@@ -157,6 +157,46 @@ describe('preDestroyBackup', () => {
     ]);
   });
 
+  // A scale killed after its DNS flip leaves the journal: the new server may
+  // already take writes on the next timeline while the config still names the
+  // fenced old one. A base pushed from the old server would then be the newest
+  // in the lineage, and `restore latest` would lose every write after the flip.
+  describe('a compose scale stopped mid-cutover', () => {
+    const cutoverEnv = () => ({
+      deployMode: 'compose',
+      servers: [{ ip: '10.0.0.5', role: 'primary' }],
+      ha: {
+        writeFence: {
+          source: 'scale',
+          cutover: { oldId: 1, oldIp: '10.0.0.5', newServerId: 2, newIp: '10.0.0.7', done: [] },
+        },
+      },
+    });
+
+    it('stops the destroy before any backup, naming the scale to finish it', async () => {
+      const { deps, logs } = harness();
+      await expect(preDestroyBackup(opts(cutoverEnv()), deps)).rejects.toThrow(new Exit(1));
+      expect(deps.backupCompose).not.toHaveBeenCalled();
+      expect(deps.confirm).not.toHaveBeenCalled();
+      const error = logs.find(([k]) => k === 'error')?.[1] ?? '';
+      expect(error).toContain('old server 10.0.0.5, new server 10.0.0.7');
+      // Each command on its own line, nothing after it.
+      const lines = error.split('\n').map((l) => l.trim());
+      expect(lines).toContain('vibecarbon scale prod');
+      expect(lines).toContain('vibecarbon destroy prod -force');
+    });
+
+    it('-force destroys without a backup, warning loudly', async () => {
+      const { deps, logs } = harness();
+      await preDestroyBackup(opts(cutoverEnv(), { force: true }), deps);
+      expect(deps.backupCompose).not.toHaveBeenCalled();
+      expect(deps.triggerBackupJob).not.toHaveBeenCalled();
+      expect(
+        logs.some(([k, m]) => k === 'warn' && /no backup/i.test(m) && /mid-cutover/.test(m)),
+      ).toBe(true);
+    });
+  });
+
   it('-purge deletes the backups, so no backup is taken', async () => {
     const { deps } = harness();
     await preDestroyBackup(opts(compose(), { purge: true }), deps);

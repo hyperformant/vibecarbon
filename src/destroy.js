@@ -337,6 +337,9 @@ export async function ensureDestroyOperatorAccess(
  * unknown primary, or a missing deploy key stops the destroy with the reason
  * and the override, unless -force; with -force it warns and goes on. A pushed
  * base whose retention failed counts as backed up (the base is in the bucket).
+ * A compose scale cutover journal (ha.writeFence.cutover) stops the destroy
+ * before any backup and names the scale that finishes it; -force destroys
+ * with no backup.
  *
  * @param {object} o
  * @param {object} o.envConfig
@@ -370,6 +373,36 @@ export async function preDestroyBackup(
 
   if (purge) {
     log.info('-purge deletes the backups, so destroy takes no backup first.');
+    return;
+  }
+
+  // A compose scale killed after its cutover journal was written: the new
+  // server may already take writes on the next timeline while the config
+  // still names the fenced old one. A base pushed from the old server would
+  // become the newest in the lineage, and `restore latest` would lose every
+  // write after the flip. No backup from either side is trustworthy until the
+  // scale finishes or rolls back.
+  const cutover = envConfig?.ha?.writeFence?.cutover;
+  if (cutover) {
+    const state = `a compose scale stopped mid-cutover (old server ${cutover.oldIp}, new server ${cutover.newIp})`;
+    if (force) {
+      log.warn(
+        `${state}; -force set, so destroy takes NO backup: a base from the old server would ` +
+          'sit in the lineage newer than the writes the new server may have taken',
+      );
+      return;
+    }
+    log.error(
+      [
+        `destroy stopped: ${state}. The database may already take writes on the new server, ` +
+          'so a backup from the old one would land in the lineage without them.',
+        'Finish the scale, or roll it back if DNS never moved, then destroy:',
+        `  vibecarbon scale ${envName}`,
+        'Or destroy without a backup:',
+        `  vibecarbon destroy ${envName} -force`,
+      ].join('\n'),
+    );
+    exit(1);
     return;
   }
 
