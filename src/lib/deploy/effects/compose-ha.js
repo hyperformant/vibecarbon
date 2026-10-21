@@ -51,7 +51,7 @@ import {
   openWireguardPortHetznerFirewall,
   openWireguardPortUfw,
 } from '../compose/ha.js';
-import { assertReseedTargetNotServing } from '../compose/ha-role-swap.js';
+import { assertReseedTargetNotServing, composeHaStackOf } from '../compose/ha-role-swap.js';
 import {
   dockerLoginOnServer,
   pullComposeImages,
@@ -167,9 +167,26 @@ async function haProvisionServers(ctx) {
   // resolveServerTypeForRegion also carries the ARM->x86 rescue (vibecarbon is
   // amd64-only, see deploy/platform.js), so an environment predating that
   // standardization converges here too.
-  const standbyServerType = Provider.resolveServerTypeForRegion(serverType, standbyRegion);
+  //
+  // A compose scale replaces a server outside the programs and records its new
+  // type on that server's servers[] entry (a primary-only scale leaves the
+  // env-level serverType alone). Each stack keeps its server's recorded type,
+  // or `up` would resize the scaled server back; only a type this deploy asks
+  // for at the env level (`-server-type`, which differs from the recorded
+  // envConfig.serverType) applies to both stacks.
+  const requested = serverType !== envConfig?.serverType;
+  const recordedType = (stack) =>
+    requested
+      ? undefined
+      : (envConfig?.servers ?? []).find(
+          (sv) => composeHaStackOf(sv, projectName, environment) === stack,
+        )?.serverType;
+  const primaryStackServerType = recordedType('primary') ?? serverType;
+  ctx.primaryStackServerType = primaryStackServerType;
+  const standbyServerType =
+    recordedType('standby') ?? Provider.resolveServerTypeForRegion(serverType, standbyRegion);
   ctx.standbyServerType = standbyServerType;
-  if (standbyServerType !== serverType) {
+  if (!recordedType('standby') && standbyServerType !== serverType) {
     p.log.info(
       `Standby server type adjusted for ${standbyRegion}: ${serverType} -> ${standbyServerType}`,
     );
@@ -203,7 +220,7 @@ async function haProvisionServers(ctx) {
     sshPublicKey: publicKey,
     existingSshKeyId: sharedSshKeyId,
     location: primaryStackRegion,
-    serverType,
+    serverType: primaryStackServerType,
     labels: { 'managed-by': 'vibecarbon', role: 'primary' },
     allowedSshIps,
   });
@@ -272,7 +289,7 @@ async function haProvisionServers(ctx) {
       firewallId: primaryResult.outputs.firewallId || null,
       stack: 'primary',
       region: primaryStackRegion,
-      serverType,
+      serverType: primaryStackServerType,
     },
     standby: {
       ip: standbyResult.outputs.serverIp,

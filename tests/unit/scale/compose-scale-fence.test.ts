@@ -93,6 +93,21 @@ vi.mock('../../../src/lib/deploy/write-fence.js', async (orig) => {
   };
 });
 
+// Pulumi state follows the scale (Task 7b): recorded before the old server's
+// delete, synced after it.
+vi.mock('../../../src/lib/deploy/compose/server-state-sync.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    recordPendingServerState: (_env: string, e: { stack: string; serverId: string }) => {
+      h.events.push(`state:record:${e.stack}:${e.serverId}`);
+    },
+    syncScaledServerState: async (_c: unknown, e: { stack: string; serverId: string }) => {
+      h.events.push(`state:sync:${e.stack}:${e.serverId}`);
+    },
+  };
+});
+
 vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
   const actual = await orig<typeof import('../../../src/lib/walg/restore-base.js')>();
   return {
@@ -407,8 +422,12 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
       // M1: demoted only after the flip, so a rollback never follows a demote.
       'demote:1.1.1.1',
       'push:9.9.9.9:5',
+      // Recorded before the delete, so a kill between the two leaves a record
+      // deploy repairs from.
+      'state:record:prod:new-id',
       'delete:old-id',
       'marker:clear',
+      'state:sync:prod:new-id',
     ];
     const seen = h.events.filter((e) => order.includes(e));
     expect(seen).toEqual(order);
@@ -703,8 +722,10 @@ describe('resumeComposeCutover (a scale stopped mid-cutover)', () => {
       'demote:1.1.1.1',
       'push:9.9.9.9:5',
       'cron:install:9.9.9.9',
+      'state:record:prod:new-id',
       'delete:old-id',
       'marker:clear',
+      'state:sync:prod:new-id',
     ];
     expect(h.events.filter((e) => order.includes(e))).toEqual(order);
     expect(h.events).not.toContain('unfence');
@@ -732,6 +753,39 @@ describe('resumeComposeCutover (a scale stopped mid-cutover)', () => {
     expect(h.events).toContain('delete:old-id');
   });
 
+  it('a scale killed after the delete: the resume skips it and still points state at the new server', async () => {
+    reset();
+    const { ctx } = resumeCtx();
+    const envConfig = ctx.envConfig as {
+      ha: { writeFence: { cutover: { done: string[] } } };
+    };
+    envConfig.ha.writeFence.cutover.done = ['dns', 'demote', 'recreate', 'push', 'cron', 'destroy'];
+    (ctx.envConfig as { servers: unknown[] }).servers = [
+      { ip: '9.9.9.9', id: 'new-id', serverType: 'cpx31' },
+    ];
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    expect(h.events).not.toContain('delete:old-id');
+    expect(h.events).toContain('state:sync:prod:new-id');
+  });
+
+  it('single compose: the resume records the scaled type on the env, which a cold provision reads', async () => {
+    reset();
+    const { ctx } = resumeCtx();
+    const envConfig = ctx.envConfig as {
+      ha: { writeFence: { cutover: { done: string[] } } };
+    };
+    envConfig.ha.writeFence.cutover.done = ['dns', 'demote', 'recreate', 'push'];
+    (ctx.envConfig as { servers: unknown[] }).servers = [
+      { ip: '9.9.9.9', id: 'new-id', serverType: 'cpx31' },
+    ];
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    const saved = h.state.saved.at(-1) as {
+      environments: Record<string, { serverType: string; servers: Array<{ id: string }> }>;
+    };
+    expect(saved.environments.prod.serverType).toBe('cpx31');
+    expect(saved.environments.prod.servers.map((sv) => sv.id)).toEqual(['new-id']);
+  });
+
   it('DNS unreadable: changes nothing and refuses with the resume command', async () => {
     reset();
     h.state.dnsUnreadable = true;
@@ -741,5 +795,33 @@ describe('resumeComposeCutover (a scale stopped mid-cutover)', () => {
     );
     expect(h.events).not.toContain('unfence');
     expect(provider.deleteServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('scaleFinishComposeOutro: a stack that still names a replaced server', () => {
+  it('fails the command and names the deploy that repairs state', async () => {
+    const outros: string[] = [];
+    const prompts = await import('@clack/prompts');
+    const spy = vi.spyOn(prompts, 'outro').mockImplementation((m?: string) => {
+      outros.push(String(m));
+    });
+    const before = process.exitCode;
+    try {
+      await SCALE_EFFECTS.scaleFinishComposeOutro({
+        currentType: 'cpx21',
+        newType: 'cpx31',
+        provider: { ensureProjectAssignment: async () => null },
+        projectName: 'myapp',
+        environment: 'prod',
+        serverStateProblems: ['Pulumi stack prod still names the server scale replaced (x)'],
+      });
+      expect(process.exitCode).toBe(1);
+      expect(outros.at(-1)).toMatch(
+        /Pulumi state still names the old server.*run vibecarbon deploy prod: it points Pulumi state at the new server/,
+      );
+    } finally {
+      process.exitCode = before;
+      spy.mockRestore();
+    }
   });
 });

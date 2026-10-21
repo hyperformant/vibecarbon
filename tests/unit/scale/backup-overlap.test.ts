@@ -117,6 +117,9 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) =>
 vi.mock('../../../src/lib/deploy/write-fence.js', async (orig) =>
   (await import('../helpers/scale-cutover-stub.js')).stubWriteFence(await orig()),
 );
+vi.mock('../../../src/lib/deploy/compose/server-state-sync.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubServerStateSync(await orig()),
+);
 vi.mock('../../../src/lib/build.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return { ...actual, getGHCRCredentials: async () => ({}) };

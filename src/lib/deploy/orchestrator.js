@@ -1608,6 +1608,24 @@ export async function executeDeployment(args, gatheredConfig) {
   const { runPlan } = await import('./plan/runner.js');
   const { EFFECTS } = await import('./effects/index.js');
 
+  // A compose scale replaced a server outside Pulumi and could not point the
+  // stack at the new one (or was killed before it did): repair that state
+  // before any Pulumi `up`, whose refresh would otherwise drop the deleted
+  // server and build a second one. Refuses the deploy when it cannot.
+  if (isComposeTier(tier) && envConfig?.pendingServerState?.length) {
+    const { repairPendingServerState } = await import('./compose/server-state-sync.js');
+    await repairPendingServerState({
+      environment,
+      envConfig,
+      options: {
+        provider: providerIdFor(envConfig),
+        providerToken: apiToken,
+        s3Config,
+        projectName: projectConfig.projectName,
+      },
+    });
+  }
+
   let deployResult;
   if (tier === 'compose') {
     // Compose (single, non-HA) runs through the pure step-plan + effect

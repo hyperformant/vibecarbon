@@ -50,6 +50,14 @@ import {
   rollbackComposeCutover,
   writeComposeReplicationOverlay,
 } from './lib/deploy/compose/scale-cutover.js';
+import {
+  assertComposeScaleKeepsState,
+  recordPendingServerState,
+  resolveServerStateOptions,
+  scaledServerStateEntry,
+  serverStateRecovery,
+  syncScaledServerState,
+} from './lib/deploy/compose/server-state-sync.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
@@ -204,10 +212,30 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
     return;
   }
 
+  // Before any prompt or server: the replacement must be one Pulumi state can
+  // follow, or the next deploy builds a second server.
+  refuseOrContinue(() => assertComposeScaleKeepsState({ environment, envConfig }));
+
   // Get API token
   const apiToken = await Provider.promptApiToken(projectName);
   if (!apiToken) {
     p.log.error('API token required for server scaling');
+    process.exit(1);
+  }
+
+  // The Pulumi backend the scale points at the replacement once the old
+  // server is gone (server-state-sync.js). Resolved now: missing keys refuse
+  // before anything is built, not after the old server is deleted.
+  let serverStateOptions;
+  try {
+    serverStateOptions = await resolveServerStateOptions({
+      envConfig,
+      projectName,
+      Provider,
+      apiToken,
+    });
+  } catch (err) {
+    p.log.error(err.message);
     process.exit(1);
   }
 
@@ -248,10 +276,17 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
       apiToken,
       region: envConfig.region,
       services: projectConfig.services || {},
+      serverStateOptions,
     };
     const outcome = await resumeComposeCutover(resumeCtx);
     const problems = resumeCtx.resumeProblems ?? [];
-    if (outcome === 'finished') {
+    if (outcome === 'finished' && resumeCtx.serverStateProblems?.length) {
+      p.outro(
+        `${c.warning('Scale finished, but Pulumi state still names the old server.')} ` +
+          `The new server serves; ${serverStateRecovery(environment)}.`,
+      );
+      process.exitCode = 1;
+    } else if (outcome === 'finished') {
       p.outro(
         `${c.success('Scale finished.')} The new server serves; rerun scale for another change.`,
       );
@@ -441,6 +476,7 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
     dnsChallenge,
     apiToken,
     services,
+    serverStateOptions,
   };
   await runPlan(planScale(tier, envConfig), ctx, SCALE_EFFECTS);
 }
@@ -705,8 +741,12 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
   });
 
   // 15. Destroy the old server: it took no write since the fence, and its
-  //     final base is restored on the new one.
+  //     final base is restored on the new one. The Pulumi state sync is
+  //     recorded first, so a run killed between the two leaves a record
+  //     deploy repairs from (server-state-sync.js).
+  const stateEntry = scaledServerStateEntry(ctx, server);
   await step('destroy', async () => {
+    recordPendingServerState(environment, stateEntry);
     s.start(`Destroying old server ${server.ip}...`);
     await perfAsync('scale.destroyOldServer', () => provider.deleteServer(server.id));
     s.stop(`Old server destroyed: ${server.ip}`);
@@ -714,6 +754,8 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
   // The fenced server is gone, and its record (marker and journal) with it.
   clearWriteFenceMarker({ environment });
   await renameReplacement(ctx, server._replacement);
+  // 16. Pulumi state names the new server (also on a resume past the delete).
+  await syncScaledServerState(ctx, stateEntry);
 }
 
 /**
@@ -824,7 +866,11 @@ export async function resumeComposeCutover(ctx) {
     done.push('dns');
     markScaleCutoverStep({ environment }, 'dns');
   }
-  if (!recorded) saveScaledServers(adoptCtx);
+  // Single compose: its one server's type is the env's (on a resume the
+  // update-project-config step never runs), which a cold provision's program
+  // reads.
+  const extra = !isHATier(tier) && adoptCtx.newType ? { serverType: adoptCtx.newType } : {};
+  if (!recorded || Object.keys(extra).length > 0) saveScaledServers(adoptCtx, extra);
   await finishComposeCutover(adoptCtx, {
     server,
     newIp,
@@ -1665,10 +1711,13 @@ async function scaleServers(ctx) {
       );
     }
     if (replication !== 'streaming') ctx.replicationDegraded = true;
+    const stateEntry = scaledServerStateEntry(ctx, server);
+    recordPendingServerState(environment, stateEntry);
     s.start(`Destroying old standby ${server.ip}...`);
     await perfAsync('scale.destroyOldServer', () => provider.deleteServer(server.id));
     s.stop(`Old standby destroyed: ${server.ip}`);
     await renameReplacement(ctx, server._replacement);
+    await syncScaledServerState(ctx, stateEntry);
   };
 
   const arms = [
@@ -1764,6 +1813,17 @@ async function scaleFinishComposeOutro(ctx) {
   const degraded = replicationDegraded
     ? `. Replication is degraded: run vibecarbon deploy ${environment} to resync the standby`
     : '';
+  // The servers moved, but a stack still names a deleted one: the command
+  // fails, and the deploy that repairs state is named (each problem was
+  // logged where it happened).
+  if (ctx.serverStateProblems?.length) {
+    p.outro(
+      `${c.warning('Scale complete, but Pulumi state still names the old server.')} ` +
+        `${c.bold(currentType)} → ${c.bold(newType)}${pause}; ${serverStateRecovery(environment)}${degraded}`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   p.outro(
     `${c.success('Scale complete!')} ${c.bold(currentType)} → ${c.bold(newType)}${pause}${degraded}`,
   );

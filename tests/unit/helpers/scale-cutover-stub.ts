@@ -46,3 +46,23 @@ export function stubWriteFence<T extends Record<string, unknown>>(actual: T) {
 export function stubProjectConfig<T extends Record<string, unknown>>(actual: T) {
   return { ...actual, loadProjectConfig: () => null, saveProjectConfig: () => {} };
 }
+
+/**
+ * The Pulumi state sync after a scale (server-state-sync.js), stubbed: it
+ * writes the project config and the state backend. `onEvent` sees
+ * `state:record:<stack>:<id>` and `state:sync:<stack>:<id>`.
+ */
+export function stubServerStateSync<T extends Record<string, unknown>>(
+  actual: T,
+  onEvent: (event: string) => void = () => {},
+) {
+  return {
+    ...actual,
+    recordPendingServerState: (_env: string, e: { stack: string; serverId: unknown }) => {
+      onEvent(`state:record:${e.stack}:${e.serverId}`);
+    },
+    syncScaledServerState: async (_ctx: unknown, e: { stack: string; serverId: unknown }) => {
+      onEvent(`state:sync:${e.stack}:${e.serverId}`);
+    },
+  };
+}

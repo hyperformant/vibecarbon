@@ -135,6 +135,12 @@ vi.mock('../../../src/lib/deploy/write-fence.js', async (orig) => {
   return (await import('../helpers/scale-cutover-stub.js')).stubWriteFence(actual);
 });
 
+vi.mock('../../../src/lib/deploy/compose/server-state-sync.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubServerStateSync(await orig(), (e) =>
+    h.events.push(e),
+  ),
+);
+
 vi.mock('../../../src/lib/deploy/wireguard.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -302,6 +308,19 @@ describe('compose-ha scale: the standby arm reseeds, never restores', () => {
     expect(h.degraded.value).toBe(0);
     expect(provider.deleteServer).toHaveBeenCalledWith('p-old');
     expect(provider.deleteServer).toHaveBeenCalledWith('s-old');
+    // Pulumi state follows each arm, by birth stack: recorded before the old
+    // server's delete, synced after it.
+    for (const [stack, oldId, newId] of [
+      ['prod-primary', 'p-old', 'p-new'],
+      ['prod-standby', 's-old', 's-new'],
+    ]) {
+      const record = h.events.indexOf(`state:record:${stack}:${newId}`);
+      const del = h.events.indexOf(`delete:${oldId}`);
+      const sync = h.events.indexOf(`state:sync:${stack}:${newId}`);
+      expect(record).toBeGreaterThan(-1);
+      expect(record).toBeLessThan(del);
+      expect(sync).toBeGreaterThan(del);
+    }
   });
 
   it('standby only: reseeds from the live primary; nothing is fenced, backed up or restored', async () => {
