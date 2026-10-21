@@ -17,6 +17,7 @@ import {
   enabledAddonNames,
   enabledK8sAddonNames,
   k8sFailoverAddonWorkloads,
+  k8sPrimaryOnlyWorkloads,
   k8sStandbyZeroedWorkloads,
   loadAddonStandby,
 } from '../../../src/lib/services/standby-policy.js';
@@ -127,6 +128,13 @@ describe('standby-policy helpers', () => {
   it('k8sFailoverAddonWorkloads keeps only vibecarbon-namespace entries', () => {
     expect(k8sFailoverAddonWorkloads(['observability', 'redis'])).toEqual([
       { kind: 'Deployment', name: 'redis', namespace: 'vibecarbon' },
+    ]);
+  });
+
+  it('k8sPrimaryOnlyWorkloads lists only primary-only add-on workloads', () => {
+    expect(k8sPrimaryOnlyWorkloads(['observability', 'redis', 'n8n', 'metabase'])).toEqual([
+      { kind: 'Deployment', name: 'n8n', namespace: 'vibecarbon' },
+      { kind: 'Deployment', name: 'metabase', namespace: 'vibecarbon' },
     ]);
   });
 

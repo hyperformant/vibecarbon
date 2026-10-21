@@ -92,6 +92,11 @@ export function k8sFailoverAddonWorkloads(names) {
   return k8sStandbyZeroedWorkloads(names).filter((w) => w.namespace === FAILOVER_NAMESPACE);
 }
 
+/** k8s workloads of the primary-only add-ons: a failover starts them only once the old primary's writers are stopped. */
+export function k8sPrimaryOnlyWorkloads(names) {
+  return primaryOnly(names).flatMap((s) => s.k8s);
+}
+
 /** Compose services that write to the database: the app plus the promoted primary-only add-ons. */
 export function composeWriterServices(names) {
   return ['app', ...composePromotionServices(names)];

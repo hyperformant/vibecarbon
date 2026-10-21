@@ -17,9 +17,11 @@ const manifestReplicas = (text, fallback) =>
  * then the add-ons in the app namespace (`k8sFailoverAddonWorkloads`; the
  * observability stack is reinstalled by the reconverge deploy instead), then
  * the autoscaler. The db is never in this list: it is already running.
- * Add-on entries carry `addon: true`: failover scales and quiesces them with
- * the app, but its readiness gate (before the DNS flip) awaits only the app
- * tier, so a slow add-on start never lengthens the outage.
+ * Add-on entries carry `addon: true`: failover quiesces them with the app and
+ * scales them up on promotion (the primary-only ones only once the old
+ * primary's are scaled down), but its readiness gate (before the DNS flip)
+ * awaits only the app tier, so a slow add-on start never lengthens the
+ * outage; their rollout is checked, warn-only, after the flip.
  *
  * An older project config may still carry entries for workloads that no
  * longer exist (the retired chart's Deployments); failover's scale step logs
@@ -37,7 +39,7 @@ export function deriveScaleUpList({ appManifestText, addons = [] }) {
       name: a.name,
       namespace: a.namespace,
       replicas: manifestReplicas(a.manifestText, 1),
-      // Scaled up with the app, not awaited by the pre-DNS-flip rollout gate.
+      // Not awaited by the pre-DNS-flip rollout gate; checked after the flip.
       addon: true,
     })),
     { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },

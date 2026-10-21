@@ -17,8 +17,10 @@
  * the sign-in condition; there is no separate auth service to probe. Best-effort throughout (loud warning, never
  * throws) — the promotion + DNS flip already happened.
  */
-import { describe, expect, it, vi } from 'vitest';
+import * as p from '@clack/prompts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  checkPromotedAddonRollouts,
   gatePromotedApiReadiness,
   promotedProbeArgv,
   waitForPromotedApiServing,
@@ -194,6 +196,63 @@ describe('gatePromotedApiReadiness', () => {
     // Rollouts still ran, but no probe fired without a domain.
     expect(kubectl.mock.calls.some((c) => c[2][0] === 'rollout')).toBe(true);
     expect(runner).not.toHaveBeenCalled();
+  });
+});
+
+describe('checkPromotedAddonRollouts (after the DNS flip, warn-only)', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const LIST = [
+    { name: 'app', namespace: 'vibecarbon', replicas: 2 },
+    { name: 'redis', namespace: 'vibecarbon', replicas: 1, addon: true },
+    { name: 'metabase', namespace: 'vibecarbon', replicas: 1, addon: true },
+    { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
+  ];
+
+  it('rollout-waits every add-on entry, and only those, in parallel inside the SSH cap', async () => {
+    const calls: Array<{ argv: string[]; opts?: { timeout?: number } }> = [];
+    let release!: () => void;
+    const barrier = new Promise<void>((r) => {
+      release = r;
+    });
+    const kubectl = vi.fn(
+      async (_ip: string, _key: string, argv: string[], opts?: { timeout?: number }) => {
+        calls.push({ argv, opts });
+        await barrier;
+        return '';
+      },
+    );
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const done = checkPromotedAddonRollouts('9.9.9.9', '/key', LIST, { kubectl });
+    expect(calls.map((c) => c.argv[2])).toEqual(['deployment/redis', 'deployment/metabase']);
+    release();
+    await expect(done).resolves.toEqual({ notReady: [] });
+    for (const c of calls) {
+      expect(c.argv).toEqual(expect.arrayContaining(['rollout', 'status', '-n', 'vibecarbon']));
+      expect(c.argv).toContain('--timeout=300s');
+      expect(c.opts).toMatchObject({ timeout: 310_000 });
+    }
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('a failed add-on rollout warns with the exact command to run, and never throws', async () => {
+    const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
+      if (argv.includes('deployment/metabase')) {
+        throw new Error('error: timed out waiting for the condition\nmore');
+      }
+      return '';
+    });
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await expect(checkPromotedAddonRollouts('9.9.9.9', '/key', LIST, { kubectl })).resolves.toEqual(
+      { notReady: ['metabase'] },
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0][0]);
+    expect(line).toContain('metabase');
+    expect(line).toContain('timed out waiting for the condition');
+    expect(line).not.toContain('more');
+    expect(line).toContain(
+      "ssh root@9.9.9.9 'kubectl rollout status deployment/metabase -n vibecarbon'",
+    );
   });
 });
 
