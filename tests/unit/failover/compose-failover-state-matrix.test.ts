@@ -757,6 +757,23 @@ describe('failoverComposeHA planned fence and catch-up (H1)', () => {
     expect(order).not.toContain('promote');
   });
 
+  it('resume: a writer stop that cannot be confirmed names every writer in the by-hand stop', async () => {
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await run({
+      primaryReachable: true,
+      fenceFails: true,
+      standbyState: replica({ inRecovery: false, receiverStatus: null }),
+      envConfig: baseEnvConfig({
+        n8n: true,
+        ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
+      }),
+    });
+    const hint = warn.mock.calls.map((c) => String(c[0])).find((w) => /Could not fence/.test(w));
+    expect(hint).toContain(`ssh root@${PRIMARY_IP} 'docker stop myapp-app myapp-n8n'`);
+    warn.mockRestore();
+  });
+
   it('a database fence that cannot be proven aborts and lifts it on a first run', async () => {
     const { order, thrown } = await run({ primaryReachable: true, dbFenceThrows: true });
     expect(thrown?.message).toMatch(/^Failover aborted: write fence/);
