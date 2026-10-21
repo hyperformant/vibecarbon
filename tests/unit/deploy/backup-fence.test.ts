@@ -25,8 +25,10 @@ import {
   BACKUP_FENCE_OBJECT,
   BACKUP_FENCE_REFUSAL,
   BACKUP_FENCE_STATE_SQL,
+  BACKUP_FENCE_SWITCH_SQL,
   backupFenceWriteScript,
   parseBackupFenceState,
+  parseBackupFenceSwitch,
   writeBackupFence,
   writeComposeBackupFence,
   writeK8sBackupFence,
@@ -40,16 +42,13 @@ const SYSID = '7699032860122738725';
 
 describe('the fence record', () => {
   it('parses sysid|timeline-hex, and refuses anything else', () => {
-    expect(parseBackupFenceState(`${SYSID}|00000002|0000000000000005\n`)).toEqual({
+    expect(parseBackupFenceState(`${SYSID}|00000002\n`)).toEqual({
       systemIdentifier: SYSID,
       timeline: 2,
-      switchSegment: '0000000000000005',
     });
-    // A primary that never recovered has no switch point (pg_last_wal_replay_lsn is NULL).
-    expect(parseBackupFenceState(`${SYSID}|0000001A|`)).toEqual({
+    expect(parseBackupFenceState(`${SYSID}|0000001A`)).toEqual({
       systemIdentifier: SYSID,
       timeline: 26,
-      switchSegment: null,
     });
     for (const bad of [
       '',
@@ -62,8 +61,29 @@ describe('the fence record', () => {
     }
   });
 
+  // Controller ruling: the switch point comes from the new timeline's history
+  // file (durable; pg_last_wal_replay_lsn() is NULL after a restart), and only
+  // a row naming exactly the parent timeline counts. Anything else is null,
+  // and a null switch point exempts nothing.
+  it('the switch point is read from the history file and must name the parent timeline', () => {
+    expect(BACKUP_FENCE_SWITCH_SQL).toContain('pg_read_file($$pg_wal/$$');
+    expect(BACKUP_FENCE_SWITCH_SQL).toContain('$$.history$$');
+    expect(BACKUP_FENCE_SWITCH_SQL).not.toContain('pg_last_wal_replay_lsn');
+    expect(parseBackupFenceSwitch('1|0000000000000004\n', 2)).toBe('0000000000000004');
+    expect(parseBackupFenceSwitch('2|00000000000000ab', 3)).toBe('00000000000000AB');
+    for (const [out, tl] of [
+      ['1|0000000000000004', 3], // not the parent of timeline 3
+      ['', 2],
+      ['ERROR:  could not open file "pg_wal/00000001.history"', 1],
+      ['1|', 2],
+    ] as const) {
+      expect(parseBackupFenceSwitch(out, tl), `${out} @${tl}`).toBeNull();
+    }
+  });
+
   it('the state query and the write script carry no single quote (they nest in sh -c quoting)', () => {
     expect(BACKUP_FENCE_STATE_SQL).not.toContain("'");
+    expect(BACKUP_FENCE_SWITCH_SQL).not.toContain("'");
     const script = backupFenceWriteScript({ primaryNode: "o'brien", timeline: 2 });
     expect(script).not.toContain("'");
     const b64 = script.match(/echo ([A-Za-z0-9+/=]+) \| base64 -d/)?.[1] ?? '';
@@ -81,7 +101,11 @@ describe('the fence record', () => {
     const r = await writeBackupFence({
       primaryNode: 'myapp-prod-standby',
       exec: async (sql) =>
-        sql === BACKUP_FENCE_STATE_SQL ? `${SYSID}|00000002|0000000000000005` : '',
+        sql === BACKUP_FENCE_STATE_SQL
+          ? `${SYSID}|00000002`
+          : sql === BACKUP_FENCE_SWITCH_SQL
+            ? '1|0000000000000005'
+            : '',
       runInDb: async (script) => {
         scripts.push(script);
         return 'FENCE_WRITTEN\n';
@@ -99,6 +123,24 @@ describe('the fence record', () => {
       },
     });
     expect(scripts).toHaveLength(1);
+  });
+
+  it('a history file that cannot be read writes switchSegment null (fail closed)', async () => {
+    const scripts: string[] = [];
+    const r = await writeBackupFence({
+      primaryNode: 'a',
+      exec: async (sql) => {
+        if (sql === BACKUP_FENCE_SWITCH_SQL) throw new Error('could not open file');
+        return `${SYSID}|00000001`;
+      },
+      runInDb: async (script) => {
+        scripts.push(script);
+        return 'FENCE_WRITTEN';
+      },
+    });
+    expect(r).toMatchObject({ ok: true, fence: { timeline: 1, switchSegment: null } });
+    const b64 = scripts[0].match(/echo ([A-Za-z0-9+/=]+) \| base64 -d/)?.[1] ?? '';
+    expect(JSON.parse(Buffer.from(b64, 'base64').toString()).switchSegment).toBeNull();
   });
 
   it('a db with no backup target skips; an unreadable primary or unconfirmed put is a failure', async () => {
@@ -130,7 +172,10 @@ describe('the fence record', () => {
     expect(cmds[0]).toBe(
       `cd /opt/myapp && docker compose exec -T db psql -U postgres -d postgres -tAc '${BACKUP_FENCE_STATE_SQL}'`,
     );
-    expect(cmds[1]).toMatch(
+    expect(cmds[1]).toBe(
+      `cd /opt/myapp && docker compose exec -T db psql -U postgres -d postgres -tAc '${BACKUP_FENCE_SWITCH_SQL}'`,
+    );
+    expect(cmds[2]).toMatch(
       /^cd \/opt\/myapp && docker compose exec -T db sh -c '.*FENCE_WRITTEN'$/,
     );
 
@@ -285,7 +330,7 @@ describe('wal-archive.sh against the fence', () => {
   // A planned failover with an archive backlog on the old primary: the
   // segments before the branch are history both timelines need. Refusing them
   // would leave a gap every pre-failover base backup replays through.
-  it('the old timeline before the switch segment pushes; from the switch on it refuses', () => {
+  it('the parent timeline before the switch segment pushes; from the switch on it refuses', () => {
     const fence = fenceJson(2, SYSID, '0000000000000005');
     const before = archive('s1', '000000010000000000000004', { fence });
     expect(before.status).toBe(0);
@@ -299,6 +344,22 @@ describe('wal-archive.sh against the fence', () => {
     const hi = fenceJson(2, SYSID, '0000000100000002');
     expect(archive('s3', '0000000100000000000000FF', { fence: hi }).status).toBe(0);
     expect(archive('s4', '000000010000000100000002', { fence: hi }).status).toBe(1);
+  });
+
+  it('a timeline older than the parent refuses even before the switch segment', () => {
+    // Fence on timeline 3, switch from timeline 2 at segment 9: timeline 1 is
+    // not the parent, so its segment 4 is refused.
+    const fence = fenceJson(3, SYSID, '0000000000000009');
+    const r = archive('s5', '000000010000000000000004', { fence });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(BACKUP_FENCE_REFUSAL);
+    expect(archive('s6', '000000020000000000000004', { fence }).status).toBe(0);
+  });
+
+  it('a fence with no switch point exempts nothing on the old timeline', () => {
+    const r = archive('s7', '000000010000000000000001', { fence: fenceJson(2, SYSID, null) });
+    expect(r.status).toBe(1);
+    expect(r.pushes).toBe('');
   });
 
   it('the .history and .partial files a promotion archives are exempt', () => {

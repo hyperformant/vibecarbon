@@ -133,10 +133,10 @@ data:
     # segment that timeline branched in. An old primary that rebooted unreached is
     # the same database on an OLDER timeline: its segments from the branch on
     # would land in, and fork, the promoted node's stream. The segment's timeline
-    # is the first 8 hex digits of its name, its number the next 16. Segments
-    # before the branch are history both timelines share (an archive backlog at a
-    # planned failover), and the .history and .partial files are what a promotion
-    # itself archives, so those pass. No fence object (an env that never failed
+    # is the first 8 hex digits of its name, its number the next 16. Segments of
+    # the parent timeline before the branch are history both timelines share (an
+    # archive backlog at a planned failover), and the .history and .partial files
+    # are what a promotion itself archives, so those pass. No fence object (an env that never failed
     # over) or another database is allowed; a fence that cannot be read falls
     # through to the push, which fails the same way.
     WAL_NAME="$(basename "$WAL_PATH")"
@@ -150,7 +150,10 @@ data:
             seg_tl="${WAL_NAME:0:8}"
             seg_no="${WAL_NAME:8:16}"
             before_switch=0
-            if [ -n "$fence_switch" ] && [[ "$seg_no" =~ ^[0-9A-F]{16}$ ]]; then
+            # Only on the PARENT timeline (the one the switch point is on); any
+            # older timeline, and any fence without a switch point, refuses.
+            if [ -n "$fence_switch" ] && [ -n "$fence_tl" ] && [[ "$seg_tl" =~ ^[0-9A-Fa-f]{8}$ ]] \
+                && [ "$((16#$seg_tl))" -eq "$((fence_tl - 1))" ] && [[ "$seg_no" =~ ^[0-9A-F]{16}$ ]]; then
                 # Numerically, in two 32-bit halves (log id, segment).
                 s_hi=$((16#${seg_no:0:8})); s_lo=$((16#${seg_no:8:8}))
                 f_hi=$((16#${fence_switch:0:8})); f_lo=$((16#${fence_switch:8:8}))

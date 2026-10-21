@@ -22,10 +22,12 @@
  * timeline than its own: wal-archive.sh (both tiers, by the pushed segment's
  * own timeline), backup/compose-backup.sh and the k8s backup CronJob (by the
  * current WAL insert timeline). The archive wrapper still lets through what
- * the old timeline shares with the new one: segments before the switch
- * segment (an old primary's archive backlog at the moment of a planned
- * failover, which a refusal would turn into a gap every pre-failover backup
- * needs), and the .history and .partial files a promotion itself archives. No fence object means an env
+ * the parent timeline shares with the new one: parent-timeline segments
+ * before the switch segment (an old primary's archive backlog at the moment of
+ * a planned failover, which a refusal would turn into a gap every
+ * pre-failover backup needs), and the .history and .partial files a promotion
+ * itself archives. The switch point comes from the new timeline's history
+ * file; when it cannot be read the fence records none and exempts nothing. No fence object means an env
  * that never failed over: allowed. Another system identifier is another
  * database (a destroyed and recreated env): allowed. `wal-g delete garbage` and
  * `delete retain` only touch basebackups_005/ and wal_005/, never the root
@@ -50,39 +52,67 @@ export const BACKUP_FENCE_OBJECT = 'vibecarbon-fence.json';
 export const BACKUP_FENCE_REFUSAL = 'backup prefix fenced to another primary';
 
 /**
- * The fenced primary's identity: `sysid|timeline-hex|switch-segment`.
- * pg_walfile_name of the insert position carries the current timeline in its
- * first 8 hex digits, even right after a promotion (pg_control_checkpoint lags
- * until a checkpoint). The switch segment is the segment number (16 hex) that
- * holds the end of the recovery that promoted it: pg_last_wal_replay_lsn()
- * stays there after a promotion (NULL on a server that never recovered, read
- * as no switch point). Verified on postgres:17.11-walg3.0.9-r2: a standby
- * promoted at 0/5000060 reads 0000000000000005 while writing
- * 000000020000000000000005. No string literals, so it survives every psql
- * transport's quoting. Errors on a server in recovery, never a primary.
+ * The fenced primary's identity: `sysid|timeline-hex`. pg_walfile_name of the
+ * insert position carries the current timeline in its first 8 hex digits, even
+ * right after a promotion (pg_control_checkpoint lags until a checkpoint). No
+ * string literals, so it survives every psql transport's quoting. Errors on a
+ * server in recovery, which is never a primary to fence to.
  */
 export const BACKUP_FENCE_STATE_SQL =
   'SELECT (SELECT system_identifier FROM pg_control_system()), ' +
-  'substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8), ' +
-  'substr(pg_walfile_name(pg_last_wal_replay_lsn()), 9, 16)';
+  'substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8)';
+
+/**
+ * The switch point of the current timeline, from its own history file
+ * (pg_wal/<tli>.history, whose last line is `<parent tli>\t<switch LSN>\t...`),
+ * as `parent|segment` with the segment number (16 hex) that holds the switch
+ * LSN. The history file is the durable record: pg_last_wal_replay_lsn() reads
+ * NULL once the promoted server restarts. Errors on a timeline with no history
+ * (a primary that never promoted), which leaves the fence with no switch point.
+ * Dollar-quoted, no single quote, so it nests in `'...'` and kubectl argv.
+ * Verified on postgres:17.11-walg3.0.9-r2: a standby promoted at 0/4000060
+ * reads `1|0000000000000004`, before and after a restart.
+ */
+export const BACKUP_FENCE_SWITCH_SQL =
+  'WITH h AS (SELECT string_to_array(rtrim(pg_read_file($$pg_wal/$$ || ' +
+  'substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8) || $$.history$$), chr(10)), chr(10)) AS a) ' +
+  'SELECT split_part(a[array_length(a, 1)], chr(9), 1) || chr(124) || ' +
+  'substr(pg_walfile_name(split_part(a[array_length(a, 1)], chr(9), 2)::pg_lsn), 9, 16) FROM h';
 
 /**
  * Parse BACKUP_FENCE_STATE_SQL's row.
  *
  * @param {unknown} out
- * @returns {{ systemIdentifier: string, timeline: number, switchSegment: string|null } | null}
+ * @returns {{ systemIdentifier: string, timeline: number } | null}
  */
 export function parseBackupFenceState(out) {
   const row = String(out ?? '')
     .trim()
     .split('\n')
     .pop();
-  const [sysid, tl, sw] = (row ?? '').split('|').map((s) => s.trim());
+  const [sysid, tl] = (row ?? '').split('|').map((s) => s.trim());
   if (!/^\d+$/.test(sysid ?? '') || !/^[0-9A-Fa-f]{8}$/.test(tl ?? '')) return null;
   const timeline = Number.parseInt(tl, 16);
-  if (!(timeline > 0)) return null;
-  const switchSegment = /^[0-9A-Fa-f]{16}$/.test(sw ?? '') ? sw.toUpperCase() : null;
-  return { systemIdentifier: sysid, timeline, switchSegment };
+  return timeline > 0 ? { systemIdentifier: sysid, timeline } : null;
+}
+
+/**
+ * Parse BACKUP_FENCE_SWITCH_SQL's row into the switch segment, or null unless
+ * it names exactly the parent of `timeline` (anything else fails closed: the
+ * fence then exempts nothing).
+ *
+ * @param {unknown} out
+ * @param {number} timeline
+ * @returns {string|null}
+ */
+export function parseBackupFenceSwitch(out, timeline) {
+  const row = String(out ?? '')
+    .trim()
+    .split('\n')
+    .pop();
+  const m = /^(\d+)\|([0-9A-Fa-f]{16})$/.exec((row ?? '').trim());
+  if (!m || Number(m[1]) !== timeline - 1) return null;
+  return m[2].toUpperCase();
 }
 
 /**
@@ -126,7 +156,13 @@ export async function writeBackupFence({ exec, runInDb, primaryNode, now = () =>
   if (!state) {
     return { ok: false, reason: "could not read the primary's system identifier and timeline" };
   }
-  const fence = { primaryNode, ...state, at: now().toISOString() };
+  let switchSegment = null;
+  try {
+    switchSegment = parseBackupFenceSwitch(await exec(BACKUP_FENCE_SWITCH_SQL), state.timeline);
+  } catch {
+    switchSegment = null;
+  }
+  const fence = { primaryNode, ...state, switchSegment, at: now().toISOString() };
   let out;
   try {
     out = String((await runInDb(backupFenceWriteScript(fence))) ?? '');
