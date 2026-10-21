@@ -43,6 +43,7 @@ import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
+import { checkBackupHealth } from './lib/status/backup-health.js';
 import {
   CORE_SERVICE_ORDER,
   classifyContainer,
@@ -1366,6 +1367,15 @@ function renderEnvironment(envName, envConfig, checks) {
     if (backupFence) lines.push(`${c.dim('Backup fence')}   ${c.warning(backupFence)}`);
   }
 
+  // Backup and WAL archiving health. Every tier; yellow when it cannot tell
+  // (no credentials), red when a base or the archive is stale or failing.
+  if (checks.backups) {
+    const paint = { ok: c.success, warn: c.warning, error: c.error }[checks.backups.level];
+    lines.push(
+      `${c.dim('Backups')}        ${paint(checks.backups.text.replace(/^backups: /, ''))}`,
+    );
+  }
+
   // The write fence: an interrupted failover's or scale's marker, or a primary
   // that reads read-only. Every tier, not only HA (compose scale fences too).
   const fenceRow = writeFenceRow(envConfig, checks.replication, envName);
@@ -1667,9 +1677,10 @@ async function main(argv = []) {
       // serially would double an HA environment's worst case. Independent of
       // noLocal — that flag is about THIS machine's dev stack.
       // allSettled so a throw in one check can never take the other's result with it.
-      const [replicationResult, containersResult] = await Promise.allSettled([
+      const [replicationResult, containersResult, backupsResult] = await Promise.allSettled([
         checkReplication(envName, envConfig, projectConfig.projectName),
         checkRemoteContainers(envName, envConfig, projectConfig.projectName),
+        checkBackupHealth(envName, envConfig, projectConfig.projectName),
       ]);
       checks.replication =
         replicationResult.status === 'fulfilled' ? replicationResult.value : null;
@@ -1678,7 +1689,11 @@ async function main(argv = []) {
       const failed = rejectedChecks({
         replication: replicationResult,
         containers: containersResult,
+        backups: backupsResult,
       });
+      if (backupsResult.status === 'fulfilled' && backupsResult.value) {
+        checks.backups = backupsResult.value;
+      }
       if (failed) checks.checkErrors = failed;
       // Omitted, not null, when there is nothing to query (no servers, no
       // project name) — spec §6; consumers key on the key's absence.
