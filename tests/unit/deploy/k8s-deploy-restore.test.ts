@@ -440,7 +440,6 @@ function args(restore: typeof RESTORE | null) {
     masterIp: '1.2.3.4',
     sshKeyPath: '/tmp/key',
     khPath: join(dir, 'known_hosts'),
-    localTunnelPort: 5000,
     perfPrefix: 'k3s',
   };
 }

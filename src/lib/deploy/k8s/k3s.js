@@ -101,6 +101,7 @@ import {
 } from '../walg-audit.js';
 import { REPL_GATEWAY_PORT } from '../wireguard.js';
 import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
+import { planImageDelivery, standbyImageRef } from './image-delivery.js';
 import {
   awaitAppAdminReady,
   awaitCertManagerAdmission,
@@ -1449,6 +1450,10 @@ function loadEnvLocal(envPath) {
  *     hit, kubelet `imagePullPolicy: IfNotPresent` finds it),
  *   - CA-spawned workers (which don't exist at sideload time) pull the
  *     same tag from master's registry pod via `registries.yaml`.
+ *
+ * A k8s-ha standby never calls this: it receives the primary's tag, copied
+ * from the primary's registry into its own and re-prefixed with its own
+ * master's private IP (see deliverAppImage).
  *
  * @param {string} projectDir
  * @param {string} projectName
@@ -3441,12 +3446,6 @@ export async function applyK3sManifests({
   masterIp,
   sshKeyPath,
   khPath,
-  // HA runs primary+standby deploys in parallel; both call this
-  // function from the same operator host. Without distinct ports, the
-  // second `ssh -L 5000:<masterPrivateIp>:5000` loses the bind race and
-  // ExitOnForwardFailure=yes aborts the deploy. Default 5000 is the
-  // single-cluster path; HA passes 5000 (primary) and 5001 (standby).
-  localTunnelPort = 5000,
   // perfPrefix tags internal sub-stage perf timings — see deployK3s.
   perfPrefix = 'k3s',
   // The database node's Hetzner private-network IP (deterministic in the IaC
@@ -4113,60 +4112,63 @@ export async function applyK3sManifests({
   //       CA-spawned workers (which don't exist at sideload time) can
   //       pull on first schedule. Sideload remains primary distribution
   //       for static workers — this is additive. Both paths use the
-  //       same `10.0.1.1:5000/<project>:<tag>` reference (Phase 1's
+  //       same `<masterPrivateIp>:5000/<project>:<tag>` reference (Phase 1's
   //       registries.yaml maps that hostname to the registry pod).
-  if (!masterIp) {
-    throw new Error('applyK3sManifests: masterIp required for registry push (Phase 6)');
+  //       A k8s-ha standby pushes nothing: the primary's image is copied
+  //       into this registry over wg0 (planImageDelivery), so the wait above
+  //       stays and only the push is skipped.
+  const { registryPush } = planImageDelivery({ role });
+  let registryPushPromise = null;
+  if (registryPush) {
+    if (!masterIp) {
+      throw new Error('applyK3sManifests: masterIp required for registry push (Phase 6)');
+    }
+    if (!sshKeyPath) {
+      throw new Error('applyK3sManifests: sshKeyPath required for registry push (Phase 6)');
+    }
+    if (!khPath) {
+      throw new Error('applyK3sManifests: khPath required for registry push (Phase 6)');
+    }
+    // Push the app image to the in-cluster registry so CA-spawned workers
+    // (which don't exist at sideload time) can pull it on first schedule.
+    // The db image is NOT pushed here: it's pulled from ghcr by the database
+    // node (pinned there, see k8s/base/db/statefulset.yaml) — CA workers never
+    // run postgres.
+    //
+    // Kick off the registry push CONCURRENTLY — do NOT await it here. It exists
+    // only so future cluster-autoscaler-spawned workers can pull the app image;
+    // the app pods themselves run the SIDELOADED image (step 6 sets
+    // deployment/app to imageTag with imagePullPolicy: IfNotPresent), and NOTHING
+    // between here and the end of this function reads the in-cluster registry. So
+    // this ~90-140s S3-blob upload overlaps the CA rollout + db rollout +
+    // migrations + app rollout instead of serializing onto the critical path. It
+    // is still AWAITED at the end of applyK3sManifests (see the await below the
+    // traefik restart) so a failed push — which would leave CA-scaled workers
+    // unable to pull the app image — still fails the deploy.
+    //
+    // An HA deploy makes one push now: only the primary pushes, and the standby
+    // receives the same image by registry-to-registry copy. The process-wide
+    // mutex in pushImageOverSshTunnel (see "Uplink serialization" in
+    // registry-push.js) still guards against a concurrent push from elsewhere.
+    registryPushPromise = perfAsync(`deploy.${perfPrefix}.registryPush.app`, () =>
+      pushImageToLocalRegistry({
+        tag: imageTag,
+        masterIp,
+        sshKey: sshKeyPath,
+        khPath,
+        // Must match the masterPrivateIp buildAppImage used to build imageTag's
+        // registry-ref prefix (M3 Task 2) — undefined falls through to this
+        // callee's own '10.0.1.1' default, same as the renderCarbonAutoscalerConfig
+        // call site above.
+        masterPrivateIp,
+      }),
+    );
+    // Attach a no-op rejection guard so a push failure that lands WHILE the CA /
+    // db work below is still running doesn't surface as an
+    // unhandledRejection — the real `await registryPushPromise` at the end
+    // re-throws it and fails the deploy.
+    registryPushPromise.catch(() => {});
   }
-  if (!sshKeyPath) {
-    throw new Error('applyK3sManifests: sshKeyPath required for registry push (Phase 6)');
-  }
-  if (!khPath) {
-    throw new Error('applyK3sManifests: khPath required for registry push (Phase 6)');
-  }
-  // Push the app image to the in-cluster registry so CA-spawned workers
-  // (which don't exist at sideload time) can pull it on first schedule.
-  // The db image is NOT pushed here: it's pulled from ghcr by the database
-  // node (pinned there, see k8s/base/db/statefulset.yaml) — CA workers never
-  // run postgres.
-  const appPushPort = localTunnelPort;
-  // Kick off the registry push CONCURRENTLY — do NOT await it here. It exists
-  // only so future cluster-autoscaler-spawned workers can pull the app image;
-  // the app pods themselves run the SIDELOADED image (step 6 sets
-  // deployment/app to imageTag with imagePullPolicy: IfNotPresent), and NOTHING
-  // between here and the end of this function reads the in-cluster registry. So
-  // this ~90-140s S3-blob upload overlaps the CA rollout + db rollout +
-  // migrations + app rollout instead of serializing onto the critical path. It
-  // is still AWAITED at the end of applyK3sManifests (see the await below the
-  // traefik restart) so a failed push — which would leave CA-scaled workers
-  // unable to pull the app image — still fails the deploy.
-  //
-  // In an HA deploy the two clusters reach this point concurrently, but
-  // pushImageOverSshTunnel holds a process-wide mutex (two simultaneous
-  // uploads thrash the operator uplink into `unknown blob` failures — see the
-  // "Uplink serialization" block in registry-push.js). So the SECOND cluster's
-  // perf duration below includes its lock wait, not just its transfer: read a
-  // large `registryPush.app` on one arm together with the `[push] ... acquired
-  // push lock after Ns wait` line before calling it a slow push.
-  const registryPushPromise = perfAsync(`deploy.${perfPrefix}.registryPush.app`, () =>
-    pushImageToLocalRegistry({
-      tag: imageTag,
-      masterIp,
-      sshKey: sshKeyPath,
-      khPath,
-      localTunnelPort: appPushPort,
-      // Must match the masterPrivateIp buildAppImage used to build imageTag's
-      // registry-ref prefix (M3 Task 2) — undefined falls through to this
-      // callee's own '10.0.1.1' default, same as the renderCarbonAutoscalerConfig
-      // call site above.
-      masterPrivateIp,
-    }),
-  );
-  // Attach a no-op rejection guard so a push failure that lands WHILE the CA /
-  // db work below is still running doesn't surface as an
-  // unhandledRejection — the real `await registryPushPromise` at the end
-  // re-throws it and fails the deploy.
-  registryPushPromise.catch(() => {});
   // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
   //      kube-system but base/'s parent kustomization sets
   //      `namespace: vibecarbon`, whose namespace transformer would
@@ -4748,8 +4750,85 @@ export async function applyK3sManifests({
   // db rollout + migrations + app rollout — nothing above reads the
   // registry — so awaiting it here keeps a failed push FATAL to the deploy
   // (CA-scaled workers must be able to pull the app image) without having
-  // serialized its ~90-140s S3 upload onto the critical path.
-  await registryPushPromise;
+  // serialized its ~90-140s S3 upload onto the critical path. A standby
+  // started none.
+  if (registryPushPromise) await registryPushPromise;
+}
+
+/**
+ * Put the app image where this cluster's nodes can run it, and return its tag.
+ *
+ * Single-cluster k8s and a k8s-ha primary build the image locally (the
+ * `k3s-build` gate) and sideload it to every node (`k3s-sideload`). A k8s-ha
+ * standby does neither: it awaits the primary's built ref (`peerImageRef`),
+ * which is copied into its own registry, and re-prefixes it for its own
+ * master (`standbyImageRef`). `onImageBuilt` reports the built tag whether
+ * the build gate ran or skipped, so a warm rerun still hands the standby a ref.
+ *
+ * `deps` exists for tests: deployK3s can't be unit-driven and same-module
+ * calls can't be mocked. Calls stay spelled `d.buildAppImage(` /
+ * `d.sideloadK3s(` so call-site censuses see them.
+ *
+ * @returns {Promise<string>} the image tag deployment/app runs
+ */
+export async function deliverAppImage({
+  role,
+  peerImageRef,
+  onImageBuilt,
+  state,
+  buildInputs,
+  projectDir,
+  projectName,
+  domain,
+  masterPrivateIp,
+  sshTargets,
+  privateKeyPath,
+  khPath,
+  perfPrefix,
+  spinner,
+  deps = {},
+}) {
+  const d = { buildAppImage, sideloadK3s, ...deps };
+  const plan = planImageDelivery({ role });
+  if (plan.awaitPeerImage) {
+    if (!peerImageRef) throw new Error('deployK3s: role standby requires peerImageRef');
+    return standbyImageRef({
+      primaryRef: await peerImageRef,
+      standbyMasterPrivateIp: masterPrivateIp,
+    });
+  }
+  let imageTag;
+  if (plan.build) {
+    if (!state.shouldSkip('k3s-build', buildInputs)) {
+      state.startStep('k3s-build', buildInputs);
+      spinner.start(`Building app image (${masterPrivateIp}:5000/...)`);
+      const built = await d.buildAppImage(projectDir, projectName, false, domain, masterPrivateIp);
+      state.completeStep('k3s-build', {
+        tag: built.tag,
+        gitSha: built.gitSha,
+        isDirty: built.isDirty,
+      });
+      spinner.stop(`Image built: ${built.tag}`);
+    }
+    ({ tag: imageTag } = state.getStepResult('k3s-build'));
+    onImageBuilt?.(imageTag);
+  }
+  // Sideload to every node (parallel SSH within sideloadK3s): `docker save |
+  // ssh ... gunzip | k3s ctr import` per target. The db image is not
+  // sideloaded; the database node pulls it from ghcr.
+  if (plan.sideload) {
+    const sideloadInputs = { imageTag, targets: sshTargets.join(',') };
+    if (!state.shouldSkip('k3s-sideload', sideloadInputs)) {
+      state.startStep('k3s-sideload', sideloadInputs);
+      spinner.start(`Sideloading app to ${sshTargets.length} node(s)`);
+      await perfAsync(`deploy.${perfPrefix}.sideload.app`, () =>
+        d.sideloadK3s({ tag: imageTag, sshTargets, sshKey: privateKeyPath, khPath }),
+      );
+      state.completeStep('k3s-sideload');
+      spinner.stop('Sideload complete (app)');
+    }
+  }
+  return imageTag;
 }
 
 /**
@@ -5074,8 +5153,9 @@ export async function deployK3s(options) {
     });
   }
 
-  // 6. Build the app image locally.
-  // The gate folds the CONTENT of the build context (app source + Dockerfile)
+  // 6-7. Deliver the app image: build + sideload it, or, on a k8s-ha standby,
+  // take the primary's ref (deliverAppImage).
+  // The build gate folds the CONTENT of the build context (app source + Dockerfile)
   // and of the VITE_* build args into its inputs — see buildK3sBuildInputs for
   // why each one is load-bearing, and for the stale-image bug the coarse inputs
   // alone shipped.
@@ -5085,50 +5165,26 @@ export async function deployK3s(options) {
     masterPrivateIp,
     projectDir,
   });
-  if (!state.shouldSkip('k3s-build', buildInputs)) {
-    state.startStep('k3s-build', buildInputs);
-    s.start(`Building app image (${masterPrivateIp}:5000/...)`);
-    const built = await buildAppImage(
-      projectDir,
-      options.projectName,
-      false,
-      options.domain,
-      masterPrivateIp,
-    );
-    state.completeStep('k3s-build', {
-      tag: built.tag,
-      gitSha: built.gitSha,
-      isDirty: built.isDirty,
-    });
-    s.stop(`Image built: ${built.tag}`);
-  }
-  const { tag: imageTag } = state.getStepResult('k3s-build');
-
-  // 7b. Sideload to every node (parallel SSH within sideloadK3s) AND fan out
-  //     the app+db sideloads against each other. Both writes go through
-  //     `docker save | ssh ... gunzip | k3s ctr import` against disjoint
-  //     image refs on the same target nodes — kernel disk buffer + sshd
-  //     multiplex two parallel streams. Critical path = max(app, db).
-  //     The db image only NEEDS the database node (db is pinned there), but
-  //     sideloading to all nodes is harmless and keeps the target list shared.
+  // The sideload targets: every node.
   const sshTargets = [`root@${masterIp}`];
   if (dbIp) sshTargets.push(`root@${dbIp}`);
   for (const wIp of workerIps ?? []) sshTargets.push(`root@${wIp}`);
-  const sideloadInputs = { imageTag, targets: sshTargets.join(',') };
-  const sideloadTasks = [];
-  if (!state.shouldSkip('k3s-sideload', sideloadInputs)) {
-    state.startStep('k3s-sideload', sideloadInputs);
-    sideloadTasks.push(
-      perfAsync(`deploy.${perfPrefix}.sideload.app`, () =>
-        sideloadK3s({ tag: imageTag, sshTargets, sshKey: privateKeyPath, khPath }),
-      ).then(() => state.completeStep('k3s-sideload')),
-    );
-  }
-  if (sideloadTasks.length > 0) {
-    s.start(`Sideloading app to ${sshTargets.length} node(s)`);
-    await Promise.all(sideloadTasks);
-    s.stop('Sideload complete (app)');
-  }
+  const imageTag = await deliverAppImage({
+    role: options.role,
+    peerImageRef: options.peerImageRef,
+    onImageBuilt: options.onImageBuilt,
+    state,
+    buildInputs,
+    projectDir,
+    projectName: options.projectName,
+    domain: options.domain,
+    masterPrivateIp,
+    sshTargets,
+    privateKeyPath,
+    khPath,
+    perfPrefix,
+    spinner: s,
+  });
 
   // 8. Apply manifests (the db StatefulSet included) + roll out the app.
   // The gate folds the CONTENT of BOTH applied manifest trees (the project
@@ -5208,10 +5264,6 @@ export async function deployK3s(options) {
         masterIp,
         sshKeyPath: privateKeyPath,
         khPath,
-        // HA passes a per-cluster port so primary + standby don't race
-        // for `localhost:5000` on the operator host. Single-cluster
-        // deploys leave it undefined → applyK3sManifests defaults to 5000.
-        localTunnelPort: options.localTunnelPort,
         // The database node's own private IP — rendered (buildDbManifestValues)
         // into the seed-standby init's SEED_PRIMARY_HOST (repl-gateway relay
         // endpoint). Already in scope from infraOutputs (returned below).
