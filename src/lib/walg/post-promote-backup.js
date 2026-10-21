@@ -50,11 +50,13 @@ export class PostPromoteBackupError extends Error {
 }
 
 /**
- * How long the compose push waits for another backup run's lock (cron) before
- * it reads as skipped:already-running. That run is a fast standby-role skip or
- * a push of the very base wanted here, so it is waited out, not counted as a
- * failure; the budget matches the push's own ssh timeout, which backupCompose
- * extends by it. k8s has no lock: each backup Job is its own pod.
+ * How long the push waits for another backup run's lock before it reads as
+ * skipped:already-running. That run is a fast standby-role skip or a push of
+ * the very base wanted here, so it is waited out, not counted as a failure.
+ * compose: the host lock compose-backup.sh takes; backupCompose extends its
+ * ssh timeout by it. k8s: the db-container lock every backup Job takes
+ * (cronjob.yaml), set as LOCK_WAIT on the Job; it fits inside the Job's
+ * activeDeadlineSeconds, which bounds the CLI's wait.
  */
 export const POST_PROMOTE_LOCK_WAIT_S = 900;
 
@@ -101,7 +103,7 @@ export async function pushBaseBackupAfterPromote({
       });
     } else {
       const { triggerBackupJob } = await import('../../backup.js');
-      outcome = await triggerBackupJob(ip, sshKeyPath);
+      outcome = await triggerBackupJob(ip, sshKeyPath, { lockWaitS: POST_PROMOTE_LOCK_WAIT_S });
     }
   } catch (err) {
     throw new PostPromoteBackupError(firstLine(err), envName);

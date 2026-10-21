@@ -18,6 +18,14 @@
 # `vibecarbon backup` and destroy read from the Job logs. The pushed line comes
 # before retention, so a retention failure still names the base; it exits 3.
 #
+# One backup at a time per database: every Job (the schedule, and each
+# `kubectl create job --from=cronjob/backup` the CLI starts, which
+# concurrencyPolicy Forbid does not see) takes a lock inside the db container
+# before wal-g runs. A held lock prints BACKUP_RESULT=skipped:already-running
+# and the Job completes; LOCK_WAIT (seconds, set on the Job the CLI starts
+# after a promotion) waits for it first. Two concurrent runs would each run
+# `wal-g delete garbage`, which can delete the base the other is still pushing.
+#
 # Retries never re-push a landed base: restartPolicy Never (no in-place
 # container restart) plus a podFailurePolicy that fails the Job at once on
 # exit 3 (base pushed, retention failed). A failed push (exit 1, no marker)
@@ -44,6 +52,8 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      # BACKUP_JOB_ACTIVE_DEADLINE_S (src/backup.js) is this value: the CLI
+      # waits for a Job as long as it may run.
       activeDeadlineSeconds: 3600
       backoffLimit: 2
       podFailurePolicy:
@@ -118,10 +128,35 @@ spec:
                       exit 1
                       ;;
                   esac
+                  # Seconds to wait for another backup run before skipping. It is
+                  # spliced into the db-container command, so only a whole number.
+                  LOCK_WAIT="${LOCK_WAIT:-0}"
+                  case "$LOCK_WAIT" in
+                    ""|*[!0-9]*)
+                      echo "LOCK_WAIT must be a whole number of seconds (got: $LOCK_WAIT)" >&2
+                      exit 1
+                      ;;
+                  esac
                   # Exec wal-g inside the db pod. The guard makes this a no-op on
                   # a standby (in recovery) so only the primary takes base backups.
-                  kubectl exec -n vibecarbon statefulset/db -c db -- bash -c '
+                  # Exit 75 is the lock skip (marker printed): the Job completes.
+                  rc=0
+                  kubectl exec -n vibecarbon statefulset/db -c db -- env "LOCK_WAIT=$LOCK_WAIT" bash -c '
                     set -euo pipefail
+                    # ONE BACKUP AT A TIME per database, whichever Job runs this:
+                    # the lock is a file in the db container, held for the whole
+                    # run. busybox flock has no -w, so the bounded wait polls -n.
+                    # VC_BACKUP_LOCKFILE exists for the script tests only.
+                    exec 9>"${VC_BACKUP_LOCKFILE:-/tmp/vc-backup.lock}"
+                    lock_until=$(( $(date +%s) + LOCK_WAIT ))
+                    until flock -n 9; do
+                      if [ "$(date +%s)" -ge "$lock_until" ]; then
+                        echo "Backup already running, skipping" >&2
+                        echo "BACKUP_RESULT=skipped:already-running"
+                        exit 75
+                      fi
+                      sleep 2
+                    done
                     # wal-g backup-push connects to Postgres (pg_backup_start) using
                     # libpq env. Unset, PGUSER defaults to the container OS user
                     # "root" → "role \"root\" does not exist". And only the cluster
@@ -228,9 +263,9 @@ spec:
                     # orphans (interrupted pushes) before the delete, since
                     # it hard-crashes on a backup whose
                     # stop-sentinel never got written, and retries cannot heal a
-                    # permanently missing object (2026-08-30 RCA). Safe under
-                    # concurrencyPolicy: Forbid, as no concurrent push can look
-                    # like an orphan mid-flight.
+                    # permanently missing object (2026-08-30 RCA). Safe under the
+                    # db-container lock above, which every backup Job takes, so no
+                    # concurrent push can look like an orphan mid-flight.
                     # Retention is by TIME and keeps the full retention window. The
                     # cutoff is that many days ago; the target is the NEWEST base that
                     # finished at or before it, and delete before FIND_FULL on that
@@ -253,7 +288,11 @@ spec:
                       exit 3
                     }
                     printf "%s\n" "$retain_out" >&2
-                  '
+                  ' || rc=$?
+                  if [ "$rc" -eq 75 ]; then
+                    exit 0
+                  fi
+                  exit "$rc"
               resources:
                 requests:
                   cpu: 50m

@@ -83,6 +83,8 @@ type Stub = {
   /** The fence object disappears when `delete before` runs. */
   fenceVanishes?: boolean;
   lockHeld?: boolean;
+  /** Use the host's real flock (the lock tests hold the file themselves). */
+  realFlock?: boolean;
   fence?: string | null;
   /** The bases wal-g backup-list reports, by age in days (finish time = now - age). */
   bases?: Array<{ name: string; ageDays: number }>;
@@ -126,6 +128,7 @@ function stubs(name: string, opts: Stub) {
     retainFails = false,
     fenceVanishes = false,
     lockHeld = false,
+    realFlock = false,
     fence = null,
     bases = DEFAULT_BASES,
   } = opts;
@@ -166,7 +169,7 @@ case "$*" in
 esac
 `,
   );
-  writeFileSync(join(bin, 'flock'), `#!/bin/bash\nexit ${lockHeld ? 1 : 0}\n`);
+  if (!realFlock) writeFileSync(join(bin, 'flock'), `#!/bin/bash\nexit ${lockHeld ? 1 : 0}\n`);
   writeFileSync(
     join(bin, 'pg_controldata'),
     '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',
@@ -176,7 +179,14 @@ esac
     join(bin, 'kubectl'),
     '#!/bin/bash\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n',
   );
-  for (const f of ['wal-g', 'psql', 'flock', 'docker', 'kubectl', 'pg_controldata']) {
+  for (const f of [
+    'wal-g',
+    'psql',
+    ...(realFlock ? [] : ['flock']),
+    'docker',
+    'kubectl',
+    'pg_controldata',
+  ]) {
     chmodSync(join(bin, f), 0o755);
   }
   return { bin, walg: () => readFileSync(log, 'utf-8') };
@@ -339,6 +349,43 @@ describe('the backup CronJob prints the same markers', () => {
     expect(bad.status).toBe(3);
     expect(markers(bad.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
     expect(bad.stderr).toContain(`retention failed after pushing ${NAME}: `);
+  });
+
+  // Every Job (the schedule, and each `kubectl create job --from` beside it:
+  // concurrencyPolicy Forbid does not see those) execs into the same db
+  // container, so the lock lives there. Two runs would each `wal-g delete
+  // garbage`, and one can delete the base the other is still pushing.
+  it('another Job holds the db-container lock: skipped:already-running, the Job completes, no wal-g', () => {
+    const r = runCron('locked', { lockHeld: true });
+    expect(r.status, r.stderr).toBe(0);
+    expect(markers(r.stdout)).toEqual(['BACKUP_RESULT=skipped:already-running']);
+    expect(r.walg).toBe('');
+  });
+
+  it('LOCK_WAIT waits out a held lock and then pushes; without it a held lock is a skip', () => {
+    const lockfile = join(work, 'cron-real.lock');
+    // Hold the lock for 3s with the real flock.
+    const holder = spawnSync(
+      'bash',
+      ['-c', `(flock -n "${lockfile}" sleep 3 >/dev/null 2>&1 &) ; sleep 0.5`],
+      { encoding: 'utf-8' },
+    );
+    expect(holder.status).toBe(0);
+    const env = { VC_BACKUP_LOCKFILE: lockfile };
+    const skip = runCron('real-skip', { realFlock: true }, env);
+    expect(skip.status, skip.stderr).toBe(0);
+    expect(markers(skip.stdout)).toEqual(['BACKUP_RESULT=skipped:already-running']);
+    const waited = runCron('real-wait', { realFlock: true }, { ...env, LOCK_WAIT: '8' });
+    expect(waited.status, waited.stderr).toBe(0);
+    expect(markers(waited.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
+  });
+
+  it('a LOCK_WAIT that is not a whole number of seconds is refused before kubectl exec', () => {
+    const r = runCron('bad-wait', {}, { LOCK_WAIT: '5;rm' });
+    expect(r.status).toBe(1);
+    expect(markers(r.stdout)).toEqual([]);
+    expect(r.stderr).toContain('LOCK_WAIT');
+    expect(r.walg).toBe('');
   });
 
   it('the retired refusal and a nameless push exit 1 with no marker', () => {

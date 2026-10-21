@@ -139,9 +139,9 @@ async function downloadPodBackup(ip, sshKeyPath, filename) {
  * failure, captures pod diagnostics IN-LINE (before the controller GCs the
  * failed Pod). Extracted as a pure builder so the poll cadence is unit-testable.
  *
- * Poll cadence: we avoid `kubectl wait --for=condition=Complete --timeout=300s`
+ * Poll cadence: we avoid `kubectl wait --for=condition=Complete`
  * because the wait can only watch ONE condition, so on a CrashLoopBackOff that
- * ends in Failed it would burn the FULL 5 min before timing out. By that point
+ * ends in Failed it would burn the FULL timeout before returning. By that point
  * kubelet had GC'd the failed Pod (observed 2026-04-28 e2e — the Pod was visible
  * in events but kubectl get returned nothing, so the diagnostic captured no
  * logs). Polling for BOTH conditions returns promptly on Failed while the Pod is
@@ -152,7 +152,8 @@ async function downloadPodBackup(ip, sshKeyPath, filename) {
  * to 5s of tail latency after the condition fires. The ramp keeps early
  * detection tight while a genuinely slow job still settles to 5s pacing. The
  * first condition check runs BEFORE the first sleep, so a fast job is caught
- * immediately. The 300s DEADLINE is the load-bearing ceiling and is unchanged.
+ * immediately. The DEADLINE is the Job's own activeDeadlineSeconds plus the
+ * controller's grace (BACKUP_JOB_ACTIVE_DEADLINE_S): the Job is Failed by then.
  *
  * CRITICAL: capture pod logs + describe IN-LINE the moment Failed=True is
  * detected. Doing this in a follow-up SSH session race-loses to Pod GC (observed
@@ -160,9 +161,20 @@ async function downloadPodBackup(ip, sshKeyPath, filename) {
  * returned "No pod matching" because controller-manager already GC'd the failed
  * Pod within the ~1s window between SSH sessions).
  */
+/**
+ * The backup Job's activeDeadlineSeconds (carbon/k8s/base/backup/cronjob.yaml;
+ * a test pins the two equal). The CLI waits for a Job as long as the Job may
+ * run: a fixed 300s failed every post-promote push of a database whose
+ * backup-push took longer, while the Job went on pushing.
+ */
+export const BACKUP_JOB_ACTIVE_DEADLINE_S = 3600;
+
+/** After activeDeadlineSeconds the Job controller still has to mark it Failed. */
+const JOB_DEADLINE_GRACE_S = 60;
+
 export function buildBackupJobWaitScript(jobName) {
   return `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-DEADLINE=$(($(date +%s) + 300))
+DEADLINE=$(($(date +%s) + ${BACKUP_JOB_ACTIVE_DEADLINE_S + JOB_DEADLINE_GRACE_S}))
 RESULT="timeout"
 INTERVAL=2
 while [ $(date +%s) -lt $DEADLINE ]; do
@@ -248,10 +260,18 @@ exit 1`;
  * @param {typeof sshRunScript} [opts.runScriptImpl]
  * @param {Function} [opts.sleep]
  * @param {Function} [opts.nowFn]
+ * @param {number} [opts.lockWaitS] seconds the Job waits for another backup
+ *   run's db-container lock before it skips (LOCK_WAIT on the Job's backup
+ *   container). Omitted: a held lock is an immediate skip:already-running.
  * @returns {Promise<({result: 'pushed', name: string, retentionError?: string} | {result: 'skipped', reason: string}) & {job: string}>}
  */
 export async function triggerBackupJob(ip, sshKeyPath, opts = {}) {
-  const { kubectlImpl = sshKubectl, runScriptImpl = sshRunScript, sleep, nowFn } = opts;
+  const { kubectlImpl = sshKubectl, runScriptImpl = sshRunScript, sleep, nowFn, lockWaitS } = opts;
+  if (lockWaitS !== undefined && !(Number.isInteger(lockWaitS) && lockWaitS > 0)) {
+    throw new Error(
+      `the backup Job lock wait (lockWaitS) must be a positive whole number of seconds (got ${lockWaitS})`,
+    );
+  }
 
   await awaitPostgresAccepting({
     env: process.env,
@@ -271,21 +291,47 @@ export async function triggerBackupJob(ip, sshKeyPath, opts = {}) {
     .toLowerCase();
   const jobName = `backup-manual-${timestamp}`;
 
-  // Create a one-off Job from the CronJob template
-  await kubectlImpl(ip, sshKeyPath, [
-    'create',
-    'job',
-    `--from=cronjob/backup`,
-    jobName,
-    '-n',
-    'vibecarbon',
-  ]);
+  // Create a one-off Job from the CronJob template.
+  const createArgv = ['create', 'job', `--from=cronjob/backup`, jobName, '-n', 'vibecarbon'];
+  if (lockWaitS === undefined) {
+    await kubectlImpl(ip, sshKeyPath, createArgv);
+  } else {
+    // `create job --from` cannot set env, so render the Job, add LOCK_WAIT to
+    // the backup container, and create that.
+    const rendered = await kubectlImpl(
+      ip,
+      sshKeyPath,
+      [...createArgv, '--dry-run=client', '-o', 'json'],
+      { silent: true },
+    );
+    const job = JSON.parse(String(rendered));
+    const container = job?.spec?.template?.spec?.containers?.find((c) => c.name === 'backup');
+    if (!container) {
+      throw new Error('the backup CronJob template has no container named backup');
+    }
+    container.env = [
+      ...(container.env ?? []).filter((e) => e.name !== 'LOCK_WAIT'),
+      { name: 'LOCK_WAIT', value: String(lockWaitS) },
+    ];
+    await runScriptImpl(
+      ip,
+      sshKeyPath,
+      `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+kubectl create -f - <<'VC_BACKUP_JOB'
+${JSON.stringify(job)}
+VC_BACKUP_JOB`,
+      { timeout: 60_000 },
+    );
+  }
 
   // Poll the Job to completion (ramped-interval condition poll — see
   // buildBackupJobWaitScript for the both-conditions + inline-diagnostics
   // rationale) and capture failure diagnostics before the Pod is GC'd.
   try {
-    await runScriptImpl(ip, sshKeyPath, buildBackupJobWaitScript(jobName), { timeout: 420_000 });
+    await runScriptImpl(ip, sshKeyPath, buildBackupJobWaitScript(jobName), {
+      // The poll's own deadline, plus room for the ssh hop and the diagnostics.
+      timeout: (BACKUP_JOB_ACTIVE_DEADLINE_S + JOB_DEADLINE_GRACE_S + 120) * 1000,
+    });
   } catch (waitErr) {
     // The wait script's inline diagnostics (stdout of the failed run) carry
     // the pod logs captured before GC.

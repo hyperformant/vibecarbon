@@ -295,7 +295,10 @@ describe('pushBaseBackupAfterPromote', () => {
     await expect(pushBaseBackupAfterPromote({ tier: 'k8s', ...args })).resolves.toEqual({
       name: 'base_000000030000000000000009',
     });
-    expect(triggerBackupJob).toHaveBeenCalledWith('10.0.0.9', '/k');
+    // Another backup Job holding the db-container lock is waited out too.
+    expect(triggerBackupJob).toHaveBeenCalledWith('10.0.0.9', '/k', {
+      lockWaitS: POST_PROMOTE_LOCK_WAIT_S,
+    });
   });
 
   it('a skip is a failure: the new timeline still has no base', async () => {
