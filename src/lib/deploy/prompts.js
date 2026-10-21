@@ -35,6 +35,7 @@ import {
 import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
+import { walgPrefixFor } from '../walg/restore-base.js';
 import { collectDeployDelta, formatDeployDeltaLines } from './delta.js';
 import { assertOperatorConfig } from './preflight.js';
 import { resolveTier } from './tier-registry.js';
@@ -528,7 +529,7 @@ export function resolveEnvStorage(envName, envConfig, projectConfig) {
   return {
     bucket,
     backupBucket: envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig, 'backups'),
-    walgPrefix: `backups/${projectConfig.projectName}/${envName}/walg`,
+    walgPrefix: walgPrefixFor(projectConfig.projectName, envName),
   };
 }
 

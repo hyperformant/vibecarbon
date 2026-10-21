@@ -71,6 +71,12 @@ const SAFE_PATTERNS = [
   '.claude/agents/**',
 ];
 
+// Template-owned files under a NEVER directory that upgrade must still ship.
+// volumes/db/db-guard.sh is the compose db service's entrypoint
+// (docker-compose.yml mounts it): a project that takes the compose merge
+// without it gets an empty directory mounted there and no database.
+const SAFE_DESPITE_NEVER = ['volumes/db/db-guard.sh'];
+
 // Files that always require user review
 const MERGE_PATTERNS = [
   'docker-compose.yml',
@@ -139,6 +145,7 @@ function matchesAny(filePath, patterns) {
  * @returns {'safe' | 'merge' | 'never'}
  */
 export function getFilePolicy(relativePath) {
+  if (matchesAny(relativePath, SAFE_DESPITE_NEVER)) return 'safe';
   if (matchesAny(relativePath, NEVER_PATTERNS)) return 'never';
   if (matchesAny(relativePath, MERGE_PATTERNS)) return 'merge';
   if (matchesAny(relativePath, SAFE_PATTERNS)) return 'safe';

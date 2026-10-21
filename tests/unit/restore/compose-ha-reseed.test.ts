@@ -19,8 +19,28 @@ function makeSpinner() {
   return { start: vi.fn(), stop: vi.fn(), message: vi.fn() };
 }
 
+// The base run() resolved from the bucket's stop sentinels.
+const BASE = {
+  name: 'base_000000010000000000000002',
+  timeline: 1,
+  finishTime: new Date('2026-10-20T01:00:00Z'),
+  sizeBytes: 4_290_228,
+  uncompressedBytes: 23_439_374,
+};
+
+/** restoreCompose's 4th argument for BASE restored to `latest`. */
+const restorePoint = () =>
+  expect.objectContaining({
+    backup: BASE.name,
+    target: 'latest',
+    recoveryConf: expect.stringContaining("recovery_target_timeline = 'current'"),
+    requiredBytes: BASE.uncompressedBytes,
+    assertWritable: expect.any(Function),
+  });
+
 const baseArgs = {
   chosenSource: { kind: 's3' as const, name: 'latest' },
+  base: BASE,
   envName: 'prod',
   projectName: 'myapp',
   serverIp: '10.0.0.1', // primary (servers[0])
@@ -79,7 +99,7 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
     });
 
     // Primary restored first.
-    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.1', '/tmp/key', 'myapp', 'latest');
+    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.1', '/tmp/key', 'myapp', restorePoint());
     // Standby re-seeded FROM the restored primary: (standbyIp, primaryIp, key,
     // name), dialing the primary's own tunnel address (its stack's, wgIpOf).
     expect(configureStandbyReplication).toHaveBeenCalledWith(
@@ -205,7 +225,7 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
       configureStandbyReplication,
     });
 
-    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.2', '/tmp/key', 'myapp', 'latest');
+    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.2', '/tmp/key', 'myapp', restorePoint());
     expect(configureStandbyReplication).not.toHaveBeenCalled();
     const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
     expect(text).toMatch(/failed over/);
@@ -360,6 +380,8 @@ describe('runComposeRestore: a standby not re-seeded and verified is marked unpr
 // Final review M4: a backup taken under a stranded write fence carries
 // default_transaction_read_only=on, so the restored primary must be proven
 // writable (or lifted) before anything else.
+// restoreCompose runs the proof (before it drops the previous cluster), so the
+// injected restoreCompose calls the assertWritable it is handed.
 describe('runComposeRestore: the restored primary is proven writable first (M4)', () => {
   it('right after the restore, before the standby reseed', async () => {
     const order: string[] = [];
@@ -373,8 +395,9 @@ describe('runComposeRestore: the restored primary is proven writable first (M4)'
           { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
         ],
       },
-      restoreCompose: vi.fn(async () => {
+      restoreCompose: vi.fn(async (_ip, _key, _project, point) => {
         order.push('restore');
+        await point.assertWritable();
       }),
       configureStandbyReplication: vi.fn(async () => {
         order.push('reseed');

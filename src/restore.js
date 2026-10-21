@@ -39,7 +39,7 @@ import {
   detectComposeHaRoleSwap,
 } from './lib/deploy/compose/ha-role-swap.js';
 import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index.js';
-import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
+import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import {
   assertNoFailoverInFlight,
   readReplicaState,
@@ -56,7 +56,6 @@ import {
   verifyStreaming,
 } from './lib/deploy/replication.js';
 import { wgIpOf } from './lib/deploy/wireguard.js';
-import { assertRolePrimaryWritable } from './lib/deploy/write-fence.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
@@ -64,7 +63,30 @@ import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
-import { listWalgBackups, printWalgBackupList } from './lib/walg-backups.js';
+import {
+  buildRecoveryConfig,
+  RESTORE_PITR_RE,
+  renderRecoveryConf,
+} from './lib/walg/recovery-config.js';
+import {
+  backupCredentialVars,
+  createS3Client,
+  NoRestorePointError,
+  printBaseBackupList,
+  readEnvBaseBackups,
+  resolveRestoreBase,
+  resolveS3Config,
+} from './lib/walg/restore-base.js';
+import { assertRestoreFits, PREVIOUS_PGDATA_PATH } from './lib/walg/restore-layout.js';
+import {
+  assertRestoredPrimaryWritable,
+  clearRestoreMarker,
+  setRestoreMarker,
+} from './lib/walg/restore-marker.js';
+
+// Moved to src/lib/walg/restore-marker.js (shared with deploy -restore);
+// re-exported for the callers and tests that import it from here.
+export { assertRestoredPrimaryWritable };
 
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
@@ -223,17 +245,16 @@ export async function verifyPostgres(ip, sshKeyPath, opts = {}) {
 // SOURCE INTERPRETATION
 // ============================================================================
 
-// ISO-8601 datetime for point-in-time recovery. MUST stay in sync with
-// composeRestoreScript's ISO_DATETIME_RE (compose/index.js) and the k8s
-// walg-restore init container, which reject any other target format.
-const RESTORE_PITR_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$/;
+// RESTORE_PITR_RE (src/lib/walg/recovery-config.js) is the one ISO-8601
+// target format: buildRecoveryConfig rejects any other.
 
 /**
  * Resolve `-source` into a wal-g restore POINT.
  *
- * Restore is wal-g-native for compose and k8s: it always fetches the latest
- * base backup and replays WAL either to the present (`latest`) or to an
- * ISO-8601 instant (PITR). There is no "restore this file": the legacy
+ * Restore is wal-g-native for compose and k8s: it fetches the base backup the
+ * CLI resolved from the bucket (the newest, or the newest that finished at or
+ * before a PITR instant) and replays WAL either to the present (`latest`) or
+ * to an ISO-8601 instant (PITR). There is no "restore this file": the legacy
  * `backups/*_full.tar.gz` objects are not wal-g backups and local dumps
  * cannot be loaded (runComposeRestore / runK8sRestore reject `kind: local`).
  * Until 2026-09-15 this special-cased `latest` and sent everything else
@@ -266,7 +287,13 @@ export function resolveRestoreTarget(source) {
 // MAIN
 // ============================================================================
 
-export async function run(args) {
+/**
+ * @param {string[]} args
+ * @param {object} [deps]  Test seams; production passes none.
+ * @param {typeof resolveS3Config} [deps.resolveS3Config]
+ * @param {(cfg: object) => any} [deps.createS3Client]
+ */
+export async function run(args, deps = {}) {
   const { values, positional, handled } = parseFlagsOrExit(args, SPEC);
   if (handled) return;
 
@@ -320,9 +347,52 @@ export async function run(args) {
     });
   }
 
-  // Operator-IP firewall refresh — the listing path needs SSH/k8s
-  // reachability too (we may fall back to a pod-list when S3 isn't
-  // configured), so we run this regardless of -l.
+  const projectName = projectConfig.projectName || 'project';
+  const isCompose = envConfig.deployMode === 'compose' || envConfig.deployMode === 'compose-ha';
+
+  // The base backups come from the stop sentinels in the backup bucket, read
+  // here in the CLI (H3), so restore needs the bucket's credentials locally:
+  // the provider's object-storage env vars, or the prompt (never with -y or
+  // off a TTY). Resolved before anything on the server is touched, and before
+  // the firewall refresh and SSH, which `-l` does not need at all.
+  let listing;
+  try {
+    listing = await readEnvBaseBackups({
+      envName,
+      envConfig,
+      projectName,
+      skipPrompts: !!values.y || !process.stdin.isTTY,
+      resolveS3: deps.resolveS3Config ?? resolveS3Config,
+      makeClient: deps.createS3Client ?? createS3Client,
+    });
+  } catch (err) {
+    p.log.error(
+      `Could not read the base backups from the backup bucket: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(1);
+  }
+  if (!listing.s3Config) {
+    p.log.error(
+      `Restore reads the base backups from ${envName}'s backup bucket and needs its credentials: ` +
+        `export ${backupCredentialVars(envConfig)}${values.y ? '' : ', or enter them when asked'}, then rerun.`,
+    );
+    process.exit(1);
+  }
+  const { backups, location } = listing;
+
+  // -l: list-only path. Read-only, bucket only; print and exit.
+  if (values.l) {
+    printBaseBackupList({ backups, envName, location });
+    p.outro('');
+    return;
+  }
+  if (backups.length === 0) {
+    p.log.error(`No base backups found in ${location}: there is nothing to restore.`);
+    p.log.info(`Create one with: ${c.info(`vibecarbon backup ${envName}`)}`);
+    process.exit(1);
+  }
+
+  // Operator-IP firewall refresh: everything below needs SSH/k8s reachability.
   const apiToken = resolveProviderToken(providerIdFor(envConfig));
   if (apiToken) {
     try {
@@ -354,23 +424,10 @@ export async function run(args) {
     process.exit(1);
   }
 
-  const projectName = projectConfig.projectName || 'project';
-  const isCompose = envConfig.deployMode === 'compose' || envConfig.deployMode === 'compose-ha';
-
-  // -l: list-only path. Read-only; print and exit.
-  if (values.l) {
-    await runList({ isCompose, envName, projectName, serverIp, sshKeyPath });
-    p.outro('');
-    return;
-  }
-
-  // Resolve the chosen backup source. Restore is wal-g-native (compose + k8s):
-  // wal-g runs server-side and reads its own S3 config from the db container —
-  // the operator does NOT need local S3 credentials to restore.
-  //
-  // `-source latest` (e2e, post-incident scripts) and `-y` both resolve to the
-  // LATEST base backup; `-source <ISO-8601>` is a point-in-time target. A bare
-  // interactive run opens the restore-point chooser.
+  // Resolve the restore point. `-source latest` (e2e, post-incident scripts)
+  // and `-y` both mean the newest base backup plus all WAL; `-source
+  // <ISO-8601>` is a point-in-time target. A bare interactive run opens the
+  // restore-point chooser.
   const wantsLatest = values.source === 'latest';
   let chosenSource;
   if (!wantsLatest && values.source) {
@@ -378,14 +435,7 @@ export async function run(args) {
   } else if (wantsLatest) {
     chosenSource = { kind: 's3', name: 'latest' };
   } else {
-    chosenSource = await pickInteractiveSource({
-      isCompose,
-      envName,
-      projectName,
-      serverIp,
-      sshKeyPath,
-      yes: !!values.y,
-    });
+    chosenSource = await pickInteractiveSource({ backups, yes: !!values.y });
   }
 
   if (!chosenSource) {
@@ -393,15 +443,33 @@ export async function run(args) {
     process.exit(1);
   }
 
+  // The exact base backup this restore fetches, before any confirmation or
+  // stop: a point-in-time target older than every base refuses here.
+  let base;
+  try {
+    base = resolveRestoreBase(
+      backups,
+      chosenSource.name === 'latest' ? 'latest' : new Date(chosenSource.name),
+    );
+  } catch (err) {
+    if (!(err instanceof NoRestorePointError)) throw err;
+    p.log.error(`Cannot restore ${chosenSource.name}: ${err.message} (in ${location}).`);
+    process.exit(1);
+  }
+
   // Confirmation gates
   p.log.warn('This will overwrite the current database!');
   p.log.message(`  ${c.dim('Environment'.padEnd(14))} ${c.bold(envName)}`);
   p.log.message(`  ${c.dim('Server'.padEnd(14))} ${c.bold(serverIp)}`);
-  p.log.message(`  ${c.dim('Backup'.padEnd(14))} ${c.bold(chosenSource.name)}`);
+  p.log.message(`  ${c.dim('Backup'.padEnd(14))} ${c.bold(base.name)}`);
+  p.log.message(`  ${c.dim('Finished'.padEnd(14))} ${c.bold(formatInstant(base.finishTime))}`);
+  p.log.message(
+    `  ${c.dim('Restore to'.padEnd(14))} ${c.bold(chosenSource.name === 'latest' ? 'latest (all WAL)' : chosenSource.name)}`,
+  );
 
   if (!values.y) {
     const confirm = await p.confirm({
-      message: `Restore ${c.bold(chosenSource.name)} to ${c.bold(envName)}?`,
+      message: `Restore ${c.bold(base.name)} to ${c.bold(envName)}?`,
     });
     // Ctrl-C/ESC and an explicit "no" are different answers: one is an
     // interrupt, the other a considered refusal. Both stop the run.
@@ -433,6 +501,7 @@ export async function run(args) {
       await runComposeRestore({
         s,
         chosenSource,
+        base,
         envName,
         projectName,
         serverIp,
@@ -443,6 +512,7 @@ export async function run(args) {
       await runK8sRestore({
         s,
         chosenSource,
+        base,
         envName,
         serverIp,
         sshKeyPath,
@@ -469,46 +539,24 @@ export async function run(args) {
 // ORCHESTRATION HELPERS
 // ============================================================================
 
-async function runList({ isCompose, envName, projectName, serverIp, sshKeyPath }) {
-  await printWalgBackupList({ serverIp, sshKeyPath, projectName, isCompose, envName });
-}
-
-async function pickInteractiveSource({
-  isCompose,
-  envName,
-  projectName,
-  serverIp,
-  sshKeyPath,
-  yes,
-}) {
-  // Restore is wal-g-native for both compose and k8s: it ALWAYS fetches the
-  // LATEST base backup and replays WAL — either to the present ("latest") or to
-  // a point-in-time target. There is no "restore a specific older base backup",
-  // so this is a restore-POINT chooser, not a backup-file picker. (The legacy
-  // backups/*_full.tar.gz S3 objects are NOT wal-g backups — composeRestoreScript
-  // and the k8s walg-restore init container reject any target that isn't
-  // "latest" or an ISO-8601 datetime.)
+async function pickInteractiveSource({ backups, yes }) {
+  // A restore-POINT chooser, not a backup picker: the CLI resolves the base
+  // backup from the point (the newest base for "latest", the newest that
+  // finished at or before a point-in-time target).
   if (yes) {
     return { kind: 's3', name: 'latest' };
   }
 
-  // Best-effort recovery-window context so point-in-time is meaningful. Never
-  // blocks the chooser: if wal-g listing fails (db down, no --json), omit it.
-  const tracker = createTracker('restore.window', { environment: envName });
-  const s = tracker.spinner();
-  s.start('Reading available backups');
-  const backups = await listWalgBackups({ serverIp, sshKeyPath, projectName, isCompose });
-  if (backups.length > 0) {
-    const newest = formatInstant(backups[0].time);
-    const oldest = formatInstant(backups[backups.length - 1].time);
-    s.stop(
-      backups.length === 1
-        ? `1 base backup available (${newest})`
-        : `${backups.length} base backups; recovery window ${oldest} → ${newest}`,
-    );
-  } else {
-    s.stop('Backups read');
-  }
+  // The window a point in time can fall in starts at the oldest base's finish.
+  const sorted = [...backups].sort((a, b) => a.finishTime.getTime() - b.finishTime.getTime());
+  const oldest = formatInstant(sorted[0].finishTime);
+  const newest = formatInstant(sorted[sorted.length - 1].finishTime);
+  p.log.info(
+    sorted.length === 1
+      ? `1 base backup, finished ${newest}: a point in time can be any instant after it`
+      : `${sorted.length} base backups, the oldest finished ${oldest} and the newest ${newest}: ` +
+          `a point in time can be any instant after ${oldest}`,
+  );
 
   const choice = await p.select({
     message: 'Restore point:',
@@ -524,9 +572,7 @@ async function pickInteractiveSource({
     return { kind: 's3', name: 'latest' };
   }
 
-  // Point-in-time: wal-g fetches the latest base backup and replays WAL up to
-  // this instant. Must match the ISO-8601 target validation in
-  // composeRestoreScript / the k8s walg-restore init container.
+  // Point-in-time: WAL replays from the resolved base up to this instant.
   const ts = await p.text({
     message: 'Recover to (ISO-8601 timestamp):',
     placeholder: '2026-06-22T14:30:00Z',
@@ -541,9 +587,30 @@ async function pickInteractiveSource({
   return { kind: 's3', name: /** @type {string} */ (ts).trim() };
 }
 
+/**
+ * The base a runner restores must be resolved by the caller (run, from the
+ * bucket's stop sentinels): the runners never pick one, and never fall back
+ * to LATEST.
+ */
+function assertResolvedBase(base) {
+  if (!base?.name) {
+    throw new Error(
+      'restore needs a resolved base backup (listBaseBackups + resolveRestoreBase) before it touches the server',
+    );
+  }
+}
+
+/** The restore point's target and the recovery config both tiers apply. */
+function restorePointOf(chosenSource) {
+  const target =
+    chosenSource.name === 'latest' || !chosenSource.name ? 'latest' : chosenSource.name;
+  return { target, recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target })) };
+}
+
 // compose restore is wal-g-based (S3 pull, no file transfer). Mirrors
-// runK8sRestore's structure: reject local-file sources, resolve target,
-// call restoreCompose, verify postgres.
+// runK8sRestore's structure: reject local-file sources and a missing base,
+// call restoreCompose with the resolved base (it stages, swaps, waits for
+// promotion and proves the result writable before the previous cluster goes).
 //
 // COMPOSE-HA re-seed (Invariant 3): the wal-g restore rewinds the PRIMARY
 // (servers[0]) to an earlier LSN. For a compose-ha deployment the standby then
@@ -562,6 +629,7 @@ async function pickInteractiveSource({
 export async function runComposeRestore({
   s,
   chosenSource,
+  base,
   envName,
   projectName,
   serverIp,
@@ -580,6 +648,7 @@ export async function runComposeRestore({
       exec: composePsqlRunner(serverIp, sshKeyPath, `/opt/${projectName}`),
     }),
 }) {
+  assertResolvedBase(base);
   // Also here, for every caller: see run().
   assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
   if (chosenSource.kind === 'local') {
@@ -589,15 +658,19 @@ export async function runComposeRestore({
     );
   }
 
-  // wal-g target: 'latest' → LATEST base backup; otherwise treat the source
-  // name as an ISO-8601 timestamp for point-in-time recovery.
-  const target =
-    chosenSource.name === 'latest' || !chosenSource.name ? 'latest' : chosenSource.name;
+  const { target, recoveryConf } = restorePointOf(chosenSource);
 
-  s.start('Restoring database via wal-g (app will be temporarily unavailable)');
-  await restoreCompose(serverIp, sshKeyPath, projectName, target);
+  s.start(`Restoring ${base.name} via wal-g (app will be temporarily unavailable)`);
+  // restoreCompose proves the restored database writable (assertWritable)
+  // before it removes the previous cluster and brings the app back.
+  await restoreCompose(serverIp, sshKeyPath, projectName, {
+    backup: base.name,
+    target,
+    recoveryConf,
+    requiredBytes: base.uncompressedBytes ?? base.sizeBytes,
+    assertWritable,
+  });
   s.stop('Database restored');
-  await assertWritable();
 
   // compose-ha: the wal-g restore rewound the primary to an earlier LSN, so the
   // standby now has WAL AHEAD of the primary and cannot resume streaming. Re-seed
@@ -664,57 +737,100 @@ export async function runComposeRestore({
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);
 }
 
+// k8s restore is wal-g-native: postgres + wal-g live in the db pod, which
+// archives WAL + base backups to S3. Restore = set the restore marker on
+// vibecarbon-infra-secrets (RESTORE_BACKUP, the base resolved here, plus the
+// rendered recovery config) → bounce the db StatefulSet so its walg-restore
+// init container fetches that backup into a staging dir and swaps it in →
+// wait for promotion and prove the result writable → clear the marker and
+// remove the previous cluster. No bytes flow through the operator; wal-g
+// pulls from S3 inside the cluster. The workload name is DB_STATEFULSET
+// (src/lib/deploy/db-workload.js).
+
+/** Staged fetches stream at least this fast; it sizes the rollout wait (M1). */
+export const RESTORE_FETCH_FLOOR_BYTES_PER_S = 20 * 1024 ** 2;
+
 /**
- * A restored database must take writes (final review M4). A base backup taken
- * while a planned failover's write fence was stranded on the primary carries
- * default_transaction_read_only=on in its postgresql.auto.conf, so the restore
- * would bring back a read-only primary. Same check and lift as the deploy's
- * (write-fence.js): fenced is lifted with a warning, a lift that fails throws
- * with the manual fix, an unreadable setting warns.
- *
- * @param {{ environment: string, envConfig: object, exec: (sql: string, o?: object) => Promise<string> }} args
+ * The db rollout wait for a restore of `sizeBytes`: the boot floor, or the
+ * time the fetch needs at RESTORE_FETCH_FLOOR_BYTES_PER_S, whichever is longer.
  */
-export async function assertRestoredPrimaryWritable({ environment, envConfig, exec }) {
-  const state = await assertRolePrimaryWritable({
-    environment,
-    envConfig,
-    exec,
-    warn: (line) => p.log.warn(`restored database: ${line}`),
-  });
-  if (state === 'unknown') {
-    p.log.warn(
-      "could not read the restored database's write-fence setting; vibecarbon status shows it " +
-        'once the database answers',
-    );
+export function restoreRolloutTimeoutS(sizeBytes) {
+  return Math.max(
+    DB_STS_BOOT_TIMEOUT_S,
+    Math.ceil((Number(sizeBytes) || 0) / RESTORE_FETCH_FLOOR_BYTES_PER_S),
+  );
+}
+
+/** Free bytes on the db pod's PGDATA volume, or null when unreadable. */
+async function k8sPgdataFreeBytes(ip, sshKeyPath) {
+  try {
+    const out = await sshKubectl(ip, sshKeyPath, [
+      'exec',
+      '-n',
+      'vibecarbon',
+      DB_POD,
+      '-c',
+      DB_CONTAINER,
+      '--',
+      'df',
+      '-Pk',
+      '/var/lib/postgresql/data',
+    ]);
+    const row =
+      String(out ?? '')
+        .trim()
+        .split('\n')[1] ?? '';
+    const kb = Number.parseInt(row.trim().split(/\s+/)[3] ?? '', 10);
+    return Number.isFinite(kb) ? kb * 1024 : null;
+  } catch {
+    return null;
   }
 }
 
-// k8s restore is wal-g-native: postgres + wal-g live in the db pod,
-// which continuously archives WAL + base backups to S3. Restore = set a
-// RESTORE_TARGET marker on vibecarbon-infra-secrets → bounce the db StatefulSet so
-// its walg-restore init container runs `wal-g backup-fetch` into PGDATA before
-// postgres starts → clear the marker. No bytes flow through the operator and
-// no pg_dump/kubectl-cp; wal-g pulls from S3 inside the cluster. Mirrors the
-// compose wal-g restore, adapted to the StatefulSet/init-container shape.
-// The workload name is DB_STATEFULSET (src/lib/deploy/db-workload.js).
-
-/** Set or clear the RESTORE_TARGET marker the init container reads. */
-async function setRestoreMarker(ip, sshKeyPath, value) {
-  await sshKubectl(ip, sshKeyPath, [
-    'patch',
-    'secret',
-    'vibecarbon-infra-secrets',
-    '-n',
-    'vibecarbon',
-    '--type=merge',
-    '-p',
-    JSON.stringify({ stringData: { RESTORE_TARGET: value } }),
-  ]);
+/** Poll until the db pod's postgres has left recovery (promoted). */
+async function waitForK8sPromotion(
+  ip,
+  sshKeyPath,
+  { timeoutMs = 300_000, intervalMs = 2_000 } = {},
+) {
+  const deadline = Date.now() + timeoutMs;
+  let last = '';
+  for (;;) {
+    try {
+      const out = await sshKubectl(ip, sshKeyPath, [
+        'exec',
+        '-n',
+        'vibecarbon',
+        DB_POD,
+        '-c',
+        DB_CONTAINER,
+        '--',
+        'psql',
+        '-U',
+        'postgres',
+        '-At',
+        '-c',
+        'SELECT pg_is_in_recovery()',
+      ]);
+      if (String(out ?? '').trim() === 'f') return;
+      last = 'pg_is_in_recovery() still true';
+    } catch (err) {
+      last = err instanceof Error ? err.message : String(err);
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `the restored database did not promote within ${Math.round(timeoutMs / 1000)}s (${last}). ` +
+          `The restore marker stays set and the database from before the restore is kept in ${PREVIOUS_PGDATA_PATH}.`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
 
 export async function runK8sRestore({
   s,
   chosenSource,
+  base,
   envName,
   serverIp,
   sshKeyPath,
@@ -732,10 +848,12 @@ export async function runK8sRestore({
       envConfig,
       exec: k8sPsqlRunner(serverIp, sshKeyPath),
     }),
+  readFreeBytes = () => k8sPgdataFreeBytes(serverIp, sshKeyPath),
   // Pacing for the post-reseed streaming verify — injectable so tests don't wait
   // on real timers. Production uses the default setTimeout-backed sleep.
   verifySleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 }) {
+  assertResolvedBase(base);
   // Also here, for every caller: see run().
   assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
   if (chosenSource.kind === 'local') {
@@ -743,20 +861,29 @@ export async function runK8sRestore({
       'k8s restore is wal-g-based and pulls from S3 — local backup files are not supported. Use `-source latest` (or a timestamp for PITR).',
     );
   }
-  // wal-g target: 'latest' → LATEST base backup; otherwise treat the source
-  // name as an ISO-8601 timestamp for point-in-time recovery.
-  const target =
-    chosenSource.name === 'latest' || !chosenSource.name ? 'latest' : chosenSource.name;
+  const { target, recoveryConf } = restorePointOf(chosenSource);
 
-  s.start('Restoring database via wal-g (app will be temporarily unavailable)');
-  // 1. Mark the restore so the db pod's init container fetches on next boot.
-  await setRestoreMarker(serverIp, sshKeyPath, target);
+  // 0. The staged fetch needs the backup's size free next to the live cluster.
+  //    Refuse before anything stops.
+  assertRestoreFits({
+    requiredBytes: base.uncompressedBytes ?? base.sizeBytes ?? 0,
+    freeBytes: await readFreeBytes(),
+    where: `${DB_POD}'s data volume`,
+    warn: (msg) => p.log.warn(msg),
+  });
+
+  const rolloutTimeoutS = restoreRolloutTimeoutS(base.sizeBytes);
+  s.start(`Restoring ${base.name} via wal-g (app will be temporarily unavailable)`);
+  // 1. Mark the restore so the db pod's init container fetches this backup on
+  //    its next boot.
+  await setRestoreMarker({ ip: serverIp, sshKeyPath, backup: base.name, target, recoveryConf });
   // 2. Quiesce the app so it isn't querying mid-swap.
   await perfAsync('restore.scaleDownApp', async () => scaleDownApp(serverIp, sshKeyPath));
+  // 3. Bounce the db StatefulSet → walg-restore stages the fetch and swaps it
+  //    in before postgres starts. The wait scales with the backup (M1): a
+  //    fixed boot timeout cut large fetches short.
+  s.message(`Fetching ${base.name} from S3 + recovering (wal-g)`);
   try {
-    // 3. Bounce the db StatefulSet → walg-restore init container clears PGDATA
-    //    and runs `wal-g backup-fetch` before postgres starts.
-    s.message('Fetching from S3 + recovering (wal-g)');
     await perfAsync('restore.walgFetch', async () => {
       await sshKubectl(serverIp, sshKeyPath, [
         'rollout',
@@ -765,9 +892,6 @@ export async function runK8sRestore({
         '-n',
         'vibecarbon',
       ]);
-      // 120s server-side inside a 130s client cap: the declared 600s never
-      // functioned — sshRun's 120s client default cut this wait to 2 minutes
-      // on every run (all green matrix restores completed within it).
       await sshKubectl(
         serverIp,
         sshKeyPath,
@@ -777,43 +901,71 @@ export async function runK8sRestore({
           `statefulset/${DB_STATEFULSET}`,
           '-n',
           'vibecarbon',
-          `--timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
+          `--timeout=${rolloutTimeoutS}s`,
         ],
-        { timeout: (DB_STS_BOOT_TIMEOUT_S + 30) * 1000 },
+        { timeout: (rolloutTimeoutS + 30) * 1000 },
       );
     });
-    // 4. Confirm postgres accepts connections post-recovery.
-    await perfAsync('restore.verifyPostgres', async () => verifyPostgres(serverIp, sshKeyPath));
-    // 4b. Rebuild planner statistics before the app comes back. A base backup
-    //     carries none: until autovacuum runs, n_live_tup reads 0 for every
-    //     table and the first queries plan blind — which looks exactly like
-    //     data loss to whoever verifies the restore (vibecarbon-web
-    //     2026-09-15; same step in restoreCompose). Best-effort: the restore
-    //     itself has already succeeded.
-    await perfAsync('restore.analyze', async () => {
-      try {
-        const pod = await getPostgresPod(serverIp, sshKeyPath);
-        await sshKubectl(
-          serverIp,
-          sshKeyPath,
-          ['exec', '-n', 'vibecarbon', pod, '--', 'psql', '-U', 'postgres', '-q', '-c', 'ANALYZE'],
-          { timeout: 300_000 },
-        );
-      } catch (err) {
-        p.log.warn(
-          `ANALYZE after restore failed (${err instanceof Error ? err.message : String(err)}); ` +
-            'planner statistics will rebuild on the next autovacuum.',
-        );
-      }
-    });
-  } finally {
-    // 5. Always clear the marker so an unrelated future pod restart does NOT
-    //    re-fetch and wipe live data. Runs even if the restore failed.
-    await setRestoreMarker(serverIp, sshKeyPath, '');
+  } catch (err) {
+    // The marker stays set: clearing it here made the next pod start boot
+    // whatever a failed fetch left (the old `finally`). The init keeps the
+    // live cluster until a fetch completes, so a retry is safe.
+    throw new Error(
+      `the db pod did not come back from the restore of ${base.name} within ${rolloutTimeoutS}s: ` +
+        `${err instanceof Error ? err.message : String(err)}. The restore marker stays set, so the pod ` +
+        `retries the restore on its next start. See why with: kubectl logs ${DB_POD} -c walg-restore -n vibecarbon, ` +
+        'then rerun vibecarbon restore.',
+    );
   }
-  // 5b. Before the app comes back: the restored database must take writes.
+  // 4. Confirm postgres accepts connections and has left recovery.
+  await perfAsync('restore.verifyPostgres', async () => verifyPostgres(serverIp, sshKeyPath));
+  await perfAsync('restore.waitPromoted', async () => waitForK8sPromotion(serverIp, sshKeyPath));
+  // 4b. Rebuild planner statistics before the app comes back. A base backup
+  //     carries none: until autovacuum runs, n_live_tup reads 0 for every
+  //     table and the first queries plan blind — which looks exactly like
+  //     data loss to whoever verifies the restore (vibecarbon-web
+  //     2026-09-15; same step in restoreCompose). Best-effort: the restore
+  //     itself has already succeeded.
+  await perfAsync('restore.analyze', async () => {
+    try {
+      const pod = await getPostgresPod(serverIp, sshKeyPath);
+      await sshKubectl(
+        serverIp,
+        sshKeyPath,
+        ['exec', '-n', 'vibecarbon', pod, '--', 'psql', '-U', 'postgres', '-q', '-c', 'ANALYZE'],
+        { timeout: 300_000 },
+      );
+    } catch (err) {
+      p.log.warn(
+        `ANALYZE after restore failed (${err instanceof Error ? err.message : String(err)}); ` +
+          'planner statistics will rebuild on the next autovacuum.',
+      );
+    }
+  });
+  // 5. Before the marker goes and the app comes back: the restored database
+  //    must take writes.
   await assertWritable();
-  // 6. Bring the app back.
+  // 6. Proven: clear the marker (a later pod restart boots normally), then
+  //    drop the database from before the restore.
+  await clearRestoreMarker({ ip: serverIp, sshKeyPath });
+  await sshKubectl(
+    serverIp,
+    sshKeyPath,
+    [
+      'exec',
+      '-n',
+      'vibecarbon',
+      DB_POD,
+      '-c',
+      DB_CONTAINER,
+      '--',
+      'rm',
+      '-rf',
+      PREVIOUS_PGDATA_PATH,
+    ],
+    { timeout: 300_000 },
+  );
+  // 7. Bring the app back.
   await perfAsync('restore.scaleUpApp', async () => scaleUpApp(serverIp, sshKeyPath));
   s.stop('Database restored');
 

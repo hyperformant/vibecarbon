@@ -20,6 +20,29 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // providers' waitForServer only resolves once the server is active AND has
 // a public IP), not from createServer's immediate return.
 
+// scale resolves the restore's base backup from the backup bucket's stop
+// sentinels; here, a bucket holding one base backup.
+vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
+  const actual = await orig<typeof import('../../../src/lib/walg/restore-base.js')>();
+  return {
+    ...actual,
+    readEnvBaseBackups: async () => ({
+      s3Config: { bucket: 'myapp-backups' },
+      location: 's3://myapp-backups/backups/myapp/prod/walg',
+      backups: [
+        {
+          name: 'base_000000010000000000000002',
+          timeline: 1,
+          startLsn: '0/2000028',
+          finishTime: new Date('2026-10-20T01:00:00Z'),
+          sizeBytes: 1024,
+          uncompressedBytes: 4096,
+        },
+      ],
+    }),
+  };
+});
+
 vi.mock('@clack/prompts', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {

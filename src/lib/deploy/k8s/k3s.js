@@ -62,6 +62,7 @@ import {
 } from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
+import { restoreMarkerStringData } from '../../walg/restore-layout.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
@@ -1885,13 +1886,17 @@ export function buildAppSecretData({ envLocal, s3Config }) {
  * Deployment's required secretKeyRef), WAL-G's credentials file and the
  * backup bucket name. Every consumer reads it by key, never whole, and the
  * app container reads none of it (only the migrate init container reads
- * DB_PASSWORD, to run the migrations as the owner). Also the Secret
- * `vibecarbon restore` sets RESTORE_TARGET on. Pure.
+ * DB_PASSWORD, to run the migrations as the owner). Also the Secret that
+ * carries the restore marker (RESTORE_MARKER_KEYS, src/lib/walg/restore-marker.js):
+ * `vibecarbon restore` patches it in, and a caller that passes `restoreMarker`
+ * writes it with the rest (a complete set, or all empty for null). Without
+ * `restoreMarker` no marker key is written, so an apply leaves a restore's
+ * patched keys alone. Pure.
  *
- * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null}} args
+ * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restoreMarker?: {backup: string, target: string, recoveryConf: string}|null}} args
  * @returns {Record<string,string>}
  */
-export function buildInfraSecretData({ envLocal, s3Config, backupBucketName }) {
+export function buildInfraSecretData({ envLocal, s3Config, backupBucketName, restoreMarker }) {
   /** @type {Record<string,string>} */
   const stringData = {};
   for (const key of INFRA_SECRET_KEYS) {
@@ -1908,6 +1913,9 @@ export function buildInfraSecretData({ envLocal, s3Config, backupBucketName }) {
   }
   if (backupBucketName) {
     stringData.S3_BACKUP_BUCKET = backupBucketName;
+  }
+  if (restoreMarker !== undefined) {
+    Object.assign(stringData, restoreMarkerStringData(restoreMarker));
   }
   return stringData;
 }
@@ -2678,7 +2686,7 @@ export async function auditRls({ kubeconfig }) {
  * Ground-truth BACKUP audit for the k8s path — the kubectl-exec twin of the
  * `docker compose exec` probe compose/index.js runs inside runDatabaseAudits.
  * Same probe string, same pure evaluator, same failure message; only the exec
- * seam differs. See src/lib/deploy/walg-audit.js for why `wal-g backup-list`
+ * seam differs. See src/lib/deploy/walg-audit.js for why its in-container listing
  * is the load-bearing signal and why a standby / unconfigured node skips.
  *
  * THROWS (failing the deploy) when wal-g cannot reach the configured storage.

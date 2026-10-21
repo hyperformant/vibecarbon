@@ -19,6 +19,14 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
 import { runCommandAsync } from '../../../src/lib/command.js';
 import { restoreCompose } from '../../../src/lib/deploy/compose/index.js';
 
+/** A resolved restore point, as restore.js hands it to restoreCompose. */
+const RESTORE = {
+  backup: 'base_000000010000000000000002',
+  target: 'latest',
+  recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
+  assertWritable: async () => {},
+};
+
 /** The remote shell each sshRunAsync call carries — the last argv element. */
 function remoteCommands(): string[] {
   return vi
@@ -39,7 +47,7 @@ describe('restoreCompose runs ANALYZE after the restored cluster promotes', () =
   });
 
   it('issues ANALYZE between promotion and `compose start app`', async () => {
-    await restoreCompose('1.2.3.4', '/tmp/key', 'proj', 'latest', { staleRetryDelaysMs: [] });
+    await restoreCompose('1.2.3.4', '/tmp/key', 'proj', RESTORE, { staleRetryDelaysMs: [] });
     const cmds = remoteCommands();
     const analyzeIdx = cmds.findIndex((c) => /psql\b.*\bANALYZE\b/.test(c));
     const promotedIdx = cmds.findIndex((c) => c.includes('pg_is_in_recovery'));

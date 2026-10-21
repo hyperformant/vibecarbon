@@ -19,9 +19,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The db pod name (DB_POD in src/lib/deploy/db-workload.js), spelled out:
 // vi.mock factories are hoisted above every import.
+// The promotion poll reads pg_is_in_recovery(): report promoted.
+const promotedKubectl = async (_ip: string, _key: string, argv: string[]) =>
+  argv.join(' ').includes('pg_is_in_recovery') ? 'f' : '';
 vi.mock('../../../src/lib/ssh.js', () => ({
   getPostgresPod: vi.fn().mockResolvedValue('db-0'),
-  sshKubectl: vi.fn().mockResolvedValue(''),
+  sshKubectl: vi.fn(promotedKubectl),
   sshRun: vi.fn().mockResolvedValue(''),
   getSSHKeyPath: vi.fn(),
 }));
@@ -56,6 +59,15 @@ const haEnvConfig = {
 
 const baseArgs = {
   chosenSource: { kind: 's3' as const, name: 'latest' },
+  // The base run() resolved from the bucket's stop sentinels.
+  base: {
+    name: 'base_000000010000000000000002',
+    timeline: 1,
+    finishTime: new Date('2026-10-20T01:00:00Z'),
+    sizeBytes: 4_290_228,
+    uncompressedBytes: 23_439_374,
+  },
+  readFreeBytes: async () => 100 * 1024 ** 3,
   envName: 'prod',
   serverIp: '10.0.1.1', // restored primary master
   sshKeyPath: '/tmp/key',
@@ -380,7 +392,7 @@ describe('runK8sRestore: the restored primary is proven writable before the app 
         ) {
           order.push('scaleUp');
         }
-        return '';
+        return promotedKubectl(_ip, _k, argv);
       },
     );
     await runK8sRestore({

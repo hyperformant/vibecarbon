@@ -864,6 +864,10 @@ async function bootstrap(cliArgs) {
     join(projectDir, 'volumes/db/wal-archive.sh'),
     variables,
   );
+  // db-guard.sh is the db container's entrypoint (it refuses to boot over an
+  // interrupted restore, then execs the image's db-entrypoint.sh). Compose
+  // runs it through `sh`, so the mode copyFileSync leaves does not matter.
+  copyTemplate('volumes/db/db-guard.sh', join(projectDir, 'volumes/db/db-guard.sh'), variables);
   copyTemplate('volumes/s3/garage.toml', join(projectDir, 'volumes/s3/garage.toml'), variables);
   copyTemplate(
     'volumes/traefik/middlewares.yml',

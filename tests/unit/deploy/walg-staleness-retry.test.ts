@@ -41,6 +41,14 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+/** A resolved restore point, as restore.js hands it to restoreCompose. */
+const RESTORE = {
+  backup: 'base_000000010000000000000002',
+  target: 'latest',
+  recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
+  assertWritable: async () => {},
+};
+
 const runCommandAsync = vi.fn();
 vi.mock('../../../src/lib/command.js', async () => {
   const actual = await vi.importActual<typeof import('../../../src/lib/command.js')>(
@@ -258,7 +266,7 @@ describe('restoreCompose — wal-g backup-fetch staleness retry (the incident se
       }
     });
 
-    await restoreCompose('10.0.0.1', '/tmp/key', 'testapp', 'latest', {
+    await restoreCompose('10.0.0.1', '/tmp/key', 'testapp', RESTORE, {
       staleRetryDelaysMs: NO_DELAYS,
     });
 
@@ -278,7 +286,7 @@ describe('restoreCompose — wal-g backup-fetch staleness retry (the incident se
       }
     });
 
-    await restoreCompose('10.0.0.1', '/tmp/key', 'testapp', 'latest', {
+    await restoreCompose('10.0.0.1', '/tmp/key', 'testapp', RESTORE, {
       staleRetryDelaysMs: NO_DELAYS,
     });
 
@@ -294,7 +302,7 @@ describe('restoreCompose — wal-g backup-fetch staleness retry (the incident se
     });
 
     await expect(
-      restoreCompose('10.0.0.1', '/tmp/key', 'testapp', 'latest', {
+      restoreCompose('10.0.0.1', '/tmp/key', 'testapp', RESTORE, {
         staleRetryDelaysMs: NO_DELAYS,
       }),
     ).rejects.toThrow(/could not locate required checkpoint record/);
@@ -309,7 +317,7 @@ describe('restoreCompose — wal-g backup-fetch staleness retry (the incident se
     });
 
     await expect(
-      restoreCompose('10.0.0.1', '/tmp/key', 'testapp', 'latest', {
+      restoreCompose('10.0.0.1', '/tmp/key', 'testapp', RESTORE, {
         staleRetryDelaysMs: NO_DELAYS,
       }),
     ).rejects.toThrow(/NoSuchBucket/);

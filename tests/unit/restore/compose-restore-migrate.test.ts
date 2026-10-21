@@ -18,6 +18,14 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
 import { runCommandAsync } from '../../../src/lib/command.js';
 import { restoreCompose } from '../../../src/lib/deploy/compose/index.js';
 
+/** A resolved restore point, as restore.js hands it to restoreCompose. */
+const RESTORE = {
+  backup: 'base_000000010000000000000002',
+  target: 'latest',
+  recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
+  assertWritable: async () => {},
+};
+
 function remoteCommands(): string[] {
   return vi
     .mocked(runCommandAsync)
@@ -40,7 +48,7 @@ describe('restoreCompose reruns app-migrate before the app comes back', () => {
   });
 
   it('runs app-migrate to completion after ANALYZE and before `compose start app`', async () => {
-    await restoreCompose('1.2.3.4', '/tmp/key', 'proj', 'latest', { staleRetryDelaysMs: [] });
+    await restoreCompose('1.2.3.4', '/tmp/key', 'proj', RESTORE, { staleRetryDelaysMs: [] });
     const cmds = remoteCommands();
     const analyzeIdx = cmds.findIndex((c) => /psql\b.*\bANALYZE\b/.test(c));
     const migrateIdx = cmds.findIndex((c) =>
@@ -55,7 +63,7 @@ describe('restoreCompose reruns app-migrate before the app comes back', () => {
   it('a failed migration fails the restore loudly and leaves the app stopped', async () => {
     migrateFails = true;
     await expect(
-      restoreCompose('1.2.3.4', '/tmp/key', 'proj', 'latest', { staleRetryDelaysMs: [] }),
+      restoreCompose('1.2.3.4', '/tmp/key', 'proj', RESTORE, { staleRetryDelaysMs: [] }),
     ).rejects.toThrow(/app-migrate failed after the restore/);
     expect(remoteCommands().some((c) => c.includes('docker compose start app'))).toBe(false);
   });

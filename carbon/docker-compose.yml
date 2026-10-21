@@ -175,6 +175,11 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # db-guard.sh refuses to boot over an interrupted `vibecarbon restore`
+    # (its in-progress marker in PGDATA), then execs the image's own
+    # db-entrypoint.sh with the same arguments. Run through sh so the scaffold
+    # copy's file mode does not matter.
+    entrypoint: ["sh", "/usr/local/bin/db-guard.sh"]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
       interval: 5s
@@ -305,6 +310,7 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./volumes/db/wal-archive.sh:/etc/postgresql/wal-archive.sh:ro,Z
+      - ./volumes/db/db-guard.sh:/usr/local/bin/db-guard.sh:ro,Z
     networks:
       - vibecarbon-network
 

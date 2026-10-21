@@ -24,6 +24,13 @@ import {
   sshRunScript,
 } from '../../ssh.js';
 import {
+  assertRestoreFits,
+  BACKUP_NAME_RE,
+  PGDATA_PATH,
+  PREVIOUS_PGDATA_PATH,
+  RESTORE_LAYOUT,
+} from '../../walg/restore-layout.js';
+import {
   ADMIN_PROBE_EXIT,
   adminNotReadyHint,
   adminReadyProbeScript,
@@ -1293,84 +1300,147 @@ export async function setupComposeBackupCron(ip, sshKeyPath, projectName, backup
   await runScript(ip, sshKeyPath, installScript, { timeout: 60_000 });
 }
 
-// ISO-8601 datetime: YYYY-MM-DDTHH:MM:SS followed by Z or ±HH:MM
-const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$/;
-
 /**
- * Build the shell script that fetches a wal-g base backup and writes the
- * archive-recovery configuration so postgres replays WAL from S3 and
- * promotes to read-write on completion (or at a PITR target).
+ * Build the script that restores one NAMED wal-g base backup into a compose
+ * db volume without destroying the live cluster before the backup is proven
+ * (H2a). It runs inside a throwaway db container (`docker compose run --rm
+ * ... db bash /restore.sh`), which mounts the real <project>_db_data volume
+ * at $PGDATA.
  *
- * This is a pure function (no I/O) so it can be unit-tested without SSH.
- * The script is SCP'd to the server and bind-mounted into the db container
- * via `docker compose run --rm -v …:/restore.sh:ro db bash /restore.sh`,
- * which avoids the quoting collision that would arise from embedding
- * single-quoted postgres config values in a deeply-nested ssh command.
+ *   1. Settle what an earlier unproven restore left: a `.vc-prev` that the CLI
+ *      never removed (or a marker saying the staged copy was half moved in)
+ *      means PGDATA holds that restore's copy and `.vc-prev` the database from
+ *      before it. The copy goes to staging, which step 2 replaces; `.vc-prev`
+ *      is kept.
+ *   2. `wal-g backup-fetch` the named backup into `$PGDATA/.vc-restore`. A
+ *      failed fetch clears staging and exits non-zero, the live cluster
+ *      untouched.
+ *   3. Write the recovery config and recovery.signal into staging.
+ *   4. Swap under `.vc-restore-in-progress`: the live cluster's entries move
+ *      into `$PGDATA/.vc-prev`, the staged ones into PGDATA, then the marker
+ *      goes. A boot that finds the marker with no restore running refuses
+ *      (carbon/volumes/db/db-guard.sh).
  *
- * Mirrors the k8s walg-restore init container in carbon/k8s/base/db/statefulset.yaml.
+ * PGDATA is the volume's mount point, so it cannot be renamed: staging and the
+ * previous cluster live inside it, and the swap moves entries. Nothing here
+ * removes `.vc-prev`; the CLI does, once the restored database promoted and
+ * proved writable. The k8s walg-restore init container in
+ * carbon/k8s/base/db/statefulset.yaml runs the same steps
+ * (tests/unit/deploy/restore-destroy-before-verify-census.test.ts).
  *
- * @param {'latest' | string} target  'latest' for the most-recent base backup,
- *   or an ISO-8601 datetime string for point-in-time recovery.
+ * Pure (no I/O) so it can be tested without SSH.
+ *
+ * @param {{ backup: string, recoveryConf: string }} args  `backup` is a wal-g
+ *   backup name resolved by the CLI (never LATEST), `recoveryConf` the text
+ *   from renderRecoveryConf (src/lib/walg/recovery-config.js).
  * @returns {string} The bash script body.
  */
-export function composeRestoreScript(target) {
-  if (target !== 'latest' && !ISO_DATETIME_RE.test(target)) {
+export function composeRestoreScript({ backup, recoveryConf } = /** @type {any} */ ({})) {
+  if (!BACKUP_NAME_RE.test(String(backup))) {
     throw new Error(
-      `Invalid target ${JSON.stringify(target)}: must be "latest" or an ISO-8601 datetime (e.g. 2026-05-31T12:00:00Z)`,
+      `composeRestoreScript: ${JSON.stringify(backup)} is not a wal-g backup name; the CLI resolves one before any restore`,
     );
   }
-
-  // pitrLine goes inside the { ... } block — no separate redirect needed
-  const pitrLine = target !== 'latest' ? `  echo "recovery_target_time = '${target}'"` : null;
-
+  if (!recoveryConf || /^VC_RECOVERY_CONF_EOF$/m.test(recoveryConf)) {
+    throw new Error('composeRestoreScript: recoveryConf (renderRecoveryConf) is required');
+  }
+  const { staging, previous, inProgress } = RESTORE_LAYOUT;
   return [
     '#!/bin/bash',
     'set -euo pipefail',
-    'PGDATA=/var/lib/postgresql/data',
+    `PGDATA=${PGDATA_PATH}`,
+    `RESTORE_BACKUP='${backup}'`,
+    `VC_MARKER="$PGDATA/${inProgress}"`,
+    'VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf',
+    'cat > "$VC_RECOVERY_CONF_FILE" <<\'VC_RECOVERY_CONF_EOF\'',
+    recoveryConf,
+    'VC_RECOVERY_CONF_EOF',
     '',
-    '# Empty PGDATA, wal-g backup-fetch requires an empty target dir. We are',
-    '# inside the db container, which mounts the real <project>_db_data volume',
-    '# at $PGDATA, so this clears the correct data (unlike a `docker compose run',
-    "# -v db_data:/data` flag, which bypasses Compose's project-volume naming).",
-    'if [ -f "$PGDATA/PG_VERSION" ]; then',
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: ${PGDATA:?} is a deliberate bash "fail if unset" guard, not a JS template placeholder
-    '  rm -rf "${PGDATA:?}/"* "${PGDATA:?}/".* 2>/dev/null || true',
+    "# The cluster's own entries in PGDATA: everything but the restore's.",
+    'vc_cluster_entries() {',
+    `  find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name ${staging} ! -name ${previous} ! -name ${inProgress}`,
+    '}',
+    '',
+    ...restoreSettleLines(),
+    '',
+    '# 2. Fetch the named base backup into staging. The live cluster is untouched.',
+    `rm -rf "$PGDATA/${staging}"`,
+    `mkdir -p "$PGDATA/${staging}"`,
+    `if ! wal-g backup-fetch "$PGDATA/${staging}" "$RESTORE_BACKUP"; then`,
+    `  rm -rf "$PGDATA/${staging}"`,
+    '  echo "restore: wal-g backup-fetch $RESTORE_BACKUP failed; nothing was moved" >&2',
+    '  exit 1',
+    'fi',
+    ...restoreConfigureAndSwapLines(),
+  ].join('\n');
+}
+
+/**
+ * Step 1 of both restore scripts, shared text (the k8s init carries the same
+ * lines; the census compares them).
+ */
+function restoreSettleLines() {
+  const { staging, previous } = RESTORE_LAYOUT;
+  return [
+    '# --- settle ---',
+    '# 1. A .vc-prev the CLI never removed means the restore that made it never',
+    '#    proved itself: .vc-prev still holds the database from before it, and',
+    '#    PGDATA holds that restore\'s copy. So does a marker reading "in" (the',
+    '#    staged copy was half moved in). Hand the copy to staging, which the',
+    '#    fetch replaces. A marker reading anything else means the live cluster',
+    '#    was half moved into .vc-prev: the swap below finishes that move.',
+    'if { [ -f "$VC_MARKER" ] && [ "$(cat "$VC_MARKER")" = in ]; } || \\',
+    `   { [ ! -f "$VC_MARKER" ] && [ -d "$PGDATA/${previous}" ]; }; then`,
+    '  echo in > "$VC_MARKER"',
+    `  mkdir -p "$PGDATA/${staging}"`,
+    `  vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${staging}/"; done`,
+    'fi',
+    '# --- end settle ---',
+  ];
+}
+
+/** Steps 3 and 4 of both restore scripts, shared text. */
+function restoreConfigureAndSwapLines() {
+  const { staging, previous } = RESTORE_LAYOUT;
+  return [
+    `if [ ! -f "$PGDATA/${staging}/PG_VERSION" ]; then`,
+    `  rm -rf "$PGDATA/${staging}"`,
+    '  echo "restore: $RESTORE_BACKUP fetched no PG_VERSION; nothing was moved" >&2',
+    '  exit 1',
     'fi',
     '',
-    '# Fetch the base backup from S3 (wal-g reads S3 credentials from container env)',
-    `wal-g backup-fetch "$PGDATA" LATEST`,
+    '# 3. Recovery config into staging: strip the settings it rewrites, append the',
+    '#    new ones (rendered by the CLI, the same text on both tiers).',
+    `VC_AUTO_CONF="$PGDATA/${staging}/postgresql.auto.conf"`,
+    'touch "$VC_AUTO_CONF"',
+    'while IFS= read -r vc_line; do',
+    '  case "$vc_line" in',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: ${vc_line#-} is bash prefix removal, not a JS placeholder
+    '    -*) sed -i "/^[[:space:]]*${vc_line#-}[[:space:]]*=/d" "$VC_AUTO_CONF" ;;',
+    '    ?*) printf \'%s\\n\' "$vc_line" >> "$VC_AUTO_CONF" ;;',
+    '  esac',
+    'done < "$VC_RECOVERY_CONF_FILE"',
+    `touch "$PGDATA/${staging}/recovery.signal"`,
+    `chown -R postgres:postgres "$PGDATA/${staging}"`,
     '',
-    '# Remove any recovery settings left in postgresql.auto.conf by a previous',
-    "# restore so they don't accumulate across cycles (postgres takes the last",
-    '# value, but stale duplicates are confusing).',
-    'if [ -f "$PGDATA/postgresql.auto.conf" ]; then',
-    '  sed -i "/^restore_command =/d; /^recovery_target_action =/d; /^recovery_target_time =/d; /^recovery_target_timeline =/d" "$PGDATA/postgresql.auto.conf"',
+    '# --- swap ---',
+    '# 4. Swap under the in-progress marker: the live cluster into .vc-prev, the',
+    '#    staged one into PGDATA. .vc-prev stays until the CLI has proven the',
+    '#    restored database.',
+    'if [ ! -f "$VC_MARKER" ]; then',
+    '  : > "$VC_MARKER"',
     'fi',
-    '',
-    '# Write archive-recovery config so postgres replays WAL segments from S3',
-    '# and promotes to read-write on end-of-WAL (or at the PITR target).',
-    '# Uses >> so any existing postgresql.auto.conf settings are preserved.',
-    '{',
-    `  echo "restore_command = 'wal-g wal-fetch \\"%f\\" \\"%p\\"'"`,
-    `  echo "recovery_target_action = 'promote'"`,
-    // Pin recovery to the FETCHED base backup's own timeline. Default is
-    // 'latest', which makes postgres chase the newest timeline it can find a
-    // .history file for. In HA, repeated restore→promote cycles accumulate
-    // DIVERGENT timelines in the shared wal-g S3 prefix, and 'latest' picks one
-    // that forked off BEFORE this base backup's checkpoint — postgres then
-    // crash-loops "requested timeline N is not a child of this server's history"
-    // / wal-g "Archive '0000000N.history' does not exist". 'current' recovers
-    // along the base backup's timeline to end-of-WAL, then promotes fresh.
-    // (RCA 2026-06-01: compose-ha kept-rig restore.)
-    `  echo "recovery_target_timeline = 'current'"`,
-    pitrLine,
-    '} >> "$PGDATA/postgresql.auto.conf"',
-    '',
-    '# Signal file that tells postgres to enter archive recovery mode (PG 12+)',
-    'touch "$PGDATA/recovery.signal"',
-  ]
-    .filter((line) => line !== null)
-    .join('\n');
+    'if [ "$(cat "$VC_MARKER")" != in ]; then',
+    `  mkdir -p "$PGDATA/${previous}"`,
+    `  vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${previous}/"; done`,
+    '  echo in > "$VC_MARKER"',
+    'fi',
+    `find "$PGDATA/${staging}" -mindepth 1 -maxdepth 1 | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/"; done`,
+    `rmdir "$PGDATA/${staging}"`,
+    'rm -f "$VC_MARKER"',
+    'echo "restore: $RESTORE_BACKUP staged and swapped in"',
+    '# --- end swap ---',
+  ];
 }
 
 /**
@@ -1382,28 +1452,70 @@ export function composeRestoreScript(target) {
 export const RESTORE_PROMOTE_POLL_MS = 2000;
 
 /**
- * Restore from a wal-g base backup via Docker Compose with full archive
- * recovery. Postgres replays WAL segments from S3 via restore_command and
- * promotes to read-write on reaching end-of-WAL or the PITR target.
+ * Free bytes on the filesystem holding the compose db volume, or null when
+ * unreadable. Read on the host (the db may be the thing being restored, so it
+ * need not be running).
+ */
+async function composeVolumeFreeBytes(ip, sshKeyPath) {
+  try {
+    const out = await sshRunAsync(
+      ip,
+      sshKeyPath,
+      `df -Pk "$(docker info -f '{{.DockerRootDir}}')" | awk 'NR==2 {print $4}'`,
+      { timeout: 30_000 },
+    );
+    const kb = Number.parseInt(String(out ?? '').trim(), 10);
+    return Number.isFinite(kb) ? kb * 1024 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Restore one named wal-g base backup via Docker Compose, with full archive
+ * recovery. Postgres replays WAL from S3 via restore_command and promotes to
+ * read-write at the end of WAL or the PITR target.
+ *
+ * Order: free-space check (when the size is known), stop app + db, staged
+ * fetch and swap (composeRestoreScript), start db, wait for promotion, prove
+ * it writable (`assertWritable`), remove the previous cluster, ANALYZE, rerun
+ * app-migrate, start the app. A fetch that fails leaves the live cluster in
+ * place, and the db and app are started again before the error propagates.
  *
  * S3 credentials are read from the db container's environment (sourced from
- * the project .env file) — DO NOT pass them as -e overrides; the container
- * already has WALG_S3_PREFIX + AWS_* set by carbon/docker-compose.yml.
+ * the project .env file); the container already has WALG_S3_PREFIX + AWS_*.
  *
  * @param {string} ip
  * @param {string} sshKeyPath
  * @param {string} projectName
- * @param {'latest' | string} [target='latest']  'latest' or ISO-8601 PITR timestamp.
+ * @param {{ backup: string, target: 'latest' | string, recoveryConf: string, requiredBytes?: number, assertWritable: () => Promise<void> }} restore
+ *   `backup`: the resolved base backup name. `target`: 'latest' or the
+ *   ISO-8601 PITR instant, for messages. `recoveryConf`: renderRecoveryConf's
+ *   text. `requiredBytes`: the backup's uncompressed size, for the free-space
+ *   check. `assertWritable`: the proof that runs before `.vc-prev` goes.
  * @param {object} [options]
  * @param {number[]} [options.staleRetryDelaysMs]  Test seam for the
  *   object-storage staleness retry ladder; production callers omit it.
  */
-export async function restoreCompose(ip, sshKeyPath, projectName, target = 'latest', options = {}) {
+export async function restoreCompose(ip, sshKeyPath, projectName, restore, options = {}) {
   const remoteDir = `/opt/${projectName}`;
+  const { backup, recoveryConf, requiredBytes, assertWritable } = restore ?? {};
+  if (typeof assertWritable !== 'function') {
+    throw new Error('restoreCompose: assertWritable is required (the proof before .vc-prev goes)');
+  }
 
-  // Build and validate the restore script early — fail before touching the
-  // running server if the target is malformed.
-  const scriptBody = composeRestoreScript(target);
+  // Build and validate the restore script early: fail before touching the
+  // running server if the backup name or the config is malformed.
+  const scriptBody = composeRestoreScript({ backup, recoveryConf });
+
+  if (requiredBytes) {
+    assertRestoreFits({
+      requiredBytes,
+      freeBytes: await composeVolumeFreeBytes(ip, sshKeyPath),
+      where: `${ip}'s docker volume filesystem`,
+      warn: (msg) => console.warn(`[restore] ${msg}`),
+    });
+  }
 
   // 1. Stop app to prevent connections during restore
   await sshRunAsync(
@@ -1412,18 +1524,16 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
     `cd ${remoteDir} && docker compose stop app 2>/dev/null || true`,
   );
 
-  // 2. Stop the DB. The restore container (step 4) clears PGDATA *itself*
-  //    from inside the db container — where the real ${project}_db_data volume
-  //    is mounted at $PGDATA — so there is no separate volume-clearing step.
-  //    (A `docker compose run --rm -v db_data:/data alpine` would clear a
-  //    literal `db_data` volume, NOT the project-prefixed one Compose uses.)
+  // 2. Stop the DB. The restore container (step 3) stages and swaps PGDATA
+  //    from inside a db container, where the real ${project}_db_data volume is
+  //    mounted at $PGDATA. (A `docker compose run --rm -v db_data:/data alpine`
+  //    would mount a literal `db_data` volume, NOT the project-prefixed one.)
   await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose stop db`);
 
-  // 3. Write the restore script to the server (heredoc — no quoting risk) and
+  // 3. Write the restore script to the server (heredoc, no quoting risk) and
   //    bind-mount it into the db container. The script body contains single
   //    quotes (restore_command = 'wal-g wal-fetch ...') so it MUST go via a
-  //    file rather than a nested bash -c '...' invocation. The script clears
-  //    PGDATA, runs wal-g backup-fetch, and writes the archive-recovery config.
+  //    file rather than a nested bash -c '...' invocation.
   await sshRunScript(
     ip,
     sshKeyPath,
@@ -1437,32 +1547,42 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
     { timeout: 30_000 },
   );
 
-  // THE wal-g FETCH. Wrapped in the object-storage staleness retry: this exec
-  // is where a compose scale died on 2026-07-31 — the old server's base-backup
-  // push had succeeded seconds earlier, and the new server's first read of the
-  // same prefix hit a Hetzner frontend that had not caught up and answered
-  // `NoSuchBucket: status code: 404`. Re-running the WHOLE script is the right
-  // unit of retry: it is self-contained and, for this failure, idempotent — the
-  // staleness lands on the initial S3 LIST ("Selecting the latest backup"),
-  // before a single byte is fetched, so attempt 2 re-clears a $PGDATA that is
-  // already empty and fetches from scratch against a stopped db. (A 404 landing
-  // MID-fetch instead would leave partial files behind, and composeRestoreScript
-  // only re-clears when a complete cluster is present — that retry then fails on
-  // wal-g's own non-empty-target error, i.e. no worse than today's single-shot
-  // failure, with a message that names the real state.) Non-staleness failures
-  // fail on attempt 1 unchanged, and a bucket that really is missing still fails
-  // once the budget is spent. See src/lib/deploy/walg-staleness.js.
-  await withWalgStaleStorageRetry(
-    () =>
-      sshRunAsync(
-        ip,
-        sshKeyPath,
-        `cd ${remoteDir} && docker compose run --rm -v ${remoteDir}/restore-walg.sh:/restore.sh:ro db bash /restore.sh`,
-        { timeout: 900_000 },
-      ),
-    'backup-fetch (restore)',
-    { delaysMs: options.staleRetryDelaysMs },
-  );
+  // THE wal-g FETCH. Wrapped in the object-storage staleness retry (quarantined
+  // in docs/mitigations.yml): this exec is where a compose scale died on
+  // 2026-07-31 — a Hetzner frontend that had not caught up with a push seconds
+  // earlier answered `NoSuchBucket: status code: 404`. Re-running the whole
+  // script is the unit of retry: each run clears staging before it fetches and
+  // never touches the live cluster until a fetch completed. RESTORE_BACKUP in
+  // the container env lets the run past db-guard.sh's interrupted-restore
+  // check. See src/lib/deploy/walg-staleness.js.
+  try {
+    await withWalgStaleStorageRetry(
+      () =>
+        sshRunAsync(
+          ip,
+          sshKeyPath,
+          `cd ${remoteDir} && docker compose run --rm -e RESTORE_BACKUP=${backup} -v ${remoteDir}/restore-walg.sh:/restore.sh:ro db bash /restore.sh`,
+          { timeout: 900_000 },
+        ),
+      'backup-fetch (restore)',
+      { delaysMs: options.staleRetryDelaysMs },
+    );
+  } catch (err) {
+    // The script moves nothing until a fetch completed, so the database from
+    // before the restore is still in place: bring it back. If an earlier
+    // restore was interrupted mid-swap, db-guard.sh keeps the db down and
+    // says so.
+    await sshRunAsync(
+      ip,
+      sshKeyPath,
+      `cd ${remoteDir} && docker compose start db && docker compose start app`,
+      { ignoreError: true },
+    );
+    throw new Error(
+      `restoreCompose: the restore of ${backup} did not complete, and the database from before it was started again: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   // 4. Start the DB — postgres enters archive recovery, replays WAL, promotes
   await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose start db`);
@@ -1498,13 +1618,24 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
     if (Date.now() >= deadline) {
       throw new Error(
         `restoreCompose: postgres did not promote within 300s after wal-g restore. ` +
-          `Last error: ${lastErr}`,
+          `Last error: ${lastErr}. The database from before the restore is kept in ${PREVIOUS_PGDATA_PATH}.`,
       );
     }
     await new Promise((r) => setTimeout(r, RESTORE_PROMOTE_POLL_MS));
   }
 
-  // 6. Rebuild planner statistics. A base backup carries none: until
+  // 6. Prove the restored database takes writes, then drop the previous
+  //    cluster. Never the other way round: until this proof the previous
+  //    cluster is the only copy of the database from before the restore.
+  await assertWritable();
+  await sshRunAsync(
+    ip,
+    sshKeyPath,
+    `cd ${remoteDir} && docker compose exec -T db rm -rf ${PREVIOUS_PGDATA_PATH}`,
+    { timeout: 300_000 },
+  );
+
+  // 7. Rebuild planner statistics. A base backup carries none: until
   //    autovacuum runs, `pg_stat_user_tables.n_live_tup` reads 0 for every
   //    table and the first queries plan blind — which looks exactly like data
   //    loss to whoever is verifying the restore (vibecarbon-web prod move,
@@ -1525,7 +1656,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
     );
   }
 
-  // 7. Rerun the migrate step before the app: the app no longer migrates at
+  // 8. Rerun the migrate step before the app: the app no longer migrates at
   //    boot, so a restore to a point before a deployed migration would leave
   //    it 503, and a backup older than the last APP_DB_PASSWORD carries the
   //    old app_service password. app-migrate applies the ledger and resets
@@ -1544,6 +1675,6 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
     );
   }
 
-  // 8. Bring the app back up
+  // 9. Bring the app back up
   await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose start app`);
 }

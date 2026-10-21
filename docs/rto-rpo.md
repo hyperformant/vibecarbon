@@ -272,7 +272,10 @@ including compose), use `vibecarbon restore` instead.
 ### Step 1: confirm what's in S3
 
 List the wal-g base backups available for the environment (read-only, no
-changes):
+changes). The list is read from the backup bucket's stop sentinels, so it
+needs the bucket's credentials in your shell (the provider's object-storage
+variables, e.g. `HETZNER_ACCESS_KEY` and `HETZNER_SECRET_KEY`), and no server
+has to be up:
 
 ```bash
 vibecarbon restore <env> -l     # or: vibecarbon backup <env> -l
@@ -295,12 +298,19 @@ vibecarbon deploy <env> -mode k8s -restore 2026-08-05T14:30:00Z -y
 ### What actually happens
 
 1. Pulumi provisions fresh nodes, firewalls, and S3 bindings as on any cold
-   deploy; the restore target is stamped into the `vibecarbon-infra-secrets` Secret
-   as `RESTORE_TARGET` (empty on normal boots, making the next step a no-op).
+   deploy; the restore marker is stamped into the `vibecarbon-infra-secrets`
+   Secret: `RESTORE_BACKUP` (the exact base backup the CLI resolved from the
+   bucket), `RESTORE_RECOVERY_CONF` (the recovery settings, rendered by the
+   CLI) and `RESTORE_TARGET`. All empty on normal boots, making the next step a
+   no-op.
 2. The database StatefulSet's `walg-restore` init container
-   (`carbon/k8s/base/db/statefulset.yaml`) sees `RESTORE_TARGET`, clears
-   `PGDATA`, and runs `wal-g backup-fetch` against the backup bucket (with
-   retries for stale storage frontends).
+   (`carbon/k8s/base/db/statefulset.yaml`) sees `RESTORE_BACKUP` and runs
+   `wal-g backup-fetch` of that backup into a staging directory beside the
+   live data (with retries for stale storage frontends). Only a complete
+   fetch is swapped in; the live data moves aside to `.vc-prev` and stays
+   until the restored database has promoted and proved writable. A boot that
+   finds a swap half done refuses with `restore interrupted; rerun vibecarbon
+   restore`.
 3. It then configures archive recovery: `restore_command = 'wal-g wal-fetch …'`
    pulls WAL segments back from S3, `recovery.signal` puts Postgres into
    archive recovery pinned to the base backup's own timeline, and (for PITR)

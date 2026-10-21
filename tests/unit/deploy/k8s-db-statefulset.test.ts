@@ -171,6 +171,8 @@ describe('k8s/base renders the db StatefulSet', () => {
       expect([
         '"key":"DB_PASSWORD"',
         '"key":"RESTORE_TARGET"',
+        '"key":"RESTORE_BACKUP"',
+        '"key":"RESTORE_RECOVERY_CONF"',
         '"key":"REPL_PASSWORD"',
         '"key":"S3_CREDENTIALS_INI"',
       ]).toContain(k);

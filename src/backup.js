@@ -21,13 +21,12 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { selectAction } from './lib/cli/select-action.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { loadBackupS3Config, loadS3Config } from './lib/config.js';
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import { awaitPostgresAccepting } from './lib/deploy/k8s/index.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
+import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import {
   getPostgresPod,
   getSSHKeyPath,
@@ -38,7 +37,12 @@ import {
 } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { validateBackupFilename } from './lib/validators.js';
-import { printWalgBackupList } from './lib/walg-backups.js';
+import {
+  backupCredentialVars,
+  printBaseBackupList,
+  readEnvBaseBackups,
+  resolveS3Config,
+} from './lib/walg/restore-base.js';
 
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
@@ -382,21 +386,30 @@ export async function run(args) {
     seed: actionSeed,
   });
 
+  // -l lists from the backup bucket's stop sentinels: no firewall refresh, no
+  // SSH, the db need not be running.
+  if (action === 'list') {
+    await runList({
+      envName,
+      envConfig,
+      projectName: projectConfig.projectName || 'project',
+      yes: !!values.y,
+    });
+    p.outro('');
+    return;
+  }
+
   // Operator-IP whitelist refresh happens before any command that
-  // touches the live cluster. Listing is read-only via S3 only when
-  // S3 is configured; if we'd fall back to pod-listing it still hits
-  // the cluster. Run the firewall check for everything except the
-  // S3-only list path (handled inside the dispatch below).
+  // touches the live cluster.
   await ensureFirewallAccessIfNeeded({
-    action,
     projectConfig,
     envName,
     envConfig,
     yes: !!values.y,
   });
 
-  // SSH key is required for everything (compose path AND k8s pod-list
-  // fallback). Bail early with a clear message if it's missing.
+  // SSH key is required for create and download. Bail early with a clear
+  // message if it's missing.
   const sshKeyPath = getSSHKeyPath(envName);
   if (!existsSync(sshKeyPath)) {
     p.log.error(`SSH key not found: ${sshKeyPath}`);
@@ -446,12 +459,6 @@ export async function run(args) {
   const tracker = createTracker('backup', { environment: envName });
   const s = tracker.spinner();
 
-  if (action === 'list') {
-    await runList({ s, isCompose, serverIp, sshKeyPath, projectName, envName });
-    p.outro('');
-    return;
-  }
-
   if (action === 'download') {
     await runDownload({
       s,
@@ -487,16 +494,10 @@ export async function run(args) {
 // ============================================================================
 
 /**
- * Refresh operator-IP firewall allowlist when the action would hit
- * the cluster. Listing via S3 alone doesn't need this; everything
- * else does.
+ * Refresh operator-IP firewall allowlist before an action that hits the
+ * cluster (create, download; list reads the bucket only).
  */
-async function ensureFirewallAccessIfNeeded({ action, projectConfig, envName, envConfig, yes }) {
-  // Skip the firewall check for read-only list ops — they may hit
-  // S3 only (when configured), and even when they fall back to the
-  // pod, the existing key-based SSH already establishes access.
-  if (action === 'list') return;
-
+async function ensureFirewallAccessIfNeeded({ projectConfig, envName, envConfig, yes }) {
   const apiToken = resolveProviderToken(providerIdFor(envConfig));
   if (!apiToken) return;
 
@@ -519,37 +520,34 @@ async function ensureFirewallAccessIfNeeded({ action, projectConfig, envName, en
   }
 }
 
-/** Resolve the S3 config for the deploy mode, merging credentials when needed. */
-async function resolveS3Config({ isCompose, envName, projectName, envConfig }) {
-  const Provider = providerFor(envConfig);
-
-  if (isCompose) {
-    const backupS3 = loadBackupS3Config(envName);
-    if (!backupS3) return null;
-    const creds = await Provider.promptObjectStorageCredentials(projectName, { save: false });
-    if (!creds) return null;
-    return { ...backupS3, accessKey: creds.accessKey, secretKey: creds.secretKey };
+/**
+ * `-l`: the environment's base backups, read from the backup bucket's stop
+ * sentinels (listBaseBackups), the same listing restore resolves from. Needs
+ * the bucket's credentials locally.
+ */
+async function runList({ envName, envConfig, projectName, yes }) {
+  let listing;
+  try {
+    listing = await readEnvBaseBackups({
+      envName,
+      envConfig,
+      projectName,
+      skipPrompts: yes || !process.stdin.isTTY,
+    });
+  } catch (err) {
+    p.log.error(
+      `Could not read the base backups from the backup bucket: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(1);
   }
-
-  // K8s mode: prefer the dedicated backup bucket, fall back to
-  // storage. Either way, top up credentials from the environment
-  // (HETZNER_ACCESS_KEY/HETZNER_SECRET_KEY) when the config didn't carry them.
-  const backupS3 = loadBackupS3Config(envName);
-  const storageS3 = loadS3Config(envName);
-  let s3Config = backupS3 || storageS3;
-  if (s3Config && !s3Config.secretKey) {
-    const creds = await Provider.promptObjectStorageCredentials(projectName, { save: false });
-    if (creds) {
-      s3Config = { ...s3Config, accessKey: creds.accessKey, secretKey: creds.secretKey };
-    }
+  if (!listing.s3Config) {
+    p.log.error(
+      `Listing backups reads ${envName}'s backup bucket and needs its credentials: ` +
+        `export ${backupCredentialVars(envConfig)}, then rerun.`,
+    );
+    process.exit(1);
   }
-  return s3Config;
-}
-
-async function runList({ s, isCompose, serverIp, sshKeyPath, projectName, envName }) {
-  // List the actual wal-g base backups (the restorable ones) — NOT the legacy
-  // backups/*_full.tar.gz S3 objects, which wal-g neither writes nor restores.
-  await printWalgBackupList({ spinner: s, serverIp, sshKeyPath, projectName, isCompose, envName });
+  printBaseBackupList({ backups: listing.backups, envName, location: listing.location });
 }
 
 /**

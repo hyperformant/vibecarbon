@@ -28,6 +28,7 @@ import { saveProjectConfig } from './lib/config.js';
 import { useDnsChallenge } from './lib/deploy/acme.js';
 import { RECONCILE_FLAGS_SED, STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
 import { collectComposeBuildArgs } from './lib/deploy/compose/build-args.js';
+import { composePsqlRunner } from './lib/deploy/compose/ha.js';
 import {
   backupCompose,
   dockerLoginOnServer,
@@ -67,6 +68,13 @@ import { pollUntil } from './lib/retry.js';
 import { assertPersistedRoleTypes, planK8sScaleChanges } from './lib/scale-plan.js';
 import { buildComposeTypeOptions, buildSimpleTypeOptions } from './lib/server-types.js';
 import { sshRun, sshRunScript } from './lib/ssh.js';
+import { buildRecoveryConfig, renderRecoveryConf } from './lib/walg/recovery-config.js';
+import {
+  backupCredentialVars,
+  readEnvBaseBackups,
+  resolveRestoreBase,
+} from './lib/walg/restore-base.js';
+import { assertRestoredPrimaryWritable } from './lib/walg/restore-marker.js';
 
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
@@ -833,7 +841,7 @@ async function scaleServers(ctx) {
 
       // 7. Restore database on new server from S3 via wal-g. The base backup +
       //    WAL were pushed straight to S3 by step 1's backupCompose, so the
-      //    restore fetches LATEST directly — no local archive to transfer.
+      //    restore fetches the newest base directly — no local archive to transfer.
       //    S3 credentials come from the db container's env (sourced from .env)
       //    so no opts are needed; restoreCompose handles its own verify loop
       //    (pg_isready + pg_is_in_recovery() = f) before returning.
@@ -846,17 +854,46 @@ async function scaleServers(ctx) {
       await backupPromise;
       s.stop('Database backed up (wal-g base backup pushed to S3)');
 
+      // Remote compose project dir on the new server — used by the restore's
+      // writable proof, the ACME reset and the post-restore service recreate.
+      const remoteDir = `/opt/${projectName}`;
+
+      // The restore fetches a NAMED base backup, resolved here from the backup
+      // bucket's stop sentinels: the newest, read after the push above landed
+      // (the same pick the server-side LATEST made). Needs the bucket's
+      // credentials locally; without them nothing is restored or destroyed.
+      s.start('Resolving the base backup to restore...');
+      const listing = await readEnvBaseBackups({
+        envName: environment,
+        envConfig,
+        projectName,
+        skipPrompts: !process.stdin.isTTY,
+      });
+      if (!listing.s3Config) {
+        throw new Error(
+          `scale restores the new server from ${environment}'s backup bucket and needs its credentials: ` +
+            `export ${backupCredentialVars(envConfig)}, then rerun.`,
+        );
+      }
+      const base = resolveRestoreBase(listing.backups, 'latest');
+      s.stop(`Restoring ${base.name}`);
+
       s.start('Restoring database from S3 via wal-g...');
       await perfAsync('scale.restoreDb', async () =>
-        restoreCompose(newIp, sshKeyPath, projectName, 'latest'),
+        restoreCompose(newIp, sshKeyPath, projectName, {
+          backup: base.name,
+          target: 'latest',
+          recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
+          requiredBytes: base.uncompressedBytes,
+          assertWritable: () =>
+            assertRestoredPrimaryWritable({
+              environment,
+              envConfig,
+              exec: composePsqlRunner(newIp, sshKeyPath, remoteDir),
+            }),
+        }),
       );
       s.stop('Database restored');
-
-      // Remote compose project dir on the new server — used by the ACME reset
-      // and the post-restore service recreate below. (Previously declared by a
-      // since-removed pre-restore readiness step; restoreCompose now owns that
-      // wait, so declare it here.)
-      const remoteDir = `/opt/${projectName}`;
 
       // 9a. Update DNS to the new server. On HTTP-01 this must happen BEFORE
       // recreating services (Traefik challenges the A record on startup; a

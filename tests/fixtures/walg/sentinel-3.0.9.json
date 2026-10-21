@@ -1,0 +1,20 @@
+{
+  "name": "base_000000010000000000000002",
+  "sentinel": {
+    "LSN": 33554472,
+    "PgVersion": 170011,
+    "FinishLSN": 33554720,
+    "SystemIdentifier": 7699089832250274000,
+    "UncompressedSize": 23439374,
+    "CompressedSize": 4290228,
+    "DataCatalogSize": 23541807,
+    "ChkpNum": null,
+    "Version": 2,
+    "StartTime": "2026-10-21T12:00:42.308323Z",
+    "FinishTime": "2026-10-21T12:00:43.536853Z",
+    "DateFmt": "%Y-%m-%dT%H:%M:%S.%fZ",
+    "Hostname": "faf95b1971c3",
+    "DataDir": "/var/lib/postgresql/data",
+    "IsPermanent": false
+  }
+}

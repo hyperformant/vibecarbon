@@ -21,6 +21,10 @@ describe('getFilePolicy', () => {
     expect(getFilePolicy('k8s/base/deep/nested/file.yaml')).toBe('safe');
     expect(getFilePolicy('.github/workflows/deploy.yml')).toBe('safe');
     expect(getFilePolicy('cloud-init/docker-ce-setup.yaml')).toBe('safe');
+    // The compose db entrypoint docker-compose.yml mounts: missing, the db
+    // container gets a directory there and never starts. The rest of
+    // volumes/db stays never.
+    expect(getFilePolicy('volumes/db/db-guard.sh')).toBe('safe');
   });
 
   it('classifies user-blended files as merge', () => {

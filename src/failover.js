@@ -12,7 +12,6 @@
 
 import { existsSync } from 'node:fs';
 import * as p from '@clack/prompts';
-import { formatInstant } from './lib/backup-format.js';
 import { resolveEnvContext } from './lib/cli/env-context.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
@@ -94,7 +93,11 @@ import { pollUntil } from './lib/retry.js';
 import { declaredAddonNames, k8sPrimaryOnlyWorkloads } from './lib/services/standby-policy.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
-import { listWalgBackups } from './lib/walg-backups.js';
+import {
+  backupCredentialVars,
+  printBaseBackupList,
+  readEnvBaseBackups,
+} from './lib/walg/restore-base.js';
 
 // Shared with the compose-ha failover; re-exported where tests and callers
 // have always found them.
@@ -2373,35 +2376,42 @@ export async function failoverHA(
 // ============================================================================
 
 async function failoverSingleServer(envName, envConfig) {
-  const serverIp = envConfig.servers?.[0]?.ip;
-  const sshKeyPath = getSSHKeyPath(envName);
-
   p.log.warn('This environment has no standby region');
   p.log.info('Recovery requires deploying a new server and restoring from backup');
 
-  // Check for available backups. wal-g is the SINGLE SOURCE OF TRUTH for what is
-  // actually restorable — the legacy `/backups/*_full.tar.gz` + `*.sql.gz` S3
-  // objects are NOT wal-g backups and `vibecarbon restore` cannot replay them,
-  // so listing them here would tempt an operator to pick a non-restorable
-  // artifact mid-disaster. List wal-g base backups only.
-  if (serverIp && existsSync(sshKeyPath)) {
-    const s = spinner();
-    s.start('Checking for available backups (wal-g)');
-    const projectConfig = loadProjectConfig();
-    const projectName = projectConfig?.projectName || 'project';
-    const isCompose = envConfig.deployMode === 'compose' || envConfig.deployMode === 'compose-ha';
-    const backups = await listWalgBackups({ serverIp, sshKeyPath, projectName, isCompose });
+  // The restorable base backups, read from the backup bucket's stop sentinels
+  // (the listing restore resolves from). Never SSH: the server may be the
+  // thing that is gone. The legacy `/backups/*_full.tar.gz` + `*.sql.gz`
+  // objects are not wal-g backups and restore cannot replay them, so they are
+  // never offered here.
+  const s = spinner();
+  s.start('Checking for available backups');
+  const projectName = loadProjectConfig()?.projectName || 'project';
+  try {
+    const listing = await readEnvBaseBackups({
+      envName,
+      envConfig,
+      projectName,
+      skipPrompts: !process.stdin.isTTY,
+    });
     s.stop('Backup check complete');
-
-    if (backups.length > 0) {
-      p.log.info(c.bold(`Available wal-g base backups (${backups.length}, newest first):`));
-      for (const b of backups.slice(0, 5)) {
-        p.log.message(`  ${formatInstant(b.time).padEnd(22)} ${c.dim(b.name)}`);
-      }
+    if (listing.s3Config) {
+      printBaseBackupList({
+        backups: listing.backups,
+        envName,
+        location: listing.location,
+        limit: 5,
+      });
     } else {
-      p.log.info('No wal-g base backups found on the server');
-      p.log.info(`Create one with: ${c.info(`vibecarbon backup ${envName}`)}`);
+      p.log.info(
+        `Export ${backupCredentialVars(envConfig)} to list the backups ${c.info(`vibecarbon restore ${envName}`)} can use.`,
+      );
     }
+  } catch (err) {
+    s.stop('Backup check failed');
+    p.log.warn(
+      `Could not read the base backups from the backup bucket: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   p.log.info(c.bold('Recovery steps:'));

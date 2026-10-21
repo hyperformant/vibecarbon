@@ -97,7 +97,6 @@
 
 import { progressLog } from '../cli/progress.js';
 import { runWithRetry } from '../retry.js';
-import { parseWalgBackupList } from '../walg-backups.js';
 import { DB_POD } from './db-workload.js';
 
 /**
@@ -324,7 +323,7 @@ export function parseWalgAuditOutput(raw) {
  * Count base backups out of `wal-g backup-list --json` output for the success
  * line. The probe merges stderr into the capture (wal-g logs INFO lines there
  * and we want them in failure messages), so slice out the JSON array before
- * handing it to the shared parser. Returns null when no array is present —
+ * counting. Returns null when no array is present —
  * reported as "unknown", never as a misleading 0.
  *
  * @param {string} listOutput
@@ -335,14 +334,16 @@ export function countWalgBackups(listOutput) {
   const start = text.indexOf('[');
   const end = text.lastIndexOf(']');
   if (start < 0 || end <= start) return null;
-  const arr = text.slice(start, end + 1);
+  let parsed;
   try {
-    const parsed = JSON.parse(arr);
-    if (!Array.isArray(parsed)) return null;
+    parsed = JSON.parse(text.slice(start, end + 1));
   } catch {
     return null;
   }
-  return parseWalgBackupList(arr).length;
+  if (!Array.isArray(parsed)) return null;
+  // An entry counts when it names a backup (wal-g's field name has drifted
+  // across versions).
+  return parsed.filter((b) => b && (b.backup_name ?? b.BackupName ?? b.name)).length;
 }
 
 /**
