@@ -264,6 +264,49 @@ describe('compose-ha abort backend', () => {
     ).resolves.toEqual({ ok: true });
   });
 
+  // Re-review: any inspect error used to read as absent. Only docker's own
+  // "No such container" is absent; anything else proves nothing.
+  it('the proof tells "No such container" from any other inspect failure', async () => {
+    const { backend, commands } = make({ 'docker stop myapp-db': 'DB_RUNNING=unknown' });
+    await expect(backend.stopStandbyDb()).resolves.toMatchObject({
+      ok: false,
+      reason: /could not inspect its db container/,
+    });
+    expect(commands[0].command).toMatch(/\*\[Nn\]"o such container"\*\) echo DB_RUNNING=absent/);
+    expect(commands[0].command).toMatch(/\*\) echo DB_RUNNING=unknown/);
+    expect(commands[0].command).not.toMatch(/2>\/dev\/null \|\| echo absent/);
+  });
+
+  it('the proof shell, run for real: a missing container is absent, a dead daemon is unknown', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { backend, commands } = make({});
+    await backend.stopStandbyDb();
+    const dir = mkdtempSync(join(tmpdir(), 'vc-abort-docker-'));
+    try {
+      const run = (stderr: string) => {
+        writeFileSync(
+          join(dir, 'docker'),
+          `#!/bin/bash\n[ "$1" = stop ] && exit 1\necho "${stderr}" >&2\nexit 1\n`,
+        );
+        chmodSync(join(dir, 'docker'), 0o755);
+        return spawnSync('bash', ['-c', commands[0].command], {
+          encoding: 'utf-8',
+          env: { PATH: `${dir}:${process.env.PATH}` },
+        }).stdout.trim();
+      };
+      expect(run('Error response from daemon: No such container: myapp-db')).toBe(
+        'DB_RUNNING=absent',
+      );
+      expect(run('Cannot connect to the Docker daemon at unix:///var/run/docker.sock')).toBe(
+        'DB_RUNNING=unknown',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('re-arms WALG_ROLE on the old primary only when its running db lost it', async () => {
     const kept = make({ 'docker inspect': 'WALG_ROLE=primary' });
     await expect(kept.backend.armPrimary()).resolves.toBe(true);

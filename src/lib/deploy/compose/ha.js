@@ -1714,8 +1714,12 @@ export function composeFailoverAbortBackend({
       const out = await run(
         standbyServer.ip,
         sshKeyPath,
+        // Only docker's own "No such container" counts as absent: any other
+        // inspect failure (daemon down, permissions) proves nothing.
         `docker stop ${dbCt} >/dev/null 2>&1; ` +
-          `echo "DB_RUNNING=$(docker container inspect -f '{{.State.Running}}' ${dbCt} 2>/dev/null || echo absent)"`,
+          `if out=$(docker container inspect -f '{{.State.Running}}' ${dbCt} 2>&1); then ` +
+          `echo "DB_RUNNING=$out"; else case "$out" in *[Nn]"o such container"*) ` +
+          `echo DB_RUNNING=absent ;; *) echo DB_RUNNING=unknown ;; esac; fi`,
         { timeout: 120_000 },
       );
       const line = String(out === false ? '' : (out ?? ''))
@@ -1724,6 +1728,9 @@ export function composeFailoverAbortBackend({
         .find((l) => l.startsWith('DB_RUNNING='));
       const state = line?.slice('DB_RUNNING='.length);
       if (state === 'false' || state === 'absent') return { ok: true };
+      if (state === 'unknown') {
+        return { ok: false, reason: 'docker could not inspect its db container' };
+      }
       return {
         ok: false,
         reason: line ? `its db container still reads running=${state}` : 'the node did not answer',
