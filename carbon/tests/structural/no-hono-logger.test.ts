@@ -22,3 +22,17 @@ describe('no hono/logger', () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe('logger calls never carry a raw request path or url', () => {
+  it('wraps req.path / req.url in redactPath', () => {
+    const offenders: string[] = [];
+    for (const f of files(SERVER)) {
+      const src = readFileSync(f, 'utf-8');
+      for (const m of src.matchAll(/\blog(?:ger)?\.(?:trace|debug|info|warn|error|fatal)\(\s*\{[^}]*\}/g)) {
+        const body = m[0].replace(/redactPath\([^)]*\)/g, '');
+        if (/req\.(path|url)|\.raw\.url/.test(body)) offenders.push(f);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});

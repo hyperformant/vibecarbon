@@ -1,6 +1,7 @@
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { dbErrorForLog, dbErrorMessage } from '../db/errors';
+import { redactPath } from '../middleware/access-log';
 import { env } from './env';
 import { logger } from './logger';
 
@@ -34,7 +35,7 @@ export function sanitizeError(error: unknown, fallback = 'An unexpected error oc
 export function handleAppError(err: Error, c: Context): Response {
   if (err instanceof HTTPException) return err.getResponse();
   logger.error(
-    { err: dbErrorForLog(err), method: c.req.method, path: c.req.path },
+    { err: dbErrorForLog(err), method: c.req.method, path: redactPath(c.req.path) },
     'Unhandled error in request'
   );
   return c.json({ error: 'Internal server error' }, 500);
