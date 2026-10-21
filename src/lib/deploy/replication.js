@@ -1359,7 +1359,7 @@ export async function reseedStandbyFromPrimary(
     throw new Error(
       're-seed aborted: REPL_PASSWORD not found in the vibecarbon-infra-secrets Secret. ' +
         'Cannot re-seed the standby from the primary, refusing to act on a ' +
-        'possibly-stale standby. Verify the standby cluster was deployed with `vibecarbon deploy --ha`.',
+        'possibly-stale standby. Verify the standby cluster was deployed with `vibecarbon deploy -mode k8s-ha`.',
     );
   }
 

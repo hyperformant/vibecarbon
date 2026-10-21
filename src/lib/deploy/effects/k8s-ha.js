@@ -664,10 +664,9 @@ async function haK8sFinalize(ctx) {
   );
 
   p.note(
-    [
-      `${c.dim('vibecarbon failover --target standby')}`,
-      `${c.dim('vibecarbon failover --target primary')}`,
-    ].join('\n'),
+    [`${c.dim('vibecarbon failover <env>')}`, `${c.dim('vibecarbon failover <env> -dry')}`].join(
+      '\n',
+    ),
     'Failover Commands',
   );
 }

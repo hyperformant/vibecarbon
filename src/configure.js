@@ -116,6 +116,12 @@ export const SPEC = {
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },
     { name: 'v', boolean: true, description: 'Show version' },
+    {
+      name: 'forget',
+      value: '<id>',
+      description:
+        'Only with `storage`: stop denying a deleted app storage key in the bucket fences',
+    },
   ],
   examples: [
     {

@@ -1683,7 +1683,7 @@ export async function failoverComposeHA(
 
   if (!primaryServer || !standbyServer) {
     p.log.error('Could not identify primary and standby servers from config');
-    p.log.info('Ensure Compose HA deployment was set up with vibecarbon deploy --ha');
+    p.log.info('Ensure Compose HA deployment was set up with vibecarbon deploy -mode compose-ha');
     process.exit(1);
   }
 
