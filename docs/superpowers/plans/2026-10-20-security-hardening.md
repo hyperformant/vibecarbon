@@ -401,6 +401,7 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 - compose: a hand-customized `DB_USER` or `DB_NAME` in `.env` no longer reaches the app container. The defaults (`postgres`) are unchanged.
 - k8s: `vibecarbon-secrets` becomes `vibecarbon-app-secrets` and `vibecarbon-infra-secrets`. The next deploy applies both and, after the app rollout, deletes the old `vibecarbon-secrets` Secret.
 - GitOps: the deploy workflow builds the app Secret from a positive key list. A secret seeded for anything else no longer reaches the app pod.
+- GitOps: earlier `seedOrgSecrets` runs left repo-level `S3_ACCESS_KEY` / `S3_SECRET_KEY` GitHub secrets holding the account-wide key. Each env's GitHub Environment now gets its own scoped pair, and an Environment secret overrides a repo secret of the same name, so the stale ones are unused, but they stay in the repo until removed (`gh secret delete S3_ACCESS_KEY` and `gh secret delete S3_SECRET_KEY`).
 - Object storage:
   - Linode and DigitalOcean envs get a minted app key, limited to the env's own bucket, on their next deploy (tier `isolated`). A DigitalOcean token with custom scopes needs `spaces_key` create/delete.
   - Hetzner envs keep the shared key unless the operator pastes a console-made app key in `vibecarbon configure`, which turns on the deny-fence (tier `fenced`).
