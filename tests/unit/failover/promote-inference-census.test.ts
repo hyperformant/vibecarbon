@@ -9,9 +9,11 @@
  * `assertFailoverPreconditions` and the journal.
  *
  * Rule: a source line that compares a result to the literal 'f', in a file
- * that queries pg_is_in_recovery(), must sit in a file that imports from
- * failover-guard.js, or inside `readReplicaState` itself. Files are listed with
- * git, so node_modules and build output are never walked.
+ * that spells pg_is_in_recovery() or imports an exported SQL constant that
+ * does, is an offender unless it sits inside `readReplicaState` or in an
+ * explicitly ALLOWED call site with its reason. Importing the guard exempts
+ * nothing. Files are listed with git, so node_modules and build output are
+ * never walked.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -69,16 +71,34 @@ function readReplicaStateRanges(lines: string[]): Array<[number, number]> {
   return ranges;
 }
 
-const importsGuard = (text: string) =>
-  /from\s+['"][^'"]*failover-guard\.js['"]/.test(text) ||
-  /import\(\s*['"][^'"]*failover-guard\.js['"]\s*\)/.test(text);
+/**
+ * Names of exported constants whose initializer spells pg_is_in_recovery (an
+ * SQL string a file can import instead of spelling the function itself).
+ */
+function recoverySqlConstants(files: Array<{ path: string; text: string }>): string[] {
+  const names: string[] = [];
+  for (const { text } of files) {
+    for (const m of text.matchAll(/export const (\w+)\s*=([\s\S]*?);/g)) {
+      if (m[2].includes('pg_is_in_recovery')) names.push(m[1]);
+    }
+  }
+  return names;
+}
 
-/** Every offending line in `src/**\/*.js`, as `path:line`. */
+/**
+ * Every offending line in `src/**\/*.js`, as `path:line`. A file is in scope
+ * when it spells pg_is_in_recovery or names an exported constant that does.
+ * No file is exempt for importing the guard: the only exemption is the body of
+ * readReplicaState, plus the explicit ALLOWED call sites the caller filters.
+ */
 function findOffenders(files: Array<{ path: string; text: string }>): string[] {
+  const constants = recoverySqlConstants(files);
   const out: string[] = [];
   for (const { path, text } of files) {
-    if (!text.includes('pg_is_in_recovery')) continue;
-    if (importsGuard(text)) continue;
+    const inScope =
+      text.includes('pg_is_in_recovery') ||
+      constants.some((name) => new RegExp(`\\b${name}\\b`).test(text));
+    if (!inScope) continue;
     const lines = text.split('\n');
     const exempt = path === GUARD ? readReplicaStateRanges(lines) : [];
     lines.forEach((line, i) => {
@@ -125,6 +145,32 @@ describe('census: promotion is never inferred from pg_is_in_recovery() alone', (
     expect(findOffenders([{ path: 'src/lib/deploy/replication.js', text: planted }])).toEqual([
       'src/lib/deploy/replication.js:3',
     ]);
+  });
+
+  it('importing the guard is no exemption', () => {
+    const planted = [
+      "import { readReplicaState } from './failover-guard.js';",
+      "const SQL = 'SELECT pg_is_in_recovery()';",
+      "export const promoted = async (run) => (await run(SQL)).trim() === 'f';",
+    ].join('\n');
+    expect(findOffenders([{ path: 'src/failover.js', text: planted }])).toEqual([
+      'src/failover.js:3',
+    ]);
+  });
+
+  it('catches a file that only imports an SQL constant spelling pg_is_in_recovery', () => {
+    const lib = {
+      path: 'src/lib/deploy/sql.js',
+      text: "export const RECOVERY_SQL =\n  'SELECT pg_is_in_recovery()';",
+    };
+    const user = {
+      path: 'src/lib/deploy/user.js',
+      text: [
+        "import { RECOVERY_SQL } from './sql.js';",
+        "export const promoted = async (run) => (await run(RECOVERY_SQL)).trim() === 'f';",
+      ].join('\n'),
+    };
+    expect(findOffenders([lib, user])).toEqual(['src/lib/deploy/user.js:2']);
   });
 
   it('exempts readReplicaState in the guard, and only it', () => {

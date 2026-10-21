@@ -92,6 +92,17 @@ const SPEC = {
     { name: 'v', boolean: true, description: 'Show version' },
     { name: 'y', boolean: true, description: 'Skip confirmation prompts' },
     { name: 'dry', boolean: true, description: 'Show plan without executing' },
+    {
+      name: 'force-unproven',
+      boolean: true,
+      description:
+        'Primary is dead and nothing proves the standby holds its data: promote it anyway (unplanned only)',
+    },
+    {
+      name: 'allow-degraded',
+      boolean: true,
+      description: 'With -force-unproven: also accept a standby the last deploy flagged degraded',
+    },
     { name: 'env', value: '<name>', description: 'Environment seed (alternative to positional)' },
     {
       name: 'server-type',
@@ -306,6 +317,31 @@ async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded } = {}) {
       ? 'Standby re-seeded with primary state'
       : 'Primary unreachable mid-probe, promoting standby with current state',
   );
+}
+
+/** The one-line risk statement for -force-unproven. */
+export const UNPROVEN_RISK_LINE =
+  '-force-unproven: nothing proves the standby holds this database, so the promoted side may ' +
+  'be missing writes or hold different data entirely';
+
+/**
+ * Typed confirmation for -force-unproven: the env name, or -y. Without a TTY
+ * and without -y it refuses rather than hanging on a prompt.
+ *
+ * @param {string} envName
+ * @param {{ yes?: boolean }} parsed
+ */
+export async function confirmUnprovenFailover(envName, parsed) {
+  if (parsed.yes) return;
+  if (!process.stdin.isTTY) {
+    p.log.error('-force-unproven needs a typed confirmation; pass -y in a script');
+    process.exit(1);
+  }
+  const typed = await p.text({
+    message: `Type ${envName} to promote a standby nothing proves is a replica`,
+  });
+  if (p.isCancel(typed)) exitCancelled();
+  if (typed !== envName) exitDeclined();
 }
 
 /** R3: the exit message for a promotion the flow could not confirm. */
@@ -1249,7 +1285,7 @@ const MANUAL_DNS_STRATEGY = {};
  *
  * @param {string} envName
  */
-export function swapHaRoles(envName) {
+export function swapHaRoles(envName, { override } = {}) {
   const config = loadProjectConfig();
   const envConfig = config?.environments?.[envName];
   if (!envConfig?.ha?.primary || !envConfig.ha.standby) {
@@ -1271,6 +1307,9 @@ export function swapHaRoles(envName) {
   // The failback guard compares this with deployedAt: until a deploy
   // reconverges, the new standby is the old primary and holds no replica.
   envConfig.lastFailover = new Date().toISOString();
+  // A failover that skipped the replica proof says so on the record.
+  if (override) envConfig.lastFailoverOverride = override;
+  else delete envConfig.lastFailoverOverride;
   // R2: the journal is cleared by the same save that persists the swap, so no
   // crash can leave a swapped config that still claims a failover in flight.
   delete ha.failoverInFlight;
@@ -1401,7 +1440,7 @@ export async function failoverHA(
     writeJournal = writeFailoverJournal,
     clearJournal = clearFailoverJournal,
     promote = (srv, key) => promoteStandbyDatabase(srv.standby.ip, key),
-    now = Date.now,
+    confirmUnproven = confirmUnprovenFailover,
     restoreWalgRole = restorePromotedWalgRole,
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
@@ -1504,14 +1543,22 @@ export async function failoverHA(
   const planned = await isPrimaryReady(servers.primary.ip, sshKeyPath);
   const standbyState = await readStandbyState(servers, sshKeyPath);
   const primaryState = planned ? await readPrimaryState(servers, sshKeyPath) : null;
-  const { mode } = assertFailoverPreconditions({
+  const { mode, unproven } = assertFailoverPreconditions({
     envConfig,
     environment: envName,
     standbyState,
     tier: 'k8s-ha',
     planned,
     primaryState,
+    forceUnproven: !!parsed.forceUnproven,
+    allowDegraded: !!parsed.allowDegraded,
   });
+  if (unproven) {
+    // The operator asked to skip the identifier proof on a dead primary. Say the
+    // risk once, and make them type the env name (or pass -y) before anything moves.
+    p.log.warn(UNPROVEN_RISK_LINE);
+    await confirmUnproven(envName, parsed);
+  }
   if (mode === 'resume') {
     p.log.info(
       'Standby already promoted by an unfinished run of this failover (journal set), ' +
@@ -1581,8 +1628,14 @@ export async function failoverHA(
           throw cuErr;
         }
       }
+      // A reseed rewrites the standby's identity: the journal must name what
+      // was just seeded, not the pre-reseed reading.
+      let seededSysid = null;
       await reseed(servers, sshKeyPath, s, {
-        onSeeded: (sysid) => recordSystemIdentifier({ environment: envName }, sysid),
+        onSeeded: (sysid) => {
+          seededSysid = sysid;
+          recordSystemIdentifier({ environment: envName }, sysid);
+        },
       });
       // R2: the journal goes down immediately before the promote call.
       await writeJournal(
@@ -1590,7 +1643,8 @@ export async function failoverHA(
         {
           target: 'standby',
           primaryLsn: primaryLsn ?? null,
-          systemIdentifier: standbyState.systemIdentifier,
+          systemIdentifier: seededSysid ?? standbyState.systemIdentifier,
+          ...(unproven && { override: 'force-unproven' }),
         },
       );
     } catch (err) {
@@ -1603,18 +1657,12 @@ export async function failoverHA(
 
     // STEP 4a: promote. The deadline bounds RTO only; the verdict decides.
     s.start('Promoting standby database');
-    const startedAt = now();
     let verdict;
     try {
       verdict = await promote(servers, sshKeyPath);
     } catch {
       verdict = 'unknown';
     }
-    // A verdict that lands past the deadline came from a promote that overran
-    // its budget; nothing after the deadline acts on it. Fence, and let the
-    // rerun resume from the journal.
-    if (verdict === 'promoted' && now() - startedAt > PROMOTE_DEADLINE_MS) verdict = 'unknown';
-
     if (verdict === 'promoted') {
       s.stop('Standby database promoted to primary');
       return;
@@ -1747,7 +1795,7 @@ export async function failoverHA(
   // unswapped config), so a mid-flow crash re-runs the SAME failover, and the
   // journal written before the promote lets that rerun resume instead of
   // promoting again. The same save clears the journal. One write, here.
-  swapRoles(envName);
+  swapRoles(envName, unproven ? { override: 'force-unproven' } : undefined);
 
   if (strategy.updateDns) {
     p.log.success('Failover complete');
@@ -1871,6 +1919,8 @@ export async function run(args) {
     // Task 10's provisioning step (provisionStandbyCapacity's
     // serverTypeOverride) — null means "use the persisted standbyWorkerSpec".
     serverType: values['server-type'] || null,
+    forceUnproven: !!values['force-unproven'],
+    allowDegraded: !!values['allow-degraded'],
   };
 
   // `-server-type` is raw operator input that goes straight to the converge as

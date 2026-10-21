@@ -30,7 +30,9 @@ vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
 }));
 
 const ssh = await import('../../../src/lib/ssh.js');
-const { failoverHA, swapHaRoles } = await import('../../../src/failover.js');
+const { confirmUnprovenFailover, failoverHA, swapHaRoles } = await import(
+  '../../../src/failover.js'
+);
 const {
   assertFailoverPreconditions,
   clearFailoverJournal,
@@ -38,7 +40,7 @@ const {
   readReplicaState,
   writeFailoverJournal,
 } = await import('../../../src/lib/deploy/failover-guard.js');
-const { PROMOTE_DEADLINE_MS, promoteStandby } = await import(
+const { PROMOTE_DEADLINE_MS, PROMOTE_SIGNAL_PATH, promoteStandby } = await import(
   '../../../src/lib/deploy/replication.js'
 );
 
@@ -86,8 +88,10 @@ interface RunOpts {
   envConfig?: Record<string, unknown>;
   /** What the promote seam resolves to. */
   promoteVerdict?: 'promoted' | 'in-recovery' | 'unknown';
-  /** Milliseconds the fake clock advances while the promote seam runs. */
-  promoteTakesMs?: number;
+  /** Flags as parsed from the command line (-force-unproven, -allow-degraded, -y). */
+  flags?: { forceUnproven?: boolean; allowDegraded?: boolean; yes?: boolean };
+  /** The system identifier the reseed seam reports through onSeeded (null: no reseed ran). */
+  seededSysid?: string | null;
 }
 
 /**
@@ -103,11 +107,11 @@ async function run(opts: RunOpts = {}) {
     primaryState = streamingStandby({ inRecovery: false, receiverStatus: null }),
     envConfig = baseEnvConfig(),
     promoteVerdict = 'promoted',
-    promoteTakesMs = 1_000,
+    flags = {},
+    seededSysid = null,
   } = opts;
   const order: string[] = [];
   const captured: Record<string, unknown> = {};
-  let clock = 1_000_000;
   let thrown: unknown;
   const servers = {
     primary: { ip: '10.0.0.1', floatingIp: '10.0.0.1', region: 'nbg1' },
@@ -128,7 +132,9 @@ async function run(opts: RunOpts = {}) {
     identify: () => servers,
     getKeyPath: () => '/fake/key',
     keyExists: () => true,
-    now: () => clock,
+    confirmUnproven: async () => {
+      order.push('confirmUnproven');
+    },
     preflight: async () => {
       order.push('preflight');
       return {
@@ -158,8 +164,14 @@ async function run(opts: RunOpts = {}) {
       else if (/scale up promoted/.test(label)) order.push('scaleUp');
       else if (/scale-down old primary/.test(label)) order.push('scaleDownOldPrimary');
     },
-    reseed: async () => {
+    reseed: async (
+      _srv: unknown,
+      _key: unknown,
+      _s: unknown,
+      o: { onSeeded?: (sysid: string) => void },
+    ) => {
       order.push('reseed');
+      if (seededSysid) o?.onSeeded?.(seededSysid);
     },
     writeJournal: async (_ctx: unknown, journal: Record<string, unknown>) => {
       captured.journal = journal;
@@ -171,7 +183,6 @@ async function run(opts: RunOpts = {}) {
     },
     promote: async () => {
       order.push('promote');
-      clock += promoteTakesMs;
       return promoteVerdict;
     },
     restoreWalgRole: async () => {
@@ -185,7 +196,8 @@ async function run(opts: RunOpts = {}) {
       order.push('promoteIssuer');
       return { patched: [] };
     },
-    swapRoles: () => {
+    swapRoles: (_env: string, o?: { override?: string }) => {
+      captured.swapOverride = o?.override;
       order.push('saveConfig');
     },
   };
@@ -195,7 +207,7 @@ async function run(opts: RunOpts = {}) {
       order.push('dns');
     },
   };
-  const parsed = { dryRun: false, yes: true, serverType: null };
+  const parsed = { dryRun: false, yes: true, serverType: null, ...flags };
   const tracker = { spinner: () => ({ start: () => {}, stop: () => {} }) };
   try {
     // biome-ignore lint/suspicious/noExplicitAny: injected test deps bag.
@@ -375,25 +387,36 @@ describe('failoverHA state matrix', () => {
     expectNoMutation(order);
   });
 
-  it.each([
-    ['unknown', 1_000],
-    ['promoted', PROMOTE_DEADLINE_MS + 1],
-  ] as const)(
-    'promote %s (after %d ms) keeps the old primary fenced and the journal set',
-    async (verdict, takesMs) => {
-      const { order, thrown } = await run({ promoteVerdict: verdict, promoteTakesMs: takesMs });
-      expect(order).toContain('quiesce');
-      expect(order).toContain('promote');
-      expect(order.filter((s) => s === 'unquiesce')).toHaveLength(0);
-      expect(order).not.toContain('clearJournal');
-      expect(thrown?.message).toMatch(/kept fenced/);
-      expect(thrown?.message).toMatch(/rerun vibecarbon failover e4 to finish/);
-      // Nothing past the promote ran on an unconfirmed promotion.
-      expect(order).not.toContain('scaleUp');
-      expect(order).not.toContain('dns');
-      expect(order).not.toContain('saveConfig');
-    },
-  );
+  it("promote 'unknown' keeps the old primary fenced and the journal set", async () => {
+    const { order, thrown } = await run({ promoteVerdict: 'unknown' });
+    expect(order).toContain('quiesce');
+    expect(order).toContain('promote');
+    expect(order.filter((s) => s === 'unquiesce')).toHaveLength(0);
+    expect(order).not.toContain('clearJournal');
+    expect(thrown?.message).toMatch(/kept fenced/);
+    expect(thrown?.message).toMatch(/rerun vibecarbon failover e4 to finish/);
+    // Nothing past the promote ran on an unconfirmed promotion.
+    expect(order).not.toContain('scaleUp');
+    expect(order).not.toContain('dns');
+    expect(order).not.toContain('saveConfig');
+  });
+
+  it("a 'promoted' verdict proceeds: promoteStandby owns the deadline, the caller does not re-time it", async () => {
+    const { order, thrown } = await run({ promoteVerdict: 'promoted' });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('dns');
+    expect(order).not.toContain('unquiesce');
+  });
+
+  it('the journal names the identifier the reseed just seeded, not the pre-reseed reading', async () => {
+    const { captured } = await run({ seededSysid: OTHER_SYSID });
+    expect((captured.journal as { systemIdentifier: string }).systemIdentifier).toBe(OTHER_SYSID);
+  });
+
+  it('without a reseed the journal keeps the verified reading', async () => {
+    const { captured } = await run({ seededSysid: null });
+    expect((captured.journal as { systemIdentifier: string }).systemIdentifier).toBe(SYSID);
+  });
 
   it("promote 'in-recovery' un-quiesces once and clears the journal", async () => {
     const { order, thrown } = await run({ promoteVerdict: 'in-recovery' });
@@ -403,6 +426,113 @@ describe('failoverHA state matrix', () => {
     expect(thrown).toBeInstanceOf(Error);
     expect(order).not.toContain('dns');
     expect(order).not.toContain('saveConfig');
+  });
+});
+
+describe('-force-unproven (dead primary, no identifier proof)', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const unprovenEnv = () => {
+    const envConfig = baseEnvConfig();
+    delete (envConfig.ha as Record<string, unknown>).systemIdentifier;
+    return envConfig;
+  };
+
+  it('refused without the flag', async () => {
+    const { order, thrown } = await run({ primaryReachable: false, envConfig: unprovenEnv() });
+    expect(thrown).toBeInstanceOf(FailoverRefusedError);
+    expectNoMutation(order);
+  });
+
+  it('proceeds with it when unplanned: confirms first, records the override in journal and swap', async () => {
+    const { order, captured, thrown } = await run({
+      primaryReachable: false,
+      envConfig: unprovenEnv(),
+      flags: { forceUnproven: true },
+    });
+    expect(thrown).toBeUndefined();
+    expect(order.indexOf('confirmUnproven')).toBeLessThan(order.indexOf('provision'));
+    expect(order).toContain('promote');
+    expect(captured.journal).toMatchObject({ override: 'force-unproven' });
+    expect(captured.swapOverride).toBe('force-unproven');
+  });
+
+  it('also skips a mismatched identifier, but never a standby out of recovery', async () => {
+    const mismatch = await run({
+      primaryReachable: false,
+      standbyState: streamingStandby({ systemIdentifier: OTHER_SYSID, receiverStatus: null }),
+      flags: { forceUnproven: true },
+    });
+    expect(mismatch.thrown).toBeUndefined();
+    const notReplica = await run({
+      primaryReachable: false,
+      envConfig: unprovenEnv(),
+      standbyState: streamingStandby({ inRecovery: false, receiverStatus: null }),
+      flags: { forceUnproven: true },
+    });
+    expect(notReplica.thrown?.message).toMatch(/not a replica/);
+    expectNoMutation(notReplica.order);
+  });
+
+  it('refused in planned mode, before any write', async () => {
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      envConfig: unprovenEnv(),
+      flags: { forceUnproven: true },
+    });
+    expect(thrown).toBeInstanceOf(FailoverRefusedError);
+    expect(thrown?.message).toMatch(/dead primary only/);
+    expect(order).not.toContain('confirmUnproven');
+    expectNoMutation(order);
+  });
+
+  it('a degraded env still refuses unless -allow-degraded is passed too', async () => {
+    const degraded = () => ({ ...unprovenEnv(), replication: 'degraded', degraded: true });
+    const without = await run({
+      primaryReachable: false,
+      envConfig: degraded(),
+      flags: { forceUnproven: true },
+    });
+    expect(without.thrown?.message).toMatch(/degraded/);
+    expectNoMutation(without.order);
+    const withFlag = await run({
+      primaryReachable: false,
+      envConfig: degraded(),
+      flags: { forceUnproven: true, allowDegraded: true },
+    });
+    expect(withFlag.thrown).toBeUndefined();
+    expect(withFlag.order).toContain('promote');
+  });
+
+  it('-allow-degraded alone is refused', async () => {
+    const { thrown, order } = await run({
+      primaryReachable: false,
+      envConfig: { ...baseEnvConfig(), replication: 'degraded' },
+      flags: { allowDegraded: true },
+    });
+    expect(thrown?.message).toMatch(/only applies together with -force-unproven/);
+    expectNoMutation(order);
+  });
+});
+
+describe('confirmUnprovenFailover', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('-y skips the typed confirmation', async () => {
+    await expect(confirmUnprovenFailover('e4', { yes: true })).resolves.toBeUndefined();
+  });
+
+  it('no TTY and no -y exits rather than hanging on a prompt', async () => {
+    const isTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('__exit__');
+    }) as never);
+    try {
+      await expect(confirmUnprovenFailover('e4', { yes: false })).rejects.toThrow('__exit__');
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: isTTY, configurable: true });
+    }
   });
 });
 
@@ -489,7 +619,11 @@ describe('readReplicaState', () => {
 });
 
 describe('promoteStandby (tri-state, deadline not poll count)', () => {
-  afterEach(() => vi.clearAllMocks());
+  afterEach(() => {
+    vi.clearAllMocks();
+    // Implementations set per test must not leak into the next one.
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockReset();
+  });
 
   const fakeTime = () => {
     let t = 0;
@@ -520,13 +654,47 @@ describe('promoteStandby (tri-state, deadline not poll count)', () => {
     expect(ssh.sshKubectl).not.toHaveBeenCalled();
   });
 
-  it("still in recovery at the deadline is 'in-recovery'", async () => {
+  it("still in recovery at the deadline withdraws promote.signal, then is 'in-recovery'", async () => {
     const time = fakeTime();
     const readState = readSeq([true]);
     const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...time });
     expect(verdict).toBe('in-recovery');
     // The deadline, not a poll count, ended the wait.
     expect(time.now()).toBeGreaterThanOrEqual(PROMOTE_DEADLINE_MS);
+    // The issued promote is cancelled before the verdict lets anyone un-fence.
+    const calls = (ssh.sshKubectl as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+      (c[2] as string[]).join(' '),
+    );
+    expect(calls[calls.length - 1]).toBe(`exec -n vibecarbon db-0 -- rm -f ${PROMOTE_SIGNAL_PATH}`);
+    expect(PROMOTE_SIGNAL_PATH).toBe('/var/lib/postgresql/data/promote.signal');
+  });
+
+  it("a promote that lands while being withdrawn is 'unknown', never 'in-recovery'", async () => {
+    // In recovery for the whole deadline; out of it on the read after the rm.
+    let rmDone = false;
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_ip: string, _k: string, argv: string[]) => {
+        if (argv.includes('rm')) rmDone = true;
+        return '';
+      },
+    );
+    const readState = vi.fn(async () => ({ inRecovery: !rmDone }));
+    const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...fakeTime() });
+    expect(verdict).toBe('unknown');
+  });
+
+  it("a failed withdraw is 'unknown'", async () => {
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_ip: string, _k: string, argv: string[]) => {
+        if (argv.includes('rm')) throw new Error('pod gone');
+        return '';
+      },
+    );
+    const verdict = await promoteStandby('10.0.0.9', '/k', {
+      readState: readSeq([true]),
+      ...fakeTime(),
+    });
+    expect(verdict).toBe('unknown');
   });
 
   it("an unreadable state at the deadline is 'unknown'", async () => {

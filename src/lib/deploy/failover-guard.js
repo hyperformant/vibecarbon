@@ -106,7 +106,11 @@ function swappedSinceLastDeploy(envConfig) {
  * @param {'compose-ha'|'k8s-ha'} args.tier
  * @param {boolean} [args.planned] the old primary answered (planned switchover)
  * @param {Awaited<ReturnType<typeof readReplicaState>>|null} [args.primaryState]
- * @returns {{ mode: 'promote'|'resume' }}
+ * @param {boolean} [args.forceUnproven] -force-unproven: unplanned only, skips the
+ *   system identifier proof (the standby must still be in recovery)
+ * @param {boolean} [args.allowDegraded] -allow-degraded: with forceUnproven only,
+ *   also accepts a standby the last deploy flagged degraded
+ * @returns {{ mode: 'promote'|'resume', unproven?: true }}
  */
 export function assertFailoverPreconditions({
   envConfig,
@@ -115,6 +119,8 @@ export function assertFailoverPreconditions({
   tier,
   planned = false,
   primaryState = null,
+  forceUnproven = false,
+  allowDegraded = false,
 }) {
   if (tier !== 'compose-ha' && tier !== 'k8s-ha') {
     throw new Error(`assertFailoverPreconditions: unknown tier ${JSON.stringify(tier)}`);
@@ -131,6 +137,20 @@ export function assertFailoverPreconditions({
     );
   }
 
+  if (forceUnproven && planned) {
+    refuse(
+      `-force-unproven is for a dead primary only. the primary is answering, so this is a ` +
+        `planned failover and the standby must prove it holds this database. drop the flag, ` +
+        `or run ${deploy} to record the proof`,
+    );
+  }
+  if (allowDegraded && !forceUnproven) {
+    refuse(
+      `-allow-degraded only applies together with -force-unproven. run ${deploy} to restore ` +
+        `streaming instead`,
+    );
+  }
+
   if (swappedSinceLastDeploy(envConfig)) {
     refuse(
       `the last failover (${envConfig.lastFailover}) swapped the roles and no deploy has ` +
@@ -139,7 +159,7 @@ export function assertFailoverPreconditions({
     );
   }
 
-  if (envConfig?.replication === 'degraded') {
+  if (envConfig?.replication === 'degraded' && !(forceUnproven && allowDegraded)) {
     refuse(
       `replication is degraded (the last deploy did not prove the standby streaming), so ` +
         `the standby may be missing writes or hold no data at all. run ${deploy} to ` +
@@ -161,6 +181,10 @@ export function assertFailoverPreconditions({
         `for it, so promoting it could serve stale or empty data. run ${deploy} to reseed it`,
     );
   }
+
+  // Past here only the identifier proof remains, which -force-unproven skips.
+  // The standby is in recovery (a replica of something); that is all it proves.
+  if (forceUnproven) return { mode: 'promote', unproven: true };
 
   const differentDatabase = (expectedId, source) =>
     refuse(
@@ -193,10 +217,13 @@ export function assertFailoverPreconditions({
  * when this names it.
  *
  * @param {{ environment: string }} ctx
- * @param {{ target: 'primary'|'standby', primaryLsn: string|null, systemIdentifier: string }} journal
+ * @param {{ target: 'primary'|'standby', primaryLsn: string|null, systemIdentifier: string, override?: 'force-unproven' }} journal
  * @returns {Promise<string>} the journal id
  */
-export async function writeFailoverJournal(ctx, { target, primaryLsn, systemIdentifier }) {
+export async function writeFailoverJournal(
+  ctx,
+  { target, primaryLsn, systemIdentifier, override },
+) {
   const config = loadProjectConfig();
   const envConfig = config?.environments?.[ctx.environment];
   if (!envConfig) {
@@ -211,6 +238,7 @@ export async function writeFailoverJournal(ctx, { target, primaryLsn, systemIden
       startedAt: new Date().toISOString(),
       primaryLsn: primaryLsn ?? null,
       systemIdentifier,
+      ...(override && { override }),
     },
   };
   saveProjectConfig(config);
@@ -245,4 +273,17 @@ export function recordSystemIdentifier(ctx, systemIdentifier) {
   if (!envConfig || !systemIdentifier) return;
   envConfig.ha = { ...(envConfig.ha ?? {}), systemIdentifier };
   saveProjectConfig(config);
+}
+
+/**
+ * The `ha` fields a deploy persists for failover's replica proof: the standby's
+ * system identifier, only when this deploy verified streaming. A degraded deploy
+ * records nothing, so an unplanned failover refuses until one proves it.
+ *
+ * @param {{ replicationStatus?: string, systemIdentifier?: string|null }} deployResult
+ * @returns {{ systemIdentifier?: string }}
+ */
+export function haSeedRecord(deployResult) {
+  const { replicationStatus, systemIdentifier } = deployResult ?? {};
+  return replicationStatus === 'streaming' && systemIdentifier ? { systemIdentifier } : {};
 }

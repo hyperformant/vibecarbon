@@ -1688,6 +1688,9 @@ export async function reseedStandbyFromPrimary(
  */
 export const PROMOTE_DEADLINE_MS = 120_000;
 
+/** The file `pg_ctl promote` drops in PGDATA; removing it withdraws the promote. */
+export const PROMOTE_SIGNAL_PATH = '/var/lib/postgresql/data/promote.signal';
+
 /**
  * A psql runner for the k8s db pod: `exec(sql) -> Promise<string>`, the shape
  * failover-guard's readReplicaState takes.
@@ -1718,7 +1721,8 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
 /**
  * Promote the standby database (k8s transport) and report what happened:
  *   - 'promoted': it was seen IN recovery before the promote, then out of it;
- *   - 'in-recovery': still a replica when the deadline lapsed (nothing promoted);
+ *   - 'in-recovery': still a replica when the deadline lapsed, and still one
+ *     after promote.signal was withdrawn (nothing promoted, nothing pending);
  *   - 'unknown': anything else, including a first reading that is already out
  *     of recovery (that is not proof THIS call promoted it, so pg_ctl promote
  *     is not even issued) and an unreadable state at the deadline.
@@ -1787,7 +1791,26 @@ export async function promoteStandby(
     if (now() >= deadline) break;
     await sleep(pollMs);
   }
-  return last === true ? 'in-recovery' : 'unknown';
+  if (last !== true) return 'unknown';
+  // Still a replica at the deadline, but pg_ctl promote left promote.signal in
+  // PGDATA and the startup process may yet act on it. Withdraw it, then read
+  // once more: 'in-recovery' (which lets the caller un-fence the old primary)
+  // is only true if the promote can no longer land.
+  try {
+    await sshKubectl(standbyIp, sshKeyPath, [
+      'exec',
+      '-n',
+      'vibecarbon',
+      pod,
+      '--',
+      'rm',
+      '-f',
+      PROMOTE_SIGNAL_PATH,
+    ]);
+  } catch {
+    return 'unknown';
+  }
+  return (await read()) === true ? 'in-recovery' : 'unknown';
 }
 
 /**

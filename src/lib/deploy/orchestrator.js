@@ -42,6 +42,7 @@ import { completionSummaryLines, entryIpFor } from './completion-summary.js';
 import { assertNoComposeHaRoleSwap } from './compose/ha-role-swap.js';
 import { workingTreeDirty } from './delta.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
+import { haSeedRecord } from './failover-guard.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
@@ -1971,9 +1972,7 @@ export async function executeDeployment(args, gatheredConfig) {
             // verified streaming. failover's replica proof (R1) compares the
             // standby against it; a deploy that could not prove streaming
             // leaves it unset, so an unplanned failover refuses until one does.
-            ...(deployResult?.systemIdentifier && {
-              systemIdentifier: deployResult.systemIdentifier,
-            }),
+            ...haSeedRecord(deployResult),
             ...(deployResult.primary && {
               primary: {
                 masterIp: deployResult.primary.masterIp,
