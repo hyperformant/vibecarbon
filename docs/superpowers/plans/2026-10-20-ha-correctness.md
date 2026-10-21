@@ -14,29 +14,29 @@
 
 **Spec:** the review `/tmp/claude-1000/-home-brandon-repos-vibecarbon/0b7ee7cd-7067-44f6-a72a-5ce5d7505b2c/scratchpad/arch-review/ha.md` (findings C1, C2, H1-H5, M1-M3, L1). Brandon, 2026-10-20: "ensure that all our outstanding issues are fully RCA'd and resolved."
 
-**Stacks on:** `feat/project-app-bucket` (7de7f0d).
+**Stacks on:** `feat/security-hardening` (3e0308e, PR #234), which sits on main 63c1bad (PR #233, one app bucket per environment). References were re-verified on 3e0308e (2026-10-20 refresh); the original verification below was done on 7de7f0d and its line numbers are updated in place.
 
-## Verification of the review (done while planning, branch @ 7de7f0d)
+## Verification of the review (done on 7de7f0d, line refs refreshed on 3e0308e)
 
 All 10 findings hold; none dropped. Corrections and additions:
 - **C1, confirmed.**
-  - `failover.js:251` skips reseed and promote on `isStandbyPromoted()`, and `replication.js:1776` is `pg_is_in_recovery() = 'f'` alone.
+  - `failover.js:251` skips reseed and promote on `isStandbyPromoted()`, and `isStandbyPromoted` (`replication.js:1759`) is `pg_is_in_recovery() = 'f'` alone.
   - `promoteStandby` returns on the first `'f'` (`replication.js:1697`).
-  - Compose accepts `probeRecovery() === 'f'` after a failed `pg_promote` (`compose/ha.js:1533,1542`).
+  - Compose accepts `probeRecovery() === 'f'` after a failed `pg_promote` (`probeRecovery` at `compose/ha.js:1534`, the accepts at `:1572,1581`).
   - `waitForStandbyCaughtUp` returns early when not streaming (`failover.js:358`).
   - `grep "replication === 'degraded'" src/failover.js` returns nothing. The flag is only written (`:1266`), never read.
 - **C2, confirmed.**
-  - `effects/compose-ha.js:744-745` binds `WG_PRIMARY_IP` to the born-primary node.
-  - `configureStandbyReplication` dials `WG_PRIMARY_IP` (`compose/ha.js:527,537`).
-  - `detectComposeHaRoleSwap` is called only from `orchestrator.js:585` (deploy), not from `failoverComposeHA` (`:1352`) or `restore.js:575`.
-- **H1, confirmed.** `compose/ha.js` contains no `pg_wal_lsn_diff` or `pg_last_wal_replay_lsn` (0 matches). The old primary's `docker stop` is at `:1702`, after promote.
+  - `effects/compose-ha.js:729-730` binds `WG_PRIMARY_IP` to the born-primary node.
+  - `configureStandbyReplication` dials `WG_PRIMARY_IP` (`compose/ha.js:528,538`).
+  - `detectComposeHaRoleSwap` lives in `compose/ha-role-swap.js:105`, and its `assertNoComposeHaRoleSwap` (`:169`) is called only from `orchestrator.js:522` (deploy), not from `failoverComposeHA` (`compose/ha.js:1391`) or `restore.js:575`. `restore.js` already imports `composeHaStandbyResyncHint` (`:33`) but only prints it after a FAILED reseed (`:579-582`); it still calls `configureStandbyReplication` on a swapped env.
+- **H1, confirmed.** `compose/ha.js` contains no `pg_wal_lsn_diff` or `pg_last_wal_replay_lsn` (0 matches). The old primary's `docker stop` is at `:1741`, after promote.
 - **H2, confirmed.** `createDNSRecord` (`cloudflare-dns.js:110-156`) has 0 `.ok` checks.
 - **H3, confirmed.** The `return { ok: false }` at `failover.js:~1328` precedes the demotion at `~1341`.
 - **H4, confirmed.** `planned = await isPrimaryReady(...)` (`failover.js:1514`) is an operator-vantage probe.
 - **H5, confirmed.** `max_slot_wal_keep_size` has 0 matches in `src carbon docker`, and `repl-gateway.yaml:28` is `kind: Pod`.
-- **M1, confirmed, with one correction.** `wal_level` and `hot_standby` are in argv (`carbon/docker-compose.yml:145,191`; `statefulset.yaml:277,292`), but `max_wal_senders` and `wal_keep_size` are not. `primary-init.sql:25-27` sets all three via `ALTER SYSTEM`.
+- **M1, confirmed, with one correction.** `wal_level` and `hot_standby` are in argv (`carbon/docker-compose.yml:199,245`; `statefulset.yaml:282,297`), but `max_wal_senders` and `wal_keep_size` are not. `primary-init.sql:25-27` sets all three via `ALTER SYSTEM`.
   - Correction: `wal_keep_size` is reloadable, and `max_wal_senders` defaults to 10 (≥ 5), so no restart is needed. Move `wal_keep_size` to argv too, so the settings live in one place.
-  - The k8s restart is `kubectl delete pod db-0` (`k8s/ha/index.js:~606`), with a silent `if (i === 29) break` at `~631`. Compose runs `docker compose restart db` (`compose/ha.js:400`).
+  - The k8s restart is `kubectl delete pod ${DB_POD}` (`k8s/ha/index.js:608`), with a silent `if (i === 29) break` at `:633`. Compose runs `docker compose restart db` (`compose/ha.js:401`).
 - **M2, confirmed.** The census `FILES` covers 2 files (`db-sts-boot-timeout-census.test.ts:35`), `k8sDbRolloutStatusArgv(timeoutSeconds = 300)` (`walg-role.js:266`), and `restore.js:673` uses `--timeout=120s`.
 - **M3, confirmed.** The polls are 30 × 2 s. Task 1 folds it in: budgets then only affect RTO.
 - **L1, confirmed.** `effects/k8s-ha.js:671-672` prints `--target`.
@@ -83,6 +83,12 @@ All 10 findings hold; none dropped. Corrections and additions:
 
     This plan does not touch those. R7's backup refusal is the one shared seam: this plan adds the retired check; that plan owns exit-code semantics.
   - **`2026-10-20-primary-only-addons.md`** stops n8n on the retired compose primary (its Task 4) and starts add-ons on promotion. R7's `reconcileRetiredFence` must call that plan's `zeroWorkloadsOnStandby` when present. If this plan lands first, it zeroes `app` only, and the addons plan extends the reconciler.
+  - **Landed since planning (security #234, bucket #233), checked on 3e0308e:** no HA finding was fixed by that work, so no task is dropped. Interactions:
+    - compose promotion restarts only `app`; `app-migrate` is not re-run on the promoted standby (it was a replica of an already-migrated primary), so Tasks 2-3 must not add an `app-migrate` run to failover.
+    - k8s: the app Deployment now has a `migrate` init container and a `vibecarbon.dev/app-secrets-sha` pod annotation set by one strategic-merge patch in `applyK3sManifests`. Task 5's demotion (`WALG_ROLE` on the db StatefulSet) and Task 6's `reconcileRetiredFence` (app scale 0) do not touch that patch; scaling the retired side's app to 0 must use `kubectl scale`, never a `set image`/patch that would roll pods.
+    - WireGuard firewall rules are now reconciled per peer on every provider (`base.js` `replaceWireguardPeerRules`, compose `openWireguardPortUfw`). R4's compose refusal stands; nothing here re-addresses WireGuard.
+    - Per-env WAL-G folders (`backups/<project>/<env>/walg`): R7's retired check refuses before any push, independent of the prefix.
+  - **`2026-10-20-cold-deploy-speed.md` Task 6** (seed-standby init removal, event-triggered transport, primary replication config on db-Ready) edits the same k8s replication setup as Task 8 (`k8s/ha/index.js` `setupReplication`/`configurePrimaryForReplication`) and `effects/compose-ha.js`. Execution order is now HA before speed, so speed Task 6 rebases onto Task 8: it inherits reload-not-restart and the shared streaming-probe helper, and touches only deploy-time timing.
   - **`2026-10-20-k8s-ha-registry-copy.md`** adds a "standby registry has the app image" refusal. It extends `assertFailoverPreconditions` from Task 1 rather than adding its own gate.
 
 ## Global Constraints
@@ -134,8 +140,8 @@ All 10 findings hold; none dropped. Corrections and additions:
 **Files:**
 - Create: `src/lib/deploy/failover-guard.js`.
 - Modify:
-  - `src/failover.js`: `reseedAndPromoteOrAbort` (~:247) and the promote/abort block (~:1514-1560);
-  - `src/lib/deploy/replication.js`: delete `isStandbyPromoted` (:1759); make `promoteStandby` (:1660-1700) return `'promoted'|'in-recovery'|'unknown'`, never inferring promotion from a first `'f'` without a prior `'t'`;
+  - `src/failover.js`: `reseedAndPromoteOrAbort` (:246) and the promote/abort block (~:1514-1560);
+  - `src/lib/deploy/replication.js`: delete `isStandbyPromoted` (:1759); make `promoteStandby` (:1661-1700) return `'promoted'|'in-recovery'|'unknown'`, never inferring promotion from a first `'f'` without a prior `'t'`;
   - every reseed and verified-streaming success path in `replication.js` and `k8s/ha/index.js` records `envConfig.ha.systemIdentifier`.
 - Test: `tests/unit/failover/failover-state-matrix.test.ts` (new) and `tests/unit/failover/promote-inference-census.test.ts` (new).
 
@@ -147,7 +153,7 @@ All 10 findings hold; none dropped. Corrections and additions:
   - `FailoverRefusedError` (exported class).
 - Consumed by: Task 2 (compose), Task 6 (`classifyFailover` is added to this module), and the registry-copy plan (extends `assertFailoverPreconditions`).
 
-- [ ] **Step 1: Write the failing matrix test.** Drive `failoverHA` with injected deps (the existing `deps` seam at `failover.js:~1384`) through these fixtures.
+- [ ] **Step 1: Write the failing matrix test.** Drive `failoverHA` (`failover.js:1369`) with injected deps (the existing `deps` parameter, destructured at `:1376-1392`) through these fixtures.
   - `{inRecovery:true, sysid matches, not degraded}`: promotes. The journal is written before the promote seam, and cleared in the swap save.
   - `{inRecovery:false, journal names this target}`: `mode 'resume'`. No reseed seam, no promote seam; DNS and swap seams are called.
   - `{inRecovery:false, no journal}`: throws `FailoverRefusedError` matching `/not a replica/`. Zero quiesce and zero kubectl write calls.
@@ -171,8 +177,8 @@ All 10 findings hold; none dropped. Corrections and additions:
 
 **Files:**
 - Modify:
-  - `src/lib/deploy/compose/ha.js`: in `failoverComposeHA` (:1352), call `assertNoComposeHaRoleSwap` and `assertFailoverPreconditions` first. In the promote loop (:1510-1550), accept "promoted" only if `readReplicaState` returned `inRecovery:true` immediately before `pg_promote`, or the journal names this target. Write and clear the journal.
-  - `src/restore.js:~571-575`: call `detectComposeHaRoleSwap` before the standby resync. When it detects a swap, skip the resync and print `composeHaStandbyResyncHint`. Never call `configureStandbyReplication`.
+  - `src/lib/deploy/compose/ha.js`: in `failoverComposeHA` (:1391), call `assertNoComposeHaRoleSwap` and `assertFailoverPreconditions` first. In the promote loop (:1500-1590), accept "promoted" only if `readReplicaState` returned `inRecovery:true` immediately before `pg_promote`, or the journal names this target. Write and clear the journal.
+  - `src/restore.js:568-582`: call `detectComposeHaRoleSwap` before the standby resync. When it detects a swap, skip the resync and print `composeHaStandbyResyncHint` (already imported at `:33`; today it is only printed after a failed reseed). Never call `configureStandbyReplication` on a swapped env.
 - Test: `tests/unit/failover/compose-failover-state-matrix.test.ts` (new) and `tests/unit/deploy/configure-standby-replication-callers-census.test.ts` (new).
 
 **Interfaces:**
@@ -182,7 +188,7 @@ All 10 findings hold; none dropped. Corrections and additions:
   - The Task 1 matrix rows (refusals, resume, unknown, fence), against `failoverComposeHA` with injected ssh.
   - A swapped fixture (born-primary role `standby`) makes `failoverComposeHA` throw before any `sshRun*` call.
   - `restore` on a swapped env never calls `configureStandbyReplication` and prints the hint.
-  - Census: every call site of `configureStandbyReplication(` in `src/` is either `effects/compose-ha.js` (guarded by `orchestrator.js:585`) or calls `detectComposeHaRoleSwap`/`assertNoComposeHaRoleSwap` earlier in the same function. Show it fails by deleting the new guard in `restore.js`.
+  - Census: every call site of `configureStandbyReplication(` in `src/` is either `effects/compose-ha.js` (guarded by `orchestrator.js:522`) or calls `detectComposeHaRoleSwap`/`assertNoComposeHaRoleSwap` earlier in the same function. Show it fails by deleting the new guard in `restore.js`.
 - [ ] **Step 2: Run** `pnpm vitest run tests/unit/failover tests/unit/deploy/configure-standby-replication-callers-census.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement** as listed.
 - [ ] **Step 4: Run the same command.** Expected: PASS.
@@ -213,7 +219,7 @@ All 10 findings hold; none dropped. Corrections and additions:
 - Modify:
   - `src/lib/cloudflare-dns.js`: `createDNSRecord` (:110-156) and `createHealthCheck` (:355-383) throw on `!response.ok || json.success === false`. Use the error shape the vultr/do/linode backends use, never including the token.
   - Every `src/lib/*-dns.js`: export `readARecord(apiToken, zoneRef, name) -> Promise<string|null>`.
-  - `src/failover.js:~1644-1664` and `src/lib/deploy/compose/ha.js:~1758-1770`: implement R5. Read back, persist the swap, then throw `FailoverDnsError` when the flip failed or the read-back mismatches. A missing DNS token also ends in a non-zero exit.
+  - `src/failover.js:~1644-1664` and `src/lib/deploy/compose/ha.js:~1784-1810` (Step 3 DNS flip, `upsertApexAndWildcard`): implement R5. Read back, persist the swap, then throw `FailoverDnsError` when the flip failed or the read-back mismatches. A missing DNS token also ends in a non-zero exit.
 - Test:
   - `tests/unit/dns/dns-mutation-status-census.test.ts` (new);
   - `tests/unit/dns/cloudflare-create-record.test.ts` (new);
@@ -234,7 +240,7 @@ All 10 findings hold; none dropped. Corrections and additions:
 ### Task 5: k8s old-primary demotion is independent of the promoted side's outcome (H3)
 
 **Files:**
-- Modify: `src/failover.js` `restorePromotedWalgRole` (:1295-1352). Demote the old primary in a `finally`, and return `{ promoted: {ok, error?}, demoted: {ok, error?} }`. The caller's banner reports each verdict.
+- Modify: `src/failover.js` `restorePromotedWalgRole` (~:1290-1350). Demote the old primary in a `finally`, and return `{ promoted: {ok, error?}, demoted: {ok, error?} }`. The caller's banner reports each verdict.
 - Test: `tests/unit/failover/walg-role-demotion-independent.test.ts` (new).
 
 - [ ] **Step 1: Failing test.**
@@ -251,7 +257,7 @@ All 10 findings hold; none dropped. Corrections and additions:
 - Create: `src/lib/deploy/retired-fence.js`.
 - Modify:
   - `failover-guard.js`: add `classifyFailover`.
-  - `src/failover.js:1514` and `compose/ha.js`'s reachability check: use `classifyFailover`. Add the `-force-unplanned` flag to the `failover` SPEC (`failover.js:82-99`), with help text in the CLI voice.
+  - `src/failover.js:1514` and `compose/ha.js`'s reachability check: use `classifyFailover`. Add the `-force-unplanned` flag to the `failover` SPEC (`failover.js:65`), with help text in the CLI voice.
   - `carbon/k8s/base/backup/cronjob.yaml`, `carbon/backup/compose-backup.sh`, `carbon/volumes/db/wal-archive.sh` and its configmap copy (keep the parity test green): exit 1 with `retired node: backups refused` when the marker is set.
   - `src/status.js`, `src/failover.js`, the deploy orchestrator entry: call `reconcileRetiredFence` before other work for HA envs.
 - Test: `tests/unit/failover/classify-failover.test.ts`, `tests/unit/deploy/retired-fence.test.ts`, `tests/unit/deploy/retired-fence-entrypoints-census.test.ts` (all new).
@@ -279,8 +285,8 @@ All 10 findings hold; none dropped. Corrections and additions:
 **Files:**
 - Modify:
   - `carbon/docker-compose.yml` and `carbon/k8s/base/db/statefulset.yaml`: add `max_slot_wal_keep_size=4GB`, `wal_keep_size=512MB` and `max_wal_senders=10` to argv (R9).
-  - `carbon/k8s/base/repl-gateway/repl-gateway.yaml`: `kind: Deployment`, `replicas: 1`, same pod spec. Update the re-render in `k8s/ha/index.js:191-216` to `kubectl rollout restart` or apply rather than delete-recreate the bare Pod.
-  - `demoteComposeWalgRole` (`compose/ha.js:1314`) and the k8s demotion: `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE NOT active`.
+  - `carbon/k8s/base/repl-gateway/repl-gateway.yaml`: `kind: Deployment`, `replicas: 1`, same pod spec. Update the re-render in `k8s/ha/index.js:~185-220` (`applyGatewayPod`, its delete-and-reapply fallback at `:211`) to apply the Deployment rather than delete-recreate the bare Pod. Keep `hostNetwork: true` and the relay target `TCP:127.0.0.1:${REPL_PORT}` (`:91`): security #234 bound the db hostPort to `hostIP: 127.0.0.1` (`buildDbHostPortPatch`), and the hostNetwork gateway is its only consumer. repl-gateway is CLI-rendered, not in `k8s/base`; if it ever moves into base it must be Flux-stripped and carry `kustomize.toolkit.fluxcd.io/prune: disabled` (the #234 census enforces that).
+  - `demoteComposeWalgRole` (`compose/ha.js:1353`) and the k8s demotion: `SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE NOT active`.
   - `src/status.js`: an HA row `replication slot: <wal_status>, <retained MB> retained`. `lost` renders as an error with `run vibecarbon deploy <env> to reseed`.
   - Deploy: when `wal_status = 'lost'`, drop, recreate and reseed (the existing reseed path).
 - Test:
@@ -300,9 +306,9 @@ All 10 findings hold; none dropped. Corrections and additions:
 **Files:**
 - Modify:
   - `carbon/ha/primary-init.sql`: delete lines 25-27. Keep the role and slot SQL, and end with `SELECT pg_reload_conf();`.
-  - `src/lib/deploy/compose/ha.js:387-403`: delete `docker compose restart db`, and reload instead.
+  - `src/lib/deploy/compose/ha.js:~387-405` (`configurePrimaryReplication`, the restart at `:401`): delete `docker compose restart db`, and reload instead.
   - `src/lib/deploy/k8s/ha/index.js:~595-640`: delete the `delete pod db-0` block, the silent wait loop and the app `rollout restart`. Reload instead.
-  - `src/lib/deploy/effects/compose-ha.js:811`: call `configureStandbyReplication` only when the standby is not verifiably streaming from the current primary. Use the same probe k8s `setupReplication` uses (`k8s/ha/index.js:789-810`), extracted to a shared helper with an exec-backend closure.
+  - `src/lib/deploy/effects/compose-ha.js:796`: call `configureStandbyReplication` only when the standby is not verifiably streaming from the current primary. Use the same probe k8s `setupReplication` uses (`k8s/ha/index.js:789-810`), extracted to a shared helper with an exec-backend closure.
 - Test: `tests/unit/deploy/no-warm-primary-restart-census.test.ts` (new); a compose streaming fast-path unit test.
 
 - [ ] **Step 1: Failing tests.**
