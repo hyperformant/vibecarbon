@@ -302,9 +302,8 @@ spec:
               containerPort: 5432
               protocol: TCP
           env:
-            # The official image's superuser. The app connects as it too
-            # (DB_USER defaults to postgres): its startup migrations create the
-            # pg_cron extension and the app_user role, which takes a superuser.
+            # The official image's superuser. Only the db and the app's
+            # migrate init container use it; the app connects as app_service.
             - name: POSTGRES_USER
               value: postgres
             - name: POSTGRES_PASSWORD

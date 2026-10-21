@@ -244,7 +244,7 @@ vibecarbon deploy <env> -mode k8s -restore 2026-08-05T14:30:00Z -y
 ### What actually happens
 
 1. Pulumi provisions fresh nodes, firewalls, and S3 bindings as on any cold
-   deploy; the restore target is stamped into the `vibecarbon-secrets` Secret
+   deploy; the restore target is stamped into the `vibecarbon-infra-secrets` Secret
    as `RESTORE_TARGET` (empty on normal boots, making the next step a no-op).
 2. The database StatefulSet's `walg-restore` init container
    (`carbon/k8s/base/db/statefulset.yaml`) sees `RESTORE_TARGET`, clears
