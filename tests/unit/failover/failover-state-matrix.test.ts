@@ -94,6 +94,16 @@ interface RunOpts {
   flags?: { forceUnproven?: boolean; allowDegraded?: boolean; yes?: boolean };
   /** The system identifier the reseed seam reports through onSeeded (null: no reseed ran). */
   seededSysid?: string | null;
+  /** The catch-up gate throws (a streaming standby missed the deadline). */
+  catchUpThrows?: boolean;
+  /** What the catch-up gate reports (default: caught up). */
+  caughtUp?: boolean;
+  /** The quiesced pods never go away. */
+  quiesceUnconfirmed?: boolean;
+  /** The database write fence cannot be proven. */
+  fenceThrows?: boolean;
+  /** The reseeded standby still carries the fence. */
+  standbyFenced?: boolean;
 }
 
 /**
@@ -112,6 +122,11 @@ async function run(opts: RunOpts = {}) {
     promoteThrows = false,
     flags = {},
     seededSysid = null,
+    catchUpThrows = false,
+    caughtUp = true,
+    quiesceUnconfirmed = false,
+    fenceThrows = false,
+    standbyFenced = false,
   } = opts;
   const order: string[] = [];
   const captured: Record<string, unknown> = {};
@@ -159,7 +174,26 @@ async function run(opts: RunOpts = {}) {
     },
     catchUp: async () => {
       order.push('catchup');
-      return { caughtUp: true, lagBytes: 0, primaryLsn: '0/3000060' };
+      if (catchUpThrows) throw new Error('zero-data-loss gate: the standby did not replay');
+      return { caughtUp, lagBytes: caughtUp ? 0 : null, primaryLsn: '0/3000060' };
+    },
+    confirmQuiesced: async () => {
+      order.push('quiesceConfirmed');
+      return quiesceUnconfirmed
+        ? { ok: false, remaining: ['app'] }
+        : { ok: true, remaining: [] as string[] };
+    },
+    fenceWrites: async () => {
+      order.push('dbFence');
+      if (fenceThrows) throw new Error('write fence: 1 client session(s) outlived it');
+    },
+    unfenceWrites: async () => {
+      order.push('dbUnfence');
+      return true;
+    },
+    assertUnfenced: async () => {
+      order.push('assertUnfenced');
+      if (standbyFenced) throw new Error('the reseeded standby carries the write fence');
     },
     scale: async (_ip: string, _key: string, _list: unknown, _replicas: unknown, label: string) => {
       if (/un-quiesce/.test(label)) order.push('unquiesce');
@@ -171,9 +205,10 @@ async function run(opts: RunOpts = {}) {
       _srv: unknown,
       _key: unknown,
       _s: unknown,
-      o: { onSeeded?: (sysid: string) => void },
+      o: { onSeeded?: (sysid: string) => void; mustReseed?: boolean },
     ) => {
       order.push('reseed');
+      captured.mustReseed = o?.mustReseed;
       if (seededSysid) o?.onSeeded?.(seededSysid);
     },
     writeJournal: async (_ctx: unknown, journal: Record<string, unknown>) => {
@@ -228,6 +263,8 @@ async function run(opts: RunOpts = {}) {
 const MUTATIONS = [
   'provision',
   'quiesce',
+  'dbFence',
+  'dbUnfence',
   'unquiesce',
   'reseed',
   'journal',
@@ -245,6 +282,72 @@ function expectNoMutation(order: string[]) {
 
 describe('failoverHA state matrix', () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it('planned: quiesce, proven pods gone, then the database fence, all before the catch-up gate', async () => {
+    const { order, thrown } = await run();
+    expect(thrown).toBeUndefined();
+    expect(order.indexOf('quiesce')).toBeLessThan(order.indexOf('quiesceConfirmed'));
+    expect(order.indexOf('quiesceConfirmed')).toBeLessThan(order.indexOf('dbFence'));
+    expect(order.indexOf('dbFence')).toBeLessThan(order.indexOf('catchup'));
+    expect(order).not.toContain('dbUnfence');
+  });
+
+  it('an unconfirmed quiesce aborts before the database fence and the gate, and lifts it on a first run', async () => {
+    const { order, thrown } = await run({ quiesceUnconfirmed: true });
+    expect(thrown?.message).toMatch(/quiesced app tier on the primary did not stop/);
+    expect(thrown?.message).toContain('rerun vibecarbon failover e4');
+    expect(order).not.toContain('dbFence');
+    expect(order).not.toContain('dbUnfence');
+    expect(order).not.toContain('catchup');
+    expect(order).not.toContain('promote');
+    expect(order).toContain('unquiesce');
+  });
+
+  it('a database fence that cannot be proven aborts and lifts the fence (database first) on a first run', async () => {
+    const { order, thrown } = await run({ fenceThrows: true });
+    expect(thrown?.message).toMatch(/^Failover aborted: write fence/);
+    expect(order).not.toContain('catchup');
+    expect(order.indexOf('dbUnfence')).toBeLessThan(order.indexOf('unquiesce'));
+  });
+
+  it('journal at entry + catch-up throws: the primary stays quiesced and fenced', async () => {
+    const { order, thrown } = await run({
+      catchUpThrows: true,
+      envConfig: baseEnvConfig({
+        ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
+      }),
+    });
+    expect(thrown?.message).toMatch(/zero-data-loss gate/);
+    expect(order).not.toContain('unquiesce');
+    expect(order).not.toContain('dbUnfence');
+    expect(order).not.toContain('promote');
+  });
+
+  it('first run + catch-up throws: un-fences the database, then un-quiesces', async () => {
+    const { order, thrown } = await run({ catchUpThrows: true });
+    expect(thrown?.message).toMatch(/zero-data-loss gate/);
+    expect(order.indexOf('dbUnfence')).toBeLessThan(order.indexOf('unquiesce'));
+  });
+
+  it('a standby the gate found not streaming must be reseeded, and the reseed is proven free of the fence', async () => {
+    const { order, captured, thrown } = await run({ caughtUp: false, seededSysid: SYSID });
+    expect(thrown).toBeUndefined();
+    expect(captured.mustReseed).toBe(true);
+    expect(order.indexOf('reseed')).toBeLessThan(order.indexOf('assertUnfenced'));
+    expect(order.indexOf('assertUnfenced')).toBeLessThan(order.indexOf('journal'));
+  });
+
+  it('a reseeded standby that still carries the fence aborts before the journal', async () => {
+    const { order, thrown } = await run({
+      caughtUp: false,
+      seededSysid: SYSID,
+      standbyFenced: true,
+    });
+    expect(thrown?.message).toMatch(/carries the write fence/);
+    expect(order).not.toContain('journal');
+    expect(order).not.toContain('promote');
+    expect(order).toContain('unquiesce');
+  });
 
   it('a proven replica (in recovery, sysid matches, not degraded) promotes; journal first, cleared by the swap save', async () => {
     const { order, captured, thrown } = await run();

@@ -123,8 +123,12 @@ interface RunOpts {
   flags?: { forceUnproven?: boolean; allowDegraded?: boolean };
   /** The catch-up gate throws (a streaming standby missed the deadline). */
   catchUpThrows?: boolean;
-  /** The pre-promote fence (docker stop) cannot be confirmed. */
+  /** The pre-promote writer stop (docker stop) cannot be confirmed. */
   fenceFails?: boolean;
+  /** The database write fence cannot be proven. */
+  dbFenceThrows?: boolean;
+  /** The reseeded standby still carries the fence. */
+  standbyFenced?: boolean;
   /** Pass no seams at all (the real ssh-backed defaults run). */
   noSeams?: boolean;
 }
@@ -141,6 +145,8 @@ async function run(opts: RunOpts = {}) {
     flags = {},
     catchUpThrows = false,
     fenceFails = false,
+    dbFenceThrows = false,
+    standbyFenced = false,
     noSeams = false,
   } = opts;
   const order: string[] = [];
@@ -187,14 +193,32 @@ async function run(opts: RunOpts = {}) {
       const streaming = await o.isStreaming();
       return { caughtUp: streaming, lagBytes: streaming ? 0 : null, primaryLsn: '0/3000060' };
     },
+    stopWriters: async (ip: string) => {
+      order.push('stopWriters');
+      captured.stoppedIp = ip;
+      return { ok: !fenceFails, stopped: ['myapp-app'] };
+    },
+    fenceWrites: async () => {
+      order.push('dbFence');
+      if (dbFenceThrows) throw new Error('write fence: 1 client session(s) outlived it');
+    },
+    unfenceWrites: async () => {
+      order.push('dbUnfence');
+      return true;
+    },
+    startWriters: async (ip: string, _k: string, containers: string[]) => {
+      order.push('startWriters');
+      captured.startedIp = ip;
+      captured.started = containers;
+      return true;
+    },
+    assertUnfenced: async () => {
+      order.push('assertUnfenced');
+      if (standbyFenced) throw new Error('the reseeded standby carries the write fence');
+    },
     fenceOldPrimary: async (ip: string) => {
       order.push('fence');
       captured.fencedIp = ip;
-      return !fenceFails;
-    },
-    unfenceOldPrimary: async (ip: string) => {
-      order.push('unfence');
-      captured.unfencedIp = ip;
       return true;
     },
     confirmUnproven: async () => {
@@ -226,7 +250,17 @@ async function run(opts: RunOpts = {}) {
 }
 
 /** Steps a refusal must never reach. */
-const MUTATIONS = ['reseed', 'journal', 'promote', 'fence', 'unfence', 'swap'];
+const MUTATIONS = [
+  'stopWriters',
+  'dbFence',
+  'dbUnfence',
+  'startWriters',
+  'reseed',
+  'journal',
+  'promote',
+  'fence',
+  'swap',
+];
 function expectNoMutation(order: string[]) {
   for (const step of MUTATIONS) expect(order, `refusal reached ${step}`).not.toContain(step);
   expect(sshCalls, 'a refusal ran a remote command').toEqual([]);
@@ -416,10 +450,13 @@ describe('failoverComposeHA state matrix', () => {
     });
     expect(thrown).toBeUndefined();
     expect(captured.reseedArgs).toEqual([STANDBY_IP, PRIMARY_IP]);
-    // Reseeded from the FENCED primary, after the gate found it not streaming.
-    expect(order.indexOf('fence')).toBeLessThan(order.indexOf('catchUp'));
+    // Reseeded from the FENCED primary, after the gate found it not streaming,
+    // and proven free of the fence the basebackup copied, before the journal.
+    expect(order.indexOf('dbFence')).toBeLessThan(order.indexOf('catchUp'));
     expect(order.indexOf('catchUp')).toBeLessThan(order.indexOf('reseed'));
     expect(order.indexOf('reseed')).toBeLessThan(order.indexOf('recordSeeded'));
+    expect(order.indexOf('reseed')).toBeLessThan(order.indexOf('assertUnfenced'));
+    expect(order.indexOf('assertUnfenced')).toBeLessThan(order.indexOf('journal'));
     expect(captured.recordedSysid).toBe(SYSID);
     expect((captured.journal as { systemIdentifier: string }).systemIdentifier).toBe(SYSID);
   });
@@ -439,8 +476,9 @@ describe('failoverComposeHA state matrix', () => {
     expect(thrown?.message).toMatch(/re-seed/);
     expect(order).not.toContain('journal');
     expect(order).not.toContain('promote');
-    // Nothing was promoted: the old primary's app is started again.
-    expect(order.indexOf('unfence')).toBeGreaterThan(order.indexOf('reseed'));
+    // Nothing was promoted: the fence is lifted, database first.
+    expect(order.indexOf('dbUnfence')).toBeGreaterThan(order.indexOf('reseed'));
+    expect(order.indexOf('startWriters')).toBeGreaterThan(order.indexOf('dbUnfence'));
   });
 
   it('-force-unproven on a dead primary confirms first and records the override in the journal and swap', async () => {
@@ -455,63 +493,93 @@ describe('failoverComposeHA state matrix', () => {
 });
 
 describe('failoverComposeHA planned fence and catch-up (H1)', () => {
-  it('planned: fences the old primary before the gate, journals its LSN, and never un-fences on a proven promote', async () => {
+  const journaled = () =>
+    baseEnvConfig({ ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } } });
+
+  it('planned: stops the writers, fences the database, then the gate; journals the LSN and never un-fences on a proven promote', async () => {
     const { order, captured, thrown } = await run({ primaryReachable: true });
     expect(thrown).toBeUndefined();
-    expect(captured.fencedIp).toBe(PRIMARY_IP);
-    expect(order.indexOf('fence')).toBeLessThan(order.indexOf('catchUp'));
+    expect(captured.stoppedIp).toBe(PRIMARY_IP);
+    expect(order.indexOf('stopWriters')).toBeLessThan(order.indexOf('dbFence'));
+    expect(order.indexOf('dbFence')).toBeLessThan(order.indexOf('catchUp'));
     expect(order.indexOf('catchUp')).toBeLessThan(order.indexOf('journal'));
     expect((captured.journal as { primaryLsn: string }).primaryLsn).toBe('0/3000060');
     expect(order).not.toContain('reseed');
-    expect(order).not.toContain('unfence');
-    // Fenced once: the post-promote stop does not ssh it again.
-    expect(order.filter((x) => x === 'fence')).toHaveLength(1);
+    expect(order).not.toContain('dbUnfence');
+    expect(order).not.toContain('startWriters');
+    // Already fenced: the post-promote stop does not ssh it again.
+    expect(order).not.toContain('fence');
   });
 
-  it('a standby that misses the catch-up deadline aborts before the journal and un-fences', async () => {
+  it('a standby that misses the catch-up deadline aborts before the journal and lifts the fence', async () => {
     const { order, captured, thrown } = await run({ primaryReachable: true, catchUpThrows: true });
     expect(thrown?.message).toMatch(/^Failover aborted: zero-data-loss gate/);
     expect(order).not.toContain('journal');
     expect(order).not.toContain('promote');
-    expect(order.indexOf('unfence')).toBeGreaterThan(order.indexOf('catchUp'));
-    expect(captured.unfencedIp).toBe(PRIMARY_IP);
+    expect(order.indexOf('dbUnfence')).toBeGreaterThan(order.indexOf('catchUp'));
+    expect(order.indexOf('startWriters')).toBeGreaterThan(order.indexOf('dbUnfence'));
+    expect(captured.startedIp).toBe(PRIMARY_IP);
+    expect(captured.started).toEqual(['myapp-app']);
     expect(order).not.toContain('swap');
   });
 
-  it('a fence that cannot be confirmed aborts before the gate: nothing promoted', async () => {
+  it('a writer stop that cannot be confirmed aborts before the database fence and starts what it stopped (first run)', async () => {
     const { order, thrown } = await run({ primaryReachable: true, fenceFails: true });
-    expect(thrown?.message).toMatch(/could not stop the app on the old primary/);
+    expect(thrown?.message).toMatch(/could not stop the app containers on the old primary/);
     expect(thrown?.message).toContain('rerun vibecarbon failover prod');
     expect(thrown?.message).not.toMatch(/—/);
+    expect(order).not.toContain('dbFence');
+    expect(order).not.toContain('dbUnfence');
+    expect(order).toContain('startWriters');
     expect(order).not.toContain('catchUp');
     expect(order).not.toContain('journal');
     expect(order).not.toContain('promote');
   });
 
-  it("first run, planned, promote 'not-issued': journal cleared, then the old primary's app is started again", async () => {
+  it('a writer stop that cannot be confirmed with a journal at entry keeps everything stopped', async () => {
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      fenceFails: true,
+      envConfig: journaled(),
+    });
+    expect(thrown?.message).toMatch(/could not stop the app containers/);
+    expect(order).not.toContain('startWriters');
+    expect(order).not.toContain('dbUnfence');
+    expect(order).not.toContain('promote');
+  });
+
+  it('a database fence that cannot be proven aborts and lifts it on a first run', async () => {
+    const { order, thrown } = await run({ primaryReachable: true, dbFenceThrows: true });
+    expect(thrown?.message).toMatch(/^Failover aborted: write fence/);
+    expect(order).not.toContain('catchUp');
+    expect(order.indexOf('dbUnfence')).toBeLessThan(order.indexOf('startWriters'));
+  });
+
+  it("first run, planned, promote 'not-issued': journal cleared, then the fence is lifted", async () => {
     const { order, thrown } = await run({ primaryReachable: true, promoteVerdict: 'not-issued' });
     expect(thrown?.message).toMatch(/no promote was sent/);
     expect(order.indexOf('clearJournal')).toBeGreaterThan(order.indexOf('promote'));
-    expect(order.indexOf('unfence')).toBeGreaterThan(order.indexOf('clearJournal'));
+    expect(order.indexOf('dbUnfence')).toBeGreaterThan(order.indexOf('clearJournal'));
+    expect(order).toContain('startWriters');
   });
 
-  it("resumed run, planned, promote 'not-issued': an earlier promote may land, so the app stays stopped", async () => {
+  it("resumed run, planned, promote 'not-issued': an earlier promote may land, so it stays fenced", async () => {
     const { order, thrown } = await run({
       primaryReachable: true,
       promoteVerdict: 'not-issued',
-      envConfig: baseEnvConfig({
-        ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
-      }),
+      envConfig: journaled(),
     });
     expect(thrown?.message).toMatch(/kept fenced/);
-    expect(order).not.toContain('unfence');
+    expect(order).not.toContain('dbUnfence');
+    expect(order).not.toContain('startWriters');
     expect(order).not.toContain('clearJournal');
   });
 
   it("planned, promote 'unknown': stays fenced, journal kept, never un-fenced", async () => {
     const { order, thrown } = await run({ primaryReachable: true, promoteVerdict: 'unknown' });
     expect(thrown?.message).toMatch(/kept fenced/);
-    expect(order).not.toContain('unfence');
+    expect(order).not.toContain('dbUnfence');
+    expect(order).not.toContain('startWriters');
     expect(order).not.toContain('clearJournal');
   });
 
@@ -519,26 +587,65 @@ describe('failoverComposeHA planned fence and catch-up (H1)', () => {
     const { order, thrown } = await run({
       primaryReachable: true,
       catchUpThrows: true,
-      envConfig: baseEnvConfig({
-        ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
-      }),
+      envConfig: journaled(),
     });
     expect(thrown?.message).toMatch(/zero-data-loss gate/);
-    expect(order).toContain('fence');
-    expect(order).not.toContain('unfence');
+    expect(order).toContain('dbFence');
+    expect(order).not.toContain('dbUnfence');
+    expect(order).not.toContain('startWriters');
+  });
+
+  it('a reseeded standby that still carries the fence aborts before the journal and lifts the fence', async () => {
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      standbyState: replica({ receiverStatus: null }),
+      seededState: replica({ receiverStatus: 'streaming' }),
+      standbyFenced: true,
+    });
+    expect(thrown?.message).toMatch(/carries the write fence/);
+    expect(thrown?.message).toMatch(/Nothing was promoted/);
+    expect(order).not.toContain('journal');
+    expect(order).not.toContain('promote');
+    expect(order).toContain('dbUnfence');
   });
 
   it('unplanned: no fence, no gate, before the promote', async () => {
     const { order, captured, thrown } = await run({ primaryReachable: false });
     expect(thrown).toBeUndefined();
-    expect(order.slice(0, order.indexOf('promote'))).not.toContain('fence');
-    expect(order).not.toContain('catchUp');
+    const beforePromote = order.slice(0, order.indexOf('promote'));
+    for (const step of ['stopWriters', 'dbFence', 'fence', 'catchUp']) {
+      expect(beforePromote).not.toContain(step);
+    }
     expect((captured.journal as { primaryLsn: unknown }).primaryLsn).toBeNull();
   });
 
-  it('the unfence starts the app by container name, never app-migrate', async () => {
-    const { startOldPrimaryApp } = await import('../../../src/lib/deploy/compose/ha.js');
-    await startOldPrimaryApp(PRIMARY_IP, '/k', 'myapp');
+  it('the writer stop skips absent add-ons and reports what it stopped; the start never runs app-migrate', async () => {
+    const { stopOldPrimaryWriters, startOldPrimaryWriters, FAILOVER_FENCE_SERVICES } = await import(
+      '../../../src/lib/deploy/compose/ha.js'
+    );
+    expect(FAILOVER_FENCE_SERVICES).toEqual(['app', 'n8n', 'metabase']);
+    vi.mocked(composeSsh.sshRun).mockImplementationOnce(
+      async () => 'STOPPED myapp-app\nFENCE_DONE',
+    );
+    await expect(stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp')).resolves.toEqual({
+      ok: true,
+      stopped: ['myapp-app'],
+    });
+    vi.mocked(composeSsh.sshRun).mockImplementationOnce(
+      async () => 'STOPPED myapp-app\nFAILED myapp-n8n\nFENCE_DONE',
+    );
+    await expect(stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp')).resolves.toEqual({
+      ok: false,
+      stopped: ['myapp-app'],
+    });
+    // A dropped session never printed FENCE_DONE: not confirmed.
+    vi.mocked(composeSsh.sshRun).mockImplementationOnce(async () => false);
+    await expect(stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp')).resolves.toEqual({
+      ok: false,
+      stopped: [],
+    });
+    sshCalls.length = 0;
+    await startOldPrimaryWriters(PRIMARY_IP, '/k', ['myapp-app']);
     expect(sshCalls).toEqual([{ ip: PRIMARY_IP, command: 'docker start myapp-app' }]);
   });
 });

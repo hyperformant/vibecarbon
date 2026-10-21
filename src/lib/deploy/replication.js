@@ -46,6 +46,14 @@ const RESEED_STAGING_DIR = '/var/lib/postgresql/data/.reseed_staging';
 // it so the primary holds WAL for this standby specifically.
 const REPLICATION_SLOT = 'vibecarbon_standby_slot';
 
+/**
+ * The planned-failover write fence: a server-wide default set with ALTER
+ * SYSTEM (postgresql.auto.conf). Never ALTER ROLE / ALTER DATABASE SET: those
+ * are catalog writes, so they replicate to the standby and survive its promote.
+ * ALTER SYSTEM is a file on the node, so the stream never carries it.
+ */
+export const WRITE_FENCE_SETTING = 'default_transaction_read_only';
+
 // The single replication port for BOTH HA modes. compose publishes db:5432 →
 // host:5433 (over WireGuard only); k8s uses a hostPort 5433 → container
 // 5432. One port keeps primary_conninfo / pg_basebackup byte-identical.
@@ -419,6 +427,11 @@ echo "primary_slot_name = '${slotName}'" >> ${stagingDir}/postgresql.auto.conf
 # LAST, so pinning it here wins over any image config on both staging paths
 # (k8s + compose). Harmless after promotion (ignored outside recovery).
 echo "hot_standby = on" >> ${stagingDir}/postgresql.auto.conf
+# A planned failover fences the primary with ALTER SYSTEM SET
+# default_transaction_read_only, which lives in postgresql.auto.conf, and
+# pg_basebackup copies that file: a standby seeded from a fenced primary would
+# come up read-only once promoted. The staged copy never keeps it.
+sed -i '/^[[:space:]]*${WRITE_FENCE_SETTING}[[:space:]]*=/d' ${stagingDir}/postgresql.auto.conf
 ${conninfoBlock}chown -R postgres:postgres ${stagingDir}
 ${swapBlock}`.trim();
 }
@@ -1689,15 +1702,16 @@ export async function reseedStandbyFromPrimary(
 export const PROMOTE_DEADLINE_MS = 120_000;
 
 /**
- * A psql runner for the k8s db pod: `exec(sql) -> Promise<string>`, the shape
- * failover-guard's readReplicaState takes.
+ * A psql runner for the k8s db pod: `exec(sql, { readWrite }) -> Promise<string>`,
+ * the shape failover-guard's readReplicaState takes. `readWrite` opens the
+ * session read-write on a write-fenced server (the un-fence).
  *
  * @param {string} ip - cluster master IP (kubectl target)
  * @param {string} sshKeyPath
  * @returns {(sql: string) => Promise<string>}
  */
 export function k8sPsqlRunner(ip, sshKeyPath) {
-  return async (sql) => {
+  return async (sql, { readWrite = false } = {}) => {
     const pod = await getPostgresPod(ip, sshKeyPath);
     const out = await sshKubectl(ip, sshKeyPath, [
       'exec',
@@ -1705,6 +1719,7 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
       'vibecarbon',
       pod,
       '--',
+      ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
       'psql',
       '-U',
       'postgres',
@@ -1723,6 +1738,164 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
 export const CATCH_UP_DEADLINE_MS = 60_000;
 
 const LSN_RE = /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/;
+
+/** How long the write fence (or its removal) may take to read back applied. */
+export const WRITE_FENCE_DEADLINE_MS = 15_000;
+
+/**
+ * The backends a write fence terminates: client sessions, plus pg_cron job
+ * workers when cron.use_background_workers is on (with it off, pg_cron jobs
+ * already run as client backends). Never a walsender, checkpointer, bgwriter,
+ * walwriter, autovacuum launcher, archiver, startup, the logical replication
+ * launcher, the pg_cron launcher, or the fencing session itself. OFFSET 0 keeps
+ * the planner from evaluating pg_terminate_backend before the filter.
+ */
+export const TERMINATE_CLIENT_BACKENDS_SQL =
+  "SELECT coalesce(string_agg(pid::text || '=' || ok::text, ','), '') FROM (" +
+  'SELECT pid, pg_terminate_backend(pid, 5000) AS ok FROM (' +
+  'SELECT pid FROM pg_stat_activity WHERE pid <> pg_backend_pid() ' +
+  "AND backend_type IN ('client backend', 'pg_cron', 'pg_cron worker') OFFSET 0) c) t";
+
+const readSetting = async (exec) => {
+  const out = await exec(`SELECT current_setting('${WRITE_FENCE_SETTING}')`);
+  return (typeof out === 'string' ? out : '').trim();
+};
+
+/** Poll a fresh session's view of the fence setting until it reads `want`, or the deadline. */
+async function waitForSetting(exec, want, { deadlineMs, pollMs, sleep, now }) {
+  const deadline = now() + deadlineMs;
+  let last = '';
+  for (;;) {
+    try {
+      last = await readSetting(exec);
+    } catch (err) {
+      last = String(err?.message ?? err).split('\n')[0];
+    }
+    if (last === want) return { ok: true, last };
+    if (now() >= deadline) return { ok: false, last };
+    await sleep(pollMs);
+  }
+}
+
+/**
+ * Fence writes on the old primary at the database, the guarantee behind a
+ * planned failover's RPO 0 (stopping the app is only the outward signal):
+ *   1. ALTER SYSTEM SET default_transaction_read_only = on, pg_reload_conf();
+ *   2. read it back as `on` from a fresh session (the reload is a signal);
+ *   3. terminate every client backend (and pg_cron job worker), waiting up to
+ *      5 s each, so no session opened before the fence keeps a read-write
+ *      transaction; then prove none of them is left.
+ * Only after this is the primary's WAL position stable, so the caller captures
+ * the LSN next. Throws a one-line cause when any step cannot be proven.
+ *
+ * @param {object} opts
+ * @param {(sql: string) => Promise<string>} opts.exec - psql on the old primary
+ * @returns {Promise<{ terminated: number }>}
+ */
+export async function fenceDatabaseWrites({
+  exec,
+  deadlineMs = WRITE_FENCE_DEADLINE_MS,
+  pollMs = 500,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = Date.now,
+} = {}) {
+  if (typeof exec !== 'function') throw new TypeError('fenceDatabaseWrites: exec is required');
+  // Separate statements: ALTER SYSTEM cannot run inside a transaction block,
+  // and one multi-statement -c string is one implicit transaction.
+  await exec(`ALTER SYSTEM SET ${WRITE_FENCE_SETTING} = on`);
+  await exec('SELECT pg_reload_conf()');
+  const applied = await waitForSetting(exec, 'on', { deadlineMs, pollMs, sleep, now });
+  if (!applied.ok) {
+    throw new Error(
+      `write fence: the old primary did not read back ${WRITE_FENCE_SETTING} = on ` +
+        `(last read: ${applied.last || 'none'}), so its writes are not fenced`,
+    );
+  }
+
+  const out = await exec(TERMINATE_CLIENT_BACKENDS_SQL);
+  const text = (typeof out === 'string' ? out : '').trim();
+  if (text !== '' && !/^\d+=[tf](,\d+=[tf])*$/.test(text)) {
+    throw new Error(
+      `write fence: could not terminate the old primary's client sessions ` +
+        `(got: ${text.slice(0, 80)})`,
+    );
+  }
+  const pids = text === '' ? [] : text.split(',').map((x) => x.split('=')[0]);
+  if (pids.length > 0) {
+    const left = await exec(
+      `SELECT count(*) FROM pg_stat_activity WHERE pid IN (${pids.join(', ')})`,
+    );
+    if ((typeof left === 'string' ? left : '').trim() !== '0') {
+      throw new Error(
+        `write fence: ${String(left).trim() || 'an unknown number of'} client session(s) on ` +
+          `the old primary outlived pg_terminate_backend, so its writes are not fenced`,
+      );
+    }
+  }
+  return { terminated: pids.length };
+}
+
+/**
+ * Lift the write fence (an aborted failover that promoted nothing): ALTER
+ * SYSTEM RESET default_transaction_read_only, pg_reload_conf(), read back off.
+ * Never throws: the caller reports the manual fix.
+ *
+ * @returns {Promise<boolean>} true when it reads back off
+ */
+export async function unfenceDatabaseWrites({
+  exec,
+  deadlineMs = WRITE_FENCE_DEADLINE_MS,
+  pollMs = 500,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = Date.now,
+} = {}) {
+  try {
+    // readWrite: the fenced server opens every session read-only, and the
+    // docs list "all ALTER commands" as refused in a read-only transaction.
+    await exec(`ALTER SYSTEM RESET ${WRITE_FENCE_SETTING}`, { readWrite: true });
+    await exec('SELECT pg_reload_conf()');
+    return (await waitForSetting(exec, 'off', { deadlineMs, pollMs, sleep, now })).ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The manual un-fence, for a message when unfenceDatabaseWrites cannot prove it.
+ * psql -c, one statement each (ALTER SYSTEM refuses a transaction block). Only
+ * double quotes, so it nests inside the single-quoted ssh command it is shown in.
+ */
+export const UNFENCE_SQL_HINT =
+  `env PGOPTIONS="-c ${WRITE_FENCE_SETTING}=off" psql -U postgres ` +
+  `-c "ALTER SYSTEM RESET ${WRITE_FENCE_SETTING}" -c "SELECT pg_reload_conf()"`;
+
+/** PGOPTIONS for a session that must write on a fenced server (the un-fence). */
+export const READ_WRITE_PGOPTIONS = `-c ${WRITE_FENCE_SETTING}=off`;
+
+/**
+ * A reseeded standby must not carry the fence into its promote: a basebackup
+ * of a fenced primary copies postgresql.auto.conf, and the staged-reseed script
+ * strips the setting (buildStagedBasebackupScript). This proves it from the
+ * files themselves (pg_file_settings reads them, in recovery too). Throws.
+ *
+ * @param {object} opts
+ * @param {(sql: string) => Promise<string>} opts.exec - psql on the standby
+ */
+export async function assertStandbyNotWriteFenced({ exec }) {
+  const out = await exec(
+    `SELECT count(*) FROM pg_file_settings WHERE name = '${WRITE_FENCE_SETTING}'`,
+  );
+  const n = (typeof out === 'string' ? out : '').trim();
+  if (n !== '0') {
+    throw new Error(
+      n === ''
+        ? `could not read the reseeded standby's settings files, so it may carry the ` +
+            `old primary's write fence and would promote read-only`
+        : `the reseeded standby carries the old primary's write fence ` +
+            `(${WRITE_FENCE_SETTING} in its settings files) and would promote read-only`,
+    );
+  }
+}
 
 /**
  * PLANNED-failover zero-data-loss gate, for any transport (R1d). Runs after the

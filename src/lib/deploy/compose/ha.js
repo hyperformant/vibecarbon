@@ -39,12 +39,17 @@ import {
   writeFailoverJournal,
 } from '../failover-guard.js';
 import {
+  assertStandbyNotWriteFenced,
   buildNodePgdataSwapScript,
   buildPrimaryConninfo,
   buildReplicationHbaLines,
   buildStagedBasebackupScript,
+  fenceDatabaseWrites,
   promoteWithProof,
+  READ_WRITE_PGOPTIONS,
   REPL_PORT,
+  UNFENCE_SQL_HINT,
+  unfenceDatabaseWrites,
   waitForStandbyCaughtUp,
 } from '../replication.js';
 import { waitForTrustedTls } from '../tls-ready.js';
@@ -1384,12 +1389,14 @@ export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectN
  * @returns {(sql: string) => Promise<string>}
  */
 export function composePsqlRunner(ip, sshKeyPath, remoteDir) {
-  return async (sql) => {
+  return async (sql, { readWrite = false } = {}) => {
     const quoted = `'${sql.replaceAll("'", "'\\''")}'`;
+    // readWrite: a session that must write on a write-fenced server (the un-fence).
+    const env = readWrite ? `-e PGOPTIONS='${READ_WRITE_PGOPTIONS}' ` : '';
     const out = await sshRun(
       ip,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc ${quoted}`,
+      `cd ${remoteDir} && docker compose exec -T ${env}db psql -U postgres -d postgres -tAc ${quoted}`,
       { silent: true, timeout: 10_000 },
     );
     return typeof out === 'string' ? out : '';
@@ -1444,16 +1451,58 @@ export async function stopOldPrimaryApp(ip, sshKeyPath, projectName) {
 }
 
 /**
- * Start the old primary's app tier again: the un-fence of a planned failover
- * that stopped before anything could promote the standby. `docker start` by
- * container name, the inverse of stopOldPrimaryApp; it starts only `app`
- * (app-migrate is never re-run on failover).
+ * The containers a planned failover stops on the old primary before its write
+ * fence: the app plus the add-ons that write to the database when deployed.
+ * Stopping them is the outward signal; the database fence
+ * (fenceDatabaseWrites) is the guarantee. The e2e health check excuses exactly
+ * these on the retired node.
+ */
+export const FAILOVER_FENCE_SERVICES = ['app', 'n8n', 'metabase'];
+
+const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
+
+/**
+ * Stop the old primary's writers that are running, by container name (absent
+ * add-ons are skipped, a running one that will not stop fails the call). Every
+ * container is tried, so `stopped` names all that did stop even on a failure.
+ *
+ * @returns {Promise<{ ok: boolean, stopped: string[] }>} the containers this
+ *   call stopped, which the un-fence starts again
+ */
+export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName) {
+  const containers = FAILOVER_FENCE_SERVICES.map((svc) => `${projectName}-${svc}`).join(' ');
+  const out = await sshRun(
+    ip,
+    sshKeyPath,
+    `for c in ${containers}; do ` +
+      `if [ "$(docker container inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ]; then ` +
+      `if docker stop "$c" >/dev/null; then echo "STOPPED $c"; else echo "FAILED $c"; fi; ` +
+      `fi; done; echo FENCE_DONE`,
+    { timeout: 120_000 },
+  );
+  const lines = String(out === false ? '' : (out ?? ''))
+    .split('\n')
+    .map((l) => l.trim());
+  const named = (tag) =>
+    lines.filter((l) => l.startsWith(`${tag} `)).map((l) => l.slice(tag.length + 1));
+  const stopped = named('STOPPED');
+  // FENCE_DONE proves the loop ran to its end over a live ssh session.
+  const ok = lines.includes('FENCE_DONE') && named('FAILED').length === 0;
+  return { ok, stopped };
+}
+
+/**
+ * Start again the containers stopOldPrimaryWriters stopped: the un-fence of a
+ * planned failover that promoted nothing. `docker start` by container name; it
+ * never runs app-migrate (the database it serves did not change).
  *
  * @returns {Promise<boolean>} false when the start could not be confirmed
  */
-export async function startOldPrimaryApp(ip, sshKeyPath, projectName) {
-  const containers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(' ');
-  const started = await sshRun(ip, sshKeyPath, `docker start ${containers}`, { timeout: 90_000 });
+export async function startOldPrimaryWriters(ip, sshKeyPath, containers) {
+  if (containers.length === 0) return true;
+  const started = await sshRun(ip, sshKeyPath, `docker start ${containers.join(' ')}`, {
+    timeout: 120_000,
+  });
   return started !== false;
 }
 
@@ -1495,11 +1544,13 @@ export function swapComposeHaRoles(envName, { override } = {}) {
 
 /**
  * Perform failover for a Compose HA environment: prove the standby (the shared
- * failover guard); when the primary answers (planned), stop its app so no write
- * can land after the promote, capture its WAL position and wait for the standby
- * to replay it (or reseed a standby that is not streaming); journal, promote,
+ * failover guard); when the primary answers (planned), stop its writers and
+ * fence its database read-only so no write can land after the promote,
+ * capture its WAL position and wait for the standby to replay it (or reseed a
+ * standby that is not streaming, proven free of the fence); journal, promote,
  * then move the write-guard and issuer, restart the app, flip DNS and persist
- * the swap. The order is fence < capture LSN < catch-up < promote < DNS, as on
+ * the swap. The order is fence < terminate < capture LSN < catch-up < promote <
+ * DNS, as on
  * k8s (failover-step-order-census.test.ts).
  *
  * Refuses a role-swapped environment before any ssh call (R4), and decides
@@ -1507,7 +1558,7 @@ export function swapComposeHaRoles(envName, { override } = {}) {
  * journal is written, a promote that cannot be proven stops the old primary's
  * app and exits non-zero, and the rerun resumes (R3). The one exception is a
  * promote this run never sent on a run that started with no journal: then the
- * journal is cleared and the old primary's app is started again. An abort before
+ * journal is cleared and the old primary's fence is lifted. An abort before
  * the journal (catch-up deadline, failed reseed) un-fences on the same terms.
  * `app-migrate` is never re-run here: the promoted standby replicated an
  * already-migrated primary.
@@ -1539,8 +1590,12 @@ export async function failoverComposeHA(
     promote = promoteComposeStandby,
     psql = composePsqlRunner,
     catchUp = waitForStandbyCaughtUp,
+    stopWriters = stopOldPrimaryWriters,
+    startWriters = startOldPrimaryWriters,
+    fenceWrites = (exec) => fenceDatabaseWrites({ exec }),
+    unfenceWrites = (exec) => unfenceDatabaseWrites({ exec }),
+    assertUnfenced = (exec) => assertStandbyNotWriteFenced({ exec }),
     fenceOldPrimary = stopOldPrimaryApp,
-    unfenceOldPrimary = startOldPrimaryApp,
     confirmUnproven = confirmUnprovenFailover,
     swapRoles = swapComposeHaRoles,
   } = deps ?? {};
@@ -1568,10 +1623,10 @@ export async function failoverComposeHA(
   p.log.message(`  ${c.dim(`Standby (${standbyServer.region})`.padEnd(22))} ${standbyServer.ip}`);
 
   p.log.info(c.bold('This will:'));
-  p.log.message('  1. Stop the app on the old primary if it answers (planned: brief write outage)');
+  p.log.message('  1. Fence writes on the old primary if it answers (planned: brief write outage)');
   p.log.message("  2. Wait for the standby to replay the old primary's final writes");
   p.log.message('  3. Promote the standby database to primary (docker compose exec)');
-  p.log.message('  4. Update DNS (if configured), or print the DNS update to make');
+  p.log.message('  4. Update DNS, or print the record to change by hand');
 
   if (parsed.dryRun) {
     p.log.info(c.dim('Dry run: no changes made'));
@@ -1621,58 +1676,88 @@ export async function failoverComposeHA(
     await confirmUnproven(envName, parsed);
   }
 
-  // Step 0a (PLANNED only): fence. Stop the old primary's app BEFORE the
-  // promote, so no write can land on it once the standby takes over; the write
-  // outage opens here. Until 2026-10 compose promoted first and stopped the old
-  // primary minutes later, and every write in between was lost. On resume this
-  // re-applies the fence an earlier run may have left.
+  const primaryPsql = psql(primaryServer.ip, sshKeyPath, remoteDir);
+  const standbyPsql = psql(standbyServer.ip, sshKeyPath, remoteDir);
+
+  // Step 0a (PLANNED only): fence the old primary BEFORE the promote, so no
+  // write can land on it once the standby takes over; the write outage opens
+  // here. Stop its writer containers (the outward signal), then fence the
+  // database itself (read-only default, client sessions terminated): that is
+  // the guarantee, and only after it is the primary's WAL position final.
+  // Until 2026-10 compose promoted first and stopped the old primary minutes
+  // later, and every write in between was lost. On resume this re-applies the
+  // fence an earlier run may have left.
+  let stoppedWriters = [];
+  let dbFenceAttempted = false;
   let fenced = false;
-  if (planned) {
-    s.start('Stopping the app on the old primary (write outage begins)');
-    fenced = await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
-    s.stop(fenced ? 'Old primary app stopped, no new writes' : 'Old primary app NOT stopped');
-    if (!fenced && mode === 'promote') {
-      // Nothing was promoted and the app may still be up: a promote now could
-      // lose its writes. A start undoes a partial stop.
-      if (!journalAtEntry) await unfenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
-      throw new Error(
-        `Failover aborted: could not stop the app on the old primary (${primaryServer.ip}), so ` +
-          `its writes could not be fenced before the promote. Nothing was promoted; check ssh ` +
-          `to it and rerun vibecarbon failover ${envName}`,
-      );
-    }
-    if (!fenced) {
-      p.log.warn(
-        `Could not stop the app on the old primary (${primaryServer.ip}). Stop it by hand: ` +
-          `ssh root@${primaryServer.ip} 'docker stop ${projectName}-app'`,
-      );
-    }
-  }
 
   /**
-   * Un-fence after an abort that promoted nothing: only when this run started
-   * with no journal. With an earlier run's journal its promote may still land,
-   * so the old primary stays stopped.
+   * Lift the fence after an abort that promoted nothing: only when this run
+   * started with no journal. With an earlier run's journal its promote may
+   * still land, so the old primary stays fenced. Never throws, so it cannot
+   * mask the abort it runs for.
    */
   const unfence = async () => {
-    if (!fenced) return;
+    if (stoppedWriters.length === 0 && !dbFenceAttempted) return;
     if (journalAtEntry) {
       p.log.warn(
-        'The old primary app stays stopped: an earlier run of this failover journaled a promote.',
+        'The old primary stays fenced: an earlier run of this failover journaled a promote ' +
+          'that may still land.',
       );
       return;
     }
-    p.log.warn('Failover aborted after the fence, starting the old primary app again.');
-    const started = await unfenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
-    if (started) {
-      p.log.info('Old primary app started; the original primary is serving again.');
-    } else {
-      p.log.warn(
-        `Could not start the app on the old primary (${primaryServer.ip}). Start it by hand: ` +
-          `ssh root@${primaryServer.ip} 'docker start ${projectName}-app'`,
-      );
+    p.log.warn('Failover aborted after the fence, lifting it on the old primary.');
+    try {
+      if (dbFenceAttempted && !(await unfenceWrites(primaryPsql))) {
+        p.log.warn(
+          `Could not lift the database write fence on the old primary (${primaryServer.ip}). ` +
+            `Lift it by hand: ssh root@${primaryServer.ip} 'cd ${remoteDir} && docker compose ` +
+            `exec -T db ${UNFENCE_SQL_HINT}'`,
+        );
+      }
+      if (!(await startWriters(primaryServer.ip, sshKeyPath, stoppedWriters))) {
+        p.log.warn(
+          `Could not start ${stoppedWriters.join(', ')} on the old primary ` +
+            `(${primaryServer.ip}). Start them by hand: ssh root@${primaryServer.ip} ` +
+            `'docker start ${stoppedWriters.join(' ')}'`,
+        );
+      } else {
+        p.log.info('Fence lifted; the original primary is serving again.');
+      }
+    } catch (err) {
+      p.log.warn(`Could not lift the fence on the old primary: ${firstLine(err)}`);
     }
   };
+
+  if (planned) {
+    s.start('Fencing writes on the old primary (write outage begins)');
+    try {
+      const stop = await stopWriters(primaryServer.ip, sshKeyPath, projectName);
+      stoppedWriters = stop.stopped;
+      if (!stop.ok) {
+        throw new Error(
+          `could not stop the app containers on the old primary (${primaryServer.ip})`,
+        );
+      }
+      dbFenceAttempted = true;
+      await fenceWrites(primaryPsql);
+      fenced = true;
+      s.stop('Old primary fenced: app stopped, database read-only');
+    } catch (err) {
+      s.stop('Old primary NOT fenced');
+      if (mode === 'promote') {
+        await unfence();
+        throw new Error(
+          `Failover aborted: ${firstLine(err)}. Nothing was promoted; fix it and rerun ` +
+            `vibecarbon failover ${envName}`,
+        );
+      }
+      p.log.warn(
+        `Could not fence the old primary (${primaryServer.ip}): ${firstLine(err)}. Stop its ` +
+          `app by hand: ssh root@${primaryServer.ip} 'docker stop ${projectName}-app'`,
+      );
+    }
+  }
 
   if (mode === 'resume') {
     p.log.info(
@@ -1693,8 +1778,8 @@ export async function failoverComposeHA(
         s.start("Waiting for the standby to replay the old primary's final WAL");
         try {
           const caught = await catchUp({
-            primaryExec: psql(primaryServer.ip, sshKeyPath, remoteDir),
-            standbyExec: psql(standbyServer.ip, sshKeyPath, remoteDir),
+            primaryExec: primaryPsql,
+            standbyExec: standbyPsql,
             isStreaming: async () => (await readStandby()).receiverStatus === 'streaming',
           });
           primaryLsn = caught.primaryLsn;
@@ -1743,6 +1828,14 @@ export async function failoverComposeHA(
               `not guaranteed. Fix the re-seed issue and retry.\nUnderlying error: ${err.message}`,
           );
         }
+        // The basebackup copied the fenced primary's postgresql.auto.conf; the
+        // staged script strips the fence from it. Prove that before the
+        // promote, or the new primary would come up read-only.
+        try {
+          await assertUnfenced(standbyPsql);
+        } catch (err) {
+          throw new Error(`Failover aborted: ${err.message}. Nothing was promoted`);
+        }
       } else {
         p.log.warn(
           'Primary unreachable, skipping re-seed. Standby will promote with current state.',
@@ -1789,8 +1882,9 @@ export async function failoverComposeHA(
       // The standby may yet promote: the old primary's writers stay stopped (a
       // planned run fenced them already) so the two sides never both serve.
       // DNS is not flipped and the journal stays set.
-      if (!fenced) fenced = await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
-      if (!fenced) {
+      const appStopped =
+        fenced || (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName));
+      if (!appStopped) {
         p.log.warn(
           `Could not stop the app on the old primary (${primaryServer.ip}). If it is up, stop ` +
             `it before anything else: ssh root@${primaryServer.ip} 'docker stop ${projectName}-app'`,

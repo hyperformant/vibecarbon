@@ -69,14 +69,24 @@ the command-side figure, plus failure-detection time (operator-dependent:
 failover is deliberately manual) and DNS propagation. The e2e cannot ethically
 measure detection time; it is named, not numbered.
 
-**Planned RPO = 0.** By construction (fence-before-promote, which is the
-quiesce on k8s-ha and `docker stop <project>-app` on compose-ha, plus the
-pre-promotion WAL catch-up gate both tiers share in
-`src/lib/deploy/replication.js`: `waitForStandbyCaughtUp` refuses to promote
-a standby that has not replayed the primary's final LSN) and evidenced per run: the e2e writes a marker row on
-the old primary immediately before failover and asserts it survived onto the
-promoted primary (`replication_failover_continuity`). The renderer **refuses
-to publish** figures from any run where that check is missing or failed.
+**Planned RPO = 0.** By construction, on both k8s-ha and compose-ha. Before
+the promote, the failover fences writes on the old primary at the database:
+`ALTER SYSTEM SET default_transaction_read_only = on`, a reload read back as
+applied, and every client session opened before the fence terminated and
+proven gone. Stopping the app tier first (the k8s quiesce, proven by its pods
+being gone; `docker stop` of the app and any n8n/metabase add-on on compose) is
+the outward signal; the database fence is the guarantee. Only then is the
+primary's WAL position final: the shared catch-up gate
+(`waitForStandbyCaughtUp` in `src/lib/deploy/replication.js`) captures it and
+refuses to promote a standby that has not replayed it, and the failover
+journal records it. A standby that is not streaming is reseeded from the fenced
+primary instead, and is proven free of the copied fence before it is promoted.
+A failover that aborts before anything could promote lifts the fence; after a
+completed failover the retired node stays read-only. Evidenced per run: the e2e
+writes a marker row on the old primary immediately before failover and asserts
+it survived onto the promoted primary (`replication_failover_continuity`). The
+renderer **refuses to publish** figures from any run where that check is
+missing or failed.
 
 **Unplanned RPO = replication lag at failure.** Not a per-run e2e figure: it
 is whatever WAL was in flight when the primary died. It is evidenced two ways:

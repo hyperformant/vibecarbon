@@ -37,11 +37,15 @@ import {
   PROMOTE_ISSUER_ANNOTATION,
 } from './lib/deploy/k8s/acme-issuer-policy.js';
 import {
+  assertStandbyNotWriteFenced,
+  fenceDatabaseWrites,
   getReplPasswordFromSecret,
   isStandbyStreaming,
   k8sPsqlRunner,
   promoteStandby,
   reseedStandbyFromPrimary,
+  UNFENCE_SQL_HINT,
+  unfenceDatabaseWrites,
   waitForStandbyCaughtUp,
 } from './lib/deploy/replication.js';
 import {
@@ -278,7 +282,7 @@ async function promoteStandbyDatabase(standbyIp, sshKeyPath) {
  * @param {{ start: Function, stop: Function }} s
  * @param {{ onSeeded?: (systemIdentifier: string) => void }} [opts]
  */
-async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded } = {}) {
+async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded, mustReseed = false } = {}) {
   // Skip the re-seed when the standby is already verifiably streaming. A
   // streaming standby is in-parity with the primary (that is exactly what
   // streaming replication guarantees), so a pre-promotion pg_basebackup is
@@ -290,7 +294,9 @@ async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded } = {}) {
   // Prefer the STANDBY-side signal (pg_stat_wal_receiver): failover often runs
   // when the primary is unhealthy, and the standby can see its own receiver even
   // when the primary is unreachable.
-  if (await isStandbyStreaming(servers.standby.ip, sshKeyPath)) {
+  // mustReseed: the catch-up gate already read it not streaming, so a
+  // streaming read now carries no catch-up proof and cannot skip the reseed.
+  if (!mustReseed && (await isStandbyStreaming(servers.standby.ip, sshKeyPath))) {
     p.log.info(
       'Standby already streaming, skipping re-seed (parity guaranteed by streaming state)',
     );
@@ -327,6 +333,87 @@ async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded } = {}) {
       ? 'Standby re-seeded with primary state'
       : 'Primary unreachable mid-probe, promoting standby with current state',
   );
+}
+
+/** How long a quiesce may take to show every quiesced pod gone. */
+export const QUIESCE_DEADLINE_MS = 180_000;
+
+/**
+ * Prove a quiesce: every Deployment in `deployments` has no pods left (none
+ * running, none terminating). A scale to 0 returns before its pods terminate,
+ * and a terminating app pod can still hold a database session. A Deployment
+ * that does not exist has nothing to wait for. Deadline-bounded (R3).
+ *
+ * @returns {Promise<{ ok: boolean, remaining: string[] }>} remaining names the
+ *   Deployments that still had pods (or could not be read) at the deadline
+ */
+export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {}) {
+  const {
+    kubectl = sshKubectl,
+    deadlineMs = QUIESCE_DEADLINE_MS,
+    pollMs = 3000,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    now = Date.now,
+  } = opts;
+  const deadline = now() + deadlineMs;
+  const selectors = [];
+  for (const dep of deployments) {
+    const ns = dep.namespace || 'vibecarbon';
+    let raw;
+    try {
+      raw = await kubectl(ip, sshKeyPath, [
+        'get',
+        'deployment',
+        dep.name,
+        '-n',
+        ns,
+        '-o',
+        'jsonpath={.spec.selector.matchLabels}',
+      ]);
+    } catch (err) {
+      if (/not found/i.test(String(err?.message ?? err))) continue;
+      return { ok: false, remaining: [`${dep.name} (unreadable: ${firstErrorLine(err)})`] };
+    }
+    let labels;
+    try {
+      labels = JSON.parse(String(raw ?? '').trim() || 'null');
+    } catch {
+      labels = null;
+    }
+    if (!labels || typeof labels !== 'object' || Object.keys(labels).length === 0) {
+      return { ok: false, remaining: [`${dep.name} (no pod selector)`] };
+    }
+    const selector = Object.entries(labels)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(',');
+    selectors.push({ name: dep.name, ns, selector });
+  }
+
+  let remaining = selectors.map((x) => x.name);
+  for (;;) {
+    const still = [];
+    for (const { name, ns, selector } of selectors) {
+      try {
+        const out = await kubectl(ip, sshKeyPath, [
+          'get',
+          'pods',
+          '-n',
+          ns,
+          '-l',
+          selector,
+          '-o',
+          'name',
+        ]);
+        if (String(out ?? '').trim() !== '') still.push(name);
+      } catch {
+        still.push(name);
+      }
+    }
+    remaining = still;
+    if (remaining.length === 0) return { ok: true, remaining };
+    if (now() >= deadline) return { ok: false, remaining };
+    await sleep(pollMs);
+  }
 }
 
 /**
@@ -1277,7 +1364,7 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
  *   1. preflight (verify persisted config + probe standby state backend)
  *  1b. replica proof (failover-guard)                  (refuse = nothing touched)
  *   2. provision standby worker capacity 0→N          (abort = clean exit)
- *   3. quiesce primary app tier                        (planned only)
+ *   3. quiesce + write-fence the primary               (planned only; unproven = abort)
  *   4. catch-up, re-seed, journal, promote standby     (skipped on resume;
  *                                                       unconfirmed = kept fenced)
  *   5. scale up promoted app tier
@@ -1310,6 +1397,10 @@ export async function failoverHA(
     scale = scaleDeployments,
     psql = k8sPsqlRunner,
     isStreaming = isStandbyStreaming,
+    confirmQuiesced = waitForAppTierGone,
+    fenceWrites = (exec) => fenceDatabaseWrites({ exec }),
+    unfenceWrites = (exec) => unfenceDatabaseWrites({ exec }),
+    assertUnfenced = (exec) => assertStandbyNotWriteFenced({ exec }),
     catchUp = (srv, key) =>
       waitForStandbyCaughtUp({
         primaryExec: psql(srv.primary.ip, key),
@@ -1486,19 +1577,6 @@ export async function failoverHA(
    * earlier run, 'not-issued' proves nothing: that run's promote may be landing.
    */
   async function catchUpReseedAndPromote() {
-    const unquiesce = async () => {
-      if (!planned) return;
-      p.log.warn('Failover aborted after quiesce, re-scaling the primary app tier back up.');
-      await scale(
-        servers.primary.ip,
-        sshKeyPath,
-        scaleUpList,
-        'up',
-        'un-quiesce primary (failover aborted)',
-      ).catch(() => {});
-      p.log.info('Primary app tier restored; the original primary is serving again.');
-    };
-
     try {
       // STEP 3b (PLANNED only): zero-data-loss gate. The primary is quiesced, so
       // wait for the STREAMING standby to replay the primary's WAL up to its
@@ -1506,11 +1584,13 @@ export async function failoverHA(
       // standby that is not streaming cannot catch up: the reseed below copies
       // it in full from the quiesced primary.
       let primaryLsn = null;
+      let caughtUp = null;
       if (planned) {
         s.start("Verifying the standby replayed the primary's final WAL (zero-data-loss)");
         try {
           const caught = await catchUp(servers, sshKeyPath);
           primaryLsn = caught.primaryLsn;
+          caughtUp = caught.caughtUp;
           s.stop(
             caught.caughtUp
               ? 'Standby caught up to the primary: safe to promote'
@@ -1524,12 +1604,27 @@ export async function failoverHA(
       // A reseed rewrites the standby's identity: the journal must name what
       // was just seeded, not the pre-reseed reading.
       let seededSysid = null;
+      let reseeded = false;
       await reseed(servers, sshKeyPath, s, {
+        // A standby the gate found not streaming has no catch-up proof, so a
+        // later streaming read must not skip its reseed.
+        mustReseed: planned && caughtUp === false,
         onSeeded: (sysid) => {
+          reseeded = true;
           seededSysid = sysid;
           recordSystemIdentifier({ environment: envName }, sysid);
         },
       });
+      // The basebackup copied the fenced primary's postgresql.auto.conf; the
+      // staged script strips the fence from it. Prove that before the promote,
+      // or the promoted primary would come up read-only.
+      if (reseeded && planned) {
+        try {
+          await assertUnfenced(psql(servers.standby.ip, sshKeyPath));
+        } catch (err) {
+          throw new Error(`Failover aborted before promotion: ${err.message}`);
+        }
+      }
       // R2: the journal goes down immediately before the promote call.
       await writeJournal(
         { environment: envName },
@@ -1580,10 +1675,77 @@ export async function failoverHA(
   // upgrade (no writer can commit past the final catch-up). Unplanned (primary
   // unreachable) skips quiesce; the old primary's app tier is scaled down after
   // the gate instead (step 6b). On resume the scale to 0 re-applies the fence.
+  //
+  // The scale is only the outward signal (scaleDeployments returns before pods
+  // terminate and swallows failures). The fence is proven: every quiesced
+  // Deployment's pods are gone, then the database itself is fenced (read-only
+  // default, client sessions terminated). Only then is the primary's WAL
+  // position final. A fence that cannot be proven aborts a promote-mode run.
+  let dbFenceAttempted = false;
+  const primaryPsql = psql(servers.primary.ip, sshKeyPath);
+
+  /**
+   * Lift the fence after an abort that promoted nothing: only when this run
+   * started with no journal (R3). With an earlier run's journal its promote may
+   * still land, so the old primary stays quiesced. Never throws, so it cannot
+   * mask the abort it runs for.
+   */
+  const unquiesce = async () => {
+    if (!planned) return;
+    if (journalAtEntry) {
+      p.log.warn(
+        'The old primary stays quiesced: an earlier run of this failover journaled a promote ' +
+          'that may still land.',
+      );
+      return;
+    }
+    p.log.warn('Failover aborted after quiesce, lifting the fence on the primary.');
+    try {
+      if (dbFenceAttempted && !(await unfenceWrites(primaryPsql))) {
+        p.log.warn(
+          `Could not lift the database write fence on the primary (${servers.primary.ip}). ` +
+            `Lift it by hand: ssh root@${servers.primary.ip} 'kubectl -n vibecarbon exec db-0 ` +
+            `-- ${UNFENCE_SQL_HINT}'`,
+        );
+      }
+      await scale(
+        servers.primary.ip,
+        sshKeyPath,
+        scaleUpList,
+        'up',
+        'un-quiesce primary (failover aborted)',
+      );
+      p.log.info('Primary app tier restored; the original primary is serving again.');
+    } catch (err) {
+      p.log.warn(`Could not lift the fence on the primary: ${firstErrorLine(err)}`);
+    }
+  };
+
   if (planned) {
     s.start('Quiescing primary app tier (write outage begins)');
-    await scale(servers.primary.ip, sshKeyPath, scaleUpList, 0, 'quiesce primary app tier');
-    s.stop('Primary app tier quiesced');
+    try {
+      await scale(servers.primary.ip, sshKeyPath, scaleUpList, 0, 'quiesce primary app tier');
+      const gone = await confirmQuiesced(servers.primary.ip, sshKeyPath, scaleUpList);
+      if (!gone.ok) {
+        throw new Error(
+          `the quiesced app tier on the primary did not stop (still running: ` +
+            `${gone.remaining.join(', ') || 'unknown'})`,
+        );
+      }
+      dbFenceAttempted = true;
+      await fenceWrites(primaryPsql);
+      s.stop('Primary fenced: app tier gone, database read-only');
+    } catch (err) {
+      s.stop('Primary NOT fenced');
+      if (mode === 'promote') {
+        await unquiesce();
+        throw new Error(
+          `Failover aborted: ${firstErrorLine(err)}. Nothing was promoted; fix it and rerun ` +
+            `vibecarbon failover ${envName}`,
+        );
+      }
+      p.log.warn(`Could not prove the primary fenced: ${firstErrorLine(err)}`);
+    }
   }
 
   if (mode === 'promote') {

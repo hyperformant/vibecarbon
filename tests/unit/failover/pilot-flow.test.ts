@@ -549,6 +549,12 @@ async function runFailoverHA(opts: RunOpts) {
     }),
     writeJournal: async () => 'journal-id',
     clearJournal: async () => {},
+    // The quiesce proof and the database write fence: proven here, pinned in
+    // failover-state-matrix and failover-step-order-census.
+    confirmQuiesced: async () => ({ ok: true, remaining: [] }),
+    fenceWrites: async () => {},
+    unfenceWrites: async () => true,
+    assertUnfenced: async () => {},
     catchUp: async () => {
       order.push('catchup');
       if (catchUpThrows) {

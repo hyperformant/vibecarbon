@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { APP_TIER_RESTART_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { FAILOVER_FENCE_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
@@ -3836,7 +3836,8 @@ EOF`;
     //
     // compose-ha: the retired node (the one that is no longer the primary
     // after the role flip) keeps its app tier `docker stop`ped by design
-    // (failoverComposeHA step 2, APP_TIER_RESTART_SERVICES) until a redeploy
+    // (failoverComposeHA's pre-promote fence, FAILOVER_FENCE_SERVICES: app and
+    // the n8n/metabase add-ons when deployed) until a redeploy
     // converges it. `status` reports that truthfully as `exited`, so those
     // rows are excused on that node only; its db (recreated by the wal-g
     // demote) and everything else must still be healthy. k8s-ha scales the
@@ -3848,7 +3849,7 @@ EOF`;
           let retired: RetiredServer | undefined;
           if (config.mode === 'compose-ha') {
             const { standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
-            if (standbyIp) retired = { ip: standbyIp, allowedExited: APP_TIER_RESTART_SERVICES };
+            if (standbyIp) retired = { ip: standbyIp, allowedExited: FAILOVER_FENCE_SERVICES };
             else
               console.log(
                 `${tag} [verify-status] no retired-node IP in .vibecarbon.json — the old ` +
