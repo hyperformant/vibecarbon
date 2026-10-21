@@ -54,7 +54,7 @@ const LINEAGE = '7699032860122738725';
 const RESTORE = {
   backup: BACKUP,
   target: 'latest',
-  recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
+  recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest', lineage: LINEAGE })),
   sizeBytes: 50 * 1024 ** 3,
   attempt: '0f1e2d3c-0000-4000-8000-00000000000a',
   lineage: LINEAGE,

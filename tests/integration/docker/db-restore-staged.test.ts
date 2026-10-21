@@ -181,7 +181,7 @@ function runRestoreScript(dir: string, backup: string, lineage: string) {
     composeRestoreScript({
       backup,
       lineage,
-      recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
+      recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest', lineage: lineage })),
     }),
   );
   return spawnSync(

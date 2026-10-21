@@ -24,7 +24,7 @@
  * on vibecarbon-infra-secrets. The two copies had drifted before (M2).
  */
 
-import { WALG_ENV_SOURCE } from './restore-layout.js';
+import { LINEAGE_RE, WALG_ENV_SOURCE } from './restore-layout.js';
 
 /**
  * ISO-8601 instant for point-in-time recovery: YYYY-MM-DDTHH:MM:SS then Z or
@@ -47,19 +47,29 @@ export const RECOVERY_STRIP_SETTINGS = Object.freeze([
 ]);
 
 /**
- * @param {{ target: 'latest' | string }} args  'latest', or an ISO-8601 instant
+ * @param {{ target: 'latest' | string, lineage: string }} args  `target`:
+ *   'latest', or an ISO-8601 instant. `lineage`: the system identifier whose
+ *   archive folder holds the backup and its WAL.
  * @returns {{ strip: string[], lines: string[] }}
  */
-export function buildRecoveryConfig({ target }) {
+export function buildRecoveryConfig({ target, lineage }) {
   if (target !== 'latest' && !RESTORE_PITR_RE.test(String(target))) {
     throw new Error(
       `Invalid target ${JSON.stringify(target)}: must be "latest" or an ISO-8601 datetime (e.g. 2026-05-31T12:00:00Z)`,
     );
   }
+  if (!LINEAGE_RE.test(String(lineage ?? ''))) {
+    throw new Error(
+      `buildRecoveryConfig: lineage ${JSON.stringify(lineage)} is not a database system identifier; restore_command is never written unpinned`,
+    );
+  }
   const lines = [
-    // The restored cluster carries the system identifier of the database the
-    // backup came from, so walg-env.sh resolves that lineage's archive folder.
-    `restore_command = '${WALG_ENV_SOURCE} && wal-g wal-fetch "%f" "%p"'`,
+    // Pinned to the restored lineage: walg-env.sh takes RESTORE_LINEAGE and
+    // never runs pg_controldata on a WAL fetch. A failing fetch reads to
+    // postgres as "segment not in the archive", which ends a `latest`
+    // recovery early and promotes, so nothing that can fail is recomputed
+    // per segment.
+    `restore_command = 'export RESTORE_LINEAGE=${lineage}; ${WALG_ENV_SOURCE} && wal-g wal-fetch "%f" "%p"'`,
     "recovery_target_action = 'promote'",
     "recovery_target_timeline = 'current'",
   ];

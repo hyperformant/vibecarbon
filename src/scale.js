@@ -914,7 +914,9 @@ async function scaleServers(ctx) {
           // own PGDATA names no lineage while the fetch runs.
           lineage: listing.lineage,
           target: 'latest',
-          recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
+          recoveryConf: renderRecoveryConf(
+            buildRecoveryConfig({ target: 'latest', lineage: listing.lineage }),
+          ),
           requiredBytes: base.uncompressedBytes,
           assertWritable: () =>
             assertRestoredPrimaryWritable({

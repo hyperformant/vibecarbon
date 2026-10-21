@@ -42,7 +42,7 @@ const BASE_PREFIX = 's3://b/backups/p/prod/walg';
 const WALG_ENV = `. ${join(process.cwd(), 'carbon/volumes/db/walg-env.sh')}`;
 
 const BACKUP = 'base_000000010000000000000002';
-const CONF = renderRecoveryConf(buildRecoveryConfig({ target: 'latest' }));
+const CONF = renderRecoveryConf(buildRecoveryConfig({ target: 'latest', lineage: LINEAGE }));
 // This attempt's id (the marker's RESTORE_ATTEMPT), and the record a
 // completed swap of it leaves.
 const ATTEMPT = '11111111-2222-4333-8444-555555555555';

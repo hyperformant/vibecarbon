@@ -436,11 +436,17 @@ export function pickRestoreBase(backups, chosenSource) {
   );
 }
 
-/** The restore point's target and the recovery config both tiers apply. */
-export function restorePointOf(chosenSource) {
+/**
+ * The restore point's target and the recovery config both tiers apply,
+ * restore_command pinned to `lineage` (the folder the base came from).
+ *
+ * @param {{ name?: string }} chosenSource
+ * @param {string} lineage
+ */
+export function restorePointOf(chosenSource, lineage) {
   const target =
     chosenSource.name === 'latest' || !chosenSource.name ? 'latest' : chosenSource.name;
-  return { target, recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target })) };
+  return { target, recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target, lineage })) };
 }
 
 /**
@@ -514,7 +520,7 @@ export async function resolveDeployRestorePoint({
     if (!(err instanceof NoRestorePointError)) throw err;
     throw new NoRestorePointError(`${err.message} in s3://${bucket}/${folder}`);
   }
-  const { target, recoveryConf } = restorePointOf(chosen);
+  const { target, recoveryConf } = restorePointOf(chosen, lineage);
   // A new attempt id per deploy: the walg-restore init records it after the
   // swap, so a db pod start during this attempt boots instead of restoring
   // again, and a later attempt of the same base always restores.

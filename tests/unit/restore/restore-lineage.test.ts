@@ -317,6 +317,8 @@ describe('deploy -restore resolves the lineage too', () => {
       args({ envConfig: { backup: { lineage: OLD } } }),
     );
     expect(point).toMatchObject({ backup: 'base_000000010000000000000008', lineage: OLD });
+    // restore_command is pinned to the same lineage (I1).
+    expect(point?.recoveryConf).toContain(`export RESTORE_LINEAGE=${OLD};`);
     const marker = restoreMarkerStringData({ ...point, origin: 'deploy' } as never);
     expect(marker.RESTORE_LINEAGE).toBe(OLD);
   });

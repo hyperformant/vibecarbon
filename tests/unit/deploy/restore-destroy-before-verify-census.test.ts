@@ -38,7 +38,7 @@ function composeScript(): string {
   return composeRestoreScript({
     lineage: LINEAGE,
     backup: BACKUP,
-    recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
+    recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest', lineage: LINEAGE })),
   });
 }
 

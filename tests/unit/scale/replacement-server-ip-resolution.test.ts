@@ -28,7 +28,9 @@ vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
     ...actual,
     readEnvBaseBackups: async () => ({
       s3Config: { bucket: 'myapp-backups' },
-      location: 's3://myapp-backups/backups/myapp/prod/walg',
+      location: 's3://myapp-backups/backups/myapp/prod/walg/7699032860122738725',
+      // The lineage the listing read: the restore pins restore_command to it.
+      lineage: '7699032860122738725',
       backups: [
         {
           name: 'base_000000010000000000000002',

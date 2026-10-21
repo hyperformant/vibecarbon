@@ -34,7 +34,10 @@ const restorePoint = () =>
     backup: BASE.name,
     lineage: '7699032860122738725',
     target: 'latest',
-    recoveryConf: expect.stringContaining("recovery_target_timeline = 'current'"),
+    // Pinned to the lineage run() resolved (I1); the timeline line follows it.
+    recoveryConf: expect.stringMatching(
+      /export RESTORE_LINEAGE=7699032860122738725;[\s\S]*recovery_target_timeline = 'current'/,
+    ),
     requiredBytes: BASE.uncompressedBytes,
     assertWritable: expect.any(Function),
   });

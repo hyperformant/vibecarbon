@@ -187,7 +187,7 @@ describe('(a) every wal-g caller sources walg-env.sh first', () => {
   it('compose/index.js: the restore script names the lineage, then sources, then fetches', () => {
     const script = composeRestoreScript({
       backup: 'base_000000010000000000000004',
-      recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
+      recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest', lineage: SYSID })),
       lineage: SYSID,
     });
     expect(script.indexOf(`export RESTORE_LINEAGE='${SYSID}'`)).toBeGreaterThan(-1);
@@ -198,10 +198,12 @@ describe('(a) every wal-g caller sources walg-env.sh first', () => {
   });
 
   it("recovery-config.js: restore_command fetches WAL from the restored lineage's folder", () => {
-    const { lines } = buildRecoveryConfig({ target: 'latest' });
+    const { lines } = buildRecoveryConfig({ target: 'latest', lineage: SYSID });
     const restoreCommand = lines.find((l) => l.startsWith('restore_command'));
+    // Pinned to the restored lineage (I1): walg-env.sh takes RESTORE_LINEAGE
+    // and never runs pg_controldata on a WAL fetch.
     expect(restoreCommand).toBe(
-      `restore_command = '${WALG_ENV_SOURCE} && wal-g wal-fetch "%f" "%p"'`,
+      `restore_command = 'export RESTORE_LINEAGE=${SYSID}; ${WALG_ENV_SOURCE} && wal-g wal-fetch "%f" "%p"'`,
     );
   });
 });

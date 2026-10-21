@@ -740,7 +740,7 @@ export async function runComposeRestore({
     );
   }
 
-  const { target, recoveryConf } = restorePointOf(chosenSource);
+  const { target, recoveryConf } = restorePointOf(chosenSource, lineage);
 
   s.start(`Restoring ${base.name} via wal-g (app will be temporarily unavailable)`);
   // restoreCompose proves the restored database writable (assertWritable)
@@ -931,7 +931,7 @@ export async function runK8sRestore({
       'k8s restore is wal-g-based and pulls from S3 — local backup files are not supported. Use `-source latest` (or a timestamp for PITR).',
     );
   }
-  const { target, recoveryConf } = restorePointOf(chosenSource);
+  const { target, recoveryConf } = restorePointOf(chosenSource, lineage);
 
   // 0. The staged fetch needs the backup's size free next to the live cluster.
   //    Refuse before anything stops.

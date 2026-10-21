@@ -15,7 +15,8 @@ const LINEAGE = '7699032860122738725';
 // the script's own contract.
 // ---------------------------------------------------------------------------
 const BACKUP = 'base_000000010000000000000002';
-const conf = (target: string) => renderRecoveryConf(buildRecoveryConfig({ target }));
+const conf = (target: string) =>
+  renderRecoveryConf(buildRecoveryConfig({ target, lineage: LINEAGE }));
 
 describe('composeRestoreScript', () => {
   it('fetches the named backup into staging, never LATEST', () => {

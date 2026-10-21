@@ -16,24 +16,25 @@ const LINEAGE = '7699032860122738725';
  */
 describe('buildRecoveryConfig', () => {
   it('latest replays along the base backup timeline to the end of WAL', () => {
-    const { lines } = buildRecoveryConfig({ target: 'latest' });
+    const { lines } = buildRecoveryConfig({ target: 'latest', lineage: LINEAGE });
     expect(lines).toContain("recovery_target_timeline = 'current'");
     expect(lines).toContain("recovery_target_action = 'promote'");
-    // Through walg-env.sh: WAL comes from the restored lineage's folder.
+    // Through walg-env.sh, pinned to the restored lineage (I1): no
+    // pg_controldata on a WAL fetch, so it cannot fail as "segment missing".
     expect(lines).toContain(
-      `restore_command = '. /etc/postgresql/walg-env.sh && wal-g wal-fetch "%f" "%p"'`,
+      `restore_command = 'export RESTORE_LINEAGE=${LINEAGE}; . /etc/postgresql/walg-env.sh && wal-g wal-fetch "%f" "%p"'`,
     );
     expect(lines.join('\n')).not.toMatch(/recovery_target_time\s*=/);
   });
 
   it('a timestamp stops replay at that instant', () => {
-    const { lines } = buildRecoveryConfig({ target: '2026-10-20T09:55:00Z' });
+    const { lines } = buildRecoveryConfig({ target: '2026-10-20T09:55:00Z', lineage: LINEAGE });
     expect(lines).toContain("recovery_target_time = '2026-10-20T09:55:00Z'");
   });
 
   it('strips every recovery setting and the write fence before appending', () => {
     for (const target of ['latest', '2026-10-20T09:55:00Z']) {
-      const { strip } = buildRecoveryConfig({ target });
+      const { strip } = buildRecoveryConfig({ target, lineage: LINEAGE });
       expect(strip).toContain('default_transaction_read_only');
       expect(strip).toContain('restore_command');
       expect(strip).toContain('recovery_target_action');
@@ -47,15 +48,25 @@ describe('buildRecoveryConfig', () => {
     }
   });
 
+  it('never emits an unpinned restore_command: a missing or malformed lineage throws', () => {
+    for (const lineage of [undefined, '', 'abc', '1; rm -rf /']) {
+      expect(() => buildRecoveryConfig({ target: 'latest', lineage } as never)).toThrow(/lineage/);
+    }
+  });
+
   it('refuses anything that is not latest or an ISO-8601 instant', () => {
-    expect(() => buildRecoveryConfig({ target: "'; DROP TABLE x; --" })).toThrow(/invalid target/i);
-    expect(() => buildRecoveryConfig({ target: '2026-10-20' })).toThrow(/invalid target/i);
+    expect(() => buildRecoveryConfig({ target: "'; DROP TABLE x; --", lineage: LINEAGE })).toThrow(
+      /invalid target/i,
+    );
+    expect(() => buildRecoveryConfig({ target: '2026-10-20', lineage: LINEAGE })).toThrow(
+      /invalid target/i,
+    );
   });
 });
 
 describe('renderRecoveryConf', () => {
   it('lists the strips first, then the appended lines', () => {
-    const text = renderRecoveryConf(buildRecoveryConfig({ target: 'latest' }));
+    const text = renderRecoveryConf(buildRecoveryConfig({ target: 'latest', lineage: LINEAGE }));
     const rows = text.split('\n');
     const firstAppend = rows.findIndex((r) => !r.startsWith('-'));
     expect(rows.slice(0, firstAppend).every((r) => /^-[a-z_]+$/.test(r))).toBe(true);
@@ -75,7 +86,7 @@ describe('byte parity between the tiers (M2)', () => {
 
   for (const target of ['latest', '2026-10-20T09:55:00Z']) {
     it(`the compose script carries exactly the rendered RESTORE_RECOVERY_CONF (${target})`, () => {
-      const recoveryConf = renderRecoveryConf(buildRecoveryConfig({ target }));
+      const recoveryConf = renderRecoveryConf(buildRecoveryConfig({ target, lineage: LINEAGE }));
       const script = composeRestoreScript({ lineage: LINEAGE, backup: BACKUP, recoveryConf });
       expect(composeConfBody(script)).toBe(recoveryConf);
     });
@@ -85,7 +96,7 @@ describe('byte parity between the tiers (M2)', () => {
     const script = composeRestoreScript({
       lineage: LINEAGE,
       backup: BACKUP,
-      recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
+      recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest', lineage: LINEAGE })),
     });
     const sts = readFileSync(join(process.cwd(), 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8');
     const loop = (text: string) => {
