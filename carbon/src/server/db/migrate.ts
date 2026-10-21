@@ -1,4 +1,5 @@
-import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
@@ -15,7 +16,9 @@ import pg from 'pg';
  *
  * The ledger is drizzle's default, `drizzle.__drizzle_migrations`. Pending
  * migrations run in ONE transaction, so a failure leaves none of them
- * applied. A restored database carries its ledger, so this is a no-op there.
+ * applied. A restored database carries its ledger, so this is a no-op there. After
+ * the run every journal entry's hash must be in the ledger, else it throws
+ * and the migrate step (so the deploy) fails.
  */
 
 /** Where the migrations are: `db/migrations` under the app's working directory. */
@@ -38,32 +41,50 @@ export type MigrationOutcome =
    */
   | { kind: 'standby'; upToDate: boolean };
 
-async function ledger(client: pg.ClientBase): Promise<{ count: number; latest: number }> {
+interface Ledger {
+  count: number;
+  /** The `hash` of every applied migration. */
+  hashes: Set<string>;
+}
+
+async function ledger(client: pg.ClientBase): Promise<Ledger> {
   const { rows } = await client.query<{ present: boolean }>(
     `select to_regclass('drizzle.__drizzle_migrations') is not null as present`
   );
-  if (!rows[0]?.present) return { count: 0, latest: 0 };
-  const res = await client.query<{ count: string; latest: string | null }>(
-    'select count(*) as count, max(created_at) as latest from drizzle.__drizzle_migrations'
-  );
-  return { count: Number(res.rows[0]?.count ?? 0), latest: Number(res.rows[0]?.latest ?? 0) };
+  if (!rows[0]?.present) return { count: 0, hashes: new Set() };
+  const res = await client.query<{ hash: string }>('select hash from drizzle.__drizzle_migrations');
+  return { count: res.rows.length, hashes: new Set(res.rows.map((r) => r.hash)) };
 }
 
 /**
- * Whether the ledger on `client` already has every migration in `folder`:
- * its newest entry is at least as new as the newest migration file. Reads
- * only, so the app runs it as `app_service` (which may read the ledger and
- * nothing else in the `drizzle` schema), and a standby runs it on a
- * read-only database. Never applies, locks or writes anything.
+ * The journal entries (by tag, in journal order) whose hash is not in the
+ * ledger. drizzle's migrator applies only entries newer than the newest
+ * ledger row, so an entry added later with an older timestamp is skipped
+ * without an error; comparing hashes is what proves every entry ran.
+ */
+function unappliedTags(folder: string, applied: Set<string>): string[] {
+  const journal = JSON.parse(readFileSync(join(folder, 'meta', '_journal.json'), 'utf8')) as {
+    entries: { tag: string }[];
+  };
+  const files = readMigrationFiles({ migrationsFolder: folder });
+  // readMigrationFiles returns one entry per journal entry, in journal order.
+  return files.flatMap((m, i) => (applied.has(m.hash) ? [] : [journal.entries[i]?.tag ?? `#${i}`]));
+}
+
+/**
+ * Whether the ledger on `client` has every migration in `folder`, compared by
+ * hash: a journal entry older than the newest applied one but never applied
+ * is not up to date. Reads only, so the app runs it as `app_service` (which
+ * may read the ledger and nothing else in the `drizzle` schema), and a
+ * standby runs it on a read-only database. Never applies, locks or writes
+ * anything.
  */
 export async function verifyMigrations(
   client: pg.ClientBase,
   folder: string = migrationsFolder()
 ): Promise<{ upToDate: boolean }> {
-  const files = readMigrationFiles({ migrationsFolder: folder });
-  const newest = Math.max(0, ...files.map((m) => m.folderMillis));
-  const { latest } = await ledger(client);
-  return { upToDate: latest >= newest };
+  const { hashes } = await ledger(client);
+  return { upToDate: unappliedTags(folder, hashes).length === 0 };
 }
 
 /**
@@ -117,6 +138,17 @@ export async function runMigrations(
     await migrate(drizzle({ client }), { migrationsFolder: folder });
     await revokeServerOnlyTables(client);
     const after = await ledger(client);
+    const skipped = unappliedTags(folder, after.hashes);
+    if (skipped.length > 0) {
+      throw new Error(
+        skipped
+          .map(
+            (tag) =>
+              `migration ${tag} was skipped (its timestamp is older than the newest applied one); regenerate it`
+          )
+          .join('; ')
+      );
+    }
     outcome = { kind: 'applied', newlyApplied: after.count - before.count };
   } finally {
     const unlock = client.query('select pg_advisory_unlock($1::bigint)', [MIGRATIONS_LOCK_KEY]);

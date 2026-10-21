@@ -16,8 +16,8 @@ process.env.DB_HOST ??= 'db.test';
 process.env.DB_PASSWORD ??= 'pw';
 
 const { ledger, queries, migrate } = vi.hoisted(() => ({
-  // The newest migration the fake database has recorded (folder millis).
-  ledger: { latest: 1 },
+  // The hashes of the migrations the fake database has recorded.
+  ledger: { hashes: [] as string[] },
   queries: [] as string[],
   migrate: vi.fn(),
 }));
@@ -34,7 +34,7 @@ vi.mock('pg', async (importOriginal) => {
         if (text.includes('pg_is_in_recovery')) return { rows: [{ standby: false }] };
         if (text.includes('to_regclass')) return { rows: [{ present: true }] };
         if (text.includes('__drizzle_migrations')) {
-          return { rows: [{ count: '1', latest: String(ledger.latest) }] };
+          return { rows: ledger.hashes.map((hash) => ({ hash })) };
         }
         return { rows: [] };
       },
@@ -52,14 +52,15 @@ const { healthRoutes } = await import('@server/routes/health');
 const { readMigrationFiles } = await import('drizzle-orm/migrator');
 const { migrationsFolder } = await import('@server/db/migrate');
 
-const newest = Math.max(
-  ...readMigrationFiles({ migrationsFolder: migrationsFolder() }).map((m) => m.folderMillis)
+const journalHashes = readMigrationFiles({ migrationsFolder: migrationsFolder() }).map(
+  (m) => m.hash
 );
 
 describe('startup is verify-only', () => {
   it('with the ledger behind the folder: logs "migrations pending", ready stays down, never migrates', async () => {
     setMigrationStatus('pending');
-    ledger.latest = newest - 1;
+    // One journal migration is not in the ledger yet.
+    ledger.hashes = journalHashes.slice(0, -1);
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     let pauses = 0;
     let caughtUp: () => void = () => {};
@@ -86,7 +87,7 @@ describe('startup is verify-only', () => {
     expect(ready.status).toBe(503);
 
     // The migrate step catches the ledger up; the app notices on its next look.
-    ledger.latest = newest;
+    ledger.hashes = journalHashes;
     expect(await done).toBe('applied');
     expect(getMigrationStatus()).toBe('applied');
 
