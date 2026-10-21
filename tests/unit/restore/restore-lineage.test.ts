@@ -25,6 +25,7 @@ import {
   recordBackupLineage,
   resolveDeployRestorePoint,
   resolveRestoreLineage,
+  restoredLineageRecord,
 } from '../../../src/lib/walg/restore-base.js';
 import {
   RESTORE_MARKER_KEYS,
@@ -406,7 +407,7 @@ describe('a destroyed and redeployed environment keeps its old lineage on record
       ],
       log: { info: (m) => info.push(m), warn: () => {} },
     });
-    expect(record).toEqual({ lineage: NEW, priorLineages: [OLD] });
+    expect(record).toEqual({ lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD });
     expect(info.join('\n')).toContain(`vibecarbon restore prod -lineage ${OLD}`);
     expect(info.join('\n')).not.toContain(`-lineage ${NEW}`);
   });
@@ -445,5 +446,151 @@ describe('a destroyed and redeployed environment keeps its old lineage on record
     expect(orch.indexOf('recordDeployedLineage({')).toBeLessThan(
       orch.indexOf('saveProjectConfig(clearDestroyedRecord(finalConfig, environment))'),
     );
+  });
+});
+
+// Decision 2 hardening: the refusal above only lasts until the new database's
+// first scheduled base lands. After that the new lineage is newer and a bare
+// restore would pick it silently. A deploy that replaced an archived database
+// marks the old lineage `backup.unrestoredPrior`; a bare restore refuses while
+// it is set, and a restore that names a lineage clears it.
+describe('backup.unrestoredPrior: a replaced database is never silently skipped', () => {
+  const info = { info: () => {}, warn: () => {} };
+  const oldWithBases = L(OLD, '2026-10-18T02:00:00Z', '2026-10-19T02:00:00Z');
+
+  it('a deploy that records a new lineage beside an archived one marks the old one', async () => {
+    const record = await recordDeployedLineage({
+      environment: 'prod',
+      backup: { lineage: OLD },
+      exec: async () => NEW,
+      where: '10.0.0.1',
+      listLineages: async () => [oldWithBases, L(NEW, null, null)],
+      log: info,
+    });
+    expect(record).toEqual({ lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD });
+  });
+
+  it('nothing recorded before: the newest other lineage with bases is the one marked', async () => {
+    const record = await recordDeployedLineage({
+      environment: 'prod',
+      backup: undefined,
+      exec: async () => NEW,
+      where: '10.0.0.1',
+      listLineages: async () => [
+        L('1', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z'),
+        oldWithBases,
+      ],
+      log: info,
+    });
+    expect(record.unrestoredPrior).toBe(OLD);
+  });
+
+  it('the bucket unreadable from here: the replaced recorded lineage is marked anyway', async () => {
+    const record = await recordDeployedLineage({
+      environment: 'prod',
+      backup: { lineage: OLD },
+      exec: async () => NEW,
+      where: '10.0.0.1',
+      listLineages: null,
+      log: info,
+    });
+    expect(record.unrestoredPrior).toBe(OLD);
+  });
+
+  it('no earlier lineage with bases, or a deploy -restore that chose its lineage: nothing marked', async () => {
+    const fresh = await recordDeployedLineage({
+      environment: 'prod',
+      backup: { lineage: OLD },
+      exec: async () => NEW,
+      where: '10.0.0.1',
+      listLineages: async () => [L(OLD, null, null), L(NEW, null, null)],
+      log: info,
+    });
+    expect(fresh).not.toHaveProperty('unrestoredPrior');
+    const restored = await recordDeployedLineage({
+      environment: 'prod',
+      backup: { lineage: NEW, unrestoredPrior: OLD },
+      exec: async () => OLD,
+      where: '10.0.0.1',
+      listLineages: async () => [
+        oldWithBases,
+        L(NEW, '2026-10-20T02:00:00Z', '2026-10-20T02:00:00Z'),
+      ],
+      restored: true,
+      log: info,
+    });
+    expect(restored).toEqual({ lineage: OLD, priorLineages: [NEW] });
+  });
+
+  it('a later deploy of the same database keeps the mark', () => {
+    expect(
+      recordBackupLineage({ lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD }, NEW),
+    ).toEqual({
+      lineage: NEW,
+      priorLineages: [OLD],
+      unrestoredPrior: OLD,
+    });
+  });
+
+  // The DR redeploy after the new database's first base: NEW is newer.
+  const afterFirstNewBase = [oldWithBases, L(NEW, '2026-10-21T02:00:00Z', '2026-10-21T02:00:00Z')];
+  const marked = { backup: { lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD } };
+
+  it('a bare restore refuses, listing both lineages with their newest base and naming -lineage', () => {
+    let err: unknown;
+    try {
+      resolveRestoreLineage({ envConfig: marked, lineages: afterFirstNewBase });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AmbiguousLineageError);
+    const message = (err as Error).message;
+    expect(message).toContain(`${NEW}  newest base 2026-10-21T02:00:00Z`);
+    expect(message).toContain(`${OLD}  newest base 2026-10-19T02:00:00Z`);
+    expect(message).toContain('-lineage');
+    expect(message).toMatch(/replaced/);
+  });
+
+  it('-lineage <old> and -lineage <new> both restore', () => {
+    expect(
+      resolveRestoreLineage({ envConfig: marked, lineages: afterFirstNewBase, flag: OLD }),
+    ).toBe(OLD);
+    expect(
+      resolveRestoreLineage({ envConfig: marked, lineages: afterFirstNewBase, flag: NEW }),
+    ).toBe(NEW);
+  });
+
+  it('a mark on a lineage that holds no base does not refuse', () => {
+    expect(
+      resolveRestoreLineage({
+        envConfig: marked,
+        lineages: [L(OLD, null, null), L(NEW, '2026-10-21T02:00:00Z', '2026-10-21T02:00:00Z')],
+      }),
+    ).toBe(NEW);
+  });
+
+  it('a completed restore of either lineage clears the mark and records what now serves', () => {
+    expect(restoredLineageRecord(marked.backup, OLD)).toEqual({
+      lineage: OLD,
+      priorLineages: [NEW],
+    });
+    expect(restoredLineageRecord(marked.backup, NEW)).toEqual({
+      lineage: NEW,
+      priorLineages: [OLD],
+    });
+    // Then a bare restore resolves again.
+    expect(
+      resolveRestoreLineage({
+        envConfig: { backup: restoredLineageRecord(marked.backup, NEW) },
+        lineages: afterFirstNewBase,
+      }),
+    ).toBe(NEW);
+  });
+
+  it('restore persists the cleared record; the deploy passes whether it restored', () => {
+    const restore = readFileSync('src/restore.js', 'utf-8');
+    expect(restore).toMatch(/restoredLineageRecord\(envConfig\.backup, lineage\)/);
+    const orch = readFileSync('src/lib/deploy/orchestrator.js', 'utf-8');
+    expect(orch).toMatch(/restored: !!restorePoint,/);
   });
 });

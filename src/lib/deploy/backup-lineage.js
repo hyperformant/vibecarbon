@@ -47,8 +47,16 @@ export function parseSystemIdentifier(out) {
  * @param {string} args.where  the primary, for the error
  * @param {(() => Promise<Array<{ lineage: string, newestFinish: Date|null }>>) | null} [args.listLineages]
  *   the lineages under the env's prefix, or null when the bucket cannot be read from here
+ * @param {boolean} [args.restored]  a deploy -restore: the operator chose the lineage
  * @param {{ info: (m: string) => void, warn: (m: string) => void }} args.log
- * @returns {Promise<{ lineage: string, priorLineages?: string[] }>}
+ * @returns {Promise<{ lineage: string, priorLineages?: string[], unrestoredPrior?: string }>}
+ *
+ * A new lineage beside an earlier one that holds base backups (a fresh
+ * database replaced an archived one) is recorded with `unrestoredPrior`, the
+ * earlier lineage: a bare `vibecarbon restore` refuses while it is set, so
+ * the new database's first scheduled base can never make it the silent pick
+ * (Decision 2). A restore that names a lineage clears it. Unknown (the
+ * bucket cannot be read from here): the replaced recorded lineage is marked.
  */
 export async function recordDeployedLineage({
   environment,
@@ -56,6 +64,7 @@ export async function recordDeployedLineage({
   exec,
   where,
   listLineages = null,
+  restored = false,
   log,
 }) {
   let sysid = null;
@@ -72,17 +81,32 @@ export async function recordDeployedLineage({
     );
   }
   const record = recordBackupLineage(backup, sysid);
-  if (backup?.lineage === sysid || !listLineages) return record;
-  let others = [];
-  try {
-    others = (await listLineages()).filter((l) => l.lineage !== sysid && l.newestFinish);
-  } catch (err) {
-    log.warn(
-      `could not list the earlier backup lineages of ${environment} ` +
-        `(${String(err?.message ?? err).split('\n')[0]}); vibecarbon restore ${environment} -l shows them`,
-    );
+  if (restored) {
+    delete record.unrestoredPrior;
     return record;
   }
+  if (backup?.lineage === sysid) return record;
+  const replaced = backup?.lineage ? String(backup.lineage) : null;
+  let others = null;
+  if (listLineages) {
+    try {
+      others = (await listLineages()).filter((l) => l.lineage !== sysid && l.newestFinish);
+    } catch (err) {
+      log.warn(
+        `could not list the earlier backup lineages of ${environment} ` +
+          `(${String(err?.message ?? err).split('\n')[0]}); vibecarbon restore ${environment} -l shows them`,
+      );
+    }
+  }
+  if (others === null) {
+    if (replaced) record.unrestoredPrior = replaced;
+    return record;
+  }
+  const newestFirst = [...others].sort(
+    (a, b) => (b.newestFinish?.getTime() ?? -1) - (a.newestFinish?.getTime() ?? -1),
+  );
+  const prior = newestFirst.find((l) => l.lineage === replaced) ?? newestFirst[0];
+  if (prior) record.unrestoredPrior = prior.lineage;
   if (others.length > 0) {
     log.info(
       [

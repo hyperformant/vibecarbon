@@ -74,8 +74,8 @@ import {
   pickRestoreBase,
   printBaseBackupList,
   readEnvBaseBackups,
-  recordBackupLineage,
   resolveS3Config,
+  restoredLineageRecord,
   restorePointOf,
 } from './lib/walg/restore-base.js';
 import {
@@ -607,8 +607,10 @@ function recordRestoredLineage(envName, lineage) {
   try {
     const config = loadProjectConfig();
     const envConfig = config?.environments?.[envName];
-    if (!envConfig || envConfig.backup?.lineage === lineage) return;
-    envConfig.backup = { ...envConfig.backup, ...recordBackupLineage(envConfig.backup, lineage) };
+    if (!envConfig) return;
+    // Also clears backup.unrestoredPrior: the operator chose this lineage.
+    const { unrestoredPrior: _cleared, ...kept } = envConfig.backup ?? {};
+    envConfig.backup = { ...kept, ...restoredLineageRecord(envConfig.backup, lineage) };
     saveProjectConfig(config);
   } catch (err) {
     p.log.warn(

@@ -283,6 +283,18 @@ export function resolveRestoreLineage({ envConfig, lineages, flag = null, target
     return named;
   }
   const current = envConfig?.backup?.lineage ? String(envConfig.backup.lineage) : null;
+  // A deploy replaced an archived database (unrestoredPrior): the new one's
+  // own bases, however new, never make the pick while the old one holds bases.
+  const unrestored = envConfig?.backup?.unrestoredPrior
+    ? String(envConfig.backup.unrestoredPrior)
+    : null;
+  if (unrestored && unrestored !== current && withBases.some((l) => l.lineage === unrestored)) {
+    throw ambiguousLineage(
+      `this environment's database was replaced by a new one (lineage ${current ?? 'unknown'}) while lineage ${unrestored} still holds backups, and restore will not guess which one you mean:`,
+      withBases,
+      current,
+    );
+  }
   const others = withBases.filter((l) => l.lineage !== current);
   if (others.length === 0) return current;
   const cur = withBases.find((l) => l.lineage === current);
@@ -293,6 +305,16 @@ export function resolveRestoreLineage({ envConfig, lineages, flag = null, target
     const newer = others.some((l) => l.newestFinish > cur.newestFinish);
     if (covers && !newer) return current;
   }
+  throw ambiguousLineage(
+    'more than one database lineage holds backups for this environment, and restore will not guess which one you mean:',
+    withBases,
+    current,
+  );
+}
+
+/** The refusal: each lineage with its newest and oldest base, and the flag. */
+function ambiguousLineage(head, withBases, current) {
+  const cur = withBases.find((l) => l.lineage === current);
   const listed = [
     ...(current && !cur ? [{ lineage: current, oldestFinish: null, newestFinish: null }] : []),
     ...withBases,
@@ -302,12 +324,8 @@ export function resolveRestoreLineage({ envConfig, lineages, flag = null, target
       `  ${l.lineage}  ${l.newestFinish ? `newest base ${instant(l.newestFinish)}, oldest ${instant(l.oldestFinish)}` : 'no base backups yet'}` +
       `${l.lineage === current ? ' (recorded for this environment)' : ''}`,
   );
-  throw new AmbiguousLineageError(
-    [
-      'more than one database lineage holds backups for this environment, and restore will not guess which one you mean:',
-      ...rows,
-      'Pass -lineage <system identifier> to choose one.',
-    ].join('\n'),
+  return new AmbiguousLineageError(
+    [head, ...rows, 'Pass -lineage <system identifier> to choose one.'].join('\n'),
     listed,
   );
 }
@@ -318,9 +336,13 @@ export function resolveRestoreLineage({ envConfig, lineages, flag = null, target
  * `priorLineages` (B8), so a restore can still name the archive a destroyed
  * database left. Pure.
  *
- * @param {{ lineage?: string, priorLineages?: string[] } | undefined} backup
+ * A recorded `unrestoredPrior` (see recordDeployedLineage) survives a deploy
+ * of the same database and is dropped when the lineage changes (the deploy
+ * computes a new one).
+ *
+ * @param {{ lineage?: string, priorLineages?: string[], unrestoredPrior?: string } | undefined} backup
  * @param {string} sysid
- * @returns {{ lineage: string, priorLineages?: string[] }}
+ * @returns {{ lineage: string, priorLineages?: string[], unrestoredPrior?: string }}
  */
 export function recordBackupLineage(backup, sysid) {
   if (!LINEAGE_RE.test(String(sysid ?? ''))) {
@@ -330,7 +352,25 @@ export function recordBackupLineage(backup, sysid) {
   const was = backup?.lineage ? String(backup.lineage) : null;
   const next = was && was !== sysid ? [was, ...prior] : prior;
   const priorLineages = [...new Set(next)].filter((l) => l !== sysid);
-  return { lineage: sysid, ...(priorLineages.length > 0 && { priorLineages }) };
+  const keep = was === sysid && backup?.unrestoredPrior ? String(backup.unrestoredPrior) : null;
+  return {
+    lineage: sysid,
+    ...(priorLineages.length > 0 && { priorLineages }),
+    ...(keep && { unrestoredPrior: keep }),
+  };
+}
+
+/**
+ * The `backup` record after a restore of `lineage` completed: the restored
+ * lineage is the one now serving, and the operator chose it, so
+ * `unrestoredPrior` is cleared. Pure.
+ *
+ * @param {{ lineage?: string, priorLineages?: string[], unrestoredPrior?: string } | undefined} backup
+ * @param {string} lineage
+ */
+export function restoredLineageRecord(backup, lineage) {
+  const { unrestoredPrior: _cleared, ...record } = recordBackupLineage(backup, lineage);
+  return record;
 }
 
 /**

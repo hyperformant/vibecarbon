@@ -2236,6 +2236,8 @@ export async function executeDeployment(args, gatheredConfig) {
       backupLineage = await recordDeployedLineage({
         environment,
         backup: envConfig.backup,
+        // deploy -restore chose its lineage: nothing is left unrestored.
+        restored: !!restorePoint,
         where: primaryIp,
         exec: await deployedPrimaryPsql(tier, environment, projectConfig.projectName, primaryIp),
         listLineages:
