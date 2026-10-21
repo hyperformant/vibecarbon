@@ -53,7 +53,7 @@ const SITES: Record<string, { calls: string[]; why: string; gated?: boolean }> =
   },
   'lib/deploy/effects/index.js:transferImage': {
     calls: ['pushImageOverSshTunnel'],
-    why: 'compose tier, not k8s; serialised in-process for the two compose-ha servers',
+    why: 'compose tier, not k8s; single compose only (compose-ha builds natively on both servers); at most one push per deploy, the mutex is a guard',
   },
   'lib/deploy/effects/k8s-ha.js:startStandbyImageCopy': {
     calls: ['copyAppImageToStandby'],

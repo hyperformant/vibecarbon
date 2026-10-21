@@ -141,7 +141,7 @@ Compose HA (`vibecarbon deploy prod -mode compose-ha`) is also available, for pr
 
 Both HA modes place the standby in a second region. `-region` sets the primary and `-standby-region` sets the standby; leave `-standby-region` off and the CLI picks a same-continent partner of `-region` for you. An HA deploy fails unless replication is confirmed streaming, so pass `-allow-degraded` to finish anyway and accept a warm-standby (degraded DR) result.
 
-On Kubernetes HA, your app image is uploaded once, to the primary. The standby copies it from the primary over the private tunnel, and the deploy fails if that copy fails, because a standby without the image cannot serve after failover. Failover checks for the image first: a planned failover refuses if the standby lacks it, and an unplanned one refuses unless you pass `-force-unproven`. `vibecarbon status` shows a `Standby image` line when the standby is missing it.
+On Kubernetes HA, your app image is uploaded once, to the primary. The standby copies it from the primary over the private tunnel, and the deploy fails if that copy fails. With `-allow-degraded` it finishes, records the standby as missing its image, and failover refuses it until a deploy copies it. Failover checks for the image first: a planned failover refuses if the standby lacks it, and an unplanned one refuses unless you pass `-force-unproven`. `vibecarbon status` shows a `Standby image` line when the standby is missing it.
 
 ## Environment Variables
 

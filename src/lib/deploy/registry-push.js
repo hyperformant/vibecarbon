@@ -57,9 +57,10 @@
  *
  * Concurrency: calls are SERIALIZED process-wide by a mutex, because two
  * simultaneous uploads over one operator uplink stall each other's blobs into
- * `unknown blob` failures. A k8s-ha deploy now makes ONE tunnel push (the
- * standby gets its image by copy over wg0); the mutex still serves compose-ha's
- * two servers. Separate processes are covered by uplink-lock.js. See the
+ * `unknown blob` failures. After the k8s-ha registry copy one deploy makes at most ONE tunnel
+ * push (single compose and the k8s primary push; the k8s-ha standby gets its
+ * image by copy over wg0, and compose-ha builds natively on both servers), so
+ * the mutex is a guard against a second caller, not a hot path. Separate processes are covered by uplink-lock.js. See the
  * "Uplink serialization" block below for the evidence and the alternatives
  * that were rejected.
  *
@@ -99,9 +100,8 @@ export function isPermanentPushError(err) {
 // CLASS: concurrent tunnel pushes contend on the operator uplink.
 //
 // An HA deploy used to fan `applyK3sManifests` out over primary + standby at
-// once, each side backgrounding its own `pushImageOverSshTunnel` (a k8s-ha
-// deploy now makes one tunnel push; compose-ha's two servers still do this,
-// see effects/index.js). That put TWO
+// once, each side backgrounding its own `pushImageOverSshTunnel` (a deploy
+// now makes at most one tunnel push, so the mutex below is a guard). That put TWO
 // multi-hundred-MB image uploads on the operator's single uplink
 // simultaneously, both funnelled through SSH tunnels. When the link can't
 // carry both, a blob PUT stalls long enough for the registry to drop the
