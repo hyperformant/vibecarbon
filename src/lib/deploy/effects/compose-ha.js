@@ -67,7 +67,11 @@ import {
 import { requireDnsSetup } from '../dns-result.js';
 import { readReplicaState } from '../failover-guard.js';
 import { resolvePublicA } from '../public-dns-lookup.js';
-import { assertReplicationStreamingOrDegraded, verifyStreaming } from '../replication.js';
+import {
+  assertReplicationStreamingOrDegraded,
+  probeStreaming,
+  verifyStreaming,
+} from '../replication.js';
 import { clearRetiredFence, fenceRetiredNode } from '../retired-fence.js';
 import { envS3Record } from '../s3-record.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
@@ -909,6 +913,21 @@ async function haConfigureReplication(ctx) {
     ctx.onProgress('Configuring PostgreSQL replication on primary...');
     await configurePrimaryReplication(primary.ip, standby.ip, sshKeyPath, projectName);
 
+    // A standby already streaming from this primary is left alone: the reseed
+    // wipes its PGDATA and downtime-reseeds it. Same probe as the k8s tier.
+    const probe = await probeStreaming({
+      exec: (sql) =>
+        sshRun(
+          primary.ip,
+          sshKeyPath,
+          `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${sql}"`,
+          { timeout: 10_000 },
+        ),
+    });
+    if (probe.streaming) {
+      p.log.info('Standby already streaming from the primary, skipping the reseed');
+      return;
+    }
     ctx.onProgress('Configuring standby as hot replica...');
     let replicationOk = false;
     try {

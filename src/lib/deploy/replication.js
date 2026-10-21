@@ -1095,6 +1095,40 @@ export async function verifyStreaming({
 }
 
 /**
+ * The primary's view of its standby: the best `state` in pg_stat_replication
+ * (`streaming` sorts first), or no row when nothing is connected.
+ */
+export const STREAMING_STATE_SQL =
+  "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1";
+
+/**
+ * Is the standby already streaming from the current primary? Asks the primary,
+ * so a streaming answer proves the connection is to THIS primary. The probe a
+ * deploy runs before it reseeds (a reseed wipes the standby's PGDATA), shared
+ * by both HA tiers; each tier supplies its transport as `exec`.
+ *
+ * @param {object} opts
+ * @param {(sql: string) => Promise<string|false|undefined>} opts.exec
+ *   runs one SQL statement on the primary and returns its tuples-only stdout;
+ *   a failed exec may throw or answer false (read as nothing)
+ * @param {number} [opts.attempts]
+ * @param {number[]} [opts.delaysMs]
+ * @param {(ms: number) => Promise<void>} [opts.sleep]
+ * @returns {Promise<{streaming: boolean, lastState: string}>}
+ */
+export function probeStreaming({ exec, attempts = 3, delaysMs = [2000], sleep }) {
+  return verifyStreaming({
+    readState: async () => {
+      const out = await exec(STREAMING_STATE_SQL);
+      return typeof out === 'string' ? out.trim() : '';
+    },
+    attempts,
+    delaysMs,
+    ...(sleep ? { sleep } : {}),
+  });
+}
+
+/**
  * Finding #1 — the hard-gate policy, shared by the compose-HA and k8s-HA deploy
  * paths so they behave identically. Given the verified streaming result:
  *   - streaming            → returns { degraded: false } (deploy proceeds).

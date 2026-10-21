@@ -35,6 +35,7 @@ import {
   buildStagedBasebackupScript,
   DB_STS_BOOT_TIMEOUT_S,
   parsePgdataClaimFromPodJson,
+  probeStreaming,
   REPL_PORT,
   SYSTEM_IDENTIFIER_SQL,
   swapPgdataViaHelperPod,
@@ -408,8 +409,8 @@ export async function reestablishReplicationTransport(options) {
 /**
  * Primary-side replication configuration — everything the primary needs
  * BEFORE a standby can basebackup from it: replication role/slot SQL,
- * the hostPort relay target, durable pg_hba admission, the wal_level
- * restart, and the post-restart rollout of postgres-dependent deployments.
+ * the hostPort relay target, and durable pg_hba admission with a reload. The
+ * db is never restarted: the replication settings are on its argv.
  * Extracted from setupReplication (phases + perf slices verbatim) so the HA
  * fan-out can run it opportunistically the moment the primary cluster
  * completes (mirrors prepareReplicationTransport) — the standby's seed init
@@ -540,14 +541,14 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   // random REPL_PASSWORD.
   //
   // DURABILITY: the rules must land in the file postgres actually reads AND
-  // survive the pod restart in step 3. Our db image leaves hba_file at its
+  // survive a pod restart. Our db image leaves hba_file at its
   // default, PGDATA/pg_hba.conf (docker/postgres-walg/postgresql.conf), which
   // lives on the PVC: it survives restarts, rides wal-g base backups, and is
   // inherited by the standby via pg_basebackup. The script resolves the live
   // path with SHOW hba_file and REFUSES (exit 1, failing this step) when it is
   // not under PGDATA — appending to a container-ephemeral file would be
   // reverted by the very next restart and fail replication much later and
-  // much less clearly. Step 3's restart then loads the new rules.
+  // much less clearly. The script ends with a reload that loads the new rules.
   const hbaLines = buildReplicationHbaLines([WG_SUBNET_CIDR, K3S_POD_CIDR]);
   const hbaSetupScript = [
     'set -e',
@@ -557,6 +558,9 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
     '  *) echo "hba_file is $HBA, not under PGDATA; replication rules there would not survive a restart" >&2; exit 1 ;;',
     'esac',
     ...hbaLines.map((l) => `grep -qxF '${l}' "$HBA" || echo '${l}' >> "$HBA"`),
+    // Reload, never restart: the serving primary's postgres is not bounced by a
+    // deploy. wal_level and the other replication settings are on the db argv.
+    `psql -U postgres -d postgres -tAc 'SELECT pg_reload_conf();'`,
   ].join('\n');
   await perfAsync('deploy.ha.replication.hba', () =>
     runCommandAsync(
@@ -567,84 +571,6 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         `kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- bash`,
       ],
       { silent: true, input: hbaSetupScript },
-    ),
-  );
-
-  // 3. Restart primary postgres to apply wal_level change (requires restart, not just reload)
-  await perfAsync('deploy.ha.replication.primaryRestart', async () => {
-    await runCommandAsync(
-      [
-        'ssh',
-        ...sshOpts,
-        `root@${primaryIp}`,
-        `kubectl delete pod ${DB_POD} -n vibecarbon --wait=true`,
-      ],
-      { silent: true },
-    );
-    // Wait for pod to come back
-    for (let i = 0; i < 30; i++) {
-      try {
-        const ready = await runCommandAsync(
-          [
-            'ssh',
-            ...sshOpts,
-            `root@${primaryIp}`,
-            // -h 127.0.0.1 (TCP): discriminates the real server from the
-            // docker-entrypoint's socket-only first-boot temp server — see
-            // awaitPostgresAccepting (readiness.js) for the d4 run-2 RCA.
-            // This pod restarts with existing PGDATA (no init flow), so the
-            // socket form was safe here, but TCP is the uniform condition.
-            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- pg_isready -h 127.0.0.1 -U postgres 2>/dev/null && echo IS_READY || echo NOT_READY`,
-          ],
-          { silent: true, ignoreError: true },
-        );
-        if (ready?.trim()?.includes('IS_READY')) break;
-      } catch {
-        // Retry
-      }
-      if (i === 29) break;
-      const interval = i < 5 ? 500 : 2000;
-      await new Promise((r) => setTimeout(r, interval));
-    }
-  });
-
-  // 3b. Rollout-restart the app on primary so it drops connections to the
-  //     (now-restarted) postgres.
-  //
-  //     RCA from k8s-ha 2026-04-28 deploy runs: after the primary postgres
-  //     restart, the db clients held stale connections, Service `app` had
-  //     zero Ready endpoints, and Traefik's IngressRoute fell through to its
-  //     default 404 backend on the public probe. The app's
-  //     `/api/health/ready` is now a direct db ping on its own pg pool, which
-  //     reconnects on its own, but the restart keeps the post-restart state
-  //     deterministic: the app is the only Deployment that holds postgres
-  //     connections now that the chart runs only the db.
-  //
-  //     Traefik is deliberately NOT restarted: hostPort 80/443 makes a
-  //     RollingUpdate race itself (the new pod can't bind while the old one
-  //     still listens), and it doesn't talk to postgres. Verified on a live
-  //     standby cluster on 2026-04-28: restarting every deployment hung on
-  //     traefik (10 min progress deadline).
-  await perfAsync('deploy.ha.replication.rolloutRestart', () =>
-    runCommandAsync(
-      [
-        'ssh',
-        ...sshOpts,
-        `root@${primaryIp}`,
-        'kubectl rollout restart deployment/app -n vibecarbon',
-      ],
-      { silent: true, ignoreError: true },
-    ),
-  );
-  await perfAsync('deploy.ha.replication.rolloutStatus', () =>
-    runCommandAsync(
-      [
-        'ssh',
-        ...sshOpts,
-        `root@${primaryIp}`,
-        'kubectl rollout status deployment/app -n vibecarbon --timeout=300s',
-      ],
-      { silent: true, ignoreError: true },
     ),
   );
 }
@@ -660,7 +586,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
  * @param {string} [options.primaryDbPrivateIp] - Primary database node private IP (gateway bind + egress netpol)
  * @param {string} [options.standbyDbPrivateIp] - Standby database node private IP (gateway bind + egress netpol)
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
- * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort patch, pg_hba, restart, dependent-deployment rollout) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
+ * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort patch, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
  * @returns {Promise<{streaming: boolean, lastState: string, systemIdentifier: string|null}>} Replication status;
  *   systemIdentifier is the standby's, set only when streaming was verified
  */
@@ -762,21 +688,17 @@ export async function setupReplication(options) {
   // the seed-standby init's happy path — the entire
   // resolvePvc/stage/swap/standbyBoot/recoveryWait block is unnecessary.
   const probe = await perfAsync('deploy.ha.replication.streamingProbe', () =>
-    verifyStreaming({
-      readState: async () => {
-        const result = await runCommandAsync(
+    probeStreaming({
+      exec: (sql) =>
+        runCommandAsync(
           [
             'ssh',
             ...sshOpts,
             `root@${primaryIp}`,
-            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "${sql}"`,
           ],
           { silent: true, ignoreError: true },
-        );
-        return (typeof result === 'string' ? result : '').trim();
-      },
-      attempts: 3,
-      delaysMs: [2000],
+        ),
     }),
   );
   // The verified-streaming result carries the standby's system identifier: the
@@ -907,9 +829,9 @@ export async function setupReplication(options) {
   // drift apart. The script (PGPASSWORD + conninfo password) is piped over stdin,
   // never argv.
   const stagingDir = '/var/lib/postgresql/data/.reseed_staging';
-  // Probe retry budget (RCA 2026-07-06 e4 rig): step 3 deleted the primary db
-  // pod moments ago, and the in-pod pg_isready wait can pass before the
-  // hostPort→relay path is reachable again — a single-shot probe then skips the
+  // Probe retry budget (RCA 2026-07-06 e4 rig): the in-pod pg_isready wait can
+  // pass before the hostPort→relay path is reachable (the hostPort patch above
+  // recreates the pod on a first deploy) — a single-shot probe then skips the
   // entire reseed silently. 12 × 10s ≈ 2 min, each attempt logged in-script.
   const PROBE_ATTEMPTS = 12;
   const PROBE_DELAY_S = 10;

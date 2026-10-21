@@ -282,8 +282,10 @@ export const REPL_COMPOSE_FLAGS =
  * 2. Create a dedicated replication user
  * 3. Allow replication from the WireGuard tunnel subnet in pg_hba.conf (plain
  *    `host` — WireGuard encrypts the wire, so Postgres doesn't also need TLS)
- * 4. Set wal_level=replica and max_wal_senders
- * 5. Restart PostgreSQL to apply changes
+ *
+ * The db is never restarted: wal_level, max_wal_senders and the rest of the
+ * replication settings are on the db command line (carbon/docker-compose.yml),
+ * so the primary that is serving traffic keeps serving through a deploy.
  */
 export async function configurePrimaryReplication(primaryIp, standbyIp, sshKeyPath, projectName) {
   const remoteDir = `/opt/${projectName}`;
@@ -297,47 +299,10 @@ export async function configurePrimaryReplication(primaryIp, standbyIp, sshKeyPa
 
   await ensurePrimaryReplicationAccess(primaryIp, sshKeyPath, projectName);
 
-  // Set WAL settings for replication
-  await sshRunChecked(
-    primaryIp,
-    sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_level = 'replica';" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET max_wal_senders = 5;" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_keep_size = '512MB';"`,
-    { timeout: 30_000, what: 'WAL replication settings (ALTER SYSTEM)' },
-  );
-
   // No app-layer TLS. Replication runs over the WireGuard tunnel (brought up
   // above), which encrypts the wire, so Postgres itself speaks plaintext — the
   // retired verify-ca transport's cert install + `ALTER SYSTEM SET ssl='on'`
   // are gone (public-IP-era plumbing).
-
-  // Restart PostgreSQL to apply WAL changes
-  await sshRunChecked(primaryIp, sshKeyPath, `cd ${remoteDir} && docker compose restart db`, {
-    timeout: 60_000,
-    what: 'primary db restart (to load the new WAL settings)',
-  });
-
-  // Wait for PostgreSQL to be ready again.
-  //
-  // This loop used to be `try { await sshRun(...); return; } catch { /* retry */ }`.
-  // sshRun answers `false` and never throws, so the catch was unreachable and
-  // the `return` fired unconditionally on the FIRST iteration — it waited for
-  // nothing, and had no sleep either. configurePrimaryReplication then returned
-  // while the restart above was still in flight, and the standby's
-  // pg_basebackup raced a postmaster that was not yet accepting connections.
-  for (let i = 0; i < 15; i++) {
-    const ready = await sshRun(
-      primaryIp,
-      sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres`,
-      { timeout: 10_000 },
-    );
-    if (ready !== false) return;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  throw new Error(
-    `Primary PostgreSQL did not become ready on ${primaryIp} within ~30s of the ` +
-      'WAL-settings restart; the standby base backup would race an unavailable postmaster.',
-  );
 }
 
 /**

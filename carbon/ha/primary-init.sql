@@ -21,10 +21,9 @@ BEGIN
   END IF;
 END $$;
 
--- Enable WAL-level replication
-ALTER SYSTEM SET wal_level = 'replica';
-ALTER SYSTEM SET max_wal_senders = 5;
-ALTER SYSTEM SET wal_keep_size = '512MB';
+-- The replication settings (wal_level, hot_standby, max_wal_senders,
+-- wal_keep_size, max_slot_wal_keep_size) are on the db argv (the StatefulSet
+-- args), so they are live from the first boot and this script restarts nothing.
 
 -- The physical replication slot for the standby. Without a slot, the
 -- standby's follow position isn't persisted on primary; if it falls behind
@@ -50,5 +49,4 @@ BEGIN
   END IF;
 END $$;
 
--- Reload config (wal_level change requires restart, handled by caller)
 SELECT pg_reload_conf();
