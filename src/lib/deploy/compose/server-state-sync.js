@@ -16,7 +16,7 @@
  */
 
 import * as p from '@clack/prompts';
-import { loadProjectConfig, saveProjectConfig } from '../../config.js';
+import { updateProjectConfig } from '../../config.js';
 import { composeServerStateSpec, syncServerState } from '../../iac/server-state.js';
 import { providerIdFor } from '../../providers/index.js';
 import { composeHaStackOf } from './ha-role-swap.js';
@@ -84,28 +84,28 @@ export async function resolveServerStateOptions({ envConfig, projectName, Provid
 
 /** Record a pending state sync (one per stack; a newer one replaces it). */
 export function recordPendingServerState(environment, entry) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[environment];
-  if (!envConfig) {
-    throw new Error(`server state: environment ${environment} is not in .vibecarbon.json`);
-  }
-  envConfig.pendingServerState = [
-    ...(envConfig.pendingServerState ?? []).filter((e) => e.stack !== entry.stack),
-    { ...entry, at: new Date().toISOString() },
-  ];
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[environment];
+    if (!envConfig) {
+      throw new Error(`server state: environment ${environment} is not in .vibecarbon.json`);
+    }
+    envConfig.pendingServerState = [
+      ...(envConfig.pendingServerState ?? []).filter((e) => e.stack !== entry.stack),
+      { ...entry, at: new Date().toISOString() },
+    ];
+  });
 }
 
 /** Drop the pending sync for `stack`. A no-op when none is set. */
 export function clearPendingServerState(environment, stack) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[environment];
-  const pending = envConfig?.pendingServerState;
-  if (!pending) return;
-  const rest = pending.filter((e) => e.stack !== stack);
-  if (rest.length > 0) envConfig.pendingServerState = rest;
-  else delete envConfig.pendingServerState;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[environment];
+    const pending = envConfig?.pendingServerState;
+    if (!pending) return;
+    const rest = pending.filter((e) => e.stack !== stack);
+    if (rest.length > 0) envConfig.pendingServerState = rest;
+    else delete envConfig.pendingServerState;
+  });
 }
 
 /**
@@ -142,13 +142,12 @@ export function describeOldServer(old) {
 
 /** Mark the record's old server as deleted (its delete landed). */
 export function markPendingServerOldDeleted(environment, stack) {
-  const config = loadProjectConfig();
-  const entry = config?.environments?.[environment]?.pendingServerState?.find(
-    (e) => e.stack === stack,
-  );
-  if (!entry) return;
-  entry.oldDeleted = true;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const entry = config.environments?.[environment]?.pendingServerState?.find(
+      (e) => e.stack === stack,
+    );
+    if (entry) entry.oldDeleted = true;
+  });
 }
 
 /** The one recovery line for a stack that still names a replaced server. */

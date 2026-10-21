@@ -32,7 +32,7 @@
 import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { c } from '../../colors.js';
-import { loadProjectConfig, registerProject, saveProjectConfig } from '../../config.js';
+import { loadProjectConfig, registerProject, updateProjectConfig } from '../../config.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { perfAsync } from '../../perf.js';
@@ -410,16 +410,21 @@ async function haPersistPendingConfig(ctx) {
     services,
     lastAttempt: new Date().toISOString(),
   };
-  saveProjectConfig({
-    ...loadedProjectConfig,
-    provider: envConfig.provider ?? 'hetzner',
-    environments: {
-      ...loadedProjectConfig.environments,
-      [environment]: pendingEnvConfig,
-    },
-  });
+  persistComposeHaEnv(environment, envConfig, pendingEnvConfig);
   ctx.loadedProjectConfig = loadedProjectConfig;
   ctx.pendingEnvConfig = pendingEnvConfig;
+}
+
+/**
+ * Write this deploy's env entry (and the project provider) onto the file as it
+ * is now, under the config lock: every other environment and top-level field
+ * keeps what was saved since this deploy loaded the config.
+ */
+function persistComposeHaEnv(environment, envConfig, envEntry) {
+  updateProjectConfig((config) => {
+    config.provider = envConfig.provider ?? 'hetzner';
+    config.environments = { ...config.environments, [environment]: envEntry };
+  });
 }
 
 /** Wait for SSH on both servers; hard-fail if either times out. */
@@ -1186,7 +1191,6 @@ async function haFinalizeConfig(ctx) {
     primary,
     standby,
     domain,
-    loadedProjectConfig,
     pendingEnvConfig,
     replActive,
     degraded,
@@ -1243,14 +1247,7 @@ async function haFinalizeConfig(ctx) {
     delete finalEnv.lastFailoverOverride;
     finalEnv.ha = { ...(finalEnv.ha ?? {}), systemIdentifier: ctx.systemIdentifier };
   }
-  saveProjectConfig({
-    ...loadedProjectConfig,
-    provider: envConfig.provider ?? 'hetzner',
-    environments: {
-      ...loadedProjectConfig.environments,
-      [environment]: finalEnv,
-    },
-  });
+  persistComposeHaEnv(environment, envConfig, finalEnv);
   registerProject(projectName, process.cwd());
 
   p.log.success('');

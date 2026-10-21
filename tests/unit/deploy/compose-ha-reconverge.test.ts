@@ -60,11 +60,14 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
   return {
     ...actual,
     loadProjectConfig: () => structuredClone(h.disk.config),
-    saveProjectConfig: (cfg: Record<string, unknown>) => {
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) => {
+      const current = structuredClone(h.disk.config ?? {}) as Record<string, unknown>;
+      const cfg = (fn(current) ?? current) as Record<string, unknown>;
       const env = (cfg as { environments?: Record<string, { status?: string }> }).environments
         ?.prod;
       h.events.push(`save:${env?.status}`);
       h.disk.config = structuredClone(cfg);
+      return cfg;
     },
     registerProject: () => {},
   };

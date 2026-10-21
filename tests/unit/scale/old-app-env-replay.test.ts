@@ -24,7 +24,7 @@ vi.mock('../../../src/lib/iac/converge-cluster.js', () => ({
   convergeClusterInfra: vi.fn(async () => ({ outputs: {} })),
 }));
 vi.mock('../../../src/lib/command.js', () => ({ runCommand: vi.fn(() => '') }));
-vi.mock('../../../src/lib/config.js', () => ({ saveProjectConfig: vi.fn() }));
+vi.mock('../../../src/lib/config.js', () => ({ updateProjectConfig: vi.fn() }));
 
 const { NO_APP_ENV_MARKER, readOldAppEnv } = await import('../../../src/scale.js');
 

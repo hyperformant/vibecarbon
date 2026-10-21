@@ -16,8 +16,11 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
   return {
     ...actual,
     loadProjectConfig: () => structuredClone(h.config),
-    saveProjectConfig: (c: typeof h.config) => {
-      h.config = structuredClone(c);
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) => {
+      const current = structuredClone(h.config ?? {}) as Record<string, unknown>;
+      const next = (fn(current) ?? current) as typeof h.config;
+      h.config = structuredClone(next);
+      return next;
     },
   };
 });

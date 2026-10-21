@@ -17,8 +17,11 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
   return {
     ...actual,
     loadProjectConfig: () => disk.config,
-    saveProjectConfig: (cfg: Record<string, unknown>) => {
-      disk.saved = cfg;
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) => {
+      const current = structuredClone(disk.config ?? {});
+      const next = (fn(current) ?? current) as Record<string, unknown>;
+      disk.saved = next;
+      return next;
     },
     registerProject: () => {},
   };

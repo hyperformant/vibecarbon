@@ -36,7 +36,7 @@
  */
 
 import * as p from '@clack/prompts';
-import { loadProjectConfig, saveProjectConfig } from '../../config.js';
+import { updateProjectConfig } from '../../config.js';
 import { composeWriterServices } from '../../services/standby-policy.js';
 import {
   markStandbyUnproven,
@@ -352,12 +352,12 @@ export async function writeComposeReplicationOverlay({
  */
 function recordProvenStandby(ctx, systemIdentifier) {
   recordSystemIdentifier(ctx, systemIdentifier);
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[ctx.environment];
-  if (!envConfig) return;
-  envConfig.replication = 'streaming';
-  envConfig.degraded = false;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[ctx.environment];
+    if (!envConfig) return;
+    envConfig.replication = 'streaming';
+    envConfig.degraded = false;
+  });
 }
 
 /**

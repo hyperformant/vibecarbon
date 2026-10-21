@@ -2,7 +2,19 @@
  * Project configuration management
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { parseDotenv } from './dotenv.js';
@@ -118,15 +130,230 @@ export function loadProjectConfig(cwd = process.cwd()) {
   return null;
 }
 
+/** How long a writer waits for another process's config write before refusing. */
+const CONFIG_LOCK_TIMEOUT_MS = 30_000;
+/** A lock file with no readable pid yet is trusted for this long (its writer is mid-create). */
+const UNREADABLE_LOCK_GRACE_MS = 5_000;
+const CONFIG_LOCK_POLL_MS = 25;
+
+/** Lock paths this process holds right now: a nested call would wait on itself. */
+const heldConfigLocks = new Set();
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: the pid exists under another user, so it is alive.
+    return err?.code === 'EPERM';
+  }
+}
+
 /**
- * Save project configuration to .vibecarbon.json
- *
- * @param {object} config - Configuration to save
- * @param {string} [cwd] - Working directory (defaults to process.cwd())
+ * The holder of an existing lock file: its pid, the text it holds, and
+ * whether it is stale (a dead pid, or no pid long after its create).
  */
-export function saveProjectConfig(config, cwd = process.cwd()) {
+function inspectLock(lockPath) {
+  let text;
+  let st;
+  try {
+    st = statSync(lockPath);
+    text = readFileSync(lockPath, 'utf-8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { gone: true };
+    throw err;
+  }
+  const pid = /^\d+$/.test(text.trim()) ? Number(text.trim()) : null;
+  if (pid === null) {
+    return { pid: null, text, stale: Date.now() - st.mtimeMs > UNREADABLE_LOCK_GRACE_MS };
+  }
+  // Our own pid on a lock we do not hold is a leftover of a recycled pid.
+  return { pid, text, stale: pid === process.pid || !pidAlive(pid) };
+}
+
+/** Create `path` exclusively, holding this pid. False when it already exists. */
+function createLockFile(path) {
+  let fd;
+  try {
+    fd = openSync(path, 'wx', 0o600);
+  } catch (err) {
+    if (err?.code === 'EEXIST') return false;
+    throw err;
+  }
+  try {
+    writeSync(fd, `${process.pid}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  return true;
+}
+
+/**
+ * Remove a stale lock, one breaker at a time: two waiters that both judged
+ * the same lock stale must not have the second remove the fresh lock the
+ * first one took after its break. Under `<lock>.break` the lock is re-read
+ * and removed only if it still holds the stale text: a fresh lock can only
+ * appear once the stale one is gone, and only a breaker removes that.
+ */
+function breakStaleLock(lockPath, stale) {
+  const breakPath = `${lockPath}.break`;
+  if (!createLockFile(breakPath)) {
+    // Another process is breaking it right now (microseconds), or crashed
+    // mid-break: clear a dead breaker's file, otherwise wait and retry.
+    const breaker = inspectLock(breakPath);
+    if (!breaker.gone && breaker.stale) {
+      try {
+        unlinkSync(breakPath);
+      } catch (err) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
+    } else {
+      sleepSync(CONFIG_LOCK_POLL_MS);
+    }
+    return;
+  }
+  try {
+    const now = inspectLock(lockPath);
+    if (!now.gone && now.text === stale.text) unlinkSync(lockPath);
+  } finally {
+    unlinkSync(breakPath);
+  }
+}
+
+/**
+ * Take `.vibecarbon.json.lock` (O_EXCL, so exactly one process wins across
+ * terminals), waiting up to `timeoutMs` for a live holder. A lock whose holder
+ * pid is dead is broken. Returns the release.
+ */
+function acquireConfigLock(lockPath, timeoutMs) {
+  if (heldConfigLocks.has(lockPath)) {
+    throw new Error(
+      'updateProjectConfig: nested call while this process holds the config lock; ' +
+        'make the change inside the outer mutator',
+    );
+  }
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!createLockFile(lockPath)) {
+      const holder = inspectLock(lockPath);
+      if (holder.gone) continue;
+      if (holder.stale) {
+        breakStaleLock(lockPath, holder);
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `${lockPath} is held by pid ${holder.pid ?? 'unknown'} (another vibecarbon command ` +
+            `writing the project config); waited ${Math.round(timeoutMs / 1000)}s. ` +
+            'If no vibecarbon command is running, delete the lock file and rerun.',
+        );
+      }
+      sleepSync(CONFIG_LOCK_POLL_MS);
+      continue;
+    }
+    heldConfigLocks.add(lockPath);
+    return () => {
+      heldConfigLocks.delete(lockPath);
+      try {
+        // Only our lock: a breaker can only have removed it if our pid read dead.
+        if (readFileSync(lockPath, 'utf-8').trim() === String(process.pid)) unlinkSync(lockPath);
+      } catch (err) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
+    };
+  }
+}
+
+/**
+ * Write the config atomically: `.vibecarbon.json.tmp` in the same directory,
+ * fsync, rename over the file, fsync the directory. A crash at any point
+ * leaves either the old file or the new one, never a truncated one.
+ * Internal: every write goes through updateProjectConfig.
+ */
+function saveProjectConfig(config, cwd) {
   const configPath = join(cwd, '.vibecarbon.json');
-  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  const tmpPath = `${configPath}.tmp`;
+  // Keep the file's mode: the rename replaces the inode.
+  const mode = existsSync(configPath) ? statSync(configPath).mode & 0o777 : 0o644;
+  const fd = openSync(tmpPath, 'w', mode);
+  try {
+    writeSync(fd, `${JSON.stringify(config, null, 2)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    renameSync(tmpPath, configPath);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // the original file is intact either way; the rename error is the cause
+    }
+    throw err;
+  }
+  try {
+    const dirFd = openSync(cwd, 'r');
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    // Directory fsync is unsupported on some filesystems; the rename is atomic regardless.
+  }
+}
+
+/**
+ * The one way to change .vibecarbon.json: under the cross-process config lock,
+ * reload the file from disk, apply `mutator`, write it atomically.
+ *
+ * The mutator receives the freshly read config (the raw file, never the
+ * fields loadProjectConfig synthesizes) and either changes it in place or
+ * returns a replacement. Patch only the fields you own: whatever another
+ * step or another terminal saved since you last read is in `config` and must
+ * be kept. A mutator that throws writes nothing. It must be synchronous.
+ *
+ * @param {(config: object) => object|void} mutator
+ * @param {string} [cwd] - Working directory (defaults to process.cwd())
+ * @param {{ lockTimeoutMs?: number }} [opts]
+ * @returns {object} the config as written
+ */
+export function updateProjectConfig(
+  mutator,
+  cwd = process.cwd(),
+  { lockTimeoutMs = CONFIG_LOCK_TIMEOUT_MS } = {},
+) {
+  const configPath = join(cwd, '.vibecarbon.json');
+  const release = acquireConfigLock(`${configPath}.lock`, lockTimeoutMs);
+  try {
+    let current = {};
+    if (existsSync(configPath)) {
+      try {
+        current = JSON.parse(readFileSync(configPath, 'utf-8'));
+      } catch (err) {
+        throw new Error(`${configPath} is not valid JSON (${err.message}); fix it and rerun`);
+      }
+    }
+    const unchanged = JSON.stringify(current);
+    const returned = mutator(current);
+    if (typeof returned?.then === 'function') {
+      throw new Error(
+        'updateProjectConfig: the mutator must be synchronous (it runs under the lock)',
+      );
+    }
+    const next = returned ?? current;
+    // A no-op mutator writes nothing (and never creates a missing file).
+    if (JSON.stringify(next) !== unchanged) saveProjectConfig(next, cwd);
+    return next;
+  } finally {
+    release();
+  }
 }
 
 /**

@@ -20,7 +20,7 @@ import { spinner } from './lib/cli/progress.js';
 import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { assertInteractiveStdin } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { loadProjectConfig, updateProjectConfig } from './lib/config.js';
 import {
   backupFenceWarning,
   recordBackupFence,
@@ -1371,47 +1371,50 @@ function swapServerRoles(servers) {
  * role-agnostic pilot config (standbyWorkerSpec, scaleUpList) is preserved
  * untouched — it describes whatever cluster is currently the standby.
  *
- * Loads a FRESH project config (never a stale in-memory envConfig — the deploy
- * paths save mid-flight) and saves via saveProjectConfig. Exported for tests.
+ * Patches the FRESH project config under the config lock (never a stale
+ * in-memory envConfig — the deploy paths save mid-flight). Exported for tests.
  *
  * @param {string} envName
  */
 export function swapHaRoles(envName, { override } = {}) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[envName];
-  if (!envConfig?.ha?.primary || !envConfig.ha.standby) {
-    // Nothing structured to swap. The promotion + DNS flip already happened, so
-    // warn rather than throw — a role reconcile just can't be persisted here.
-    p.log.warn('Could not persist role swap, ha.primary/standby missing from config');
-    return;
-  }
-  const ha = envConfig.ha;
-  // Swap the role objects wholesale (stack / region / IP fields ride along).
-  [ha.primary, ha.standby] = [ha.standby, ha.primary];
-  // servers[] records the same roles; resolvePrimary refuses a config whose
-  // two records disagree. db, worker and master entries carry other roles.
-  envConfig.servers = swapServerRoles(envConfig.servers);
+  let swapped = false;
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[envName];
+    // Nothing structured to swap: leave the file untouched (warned below).
+    if (!envConfig?.ha?.primary || !envConfig.ha.standby) return;
+    swapped = true;
+    const ha = envConfig.ha;
+    // Swap the role objects wholesale (stack / region / IP fields ride along).
+    [ha.primary, ha.standby] = [ha.standby, ha.primary];
+    // servers[] records the same roles; resolvePrimary refuses a config whose
+    // two records disagree. db, worker and master entries carry other roles.
+    envConfig.servers = swapServerRoles(envConfig.servers);
 
-  // Swap the top-level regions to match the new primary / standby.
-  [envConfig.region, envConfig.secondaryRegion] = [envConfig.secondaryRegion, envConfig.region];
-  // failoverRegion tracks the standby's region — keep it consistent.
-  ha.failoverRegion = envConfig.secondaryRegion;
-  // Honest DR posture until a reconverge deploy re-establishes streaming.
-  envConfig.replication = 'degraded';
-  envConfig.degraded = true;
-  // The failback guard compares this with deployedAt: until a deploy
-  // reconverges, the new standby is the old primary and holds no replica.
-  envConfig.lastFailover = new Date().toISOString();
-  // A failover that skipped the replica proof says so on the record.
-  if (override) envConfig.lastFailoverOverride = override;
-  else delete envConfig.lastFailoverOverride;
-  // R2: the journal is cleared by the same save that persists the swap, so no
-  // crash can leave a swapped config that still claims a failover in flight.
-  delete ha.failoverInFlight;
-  // The retired side's read-only state now belongs to the retired-node
-  // handling, not to the interrupted-fence marker.
-  delete ha.writeFence;
-  saveProjectConfig(config);
+    // Swap the top-level regions to match the new primary / standby.
+    [envConfig.region, envConfig.secondaryRegion] = [envConfig.secondaryRegion, envConfig.region];
+    // failoverRegion tracks the standby's region — keep it consistent.
+    ha.failoverRegion = envConfig.secondaryRegion;
+    // Honest DR posture until a reconverge deploy re-establishes streaming.
+    envConfig.replication = 'degraded';
+    envConfig.degraded = true;
+    // The failback guard compares this with deployedAt: until a deploy
+    // reconverges, the new standby is the old primary and holds no replica.
+    envConfig.lastFailover = new Date().toISOString();
+    // A failover that skipped the replica proof says so on the record.
+    if (override) envConfig.lastFailoverOverride = override;
+    else delete envConfig.lastFailoverOverride;
+    // R2: the journal is cleared by the same save that persists the swap, so no
+    // crash can leave a swapped config that still claims a failover in flight.
+    delete ha.failoverInFlight;
+    // The retired side's read-only state now belongs to the retired-node
+    // handling, not to the interrupted-fence marker.
+    delete ha.writeFence;
+  });
+  if (!swapped) {
+    // The promotion + DNS flip already happened, so warn rather than throw — a
+    // role reconcile just can't be persisted here.
+    p.log.warn('Could not persist role swap, ha.primary/standby missing from config');
+  }
 }
 
 /** How long `-abort` waits for the standby's db pod to be gone after the scale to zero. */

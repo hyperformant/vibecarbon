@@ -45,7 +45,7 @@ vi.mock('@clack/prompts', async (orig) => {
 
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, loadProjectConfig: () => null, saveProjectConfig: () => {} };
+  return { ...actual, loadProjectConfig: () => null, updateProjectConfig: () => ({}) };
 });
 
 vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {

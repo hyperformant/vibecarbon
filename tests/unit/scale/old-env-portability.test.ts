@@ -26,7 +26,7 @@ vi.mock('../../../src/lib/iac/converge-cluster.js', () => ({
   convergeClusterInfra: vi.fn(async () => ({ outputs: {} })),
 }));
 vi.mock('../../../src/lib/command.js', () => ({ runCommand: vi.fn(() => '') }));
-vi.mock('../../../src/lib/config.js', () => ({ saveProjectConfig: vi.fn() }));
+vi.mock('../../../src/lib/config.js', () => ({ updateProjectConfig: vi.fn() }));
 
 const { dropUnportableEnv } = await import('../../../src/scale.js');
 const { encodeDotenvValue } = await import('../../../src/lib/dotenv.js');

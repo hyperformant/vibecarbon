@@ -23,7 +23,7 @@
  *   - ensureOperatorIpAccess — the all-in-one helper for command run()s
  */
 
-import { saveProjectConfig } from './config.js';
+import { updateProjectConfig } from './config.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { readOperatorVar } from './operator-env.js';
 import { providerFor } from './providers/index.js';
@@ -267,7 +267,7 @@ export async function applyToFirewall({
  *   yes — non-interactive mode flag
  *   onMessage — optional callback invoked with a single info string when a
  *     new CIDR is added (caller wires this to its logger)
- *   cwd — passed to saveProjectConfig
+ *   cwd — the project directory whose .vibecarbon.json is updated
  *
  * Returns { added, cidr, list, fromEnv }:
  *   added — true if the list was modified this call
@@ -383,10 +383,12 @@ export async function ensureOperatorIpAccess({
 
 function persist(projectConfig, newList, cwd) {
   if (!projectConfig) return;
-  const updated = { ...projectConfig, operatorCidrs: newList };
+  // Only operatorCidrs, onto the file as it is now (never the whole stale config).
+  updateProjectConfig((config) => {
+    config.operatorCidrs = newList;
+  }, cwd);
   // Mutate in place so callers holding a reference see the new list.
   projectConfig.operatorCidrs = newList;
-  saveProjectConfig(updated, cwd);
 }
 
 export function parseAllowedSshIpsEnv(envVar) {

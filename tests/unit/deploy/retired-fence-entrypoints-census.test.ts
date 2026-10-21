@@ -88,7 +88,7 @@ describe('the fence is cleared only once the retired side is a proven replica', 
     const body = fnBody(code('src/lib/deploy/orchestrator.js'), 'executeDeployment');
     expect(calls(body, 'finishK8sRetiredFence')).toBe(1);
     expect(body.indexOf('finishK8sRetiredFence(')).toBeLessThan(
-      body.indexOf('saveProjectConfig(clearDestroyedRecord('),
+      body.indexOf('return clearDestroyedRecord('),
     );
   });
 });

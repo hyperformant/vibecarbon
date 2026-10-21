@@ -17,7 +17,7 @@ import { reapChallengeRecords } from '../../acme-challenge.js';
 import { exitCancelled, exitDeclined } from '../../cli/exit-guard.js';
 import { resolvePrimary } from '../../cli/resolve-primary.js';
 import { c } from '../../colors.js';
-import { loadProjectConfig, saveProjectConfig } from '../../config.js';
+import { loadProjectConfig, updateProjectConfig } from '../../config.js';
 import { environmentServerNames } from '../../destroy/server-naming.js';
 import {
   DNS_PROVIDERS,
@@ -1630,39 +1630,40 @@ export async function startOldPrimaryWriters(ip, sshKeyPath, containers) {
  * Persist a compose-HA failover: flip the two `role` fields in place (names and
  * array order keep their Pulumi identity, see ha-role-swap.js), swap the
  * regions, stamp lastFailover and clear the failover journal in the same save
- * (R2). Loads a fresh config: the journal and a reseed's identifier were saved
- * mid-run, and an in-memory copy would write them back stale.
+ * (R2). Patches the fresh config under the config lock: the journal and a
+ * reseed's identifier were saved mid-run, and an in-memory copy would write
+ * them back stale.
  *
  * @param {string} envName
  * @param {{ override?: string }} [opts]
  */
 export function swapComposeHaRoles(envName, { override } = {}) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[envName];
-  if (!envConfig) {
-    throw new Error(`could not persist the role swap: ${envName} is not in .vibecarbon.json`);
-  }
-  const servers = envConfig.servers || [];
-  const oldPrimary = servers.find((sv) => sv.role === 'primary');
-  const oldStandby = servers.find((sv) => sv.role === 'standby');
-  envConfig.servers = servers.map((sv) => ({
-    ...sv,
-    role: sv.role === 'primary' ? 'standby' : 'primary',
-  }));
-  envConfig.region = oldStandby?.region ?? envConfig.secondaryRegion;
-  envConfig.secondaryRegion = oldPrimary?.region ?? envConfig.region;
-  envConfig.ha = { ...(envConfig.ha ?? {}), failoverRegion: envConfig.secondaryRegion };
-  delete envConfig.ha.failoverInFlight;
-  // The retired node's read-only state now belongs to the retired-node
-  // handling, not to the interrupted-fence marker.
-  delete envConfig.ha.writeFence;
-  // Honest DR posture, as k8s swapHaRoles: the retired node replicates nothing.
-  envConfig.replication = 'degraded';
-  envConfig.degraded = true;
-  envConfig.lastFailover = new Date().toISOString();
-  if (override) envConfig.lastFailoverOverride = override;
-  else delete envConfig.lastFailoverOverride;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[envName];
+    if (!envConfig) {
+      throw new Error(`could not persist the role swap: ${envName} is not in .vibecarbon.json`);
+    }
+    const servers = envConfig.servers || [];
+    const oldPrimary = servers.find((sv) => sv.role === 'primary');
+    const oldStandby = servers.find((sv) => sv.role === 'standby');
+    envConfig.servers = servers.map((sv) => ({
+      ...sv,
+      role: sv.role === 'primary' ? 'standby' : 'primary',
+    }));
+    envConfig.region = oldStandby?.region ?? envConfig.secondaryRegion;
+    envConfig.secondaryRegion = oldPrimary?.region ?? envConfig.region;
+    envConfig.ha = { ...(envConfig.ha ?? {}), failoverRegion: envConfig.secondaryRegion };
+    delete envConfig.ha.failoverInFlight;
+    // The retired node's read-only state now belongs to the retired-node
+    // handling, not to the interrupted-fence marker.
+    delete envConfig.ha.writeFence;
+    // Honest DR posture, as k8s swapHaRoles: the retired node replicates nothing.
+    envConfig.replication = 'degraded';
+    envConfig.degraded = true;
+    envConfig.lastFailover = new Date().toISOString();
+    if (override) envConfig.lastFailoverOverride = override;
+    else delete envConfig.lastFailoverOverride;
+  });
 }
 
 /**

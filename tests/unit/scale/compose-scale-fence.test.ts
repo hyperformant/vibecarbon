@@ -65,8 +65,12 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
   return {
     ...actual,
     loadProjectConfig: () => null,
-    saveProjectConfig: (c: unknown) => {
-      h.state.saved.push(c);
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) => {
+      // Nothing on disk; a no-op mutator writes nothing, as the real one.
+      const current: Record<string, unknown> = {};
+      const next = fn(current) ?? current;
+      if (JSON.stringify(next) !== '{}') h.state.saved.push(next);
+      return next;
     },
   };
 });

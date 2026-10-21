@@ -24,8 +24,11 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
   return {
     ...actual,
     loadProjectConfig: () => ({ projectName: 'testapp', environments: {} }),
-    saveProjectConfig: (cfg: Record<string, unknown>) => {
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) => {
+      const current: Record<string, unknown> = { projectName: 'testapp', environments: {} };
+      const cfg = (fn(current) ?? current) as Record<string, unknown>;
       saved.last = cfg;
+      return cfg;
     },
     registerProject: () => {},
   };

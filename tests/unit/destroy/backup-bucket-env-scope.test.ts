@@ -6,6 +6,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
+import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const BACKUPS = 'myapp-cd9ecc-backups';
 
@@ -30,14 +31,14 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   };
 });
 
-const saved = vi.hoisted(() => ({ configs: [] as Array<Record<string, unknown>> }));
+const store = projectConfigStore();
+const saved = { configs: store.state.writes };
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
   return {
     ...real,
-    saveProjectConfig: (c: Record<string, unknown>) => {
-      saved.configs.push(structuredClone(c));
-    },
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
+      store.updateProjectConfig(fn),
   };
 });
 
@@ -75,6 +76,8 @@ async function destroy(
     stop: (m?: string) => messages.push(`stop:${m ?? ''}`),
     message: (m?: string) => messages.push(`message:${m ?? ''}`),
   };
+  // The file as it was when the destroy loaded it.
+  store.state.disk = structuredClone(projectConfig);
   const ctx = {
     envConfig: projectConfig.environments[environment],
     projectConfig,

@@ -27,7 +27,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { updateProjectConfig } from './lib/config.js';
 // Static imports (no cycle: neither compose/index.js nor compose/ha.js imports
 // restore.js). Aliased so runComposeRestore can default to the real functions
 // while still accepting injected mocks for unit tests.
@@ -640,13 +640,13 @@ export async function run(args, deps = {}) {
  */
 function recordRestoredLineage(envName, lineage) {
   try {
-    const config = loadProjectConfig();
-    const envConfig = config?.environments?.[envName];
-    if (!envConfig) return;
-    // Also clears backup.unrestoredPrior: the operator chose this lineage.
-    const { unrestoredPrior: _cleared, ...kept } = envConfig.backup ?? {};
-    envConfig.backup = { ...kept, ...restoredLineageRecord(envConfig.backup, lineage) };
-    saveProjectConfig(config);
+    updateProjectConfig((config) => {
+      const envConfig = config.environments?.[envName];
+      if (!envConfig) return;
+      // Also clears backup.unrestoredPrior: the operator chose this lineage.
+      const { unrestoredPrior: _cleared, ...kept } = envConfig.backup ?? {};
+      envConfig.backup = { ...kept, ...restoredLineageRecord(envConfig.backup, lineage) };
+    });
   } catch (err) {
     p.log.warn(
       `could not record backup lineage ${lineage} in .vibecarbon.json ` +

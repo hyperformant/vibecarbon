@@ -35,15 +35,9 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
-import { isHAConfigured, registerProject } from './lib/config.js';
+import { isHAConfigured, registerProject, updateProjectConfig } from './lib/config.js';
 import { fetchWithRetry } from './lib/fetch-retry.js';
-import {
-  appendToEnv,
-  loadEnvVariables,
-  loadManifest,
-  saveManifest,
-  setEnvVar,
-} from './lib/project.js';
+import { appendToEnv, loadEnvVariables, loadManifest, setEnvVar } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { generatePassword } from './lib/secrets.js';
 
@@ -489,7 +483,10 @@ async function addService(serviceName, options) {
       addedAt: new Date().toISOString(),
       version: manifest.version,
     };
-    saveManifest(projectManifest);
+    const serviceRecord = projectManifest.services[serviceName];
+    updateProjectConfig((config) => {
+      config.services = { ...(config.services ?? {}), [serviceName]: serviceRecord };
+    });
 
     s.stop(`${manifest.name} added successfully`);
 
@@ -693,4 +690,4 @@ export async function run(args) {
 // EXPORTS FOR TESTING
 // ============================================================================
 
-export { fetchServiceManifest, loadManifest, removeFromBaseKustomization, saveManifest };
+export { fetchServiceManifest, loadManifest, removeFromBaseKustomization };

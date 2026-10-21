@@ -13,12 +13,7 @@
 import { existsSync, rmSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import {
-  fetchServiceManifest,
-  loadManifest,
-  removeFromBaseKustomization,
-  saveManifest,
-} from './add.js';
+import { fetchServiceManifest, loadManifest, removeFromBaseKustomization } from './add.js';
 import { exitCancelled } from './lib/cli/exit-guard.js';
 import { formatCommandNote } from './lib/cli/help.js';
 import { introCommand } from './lib/cli/intro.js';
@@ -27,6 +22,7 @@ import { spinner } from './lib/cli/progress.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
+import { updateProjectConfig } from './lib/config.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 
 // ============================================================================
@@ -174,7 +170,9 @@ async function removeService(serviceName, options) {
 
   // Update project manifest
   delete projectManifest.services[serviceName];
-  saveManifest(projectManifest);
+  updateProjectConfig((config) => {
+    if (config.services) delete config.services[serviceName];
+  });
 
   s.stop(`${serviceManifest.name} removed successfully`);
 

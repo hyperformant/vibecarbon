@@ -31,7 +31,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { loadProjectConfig, updateProjectConfig } from './lib/config.js';
 import { captureClusterCsiVolumes, isCsiVolumeName } from './lib/csi-volumes.js';
 import {
   appStorageSecretKeys,
@@ -1368,8 +1368,8 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks,
   // rotates only when -purge deletes the bucket), and recording the kept name
   // also covers a bucket derived under an older scheme, so a redeploy finds
   // this bucket again instead of orphaning it (vibecarbon-web 2026-09-15).
-  // resolveStateBucketName reads it ahead of derivation, and
-  // updateProjectConfig persists this same object.
+  // resolveStateBucketName reads it ahead of derivation; the
+  // update-project-config step writes it (results.retainedStateBucket).
   projectConfig.retainedStateBucket = stateBucket;
   spinner.start('Pulumi state bucket');
   spinner.stop(
@@ -1641,8 +1641,11 @@ async function revokeAppStorageKeyEffect(ctx) {
   if (record.scoping !== 'paste-fence') return;
   // Retire the key before anything else: it stays denied in every fence
   // until the operator deletes it in the console and forgets it.
-  projectConfig.retiredAppKeys = [...new Set([...(projectConfig.retiredAppKeys ?? []), record.id])];
-  saveProjectConfig(projectConfig);
+  const retire = (keys) => [...new Set([...(keys ?? []), record.id])];
+  projectConfig.retiredAppKeys = retire(projectConfig.retiredAppKeys);
+  updateProjectConfig((config) => {
+    config.retiredAppKeys = retire(config.retiredAppKeys);
+  });
   spinner.start('App storage key fence');
   try {
     const s3Creds = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
@@ -1687,6 +1690,7 @@ async function revokeAppStorageKeyEffect(ctx) {
 //    instead of recreating one under the same name — see retainStateBucket.
 async function retainStateBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
+  const before = projectConfig.retainedStateBucket;
   const outcome = await retainStateBucket(
     envConfig,
     projectConfig,
@@ -1696,6 +1700,11 @@ async function retainStateBucketEffect(ctx) {
     environment,
   );
   if (outcome?.purged) results.stateBucketPurged = true;
+  // What this destroy decided about retainedStateBucket, for the config write
+  // (which patches the file as it is then, not this in-memory copy).
+  if (projectConfig.retainedStateBucket !== before) {
+    results.retainedStateBucket = { value: projectConfig.retainedStateBucket };
+  }
 }
 
 // 3. Backup bucket: preserved by default, deleted with -purge.
@@ -1760,41 +1769,50 @@ async function updateProjectConfigEffect(ctx) {
     return;
   }
   spinner.start('Updating project configuration');
-  const updatedConfig = { ...projectConfig };
-  if (updatedConfig.environments) {
-    // Keep what the environment WAS (placement, domain, DNS, backup bucket,
-    // sizing) under a sibling key `deploy` reads when this name is deployed
-    // again — a destroy→deploy move no longer needs a hand-typed block. A
-    // sibling key rather than a stub in `environments`: every other command
-    // treats presence there as "deployed" (see lib/env-identity.js).
-    const identity = envIdentityOf(updatedConfig.environments[environment]);
-    if (Object.keys(identity).length > 0) {
-      updatedConfig.destroyedEnvironments = {
-        ...(updatedConfig.destroyedEnvironments ?? {}),
-        [environment]: {
-          ...identity,
-          // This env's backup folder is gone, so it no longer holds the
-          // backup bucket (preservedBackupHolders).
-          ...(results.backupsPurged && { backupsPurged: true }),
-          destroyedAt: new Date().toISOString(),
-        },
-      };
+  // One locked write onto the file as it is now: the in-memory projectConfig
+  // was loaded when this destroy started, and a failover journal or another
+  // environment's record saved since must survive.
+  updateProjectConfig((updatedConfig) => {
+    if (results.retainedStateBucket) {
+      if (results.retainedStateBucket.value === undefined) delete updatedConfig.retainedStateBucket;
+      else updatedConfig.retainedStateBucket = results.retainedStateBucket.value;
     }
-    delete updatedConfig.environments[environment];
-  }
-  // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
-  // deleted the derived state bucket (the last live environment). The next
-  // deploy then derives a FRESH state-bucket name rather than recreating the
-  // one just deleted: Hetzner Object Storage can ack writes into a
-  // just-recreated same-name bucket and lose them (e4 restore->failover,
-  // 2026-08-07). Every other destroy keeps the state bucket (see
-  // retainStateBucket), and rotating then would strand the warm bucket.
-  //
-  // The app bucket name stays stable; it is not rotated here.
-  if (results.stateBucketPurged) {
-    updatedConfig.stateBucketGeneration = generateBucketSalt();
-  }
-  saveProjectConfig(updatedConfig);
+    if (updatedConfig.environments) {
+      // Keep what the environment WAS (placement, domain, DNS, backup bucket,
+      // sizing) under a sibling key `deploy` reads when this name is deployed
+      // again — a destroy→deploy move no longer needs a hand-typed block. A
+      // sibling key rather than a stub in `environments`: every other command
+      // treats presence there as "deployed" (see lib/env-identity.js).
+      const identity = envIdentityOf(
+        updatedConfig.environments[environment] ?? projectConfig.environments?.[environment],
+      );
+      if (Object.keys(identity).length > 0) {
+        updatedConfig.destroyedEnvironments = {
+          ...(updatedConfig.destroyedEnvironments ?? {}),
+          [environment]: {
+            ...identity,
+            // This env's backup folder is gone, so it no longer holds the
+            // backup bucket (preservedBackupHolders).
+            ...(results.backupsPurged && { backupsPurged: true }),
+            destroyedAt: new Date().toISOString(),
+          },
+        };
+      }
+      delete updatedConfig.environments[environment];
+    }
+    // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
+    // deleted the derived state bucket (the last live environment). The next
+    // deploy then derives a FRESH state-bucket name rather than recreating the
+    // one just deleted: Hetzner Object Storage can ack writes into a
+    // just-recreated same-name bucket and lose them (e4 restore->failover,
+    // 2026-08-07). Every other destroy keeps the state bucket (see
+    // retainStateBucket), and rotating then would strand the warm bucket.
+    //
+    // The app bucket name stays stable; it is not rotated here.
+    if (results.stateBucketPurged) {
+      updatedConfig.stateBucketGeneration = generateBucketSalt();
+    }
+  });
   spinner.stop('Configuration updated');
 }
 
@@ -3910,6 +3928,5 @@ export {
   main,
   retainStateBucket,
   SPEC,
-  saveProjectConfig,
   VERSION,
 };

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { projectConfigStore } from '../helpers/project-config-store.js';
 
 // Task 11: role-aware HA scale sizing. Stacks are cluster IDENTITIES named at
 // birth ("<env>-primary" / "<env>-standby"); ROLES flip at failover, persisted
@@ -84,14 +85,15 @@ vi.mock('../../../src/lib/command.js', () => ({
   }),
 }));
 
+const store = projectConfigStore();
 vi.mock('../../../src/lib/config.js', () => ({
-  saveProjectConfig: vi.fn(),
+  updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
+    store.updateProjectConfig(fn),
 }));
 
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
 const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
 const { runCommand } = await import('../../../src/lib/command.js');
-const { saveProjectConfig } = await import('../../../src/lib/config.js');
 
 const Provider = { K8S_ASSETS: { csiNodeDaemonSet: 'daemonset/hcloud-csi-node' } };
 
@@ -308,7 +310,7 @@ type SavedProjectConfig = {
 
 describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyWorkerSpec', () => {
   beforeEach(() => {
-    vi.mocked(saveProjectConfig).mockClear();
+    store.reset();
   });
 
   it('updates ha.standbyWorkerSpec.serverType when HA and workerType changed, preserving the rest of ha', async () => {
@@ -322,6 +324,7 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
       },
     };
     const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    store.reset(projectConfig);
     await SCALE_EFFECTS.scaleUpdateK8sConfig({
       environment: 'prod',
       envConfig,
@@ -330,8 +333,8 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
       isHA: true,
     });
 
-    expect(saveProjectConfig).toHaveBeenCalledTimes(1);
-    const saved = vi.mocked(saveProjectConfig).mock.calls[0][0] as SavedProjectConfig;
+    expect(store.state.writes).toHaveLength(1);
+    const saved = store.state.writes[0] as SavedProjectConfig;
     const savedEnv = saved.environments.prod;
     expect(savedEnv.ha.standbyWorkerSpec.serverType).toBe('cx33');
     expect(savedEnv.ha.standbyWorkerSpec.count).toBe(1);
@@ -344,6 +347,7 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
   it('does not add an ha block for non-HA environments', async () => {
     const envConfig = { workerServerType: 'cx22' };
     const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    store.reset(projectConfig);
     await SCALE_EFFECTS.scaleUpdateK8sConfig({
       environment: 'prod',
       envConfig,
@@ -351,13 +355,14 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
       newValues: { workerType: 'cx33' },
       isHA: false,
     });
-    const saved = vi.mocked(saveProjectConfig).mock.calls[0][0] as SavedProjectConfig;
+    const saved = store.state.writes[0] as SavedProjectConfig;
     expect(saved.environments.prod.ha).toBeUndefined();
   });
 
   it('leaves ha.standbyWorkerSpec.serverType untouched on a bounds-only scale (no workerType change)', async () => {
     const envConfig = { ha: { standbyWorkerSpec: { count: 1, serverType: 'cx22' } } };
     const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    store.reset(projectConfig);
     await SCALE_EFFECTS.scaleUpdateK8sConfig({
       environment: 'prod',
       envConfig,
@@ -365,8 +370,34 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
       newValues: { minWorkers: 2 },
       isHA: true,
     });
-    const saved = vi.mocked(saveProjectConfig).mock.calls[0][0] as SavedProjectConfig;
+    const saved = store.state.writes[0] as SavedProjectConfig;
     expect(saved.environments.prod.ha.standbyWorkerSpec.serverType).toBe('cx22');
+  });
+
+  it('patches the env as it is on disk, keeping what was saved after the scale loaded its copy', async () => {
+    const envConfig = { workerServerType: 'cx22', ha: { standbyWorkerSpec: { count: 1 } } };
+    const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    // Saved mid-scale (a reseed's proof) and by another terminal (a new env).
+    store.reset({
+      projectName: 'proj',
+      environments: {
+        prod: { ...envConfig, ha: { ...envConfig.ha, systemIdentifier: '7412' } },
+        staging: { region: 'fsn1' },
+      },
+    });
+    await SCALE_EFFECTS.scaleUpdateK8sConfig({
+      environment: 'prod',
+      envConfig,
+      projectConfig,
+      newValues: { workerType: 'cx33' },
+      isHA: true,
+    });
+    const saved = store.state.writes[0] as SavedProjectConfig & {
+      environments: Record<string, { ha?: { systemIdentifier?: string } }>;
+    };
+    expect(saved.environments.prod.ha?.systemIdentifier).toBe('7412');
+    expect(saved.environments.prod.ha?.standbyWorkerSpec?.serverType).toBe('cx33');
+    expect(saved.environments.staging).toEqual({ region: 'fsn1' });
   });
 });
 

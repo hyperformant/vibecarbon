@@ -31,7 +31,7 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommand } from './lib/command.js';
-import { registerProject } from './lib/config.js';
+import { registerProject, updateProjectConfig } from './lib/config.js';
 import { devS3Endpoint } from './lib/dev-s3.js';
 import { titleizeSlug } from './lib/display-name.js';
 import { dotenvValueProblem, formatDotenvLine } from './lib/dotenv.js';
@@ -45,7 +45,7 @@ import {
   writePnpmWorkspaceSettings,
   writeTemplateLockfile,
 } from './lib/package-manager.js';
-import { saveManifest, validateGitignore } from './lib/project.js';
+import { validateGitignore } from './lib/project.js';
 import { generateBucketSalt, generatePassword, generateReplPassword } from './lib/secrets.js';
 import { projectPathFor, templatePathFor } from './lib/template-paths.js';
 import { createTracker } from './lib/tracker.js';
@@ -1340,8 +1340,8 @@ ${runCmd} test:prepush
       }
     }
   }
-  // ONE write. saveManifest and saveProjectConfig both writeFileSync the WHOLE
-  // of .vibecarbon.json with no merge, so calling them in sequence meant the
+  // ONE write. The manifest and config halves of .vibecarbon.json used to be
+  // two whole-file writes with no merge, so calling them in sequence meant the
   // second silently discarded the first: `templateVersion` and every entry of
   // `fileChecksums` were destroyed ~16 lines after being computed, before the
   // initial commit ever saw them. `vibecarbon upgrade` then read
@@ -1361,21 +1361,22 @@ ${runCmd} test:prepush
   // bucket recreation can silently lose acked writes; see
   // deriveStateBucketName). Persisted env names win over derivation, so a
   // rotation never moves a live environment.
-  saveManifest(
-    {
-      version: '1',
-      projectName,
-      // Anonymous per-project id for usage telemetry (see
-      // src/lib/telemetry/index.js) — generated once here rather than
-      // lazily on first command so it's part of the baseline the user's
-      // initial commit captures, like bucketSalt above.
-      projectId: randomUUID(),
-      bucketSalt: generateBucketSalt(),
-      stateBucketGeneration: generateBucketSalt(),
-      templateVersion: VERSION,
-      fileChecksums,
-      services: {},
-    },
+  updateProjectConfig(
+    (config) =>
+      Object.assign(config, {
+        version: '1',
+        projectName,
+        // Anonymous per-project id for usage telemetry (see
+        // src/lib/telemetry/index.js) — generated once here rather than
+        // lazily on first command so it's part of the baseline the user's
+        // initial commit captures, like bucketSalt above.
+        projectId: randomUUID(),
+        bucketSalt: generateBucketSalt(),
+        stateBucketGeneration: generateBucketSalt(),
+        templateVersion: VERSION,
+        fileChecksums,
+        services: {},
+      }),
     projectDir,
   );
   await tick();

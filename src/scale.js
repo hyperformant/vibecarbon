@@ -25,7 +25,7 @@ import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
-import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { updateProjectConfig } from './lib/config.js';
 import { useDnsChallenge } from './lib/deploy/acme.js';
 import { RECONCILE_FLAGS_SED, STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
 import { collectComposeBuildArgs } from './lib/deploy/compose/build-args.js';
@@ -1785,26 +1785,25 @@ async function scaleServers(ctx) {
 }
 
 /**
- * Write the scaled servers into the CURRENT .vibecarbon.json: loaded fresh,
- * because a reseed's proof (ha.systemIdentifier) or an unproven one
- * (replication: degraded) was saved during the scale, and the in-memory env
- * config predates both. `extra` lands on the env entry.
+ * Write the scaled servers into the CURRENT .vibecarbon.json, under the
+ * config lock: a reseed's proof (ha.systemIdentifier), an unproven one
+ * (replication: degraded) and the cutover journal were saved during the
+ * scale, and the in-memory env config predates all of them. `extra` lands on
+ * the env entry.
  */
 function saveScaledServers(ctx, extra = {}) {
-  const { environment, envConfig, projectConfig } = ctx;
+  const { environment, envConfig } = ctx;
   const servers = ctx.servers ?? ctx.targetServers;
-  const fresh = loadProjectConfig() ?? projectConfig;
-  const freshEnv = fresh?.environments?.[environment] ?? envConfig;
   const byOldId = new Map(
     servers.filter((sv) => sv._replacement).map((sv) => [sv.id, sv._replacement]),
   );
-  const updatedServers = (freshEnv.servers ?? servers).map((sv) => byOldId.get(sv.id) ?? sv);
-  saveProjectConfig({
-    ...fresh,
-    environments: {
+  updateProjectConfig((fresh) => {
+    const freshEnv = fresh.environments?.[environment] ?? envConfig;
+    const updatedServers = (freshEnv.servers ?? servers).map((sv) => byOldId.get(sv.id) ?? sv);
+    fresh.environments = {
       ...fresh.environments,
       [environment]: { ...freshEnv, ...extra, servers: updatedServers },
-    },
+    };
   });
 }
 
@@ -2985,48 +2984,49 @@ done`,
  * at the right hosts after scale; only the sizing inputs need updating.
  */
 async function scaleUpdateK8sConfig(ctx) {
-  const { environment, envConfig, projectConfig, newValues, isHA } = ctx;
-  const updatedEnvFields = {
-    ...(newValues.workerType && {
-      workerServerType: newValues.workerType,
-      serverType: newValues.workerType,
-    }),
-    ...(newValues.masterType && { masterServerType: newValues.masterType }),
-    ...(newValues.dbType && { dbServerType: newValues.dbType }),
-    // Phase 8: persist CA bounds so subsequent `vibecarbon deploy` and
-    // `vibecarbon scale` runs replay the operator's most recent choice
-    // rather than falling back to defaults.
-    ...(newValues.minWorkers != null && { minWorkers: newValues.minWorkers }),
-    ...(newValues.maxWorkers != null && { maxWorkers: newValues.maxWorkers }),
-    // Task 11: a worker-type scale must also update the PILOT standby's
-    // provisioning spec — `preflightPilotFailover` (src/failover.js) reads
-    // `ha.standbyWorkerSpec.serverType` to decide what hardware to bring up
-    // when it converges the standby 0→N. Without this, the NEXT failover
-    // would still provision the OLD worker type even after an operator
-    // scaled the live cluster to the new one. Spread envConfig.ha first so
-    // the role↔stack mapping (primary/standby/.stack) and scaleUpList stay
-    // untouched — only standbyWorkerSpec.serverType changes.
-    ...(isHA &&
-      newValues.workerType &&
-      envConfig.ha && {
-        ha: {
-          ...envConfig.ha,
-          standbyWorkerSpec: {
-            ...envConfig.ha.standbyWorkerSpec,
-            serverType: newValues.workerType,
-          },
-        },
+  const { environment, newValues, isHA } = ctx;
+  // Patched onto the env as it is on disk now, under the config lock: the
+  // in-memory envConfig predates everything this scale saved.
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[environment] ?? ctx.envConfig;
+    const updatedEnvFields = {
+      ...(newValues.workerType && {
+        workerServerType: newValues.workerType,
+        serverType: newValues.workerType,
       }),
-  };
+      ...(newValues.masterType && { masterServerType: newValues.masterType }),
+      ...(newValues.dbType && { dbServerType: newValues.dbType }),
+      // Phase 8: persist CA bounds so subsequent `vibecarbon deploy` and
+      // `vibecarbon scale` runs replay the operator's most recent choice
+      // rather than falling back to defaults.
+      ...(newValues.minWorkers != null && { minWorkers: newValues.minWorkers }),
+      ...(newValues.maxWorkers != null && { maxWorkers: newValues.maxWorkers }),
+      // Task 11: a worker-type scale must also update the PILOT standby's
+      // provisioning spec — `preflightPilotFailover` (src/failover.js) reads
+      // `ha.standbyWorkerSpec.serverType` to decide what hardware to bring up
+      // when it converges the standby 0→N. Without this, the NEXT failover
+      // would still provision the OLD worker type even after an operator
+      // scaled the live cluster to the new one. Spread envConfig.ha first so
+      // the role↔stack mapping (primary/standby/.stack) and scaleUpList stay
+      // untouched — only standbyWorkerSpec.serverType changes.
+      ...(isHA &&
+        newValues.workerType &&
+        envConfig.ha && {
+          ha: {
+            ...envConfig.ha,
+            standbyWorkerSpec: {
+              ...envConfig.ha.standbyWorkerSpec,
+              serverType: newValues.workerType,
+            },
+          },
+        }),
+    };
 
-  const updatedConfig = {
-    ...projectConfig,
-    environments: {
-      ...projectConfig.environments,
+    config.environments = {
+      ...config.environments,
       [environment]: { ...envConfig, ...updatedEnvFields },
-    },
-  };
-  saveProjectConfig(updatedConfig);
+    };
+  });
 }
 
 /** k8s/k8s-ha `finish-outro` effect. */

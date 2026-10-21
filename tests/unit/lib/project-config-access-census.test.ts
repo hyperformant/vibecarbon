@@ -49,7 +49,7 @@ describe('project config is read through one accessor', () => {
     expect(
       offenders,
       'These build their own path to the project config instead of calling ' +
-        `loadProjectConfig()/saveProjectConfig() from lib/config.js:\n  ${offenders.join('\n  ')}\n` +
+        `loadProjectConfig()/updateProjectConfig() from lib/config.js:\n  ${offenders.join('\n  ')}\n` +
         'A second implementation of "where the config lives" is how ciAvailable() ' +
         'came to read an undotted filename and silently return false forever.',
     ).toEqual([]);

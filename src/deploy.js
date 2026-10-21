@@ -7,7 +7,7 @@ import * as p from '@clack/prompts';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { checkDependency, runCommand } from './lib/command.js';
-import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { loadProjectConfig } from './lib/config.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import {
   checkExistingRepo,
@@ -504,7 +504,6 @@ export {
   runCommand,
   SPEC,
   sanitizeBucketName,
-  saveProjectConfig,
   setupGitHubEnvironment,
   setupGitHubIntegration,
   VERSION,

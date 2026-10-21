@@ -21,7 +21,7 @@
  * depth); `vibecarbon status` shows a fenced primary.
  */
 
-import { loadProjectConfig, saveProjectConfig } from '../config.js';
+import { updateProjectConfig } from '../config.js';
 import { failoverInFlightNextStep } from './failover-guard.js';
 import { UNFENCE_SQL_HINT, unfenceDatabaseWrites, WRITE_FENCE_SETTING } from './replication.js';
 import { isRetiredSide } from './retired-fence.js';
@@ -35,33 +35,33 @@ import { isRetiredSide } from './retired-fence.js';
  *   so a name would also match the new server; scale markers match by IP.
  */
 export function writeWriteFenceMarker(ctx, { node, ip, source }) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[ctx.environment];
-  if (!envConfig) {
-    throw new Error(`write fence: environment ${ctx.environment} is not in .vibecarbon.json`);
-  }
-  envConfig.ha = {
-    ...(envConfig.ha ?? {}),
-    writeFence: {
-      ...(node ? { node } : {}),
-      ip,
-      ...(source ? { source } : {}),
-      at: new Date().toISOString(),
-    },
-  };
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[ctx.environment];
+    if (!envConfig) {
+      throw new Error(`write fence: environment ${ctx.environment} is not in .vibecarbon.json`);
+    }
+    envConfig.ha = {
+      ...(envConfig.ha ?? {}),
+      writeFence: {
+        ...(node ? { node } : {}),
+        ip,
+        ...(source ? { source } : {}),
+        at: new Date().toISOString(),
+      },
+    };
+  });
 }
 
 /** Clear the marker once the fence is lifted. A no-op when none is set. */
 export function clearWriteFenceMarker(ctx) {
-  const config = loadProjectConfig();
-  const ha = config?.environments?.[ctx.environment]?.ha;
-  if (!ha || !('writeFence' in ha)) return;
-  delete ha.writeFence;
-  // A single-server compose env carries `ha` only for this marker (scale's
-  // fence): leave no empty `ha` behind, which status reads as HA.
-  if (Object.keys(ha).length === 0) delete config.environments[ctx.environment].ha;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const ha = config.environments?.[ctx.environment]?.ha;
+    if (!ha || !('writeFence' in ha)) return;
+    delete ha.writeFence;
+    // A single-server compose env carries `ha` only for this marker (scale's
+    // fence): leave no empty `ha` behind, which status reads as HA.
+    if (Object.keys(ha).length === 0) delete config.environments[ctx.environment].ha;
+  });
 }
 
 /** What left a fence, for the operator's line: a scale's marker says so. */
@@ -91,31 +91,29 @@ export function scaleCutoverNextStep(environment) {
  *   stopped: string[], cronRemoved: boolean }} cutover
  */
 export function writeScaleCutoverJournal(ctx, cutover) {
-  const config = loadProjectConfig();
-  const fence = config?.environments?.[ctx.environment]?.ha?.writeFence;
-  if (!fence) {
-    throw new Error(`scale cutover: no write-fence marker for ${ctx.environment} to journal on`);
-  }
-  fence.cutover = { ...cutover, done: [], startedAt: new Date().toISOString() };
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const fence = config.environments?.[ctx.environment]?.ha?.writeFence;
+    if (!fence) {
+      throw new Error(`scale cutover: no write-fence marker for ${ctx.environment} to journal on`);
+    }
+    fence.cutover = { ...cutover, done: [], startedAt: new Date().toISOString() };
+  });
 }
 
 /** Record a post-flip step of the journaled cutover as done. */
 export function markScaleCutoverStep(ctx, step) {
-  const config = loadProjectConfig();
-  const cutover = config?.environments?.[ctx.environment]?.ha?.writeFence?.cutover;
-  if (!cutover) return;
-  if (!cutover.done.includes(step)) cutover.done.push(step);
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const cutover = config.environments?.[ctx.environment]?.ha?.writeFence?.cutover;
+    if (cutover && !cutover.done.includes(step)) cutover.done.push(step);
+  });
 }
 
 /** Drop the cutover journal, keeping the marker (a fence still on the old server). */
 export function clearScaleCutoverJournal(ctx) {
-  const config = loadProjectConfig();
-  const fence = config?.environments?.[ctx.environment]?.ha?.writeFence;
-  if (!fence || !('cutover' in fence)) return;
-  delete fence.cutover;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const fence = config.environments?.[ctx.environment]?.ha?.writeFence;
+    if (fence) delete fence.cutover;
+  });
 }
 
 /**

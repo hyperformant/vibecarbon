@@ -44,7 +44,7 @@ export function stubWriteFence<T extends Record<string, unknown>>(actual: T) {
 
 /** The project config, stubbed: no file is read or written. */
 export function stubProjectConfig<T extends Record<string, unknown>>(actual: T) {
-  return { ...actual, loadProjectConfig: () => null, saveProjectConfig: () => {} };
+  return { ...actual, loadProjectConfig: () => null, updateProjectConfig: () => ({}) };
 }
 
 /**

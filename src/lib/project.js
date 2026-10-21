@@ -8,6 +8,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { writeSecretFile } from './command.js';
+import { updateProjectConfig } from './config.js';
 import { operatorSecretKeys } from './config-registry.js';
 import { formatDotenvLine, parseDotenv, readEnvFiles } from './dotenv.js';
 import { healLegacyDotenvQuoting, healLegacyDotenvText } from './dotenv-heal.js';
@@ -79,17 +80,6 @@ export function loadManifest(cwd = process.cwd()) {
 }
 
 /**
- * Save the project manifest (.vibecarbon.json)
- *
- * @param {object} manifest - Manifest object to save
- * @param {string} [cwd] - Working directory (defaults to process.cwd())
- */
-export function saveManifest(manifest, cwd = process.cwd()) {
-  const manifestPath = join(cwd, '.vibecarbon.json');
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-}
-
-/**
  * The project's stable id, backfilling one into `.vibecarbon.json` when the
  * project doesn't have one yet.
  *
@@ -113,16 +103,16 @@ export function saveManifest(manifest, cwd = process.cwd()) {
 export function ensureProjectId(projectConfig, cwd = process.cwd()) {
   if (projectConfig?.projectId) return projectConfig.projectId;
 
-  // loadManifest returns the empty-project default when no file exists, so
-  // this also covers a hand-made project that has docker-compose.yml but no
-  // manifest: saveManifest creates one carrying just the id.
-  const manifest = loadManifest(cwd);
-  if (!manifest.projectId) {
+  // Under the config lock, so two commands backfilling at once agree on one
+  // id. A hand-made project with docker-compose.yml but no manifest gets one
+  // carrying the empty-project default plus the id.
+  const written = updateProjectConfig((manifest) => {
+    if (manifest.projectId) return;
+    if (Object.keys(manifest).length === 0) Object.assign(manifest, loadManifest(cwd));
     manifest.projectId = randomUUID();
-    saveManifest(manifest, cwd);
-  }
-  if (projectConfig) projectConfig.projectId = manifest.projectId;
-  return manifest.projectId;
+  }, cwd);
+  if (projectConfig) projectConfig.projectId = written.projectId;
+  return written.projectId;
 }
 
 // ============================================================================

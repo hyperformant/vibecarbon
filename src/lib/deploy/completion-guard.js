@@ -18,7 +18,7 @@
  * step gated out). This guard covers the HARDER case that actually bit us: the
  * awaited deploy chain never settles at all, so no throw, no catch, no finalize
  * — the process just exits 0. `executeDeployment` arms the guard on entry and
- * marks completion only after the terminal `saveProjectConfig`. If the process
+ * marks completion only after the terminal config write. If the process
  * exits with a success code while armed-but-not-completed, the 'exit' handler
  * forces a non-zero code and prints an actionable diagnostic, converting a silent
  * exit-0 into a loud failure the e2e matrix (and a human) cannot miss.
@@ -95,7 +95,7 @@ export function armDeployCompletionGuard() {
 
 /**
  * Mark the deploy as having reached its terminal, fully-persisted state. Call
- * once at the very end of executeDeployment (after the final saveProjectConfig).
+ * once at the very end of executeDeployment (after the final config write).
  */
 export function markDeployCompleted() {
   completed = true;

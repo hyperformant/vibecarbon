@@ -447,7 +447,7 @@ describe('a destroyed and redeployed environment keeps its old lineage on record
     expect(orch).toContain('backup: { ...backupConfig, ...backupLineage },');
     // Before the final save.
     expect(orch.indexOf('recordDeployedLineage({')).toBeLessThan(
-      orch.indexOf('saveProjectConfig(clearDestroyedRecord(finalConfig, environment))'),
+      orch.indexOf('return clearDestroyedRecord(finalConfig, environment);'),
     );
   });
 });

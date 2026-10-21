@@ -43,7 +43,7 @@
  */
 
 import * as p from '@clack/prompts';
-import { loadProjectConfig, saveProjectConfig } from '../config.js';
+import { updateProjectConfig } from '../config.js';
 import { sshKubectl } from '../ssh.js';
 import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
 import { sshRun } from './compose/index.js';
@@ -212,14 +212,14 @@ export function backupFenceRecord(result, now = () => new Date()) {
 export function recordBackupFence(ctx, result) {
   const record = backupFenceRecord(result);
   try {
-    const config = loadProjectConfig();
-    const envConfig = config?.environments?.[ctx.environment];
-    if (!envConfig) return record;
-    envConfig.ha = {
-      ...(typeof envConfig.ha === 'object' ? envConfig.ha : {}),
-      backupFence: record,
-    };
-    saveProjectConfig(config);
+    updateProjectConfig((config) => {
+      const envConfig = config.environments?.[ctx.environment];
+      if (!envConfig) return;
+      envConfig.ha = {
+        ...(typeof envConfig.ha === 'object' ? envConfig.ha : {}),
+        backupFence: record,
+      };
+    });
   } catch (err) {
     p.log.warn(
       `could not record the backup-prefix fence outcome in .vibecarbon.json ` +
