@@ -3,7 +3,9 @@
  * A k8s-ha standby takes the primary's image by copy instead of building its own.
  */
 
-const LOCAL_REGISTRY_REF = /^([^/\s]+:5000)\/([^\s:]+(?:\/[^\s:]+)*):([^\s/:]+)$/;
+// `@` is excluded from repo and tag so a digest ref (`repo@sha256:…`) is
+// refused rather than read as a tag named after the digest.
+const LOCAL_REGISTRY_REF = /^([^/\s]+:5000)\/([^\s:@]+(?:\/[^\s:@]+)*):([^\s/:@]+)$/;
 
 /**
  * Split a `<host>:5000/<repo>:<tag>` ref. Throws unless the host is a cluster

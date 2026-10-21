@@ -24,6 +24,14 @@ describe('image-delivery helpers', () => {
     expect(() => parseLocalRegistryRef('ghcr.io/o/r:main')).toThrow(/not a local-registry ref/);
     expect(() => parseLocalRegistryRef('10.0.1.1:5000/quorum')).toThrow(/not a local-registry ref/);
   });
+  it('refuses a digest ref instead of reading the digest as a tag', () => {
+    expect(() => parseLocalRegistryRef(`10.0.1.1:5000/quorum@sha256:${'a'.repeat(64)}`)).toThrow(
+      /not a local-registry ref/,
+    );
+  });
+  it('keeps a multi-segment repo whole', () => {
+    expect(parseLocalRegistryRef('10.0.1.1:5000/team/quorum:t1').repo).toBe('team/quorum');
+  });
   it('re-prefixes the primary ref for the standby registry', () => {
     expect(
       standbyImageRef({
