@@ -328,6 +328,20 @@ function redact(line) {
     .replace(SECRETISH, '$1=<redacted>');
 }
 
+/** The compose backup lock (compose-backup.sh's default path). */
+const COMPOSE_BACKUP_LOCK = '/tmp/vibecarbon-backup.lock';
+
+/**
+ * Shell that prints 1 when a flock is held on the compose backup lock and 0
+ * otherwise, read-only: the lock file's inode is looked up in /proc/locks. An
+ * absent file is not running.
+ * @param {string} [lock] lock path (tests only)
+ * @returns {string}
+ */
+export function composeRunningProbe(lock = COMPOSE_BACKUP_LOCK) {
+  return `ino=$(stat -c %i ${lock} 2>/dev/null) && grep -Eq " FLOCK .*:\${ino} " /proc/locks && echo 1 || echo 0`;
+}
+
 /**
  * The newest scheduled compose backup from the tail of backups/backup.log.
  * Failed = the last "Started at" block ended without a BACKUP_RESULT marker
@@ -496,7 +510,9 @@ function primaryProbes(envName, envConfig, projectName) {
         const out = await bash(
           ip,
           // compose-backup.sh holds this lock for its whole run: held = running.
-          `tail -n 40 ${remoteDir}/backups/backup.log 2>/dev/null; echo "__RUNNING__=$([ -e /tmp/vibecarbon-backup.lock ] && ! flock -n /tmp/vibecarbon-backup.lock true && echo 1 || echo 0)"`,
+          // Read from /proc/locks, never by taking the lock: a probe that opens
+          // or locks a root-owned file in /tmp could itself skip a real backup.
+          `tail -n 40 ${remoteDir}/backups/backup.log 2>/dev/null; echo "__RUNNING__=$(${composeRunningProbe()})"`,
         );
         return parseComposeBackupLog(out);
       }

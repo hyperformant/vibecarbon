@@ -10,13 +10,16 @@
  * recorded in $PGDATA/vibecarbon-wal-gap) and WAL_ARCHIVE_OVERWRITE_REFUSED
  * give a segment up.
  */
-import { readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   ARCHIVER_SQL,
   backupHealthRow,
   checkBackupHealth,
+  composeRunningProbe,
   cronIntervalMs,
   parseArchiverRow,
   parseComposeBackupLog,
@@ -515,11 +518,47 @@ describe('census: backup reads take their target from the recorded primary/linea
 
   it('a compose backup in progress is read from its lock, not a process-name match', () => {
     expect(src).not.toContain('pgrep');
-    expect(src).toContain('flock -n /tmp/vibecarbon-backup.lock true');
+    expect(src).not.toMatch(/flock -n \/tmp/);
+    expect(src).toContain('/proc/locks');
   });
 
   it('checkBackupHealth( is the only backup read in status.js', () => {
     expect(status).not.toMatch(/pg_stat_archiver|listBaseBackups\(|readEnvBaseBackups\(|walg\//);
     expect([...status.matchAll(/checkBackupHealth\(/g)].length).toBe(1);
+  });
+});
+
+describe('composeRunningProbe reads the backup lock without taking it', () => {
+  const probe = (lock: string) =>
+    spawnSync('sh', ['-c', composeRunningProbe(lock)], { encoding: 'utf-8' }).stdout.trim();
+
+  it('absent file: 0; unlocked file: 0; flock held: 1; and the probe never locks', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'running-probe-'));
+    const lock = join(dir, 'backup.lock');
+    try {
+      expect(probe(lock)).toBe('0');
+      writeFileSync(lock, '');
+      expect(probe(lock)).toBe('0');
+      const holder = spawn('flock', [lock, 'sleep', '1'], { stdio: 'ignore' });
+      try {
+        let seen = '0';
+        for (let i = 0; i < 100 && seen !== '1'; i++) {
+          await new Promise((r) => setTimeout(r, 20));
+          seen = probe(lock);
+        }
+        expect(seen).toBe('1');
+        // Still held by the sleeper alone: the probe left no lock of its own.
+        expect(probe(lock)).toBe('1');
+      } finally {
+        holder.kill('SIGKILL');
+      }
+      // The holder's sleep ends on its own; the probe then reads 0 again.
+      for (let i = 0; i < 200 && probe(lock) !== '0'; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(probe(lock)).toBe('0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
