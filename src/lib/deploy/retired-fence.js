@@ -28,9 +28,10 @@
  * fence uses, so every writer is covered, app, add-ons and pg_cron alike, and
  * open sessions are terminated). A db in recovery cannot write and is left
  * alone. Besides that the fence holds the retired side's writers at zero (k8s:
- * `kubectl scale deployment app --replicas=0`, never a patch that would roll
- * pods, after suspending any Flux Kustomization that would scale it back;
- * compose: app, n8n and metabase) and WALG_ROLE=standby.
+ * the app and every deployed add-on through `kubectl scale --replicas=0`,
+ * never a patch that would roll pods, after suspending any Flux Kustomization
+ * that would scale them back; compose: the app and the primary-only add-ons)
+ * and WALG_ROLE=standby.
  *
  * `vibecarbon status`, `failover` and `deploy` call reconcileRetiredFence
  * first, and failover again once its role swap is saved, so an old primary
@@ -46,7 +47,12 @@
  */
 
 import * as p from '@clack/prompts';
-import { composeWriterServices, enabledAddonNames } from '../services/standby-policy.js';
+import {
+  composeWriterServices,
+  enabledAddonNames,
+  enabledK8sAddonNames,
+  k8sStandbyZeroedWorkloads,
+} from '../services/standby-policy.js';
 import { getSSHKeyPath, sshKubectl } from '../ssh.js';
 import { sshRun as composeSshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
@@ -233,12 +239,67 @@ async function listFluxKustomizations(ip, kubectl, opts) {
   );
 }
 
+/**
+ * The workloads the k8s fence holds at zero: the app, then every add-on
+ * deployed into the project's k8s tree (k8sStandbyZeroedWorkloads, the same
+ * list the pilot standby zeroes).
+ */
+function k8sFencedWorkloads(projectDir) {
+  return [
+    { kind: 'Deployment', name: K8S_APP_DEPLOYMENT, namespace: NS },
+    ...k8sStandbyZeroedWorkloads(enabledK8sAddonNames(projectDir)),
+  ];
+}
+
+const listItems = (out) => {
+  const text = String(out ?? '').trim();
+  if (!text) return [];
+  const listed = JSON.parse(text);
+  return listed?.kind === 'List' ? (listed.items ?? []) : [listed];
+};
+
+/**
+ * The fenced workloads not at zero, as `{kind, name, namespace}`. One read per
+ * namespace beyond the app's (the app namespace rides the probe's main read);
+ * a workload that does not exist counts as zero.
+ */
+async function k8sWorkloadsNotZero(ip, { kubectl, workloads, appNsItems, opts }) {
+  const byNs = new Map();
+  for (const w of workloads) byNs.set(w.namespace, [...(byNs.get(w.namespace) ?? []), w]);
+  const live = [];
+  for (const [namespace, list] of byNs) {
+    const items =
+      namespace === NS
+        ? appNsItems
+        : listItems(
+            await kubectl(
+              ip,
+              [
+                '-n',
+                namespace,
+                'get',
+                ...list.map((w) => `${w.kind.toLowerCase()}/${w.name}`),
+                '-o',
+                'json',
+                '--ignore-not-found',
+              ],
+              opts,
+            ),
+          );
+    for (const w of list) {
+      const obj = items.find((i) => i?.kind === w.kind && i?.metadata?.name === w.name);
+      if (obj && obj.spec?.replicas !== 0) live.push(w);
+    }
+  }
+  return live;
+}
+
 /** One read of everything the k8s fence covers; null when the cluster does not answer. */
-async function probeK8s(ip, { kubectl, psqlFor }) {
+async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
   const opts = { timeout: PROBE_TIMEOUT_MS, transportRetry: false };
-  let listed;
+  let items;
   try {
-    listed = JSON.parse(
+    items = listItems(
       await kubectl(
         ip,
         [
@@ -246,7 +307,9 @@ async function probeK8s(ip, { kubectl, psqlFor }) {
           NS,
           'get',
           'configmap/vibecarbon-config',
-          `deployment/${K8S_APP_DEPLOYMENT}`,
+          ...workloads
+            .filter((w) => w.namespace === NS)
+            .map((w) => `${w.kind.toLowerCase()}/${w.name}`),
           `statefulset/${DB_STATEFULSET}`,
           '-o',
           'json',
@@ -258,9 +321,20 @@ async function probeK8s(ip, { kubectl, psqlFor }) {
   } catch {
     return null;
   }
-  const items = listed?.kind === 'List' ? (listed.items ?? []) : [listed];
   const of = (kind) => items.find((i) => i?.kind === kind);
-  const dep = of('Deployment');
+  let workloadsZero = 'unknown';
+  let workloadsToZero = [];
+  try {
+    workloadsToZero = await k8sWorkloadsNotZero(ip, {
+      kubectl,
+      workloads,
+      appNsItems: items,
+      opts,
+    });
+    workloadsZero = workloadsToZero.length === 0;
+  } catch {
+    // an add-on namespace unreadable: reported as missing, never guessed zero
+  }
   const db = (of('StatefulSet')?.spec?.template?.spec?.containers ?? []).find(
     (ct) => ct.name === DB_CONTAINER,
   );
@@ -293,14 +367,15 @@ async function probeK8s(ip, { kubectl, psqlFor }) {
     walBytes: dbState.walBytes,
     fluxSuspended,
     fluxToSuspend,
-    workloadsZero: !dep || dep.spec?.replicas === 0,
+    workloadsZero,
+    workloadsToZero,
     walgStandby: (db?.env ?? []).find((e) => e.name === 'WALG_ROLE')?.value === 'standby',
   };
 }
 
-function k8sBackend({ kubectl, psqlFor, zeroWorkloads }) {
+function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads }) {
   return {
-    probe: (ip) => probeK8s(ip, { kubectl, psqlFor }),
+    probe: (ip) => probeK8s(ip, { kubectl, psqlFor, workloads }),
     // Ordered so backups are refused first, the database stops taking writes
     // next, Flux cannot scale the app back before it is zeroed, and the db
     // marker lands before the WALG_ROLE change rolls the db pod.
@@ -353,14 +428,23 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads }) {
       },
       {
         key: 'workloadsZero',
-        what: 'its app at zero',
-        apply: (ip) =>
+        what: 'its app and add-ons at zero',
+        apply: (ip, state) =>
           zeroWorkloads
             ? zeroWorkloads(ip)
             : // kubectl scale, never a patch or set image: those would roll pods.
-              attempt(() =>
-                kubectl(ip, ['-n', NS, 'scale', 'deployment', K8S_APP_DEPLOYMENT, '--replicas=0']),
-              ),
+              attempt(async () => {
+                for (const w of state.workloadsToZero) {
+                  await kubectl(ip, [
+                    '-n',
+                    w.namespace,
+                    'scale',
+                    w.kind.toLowerCase(),
+                    w.name,
+                    '--replicas=0',
+                  ]);
+                }
+              }),
       },
       {
         key: 'walgStandby',
@@ -496,6 +580,7 @@ async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
       kubectl: deps.kubectl ?? ((ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts)),
       psqlFor: deps.psql ?? ((ip) => k8sPsqlRunner(ip, sshKeyPath)),
       zeroWorkloads: deps.zeroWorkloads,
+      workloads: k8sFencedWorkloads(deps.projectDir ?? process.cwd()),
     });
   }
   if (tier === 'compose-ha') {
@@ -528,8 +613,9 @@ async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
  * once the db settles, so one run fences fully.
  *
  * `deps.zeroWorkloads(ip) -> Promise<boolean>` replaces the built-in writer
- * stop (k8s: the app Deployment; compose: the declared writers). It is the seam
- * the primary-only add-ons plan fills with zeroWorkloadsOnStandby.
+ * stop (k8s: the app Deployment and every add-on deployed into the project's
+ * k8s tree, the list the pilot standby zeroes; compose: the declared writers).
+ * `deps.projectDir` (default: the cwd) is where the k8s add-ons are read.
  *
  * @param {object} args
  * @param {'compose-ha'|'k8s-ha'} args.tier
@@ -577,6 +663,7 @@ export async function fenceRetiredNode({
         if (state[step.key] === 'unknown') state[step.key] = again[step.key];
       }
       state.fluxToSuspend = again.fluxToSuspend ?? state.fluxToSuspend;
+      state.workloadsToZero = again.workloadsToZero ?? state.workloadsToZero;
       state.walBytes = state.walBytes ?? again.walBytes;
       await pass();
     }

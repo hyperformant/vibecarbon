@@ -122,11 +122,19 @@ type Kustomization = { name: string; suspend?: boolean; annotations?: Record<str
 
 /** A fake k8s cluster behind `kubectl`, recording every mutating call. */
 function fakeCluster(
-  init: { replicas?: number; walg?: string; role?: string; flux?: Kustomization[] } = {},
+  init: {
+    replicas?: number;
+    walg?: string;
+    role?: string;
+    flux?: Kustomization[];
+    /** Add-on Deployments installed on the cluster: name -> replicas (namespace vibecarbon). */
+    addons?: Record<string, number>;
+  } = {},
 ) {
   const state = {
     role: init.role ?? '',
     replicas: init.replicas ?? 2,
+    addons: { ...(init.addons ?? {}) } as Record<string, number>,
     walg: init.walg ?? 'primary',
     dbMarker: false,
     reachable: true,
@@ -180,6 +188,13 @@ function fakeCluster(
             },
           },
           { kind: 'Deployment', metadata: { name: 'app' }, spec: { replicas: state.replicas } },
+          ...Object.entries(state.addons)
+            .filter(([name]) => argv.includes(`deployment/${name}`))
+            .map(([name, replicas]) => ({
+              kind: 'Deployment',
+              metadata: { name },
+              spec: { replicas },
+            })),
           {
             kind: 'StatefulSet',
             metadata: { name: 'db' },
@@ -218,8 +233,12 @@ function fakeCluster(
       return 'OK';
     }
     if (argv.includes('scale')) {
-      state.replicas = Number(a.match(/--replicas=(\d+)/)?.[1]);
-      writes.push(`scale ${argv[argv.indexOf('scale') + 2]} ${state.replicas}`);
+      const name = argv[argv.indexOf('scale') + 2];
+      const replicas = Number(a.match(/--replicas=(\d+)/)?.[1]);
+      if (name === 'app') state.replicas = replicas;
+      else if (name in state.addons) state.addons[name] = replicas;
+      else throw new Error(`Error from server (NotFound): deployments.apps "${name}" not found`);
+      writes.push(`scale ${name} ${replicas}`);
       return '';
     }
     if (argv.includes('set') && argv.includes('env')) {
@@ -475,6 +494,45 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     );
     expect(zeroed).toEqual([RETIRED_IP]);
     expect(cluster.writes).not.toContain('scale app 0');
+  });
+
+  it('with n8n and redis installed, the default zeroes the app and both add-ons, and the probe needs all three at 0', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'vc-fence-addons-'));
+    for (const name of ['n8n', 'redis']) {
+      mkdirSync(join(projectDir, 'k8s', 'base', name), { recursive: true });
+      writeFileSync(join(projectDir, 'k8s', 'base', name, 'kustomization.yaml'), 'kind: x\n');
+    }
+    try {
+      const cluster = fakeCluster({ addons: { n8n: 1, redis: 1 } });
+      const first = await reconcileRetiredFence(argsFor(cluster, { projectDir }));
+      expect(first.fenced).toEqual([RETIRED_IP]);
+      expect(cluster.writes.filter((w) => w.startsWith('scale '))).toEqual([
+        'scale app 0',
+        'scale n8n 0',
+        'scale redis 0',
+      ]);
+      // kubectl scale only: a patch or set image would roll the pods.
+      for (const a of cluster.argvs.filter((x) => x.includes('n8n') || x.includes('redis'))) {
+        expect(a).not.toContain('patch');
+      }
+      // A fenced cluster reads clean; one add-on scaled back up reads as missing.
+      cluster.writes.length = 0;
+      await reconcileRetiredFence(argsFor(cluster, { projectDir }));
+      expect(cluster.writes).toEqual([]);
+      cluster.state.addons.redis = 1;
+      await reconcileRetiredFence(argsFor(cluster, { projectDir }));
+      expect(cluster.writes).toEqual(['scale redis 0']);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it('with no add-on installed the default is app-only (an add-on Deployment left over is not listed)', async () => {
+    const cluster = fakeCluster({ addons: { n8n: 1 } });
+    const result = await reconcileRetiredFence(argsFor(cluster));
+    expect(result.fenced).toEqual([RETIRED_IP]);
+    expect(cluster.writes.filter((w) => w.startsWith('scale '))).toEqual(['scale app 0']);
+    expect(cluster.argvs.some((a) => a.includes('deployment/n8n'))).toBe(false);
   });
 
   it('the fence log says the domain is down while DNS still points at the node', async () => {

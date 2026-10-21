@@ -836,15 +836,19 @@ describe('applyK3sManifests pilot-standby role', () => {
       leftoverObservability = false;
     }
     expect(cmdCalls.some(isObservabilityApply)).toBe(false);
-    expect(cmdCalls).toContainEqual([
-      'kubectl',
-      '-n',
-      'vibecarbon-observability',
-      'scale',
-      'deployment',
-      '--all',
-      '--replicas=0',
-    ]);
+    // Each Deployment the observability manifest declares, by kubectl scale.
+    for (const name of ['grafana', 'prometheus', 'loki']) {
+      expect(cmdCalls).toContainEqual([
+        'kubectl',
+        '-n',
+        'vibecarbon-observability',
+        'scale',
+        'deployment',
+        name,
+        '--replicas=0',
+      ]);
+    }
+    expect(cmdCalls.some((a) => a.includes('scale') && a.includes('--all'))).toBe(false);
     const grafanaPatch =
       cmdCalls.find(
         (a) => a.includes('patch') && a.includes('grafana-tls') && a.includes('certificate'),

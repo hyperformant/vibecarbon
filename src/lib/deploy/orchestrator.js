@@ -25,6 +25,7 @@ import {
   providerIdFor,
 } from '../providers/index.js';
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
+import { enabledK8sAddonNames, k8sFailoverAddonWorkloads } from '../services/standby-policy.js';
 import { getSSHKeyPath } from '../ssh.js';
 import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
@@ -2245,6 +2246,18 @@ export async function executeDeployment(args, gatheredConfig) {
                 appManifestText: readFileSync(
                   join(process.cwd(), 'k8s/base/app/deployment.yaml'),
                   'utf-8',
+                ),
+                // The pilot standby zeroes every declared add-on; failover
+                // brings back the ones in the app namespace.
+                addons: enabledK8sAddonNames(process.cwd()).flatMap((addon) =>
+                  k8sFailoverAddonWorkloads([addon]).map((w) => ({
+                    name: w.name,
+                    namespace: w.namespace,
+                    manifestText: readFileSync(
+                      join(process.cwd(), 'k8s/base', addon, 'deployment.yaml'),
+                      'utf-8',
+                    ),
+                  })),
                 ),
               }),
             }),

@@ -38,4 +38,35 @@ describe('deriveScaleUpList', () => {
     const names = deriveScaleUpList({ appManifestText }).map((e) => e.name);
     expect(names).not.toContain('db');
   });
+
+  it('with no add-ons the list is unchanged (an empty add-on list is the same)', () => {
+    expect(deriveScaleUpList({ appManifestText, addons: [] })).toEqual(
+      deriveScaleUpList({ appManifestText }),
+    );
+  });
+
+  it('lists each add-on after the app at its manifest replica count, the autoscaler last', () => {
+    const manifest = (name: string) =>
+      readFileSync(join(__dirname, `../../../services/${name}/k8s/deployment.yaml`), 'utf-8');
+    const list = deriveScaleUpList({
+      appManifestText,
+      addons: [
+        { name: 'redis', namespace: 'vibecarbon', manifestText: manifest('redis') },
+        {
+          name: 'n8n',
+          namespace: 'vibecarbon',
+          manifestText: manifest('n8n').replace(/^(\s*)replicas:\s*\d+/m, '$1replicas: 3'),
+        },
+        { name: 'metabase', namespace: 'vibecarbon', manifestText: 'kind: Deployment\n' },
+      ],
+    });
+    expect(list).toEqual([
+      { name: 'app', namespace: 'vibecarbon', replicas: 2 },
+      { name: 'redis', namespace: 'vibecarbon', replicas: 1 },
+      { name: 'n8n', namespace: 'vibecarbon', replicas: 3 },
+      // No replicas line: one, the Deployment default.
+      { name: 'metabase', namespace: 'vibecarbon', replicas: 1 },
+      { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
+    ]);
+  });
 });
