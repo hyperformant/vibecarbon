@@ -40,7 +40,7 @@ const {
   readReplicaState,
   writeFailoverJournal,
 } = await import('../../../src/lib/deploy/failover-guard.js');
-const { PROMOTE_DEADLINE_MS, PROMOTE_SIGNAL_PATH, promoteStandby } = await import(
+const { PROMOTE_DEADLINE_MS, promoteStandby } = await import(
   '../../../src/lib/deploy/replication.js'
 );
 
@@ -418,7 +418,7 @@ describe('failoverHA state matrix', () => {
     expect((captured.journal as { systemIdentifier: string }).systemIdentifier).toBe(SYSID);
   });
 
-  it("promote 'in-recovery' un-quiesces once and clears the journal", async () => {
+  it("promote 'in-recovery' (never issued) un-quiesces once and clears the journal", async () => {
     const { order, thrown } = await run({ promoteVerdict: 'in-recovery' });
     expect(order.filter((s) => s === 'unquiesce')).toHaveLength(1);
     expect(order).toContain('clearJournal');
@@ -654,47 +654,33 @@ describe('promoteStandby (tri-state, deadline not poll count)', () => {
     expect(ssh.sshKubectl).not.toHaveBeenCalled();
   });
 
-  it("still in recovery at the deadline withdraws promote.signal, then is 'in-recovery'", async () => {
+  it("still in recovery at the deadline after pg_ctl promote was issued is 'unknown', never 'in-recovery'", async () => {
+    // An issued promote cannot be taken back (postgres deletes promote.signal
+    // itself on accepting it and reads in recovery while it finishes), so a
+    // late "still in recovery" proves nothing: the old primary stays fenced.
     const time = fakeTime();
     const readState = readSeq([true]);
     const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...time });
-    expect(verdict).toBe('in-recovery');
+    expect(verdict).toBe('unknown');
     // The deadline, not a poll count, ended the wait.
     expect(time.now()).toBeGreaterThanOrEqual(PROMOTE_DEADLINE_MS);
-    // The issued promote is cancelled before the verdict lets anyone un-fence.
     const calls = (ssh.sshKubectl as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
       (c[2] as string[]).join(' '),
     );
-    expect(calls[calls.length - 1]).toBe(`exec -n vibecarbon db-0 -- rm -f ${PROMOTE_SIGNAL_PATH}`);
-    expect(PROMOTE_SIGNAL_PATH).toBe('/var/lib/postgresql/data/promote.signal');
+    // Exactly one remote write, the promote itself; nothing tries to withdraw it.
+    expect(calls).toEqual([
+      'exec -n vibecarbon db-0 -- su postgres -c pg_ctl promote -D /var/lib/postgresql/data',
+    ]);
   });
 
-  it("a promote that lands while being withdrawn is 'unknown', never 'in-recovery'", async () => {
-    // In recovery for the whole deadline; out of it on the read after the rm.
-    let rmDone = false;
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (_ip: string, _k: string, argv: string[]) => {
-        if (argv.includes('rm')) rmDone = true;
-        return '';
-      },
-    );
-    const readState = vi.fn(async () => ({ inRecovery: !rmDone }));
-    const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...fakeTime() });
-    expect(verdict).toBe('unknown');
-  });
-
-  it("a failed withdraw is 'unknown'", async () => {
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (_ip: string, _k: string, argv: string[]) => {
-        if (argv.includes('rm')) throw new Error('pod gone');
-        return '';
-      },
-    );
+  it("in recovery and the promote never issued is 'in-recovery'", async () => {
+    vi.mocked(ssh.getPostgresPod).mockRejectedValueOnce(new Error('no db pod'));
     const verdict = await promoteStandby('10.0.0.9', '/k', {
       readState: readSeq([true]),
       ...fakeTime(),
     });
-    expect(verdict).toBe('unknown');
+    expect(verdict).toBe('in-recovery');
+    expect(ssh.sshKubectl).not.toHaveBeenCalled();
   });
 
   it("an unreadable state at the deadline is 'unknown'", async () => {

@@ -684,7 +684,7 @@ Behavior depends on deployment topology:
 | `-y` | Skip confirmation prompts |
 | `-dry` | Show plan without executing |
 | `-force-unproven` | Primary is dead and nothing proves the standby holds its data: promote it anyway (unplanned only) |
-| `-allow-degraded` | With -force-unproven: also accept a standby the last deploy flagged degraded |
+| `-allow-degraded` | Only applies together with -force-unproven (refused on its own): also accept a standby the last deploy flagged degraded |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-server-type <id>` | Worker server type override for pilot-light failover provisioning (e.g. cx33) |
 | `-confirm <value>` | Production only: supply the type-to-confirm value on the command line (scripts / no TTY) |

@@ -1688,9 +1688,6 @@ export async function reseedStandbyFromPrimary(
  */
 export const PROMOTE_DEADLINE_MS = 120_000;
 
-/** The file `pg_ctl promote` drops in PGDATA; removing it withdraws the promote. */
-export const PROMOTE_SIGNAL_PATH = '/var/lib/postgresql/data/promote.signal';
-
 /**
  * A psql runner for the k8s db pod: `exec(sql) -> Promise<string>`, the shape
  * failover-guard's readReplicaState takes.
@@ -1721,14 +1718,19 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
 /**
  * Promote the standby database (k8s transport) and report what happened:
  *   - 'promoted': it was seen IN recovery before the promote, then out of it;
- *   - 'in-recovery': still a replica when the deadline lapsed, and still one
- *     after promote.signal was withdrawn (nothing promoted, nothing pending);
- *   - 'unknown': anything else, including a first reading that is already out
- *     of recovery (that is not proof THIS call promoted it, so pg_ctl promote
- *     is not even issued) and an unreadable state at the deadline.
+ *   - 'in-recovery': it read IN recovery and pg_ctl promote was never issued
+ *     (the db pod could not be resolved), so nothing can promote it;
+ *   - 'unknown': anything else. That includes a first reading that is already
+ *     out of recovery (not proof THIS call promoted it, so pg_ctl promote is
+ *     not issued) and, once pg_ctl promote has been issued, any deadline
+ *     without a proven out-of-recovery reading. An issued promote cannot be
+ *     taken back: postgres deletes promote.signal itself when it accepts the
+ *     request and still reads in recovery while it finishes, so a late
+ *     "still in recovery" proves nothing.
  *
  * Only 'in-recovery' lets a caller un-fence the old primary: on 'unknown' the
- * standby may be promoted, and serving from both sides is a split brain.
+ * standby may yet promote, and serving from both sides is a split brain. The
+ * caller's journal lets a rerun finish instead.
  *
  * @param {string} standbyIp
  * @param {string} sshKeyPath
@@ -1766,7 +1768,13 @@ export async function promoteStandby(
 
   if ((await read()) !== true) return 'unknown';
 
-  const pod = await getPostgresPod(standbyIp, sshKeyPath);
+  let pod;
+  try {
+    pod = await getPostgresPod(standbyIp, sshKeyPath);
+  } catch {
+    // Read in recovery a moment ago, and no promote was issued.
+    return 'in-recovery';
+  }
   try {
     await sshKubectl(standbyIp, sshKeyPath, [
       'exec',
@@ -1783,34 +1791,15 @@ export async function promoteStandby(
     // pg_ctl promote may exit non-zero even on success; the reads below decide.
   }
 
+  // From here on the promote is issued and may land at any time: only a proven
+  // out-of-recovery reading is an answer, and the deadline without one is
+  // 'unknown', never 'in-recovery'.
   const deadline = now() + deadlineMs;
-  let last = true;
   for (;;) {
-    last = await read();
-    if (last === false) return 'promoted';
-    if (now() >= deadline) break;
+    if ((await read()) === false) return 'promoted';
+    if (now() >= deadline) return 'unknown';
     await sleep(pollMs);
   }
-  if (last !== true) return 'unknown';
-  // Still a replica at the deadline, but pg_ctl promote left promote.signal in
-  // PGDATA and the startup process may yet act on it. Withdraw it, then read
-  // once more: 'in-recovery' (which lets the caller un-fence the old primary)
-  // is only true if the promote can no longer land.
-  try {
-    await sshKubectl(standbyIp, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'rm',
-      '-f',
-      PROMOTE_SIGNAL_PATH,
-    ]);
-  } catch {
-    return 'unknown';
-  }
-  return (await read()) === true ? 'in-recovery' : 'unknown';
 }
 
 /**

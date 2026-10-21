@@ -35,7 +35,6 @@ import {
   getReplPasswordFromSecret,
   isStandbyStreaming,
   k8sPsqlRunner,
-  PROMOTE_DEADLINE_MS,
   promoteStandby,
   reseedStandbyFromPrimary,
 } from './lib/deploy/replication.js';
@@ -101,7 +100,8 @@ const SPEC = {
     {
       name: 'allow-degraded',
       boolean: true,
-      description: 'With -force-unproven: also accept a standby the last deploy flagged degraded',
+      description:
+        'Only applies together with -force-unproven (refused on its own): also accept a standby the last deploy flagged degraded',
     },
     { name: 'env', value: '<name>', description: 'Environment seed (alternative to positional)' },
     {
@@ -1595,9 +1595,10 @@ export async function failoverHA(
   /**
    * STEP 4: final catch-up gate, re-seed, journal, promote. Until the journal is
    * written nothing is promoted, so any throw un-quiesces the primary (planned)
-   * and aborts. From the promote call on, only a proven 'in-recovery' verdict
-   * un-fences it (R3); anything unconfirmed keeps the old primary fenced, leaves
-   * the journal set and exits non-zero, and the rerun resumes from the journal.
+   * and aborts. From the promote call on, only an 'in-recovery' verdict (the
+   * promote was never issued) un-fences it (R3); anything else keeps the old
+   * primary fenced, leaves the journal set and exits non-zero, and the rerun
+   * resumes from the journal.
    */
   async function catchUpReseedAndPromote() {
     const unquiesce = async () => {
@@ -1668,13 +1669,13 @@ export async function failoverHA(
       return;
     }
     if (verdict === 'in-recovery') {
-      s.stop('Promotion did not take, aborting failover');
+      s.stop('Promotion was never issued, aborting failover');
       await clearJournal({ environment: envName });
       await unquiesce();
       throw new Error(
-        `Failover aborted: standby ${servers.standby.ip} is still in recovery after ` +
-          `${Math.round(PROMOTE_DEADLINE_MS / 1000)}s, so nothing was promoted. Refusing to ` +
-          `flip DNS onto a read-only standby. Verify the standby db pod and retry.`,
+        `Failover aborted: the promote was never issued on standby ${servers.standby.ip} ` +
+          `(its db pod could not be resolved), so it is still a replica. Refusing to flip DNS ` +
+          `onto a read-only standby. Verify the standby db pod and retry.`,
       );
     }
     s.stop('Promotion could not be confirmed, old primary kept fenced');

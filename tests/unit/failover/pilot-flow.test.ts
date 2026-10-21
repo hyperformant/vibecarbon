@@ -438,7 +438,7 @@ const SCALE_UP_LIST = [
 
 interface RunOpts {
   primaryReachable: boolean;
-  /** The promote verdict is 'in-recovery': proven not promoted. */
+  /** The promote verdict is 'in-recovery': the promote was never issued. */
   promoteInRecovery?: boolean;
   manualDns?: boolean;
   provisionThrows?: unknown;
@@ -688,7 +688,7 @@ describe('failoverHA step order', () => {
     expect(thrown).toBeUndefined();
   });
 
-  it('a promote proven not to take (in-recovery) un-quiesces the primary and aborts (no dns, no swap, no scale-up)', async () => {
+  it('a promote never issued (in-recovery) un-quiesces the primary and aborts (no dns, no swap, no scale-up)', async () => {
     const { order } = await runFailoverHA({ primaryReachable: true, promoteInRecovery: true });
     // The aborted planned failover must NOT leave the primary quiesced.
     expect(order).toContain('unquiesce');
