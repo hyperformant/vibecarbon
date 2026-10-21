@@ -259,6 +259,10 @@ if [ "$1" = st ] && [ "$2" = cat ]; then
   exit 0
 fi
 echo "$*" >> ${log}
+# One base 10 days old, so retention (RETAIN=2 days) has a target to delete before.
+if [ "$1" = backup-list ]; then
+  printf '[{"backup_name":"base_000000010000000000000001","finish_time":"%s"}]\\n' "$(date -u -d "@$(( $(date +%s) - 864000 ))" +%Y-%m-%dT%H:%M:%S.000000Z)"
+fi
 # backup-push names the base it wrote (stderr, as wal-g logs); the backup
 # scripts carry that name in their BACKUP_RESULT marker.
 if [ "$1" = backup-push ]; then
@@ -457,7 +461,9 @@ describe.each(Object.entries(backupRuns))('%s base backup against the fence', (t
   it('no fence object: backs up and prunes', () => {
     const r = run('b1', { fence: null });
     expect(r.status).toBe(0);
-    expect(r.pushes).toMatch(/backup-push[\s\S]*delete before FIND_FULL \S+ --confirm/);
+    expect(r.pushes).toMatch(
+      /backup-push[\s\S]*delete before FIND_FULL base_000000010000000000000001 --confirm/,
+    );
   });
 
   it('the fence names this database on a newer timeline: refuses, no push and no delete', () => {

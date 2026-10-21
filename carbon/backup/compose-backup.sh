@@ -27,10 +27,10 @@ set -e
 # can never drift.
 #
 # Environment Variables:
-#   RETAIN     - Days of base backups to keep (default: 7). wal-g keeps the
-#                first base made at or after the cutoff and everything after
-#                it, and deletes nothing when every base is older, so the
-#                newest base survives any cutoff.
+#   RETAIN     - Days of base backups to keep (default: 7). The newest base
+#                that finished at or before the cutoff is kept with everything
+#                after it, so the full window is restorable; the newest base
+#                always survives.
 #   LOCK_WAIT  - Seconds to wait for another run's lock before skipping (default: 0)
 # ============================================================================
 
@@ -182,17 +182,20 @@ docker compose exec -T db bash -c '
   # window orphaned one push and wedged all five retry attempts). Safe under
   # the flock above: no concurrent push on this host can look like an orphan
   # mid-flight.
-  # Retention is by TIME: `delete before FIND_FULL <cutoff>` removes what
-  # precedes the first base made at or after the cutoff (RETAIN days ago) and
-  # keeps that base and everything after it; with every base older than the
-  # cutoff it deletes nothing. So the newest base always survives (verified
-  # on wal-g 3.0.9, tests/integration/docker/db-restore-staged.test.ts). It acts on this lineage folder only (WALG_S3_PREFIX from
-  # walg-env.sh). The db image is Alpine (busybox date, no relative dates),
-  # so the cutoff is epoch arithmetic. The fence object lives at the lineage
-  # root, outside what the delete touches; it is read back after, and a
-  # fence that changed or vanished fails retention loudly.
+  # Retention is by TIME and keeps the full RETAIN days. The cutoff is RETAIN
+  # days ago; the target is the NEWEST base that finished at or before it, and
+  # `delete before FIND_FULL <that base>` removes what precedes it, so that
+  # base and its WAL stay: a restore to any moment in the last RETAIN days has
+  # its base. No base that old (a young environment): nothing is deleted, and
+  # the newest base always survives. (wal-g given a bare timestamp would keep
+  # only the first base AFTER it and shorten the window.) The list is parsed
+  # without jq (the db image is Alpine busybox, no coreutils or jq): the cutoff
+  # is epoch arithmetic, the JSON is split with tr and sed. It acts on this
+  # lineage folder only (WALG_S3_PREFIX from walg-env.sh). The fence object
+  # lives at the lineage root, outside what the delete touches; it is read
+  # back after, and a fence that changed or vanished fails retention loudly.
   RETAIN_DAYS='"${RETAIN}"'
-  retain_out="$( { cutoff="$(date -u -d "@$(( $(date +%s) - RETAIN_DAYS * 86400 ))" +%Y-%m-%dT%H:%M:%SZ)" && [ -n "$cutoff" ] && wal-g delete garbage BACKUPS --confirm && wal-g delete before FIND_FULL "$cutoff" --confirm && { [ -z "$fence" ] || [ "$(wal-g st cat vibecarbon-fence.json 2>&1)" = "$fence" ] || { echo "the backup-prefix fence (vibecarbon-fence.json) changed or vanished during retention"; false; }; }; } 2>&1)" || {
+  retain_out="$( { cutoff="$(date -u -d "@$(( $(date +%s) - RETAIN_DAYS * 86400 ))" +%Y-%m-%dT%H:%M:%SZ)" && [ -n "$cutoff" ] && wal-g delete garbage BACKUPS --confirm && list="$(wal-g backup-list --detail --json)" && target="$(printf "%s" "$list" | tr "}" "\n" | sed -n "s/.*\"backup_name\":\"\([^\"]*\)\".*\"finish_time\":\"\([^\"]*\)\".*/\2 \1/p" | awk -v c="$cutoff" "substr(\$1,1,19) <= substr(c,1,19)" | sort | tail -n 1 | cut -d " " -f 2)" && { if [ -n "$target" ]; then wal-g delete before FIND_FULL "$target" --confirm; else echo "no base backup is older than ${RETAIN_DAYS} days, nothing to delete"; fi; } && { [ -z "$fence" ] || [ "$(wal-g st cat vibecarbon-fence.json 2>&1)" = "$fence" ] || { echo "the backup-prefix fence (vibecarbon-fence.json) changed or vanished during retention"; false; }; }; } 2>&1)" || {
     printf "%s\n" "$retain_out" >&2
     echo "retention failed after pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
     exit 3

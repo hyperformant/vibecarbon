@@ -1670,6 +1670,7 @@ export async function runConfigureCicd(envName) {
       providerCreds,
       appStorage,
       imageTag,
+      backupConfig: subEnvConfig.backup || envConfig.backup,
     });
   }
 

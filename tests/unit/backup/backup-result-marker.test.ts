@@ -84,7 +84,36 @@ type Stub = {
   fenceVanishes?: boolean;
   lockHeld?: boolean;
   fence?: string | null;
+  /** The bases wal-g backup-list reports, by age in days (finish time = now - age). */
+  bases?: Array<{ name: string; ageDays: number }>;
 };
+
+/** Bases the stub lists by default: 10 days old, 3 days old, just pushed. */
+const OLD = 'base_000000010000000000000001';
+const MID = 'base_000000010000000000000005';
+const DEFAULT_BASES = [
+  { name: OLD, ageDays: 10 },
+  { name: MID, ageDays: 3 },
+  { name: NAME, ageDays: 0 },
+];
+
+/** wal-g 3.0.9 backup-list --detail --json: one line, backup_name first (verified in Docker). */
+function backupListJson(bases: Array<{ name: string; ageDays: number }>) {
+  const iso = (ms: number) => new Date(ms).toISOString();
+  return JSON.stringify(
+    bases.map((b) => ({
+      backup_name: b.name,
+      time: iso(Date.now() - b.ageDays * 86_400_000 + 500),
+      wal_file_name: b.name.slice(5),
+      storage_name: 'default',
+      start_time: iso(Date.now() - b.ageDays * 86_400_000 - 1500),
+      finish_time: iso(Date.now() - b.ageDays * 86_400_000),
+      date_fmt: '%Y-%m-%dT%H:%M:%S.%fZ',
+      hostname: 'db',
+      is_permanent: false,
+    })),
+  );
+}
 
 function stubs(name: string, opts: Stub) {
   const {
@@ -98,12 +127,14 @@ function stubs(name: string, opts: Stub) {
     fenceVanishes = false,
     lockHeld = false,
     fence = null,
+    bases = DEFAULT_BASES,
   } = opts;
   const bin = join(work, name);
   mkdirSync(bin, { recursive: true });
   const log = join(bin, 'walg.log');
   writeFileSync(log, '');
   writeFileSync(join(bin, 'fence-present'), '');
+  writeFileSync(join(bin, 'list.json'), `${backupListJson(bases)}\n`);
   writeFileSync(
     join(bin, 'wal-g'),
     `#!/bin/bash
@@ -113,6 +144,7 @@ if [ "$1" = st ] && [ "$2" = cat ]; then
   exit 0
 fi
 echo "$*" >> ${log}
+if [ "$1" = backup-list ]; then cat ${join(bin, 'list.json')}; fi
 if [ "$1" = backup-push ]; then
   ${pushFails ? 'echo "ERROR: pg_backup_start: permission denied" >&2; exit 1' : `printf '%s\\n' "${pushOutput}" >&2`}
 fi
@@ -325,34 +357,66 @@ describe('the backup CronJob prints the same markers', () => {
 });
 
 /**
- * Retention is by time: `wal-g delete before FIND_FULL <cutoff>`, cutoff =
- * now minus RETAIN days. wal-g keeps the first base at or after the cutoff and
- * deletes nothing when every base is older, so the newest base survives any
- * cutoff (proved against the real wal-g in
+ * Retention is by time and keeps the full window: the target is the newest base
+ * that finished at or before now minus RETAIN days, and `wal-g delete before
+ * FIND_FULL <that base>` keeps it and its WAL. No base that old: no delete, and
+ * the newest base always survives (proved against the real wal-g in
  * tests/integration/docker/db-restore-staged.test.ts).
  */
 describe('retention deletes by time, inside the current lineage', () => {
-  const deleteArgs = (walg: string) =>
-    walg.split('\n').find((l) => l.startsWith('delete before ')) ?? '';
-  const cutoffOf = (walg: string) =>
-    deleteArgs(walg).match(/^delete before FIND_FULL (\S+) --confirm$/)?.[1] ?? '';
-  const expectCutoff = (cutoff: string, days: number) => {
-    expect(cutoff).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
-    const want = Date.now() - days * 86_400_000;
-    expect(Math.abs(Date.parse(cutoff) - want)).toBeLessThan(120_000);
-  };
+  const deletes = (walg: string) =>
+    walg
+      .split('\n')
+      .filter((l) => l.startsWith('delete before '))
+      .map((l) => l.match(/^delete before FIND_FULL (\S+) --confirm$/)?.[1] ?? l);
 
   it.each([
-    ['compose', () => runCompose('time-compose')],
-    ['k8s CronJob', () => runCron('time-cron')],
-  ])('%s: sweeps orphans, then delete before FIND_FULL at now minus RETAIN days', (_t, run) => {
-    const r = run();
+    ['compose', (b?: Stub['bases']) => runCompose('time-compose', { bases: b })],
+    ['k8s CronJob', (b?: Stub['bases']) => runCron('time-cron', { bases: b })],
+  ])(
+    '%s: sweeps orphans, lists, then deletes before the newest base at least RETAIN days old',
+    (_t, run) => {
+      const r = run();
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.walg).toMatch(
+        /delete garbage BACKUPS --confirm\nbackup-list --detail --json\ndelete before FIND_FULL \S+ --confirm/,
+      );
+      expect(r.walg).not.toMatch(/retain/);
+      // RETAIN is 2: the 3-day-old base, not the 10-day-old one and not the new one.
+      expect(deletes(r.walg)).toEqual([MID]);
+      // Nothing reaches the delete but the base name (no bare timestamp).
+      expect(r.walg).not.toMatch(/delete before FIND_FULL \d{4}-/);
+    },
+  );
+
+  it.each([
+    ['compose', (b: Stub['bases']) => runCompose('young-compose', { bases: b })],
+    ['k8s CronJob', (b: Stub['bases']) => runCron('young-cron', { bases: b })],
+  ])('%s: no base that old, no delete; the run still succeeds', (_t, run) => {
+    for (const bases of [
+      [{ name: NAME, ageDays: 0 }],
+      [
+        { name: MID, ageDays: 1 },
+        { name: NAME, ageDays: 0 },
+      ],
+    ]) {
+      const r = run(bases);
+      expect(r.status, r.stderr).toBe(0);
+      expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
+      expect(deletes(r.walg)).toEqual([]);
+      expect(r.stderr).toContain('nothing to delete');
+    }
+  });
+
+  it('only old bases: the newest of them is the target, so it stays', () => {
+    const r = runCompose('old-only', {
+      bases: [
+        { name: OLD, ageDays: 10 },
+        { name: MID, ageDays: 3 },
+      ],
+    });
     expect(r.status, r.stderr).toBe(0);
-    expect(r.walg).toMatch(
-      /delete garbage BACKUPS --confirm\ndelete before FIND_FULL \S+ --confirm/,
-    );
-    expect(r.walg).not.toMatch(/retain/);
-    expectCutoff(cutoffOf(r.walg), 2);
+    expect(deletes(r.walg)).toEqual([MID]);
   });
 
   it('the scripts hold no count-based retention', () => {
@@ -366,13 +430,16 @@ describe('retention deletes by time, inside the current lineage', () => {
     }
   });
 
-  it('RETAIN reaches the cutoff: 5 days back, not the default', () => {
+  it('RETAIN reaches the cutoff: 5 days picks the 10-day base, 20 days picks none', () => {
     const r = runCompose('time-5', {}, { RETAIN: '5' });
     expect(r.status, r.stderr).toBe(0);
-    expectCutoff(cutoffOf(r.walg), 5);
+    expect(deletes(r.walg)).toEqual([OLD]);
     const c = runCron('time-5', {}, { BACKUP_RETENTION_DAYS: '5' });
     expect(c.status, c.stderr).toBe(0);
-    expectCutoff(cutoffOf(c.walg), 5);
+    expect(deletes(c.walg)).toEqual([OLD]);
+    const none = runCompose('time-20', {}, { RETAIN: '20' });
+    expect(none.status, none.stderr).toBe(0);
+    expect(deletes(none.walg)).toEqual([]);
   });
 
   it.each(['0', '-1', '7; rm -rf /', 'abc', '01', '2.5'])(
@@ -411,24 +478,26 @@ describe('retention deletes by time, inside the current lineage', () => {
   });
 
   /**
-   * The db image is Alpine: busybox date, no coreutils, so a relative date
-   * ("-7 days") is rejected and the cutoff has to be epoch arithmetic. Run the
-   * scripts' own cutoff expression under busybox (the db image's date is
-   * /bin/busybox) and compare with the host.
+   * The db image is Alpine: busybox date, tr, sed, awk and sort, no coreutils or
+   * jq, so a relative date ("-7 days") is rejected and the cutoff and the list
+   * parsing have to be plain POSIX. Run the scripts' own retention chain in the
+   * pinned db image (its date is /bin/busybox) against a stub wal-g function.
    */
   const dockerUp = spawnSync('docker', ['info'], { timeout: 20_000 }).status === 0;
+  const DB_IMAGE = 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r2';
   it.skipIf(!dockerUp)(
-    'the cutoff expression runs under busybox date',
-    { timeout: 120_000 },
+    'the retention chain runs under the db image busybox and picks the right base',
+    { timeout: 300_000 },
     () => {
-      const expr = (src: string) =>
-        src.match(
-          /cutoff="\$\((date -u -d "@\$\(\( \$\(date \+%s\) - RETAIN_DAYS \* 86400 \)\)" \+[^)]*)\)"/,
-        )?.[1];
-      const fromCompose = expr(readFileSync(COMPOSE_BACKUP, 'utf-8'));
-      const fromCron = expr(readFileSync(CRONJOB, 'utf-8'));
-      expect(fromCompose).toBeTruthy();
-      expect(fromCron).toBe(fromCompose);
+      const chain = (src: string) => src.match(/retain_out="\$\( \{ (.*?) \} 2>&1\)"/s)?.[1] ?? '';
+      const fromCompose = chain(readFileSync(COMPOSE_BACKUP, 'utf-8'));
+      expect(fromCompose).toContain('delete before FIND_FULL');
+      expect(chain(readFileSync(CRONJOB, 'utf-8'))).toBe(fromCompose);
+      const script = [
+        'wal-g() { case "$1" in backup-list) printf "%s\\n" "$LISTJSON";; *) echo "wal-g $*";; esac; }',
+        'fence=""; RETAIN_DAYS=2',
+        `{ ${fromCompose} } 2>&1`,
+      ].join('\n');
       const name = `vcdate${process.pid}`;
       try {
         const r = spawnSync(
@@ -438,15 +507,22 @@ describe('retention deletes by time, inside the current lineage', () => {
             '--rm',
             '--name',
             name,
-            'busybox:1.36',
-            'sh',
+            '-e',
+            `LISTJSON=${backupListJson(DEFAULT_BASES)}`,
+            '--entrypoint',
+            'bash',
+            DB_IMAGE,
             '-c',
-            `RETAIN_DAYS=3; ${fromCompose}`,
+            script,
           ],
-          { encoding: 'utf-8', timeout: 100_000 },
+          { encoding: 'utf-8', timeout: 280_000 },
         );
-        expect(r.status, r.stderr).toBe(0);
-        expectCutoff(r.stdout.trim(), 3);
+        expect(r.status, r.stderr + r.stdout).toBe(0);
+        const out = r.stdout.split('\n').filter((l) => l.startsWith('wal-g '));
+        expect(out).toEqual([
+          'wal-g delete garbage BACKUPS --confirm',
+          `wal-g delete before FIND_FULL ${MID} --confirm`,
+        ]);
       } finally {
         spawnSync('docker', ['rm', '-f', '-v', name], { timeout: 30_000 });
       }

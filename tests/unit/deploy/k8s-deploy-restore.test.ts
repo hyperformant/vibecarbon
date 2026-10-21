@@ -288,6 +288,8 @@ let fence = 'off';
 // Secret carries (plain; the mock answers base64 as kubectl does), and what
 // the db pod's PGDATA shows (null: the pod cannot be exec'd).
 let liveDbSts = false;
+/** The backup files inside the rendered dir `kubectl apply -k` was handed. */
+let appliedBackup: { cronjob: string; configmap: string } | null = null;
 let marker: Record<string, string> = {};
 let pgdataState: string | null = '';
 
@@ -333,6 +335,13 @@ function installSpawn() {
   vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
     calls.push([cmd, ...args]);
     const has = (s: string) => args.includes(s);
+    if (cmd === 'kubectl' && has('apply') && has('-k') && args.some((a) => /k8s-base/.test(a))) {
+      const dir = args[args.indexOf('-k') + 1];
+      appliedBackup = {
+        cronjob: readFileSync(join(dir, 'backup/cronjob.yaml'), 'utf-8'),
+        configmap: readFileSync(join(dir, 'config/configmap.yaml'), 'utf-8'),
+      };
+    }
     const sql = args.find((a) => /SELECT|ANALYZE/i.test(a)) ?? '';
     if (cmd === 'kubectl' && has('rollout') && has('status') && has('statefulset/db')) {
       return child(dbRolloutExit);
@@ -376,6 +385,14 @@ function projectDir() {
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
     readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
   );
+  mkdirSync(join(dir, 'k8s', 'base', 'backup'), { recursive: true });
+  mkdirSync(join(dir, 'k8s', 'base', 'config'), { recursive: true });
+  for (const f of ['backup/cronjob.yaml', 'config/configmap.yaml']) {
+    writeFileSync(
+      join(dir, 'k8s', 'base', f),
+      readFileSync(join(__dirname, '../../../carbon/k8s/base', f), 'utf-8'),
+    );
+  }
   return dir;
 }
 
@@ -668,6 +685,24 @@ describe('applyK3sManifests with a restore point', () => {
       /if \(options\.restore\) \{/,
     );
     expect(body.slice(push, push + 300)).toMatch(/tier: 'k8s',\s+ip: masterIp,/);
+  });
+
+  it('the configured backup schedule and retention are in the files kubectl applies', async () => {
+    appliedBackup = null;
+    await applyK3sManifests({
+      ...args(null),
+      backupConfig: { schedule: '0 */6 * * *', retentionDays: 14 },
+    });
+    expect(appliedBackup?.cronjob).toMatch(/^ {2}schedule: "0 \*\/6 \* \* \*"$/m);
+    expect(appliedBackup?.configmap).toMatch(/^ {2}BACKUP_RETENTION_DAYS: "14"$/m);
+  });
+
+  it('a malformed schedule fails before any kubectl call', async () => {
+    calls = [];
+    await expect(
+      applyK3sManifests({ ...args(null), backupConfig: { schedule: '@daily', retentionDays: 7 } }),
+    ).rejects.toThrow(/5-field cron expression/);
+    expect(calls).toEqual([]);
   });
 
   it('without a restore point: no marker keys, no proof, no clear', async () => {

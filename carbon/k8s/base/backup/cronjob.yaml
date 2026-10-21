@@ -221,20 +221,23 @@ spec:
                     # permanently missing object (2026-08-30 RCA). Safe under
                     # concurrencyPolicy: Forbid, as no concurrent push can look
                     # like an orphan mid-flight.
-                    # Retention is by TIME: delete before FIND_FULL removes what
-                    # precedes the first base made at or after the cutoff (RETAIN
-                    # days ago) and keeps that base and everything after it; with
-                    # every base older than the cutoff it deletes nothing, so the
-                    # newest base always survives. It acts on this lineage folder only (walg-env.sh). The db image
-                    # is Alpine (busybox date, no relative dates), so the cutoff is
-                    # epoch arithmetic. The fence object is read back after the
-                    # delete, and one that changed or vanished fails retention.
+                    # Retention is by TIME and keeps the full retention window. The
+                    # cutoff is that many days ago; the target is the NEWEST base that
+                    # finished at or before it, and delete before FIND_FULL on that
+                    # base removes what precedes it, so the base and its WAL stay and
+                    # a restore to any moment in the window has its base. No base that
+                    # old: nothing is deleted, and the newest base always survives.
+                    # The list is parsed without jq (Alpine busybox db image): the
+                    # cutoff is epoch arithmetic, the JSON is split with tr and sed.
+                    # It acts on this lineage folder only (walg-env.sh). The fence
+                    # object is read back after the delete, and one that changed or
+                    # vanished fails retention.
                     # NO APOSTROPHES in this wrapper, comments included: a
                     # single quote ends the bash -c string (enforced by
                     # tests/unit/template/embedded-shell-syntax.test.ts;
                     # run 33319907805 is the day one broke every backup).
                     RETAIN_DAYS='"${RETAIN}"'
-                    retain_out="$( { cutoff="$(date -u -d "@$(( $(date +%s) - RETAIN_DAYS * 86400 ))" +%Y-%m-%dT%H:%M:%SZ)" && [ -n "$cutoff" ] && wal-g delete garbage BACKUPS --confirm && wal-g delete before FIND_FULL "$cutoff" --confirm && { [ -z "$fence" ] || [ "$(wal-g st cat vibecarbon-fence.json 2>&1)" = "$fence" ] || { echo "the backup-prefix fence (vibecarbon-fence.json) changed or vanished during retention"; false; }; }; } 2>&1)" || {
+                    retain_out="$( { cutoff="$(date -u -d "@$(( $(date +%s) - RETAIN_DAYS * 86400 ))" +%Y-%m-%dT%H:%M:%SZ)" && [ -n "$cutoff" ] && wal-g delete garbage BACKUPS --confirm && list="$(wal-g backup-list --detail --json)" && target="$(printf "%s" "$list" | tr "}" "\n" | sed -n "s/.*\"backup_name\":\"\([^\"]*\)\".*\"finish_time\":\"\([^\"]*\)\".*/\2 \1/p" | awk -v c="$cutoff" "substr(\$1,1,19) <= substr(c,1,19)" | sort | tail -n 1 | cut -d " " -f 2)" && { if [ -n "$target" ]; then wal-g delete before FIND_FULL "$target" --confirm; else echo "no base backup is older than ${RETAIN_DAYS} days, nothing to delete"; fi; } && { [ -z "$fence" ] || [ "$(wal-g st cat vibecarbon-fence.json 2>&1)" = "$fence" ] || { echo "the backup-prefix fence (vibecarbon-fence.json) changed or vanished during retention"; false; }; }; } 2>&1)" || {
                       printf "%s\n" "$retain_out" >&2
                       echo "retention failed after pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
                       exit 3

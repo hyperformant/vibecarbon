@@ -34,6 +34,7 @@ import {
   uploadKubeconfig,
   waitForLatestWorkflowRun,
 } from '../../github-environments.js';
+import { writeBackupConfigIntoTree } from './backup-config.js';
 
 /**
  * Build the operator-facing warning when observability is installed but this
@@ -196,6 +197,8 @@ function commitAndPushManifests(cwd, message) {
  *   class): { hetznerApiToken, dnsTokens }
  * @param {{ accessKey: string, secretKey: string }} args.appStorage - the env
  *   app's own storage pair (storedAppStoragePair), seeded per environment
+ * @param {{schedule?: string, retentionDays?: number}} [args.backupConfig] - envConfig.backup:
+ *   written into the committed base so a Flux reconcile keeps the configured schedule and retention
  * @param {string} [args.imageTag] - specific image tag to bake into app Deployment (default "main")
  * @param {number} [args.workflowTimeoutSec] - default 60 min. deploy.yml's
  *   internal Flux wait caps at 10m (vibecarbon-base), on top of ~5m Flux
@@ -215,6 +218,7 @@ export async function deployK8sGitOps(args) {
     providerCreds,
     appStorage,
     imageTag,
+    backupConfig,
     workflowTimeoutSec = 3600,
     skipCi = false,
   } = args;
@@ -258,6 +262,9 @@ export async function deployK8sGitOps(args) {
     // (follow-up: switch template to use {{IMAGE_TAG}} so SHAs can pin).
     renderInPlace(appDeployment, { IMAGE_TAG: imageTag });
   }
+  // Flux reconciles the committed ./k8s/base every 10 minutes, so the backup
+  // schedule and retention go into the files, not onto the live objects.
+  writeBackupConfigIntoTree(join(projectDir, 'k8s', 'base'), backupConfig);
   s.stop('Manifests rendered');
 
   // 2. git add/commit/push — this is the deploy.

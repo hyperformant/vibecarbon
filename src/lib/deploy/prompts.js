@@ -84,6 +84,26 @@ const COMPOSE_HA_OPTION = {
 };
 
 /**
+ * The backup schedule and retention this deploy runs with: the flag, else what
+ * the environment recorded (envConfig.backup survives between deploys), else
+ * the default. A plain `vibecarbon deploy <env>` therefore keeps the recorded
+ * values and never resets them.
+ *
+ * @param {{backupSchedule?: string, backupRetentionDays?: string|number|null}} args
+ * @param {{backup?: {schedule?: string, retentionDays?: number|string}}} envConfig
+ * @returns {{schedule: string, retentionDays: number}}
+ */
+export function resolveBackupConfig(args, envConfig) {
+  return {
+    schedule: args.backupSchedule || envConfig.backup?.schedule || '0 */6 * * *',
+    retentionDays: Number.parseInt(
+      args.backupRetentionDays || envConfig.backup?.retentionDays || '30',
+      10,
+    ),
+  };
+}
+
+/**
  * Validate `-region` (when supplied) against a resolved provider's REGIONS
  * map. Exported so gatherDeploymentConfig's two call sites — the initial
  * guard (resolved against envConfig's persisted/default provider) and the
@@ -1071,13 +1091,7 @@ export async function gatherDeploymentConfig(args) {
     p.log.error(err.message);
     process.exit(1);
   }
-  const backupConfig = {
-    schedule: args.backupSchedule || envConfig.backup?.schedule || '0 */6 * * *',
-    retentionDays: Number.parseInt(
-      args.backupRetentionDays || envConfig.backup?.retentionDays || '30',
-      10,
-    ),
-  };
+  const backupConfig = resolveBackupConfig(args, envConfig);
 
   const branchName = getBranchName(config.environment);
 
