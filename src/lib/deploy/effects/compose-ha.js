@@ -171,12 +171,11 @@ async function haProvisionServers(ctx) {
   // A compose scale replaces a server outside the programs and records its new
   // type on that server's servers[] entry (a primary-only scale leaves the
   // env-level serverType alone). Each stack keeps its server's recorded type,
-  // or `up` would resize the scaled server back; only a type this deploy asks
-  // for at the env level (`-server-type`, which differs from the recorded
-  // envConfig.serverType) applies to both stacks.
-  const requested = serverType !== envConfig?.serverType;
+  // or `up` would resize the scaled server back; only a type this deploy was
+  // asked for (`deploy -server-type`, ctx.serverTypeRequested) applies to both
+  // stacks, even one equal to the env's recorded type.
   const recordedType = (stack) =>
-    requested
+    ctx.serverTypeRequested
       ? undefined
       : (envConfig?.servers ?? []).find(
           (sv) => composeHaStackOf(sv, projectName, environment) === stack,

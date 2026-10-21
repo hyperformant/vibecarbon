@@ -64,5 +64,8 @@ export function stubServerStateSync<T extends Record<string, unknown>>(
     syncScaledServerState: async (_ctx: unknown, e: { stack: string; serverId: unknown }) => {
       onEvent(`state:sync:${e.stack}:${e.serverId}`);
     },
+    markPendingServerOldDeleted: (_env: string, stack: string) => {
+      onEvent(`state:old-deleted:${stack}`);
+    },
   };
 }

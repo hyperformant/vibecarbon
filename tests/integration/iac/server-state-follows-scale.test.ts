@@ -14,7 +14,9 @@
  *   - after retargetServerResource, the plan creates, replaces and deletes
  *     nothing, and the server resource is `same`.
  *
- * Skipped where no pulumi CLI is installed (CI's unit/integration runners).
+ * Skipped locally where no pulumi CLI is installed. Under CI it runs: the
+ * integration job installs the CLI pinned to the SDK version, and a missing
+ * CLI there fails this test instead of skipping it.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -98,10 +100,11 @@ async function deployPlan(stack: Awaited<ReturnType<typeof stackFor>>) {
   return preview.changeSummary as Record<string, number>;
 }
 
-describe.skipIf(!hasPulumi)(
+describe.skipIf(!hasPulumi && !process.env.CI)(
   'Pulumi state follows a compose scale (real engine, fake cloud)',
   () => {
     it('without the sync the next deploy plans a new server; after it, no server is created, replaced or deleted', async () => {
+      expect(hasPulumi, 'CI must install the pulumi CLI (test.yml integration job)').toBe(true);
       writeCloud({ next: 1, servers: {} });
 
       // The bug, as a control.

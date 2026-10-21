@@ -5,9 +5,9 @@
  * serverType alone. If the deploy's programs then asked for the env-level type,
  * `up` would resize the scaled server back (a reboot on every provider).
  *
- * Rule: a type this deploy asks for at the env level (`-server-type`, which
- * differs from the recorded envConfig.serverType) applies to both stacks, as
- * before; otherwise each stack keeps its server's recorded type.
+ * Rule: a type this deploy was asked for (`deploy -server-type`, threaded as
+ * ctx.serverTypeRequested) applies to both stacks, as before; otherwise each
+ * stack keeps its server's recorded type.
  *
  * Same stop-early harness as compose-ha-standby-server-type.test.ts.
  */
@@ -25,7 +25,11 @@ vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
 
 const { COMPOSE_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/compose-ha.js');
 
-async function runDecision(serverType: string, envConfig: Record<string, unknown>) {
+async function runDecision(
+  serverType: string,
+  envConfig: Record<string, unknown>,
+  serverTypeRequested = false,
+) {
   const ctx: Record<string, unknown> = {
     projectConfig: { projectName: 'testapp' },
     environment: 'production',
@@ -33,6 +37,7 @@ async function runDecision(serverType: string, envConfig: Record<string, unknown
     region: 'nbg1',
     secondaryRegion: 'fsn1',
     serverType,
+    serverTypeRequested,
     apiToken: 'test-token',
     imageRef: 'ghcr.io/owner/repo:tag',
     envConfig: { provider: 'hetzner', ...envConfig },
@@ -70,12 +75,32 @@ describe('compose-ha server type per stack, after a scale', () => {
   });
 
   it('a type this deploy asks for applies to both stacks, as before', async () => {
-    const ctx = await runDecision('cpx52', {
-      serverType: 'cpx22',
-      servers: servers('cpx42', 'cpx22'),
-    });
+    const ctx = await runDecision(
+      'cpx52',
+      { serverType: 'cpx22', servers: servers('cpx42', 'cpx22') },
+      true,
+    );
     expect(ctx.primaryStackServerType).toBe('cpx52');
     expect(ctx.standbyServerType).toBe('cpx52');
+  });
+
+  it('a requested type equal to the env type still applies: -server-type cpx22 resizes the scaled primary back', async () => {
+    const ctx = await runDecision(
+      'cpx22',
+      { serverType: 'cpx22', servers: servers('cpx42', 'cpx22') },
+      true,
+    );
+    expect(ctx.primaryStackServerType).toBe('cpx22');
+    expect(ctx.standbyServerType).toBe('cpx22');
+  });
+
+  it('no -server-type: a differing env type never overrides the recorded ones', async () => {
+    const ctx = await runDecision('cpx52', {
+      serverType: 'cpx22',
+      servers: servers('cpx42', 'cpx32'),
+    });
+    expect(ctx.primaryStackServerType).toBe('cpx42');
+    expect(ctx.standbyServerType).toBe('cpx32');
   });
 
   it('a first deploy (no servers recorded) takes the env type', async () => {

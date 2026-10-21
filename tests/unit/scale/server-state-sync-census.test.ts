@@ -114,6 +114,13 @@ describe('servers created or deleted outside Pulumi are followed by the state sy
     expect(firstPlan).toBeGreaterThan(repair);
   });
 
+  it('compose-ha deploy knows whether -server-type was given (the per-stack type rule reads it)', () => {
+    const orch = code(read('src/lib/deploy/orchestrator.js'));
+    const haCtx = orch.slice(orch.indexOf('const composeHaCtx = {'));
+    expect(haCtx.slice(0, haCtx.indexOf('};'))).toMatch(/serverTypeRequested: !!args\.serverType,/);
+    expect(code(read('src/lib/deploy/effects/compose-ha.js'))).toMatch(/ctx\.serverTypeRequested/);
+  });
+
   it('scale refuses a provider the stack cannot follow before the token prompt, and resolves the backend before any server', () => {
     const body = scaleFn('scaleCompose');
     const refuse = body.indexOf('assertComposeScaleKeepsState(');

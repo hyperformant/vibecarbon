@@ -128,7 +128,27 @@ export function scaledServerStateEntry(ctx, server) {
     serverId: replacement.id,
     serverType: replacement.serverType,
     ip: replacement.ip,
+    // The server it replaces, so a record whose delete never landed can name
+    // it for cleanup (it keeps billing outside Pulumi state).
+    old: { id: server.id, ip: server.ip, name: server.providerServerName ?? server.name ?? null },
   };
+}
+
+/** The old server, as a cleanup line names it. */
+export function describeOldServer(old) {
+  if (!old) return 'the old server';
+  return `the old server ${old.ip} (id ${old.id}${old.name ? `, ${old.name}` : ''})`;
+}
+
+/** Mark the record's old server as deleted (its delete landed). */
+export function markPendingServerOldDeleted(environment, stack) {
+  const config = loadProjectConfig();
+  const entry = config?.environments?.[environment]?.pendingServerState?.find(
+    (e) => e.stack === stack,
+  );
+  if (!entry) return;
+  entry.oldDeleted = true;
+  saveProjectConfig(config);
 }
 
 /** The one recovery line for a stack that still names a replaced server. */
@@ -143,7 +163,8 @@ export function serverStateRecovery(environment) {
  * fails the command), and the record stays for deploy to repair.
  */
 export async function syncScaledServerState(ctx, entry) {
-  const { stack, ...target } = entry;
+  const { stack, serverId, serverType, ip } = entry;
+  const target = { serverId, serverType, ip };
   try {
     if (!ctx.serverStateOptions) {
       throw new Error('no Pulumi backend options were resolved for this scale');
@@ -169,7 +190,15 @@ export async function syncScaledServerState(ctx, entry) {
  */
 export async function repairPendingServerState({ environment, envConfig, options }) {
   const pending = envConfig?.pendingServerState ?? [];
-  for (const { stack, serverId, serverType, ip } of pending) {
+  for (const { stack, serverId, serverType, ip, old, oldDeleted } of pending) {
+    // A record whose delete never landed (killed before it, or it failed):
+    // the old server may still run, billing outside Pulumi state.
+    if (!oldDeleted) {
+      p.log.warn(
+        `${describeOldServer(old)}, which scale replaced in stack ${stack}, may still exist: ` +
+          "if your provider's console lists it, delete it there; nothing tracks it any more.",
+      );
+    }
     try {
       const { changed } = await syncServerState(stack, { serverId, serverType, ip }, options);
       p.log.info(

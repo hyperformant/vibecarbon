@@ -1685,6 +1685,9 @@ export async function executeDeployment(args, gatheredConfig) {
       // place — deliberately not restated here, because the last copy of it
       // said 'cx23' long after that SKU stopped being placeable in the EU.
       serverType: serverType || providerFor(envConfig).DEFAULT_COMPOSE_TYPE,
+      // `deploy -server-type` given: that type applies to both stacks; without
+      // it each keeps its server's recorded type (a scale may have changed one).
+      serverTypeRequested: !!args.serverType,
       secondaryRegion: secondaryRegion || undefined,
       backupS3Config,
       // Docker Hub + GHCR creds gate the HA login fan-out; loaded here so the

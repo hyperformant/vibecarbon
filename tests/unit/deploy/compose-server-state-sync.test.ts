@@ -41,7 +41,7 @@ vi.mock('@clack/prompts', async (orig) => {
     log: {
       info: (m: string) => h.logs.push(`info:${m}`),
       error: (m: string) => h.logs.push(`error:${m}`),
-      warn() {},
+      warn: (m: string) => h.logs.push(`warn:${m}`),
     },
   };
 });
@@ -123,6 +123,7 @@ describe('record, sync, clear (the scale side)', () => {
       serverId: 'new',
       serverType: 'cpx41',
       ip: '9.9.9.9',
+      old: { id: 'old', ip: undefined, name: 'myapp-prod-primary' },
     });
     expect(h.config?.environments.prod.pendingServerState).toMatchObject([entry]);
     await m.syncScaledServerState(c, entry);
@@ -188,6 +189,31 @@ describe('repairPendingServerState (the deploy side)', () => {
     expect(h.syncCalls.map((c) => c[0])).toEqual(['prod-primary', 'prod-standby']);
     expect(h.config?.environments.prod.pendingServerState).toBeUndefined();
     expect(envConfig.pendingServerState).toBeUndefined();
+  });
+
+  it('a record whose delete never landed warns naming the old server for cleanup; a landed one does not', async () => {
+    const records = [
+      { ...pending[0], old: { id: 'p-old', ip: '1.1.1.1', name: 'myapp-prod-primary' } },
+      { ...pending[1], old: { id: 's-old', ip: '2.2.2.2', name: null }, oldDeleted: true },
+    ];
+    h.config = { environments: { prod: { pendingServerState: records } } };
+    await m.repairPendingServerState({
+      environment: 'prod',
+      envConfig: { pendingServerState: records },
+      options: OPTIONS,
+    });
+    const warns = h.logs.filter((l) => l.startsWith('warn:'));
+    expect(warns).toEqual([
+      'warn:the old server 1.1.1.1 (id p-old, myapp-prod-primary), which scale replaced in stack ' +
+        "prod-primary, may still exist: if your provider's console lists it, delete it there; nothing tracks it any more.",
+    ]);
+  });
+
+  it('markPendingServerOldDeleted flags only that stack’s record', () => {
+    h.config = { environments: { prod: { pendingServerState: structuredClone(pending) } } };
+    m.markPendingServerOldDeleted('prod', 'prod-standby');
+    const recs = h.config?.environments.prod.pendingServerState as Array<Record<string, unknown>>;
+    expect(recs.map((r) => r.oldDeleted)).toEqual([undefined, true]);
   });
 
   it('nothing pending: no state is touched', async () => {

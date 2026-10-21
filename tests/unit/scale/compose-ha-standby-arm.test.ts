@@ -316,10 +316,12 @@ describe('compose-ha scale: the standby arm reseeds, never restores', () => {
     ]) {
       const record = h.events.indexOf(`state:record:${stack}:${newId}`);
       const del = h.events.indexOf(`delete:${oldId}`);
+      const marked = h.events.indexOf(`state:old-deleted:${stack}`);
       const sync = h.events.indexOf(`state:sync:${stack}:${newId}`);
       expect(record).toBeGreaterThan(-1);
       expect(record).toBeLessThan(del);
-      expect(sync).toBeGreaterThan(del);
+      expect(marked).toBeGreaterThan(del);
+      expect(sync).toBeGreaterThan(marked);
     }
   });
 
@@ -392,6 +394,24 @@ describe('compose-ha scale: the standby arm reseeds, never restores', () => {
     // Nothing was reseeded and no tunnel moved.
     expect(h.reseeds).toEqual([]);
     expect(h.tunnels).toEqual([]);
+  });
+});
+
+describe('compose-ha scale: an old standby whose delete fails', () => {
+  it('still points config and state at the new standby, then fails naming the old one for cleanup', async () => {
+    reset();
+    const { provider, ctx } = makeCtx('standby');
+    provider.deleteServer.mockImplementation(async (id: string) => {
+      if (id === 's-old') throw new Error('api 503\nbody');
+      h.events.push(`delete:${id}`);
+    });
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+      'the new standby 9.9.9.2 serves, but deleting the old server 2.2.2.2 (id s-old, myapp-prod-standby) ' +
+        'failed: api 503. It keeps billing and nothing tracks it any more: delete it in the Hetzner Cloud console.',
+    );
+    // The new standby is the record, in Pulumi state too; the delete never landed.
+    expect(h.events).toContain('state:sync:prod-standby:s-new');
+    expect(h.events).not.toContain('state:old-deleted:prod-standby');
   });
 });
 

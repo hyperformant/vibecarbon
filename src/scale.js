@@ -52,6 +52,8 @@ import {
 } from './lib/deploy/compose/scale-cutover.js';
 import {
   assertComposeScaleKeepsState,
+  describeOldServer,
+  markPendingServerOldDeleted,
   recordPendingServerState,
   resolveServerStateOptions,
   scaledServerStateEntry,
@@ -749,6 +751,7 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
     recordPendingServerState(environment, stateEntry);
     s.start(`Destroying old server ${server.ip}...`);
     await perfAsync('scale.destroyOldServer', () => provider.deleteServer(server.id));
+    markPendingServerOldDeleted(environment, stateEntry.stack);
     s.stop(`Old server destroyed: ${server.ip}`);
   });
   // The fenced server is gone, and its record (marker and journal) with it.
@@ -1714,10 +1717,25 @@ async function scaleServers(ctx) {
     const stateEntry = scaledServerStateEntry(ctx, server);
     recordPendingServerState(environment, stateEntry);
     s.start(`Destroying old standby ${server.ip}...`);
-    await perfAsync('scale.destroyOldServer', () => provider.deleteServer(server.id));
-    s.stop(`Old standby destroyed: ${server.ip}`);
+    let deleteErr = null;
+    try {
+      await perfAsync('scale.destroyOldServer', () => provider.deleteServer(server.id));
+      markPendingServerOldDeleted(environment, stateEntry.stack);
+      s.stop(`Old standby destroyed: ${server.ip}`);
+    } catch (err) {
+      s.stop(`Old standby not destroyed: ${server.ip}`, 1);
+      deleteErr = err;
+    }
+    // The new standby serves either way: config and Pulumi state name it.
     await renameReplacement(ctx, server._replacement);
     await syncScaledServerState(ctx, stateEntry);
+    if (deleteErr) {
+      throw new Error(
+        `the new standby ${newIp} serves, but deleting ${describeOldServer(stateEntry.old)} failed: ` +
+          `${firstLineOf(deleteErr)}. It keeps billing and nothing tracks it any more: ` +
+          `delete it in the ${ctx.Provider?.NAME ?? 'provider'} console.`,
+      );
+    }
   };
 
   const arms = [
