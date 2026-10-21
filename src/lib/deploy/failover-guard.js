@@ -364,6 +364,26 @@ export function recordSystemIdentifier(ctx, systemIdentifier) {
 }
 
 /**
+ * Mark the standby unproven after a restore that did not reseed it and verify
+ * it (skipped, failed, or never confirmed): replication degraded, and the
+ * recorded system identifier dropped. The restore rewound the primary, so the
+ * standby's identifier still matches but its data is ahead of the restored
+ * primary on another history; without this the replica proof would pass it.
+ * The next deploy reseeds it and records the identifier again.
+ *
+ * @param {{ environment: string }} ctx
+ */
+export function markStandbyUnproven(ctx) {
+  const config = loadProjectConfig();
+  const envConfig = config?.environments?.[ctx.environment];
+  if (!envConfig) return;
+  envConfig.replication = 'degraded';
+  envConfig.degraded = true;
+  if (envConfig.ha && typeof envConfig.ha === 'object') delete envConfig.ha.systemIdentifier;
+  saveProjectConfig(config);
+}
+
+/**
  * The `ha` fields a deploy persists for failover's replica proof: the standby's
  * system identifier, only when this deploy verified streaming. A degraded deploy
  * records nothing, so an unplanned failover refuses until one proves it.

@@ -25,6 +25,10 @@ const baseArgs = {
   projectName: 'myapp',
   serverIp: '10.0.0.1', // primary (servers[0])
   sshKeyPath: '/tmp/key',
+  // The post-reseed proof and the config writes (I2), inert by default.
+  readStandbyState: async () => ({ inRecovery: true, systemIdentifier: '7412345678901234567' }),
+  markStandbyUnproven: () => {},
+  recordSystemIdentifier: () => {},
 };
 
 // The restore target (serverIp) is derived in run() as the role==='primary'
@@ -287,5 +291,67 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
       configureStandbyReplication,
     });
     expect(configureStandbyReplication).toHaveBeenCalledOnce();
+  });
+});
+
+describe('runComposeRestore: a standby not re-seeded and verified is marked unproven (I2)', () => {
+  const pair = {
+    deployMode: 'compose-ha',
+    servers: [
+      { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'primary' },
+      { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
+    ],
+  };
+  const run = async (over: Record<string, unknown>) => {
+    const markStandbyUnproven = vi.fn();
+    const recordSystemIdentifier = vi.fn();
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: pair,
+      restoreCompose: vi.fn().mockResolvedValue(undefined),
+      configureStandbyReplication: vi.fn().mockResolvedValue(true),
+      markStandbyUnproven,
+      recordSystemIdentifier,
+      ...over,
+    });
+    warn.mockRestore();
+    return { markStandbyUnproven, recordSystemIdentifier };
+  };
+
+  it('a verified reseed records the identifier and stays proven', async () => {
+    const { markStandbyUnproven, recordSystemIdentifier } = await run({});
+    expect(markStandbyUnproven).not.toHaveBeenCalled();
+    expect(recordSystemIdentifier).toHaveBeenCalledWith(
+      { environment: 'prod' },
+      '7412345678901234567',
+    );
+  });
+
+  it('a failed reseed marks it unproven', async () => {
+    const { markStandbyUnproven } = await run({
+      configureStandbyReplication: vi.fn().mockRejectedValue(new Error('basebackup failed')),
+    });
+    expect(markStandbyUnproven).toHaveBeenCalledWith({ environment: 'prod' });
+  });
+
+  it('a reseed that does not read back as a replica marks it unproven', async () => {
+    const { markStandbyUnproven, recordSystemIdentifier } = await run({
+      readStandbyState: async () => ({ inRecovery: false, systemIdentifier: '1' }),
+    });
+    expect(markStandbyUnproven).toHaveBeenCalledOnce();
+    expect(recordSystemIdentifier).not.toHaveBeenCalled();
+  });
+
+  it('a skipped reseed (failed-over pair) marks it unproven', async () => {
+    const { markStandbyUnproven } = await run({
+      envConfig: {
+        ...pair,
+        deployedAt: '2026-10-01T00:00:00.000Z',
+        lastFailover: '2026-10-05T00:00:00.000Z',
+      },
+    });
+    expect(markStandbyUnproven).toHaveBeenCalledOnce();
   });
 });

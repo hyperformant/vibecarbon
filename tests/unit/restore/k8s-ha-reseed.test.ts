@@ -294,3 +294,77 @@ describe('runK8sRestore — planner statistics', () => {
     if (scaleUpIdx > -1) expect(analyzeIdx).toBeLessThan(scaleUpIdx);
   });
 });
+
+describe('runK8sRestore: a standby not re-seeded and verified is marked unproven (I2)', () => {
+  const run = async (over: Record<string, unknown>) => {
+    const markStandbyUnproven = vi.fn();
+    const outcome = runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnvConfig,
+      ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+      reseedStandbyFromPrimary: vi.fn().mockResolvedValue('reseeded'),
+      readReplicationState: vi.fn().mockResolvedValue('streaming'),
+      verifySleep: async () => {},
+      markStandbyUnproven,
+      recordSystemIdentifier: vi.fn(),
+      ...over,
+    });
+    return { outcome, markStandbyUnproven };
+  };
+
+  it('a verified reseed leaves the proof alone', async () => {
+    const { outcome, markStandbyUnproven } = await run({});
+    await outcome;
+    expect(markStandbyUnproven).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'the slot recreate fails',
+      { ensureReplicationSlot: vi.fn().mockRejectedValue(new Error('x')) },
+    ],
+    ['the reseed fails', { reseedStandbyFromPrimary: vi.fn().mockRejectedValue(new Error('x')) }],
+    ['the reseed is skipped', { reseedStandbyFromPrimary: vi.fn().mockResolvedValue('skipped') }],
+    ['streaming is never confirmed', { readReplicationState: vi.fn().mockResolvedValue('') }],
+    [
+      'the standby cannot be resolved',
+      {
+        envConfig: { ...haEnvConfig, ha: { ...haEnvConfig.ha, standby: { masterIp: '10.0.2.1' } } },
+      },
+    ],
+  ])('%s: throws, marked unproven first', async (_name, over) => {
+    const { outcome, markStandbyUnproven } = await run(over);
+    await expect(outcome).rejects.toThrow(/HA restore/);
+    expect(markStandbyUnproven).toHaveBeenCalledWith({ environment: 'prod' });
+  });
+});
+
+describe('markStandbyUnproven', () => {
+  it('sets replication degraded and drops the recorded identifier, keeping the rest', async () => {
+    const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { markStandbyUnproven } = await import('../../../src/lib/deploy/failover-guard.js');
+    const dir = mkdtempSync(join(tmpdir(), 'vc-unproven-'));
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'myapp',
+        environments: {
+          prod: { replication: 'streaming', ha: { enabled: true, systemIdentifier: '7' } },
+        },
+      }),
+    );
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    try {
+      markStandbyUnproven({ environment: 'prod' });
+      const env = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments
+        .prod;
+      expect(env).toEqual({ replication: 'degraded', degraded: true, ha: { enabled: true } });
+    } finally {
+      cwd.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -29,7 +29,10 @@ import { c } from './lib/colors.js';
 // Static imports (no cycle: neither compose/index.js nor compose/ha.js imports
 // restore.js). Aliased so runComposeRestore can default to the real functions
 // while still accepting injected mocks for unit tests.
-import { configureStandbyReplication as realConfigureStandbyReplication } from './lib/deploy/compose/ha.js';
+import {
+  composePsqlRunner,
+  configureStandbyReplication as realConfigureStandbyReplication,
+} from './lib/deploy/compose/ha.js';
 import {
   composeHaStackOf,
   composeHaStandbyResyncHint,
@@ -39,7 +42,9 @@ import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import {
   assertNoFailoverInFlight,
-  recordSystemIdentifier,
+  readReplicaState,
+  markStandbyUnproven as realMarkStandbyUnproven,
+  recordSystemIdentifier as realRecordSystemIdentifier,
   swappedSinceLastDeploy,
 } from './lib/deploy/failover-guard.js';
 import {
@@ -562,6 +567,10 @@ export async function runComposeRestore({
   envConfig = {},
   restoreCompose = realRestoreCompose,
   configureStandbyReplication = realConfigureStandbyReplication,
+  markStandbyUnproven = realMarkStandbyUnproven,
+  recordSystemIdentifier = realRecordSystemIdentifier,
+  readStandbyState = (ip) =>
+    readReplicaState({ exec: composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`) }),
 }) {
   // Also here, for every caller: see run().
   assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
@@ -603,6 +612,7 @@ export async function runComposeRestore({
       detectComposeHaRoleSwap({ projectName, environment: envName, envConfig }) ||
       swappedSinceLastDeploy(envConfig)
     ) {
+      markStandbyUnproven({ environment: envName });
       p.log.warn(
         'Primary restored and serving. Skipping the standby re-seed here: this pair has ' +
           'failed over at some point, so its standby is rebuilt by `vibecarbon deploy`, which ' +
@@ -617,15 +627,24 @@ export async function runComposeRestore({
             stackIdentity: composeHaStackOf(primary, projectName, envName) ?? 'primary',
           }),
         });
+        // Re-seeded is proven only by a reading in recovery with an identifier:
+        // that is what the next failover's replica proof compares against.
+        const seeded = await readStandbyState(standby.ip);
+        if (seeded.inRecovery !== true || !seeded.systemIdentifier) {
+          throw new Error('the re-seeded standby did not read back as a replica');
+        }
+        recordSystemIdentifier({ environment: envName }, seeded.systemIdentifier);
         s.stop('Standby re-seeded from restored primary');
       } catch (err) {
         s.stop('Standby re-seed failed');
+        markStandbyUnproven({ environment: envName });
         p.log.warn(
           `Primary restored and serving, but standby re-seed failed: ${err.message}. ` +
             composeHaStandbyResyncHint({ projectName, environment: envName, envConfig }),
         );
       }
     } else {
+      markStandbyUnproven({ environment: envName });
       p.log.warn(
         'compose-ha restore: no standby server found to re-seed, skipping (verify replication manually).',
       );
@@ -671,6 +690,8 @@ export async function runK8sRestore({
   reseedStandbyFromPrimary = realReseedStandbyFromPrimary,
   ensureReplicationSlot = realEnsureReplicationSlot,
   readReplicationState = realReadK8sReplicationState,
+  markStandbyUnproven = realMarkStandbyUnproven,
+  recordSystemIdentifier = realRecordSystemIdentifier,
   // Pacing for the post-reseed streaming verify — injectable so tests don't wait
   // on real timers. Production uses the default setTimeout-backed sleep.
   verifySleep = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -770,94 +791,102 @@ export async function runK8sRestore({
   // can't complete — never silently leave a diverged standby.
   const isK8sHA = !!(envConfig.ha?.enabled || envConfig.ha === true || envConfig.secondaryRegion);
   if (isK8sHA) {
-    const servers = identifyServers(envName, envConfig, {});
-    const standbyIp = servers?.standby?.ip;
-    // The standby DATABASE node hosts the db pod's local-path PVC — the re-seed's
-    // node-side PGDATA swap ssh's there. No masterIp fallback: swapping on the
-    // wrong node would be destructive-in-the-wrong-place, so fail loudly instead.
-    const standbyDbIp = servers?.standby?.dbIp;
-    if (!standbyIp || !standbyDbIp) {
-      // We can't locate the standby — fail loudly rather than report a clean
-      // restore while the standby silently diverges.
-      throw new Error(
-        'HA restore: the primary was restored, but the standby cluster or its ' +
-          'database node could not be resolved from config, ' +
-          'so the standby could NOT be ' +
-          `re-seeded and now has a DIVERGED timeline. DR is not guaranteed. Resync with ` +
-          `\`vibecarbon deploy ${envName}\` (re-runs the verified replication setup).`,
-      );
-    }
-
-    // The wal-g restore wiped pg_replslot on the primary (slots are never part
-    // of a base backup). The reseeded standby STREAMS through this persistent
-    // slot post-swap (primary_slot_name) — without it, it connects and errors
-    // `replication slot "…" does not exist`, so it never streams. (The basebackup
-    // itself uses a temp slot now and no longer needs this — streaming does.)
-    // Recreate it idempotently first — same IF-NOT-EXISTS block primary-init.sql uses.
-    s.start('Recreating replication slot on restored primary');
+    // Every throw below leaves a standby that was not reseeded and verified:
+    // mark it unproven first (replication degraded, identifier dropped), so the
+    // replica proof cannot pass it on the identifier alone (I2).
     try {
-      await ensureReplicationSlot(serverIp, sshKeyPath);
-    } catch (err) {
-      s.stop('Replication slot recreation failed');
-      throw new Error(
-        `HA restore: the primary was restored, but recreating the replication slot ` +
-          `FAILED: ${err.message}\nWithout the slot the standby cannot be re-seeded and ` +
-          `has a DIVERGED timeline, DR is not guaranteed. Resync with ` +
-          `\`vibecarbon deploy ${envName}\`.`,
-      );
-    }
-    s.stop('Replication slot present on restored primary');
+      const servers = identifyServers(envName, envConfig, {});
+      const standbyIp = servers?.standby?.ip;
+      // The standby DATABASE node hosts the db pod's local-path PVC — the re-seed's
+      // node-side PGDATA swap ssh's there. No masterIp fallback: swapping on the
+      // wrong node would be destructive-in-the-wrong-place, so fail loudly instead.
+      const standbyDbIp = servers?.standby?.dbIp;
+      if (!standbyIp || !standbyDbIp) {
+        // We can't locate the standby — fail loudly rather than report a clean
+        // restore while the standby silently diverges.
+        throw new Error(
+          'HA restore: the primary was restored, but the standby cluster or its ' +
+            'database node could not be resolved from config, ' +
+            'so the standby could NOT be ' +
+            `re-seeded and now has a DIVERGED timeline. DR is not guaranteed. Resync with ` +
+            `\`vibecarbon deploy ${envName}\` (re-runs the verified replication setup).`,
+        );
+      }
 
-    s.start('Re-seeding standby cluster from restored primary (pg_basebackup)');
-    let reseedResult;
-    try {
-      reseedResult = await reseedStandbyFromPrimary(standbyIp, sshKeyPath, {
-        standbyDbIp,
-        // The re-seed dials the standby's LOCAL WireGuard relay (private IP :
-        // gateway port) — the deploy-time transport, unchanged by a restore.
-        standbyDbPrivateIp: servers?.standby?.dbPrivateIp,
-        // The restored primary may carry another lineage than the last seed
-        // (a backup from before a re-create): record what the standby now holds.
-        onSeeded: (sysid) => recordSystemIdentifier({ environment: envName }, sysid),
+      // The wal-g restore wiped pg_replslot on the primary (slots are never part
+      // of a base backup). The reseeded standby STREAMS through this persistent
+      // slot post-swap (primary_slot_name) — without it, it connects and errors
+      // `replication slot "…" does not exist`, so it never streams. (The basebackup
+      // itself uses a temp slot now and no longer needs this — streaming does.)
+      // Recreate it idempotently first — same IF-NOT-EXISTS block primary-init.sql uses.
+      s.start('Recreating replication slot on restored primary');
+      try {
+        await ensureReplicationSlot(serverIp, sshKeyPath);
+      } catch (err) {
+        s.stop('Replication slot recreation failed');
+        throw new Error(
+          `HA restore: the primary was restored, but recreating the replication slot ` +
+            `FAILED: ${err.message}\nWithout the slot the standby cannot be re-seeded and ` +
+            `has a DIVERGED timeline, DR is not guaranteed. Resync with ` +
+            `\`vibecarbon deploy ${envName}\`.`,
+        );
+      }
+      s.stop('Replication slot present on restored primary');
+
+      s.start('Re-seeding standby cluster from restored primary (pg_basebackup)');
+      let reseedResult;
+      try {
+        reseedResult = await reseedStandbyFromPrimary(standbyIp, sshKeyPath, {
+          standbyDbIp,
+          // The re-seed dials the standby's LOCAL WireGuard relay (private IP :
+          // gateway port) — the deploy-time transport, unchanged by a restore.
+          standbyDbPrivateIp: servers?.standby?.dbPrivateIp,
+          // The restored primary may carry another lineage than the last seed
+          // (a backup from before a re-create): record what the standby now holds.
+          onSeeded: (sysid) => recordSystemIdentifier({ environment: envName }, sysid),
+        });
+      } catch (err) {
+        s.stop('Standby re-seed failed');
+        throw new Error(
+          `HA restore: the primary was restored and is serving, but re-seeding the standby ` +
+            `FAILED: ${err.message}\nThe standby has a DIVERGED timeline and is NOT replicating, ` +
+            `DR is not guaranteed. Resync with \`vibecarbon deploy ${envName}\`.`,
+        );
+      }
+      if (reseedResult === 'skipped') {
+        s.stop('Standby re-seed skipped, primary unreachable from standby');
+        throw new Error(
+          'HA restore: the standby could NOT reach the restored primary to re-seed ' +
+            '(cross-cluster connectivity). The standby has a DIVERGED timeline and is NOT ' +
+            `replicating, DR is not guaranteed. Verify the replication firewall/network, then ` +
+            `resync with \`vibecarbon deploy ${envName}\`.`,
+        );
+      }
+      s.stop('Standby re-seeded from restored primary');
+
+      // Confirm streaming from the restored primary — a re-seed that boots but
+      // never streams is still a diverged standby.
+      s.start('Verifying standby is streaming from restored primary');
+      const { streaming, lastState } = await verifyStreaming({
+        readState: async () => readReplicationState(servers.primary.ip, sshKeyPath),
+        attempts: 15,
+        delaysMs: [1000, 2000, 3000],
+        sleep: verifySleep,
       });
+      if (!streaming) {
+        s.stop('Standby streaming NOT confirmed');
+        throw new Error(
+          `HA restore: the standby was re-seeded but streaming replication is NOT confirmed ` +
+            `(last pg_stat_replication.state=${
+              lastState ? JSON.stringify(lastState) : 'no replica connected'
+            }). DR is not guaranteed. Resync with \`vibecarbon deploy ${envName}\`.`,
+        );
+      }
+      s.stop('Standby streaming from restored primary: DR restored');
     } catch (err) {
-      s.stop('Standby re-seed failed');
-      throw new Error(
-        `HA restore: the primary was restored and is serving, but re-seeding the standby ` +
-          `FAILED: ${err.message}\nThe standby has a DIVERGED timeline and is NOT replicating, ` +
-          `DR is not guaranteed. Resync with \`vibecarbon deploy ${envName}\`.`,
-      );
+      markStandbyUnproven({ environment: envName });
+      throw err;
     }
-    if (reseedResult === 'skipped') {
-      s.stop('Standby re-seed skipped, primary unreachable from standby');
-      throw new Error(
-        'HA restore: the standby could NOT reach the restored primary to re-seed ' +
-          '(cross-cluster connectivity). The standby has a DIVERGED timeline and is NOT ' +
-          `replicating, DR is not guaranteed. Verify the replication firewall/network, then ` +
-          `resync with \`vibecarbon deploy ${envName}\`.`,
-      );
-    }
-    s.stop('Standby re-seeded from restored primary');
-
-    // Confirm streaming from the restored primary — a re-seed that boots but
-    // never streams is still a diverged standby.
-    s.start('Verifying standby is streaming from restored primary');
-    const { streaming, lastState } = await verifyStreaming({
-      readState: async () => readReplicationState(servers.primary.ip, sshKeyPath),
-      attempts: 15,
-      delaysMs: [1000, 2000, 3000],
-      sleep: verifySleep,
-    });
-    if (!streaming) {
-      s.stop('Standby streaming NOT confirmed');
-      throw new Error(
-        `HA restore: the standby was re-seeded but streaming replication is NOT confirmed ` +
-          `(last pg_stat_replication.state=${
-            lastState ? JSON.stringify(lastState) : 'no replica connected'
-          }). DR is not guaranteed. Resync with \`vibecarbon deploy ${envName}\`.`,
-      );
-    }
-    s.stop('Standby streaming from restored primary: DR restored');
   }
 
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);
