@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import * as p from '@clack/prompts';
 import { exitCancelled, exitDeclined } from '../cli/exit-guard.js';
 import { updateProjectConfig } from '../config.js';
+import { DEGRADED_CAUSE } from './env-safety-fields.js';
 
 /** Refusal raised before any write. The message names the reason and `vibecarbon deploy`. */
 export class FailoverRefusedError extends Error {
@@ -252,6 +253,19 @@ export function assertFailoverPreconditions({
       `replication is degraded (the last deploy did not prove the standby streaming), so ` +
         `the standby may be missing writes or hold no data at all. ` +
         repair('to restore streaming, then fail over'),
+    );
+  }
+
+  // No flag overrides it: a promoted standby without the app image serves
+  // nothing. A failover already in flight is let finish (R6).
+  if (
+    envConfig?.degradedCause === DEGRADED_CAUSE.STANDBY_IMAGE_MISSING &&
+    !envConfig?.ha?.failoverInFlight
+  ) {
+    refuse(
+      `the standby is missing the app image (the last deploy could not copy it to the ` +
+        `standby's registry), so a promoted standby could not start the app. ` +
+        repair('to copy it, then fail over'),
     );
   }
 

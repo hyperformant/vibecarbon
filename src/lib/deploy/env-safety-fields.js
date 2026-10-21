@@ -28,8 +28,20 @@ export const ENV_SAFETY_FIELDS = Object.freeze([
   'pendingServerState',
   'replication',
   'degraded',
+  'degradedCause',
   'backup.unrestoredPrior',
 ]);
+
+/**
+ * Named causes for `degraded` beyond the replication verdict (`replication`
+ * carries that one), persisted as the env's `degradedCause`.
+ * STANDBY_IMAGE_MISSING: a k8s-ha deploy under -allow-degraded could not copy
+ * the app image into the standby's registry, so the standby cannot start the
+ * app and failover refuses it.
+ */
+export const DEGRADED_CAUSE = Object.freeze({
+  STANDBY_IMAGE_MISSING: 'standby-image-missing',
+});
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 

@@ -55,7 +55,7 @@ import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compo
 import { workingTreeDirty } from './delta.js';
 import { requireDnsSetup } from './dns-result.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
-import { preserveSafetyFields } from './env-safety-fields.js';
+import { DEGRADED_CAUSE, preserveSafetyFields } from './env-safety-fields.js';
 import { assertNoFailoverInFlight, haSeedRecord, readReplicaState } from './failover-guard.js';
 import {
   createAcmeIssuanceWatchdog,
@@ -592,8 +592,27 @@ export function resolveKubeconfigPath(environment, envConfig) {
  */
 export function finalSaveSafetyOwns(isHADeploy) {
   return isHADeploy
-    ? ['replication', 'degraded', 'ha.systemIdentifier', 'backup.unrestoredPrior']
+    ? ['replication', 'degraded', 'degradedCause', 'ha.systemIdentifier', 'backup.unrestoredPrior']
     : ['backup.unrestoredPrior'];
+}
+
+/**
+ * The DR posture an HA deploy's final save records: the replication verdict,
+ * `degraded`, and the named cause when the standby is missing its app image
+ * (R14). `degradedCause` is always present so it overrides a cause an earlier
+ * deploy left; undefined is dropped when the config is written.
+ *
+ * @param {{ replication?: 'streaming'|'degraded', degraded?: boolean, standbyImageMissing?: boolean }} deployResult
+ * @returns {{ replication: 'streaming'|'degraded', degraded: boolean, degradedCause: string|undefined }}
+ */
+export function haDegradedRecord(deployResult) {
+  return {
+    replication: deployResult?.replication ?? (deployResult?.degraded ? 'degraded' : 'streaming'),
+    degraded: !!deployResult?.degraded,
+    degradedCause: deployResult?.standbyImageMissing
+      ? DEGRADED_CAUSE.STANDBY_IMAGE_MISSING
+      : undefined,
+  };
 }
 
 /**
@@ -1807,7 +1826,11 @@ export async function executeDeployment(args, gatheredConfig) {
       standby: k8sHaCtx.standbyResult,
       domain,
       replicationStatus: k8sHaCtx.replicationStatus,
-      degraded: k8sHaCtx.replicationStatus !== 'streaming',
+      replication: k8sHaCtx.replicationStatus === 'streaming' ? 'streaming' : 'degraded',
+      // Under -allow-degraded a standby without its app image finishes the
+      // deploy degraded too, with its own cause (R14).
+      standbyImageMissing: !!k8sHaCtx.standbyImageMissing,
+      degraded: k8sHaCtx.replicationStatus !== 'streaming' || !!k8sHaCtx.standbyImageMissing,
       systemIdentifier: k8sHaCtx.systemIdentifier ?? null,
       // A retired side that is not a replica yet keeps its fence: deployedAt
       // stays unstamped, so the env stays swapped and the next deploy retries.
@@ -2374,10 +2397,10 @@ export async function executeDeployment(args, gatheredConfig) {
       ...(isHADeploy && {
         secondaryRegion: deployResult?.standby?.region ?? secondaryRegion,
         // Finding #1: persist DR posture. A default (gated) HA deploy that
-        // reaches this point is streaming; only `-allow-degraded` finalizes a
-        // warm/degraded standby, which the inner deploy flags on deployResult.
-        replication: deployResult?.degraded ? 'degraded' : 'streaming',
-        degraded: !!deployResult?.degraded,
+        // reaches this point is streaming with a standby that holds the app
+        // image; only `-allow-degraded` finalizes a warm/degraded standby,
+        // which the inner deploy flags on deployResult.
+        ...haDegradedRecord(deployResult),
         // Persist per-cluster floatingIp + dbIp under ha.primary /
         // ha.standby so failover.identifyServers takes the structured
         // path that surfaces floatingIp. Without these, identifyServers
