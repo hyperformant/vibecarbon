@@ -210,7 +210,9 @@ function isNoSuchBucket(err) {
  * Every target with a non-empty deny list is verified on every run, with
  * every fenced key the caller holds a probe client for (`probes`, by access
  * key id): a just-written fence needs FENCE_PROBE_STREAK denied probes in a
- * row, an unchanged one a single denied probe, both inside the budget. So a
+ * row, an unchanged one a single denied probe, both inside the budget. The
+ * verifications start once every write is done and run in parallel; a
+ * failure names every bucket that did not hold. So a
  * run after an exhausted budget checks again instead of trusting the
  * unchanged policy. A bucket none of the probes is fenced from is reported
  * as `unverified`.
@@ -242,6 +244,9 @@ export async function applyHetznerFences({
   const removed = [];
   const unverified = [];
   const skipped = [];
+  // Every write lands first; the verifications then run side by side, since
+  // each waits on its own bucket's consistency.
+  const verifications = [];
   for (const { bucket, deniedAccessKeyIds, mayBeAbsent = false } of targets) {
     let current;
     try {
@@ -291,14 +296,21 @@ export async function applyHetznerFences({
       continue;
     }
     for (const probe of checkers) {
-      await waitForFence({
-        bucket,
-        probe,
-        sleep,
-        now,
-        streakNeeded: unchanged ? 1 : FENCE_PROBE_STREAK,
-      });
+      verifications.push(() =>
+        waitForFence({
+          bucket,
+          probe,
+          sleep,
+          now,
+          streakNeeded: unchanged ? 1 : FENCE_PROBE_STREAK,
+        }),
+      );
     }
   }
+  const failed = (await Promise.allSettled(verifications.map((verify) => verify()))).filter(
+    (r) => r.status === 'rejected',
+  );
+  if (failed.length === 1) throw failed[0].reason;
+  if (failed.length > 1) throw new Error(failed.map((r) => r.reason.message).join('\n'));
   return { written, removed, unverified, skipped };
 }

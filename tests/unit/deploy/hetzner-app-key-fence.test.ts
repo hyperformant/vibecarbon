@@ -187,6 +187,54 @@ describe('applyHetznerFences', () => {
     expect(s3.puts).toEqual(['proj-abc-state']);
   });
 
+  it('verifies the buckets in parallel, after every fence is written', async () => {
+    const s3 = makeS3();
+    const log: string[] = [];
+    const probe = {
+      isDeniedOn: vi.fn(async (bucket: string) => {
+        log.push(`${bucket}@${s3.puts.length}`);
+        return true;
+      }),
+    };
+    await applyHetznerFences({
+      s3,
+      ownerId: OWNER,
+      targets: [
+        { bucket: 'proj-abc-state', deniedAccessKeyIds: ['AK_P'] },
+        { bucket: 'proj-abc-backups', deniedAccessKeyIds: ['AK_P'] },
+      ],
+      probes: { AK_P: probe },
+      ...fakeClock(),
+    });
+    // Both writes land before the first probe, and the first two probes
+    // are one per bucket (serially, the state bucket would take all
+    // FENCE_PROBE_STREAK first).
+    expect(log.every((e) => e.endsWith('@2'))).toBe(true);
+    expect(
+      log
+        .slice(0, 2)
+        .map((e) => e.split('@')[0])
+        .sort(),
+    ).toEqual(['proj-abc-backups', 'proj-abc-state']);
+    expect(log).toHaveLength(2 * FENCE_PROBE_STREAK);
+  });
+
+  it('a parallel verification failure names every bucket that did not hold', async () => {
+    const s3 = makeS3();
+    await expect(
+      applyHetznerFences({
+        s3,
+        ownerId: OWNER,
+        targets: [
+          { bucket: 'proj-abc-state', deniedAccessKeyIds: ['AK_P'] },
+          { bucket: 'proj-abc-backups', deniedAccessKeyIds: ['AK_P'] },
+        ],
+        probes: { AK_P: scriptedProbe([false]) },
+        ...fakeClock(),
+      }),
+    ).rejects.toThrow(/proj-abc-state[\s\S]*proj-abc-backups/);
+  });
+
   it(`an exhausted ${FENCE_PROBE_BUDGET_MS / 1000} s budget fails naming the bucket, with no rewrite`, async () => {
     const s3 = makeS3();
     const clock = fakeClock();
