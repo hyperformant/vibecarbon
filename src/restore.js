@@ -591,12 +591,21 @@ export async function run(args, deps = {}) {
       });
     }
   } catch (error) {
-    if (error instanceof PostPromoteBackupError) {
-      // The database IS restored and serving (the runner already printed the
-      // push failure): record its lineage, then fail the command.
+    if (error instanceof PostPromoteBackupError || error instanceof RestoredDatabaseError) {
+      // The database IS restored and serving; what followed it failed (the
+      // runner printed the push failure): record its lineage, name every
+      // cause, then fail the command.
       recordRestoredLineage(envName, listing.lineage);
+      if (error instanceof RestoredDatabaseError) {
+        // The push failure was printed when it happened; the others were not.
+        for (const cause of error.causes) {
+          if (!(cause instanceof PostPromoteBackupError)) p.log.error(cause.message);
+        }
+      }
       p.log.warn(
-        `The restored database is serving on ${serverIp}; only its first base backup is missing.`,
+        error instanceof RestoredDatabaseError
+          ? `The restored database is serving on ${serverIp}; the steps named above did not complete.`
+          : `The restored database is serving on ${serverIp}; only its first base backup is missing.`,
       );
       process.exit(1);
     }
@@ -858,6 +867,24 @@ export async function runComposeRestore({
   if (basePushError) throw basePushError;
   p.log.success('Restore completed successfully');
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);
+}
+
+/**
+ * A restore that succeeded (the database is restored, proven writable and
+ * serving) whose follow-ups failed: the first base backup on the restored
+ * timeline AND the k8s-ha standby re-seed. Carries both, so neither replaces
+ * the other and run() still records the restored lineage.
+ */
+export class RestoredDatabaseError extends Error {
+  /** @param {Error[]} causes */
+  constructor(causes) {
+    super(
+      `the database is restored and serving, but ${causes.length} steps after it failed:\n` +
+        causes.map((c, i) => `  ${i + 1}. ${c.message}`).join('\n'),
+    );
+    this.name = 'RestoredDatabaseError';
+    this.causes = causes;
+  }
 }
 
 /**
@@ -1246,6 +1273,8 @@ export async function runK8sRestore({
       s.stop('Standby streaming from restored primary: DR restored');
     } catch (err) {
       markStandbyUnproven({ environment: envName });
+      // Both failed: carry both (the restore itself succeeded).
+      if (basePushError) throw new RestoredDatabaseError([basePushError, err]);
       throw err;
     }
   }

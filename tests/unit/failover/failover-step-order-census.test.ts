@@ -82,7 +82,7 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
         order.push('dns');
         composeFlippedTo = ip;
       },
-      readARecord: async () => (composeFlippedTo ? [composeFlippedTo] : []),
+      readARecord: async () => (composeFlippedTo && !dnsFails ? [composeFlippedTo] : []),
     }),
   };
 });
@@ -148,6 +148,7 @@ const recordingPsql = (ip: string) => async (sql: string) => {
 };
 
 let walgArmed = true;
+let dnsFails = false;
 let pushFails: string | null = null;
 const pushArgs: Array<Record<string, unknown>> = [];
 
@@ -196,6 +197,7 @@ afterEach(() => {
   order.length = 0;
   pushArgs.length = 0;
   walgArmed = true;
+  dnsFails = false;
   pushFails = null;
   vi.clearAllMocks();
 });
@@ -280,7 +282,7 @@ async function runK8s(primaryReachable: boolean) {
       order.push('dns');
       flippedTo = ip;
     },
-    readDns: async () => (flippedTo ? [flippedTo] : []),
+    readDns: async () => (flippedTo && !dnsFails ? [flippedTo] : []),
   };
   // The real waitForAppTierGone reads the quiesced Deployment's selector, then
   // its pods: none left is the proof (writersGone).
@@ -325,6 +327,7 @@ async function runCompose(primaryReachable: boolean) {
       { name: 'myapp-prod-standby', role: 'standby', ip: STANDBY_IP, region: 'ash' },
     ],
     ha: { enabled: true, failoverRegion: 'ash', systemIdentifier: SYSID },
+    backup: { retentionDays: 14 },
   };
   const deps = {
     isPrimaryReachable: async () => primaryReachable,
@@ -446,8 +449,22 @@ describe.each([
       await run(planned);
       expectBasePushLast();
       expect(pushArgs[0]).toMatchObject({ tier });
+      // compose prunes with the env's own retention; k8s retention is the CronJob's.
+      if (tier === 'compose') expect(pushArgs[0]).toMatchObject({ retain: 14 });
+      else expect(pushArgs[0]).not.toHaveProperty('retain');
     },
   );
+
+  it('a DNS flip that is not confirmed skips the push; the DNS error names the missing base', async () => {
+    dnsFails = true;
+    const err = await run(true).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain('FAILOVER COMPLETED, DNS DID NOT');
+    expect(err.message).toContain('no base backup was pushed on the new timeline');
+    expect(err.message).toContain('run vibecarbon backup prod');
+    expect(order).toContain('swap');
+    expect(order).not.toContain('basePush');
+  });
 
   it('a failed WALG_ROLE move skips the push; the one error names the missing base', async () => {
     walgArmed = false;

@@ -1204,11 +1204,15 @@ export async function destroyCompose(ip, sshKeyPath, projectName) {
  *                            (e.g. /opt/myapp)
  * @param {number} [retain=7]  Number of full base backups to keep. Validated
  *                             to a positive integer (injection-safe + sane).
+ * @param {{ lockWaitS?: number }} [opts]  lockWaitS: seconds the script waits
+ *   for another run's lock before it skips (LOCK_WAIT); omitted, it skips at
+ *   once (cron). Validated to a positive integer.
  * @returns {string}
  */
-export function composeBackupCmd(remoteDir, retain = 7) {
+export function composeBackupCmd(remoteDir, retain = 7, { lockWaitS } = {}) {
   const r = Number.isInteger(retain) && retain > 0 ? retain : 7;
-  return `cd ${remoteDir} && RETAIN=${r} bash backup/compose-backup.sh`;
+  const wait = Number.isInteger(lockWaitS) && lockWaitS > 0 ? `LOCK_WAIT=${lockWaitS} ` : '';
+  return `cd ${remoteDir} && ${wait}RETAIN=${r} bash backup/compose-backup.sh`;
 }
 
 /**
@@ -1255,21 +1259,32 @@ export function composeBackupCmd(remoteDir, retain = 7) {
  * @param {string} projectName
  * @param {object} [options]
  * @param {number} [options.retain]  Full base backups to keep (default 7).
+ * @param {number} [options.lockWaitS]  Seconds to wait for another backup run's
+ *   lock before skipping (LOCK_WAIT); added to the ssh timeout. Omitted: skip
+ *   at once (today's behaviour).
  * @param {number[]} [options.staleRetryDelaysMs]  Test seam for the staleness
  *   retry ladder; production callers omit it.
  * @returns {Promise<{result: 'pushed', name: string, retentionError?: string} | {result: 'skipped', reason: string}>}
  */
 export async function backupCompose(ip, sshKeyPath, projectName, options = {}) {
   const remoteDir = `/opt/${projectName}`;
+  const lockWaitMs =
+    Number.isInteger(options.lockWaitS) && options.lockWaitS > 0 ? options.lockWaitS * 1000 : 0;
   const t = perfTimer('backup.walgPush');
   const run = await withWalgStaleStorageRetry(
     async () => {
       try {
         const stdout = await runWithTransportRetry(() =>
-          sshRunAsync(ip, sshKeyPath, composeBackupCmd(remoteDir, options.retain ?? 7), {
-            timeout: 900_000,
-            retries: 1,
-          }),
+          sshRunAsync(
+            ip,
+            sshKeyPath,
+            composeBackupCmd(remoteDir, options.retain ?? 7, { lockWaitS: options.lockWaitS }),
+            {
+              // The lock wait comes on top of the push's own budget.
+              timeout: 900_000 + lockWaitMs,
+              retries: 1,
+            },
+          ),
         );
         return { stdout: String(stdout ?? '') };
       } catch (err) {

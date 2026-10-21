@@ -252,8 +252,12 @@ vi.mock('../../../src/backup.js', async (orig) => ({
   triggerBackupJob: (...a: unknown[]) => triggerBackupJob(...a),
 }));
 
-const { pushBaseBackupAfterPromote, PostPromoteBackupError, postPromoteBackupFailedMessage } =
-  await import('../../../src/lib/walg/post-promote-backup.js');
+const {
+  pushBaseBackupAfterPromote,
+  PostPromoteBackupError,
+  postPromoteBackupFailedMessage,
+  POST_PROMOTE_LOCK_WAIT_S,
+} = await import('../../../src/lib/walg/post-promote-backup.js');
 
 afterEach(() => {
   backupCompose.mockReset();
@@ -274,7 +278,11 @@ describe('pushBaseBackupAfterPromote', () => {
     await expect(pushBaseBackupAfterPromote({ tier: 'compose', ...args })).resolves.toEqual({
       name: 'base_000000020000000000000005',
     });
-    expect(backupCompose).toHaveBeenCalledWith('10.0.0.9', '/k', 'myapp', { retain: 14 });
+    expect(backupCompose).toHaveBeenCalledWith('10.0.0.9', '/k', 'myapp', {
+      retain: 14,
+      // A cron run holding the lock is waited out, not read as a skip.
+      lockWaitS: POST_PROMOTE_LOCK_WAIT_S,
+    });
     expect(triggerBackupJob).not.toHaveBeenCalled();
   });
 

@@ -2584,9 +2584,11 @@ export async function failoverComposeHA(
   // The first base backup on the new timeline (post-promote-backup.js): after
   // the DNS flip, the add-ons, the WALG_ROLE move and the swap save, so it never
   // holds the outage open. Not attempted while the promoted node still reads
-  // standby (it would skip): the degraded error below names the missing base.
+  // standby (it would skip), nor after a DNS flip that was not confirmed (the
+  // site is down, and minutes of upload would only delay the error that says
+  // so): the degraded and DNS errors below name the missing base.
   let basePush = { ok: true };
-  if (backupHealth.ok) {
+  if (backupHealth.ok && dnsFlip.ok) {
     s.start('Pushing the first base backup on the new timeline');
     try {
       const { name } = await pushBaseBackup({
@@ -2625,7 +2627,12 @@ export async function failoverComposeHA(
   // unreachable), so it throws first; the roles are already saved.
   if (!dnsFlip.ok) {
     throw new FailoverDnsError(
-      dnsDidNotMessage({ domain: envConfig.domain, ip: standbyServer.ip, reason: dnsFlip.reason }),
+      dnsDidNotMessage({
+        domain: envConfig.domain,
+        ip: standbyServer.ip,
+        reason: dnsFlip.reason,
+        noBaseFor: envName,
+      }),
     );
   }
 

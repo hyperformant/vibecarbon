@@ -29,7 +29,7 @@ vi.mock('../../../src/lib/ssh.js', () => ({
   getSSHKeyPath: vi.fn(),
 }));
 
-const { runK8sRestore } = await import('../../../src/restore.js');
+const { runK8sRestore, RestoredDatabaseError } = await import('../../../src/restore.js');
 const ssh = await import('../../../src/lib/ssh.js');
 
 function makeSpinner() {
@@ -454,5 +454,28 @@ describe('runK8sRestore: the first base on the restored timeline (H2b)', () => {
     expect(reseedStandbyFromPrimary).toHaveBeenCalled();
     // The standby re-seeded and streams: only the base is missing.
     expect(markStandbyUnproven).not.toHaveBeenCalled();
+  });
+
+  it('a failed push AND a failed re-seed: one error carries both (the restore itself succeeded)', async () => {
+    const pushFail = new Error(
+      'promoted, but the first base backup on the new timeline failed: boom; run vibecarbon backup prod now',
+    );
+    const markStandbyUnproven = vi.fn();
+    const err = await runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnvConfig,
+      pushBaseBackup: vi.fn().mockRejectedValue(pushFail),
+      ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+      reseedStandbyFromPrimary: vi.fn().mockRejectedValue(new Error('pg_basebackup: no route')),
+      markStandbyUnproven,
+      verifySleep: async () => {},
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(RestoredDatabaseError);
+    expect(err.causes).toHaveLength(2);
+    expect(err.causes[0]).toBe(pushFail);
+    expect(err.message).toContain('the first base backup on the new timeline failed: boom');
+    expect(err.message).toContain('pg_basebackup: no route');
+    expect(markStandbyUnproven).toHaveBeenCalled();
   });
 });

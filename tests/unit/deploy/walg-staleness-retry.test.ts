@@ -361,6 +361,18 @@ describe('backupCompose — wal-g backup-push staleness retry', () => {
     expect(backupPushCount()).toBe(2);
   });
 
+  it('a lock wait (LOCK_WAIT) rides on the command and stretches the ssh timeout by it', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => PUSHED);
+    await backupCompose('10.0.0.1', '/tmp/key', 'testapp', { lockWaitS: 900 });
+    const call = runCommandAsync.mock.calls.find(([argv]) =>
+      String(Array.isArray(argv) ? argv.join(' ') : argv).includes('backup/compose-backup.sh'),
+    );
+    const cmd = String(Array.isArray(call?.[0]) ? call?.[0].join(' ') : call?.[0]);
+    expect(cmd).toContain('LOCK_WAIT=900 RETAIN=7 bash backup/compose-backup.sh');
+    expect(call?.[1]).toMatchObject({ timeout: 1_800_000 });
+  });
+
   it('returns a skip as a skip, including the lock skip (exit 75)', async () => {
     const { backupCompose } = await composePromise;
     mockBackup(() => 'BACKUP_RESULT=skipped:in-recovery\n');

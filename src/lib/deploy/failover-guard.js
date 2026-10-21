@@ -457,15 +457,21 @@ export class FailoverDnsError extends Error {
 }
 
 /**
- * @param {{ domain: string, ip: string, reason?: string }} args
+ * @param {{ domain: string, ip: string, reason?: string, noBaseFor?: string }} args
+ *   `noBaseFor`: the environment, when the failover skipped its first base
+ *   backup on the new timeline because the flip was not confirmed (the push
+ *   would only stretch an outage); the message then names the command.
  * @returns {string}
  */
-export function dnsDidNotMessage({ domain, ip, reason }) {
+export function dnsDidNotMessage({ domain, ip, reason, noBaseFor }) {
   return (
     `FAILOVER COMPLETED, DNS DID NOT: point A records for ${domain} (apex and *.${domain}) at ${ip}` +
     (reason ? `. ${reason}` : '') +
     `. until they move, ${domain} is down: the old primary is fenced or gone, so nothing serves it` +
-    '. the roles are saved; run vibecarbon deploy: it points the records at the promoted node, then rebuilds the old primary'
+    '. the roles are saved; run vibecarbon deploy: it points the records at the promoted node, then rebuilds the old primary' +
+    (noBaseFor
+      ? `. no base backup was pushed on the new timeline either: once DNS points at ${ip}, run vibecarbon backup ${noBaseFor}`
+      : '')
   );
 }
 

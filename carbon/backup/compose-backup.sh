@@ -27,7 +27,8 @@ set -e
 # can never drift.
 #
 # Environment Variables:
-#   RETAIN  - Number of full base backups to keep (default: 7)
+#   RETAIN     - Number of full base backups to keep (default: 7)
+#   LOCK_WAIT  - Seconds to wait for another run's lock before skipping (default: 0)
 # ============================================================================
 
 # RETIRED-NODE FENCE: a failover retired this node (the old primary), and the
@@ -42,9 +43,21 @@ if [ -f .vibecarbon-retired ]; then
 fi
 
 # Prevent concurrent backups (cron + a manual run racing each other).
-LOCKFILE="/tmp/vibecarbon-backup.lock"
+# LOCK_WAIT (seconds, default 0) is an opt-in bounded wait for the lock: 0 is
+# today's behaviour (a held lock is an immediate skip, which cron wants). The
+# first base after a promotion (src/lib/walg/post-promote-backup.js) waits: the
+# run holding the lock is a fast standby-role skip or the very push it wants,
+# never a reason to call its own push done. VC_BACKUP_LOCKFILE exists for the
+# script tests only.
+LOCKFILE="${VC_BACKUP_LOCKFILE:-/tmp/vibecarbon-backup.lock}"
+LOCK_WAIT="${LOCK_WAIT:-0}"
+[[ "$LOCK_WAIT" =~ ^[0-9]+$ ]] || LOCK_WAIT=0
 exec 200>"${LOCKFILE}"
-flock -n 200 || {
+if [ "$LOCK_WAIT" -gt 0 ]; then
+  flock -w "$LOCK_WAIT" 200
+else
+  flock -n 200
+fi || {
   echo "Backup already running, skipping" >&2
   echo "BACKUP_RESULT=skipped:already-running"
   exit 75
