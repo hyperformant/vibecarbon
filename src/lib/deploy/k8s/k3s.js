@@ -66,7 +66,7 @@ import {
   k8sStandbyZeroedWorkloads,
 } from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
-import { scpWithRetry } from '../../ssh.js';
+import { scpWithRetry, sshRun } from '../../ssh.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import {
   BACKUP_NAME_RE,
@@ -101,7 +101,12 @@ import {
 } from '../walg-audit.js';
 import { REPL_GATEWAY_PORT } from '../wireguard.js';
 import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
-import { planImageDelivery, standbyImageRef } from './image-delivery.js';
+import {
+  MANIFEST_DIGEST_SH,
+  parseLocalRegistryRef,
+  planImageDelivery,
+  standbyImageRef,
+} from './image-delivery.js';
 import {
   awaitAppAdminReady,
   awaitCertManagerAdmission,
@@ -4837,6 +4842,50 @@ export async function deliverAppImage({
 }
 
 /**
+ * Does the primary's own registry still hold the app image tag? One ssh round
+ * trip to the master: a manifest HEAD against the registry the image was
+ * pushed to. The k3s-apply gate hashes manifests and tags, none of which see
+ * a registry that lost its contents (a rebuilt master disk), so the gate asks
+ * here. `false` only when the registry answered with no such tag.
+ *
+ * @param {object} o
+ * @param {string} o.masterIp
+ * @param {string} o.sshKeyPath
+ * @param {string} o.imageTag - `<masterPrivateIp>:5000/<repo>:<tag>`
+ * @param {(script: string) => Promise<string>} [o.run] - test seam
+ * @returns {Promise<boolean>}
+ */
+export async function primaryRegistryHasImage({ masterIp, sshKeyPath, imageTag, run }) {
+  const { host, repo, repoTag } = parseLocalRegistryRef(imageTag);
+  if (
+    !/^[A-Za-z0-9.-]+:[0-9]+$/.test(host) ||
+    !/^[a-z0-9._/-]+$/.test(repo) ||
+    !/^[A-Za-z0-9._-]+$/.test(repoTag.slice(repo.length + 1))
+  ) {
+    throw new Error(`primaryRegistryHasImage: unsafe image ref ${imageTag}`);
+  }
+  const script = `set -eu\n${MANIFEST_DIGEST_SH}\ndigest ${host} ${repo} ${repoTag.slice(repo.length + 1)}\n`;
+  const exec =
+    run ?? ((s) => sshRun(masterIp, sshKeyPath, ['sh', '-s'], { input: s, timeout: 60_000 }));
+  return (await exec(script)).trim() !== '';
+}
+
+/**
+ * The k3s-apply skip decision. A role that pushes to its own registry
+ * (planImageDelivery.registryPush) only skips when that registry still holds
+ * the image: the push lives inside the gated apply, so a warm deploy against a
+ * registry that lost the tag must re-run it, or the standby copy has nothing
+ * to read. A probe that throws keeps the hash decision
+ * (state.shouldSkipWithVerify); a standby has no push and skips on the hash.
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function shouldSkipK3sApply({ state, applyInputs, role, imageInRegistry }) {
+  if (!planImageDelivery({ role }).registryPush) return state.shouldSkip('k3s-apply', applyInputs);
+  return state.shouldSkipWithVerify('k3s-apply', applyInputs, imageInRegistry);
+}
+
+/**
  * Deploy a k3s cluster on Hetzner.
  *
  * Cold-path implementation through to "kubeconfig saved + cluster reachable."
@@ -5200,7 +5249,14 @@ export async function deployK3s(options) {
     // The schedule and retention rendered into the backup CronJob/ConfigMap.
     backupConfig: options.backupConfig,
   });
-  if (!state.shouldSkip('k3s-apply', applyInputs)) {
+  const skipApply = await shouldSkipK3sApply({
+    state,
+    applyInputs,
+    role: options.role,
+    imageInRegistry: () =>
+      primaryRegistryHasImage({ masterIp, sshKeyPath: privateKeyPath, imageTag }),
+  });
+  if (!skipApply) {
     state.startStep('k3s-apply', applyInputs);
     s.start('Applying k8s manifests + starting the database + rolling out app');
     const envLocal = loadEnvLocal(join(projectDir, '.env.local'));

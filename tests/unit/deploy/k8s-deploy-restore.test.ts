@@ -709,7 +709,7 @@ describe('applyK3sManifests with a restore point', () => {
     const check = at('await assertRestoreMarkerState({');
     expect(check).toBeGreaterThan(at("state.completeStep('k3s-kubeconfig'"));
     expect(check).toBeLessThan(at('await deliverAppImage({'));
-    expect(check).toBeLessThan(at("state.shouldSkip('k3s-apply'"));
+    expect(check).toBeLessThan(at('await shouldSkipK3sApply({'));
     // Outside every step gate: a skipped apply must not skip the check.
     const before = body.slice(at("state.getStepResult('k3s-kubeconfig')"), check);
     expect(before).not.toMatch(/shouldSkip/);
