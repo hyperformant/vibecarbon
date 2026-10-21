@@ -14,6 +14,8 @@ import type { HonoVariables } from '@server/types';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// These routes sit behind the aal2 gate; the MFA setting is not under test here.
+vi.mock('@server/lib/mfa-settings', () => ({ isMfaGloballyEnabled: async () => false }));
 vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));

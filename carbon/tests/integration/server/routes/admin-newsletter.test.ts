@@ -12,6 +12,8 @@ vi.mock('@server/db/client', () => ({
 }));
 vi.mock('@server/lib/email', () => ({ sendEmail: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('@server/lib/env', () => ({ env: { SITE_URL: 'https://app.test' } }));
+// These routes sit behind the aal2 gate; the MFA setting is not under test here.
+vi.mock('@server/lib/mfa-settings', () => ({ isMfaGloballyEnabled: async () => false }));
 vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));

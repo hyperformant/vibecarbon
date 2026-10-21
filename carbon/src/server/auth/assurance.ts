@@ -378,7 +378,7 @@ const before = createAuthMiddleware(async (ctx) => {
     const current = await liveSession(ctx);
     // No session cookie: the endpoint itself answers 401.
     if (!current || current.session.twoFactorVerified === true) return;
-    if (!(await isMfaGloballyEnabled())) return;
+    if ((await isMfaGloballyEnabled()) === false) return; // null (unreadable) counts as on
     throw mfaRequired(
       'Admin actions need a session that passed two-factor verification. ' +
         'Verify a code from your authenticator app (POST /api/auth/two-factor/verify-totp) and try again.'

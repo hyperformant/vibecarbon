@@ -9,6 +9,8 @@ import type { HonoVariables } from '@server/types';
 vi.mock('@server/db/client', () => ({
   adminDb: { insert: () => queryChain(async () => undefined) },
 }));
+// These routes sit behind the aal2 gate; the MFA setting is not under test here.
+vi.mock('@server/lib/mfa-settings', () => ({ isMfaGloballyEnabled: async () => false }));
 vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));

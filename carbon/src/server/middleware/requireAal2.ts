@@ -16,8 +16,8 @@ type Ctx = Context<{ Variables: HonoVariables }>;
  * Order: no user -> 401; an impersonation session -> 403
  * impersonation_not_allowed (a super admin acting as the user never takes
  * the user's sensitive actions: deleting the account, billing, ownership);
- * this session verified -> allow; MFA globally disabled -> allow (gate
- * inert, respects the operator toggle); otherwise -> 403 mfa_required.
+ * this session verified -> allow; MFA known to be globally disabled -> allow
+ * (gate inert, respects the operator toggle; an unreadable setting counts as on); otherwise -> 403 mfa_required.
  *
  * The 403 tells the client what to do next:
  * - `mfa_enrolled: true`: the user has an authenticator. Verify a code from
@@ -48,7 +48,8 @@ export async function checkAal2(c: Ctx): Promise<Response | null> {
     return null;
   }
 
-  if (!(await isMfaGloballyEnabled())) {
+  // false is the only "off": null (unreadable) is treated as on.
+  if ((await isMfaGloballyEnabled()) === false) {
     return null;
   }
 
