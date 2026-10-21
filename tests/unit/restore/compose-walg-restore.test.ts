@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
 
+/** The database lineage (system identifier) whose folder holds the backup. */
+const LINEAGE = '7699032860122738725';
+
 // ---------------------------------------------------------------------------
 // composeRestoreScript() — pure function, no I/O, no SSH.
 //
@@ -16,7 +19,11 @@ const conf = (target: string) => renderRecoveryConf(buildRecoveryConfig({ target
 
 describe('composeRestoreScript', () => {
   it('fetches the named backup into staging, never LATEST', () => {
-    const script = composeRestoreScript({ backup: BACKUP, recoveryConf: conf('latest') });
+    const script = composeRestoreScript({
+      lineage: LINEAGE,
+      backup: BACKUP,
+      recoveryConf: conf('latest'),
+    });
     expect(script).toContain(`RESTORE_BACKUP='${BACKUP}'`);
     expect(script).toContain('wal-g backup-fetch "$PGDATA/.vc-restore" "$RESTORE_BACKUP"');
     expect(script).not.toMatch(/backup-fetch[^\n]*LATEST/);
@@ -24,6 +31,7 @@ describe('composeRestoreScript', () => {
 
   it('applies the rendered recovery config and recovery.signal to the staged cluster', () => {
     const script = composeRestoreScript({
+      lineage: LINEAGE,
       backup: BACKUP,
       recoveryConf: conf('2026-05-31T12:00:00Z'),
     });
@@ -33,13 +41,21 @@ describe('composeRestoreScript', () => {
   });
 
   it('runs under set -euo pipefail against the db container PGDATA', () => {
-    const script = composeRestoreScript({ backup: BACKUP, recoveryConf: conf('latest') });
+    const script = composeRestoreScript({
+      lineage: LINEAGE,
+      backup: BACKUP,
+      recoveryConf: conf('latest'),
+    });
     expect(script).toContain('set -euo pipefail');
     expect(script).toContain('PGDATA=/var/lib/postgresql/data');
   });
 
   it('swaps under the in-progress marker and leaves .vc-prev for the CLI', () => {
-    const script = composeRestoreScript({ backup: BACKUP, recoveryConf: conf('latest') });
+    const script = composeRestoreScript({
+      lineage: LINEAGE,
+      backup: BACKUP,
+      recoveryConf: conf('latest'),
+    });
     const lines = script.split('\n').map((l) => l.trim());
     const markerOff = lines.indexOf('rm -f "$VC_MARKER"');
     const swapIn = lines.findIndex((l) => l.includes('mv "$vc_entry" "$PGDATA/"'));
@@ -60,14 +76,19 @@ describe('composeRestoreScript', () => {
   });
 
   it('rejects anything that is not a wal-g backup name (injection guard)', () => {
-    expect(() => composeRestoreScript({ backup: 'LATEST', recoveryConf: conf('latest') })).toThrow(
-      /not a wal-g backup name/,
-    );
     expect(() =>
-      composeRestoreScript({ backup: "base_1'; rm -rf / #", recoveryConf: conf('latest') }),
+      composeRestoreScript({ lineage: LINEAGE, backup: 'LATEST', recoveryConf: conf('latest') }),
     ).toThrow(/not a wal-g backup name/);
     expect(() =>
       composeRestoreScript({
+        lineage: LINEAGE,
+        backup: "base_1'; rm -rf / #",
+        recoveryConf: conf('latest'),
+      }),
+    ).toThrow(/not a wal-g backup name/);
+    expect(() =>
+      composeRestoreScript({
+        lineage: LINEAGE,
         backup: 'base_000000010000000000000002_D_000000010000000000000001',
         recoveryConf: conf('latest'),
       }),
@@ -75,11 +96,15 @@ describe('composeRestoreScript', () => {
   });
 
   it('requires the rendered recovery config', () => {
-    expect(() => composeRestoreScript({ backup: BACKUP, recoveryConf: '' })).toThrow(
-      /recoveryConf/,
-    );
     expect(() =>
-      composeRestoreScript({ backup: BACKUP, recoveryConf: 'x\nVC_RECOVERY_CONF_EOF\nrm -rf /' }),
+      composeRestoreScript({ lineage: LINEAGE, backup: BACKUP, recoveryConf: '' }),
+    ).toThrow(/recoveryConf/);
+    expect(() =>
+      composeRestoreScript({
+        lineage: LINEAGE,
+        backup: BACKUP,
+        recoveryConf: 'x\nVC_RECOVERY_CONF_EOF\nrm -rf /',
+      }),
     ).toThrow(/recoveryConf/);
   });
 });

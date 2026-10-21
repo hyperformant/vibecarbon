@@ -300,7 +300,7 @@ When modifying template files in `carbon/`, these placeholders are replaced at g
 | `{{DB_PASSWORD}}` | PostgreSQL password (never substituted into a checked-in file) |
 | `{{REPL_PASSWORD}}` | Replication password for the HA modes (never substituted into a checked-in file) |
 
-Secret placeholders go to `.env.local` and are patched in at deploy time. Deploy-time placeholders (`{{DOMAIN}}`, `{{DB_IMAGE}}`, `{{WALG_S3_PREFIX}}`, ...) stay in the scaffold until `vibecarbon deploy` fills them.
+Secret placeholders go to `.env.local` and are patched in at deploy time. Deploy-time placeholders (`{{DOMAIN}}`, `{{DB_IMAGE}}`, `{{WALG_S3_PREFIX_BASE}}`, ...) stay in the scaffold until `vibecarbon deploy` fills them.
 
 ---
 
@@ -646,9 +646,11 @@ The command:
 - Accepts `-server-type <id>` to retry provisioning on different hardware during capacity events
 - Fails gracefully: provisioning failures abort cleanly with the primary untouched (convergent re-run is safe)
 
+**One archive folder per database lineage.** The environment's backup prefix (`WALG_S3_PREFIX_BASE`, `backups/<project>/<env>/walg`) holds one folder per database, named by its system identifier. Every wal-g caller in the db container sources `walg-env.sh` (`carbon/volumes/db/walg-env.sh`, copied into the `vibecarbon-wal-archive` ConfigMap on k8s), which exports `WALG_S3_PREFIX=<base>/<system identifier>`, or `<base>/$RESTORE_LINEAGE` during a restore's fetch. A destroyed and redeployed environment is a new database, so it archives beside the old one and never takes over its newest base; `WALG_PREVENT_WAL_OVERWRITE=true` refuses a segment name already archived with other bytes. Each deploy records the database's system identifier as `backup.lineage` in `.vibecarbon.json` (a changed one moves the old value to `backup.priorLineages`), and the record survives a destroy. `vibecarbon restore` reads one lineage: `-lineage <id>`, or the recorded one when it covers the restore point and no other lineage holds a newer base. Otherwise it refuses and lists each lineage with its newest base.
+
 **The wal-g write-guard moves with the role (both HA modes).** `WALG_ROLE` is
 the backup write-guard: `standby` makes WAL archiving and base backups no-op so
-only one node ever writes the single canonical `WALG_S3_PREFIX`. It is rendered
+only one node ever writes the environment's archive. It is rendered
 at deploy time, so failover re-renders it directly (`primary` onto the promoted
 node and, best-effort, `standby` onto the demoted one) and then recreates the
 database container, because container environment is fixed at container-create

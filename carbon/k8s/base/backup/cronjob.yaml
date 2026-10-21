@@ -112,8 +112,17 @@ spec:
                     # (wal-push/archiving and backup-fetch/restore do not connect to
                     # PG, which is why this only bit backup-push. RCA 2026-05-30.)
                     export PGUSER=postgres PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
+                    # This database lineage folder: walg-env.sh (mounted from the
+                    # vibecarbon-wal-archive ConfigMap) turns WALG_S3_PREFIX_BASE into
+                    # the folder named by the system identifier in PGDATA, so the push,
+                    # the fence read and the retention act on this lineage only. One it
+                    # cannot read exits 1 with no marker. WALG_ENV_SH exists for the
+                    # script tests only. A segment name already archived with other
+                    # bytes is refused, never overwritten (as on the db container).
+                    . "${WALG_ENV_SH:-/etc/postgresql/walg-env.sh}" || exit 1
+                    export WALG_PREVENT_WAL_OVERWRITE=true
                     # WRITE-GUARD (finding #3): never base-backup on a standby into
-                    # the single canonical WALG_S3_PREFIX. WALG_ROLE is rendered
+                    # the single canonical lineage prefix. WALG_ROLE is rendered
                     # into the db container env (db/statefulset.yaml) and inherited
                     # by this kubectl-exec. Closes the bring-up window the recovery
                     # check below cannot (independent primary, not yet in recovery).

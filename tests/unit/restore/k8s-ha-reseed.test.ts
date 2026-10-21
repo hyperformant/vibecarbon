@@ -67,6 +67,7 @@ const baseArgs = {
     sizeBytes: 4_290_228,
     uncompressedBytes: 23_439_374,
   },
+  lineage: '7699032860122738725',
   readFreeBytes: async () => 100 * 1024 ** 3,
   assertWritable: async () => 'writable' as const,
   envName: 'prod',

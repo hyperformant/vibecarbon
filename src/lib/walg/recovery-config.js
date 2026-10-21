@@ -4,7 +4,7 @@
  *
  * A fetched base backup is only consistent after replaying the WAL from its
  * redo point to its stop point, and that WAL lives in the bucket, so the
- * restore sets restore_command (wal-g wal-fetch), recovery_target_action
+ * restore sets restore_command (walg-env.sh, then wal-g wal-fetch), recovery_target_action
  * 'promote' and recovery_target_timeline 'current', plus recovery_target_time
  * for a point-in-time target. 'current' pins recovery to the base backup's own
  * timeline: the default 'latest' chases the newest .history file in the shared
@@ -23,6 +23,8 @@
  * restore script and k8s receives the same text through RESTORE_RECOVERY_CONF
  * on vibecarbon-infra-secrets. The two copies had drifted before (M2).
  */
+
+import { WALG_ENV_SOURCE } from './restore-layout.js';
 
 /**
  * ISO-8601 instant for point-in-time recovery: YYYY-MM-DDTHH:MM:SS then Z or
@@ -55,7 +57,9 @@ export function buildRecoveryConfig({ target }) {
     );
   }
   const lines = [
-    `restore_command = 'wal-g wal-fetch "%f" "%p"'`,
+    // The restored cluster carries the system identifier of the database the
+    // backup came from, so walg-env.sh resolves that lineage's archive folder.
+    `restore_command = '${WALG_ENV_SOURCE} && wal-g wal-fetch "%f" "%p"'`,
     "recovery_target_action = 'promote'",
     "recovery_target_timeline = 'current'",
   ];

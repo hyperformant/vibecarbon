@@ -406,10 +406,21 @@ describe('walgAuditFailureMessage', () => {
   });
 
   it('gives the reproduce command for the caller’s deploy path', () => {
-    expect(msg).toContain('docker compose exec -T db wal-g backup-list');
-    expect(walgAuditFailureMessage({ failures: [] }, 'k8s')).toContain(
-      'kubectl -n vibecarbon exec db-0 -- wal-g backup-list',
+    // Through walg-env.sh: the db container has only the base prefix, and the
+    // lineage folder is the one the deploy's pushes use.
+    expect(msg).toContain(
+      "docker compose exec -T db sh -c '. /etc/postgresql/walg-env.sh && wal-g backup-list'",
     );
+    expect(walgAuditFailureMessage({ failures: [] }, 'k8s')).toContain(
+      "kubectl -n vibecarbon exec db-0 -- sh -c '. /etc/postgresql/walg-env.sh && wal-g backup-list'",
+    );
+  });
+
+  it('a db container that cannot name its lineage folder fails, never retried', () => {
+    const r = evaluateWalgAudit('WALG_AUDIT=fail:no-lineage\n');
+    expect(r.ok).toBe(false);
+    expect(r.failures[0].code).toBe('no-lineage');
+    expect(r.failures[0].detail).toContain('system identifier');
   });
 });
 

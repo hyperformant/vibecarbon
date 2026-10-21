@@ -23,19 +23,41 @@
  * signalling.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const COMPOSE_SCRIPT = 'carbon/volumes/db/wal-archive.sh';
+const WALG_ENV_SCRIPT = 'carbon/volumes/db/walg-env.sh';
 const K8S_CONFIGMAP = 'carbon/k8s/base/backup/configmap-walg.yaml';
 
 const composeBody = readFileSync(`${repoRoot}${COMPOSE_SCRIPT}`, 'utf-8');
+const walgEnvBody = readFileSync(`${repoRoot}${WALG_ENV_SCRIPT}`, 'utf-8');
 const configMapRaw = readFileSync(`${repoRoot}${K8S_CONFIGMAP}`, 'utf-8');
 const configMap = loadYaml(configMapRaw) as { data: Record<string, string> };
 const k8sBody = configMap.data['wal-archive.sh'];
+const k8sWalgEnvBody = configMap.data['walg-env.sh'];
+
+const SYSID = '7699032860122738725';
+const work = mkdtempSync(join(tmpdir(), 'vc-walg-env-'));
+afterAll(() => rmSync(work, { recursive: true, force: true }));
+/** A bin dir whose pg_controldata prints SYSID, or fails like an unreadable PGDATA. */
+function controldataBin(name: string, readable = true) {
+  const bin = join(work, name);
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, 'pg_controldata'),
+    readable
+      ? `#!/bin/sh\nprintf 'pg_control version number:            1700\\nDatabase system identifier:           ${SYSID}\\n'\n`
+      : '#!/bin/sh\necho "pg_controldata: error: could not open file" >&2\nexit 1\n',
+  );
+  chmodSync(join(bin, 'pg_controldata'), 0o755);
+  return bin;
+}
 
 describe('wal-archive.sh is byte-identical across compose and k8s', () => {
   it('the ConfigMap block scalar dedents to exactly the compose script', () => {
@@ -52,6 +74,31 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
       );
     }
     expect(k8sBody).toBe(composeBody);
+  });
+
+  it('the ConfigMap carries walg-env.sh byte-identical too', () => {
+    if (k8sWalgEnvBody !== walgEnvBody) {
+      const paste = walgEnvBody
+        .split('\n')
+        .map((l) => (l.length ? `    ${l}` : l))
+        .join('\n');
+      throw new Error(
+        `${K8S_CONFIGMAP} has drifted from ${WALG_ENV_SCRIPT}. Replace everything under ` +
+          `\`walg-env.sh: |\` with:\n\n${paste}`,
+      );
+    }
+    expect(k8sWalgEnvBody).toBe(walgEnvBody);
+  });
+
+  it('both tiers source walg-env.sh before anything reads the prefix', () => {
+    for (const body of [composeBody, k8sBody]) {
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder
+      const source = body.indexOf('. "${WALG_ENV_SH:-/etc/postgresql/walg-env.sh}"');
+      expect(source).toBeGreaterThan(-1);
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder
+      expect(source).toBeLessThan(body.indexOf('case "${WALG_S3_PREFIX:-}" in'));
+      expect(source).toBeLessThan(body.indexOf('st cat vibecarbon-fence.json'));
+    }
   });
 
   it('both tiers therefore carry the WALG_ROLE write-guard', () => {
@@ -152,12 +199,14 @@ describe('a changed wal-archive.sh actually reaches the running db pod', () => {
 // attempts and logged WAL_ARCHIVE_FAILED. The script now exits 0 before any
 // wal-g call, like backup/compose-backup.sh. Runs the real script with bash.
 describe('wal-archive.sh with no backup target', () => {
-  const run = (prefix: string) =>
+  const bin = controldataBin('no-target');
+  const run = (base: string) =>
     spawnSync('bash', [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'], {
       encoding: 'utf-8',
       env: {
-        PATH: process.env.PATH,
-        WALG_S3_PREFIX: prefix,
+        PATH: `${bin}:${process.env.PATH}`,
+        WALG_S3_PREFIX_BASE: base,
+        WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',
         PGDATA: '/nonexistent',
@@ -175,6 +224,25 @@ describe('wal-archive.sh with no backup target', () => {
     });
   }
 
+  it('a missing walg-env.sh refuses (exit 1, postgres retries), never a silent no-target skip', () => {
+    const r = spawnSync(
+      'bash',
+      [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'],
+      {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
+          WALG_ENV_SH: '/nonexistent/walg-env.sh',
+          PGDATA: '/nonexistent',
+        },
+        timeout: 10_000,
+      },
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).not.toContain('no backup target');
+  });
+
   it('a real target still goes through the wal-g attempts (control)', () => {
     const r = run('s3://bucket/backups/acme');
     expect(r.status).toBe(0);
@@ -187,5 +255,67 @@ describe('wal-archive.sh with no backup target', () => {
       expect(body.indexOf('""|s3:///*)')).toBeGreaterThan(-1);
       expect(body.indexOf('""|s3:///*)')).toBeLessThan(body.indexOf('wal-push "$WAL_PATH"'));
     }
+  });
+});
+
+// walg-env.sh, run for real (sourced by sh, as every caller does), with a stub
+// pg_controldata standing in for the cluster in PGDATA.
+describe('walg-env.sh exports the lineage folder', () => {
+  const source = (env: Record<string, string>, readable = true) =>
+    spawnSync(
+      'sh',
+      ['-c', `set -eu; . "${repoRoot}${WALG_ENV_SCRIPT}"; printf '%s' "$WALG_S3_PREFIX"`],
+      {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${controldataBin(readable ? 'ok' : 'unreadable', readable)}:${process.env.PATH}`,
+          PGDATA: '/var/lib/postgresql/data',
+          ...env,
+        },
+        timeout: 10_000,
+      },
+    );
+  const BASE = 's3://b/backups/p/prod/walg';
+
+  it("the cluster's system identifier, read from pg_controldata", () => {
+    const r = source({ WALG_S3_PREFIX_BASE: BASE });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe(`${BASE}/${SYSID}`);
+  });
+
+  it('RESTORE_LINEAGE wins (a restore fetches before PGDATA holds that database)', () => {
+    const r = source({ WALG_S3_PREFIX_BASE: BASE, RESTORE_LINEAGE: '7612000000000000001' }, false);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe(`${BASE}/7612000000000000001`);
+  });
+
+  it('no base, or a bucketless one, is no target: nothing is read', () => {
+    expect(source({ WALG_S3_PREFIX_BASE: '' }, false)).toMatchObject({ status: 0, stdout: '' });
+    expect(source({}, false)).toMatchObject({ status: 0, stdout: '' });
+    expect(source({ WALG_S3_PREFIX_BASE: 's3:///backups/p/prod/walg' }, false)).toMatchObject({
+      status: 0,
+      stdout: 's3:///backups/p/prod/walg',
+    });
+  });
+
+  it('a PGDATA it cannot read exits 1 with the one-line cause', () => {
+    const r = source({ WALG_S3_PREFIX_BASE: BASE }, false);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe('');
+    expect(r.stderr.trim()).toBe(
+      'walg-env: no database system identifier in /var/lib/postgresql/data',
+    );
+  });
+
+  it('a RESTORE_LINEAGE that is no system identifier exits 1', () => {
+    const r = source({ WALG_S3_PREFIX_BASE: BASE, RESTORE_LINEAGE: '../other' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('is not a database system identifier');
+  });
+
+  it('runs under busybox-style sh with set -u (no bashisms)', () => {
+    const r = spawnSync('sh', ['-n', `${repoRoot}${WALG_ENV_SCRIPT}`], { encoding: 'utf-8' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(walgEnvBody).not.toMatch(/\[\[|\$\{[A-Za-z_]+:[0-9]/);
   });
 });

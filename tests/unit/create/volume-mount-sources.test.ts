@@ -33,8 +33,9 @@ const fileMounts = [...new Set(composeSources)].filter((p) =>
 
 describe('compose file bind-mount sources', () => {
   it('found exactly the known mounts (sanity — regex still matches the compose files)', () => {
-    // The real set, pinned exactly: the lean stack bind-mounts two files
-    // (the WAL archive script and the db entrypoint guard) and one directory
+    // The real set, pinned exactly: the lean stack bind-mounts three files
+    // (the WAL archive script, the lineage prefix walg-env.sh both wal-g
+    // callers source, and the db entrypoint guard) and one directory
     // (Traefik's). A regex that
     // stops matching fails here instead of silently testing nothing, and a
     // new mount must be added here, which is the moment to check it is
@@ -42,9 +43,14 @@ describe('compose file bind-mount sources', () => {
     expect([...new Set(composeSources)].sort()).toEqual([
       'volumes/db/db-guard.sh',
       'volumes/db/wal-archive.sh',
+      'volumes/db/walg-env.sh',
       'volumes/traefik',
     ]);
-    expect(fileMounts.sort()).toEqual(['volumes/db/db-guard.sh', 'volumes/db/wal-archive.sh']);
+    expect(fileMounts.sort()).toEqual([
+      'volumes/db/db-guard.sh',
+      'volumes/db/wal-archive.sh',
+      'volumes/db/walg-env.sh',
+    ]);
   });
 
   it.each(fileMounts)('%s is scaffolded by create.js', (rel) => {

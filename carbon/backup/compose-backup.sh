@@ -5,8 +5,11 @@ set -e
 # Vibecarbon Compose Backup Script — single source of truth for compose backups
 #
 # Runs via cron on the VPS (and on-demand from the CLI). Triggers a wal-g base
-# backup from inside the db container (which already has WALG_S3_PREFIX + AWS_*
-# configured from .env) and prunes old base backups via `wal-g delete retain`.
+# backup from inside the db container (which already has WALG_S3_PREFIX_BASE +
+# AWS_* configured from .env) and prunes old base backups via `wal-g delete
+# retain`. The in-container script sources /etc/postgresql/walg-env.sh first,
+# so the push, the fence read and the retention all act on this database's own
+# lineage folder (its system identifier) and never on another lineage's.
 #
 # RESULT MARKER (src/lib/walg/backup-result.js parses it): every run that exits
 # 0 prints exactly one stdout line, `BACKUP_RESULT=pushed:<name>` (the base
@@ -59,15 +62,20 @@ echo "Retain: ${RETAIN} full base backups"
 # backup a skip on a standby (exit 0), so only the primary pushes to S3.
 #
 # The S3-configured guard exits 0 BEFORE wal-g runs when no S3 backup target is
-# configured. docker-compose.yml renders WALG_S3_PREFIX as
+# configured. docker-compose.yml renders WALG_S3_PREFIX_BASE as
 #   s3://${S3_BACKUP_BUCKET:-${S3_BUCKET:-}}/backups/${PROJECT_NAME}/${VC_ENV:-local}/walg
-# so an unconfigured deploy yields the empty-bucket form `s3:///backups/...`
+# and walg-env.sh appends the lineage folder, so an unconfigured deploy yields
+# the empty-bucket form `s3:///backups/...`
 # (and empty AWS_ACCESS_KEY_ID). Without this guard an always-installed cron
 # would `set -e`-fail nightly into backup.log on no-S3 deploys. Checking inside
 # the container is robust: it tests the actual env wal-g sees (source of truth),
 # covers both the cron and on-demand paths, and needs no deploy-time S3 plumbing.
 docker compose exec -T db bash -c '
   export PGUSER=postgres PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
+  # This database lineage folder (walg-env.sh). A system identifier it cannot
+  # read exits 1 with no marker: a refusal, never a push into a guessed folder.
+  # WALG_ENV_SH exists for the script tests only.
+  . "${WALG_ENV_SH:-/etc/postgresql/walg-env.sh}" || exit 1
   case "${WALG_S3_PREFIX:-}" in
     ""|s3:///*)
       echo "scheduled backup skipped: no S3 backup target configured (empty WALG_S3_PREFIX)."

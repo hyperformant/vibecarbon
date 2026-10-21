@@ -33,6 +33,13 @@ import { load } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
+import { WALG_ENV_SOURCE } from '../../../src/lib/walg/restore-layout.js';
+
+/** The database lineage (system identifier) whose folder holds the backup. */
+const LINEAGE = '7699032860122738725';
+const BASE_PREFIX = 's3://b/backups/p/prod/walg';
+/** The real walg-env.sh, in place of the in-container path. */
+const WALG_ENV = `. ${join(process.cwd(), 'carbon/volumes/db/walg-env.sh')}`;
 
 const BACKUP = 'base_000000010000000000000002';
 const CONF = renderRecoveryConf(buildRecoveryConfig({ target: 'latest' }));
@@ -71,7 +78,13 @@ function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc') {
               ]
             : []),
         ].join('\n');
-  writeFileSync(join(bin, 'wal-g'), `#!/bin/sh\n[ "$1" = backup-fetch ] || exit 2\n${body}\n`);
+  // Every fetch must read the restored lineage's folder (walg-env.sh with
+  // RESTORE_LINEAGE), never the base or the volume's own cluster.
+  const prefixCheck = `[ "$WALG_S3_PREFIX" = "${BASE_PREFIX}/${LINEAGE}" ] || { echo "wal-g: wrong prefix $WALG_S3_PREFIX" >&2; exit 3; }`;
+  writeFileSync(
+    join(bin, 'wal-g'),
+    `#!/bin/sh\n[ "$1" = backup-fetch ] || exit 2\n${prefixCheck}\n${body}\n`,
+  );
   chmodSync(join(bin, 'wal-g'), 0o755);
 }
 
@@ -87,10 +100,13 @@ const TIERS: Array<[string, () => string[]]> = [
     'compose',
     () => {
       const script = composeRestoreScript({
+        lineage: LINEAGE,
         backup: BACKUP,
         recoveryConf: CONF,
         attempt: ATTEMPT,
-      }).replace('PGDATA=/var/lib/postgresql/data', `PGDATA=${pgdata}`);
+      })
+        .replace('PGDATA=/var/lib/postgresql/data', `PGDATA=${pgdata}`)
+        .replace(WALG_ENV_SOURCE, WALG_ENV);
       writeFileSync(join(dir, 'restore.sh'), script);
       return ['bash', join(dir, 'restore.sh')];
     },
@@ -98,7 +114,7 @@ const TIERS: Array<[string, () => string[]]> = [
   [
     'k8s',
     () => {
-      writeFileSync(join(dir, 'init.sh'), k8sInit());
+      writeFileSync(join(dir, 'init.sh'), k8sInit().replace(WALG_ENV_SOURCE, WALG_ENV));
       return ['bash', join(dir, 'init.sh')];
     },
   ],
@@ -114,6 +130,8 @@ function run(argv: string[], env: Record<string, string> = {}) {
       RESTORE_RECOVERY_CONF: CONF,
       RESTORE_TARGET: 'latest',
       RESTORE_ATTEMPT: ATTEMPT,
+      RESTORE_LINEAGE: LINEAGE,
+      WALG_S3_PREFIX_BASE: BASE_PREFIX,
       ...env,
     },
   });
@@ -262,7 +280,7 @@ for (const [tier, build] of TIERS) {
  */
 describe.skipIf(!hasFlock)('k8s walg-restore is idempotent per restore attempt', () => {
   const k8s = () => {
-    writeFileSync(join(dir, 'init.sh'), k8sInit());
+    writeFileSync(join(dir, 'init.sh'), k8sInit().replace(WALG_ENV_SOURCE, WALG_ENV));
     return ['bash', join(dir, 'init.sh')];
   };
 

@@ -506,6 +506,7 @@ confirmations.
 | `-server-type <id>` | Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/database/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default. |
 | `-full` | Clear resume state and redo every step from scratch |
 | `-restore <latest\|base\|timestamp>` | Disaster recovery: seed a new database from your wal-g backups in S3. Pass latest for the newest backup and all WAL, a base backup name (e.g. base_000000010000000000000004) for that backup and all WAL, or an ISO-8601 timestamp for point-in-time recovery. The restored database keeps its migration history, so the app applies only newer migrations. k8s and k8s-ha only, onto a fresh or destroyed environment. |
+| `-lineage <system-identifier>` | With -restore: the database lineage to restore from. Each database archives in its own folder, so a destroyed and redeployed environment leaves its old backups beside the new database's. Needed only when more than one lineage holds backups; the refusal and restore -l name them. |
 | `-allow-degraded` | HA only: proceed even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy FAILS unless replication is confirmed streaming. |
 {/* END GENERATED: flags deploy */}
 
@@ -652,6 +653,7 @@ are rebuilt (`ANALYZE`) once the restored cluster promotes.
 | `-l` | List available backups (read-only; does not restore) |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-source <latest\|base-name\|ISO-timestamp>` | Restore point: `latest` (newest base backup + all WAL), a base backup name (that base + all WAL), or an ISO-8601 timestamp (PITR) |
+| `-lineage <system-identifier>` | The database lineage to restore from. Each database archives in its own folder, so a destroyed and redeployed environment leaves its old backups beside the new database's. Needed only when more than one lineage holds backups; the refusal names them. |
 | `-confirm <value>` | Production only: supply the type-to-confirm value on the command line (scripts / no TTY) |
 {/* END GENERATED: flags restore */}
 

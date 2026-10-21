@@ -172,7 +172,7 @@ describe('create-vibecarbon E2E', () => {
       expect(sts).not.toMatch(/ADMIN_(EMAIL|PASSWORD)|username:|password:/);
       expect(sts).toContain('key: DB_PASSWORD');
       expect(sts).toContain('{{DB_IMAGE}}');
-      expect(sts).toContain('{{WALG_S3_PREFIX}}');
+      expect(sts).toContain('{{WALG_S3_PREFIX_BASE}}');
       expect(sts).toContain('{{K8S_STORAGE_CLASS}}');
       // The chart era's files are not scaffolded any more.
       expect(existsSync(join(projectDir(), 'k8s/values'))).toBe(false);

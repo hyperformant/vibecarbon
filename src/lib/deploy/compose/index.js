@@ -27,6 +27,7 @@ import { hasBackupResult, parseBackupResult } from '../../walg/backup-result.js'
 import {
   assertRestoreFits,
   BACKUP_NAME_RE,
+  LINEAGE_RE,
   PGDATA_PATH,
   PREVIOUS_PGDATA_PATH,
   PROVEN_WRITABLE_STATES,
@@ -35,6 +36,7 @@ import {
   RESTORE_LAYOUT,
   RETIRE_PREVIOUS_SH,
   restoreFetchTimeoutS,
+  WALG_ENV_SOURCE,
 } from '../../walg/restore-layout.js';
 import {
   ADMIN_PROBE_EXIT,
@@ -1385,13 +1387,15 @@ export async function setupComposeBackupCron(ip, sshKeyPath, projectName, backup
  *
  * Pure (no I/O) so it can be tested without SSH.
  *
- * @param {{ backup: string, recoveryConf: string }} args  `backup` is a wal-g
- *   backup name resolved by the CLI (never LATEST), `recoveryConf` the text
- *   from renderRecoveryConf (src/lib/walg/recovery-config.js).
+ * @param {{ backup: string, recoveryConf: string, lineage: string }} args  `backup`
+ *   is a wal-g backup name resolved by the CLI (never LATEST), `recoveryConf`
+ *   the text from renderRecoveryConf (src/lib/walg/recovery-config.js),
+ *   `lineage` the system identifier whose archive folder holds the backup
+ *   (RESTORE_LINEAGE for walg-env.sh: PGDATA does not hold that database yet).
  * @returns {string} The bash script body.
  */
 export function composeRestoreScript(
-  { backup, recoveryConf, attempt = randomUUID() } = /** @type {any} */ ({}),
+  { backup, recoveryConf, lineage, attempt = randomUUID() } = /** @type {any} */ ({}),
 ) {
   if (!BACKUP_NAME_RE.test(String(backup))) {
     throw new Error(
@@ -1404,6 +1408,11 @@ export function composeRestoreScript(
   if (!RESTORE_ATTEMPT_RE.test(String(attempt))) {
     throw new Error(`composeRestoreScript: ${JSON.stringify(attempt)} is not a restore attempt id`);
   }
+  if (!LINEAGE_RE.test(String(lineage ?? ''))) {
+    throw new Error(
+      `composeRestoreScript: ${JSON.stringify(lineage)} is not a database lineage (system identifier); the CLI resolves one before any restore`,
+    );
+  }
   const { staging } = RESTORE_LAYOUT;
   return [
     '#!/bin/bash',
@@ -1413,6 +1422,9 @@ export function composeRestoreScript(
     // The shared swap block records `<backup> <attempt>`; compose never reads
     // it back (its script runs once per restore), the k8s init does.
     `RESTORE_ATTEMPT='${attempt}'`,
+    // The archive folder of the lineage the backup came from (walg-env.sh).
+    `export RESTORE_LINEAGE='${lineage}'`,
+    WALG_ENV_SOURCE,
     'VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf',
     'cat > "$VC_RECOVERY_CONF_FILE" <<\'VC_RECOVERY_CONF_EOF\'',
     recoveryConf,
@@ -1592,13 +1604,15 @@ async function composeVolumeFreeBytes(ip, sshKeyPath) {
  * place, and the db and app are started again before the error propagates.
  *
  * S3 credentials are read from the db container's environment (sourced from
- * the project .env file); the container already has WALG_S3_PREFIX + AWS_*.
+ * the project .env file); the container already has WALG_S3_PREFIX_BASE +
+ * AWS_*, and the script sources walg-env.sh with RESTORE_LINEAGE.
  *
  * @param {string} ip
  * @param {string} sshKeyPath
  * @param {string} projectName
- * @param {{ backup: string, target: 'latest' | string, recoveryConf: string, requiredBytes?: number, assertWritable: () => Promise<'writable' | 'lifted' | 'unknown'> }} restore
- *   `backup`: the resolved base backup name. `target`: 'latest' or the
+ * @param {{ backup: string, lineage: string, target: 'latest' | string, recoveryConf: string, requiredBytes?: number, assertWritable: () => Promise<'writable' | 'lifted' | 'unknown'> }} restore
+ *   `backup`: the resolved base backup name. `lineage`: the system identifier
+ *   whose archive folder holds it. `target`: 'latest' or the
  *   ISO-8601 PITR instant, for messages. `recoveryConf`: renderRecoveryConf's
  *   text. `requiredBytes`: the backup's uncompressed size, for the free-space
  *   check. `assertWritable`: the proof that runs before `.vc-prev` goes.
@@ -1608,14 +1622,14 @@ async function composeVolumeFreeBytes(ip, sshKeyPath) {
  */
 export async function restoreCompose(ip, sshKeyPath, projectName, restore, options = {}) {
   const remoteDir = `/opt/${projectName}`;
-  const { backup, recoveryConf, requiredBytes, assertWritable } = restore ?? {};
+  const { backup, lineage, recoveryConf, requiredBytes, assertWritable } = restore ?? {};
   if (typeof assertWritable !== 'function') {
     throw new Error('restoreCompose: assertWritable is required (the proof before .vc-prev goes)');
   }
 
   // Build and validate the restore script early: fail before touching the
   // running server if the backup name or the config is malformed.
-  const scriptBody = composeRestoreScript({ backup, recoveryConf });
+  const scriptBody = composeRestoreScript({ backup, recoveryConf, lineage });
 
   if (requiredBytes) {
     assertRestoreFits({

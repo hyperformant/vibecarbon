@@ -9,6 +9,17 @@
 /** PGDATA inside the db container, both tiers. */
 export const PGDATA_PATH = '/var/lib/postgresql/data';
 
+/**
+ * walg-env.sh inside the db container, both tiers (carbon/volumes/db/walg-env.sh,
+ * and its copy in the vibecarbon-wal-archive ConfigMap). It exports
+ * WALG_S3_PREFIX, the archive folder of one database lineage, from
+ * WALG_S3_PREFIX_BASE and RESTORE_LINEAGE or the system identifier in PGDATA.
+ * Every script the CLI runs in the db container that calls wal-g starts with
+ * WALG_ENV_SOURCE (tests/unit/deploy/walg-lineage-prefix-census.test.ts).
+ */
+export const WALG_ENV_PATH = '/etc/postgresql/walg-env.sh';
+export const WALG_ENV_SOURCE = `. ${WALG_ENV_PATH}`;
+
 /** Entries a restore keeps inside PGDATA (names relative to it). */
 export const RESTORE_LAYOUT = Object.freeze({
   staging: '.vc-restore',
@@ -70,7 +81,10 @@ export const BACKUP_NAME_RE = /^base_[0-9A-F]{24}(_D_[0-9A-F]{24})?$/;
  * it after a swap, so a pod start during the same attempt does not restore
  * again. RESTORE_ORIGIN says which command set it ('deploy' for deploy
  * -restore onto a new cluster, 'restore' for vibecarbon restore), so a
- * refusal can name the command that finishes it.
+ * refusal can name the command that finishes it. RESTORE_LINEAGE is the
+ * system identifier of the database the backup came from: the init sources
+ * walg-env.sh with it, so the fetch reads that lineage's archive folder
+ * before PGDATA holds the database that names it.
  */
 export const RESTORE_MARKER_KEYS = Object.freeze([
   'RESTORE_TARGET',
@@ -78,7 +92,11 @@ export const RESTORE_MARKER_KEYS = Object.freeze([
   'RESTORE_RECOVERY_CONF',
   'RESTORE_ATTEMPT',
   'RESTORE_ORIGIN',
+  'RESTORE_LINEAGE',
 ]);
+
+/** A database lineage: its system identifier, the name of its archive folder. */
+export const LINEAGE_RE = /^[0-9]{1,20}$/;
 
 /** Who set a restore marker. */
 export const RESTORE_ORIGINS = Object.freeze(['deploy', 'restore']);
@@ -89,12 +107,12 @@ export const RESTORE_ATTEMPT_RE = /^[A-Za-z0-9-]{8,64}$/;
 /**
  * The marker's Secret stringData. A complete set, or every key empty (clear).
  *
- * @param {{ backup: string, target: string, recoveryConf: string, attempt: string, origin: 'deploy'|'restore' } | null} marker
+ * @param {{ backup: string, target: string, recoveryConf: string, attempt: string, origin: 'deploy'|'restore', lineage: string } | null} marker
  * @returns {Record<string, string>}
  */
 export function restoreMarkerStringData(marker) {
   if (!marker) return Object.fromEntries(RESTORE_MARKER_KEYS.map((k) => [k, '']));
-  const { backup, target, recoveryConf, attempt, origin } = marker;
+  const { backup, target, recoveryConf, attempt, origin, lineage } = marker;
   if (!BACKUP_NAME_RE.test(String(backup))) {
     throw new Error(`restore marker: ${JSON.stringify(backup)} is not a wal-g backup name`);
   }
@@ -107,12 +125,18 @@ export function restoreMarkerStringData(marker) {
   if (!RESTORE_ORIGINS.includes(origin)) {
     throw new Error(`restore marker: origin ${JSON.stringify(origin)} is not deploy or restore`);
   }
+  if (!LINEAGE_RE.test(String(lineage ?? ''))) {
+    throw new Error(
+      `restore marker: lineage ${JSON.stringify(lineage)} is not a database system identifier`,
+    );
+  }
   return {
     RESTORE_TARGET: target,
     RESTORE_BACKUP: backup,
     RESTORE_RECOVERY_CONF: recoveryConf,
     RESTORE_ATTEMPT: attempt,
     RESTORE_ORIGIN: origin,
+    RESTORE_LINEAGE: lineage,
   };
 }
 

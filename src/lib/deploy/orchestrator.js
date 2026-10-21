@@ -31,7 +31,10 @@ import { createTracker } from '../tracker.js';
 import {
   assertDeployRestoreAllowed,
   backupCredentialVars,
+  createS3Client,
+  listLineages,
   resolveDeployRestorePoint,
+  walgPrefixFor,
 } from '../walg/restore-base.js';
 import { useDnsChallenge } from './acme.js';
 import {
@@ -43,6 +46,7 @@ import {
   waitForAppKeyReady,
 } from './app-storage-credential.js';
 import { backupFenceWarning, recordBackupFence, writeK8sBackupFence } from './backup-fence.js';
+import { recordDeployedLineage } from './backup-lineage.js';
 import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
@@ -481,6 +485,25 @@ const isHaTier = (tier) => tier === 'compose-ha' || tier === 'k8s-ha';
 /** The node the persisted roles call primary, as the write-fence marker names it. */
 function rolePrimaryOf(_tier, envConfig, environment) {
   return resolvePrimary(envConfig, { env: environment });
+}
+
+/**
+ * The deployed role primary's address, by tier: the server a deploy-time read
+ * of the database (its lineage) goes to.
+ */
+function deployedPrimaryIp(tier, deployResult) {
+  if (tier === 'compose-ha') return deployResult?.primaryIp ?? null;
+  if (tier === 'k8s-ha') return deployResult?.primary?.masterIp ?? null;
+  return deployResult?.masterIp ?? null;
+}
+
+/** psql on the deployed role primary, every tier (compose single included). */
+async function deployedPrimaryPsql(tier, environment, projectName, ip) {
+  if (isComposeTier(tier)) {
+    const { composePsqlRunner } = await import('./compose/ha.js');
+    return composePsqlRunner(ip, getSSHKeyPath(environment), `/opt/${projectName}`);
+  }
+  return k8sPsqlRunner(ip, getSSHKeyPath(environment));
 }
 
 /** psql on the role primary over the tier's transport (the write-fence checks). */
@@ -1098,6 +1121,10 @@ export async function executeDeployment(args, gatheredConfig) {
     restorePoint = await resolveDeployRestorePoint({
       restore: args.restore,
       k8s: isK8sTier(tier),
+      // The lineage the base comes from: -lineage, or the record the destroyed
+      // environment left (envConfig.backup survives a destroy).
+      envConfig,
+      lineage: args.lineage,
       s3Config,
       backupBucketName: backupS3Config?.bucket || null,
       credentialVars: backupCredentialVars(envConfig),
@@ -2195,6 +2222,40 @@ export async function executeDeployment(args, gatheredConfig) {
     log: p.log,
   });
 
+  // The database lineage this deploy leaves on record (B8): the role primary's
+  // system identifier, the name of its archive folder. A new one (a destroyed
+  // and redeployed environment) moves the old one to backup.priorLineages and
+  // names the restore of every earlier lineage that holds base backups.
+  // Unreadable fails the deploy before the final save, so the rerun records it.
+  let backupLineage;
+  {
+    const primaryIp = deployedPrimaryIp(tier, deployResult);
+    const lineageBucket = backupS3Config?.bucket || s3Config?.bucket;
+    try {
+      if (!primaryIp) throw new Error('no primary address in the deploy result');
+      backupLineage = await recordDeployedLineage({
+        environment,
+        backup: envConfig.backup,
+        where: primaryIp,
+        exec: await deployedPrimaryPsql(tier, environment, projectConfig.projectName, primaryIp),
+        listLineages:
+          lineageBucket && s3Config?.accessKey && s3Config?.secretKey
+            ? async () =>
+                listLineages({
+                  s3: await createS3Client({ ...s3Config, bucket: lineageBucket }),
+                  bucket: lineageBucket,
+                  base: walgPrefixFor(projectConfig.projectName, environment),
+                })
+            : null,
+        log: p.log,
+      });
+    } catch (err) {
+      p.log.error(`Backup lineage: ${err.message}`);
+      writeLogDetail(`# backup lineage error detail: ${err?.stack || err}`);
+      process.exit(1);
+    }
+  }
+
   // Re-read the on-disk project config before merging. Inner deploy paths
   // (compose/ha.js, k8s/ha/index.js) call saveProjectConfig themselves
   // mid-flight to persist server IDs / per-cluster details that this
@@ -2383,7 +2444,7 @@ export async function executeDeployment(args, gatheredConfig) {
           }),
         }),
         ...(backupS3Persist && { backupS3: backupS3Persist }),
-        backup: backupConfig,
+        backup: { ...backupConfig, ...backupLineage },
         services,
       },
     },

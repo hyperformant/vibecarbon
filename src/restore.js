@@ -26,6 +26,7 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
+import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 // Static imports (no cycle: neither compose/index.js nor compose/ha.js imports
 // restore.js). Aliased so runComposeRestore can default to the real functions
 // while still accepting injected mocks for unit tests.
@@ -65,6 +66,7 @@ import { getPostgresPod, getSSHKeyPath, sshKubectl } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { RESTORE_PITR_RE } from './lib/walg/recovery-config.js';
 import {
+  AmbiguousLineageError,
   backupCredentialVars,
   createS3Client,
   NoRestorePointError,
@@ -72,11 +74,13 @@ import {
   pickRestoreBase,
   printBaseBackupList,
   readEnvBaseBackups,
+  recordBackupLineage,
   resolveS3Config,
   restorePointOf,
 } from './lib/walg/restore-base.js';
 import {
   assertRestoreFits,
+  LINEAGE_RE,
   PREVIOUS_PGDATA_PATH,
   PROVEN_WRITABLE_STATES,
   REMOVE_DISCARD_SH,
@@ -125,6 +129,12 @@ const SPEC = {
         'Restore point: `latest` (newest base backup + all WAL), a base backup name (that base + all WAL), or an ISO-8601 timestamp (PITR)',
     },
     {
+      name: 'lineage',
+      value: '<system-identifier>',
+      description:
+        "The database lineage to restore from. Each database archives in its own folder, so a destroyed and redeployed environment leaves its old backups beside the new database's. Needed only when more than one lineage holds backups; the refusal names them.",
+    },
+    {
       name: 'confirm',
       value: '<value>',
       description:
@@ -141,6 +151,10 @@ const SPEC = {
     {
       command: 'vibecarbon restore prod -source 2026-06-22T14:30:00Z',
       description: 'point-in-time recovery to a specific moment (wal-g WAL replay)',
+    },
+    {
+      command: 'vibecarbon restore prod -lineage 7699032860122738725 -source latest',
+      description: "restore the backups a destroyed environment's database left",
     },
   ],
 };
@@ -369,6 +383,15 @@ export async function run(args, deps = {}) {
   // the provider's object-storage env vars, or the prompt (never with -y or
   // off a TTY). Resolved before anything on the server is touched, and before
   // the firewall refresh and SSH, which `-l` does not need at all.
+  //
+  // One lineage's backups (Decision 2): -lineage, or the one on record when it
+  // covers the restore point and no other is newer. Ambiguous refuses here,
+  // naming each lineage and the flag, before anything is touched.
+  const sourceForLineage = values.source ? parseRestoreSource(String(values.source)) : null;
+  const lineageTarget =
+    sourceForLineage && sourceForLineage.name !== 'latest'
+      ? new Date(sourceForLineage.name)
+      : 'latest';
   let listing;
   try {
     listing = await readEnvBaseBackups({
@@ -376,10 +399,31 @@ export async function run(args, deps = {}) {
       envConfig,
       projectName,
       skipPrompts: !!values.y || !process.stdin.isTTY,
+      lineage: values.lineage ?? null,
+      target: lineageTarget,
       resolveS3: deps.resolveS3Config ?? resolveS3Config,
       makeClient: deps.createS3Client ?? createS3Client,
     });
   } catch (err) {
+    // -l lists: more than one lineage is an answer, not an error.
+    if (values.l && err instanceof AmbiguousLineageError) {
+      p.log.info(err.message);
+      p.outro('');
+      return;
+    }
+    if (err instanceof AmbiguousLineageError || err instanceof NoRestorePointError) {
+      p.log.error(`Cannot restore ${envName}: ${err.message}`);
+      if (err instanceof AmbiguousLineageError) {
+        const source = values.source ? ` -source ${values.source}` : '';
+        p.log.info(
+          err.lineages
+            .filter((l) => l.newestFinish)
+            .map((l) => `  vibecarbon restore ${envName} -lineage ${l.lineage}${source}`)
+            .join('\n'),
+        );
+      }
+      process.exit(1);
+    }
     p.log.error(
       `Could not read the base backups from the backup bucket: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -515,6 +559,7 @@ export async function run(args, deps = {}) {
         s,
         chosenSource,
         base,
+        lineage: listing.lineage,
         envName,
         projectName,
         serverIp,
@@ -526,6 +571,7 @@ export async function run(args, deps = {}) {
         s,
         chosenSource,
         base,
+        lineage: listing.lineage,
         envName,
         serverIp,
         sshKeyPath,
@@ -544,8 +590,32 @@ export async function run(args, deps = {}) {
     process.exit(1);
   }
 
+  // The database now serving is the restored lineage's: record it, so the
+  // next restore reads its folder (a restore from an earlier lineage moves the
+  // one before it to priorLineages).
+  recordRestoredLineage(envName, listing.lineage);
+
   tracker.finish();
   p.outro(c.success('Done'));
+}
+
+/**
+ * Persist the restored lineage as `backup.lineage`. A save that fails warns:
+ * the next deploy records it from the database itself.
+ */
+function recordRestoredLineage(envName, lineage) {
+  try {
+    const config = loadProjectConfig();
+    const envConfig = config?.environments?.[envName];
+    if (!envConfig || envConfig.backup?.lineage === lineage) return;
+    envConfig.backup = { ...envConfig.backup, ...recordBackupLineage(envConfig.backup, lineage) };
+    saveProjectConfig(config);
+  } catch (err) {
+    p.log.warn(
+      `could not record backup lineage ${lineage} in .vibecarbon.json ` +
+        `(${String(err?.message ?? err).split('\n')[0]}); the next vibecarbon deploy records it`,
+    );
+  }
 }
 
 // ============================================================================
@@ -605,10 +675,15 @@ async function pickInteractiveSource({ backups, yes }) {
  * bucket's stop sentinels): the runners never pick one, and never fall back
  * to LATEST.
  */
-function assertResolvedBase(base) {
+function assertResolvedBase(base, lineage) {
   if (!base?.name) {
     throw new Error(
       'restore needs a resolved base backup (listBaseBackups + resolveRestoreBase) before it touches the server',
+    );
+  }
+  if (!LINEAGE_RE.test(String(lineage ?? ''))) {
+    throw new Error(
+      'restore needs the lineage the base backup came from (resolveRestoreLineage) before it touches the server',
     );
   }
 }
@@ -636,6 +711,7 @@ export async function runComposeRestore({
   s,
   chosenSource,
   base,
+  lineage,
   envName,
   projectName,
   serverIp,
@@ -654,7 +730,7 @@ export async function runComposeRestore({
       exec: composePsqlRunner(serverIp, sshKeyPath, `/opt/${projectName}`),
     }),
 }) {
-  assertResolvedBase(base);
+  assertResolvedBase(base, lineage);
   // Also here, for every caller: see run().
   assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
   if (chosenSource.kind === 'local') {
@@ -671,6 +747,7 @@ export async function runComposeRestore({
   // before it removes the previous cluster and brings the app back.
   await restoreCompose(serverIp, sshKeyPath, projectName, {
     backup: base.name,
+    lineage,
     target,
     recoveryConf,
     requiredBytes: base.uncompressedBytes ?? base.sizeBytes,
@@ -823,6 +900,7 @@ export async function runK8sRestore({
   s,
   chosenSource,
   base,
+  lineage,
   envName,
   serverIp,
   sshKeyPath,
@@ -845,7 +923,7 @@ export async function runK8sRestore({
   // on real timers. Production uses the default setTimeout-backed sleep.
   verifySleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 }) {
-  assertResolvedBase(base);
+  assertResolvedBase(base, lineage);
   // Also here, for every caller: see run().
   assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
   if (chosenSource.kind === 'local') {
@@ -868,7 +946,14 @@ export async function runK8sRestore({
   s.start(`Restoring ${base.name} via wal-g (app will be temporarily unavailable)`);
   // 1. Mark the restore so the db pod's init container fetches this backup on
   //    its next boot.
-  await setRestoreMarker({ ip: serverIp, sshKeyPath, backup: base.name, target, recoveryConf });
+  await setRestoreMarker({
+    ip: serverIp,
+    sshKeyPath,
+    backup: base.name,
+    target,
+    recoveryConf,
+    lineage,
+  });
   // 2. Quiesce the app so it isn't querying mid-swap.
   await perfAsync('restore.scaleDownApp', async () => scaleDownApp(serverIp, sshKeyPath));
   // 3. Bounce the db StatefulSet → walg-restore stages the fetch and swaps it

@@ -64,6 +64,7 @@ import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
 import {
   BACKUP_NAME_RE,
+  LINEAGE_RE,
   PGDATA_PATH,
   PREVIOUS_PGDATA_PATH,
   PROVEN_WRITABLE_STATES,
@@ -1884,7 +1885,7 @@ function redisPassword(envLocal) {
  * services/redis/compose/docker-compose.yml). No infra password, cloud or DNS
  * token ever lands here. Pure, so the contents are testable without a cluster.
  *
- * No VC_ENV: compose's WAL-G prefix reads it, but k8s renders WALG_S3_PREFIX
+ * No VC_ENV: compose's WAL-G prefix reads it, but k8s renders WALG_S3_PREFIX_BASE
  * from s3Config.walgPrefix (buildDbManifestValues) and nothing in carbon/k8s
  * reads it; in k8s-ha the stack env (prod-primary) is not even the env's name.
  *
@@ -2618,7 +2619,9 @@ export function buildDbManifestValues({
   const lastColon = dbImageTag.lastIndexOf(':');
   // WAL-G S3 prefix — dedicated backup bucket if provided, else the storage
   // bucket (mirrors compose's S3_BACKUP_BUCKET:-S3_BUCKET fallback). Never
-  // s3:/// (wal-g would error): empty when there is no bucket at all.
+  // s3:/// (wal-g would error): empty when there is no bucket at all. This is
+  // the BASE: walg-env.sh (sourced by every wal-g caller in the db pod)
+  // appends the database lineage's folder, its system identifier.
   //
   // SINGLE canonical prefix (NO role segment). Reads (backup-fetch/restore/
   // reseed) and writes (backup-push/wal-push) must all agree on ONE prefix — a
@@ -2640,7 +2643,7 @@ export function buildDbManifestValues({
   return {
     DB_IMAGE: dbImageTag.slice(0, lastColon),
     DB_IMAGE_TAG: dbImageTag.slice(lastColon + 1),
-    WALG_S3_PREFIX: walgBucket ? `s3://${walgBucket}/${walgPrefix}` : '',
+    WALG_S3_PREFIX_BASE: walgBucket ? `s3://${walgBucket}/${walgPrefix}` : '',
     WALG_ROLE: walgRole,
     S3_ENDPOINT: s3Config?.endpoint ?? '',
     S3_REGION: s3Config?.region ?? '',
@@ -3059,10 +3062,11 @@ export function assertDeployRestorePoint({ restore }) {
     typeof restore.recoveryConf === 'string' &&
     restore.recoveryConf !== '' &&
     Number.isFinite(restore.sizeBytes) &&
-    RESTORE_ATTEMPT_RE.test(String(restore.attempt ?? ''));
+    RESTORE_ATTEMPT_RE.test(String(restore.attempt ?? '')) &&
+    LINEAGE_RE.test(String(restore.lineage ?? ''));
   if (!ok) {
     throw new Error(
-      'deployK3s: incomplete restore point. Expected { backup, target, recoveryConf, sizeBytes, attempt } ' +
+      'deployK3s: incomplete restore point. Expected { backup, target, recoveryConf, sizeBytes, attempt, lineage } ' +
         'resolved from the backup bucket (resolveDeployRestorePoint) before the deploy starts',
     );
   }
@@ -3096,6 +3100,7 @@ async function readRestoreMarker(env) {
     target: get('RESTORE_TARGET'),
     attempt: get('RESTORE_ATTEMPT'),
     origin: get('RESTORE_ORIGIN'),
+    lineage: get('RESTORE_LINEAGE'),
   };
 }
 
@@ -3155,14 +3160,16 @@ export async function assertRestoreMarkerState({ env, restore, operatorEnv }) {
   if (!restore) {
     if (!marker.backup) return;
     const point = marker.target && marker.target !== 'latest' ? marker.target : marker.backup;
+    // The lineage folder the attempt reads, so the rerun reads the same one.
+    const lineage = marker.lineage ? ` -lineage ${marker.lineage}` : '';
     const finish =
       marker.origin === 'deploy'
-        ? [`  vibecarbon deploy ${operatorEnv} -restore ${point}`]
+        ? [`  vibecarbon deploy ${operatorEnv} -restore ${point}${lineage}`]
         : marker.origin === 'restore'
-          ? [`  vibecarbon restore ${operatorEnv} -source ${point}`]
+          ? [`  vibecarbon restore ${operatorEnv} -source ${point}${lineage}`]
           : [
-              `  vibecarbon restore ${operatorEnv} -source ${point}`,
-              `(or, on an environment deploy -restore was bringing up: vibecarbon deploy ${operatorEnv} -restore ${point})`,
+              `  vibecarbon restore ${operatorEnv} -source ${point}${lineage}`,
+              `(or, on an environment deploy -restore was bringing up: vibecarbon deploy ${operatorEnv} -restore ${point}${lineage})`,
             ];
     const { state, previous } = await readRestoreSwapState(env, marker);
     const before = previous
@@ -3208,7 +3215,7 @@ export async function assertRestoreMarkerState({ env, restore, operatorEnv }) {
     [
       `deploy -restore seeds a new database, and this cluster already runs one (statefulset/${DB_STATEFULSET}).`,
       'Restore into the running environment:',
-      `  vibecarbon restore ${operatorEnv} -source ${restore.target !== 'latest' ? restore.target : restore.backup}`,
+      `  vibecarbon restore ${operatorEnv} -source ${restore.target !== 'latest' ? restore.target : restore.backup}${restore.lineage ? ` -lineage ${restore.lineage}` : ''}`,
       'or destroy it first and run deploy -restore again.',
     ].join('\n'),
   );

@@ -32,6 +32,7 @@ const BASE = {
 const restorePoint = () =>
   expect.objectContaining({
     backup: BASE.name,
+    lineage: '7699032860122738725',
     target: 'latest',
     recoveryConf: expect.stringContaining("recovery_target_timeline = 'current'"),
     requiredBytes: BASE.uncompressedBytes,
@@ -41,6 +42,8 @@ const restorePoint = () =>
 const baseArgs = {
   chosenSource: { kind: 's3' as const, name: 'latest' },
   base: BASE,
+  // The lineage run() resolved (its archive folder holds BASE).
+  lineage: '7699032860122738725',
   envName: 'prod',
   projectName: 'myapp',
   serverIp: '10.0.0.1', // primary (servers[0])

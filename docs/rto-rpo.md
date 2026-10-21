@@ -226,7 +226,8 @@ What the environment's DR posture actually is while it sits in that state:
 - Backups continue from the promoted node **provided the write-guard move
   succeeded**. Failover moves the wal-g write-guard onto it
   (`restoreComposeWalgRole`) and a promoted Postgres archives on the new
-  timeline under the same `WALG_S3_PREFIX`, so base backups and WAL archiving
+  timeline in the same lineage folder (one database, one system identifier
+  under the environment's `WALG_S3_PREFIX_BASE`), so base backups and WAL archiving
   are continuous across the failover: RPO for a *further* loss is then still
   bounded by the archiving cadence, recoverable via `vibecarbon restore <env>`.
   That move is proven, not assumed: `vibecarbon failover` exits **non-zero** if

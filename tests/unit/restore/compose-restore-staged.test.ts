@@ -24,6 +24,7 @@ import { restoreCompose } from '../../../src/lib/deploy/compose/index.js';
 
 const BASE = {
   backup: 'base_000000010000000000000002',
+  lineage: '7699032860122738725',
   target: 'latest',
   recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
 };

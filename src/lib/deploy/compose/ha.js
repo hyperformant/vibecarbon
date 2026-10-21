@@ -178,9 +178,11 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
 //   container's `command:`. A promoted standby runs the SAME image/command,
 //   so it starts archiving WAL on the new timeline immediately after promotion.
 //   No extra step is needed.
-//   WALG_S3_PREFIX is derived from S3_BACKUP_BUCKET + PROJECT_NAME (see
-//   docker-compose.yml:197) and is identical on both nodes — same .env is
-//   deployed to both servers via setupServerFiles. The WAL timeline is therefore
+//   WALG_S3_PREFIX_BASE is derived from S3_BACKUP_BUCKET + PROJECT_NAME (see
+//   docker-compose.yml) and is identical on both nodes — same .env is
+//   deployed to both servers via setupServerFiles — and both nodes hold one
+//   database (one system identifier), so walg-env.sh resolves the same
+//   lineage folder on either. The WAL timeline is therefore
 //   continuous across failover: pre-promotion WAL is on TL1, post-promotion WAL
 //   is on TL2, both under the same S3 prefix.
 //   Note: a PostgreSQL standby with archive_mode=on does NOT archive while it is
@@ -2184,8 +2186,9 @@ export async function failoverComposeHA(
       // need (compose-ha 2026-07-07: "slot is active for PID"). The reseed
       // stages first and swaps PGDATA atomically, so on failure the standby
       // keeps its previous data. WAL-G archiving on the promoted node needs
-      // nothing here: archive_mode is in the db command line and WALG_S3_PREFIX
-      // is shared, so the timeline continues in S3.
+      // nothing here: archive_mode is in the db command line and the promoted
+      // node is the same database lineage (walg-env.sh resolves the same
+      // folder), so the timeline continues in S3.
       if (!needsReseed) {
         p.log.info('Standby streaming, skipping re-seed');
       } else if (planned) {

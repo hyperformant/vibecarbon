@@ -38,6 +38,7 @@ import { createTracker } from './lib/tracker.js';
 import { validateBackupFilename } from './lib/validators.js';
 import { parseBackupResult, pushedBackupNames } from './lib/walg/backup-result.js';
 import {
+  AmbiguousLineageError,
   backupCredentialVars,
   printBaseBackupList,
   readEnvBaseBackups,
@@ -569,6 +570,12 @@ async function runList({ envName, envConfig, projectName, yes }) {
       skipPrompts: yes || !process.stdin.isTTY,
     });
   } catch (err) {
+    // More than one database lineage holds backups: the lineages are the
+    // listing (vibecarbon restore -lineage <id> -l shows one's backups).
+    if (err instanceof AmbiguousLineageError) {
+      p.log.info(err.message);
+      return;
+    }
     p.log.error(
       `Could not read the base backups from the backup bucket: ${err instanceof Error ? err.message : String(err)}`,
     );

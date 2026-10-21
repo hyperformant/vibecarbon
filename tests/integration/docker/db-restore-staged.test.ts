@@ -8,6 +8,7 @@ import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/r
 import {
   createS3Client,
   listBaseBackups,
+  listLineages,
   resolveRestoreBase,
 } from '../../../src/lib/walg/restore-base.js';
 import { REMOVE_DISCARD_SH, RETIRE_PREVIOUS_SH } from '../../../src/lib/walg/restore-layout.js';
@@ -30,6 +31,15 @@ import { REMOVE_DISCARD_SH, RETIRE_PREVIOUS_SH } from '../../../src/lib/walg/res
  *      original cluster (both rows) is still there;
  *   3. a restore of the real name completes, the cluster promotes, and the
  *      row from before the base is present.
+ *
+ * Every wal-g caller sources the real carbon/volumes/db/walg-env.sh, mounted
+ * where the compose db mounts it, and archive_command is the real
+ * wal-archive.sh: each database lineage archives under
+ * <prefix>/<system identifier>/ (H1, B1). After the restores the volume is
+ * wiped and a new database initialised (a destroyed and redeployed
+ * environment): its pushes land in its own lineage folder, the first lineage's
+ * sentinel keeps its ETag, and with WALG_PREVENT_WAL_OVERWRITE=true a segment
+ * name already archived cannot be pushed again with other bytes.
  *
  * Everything this creates is named vcrestore<pid>* and removed in afterAll;
  * nothing else on the daemon is touched. Set UPDATE_WALG_FIXTURE=1 to rewrite
@@ -54,12 +64,22 @@ const BUCKET = NAME;
 const PREFIX = 'backups/proj/prod/walg';
 const PGDATA = '/var/lib/postgresql/data';
 const GUARD = join(ROOT, 'carbon/volumes/db/db-guard.sh');
+const WALG_ENV_SH = join(ROOT, 'carbon/volumes/db/walg-env.sh');
+const WAL_ARCHIVE_SH = join(ROOT, 'carbon/volumes/db/wal-archive.sh');
+/** The two scripts, where the compose db service mounts them. */
+const SCRIPT_MOUNTS = [
+  '-v',
+  `${WALG_ENV_SH}:/etc/postgresql/walg-env.sh:ro`,
+  '-v',
+  `${WAL_ARCHIVE_SH}:/etc/postgresql/wal-archive.sh:ro`,
+];
 
 const docker = (args: string[]) =>
   execFileSync('docker', args, { encoding: 'utf-8', stdio: 'pipe' }).trim();
 
 const WALG_ENV = [
-  `WALG_S3_PREFIX=s3://${BUCKET}/${PREFIX}`,
+  `WALG_S3_PREFIX_BASE=s3://${BUCKET}/${PREFIX}`,
+  'WALG_PREVENT_WAL_OVERWRITE=true',
   `AWS_ACCESS_KEY_ID=${ACCESS_KEY}`,
   `AWS_SECRET_ACCESS_KEY=${SECRET_KEY}`,
   `AWS_ENDPOINT=http://${S3_CT}:3900`,
@@ -102,6 +122,7 @@ function startDb() {
     `${VOL}:${PGDATA}`,
     '-v',
     `${GUARD}:/usr/local/bin/db-guard.sh:ro`,
+    ...SCRIPT_MOUNTS,
     ...WALG_ENV,
     '--entrypoint',
     'sh',
@@ -115,7 +136,7 @@ function startDb() {
     '-c',
     'archive_mode=on',
     '-c',
-    'archive_command=wal-g wal-push %p',
+    'archive_command=bash /etc/postgresql/wal-archive.sh %p',
     '-c',
     'archive_timeout=60',
   ]);
@@ -141,13 +162,25 @@ async function waitPromoted() {
   );
 }
 
+/** The running database's system identifier: the name of its archive folder. */
+const sysidOf = () => psql('SELECT system_identifier FROM pg_control_system()');
+
+/** wal-g in the db container, through walg-env.sh like every caller. */
+const walgInDb = (args: string) =>
+  spawnSync(
+    'docker',
+    ['exec', '-u', 'postgres', DB_CT, 'sh', '-c', `. /etc/postgresql/walg-env.sh && wal-g ${args}`],
+    { encoding: 'utf-8' },
+  );
+
 /** Run a restore script the way restoreCompose does: a throwaway db container. */
-function runRestoreScript(dir: string, backup: string) {
+function runRestoreScript(dir: string, backup: string, lineage: string) {
   const scriptPath = join(dir, `restore-${backup}.sh`);
   writeFileSync(
     scriptPath,
     composeRestoreScript({
       backup,
+      lineage,
       recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
     }),
   );
@@ -164,6 +197,7 @@ function runRestoreScript(dir: string, backup: string) {
       `${GUARD}:/usr/local/bin/db-guard.sh:ro`,
       '-v',
       `${scriptPath}:/restore.sh:ro`,
+      ...SCRIPT_MOUNTS,
       ...WALG_ENV,
       '-e',
       `RESTORE_BACKUP=${backup}`,
@@ -228,6 +262,9 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
   let dir: string;
   let s3: Awaited<ReturnType<typeof createS3Client>>;
   let backupName = '';
+  // The first database's lineage (system identifier) and its archive folder.
+  let lineageA = '';
+  let folderA = '';
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'vc-restore-staged-'));
@@ -299,11 +336,17 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     const markerName = markers[0].slice('BACKUP_RESULT=pushed:'.length);
     // wal-g logs Started AND Wrote lines with the name; only Wrote is a push.
     expect(pushed.stderr).toContain(`Wrote backup with name ${markerName}`);
-    const listed = docker(['exec', '-u', 'postgres', DB_CT, 'wal-g', 'backup-list']);
-    expect(listed.split('\n').filter((l) => l.startsWith(`${markerName} `))).toHaveLength(1);
+    const listed = walgInDb('backup-list');
+    expect(listed.status, listed.stderr).toBe(0);
+    expect(listed.stdout.split('\n').filter((l) => l.startsWith(`${markerName} `))).toHaveLength(1);
     psql("INSERT INTO t VALUES ('after-base')");
 
-    const backups = await listBaseBackups({ s3, bucket: BUCKET, prefix: PREFIX });
+    // The base landed in this database's own lineage folder, nowhere else.
+    lineageA = sysidOf();
+    expect(lineageA).toMatch(/^\d+$/);
+    folderA = `${PREFIX}/${lineageA}`;
+    expect(await listBaseBackups({ s3, bucket: BUCKET, prefix: PREFIX })).toEqual([]);
+    const backups = await listBaseBackups({ s3, bucket: BUCKET, prefix: folderA });
     expect(backups).toHaveLength(1);
     const base = resolveRestoreBase(backups, 'latest');
     expect(base.name).toBe(markerName);
@@ -317,7 +360,7 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
       const res = await s3.send(
         new GetObjectCommand({
           Bucket: BUCKET,
-          Key: `${PREFIX}/basebackups_005/${base.name}_backup_stop_sentinel.json`,
+          Key: `${folderA}/basebackups_005/${base.name}_backup_stop_sentinel.json`,
         }),
       );
       const body = await res.Body?.transformToString();
@@ -335,7 +378,7 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
   }, async () => {
     expect(backupName).not.toBe('');
     stopDb();
-    const r = runRestoreScript(dir, 'base_0000000100000000000000FF');
+    const r = runRestoreScript(dir, 'base_0000000100000000000000FF', lineageA);
     expect(r.status, r.stdout + r.stderr).not.toBe(0);
     expect(r.stderr + r.stdout).toContain('nothing was moved');
     const entries = lsPgdata();
@@ -353,7 +396,7 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     timeout: 400_000,
   }, async () => {
     stopDb();
-    const r = runRestoreScript(dir, backupName);
+    const r = runRestoreScript(dir, backupName, lineageA);
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stdout).toContain(`restore: ${backupName} staged and swapped in`);
     const entries = lsPgdata();
@@ -390,7 +433,7 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
       `mkdir -p ${PGDATA}/.vc-prev/base && echo 17 > ${PGDATA}/.vc-prev/PG_VERSION`,
     ]);
     stopDb();
-    const r = runRestoreScript(dir, 'base_0000000100000000000000FF');
+    const r = runRestoreScript(dir, 'base_0000000100000000000000FF', lineageA);
     expect(r.status, r.stdout + r.stderr).not.toBe(0);
     expect(r.stderr + r.stdout).toContain('nothing was moved');
     expect(lsPgdata()).not.toContain('.vc-restore-in-progress');
@@ -398,5 +441,85 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     startDb();
     await waitPromoted();
     expect(psql("SELECT count(*) FROM t WHERE v IN ('before-base', 'after-restore')")).toBe('2');
+  });
+  it('a recreated database archives under its own lineage; the old archive is untouched', {
+    timeout: 600_000,
+  }, async () => {
+    expect(folderA).not.toBe('');
+    const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+    const sentinelA = `${folderA}/basebackups_005/${backupName}_backup_stop_sentinel.json`;
+    const etagBefore = (await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: sentinelA })))
+      .ETag;
+    expect(etagBefore).toBeTruthy();
+    const basesA = (await listBaseBackups({ s3, bucket: BUCKET, prefix: folderA })).map(
+      (b) => b.name,
+    );
+
+    // Destroy and redeploy: wipe the volume (this test's own), initdb anew.
+    stopDb();
+    docker(['volume', 'rm', VOL]);
+    docker(['volume', 'create', VOL]);
+    startDb();
+    await waitPromoted();
+    const lineageB = sysidOf();
+    expect(lineageB).toMatch(/^\d+$/);
+    expect(lineageB).not.toBe(lineageA);
+
+    const pushed = runComposeBackupScript(dir);
+    expect(pushed.status, pushed.stdout + pushed.stderr).toBe(0);
+    const marker = pushed.stdout.split('\n').find((l) => l.startsWith('BACKUP_RESULT=pushed:'));
+    expect(marker).toBeTruthy();
+    const nameB = String(marker).slice('BACKUP_RESULT=pushed:'.length);
+
+    const folderB = `${PREFIX}/${lineageB}`;
+    expect(
+      (await listBaseBackups({ s3, bucket: BUCKET, prefix: folderB })).map((b) => b.name),
+    ).toEqual([nameB]);
+    // The first lineage: the same bases, its sentinel byte for byte (ETag).
+    expect(
+      (await listBaseBackups({ s3, bucket: BUCKET, prefix: folderA })).map((b) => b.name),
+    ).toEqual(basesA);
+    expect((await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: sentinelA }))).ETag).toBe(
+      etagBefore,
+    );
+    // Nothing at the env prefix itself; two lineages under it.
+    expect(await listBaseBackups({ s3, bucket: BUCKET, prefix: PREFIX })).toEqual([]);
+    const lineages = await listLineages({ s3, bucket: BUCKET, base: PREFIX });
+    expect(lineages.map((l) => l.lineage).sort()).toEqual([lineageA, lineageB].sort());
+    expect(lineages.every((l) => l.newestFinish)).toBe(true);
+  });
+
+  it('WALG_PREVENT_WAL_OVERWRITE refuses a segment name already archived with other bytes', {
+    timeout: 300_000,
+  }, async () => {
+    const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+    const lineageB = sysidOf();
+    const walFolder = `${PREFIX}/${lineageB}/wal_005/`;
+    // A segment the new lineage archived (the base push switched WAL).
+    const segment = await until('an archived WAL segment in the new lineage', async () => {
+      const page = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: walFolder }));
+      const key = (page.Contents ?? [])
+        .map((o) => String(o.Key).slice(walFolder.length))
+        .find((k) => /^[0-9A-F]{24}\./.test(k));
+      return key ? key.slice(0, 24) : '';
+    });
+    const forged = `/tmp/${segment}`;
+    docker([
+      'exec',
+      '-u',
+      'postgres',
+      DB_CT,
+      'sh',
+      '-c',
+      `head -c 16777216 /dev/urandom > ${forged}`,
+    ]);
+    const r = walgInDb(`wal-push ${forged}`);
+    expect(r.status, r.stdout + r.stderr).not.toBe(0);
+    expect(r.stdout + r.stderr).toMatch(/overwrit|already archived|differ/i);
+    // The archived segment is still the one postgres wrote.
+    const again = await s3.send(
+      new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${walFolder}${segment}` }),
+    );
+    expect(again.Contents?.length).toBe(1);
   });
 });

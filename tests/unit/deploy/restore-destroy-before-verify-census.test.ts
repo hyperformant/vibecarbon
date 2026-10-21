@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
 
+/** The database lineage (system identifier) whose folder holds the backup. */
+const LINEAGE = '7699032860122738725';
+
 /**
  * Census: neither restore script destroys the live cluster before the fetched
  * backup is proven (H2a). Before this, both cleared PGDATA first and then ran
@@ -33,6 +36,7 @@ const BACKUP = 'base_000000010000000000000002';
 
 function composeScript(): string {
   return composeRestoreScript({
+    lineage: LINEAGE,
     backup: BACKUP,
     recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
   });

@@ -864,6 +864,11 @@ async function bootstrap(cliArgs) {
     join(projectDir, 'volumes/db/wal-archive.sh'),
     variables,
   );
+  // walg-env.sh is sourced by wal-archive.sh and every in-container wal-g
+  // script (it names this database's archive folder). Mounted like
+  // wal-archive.sh, so a missing source would be the same empty-directory
+  // mount and every archive attempt would fail to source it.
+  copyTemplate('volumes/db/walg-env.sh', join(projectDir, 'volumes/db/walg-env.sh'), variables);
   // db-guard.sh is the db container's entrypoint (it refuses to boot over an
   // interrupted restore, then execs the image's db-entrypoint.sh). Compose
   // runs it through `sh`, so the mode copyFileSync leaves does not matter.

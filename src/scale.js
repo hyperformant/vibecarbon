@@ -910,6 +910,9 @@ async function scaleServers(ctx) {
       await perfAsync('scale.restoreDb', async () =>
         restoreCompose(newIp, sshKeyPath, projectName, {
           backup: base.name,
+          // The lineage the listing read (the one on record): the new server's
+          // own PGDATA names no lineage while the fetch runs.
+          lineage: listing.lineage,
           target: 'latest',
           recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
           requiredBytes: base.uncompressedBytes,

@@ -16,6 +16,7 @@ const MARKER = {
   recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
   attempt: 'a1b2c3d4-0000-4000-8000-000000000001',
   origin: 'restore',
+  lineage: '7699032860122738725',
 };
 
 describe('restore marker keys', () => {
@@ -35,6 +36,8 @@ describe('restore marker keys', () => {
     expect(() => restoreMarkerStringData({ ...MARKER, attempt: '' })).toThrow(/attempt/);
     expect(() => restoreMarkerStringData({ ...MARKER, attempt: 'two words' })).toThrow(/attempt/);
     expect(() => restoreMarkerStringData({ ...MARKER, origin: 'cron' })).toThrow(/origin/);
+    expect(() => restoreMarkerStringData({ ...MARKER, lineage: '' })).toThrow(/lineage/);
+    expect(() => restoreMarkerStringData({ ...MARKER, lineage: '1; rm -rf /' })).toThrow(/lineage/);
   });
 
   it('refuses a marker without a real backup name or config', () => {

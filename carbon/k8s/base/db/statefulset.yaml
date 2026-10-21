@@ -16,9 +16,13 @@
 # volumeClaimTemplates cannot be changed afterwards.
 #
 #   DB_IMAGE / DB_IMAGE_TAG   the db image (resolveDbImage, src/lib/images.js)
-#   WALG_S3_PREFIX            s3://<backup bucket>/backups/<project>/<env>/walg,
+#   WALG_S3_PREFIX_BASE       s3://<backup bucket>/backups/<project>/<env>/walg,
 #                             one prefix per environment, shared by primary
-#                             and standby
+#                             and standby. Each database lineage archives in
+#                             its own folder under it, named by its system
+#                             identifier: walg-env.sh (vibecarbon-wal-archive
+#                             ConfigMap) exports WALG_S3_PREFIX from it, and
+#                             every wal-g caller sources that file first
 #   WALG_ROLE                 primary | standby: the wal-g WRITE-GUARD that
 #                             wal-archive.sh and the backup CronJob read
 #   S3_ENDPOINT / S3_REGION   the backup bucket's endpoint
@@ -94,10 +98,13 @@ spec:
         # Normal boot (RESTORE_BACKUP empty): exit 0, unless a restore's
         # in-progress marker is in PGDATA (a swap this init left half done);
         # then exit 1 with "restore interrupted; rerun vibecarbon restore".
+        # It never sources walg-env.sh: a fresh volume has no system
+        # identifier to read.
         #
         # Restore (RESTORE_BACKUP set by `vibecarbon restore` on
         # vibecarbon-infra-secrets, with RESTORE_RECOVERY_CONF rendered by the
-        # CLI): fetch exactly that base backup into $PGDATA/.vc-restore,
+        # CLI and RESTORE_LINEAGE naming the archive folder, sourced through
+        # walg-env.sh): fetch exactly that base backup into $PGDATA/.vc-restore,
         # write the recovery config and recovery.signal into it, then swap it
         # in under the marker, the live cluster moving to $PGDATA/.vc-prev
         # (or, when a surviving .vc-prev says PGDATA holds an unproven copy,
@@ -151,6 +158,15 @@ spec:
                 echo "walg-restore: ${RESTORE_BACKUP} is already restored on this volume (marker not cleared yet), normal boot."
                 exit 0
               fi
+              # The archive folder of the lineage being restored (walg-env.sh). PGDATA
+              # does not hold that database yet, so the marker names it. Only a restore that
+              # fetches sources it: a normal boot (a fresh volume included) has no wal-g call
+              # and nothing to read a system identifier from.
+              if [ -z "${RESTORE_LINEAGE:-}" ]; then
+                echo "walg-restore: RESTORE_BACKUP is set without RESTORE_LINEAGE; rerun vibecarbon restore" >&2
+                exit 1
+              fi
+              . /etc/postgresql/walg-env.sh
               echo "walg-restore: restoring ${RESTORE_BACKUP} (target ${RESTORE_TARGET:-latest})."
               VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf
               printf '%s\n' "$RESTORE_RECOVERY_CONF" > "$VC_RECOVERY_CONF_FILE"
@@ -309,8 +325,16 @@ spec:
                   name: vibecarbon-infra-secrets
                   key: RESTORE_ATTEMPT
                   optional: true
-            - name: WALG_S3_PREFIX
-              value: "{{WALG_S3_PREFIX}}"
+            - name: RESTORE_LINEAGE
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-infra-secrets
+                  key: RESTORE_LINEAGE
+                  optional: true
+            - name: WALG_S3_PREFIX_BASE
+              value: "{{WALG_S3_PREFIX_BASE}}"
+            - name: WALG_PREVENT_WAL_OVERWRITE
+              value: "true"
             - name: WALG_COMPRESSION_METHOD
               value: lz4
             - name: AWS_ENDPOINT
@@ -325,6 +349,10 @@ spec:
               subPath: postgres-data
             - name: walg-s3-creds
               mountPath: /etc/walg
+              readOnly: true
+            - name: wal-archive-script
+              mountPath: /etc/postgresql/walg-env.sh
+              subPath: walg-env.sh
               readOnly: true
         # Standby first-boot seeding (spec 2026-07-16-standby-init-seeding):
         # on the k8s-ha STANDBY's first boot only, pg_basebackup the primary's
@@ -451,8 +479,14 @@ spec:
             # and the backup CronJob's `kubectl exec` (which inherits this env)
             # both read it. The S3 keys are a mounted file (walg-s3-creds), not
             # env, so rotating them never needs a template change.
-            - name: WALG_S3_PREFIX
-              value: "{{WALG_S3_PREFIX}}"
+            # WALG_S3_PREFIX_BASE is the environment's prefix; walg-env.sh
+            # (sourced by every wal-g caller) appends this database's lineage
+            # folder. A segment name already archived with other bytes is
+            # refused, never overwritten.
+            - name: WALG_S3_PREFIX_BASE
+              value: "{{WALG_S3_PREFIX_BASE}}"
+            - name: WALG_PREVENT_WAL_OVERWRITE
+              value: "true"
             - name: WALG_ROLE
               value: "{{WALG_ROLE}}"
             - name: WALG_COMPRESSION_METHOD
@@ -502,6 +536,10 @@ spec:
             - name: wal-archive-script
               mountPath: /etc/postgresql/wal-archive.sh
               subPath: wal-archive.sh
+              readOnly: true
+            - name: wal-archive-script
+              mountPath: /etc/postgresql/walg-env.sh
+              subPath: walg-env.sh
               readOnly: true
             - name: walg-s3-creds
               mountPath: /etc/walg

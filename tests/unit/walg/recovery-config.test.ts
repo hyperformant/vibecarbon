@@ -4,6 +4,9 @@ import { describe, expect, it } from 'vitest';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
 
+/** The database lineage (system identifier) whose folder holds the backup. */
+const LINEAGE = '7699032860122738725';
+
 /**
  * The archive-recovery settings a restore writes into the fetched cluster's
  * postgresql.auto.conf. One builder for both tiers: compose embeds the
@@ -16,7 +19,10 @@ describe('buildRecoveryConfig', () => {
     const { lines } = buildRecoveryConfig({ target: 'latest' });
     expect(lines).toContain("recovery_target_timeline = 'current'");
     expect(lines).toContain("recovery_target_action = 'promote'");
-    expect(lines).toContain(`restore_command = 'wal-g wal-fetch "%f" "%p"'`);
+    // Through walg-env.sh: WAL comes from the restored lineage's folder.
+    expect(lines).toContain(
+      `restore_command = '. /etc/postgresql/walg-env.sh && wal-g wal-fetch "%f" "%p"'`,
+    );
     expect(lines.join('\n')).not.toMatch(/recovery_target_time\s*=/);
   });
 
@@ -70,13 +76,14 @@ describe('byte parity between the tiers (M2)', () => {
   for (const target of ['latest', '2026-10-20T09:55:00Z']) {
     it(`the compose script carries exactly the rendered RESTORE_RECOVERY_CONF (${target})`, () => {
       const recoveryConf = renderRecoveryConf(buildRecoveryConfig({ target }));
-      const script = composeRestoreScript({ backup: BACKUP, recoveryConf });
+      const script = composeRestoreScript({ lineage: LINEAGE, backup: BACKUP, recoveryConf });
       expect(composeConfBody(script)).toBe(recoveryConf);
     });
   }
 
   it('both tiers apply the conf with the same loop', () => {
     const script = composeRestoreScript({
+      lineage: LINEAGE,
       backup: BACKUP,
       recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
     });

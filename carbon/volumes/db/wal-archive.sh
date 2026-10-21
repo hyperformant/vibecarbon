@@ -62,9 +62,21 @@ if [ "${WALG_ROLE:-primary}" = "standby" ]; then
     exit 0
 fi
 
-# No backup target: nothing to push to. Local dev sets WALG_S3_PREFIX to ""
-# (docker-compose.override.yml), and a deploy with no bucket name renders a
-# bucketless "s3:///..." prefix. Without this, every segment waits out the
+# THIS DATABASE'S ARCHIVE FOLDER: walg-env.sh turns WALG_S3_PREFIX_BASE into
+# WALG_S3_PREFIX, the folder of this database's lineage (its system
+# identifier), so a recreated database never archives into, or fences, the
+# archive an earlier one left. Sourced before anything reads the prefix. A
+# system identifier it cannot read, or a missing walg-env.sh (bash would carry
+# on with no prefix and skip the segment as "no backup target"), exits 1:
+# postgres retries the segment rather than drop it or archive it into a
+# guessed folder. WALG_ENV_SH exists for the
+# script tests only (the backup scripts read the same name), like WAL_ARCHIVE_WALG.
+. "${WALG_ENV_SH:-/etc/postgresql/walg-env.sh}" || exit 1
+
+# No backup target: nothing to push to. Local dev sets WALG_S3_PREFIX_BASE to
+# "" (docker-compose.override.yml), which walg-env.sh turns into an empty
+# WALG_S3_PREFIX, and a deploy with no bucket name renders a bucketless
+# "s3:///..." prefix. Without this, every segment waits out the
 # wal-g attempts below and logs WAL_ARCHIVE_FAILED. Same guard as
 # backup/compose-backup.sh; a real deploy without archiving is still failed
 # by the deploy's wal-g audit (src/lib/deploy/walg-audit.js).

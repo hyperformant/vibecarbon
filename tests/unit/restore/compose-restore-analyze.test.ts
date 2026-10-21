@@ -22,6 +22,7 @@ import { restoreCompose } from '../../../src/lib/deploy/compose/index.js';
 /** A resolved restore point, as restore.js hands it to restoreCompose. */
 const RESTORE = {
   backup: 'base_000000010000000000000002',
+  lineage: '7699032860122738725',
   target: 'latest',
   recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
   assertWritable: async () => 'writable',

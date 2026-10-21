@@ -852,12 +852,20 @@ describe('wal-archive.sh refuses on a retired node', () => {
     mkdirSync(pgdata);
     if (marker) writeFileSync(join(pgdata, RETIRED_DB_MARKER), '');
     const calls = stubBin(join(base, 'bin'), ['wal-g', 'psql']);
+    writeFileSync(
+      join(base, 'bin', 'pg_controldata'),
+      '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',
+    );
+    chmodSync(join(base, 'bin', 'pg_controldata'), 0o755);
     const r = spawnSync('bash', [script, 'pg_wal/000000010000000000000001'], {
       encoding: 'utf-8',
       env: {
         PATH: `${join(base, 'bin')}:${process.env.PATH}`,
         PGDATA: pgdata,
-        WALG_S3_PREFIX: 's3://bucket/backups/acme',
+        // The base; walg-env.sh (the real file, with a stub pg_controldata)
+        // appends the lineage folder.
+        WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
+        WALG_ENV_SH: join(repoRoot, 'carbon/volumes/db/walg-env.sh'),
         WALG_ROLE: 'primary',
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',

@@ -10,7 +10,8 @@
  *   when RESTORE_BACKUP is set, fetching exactly that backup and applying
  *   RESTORE_RECOVERY_CONF. RESTORE_TARGET stays for the seed-standby init,
  *   which skips its seed while a restore runs. RESTORE_ATTEMPT (a new random
- *   id per restore) and RESTORE_ORIGIN go with them. All are set and cleared
+ *   id per restore), RESTORE_ORIGIN and RESTORE_LINEAGE (the archive folder the
+ *   fetch reads) go with them. All are set and cleared
  *   together, by one patch.
  *
  * - The in-progress FILE inside PGDATA (RESTORE_LAYOUT.inProgress), on both
@@ -51,9 +52,10 @@ async function patchMarker(ip, sshKeyPath, stringData) {
 /**
  * Set the k8s restore marker: the db pod's next boot restores `backup`.
  *
- * @param {{ ip: string, sshKeyPath: string, backup: string, target: string, recoveryConf: string }} args
+ * @param {{ ip: string, sshKeyPath: string, backup: string, target: string, recoveryConf: string, lineage: string }} args
+ *   `lineage`: the system identifier whose archive folder holds `backup`.
  */
-export async function setRestoreMarker({ ip, sshKeyPath, backup, target, recoveryConf }) {
+export async function setRestoreMarker({ ip, sshKeyPath, backup, target, recoveryConf, lineage }) {
   await patchMarker(
     ip,
     sshKeyPath,
@@ -63,6 +65,7 @@ export async function setRestoreMarker({ ip, sshKeyPath, backup, target, recover
       recoveryConf,
       attempt: randomUUID(),
       origin: 'restore',
+      lineage,
     }),
   );
 }

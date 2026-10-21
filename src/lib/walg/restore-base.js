@@ -17,6 +17,16 @@
  *
  * Restore therefore needs the backup bucket's credentials locally (Decision 1):
  * the provider's object-storage env vars, or the interactive prompt.
+ *
+ * LINEAGES. Inside the environment's prefix each database lineage archives in
+ * its own folder, named by its system identifier (carbon/volumes/db/walg-env.sh):
+ * `<prefix>/<sysid>/basebackups_005/...`. A destroyed and redeployed
+ * environment is a new lineage beside the old one. `.vibecarbon.json` records
+ * the current one as `backup.lineage` and the ones before it as
+ * `backup.priorLineages` (recordBackupLineage), and both survive a destroy
+ * (env-identity.js). Every listing here reads one lineage's folder, chosen by
+ * resolveRestoreLineage: never silently the new empty lineage when an older
+ * one holds the backups (Decision 2).
  */
 import { randomUUID } from 'node:crypto';
 import * as p from '@clack/prompts';
@@ -26,7 +36,7 @@ import { c } from '../colors.js';
 import { loadBackupS3Config, loadS3Config } from '../config.js';
 import { providerFor } from '../providers/index.js';
 import { buildRecoveryConfig, RESTORE_PITR_RE, renderRecoveryConf } from './recovery-config.js';
-import { BACKUP_NAME_RE } from './restore-layout.js';
+import { BACKUP_NAME_RE, LINEAGE_RE } from './restore-layout.js';
 
 const SENTINEL_SUFFIX = '_backup_stop_sentinel.json';
 
@@ -39,9 +49,26 @@ export class NoRestorePointError extends Error {
 }
 
 /**
+ * More than one database lineage could be meant, and restore will not guess
+ * (Decision 2). `lineages` is the listing it chose between.
+ */
+export class AmbiguousLineageError extends Error {
+  /**
+   * @param {string} message
+   * @param {Array<{ lineage: string, oldestFinish: Date|null, newestFinish: Date|null }>} lineages
+   */
+  constructor(message, lineages) {
+    super(message);
+    this.name = 'AmbiguousLineageError';
+    this.lineages = lineages;
+  }
+}
+
+/**
  * The wal-g prefix inside the backup bucket: one per environment. The same
- * path compose renders into WALG_S3_PREFIX (carbon/docker-compose.yml) and
- * resolveEnvStorage hands k8s.
+ * path compose renders into WALG_S3_PREFIX_BASE (carbon/docker-compose.yml)
+ * and resolveEnvStorage hands k8s. Each lineage's archive is a folder under
+ * it (listLineages).
  *
  * @param {string} projectName
  * @param {string} envName
@@ -167,15 +194,160 @@ export async function listBaseBackups({ s3, bucket, prefix }) {
 }
 
 /**
+ * The database lineages archived under an environment's prefix: one folder
+ * per system identifier (ListObjectsV2 with Delimiter '/'), each with the
+ * finish times of its oldest and newest complete base backup (null when it
+ * holds none). Folders that are not a system identifier are not lineages.
+ * Oldest lineage first, by its newest base (lineages with none first).
+ *
+ * @param {{ s3: { send: (cmd: unknown) => Promise<any> }, bucket: string, base: string }} args
+ * @returns {Promise<Array<{ lineage: string, oldestFinish: Date|null, newestFinish: Date|null }>>}
+ */
+export async function listLineages({ s3, bucket, base }) {
+  const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+  const root = `${base.replace(/\/+$/, '')}/`;
+  const ids = [];
+  let token;
+  do {
+    let page;
+    try {
+      page = await s3.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: root,
+          Delimiter: '/',
+          ...(token ? { ContinuationToken: token } : {}),
+        }),
+      );
+    } catch (err) {
+      if (err?.name === 'NoSuchBucket' || err?.Code === 'NoSuchBucket') return [];
+      throw err;
+    }
+    for (const cp of page?.CommonPrefixes ?? []) {
+      const id = String(cp?.Prefix ?? '')
+        .slice(root.length)
+        .replace(/\/$/, '');
+      if (LINEAGE_RE.test(id)) ids.push(id);
+    }
+    token = page?.IsTruncated ? page.NextContinuationToken : undefined;
+  } while (token);
+
+  const lineages = [];
+  for (const lineage of ids) {
+    const backups = await listBaseBackups({ s3, bucket, prefix: `${root}${lineage}` });
+    lineages.push({
+      lineage,
+      oldestFinish: backups[0]?.finishTime ?? null,
+      newestFinish: backups.at(-1)?.finishTime ?? null,
+    });
+  }
+  const at = (l) => l.newestFinish?.getTime() ?? -1;
+  return lineages.sort((a, b) => at(a) - at(b));
+}
+
+function instant(d) {
+  return d ? d.toISOString().replace(/\.\d{3}Z$/, 'Z') : null;
+}
+
+/**
+ * The lineage a restore reads (Decision 2, C16). `-lineage` (`flag`) decides
+ * when given and must name a lineage that holds base backups. Otherwise the
+ * recorded `envConfig.backup.lineage`, when it covers the target (any base for
+ * 'latest'; its oldest base finished at or before an instant) and no other
+ * lineage has a newer base. With nothing recorded, the only lineage that holds
+ * bases. With no bases anywhere, the recorded lineage (or null), so the caller
+ * reports an empty listing. Anything else is ambiguous: a redeployed env whose
+ * new database has no base yet beside the old one's backups must never restore
+ * the empty one, or the old one, without the operator saying which.
+ *
+ * @param {{ envConfig?: object, lineages: Array<{ lineage: string, oldestFinish: Date|null, newestFinish: Date|null }>, flag?: string|null, target?: 'latest' | Date }} args
+ * @returns {string|null}
+ * @throws {AmbiguousLineageError}
+ * @throws {NoRestorePointError} when `flag` names no lineage with base backups
+ */
+export function resolveRestoreLineage({ envConfig, lineages, flag = null, target = 'latest' }) {
+  const withBases = lineages.filter((l) => l.newestFinish);
+  if (flag !== null && flag !== undefined && flag !== '') {
+    const named = String(flag);
+    if (!LINEAGE_RE.test(named)) {
+      throw new NoRestorePointError(
+        `-lineage ${named} is not a database system identifier (digits only)`,
+      );
+    }
+    if (!withBases.some((l) => l.lineage === named)) {
+      const known = withBases.map((l) => l.lineage).join(', ') || 'none';
+      throw new NoRestorePointError(
+        `lineage ${named} holds no base backups (lineages with base backups: ${known})`,
+      );
+    }
+    return named;
+  }
+  const current = envConfig?.backup?.lineage ? String(envConfig.backup.lineage) : null;
+  const others = withBases.filter((l) => l.lineage !== current);
+  if (others.length === 0) return current;
+  const cur = withBases.find((l) => l.lineage === current);
+  if (!current && others.length === 1) return others[0].lineage;
+  if (cur) {
+    const covers =
+      target === 'latest' || !target || (cur.oldestFinish && cur.oldestFinish <= target);
+    const newer = others.some((l) => l.newestFinish > cur.newestFinish);
+    if (covers && !newer) return current;
+  }
+  const listed = [
+    ...(current && !cur ? [{ lineage: current, oldestFinish: null, newestFinish: null }] : []),
+    ...withBases,
+  ].sort((a, b) => (b.newestFinish?.getTime() ?? -1) - (a.newestFinish?.getTime() ?? -1));
+  const rows = listed.map(
+    (l) =>
+      `  ${l.lineage}  ${l.newestFinish ? `newest base ${instant(l.newestFinish)}, oldest ${instant(l.oldestFinish)}` : 'no base backups yet'}` +
+      `${l.lineage === current ? ' (recorded for this environment)' : ''}`,
+  );
+  throw new AmbiguousLineageError(
+    [
+      'more than one database lineage holds backups for this environment, and restore will not guess which one you mean:',
+      ...rows,
+      'Pass -lineage <system identifier> to choose one.',
+    ].join('\n'),
+    listed,
+  );
+}
+
+/**
+ * The `backup` record after a deploy read the database's system identifier:
+ * `lineage` is it, and a changed one moves the old lineage to the front of
+ * `priorLineages` (B8), so a restore can still name the archive a destroyed
+ * database left. Pure.
+ *
+ * @param {{ lineage?: string, priorLineages?: string[] } | undefined} backup
+ * @param {string} sysid
+ * @returns {{ lineage: string, priorLineages?: string[] }}
+ */
+export function recordBackupLineage(backup, sysid) {
+  if (!LINEAGE_RE.test(String(sysid ?? ''))) {
+    throw new Error(`recordBackupLineage: ${JSON.stringify(sysid)} is not a system identifier`);
+  }
+  const prior = Array.isArray(backup?.priorLineages) ? backup.priorLineages.map(String) : [];
+  const was = backup?.lineage ? String(backup.lineage) : null;
+  const next = was && was !== sysid ? [was, ...prior] : prior;
+  const priorLineages = [...new Set(next)].filter((l) => l !== sysid);
+  return { lineage: sysid, ...(priorLineages.length > 0 && { priorLineages }) };
+}
+
+/**
  * An environment's base backups, read from its backup bucket: the one listing
  * path behind `restore` (and `restore -l`), `backup -l`, scale and the
  * single-server failover guide. Never SSH: the db need not be running.
  *
+ * Reads one lineage's folder: `lineage` (the -lineage flag) or the one
+ * resolveRestoreLineage picks for `target`. `lineage` comes back null when
+ * no lineage is recorded and none holds a base (an empty listing).
+ *
  * `s3Config` is null when there is no backup bucket on record or no
  * credentials for it; callers name the variables (backupCredentialVars).
  *
- * @param {{ envName: string, envConfig: object, projectName: string, skipPrompts?: boolean, s3Config?: object, resolveS3?: typeof resolveS3Config, makeClient?: (cfg: object) => any }} args
- * @returns {Promise<{ s3Config: object | null, location: string | null, backups: Awaited<ReturnType<typeof listBaseBackups>> }>}
+ * @param {{ envName: string, envConfig: object, projectName: string, skipPrompts?: boolean, s3Config?: object, lineage?: string|null, target?: 'latest' | Date, resolveS3?: typeof resolveS3Config, makeClient?: (cfg: object) => any }} args
+ * @returns {Promise<{ s3Config: object | null, location: string | null, lineage: string | null, backups: Awaited<ReturnType<typeof listBaseBackups>> }>}
+ * @throws {AmbiguousLineageError}
  */
 export async function readEnvBaseBackups({
   envName,
@@ -183,18 +355,23 @@ export async function readEnvBaseBackups({
   projectName,
   skipPrompts = false,
   s3Config: given,
+  lineage: flag = null,
+  target = 'latest',
   resolveS3 = resolveS3Config,
   makeClient = createS3Client,
 }) {
   const isCompose = envConfig?.deployMode === 'compose' || envConfig?.deployMode === 'compose-ha';
   const s3Config =
     given ?? (await resolveS3({ isCompose, envName, projectName, envConfig, skipPrompts }));
-  if (!s3Config?.bucket) return { s3Config: null, location: null, backups: [] };
-  const prefix = walgPrefixFor(projectName, envName);
-  const location = `s3://${s3Config.bucket}/${prefix}`;
+  if (!s3Config?.bucket) return { s3Config: null, location: null, lineage: null, backups: [] };
+  const base = walgPrefixFor(projectName, envName);
   const s3 = await makeClient(s3Config);
-  const backups = await listBaseBackups({ s3, bucket: s3Config.bucket, prefix });
-  return { s3Config, location, backups };
+  const lineages = await listLineages({ s3, bucket: s3Config.bucket, base });
+  const lineage = resolveRestoreLineage({ envConfig, lineages, flag, target });
+  const prefix = lineage ? `${base}/${lineage}` : base;
+  const location = `s3://${s3Config.bucket}/${prefix}`;
+  const backups = lineage ? await listBaseBackups({ s3, bucket: s3Config.bucket, prefix }) : [];
+  return { s3Config, location, lineage, backups };
 }
 
 /**
@@ -277,19 +454,30 @@ export function restorePointOf(chosenSource) {
  * Reads only (ListObjectsV2, GetObject), with the deploy's own object-storage
  * credentials (Decision 1). Errors name the variables, never a value.
  *
- * @param {{ restore: string | null, k8s: boolean, s3Config: { bucket?: string, walgPrefix?: string, endpoint?: string, region?: string, accessKey?: string, secretKey?: string }, backupBucketName?: string | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
- * @returns {Promise<{ backup: string, target: string, recoveryConf: string, sizeBytes: number, attempt: string } | null>}
+ * The base comes from one lineage's folder: `lineage` (the -lineage flag), or
+ * resolveRestoreLineage's pick from `envConfig.backup` (the destroyed
+ * environment's record, which survives a destroy).
+ *
+ * @param {{ restore: string | null, k8s: boolean, envConfig?: object, lineage?: string | null, s3Config: { bucket?: string, walgPrefix?: string, endpoint?: string, region?: string, accessKey?: string, secretKey?: string }, backupBucketName?: string | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
+ * @returns {Promise<{ backup: string, target: string, recoveryConf: string, sizeBytes: number, attempt: string, lineage: string } | null>}
  * @throws {NoRestorePointError} when no base backup satisfies the restore point
+ * @throws {AmbiguousLineageError}
  */
 export async function resolveDeployRestorePoint({
   restore,
   k8s,
+  envConfig,
+  lineage: flag = null,
   s3Config,
   backupBucketName,
   credentialVars,
   makeClient = createS3Client,
 }) {
-  if (!restore) return null;
+  if (!restore) {
+    if (flag)
+      throw new Error('-lineage chooses the backups -restore seeds from; pass it with -restore');
+    return null;
+  }
   assertDeployRestoreAllowed({ restore, k8s });
   const chosen = parseRestoreSource(String(restore));
   if (!chosen) {
@@ -307,13 +495,24 @@ export async function resolveDeployRestorePoint({
     throw new Error(`reading the backups in s3://${bucket}/${prefix} needs ${credentialVars}`);
   }
   const s3 = await makeClient({ ...s3Config, bucket });
-  const backups = await listBaseBackups({ s3, bucket, prefix });
+  const lineages = await listLineages({ s3, bucket, base: prefix });
+  const lineage = resolveRestoreLineage({
+    envConfig,
+    lineages,
+    flag,
+    target: chosen.name === 'latest' ? 'latest' : new Date(chosen.name),
+  });
+  if (!lineage) {
+    throw new NoRestorePointError(`no base backups found in s3://${bucket}/${prefix}`);
+  }
+  const folder = `${prefix}/${lineage}`;
+  const backups = await listBaseBackups({ s3, bucket, prefix: folder });
   let base;
   try {
     base = pickRestoreBase(backups, chosen);
   } catch (err) {
     if (!(err instanceof NoRestorePointError)) throw err;
-    throw new NoRestorePointError(`${err.message} in s3://${bucket}/${prefix}`);
+    throw new NoRestorePointError(`${err.message} in s3://${bucket}/${folder}`);
   }
   const { target, recoveryConf } = restorePointOf(chosen);
   // A new attempt id per deploy: the walg-restore init records it after the
@@ -325,6 +524,7 @@ export async function resolveDeployRestorePoint({
     recoveryConf,
     sizeBytes: base.sizeBytes,
     attempt: randomUUID(),
+    lineage,
   };
 }
 

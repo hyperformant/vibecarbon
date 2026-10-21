@@ -50,12 +50,14 @@ const { buildRecoveryConfig, renderRecoveryConf } = await import(
 const { restoreRolloutTimeoutS } = await import('../../../src/lib/deploy/replication.js');
 
 const BACKUP = 'base_000000010000000000000003';
+const LINEAGE = '7699032860122738725';
 const RESTORE = {
   backup: BACKUP,
   target: 'latest',
   recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
   sizeBytes: 50 * 1024 ** 3,
   attempt: '0f1e2d3c-0000-4000-8000-00000000000a',
+  lineage: LINEAGE,
 };
 
 // ---------------------------------------------------------------------------
@@ -70,6 +72,7 @@ describe('buildInfraSecretData carries the restore marker', () => {
     expect(data.RESTORE_RECOVERY_CONF).toBe(RESTORE.recoveryConf);
     expect(data.RESTORE_ATTEMPT).toBe(RESTORE.attempt);
     expect(data.RESTORE_ORIGIN).toBe('deploy');
+    expect(data.RESTORE_LINEAGE).toBe(LINEAGE);
   });
 
   it('writes none without one, so an apply leaves a `vibecarbon restore` marker alone', () => {
@@ -84,17 +87,24 @@ describe('buildInfraSecretData carries the restore marker', () => {
 // The orchestrator's resolution (resolveDeployRestorePoint)
 // ---------------------------------------------------------------------------
 
-/** A fake S3 that answers sentinel listings, and records every command it saw. */
+/**
+ * A fake S3 that answers sentinel listings, and records every command it saw.
+ * The bases sit in one lineage folder (LINEAGE): the base listing (Delimiter,
+ * at the env prefix) answers it as a CommonPrefix.
+ */
 function fakeS3(names: Array<{ name: string; finish: string; size?: number }>) {
   const seen: string[] = [];
   return {
     seen,
-    async send(cmd: { constructor: { name: string }; input: { Key?: string } }) {
+    async send(cmd: { constructor: { name: string }; input: { Key?: string; Prefix?: string } }) {
       seen.push(cmd.constructor.name);
       if (cmd.constructor.name === 'ListObjectsV2Command') {
+        if (cmd.input.Prefix === 'backups/proj/prod/walg/') {
+          return { CommonPrefixes: [{ Prefix: `backups/proj/prod/walg/${LINEAGE}/` }] };
+        }
         return {
           Contents: names.map((b) => ({
-            Key: `backups/proj/prod/walg/basebackups_005/${b.name}_backup_stop_sentinel.json`,
+            Key: `backups/proj/prod/walg/${LINEAGE}/basebackups_005/${b.name}_backup_stop_sentinel.json`,
           })),
         };
       }
@@ -247,6 +257,7 @@ describe('assertDeployRestorePoint', () => {
     ['no target', { ...RESTORE, target: '' }],
     ['no size', { ...RESTORE, sizeBytes: undefined }],
     ['no attempt', { ...RESTORE, attempt: '' }],
+    ['no lineage', { ...RESTORE, lineage: '' }],
   ])('refuses %s', (_label, restore) => {
     expect(() => assertDeployRestorePoint({ restore })).toThrow(/restore point/);
   });
@@ -518,6 +529,7 @@ describe('applyK3sManifests with a restore point', () => {
     RESTORE_RECOVERY_CONF: RESTORE.recoveryConf,
     RESTORE_ATTEMPT: RESTORE.attempt,
     RESTORE_ORIGIN: 'deploy',
+    RESTORE_LINEAGE: LINEAGE,
     ...over,
   });
   const lines = (msg: string) => msg.split('\n').map((l) => l.trim());
@@ -535,7 +547,9 @@ describe('applyK3sManifests with a restore point', () => {
       operatorEnv: 'prod',
     }).catch((e) => e);
     expect(err.message).toMatch(/seeds a new database, and this cluster already runs one/);
-    expect(lines(err.message)).toContain(`vibecarbon restore prod -source ${BACKUP}`);
+    expect(lines(err.message)).toContain(
+      `vibecarbon restore prod -source ${BACKUP} -lineage ${LINEAGE}`,
+    );
     expect(err.message).not.toContain('<env>');
   });
 
@@ -560,7 +574,9 @@ describe('applyK3sManifests with a restore point', () => {
     marker = pending();
     const err = await plain();
     expect(err.message).toMatch(new RegExp(`restore of ${BACKUP} \\(target latest\\) is pending`));
-    expect(lines(err.message)).toContain(`vibecarbon deploy prod -restore ${BACKUP}`);
+    expect(lines(err.message)).toContain(
+      `vibecarbon deploy prod -restore ${BACKUP} -lineage ${LINEAGE}`,
+    );
     // Read-only: only gets, and the one PGDATA probe.
     expect(calls.every((a) => a.includes('get') || a.includes('exec'))).toBe(true);
     expect(calls.some((a) => a.includes('patch') || a.includes('apply'))).toBe(false);
@@ -570,7 +586,9 @@ describe('applyK3sManifests with a restore point', () => {
     liveDbSts = true;
     marker = pending({ RESTORE_ORIGIN: 'restore', RESTORE_TARGET: '2026-10-19T12:00:00Z' });
     const err = await plain();
-    expect(lines(err.message)).toContain('vibecarbon restore prod -source 2026-10-19T12:00:00Z');
+    expect(lines(err.message)).toContain(
+      `vibecarbon restore prod -source 2026-10-19T12:00:00Z -lineage ${LINEAGE}`,
+    );
     expect(err.message).not.toContain('deploy prod -restore');
   });
 
@@ -591,7 +609,9 @@ describe('applyK3sManifests with a restore point', () => {
     expect(lines(err.message)).not.toContain(CLEAR);
     expect(err.message).toMatch(/clearing the marker would boot the restored copy/i);
     expect(err.message).toContain('/var/lib/postgresql/data/.vc-prev');
-    expect(lines(err.message)).toContain(`vibecarbon restore prod -source ${BACKUP}`);
+    expect(lines(err.message)).toContain(
+      `vibecarbon restore prod -source ${BACKUP} -lineage ${LINEAGE}`,
+    );
   });
 
   it('plain deploy, the pod cannot be read: says both possibilities', async () => {

@@ -37,6 +37,7 @@ const args = (over: Record<string, unknown> = {}) => ({
   s: s(),
   chosenSource: { kind: 's3' as const, name: 'latest' },
   base: BASE,
+  lineage: '7699032860122738725',
   envName: 'prod',
   serverIp: '10.0.1.1',
   sshKeyPath: '/tmp/key',

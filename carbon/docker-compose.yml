@@ -288,10 +288,17 @@ services:
       # WAL-G is dormant locally without these anyway; the warns were pure
       # noise.
       #
-      # WALG_S3_PREFIX is one path per ENVIRONMENT (VC_ENV, which the deploy
-      # bundle writes into the server .env), so two environments of a project
-      # never share a backup stream. It is a SINGLE canonical path per
-      # environment (NO role segment). Reads
+      # WALG_S3_PREFIX_BASE is one path per ENVIRONMENT (VC_ENV, which the
+      # deploy bundle writes into the server .env), so two environments of a
+      # project never share a backup stream. Inside it each database lineage
+      # has its own folder, named by its system identifier: every script that
+      # runs wal-g sources /etc/postgresql/walg-env.sh (mounted below), which
+      # exports WALG_S3_PREFIX=<base>/<system identifier>. A destroyed and
+      # redeployed environment is a new database, so it never archives into,
+      # or takes over the newest base of, the archive the old one left. Nothing
+      # else sets WALG_S3_PREFIX (tests/unit/deploy/walg-lineage-prefix-census
+      # .test.ts). It is a SINGLE canonical path per environment (NO role
+      # segment). Reads
       # (backup-fetch/restore/reseed) and writes (backup-push/wal-push) must all
       # agree on ONE prefix — otherwise a standby restoring/reseeding would read
       # an empty `…/walg/standby` and fail with "No backups found". Anti-collision
@@ -300,7 +307,11 @@ services:
       # wal-archive.sh and the backup path both no-op when WALG_ROLE=standby.
       # WALG_ROLE is exposed to the container so those write guards can read it;
       # deployComposeHA writes WALG_ROLE=standby into the standby's .env.
-      WALG_S3_PREFIX: s3://${S3_BACKUP_BUCKET:-${S3_BUCKET:-}}/backups/${PROJECT_NAME}/${VC_ENV:-local}/walg
+      WALG_S3_PREFIX_BASE: s3://${S3_BACKUP_BUCKET:-${S3_BUCKET:-}}/backups/${PROJECT_NAME}/${VC_ENV:-local}/walg
+      # A WAL segment name already in the archive with other bytes is refused,
+      # never overwritten: an archive that is somebody else's history stays
+      # intact even if a guard above ever failed.
+      WALG_PREVENT_WAL_OVERWRITE: "true"
       WALG_ROLE: ${WALG_ROLE:-primary}
       AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-}
       AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-}
@@ -310,6 +321,7 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./volumes/db/wal-archive.sh:/etc/postgresql/wal-archive.sh:ro,Z
+      - ./volumes/db/walg-env.sh:/etc/postgresql/walg-env.sh:ro,Z
       - ./volumes/db/db-guard.sh:/usr/local/bin/db-guard.sh:ro,Z
     networks:
       - vibecarbon-network

@@ -12,7 +12,8 @@
  * flag's keys on the args object that buildLegacyArgs builds, follows every
  * pass-through (`key: options.key`) under src/lib/deploy, and asks for at
  * least one reader that USES the value: one that is not the input hash, not
- * a validation-only check, and not another pass-through.
+ * a validation-only check, and not another pass-through. src/lib/walg is
+ * walked too: deploy -restore's resolver lives there.
  *
  * A "use" is deliberately broad: ANY read that is not a pass-through and not
  * in an allowlisted reader (a condition, a call argument, a template, a member
@@ -39,7 +40,9 @@ import {
 } from '../helpers/runtime-reach-walk.js';
 
 const DEPLOY_SRC = readFileSync('src/deploy.js', 'utf8');
-const FILES = loadSourceTree('src/lib/deploy');
+// src/lib/walg too: the deploy hands -restore and -lineage to its resolver
+// there (resolveDeployRestorePoint), whose result then rides options.restore.
+const FILES = [...loadSourceTree('src/lib/deploy'), ...loadSourceTree('src/lib/walg')];
 
 /** Readers that see the value without rendering it anywhere. */
 const NON_RENDERING_READERS: NonRenderingReader[] = [
@@ -148,6 +151,15 @@ describe('every deploy flag reaches the runtime', () => {
       ).toBeGreaterThan(0);
     });
   }
+
+  it('-lineage reaches the deploy -restore resolver, which names the lineage folder it lists', () => {
+    const { sites } = walkFlag(['lineage']);
+    const uses = sites.filter((s) => s.kind === 'use');
+    expect(
+      uses.some((s) => s.file === 'src/lib/walg/restore-base.js'),
+      formatReachSites(sites),
+    ).toBe(true);
+  });
 
   it('-restore reaches the infra Secret through applyK3sManifests', () => {
     const { sites } = walkFlag(['restore']);

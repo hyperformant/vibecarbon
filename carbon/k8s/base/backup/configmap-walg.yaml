@@ -1,12 +1,21 @@
 # Fault-tolerant WAL-archive wrapper mounted into the db container at
 # /etc/postgresql/wal-archive.sh (see k8s/base/db/statefulset.yaml). Postgres'
 # archive_command invokes it as `bash /etc/postgresql/wal-archive.sh %p` (a
-# startup flag on the StatefulSet). wal-g reads WALG_S3_PREFIX / AWS_* /
-# WALG_ROLE from the db container's env. The StatefulSet's pod template carries
-# this file's sha, so a changed script rolls the db pod on the next deploy.
+# startup flag on the StatefulSet). wal-g reads AWS_* / WALG_ROLE from the db
+# container's env and WALG_S3_PREFIX from walg-env.sh. The StatefulSet's pod
+# template carries this file's sha, so a changed script rolls the db pod on the
+# next deploy.
 #
-# The script body below is a BYTE-IDENTICAL copy of carbon/volumes/db/wal-archive.sh
-# (the compose mount), indented 4 spaces into the block scalar. That is not a
+# A second key, walg-env.sh, is the file every wal-g caller in the db pod
+# sources first (wal-archive.sh, the backup CronJob's exec script, the
+# walg-restore init, a restore's restore_command, the CLI's exec scripts): it
+# turns WALG_S3_PREFIX_BASE into WALG_S3_PREFIX, this database lineage's own
+# folder. Mounted at /etc/postgresql/walg-env.sh in the db container and the
+# walg-restore init.
+#
+# Both script bodies below are BYTE-IDENTICAL copies of
+# carbon/volumes/db/wal-archive.sh and carbon/volumes/db/walg-env.sh (the
+# compose mounts), indented 4 spaces into the block scalars. That is not a
 # convention any more — tests/unit/deploy/walg-archive-script-parity.test.ts
 # dedents this block and compares it to the file, and fails the build on any
 # divergence. It used to be only a comment, and the two drifted: this copy lost
@@ -92,9 +101,21 @@ data:
         exit 0
     fi
 
-    # No backup target: nothing to push to. Local dev sets WALG_S3_PREFIX to ""
-    # (docker-compose.override.yml), and a deploy with no bucket name renders a
-    # bucketless "s3:///..." prefix. Without this, every segment waits out the
+    # THIS DATABASE'S ARCHIVE FOLDER: walg-env.sh turns WALG_S3_PREFIX_BASE into
+    # WALG_S3_PREFIX, the folder of this database's lineage (its system
+    # identifier), so a recreated database never archives into, or fences, the
+    # archive an earlier one left. Sourced before anything reads the prefix. A
+    # system identifier it cannot read, or a missing walg-env.sh (bash would carry
+    # on with no prefix and skip the segment as "no backup target"), exits 1:
+    # postgres retries the segment rather than drop it or archive it into a
+    # guessed folder. WALG_ENV_SH exists for the
+    # script tests only (the backup scripts read the same name), like WAL_ARCHIVE_WALG.
+    . "${WALG_ENV_SH:-/etc/postgresql/walg-env.sh}" || exit 1
+
+    # No backup target: nothing to push to. Local dev sets WALG_S3_PREFIX_BASE to
+    # "" (docker-compose.override.yml), which walg-env.sh turns into an empty
+    # WALG_S3_PREFIX, and a deploy with no bucket name renders a bucketless
+    # "s3:///..." prefix. Without this, every segment waits out the
     # wal-g attempts below and logs WAL_ARCHIVE_FAILED. Same guard as
     # backup/compose-backup.sh; a real deploy without archiving is still failed
     # by the deploy's wal-g audit (src/lib/deploy/walg-audit.js).
@@ -190,3 +211,64 @@ data:
     # catch this — but exit 0 so PG recycles the segment instead of pinning it.
     echo "WAL_ARCHIVE_FAILED: wal-g wal-push '$WAL_PATH' failed after $RETRIES attempts; allowing PG to recycle (PITR gap for this segment)" >&2
     exit 0
+  walg-env.sh: |
+    # The WAL-G prefix of this database's own archive. SOURCED, never executed,
+    # inside the db container: by wal-archive.sh, the base backup scripts
+    # (backup/compose-backup.sh, the k8s backup CronJob), the k8s walg-restore
+    # init, the restore_command a restore writes, and every script the CLI runs
+    # in the container that calls wal-g.
+    #
+    # Each database lineage archives under its own folder of the environment's
+    # prefix, named by its system identifier (pg_controldata):
+    #
+    #   <WALG_S3_PREFIX_BASE>/<system identifier>/{basebackups_005,wal_005,vibecarbon-fence.json}
+    #
+    # A destroyed and redeployed environment is a new database with a new system
+    # identifier, so it never archives into, or takes over the newest base of, the
+    # archive the old one left. A restore keeps the system identifier, so a
+    # restored database archives on in the lineage it came from, and a promoted
+    # standby (a copy of its primary) does too.
+    #
+    #   WALG_S3_PREFIX_BASE  the environment's prefix (compose db env, k8s db pod).
+    #                        Empty means no backup target: WALG_S3_PREFIX is
+    #                        exported empty, and every script skips as before. A
+    #                        bucketless s3:///... is passed through as is, for the
+    #                        same skip.
+    #   RESTORE_LINEAGE      set by a restore, whose fetch runs before PGDATA holds
+    #                        the database it names: that lineage's folder.
+    #   otherwise            the system identifier of the cluster in $PGDATA. One
+    #                        that cannot be read exits 1: nothing may guess a
+    #                        folder.
+    #
+    # THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR BOTH DEPLOY TIERS. compose mounts
+    # it at /etc/postgresql/walg-env.sh; k8s ships a byte-identical copy in the
+    # vibecarbon-wal-archive ConfigMap (carbon/k8s/base/backup/configmap-walg.yaml),
+    # pinned by tests/unit/deploy/walg-archive-script-parity.test.ts.
+    vc_walg_base="${WALG_S3_PREFIX_BASE:-}"
+    if [ -z "$vc_walg_base" ]; then
+        WALG_S3_PREFIX=""
+    elif [ "${vc_walg_base#s3:///}" != "$vc_walg_base" ]; then
+        # A deploy with no bucket name renders a bucketless base: still no backup
+        # target, which every caller skips on, so no folder is read.
+        WALG_S3_PREFIX="$vc_walg_base"
+    elif [ -n "${RESTORE_LINEAGE:-}" ]; then
+        case "$RESTORE_LINEAGE" in
+            *[!0-9]*)
+                echo "walg-env: RESTORE_LINEAGE=$RESTORE_LINEAGE is not a database system identifier" >&2
+                exit 1
+                ;;
+        esac
+        WALG_S3_PREFIX="${vc_walg_base}/${RESTORE_LINEAGE}"
+    else
+        vc_walg_pgdata="${PGDATA:-/var/lib/postgresql/data}"
+        vc_walg_sysid="$(pg_controldata "$vc_walg_pgdata" 2>/dev/null | awk -F': *' '/Database system identifier/{print $2}')" || vc_walg_sysid=""
+        case "$vc_walg_sysid" in
+            "" | *[!0-9]*)
+                echo "walg-env: no database system identifier in $vc_walg_pgdata" >&2
+                exit 1
+                ;;
+        esac
+        WALG_S3_PREFIX="${vc_walg_base}/${vc_walg_sysid}"
+    fi
+    export WALG_S3_PREFIX
+    unset vc_walg_base vc_walg_pgdata vc_walg_sysid

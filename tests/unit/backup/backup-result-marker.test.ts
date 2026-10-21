@@ -129,18 +129,27 @@ esac
 `,
   );
   writeFileSync(join(bin, 'flock'), `#!/bin/bash\nexit ${lockHeld ? 1 : 0}\n`);
+  writeFileSync(
+    join(bin, 'pg_controldata'),
+    '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',
+  );
   writeFileSync(join(bin, 'docker'), '#!/bin/bash\nshift 4\nexec "$@"\n');
   writeFileSync(
     join(bin, 'kubectl'),
     '#!/bin/bash\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n',
   );
-  for (const f of ['wal-g', 'psql', 'flock', 'docker', 'kubectl']) chmodSync(join(bin, f), 0o755);
+  for (const f of ['wal-g', 'psql', 'flock', 'docker', 'kubectl', 'pg_controldata']) {
+    chmodSync(join(bin, f), 0o755);
+  }
   return { bin, walg: () => readFileSync(log, 'utf-8') };
 }
 
 const baseEnv = (bin: string): Record<string, string> => ({
   PATH: `${bin}:${process.env.PATH}`,
-  WALG_S3_PREFIX: 's3://bkt/backups/p/e/walg',
+  // walg-env.sh (the real file) turns the base into the lineage folder, with
+  // pg_controldata stubbed below.
+  WALG_S3_PREFIX_BASE: 's3://bkt/backups/p/e/walg',
+  WALG_ENV_SH: join(ROOT, 'carbon/volumes/db/walg-env.sh'),
   AWS_ACCESS_KEY_ID: 'k',
   AWS_SECRET_ACCESS_KEY: 's',
   PGDATA: join(work, 'pgdata-none'),
@@ -188,8 +197,8 @@ function runCron(name: string, opts: Stub = {}, env: Record<string, string> = {}
 
 describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
   it.each([
-    ['no S3 target', {}, { WALG_S3_PREFIX: 's3:///backups/p/e/walg' }, 'no-s3-target'],
-    ['empty S3 target', {}, { WALG_S3_PREFIX: '' }, 'no-s3-target'],
+    ['no S3 target', {}, { WALG_S3_PREFIX_BASE: 's3:///backups/p/e/walg' }, 'no-s3-target'],
+    ['empty S3 target', {}, { WALG_S3_PREFIX_BASE: '' }, 'no-s3-target'],
     ['no S3 credentials', {}, { AWS_SECRET_ACCESS_KEY: '' }, 'no-s3-credentials'],
     ['standby role', {}, { WALG_ROLE: 'standby' }, 'standby-role'],
     ['in recovery', { recovery: 't' as const }, {}, 'in-recovery'],

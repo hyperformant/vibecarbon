@@ -53,7 +53,7 @@
  * ------------
  * Wherever wal-g is deployed, on both paths, gated on backups actually being
  * configured. Backups CAN be disabled (a deploy with no S3 bucket renders
- * `WALG_S3_PREFIX` as the empty-bucket form `s3:///backups/...` — see
+ * `WALG_S3_PREFIX_BASE` as the empty-bucket form `s3:///backups/...` — see
  * carbon/docker-compose.yml and carbon/k8s/base/db/statefulset.yaml), and
  * the probe detects that from INSIDE the container and reports a skip. Testing
  * the env wal-g actually sees is the same technique
@@ -97,6 +97,7 @@
 
 import { progressLog } from '../cli/progress.js';
 import { runWithRetry } from '../retry.js';
+import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
 import { DB_POD } from './db-workload.js';
 
 /**
@@ -133,6 +134,10 @@ export const WALG_ARCHIVER_SQL =
  *
  * GUARD ORDER IS THE WHOLE POINT — it is what separates "configured" from
  * "working":
+ *   0. walg-env.sh resolves WALG_S3_PREFIX, this database lineage's folder (the
+ *      prefix every push uses). One that cannot read the system identifier
+ *      FAILS (`no-lineage`): nothing could archive from this node. It is
+ *      tried in a subshell first, so the probe still exits 0 and reports.
  *   1. No prefix at all (empty, or the `s3:///…` empty-bucket form both paths
  *      render when no bucket is set) → backups are deliberately OFF → skip.
  *   2. WALG_ROLE=standby → normally write-guarded by design → skip, before the
@@ -165,6 +170,8 @@ export function buildWalgAuditProbe({ requirePrimary = false } = {}) {
     : ['  echo "WALG_AUDIT=skip:standby-write-guard"; exit 0'];
   return [
     'set -u',
+    `if ! ( ${WALG_ENV_SOURCE} ) >/dev/null 2>&1; then echo "WALG_AUDIT=fail:no-lineage"; exit 0; fi`,
+    WALG_ENV_SOURCE,
     // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion inside a shell script string, not a JS template placeholder
     'PFX="${WALG_S3_PREFIX:-}"',
     'case "$PFX" in "" | s3:///*) echo "WALG_AUDIT=skip:no-backup-target"; exit 0 ;; esac',
@@ -218,9 +225,9 @@ export const WALG_AUDIT_PROBE_TIMEOUT_MS = 120_000;
  * Human-readable "check this by hand" command per deploy path. Keyed by the
  * `path` a caller passes; unknown keys fall back to naming both.
  */
-const VERIFY_HINTS = {
-  compose: 'docker compose exec -T db wal-g backup-list',
-  k8s: `kubectl -n vibecarbon exec ${DB_POD} -- wal-g backup-list`,
+export const VERIFY_HINTS = {
+  compose: `docker compose exec -T db sh -c '${WALG_ENV_SOURCE} && wal-g backup-list'`,
+  k8s: `kubectl -n vibecarbon exec ${DB_POD} -- sh -c '${WALG_ENV_SOURCE} && wal-g backup-list'`,
 };
 
 /** Keep operator-facing error bodies bounded without losing the useful tail. */
@@ -354,6 +361,13 @@ export function countWalgBackups(listOutput) {
  * @returns {string}
  */
 function preflightFailureDetail(parsed) {
+  if (parsed.reason === 'no-lineage') {
+    return (
+      'walg-env.sh could not read the database system identifier in PGDATA (pg_controldata), ' +
+      'so the db container cannot name its own archive folder and nothing will be archived. ' +
+      'Check that /etc/postgresql/walg-env.sh is mounted in the db container'
+    );
+  }
   if (parsed.reason === 'stale-standby-role') {
     // Only reachable under `requirePrimary`, i.e. from a failover that has
     // already promoted this node. Name the mechanism, because the symptom
@@ -529,7 +543,7 @@ export function walgAuditFailureMessage(result, path, { context = 'deploy' } = {
  * `stale-standby-role` belongs here for the same reason and one more: it is
  * raised mid-failover, where 20s of pointless backoff is 20s of RTO.
  */
-const NON_RETRYABLE_CODES = new Set(['no-credentials', 'stale-standby-role']);
+const NON_RETRYABLE_CODES = new Set(['no-credentials', 'stale-standby-role', 'no-lineage']);
 
 /** Success/skip one-liner, so a passing audit is visible rather than silent. */
 function successLine(result) {
