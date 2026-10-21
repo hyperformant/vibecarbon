@@ -37,6 +37,11 @@ metadata:
   labels:
     app: vibecarbon-db
     component: database
+  # The vibecarbon CLI's deploy owns this object; Flux strips it from its
+  # base build (flux/clusters/*). prune: disabled keeps Flux's garbage
+  # collection from deleting the live one in either handoff order.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   serviceName: db-headless
   replicas: 1

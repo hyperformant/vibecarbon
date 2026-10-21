@@ -30,6 +30,8 @@ carbon/k8s/
 
    **Clusters set up before the db StatefulSet** still carry the old database chart's Kustomization in flux-system, and `vibecarbon deploy` refuses to run beside it and prints its exact name. Do not simply delete that Kustomization: it has `prune: true`, so deleting it garbage-collects its HelmRelease, which uninstalls the old chart and deletes its database volume. Set `prune: false` on it first, then delete it, then follow the rest of the steps `vibecarbon deploy` prints (destroy and redeploy, or uninstall the old Helm release and run `vibecarbon deploy <env> -restore latest`).
 
+   **CLI-owned objects in base** (the db StatefulSet and the registry Deployment) are stripped from Flux's build with `$patch: delete` and carry `kustomize.toolkit.fluxcd.io/prune: disabled`, so Flux never garbage-collects the live ones the CLI deploy applies.
+
 Flux's 5-minute HelmRepository interval means transient source-controller fetch failures self-heal inside the HelmRelease wait budget. There is no client-side reconcile poking.
 
 ## Useful commands (post-deploy, for debugging)

@@ -5,6 +5,11 @@ metadata:
   namespace: vibecarbon
   labels:
     app: local-registry
+  # The vibecarbon CLI's deploy owns this object; Flux strips it from its
+  # base build (flux/clusters/*). prune: disabled keeps Flux's garbage
+  # collection from deleting the live one in either handoff order.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   replicas: 1
   # Recreate (not RollingUpdate) because hostPort: 5000 can only be held by one pod at a time.

@@ -106,6 +106,30 @@ describe('Flux applies no unrendered placeholder from k8s/base', () => {
       expect(has('StatefulSet', 'db')).toBe(false);
     }, 60_000);
 
+    it(`${cluster}: every object stripped with $patch: delete carries prune: disabled`, () => {
+      // Stripping an object from Flux's build makes it an orphan in Flux's
+      // inventory; without the annotation Flux's garbage collection deletes
+      // the live object the CLI applied (in either handoff order).
+      const stripped = fluxBasePatches(cluster)
+        .filter((p: Doc) => /\$patch: delete/.test(String(p.patch)))
+        .map((p: Doc) => ({ kind: p.target?.kind, name: p.target?.name }));
+      expect(stripped).toEqual(
+        expect.arrayContaining([
+          { kind: 'StatefulSet', name: 'db' },
+          { kind: 'Deployment', name: 'local-registry' },
+        ]),
+      );
+      const docs = (loadAll(fluxBuild([])) as Doc[]).filter(Boolean);
+      for (const { kind, name } of stripped) {
+        const obj = docs.find((d) => d.kind === kind && d.metadata?.name === name);
+        expect(obj, `${kind}/${name} is in base`).toBeDefined();
+        expect(
+          obj.metadata.annotations?.['kustomize.toolkit.fluxcd.io/prune'],
+          `${kind}/${name}`,
+        ).toBe('disabled');
+      }
+    }, 60_000);
+
     it(`${cluster}: still health-checks the CLI-owned registry Deployment`, () => {
       const file = join(ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
       const ks = (loadAll(readFileSync(file, 'utf-8')) as Doc[]).find(
