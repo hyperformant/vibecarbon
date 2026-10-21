@@ -597,6 +597,24 @@ export function finalSaveSafetyOwns(isHADeploy) {
 }
 
 /**
+ * The k8s-ha deployResult's DR verdict from the plan ctx: replication, and
+ * whether the standby is missing its app image. Under -allow-degraded either
+ * one finishes the deploy degraded (R14).
+ *
+ * @param {{ replicationStatus?: string, standbyImageMissing?: boolean }} ctx
+ * @returns {{ replication: 'streaming'|'degraded', standbyImageMissing: boolean, degraded: boolean }}
+ */
+export function k8sHaDegradedVerdict(ctx) {
+  const streaming = ctx?.replicationStatus === 'streaming';
+  const standbyImageMissing = !!ctx?.standbyImageMissing;
+  return {
+    replication: streaming ? 'streaming' : 'degraded',
+    standbyImageMissing,
+    degraded: !streaming || standbyImageMissing,
+  };
+}
+
+/**
  * The DR posture an HA deploy's final save records: the replication verdict,
  * `degraded`, and the named cause when the standby is missing its app image
  * (R14). `degradedCause` is always present so it overrides a cause an earlier
@@ -1826,11 +1844,7 @@ export async function executeDeployment(args, gatheredConfig) {
       standby: k8sHaCtx.standbyResult,
       domain,
       replicationStatus: k8sHaCtx.replicationStatus,
-      replication: k8sHaCtx.replicationStatus === 'streaming' ? 'streaming' : 'degraded',
-      // Under -allow-degraded a standby without its app image finishes the
-      // deploy degraded too, with its own cause (R14).
-      standbyImageMissing: !!k8sHaCtx.standbyImageMissing,
-      degraded: k8sHaCtx.replicationStatus !== 'streaming' || !!k8sHaCtx.standbyImageMissing,
+      ...k8sHaDegradedVerdict(k8sHaCtx),
       systemIdentifier: k8sHaCtx.systemIdentifier ?? null,
       // A retired side that is not a replica yet keeps its fence: deployedAt
       // stays unstamped, so the env stays swapped and the next deploy retries.

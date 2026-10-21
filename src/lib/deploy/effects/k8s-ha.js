@@ -283,10 +283,15 @@ async function haK8sProvisionClusters(ctx) {
   // Settlement fallbacks: a warm redeploy may resolve without a fresh
   // onInfraReady (the deferred is already resolved — resolve is idempotent);
   // a failed cluster resolves null so the prep task bails instead of hanging.
-  // A primary that fails rejects its image ref (a no-op once onImageBuilt has
-  // resolved it).
+  // The primary's settlement also settles its image ref, so the standby never
+  // waits on a primary that finished without reporting one (each is a no-op
+  // once onImageBuilt has resolved it).
   primaryPromise.then(
-    (r) => primaryInfra.resolve(r),
+    (r) => {
+      primaryInfra.resolve(r);
+      if (r?.imageTag) primaryImage.resolve(r.imageTag);
+      else primaryImage.reject(new Error('primary image unavailable: primary reported no image'));
+    },
     () => {
       primaryInfra.resolve(null);
       primaryImage.reject(new Error('primary image unavailable: primary deploy failed'));
@@ -681,7 +686,7 @@ async function haK8sCopyStandbyImage(ctx) {
     ctx.standbyImageMissing = true;
     s.stop('Standby image MISSING, continuing (-allow-degraded)');
     p.log.warn(
-      `DEGRADED HA: ${err.message}. The standby cannot start the app, so failover refuses ` +
+      `DEGRADED HA: ${/[.?!]$/.test(err.message) ? err.message : `${err.message}.`} The standby cannot start the app, so failover refuses ` +
         'it. You proceeded with -allow-degraded; rerun `vibecarbon deploy` to copy the image.',
     );
   }

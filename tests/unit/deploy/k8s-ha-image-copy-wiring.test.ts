@@ -134,6 +134,37 @@ describe('the primary image ref flows to the standby', () => {
   });
 });
 
+describe('the primary settlement settles the image ref', () => {
+  const standbyRef = () =>
+    deployK3s.mock.calls
+      .map(([o]) => o as Record<string, unknown>)
+      .find((o) => o.role === 'standby')?.peerImageRef as Promise<string>;
+
+  it('a primary that returns its tag without reporting it still hands it over', async () => {
+    deployK3s.mockImplementationOnce(async (opts: Record<string, unknown>) => ({
+      ...clusterFor(String(opts.environment)),
+      imageTag: PRIMARY_REF,
+    }));
+    await K8S_HA_EFFECTS.haK8sProvisionClusters(newCtx());
+    await expect(standbyRef()).resolves.toBe(PRIMARY_REF);
+  });
+
+  it('a primary that finishes with no image rejects the ref, so the standby never hangs', async () => {
+    deployK3s.mockImplementationOnce(async (opts: Record<string, unknown>) => ({
+      ...clusterFor(String(opts.environment)),
+    }));
+    deployK3s.mockImplementationOnce(async (opts: Record<string, unknown>) => {
+      await (opts.peerImageRef as Promise<string>);
+      return {} as never;
+    });
+    await expect(K8S_HA_EFFECTS.haK8sProvisionClusters(newCtx())).rejects.toThrow(
+      /standby: primary image unavailable: primary reported no image/,
+    );
+    await settle();
+    expect(unhandled).toEqual([]);
+  });
+});
+
 describe('the copy starts once the transport is up', () => {
   it('early: provision-clusters starts it after the transport prep, the step awaits it', async () => {
     const ctx = newCtx();
@@ -219,6 +250,16 @@ describe('a failed copy', () => {
     );
   });
 
+  it('under -allow-degraded does not double the period of a cause that has one', async () => {
+    copyAppImageToStandby.mockRejectedValueOnce(new Error(`${failure}.`));
+    const ctx = newCtx({ allowDegraded: true });
+    await K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
+    await K8S_HA_EFFECTS.haK8sCopyStandbyImage(ctx);
+    const warned = vi.mocked(p.log.warn).mock.calls.map(([m]) => String(m));
+    expect(warned.some((m) => m.includes(`${failure}. The standby`))).toBe(true);
+    expect(warned.some((m) => m.includes('..'))).toBe(false);
+  });
+
   it('under -allow-degraded marks the standby image missing and lets the deploy finish', async () => {
     copyAppImageToStandby.mockRejectedValueOnce(new Error(failure));
     const ctx = newCtx({ allowDegraded: true });
@@ -228,6 +269,8 @@ describe('a failed copy', () => {
     expect(ctx.standbyImageDigest ?? null).toBeNull();
     const warned = vi.mocked(p.log.warn).mock.calls.map(([m]) => String(m));
     expect(warned.some((m) => m.includes(failure) && /failover/i.test(m))).toBe(true);
+    // One sentence end, whether or not the cause brought its own.
+    expect(warned.some((m) => m.includes('..'))).toBe(false);
     await settle();
     expect(unhandled).toEqual([]);
   });

@@ -256,16 +256,30 @@ export function assertFailoverPreconditions({
     );
   }
 
-  // No flag overrides it: a promoted standby without the app image serves
-  // nothing. A failover already in flight is let finish (R6).
+  // A promoted standby without the app image serves nothing. With the
+  // primary up, a deploy copies it there first, so a planned failover refuses.
+  // With the primary dead nothing can copy it, so -force-unproven promotes
+  // anyway and says the app is down until a deploy builds it on the new
+  // primary. A failover already in flight is let finish (R6).
   if (
     envConfig?.degradedCause === DEGRADED_CAUSE.STANDBY_IMAGE_MISSING &&
     !envConfig?.ha?.failoverInFlight
   ) {
-    refuse(
+    const missing =
       `the standby is missing the app image (the last deploy could not copy it to the ` +
-        `standby's registry), so a promoted standby could not start the app. ` +
-        repair('to copy it, then fail over'),
+      `standby's registry), so a promoted standby could not start the app.`;
+    if (planned) refuse(`${missing} ${repair('to copy it, then fail over')}`);
+    if (!forceUnproven) {
+      refuse(
+        `${missing} the primary is unreachable, so no deploy can copy it there now. pass ` +
+          `-force-unproven to promote it anyway; it serves nothing until a deploy builds ` +
+          `the image on it`,
+      );
+    }
+    p.log.warn(
+      'the promoted standby has no app image; it serves nothing until\n' +
+        `  vibecarbon deploy ${environment}\n` +
+        'builds it there',
     );
   }
 
