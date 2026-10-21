@@ -1397,6 +1397,12 @@ function restorePreludeLines() {
     `  echo "restore: another restore holds $PGDATA/${lock}; refusing" >&2`,
     '  exit 75',
     'fi',
+    '# The marker is only ever replaced by rename, so a crash mid-write leaves',
+    '# the previous state, never a torn one.',
+    'vc_mark() {',
+    '  printf \'%s\' "$1" > "$VC_MARKER.tmp"',
+    '  mv -f "$VC_MARKER.tmp" "$VC_MARKER"',
+    '}',
     "# The cluster's own entries in PGDATA: everything but the restore's .vc-*.",
     'vc_cluster_entries() {',
     `  find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name '.vc-*'`,
@@ -1408,7 +1414,7 @@ function restorePreludeLines() {
 /** Steps 3 and 4 of both restore scripts, shared text. */
 function restoreStagedAndSwapLines() {
   const { staging, previous, discard, inProgress, lock } = RESTORE_LAYOUT;
-  const stagedVc = [staging, previous, discard, inProgress, lock]
+  const stagedVc = [staging, previous, discard, inProgress, `${inProgress}.tmp`, lock]
     .map((name) => `"$PGDATA/${staging}/${name}"`)
     .join(' ');
   return [
@@ -1452,28 +1458,31 @@ function restoreStagedAndSwapLines() {
     'case "$vc_root" in',
     '  unproven)',
     `    # .vc-prev holds the database from before; PGDATA an unproven copy.`,
-    '    echo in > "$VC_MARKER"',
+    '    vc_mark in',
     `    mkdir -p "$PGDATA/${discard}"`,
     `    vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${discard}/"; done`,
     '    ;;',
     '  half-out)',
     `    mkdir -p "$PGDATA/${previous}"`,
     `    vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${previous}/"; done`,
-    '    echo in > "$VC_MARKER"',
+    '    vc_mark in',
     '    ;;',
     '  live)',
     '    if [ -n "$(vc_cluster_entries)" ]; then',
-    '      : > "$VC_MARKER"',
+    '      vc_mark out',
     `      mkdir -p "$PGDATA/${previous}"`,
     `      vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${previous}/"; done`,
     '    fi',
-    '    echo in > "$VC_MARKER"',
+    '    vc_mark in',
     '    ;;',
     'esac',
     `find "$PGDATA/${staging}" -mindepth 1 -maxdepth 1 | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/"; done`,
     `rmdir "$PGDATA/${staging}"`,
-    'rm -f "$VC_MARKER"',
+    '# The slow removal goes before the marker: once the marker is gone, the',
+    '# only thing in PGDATA that says "swapped, not proven" is recovery.signal,',
+    '# and nothing slow may follow.',
     `rm -rf "$PGDATA/${discard}"`,
+    'rm -f "$VC_MARKER"',
     'echo "restore: $RESTORE_BACKUP staged and swapped in"',
     '# --- end swap ---',
   ];
@@ -1566,22 +1575,43 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
   //    would mount a literal `db_data` volume, NOT the project-prefixed one.)
   await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose stop db`);
 
-  // 3. Write the restore script to the server (heredoc, no quoting risk) and
-  //    bind-mount it into the db container. The script body contains single
-  //    quotes (restore_command = 'wal-g wal-fetch ...') so it MUST go via a
-  //    file rather than a nested bash -c '...' invocation.
+  // 3. Write this run's restore script to the server (heredoc, no quoting
+  //    risk) and bind-mount it into the db container. The script body contains
+  //    single quotes (restore_command = 'wal-g wal-fetch ...') so it MUST go via
+  //    a file rather than a nested bash -c '...' invocation. One file per run,
+  //    never rewritten in place: an orphaned earlier run's bash may still be
+  //    reading its own.
+  const scriptPath = `${remoteDir}/restore-walg.${randomBytes(6).toString('hex')}.sh`;
   await sshRunScript(
     ip,
     sshKeyPath,
     [
       'set -e',
-      `cat > ${remoteDir}/restore-walg.sh <<'VC_RESTORE_EOF'`,
+      `cat > ${scriptPath} <<'VC_RESTORE_EOF'`,
       scriptBody,
       'VC_RESTORE_EOF',
-      `chmod +x ${remoteDir}/restore-walg.sh`,
+      `chmod +x ${scriptPath}`,
     ].join('\n'),
     { timeout: 30_000 },
   );
+
+  // An earlier restore whose ssh dropped can leave its run container behind
+  // (still running, or stopped and not removed): `run --name` would refuse
+  // the name. Remove that one container, by its exact name, and say so. Its
+  // swap, if it began one, is settled by this run's script.
+  const runContainer = `${projectName}-db-restore`;
+  const orphan = await sshRunAsync(
+    ip,
+    sshKeyPath,
+    `docker ps -aq --filter name=^/${runContainer}$`,
+    { timeout: 30_000 },
+  );
+  if (String(orphan ?? '').trim()) {
+    console.warn(
+      `[restore] an earlier restore's container ${runContainer} was still there; stopped and removed it`,
+    );
+    await sshRunAsync(ip, sshKeyPath, `docker rm -f ${runContainer}`, { timeout: 60_000 });
+  }
 
   // THE wal-g FETCH. Wrapped in the object-storage staleness retry (quarantined
   // in docs/mitigations.yml): this exec is where a compose scale died on
@@ -1597,20 +1627,23 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
   // refuses a second one outright. The timeout grows with the backup, like the
   // k8s rollout wait. The run container is named so the failure path can make
   // sure it is gone. See src/lib/deploy/walg-staleness.js.
-  const runContainer = `${projectName}-db-restore`;
   const fetchTimeoutS = restoreFetchTimeoutS(requiredBytes);
   try {
-    await withWalgStaleStorageRetry(
-      () =>
-        sshRunAsync(
-          ip,
-          sshKeyPath,
-          `cd ${remoteDir} && docker compose run --rm --name ${runContainer} -e RESTORE_BACKUP=${backup} -v ${remoteDir}/restore-walg.sh:/restore.sh:ro db bash /restore.sh`,
-          { timeout: fetchTimeoutS * 1000, retries: 1 },
-        ),
-      'backup-fetch (restore)',
-      { delaysMs: options.staleRetryDelaysMs },
-    );
+    try {
+      await withWalgStaleStorageRetry(
+        () =>
+          sshRunAsync(
+            ip,
+            sshKeyPath,
+            `cd ${remoteDir} && docker compose run --rm --name ${runContainer} -e RESTORE_BACKUP=${backup} -v ${scriptPath}:/restore.sh:ro db bash /restore.sh`,
+            { timeout: fetchTimeoutS * 1000, retries: 1 },
+          ),
+        'backup-fetch (restore)',
+        { delaysMs: options.staleRetryDelaysMs },
+      );
+    } finally {
+      await sshRunAsync(ip, sshKeyPath, `rm -f ${scriptPath}`, { ignoreError: true });
+    }
   } catch (err) {
     const cause = err instanceof Error ? err.message : String(err);
     // An ssh timeout leaves the run container going on the server: stop that
@@ -1618,17 +1651,20 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
     await sshRunAsync(ip, sshKeyPath, `docker rm -f ${runContainer} 2>/dev/null || true`, {
       ignoreError: true,
     });
-    // The marker says whether a swap began. The entrypoint is bypassed for
-    // this read, so db-guard.sh does not refuse it.
+    // What the run left, read with the entrypoint bypassed (db-guard.sh would
+    // refuse a marker): the marker means the swap is half done; no marker but
+    // recovery.signal means it swapped and was never proven; neither means
+    // nothing was moved.
     const probe = await sshRunAsync(
       ip,
       sshKeyPath,
       `cd ${remoteDir} && docker compose run --rm --no-deps --entrypoint sh db -c ` +
-        `'if [ -e ${PGDATA_PATH}/${RESTORE_LAYOUT.inProgress} ]; then echo VC_MARKER_PRESENT; else echo VC_MARKER_ABSENT; fi'`,
+        `'if [ -e ${PGDATA_PATH}/${RESTORE_LAYOUT.inProgress} ]; then echo VC_MARKER_PRESENT; ` +
+        `elif [ -e ${PGDATA_PATH}/recovery.signal ]; then echo VC_SWAPPED; else echo VC_MARKER_ABSENT; fi'`,
       { ignoreError: true, retries: 1 },
     );
-    const marker = String(probe ?? '');
-    if (marker.includes('VC_MARKER_ABSENT')) {
+    const state = String(probe ?? '');
+    if (state.includes('VC_MARKER_ABSENT')) {
       // No swap began: the database from before the restore is untouched.
       await sshRunAsync(
         ip,
@@ -1641,11 +1677,18 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
           `from before it was started again: ${cause}`,
       );
     }
-    if (marker.includes('VC_MARKER_PRESENT')) {
+    if (state.includes('VC_MARKER_PRESENT')) {
       throw new Error(
         `restoreCompose: the restore of ${backup} was interrupted mid-swap (${cause}). The db stays down ` +
           `(db-guard.sh refuses to boot it) and the database from before the restore is in ` +
           `${PREVIOUS_PGDATA_PATH}; rerun vibecarbon restore to finish or redo the swap.`,
+      );
+    }
+    if (state.includes('VC_SWAPPED')) {
+      throw new Error(
+        `restoreCompose: the restore of ${backup} swapped in but was not proven (${cause}). The db stays ` +
+          `down, the app too, and the database from before the restore is in ${PREVIOUS_PGDATA_PATH}; rerun ` +
+          'vibecarbon restore, which keeps that database and redoes the swap.',
       );
     }
     throw new Error(
@@ -1704,8 +1747,12 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
     throw new Error(
       `restoreCompose: could not prove the restored database writable (write fence ${proof ?? 'unread'}), ` +
         `so it kept the database from before the restore in ${PREVIOUS_PGDATA_PATH} and left the app ` +
-        'stopped. Once vibecarbon status shows the database writable, remove it and start the app: ' +
-        `ssh root@${ip} "cd ${remoteDir} && docker compose exec -T db rm -rf ${PREVIOUS_PGDATA_PATH} && docker compose start app"`,
+        `stopped. Check it by hand (expect off): ssh root@${ip} 'cd ${remoteDir} && docker compose exec -T db ` +
+        `psql -U postgres -At -c "SHOW default_transaction_read_only"'. Then finish what the restore owed: ` +
+        `ssh root@${ip} 'cd ${remoteDir} && docker compose exec -T db sh -c "${RETIRE_PREVIOUS_SH}" ` +
+        `&& docker compose exec -T db sh -c "${REMOVE_DISCARD_SH}" ` +
+        '&& docker compose run --rm --no-deps app-migrate ' +
+        "&& docker compose exec -T db psql -U postgres -q -c ANALYZE && docker compose start app'.",
     );
   }
   //    Rename first, then remove: a crash mid-delete leaves .vc-discard

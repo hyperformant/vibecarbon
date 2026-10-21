@@ -165,7 +165,8 @@ describeDocker('Docker Services Smoke Test', () => {
       let lastError: Error | null = null;
       for (let i = 0; i < 5; i++) {
         try {
-          result = execSync('docker compose exec -T db pg_isready -U postgres', {
+          // TCP: the socket also answers for the entrypoint's init-time server.
+          result = execSync('docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres', {
             cwd: projectDir(),
             encoding: 'utf-8',
             timeout: 10000,

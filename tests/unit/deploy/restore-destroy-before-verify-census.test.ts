@@ -119,6 +119,24 @@ for (const [label, build] of SCRIPTS) {
       }
     });
 
+    it('writes the marker only by rename (tmp then mv), never in place', () => {
+      for (const l of lines) {
+        expect(l, `in-place marker write: ${l}`).not.toMatch(/>\s*"\$VC_MARKER"/);
+      }
+      expect(lines.some((l) => /mv -f "\$VC_MARKER\.tmp" "\$VC_MARKER"/.test(l))).toBe(true);
+    });
+
+    it('drops the discard before the marker goes, so no slow step follows the marker removal', () => {
+      const markerOff = lines.lastIndexOf('rm -f "$VC_MARKER"');
+      const lastDiscardRm = lines.reduce(
+        (last, l, i) => (l === 'rm -rf "$PGDATA/.vc-discard"' ? i : last),
+        -1,
+      );
+      expect(markerOff).toBeGreaterThan(lastDiscardRm);
+      const after = lines.slice(markerOff + 1).filter((l) => /\b(rm|mv|find)\b/.test(l));
+      expect(after, after.join('\n')).toEqual([]);
+    });
+
     it('never find -deletes inside PGDATA', () => {
       for (const l of lines) {
         if (/\bfind\b/.test(l) && PGDATA_REF.test(l)) expect(l).not.toMatch(/-delete\b/);
@@ -126,6 +144,19 @@ for (const [label, build] of SCRIPTS) {
     });
   });
 }
+
+describe('the CLI retires a proven .vc-prev with one rename and no removal in front', () => {
+  it('RETIRE_PREVIOUS_SH', async () => {
+    const { RETIRE_PREVIOUS_SH, REMOVE_DISCARD_SH } = await import(
+      '../../../src/lib/walg/restore-layout.js'
+    );
+    expect(RETIRE_PREVIOUS_SH).not.toMatch(/\brm\b/);
+    expect(RETIRE_PREVIOUS_SH).toBe(
+      'mkdir -p /var/lib/postgresql/data/.vc-discard && if [ -e /var/lib/postgresql/data/.vc-prev ]; then mv /var/lib/postgresql/data/.vc-prev /var/lib/postgresql/data/.vc-discard/prev.$$; fi',
+    );
+    expect(REMOVE_DISCARD_SH).toBe('rm -rf /var/lib/postgresql/data/.vc-discard');
+  });
+});
 
 describe('both tiers run the same staged-tree, settle and swap steps', () => {
   function block(script: string, start: string, end: string): string {

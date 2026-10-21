@@ -123,7 +123,12 @@ function stopDb() {
   docker(['rm', DB_CT]);
 }
 
-const psql = (sql: string) => docker(['exec', DB_CT, 'psql', '-U', 'postgres', '-tAc', sql]).trim();
+// Over TCP, never the unix socket: WALG_ENV's PGHOST points psql at the
+// socket, where the entrypoint's socket-only init server answers (and says it
+// is out of recovery) before the real server starts. A readiness read there
+// lands in the gap between the two and cascades into every later test.
+const psql = (sql: string) =>
+  docker(['exec', DB_CT, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-tAc', sql]).trim();
 
 async function waitPromoted() {
   await until(

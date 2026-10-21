@@ -150,6 +150,12 @@ spec:
                 echo "restore: another restore holds $PGDATA/.vc-restore.lock; refusing" >&2
                 exit 75
               fi
+              # The marker is only ever replaced by rename, so a crash mid-write leaves
+              # the previous state, never a torn one.
+              vc_mark() {
+                printf '%s' "$1" > "$VC_MARKER.tmp"
+                mv -f "$VC_MARKER.tmp" "$VC_MARKER"
+              }
               # The cluster's own entries in PGDATA: everything but the restore's .vc-*.
               vc_cluster_entries() {
                 find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name '.vc-*'
@@ -200,7 +206,7 @@ spec:
               fi
               # 3. A base pushed while a restore left its dirs in PGDATA carries them:
               #    drop them from the staged tree so they cannot wedge the swap.
-              rm -rf "$PGDATA/.vc-restore/.vc-restore" "$PGDATA/.vc-restore/.vc-prev" "$PGDATA/.vc-restore/.vc-discard" "$PGDATA/.vc-restore/.vc-restore-in-progress" "$PGDATA/.vc-restore/.vc-restore.lock"
+              rm -rf "$PGDATA/.vc-restore/.vc-restore" "$PGDATA/.vc-restore/.vc-prev" "$PGDATA/.vc-restore/.vc-discard" "$PGDATA/.vc-restore/.vc-restore-in-progress" "$PGDATA/.vc-restore/.vc-restore-in-progress.tmp" "$PGDATA/.vc-restore/.vc-restore.lock"
               # Recovery config into staging: strip the settings it rewrites, append the
               # new ones (rendered by the CLI, the same text on both tiers).
               VC_AUTO_CONF="$PGDATA/.vc-restore/postgresql.auto.conf"
@@ -231,28 +237,31 @@ spec:
               case "$vc_root" in
                 unproven)
                   # .vc-prev holds the database from before; PGDATA an unproven copy.
-                  echo in > "$VC_MARKER"
+                  vc_mark in
                   mkdir -p "$PGDATA/.vc-discard"
                   vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-discard/"; done
                   ;;
                 half-out)
                   mkdir -p "$PGDATA/.vc-prev"
                   vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-prev/"; done
-                  echo in > "$VC_MARKER"
+                  vc_mark in
                   ;;
                 live)
                   if [ -n "$(vc_cluster_entries)" ]; then
-                    : > "$VC_MARKER"
+                    vc_mark out
                     mkdir -p "$PGDATA/.vc-prev"
                     vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-prev/"; done
                   fi
-                  echo in > "$VC_MARKER"
+                  vc_mark in
                   ;;
               esac
               find "$PGDATA/.vc-restore" -mindepth 1 -maxdepth 1 | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/"; done
               rmdir "$PGDATA/.vc-restore"
-              rm -f "$VC_MARKER"
+              # The slow removal goes before the marker: once the marker is gone, the
+              # only thing in PGDATA that says "swapped, not proven" is recovery.signal,
+              # and nothing slow may follow.
               rm -rf "$PGDATA/.vc-discard"
+              rm -f "$VC_MARKER"
               echo "restore: $RESTORE_BACKUP staged and swapped in"
               # --- end swap ---
           env:

@@ -28,12 +28,15 @@ export const PREVIOUS_PGDATA_PATH = `${PGDATA_PATH}/${RESTORE_LAYOUT.previous}`;
 export const DISCARD_PGDATA_PATH = `${PGDATA_PATH}/${RESTORE_LAYOUT.discard}`;
 
 /**
- * The shell that retires a proven restore's previous cluster: rename it out
- * of the `.vc-prev` name first (one atomic rename, so a crash mid-delete can
- * never leave a `.vc-prev` that reads as unproven), then remove the discard.
- * Two steps so k8s can clear its marker in between.
+ * The shell that retires a proven restore's previous cluster: one atomic
+ * rename out of the `.vc-prev` name, into a per-call name under the discard,
+ * with nothing removed in front of it (a crash at any point leaves either the
+ * whole `.vc-prev` or garbage under `.vc-discard`). REMOVE_DISCARD_SH then
+ * removes the discard. Two steps so k8s can clear its marker in between. `$$`
+ * is the remote shell's pid: run it through `sh -c` with the text quoted so
+ * only that shell expands it.
  */
-export const RETIRE_PREVIOUS_SH = `rm -rf ${DISCARD_PGDATA_PATH} && if [ -e ${PREVIOUS_PGDATA_PATH} ]; then mv ${PREVIOUS_PGDATA_PATH} ${DISCARD_PGDATA_PATH}; fi`;
+export const RETIRE_PREVIOUS_SH = `mkdir -p ${DISCARD_PGDATA_PATH} && if [ -e ${PREVIOUS_PGDATA_PATH} ]; then mv ${PREVIOUS_PGDATA_PATH} ${DISCARD_PGDATA_PATH}/prev.$$; fi`;
 export const REMOVE_DISCARD_SH = `rm -rf ${DISCARD_PGDATA_PATH}`;
 
 /** The restore states a writable proof accepts (assertRolePrimaryWritable). */

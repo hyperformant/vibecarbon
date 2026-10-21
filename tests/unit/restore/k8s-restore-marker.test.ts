@@ -67,7 +67,11 @@ beforeEach(() => {
       if (rolloutFails) throw new Error('timed out waiting for the condition');
     } else if (line.includes('pg_is_in_recovery')) {
       return 'f';
-    } else if (line.includes('mv /var/lib/postgresql/data/.vc-prev')) {
+    } else if (
+      line.includes(
+        'mv /var/lib/postgresql/data/.vc-prev /var/lib/postgresql/data/.vc-discard/prev.',
+      )
+    ) {
       events.push('retirePrev');
     } else if (line.includes('rm -rf /var/lib/postgresql/data/.vc-discard')) {
       events.push('rmDiscard');
@@ -143,9 +147,23 @@ describe('runK8sRestore: the restore marker', () => {
 
 describe('runK8sRestore: an unproven restore keeps the marker and .vc-prev (I4)', () => {
   it('an unreadable fence fails loudly, the keys stay set and the app stays down', async () => {
-    await expect(runK8sRestore(args({ assertWritable: async () => 'unknown' }))).rejects.toThrow(
-      /could not prove .* writable.*kept .*\.vc-prev.*rm -rf \/var\/lib\/postgresql\/data\/\.vc-prev/s,
+    const err = await runK8sRestore(args({ assertWritable: async () => 'unknown' })).catch(
+      (e) => e,
     );
+    const msg = String(err?.message);
+    expect(msg).toMatch(/could not prove .* writable.*kept .*\.vc-prev/s);
+    const check = msg.indexOf('SHOW default_transaction_read_only');
+    const retire = msg.indexOf('mkdir -p /var/lib/postgresql/data/.vc-discard');
+    const clear = msg.indexOf('"RESTORE_BACKUP":""');
+    const remove = msg.indexOf('rm -rf /var/lib/postgresql/data/.vc-discard');
+    const scale = msg.indexOf('--replicas=2');
+    expect(check).toBeGreaterThan(-1);
+    expect(msg).toMatch(/expect off/);
+    expect(retire).toBeGreaterThan(check);
+    expect(clear).toBeGreaterThan(retire);
+    expect(remove).toBeGreaterThan(clear);
+    expect(scale).toBeGreaterThan(remove);
+    expect(msg).not.toMatch(/rm -rf \/var\/lib\/postgresql\/data\/\.vc-prev\b/);
     expect(events).not.toContain('marker:clear');
     expect(events).not.toContain('retirePrev');
     expect(events).not.toContain('scaleUp');

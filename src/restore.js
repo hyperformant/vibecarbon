@@ -956,9 +956,11 @@ export async function runK8sRestore({
     throw new Error(
       `could not prove the restored database writable (write fence ${proof ?? 'unread'}), so the restore ` +
         `marker stays set and the database from before the restore is kept in ${PREVIOUS_PGDATA_PATH}. ` +
-        'Once vibecarbon status shows the database writable, finish by hand: ' +
-        `kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '{"stringData":{"RESTORE_TARGET":"","RESTORE_BACKUP":"","RESTORE_RECOVERY_CONF":""}}' ` +
-        `&& kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- rm -rf ${PREVIOUS_PGDATA_PATH} ` +
+        `Check it on ${serverIp} (expect off): kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- ` +
+        `psql -U postgres -At -c 'SHOW default_transaction_read_only'. Then finish on ${serverIp}: ` +
+        `kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- sh -c '${RETIRE_PREVIOUS_SH}' ` +
+        `&& kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '{"stringData":{"RESTORE_TARGET":"","RESTORE_BACKUP":"","RESTORE_RECOVERY_CONF":""}}' ` +
+        `&& kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- sh -c '${REMOVE_DISCARD_SH}' ` +
         '&& kubectl scale deployment app -n vibecarbon --replicas=2',
     );
   }

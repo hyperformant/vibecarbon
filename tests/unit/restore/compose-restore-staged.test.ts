@@ -32,19 +32,25 @@ const writable = async () => 'writable' as const;
 let events: string[];
 let fetchError: Error | null;
 let freeKb: string;
-let markerLeft: boolean;
+let probeState: 'absent' | 'present' | 'swapped';
+let orphan: boolean;
+let commands: string[];
 let fetchOpts: Array<Record<string, unknown>>;
 
 function label(cmd: string): string | null {
   if (cmd.includes('df -Pk')) return 'df';
   if (cmd.includes('docker compose stop db')) return 'stopDb';
   if (cmd.includes('bash /restore.sh')) return 'fetch';
+  if (cmd.includes('docker ps -aq') && cmd.includes('proj-db-restore')) return 'orphanCheck';
   if (cmd.includes('docker rm -f proj-db-restore')) return 'rmRunContainer';
+  if (/rm -f \/opt\/proj\/restore-walg\.[0-9a-f]+\.sh/.test(cmd)) return 'rmScript';
   if (cmd.includes('.vc-restore-in-progress')) return 'probeMarker';
   if (cmd.includes('docker compose start db && docker compose start app')) return 'restartOld';
   if (cmd.includes('docker compose start db')) return 'startDb';
   if (cmd.includes('pg_is_in_recovery')) return 'promoted';
-  if (cmd.includes('mv /var/lib/postgresql/data/.vc-prev /var/lib/postgresql/data/.vc-discard'))
+  if (
+    cmd.includes('mv /var/lib/postgresql/data/.vc-prev /var/lib/postgresql/data/.vc-discard/prev.')
+  )
     return 'retirePrev';
   if (cmd.includes('rm -rf /var/lib/postgresql/data/.vc-discard')) return 'rmDiscard';
   if (/psql\b.*\bANALYZE\b/.test(cmd)) return 'analyze';
@@ -56,19 +62,28 @@ beforeEach(() => {
   events = [];
   fetchError = null;
   freeKb = '';
-  markerLeft = false;
+  probeState = 'absent';
+  orphan = false;
+  commands = [];
   fetchOpts = [];
   vi.mocked(runCommandAsync).mockReset();
   vi.mocked(runCommandAsync).mockImplementation(async (argv: unknown, opts: unknown) => {
     const cmd = String((argv as string[]).at(-1));
+    commands.push(cmd);
     const l = label(cmd);
     if (l && l !== 'promoted') events.push(l);
+    if (l === 'orphanCheck') return orphan ? 'f00dfeed\n' : '';
     if (l === 'df') return freeKb;
     if (l === 'fetch') {
       fetchOpts.push(opts as Record<string, unknown>);
       if (fetchError) throw fetchError;
     }
-    if (l === 'probeMarker') return markerLeft ? 'VC_MARKER_PRESENT\n' : 'VC_MARKER_ABSENT\n';
+    if (l === 'probeMarker')
+      return {
+        absent: 'VC_MARKER_ABSENT\n',
+        present: 'VC_MARKER_PRESENT\n',
+        swapped: 'VC_SWAPPED\n',
+      }[probeState];
     if (l === 'promoted') {
       if (!events.includes('promoted')) events.push('promoted');
       return 'f\n';
@@ -96,7 +111,9 @@ describe('restoreCompose around the staged fetch', () => {
     });
     expect(events).toEqual([
       'stopDb',
+      'orphanCheck',
       'fetch',
+      'rmScript',
       'startDb',
       'promoted',
       'writable',
@@ -112,10 +129,27 @@ describe('restoreCompose around the staged fetch', () => {
     expect(events).toContain('retirePrev');
   });
 
-  it('an unreadable fence keeps .vc-prev and the app down, and names the cleanup', async () => {
-    await expect(restore({ assertWritable: async () => 'unknown' })).rejects.toThrow(
-      /could not prove .* writable.*kept .*\.vc-prev.*rm -rf \/var\/lib\/postgresql\/data\/\.vc-prev/s,
-    );
+  it('an unreadable fence keeps .vc-prev and the app down, and names the whole finish', async () => {
+    const err = await restore({ assertWritable: async () => 'unknown' }).catch((e) => e);
+    const msg = String(err?.message);
+    expect(msg).toMatch(/could not prove .* writable.*kept .*\.vc-prev/s);
+    // The exact check, then the same retire the CLI runs, then what the
+    // restore still owed the app before it starts.
+    expect(msg).toContain('SHOW default_transaction_read_only');
+    expect(msg).toMatch(/expect off/);
+    const check = msg.indexOf('SHOW default_transaction_read_only');
+    const retire = msg.indexOf('mkdir -p /var/lib/postgresql/data/.vc-discard');
+    const remove = msg.indexOf('rm -rf /var/lib/postgresql/data/.vc-discard');
+    const migrate = msg.indexOf('docker compose run --rm --no-deps app-migrate');
+    const analyze = msg.indexOf('ANALYZE');
+    const start = msg.indexOf('docker compose start app');
+    expect(check).toBeGreaterThan(-1);
+    expect(retire).toBeGreaterThan(check);
+    expect(remove).toBeGreaterThan(retire);
+    expect(migrate).toBeGreaterThan(remove);
+    expect(analyze).toBeGreaterThan(migrate);
+    expect(start).toBeGreaterThan(analyze);
+    expect(msg).not.toMatch(/rm -rf \/var\/lib\/postgresql\/data\/\.vc-prev\b/);
     expect(events).not.toContain('retirePrev');
     expect(events).not.toContain('rmDiscard');
     expect(events).not.toContain('startApp');
@@ -150,16 +184,56 @@ describe('restoreCompose around the staged fetch', () => {
     await expect(restore()).rejects.toThrow(
       /nothing was moved.*database from before it was started again.*does not exist/s,
     );
-    expect(events).toEqual(['stopDb', 'fetch', 'rmRunContainer', 'probeMarker', 'restartOld']);
+    expect(events).toEqual([
+      'stopDb',
+      'orphanCheck',
+      'fetch',
+      'rmScript',
+      'rmRunContainer',
+      'probeMarker',
+      'restartOld',
+    ]);
   });
 
   it('a failed fetch that left a swap half done keeps the db down and names the rerun', async () => {
     fetchError = new Error('timed out');
-    markerLeft = true;
+    probeState = 'present';
     await expect(restore()).rejects.toThrow(
       /interrupted mid-swap.*stays down.*\.vc-prev.*rerun vibecarbon restore/s,
     );
-    expect(events).toEqual(['stopDb', 'fetch', 'rmRunContainer', 'probeMarker']);
+    expect(events).toEqual([
+      'stopDb',
+      'orphanCheck',
+      'fetch',
+      'rmScript',
+      'rmRunContainer',
+      'probeMarker',
+    ]);
+  });
+
+  it('a failed fetch after the swap finished keeps the db down: swapped but not proven', async () => {
+    fetchError = new Error('timed out');
+    probeState = 'swapped';
+    await expect(restore()).rejects.toThrow(
+      /swapped in but was not proven.*stays down.*\.vc-prev.*rerun vibecarbon restore/s,
+    );
+    expect(events).not.toContain('restartOld');
+    expect(events).not.toContain('startDb');
+  });
+
+  it('an orphaned restore container from an earlier run is removed, and only it, before the fetch', async () => {
+    orphan = true;
+    await restore();
+    expect(events.slice(0, 4)).toEqual(['stopDb', 'orphanCheck', 'rmRunContainer', 'fetch']);
+    expect(commands.find((c) => c.includes('docker rm -f'))).toBe('docker rm -f proj-db-restore');
+  });
+
+  it('each run writes its own script file and removes it afterwards', async () => {
+    await restore();
+    const run = commands.find((c) => c.includes('bash /restore.sh')) ?? '';
+    const file = run.match(/-v (\/opt\/proj\/restore-walg\.[0-9a-f]+\.sh):\/restore\.sh:ro/)?.[1];
+    expect(file, run).toBeTruthy();
+    expect(commands).toContain(`rm -f ${file}`);
   });
 
   it('refuses a backup that does not fit before anything stops', async () => {
