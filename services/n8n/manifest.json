@@ -31,6 +31,17 @@
     ]
   },
 
+  "standby": {
+    "policy": "primary-only",
+    "compose": {
+      "services": ["n8n"],
+      "setup": ["n8n-setup"]
+    },
+    "k8s": [
+      { "kind": "Deployment", "name": "n8n", "namespace": "vibecarbon" }
+    ]
+  },
+
   "kustomization": {
     "entry": "n8n/"
   }
