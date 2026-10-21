@@ -18,6 +18,7 @@ import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
+import { assertInteractiveStdin } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import {
@@ -1203,7 +1204,7 @@ export async function waitForWorkersReady(
  * resolveDnsToken resolves env-first — for native DNS that env var IS the
  * compute credential, so it's normally already present.
  */
-function dnsStrategyFor(dnsProvider) {
+export function dnsStrategyFor(dnsProvider) {
   const row = DNS_PROVIDERS[dnsProvider];
   return {
     async getAuth(envConfig) {
@@ -1212,6 +1213,12 @@ function dnsStrategyFor(dnsProvider) {
         computeToken: undefined,
       });
       if (!token) {
+        // A prompt that can never be answered must not "cancel" (exit 0) in
+        // the middle of an incident: say what to export and fail.
+        assertInteractiveStdin({
+          what: `the ${row.name} API token`,
+          envVar: row.tokenEnv,
+        });
         token = await p.text({
           message: `${row.name} API token:`,
           validate: (v) => (!v ? 'Required' : undefined),

@@ -622,7 +622,7 @@ async function runFailoverHA(opts: RunOpts) {
           order.push('dns');
           flippedTo = ip;
         },
-        readDns: async () => flippedTo,
+        readDns: async () => (flippedTo ? [flippedTo] : []),
       };
 
   const envConfig = {

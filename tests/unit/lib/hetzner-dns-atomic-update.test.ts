@@ -49,7 +49,9 @@ describe('hetzner createDNSRecord — atomic update', () => {
     queuePreamble('z-atomic', [
       { name: 'e4', type: 'A', ttl: 60, records: [{ value: '1.1.1.1' }] },
     ]);
-    fetchMock.mockResolvedValueOnce(ok({ action: { id: 1, command: 'set_rrset_records' } }, 201));
+    fetchMock.mockResolvedValueOnce(
+      ok({ action: { id: 1, command: 'set_rrset_records', status: 'success' } }, 201),
+    );
 
     await createDNSRecord('tok', 'z-atomic', {
       type: 'A',

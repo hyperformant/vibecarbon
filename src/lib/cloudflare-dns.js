@@ -3,6 +3,7 @@
  * Shared across deploy.js and destroy.js
  */
 
+import * as p from '@clack/prompts';
 import { challengeRecordNames } from './acme-challenge.js';
 import { spinner } from './cli/progress.js';
 import { fetchWithRetry } from './fetch-retry.js';
@@ -105,7 +106,9 @@ async function readCloudflareJson(response, prefix) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok || body.success === false) {
     const detail = body.errors?.[0]?.message || response.statusText || 'request failed';
-    throw new Error(`${prefix} (HTTP ${response.status}): ${detail}`);
+    throw Object.assign(new Error(`${prefix} (HTTP ${response.status}): ${detail}`), {
+      status: response.status,
+    });
   }
   return body;
 }
@@ -175,13 +178,13 @@ export async function createDNSRecord(apiToken, zoneId, config) {
 }
 
 /**
- * Read the A record's current target, for verifying a flip. Null when the
- * name has no A record.
+ * Read every A record target at a name, for verifying a flip. Empty when the
+ * name has no A record; a stale second value must stay visible.
  *
  * @param {string} apiToken - Cloudflare API token
  * @param {string} zoneId - Zone ID
  * @param {string} name - Record name (FQDN)
- * @returns {Promise<string|null>}
+ * @returns {Promise<string[]>}
  */
 export async function readARecord(apiToken, zoneId, name) {
   const response = await fetchWithRetry(
@@ -189,7 +192,7 @@ export async function readARecord(apiToken, zoneId, name) {
     { headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' } },
   );
   const body = await readCloudflareJson(response, 'Failed to read DNS record');
-  return body.result?.find((r) => r.name === name && r.type === 'A')?.content ?? null;
+  return (body.result ?? []).filter((r) => r.name === name && r.type === 'A').map((r) => r.content);
 }
 
 /**
@@ -419,6 +422,29 @@ async function createHealthCheck(apiToken, zoneId, config) {
 }
 
 /**
+ * Create a health check without letting an entitlement refusal sink the setup.
+ * Health checks are informational and need a paid Cloudflare plan; the DNS
+ * records are already written when this runs, so a 4xx here is a warning with
+ * the cause, never a failed deploy. Anything else (5xx, network) still throws.
+ *
+ * @returns {Promise<boolean>} whether the check was created
+ */
+async function createHealthCheckOrWarn(apiToken, zoneId, config) {
+  try {
+    await createHealthCheck(apiToken, zoneId, config);
+    return true;
+  } catch (error) {
+    if (error.status >= 400 && error.status < 500) {
+      p.log.warn(
+        `cloudflare refused the ${config.name} health check (${error.message}); health checks need a paid cloudflare plan, the dns records are set`,
+      );
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
  * Delete a health check
  *
  * @param {string} apiToken - Cloudflare API token
@@ -509,12 +535,16 @@ export async function setupHA(apiToken, zoneId, domain, servers) {
     // Create health checks for monitoring both regions
     for (const server of servers) {
       s.start(`Creating health check for ${server.name}`);
-      await createHealthCheck(apiToken, zoneId, {
+      const created = await createHealthCheckOrWarn(apiToken, zoneId, {
         name: `${server.name}-health`,
         address: server.ip,
         path: '/api/health',
       });
-      s.stop(`Health check created for ${server.name}`);
+      s.stop(
+        created
+          ? `Health check created for ${server.name}`
+          : `Health check skipped for ${server.name}`,
+      );
     }
 
     return {
@@ -584,13 +614,14 @@ export async function setupSimple(apiToken, zoneId, domain, serverIp, options = 
     // Create health check (informational, doesn't affect routing without LB)
     s?.start('Creating health check');
     onProgress?.('Creating health check');
-    await createHealthCheck(apiToken, zoneId, {
+    const created = await createHealthCheckOrWarn(apiToken, zoneId, {
       name: `${domain}-health`,
       address: serverIp,
       path: '/api/health',
     });
-    s?.stop('Health check created');
-    onProgress?.('Health check created');
+    const note = created ? 'Health check created' : 'Health check skipped';
+    s?.stop(note);
+    onProgress?.(note);
 
     return { success: true, mode: 'simple', record: result.result };
   } catch (error) {

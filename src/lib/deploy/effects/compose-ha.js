@@ -65,6 +65,7 @@ import {
   waitForDockerReady,
   waitForSSH,
 } from '../compose/index.js';
+import { requireDnsSetup } from '../dns-result.js';
 import { readReplicaState } from '../failover-guard.js';
 import { resolvePublicA } from '../public-dns-lookup.js';
 import { assertReplicationStreamingOrDegraded, verifyStreaming } from '../replication.js';
@@ -632,26 +633,24 @@ async function haUpdateDns(ctx) {
   if (domain && hasAutomatedDns(dnsProvider) && dnsToken && dnsZoneId) {
     const dnsName = DNS_PROVIDERS[dnsProvider].name;
     ctx.onProgress(`Setting up ${dnsName} for HA...`);
-    try {
-      const { setupHA } = await getDnsProvider(dnsProvider);
-      await perfAsync('deploy.ha.compose.dns.setup', () =>
-        setupHA(dnsToken, dnsZoneId, domain, [
-          {
-            name: `${projectName}-${environment}-${stackOf(primary, 'primary')}`,
-            ip: primary.ip,
-            region: primary.region ?? region,
-          },
-          {
-            name: `${projectName}-${environment}-${stackOf(standby, 'standby')}`,
-            ip: standby.ip,
-            region: standby.region ?? standbyRegion,
-          },
-        ]),
-      );
-    } catch (error) {
-      p.log.warn(`${dnsName} HA setup failed: ${error.message}`);
-      p.log.info('You can configure DNS manually.');
-    }
+    const { setupHA } = await getDnsProvider(dnsProvider);
+    const haResult = await perfAsync('deploy.ha.compose.dns.setup', () =>
+      setupHA(dnsToken, dnsZoneId, domain, [
+        {
+          name: `${projectName}-${environment}-${stackOf(primary, 'primary')}`,
+          ip: primary.ip,
+          region: primary.region ?? region,
+        },
+        {
+          name: `${projectName}-${environment}-${stackOf(standby, 'standby')}`,
+          ip: standby.ip,
+          region: standby.region ?? standbyRegion,
+        },
+      ]),
+    );
+    // A refused record write fails the deploy: it would otherwise run on to a
+    // certificate and health probe that can never pass.
+    requireDnsSetup(haResult, `${dnsName} HA DNS records for ${domain}`);
   } else if (domain && dnsProvider === 'manual') {
     p.log.info(c.bold('Manual DNS Configuration:'));
     p.log.message(`  Point ${c.bold(domain)} to ${c.bold(primary.ip)} (primary)`);

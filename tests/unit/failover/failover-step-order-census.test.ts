@@ -74,7 +74,7 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
         order.push('dns');
         composeFlippedTo = ip;
       },
-      readARecord: async () => composeFlippedTo,
+      readARecord: async () => (composeFlippedTo ? [composeFlippedTo] : []),
     }),
   };
 });
@@ -244,7 +244,7 @@ async function runK8s(primaryReachable: boolean) {
       order.push('dns');
       flippedTo = ip;
     },
-    readDns: async () => flippedTo,
+    readDns: async () => (flippedTo ? [flippedTo] : []),
   };
   // The real waitForAppTierGone reads the quiesced Deployment's selector, then
   // its pods: none left is the proof (writersGone).

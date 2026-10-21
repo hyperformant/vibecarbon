@@ -373,7 +373,7 @@ export function dnsDidNotMessage({ domain, ip, reason }) {
  *
  * @param {object} args
  * @param {() => Promise<unknown>} args.update - writes the apex + wildcard records
- * @param {(name: string) => Promise<string|null>} args.read - the A record's current target
+ * @param {(name: string) => Promise<string[]>} args.read - every A record target at the name
  * @param {string} args.domain
  * @param {string} args.ip
  * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
@@ -391,10 +391,12 @@ export async function flipAndVerifyDns({ update, read, domain, ip }) {
     } catch (error) {
       return { ok: false, reason: `could not read ${name} back: ${error.message}` };
     }
-    if (seen !== ip) {
+    // Exactly [ip]: a stale second A record would keep sending part of the
+    // traffic to the retired node.
+    if (!Array.isArray(seen) || seen.length !== 1 || seen[0] !== ip) {
       return {
         ok: false,
-        reason: `${name} reads back as ${seen ?? 'nothing'}, not ${ip}`,
+        reason: `${name} reads back as ${Array.isArray(seen) && seen.length > 0 ? seen.join(', ') : 'nothing'}, not only ${ip}`,
       };
     }
   }

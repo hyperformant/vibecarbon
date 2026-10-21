@@ -108,7 +108,9 @@ interface RunOpts {
   /** The provider write throws. */
   dnsUpdateThrows?: boolean;
   /** What the provider reads back after the write (default: the flipped IP). */
-  dnsReadsBack?: string | null;
+  dnsReadsBack?: string[];
+  /** What the wildcard reads back, when it differs from the apex. */
+  wildcardReadsBack?: string[];
 }
 
 /**
@@ -134,6 +136,7 @@ async function run(opts: RunOpts = {}) {
     standbyFenced = false,
     dnsUpdateThrows = false,
     dnsReadsBack,
+    wildcardReadsBack,
   } = opts;
   const order: string[] = [];
   const captured: Record<string, unknown> = {};
@@ -276,7 +279,10 @@ async function run(opts: RunOpts = {}) {
       if (dnsUpdateThrows) throw new Error('Failed to create DNS record (HTTP 403)');
       flippedTo = ip;
     },
-    readDns: async () => (dnsReadsBack === undefined ? flippedTo : dnsReadsBack),
+    readDns: async (_auth: unknown, name: string) => {
+      if (name.startsWith('*.') && wildcardReadsBack) return wildcardReadsBack;
+      return dnsReadsBack === undefined ? (flippedTo ? [flippedTo] : []) : dnsReadsBack;
+    },
   };
   const parsed = { dryRun: false, yes: true, serverType: null, ...flags };
   const tracker = { spinner: () => ({ start: () => {}, stop: () => {} }) };
@@ -994,14 +1000,44 @@ describe('failoverHA DNS flip is verified (R5)', () => {
   });
 
   it('a read-back that disagrees with the promoted IP counts as not flipped', async () => {
-    const { order, thrown } = await run({ dnsReadsBack: '10.0.0.1' });
+    const { order, thrown } = await run({ dnsReadsBack: ['10.0.0.1'] });
     expect(thrown?.message).toMatch(/DNS DID NOT/);
     expect(thrown?.message).toContain('reads back as 10.0.0.1');
     expect(order).toContain('saveConfig');
   });
 
-  it('a record that reads back as nothing counts as not flipped', async () => {
-    const { thrown } = await run({ dnsReadsBack: null });
+  it('an apex that is right but a wildcard that is wrong counts as not flipped', async () => {
+    const { thrown } = await run({ wildcardReadsBack: ['10.0.0.1'] });
     expect(thrown?.message).toMatch(/DNS DID NOT/);
+    expect(thrown?.message).toContain('*.app.example.com reads back as 10.0.0.1');
+  });
+
+  it('a stale second A record counts as not flipped', async () => {
+    const { thrown } = await run({ dnsReadsBack: ['10.0.0.99', '10.0.0.1'] });
+    expect(thrown?.message).toMatch(/DNS DID NOT/);
+  });
+
+  it('a record that reads back as nothing counts as not flipped', async () => {
+    const { thrown } = await run({ dnsReadsBack: [] });
+    expect(thrown?.message).toMatch(/DNS DID NOT/);
+  });
+
+  it('rerunning failover after a DNS-failed (swap-persisted) failover is refused before any mutation', async () => {
+    const first = await run({ dnsUpdateThrows: true });
+    expect(first.thrown?.message).toMatch(/DNS DID NOT/);
+    expect(first.order).toContain('saveConfig');
+    // The state that first run persisted: roles swapped after the last deploy,
+    // so the "standby" the rerun sees is the retired primary, not a replica.
+    const rerun = await run({
+      envConfig: baseEnvConfig({
+        lastFailover: '2026-10-20T12:00:00.000Z',
+        deployedAt: '2026-10-01T00:00:00.000Z',
+        replication: 'degraded',
+      }),
+      standbyState: streamingStandby({ inRecovery: false, receiverStatus: null }),
+    });
+    expect(rerun.thrown).toBeInstanceOf(FailoverRefusedError);
+    expect(rerun.thrown?.message).toMatch(/vibecarbon deploy/);
+    expectNoMutation(rerun.order);
   });
 });

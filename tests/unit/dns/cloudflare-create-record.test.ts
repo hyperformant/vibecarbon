@@ -5,6 +5,7 @@
  * unconditionally: a 401/403 (or a 200 carrying `success: false`) came back as
  * if it had worked, and the callers printed "DNS updated".
  */
+import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const stops: string[] = [];
@@ -93,19 +94,54 @@ describe('Cloudflare setup never reports success past a refused write', () => {
     expect(stops.join('\n')).not.toMatch(/DNS records created/);
   });
 
-  it('a refused health check fails setupHA instead of printing "Health check created"', async () => {
+  it('a free-plan health-check refusal warns and keeps the records: setupHA still succeeds', async () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(listEmpty())
+      .mockResolvedValueOnce(json(200, { success: true, result: { id: '1' } }))
+      .mockResolvedValueOnce(listEmpty())
+      .mockResolvedValueOnce(json(200, { success: true, result: { id: '2' } }))
+      .mockResolvedValueOnce(forbidden())
+      .mockResolvedValueOnce(json(200, { success: true, result: { id: 'hc2' } }));
+    const result = await setupHA('t', 'zone', 'app.example.com', [
+      { name: 'a', ip: '203.0.113.1' },
+      { name: 'b', ip: '203.0.113.2' },
+    ]);
+    expect(result.success).toBe(true);
+    // The second check is attempted independently of the first one's refusal.
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/paid cloudflare plan/);
+    expect(stops.join('\n')).toMatch(/Health check skipped for a/);
+    expect(stops.join('\n')).toMatch(/Health check created for b/);
+    warn.mockRestore();
+  });
+
+  it('a free-plan health-check refusal keeps setupSimple successful', async () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
     fetchMock
       .mockResolvedValueOnce(listEmpty())
       .mockResolvedValueOnce(json(200, { success: true, result: { id: '1' } }))
       .mockResolvedValueOnce(listEmpty())
       .mockResolvedValueOnce(json(200, { success: true, result: { id: '2' } }))
       .mockResolvedValueOnce(forbidden());
+    const result = await setupSimple('t', 'zone', 'app.example.com', '203.0.113.9');
+    expect(result.success).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('a refused wildcard record write still fails setupHA', async () => {
+    fetchMock
+      .mockResolvedValueOnce(listEmpty())
+      .mockResolvedValueOnce(json(200, { success: true, result: { id: '1' } }))
+      .mockResolvedValueOnce(listEmpty())
+      .mockResolvedValueOnce(forbidden());
     const result = await setupHA('t', 'zone', 'app.example.com', [
       { name: 'a', ip: '203.0.113.1' },
-      { name: 'b', ip: '203.0.113.2' },
     ]);
     expect(result.success).toBe(false);
-    expect(stops.join('\n')).not.toMatch(/Health check created/);
+    expect(result.error).toMatch(/403/);
   });
 });
 
@@ -117,12 +153,12 @@ describe('Cloudflare readARecord', () => {
         result: [{ id: 'r1', name: 'app.example.com', type: 'A', content: '203.0.113.9' }],
       }),
     );
-    await expect(readARecord('t', 'zone', 'app.example.com')).resolves.toBe('203.0.113.9');
+    await expect(readARecord('t', 'zone', 'app.example.com')).resolves.toEqual(['203.0.113.9']);
   });
 
   it('returns null when there is no A record', async () => {
     fetchMock.mockResolvedValueOnce(listEmpty());
-    await expect(readARecord('t', 'zone', 'app.example.com')).resolves.toBeNull();
+    await expect(readARecord('t', 'zone', 'app.example.com')).resolves.toEqual([]);
   });
 
   it('throws when the read is refused', async () => {

@@ -124,14 +124,14 @@ describe('readARecord', () => {
     it(`${file}: reads the apex and the wildcard`, async () => {
       route(routes);
       const mod = await import(`../../../src/lib/${file}`);
-      await expect(mod.readARecord('t', zoneId, 'example.com')).resolves.toBe(IP);
-      await expect(mod.readARecord('t', zoneId, '*.example.com')).resolves.toBe(IP);
+      await expect(mod.readARecord('t', zoneId, 'example.com')).resolves.toEqual([IP]);
+      await expect(mod.readARecord('t', zoneId, '*.example.com')).resolves.toEqual([IP]);
     });
   }
 
   it('vultr-dns.js: a name with no A record reads as null', async () => {
     route({ '/records': { records: [], meta: { links: { next: '' } } } });
     const mod = await import('../../../src/lib/vultr-dns.js');
-    await expect(mod.readARecord('t', 'example.com', 'example.com')).resolves.toBeNull();
+    await expect(mod.readARecord('t', 'example.com', 'example.com')).resolves.toEqual([]);
   });
 });

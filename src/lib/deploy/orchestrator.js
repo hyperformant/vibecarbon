@@ -42,6 +42,7 @@ import { armDeployCompletionGuard, markDeployCompleted } from './completion-guar
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
 import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compose/ha-role-swap.js';
 import { workingTreeDirty } from './delta.js';
+import { requireDnsSetup } from './dns-result.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
 import { haSeedRecord, readReplicaState } from './failover-guard.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
@@ -1307,6 +1308,11 @@ export async function executeDeployment(args, gatheredConfig) {
             const result = await updateDnsIp(dnsToken, dnsZoneId, domain, '0.0.0.0', {
               onProgress: () => {},
             });
+            if (result?.success === false) {
+              // Best-effort: the real-IP write below is the one that must land.
+              p.log.warn(`Initial DNS setup failed: ${result.error}`);
+              return null;
+            }
             state.completeStep('dns-setup', result);
             p.log.info('DNS records warmed up');
             return result;
@@ -1617,8 +1623,11 @@ export async function executeDeployment(args, gatheredConfig) {
         if (!state.shouldSkip('k8s-dns-update', dnsUpdateInputs)) {
           state.startStep('k8s-dns-update', dnsUpdateInputs);
           const { setupSimple: updateDnsIp } = await getDnsProvider(dnsProvider);
-          await perfAsync('deploy.dns.create', () =>
-            updateDnsIp(dnsToken, dnsZoneId, domain, k8sFloatingIp),
+          requireDnsSetup(
+            await perfAsync('deploy.dns.create', () =>
+              updateDnsIp(dnsToken, dnsZoneId, domain, k8sFloatingIp),
+            ),
+            `DNS A record for ${domain}`,
           );
           state.completeStep('k8s-dns-update', { serverIp: k8sFloatingIp });
         }

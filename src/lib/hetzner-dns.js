@@ -30,6 +30,50 @@ const DEFAULT_TTL = 60;
 // HELPERS
 // ============================================================================
 
+// Hetzner applies rrset writes asynchronously: the write returns an Action
+// that is still "running" while the old value is served. A read-back (and
+// failover's DNS verification) must wait for it to finish.
+const ACTION_POLL_MS = 500;
+const ACTION_DEADLINE_MS = 60_000;
+
+/**
+ * Wait for the Cloud API Action a DNS write returned to finish. This awaits
+ * completion against a fixed deadline; it does not re-issue the write.
+ *
+ * @param {string} apiToken
+ * @param {{ id: number|string, status?: string, error?: { message?: string } }|undefined} action
+ * @returns {Promise<void>}
+ */
+async function awaitAction(apiToken, action) {
+  if (!action || action.id == null || action.status === 'success') return;
+  const deadline = Date.now() + ACTION_DEADLINE_MS;
+  let current = action;
+  while (true) {
+    if (current.status === 'error') {
+      throw new Error(
+        `Hetzner DNS action ${action.id} failed: ${current.error?.message || 'unknown error'}`,
+      );
+    }
+    if (current.status === 'success') return;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Hetzner DNS action ${action.id} did not finish within ${ACTION_DEADLINE_MS / 1000}s`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, ACTION_POLL_MS));
+    const response = await fetchWithRetry(`${API_BASE}/actions/${action.id}`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(
+        `Hetzner DNS API error: ${error.error?.message || response.statusText} (HTTP ${response.status}) while waiting on action ${action.id}`,
+      );
+    }
+    current = (await response.json()).action ?? current;
+  }
+}
+
 /**
  * Convert an FQDN to a zone-relative name for the Hetzner DNS API.
  *
@@ -213,6 +257,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
       );
       if (setResponse.ok) {
         const data = await setResponse.json().catch(() => ({}));
+        await awaitAction(apiToken, data.action);
         return data.rrset ?? { name: relativeName, type, ttl, records: [{ value }] };
       }
       // Fall through to delete + create — better a brief gap than a failure.
@@ -230,6 +275,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
         `Failed to remove existing DNS record: ${error.error?.message || delResponse.statusText}`,
       );
     }
+    await awaitAction(apiToken, (await delResponse.json().catch(() => ({}))).action);
   }
 
   // Create new rrset
@@ -253,23 +299,26 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   }
 
   const data = await response.json();
+  await awaitAction(apiToken, data.action);
   return data.rrset;
 }
 
 /**
- * Read the A record's current target, for verifying a flip. Null when the
+ * Read every A record target at a name, for verifying a flip. Empty when the
  * name has no A rrset.
  *
  * @param {string} apiToken
  * @param {string} zoneId - Zone ID
  * @param {string} name - Record name (FQDN)
- * @returns {Promise<string|null>}
+ * @returns {Promise<string[]>}
  */
 export async function readARecord(apiToken, zoneId, name) {
   const zoneName = await zoneNameForId(apiToken, zoneId);
   const relativeName = fqdnToRelative(name, zoneName);
   const rrsets = await getRrsets(apiToken, zoneId);
-  return rrsets.find((r) => r.type === 'A' && r.name === relativeName)?.records?.[0]?.value ?? null;
+  return rrsets
+    .filter((r) => r.type === 'A' && r.name === relativeName)
+    .flatMap((r) => (r.records ?? []).map((rec) => rec.value));
 }
 
 /**

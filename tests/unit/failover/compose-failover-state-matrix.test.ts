@@ -991,4 +991,28 @@ describe('failoverComposeHA DNS flip is verified (R5)', () => {
       dnsToken = 'dns-token';
     }
   });
+
+  it('rerunning failover after a DNS-failed (swap-persisted) failover is refused before any mutation', async () => {
+    const first = await run({
+      envConfig: managedDns(),
+      dnsFlip: { ok: false, reason: 'app.example.com reads back as 10.0.0.1, not 10.0.0.2' },
+    });
+    expect(first.thrown?.message).toMatch(/DNS DID NOT/);
+    expect(first.order).toContain('swap');
+    sshCalls.length = 0; // the first run's remote commands are not the rerun's
+    const rerun = await run({
+      envConfig: baseEnvConfig({
+        domain: 'app.example.com',
+        dns: { provider: 'cloudflare', zoneId: 'z1' },
+        lastFailover: '2026-10-05T00:00:00.000Z',
+        servers: [
+          { role: 'primary', ip: PRIMARY_IP, region: 'nbg1' },
+          { role: 'standby', ip: STANDBY_IP, region: 'ash' },
+        ],
+      }),
+    });
+    expect(rerun.thrown).toBeInstanceOf(FailoverRefusedError);
+    expect(rerun.thrown?.message).toMatch(/vibecarbon deploy/);
+    expectNoMutation(rerun.order);
+  });
 });

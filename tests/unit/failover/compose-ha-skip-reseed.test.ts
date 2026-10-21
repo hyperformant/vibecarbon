@@ -118,7 +118,7 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
       upsertApexAndWildcard: async (_auth: unknown, _domain: string, ip: string) => {
         dnsHeld = ip;
       },
-      readARecord: async () => dnsHeld,
+      readARecord: async () => (dnsHeld ? [dnsHeld] : []),
     }),
   };
 });

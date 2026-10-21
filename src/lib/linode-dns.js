@@ -321,19 +321,19 @@ export async function createDNSRecord(apiToken, zoneId, config) {
 }
 
 /**
- * Read the A record's current target, for verifying a flip. Null when the
- * name has no A record.
+ * Read every A record target at a name, for verifying a flip. Empty when the
+ * name has no A record; a stale second value must stay visible.
  *
  * @param {string} apiToken
  * @param {string} zoneId - Zone identity
  * @param {string} name - Record name (FQDN)
- * @returns {Promise<string|null>}
+ * @returns {Promise<string[]>}
  */
 export async function readARecord(apiToken, zoneId, name) {
   const zoneName = await getZoneName(apiToken, zoneId);
   const records = await getRecords(apiToken, zoneId);
   const fqdn = String(name).replace(/\.$/, '');
-  return matching(records, fqdnToRelative(name, zoneName), fqdn, 'A')[0]?.target ?? null;
+  return matching(records, fqdnToRelative(name, zoneName), fqdn, 'A').map((r) => r.target);
 }
 
 /**
