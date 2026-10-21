@@ -162,6 +162,22 @@ export function composeHaRoleSwapMessage(detail) {
 }
 
 /**
+ * Today's supported way back to two nodes after a compose-HA failover: rebuild
+ * the environment from its backups. destroy keeps the backup bucket by default,
+ * so the new deploy can restore the promoted node's data. The one place this
+ * path is spelled, so a later change to it lands everywhere at once.
+ *
+ * @param {string} environment
+ * @returns {string[]}
+ */
+export const COMPOSE_HA_SWAPPED_RECOVERY = (environment) => [
+  'To get back to two nodes, rebuild the environment from its backups:',
+  `  1. vibecarbon destroy ${environment}   (the backup bucket is kept by default)`,
+  `  2. vibecarbon deploy ${environment}`,
+  `  3. vibecarbon restore ${environment}`,
+];
+
+/**
  * Render the failover refusal (R4). A second compose-HA failover on a swapped
  * environment would aim the reseed at the retired node: WireGuard gives the
  * primary tunnel address to the node BORN as the primary, and that address is
@@ -182,9 +198,10 @@ export function composeHaFailoverRefusalMessage(detail) {
     '',
     "The replication tunnel still gives the primary's address to the node born as the",
     `primary, which is the retired node ${retiredIp}. A second failover would re-seed it`,
-    `from its own address and promote a database frozen at the last failover, so`,
-    'compose-HA failover is one-way until the environment is rebuilt: destroy the',
-    'retired node and redeploy. see the operational notes in docs/rto-rpo.md.',
+    'from its own address and promote a database frozen at the last failover, so',
+    'compose-HA failover is one-way.',
+    '',
+    ...COMPOSE_HA_SWAPPED_RECOVERY(environment),
   ].join('\n');
 }
 

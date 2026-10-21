@@ -89,7 +89,7 @@ interface RunOpts {
   /** The promote seam throws instead of returning a verdict. */
   promoteThrows?: boolean;
   /** What the promote seam resolves to. */
-  promoteVerdict?: 'promoted' | 'unknown';
+  promoteVerdict?: 'promoted' | 'not-issued' | 'unknown';
   /** Flags as parsed from the command line (-force-unproven, -allow-degraded, -y). */
   flags?: { forceUnproven?: boolean; allowDegraded?: boolean; yes?: boolean };
   /** The system identifier the reseed seam reports through onSeeded (null: no reseed ran). */
@@ -405,6 +405,29 @@ describe('failoverHA state matrix', () => {
     expect(order).not.toContain('saveConfig');
   });
 
+  it("first run, promote 'not-issued': un-quiesces, clears the journal and exits with the cause", async () => {
+    const { order, thrown } = await run({ promoteVerdict: 'not-issued' });
+    expect(order.filter((st) => st === 'unquiesce')).toHaveLength(1);
+    expect(order).toContain('clearJournal');
+    expect(order.indexOf('clearJournal')).toBeGreaterThan(order.indexOf('promote'));
+    expect(thrown?.message).toMatch(/no promote was sent/);
+    expect(order).not.toContain('dns');
+    expect(order).not.toContain('saveConfig');
+  });
+
+  it("resumed run, promote 'not-issued': an earlier run's promote may land, so it stays fenced", async () => {
+    const { order, thrown } = await run({
+      promoteVerdict: 'not-issued',
+      envConfig: baseEnvConfig({
+        ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
+      }),
+    });
+    expect(order).toContain('promote');
+    expect(order).not.toContain('unquiesce');
+    expect(order).not.toContain('clearJournal');
+    expect(thrown?.message).toMatch(/kept fenced/);
+  });
+
   it("a 'promoted' verdict proceeds: promoteStandby owns the deadline, the caller does not re-time it", async () => {
     const { order, thrown } = await run({ promoteVerdict: 'promoted' });
     expect(thrown).toBeUndefined();
@@ -651,10 +674,10 @@ describe('promoteStandby (tri-state, deadline not poll count)', () => {
     expect(argv.join(' ')).toContain('pg_ctl promote');
   });
 
-  it("a first out-of-recovery read is 'unknown' and never issues pg_ctl promote", async () => {
+  it("a first out-of-recovery read is 'not-issued' and never issues pg_ctl promote", async () => {
     const readState = readSeq([false]);
     const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...fakeTime() });
-    expect(verdict).toBe('unknown');
+    expect(verdict).toBe('not-issued');
     expect(ssh.sshKubectl).not.toHaveBeenCalled();
   });
 
@@ -691,9 +714,16 @@ describe('promoteStandby (tri-state, deadline not poll count)', () => {
     expect(ssh.sshKubectl).not.toHaveBeenCalled();
   });
 
-  it("promoteStandby never answers 'in-recovery' (nothing un-fences once a failover is journaled)", () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/replication.js'), 'utf-8');
-    expect(src).not.toMatch(/return 'in-recovery'/);
+  it('the deadline runs from before the first read, so it bounds the whole promote window', async () => {
+    const time = fakeTime();
+    const readState = vi.fn(async () => {
+      await time.sleep(PROMOTE_DEADLINE_MS / 2);
+      return { inRecovery: true };
+    });
+    const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...time });
+    expect(verdict).toBe('unknown');
+    // pre-read (60 s) + one post-issue read (60 s) reaches the deadline.
+    expect(readState).toHaveBeenCalledTimes(2);
   });
 
   it("an unreadable state at the deadline is 'unknown'", async () => {

@@ -16,6 +16,9 @@
  * The guard reads, reseed, journal, promote, fence and swap are injected seams;
  * the post-promote steps run against the mocked compose ssh layer.
  */
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sshCalls: Array<{ ip: string; command: string }> = [];
@@ -59,7 +62,7 @@ vi.mock('node:fs', async (orig) => {
 });
 
 const composeSsh = await import('../../../src/lib/deploy/compose/index.js');
-const { failoverComposeHA, promoteComposeStandby } = await import(
+const { failoverComposeHA, promoteComposeStandby, swapComposeHaRoles } = await import(
   '../../../src/lib/deploy/compose/ha.js'
 );
 const { FailoverRefusedError } = await import('../../../src/lib/deploy/failover-guard.js');
@@ -115,7 +118,7 @@ interface RunOpts {
   /** The standby's reading after a reseed (default: the same database, in recovery). */
   seededState?: State;
   primaryState?: State;
-  promoteVerdict?: 'promoted' | 'unknown';
+  promoteVerdict?: 'promoted' | 'not-issued' | 'unknown';
   promoteThrows?: boolean;
   flags?: { forceUnproven?: boolean; allowDegraded?: boolean };
   /** Pass no seams at all (the real ssh-backed defaults run). */
@@ -156,6 +159,9 @@ async function run(opts: RunOpts = {}) {
     recordSeeded: (_ctx: unknown, sysid: string) => {
       order.push('recordSeeded');
       captured.recordedSysid = sysid;
+    },
+    clearJournal: async () => {
+      order.push('clearJournal');
     },
     writeJournal: async (_ctx: unknown, journal: Record<string, unknown>) => {
       order.push('journal');
@@ -334,6 +340,47 @@ describe('failoverComposeHA state matrix', () => {
     expect(sshCalls.some((c) => c.command.includes('docker restart'))).toBe(false);
   });
 
+  it("first run, promote 'not-issued': no fence, journal cleared, non-zero exit naming the cause", async () => {
+    const { order, thrown } = await run({ promoteVerdict: 'not-issued' });
+    expect(order).not.toContain('fence');
+    expect(order).toContain('clearJournal');
+    expect(order.indexOf('clearJournal')).toBeGreaterThan(order.indexOf('promote'));
+    expect(order).not.toContain('swap');
+    expect(thrown?.message).toMatch(/no promote was sent/);
+    expect(thrown?.message).toContain(STANDBY_IP);
+    expect(sshCalls.some((c) => c.command.includes('docker restart'))).toBe(false);
+  });
+
+  it("resumed run, promote 'not-issued': an earlier run's promote may land, so it fences and keeps the journal", async () => {
+    const { order, thrown } = await run({
+      promoteVerdict: 'not-issued',
+      envConfig: baseEnvConfig({
+        ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
+      }),
+    });
+    expect(order).toContain('fence');
+    expect(order).not.toContain('clearJournal');
+    expect(order).not.toContain('swap');
+    expect(thrown?.message).toMatch(/kept fenced/);
+  });
+
+  it('resume keeps the override the proof-skipping run recorded', async () => {
+    const { captured, thrown } = await run({
+      standbyState: replica({ inRecovery: false, receiverStatus: null }),
+      envConfig: baseEnvConfig({
+        ha: {
+          failoverInFlight: {
+            target: 'standby',
+            systemIdentifier: SYSID,
+            override: 'force-unproven',
+          },
+        },
+      }),
+    });
+    expect(thrown).toBeUndefined();
+    expect(captured.swapOverride).toBe('force-unproven');
+  });
+
   it('a thrown promote is unconfirmed too: fenced, journal kept, no swap', async () => {
     const { order, thrown } = await run({ promoteThrows: true });
     expect(order).toContain('fence');
@@ -399,7 +446,9 @@ describe('failoverComposeHA on a role-swapped env (C2)', () => {
     expect(thrown?.message).toMatch(/swapped/);
     expect(thrown?.message).toMatch(/second failover/);
     expect(thrown?.message).toContain(PRIMARY_IP);
-    expect(thrown?.message).toMatch(/redeploy/);
+    expect(thrown?.message).toContain('vibecarbon destroy prod');
+    expect(thrown?.message).toContain('vibecarbon deploy prod');
+    expect(thrown?.message).toContain('vibecarbon restore prod');
     expect(thrown?.message).not.toMatch(/—/);
     expect(composeSsh.sshRun).not.toHaveBeenCalled();
     expect(composeSsh.sshRunAsync).not.toHaveBeenCalled();
@@ -450,13 +499,21 @@ describe('promoteComposeStandby (proof, not inference)', () => {
     expect(promotes()[0].ip).toBe(STANDBY_IP);
   });
 
-  it("a standby already out of recovery is 'unknown' and pg_promote is never sent", async () => {
+  it("a standby already out of recovery is 'not-issued' and pg_promote is never sent", async () => {
     const verdict = await promoteComposeStandby(STANDBY_IP, '/k', '/opt/myapp', {
       readState: readSeq([false]),
       ...fakeTime(),
     });
-    expect(verdict).toBe('unknown');
+    expect(verdict).toBe('not-issued');
     expect(promotes()).toEqual([]);
+  });
+
+  it('sends pg_promote without a server-side wait, so the one deadline bounds the window', async () => {
+    await promoteComposeStandby(STANDBY_IP, '/k', '/opt/myapp', {
+      readState: readSeq([true, false]),
+      ...fakeTime(),
+    });
+    expect(promotes()[0].command).toContain('pg_promote(wait => false)');
   });
 
   it("still in recovery at the deadline is 'unknown', with one pg_promote and no retry", async () => {
@@ -475,5 +532,42 @@ describe('promoteComposeStandby (proof, not inference)', () => {
       ...fakeTime(),
     });
     expect(verdict).toBe('promoted');
+  });
+});
+
+describe('swapComposeHaRoles (the terminal save)', () => {
+  let dir: string;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('flips the roles in place, marks replication degraded and clears the journal in one save', () => {
+    dir = mkdtempSync(join(tmpdir(), 'vc-compose-swap-'));
+    const env = baseEnvConfig({
+      ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
+    });
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({ projectName: 'myapp', environments: { prod: env } }),
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+
+    swapComposeHaRoles('prod', { override: 'force-unproven' });
+
+    const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments
+      .prod;
+    expect(saved.servers.map((sv: { name: string; role: string }) => [sv.name, sv.role])).toEqual([
+      ['myapp-prod-primary', 'standby'],
+      ['myapp-prod-standby', 'primary'],
+    ]);
+    expect(saved.region).toBe('ash');
+    expect(saved.secondaryRegion).toBe('nbg1');
+    expect(saved.replication).toBe('degraded');
+    expect(saved.degraded).toBe(true);
+    expect(saved.ha.failoverInFlight).toBeUndefined();
+    expect(saved.ha.systemIdentifier).toBe(SYSID);
+    expect(saved.lastFailoverOverride).toBe('force-unproven');
+    expect(typeof saved.lastFailover).toBe('string');
   });
 });

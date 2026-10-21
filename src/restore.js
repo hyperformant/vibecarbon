@@ -31,12 +31,13 @@ import { c } from './lib/colors.js';
 // while still accepting injected mocks for unit tests.
 import { configureStandbyReplication as realConfigureStandbyReplication } from './lib/deploy/compose/ha.js';
 import {
+  COMPOSE_HA_SWAPPED_RECOVERY,
   composeHaStandbyResyncHint,
   detectComposeHaRoleSwap,
 } from './lib/deploy/compose/ha-role-swap.js';
 import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index.js';
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
-import { recordSystemIdentifier } from './lib/deploy/failover-guard.js';
+import { recordSystemIdentifier, swappedSinceLastDeploy } from './lib/deploy/failover-guard.js';
 import {
   ensureReplicationSlot as realEnsureReplicationSlot,
   readK8sReplicationState as realReadK8sReplicationState,
@@ -583,6 +584,18 @@ export async function runComposeRestore({
         'Primary restored and serving. Skipping the standby re-seed: this environment ' +
           'failed over, and the re-seed would copy the retired node from its own address. ' +
           composeHaStandbyResyncHint({ projectName, environment: envName, envConfig }),
+      );
+    } else if (swappedSinceLastDeploy(envConfig)) {
+      // An older config without stack names: the detector cannot read the
+      // roles against the stacks, but a failover after the last deploy says the
+      // same thing.
+      p.log.warn(
+        [
+          'Primary restored and serving. Skipping the standby re-seed: this environment ' +
+            `failed over (${envConfig.lastFailover}) after its last deploy, and the re-seed ` +
+            'would copy the retired node from its own address.',
+          ...COMPOSE_HA_SWAPPED_RECOVERY(envName),
+        ].join('\n'),
       );
     } else if (standby?.ip) {
       try {

@@ -22,7 +22,9 @@ import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import {
   assertFailoverPreconditions,
+  clearFailoverJournal,
   confirmUnprovenFailover,
+  promotionNotIssuedMessage,
   promotionUnknownMessage,
   readReplicaState,
   recordSystemIdentifier,
@@ -1412,6 +1414,7 @@ export async function failoverHA(
     catchUp = waitForStandbyCaughtUp,
     reseed = reseedStandbyOrAbort,
     writeJournal = writeFailoverJournal,
+    clearJournal = clearFailoverJournal,
     promote = (srv, key) => promoteStandbyDatabase(srv.standby.ip, key),
     confirmUnproven = confirmUnprovenFailover,
     restoreWalgRole = restorePromotedWalgRole,
@@ -1516,6 +1519,9 @@ export async function failoverHA(
   const planned = await isPrimaryReady(servers.primary.ip, sshKeyPath);
   const standbyState = await readStandbyState(servers, sshKeyPath);
   const primaryState = planned ? await readPrimaryState(servers, sshKeyPath) : null;
+  // Whether an earlier run left a journal: only without one can a promote this
+  // run never sent prove that nothing will promote the standby.
+  const journalAtEntry = !!envConfig?.ha?.failoverInFlight;
   const { mode, unproven } = assertFailoverPreconditions({
     envConfig,
     environment: envName,
@@ -1568,10 +1574,12 @@ export async function failoverHA(
   /**
    * STEP 4: final catch-up gate, re-seed, journal, promote. Until the journal is
    * written nothing is promoted, so any throw un-quiesces the primary (planned)
-   * and aborts. From the journal write on nothing un-fences it (R3): anything but
-   * a proven 'promoted' keeps the old primary fenced, leaves the journal set and
-   * exits non-zero, and the rerun resumes from the journal. Even a promote this
-   * run never issued proves nothing, since a previous run's may still be landing.
+   * and aborts. From the journal write on only two verdicts are answers (R3): a
+   * proven 'promoted', and a 'not-issued' (this run sent nothing) on a run that
+   * started with no journal, which clears the journal and un-quiesces. Anything
+   * else keeps the old primary fenced, leaves the journal set and exits
+   * non-zero, and the rerun resumes from the journal. With a journal from an
+   * earlier run, 'not-issued' proves nothing: that run's promote may be landing.
    */
   async function catchUpReseedAndPromote() {
     const unquiesce = async () => {
@@ -1640,6 +1648,15 @@ export async function failoverHA(
     if (verdict === 'promoted') {
       s.stop('Standby database promoted to primary');
       return;
+    }
+    // 'not-issued' un-fences only when this run started with no journal: then
+    // nothing anywhere asked the standby to promote. With a journal from an
+    // earlier run, its promote may still be landing, so it reads as 'unknown'.
+    if (verdict === 'not-issued' && !journalAtEntry) {
+      s.stop('Promote never sent, aborting failover');
+      await clearJournal({ environment: envName });
+      await unquiesce();
+      throw new Error(promotionNotIssuedMessage(envName, servers.standby.ip));
     }
     s.stop('Promotion could not be confirmed, old primary kept fenced');
     throw new Error(promotionUnknownMessage(envName));
@@ -1759,7 +1776,13 @@ export async function failoverHA(
   // unswapped config), so a mid-flow crash re-runs the SAME failover, and the
   // journal written before the promote lets that rerun resume instead of
   // promoting again. The same save clears the journal. One write, here.
-  swapRoles(envName, unproven ? { override: 'force-unproven' } : undefined);
+  // On resume the override was recorded by the run that skipped the proof.
+  const override = unproven
+    ? 'force-unproven'
+    : mode === 'resume'
+      ? envConfig?.ha?.failoverInFlight?.override
+      : undefined;
+  swapRoles(envName, override ? { override } : undefined);
 
   if (strategy.updateDns) {
     p.log.success('Failover complete');

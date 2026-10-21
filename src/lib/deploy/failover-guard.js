@@ -83,7 +83,7 @@ export async function readReplicaState({ exec }) {
 }
 
 /** True when a failover swapped the roles and no deploy has reconverged since. */
-function swappedSinceLastDeploy(envConfig) {
+export function swappedSinceLastDeploy(envConfig) {
   if (!envConfig?.lastFailover) return false;
   const failedOverAt = Date.parse(envConfig.lastFailover);
   const deployedAt = Date.parse(envConfig.deployedAt ?? '');
@@ -320,5 +320,21 @@ export function promotionUnknownMessage(envName) {
   return (
     `promotion state unknown: old primary kept fenced; rerun vibecarbon failover ${envName} ` +
     `to finish`
+  );
+}
+
+/**
+ * The exit message for a promote that was never sent: the standby did not read
+ * as a replica right before it. Used only when this run started with no journal,
+ * so nothing anywhere has asked the standby to promote.
+ *
+ * @param {string} envName
+ * @param {string} standbyIp
+ */
+export function promotionNotIssuedMessage(envName, standbyIp) {
+  return (
+    `Failover aborted: the standby ${standbyIp} did not read as a replica right before ` +
+    `the promote, so no promote was sent and the old primary keeps serving. check the ` +
+    `standby db is up, then rerun vibecarbon failover ${envName}`
   );
 }

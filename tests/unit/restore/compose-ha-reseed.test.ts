@@ -206,4 +206,56 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
     expect(text).toMatch(/failover has swapped/);
     warn.mockRestore();
   });
+
+  it('skips the re-seed on an older config without stack names when a failover came after the last deploy', async () => {
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const s = makeSpinner();
+
+    await runComposeRestore({
+      ...baseArgs,
+      serverIp: '10.0.0.2',
+      s,
+      envConfig: {
+        deployMode: 'compose-ha',
+        deployedAt: '2026-10-01T00:00:00.000Z',
+        lastFailover: '2026-10-05T00:00:00.000Z',
+        servers: [
+          { ip: '10.0.0.1', role: 'standby' },
+          { ip: '10.0.0.2', role: 'primary' },
+        ],
+      },
+      restoreCompose,
+      configureStandbyReplication,
+    });
+
+    expect(configureStandbyReplication).not.toHaveBeenCalled();
+    const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(text).toMatch(/failed over .* after its last deploy/);
+    expect(text).toContain('vibecarbon destroy prod');
+    expect(text).toContain('vibecarbon restore prod');
+    warn.mockRestore();
+  });
+
+  it('still re-seeds when the last deploy came after the last failover (reconverged)', async () => {
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: {
+        deployMode: 'compose-ha',
+        deployedAt: '2026-10-06T00:00:00.000Z',
+        lastFailover: '2026-10-05T00:00:00.000Z',
+        servers: [
+          { ip: '10.0.0.1', role: 'primary' },
+          { ip: '10.0.0.2', role: 'standby' },
+        ],
+      },
+      restoreCompose,
+      configureStandbyReplication,
+    });
+    expect(configureStandbyReplication).toHaveBeenCalledOnce();
+  });
 });

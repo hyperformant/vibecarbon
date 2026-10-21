@@ -29,7 +29,9 @@ import { providerFor, providerIdFor } from '../../providers/index.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import {
   assertFailoverPreconditions,
+  clearFailoverJournal,
   confirmUnprovenFailover,
+  promotionNotIssuedMessage,
   promotionUnknownMessage,
   readReplicaState,
   recordSystemIdentifier,
@@ -1394,10 +1396,11 @@ export function composePsqlRunner(ip, sshKeyPath, remoteDir) {
 }
 
 /**
- * Promote the compose standby: SQL `pg_promote(wait => true)` in its db
+ * Promote the compose standby: SQL `pg_promote(wait => false)` in its db
  * container, proven by promoteWithProof (a reading in recovery right before the
- * call, then one out of recovery before the deadline). There is no retry and no
- * un-fence answer: anything short of that proof is 'unknown'.
+ * call, then one out of recovery before the deadline). No retry. `wait => false`
+ * returns once the request is signalled, so promoteWithProof's one deadline
+ * bounds the whole window (a server-side wait would stack a second budget on it).
  *
  * SQL, not `pg_ctl promote`: pg_ctl only writes the signal file and can no-op
  * against a postmaster that has not bound its socket yet (compose-ha
@@ -1408,7 +1411,7 @@ export function composePsqlRunner(ip, sshKeyPath, remoteDir) {
  * @param {string} sshKeyPath
  * @param {string} remoteDir
  * @param {object} opts - promoteWithProof's options, minus issuePromote
- * @returns {Promise<'promoted'|'unknown'>}
+ * @returns {Promise<'promoted'|'not-issued'|'unknown'>}
  */
 export async function promoteComposeStandby(standbyIp, sshKeyPath, remoteDir, opts = {}) {
   return promoteWithProof({
@@ -1417,8 +1420,8 @@ export async function promoteComposeStandby(standbyIp, sshKeyPath, remoteDir, op
       sshRun(
         standbyIp,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT pg_promote(wait => true, wait_seconds => 120)"`,
-        { silent: true, timeout: 150_000 },
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT pg_promote(wait => false)"`,
+        { silent: true, timeout: 30_000 },
       ),
   });
 }
@@ -1466,6 +1469,9 @@ export function swapComposeHaRoles(envName, { override } = {}) {
   envConfig.secondaryRegion = oldPrimary?.region ?? envConfig.region;
   envConfig.ha = { ...(envConfig.ha ?? {}), failoverRegion: envConfig.secondaryRegion };
   delete envConfig.ha.failoverInFlight;
+  // Honest DR posture, as k8s swapHaRoles: the retired node replicates nothing.
+  envConfig.replication = 'degraded';
+  envConfig.degraded = true;
   envConfig.lastFailover = new Date().toISOString();
   if (override) envConfig.lastFailoverOverride = override;
   else delete envConfig.lastFailoverOverride;
@@ -1480,8 +1486,10 @@ export function swapComposeHaRoles(envName, { override } = {}) {
  *
  * Refuses a role-swapped environment before any ssh call (R4), and decides
  * promote, resume or refuse from the guard before any write (R1). Once the
- * journal is written nothing un-fences: a promote that cannot be proven stops
- * the old primary's app and exits non-zero, and the rerun resumes (R3).
+ * journal is written, a promote that cannot be proven stops the old primary's
+ * app and exits non-zero, and the rerun resumes (R3). The one exception is a
+ * promote this run never sent on a run that started with no journal: then the
+ * journal is cleared and the old primary is left serving.
  * `app-migrate` is never re-run here: the promoted standby replicated an
  * already-migrated primary.
  *
@@ -1508,6 +1516,7 @@ export async function failoverComposeHA(
     reseed = configureStandbyReplication,
     recordSeeded = recordSystemIdentifier,
     writeJournal = writeFailoverJournal,
+    clearJournal = clearFailoverJournal,
     promote = promoteComposeStandby,
     fenceOldPrimary = stopOldPrimaryApp,
     confirmUnproven = confirmUnprovenFailover,
@@ -1571,6 +1580,9 @@ export async function failoverComposeHA(
   const planned = await primaryReachable(primaryServer.ip, sshKeyPath, remoteDir);
   const standbyState = await readStandby();
   const primaryState = planned ? await readState(primaryServer.ip, sshKeyPath, remoteDir) : null;
+  // Whether an earlier run left a journal: only without one can a promote this
+  // run never sent prove that nothing will promote the standby.
+  const journalAtEntry = !!envConfig?.ha?.failoverInFlight;
   const { mode, unproven } = assertFailoverPreconditions({
     envConfig,
     environment: envName,
@@ -1631,7 +1643,8 @@ export async function failoverComposeHA(
     }
 
     // Step 1: journal, then promote (R2, R3). The journal goes down right before
-    // the promote; from here on nothing un-fences the old primary.
+    // the promote; from here on only a never-sent promote on a run that started
+    // without a journal leaves the old primary untouched.
     await writeJournal(
       { environment: envName },
       {
@@ -1648,7 +1661,16 @@ export async function failoverComposeHA(
     } catch {
       verdict = 'unknown';
     }
+    if (verdict === 'not-issued' && !journalAtEntry) {
+      // Nothing was sent and no earlier run journaled a promote: the standby is
+      // not promoting, so the old primary keeps serving untouched.
+      s.stop('Promote never sent, aborting failover');
+      await clearJournal({ environment: envName });
+      throw new Error(promotionNotIssuedMessage(envName, standbyServer.ip));
+    }
     if (verdict !== 'promoted') {
+      // 'unknown', or 'not-issued' with an earlier run's journal (its promote
+      // may still be landing).
       s.stop('Promotion could not be confirmed, fencing the old primary');
       // The standby may yet promote: stop the old primary's writers so the two
       // sides never both serve. DNS is not flipped and the journal stays set.
@@ -1879,7 +1901,14 @@ export async function failoverComposeHA(
   }
 
   // Persist the swap; the same save clears the failover journal (R2).
-  swapRoles(envName, { override: unproven ? 'force-unproven' : undefined });
+  // On resume the override was recorded by the run that skipped the proof.
+  swapRoles(envName, {
+    override: unproven
+      ? 'force-unproven'
+      : mode === 'resume'
+        ? envConfig?.ha?.failoverInFlight?.override
+        : undefined,
+  });
 
   p.log.success('Failover complete');
   // The roles persisted above are now inverted relative to the Pulumi stacks,

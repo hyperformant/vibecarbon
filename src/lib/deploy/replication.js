@@ -1719,16 +1719,17 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
  * Issue a promote and prove it landed, for any transport. The verdict:
  *   - 'promoted': it was read IN recovery immediately before the promote was
  *     issued, then read out of it before the deadline;
- *   - 'unknown': anything else. That includes a first reading that is not
- *     in recovery (no proof THIS call would promote it, so nothing is issued),
- *     an issue that throws, and any deadline without a proven out-of-recovery
+ *   - 'not-issued': the reading right before the issue was not in recovery (or
+ *     unreadable), so this call sent nothing. That proves nothing about an
+ *     earlier run's promote: a caller may un-fence on it only when its run
+ *     started with no failover journal;
+ *   - 'unknown': everything after the issue that is not a proven promote: an
+ *     issue that throws, and any deadline without a proven out-of-recovery
  *     reading. An issued promote cannot be taken back: postgres deletes
  *     promote.signal itself when it accepts the request and still reads in
  *     recovery while it finishes, so a late "still in recovery" proves nothing.
  *
- * There is no un-fence answer. Even a promote this call never issued proves
- * nothing on a rerun, since a previous run's promote may still be landing. On
- * 'unknown' the caller keeps the old primary fenced and its journal set, and
+ * On 'unknown' the caller keeps the old primary fenced and its journal set, and
  * the rerun finishes the job (R3).
  *
  * @param {object} opts
@@ -1737,11 +1738,12 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
  *   lives there and nowhere else)
  * @param {() => Promise<unknown>} opts.issuePromote - sends the promote; its
  *   result is ignored (the reads decide)
- * @param {number} [opts.deadlineMs]
  * @param {number} [opts.pollMs]
  * @param {() => number} [opts.now]
  * @param {(ms: number) => Promise<void>} [opts.sleep]
- * @returns {Promise<'promoted'|'unknown'>}
+ * @param {number} [opts.deadlineMs] - measured from before the first read, so
+ *   it bounds the whole promote window
+ * @returns {Promise<'promoted'|'not-issued'|'unknown'>}
  */
 export async function promoteWithProof({
   readState,
@@ -1765,7 +1767,8 @@ export async function promoteWithProof({
     }
   };
 
-  if ((await read()) !== true) return 'unknown';
+  const deadline = now() + deadlineMs;
+  if ((await read()) !== true) return 'not-issued';
 
   try {
     await issuePromote();
@@ -1776,7 +1779,6 @@ export async function promoteWithProof({
 
   // From here on a promote may land at any time: only a proven out-of-recovery
   // reading is an answer, and the deadline without one is 'unknown'.
-  const deadline = now() + deadlineMs;
   for (;;) {
     if ((await read()) === false) return 'promoted';
     if (now() >= deadline) return 'unknown';
@@ -1787,12 +1789,12 @@ export async function promoteWithProof({
 /**
  * Promote the standby database (k8s transport): `pg_ctl promote` in its db pod,
  * proven by promoteWithProof. A db pod that cannot be resolved is 'unknown' like
- * any other unconfirmed promote, never an un-fence.
+ * any other failed issue: the pod lookup is part of the issue.
  *
  * @param {string} standbyIp
  * @param {string} sshKeyPath
  * @param {object} opts - promoteWithProof's options, minus issuePromote
- * @returns {Promise<'promoted'|'unknown'>}
+ * @returns {Promise<'promoted'|'not-issued'|'unknown'>}
  */
 export async function promoteStandby(standbyIp, sshKeyPath, opts = {}) {
   if (typeof opts.readState !== 'function') {

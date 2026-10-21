@@ -173,7 +173,10 @@ A second `vibecarbon failover` is refused the same way, before any ssh call, and
 re-seed the node that now carries role `standby`, the retired born-primary, and
 the replication tunnel still gives that node the primary's WireGuard address,
 which is what the re-seed dials: it would copy the retired node from itself.
-Compose-HA failover is one-way until the environment is rebuilt.
+Compose-HA failover is one-way. Today the way back to two nodes is to rebuild
+the environment from its backups: `vibecarbon destroy <env>` (it keeps the
+backup bucket by default), then `vibecarbon deploy <env>`, then
+`vibecarbon restore <env>`.
 
 What the environment's DR posture actually is while it sits in that state:
 
