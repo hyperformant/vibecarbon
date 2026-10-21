@@ -257,6 +257,13 @@ describe('deploy wires both checks (census)', () => {
   it('orchestrator lifts a stranded marker at entry and probes the role primary after bring-up', () => {
     const src = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf-8');
     const entry = src.indexOf('await liftStrandedFenceAtEntry({');
+    // A journaled scale cutover is refused before the lift ever reads the marker.
+    expect(
+      src.indexOf("assertNoScaleCutoverInFlight({ environment, envConfig, action: 'deploy' })"),
+    ).toBeGreaterThan(-1);
+    expect(
+      src.indexOf("assertNoScaleCutoverInFlight({ environment, envConfig, action: 'deploy' })"),
+    ).toBeLessThan(entry);
     const roleSwap = src.indexOf(
       'assertNoComposeHaRoleSwap({ projectName: projectConfig.projectName',
     );

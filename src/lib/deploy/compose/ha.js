@@ -88,6 +88,7 @@ import {
   wgIpOf,
 } from '../wireguard.js';
 import {
+  assertNoScaleCutoverInFlight,
   clearWriteFenceMarker,
   liftStrandedWriteFence,
   writeWriteFenceMarker,
@@ -1916,6 +1917,8 @@ export async function failoverComposeHA(
   // call, a dry run included. A reconverged pair passes: the reseed below dials
   // the role primary's own tunnel address.
   assertNoComposeHaRoleSwap({ projectName, environment: envName, envConfig });
+  // A compose scale stopped mid-cutover may have moved the primary already.
+  assertNoScaleCutoverInFlight({ environment: envName, envConfig, action: 'fail over' });
 
   const {
     keyExists = existsSync,

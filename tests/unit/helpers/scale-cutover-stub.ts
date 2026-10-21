@@ -26,3 +26,23 @@ export function stubScaleCutover<T extends Record<string, unknown>>(
 export function stubDemote<T extends Record<string, unknown>>(actual: T) {
   return { ...actual, demoteComposeWalgRole: async () => true };
 }
+
+/**
+ * The write-fence marker and cutover journal, stubbed: they write the
+ * project config, which these tests do not have.
+ */
+export function stubWriteFence<T extends Record<string, unknown>>(actual: T) {
+  return {
+    ...actual,
+    writeWriteFenceMarker: () => {},
+    clearWriteFenceMarker: () => {},
+    writeScaleCutoverJournal: () => {},
+    markScaleCutoverStep: () => {},
+    clearScaleCutoverJournal: () => {},
+  };
+}
+
+/** The project config, stubbed: no file is read or written. */
+export function stubProjectConfig<T extends Record<string, unknown>>(actual: T) {
+  return { ...actual, loadProjectConfig: () => null, saveProjectConfig: () => {} };
+}

@@ -68,7 +68,11 @@ import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retire
 import { envS3Record } from './s3-record.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
-import { assertRolePrimaryWritable, liftStrandedWriteFence } from './write-fence.js';
+import {
+  assertNoScaleCutoverInFlight,
+  assertRolePrimaryWritable,
+  liftStrandedWriteFence,
+} from './write-fence.js';
 
 /**
  * Probe the public /api/health endpoint to verify the app is reachable
@@ -683,6 +687,9 @@ export async function executeDeployment(args, gatheredConfig) {
   // A planned failover interrupted between its database write fence and its
   // journal, or a compose scale killed mid-cutover, left the primary read-only:
   // lift it before this deploy restarts the app onto it.
+  // A compose scale stopped mid-cutover: the config may still name the old
+  // server while DNS and the database moved. Only the scale resumes it.
+  assertNoScaleCutoverInFlight({ environment, envConfig, action: 'deploy' });
   await liftStrandedFenceAtEntry({
     tier,
     environment,

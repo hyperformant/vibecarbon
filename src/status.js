@@ -435,7 +435,9 @@ export function writeFenceRow(envConfig, replication) {
   if (!marker && replication?.writeFenced !== 'on') return null;
   const why = envConfig?.ha?.failoverInFlight
     ? 'a failover is in flight; vibecarbon failover finishes it'
-    : 'an interrupted failover or scale left it; vibecarbon deploy lifts it';
+    : marker?.cutover
+      ? 'a compose scale stopped mid-cutover; rerun vibecarbon scale to finish or roll it back'
+      : 'an interrupted failover or scale left it; vibecarbon deploy lifts it';
   return `database write-fenced: the primary refuses writes (${why})`;
 }
 

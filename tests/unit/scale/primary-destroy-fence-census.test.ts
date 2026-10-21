@@ -53,8 +53,12 @@ type Rule = 'fenced' | 'destroy' | 'no-database';
 /** Every top-level function under src/ that calls deleteServer, with its rule. */
 const SITES: Record<string, { rule: Rule; why: string }> = {
   'src/scale.js#scaleServers': {
+    rule: 'no-database',
+    why: 'the standby arm destroys the old standby, which ran no primary (the primary arm destroys through finishComposeCutover)',
+  },
+  'src/scale.js#finishComposeCutover': {
     rule: 'fenced',
-    why: 'the primary arm destroys the old primary only after its fence and a pushed final base; the standby arm destroys a standby',
+    why: 'the old primary goes only after its fence, a pushed final base restored on the new server, and the flip',
   },
   'src/scale.js#deleteUnusedReplacement': {
     rule: 'no-database',
@@ -119,8 +123,9 @@ describe('a server that ran a primary is destroyed only behind a pushed base', (
   });
 
   it('scale: the old primary is deleted after its write fence and a pushed final base', () => {
-    const body =
-      fns.find((f) => f.file === 'src/scale.js' && f.name === 'scaleServers')?.body ?? '';
+    const fn = (name: string) =>
+      fns.find((f) => f.file === 'src/scale.js' && f.name === name)?.body ?? '';
+    const body = fn('scaleServers');
     const arm = body.slice(
       body.indexOf('const scalePrimaryArm = async'),
       body.indexOf('const scaleStandbyArm = async'),
@@ -129,14 +134,27 @@ describe('a server that ran a primary is destroyed only behind a pushed base', (
     const backup = arm.indexOf('backupCompose(');
     const pushed = arm.indexOf("backup.result !== 'pushed'");
     const restore = arm.indexOf('restoreCompose(');
-    const destroyOld = arm.indexOf('provider.deleteServer(server.id)');
+    const journal = arm.indexOf('writeScaleCutoverJournal(');
+    const finish = arm.indexOf('finishComposeCutover(');
     expect(fence).toBeGreaterThan(-1);
     expect(fence).toBeLessThan(backup);
     expect(backup).toBeLessThan(pushed);
     expect(pushed).toBeLessThan(restore);
-    expect(restore).toBeLessThan(destroyOld);
-    // The arm's only other delete is the unused replacement's, in the rollback.
-    expect(arm.match(/deleteServer\(/g)?.length).toBe(1);
+    expect(restore).toBeLessThan(journal);
+    expect(journal).toBeLessThan(finish);
+    // The arm deletes nothing itself but the unused replacement, by its helper.
+    expect(arm).not.toMatch(/deleteServer\(/);
+    // The tail destroys the old server, and is reached only from that arm and
+    // the resume of a journaled cutover (whose fence and base already ran).
+    expect(fn('finishComposeCutover')).toMatch(/provider\.deleteServer\(server\.id\)/);
+    const callers = fns
+      .filter(
+        (f) => f.name !== 'finishComposeCutover' && /(?<![\w.])finishComposeCutover\(/.test(f.body),
+      )
+      .map((f) => `${f.file}#${f.name}`)
+      .sort();
+    expect(callers).toEqual(['src/scale.js#resumeComposeCutover', 'src/scale.js#scaleServers']);
+    expect(fn('resumeComposeCutover')).toMatch(/envConfig\.ha\.writeFence\.cutover/);
     // The standby arm deletes the old standby, never a primary.
     const standby = body.slice(body.indexOf('const scaleStandbyArm = async'));
     expect(standby).not.toMatch(/restoreCompose\(|backupCompose\(/);

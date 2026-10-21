@@ -58,6 +58,7 @@ import {
   verifyStreaming,
 } from './lib/deploy/replication.js';
 import { wgIpOf } from './lib/deploy/wireguard.js';
+import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
@@ -359,6 +360,9 @@ export async function run(args, deps = {}) {
   if (!values.l) {
     try {
       assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
+      // A compose scale stopped mid-cutover: the config may name the server
+      // the database is moving away from.
+      assertNoScaleCutoverInFlight({ environment: envName, envConfig, action: 'restore' });
     } catch (err) {
       p.log.error(err.message);
       process.exit(1);

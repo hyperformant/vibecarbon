@@ -132,7 +132,7 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
 
 vi.mock('../../../src/lib/deploy/write-fence.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, writeWriteFenceMarker: () => {}, clearWriteFenceMarker: () => {} };
+  return (await import('../helpers/scale-cutover-stub.js')).stubWriteFence(actual);
 });
 
 vi.mock('../../../src/lib/deploy/wireguard.js', async (orig) => {

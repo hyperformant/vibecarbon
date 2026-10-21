@@ -116,8 +116,8 @@ export function walArchivedThrough(lastArchived, switchWal) {
  *
  * @param {object} args
  * @param {string} args.environment
- * @param {string} [args.node] the old primary's servers[] name, for the marker
- * @param {string} args.ip the old primary
+ * @param {string} args.ip the old primary (the marker matches it by IP only:
+ *   the replacement keeps the servers[] name)
  * @param {string} args.sshKeyPath
  * @param {string} args.projectName
  * @param {string[]} args.services the enabled add-on names (enabledAddonNames)
@@ -127,7 +127,6 @@ export function walArchivedThrough(lastArchived, switchWal) {
  */
 export async function fenceComposePrimary({
   environment,
-  node,
   ip,
   sshKeyPath,
   projectName,
@@ -149,7 +148,7 @@ export async function fenceComposePrimary({
   const writers = composeWriterServices(services ?? []);
   // Recorded BEFORE anything is stopped or fenced: a kill from here on leaves
   // the record deploy's stranded-fence lift acts on.
-  writeMarker({ environment }, { node: node ?? ip, ip });
+  writeMarker({ environment }, { ip, source: 'scale' });
   const stop = await stopWriters(ip, sshKeyPath, projectName, writers);
   const stopped = stop?.stopped ?? [];
   try {

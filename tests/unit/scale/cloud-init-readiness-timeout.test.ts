@@ -86,6 +86,12 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) =>
   (await import('../helpers/scale-cutover-stub.js')).stubDemote(await orig()),
 );
 
+vi.mock('../../../src/lib/deploy/write-fence.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubWriteFence(await orig()),
+);
+vi.mock('../../../src/lib/config.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubProjectConfig(await orig()),
+);
 vi.mock('../../../src/lib/build.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return { ...actual, getGHCRCredentials: async () => ({}) };
@@ -127,6 +133,7 @@ function makeCtx(Provider: typeof HetznerProvider | typeof DigitalOceanProvider)
     dnsChallenge: true,
     dnsProvider: null,
     apiToken: 'tok',
+    projectConfig: { projectName: 'myapp', environments: {} },
     targetServers: [{ ip: '1.1.1.1', id: 'old-id' }],
   };
 }

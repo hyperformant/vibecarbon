@@ -27,6 +27,9 @@ const h = vi.hoisted(() => {
     // What the DNS provider reads back for apex and wildcard after a failed
     // update (null: the update succeeds).
     dnsReadBack: null as null | string[][],
+    // The DNS update's error (null: it succeeds), and a read-back that fails.
+    dnsError: null as null | string,
+    dnsUnreadable: false,
     saved: [] as unknown[],
   };
   return { events, state };
@@ -76,6 +79,15 @@ vi.mock('../../../src/lib/deploy/write-fence.js', async (orig) => {
     },
     clearWriteFenceMarker: () => {
       h.events.push('marker:clear');
+    },
+    writeScaleCutoverJournal: (_c: unknown, j: { oldIp: string; newIp: string }) => {
+      h.events.push(`journal:write:${j.oldIp}->${j.newIp}`);
+    },
+    markScaleCutoverStep: (_c: unknown, step: string) => {
+      h.events.push(`journal:done:${step}`);
+    },
+    clearScaleCutoverJournal: () => {
+      h.events.push('journal:clear');
     },
   };
 });
@@ -201,10 +213,12 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
     getDnsProvider: async () => ({
       upsertApexAndWildcard: async (_t: unknown, _d: string, ip: string) => {
         h.events.push(`dns:${ip}`);
-        if (h.state.dnsReadBack) throw new Error('dns api 500');
+        if (h.state.dnsError) throw new Error(h.state.dnsError);
       },
-      readARecord: async (_t: string, _z: string, name: string) =>
-        h.state.dnsReadBack?.[name.startsWith('*.') ? 1 : 0] ?? [],
+      readARecord: async (_t: string, _z: string, name: string) => {
+        if (h.state.dnsUnreadable) throw new Error('dns read 503');
+        return h.state.dnsReadBack?.[name.startsWith('*.') ? 1 : 0] ?? [];
+      },
     }),
   };
 });
@@ -219,7 +233,7 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
   return { ...actual, sshRun: async () => '', sshRunScript: async () => '' };
 });
 
-const { SCALE_EFFECTS } = await import('../../../src/scale.js');
+const { SCALE_EFFECTS, resumeComposeCutover } = await import('../../../src/scale.js');
 const { fenceComposePrimary } = await import('../../../src/lib/deploy/compose/scale-cutover.js');
 
 function makeCtx() {
@@ -270,6 +284,8 @@ function reset(failAt = '') {
   h.state.archived = '000000010000000000000003';
   h.state.failAt = failAt;
   h.state.dnsReadBack = null;
+  h.state.dnsError = null;
+  h.state.dnsUnreadable = false;
   h.state.saved.length = 0;
 }
 
@@ -377,6 +393,8 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
       'backup:1.1.1.1',
       `restore:9.9.9.9:${PUSHED}`,
       'cron:remove',
+      // The cutover journal, before the DNS call.
+      'journal:write:1.1.1.1->9.9.9.9',
       'dns:9.9.9.9',
       'log:paused',
       // M1: demoted only after the flip, so a rollback never follows a demote.
@@ -432,6 +450,7 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
 
   it('a DNS update that fails with every record still on the old server is before the flip: full rollback', async () => {
     reset();
+    h.state.dnsError = 'dns api 500';
     h.state.dnsReadBack = [['1.1.1.1'], ['1.1.1.1']];
     const { provider, ctx } = makeCtx();
     await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(/dns api 500/);
@@ -440,16 +459,41 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     expect(h.events).toContain('cron:install:1.1.1.1');
     expect(h.events).not.toContain('demote:1.1.1.1');
     expect(provider.deleteServer).toHaveBeenCalledWith('new-id');
-    // The new server is never recorded.
+    // The new server is never recorded, and the journal goes.
     expect(h.state.saved).toEqual([]);
+    expect(h.events).toContain('journal:clear');
   });
+
+  it.each([
+    ['the records cannot be read back', { dnsError: 'dns api 500', dnsUnreadable: true }],
+    [
+      'the update timed out (the provider may still apply it)',
+      { dnsError: 'action timed out', dnsReadBack: [['1.1.1.1'], ['1.1.1.1']] },
+    ],
+  ])(
+    'a DNS update whose outcome is unknown (%s) rolls nothing back and deletes nothing: the journal holds it for the resume',
+    async (_why, state) => {
+      reset();
+      Object.assign(h.state, state);
+      const { provider, ctx } = makeCtx();
+      await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+        /where the records point now is unknown: .*The old server 1\.1\.1\.1 stays write-fenced and the new server 9\.9\.9\.9 is kept; rerun vibecarbon scale prod to finish it/,
+      );
+      expect(h.events).not.toContain('unfence');
+      expect(h.events).not.toContain('journal:clear');
+      expect(h.events).not.toContain('marker:clear');
+      expect(provider.deleteServer).not.toHaveBeenCalled();
+      expect(h.state.saved).toEqual([]);
+    },
+  );
 
   it('a DNS update that fails part way goes forward: records the new server and names the records still to move', async () => {
     reset();
+    h.state.dnsError = 'dns api 500';
     h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
     const { provider, ctx } = makeCtx();
     await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
-      /the DNS update failed part way \(dns api 500\); still to point at 9\.9\.9\.9: \*\.example\.com \(now 1\.1\.1\.1\)\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced;/,
+      /the DNS update failed part way \(dns api 500\); still to point at 9\.9\.9\.9: \*\.example\.com \(now 1\.1\.1\.1\)\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced\. Still to run: the DNS flip, the old server's demote, the service recreate, the first base backup on the new timeline, the backup cron, the old server's destroy; rerun vibecarbon scale prod to finish it/,
     );
     expect(h.events).not.toContain('unfence');
     expect(provider.deleteServer).not.toHaveBeenCalled();
@@ -474,7 +518,7 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     reset('push');
     const { provider, ctx } = makeCtx();
     await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
-      /database to the new server 9\.9\.9\.9, then failed: push failed\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced and demoted/,
+      /database to the new server 9\.9\.9\.9, then failed: push failed\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced\. Still to run: the first base backup on the new timeline, the backup cron, the old server's destroy; rerun vibecarbon scale prod to finish it/,
     );
     expect(h.events).not.toContain('unfence');
     expect(h.events).not.toContain('rearm:1.1.1.1');
@@ -560,5 +604,91 @@ describe('removeComposeBackupCron', () => {
     await expect(
       removeComposeBackupCron('1.1.1.1', '/key', { run: async () => 'VC_CRON_REMOVED\n' }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('resumeComposeCutover (a scale stopped mid-cutover)', () => {
+  const journal = {
+    oldId: 'old-id',
+    oldIp: '1.1.1.1',
+    newServerId: 'new-id',
+    newIp: '9.9.9.9',
+    serverType: 'cpx31',
+    stopped: ['myapp-app'],
+    cronRemoved: true,
+    done: [] as string[],
+  };
+  const resumeCtx = () => {
+    const { provider, ctx } = makeCtx();
+    const envConfig = {
+      ...(ctx.envConfig as Record<string, unknown>),
+      domain: 'example.com',
+      ha: { writeFence: { ip: '1.1.1.1', source: 'scale', cutover: { ...journal } } },
+    };
+    return { provider, ctx: { ...ctx, envConfig, servers: undefined } };
+  };
+
+  it('DNS still all on the old server: rolls back (unfence, writers, cron), drops the journal, deletes the new server', async () => {
+    reset();
+    h.state.dnsReadBack = [['1.1.1.1'], ['1.1.1.1']];
+    const { provider, ctx } = resumeCtx();
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('rolled-back');
+    expect(h.events).toContain('unfence');
+    expect(h.events).toContain('writers:start:myapp-app');
+    expect(h.events).toContain('cron:install:1.1.1.1');
+    expect(h.events).toContain('journal:clear');
+    expect(provider.deleteServer).toHaveBeenCalledWith('new-id');
+    expect(provider.deleteServer).not.toHaveBeenCalledWith('old-id');
+    expect(h.events.some((e) => e.startsWith('demote:'))).toBe(false);
+  });
+
+  it('DNS part way: adopts the new server, points DNS at it again and runs the remaining post-flip steps', async () => {
+    reset();
+    h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
+    const { provider, ctx } = resumeCtx();
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    const order = [
+      'dns:9.9.9.9',
+      'demote:1.1.1.1',
+      'push:9.9.9.9:5',
+      'cron:install:9.9.9.9',
+      'delete:old-id',
+      'marker:clear',
+    ];
+    expect(h.events.filter((e) => order.includes(e))).toEqual(order);
+    expect(h.events).not.toContain('unfence');
+    expect(provider.deleteServer).not.toHaveBeenCalledWith('new-id');
+    const saved = h.state.saved.at(-1) as {
+      environments: Record<string, { servers: Array<{ ip: string; id: string }> }>;
+    };
+    expect(saved.environments.prod.servers.map((sv) => sv.id)).toEqual(['new-id']);
+  });
+
+  it('skips the post-flip steps the journal says are done', async () => {
+    reset();
+    const { ctx } = resumeCtx();
+    const envConfig = ctx.envConfig as {
+      ha: { writeFence: { cutover: { done: string[] } } };
+    };
+    envConfig.ha.writeFence.cutover.done = ['dns', 'demote', 'recreate', 'push'];
+    // The config already names the new server: no DNS read is needed.
+    (ctx.envConfig as { servers: unknown[] }).servers = [
+      { ip: '9.9.9.9', id: 'new-id', serverType: 'cpx31' },
+    ];
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    expect(h.events.some((e) => e.startsWith('demote:') || e.startsWith('push:'))).toBe(false);
+    expect(h.events.some((e) => e.startsWith('dns:'))).toBe(false);
+    expect(h.events).toContain('delete:old-id');
+  });
+
+  it('DNS unreadable: changes nothing and refuses with the resume command', async () => {
+    reset();
+    h.state.dnsUnreadable = true;
+    const { provider, ctx } = resumeCtx();
+    await expect(resumeComposeCutover(ctx)).rejects.toThrow(
+      /records point is unknown .*rerun vibecarbon scale prod to finish it/,
+    );
+    expect(h.events).not.toContain('unfence');
+    expect(provider.deleteServer).not.toHaveBeenCalled();
   });
 });
