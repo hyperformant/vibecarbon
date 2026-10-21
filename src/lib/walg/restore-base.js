@@ -276,7 +276,7 @@ export function restorePointOf(chosenSource) {
  * Reads only (ListObjectsV2, GetObject), with the deploy's own object-storage
  * credentials (Decision 1). Errors name the variables, never a value.
  *
- * @param {{ restore: string | null, k8s: boolean, s3Config: { bucket?: string, walgPrefix?: string, endpoint?: string, region?: string, accessKey?: string, secretKey?: string }, backupBucketName?: string | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
+ * @param {{ restore: string | null, k8s: boolean, environment?: string, deployedAt?: string | null, s3Config: { bucket?: string, walgPrefix?: string, endpoint?: string, region?: string, accessKey?: string, secretKey?: string }, backupBucketName?: string | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
  * @returns {Promise<{ backup: string, target: string, recoveryConf: string, sizeBytes: number } | null>}
  * @throws {NoRestorePointError} when no base backup satisfies the restore point
  */
@@ -286,12 +286,27 @@ export async function resolveDeployRestorePoint({
   s3Config,
   backupBucketName,
   credentialVars,
+  environment,
+  deployedAt = null,
   makeClient = createS3Client,
 }) {
   if (!restore) return null;
   if (!k8s) {
     throw new Error(
       'deploy -restore is k8s and k8s-ha only. On compose, deploy first, then run vibecarbon restore',
+    );
+  }
+  // A completed deploy is on record: the database runs, and deploy -restore
+  // only seeds a new one. Refused here, before anything is minted or
+  // provisioned (deployK3s refuses again on the cluster itself).
+  if (deployedAt) {
+    throw new Error(
+      [
+        `${environment} already runs a database (deployed ${deployedAt}); deploy -restore seeds a new one.`,
+        'Restore into the running environment:',
+        `  vibecarbon restore ${environment} -source ${restore}`,
+        'or destroy it first and run deploy -restore again.',
+      ].join('\n'),
     );
   }
   const chosen = parseRestoreSource(String(restore));

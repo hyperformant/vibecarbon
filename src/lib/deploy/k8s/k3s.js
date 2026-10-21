@@ -3063,27 +3063,32 @@ export function assertDeployRestorePoint({ restore }) {
   }
 }
 
+/** The kubectl patch that clears the k8s restore marker, for operator messages. */
+function clearMarkerCommand() {
+  return `kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '${JSON.stringify({ stringData: restoreMarkerStringData(null) })}'`;
+}
+
 /**
- * `deploy -restore` seeds a NEW database: the restore runs in the db pod's
- * walg-restore init, on its first boot. On a cluster whose db StatefulSet
- * already runs, nothing reboots the pod, so the marker would be set, the live
- * database would read as "promoted and writable", and the deploy would report
- * a restore that never happened. Refuse that, naming the command that does
- * restore a running environment. A rerun that finishes the same restore (the
- * infra Secret already names this backup) goes on.
+ * What the cluster's restore marker (RESTORE_BACKUP on vibecarbon-infra-secrets)
+ * lets this deploy do. Read-only; runs in deployK3s once the cluster answers,
+ * outside every step gate.
  *
- * @param {{ env: NodeJS.ProcessEnv, restore: { backup: string } }} args
+ * - A plain deploy refuses while a restore is pending (Fix round 1, I1): the
+ *   walg-restore init restores on every db pod start while the marker is set,
+ *   so leaving it would hand the restore to the next drain or OOM, unproven,
+ *   and an apply could drop the key and abandon it silently. It names the
+ *   command that finishes the restore and the one that abandons it. A marker
+ *   left by `vibecarbon restore` counts the same.
+ * - `deploy -restore` seeds a NEW database: the restore runs in the db pod's
+ *   first boot. On a cluster whose db StatefulSet already runs, nothing
+ *   reboots the pod, so the live database would read as "promoted and
+ *   writable" and the deploy would report a restore that never happened. It
+ *   refuses, unless the marker already names this backup (a rerun finishing
+ *   the same restore).
+ *
+ * @param {{ env: NodeJS.ProcessEnv, restore: { backup: string } | null, operatorEnv: string }} args
  */
-export async function assertRestoreSeedsNewDatabase({ env, restore }) {
-  const sts = await runKubectlWithRetry(
-    ['-n', 'vibecarbon', 'get', 'statefulset', DB_STATEFULSET, '--ignore-not-found', '-o', 'name'],
-    {
-      env,
-      captureStdout: true,
-      description: 'assertRestoreSeedsNewDatabase: get the db StatefulSet',
-    },
-  );
-  if (!String(sts ?? '').trim()) return;
+export async function assertRestoreMarkerState({ env, restore, operatorEnv }) {
   const marked = await runKubectlWithRetry(
     [
       '-n',
@@ -3095,18 +3100,35 @@ export async function assertRestoreSeedsNewDatabase({ env, restore }) {
       '-o',
       'jsonpath={.data.RESTORE_BACKUP}',
     ],
-    {
-      env,
-      captureStdout: true,
-      description: 'assertRestoreSeedsNewDatabase: read the restore marker',
-    },
+    { env, captureStdout: true, description: 'assertRestoreMarkerState: read the restore marker' },
   );
-  const inProgress = Buffer.from(String(marked ?? '').trim(), 'base64').toString('utf8');
-  if (inProgress === restore.backup) return;
+  const pending = Buffer.from(String(marked ?? '').trim(), 'base64').toString('utf8');
+  if (!restore) {
+    if (!pending) return;
+    throw new Error(
+      [
+        `a restore of ${pending} is pending on this cluster (RESTORE_BACKUP on vibecarbon-infra-secrets).`,
+        'A plain deploy would leave it to the next db pod start, unproven, so it stops here.',
+        'Finish the restore:',
+        `  vibecarbon deploy ${operatorEnv} -restore ${pending}`,
+        'or abandon it (the database keeps whatever it holds now):',
+        `  ${clearMarkerCommand()}`,
+      ].join('\n'),
+    );
+  }
+  const sts = await runKubectlWithRetry(
+    ['-n', 'vibecarbon', 'get', 'statefulset', DB_STATEFULSET, '--ignore-not-found', '-o', 'name'],
+    { env, captureStdout: true, description: 'assertRestoreMarkerState: get the db StatefulSet' },
+  );
+  if (!String(sts ?? '').trim()) return;
+  if (pending === restore.backup) return;
   throw new Error(
-    `deploy -restore seeds a new database, and this cluster already runs one (statefulset/${DB_STATEFULSET}). ` +
-      'Nothing was changed. Restore into the running environment with vibecarbon restore ' +
-      `<env> -source ${restore.backup}, or destroy it first and deploy -restore again.`,
+    [
+      `deploy -restore seeds a new database, and this cluster already runs one (statefulset/${DB_STATEFULSET}).`,
+      'Restore into the running environment:',
+      `  vibecarbon restore ${operatorEnv} -source ${restore.backup}`,
+      `or destroy it first and run deploy -restore again.`,
+    ].join('\n'),
   );
 }
 
@@ -3149,7 +3171,7 @@ function dbPsql(env) {
  *
  * @param {{ env: NodeJS.ProcessEnv, restore: { backup: string }, environment?: string }} args
  */
-export async function finishDeployRestore({ env, restore, environment }) {
+export async function finishDeployRestore({ env, restore, environment, operatorEnv }) {
   await awaitPostgresPromoted({ env, dbPod: DB_POD, dbContainer: DB_CONTAINER });
   // The orchestrator already refused an HA deploy with a failover in flight.
   const proof = await assertRestoredPrimaryWritable({
@@ -3160,12 +3182,16 @@ export async function finishDeployRestore({ env, restore, environment }) {
   const inDb = `kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} --`;
   if (!PROVEN_WRITABLE_STATES.includes(proof)) {
     throw new Error(
-      `could not prove the restored database writable (write fence ${proof ?? 'unread'}), so the ` +
-        `restore marker stays set and the app has not rolled. Check it (expect off): ${inDb} ` +
-        `psql -U postgres -At -c 'SHOW default_transaction_read_only'. Then finish: ` +
-        `${inDb} sh -c '${RETIRE_PREVIOUS_SH}' ` +
-        `&& kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '${JSON.stringify({ stringData: restoreMarkerStringData(null) })}' ` +
-        `&& ${inDb} sh -c '${REMOVE_DISCARD_SH}', and rerun vibecarbon deploy.`,
+      [
+        `could not prove the restored database writable (write fence ${proof ?? 'unread'}), so the`,
+        'restore marker stays set and the app has not rolled. Check it (expect off):',
+        `  ${inDb} psql -U postgres -At -c 'SHOW default_transaction_read_only'`,
+        'Then finish, one command at a time:',
+        `  ${inDb} sh -c '${RETIRE_PREVIOUS_SH}'`,
+        `  ${clearMarkerCommand()}`,
+        `  ${inDb} sh -c '${REMOVE_DISCARD_SH}'`,
+        `  vibecarbon deploy ${operatorEnv ?? environment}`,
+      ].join('\n'),
     );
   }
   const execInDb = (script, description) =>
@@ -3295,6 +3321,9 @@ export async function applyK3sManifests({
   role,
   // `deploy -restore`: { backup, target, recoveryConf, sizeBytes }, or null.
   restore = null,
+  // The environment as the operator names it (HA clusters deploy under their
+  // stack names), for the commands an error prints.
+  operatorEnv,
 }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   // Pilot-light: on the standby cluster nothing app-tier runs until a
@@ -3706,7 +3735,6 @@ export async function applyK3sManifests({
   //    creation with `secret "vibecarbon-app-secrets" not found`.
   //    With `deploy -restore` the infra Secret also carries the restore
   //    marker, so the db pod's first boot restores that backup.
-  if (restore) await assertRestoreSeedsNewDatabase({ env, restore });
   await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore });
   // 4b. Create the kube-system/carbon-autoscaler-config Secret the
   //     carbon-autoscaler sidecar reads on startup (and on every
@@ -4305,7 +4333,7 @@ export async function applyK3sManifests({
   if (restore) {
     await awaitDb();
     await perfAsync(`deploy.${perfPrefix}.restore.finish`, () =>
-      finishDeployRestore({ env, restore, environment }),
+      finishDeployRestore({ env, restore, environment, operatorEnv }),
     );
   }
   // 6. Patch the app deployment to use the sideloaded image BEFORE waiting on
@@ -4861,6 +4889,21 @@ export async function deployK3s(options) {
     kubeconfig = state.getStepResult('k3s-kubeconfig').kubeconfig;
   }
 
+  // 5b. The cluster's restore marker decides what this deploy may do (a
+  //     pending restore stops a plain deploy; a running database stops
+  //     `deploy -restore`). Outside every step gate on purpose: a skipped
+  //     k3s-apply must not skip it. Before the image build, so a refusal
+  //     costs nothing.
+  {
+    const kubeEnv = { ...process.env, KUBECONFIG: kubeconfig };
+    await awaitControlPlaneServing({ env: kubeEnv });
+    await assertRestoreMarkerState({
+      env: kubeEnv,
+      restore: options.restore ?? null,
+      operatorEnv: options.operatorEnv ?? options.environment,
+    });
+  }
+
   // 6. Build the app image locally.
   // The gate folds the CONTENT of the build context (app source + Dockerfile)
   // and of the VITE_* build args into its inputs — see buildK3sBuildInputs for
@@ -4952,6 +4995,7 @@ export async function deployK3s(options) {
         s3Config: options.s3Config,
         backupBucketName: options.backupBucketName,
         restore: options.restore,
+        operatorEnv: options.operatorEnv ?? options.environment,
         dnsProvider: options.dnsProvider,
         // Resolved upstream (deploy effects) for whichever DNS provider is
         // selected — the DNS credential is independent of the compute one,

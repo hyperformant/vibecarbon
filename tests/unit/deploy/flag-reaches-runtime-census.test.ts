@@ -14,6 +14,15 @@
  * least one reader that USES the value: one that is not the input hash, not
  * a validation-only check, and not another pass-through.
  *
+ * A "use" is deliberately broad: ANY read that is not a pass-through and not
+ * in an allowlisted reader (a condition, a call argument, a template, a member
+ * access). That proves the value is consumed, not that it renders into a
+ * manifest, Secret, env or command, so control flags (-y, -full) pass on their
+ * condition reads. Where rendering is the point, a flag gets its own sink
+ * assertion: -restore must reach restoreMarkerStringData (the infra Secret).
+ * A value forwarded to a callee outside src/lib/deploy is tracked on as a
+ * member name of the options bag it ends up in.
+ *
  * Two allowlists, each entry with its reason:
  * - NON_RENDERING_READERS: functions whose reads do not count.
  * - HASH_ONLY_FLAGS: flags allowed to feed only the input hash. Empty today;
@@ -43,6 +52,11 @@ const NON_RENDERING_READERS: NonRenderingReader[] = [
     file: 'src/lib/deploy/k8s/k3s.js',
     fn: 'assertDeployRestorePoint',
     reason: 'validation only: refuses an incomplete restore point before any apply',
+  },
+  {
+    file: 'src/lib/deploy/k8s/k3s.js',
+    fn: 'assertRestoreMarkerState',
+    reason: "validation only: refuses a deploy the cluster's restore marker contradicts",
   },
 ];
 

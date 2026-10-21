@@ -170,6 +170,15 @@ for (const [tier, build] of TIERS) {
       expect(read('postgresql.auto.conf')).toContain("recovery_target_timeline = 'current'");
     });
 
+    it('a good swap records the base the volume now holds', () => {
+      seedLive();
+      stubWalg('ok');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(read('.vc-restored-from')).toBe(BACKUP);
+      expect(ls()).not.toContain('.vc-restored-from.tmp');
+    });
+
     it('a fresh, empty PGDATA leaves no empty .vc-prev behind', () => {
       stubWalg('ok');
       const r = run(build());
@@ -236,3 +245,51 @@ for (const [tier, build] of TIERS) {
     });
   });
 }
+
+/**
+ * The k8s init runs on EVERY db pod start while the marker is set (Fix round
+ * 1, I1). Once a restore of that base has swapped in, a later start (a drain,
+ * an OOM, a template change) before the CLI cleared the marker must not move
+ * the live cluster aside and restore it again: a silent rewind. Compose has
+ * no such repeat: its script runs once, invoked by the CLI.
+ */
+describe.skipIf(!hasFlock)('k8s walg-restore is idempotent per restored base', () => {
+  const k8s = () => {
+    writeFileSync(join(dir, 'init.sh'), k8sInit());
+    return ['bash', join(dir, 'init.sh')];
+  };
+
+  it('marker set, the volume already restored from that base: no move, normal boot', () => {
+    seedLive();
+    writeFileSync(join(pgdata, '.vc-restored-from'), BACKUP);
+    stubWalg('ok');
+    const r = run(k8s());
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('already restored');
+    expect(read('base/marker')).toBe('live');
+    expect(ls()).not.toContain('.vc-prev');
+  });
+
+  it('marker set to a different base: restores it', () => {
+    seedLive();
+    writeFileSync(join(pgdata, '.vc-restored-from'), 'base_000000010000000000000001');
+    stubWalg('ok');
+    const r = run(k8s());
+    expect(r.status, r.stderr).toBe(0);
+    expect(read('base/marker')).toBe('restored');
+    expect(read('.vc-prev/base/marker')).toBe('live');
+    expect(read('.vc-restored-from')).toBe(BACKUP);
+  });
+
+  it('a swap left in progress is settled even when the record names the base', () => {
+    mkdirSync(join(pgdata, '.vc-prev', 'base'), { recursive: true });
+    writeFileSync(join(pgdata, '.vc-prev', 'base', 'marker'), 'original\n');
+    writeFileSync(join(pgdata, '.vc-restore-in-progress'), 'in\n');
+    writeFileSync(join(pgdata, '.vc-restored-from'), BACKUP);
+    stubWalg('ok');
+    const r = run(k8s());
+    expect(r.status, r.stderr).toBe(0);
+    expect(read('base/marker')).toBe('restored');
+    expect(ls()).not.toContain('.vc-restore-in-progress');
+  });
+});

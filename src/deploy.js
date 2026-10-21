@@ -117,9 +117,9 @@ const SPEC = {
     },
     {
       name: 'restore',
-      value: '<latest|timestamp>',
+      value: '<latest|base|timestamp>',
       description:
-        'Disaster recovery: seed the fresh DB from the latest wal-g backup in S3 (or PITR to an ISO-8601 timestamp). The restored DB keeps its migration history, so the app applies only newer migrations. k8s and k8s-ha only.',
+        'Disaster recovery: seed a new database from your wal-g backups in S3. Pass latest for the newest backup and all WAL, a base backup name (e.g. base_000000010000000000000004) for that backup and all WAL, or an ISO-8601 timestamp for point-in-time recovery. The restored database keeps its migration history, so the app applies only newer migrations. k8s and k8s-ha only, onto a fresh or destroyed environment.',
     },
     {
       name: 'allow-degraded',

@@ -34,6 +34,7 @@ const {
   buildInfraSecretData,
   applyK3sManifests,
   assertDeployRestorePoint,
+  assertRestoreMarkerState,
   deployK3s,
   DB_ROLLOUT_TIMEOUT_S,
 } = k3s;
@@ -173,6 +174,17 @@ describe('resolveDeployRestorePoint', () => {
     await expect(resolve('latest', fakeS3(two), { k8s: false })).rejects.toThrow(
       /k8s and k8s-ha only/,
     );
+  });
+
+  it('refuses an environment that completed a deploy, before anything is minted (M1)', async () => {
+    const s3 = fakeS3(two);
+    const err = await resolve('latest', s3, {
+      environment: 'prod',
+      deployedAt: '2026-10-20T10:00:00Z',
+    }).catch((e) => e);
+    expect(err.message).toMatch(/prod already runs a database/);
+    expect(err.message).toContain(`vibecarbon restore prod -source latest`);
+    expect(s3.seen).toEqual([]);
   });
 
   it('names the credential variables, never a value, when credentials are missing', async () => {
@@ -372,7 +384,7 @@ const isMarkerClear = (a: string[]) =>
   a.some((x) => x.includes('"RESTORE_BACKUP":""'));
 const isRetire = (a: string[]) => a.includes('exec') && a.some((x) => x.includes('.vc-prev'));
 const isRemoveDiscard = (a: string[]) =>
-  a.includes('exec') && a.some((x) => /^rm -rf .*\.vc-discard$/.test(x));
+  a.includes('exec') && a.some((x) => /^rm -rf .*\.vc-discard .*\.vc-restored-from$/.test(x));
 const isAppPatch = (a: string[]) =>
   a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app');
 
@@ -452,20 +464,71 @@ describe('applyK3sManifests with a restore point', () => {
     expect(calls.some(isAppPatch)).toBe(false);
   });
 
-  it('refuses a cluster that already runs a database, before the marker is written', async () => {
+  const markerEnv = { ...process.env, KUBECONFIG: '/tmp/kc' };
+
+  it('-restore: refuses a cluster that already runs a database, naming the env', async () => {
     liveDbSts = true;
-    await expect(applyK3sManifests(args(RESTORE))).rejects.toThrow(
-      /seeds a new database, and this cluster already runs one/,
-    );
-    expect(infraSecretApply()).toBeUndefined();
-    expect(calls.some(isBaseApply)).toBe(false);
+    const err = await assertRestoreMarkerState({
+      env: markerEnv,
+      restore: RESTORE,
+      operatorEnv: 'prod',
+    }).catch((e) => e);
+    expect(err.message).toMatch(/seeds a new database, and this cluster already runs one/);
+    expect(err.message).toContain(`\n  vibecarbon restore prod -source ${BACKUP}\n`);
+    expect(err.message).not.toContain('<env>');
   });
 
-  it('a rerun that finishes the same restore goes on', async () => {
+  it('-restore: a rerun that finishes the same restore goes on', async () => {
     liveDbSts = true;
     markedBackup = BACKUP;
-    await applyK3sManifests(args(RESTORE));
-    expect(calls.some(isMarkerClear)).toBe(true);
+    await expect(
+      assertRestoreMarkerState({ env: markerEnv, restore: RESTORE, operatorEnv: 'prod' }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('plain deploy: refuses a cluster with a pending restore marker (I1)', async () => {
+    liveDbSts = true;
+    markedBackup = BACKUP;
+    const err = await assertRestoreMarkerState({
+      env: markerEnv,
+      restore: null,
+      operatorEnv: 'prod',
+    }).catch((e) => e);
+    expect(err.message).toMatch(new RegExp(`restore of ${BACKUP} is pending`));
+    const lines = err.message.split('\n').map((l: string) => l.trim());
+    expect(lines).toContain(`vibecarbon deploy prod -restore ${BACKUP}`);
+    expect(lines).toContain(
+      `kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '{"stringData":{"RESTORE_TARGET":"","RESTORE_BACKUP":"","RESTORE_RECOVERY_CONF":""}}'`,
+    );
+    // Read-only: nothing applied, patched or exec'd.
+    expect(calls.every((a) => a.includes('get'))).toBe(true);
+  });
+
+  it('plain deploy: no marker, or a fresh cluster, goes on', async () => {
+    await expect(
+      assertRestoreMarkerState({ env: markerEnv, restore: null, operatorEnv: 'prod' }),
+    ).resolves.toBeUndefined();
+    liveDbSts = true;
+    await expect(
+      assertRestoreMarkerState({ env: markerEnv, restore: null, operatorEnv: 'prod' }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('deployK3s checks the marker once the cluster answers, before the image build and the k3s-apply gate', () => {
+    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const body = src.slice(src.indexOf('export async function deployK3s('));
+    const at = (needle: string) => {
+      const i = body.indexOf(needle);
+      expect(i, needle).toBeGreaterThan(-1);
+      return i;
+    };
+    const check = at('await assertRestoreMarkerState({');
+    expect(check).toBeGreaterThan(at("state.completeStep('k3s-kubeconfig'"));
+    expect(check).toBeLessThan(at('buildK3sBuildInputs({'));
+    expect(check).toBeLessThan(at("state.shouldSkip('k3s-apply'"));
+    // Outside every step gate: a skipped apply must not skip the check.
+    const before = body.slice(at("state.getStepResult('k3s-kubeconfig')"), check);
+    expect(before).not.toMatch(/shouldSkip/);
   });
 
   it('without a restore point: no marker keys, no proof, no clear', async () => {

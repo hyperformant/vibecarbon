@@ -1082,6 +1082,8 @@ export async function executeDeployment(args, gatheredConfig) {
       s3Config,
       backupBucketName: backupS3Config?.bucket || null,
       credentialVars: backupCredentialVars(envConfig),
+      environment,
+      deployedAt: envConfig?.deployedAt ?? null,
     });
   } catch (err) {
     p.log.error(`deploy -restore: ${err.message}`);
@@ -1474,6 +1476,9 @@ export async function executeDeployment(args, gatheredConfig) {
     // that backup; the restored DB carries its migration ledger, so the app's
     // migrate init container applies only what the backup lacks.
     restore: restorePoint,
+    // The environment as the operator names it: HA clusters deploy under their
+    // stack names, and the commands an error prints must use this one.
+    operatorEnv: environment,
     // Finding #1: hard-gate k8s-HA replication unless the operator opts into a
     // warm/degraded standby via `deploy -allow-degraded`.
     allowDegraded: !!args.allowDegraded,

@@ -19,6 +19,11 @@ export const RESTORE_LAYOUT = Object.freeze({
   discard: '.vc-discard',
   inProgress: '.vc-restore-in-progress',
   lock: '.vc-restore.lock',
+  // The base a completed swap put here. The k8s init restores on every boot
+  // while the marker is set; with this naming the same base it boots
+  // normally instead of rewinding the live cluster again. Removed with the
+  // discard, after the CLI cleared the marker.
+  restoredFrom: '.vc-restored-from',
 });
 
 /** The previous cluster, removed once the restored one is proven. */
@@ -32,12 +37,14 @@ export const DISCARD_PGDATA_PATH = `${PGDATA_PATH}/${RESTORE_LAYOUT.discard}`;
  * rename out of the `.vc-prev` name, into a per-call name under the discard,
  * with nothing removed in front of it (a crash at any point leaves either the
  * whole `.vc-prev` or garbage under `.vc-discard`). REMOVE_DISCARD_SH then
- * removes the discard. Two steps so k8s can clear its marker in between. `$$`
+ * removes the discard and the restored-base record. Two steps so k8s can
+ * clear its marker in between: the record must outlive the marker, or a pod
+ * start in that gap would restore again. `$$`
  * is the remote shell's pid: run it through `sh -c` with the text quoted so
  * only that shell expands it.
  */
 export const RETIRE_PREVIOUS_SH = `mkdir -p ${DISCARD_PGDATA_PATH} && if [ -e ${PREVIOUS_PGDATA_PATH} ]; then mv ${PREVIOUS_PGDATA_PATH} ${DISCARD_PGDATA_PATH}/prev.$$; fi`;
-export const REMOVE_DISCARD_SH = `rm -rf ${DISCARD_PGDATA_PATH}`;
+export const REMOVE_DISCARD_SH = `rm -rf ${DISCARD_PGDATA_PATH} ${PGDATA_PATH}/${RESTORE_LAYOUT.restoredFrom}`;
 
 /** The restore states a writable proof accepts (assertRolePrimaryWritable). */
 export const PROVEN_WRITABLE_STATES = Object.freeze(['writable', 'lifted']);

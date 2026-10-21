@@ -138,6 +138,15 @@ spec:
                 echo "walg-restore: RESTORE_BACKUP is set without RESTORE_RECOVERY_CONF; rerun vibecarbon restore" >&2
                 exit 1
               fi
+              # This init runs on EVERY boot while the marker is set. A completed swap
+              # of this same base (recorded in .vc-restored-from, no swap in progress)
+              # means the CLI has not cleared the marker yet: boot it, never move the
+              # live cluster aside and restore it again.
+              if [ ! -e "$VC_MARKER" ] && [ -f "$PGDATA/.vc-restored-from" ] && \
+                 [ "$(cat "$PGDATA/.vc-restored-from")" = "$RESTORE_BACKUP" ]; then
+                echo "walg-restore: ${RESTORE_BACKUP} is already restored on this volume (marker not cleared yet), normal boot."
+                exit 0
+              fi
               echo "walg-restore: restoring ${RESTORE_BACKUP} (target ${RESTORE_TARGET:-latest})."
               VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf
               printf '%s\n' "$RESTORE_RECOVERY_CONF" > "$VC_RECOVERY_CONF_FILE"
@@ -206,7 +215,7 @@ spec:
               fi
               # 3. A base pushed while a restore left its dirs in PGDATA carries them:
               #    drop them from the staged tree so they cannot wedge the swap.
-              rm -rf "$PGDATA/.vc-restore/.vc-restore" "$PGDATA/.vc-restore/.vc-prev" "$PGDATA/.vc-restore/.vc-discard" "$PGDATA/.vc-restore/.vc-restore-in-progress" "$PGDATA/.vc-restore/.vc-restore-in-progress.tmp" "$PGDATA/.vc-restore/.vc-restore.lock"
+              rm -rf "$PGDATA/.vc-restore/.vc-restore" "$PGDATA/.vc-restore/.vc-prev" "$PGDATA/.vc-restore/.vc-discard" "$PGDATA/.vc-restore/.vc-restore-in-progress" "$PGDATA/.vc-restore/.vc-restore-in-progress.tmp" "$PGDATA/.vc-restore/.vc-restore.lock" "$PGDATA/.vc-restore/.vc-restored-from" "$PGDATA/.vc-restore/.vc-restored-from.tmp"
               # Recovery config into staging: strip the settings it rewrites, append the
               # new ones (rendered by the CLI, the same text on both tiers).
               VC_AUTO_CONF="$PGDATA/.vc-restore/postgresql.auto.conf"
@@ -261,6 +270,11 @@ spec:
               # only thing in PGDATA that says "swapped, not proven" is recovery.signal,
               # and nothing slow may follow.
               rm -rf "$PGDATA/.vc-discard"
+              # Record the base PGDATA now holds (renamed in, never torn), before the marker
+              # goes: a k8s pod start while its restore marker is still set boots it
+              # instead of restoring it again.
+              printf '%s' "$RESTORE_BACKUP" > "$PGDATA/.vc-restored-from.tmp"
+              mv -f "$PGDATA/.vc-restored-from.tmp" "$PGDATA/.vc-restored-from"
               rm -f "$VC_MARKER"
               echo "restore: $RESTORE_BACKUP staged and swapped in"
               # --- end swap ---

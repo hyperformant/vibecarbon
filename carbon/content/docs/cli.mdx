@@ -505,7 +505,7 @@ confirmations.
 | `-mode <mode>` | Deploy mode: compose, compose-ha, k8s, or k8s-ha |
 | `-server-type <id>` | Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/database/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default. |
 | `-full` | Clear resume state and redo every step from scratch |
-| `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3 (or PITR to an ISO-8601 timestamp). The restored DB keeps its migration history, so the app applies only newer migrations. k8s and k8s-ha only. |
+| `-restore <latest\|base\|timestamp>` | Disaster recovery: seed a new database from your wal-g backups in S3. Pass latest for the newest backup and all WAL, a base backup name (e.g. base_000000010000000000000004) for that backup and all WAL, or an ISO-8601 timestamp for point-in-time recovery. The restored database keeps its migration history, so the app applies only newer migrations. k8s and k8s-ha only, onto a fresh or destroyed environment. |
 | `-allow-degraded` | HA only: proceed even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy FAILS unless replication is confirmed streaming. |
 {/* END GENERATED: flags deploy */}
 

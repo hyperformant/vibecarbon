@@ -3949,9 +3949,13 @@ EOF`;
         ),
     },
 
-    // 9. Re-deploy (restore requires running infrastructure)
-    //    The destroy step removed the environment. Re-deploy to create fresh
-    //    infrastructure, then restore the database backup onto it.
+    // 9. Re-deploy, then `vibecarbon restore` onto it.
+    //    compose tiers: the destroy step removed the environment, so this
+    //    re-deploy is cold and the restore runs onto fresh infrastructure.
+    //    k8s tiers: restore-deploy (8b) already brought the environment back
+    //    from the backups, so this re-deploy is a warm one and the restore
+    //    rewinds a RUNNING database to the pushed base: the running-environment
+    //    restore path, which restore-deploy does not exercise.
     {
       name: 'restore',
       run: () =>

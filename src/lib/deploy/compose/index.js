@@ -1454,8 +1454,17 @@ function restorePreludeLines() {
 
 /** Steps 3 and 4 of both restore scripts, shared text. */
 function restoreStagedAndSwapLines() {
-  const { staging, previous, discard, inProgress, lock } = RESTORE_LAYOUT;
-  const stagedVc = [staging, previous, discard, inProgress, `${inProgress}.tmp`, lock]
+  const { staging, previous, discard, inProgress, lock, restoredFrom } = RESTORE_LAYOUT;
+  const stagedVc = [
+    staging,
+    previous,
+    discard,
+    inProgress,
+    `${inProgress}.tmp`,
+    lock,
+    restoredFrom,
+    `${restoredFrom}.tmp`,
+  ]
     .map((name) => `"$PGDATA/${staging}/${name}"`)
     .join(' ');
   return [
@@ -1523,6 +1532,11 @@ function restoreStagedAndSwapLines() {
     '# only thing in PGDATA that says "swapped, not proven" is recovery.signal,',
     '# and nothing slow may follow.',
     `rm -rf "$PGDATA/${discard}"`,
+    '# Record the base PGDATA now holds (renamed in, never torn), before the marker',
+    '# goes: a k8s pod start while its restore marker is still set boots it',
+    '# instead of restoring it again.',
+    `printf '%s' "$RESTORE_BACKUP" > "$PGDATA/${restoredFrom}.tmp"`,
+    `mv -f "$PGDATA/${restoredFrom}.tmp" "$PGDATA/${restoredFrom}"`,
     'rm -f "$VC_MARKER"',
     'echo "restore: $RESTORE_BACKUP staged and swapped in"',
     '# --- end swap ---',
