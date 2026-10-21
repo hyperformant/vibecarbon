@@ -93,7 +93,7 @@ describe.skipIf(!dbTestsEnabled)('a skipped journal migration', () => {
     const folder = writeFolder(root, [a, b, c]);
 
     await expect(runMigrateStep(conn(), APP_PW, folder)).rejects.toThrow(
-      /migration 0001_second was skipped/
+      /migration 0001_second is not in the ledger \(skipped, or edited after it was applied\); regenerate it/
     );
     expect(await verifyMigrationsOnOwnConnection(conn(), folder)).toEqual({ upToDate: false });
 
@@ -110,7 +110,7 @@ describe.skipIf(!dbTestsEnabled)('a skipped journal migration', () => {
     });
     expect(code).toBe(1);
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain('migration 0001_second was skipped');
+    expect(errors[0]).toContain('migration 0001_second is not in the ledger (skipped, or edited after it was applied)');
     expect(errors[0]).not.toContain(APP_PW);
     expect(errors[0]).not.toContain(String(process.env.TEST_DB_PASSWORD));
   });

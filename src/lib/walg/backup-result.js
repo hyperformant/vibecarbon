@@ -9,9 +9,11 @@
  *   BACKUP_RESULT=skipped:<reason>            nothing was pushed, and why
  *
  * The pushed line is printed right after backup-push succeeds and BEFORE
- * retention, so a retention failure (exit 1) still carries the name of the
+ * retention, so a retention failure (exit 3) still carries the name of the
  * base that is in the bucket. Refusals (retired node, backup-prefix fence)
- * and failed pushes exit 1 with no marker.
+ * and failed pushes exit 1 with no marker. On k8s the lock skip exits the
+ * backup Job 0 (the marker is the skip), and exit 3 fails the Job at once
+ * (podFailurePolicy), with no second pod and no second push.
  *
  * This is the one parser of that marker (census:
  * tests/unit/backup/backup-result-consumed-census.test.ts).
@@ -59,8 +61,9 @@ export function hasBackupResult(text) {
 }
 
 /**
- * Every pushed name in a log that may hold several runs (a backup Job whose
- * container restarted after a retention failure pushes once per attempt).
+ * Every pushed name in a log that may hold several runs (the logs of every
+ * pod of one backup Job: a pod that failed before its push beside the one
+ * that pushed; restartPolicy Never, so a container never restarts in place).
  *
  * @param {unknown} text
  * @returns {string[]}

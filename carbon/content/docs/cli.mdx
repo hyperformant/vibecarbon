@@ -639,7 +639,19 @@ vibecarbon restore prod -source 2026-06-22T14:30:00Z
 
 # Scripted production restore (the typed confirmation as a flag)
 vibecarbon restore prod -y -source latest -confirm prod
+
+# One base backup by name (that base + all WAL), as backup -l lists it
+vibecarbon restore prod -source base_000000010000000000000004
+
+# A lineage other than the current database (after a destroy and redeploy)
+vibecarbon restore prod -source latest -lineage 7699032860122738725
 ```
+
+Restore reads the backup bucket from your machine, so the bucket's
+object-storage keys must be set locally; without them it stops and names the
+variables. Each database archives under its own lineage (its system
+identifier). When more than one lineage holds backups, restore asks for
+`-lineage` and lists them.
 
 Restoring a production environment asks you to type its name to confirm,
 even with `-y`; `-confirm <env>` supplies it for scripts (without it, and
@@ -716,9 +728,25 @@ vibecarbon scale -env prod -type cx33 -y
 
 | Topology | What you can change |
 |----------|---------------------|
-| Compose / Compose HA | VPS server type (blue-green; zero downtime) |
+| Compose / Compose HA | VPS server type (blue-green; the app pauses for the cutover) |
 | Kubernetes | Worker / master / database server types (in-place) |
 | Kubernetes | Worker bounds (autoscaler floor + ceiling) |
+
+A compose scale builds the new server, fences writes on the old one, pushes
+a base backup, restores it on the new server and moves DNS. The app pauses
+from the fence until the new server serves. It needs the backup bucket's
+object-storage keys on your machine (the refusal names the variables), since
+the new server is seeded from a backup. Compose scale is not available on
+Scaleway yet: resize the server in the Scaleway console instead.
+
+If a scale stops part way through the cutover (a killed terminal, a lost
+connection), run it again. It reads where it stopped, finishes the move to
+the new server, or rolls back to the old one if DNS never moved. Deploy,
+destroy and the next backup refuse until it has:
+
+```bash
+vibecarbon scale prod
+```
 
 {/* BEGIN GENERATED: flags scale */}
 | Flag | Description |

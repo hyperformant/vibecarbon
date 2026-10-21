@@ -144,7 +144,7 @@ export async function runMigrations(
         skipped
           .map(
             (tag) =>
-              `migration ${tag} was skipped (its timestamp is older than the newest applied one); regenerate it`
+              `migration ${tag} is not in the ledger (skipped, or edited after it was applied); regenerate it`
           )
           .join('; ')
       );
