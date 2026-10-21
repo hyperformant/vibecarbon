@@ -1239,7 +1239,8 @@ export function missingDbHandle(ip?: string | null, sshKeyPath?: string | null):
 /**
  * The node every SSH/exec-based verify check targets: serverIps[0] (compose's
  * VPS, compose-HA's role-primary, k8s's master, k8s-HA's primary master), or,
- * at verify-failover on an HA mode, the PROMOTED primary.
+ * at verify-failover (and compose-ha's verify-failback) on an HA mode, the
+ * PROMOTED primary.
  *
  * Both HA modes retire the old primary on failover and neither reorders
  * servers[], so serverIps[0] would keep naming the decommissioned node.
@@ -1252,7 +1253,8 @@ export function resolveSshCheckMasterIp(
   opts: { stepName: StepName; mode: DeployMode; projectDir: string; envPrefix: string },
 ): string | undefined {
   let ip: string | undefined = serverIps[0];
-  if (opts.stepName === 'verify-failover' && opts.mode.endsWith('-ha')) {
+  const postFailover = opts.stepName === 'verify-failover' || opts.stepName === 'verify-failback';
+  if (postFailover && opts.mode.endsWith('-ha')) {
     const { primaryIp } = resolveHaDbIps(opts.projectDir, opts.envPrefix);
     if (primaryIp) ip = primaryIp;
   }

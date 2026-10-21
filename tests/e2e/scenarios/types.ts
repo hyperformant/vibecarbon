@@ -86,11 +86,19 @@ export type StepName =
   | 'verify-restore'
   | 'failover'
   | 'verify-failover'
-  // k8s-ha only. Re-invokes `vibecarbon deploy` after failover to converge
-  // the recovered ex-primary to pilot-light (app tier + workers to zero,
-  // full serial reseed as the new streaming standby) — proves the DR
-  // posture that failover alone leaves degraded is actually restorable.
+  // Both HA modes. A failover before the reconverge deploy must refuse,
+  // naming `vibecarbon deploy`, and move no role.
+  | 'second-failover'
+  // Both HA modes. Re-invokes `vibecarbon deploy` after failover: k8s-ha
+  // converges the recovered ex-primary to pilot-light (app tier + workers to
+  // zero, full serial reseed as the new streaming standby), compose-ha
+  // rebuilds the retired node as the standby. Proves the DR posture that
+  // failover alone leaves degraded is actually restorable.
   | 'reconverge-deploy'
+  // compose-ha only. A planned failover back to the original node once the
+  // reconverge restored streaming, then the post-failover checks again.
+  | 'failback'
+  | 'verify-failback'
   | 'final-destroy'
   | 'teardown-repo';
 

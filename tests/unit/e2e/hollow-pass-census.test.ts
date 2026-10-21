@@ -22,6 +22,12 @@
  *    HTTP seam (dnsSafeFetch or an injected fetcher) must be covered by a
  *    behaviour entry or carry a documented exemption. A new check drafts
  *    itself into this audit: until it is classified here, this test fails.
+ *
+ * 3. HA INTEGRITY. The checks of tests/e2e/checks/ha-integrity.ts read over
+ *    SSH or the DNS provider's API, not HTTP. Their hollow shape is a missing
+ *    handle (no key, no node IP, no reader): HA scenarios always have one, so
+ *    each must FAIL without it, never pass or skip, and must not even try the
+ *    remote. Every exported `check*` there is drafted into this audit.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -44,6 +50,7 @@ import {
   FORWARDAUTH_COOKIE,
   runObservabilityChecks,
 } from '../../e2e/checks/feature-observability.js';
+import * as haIntegrity from '../../e2e/checks/ha-integrity.js';
 import {
   APP_SHELL_MARKER,
   checkApiHealth,
@@ -436,5 +443,94 @@ describe('CENSUS: every HTTP-calling check function is classified', () => {
         false,
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HA integrity: a missing SSH handle (or DNS reader) fails, never passes
+// ---------------------------------------------------------------------------
+
+/** A runner that must never be reached: a check with no handle has no way in. */
+const unreachable: haIntegrity.RemoteRun = async () => {
+  throw new Error('the check reached the remote without a handle');
+};
+const sshless = { mode: 'compose-ha' as const, projectName: 'demo', run: unreachable };
+const KEY = '/tmp/key';
+const NODE = '203.0.113.10';
+
+/** Each HA integrity check, run with each half of its handle missing. */
+const HA_HANDLELESS: Record<
+  string,
+  Array<() => Promise<VerificationResult> | VerificationResult>
+> = {
+  checkOldPrimaryDisarmed: [
+    () => haIntegrity.checkOldPrimaryDisarmed({ ...sshless, retiredIp: NODE, sshKeyPath: null }),
+    () => haIntegrity.checkOldPrimaryDisarmed({ ...sshless, retiredIp: null, sshKeyPath: KEY }),
+  ],
+  checkPrimaryNotRestarted: [
+    async () =>
+      haIntegrity.checkPrimaryNotRestarted({
+        ip: NODE,
+        before: await haIntegrity.readDbIncarnation({ ...sshless, ip: NODE, sshKeyPath: null }),
+        after: await haIntegrity.readDbIncarnation({ ...sshless, ip: NODE, sshKeyPath: null }),
+      }),
+    async () =>
+      haIntegrity.checkPrimaryNotRestarted({
+        ip: null,
+        before: await haIntegrity.readDbIncarnation({ ...sshless, ip: null, sshKeyPath: KEY }),
+        after: await haIntegrity.readDbIncarnation({ ...sshless, ip: null, sshKeyPath: KEY }),
+      }),
+  ],
+  checkSlotCapped: [
+    () => haIntegrity.checkSlotCapped({ ...sshless, primaryIp: NODE, sshKeyPath: null }),
+    () => haIntegrity.checkSlotCapped({ ...sshless, primaryIp: null, sshKeyPath: KEY }),
+  ],
+  checkAppEndpointsReady: [
+    () =>
+      haIntegrity.checkAppEndpointsReady({ primaryIp: NODE, sshKeyPath: null, run: unreachable }),
+    () =>
+      haIntegrity.checkAppEndpointsReady({ primaryIp: null, sshKeyPath: KEY, run: unreachable }),
+  ],
+  checkDnsFlipVerified: [
+    () =>
+      haIntegrity.checkDnsFlipVerified({
+        domain: D,
+        expectedIp: NODE,
+        readA: null,
+        readerError: 'HCLOUD_TOKEN is not set',
+      }),
+    () =>
+      haIntegrity.checkDnsFlipVerified({
+        domain: D,
+        expectedIp: null,
+        readA: async () => NODE,
+      }),
+  ],
+  checkSecondFailoverRefused: [
+    // No handle to lose: its hollow shape is a non-zero exit for another reason.
+    () =>
+      haIntegrity.checkSecondFailoverRefused({
+        exitCode: 255,
+        output: 'ssh: connect to host port 22: Connection timed out',
+        rolesBefore: { primaryIp: NODE, standbyIp: null },
+        rolesAfter: { primaryIp: NODE, standbyIp: null },
+      }),
+  ],
+};
+
+describe('HA INTEGRITY: every check fails without its handle', () => {
+  const cases = Object.entries(HA_HANDLELESS).flatMap(([name, runs]) =>
+    runs.map((run, i) => [`${name} #${i + 1}`, run] as const),
+  );
+
+  it.each(cases)('%s fails', async (_label, run) => {
+    const r = await run();
+    expect(r.status, r.errorMessage).toBe('fail');
+  });
+
+  it('every exported check in ha-integrity.ts is registered', () => {
+    const exported = Object.keys(haIntegrity).filter((k) => /^check[A-Z]/.test(k));
+    expect(exported.length).toBeGreaterThanOrEqual(6);
+    expect(exported.sort()).toEqual(Object.keys(HA_HANDLELESS).sort());
   });
 });
