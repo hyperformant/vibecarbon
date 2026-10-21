@@ -34,6 +34,9 @@ const h = vi.hoisted(() => ({
   dnsAnswer: [] as string[],
   disk: { config: null as Record<string, unknown> | null },
   started: [] as string[],
+  /** One ordered log: ssh writes of interest, stack starts and config saves. */
+  events: [] as string[],
+  startFails: false,
   envMerges: [] as Array<{ ip: string; vars: Record<string, string> }>,
   upStacks: [] as Array<{ stack: string; location: unknown }>,
 }));
@@ -54,6 +57,9 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
     ...actual,
     loadProjectConfig: () => structuredClone(h.disk.config),
     saveProjectConfig: (cfg: Record<string, unknown>) => {
+      const env = (cfg as { environments?: Record<string, { status?: string }> }).environments
+        ?.prod;
+      h.events.push(`save:${env?.status}`);
       h.disk.config = structuredClone(cfg);
     },
     registerProject: () => {},
@@ -89,6 +95,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const rec = async (ip: string, _k: string, command: unknown, options?: { input?: string }) => {
     const c = Array.isArray(command) ? command.join(' ') : String(command);
     h.calls.push({ ip, command: c, input: options?.input });
+    if (options?.input?.includes('pg_basebackup')) h.events.push(`basebackup:${ip}`);
     return respond(ip, c, options?.input);
   };
   return {
@@ -101,6 +108,8 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
       return out;
     }),
     startComposeStack: vi.fn(async (ip: string) => {
+      h.events.push(`start:${ip}`);
+      if (h.startFails && ip === RETIRED_IP) throw new Error('reconcile failed');
       h.started.push(ip);
     }),
   };
@@ -280,6 +289,8 @@ const DB_LIFECYCLE =
 beforeEach(() => {
   h.calls.length = 0;
   h.started.length = 0;
+  h.events.length = 0;
+  h.startFails = false;
   h.envMerges.length = 0;
   h.upStacks.length = 0;
   h.reseedFails = false;
@@ -482,15 +493,23 @@ describe('reconverge effects', () => {
     expect(overlay(PROMOTED_IP)).toContain('bind=10.99.0.2');
   });
 
-  it('(e) brings the app tier up on the promoted node and holds it at zero on the retired one', async () => {
+  it('(e) app tier up on the promoted node, held at zero on the retired one until its reseed, then up as a standby', async () => {
     await runReconverge(baseCtx());
-    expect(h.started).toEqual([PROMOTED_IP]);
-    expect(
-      h.calls.some(
-        (c) =>
-          c.ip === RETIRED_IP && /docker stop/.test(c.command) && c.command.includes('myapp-app'),
-      ),
-    ).toBe(true);
+    // Held at zero for the pre-reseed window...
+    const stopIdx = h.calls.findIndex(
+      (c) =>
+        c.ip === RETIRED_IP && /docker stop/.test(c.command) && c.command.includes('myapp-app'),
+    );
+    expect(stopIdx).toBeGreaterThanOrEqual(0);
+    // ...then reconciled as a normal standby in the SAME run: after the
+    // basebackup made it a replica, before finalize persists 'deployed'.
+    const ev = h.events;
+    expect(ev.indexOf(`start:${PROMOTED_IP}`)).toBeGreaterThanOrEqual(0);
+    const retiredStart = ev.indexOf(`start:${RETIRED_IP}`);
+    expect(retiredStart).toBeGreaterThan(ev.indexOf(`basebackup:${RETIRED_IP}`));
+    expect(ev.indexOf(`basebackup:${RETIRED_IP}`)).toBeGreaterThanOrEqual(0);
+    expect(retiredStart).toBeLessThan(ev.indexOf('save:deployed'));
+    expect(h.started).toEqual([PROMOTED_IP, RETIRED_IP]);
     // WALG_ROLE follows the roles, not the stacks.
     const role = (ip: string) => h.envMerges.find((m) => m.ip === ip)?.vars.WALG_ROLE;
     expect(role(PROMOTED_IP)).toBe('primary');
@@ -534,6 +553,17 @@ describe('reconverge effects', () => {
     // A replica standby gets its stack like any standby.
     expect(h.started.sort()).toEqual([PROMOTED_IP, RETIRED_IP].sort());
     expect(envOnDisk().lastFailover).toBeUndefined();
+  });
+
+  it('a failed reconcile of the rebuilt standby leaves the reconverge incomplete', async () => {
+    h.startFails = true;
+    const ctx = baseCtx();
+    await runReconverge(ctx);
+    const env = envOnDisk();
+    expect(ctx.reconvergeComplete).toBe(false);
+    expect(env.lastFailover).toBe('2026-10-20T12:00:00.000Z');
+    expect(env.replication).toBe('degraded');
+    expect(env.deployedAt).toBe('2026-10-19T12:00:00.000Z');
   });
 
   it('resumes: a failed reseed leaves the env swapped and degraded, and a rerun reseeds and clears', async () => {

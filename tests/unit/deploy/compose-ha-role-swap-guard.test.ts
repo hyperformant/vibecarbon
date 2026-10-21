@@ -16,9 +16,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // cases then prove two things at once: the guard let the deploy through, and it
 // sits ahead of even the host-tooling preflight — hence ahead of the operator
 // firewall patch, the S3 bucket creation, the image push and the DNS warm-up.
+// The reconverge readiness reads run after the operator-IP check, so those
+// cases let preflight through and stop at the StateTracker (the next mutation).
+const stops = vi.hoisted(() => ({ atPreflight: true }));
 vi.mock('../../../src/lib/deploy/preflight.js', () => ({
   checkDeployPrerequisites: () => {
-    throw new Error('STOP_AFTER_ROLE_SWAP_GUARD');
+    if (stops.atPreflight) throw new Error('STOP_AFTER_ROLE_SWAP_GUARD');
   },
   // Evaluated as checkDeployPrerequisites's `env` argument (the file-aware
   // `[fileEnv, shellEnv]` pair) — inert here, the call above is the stop.
@@ -39,6 +42,7 @@ vi.mock('../../../src/lib/deploy/state.js', () => ({
   StateTracker: class {
     constructor(...args: unknown[]) {
       StateTracker(...args);
+      throw new Error('STOP_AT_STATE_TRACKER');
     }
   },
 }));
@@ -381,31 +385,39 @@ describe('deploy path wiring', () => {
   beforeEach(() => {
     ensureOperatorIpAccess.mockClear();
     StateTracker.mockClear();
+    stops.atPreflight = true;
     replica.inRecovery = { '10.0.0.2': false, '10.0.0.1': false };
     replica.dns = ['10.0.0.2'];
   });
 
   it('reconverges a swapped compose-HA environment instead of refusing it', async () => {
+    stops.atPreflight = false;
     await expect(executeDeployment({}, gathered(swappedComposeHa()))).rejects.toThrow(
-      'STOP_AFTER_ROLE_SWAP_GUARD',
+      'STOP_AT_STATE_TRACKER',
     );
   });
 
-  it('refuses before any infra mutation while the promoted node is still in recovery', async () => {
+  // The readiness reads follow the operator-IP check (an operator whose IP
+  // changed must be let back in before the first SSH read), and precede every
+  // later mutation: the StateTracker and everything after it.
+  it('refuses after the operator-IP check, before any later mutation, while the promoted node is in recovery', async () => {
+    stops.atPreflight = false;
     replica.inRecovery['10.0.0.2'] = true;
     await expect(executeDeployment({}, gathered(swappedComposeHa()))).rejects.toThrow(
       /still in recovery.*vibecarbon failover prod/,
     );
-    expect(ensureOperatorIpAccess).not.toHaveBeenCalled();
+    expect(ensureOperatorIpAccess).toHaveBeenCalledTimes(1);
     expect(StateTracker).not.toHaveBeenCalled();
   });
 
-  it('refuses before any infra mutation while DNS does not point at the promoted node', async () => {
+  it('refuses after the operator-IP check, before any later mutation, while DNS is elsewhere', async () => {
+    stops.atPreflight = false;
     replica.dns = ['10.0.0.1'];
     await expect(executeDeployment({}, gathered(swappedComposeHa()))).rejects.toThrow(
       /not the promoted primary 10\.0\.0\.2/,
     );
-    expect(ensureOperatorIpAccess).not.toHaveBeenCalled();
+    expect(ensureOperatorIpAccess).toHaveBeenCalledTimes(1);
+    expect(StateTracker).not.toHaveBeenCalled();
   });
 
   it('refuses before any infra mutation while a failover journal is set', async () => {

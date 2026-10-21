@@ -27,10 +27,13 @@
  * second `vibecarbon failover` and `restore`'s standby re-seed refuse with the
  * reconverge (`vibecarbon deploy`) as the way back.
  *
- * This module does no I/O: the readers the readiness check needs are injected,
+ * This module does no I/O (failover-guard's swappedSinceLastDeploy is pure): the
+ * readers the readiness check needs are injected,
  * so it is unit-tested against config fixtures and called at the very top of
  * executeDeployment, ahead of every infra mutation.
  */
+
+import { swappedSinceLastDeploy } from '../failover-guard.js';
 
 const PRIMARY = 'primary';
 const STANDBY = 'standby';
@@ -142,15 +145,6 @@ export function composeHaStackOf(entry, projectName, environment) {
   return entry?.role === PRIMARY || entry?.role === STANDBY ? entry.role : null;
 }
 
-/** A failover swapped the roles and no deploy has reconverged them since. */
-function failedOverSinceLastDeploy(envConfig) {
-  if (!envConfig?.lastFailover) return false;
-  const failedOverAt = Date.parse(envConfig.lastFailover);
-  const deployedAt = Date.parse(envConfig.deployedAt ?? '');
-  if (Number.isNaN(deployedAt)) return true;
-  return Number.isNaN(failedOverAt) || failedOverAt > deployedAt;
-}
-
 /**
  * The way back to two nodes after a compose-HA failover: one deploy. The one
  * place this path is spelled, so the failover refusal, its recovery lines and
@@ -238,7 +232,7 @@ export function composeHaStandbyResyncHint({ projectName, environment, envConfig
   }
   if (
     detectComposeHaRoleSwap({ projectName, environment, envConfig }) ||
-    failedOverSinceLastDeploy(envConfig)
+    swappedSinceLastDeploy(envConfig)
   ) {
     return (
       `Run \`vibecarbon deploy ${environment}\`: it rebuilds the standby from the primary by ` +
@@ -284,7 +278,7 @@ export function planComposeHaReconverge({ projectName, environment, envConfig } 
     );
   }
   const swapped = detectComposeHaRoleSwap({ projectName, environment, envConfig });
-  if (!swapped && !failedOverSinceLastDeploy(envConfig)) return null;
+  if (!swapped && !swappedSinceLastDeploy(envConfig)) return null;
 
   const servers = Array.isArray(envConfig.servers) ? envConfig.servers : [];
   const promoted = servers.find((sv) => sv?.role === PRIMARY);

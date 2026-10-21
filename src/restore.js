@@ -585,8 +585,9 @@ export async function runComposeRestore({
       envConfig.ha?.failoverInFlight
     ) {
       p.log.warn(
-        'Primary restored and serving. Skipping the standby re-seed here: this environment ' +
-          'failed over, and its standby is rebuilt by the role-aware deploy. ' +
+        'Primary restored and serving. Skipping the standby re-seed here: this pair has ' +
+          'failed over at some point, so its standby is rebuilt by `vibecarbon deploy`, which ' +
+          'resolves the nodes by role. ' +
           composeHaStandbyResyncHint({ projectName, environment: envName, envConfig }),
       );
     } else if (standby?.ip) {

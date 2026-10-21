@@ -713,8 +713,9 @@ async function haStartComposeStack(ctx) {
  * database and exits). The retired node before its reseed is NOT: its database
  * is the stale ex-primary, so its app tier would serve stale data and its
  * app-migrate would write into it (or fail on the failover's write fence). Its
- * writers are held at zero instead and the reseed below rebuilds it; the next
- * deploy, finding a replica, brings its stack up.
+ * writers are held at zero for that window only; reconvergeReplication brings
+ * its stack up as a normal standby once the reseed makes it a replica, in the
+ * same run (one deploy restores HA).
  */
 async function reconvergeStandbyStack(ctx, serviceOpts) {
   const projectName = ctx.projectConfig.projectName;
@@ -722,6 +723,7 @@ async function reconvergeStandbyStack(ctx, serviceOpts) {
   const state = await readNodeState(ctx, standby.ip);
   if (state.inRecovery === true) {
     await startComposeStack(standby.ip, sshKeyPath, projectName, serviceOpts);
+    ctx.standbyReconciled = true;
     return;
   }
   const { ok, stopped } = await stopOldPrimaryWriters(standby.ip, sshKeyPath, projectName);
@@ -953,6 +955,9 @@ async function reconvergeReplication(ctx) {
       domain,
       dnsAnswer,
     });
+    // receiverStatus === 'streaming' is the real discriminator: the system
+    // identifier also matches on the retired node's stale PGDATA (promotion
+    // keeps it), so it only rules out a foreign database.
     const inSync =
       standbyState.inRecovery === true &&
       standbyState.receiverStatus === 'streaming' &&
@@ -971,6 +976,9 @@ async function reconvergeReplication(ctx) {
       });
     }
     ctx.onProgress('Configuring PostgreSQL replication on the promoted primary...');
+    // No ALTER SYSTEM WAL settings and no restart: the promoted node's
+    // postgresql.auto.conf came from the old primary in its basebackup, and its
+    // db is serving.
     await ensurePrimaryReplicationAccess(primary.ip, sshKeyPath, projectName);
 
     if (inSync) {
@@ -986,8 +994,41 @@ async function reconvergeReplication(ctx) {
       });
     } catch (err) {
       p.log.warn(`Reseed of the retired node failed (continuing to the gate): ${err.message}`);
+      return;
     }
+    await reconcileRebuiltStandby(ctx);
   });
+}
+
+/**
+ * Bring the rebuilt node's stack up as a normal standby (current image, the
+ * standby role env merged earlier: WALG_ROLE=standby, ACME disarmed), once it
+ * reads as a replica, so its app-migrate exits on the read-only database. Its
+ * success is part of a complete reconverge (haFinalizeConfig); a failure is a
+ * warning here, and the env stays degraded for the rerun.
+ */
+async function reconcileRebuiltStandby(ctx) {
+  if (ctx.standbyReconciled) return;
+  const projectName = ctx.projectConfig.projectName;
+  const { standby, sshKeyPath } = ctx;
+  const state = await readNodeState(ctx, standby.ip);
+  if (state.inRecovery !== true) {
+    p.log.warn(
+      `the rebuilt standby ${standby.ip} does not read as a replica yet; its stack stays down ` +
+        `until a rerun of vibecarbon deploy ${ctx.environment}`,
+    );
+    return;
+  }
+  ctx.onProgress(`Starting services on the rebuilt standby ${standby.ip}...`);
+  try {
+    await startComposeStack(standby.ip, sshKeyPath, projectName, haServiceOpts(ctx));
+    ctx.standbyReconciled = true;
+  } catch (err) {
+    p.log.warn(
+      `starting the rebuilt standby's stack failed (${standby.ip}): ` +
+        `${err?.message ?? err}; rerun vibecarbon deploy ${ctx.environment}`,
+    );
+  }
 }
 
 /**
@@ -1101,11 +1142,13 @@ async function haFinalizeConfig(ctx) {
     degraded,
   } = ctx;
 
-  // A reconverge is complete only once this deploy verified streaming AND read
-  // the standby's system identifier (R12 step 5). Until then the env stays
+  // A reconverge is complete only once this deploy verified streaming, read
+  // the standby's system identifier and brought the standby's stack up (R12
+  // step 5). Until then the env stays
   // swapped and degraded (lastFailover kept, deployedAt not stamped), so a rerun
   // resumes and failover keeps refusing.
-  const reconvergeComplete = !ctx.reconverge || (!!replActive && !!ctx.systemIdentifier);
+  const reconvergeComplete =
+    !ctx.reconverge || (!!replActive && !!ctx.systemIdentifier && !!ctx.standbyReconciled);
   ctx.reconvergeComplete = reconvergeComplete;
   const finalEnv = {
     ...pendingEnvConfig,

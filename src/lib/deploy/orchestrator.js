@@ -538,39 +538,20 @@ export async function executeDeployment(args, gatheredConfig) {
 
   const { deployMode } = config;
   const tier = resolveTier({ deployMode, ha: config.ha });
-  // COMPOSE-HA RECONVERGE (R12), first thing after the tier is known and BEFORE
-  // any mutation (the operator-firewall patch below, the S3 buckets, the image
-  // push, the DNS warm-up, the plan itself). `envConfig` here is the
-  // environment's persisted config as it stood before this invocation, so it
-  // still carries the roles a failover flipped, the one and only place the swap
-  // is recorded. A swapped pair deploys by role (compose/ha-role-swap.js): the
-  // promoted node stays the primary and the retired one is rebuilt as the
-  // standby. It refuses while a failover is in flight, while the promoted node
-  // is still in recovery, and while DNS does not point at it yet.
+  // COMPOSE-HA RECONVERGE (R12), classified first thing after the tier is
+  // known and BEFORE any mutation. `envConfig` here is the environment's
+  // persisted config as it stood before this invocation, so it still carries
+  // the roles a failover flipped, the one and only place the swap is recorded.
+  // A swapped pair deploys by role (compose/ha-role-swap.js): the promoted node
+  // stays the primary and the retired one is rebuilt as the standby. The journal
+  // refusal is pure and fires here; the readiness reads (promoted node out of
+  // recovery, DNS on it) need SSH, so they run right after the operator-IP
+  // firewall check below, still ahead of every SSH write and Pulumi.
   const composeHaReconverge = planComposeHaReconverge({
     projectName: projectConfig.projectName,
     environment,
     envConfig,
   });
-  if (composeHaReconverge) {
-    await assertComposeHaReconvergeReady({
-      plan: composeHaReconverge,
-      environment,
-      domain,
-      readState: async (ip) =>
-        readReplicaState({
-          exec: await rolePrimaryPsql('compose-ha', environment, projectConfig.projectName, ip),
-        }),
-      resolveA: async (hostname) => {
-        const { resolvePublicA } = await import('./public-dns-lookup.js');
-        return resolvePublicA(hostname);
-      },
-    });
-    p.log.info(
-      `a failover swapped this environment's roles: ${composeHaReconverge.promoted.ip} stays ` +
-        `the primary and ${composeHaReconverge.retired.ip} is rebuilt as the standby`,
-    );
-  }
   // A planned failover interrupted between its database write fence and its
   // journal left the primary read-only with nothing promoted: lift it before
   // this deploy restarts the app onto it (write-fence.js). Unreachable or
@@ -663,6 +644,31 @@ export async function executeDeployment(args, gatheredConfig) {
   );
   if (accessResult.added && accessResult.fromEnv) {
     p.log.info(`Bootstrapped operator CIDRs from ALLOWED_SSH_IPS env var: ${accessResult.cidr}`);
+  }
+
+  // The reconverge readiness reads (R12): after the operator-IP check, so an
+  // operator whose IP changed is let back in before the first SSH read, and
+  // before every SSH write and Pulumi call.
+  if (composeHaReconverge) {
+    const { composePsqlRunner } = await import('./compose/ha.js');
+    const haKey = getSSHKeyPath(environment);
+    await assertComposeHaReconvergeReady({
+      plan: composeHaReconverge,
+      environment,
+      domain,
+      readState: (ip) =>
+        readReplicaState({
+          exec: composePsqlRunner(ip, haKey, `/opt/${projectConfig.projectName}`),
+        }),
+      resolveA: async (hostname) => {
+        const { resolvePublicA } = await import('./public-dns-lookup.js');
+        return resolvePublicA(hostname);
+      },
+    });
+    p.log.info(
+      `a failover swapped this environment's roles: ${composeHaReconverge.promoted.ip} stays ` +
+        `the primary and ${composeHaReconverge.retired.ip} is rebuilt as the standby`,
+    );
   }
 
   // Initialize state tracker for granular resume
