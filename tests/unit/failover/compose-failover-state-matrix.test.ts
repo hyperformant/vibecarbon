@@ -121,6 +121,10 @@ interface RunOpts {
   promoteVerdict?: 'promoted' | 'not-issued' | 'unknown';
   promoteThrows?: boolean;
   flags?: { forceUnproven?: boolean; allowDegraded?: boolean };
+  /** The catch-up gate throws (a streaming standby missed the deadline). */
+  catchUpThrows?: boolean;
+  /** The pre-promote fence (docker stop) cannot be confirmed. */
+  fenceFails?: boolean;
   /** Pass no seams at all (the real ssh-backed defaults run). */
   noSeams?: boolean;
 }
@@ -135,6 +139,8 @@ async function run(opts: RunOpts = {}) {
     promoteVerdict = 'promoted',
     promoteThrows = false,
     flags = {},
+    catchUpThrows = false,
+    fenceFails = false,
     noSeams = false,
   } = opts;
   const order: string[] = [];
@@ -173,9 +179,22 @@ async function run(opts: RunOpts = {}) {
       if (promoteThrows) throw new Error('ssh dropped');
       return promoteVerdict;
     },
+    catchUp: async (o: { isStreaming: () => Promise<boolean> }) => {
+      order.push('catchUp');
+      if (catchUpThrows) {
+        throw new Error("zero-data-loss gate: the standby did not replay the primary's final WAL");
+      }
+      const streaming = await o.isStreaming();
+      return { caughtUp: streaming, lagBytes: streaming ? 0 : null, primaryLsn: '0/3000060' };
+    },
     fenceOldPrimary: async (ip: string) => {
       order.push('fence');
       captured.fencedIp = ip;
+      return !fenceFails;
+    },
+    unfenceOldPrimary: async (ip: string) => {
+      order.push('unfence');
+      captured.unfencedIp = ip;
       return true;
     },
     confirmUnproven: async () => {
@@ -207,7 +226,7 @@ async function run(opts: RunOpts = {}) {
 }
 
 /** Steps a refusal must never reach. */
-const MUTATIONS = ['reseed', 'journal', 'promote', 'fence', 'swap'];
+const MUTATIONS = ['reseed', 'journal', 'promote', 'fence', 'unfence', 'swap'];
 function expectNoMutation(order: string[]) {
   for (const step of MUTATIONS) expect(order, `refusal reached ${step}`).not.toContain(step);
   expect(sshCalls, 'a refusal ran a remote command').toEqual([]);
@@ -397,6 +416,9 @@ describe('failoverComposeHA state matrix', () => {
     });
     expect(thrown).toBeUndefined();
     expect(captured.reseedArgs).toEqual([STANDBY_IP, PRIMARY_IP]);
+    // Reseeded from the FENCED primary, after the gate found it not streaming.
+    expect(order.indexOf('fence')).toBeLessThan(order.indexOf('catchUp'));
+    expect(order.indexOf('catchUp')).toBeLessThan(order.indexOf('reseed'));
     expect(order.indexOf('reseed')).toBeLessThan(order.indexOf('recordSeeded'));
     expect(captured.recordedSysid).toBe(SYSID);
     expect((captured.journal as { systemIdentifier: string }).systemIdentifier).toBe(SYSID);
@@ -417,6 +439,8 @@ describe('failoverComposeHA state matrix', () => {
     expect(thrown?.message).toMatch(/re-seed/);
     expect(order).not.toContain('journal');
     expect(order).not.toContain('promote');
+    // Nothing was promoted: the old primary's app is started again.
+    expect(order.indexOf('unfence')).toBeGreaterThan(order.indexOf('reseed'));
   });
 
   it('-force-unproven on a dead primary confirms first and records the override in the journal and swap', async () => {
@@ -427,6 +451,95 @@ describe('failoverComposeHA state matrix', () => {
     expect(order.indexOf('confirmUnproven')).toBeLessThan(order.indexOf('journal'));
     expect((captured.journal as { override?: string }).override).toBe('force-unproven');
     expect(captured.swapOverride).toBe('force-unproven');
+  });
+});
+
+describe('failoverComposeHA planned fence and catch-up (H1)', () => {
+  it('planned: fences the old primary before the gate, journals its LSN, and never un-fences on a proven promote', async () => {
+    const { order, captured, thrown } = await run({ primaryReachable: true });
+    expect(thrown).toBeUndefined();
+    expect(captured.fencedIp).toBe(PRIMARY_IP);
+    expect(order.indexOf('fence')).toBeLessThan(order.indexOf('catchUp'));
+    expect(order.indexOf('catchUp')).toBeLessThan(order.indexOf('journal'));
+    expect((captured.journal as { primaryLsn: string }).primaryLsn).toBe('0/3000060');
+    expect(order).not.toContain('reseed');
+    expect(order).not.toContain('unfence');
+    // Fenced once: the post-promote stop does not ssh it again.
+    expect(order.filter((x) => x === 'fence')).toHaveLength(1);
+  });
+
+  it('a standby that misses the catch-up deadline aborts before the journal and un-fences', async () => {
+    const { order, captured, thrown } = await run({ primaryReachable: true, catchUpThrows: true });
+    expect(thrown?.message).toMatch(/^Failover aborted: zero-data-loss gate/);
+    expect(order).not.toContain('journal');
+    expect(order).not.toContain('promote');
+    expect(order.indexOf('unfence')).toBeGreaterThan(order.indexOf('catchUp'));
+    expect(captured.unfencedIp).toBe(PRIMARY_IP);
+    expect(order).not.toContain('swap');
+  });
+
+  it('a fence that cannot be confirmed aborts before the gate: nothing promoted', async () => {
+    const { order, thrown } = await run({ primaryReachable: true, fenceFails: true });
+    expect(thrown?.message).toMatch(/could not stop the app on the old primary/);
+    expect(thrown?.message).toContain('rerun vibecarbon failover prod');
+    expect(thrown?.message).not.toMatch(/—/);
+    expect(order).not.toContain('catchUp');
+    expect(order).not.toContain('journal');
+    expect(order).not.toContain('promote');
+  });
+
+  it("first run, planned, promote 'not-issued': journal cleared, then the old primary's app is started again", async () => {
+    const { order, thrown } = await run({ primaryReachable: true, promoteVerdict: 'not-issued' });
+    expect(thrown?.message).toMatch(/no promote was sent/);
+    expect(order.indexOf('clearJournal')).toBeGreaterThan(order.indexOf('promote'));
+    expect(order.indexOf('unfence')).toBeGreaterThan(order.indexOf('clearJournal'));
+  });
+
+  it("resumed run, planned, promote 'not-issued': an earlier promote may land, so the app stays stopped", async () => {
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      promoteVerdict: 'not-issued',
+      envConfig: baseEnvConfig({
+        ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
+      }),
+    });
+    expect(thrown?.message).toMatch(/kept fenced/);
+    expect(order).not.toContain('unfence');
+    expect(order).not.toContain('clearJournal');
+  });
+
+  it("planned, promote 'unknown': stays fenced, journal kept, never un-fenced", async () => {
+    const { order, thrown } = await run({ primaryReachable: true, promoteVerdict: 'unknown' });
+    expect(thrown?.message).toMatch(/kept fenced/);
+    expect(order).not.toContain('unfence');
+    expect(order).not.toContain('clearJournal');
+  });
+
+  it('a resumed run with an earlier journal never un-fences on a pre-promote abort', async () => {
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      catchUpThrows: true,
+      envConfig: baseEnvConfig({
+        ha: { failoverInFlight: { target: 'standby', systemIdentifier: SYSID } },
+      }),
+    });
+    expect(thrown?.message).toMatch(/zero-data-loss gate/);
+    expect(order).toContain('fence');
+    expect(order).not.toContain('unfence');
+  });
+
+  it('unplanned: no fence, no gate, before the promote', async () => {
+    const { order, captured, thrown } = await run({ primaryReachable: false });
+    expect(thrown).toBeUndefined();
+    expect(order.slice(0, order.indexOf('promote'))).not.toContain('fence');
+    expect(order).not.toContain('catchUp');
+    expect((captured.journal as { primaryLsn: unknown }).primaryLsn).toBeNull();
+  });
+
+  it('the unfence starts the app by container name, never app-migrate', async () => {
+    const { startOldPrimaryApp } = await import('../../../src/lib/deploy/compose/ha.js');
+    await startOldPrimaryApp(PRIMARY_IP, '/k', 'myapp');
+    expect(sshCalls).toEqual([{ ip: PRIMARY_IP, command: 'docker start myapp-app' }]);
   });
 });
 

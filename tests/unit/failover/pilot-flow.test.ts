@@ -25,9 +25,9 @@ import {
   preflightPilotFailover,
   provisionStandbyCapacity,
   swapHaRoles,
-  waitForStandbyCaughtUp,
   waitForWorkersReady,
 } from '../../../src/failover.js';
+import { waitForStandbyCaughtUp } from '../../../src/lib/deploy/replication.js';
 
 /** `kubectl get nodes --no-headers` output with `n` Ready worker rows (+ master). */
 function readyLines(n: number): string {
@@ -360,64 +360,92 @@ describe('waitForWorkersReady', () => {
   });
 });
 
-describe('waitForStandbyCaughtUp (planned zero-data-loss gate)', () => {
-  const servers = { primary: { ip: '10.0.0.1' }, standby: { ip: '10.0.0.9' } };
-  const baseDeps = () => ({
-    getPostgresPod: vi.fn(async () => 'db-0'),
-    isStreaming: vi.fn(async () => true),
-    sleep: vi.fn(async () => {}),
-  });
-  // kubectl stub: answers the primary's pg_current_wal_lsn() capture with
-  // `primaryLsn`, and each standby pg_wal_lsn_diff(...) >= 0 check with the next
-  // element of `standbyResponses` ('t' = caught up, 'f' = still lagging).
-  const makeKubectl = (primaryLsn: string, standbyResponses: string[]) => {
+describe('waitForStandbyCaughtUp (planned zero-data-loss gate, any transport)', () => {
+  const PRIMARY_LSN = '0/3000000';
+  /** A fake clock: sleep advances it, so the deadline (not a count) ends the wait. */
+  const clock = () => {
+    let t = 0;
+    return {
+      now: () => t,
+      sleep: vi.fn(async (ms: number) => {
+        t += ms;
+      }),
+    };
+  };
+  // The standby answers its replay lag behind the captured LSN in bytes, one
+  // element per read (the last one repeats).
+  const execs = (lags: string[], primaryOut = `${PRIMARY_LSN}\n`) => {
     let i = 0;
-    return vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      const sql = argv[argv.length - 1];
-      if (sql === 'SELECT pg_current_wal_lsn()') return primaryLsn;
-      return standbyResponses[Math.min(i++, standbyResponses.length - 1)];
-    });
+    return {
+      primaryExec: vi.fn(async () => primaryOut),
+      standbyExec: vi.fn(async (_sql: string) => lags[Math.min(i++, lags.length - 1)]),
+    };
   };
 
-  it('returns once the standby has replayed past the captured primary LSN', async () => {
-    const deps = { ...baseDeps(), kubectl: makeKubectl('0/3000000', ['t']) };
-    // Resolves to the captured primary LSN: the failover journal records it.
-    await expect(waitForStandbyCaughtUp(servers, '/key', { deps })).resolves.toBe('0/3000000');
-    // Captured the primary target once, then a single standby check (no sleep).
-    expect(deps.kubectl).toHaveBeenCalledTimes(2);
-    expect(deps.sleep).not.toHaveBeenCalled();
+  it('returns caught up once the standby has replayed to the captured primary LSN', async () => {
+    const e = execs(['0']);
+    const c = clock();
+    await expect(
+      waitForStandbyCaughtUp({ ...e, isStreaming: async () => true, ...c }),
+    ).resolves.toEqual({ caughtUp: true, lagBytes: 0, primaryLsn: PRIMARY_LSN });
+    expect(e.primaryExec).toHaveBeenCalledWith('SELECT pg_current_wal_lsn()');
+    expect(e.standbyExec.mock.calls[0][0]).toContain(`'${PRIMARY_LSN}'`);
+    expect(c.sleep).not.toHaveBeenCalled();
   });
 
   it('polls while the standby lags, then returns when it catches up', async () => {
-    const deps = { ...baseDeps(), kubectl: makeKubectl('0/3000000', ['f', 'f', 't']) };
-    await expect(waitForStandbyCaughtUp(servers, '/key', { deps, intervalMs: 1 })).resolves.toBe(
-      '0/3000000',
-    );
-    // 1 primary capture + 3 standby checks; slept between the 3 checks.
-    expect(deps.kubectl).toHaveBeenCalledTimes(4);
-    expect(deps.sleep).toHaveBeenCalledTimes(2);
+    const e = execs(['4096', '512', '0']);
+    const c = clock();
+    const r = await waitForStandbyCaughtUp({ ...e, isStreaming: async () => true, ...c });
+    expect(r.caughtUp).toBe(true);
+    expect(e.standbyExec).toHaveBeenCalledTimes(3);
+    expect(c.sleep).toHaveBeenCalledTimes(2);
   });
 
-  it('throws when the standby never catches up within the attempt budget', async () => {
-    const deps = { ...baseDeps(), kubectl: makeKubectl('0/3000000', ['f']) };
+  it('throws at the deadline when a streaming standby never catches up, naming the lag', async () => {
+    const e = execs(['4096']);
+    const c = clock();
     await expect(
-      waitForStandbyCaughtUp(servers, '/key', { deps, attempts: 3, intervalMs: 1 }),
-    ).rejects.toThrow(/did not replay|zero-data-loss/i);
-    expect(deps.sleep).toHaveBeenCalledTimes(2); // slept between attempts 1→2, 2→3
+      waitForStandbyCaughtUp({
+        ...e,
+        isStreaming: async () => true,
+        deadlineMs: 10_000,
+        pollMs: 2000,
+        ...c,
+      }),
+    ).rejects.toThrow(
+      /did not replay the primary's final WAL \(0\/3000000\) within 10s \(4096 bytes behind\)/,
+    );
+    // The deadline ended it: 10 s of 2 s polls is 5 sleeps, whatever the count.
+    expect(c.sleep).toHaveBeenCalledTimes(5);
   });
 
-  it('is N/A when the standby is not streaming (a full reseed copies all state)', async () => {
-    const kubectl = vi.fn(async () => 't');
-    const deps = {
-      getPostgresPod: vi.fn(),
-      isStreaming: vi.fn(async () => false),
-      sleep: vi.fn(),
-      kubectl,
-    };
-    await expect(waitForStandbyCaughtUp(servers, '/key', { deps })).resolves.toBeNull();
-    // Returned before touching postgres — no LSN capture, no pod resolution.
-    expect(kubectl).not.toHaveBeenCalled();
-    expect(deps.getPostgresPod).not.toHaveBeenCalled();
+  it('a standby that is not streaming is not caught up: the caller must reseed or refuse', async () => {
+    const e = execs(['0']);
+    await expect(
+      waitForStandbyCaughtUp({ ...e, isStreaming: async () => false, ...clock() }),
+    ).resolves.toEqual({ caughtUp: false, lagBytes: null, primaryLsn: PRIMARY_LSN });
+    expect(e.standbyExec).not.toHaveBeenCalled();
+  });
+
+  it('an unreadable primary LSN throws before any standby read', async () => {
+    const e = execs(['0'], '');
+    await expect(
+      waitForStandbyCaughtUp({ ...e, isStreaming: async () => true, ...clock() }),
+    ).rejects.toThrow(/could not read the primary's WAL position/);
+    expect(e.standbyExec).not.toHaveBeenCalled();
+  });
+
+  it('an unreadable replay position is not caught up', async () => {
+    const e = execs(['']);
+    await expect(
+      waitForStandbyCaughtUp({
+        ...e,
+        isStreaming: async () => true,
+        deadlineMs: 2000,
+        ...clock(),
+      }),
+    ).rejects.toThrow(/last read: no replay position/);
   });
 });
 
@@ -526,7 +554,7 @@ async function runFailoverHA(opts: RunOpts) {
       if (catchUpThrows) {
         throw new Error("standby did not replay the primary's final WAL — aborting failover");
       }
-      return '0/3000060';
+      return { caughtUp: true, lagBytes: 0, primaryLsn: '0/3000060' };
     },
     scale: async (_ip: string, _key: string, list: unknown, replicas: unknown, label: string) => {
       if (/un-quiesce/.test(label)) order.push('unquiesce');

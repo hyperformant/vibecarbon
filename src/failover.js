@@ -42,6 +42,7 @@ import {
   k8sPsqlRunner,
   promoteStandby,
   reseedStandbyFromPrimary,
+  waitForStandbyCaughtUp,
 } from './lib/deploy/replication.js';
 import {
   assertWalgBackupsWorking,
@@ -325,110 +326,6 @@ async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded } = {}) {
     result === 'reseeded'
       ? 'Standby re-seeded with primary state'
       : 'Primary unreachable mid-probe, promoting standby with current state',
-  );
-}
-
-/**
- * PLANNED-mode zero-data-loss gate: after the primary's app tier is quiesced
- * (no new customer writes) and BEFORE promotion, ensure the standby has
- * replayed every byte of WAL the primary held at quiesce time.
- *
- * Why: streaming ≠ caught-up. reseedStandbyOrAbort's streaming short-circuit
- * skips the pre-promote reseed for an already-streaming standby, but the WAL
- * records written just before quiesce may still be in flight — promoting then
- * would silently drop them, making "RPO zero" merely probabilistic. This gate
- * closes that window and is what upgrades planned switchover to a TRUE
- * zero-data-loss guarantee.
- *
- * Scope: only ENFORCED when the standby is STREAMING (the short-circuit path).
- * A non-streaming standby is reseeded downstream by a full pg_basebackup from
- * the quiesced primary, which copies everything — so the WAL-replay gate does
- * not apply and we return early rather than time out against a frozen replay
- * position.
- *
- * Which side we query: we capture the target ONCE on the PRIMARY (reachable by
- * definition in planned mode) via pg_current_wal_lsn(); after quiesce that
- * high-water mark is stable for customer writes. Then each poll runs a single
- * boolean query on the STANDBY (the node we are about to promote — guaranteed
- * reachable) comparing its live pg_last_wal_replay_lsn() to the captured target
- * with pg_wal_lsn_diff(...) >= 0 — one round-trip, freshest replay position. On
- * timeout we THROW so the caller's abort + un-quiesce path runs; a lagging
- * standby is never promoted.
- *
- * @param {{ primary: { ip: string }, standby: { ip: string } }} servers
- * @param {string} sshKeyPath
- * @param {{ attempts?: number, intervalMs?: number, deps?: { kubectl?: Function, getPostgresPod?: Function, isStreaming?: Function, sleep?: Function } }} [opts]
- * @returns {Promise<string|null>} the primary's captured WAL position (the
- *   failover journal's primaryLsn), or null when the gate does not apply
- */
-export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
-  const { attempts = 30, intervalMs = 2000, deps = {} } = opts;
-  const kubectl = deps.kubectl ?? sshKubectl;
-  const getPod = deps.getPostgresPod ?? getPostgresPod;
-  const streamingCheck = deps.isStreaming ?? isStandbyStreaming;
-  const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-
-  // Only the streaming short-circuit needs this gate; a non-streaming standby
-  // gets a full reseed downstream which is caught-up by construction.
-  if (!(await streamingCheck(servers.standby.ip, sshKeyPath))) {
-    p.log.info(
-      'Standby not streaming, catch-up gate N/A (the downstream reseed copies all state).',
-    );
-    return null;
-  }
-
-  // Capture the primary's WAL high-water mark ONCE, after quiesce.
-  const primaryPod = await getPod(servers.primary.ip, sshKeyPath);
-  const targetRaw = await kubectl(servers.primary.ip, sshKeyPath, [
-    'exec',
-    '-n',
-    'vibecarbon',
-    primaryPod,
-    '--',
-    'psql',
-    '-U',
-    'postgres',
-    '-tAc',
-    'SELECT pg_current_wal_lsn()',
-  ]);
-  const target = (typeof targetRaw === 'string' ? targetRaw : '').trim();
-  if (!/^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/.test(target)) {
-    throw new Error(
-      `Zero-data-loss gate: could not read the primary's WAL position before promote ` +
-        `(got: ${target.slice(0, 80) || 'empty'}). Aborting failover.`,
-    );
-  }
-
-  const standbyPod = await getPod(servers.standby.ip, sshKeyPath);
-  let last = '';
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    let out = '';
-    try {
-      out = await kubectl(servers.standby.ip, sshKeyPath, [
-        'exec',
-        '-n',
-        'vibecarbon',
-        standbyPod,
-        '--',
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        `SELECT pg_wal_lsn_diff(pg_last_wal_replay_lsn(), '${target}') >= 0`,
-      ]);
-    } catch (err) {
-      out = '';
-      last = firstErrorLine(err);
-    }
-    const caughtUp = (typeof out === 'string' ? out : '').trim();
-    if (caughtUp === 't') return target; // standby replayed up to the primary's quiesce LSN
-    last = caughtUp || last;
-    if (attempt < attempts) await sleep(intervalMs);
-  }
-  throw new Error(
-    `Zero-data-loss gate: standby did not replay the primary's final WAL (target ${target}) ` +
-      `within ${Math.round((attempts * intervalMs) / 1000)}s (last: ${last || 'none'}). ` +
-      `Aborting before promotion; the primary is un-quiesced and still serving.`,
   );
 }
 
@@ -1411,7 +1308,14 @@ export async function failoverHA(
     readStandbyState = (srv, key) => readReplicaState({ exec: k8sPsqlRunner(srv.standby.ip, key) }),
     readPrimaryState = (srv, key) => readReplicaState({ exec: k8sPsqlRunner(srv.primary.ip, key) }),
     scale = scaleDeployments,
-    catchUp = waitForStandbyCaughtUp,
+    psql = k8sPsqlRunner,
+    isStreaming = isStandbyStreaming,
+    catchUp = (srv, key) =>
+      waitForStandbyCaughtUp({
+        primaryExec: psql(srv.primary.ip, key),
+        standbyExec: psql(srv.standby.ip, key),
+        isStreaming: () => isStreaming(srv.standby.ip, key),
+      }),
     reseed = reseedStandbyOrAbort,
     writeJournal = writeFailoverJournal,
     clearJournal = clearFailoverJournal,
@@ -1598,13 +1502,20 @@ export async function failoverHA(
     try {
       // STEP 3b (PLANNED only): zero-data-loss gate. The primary is quiesced, so
       // wait for the STREAMING standby to replay the primary's WAL up to its
-      // quiesce-time position (R1d); its captured LSN goes into the journal.
+      // quiesce-time position (R1d); its captured LSN goes into the journal. A
+      // standby that is not streaming cannot catch up: the reseed below copies
+      // it in full from the quiesced primary.
       let primaryLsn = null;
       if (planned) {
         s.start("Verifying the standby replayed the primary's final WAL (zero-data-loss)");
         try {
-          primaryLsn = await catchUp(servers, sshKeyPath);
-          s.stop('Standby caught up to the primary: safe to promote');
+          const caught = await catchUp(servers, sshKeyPath);
+          primaryLsn = caught.primaryLsn;
+          s.stop(
+            caught.caughtUp
+              ? 'Standby caught up to the primary: safe to promote'
+              : 'Standby not streaming, it is re-seeded from the quiesced primary',
+          );
         } catch (cuErr) {
           s.stop('Standby did not catch up, aborting failover');
           throw cuErr;

@@ -159,7 +159,7 @@ async function run(opts: RunOpts = {}) {
     },
     catchUp: async () => {
       order.push('catchup');
-      return '0/3000060';
+      return { caughtUp: true, lagBytes: 0, primaryLsn: '0/3000060' };
     },
     scale: async (_ip: string, _key: string, _list: unknown, _replicas: unknown, label: string) => {
       if (/un-quiesce/.test(label)) order.push('unquiesce');

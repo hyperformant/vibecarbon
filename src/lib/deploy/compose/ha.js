@@ -45,6 +45,7 @@ import {
   buildStagedBasebackupScript,
   promoteWithProof,
   REPL_PORT,
+  waitForStandbyCaughtUp,
 } from '../replication.js';
 import { waitForTrustedTls } from '../tls-ready.js';
 import { mergeRemoteDotenv, pinnedSshOptsString, readReplPassword } from '../utils.js';
@@ -1443,6 +1444,20 @@ export async function stopOldPrimaryApp(ip, sshKeyPath, projectName) {
 }
 
 /**
+ * Start the old primary's app tier again: the un-fence of a planned failover
+ * that stopped before anything could promote the standby. `docker start` by
+ * container name, the inverse of stopOldPrimaryApp; it starts only `app`
+ * (app-migrate is never re-run on failover).
+ *
+ * @returns {Promise<boolean>} false when the start could not be confirmed
+ */
+export async function startOldPrimaryApp(ip, sshKeyPath, projectName) {
+  const containers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(' ');
+  const started = await sshRun(ip, sshKeyPath, `docker start ${containers}`, { timeout: 90_000 });
+  return started !== false;
+}
+
+/**
  * Persist a compose-HA failover: flip the two `role` fields in place (names and
  * array order keep their Pulumi identity, see ha-role-swap.js), swap the
  * regions, stamp lastFailover and clear the failover journal in the same save
@@ -1480,16 +1495,20 @@ export function swapComposeHaRoles(envName, { override } = {}) {
 
 /**
  * Perform failover for a Compose HA environment: prove the standby (the shared
- * failover guard), reseed it when it is not streaming and the primary answers,
- * journal, promote, then move the write-guard and issuer, restart the app,
- * stop the old primary, flip DNS and persist the swap.
+ * failover guard); when the primary answers (planned), stop its app so no write
+ * can land after the promote, capture its WAL position and wait for the standby
+ * to replay it (or reseed a standby that is not streaming); journal, promote,
+ * then move the write-guard and issuer, restart the app, flip DNS and persist
+ * the swap. The order is fence < capture LSN < catch-up < promote < DNS, as on
+ * k8s (failover-step-order-census.test.ts).
  *
  * Refuses a role-swapped environment before any ssh call (R4), and decides
  * promote, resume or refuse from the guard before any write (R1). Once the
  * journal is written, a promote that cannot be proven stops the old primary's
  * app and exits non-zero, and the rerun resumes (R3). The one exception is a
  * promote this run never sent on a run that started with no journal: then the
- * journal is cleared and the old primary is left serving.
+ * journal is cleared and the old primary's app is started again. An abort before
+ * the journal (catch-up deadline, failed reseed) un-fences on the same terms.
  * `app-migrate` is never re-run here: the promoted standby replicated an
  * already-migrated primary.
  *
@@ -1518,7 +1537,10 @@ export async function failoverComposeHA(
     writeJournal = writeFailoverJournal,
     clearJournal = clearFailoverJournal,
     promote = promoteComposeStandby,
+    psql = composePsqlRunner,
+    catchUp = waitForStandbyCaughtUp,
     fenceOldPrimary = stopOldPrimaryApp,
+    unfenceOldPrimary = startOldPrimaryApp,
     confirmUnproven = confirmUnprovenFailover,
     swapRoles = swapComposeHaRoles,
   } = deps ?? {};
@@ -1546,9 +1568,10 @@ export async function failoverComposeHA(
   p.log.message(`  ${c.dim(`Standby (${standbyServer.region})`.padEnd(22))} ${standbyServer.ip}`);
 
   p.log.info(c.bold('This will:'));
-  p.log.message('  1. Promote the standby database to primary (docker compose exec)');
-  p.log.message('  2. Update Cloudflare DNS (if configured)');
-  p.log.message('  3. Print DNS update instructions (if manual DNS)');
+  p.log.message('  1. Stop the app on the old primary if it answers (planned: brief write outage)');
+  p.log.message("  2. Wait for the standby to replay the old primary's final writes");
+  p.log.message('  3. Promote the standby database to primary (docker compose exec)');
+  p.log.message('  4. Update DNS (if configured), or print the DNS update to make');
 
   if (parsed.dryRun) {
     p.log.info(c.dim('Dry run: no changes made'));
@@ -1598,48 +1621,138 @@ export async function failoverComposeHA(
     await confirmUnproven(envName, parsed);
   }
 
+  // Step 0a (PLANNED only): fence. Stop the old primary's app BEFORE the
+  // promote, so no write can land on it once the standby takes over; the write
+  // outage opens here. Until 2026-10 compose promoted first and stopped the old
+  // primary minutes later, and every write in between was lost. On resume this
+  // re-applies the fence an earlier run may have left.
+  let fenced = false;
+  if (planned) {
+    s.start('Stopping the app on the old primary (write outage begins)');
+    fenced = await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
+    s.stop(fenced ? 'Old primary app stopped, no new writes' : 'Old primary app NOT stopped');
+    if (!fenced && mode === 'promote') {
+      // Nothing was promoted and the app may still be up: a promote now could
+      // lose its writes. A start undoes a partial stop.
+      if (!journalAtEntry) await unfenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
+      throw new Error(
+        `Failover aborted: could not stop the app on the old primary (${primaryServer.ip}), so ` +
+          `its writes could not be fenced before the promote. Nothing was promoted; check ssh ` +
+          `to it and rerun vibecarbon failover ${envName}`,
+      );
+    }
+    if (!fenced) {
+      p.log.warn(
+        `Could not stop the app on the old primary (${primaryServer.ip}). Stop it by hand: ` +
+          `ssh root@${primaryServer.ip} 'docker stop ${projectName}-app'`,
+      );
+    }
+  }
+
+  /**
+   * Un-fence after an abort that promoted nothing: only when this run started
+   * with no journal. With an earlier run's journal its promote may still land,
+   * so the old primary stays stopped.
+   */
+  const unfence = async () => {
+    if (!fenced) return;
+    if (journalAtEntry) {
+      p.log.warn(
+        'The old primary app stays stopped: an earlier run of this failover journaled a promote.',
+      );
+      return;
+    }
+    p.log.warn('Failover aborted after the fence, starting the old primary app again.');
+    const started = await unfenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
+    if (started) {
+      p.log.info('Old primary app started; the original primary is serving again.');
+    } else {
+      p.log.warn(
+        `Could not start the app on the old primary (${primaryServer.ip}). Start it by hand: ` +
+          `ssh root@${primaryServer.ip} 'docker start ${projectName}-app'`,
+      );
+    }
+  };
+
   if (mode === 'resume') {
     p.log.info(
       'Standby already promoted by an unfinished run of this failover (journal set), ' +
         'resuming after the promote',
     );
   } else {
-    // Step 0b: re-seed when the standby is not streaming and the primary
-    // answers. A streaming standby is in parity already, and its walreceiver
-    // holds the replication slot a basebackup would need (compose-ha
-    // 2026-07-07: "slot is active for PID"). The reseed stages first and swaps
-    // PGDATA atomically, so on failure the standby keeps its previous data.
-    // WAL-G archiving on the promoted node needs nothing here: archive_mode is
-    // in the db command line and WALG_S3_PREFIX is shared, so the timeline
-    // continues in S3.
     let systemIdentifier = standbyState.systemIdentifier;
-    if (standbyState.receiverStatus === 'streaming') {
-      p.log.info('Standby already streaming, skipping re-seed (parity guaranteed by streaming)');
-    } else if (planned) {
-      s.start('Re-seeding standby from primary (pg_basebackup)');
-      try {
-        await reseed(standbyServer.ip, primaryServer.ip, sshKeyPath, projectName);
-        // A reseed rewrites the standby's identity: the journal names what was
-        // just seeded, and that is recorded for the next failover's proof.
-        const seeded = await readStandby();
-        if (seeded.inRecovery !== true || !seeded.systemIdentifier) {
+    let primaryLsn = null;
+    try {
+      // Step 0b (PLANNED only): zero-data-loss gate (R1d). Capture the fenced
+      // primary's WAL position and wait for the streaming standby to replay
+      // it; the deadline throws. A standby that is not streaming cannot catch
+      // up, so it is reseeded below. Unplanned: the primary is gone, the
+      // standby promotes with what it has.
+      let needsReseed = standbyState.receiverStatus !== 'streaming';
+      if (planned) {
+        s.start("Waiting for the standby to replay the old primary's final WAL");
+        try {
+          const caught = await catchUp({
+            primaryExec: psql(primaryServer.ip, sshKeyPath, remoteDir),
+            standbyExec: psql(standbyServer.ip, sshKeyPath, remoteDir),
+            isStreaming: async () => (await readStandby()).receiverStatus === 'streaming',
+          });
+          primaryLsn = caught.primaryLsn;
+          needsReseed = !caught.caughtUp;
+          s.stop(
+            caught.caughtUp
+              ? 'Standby caught up to the old primary: safe to promote'
+              : 'Standby not streaming, re-seeding it from the fenced primary',
+          );
+        } catch (err) {
+          s.stop('Standby did not catch up, aborting failover');
+          throw new Error(`Failover aborted: ${err.message}`);
+        }
+      }
+
+      // Step 0c: re-seed a standby that is not streaming, from the fenced
+      // primary (a full copy, so caught up by construction). A streaming
+      // standby's walreceiver holds the replication slot a basebackup would
+      // need (compose-ha 2026-07-07: "slot is active for PID"). The reseed
+      // stages first and swaps PGDATA atomically, so on failure the standby
+      // keeps its previous data. WAL-G archiving on the promoted node needs
+      // nothing here: archive_mode is in the db command line and WALG_S3_PREFIX
+      // is shared, so the timeline continues in S3.
+      if (!needsReseed) {
+        p.log.info('Standby streaming, skipping re-seed');
+      } else if (planned) {
+        s.start('Re-seeding standby from primary (pg_basebackup)');
+        try {
+          await reseed(standbyServer.ip, primaryServer.ip, sshKeyPath, projectName);
+          // A reseed rewrites the standby's identity: the journal names what
+          // was just seeded, and that is recorded for the next failover's proof.
+          const seeded = await readStandby();
+          if (seeded.inRecovery !== true || !seeded.systemIdentifier) {
+            throw new Error(
+              'the re-seeded standby did not read back as a replica with a system identifier',
+            );
+          }
+          systemIdentifier = seeded.systemIdentifier;
+          recordSeeded({ environment: envName }, systemIdentifier);
+          s.stop('Standby re-seeded with primary state');
+        } catch (err) {
+          s.stop('Re-seed failed, aborting failover');
           throw new Error(
-            'the re-seeded standby did not read back as a replica with a system identifier',
+            `Failover aborted: re-seed failed; the standby keeps its previous data ` +
+              `directory (the staged swap is atomic), but its parity with the primary is ` +
+              `not guaranteed. Fix the re-seed issue and retry.\nUnderlying error: ${err.message}`,
           );
         }
-        systemIdentifier = seeded.systemIdentifier;
-        recordSeeded({ environment: envName }, systemIdentifier);
-        s.stop('Standby re-seeded with primary state');
-      } catch (err) {
-        s.stop('Re-seed failed, aborting failover');
-        throw new Error(
-          `Failover aborted: re-seed failed; the standby keeps its previous data ` +
-            `directory (the staged swap is atomic), but its parity with the primary is ` +
-            `not guaranteed. Fix the re-seed issue and retry.\nUnderlying error: ${err.message}`,
+      } else {
+        p.log.warn(
+          'Primary unreachable, skipping re-seed. Standby will promote with current state.',
         );
       }
-    } else {
-      p.log.warn('Primary unreachable, skipping re-seed. Standby will promote with current state.');
+    } catch (err) {
+      // Nothing is promoted before the journal: un-fence (on a first run) and
+      // rethrow; the error names the cause and that nothing was promoted.
+      await unfence();
+      throw err;
     }
 
     // Step 1: journal, then promote (R2, R3). The journal goes down right before
@@ -1649,7 +1762,7 @@ export async function failoverComposeHA(
       { environment: envName },
       {
         target: 'standby',
-        primaryLsn: null,
+        primaryLsn,
         systemIdentifier,
         ...(unproven && { override: 'force-unproven' }),
       },
@@ -1663,18 +1776,20 @@ export async function failoverComposeHA(
     }
     if (verdict === 'not-issued' && !journalAtEntry) {
       // Nothing was sent and no earlier run journaled a promote: the standby is
-      // not promoting, so the old primary keeps serving untouched.
+      // not promoting, so the old primary serves again (un-fenced if planned).
       s.stop('Promote never sent, aborting failover');
       await clearJournal({ environment: envName });
+      await unfence();
       throw new Error(promotionNotIssuedMessage(envName, standbyServer.ip));
     }
     if (verdict !== 'promoted') {
       // 'unknown', or 'not-issued' with an earlier run's journal (its promote
       // may still be landing).
       s.stop('Promotion could not be confirmed, fencing the old primary');
-      // The standby may yet promote: stop the old primary's writers so the two
-      // sides never both serve. DNS is not flipped and the journal stays set.
-      const fenced = await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
+      // The standby may yet promote: the old primary's writers stay stopped (a
+      // planned run fenced them already) so the two sides never both serve.
+      // DNS is not flipped and the journal stays set.
+      if (!fenced) fenced = await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
       if (!fenced) {
         p.log.warn(
           `Could not stop the app on the old primary (${primaryServer.ip}). If it is up, stop ` +
@@ -1800,7 +1915,8 @@ export async function failoverComposeHA(
   const oldPrimaryContainers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(
     ' ',
   );
-  const stopped = await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
+  // A planned run fenced it before the promote; stopping again is a no-op.
+  const stopped = fenced || (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName));
   if (!stopped) {
     p.log.warn(
       `Could not stop services on the old primary (${primaryServer.ip}). SPLIT-BRAIN RISK: ` +

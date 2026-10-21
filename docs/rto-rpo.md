@@ -69,10 +69,11 @@ the command-side figure, plus failure-detection time (operator-dependent:
 failover is deliberately manual) and DNS propagation. The e2e cannot ethically
 measure detection time; it is named, not numbered.
 
-**Planned RPO = 0.** By construction (quiesce-before-promote plus the
-pre-promotion WAL catch-up gate in `src/failover.js`:
-`waitForStandbyCaughtUp` refuses to promote a standby that has not replayed
-the primary's final LSN) and evidenced per run: the e2e writes a marker row on
+**Planned RPO = 0.** By construction (fence-before-promote, which is the
+quiesce on k8s-ha and `docker stop <project>-app` on compose-ha, plus the
+pre-promotion WAL catch-up gate both tiers share in
+`src/lib/deploy/replication.js`: `waitForStandbyCaughtUp` refuses to promote
+a standby that has not replayed the primary's final LSN) and evidenced per run: the e2e writes a marker row on
 the old primary immediately before failover and asserts it survived onto the
 promoted primary (`replication_failover_continuity`). The renderer **refuses
 to publish** figures from any run where that check is missing or failed.

@@ -1716,6 +1716,101 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
 }
 
 /**
+ * How long a planned failover waits for a streaming standby to replay the
+ * fenced primary's final WAL. A deadline, not a poll count (R3): the poll
+ * interval only paces the reads.
+ */
+export const CATCH_UP_DEADLINE_MS = 60_000;
+
+const LSN_RE = /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/;
+
+/**
+ * PLANNED-failover zero-data-loss gate, for any transport (R1d). Runs after the
+ * old primary is fenced (no writer can commit) and before the promote.
+ *
+ * Captures the primary's `pg_current_wal_lsn()` once, which is stable for
+ * customer writes once the primary is fenced, then reads the standby's replay
+ * lag behind it until that lag is zero. Streaming is not caught up: the WAL
+ * written just before the fence may still be in flight, and promoting then
+ * silently drops it.
+ *
+ * - A streaming standby that reaches the LSN: `{ caughtUp: true, lagBytes: 0 }`.
+ * - A streaming standby still behind at the deadline: THROWS, so the caller's
+ *   abort path runs and a lagging standby is never promoted.
+ * - A standby that is not streaming: `{ caughtUp: false, lagBytes: null }`. It
+ *   cannot catch up, so the caller must reseed it from the fenced primary (a
+ *   full copy) or refuse. It is never read as "the gate does not apply".
+ *
+ * `primaryLsn` is returned in every case: it is the failover journal's
+ * `primaryLsn` (R2).
+ *
+ * @param {object} opts
+ * @param {(sql: string) => Promise<string>} opts.primaryExec - psql on the primary
+ * @param {(sql: string) => Promise<string>} opts.standbyExec - psql on the standby
+ * @param {() => Promise<boolean>} opts.isStreaming - the standby's walreceiver streams
+ * @param {number} [opts.deadlineMs]
+ * @param {number} [opts.pollMs]
+ * @param {(ms: number) => Promise<void>} [opts.sleep]
+ * @param {() => number} [opts.now]
+ * @returns {Promise<{ caughtUp: boolean, lagBytes: number|null, primaryLsn: string }>}
+ */
+export async function waitForStandbyCaughtUp({
+  primaryExec,
+  standbyExec,
+  isStreaming,
+  deadlineMs = CATCH_UP_DEADLINE_MS,
+  pollMs = 2000,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = Date.now,
+} = {}) {
+  for (const [name, fn] of Object.entries({ primaryExec, standbyExec, isStreaming })) {
+    if (typeof fn !== 'function') {
+      throw new TypeError(`waitForStandbyCaughtUp: ${name} is required`);
+    }
+  }
+  const deadline = now() + deadlineMs;
+
+  const raw = await primaryExec('SELECT pg_current_wal_lsn()');
+  const primaryLsn = (typeof raw === 'string' ? raw : '').trim();
+  if (!LSN_RE.test(primaryLsn)) {
+    throw new Error(
+      `zero-data-loss gate: could not read the primary's WAL position before the promote ` +
+        `(got: ${primaryLsn.slice(0, 80) || 'empty'}), so the standby was not promoted`,
+    );
+  }
+
+  if (!(await isStreaming())) return { caughtUp: false, lagBytes: null, primaryLsn };
+
+  let lagBytes = null;
+  let last = '';
+  for (;;) {
+    try {
+      const out = await standbyExec(
+        `SELECT pg_wal_lsn_diff('${primaryLsn}', pg_last_wal_replay_lsn())`,
+      );
+      const text = (typeof out === 'string' ? out : '').trim();
+      const n = text === '' ? Number.NaN : Number(text);
+      if (Number.isFinite(n)) {
+        lagBytes = Math.max(0, n);
+        if (lagBytes === 0) return { caughtUp: true, lagBytes: 0, primaryLsn };
+      } else {
+        last = text || 'no replay position';
+      }
+    } catch (err) {
+      last = String(err?.message ?? err).split('\n')[0];
+    }
+    if (now() >= deadline) break;
+    await sleep(pollMs);
+  }
+  throw new Error(
+    `zero-data-loss gate: the standby did not replay the primary's final WAL (${primaryLsn}) ` +
+      `within ${Math.round(deadlineMs / 1000)}s ` +
+      `(${lagBytes === null ? `last read: ${last || 'none'}` : `${lagBytes} bytes behind`}), ` +
+      `so it was not promoted`,
+  );
+}
+
+/**
  * Issue a promote and prove it landed, for any transport. The verdict:
  *   - 'promoted': it was read IN recovery immediately before the promote was
  *     issued, then read out of it before the deadline;
