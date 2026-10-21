@@ -18,7 +18,8 @@
  * restarted or reseeded. It requires a finished failover:
  *   - no failover journal (`ha.failoverInFlight`): rerun `vibecarbon failover`;
  *   - the promoted node reads out of recovery;
- *   - DNS already points at the promoted node.
+ *   - DNS points at the promoted node: managed DNS is repointed by the deploy
+ *     itself, manual DNS must be moved first (only while a reseed is due).
  *
  * k8s-HA reconverges on its own model: `swapHaRoles` (src/failover.js) swaps
  * `ha.primary` / `ha.standby`, objects that carry their own `.stack`.
@@ -323,12 +324,27 @@ export function assertReseedTargetNotServing({ environment, target, state, domai
  * promoted node is out of recovery, DNS points at it, and the retired node is
  * not serving. Throws one line naming the cause and the command that fixes it.
  *
+ * The DNS check protects the reseed only (a reseed must never wipe a node that
+ * clients still reach), so a retired node already rebuilt (streaming from the
+ * promoted primary with its identifier) skips it: a resolver hiccup or a
+ * proxied domain must not refuse every later deploy of a reconverged pair.
+ *
+ * With managed DNS the deploy repoints the records itself (`repointDns`, a
+ * provider write read back through the provider's own API) instead of
+ * refusing: a failover whose DNS flip failed has no other CLI path back, since
+ * this check would otherwise run before the deploy's own DNS step. The
+ * provider's read-back is then the answer the reseed guard reads. Manual DNS
+ * keeps the refusal, naming the exact records to set.
+ *
  * @param {object} args
  * @param {{ promoted: { ip: string }, retired: { ip: string } }} args.plan
  * @param {string} args.environment
  * @param {string|null} args.domain
- * @param {(ip: string) => Promise<{ inRecovery: boolean|null }>} args.readState
+ * @param {(ip: string) => Promise<{ inRecovery: boolean|null, systemIdentifier?: string|null, receiverStatus?: string|null }>} args.readState
  * @param {(hostname: string) => Promise<string[]>} args.resolveA
+ * @param {((ip: string) => Promise<{ ok: boolean, reason?: string }>)|null} [args.repointDns]
+ * @returns {Promise<{ dnsAnswer: string[]|null }>} the A records the reseed guard
+ *   should read (null: no reseed is due, or no domain)
  */
 export async function assertComposeHaReconvergeReady({
   plan,
@@ -336,6 +352,7 @@ export async function assertComposeHaReconvergeReady({
   domain,
   readState,
   resolveA,
+  repointDns = null,
 }) {
   const refuse = (cause) => {
     throw new Error(`Refusing to reconverge "${environment}": ${cause}`);
@@ -354,25 +371,47 @@ export async function assertComposeHaReconvergeReady({
         `promoting it. run vibecarbon failover ${environment} to finish it, then deploy`,
     );
   }
-  if (!domain) return;
-  let dnsAnswer = [];
-  try {
-    dnsAnswer = (await resolveA(domain)) ?? [];
-  } catch {
-    dnsAnswer = [];
-  }
-  if (!dnsAnswer.includes(promoted.ip)) {
-    refuse(
-      `${domain} resolves to ${dnsAnswer.join(', ') || 'nothing'}, not the promoted primary ` +
-        `${promoted.ip}, so the failover's DNS flip has not landed. point the A records at ` +
-        `${promoted.ip}, then rerun vibecarbon deploy ${environment}`,
-    );
+  if (!domain) return { dnsAnswer: null };
+  const retiredState = await readState(retired.ip);
+  const rebuilt =
+    retiredState?.inRecovery === true &&
+    retiredState.receiverStatus === 'streaming' &&
+    !!retiredState.systemIdentifier &&
+    retiredState.systemIdentifier === promotedState.systemIdentifier;
+  if (rebuilt) return { dnsAnswer: null };
+
+  let dnsAnswer;
+  if (repointDns) {
+    const flip = await repointDns(promoted.ip);
+    if (!flip?.ok) {
+      refuse(
+        `could not point ${domain} at the promoted primary ${promoted.ip} (${flip?.reason ?? 'unknown'}), ` +
+          `and the retired node is rebuilt only once DNS stops sending clients to it. fix the ` +
+          `DNS provider or token, then rerun vibecarbon deploy ${environment}`,
+      );
+    }
+    dnsAnswer = [promoted.ip];
+  } else {
+    try {
+      dnsAnswer = (await resolveA(domain)) ?? [];
+    } catch {
+      dnsAnswer = [];
+    }
+    if (!dnsAnswer.includes(promoted.ip)) {
+      refuse(
+        `${domain} resolves to ${dnsAnswer.join(', ') || 'nothing'}, not the promoted primary ` +
+          `${promoted.ip}, so the failover's DNS flip has not landed. point the A records for ` +
+          `${domain} (apex and *.${domain}) at ${promoted.ip}, then rerun vibecarbon deploy ` +
+          `${environment}`,
+      );
+    }
   }
   assertReseedTargetNotServing({
     environment,
     target: retired,
-    state: await readState(retired.ip),
+    state: retiredState,
     domain,
     dnsAnswer,
   });
+  return { dnsAnswer };
 }

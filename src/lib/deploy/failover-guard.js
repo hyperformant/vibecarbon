@@ -446,8 +446,8 @@ export function promotionNotIssuedMessage(envName, standbyIp) {
  * Raised when the role swap is persisted but the DNS flip is not proven. The
  * failover itself happened (the standby is promoted, the swap is saved), so the
  * only thing left undone is pointing the A records at the new primary. The
- * message names that one manual step; the compose reconverge deploy refuses
- * until DNS answers with the promoted node, so the env stays resumable.
+ * message names the record and the deploy that repoints it (managed DNS: the
+ * compose reconverge repoints before its reseed gate, k8s at its DNS step).
  */
 export class FailoverDnsError extends Error {
   constructor(message) {
@@ -465,7 +465,7 @@ export function dnsDidNotMessage({ domain, ip, reason }) {
     `FAILOVER COMPLETED, DNS DID NOT: point A records for ${domain} (apex and *.${domain}) at ${ip}` +
     (reason ? `. ${reason}` : '') +
     `. until they move, ${domain} is down: the old primary is fenced or gone, so nothing serves it` +
-    '. the roles are saved; once DNS answers with the promoted node, run vibecarbon deploy to rebuild the old primary'
+    '. the roles are saved; run vibecarbon deploy: it points the records at the promoted node, then rebuilds the old primary'
   );
 }
 

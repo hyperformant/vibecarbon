@@ -975,7 +975,11 @@ async function reconvergeReplication(ctx) {
       );
     }
     const standbyState = await readNodeState(ctx, standby.ip);
-    const dnsAnswer = domain ? await resolvePublicA(domain).catch(() => []) : [];
+    // The entry check's answer when it had one (a managed-DNS repoint is read
+    // back through the provider, which public resolvers may still lag).
+    const dnsAnswer = !domain
+      ? []
+      : (ctx.reconverge.dnsAnswer ?? (await resolvePublicA(domain).catch(() => [])));
     assertReseedTargetNotServing({
       environment,
       target: standby,

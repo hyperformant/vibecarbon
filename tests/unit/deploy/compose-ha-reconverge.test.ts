@@ -421,7 +421,70 @@ describe('assertComposeHaReconvergeReady (refusals before any ssh write)', () =>
     });
 
   it('passes a finished failover: promoted out of recovery and serving DNS', async () => {
-    await expect(ready({})).resolves.toBeUndefined();
+    await expect(ready({})).resolves.toEqual({ dnsAnswer: [PROMOTED_IP] });
+  });
+
+  it('manual DNS that has not moved names the exact records to set', async () => {
+    await expect(ready({ dns: [RETIRED_IP] })).rejects.toThrow(
+      new RegExp(
+        `point the A records for prod\\.example\\.com \\(apex and \\*\\.prod\\.example\\.com\\) at ${PROMOTED_IP.replaceAll('.', '\\.')}`,
+      ),
+    );
+  });
+
+  // I3: a failover whose DNS flip failed had no CLI path back, since this
+  // check ran before the deploy's own DNS step. Managed DNS repoints instead.
+  describe('managed DNS (repointDns)', () => {
+    const managed = (flip: { ok: boolean; reason?: string }) => {
+      const repointDns = vi.fn(async () => flip);
+      const resolveA = vi.fn(async () => [RETIRED_IP]);
+      const out = assertComposeHaReconvergeReady({
+        plan: plan(),
+        environment: 'prod',
+        domain: 'prod.example.com',
+        readState: async (ip: string) => state(ip === PROMOTED_IP ? false : false),
+        resolveA,
+        repointDns,
+      });
+      return { out, repointDns, resolveA };
+    };
+
+    it('points the records at the promoted node and hands its read-back to the reseed guard', async () => {
+      const { out, repointDns, resolveA } = managed({ ok: true });
+      await expect(out).resolves.toEqual({ dnsAnswer: [PROMOTED_IP] });
+      expect(repointDns).toHaveBeenCalledWith(PROMOTED_IP);
+      // Public resolvers may still lag the write: they are not consulted.
+      expect(resolveA).not.toHaveBeenCalled();
+    });
+
+    it('a repoint the provider does not confirm refuses with its reason', async () => {
+      const { out } = managed({ ok: false, reason: 'CLOUDFLARE_API_TOKEN is not set' });
+      await expect(out).rejects.toThrow(
+        /could not point prod\.example\.com at the promoted primary .*CLOUDFLARE_API_TOKEN is not set/,
+      );
+    });
+  });
+
+  // M5: once the retired node is rebuilt, a resolver hiccup or a proxied
+  // domain must not refuse every later deploy of the swapped pair.
+  it('a rebuilt standby (streaming, same identifier) needs no reseed, so DNS is not consulted', async () => {
+    const resolveA = vi.fn(async () => {
+      throw new Error('SERVFAIL');
+    });
+    const repointDns = vi.fn();
+    await expect(
+      assertComposeHaReconvergeReady({
+        plan: plan(),
+        environment: 'prod',
+        domain: 'prod.example.com',
+        readState: async (ip: string) =>
+          ip === PROMOTED_IP ? state(false) : { ...state(true), receiverStatus: 'streaming' },
+        resolveA,
+        repointDns,
+      }),
+    ).resolves.toEqual({ dnsAnswer: null });
+    expect(resolveA).not.toHaveBeenCalled();
+    expect(repointDns).not.toHaveBeenCalled();
   });
 
   it('refuses when the promoted node is still in recovery', async () => {
@@ -638,6 +701,15 @@ describe('reconverge effects', () => {
     expect(h.calls.every((c) => /pg_control_system/.test(c.command))).toBe(true);
   });
 
+  it('a managed-DNS repoint at entry is the answer the reseed guard reads, not a lagging resolver (I3)', async () => {
+    // Public resolvers still cache the retired node; the provider read back the promoted one.
+    h.dnsAnswer = [RETIRED_IP];
+    const ctx = baseCtx();
+    (ctx.reconverge as { dnsAnswer?: string[] }).dnsAnswer = [PROMOTED_IP];
+    await COMPOSE_HA_EFFECTS.haConfigureReplication(ctx);
+    expect(composeHa.configureStandbyReplication).toHaveBeenCalled();
+  });
+
   it('is idempotent: a standby already streaming from the promoted node is not reseeded', async () => {
     h.nodes[RETIRED_IP] = { inRecovery: true, receiver: 'streaming' };
     await runReconverge(baseCtx());
@@ -677,5 +749,18 @@ describe('reconverge effects', () => {
     expect(env.lastFailover).toBeUndefined();
     expect(env.replication).toBe('streaming');
     expect(sv().find((s) => s.role === 'primary')?.name).toBe('myapp-prod-standby');
+  });
+});
+
+describe('the deploy wires the managed-DNS repoint into the reconverge check (I3)', () => {
+  it('passes repointDns only with a managed provider, token and zone, and keeps the answer', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf-8');
+    const call = src.slice(src.indexOf('const ready = await assertComposeHaReconvergeReady({'));
+    expect(src).toMatch(
+      /const managedDns = !!\(domain && hasAutomatedDns\(dnsProvider\) && dnsToken && dnsZoneId\);/,
+    );
+    expect(call.slice(0, 1200)).toMatch(/repointDns: managedDns\s*\?/);
+    expect(call.slice(0, 1400)).toContain('composeHaReconverge.dnsAnswer = ready.dnsAnswer;');
   });
 });

@@ -696,9 +696,10 @@ export async function executeDeployment(args, gatheredConfig) {
   // operator whose IP changed is let back in before the first SSH read, and
   // before every SSH write and Pulumi call.
   if (composeHaReconverge) {
-    const { composePsqlRunner } = await import('./compose/ha.js');
+    const { composePsqlRunner, flipComposeDnsWith } = await import('./compose/ha.js');
     const haKey = getSSHKeyPath(environment);
-    await assertComposeHaReconvergeReady({
+    const managedDns = !!(domain && hasAutomatedDns(dnsProvider) && dnsToken && dnsZoneId);
+    const ready = await assertComposeHaReconvergeReady({
       plan: composeHaReconverge,
       environment,
       domain,
@@ -710,7 +711,14 @@ export async function executeDeployment(args, gatheredConfig) {
         const { resolvePublicA } = await import('./public-dns-lookup.js');
         return resolvePublicA(hostname);
       },
+      // A failover whose DNS flip failed: the deploy repoints the records
+      // itself (managed DNS), before the reseed it gates.
+      repointDns: managedDns
+        ? (ip) =>
+            flipComposeDnsWith({ dnsProvider, token: dnsToken, zoneId: dnsZoneId, domain, ip })
+        : null,
     });
+    composeHaReconverge.dnsAnswer = ready.dnsAnswer;
     p.log.info(
       `a failover swapped this environment's roles: ${composeHaReconverge.promoted.ip} stays ` +
         `the primary and ${composeHaReconverge.retired.ip} is rebuilt as the standby`,

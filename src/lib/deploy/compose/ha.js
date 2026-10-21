@@ -1598,12 +1598,29 @@ export async function flipComposeDns(envConfig, ip) {
   if (!token) {
     return { ok: false, reason: `${DNS_PROVIDERS[dnsProvider].tokenEnv} is not set` };
   }
-  const auth = { token, zoneId: envConfig.dns.zoneId };
+  return flipComposeDnsWith({
+    dnsProvider,
+    token,
+    zoneId: envConfig.dns.zoneId,
+    domain: envConfig.domain,
+    ip,
+  });
+}
+
+/**
+ * The managed-DNS flip with resolved credentials (deploy has them in hand):
+ * apex + wildcard upserted at `ip`, then read back through the provider's API.
+ *
+ * @param {{ dnsProvider: string, token: string, zoneId: string, domain: string, ip: string }} args
+ * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+ */
+export async function flipComposeDnsWith({ dnsProvider, token, zoneId, domain, ip }) {
+  const auth = { token, zoneId };
   const dns = await getDnsProvider(dnsProvider);
   return flipAndVerifyDns({
-    update: () => dns.upsertApexAndWildcard(auth, envConfig.domain, ip),
-    read: (name) => dns.readARecord(token, auth.zoneId, name),
-    domain: envConfig.domain,
+    update: () => dns.upsertApexAndWildcard(auth, domain, ip),
+    read: (name) => dns.readARecord(token, zoneId, name),
+    domain,
     ip,
   });
 }
