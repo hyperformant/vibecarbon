@@ -172,6 +172,51 @@ describe('record, sync, clear (the scale side)', () => {
     );
     expect(h.config?.environments.prod.pendingServerState).toMatchObject([{ serverId: 'newer' }]);
   });
+
+  // D4: the first scale's delete of its old server never landed, and its
+  // record was never repaired. The second scale's record must keep naming
+  // that server, or nothing ever says it may still be billing.
+  it('a second record keeps the earlier old server whose delete never landed', async () => {
+    const c = ctx();
+    m.recordPendingServerState('prod', {
+      ...m.scaledServerStateEntry(c, server),
+      old: { id: 'A', ip: '1.1.1.1', name: 'a' },
+    });
+    m.recordPendingServerState('prod', {
+      ...m.scaledServerStateEntry(c, {
+        ...server,
+        _replacement: { id: 'C', ip: '3.3.3.3', serverType: 'x' },
+      }),
+      old: { id: 'B', ip: '2.2.2.2', name: 'b' },
+    });
+    const [rec] = (h.config?.environments.prod.pendingServerState ?? []) as Array<
+      Record<string, unknown>
+    >;
+    expect(rec).toMatchObject({ serverId: 'C', old: { id: 'B' } });
+    expect(rec.orphans).toEqual([{ id: 'A', ip: '1.1.1.1', name: 'a' }]);
+    await m.repairPendingServerState({
+      environment: 'prod',
+      envConfig: { pendingServerState: [rec] },
+      options: OPTIONS,
+    });
+    const warns = h.logs.filter((l) => l.startsWith('warn:')).join('\n');
+    expect(warns).toContain('the old server 1.1.1.1 (id A, a)');
+    expect(warns).toContain('the old server 2.2.2.2 (id B, b)');
+  });
+
+  it('an earlier record whose delete landed is not carried', () => {
+    const c = ctx();
+    m.recordPendingServerState('prod', {
+      ...m.scaledServerStateEntry(c, server),
+      old: { id: 'A', ip: '1.1.1.1', name: 'a' },
+    });
+    m.markPendingServerOldDeleted('prod', 'prod-primary');
+    m.recordPendingServerState('prod', m.scaledServerStateEntry(c, server));
+    const [rec] = (h.config?.environments.prod.pendingServerState ?? []) as Array<
+      Record<string, unknown>
+    >;
+    expect(rec.orphans).toBeUndefined();
+  });
 });
 
 describe('repairPendingServerState (the deploy side)', () => {

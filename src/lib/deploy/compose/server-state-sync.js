@@ -82,16 +82,25 @@ export async function resolveServerStateOptions({ envConfig, projectName, Provid
   };
 }
 
-/** Record a pending state sync (one per stack; a newer one replaces it). */
+/**
+ * Record a pending state sync (one per stack; a newer one replaces it). A
+ * replaced record whose old server's delete never landed hands that server
+ * on in `orphans`, so the deploy's repair still names it for cleanup.
+ */
 export function recordPendingServerState(environment, entry) {
   updateProjectConfig((config) => {
     const envConfig = config.environments?.[environment];
     if (!envConfig) {
       throw new Error(`server state: environment ${environment} is not in .vibecarbon.json`);
     }
+    const prior = (envConfig.pendingServerState ?? []).find((e) => e.stack === entry.stack);
+    const orphans = [
+      ...(prior?.orphans ?? []),
+      ...(prior && !prior.oldDeleted && prior.old ? [prior.old] : []),
+    ];
     envConfig.pendingServerState = [
       ...(envConfig.pendingServerState ?? []).filter((e) => e.stack !== entry.stack),
-      { ...entry, at: new Date().toISOString() },
+      { ...entry, ...(orphans.length > 0 ? { orphans } : {}), at: new Date().toISOString() },
     ];
   });
 }
@@ -189,12 +198,13 @@ export async function syncScaledServerState(ctx, entry) {
  */
 export async function repairPendingServerState({ environment, envConfig, options }) {
   const pending = envConfig?.pendingServerState ?? [];
-  for (const { stack, serverId, serverType, ip, old, oldDeleted } of pending) {
-    // A record whose delete never landed (killed before it, or it failed):
-    // the old server may still run, billing outside Pulumi state.
-    if (!oldDeleted) {
+  for (const { stack, serverId, serverType, ip, old, oldDeleted, orphans = [] } of pending) {
+    // A record whose delete never landed (killed before it, or it failed),
+    // and any earlier one it replaced: those servers may still run, billing
+    // outside Pulumi state.
+    for (const server of [...orphans, ...(oldDeleted ? [] : [old])]) {
       p.log.warn(
-        `${describeOldServer(old)}, which scale replaced in stack ${stack}, may still exist: ` +
+        `${describeOldServer(server)}, which scale replaced in stack ${stack}, may still exist: ` +
           "if your provider's console lists it, delete it there; nothing tracks it any more.",
       );
     }
