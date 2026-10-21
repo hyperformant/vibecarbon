@@ -35,6 +35,9 @@ const ALLOWED: Record<string, string> = {
   'src/lib/deploy/compose/index.js': 'restore boots its own recovery and waits for it to end',
   // Chooses the wording of a backup-audit error; it gates nothing.
   'src/lib/deploy/walg-audit.js': 'error wording only',
+  // The retirement fence: 'f' (out of recovery) means the retired db can take
+  // writes, so it is made read-only. It fences; it never promotes.
+  'src/lib/deploy/retired-fence.js': 'decides to fence a writable retired db, never to promote',
 };
 
 /** A comparison against the literal 'f' (either side, any quote, == or ===). */

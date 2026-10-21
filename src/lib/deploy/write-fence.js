@@ -21,6 +21,7 @@
 
 import { loadProjectConfig, saveProjectConfig } from '../config.js';
 import { UNFENCE_SQL_HINT, unfenceDatabaseWrites, WRITE_FENCE_SETTING } from './replication.js';
+import { isRetiredSide } from './retired-fence.js';
 
 /**
  * Record the fence BEFORE applying it.
@@ -78,7 +79,11 @@ export async function readWriteFence(exec) {
  * @param {(sql: string, o?: object) => Promise<string>} opts.exec - psql on the role primary
  * @param {(line: string) => void} opts.log - one line for the operator
  * @param {object} [opts.deps]
- * @returns {Promise<'none'|'journal'|'stale'|'lifted'>}
+ * A retired node (retired-fence.js) is never lifted here: its read-only
+ * setting is the retirement fence, which comes off only when a deploy has
+ * rebuilt it as a proven replica.
+ *
+ * @returns {Promise<'none'|'journal'|'retired'|'stale'|'lifted'>}
  * @throws when the fence cannot be lifted (the one-line cause and manual fix)
  */
 export async function liftStrandedWriteFence({
@@ -96,6 +101,7 @@ export async function liftStrandedWriteFence({
   const marker = envConfig?.ha?.writeFence;
   if (!marker) return 'none';
   if (envConfig?.ha?.failoverInFlight) return 'journal';
+  if (isRetiredSide(envConfig, rolePrimary?.ip)) return 'retired';
   const onPrimary =
     rolePrimary &&
     (marker.ip === rolePrimary.ip || (marker.node && marker.node === rolePrimary.name));

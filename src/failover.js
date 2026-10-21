@@ -1995,6 +1995,10 @@ export async function failoverHA(
       `  Re-run \`vibecarbon deploy ${envName}\`; it converges the recovered ex-primary ` +
         `(${servers.primary.ip}) to pilot-light and re-establishes streaming.`,
     );
+    p.log.message(
+      `  If ${servers.primary.ip} was down, run \`vibecarbon status ${envName}\` as soon as it ` +
+        'answers: that fences it (backups and writes refused) before it can push a backup.',
+    );
   } else {
     const displayDomain = domain || '<your-domain>';
     p.log.success('Standby region activated');

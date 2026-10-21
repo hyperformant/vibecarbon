@@ -31,7 +31,7 @@ const h = vi.hoisted(() => ({
   calls: [] as Array<{ ip: string; command: string; input?: string }>,
   nodes: {} as Record<string, { inRecovery: boolean | null; receiver: string }>,
   /** The retirement fence on each node (retired-fence.js): markers and running writers. */
-  fence: {} as Record<string, { host: boolean; db: boolean; running: boolean }>,
+  fence: {} as Record<string, { host: boolean; db: boolean; running: boolean; readOnly: boolean }>,
   /** The retired node stops answering the fence clear. */
   clearFails: false,
   reseedFails: false,
@@ -73,6 +73,10 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
 function respond(ip: string, command: string, input?: string): string | false {
   const node = h.nodes[ip] ?? { inRecovery: null, receiver: '' };
   const tf = node.inRecovery === true ? 't' : node.inRecovery === false ? 'f' : '';
+  if (command.includes('pg_ls_waldir')) {
+    if (!tf) return false;
+    return `${tf}|${h.fence[ip]?.readOnly ? 'on' : 'off'}|16777216`;
+  }
   if (command.includes('pg_control_system')) {
     if (!tf) return false;
     return `${tf}|${SYSID}|0/3000060|${node.receiver}|${node.receiver ? '1' : ''}`;
@@ -84,8 +88,20 @@ function respond(ip: string, command: string, input?: string): string | false {
   if (command.includes('SHOW hba_file')) return '/var/lib/postgresql/data/pg_hba.conf';
   if (command.includes('IPAM')) return '172.19.0.0/16 ';
   if (command.includes('.Mounts')) return '/var/lib/docker/volumes/myapp_db_data/_data';
-  if (!h.fence[ip]) h.fence[ip] = { host: false, db: false, running: true };
+  if (!h.fence[ip]) h.fence[ip] = { host: false, db: false, running: true, readOnly: false };
   const fence = h.fence[ip];
+  // The retirement fence's database reads and its read-only write.
+  if (command.includes('ALTER SYSTEM SET default_transaction_read_only')) {
+    fence.readOnly = true;
+    h.events.push(`readOnly:${ip}`);
+    return '';
+  }
+  if (command.includes('pg_reload_conf')) return 't';
+  if (command.includes("current_setting('\\''default_transaction_read_only")) {
+    return fence.readOnly ? 'on' : 'off';
+  }
+  if (command.includes('pg_terminate_backend')) return '';
+  if (command.includes('pg_file_settings')) return fence.readOnly ? '1' : '0';
   if (command.includes('PROBE_DONE')) {
     return [
       `HOST_MARKER=${fence.host ? 1 : 0}`,
@@ -119,8 +135,9 @@ function respond(ip: string, command: string, input?: string): string | false {
     return h.reseedFails ? 'pg_basebackup: error' : 'COMPOSE_RESEED_STAGED';
   if (input?.includes('RESEED_SWAPPED')) {
     h.nodes[ip] = { inRecovery: true, receiver: 'streaming' };
-    // The reseed replaces PGDATA, and the PGDATA marker with it.
+    // The reseed replaces PGDATA, and the PGDATA marker and read-only setting with it.
     fence.db = false;
+    fence.readOnly = false;
     return 'RESEED_SWAPPED';
   }
   return '';
@@ -585,7 +602,14 @@ describe('reconverge effects', () => {
     expect(unfenced).toBeGreaterThan(ev.indexOf(`basebackup:${RETIRED_IP}`));
     expect(unfenced).toBeLessThan(ev.indexOf('save:deployed'));
     expect(h.fence[RETIRED_IP]).toMatchObject({ host: false, db: false });
+    // Its database is read-only for the window too (nothing in the reconverge
+    // writes to it before the reseed replaces it).
+    expect(ev.indexOf(`readOnly:${RETIRED_IP}`)).toBeGreaterThanOrEqual(0);
+    expect(ev.indexOf(`readOnly:${RETIRED_IP}`)).toBeLessThan(
+      ev.indexOf(`basebackup:${RETIRED_IP}`),
+    );
     // The promoted node is never fenced.
+    expect(ev).not.toContain(`readOnly:${PROMOTED_IP}`);
     expect(ev).not.toContain(`fence:${PROMOTED_IP}`);
     expect(ev).not.toContain(`unfence:${PROMOTED_IP}`);
   });

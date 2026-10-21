@@ -422,6 +422,7 @@ export function dnsDidNotMessage({ domain, ip, reason }) {
   return (
     `FAILOVER COMPLETED, DNS DID NOT: point A records for ${domain} (apex and *.${domain}) at ${ip}` +
     (reason ? `. ${reason}` : '') +
+    `. until they move, ${domain} is down: the old primary is fenced or gone, so nothing serves it` +
     '. the roles are saved; once DNS answers with the promoted node, run vibecarbon deploy to rebuild the old primary'
   );
 }

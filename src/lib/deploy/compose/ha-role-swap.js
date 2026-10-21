@@ -208,7 +208,9 @@ export function composeHaFailoverRecoveryInstructions({ envName, promotedIp, ret
   return [
     `1. ${promotedIp} is now the primary, every write from here on lands there.`,
     `2. Fix the issue on the retired node (${retiredIp}) but keep it out of service: its`,
-    '   database is frozen at the moment of the failover.',
+    '   database is frozen at the moment of the failover. The moment it answers again, run',
+    `   \`vibecarbon status ${envName}\`: that fences it (backups and writes refused) before`,
+    '   its own backup cron or WAL archiver can push.',
     `3. Run \`vibecarbon deploy ${envName}\` once ${retiredIp} answers: it keeps ${promotedIp}`,
     `   serving as the primary and rebuilds ${retiredIp} as the new standby from it.`,
   ];

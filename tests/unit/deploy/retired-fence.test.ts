@@ -3,16 +3,20 @@
  *
  * A failover can finish with the old primary unreachable and un-demoted (that
  * is usually why it ran). When that node comes back it still believes it is
- * the primary: its app serves, its WAL archiver and nightly base backup push
- * into the shared prefix the new primary owns, and `wal-g delete retain` can
- * prune the new primary's backups. So the retired side is fenced by a marker it
- * enforces itself, and every HA command (status, failover, deploy) re-applies
- * it on any reachable side the persisted roles call retired:
+ * the primary: its app and add-ons write, its WAL archiver and nightly base
+ * backup push into the shared prefix the new primary owns, and
+ * `wal-g delete retain` can prune the new primary's backups. So the retired
+ * side is fenced by markers it enforces itself, and every HA command (status,
+ * failover, deploy) re-applies it on any reachable side the persisted roles
+ * call retired:
  *   - a marker each backup script refuses on (k8s: VIBECARBON_ROLE=retired in
  *     vibecarbon-config; compose: <remoteDir>/.vibecarbon-retired; both: a
  *     `vibecarbon-retired` file in PGDATA, the only marker the db container's
  *     archive_command can see);
- *   - its writers at zero (k8s: `kubectl scale`, never a patch that rolls pods);
+ *   - its database read-only (default_transaction_read_only via ALTER SYSTEM,
+ *     every writer covered), unless it is in recovery;
+ *   - its writers at zero (k8s: `kubectl scale`, never a patch that rolls pods,
+ *     after suspending any Flux Kustomization that would scale it back);
  *   - WALG_ROLE=standby.
  * The reconciler reads first and writes only what is missing, so a fenced side
  * costs no writes.
@@ -27,7 +31,10 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { FAILOVER_FENCE_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
 import {
   clearRetiredFence,
+  FLUX_SUSPENDED_BY,
+  isRetiredSide,
   RETIRED_DB_MARKER,
+  RETIRED_DB_STATE_SQL,
   RETIRED_HOST_MARKER,
   RETIRED_REFUSAL,
   RETIRED_ROLE,
@@ -35,11 +42,13 @@ import {
   reconcileRetiredFence,
   retiredSides,
 } from '../../../src/lib/deploy/retired-fence.js';
+import { liftStrandedWriteFence } from '../../../src/lib/deploy/write-fence.js';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 const RETIRED_IP = '10.0.0.1';
 const PROMOTED_IP = '10.0.0.9';
+const WAL_BYTES = 3 * 1024 * 1024 * 1024;
 
 /** A k8s-ha env right after a failover: ha.standby is the old primary. */
 const k8sSwapped = (over: Record<string, unknown> = {}) => ({
@@ -69,15 +78,60 @@ const composeSwapped = (over: Record<string, unknown> = {}) => ({
 
 const quiet = { log: () => {}, warn: () => {} };
 
+type Db = {
+  up: boolean;
+  inRecovery: boolean;
+  readOnly: boolean;
+  /** default_transaction_read_only is in postgresql.auto.conf */
+  fileSetting: boolean;
+};
+
+/** A fake postgres behind the tier's psql runner, recording its writes. */
+function fakeDb(db: Db, writes: string[]) {
+  return () => async (sql: string, o?: { readWrite?: boolean }) => {
+    if (!db.up) throw new Error('psql: could not connect to server');
+    if (sql === RETIRED_DB_STATE_SQL) {
+      return `${db.inRecovery ? 't' : 'f'}|${db.readOnly ? 'on' : 'off'}|${WAL_BYTES}`;
+    }
+    if (/^ALTER SYSTEM SET default_transaction_read_only = on$/.test(sql)) {
+      db.fileSetting = true;
+      writes.push('readOnly');
+      return '';
+    }
+    if (/^ALTER SYSTEM RESET default_transaction_read_only$/.test(sql)) {
+      expect(o?.readWrite).toBe(true);
+      db.fileSetting = false;
+      writes.push('clearReadOnly');
+      return '';
+    }
+    if (sql === 'SELECT pg_reload_conf()') {
+      db.readOnly = db.fileSetting;
+      return 't';
+    }
+    if (sql.includes("current_setting('default_transaction_read_only')")) {
+      return db.readOnly ? 'on' : 'off';
+    }
+    if (sql.includes('pg_terminate_backend')) return '';
+    if (sql.includes('pg_file_settings')) return db.fileSetting ? '1' : '0';
+    throw new Error(`unexpected sql ${sql}`);
+  };
+}
+
+type Kustomization = { name: string; suspend?: boolean; annotations?: Record<string, string> };
+
 /** A fake k8s cluster behind `kubectl`, recording every mutating call. */
-function fakeCluster(init: { replicas?: number; walg?: string; role?: string } = {}) {
+function fakeCluster(
+  init: { replicas?: number; walg?: string; role?: string; flux?: Kustomization[] } = {},
+) {
   const state = {
     role: init.role ?? '',
     replicas: init.replicas ?? 2,
     walg: init.walg ?? 'primary',
     dbMarker: false,
     reachable: true,
+    flux: init.flux,
   };
+  const db: Db = { up: true, inRecovery: false, readOnly: false, fileSetting: false };
   const writes: string[] = [];
   const argvs: string[][] = [];
   const kubectl = async (ip: string, argv: string[]) => {
@@ -85,6 +139,33 @@ function fakeCluster(init: { replicas?: number; walg?: string; role?: string } =
     if (!state.reachable) throw new Error('ssh: connect to host 10.0.0.1 port 22: timed out');
     argvs.push(argv);
     const a = argv.join(' ');
+    if (a.includes('kustomizations.kustomize.toolkit.fluxcd.io')) {
+      if (!state.flux) {
+        throw new Error('error: the server doesn\'t have a resource type "kustomizations"');
+      }
+      if (argv.includes('get')) {
+        return JSON.stringify({
+          items: state.flux.map((k) => ({
+            metadata: { name: k.name, annotations: k.annotations ?? {} },
+            spec: { suspend: !!k.suspend },
+          })),
+        });
+      }
+      const name = argv[argv.indexOf('patch') + 2];
+      const body = JSON.parse(argv[argv.indexOf('-p') + 1]);
+      const k = state.flux.find((x) => x.name === name) as Kustomization;
+      k.suspend = body.spec.suspend;
+      k.annotations = { ...(k.annotations ?? {}) };
+      const ann = body.metadata.annotations[FLUX_SUSPENDED_BY];
+      if (ann === null) delete k.annotations[FLUX_SUSPENDED_BY];
+      else k.annotations[FLUX_SUSPENDED_BY] = ann;
+      writes.push(`flux ${body.spec.suspend ? 'suspend' : 'resume'} ${name}`);
+      return '';
+    }
+    if (argv.includes('rollout')) {
+      db.up = true;
+      return 'statefulset rolling update complete';
+    }
     if (argv.includes('get')) {
       return JSON.stringify({
         kind: 'List',
@@ -112,6 +193,7 @@ function fakeCluster(init: { replicas?: number; walg?: string; role?: string } =
         ],
       });
     }
+    if (argv.includes('exec') && !db.up) throw new Error('pod db-0 is not running');
     if (argv.includes('exec') && a.includes('[ -f')) return state.dbMarker ? 'present' : 'absent';
     if (argv.includes('patch') && argv.includes('configmap')) {
       const body = JSON.parse(argv[argv.indexOf('-p') + 1]);
@@ -142,7 +224,7 @@ function fakeCluster(init: { replicas?: number; walg?: string; role?: string } =
     }
     throw new Error(`unexpected kubectl ${a}`);
   };
-  return { state, writes, argvs, kubectl };
+  return { state, db, writes, argvs, kubectl, psql: fakeDb(db, writes) };
 }
 
 /** A fake compose node behind the compose ssh runner (false = remote failure). */
@@ -153,8 +235,8 @@ function fakeNode(init: { walg?: string; running?: string[] } = {}) {
     walg: init.walg ?? 'primary',
     running: init.running ?? ['myapp-app', 'myapp-n8n'],
     reachable: true,
-    dbUp: true,
   };
+  const db: Db = { up: true, inRecovery: false, readOnly: false, fileSetting: false };
   const writes: string[] = [];
   const commands: string[] = [];
   const run = async (ip: string, command: string) => {
@@ -165,7 +247,7 @@ function fakeNode(init: { walg?: string; running?: string[] } = {}) {
       return [
         `HOST_MARKER=${state.hostMarker ? 1 : 0}`,
         `WALG_ROLE=${state.walg}`,
-        `DB_MARKER=${state.dbUp ? (state.dbMarker ? 'present' : 'absent') : 'unknown'}`,
+        `DB_MARKER=${db.up ? (state.dbMarker ? 'present' : 'absent') : 'unknown'}`,
         ...state.running.map((c) => `RUNNING ${c}`),
         'PROBE_DONE',
       ].join('\n');
@@ -176,7 +258,7 @@ function fakeNode(init: { walg?: string; running?: string[] } = {}) {
       return 'OK';
     }
     if (command.includes('docker exec') && command.includes('touch')) {
-      if (!state.dbUp) return false;
+      if (!db.up) return false;
       state.dbMarker = true;
       writes.push('dbMarker');
       return 'OK';
@@ -199,10 +281,19 @@ function fakeNode(init: { walg?: string; running?: string[] } = {}) {
     expect(ip).toBe(RETIRED_IP);
     writes.push('walg=standby');
     state.walg = 'standby';
-    state.dbUp = true;
+    db.up = true;
     return true;
   };
-  return { state, writes, commands, run, zeroWorkloads, demoteWalgRole };
+  return {
+    state,
+    db,
+    writes,
+    commands,
+    run,
+    zeroWorkloads,
+    demoteWalgRole,
+    psql: fakeDb(db, writes),
+  };
 }
 
 describe('retiredSides: only a side the persisted roles call retired', () => {
@@ -223,42 +314,49 @@ describe('retiredSides: only a side the persisted roles call retired', () => {
     expect(retiredSides({ tier: 'compose-ha', envConfig: composeSwapped() })).toEqual([
       { ip: RETIRED_IP, name: 'myapp-prod-primary' },
     ]);
+    expect(isRetiredSide(composeSwapped(), RETIRED_IP)).toBe(true);
+    expect(isRetiredSide(composeSwapped(), PROMOTED_IP)).toBe(false);
   });
 });
 
 describe('reconcileRetiredFence (k8s-ha)', () => {
   const projectConfig = { projectName: 'myapp' };
+  const argsFor = (
+    cluster: ReturnType<typeof fakeCluster>,
+    deps: Record<string, unknown> = {},
+  ) => ({
+    environment: 'prod',
+    envConfig: k8sSwapped(),
+    projectConfig,
+    tier: 'k8s-ha' as const,
+    deps: { ...quiet, sshKeyPath: '/k', kubectl: cluster.kubectl, psql: cluster.psql, ...deps },
+  });
 
   it('an unswapped env makes no call at all', async () => {
     const cluster = fakeCluster();
     const result = await reconcileRetiredFence({
-      environment: 'prod',
+      ...argsFor(cluster),
       envConfig: k8sSwapped({ lastFailover: undefined }),
-      projectConfig,
-      tier: 'k8s-ha',
-      deps: { ...quiet, sshKeyPath: '/k', kubectl: cluster.kubectl },
     });
-    expect(result).toEqual({ fenced: [], unreachable: [] });
+    expect(result).toEqual({ fenced: [], unreachable: [], nodes: [] });
     expect(cluster.argvs).toEqual([]);
   });
 
-  it('fences a reachable retired cluster (app 2, WALG_ROLE=primary); a second run writes nothing', async () => {
+  it('fences a reachable retired cluster (app 2, WALG_ROLE=primary, writable db); a second run writes nothing', async () => {
     const cluster = fakeCluster({ replicas: 2, walg: 'primary' });
-    const args = {
-      environment: 'prod',
-      envConfig: k8sSwapped(),
-      projectConfig,
-      tier: 'k8s-ha' as const,
-      deps: { ...quiet, sshKeyPath: '/k', kubectl: cluster.kubectl },
-    };
-    const first = await reconcileRetiredFence(args);
-    expect(first).toEqual({ fenced: [RETIRED_IP], unreachable: [] });
+    const first = await reconcileRetiredFence(argsFor(cluster));
+    expect(first.fenced).toEqual([RETIRED_IP]);
+    expect(first.unreachable).toEqual([]);
+    expect(first.nodes[0]).toMatchObject({ ip: RETIRED_IP, fenced: true, walBytes: WAL_BYTES });
+    expect(first.nodes[0].wrote.length).toBeGreaterThan(0);
     expect(cluster.writes).toEqual([
       `marker=${RETIRED_ROLE}`,
       'dbMarker',
+      'readOnly',
       'scale app 0',
       'walg=standby',
     ]);
+    expect(cluster.db.readOnly).toBe(true);
     // The app is zeroed with `kubectl scale`, never a patch or set image that
     // would roll its pods.
     const appWrites = cluster.argvs.filter((a) => a.join(' ').includes('app'));
@@ -268,28 +366,88 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     }
 
     cluster.writes.length = 0;
-    const second = await reconcileRetiredFence(args);
-    expect(second).toEqual({ fenced: [RETIRED_IP], unreachable: [] });
+    const second = await reconcileRetiredFence(argsFor(cluster));
+    expect(second.fenced).toEqual([RETIRED_IP]);
+    expect(second.nodes[0].wrote).toEqual([]);
     expect(cluster.writes).toEqual([]);
+  });
+
+  it('a db in recovery is not made read-only (a replica cannot write)', async () => {
+    const cluster = fakeCluster();
+    cluster.db.inRecovery = true;
+    const result = await reconcileRetiredFence(argsFor(cluster));
+    expect(result.fenced).toEqual([RETIRED_IP]);
+    expect(cluster.writes).not.toContain('readOnly');
+  });
+
+  it('suspends the vibecarbon Flux Kustomizations before zeroing the app, and leaves an operator-suspended one alone', async () => {
+    const cluster = fakeCluster({
+      flux: [
+        { name: 'vibecarbon-base' },
+        { name: 'vibecarbon-production-nbg1', suspend: true },
+        { name: 'flux-system' },
+      ],
+    });
+    const result = await reconcileRetiredFence(argsFor(cluster));
+    expect(result.fenced).toEqual([RETIRED_IP]);
+    expect(cluster.writes).toEqual([
+      `marker=${RETIRED_ROLE}`,
+      'dbMarker',
+      'readOnly',
+      'flux suspend vibecarbon-base',
+      'scale app 0',
+      'walg=standby',
+    ]);
+    cluster.writes.length = 0;
+    await reconcileRetiredFence(argsFor(cluster));
+    expect(cluster.writes).toEqual([]);
+
+    // The clear resumes only what the fence suspended.
+    cluster.db.fileSetting = true;
+    await clearRetiredFence({
+      tier: 'k8s-ha',
+      ip: RETIRED_IP,
+      projectName: 'myapp',
+      deps: { sshKeyPath: '/k', kubectl: cluster.kubectl, psql: cluster.psql },
+    });
+    expect(cluster.writes).toEqual([
+      'clearMarker',
+      'clearDbMarker',
+      'clearReadOnly',
+      'flux resume vibecarbon-base',
+    ]);
+    expect(cluster.state.flux?.find((k) => k.name === 'vibecarbon-production-nbg1')?.suspend).toBe(
+      true,
+    );
+  });
+
+  it('a db pod down at the first read: waits for the db rollout, then fences it in the same run', async () => {
+    const cluster = fakeCluster();
+    cluster.db.up = false;
+    const result = await reconcileRetiredFence(argsFor(cluster));
+    expect(result.fenced).toEqual([RETIRED_IP]);
+    expect(cluster.writes).toEqual([
+      `marker=${RETIRED_ROLE}`,
+      'scale app 0',
+      'walg=standby',
+      'dbMarker',
+      'readOnly',
+    ]);
+    const rollout = cluster.argvs.findIndex((a) => a.includes('rollout'));
+    const touch = cluster.argvs.findIndex((a) => a.join(' ').includes('touch'));
+    expect(rollout).toBeGreaterThan(-1);
+    expect(rollout).toBeLessThan(touch);
   });
 
   it('an unreachable retired cluster is reported, and nothing is written', async () => {
     const cluster = fakeCluster();
     cluster.state.reachable = false;
     const warned: string[] = [];
-    const result = await reconcileRetiredFence({
-      environment: 'prod',
-      envConfig: k8sSwapped(),
-      projectConfig,
-      tier: 'k8s-ha',
-      deps: {
-        log: () => {},
-        warn: (l: string) => warned.push(l),
-        sshKeyPath: '/k',
-        kubectl: cluster.kubectl,
-      },
-    });
-    expect(result).toEqual({ fenced: [], unreachable: [RETIRED_IP] });
+    const result = await reconcileRetiredFence(
+      argsFor(cluster, { warn: (l: string) => warned.push(l) }),
+    );
+    expect(result.fenced).toEqual([]);
+    expect(result.unreachable).toEqual([RETIRED_IP]);
     expect(cluster.writes).toEqual([]);
     expect(warned.join('\n')).toMatch(/10\.0\.0\.1/);
   });
@@ -297,43 +455,42 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
   it('a zeroWorkloads seam replaces the app-only default (the add-ons plan extends it)', async () => {
     const cluster = fakeCluster();
     const zeroed: string[] = [];
-    await reconcileRetiredFence({
-      environment: 'prod',
-      envConfig: k8sSwapped(),
-      projectConfig,
-      tier: 'k8s-ha',
-      deps: {
-        ...quiet,
-        sshKeyPath: '/k',
-        kubectl: cluster.kubectl,
+    await reconcileRetiredFence(
+      argsFor(cluster, {
         zeroWorkloads: async (ip: string) => {
           zeroed.push(ip);
           return true;
         },
-      },
-    });
+      }),
+    );
     expect(zeroed).toEqual([RETIRED_IP]);
     expect(cluster.writes).not.toContain('scale app 0');
   });
 
-  it('clearRetiredFence removes both markers, and throws when it cannot', async () => {
+  it('the fence log says the domain is down while DNS still points at the node', async () => {
+    const cluster = fakeCluster();
+    const logged: string[] = [];
+    await reconcileRetiredFence({
+      ...argsFor(cluster, { log: (l: string) => logged.push(l) }),
+      envConfig: k8sSwapped({ domain: 'app.example.com' }),
+    });
+    expect(logged.join('\n')).toMatch(
+      /if app\.example\.com still points at it, the site is down until its A records move/,
+    );
+  });
+
+  it('clearRetiredFence removes the markers and the read-only setting, and throws when it cannot', async () => {
     const cluster = fakeCluster({ role: RETIRED_ROLE });
     cluster.state.dbMarker = true;
-    await clearRetiredFence({
-      tier: 'k8s-ha',
-      ip: RETIRED_IP,
-      projectName: 'myapp',
-      deps: { sshKeyPath: '/k', kubectl: cluster.kubectl },
-    });
-    expect(cluster.writes).toEqual(['clearMarker', 'clearDbMarker']);
+    cluster.db.fileSetting = true;
+    cluster.db.readOnly = true;
+    const deps = { sshKeyPath: '/k', kubectl: cluster.kubectl, psql: cluster.psql };
+    await clearRetiredFence({ tier: 'k8s-ha', ip: RETIRED_IP, projectName: 'myapp', deps });
+    expect(cluster.writes).toEqual(['clearMarker', 'clearDbMarker', 'clearReadOnly']);
+    expect(cluster.db.fileSetting).toBe(false);
     cluster.state.reachable = false;
     await expect(
-      clearRetiredFence({
-        tier: 'k8s-ha',
-        ip: RETIRED_IP,
-        projectName: 'myapp',
-        deps: { sshKeyPath: '/k', kubectl: cluster.kubectl },
-      }),
+      clearRetiredFence({ tier: 'k8s-ha', ip: RETIRED_IP, projectName: 'myapp', deps }),
     ).rejects.toThrow(/retired/);
   });
 });
@@ -349,20 +506,28 @@ describe('reconcileRetiredFence (compose-ha)', () => {
       ...quiet,
       sshKeyPath: '/k',
       run: node.run,
+      psql: node.psql,
       zeroWorkloads: node.zeroWorkloads,
       demoteWalgRole: node.demoteWalgRole,
     },
   });
 
-  it('fences a returning old primary: marker first, writers down before the db recreate; then idempotent', async () => {
+  it('fences a returning old primary: markers, db read-only, writers down before the db recreate; then idempotent', async () => {
     const node = fakeNode({ walg: 'primary', running: ['myapp-app', 'myapp-n8n'] });
     const first = await reconcileRetiredFence(argsFor(node));
-    expect(first).toEqual({ fenced: [RETIRED_IP], unreachable: [] });
-    expect(node.writes).toEqual(['hostMarker', 'dbMarker', 'zeroWorkloads', 'walg=standby']);
+    expect(first.fenced).toEqual([RETIRED_IP]);
+    expect(node.writes).toEqual([
+      'hostMarker',
+      'dbMarker',
+      'readOnly',
+      'zeroWorkloads',
+      'walg=standby',
+    ]);
+    expect(node.db.readOnly).toBe(true);
 
     node.writes.length = 0;
     const second = await reconcileRetiredFence(argsFor(node));
-    expect(second).toEqual({ fenced: [RETIRED_IP], unreachable: [] });
+    expect(second.fenced).toEqual([RETIRED_IP]);
     expect(node.writes).toEqual([]);
   });
 
@@ -374,19 +539,27 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     for (const svc of FAILOVER_FENCE_SERVICES) expect(probe).toContain(`myapp-${svc}`);
   });
 
-  it('a db that is down gets its PGDATA marker once the role recreate brings it up', async () => {
+  it('a db that is down gets its PGDATA marker and read-only fence once the role recreate brings it up', async () => {
     const node = fakeNode({ walg: 'primary', running: [] });
-    node.state.dbUp = false;
+    node.db.up = false;
     const result = await reconcileRetiredFence(argsFor(node));
     expect(result.fenced).toEqual([RETIRED_IP]);
-    expect(node.writes).toEqual(['hostMarker', 'walg=standby', 'dbMarker']);
+    expect(node.writes).toEqual(['hostMarker', 'walg=standby', 'dbMarker', 'readOnly']);
+  });
+
+  it('a db in recovery is not made read-only', async () => {
+    const node = fakeNode({ running: [] });
+    node.db.inRecovery = true;
+    await reconcileRetiredFence(argsFor(node));
+    expect(node.writes).not.toContain('readOnly');
   });
 
   it('an unreachable node is reported with no write', async () => {
     const node = fakeNode();
     node.state.reachable = false;
     const result = await reconcileRetiredFence(argsFor(node));
-    expect(result).toEqual({ fenced: [], unreachable: [RETIRED_IP] });
+    expect(result.fenced).toEqual([]);
+    expect(result.unreachable).toEqual([RETIRED_IP]);
     expect(node.writes).toEqual([]);
   });
 
@@ -396,29 +569,65 @@ describe('reconcileRetiredFence (compose-ha)', () => {
       ...argsFor(node),
       deps: { ...argsFor(node).deps, zeroWorkloads: async () => false },
     });
-    expect(result).toEqual({ fenced: [], unreachable: [RETIRED_IP] });
+    expect(result.fenced).toEqual([]);
+    expect(result.unreachable).toEqual([RETIRED_IP]);
   });
 
-  it('clearRetiredFence removes the host and PGDATA markers, and throws when it cannot', async () => {
+  it('clearRetiredFence removes the host and PGDATA markers and the read-only setting, and throws when it cannot', async () => {
     const node = fakeNode();
     node.state.hostMarker = true;
-    await clearRetiredFence({
-      tier: 'compose-ha',
-      ip: RETIRED_IP,
-      projectName: 'myapp',
-      deps: { sshKeyPath: '/k', run: node.run },
-    });
-    expect(node.writes).toEqual(['clear']);
+    node.db.fileSetting = true;
+    const deps = { sshKeyPath: '/k', run: node.run, psql: node.psql };
+    await clearRetiredFence({ tier: 'compose-ha', ip: RETIRED_IP, projectName: 'myapp', deps });
+    expect(node.writes).toEqual(['clear', 'clearReadOnly']);
     expect(node.state.hostMarker).toBe(false);
+    expect(node.db.fileSetting).toBe(false);
     node.state.reachable = false;
     await expect(
-      clearRetiredFence({
-        tier: 'compose-ha',
-        ip: RETIRED_IP,
-        projectName: 'myapp',
-        deps: { sshKeyPath: '/k', run: node.run },
-      }),
+      clearRetiredFence({ tier: 'compose-ha', ip: RETIRED_IP, projectName: 'myapp', deps }),
     ).rejects.toThrow(/retired/);
+  });
+});
+
+describe('the stranded-fence lifter never lifts a retired node', () => {
+  it('a write-fence marker naming the retired node is never acted on as the primary', async () => {
+    const lifted: string[] = [];
+    const verdict = await liftStrandedWriteFence({
+      environment: 'prod',
+      envConfig: composeSwapped({ ha: { enabled: true, writeFence: { ip: RETIRED_IP } } }),
+      rolePrimary: { ip: RETIRED_IP },
+      exec: async () => '',
+      log: () => {},
+      deps: {
+        unfence: async () => {
+          lifted.push('unfence');
+          return true;
+        },
+        clearMarker: () => {},
+      },
+    });
+    expect(verdict).toBe('retired');
+    expect(lifted).toEqual([]);
+  });
+
+  it('on the role primary the lifter still works as before', async () => {
+    const lifted: string[] = [];
+    const verdict = await liftStrandedWriteFence({
+      environment: 'prod',
+      envConfig: composeSwapped({ ha: { enabled: true, writeFence: { ip: PROMOTED_IP } } }),
+      rolePrimary: { ip: PROMOTED_IP },
+      exec: async () => '',
+      log: () => {},
+      deps: {
+        unfence: async () => {
+          lifted.push('unfence');
+          return true;
+        },
+        clearMarker: () => {},
+      },
+    });
+    expect(verdict).toBe('lifted');
+    expect(lifted).toEqual(['unfence']);
   });
 });
 

@@ -75,17 +75,21 @@ describe('the fence is cleared only once the retired side is a proven replica', 
     'src/lib/deploy/orchestrator.js',
   ];
 
-  it('clearRetiredFence is called from haFinalizeConfig and the k8s-ha deploy only', () => {
+  it('clearRetiredFence is called from haFinalizeConfig only, and the k8s-ha deploy through finishK8sRetiredFence', () => {
     const where: string[] = [];
     for (const rel of callers) {
       const n = calls(code(rel), 'clearRetiredFence');
       if (n > 0) where.push(`${rel}:${n}`);
     }
-    expect(where.sort()).toEqual(
-      ['src/lib/deploy/effects/compose-ha.js:1', 'src/lib/deploy/orchestrator.js:1'].sort(),
-    );
+    expect(where).toEqual(['src/lib/deploy/effects/compose-ha.js:1']);
     const effects = code('src/lib/deploy/effects/compose-ha.js');
     expect(calls(fnBody(effects, 'haFinalizeConfig'), 'clearRetiredFence')).toBe(1);
+    // k8s: once in executeDeployment, before its final save.
+    const body = fnBody(code('src/lib/deploy/orchestrator.js'), 'executeDeployment');
+    expect(calls(body, 'finishK8sRetiredFence')).toBe(1);
+    expect(body.indexOf('finishK8sRetiredFence(')).toBeLessThan(
+      body.indexOf('saveProjectConfig(clearDestroyedRecord('),
+    );
   });
 });
 

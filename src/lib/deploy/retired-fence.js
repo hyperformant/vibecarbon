@@ -4,11 +4,11 @@
  * A failover often finishes with the old primary unreachable: that is usually
  * why it ran. Nothing then demoted it, so when it comes back it still believes
  * it is the primary. Its app serves stale data to any client on old DNS, its
- * archive_command pushes WAL into the backup prefix the new primary owns, and
- * its nightly base backup does too, ending in a `wal-g delete retain` that can
- * prune the new primary's backups. Until a deploy rebuilds it as the standby,
- * the side the persisted roles call retired is fenced by markers it enforces
- * itself:
+ * add-ons and pg_cron keep writing, its archive_command pushes WAL into the
+ * backup prefix the new primary owns, and its nightly base backup does too,
+ * ending in a `wal-g delete retain` that can prune the new primary's backups.
+ * Until a deploy rebuilds it as the standby, the side the persisted roles call
+ * retired is fenced by markers it enforces itself:
  *
  *   - k8s: `VIBECARBON_ROLE=retired` in the `vibecarbon-config` ConfigMap,
  *     which the backup CronJob reads per job (configMapKeyRef);
@@ -23,10 +23,14 @@
  * Each script exits 1 with `retired node: backups refused` before any wal-g
  * call: a refused push fails loudly and never counts as a skip.
  *
- * Besides the markers the fence holds the retired side's writers at zero (k8s:
+ * Writes are refused at the database itself: `default_transaction_read_only =
+ * on` through ALTER SYSTEM (the same setting and helper the planned-failover
+ * fence uses, so every writer is covered, app, add-ons and pg_cron alike, and
+ * open sessions are terminated). A db in recovery cannot write and is left
+ * alone. Besides that the fence holds the retired side's writers at zero (k8s:
  * `kubectl scale deployment app --replicas=0`, never a patch that would roll
- * pods; compose: the planned-failover writer set, app, n8n and metabase) and
- * WALG_ROLE=standby.
+ * pods, after suspending any Flux Kustomization that would scale it back;
+ * compose: app, n8n and metabase) and WALG_ROLE=standby.
  *
  * `vibecarbon status`, `failover` and `deploy` call reconcileRetiredFence
  * first, and failover again once its role swap is saved, so an old primary
@@ -37,7 +41,8 @@
  * The fence comes off in two places only, once the retired side has been
  * rebuilt as a proven replica: the compose reconverge's haFinalizeConfig and
  * the k8s-ha deploy after its streaming gate (clearRetiredFence; the
- * retired-fence-entrypoints census pins both).
+ * retired-fence-entrypoints census pins both). The stranded-fence lifter
+ * (write-fence.js) never touches a retired node.
  */
 
 import * as p from '@clack/prompts';
@@ -45,7 +50,8 @@ import { getSSHKeyPath, sshKubectl } from '../ssh.js';
 import { sshRun as composeSshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
 import { swappedSinceLastDeploy } from './failover-guard.js';
-import { k8sSetWalgRoleArgv } from './walg-role.js';
+import { fenceDatabaseWrites, k8sPsqlRunner, WRITE_FENCE_SETTING } from './replication.js';
+import { k8sDbRolloutStatusArgv, k8sSetWalgRoleArgv } from './walg-role.js';
 
 /** The vibecarbon-config key the k8s backup CronJob reads. */
 export const RETIRED_ROLE_KEY = 'VIBECARBON_ROLE';
@@ -56,14 +62,31 @@ export const RETIRED_HOST_MARKER = '.vibecarbon-retired';
 export const RETIRED_DB_MARKER = 'vibecarbon-retired';
 /** The one line every backup script prints when it refuses. */
 export const RETIRED_REFUSAL = 'retired node: backups refused';
+/** The annotation on a Flux Kustomization the fence suspended (so the clear resumes only those). */
+export const FLUX_SUSPENDED_BY = 'vibecarbon.dev/suspended-by';
+const FLUX_SUSPENDED_BY_VALUE = 'retired-fence';
 
 /** The app Deployment the k8s fence zeroes (k8s/base/app/deployment.yaml). */
 const K8S_APP_DEPLOYMENT = 'app';
 const NS = 'vibecarbon';
+/** The Flux Kustomizations of k8s/flux/clusters/*: vibecarbon-base and its overlays. */
+const FLUX_NS = 'flux-system';
+const FLUX_KUSTOMIZATION = 'kustomizations.kustomize.toolkit.fluxcd.io';
+const FLUX_PREFIX = 'vibecarbon-';
 /** PGDATA as the db container resolves it (the image sets PGDATA). */
 const DB_MARKER_PATH = `"\${PGDATA:-/var/lib/postgresql/data}/${RETIRED_DB_MARKER}"`;
 /** Reads are bounded: status calls this, and an unreachable side must not stall it. */
 const PROBE_TIMEOUT_MS = 20_000;
+/** The db roll a WALG_ROLE change triggers, waited before the second pass. */
+const DB_SETTLE_TIMEOUT_S = 120;
+
+/** One read: recovery, the fence setting, and the pg_wal size (the retired node's disk clock). */
+export const RETIRED_DB_STATE_SQL =
+  `SELECT pg_is_in_recovery(), current_setting('${WRITE_FENCE_SETTING}'), ` +
+  '(SELECT coalesce(sum(size), 0) FROM pg_ls_waldir())';
+
+/** The fence setting as written to the settings files, which is what a promotion would read. */
+const FILE_SETTING_SQL = `SELECT count(*) FROM pg_file_settings WHERE name = '${WRITE_FENCE_SETTING}'`;
 
 /**
  * The HA tier of a persisted env, or null for a non-HA (or unknown) one.
@@ -100,6 +123,72 @@ export function retiredSides({ envConfig, tier }) {
   return [];
 }
 
+/** True when `ip` is a side the persisted roles call retired, on either HA tier. */
+export function isRetiredSide(envConfig, ip) {
+  return (
+    !!ip &&
+    ['compose-ha', 'k8s-ha'].some((tier) =>
+      retiredSides({ envConfig, tier }).some((side) => side.ip === ip),
+    )
+  );
+}
+
+/**
+ * Read the db's fence state through a psql runner.
+ * readOnly: true when fenced or in recovery (a replica cannot write), false
+ * when it takes writes, 'unknown' when the db does not answer.
+ */
+async function probeDb(exec) {
+  let out;
+  try {
+    out = await exec(RETIRED_DB_STATE_SQL);
+  } catch {
+    return { readOnly: 'unknown', walBytes: null };
+  }
+  const [rec, setting, wal] = String(out ?? '')
+    .trim()
+    .split('\n')
+    .pop()
+    .split('|')
+    .map((s) => s.trim());
+  const walBytes = /^\d+$/.test(wal ?? '') ? Number(wal) : null;
+  if (rec === 't') return { readOnly: true, walBytes };
+  if (rec === 'f' && (setting === 'on' || setting === 'off')) {
+    return { readOnly: setting === 'on', walBytes };
+  }
+  return { readOnly: 'unknown', walBytes };
+}
+
+const attempt = async (fn) => {
+  try {
+    const out = await fn();
+    return out !== false;
+  } catch {
+    return false;
+  }
+};
+
+/** The database-level write fence (fenceDatabaseWrites: ALTER SYSTEM, reload, read back, terminate sessions). */
+const fenceDbStep = (psqlFor) => ({
+  key: 'dbReadOnly',
+  what: 'its database read-only',
+  apply: (ip) => attempt(() => fenceDatabaseWrites({ exec: psqlFor(ip) })),
+});
+
+/**
+ * Lift the database-level fence from the settings files (a promotion reads
+ * them), then prove it gone from the files. Throws.
+ */
+async function clearDbReadOnly(exec) {
+  const count = async () => String((await exec(FILE_SETTING_SQL)) ?? '').trim();
+  if ((await count()) === '0') return;
+  // readWrite: a read-only default session refuses ALTER commands.
+  await exec(`ALTER SYSTEM RESET ${WRITE_FENCE_SETTING}`, { readWrite: true });
+  await exec('SELECT pg_reload_conf()');
+  const left = await count();
+  if (left !== '0') throw new Error(`${WRITE_FENCE_SETTING} is still in its settings files`);
+}
+
 // ---------------------------------------------------------------------------
 // k8s-ha: kubectl over ssh on the retired cluster's master
 // ---------------------------------------------------------------------------
@@ -117,8 +206,32 @@ const k8sDbMarkerExec = (script) => [
   script,
 ];
 
+const NO_FLUX =
+  /doesn't have a resource type|no matches for kind|could not find the requested resource/i;
+
+const fluxPatch = (suspend) =>
+  JSON.stringify({
+    metadata: { annotations: { [FLUX_SUSPENDED_BY]: suspend ? FLUX_SUSPENDED_BY_VALUE : null } },
+    spec: { suspend },
+  });
+
+/** The vibecarbon Flux Kustomizations, or null when Flux is not installed. Throws on any other failure. */
+async function listFluxKustomizations(ip, kubectl, opts) {
+  let out;
+  try {
+    out = await kubectl(ip, ['-n', FLUX_NS, 'get', FLUX_KUSTOMIZATION, '-o', 'json'], opts);
+  } catch (err) {
+    if (NO_FLUX.test(String(err?.message ?? err))) return null;
+    throw err;
+  }
+  return (JSON.parse(out)?.items ?? []).filter((k) =>
+    String(k?.metadata?.name ?? '').startsWith(FLUX_PREFIX),
+  );
+}
+
 /** One read of everything the k8s fence covers; null when the cluster does not answer. */
-async function probeK8s(ip, kubectl) {
+async function probeK8s(ip, { kubectl, psqlFor }) {
+  const opts = { timeout: PROBE_TIMEOUT_MS, transportRetry: false };
   let listed;
   try {
     listed = JSON.parse(
@@ -135,7 +248,7 @@ async function probeK8s(ip, kubectl) {
           'json',
           '--ignore-not-found',
         ],
-        { timeout: PROBE_TIMEOUT_MS, transportRetry: false },
+        opts,
       ),
     );
   } catch {
@@ -152,39 +265,41 @@ async function probeK8s(ip, kubectl) {
     const out = await kubectl(
       ip,
       k8sDbMarkerExec(`if [ -f ${DB_MARKER_PATH} ]; then echo present; else echo absent; fi`),
-      { timeout: PROBE_TIMEOUT_MS, transportRetry: false },
+      opts,
     );
     const v = String(out ?? '').trim();
-    if (v === 'present' || v === 'absent') dbMarker = v;
+    if (v === 'present' || v === 'absent') dbMarker = v === 'present';
   } catch {
-    // db pod not running: placed after the role roll, or left to the next run.
+    // db pod not running: the second pass, after the db settles, retries.
   }
+  let fluxSuspended = 'unknown';
+  let fluxToSuspend = [];
+  try {
+    const ks = await listFluxKustomizations(ip, kubectl, opts);
+    fluxToSuspend = (ks ?? []).filter((k) => k?.spec?.suspend !== true).map((k) => k.metadata.name);
+    fluxSuspended = fluxToSuspend.length === 0;
+  } catch {
+    // unreadable: reported as missing, never guessed absent
+  }
+  const dbState = await probeDb(psqlFor(ip));
   return {
     marker: of('ConfigMap')?.data?.[RETIRED_ROLE_KEY] === RETIRED_ROLE,
     dbMarker,
+    dbReadOnly: dbState.readOnly,
+    walBytes: dbState.walBytes,
+    fluxSuspended,
+    fluxToSuspend,
     workloadsZero: !dep || dep.spec?.replicas === 0,
     walgStandby: (db?.env ?? []).find((e) => e.name === 'WALG_ROLE')?.value === 'standby',
   };
 }
 
-function k8sBackend({ kubectl, zeroWorkloads }) {
-  const attempt = async (fn) => {
-    try {
-      await fn();
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  const placeDbMarker = (ip) =>
-    attempt(async () => {
-      const out = await kubectl(ip, k8sDbMarkerExec(`touch ${DB_MARKER_PATH} && echo OK`));
-      if (String(out ?? '').trim() !== 'OK') throw new Error('touch did not confirm');
-    });
+function k8sBackend({ kubectl, psqlFor, zeroWorkloads }) {
   return {
-    probe: (ip) => probeK8s(ip, kubectl),
-    // Ordered so the backups are refused first, and the db marker lands
-    // before the WALG_ROLE change rolls the db pod.
+    probe: (ip) => probeK8s(ip, { kubectl, psqlFor }),
+    // Ordered so backups are refused first, the database stops taking writes
+    // next, Flux cannot scale the app back before it is zeroed, and the db
+    // marker lands before the WALG_ROLE change rolls the db pod.
     steps: [
       {
         key: 'marker',
@@ -206,8 +321,31 @@ function k8sBackend({ kubectl, zeroWorkloads }) {
       {
         key: 'dbMarker',
         what: 'the PGDATA marker',
-        when: (s) => s.dbMarker === 'absent',
-        apply: placeDbMarker,
+        apply: (ip) =>
+          attempt(async () => {
+            const out = await kubectl(ip, k8sDbMarkerExec(`touch ${DB_MARKER_PATH} && echo OK`));
+            if (String(out ?? '').trim() !== 'OK') throw new Error('touch did not confirm');
+          }),
+      },
+      fenceDbStep(psqlFor),
+      {
+        key: 'fluxSuspended',
+        what: 'its Flux Kustomizations suspended',
+        apply: (ip, state) =>
+          attempt(async () => {
+            for (const name of state.fluxToSuspend) {
+              await kubectl(ip, [
+                '-n',
+                FLUX_NS,
+                'patch',
+                FLUX_KUSTOMIZATION,
+                name,
+                '--type=merge',
+                '-p',
+                fluxPatch(true),
+              ]);
+            }
+          }),
       },
       {
         key: 'workloadsZero',
@@ -227,8 +365,13 @@ function k8sBackend({ kubectl, zeroWorkloads }) {
           attempt(() => kubectl(ip, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 })),
       },
     ],
-    // The db pod was down at the probe: try the marker once more after the roll.
-    lateDbMarker: placeDbMarker,
+    // The db pod was down or mid-roll: wait for it (bounded) before the second pass.
+    settle: (ip) =>
+      attempt(() =>
+        kubectl(ip, k8sDbRolloutStatusArgv(DB_SETTLE_TIMEOUT_S), {
+          timeout: (DB_SETTLE_TIMEOUT_S + 30) * 1000,
+        }),
+      ),
   };
 }
 
@@ -240,7 +383,7 @@ const running = (ct) =>
   `[ "$(docker container inspect -f '{{.State.Running}}' ${ct} 2>/dev/null)" = true ]`;
 
 /** One read of everything the compose fence covers; null when the node does not answer. */
-async function probeCompose(ip, { run, projectName, writerContainers }) {
+async function probeCompose(ip, { run, projectName, writerContainers, psqlFor }) {
   const dbCt = `${projectName}-db`;
   const out = await run(
     ip,
@@ -262,34 +405,37 @@ async function probeCompose(ip, { run, projectName, writerContainers }) {
   if (!lines.includes('PROBE_DONE')) return null;
   const value = (key) => lines.find((l) => l.startsWith(`${key}=`))?.slice(key.length + 1) ?? '';
   const dbMarker = value('DB_MARKER');
+  const dbState = await probeDb(psqlFor(ip));
   return {
     marker: value('HOST_MARKER') === '1',
-    dbMarker: dbMarker === 'present' || dbMarker === 'absent' ? dbMarker : 'unknown',
+    dbMarker: dbMarker === 'present' ? true : dbMarker === 'absent' ? false : 'unknown',
+    dbReadOnly: dbState.readOnly,
+    walBytes: dbState.walBytes,
     workloadsZero: !lines.some((l) => l.startsWith('RUNNING ')),
     walgStandby: value('WALG_ROLE') === 'standby',
   };
 }
 
-function composeBackend({ run, projectName, sshKeyPath, zeroWorkloads, demoteWalgRole }) {
+function composeBackend({ run, psqlFor, projectName, sshKeyPath, zeroWorkloads, demoteWalgRole }) {
   const dbCt = `${projectName}-db`;
   const confirmed = async (ip, command) => {
     const out = await run(ip, `${command} && echo OK`, { timeout: 30_000 });
     return String(out === false ? '' : (out ?? '')).trim() === 'OK';
   };
-  const placeDbMarker = (ip) =>
-    confirmed(ip, `docker exec -u postgres ${dbCt} sh -c 'touch ${DB_MARKER_PATH}'`);
   return {
     probe: async (ip) => {
       const { FAILOVER_FENCE_SERVICES } = await import('./compose/ha.js');
       return probeCompose(ip, {
         run,
         projectName,
+        psqlFor,
         writerContainers: FAILOVER_FENCE_SERVICES.map((svc) => `${projectName}-${svc}`),
       });
     },
     // Marker first (it refuses the nightly backup), then the PGDATA marker (it
-    // refuses WAL archiving at once), the writers before the db recreate the
-    // role change needs.
+    // refuses WAL archiving at once), the database read-only, the writers
+    // before the db recreate the role change needs (ALTER SYSTEM persists in
+    // postgresql.auto.conf across it).
     steps: [
       {
         key: 'marker',
@@ -299,9 +445,10 @@ function composeBackend({ run, projectName, sshKeyPath, zeroWorkloads, demoteWal
       {
         key: 'dbMarker',
         what: 'the PGDATA marker',
-        when: (s) => s.dbMarker === 'absent',
-        apply: placeDbMarker,
+        apply: (ip) =>
+          confirmed(ip, `docker exec -u postgres ${dbCt} sh -c 'touch ${DB_MARKER_PATH}'`),
       },
+      fenceDbStep(psqlFor),
       {
         key: 'workloadsZero',
         what: 'its writers stopped',
@@ -326,21 +473,28 @@ function composeBackend({ run, projectName, sshKeyPath, zeroWorkloads, demoteWal
         },
       },
     ],
-    // The db was down at the probe: the role recreate above brought it up.
-    lateDbMarker: placeDbMarker,
+    // demoteComposeWalgRole's recreate already waits for the db to accept connections.
+    settle: async () => true,
   };
 }
 
-function backendFor(tier, { projectName, sshKeyPath, deps }) {
+async function backendFor(tier, { projectName, sshKeyPath, deps }) {
   if (tier === 'k8s-ha') {
     return k8sBackend({
       kubectl: deps.kubectl ?? ((ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts)),
+      psqlFor: deps.psql ?? ((ip) => k8sPsqlRunner(ip, sshKeyPath)),
       zeroWorkloads: deps.zeroWorkloads,
     });
   }
   if (tier === 'compose-ha') {
+    let psqlFor = deps.psql;
+    if (!psqlFor) {
+      const { composePsqlRunner } = await import('./compose/ha.js');
+      psqlFor = (ip) => composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`);
+    }
     return composeBackend({
       run: deps.run ?? ((ip, command, opts) => composeSshRun(ip, sshKeyPath, command, opts)),
+      psqlFor,
       projectName,
       sshKeyPath,
       zeroWorkloads: deps.zeroWorkloads,
@@ -351,7 +505,9 @@ function backendFor(tier, { projectName, sshKeyPath, deps }) {
 }
 
 /**
- * Fence one retired node: read its state, apply only the missing parts.
+ * Fence one retired node: read its state, apply only the missing parts. A part
+ * the first read could not see (its db down or mid-roll) gets a second pass
+ * once the db settles, so one run fences fully.
  *
  * `deps.zeroWorkloads(ip) -> Promise<boolean>` replaces the built-in writer
  * stop (k8s: the app Deployment; compose: app, n8n, metabase). It is the seam
@@ -362,34 +518,52 @@ function backendFor(tier, { projectName, sshKeyPath, deps }) {
  * @param {string} args.ip
  * @param {string} args.projectName
  * @param {string} args.sshKeyPath
- * @param {object} [args.deps] kubectl / run / zeroWorkloads / demoteWalgRole seams
- * @returns {Promise<{ reachable: boolean, fenced: boolean, wrote: string[], missing: string[] }>}
+ * @param {object} [args.deps] kubectl / run / psql / zeroWorkloads / demoteWalgRole seams
+ * @returns {Promise<{ reachable: boolean, fenced: boolean, wrote: string[], missing: string[], walBytes: number|null }>}
  */
 export async function fenceRetiredNode({ tier, ip, projectName, sshKeyPath, deps = {} }) {
-  const backend = backendFor(tier, { projectName, sshKeyPath, deps });
+  const backend = await backendFor(tier, { projectName, sshKeyPath, deps });
   const state = await backend.probe(ip);
-  if (!state) return { reachable: false, fenced: false, wrote: [], missing: ['reachable'] };
+  if (!state) {
+    return { reachable: false, fenced: false, wrote: [], missing: ['reachable'], walBytes: null };
+  }
   const wrote = [];
-  const missing = [];
-  for (const step of backend.steps) {
-    const needed = step.when ? step.when(state) : !state[step.key];
-    if (!needed) continue;
-    if (await step.apply(ip)) {
-      state[step.key] = step.key === 'dbMarker' ? 'present' : true;
-      wrote.push(step.what);
-    } else {
-      missing.push(step.what);
+  const failed = new Set();
+  const pass = async () => {
+    for (const step of backend.steps) {
+      if (state[step.key] !== false || failed.has(step.key)) continue;
+      if (await step.apply(ip, state)) {
+        state[step.key] = true;
+        wrote.push(step.what);
+      } else {
+        failed.add(step.key);
+      }
+    }
+  };
+  await pass();
+  const unseen = () => backend.steps.filter((s) => state[s.key] === 'unknown');
+  if (unseen().length > 0) {
+    await backend.settle(ip);
+    const again = await backend.probe(ip);
+    if (again) {
+      for (const step of backend.steps) {
+        if (state[step.key] === 'unknown') state[step.key] = again[step.key];
+      }
+      state.fluxToSuspend = again.fluxToSuspend ?? state.fluxToSuspend;
+      state.walBytes = state.walBytes ?? again.walBytes;
+      await pass();
     }
   }
-  if (state.dbMarker === 'unknown') {
-    if (await backend.lateDbMarker(ip)) {
-      state.dbMarker = 'present';
-      wrote.push('the PGDATA marker');
-    } else {
-      missing.push('the PGDATA marker (its db is not running)');
-    }
-  }
-  return { reachable: true, fenced: missing.length === 0, wrote, missing };
+  const missing = backend.steps
+    .filter((s) => state[s.key] !== true)
+    .map((s) => (state[s.key] === 'unknown' ? `${s.what} (its db or API did not answer)` : s.what));
+  return {
+    reachable: true,
+    fenced: missing.length === 0,
+    wrote,
+    missing,
+    walBytes: state.walBytes,
+  };
 }
 
 /**
@@ -403,10 +577,10 @@ export async function fenceRetiredNode({ tier, ip, projectName, sshKeyPath, deps
  * @param {object} args.envConfig - the persisted env config (roles, lastFailover)
  * @param {{ projectName: string }} args.projectConfig
  * @param {'compose-ha'|'k8s-ha'} args.tier
- * @param {object} [args.deps] sshKeyPath / kubectl / run / zeroWorkloads /
+ * @param {object} [args.deps] sshKeyPath / kubectl / run / psql / zeroWorkloads /
  *   demoteWalgRole / log / warn
- * @returns {Promise<{ fenced: string[], unreachable: string[] }>} `unreachable`
- *   names every retired side not fully fenced (it, or its database, did not answer)
+ * @returns {Promise<{ fenced: string[], unreachable: string[], nodes: Array<{ ip: string, fenced: boolean, wrote: string[], walBytes: number|null }> }>}
+ *   `unreachable` names every retired side not fully fenced (it, or its database, did not answer)
  */
 export async function reconcileRetiredFence({
   environment,
@@ -416,10 +590,11 @@ export async function reconcileRetiredFence({
   deps = {},
 }) {
   const sides = retiredSides({ envConfig, tier });
-  const result = { fenced: [], unreachable: [] };
+  const result = { fenced: [], unreachable: [], nodes: [] };
   if (sides.length === 0) return result;
   const { log = (line) => p.log.info(line), warn = (line) => p.log.warn(line) } = deps;
   const sshKeyPath = deps.sshKeyPath ?? getSSHKeyPath(environment);
+  const domain = envConfig?.domain || envConfig?.dns?.domain;
   for (const { ip } of sides) {
     const verdict = await fenceRetiredNode({
       tier,
@@ -428,12 +603,21 @@ export async function reconcileRetiredFence({
       sshKeyPath,
       deps,
     });
+    result.nodes.push({
+      ip,
+      fenced: verdict.fenced,
+      wrote: verdict.wrote,
+      walBytes: verdict.walBytes,
+    });
     if (verdict.fenced) {
       result.fenced.push(ip);
       if (verdict.wrote.length > 0) {
         log(
           `fenced the retired node ${ip} (${verdict.wrote.join(', ')}): it refuses backups and ` +
-            'serves nothing until vibecarbon deploy rebuilds it as the standby',
+            'writes until vibecarbon deploy rebuilds it as the standby' +
+            (domain
+              ? `. if ${domain} still points at it, the site is down until its A records move to the primary`
+              : ''),
         );
       }
       continue;
@@ -452,15 +636,19 @@ export async function reconcileRetiredFence({
 
 /**
  * Take the fence off a retired side that has just been rebuilt as a proven
- * replica. Throws a one-line cause when it cannot prove both markers gone: a
- * marker left behind would make that node refuse its own backups once a later
- * failover promotes it, so the caller must not record the rebuild as complete.
+ * replica: both markers, the database-level read-only setting from its
+ * settings files (a later promotion must never come up read-only), and, on
+ * k8s, the Flux Kustomizations the fence suspended. Throws a one-line cause
+ * when it cannot prove all of it: a marker left behind would make that node
+ * refuse its own backups once a later failover promotes it, so the caller must
+ * not record the rebuild as complete.
  *
  * @param {object} args
  * @param {'compose-ha'|'k8s-ha'} args.tier
  * @param {string} args.ip
  * @param {string} args.projectName
- * @param {object} [args.deps] sshKeyPath / kubectl / run seams
+ * @param {string} [args.environment]
+ * @param {object} [args.deps] sshKeyPath / kubectl / run / psql seams
  */
 export async function clearRetiredFence({ tier, ip, projectName, environment, deps = {} }) {
   const sshKeyPath = deps.sshKeyPath ?? getSSHKeyPath(environment);
@@ -469,8 +657,10 @@ export async function clearRetiredFence({ tier, ip, projectName, environment, de
       `could not clear the retired marker on the rebuilt standby ${ip} (${why}); ` +
         'rerun vibecarbon deploy to finish',
     );
+  const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
   if (tier === 'k8s-ha') {
     const kubectl = deps.kubectl ?? ((h, argv, opts) => sshKubectl(h, sshKeyPath, argv, opts));
+    const exec = (deps.psql ?? ((h) => k8sPsqlRunner(h, sshKeyPath)))(ip);
     try {
       // A merge-patch null removes the key, and is a no-op when it is absent.
       await kubectl(ip, [
@@ -485,8 +675,22 @@ export async function clearRetiredFence({ tier, ip, projectName, environment, de
       ]);
       const out = await kubectl(ip, k8sDbMarkerExec(`rm -f ${DB_MARKER_PATH} && echo OK`));
       if (String(out ?? '').trim() !== 'OK') throw new Error('rm did not confirm');
+      await clearDbReadOnly(exec);
+      for (const k of (await listFluxKustomizations(ip, kubectl)) ?? []) {
+        if (k?.metadata?.annotations?.[FLUX_SUSPENDED_BY] !== FLUX_SUSPENDED_BY_VALUE) continue;
+        await kubectl(ip, [
+          '-n',
+          FLUX_NS,
+          'patch',
+          FLUX_KUSTOMIZATION,
+          k.metadata.name,
+          '--type=merge',
+          '-p',
+          fluxPatch(false),
+        ]);
+      }
     } catch (err) {
-      throw fail(String(err?.message ?? err).split('\n')[0]);
+      throw fail(firstLine(err));
     }
     return;
   }
@@ -500,6 +704,16 @@ export async function clearRetiredFence({ tier, ip, projectName, environment, de
     );
     if (String(out === false ? '' : (out ?? '')).trim() !== 'CLEARED') {
       throw fail('the node or its db did not answer');
+    }
+    let psqlFor = deps.psql;
+    if (!psqlFor) {
+      const { composePsqlRunner } = await import('./compose/ha.js');
+      psqlFor = (h) => composePsqlRunner(h, sshKeyPath, `/opt/${projectName}`);
+    }
+    try {
+      await clearDbReadOnly(psqlFor(ip));
+    } catch (err) {
+      throw fail(firstLine(err));
     }
     return;
   }

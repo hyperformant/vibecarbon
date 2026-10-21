@@ -501,6 +501,33 @@ export function resolveKubeconfigPath(environment, envConfig) {
 }
 
 /**
+ * k8s-ha: take the retirement fence off the cluster this deploy just rebuilt
+ * as the standby (retired-fence.js). Only when the env was swapped at entry
+ * (a retired side existed); a no-op otherwise. Throws when the clear cannot be
+ * proven, and the caller runs it before the final save, so a failed clear
+ * leaves deployedAt unstamped and the rerun clears it.
+ *
+ * @param {object} args
+ * @param {Array<{ ip: string }>} args.retiredAtEntry
+ * @param {string|undefined} args.standbyIp - the rebuilt standby's master
+ * @param {string} args.projectName
+ * @param {string} args.environment
+ * @param {typeof clearRetiredFence} [args.clear]
+ * @returns {Promise<boolean>} whether a clear ran
+ */
+export async function finishK8sRetiredFence({
+  retiredAtEntry,
+  standbyIp,
+  projectName,
+  environment,
+  clear = clearRetiredFence,
+}) {
+  if (!retiredAtEntry?.length || !standbyIp) return false;
+  await clear({ tier: 'k8s-ha', ip: standbyIp, projectName, environment });
+  return true;
+}
+
+/**
  * Execute the deployment based on gathered configuration
  */
 export async function executeDeployment(args, gatheredConfig) {
@@ -1562,14 +1589,12 @@ export async function executeDeployment(args, gatheredConfig) {
     // marker left behind would make it refuse its own backups once a later
     // failover promotes it, so a failed clear fails the deploy (the env stays
     // swapped and the rerun clears it).
-    if (retiredAtEntry.length > 0 && k8sHaCtx.standbyResult?.masterIp) {
-      await clearRetiredFence({
-        tier,
-        ip: k8sHaCtx.standbyResult.masterIp,
-        projectName: projectConfig.projectName,
-        environment,
-      });
-    }
+    await finishK8sRetiredFence({
+      retiredAtEntry,
+      standbyIp: k8sHaCtx.standbyResult?.masterIp,
+      projectName: projectConfig.projectName,
+      environment,
+    });
     deployResult = {
       primary: k8sHaCtx.primaryResult,
       standby: k8sHaCtx.standbyResult,

@@ -92,6 +92,25 @@ it survived onto the promoted primary (`replication_failover_continuity`). The
 renderer **refuses to publish** figures from any run where that check is
 missing or failed.
 
+**When the old primary comes back.** The failover classifies itself from the
+standby's side: a standby still receiving fresh WAL (under 60 s old) means the
+primary is alive behind a partition, so failover refuses unless you pass
+`-force-unplanned`. Once the roles are swapped, the old primary is the
+*retired* side. It is fenced by markers it enforces itself:
+
+- every backup script refuses on it (`retired node: backups refused`, exit 1);
+- its database is read-only;
+- its writers are at zero (on k8s, after its Flux Kustomizations are suspended);
+- it runs with `WALG_ROLE=standby`.
+
+The fence is applied whenever the CLI reaches the node: by the failover itself
+if the node answers, otherwise by the next `vibecarbon status`, `failover` or
+`deploy`. **When a dead old primary comes back, run `vibecarbon status <env>`
+(or `vibecarbon deploy <env>`) right away**, so its fence lands before its
+nightly backup or WAL archiver can push. Its row in `status` shows its pg_wal
+size, which grows while archiving is refused. `vibecarbon deploy` rebuilds it as
+the new standby, and the fence comes off only once it streams.
+
 **Unplanned RPO = replication lag at failure.** Not a per-run e2e figure: it
 is whatever WAL was in flight when the primary died. It is evidenced two ways:
 

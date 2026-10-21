@@ -360,6 +360,65 @@ function parseStandbyReplayRow(out) {
  *
  * @returns {Promise<{ streaming: boolean, state: string, lagBytes: number|null, lagLine: string, primaryRow: {state:string,lagSeconds:number}|null, standbyRow: {inRecovery:boolean,lastWalReplayLsn:string,secondsSinceReplay:number}|null } | null>}
  */
+/** Bytes as the largest whole unit (KiB, MiB, GiB). */
+function formatBytes(n) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
+}
+
+/** A coarse age: minutes, hours or days. */
+function formatAge(ms) {
+  const m = Math.max(0, Math.round(ms / 60_000));
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
+
+/**
+ * The retired side's row (retired-fence.js): whether it is fenced, whether
+ * this run fenced it, and its disk clock (pg_wal grows while archiving is
+ * refused) plus how long it has been retired.
+ *
+ * @param {{ fenced: string[], unreachable: string[], nodes?: Array<{ ip: string, wrote?: string[], walBytes?: number|null }> }} fence
+ * @param {object} envConfig
+ * @param {number} [now]
+ * @returns {string}
+ */
+export function retiredFenceRow(fence, envConfig, now = Date.now()) {
+  const node = (ip) => (fence.nodes ?? []).find((n) => n.ip === ip) ?? {};
+  const since = Date.parse(envConfig?.lastFailover ?? '');
+  const age = Number.isNaN(since) ? null : `retired ${formatAge(now - since)} ago`;
+  const clock = (ip) => {
+    const { walBytes } = node(ip);
+    return [typeof walBytes === 'number' ? `pg_wal ${formatBytes(walBytes)}` : null, age]
+      .filter(Boolean)
+      .join(', ');
+  };
+  const parts = [
+    ...fence.fenced.map((ip) => {
+      const fencedNow = node(ip).wrote?.length ? ' (fenced now)' : '';
+      const detail = clock(ip);
+      return (
+        `${ip} fenced${fencedNow}: ${c.dim('refuses backups and writes')}` +
+        (detail ? ` ${c.dim(`(${detail})`)}` : '')
+      );
+    }),
+    ...fence.unreachable.map(
+      (ip) =>
+        `${c.warning(`${ip} not fenced yet`)} ${c.dim(
+          `(it or its db does not answer${age ? `, ${age}` : ''})`,
+        )}`,
+    ),
+  ];
+  return parts.join(', ');
+}
+
 /**
  * The role primary's write-fence row: shown when an interrupted planned
  * failover's marker is set or the primary reads read-only. Null otherwise.
@@ -1161,14 +1220,7 @@ function renderEnvironment(envName, envConfig, checks) {
 
     // The side a failover retired, until a deploy rebuilds it as the standby.
     if (checks.retiredFence) {
-      const { fenced, unreachable } = checks.retiredFence;
-      const parts = [
-        ...fenced.map((ip) => `${ip} ${c.dim('fenced: refuses backups, serves nothing')}`),
-        ...unreachable.map(
-          (ip) => `${c.warning(`${ip} not fenced yet`)} ${c.dim('(does not answer)')}`,
-        ),
-      ];
-      lines.push(`${c.dim('Retired')}        ${parts.join(', ')}`);
+      lines.push(`${c.dim('Retired')}        ${retiredFenceRow(checks.retiredFence, envConfig)}`);
     }
 
     // Real replication state (finding #4) — never a hardcoded "streaming".
