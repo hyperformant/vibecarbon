@@ -234,8 +234,9 @@ spec:
                 exit 1
               fi
               # 3. A base pushed while a restore left its dirs in PGDATA carries them:
-              #    drop them from the staged tree so they cannot wedge the swap.
-              rm -rf "$PGDATA/.vc-restore/.vc-restore" "$PGDATA/.vc-restore/.vc-prev" "$PGDATA/.vc-restore/.vc-discard" "$PGDATA/.vc-restore/.vc-restore-in-progress" "$PGDATA/.vc-restore/.vc-restore-in-progress.tmp" "$PGDATA/.vc-restore/.vc-restore.lock" "$PGDATA/.vc-restore/.vc-restored-from" "$PGDATA/.vc-restore/.vc-restored-from.tmp"
+              #    drop them from the staged tree so they cannot wedge the swap. The
+              #    source database's WAL gap record goes too: the restored one has its own.
+              rm -rf "$PGDATA/.vc-restore/.vc-restore" "$PGDATA/.vc-restore/.vc-prev" "$PGDATA/.vc-restore/.vc-discard" "$PGDATA/.vc-restore/.vc-restore-in-progress" "$PGDATA/.vc-restore/.vc-restore-in-progress.tmp" "$PGDATA/.vc-restore/.vc-restore.lock" "$PGDATA/.vc-restore/.vc-restored-from" "$PGDATA/.vc-restore/.vc-restored-from.tmp" "$PGDATA/.vc-restore/vibecarbon-wal-gap" "$PGDATA/.vc-restore/vibecarbon-wal-gap.clearing"
               # Recovery config into staging: strip the settings it rewrites, append the
               # new ones (rendered by the CLI, the same text on both tiers).
               VC_AUTO_CONF="$PGDATA/.vc-restore/postgresql.auto.conf"

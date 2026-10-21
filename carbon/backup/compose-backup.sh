@@ -160,6 +160,7 @@ docker compose exec -T db bash -c '
   # postgres:17.11-walg3.0.9-r2). Only the Wrote line proves a pushed base, so
   # the marker takes its name from that line; a push that exits 0 without it
   # fails rather than guess.
+  push_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   push_out="$(wal-g backup-push "$PGDATA" 2>&1)" || {
     printf "%s\n" "$push_out" >&2
     exit 1
@@ -171,6 +172,17 @@ docker compose exec -T db bash -c '
     exit 1
   fi
   echo "BACKUP_RESULT=pushed:$name"
+  # WAL GAP RECORD (wal-archive.sh drops a segment only under disk pressure
+  # and records it here): a drop before this base started is behind it now,
+  # so its entry goes; one recorded while the push ran stays (this base needs
+  # that WAL). The record moves aside first, so an entry wal-archive.sh
+  # appends meanwhile lands in a new file and is never lost. A failure here
+  # only warns: the base is in the bucket.
+  gap="$PGDATA/vibecarbon-wal-gap"
+  if [ -f "$gap" ] || [ -f "$gap.clearing" ]; then
+    { { [ ! -f "$gap" ] || mv -f "$gap" "$gap.clearing"; } && kept="$(awk -v s="$push_started" "\$2 >= s" "$gap.clearing")" && { [ -z "$kept" ] || printf "%s\n" "$kept" >> "$gap"; } && rm -f "$gap.clearing"; } || echo "could not clear the WAL gap record $gap after pushing $name" >&2
+    [ ! -f "$gap" ] || chown postgres:postgres "$gap" 2>/dev/null || true
+  fi
   # RETENTION, a separate step after the marker: the base above is in the
   # bucket whatever happens here, and a failure exits 3 (base pushed,
   # retention failed), never 1. `delete garbage BACKUPS` sweeps

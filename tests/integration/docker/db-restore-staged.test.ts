@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { writeBackupFence } from '../../../src/lib/deploy/backup-fence.js';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
+import { parseWalGapRecord } from '../../../src/lib/status/backup-health.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
 import {
   createS3Client,
@@ -755,5 +756,64 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     expect(old.status, old.stdout + old.stderr).not.toBe(0);
     expect(old.stderr).toContain('backup prefix fenced to another primary');
     expect((await latestBase(s3, folderB)).name).toBe(name);
+  });
+
+  // Final review ruling (e): a failing bucket holds the segment (postgres
+  // retries it, pg_stat_archiver shows it); only disk pressure drops one, with
+  // a durable record status reads, and the next pushed base clears it. Runs
+  // the real wal-archive.sh (real wal-g, busybox df) the way archive_command
+  // does, on the promoted primary the previous test left running. The push
+  // targets a closed port, so nothing is ever uploaded for the live segment.
+  it('wal-archive.sh holds a segment a push cannot land, drops one only under disk pressure, and a base clears the record', {
+    timeout: 300_000,
+  }, async () => {
+    const ct = SB_CT;
+    const seg = psql('SELECT pg_walfile_name(pg_current_wal_lsn())', ct);
+    const segPath = `${PGDATA}/pg_wal/${seg}`;
+    const gapPath = `${PGDATA}/vibecarbon-wal-gap`;
+    const archive = (extra: string[] = []) =>
+      spawnSync(
+        'docker',
+        [
+          'exec',
+          '-u',
+          'postgres',
+          ...[
+            'AWS_ENDPOINT=http://127.0.0.1:1',
+            // wal-g retries a refused connection for minutes by default.
+            'WALG_S3_MAX_RETRIES=0',
+            'WAL_ARCHIVE_RETRIES=1',
+            'WAL_ARCHIVE_SLEEP=0',
+            ...extra,
+          ].flatMap((e) => ['-e', e]),
+          ct,
+          'bash',
+          '/etc/postgresql/wal-archive.sh',
+          segPath,
+        ],
+        { encoding: 'utf-8', timeout: 120_000 },
+      );
+    const exists = (path: string) =>
+      spawnSync('docker', ['exec', ct, 'test', '-e', path]).status === 0;
+
+    const held = archive();
+    expect(held.status, held.stderr).toBe(1);
+    expect(held.stderr).toMatch(/WAL_ARCHIVE_FAILED: [^\n]*keeping the segment/);
+    expect(exists(segPath)).toBe(true);
+    expect(exists(gapPath)).toBe(false);
+
+    const dropped = archive(['VC_WAL_GUARD_FREE_BYTES=1048576']);
+    expect(dropped.status, dropped.stderr).toBe(0);
+    expect(dropped.stderr).toContain('WAL_ARCHIVE_DROPPED');
+    const gap = docker(['exec', ct, 'cat', gapPath]);
+    expect(gap).toMatch(new RegExp(`^${seg} \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$`));
+    expect(parseWalGapRecord(`${gap}\nVC_OK`)).toEqual({ count: 1, first: seg, last: seg });
+
+    // A drop recorded in the second the push starts is kept (it may be
+    // after the base's start); this one is a second older.
+    await sleep(1100);
+    pushedName(runComposeBackupScript(dir, ct));
+    expect(exists(gapPath)).toBe(false);
+    expect(exists(`${gapPath}.clearing`)).toBe(false);
   });
 });

@@ -62,7 +62,7 @@ let pgdata: string;
 let bin: string;
 
 /** A stub wal-g: `backup-fetch <dir> <name>` writes a fake cluster, or fails. */
-function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc') {
+function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap') {
   const body =
     mode === 'fail'
       ? 'echo "ERROR: Backup $3 does not exist" >&2; exit 1'
@@ -75,6 +75,14 @@ function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc') {
             ? [
                 'mkdir -p "$2/.vc-prev/base" "$2/.vc-restore" "$2/.vc-discard"',
                 'echo in > "$2/.vc-restore-in-progress"',
+              ]
+            : []),
+          // A base pushed while the source database had dropped WAL under
+          // disk pressure carries its gap record (wal-archive.sh).
+          ...(mode === 'ok-with-gap'
+            ? [
+                'echo "000000010000000000000003 2026-10-21T00:00:00Z" > "$2/vibecarbon-wal-gap"',
+                'echo "000000010000000000000004 2026-10-21T00:00:01Z" > "$2/vibecarbon-wal-gap.clearing"',
               ]
             : []),
         ].join('\n');
@@ -222,6 +230,16 @@ for (const [tier, build] of TIERS) {
       expect(ls()).not.toContain('.vc-restore-in-progress');
       expect(ls()).not.toContain('.vc-discard');
       expect(existsSync(join(pgdata, '.vc-prev', '.vc-prev'))).toBe(false);
+    });
+
+    it('a restored base never carries the source database WAL gap record', () => {
+      seedLive();
+      stubWalg('ok-with-gap');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(read('base/marker')).toBe('restored');
+      expect(ls()).not.toContain('vibecarbon-wal-gap');
+      expect(ls()).not.toContain('vibecarbon-wal-gap.clearing');
     });
 
     it('a swap interrupted half way in (marker "in") is settled by the rerun', () => {

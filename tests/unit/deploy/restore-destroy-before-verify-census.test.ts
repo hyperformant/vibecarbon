@@ -60,8 +60,10 @@ const SCRIPTS: Array<[string, () => string]> = [
 const PGDATA_REF = /\$\{?PGDATA(?::\?)?\}?/;
 // Staging, the previous cluster, the set-aside unproven copy, the marker, and
 // the .vc-* names a staged tree may carry (dropped before the swap).
+// Inside the staging dir, also the source database's WAL gap record (a
+// restored database does not share its gap): still never the live cluster.
 const ALLOWED_RM_TARGET =
-  /^"\$\{?PGDATA(?::\?)?\}?\/(\.vc-restore|\.vc-prev|\.vc-discard|\.vc-restore-in-progress|\.vc-restore\/\.vc-[a-z.-]+)"$/;
+  /^"\$\{?PGDATA(?::\?)?\}?\/(\.vc-restore|\.vc-prev|\.vc-discard|\.vc-restore-in-progress|\.vc-restore\/\.vc-[a-z.-]+|\.vc-restore\/vibecarbon-wal-gap(?:\.clearing)?)"$/;
 
 function codeLines(script: string): string[] {
   return script

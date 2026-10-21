@@ -5,10 +5,12 @@
  * - the newest base backup, from the RECORDED lineage (`backup.lineage`,
  *   readEnvBaseBackups with `live: true`). A live read never resolves, so an
  *   ambiguous or unrestored lineage (a restore question) cannot stop status;
- * - `pg_stat_archiver` and the 24 h count of `WAL_ARCHIVE_FAILED` lines, from
- *   the role primary (resolvePrimary), never a retired HA side. The count
- *   matters because wal-archive.sh exits 0 after giving up on a segment, so
- *   postgres' own failed_count cannot see those drops;
+ * - `pg_stat_archiver`, the 24 h count of segments wal-archive.sh gave up on
+ *   (`WAL_ARCHIVE_DROPPED`, `WAL_ARCHIVE_OVERWRITE_REFUSED`) and the gap record
+ *   (`$PGDATA/vibecarbon-wal-gap`, the segments it dropped under disk
+ *   pressure), from the role primary (resolvePrimary), never a retired HA
+ *   side. A push that fails is held (exit 1) and retried by postgres, which
+ *   pg_stat_archiver shows; only a drop is invisible to it;
  * - on k8s, the newest finished backup Job (exit 3 = base pushed, retention
  *   failed).
  *
@@ -21,6 +23,7 @@ import { resolvePrimary } from '../cli/resolve-primary.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from '../ssh.js';
 import { hasBackupResult, pushedBackupNames } from '../walg/backup-result.js';
 import { backupCredentialVars, readEnvBaseBackups } from '../walg/restore-base.js';
+import { PGDATA_PATH, WAL_GAP_RECORDS } from '../walg/restore-layout.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -152,7 +155,7 @@ function archiveVerdict(archiver) {
 /**
  * The row's verdict and text from already-gathered facts. Pure.
  *
- * @param {{ lineage: string, schedule: string, backups: Array<{ name?: string, finishTime: Date }>, archiver: { lastArchivedAgeSeconds: number|null, lastArchivedWal: string, currentWal: string, failing: boolean } | null, walFailures: { count: number, lastAt?: Date|null, since?: Date|null } | null, job: { name: string, failed: boolean, retentionFailed?: boolean, log?: boolean, detail?: string } | null, unrestoredPrior?: string|null, unknown?: string[], now?: number }} i
+ * @param {{ lineage: string, schedule: string, backups: Array<{ name?: string, finishTime: Date }>, archiver: { lastArchivedAgeSeconds: number|null, lastArchivedWal: string, currentWal: string, failing: boolean } | null, walFailures: { count: number, overwrite?: number, lastAt?: Date|null, since?: Date|null } | null, walGap?: { count: number, first: string, last: string } | null, job: { name: string, failed: boolean, retentionFailed?: boolean, log?: boolean, detail?: string } | null, unrestoredPrior?: string|null, unknown?: string[], now?: number }} i
  * @returns {{ level: 'ok'|'warn'|'error', text: string }}
  */
 export function backupHealthRow(i) {
@@ -179,10 +182,24 @@ export function backupHealthRow(i) {
     if (v.good) good.push(v.good);
   }
 
-  // The wrapper exits 0 after giving up on a segment, so these lines are the
-  // only drop detector. A drop is an open PITR gap until a base backup lands
-  // after it, and a live problem while it is newer than the last archive.
-  const drops = i.walFailures;
+  // Segments dropped under disk pressure: the durable record, red until a
+  // base pushed after them clears it.
+  if (i.walGap) {
+    const range =
+      i.walGap.first === i.walGap.last ? i.walGap.first : `${i.walGap.first}..${i.walGap.last}`;
+    bad.push(
+      `WAL segments dropped under disk pressure: ${range}, a restore across them stops at the gap; take a fresh base backup`,
+    );
+  }
+
+  // Segments wal-archive.sh gave up on, from the db log (pg_stat_archiver
+  // cannot see a segment the wrapper exited 0 on). A drop is an open PITR gap
+  // until a base backup lands after it. With the gap record shown, its own
+  // drops (WAL_ARCHIVE_DROPPED) are not counted twice: only overwrite
+  // refusals remain.
+  const logged = i.walFailures;
+  const drops =
+    logged && i.walGap ? { ...logged, count: logged.overwrite ?? logged.count } : logged;
   if (drops && drops.count > 0) {
     const lastArchivedAt =
       i.archiver && i.archiver.lastArchivedAgeSeconds >= 0
@@ -196,8 +213,11 @@ export function backupHealthRow(i) {
       !newest ||
       at > newest.finishTime.getTime();
     const window = drops.since ? `since ${drops.since.toISOString().slice(0, 16)}Z` : 'in 24h';
-    if (open) bad.push(`${drops.count} WAL_ARCHIVE_FAILED ${window}`);
-    else warn.push(`${drops.count} drops in the last 24h (archiving has since recovered)`);
+    if (open) bad.push(`${drops.count} WAL segments dropped ${window}`);
+    else
+      warn.push(
+        `${drops.count} WAL segments dropped in the last 24h (a newer base backup covers them)`,
+      );
   }
 
   if (i.job?.failed) {
@@ -220,17 +240,26 @@ export function backupHealthRow(i) {
 
 const TS_RE = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/;
 
+/** The wal-archive.sh lines that mean a segment was given up (exit 0, a PITR gap). */
+const DROP_TAGS = ['WAL_ARCHIVE_DROPPED', 'WAL_ARCHIVE_OVERWRITE_REFUSED'];
+
+/** The db-log grep for DROP_TAGS, as an extended regex. */
+const DROP_GREP = `WAL_ARCHIVE_(DROPPED|OVERWRITE_REFUSED)`;
+
 /**
- * WAL_ARCHIVE_FAILED lines from `logs --timestamps` output (plus an optional
- * `STARTED=<iso>` line naming the container's start). The count is labelled
- * "since <start>" when the log cannot cover 24 h.
+ * The dropped-segment lines from `logs --timestamps` output (plus an optional
+ * `STARTED=<iso>` line naming the container's start): WAL_ARCHIVE_DROPPED
+ * (disk pressure) and WAL_ARCHIVE_OVERWRITE_REFUSED (`overwrite`). A
+ * WAL_ARCHIVE_FAILED line is a held segment postgres retries, not a drop. The
+ * count is labelled "since <start>" when the log cannot cover 24 h.
  *
  * @param {string} text
  * @param {{ now?: number, previousRead?: boolean }} [opts] previousRead: the prior container's log was read too, so a restart does not shorten coverage
- * @returns {{ count: number, lastAt: Date|null, since: Date|null }}
+ * @returns {{ count: number, overwrite: number, lastAt: Date|null, since: Date|null }}
  */
 export function parseWalFailureLog(text, { now = Date.now(), previousRead = false } = {}) {
   let count = 0;
+  let overwrite = 0;
   let lastAt = null;
   let started = null;
   for (const line of String(text ?? '').split('\n')) {
@@ -240,8 +269,9 @@ export function parseWalFailureLog(text, { now = Date.now(), previousRead = fals
       if (!Number.isNaN(d.getTime())) started = d;
       continue;
     }
-    if (!line.includes('WAL_ARCHIVE_FAILED')) continue;
+    if (!DROP_TAGS.some((t) => line.includes(t))) continue;
     count += 1;
+    if (line.includes('WAL_ARCHIVE_OVERWRITE_REFUSED')) overwrite += 1;
     const m = TS_RE.exec(line);
     if (m) {
       const d = new Date(m[1]);
@@ -249,10 +279,54 @@ export function parseWalFailureLog(text, { now = Date.now(), previousRead = fals
     }
   }
   const since = !previousRead && started && now - started.getTime() < DAY ? started : null;
-  return { count, lastAt, since };
+  return { count, overwrite, lastAt, since };
+}
+
+/** The read sentinel the gap probe prints after the record, so a failed read is never "no gap". */
+const GAP_READ_OK = 'VC_OK';
+
+/**
+ * The shell that prints the gap record (and its aside copy while a base push
+ * clears it), then the read sentinel. Runs in the db container.
+ */
+export const WAL_GAP_READ_SH = `cat ${WAL_GAP_RECORDS.map((n) => `${PGDATA_PATH}/${n}`).join(' ')} 2>/dev/null; echo ${GAP_READ_OK}`;
+
+/**
+ * The gap record: `<segment> <UTC time>` lines. Null when it is empty or
+ * absent; throws when the sentinel is missing (the read did not complete).
+ *
+ * @param {string} text
+ * @returns {{ count: number, first: string, last: string } | null}
+ */
+export function parseWalGapRecord(text) {
+  const lines = String(text ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.at(-1) !== GAP_READ_OK) throw new Error('the WAL gap record was unreadable');
+  const segments = [
+    ...new Set(
+      lines
+        .slice(0, -1)
+        .map((l) => l.split(/\s+/)[0])
+        .filter((seg) => parseWalName(seg)),
+    ),
+  ].sort();
+  if (segments.length === 0) return null;
+  return { count: segments.length, first: segments[0], last: segments.at(-1) };
 }
 
 const SECRETISH = /([A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASS)[A-Za-z0-9_]*)\s*[=:]\s*\S+/gi;
+const BEARER = /\b(Bearer|Basic)\s+\S+/gi;
+const URL_CREDS = /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
+
+/** A log line with credential-shaped values (assignments, auth headers, URL userinfo) masked. */
+function redact(line) {
+  return line
+    .replace(URL_CREDS, '$1<redacted>@')
+    .replace(BEARER, '$1 <redacted>')
+    .replace(SECRETISH, '$1=<redacted>');
+}
 
 /**
  * The newest scheduled compose backup from the tail of backups/backup.log.
@@ -278,7 +352,9 @@ export function parseComposeBackupLog(text) {
   if (marker && !retentionFailed) return null;
   if (!marker && running) return null;
   const last = [...block].reverse().find((l) => l.trim() && !hasBackupResult(l));
-  const detail = (last ?? '').replace(SECRETISH, '$1=<redacted>').trim().slice(0, 200);
+  const detail = redact(last ?? '')
+    .trim()
+    .slice(0, 200);
   return { name: 'backup.log', failed: true, retentionFailed, log: true, detail };
 }
 
@@ -361,7 +437,7 @@ function primaryProbes(envName, envConfig, projectName) {
           ip,
           `cd ${remoteDir} && cid="$(docker compose ps -q db)" && ` +
             'echo "STARTED=$(docker inspect -f \'{{.State.StartedAt}}\' "$cid")" && ' +
-            '(docker compose logs --no-color -t --since 24h db 2>&1 | grep WAL_ARCHIVE_FAILED || true)',
+            `(docker compose logs --no-color -t --since 24h db 2>&1 | grep -E '${DROP_GREP}' || true)`,
         );
         return parseWalFailureLog(out);
       }
@@ -397,12 +473,30 @@ function primaryProbes(envName, envConfig, projectName) {
       ]);
       return parseWalFailureLog(`${started}\n${previous}\n${current}`, { previousRead });
     },
+    // Segments dropped under disk pressure (wal-archive.sh), in PGDATA.
+    readWalGap: async (ip) => {
+      if (isCompose) {
+        return parseWalGapRecord(
+          await bash(ip, `cd ${remoteDir} && docker compose exec -T db sh -c '${WAL_GAP_READ_SH}'`),
+        );
+      }
+      const pod = await getPostgresPod(ip, key());
+      return parseWalGapRecord(
+        await sshKubectl(
+          ip,
+          key(),
+          ['exec', '-n', NAMESPACE, pod, '--', 'sh', '-c', WAL_GAP_READ_SH],
+          { timeout: PROBE_TIMEOUT_MS },
+        ),
+      );
+    },
     // The newest finished scheduled backup: a k8s Job, or compose's cron log.
     lastJob: async (ip) => {
       if (isCompose) {
         const out = await bash(
           ip,
-          `tail -n 40 ${remoteDir}/backups/backup.log 2>/dev/null; echo "__RUNNING__=$(pgrep -f '[c]ompose-backup' >/dev/null && echo 1 || echo 0)"`,
+          // compose-backup.sh holds this lock for its whole run: held = running.
+          `tail -n 40 ${remoteDir}/backups/backup.log 2>/dev/null; echo "__RUNNING__=$([ -e /tmp/vibecarbon-backup.lock ] && ! flock -n /tmp/vibecarbon-backup.lock true && echo 1 || echo 0)"`,
         );
         return parseComposeBackupLog(out);
       }
@@ -470,9 +564,10 @@ export async function checkBackupHealth(envName, envConfig, projectName, deps = 
   }
 
   const probes = deps.runOnPrimary ? deps : primaryProbes(envName, envConfig, projectName);
-  const [archiver, walFailures, job] = await Promise.allSettled([
+  const [archiver, walFailures, walGap, job] = await Promise.allSettled([
     probes.runOnPrimary(primary.ip, ARCHIVER_SQL),
     probes.countWalFailures(primary.ip),
+    probes.readWalGap(primary.ip),
     probes.lastJob(primary.ip),
   ]);
 
@@ -484,8 +579,11 @@ export async function checkBackupHealth(envName, envConfig, projectName, deps = 
   } else unknown.push(`WAL archiving unknown (${archiver.reason?.message ?? archiver.reason})`);
   if (walFailures.status === 'rejected') {
     unknown.push(
-      `WAL_ARCHIVE_FAILED count unknown (${walFailures.reason?.message ?? walFailures.reason})`,
+      `dropped WAL count unknown (${walFailures.reason?.message ?? walFailures.reason})`,
     );
+  }
+  if (walGap.status === 'rejected') {
+    unknown.push(`WAL gap record unknown (${walGap.reason?.message ?? walGap.reason})`);
   }
   if (job.status === 'rejected') {
     unknown.push(`backup job status unknown (${job.reason?.message ?? job.reason})`);
@@ -497,6 +595,7 @@ export async function checkBackupHealth(envName, envConfig, projectName, deps = 
     backups: listing.backups,
     archiver: archiverFacts,
     walFailures: walFailures.status === 'fulfilled' ? walFailures.value : null,
+    walGap: walGap.status === 'fulfilled' ? walGap.value : null,
     job: job.status === 'fulfilled' ? job.value : null,
     unrestoredPrior: envConfig.backup?.unrestoredPrior ?? null,
     unknown,
@@ -511,7 +610,8 @@ export async function checkBackupHealth(envName, envConfig, projectName, deps = 
     baseCount: listing.backups.length,
     lastArchivedAgeSeconds: archiverFacts?.lastArchivedAgeSeconds ?? null,
     archiverFailing: archiverFacts?.failing ?? null,
-    walArchiveFailures24h: facts.walFailures?.count ?? null,
+    walSegmentsDropped24h: facts.walFailures?.count ?? null,
+    walGap: facts.walGap,
     lastJob: facts.job,
     unrestoredPrior: facts.unrestoredPrior,
   };

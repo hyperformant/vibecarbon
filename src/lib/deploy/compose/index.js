@@ -37,6 +37,7 @@ import {
   RESTORE_LAYOUT,
   RETIRE_PREVIOUS_SH,
   restoreFetchTimeoutS,
+  WAL_GAP_RECORDS,
   WALG_ENV_SOURCE,
 } from '../../walg/restore-layout.js';
 import {
@@ -1499,6 +1500,7 @@ function restoreStagedAndSwapLines() {
     lock,
     restoredFrom,
     `${restoredFrom}.tmp`,
+    ...WAL_GAP_RECORDS,
   ]
     .map((name) => `"$PGDATA/${staging}/${name}"`)
     .join(' ');
@@ -1510,7 +1512,8 @@ function restoreStagedAndSwapLines() {
     '  exit 1',
     'fi',
     '# 3. A base pushed while a restore left its dirs in PGDATA carries them:',
-    '#    drop them from the staged tree so they cannot wedge the swap.',
+    '#    drop them from the staged tree so they cannot wedge the swap. The',
+    "#    source database's WAL gap record goes too: the restored one has its own.",
     `rm -rf ${stagedVc}`,
     '# Recovery config into staging: strip the settings it rewrites, append the',
     '# new ones (rendered by the CLI, the same text on both tiers).',

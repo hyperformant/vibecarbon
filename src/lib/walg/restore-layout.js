@@ -40,6 +40,17 @@ export const RESTORE_LAYOUT = Object.freeze({
   restoredFrom: '.vc-restored-from',
 });
 
+/**
+ * The record wal-archive.sh keeps in PGDATA of WAL segments it dropped under
+ * disk pressure (`<segment> <UTC time>` per line), and the name a pushed base
+ * moves it aside to while it clears the entries older than itself
+ * (backup/compose-backup.sh, the k8s backup CronJob). vibecarbon status reads
+ * both; a restore drops both from the staged tree, since a restored database
+ * does not share its source's gap.
+ */
+export const WAL_GAP_RECORD = 'vibecarbon-wal-gap';
+export const WAL_GAP_RECORDS = Object.freeze([WAL_GAP_RECORD, `${WAL_GAP_RECORD}.clearing`]);
+
 /** The previous cluster, removed once the restored one is proven. */
 export const PREVIOUS_PGDATA_PATH = `${PGDATA_PATH}/${RESTORE_LAYOUT.previous}`;
 

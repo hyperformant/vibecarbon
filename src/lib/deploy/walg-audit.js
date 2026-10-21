@@ -29,15 +29,12 @@
  * failure: a brand-new environment legitimately has no base backups until the
  * first `vibecarbon backup` or the nightly cron runs.
  *
- * `pg_stat_archiver` is read too, but it is deliberately NOT the primary
- * signal, because on this stack it cannot see the failure mode we care about:
- * `wal-archive.sh` retries and then exits 0 on purpose (a non-zero
- * archive_command pins pg_wal and fills the disk — RCA prod-1 2026-05-26), so
- * postgres counts every push as a success and `failed_count` stays 0 even when
- * every WAL segment is being dropped on the floor. What pg_stat_archiver DOES
- * see is the archive_command itself being broken — missing script, bad mount,
- * wrong interpreter — which surfaces as a real non-zero exit. So we use it for
- * exactly that, and only when the MOST RECENT archiver event was a failure
+ * `pg_stat_archiver` is read too. `wal-archive.sh` holds a segment it cannot
+ * push (exit 1 after its retries, so postgres keeps it and retries), which
+ * makes a failing push visible here as well as a broken archive_command
+ * (missing script, bad mount, wrong interpreter). It drops a segment (exit 0)
+ * only under disk pressure, with a record status reads. The audit fails only
+ * when the MOST RECENT archiver event was a failure
  * (`last_failed_time` newer than `last_archived_time`). Comparing timestamps
  * instead of `failed_count > 0` means a historical failure that has since been
  * fixed cannot false-red a warm redeploy, and it is computed in SQL so no
@@ -45,9 +42,9 @@
  *
  * A fresh cluster that has archived nothing yet has both timestamps NULL and is
  * reported as a PASS with a note — never a failure. Forcing a WAL switch to
- * manufacture a data point was considered and rejected: because the wrapper
- * exits 0 regardless, a forced switch would prove nothing that backup-list
- * hasn't already proven, at the cost of a 16 MiB segment on every deploy.
+ * manufacture a data point was considered and rejected: it would prove little
+ * that backup-list hasn't already proven, at the cost of a 16 MiB segment on
+ * every deploy.
  *
  * WHEN IT RUNS
  * ------------
@@ -465,8 +462,9 @@ export function evaluateWalgAudit(raw) {
         `pg_stat_archiver reports the most recent archive attempt FAILED ` +
         `(last_failed_wal=${parsed.archiver.lastFailedWal || '?'} at ` +
         `${parsed.archiver.lastFailedTime || '?'}, failed_count=` +
-        `${parsed.archiver.failedCount ?? '?'}). postgres could not even run ` +
-        `archive_command to completion, so this is the wrapper script itself: check that ` +
+        `${parsed.archiver.failedCount ?? '?'}). Either wal-g could not push the segment ` +
+        `(postgres keeps it and retries; the db log has a WAL_ARCHIVE_FAILED line with ` +
+        `wal-g's error) or the wrapper itself did not run: check that ` +
         `/etc/postgresql/wal-archive.sh is mounted and readable in the db container`,
     });
   }

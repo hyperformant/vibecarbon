@@ -1,7 +1,14 @@
 /**
  * `vibecarbon status` Backups row (M5): newest base age in the recorded
  * lineage, last archived WAL and failures from the role primary, the 24 h
- * WAL_ARCHIVE_FAILED count, and the last scheduled backup Job.
+ * count of WAL segments wal-archive.sh gave up on, the durable record of the
+ * segments it dropped under disk pressure, and the last scheduled backup Job.
+ *
+ * Since the final review ruling (e), wal-archive.sh holds a segment on a
+ * failing bucket (exit 1, pg_stat_archiver shows it), so WAL_ARCHIVE_FAILED is
+ * a retried attempt, not a drop. Only WAL_ARCHIVE_DROPPED (disk pressure,
+ * recorded in $PGDATA/vibecarbon-wal-gap) and WAL_ARCHIVE_OVERWRITE_REFUSED
+ * give a segment up.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -14,6 +21,7 @@ import {
   parseArchiverRow,
   parseComposeBackupLog,
   parseWalFailureLog,
+  parseWalGapRecord,
   parseWalName,
 } from '../../../src/lib/status/backup-health.js';
 import { attachBackups } from '../../../src/status.js';
@@ -43,6 +51,7 @@ const input = (over = {}) => ({
   backups: [base(2)],
   archiver: arch(),
   walFailures: null,
+  walGap: null,
   job: null,
   unrestoredPrior: null,
   now: NOW,
@@ -141,7 +150,7 @@ describe('backupHealthRow', () => {
       }),
     );
     expect(r.level).toBe('error');
-    expect(r.text).toContain('4 WAL_ARCHIVE_FAILED since 2026-10-21T10:00Z');
+    expect(r.text).toContain('4 WAL segments dropped since 2026-10-21T10:00Z');
   });
 
   it('drops with a later archive and a later base are yellow, recovered', () => {
@@ -153,7 +162,47 @@ describe('backupHealthRow', () => {
       }),
     );
     expect(r.level).toBe('warn');
-    expect(r.text).toContain('3 drops in the last 24h (archiving has since recovered)');
+    expect(r.text).toContain(
+      '3 WAL segments dropped in the last 24h (a newer base backup covers them)',
+    );
+  });
+
+  it('a drop older than both the last archive and the newest base is yellow, not red', () => {
+    const r = backupHealthRow(
+      input({
+        backups: [base(2)],
+        archiver: arch({ lastArchivedAgeSeconds: 60 }),
+        walFailures: { count: 1, lastAt: new Date(NOW - 3 * HOUR), since: null },
+      }),
+    );
+    expect(r.level).toBe('warn');
+    expect(r.text).not.toContain('since 20');
+  });
+
+  it('the gap record is red, names the dropped range, and says what fixes it', () => {
+    const r = backupHealthRow(
+      input({
+        walGap: { count: 3, first: WAL(12), last: WAL(14) },
+        walFailures: { count: 3, overwrite: 0, lastAt: new Date(NOW - 60_000), since: null },
+      }),
+    );
+    expect(r.level).toBe('error');
+    expect(r.text).toContain(
+      `WAL segments dropped under disk pressure: ${WAL(12)}..${WAL(14)}, a restore across them stops at the gap; take a fresh base backup`,
+    );
+    // The log lines for those same drops are not counted a second time.
+    expect(r.text).not.toContain('3 WAL segments dropped');
+  });
+
+  it('with the gap record, overwrite refusals in the log still show', () => {
+    const r = backupHealthRow(
+      input({
+        walGap: { count: 1, first: WAL(12), last: WAL(12) },
+        walFailures: { count: 3, overwrite: 2, lastAt: new Date(NOW - 60_000), since: null },
+      }),
+    );
+    expect(r.text).toContain(`WAL segments dropped under disk pressure: ${WAL(12)},`);
+    expect(r.text).toContain('2 WAL segments dropped in 24h');
   });
 
   it('a drop newer than the newest base stays red even after archiving recovered', () => {
@@ -220,6 +269,10 @@ function deps(over: Record<string, unknown> = {}) {
         calls.ssh.push(ip);
         return { count: 0, lastAt: null, since: null };
       },
+      readWalGap: async (ip: string) => {
+        calls.ssh.push(ip);
+        return null;
+      },
 
       lastJob: async () => null,
       credentialVars: () => 'HCLOUD_S3_ACCESS_KEY and HCLOUD_S3_SECRET_KEY',
@@ -261,7 +314,7 @@ describe('checkBackupHealth', () => {
     );
   });
 
-  it('stale last-archived WAL and a WAL_ARCHIVE_FAILED count surface in the row', async () => {
+  it('stale last-archived WAL and a dropped-segment count surface in the row', async () => {
     const { deps: d } = deps({
       runOnPrimary: async () => `4000|${WAL(10)}|${WAL(20)}|f`,
       countWalFailures: async () => ({ count: 7, lastAt: null, since: null }),
@@ -269,7 +322,31 @@ describe('checkBackupHealth', () => {
     const r = await checkBackupHealth('prod', composeHa(), 'proj', d);
     expect(r?.level).toBe('error');
     expect(r?.text).toContain('segments pending');
-    expect(r?.text).toContain('7 WAL_ARCHIVE_FAILED in 24h');
+    expect(r?.text).toContain('7 WAL segments dropped in 24h');
+  });
+
+  it('the gap record is read from the role primary and turns the row red', async () => {
+    const { deps: d, calls } = deps({
+      readWalGap: async (ip: string) => {
+        calls.ssh.push(ip);
+        return { count: 1, first: WAL(5), last: WAL(5) };
+      },
+    });
+    const r = await checkBackupHealth('prod', composeHa(), 'proj', d);
+    expect(r?.level).toBe('error');
+    expect(r?.walGap).toEqual({ count: 1, first: WAL(5), last: WAL(5) });
+    expect(calls.ssh.every((ip) => ip === '10.0.0.1')).toBe(true);
+  });
+
+  it('an unreadable gap record is yellow unknown, never green', async () => {
+    const { deps: d } = deps({
+      readWalGap: async () => {
+        throw new Error('exec failed');
+      },
+    });
+    const r = await checkBackupHealth('prod', composeHa(), 'proj', d);
+    expect(r?.level).toBe('warn');
+    expect(r?.text).toContain('WAL gap record unknown (exec failed)');
   });
 
   it('a probe that throws is reported in the row, not thrown', async () => {
@@ -307,23 +384,36 @@ describe('parsers', () => {
     expect(parseArchiverRow('')).toBeNull();
   });
 
-  it('parseWalFailureLog counts drops, finds the newest, labels short coverage', () => {
+  it('parseWalFailureLog counts drops (not held retries), finds the newest, labels short coverage', () => {
     const now = Date.parse('2026-10-21T12:00:00Z');
     const out = parseWalFailureLog(
       [
         'STARTED=2026-10-21T09:00:00Z',
-        'db-1  | 2026-10-21T10:00:00.5Z WAL_ARCHIVE_FAILED: a',
-        'db-1  | 2026-10-21T11:00:00Z WAL_ARCHIVE_FAILED: b',
+        'db-1  | 2026-10-21T10:00:00.5Z WAL_ARCHIVE_DROPPED: a',
+        // A held segment is retried by postgres: pg_stat_archiver reports it.
+        'db-1  | 2026-10-21T10:30:00Z WAL_ARCHIVE_FAILED: wal-g wal-push x failed after 3 attempts; keeping the segment, postgres retries it',
+        'db-1  | 2026-10-21T11:00:00Z WAL_ARCHIVE_OVERWRITE_REFUSED: b',
       ].join('\n'),
       { now },
     );
     expect(out.count).toBe(2);
+    expect(out.overwrite).toBe(1);
     expect(out.lastAt?.toISOString()).toBe('2026-10-21T11:00:00.000Z');
     expect(out.since?.toISOString()).toBe('2026-10-21T09:00:00.000Z');
     expect(
       parseWalFailureLog('STARTED=2026-10-21T09:00:00Z', { now, previousRead: true }).since,
     ).toBeNull();
     expect(parseWalFailureLog('STARTED=2026-10-01T09:00:00Z', { now }).since).toBeNull();
+  });
+
+  it('parseWalGapRecord reads the first and last dropped segment, needs the read sentinel', () => {
+    expect(parseWalGapRecord('VC_OK\n')).toBeNull();
+    expect(
+      parseWalGapRecord(
+        `${WAL(14)} 2026-10-21T10:02:00Z\n${WAL(12)} 2026-10-21T10:00:00Z\n${WAL(13)} 2026-10-21T10:01:00Z\nVC_OK\n`,
+      ),
+    ).toEqual({ count: 3, first: WAL(12), last: WAL(14) });
+    expect(() => parseWalGapRecord(`${WAL(12)} 2026-10-21T10:00:00Z\n`)).toThrow(/unreadable/);
   });
 });
 
@@ -347,6 +437,15 @@ describe('compose scheduled backup log', () => {
     expect(r).toMatchObject({ failed: true, retentionFailed: false });
     expect(r?.detail).toBe('boom AWS_SECRET_ACCESS_KEY=<redacted> fail');
     expect(r?.detail).not.toContain('abc123');
+  });
+  it('redacts bearer tokens and credentials in URLs too', () => {
+    const r = parseComposeBackupLog(
+      'Started at x\ncurl -H Authorization: Bearer eyJhbGciOi.tok https://ak:sk123@s3.example.com/b fail\n__RUNNING__=0',
+    );
+    expect(r?.detail).not.toContain('eyJhbGciOi.tok');
+    expect(r?.detail).not.toContain('sk123');
+    expect(r?.detail).toContain('Bearer <redacted>');
+    expect(r?.detail).toContain('https://<redacted>@s3.example.com/b');
   });
   it('a block still running is not a failure', () => {
     expect(parseComposeBackupLog('Started at x\nRetain: 30\n__RUNNING__=1')).toBeNull();
@@ -376,7 +475,8 @@ describe('--json', () => {
       level: 'ok',
       lineage: SYSID,
       baseCount: 1,
-      walArchiveFailures24h: 0,
+      walSegmentsDropped24h: 0,
+      walGap: null,
     });
     expect(readFileSync(join(__dirname, '../../../src/status.js'), 'utf8')).toContain(
       'JSON.stringify(allData',
@@ -411,6 +511,11 @@ describe('census: backup reads take their target from the recorded primary/linea
   it('the listing is read live from the recorded lineage, never resolved or by bare prefix', () => {
     expect(src).toMatch(/readBases\(\{[^}]*live: true/s);
     expect(src).not.toMatch(/walgPrefixFor|listBaseBackups\(|listLineages/);
+  });
+
+  it('a compose backup in progress is read from its lock, not a process-name match', () => {
+    expect(src).not.toContain('pgrep');
+    expect(src).toContain('flock -n /tmp/vibecarbon-backup.lock true');
   });
 
   it('checkBackupHealth( is the only backup read in status.js', () => {

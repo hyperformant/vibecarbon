@@ -1,19 +1,22 @@
 #!/bin/bash
 # Fault-tolerant archive_command for Postgres + wal-g.
 #
-# Standard archive_command (`wal-g wal-push %p`) blocks WAL recycling until it
-# succeeds. If wal-g fails for any reason (S3 outage, bad credentials, bucket
-# missing, network), pg_wal grows unbounded — combined with archive_timeout
-# this fills the disk in days even on an idle DB.
-#
 # This wrapper:
 #   1. Tries `wal-g wal-push` with $RETRIES attempts and exponential backoff.
-#   2. On final failure, logs loudly to stderr (visible in the db container's
-#      logs) and exits 0 so PG can recycle the segment. PITR coverage degrades
-#      for the failed segment; the database stays up.
-#   3. Refuses (exit 1) on a node a failover retired: its PGDATA carries the
+#   2. On final failure, logs WAL_ARCHIVE_FAILED to stderr (the db container's
+#      logs) and exits 1: postgres keeps the segment and retries it, and
+#      pg_stat_archiver's failed_count / last_failed_time show the failure
+#      (vibecarbon status turns red). No segment is lost to a bucket outage.
+#   3. Drops a segment (exit 0) only under disk pressure: when the pg_wal
+#      filesystem has less than 10% or less than 2 GiB free, a held segment
+#      would take the database down with the disk. It logs WAL_ARCHIVE_DROPPED
+#      and appends `<segment> <UTC time>` to $PGDATA/vibecarbon-wal-gap, the
+#      durable record vibecarbon status reads (a restore across a dropped
+#      segment stops at it). The next pushed base backup clears the entries
+#      older than itself (backup/compose-backup.sh, the k8s backup CronJob).
+#   4. Refuses (exit 1) on a node a failover retired: its PGDATA carries the
 #      vibecarbon-retired marker, or the backup prefix's fence object names
-#      its database on a newer timeline. The only non-zero exits: see below.
+#      its database on a newer timeline.
 #
 # THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR BOTH DEPLOY TIERS. compose mounts
 # it directly; k8s ships a byte-identical copy in the vibecarbon-wal-archive
@@ -21,10 +24,8 @@
 # tests/unit/deploy/walg-archive-script-parity.test.ts. Edit here, then re-run
 # that test — it prints the exact indented block to paste into the ConfigMap.
 #
-# Trade-off: a persistent archive outage means a gap in your PITR chain. The
-# alternative — letting WAL fill the disk and taking the DB offline — is worse
-# for any SaaS template. Monitor for the "WAL_ARCHIVE_FAILED" line to detect
-# silent backup regressions.
+# Trade-off: during a bucket outage pg_wal grows until the outage ends or the
+# disk-pressure guard trips; only then is there a PITR gap, and it is recorded.
 #
 # Invoked by postgres as: wal-archive.sh <wal-file-path>
 # %p is passed by Postgres and is the absolute path to the WAL segment.
@@ -34,6 +35,8 @@ WAL_PATH="${1:?archive_command requires a WAL file path}"
 RETRIES="${WAL_ARCHIVE_RETRIES:-3}"
 SLEEP_BASE="${WAL_ARCHIVE_SLEEP:-2}"
 PGDATA_DIR="${PGDATA:-/var/lib/postgresql/data}"
+# The durable record of segments dropped under disk pressure (see above).
+WAL_GAP_FILE="${PGDATA_DIR}/vibecarbon-wal-gap"
 # The wal-g binary. WAL_ARCHIVE_WALG exists for the script tests only (a stub
 # in place of the real binary); nothing in a deploy sets it.
 WALG="${WAL_ARCHIVE_WALG:-/usr/local/bin/wal-g}"
@@ -41,8 +44,8 @@ WALG="${WAL_ARCHIVE_WALG:-/usr/local/bin/wal-g}"
 # RETIRED-NODE FENCE: a failover retired this node (the old primary), and the
 # CLI placed this marker in PGDATA when it next reached it. Its WAL belongs to a
 # timeline the promoted node has left, and the backup prefix is the promoted
-# node's now. This is the one exit that is not 0, on purpose: a refused push
-# fails loudly (postgres logs every retry) rather than reading as a skip. The
+# node's now. It exits 1 on purpose: a refused push fails loudly (postgres
+# logs every retry) rather than reading as a skip. The
 # reseed that rebuilds this node as the standby replaces PGDATA and the marker
 # with it. Checked first, before any other guard, psql or wal-g.
 if [ -f "${PGDATA_DIR}/vibecarbon-retired" ]; then
@@ -181,7 +184,27 @@ while [ "$attempt" -le "$RETRIES" ]; do
     attempt=$((attempt + 1))
 done
 
-# All retries exhausted. Loud, greppable log line so monitoring/alerting can
-# catch this — but exit 0 so PG recycles the segment instead of pinning it.
-echo "WAL_ARCHIVE_FAILED: wal-g wal-push '$WAL_PATH' failed after $RETRIES attempts; allowing PG to recycle (PITR gap for this segment)" >&2
-exit 0
+# All retries exhausted. Hold the segment (exit 1: postgres retries it, and
+# pg_stat_archiver shows the failure) unless the pg_wal filesystem is nearly
+# full: under 10% or under 2 GiB free. A full disk stops the database, which
+# is worse than the PITR gap a dropped segment leaves, so only then is the
+# segment given up, with a durable record. Free space that cannot be read
+# holds the segment. VC_WAL_GUARD_FREE_BYTES and VC_WAL_GUARD_TOTAL_BYTES
+# exist for the script tests only.
+wal_fs="$(df -Pk "${PGDATA_DIR}/pg_wal" 2>/dev/null | awk 'NR == 2 { print $2, $4 }')"
+total_kb="${wal_fs%% *}"
+free_kb="${wal_fs##* }"
+if [[ "${VC_WAL_GUARD_TOTAL_BYTES:-}" =~ ^[0-9]+$ ]]; then
+    total_kb=$((VC_WAL_GUARD_TOTAL_BYTES / 1024))
+fi
+if [[ "${VC_WAL_GUARD_FREE_BYTES:-}" =~ ^[0-9]+$ ]]; then
+    free_kb=$((VC_WAL_GUARD_FREE_BYTES / 1024))
+fi
+if [[ "$total_kb" =~ ^[0-9]+$ && "$free_kb" =~ ^[0-9]+$ ]] \
+    && { [ "$free_kb" -lt $((2 * 1024 * 1024)) ] || [ "$((free_kb * 10))" -lt "$total_kb" ]; }; then
+    printf '%s %s\n' "$WAL_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WAL_GAP_FILE"
+    echo "WAL_ARCHIVE_DROPPED: wal-g wal-push '$WAL_PATH' failed after $RETRIES attempts and pg_wal has $((free_kb / 1024)) MiB free (under 10% or 2 GiB): dropping it so the disk does not fill (PITR gap, recorded in $WAL_GAP_FILE)" >&2
+    exit 0
+fi
+echo "WAL_ARCHIVE_FAILED: wal-g wal-push '$WAL_PATH' failed after $RETRIES attempts; keeping the segment, postgres retries it" >&2
+exit 1

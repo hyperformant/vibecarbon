@@ -404,6 +404,60 @@ describe('the backup CronJob prints the same markers', () => {
 });
 
 /**
+ * wal-archive.sh drops a segment only under disk pressure, and appends it to
+ * $PGDATA/vibecarbon-wal-gap. A pushed base covers every drop recorded before
+ * it started, so those entries go; one recorded during the push stays.
+ */
+describe('a pushed base clears the WAL gap record entries older than itself', () => {
+  const OLD_ENTRY = '000000010000000000000003 2020-01-01T00:00:00Z';
+  const FUTURE_ENTRY = '000000010000000000000009 2999-01-01T00:00:00Z';
+  const withGap = (name: string, lines: string[] | null) => {
+    const pgdata = join(work, `gap-${name}`);
+    mkdirSync(pgdata, { recursive: true });
+    if (lines) writeFileSync(join(pgdata, 'vibecarbon-wal-gap'), `${lines.join('\n')}\n`);
+    const read = () => {
+      try {
+        return readFileSync(join(pgdata, 'vibecarbon-wal-gap'), 'utf-8');
+      } catch {
+        return null;
+      }
+    };
+    return { env: { PGDATA: pgdata }, read };
+  };
+
+  it.each([
+    ['compose', (n: string, o: Stub, e: Record<string, string>) => runCompose(n, o, e)],
+    ['k8s CronJob', (n: string, o: Stub, e: Record<string, string>) => runCron(n, o, e)],
+  ])('%s: only older entries: the record goes', (t, run) => {
+    const g = withGap(`old-${t}`, [OLD_ENTRY]);
+    const r = run(`gap-old-${t}`, {}, g.env);
+    expect(r.status, r.stderr).toBe(0);
+    expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
+    expect(g.read()).toBeNull();
+  });
+
+  it.each([
+    ['compose', (n: string, o: Stub, e: Record<string, string>) => runCompose(n, o, e)],
+    ['k8s CronJob', (n: string, o: Stub, e: Record<string, string>) => runCron(n, o, e)],
+  ])('%s: an entry from after the push started stays', (t, run) => {
+    const g = withGap(`mixed-${t}`, [OLD_ENTRY, FUTURE_ENTRY]);
+    const r = run(`gap-mixed-${t}`, {}, g.env);
+    expect(r.status, r.stderr).toBe(0);
+    expect(g.read()).toBe(`${FUTURE_ENTRY}\n`);
+  });
+
+  it.each([
+    ['compose', (n: string, o: Stub, e: Record<string, string>) => runCompose(n, o, e)],
+    ['k8s CronJob', (n: string, o: Stub, e: Record<string, string>) => runCron(n, o, e)],
+  ])('%s: a failed push leaves the record as it was', (t, run) => {
+    const g = withGap(`fail-${t}`, [OLD_ENTRY]);
+    const r = run(`gap-fail-${t}`, { pushFails: true }, g.env);
+    expect(r.status).toBe(1);
+    expect(g.read()).toBe(`${OLD_ENTRY}\n`);
+  });
+});
+
+/**
  * Retention is by time and keeps the full window: the target is the newest base
  * that finished at or before now minus RETAIN days, and `wal-g delete before
  * FIND_FULL <that base>` keeps it and its WAL. No base that old: no delete, and

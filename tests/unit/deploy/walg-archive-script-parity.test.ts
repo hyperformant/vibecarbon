@@ -128,17 +128,15 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
     }
   });
 
-  it('every exit but the two retired-node refusals is exit 0 — a non-zero archive_command fills the disk', () => {
-    const exits = composeBody.match(/^\s*exit \d+/gm) ?? [];
-    expect(exits.length).toBeGreaterThanOrEqual(5); // retired, role guard, recovery gate, push success, exhausted
-    // The one deliberate exception (HA-correctness R7): a node a failover
-    // retired must refuse loudly rather than skip, and pg_wal growth on a node
-    // awaiting its rebuild is the lesser harm than its WAL in the new primary's
-    // prefix. It is the first guard and the only exit 1.
-    // The second (final review I1): the backup-prefix fence object names this
-    // database on a newer timeline, the same retired node seen from S3.
-    const nonZero = exits.filter((e) => e.trim() !== 'exit 0');
-    expect(nonZero.map((e) => e.trim())).toEqual(['exit 1', 'exit 1']);
+  // Final review ruling (e): a segment given up on a failing bucket is a
+  // silent PITR gap, the worst outcome for a backup. Exhausted retries now
+  // hold the segment (exit 1: postgres keeps it and retries, and
+  // pg_stat_archiver turns status red); only disk pressure drops one, with a
+  // durable record. The old pin (every exhausted path exits 0) was that bug.
+  it('exit codes: refusals and a held segment exit 1; only the disk-pressure drop and the overwrite refusal give a segment up', () => {
+    const exits = (composeBody.match(/^\s*exit \d+/gm) ?? []).map((e) => e.trim());
+    // retired, the walg-env source (|| exit 1, not a line of its own), fence, final hold
+    expect(exits.filter((e) => e === 'exit 1')).toHaveLength(3);
     expect(composeBody).toMatch(/backup prefix fenced to another primary[^\n]*\n\s*exit 1\n/);
     expect(composeBody.indexOf('vibecarbon-fence.json')).toBeLessThan(
       composeBody.indexOf('wal-push "$WAL_PATH"'),
@@ -149,9 +147,9 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
     expect(composeBody.indexOf('vibecarbon-retired')).toBeLessThan(
       composeBody.indexOf('WALG_ROLE:-primary'),
     );
-    // Including the one that runs after all retries are exhausted, which is the
-    // whole reason this wrapper exists rather than a bare `wal-g wal-push %p`.
-    expect(composeBody).toMatch(/WAL_ARCHIVE_FAILED[\s\S]*\nexit 0\n?$/);
+    // The script ends holding the segment.
+    expect(composeBody).toMatch(/WAL_ARCHIVE_FAILED[^\n]*keeping the segment[^\n]*\nexit 1\n?$/);
+    expect(composeBody).toMatch(/WAL_ARCHIVE_DROPPED[^\n]*\n\s*exit 0\n/);
   });
 
   it('the ConfigMap header no longer merely ASKS for sync — it names the pin', () => {
@@ -245,7 +243,8 @@ describe('wal-archive.sh with no backup target', () => {
 
   it('a real target still goes through the wal-g attempts (control)', () => {
     const r = run('s3://bucket/backups/acme');
-    expect(r.status).toBe(0);
+    // No wal-g here, so every attempt fails and the segment is held.
+    expect(r.status).toBe(1);
     expect(r.stderr).not.toContain('no backup target');
     expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
   });
@@ -368,5 +367,96 @@ describe('wal-archive.sh on an overwrite refusal', () => {
     ).toHaveLength(1);
     expect(r.stderr).toMatch(/WAL_ARCHIVE_OVERWRITE_REFUSED: [^\n]*000000010000000000000001/);
     expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
+  });
+});
+
+// The exhausted-retry policy, run for real with bash against a wal-g stub that
+// always fails. The disk numbers come from the test-only overrides (the
+// Docker test runs the same paths on the db image's busybox df).
+describe('wal-archive.sh when every push fails', () => {
+  const GiB = 1024 ** 3;
+  const SEG = '000000010000000000000007';
+  function setup(name: string) {
+    const bin = controldataBin(`exhausted-${name}`);
+    writeFileSync(
+      join(bin, 'wal-g'),
+      [
+        '#!/bin/sh',
+        'if [ "$1" = st ]; then echo "object not found in storage" >&2; exit 1; fi',
+        'echo "ERROR: dial tcp: connection refused" >&2',
+        'exit 1',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'wal-g'), 0o755);
+    const pgdata = join(work, `pgdata-${name}`);
+    mkdirSync(join(pgdata, 'pg_wal'), { recursive: true });
+    writeFileSync(join(pgdata, 'pg_wal', SEG), 'x');
+    const run = (env: Record<string, string> = {}) =>
+      spawnSync('bash', [`${repoRoot}${COMPOSE_SCRIPT}`, join(pgdata, 'pg_wal', SEG)], {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
+          WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+          WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
+          WAL_ARCHIVE_RETRIES: '2',
+          WAL_ARCHIVE_SLEEP: '0',
+          PGDATA: pgdata,
+          ...env,
+        },
+        timeout: 10_000,
+      });
+    const gap = () => {
+      try {
+        return readFileSync(join(pgdata, 'vibecarbon-wal-gap'), 'utf-8');
+      } catch {
+        return null;
+      }
+    };
+    return { run, gap, pgdata };
+  }
+
+  it('room on the disk: exit 1 (postgres keeps the segment and retries), no gap record', () => {
+    const { run, gap } = setup('room');
+    const r = run({
+      VC_WAL_GUARD_TOTAL_BYTES: String(100 * GiB),
+      VC_WAL_GUARD_FREE_BYTES: String(50 * GiB),
+    });
+    expect(r.status, r.stderr).toBe(1);
+    expect(r.stderr).toMatch(
+      /WAL_ARCHIVE_FAILED: [^\n]*failed after 2 attempts; keeping the segment/,
+    );
+    expect(r.stderr).not.toContain('WAL_ARCHIVE_DROPPED');
+    expect(gap()).toBeNull();
+  });
+
+  it.each([
+    ['under 2 GiB free', 100 * GiB, 1.5 * GiB],
+    ['under 10% free', 100 * GiB, 9 * GiB],
+  ])(
+    '%s: exit 0, WAL_ARCHIVE_DROPPED, and the segment appended to the gap record',
+    (_l, total, free) => {
+      const { run, gap } = setup(`pressure-${free}`);
+      const env = {
+        VC_WAL_GUARD_TOTAL_BYTES: String(total),
+        VC_WAL_GUARD_FREE_BYTES: String(Math.floor(free)),
+      };
+      const r = run(env);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stderr).toMatch(/WAL_ARCHIVE_DROPPED: [^\n]*under 10% or 2 GiB/);
+      expect(r.stderr).not.toContain('WAL_ARCHIVE_FAILED');
+      expect(gap()).toMatch(new RegExp(`^${SEG} \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z\\n$`));
+      // A second drop appends.
+      expect(run(env).status).toBe(0);
+      expect(gap()?.trim().split('\n')).toHaveLength(2);
+    },
+  );
+
+  it('free space it cannot read holds the segment', () => {
+    const { run, gap } = setup('unreadable');
+    const r = run({ PGDATA: '/nonexistent' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
+    expect(gap()).toBeNull();
   });
 });
