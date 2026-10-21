@@ -157,7 +157,11 @@ async function run(opts: RunOpts = {}) {
   const {
     envConfig = baseEnvConfig(),
     primaryReachable = false,
-    standbyState = replica(),
+    // A dead primary stops streaming; one still streaming fresh WAL is alive
+    // (R8, classify-failover.test.ts), so unplanned rows default to no receiver.
+    standbyState = opts.primaryReachable
+      ? replica()
+      : replica({ receiverStatus: null, lastMsgAgeS: null }),
     seededState = replica(),
     primaryState = primaryDb(),
     promoteVerdict = 'promoted',
@@ -286,6 +290,10 @@ async function run(opts: RunOpts = {}) {
       order.push('swap');
       captured.swapOverride = o?.override;
     },
+    reconcileRetired: async () => {
+      order.push('fenceRetired');
+      return { fenced: [], unreachable: [] };
+    },
   };
   const projectConfig = { projectName: 'myapp', environments: { prod: envConfig } };
   const parsed = { yes: true, dryRun: false, ...flags };
@@ -318,6 +326,7 @@ const MUTATIONS = [
   'promote',
   'fence',
   'swap',
+  'fenceRetired',
 ];
 function expectNoMutation(order: string[]) {
   for (const step of MUTATIONS) expect(order, `refusal reached ${step}`).not.toContain(step);
@@ -403,7 +412,11 @@ describe('failoverComposeHA state matrix', () => {
 
   it('a standby holding a different database refuses', async () => {
     const { order, thrown } = await run({
-      standbyState: replica({ systemIdentifier: OTHER_SYSID }),
+      standbyState: replica({
+        systemIdentifier: OTHER_SYSID,
+        receiverStatus: null,
+        lastMsgAgeS: null,
+      }),
     });
     expect(thrown?.message).toMatch(/different database/);
     expectNoMutation(order);

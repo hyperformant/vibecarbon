@@ -30,6 +30,10 @@ const SYSID = '7311111111111111111';
 const h = vi.hoisted(() => ({
   calls: [] as Array<{ ip: string; command: string; input?: string }>,
   nodes: {} as Record<string, { inRecovery: boolean | null; receiver: string }>,
+  /** The retirement fence on each node (retired-fence.js): markers and running writers. */
+  fence: {} as Record<string, { host: boolean; db: boolean; running: boolean }>,
+  /** The retired node stops answering the fence clear. */
+  clearFails: false,
   reseedFails: false,
   dnsAnswer: [] as string[],
   disk: { config: null as Record<string, unknown> | null },
@@ -80,11 +84,43 @@ function respond(ip: string, command: string, input?: string): string | false {
   if (command.includes('SHOW hba_file')) return '/var/lib/postgresql/data/pg_hba.conf';
   if (command.includes('IPAM')) return '172.19.0.0/16 ';
   if (command.includes('.Mounts')) return '/var/lib/docker/volumes/myapp_db_data/_data';
-  if (command.includes('docker container inspect')) return 'STOPPED myapp-app\nFENCE_DONE';
+  if (!h.fence[ip]) h.fence[ip] = { host: false, db: false, running: true };
+  const fence = h.fence[ip];
+  if (command.includes('PROBE_DONE')) {
+    return [
+      `HOST_MARKER=${fence.host ? 1 : 0}`,
+      'WALG_ROLE=primary',
+      `DB_MARKER=${fence.db ? 'present' : 'absent'}`,
+      ...(fence.running ? ['RUNNING myapp-app'] : []),
+      'PROBE_DONE',
+    ].join('\n');
+  }
+  if (command.includes('rm -f') && command.includes('.vibecarbon-retired')) {
+    if (h.clearFails) return false;
+    fence.host = false;
+    fence.db = false;
+    h.events.push(`unfence:${ip}`);
+    return 'CLEARED';
+  }
+  if (command.includes('touch') && command.includes('/.vibecarbon-retired')) {
+    fence.host = true;
+    h.events.push(`fence:${ip}`);
+    return 'OK';
+  }
+  if (command.includes('touch') && command.includes('/vibecarbon-retired')) {
+    fence.db = true;
+    return 'OK';
+  }
+  if (command.includes('docker container inspect')) {
+    fence.running = false;
+    return 'STOPPED myapp-app\nFENCE_DONE';
+  }
   if (input?.includes('pg_basebackup'))
     return h.reseedFails ? 'pg_basebackup: error' : 'COMPOSE_RESEED_STAGED';
   if (input?.includes('RESEED_SWAPPED')) {
     h.nodes[ip] = { inRecovery: true, receiver: 'streaming' };
+    // The reseed replaces PGDATA, and the PGDATA marker with it.
+    fence.db = false;
     return 'RESEED_SWAPPED';
   }
   return '';
@@ -295,6 +331,8 @@ beforeEach(() => {
   h.upStacks.length = 0;
   h.reseedFails = false;
   h.dnsAnswer = [PROMOTED_IP];
+  h.fence = {};
+  h.clearFails = false;
   h.nodes = {
     [PROMOTED_IP]: { inRecovery: false, receiver: '' },
     [RETIRED_IP]: { inRecovery: false, receiver: '' },
@@ -533,6 +571,39 @@ describe('reconverge effects', () => {
       name: 'myapp-prod-primary',
       ip: RETIRED_IP,
     });
+  });
+
+  it('(g) the retired node is fenced before its reseed, and the fence comes off only in finalize', async () => {
+    await runReconverge(baseCtx());
+    const ev = h.events;
+    const fenced = ev.indexOf(`fence:${RETIRED_IP}`);
+    const unfenced = ev.indexOf(`unfence:${RETIRED_IP}`);
+    expect(fenced).toBeGreaterThanOrEqual(0);
+    expect(fenced).toBeLessThan(ev.indexOf(`basebackup:${RETIRED_IP}`));
+    // Off once it streams (verify-streaming ran) and right before the save that
+    // records the reconverge complete.
+    expect(unfenced).toBeGreaterThan(ev.indexOf(`basebackup:${RETIRED_IP}`));
+    expect(unfenced).toBeLessThan(ev.indexOf('save:deployed'));
+    expect(h.fence[RETIRED_IP]).toMatchObject({ host: false, db: false });
+    // The promoted node is never fenced.
+    expect(ev).not.toContain(`fence:${PROMOTED_IP}`);
+    expect(ev).not.toContain(`unfence:${PROMOTED_IP}`);
+  });
+
+  it('(g) a run that fails before streaming leaves the retired node fenced', async () => {
+    h.reseedFails = true;
+    await expect(runReconverge(baseCtx())).rejects.toThrow();
+    expect(h.events).toContain(`fence:${RETIRED_IP}`);
+    expect(h.events).not.toContain(`unfence:${RETIRED_IP}`);
+    expect(h.fence[RETIRED_IP].host).toBe(true);
+  });
+
+  it('(g) a marker that cannot be cleared keeps the reconverge incomplete', async () => {
+    h.clearFails = true;
+    const ctx = baseCtx();
+    await runReconverge(ctx);
+    expect(ctx.reconvergeComplete).toBe(false);
+    expect(envOnDisk().lastFailover).toBe('2026-10-20T12:00:00.000Z');
   });
 
   it('refuses the reseed when its target reads out of recovery while serving DNS, before any write', async () => {

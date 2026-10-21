@@ -239,6 +239,7 @@ async function runK8s(primaryReachable: boolean) {
     gate: async () => {},
     promoteIssuer: async () => ({ patched: [] }),
     swapRoles: () => {},
+    reconcileRetired: async () => ({ fenced: [], unreachable: [] }),
   };
   let flippedTo: string | null = null;
   const strategy = {
@@ -330,6 +331,7 @@ async function runCompose(primaryReachable: boolean) {
     },
     confirmUnproven: async () => {},
     swapRoles: () => {},
+    reconcileRetired: async () => ({ fenced: [], unreachable: [] }),
   };
   await failoverComposeHA(
     'prod',

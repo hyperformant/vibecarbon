@@ -151,7 +151,10 @@ const envConfig = {
   ],
 };
 const projectConfig = { projectName: 'myapp', environments: { prod: envConfig } };
-const parsed = { yes: true, dryRun: false };
+// The primary does not answer pg_isready here while the standby still streams
+// from it, which R8 refuses as "alive behind a partition" (classify-failover
+// .test.ts); -force-unplanned is the operator saying it is gone anyway.
+const parsed = { yes: true, dryRun: false, forceUnplanned: true };
 const tracker = { spinner: () => ({ start() {}, stop() {} }) };
 
 beforeEach(() => {

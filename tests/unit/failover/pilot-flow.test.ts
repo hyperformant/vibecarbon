@@ -533,12 +533,14 @@ async function runFailoverHA(opts: RunOpts) {
     isPrimaryReady: async () => primaryReachable,
     // A proven replica: the matrix in failover-state-matrix.test.ts covers the
     // refusals and the journal resume.
+    // A dead primary stops streaming to the standby; one still streaming is
+    // alive (R8), which classify-failover.test.ts covers.
     readStandbyState: async () => ({
       inRecovery: true,
       systemIdentifier: '7412345678901234567',
       replayLsn: '0/3000060',
-      receiverStatus: 'streaming',
-      lastMsgAgeS: 1,
+      receiverStatus: primaryReachable ? 'streaming' : null,
+      lastMsgAgeS: primaryReachable ? 1 : null,
     }),
     readPrimaryState: async () => ({
       inRecovery: false,
@@ -617,6 +619,10 @@ async function runFailoverHA(opts: RunOpts) {
       captured.swapEnv = envName;
       order.push('saveConfig');
     },
+    reconcileRetired: async () => {
+      order.push('fenceRetired');
+      return { fenced: [], unreachable: [] };
+    },
   };
 
   let flippedTo: string | null = null;
@@ -674,6 +680,7 @@ describe('failoverHA step order', () => {
       'apiProbe',
       'dns',
       'saveConfig',
+      'fenceRetired',
     ]);
     // The wal-g write-guard moves onto the promoted cluster BETWEEN promotion
     // and scale-up: the env change rolls the db pod, and the app tier is still
@@ -725,8 +732,9 @@ describe('failoverHA step order', () => {
     expect(order).toContain('saveConfig');
     // …but the command must not report success.
     expect((thrown as Error)?.message).toMatch(/FAILOVER COMPLETED, BACKUPS DID NOT/);
-    // The throw is TERMINAL: it comes after the persisted role swap, never before.
-    expect(order[order.length - 1]).toBe('saveConfig');
+    // The throw is TERMINAL: it comes after the persisted role swap (and the
+    // retired side's fence that follows it), never before.
+    expect(order.slice(-2)).toEqual(['saveConfig', 'fenceRetired']);
   });
 
   it('a healthy wal-g write-guard move leaves the failover clean (no throw)', async () => {
@@ -806,7 +814,8 @@ describe('failoverHA step order', () => {
 
   it('persists the role swap only at the very end (after dns)', async () => {
     const { order, captured } = await runFailoverHA({ primaryReachable: true });
-    expect(order[order.length - 1]).toBe('saveConfig');
+    // Then only the retired side's fence, which needs the swap saved.
+    expect(order.slice(-2)).toEqual(['saveConfig', 'fenceRetired']);
     expect(order.indexOf('saveConfig')).toBeGreaterThan(order.indexOf('dns'));
     expect(captured.swapEnv).toBe('e4');
   });

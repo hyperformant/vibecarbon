@@ -44,11 +44,12 @@ import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compo
 import { workingTreeDirty } from './delta.js';
 import { requireDnsSetup } from './dns-result.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
-import { haSeedRecord, readReplicaState } from './failover-guard.js';
+import { assertNoFailoverInFlight, haSeedRecord, readReplicaState } from './failover-guard.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { k8sPsqlRunner } from './replication.js';
+import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retired-fence.js';
 import { envS3Record } from './s3-record.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
@@ -539,6 +540,10 @@ export async function executeDeployment(args, gatheredConfig) {
 
   const { deployMode } = config;
   const tier = resolveTier({ deployMode, ha: config.ha });
+  // A failover journal means the roles may be mid-swap, and this deploy's final
+  // save rebuilds `ha` and would drop the journal its rerun resumes from. Every
+  // HA tier refuses, before any work, and names the command that finishes it.
+  if (isHaTier(tier)) assertNoFailoverInFlight({ environment, envConfig });
   // COMPOSE-HA RECONVERGE (R12), classified first thing after the tier is
   // known and BEFORE any mutation. `envConfig` here is the environment's
   // persisted config as it stood before this invocation, so it still carries
@@ -645,6 +650,15 @@ export async function executeDeployment(args, gatheredConfig) {
   );
   if (accessResult.added && accessResult.fromEnv) {
     p.log.info(`Bootstrapped operator CIDRs from ALLOWED_SSH_IPS env var: ${accessResult.cidr}`);
+  }
+
+  // The retirement fence (R7), first thing once SSH is let in: a side a past
+  // failover retired that has come back refuses its backups and serves nothing
+  // before this deploy touches anything. Idempotent; an unreachable side is a
+  // warning (the rebuild below reaches it, or the next command does).
+  const retiredAtEntry = isHaTier(tier) ? retiredSides({ envConfig, tier }) : [];
+  if (retiredAtEntry.length > 0) {
+    await reconcileRetiredFence({ environment, envConfig, projectConfig, tier });
   }
 
   // The reconverge readiness reads (R12): after the operator-IP check, so an
@@ -1542,6 +1556,20 @@ export async function executeDeployment(args, gatheredConfig) {
     await perfAsync('deploy.ha.k8s.full', () =>
       runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
     );
+    // The retired cluster is the standby this deploy just rebuilt and gated on
+    // streaming (or finalized degraded under -allow-degraded): this deploy
+    // stamps deployedAt, so the fence comes off here, before that save. A
+    // marker left behind would make it refuse its own backups once a later
+    // failover promotes it, so a failed clear fails the deploy (the env stays
+    // swapped and the rerun clears it).
+    if (retiredAtEntry.length > 0 && k8sHaCtx.standbyResult?.masterIp) {
+      await clearRetiredFence({
+        tier,
+        ip: k8sHaCtx.standbyResult.masterIp,
+        projectName: projectConfig.projectName,
+        environment,
+      });
+    }
     deployResult = {
       primary: k8sHaCtx.primaryResult,
       standby: k8sHaCtx.standbyResult,

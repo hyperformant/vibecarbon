@@ -28,7 +28,9 @@ import {
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import {
+  assertFailoverClassified,
   assertFailoverPreconditions,
+  classifyFailover,
   clearFailoverJournal,
   confirmUnprovenFailover,
   dnsDidNotMessage,
@@ -55,6 +57,7 @@ import {
   unfenceDatabaseWrites,
   waitForStandbyCaughtUp,
 } from '../replication.js';
+import { reconcileRetiredFence } from '../retired-fence.js';
 import { waitForTrustedTls } from '../tls-ready.js';
 import { mergeRemoteDotenv, pinnedSshOptsString, readReplPassword } from '../utils.js';
 import {
@@ -1683,6 +1686,14 @@ export async function failoverComposeHA(
     confirmUnproven = confirmUnprovenFailover,
     swapRoles = swapComposeHaRoles,
     flipDns = flipComposeDns,
+    reconcileRetired = () =>
+      reconcileRetiredFence({
+        environment: envName,
+        envConfig: loadProjectConfig()?.environments?.[envName],
+        projectConfig,
+        tier: 'compose-ha',
+        deps: { sshKeyPath },
+      }),
   } = deps ?? {};
 
   const servers = envConfig.servers || [];
@@ -1761,6 +1772,10 @@ export async function failoverComposeHA(
     );
   }
   const standbyState = await readStandby();
+  // R8: "unreachable from here" is not "dead". A standby still streaming fresh
+  // WAL from the primary proves it alive behind a partition; refuse unless the
+  // operator passed -force-unplanned.
+  assertFailoverClassified(classifyFailover({ primaryReachable: planned, standbyState }), parsed);
   const primaryState = planned ? await readState(primaryServer.ip, sshKeyPath, remoteDir) : null;
   // Whether an earlier run left a journal: only without one can a promote this
   // run never sent prove that nothing will promote the standby.
@@ -2229,6 +2244,20 @@ export async function failoverComposeHA(
         ? envConfig?.ha?.failoverInFlight?.override
         : undefined,
   });
+  // The old primary is now the retired side: fence it if it answers (marker,
+  // every writer stopped, not just the app, WALG_ROLE=standby). One that does
+  // not is fenced by the next status, failover or deploy that reaches it,
+  // before it can push a backup.
+  // Never fails the failover: it has completed, and the terminal checks below
+  // must still report.
+  try {
+    await reconcileRetired();
+  } catch (err) {
+    p.log.warn(
+      `could not fence the retired node (${String(err?.message ?? err).split('\n')[0]}); the ` +
+        'next status, failover or deploy that reaches it fences it',
+    );
+  }
 
   if (dnsFlip.ok) p.log.success('Failover complete');
   else p.log.warn('The standby is promoted and the roles are saved, but DNS was not flipped.');

@@ -48,7 +48,6 @@ import {
   ensurePrimaryReplicationAccess,
   openWireguardPortHetznerFirewall,
   openWireguardPortUfw,
-  stopOldPrimaryWriters,
 } from '../compose/ha.js';
 import { assertReseedTargetNotServing } from '../compose/ha-role-swap.js';
 import {
@@ -69,6 +68,7 @@ import { requireDnsSetup } from '../dns-result.js';
 import { readReplicaState } from '../failover-guard.js';
 import { resolvePublicA } from '../public-dns-lookup.js';
 import { assertReplicationStreamingOrDegraded, verifyStreaming } from '../replication.js';
+import { clearRetiredFence, fenceRetiredNode } from '../retired-fence.js';
 import { envS3Record } from '../s3-record.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
 import { composeRoleEnv } from '../walg-role.js';
@@ -710,11 +710,15 @@ async function haStartComposeStack(ctx) {
  * The standby's stack on a reconverge. A standby that already reads as a
  * replica is brought up like any standby (its app-migrate finds a read-only
  * database and exits). The retired node before its reseed is NOT: its database
- * is the stale ex-primary, so its app tier would serve stale data and its
- * app-migrate would write into it (or fail on the failover's write fence). Its
- * writers are held at zero for that window only; reconvergeReplication brings
- * its stack up as a normal standby once the reseed makes it a replica, in the
- * same run (one deploy restores HA).
+ * is the stale ex-primary, so its app tier would serve stale data, its
+ * app-migrate would write into it (or fail on the failover's write fence), and
+ * its archiver and backup cron would push into the promoted node's prefix. So
+ * the retirement fence is armed on it here (retired-fence.js: markers, every
+ * writer stopped, WALG_ROLE=standby), in case the deploy's entry could not
+ * reach it. It stays armed through the reseed; reconvergeReplication brings the
+ * stack up as a normal standby once the reseed makes it a replica, and only
+ * haFinalizeConfig, after verified streaming, takes the fence off (one deploy
+ * restores HA).
  */
 async function reconvergeStandbyStack(ctx, serviceOpts) {
   const projectName = ctx.projectConfig.projectName;
@@ -725,17 +729,22 @@ async function reconvergeStandbyStack(ctx, serviceOpts) {
     ctx.standbyReconciled = true;
     return;
   }
-  const { ok, stopped } = await stopOldPrimaryWriters(standby.ip, sshKeyPath, projectName);
-  if (!ok) {
+  const fence = await fenceRetiredNode({
+    tier: 'compose-ha',
+    ip: standby.ip,
+    projectName,
+    sshKeyPath,
+  });
+  if (!fence.fenced) {
     throw new Error(
-      `could not hold the retired node's app tier at zero (${standby.ip}): its database is ` +
-        'stale until the reseed, so it must not serve. check docker on that node, then rerun ' +
-        `vibecarbon deploy ${ctx.environment}`,
+      `could not fence the retired node ${standby.ip} (missing: ${fence.missing.join(', ')}): its ` +
+        'database is stale until the reseed, so it must not serve or push backups. check docker ' +
+        `on that node, then rerun vibecarbon deploy ${ctx.environment}`,
     );
   }
   p.log.info(
-    `holding the app tier at zero on the retired node ${standby.ip}${
-      stopped.length ? ` (stopped ${stopped.join(', ')})` : ''
+    `the retired node ${standby.ip} is fenced${
+      fence.wrote.length ? ` (${fence.wrote.join(', ')})` : ''
     }: it is rebuilt as the standby below`,
   );
 }
@@ -1146,8 +1155,26 @@ async function haFinalizeConfig(ctx) {
   // step 5). Until then the env stays
   // swapped and degraded (lastFailover kept, deployedAt not stamped), so a rerun
   // resumes and failover keeps refusing.
-  const reconvergeComplete =
+  let reconvergeComplete =
     !ctx.reconverge || (!!replActive && !!ctx.systemIdentifier && !!ctx.standbyReconciled);
+  // The rebuilt standby is a proven replica: only now does the retirement fence
+  // come off (retired-fence.js). A marker it cannot prove gone keeps the
+  // reconverge incomplete, since that node would refuse its own backups once a
+  // later failover promoted it; the rerun clears it.
+  if (ctx.reconverge && reconvergeComplete) {
+    try {
+      await clearRetiredFence({
+        tier: 'compose-ha',
+        ip: standby.ip,
+        projectName,
+        environment,
+        deps: { sshKeyPath: ctx.sshKeyPath },
+      });
+    } catch (err) {
+      p.log.warn(err.message);
+      reconvergeComplete = false;
+    }
+  }
   ctx.reconvergeComplete = reconvergeComplete;
   const finalEnv = {
     ...pendingEnvConfig,

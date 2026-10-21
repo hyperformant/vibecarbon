@@ -18,6 +18,17 @@ set -e
 #   RETAIN  - Number of full base backups to keep (default: 7)
 # ============================================================================
 
+# RETIRED-NODE FENCE: a failover retired this node (the old primary), and the
+# CLI placed this marker when it next reached it. Its database is a timeline
+# the promoted node has left, and a base backup plus `delete retain` from here
+# would land in, and prune, the promoted node's backups. Refuse loudly (exit 1,
+# never a skip) before anything touches the db container. `vibecarbon deploy`
+# rebuilds this node as the standby and removes the marker once it streams.
+if [ -f .vibecarbon-retired ]; then
+  echo "retired node: backups refused (run vibecarbon deploy to rebuild it as the standby)" >&2
+  exit 1
+fi
+
 # Prevent concurrent backups (cron + a manual run racing each other).
 LOCKFILE="/tmp/vibecarbon-backup.lock"
 exec 200>"${LOCKFILE}"

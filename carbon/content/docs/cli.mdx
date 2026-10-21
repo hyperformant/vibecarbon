@@ -684,6 +684,7 @@ Behavior depends on deployment topology:
 | `-y` | Skip confirmation prompts |
 | `-dry` | Show plan without executing |
 | `-force-unproven` | Primary is dead and nothing proves the standby holds its data: promote it anyway (unplanned only) |
+| `-force-unplanned` | Your machine cannot reach the primary but the standby still sees it streaming: fail over anyway, knowing the old primary may still be serving |
 | `-allow-degraded` | Only applies together with -force-unproven (refused on its own): also accept a standby the last deploy flagged degraded |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-server-type <id>` | Worker server type override for pilot-light failover provisioning (e.g. cx33) |

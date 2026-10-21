@@ -29,6 +29,7 @@ import {
   buildStandbyReplayQuery,
   formatReplicationLagLine,
 } from './lib/deploy/replication.js';
+import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { parseDotenv } from './lib/dotenv.js';
 import { hasLegacyDotenvQuoting } from './lib/dotenv-heal.js';
@@ -1158,6 +1159,18 @@ function renderEnvironment(envName, envConfig, checks) {
       : c.success('Enabled');
     lines.push(`${c.dim('HA')}             ${haDisplay}`);
 
+    // The side a failover retired, until a deploy rebuilds it as the standby.
+    if (checks.retiredFence) {
+      const { fenced, unreachable } = checks.retiredFence;
+      const parts = [
+        ...fenced.map((ip) => `${ip} ${c.dim('fenced: refuses backups, serves nothing')}`),
+        ...unreachable.map(
+          (ip) => `${c.warning(`${ip} not fenced yet`)} ${c.dim('(does not answer)')}`,
+        ),
+      ];
+      lines.push(`${c.dim('Retired')}        ${parts.join(', ')}`);
+    }
+
     // Real replication state (finding #4) — never a hardcoded "streaming".
     if (checks.replication) {
       const r = checks.replication;
@@ -1420,6 +1433,21 @@ async function main(argv = []) {
   const envChecksPromise = Promise.allSettled(
     envEntries.map(async ([envName, envConfig]) => {
       const checks = {};
+
+      // The retirement fence first (R7): a side a past failover retired that
+      // has come back refuses its backups before anything else looks at it.
+      // Silent here (the -json stdout carries only JSON); the result is a row.
+      const haTier = haTierOf(envConfig);
+      if (haTier) {
+        const fence = await reconcileRetiredFence({
+          environment: envName,
+          envConfig,
+          projectConfig,
+          tier: haTier,
+          deps: { log: () => {}, warn: () => {} },
+        });
+        if (fence.fenced.length > 0 || fence.unreachable.length > 0) checks.retiredFence = fence;
+      }
 
       // Remote health check
       if (envConfig.domain) {

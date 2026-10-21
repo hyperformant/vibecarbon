@@ -41,6 +41,8 @@ data:
     #   2. On final failure, logs loudly to stderr (visible in the db container's
     #      logs) and exits 0 so PG can recycle the segment. PITR coverage degrades
     #      for the failed segment; the database stays up.
+    #   3. Refuses (exit 1) on a node a failover retired (its PGDATA carries the
+    #      vibecarbon-retired marker), the only non-zero exit: see the fence below.
     #
     # THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR BOTH DEPLOY TIERS. compose mounts
     # it directly; k8s ships a byte-identical copy in the vibecarbon-wal-archive
@@ -60,6 +62,19 @@ data:
     WAL_PATH="${1:?archive_command requires a WAL file path}"
     RETRIES="${WAL_ARCHIVE_RETRIES:-3}"
     SLEEP_BASE="${WAL_ARCHIVE_SLEEP:-2}"
+    PGDATA_DIR="${PGDATA:-/var/lib/postgresql/data}"
+
+    # RETIRED-NODE FENCE: a failover retired this node (the old primary), and the
+    # CLI placed this marker in PGDATA when it next reached it. Its WAL belongs to a
+    # timeline the promoted node has left, and the backup prefix is the promoted
+    # node's now. This is the one exit that is not 0, on purpose: a refused push
+    # fails loudly (postgres logs every retry) rather than reading as a skip. The
+    # reseed that rebuilds this node as the standby replaces PGDATA and the marker
+    # with it. Checked first, before any other guard, psql or wal-g.
+    if [ -f "${PGDATA_DIR}/vibecarbon-retired" ]; then
+        echo "wal-archive: retired node: backups refused, not archiving '${WAL_PATH}' (run vibecarbon deploy to rebuild it as the standby)." >&2
+        exit 1
+    fi
 
     # WRITE-GUARD (finding #3): a standby node must NEVER push WAL into the single
     # canonical WALG_S3_PREFIX. WALG_ROLE=standby is set on the standby's db env
@@ -94,7 +109,6 @@ data:
     # ever set, or a split-brain leaves two writers). Only SKIP when we can
     # POSITIVELY confirm recovery — never fail-closed in a way that would drop a
     # real primary's WAL.
-    PGDATA_DIR="${PGDATA:-/var/lib/postgresql/data}"
     in_recovery=""
     if command -v psql >/dev/null 2>&1; then
         in_recovery="$(psql -U "${PGUSER:-postgres}" -d postgres -tAXc 'SELECT pg_is_in_recovery()' 2>/dev/null | tr -d '[:space:]')"

@@ -33,7 +33,7 @@
  * executeDeployment, ahead of every infra mutation.
  */
 
-import { swappedSinceLastDeploy } from '../failover-guard.js';
+import { assertNoFailoverInFlight, swappedSinceLastDeploy } from '../failover-guard.js';
 
 const PRIMARY = 'primary';
 const STANDBY = 'standby';
@@ -271,12 +271,7 @@ function reconvergeNode(entry, stack) {
  */
 export function planComposeHaReconverge({ projectName, environment, envConfig } = {}) {
   if (envConfig?.deployMode !== 'compose-ha') return null;
-  if (envConfig.ha?.failoverInFlight) {
-    throw new Error(
-      `Refusing to deploy "${environment}": a failover is still in flight (its journal is set), ` +
-        `so the roles may be mid-swap. run vibecarbon failover ${environment} to finish it, then deploy`,
-    );
-  }
+  assertNoFailoverInFlight({ environment, envConfig });
   const swapped = detectComposeHaRoleSwap({ projectName, environment, envConfig });
   if (!swapped && !swappedSinceLastDeploy(envConfig)) return null;
 

@@ -54,11 +54,31 @@ spec:
                       name: vibecarbon-config
                       key: BACKUP_RETENTION_DAYS
                       optional: true
+                # The retirement marker (HA-correctness R7): a failover retired
+                # this cluster, and the CLI patched VIBECARBON_ROLE=retired into
+                # vibecarbon-config when it next reached it. Read per job, so a
+                # patched ConfigMap reaches the next run with no restart.
+                - name: VIBECARBON_ROLE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vibecarbon-config
+                      key: VIBECARBON_ROLE
+                      optional: true
               command:
                 - /bin/bash
                 - -c
                 - |
                   set -euo pipefail
+                  # A retired cluster (the old primary after a failover) holds a
+                  # timeline the promoted cluster has left: a base backup plus
+                  # delete retain from here would land in, and prune, the
+                  # promoted cluster backups. Refuse loudly, never a skip, before
+                  # kubectl exec reaches wal-g. vibecarbon deploy rebuilds this
+                  # cluster as the standby and clears the marker once it streams.
+                  if [ "${VIBECARBON_ROLE:-}" = "retired" ]; then
+                    echo "retired node: backups refused (run vibecarbon deploy to rebuild it as the standby)" >&2
+                    exit 1
+                  fi
                   RETAIN="${BACKUP_RETENTION_DAYS:-7}"
                   # Exec wal-g inside the db pod. The guard makes this a no-op on
                   # a standby (in recovery) so only the primary takes base backups.

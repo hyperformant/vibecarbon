@@ -22,7 +22,9 @@ import { assertInteractiveStdin } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import {
+  assertFailoverClassified,
   assertFailoverPreconditions,
+  classifyFailover,
   clearFailoverJournal,
   confirmUnprovenFailover,
   dnsDidNotMessage,
@@ -52,6 +54,7 @@ import {
   unfenceDatabaseWrites,
   waitForStandbyCaughtUp,
 } from './lib/deploy/replication.js';
+import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
 import {
   assertWalgBackupsWorking,
   k8sWalgAuditArgv,
@@ -119,6 +122,12 @@ const SPEC = {
       boolean: true,
       description:
         'Primary is dead and nothing proves the standby holds its data: promote it anyway (unplanned only)',
+    },
+    {
+      name: 'force-unplanned',
+      boolean: true,
+      description:
+        'Your machine cannot reach the primary but the standby still sees it streaming: fail over anyway, knowing the old primary may still be serving',
     },
     {
       name: 'allow-degraded',
@@ -1472,6 +1481,13 @@ export async function failoverHA(
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
     promoteIssuer = promoteAcmeIssuer,
+    reconcileRetired = () =>
+      reconcileRetiredFence({
+        environment: envName,
+        envConfig: loadProjectConfig()?.environments?.[envName],
+        projectConfig,
+        tier: 'k8s-ha',
+      }),
   } = deps;
 
   const servers = identify(envName, envConfig, projectConfig);
@@ -1587,6 +1603,10 @@ export async function failoverHA(
     );
   }
   const standbyState = await readStandbyState(servers, sshKeyPath);
+  // R8: "unreachable from here" is not "dead". A standby still streaming fresh
+  // WAL from the primary proves it alive behind a partition; refuse unless the
+  // operator passed -force-unplanned.
+  assertFailoverClassified(classifyFailover({ primaryReachable: planned, standbyState }), parsed);
   const primaryState = planned ? await readPrimaryState(servers, sshKeyPath) : null;
   // Whether an earlier run left a journal: only without one can a promote this
   // run never sent prove that nothing will promote the standby.
@@ -1950,6 +1970,19 @@ export async function failoverHA(
       ? envConfig?.ha?.failoverInFlight?.override
       : undefined;
   swapRoles(envName, override ? { override } : undefined);
+  // The old primary is now the retired side: fence it (marker, app at zero,
+  // WALG_ROLE=standby) if it answers. One that does not is fenced by the next
+  // status, failover or deploy that reaches it, before it can push a backup.
+  // Never fails the failover: it has completed, and the terminal checks below
+  // must still report.
+  try {
+    await reconcileRetired();
+  } catch (err) {
+    p.log.warn(
+      `could not fence the retired node (${String(err?.message ?? err).split('\n')[0]}); the ` +
+        'next status, failover or deploy that reaches it fences it',
+    );
+  }
 
   if (!dnsFlip.ok) {
     p.log.warn(
@@ -2083,6 +2116,7 @@ export async function run(args) {
     // serverTypeOverride) — null means "use the persisted standbyWorkerSpec".
     serverType: values['server-type'] || null,
     forceUnproven: !!values['force-unproven'],
+    forceUnplanned: !!values['force-unplanned'],
     allowDegraded: !!values['allow-degraded'],
   };
 
@@ -2124,6 +2158,15 @@ export async function run(args) {
     } catch (err) {
       p.log.error(`Operator-IP check failed: ${err.message}`);
       process.exit(1);
+    }
+  }
+
+  // Re-apply the retirement fence first (R7): a side a past failover retired
+  // that has come back must refuse its backups before anything else runs.
+  if (!parsed.dryRun) {
+    const haTier = haTierOf(envConfig);
+    if (haTier) {
+      await reconcileRetiredFence({ environment: envName, envConfig, projectConfig, tier: haTier });
     }
   }
 

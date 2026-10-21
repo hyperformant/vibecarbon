@@ -78,6 +78,16 @@ vi.mock('../../../src/lib/deploy/public-dns-lookup.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return { ...actual, resolvePublicA: async () => replica.dns };
 });
+// The retirement fence reaches the retired node over ssh (retired-fence.test.ts
+// drives it); here it only has to run, in order, ahead of the readiness reads.
+const reconcileRetiredFence = vi.fn(async () => ({ fenced: [], unreachable: [] }));
+vi.mock('../../../src/lib/deploy/retired-fence.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    reconcileRetiredFence: (...a: unknown[]) => reconcileRetiredFence(...(a as [])),
+  };
+});
 
 const {
   assertNoComposeHaRoleSwap,
@@ -385,6 +395,7 @@ describe('deploy path wiring', () => {
   beforeEach(() => {
     ensureOperatorIpAccess.mockClear();
     StateTracker.mockClear();
+    reconcileRetiredFence.mockClear();
     stops.atPreflight = true;
     replica.inRecovery = { '10.0.0.2': false, '10.0.0.1': false };
     replica.dns = ['10.0.0.2'];
@@ -395,6 +406,12 @@ describe('deploy path wiring', () => {
     await expect(executeDeployment({}, gathered(swappedComposeHa()))).rejects.toThrow(
       'STOP_AT_STATE_TRACKER',
     );
+    // The retired node is fenced first, once SSH is let in.
+    expect(reconcileRetiredFence).toHaveBeenCalledTimes(1);
+    expect(reconcileRetiredFence.mock.calls[0]?.[0]).toMatchObject({
+      environment: 'prod',
+      tier: 'compose-ha',
+    });
   });
 
   // The readiness reads follow the operator-IP check (an operator whose IP
@@ -425,6 +442,18 @@ describe('deploy path wiring', () => {
     await expect(executeDeployment({}, gathered(env))).rejects.toThrow(/vibecarbon failover prod/);
     expect(ensureOperatorIpAccess).not.toHaveBeenCalled();
     expect(StateTracker).not.toHaveBeenCalled();
+    expect(reconcileRetiredFence).not.toHaveBeenCalled();
+  });
+
+  it('refuses a k8s-HA deploy too while a failover journal is set (its final save would drop it)', async () => {
+    const env = {
+      ...HEALTHY_BY_TIER['k8s-ha'],
+      ha: { enabled: true, failoverInFlight: { id: 'j', target: 'standby' } },
+    };
+    await expect(executeDeployment({}, gathered(env))).rejects.toThrow(
+      /a failover is still in flight.*run vibecarbon failover prod to finish it/,
+    );
+    expect(ensureOperatorIpAccess).not.toHaveBeenCalled();
   });
 
   it('lets a symmetric compose-HA environment through to the rest of the deploy', async () => {

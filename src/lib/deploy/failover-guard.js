@@ -82,6 +82,67 @@ export async function readReplicaState({ exec }) {
   };
 }
 
+/**
+ * R8: a walreceiver message younger than this means the primary is still
+ * streaming to the standby, so it is alive even if this machine cannot reach it.
+ */
+export const PRIMARY_ALIVE_MAX_AGE_S = 60;
+
+/** The R8 refusal: the operator is partitioned from a primary that is alive. */
+export const PRIMARY_ALIVE_MESSAGE =
+  'the primary is still streaming to the standby; your machine cannot reach it. ' +
+  'Rerun with -force-unplanned to fail over anyway';
+
+/**
+ * Classify a failover from the standby's vantage point (R8). The operator's
+ * own reachability check says only what this machine sees: a primary behind a
+ * partition looks exactly like a dead one. The standby's walreceiver is the
+ * better witness. `streaming` with a message under 60 s old means the primary
+ * is alive and still shipping WAL, and an unplanned failover would make a
+ * second primary next to it. A streaming receiver whose age cannot be read
+ * counts as alive (fail safe: -force-unplanned overrides).
+ *
+ * @param {{ primaryReachable: boolean, standbyState: Awaited<ReturnType<typeof readReplicaState>>|null }} args
+ * @returns {'planned'|'unplanned'|'refuse-primary-alive'}
+ */
+export function classifyFailover({ primaryReachable, standbyState }) {
+  if (primaryReachable) return 'planned';
+  if (standbyState?.receiverStatus !== 'streaming') return 'unplanned';
+  const age = standbyState.lastMsgAgeS;
+  return typeof age === 'number' && age >= PRIMARY_ALIVE_MAX_AGE_S
+    ? 'unplanned'
+    : 'refuse-primary-alive';
+}
+
+/**
+ * Throw the R8 refusal when the classification says the primary is alive and
+ * the operator did not pass -force-unplanned. Runs before any write.
+ *
+ * @param {ReturnType<typeof classifyFailover>} kind
+ * @param {{ forceUnplanned?: boolean }} parsed
+ */
+export function assertFailoverClassified(kind, parsed) {
+  if (kind === 'refuse-primary-alive' && !parsed?.forceUnplanned) {
+    throw new FailoverRefusedError(`Failover refused: ${PRIMARY_ALIVE_MESSAGE}`);
+  }
+}
+
+/**
+ * A deploy refuses while a failover journal is set, on every HA tier: the roles
+ * may be mid-swap, and the deploy's final save rebuilds `ha` and would drop the
+ * journal the rerun of `vibecarbon failover` resumes from.
+ *
+ * @param {{ environment: string, envConfig: object }} args
+ */
+export function assertNoFailoverInFlight({ environment, envConfig }) {
+  if (envConfig?.ha?.failoverInFlight) {
+    throw new Error(
+      `Refusing to deploy "${environment}": a failover is still in flight (its journal is set), ` +
+        `so the roles may be mid-swap. run vibecarbon failover ${environment} to finish it, then deploy`,
+    );
+  }
+}
+
 /** True when a failover swapped the roles and no deploy has reconverged since. */
 export function swappedSinceLastDeploy(envConfig) {
   if (!envConfig?.lastFailover) return false;

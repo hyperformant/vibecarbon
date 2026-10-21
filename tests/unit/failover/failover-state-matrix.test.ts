@@ -122,7 +122,11 @@ interface RunOpts {
 async function run(opts: RunOpts = {}) {
   const {
     primaryReachable = true,
-    standbyState = streamingStandby(),
+    // A dead primary stops streaming; one still streaming fresh WAL is alive
+    // (R8, classify-failover.test.ts), so unplanned rows default to no receiver.
+    standbyState = primaryReachable
+      ? streamingStandby()
+      : streamingStandby({ receiverStatus: null, lastMsgAgeS: null }),
     primaryState = streamingStandby({ inRecovery: false, receiverStatus: null }),
     envConfig = baseEnvConfig(),
     promoteVerdict = 'promoted',
@@ -270,6 +274,10 @@ async function run(opts: RunOpts = {}) {
       captured.swapOverride = o?.override;
       order.push('saveConfig');
     },
+    reconcileRetired: async () => {
+      order.push('fenceRetired');
+      return { fenced: [], unreachable: [] };
+    },
   };
   let flippedTo: string | null = null;
   const strategy = {
@@ -313,6 +321,7 @@ const MUTATIONS = [
   'scaleDownOldPrimary',
   'dns',
   'saveConfig',
+  'fenceRetired',
 ];
 function expectNoMutation(order: string[]) {
   for (const step of MUTATIONS) expect(order, `refusal reached ${step}`).not.toContain(step);
@@ -432,7 +441,8 @@ describe('failoverHA state matrix', () => {
     });
     // ... and cleared by the terminal swap save, not by a separate write.
     expect(order).not.toContain('clearJournal');
-    expect(order[order.length - 1]).toBe('saveConfig');
+    // Only the retired side's fence follows: it needs the swap saved.
+    expect(order.slice(-2)).toEqual(['saveConfig', 'fenceRetired']);
   });
 
   it('out of recovery with a journal naming this target resumes: no reseed, no promote; DNS and swap run', async () => {
