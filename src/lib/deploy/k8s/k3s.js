@@ -64,6 +64,7 @@ import { digestDir, digestPaths } from '../digest.js';
 import { pushImageOverSshTunnel } from '../registry-push.js';
 import { buildStandbySeedInitScript } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
+import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
 import {
   assertWalgBackupsWorking,
   k8sWalgAuditArgv,
@@ -333,9 +334,7 @@ export function buildK3sApplyInputs({
     restore: restore ?? '',
     storageClass: storageClass ?? '',
     role: role === 'standby' ? 'standby' : 'primary',
-    appStorageKeyDigest: appStorageAccessKey
-      ? createHash('sha256').update(appStorageAccessKey).digest('hex').slice(0, 16)
-      : '',
+    appStorageKeyDigest: appStorageAccessKey ? fingerprintSecret(appStorageAccessKey) : '',
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
     envLocalDigest: digestEnvLocalSecrets(projectDir),
@@ -380,7 +379,9 @@ export function digestEnvLocalSecrets(projectDir) {
   if (!existsSync(envPath)) return 'no-env-local';
   const envLocal = loadEnvLocal(envPath);
   if (!envLocal) return 'no-env-local';
-  const hash = createHash('sha256');
+  // Keyed (HMAC under a machine-local key): the digest lands in the persisted
+  // deploy state and must reveal nothing about the values.
+  const hash = secretHmac();
   // Sorted so key ORDER in the file is not a change. ACME_CA_SERVER joins
   // SECRET_KEYS because the issuer pick reads it directly.
   const watched = [...new Set([...SECRET_KEYS, 'ACME_CA_SERVER'])].sort();

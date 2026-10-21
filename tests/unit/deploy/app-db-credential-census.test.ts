@@ -10,7 +10,7 @@
  * tier's compose-secret-reach test checks the same against a real
  * `docker compose config`. Every value is a SENTINEL_<NAME> stand-in.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
@@ -210,26 +210,104 @@ describe('the app password rides the app allowlist; the owner password never doe
   });
 });
 
-describe('k3s.js never hashes secret values', () => {
+describe('no plain hash is fed secret values anywhere in src/', () => {
   // The app rolls on Secret changes by resourceVersion (readAppSecretVersions),
-  // not by a digest of the values: a hash of a secret in a readable pod
-  // annotation is exactly what CodeQL js/insufficient-password-hash flags.
-  const src = read('src/lib/deploy/k8s/k3s.js');
+  // and secret change detection elsewhere uses a keyed HMAC
+  // (secret-fingerprint.js). A plain sha256 of a secret in a persisted or
+  // readable place is what CodeQL js/insufficient-password-hash flags.
+  const SECRETISH =
+    /envLocal|buildAppSecretData|buildInfraSecretData|SECRET_KEYS|secretKey|accessKey|password|passwd|secret|token|credential|\b[A-Z][A-Z0-9_]*_(?:PASSWORD|SECRET|KEY|TOKEN)\b/i;
 
-  it('appPodSecretsSha is gone and the annotation is built from readAppSecretVersions', () => {
-    expect(src).not.toMatch(/appPodSecretsSha/);
-    expect(src).toMatch(/\[APP_SECRETS_SHA_ANNOTATION\]:\s*await readAppSecretVersions\(/);
+  /** Text of the balanced `(...)` starting at the `(` at index `open`. */
+  function balanced(src: string, open: number): string {
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')' && --depth === 0) return src.slice(open, i + 1);
+    }
+    return src.slice(open);
+  }
+
+  /**
+   * Every `createHash(...)` use: the whole chain when it is used inline, and
+   * every `.update(...)` argument when the hash is bound (`const h =
+   * createHash(...)` ... `h.update(...)`), so a split chain is seen too.
+   * Returns the text each use feeds into the hash.
+   */
+  function hashFeeds(src: string): string[] {
+    const feeds: string[] = [];
+    for (const m of src.matchAll(/createHash\s*\(/g)) {
+      const callOpen = (m.index ?? 0) + m[0].length - 1;
+      const callEnd = callOpen + balanced(src, callOpen).length;
+      const before = src.slice(Math.max(0, (m.index ?? 0) - 80), m.index);
+      const binding = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/.exec(before);
+      if (binding) {
+        const name = binding[1];
+        const uses = new RegExp(`\\b${name}\\s*\\.\\s*update\\s*\\(`, 'g');
+        // Chained updates on the declaration itself, plus later `name.update(`.
+        // A bound hash is fed through variables (`const v = envLocal[k]; h.update(v)`),
+        // so the feed is the whole span from the binding to its last update.
+        let end = callEnd;
+        const rest = src.slice(callEnd);
+        const chain = /^\s*(?:\.update\s*\()/.exec(rest);
+        if (chain)
+          end = callEnd + chain[0].length + balanced(src, callEnd + chain[0].length - 1).length;
+        for (const u of src.matchAll(uses)) {
+          const open = (u.index ?? 0) + u[0].length - 1;
+          end = Math.max(end, open + balanced(src, open).length);
+        }
+        feeds.push(src.slice(m.index, end));
+      } else {
+        // Inline chain: everything up to the terminal .digest(
+        const tail = src.slice(callEnd, callEnd + 600);
+        const d = tail.search(/\.digest\s*\(/);
+        feeds.push(d >= 0 ? tail.slice(0, d) : tail.slice(0, 200));
+      }
+    }
+    return feeds;
+  }
+
+  function* srcFiles(dir: string): Generator<string> {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) yield* srcFiles(full);
+      else if (e.name.endsWith('.js')) yield full;
+    }
+  }
+
+  it('bites on the old split chain (digestEnvLocalSecrets before the HMAC fix)', () => {
+    const old = `
+      const hash = createHash('sha256');
+      for (const key of watched) {
+        const value = envLocal[key];
+        hash.update(\`\${key}=\${value}\\n\`);
+      }
+      return hash.digest('hex');`;
+    expect(hashFeeds(old).some((f) => SECRETISH.test(f))).toBe(true);
+    const inline = "createHash('sha256').update(appStorageAccessKey).digest('hex')";
+    expect(hashFeeds(inline).some((f) => SECRETISH.test(f))).toBe(true);
+    const ok = "const h = createHash('sha256'); h.update(readFileSync(p)); h.digest('hex')";
+    expect(hashFeeds(ok).some((f) => SECRETISH.test(f))).toBe(false);
   });
 
-  it('no hash call takes buildAppSecretData, buildInfraSecretData or envLocal values', () => {
-    const hashCalls = [...src.matchAll(/createHash\([^)]*\)[\s\S]{0,200}?\.digest\(/g)].map(
-      (m) => m[0],
-    );
-    expect(hashCalls.length).toBeGreaterThan(0);
-    for (const call of hashCalls) {
-      expect(call).not.toMatch(
-        /buildAppSecretData|buildInfraSecretData|envLocal|secretKey|PASSWORD/,
-      );
+  it('no createHash in src/ takes secret-derived values', () => {
+    const offenders: string[] = [];
+    let seen = 0;
+    for (const file of srcFiles(join(ROOT, 'src'))) {
+      const src = readFileSync(file, 'utf-8');
+      for (const feed of hashFeeds(src)) {
+        seen++;
+        if (SECRETISH.test(feed))
+          offenders.push(`${file.slice(ROOT.length + 1)}: ${feed.slice(0, 80)}`);
+      }
     }
+    expect(seen).toBeGreaterThan(5);
+    expect(offenders).toEqual([]);
+  });
+
+  it('appPodSecretsSha is gone and the annotation is built from readAppSecretVersions', () => {
+    const src = read('src/lib/deploy/k8s/k3s.js');
+    expect(src).not.toMatch(/appPodSecretsSha/);
+    expect(src).toMatch(/\[APP_SECRETS_SHA_ANNOTATION\]:\s*await readAppSecretVersions\(/);
   });
 });

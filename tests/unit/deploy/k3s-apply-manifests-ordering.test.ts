@@ -51,9 +51,9 @@ let cmdCalls: string[][] = [];
 // cmdCalls index of the owning spawn, so a piped call can be ordered against
 // argv-only calls; runCommandAsync writes stdin synchronously after spawn
 // returns, so no other spawn can slip in between.
-// Empty = the default version below; set a name to override (an empty string is unreadable).
-let secretVersionOut: Record<string, string> = {};
 let stdinCalls: { argv: string[]; data: string; seq: number }[] = [];
+// Per-Secret resourceVersion stdout; unset = "1", an empty string is unreadable.
+let secretVersionOut: Record<string, string> = {};
 // A manual gate the `docker push` child's exit waits on (concurrency test).
 let pushGate: { promise: Promise<void>; release: () => void } | null = null;
 // Exit code/stderr the `docker push` child settles with.
