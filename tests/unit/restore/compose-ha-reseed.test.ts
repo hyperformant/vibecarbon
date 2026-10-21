@@ -241,29 +241,31 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
     warn.mockRestore();
   });
 
-  it('with a failover still in flight, names vibecarbon failover before the deploy', async () => {
+  it('with a failover still in flight, refuses before touching the old primary (C2)', async () => {
     const restoreCompose = vi.fn().mockResolvedValue(undefined);
     const configureStandbyReplication = vi.fn().mockResolvedValue(true);
-    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
-    await runComposeRestore({
-      ...baseArgs,
-      s: makeSpinner(),
-      envConfig: {
-        deployMode: 'compose-ha',
-        ha: { failoverInFlight: { id: 'j', target: 'standby' } },
-        servers: [
-          { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'primary' },
-          { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
-        ],
-      },
-      restoreCompose,
-      configureStandbyReplication,
-    });
+    await expect(
+      runComposeRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: {
+          deployMode: 'compose-ha',
+          ha: { failoverInFlight: { id: 'j', target: 'standby' } },
+          servers: [
+            { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'primary' },
+            { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
+          ],
+        },
+        restoreCompose,
+        configureStandbyReplication,
+      }),
+    ).rejects.toThrow(
+      /Refusing to restore "prod": a failover is still in flight.*vibecarbon failover prod -abort/,
+    );
+    // The fenced old primary is never rewound or restarted next to a standby
+    // that may already be promoted.
+    expect(restoreCompose).not.toHaveBeenCalled();
     expect(configureStandbyReplication).not.toHaveBeenCalled();
-    const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(text).toContain('vibecarbon failover prod');
-    expect(text).toContain('vibecarbon deploy prod');
-    warn.mockRestore();
   });
 
   it('still re-seeds when the last deploy came after the last failover (reconverged)', async () => {

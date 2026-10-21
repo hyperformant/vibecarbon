@@ -37,7 +37,11 @@ import {
 } from './lib/deploy/compose/ha-role-swap.js';
 import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index.js';
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
-import { recordSystemIdentifier, swappedSinceLastDeploy } from './lib/deploy/failover-guard.js';
+import {
+  assertNoFailoverInFlight,
+  recordSystemIdentifier,
+  swappedSinceLastDeploy,
+} from './lib/deploy/failover-guard.js';
 import {
   DB_STS_BOOT_TIMEOUT_S,
   ensureReplicationSlot as realEnsureReplicationSlot,
@@ -278,6 +282,19 @@ export async function run(args) {
     projectConfig,
     serverIp: 'primary',
   });
+
+  // A failover in flight (its journal set) may be promoting the standby while
+  // the old primary is fenced: a restore would rewind and restart the fenced
+  // old primary next to it (two writable primaries) and, on k8s, reseed the
+  // standby that may be the promoted one. Refuse before any prompt or SSH.
+  if (!values.l) {
+    try {
+      assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
+    } catch (err) {
+      p.log.error(err.message);
+      process.exit(1);
+    }
+  }
 
   // Source TTY guard fires *before* infrastructure checks so the
   // off-TTY error message is "needs -source" rather than "SSH key
@@ -546,6 +563,8 @@ export async function runComposeRestore({
   restoreCompose = realRestoreCompose,
   configureStandbyReplication = realConfigureStandbyReplication,
 }) {
+  // Also here, for every caller: see run().
+  assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
   if (chosenSource.kind === 'local') {
     throw new Error(
       'compose restore is wal-g-based and pulls from S3, local backup files are not supported. ' +
@@ -575,15 +594,14 @@ export async function runComposeRestore({
   // C2: on a failed-over env (roles swapped against the stacks, or a failover
   // after the last deploy) the standby is rebuilt by role, and that is the
   // deploy's reconverge (compose/ha-role-swap.js): restore never re-seeds there,
-  // it says why and names `vibecarbon deploy` (or `vibecarbon failover` first
-  // while a failover is still in flight).
+  // it says why and names `vibecarbon deploy`. A failover still in flight never
+  // gets here: the restore refuses up front.
   if (envConfig.deployMode === 'compose-ha') {
     const primary = envConfig.servers?.find((sv) => sv.role === 'primary');
     const standby = envConfig.servers?.find((sv) => sv.role === 'standby');
     if (
       detectComposeHaRoleSwap({ projectName, environment: envName, envConfig }) ||
-      swappedSinceLastDeploy(envConfig) ||
-      envConfig.ha?.failoverInFlight
+      swappedSinceLastDeploy(envConfig)
     ) {
       p.log.warn(
         'Primary restored and serving. Skipping the standby re-seed here: this pair has ' +
@@ -657,6 +675,8 @@ export async function runK8sRestore({
   // on real timers. Production uses the default setTimeout-backed sleep.
   verifySleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 }) {
+  // Also here, for every caller: see run().
+  assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
   if (chosenSource.kind === 'local') {
     throw new Error(
       'k8s restore is wal-g-based and pulls from S3 — local backup files are not supported. Use `-source latest` (or a timestamp for PITR).',

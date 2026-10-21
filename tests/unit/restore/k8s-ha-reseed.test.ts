@@ -65,6 +65,29 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+describe('runK8sRestore: a failover in flight (C2)', () => {
+  it('refuses before the restore marker, the db bounce or the standby reseed', async () => {
+    const reseedStandbyFromPrimary = vi.fn().mockResolvedValue('reseeded');
+    await expect(
+      runK8sRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: {
+          ...haEnvConfig,
+          ha: { ...haEnvConfig.ha, failoverInFlight: { id: 'j', target: 'standby' } },
+        },
+        ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+        reseedStandbyFromPrimary,
+      }),
+    ).rejects.toThrow(
+      /Refusing to restore "prod": a failover is still in flight.*vibecarbon failover prod -abort/,
+    );
+    // The standby may be the promoted primary: nothing touches either side.
+    expect(ssh.sshKubectl).not.toHaveBeenCalled();
+    expect(reseedStandbyFromPrimary).not.toHaveBeenCalled();
+  });
+});
+
 describe('runK8sRestore — k8s-HA standby re-seed', () => {
   it('bounds the post-restore db rollout-status inside the SSH client timeout (120s < 130s)', async () => {
     // Reconciliation invariant (see readiness-gate.test.ts): the old
