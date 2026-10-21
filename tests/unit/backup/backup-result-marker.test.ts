@@ -12,7 +12,16 @@
  * tests/unit/deploy/backup-fence.test.ts.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -174,6 +183,9 @@ esac
     join(bin, 'pg_controldata'),
     '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',
   );
+  // gosu <user> <cmd...>: the scripts drop to the postgres user for PGDATA
+  // writes; here the test user stands in for it.
+  writeFileSync(join(bin, 'gosu'), '#!/bin/bash\nshift\nexec "$@"\n');
   writeFileSync(join(bin, 'docker'), '#!/bin/bash\nshift 4\nexec "$@"\n');
   writeFileSync(
     join(bin, 'kubectl'),
@@ -186,6 +198,7 @@ esac
     'docker',
     'kubectl',
     'pg_controldata',
+    'gosu',
   ]) {
     chmodSync(join(bin, f), 0o755);
   }
@@ -444,6 +457,34 @@ describe('a pushed base clears the WAL gap record entries older than itself', ()
     const r = run(`gap-mixed-${t}`, {}, g.env);
     expect(r.status, r.stderr).toBe(0);
     expect(g.read()).toBe(`${FUTURE_ENTRY}\n`);
+  });
+
+  // The scripts run as root in the db container; PGDATA is the postgres
+  // user's. The maintenance drops to postgres (gosu) and refuses a symlinked
+  // record, so a planted link never makes it write through to another file.
+  it.each([
+    ['compose', (n: string, o: Stub, e: Record<string, string>) => runCompose(n, o, e)],
+    ['k8s CronJob', (n: string, o: Stub, e: Record<string, string>) => runCron(n, o, e)],
+  ])('%s: a symlinked gap record is refused, never followed; the push still counts', (t, run) => {
+    const pgdata = join(work, `gap-link-${t}`);
+    mkdirSync(pgdata, { recursive: true });
+    const victim = join(work, `victim-${t.replace(/\W/g, '')}`);
+    writeFileSync(victim, 'precious\n');
+    symlinkSync(victim, join(pgdata, 'vibecarbon-wal-gap'));
+    const r = run(`gap-link-${t}`, {}, { PGDATA: pgdata });
+    expect(r.status, r.stderr).toBe(0);
+    expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
+    expect(r.stderr).toMatch(/refusing the WAL gap record [^\n]*: it is a symlink/);
+    expect(readFileSync(victim, 'utf-8')).toBe('precious\n');
+    expect(lstatSync(join(pgdata, 'vibecarbon-wal-gap')).isSymbolicLink()).toBe(true);
+  });
+
+  it('both copies run the maintenance as postgres, with no root chown', () => {
+    for (const f of [COMPOSE_BACKUP, CRONJOB]) {
+      const text = readFileSync(f, 'utf-8');
+      expect(text, f).toMatch(/gosu postgres sh -c "/);
+      expect(text, f).not.toMatch(/chown[^\n]*vibecarbon-wal-gap|chown postgres:postgres "\$gap"/);
+    }
   });
 
   it.each([

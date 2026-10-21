@@ -735,7 +735,11 @@ describe('applyK3sManifests with a restore point', () => {
     expect(body.slice(push, push + 300)).toMatch(/tier: 'k8s',\s+ip: masterIp,/);
   });
 
-  it('each environment applies its own backup schedule (CronJob) and retention (ConfigMap)', async () => {
+  // Two full applies (about 2s each in this file's mock, up to 5s under a
+  // loaded machine): the default 5s budget was too tight for both.
+  it('each environment applies its own backup schedule (CronJob) and retention (ConfigMap)', {
+    timeout: 20_000,
+  }, async () => {
     const settingsMap = () =>
       stdin.filter((s) => s.data.includes('name: vibecarbon-backup-settings')).at(-1)?.data ?? '';
     for (const [cfg, cron, days] of [

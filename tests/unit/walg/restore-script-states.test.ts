@@ -25,6 +25,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -230,6 +231,28 @@ for (const [tier, build] of TIERS) {
       expect(ls()).not.toContain('.vc-restore-in-progress');
       expect(ls()).not.toContain('.vc-discard');
       expect(existsSync(join(pgdata, '.vc-prev', '.vc-prev'))).toBe(false);
+    });
+
+    // The script runs as root in the postgres user's PGDATA: a planted
+    // symlink must never make it write through to another file.
+    it('a symlinked lock is refused before anything moves; a symlinked temp file is replaced, not followed', () => {
+      seedLive();
+      stubWalg('ok');
+      const victim = join(dir, 'victim');
+      writeFileSync(victim, 'precious\n');
+      symlinkSync(victim, join(pgdata, '.vc-restore.lock'));
+      const refused = run(build());
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toMatch(/\.vc-restore\.lock is a symlink; refusing/);
+      expect(read('base/marker')).toBe('live');
+      expect(readFileSync(victim, 'utf-8')).toBe('precious\n');
+      rmSync(join(pgdata, '.vc-restore.lock'));
+      symlinkSync(victim, join(pgdata, '.vc-restore-in-progress.tmp'));
+      symlinkSync(victim, join(pgdata, '.vc-restored-from.tmp'));
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(read('base/marker')).toBe('restored');
+      expect(readFileSync(victim, 'utf-8')).toBe('precious\n');
     });
 
     it('a restored base never carries the source database WAL gap record', () => {

@@ -176,12 +176,23 @@ docker compose exec -T db bash -c '
   # and records it here): a drop before this base started is behind it now,
   # so its entry goes; one recorded while the push ran stays (this base needs
   # that WAL). The record moves aside first, so an entry wal-archive.sh
-  # appends meanwhile lands in a new file and is never lost. A failure here
-  # only warns: the base is in the bucket.
+  # appends meanwhile lands in a new file and is never lost. It runs as the
+  # postgres user (gosu): this shell is root, and PGDATA is the postgres
+  # user directory, so a root write there could follow a planted symlink. A
+  # symlinked record is refused. A failure here only warns: the base is in
+  # the bucket.
   gap="$PGDATA/vibecarbon-wal-gap"
-  if [ -f "$gap" ] || [ -f "$gap.clearing" ]; then
-    { { [ ! -f "$gap" ] || mv -f "$gap" "$gap.clearing"; } && kept="$(awk -v s="$push_started" "\$2 >= s" "$gap.clearing")" && { [ -z "$kept" ] || printf "%s\n" "$kept" >> "$gap"; } && rm -f "$gap.clearing"; } || echo "could not clear the WAL gap record $gap after pushing $name" >&2
-    [ ! -f "$gap" ] || chown postgres:postgres "$gap" 2>/dev/null || true
+  if [ -e "$gap" ] || [ -e "$gap.clearing" ] || [ -L "$gap" ] || [ -L "$gap.clearing" ]; then
+    gosu postgres sh -c "
+      g=\"\$1\"; s=\"\$2\"
+      for f in \"\$g\" \"\$g.clearing\"; do
+        if [ -L \"\$f\" ]; then echo \"refusing the WAL gap record \$f: it is a symlink\" >&2; exit 1; fi
+      done
+      { [ ! -f \"\$g\" ] || mv -f \"\$g\" \"\$g.clearing\"; } &&
+        kept=\"\$(awk -v s=\"\$s\" \"\\\$2 >= s\" \"\$g.clearing\")\" &&
+        { [ -z \"\$kept\" ] || printf \"%s\\n\" \"\$kept\" >> \"\$g\"; } &&
+        rm -f \"\$g.clearing\"
+    " sh "$gap" "$push_started" || echo "could not clear the WAL gap record $gap after pushing $name" >&2
   fi
   # RETENTION, a separate step after the marker: the base above is in the
   # bucket whatever happens here, and a failure exits 3 (base pushed,
