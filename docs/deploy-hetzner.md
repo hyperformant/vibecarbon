@@ -360,7 +360,7 @@ the point of no return last**:
 5. **Scales up the app tier** (0 → target replicas) and verifies public API readiness
 6. **Repoints DNS** to the new primary
 
-**Standby image check:** Before changing anything, failover reads the standby registry live, for planned and unplanned failovers alike. If the image is missing, a planned failover refuses and tells you to run `vibecarbon deploy` first; an unplanned failover refuses unless you pass `-force-unproven`, and then the promoted app stays down until a deploy delivers the image. If the registry cannot be read at all, a planned failover refuses even with `-force-unproven`, because the primary is alive and a deploy can fix it.
+**Standby image check:** Before changing anything, failover reads the standby registry live, for planned and unplanned failovers alike. If the image is missing, a planned failover refuses and tells you to run `vibecarbon deploy` first; an unplanned failover refuses unless you pass `-force-unproven`, and then the promoted app stays down until a deploy delivers the image. If the registry cannot be read at all, a planned failover refuses even with `-force-unproven`, because the fault is access to the standby master, and a deploy cannot fix that.
 
 **Clean abort on failure:** If provisioning fails, the command attempts to converge workers back to 0. If that also fails, it reports the exact state and the primary remains untouched. Re-run the command (optionally with `-server-type` for different hardware) to retry: every step is convergent, so reruns resume instead of duplicating.
 
