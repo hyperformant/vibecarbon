@@ -93,6 +93,14 @@ services:
       - DB_PORT=5432
       - DB_USER=app_service
       - DB_PASSWORD=${APP_DB_PASSWORD:?APP_DB_PASSWORD missing, run vibecarbon upgrade to write it to .env}
+      # env_file above hands the app all of .env, owner credentials included.
+      # Blank them here (environment wins over env_file), so a local app holds
+      # no database password but its own.
+      - POSTGRES_PASSWORD=
+      - REPL_PASSWORD=
+      - N8N_DB_PASSWORD=
+      - METABASE_DB_PASSWORD=
+      - OBSERVABILITY_DB_PASSWORD=
     depends_on:
       # Data and auth both live in Postgres. The app starts once the db is
       # healthy and app-migrate has applied the migrations and set up the
@@ -112,7 +120,8 @@ services:
   # The migrate step (src/server/db/migrate-cli.ts): a one-shot of the app
   # image that applies db/migrations as the owner, postgres, then creates or
   # updates the app's own role, app_service, with APP_DB_PASSWORD. It is the
-  # only service besides db that holds the owner password, and it exits when
+  # only service besides db that holds the owner password (the app's
+  # environment blanks the one its env_file carries), and it exits when
   # done; the app waits for it to complete successfully. On a compose-ha
   # standby it finds a read-only database and exits 0 at once: migrations and
   # the role arrive from the primary by replication.

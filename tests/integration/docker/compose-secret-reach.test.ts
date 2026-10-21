@@ -211,6 +211,25 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     );
   });
 
+  // Local dev runs the base file alone, whose app reads the whole .env
+  // (env_file), owner password included. The base blanks every owner
+  // credential on the app, so local dev holds the app to app_service too.
+  it('base alone (local dev): the app holds no owner or infra database password', () => {
+    const services = render(['docker-compose.yml']);
+    for (const k of [
+      'POSTGRES_PASSWORD',
+      'N8N_DB_PASSWORD',
+      'METABASE_DB_PASSWORD',
+      'OBSERVABILITY_DB_PASSWORD',
+    ]) {
+      expect(holders(services, sentinel(k)), k).not.toContain('app');
+    }
+    expect(holders(services, sentinel('POSTGRES_PASSWORD'))).toContain('app-migrate');
+    const appEnv = services.app.environment as Record<string, string>;
+    expect(appEnv.DB_USER).toBe('app_service');
+    expect(appEnv.DB_PASSWORD).toBe(sentinel('APP_DB_PASSWORD'));
+  });
+
   it('full deploy set: the app gets no infra password, and REDIS_URL still reaches it', () => {
     const services = full();
     for (const k of ['N8N_DB_PASSWORD', 'METABASE_DB_PASSWORD', 'OBSERVABILITY_DB_PASSWORD']) {
