@@ -531,6 +531,9 @@ async function haK8sConfigureReplication(ctx) {
     });
     replStreaming = replResult.streaming;
     replLastState = replResult.lastState || '';
+    // Set only on verified streaming; the deploy persists it as
+    // ha.systemIdentifier for failover's replica proof.
+    ctx.systemIdentifier = replResult.systemIdentifier ?? null;
   } catch (error) {
     replError = error;
     // The fold below keeps only the last line for the gate message; the full

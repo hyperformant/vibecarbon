@@ -1,0 +1,610 @@
+/**
+ * Failover state matrix (HA-correctness Task 1, C1 + M3).
+ *
+ * The k8s-HA failover used to treat "the standby is not in recovery" as "a
+ * previous run already promoted it". That one inference let three different
+ * worlds promote stale or empty data, flip DNS and exit 0:
+ *   - a failback right after a failover, before `vibecarbon deploy`
+ *     reconverged (the "standby" is the old primary, holding no replica of
+ *     the new data);
+ *   - an unseeded standby finalized under `-allow-degraded` (a fresh initdb,
+ *     a different database);
+ *   - a retry after a promote that landed late, once the first run had
+ *     already un-quiesced the old primary.
+ *
+ * Every promote decision now reads a persisted journal and a positive replica
+ * proof (R1, R2), and an unconfirmed promote keeps the old primary fenced (R3).
+ * This file drives `failoverHA` through each state with injected seams, so no
+ * ssh, iac or config write runs; the journal helpers and the tri-state promote
+ * are exercised on their own below.
+ */
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
+  getPostgresPod: vi.fn(async () => 'db-0'),
+  sshKubectl: vi.fn(),
+}));
+
+const ssh = await import('../../../src/lib/ssh.js');
+const { failoverHA, swapHaRoles } = await import('../../../src/failover.js');
+const {
+  assertFailoverPreconditions,
+  clearFailoverJournal,
+  FailoverRefusedError,
+  readReplicaState,
+  writeFailoverJournal,
+} = await import('../../../src/lib/deploy/failover-guard.js');
+const { PROMOTE_DEADLINE_MS, promoteStandby } = await import(
+  '../../../src/lib/deploy/replication.js'
+);
+
+const SYSID = '7412345678901234567';
+const OTHER_SYSID = '7499999999999999999';
+
+const SCALE_UP_LIST = [{ name: 'app', namespace: 'vibecarbon', replicas: 2 }];
+
+type StandbyState = {
+  inRecovery: boolean | null;
+  systemIdentifier: string | null;
+  replayLsn: string | null;
+  receiverStatus: string | null;
+  lastMsgAgeS: number | null;
+};
+
+const streamingStandby = (over: Partial<StandbyState> = {}): StandbyState => ({
+  inRecovery: true,
+  systemIdentifier: SYSID,
+  replayLsn: '0/3000060',
+  receiverStatus: 'streaming',
+  lastMsgAgeS: 1,
+  ...over,
+});
+
+const baseEnvConfig = (over: Record<string, unknown> = {}) => ({
+  domain: 'app.example.com',
+  region: 'nbg1',
+  secondaryRegion: 'ash',
+  replication: 'streaming',
+  deployedAt: '2026-10-01T00:00:00.000Z',
+  ...over,
+  ha: {
+    primary: { masterIp: '10.0.0.1' },
+    standby: { masterIp: '10.0.0.9' },
+    systemIdentifier: SYSID,
+    ...((over.ha as Record<string, unknown>) ?? {}),
+  },
+});
+
+interface RunOpts {
+  primaryReachable?: boolean;
+  standbyState?: StandbyState;
+  primaryState?: StandbyState;
+  envConfig?: Record<string, unknown>;
+  /** What the promote seam resolves to. */
+  promoteVerdict?: 'promoted' | 'in-recovery' | 'unknown';
+  /** Milliseconds the fake clock advances while the promote seam runs. */
+  promoteTakesMs?: number;
+}
+
+/**
+ * Drive failoverHA with every step seam injected, recording each call as a
+ * canonical step name. Mutating steps are the ones a refusal must never reach:
+ * provision, quiesce, unquiesce, reseed, journal, promote, walgRole, scaleUp,
+ * promoteIssuer, scaleDownOldPrimary, dns, saveConfig.
+ */
+async function run(opts: RunOpts = {}) {
+  const {
+    primaryReachable = true,
+    standbyState = streamingStandby(),
+    primaryState = streamingStandby({ inRecovery: false, receiverStatus: null }),
+    envConfig = baseEnvConfig(),
+    promoteVerdict = 'promoted',
+    promoteTakesMs = 1_000,
+  } = opts;
+  const order: string[] = [];
+  const captured: Record<string, unknown> = {};
+  let clock = 1_000_000;
+  let thrown: unknown;
+  const servers = {
+    primary: { ip: '10.0.0.1', floatingIp: '10.0.0.1', region: 'nbg1' },
+    standby: {
+      ip: '10.0.0.9',
+      floatingIp: '10.0.0.99',
+      dbIp: '10.0.0.10',
+      dbPrivateIp: '10.0.1.2',
+      region: 'ash',
+    },
+  };
+  const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    order.push(`exit(${code})`);
+    throw new Error('__exit__');
+  }) as never);
+
+  const deps = {
+    identify: () => servers,
+    getKeyPath: () => '/fake/key',
+    keyExists: () => true,
+    now: () => clock,
+    preflight: async () => {
+      order.push('preflight');
+      return {
+        workerSpec: { count: 2, serverType: 'cx23' },
+        scaleUpList: SCALE_UP_LIST,
+        standbyStack: 'e4-standby',
+        creds: {},
+      };
+    },
+    provision: async () => {
+      order.push('provision');
+      return { provisioned: true as const };
+    },
+    isPrimaryReady: async () => primaryReachable,
+    readStandbyState: async () => standbyState,
+    readPrimaryState: async () => {
+      order.push('readPrimary');
+      return primaryState;
+    },
+    catchUp: async () => {
+      order.push('catchup');
+      return '0/3000060';
+    },
+    scale: async (_ip: string, _key: string, _list: unknown, _replicas: unknown, label: string) => {
+      if (/un-quiesce/.test(label)) order.push('unquiesce');
+      else if (/^quiesce primary/.test(label)) order.push('quiesce');
+      else if (/scale up promoted/.test(label)) order.push('scaleUp');
+      else if (/scale-down old primary/.test(label)) order.push('scaleDownOldPrimary');
+    },
+    reseed: async () => {
+      order.push('reseed');
+    },
+    writeJournal: async (_ctx: unknown, journal: Record<string, unknown>) => {
+      captured.journal = journal;
+      order.push('journal');
+      return 'journal-id';
+    },
+    clearJournal: async () => {
+      order.push('clearJournal');
+    },
+    promote: async () => {
+      order.push('promote');
+      clock += promoteTakesMs;
+      return promoteVerdict;
+    },
+    restoreWalgRole: async () => {
+      order.push('walgRole');
+      return { ok: true as const };
+    },
+    gate: async () => {
+      order.push('gate');
+    },
+    promoteIssuer: async () => {
+      order.push('promoteIssuer');
+      return { patched: [] };
+    },
+    swapRoles: () => {
+      order.push('saveConfig');
+    },
+  };
+  const strategy = {
+    getAuth: async () => ({ token: 't', zoneId: 'z' }),
+    updateDns: async () => {
+      order.push('dns');
+    },
+  };
+  const parsed = { dryRun: false, yes: true, serverType: null };
+  const tracker = { spinner: () => ({ start: () => {}, stop: () => {} }) };
+  try {
+    // biome-ignore lint/suspicious/noExplicitAny: injected test deps bag.
+    await failoverHA('e4', envConfig, {}, parsed, tracker, strategy, deps as any);
+  } catch (err) {
+    thrown = err;
+  } finally {
+    exitSpy.mockRestore();
+  }
+  return { order, captured, thrown: thrown as Error | undefined };
+}
+
+/** Steps a refusal must never reach: any quiesce, kubectl write or cloud change. */
+const MUTATIONS = [
+  'provision',
+  'quiesce',
+  'unquiesce',
+  'reseed',
+  'journal',
+  'promote',
+  'walgRole',
+  'scaleUp',
+  'promoteIssuer',
+  'scaleDownOldPrimary',
+  'dns',
+  'saveConfig',
+];
+function expectNoMutation(order: string[]) {
+  for (const step of MUTATIONS) expect(order, `refusal reached ${step}`).not.toContain(step);
+}
+
+describe('failoverHA state matrix', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('a proven replica (in recovery, sysid matches, not degraded) promotes; journal first, cleared by the swap save', async () => {
+    const { order, captured, thrown } = await run();
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('promote');
+    // The journal is written immediately before the promote seam ...
+    expect(order.indexOf('journal')).toBe(order.indexOf('promote') - 1);
+    expect(captured.journal).toEqual({
+      target: 'standby',
+      primaryLsn: '0/3000060',
+      systemIdentifier: SYSID,
+    });
+    // ... and cleared by the terminal swap save, not by a separate write.
+    expect(order).not.toContain('clearJournal');
+    expect(order[order.length - 1]).toBe('saveConfig');
+  });
+
+  it('out of recovery with a journal naming this target resumes: no reseed, no promote; DNS and swap run', async () => {
+    const { order, thrown } = await run({
+      standbyState: streamingStandby({ inRecovery: false, receiverStatus: null }),
+      envConfig: baseEnvConfig({
+        ha: {
+          failoverInFlight: {
+            id: 'j1',
+            target: 'standby',
+            startedAt: '2026-10-20T10:00:00.000Z',
+            primaryLsn: '0/3000060',
+            systemIdentifier: SYSID,
+          },
+        },
+      }),
+    });
+    expect(thrown).toBeUndefined();
+    expect(order).not.toContain('reseed');
+    expect(order).not.toContain('promote');
+    expect(order).not.toContain('journal');
+    // A resumed run never un-fences the old primary: the standby is promoted.
+    expect(order).not.toContain('unquiesce');
+    expect(order).toContain('dns');
+    expect(order).toContain('saveConfig');
+  });
+
+  it('out of recovery with no journal refuses as "not a replica", before any quiesce or write', async () => {
+    const { order, thrown } = await run({
+      standbyState: streamingStandby({ inRecovery: false, receiverStatus: null }),
+    });
+    expect(thrown).toBeInstanceOf(FailoverRefusedError);
+    expect(thrown?.message).toMatch(/not a replica/);
+    expect(thrown?.message).toMatch(/vibecarbon deploy/);
+    expectNoMutation(order);
+  });
+
+  it('replication degraded refuses before quiesce', async () => {
+    const { order, thrown } = await run({
+      envConfig: baseEnvConfig({ replication: 'degraded', degraded: true }),
+    });
+    expect(thrown).toBeInstanceOf(FailoverRefusedError);
+    expect(thrown?.message).toMatch(/degraded/);
+    expect(thrown?.message).toMatch(/vibecarbon deploy/);
+    expectNoMutation(order);
+  });
+
+  it('a failback before reconverge (roles swapped since the last deploy) refuses and names vibecarbon deploy', async () => {
+    const { order, thrown } = await run({
+      // The state a completed failover leaves behind: lastFailover after the
+      // last deploy. swapHaRoles also flags replication degraded; the failback
+      // reason must win, because it is the precise one.
+      envConfig: baseEnvConfig({
+        lastFailover: '2026-10-20T12:00:00.000Z',
+        deployedAt: '2026-10-01T00:00:00.000Z',
+        replication: 'degraded',
+      }),
+      standbyState: streamingStandby({ inRecovery: false, receiverStatus: null }),
+    });
+    expect(thrown).toBeInstanceOf(FailoverRefusedError);
+    expect(thrown?.message).toMatch(/vibecarbon deploy/);
+    expect(thrown?.message).toMatch(/failover/);
+    expectNoMutation(order);
+  });
+
+  it('a failover after a reconverging deploy is not a failback', async () => {
+    const { thrown, order } = await run({
+      envConfig: baseEnvConfig({
+        lastFailover: '2026-10-20T12:00:00.000Z',
+        deployedAt: '2026-10-20T13:00:00.000Z',
+      }),
+    });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('promote');
+  });
+
+  it('a system identifier mismatch refuses as "different database"', async () => {
+    const { order, thrown } = await run({
+      standbyState: streamingStandby({ systemIdentifier: OTHER_SYSID }),
+    });
+    expect(thrown).toBeInstanceOf(FailoverRefusedError);
+    expect(thrown?.message).toMatch(/different database/);
+    expectNoMutation(order);
+  });
+
+  it('no recorded system identifier refuses an unplanned failover', async () => {
+    const envConfig = baseEnvConfig();
+    delete (envConfig.ha as Record<string, unknown>).systemIdentifier;
+    const { order, thrown } = await run({ primaryReachable: false, envConfig });
+    expect(thrown).toBeInstanceOf(FailoverRefusedError);
+    expect(thrown?.message).toMatch(/vibecarbon deploy/);
+    expectNoMutation(order);
+  });
+
+  it('no recorded system identifier, planned with a streaming standby: allowed, compared live against the primary', async () => {
+    const envConfig = baseEnvConfig();
+    delete (envConfig.ha as Record<string, unknown>).systemIdentifier;
+    const { order, thrown } = await run({ primaryReachable: true, envConfig });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('readPrimary');
+    expect(order.indexOf('readPrimary')).toBeLessThan(order.indexOf('quiesce'));
+    expect(order).toContain('promote');
+  });
+
+  it('no recorded system identifier, planned, the live primary differs: refuses as "different database"', async () => {
+    const envConfig = baseEnvConfig();
+    delete (envConfig.ha as Record<string, unknown>).systemIdentifier;
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      envConfig,
+      primaryState: streamingStandby({ inRecovery: false, systemIdentifier: OTHER_SYSID }),
+    });
+    expect(thrown?.message).toMatch(/different database/);
+    expectNoMutation(order);
+  });
+
+  it('an unreadable standby refuses (fence on unknown), before any write', async () => {
+    const { order, thrown } = await run({
+      standbyState: {
+        inRecovery: null,
+        systemIdentifier: null,
+        replayLsn: null,
+        receiverStatus: null,
+        lastMsgAgeS: null,
+      },
+    });
+    expect(thrown).toBeInstanceOf(FailoverRefusedError);
+    expect(thrown?.message).toMatch(/vibecarbon deploy/);
+    expectNoMutation(order);
+  });
+
+  it.each([
+    ['unknown', 1_000],
+    ['promoted', PROMOTE_DEADLINE_MS + 1],
+  ] as const)(
+    'promote %s (after %d ms) keeps the old primary fenced and the journal set',
+    async (verdict, takesMs) => {
+      const { order, thrown } = await run({ promoteVerdict: verdict, promoteTakesMs: takesMs });
+      expect(order).toContain('quiesce');
+      expect(order).toContain('promote');
+      expect(order.filter((s) => s === 'unquiesce')).toHaveLength(0);
+      expect(order).not.toContain('clearJournal');
+      expect(thrown?.message).toMatch(/kept fenced/);
+      expect(thrown?.message).toMatch(/rerun vibecarbon failover e4 to finish/);
+      // Nothing past the promote ran on an unconfirmed promotion.
+      expect(order).not.toContain('scaleUp');
+      expect(order).not.toContain('dns');
+      expect(order).not.toContain('saveConfig');
+    },
+  );
+
+  it("promote 'in-recovery' un-quiesces once and clears the journal", async () => {
+    const { order, thrown } = await run({ promoteVerdict: 'in-recovery' });
+    expect(order.filter((s) => s === 'unquiesce')).toHaveLength(1);
+    expect(order).toContain('clearJournal');
+    expect(order.indexOf('clearJournal')).toBeGreaterThan(order.indexOf('promote'));
+    expect(thrown).toBeInstanceOf(Error);
+    expect(order).not.toContain('dns');
+    expect(order).not.toContain('saveConfig');
+  });
+});
+
+describe('assertFailoverPreconditions', () => {
+  it('is shared by both tiers and returns the mode', () => {
+    for (const tier of ['compose-ha', 'k8s-ha'] as const) {
+      expect(
+        assertFailoverPreconditions({
+          envConfig: baseEnvConfig(),
+          environment: 'e4',
+          standbyState: streamingStandby(),
+          tier,
+        }),
+      ).toEqual({ mode: 'promote' });
+    }
+  });
+
+  it('a journal for a different database does not resume', () => {
+    expect(() =>
+      assertFailoverPreconditions({
+        envConfig: baseEnvConfig({
+          ha: {
+            failoverInFlight: {
+              id: 'j1',
+              target: 'standby',
+              startedAt: '2026-10-20T10:00:00.000Z',
+              primaryLsn: null,
+              systemIdentifier: OTHER_SYSID,
+            },
+          },
+        }),
+        environment: 'e4',
+        standbyState: streamingStandby({ inRecovery: false }),
+        tier: 'k8s-ha',
+      }),
+    ).toThrow(FailoverRefusedError);
+  });
+});
+
+describe('readReplicaState', () => {
+  it('parses one psql row into the replica proof', async () => {
+    const exec = vi.fn(async () => `t|${SYSID}|0/3000060|streaming|2\n`);
+    await expect(readReplicaState({ exec })).resolves.toEqual({
+      inRecovery: true,
+      systemIdentifier: SYSID,
+      replayLsn: '0/3000060',
+      receiverStatus: 'streaming',
+      lastMsgAgeS: 2,
+    });
+    const sql = exec.mock.calls[0][0] as string;
+    expect(sql).toContain('pg_is_in_recovery()');
+    expect(sql).toContain('pg_control_system()');
+    expect(sql).toContain('pg_stat_wal_receiver');
+  });
+
+  it('a primary reads as out of recovery with no receiver', async () => {
+    const exec = vi.fn(async () => `f|${SYSID}|||`);
+    await expect(readReplicaState({ exec })).resolves.toEqual({
+      inRecovery: false,
+      systemIdentifier: SYSID,
+      replayLsn: null,
+      receiverStatus: null,
+      lastMsgAgeS: null,
+    });
+  });
+
+  it('an exec failure or garbage output is unknown, never "promoted"', async () => {
+    const unknown = {
+      inRecovery: null,
+      systemIdentifier: null,
+      replayLsn: null,
+      receiverStatus: null,
+      lastMsgAgeS: null,
+    };
+    await expect(
+      readReplicaState({
+        exec: async () => {
+          throw new Error('pod down');
+        },
+      }),
+    ).resolves.toEqual(unknown);
+    await expect(readReplicaState({ exec: async () => 'error: x' })).resolves.toEqual(unknown);
+  });
+});
+
+describe('promoteStandby (tri-state, deadline not poll count)', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  const fakeTime = () => {
+    let t = 0;
+    return {
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += ms;
+      },
+    };
+  };
+  const readSeq = (seq: Array<boolean | null>) => {
+    let i = 0;
+    return vi.fn(async () => ({ inRecovery: seq[Math.min(i++, seq.length - 1)] }));
+  };
+
+  it("'promoted' only after a prior in-recovery read", async () => {
+    const readState = readSeq([true, true, false]);
+    const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...fakeTime() });
+    expect(verdict).toBe('promoted');
+    const argv = (ssh.sshKubectl as ReturnType<typeof vi.fn>).mock.calls[0][2] as string[];
+    expect(argv.join(' ')).toContain('pg_ctl promote');
+  });
+
+  it("a first out-of-recovery read is 'unknown' and never issues pg_ctl promote", async () => {
+    const readState = readSeq([false]);
+    const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...fakeTime() });
+    expect(verdict).toBe('unknown');
+    expect(ssh.sshKubectl).not.toHaveBeenCalled();
+  });
+
+  it("still in recovery at the deadline is 'in-recovery'", async () => {
+    const time = fakeTime();
+    const readState = readSeq([true]);
+    const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...time });
+    expect(verdict).toBe('in-recovery');
+    // The deadline, not a poll count, ended the wait.
+    expect(time.now()).toBeGreaterThanOrEqual(PROMOTE_DEADLINE_MS);
+  });
+
+  it("an unreadable state at the deadline is 'unknown'", async () => {
+    const readState = readSeq([true, null]);
+    const verdict = await promoteStandby('10.0.0.9', '/k', { readState, ...fakeTime() });
+    expect(verdict).toBe('unknown');
+  });
+
+  it('the promote deadline is 120 s', () => {
+    expect(PROMOTE_DEADLINE_MS).toBe(120_000);
+  });
+});
+
+describe('failover journal (R2)', () => {
+  let dir: string;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const seed = (env: Record<string, unknown>) => {
+    dir = mkdtempSync(join(tmpdir(), 'vc-journal-'));
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({ projectName: 'proj', environments: { e4: env } }),
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+  };
+  const readEnv = () =>
+    JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments.e4;
+
+  it('writes the journal shape through the config save and returns its id', async () => {
+    seed(baseEnvConfig());
+    const id = await writeFailoverJournal(
+      { environment: 'e4' },
+      { target: 'standby', primaryLsn: '0/3000060', systemIdentifier: SYSID },
+    );
+    const j = readEnv().ha.failoverInFlight;
+    expect(j).toEqual({
+      id,
+      target: 'standby',
+      startedAt: expect.any(String),
+      primaryLsn: '0/3000060',
+      systemIdentifier: SYSID,
+    });
+    expect(id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(Number.isNaN(Date.parse(j.startedAt))).toBe(false);
+  });
+
+  it('clears the journal and keeps the rest of ha', async () => {
+    seed(
+      baseEnvConfig({
+        ha: { failoverInFlight: { id: 'j1', target: 'standby' } },
+      }),
+    );
+    await clearFailoverJournal({ environment: 'e4' });
+    const env = readEnv();
+    expect(env.ha.failoverInFlight).toBeUndefined();
+    expect(env.ha.systemIdentifier).toBe(SYSID);
+  });
+
+  it('swapHaRoles clears the journal in the same save that persists the swap', () => {
+    seed(
+      baseEnvConfig({
+        ha: {
+          primary: { masterIp: '10.0.0.1', stack: 'e4-primary' },
+          standby: { masterIp: '10.0.0.9', stack: 'e4-standby' },
+          failoverInFlight: { id: 'j1', target: 'standby' },
+        },
+      }),
+    );
+    swapHaRoles('e4');
+    const env = readEnv();
+    expect(env.ha.primary.stack).toBe('e4-standby');
+    expect(env.ha.failoverInFlight).toBeUndefined();
+    // The failback guard reads this against deployedAt.
+    expect(Date.parse(env.lastFailover)).toBeGreaterThan(Date.parse(env.deployedAt));
+    // The promoted side keeps the same lineage: the identifier survives.
+    expect(env.ha.systemIdentifier).toBe(SYSID);
+  });
+});

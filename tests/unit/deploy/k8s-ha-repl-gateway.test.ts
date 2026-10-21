@@ -76,6 +76,8 @@ function happyExec({
     if (cmd.includes('pg_isready')) return 'IS_READY';
     if (cmd.includes('pg_is_in_recovery')) return 't';
     if (cmd.includes('pg_stat_replication')) return reseeded ? 'streaming' : '';
+    // The verified-streaming result records the standby's system identifier.
+    if (cmd.includes('pg_control_system')) return '7412345678901234567';
     return '';
   };
 }
@@ -357,6 +359,15 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
 
     const res = await runWithFakeTimers(() => setupReplication(opts));
     expect(res.streaming).toBe(true);
+    // Verified streaming carries the standby's identity for the deploy to
+    // record as ha.systemIdentifier (failover's replica proof). Read on the
+    // standby master, the side failover promotes.
+    expect(res.systemIdentifier).toBe('7412345678901234567');
+    const sysidRead = vi
+      .mocked(runCommandAsync)
+      .mock.calls.map((c) => (c[0] as string[]).join(' '))
+      .find((c) => c.includes('pg_control_system'));
+    expect(sysidRead).toContain(`root@${opts.standbyIp}`);
 
     const calls = vi.mocked(runCommandAsync).mock.calls;
     const joined = calls.map(([argv]) => (argv as string[]).join(' '));

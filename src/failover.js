@@ -21,13 +21,21 @@ import { spinner } from './lib/cli/progress.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import {
+  assertFailoverPreconditions,
+  clearFailoverJournal,
+  readReplicaState,
+  recordSystemIdentifier,
+  writeFailoverJournal,
+} from './lib/deploy/failover-guard.js';
+import {
   PROMOTABLE_CERTIFICATES,
   PROMOTE_ISSUER_ANNOTATION,
 } from './lib/deploy/k8s/acme-issuer-policy.js';
 import {
   getReplPasswordFromSecret,
-  isStandbyPromoted,
   isStandbyStreaming,
+  k8sPsqlRunner,
+  PROMOTE_DEADLINE_MS,
   promoteStandby,
   reseedStandbyFromPrimary,
 } from './lib/deploy/replication.js';
@@ -230,37 +238,34 @@ async function isPrimaryPostgresReady(primaryIp, sshKeyPath) {
 async function promoteStandbyDatabase(standbyIp, sshKeyPath) {
   const _t = perfTimer('failover.promoteStandby');
   try {
-    return await promoteStandby(standbyIp, sshKeyPath);
+    return await promoteStandby(standbyIp, sshKeyPath, {
+      readState: () => readReplicaState({ exec: k8sPsqlRunner(standbyIp, sshKeyPath) }),
+    });
   } finally {
     _t.end();
   }
 }
 
 /**
- * Re-seed the standby from the primary (when reachable) then promote it.
- * ABORTS the whole failover (throws) if the re-seed fails or the promotion
- * cannot be confirmed — we must NEVER scale down the old primary and flip DNS
- * onto a standby that was left half-seeded or is still in recovery. Brings the
- * k8s failover path to parity with compose (compose/ha.js hard-fails both).
+ * Re-seed the standby from the primary when it needs it, before promotion.
+ * ABORTS the whole failover (throws) if the re-seed fails: we must NEVER flip
+ * DNS onto a standby that was left half-seeded. Promotion itself is a separate
+ * step (failoverHA), gated by failover-guard's preconditions and journal.
+ *
+ * @param {object} servers
+ * @param {string} sshKeyPath
+ * @param {{ start: Function, stop: Function }} s
+ * @param {{ onSeeded?: (systemIdentifier: string) => void }} [opts]
  */
-async function reseedAndPromoteOrAbort(servers, sshKeyPath, s) {
-  // Step -1 (convergent-rerun guard): if the standby has ALREADY exited
-  // recovery it was promoted by a prior (crashed mid-flow) run. Re-seeding now
-  // would pg_basebackup OVER a promoted — possibly already-serving — database.
-  // Skip re-seed + promote and let the rest of the flow re-converge idempotently.
-  if (await isStandbyPromoted(servers.standby.ip, sshKeyPath)) {
-    p.log.info('Standby already promoted, convergent rerun, skipping reseed + promote');
-    return { alreadyPromoted: true };
-  }
-
-  // Step 0: Re-seed standby from primary — UNLESS the standby is already
-  // verifiably streaming. A streaming standby is in-parity with the primary
-  // (that is exactly what streaming replication guarantees), so a pre-promotion
-  // pg_basebackup is wasted RTO — and worse, the standby's live walreceiver
-  // holds the persistent replication slot, so a basebackup that tried to attach
-  // to it would error "replication slot is active for PID …" (live RCA
-  // compose-ha 2026-07-07; the reseed's basebackup now uses a temp slot, but
-  // skipping entirely is still the right call for an already-streaming standby).
+async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded } = {}) {
+  // Skip the re-seed when the standby is already verifiably streaming. A
+  // streaming standby is in-parity with the primary (that is exactly what
+  // streaming replication guarantees), so a pre-promotion pg_basebackup is
+  // wasted RTO, and worse, the standby's live walreceiver holds the persistent
+  // replication slot, so a basebackup that tried to attach to it would error
+  // "replication slot is active for PID ..." (live RCA compose-ha 2026-07-07;
+  // the reseed's basebackup now uses a temp slot, but skipping entirely is
+  // still the right call for an already-streaming standby).
   // Prefer the STANDBY-side signal (pg_stat_wal_receiver): failover often runs
   // when the primary is unhealthy, and the standby can see its own receiver even
   // when the primary is unreachable.
@@ -268,50 +273,47 @@ async function reseedAndPromoteOrAbort(servers, sshKeyPath, s) {
     p.log.info(
       'Standby already streaming, skipping re-seed (parity guaranteed by streaming state)',
     );
-  } else if (await isPrimaryPostgresReady(servers.primary.ip, sshKeyPath)) {
-    s.start('Re-seeding standby from primary (pg_basebackup)');
-    let result;
-    try {
-      // standby.dbIp: the node the standby db pod is pinned to — the
-      // re-seed's node-side PGDATA swap ssh's there (roles are not yet swapped;
-      // the re-seed runs BEFORE promotion, so the deploy-time gateway relay
-      // directions still hold and the re-seed dials the standby's LOCAL
-      // WireGuard relay — no primary IP needed, no gateway re-render).
-      result = await reseedStandbyFromPrimary(servers.standby.ip, sshKeyPath, {
-        standbyDbIp: servers.standby.dbIp,
-        standbyDbPrivateIp: servers.standby.dbPrivateIp,
-      });
-    } catch (err) {
-      s.stop('Re-seed failed, aborting failover');
-      throw new Error(
-        `Failover aborted before promotion: ${err.message}\n` +
-          `The standby was NOT promoted and the old primary is untouched: no ` +
-          `split-brain and no DNS flip. Resolve the issue (or redeploy the ` +
-          `standby) and retry.`,
-      );
-    }
-    s.stop(
-      result === 'reseeded'
-        ? 'Standby re-seeded with primary state'
-        : 'Primary unreachable mid-probe, promoting standby with current state',
-    );
-  } else {
+    return;
+  }
+  if (!(await isPrimaryPostgresReady(servers.primary.ip, sshKeyPath))) {
     p.log.warn('Primary unreachable, skipping re-seed, promoting standby with current state');
+    return;
   }
-
-  // Step 1: Promote standby database. A failure here is FATAL: continuing would
-  // scale down the old primary and flip DNS onto a read-only standby.
-  s.start('Promoting standby database');
-  const promoted = await promoteStandbyDatabase(servers.standby.ip, sshKeyPath);
-  if (!promoted) {
-    s.stop('Promotion could not be confirmed, aborting failover');
+  s.start('Re-seeding standby from primary (pg_basebackup)');
+  let result;
+  try {
+    // standby.dbIp: the node the standby db pod is pinned to; the re-seed's
+    // node-side PGDATA swap ssh's there (roles are not yet swapped; the
+    // re-seed runs BEFORE promotion, so the deploy-time gateway relay
+    // directions still hold and the re-seed dials the standby's LOCAL
+    // WireGuard relay: no primary IP needed, no gateway re-render).
+    result = await reseedStandbyFromPrimary(servers.standby.ip, sshKeyPath, {
+      standbyDbIp: servers.standby.dbIp,
+      standbyDbPrivateIp: servers.standby.dbPrivateIp,
+      onSeeded,
+    });
+  } catch (err) {
+    s.stop('Re-seed failed, aborting failover');
     throw new Error(
-      `Failover aborted: standby ${servers.standby.ip} did not exit recovery mode. ` +
-        `Refusing to scale down the old primary or flip DNS onto an unpromoted ` +
-        `standby (that would take the app read-only). Verify the standby db pod and retry.`,
+      `Failover aborted before promotion: ${err.message}\n` +
+        `The standby was NOT promoted and the old primary is untouched: no ` +
+        `split-brain and no DNS flip. Resolve the issue (or redeploy the ` +
+        `standby) and retry.`,
     );
   }
-  s.stop('Standby database promoted to primary');
+  s.stop(
+    result === 'reseeded'
+      ? 'Standby re-seeded with primary state'
+      : 'Primary unreachable mid-probe, promoting standby with current state',
+  );
+}
+
+/** R3: the exit message for a promotion the flow could not confirm. */
+export function promotionUnknownMessage(envName) {
+  return (
+    `promotion state unknown: old primary kept fenced; rerun vibecarbon failover ${envName} ` +
+    `to finish`
+  );
 }
 
 /**
@@ -319,7 +321,7 @@ async function reseedAndPromoteOrAbort(servers, sshKeyPath, s) {
  * (no new customer writes) and BEFORE promotion, ensure the standby has
  * replayed every byte of WAL the primary held at quiesce time.
  *
- * Why: streaming ≠ caught-up. reseedAndPromoteOrAbort's streaming short-circuit
+ * Why: streaming ≠ caught-up. reseedStandbyOrAbort's streaming short-circuit
  * skips the pre-promote reseed for an already-streaming standby, but the WAL
  * records written just before quiesce may still be in flight — promoting then
  * would silently drop them, making "RPO zero" merely probabilistic. This gate
@@ -344,7 +346,8 @@ async function reseedAndPromoteOrAbort(servers, sshKeyPath, s) {
  * @param {{ primary: { ip: string }, standby: { ip: string } }} servers
  * @param {string} sshKeyPath
  * @param {{ attempts?: number, intervalMs?: number, deps?: { kubectl?: Function, getPostgresPod?: Function, isStreaming?: Function, sleep?: Function } }} [opts]
- * @returns {Promise<void>}
+ * @returns {Promise<string|null>} the primary's captured WAL position (the
+ *   failover journal's primaryLsn), or null when the gate does not apply
  */
 export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
   const { attempts = 30, intervalMs = 2000, deps = {} } = opts;
@@ -359,7 +362,7 @@ export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
     p.log.info(
       'Standby not streaming, catch-up gate N/A (the downstream reseed copies all state).',
     );
-    return;
+    return null;
   }
 
   // Capture the primary's WAL high-water mark ONCE, after quiesce.
@@ -406,7 +409,7 @@ export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
       last = firstErrorLine(err);
     }
     const caughtUp = (typeof out === 'string' ? out : '').trim();
-    if (caughtUp === 't') return; // standby replayed up to the primary's quiesce LSN
+    if (caughtUp === 't') return target; // standby replayed up to the primary's quiesce LSN
     last = caughtUp || last;
     if (attempt < attempts) await sleep(intervalMs);
   }
@@ -1265,6 +1268,12 @@ export function swapHaRoles(envName) {
   // Honest DR posture until a reconverge deploy re-establishes streaming.
   envConfig.replication = 'degraded';
   envConfig.degraded = true;
+  // The failback guard compares this with deployedAt: until a deploy
+  // reconverges, the new standby is the old primary and holds no replica.
+  envConfig.lastFailover = new Date().toISOString();
+  // R2: the journal is cleared by the same save that persists the swap, so no
+  // crash can leave a swapped config that still claims a failover in flight.
+  delete ha.failoverInFlight;
   saveProjectConfig(config);
 }
 
@@ -1354,9 +1363,11 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
 /**
  * Pilot-light HA failover core (shared across DNS-provider strategies). Order:
  *   1. preflight (verify persisted config + probe standby state backend)
+ *  1b. replica proof (failover-guard)                  (refuse = nothing touched)
  *   2. provision standby worker capacity 0→N          (abort = clean exit)
  *   3. quiesce primary app tier                        (planned only)
- *   4. re-seed + promote standby                       (abort = un-quiesce + throw)
+ *   4. catch-up, re-seed, journal, promote standby     (skipped on resume;
+ *                                                       unconfirmed = kept fenced)
  *   5. scale up promoted app tier
  *   6. readiness gate (rollout-status each + public API probe)
  *  6b. scale down old primary                          (unplanned only, best-effort)
@@ -1382,9 +1393,15 @@ export async function failoverHA(
     preflight = preflightPilotFailover,
     provision = provisionStandbyCapacity,
     isPrimaryReady = isPrimaryPostgresReady,
+    readStandbyState = (srv, key) => readReplicaState({ exec: k8sPsqlRunner(srv.standby.ip, key) }),
+    readPrimaryState = (srv, key) => readReplicaState({ exec: k8sPsqlRunner(srv.primary.ip, key) }),
     scale = scaleDeployments,
     catchUp = waitForStandbyCaughtUp,
-    reseedPromote = reseedAndPromoteOrAbort,
+    reseed = reseedStandbyOrAbort,
+    writeJournal = writeFailoverJournal,
+    clearJournal = clearFailoverJournal,
+    promote = (srv, key) => promoteStandbyDatabase(srv.standby.ip, key),
+    now = Date.now,
     restoreWalgRole = restorePromotedWalgRole,
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
@@ -1478,6 +1495,30 @@ export async function failoverHA(
     servers.standby.dbPrivateIp = freshDbPrivateIp;
   }
 
+  // STEP 1b — Positive replica proof (R1), before any cloud change, quiesce or
+  // kubectl write. Reads the standby's recovery flag, system identifier and
+  // walreceiver, plus the primary's identifier when it answers (planned mode).
+  // A refusal throws FailoverRefusedError naming the reason and the deploy that
+  // fixes it; `resume` means a previous run of THIS failover (its journal) already
+  // promoted the standby, so reseed and promote are skipped.
+  const planned = await isPrimaryReady(servers.primary.ip, sshKeyPath);
+  const standbyState = await readStandbyState(servers, sshKeyPath);
+  const primaryState = planned ? await readPrimaryState(servers, sshKeyPath) : null;
+  const { mode } = assertFailoverPreconditions({
+    envConfig,
+    environment: envName,
+    standbyState,
+    tier: 'k8s-ha',
+    planned,
+    primaryState,
+  });
+  if (mode === 'resume') {
+    p.log.info(
+      'Standby already promoted by an unfinished run of this failover (journal set), ' +
+        'resuming after the promote',
+    );
+  }
+
   // STEP 2 — Provision standby worker capacity (0→N). The ONLY step that adds
   // cloud capacity, and it runs FIRST: on ANY failure here (an
   // AbortProvisioningError OR a pre-converge cred-resolution throw) the
@@ -1504,47 +1545,16 @@ export async function failoverHA(
     process.exit(1);
   }
 
-  // STEP 3 — Quiesce the primary app tier (PLANNED failover only). Scaling the
-  // scale-up list to 0 stops every writer while leaving postgres (a StatefulSet,
-  // not in the list) up for the final catch-up re-seed. THE WRITE OUTAGE OPENS
-  // HERE — quiesce-BEFORE-promote is what makes this a true zero-data-loss
-  // upgrade (no writer can commit past the final catch-up). Unplanned (primary
-  // unreachable) skips quiesce; the old primary's app tier is scaled down after
-  // the gate instead (step 6b).
-  const planned = await isPrimaryReady(servers.primary.ip, sshKeyPath);
-  if (planned) {
-    s.start('Quiescing primary app tier (write outage begins)');
-    await scale(servers.primary.ip, sshKeyPath, scaleUpList, 0, 'quiesce primary app tier');
-    s.stop('Primary app tier quiesced');
-  }
-
-  // STEP 4 — Final catch-up re-seed (against the now-quiesced primary) + promote.
-  // A re-seed failure or unconfirmed promotion ABORTS (throws). In planned mode
-  // the primary was just quiesced, so before rethrowing we best-effort un-quiesce
-  // it — an aborted failover must NOT leave the site down.
-  try {
-    // STEP 3b (PLANNED only) — zero-data-loss gate. The primary is quiesced (no
-    // new customer writes), so before crossing the point of no return, wait for
-    // the STREAMING standby to replay the primary's WAL up to its quiesce-time
-    // position — streaming ≠ caught-up, and the streaming short-circuit would
-    // otherwise promote a standby that hasn't replayed the last pre-quiesce
-    // records. A timeout THROWS into the catch below → the primary is
-    // un-quiesced and the failover aborts (a lagging standby is never promoted).
-    if (planned) {
-      s.start("Verifying the standby replayed the primary's final WAL (zero-data-loss)");
-      try {
-        await catchUp(servers, sshKeyPath);
-        s.stop('Standby caught up to the primary: safe to promote');
-      } catch (cuErr) {
-        s.stop('Standby did not catch up, aborting failover');
-        throw cuErr;
-      }
-    }
-    await reseedPromote(servers, sshKeyPath, s);
-  } catch (err) {
-    if (planned) {
-      // The primary was quiesced moments ago — an aborted failover must not
-      // leave the site down. Un-quiesce (best-effort) BEFORE rethrowing.
+  /**
+   * STEP 4: final catch-up gate, re-seed, journal, promote. Until the journal is
+   * written nothing is promoted, so any throw un-quiesces the primary (planned)
+   * and aborts. From the promote call on, only a proven 'in-recovery' verdict
+   * un-fences it (R3); anything unconfirmed keeps the old primary fenced, leaves
+   * the journal set and exits non-zero, and the rerun resumes from the journal.
+   */
+  async function catchUpReseedAndPromote() {
+    const unquiesce = async () => {
+      if (!planned) return;
       p.log.warn('Failover aborted after quiesce, re-scaling the primary app tier back up.');
       await scale(
         servers.primary.ip,
@@ -1554,11 +1564,90 @@ export async function failoverHA(
         'un-quiesce primary (failover aborted)',
       ).catch(() => {});
       p.log.info('Primary app tier restored; the original primary is serving again.');
+    };
+
+    try {
+      // STEP 3b (PLANNED only): zero-data-loss gate. The primary is quiesced, so
+      // wait for the STREAMING standby to replay the primary's WAL up to its
+      // quiesce-time position (R1d); its captured LSN goes into the journal.
+      let primaryLsn = null;
+      if (planned) {
+        s.start("Verifying the standby replayed the primary's final WAL (zero-data-loss)");
+        try {
+          primaryLsn = await catchUp(servers, sshKeyPath);
+          s.stop('Standby caught up to the primary: safe to promote');
+        } catch (cuErr) {
+          s.stop('Standby did not catch up, aborting failover');
+          throw cuErr;
+        }
+      }
+      await reseed(servers, sshKeyPath, s, {
+        onSeeded: (sysid) => recordSystemIdentifier({ environment: envName }, sysid),
+      });
+      // R2: the journal goes down immediately before the promote call.
+      await writeJournal(
+        { environment: envName },
+        {
+          target: 'standby',
+          primaryLsn: primaryLsn ?? null,
+          systemIdentifier: standbyState.systemIdentifier,
+        },
+      );
+    } catch (err) {
+      // An aborted failover must not leave the site down. The error already
+      // states the world (standby NOT promoted, DNS NOT flipped) and the retry
+      // guidance, so rethrow it for the top-level handler.
+      await unquiesce();
+      throw err;
     }
-    // reseedAndPromoteOrAbort's error already states the world (standby NOT
-    // promoted, DNS NOT flipped) and the retry guidance — rethrow so it
-    // surfaces once via the top-level handler instead of duplicating it here.
-    throw err;
+
+    // STEP 4a: promote. The deadline bounds RTO only; the verdict decides.
+    s.start('Promoting standby database');
+    const startedAt = now();
+    let verdict;
+    try {
+      verdict = await promote(servers, sshKeyPath);
+    } catch {
+      verdict = 'unknown';
+    }
+    // A verdict that lands past the deadline came from a promote that overran
+    // its budget; nothing after the deadline acts on it. Fence, and let the
+    // rerun resume from the journal.
+    if (verdict === 'promoted' && now() - startedAt > PROMOTE_DEADLINE_MS) verdict = 'unknown';
+
+    if (verdict === 'promoted') {
+      s.stop('Standby database promoted to primary');
+      return;
+    }
+    if (verdict === 'in-recovery') {
+      s.stop('Promotion did not take, aborting failover');
+      await clearJournal({ environment: envName });
+      await unquiesce();
+      throw new Error(
+        `Failover aborted: standby ${servers.standby.ip} is still in recovery after ` +
+          `${Math.round(PROMOTE_DEADLINE_MS / 1000)}s, so nothing was promoted. Refusing to ` +
+          `flip DNS onto a read-only standby. Verify the standby db pod and retry.`,
+      );
+    }
+    s.stop('Promotion could not be confirmed, old primary kept fenced');
+    throw new Error(promotionUnknownMessage(envName));
+  }
+
+  // STEP 3 — Quiesce the primary app tier (PLANNED failover only). Scaling the
+  // scale-up list to 0 stops every writer while leaving postgres (a StatefulSet,
+  // not in the list) up for the final catch-up re-seed. THE WRITE OUTAGE OPENS
+  // HERE: quiesce-BEFORE-promote is what makes this a true zero-data-loss
+  // upgrade (no writer can commit past the final catch-up). Unplanned (primary
+  // unreachable) skips quiesce; the old primary's app tier is scaled down after
+  // the gate instead (step 6b). On resume the scale to 0 re-applies the fence.
+  if (planned) {
+    s.start('Quiescing primary app tier (write outage begins)');
+    await scale(servers.primary.ip, sshKeyPath, scaleUpList, 0, 'quiesce primary app tier');
+    s.stop('Primary app tier quiesced');
+  }
+
+  if (mode === 'promote') {
+    await catchUpReseedAndPromote();
   }
 
   // STEP 4b — Move the wal-g WRITE-GUARD onto the promoted cluster. The standby
@@ -1653,11 +1742,11 @@ export async function failoverHA(
     }
   }
 
-  // TERMINAL WRITE — persist the role swap LAST, after the DNS flip. A rerun
+  // TERMINAL WRITE: persist the role swap LAST, after the DNS flip. A rerun
   // BEFORE this point keeps the ORIGINAL direction (identifyServers reads the
-  // unswapped config), so a mid-flow crash re-runs the SAME failover — the
-  // already-promoted guard in reseedAndPromoteOrAbort makes that convergent.
-  // Persisting mid-flow would instead flip a rerun's direction. One write, here.
+  // unswapped config), so a mid-flow crash re-runs the SAME failover, and the
+  // journal written before the promote lets that rerun resume instead of
+  // promoting again. The same save clears the journal. One write, here.
   swapRoles(envName);
 
   if (strategy.updateDns) {
@@ -1904,4 +1993,4 @@ export async function run(args) {
 // waitForPromotedApiServing, promotedProbeArgv,
 // preflightPilotFailover, provisionStandbyCapacity, and AbortProvisioningError
 // are exported inline at their definitions above.)
-export { getReplPasswordFromSecret, reseedAndPromoteOrAbort, reseedStandbyFromPrimary, SPEC };
+export { getReplPasswordFromSecret, reseedStandbyFromPrimary, reseedStandbyOrAbort, SPEC };

@@ -51,6 +51,9 @@ const REPLICATION_SLOT = 'vibecarbon_standby_slot';
 // 5432. One port keeps primary_conninfo / pg_basebackup byte-identical.
 export const REPL_PORT = 5433;
 
+/** The cluster identity pg_basebackup copies and initdb mints fresh. */
+export const SYSTEM_IDENTIFIER_SQL = 'SELECT system_identifier FROM pg_control_system()';
+
 /**
  * The `primary_conninfo` the standby uses to stream from the primary. The
  * transport is a point-to-point WireGuard tunnel (see wireguard.js) — the
@@ -1283,6 +1286,9 @@ $$;
  *   Hetzner-shaped fallback here would make the re-seed's reachability probe
  *   fail closed into 'skipped' on other providers — promotion without
  *   re-seed.
+ * @param {(systemIdentifier: string) => (void|Promise<void>)} [opts.onSeeded] - called
+ *   with the reseeded standby's system identifier; callers record it as
+ *   envConfig.ha.systemIdentifier (failover-guard recordSystemIdentifier).
  * @returns {Promise<'reseeded'|'skipped'>} 'reseeded' on success, 'skipped' when
  *   the primary is unreachable. Throws on password-missing or a real failure —
  *   NEVER silently returns as if skipped.
@@ -1290,7 +1296,7 @@ $$;
 export async function reseedStandbyFromPrimary(
   standbyIp,
   sshKeyPath,
-  { standbyDbIp, standbyDbPrivateIp, detachSettleMs = 25_000 } = {},
+  { standbyDbIp, standbyDbPrivateIp, detachSettleMs = 25_000, onSeeded } = {},
 ) {
   if (!standbyDbPrivateIp) {
     // Same precondition class as the standbyDbIp check below: a
@@ -1646,23 +1652,117 @@ export async function reseedStandbyFromPrimary(
         'the primary (check the standby db logs).',
     );
   }
+  // Record what was seeded: failover's replica proof (R1) compares the
+  // standby's system identifier against this value. Read on the standby, which
+  // pg_basebackup just gave the primary's identity.
+  if (onSeeded) {
+    const sysid = (
+      await sshKubectl(standbyIp, sshKeyPath, [
+        'exec',
+        '-n',
+        'vibecarbon',
+        pod,
+        '--',
+        'psql',
+        '-U',
+        'postgres',
+        '-tAc',
+        SYSTEM_IDENTIFIER_SQL,
+      ])
+    ).trim();
+    if (!/^\d+$/.test(sysid)) {
+      throw new Error(
+        `standby re-seed finished but its system identifier could not be read ` +
+          `(got: ${sysid.slice(0, 80) || 'empty'}), so the seed cannot be recorded.`,
+      );
+    }
+    await onSeeded(sysid);
+  }
   return 'reseeded';
 }
 
 /**
- * Promote the standby database to primary (k8s transport) and confirm it exited
- * recovery. Returns true only when pg_is_in_recovery() flips to 'f' — the caller
- * MUST abort the failover on false rather than flip DNS onto a read-only standby.
+ * Wall-clock budget for a promotion to show up as "out of recovery". A deadline,
+ * not a poll count: the verdict below is what keeps failover correct, and this
+ * number only bounds RTO (R3, M3).
+ */
+export const PROMOTE_DEADLINE_MS = 120_000;
+
+/**
+ * A psql runner for the k8s db pod: `exec(sql) -> Promise<string>`, the shape
+ * failover-guard's readReplicaState takes.
+ *
+ * @param {string} ip - cluster master IP (kubectl target)
+ * @param {string} sshKeyPath
+ * @returns {(sql: string) => Promise<string>}
+ */
+export function k8sPsqlRunner(ip, sshKeyPath) {
+  return async (sql) => {
+    const pod = await getPostgresPod(ip, sshKeyPath);
+    const out = await sshKubectl(ip, sshKeyPath, [
+      'exec',
+      '-n',
+      'vibecarbon',
+      pod,
+      '--',
+      'psql',
+      '-U',
+      'postgres',
+      '-tAc',
+      sql,
+    ]);
+    return typeof out === 'string' ? out : '';
+  };
+}
+
+/**
+ * Promote the standby database (k8s transport) and report what happened:
+ *   - 'promoted': it was seen IN recovery before the promote, then out of it;
+ *   - 'in-recovery': still a replica when the deadline lapsed (nothing promoted);
+ *   - 'unknown': anything else, including a first reading that is already out
+ *     of recovery (that is not proof THIS call promoted it, so pg_ctl promote
+ *     is not even issued) and an unreadable state at the deadline.
+ *
+ * Only 'in-recovery' lets a caller un-fence the old primary: on 'unknown' the
+ * standby may be promoted, and serving from both sides is a split brain.
  *
  * @param {string} standbyIp
  * @param {string} sshKeyPath
- * @returns {Promise<boolean>}
+ * @param {object} opts
+ * @param {() => Promise<{ inRecovery: boolean|null }>} opts.readState - the
+ *   standby's failover-guard readReplicaState (required: the 't'/'f' parse
+ *   lives there and nowhere else)
+ * @param {number} [opts.deadlineMs]
+ * @param {number} [opts.pollMs]
+ * @param {() => number} [opts.now]
+ * @param {(ms: number) => Promise<void>} [opts.sleep]
+ * @returns {Promise<'promoted'|'in-recovery'|'unknown'>}
  */
-export async function promoteStandby(standbyIp, sshKeyPath) {
-  const pod = await getPostgresPod(standbyIp, sshKeyPath);
+export async function promoteStandby(
+  standbyIp,
+  sshKeyPath,
+  {
+    readState,
+    deadlineMs = PROMOTE_DEADLINE_MS,
+    pollMs = 2000,
+    now = Date.now,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  } = {},
+) {
+  if (typeof readState !== 'function') {
+    throw new TypeError('promoteStandby: readState is required');
+  }
+  const read = async () => {
+    try {
+      return (await readState())?.inRecovery ?? null;
+    } catch {
+      return null;
+    }
+  };
 
-  // Promote PostgreSQL on standby. pg_ctl promote may return non-zero even on
-  // success, so we confirm via the pg_is_in_recovery() poll below.
+  if ((await read()) !== true) return 'unknown';
+
+  const pod = await getPostgresPod(standbyIp, sshKeyPath);
   try {
     await sshKubectl(standbyIp, sshKeyPath, [
       'exec',
@@ -1676,31 +1776,18 @@ export async function promoteStandby(standbyIp, sshKeyPath) {
       'pg_ctl promote -D /var/lib/postgresql/data',
     ]);
   } catch {
-    // pg_ctl promote may return non-zero even on success — confirm via poll.
+    // pg_ctl promote may exit non-zero even on success; the reads below decide.
   }
 
-  for (let i = 0; i < 30; i++) {
-    try {
-      const result = await sshKubectl(standbyIp, sshKeyPath, [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        'SELECT pg_is_in_recovery()',
-      ]);
-      if (result.trim() === 'f') return true;
-    } catch {
-      // Retry
-    }
-    await new Promise((r) => setTimeout(r, 2000));
+  const deadline = now() + deadlineMs;
+  let last = true;
+  for (;;) {
+    last = await read();
+    if (last === false) return 'promoted';
+    if (now() >= deadline) break;
+    await sleep(pollMs);
   }
-
-  return false;
+  return last === true ? 'in-recovery' : 'unknown';
 }
 
 /**
@@ -1734,44 +1821,6 @@ export async function isStandbyStreaming(standbyIp, sshKeyPath) {
       'SELECT status FROM pg_stat_wal_receiver',
     ]);
     return (typeof out === 'string' ? out : '').trim() === 'streaming';
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Has the standby ALREADY exited recovery (i.e. been promoted to primary)?
- *
- * Queries pg_is_in_recovery() on the standby db pod. Returns true ONLY when the
- * result is 'f' (out of recovery = promoted). Non-throwing — any error (pod
- * down, exec failure, unreadable output) returns false so the caller falls back
- * to the normal re-seed + promote path.
- *
- * The failover flow checks this FIRST: on a convergent rerun after a mid-flow
- * crash the standby is already promoted, and a blind re-seed would pg_basebackup
- * OVER a promoted (and possibly already-serving) database. Mirrors the
- * non-throwing shape of isStandbyStreaming above.
- *
- * @param {string} standbyIp - standby cluster master IP (kubectl target)
- * @param {string} sshKeyPath
- * @returns {Promise<boolean>}
- */
-export async function isStandbyPromoted(standbyIp, sshKeyPath) {
-  try {
-    const pod = await getPostgresPod(standbyIp, sshKeyPath);
-    const out = await sshKubectl(standbyIp, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-tAc',
-      'SELECT pg_is_in_recovery()',
-    ]);
-    return (typeof out === 'string' ? out : '').trim() === 'f';
   } catch {
     return false;
   }

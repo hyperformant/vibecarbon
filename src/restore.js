@@ -33,6 +33,7 @@ import { configureStandbyReplication as realConfigureStandbyReplication } from '
 import { composeHaStandbyResyncHint } from './lib/deploy/compose/ha-role-swap.js';
 import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index.js';
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
+import { recordSystemIdentifier } from './lib/deploy/failover-guard.js';
 import {
   ensureReplicationSlot as realEnsureReplicationSlot,
   readK8sReplicationState as realReadK8sReplicationState,
@@ -770,6 +771,9 @@ export async function runK8sRestore({
         // The re-seed dials the standby's LOCAL WireGuard relay (private IP :
         // gateway port) — the deploy-time transport, unchanged by a restore.
         standbyDbPrivateIp: servers?.standby?.dbPrivateIp,
+        // The restored primary may carry another lineage than the last seed
+        // (a backup from before a re-create): record what the standby now holds.
+        onSeeded: (sysid) => recordSystemIdentifier({ environment: envName }, sysid),
       });
     } catch (err) {
       s.stop('Standby re-seed failed');

@@ -1451,6 +1451,7 @@ export async function executeDeployment(args, gatheredConfig) {
       domain,
       replicationStatus: k8sHaCtx.replicationStatus,
       degraded: k8sHaCtx.replicationStatus !== 'streaming',
+      systemIdentifier: k8sHaCtx.systemIdentifier ?? null,
     };
   }
 
@@ -1966,6 +1967,13 @@ export async function executeDeployment(args, gatheredConfig) {
           ha: {
             enabled: true,
             failoverRegion: secondaryRegion,
+            // The seeded standby's system identifier, set only when this deploy
+            // verified streaming. failover's replica proof (R1) compares the
+            // standby against it; a deploy that could not prove streaming
+            // leaves it unset, so an unplanned failover refuses until one does.
+            ...(deployResult?.systemIdentifier && {
+              systemIdentifier: deployResult.systemIdentifier,
+            }),
             ...(deployResult.primary && {
               primary: {
                 masterIp: deployResult.primary.masterIp,

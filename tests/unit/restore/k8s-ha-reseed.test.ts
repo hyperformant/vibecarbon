@@ -124,6 +124,8 @@ describe('runK8sRestore — k8s-HA standby re-seed', () => {
     expect(reseedStandbyFromPrimary).toHaveBeenCalledWith('10.0.2.1', '/tmp/key', {
       standbyDbIp: '10.0.2.9',
       standbyDbPrivateIp: '10.0.1.2',
+      // The restored primary's lineage is what the standby now holds: record it.
+      onSeeded: expect.any(Function),
     });
     // Verify reads pg_stat_replication on the PRIMARY master.
     expect(readReplicationState).toHaveBeenCalledWith('10.0.1.1', '/tmp/key');

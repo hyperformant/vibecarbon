@@ -36,6 +36,7 @@ import {
   DB_STS_BOOT_TIMEOUT_S,
   parsePgdataClaimFromPodJson,
   REPL_PORT,
+  SYSTEM_IDENTIFIER_SQL,
   swapPgdataViaHelperPod,
   verifyStreaming,
 } from '../../replication.js';
@@ -689,7 +690,8 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
  * @param {string} [options.standbyDbPrivateIp] - Standby database node private IP (gateway bind + egress netpol)
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
  * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort patch, pg_hba, restart, dependent-deployment rollout) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
- * @returns {Promise<{streaming: boolean}>} Replication status
+ * @returns {Promise<{streaming: boolean, lastState: string, systemIdentifier: string|null}>} Replication status;
+ *   systemIdentifier is the standby's, set only when streaming was verified
  */
 export async function setupReplication(options) {
   const { primaryIp, standbyIp, sshKeyPath } = options;
@@ -806,9 +808,37 @@ export async function setupReplication(options) {
       delaysMs: [2000],
     }),
   );
+  // The verified-streaming result carries the standby's system identifier: the
+  // deploy persists it as envConfig.ha.systemIdentifier, the value failover's
+  // replica proof (R1) compares against. Read on the standby, the side failover
+  // will promote; streaming already implies the primary's identity matches.
+  const readStandbySystemIdentifier = async () => {
+    const out = await runCommandAsync(
+      [
+        'ssh',
+        ...sshOpts,
+        `root@${standbyIp}`,
+        `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "${SYSTEM_IDENTIFIER_SQL}"`,
+      ],
+      { silent: true },
+    );
+    const sysid = (typeof out === 'string' ? out : '').trim();
+    if (!/^\d+$/.test(sysid)) {
+      throw new Error(
+        `replication is streaming but the standby's system identifier could not be read ` +
+          `(got: ${sysid.slice(0, 80) || 'empty'})`,
+      );
+    }
+    return sysid;
+  };
+
   if (probe.streaming) {
     p.log.info('Standby already streaming (seeded at first boot), skipping the reseed');
-    return { streaming: true, lastState: probe.lastState || 'streaming' };
+    return {
+      streaming: true,
+      lastState: probe.lastState || 'streaming',
+      systemIdentifier: await readStandbySystemIdentifier(),
+    };
   }
 
   // 4. Initialize standby as a streaming replica of the primary.
@@ -1168,5 +1198,9 @@ export async function setupReplication(options) {
     }),
   );
 
-  return { streaming, lastState };
+  return {
+    streaming,
+    lastState,
+    systemIdentifier: streaming ? await readStandbySystemIdentifier() : null,
+  };
 }
