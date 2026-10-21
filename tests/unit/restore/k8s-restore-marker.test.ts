@@ -43,8 +43,15 @@ const args = (over: Record<string, unknown> = {}) => ({
   sshKeyPath: '/tmp/key',
   envConfig: { deployMode: 'kubernetes' },
   readFreeBytes: async () => 500 * 1024 ** 3,
+  pushBaseBackup: async (a: Record<string, unknown>) => {
+    events.push('basePush');
+    pushArgs.push(a);
+    return { name: 'base_000000020000000000000004' };
+  },
   ...over,
 });
+
+const pushArgs: Array<Record<string, unknown>> = [];
 
 let events: string[];
 let rolloutFails: boolean;
@@ -57,6 +64,7 @@ function patchOf(argv: string[]) {
 beforeEach(() => {
   vi.clearAllMocks();
   events = [];
+  pushArgs.length = 0;
   rolloutFails = false;
   vi.mocked(ssh.sshKubectl).mockImplementation(async (_ip, _key, argv: string[]) => {
     const line = argv.join(' ');
@@ -104,7 +112,7 @@ describe('runK8sRestore: the restore marker', () => {
     expect(data.RESTORE_RECOVERY_CONF).toContain('-default_transaction_read_only');
   });
 
-  it('clears the keys only after Ready and the writable proof, then removes .vc-prev', async () => {
+  it('clears the keys only after Ready and the writable proof, removes .vc-prev, then pushes a base', async () => {
     await runK8sRestore(
       args({
         assertWritable: async () => {
@@ -122,7 +130,35 @@ describe('runK8sRestore: the restore marker', () => {
       'marker:clear',
       'rmDiscard',
       'scaleUp',
+      'basePush',
     ]);
+    // On the restored primary, through the k8s backup Job.
+    expect(pushArgs).toEqual([
+      expect.objectContaining({
+        tier: 'k8s',
+        ip: '10.0.1.1',
+        sshKeyPath: '/tmp/key',
+        envName: 'prod',
+      }),
+    ]);
+  });
+
+  it('a failed base push fails the restore once the app is back', async () => {
+    const fail = new Error(
+      'promoted, but the first base backup on the new timeline failed: boom; run vibecarbon backup prod now',
+    );
+    await expect(
+      runK8sRestore(
+        args({
+          assertWritable: async () => 'writable',
+          pushBaseBackup: async () => {
+            events.push('basePush');
+            throw fail;
+          },
+        }),
+      ),
+    ).rejects.toBe(fail);
+    expect(events.slice(-3)).toEqual(['rmDiscard', 'scaleUp', 'basePush']);
   });
 
   it('a rollout failure leaves the keys set and names the init container logs', async () => {
@@ -177,6 +213,7 @@ describe('runK8sRestore: an unproven restore keeps the marker and .vc-prev (I4)'
     expect(events).not.toContain('marker:clear');
     expect(events).not.toContain('retirePrev');
     expect(events).not.toContain('scaleUp');
+    expect(events).not.toContain('basePush');
   });
 });
 

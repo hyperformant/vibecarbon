@@ -68,6 +68,7 @@ import { pollUntil } from './lib/retry.js';
 import { assertPersistedRoleTypes, planK8sScaleChanges } from './lib/scale-plan.js';
 import { buildComposeTypeOptions, buildSimpleTypeOptions } from './lib/server-types.js';
 import { sshRun, sshRunScript } from './lib/ssh.js';
+import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
 import { buildRecoveryConfig, renderRecoveryConf } from './lib/walg/recovery-config.js';
 import {
   backupCredentialVars,
@@ -959,6 +960,24 @@ async function scaleServers(ctx) {
         }),
       );
       s.stop('Database restored');
+
+      // 8. The first base backup on the restored timeline
+      //    (post-promote-backup.js), primary arm only: a standby's replacement
+      //    never writes the canonical prefix. restoreCompose has retired
+      //    .vc-prev, so the base holds the restored cluster only. A failure
+      //    throws into the cleanup below: the new server goes, the old one stays.
+      if (server.role !== 'standby') {
+        s.start('Pushing the first base backup on the restored timeline...');
+        const { name } = await pushBaseBackupAfterPromote({
+          tier: 'compose',
+          ip: newIp,
+          sshKeyPath,
+          projectName,
+          envName: environment,
+          retain: envConfig.backup?.retentionDays,
+        });
+        s.stop(`Base backup ${name} pushed on the restored timeline`);
+      }
 
       // 9a. Update DNS to the new server. On HTTP-01 this must happen BEFORE
       // recreating services (Traefik challenges the A record on startup; a

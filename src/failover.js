@@ -94,6 +94,7 @@ import { pollUntil } from './lib/retry.js';
 import { declaredAddonNames, k8sPrimaryOnlyWorkloads } from './lib/services/standby-policy.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
+import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
 import {
   backupCredentialVars,
   printBaseBackupList,
@@ -1747,6 +1748,7 @@ export async function failoverHA(
         projectConfig,
         tier: 'k8s-ha',
       }),
+    pushBaseBackup = pushBaseBackupAfterPromote,
   } = deps;
 
   const servers = identify(envName, envConfig, projectConfig);
@@ -2324,6 +2326,28 @@ export async function failoverHA(
     }
   }
 
+  // The first base backup on the new timeline (post-promote-backup.js): after
+  // the DNS flip, the add-ons, the WALG_ROLE move and the swap save, so it never
+  // holds the outage open. Not attempted while the promoted cluster still reads
+  // standby (it would skip): the degraded error below names the missing base.
+  let basePush = { ok: true };
+  if (backupHealth.promoted.ok) {
+    s.start('Pushing the first base backup on the new timeline');
+    try {
+      const { name } = await pushBaseBackup({
+        tier: 'k8s',
+        ip: servers.standby.ip,
+        sshKeyPath,
+        envName,
+      });
+      s.stop(`Base backup ${name} pushed on the new timeline`);
+    } catch (err) {
+      s.stop('First base backup on the new timeline NOT pushed');
+      p.log.error(err.message);
+      basePush = { ok: false, error: err };
+    }
+  }
+
   if (!dnsFlip.ok) {
     p.log.warn(
       'The standby is promoted and the roles are saved, but DNS still points at the old primary.',
@@ -2375,6 +2399,7 @@ export async function failoverHA(
       }),
     );
   }
+  if (!basePush.ok) throw basePush.error;
 }
 
 // ============================================================================

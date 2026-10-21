@@ -64,6 +64,10 @@ import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
+import {
+  PostPromoteBackupError,
+  pushBaseBackupAfterPromote,
+} from './lib/walg/post-promote-backup.js';
 import { RESTORE_PITR_RE } from './lib/walg/recovery-config.js';
 import {
   AmbiguousLineageError,
@@ -587,6 +591,15 @@ export async function run(args, deps = {}) {
       });
     }
   } catch (error) {
+    if (error instanceof PostPromoteBackupError) {
+      // The database IS restored and serving (the runner already printed the
+      // push failure): record its lineage, then fail the command.
+      recordRestoredLineage(envName, listing.lineage);
+      p.log.warn(
+        `The restored database is serving on ${serverIp}; only its first base backup is missing.`,
+      );
+      process.exit(1);
+    }
     s.stop('Restore failed');
     p.log.error(error.message);
     if (!isCompose) {
@@ -731,6 +744,7 @@ export async function runComposeRestore({
   configureStandbyReplication = realConfigureStandbyReplication,
   markStandbyUnproven = realMarkStandbyUnproven,
   recordSystemIdentifier = realRecordSystemIdentifier,
+  pushBaseBackup = pushBaseBackupAfterPromote,
   readStandbyState = (ip) =>
     readReplicaState({ exec: composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`) }),
   assertWritable = () =>
@@ -764,6 +778,21 @@ export async function runComposeRestore({
     assertWritable,
   });
   s.stop('Database restored');
+
+  // The first base backup on the restored timeline (post-promote-backup.js).
+  // restoreCompose has already retired .vc-prev and removed the discard, so the
+  // base holds the restored cluster only. A failure fails the command after the
+  // standby re-seed below, which must still run.
+  const basePushError = await pushFirstBase(s, () =>
+    pushBaseBackup({
+      tier: 'compose',
+      ip: serverIp,
+      sshKeyPath,
+      projectName,
+      envName,
+      retain: envConfig.backup?.retentionDays,
+    }),
+  );
 
   // compose-ha: the wal-g restore rewound the primary to an earlier LSN, so the
   // standby now has WAL AHEAD of the primary and cannot resume streaming. Re-seed
@@ -826,8 +855,31 @@ export async function runComposeRestore({
     }
   }
 
+  if (basePushError) throw basePushError;
   p.log.success('Restore completed successfully');
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);
+}
+
+/**
+ * Run a restore's post-promotion base push under the spinner. Returns the
+ * failure (already printed) instead of throwing: the restore itself is done,
+ * and what follows it (the standby re-seed) must still run.
+ *
+ * @param {{ start: (m: string) => void, stop: (m: string) => void }} s
+ * @param {() => Promise<{ name: string }>} push
+ * @returns {Promise<Error|null>}
+ */
+async function pushFirstBase(s, push) {
+  s.start('Pushing the first base backup on the restored timeline');
+  try {
+    const { name } = await push();
+    s.stop(`Base backup ${name} pushed on the restored timeline`);
+    return null;
+  } catch (err) {
+    s.stop('First base backup on the restored timeline NOT pushed');
+    p.log.error(err.message);
+    return err;
+  }
 }
 
 // k8s restore is wal-g-native: postgres + wal-g live in the db pod, which
@@ -922,6 +974,7 @@ export async function runK8sRestore({
   readReplicationState = realReadK8sReplicationState,
   markStandbyUnproven = realMarkStandbyUnproven,
   recordSystemIdentifier = realRecordSystemIdentifier,
+  pushBaseBackup = pushBaseBackupAfterPromote,
   assertWritable = () =>
     assertRestoredPrimaryWritable({
       environment: envName,
@@ -1070,7 +1123,20 @@ export async function runK8sRestore({
   await perfAsync('restore.scaleUpApp', async () => scaleUpApp(serverIp, sshKeyPath));
   s.stop('Database restored');
 
-  p.log.success('Restore completed successfully');
+  // 8. The first base backup on the restored timeline (post-promote-backup.js),
+  //    after .vc-prev is retired and the discard removed (step 6), so the base
+  //    holds the restored cluster only. A failure fails the command after the
+  //    HA standby re-seed below, which must still run.
+  const basePushError = await pushFirstBase(s, () =>
+    pushBaseBackup({
+      tier: 'k8s',
+      ip: serverIp,
+      sshKeyPath,
+      envName,
+    }),
+  );
+
+  if (!basePushError) p.log.success('Restore completed successfully');
   p.log.info('The application has been scaled back up.');
 
   // k8s-HA: the standby is a SEPARATE cluster deployed with `restore: null` — a
@@ -1184,6 +1250,7 @@ export async function runK8sRestore({
     }
   }
 
+  if (basePushError) throw basePushError;
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);
 }
 

@@ -20,6 +20,14 @@
  *
  * Unplanned (the primary does not answer): promote < dns, and nothing is fenced
  * or read on the unreachable side before the promote.
+ *
+ * Both modes, both tiers: the first base backup on the new timeline
+ * (pushBaseBackupAfterPromote, H2b) comes after the WALG_ROLE move
+ * (restore*WalgRole) and after the role-swap save that clears
+ * ha.failoverInFlight (swapHaRoles / swapComposeHaRoles), and after the DNS
+ * flip. It is anchored on those calls, not on the config save underneath.
+ * A WALG_ROLE move that failed skips it (one error names both), and a failed
+ * push fails the command once the roles are saved.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -90,7 +98,9 @@ vi.mock('node:fs', async (orig) => {
 
 const ssh = await import('../../../src/lib/ssh.js');
 const { failoverHA } = await import('../../../src/failover.js');
-const { failoverComposeHA } = await import('../../../src/lib/deploy/compose/ha.js');
+const { failoverComposeHA, restoreComposeWalgRole } = await import(
+  '../../../src/lib/deploy/compose/ha.js'
+);
 
 const SYSID = '7412345678901234567';
 const PRIMARY_LSN = '0/3000060';
@@ -137,6 +147,10 @@ const recordingPsql = (ip: string) => async (sql: string) => {
   return '';
 };
 
+let walgArmed = true;
+let pushFails: string | null = null;
+const pushArgs: Array<Record<string, unknown>> = [];
+
 const tracker = { spinner: () => ({ start() {}, stop() {}, message() {} }) };
 
 /** Index of the first occurrence; -1 fails every `<` assertion below. */
@@ -180,6 +194,9 @@ function expectUnplannedOrder() {
 
 afterEach(() => {
   order.length = 0;
+  pushArgs.length = 0;
+  walgArmed = true;
+  pushFails = null;
   vi.clearAllMocks();
 });
 
@@ -232,13 +249,26 @@ async function runK8s(primaryReachable: boolean) {
       order.push('promote');
       return 'promoted';
     },
-    restoreWalgRole: async () => ({
-      promoted: { ok: true as const },
-      demoted: { ok: true as const },
-    }),
+    restoreWalgRole: async () => {
+      order.push('walgRole');
+      return {
+        promoted: walgArmed
+          ? { ok: true as const }
+          : { ok: false as const, error: new Error('no') },
+        demoted: { ok: true as const },
+      };
+    },
     gate: async () => {},
     promoteIssuer: async () => ({ patched: [] }),
-    swapRoles: () => {},
+    swapRoles: () => {
+      order.push('swap');
+    },
+    pushBaseBackup: async (a: Record<string, unknown>) => {
+      order.push('basePush');
+      pushArgs.push(a);
+      if (pushFails) throw new Error(pushFails);
+      return { name: 'base_000000020000000000000004' };
+    },
     reconcileRetired: async () => ({ fenced: [], unreachable: [] }),
     writeFence: async () => ({ ok: true }),
     recordFence: () => {},
@@ -332,7 +362,22 @@ async function runCompose(primaryReachable: boolean) {
       return { ok: true, reached: true };
     },
     confirmUnproven: async () => {},
-    swapRoles: () => {},
+    restoreWalgRole: async (a: Parameters<typeof restoreComposeWalgRole>[0]) => {
+      const health = walgArmed
+        ? await restoreComposeWalgRole(a)
+        : { ok: false, error: new Error('no') };
+      order.push('walgRole');
+      return health;
+    },
+    swapRoles: () => {
+      order.push('swap');
+    },
+    pushBaseBackup: async (a: Record<string, unknown>) => {
+      order.push('basePush');
+      pushArgs.push(a);
+      if (pushFails) throw new Error(pushFails);
+      return { name: 'base_000000020000000000000004' };
+    },
     reconcileRetired: async () => ({ fenced: [], unreachable: [] }),
     writeFence: async () => ({ ok: true }),
     recordFence: () => {},
@@ -376,5 +421,50 @@ describe('failover step order: compose-ha (failoverComposeHA)', () => {
   it('unplanned: promote < dns, nothing fenced or read on the unreachable primary first', async () => {
     await runCompose(false);
     expectUnplannedOrder();
+  });
+});
+
+function expectBasePushLast() {
+  for (const step of ['walgRole', 'swap', 'dns', 'basePush']) {
+    expect(order, `failover never reached ${step}`).toContain(step);
+  }
+  expect(at('promote')).toBeLessThan(at('walgRole'));
+  expect(at('walgRole'), 'the base is pushed once WALG_ROLE=primary').toBeLessThan(at('basePush'));
+  expect(at('swap'), 'the base is pushed after the swap save').toBeLessThan(at('basePush'));
+  expect(at('dns'), 'the base push stays out of the RTO path').toBeLessThan(at('basePush'));
+  expect(order.filter((x) => x === 'basePush')).toHaveLength(1);
+  expect(pushArgs[0]).toMatchObject({ ip: STANDBY_IP, envName: 'prod' });
+}
+
+describe.each([
+  ['k8s-ha', 'k8s', runK8s],
+  ['compose-ha', 'compose', runCompose],
+] as const)('failover %s: a base backup on the new timeline', (_label, tier, run) => {
+  it.each([true, false])(
+    'planned=%s: walgRole < swap < basePush, after the DNS flip',
+    async (planned) => {
+      await run(planned);
+      expectBasePushLast();
+      expect(pushArgs[0]).toMatchObject({ tier });
+    },
+  );
+
+  it('a failed WALG_ROLE move skips the push; the one error names the missing base', async () => {
+    walgArmed = false;
+    const err = await run(true).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain('FAILOVER COMPLETED, BACKUPS DID NOT');
+    expect(err.message).toContain('no base backup on the new timeline');
+    expect(err.message).toContain('vibecarbon backup prod');
+    expect(order).not.toContain('basePush');
+  });
+
+  it('a failed push fails the command after the roles are saved', async () => {
+    pushFails =
+      'promoted, but the first base backup on the new timeline failed: boom; run vibecarbon backup prod now';
+    const err = await run(true).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toBe(pushFails);
+    expect(at('swap')).toBeLessThan(at('basePush'));
   });
 });

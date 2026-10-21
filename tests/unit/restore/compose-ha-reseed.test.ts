@@ -56,6 +56,7 @@ const baseArgs = {
   markStandbyUnproven: () => {},
   recordSystemIdentifier: () => {},
   assertWritable: async () => 'writable',
+  pushBaseBackup: vi.fn(async () => ({ name: 'base_000000020000000000000004' })),
 };
 
 // The restore target (serverIp) is derived in run() as the role==='primary'
@@ -446,5 +447,80 @@ describe('assertRestoredPrimaryWritable', () => {
     await expect(
       assertRestoredPrimaryWritable({ environment: 'prod', envConfig: {}, exec }),
     ).rejects.toThrow(/write-fenced and could not be lifted/);
+  });
+});
+
+describe('runComposeRestore: the first base on the restored timeline (H2b)', () => {
+  const haEnv = {
+    deployMode: 'compose-ha',
+    backup: { retentionDays: 14 },
+    servers: [
+      { ip: '10.0.0.1', role: 'primary' },
+      { ip: '10.0.0.2', role: 'standby' },
+    ],
+  };
+
+  it('pushes on the restored primary after restoreCompose (which retired .vc-prev), before the re-seed', async () => {
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    const pushBaseBackup = vi.fn(async () => ({ name: 'base_000000020000000000000004' }));
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnv,
+      restoreCompose,
+      configureStandbyReplication,
+      pushBaseBackup,
+    });
+    expect(pushBaseBackup).toHaveBeenCalledWith({
+      tier: 'compose',
+      ip: '10.0.0.1',
+      sshKeyPath: '/tmp/key',
+      projectName: 'myapp',
+      envName: 'prod',
+      retain: 14,
+    });
+    expect(restoreCompose.mock.invocationCallOrder[0]).toBeLessThan(
+      pushBaseBackup.mock.invocationCallOrder[0],
+    );
+    expect(pushBaseBackup.mock.invocationCallOrder[0]).toBeLessThan(
+      configureStandbyReplication.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('a failed push still re-seeds the standby, then fails the restore with its message', async () => {
+    const fail = new Error(
+      'promoted, but the first base backup on the new timeline failed: boom; run vibecarbon backup prod now',
+    );
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    const success = vi.spyOn(p.log, 'success');
+    await expect(
+      runComposeRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: haEnv,
+        restoreCompose: vi.fn().mockResolvedValue(undefined),
+        configureStandbyReplication,
+        pushBaseBackup: vi.fn().mockRejectedValue(fail),
+      }),
+    ).rejects.toBe(fail);
+    expect(configureStandbyReplication).toHaveBeenCalled();
+    expect(success).not.toHaveBeenCalledWith('Restore completed successfully');
+    success.mockRestore();
+  });
+
+  it('a restore that fails never pushes', async () => {
+    const pushBaseBackup = vi.fn();
+    await expect(
+      runComposeRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: haEnv,
+        restoreCompose: vi.fn().mockRejectedValue(new Error('fetch failed')),
+        configureStandbyReplication: vi.fn(),
+        pushBaseBackup,
+      }),
+    ).rejects.toThrow('fetch failed');
+    expect(pushBaseBackup).not.toHaveBeenCalled();
   });
 });

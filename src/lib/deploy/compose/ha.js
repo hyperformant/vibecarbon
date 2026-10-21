@@ -32,6 +32,7 @@ import {
   composeWriterServices,
   enabledAddonNames,
 } from '../../services/standby-policy.js';
+import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import { backupFenceWarning, recordBackupFence, writeComposeBackupFence } from '../backup-fence.js';
 import { RECONCILE_FLAGS_SED } from '../bundle.js';
@@ -1941,6 +1942,8 @@ export async function failoverComposeHA(
     flipDns = flipComposeDns,
     writeFence = writeComposeBackupFence,
     recordFence = recordBackupFence,
+    restoreWalgRole = restoreComposeWalgRole,
+    pushBaseBackup = pushBaseBackupAfterPromote,
     reconcileRetired = () =>
       reconcileRetiredFence({
         environment: envName,
@@ -2314,7 +2317,7 @@ export async function failoverComposeHA(
   // recreated database. Never throws — the verdict is carried to the end of the
   // failover (see restoreComposeWalgRole).
   s.start('Moving the wal-g write-guard to the new primary');
-  const backupHealth = await restoreComposeWalgRole({
+  const backupHealth = await restoreWalgRole({
     promotedIp: standbyServer.ip,
     sshKeyPath,
     projectName,
@@ -2578,6 +2581,30 @@ export async function failoverComposeHA(
     }
   }
 
+  // The first base backup on the new timeline (post-promote-backup.js): after
+  // the DNS flip, the add-ons, the WALG_ROLE move and the swap save, so it never
+  // holds the outage open. Not attempted while the promoted node still reads
+  // standby (it would skip): the degraded error below names the missing base.
+  let basePush = { ok: true };
+  if (backupHealth.ok) {
+    s.start('Pushing the first base backup on the new timeline');
+    try {
+      const { name } = await pushBaseBackup({
+        tier: 'compose',
+        ip: standbyServer.ip,
+        sshKeyPath,
+        projectName,
+        envName,
+        retain: envConfig.backup?.retentionDays,
+      });
+      s.stop(`Base backup ${name} pushed on the new timeline`);
+    } catch (err) {
+      s.stop('First base backup on the new timeline NOT pushed');
+      p.log.error(err.message);
+      basePush = { ok: false, error: err };
+    }
+  }
+
   if (dnsFlip.ok) p.log.success('Failover complete');
   else p.log.warn('The standby is promoted and the roles are saved, but DNS was not flipped.');
   // The roles persisted above are now inverted relative to the Pulumi stacks.
@@ -2618,4 +2645,5 @@ export async function failoverComposeHA(
       }),
     );
   }
+  if (!basePush.ok) throw basePush.error;
 }

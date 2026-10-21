@@ -73,6 +73,7 @@ const baseArgs = {
   envName: 'prod',
   serverIp: '10.0.1.1', // restored primary master
   sshKeyPath: '/tmp/key',
+  pushBaseBackup: vi.fn(async () => ({ name: 'base_000000020000000000000004' })),
 };
 
 beforeEach(() => {
@@ -408,5 +409,50 @@ describe('runK8sRestore: the restored primary is proven writable before the app 
     });
     expect(order[0]).toBe('writable');
     expect(order).toContain('scaleUp');
+  });
+});
+
+describe('runK8sRestore: the first base on the restored timeline (H2b)', () => {
+  it('pushes on the restored primary before the standby re-seed', async () => {
+    const reseedStandbyFromPrimary = vi.fn().mockResolvedValue('reseeded');
+    await runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnvConfig,
+      ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+      reseedStandbyFromPrimary,
+      readReplicationState: vi.fn().mockResolvedValue('streaming'),
+      verifySleep: async () => {},
+    });
+    expect(baseArgs.pushBaseBackup).toHaveBeenCalledWith(
+      expect.objectContaining({ tier: 'k8s', ip: '10.0.1.1', envName: 'prod' }),
+    );
+    expect(baseArgs.pushBaseBackup.mock.invocationCallOrder[0]).toBeLessThan(
+      reseedStandbyFromPrimary.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('a failed push still re-seeds the standby, then fails the restore with its message', async () => {
+    const fail = new Error(
+      'promoted, but the first base backup on the new timeline failed: boom; run vibecarbon backup prod now',
+    );
+    const reseedStandbyFromPrimary = vi.fn().mockResolvedValue('reseeded');
+    const markStandbyUnproven = vi.fn();
+    await expect(
+      runK8sRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: haEnvConfig,
+        pushBaseBackup: vi.fn().mockRejectedValue(fail),
+        ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+        reseedStandbyFromPrimary,
+        readReplicationState: vi.fn().mockResolvedValue('streaming'),
+        markStandbyUnproven,
+        verifySleep: async () => {},
+      }),
+    ).rejects.toBe(fail);
+    expect(reseedStandbyFromPrimary).toHaveBeenCalled();
+    // The standby re-seeded and streams: only the base is missing.
+    expect(markStandbyUnproven).not.toHaveBeenCalled();
   });
 });

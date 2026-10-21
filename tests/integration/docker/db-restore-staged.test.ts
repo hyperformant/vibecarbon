@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { writeBackupFence } from '../../../src/lib/deploy/backup-fence.js';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
 import {
@@ -41,6 +42,12 @@ import { REMOVE_DISCARD_SH, RETIRE_PREVIOUS_SH } from '../../../src/lib/walg/res
  * sentinel keeps its ETag, and with WALG_PREVENT_WAL_OVERWRITE=true a segment
  * name already archived cannot be pushed again with other bytes.
  *
+ * Every promotion ends with a base on its new timeline (H2b): after a restore
+ * (the CLI's .vc-prev retire first) and after a streaming standby's promote
+ * (behind the backup-prefix fence, which still refuses the old primary), the
+ * base compose-backup.sh pushes is the newest, on the new timeline, and a
+ * `restore latest` from it keeps a write made after the promotion.
+ *
  * Everything this creates is named vcrestore<pid>* and removed in afterAll;
  * nothing else on the daemon is touched. Set UPDATE_WALG_FIXTURE=1 to rewrite
  * tests/fixtures/walg/sentinel-3.0.9.json from this run's sentinel.
@@ -54,6 +61,9 @@ const NET = NAME;
 const S3_CT = `${NAME}-s3`;
 const DB_CT = `${NAME}-db`;
 const VOL = `${NAME}-data`;
+/** The streaming standby a promote test builds next to DB_CT. */
+const SB_CT = `${NAME}-sb`;
+const SB_VOL = `${NAME}-sb-data`;
 const DB_IMAGE = 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r2';
 const GARAGE_IMAGE =
   'dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020';
@@ -110,16 +120,16 @@ async function until<T>(what: string, fn: () => T | Promise<T>, timeoutMs = 120_
   }
 }
 
-function startDb() {
+function startDb(ct = DB_CT, vol = VOL) {
   docker([
     'run',
     '-d',
     '--name',
-    DB_CT,
+    ct,
     '--network',
     NET,
     '-v',
-    `${VOL}:${PGDATA}`,
+    `${vol}:${PGDATA}`,
     '-v',
     `${GUARD}:/usr/local/bin/db-guard.sh:ro`,
     ...SCRIPT_MOUNTS,
@@ -142,28 +152,58 @@ function startDb() {
   ]);
 }
 
-function stopDb() {
-  docker(['stop', '-t', '60', DB_CT]);
-  docker(['rm', DB_CT]);
+function stopDb(ct = DB_CT) {
+  docker(['stop', '-t', '60', ct]);
+  docker(['rm', ct]);
 }
 
 // Over TCP, never the unix socket: WALG_ENV's PGHOST points psql at the
 // socket, where the entrypoint's socket-only init server answers (and says it
 // is out of recovery) before the real server starts. A readiness read there
 // lands in the gap between the two and cascades into every later test.
-const psql = (sql: string) =>
-  docker(['exec', DB_CT, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-tAc', sql]).trim();
+const psql = (sql: string, ct = DB_CT) =>
+  docker(['exec', ct, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-tAc', sql]).trim();
 
-async function waitPromoted() {
+async function waitPromoted(ct = DB_CT) {
   await until(
     'the db to accept connections and leave recovery',
-    () => psql('SELECT pg_is_in_recovery()') === 'f',
+    () => psql('SELECT pg_is_in_recovery()', ct) === 'f',
     300_000,
   );
 }
 
 /** The running database's system identifier: the name of its archive folder. */
-const sysidOf = () => psql('SELECT system_identifier FROM pg_control_system()');
+const sysidOf = (ct = DB_CT) => psql('SELECT system_identifier FROM pg_control_system()', ct);
+
+/** The timeline the database writes on now (its insert position's WAL file). */
+const timelineOf = (ct = DB_CT) =>
+  Number.parseInt(psql('SELECT substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8)', ct), 16);
+
+/** Close the current WAL segment and wait until the archiver has pushed it. */
+async function archiveCurrentWal(ct = DB_CT) {
+  const segment = psql('SELECT pg_walfile_name(pg_switch_wal())', ct);
+  await until(
+    `${segment} archived`,
+    () => psql("SELECT coalesce(last_archived_wal, '') FROM pg_stat_archiver", ct) >= segment,
+    180_000,
+  );
+}
+
+/** The newest base in a lineage folder, as `restore latest` resolves it. */
+async function latestBase(s3: Awaited<ReturnType<typeof createS3Client>>, folder: string) {
+  return resolveRestoreBase(
+    await listBaseBackups({ s3, bucket: BUCKET, prefix: folder }),
+    'latest',
+  );
+}
+
+/** The one BACKUP_RESULT=pushed:<name> of a compose-backup.sh run. */
+function pushedName(run: { status: number | null; stdout: string; stderr: string }) {
+  expect(run.status, run.stdout + run.stderr).toBe(0);
+  const marker = run.stdout.split('\n').find((l) => l.startsWith('BACKUP_RESULT=pushed:'));
+  expect(marker, run.stdout).toBeTruthy();
+  return String(marker).slice('BACKUP_RESULT=pushed:'.length);
+}
 
 /** wal-g in the db container, through walg-env.sh like every caller. */
 const walgInDb = (args: string) =>
@@ -174,7 +214,7 @@ const walgInDb = (args: string) =>
   );
 
 /** Run a restore script the way restoreCompose does: a throwaway db container. */
-function runRestoreScript(dir: string, backup: string, lineage: string) {
+function runRestoreScript(dir: string, backup: string, lineage: string, vol = VOL) {
   const scriptPath = join(dir, `restore-${backup}.sh`);
   writeFileSync(
     scriptPath,
@@ -192,7 +232,7 @@ function runRestoreScript(dir: string, backup: string, lineage: string) {
       '--network',
       NET,
       '-v',
-      `${VOL}:${PGDATA}`,
+      `${vol}:${PGDATA}`,
       '-v',
       `${GUARD}:/usr/local/bin/db-guard.sh:ro`,
       '-v',
@@ -218,7 +258,7 @@ function runRestoreScript(dir: string, backup: string, lineage: string) {
  * `docker` shim that routes its `docker compose exec -T db …` into this
  * test's db container. PGPASSWORD mirrors the compose db service env.
  */
-function runComposeBackupScript(dir: string) {
+function runComposeBackupScript(dir: string, ct = DB_CT) {
   const project = join(dir, 'project');
   const bin = join(dir, 'bin');
   mkdirSync(join(project, 'backup'), { recursive: true });
@@ -230,7 +270,7 @@ function runComposeBackupScript(dir: string) {
   const realDocker = execFileSync('sh', ['-c', 'command -v docker'], { encoding: 'utf-8' }).trim();
   writeFileSync(
     join(bin, 'docker'),
-    `#!/bin/bash\n# docker compose exec -T db <cmd...>\nshift 4\nexec ${realDocker} exec -i -e PGPASSWORD=restore-staged-test ${DB_CT} "$@"\n`,
+    `#!/bin/bash\n# docker compose exec -T db <cmd...>\nshift 4\nexec ${realDocker} exec -i -e PGPASSWORD=restore-staged-test ${ct} "$@"\n`,
   );
   chmodSync(join(bin, 'docker'), 0o755);
   return spawnSync('bash', ['backup/compose-backup.sh'], {
@@ -311,8 +351,10 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
   afterAll(() => {
     for (const args of [
       ['rm', '-f', DB_CT],
+      ['rm', '-f', SB_CT],
       ['rm', '-f', S3_CT],
       ['volume', 'rm', '-f', VOL],
+      ['volume', 'rm', '-f', SB_VOL],
       ['network', 'rm', NET],
     ]) {
       try {
@@ -442,6 +484,38 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     await waitPromoted();
     expect(psql("SELECT count(*) FROM t WHERE v IN ('before-base', 'after-restore')")).toBe('2');
   });
+  it('a restore ends with a base on its new timeline; restore latest keeps a write made after it', {
+    timeout: 600_000,
+  }, async () => {
+    expect(folderA).not.toBe('');
+    stopDb();
+    const r = runRestoreScript(dir, backupName, lineageA);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    startDb();
+    await waitPromoted();
+    const timeline = timelineOf();
+    expect(timeline).toBeGreaterThan(1);
+    // restoreCompose once the restore is proven: .vc-prev goes BEFORE the push,
+    // so the base holds the restored cluster only.
+    docker(['exec', DB_CT, 'sh', '-c', RETIRE_PREVIOUS_SH]);
+    docker(['exec', DB_CT, 'sh', '-c', REMOVE_DISCARD_SH]);
+    const name = pushedName(runComposeBackupScript(dir));
+    const base = await latestBase(s3, folderA);
+    expect(base.name).toBe(name);
+    expect(base.timeline).toBe(timeline);
+
+    psql("INSERT INTO t VALUES ('after-promote-restore')");
+    await archiveCurrentWal();
+    stopDb();
+    const again = runRestoreScript(dir, base.name, lineageA);
+    expect(again.status, again.stdout + again.stderr).toBe(0);
+    startDb();
+    await waitPromoted();
+    expect(psql("SELECT count(*) FROM t WHERE v = 'after-promote-restore'")).toBe('1');
+    docker(['exec', DB_CT, 'sh', '-c', RETIRE_PREVIOUS_SH]);
+    docker(['exec', DB_CT, 'sh', '-c', REMOVE_DISCARD_SH]);
+  });
+
   it('a recreated database archives under its own lineage; the old archive is untouched', {
     timeout: 600_000,
   }, async () => {
@@ -526,5 +600,79 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
       new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${walFolder}${segment.slice(0, 24)}` }),
     );
     expect(again.Contents?.length).toBe(1);
+  });
+  it('a promoted standby pushes the first base on its timeline; restore latest keeps a later write', {
+    timeout: 900_000,
+  }, async () => {
+    const lineageB = sysidOf();
+    const folderB = `${PREFIX}/${lineageB}`;
+    // A streaming standby of DB_CT: replication from the network, then a
+    // pg_basebackup -R into its own volume.
+    const hba = psql('SHOW hba_file');
+    docker(['exec', DB_CT, 'sh', '-c', `echo 'host replication all all scram-sha-256' >> ${hba}`]);
+    psql('SELECT pg_reload_conf()');
+    docker(['volume', 'create', SB_VOL]);
+    docker([
+      'run',
+      '--rm',
+      '--network',
+      NET,
+      '-v',
+      `${SB_VOL}:${PGDATA}`,
+      '--entrypoint',
+      'sh',
+      DB_IMAGE,
+      '-c',
+      `pg_basebackup -d 'host=${DB_CT} user=postgres password=restore-staged-test' ` +
+        `-D ${PGDATA} -R -X stream -c fast && chown -R postgres:postgres ${PGDATA} && chmod 700 ${PGDATA}`,
+    ]);
+    startDb(SB_CT, SB_VOL);
+    await until(
+      'the standby to stream',
+      () => psql('SELECT status FROM pg_stat_wal_receiver', SB_CT) === 'streaming',
+      180_000,
+    );
+    psql("CREATE TABLE IF NOT EXISTS t (v text); INSERT INTO t VALUES ('before-promote')");
+    await until(
+      'the standby to replay the write',
+      () => psql("SELECT count(*) FROM t WHERE v = 'before-promote'", SB_CT) === '1',
+    );
+
+    // The failover: the primary is gone, the standby promotes, the fence
+    // names it (the real writer), and then the first base on its timeline.
+    stopDb();
+    expect(psql('SELECT pg_promote()', SB_CT)).toBe('t');
+    await waitPromoted(SB_CT);
+    const timeline = timelineOf(SB_CT);
+    expect(timeline).toBe(2);
+    const fence = await writeBackupFence({
+      exec: async (sql) => psql(sql, SB_CT),
+      runInDb: async (script) => docker(['exec', SB_CT, 'sh', '-c', script]),
+      primaryNode: SB_CT,
+    });
+    expect(fence.ok, JSON.stringify(fence)).toBe(true);
+    const name = pushedName(runComposeBackupScript(dir, SB_CT));
+    const base = await latestBase(s3, folderB);
+    expect(base.name).toBe(name);
+    expect(base.timeline).toBe(timeline);
+
+    psql("INSERT INTO t VALUES ('after-promote')", SB_CT);
+    await archiveCurrentWal(SB_CT);
+    stopDb(SB_CT);
+    const r = runRestoreScript(dir, base.name, lineageB, SB_VOL);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    startDb(SB_CT, SB_VOL);
+    await waitPromoted(SB_CT);
+    expect(
+      psql("SELECT count(*) FROM t WHERE v IN ('before-promote', 'after-promote')", SB_CT),
+    ).toBe('2');
+
+    // The old primary comes back on timeline 1: the fence refuses its base.
+    startDb();
+    await waitPromoted();
+    const old = runComposeBackupScript(dir);
+    expect(old.status, old.stdout + old.stderr).not.toBe(0);
+    expect(old.stderr).toContain('backup prefix fenced to another primary');
+    expect((await latestBase(s3, folderB)).name).toBe(name);
   });
 });

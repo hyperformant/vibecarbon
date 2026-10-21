@@ -16,12 +16,13 @@ import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 
 const h = vi.hoisted(() => {
   const events: string[] = [];
+  const backupIps: string[] = [];
   // Defer the backup's resolution onto a real timer so that, if the code were
   // (wrongly) awaiting it before provisioning, 'backup:resolved' would land
   // before 'create'. With the overlap, 'create' (a resolved-promise microtask)
   // races ahead of the timer and lands first.
   const backupDeferMs = 25;
-  return { events, backupDeferMs };
+  return { events, backupIps, backupDeferMs };
 });
 
 // scale resolves the restore's base backup from the backup bucket's stop
@@ -72,8 +73,9 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    backupCompose: () => {
+    backupCompose: (ip: string) => {
       h.events.push('backup:call');
+      h.backupIps.push(ip);
       return new Promise((res) => {
         setTimeout(() => {
           h.events.push('backup:resolved');
@@ -116,8 +118,10 @@ function makeCtx() {
       h.events.push('create');
       return { id: 'new-id', server: { public_net: { ipv4: { ip: '9.9.9.9' } } } };
     }),
-    waitForServer: vi.fn(async () => ({})),
-    deleteServer: vi.fn(async () => {}),
+    waitForServer: vi.fn(async () => ({ public_net: { ipv4: { ip: '9.9.9.9' } } })),
+    deleteServer: vi.fn(async (id: string) => {
+      h.events.push(`delete:${id}`);
+    }),
     apiRequest: vi.fn(async () => ({})),
   };
   return {
@@ -199,6 +203,41 @@ describe('scaleServers — background backup overlap (finding #2)', () => {
       expect(provider.createServer).toHaveBeenCalled();
       expect(provider.deleteServer).toHaveBeenCalledWith('new-id');
       expect(h.events).not.toContain('restore:call');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('pushes the first base on the NEW server after its restore, before the old server goes (H2b)', async () => {
+    h.events.length = 0;
+    h.backupIps.length = 0;
+    const { ctx } = makeCtx();
+    await SCALE_EFFECTS.scaleServers(ctx);
+    // The old server's backup, then the post-restore push on the new one.
+    expect(h.backupIps).toEqual(['1.1.1.1', '9.9.9.9']);
+    const push = h.events.lastIndexOf('backup:call');
+    expect(h.events.indexOf('restore:call')).toBeLessThan(push);
+    expect(push).toBeLessThan(h.events.indexOf('delete:old-id'));
+  });
+
+  it('a post-restore push that skips fails the scale: the new server goes, the old one stays', async () => {
+    h.events.length = 0;
+    h.backupIps.length = 0;
+    const { provider, ctx } = makeCtx();
+    const compose = await import('../../../src/lib/deploy/compose/index.js');
+    const real = compose.backupCompose;
+    const spy = vi.spyOn(compose, 'backupCompose').mockImplementation(async (ip, ...rest) =>
+      ip === '9.9.9.9'
+        ? { result: 'skipped', reason: 'in-recovery' }
+        : // biome-ignore lint/suspicious/noExplicitAny: the factory mock's own signature.
+          (real as any)(ip, ...rest),
+    );
+    try {
+      await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+        'promoted, but the first base backup on the new timeline failed: the backup was skipped (in-recovery); run vibecarbon backup prod now',
+      );
+      expect(provider.deleteServer).toHaveBeenCalledWith('new-id');
+      expect(provider.deleteServer).not.toHaveBeenCalledWith('old-id');
     } finally {
       spy.mockRestore();
     }

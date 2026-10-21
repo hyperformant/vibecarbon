@@ -651,6 +651,25 @@ describe('applyK3sManifests with a restore point', () => {
     expect(before).not.toMatch(/shouldSkip/);
   });
 
+  it('deployK3s pushes the first base on the restored timeline once the app is up, outside the apply gate (H2b)', () => {
+    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const body = src.slice(src.indexOf('export async function deployK3s('));
+    const at = (needle: string) => {
+      const i = body.indexOf(needle);
+      expect(i, needle).toBeGreaterThan(-1);
+      return i;
+    };
+    const push = at('pushBaseBackupAfterPromote({');
+    // After the apply (finishDeployRestore retired .vc-prev; the app rolled)
+    // and after the archiving audit, outside the k3s-apply gate.
+    expect(push).toBeGreaterThan(at("state.completeStep('k3s-apply')"));
+    expect(push).toBeGreaterThan(at('verifyWalgBackups({ kubeconfig })'));
+    expect(body.slice(at("state.completeStep('k3s-apply')"), push)).toMatch(
+      /if \(options\.restore\) \{/,
+    );
+    expect(body.slice(push, push + 300)).toMatch(/tier: 'k8s',\s+ip: masterIp,/);
+  });
+
   it('without a restore point: no marker keys, no proof, no clear', async () => {
     await applyK3sManifests(args(null));
     const data = infraSecretApply()?.data ?? '';

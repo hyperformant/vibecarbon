@@ -62,6 +62,7 @@ import {
 } from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
+import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import {
   BACKUP_NAME_RE,
   LINEAGE_RE,
@@ -5168,6 +5169,25 @@ export async function deployK3s(options) {
     await perfAsync(`deploy.${perfPrefix}.verifyWalgBackups`, () =>
       verifyWalgBackups({ kubeconfig }),
     );
+  }
+
+  // 8c. `deploy -restore`: the first base backup on the restored timeline
+  //     (post-promote-backup.js), once the app is up and archiving is proven.
+  //     finishDeployRestore retired .vc-prev and removed the discard, so the
+  //     base holds the restored cluster only. Outside the `k3s-apply` gate: a
+  //     rerun after a failed push skips the apply, never the push. A failure
+  //     fails the deploy with the one message.
+  if (options.restore) {
+    s.start('Pushing the first base backup on the restored timeline');
+    const { name } = await perfAsync(`deploy.${perfPrefix}.restore.basePush`, () =>
+      pushBaseBackupAfterPromote({
+        tier: 'k8s',
+        ip: masterIp,
+        sshKeyPath: privateKeyPath,
+        envName: options.operatorEnv ?? options.environment,
+      }),
+    );
+    s.stop(`Base backup ${name} pushed on the restored timeline`);
   }
 
   // 9. Cluster details

@@ -110,7 +110,7 @@ describe('backup results are consumed', () => {
     return { file, text, callees: [...RUNNERS, ...aliases] };
   });
 
-  it('finds the known call sites (backup create, destroy, scale)', () => {
+  it('finds the known call sites (backup create, destroy, scale, the post-promote push)', () => {
     const call = new RegExp(`(?<![\\w.])(${RUNNERS.join('|')}|triggerJob)\\(`);
     const files = perFile
       .filter(({ file, text }) =>
@@ -126,7 +126,12 @@ describe('backup results are consumed', () => {
       )
       .map((f) => f.file)
       .sort();
-    expect(files).toEqual(['src/backup.js', 'src/destroy.js', 'src/scale.js']);
+    expect(files).toEqual([
+      'src/backup.js',
+      'src/destroy.js',
+      'src/lib/walg/post-promote-backup.js',
+      'src/scale.js',
+    ]);
   });
 
   it('every call reads .result within its own function', () => {

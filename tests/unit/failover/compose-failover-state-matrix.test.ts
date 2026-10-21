@@ -22,6 +22,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The first base backup on the new timeline has its own tests
+// (tests/unit/walg/post-promote-backup-census.test.ts, the step-order census);
+// here it lands.
+vi.mock('../../../src/lib/walg/post-promote-backup.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  pushBaseBackupAfterPromote: vi.fn(async () => ({ name: 'base_000000020000000000000004' })),
+}));
+
 const sshCalls: Array<{ ip: string; command: string }> = [];
 let sshOverride: ((c: string) => string | Error | undefined) | undefined;
 let addonStartResult: string | false = '';
