@@ -7,7 +7,8 @@
  *                                    holds no container for a scaled-to-zero
  *                                    add-on service (docker ps -a).
  *   - promoted_primary_only_running compose-ha after a promotion: the promoted
- *                                    node runs every promotion service.
+ *                                    node runs every promotion service (State
+ *                                    running; a restarting one does not pass).
  *   - promoted_db_not_recreated     compose-ha after a promotion: the db
  *                                    container id read on the standby before
  *                                    the failover equals the one after.
@@ -16,7 +17,10 @@
  *                                    computed remotely; the value never leaves).
  *   - promoted_addons_ready         k8s-ha after a promotion: every failover
  *                                    add-on Deployment on the promoted
- *                                    cluster has readyReplicas >= 1.
+ *                                    cluster reaches readyReplicas >= 1
+ *                                    within one 600s deadline (failover does
+ *                                    not wait on add-ons: Metabase's cold JVM
+ *                                    start and Pending pods take minutes).
  *
  * Every list comes from src/lib/services/standby-policy.js, never a literal.
  * With no add-on of the relevant kind enabled a check reports `skip` (the
@@ -81,38 +85,57 @@ const skip = (checkName: string, why: string): VerificationResult => ({
 
 const NO_PRIMARY_ONLY = 'no primary-only add-on enabled';
 
-/** Container names from `docker ps` output; null when the sentinel is missing. */
-export function parseContainerNames(output: string | null | undefined): string[] | null {
+/**
+ * Container name -> state (`running`, `restarting`, `exited`, ...) from
+ * `docker ps` output (one `<name>\t<state>` line each); null when the sentinel
+ * is missing. A line without a state maps to ''.
+ */
+export function parseContainerStates(
+  output: string | null | undefined,
+): Map<string, string> | null {
   const lines = String(output ?? '')
     .split('\n')
     .map((l) => l.trim());
   if (!lines.includes(PROBE_DONE)) return null;
-  return lines.filter((l) => l && l !== PROBE_DONE);
+  return new Map(
+    lines
+      .filter((l) => l && l !== PROBE_DONE)
+      .map((l) => {
+        const [name, state = ''] = l.split(/\s+/);
+        return [name, state] as [string, string];
+      }),
+  );
+}
+
+/** Container names from `docker ps` output; null when the sentinel is missing. */
+export function parseContainerNames(output: string | null | undefined): string[] | null {
+  const states = parseContainerStates(output);
+  return states ? [...states.keys()] : null;
 }
 
 export function buildContainerListCommand(all: boolean): string {
-  return `docker ps ${all ? '-a ' : ''}--format '{{.Names}}' && echo ${PROBE_DONE}`;
+  return `docker ps ${all ? '-a ' : ''}--format '{{.Names}}\t{{.State}}' && echo ${PROBE_DONE}`;
 }
 
 async function readContainerNames(
   opts: SshArgs & { ip: string | null },
   role: string,
   all: boolean,
-): Promise<{ ok: true; names: string[] } | { ok: false; message: string }> {
+): Promise<{ ok: true; states: Map<string, string> } | { ok: false; message: string }> {
   const { mode, projectName, ip, sshKeyPath } = opts;
   const missing = missingHandle(ip, sshKeyPath, role);
   if (missing) return { ok: false, message: `cannot reach the ${role}: ${missing}` };
   const run = opts.run ?? defaultRun(mode, projectName, sshKeyPath as string, role);
   const res = await run(ip as string, buildContainerListCommand(all));
   if (!res.ok) return { ok: false, message: `could not list containers on ${ip}: ${res.error}` };
-  const names = parseContainerNames(res.output);
-  if (!names) {
+  const states = parseContainerStates(res.output);
+  if (!states) {
     return {
       ok: false,
       message: `unreadable container list from ${ip}: ${res.output.slice(0, 200)}`,
     };
   }
-  return { ok: true, names };
+  return { ok: true, states };
 }
 
 /** standby_primary_only_absent: the standby runs no scaled-to-zero add-on container. */
@@ -126,7 +149,7 @@ export async function checkStandbyPrimaryOnlyAbsent(
   if ('message' in read) return fail(checkName, read.message);
   const present = services
     .map((s) => `${opts.projectName}-${s}`)
-    .filter((name) => read.names.includes(name));
+    .filter((name) => read.states.has(name));
   if (present.length > 0) {
     return fail(
       checkName,
@@ -146,9 +169,15 @@ export async function checkPromotedPrimaryOnlyRunning(
   if (services.length === 0) return skip(checkName, NO_PRIMARY_ONLY);
   const read = await readContainerNames({ ...opts, ip: opts.primaryIp }, 'promoted primary', false);
   if ('message' in read) return fail(checkName, read.message);
+  // `docker ps` without -a also lists a container stuck restarting (crash
+  // loop): only State running counts.
   const missing = services
     .map((s) => `${opts.projectName}-${s}`)
-    .filter((name) => !read.names.includes(name));
+    .filter((name) => read.states.get(name) !== 'running')
+    .map((name) => {
+      const state = read.states.get(name);
+      return state ? `${name} (${state})` : name;
+    });
   if (missing.length > 0) {
     return fail(
       checkName,
@@ -207,9 +236,21 @@ export function parseReadyDeployments(json: string | null | undefined): Set<stri
   }
 }
 
-/** promoted_addons_ready: every failover add-on Deployment is ready on the promoted cluster. */
+/** One deadline for every add-on: failover never waits on them, a cold Metabase JVM takes minutes. */
+export const PROMOTED_ADDONS_DEADLINE_MS = 600_000;
+const PROMOTED_ADDONS_POLL_MS = 10_000;
+
+/**
+ * promoted_addons_ready: every failover add-on Deployment becomes ready on the
+ * promoted cluster within PROMOTED_ADDONS_DEADLINE_MS. It re-reads only while
+ * the answer is "not ready yet"; a failed or unreadable read fails at once.
+ */
 export async function checkPromotedAddonsReady(
-  opts: SshArgs & { primaryIp: string | null },
+  opts: SshArgs & {
+    primaryIp: string | null;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+  },
 ): Promise<VerificationResult> {
   const checkName = 'promoted_addons_ready';
   const workloads = k8sFailoverAddonWorkloads(enabledAddons(opts.features));
@@ -218,22 +259,31 @@ export async function checkPromotedAddonsReady(
   const missing = missingHandle(primaryIp, sshKeyPath, 'promoted primary');
   if (missing) return fail(checkName, `cannot reach the promoted primary: ${missing}`);
   const run = opts.run ?? defaultRun(mode, projectName, sshKeyPath as string, 'promoted');
-  const res = await run(primaryIp as string, `${KUBECTL} get deployments -o json`);
-  if (!res.ok) return fail(checkName, `could not list deployments on ${primaryIp}: ${res.error}`);
-  const ready = parseReadyDeployments(res.output);
-  if (!ready) {
-    return fail(
-      checkName,
-      `unreadable deployment list from ${primaryIp}: ${res.output.slice(0, 200)}`,
-    );
-  }
-  const notReady = workloads.map((w) => w.name).filter((n) => !ready.has(n));
-  if (notReady.length > 0) {
-    return fail(
-      checkName,
-      `add-on Deployment(s) not ready on the promoted cluster ${primaryIp}: ${notReady.join(', ')}`,
-      { primaryIp, notReady },
-    );
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const deadline = now() + PROMOTED_ADDONS_DEADLINE_MS;
+  for (;;) {
+    const res = await run(primaryIp as string, `${KUBECTL} get deployments -o json`);
+    if (!res.ok) return fail(checkName, `could not list deployments on ${primaryIp}: ${res.error}`);
+    const ready = parseReadyDeployments(res.output);
+    if (!ready) {
+      return fail(
+        checkName,
+        `unreadable deployment list from ${primaryIp}: ${res.output.slice(0, 200)}`,
+      );
+    }
+    const notReady = workloads.map((w) => w.name).filter((n) => !ready.has(n));
+    if (notReady.length === 0) break;
+    const left = deadline - now();
+    if (left <= 0) {
+      return fail(
+        checkName,
+        `add-on Deployment(s) not ready on the promoted cluster ${primaryIp} after ` +
+          `${PROMOTED_ADDONS_DEADLINE_MS / 1000}s: ${notReady.join(', ')}`,
+        { primaryIp, notReady },
+      );
+    }
+    await sleep(Math.min(PROMOTED_ADDONS_POLL_MS, left));
   }
   return {
     checkName,

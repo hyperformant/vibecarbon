@@ -15,6 +15,7 @@ import {
   enabledAddons,
   haScenarioFeatures,
   parseContainerNames,
+  parseContainerStates,
   parseN8nKeyFingerprint,
   parseReadyDeployments,
 } from '../../e2e/checks/standby-addons.js';
@@ -121,17 +122,40 @@ describe('standby_primary_only_absent', () => {
 });
 
 describe('promoted_primary_only_running', () => {
+  const up = (name: string, state = 'running') => `${name}\t${state}`;
+  it('parses name and state per line; the names parser ignores the state', () => {
+    const out = ps(up('quorum-n8n'), up('quorum-metabase', 'restarting'));
+    expect([...(parseContainerStates(out) as Map<string, string>)]).toEqual([
+      ['quorum-n8n', 'running'],
+      ['quorum-metabase', 'restarting'],
+    ]);
+    expect(parseContainerNames(out)).toEqual(['quorum-n8n', 'quorum-metabase']);
+    expect(parseContainerStates('quorum-n8n\trunning')).toBeNull();
+  });
   it('passes when n8n and metabase run (setups are not required)', async () => {
-    const run = runner(ps('quorum-db', 'quorum-app', 'quorum-n8n', 'quorum-metabase'));
+    const run = runner(
+      ps(up('quorum-db'), up('quorum-app'), up('quorum-n8n'), up('quorum-metabase')),
+    );
     const r = await checkPromotedPrimaryOnlyRunning({ ...base, primaryIp: IP, run });
     expect(r.status).toBe('pass');
     expect(run.calls[0]).not.toContain('-a ');
+    expect(run.calls[0]).toContain('{{.State}}');
+  });
+  it('a restarting container does not pass (docker ps lists it, but it is not serving)', async () => {
+    const r = await checkPromotedPrimaryOnlyRunning({
+      ...base,
+      primaryIp: IP,
+      run: runner(ps(up('quorum-n8n'), up('quorum-metabase', 'restarting'))),
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toContain('quorum-metabase (restarting)');
+    expect(r.errorMessage).not.toContain('quorum-n8n');
   });
   it('fails naming the add-on that is not running', async () => {
     const r = await checkPromotedPrimaryOnlyRunning({
       ...base,
       primaryIp: IP,
-      run: runner(ps('quorum-db', 'quorum-n8n')),
+      run: runner(ps(up('quorum-db'), up('quorum-n8n'))),
     });
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toContain('quorum-metabase');
@@ -193,18 +217,70 @@ describe('promoted_addons_ready', () => {
     expect(parseReadyDeployments('nope')).toBeNull();
     expect(parseReadyDeployments('{}')).toBeNull();
   });
+  /** A fake clock: sleep advances it, so the deadline is reached without waiting. */
+  const clock = () => {
+    let t = 0;
+    const sleeps: number[] = [];
+    return {
+      now: () => t,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        t += ms;
+      },
+      sleeps,
+    };
+  };
+  /** Answers each read with the next output in turn (the last one repeats). */
+  const sequence = (...outputs: string[]): RemoteRun & { calls: string[] } => {
+    const calls: string[] = [];
+    const run = (async (_ip: string, remote: string) => {
+      calls.push(remote);
+      return { ok: true, output: outputs[Math.min(calls.length - 1, outputs.length - 1)] };
+    }) as RemoteRun & { calls: string[] };
+    run.calls = calls;
+    return run;
+  };
   it('passes when every vibecarbon add-on deployment is ready', async () => {
     const run = runner(deployments(['n8n', 1], ['metabase', 2], ['redis', 1], ['app', 2]));
-    expect((await checkPromotedAddonsReady({ ...k8s, primaryIp: IP, run })).status).toBe('pass');
+    const c = clock();
+    expect((await checkPromotedAddonsReady({ ...k8s, primaryIp: IP, run, ...c })).status).toBe(
+      'pass',
+    );
+    expect(c.sleeps).toEqual([]);
   });
-  it('fails naming a zero, absent, or status-less deployment', async () => {
-    const r = await checkPromotedAddonsReady({
-      ...k8s,
-      primaryIp: IP,
-      run: runner(deployments(['n8n', 0], ['redis', undefined])),
-    });
+  it('waits for a slow add-on (metabase cold start) to become ready within the deadline', async () => {
+    const run = sequence(
+      deployments(['n8n', 1], ['metabase', 0], ['redis', 1]),
+      deployments(['n8n', 1], ['metabase', 0], ['redis', 1]),
+      deployments(['n8n', 1], ['metabase', 1], ['redis', 1]),
+    );
+    const c = clock();
+    const r = await checkPromotedAddonsReady({ ...k8s, primaryIp: IP, run, ...c });
+    expect(r.status).toBe('pass');
+    expect(run.calls).toHaveLength(3);
+  });
+  it('fails at the single 600s deadline naming a zero, absent, or status-less deployment', async () => {
+    const run = sequence(deployments(['n8n', 0], ['redis', undefined]));
+    const c = clock();
+    const r = await checkPromotedAddonsReady({ ...k8s, primaryIp: IP, run, ...c });
     expect(r.status).toBe('fail');
     for (const n of ['n8n', 'metabase', 'redis']) expect(r.errorMessage).toContain(n);
+    expect(r.errorMessage).toContain('600s');
+    expect(c.now()).toBeGreaterThanOrEqual(600_000);
+    // One deadline: the polling stops at it, it never grows.
+    expect(c.now()).toBeLessThan(600_000 + 15_000);
+  });
+  it('a failed or unreadable read fails at once, it does not keep polling', async () => {
+    const c = clock();
+    const bad = await checkPromotedAddonsReady({
+      ...k8s,
+      primaryIp: IP,
+      run: sequence(deployments(['n8n', 0]), 'garbage'),
+      ...c,
+    });
+    expect(bad.status).toBe('fail');
+    expect(bad.errorMessage).toContain('unreadable');
+    expect(c.sleeps).toHaveLength(1);
   });
   it('skips with no add-on enabled and fails without a handle or on bad reads', async () => {
     expect((await checkPromotedAddonsReady({ ...k8s, features: [], primaryIp: IP })).status).toBe(

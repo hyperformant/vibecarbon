@@ -248,12 +248,17 @@ const TIMEOUTS: Record<string, number> = {
   // budget predates provisioning. Generous on purpose; real e2e perf rows will
   // calibrate it down.
   failover: 1_800_000,
-  'verify-failover': 600_000,
+  // 20 min — promoted_addons_ready alone may wait its full 600s deadline
+  // (PROMOTED_ADDONS_DEADLINE_MS) for a slow add-on, and must then still
+  // report which one, so the step budget has to outlast it with the other
+  // checks on top.
+  'verify-failover': 1_200_000,
   // The refusal happens in the guard before any remote write; the budget is
   // the status -json poll that follows it.
   'second-failover': 600_000,
   failback: 1_800_000,
-  'verify-failback': 600_000,
+  // Same checks as verify-failover (isPostFailoverVerify), same budget.
+  'verify-failback': 1_200_000,
   // Both HA modes. Same 75-min budget as the initial cold `deploy`: this
   // redeploy converges ONE cluster's role (app tier + workers to zero) but
   // still pays a full serial pg_basebackup reseed of that cluster's
