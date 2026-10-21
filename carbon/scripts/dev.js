@@ -2,7 +2,8 @@
 /**
  * Development server script with proper signal handling.
  * Spawns both the API server (tsx watch) and Vite dev server,
- * and ensures clean shutdown on Ctrl+C.
+ * and ensures clean shutdown on Ctrl+C. `--server-only` (npm run
+ * dev:server) spawns just the API, with the same app_service database env.
  */
 
 import { execFileSync, spawn } from 'node:child_process';
@@ -11,6 +12,7 @@ import { createServer } from 'node:net';
 import { readEnvFiles } from './lib/dotenv.js';
 
 const isWindows = process.platform === 'win32';
+const serverOnly = process.argv.includes('--server-only');
 
 // Read project name from package.json
 let projectName = 'your app';
@@ -83,7 +85,7 @@ const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
 const portChecks = await Promise.all(
   [
     { name: 'API', port: ports.api },
-    { name: 'Vite', port: ports.vite },
+    ...(serverOnly ? [] : [{ name: 'Vite', port: ports.vite }]),
   ].map(async (p) => ({ ...p, free: await isPortFree(p.port) })),
 );
 const conflicts = portChecks.filter((c) => !c.free);
@@ -106,6 +108,10 @@ if (conflicts.length > 0) {
 // announceWhenReady below) rather than up-front. Otherwise Vite's "ready in Xms"
 // and the API's startup logs print afterward and scroll the URLs off-screen.
 function printBanner() {
+  if (serverOnly) {
+    console.log(`\n  ${cyan('→')}  ${bold('API:')}  ${cyan(`http://localhost:${ports.api}`)}\n`);
+    return;
+  }
   console.log(`
   ${cyan('✦')}  ${bold(projectName)} is ready
 
@@ -117,7 +123,7 @@ function printBanner() {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Poll until both dev servers hold their ports (i.e. are listening), then print
+// Poll until the dev servers hold their ports (i.e. are listening), then print
 // the URL banner so it lands as the last thing on screen. We watch the ports
 // instead of piping child stdout because `stdio: 'inherit'` keeps Vite's TTY
 // (colours + interactive `h+enter` shortcuts); piping would forfeit both.
@@ -125,7 +131,9 @@ async function announceWhenReady() {
   const deadline = Date.now() + 30_000; // print anyway after 30s, don't hang
   while (Date.now() < deadline) {
     if (shuttingDown) return;
-    const free = await Promise.all([isPortFree(ports.vite), isPortFree(ports.api)]);
+    const free = await Promise.all(
+      serverOnly ? [isPortFree(ports.api)] : [isPortFree(ports.vite), isPortFree(ports.api)],
+    );
     if (free.every((isFree) => !isFree)) break; // both ports in use → listening
     await delay(200);
   }
@@ -170,14 +178,16 @@ children.push(server);
 names.set(server, 'API');
 
 // Spawn client process
-const client = spawn('npx', ['vite'], {
-  stdio: 'inherit',
-  shell: isWindows,
-  detached: !isWindows,
-  env: childEnv,
-});
-children.push(client);
-names.set(client, 'Vite');
+if (!serverOnly) {
+  const client = spawn('npx', ['vite'], {
+    stdio: 'inherit',
+    shell: isWindows,
+    detached: !isWindows,
+    env: childEnv,
+  });
+  children.push(client);
+  names.set(client, 'Vite');
+}
 
 // Track if we're shutting down
 let shuttingDown = false;

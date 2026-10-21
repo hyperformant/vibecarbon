@@ -15,7 +15,7 @@
     "dev:reset": "node scripts/docker-down.js -v --rmi",
     "dev:reset:all": "node scripts/docker-down.js -v --rmi --all",
     "dev": "exec node scripts/dev.js",
-    "dev:server": "tsx watch --env-file=.env.local src/server/index.ts",
+    "dev:server": "node scripts/dev.js --server-only",
     "dev:client": "vite",
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build && tsx scripts/generate-sitemap.ts && tsx scripts/generate-rss.ts && tsx scripts/generate-seo.ts",

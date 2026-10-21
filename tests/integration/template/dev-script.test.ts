@@ -340,3 +340,70 @@ describe('carbon/scripts/dev.js shutdown ordering', () => {
     expect(result.doneBeforeExit).toBe(true);
   }, 15_000);
 });
+
+/**
+ * `npm run dev:server` once ran `tsx --env-file=.env.local` directly, so the
+ * API connected as the owner (.env.local's DB_PASSWORD). It now goes through
+ * dev.js --server-only, which hands the API the same app_service env as
+ * `npm run dev` and starts no Vite.
+ */
+describe('carbon dev:server runs the API as app_service', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'vibecarbon-dev-server-'));
+    await writeFile(join(tmpDir, 'package.json'), JSON.stringify({ name: 'test-app' }));
+  });
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('the package script routes through dev.js --server-only', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const pkg = JSON.parse(await readFile(join(REPO_ROOT, 'carbon', 'package.json'), 'utf-8'));
+    expect(pkg.scripts['dev:server']).toBe('node scripts/dev.js --server-only');
+  });
+
+  it('spawns only the API, with DB_USER=app_service and the app password', async () => {
+    const apiPort = await freePort();
+    await writeFile(
+      join(tmpDir, '.env.local'),
+      `DEV_API_PORT="${apiPort}"\nDB_PASSWORD="SENTINEL_OWNER"\nAPP_DB_PASSWORD="SENTINEL_APP"\n`,
+    );
+    const binDir = join(tmpDir, 'bin');
+    await mkdir(binDir);
+    const childJs = join(tmpDir, 'fake-child.js');
+    await writeFile(
+      childJs,
+      // Stays up a beat, so a Vite child spawned beside it would report too.
+      "process.stdout.write('spawned ' + process.argv.slice(2).join(' ') + ' user=' + process.env.DB_USER + ' pw=' + process.env.DB_PASSWORD + '\\n'); setTimeout(() => process.exit(0), 1000);",
+    );
+    await writeFile(
+      join(binDir, 'npx'),
+      `#!/bin/sh\nexec "${process.execPath}" "${childJs}" "$@"\n`,
+    );
+    await chmod(join(binDir, 'npx'), 0o755);
+    const out = await new Promise<string>((resolve) => {
+      const child = spawn(process.execPath, [DEV_JS, '--server-only'], {
+        cwd: tmpDir,
+        stdio: 'pipe',
+        env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+      });
+      let buf = '';
+      child.stdout.on('data', (b) => {
+        buf += b.toString();
+      });
+      child.stderr.on('data', (b) => {
+        buf += b.toString();
+      });
+      child.on('exit', () => resolve(buf));
+      setTimeout(() => {
+        if (child.exitCode === null) child.kill('SIGKILL');
+      }, 8000);
+    });
+    const spawned = out.split('\n').filter((l) => l.startsWith('spawned '));
+    expect(spawned, out).toHaveLength(1);
+    expect(spawned[0]).toContain('tsx watch --env-file=.env.local src/server/index.ts');
+    expect(spawned[0]).toContain('user=app_service pw=SENTINEL_APP');
+  }, 15_000);
+});
