@@ -28,6 +28,7 @@ import {
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
 import { getSSHKeyPath } from '../ssh.js';
 import { createTracker } from '../tracker.js';
+import { backupCredentialVars, resolveDeployRestorePoint } from '../walg/restore-base.js';
 import { useDnsChallenge } from './acme.js';
 import {
   finishAppKeyRotation,
@@ -1068,6 +1069,31 @@ export async function executeDeployment(args, gatheredConfig) {
   // .vibecarbon.json so scale / failover / destroy resolve the same backend.
   s3Config.stateBucket = s3Result?.stateBucket || stateBucket;
 
+  // DR (`deploy -restore latest|<base>|<ISO-8601>`, k8s tiers): resolve the
+  // exact base backup now, from the stop sentinels in the bucket and prefix
+  // the db pod's wal-g reads, before anything is minted or provisioned. No
+  // base satisfying the point stops the deploy here (C5: one resolver; the
+  // deploy only checks the object it is handed).
+  let restorePoint = null;
+  try {
+    restorePoint = await resolveDeployRestorePoint({
+      restore: args.restore,
+      k8s: isK8sTier(tier),
+      s3Config,
+      backupBucketName: backupS3Config?.bucket || null,
+      credentialVars: backupCredentialVars(envConfig),
+    });
+  } catch (err) {
+    p.log.error(`deploy -restore: ${err.message}`);
+    writeLogDetail(`# deploy -restore error detail: ${err?.stack || err}`);
+    process.exit(1);
+  }
+  if (restorePoint) {
+    p.log.info(
+      `restoring ${restorePoint.backup} (${restorePoint.target === 'latest' ? 'all WAL' : `to ${restorePoint.target}`}) into the new database`,
+    );
+  }
+
   // The app's own object-storage key (security plan R2, R9), resolved once
   // the env bucket is ensured, on EVERY deploy (the s3-setup step above is
   // skipped on a warm redeploy, but a missing local secret still needs a
@@ -1443,11 +1469,11 @@ export async function executeDeployment(args, gatheredConfig) {
     s3Config,
     backupConfig,
     backupBucketName: backupS3Config?.bucket || null,
-    // DR: when set (`deploy -restore latest|<ts>`), the db pod's init
-    // container seeds PGDATA from S3 via wal-g. The restored DB carries its
-    // migration ledger, so the app's startup migrations apply only what the
-    // backup lacks.
-    restore: args.restore || null,
+    // DR: the resolved restore point (above), or null. deployK3s writes its
+    // marker before the db applies, so the db pod's walg-restore init fetches
+    // that backup; the restored DB carries its migration ledger, so the app's
+    // migrate init container applies only what the backup lacks.
+    restore: restorePoint,
     // Finding #1: hard-gate k8s-HA replication unless the operator opts into a
     // warm/degraded standby via `deploy -allow-degraded`.
     allowDegraded: !!args.allowDegraded,

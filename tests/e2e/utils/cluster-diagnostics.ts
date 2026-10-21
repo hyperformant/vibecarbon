@@ -73,6 +73,7 @@ const CLUSTER_SCOPED_STEPS: ReadonlySet<StepName> = new Set<StepName>([
   'warm-redeploy-change',
   'reconverge-deploy',
   'scale',
+  'restore-deploy',
   'restore',
   'failover',
   'failback',

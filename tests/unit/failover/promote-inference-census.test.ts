@@ -35,6 +35,10 @@ const ALLOWED: Record<string, string> = {
   'src/lib/deploy/compose/index.js': 'restore boots its own recovery and waits for it to end',
   // The k8s twin: runK8sRestore's waitForK8sPromotion, same reason.
   'src/restore.js': 'restore boots its own recovery and waits for it to end',
+  // deploy -restore's twin: awaitPostgresPromoted waits for the recovery the
+  // deploy's own restore marker started, same reason.
+  'src/lib/deploy/k8s/readiness.js':
+    'deploy -restore boots its own recovery and waits for it to end',
   // Chooses the wording of a backup-audit error; it gates nothing.
   'src/lib/deploy/walg-audit.js': 'error wording only',
   // The retirement fence: 'f' (out of recovery) means the retired db can take

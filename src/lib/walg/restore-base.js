@@ -24,6 +24,8 @@ import { formatBytes } from '../backup-s3.js';
 import { c } from '../colors.js';
 import { loadBackupS3Config, loadS3Config } from '../config.js';
 import { providerFor } from '../providers/index.js';
+import { buildRecoveryConfig, RESTORE_PITR_RE, renderRecoveryConf } from './recovery-config.js';
+import { BACKUP_NAME_RE } from './restore-layout.js';
 
 const SENTINEL_SUFFIX = '_backup_stop_sentinel.json';
 
@@ -217,6 +219,107 @@ export function resolveRestoreBase(backups, target) {
     );
   }
   return eligible[eligible.length - 1];
+}
+
+/**
+ * A restore point as the operator names it: `latest` (the newest base plus
+ * all WAL), an ISO-8601 instant (point-in-time recovery), or a wal-g base
+ * backup name (that base plus all WAL). Null for anything else; the caller
+ * says what was wrong in its own words.
+ *
+ * @param {string} source
+ * @returns {{ kind: 's3', name: string, base?: string } | null}
+ */
+export function parseRestoreSource(source) {
+  if (source === 'latest') return { kind: 's3', name: 'latest' };
+  if (RESTORE_PITR_RE.test(source)) return { kind: 's3', name: source };
+  if (BACKUP_NAME_RE.test(source)) return { kind: 's3', name: 'latest', base: source };
+  return null;
+}
+
+/**
+ * The base backup a chosen restore point fetches: the named one for a base
+ * name, else resolveRestoreBase (newest, or newest at or before a PITR
+ * instant).
+ *
+ * @param {Array<{ name: string, finishTime: Date }>} backups
+ * @param {{ name: string, base?: string }} chosenSource
+ * @throws {NoRestorePointError}
+ */
+export function pickRestoreBase(backups, chosenSource) {
+  if (chosenSource.base) {
+    const named = backups.find((b) => b.name === chosenSource.base);
+    if (!named) throw new NoRestorePointError(`no base backup named ${chosenSource.base}`);
+    return named;
+  }
+  return resolveRestoreBase(
+    backups,
+    chosenSource.name === 'latest' ? 'latest' : new Date(chosenSource.name),
+  );
+}
+
+/** The restore point's target and the recovery config both tiers apply. */
+export function restorePointOf(chosenSource) {
+  const target =
+    chosenSource.name === 'latest' || !chosenSource.name ? 'latest' : chosenSource.name;
+  return { target, recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target })) };
+}
+
+/**
+ * The restore point `deploy -restore` seeds the new database from, resolved
+ * before anything is provisioned (C5): the exact base backup, read from the
+ * stop sentinels in the bucket and prefix the db pod's wal-g uses (the
+ * backup bucket, else the storage bucket; s3Config.walgPrefix), with its
+ * target, recovery config and size. Null for a deploy without -restore.
+ * deployK3s only checks the object is complete.
+ *
+ * Reads only (ListObjectsV2, GetObject), with the deploy's own object-storage
+ * credentials (Decision 1). Errors name the variables, never a value.
+ *
+ * @param {{ restore: string | null, k8s: boolean, s3Config: { bucket?: string, walgPrefix?: string, endpoint?: string, region?: string, accessKey?: string, secretKey?: string }, backupBucketName?: string | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
+ * @returns {Promise<{ backup: string, target: string, recoveryConf: string, sizeBytes: number } | null>}
+ * @throws {NoRestorePointError} when no base backup satisfies the restore point
+ */
+export async function resolveDeployRestorePoint({
+  restore,
+  k8s,
+  s3Config,
+  backupBucketName,
+  credentialVars,
+  makeClient = createS3Client,
+}) {
+  if (!restore) return null;
+  if (!k8s) {
+    throw new Error(
+      'deploy -restore is k8s and k8s-ha only. On compose, deploy first, then run vibecarbon restore',
+    );
+  }
+  const chosen = parseRestoreSource(String(restore));
+  if (!chosen) {
+    throw new Error(
+      `${JSON.stringify(restore)} is not a restore point. Pass latest, a base backup name ` +
+        '(e.g. base_000000010000000000000004) or an ISO-8601 time (e.g. 2026-06-22T14:30:00Z)',
+    );
+  }
+  const bucket = backupBucketName || s3Config?.bucket;
+  const prefix = s3Config?.walgPrefix;
+  if (!bucket || !prefix) {
+    throw new Error('there is no backup bucket on record for this environment to restore from');
+  }
+  if (!s3Config.accessKey || !s3Config.secretKey) {
+    throw new Error(`reading the backups in s3://${bucket}/${prefix} needs ${credentialVars}`);
+  }
+  const s3 = await makeClient({ ...s3Config, bucket });
+  const backups = await listBaseBackups({ s3, bucket, prefix });
+  let base;
+  try {
+    base = pickRestoreBase(backups, chosen);
+  } catch (err) {
+    if (!(err instanceof NoRestorePointError)) throw err;
+    throw new NoRestorePointError(`${err.message} in s3://${bucket}/${prefix}`);
+  }
+  const { target, recoveryConf } = restorePointOf(chosen);
+  return { backup: base.name, target, recoveryConf, sizeBytes: base.sizeBytes };
 }
 
 /**

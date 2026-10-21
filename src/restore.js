@@ -48,11 +48,11 @@ import {
   swappedSinceLastDeploy,
 } from './lib/deploy/failover-guard.js';
 import {
-  DB_STS_BOOT_TIMEOUT_S,
   k8sPsqlRunner,
   ensureReplicationSlot as realEnsureReplicationSlot,
   readK8sReplicationState as realReadK8sReplicationState,
   reseedStandbyFromPrimary as realReseedStandbyFromPrimary,
+  restoreRolloutTimeoutS,
   verifyStreaming,
 } from './lib/deploy/replication.js';
 import { wgIpOf } from './lib/deploy/wireguard.js';
@@ -63,19 +63,17 @@ import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
-import {
-  buildRecoveryConfig,
-  RESTORE_PITR_RE,
-  renderRecoveryConf,
-} from './lib/walg/recovery-config.js';
+import { RESTORE_PITR_RE } from './lib/walg/recovery-config.js';
 import {
   backupCredentialVars,
   createS3Client,
   NoRestorePointError,
+  parseRestoreSource,
+  pickRestoreBase,
   printBaseBackupList,
   readEnvBaseBackups,
-  resolveRestoreBase,
   resolveS3Config,
+  restorePointOf,
 } from './lib/walg/restore-base.js';
 import {
   assertRestoreFits,
@@ -278,9 +276,8 @@ export async function verifyPostgres(ip, sshKeyPath, opts = {}) {
  */
 
 export function resolveRestoreTarget(source) {
-  if (source === 'latest') return { kind: 's3', name: 'latest' };
-  if (RESTORE_PITR_RE.test(source)) return { kind: 's3', name: source };
-  if (BASE_BACKUP_NAME_RE.test(source)) return { kind: 's3', name: 'latest', base: source };
+  const parsed = parseRestoreSource(source);
+  if (parsed) return parsed;
   const why = existsSync(source)
     ? 'Local backup files cannot be restored'
     : /\.(tar|sql)(\.gz)?$/.test(source)
@@ -295,29 +292,9 @@ export function resolveRestoreTarget(source) {
   process.exit(1);
 }
 
-/** A wal-g base backup name: full, or delta (`_D_` + the base it diffs from). */
-const BASE_BACKUP_NAME_RE = /^base_[0-9A-F]{24}(_D_[0-9A-F]{24})?$/;
-
-/**
- * The base backup a chosen restore point fetches: the named one for
- * `-source <base name>`, else resolveRestoreBase (newest, or newest at or
- * before a PITR instant).
- *
- * @param {Array<{ name: string, finishTime: Date }>} backups
- * @param {{ name: string, base?: string }} chosenSource
- * @throws {NoRestorePointError}
- */
-export function pickRestoreBase(backups, chosenSource) {
-  if (chosenSource.base) {
-    const named = backups.find((b) => b.name === chosenSource.base);
-    if (!named) throw new NoRestorePointError(`no base backup named ${chosenSource.base}`);
-    return named;
-  }
-  return resolveRestoreBase(
-    backups,
-    chosenSource.name === 'latest' ? 'latest' : new Date(chosenSource.name),
-  );
-}
+// pickRestoreBase moved to src/lib/walg/restore-base.js (shared with
+// deploy -restore); re-exported for the callers and tests that import it here.
+export { pickRestoreBase };
 
 // ============================================================================
 // MAIN
@@ -635,13 +612,6 @@ function assertResolvedBase(base) {
   }
 }
 
-/** The restore point's target and the recovery config both tiers apply. */
-function restorePointOf(chosenSource) {
-  const target =
-    chosenSource.name === 'latest' || !chosenSource.name ? 'latest' : chosenSource.name;
-  return { target, recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target })) };
-}
-
 // compose restore is wal-g-based (S3 pull, no file transfer). Mirrors
 // runK8sRestore's structure: reject local-file sources and a missing base,
 // call restoreCompose with the resolved base (it stages, swaps, waits for
@@ -781,20 +751,6 @@ export async function runComposeRestore({
 // remove the previous cluster. No bytes flow through the operator; wal-g
 // pulls from S3 inside the cluster. The workload name is DB_STATEFULSET
 // (src/lib/deploy/db-workload.js).
-
-/** Staged fetches stream at least this fast; it sizes the rollout wait (M1). */
-export const RESTORE_FETCH_FLOOR_BYTES_PER_S = 20 * 1024 ** 2;
-
-/**
- * The db rollout wait for a restore of `sizeBytes`: the boot floor, or the
- * time the fetch needs at RESTORE_FETCH_FLOOR_BYTES_PER_S, whichever is longer.
- */
-export function restoreRolloutTimeoutS(sizeBytes) {
-  return Math.max(
-    DB_STS_BOOT_TIMEOUT_S,
-    Math.ceil((Number(sizeBytes) || 0) / RESTORE_FETCH_FLOOR_BYTES_PER_S),
-  );
-}
 
 /** Free bytes on the db pod's PGDATA volume, or null when unreadable. */
 async function k8sPgdataFreeBytes(ip, sshKeyPath) {

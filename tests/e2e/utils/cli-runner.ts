@@ -355,6 +355,8 @@ export function runDeploy(
     direct?: boolean;
     minWorkers?: number;
     maxWorkers?: number;
+    /** `-restore <point>`: seed the new database from the backups (k8s tiers). */
+    restore?: string;
   },
 ): Promise<CliResult> {
   if (options.minWorkers != null || options.maxWorkers != null) {
@@ -382,6 +384,7 @@ export function runDeploy(
     '-mode',
     options.mode,
     ...(options.region ? ['-region', options.region] : []),
+    ...(options.restore ? ['-restore', options.restore] : []),
   ].join(' ');
 
   return runCli(args, options);

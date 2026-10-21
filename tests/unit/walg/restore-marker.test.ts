@@ -36,7 +36,7 @@ describe('restore marker keys', () => {
   it('buildInfraSecretData writes the marker keys only when asked', () => {
     const plain = buildInfraSecretData({ envLocal: {} });
     for (const k of RESTORE_MARKER_KEYS) expect(plain).not.toHaveProperty(k);
-    const marked = buildInfraSecretData({ envLocal: {}, restoreMarker: MARKER });
+    const marked = buildInfraSecretData({ envLocal: {}, restore: MARKER });
     expect(marked.RESTORE_BACKUP).toBe(MARKER.backup);
     for (const k of RESTORE_MARKER_KEYS) expect(marked).toHaveProperty(k);
   });

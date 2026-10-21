@@ -69,6 +69,7 @@ import {
   resolveHaDbIps,
   runFailoverContinuityCheck,
   runReplicationChecks,
+  runRestoreDeployContinuityCheck,
   writeReplicationMarker,
 } from '../checks/replication.js';
 import {
@@ -239,6 +240,9 @@ const TIMEOUTS: Record<string, number> = {
   // worst-case ladder we intentionally ship, or the timeout re-creates the
   // exact leak the ladder prevents.
   destroy: 1_200_000,
+  // 75 min, the cold deploy's budget: restore-deploy is a cold deploy whose
+  // db first boot also fetches the backup.
+  'restore-deploy': 4_500_000,
   restore: 4_500_000, // 75 min — restore re-deploys then restores
   'verify-restore': 600_000,
   // 30 min — the pilot-light failover step now includes REAL standby worker
@@ -1312,6 +1316,9 @@ export async function runLifecycle(
   // The base the backup step reported pushed; the restore step restores it
   // by name (destroy -y takes its own, newer, pre-backup).
   let pushedBackupName: string | undefined;
+  // k8s tiers: the marker row the backup step writes on the primary before
+  // the backup, which restore-deploy must find in the database it restores.
+  let restoreDeployMarkerId: string | null = null;
   const steps: StepResult[] = [];
   // Set by the teardown sweep when it finds orphans or cannot fully
   // enumerate — gates the scenario verdict (see the sweep block).
@@ -3791,6 +3798,38 @@ EOF`;
       name: 'backup',
       run: () =>
         executeStep('backup', `vibecarbon backup ${config.envPrefix}`, async () => {
+          // k8s tiers: a marker row the backup carries, for restore-deploy.
+          // No silent skip: without it restore-deploy could not tell a
+          // restored database from an empty one.
+          if (isK8sMode) {
+            const primaryIp =
+              config.mode === 'k8s-ha'
+                ? resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp
+                : serverIps[0];
+            if (!primaryIp || !sshKeyPath) {
+              throw new Error(
+                `backup: cannot write the restore-deploy marker (${!primaryIp ? 'no primary IP' : 'no sshKeyPath'})`,
+              );
+            }
+            const markerId = buildMarkerId(scenarioId, 'restore-deploy', Date.now());
+            const write = await writeReplicationMarker(
+              {
+                ip: primaryIp,
+                sshKeyPath,
+                mode: config.mode,
+                projectName: config.projectName,
+                label: 'pre-backup-primary',
+              },
+              markerId,
+            );
+            if (!write.ok) {
+              throw new Error(
+                `backup: could not write the restore-deploy marker ${markerId} on ${primaryIp} (${write.error ?? 'unknown'})`,
+              );
+            }
+            restoreDeployMarkerId = markerId;
+            console.log(`${tag} [backup] wrote restore-deploy marker ${markerId} on ${primaryIp}`);
+          }
           const result = await runBackup(config.envPrefix, {
             cwd: config.projectDir,
             timeout: TIMEOUTS.backup,
@@ -3850,6 +3889,64 @@ EOF`;
             );
           }
         }),
+    },
+
+    // 8b. k8s tiers: deploy -restore after the destroy. The destroy kept the
+    //     backups; `deploy -restore latest` must bring the environment back
+    //     with the database seeded from them (C1), which the marker row
+    //     written before the backup proves. Filtered out on compose below.
+    {
+      name: 'restore-deploy',
+      run: () =>
+        executeStep(
+          'restore-deploy',
+          `vibecarbon deploy ${config.envPrefix} -mode ${config.mode} -restore latest -y`,
+          async (stepId) => {
+            const deployResult = await runDeploy(config.envPrefix, {
+              cwd: config.projectDir,
+              timeout: TIMEOUTS['restore-deploy'],
+              mode: config.mode,
+              domain: config.domain,
+              dnsProvider: config.dnsProvider,
+              serverType: config.serverType,
+              region: config.region,
+              secondaryRegion: config.secondaryRegion,
+              provider: config.provider,
+              restore: 'latest',
+              env: { HCLOUD_TOKEN: hetznerToken },
+              ...expandedDeployBounds,
+            });
+            if (deployResult.exitCode !== 0) {
+              const detail = extractDeployFailureDetail(deployResult.stdout, deployResult.stderr);
+              throw new Error(
+                `deploy -restore latest exited with code ${deployResult.exitCode}: ${detail.slice(-1000)}`,
+              );
+            }
+            serverIps = getServerIps(config.projectDir, config.envPrefix);
+            sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);
+            const primaryIp =
+              config.mode === 'k8s-ha'
+                ? resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp
+                : (serverIps[0] ?? null);
+            const continuity = await runRestoreDeployContinuityCheck({
+              mode: config.mode,
+              projectName: config.projectName,
+              primaryIp,
+              sshKeyPath,
+              markerId: restoreDeployMarkerId,
+            });
+            collector.recordVerifications(stepId, [continuity]);
+            if (continuity.status !== 'pass') {
+              throw new Error(
+                `restore-deploy: ${continuity.checkName}: ${continuity.errorMessage}`,
+              );
+            }
+            console.log(
+              `${tag} [restore-deploy] marker ${restoreDeployMarkerId} restored on ${primaryIp}`,
+            );
+            adminCreds = readAdminCredentials(config.projectDir);
+          },
+        ),
     },
 
     // 9. Re-deploy (restore requires running infrastructure)
@@ -4487,6 +4584,10 @@ EOF`;
   // `reconverge-deploy` — see the step's own comment for the full rationale.
   if (config.mode !== 'k8s') {
     filteredStepDefs = filteredStepDefs.filter((s) => s.name !== 'warm-redeploy-change');
+  }
+  // restore-deploy is k8s and k8s-ha only: `deploy -restore` refuses compose.
+  if (!isK8sMode) {
+    filteredStepDefs = filteredStepDefs.filter((s) => s.name !== 'restore-deploy');
   }
 
   // Iteration accelerator — drop steps named in --skip-steps / --minimal.

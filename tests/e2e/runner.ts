@@ -212,7 +212,15 @@ if (args.includes('--keep')) {
 function parseSkipStepsArg(): Set<string> {
   const skip = new Set<string>();
   if (args.includes('--minimal')) {
-    for (const s of ['scale', 'verify-scale', 'backup', 'destroy', 'restore', 'verify-restore']) {
+    for (const s of [
+      'scale',
+      'verify-scale',
+      'backup',
+      'destroy',
+      'restore-deploy',
+      'restore',
+      'verify-restore',
+    ]) {
       skip.add(s);
     }
   }

@@ -27,14 +27,15 @@ describe('_run-lifecycle.ts: every runDeploy() re-seed carries the scenario prov
     'utf8',
   );
 
-  it('has exactly the known 5 runDeploy call sites (deploy, warm-deploy, warm-redeploy-change, restore, reconverge-deploy)', () => {
+  it('has exactly the known 6 runDeploy call sites (deploy, warm-deploy, warm-redeploy-change, restore-deploy, restore, reconverge-deploy)', () => {
     const matches = [...src.matchAll(/runDeploy\(config\.envPrefix, \{/g)];
     // A deliberately rigid count: adding a 6th lifecycle re-deploy step
     // should force a look at this test, not silently skip coverage.
     // (Raised 4 -> 5 when `warm-redeploy-change` landed — the rigid count did
     // its job and made that step's re-seed prove it carries `provider`, which
-    // matters because the step also runs on the DigitalOcean d3 scenario.)
-    expect(matches.length).toBe(5);
+    // matters because the step also runs on the DigitalOcean d3 scenario.
+    // Raised 5 -> 6 for `restore-deploy`, the k8s `deploy -restore` step.)
+    expect(matches.length).toBe(6);
   });
 
   it('every runDeploy call site passes provider: config.provider before its env block', () => {

@@ -111,6 +111,19 @@ describe('haK8sProvisionClusters pilot-light asymmetry', () => {
     expect((ctx.standbyResult as Record<string, unknown>).dbServerType).toBe('cx23');
   });
 
+  it('deploy -restore seeds the primary only: the standby always deploys restore: null', async () => {
+    const restore = {
+      backup: 'base_000000010000000000000003',
+      target: 'latest',
+      recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
+      sizeBytes: 1024,
+    };
+    await runFanOut({ environment: 'e4', region: 'nbg1', secondaryRegion: 'hel1', restore });
+    const calls = deployK3s.mock.calls.map(([o]) => o as Record<string, unknown>);
+    expect(calls.find((o) => o.role === 'primary')?.restore).toEqual(restore);
+    expect(calls.find((o) => o.role === 'standby')?.restore).toBeNull();
+  });
+
   it('follows a persisted post-failover role mapping (stacks swapped)', async () => {
     const ctx = await runFanOut({
       environment: 'e4',

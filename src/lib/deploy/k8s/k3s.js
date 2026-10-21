@@ -62,13 +62,24 @@ import {
 } from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
-import { restoreMarkerStringData } from '../../walg/restore-layout.js';
+import {
+  BACKUP_NAME_RE,
+  PROVEN_WRITABLE_STATES,
+  REMOVE_DISCARD_SH,
+  RETIRE_PREVIOUS_SH,
+  restoreMarkerStringData,
+} from '../../walg/restore-layout.js';
+import { assertRestoredPrimaryWritable } from '../../walg/restore-marker.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { pushImageOverSshTunnel } from '../registry-push.js';
-import { buildStandbySeedInitScript } from '../replication.js';
+import {
+  buildStandbySeedInitScript,
+  READ_WRITE_PGOPTIONS,
+  restoreRolloutTimeoutS,
+} from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
 import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
 import {
@@ -83,6 +94,7 @@ import {
   awaitCertManagerAdmission,
   awaitControlPlaneServing,
   awaitPostgresAccepting,
+  awaitPostgresPromoted,
   watchAppMigrationFailure,
 } from './readiness.js';
 
@@ -322,7 +334,10 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * revokes the old key, so a skipped apply would leave the app Secret holding
  * a dead key. Only a digest of the access key id, never the key itself.
  *
- * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string }} args
+ * `restore` is the resolved `deploy -restore` point: its backup and target
+ * are an input, so a rerun that restores another base re-applies.
+ *
+ * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string }} args
  * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
@@ -337,7 +352,7 @@ export function buildK3sApplyInputs({
   return {
     imageTag,
     dbImageTag,
-    restore: restore ?? '',
+    restore: restore ? `${restore.backup} ${restore.target}` : '',
     storageClass: storageClass ?? '',
     role: role === 'standby' ? 'standby' : 'primary',
     appStorageKeyDigest: appStorageAccessKey ? fingerprintSecret(appStorageAccessKey) : '',
@@ -1888,15 +1903,16 @@ export function buildAppSecretData({ envLocal, s3Config }) {
  * app container reads none of it (only the migrate init container reads
  * DB_PASSWORD, to run the migrations as the owner). Also the Secret that
  * carries the restore marker (RESTORE_MARKER_KEYS, src/lib/walg/restore-marker.js):
- * `vibecarbon restore` patches it in, and a caller that passes `restoreMarker`
- * writes it with the rest (a complete set, or all empty for null). Without
- * `restoreMarker` no marker key is written, so an apply leaves a restore's
- * patched keys alone. Pure.
+ * `vibecarbon restore` patches it in, and `deploy -restore` passes its
+ * resolved `restore` point so the marker lands with the rest, before the db
+ * StatefulSet applies. Without one no marker key is written, so an apply
+ * leaves a restore's patched keys alone. Clearing is the restore's own patch
+ * once the restored database is proven, never this. Pure.
  *
- * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restoreMarker?: {backup: string, target: string, recoveryConf: string}|null}} args
+ * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: {backup: string, target: string, recoveryConf: string}|null}} args
  * @returns {Record<string,string>}
  */
-export function buildInfraSecretData({ envLocal, s3Config, backupBucketName, restoreMarker }) {
+export function buildInfraSecretData({ envLocal, s3Config, backupBucketName, restore }) {
   /** @type {Record<string,string>} */
   const stringData = {};
   for (const key of INFRA_SECRET_KEYS) {
@@ -1914,9 +1930,7 @@ export function buildInfraSecretData({ envLocal, s3Config, backupBucketName, res
   if (backupBucketName) {
     stringData.S3_BACKUP_BUCKET = backupBucketName;
   }
-  if (restoreMarker !== undefined) {
-    Object.assign(stringData, restoreMarkerStringData(restoreMarker));
-  }
+  if (restore) Object.assign(stringData, restoreMarkerStringData(restore));
   return stringData;
 }
 
@@ -1993,9 +2007,18 @@ function secretManifest(name, stringData) {
  * the storage bucket and uploads dumps next to user files (observed
  * 2026-04-27 k8s-ha matrix #6 — restore couldn't find backups).
  *
- * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null}} args
+ * `restore` (a resolved `deploy -restore` point) writes the restore marker
+ * into the infra Secret, see buildInfraSecretData.
+ *
+ * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: {backup: string, target: string, recoveryConf: string}|null}} args
  */
-export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName }) {
+export async function applyVibecarbonSecrets({
+  kubeconfig,
+  envLocal,
+  s3Config,
+  backupBucketName,
+  restore,
+}) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   // Ensure the namespace exists before we try to land a Secret in it.
   // base/ kustomization creates it too, but we run before base/.
@@ -2013,7 +2036,12 @@ export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, b
   });
   const secrets = {
     'vibecarbon-app-secrets': buildAppSecretData({ envLocal, s3Config }),
-    'vibecarbon-infra-secrets': buildInfraSecretData({ envLocal, s3Config, backupBucketName }),
+    'vibecarbon-infra-secrets': buildInfraSecretData({
+      envLocal,
+      s3Config,
+      backupBucketName,
+      restore,
+    }),
   };
   for (const [name, stringData] of Object.entries(secrets)) {
     await runKubectlWithRetry(['apply', '-f', '-'], {
@@ -3010,6 +3038,160 @@ export async function repointObservabilityCertOnStandby({
 }
 
 /**
+ * Refuse an incomplete `deploy -restore` point before deployK3s does anything
+ * (C5): the orchestrator resolves it (resolveDeployRestorePoint) and passes
+ * the object; a raw flag value or a partial object means a caller skipped
+ * that resolution. Null (no restore) passes.
+ *
+ * @param {{ restore: unknown }} args
+ */
+export function assertDeployRestorePoint({ restore }) {
+  if (restore === null || restore === undefined) return;
+  const ok =
+    typeof restore === 'object' &&
+    BACKUP_NAME_RE.test(String(restore.backup ?? '')) &&
+    typeof restore.target === 'string' &&
+    restore.target !== '' &&
+    typeof restore.recoveryConf === 'string' &&
+    restore.recoveryConf !== '' &&
+    Number.isFinite(restore.sizeBytes);
+  if (!ok) {
+    throw new Error(
+      'deployK3s: incomplete restore point. Expected { backup, target, recoveryConf, sizeBytes } ' +
+        'resolved from the backup bucket (resolveDeployRestorePoint) before the deploy starts',
+    );
+  }
+}
+
+/**
+ * `deploy -restore` seeds a NEW database: the restore runs in the db pod's
+ * walg-restore init, on its first boot. On a cluster whose db StatefulSet
+ * already runs, nothing reboots the pod, so the marker would be set, the live
+ * database would read as "promoted and writable", and the deploy would report
+ * a restore that never happened. Refuse that, naming the command that does
+ * restore a running environment. A rerun that finishes the same restore (the
+ * infra Secret already names this backup) goes on.
+ *
+ * @param {{ env: NodeJS.ProcessEnv, restore: { backup: string } }} args
+ */
+export async function assertRestoreSeedsNewDatabase({ env, restore }) {
+  const sts = await runKubectlWithRetry(
+    ['-n', 'vibecarbon', 'get', 'statefulset', DB_STATEFULSET, '--ignore-not-found', '-o', 'name'],
+    {
+      env,
+      captureStdout: true,
+      description: 'assertRestoreSeedsNewDatabase: get the db StatefulSet',
+    },
+  );
+  if (!String(sts ?? '').trim()) return;
+  const marked = await runKubectlWithRetry(
+    [
+      '-n',
+      'vibecarbon',
+      'get',
+      'secret',
+      'vibecarbon-infra-secrets',
+      '--ignore-not-found',
+      '-o',
+      'jsonpath={.data.RESTORE_BACKUP}',
+    ],
+    {
+      env,
+      captureStdout: true,
+      description: 'assertRestoreSeedsNewDatabase: read the restore marker',
+    },
+  );
+  const inProgress = Buffer.from(String(marked ?? '').trim(), 'base64').toString('utf8');
+  if (inProgress === restore.backup) return;
+  throw new Error(
+    `deploy -restore seeds a new database, and this cluster already runs one (statefulset/${DB_STATEFULSET}). ` +
+      'Nothing was changed. Restore into the running environment with vibecarbon restore ' +
+      `<env> -source ${restore.backup}, or destroy it first and deploy -restore again.`,
+  );
+}
+
+/** psql in the db pod as postgres, through the deploy's kubeconfig. */
+function dbPsql(env) {
+  return async (sql, { readWrite = false } = {}) =>
+    String(
+      (await runCommandAsync(
+        [
+          'kubectl',
+          '-n',
+          'vibecarbon',
+          'exec',
+          DB_POD,
+          '-c',
+          DB_CONTAINER,
+          '--',
+          ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
+          'psql',
+          '-U',
+          'postgres',
+          '-tAc',
+          sql,
+        ],
+        { env, silent: true },
+      )) ?? '',
+    );
+}
+
+/**
+ * Finish a `deploy -restore` once the db rollout is Ready: the restored
+ * primary must have left recovery and prove writable (only 'writable' or
+ * 'lifted' is a proof). Then, as `vibecarbon restore` does: rename the
+ * previous cluster out of `.vc-prev` (a fresh cluster has none: the swap
+ * leaves no empty one), clear the marker so a later pod restart boots
+ * normally, and remove the discard.
+ *
+ * On an unproven write fence the marker stays set and the error names the
+ * commands that finish by hand.
+ *
+ * @param {{ env: NodeJS.ProcessEnv, restore: { backup: string }, environment?: string }} args
+ */
+export async function finishDeployRestore({ env, restore, environment }) {
+  await awaitPostgresPromoted({ env, dbPod: DB_POD, dbContainer: DB_CONTAINER });
+  // The orchestrator already refused an HA deploy with a failover in flight.
+  const proof = await assertRestoredPrimaryWritable({
+    environment,
+    envConfig: undefined,
+    exec: dbPsql(env),
+  });
+  const inDb = `kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} --`;
+  if (!PROVEN_WRITABLE_STATES.includes(proof)) {
+    throw new Error(
+      `could not prove the restored database writable (write fence ${proof ?? 'unread'}), so the ` +
+        `restore marker stays set and the app has not rolled. Check it (expect off): ${inDb} ` +
+        `psql -U postgres -At -c 'SHOW default_transaction_read_only'. Then finish: ` +
+        `${inDb} sh -c '${RETIRE_PREVIOUS_SH}' ` +
+        `&& kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '${JSON.stringify({ stringData: restoreMarkerStringData(null) })}' ` +
+        `&& ${inDb} sh -c '${REMOVE_DISCARD_SH}', and rerun vibecarbon deploy.`,
+    );
+  }
+  const execInDb = (script, description) =>
+    runKubectlWithRetry(
+      ['-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', script],
+      { env, description },
+    );
+  await execInDb(RETIRE_PREVIOUS_SH, 'finishDeployRestore: retire the previous cluster');
+  await runKubectlWithRetry(
+    [
+      '-n',
+      'vibecarbon',
+      'patch',
+      'secret',
+      'vibecarbon-infra-secrets',
+      '--type=merge',
+      '-p',
+      JSON.stringify({ stringData: restoreMarkerStringData(null) }),
+    ],
+    { env, description: 'finishDeployRestore: clear the restore marker' },
+  );
+  await execInDb(REMOVE_DISCARD_SH, 'finishDeployRestore: remove the discarded cluster');
+  progressLog(`[db] restored ${restore.backup}: promoted, writable, restore marker cleared`);
+}
+
+/**
  * Apply cert-manager + the app and infra Secrets + the project's k8s/infra +
  * k8s/base kustomizations (the db StatefulSet included, rendered), wait for
  * the db, patch the app deployment to use the locally-sideloaded image, and
@@ -3018,10 +3200,15 @@ export async function repointObservabilityCertOnStandby({
  * Local-first by default — no Flux on the deploy path; Flux is opt-in
  * via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: string|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, dbPrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
- *   `restore` is accepted for the caller's input hash and ignored here: the
- *   wal-g-restored DB carries its migration ledger, so the app's startup
- *   migrations apply only what the backup lacks (no restore special case).
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, dbPrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
+ *   `restore` is the resolved `deploy -restore` point (resolveDeployRestorePoint,
+ *   src/lib/walg/restore-base.js). With it the restore marker goes into the
+ *   infra Secret before the db StatefulSet applies, so the db pod's
+ *   walg-restore init fetches that backup on its first boot; the db wait is
+ *   sized from the backup, and the restored primary must promote and prove
+ *   writable (finishDeployRestore) before the marker is cleared and the app
+ *   rolls. The app's migrate init container then applies what the backup
+ *   lacks.
  */
 export async function applyK3sManifests({
   kubeconfig,
@@ -3106,6 +3293,8 @@ export async function applyK3sManifests({
   // primary behavior). Drives walgRole below (rendered into the db
   // StatefulSet) and zeroes the app tier on a standby.
   role,
+  // `deploy -restore`: { backup, target, recoveryConf, sizeBytes }, or null.
+  restore = null,
 }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   // Pilot-light: on the standby cluster nothing app-tier runs until a
@@ -3515,7 +3704,10 @@ export async function applyK3sManifests({
   // 4. Create the app and infra Secrets BEFORE base/ — base/'s Deployment
   //    and StatefulSet reference them; without them kubelet fails container
   //    creation with `secret "vibecarbon-app-secrets" not found`.
-  await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName });
+  //    With `deploy -restore` the infra Secret also carries the restore
+  //    marker, so the db pod's first boot restores that backup.
+  if (restore) await assertRestoreSeedsNewDatabase({ env, restore });
+  await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore });
   // 4b. Create the kube-system/carbon-autoscaler-config Secret the
   //     carbon-autoscaler sidecar reads on startup (and on every
   //     mtime-changed Refresh — see ConfigWatcher). Two keys:
@@ -4084,10 +4276,43 @@ export async function applyK3sManifests({
       }
     });
   }
+  // The db wait: Ready (its readinessProbe: the real server accepting TCP),
+  // then the condition itself, not the proxy: the pod being Ready is its
+  // readiness probe's verdict at one instant, and awaitPostgresAccepting
+  // re-proves the REAL server accepts TCP right now (mitigation-audit cluster
+  // 5 root fix; the d4 run-2 RCA in awaitPostgresAccepting). WAL archiving is
+  // on from the first boot (startup flags, see k8s/base/db/statefulset.yaml),
+  // so there is no archiving setup or restart after it. A changed
+  // wal-archive.sh rolls the pod through its template's sha annotation,
+  // inside this same wait. A restore's first boot also fetches the backup, so
+  // its budget scales with the backup's size (C13), never below the cold
+  // deploy's.
+  const dbRolloutTimeoutS = restore
+    ? Math.max(DB_ROLLOUT_TIMEOUT_S, restoreRolloutTimeoutS(restore.sizeBytes))
+    : DB_ROLLOUT_TIMEOUT_S;
+  const awaitDb = async () => {
+    await perfAsync(`deploy.${perfPrefix}.awaitDb`, () =>
+      awaitDbRollout({ env, timeoutS: dbRolloutTimeoutS }),
+    );
+    await awaitPostgresAccepting({ env, dbPod: DB_POD });
+  };
+  // 5b. `deploy -restore`: the restored database must have promoted and
+  //     proved writable BEFORE the app rolls. The app pods' migrate init
+  //     container reads a database still in recovery as a standby and applies
+  //     nothing (carbon/src/server/db/migrate.ts), so pods started during the
+  //     restore would skip the migrations the backup lacks. The marker stays
+  //     set on any failure here, so a rerun restores again.
+  if (restore) {
+    await awaitDb();
+    await perfAsync(`deploy.${perfPrefix}.restore.finish`, () =>
+      finishDeployRestore({ env, restore, environment }),
+    );
+  }
   // 6. Patch the app deployment to use the sideloaded image BEFORE waiting on
-  //    the db. base/ ships image=ghcr.io/<owner>/<repo>:main — no pull secret
-  //    in local-first mode, so leaving it pointed at GHCR triggers an
-  //    ImagePullBackOff for the whole db wait. Switching now means the app
+  //    the db (after it on a restore, see 5b). base/ ships
+  //    image=ghcr.io/<owner>/<repo>:main — no pull secret in local-first mode,
+  //    so leaving it pointed at GHCR triggers an ImagePullBackOff for the
+  //    whole db wait. Switching now means the app
   //    pods come up on the sideloaded image immediately (their readiness stays
   //    503 until the db answers); we still wait for their rollout below.
   //    One patch also stamps the resourceVersions of the Secrets the pod reads
@@ -4125,18 +4350,10 @@ export async function applyK3sManifests({
       description: 'applyK3sManifests: kubectl patch deployment/app (image, secret versions)',
     },
   );
-  // 7. Wait for the db StatefulSet (applied with base in step 5) to be Ready:
-  //    WAL archiving is on from its first boot (startup flags, see
-  //    k8s/base/db/statefulset.yaml), so there is no archiving setup or
-  //    restart after it. A changed wal-archive.sh rolls the pod through its
-  //    template's sha annotation, inside this same wait.
-  await perfAsync(`deploy.${perfPrefix}.awaitDb`, () => awaitDbRollout({ env }));
-  // Gate the psql-bearing steps after this (the RLS audit, the wal-g audit,
-  // the HA primary configuration) on the condition, not the proxy: the pod
-  // being Ready is its readiness probe's verdict at one instant, and this
-  // re-proves the REAL server accepts TCP right now (mitigation-audit
-  // cluster 5 root fix; the d4 run-2 RCA in awaitPostgresAccepting).
-  await awaitPostgresAccepting({ env, dbPod: DB_POD });
+  // 7. Wait for the db StatefulSet (applied with base in step 5), gating the
+  //    psql-bearing steps after this (the RLS audit, the wal-g audit, the HA
+  //    primary configuration). A restore already waited in 5b.
+  if (!restore) await awaitDb();
   // NOTE: the wal-g backup audit deliberately does NOT live here. It is the one
   // check whose subject can rot with ZERO in-cluster change (keys revoked at the
   // provider, bucket deleted), so it must not sit behind the persisted
@@ -4145,8 +4362,9 @@ export async function applyK3sManifests({
   //    container applies db/migrations as the owner (under an advisory lock,
   //    so replicas take turns) and sets up app_service before the app
   //    container starts, and the readiness probe stays 503 until the ledger
-  //    is current. A restored database carries its ledger, so there is no
-  //    restore special case either.
+  //    is current. A restored database carries its ledger, so they apply only
+  //    what the backup lacks; the one restore special case is the ordering in
+  //    5b (the app rolls only once the restored database has promoted).
   // 9. Wait for app rollout. The deployment template already has
   //    imagePullPolicy: IfNotPresent, so kubelet uses the sideloaded image
   //    without pulling. 300s wasn't enough on a cold deploy where the app
@@ -4388,6 +4606,9 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
 }
 
 export async function deployK3s(options) {
+  // A `deploy -restore` point arrives resolved (C5); refuse a partial one
+  // before anything is provisioned or applied.
+  assertDeployRestorePoint({ restore: options.restore });
   const { state } = options;
   // When a tracker is supplied (the orchestrator + HA fan-out always pass one),
   // use its spinner factory (timing + per-step log file). Otherwise fall back to
