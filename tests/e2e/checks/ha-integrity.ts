@@ -68,7 +68,12 @@ interface SshArgs {
 
 const isCompose = (mode: DeployMode) => mode.startsWith('compose');
 
-function defaultRun(mode: DeployMode, projectName: string, sshKeyPath: string, label: string) {
+export function defaultRun(
+  mode: DeployMode,
+  projectName: string,
+  sshKeyPath: string,
+  label: string,
+) {
   return (ip: string, remote: string) =>
     runRemote({ ip, sshKeyPath, mode, projectName, label }, remote);
 }
@@ -85,7 +90,7 @@ export function missingHandle(
   return null;
 }
 
-function fail(checkName: string, errorMessage: string, details?: Record<string, unknown>) {
+export function fail(checkName: string, errorMessage: string, details?: Record<string, unknown>) {
   return { checkName, status: 'fail' as const, errorMessage, ...(details && { details }) };
 }
 

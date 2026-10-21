@@ -71,6 +71,12 @@ import {
   runReplicationChecks,
   writeReplicationMarker,
 } from '../checks/replication.js';
+import {
+  checkPromotedAddonsReady,
+  checkPromotedDbNotRecreated,
+  checkPromotedPrimaryOnlyRunning,
+  checkStandbyPrimaryOnlyAbsent,
+} from '../checks/standby-addons.js';
 import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
@@ -1342,6 +1348,9 @@ export async function runLifecycle(
   // Kept so verify-failover can prove it is not simply re-reading the marker
   // off its own origin node — see the false-green guard below.
   let failoverMarkerOriginIp: string | null = null;
+  // compose-ha: the promotion target's db container read just before the
+  // failover/failback, compared after it (promoted_db_not_recreated).
+  let preFailoverStandbyDb: Awaited<ReturnType<typeof readDbIncarnation>> | null = null;
   // The primary before the first failover: compose-ha's failback must hand
   // the primary role back to it.
   let originalPrimaryIp: string | null = null;
@@ -2225,6 +2234,44 @@ export async function runLifecycle(
                 markerId: failoverContinuityMarkerId,
               }),
             );
+            // Primary-only add-ons follow the promotion: up on the promoted
+            // node (compose: containers running and the db untouched; k8s:
+            // Deployments ready). Each skips when no such add-on is enabled.
+            if (config.mode === 'compose-ha') {
+              replResults.push(
+                await checkPromotedPrimaryOnlyRunning({
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  sshKeyPath,
+                  features: config.features,
+                  primaryIp,
+                }),
+                checkPromotedDbNotRecreated({
+                  features: config.features,
+                  ip: primaryIp,
+                  before: preFailoverStandbyDb ?? {
+                    ok: false,
+                    error: 'the pre-failover db read was never taken',
+                  },
+                  after: await readDbIncarnation({
+                    mode: config.mode,
+                    projectName: config.projectName,
+                    ip: primaryIp,
+                    sshKeyPath,
+                  }),
+                }),
+              );
+            } else {
+              replResults.push(
+                await checkPromotedAddonsReady({
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  sshKeyPath,
+                  features: config.features,
+                  primaryIp,
+                }),
+              );
+            }
             // The retired side (role standby now) must archive nothing and
             // refuse its backups until a deploy rebuilds it.
             replResults.push(
@@ -2265,6 +2312,20 @@ export async function runLifecycle(
               replResults.push(await checkAppEndpointsReady({ primaryIp, sshKeyPath }));
             }
             if (stepName === 'verify-deploy') {
+              // Primary-only add-ons write to the primary database: none may
+              // exist on the compose-ha standby (k8s-ha is covered by
+              // pilot_light_deployments_zero above).
+              if (config.mode === 'compose-ha') {
+                replResults.push(
+                  await checkStandbyPrimaryOnlyAbsent({
+                    mode: config.mode,
+                    projectName: config.projectName,
+                    sshKeyPath,
+                    features: config.features,
+                    standbyIp,
+                  }),
+                );
+              }
               replResults.push(
                 await checkSlotCapped({
                   mode: config.mode,
@@ -3956,6 +4017,16 @@ EOF`;
                 `${tag} [${name}] no primary IP/ssh key to write continuity marker — continuity check will self-skip`,
               );
             }
+
+            preFailoverStandbyDb =
+              config.mode === 'compose-ha'
+                ? await readDbIncarnation({
+                    mode: config.mode,
+                    projectName: config.projectName,
+                    ip: preFailover.standbyIp,
+                    sshKeyPath: sshKeyPath ?? getSshKeyPath(config.projectDir, config.envPrefix),
+                  })
+                : null;
 
             const result = await runFailover(config.envPrefix, {
               cwd: config.projectDir,
