@@ -2411,6 +2411,13 @@ export async function run(args) {
   // keeps the old primary, so it runs before the retirement fence and every
   // promote step, behind the same production confirmation as a failover.
   if (parsed.abort) {
+    if (!parsed.dryRun && envConfig?.ha?.failoverInFlight) {
+      await confirmProdOrExit(envName, {
+        actionLabel: 'failover -abort',
+        yes: !!parsed.yes,
+        confirm: parsed.confirm,
+      });
+    }
     await runFailoverAbort({ envName, envConfig, projectConfig, parsed });
     return;
   }

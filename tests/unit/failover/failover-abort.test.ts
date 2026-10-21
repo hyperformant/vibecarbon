@@ -454,3 +454,15 @@ describe('message census: a refusal that fires on a journal names -abort', () =>
     expect(flag?.description).not.toMatch(/—/);
   });
 });
+
+describe('run(): -abort sits behind the production confirmation', () => {
+  it('confirmProdOrExit runs before runFailoverAbort in the abort branch', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(join(__dirname, '../../../src/failover.js'), 'utf-8');
+    const branch = src.slice(src.indexOf('if (parsed.abort) {'));
+    const confirm = branch.indexOf('await confirmProdOrExit(envName');
+    const abort = branch.indexOf('await runFailoverAbort(');
+    expect(confirm).toBeGreaterThan(-1);
+    expect(confirm).toBeLessThan(abort);
+  });
+});
