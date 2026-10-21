@@ -80,6 +80,9 @@ const PROBE_TIMEOUT_MS = 20_000;
 /** The db roll a WALG_ROLE change triggers, waited before the second pass. */
 const DB_SETTLE_TIMEOUT_S = 120;
 
+/** The fence parts that live in the database pod (the ones a db settle can make readable). */
+const DB_KEYS = ['dbMarker', 'dbReadOnly'];
+
 /** One read: recovery, the fence setting, and the pg_wal size (the retired node's disk clock). */
 export const RETIRED_DB_STATE_SQL =
   `SELECT pg_is_in_recovery(), current_setting('${WRITE_FENCE_SETTING}'), ` +
@@ -541,8 +544,9 @@ export async function fenceRetiredNode({ tier, ip, projectName, sshKeyPath, deps
     }
   };
   await pass();
-  const unseen = () => backend.steps.filter((s) => state[s.key] === 'unknown');
-  if (unseen().length > 0) {
+  // Only a db-side part the first read could not see is worth the db settle
+  // (a rollout wait): an unreadable Flux API is not helped by it.
+  if (DB_KEYS.some((key) => state[key] === 'unknown')) {
     await backend.settle(ip);
     const again = await backend.probe(ip);
     if (again) {
@@ -636,7 +640,12 @@ export async function reconcileRetiredFence({
 
 /**
  * Take the fence off a retired side that has just been rebuilt as a proven
- * replica: both markers, the database-level read-only setting from its
+ * replica. It first proves it: the side must read pg_is_in_recovery() = true.
+ * Otherwise (a degraded deploy that never reseeded it, or a db that does not
+ * answer) nothing is touched, one warning line says the fence is kept, and it
+ * returns `{ cleared: false }` so the caller keeps the env swapped and the next
+ * deploy retries. A stale ex-primary must never be made writable or handed
+ * back to Flux. Once proven, it removes both markers, the database-level read-only setting from its
  * settings files (a later promotion must never come up read-only), and, on
  * k8s, the Flux Kustomizations the fence suspended. Throws a one-line cause
  * when it cannot prove all of it: a marker left behind would make that node
@@ -648,10 +657,32 @@ export async function reconcileRetiredFence({
  * @param {string} args.ip
  * @param {string} args.projectName
  * @param {string} [args.environment]
- * @param {object} [args.deps] sshKeyPath / kubectl / run / psql seams
+ * @param {object} [args.deps] sshKeyPath / kubectl / run / psql / warn seams
+ * @returns {Promise<{ cleared: boolean }>}
  */
 export async function clearRetiredFence({ tier, ip, projectName, environment, deps = {} }) {
   const sshKeyPath = deps.sshKeyPath ?? getSSHKeyPath(environment);
+  const { warn = (line) => p.log.warn(line) } = deps;
+  let psqlFor = deps.psql;
+  if (!psqlFor && tier === 'k8s-ha') psqlFor = (h) => k8sPsqlRunner(h, sshKeyPath);
+  if (!psqlFor && tier === 'compose-ha') {
+    const { composePsqlRunner } = await import('./compose/ha.js');
+    psqlFor = (h) => composePsqlRunner(h, sshKeyPath, `/opt/${projectName}`);
+  }
+  const exec = psqlFor ? psqlFor(ip) : null;
+  let replica = false;
+  try {
+    replica = String((await exec?.('SELECT pg_is_in_recovery()')) ?? '').trim() === 't';
+  } catch {
+    replica = false;
+  }
+  if (!replica) {
+    warn(
+      `retired side not yet a replica; fence kept (${ip}): the next vibecarbon deploy retries ` +
+        'once it streams from the primary',
+    );
+    return { cleared: false };
+  }
   const fail = (why) =>
     new Error(
       `could not clear the retired marker on the rebuilt standby ${ip} (${why}); ` +
@@ -660,7 +691,6 @@ export async function clearRetiredFence({ tier, ip, projectName, environment, de
   const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
   if (tier === 'k8s-ha') {
     const kubectl = deps.kubectl ?? ((h, argv, opts) => sshKubectl(h, sshKeyPath, argv, opts));
-    const exec = (deps.psql ?? ((h) => k8sPsqlRunner(h, sshKeyPath)))(ip);
     try {
       // A merge-patch null removes the key, and is a no-op when it is absent.
       await kubectl(ip, [
@@ -692,7 +722,7 @@ export async function clearRetiredFence({ tier, ip, projectName, environment, de
     } catch (err) {
       throw fail(firstLine(err));
     }
-    return;
+    return { cleared: true };
   }
   if (tier === 'compose-ha') {
     const run = deps.run ?? ((h, command, opts) => composeSshRun(h, sshKeyPath, command, opts));
@@ -705,17 +735,12 @@ export async function clearRetiredFence({ tier, ip, projectName, environment, de
     if (String(out === false ? '' : (out ?? '')).trim() !== 'CLEARED') {
       throw fail('the node or its db did not answer');
     }
-    let psqlFor = deps.psql;
-    if (!psqlFor) {
-      const { composePsqlRunner } = await import('./compose/ha.js');
-      psqlFor = (h) => composePsqlRunner(h, sshKeyPath, `/opt/${projectName}`);
-    }
     try {
-      await clearDbReadOnly(psqlFor(ip));
+      await clearDbReadOnly(exec);
     } catch (err) {
       throw fail(firstLine(err));
     }
-    return;
+    return { cleared: true };
   }
   throw new Error(`retired fence: unknown tier ${JSON.stringify(tier)}`);
 }

@@ -111,6 +111,7 @@ function fakeDb(db: Db, writes: string[]) {
     if (sql.includes("current_setting('default_transaction_read_only')")) {
       return db.readOnly ? 'on' : 'off';
     }
+    if (sql === 'SELECT pg_is_in_recovery()') return db.inRecovery ? 't' : 'f';
     if (sql.includes('pg_terminate_backend')) return '';
     if (sql.includes('pg_file_settings')) return db.fileSetting ? '1' : '0';
     throw new Error(`unexpected sql ${sql}`);
@@ -402,8 +403,9 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     await reconcileRetiredFence(argsFor(cluster));
     expect(cluster.writes).toEqual([]);
 
-    // The clear resumes only what the fence suspended.
+    // The clear resumes only what the fence suspended, once the side is a replica.
     cluster.db.fileSetting = true;
+    cluster.db.inRecovery = true;
     await clearRetiredFence({
       tier: 'k8s-ha',
       ip: RETIRED_IP,
@@ -484,8 +486,11 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     cluster.state.dbMarker = true;
     cluster.db.fileSetting = true;
     cluster.db.readOnly = true;
+    cluster.db.inRecovery = true;
     const deps = { sshKeyPath: '/k', kubectl: cluster.kubectl, psql: cluster.psql };
-    await clearRetiredFence({ tier: 'k8s-ha', ip: RETIRED_IP, projectName: 'myapp', deps });
+    expect(
+      await clearRetiredFence({ tier: 'k8s-ha', ip: RETIRED_IP, projectName: 'myapp', deps }),
+    ).toEqual({ cleared: true });
     expect(cluster.writes).toEqual(['clearMarker', 'clearDbMarker', 'clearReadOnly']);
     expect(cluster.db.fileSetting).toBe(false);
     cluster.state.reachable = false;
@@ -577,8 +582,11 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     const node = fakeNode();
     node.state.hostMarker = true;
     node.db.fileSetting = true;
+    node.db.inRecovery = true;
     const deps = { sshKeyPath: '/k', run: node.run, psql: node.psql };
-    await clearRetiredFence({ tier: 'compose-ha', ip: RETIRED_IP, projectName: 'myapp', deps });
+    expect(
+      await clearRetiredFence({ tier: 'compose-ha', ip: RETIRED_IP, projectName: 'myapp', deps }),
+    ).toEqual({ cleared: true });
     expect(node.writes).toEqual(['clear', 'clearReadOnly']);
     expect(node.state.hostMarker).toBe(false);
     expect(node.db.fileSetting).toBe(false);
@@ -586,6 +594,93 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     await expect(
       clearRetiredFence({ tier: 'compose-ha', ip: RETIRED_IP, projectName: 'myapp', deps }),
     ).rejects.toThrow(/retired/);
+  });
+});
+
+describe('the fence comes off only a proven replica (a degraded deploy keeps it)', () => {
+  it('k8s: a rebuilt side not in recovery keeps the fence: no RESET, Flux stays suspended, the marker stays', async () => {
+    const cluster = fakeCluster({ flux: [{ name: 'vibecarbon-base' }] });
+    await reconcileRetiredFence({
+      environment: 'prod',
+      envConfig: k8sSwapped(),
+      projectConfig: { projectName: 'myapp' },
+      tier: 'k8s-ha',
+      deps: { ...quiet, sshKeyPath: '/k', kubectl: cluster.kubectl, psql: cluster.psql },
+    });
+    cluster.writes.length = 0;
+    const warned: string[] = [];
+    const result = await clearRetiredFence({
+      tier: 'k8s-ha',
+      ip: RETIRED_IP,
+      projectName: 'myapp',
+      deps: {
+        sshKeyPath: '/k',
+        kubectl: cluster.kubectl,
+        psql: cluster.psql,
+        warn: (l: string) => warned.push(l),
+      },
+    });
+    expect(result).toEqual({ cleared: false });
+    expect(cluster.writes).toEqual([]);
+    expect(cluster.db.fileSetting).toBe(true);
+    expect(cluster.state.role).toBe(RETIRED_ROLE);
+    expect(cluster.state.flux?.[0].suspend).toBe(true);
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toMatch(/^retired side not yet a replica; fence kept/);
+
+    // Once it is a replica the same clear goes through.
+    cluster.db.inRecovery = true;
+    expect(
+      await clearRetiredFence({
+        tier: 'k8s-ha',
+        ip: RETIRED_IP,
+        projectName: 'myapp',
+        deps: { sshKeyPath: '/k', kubectl: cluster.kubectl, psql: cluster.psql, warn: () => {} },
+      }),
+    ).toEqual({ cleared: true });
+    expect(cluster.writes).toEqual([
+      'clearMarker',
+      'clearDbMarker',
+      'clearReadOnly',
+      'flux resume vibecarbon-base',
+    ]);
+  });
+
+  it('compose: a side not in recovery keeps the fence with no write; an unreadable db keeps it too', async () => {
+    const node = fakeNode();
+    node.state.hostMarker = true;
+    node.db.fileSetting = true;
+    const deps = { sshKeyPath: '/k', run: node.run, psql: node.psql, warn: () => {} };
+    expect(
+      await clearRetiredFence({ tier: 'compose-ha', ip: RETIRED_IP, projectName: 'myapp', deps }),
+    ).toEqual({ cleared: false });
+    node.db.up = false;
+    expect(
+      await clearRetiredFence({ tier: 'compose-ha', ip: RETIRED_IP, projectName: 'myapp', deps }),
+    ).toEqual({ cleared: false });
+    expect(node.writes).toEqual([]);
+    expect(node.state.hostMarker).toBe(true);
+  });
+});
+
+describe('the db settle is only for db-side parts', () => {
+  it('an unreadable Flux API is reported missing without the rollout wait', async () => {
+    const cluster = fakeCluster({ flux: [{ name: 'vibecarbon-base' }] });
+    const kubectl = async (ip: string, argv: string[]) => {
+      if (argv.join(' ').includes('kustomizations') && argv.includes('get')) {
+        throw new Error('Unable to connect to the server: net/http: TLS handshake timeout');
+      }
+      return cluster.kubectl(ip, argv);
+    };
+    const result = await reconcileRetiredFence({
+      environment: 'prod',
+      envConfig: k8sSwapped(),
+      projectConfig: { projectName: 'myapp' },
+      tier: 'k8s-ha',
+      deps: { ...quiet, sshKeyPath: '/k', kubectl, psql: cluster.psql },
+    });
+    expect(result.unreachable).toEqual([RETIRED_IP]);
+    expect(cluster.argvs.some((a) => a.includes('rollout'))).toBe(false);
   });
 });
 

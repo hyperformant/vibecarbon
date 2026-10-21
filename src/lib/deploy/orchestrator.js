@@ -505,7 +505,10 @@ export function resolveKubeconfigPath(environment, envConfig) {
  * as the standby (retired-fence.js). Only when the env was swapped at entry
  * (a retired side existed); a no-op otherwise. Throws when the clear cannot be
  * proven, and the caller runs it before the final save, so a failed clear
- * leaves deployedAt unstamped and the rerun clears it.
+ * leaves deployedAt unstamped and the rerun clears it. A rebuilt standby that
+ * is not a replica yet (a degraded deploy that did not reseed it) keeps its
+ * fence: `kept` is true, the deploy still succeeds, and the caller leaves
+ * deployedAt unstamped so the env stays swapped and the next deploy retries.
  *
  * @param {object} args
  * @param {Array<{ ip: string }>} args.retiredAtEntry
@@ -513,7 +516,7 @@ export function resolveKubeconfigPath(environment, envConfig) {
  * @param {string} args.projectName
  * @param {string} args.environment
  * @param {typeof clearRetiredFence} [args.clear]
- * @returns {Promise<boolean>} whether a clear ran
+ * @returns {Promise<{ ran: boolean, kept: boolean }>}
  */
 export async function finishK8sRetiredFence({
   retiredAtEntry,
@@ -522,9 +525,9 @@ export async function finishK8sRetiredFence({
   environment,
   clear = clearRetiredFence,
 }) {
-  if (!retiredAtEntry?.length || !standbyIp) return false;
-  await clear({ tier: 'k8s-ha', ip: standbyIp, projectName, environment });
-  return true;
+  if (!retiredAtEntry?.length || !standbyIp) return { ran: false, kept: false };
+  const { cleared } = await clear({ tier: 'k8s-ha', ip: standbyIp, projectName, environment });
+  return { ran: true, kept: !cleared };
 }
 
 /**
@@ -1589,7 +1592,7 @@ export async function executeDeployment(args, gatheredConfig) {
     // marker left behind would make it refuse its own backups once a later
     // failover promotes it, so a failed clear fails the deploy (the env stays
     // swapped and the rerun clears it).
-    await finishK8sRetiredFence({
+    const retiredFence = await finishK8sRetiredFence({
       retiredAtEntry,
       standbyIp: k8sHaCtx.standbyResult?.masterIp,
       projectName: projectConfig.projectName,
@@ -1602,6 +1605,9 @@ export async function executeDeployment(args, gatheredConfig) {
       replicationStatus: k8sHaCtx.replicationStatus,
       degraded: k8sHaCtx.replicationStatus !== 'streaming',
       systemIdentifier: k8sHaCtx.systemIdentifier ?? null,
+      // A retired side that is not a replica yet keeps its fence: deployedAt
+      // stays unstamped, so the env stays swapped and the next deploy retries.
+      reconvergeIncomplete: retiredFence.kept,
     };
   }
 

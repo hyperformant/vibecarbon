@@ -1163,13 +1163,14 @@ async function haFinalizeConfig(ctx) {
   // later failover promoted it; the rerun clears it.
   if (ctx.reconverge && reconvergeComplete) {
     try {
-      await clearRetiredFence({
+      const { cleared } = await clearRetiredFence({
         tier: 'compose-ha',
         ip: standby.ip,
         projectName,
         environment,
         deps: { sshKeyPath: ctx.sshKeyPath },
       });
+      if (!cleared) reconvergeComplete = false;
     } catch (err) {
       p.log.warn(err.message);
       reconvergeComplete = false;
