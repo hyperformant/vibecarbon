@@ -8,8 +8,9 @@
  * two GETs below (the container list and one container's logs) plus /_ping,
  * and refuses everything else, container inspect and its env included. A new
  * call here needs a matching allow rule in that proxy's haproxy config. In
- * local dev the host's /var/run/docker.sock is used directly. This mirrors the Kubernetes branch of the services-status
- * routes, which talks to the K8s API over HTTPS instead of exec'ing kubectl.
+ * local dev the host's /var/run/docker.sock is used directly. This mirrors
+ * the Kubernetes branch of the services-status routes, which talks to the
+ * K8s API over HTTPS instead of exec'ing kubectl.
  */
 
 import { existsSync } from 'node:fs';

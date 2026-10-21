@@ -58,8 +58,9 @@ interface ServiceConfig {
 const dockerApiProxy = process.env.DOCKER_API_PROXY;
 
 // The per-server stack: the app, its Postgres, Traefik in front, and (in a
-// production compose deployment) the socket proxy Traefik and this page read
-// Docker through. Authentication is not a row of its own: Better Auth runs
+// production compose deployment) the two socket proxies: Traefik's, which
+// this page cannot reach and so reports from its state in the container
+// list, and the app's own, which it pings. Authentication is not a row of its own: Better Auth runs
 // inside the app, so its check is folded into the App row (checkApp).
 const CORE_SERVICES: ServiceConfig[] = [
   {
@@ -89,6 +90,15 @@ const CORE_SERVICES: ServiceConfig[] = [
         {
           name: 'Docker Socket Proxy',
           container: 'docker-socket-proxy',
+          // Traefik's proxy sits on a network only Traefik joins: reported
+          // from its state in the Docker listing, never pinged.
+          healthUrl: 'docker://docker-socket-proxy',
+          timeout: 0,
+        },
+        {
+          name: 'App Docker Proxy',
+          container: 'app-docker-proxy',
+          // The list-and-logs proxy this page reads Docker through.
           healthUrl: `${dockerApiProxy.replace(/\/$/, '')}/_ping`,
           timeout: 2000,
         },
@@ -539,21 +549,25 @@ servicesStatusRoutes.get('/', async (c) => {
   });
 });
 
+// The Docker API paths this page and Traefik see Docker through. Never
+// restarted from the dashboard.
+const SOCKET_PROXIES = ['docker-socket-proxy', 'app-docker-proxy'];
+
 // Every container this page knows by name: the log viewer's allowlist.
 const ALL_KNOWN_CONTAINERS = [
   ...CORE_SERVICES.map((s) => s.container),
-  'docker-socket-proxy',
+  ...SOCKET_PROXIES,
   ...DISCOVERED_SERVICES.map((s) => s.container),
   ...Object.values(OPTIONAL_SERVICES).flatMap((configs) => configs.map((c) => c.container)),
 ];
 
 /**
- * The restart allowlist: known containers minus docker-socket-proxy, which is
- * the read-only path this page sees Docker through and no dashboard action
+ * The restart allowlist: known containers minus the socket proxies, the
+ * paths Traefik and this page see Docker through, which no dashboard action
  * should cycle.
  */
 const RESTARTABLE_CONTAINERS = new Set(
-  ALL_KNOWN_CONTAINERS.filter((name) => name !== 'docker-socket-proxy')
+  ALL_KNOWN_CONTAINERS.filter((name) => !SOCKET_PROXIES.includes(name))
 );
 
 /**

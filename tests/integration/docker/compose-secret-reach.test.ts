@@ -293,6 +293,9 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       const nets = networksOf(config.services[p]);
       expect(nets, p).not.toContain('vibecarbon-network');
       for (const n of nets) expect(config.networks[n]?.internal, `${p} on ${n}`).toBe(true);
+      // An internal network means nothing if the proxy publishes a host port.
+      expect(config.services[p].ports, `${p} ports`).toBeUndefined();
+      expect(config.services[p].expose, `${p} expose`).toBeUndefined();
     }
   });
 
@@ -315,6 +318,9 @@ describeDocker('compose: secrets reach only the services that use them', () => {
   describe('app-docker-proxy against a live daemon', () => {
     const project = `vc-socket-reach-${process.pid}`;
     const SECRET = sentinel('NEIGHBOUR_ENV');
+    // Pinned by digest like every image the project runs.
+    const BUSYBOX =
+      'busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662';
     let liveDir: string;
     let victimId: string;
     const compose = (args: string[]) =>
@@ -344,12 +350,12 @@ describeDocker('compose: secrets reach only the services that use them', () => {
           // A neighbour holding a secret in its env, the way db holds the
           // owner password. Its command never names the secret.
           victim: {
-            image: 'busybox:1.36',
+            image: BUSYBOX,
             command: ['sh', '-c', 'echo neighbour-started; sleep 600'],
             environment: { NEIGHBOUR_ENV: SECRET },
             networks: ['probe'],
           },
-          probe: { image: 'busybox:1.36', networks: ['probe'] },
+          probe: { image: BUSYBOX, networks: ['probe'] },
         },
         configs: config.configs,
         networks: { probe: { internal: true } },
@@ -384,11 +390,19 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       return { status, body: out };
     };
 
-    it('lists containers without their env', () => {
-      const res = ask('GET', '/containers/json');
+    it('lists containers without their env, versioned or not', () => {
+      for (const path of ['/containers/json', '/v1.43/containers/json?all=1']) {
+        const res = ask('GET', path);
+        expect(res.status, path).toBe(200);
+        expect(res.body, path).toContain(victimId);
+        expect(res.body.includes(SECRET), path).toBe(false);
+      }
+    });
+
+    it('answers the health ping', () => {
+      const res = ask('GET', '/_ping');
       expect(res.status).toBe(200);
-      expect(res.body).toContain(victimId);
-      expect(res.body.includes(SECRET)).toBe(false);
+      expect(res.body).toMatch(/OK$/);
     });
 
     it('serves logs, versioned or not', () => {

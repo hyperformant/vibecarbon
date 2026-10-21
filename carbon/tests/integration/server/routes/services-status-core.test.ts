@@ -3,14 +3,16 @@
  *
  * The panel lists the containers this environment runs and no others:
  * - app, db and traefik everywhere;
- * - docker-socket-proxy only where it runs: a production compose deployment,
- *   which sets DOCKER_API_PROXY. Local dev talks to the host socket and k8s
- *   has no Docker API, so neither lists it;
+ * - the two socket proxies only where they run: a production compose
+ *   deployment, which sets DOCKER_API_PROXY. Traefik's docker-socket-proxy is
+ *   on a network the app cannot reach, so its row comes from the container
+ *   list; app-docker-proxy (DOCKER_API_PROXY) is pinged. Local dev talks to
+ *   the host socket and k8s has no Docker API, so neither lists them;
  * - s3 (Garage, the dev object store) only when Docker reports it running.
  *
  * Restarts need the docker CLI and compose files next to the API, which only
- * local dev has, so production and k8s offer none. docker-socket-proxy is
- * never restartable, and restart-all never restarts `app`: that is the
+ * local dev has, so production and k8s offer none. Neither proxy is ever
+ * restartable, and restart-all never restarts `app`: that is the
  * process answering the request.
  */
 
@@ -110,20 +112,57 @@ describe('services status: core rows', () => {
     expect(rows).not.toContain('docker-socket-proxy');
   });
 
-  it('lists docker-socket-proxy when DOCKER_API_PROXY is set (production compose)', async () => {
-    const rows = await containers({ DOCKER_API_PROXY: 'http://docker-socket-proxy:2375/' });
-    expect(rows).toContain('docker-socket-proxy');
+  it('lists both proxies when DOCKER_API_PROXY is set, and pings only the app proxy', async () => {
+    const rows = await containers({ DOCKER_API_PROXY: 'http://app-docker-proxy:2375/' });
+    expect(rows).toEqual(expect.arrayContaining(['docker-socket-proxy', 'app-docker-proxy']));
     const ping = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
-    expect(ping).toContain('http://docker-socket-proxy:2375/_ping');
+    expect(ping).toContain('http://app-docker-proxy:2375/_ping');
+    expect(ping.filter((url) => url.includes('docker-socket-proxy'))).toEqual([]);
+  });
+
+  it("reports Traefik's proxy from the container list, not from the app proxy's ping", async () => {
+    const env = { DOCKER_API_PROXY: 'http://app-docker-proxy:2375', PROJECT_NAME: 'litetest' };
+    // The app proxy answers, but Traefik's proxy is not running.
+    listProjectContainers.mockResolvedValue(
+      ['app', 'traefik', 'db', 'app-docker-proxy'].map((service) => ({
+        id: `id-${service}`,
+        name: `litetest-${service}`,
+        service,
+      })),
+    );
+    const down = await rows(env);
+    expect(down.find((r) => r.container === 'docker-socket-proxy')?.status).toBe('unhealthy');
+    expect(down.find((r) => r.container === 'app-docker-proxy')?.status).toBe('healthy');
+
+    listProjectContainers.mockResolvedValue(
+      ['app', 'traefik', 'db', 'app-docker-proxy', 'docker-socket-proxy'].map((service) => ({
+        id: `id-${service}`,
+        name: `litetest-${service}`,
+        service,
+      })),
+    );
+    const up = await rows(env);
+    expect(up.find((r) => r.container === 'docker-socket-proxy')?.status).toBe('healthy');
   });
 
   it('never lists docker-socket-proxy on k8s, even with DOCKER_API_PROXY set', async () => {
     const rows = await containers({
       KUBERNETES_SERVICE_HOST: '10.43.0.1',
-      DOCKER_API_PROXY: 'http://docker-socket-proxy:2375',
+      DOCKER_API_PROXY: 'http://app-docker-proxy:2375',
     });
     expect(rows).toEqual(expect.arrayContaining(['app', 'db', 'traefik']));
     expect(rows).not.toContain('docker-socket-proxy');
+    expect(rows).not.toContain('app-docker-proxy');
+  });
+
+  it("the log viewer accepts both proxies' containers", async () => {
+    const env = { DOCKER_API_PROXY: 'http://app-docker-proxy:2375', PROJECT_NAME: 'litetest' };
+    for (const proxy of ['docker-socket-proxy', 'app-docker-proxy']) {
+      const res = await (await appWith(env)).request(`/status/logs?container=${proxy}`);
+      expect(res.status, proxy).toBe(200);
+    }
+    const bogus = await (await appWith(env)).request('/status/logs?container=not-a-service');
+    expect(bogus.status).toBe(400);
   });
 });
 
@@ -173,26 +212,29 @@ describe('services restart', () => {
     expect(commands).toContain('docker compose restart db');
   });
 
-  it('never restarts docker-socket-proxy, alone or in restart-all', async () => {
-    const env = { DOCKER_API_PROXY: 'http://docker-socket-proxy:2375' };
+  it('never restarts either socket proxy, alone or in restart-all', async () => {
+    const env = { DOCKER_API_PROXY: 'http://app-docker-proxy:2375' };
     const listed = await rows(env);
-    expect(listed.find((r) => r.container === 'docker-socket-proxy')?.restartable).toBe(false);
+    for (const proxy of ['docker-socket-proxy', 'app-docker-proxy']) {
+      expect(listed.find((r) => r.container === proxy)?.restartable, proxy).toBe(false);
 
-    const single = await (await appWith(env)).request('/status/restart/docker-socket-proxy', {
-      method: 'POST',
-    });
-    expect(single.status).toBe(400);
+      const single = await (await appWith(env)).request(`/status/restart/${proxy}`, {
+        method: 'POST',
+      });
+      expect(single.status, proxy).toBe(400);
+    }
 
     const all = await (await appWith(env)).request('/status/restart', { method: 'POST' });
     const body = (await all.json()) as { results: Array<{ container: string }> };
-    expect(body.results.map((r) => r.container)).not.toContain('docker-socket-proxy');
-    expect(exec.mock.calls.map(([cmd]) => cmd)).not.toContain(
-      'docker compose restart docker-socket-proxy',
-    );
+    const commands = exec.mock.calls.map(([cmd]) => cmd);
+    for (const proxy of ['docker-socket-proxy', 'app-docker-proxy']) {
+      expect(body.results.map((r) => r.container)).not.toContain(proxy);
+      expect(commands).not.toContain(`docker compose restart ${proxy}`);
+    }
   });
 
   it('offers no restart in the production container, which has no docker CLI', async () => {
-    const env = { NODE_ENV: 'production', DOCKER_API_PROXY: 'http://docker-socket-proxy:2375' };
+    const env = { NODE_ENV: 'production', DOCKER_API_PROXY: 'http://app-docker-proxy:2375' };
     expect((await rows(env)).every((r) => r.restartable === false)).toBe(true);
     const res = await (await appWith(env)).request('/status/restart/db', { method: 'POST' });
     expect(res.status).toBe(501);

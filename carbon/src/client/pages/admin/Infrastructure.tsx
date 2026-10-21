@@ -47,7 +47,7 @@ function topologyLayers(t: TFunction) {
       key: 'edge',
       name: t('admin.infrastructure.layers.edge.name'),
       icon: Globe,
-      services: ['traefik', 'docker-socket-proxy'],
+      services: ['traefik', 'docker-socket-proxy', 'app-docker-proxy'],
       description: t('admin.infrastructure.layers.edge.description'),
     },
     {
