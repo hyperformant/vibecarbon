@@ -216,7 +216,8 @@ describe('reestablishReplicationTransport — post-resize belt (item I-1)', () =
 
     // Apply, then restart the Deployment on each cluster's MASTER: the
     // controller replaces the crash-looped pod with one that binds cleanly now
-    // wg0 exists. Nothing deletes a pod by hand.
+    // wg0 exists. The only pod delete is the legacy bare Pod's, by exact name,
+    // inside the apply (repl-gateway-kind.test.ts pins it).
     for (const master of ['1.1.1.1', '2.2.2.2']) {
       const apply = joined.findIndex((c) => c.includes(master) && c.includes('apply -f -'));
       const restart = joined.findIndex(
@@ -225,7 +226,11 @@ describe('reestablishReplicationTransport — post-resize belt (item I-1)', () =
       expect(apply).toBeGreaterThanOrEqual(0);
       expect(restart).toBeGreaterThan(apply);
     }
-    expect(joined.some((c) => c.includes('delete pod repl-gateway'))).toBe(false);
+    expect(
+      joined
+        .filter((c) => c.includes('delete pod repl-gateway'))
+        .every((c) => c.includes('--ignore-not-found >/dev/null && kubectl apply -f -')),
+    ).toBe(true);
 
     // The re-applied manifests carry the per-role relay direction.
     const applyInputs = calls

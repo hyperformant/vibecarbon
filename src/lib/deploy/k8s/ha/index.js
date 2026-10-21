@@ -162,6 +162,18 @@ export function buildDbHostPortPatch() {
 }
 
 /**
+ * The repl-gateway apply, manifest on stdin. It first removes the bare
+ * `repl-gateway` Pod a cluster deployed before the Deployment shipped: that
+ * hostNetwork socat holds the gateway port, so the Deployment's pod would
+ * crash-loop beside it, and nothing else ever deletes a bare Pod. Deployment
+ * pods carry hashed names, so this only ever matches the legacy Pod, and
+ * `--ignore-not-found` makes it a no-op everywhere else. The delete waits for
+ * the pod to go, which frees the port before the apply.
+ */
+export const REPL_GATEWAY_APPLY_SHELL =
+  'kubectl delete pod repl-gateway -n vibecarbon --ignore-not-found >/dev/null && kubectl apply -f -';
+
+/**
  * Apply the repl-gateway manifest to both clusters and bring up the WireGuard
  * tunnel between the two database nodes. Shared by setupReplication (the
  * serial path) and prepareReplicationTransport (the deploy fan-out overlap) so
@@ -185,7 +197,7 @@ async function applyGatewaysAndBringUpTunnel({
   // cluster's gateway the opposite way): the controller replaces the pod, with
   // `Recreate` so the old relay frees the port before the new one binds it.
   const applyGateway = (masterIp, rendered) =>
-    runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, 'kubectl apply -f -'], {
+    runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, REPL_GATEWAY_APPLY_SHELL], {
       silent: true,
       input: rendered,
     });
@@ -390,7 +402,7 @@ export async function reestablishReplicationTransport(options) {
     [primaryIp, 'primary', primaryDbPrivateIp],
     [standbyIp, 'standby', standbyDbPrivateIp],
   ]) {
-    await runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, 'kubectl apply -f -'], {
+    await runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, REPL_GATEWAY_APPLY_SHELL], {
       silent: true,
       input: renderReplGatewayManifest({ template: gatewayTemplate, role, nodePrivateIp }),
     });

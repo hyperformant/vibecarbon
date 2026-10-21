@@ -17,7 +17,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { renderReplGatewayManifest } from '../../../src/lib/deploy/k8s/ha/index.js';
+import {
+  REPL_GATEWAY_APPLY_SHELL,
+  renderReplGatewayManifest,
+} from '../../../src/lib/deploy/k8s/ha/index.js';
 
 const ROOT = join(__dirname, '../../..');
 const MANIFEST = readFileSync(
@@ -68,10 +71,24 @@ describe('repl-gateway manifest: a one-replica Deployment', () => {
   });
 });
 
-describe('repl-gateway apply: the controller replaces pods, the CLI never deletes them', () => {
-  it('no bare-Pod delete or immutability fallback is left in the apply path', () => {
-    expect(SRC).not.toMatch(/delete pod repl-gateway/);
+describe('repl-gateway apply: the controller replaces pods; the CLI deletes only the legacy bare Pod', () => {
+  it('no immutability fallback is left in the apply path', () => {
     expect(SRC).not.toMatch(/Forbidden: pod updates may not change fields/);
+  });
+
+  // Final review M6: a cluster deployed before the Deployment shipped still
+  // runs the bare hostNetwork Pod, which holds the gateway port, so the new
+  // Deployment pod would crash-loop beside it. Deployment pods have hashed
+  // names, so this delete only ever matches that Pod.
+  it('every apply removes the legacy bare Pod first, by its exact name, ignoring not-found', () => {
+    expect(REPL_GATEWAY_APPLY_SHELL).toBe(
+      'kubectl delete pod repl-gateway -n vibecarbon --ignore-not-found >/dev/null && kubectl apply -f -',
+    );
+    // Both apply paths (deploy bring-up, post-resize re-establish) use it, and
+    // no other gateway apply or delete is spelled anywhere.
+    expect(SRC.match(/REPL_GATEWAY_APPLY_SHELL\]/g)).toHaveLength(2);
+    expect(SRC.match(/delete pod repl-gateway/g)).toHaveLength(1);
+    expect(SRC).not.toMatch(/'kubectl apply -f -'/);
   });
 
   it('the post-resize bounce restarts the Deployment', () => {

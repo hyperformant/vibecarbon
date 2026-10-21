@@ -36,7 +36,9 @@ type Node = any;
 /** Shapes that bounce the db: `compose restart db`, `delete pod <db pod>`, a statefulset rollout restart. */
 const RESTART_SHAPES = [
   /\brestart\s+db\b/,
-  /\bdelete\s+pod\b/,
+  // Any pod delete but the legacy bare repl-gateway Pod's (final review M6:
+  // a socat relay, never the db; removed once so its Deployment can bind).
+  /\bdelete\s+pod\b(?!\s+repl-gateway\s)/,
   /\brollout\s+restart\s+(statefulset|sts)\b/,
 ];
 
