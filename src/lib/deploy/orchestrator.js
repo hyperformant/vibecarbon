@@ -45,6 +45,7 @@ import { resolveDockerHubCreds } from './docker-hub.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
+import { envS3Record } from './s3-record.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
 
@@ -439,46 +440,6 @@ export function assertBucketReady(result, role) {
 }
 
 /**
- * The `s3` block of the deploy's skeleton env save (status 'deploying').
- * Rebuilt from s3Config, but `bucketCreatedAt` (status' "storage settling"
- * row, the e2e upload gate's clock) only exists in the PRIOR record, so it is
- * carried from there, null included, the way compose-ha's pending save does.
- *
- * @param {{ bucket: string, bucketPin?: string, region: string, endpoint: string, stateBucket?: string, stateBucketRegion?: string, stateEndpoint?: string, appKey?: object|null }} s3Config
- * @param {{ bucketCreatedAt?: string|null, appKey?: object } | undefined} priorS3 - the env's persisted `s3`
- */
-export function skeletonS3Block(s3Config, priorS3) {
-  return {
-    bucket: s3Config.bucket,
-    ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
-    ...(priorS3 &&
-      Object.hasOwn(priorS3, 'bucketCreatedAt') && {
-        bucketCreatedAt: priorS3.bucketCreatedAt,
-      }),
-    region: s3Config.region,
-    endpoint: s3Config.endpoint,
-    stateBucket: s3Config.stateBucket,
-    ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
-    ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
-    ...appKeyBlock(s3Config, priorS3),
-  };
-}
-
-/**
- * The `appKey` record (R9: `{ id, scoping, tier, bucket }`, never a secret)
- * for an env save. Once this deploy resolved the app credential,
- * `s3Config.appKey` is the truth (null: the shared tier, no record). Before
- * that, the prior record is carried, so a save ahead of the resolve never
- * forgets a minted key that destroy must revoke.
- * @param {{ appKey?: object|null }} s3Config
- * @param {{ appKey?: object } | undefined} priorS3
- */
-function appKeyBlock(s3Config, priorS3) {
-  if (Object.hasOwn(s3Config, 'appKey')) return s3Config.appKey ? { appKey: s3Config.appKey } : {};
-  return priorS3?.appKey ? { appKey: priorS3.appKey } : {};
-}
-
-/**
  * Where the SERVING cluster's kubeconfig lives. Exported for unit tests.
  *
  * HA deploys split into kubeconfig-<env>-primary / -standby; standalone uses
@@ -725,7 +686,7 @@ export async function executeDeployment(args, gatheredConfig) {
       ...(secondaryRegion ? { secondaryRegion } : {}),
       ...(domain ? { domain } : {}),
       ...(dnsProvider ? { dnsProvider } : {}),
-      s3: skeletonS3Block(s3Config, existingEnv.s3),
+      s3: envS3Record(s3Config, existingEnv.s3),
       backupS3: backupS3Config?.bucket
         ? {
             bucket: backupS3Config.bucket,
@@ -2120,22 +2081,16 @@ export async function executeDeployment(args, gatheredConfig) {
         deployedAt: new Date().toISOString(),
         deployedCommit,
         ...(deployedDirty !== null && { deployedDirty }),
-        s3: {
-          bucket: s3Config.bucket,
-          ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
-          // Only on a provider with a settle window: status reads it for the
-          // "storage settling" row, the e2e upload check for its gate.
+        // bucketCreatedAt only on a provider with a settle window (status'
+        // "storage settling" row, the e2e upload gate); the fence marks the
+        // sync above wrote to disk; the app key's record (R9, no secret) so
+        // destroy can revoke it.
+        s3: envS3Record(s3Config, {
+          unfencedBuckets: persistedEnvConfig.s3?.unfencedBuckets,
           ...(Object.hasOwn(appBucketFinal, 'bucketCreatedAt') && {
             bucketCreatedAt: appBucketFinal.bucketCreatedAt,
           }),
-          region: s3Config.region,
-          endpoint: s3Config.endpoint,
-          stateBucket: s3Config.stateBucket,
-          ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
-          ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
-          // R9: the app key's record (no secret), so destroy can revoke it.
-          ...(s3Config.appKey && { appKey: s3Config.appKey }),
-        },
+        }),
         ...(backupS3Persist && { backupS3: backupS3Persist }),
         backup: backupConfig,
         services,

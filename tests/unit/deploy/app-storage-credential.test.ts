@@ -20,7 +20,8 @@ import {
 } from '../../../src/lib/deploy/app-storage-credential.js';
 import { renderBundle } from '../../../src/lib/deploy/bundle.js';
 import { buildAppSecretData, buildInfraSecretData } from '../../../src/lib/deploy/k8s/k3s.js';
-import { skeletonS3Block, startAppBucketFinalize } from '../../../src/lib/deploy/orchestrator.js';
+import { startAppBucketFinalize } from '../../../src/lib/deploy/orchestrator.js';
+import { envS3Record } from '../../../src/lib/deploy/s3-record.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { buildEnv } from '../../../src/lib/iac/index.js';
 import { findEnvDrift } from '../../../src/lib/project.js';
@@ -238,12 +239,10 @@ describe('R9 lifecycle on a mint provider', () => {
   it('an env save ahead of the resolve keeps the recorded key; after it, the resolve decides', () => {
     const record = { id: 'SENTINEL_KEY_0', scoping: 'mint', tier: 'isolated', bucket: 'b' };
     const base = { bucket: 'b', region: 'nyc3', endpoint: INFRA.endpoint };
-    expect(skeletonS3Block(base, { appKey: record }).appKey).toEqual(record);
-    expect(skeletonS3Block({ ...base, appKey: null }, { appKey: record })).not.toHaveProperty(
-      'appKey',
-    );
+    expect(envS3Record(base, { appKey: record }).appKey).toEqual(record);
+    expect(envS3Record({ ...base, appKey: null }, { appKey: record })).not.toHaveProperty('appKey');
     const next = { ...record, id: 'SENTINEL_KEY_1' };
-    expect(skeletonS3Block({ ...base, appKey: next }, { appKey: record }).appKey).toEqual(next);
+    expect(envS3Record({ ...base, appKey: next }, { appKey: record }).appKey).toEqual(next);
   });
 
   it('two environments never overwrite each other in the local secret store', () => {

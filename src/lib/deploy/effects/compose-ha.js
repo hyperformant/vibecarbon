@@ -57,6 +57,7 @@ import {
   waitForSSH,
 } from '../compose/index.js';
 import { assertReplicationStreamingOrDegraded, verifyStreaming } from '../replication.js';
+import { envS3Record } from '../s3-record.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
 import { composeRoleEnv } from '../walg-role.js';
 import { WG_PRIMARY_IP, WG_STANDBY_IP } from '../wireguard.js';
@@ -267,9 +268,9 @@ async function haPersistPendingConfig(ctx) {
   } = ctx;
 
   const loadedProjectConfig = loadProjectConfig() || { projectName, environments: {} };
-  // The per-environment storage field this save must carry forward: the
-  // recorded bucket creation time (on disk, else from the last deploy), which
-  // status' settling row reads.
+  // The per-environment storage fields this save must carry forward (on
+  // disk, else from the last deploy): the bucket creation time, the app key
+  // record destroy revokes, and the unfenced-bucket marks.
   const priorS3 = {
     ...envConfig.s3,
     ...loadedProjectConfig.environments?.[environment]?.s3,
@@ -320,20 +321,7 @@ async function haPersistPendingConfig(ctx) {
     // deploy against files in cwd, and .vibecarbon.json has no gitignore/local
     // match. prompts.js falls back to Provider.promptObjectStorageCredentials()
     // (C7d) when accessKey is missing, so runtime still resolves.
-    ...(s3Config && {
-      s3: {
-        bucket: s3Config.bucket,
-        ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
-        ...(Object.hasOwn(priorS3, 'bucketCreatedAt') && {
-          bucketCreatedAt: priorS3.bucketCreatedAt,
-        }),
-        region: s3Config.region,
-        endpoint: s3Config.endpoint,
-        stateBucket: s3Config.stateBucket,
-        ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
-        ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
-      },
-    }),
+    ...(s3Config && { s3: envS3Record(s3Config, priorS3) }),
     ...(backupS3Config && { backupS3: backupS3Config }),
     ...(backupConfig && { backup: backupConfig }),
     services,

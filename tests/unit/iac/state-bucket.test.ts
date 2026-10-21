@@ -144,7 +144,8 @@ describe('state-bucket region/endpoint passthrough census', () => {
         }
       });
     }
-    expect(hits).toBeGreaterThanOrEqual(7); // census not vacuous
+    // 5 since the env s3 saves share one builder (src/lib/deploy/s3-record.js).
+    expect(hits).toBeGreaterThanOrEqual(5); // census not vacuous
     expect(
       misses,
       `field lists missing stateBucketRegion/stateEndpoint: ${misses.join(', ')}`,
