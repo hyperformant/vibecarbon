@@ -9,7 +9,11 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
-import { finishK8sRetiredFence } from '../../../src/lib/deploy/orchestrator.js';
+import { swappedSinceLastDeploy } from '../../../src/lib/deploy/failover-guard.js';
+import {
+  finishK8sReconvergeRecord,
+  finishK8sRetiredFence,
+} from '../../../src/lib/deploy/orchestrator.js';
 
 const base = { projectName: 'myapp', environment: 'prod', standbyIp: '10.0.0.1' };
 
@@ -63,5 +67,44 @@ describe('finishK8sRetiredFence', () => {
     expect(src).toMatch(
       /deployedAt: deployResult\.reconvergeIncomplete\s*\?\s*persistedEnvConfig\.deployedAt/,
     );
+  });
+});
+
+// Final review I5: k8s never deleted lastFailover, so "swapped" was decided by
+// comparing the failover's clock with the deploy's (two machines). A complete
+// k8s reconverge now drops it, as the compose one does.
+describe('finishK8sReconvergeRecord', () => {
+  const swapped = () => ({
+    deployedAt: '2026-10-21T00:00:00.000Z',
+    // The failover ran on a machine whose clock is ahead of the deploy's.
+    lastFailover: '2026-10-21T00:05:00.000Z',
+    lastFailoverOverride: 'force-unproven',
+    ha: { enabled: true },
+  });
+
+  it('a complete reconverge drops lastFailover, so the pair is no longer swapped whatever the clocks', () => {
+    const env = finishK8sReconvergeRecord(swapped(), { reconvergeIncomplete: false });
+    expect(env).not.toHaveProperty('lastFailover');
+    expect(env).not.toHaveProperty('lastFailoverOverride');
+    expect(swappedSinceLastDeploy(env)).toBe(false);
+  });
+
+  it('a reconverge that kept the retired fence keeps it (the rerun resumes)', () => {
+    const env = finishK8sReconvergeRecord(swapped(), { reconvergeIncomplete: true });
+    expect(env.lastFailover).toBe('2026-10-21T00:05:00.000Z');
+    expect(swappedSinceLastDeploy(env)).toBe(true);
+  });
+
+  it('executeDeployment applies it to the k8s-ha env right before the final save', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
+      'utf-8',
+    );
+    const call = src.search(
+      /if \(tier === 'k8s-ha'\)\s*finishK8sReconvergeRecord\(finalConfig\.environments\[environment\], deployResult\);/,
+    );
+    const save = src.indexOf('saveProjectConfig(clearDestroyedRecord(finalConfig, environment));');
+    expect(call).toBeGreaterThan(-1);
+    expect(call).toBeLessThan(save);
   });
 });

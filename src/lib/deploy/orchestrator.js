@@ -502,6 +502,23 @@ export function resolveKubeconfigPath(environment, envConfig) {
 }
 
 /**
+ * The k8s-ha half of "the reconverge is complete": a deploy that stamps
+ * deployedAt (no retired fence kept) removes lastFailover and its override
+ * from the env it is about to save. Mutates and returns `env`.
+ *
+ * @param {object} env - the env record of the final save
+ * @param {{ reconvergeIncomplete?: boolean }} deployResult
+ * @returns {object}
+ */
+export function finishK8sReconvergeRecord(env, deployResult) {
+  if (env && !deployResult?.reconvergeIncomplete) {
+    delete env.lastFailover;
+    delete env.lastFailoverOverride;
+  }
+  return env;
+}
+
+/**
  * k8s-ha: take the retirement fence off the cluster this deploy just rebuilt
  * as the standby (retired-fence.js). Only when the env was swapped at entry
  * (a retired side existed); a no-op otherwise. Throws when the clear cannot be
@@ -2307,6 +2324,12 @@ export async function executeDeployment(args, gatheredConfig) {
   };
   // The environment is live again: drop the identity `destroy` recorded for
   // this name (if any) so it never outlives the rebuild it was kept for.
+  // A k8s-ha deploy that stamps deployedAt has reconverged a failed-over pair:
+  // drop the failover stamp, as the compose reconverge does, so "swapped"
+  // never hangs on the order of two clocks (the failover's and the deploy's
+  // machine). A reconverge that kept the retired fence keeps it.
+  if (tier === 'k8s-ha')
+    finishK8sReconvergeRecord(finalConfig.environments[environment], deployResult);
   saveProjectConfig(clearDestroyedRecord(finalConfig, environment));
   registerProject(projectConfig.projectName, process.cwd());
 
