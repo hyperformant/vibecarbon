@@ -35,6 +35,7 @@ import {
   confirmUnprovenFailover,
   dnsDidNotMessage,
   FailoverDnsError,
+  FailoverRefusedError,
   flipAndVerifyDns,
   promotionNotIssuedMessage,
   promotionUnknownMessage,
@@ -1604,6 +1605,156 @@ export async function flipComposeDns(envConfig, ip) {
     domain: envConfig.domain,
     ip,
   });
+}
+
+/**
+ * The compose-HA backend of `vibecarbon failover <env> -abort` (failover-abort.js).
+ * By container name throughout (`container_name: ${PROJECT_NAME}-<svc>`), so no
+ * compose file resolution is involved. The standby's db is stopped AND its
+ * restart policy cleared: `unless-stopped` already keeps a stopped container
+ * down, `--restart=no` keeps it down through a daemon restart too.
+ *
+ * @param {object} args
+ * @param {string} args.envName
+ * @param {object} args.envConfig
+ * @param {string} args.projectName
+ * @param {string} args.sshKeyPath
+ * @param {object} [args.deps] test seams
+ * @returns {import('../failover-abort.js').AbortBackend}
+ */
+export function composeFailoverAbortBackend({
+  envName,
+  envConfig,
+  projectName,
+  sshKeyPath,
+  deps = {},
+}) {
+  const {
+    run = sshRun,
+    mergeEnv = mergeRemoteDotenv,
+    reachable = isPrimaryReachable,
+    psql = composePsqlRunner,
+    unfenceWrites = (exec) => unfenceDatabaseWrites({ exec }),
+    rearmWalg = restoreComposeWalgRole,
+    armAcme = armComposeAcme,
+    disarmAcme = disarmComposeAcme,
+    flipDns = flipComposeDns,
+  } = deps;
+  const servers = envConfig.servers || [];
+  const primaryServer = servers.find((sv) => sv.role === 'primary');
+  const standbyServer = servers.find((sv) => sv.role === 'standby');
+  if (!primaryServer?.ip || !standbyServer?.ip) {
+    throw new FailoverRefusedError(
+      `Abort refused: the primary and standby of ${envName} could not be read from ` +
+        '.vibecarbon.json (servers[] with role primary and standby)',
+    );
+  }
+  const remoteDir = `/opt/${projectName}`;
+  const dbCt = `${projectName}-db`;
+  const writers = FAILOVER_FENCE_SERVICES.map((svc) => `${projectName}-${svc}`);
+  const quiet = { log: () => {}, warn: () => {} };
+  const ok = (out, tag) =>
+    String(out === false ? '' : (out ?? ''))
+      .split('\n')
+      .some((l) => l.trim() === tag);
+
+  return {
+    ips: { primary: primaryServer.ip, standby: standbyServer.ip },
+    stopDbHint: `ssh root@${standbyServer.ip} 'docker stop ${dbCt}'`,
+    unfenceHint: `ssh root@${primaryServer.ip} 'cd ${remoteDir} && docker compose exec -T db ${UNFENCE_SQL_HINT}'`,
+    stopStandbyDb: async () => {
+      const out = await run(
+        standbyServer.ip,
+        sshKeyPath,
+        `docker update --restart=no ${dbCt} >/dev/null 2>&1; docker stop ${dbCt} >/dev/null 2>&1; ` +
+          `echo "DB_RUNNING=$(docker container inspect -f '{{.State.Running}}' ${dbCt} 2>/dev/null || echo absent)"`,
+        { timeout: 120_000 },
+      );
+      const line = String(out === false ? '' : (out ?? ''))
+        .split('\n')
+        .map((l) => l.trim())
+        .find((l) => l.startsWith('DB_RUNNING='));
+      const state = line?.slice('DB_RUNNING='.length);
+      if (state === 'false' || state === 'absent') return { ok: true };
+      return {
+        ok: false,
+        reason: line ? `its db container still reads running=${state}` : 'the node did not answer',
+      };
+    },
+    disarmStandby: async () => {
+      const stop = await run(
+        standbyServer.ip,
+        sshKeyPath,
+        `docker stop ${writers.join(' ')} >/dev/null 2>&1; echo WRITERS_DONE`,
+        { timeout: 120_000 },
+      );
+      let roleSet = true;
+      try {
+        await mergeEnv(
+          standbyServer.ip,
+          pinnedSshOptsString(sshKeyPath),
+          remoteDir,
+          composeRoleEnv('standby'),
+        );
+      } catch {
+        roleSet = false;
+      }
+      const acme = await disarmAcme({
+        oldPrimaryIp: standbyServer.ip,
+        sshKeyPath,
+        projectName,
+        deps: quiet,
+      });
+      return ok(stop, 'WRITERS_DONE') && roleSet && acme;
+    },
+    repointDns:
+      hasAutomatedDns(envConfig.dns?.provider) && envConfig.dns?.zoneId && envConfig.domain
+        ? () => flipDns(envConfig, primaryServer.ip)
+        : null,
+    primaryReachable: () => reachable(primaryServer.ip, sshKeyPath, remoteDir),
+    unfencePrimary: () => unfenceWrites(psql(primaryServer.ip, sshKeyPath, remoteDir)),
+    armPrimary: async () => {
+      // The db recreate only when the running container lost the role: a
+      // failover that got past its demote step left it on standby.
+      const out = await run(
+        primaryServer.ip,
+        sshKeyPath,
+        `echo "WALG_ROLE=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ${dbCt} 2>/dev/null | sed -n 's/^WALG_ROLE=//p' | head -n1)"`,
+        { timeout: 20_000 },
+      );
+      const role = String(out === false ? '' : (out ?? ''))
+        .split('\n')
+        .map((l) => l.trim())
+        .find((l) => l.startsWith('WALG_ROLE='))
+        ?.slice('WALG_ROLE='.length);
+      let walg = role === 'primary';
+      if (!walg) {
+        walg = (
+          await rearmWalg({ promotedIp: primaryServer.ip, sshKeyPath, projectName, deps: quiet })
+        ).ok;
+      }
+      const acme = await armAcme({
+        promotedIp: primaryServer.ip,
+        sshKeyPath,
+        projectName,
+        deps: quiet,
+      });
+      return walg && acme;
+    },
+    startPrimaryWriters: async () => {
+      // Every writer that exists and is stopped; an add-on that is not deployed is skipped.
+      const out = await run(
+        primaryServer.ip,
+        sshKeyPath,
+        `for c in ${writers.join(' ')}; do ` +
+          `s=$(docker container inspect -f '{{.State.Running}}' "$c" 2>/dev/null) || continue; ` +
+          `if [ "$s" != true ] && ! docker start "$c" >/dev/null; then echo "FAILED $c"; fi; ` +
+          'done; echo START_DONE',
+        { timeout: 120_000 },
+      );
+      return ok(out, 'START_DONE') && !String(out ?? '').includes('FAILED ');
+    },
+  };
 }
 
 /**

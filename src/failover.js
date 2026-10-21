@@ -21,6 +21,9 @@ import { spinner } from './lib/cli/progress.js';
 import { assertInteractiveStdin } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_STATEFULSET } from './lib/deploy/db-workload.js';
+
+import { abortFailover } from './lib/deploy/failover-abort.js';
 import {
   assertFailoverClassified,
   assertFailoverPreconditions,
@@ -29,6 +32,7 @@ import {
   confirmUnprovenFailover,
   dnsDidNotMessage,
   FailoverDnsError,
+  FailoverRefusedError,
   flipAndVerifyDns,
   promotionNotIssuedMessage,
   promotionUnknownMessage,
@@ -37,7 +41,6 @@ import {
   UNPROVEN_RISK_LINE,
   writeFailoverJournal,
 } from './lib/deploy/failover-guard.js';
-
 import {
   PROMOTABLE_CERTIFICATES,
   PROMOTE_ISSUER_ANNOTATION,
@@ -137,6 +140,12 @@ const SPEC = {
       description:
         'Only applies together with -force-unproven (refused on its own): also accept a standby the last deploy flagged degraded',
     },
+    {
+      name: 'abort',
+      boolean: true,
+      description:
+        'Call off a failover that is stuck mid-flight: stops the standby database, and the old primary serves again',
+    },
     { name: 'env', value: '<name>', description: 'Environment seed (alternative to positional)' },
     {
       name: 'server-type',
@@ -154,6 +163,10 @@ const SPEC = {
     { command: 'vibecarbon failover', description: 'prompts for env' },
     { command: 'vibecarbon failover prod -dry', description: 'preview the failover plan' },
     { command: 'vibecarbon failover prod -y', description: 'execute without confirmation' },
+    {
+      command: 'vibecarbon failover prod -abort',
+      description: 'call off a stuck failover and keep the old primary',
+    },
     {
       command: 'vibecarbon failover prod -server-type cpx42',
       description: 'provision failover workers on a specific server type',
@@ -1309,6 +1322,146 @@ export function swapHaRoles(envName, { override } = {}) {
   saveProjectConfig(config);
 }
 
+/** How long `-abort` waits for the standby's db pod to be gone after the scale to zero. */
+export const ABORT_DB_GONE_TIMEOUT_S = 180;
+
+/**
+ * The k8s-HA backend of `vibecarbon failover <env> -abort` (failover-abort.js).
+ * The standby's db StatefulSet is scaled to zero and its pod proven gone (the
+ * StatefulSet is never applied by Flux, so nothing scales it back); its app
+ * tier goes to zero and its db template to WALG_ROLE=standby, so a later scale
+ * up cannot archive. The old primary gets its write fence lifted, WALG_ROLE
+ * back to primary when a failover's demote got that far (the set env rolls its
+ * db pod, which serves nothing while its app is at zero), then its app tier up.
+ *
+ * @param {object} args
+ * @param {string} args.envName
+ * @param {object} args.envConfig
+ * @param {object} args.strategy - dnsStrategyFor(...) or MANUAL_DNS_STRATEGY
+ * @param {object} [args.deps] test seams
+ * @returns {import('./lib/deploy/failover-abort.js').AbortBackend}
+ */
+export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {} }) {
+  const sshKeyPath = deps.sshKeyPath ?? getSSHKeyPath(envName);
+  const {
+    kubectl = (ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts),
+    psql = (ip) => k8sPsqlRunner(ip, sshKeyPath),
+    isPrimaryReady = (ip) => isPrimaryPostgresReady(ip, sshKeyPath),
+    unfenceWrites = (exec) => unfenceDatabaseWrites({ exec }),
+    scale = (ip, list, replicas, label) => scaleDeployments(ip, sshKeyPath, list, replicas, label),
+  } = deps;
+  const servers = identifyServers(envName, envConfig, {});
+  if (!servers?.primary?.ip || !servers?.standby?.ip) {
+    throw new FailoverRefusedError(
+      `Abort refused: the primary and standby clusters of ${envName} could not be read from ` +
+        '.vibecarbon.json (ha.primary and ha.standby)',
+    );
+  }
+  const scaleUpList = Array.isArray(envConfig.ha?.scaleUpList) ? envConfig.ha.scaleUpList : [];
+  const { primary, standby } = servers;
+  const ns = ['-n', 'vibecarbon'];
+  const quietly = async (fn) => {
+    try {
+      await fn();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return {
+    ips: { primary: primary.floatingIp || primary.ip, standby: standby.ip },
+    stopDbHint: `ssh root@${standby.ip} 'kubectl scale statefulset/${DB_STATEFULSET} -n vibecarbon --replicas=0'`,
+    unfenceHint: `ssh root@${primary.ip} 'kubectl -n vibecarbon exec ${DB_POD} -- ${UNFENCE_SQL_HINT}'`,
+    stopStandbyDb: async () => {
+      try {
+        await kubectl(standby.ip, [
+          ...ns,
+          'scale',
+          `statefulset/${DB_STATEFULSET}`,
+          '--replicas=0',
+        ]);
+      } catch (err) {
+        return { ok: false, reason: firstErrorLine(err) };
+      }
+      // The wait reports a pod already gone as an error on some kubectl
+      // versions, so its verdict is the read that follows, not its exit.
+      await quietly(() =>
+        kubectl(
+          standby.ip,
+          [...ns, 'wait', '--for=delete', `pod/${DB_POD}`, `--timeout=${ABORT_DB_GONE_TIMEOUT_S}s`],
+          { timeout: (ABORT_DB_GONE_TIMEOUT_S + 30) * 1000 },
+        ),
+      );
+      let left;
+      try {
+        left = String(
+          (await kubectl(standby.ip, [
+            ...ns,
+            'get',
+            'pods',
+            '-l',
+            DB_POD_SELECTOR,
+            '-o',
+            'name',
+          ])) ?? '',
+        ).trim();
+      } catch (err) {
+        return { ok: false, reason: `its pods could not be listed: ${firstErrorLine(err)}` };
+      }
+      return left === ''
+        ? { ok: true }
+        : { ok: false, reason: `${left.split('\n').join(', ')} still exists` };
+    },
+    disarmStandby: async () => {
+      await scale(standby.ip, scaleUpList, 0, 'abort: standby app tier to zero');
+      // The slot drop inside fails quietly (its db pod is gone); the role write
+      // lands on the StatefulSet template, so a later scale up cannot archive.
+      return quietly(() => demoteK8sWalgRole({ ip: standby.ip, kubectl, warn: () => {} }));
+    },
+    repointDns: strategy?.updateDns
+      ? async () => {
+          const auth = strategy.getAuth ? await strategy.getAuth(envConfig) : null;
+          const domain = envConfig.domain || envConfig.dns?.domain;
+          const ip = primary.floatingIp || primary.ip;
+          return flipAndVerifyDns({
+            update: () => strategy.updateDns(auth, domain, ip),
+            read: (name) => strategy.readDns(auth, name),
+            domain,
+            ip,
+          });
+        }
+      : null,
+    primaryReachable: () => isPrimaryReady(primary.ip),
+    unfencePrimary: () => unfenceWrites(psql(primary.ip)),
+    armPrimary: async () => {
+      let role;
+      try {
+        const sts = JSON.parse(
+          await kubectl(primary.ip, [...ns, 'get', `statefulset/${DB_STATEFULSET}`, '-o', 'json']),
+        );
+        const db = (sts?.spec?.template?.spec?.containers ?? []).find(
+          (ct) => ct.name === DB_CONTAINER,
+        );
+        role = (db?.env ?? []).find((e) => e.name === 'WALG_ROLE')?.value;
+      } catch {
+        return false;
+      }
+      if (role === 'primary') return true;
+      return quietly(async () => {
+        await kubectl(primary.ip, k8sSetWalgRoleArgv('primary'), { timeout: 60_000 });
+        await kubectl(primary.ip, k8sDbRolloutStatusArgv(DB_STS_BOOT_TIMEOUT_S), {
+          timeout: (DB_STS_BOOT_TIMEOUT_S + 30) * 1000,
+        });
+      });
+    },
+    startPrimaryWriters: async () => {
+      if (scaleUpList.length === 0) return false;
+      await scale(primary.ip, scaleUpList, 'up', 'abort: primary app tier back up');
+      return true;
+    },
+  };
+}
+
 /**
  * Move the wal-g WRITE-GUARD onto the cluster this failover just promoted, and
  * PROVE it took — see src/lib/deploy/walg-role.js for why nothing else does.
@@ -2087,6 +2240,72 @@ async function failoverSingleServer(envName, envConfig) {
 }
 
 // ============================================================================
+// ABORT
+// ============================================================================
+
+/**
+ * `vibecarbon failover <env> -abort`, both HA tiers. Refuses on a non-HA env,
+ * and (inside abortFailover) when no journal is set or the standby's database
+ * cannot be proven down.
+ *
+ * @param {{ envName: string, envConfig: object, projectConfig: object, parsed: object }} args
+ * @param {object} [deps] test seams: backend, abort
+ */
+export async function runFailoverAbort({ envName, envConfig, projectConfig, parsed }, deps = {}) {
+  const tier = haTierOf(envConfig);
+  if (!tier) {
+    p.log.error(`-abort applies to an HA environment only; ${envName} has no standby`);
+    process.exit(1);
+  }
+  const { abort = abortFailover } = deps;
+  p.log.info(c.bold('This will (call off the failover in flight):'));
+  p.log.message("  1. Stop the standby's database and prove it down, so it cannot promote");
+  p.log.message('  2. Point DNS back at the old primary (managed DNS)');
+  p.log.message("  3. Lift the old primary's write fence and start its app tier");
+  p.log.message('  4. Clear the failover journal and mark replication degraded');
+  if (parsed.dryRun) {
+    p.log.info(c.dim('Dry run: no changes made'));
+    return;
+  }
+  // No journal: abortFailover refuses and says why, with nothing to confirm.
+  if (envConfig?.ha?.failoverInFlight && !parsed.yes) {
+    const confirm = await p.confirm({
+      message: `Call off the failover of ${c.bold(envName)} and keep the old primary?`,
+    });
+    if (p.isCancel(confirm)) exitCancelled();
+    if (!confirm) exitDeclined();
+  }
+  let backend = deps.backend;
+  if (!backend) {
+    if (tier === 'compose-ha') {
+      const { composeFailoverAbortBackend } = await import('./lib/deploy/compose/ha.js');
+      backend = composeFailoverAbortBackend({
+        envName,
+        envConfig,
+        projectName: projectConfig.projectName,
+        sshKeyPath: getSSHKeyPath(envName),
+      });
+    } else {
+      const scenario = detectScenario(envConfig);
+      backend = k8sFailoverAbortBackend({
+        envName,
+        envConfig,
+        strategy:
+          scenario === 'ha_dns' ? dnsStrategyFor(envConfig.dns.provider) : MANUAL_DNS_STRATEGY,
+      });
+    }
+  }
+  await abort({
+    environment: envName,
+    envConfig,
+    backend,
+    log: (line) => p.log.info(line),
+    warn: (line) => p.log.warn(line),
+  });
+  p.outro(c.success('Done'));
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -2127,6 +2346,7 @@ export async function run(args) {
     forceUnproven: !!values['force-unproven'],
     forceUnplanned: !!values['force-unplanned'],
     allowDegraded: !!values['allow-degraded'],
+    abort: !!values.abort,
   };
 
   // `-server-type` is raw operator input that goes straight to the converge as
@@ -2168,6 +2388,14 @@ export async function run(args) {
       p.log.error(`Operator-IP check failed: ${err.message}`);
       process.exit(1);
     }
+  }
+
+  // -abort: call off a failover whose journal is set (failover-abort.js). It
+  // keeps the old primary, so it runs before the retirement fence and every
+  // promote step, behind the same production confirmation as a failover.
+  if (parsed.abort) {
+    await runFailoverAbort({ envName, envConfig, projectConfig, parsed });
+    return;
   }
 
   // Re-apply the retirement fence first (R7): a side a past failover retired

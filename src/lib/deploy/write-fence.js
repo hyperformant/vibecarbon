@@ -20,6 +20,7 @@
  */
 
 import { loadProjectConfig, saveProjectConfig } from '../config.js';
+import { failoverInFlightNextStep } from './failover-guard.js';
 import { UNFENCE_SQL_HINT, unfenceDatabaseWrites, WRITE_FENCE_SETTING } from './replication.js';
 import { isRetiredSide } from './retired-fence.js';
 
@@ -145,8 +146,8 @@ export async function assertRolePrimaryWritable({ environment, envConfig, exec, 
   if (state !== 'on') return state === 'off' ? 'writable' : 'unknown';
   if (envConfig?.ha?.failoverInFlight) {
     throw new Error(
-      `the primary is write-fenced by a failover still in flight; run vibecarbon failover ` +
-        `${environment} to finish it before deploying`,
+      `the primary is write-fenced by a failover still in flight; ` +
+        failoverInFlightNextStep(environment),
     );
   }
   if (!(await unfence(exec))) {

@@ -128,17 +128,34 @@ export function assertFailoverClassified(kind, parsed) {
 }
 
 /**
- * A deploy refuses while a failover journal is set, on every HA tier: the roles
- * may be mid-swap, and the deploy's final save rebuilds `ha` and would drop the
- * journal the rerun of `vibecarbon failover` resumes from.
+ * The way out while a failover journal is set: finish the failover, or call it
+ * off. Every refusal that fires on a journal names both, never a command that
+ * would refuse in turn (deploy, restore and scale all refuse on a journal).
  *
- * @param {{ environment: string, envConfig: object }} args
+ * @param {string} environment
+ * @returns {string}
  */
-export function assertNoFailoverInFlight({ environment, envConfig }) {
+export function failoverInFlightNextStep(environment) {
+  return (
+    `rerun vibecarbon failover ${environment} to finish it, or run vibecarbon failover ` +
+    `${environment} -abort to call it off and keep the old primary`
+  );
+}
+
+/**
+ * Deploy, restore and scale refuse while a failover journal is set, on every HA
+ * tier: the roles may be mid-swap, the standby may be promoting, and a deploy's
+ * final save rebuilds `ha` and would drop the journal the rerun of `vibecarbon
+ * failover` resumes from. A restore would also rewind and restart the fenced
+ * old primary while the standby may already serve as a second one.
+ *
+ * @param {{ environment: string, envConfig: object, action?: 'deploy'|'restore'|'scale' }} args
+ */
+export function assertNoFailoverInFlight({ environment, envConfig, action = 'deploy' }) {
   if (envConfig?.ha?.failoverInFlight) {
     throw new Error(
-      `Refusing to deploy "${environment}": a failover is still in flight (its journal is set), ` +
-        `so the roles may be mid-swap. run vibecarbon failover ${environment} to finish it, then deploy`,
+      `Refusing to ${action} "${environment}": a failover is still in flight (its journal is set), ` +
+        `so the roles may be mid-swap. ${failoverInFlightNextStep(environment)}`,
     );
   }
 }
@@ -192,11 +209,19 @@ export function assertFailoverPreconditions({
   const refuse = (reason) => {
     throw new FailoverRefusedError(`Failover refused: ${reason}`);
   };
+  // The repair a refusal names. With a journal set, deploy itself refuses, so
+  // the abort comes first (C1: no refusal may point at a command that refuses).
+  const repair = envConfig?.ha?.failoverInFlight
+    ? (why) =>
+        `a failover is in flight, so deploy refuses until it is settled: run vibecarbon ` +
+        `failover ${environment} -abort to call it off and keep the old primary, then run ` +
+        `${deploy} ${why}`
+    : (why) => `run ${deploy} ${why}`;
 
   if (standbyState?.inRecovery == null) {
     refuse(
       `could not read the standby database's recovery state, so nothing proves it is a ` +
-        `replica. check the standby db is up, or run ${deploy} to repair replication`,
+        `replica. check the standby db is up, or ${repair('to repair replication')}`,
     );
   }
 
@@ -204,13 +229,13 @@ export function assertFailoverPreconditions({
     refuse(
       `-force-unproven is for a dead primary only. the primary is answering, so this is a ` +
         `planned failover and the standby must prove it holds this database. drop the flag, ` +
-        `or run ${deploy} to record the proof`,
+        `or ${repair('to record the proof')}`,
     );
   }
   if (allowDegraded && !forceUnproven) {
     refuse(
-      `-allow-degraded only applies together with -force-unproven. run ${deploy} to restore ` +
-        `streaming instead`,
+      `-allow-degraded only applies together with -force-unproven. ` +
+        repair('to restore streaming instead'),
     );
   }
 
@@ -218,15 +243,15 @@ export function assertFailoverPreconditions({
     refuse(
       `the last failover (${envConfig.lastFailover}) swapped the roles and no deploy has ` +
         `reconverged since, so the standby is the old primary and holds none of the new ` +
-        `writes. run ${deploy} first, then fail over`,
+        `writes. ${repair('first, then fail over')}`,
     );
   }
 
   if (envConfig?.replication === 'degraded' && !(forceUnproven && allowDegraded)) {
     refuse(
       `replication is degraded (the last deploy did not prove the standby streaming), so ` +
-        `the standby may be missing writes or hold no data at all. run ${deploy} to ` +
-        `restore streaming, then fail over`,
+        `the standby may be missing writes or hold no data at all. ` +
+        repair('to restore streaming, then fail over'),
     );
   }
 
@@ -241,7 +266,7 @@ export function assertFailoverPreconditions({
     }
     refuse(
       `the standby is not a replica (it is out of recovery) and no failover is in flight ` +
-        `for it, so promoting it could serve stale or empty data. run ${deploy} to reseed it`,
+        `for it, so promoting it could serve stale or empty data. ${repair('to reseed it')}`,
     );
   }
 
@@ -252,8 +277,8 @@ export function assertFailoverPreconditions({
   const differentDatabase = (expectedId, source) =>
     refuse(
       `the standby holds a different database (system identifier ${live ?? 'unreadable'}, ` +
-        `${source} ${expectedId}), so it was never seeded from this primary. run ${deploy} ` +
-        `to reseed it`,
+        `${source} ${expectedId}), so it was never seeded from this primary. ` +
+        repair('to reseed it'),
     );
 
   if (recorded) {
@@ -263,7 +288,7 @@ export function assertFailoverPreconditions({
     if (!planned || standbyState.receiverStatus !== 'streaming' || !primaryId) {
       refuse(
         `no seeded system identifier is recorded for ${environment}, so nothing proves the ` +
-          `standby holds this database. run ${deploy} to record it`,
+          `standby holds this database. ${repair('to record it')}`,
       );
     }
     if (live !== primaryId) differentDatabase(primaryId, 'the primary has');
@@ -378,10 +403,7 @@ export async function confirmUnprovenFailover(envName, parsed) {
 
 /** R3: the exit message for a promotion the flow could not confirm. */
 export function promotionUnknownMessage(envName) {
-  return (
-    `promotion state unknown: old primary kept fenced; rerun vibecarbon failover ${envName} ` +
-    `to finish`
-  );
+  return `promotion state unknown: old primary kept fenced. ${failoverInFlightNextStep(envName)}`;
 }
 
 /**

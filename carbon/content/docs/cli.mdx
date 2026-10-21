@@ -688,6 +688,7 @@ Behavior depends on deployment topology:
 | `-force-unproven` | Primary is dead and nothing proves the standby holds its data: promote it anyway (unplanned only) |
 | `-force-unplanned` | Your machine cannot reach the primary but the standby still sees it streaming: fail over anyway, knowing the old primary may still be serving |
 | `-allow-degraded` | Only applies together with -force-unproven (refused on its own): also accept a standby the last deploy flagged degraded |
+| `-abort` | Call off a failover that is stuck mid-flight: stops the standby database, and the old primary serves again |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-server-type <id>` | Worker server type override for pilot-light failover provisioning (e.g. cx33) |
 | `-confirm <value>` | Production only: supply the type-to-confirm value on the command line (scripts / no TTY) |

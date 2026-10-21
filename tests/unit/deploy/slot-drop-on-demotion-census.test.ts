@@ -165,6 +165,9 @@ const COMPOSE_DEMOTERS = [
   // reseeded, which replaces PGDATA and every slot in it.
   'src/lib/deploy/effects/compose-ha.js:haMergeWalgRole',
   'src/lib/deploy/compose/ha.js:demoteComposeWalgRole',
+  // failover -abort: writes the standby's .env only once its db is stopped and
+  // proven down; the next start is a deploy that reseeds it (PGDATA and slots).
+  'src/lib/deploy/compose/ha.js:composeFailoverAbortBackend',
 ];
 
 describe('census: every standby role write is a demotion that drops slots', () => {

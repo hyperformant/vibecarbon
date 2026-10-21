@@ -33,7 +33,11 @@
  * executeDeployment, ahead of every infra mutation.
  */
 
-import { assertNoFailoverInFlight, swappedSinceLastDeploy } from '../failover-guard.js';
+import {
+  assertNoFailoverInFlight,
+  failoverInFlightNextStep,
+  swappedSinceLastDeploy,
+} from '../failover-guard.js';
 
 const PRIMARY = 'primary';
 const STANDBY = 'standby';
@@ -228,8 +232,8 @@ export function composeHaFailoverRecoveryInstructions({ envName, promotedIp, ret
 export function composeHaStandbyResyncHint({ projectName, environment, envConfig }) {
   if (envConfig?.ha?.failoverInFlight) {
     return (
-      `A failover is still in flight: run \`vibecarbon failover ${environment}\` to finish it, ` +
-      `then \`vibecarbon deploy ${environment}\` to rebuild the standby.`
+      `A failover is still in flight: ${failoverInFlightNextStep(environment)}, ` +
+      `then run \`vibecarbon deploy ${environment}\` to rebuild the standby.`
     );
   }
   if (
