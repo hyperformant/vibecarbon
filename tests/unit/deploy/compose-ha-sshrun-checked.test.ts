@@ -26,14 +26,14 @@ import { sshRunChecked } from '../../../src/lib/deploy/compose/index.js';
 //      nothing (and had no sleep either), so configurePrimaryReplication
 //      returned while the db restart was still in flight and the standby's
 //      pg_basebackup raced a postmaster that was not yet accepting connections.
+//      (The restart and its loop are gone: a deploy no longer restarts the
+//      primary, see no-warm-primary-restart-census.test.ts.)
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const haSrc = readFileSync(join(repoRoot, 'src/lib/deploy/compose/ha.js'), 'utf-8');
 
 /** Commands that must abort the deploy when they fail. */
 const MUST_SUCCEED = [
   { what: 'replicator role', match: /replicator role \+ replication slot creation/ },
-  { what: 'WAL settings', match: /WAL replication settings \(ALTER SYSTEM\)/ },
-  { what: 'primary db restart', match: /primary db restart/ },
   { what: 'slot re-create', match: /replication-slot re-create on the primary/ },
   { what: 'primary repl-gateway', match: /primary's repl-gateway start/ },
   { what: 'standby repl-gateway', match: /standby's repl-gateway start/ },
@@ -66,15 +66,6 @@ describe('compose-ha: commands that must succeed use sshRunChecked', () => {
       'sshRun answers `false` and never throws, so this catch can never run. ' +
         'Either check the return value explicitly or use sshRunChecked.',
     ).toEqual([]);
-  });
-
-  it('the pg-ready loop actually waits: it checks the result and sleeps', () => {
-    const loop = haSrc.split('// Wait for PostgreSQL to be ready again')[1]?.slice(0, 1200) ?? '';
-    expect(loop, 'loop must inspect the probe result rather than returning blind').toMatch(
-      /ready\s*!==\s*false/,
-    );
-    expect(loop, 'loop must sleep between attempts').toMatch(/setTimeout/);
-    expect(loop, 'exhausting the budget must fail loudly, not fall through').toMatch(/throw new/);
   });
 
   it('failover reports split-brain risk instead of asserting success', () => {

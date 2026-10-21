@@ -19,6 +19,7 @@ import { runCommandAsync } from '../../command.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { requireDnsSetup } from '../dns-result.js';
 import { sideloadCompose } from '../image.js';
 import { buildRemote } from '../remote-build.js';
 import { fingerprintSecret } from '../secret-fingerprint.js';
@@ -380,11 +381,17 @@ async function updateDns(ctx) {
     // already owns the "Pointing" spinner, so letting setupSimple start a
     // SECOND one would overlap and garble the line. Route its one progress
     // beat to this spinner's message instead.
-    await perfAsync('deploy.dns.create', () =>
+    const dnsResult = await perfAsync('deploy.dns.create', () =>
       updateDnsIp(dnsToken, dnsZoneId, domain, serverIp, {
         onProgress: (m) => dnsSpinner.message(m),
       }),
     );
+    try {
+      requireDnsSetup(dnsResult, `DNS A record for ${domain}`);
+    } catch (error) {
+      dnsSpinner.stop('DNS A record not set', 1);
+      throw error;
+    }
     dnsSpinner.stop(`DNS A record set: ${domain} → ${serverIp}`);
     state.completeStep('compose-dns-update', { serverIp });
   }

@@ -49,7 +49,9 @@
  */
 
 import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
-import { DB_POD, DB_STATEFULSET } from './db-workload.js';
+import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
+import { DB_STS_BOOT_TIMEOUT_S } from './replication.js';
+import { dropInactiveReplicationSlots, slotDropWarning } from './replication-slot.js';
 
 /** The env var both tiers read as the wal-g write-guard. */
 export const WALG_ROLE_ENV = 'WALG_ROLE';
@@ -255,6 +257,54 @@ export function k8sSetWalgRoleArgv(role) {
 }
 
 /**
+ * Demote a k8s cluster's db: drop its inactive replication slots, then set
+ * `WALG_ROLE=standby` on the db StatefulSet. The one k8s standby role write
+ * (tests/unit/deploy/slot-drop-on-demotion-census.test.ts), shared by
+ * failover's old-primary demotion and the retired fence.
+ *
+ * The drop goes first because the role write rolls the db pod and nothing
+ * here waits for the roll. Nobody streams from the old primary's slot after a
+ * failover, so it would only pin WAL on that node up to the slot cap. A failed
+ * drop still demotes and warns once, unless the role write fails too, which
+ * throws and is the caller's one report.
+ *
+ * @param {object} args
+ * @param {string} args.ip - the cluster's master (kubectl target)
+ * @param {(ip: string, argv: string[], opts?: object) => Promise<unknown>} args.kubectl
+ * @param {(msg: string) => void} args.warn
+ * @returns {Promise<{slotsDropped: boolean}>}
+ */
+export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
+  const slots = await dropInactiveReplicationSlots((sql) =>
+    kubectl(
+      ip,
+      [
+        '-n',
+        'vibecarbon',
+        'exec',
+        DB_POD,
+        '-c',
+        DB_CONTAINER,
+        '--',
+        'psql',
+        '-U',
+        'postgres',
+        '-d',
+        'postgres',
+        '-v',
+        'ON_ERROR_STOP=1',
+        '-tAc',
+        sql,
+      ],
+      { timeout: 30_000 },
+    ),
+  );
+  await kubectl(ip, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 });
+  if (!slots.ok) warn(slotDropWarning(ip, slots.error));
+  return { slotsDropped: slots.ok };
+}
+
+/**
  * `kubectl` argv that blocks until the db StatefulSet has finished rolling the
  * pod that `k8sSetWalgRoleArgv` triggered. Load-bearing on the PROMOTED node:
  * the audit that follows reads the env of the RUNNING pod, so auditing before
@@ -263,7 +313,7 @@ export function k8sSetWalgRoleArgv(role) {
  * @param {number} [timeoutSeconds]
  * @returns {string[]}
  */
-export function k8sDbRolloutStatusArgv(timeoutSeconds = 300) {
+export function k8sDbRolloutStatusArgv(timeoutSeconds = DB_STS_BOOT_TIMEOUT_S) {
   return [
     '-n',
     'vibecarbon',

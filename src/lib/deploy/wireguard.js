@@ -20,6 +20,24 @@ export const WG_SUBNET_CIDR = '10.99.0.0/30';
 export const WG_PRIMARY_IP = '10.99.0.1';
 export const WG_STANDBY_IP = '10.99.0.2';
 
+/**
+ * A node's tunnel address, from the Pulumi stack it was born as (R11). The
+ * `-primary` stack's node keeps WG_PRIMARY_IP and the `-standby` node keeps
+ * WG_STANDBY_IP forever, whatever their roles after a failover: re-addressing
+ * would rewrite the serving primary's wg0 and its replication overlay, which
+ * recreates its db. So every consumer that needs "the primary's tunnel
+ * address" passes the role primary's stack identity here (the census
+ * compose-ha-primary-address-census.test.ts keeps it the only way).
+ *
+ * @param {{ stackIdentity: 'primary'|'standby' }} args
+ * @returns {string}
+ */
+export function wgIpOf({ stackIdentity }) {
+  if (stackIdentity === 'primary') return WG_PRIMARY_IP;
+  if (stackIdentity === 'standby') return WG_STANDBY_IP;
+  throw new Error(`wgIpOf: unknown stack identity ${JSON.stringify(stackIdentity)}`);
+}
+
 // The TCP port the repl-gateway socat relay listens on (both clusters). The
 // standby db pod dials <local-node-private-ip>:REPL_GATEWAY_PORT; the standby
 // gateway relays that into the tunnel to the primary gateway, which relays to
@@ -195,7 +213,9 @@ export function buildWireguardPersistInstall({
  * `-o BatchMode=yes`.
  *
  * @param {object} o
- * @param {string} o.primaryIp - primary database node public IP (SSH + WG endpoint)
+ * @param {string} o.primaryIp - primary database node public IP (SSH + WG endpoint). For
+ *   compose-HA this is the node BORN as the `-primary` stack, which keeps WG_PRIMARY_IP
+ *   after a failover too (R11, see wgIpOf), not the current role primary.
  * @param {string} o.standbyIp - standby database node public IP (SSH + WG endpoint)
  * @param {string} o.sshKeyPath - path to the shared HA SSH private key
  * @returns {Promise<{primaryPubKey: string, standbyPubKey: string}>}

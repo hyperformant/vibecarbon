@@ -297,6 +297,16 @@ spec:
             - hot_standby=on
             - -c
             - max_connections=200
+            # Replication slot WAL cap, so a long-gone HA standby cannot fill
+            # the primary's volume (past it the slot goes `lost` and the next
+            # deploy reseeds), the floor a briefly disconnected standby catches
+            # up from, and room for the standby plus a reseed's basebackup.
+            - -c
+            - max_slot_wal_keep_size=4GB
+            - -c
+            - wal_keep_size=512MB
+            - -c
+            - max_wal_senders=10
           ports:
             - name: postgres
               containerPort: 5432

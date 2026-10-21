@@ -27,12 +27,47 @@
  * the shared constant interpolation or carry a value >= the constant.
  * New waits added to these files are drafted automatically.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DB_ROLLOUT_TIMEOUT_S } from '../../../src/lib/deploy/k8s/k3s.js';
 import { DB_STS_BOOT_TIMEOUT_S } from '../../../src/lib/deploy/replication.js';
 
 const FILES = ['src/lib/deploy/k8s/ha/index.js', 'src/lib/deploy/replication.js'];
+
+function walkJs(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walkJs(join(dir, e.name)) : e.name.endsWith('.js') ? [join(dir, e.name)] : [],
+  );
+}
+
+// Every src file that touches the db StatefulSet: by its constant, its literal
+// name, or the shared rollout-status argv builder (failover.js reaches the sts
+// only through that builder, which is how it escaped the hand-kept list above).
+const TOUCHES_DB_STS = /DB_STATEFULSET|statefulset\/db|k8sDbRolloutStatusArgv/;
+const DB_STS_FILES = walkJs('src').filter((f) => TOUCHES_DB_STS.test(readFileSync(f, 'utf8')));
+
+// A numeric-literal default on an argv builder's timeout parameter, e.g.
+// `function k8sDbRolloutStatusArgv(timeoutSeconds = 300)`.
+function numericDefaultTimeouts(source: string): Array<{ line: number; seconds: number }> {
+  const hits: Array<{ line: number; seconds: number }> = [];
+  source.split('\n').forEach((text, i) => {
+    for (const m of text.matchAll(/\b\w*[Tt]imeout\w*\s*=\s*(\d+)\b(?=\s*[,)])/g)) {
+      hits.push({ line: i + 1, seconds: Number(m[1]) });
+    }
+  });
+  return hits;
+}
+
+// Call sites of the shared builder that hand it a bare number.
+function builderCallLiterals(source: string): Array<{ line: number; seconds: number }> {
+  const hits: Array<{ line: number; seconds: number }> = [];
+  source.split('\n').forEach((text, i) => {
+    const m = text.match(/k8sDbRolloutStatusArgv\(\s*(\d+)\s*\)/);
+    if (m) hits.push({ line: i + 1, seconds: Number(m[1]) });
+  });
+  return hits;
+}
 
 function dbStsTimeoutLiterals(source: string): Array<{ line: number; seconds: number }> {
   const lines = source.split('\n');
@@ -68,6 +103,36 @@ describe('db StatefulSet boot/rollout budgets (the CSI-settle class)', () => {
         expect(
           hit.seconds,
           `${file}:${hit.line} — db StatefulSet rollout wait budget below DB_STS_BOOT_TIMEOUT_S`,
+        ).toBeGreaterThanOrEqual(DB_STS_BOOT_TIMEOUT_S);
+      }
+    });
+  }
+
+  it('finds the walk target set (guards the census against walking nothing)', () => {
+    expect(DB_STS_FILES).toEqual(
+      expect.arrayContaining([
+        'src/failover.js',
+        'src/restore.js',
+        'src/lib/deploy/walg-role.js',
+        'src/lib/deploy/replication.js',
+        'src/lib/deploy/k8s/ha/index.js',
+      ]),
+    );
+  });
+
+  for (const file of DB_STS_FILES) {
+    it(`${file}: no db-sts wait literal, builder default or builder call argument below the shared budget`, () => {
+      const source = readFileSync(file, 'utf8');
+      const all = [
+        ...dbStsTimeoutLiterals(source),
+        ...builderCallLiterals(source),
+        // Only builder-shaped defaults in files that define the db argv builder.
+        ...(/function k8sDbRolloutStatusArgv/.test(source) ? numericDefaultTimeouts(source) : []),
+      ];
+      for (const hit of all) {
+        expect(
+          hit.seconds,
+          `${file}:${hit.line} — db StatefulSet boot wait below DB_STS_BOOT_TIMEOUT_S`,
         ).toBeGreaterThanOrEqual(DB_STS_BOOT_TIMEOUT_S);
       }
     });

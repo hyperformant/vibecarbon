@@ -17,10 +17,15 @@
  *     secondaryRegion, serverType, services, domain, dnsProvider, apiToken,
  *     dnsZoneId, dnsToken, backupConfig,
  *     backupS3Config, imageRef, bundlePath, s3Config, dockerHubCreds,
- *     ghcrPullCreds, allowDegraded, isLocalOnlyImage, sshKeyPath, onProgress
+ *     ghcrPullCreds, allowDegraded, isLocalOnlyImage, sshKeyPath, onProgress,
+ *     reconverge (planComposeHaReconverge: { promoted, retired } on a pair a
+ *       failover swapped, else null)
  *   Filled in by the effects:
  *     standbyRegion, sharedSshKeyId,
- *     primary{ip, serverId}, standby{ip, serverId},
+ *     primary{ip, serverId, stack, region, serverType}, standby{...same},
+ *       resolved by ROLE: `stack` is the Pulumi stack the node was born as
+ *       ('primary'|'standby'), which keeps its location, firewall name and
+ *       WireGuard address whatever its role (R11),
  *     loadedProjectConfig, pendingEnvConfig,
  *     replActive, replLastState, degraded
  */
@@ -34,14 +39,18 @@ import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
+import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
   buildReplicationOverlay,
+  composePsqlRunner,
   configurePrimaryReplication,
   configureStandbyReplication,
+  ensurePrimaryReplicationAccess,
   openWireguardPortHetznerFirewall,
   openWireguardPortUfw,
 } from '../compose/ha.js';
+import { assertReseedTargetNotServing } from '../compose/ha-role-swap.js';
 import {
   dockerLoginOnServer,
   pullComposeImages,
@@ -56,11 +65,19 @@ import {
   waitForDockerReady,
   waitForSSH,
 } from '../compose/index.js';
-import { assertReplicationStreamingOrDegraded, verifyStreaming } from '../replication.js';
+import { requireDnsSetup } from '../dns-result.js';
+import { readReplicaState } from '../failover-guard.js';
+import { resolvePublicA } from '../public-dns-lookup.js';
+import {
+  assertReplicationStreamingOrDegraded,
+  probeStreaming,
+  verifyStreaming,
+} from '../replication.js';
+import { clearRetiredFence, fenceRetiredNode } from '../retired-fence.js';
 import { envS3Record } from '../s3-record.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
 import { composeRoleEnv } from '../walg-role.js';
-import { WG_PRIMARY_IP, WG_STANDBY_IP } from '../wireguard.js';
+import { exchangeAndBringUpTunnel, wgIpOf } from '../wireguard.js';
 
 /** Shared service-opts object rebuilt from ctx (identical to the inline const). */
 const haServiceOpts = (ctx) => {
@@ -75,6 +92,19 @@ const haServiceOpts = (ctx) => {
     bundlePath: ctx.bundlePath,
   };
 };
+
+/** A node's Pulumi stack (birth identity); a node without one is its role's. */
+const stackOf = (node, role) => node?.stack ?? role;
+
+/** The node born as `stack`, whatever its role now. */
+const nodeOfStack = (ctx, stack) =>
+  [ctx.primary, ctx.standby].find((n, i) => stackOf(n, i === 0 ? 'primary' : 'standby') === stack);
+
+/** psql replica-state reader for one compose node. */
+const readNodeState = (ctx, ip) =>
+  readReplicaState({
+    exec: composePsqlRunner(ip, ctx.sshKeyPath, `/opt/${ctx.projectConfig.projectName}`),
+  });
 
 /**
  * Provision BOTH VPS via two parallel Pulumi stacks (one per cluster). Uploads
@@ -109,7 +139,19 @@ async function haProvisionServers(ctx) {
   // standby for this primary — a different region on the SAME continent, so
   // an unspecified standby never puts replication on a transatlantic hop
   // (B0: the old COMPOSE_HA_FALLBACK_REGIONS list sent ash/hil to nbg1).
-  const standbyRegion = ctx.secondaryRegion || Provider.getDefaultStandbyRegion(region);
+  //
+  // A reconverge (R12) keeps each stack at its BIRTH location, read from the
+  // persisted servers[]: the failover swapped envConfig.region and
+  // secondaryRegion, and handing the `-primary` stack the promoted node's
+  // region would plan a replacement of the retired server.
+  const birth = (stack) =>
+    [ctx.reconverge?.promoted, ctx.reconverge?.retired].find((n) => n?.stack === stack);
+  const primaryStackRegion = birth('primary')?.region ?? region;
+  const standbyRegion =
+    birth('standby')?.region ??
+    (ctx.secondaryRegion || Provider.getDefaultStandbyRegion(primaryStackRegion));
+  // The standby STACK's region; re-pointed at the role standby's once the pair
+  // is resolved below (the same node unless this is a reconverge).
   ctx.standbyRegion = standbyRegion;
 
   // The standby's SKU is resolved FOR ITS OWN REGION, exactly as k8s-ha has
@@ -142,7 +184,7 @@ async function haProvisionServers(ctx) {
   ctx.sharedSshKeyId = sharedSshKeyId;
 
   const { upStack } = await import('../../iac/index.js');
-  ctx.onProgress(`Provisioning VPS in ${region} and ${standbyRegion}...`);
+  ctx.onProgress(`Provisioning VPS in ${primaryStackRegion} and ${standbyRegion}...`);
 
   // No backend pre-init here any more. It existed because parallel `stack
   // select` against a just-created bucket raced the backend's own metadata
@@ -159,7 +201,7 @@ async function haProvisionServers(ctx) {
     environment: `${environment}-primary`,
     sshPublicKey: publicKey,
     existingSshKeyId: sharedSshKeyId,
-    location: region,
+    location: primaryStackRegion,
     serverType,
     labels: { 'managed-by': 'vibecarbon', role: 'primary' },
     allowedSshIps,
@@ -222,19 +264,44 @@ async function haProvisionServers(ctx) {
   // firewallId is persisted per server so `scale`'s blue-green replacement can
   // re-attach it — each HA node has its OWN firewall (one per stack), so this
   // cannot be an env-level field.
-  ctx.primary = {
-    ip: primaryResult.outputs.serverIp,
-    serverId: primaryResult.outputs.serverId,
-    firewallId: primaryResult.outputs.firewallId || null,
+  const byStack = {
+    primary: {
+      ip: primaryResult.outputs.serverIp,
+      serverId: primaryResult.outputs.serverId,
+      firewallId: primaryResult.outputs.firewallId || null,
+      stack: 'primary',
+      region: primaryStackRegion,
+      serverType,
+    },
+    standby: {
+      ip: standbyResult.outputs.serverIp,
+      serverId: standbyResult.outputs.serverId,
+      firewallId: standbyResult.outputs.firewallId || null,
+      stack: 'standby',
+      region: standbyRegion,
+      serverType: standbyServerType,
+    },
   };
-  ctx.standby = {
-    ip: standbyResult.outputs.serverIp,
-    serverId: standbyResult.outputs.serverId,
-    firewallId: standbyResult.outputs.firewallId || null,
-  };
+  // Resolve the pair by ROLE (R12). On a reconverge the promoted node (born as
+  // the standby stack) is the primary; otherwise the stacks are the roles.
+  const primaryStack = ctx.reconverge?.promoted?.stack ?? 'primary';
+  ctx.primary = byStack[primaryStack];
+  ctx.standby = byStack[primaryStack === 'primary' ? 'standby' : 'primary'];
+  ctx.standbyRegion = ctx.standby.region;
+  // The promoted node holds every write since the failover: its stack must
+  // still be the server the config calls primary. (A retired server Pulumi had
+  // to recreate is fine, it is reseeded anyway.)
+  const promotedIp = ctx.reconverge?.promoted?.ip;
+  if (promotedIp && promotedIp !== ctx.primary.ip) {
+    throw new Error(
+      `provision-ha-servers: the ${primaryStack} stack's server is ${ctx.primary.ip}, but the ` +
+        `config records the promoted primary at ${promotedIp}. refusing to reconverge onto a ` +
+        'server that does not hold the primary database; check .vibecarbon.json servers[]',
+    );
+  }
 
-  p.log.success(`Primary: ${c.info(ctx.primary.ip)} (${region})`);
-  p.log.success(`Standby: ${c.info(ctx.standby.ip)} (${standbyRegion})`);
+  p.log.success(`Primary: ${c.info(ctx.primary.ip)} (${ctx.primary.region})`);
+  p.log.success(`Standby: ${c.info(ctx.standby.ip)} (${ctx.standby.region})`);
 }
 
 /**
@@ -275,37 +342,36 @@ async function haPersistPendingConfig(ctx) {
     ...envConfig.s3,
     ...loadedProjectConfig.environments?.[environment]?.s3,
   };
+  // Each entry is named by the node's STACK (its birth identity, which the
+  // role-swap detector reads) and carries its ROLE: identical on a normal
+  // deploy, crosswise after a failover, where the reconverge keeps the
+  // promoted node primary. Role primary first.
+  const serverEntry = (node, role, fallbackRegion, fallbackType) => ({
+    name: `${projectName}-${environment}-${stackOf(node, role)}`,
+    id: node.serverId,
+    ip: node.ip,
+    ...(node.firewallId && { firewallId: node.firewallId }),
+    region: node.region ?? fallbackRegion,
+    serverType: node.serverType ?? fallbackType,
+    role,
+  });
+  const primaryRegion = primary.region ?? region;
+  const secondaryRegion = standby.region ?? standbyRegion;
   const pendingEnvConfig = {
     ...envConfig,
     status: 'deploying',
     deployMode: 'compose-ha',
     provider: envConfig.provider ?? 'hetzner',
-    region,
-    secondaryRegion: standbyRegion,
+    region: primaryRegion,
+    secondaryRegion,
     serverType,
-    ha: { enabled: true, failoverRegion: standbyRegion },
+    ha: { enabled: true, failoverRegion: secondaryRegion },
     servers: [
-      {
-        name: `${projectName}-${environment}-primary`,
-        id: primary.serverId,
-        ip: primary.ip,
-        ...(primary.firewallId && { firewallId: primary.firewallId }),
-        region,
-        serverType,
-        role: 'primary',
-      },
-      {
-        name: `${projectName}-${environment}-standby`,
-        id: standby.serverId,
-        ip: standby.ip,
-        ...(standby.firewallId && { firewallId: standby.firewallId }),
-        region: standbyRegion,
-        // Its OWN resolved type, not the primary's — scale and failover read
-        // this back, and recording the primary's SKU here would send a later
-        // resize at a type the standby's region may not stock.
-        serverType: standbyServerType,
-        role: 'standby',
-      },
+      serverEntry(primary, 'primary', region, serverType),
+      // The standby's OWN resolved type, not the primary's: scale and failover
+      // read this back, and recording the primary's SKU here would send a
+      // later resize at a type the standby's region may not stock.
+      serverEntry(standby, 'standby', standbyRegion, standbyServerType),
     ],
     domain: domain || null,
     dnsProvider: dnsProvider || null,
@@ -460,14 +526,14 @@ async function haSetupServerFiles(ctx) {
     ),
     perfAsync('deploy.ha.compose.cloudFirewallWg.primary', () =>
       openWireguardPortHetznerFirewall(
-        `${projectName}-${environment}-primary`,
+        `${projectName}-${environment}-${stackOf(primary, 'primary')}`,
         standby.ip,
         provider,
       ),
     ),
     perfAsync('deploy.ha.compose.cloudFirewallWg.standby', () =>
       openWireguardPortHetznerFirewall(
-        `${projectName}-${environment}-standby`,
+        `${projectName}-${environment}-${stackOf(standby, 'standby')}`,
         primary.ip,
         provider,
       ),
@@ -572,18 +638,24 @@ async function haUpdateDns(ctx) {
   if (domain && hasAutomatedDns(dnsProvider) && dnsToken && dnsZoneId) {
     const dnsName = DNS_PROVIDERS[dnsProvider].name;
     ctx.onProgress(`Setting up ${dnsName} for HA...`);
-    try {
-      const { setupHA } = await getDnsProvider(dnsProvider);
-      await perfAsync('deploy.ha.compose.dns.setup', () =>
-        setupHA(dnsToken, dnsZoneId, domain, [
-          { name: `${projectName}-${environment}-primary`, ip: primary.ip, region },
-          { name: `${projectName}-${environment}-standby`, ip: standby.ip, region: standbyRegion },
-        ]),
-      );
-    } catch (error) {
-      p.log.warn(`${dnsName} HA setup failed: ${error.message}`);
-      p.log.info('You can configure DNS manually.');
-    }
+    const { setupHA } = await getDnsProvider(dnsProvider);
+    const haResult = await perfAsync('deploy.ha.compose.dns.setup', () =>
+      setupHA(dnsToken, dnsZoneId, domain, [
+        {
+          name: `${projectName}-${environment}-${stackOf(primary, 'primary')}`,
+          ip: primary.ip,
+          region: primary.region ?? region,
+        },
+        {
+          name: `${projectName}-${environment}-${stackOf(standby, 'standby')}`,
+          ip: standby.ip,
+          region: standby.region ?? standbyRegion,
+        },
+      ]),
+    );
+    // A refused record write fails the deploy: it would otherwise run on to a
+    // certificate and health probe that can never pass.
+    requireDnsSetup(haResult, `${dnsName} HA DNS records for ${domain}`);
   } else if (domain && dnsProvider === 'manual') {
     p.log.info(c.bold('Manual DNS Configuration:'));
     p.log.message(`  Point ${c.bold(domain)} to ${c.bold(primary.ip)} (primary)`);
@@ -632,8 +704,53 @@ async function haStartComposeStack(ctx) {
   await perfAsync('deploy.ha.compose.composeUp.both', () =>
     Promise.all([
       startComposeStack(primary.ip, sshKeyPath, projectName, serviceOpts),
-      startComposeStack(standby.ip, sshKeyPath, projectName, serviceOpts),
+      ctx.reconverge
+        ? reconvergeStandbyStack(ctx, serviceOpts)
+        : startComposeStack(standby.ip, sshKeyPath, projectName, serviceOpts),
     ]),
+  );
+}
+
+/**
+ * The standby's stack on a reconverge. A standby that already reads as a
+ * replica is brought up like any standby (its app-migrate finds a read-only
+ * database and exits). The retired node before its reseed is NOT: its database
+ * is the stale ex-primary, so its app tier would serve stale data, its
+ * app-migrate would write into it (or fail on the failover's write fence), and
+ * its archiver and backup cron would push into the promoted node's prefix. So
+ * the retirement fence is armed on it here (retired-fence.js: markers, every
+ * writer stopped, WALG_ROLE=standby), in case the deploy's entry could not
+ * reach it. It stays armed through the reseed; reconvergeReplication brings the
+ * stack up as a normal standby once the reseed makes it a replica, and only
+ * haFinalizeConfig, after verified streaming, takes the fence off (one deploy
+ * restores HA).
+ */
+async function reconvergeStandbyStack(ctx, serviceOpts) {
+  const projectName = ctx.projectConfig.projectName;
+  const { standby, sshKeyPath } = ctx;
+  const state = await readNodeState(ctx, standby.ip);
+  if (state.inRecovery === true) {
+    await startComposeStack(standby.ip, sshKeyPath, projectName, serviceOpts);
+    ctx.standbyReconciled = true;
+    return;
+  }
+  const fence = await fenceRetiredNode({
+    tier: 'compose-ha',
+    ip: standby.ip,
+    projectName,
+    sshKeyPath,
+  });
+  if (!fence.fenced) {
+    throw new Error(
+      `could not fence the retired node ${standby.ip} (missing: ${fence.missing.join(', ')}): its ` +
+        'database is stale until the reseed, so it must not serve or push backups. check docker ' +
+        `on that node, then rerun vibecarbon deploy ${ctx.environment}`,
+    );
+  }
+  p.log.info(
+    `the retired node ${standby.ip} is fenced${
+      fence.wrote.length ? ` (${fence.wrote.join(', ')})` : ''
+    }: it is rebuilt as the standby below`,
   );
 }
 
@@ -726,15 +843,21 @@ async function haWriteReplicationOverlay(ctx) {
   const { primary, standby, sshKeyPath } = ctx;
   await Promise.all(
     [
-      [primary.ip, WG_PRIMARY_IP],
-      [standby.ip, WG_STANDBY_IP],
-    ].map(async ([ip, selfWgIp]) => {
+      // Each node binds its BIRTH tunnel address (R11), so a role swap never
+      // changes the overlay content on either node.
+      [primary.ip, wgIpOf({ stackIdentity: stackOf(primary, 'primary') }), primary],
+      [standby.ip, wgIpOf({ stackIdentity: stackOf(standby, 'standby') }), standby],
+    ].map(async ([ip, selfWgIp, node]) => {
       await sshRunAsync(
         ip,
         sshKeyPath,
         `cat > /opt/${projectName}/docker-compose.replication.yml << 'REPL'\n${buildReplicationOverlay(selfWgIp)}REPL`,
         { timeout: 10_000 },
       );
+      // A reconverge never recreates the serving primary's db (Task 8 rule).
+      // Its overlay is the one it has served with since its own birth deploy
+      // (same tunnel address), so its 5433 mapping is already live.
+      if (ctx.reconverge && node === primary) return;
       // Materialize the db image EXPLICITLY before recreating the service.
       //
       // On the standby this can be the FIRST time the db image exists: the
@@ -784,12 +907,28 @@ const REPL_COMPOSE_FLAGS_BASE = '-f docker-compose.yml -f docker-compose.prod.ym
  * been chronically fragile and hard-failing every deploy would block iteration.
  */
 async function haConfigureReplication(ctx) {
+  if (ctx.reconverge) return reconvergeReplication(ctx);
   const projectName = ctx.projectConfig.projectName;
   const { primary, standby, sshKeyPath } = ctx;
   await perfAsync('deploy.ha.replication.setup', async () => {
     ctx.onProgress('Configuring PostgreSQL replication on primary...');
     await configurePrimaryReplication(primary.ip, standby.ip, sshKeyPath, projectName);
 
+    // A standby already streaming from this primary is left alone: the reseed
+    // wipes its PGDATA and downtime-reseeds it. Same probe as the k8s tier.
+    const probe = await probeStreaming({
+      exec: (sql) =>
+        sshRun(
+          primary.ip,
+          sshKeyPath,
+          `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${sql}"`,
+          { timeout: 10_000 },
+        ),
+    });
+    if (probe.streaming) {
+      p.log.info('Standby already streaming from the primary, skipping the reseed');
+      return;
+    }
     ctx.onProgress('Configuring standby as hot replica...');
     let replicationOk = false;
     try {
@@ -798,6 +937,7 @@ async function haConfigureReplication(ctx) {
         primary.ip,
         sshKeyPath,
         projectName,
+        { primaryHost: wgIpOf({ stackIdentity: stackOf(primary, 'primary') }) },
       );
     } catch (err) {
       p.log.warn(`Replication setup error (continuing with warning): ${err.message}`);
@@ -806,6 +946,121 @@ async function haConfigureReplication(ctx) {
       p.log.warn('Replication setup may not have completed: verify manually');
     }
   });
+}
+
+/**
+ * Replication on a reconverge (R12 steps 3-4). The promoted node is serving:
+ * its db is never stopped, restarted or reseeded. It gets the primary side
+ * that needs no restart (repl-gateway on its own tunnel address, replicator
+ * role, slot, pg_hba with a reload), then the retired node is reseeded from it
+ * over the promoted node's own tunnel address.
+ *
+ * Reads first, before any write: the promoted node must still be the primary,
+ * the reseed target must not be serving (out of recovery with DNS on it), and
+ * a standby already streaming from the promoted node with its system
+ * identifier is left alone (idempotent rerun). A reseed failure is a warning
+ * here, as on a normal deploy: verify-streaming is the gate, and a failed run
+ * leaves the env swapped and degraded for the rerun.
+ */
+async function reconvergeReplication(ctx) {
+  const projectName = ctx.projectConfig.projectName;
+  const { primary, standby, sshKeyPath, environment, domain } = ctx;
+  await perfAsync('deploy.ha.replication.setup', async () => {
+    const promotedState = await readNodeState(ctx, primary.ip);
+    if (promotedState.inRecovery !== false) {
+      throw new Error(
+        `Refusing to reconverge "${environment}": the promoted primary ${primary.ip} does not ` +
+          `read as a primary (in recovery: ${promotedState.inRecovery}). rerun vibecarbon ` +
+          `deploy ${environment} once its db answers out of recovery`,
+      );
+    }
+    const standbyState = await readNodeState(ctx, standby.ip);
+    // The entry check's answer when it had one (a managed-DNS repoint is read
+    // back through the provider, which public resolvers may still lag).
+    const dnsAnswer = !domain
+      ? []
+      : (ctx.reconverge.dnsAnswer ?? (await resolvePublicA(domain).catch(() => [])));
+    assertReseedTargetNotServing({
+      environment,
+      target: standby,
+      state: standbyState,
+      domain,
+      dnsAnswer,
+    });
+    // receiverStatus === 'streaming' is the real discriminator: the system
+    // identifier also matches on the retired node's stale PGDATA (promotion
+    // keeps it), so it only rules out a foreign database.
+    const inSync =
+      standbyState.inRecovery === true &&
+      standbyState.receiverStatus === 'streaming' &&
+      !!standbyState.systemIdentifier &&
+      standbyState.systemIdentifier === promotedState.systemIdentifier;
+
+    // The tunnel keeps its BIRTH mapping (R11): the `-primary` stack's node is
+    // the WireGuard "primary" end whatever its role. Re-run (idempotent, as on
+    // every deploy) only while the retired node is being rebuilt: nothing
+    // streams then, and a standby that streams proves the tunnel is up.
+    if (!inSync) {
+      await exchangeAndBringUpTunnel({
+        primaryIp: nodeOfStack(ctx, 'primary').ip,
+        standbyIp: nodeOfStack(ctx, 'standby').ip,
+        sshKeyPath,
+      });
+    }
+    ctx.onProgress('Configuring PostgreSQL replication on the promoted primary...');
+    // No ALTER SYSTEM WAL settings and no restart: the promoted node's
+    // postgresql.auto.conf came from the old primary in its basebackup, and its
+    // db is serving.
+    await ensurePrimaryReplicationAccess(primary.ip, sshKeyPath, projectName);
+
+    if (inSync) {
+      p.log.info(
+        `standby ${standby.ip} already streams from the primary ${primary.ip}; no reseed needed`,
+      );
+      return;
+    }
+    ctx.onProgress(`Rebuilding ${standby.ip} as the standby from ${primary.ip}...`);
+    try {
+      await configureStandbyReplication(standby.ip, primary.ip, sshKeyPath, projectName, {
+        primaryHost: wgIpOf({ stackIdentity: stackOf(primary, 'primary') }),
+      });
+    } catch (err) {
+      p.log.warn(`Reseed of the retired node failed (continuing to the gate): ${err.message}`);
+      return;
+    }
+    await reconcileRebuiltStandby(ctx);
+  });
+}
+
+/**
+ * Bring the rebuilt node's stack up as a normal standby (current image, the
+ * standby role env merged earlier: WALG_ROLE=standby, ACME disarmed), once it
+ * reads as a replica, so its app-migrate exits on the read-only database. Its
+ * success is part of a complete reconverge (haFinalizeConfig); a failure is a
+ * warning here, and the env stays degraded for the rerun.
+ */
+async function reconcileRebuiltStandby(ctx) {
+  if (ctx.standbyReconciled) return;
+  const projectName = ctx.projectConfig.projectName;
+  const { standby, sshKeyPath } = ctx;
+  const state = await readNodeState(ctx, standby.ip);
+  if (state.inRecovery !== true) {
+    p.log.warn(
+      `the rebuilt standby ${standby.ip} does not read as a replica yet; its stack stays down ` +
+        `until a rerun of vibecarbon deploy ${ctx.environment}`,
+    );
+    return;
+  }
+  ctx.onProgress(`Starting services on the rebuilt standby ${standby.ip}...`);
+  try {
+    await startComposeStack(standby.ip, sshKeyPath, projectName, haServiceOpts(ctx));
+    ctx.standbyReconciled = true;
+  } catch (err) {
+    p.log.warn(
+      `starting the rebuilt standby's stack failed (${standby.ip}): ` +
+        `${err?.message ?? err}; rerun vibecarbon deploy ${ctx.environment}`,
+    );
+  }
 }
 
 /**
@@ -843,6 +1098,17 @@ async function haVerifyStreaming(ctx) {
   ctx.replActive = replActive;
   ctx.replLastState = replLastState;
   ctx.degraded = degraded;
+  // Failover's replica proof (R1): record the identifier of the standby this
+  // deploy just proved streaming, read on the standby itself. Only a reading in
+  // recovery counts; anything else records nothing, and an unplanned failover
+  // then refuses until a deploy proves it.
+  ctx.systemIdentifier = null;
+  if (replActive) {
+    const standbyState = await readReplicaState({
+      exec: composePsqlRunner(ctx.standby.ip, sshKeyPath, `/opt/${projectName}`),
+    });
+    if (standbyState.inRecovery === true) ctx.systemIdentifier = standbyState.systemIdentifier;
+  }
   if (replActive) {
     p.log.success('Streaming replication active');
   } else {
@@ -908,19 +1174,63 @@ async function haFinalizeConfig(ctx) {
     degraded,
   } = ctx;
 
+  // A reconverge is complete only once this deploy verified streaming, read
+  // the standby's system identifier and brought the standby's stack up (R12
+  // step 5). Until then the env stays
+  // swapped and degraded (lastFailover kept, deployedAt not stamped), so a rerun
+  // resumes and failover keeps refusing.
+  let reconvergeComplete =
+    !ctx.reconverge || (!!replActive && !!ctx.systemIdentifier && !!ctx.standbyReconciled);
+  // The rebuilt standby is a proven replica: only now does the retirement fence
+  // come off (retired-fence.js). A marker it cannot prove gone keeps the
+  // reconverge incomplete, since that node would refuse its own backups once a
+  // later failover promoted it; the rerun clears it.
+  if (ctx.reconverge && reconvergeComplete) {
+    try {
+      const { cleared } = await clearRetiredFence({
+        tier: 'compose-ha',
+        ip: standby.ip,
+        projectName,
+        environment,
+        deps: { sshKeyPath: ctx.sshKeyPath },
+      });
+      if (!cleared) reconvergeComplete = false;
+    } catch (err) {
+      p.log.warn(err.message);
+      reconvergeComplete = false;
+    }
+  }
+  ctx.reconvergeComplete = reconvergeComplete;
+  // The backup-prefix fence follows the role primary (backup-fence.js): a
+  // reconverge, an aborted failover or a recreated database moves it along.
+  const fence = await writeComposeBackupFence({
+    ip: primary.ip,
+    sshKeyPath: ctx.sshKeyPath,
+    projectName,
+    primaryNode: primary.name ?? primary.ip,
+  });
+  if (!fence.ok) p.log.warn(backupFenceWarning(primary.ip, fence.reason));
+  const finalEnv = {
+    ...pendingEnvConfig,
+    status: 'deployed',
+    replication: degraded || !reconvergeComplete ? 'degraded' : 'streaming',
+    degraded: degraded || !reconvergeComplete,
+    deployedAt: reconvergeComplete ? new Date().toISOString() : pendingEnvConfig.deployedAt,
+    lastAttempt: undefined,
+  };
+  // The fence write's outcome, on the record (status shows a failed one).
+  finalEnv.ha = { ...(finalEnv.ha ?? {}), backupFence: backupFenceRecord(fence) };
+  if (ctx.reconverge && reconvergeComplete) {
+    delete finalEnv.lastFailover;
+    delete finalEnv.lastFailoverOverride;
+    finalEnv.ha = { ...(finalEnv.ha ?? {}), systemIdentifier: ctx.systemIdentifier };
+  }
   saveProjectConfig({
     ...loadedProjectConfig,
     provider: envConfig.provider ?? 'hetzner',
     environments: {
       ...loadedProjectConfig.environments,
-      [environment]: {
-        ...pendingEnvConfig,
-        status: 'deployed',
-        replication: degraded ? 'degraded' : 'streaming',
-        degraded,
-        deployedAt: new Date().toISOString(),
-        lastAttempt: undefined,
-      },
+      [environment]: finalEnv,
     },
   });
   registerProject(projectName, process.cwd());
@@ -929,8 +1239,10 @@ async function haFinalizeConfig(ctx) {
   if (domain) {
     p.log.message(`  ${c.dim('URL')}            ${c.info(`https://${domain}`)}`);
   }
-  p.log.message(`  ${c.dim('Primary')}        ${c.info(primary.ip)} (${region})`);
-  p.log.message(`  ${c.dim('Standby')}        ${c.info(standby.ip)} (${standbyRegion})`);
+  p.log.message(`  ${c.dim('Primary')}        ${c.info(primary.ip)} (${primary.region ?? region})`);
+  p.log.message(
+    `  ${c.dim('Standby')}        ${c.info(standby.ip)} (${standby.region ?? standbyRegion})`,
+  );
   p.log.message(`  ${c.dim('Deploy method')}  Docker Compose HA`);
   if (replActive) {
     p.log.message(`  ${c.dim('Replication')}    ${c.success('PostgreSQL streaming')}`);

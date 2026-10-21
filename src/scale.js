@@ -40,9 +40,11 @@ import {
   waitForSSH,
 } from './lib/deploy/compose/index.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
+import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import { planScale } from './lib/deploy/plan/scale-plan.js';
 import { buildRemote } from './lib/deploy/remote-build.js';
+import { isRetiredSide } from './lib/deploy/retired-fence.js';
 import { isHATier, resolveTier } from './lib/deploy/tier-registry.js';
 import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from './lib/deploy/utils.js';
 import { waitForDNSPropagation } from './lib/dns-propagation.js';
@@ -107,6 +109,38 @@ const SPEC = {
     },
   ],
 };
+
+// ============================================================================
+// HA GATES
+// ============================================================================
+
+/**
+ * Refuse to scale a side a failover retired that no deploy has rebuilt yet.
+ * A resize reboots (or replaces) the node, and a stale ex-primary that boots
+ * comes back believing it is the primary until the retirement fence reaches
+ * it again. The deploy that rebuilds it as the standby comes first.
+ *
+ * @param {{ environment: string, envConfig: object, targetIps: string[] }} args
+ */
+export function assertScaleNotRetired({ environment, envConfig, targetIps }) {
+  const retired = targetIps.filter((ip) => isRetiredSide(envConfig, ip));
+  if (retired.length === 0) return;
+  throw new Error(
+    `Refusing to scale "${environment}": a failover retired ${retired.join(', ')} and no deploy ` +
+      `has rebuilt it as the standby, so a resize would boot a stale ex-primary. run vibecarbon ` +
+      `deploy ${environment} first, then scale`,
+  );
+}
+
+/** Run an HA gate: its refusal is one error line and exit 1, before any prompt or cloud call. */
+function refuseOrContinue(gate) {
+  try {
+    gate();
+  } catch (err) {
+    p.log.error(err.message);
+    process.exit(1);
+  }
+}
 
 // ============================================================================
 // COMPOSE SCALING
@@ -227,6 +261,15 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
 
     if (target === 'primary') targetServers = primaryServer ? [primaryServer] : [];
     else if (target === 'standby') targetServers = standbyServer ? [standbyServer] : [];
+  }
+  if (isHATier(tier)) {
+    refuseOrContinue(() =>
+      assertScaleNotRetired({
+        environment,
+        envConfig,
+        targetIps: targetServers.map((sv) => sv.ip).filter(Boolean),
+      }),
+    );
   }
 
   // Select new server type
@@ -1137,6 +1180,23 @@ export async function run(args) {
   // on every run, provisioning and redeploy alike (see
   // src/lib/licensing/gate.js).
   const tier = resolveTier(envConfig);
+  if (isHATier(tier)) {
+    // A failover in flight may be mid-swap: a resize would act on roles that
+    // are about to change (or reboot the standby mid-promote).
+    refuseOrContinue(() => assertNoFailoverInFlight({ environment, envConfig, action: 'scale' }));
+    // k8s-ha scale applies to both clusters, so a retired one refuses it all.
+    if (tier === 'k8s-ha') {
+      refuseOrContinue(() =>
+        assertScaleNotRetired({
+          environment,
+          envConfig,
+          targetIps: [envConfig.ha?.primary?.masterIp, envConfig.ha?.standby?.masterIp].filter(
+            Boolean,
+          ),
+        }),
+      );
+    }
+  }
 
   await SCALE_STRATEGIES[tier](environment, envConfig, projectConfig, { ...parsed, tier });
 }

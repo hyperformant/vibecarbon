@@ -25,6 +25,7 @@ import {
   providerIdFor,
 } from '../providers/index.js';
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
+import { getSSHKeyPath } from '../ssh.js';
 import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
 import {
@@ -35,19 +36,25 @@ import {
   syncHetznerFences,
   waitForAppKeyReady,
 } from './app-storage-credential.js';
+import { backupFenceWarning, recordBackupFence, writeK8sBackupFence } from './backup-fence.js';
 import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
-import { assertNoComposeHaRoleSwap } from './compose/ha-role-swap.js';
+import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compose/ha-role-swap.js';
 import { workingTreeDirty } from './delta.js';
+import { requireDnsSetup } from './dns-result.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
+import { assertNoFailoverInFlight, haSeedRecord, readReplicaState } from './failover-guard.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
+import { k8sPsqlRunner } from './replication.js';
+import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retired-fence.js';
 import { envS3Record } from './s3-record.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
+import { assertRolePrimaryWritable, liftStrandedWriteFence } from './write-fence.js';
 
 /**
  * Probe the public /api/health endpoint to verify the app is reachable
@@ -459,6 +466,28 @@ export function assertBucketReady(result, role) {
  * @param {string} environment
  * @param {{ha?: {primary?: {stack?: string}}}} [envConfig]
  */
+const isHaTier = (tier) => tier === 'compose-ha' || tier === 'k8s-ha';
+
+/** The node the persisted roles call primary, as the write-fence marker names it. */
+function rolePrimaryOf(tier, envConfig) {
+  if (tier === 'compose-ha') {
+    const sv = (envConfig?.servers ?? []).find((x) => x.role === 'primary');
+    return sv?.ip ? { name: sv.name, ip: sv.ip } : null;
+  }
+  const ip = envConfig?.ha?.primary?.masterIp;
+  return ip ? { ip } : null;
+}
+
+/** psql on the role primary over the tier's transport (the write-fence checks). */
+async function rolePrimaryPsql(tier, environment, projectName, ip) {
+  const key = getSSHKeyPath(environment);
+  if (tier === 'compose-ha') {
+    const { composePsqlRunner } = await import('./compose/ha.js');
+    return composePsqlRunner(ip, key, `/opt/${projectName}`);
+  }
+  return k8sPsqlRunner(ip, key);
+}
+
 export function resolveKubeconfigPath(environment, envConfig) {
   const roleStack = envConfig?.ha?.primary?.stack;
   const candidates = [
@@ -470,6 +499,53 @@ export function resolveKubeconfigPath(environment, envConfig) {
     path: candidates.find((c) => existsSync(c)) ?? candidates[candidates.length - 1],
     candidates,
   };
+}
+
+/**
+ * The k8s-ha half of "the reconverge is complete": a deploy that stamps
+ * deployedAt (no retired fence kept) removes lastFailover and its override
+ * from the env it is about to save. Mutates and returns `env`.
+ *
+ * @param {object} env - the env record of the final save
+ * @param {{ reconvergeIncomplete?: boolean }} deployResult
+ * @returns {object}
+ */
+export function finishK8sReconvergeRecord(env, deployResult) {
+  if (env && !deployResult?.reconvergeIncomplete) {
+    delete env.lastFailover;
+    delete env.lastFailoverOverride;
+  }
+  return env;
+}
+
+/**
+ * k8s-ha: take the retirement fence off the cluster this deploy just rebuilt
+ * as the standby (retired-fence.js). Only when the env was swapped at entry
+ * (a retired side existed); a no-op otherwise. Throws when the clear cannot be
+ * proven, and the caller runs it before the final save, so a failed clear
+ * leaves deployedAt unstamped and the rerun clears it. A rebuilt standby that
+ * is not a replica yet (a degraded deploy that did not reseed it) keeps its
+ * fence: `kept` is true, the deploy still succeeds, and the caller leaves
+ * deployedAt unstamped so the env stays swapped and the next deploy retries.
+ *
+ * @param {object} args
+ * @param {Array<{ ip: string }>} args.retiredAtEntry
+ * @param {string|undefined} args.standbyIp - the rebuilt standby's master
+ * @param {string} args.projectName
+ * @param {string} args.environment
+ * @param {typeof clearRetiredFence} [args.clear]
+ * @returns {Promise<{ ran: boolean, kept: boolean }>}
+ */
+export async function finishK8sRetiredFence({
+  retiredAtEntry,
+  standbyIp,
+  projectName,
+  environment,
+  clear = clearRetiredFence,
+}) {
+  if (!retiredAtEntry?.length || !standbyIp) return { ran: false, kept: false };
+  const { cleared } = await clear({ tier: 'k8s-ha', ip: standbyIp, projectName, environment });
+  return { ran: true, kept: !cleared };
 }
 
 /**
@@ -512,14 +588,46 @@ export async function executeDeployment(args, gatheredConfig) {
 
   const { deployMode } = config;
   const tier = resolveTier({ deployMode, ha: config.ha });
-  // DATA-LOSS REFUSAL, first thing after the tier is known and BEFORE any
-  // mutation (the operator-firewall patch below, the S3 buckets, the image
-  // push, the DNS warm-up, the plan itself). `envConfig` here is the
-  // environment's persisted config as it stood before this invocation, so it
-  // still carries the roles a failover flipped — the one and only place the
-  // swap is recorded. See compose/ha-role-swap.js for why compose-HA (unlike
-  // k8s-HA) cannot converge a swapped environment.
-  assertNoComposeHaRoleSwap({ projectName: projectConfig.projectName, environment, envConfig });
+  // A failover journal means the roles may be mid-swap, and this deploy's final
+  // save rebuilds `ha` and would drop the journal its rerun resumes from. Every
+  // HA tier refuses, before any work, and names the command that finishes it.
+  if (isHaTier(tier)) assertNoFailoverInFlight({ environment, envConfig });
+  // COMPOSE-HA RECONVERGE (R12), classified first thing after the tier is
+  // known and BEFORE any mutation. `envConfig` here is the environment's
+  // persisted config as it stood before this invocation, so it still carries
+  // the roles a failover flipped, the one and only place the swap is recorded.
+  // A swapped pair deploys by role (compose/ha-role-swap.js): the promoted node
+  // stays the primary and the retired one is rebuilt as the standby. The journal
+  // refusal is pure and fires here; the readiness reads (promoted node out of
+  // recovery, DNS on it) need SSH, so they run right after the operator-IP
+  // firewall check below, still ahead of every SSH write and Pulumi.
+  const composeHaReconverge = planComposeHaReconverge({
+    projectName: projectConfig.projectName,
+    environment,
+    envConfig,
+  });
+  // A planned failover interrupted between its database write fence and its
+  // journal left the primary read-only with nothing promoted: lift it before
+  // this deploy restarts the app onto it (write-fence.js). Unreachable or
+  // failing here is a warning: the post-bring-up probe below checks again.
+  if (isHaTier(tier) && envConfig?.ha?.writeFence) {
+    const rolePrimary = rolePrimaryOf(tier, envConfig);
+    if (rolePrimary?.ip) {
+      try {
+        await liftStrandedWriteFence({
+          environment,
+          envConfig,
+          rolePrimary,
+          exec: await rolePrimaryPsql(tier, environment, projectConfig.projectName, rolePrimary.ip),
+          log: (line) => p.log.info(line),
+        });
+      } catch (err) {
+        p.log.warn(
+          `${String(err?.message ?? err).split('\n')[0]}; deploy checks the primary again after bring-up`,
+        );
+      }
+    }
+  }
   // Fail fast with install guidance if host-side tools (pulumi, ssh) are
   // missing — before any Pulumi/SSH work would otherwise ENOENT mid-deploy.
   // Provider passed so the pulumi VERSION assertion can fire: a CLI too old
@@ -590,6 +698,48 @@ export async function executeDeployment(args, gatheredConfig) {
   );
   if (accessResult.added && accessResult.fromEnv) {
     p.log.info(`Bootstrapped operator CIDRs from ALLOWED_SSH_IPS env var: ${accessResult.cidr}`);
+  }
+
+  // The retirement fence (R7), first thing once SSH is let in: a side a past
+  // failover retired that has come back refuses its backups and serves nothing
+  // before this deploy touches anything. Idempotent; an unreachable side is a
+  // warning (the rebuild below reaches it, or the next command does).
+  const retiredAtEntry = isHaTier(tier) ? retiredSides({ envConfig, tier }) : [];
+  if (retiredAtEntry.length > 0) {
+    await reconcileRetiredFence({ environment, envConfig, projectConfig, tier });
+  }
+
+  // The reconverge readiness reads (R12): after the operator-IP check, so an
+  // operator whose IP changed is let back in before the first SSH read, and
+  // before every SSH write and Pulumi call.
+  if (composeHaReconverge) {
+    const { composePsqlRunner, flipComposeDnsWith } = await import('./compose/ha.js');
+    const haKey = getSSHKeyPath(environment);
+    const managedDns = !!(domain && hasAutomatedDns(dnsProvider) && dnsToken && dnsZoneId);
+    const ready = await assertComposeHaReconvergeReady({
+      plan: composeHaReconverge,
+      environment,
+      domain,
+      readState: (ip) =>
+        readReplicaState({
+          exec: composePsqlRunner(ip, haKey, `/opt/${projectConfig.projectName}`),
+        }),
+      resolveA: async (hostname) => {
+        const { resolvePublicA } = await import('./public-dns-lookup.js');
+        return resolvePublicA(hostname);
+      },
+      // A failover whose DNS flip failed: the deploy repoints the records
+      // itself (managed DNS), before the reseed it gates.
+      repointDns: managedDns
+        ? (ip) =>
+            flipComposeDnsWith({ dnsProvider, token: dnsToken, zoneId: dnsZoneId, domain, ip })
+        : null,
+    });
+    composeHaReconverge.dnsAnswer = ready.dnsAnswer;
+    p.log.info(
+      `a failover swapped this environment's roles: ${composeHaReconverge.promoted.ip} stays ` +
+        `the primary and ${composeHaReconverge.retired.ip} is rebuilt as the standby`,
+    );
   }
 
   // Initialize state tracker for granular resume
@@ -1228,6 +1378,11 @@ export async function executeDeployment(args, gatheredConfig) {
             const result = await updateDnsIp(dnsToken, dnsZoneId, domain, '0.0.0.0', {
               onProgress: () => {},
             });
+            if (result?.success === false) {
+              // Best-effort: the real-IP write below is the one that must land.
+              p.log.warn(`Initial DNS setup failed: ${result.error}`);
+              return null;
+            }
             state.completeStep('dns-setup', result);
             p.log.info('DNS records warmed up');
             return result;
@@ -1406,6 +1561,9 @@ export async function executeDeployment(args, gatheredConfig) {
       allowDegraded: !!args.allowDegraded,
       // Pure gate for the remote-build step (local-only image ⇒ build on-node).
       isLocalOnlyImage: isLocalOnlyImageTag(imageRef),
+      // Role mapping on a failed-over pair (null otherwise): the effects resolve
+      // ctx.primary / ctx.standby by role and keep each node's stack.
+      reconverge: composeHaReconverge,
       onProgress: (msg) => s.message(msg),
     };
     // Wrap the entire pipeline so the perf trace shows the headline cost
@@ -1414,14 +1572,23 @@ export async function executeDeployment(args, gatheredConfig) {
       runPlan(planDeploy('compose-ha', config), composeHaCtx, EFFECTS),
     );
     s.stop('Compose HA deployment complete');
+    // A reconverge that did not verify streaming and record the identifier
+    // stays degraded and keeps its last deployedAt (haFinalizeConfig), so the
+    // next deploy resumes it.
+    const reconvergeIncomplete = !!composeHaCtx.reconverge && !composeHaCtx.reconvergeComplete;
+    const haDegraded = !!composeHaCtx.degraded || reconvergeIncomplete;
     deployResult = {
       success: true,
       primaryIp: composeHaCtx.primary.ip,
       standbyIp: composeHaCtx.standby.ip,
       domain,
       deployMode: 'compose-ha',
-      degraded: composeHaCtx.degraded,
-      replication: composeHaCtx.degraded ? 'degraded' : 'streaming',
+      degraded: haDegraded,
+      replication: haDegraded ? 'degraded' : 'streaming',
+      // haSeedRecord persists the identifier only when streaming was verified.
+      replicationStatus: composeHaCtx.replActive && !haDegraded ? 'streaming' : 'degraded',
+      systemIdentifier: composeHaCtx.systemIdentifier ?? null,
+      reconvergeIncomplete,
     };
   } else if (tier === 'k8s') {
     // Single-cluster k3s runs through the plan as a single black-box step that
@@ -1445,13 +1612,62 @@ export async function executeDeployment(args, gatheredConfig) {
     await perfAsync('deploy.ha.k8s.full', () =>
       runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
     );
+    // The retired cluster is the standby this deploy just rebuilt and gated on
+    // streaming (or finalized degraded under -allow-degraded): this deploy
+    // stamps deployedAt, so the fence comes off here, before that save. A
+    // marker left behind would make it refuse its own backups once a later
+    // failover promotes it, so a failed clear fails the deploy (the env stays
+    // swapped and the rerun clears it).
+    const retiredFence = await finishK8sRetiredFence({
+      retiredAtEntry,
+      standbyIp: k8sHaCtx.standbyResult?.masterIp,
+      projectName: projectConfig.projectName,
+      environment,
+    });
+    // The backup-prefix fence follows the role primary (backup-fence.js): a
+    // reconverge, an aborted failover or a recreated database moves it along.
+    const fencePrimaryIp = k8sHaCtx.primaryResult?.masterIp;
+    if (fencePrimaryIp) {
+      const fence = await writeK8sBackupFence({
+        ip: fencePrimaryIp,
+        sshKeyPath: getSSHKeyPath(environment),
+      });
+      if (!fence.ok) p.log.warn(backupFenceWarning(fencePrimaryIp, fence.reason));
+      recordBackupFence({ environment }, fence);
+    }
     deployResult = {
       primary: k8sHaCtx.primaryResult,
       standby: k8sHaCtx.standbyResult,
       domain,
       replicationStatus: k8sHaCtx.replicationStatus,
       degraded: k8sHaCtx.replicationStatus !== 'streaming',
+      systemIdentifier: k8sHaCtx.systemIdentifier ?? null,
+      // A retired side that is not a replica yet keeps its fence: deployedAt
+      // stays unstamped, so the env stays swapped and the next deploy retries.
+      reconvergeIncomplete: retiredFence.kept,
     };
+  }
+
+  // Defence in depth (write-fence.js): after bring-up the role primary must take
+  // writes. Fenced with no failover in flight is lifted with a warning; with a
+  // journal, the failover is mid-flight and this deploy refuses.
+  if (isHaTier(tier)) {
+    const primaryIp =
+      tier === 'compose-ha' ? deployResult.primaryIp : deployResult.primary?.masterIp;
+    if (primaryIp) {
+      const writable = await assertRolePrimaryWritable({
+        environment,
+        envConfig: loadProjectConfig()?.environments?.[environment] ?? envConfig,
+        exec: await rolePrimaryPsql(tier, environment, projectConfig.projectName, primaryIp),
+        warn: (line) => p.log.warn(line),
+      });
+      if (writable === 'unknown') {
+        p.log.warn(
+          `could not read the primary's write-fence setting (${primaryIp}); ` +
+            'vibecarbon status shows it once the database answers',
+        );
+      }
+    }
   }
 
   if (isK8sTier(tier)) {
@@ -1503,8 +1719,11 @@ export async function executeDeployment(args, gatheredConfig) {
         if (!state.shouldSkip('k8s-dns-update', dnsUpdateInputs)) {
           state.startStep('k8s-dns-update', dnsUpdateInputs);
           const { setupSimple: updateDnsIp } = await getDnsProvider(dnsProvider);
-          await perfAsync('deploy.dns.create', () =>
-            updateDnsIp(dnsToken, dnsZoneId, domain, k8sFloatingIp),
+          requireDnsSetup(
+            await perfAsync('deploy.dns.create', () =>
+              updateDnsIp(dnsToken, dnsZoneId, domain, k8sFloatingIp),
+            ),
+            `DNS A record for ${domain}`,
           );
           state.completeStep('k8s-dns-update', { serverIp: k8sFloatingIp });
         }
@@ -1966,6 +2185,16 @@ export async function executeDeployment(args, gatheredConfig) {
           ha: {
             enabled: true,
             failoverRegion: secondaryRegion,
+            // The backup-prefix fence write's record (backup-fence.js), saved
+            // mid-deploy by the tier: this save rebuilds `ha`, so carry it.
+            ...(persistedEnvConfig.ha?.backupFence && {
+              backupFence: persistedEnvConfig.ha.backupFence,
+            }),
+            // The seeded standby's system identifier, set only when this deploy
+            // verified streaming. failover's replica proof (R1) compares the
+            // standby against it; a deploy that could not prove streaming
+            // leaves it unset, so an unplanned failover refuses until one does.
+            ...haSeedRecord(deployResult),
             ...(deployResult.primary && {
               primary: {
                 masterIp: deployResult.primary.masterIp,
@@ -2078,7 +2307,9 @@ export async function executeDeployment(args, gatheredConfig) {
           minWorkers,
           maxWorkers,
         }),
-        deployedAt: new Date().toISOString(),
+        deployedAt: deployResult.reconvergeIncomplete
+          ? persistedEnvConfig.deployedAt
+          : new Date().toISOString(),
         deployedCommit,
         ...(deployedDirty !== null && { deployedDirty }),
         // bucketCreatedAt only on a provider with a settle window (status'
@@ -2099,6 +2330,12 @@ export async function executeDeployment(args, gatheredConfig) {
   };
   // The environment is live again: drop the identity `destroy` recorded for
   // this name (if any) so it never outlives the rebuild it was kept for.
+  // A k8s-ha deploy that stamps deployedAt has reconverged a failed-over pair:
+  // drop the failover stamp, as the compose reconverge does, so "swapped"
+  // never hangs on the order of two clocks (the failover's and the deploy's
+  // machine). A reconverge that kept the retired fence keeps it.
+  if (tier === 'k8s-ha')
+    finishK8sReconvergeRecord(finalConfig.environments[environment], deployResult);
   saveProjectConfig(clearDestroyedRecord(finalConfig, environment));
   registerProject(projectConfig.projectName, process.cwd());
 

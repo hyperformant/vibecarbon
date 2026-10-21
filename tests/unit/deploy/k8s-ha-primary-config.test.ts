@@ -13,7 +13,7 @@ const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/ha/index.j
 describe('configurePrimaryForReplication', () => {
   it('is exported and owns the primary-side perf slices', () => {
     expect(src).toMatch(/export async function configurePrimaryForReplication/);
-    // the six phases live INSIDE the extracted function (appear after its
+    // the three phases live INSIDE the extracted function (appear after its
     // declaration and before setupReplication's declaration)
     const fnStart = src.indexOf('export async function configurePrimaryForReplication');
     const setupStart = src.indexOf('export async function setupReplication');
@@ -22,16 +22,16 @@ describe('configurePrimaryForReplication', () => {
       'deploy.ha.replication.primaryInit',
       'deploy.ha.replication.dbHostPort',
       'deploy.ha.replication.hba',
-      'deploy.ha.replication.primaryRestart',
-      'deploy.ha.replication.rolloutRestart',
-      'deploy.ha.replication.rolloutStatus',
     ]) {
       expect(body).toContain(slice);
     }
-    // The app is the only Deployment restarted after the primary restart;
-    // the schema-cache reload went with the chart's REST service.
-    expect(body).toContain('kubectl rollout restart deployment/app -n vibecarbon');
-    expect(body).not.toContain('reload schema');
+    // The serving primary is reloaded, never restarted, so nothing downstream
+    // of it needs a rollout (HA-correctness Task 8; the census is
+    // no-warm-primary-restart-census.test.ts).
+    for (const gone of ['primaryRestart', 'rolloutRestart', 'rolloutStatus', 'rollout restart']) {
+      expect(body).not.toContain(gone);
+    }
+    expect(body).toContain('pg_reload_conf');
   });
 
   it('setupReplication delegates and honors primaryConfigured', () => {

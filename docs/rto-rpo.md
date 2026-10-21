@@ -69,13 +69,47 @@ the command-side figure, plus failure-detection time (operator-dependent:
 failover is deliberately manual) and DNS propagation. The e2e cannot ethically
 measure detection time; it is named, not numbered.
 
-**Planned RPO = 0.** By construction (quiesce-before-promote plus the
-pre-promotion WAL catch-up gate in `src/failover.js`:
-`waitForStandbyCaughtUp` refuses to promote a standby that has not replayed
-the primary's final LSN) and evidenced per run: the e2e writes a marker row on
-the old primary immediately before failover and asserts it survived onto the
-promoted primary (`replication_failover_continuity`). The renderer **refuses
-to publish** figures from any run where that check is missing or failed.
+**Planned RPO = 0.** By construction, on both k8s-ha and compose-ha. Before
+the promote, the failover fences writes on the old primary at the database:
+`ALTER SYSTEM SET default_transaction_read_only = on`, a reload read back as
+applied, and every client session opened before the fence terminated and
+proven gone. Stopping the app tier first (the k8s quiesce, proven by its pods
+being gone; `docker stop` of the app and any n8n/metabase add-on on compose) is
+the outward signal; the database fence is the guarantee. Only then is the
+primary's WAL position final: the shared catch-up gate
+(`waitForStandbyCaughtUp` in `src/lib/deploy/replication.js`) captures it and
+refuses to promote a standby that has not replayed it, and the failover
+journal records it. A standby that is not streaming is reseeded from the fenced
+primary instead, and is proven free of the copied fence before it is promoted.
+A failover that aborts before anything could promote lifts the fence; after a
+completed failover the retired node stays read-only. The fence is recorded
+(`ha.writeFence`) before it is applied, so a run interrupted before its
+journal leaves a marker: the next `vibecarbon failover` or `vibecarbon deploy`
+lifts it, deploy also checks the primary takes writes after bring-up, and
+`vibecarbon status` shows a write-fenced primary. Evidenced per run: the e2e
+writes a marker row on the old primary immediately before failover and asserts
+it survived onto the promoted primary (`replication_failover_continuity`). The
+renderer **refuses to publish** figures from any run where that check is
+missing or failed.
+
+**When the old primary comes back.** The failover classifies itself from the
+standby's side: a standby still receiving fresh WAL (under 60 s old) means the
+primary is alive behind a partition, so failover refuses unless you pass
+`-force-unplanned`. Once the roles are swapped, the old primary is the
+*retired* side. It is fenced by markers it enforces itself:
+
+- every backup script refuses on it (`retired node: backups refused`, exit 1);
+- its database is read-only;
+- its writers are at zero (on k8s, after its Flux Kustomizations are suspended);
+- it runs with `WALG_ROLE=standby`.
+
+The fence is applied whenever the CLI reaches the node: by the failover itself
+if the node answers, otherwise by the next `vibecarbon status`, `failover` or
+`deploy`. **When a dead old primary comes back, run `vibecarbon status <env>`
+(or `vibecarbon deploy <env>`) right away**, so its fence lands before its
+nightly backup or WAL archiver can push. Its row in `status` shows its pg_wal
+size, which grows while archiving is refused. `vibecarbon deploy` rebuilds it as
+the new standby, and the fence comes off only once it streams.
 
 **Unplanned RPO = replication lag at failure.** Not a per-run e2e figure: it
 is whatever WAL was in flight when the primary died. It is evidenced two ways:
@@ -155,18 +189,35 @@ how long the runner's public resolvers took to converge. `verify-deploy` and the
 other verification steps are deliberately **not** pinned: that path is the
 customer cold path, and pinning it would hide an unpublished record.
 
-## Compose-HA after a failover (no automated failback)
+## Compose-HA after a failover
 
 `vibecarbon failover` on a `compose-ha` environment promotes the standby,
 repoints DNS, and records the swap by flipping the `role` field on the two
 `servers[]` entries. The Pulumi stacks keep their birth identity (the promoted
 node is still stack `<env>-standby`, the retired node still `<env>-primary`),
-and **compose-HA deploy resolves the pair from those stack names, not from the
-roles**. `vibecarbon deploy` therefore REFUSES a swapped compose-HA environment
-(`src/lib/deploy/compose/ha-role-swap.js`); running it would repoint DNS at the
-retired node and re-seed (wipe) the promoted primary's database. There is no
-bypass flag, and no automated failback: restoring HA symmetry needs role-aware
-compose-HA redeploy support, which does not exist yet.
+and so do the WireGuard tunnel addresses: the `-primary` stack's node keeps
+`10.99.0.1` whatever its role, because re-addressing would recreate the serving
+primary's database.
+
+To get back to two nodes, run `vibecarbon deploy <env>`. It rebuilds the
+retired node as the new standby, with no downtime. Deploy resolves the pair by
+role (`src/lib/deploy/compose/ha-role-swap.js`): the promoted node keeps
+serving as the primary and its database is never stopped, restarted or
+reseeded; the retired node's app tier is held at zero, and it is reseeded from
+the promoted node over the promoted node's own tunnel address. It refuses, with
+the cause, while a failover is still in flight (rerun `vibecarbon failover
+<env>` first), while the promoted node is still in recovery, and while DNS
+does not point at the promoted node yet. A deploy that fails part way leaves
+the environment swapped and degraded, and rerunning it resumes. Every later
+deploy of the pair stays role-aware, and skips the reseed while the standby
+streams.
+
+Until that deploy has verified streaming, a second `vibecarbon failover` is
+refused before any ssh call (the retired node is frozen at the failover and
+replicates nothing) and names `vibecarbon deploy <env>`. Once the deploy has
+reconverged the pair, failover works again in either direction.
+`vibecarbon restore` on a failed-over pair restores the primary and leaves the
+standby re-seed to `vibecarbon deploy <env>`, which rebuilds it by role.
 
 What the environment's DR posture actually is while it sits in that state:
 
@@ -183,7 +234,7 @@ What the environment's DR posture actually is while it sits in that state:
   failover that exited non-zero is not: treat the environment as unbacked-up
   until you have verified it.
 - `restore`, `scale` and `status` resolve the node by `role`, so they follow the
-  promotion correctly. `deploy` does not: it is the blocked path. `backup`
+  promotion correctly, and so does `deploy` (the reconverge above). `backup`
   resolves `servers[0]` (`serverIp: 'first'`), which post-failover is the
   **retired** node, so take on-demand backups against the promoted node until
   that path is role-aware. Do not assume a `backup create` against the retired
@@ -193,7 +244,7 @@ What the environment's DR posture actually is while it sits in that state:
   Check `WALG_ROLE` in `/opt/<project>/.env` on the retired node before running
   any manual backup there.
 
-The k8s-HA equivalent is different and is **not** blocked: `swapHaRoles` swaps
+The k8s-HA equivalent reconverges on its own model: `swapHaRoles` swaps
 `ha.primary` / `ha.standby` wholesale (each carries its own `.stack`), the
 orchestrator derives `haStacks` from them, and the reconverge deploy documented
 under "Recovery & Fail-back (k8s-ha)" in `docs/deploy-hetzner.md` is a green e2e

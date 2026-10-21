@@ -591,17 +591,21 @@ describe('_run-lifecycle.ts: verify-failover pin wiring', () => {
     expect(body).toMatch(/withResolutionPin\(verifyPin,\s*\(\)\s*=>\s*executeStep\(/);
   });
 
-  it('pins ONLY the record-flipping steps: compose-ha verify-failover + compose verify-scale', () => {
+  it('pins ONLY the record-flipping steps: compose-ha verify-failover/verify-failback + compose verify-scale', () => {
     // verify-deploy stays on the public resolver deliberately: that is the
     // customer cold path, and pinning it would hide an unpublished record.
     // Since 2026-08-17 (run 32013980356) verify-scale carries the SAME pin
     // for the same reason — a blue-green compose scale rewrites the record
     // and destroys the old servers (see verify-scale-dns-pin.test.ts).
     expect(body).toMatch(
-      /stepName === 'verify-failover' && config\.mode === 'compose-ha'[\s\S]{0,400}verifyPin = \{/,
+      /isPostFailoverVerify\(stepName\) && config\.mode === 'compose-ha'[\s\S]{0,400}verifyPin = \{/,
     );
     expect(body).toMatch(
       /stepName === 'verify-scale' && config\.mode\.startsWith\('compose'\)[\s\S]{0,700}verifyPin = \{/,
+    );
+    // compose-ha's failback flips the records back, so its verify step is pinned too.
+    expect(LIFECYCLE_SRC).toMatch(
+      /function isPostFailoverVerify\(step: StepName\): boolean \{\s*return step === 'verify-failover' \|\| step === 'verify-failback';/,
     );
     expect(body).toContain('resolveHaDbIps(config.projectDir, config.envPrefix)');
     // And nothing else computes a pin: exactly the two gated assignments.

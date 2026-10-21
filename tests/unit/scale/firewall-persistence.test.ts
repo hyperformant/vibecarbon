@@ -52,10 +52,12 @@ describe('compose firewallId survives the whole export -> persist -> read chain'
     expect(read('src/lib/deploy/orchestrator.js')).toMatch(
       /deployResult\.firewallId\s*&&\s*\{\s*firewallId:\s*deployResult\.firewallId\s*\}/,
     );
-    // compose-ha: one entry per node, each with its own stack's firewall.
+    // compose-ha: one entry per node (serverEntry, built for the role primary
+    // and the role standby), each with its own stack's firewall.
     const ha = read('src/lib/deploy/effects/compose-ha.js');
-    expect(ha).toMatch(/primary\.firewallId\s*&&\s*\{\s*firewallId:\s*primary\.firewallId\s*\}/);
-    expect(ha).toMatch(/standby\.firewallId\s*&&\s*\{\s*firewallId:\s*standby\.firewallId\s*\}/);
+    expect(ha).toMatch(/node\.firewallId\s*&&\s*\{\s*firewallId:\s*node\.firewallId\s*\}/);
+    expect(ha).toMatch(/serverEntry\(primary,\s*'primary'/);
+    expect(ha).toMatch(/serverEntry\(standby,\s*'standby'/);
   });
 
   it('scale reads it off the server entry, never off envConfig (nothing writes that)', () => {

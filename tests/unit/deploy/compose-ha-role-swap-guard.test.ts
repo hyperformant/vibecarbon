@@ -4,24 +4,24 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // A compose-HA failover persists the swap by flipping the `role` FIELD on
 // servers[]: array order, entry names, and the Pulumi stack names are all
-// untouched. `vibecarbon deploy` resolves the pair from the STACK names
-// (`${env}-primary` / `${env}-standby`) and never reads the role field, so a
-// redeploy of a swapped environment re-points DNS at the retired node and runs
-// configureStandbyReplication — destructive by design (wipes PGDATA and
-// re-basebackups) — against the PROMOTED primary holding every post-failover
-// write. Until role-aware compose-HA redeploy exists, deploy must REFUSE.
+// untouched. `vibecarbon deploy` then RECONVERGES by role (Task 3b): the
+// promoted node stays the primary and the retired node is rebuilt as the
+// standby (compose-ha-reconverge.test.ts covers the effects). Until that
+// deploy verified streaming, failover refuses the swapped env.
 //
-// These tests pin the detector's semantics, its wiring position (ahead of every
-// infra mutation), and the failover recovery text that used to send operators
-// straight into this path.
+// These tests pin the detector's semantics, the reconverge preconditions'
+// position (ahead of every infra mutation), and the recovery text.
 
 // Stop executeDeployment at the statement that follows the guard. The no-fire
 // cases then prove two things at once: the guard let the deploy through, and it
 // sits ahead of even the host-tooling preflight — hence ahead of the operator
 // firewall patch, the S3 bucket creation, the image push and the DNS warm-up.
+// The reconverge readiness reads run after the operator-IP check, so those
+// cases let preflight through and stop at the StateTracker (the next mutation).
+const stops = vi.hoisted(() => ({ atPreflight: true }));
 vi.mock('../../../src/lib/deploy/preflight.js', () => ({
   checkDeployPrerequisites: () => {
-    throw new Error('STOP_AFTER_ROLE_SWAP_GUARD');
+    if (stops.atPreflight) throw new Error('STOP_AFTER_ROLE_SWAP_GUARD');
   },
   // Evaluated as checkDeployPrerequisites's `env` argument (the file-aware
   // `[fileEnv, shellEnv]` pair) — inert here, the call above is the stop.
@@ -42,9 +42,52 @@ vi.mock('../../../src/lib/deploy/state.js', () => ({
   StateTracker: class {
     constructor(...args: unknown[]) {
       StateTracker(...args);
+      throw new Error('STOP_AT_STATE_TRACKER');
     }
   },
 }));
+
+// The reconverge preconditions read each node's replica state and the apex A
+// records before any mutation; answered here from a per-ip model.
+const replica = vi.hoisted(() => ({
+  inRecovery: {} as Record<string, boolean | null>,
+  dns: [] as string[],
+}));
+vi.mock('../../../src/lib/deploy/failover-guard.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    readReplicaState: async ({ exec }: { exec: (sql: string) => Promise<string> }) => {
+      const ip = await exec('ip');
+      const inRecovery = replica.inRecovery[ip] ?? null;
+      return {
+        inRecovery,
+        systemIdentifier: inRecovery === null ? null : '7311',
+        replayLsn: null,
+        receiverStatus: null,
+        lastMsgAgeS: null,
+      };
+    },
+  };
+});
+vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, composePsqlRunner: (ip: string) => async () => ip };
+});
+vi.mock('../../../src/lib/deploy/public-dns-lookup.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, resolvePublicA: async () => replica.dns };
+});
+// The retirement fence reaches the retired node over ssh (retired-fence.test.ts
+// drives it); here it only has to run, in order, ahead of the readiness reads.
+const reconcileRetiredFence = vi.fn(async () => ({ fenced: [], unreachable: [] }));
+vi.mock('../../../src/lib/deploy/retired-fence.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    reconcileRetiredFence: (...a: unknown[]) => reconcileRetiredFence(...(a as [])),
+  };
+});
 
 const {
   assertNoComposeHaRoleSwap,
@@ -300,41 +343,30 @@ describe('compose-HA role-swap detector — tier census', () => {
   });
 });
 
-describe('compose-HA role-swap refusal message', () => {
-  const message = (() => {
+describe('compose-HA failover refusal on a swapped env (R4 until the reconverge)', () => {
+  const refusal = (envConfig: Record<string, unknown>) => {
     try {
-      assertNoComposeHaRoleSwap({
-        projectName: PROJECT,
-        environment: ENV,
-        envConfig: swappedComposeHa(),
-      });
+      assertNoComposeHaRoleSwap({ projectName: PROJECT, environment: ENV, envConfig });
       return '';
     } catch (err) {
       return (err as Error).message;
     }
-  })();
+  };
+  const message = refusal(swappedComposeHa());
 
-  it('names the failover swap and the environment', () => {
-    expect(message).toMatch(/failover has swapped/i);
+  it('names the environment, both nodes and the stack each was born as', () => {
     expect(message).toContain(`"${ENV}"`);
-  });
-
-  it('names both nodes with the stack each was provisioned as', () => {
     expect(message).toContain('10.0.0.2');
     expect(message).toContain('10.0.0.1');
     expect(message).toContain(`${ENV}-standby`);
     expect(message).toContain(`${ENV}-primary`);
   });
 
-  it('states the two destructive consequences: DNS re-point and the wiping re-seed', () => {
-    expect(message).toMatch(/DNS/);
-    expect(message).toMatch(/WIPE/);
-    expect(message).toMatch(/re-seed/i);
-  });
-
-  it('says the path is blocked pending role-aware redeploy and points at the runbook', () => {
-    expect(message).toMatch(/role-aware/i);
-    expect(message).toContain('docs/rto-rpo.md');
+  it('names vibecarbon deploy as the way back, never destroy + restore', () => {
+    expect(message).toContain(`vibecarbon deploy ${ENV}`);
+    expect(message).not.toContain('vibecarbon destroy');
+    expect(message).not.toContain('vibecarbon restore');
+    expect(message).not.toMatch(/—/);
   });
 
   it('offers no bypass flag', () => {
@@ -342,13 +374,12 @@ describe('compose-HA role-swap refusal message', () => {
   });
 
   it('stays silent on a symmetric config', () => {
-    expect(() =>
-      assertNoComposeHaRoleSwap({
-        projectName: PROJECT,
-        environment: ENV,
-        envConfig: healthyComposeHa(),
-      }),
-    ).not.toThrow();
+    expect(refusal(healthyComposeHa())).toBe('');
+  });
+
+  it('stays silent once a deploy reconverged the swapped pair (lastFailover cleared)', () => {
+    const { lastFailover: _lf, ...reconverged } = swappedComposeHa();
+    expect(refusal(reconverged)).toBe('');
   });
 });
 
@@ -357,22 +388,72 @@ describe('deploy path wiring', () => {
     projectConfig: { projectName: PROJECT, environments: { [ENV]: envConfig } },
     envConfig,
     environment: ENV,
+    domain: 'prod.example.com',
     config: { environment: ENV, deployMode: envConfig.deployMode, ha: envConfig.ha },
   });
 
   beforeEach(() => {
     ensureOperatorIpAccess.mockClear();
     StateTracker.mockClear();
+    reconcileRetiredFence.mockClear();
+    stops.atPreflight = true;
+    replica.inRecovery = { '10.0.0.2': false, '10.0.0.1': false };
+    replica.dns = ['10.0.0.2'];
   });
 
-  it('refuses a swapped compose-HA environment before any infra mutation', async () => {
+  it('reconverges a swapped compose-HA environment instead of refusing it', async () => {
+    stops.atPreflight = false;
     await expect(executeDeployment({}, gathered(swappedComposeHa()))).rejects.toThrow(
-      /failover has swapped/i,
+      'STOP_AT_STATE_TRACKER',
     );
-    // Nothing touched: the live-firewall patch and the deploy-state write are
-    // the first two mutations past this point, and both are still untouched.
+    // The retired node is fenced first, once SSH is let in.
+    expect(reconcileRetiredFence).toHaveBeenCalledTimes(1);
+    expect(reconcileRetiredFence.mock.calls[0]?.[0]).toMatchObject({
+      environment: 'prod',
+      tier: 'compose-ha',
+    });
+  });
+
+  // The readiness reads follow the operator-IP check (an operator whose IP
+  // changed must be let back in before the first SSH read), and precede every
+  // later mutation: the StateTracker and everything after it.
+  it('refuses after the operator-IP check, before any later mutation, while the promoted node is in recovery', async () => {
+    stops.atPreflight = false;
+    replica.inRecovery['10.0.0.2'] = true;
+    await expect(executeDeployment({}, gathered(swappedComposeHa()))).rejects.toThrow(
+      /still in recovery.*vibecarbon failover prod/,
+    );
+    expect(ensureOperatorIpAccess).toHaveBeenCalledTimes(1);
+    expect(StateTracker).not.toHaveBeenCalled();
+  });
+
+  it('refuses after the operator-IP check, before any later mutation, while DNS is elsewhere', async () => {
+    stops.atPreflight = false;
+    replica.dns = ['10.0.0.1'];
+    await expect(executeDeployment({}, gathered(swappedComposeHa()))).rejects.toThrow(
+      /not the promoted primary 10\.0\.0\.2/,
+    );
+    expect(ensureOperatorIpAccess).toHaveBeenCalledTimes(1);
+    expect(StateTracker).not.toHaveBeenCalled();
+  });
+
+  it('refuses before any infra mutation while a failover journal is set', async () => {
+    const env = { ...swappedComposeHa(), ha: { enabled: true, failoverInFlight: { id: 'j' } } };
+    await expect(executeDeployment({}, gathered(env))).rejects.toThrow(/vibecarbon failover prod/);
     expect(ensureOperatorIpAccess).not.toHaveBeenCalled();
     expect(StateTracker).not.toHaveBeenCalled();
+    expect(reconcileRetiredFence).not.toHaveBeenCalled();
+  });
+
+  it('refuses a k8s-HA deploy too while a failover journal is set (its final save would drop it)', async () => {
+    const env = {
+      ...HEALTHY_BY_TIER['k8s-ha'],
+      ha: { enabled: true, failoverInFlight: { id: 'j', target: 'standby' } },
+    };
+    await expect(executeDeployment({}, gathered(env))).rejects.toThrow(
+      /a failover is still in flight.*run vibecarbon failover prod to finish it/,
+    );
+    expect(ensureOperatorIpAccess).not.toHaveBeenCalled();
   });
 
   it('lets a symmetric compose-HA environment through to the rest of the deploy', async () => {
@@ -401,14 +482,11 @@ describe('failover recovery instructions', () => {
     expect(lines.join('\n')).toContain('10.0.0.2');
   });
 
-  it('tells the operator NOT to redeploy, and why', () => {
+  it('names vibecarbon deploy as the rebuild of the retired node', () => {
     const text = lines.join('\n');
-    expect(text).toMatch(/do not run .*vibecarbon deploy/i);
-    expect(text).toMatch(/WIPE/);
-  });
-
-  it('points at the same runbook the refusal does', () => {
-    expect(lines.join('\n')).toContain('docs/rto-rpo.md');
+    expect(text).toContain(`vibecarbon deploy ${ENV}`);
+    expect(text).toMatch(/rebuilds 10\.0\.0\.1 as the new standby/);
+    expect(text).not.toMatch(/do not run/i);
   });
 
   it('is what failoverComposeHA prints — the old "Redeploy to update configuration" is gone', () => {
@@ -424,7 +502,7 @@ describe('failover recovery instructions', () => {
   });
 });
 
-describe('standby resync hint (restore.js post-restore re-seed failure)', () => {
+describe('standby resync hint (restore.js post-restore re-seed)', () => {
   const hint = (envConfig: Record<string, unknown>) =>
     composeHaStandbyResyncHint({ projectName: PROJECT, environment: ENV, envConfig });
 
@@ -434,11 +512,15 @@ describe('standby resync hint (restore.js post-restore re-seed failure)', () => 
     );
   });
 
-  it('says deploy cannot resync a swapped environment, and why', () => {
+  it('names deploy as the role-aware rebuild on a swapped environment', () => {
     const text = hint(swappedComposeHa());
-    expect(text).toMatch(/cannot resync/i);
-    expect(text).toMatch(/failover has swapped/i);
-    expect(text).toContain('docs/rto-rpo.md');
+    expect(text).toContain(`vibecarbon deploy ${ENV}`);
+    expect(text).toMatch(/rebuilds the standby/);
+  });
+
+  it('names failover first while a failover is in flight', () => {
+    const text = hint({ ...swappedComposeHa(), ha: { failoverInFlight: { id: 'j' } } });
+    expect(text).toContain(`vibecarbon failover ${ENV}`);
   });
 
   it('is the hint restore.js actually renders', () => {

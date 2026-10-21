@@ -31,7 +31,12 @@ describe('failover prod confirm', () => {
   });
 
   it('invokes the prod gate OUTSIDE any `!parsed.yes` soft-confirm block', () => {
-    const confirmIdx = failoverSrc.indexOf('await confirmProdOrExit(envName');
+    // The failover gate, after the destructive check (the -abort branch has
+    // its own call earlier, pinned in failover-abort.test.ts).
+    const confirmIdx = failoverSrc.indexOf(
+      'await confirmProdOrExit(envName',
+      failoverSrc.indexOf('const isDestructiveFailover'),
+    );
     expect(confirmIdx).toBeGreaterThan(-1);
 
     // The gate is guarded only by the `!parsed.dryRun && isDestructiveFailover`

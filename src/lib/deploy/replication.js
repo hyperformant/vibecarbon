@@ -20,6 +20,7 @@
 import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
 import { DB_PVC, DB_STATEFULSET } from './db-workload.js';
+import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
 import { REPL_GATEWAY_PORT } from './wireguard.js';
 
 /**
@@ -41,15 +42,21 @@ export const DB_STS_BOOT_TIMEOUT_S = 600;
 // filesystem so the node-side promotion is an atomic same-fs rename.
 const RESEED_STAGING_DIR = '/var/lib/postgresql/data/.reseed_staging';
 
-// The physical replication slot name is a project-wide constant — the primary
-// creates it, the standby's pg_basebackup -S references it, and streaming uses
-// it so the primary holds WAL for this standby specifically.
-const REPLICATION_SLOT = 'vibecarbon_standby_slot';
+/**
+ * The planned-failover write fence: a server-wide default set with ALTER
+ * SYSTEM (postgresql.auto.conf). Never ALTER ROLE / ALTER DATABASE SET: those
+ * are catalog writes, so they replicate to the standby and survive its promote.
+ * ALTER SYSTEM is a file on the node, so the stream never carries it.
+ */
+export const WRITE_FENCE_SETTING = 'default_transaction_read_only';
 
 // The single replication port for BOTH HA modes. compose publishes db:5432 →
 // host:5433 (over WireGuard only); k8s uses a hostPort 5433 → container
 // 5432. One port keeps primary_conninfo / pg_basebackup byte-identical.
 export const REPL_PORT = 5433;
+
+/** The cluster identity pg_basebackup copies and initdb mints fresh. */
+export const SYSTEM_IDENTIFIER_SQL = 'SELECT system_identifier FROM pg_control_system()';
 
 /**
  * The `primary_conninfo` the standby uses to stream from the primary. The
@@ -416,6 +423,11 @@ echo "primary_slot_name = '${slotName}'" >> ${stagingDir}/postgresql.auto.conf
 # LAST, so pinning it here wins over any image config on both staging paths
 # (k8s + compose). Harmless after promotion (ignored outside recovery).
 echo "hot_standby = on" >> ${stagingDir}/postgresql.auto.conf
+# A planned failover fences the primary with ALTER SYSTEM SET
+# default_transaction_read_only, which lives in postgresql.auto.conf, and
+# pg_basebackup copies that file: a standby seeded from a fenced primary would
+# come up read-only once promoted. The staged copy never keeps it.
+sed -i '/^[[:space:]]*${WRITE_FENCE_SETTING}[[:space:]]*=/d' ${stagingDir}/postgresql.auto.conf
 ${conninfoBlock}chown -R postgres:postgres ${stagingDir}
 ${swapBlock}`.trim();
 }
@@ -1083,6 +1095,40 @@ export async function verifyStreaming({
 }
 
 /**
+ * The primary's view of its standby: the best `state` in pg_stat_replication
+ * (`streaming` sorts first), or no row when nothing is connected.
+ */
+export const STREAMING_STATE_SQL =
+  "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1";
+
+/**
+ * Is the standby already streaming from the current primary? Asks the primary,
+ * so a streaming answer proves the connection is to THIS primary. The probe a
+ * deploy runs before it reseeds (a reseed wipes the standby's PGDATA), shared
+ * by both HA tiers; each tier supplies its transport as `exec`.
+ *
+ * @param {object} opts
+ * @param {(sql: string) => Promise<string|false|undefined>} opts.exec
+ *   runs one SQL statement on the primary and returns its tuples-only stdout;
+ *   a failed exec may throw or answer false (read as nothing)
+ * @param {number} [opts.attempts]
+ * @param {number[]} [opts.delaysMs]
+ * @param {(ms: number) => Promise<void>} [opts.sleep]
+ * @returns {Promise<{streaming: boolean, lastState: string}>}
+ */
+export function probeStreaming({ exec, attempts = 3, delaysMs = [2000], sleep }) {
+  return verifyStreaming({
+    readState: async () => {
+      const out = await exec(STREAMING_STATE_SQL);
+      return typeof out === 'string' ? out.trim() : '';
+    },
+    attempts,
+    delaysMs,
+    ...(sleep ? { sleep } : {}),
+  });
+}
+
+/**
  * Finding #1 — the hard-gate policy, shared by the compose-HA and k8s-HA deploy
  * paths so they behave identically. Given the verified streaming result:
  *   - streaming            → returns { degraded: false } (deploy proceeds).
@@ -1169,8 +1215,9 @@ export async function getReplPasswordFromSecret(ip, sshKeyPath) {
  * standby connects and immediately errors `replication slot "…" does not exist`,
  * so it never streams. (The basebackup itself no longer needs the slot — it uses
  * a temporary slot now — but streaming does.) Recreate it idempotently BEFORE the
- * re-seed — the same IF-NOT-EXISTS DO-block primary-init.sql (and the compose-HA
- * re-seed) uses, so all three sites create the identical slot.
+ * re-seed with ensureReplicationSlotSql, the one builder primary-init.sql and the
+ * compose-HA sites use too: it also drops a `lost` slot (WAL past the
+ * max_slot_wal_keep_size cap), which could never stream again.
  *
  * Failover does NOT need this: its re-seed sources from a live, untouched
  * primary whose slot survives.
@@ -1182,17 +1229,7 @@ export async function getReplPasswordFromSecret(ip, sshKeyPath) {
  */
 export async function ensureReplicationSlot(primaryIp, sshKeyPath, slotName = REPLICATION_SLOT) {
   const pod = await getPostgresPod(primaryIp, sshKeyPath);
-  const sql = `
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_replication_slots WHERE slot_name = '${slotName}'
-  ) THEN
-    PERFORM pg_create_physical_replication_slot('${slotName}');
-  END IF;
-END
-$$;
-`;
+  const sql = `${ensureReplicationSlotSql(slotName)}\n`;
   await sshKubectl(
     primaryIp,
     sshKeyPath,
@@ -1283,6 +1320,9 @@ $$;
  *   Hetzner-shaped fallback here would make the re-seed's reachability probe
  *   fail closed into 'skipped' on other providers — promotion without
  *   re-seed.
+ * @param {(systemIdentifier: string) => (void|Promise<void>)} [opts.onSeeded] - called
+ *   with the reseeded standby's system identifier; callers record it as
+ *   envConfig.ha.systemIdentifier (failover-guard recordSystemIdentifier).
  * @returns {Promise<'reseeded'|'skipped'>} 'reseeded' on success, 'skipped' when
  *   the primary is unreachable. Throws on password-missing or a real failure —
  *   NEVER silently returns as if skipped.
@@ -1290,7 +1330,7 @@ $$;
 export async function reseedStandbyFromPrimary(
   standbyIp,
   sshKeyPath,
-  { standbyDbIp, standbyDbPrivateIp, detachSettleMs = 25_000 } = {},
+  { standbyDbIp, standbyDbPrivateIp, detachSettleMs = 25_000, onSeeded } = {},
 ) {
   if (!standbyDbPrivateIp) {
     // Same precondition class as the standbyDbIp check below: a
@@ -1319,7 +1359,7 @@ export async function reseedStandbyFromPrimary(
     throw new Error(
       're-seed aborted: REPL_PASSWORD not found in the vibecarbon-infra-secrets Secret. ' +
         'Cannot re-seed the standby from the primary, refusing to act on a ' +
-        'possibly-stale standby. Verify the standby cluster was deployed with `vibecarbon deploy --ha`.',
+        'possibly-stale standby. Verify the standby cluster was deployed with `vibecarbon deploy -mode k8s-ha`.',
     );
   }
 
@@ -1646,42 +1686,12 @@ export async function reseedStandbyFromPrimary(
         'the primary (check the standby db logs).',
     );
   }
-  return 'reseeded';
-}
-
-/**
- * Promote the standby database to primary (k8s transport) and confirm it exited
- * recovery. Returns true only when pg_is_in_recovery() flips to 'f' — the caller
- * MUST abort the failover on false rather than flip DNS onto a read-only standby.
- *
- * @param {string} standbyIp
- * @param {string} sshKeyPath
- * @returns {Promise<boolean>}
- */
-export async function promoteStandby(standbyIp, sshKeyPath) {
-  const pod = await getPostgresPod(standbyIp, sshKeyPath);
-
-  // Promote PostgreSQL on standby. pg_ctl promote may return non-zero even on
-  // success, so we confirm via the pg_is_in_recovery() poll below.
-  try {
-    await sshKubectl(standbyIp, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'su',
-      'postgres',
-      '-c',
-      'pg_ctl promote -D /var/lib/postgresql/data',
-    ]);
-  } catch {
-    // pg_ctl promote may return non-zero even on success — confirm via poll.
-  }
-
-  for (let i = 0; i < 30; i++) {
-    try {
-      const result = await sshKubectl(standbyIp, sshKeyPath, [
+  // Record what was seeded: failover's replica proof (R1) compares the
+  // standby's system identifier against this value. Read on the standby, which
+  // pg_basebackup just gave the primary's identity.
+  if (onSeeded) {
+    const sysid = (
+      await sshKubectl(standbyIp, sshKeyPath, [
         'exec',
         '-n',
         'vibecarbon',
@@ -1691,16 +1701,411 @@ export async function promoteStandby(standbyIp, sshKeyPath) {
         '-U',
         'postgres',
         '-tAc',
-        'SELECT pg_is_in_recovery()',
-      ]);
-      if (result.trim() === 'f') return true;
-    } catch {
-      // Retry
+        SYSTEM_IDENTIFIER_SQL,
+      ])
+    ).trim();
+    if (!/^\d+$/.test(sysid)) {
+      throw new Error(
+        `standby re-seed finished but its system identifier could not be read ` +
+          `(got: ${sysid.slice(0, 80) || 'empty'}), so the seed cannot be recorded.`,
+      );
     }
-    await new Promise((r) => setTimeout(r, 2000));
+    await onSeeded(sysid);
+  }
+  return 'reseeded';
+}
+
+/**
+ * Wall-clock budget for a promotion to show up as "out of recovery". A deadline,
+ * not a poll count: the verdict below is what keeps failover correct, and this
+ * number only bounds RTO (R3, M3).
+ */
+export const PROMOTE_DEADLINE_MS = 120_000;
+
+/**
+ * A psql runner for the k8s db pod: `exec(sql, { readWrite }) -> Promise<string>`,
+ * the shape failover-guard's readReplicaState takes. `readWrite` opens the
+ * session read-write on a write-fenced server (the un-fence).
+ *
+ * @param {string} ip - cluster master IP (kubectl target)
+ * @param {string} sshKeyPath
+ * @returns {(sql: string) => Promise<string>}
+ */
+export function k8sPsqlRunner(ip, sshKeyPath) {
+  return async (sql, { readWrite = false } = {}) => {
+    const pod = await getPostgresPod(ip, sshKeyPath);
+    const out = await sshKubectl(ip, sshKeyPath, [
+      'exec',
+      '-n',
+      'vibecarbon',
+      pod,
+      '--',
+      ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
+      'psql',
+      '-U',
+      'postgres',
+      '-tAc',
+      sql,
+    ]);
+    return typeof out === 'string' ? out : '';
+  };
+}
+
+/**
+ * How long a planned failover waits for a streaming standby to replay the
+ * fenced primary's final WAL. A deadline, not a poll count (R3): the poll
+ * interval only paces the reads.
+ */
+export const CATCH_UP_DEADLINE_MS = 60_000;
+
+const LSN_RE = /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/;
+
+/** How long the write fence (or its removal) may take to read back applied. */
+export const WRITE_FENCE_DEADLINE_MS = 15_000;
+
+/**
+ * The backends a write fence terminates: client sessions, plus pg_cron job
+ * workers when cron.use_background_workers is on (with it off, pg_cron jobs
+ * already run as client backends). Never a walsender, checkpointer, bgwriter,
+ * walwriter, autovacuum launcher, archiver, startup, the logical replication
+ * launcher, the pg_cron launcher, or the fencing session itself. OFFSET 0 keeps
+ * the planner from evaluating pg_terminate_backend before the filter.
+ */
+export const TERMINATE_CLIENT_BACKENDS_SQL =
+  "SELECT coalesce(string_agg(pid::text || '=' || ok::text, ','), '') FROM (" +
+  'SELECT pid, pg_terminate_backend(pid, 5000) AS ok FROM (' +
+  'SELECT pid FROM pg_stat_activity WHERE pid <> pg_backend_pid() ' +
+  "AND backend_type IN ('client backend', 'pg_cron', 'pg_cron worker') OFFSET 0) c) t";
+
+const readSetting = async (exec) => {
+  const out = await exec(`SELECT current_setting('${WRITE_FENCE_SETTING}')`);
+  return (typeof out === 'string' ? out : '').trim();
+};
+
+/** Poll a fresh session's view of the fence setting until it reads `want`, or the deadline. */
+async function waitForSetting(exec, want, { deadlineMs, pollMs, sleep, now }) {
+  const deadline = now() + deadlineMs;
+  let last = '';
+  for (;;) {
+    try {
+      last = await readSetting(exec);
+    } catch (err) {
+      last = String(err?.message ?? err).split('\n')[0];
+    }
+    if (last === want) return { ok: true, last };
+    if (now() >= deadline) return { ok: false, last };
+    await sleep(pollMs);
+  }
+}
+
+/**
+ * Fence writes on the old primary at the database, the guarantee behind a
+ * planned failover's RPO 0 (stopping the app is only the outward signal):
+ *   1. ALTER SYSTEM SET default_transaction_read_only = on, pg_reload_conf();
+ *   2. read it back as `on` from a fresh session (the reload is a signal);
+ *   3. terminate every client backend (and pg_cron job worker), waiting up to
+ *      5 s each, so no session opened before the fence keeps a read-write
+ *      transaction; then prove none of them is left.
+ * Only after this is the primary's WAL position stable, so the caller captures
+ * the LSN next. Throws a one-line cause when any step cannot be proven.
+ *
+ * @param {object} opts
+ * @param {(sql: string) => Promise<string>} opts.exec - psql on the old primary
+ * @returns {Promise<{ terminated: number }>}
+ */
+export async function fenceDatabaseWrites({
+  exec,
+  deadlineMs = WRITE_FENCE_DEADLINE_MS,
+  pollMs = 500,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = Date.now,
+} = {}) {
+  if (typeof exec !== 'function') throw new TypeError('fenceDatabaseWrites: exec is required');
+  // Separate statements: ALTER SYSTEM cannot run inside a transaction block,
+  // and one multi-statement -c string is one implicit transaction.
+  await exec(`ALTER SYSTEM SET ${WRITE_FENCE_SETTING} = on`);
+  await exec('SELECT pg_reload_conf()');
+  const applied = await waitForSetting(exec, 'on', { deadlineMs, pollMs, sleep, now });
+  if (!applied.ok) {
+    throw new Error(
+      `write fence: the old primary did not read back ${WRITE_FENCE_SETTING} = on ` +
+        `(last read: ${applied.last || 'none'}), so its writes are not fenced`,
+    );
   }
 
-  return false;
+  const out = await exec(TERMINATE_CLIENT_BACKENDS_SQL);
+  const text = (typeof out === 'string' ? out : '').trim();
+  if (text !== '' && !/^\d+=[tf](,\d+=[tf])*$/.test(text)) {
+    throw new Error(
+      `write fence: could not terminate the old primary's client sessions ` +
+        `(got: ${text.slice(0, 80)})`,
+    );
+  }
+  const pids = text === '' ? [] : text.split(',').map((x) => x.split('=')[0]);
+  if (pids.length > 0) {
+    const left = await exec(
+      `SELECT count(*) FROM pg_stat_activity WHERE pid IN (${pids.join(', ')})`,
+    );
+    if ((typeof left === 'string' ? left : '').trim() !== '0') {
+      throw new Error(
+        `write fence: ${String(left).trim() || 'an unknown number of'} client session(s) on ` +
+          `the old primary outlived pg_terminate_backend, so its writes are not fenced`,
+      );
+    }
+  }
+  return { terminated: pids.length };
+}
+
+/**
+ * Lift the write fence (an aborted failover that promoted nothing): ALTER
+ * SYSTEM RESET default_transaction_read_only, pg_reload_conf(), read back off.
+ * Never throws: the caller reports the manual fix.
+ *
+ * @returns {Promise<boolean>} true when it reads back off
+ */
+export async function unfenceDatabaseWrites({
+  exec,
+  deadlineMs = WRITE_FENCE_DEADLINE_MS,
+  pollMs = 500,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = Date.now,
+} = {}) {
+  try {
+    // readWrite: the fenced server opens every session read-only, and the
+    // docs list "all ALTER commands" as refused in a read-only transaction.
+    await exec(`ALTER SYSTEM RESET ${WRITE_FENCE_SETTING}`, { readWrite: true });
+    await exec('SELECT pg_reload_conf()');
+    return (await waitForSetting(exec, 'off', { deadlineMs, pollMs, sleep, now })).ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The manual un-fence, for a message when unfenceDatabaseWrites cannot prove it.
+ * psql -c, one statement each (ALTER SYSTEM refuses a transaction block). Only
+ * double quotes, so it nests inside the single-quoted ssh command it is shown in.
+ */
+export const UNFENCE_SQL_HINT =
+  `env PGOPTIONS="-c ${WRITE_FENCE_SETTING}=off" psql -U postgres ` +
+  `-c "ALTER SYSTEM RESET ${WRITE_FENCE_SETTING}" -c "SELECT pg_reload_conf()"`;
+
+/** PGOPTIONS for a session that must write on a fenced server (the un-fence). */
+export const READ_WRITE_PGOPTIONS = `-c ${WRITE_FENCE_SETTING}=off`;
+
+/**
+ * A reseeded standby must not carry the fence into its promote: a basebackup
+ * of a fenced primary copies postgresql.auto.conf, and the staged-reseed script
+ * strips the setting (buildStagedBasebackupScript). This proves it from the
+ * files themselves (pg_file_settings reads them, in recovery too). Throws.
+ *
+ * @param {object} opts
+ * @param {(sql: string) => Promise<string>} opts.exec - psql on the standby
+ */
+export async function assertStandbyNotWriteFenced({ exec }) {
+  const out = await exec(
+    `SELECT count(*) FROM pg_file_settings WHERE name = '${WRITE_FENCE_SETTING}'`,
+  );
+  const n = (typeof out === 'string' ? out : '').trim();
+  if (n !== '0') {
+    throw new Error(
+      n === ''
+        ? `could not read the reseeded standby's settings files, so it may carry the ` +
+            `old primary's write fence and would promote read-only`
+        : `the reseeded standby carries the old primary's write fence ` +
+            `(${WRITE_FENCE_SETTING} in its settings files) and would promote read-only`,
+    );
+  }
+}
+
+/**
+ * PLANNED-failover zero-data-loss gate, for any transport (R1d). Runs after the
+ * old primary is fenced (no writer can commit) and before the promote.
+ *
+ * Captures the primary's `pg_current_wal_lsn()` once, which is stable for
+ * customer writes once the primary is fenced, then reads the standby's replay
+ * lag behind it until that lag is zero. Streaming is not caught up: the WAL
+ * written just before the fence may still be in flight, and promoting then
+ * silently drops it.
+ *
+ * - A streaming standby that reaches the LSN: `{ caughtUp: true, lagBytes: 0 }`.
+ * - A streaming standby still behind at the deadline: THROWS, so the caller's
+ *   abort path runs and a lagging standby is never promoted.
+ * - A standby that is not streaming: `{ caughtUp: false, lagBytes: null }`. It
+ *   cannot catch up, so the caller must reseed it from the fenced primary (a
+ *   full copy) or refuse. It is never read as "the gate does not apply".
+ *
+ * `primaryLsn` is returned in every case: it is the failover journal's
+ * `primaryLsn` (R2).
+ *
+ * @param {object} opts
+ * @param {(sql: string) => Promise<string>} opts.primaryExec - psql on the primary
+ * @param {(sql: string) => Promise<string>} opts.standbyExec - psql on the standby
+ * @param {() => Promise<boolean>} opts.isStreaming - the standby's walreceiver streams
+ * @param {number} [opts.deadlineMs]
+ * @param {number} [opts.pollMs]
+ * @param {(ms: number) => Promise<void>} [opts.sleep]
+ * @param {() => number} [opts.now]
+ * @returns {Promise<{ caughtUp: boolean, lagBytes: number|null, primaryLsn: string }>}
+ */
+export async function waitForStandbyCaughtUp({
+  primaryExec,
+  standbyExec,
+  isStreaming,
+  deadlineMs = CATCH_UP_DEADLINE_MS,
+  pollMs = 2000,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = Date.now,
+} = {}) {
+  for (const [name, fn] of Object.entries({ primaryExec, standbyExec, isStreaming })) {
+    if (typeof fn !== 'function') {
+      throw new TypeError(`waitForStandbyCaughtUp: ${name} is required`);
+    }
+  }
+  const deadline = now() + deadlineMs;
+
+  const raw = await primaryExec('SELECT pg_current_wal_lsn()');
+  const primaryLsn = (typeof raw === 'string' ? raw : '').trim();
+  if (!LSN_RE.test(primaryLsn)) {
+    throw new Error(
+      `zero-data-loss gate: could not read the primary's WAL position before the promote ` +
+        `(got: ${primaryLsn.slice(0, 80) || 'empty'}), so the standby was not promoted`,
+    );
+  }
+
+  if (!(await isStreaming())) return { caughtUp: false, lagBytes: null, primaryLsn };
+
+  let lagBytes = null;
+  let last = '';
+  for (;;) {
+    try {
+      const out = await standbyExec(
+        `SELECT pg_wal_lsn_diff('${primaryLsn}', pg_last_wal_replay_lsn())`,
+      );
+      const text = (typeof out === 'string' ? out : '').trim();
+      const n = text === '' ? Number.NaN : Number(text);
+      if (Number.isFinite(n)) {
+        lagBytes = Math.max(0, n);
+        if (lagBytes === 0) return { caughtUp: true, lagBytes: 0, primaryLsn };
+      } else {
+        last = text || 'no replay position';
+      }
+    } catch (err) {
+      last = String(err?.message ?? err).split('\n')[0];
+    }
+    if (now() >= deadline) break;
+    await sleep(pollMs);
+  }
+  throw new Error(
+    `zero-data-loss gate: the standby did not replay the primary's final WAL (${primaryLsn}) ` +
+      `within ${Math.round(deadlineMs / 1000)}s ` +
+      `(${lagBytes === null ? `last read: ${last || 'none'}` : `${lagBytes} bytes behind`}), ` +
+      `so it was not promoted`,
+  );
+}
+
+/**
+ * Issue a promote and prove it landed, for any transport. The verdict:
+ *   - 'promoted': it was read IN recovery immediately before the promote was
+ *     issued, then read out of it before the deadline;
+ *   - 'not-issued': the reading right before the issue was not in recovery (or
+ *     unreadable), so this call sent nothing. That proves nothing about an
+ *     earlier run's promote: a caller may un-fence on it only when its run
+ *     started with no failover journal;
+ *   - 'unknown': everything after the issue that is not a proven promote: an
+ *     issue that throws, and any deadline without a proven out-of-recovery
+ *     reading. An issued promote cannot be taken back: postgres deletes
+ *     promote.signal itself when it accepts the request and still reads in
+ *     recovery while it finishes, so a late "still in recovery" proves nothing.
+ *
+ * On 'unknown' the caller keeps the old primary fenced and its journal set, and
+ * the rerun finishes the job (R3).
+ *
+ * @param {object} opts
+ * @param {() => Promise<{ inRecovery: boolean|null }>} opts.readState - the
+ *   standby's failover-guard readReplicaState (required: the 't'/'f' parse
+ *   lives there and nowhere else)
+ * @param {() => Promise<unknown>} opts.issuePromote - sends the promote; its
+ *   result is ignored (the reads decide)
+ * @param {number} [opts.pollMs]
+ * @param {() => number} [opts.now]
+ * @param {(ms: number) => Promise<void>} [opts.sleep]
+ * @param {number} [opts.deadlineMs] - measured from before the first read, so
+ *   it bounds the whole promote window
+ * @returns {Promise<'promoted'|'not-issued'|'unknown'>}
+ */
+export async function promoteWithProof({
+  readState,
+  issuePromote,
+  deadlineMs = PROMOTE_DEADLINE_MS,
+  pollMs = 2000,
+  now = Date.now,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
+  if (typeof readState !== 'function') {
+    throw new TypeError('promoteWithProof: readState is required');
+  }
+  if (typeof issuePromote !== 'function') {
+    throw new TypeError('promoteWithProof: issuePromote is required');
+  }
+  const read = async () => {
+    try {
+      return (await readState())?.inRecovery ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const deadline = now() + deadlineMs;
+  if ((await read()) !== true) return 'not-issued';
+
+  try {
+    await issuePromote();
+  } catch {
+    // It may have landed anyway (a promote can exit non-zero on success, an
+    // ssh session can drop after the server accepted it): the reads decide.
+  }
+
+  // From here on a promote may land at any time: only a proven out-of-recovery
+  // reading is an answer, and the deadline without one is 'unknown'.
+  for (;;) {
+    if ((await read()) === false) return 'promoted';
+    if (now() >= deadline) return 'unknown';
+    await sleep(pollMs);
+  }
+}
+
+/**
+ * Promote the standby database (k8s transport): `pg_ctl promote` in its db pod,
+ * proven by promoteWithProof. A db pod that cannot be resolved is 'unknown' like
+ * any other failed issue: the pod lookup is part of the issue.
+ *
+ * @param {string} standbyIp
+ * @param {string} sshKeyPath
+ * @param {object} opts - promoteWithProof's options, minus issuePromote
+ * @returns {Promise<'promoted'|'not-issued'|'unknown'>}
+ */
+export async function promoteStandby(standbyIp, sshKeyPath, opts = {}) {
+  if (typeof opts.readState !== 'function') {
+    throw new TypeError('promoteStandby: readState is required');
+  }
+  return promoteWithProof({
+    ...opts,
+    issuePromote: async () => {
+      const pod = await getPostgresPod(standbyIp, sshKeyPath);
+      await sshKubectl(standbyIp, sshKeyPath, [
+        'exec',
+        '-n',
+        'vibecarbon',
+        pod,
+        '--',
+        'su',
+        'postgres',
+        '-c',
+        'pg_ctl promote -D /var/lib/postgresql/data',
+      ]);
+    },
+  });
 }
 
 /**
@@ -1734,44 +2139,6 @@ export async function isStandbyStreaming(standbyIp, sshKeyPath) {
       'SELECT status FROM pg_stat_wal_receiver',
     ]);
     return (typeof out === 'string' ? out : '').trim() === 'streaming';
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Has the standby ALREADY exited recovery (i.e. been promoted to primary)?
- *
- * Queries pg_is_in_recovery() on the standby db pod. Returns true ONLY when the
- * result is 'f' (out of recovery = promoted). Non-throwing — any error (pod
- * down, exec failure, unreadable output) returns false so the caller falls back
- * to the normal re-seed + promote path.
- *
- * The failover flow checks this FIRST: on a convergent rerun after a mid-flow
- * crash the standby is already promoted, and a blind re-seed would pg_basebackup
- * OVER a promoted (and possibly already-serving) database. Mirrors the
- * non-throwing shape of isStandbyStreaming above.
- *
- * @param {string} standbyIp - standby cluster master IP (kubectl target)
- * @param {string} sshKeyPath
- * @returns {Promise<boolean>}
- */
-export async function isStandbyPromoted(standbyIp, sshKeyPath) {
-  try {
-    const pod = await getPostgresPod(standbyIp, sshKeyPath);
-    const out = await sshKubectl(standbyIp, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-tAc',
-      'SELECT pg_is_in_recovery()',
-    ]);
-    return (typeof out === 'string' ? out : '').trim() === 'f';
   } catch {
     return false;
   }

@@ -21,6 +21,7 @@ import { c } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
 import { storageAccessLine, unfencedBucketsLine } from './lib/deploy/app-storage-credential.js';
+import { backupFenceRow } from './lib/deploy/backup-fence.js';
 import { settleWindowFor, storageSettleStatus } from './lib/deploy/bucket-settle.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { operatorCheckEnvs } from './lib/deploy/preflight.js';
@@ -29,6 +30,8 @@ import {
   buildStandbyReplayQuery,
   formatReplicationLagLine,
 } from './lib/deploy/replication.js';
+import { REPLICATION_SLOT_HEALTH_SQL, SLOT_WAL_SETTINGS } from './lib/deploy/replication-slot.js';
+import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { parseDotenv } from './lib/dotenv.js';
 import { hasLegacyDotenvQuoting } from './lib/dotenv-heal.js';
@@ -357,8 +360,140 @@ function parseStandbyReplayRow(out) {
  * to a null row — it never fails the whole probe, so the pre-existing
  * streaming/DR-not-guaranteed path above is unaffected.
  *
- * @returns {Promise<{ streaming: boolean, state: string, lagBytes: number|null, lagLine: string, primaryRow: {state:string,lagSeconds:number}|null, standbyRow: {inRecovery:boolean,lastWalReplayLsn:string,secondsSinceReplay:number}|null } | null>}
+ * @returns {Promise<{ streaming: boolean, state: string, lagBytes: number|null, lagLine: string, primaryRow: {state:string,lagSeconds:number}|null, standbyRow: {inRecovery:boolean,lastWalReplayLsn:string,secondsSinceReplay:number}|null, slot: {walStatus:string,retainedBytes:number}|'none'|null } | null>}
  */
+/** Bytes as the largest whole unit (KiB, MiB, GiB). */
+function formatBytes(n) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
+}
+
+/** A coarse age: minutes, hours or days. */
+function formatAge(ms) {
+  const m = Math.max(0, Math.round(ms / 60_000));
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
+
+/**
+ * The retired side's row (retired-fence.js): whether it is fenced, whether
+ * this run fenced it, and its disk clock (pg_wal grows while archiving is
+ * refused) plus how long it has been retired.
+ *
+ * @param {{ fenced: string[], unreachable: string[], nodes?: Array<{ ip: string, wrote?: string[], walBytes?: number|null }> }} fence
+ * @param {object} envConfig
+ * @param {number} [now]
+ * @returns {string}
+ */
+export function retiredFenceRow(fence, envConfig, now = Date.now()) {
+  const node = (ip) => (fence.nodes ?? []).find((n) => n.ip === ip) ?? {};
+  const since = Date.parse(envConfig?.lastFailover ?? '');
+  const age = Number.isNaN(since) ? null : `retired ${formatAge(now - since)} ago`;
+  const clock = (ip) => {
+    const { walBytes } = node(ip);
+    return [typeof walBytes === 'number' ? `pg_wal ${formatBytes(walBytes)}` : null, age]
+      .filter(Boolean)
+      .join(', ');
+  };
+  const parts = [
+    ...fence.fenced.map((ip) => {
+      const fencedNow = node(ip).wrote?.length ? ' (fenced now)' : '';
+      const detail = clock(ip);
+      return (
+        `${ip} fenced${fencedNow}: ${c.dim('refuses backups and writes')}` +
+        (detail ? ` ${c.dim(`(${detail})`)}` : '')
+      );
+    }),
+    ...fence.unreachable.map(
+      (ip) =>
+        `${c.warning(`${ip} not fenced yet`)} ${c.dim(
+          `(it or its db does not answer${age ? `, ${age}` : ''})`,
+        )}`,
+    ),
+  ];
+  return parts.join(', ');
+}
+
+/**
+ * The role primary's write-fence row: shown when an interrupted planned
+ * failover's marker is set or the primary reads read-only. Null otherwise.
+ *
+ * @param {object} envConfig
+ * @param {{ writeFenced?: 'on'|'off'|null } | null} replication
+ * @returns {string|null}
+ */
+export function writeFenceRow(envConfig, replication) {
+  const marker = envConfig?.ha?.writeFence;
+  if (!marker && replication?.writeFenced !== 'on') return null;
+  const why = envConfig?.ha?.failoverInFlight
+    ? 'a failover is in flight; vibecarbon failover finishes it'
+    : 'an interrupted failover left it; vibecarbon deploy or failover lifts it';
+  return `database write-fenced: the primary refuses writes (${why})`;
+}
+
+/**
+ * Parse `psql -tAc REPLICATION_SLOT_HEALTH_SQL` ("wal_status|bytes"). An empty
+ * answer is 'none' (the primary has no slot); a slot no standby has used yet
+ * has no wal_status and reads as 'unused'.
+ *
+ * @param {unknown} out
+ * @returns {{walStatus: string, retainedBytes: number} | 'none'}
+ */
+export function parseReplicationSlotRow(out) {
+  const line = String(out ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)[0];
+  if (!line) return 'none';
+  const [status, bytes] = line.split('|');
+  const retainedBytes = Number.parseFloat(bytes);
+  return {
+    walStatus: status || 'unused',
+    retainedBytes: Number.isFinite(retainedBytes) ? retainedBytes : 0,
+  };
+}
+
+/**
+ * The primary's replication slot row: its wal_status and the WAL it holds.
+ * `lost` (the standby fell past the slot cap and can never catch up) is an
+ * error that names the deploy that reseeds; null when the slot was unreadable.
+ *
+ * @param {{walStatus: string, retainedBytes: number} | 'none' | null | undefined} slot
+ * @param {string} envName
+ * @returns {{level: 'ok'|'warn'|'error', text: string} | null}
+ */
+export function replicationSlotRow(slot, envName) {
+  if (!slot) return null;
+  const cap = SLOT_WAL_SETTINGS.max_slot_wal_keep_size;
+  if (slot === 'none') {
+    return {
+      level: 'warn',
+      text: `none: nothing holds WAL for the standby, run vibecarbon deploy ${envName} to create it`,
+    };
+  }
+  const text = `${slot.walStatus}, ${Math.round(slot.retainedBytes / 1024 ** 2)} MB retained`;
+  if (slot.walStatus === 'lost') {
+    return {
+      level: 'error',
+      text: `${text}: the standby fell more than ${cap} behind and cannot catch up, run vibecarbon deploy ${envName} to reseed`,
+    };
+  }
+  if (slot.walStatus === 'unreserved') {
+    return {
+      level: 'warn',
+      text: `${text}: past the ${cap} cap, the slot is lost at the next checkpoint unless the standby catches up`,
+    };
+  }
+  return { level: 'ok', text };
+}
+
 export async function checkReplication(envName, envConfig, projectName, deps = {}) {
   const {
     sshRun: _sshRun = sshRun,
@@ -486,10 +621,46 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
       }
     }
 
+    // The replication slot (replication-slot.js): its WAL is capped, so a
+    // standby away long enough finds it lost. Its SQL names the slot in a
+    // string literal, so compose sends it base64 on stdin, never inside the
+    // double-quoted -tAc above; the k8s argv is quoting-safe as it is.
+    let slot = null;
+    try {
+      const slotSql = Buffer.from(REPLICATION_SLOT_HEALTH_SQL).toString('base64');
+      const slotOut = isCompose
+        ? await _sshRun(
+            primary.ip,
+            sshKeyPath,
+            [
+              'bash',
+              '-lc',
+              `cd /opt/${projectName} && echo ${slotSql} | base64 -d | docker compose exec -T db psql -U postgres -d postgres -tA`,
+            ],
+            { timeout: timeoutMs },
+          )
+        : await runPrimaryPsql(REPLICATION_SLOT_HEALTH_SQL);
+      slot = parseReplicationSlotRow(slotOut);
+    } catch {
+      slot = null;
+    }
+
+    // The planned-failover write fence (write-fence.js): a primary left
+    // read-only refuses every write. SHOW, so the SQL carries no quotes.
+    let writeFenced = null;
+    try {
+      const v = String((await runPrimaryPsql('SHOW default_transaction_read_only')) ?? '').trim();
+      writeFenced = v === 'on' || v === 'off' ? v : null;
+    } catch {
+      writeFenced = null;
+    }
+
     return {
       ...replication,
       primaryRow,
       standbyRow,
+      slot,
+      writeFenced,
       lagLine: formatReplicationLagLine({ primaryRow, standbyRow }),
     };
   })();
@@ -1130,6 +1301,11 @@ function renderEnvironment(envName, envConfig, checks) {
       : c.success('Enabled');
     lines.push(`${c.dim('HA')}             ${haDisplay}`);
 
+    // The side a failover retired, until a deploy rebuilds it as the standby.
+    if (checks.retiredFence) {
+      lines.push(`${c.dim('Retired')}        ${retiredFenceRow(checks.retiredFence, envConfig)}`);
+    }
+
     // Real replication state (finding #4) — never a hardcoded "streaming".
     if (checks.replication) {
       const r = checks.replication;
@@ -1153,7 +1329,19 @@ function renderEnvironment(envName, envConfig, checks) {
           : c.dim(r.lagLine);
         lines.push(`${c.dim('Repl. Lag')}      ${lagDisplay}`);
       }
+
+      const slotRow = replicationSlotRow(r.slot, envName);
+      if (slotRow) {
+        const paint = { ok: c.dim, warn: c.warning, error: c.error }[slotRow.level];
+        lines.push(`${c.dim('Repl. Slot')}     ${paint(slotRow.text)}`);
+      }
     }
+
+    const fenceRow = writeFenceRow(envConfig, checks.replication);
+    if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
+
+    const backupFence = backupFenceRow(envConfig);
+    if (backupFence) lines.push(`${c.dim('Backup fence')}   ${c.warning(backupFence)}`);
   }
 
   // Servers
@@ -1389,6 +1577,21 @@ async function main(argv = []) {
   const envChecksPromise = Promise.allSettled(
     envEntries.map(async ([envName, envConfig]) => {
       const checks = {};
+
+      // The retirement fence first (R7): a side a past failover retired that
+      // has come back refuses its backups before anything else looks at it.
+      // Silent here (the -json stdout carries only JSON); the result is a row.
+      const haTier = haTierOf(envConfig);
+      if (haTier) {
+        const fence = await reconcileRetiredFence({
+          environment: envName,
+          envConfig,
+          projectConfig,
+          tier: haTier,
+          deps: { log: () => {}, warn: () => {} },
+        });
+        if (fence.fenced.length > 0 || fence.unreachable.length > 0) checks.retiredFence = fence;
+      }
 
       // Remote health check
       if (envConfig.domain) {

@@ -75,6 +75,7 @@ const CLUSTER_SCOPED_STEPS: ReadonlySet<StepName> = new Set<StepName>([
   'scale',
   'restore',
   'failover',
+  'failback',
 ]);
 
 export function isClusterScopedStep(step: StepName): boolean {

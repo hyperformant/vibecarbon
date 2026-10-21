@@ -250,6 +250,21 @@ services:
       # ceiling can't be hit. The database has no public port: operators
       # reach it through `vibecarbon shell` / SSH. See docs/security.md.
       - max_connections=200
+      - -c
+      # Replication slot WAL cap. The HA standby streams through a physical
+      # slot, and a slot holds WAL on the primary until its standby confirms
+      # it: with no cap, a standby that stays down for about a week fills the
+      # primary's volume and takes the serving database down. Past 4GB the
+      # slot goes `lost` instead (`vibecarbon status` shows it) and the next
+      # `vibecarbon deploy` reseeds the standby. No-op without a slot.
+      - max_slot_wal_keep_size=4GB
+      - -c
+      # The floor a briefly disconnected standby catches up from without its
+      # slot.
+      - wal_keep_size=512MB
+      - -c
+      # The streaming standby plus a reseed's basebackup, with headroom.
+      - max_wal_senders=10
     environment:
       # The official image's superuser. Named explicitly so `docker compose
       # exec db` scripts (metabase-init.sh, n8n-init.sh) get it as their user.
