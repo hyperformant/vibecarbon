@@ -203,7 +203,7 @@ export async function deactivateLicense({ projectDir = process.cwd(), key, env, 
     return {
       success: false,
       reason: 'no-key',
-      error: 'No license here. Pass the key: vibecarbon deactivate <key>.',
+      error: 'No license here. Pass the key: vibecarbon deactivate <key>',
     };
   }
   const r = await requestRelease({ key: useKey, env, fetchImpl });

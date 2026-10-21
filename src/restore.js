@@ -790,6 +790,7 @@ export async function runComposeRestore({
     recoveryConf,
     requiredBytes: base.uncompressedBytes ?? base.sizeBytes,
     assertWritable,
+    rerun: `vibecarbon restore ${envName}`,
   });
   s.stop('Database restored');
 
@@ -1083,10 +1084,14 @@ export async function runK8sRestore({
     // whatever a failed fetch left (the old `finally`). The init keeps the
     // live cluster until a fetch completes, so a retry is safe.
     throw new Error(
-      `the db pod did not come back from the restore of ${base.name} within ${rolloutTimeoutS}s: ` +
-        `${err instanceof Error ? err.message : String(err)}. The restore marker stays set, so the pod ` +
-        `retries the restore on its next start. See why with: kubectl logs ${DB_POD} -c walg-restore -n vibecarbon, ` +
-        'then rerun vibecarbon restore.',
+      [
+        `the db pod did not come back from the restore of ${base.name} within ${rolloutTimeoutS}s: ` +
+          `${err instanceof Error ? err.message : String(err)}. The restore marker stays set, so the pod ` +
+          `retries the restore on its next start. See why on ${serverIp}:`,
+        `  kubectl logs ${DB_POD} -c walg-restore -n vibecarbon`,
+        'Then rerun:',
+        `  vibecarbon restore ${envName}`,
+      ].join('\n'),
     );
   }
   // 4. Confirm postgres accepts connections and has left recovery.

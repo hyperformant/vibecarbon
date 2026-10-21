@@ -470,7 +470,7 @@ export function dnsDidNotMessage({ domain, ip, reason, noBaseFor }) {
     `FAILOVER COMPLETED, DNS DID NOT: point A records for ${domain} (apex and *.${domain}) at ${ip}` +
     (reason ? `. ${reason}` : '') +
     `. until they move, ${domain} is down: the old primary is fenced or gone, so nothing serves it` +
-    '. the roles are saved; run vibecarbon deploy: it points the records at the promoted node, then rebuilds the old primary' +
+    '. the roles are saved; run vibecarbon deploy to point the records at the promoted node and rebuild the old primary' +
     (noBaseFor
       ? `. no base backup was pushed on the new timeline either: once DNS points at ${ip}, run vibecarbon backup ${noBaseFor}`
       : '')

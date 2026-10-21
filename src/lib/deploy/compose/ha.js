@@ -2437,7 +2437,7 @@ export async function failoverComposeHA(
     p.log.warn(
       `Could not stop services on the old primary (${primaryServer.ip}). SPLIT-BRAIN RISK: ` +
         'it may still be serving writes. Stop it by hand before pointing clients at the ' +
-        `new primary — ssh root@${primaryServer.ip} 'docker stop ${oldPrimaryContainers}'.`,
+        `new primary:\n  ssh root@${primaryServer.ip} 'docker stop ${oldPrimaryContainers}'`,
     );
   }
   s.stop(

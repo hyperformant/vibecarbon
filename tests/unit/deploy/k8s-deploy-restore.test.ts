@@ -292,6 +292,7 @@ let liveDbSts = false;
 let appliedBackup: { cronjob: string; configmap: string } | null = null;
 let marker: Record<string, string> = {};
 let pgdataState: string | null = '';
+let markerClearExit = 0;
 
 function child(exitCode: number, stdout = '') {
   const c: Record<string, unknown> = {
@@ -354,6 +355,14 @@ function installSpawn() {
         Object.entries(marker).map(([k, v]) => [k, Buffer.from(v).toString('base64')]),
       );
       return child(0, JSON.stringify(data));
+    }
+    if (
+      cmd === 'kubectl' &&
+      has('patch') &&
+      has('vibecarbon-infra-secrets') &&
+      args.some((x) => x.includes('"RESTORE_BACKUP":""'))
+    ) {
+      return child(markerClearExit);
     }
     if (cmd === 'kubectl' && has('exec') && args.some((a) => a.includes('.vc-restored-from'))) {
       return pgdataState === null ? child(1) : child(0, pgdataState);
@@ -470,7 +479,8 @@ describe('applyK3sManifests with a restore point', () => {
     fence = 'off';
     liveDbSts = false;
     marker = {};
-    pgdataState = '';
+    pgdataState = 'VC_OK\n';
+    markerClearExit = 0;
     installSpawn();
     vi.stubGlobal(
       'fetch',
@@ -524,6 +534,17 @@ describe('applyK3sManifests with a restore point', () => {
     await expect(applyK3sManifests(args(RESTORE))).rejects.toThrow(/statefulset\/db/);
     expect(infraSecretApply()?.data).toContain(`RESTORE_BACKUP: "${BACKUP}"`);
     expect(calls.some(isMarkerClear)).toBe(false);
+    expect(calls.some(isAppPatch)).toBe(false);
+  });
+
+  it('a marker clear that fails after the proof says the copy is proven and names what is left', async () => {
+    markerClearExit = 1;
+    const err = await applyK3sManifests(args(RESTORE)).catch((e) => e);
+    expect(err.message).toMatch(/proven writable/);
+    expect(err.message).toMatch(/clearing the restore marker failed/);
+    expect(lines(err.message)).toContain(CLEAR);
+    expect(calls.some(isRetire)).toBe(true);
+    expect(calls.some(isRemoveDiscard)).toBe(false);
     expect(calls.some(isAppPatch)).toBe(false);
   });
 
@@ -612,16 +633,43 @@ describe('applyK3sManifests with a restore point', () => {
   it('plain deploy, no swap yet: offers the abandon line', async () => {
     liveDbSts = true;
     marker = pending();
-    pgdataState = '';
+    pgdataState = 'VC_OK\n';
     const err = await plain();
     expect(lines(err.message)).toContain(CLEAR);
     expect(err.message).toMatch(/nothing was swapped in yet/);
   });
 
+  // P4: a probe that answered without its read sentinel (cut short) proves
+  // nothing; read as "not swapped" it would offer the abandon of a live copy.
+  it('plain deploy, a probe cut short (no read sentinel): unknown, never "nothing swapped"', async () => {
+    liveDbSts = true;
+    marker = pending();
+    pgdataState = '';
+    const err = await plain();
+    expect(err.message).toMatch(/could not read the db pod/i);
+    expect(err.message).not.toMatch(/since nothing was swapped in yet/);
+  });
+
+  // P5: the proven restore retired .vc-prev into .vc-discard, then the marker
+  // clear failed. The copy is proven: neither "unproven" nor "no database".
+  it('plain deploy, proven and retired but the marker clear failed: says so, names the two finishing commands', async () => {
+    liveDbSts = true;
+    marker = pending();
+    pgdataState = `discard\nrecord ${BACKUP} ${RESTORE.attempt}\nVC_OK\n`;
+    const err = await plain();
+    expect(err.message).toMatch(/proven writable/);
+    expect(err.message).not.toMatch(/unproven/);
+    expect(err.message).not.toMatch(/no database before/);
+    expect(lines(err.message)).toContain(CLEAR);
+    expect(
+      lines(err.message).some((l) => l.includes('rm -rf /var/lib/postgresql/data/.vc-discard')),
+    ).toBe(true);
+  });
+
   it('plain deploy, swapped in: no plain abandon, says what clearing would boot (ruling)', async () => {
     liveDbSts = true;
     marker = pending({ RESTORE_ORIGIN: 'restore' });
-    pgdataState = `prev\nrecord ${BACKUP} ${RESTORE.attempt}\n`;
+    pgdataState = `prev\nrecord ${BACKUP} ${RESTORE.attempt}\nVC_OK\n`;
     const err = await plain();
     expect(lines(err.message)).not.toContain(CLEAR);
     expect(err.message).toMatch(/clearing the marker would boot the restored copy/i);

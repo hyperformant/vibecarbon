@@ -821,7 +821,7 @@ describe('scaleFinishComposeOutro: a stack that still names a replaced server', 
       });
       expect(process.exitCode).toBe(1);
       expect(outros.at(-1)).toMatch(
-        /Pulumi state still names the old server.*run vibecarbon deploy prod: it points Pulumi state at the new server/,
+        /Pulumi state still names the old server.*run vibecarbon deploy prod first, which points Pulumi state at the new server/,
       );
     } finally {
       process.exitCode = before;

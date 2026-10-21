@@ -1640,6 +1640,8 @@ async function composeVolumeFreeBytes(ip, sshKeyPath) {
 export async function restoreCompose(ip, sshKeyPath, projectName, restore, options = {}) {
   const remoteDir = `/opt/${projectName}`;
   const { backup, lineage, recoveryConf, requiredBytes, assertWritable } = restore ?? {};
+  // The command that finishes or redoes this restore, for the failure messages.
+  const rerun = restore?.rerun ?? 'vibecarbon restore';
   if (typeof assertWritable !== 'function') {
     throw new Error('restoreCompose: assertWritable is required (the proof before .vc-prev goes)');
   }
@@ -1657,20 +1659,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
     });
   }
 
-  // 1. Stop app to prevent connections during restore
-  await sshRunAsync(
-    ip,
-    sshKeyPath,
-    `cd ${remoteDir} && docker compose stop app 2>/dev/null || true`,
-  );
-
-  // 2. Stop the DB. The restore container (step 3) stages and swaps PGDATA
-  //    from inside a db container, where the real ${project}_db_data volume is
-  //    mounted at $PGDATA. (A `docker compose run --rm -v db_data:/data alpine`
-  //    would mount a literal `db_data` volume, NOT the project-prefixed one.)
-  await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose stop db`);
-
-  // 3. Write this run's restore script to the server (heredoc, no quoting
+  // 1. Write this run's restore script to the server (heredoc, no quoting
   //    risk) and bind-mount it into the db container. The script body contains
   //    single quotes (restore_command = 'wal-g wal-fetch ...') so it MUST go via
   //    a file rather than a nested bash -c '...' invocation. One file per run,
@@ -1693,7 +1682,8 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
   // An earlier restore whose ssh dropped can leave its run container behind
   // (still running, or stopped and not removed): `run --name` would refuse
   // the name. Remove that one container, by its exact name, and say so. Its
-  // swap, if it began one, is settled by this run's script.
+  // swap, if it began one, is settled by this run's script. Both steps run
+  // before anything is stopped: a failure here leaves the database serving.
   const runContainer = `${projectName}-db-restore`;
   const orphan = await sshRunAsync(
     ip,
@@ -1706,6 +1696,27 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
       `[restore] an earlier restore's container ${runContainer} was still there; stopped and removed it`,
     );
     await sshRunAsync(ip, sshKeyPath, `docker rm -f ${runContainer}`, { timeout: 60_000 });
+  }
+
+  // 2. Stop the app (no connections during the restore), then the DB. The
+  //    restore container stages and swaps PGDATA from inside a db container,
+  //    where the real ${project}_db_data volume is mounted at $PGDATA. (A `docker compose run --rm -v db_data:/data alpine`
+  //    would mount a literal `db_data` volume, NOT the project-prefixed one.)
+  try {
+    await sshRunAsync(
+      ip,
+      sshKeyPath,
+      `cd ${remoteDir} && docker compose stop app 2>/dev/null || true`,
+    );
+    await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose stop db`);
+  } catch (err) {
+    await sshRunAsync(ip, sshKeyPath, `rm -f ${scriptPath}`, { ignoreError: true });
+    throw new Error(
+      `restoreCompose: stopping the app and db for the restore of ${backup} failed, so nothing was ` +
+        `restored, and the app may be stopped (${err instanceof Error ? err.message : String(err)}). ` +
+        `Check them on ${ip}:\n` +
+        `  ssh root@${ip} 'cd ${remoteDir} && docker compose ps'`,
+    );
   }
 
   // THE wal-g FETCH. Wrapped in the object-storage staleness retry (quarantined
@@ -1755,7 +1766,8 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
       sshKeyPath,
       `cd ${remoteDir} && docker compose run --rm --no-deps --entrypoint sh db -c ` +
         `'if [ -e ${PGDATA_PATH}/${RESTORE_LAYOUT.inProgress} ]; then echo VC_MARKER_PRESENT; ` +
-        `elif [ -e ${PGDATA_PATH}/recovery.signal ]; then echo VC_SWAPPED; else echo VC_MARKER_ABSENT; fi'`,
+        `elif [ -e ${PGDATA_PATH}/recovery.signal ] && [ -d ${PREVIOUS_PGDATA_PATH} ]; then echo VC_SWAPPED_PREV; ` +
+        `elif [ -e ${PGDATA_PATH}/recovery.signal ]; then echo VC_SWAPPED_EMPTY; else echo VC_MARKER_ABSENT; fi'`,
       { ignoreError: true, retries: 1 },
     );
     const state = String(probe ?? '');
@@ -1774,22 +1786,43 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
     }
     if (state.includes('VC_MARKER_PRESENT')) {
       throw new Error(
-        `restoreCompose: the restore of ${backup} was interrupted mid-swap (${cause}). The db stays down ` +
-          `(db-guard.sh refuses to boot it) and the database from before the restore is in ` +
-          `${PREVIOUS_PGDATA_PATH}; rerun vibecarbon restore to finish or redo the swap.`,
+        [
+          `restoreCompose: the restore of ${backup} was interrupted mid-swap (${cause}). The db stays down ` +
+            `(db-guard.sh refuses to boot it) and the database from before the restore is in ` +
+            `${PREVIOUS_PGDATA_PATH}. To finish or redo the swap, rerun:`,
+          `  ${rerun}`,
+        ].join('\n'),
       );
     }
-    if (state.includes('VC_SWAPPED')) {
+    if (state.includes('VC_SWAPPED_PREV')) {
       throw new Error(
-        `restoreCompose: the restore of ${backup} swapped in but was not proven (${cause}). The db stays ` +
-          `down, the app too, and the database from before the restore is in ${PREVIOUS_PGDATA_PATH}; rerun ` +
-          'vibecarbon restore, which keeps that database and redoes the swap.',
+        [
+          `restoreCompose: the restore of ${backup} swapped in but was not proven (${cause}). The db stays ` +
+            `down, the app too, and the database from before the restore is in ${PREVIOUS_PGDATA_PATH}. ` +
+            'Rerunning the restore keeps that database and redoes the swap:',
+          `  ${rerun}`,
+        ].join('\n'),
+      );
+    }
+    if (state.includes('VC_SWAPPED_EMPTY')) {
+      // The volume held no database before (a fresh server): no .vc-prev.
+      throw new Error(
+        [
+          `restoreCompose: the restore of ${backup} swapped in but was not proven (${cause}). The db stays ` +
+            'down, the app too. The volume held no database before this restore, so there is nothing ' +
+            'to keep; rerunning it redoes the swap:',
+          `  ${rerun}`,
+        ].join('\n'),
       );
     }
     throw new Error(
-      `restoreCompose: the restore of ${backup} did not complete (${cause}), and whether a swap began could ` +
-        `not be read. The db and app are left stopped. Check \`docker compose logs db\` on ${ip}, then rerun ` +
-        'vibecarbon restore.',
+      [
+        `restoreCompose: the restore of ${backup} did not complete (${cause}), and whether a swap began could ` +
+          `not be read. The db and app are left stopped. Check the db log on ${ip}:`,
+        `  ssh root@${ip} 'cd ${remoteDir} && docker compose logs db'`,
+        'Then rerun:',
+        `  ${rerun}`,
+      ].join('\n'),
     );
   }
 
@@ -1840,14 +1873,17 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
   const proof = await assertWritable();
   if (!PROVEN_WRITABLE_STATES.includes(proof)) {
     throw new Error(
-      `restoreCompose: could not prove the restored database writable (write fence ${proof ?? 'unread'}), ` +
-        `so it kept the database from before the restore in ${PREVIOUS_PGDATA_PATH} and left the app ` +
-        `stopped. Check it by hand (expect off): ssh root@${ip} 'cd ${remoteDir} && docker compose exec -T db ` +
-        `psql -U postgres -At -c "SHOW default_transaction_read_only"'. Then finish what the restore owed: ` +
-        `ssh root@${ip} 'cd ${remoteDir} && docker compose exec -T db sh -c "${RETIRE_PREVIOUS_SH}" ` +
-        `&& docker compose exec -T db sh -c "${REMOVE_DISCARD_SH}" ` +
-        '&& docker compose run --rm --no-deps app-migrate ' +
-        "&& docker compose exec -T db psql -U postgres -q -c ANALYZE && docker compose start app'.",
+      [
+        `restoreCompose: could not prove the restored database writable (write fence ${proof ?? 'unread'}), ` +
+          `so it kept the database from before the restore in ${PREVIOUS_PGDATA_PATH} and left the app ` +
+          'stopped. Check it by hand (expect off):',
+        `  ssh root@${ip} 'cd ${remoteDir} && docker compose exec -T db psql -U postgres -At -c "SHOW default_transaction_read_only"'`,
+        'Then finish what the restore owed:',
+        `  ssh root@${ip} 'cd ${remoteDir} && docker compose exec -T db sh -c "${RETIRE_PREVIOUS_SH}" ` +
+          `&& docker compose exec -T db sh -c "${REMOVE_DISCARD_SH}" ` +
+          '&& docker compose run --rm --no-deps app-migrate ' +
+          "&& docker compose exec -T db psql -U postgres -q -c ANALYZE && docker compose start app'",
+      ].join('\n'),
     );
   }
   //    Rename first, then remove: a crash mid-delete leaves .vc-discard

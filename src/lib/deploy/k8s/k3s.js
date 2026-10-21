@@ -70,6 +70,7 @@ import { scpWithRetry } from '../../ssh.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import {
   BACKUP_NAME_RE,
+  DISCARD_PGDATA_PATH,
   LINEAGE_RE,
   PGDATA_PATH,
   PREVIOUS_PGDATA_PATH,
@@ -3137,9 +3138,14 @@ async function readRestoreMarker(env) {
  */
 async function readRestoreSwapState(env, marker) {
   const record = `${PGDATA_PATH}/${RESTORE_LAYOUT.restoredFrom}`;
+  // VC_OK last: a probe cut short (no sentinel) proves nothing and reads as
+  // unknown, never as "nothing swapped in".
   const probe =
     `if [ -d ${PREVIOUS_PGDATA_PATH} ]; then echo prev; fi; ` +
-    `if [ -f ${record} ]; then printf 'record %s\\n' "$(cat ${record})"; fi`;
+    `if [ -d ${DISCARD_PGDATA_PATH} ]; then echo discard; fi; ` +
+    `if [ -e ${PGDATA_PATH}/${RESTORE_LAYOUT.inProgress} ]; then echo swapping; fi; ` +
+    `if [ -f ${record} ]; then printf 'record %s\\n' "$(cat ${record})"; fi; ` +
+    'echo VC_OK';
   let out;
   try {
     out = await runCommandAsync(
@@ -3152,9 +3158,17 @@ async function readRestoreSwapState(env, marker) {
   const lines = String(out ?? '')
     .split('\n')
     .map((l) => l.trim());
+  if (!lines.includes('VC_OK')) return { state: 'unknown', previous: false };
   const previous = lines.includes('prev');
   const recorded =
     Boolean(marker.attempt) && lines.includes(`record ${marker.backup} ${marker.attempt}`);
+  // This attempt swapped in, .vc-prev is gone and .vc-discard holds it, with
+  // no swap in progress: the CLI proved the copy writable and retired the
+  // database from before (RETIRE_PREVIOUS_SH), then stopped before the
+  // marker clear (finishDeployRestore, or runK8sRestore).
+  if (recorded && !previous && lines.includes('discard') && !lines.includes('swapping')) {
+    return { state: 'retired', previous: false };
+  }
   return { state: previous || recorded ? 'swapped' : 'not-swapped', previous };
 }
 
@@ -3201,7 +3215,9 @@ export async function assertRestoreMarkerState({ env, restore, operatorEnv }) {
       : 'there was no database before it';
     const head = [
       `a restore of ${marker.backup} (target ${marker.target || 'latest'}) is pending on this cluster (the marker on vibecarbon-infra-secrets).`,
-      'A plain deploy would leave it to the next db pod start, unproven, so it stops here.',
+      state === 'retired'
+        ? 'A plain deploy stops here until the marker is cleared.'
+        : 'A plain deploy would leave it to the next db pod start, unproven, so it stops here.',
     ];
     const lines =
       state === 'not-swapped'
@@ -3212,21 +3228,29 @@ export async function assertRestoreMarkerState({ env, restore, operatorEnv }) {
             'or, since nothing was swapped in yet, abandon it (the database keeps what it holds now):',
             `  ${clearMarkerCommand()}`,
           ]
-        : state === 'swapped'
+        : state === 'retired'
           ? [
               ...head,
-              `The restored copy is already swapped in, unproven, and ${before}.`,
-              'Clearing the marker would boot the restored copy as if it were proven, so finish the restore:',
-              ...finish,
-            ]
-          : [
-              ...head,
-              'Could not read the db pod to tell whether the restored copy was swapped in. Finish the restore:',
-              ...finish,
-              'If nothing was swapped in yet, it can be abandoned instead:',
+              'The restored copy was proven writable and the database from before it was retired; ' +
+                'only clearing the marker did not finish. Clear it, then remove the retired copy:',
               `  ${clearMarkerCommand()}`,
-              `If it was, clearing the marker boots the restored copy unproven, and the database from before (if any) is in ${PREVIOUS_PGDATA_PATH}.`,
-            ];
+              `  kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- sh -c '${REMOVE_DISCARD_SH}'`,
+            ]
+          : state === 'swapped'
+            ? [
+                ...head,
+                `The restored copy is already swapped in, unproven, and ${before}.`,
+                'Clearing the marker would boot the restored copy as if it were proven, so finish the restore:',
+                ...finish,
+              ]
+            : [
+                ...head,
+                'Could not read the db pod to tell whether the restored copy was swapped in. Finish the restore:',
+                ...finish,
+                'If nothing was swapped in yet, it can be abandoned instead:',
+                `  ${clearMarkerCommand()}`,
+                `If it was, clearing the marker boots the restored copy unproven, and the database from before (if any) is in ${PREVIOUS_PGDATA_PATH}.`,
+              ];
     throw new Error(lines.join('\n'));
   }
   const sts = await runKubectlWithRetry(
@@ -3313,19 +3337,36 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
       { env, description },
     );
   await execInDb(RETIRE_PREVIOUS_SH, 'finishDeployRestore: retire the previous cluster');
-  await runKubectlWithRetry(
-    [
-      '-n',
-      'vibecarbon',
-      'patch',
-      'secret',
-      'vibecarbon-infra-secrets',
-      '--type=merge',
-      '-p',
-      JSON.stringify({ stringData: restoreMarkerStringData(null) }),
-    ],
-    { env, description: 'finishDeployRestore: clear the restore marker' },
-  );
+  try {
+    await runKubectlWithRetry(
+      [
+        '-n',
+        'vibecarbon',
+        'patch',
+        'secret',
+        'vibecarbon-infra-secrets',
+        '--type=merge',
+        '-p',
+        JSON.stringify({ stringData: restoreMarkerStringData(null) }),
+      ],
+      { env, description: 'finishDeployRestore: clear the restore marker' },
+    );
+  } catch (err) {
+    // Past the proof and the retire: the restored copy serves the volume and
+    // the database from before is under .vc-discard. Only the marker (and the
+    // discard after it) are left; a pod start meanwhile boots normally (the
+    // attempt record matches the marker).
+    throw new Error(
+      [
+        `the restored database is proven writable and the database from before it was retired, but ` +
+          `clearing the restore marker failed (${err instanceof Error ? err.message.split('\n')[0] : String(err)}). ` +
+          'The app has not rolled. Finish, one command at a time:',
+        `  ${clearMarkerCommand()}`,
+        `  ${inDb} sh -c '${REMOVE_DISCARD_SH}'`,
+        `  vibecarbon deploy ${operatorEnv ?? environment}`,
+      ].join('\n'),
+    );
+  }
   await execInDb(REMOVE_DISCARD_SH, 'finishDeployRestore: remove the discarded cluster');
   progressLog(`[db] restored ${restore.backup}: promoted, writable, restore marker cleared`);
 }

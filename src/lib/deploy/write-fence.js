@@ -244,7 +244,7 @@ export async function assertRolePrimaryWritable({ environment, envConfig, exec, 
   if (!(await unfence(exec))) {
     throw new Error(
       `the primary is write-fenced and could not be lifted; run this in its db container, ` +
-        `then rerun vibecarbon deploy: ${UNFENCE_SQL_HINT}`,
+        `then rerun vibecarbon deploy ${environment} (the SQL: ${UNFENCE_SQL_HINT})`,
     );
   }
   clearMarker({ environment });

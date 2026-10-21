@@ -1711,7 +1711,7 @@ async function scaleServers(ctx) {
           `standby ${server.ip} kept; ` +
           (back === 'streaming'
             ? 'it streams from the primary again. Rerun scale once the cause is fixed.'
-            : `it is not proven streaming either, replication is degraded: run vibecarbon deploy ${environment}.`),
+            : `it is not proven streaming either, replication is degraded: run vibecarbon deploy ${environment} to rebuild it`),
       );
     }
     if (replication !== 'streaming') ctx.replicationDegraded = true;

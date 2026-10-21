@@ -33,7 +33,8 @@ const writable = async () => 'writable' as const;
 let events: string[];
 let fetchError: Error | null;
 let freeKb: string;
-let probeState: 'absent' | 'present' | 'swapped';
+let probeState: 'absent' | 'present' | 'swapped' | 'swapped-empty';
+let stopError: Error | null;
 let orphan: boolean;
 let commands: string[];
 let fetchOpts: Array<Record<string, unknown>>;
@@ -64,6 +65,7 @@ beforeEach(() => {
   fetchError = null;
   freeKb = '';
   probeState = 'absent';
+  stopError = null;
   orphan = false;
   commands = [];
   fetchOpts = [];
@@ -74,6 +76,7 @@ beforeEach(() => {
     const l = label(cmd);
     if (l && l !== 'promoted') events.push(l);
     if (l === 'orphanCheck') return orphan ? 'f00dfeed\n' : '';
+    if (l === 'stopDb' && stopError) throw stopError;
     if (l === 'df') return freeKb;
     if (l === 'fetch') {
       fetchOpts.push(opts as Record<string, unknown>);
@@ -83,7 +86,8 @@ beforeEach(() => {
       return {
         absent: 'VC_MARKER_ABSENT\n',
         present: 'VC_MARKER_PRESENT\n',
-        swapped: 'VC_SWAPPED\n',
+        swapped: 'VC_SWAPPED_PREV\n',
+        'swapped-empty': 'VC_SWAPPED_EMPTY\n',
       }[probeState];
     if (l === 'promoted') {
       if (!events.includes('promoted')) events.push('promoted');
@@ -111,8 +115,8 @@ describe('restoreCompose around the staged fetch', () => {
       },
     });
     expect(events).toEqual([
-      'stopDb',
       'orphanCheck',
+      'stopDb',
       'fetch',
       'rmScript',
       'startDb',
@@ -186,8 +190,8 @@ describe('restoreCompose around the staged fetch', () => {
       /nothing was moved.*database from before it was started again.*does not exist/s,
     );
     expect(events).toEqual([
-      'stopDb',
       'orphanCheck',
+      'stopDb',
       'fetch',
       'rmScript',
       'rmRunContainer',
@@ -200,11 +204,11 @@ describe('restoreCompose around the staged fetch', () => {
     fetchError = new Error('timed out');
     probeState = 'present';
     await expect(restore()).rejects.toThrow(
-      /interrupted mid-swap.*stays down.*\.vc-prev.*rerun vibecarbon restore/s,
+      /interrupted mid-swap.*stays down.*\.vc-prev.*rerun:\n {2}vibecarbon restore$/s,
     );
     expect(events).toEqual([
-      'stopDb',
       'orphanCheck',
+      'stopDb',
       'fetch',
       'rmScript',
       'rmRunContainer',
@@ -215,17 +219,53 @@ describe('restoreCompose around the staged fetch', () => {
   it('a failed fetch after the swap finished keeps the db down: swapped but not proven', async () => {
     fetchError = new Error('timed out');
     probeState = 'swapped';
-    await expect(restore()).rejects.toThrow(
-      /swapped in but was not proven.*stays down.*\.vc-prev.*rerun vibecarbon restore/s,
+    await expect(restore({ rerun: 'vibecarbon restore prod' })).rejects.toThrow(
+      /swapped in but was not proven.*stays down.*\.vc-prev.*redoes the swap:\n {2}vibecarbon restore prod$/s,
     );
     expect(events).not.toContain('restartOld');
     expect(events).not.toContain('startDb');
   });
 
+  // P2: an empty volume (a fresh server) has no database from before, so no
+  // .vc-prev: the message must not send the operator looking for one.
+  it('swapped but not proven on an empty volume names no previous database', async () => {
+    fetchError = new Error('timed out');
+    probeState = 'swapped-empty';
+    const err = await restore().catch((e) => e);
+    expect(err.message).toMatch(/swapped in but was not proven/);
+    expect(err.message).not.toContain('.vc-prev');
+    expect(err.message).toMatch(/held no database before/);
+    expect(err.message.split('\n').at(-1)).toBe('  vibecarbon restore');
+  });
+
+  // P3: the script upload and the orphan check run before anything stops, so
+  // a failure there leaves the database serving.
+  it('writes the script and checks for an orphan before it stops the app or db', async () => {
+    const { sshRunScript } = await import('../../../src/lib/ssh.js');
+    const order: string[] = [];
+    vi.mocked(sshRunScript).mockImplementationOnce(async () => {
+      order.push(`script@${events.length}`);
+      return '';
+    });
+    await restore();
+    expect(order).toEqual(['script@0']);
+    expect(events.indexOf('orphanCheck')).toBeLessThan(events.indexOf('stopDb'));
+  });
+
+  it('a stop that fails removes the script and says the app may be down', async () => {
+    stopError = new Error('Cannot connect to the Docker daemon');
+    const err = await restore().catch((e) => e);
+    expect(err.message).toMatch(/stopping the app and db .* failed, so nothing was restored/);
+    expect(err.message.split('\n').at(-1)).toBe(
+      "  ssh root@1.2.3.4 'cd /opt/proj && docker compose ps'",
+    );
+    expect(events).toEqual(['orphanCheck', 'stopDb', 'rmScript']);
+  });
+
   it('an orphaned restore container from an earlier run is removed, and only it, before the fetch', async () => {
     orphan = true;
     await restore();
-    expect(events.slice(0, 4)).toEqual(['stopDb', 'orphanCheck', 'rmRunContainer', 'fetch']);
+    expect(events.slice(0, 4)).toEqual(['orphanCheck', 'rmRunContainer', 'stopDb', 'fetch']);
     expect(commands.find((c) => c.includes('docker rm -f'))).toBe('docker rm -f proj-db-restore');
   });
 

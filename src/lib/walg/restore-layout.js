@@ -171,7 +171,7 @@ export function assertRestoreFits({ requiredBytes, freeBytes, where, warn }) {
     throw new Error(
       `restore refused before stopping anything: staging this backup needs ${formatGiB(need)} free on ${where}, ` +
         `and it has ${formatGiB(freeBytes)}. The restore keeps the live database until the backup is proven, ` +
-        'so it needs room for both. Grow the volume, then rerun vibecarbon restore.',
+        'so it needs room for both. Grow the volume, then run the command again.',
     );
   }
 }
