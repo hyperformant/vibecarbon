@@ -4776,7 +4776,6 @@ export async function deliverAppImage({
   peerImageRef,
   onImageBuilt,
   state,
-  buildInputs,
   projectDir,
   projectName,
   domain,
@@ -4788,7 +4787,7 @@ export async function deliverAppImage({
   spinner,
   deps = {},
 }) {
-  const d = { buildAppImage, sideloadK3s, ...deps };
+  const d = { buildAppImage, sideloadK3s, buildK3sBuildInputs, ...deps };
   const plan = planImageDelivery({ role });
   if (plan.awaitPeerImage) {
     if (!peerImageRef) throw new Error('deployK3s: role standby requires peerImageRef');
@@ -4799,6 +4798,12 @@ export async function deliverAppImage({
   }
   let imageTag;
   if (plan.build) {
+    // The build gate folds the CONTENT of the build context (app source +
+    // Dockerfile) and of the VITE_* build args into its inputs — see
+    // buildK3sBuildInputs for why each one is load-bearing, and for the
+    // stale-image bug the coarse inputs alone shipped. Computed here, not in
+    // deployK3s, so a standby (which builds nothing) never hashes the source.
+    const buildInputs = d.buildK3sBuildInputs({ projectName, domain, masterPrivateIp, projectDir });
     if (!state.shouldSkip('k3s-build', buildInputs)) {
       state.startStep('k3s-build', buildInputs);
       spinner.start(`Building app image (${masterPrivateIp}:5000/...)`);
@@ -5155,16 +5160,6 @@ export async function deployK3s(options) {
 
   // 6-7. Deliver the app image: build + sideload it, or, on a k8s-ha standby,
   // take the primary's ref (deliverAppImage).
-  // The build gate folds the CONTENT of the build context (app source + Dockerfile)
-  // and of the VITE_* build args into its inputs — see buildK3sBuildInputs for
-  // why each one is load-bearing, and for the stale-image bug the coarse inputs
-  // alone shipped.
-  const buildInputs = buildK3sBuildInputs({
-    projectName: options.projectName,
-    domain: options.domain,
-    masterPrivateIp,
-    projectDir,
-  });
   // The sideload targets: every node.
   const sshTargets = [`root@${masterIp}`];
   if (dbIp) sshTargets.push(`root@${dbIp}`);
@@ -5174,7 +5169,6 @@ export async function deployK3s(options) {
     peerImageRef: options.peerImageRef,
     onImageBuilt: options.onImageBuilt,
     state,
-    buildInputs,
     projectDir,
     projectName: options.projectName,
     domain: options.domain,

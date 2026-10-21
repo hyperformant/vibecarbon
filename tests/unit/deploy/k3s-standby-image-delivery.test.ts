@@ -20,17 +20,17 @@ function harness(role?: 'primary' | 'standby', extra: Record<string, unknown> = 
     isDirty: false,
   }));
   const sideloadK3s = vi.fn(async () => {});
+  const buildK3sBuildInputs = vi.fn(() => ({
+    projectName: 'quorum',
+    masterPrivateIp: '10.0.1.1',
+    sourceDigest: 'd',
+    buildArgsDigest: 'b',
+  }));
   const onImageBuilt = vi.fn();
   const args = {
     role,
     onImageBuilt,
     state: new StateTracker('quorum', `e4-${role ?? 'single'}`),
-    buildInputs: {
-      projectName: 'quorum',
-      masterPrivateIp: '10.0.1.1',
-      sourceDigest: 'd',
-      buildArgsDigest: 'b',
-    },
     projectDir: '/p',
     projectName: 'quorum',
     masterPrivateIp: '10.0.1.1',
@@ -39,10 +39,10 @@ function harness(role?: 'primary' | 'standby', extra: Record<string, unknown> = 
     khPath: '/kh',
     perfPrefix: `k3s.${role ?? 'x'}`,
     spinner: { start() {}, stop() {} },
-    deps: { buildAppImage, sideloadK3s },
+    deps: { buildAppImage, sideloadK3s, buildK3sBuildInputs },
     ...extra,
   };
-  return { args, buildAppImage, sideloadK3s, onImageBuilt };
+  return { args, buildAppImage, sideloadK3s, buildK3sBuildInputs, onImageBuilt };
 }
 
 describe('deliverAppImage', () => {
@@ -57,6 +57,15 @@ describe('deliverAppImage', () => {
     expect(h.buildAppImage).not.toHaveBeenCalled();
     expect(h.sideloadK3s).not.toHaveBeenCalled();
     expect(h.onImageBuilt).not.toHaveBeenCalled();
+  });
+
+  it('standby: never hashes the app source (no build gate, no build inputs)', async () => {
+    const h = harness('standby', {
+      masterPrivateIp: '10.120.0.3',
+      peerImageRef: Promise.resolve('10.110.0.2:5000/quorum:t1'),
+    });
+    await deliverAppImage(h.args);
+    expect(h.buildK3sBuildInputs).not.toHaveBeenCalled();
   });
 
   it('standby: a failed primary rejects with its message, nothing built', async () => {
@@ -80,6 +89,13 @@ describe('deliverAppImage', () => {
     const h = harness('primary');
     await expect(deliverAppImage(h.args)).resolves.toBe('10.0.1.1:5000/quorum:built');
     expect(h.sideloadK3s).toHaveBeenCalledTimes(1);
+    expect(h.buildK3sBuildInputs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectDir: '/p',
+        projectName: 'quorum',
+        masterPrivateIp: '10.0.1.1',
+      }),
+    );
     expect(h.onImageBuilt).toHaveBeenCalledExactlyOnceWith('10.0.1.1:5000/quorum:built');
     h.onImageBuilt.mockClear();
     await deliverAppImage(h.args); // same state: the k3s-build gate skips

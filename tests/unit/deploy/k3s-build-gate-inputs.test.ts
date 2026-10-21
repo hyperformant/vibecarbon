@@ -354,15 +354,20 @@ describe('deployK3s wires the content-aware gate end to end', () => {
   it('feeds buildK3sBuildInputs into the k3s-build skip-gate', () => {
     expect(deployBody.indexOf('export async function deployK3s(')).toBe(0);
     expect(deliverBody.indexOf('export async function deliverAppImage(')).toBe(0);
-    const gateCall = deployBody.slice(deployBody.indexOf('const buildInputs ='));
-    const call = gateCall.slice(0, gateCall.indexOf('});'));
-    expect(call).toContain('buildK3sBuildInputs({');
+    // deployK3s no longer hashes the source: a standby builds nothing, so the
+    // inputs are computed inside deliverAppImage's build branch.
+    expect(deployBody).not.toContain('buildK3sBuildInputs(');
+    const buildBranch = deliverBody.slice(deliverBody.indexOf('if (plan.build) {'));
+    const call = buildBranch.slice(0, buildBranch.indexOf('});'));
+    expect(call).toContain('d.buildK3sBuildInputs({');
     // The digest is computed FROM the tree the build is handed — the same
     // `projectDir` that deliverAppImage hands buildAppImage.
     expect(call).toContain('projectDir');
-    const deliverCall = gateCall.slice(gateCall.indexOf('await deliverAppImage({'));
+    expect(deliverBody.indexOf('d.buildK3sBuildInputs(')).toBeGreaterThan(
+      deliverBody.indexOf('plan.awaitPeerImage'),
+    );
+    const deliverCall = deployBody.slice(deployBody.indexOf('await deliverAppImage({'));
     const deliverArgs = deliverCall.slice(0, deliverCall.indexOf('});'));
-    expect(deliverArgs).toContain('buildInputs,');
     expect(deliverArgs).toContain('projectDir,');
     expect(deliverBody).toContain("state.shouldSkip('k3s-build', buildInputs)");
   });

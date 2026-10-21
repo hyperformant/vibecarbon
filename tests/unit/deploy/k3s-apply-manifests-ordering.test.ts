@@ -1123,7 +1123,7 @@ describe('applyK3sManifests image delivery by role', () => {
     const args = { ...baseArgs(makeProjectDir()), role: 'primary' };
     await applyK3sManifests(args);
     expect(dockerPushes()).toHaveLength(1);
-    expect(sshTunnels().length).toBeGreaterThan(0);
+    expect(sshTunnels()).toHaveLength(1);
   });
 });
 
