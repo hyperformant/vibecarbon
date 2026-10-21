@@ -114,6 +114,14 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   };
 });
 
+// The fenced cutover's remote steps (compose-scale-fence.test.ts covers them).
+vi.mock('../../../src/lib/deploy/compose/scale-cutover.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubScaleCutover(await orig()),
+);
+vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubDemote(await orig()),
+);
+
 vi.mock('../../../src/lib/build.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return { ...actual, getGHCRCredentials: async () => ({}) };

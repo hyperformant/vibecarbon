@@ -21,14 +21,16 @@ import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
+import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
-import { saveProjectConfig } from './lib/config.js';
+import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import { useDnsChallenge } from './lib/deploy/acme.js';
 import { RECONCILE_FLAGS_SED, STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
 import { collectComposeBuildArgs } from './lib/deploy/compose/build-args.js';
-import { composePsqlRunner } from './lib/deploy/compose/ha.js';
+import { composePsqlRunner, demoteComposeWalgRole } from './lib/deploy/compose/ha.js';
+import { composeHaStackOf } from './lib/deploy/compose/ha-role-swap.js';
 import {
   backupCompose,
   dockerLoginOnServer,
@@ -41,6 +43,13 @@ import {
   startComposeStack,
   waitForSSH,
 } from './lib/deploy/compose/index.js';
+import {
+  fenceComposePrimary,
+  rejoinComposeStandby,
+  removeComposeBackupCron,
+  rollbackComposeCutover,
+  writeComposeReplicationOverlay,
+} from './lib/deploy/compose/scale-cutover.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
@@ -67,13 +76,13 @@ import { providerFor, providerIdFor, resolveProviderToken } from './lib/provider
 import { pollUntil } from './lib/retry.js';
 import { assertPersistedRoleTypes, planK8sScaleChanges } from './lib/scale-plan.js';
 import { buildComposeTypeOptions, buildSimpleTypeOptions } from './lib/server-types.js';
+import { enabledAddonNames } from './lib/services/standby-policy.js';
 import { sshRun, sshRunScript } from './lib/ssh.js';
 import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
 import { buildRecoveryConfig, renderRecoveryConf } from './lib/walg/recovery-config.js';
 import {
   backupCredentialVars,
   readEnvBaseBackups,
-  resolveRestoreBase,
   resolveS3Config,
 } from './lib/walg/restore-base.js';
 import { LINEAGE_RE } from './lib/walg/restore-layout.js';
@@ -89,7 +98,7 @@ const SPEC = {
   summary: 'Scale worker nodes and instance sizes',
   description: [
     'What you can change:',
-    '  Compose / Compose HA   VPS server type (blue-green; zero downtime)',
+    '  Compose / Compose HA   VPS server type (blue-green; the app pauses for the cutover)',
     '  Kubernetes             Worker / master / database server types (in-place)',
     '  Kubernetes             Worker bounds (autoscaler floor + ceiling)',
   ].join('\n'),
@@ -318,7 +327,9 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   p.log.info(
     `This will create a new ${c.bold(newType)} server, migrate data, and destroy the old one.`,
   );
-  p.log.info('Your application stays online during the migration (zero downtime).');
+  p.log.info(
+    'Your app pauses while its database moves, from the write fence to the DNS flip. Scale prints how long.',
+  );
 
   const confirmed =
     options.yes ||
@@ -556,20 +567,71 @@ export function shouldUpdateApexDns(server) {
   return server?.role !== 'standby';
 }
 
-/**
- * The backup skips a standby's arm expects (compose-backup.sh BACKUP_RESULT
- * reasons): a standby never pushes into the canonical prefix.
- */
-const STANDBY_BACKUP_SKIPS = new Set(['standby-role', 'in-recovery']);
+/** `<n>s` (or `<m>m <s>s`) for a measured pause. */
+function formatPause(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  return total < 60 ? `${total}s` : `${Math.floor(total / 60)}m ${total % 60}s`;
+}
 
-async function scaleServers(ctx) {
+const firstLineOf = (err) => String(err?.message ?? err).split('\n')[0];
+
+/** A promise with its resolve/reject in hand: the standby arm waits on the primary arm. */
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  // The standby arm may never await it (it failed first); no unhandled rejection.
+  promise.catch(() => {});
+  return { promise, resolve, reject };
+}
+
+/**
+ * Create a replacement server for `server` (step 2): user_data front-loads
+ * ufw + unattended-upgrades during boot so setupServer below is a ~2s marker
+ * probe (Hetzner) or the provider-owned cloud-init budget (DigitalOcean).
+ * @returns {Promise<string|number>} the new server's id
+ */
+async function createReplacementServer(ctx, server, s) {
+  const { provider, Provider, newType, region, sshKeyId, projectName, environment } = ctx;
+  const newServerName = `${projectName}-${environment}${server.role ? `-${server.role}` : ''}-new`;
+  s.start(`Creating new ${c.bold(newType)} server...`);
+  const createServerArgs = await buildReplacementServerArgs(Provider, {
+    name: newServerName,
+    serverType: newType,
+    region: server.region || region,
+    sshKeyId,
+    // Per-SERVER, not per-env: compose-ha gives each node its own firewall
+    // (one per Pulumi stack). `envConfig.firewallId` was read here for
+    // months and never written by anything, so every replacement server was
+    // built with `firewalls: []` — unfirewalled — while the old, firewalled
+    // server was deleted underneath it.
+    firewallId: server.firewallId,
+    projectName,
+    environment,
+  });
+  const { id: newServerId } = await perfAsync('scale.createNewServer', async () =>
+    provider.createServer(createServerArgs),
+  );
+  s.stop(`New server created (id: ${newServerId})`);
+  return newServerId;
+}
+
+/**
+ * Bring a replacement server up to a running stack (steps 3-6): online, Docker
+ * ready, the old server's .env and app.env replayed, registry logins, the app
+ * image, and compose up. On compose-ha the replication overlay is written
+ * first, so the stack starts with the db's 5433 publish and the repl-gateway.
+ * Touches the old server only to read its configuration.
+ * @returns {Promise<string>} the new server's public IP
+ */
+async function prepareReplacementServer(ctx, server, newServerId, s) {
   const {
     tier,
     provider,
     Provider,
-    newType,
-    region,
-    sshKeyId,
     envConfig,
     projectName,
     environment,
@@ -579,335 +641,407 @@ async function scaleServers(ctx) {
     dnsChallenge,
     dnsProvider,
     apiToken,
-    targetServers,
   } = ctx;
+  // 3. Wait for the server to come online, THEN resolve its IP off the
+  // object waitForServer resolves with — not off createServer's return.
+  // Hetzner assigns the IP synchronously at create time, but
+  // DigitalOcean assigns it asynchronously (create returns a 202 with an
+  // empty `networks` list), so reading it immediately after createServer
+  // raced DO's assignment and always produced null. DigitalOcean's
+  // waitForServer only resolves once the droplet is active AND has a
+  // public IP; Hetzner's only checks status (its IP is already present
+  // by then). Reading the IP off whichever object waitForServer
+  // resolves with is the correct read point for either shape (costs
+  // Hetzner one GET it didn't strictly need, in exchange for one code
+  // path instead of a provider branch here).
+  s.start('Waiting for server to come online...');
+  const readyServer = await perfAsync('scale.waitForServer', () =>
+    provider.waitForServer(newServerId),
+  );
+  const newIp = Provider.getPublicIP(readyServer);
+  const sshReady = await perfAsync('scale.waitForSSH', () => waitForSSH(newIp, sshKeyPath, 40));
+  if (!sshReady) {
+    throw new Error(`SSH did not become available on new server ${newIp}`);
+  }
+  s.stop(`Server online (${newIp})`);
 
-  // PREFLIGHT, before any server is built. Every server this replaces is
-  // restored from the backup bucket (the primary from its own pushed base, a
-  // standby from the primary's), which needs the live database's recorded
-  // lineage (C7) and the bucket's credentials locally. Both are local facts:
-  // refusing late deleted a server just provisioned, set up and started.
-  const liveLineage = envConfig.backup?.lineage;
-  if (!LINEAGE_RE.test(String(liveLineage ?? ''))) {
+  // 4. Provision new server. Timeout is provider-owned (see
+  // BaseProvider.CLOUD_INIT_READY_TIMEOUT_MS) — a bare call here would
+  // silently apply setupServer's Hetzner-calibrated 180s default to
+  // every provider, including one (DigitalOcean) whose base image
+  // installs Docker inside cloud-init and needs materially longer.
+  s.start('Configuring server...');
+  await perfAsync('scale.cloudInitReady', () =>
+    setupServer(newIp, sshKeyPath, Provider.CLOUD_INIT_READY_TIMEOUT_MS),
+  );
+  s.stop('Docker installed');
+
+  // Pull the OLD server's full /opt/<project>/.env so every variable the
+  // original deploy seeded (auth secret, S3 creds, SMTP, billing,
+  // Grafana, n8n encryption key, etc.) propagates to the new server.
+  //
+  // Why pull the whole file vs. re-deriving from project state:
+  //   - The original deploy merges values from many sources — project
+  //     `.env` + operator-secret env vars (S3 secret key) +
+  //     orchestrator-derived overrides (DOMAIN, ACME_EMAIL, SITE_URL,
+  //     S3_*, S3_BACKUP_BUCKET, PROJECT_NAME, APP_IMAGE).
+  //     Reconstructing all of those at scale time would mean re-prompting
+  //     for credentials and re-running the same envOverrides logic.
+  //   - The old server's `.env` already contains the resolved superset.
+  //     Replaying it onto the new server is the smallest patch that
+  //     preserves every value, including ones the project's local
+  //     `.env`/`.env.local` doesn't even know about.
+  //
+  // The on-disk form is whichever of bare / "…" / '…' the portable
+  // grammar (src/lib/dotenv.js) picked; parseDotenv decodes it so the
+  // values we pass to renderBundle as envOverrides are raw strings ready
+  // to be re-encoded on write. We then pin APP_IMAGE explicitly because that's
+  // the one value scale needs to keep stable across the migration; all
+  // other keys flow through transparently.
+  // Spinner over the OLD-server .env pull: this SSHes a *different* host
+  // (the one being retired) and, if it's slow/unreachable, sits on sshRun's
+  // 120s client timeout. Without a spinner that window is a dead cursor
+  // between "Docker installed" and "Copying project files" — the exact
+  // stalled-spinner symptom flaky links produce.
+  let oldEnv = {};
+  /** @type {Record<string, string> | null} */
+  let oldAppEnv = null;
+  s.start('Reading current server configuration...');
+  try {
+    const envText = await sshRun(server.ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`]);
+    s.stop('Current server configuration read');
+    // renderBundle re-encodes every override and throws on a value the
+    // portable grammar refuses (a hand-edited server value with a tab,
+    // or `'` beside `"`) — mid-scale, after the new server exists. Drop
+    // and warn here instead; the operator re-enters it with configure.
+    oldEnv = dropUnportableEnv(parseDotenv(envText));
+  } catch (err) {
+    // No fallback to the project's local `.env`: it lacks the values the
+    // deploy merged in, and its S3_* would be the account-wide pair, not
+    // the app's own key (security plan R2). Stop this server's scale; the
+    // caller's cleanup deletes the new server.
+    s.stop('Could not read old-server config, so this server is not scaled', 1);
     throw new Error(
-      `scale restores ${environment}'s database onto the new server from its backup lineage, and none is on record. ` +
-        `Run vibecarbon deploy ${environment} to record it, then rerun.`,
+      `could not read .env on the old server ${server.ip} (${err?.message ?? err}), so scale stopped rather than build the new server from the project .env. Run scale again once the old server answers.`,
     );
   }
-  const backupS3 = await resolveS3Config({
-    isCompose: true,
-    envName: environment,
-    projectName,
-    envConfig,
-    skipPrompts: !process.stdin.isTTY,
-  });
-  if (!backupS3) {
-    throw new Error(
-      `scale restores the new server from ${environment}'s backup bucket and needs its credentials: ` +
-        `export ${backupCredentialVars(envConfig)}, then rerun.`,
-    );
-  }
+  // Only once the .env replay is in hand. A failed app.env read throws
+  // here, so the caller deletes the new server instead of guessing a pair.
+  oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
+  const oldAppImage = oldEnv.APP_IMAGE || '';
 
-  const scaleSingleServer = async (server) => {
-    const label = isHATier(tier) ? `${server.role} (${server.ip})` : server.ip;
-    const s = spinner();
+  s.start('Copying project files...');
+  await perfAsync('scale.setupFiles', () =>
+    setupServerFiles(newIp, sshKeyPath, projectName, {
+      domain,
+      image: oldAppImage || `${projectName}:latest`,
+      observability: services.observability,
+      n8n: services.n8n,
+      metabase: services.metabase,
+      redis: services.redis,
+      // DNS-01: ship the Traefik override + re-affirm ACME_DNS_PROVIDER.
+      // The provider token flows through `envOverrides: oldEnv` (the
+      // original deploy baked it into the server .env); the token is
+      // passed too so a fresh bundle still works if the old server was
+      // unreachable. Same-token rule: native DNS reuses the compute
+      // token in hand.
+      dnsChallenge,
+      dnsProvider,
+      dnsToken: hasAutomatedDns(dnsProvider)
+        ? resolveDnsToken(dnsProvider, {
+            computeProviderId: providerIdFor(envConfig),
+            computeToken: apiToken,
+          })
+        : null,
+      // Replay every env var the old server had. renderBundle's existing
+      // envOverrides path overlays these onto the project-local `.env`
+      // baseline, then re-applies the deploy-time overrides (DOMAIN,
+      // SITE_URL, APP_IMAGE, etc.) on top — so the new bundle is a
+      // superset of both sources.
+      envOverrides: oldEnv,
+      appEnvReplay: oldAppEnv,
+    }),
+  );
+  s.stop('Project files copied');
 
-    // 1. Kick off the wal-g base backup of the OLD server in the BACKGROUND.
-    // It pushes straight to S3; step 7's restore on the NEW server fetches
-    // `latest`. The backup SSHes the OLD server while every step below
-    // provisions the NEW one — different hosts, zero contention — so its ~11s
-    // hides entirely behind provisioning instead of blocking the critical path
-    // up front. It is awaited just before restoreDb (the step that consumes it);
-    // a backup failure still aborts scale there (before any restore/destroy),
-    // and the try/catch below still cleans up the new server on that abort.
-    //
-    // The backup must report `pushed`: a skip (no S3 target, a db in recovery,
-    // another backup holding the lock) took no base, and restoring "latest"
-    // after one would rebuild the new server from an OLDER base and then
-    // destroy the old one. The one expected skip is a standby's own (it never
-    // writes the canonical prefix; its replacement restores from the
-    // primary's bases).
-    p.log.info(`Backing up ${label} in the background (wal-g base backup → S3)`);
-    const backupPromise = perfAsync('scale.backupOldServer', async () => {
-      const backup = await backupCompose(server.ip, sshKeyPath, projectName, {
-        retain: envConfig.backup?.retentionDays,
-      });
-      if (backup.result === 'pushed') return backup;
-      if (server.role === 'standby' && STANDBY_BACKUP_SKIPS.has(backup.reason)) return backup;
-      throw new Error(
-        `the backup of ${label} was skipped (${backup.reason}), so there is no new base to restore; scale stopped before anything was restored or destroyed`,
-      );
-    });
-    // Swallow the rejection HERE only to avoid an unhandled-rejection warning if
-    // a provisioning step throws before we reach the await; the real await at
-    // step 7 still observes the rejection and aborts.
-    backupPromise.catch(() => {});
-
-    // 2. Create new server. user_data front-loads ufw + unattended-upgrades
-    // during boot so setupServer is a ~2s marker-file probe below (Hetzner)
-    // or, for a provider whose base image installs Docker inside cloud-init
-    // (DigitalOcean), the materially larger provider-owned budget applied
-    // at step 4 below.
-    const newServerName = `${projectName}-${environment}${server.role ? `-${server.role}` : ''}-new`;
-    s.start(`Creating new ${c.bold(newType)} server...`);
-    const createServerArgs = await buildReplacementServerArgs(Provider, {
-      name: newServerName,
-      serverType: newType,
-      region: server.region || region,
-      sshKeyId,
-      // Per-SERVER, not per-env: compose-ha gives each node its own firewall
-      // (one per Pulumi stack). `envConfig.firewallId` was read here for
-      // months and never written by anything, so every replacement server was
-      // built with `firewalls: []` — unfirewalled — while the old, firewalled
-      // server was deleted underneath it.
-      firewallId: server.firewallId,
+  // compose-ha: the node's replication overlay, before its stack starts
+  // (reconcile.sh adds it when present). It binds the tunnel address of the
+  // stack the node was born as, which the replacement keeps.
+  if (isHATier(tier)) {
+    await writeComposeReplicationOverlay({
+      ip: newIp,
+      sshKeyPath,
       projectName,
-      environment,
+      stack: composeHaStackOf(server, projectName, environment) ?? server.role,
     });
-    const { id: newServerId } = await perfAsync('scale.createNewServer', async () =>
-      provider.createServer(createServerArgs),
+  }
+
+  // 4b. Registry auth (optional — avoids rate limits on shared Hetzner IPs).
+  // Scale pulls the same ghcr.io/<owner>/<repo>:<tag> the original
+  // deploy pushed, so ghcr credentials are required alongside Docker Hub.
+  const dockerHubCreds = resolveDockerHubCreds();
+  if (dockerHubCreds) {
+    s.start('Authenticating with Docker Hub...');
+    await perfAsync('scale.dockerLogin', () =>
+      dockerLoginOnServer(newIp, sshKeyPath, dockerHubCreds),
     );
-    s.stop(`New server created (id: ${newServerId})`);
-
-    // Wrap remaining steps in try/catch — if anything fails after creating the
-    // new server, delete it so we don't leave orphaned infrastructure behind.
-    let newIp;
-    try {
-      // 3. Wait for the server to come online, THEN resolve its IP off the
-      // object waitForServer resolves with — not off createServer's return.
-      // Hetzner assigns the IP synchronously at create time, but
-      // DigitalOcean assigns it asynchronously (create returns a 202 with an
-      // empty `networks` list), so reading it immediately after createServer
-      // raced DO's assignment and always produced null. DigitalOcean's
-      // waitForServer only resolves once the droplet is active AND has a
-      // public IP; Hetzner's only checks status (its IP is already present
-      // by then). Reading the IP off whichever object waitForServer
-      // resolves with is the correct read point for either shape (costs
-      // Hetzner one GET it didn't strictly need, in exchange for one code
-      // path instead of a provider branch here).
-      s.start('Waiting for server to come online...');
-      const readyServer = await perfAsync('scale.waitForServer', () =>
-        provider.waitForServer(newServerId),
-      );
-      newIp = Provider.getPublicIP(readyServer);
-      const sshReady = await perfAsync('scale.waitForSSH', () => waitForSSH(newIp, sshKeyPath, 40));
-      if (!sshReady) {
-        throw new Error(`SSH did not become available on new server ${newIp}`);
-      }
-      s.stop(`Server online (${newIp})`);
-
-      // 4. Provision new server. Timeout is provider-owned (see
-      // BaseProvider.CLOUD_INIT_READY_TIMEOUT_MS) — a bare call here would
-      // silently apply setupServer's Hetzner-calibrated 180s default to
-      // every provider, including one (DigitalOcean) whose base image
-      // installs Docker inside cloud-init and needs materially longer.
-      s.start('Configuring server...');
-      await perfAsync('scale.cloudInitReady', () =>
-        setupServer(newIp, sshKeyPath, Provider.CLOUD_INIT_READY_TIMEOUT_MS),
-      );
-      s.stop('Docker installed');
-
-      // Pull the OLD server's full /opt/<project>/.env so every variable the
-      // original deploy seeded (auth secret, S3 creds, SMTP, billing,
-      // Grafana, n8n encryption key, etc.) propagates to the new server.
-      //
-      // Why pull the whole file vs. re-deriving from project state:
-      //   - The original deploy merges values from many sources — project
-      //     `.env` + operator-secret env vars (S3 secret key) +
-      //     orchestrator-derived overrides (DOMAIN, ACME_EMAIL, SITE_URL,
-      //     S3_*, S3_BACKUP_BUCKET, PROJECT_NAME, APP_IMAGE).
-      //     Reconstructing all of those at scale time would mean re-prompting
-      //     for credentials and re-running the same envOverrides logic.
-      //   - The old server's `.env` already contains the resolved superset.
-      //     Replaying it onto the new server is the smallest patch that
-      //     preserves every value, including ones the project's local
-      //     `.env`/`.env.local` doesn't even know about.
-      //
-      // The on-disk form is whichever of bare / "…" / '…' the portable
-      // grammar (src/lib/dotenv.js) picked; parseDotenv decodes it so the
-      // values we pass to renderBundle as envOverrides are raw strings ready
-      // to be re-encoded on write. We then pin APP_IMAGE explicitly because that's
-      // the one value scale needs to keep stable across the migration; all
-      // other keys flow through transparently.
-      // Spinner over the OLD-server .env pull: this SSHes a *different* host
-      // (the one being retired) and, if it's slow/unreachable, sits on sshRun's
-      // 120s client timeout. Without a spinner that window is a dead cursor
-      // between "Docker installed" and "Copying project files" — the exact
-      // stalled-spinner symptom flaky links produce.
-      let oldEnv = {};
-      /** @type {Record<string, string> | null} */
-      let oldAppEnv = null;
-      s.start('Reading current server configuration...');
-      try {
-        const envText = await sshRun(server.ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`]);
-        s.stop('Current server configuration read');
-        // renderBundle re-encodes every override and throws on a value the
-        // portable grammar refuses (a hand-edited server value with a tab,
-        // or `'` beside `"`) — mid-scale, after the new server exists. Drop
-        // and warn here instead; the operator re-enters it with configure.
-        oldEnv = dropUnportableEnv(parseDotenv(envText));
-      } catch (err) {
-        // No fallback to the project's local `.env`: it lacks the values the
-        // deploy merged in, and its S3_* would be the account-wide pair, not
-        // the app's own key (security plan R2). Stop this server's scale; the
-        // catch below deletes the new server.
-        s.stop('Could not read old-server config, so this server is not scaled', 1);
-        throw new Error(
-          `could not read .env on the old server ${server.ip} (${err?.message ?? err}), so scale stopped rather than build the new server from the project .env. Run scale again once the old server answers.`,
-        );
-      }
-      // Only once the .env replay is in hand. A failed app.env read throws
-      // here, so the catch below deletes the new server instead of guessing
-      // a pair.
-      oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
-      const oldAppImage = oldEnv.APP_IMAGE || '';
-
-      s.start('Copying project files...');
-      await perfAsync('scale.setupFiles', () =>
-        setupServerFiles(newIp, sshKeyPath, projectName, {
-          domain,
-          image: oldAppImage || `${projectName}:latest`,
-          observability: services.observability,
-          n8n: services.n8n,
-          metabase: services.metabase,
-          redis: services.redis,
-          // DNS-01: ship the Traefik override + re-affirm ACME_DNS_PROVIDER.
-          // The provider token flows through `envOverrides: oldEnv` (the
-          // original deploy baked it into the server .env); the token is
-          // passed too so a fresh bundle still works if the old server was
-          // unreachable. Same-token rule: native DNS reuses the compute
-          // token in hand.
-          dnsChallenge,
-          dnsProvider,
-          dnsToken: hasAutomatedDns(dnsProvider)
-            ? resolveDnsToken(dnsProvider, {
-                computeProviderId: providerIdFor(envConfig),
-                computeToken: apiToken,
-              })
-            : null,
-          // Replay every env var the old server had. renderBundle's existing
-          // envOverrides path overlays these onto the project-local `.env`
-          // baseline, then re-applies the deploy-time overrides (DOMAIN,
-          // SITE_URL, APP_IMAGE, etc.) on top — so the new bundle is a
-          // superset of both sources.
-          envOverrides: oldEnv,
-          appEnvReplay: oldAppEnv,
+    s.stop('Docker Hub authenticated');
+  }
+  try {
+    const ghcrCreds = await getGHCRCredentials();
+    if (ghcrCreds?.username && ghcrCreds?.token) {
+      s.start('Authenticating with ghcr.io...');
+      await perfAsync('scale.ghcrLogin', () =>
+        dockerLoginOnServer(newIp, sshKeyPath, {
+          username: ghcrCreds.username,
+          token: ghcrCreds.token,
+          registry: 'ghcr.io',
         }),
       );
-      s.stop('Project files copied');
+      s.stop('ghcr.io authenticated');
+    }
+  } catch {
+    /* non-fatal: image may be public */
+  }
 
-      // 4b. Registry auth (optional — avoids rate limits on shared Hetzner IPs).
-      // Scale pulls the same ghcr.io/<owner>/<repo>:<tag> the original
-      // deploy pushed, so ghcr credentials are required alongside Docker Hub.
-      const dockerHubCreds = resolveDockerHubCreds();
-      if (dockerHubCreds) {
-        s.start('Authenticating with Docker Hub...');
-        await perfAsync('scale.dockerLogin', () =>
-          dockerLoginOnServer(newIp, sshKeyPath, dockerHubCreds),
-        );
-        s.stop('Docker Hub authenticated');
-      }
-      try {
-        const ghcrCreds = await getGHCRCredentials();
-        if (ghcrCreds?.username && ghcrCreds?.token) {
-          s.start('Authenticating with ghcr.io...');
-          await perfAsync('scale.ghcrLogin', () =>
-            dockerLoginOnServer(newIp, sshKeyPath, {
-              username: ghcrCreds.username,
-              token: ghcrCreds.token,
-              registry: 'ghcr.io',
-            }),
-          );
-          s.stop('ghcr.io authenticated');
-        }
-      } catch {
-        /* non-fatal: image may be public */
-      }
+  // 4c. Direct-mode image: build on the new server instead of sideloading.
+  //
+  // Original implementation piped `ssh old docker save | ssh new docker load`
+  // from the local shell — every image byte transited the local machine
+  // twice across the WAN, causing 16+ min hangs / timeouts on a ~500MB
+  // image during matrix runs. compose's `prod.yml` resets
+  // `build: !reset null`, so `docker compose up --build` can NOT rebuild
+  // it during the reconcile step — the image must already exist in the
+  // new server's daemon by the time compose pulls.
+  //
+  // buildRemote uses DOCKER_HOST=ssh://new and runs the build directly on
+  // the new server. BuildKit only ships the build context (~tens of MB
+  // of source), not the 500MB built image, so the data path is local →
+  // new (one short hop) instead of old → local → new (two long hops).
+  // Reuses the same code that does direct-mode deploy builds.
+  if (oldAppImage && isLocalOnlyImageTag(oldAppImage)) {
+    s.start(`Building image ${oldAppImage} on new server...`);
+    // Pass the VITE_* build args (same as deploy/HA). Vite inlines
+    // import.meta.env.VITE_* at build time, so without these the new
+    // server's frontend bundle ships empty client config (VITE_PUBLIC_URL,
+    // feature flags). Deploy
+    // (orchestrator.js) and HA (ha.js) already do this — scale did not.
+    const scaleBuildArgs = collectComposeBuildArgs(process.cwd(), { projectName, domain });
+    // Perf label renamed 2026-08-23: this wrapped buildRemote under the
+    // name 'scale.sideloadImage', which made the 08-23 RCA read DO's
+    // successful native build as a sideload and manufacture a
+    // provider divergence that did not exist. The label now says what
+    // runs. (Perf history: entries before this date under
+    // scale.sideloadImage on the direct path were builds.)
+    const built = await perfAsync('scale.remoteBuildImage', () =>
+      buildRemote(newIp, sshKeyPath, oldAppImage, process.cwd(), scaleBuildArgs),
+    );
+    // buildRemote returns false on failure (after its own retries). The app
+    // image is local-only, so if it isn't built on the new server, the
+    // `docker compose up` below pulls it and dies ~a minute later with
+    // "pull access denied / repository does not exist" — a confusing
+    // downstream symptom. Fail loudly here instead; this guard was missing
+    // (the HA deploy path has the equivalent check). RCA: e2e loop run #1.
+    if (!built) {
+      s.stop('Remote image build failed on new server', 1);
+      throw new Error(
+        `scale: failed to build local app image ${oldAppImage} on new server ${newIp} ` +
+          `(buildRemote exhausted its retries), aborting before compose up.`,
+      );
+    }
+    s.stop('Image built on new server');
+  }
 
-      // 4c. Direct-mode image: build on the new server instead of sideloading.
-      //
-      // Original implementation piped `ssh old docker save | ssh new docker load`
-      // from the local shell — every image byte transited the local machine
-      // twice across the WAN, causing 16+ min hangs / timeouts on a ~500MB
-      // image during matrix runs. compose's `prod.yml` resets
-      // `build: !reset null`, so `docker compose up --build` can NOT rebuild
-      // it during the reconcile step — the image must already exist in the
-      // new server's daemon by the time compose pulls.
-      //
-      // buildRemote uses DOCKER_HOST=ssh://new and runs the build directly on
-      // the new server. BuildKit only ships the build context (~tens of MB
-      // of source), not the 500MB built image, so the data path is local →
-      // new (one short hop) instead of old → local → new (two long hops).
-      // Reuses the same code that does direct-mode deploy builds.
-      if (oldAppImage && isLocalOnlyImageTag(oldAppImage)) {
-        s.start(`Building image ${oldAppImage} on new server...`);
-        // Pass the VITE_* build args (same as deploy/HA). Vite inlines
-        // import.meta.env.VITE_* at build time, so without these the new
-        // server's frontend bundle ships empty client config (VITE_PUBLIC_URL,
-        // feature flags). Deploy
-        // (orchestrator.js) and HA (ha.js) already do this — scale did not.
-        const scaleBuildArgs = collectComposeBuildArgs(process.cwd(), { projectName, domain });
-        // Perf label renamed 2026-08-23: this wrapped buildRemote under the
-        // name 'scale.sideloadImage', which made the 08-23 RCA read DO's
-        // successful native build as a sideload and manufacture a
-        // provider divergence that did not exist. The label now says what
-        // runs. (Perf history: entries before this date under
-        // scale.sideloadImage on the direct path were builds.)
-        const built = await perfAsync('scale.remoteBuildImage', () =>
-          buildRemote(newIp, sshKeyPath, oldAppImage, process.cwd(), scaleBuildArgs),
-        );
-        // buildRemote returns false on failure (after its own retries). The app
-        // image is local-only, so if it isn't built on the new server, the
-        // `docker compose up` below pulls it and dies ~a minute later with
-        // "pull access denied / repository does not exist" — a confusing
-        // downstream symptom. Fail loudly here instead; this guard was missing
-        // (the HA deploy path has the equivalent check). RCA: e2e loop run #1.
-        if (!built) {
-          s.stop('Remote image build failed on new server', 1);
+  // 5. Pull app + base images from ghcr.io / Docker Hub
+  // No local build — image was built by CI (see Lever 1).
+  s.start('Pulling images on server...');
+  await perfAsync('scale.pullImages', () =>
+    pullComposeImages(newIp, sshKeyPath, projectName, services),
+  );
+  s.stop('Docker images ready');
+
+  // 6. Start compose stack on new server
+  s.start('Starting services on new server...');
+  await perfAsync('scale.composeUp', () =>
+    startComposeStack(newIp, sshKeyPath, projectName, services),
+  );
+  s.stop('Services started');
+  return newIp;
+}
+
+/** The servers[] entry for a replacement: the original entry, with what changed. */
+function replacementEntry(ctx, server, { newServerId, newIp }) {
+  const { projectName, environment, region, newType } = ctx;
+  // We spread the original `server` entry first so any field we don't
+  // explicitly touch carries over verbatim. We deliberately keep
+  // `server.name` (the role label and stack identity) because failover.js,
+  // diagnose.js, destroy.js and the compose-ha stack lookup (wgIpOf) all read
+  // it. The provider's name goes into `providerServerName` so destroy's
+  // name-fallback can locate the VPS.
+  return {
+    ...server,
+    id: newServerId,
+    providerServerName: `${projectName}-${environment}${server.role ? `-${server.role}` : ''}`,
+    ip: newIp,
+    region: server.region || region,
+    serverType: newType,
+  };
+}
+
+/** Rename the new server to its permanent name (non-critical: it works with the temporary one). */
+async function renameReplacement(ctx, entry) {
+  try {
+    await ctx.provider.renameServer(entry.id, entry.providerServerName);
+  } catch {
+    // Non-critical — server works fine with the temporary name
+  }
+}
+
+/** Delete a replacement server that never took over, or say how to. */
+async function deleteUnusedReplacement(provider, newServerId, newIp, oldStillRuns) {
+  p.log.info(`Cleaning up new server ${newIp || 'unknown'} (id: ${newServerId})...`);
+  try {
+    await provider.deleteServer(newServerId);
+    p.log.info(oldStillRuns);
+  } catch (cleanupErr) {
+    p.log.error(
+      `Failed to delete new server ${newServerId}: ${cleanupErr.message}. Delete it manually.`,
+    );
+  }
+}
+
+/**
+ * compose/compose-ha `scale-servers` effect: blue-green replace every target
+ * server.
+ *
+ * The PRIMARY arm (single-server compose, or the compose-ha node resolvePrimary
+ * names) moves the database with writes fenced (scale-cutover.js):
+ *   provision and start the new server; fence the old one (writers stopped,
+ *   database read-only, WAL archived through the fence); push the final base;
+ *   restore THAT base on the new server; demote the old server's WALG_ROLE and
+ *   drop its backup cron; flip DNS; recreate services; push the first base on
+ *   the new timeline (C8: after the flip, before the old server goes); install
+ *   the backup cron; destroy the old server.
+ * Any failure before the DNS flip rolls the old server back and deletes the
+ * new one (C19). After the flip there is no rollback: the command fails and
+ * names what is left where.
+ *
+ * The STANDBY arm (compose-ha) never restores: it provisions the replacement,
+ * waits for the primary arm when one runs, and reseeds it from the primary
+ * (rejoinComposeStandby). A primary-only scale reseeds the existing standby
+ * from the new primary the same way. A reseed that is not proven streaming
+ * marks replication degraded.
+ *
+ * The arms run in parallel (their provisioning overlaps); the apex DNS update
+ * runs on exactly ONE arm (shouldUpdateApexDns): the old "benign
+ * last-writer race" both 409'd against Hetzner's non-atomic upsert and could
+ * leave apex pointing at the pilot-light standby (run 31970876667).
+ */
+async function scaleServers(ctx) {
+  const {
+    tier,
+    provider,
+    envConfig,
+    projectName,
+    environment,
+    sshKeyPath,
+    domain,
+    services,
+    dnsChallenge,
+    apiToken,
+    targetServers,
+  } = ctx;
+  const ha = isHATier(tier);
+
+  // The live primary, by role (resolvePrimary refuses an ambiguous pair). On
+  // single-server compose the one server is the primary arm.
+  const primaryEntry = ha ? (resolvePrimary(envConfig, { env: environment })?.entry ?? null) : null;
+  const isPrimaryArm = (server) =>
+    !ha || server === primaryEntry || (!!primaryEntry?.ip && server.ip === primaryEntry.ip);
+  const primaryTarget = targetServers.find(isPrimaryArm);
+  const standbyTarget = ha ? targetServers.find((sv) => !isPrimaryArm(sv)) : undefined;
+  if (ha && !primaryEntry) {
+    throw new Error(`scale could not tell which server is ${environment}'s primary`);
+  }
+
+  // PREFLIGHT, before any server is built. The primary's replacement is
+  // restored from the base the fenced old primary pushes, which needs the
+  // live database's recorded lineage (C7) and the bucket's credentials
+  // locally. Both are local facts: refusing late deleted a server just
+  // provisioned, set up and started. A standby-only scale restores nothing.
+  let backupS3 = null;
+  if (primaryTarget) {
+    const liveLineage = envConfig.backup?.lineage;
+    if (!LINEAGE_RE.test(String(liveLineage ?? ''))) {
+      throw new Error(
+        `scale restores ${environment}'s database onto the new server from its backup lineage, and none is on record. ` +
+          `Run vibecarbon deploy ${environment} to record it, then rerun.`,
+      );
+    }
+    backupS3 = await resolveS3Config({
+      isCompose: true,
+      envName: environment,
+      projectName,
+      envConfig,
+      skipPrompts: !process.stdin.isTTY,
+    });
+    if (!backupS3) {
+      throw new Error(
+        `scale restores the new server from ${environment}'s backup bucket and needs its credentials: ` +
+          `export ${backupCredentialVars(envConfig)}, then rerun.`,
+      );
+    }
+  }
+
+  // The writers the fence stops: the app and the enabled primary-only add-ons.
+  const addonNames = enabledAddonNames({
+    ...envConfig,
+    services: { ...(envConfig.services ?? {}), ...(services ?? {}) },
+  });
+  // The standby arm waits on this: the new primary, once it serves.
+  const primaryReady = primaryTarget && standbyTarget ? deferred() : null;
+
+  const scalePrimaryArm = async (server) => {
+    const label = ha ? `${server.role} (${server.ip})` : server.ip;
+    const s = spinner();
+    const newServerId = await createReplacementServer(ctx, server, s);
+    let newIp;
+    // What the cutover has done to the old server, for the rollback.
+    let cutover = null;
+    let demoted = false;
+    let cronRemoved = false;
+    // Set when the DNS flip starts: from here on the new server is the
+    // primary, and nothing rolls back.
+    let flipped = false;
+    try {
+      newIp = await prepareReplacementServer(ctx, server, newServerId, s);
+
+      // 7. Fence writes on the old server: writers stopped, database
+      //    read-only, WAL switched and archived through the fence. From here
+      //    the old server takes no writes, so the base pushed next holds them all.
+      s.start(`Pausing writes on ${label} (write fence)...`);
+      cutover = await perfAsync('scale.fenceOldPrimary', () =>
+        fenceComposePrimary({ ip: server.ip, sshKeyPath, projectName, services: addonNames }),
+      );
+      s.stop(`Writes paused on ${label}; WAL archived through ${cutover.switchWal}`);
+
+      // 8. The final base of the old server. It must report `pushed`: a skip
+      //    (no S3 target, another backup holding the lock) took no base.
+      s.start(`Taking the final base backup of ${label}...`);
+      const retain = envConfig.backup?.retentionDays;
+      const finalBackup = await perfAsync('scale.backupOldServer', async () => {
+        const backup = await backupCompose(server.ip, sshKeyPath, projectName, { retain });
+        if (backup.result !== 'pushed') {
           throw new Error(
-            `scale: failed to build local app image ${oldAppImage} on new server ${newIp} ` +
-              `(buildRemote exhausted its retries), aborting before compose up.`,
+            `the final backup of ${label} was skipped (${backup.reason}), so there is no base to restore; scale stopped before anything was restored or destroyed`,
           );
         }
-        s.stop('Image built on new server');
-      }
-
-      // 5. Pull app + base images from ghcr.io / Docker Hub
-      // No local build — image was built by CI (see Lever 1).
-      s.start('Pulling images on server...');
-      await perfAsync('scale.pullImages', () =>
-        pullComposeImages(newIp, sshKeyPath, projectName, services),
-      );
-      s.stop('Docker images ready');
-
-      // 6. Start compose stack on new server
-      s.start('Starting services on new server...');
-      await perfAsync('scale.composeUp', () =>
-        startComposeStack(newIp, sshKeyPath, projectName, services),
-      );
-      s.stop('Services started');
-
-      // 7. Restore database on new server from S3 via wal-g. The base backup +
-      //    WAL were pushed straight to S3 by step 1's backupCompose, so the
-      //    restore fetches the newest base directly — no local archive to transfer.
-      //    S3 credentials come from the db container's env (sourced from .env)
-      //    so no opts are needed; restoreCompose handles its own verify loop
-      //    (pg_isready + pg_is_in_recovery() = f) before returning.
-      // First make sure the OLD server's base backup finished landing in S3
-      // (kicked off in the background at the top of this fn). This await is the
-      // ONLY consumer of backupPromise — a backup failure surfaces here and, via
-      // the enclosing try/catch, deletes the new server before we restore or
-      // destroy anything. On the happy path provisioning already hid its cost.
-      s.start('Finalizing old-server backup before restore...');
-      const oldServerBackup = await backupPromise;
-      s.stop(
-        oldServerBackup.result === 'pushed'
-          ? `Database backed up (base backup pushed: ${oldServerBackup.name})`
-          : `Standby backup skipped (${oldServerBackup.reason}); it restores from the primary's base backups`,
-      );
-      if (oldServerBackup.retentionError) {
+        return backup;
+      });
+      s.stop(`Database backed up (base backup pushed: ${finalBackup.name})`);
+      if (finalBackup.retentionError) {
         p.log.warn(
-          `The base backup is in the bucket, but pruning old backups failed: ${oldServerBackup.retentionError}`,
+          `The base backup is in the bucket, but pruning old backups failed: ${finalBackup.retentionError}`,
         );
       }
 
@@ -915,17 +1049,15 @@ async function scaleServers(ctx) {
       // writable proof, the ACME reset and the post-restore service recreate.
       const remoteDir = `/opt/${projectName}`;
 
-      // The restore fetches a NAMED base backup, resolved here from the backup
-      // bucket's stop sentinels: the newest, read after the push above landed
-      // (the same pick the server-side LATEST made). Needs the bucket's
-      // credentials locally; without them nothing is restored or destroyed.
-      s.start('Resolving the base backup to restore...');
+      // 9. The restore fetches the base just pushed, BY NAME. The listing
+      //    reads the live database's own lineage (C7), never a resolved one:
+      //    an unrestored prior lineage is a restore question, not scale's.
+      //    Finding the name in it proves the base landed in that lineage.
+      s.start('Finding the pushed base backup in the backup bucket...');
       const listing = await readEnvBaseBackups({
         envName: environment,
         envConfig,
         projectName,
-        // The live database's own lineage (C7), never a resolved one: an
-        // unrestored prior lineage is a restore question, not scale's.
         live: true,
         // Resolved by the preflight, before anything was provisioned.
         s3Config: backupS3,
@@ -936,7 +1068,12 @@ async function scaleServers(ctx) {
             `export ${backupCredentialVars(envConfig)}, then rerun.`,
         );
       }
-      const base = resolveRestoreBase(listing.backups, 'latest');
+      const base = listing.backups.find((b) => b.name === finalBackup.name);
+      if (!base) {
+        throw new Error(
+          `the pushed base ${finalBackup.name} is not in lineage ${listing.lineage} of the backup bucket, so scale stopped before anything was restored`,
+        );
+      }
       s.stop(`Restoring ${base.name}`);
 
       s.start('Restoring database from S3 via wal-g...');
@@ -961,31 +1098,35 @@ async function scaleServers(ctx) {
       );
       s.stop('Database restored');
 
-      // 8. The first base backup on the restored timeline
-      //    (post-promote-backup.js), primary arm only: a standby's replacement
-      //    never writes the canonical prefix. restoreCompose has retired
-      //    .vc-prev, so the base holds the restored cluster only. A failure
-      //    throws into the cleanup below: the new server goes, the old one stays.
-      if (server.role !== 'standby') {
-        s.start('Pushing the first base backup on the restored timeline...');
-        const { name } = await pushBaseBackupAfterPromote({
-          tier: 'compose',
-          ip: newIp,
-          sshKeyPath,
-          projectName,
-          envName: environment,
-          retain: envConfig.backup?.retentionDays,
-        });
-        s.stop(`Base backup ${name} pushed on the restored timeline`);
+      // 10. Demote the old server so it never archives next to the new
+      //     primary (demoteComposeWalgRole recreates its db with
+      //     WALG_ROLE=standby), and drop its backup cron. Marked before each
+      //     call: a half-applied demote is rolled back too.
+      s.start(`Demoting ${label} (wal-g write-guard, backup cron)...`);
+      demoted = true;
+      const demotedOk = await demoteComposeWalgRole({
+        oldPrimaryIp: server.ip,
+        sshKeyPath,
+        projectName,
+      });
+      if (!demotedOk) {
+        throw new Error(
+          `could not demote ${label}'s wal-g write-guard, so it could archive next to the new server`,
+        );
       }
+      cronRemoved = true;
+      await removeComposeBackupCron(server.ip, sshKeyPath);
+      s.stop(`${label} demoted`);
 
-      // 9a. Update DNS to the new server. On HTTP-01 this must happen BEFORE
-      // recreating services (Traefik challenges the A record on startup; a
-      // stale record fails all challenges with a 30+ min retry). On DNS-01 the
-      // ordering is irrelevant — lego validates a TXT record, not the A record.
-      // Gated to ONE writer: the standby's replacement never touches apex
-      // (see shouldUpdateApexDns — the two-writer upsert race, run
-      // 31970876667).
+      // 11. Update DNS to the new server: the point of no return. On HTTP-01
+      // this must happen BEFORE recreating services (Traefik challenges the A
+      // record on startup; a stale record fails all challenges with a 30+ min
+      // retry). On DNS-01 the ordering is irrelevant — lego validates a TXT
+      // record, not the A record. Gated to ONE writer: the standby's
+      // replacement never touches apex (see shouldUpdateApexDns — the
+      // two-writer upsert race, run 31970876667). A DNS update that fails
+      // part way leaves the records unknown, so it is already past the flip.
+      flipped = true;
       if (domain && shouldUpdateApexDns(server)) {
         s.start('Updating DNS to new server...');
         await perfAsync('scale.updateDNS', () => updateDNS(envConfig, apiToken, domain, newIp));
@@ -1002,8 +1143,14 @@ async function scaleServers(ctx) {
           s.stop(dnsOk ? 'DNS propagated' : 'DNS propagation timed out (proceeding anyway)');
         }
       }
+      const pausedMs = Date.now() - cutover.fencedAt.getTime();
+      ctx.writePauseMs = pausedMs;
+      p.log.info(
+        `writes paused from ${cutover.fencedAt.toISOString()} until DNS flip (${formatPause(pausedMs)})`,
+      );
+      server._replacement = replacementEntry(ctx, server, { newServerId, newIp });
 
-      // 9b. HTTP-01 only: reset ACME state so Traefik retries challenges with
+      // 12a. HTTP-01 only: reset ACME state so Traefik retries challenges with
       // the corrected DNS — step 6's startComposeStack ran before the A record
       // moved, so failed challenges are cached as errors in letsencrypt_data.
       // DNS-01 has no such cached HTTP-01 failure to clear (and wiping acme.json
@@ -1018,7 +1165,7 @@ async function scaleServers(ctx) {
         );
       }
 
-      // 9c. Recreate all services after restore so they reconnect to the restored DB.
+      // 12b. Recreate all services after restore so they reconnect to the restored DB.
       // Using --force-recreate (not down+up) avoids a Docker network removal error
       // when feature containers on separate compose files are still holding the
       // network open. depends_on ordering is still respected.
@@ -1049,8 +1196,25 @@ async function scaleServers(ctx) {
         { timeout: 600_000 },
       );
       s.stop('All services running');
+      primaryReady?.resolve({ ip: newIp, entry: server });
 
-      // 11. Re-setup backup cron if configured. wal-g reads its S3 config from
+      // 13. The first base backup on the restored timeline
+      //     (post-promote-backup.js, C8): after the flip, before the old
+      //     server goes. restoreCompose has retired .vc-prev, so the base
+      //     holds the restored cluster only. A failure fails the scale and
+      //     keeps the old server (demoted).
+      s.start('Pushing the first base backup on the restored timeline...');
+      const { name } = await pushBaseBackupAfterPromote({
+        tier: 'compose',
+        ip: newIp,
+        sshKeyPath,
+        projectName,
+        envName: environment,
+        retain: envConfig.backup?.retentionDays,
+      });
+      s.stop(`Base backup ${name} pushed on the restored timeline`);
+
+      // 14. Re-setup backup cron if configured. wal-g reads its S3 config from
       //     the db container's env (rendered into .env at deploy), so the cron
       //     just runs compose-backup.sh on schedule — no separate S3 plumbing.
       if (envConfig.backup) {
@@ -1058,102 +1222,185 @@ async function scaleServers(ctx) {
         p.log.info('Backup cron restored on new server');
       }
 
-      // 12. Destroy old server
+      // 15. Destroy the old server: it took no write since the fence, and its
+      //     final base is restored on the new one.
       s.start(`Destroying old server ${server.ip}...`);
       await perfAsync('scale.destroyOldServer', () => provider.deleteServer(server.id));
       s.stop(`Old server destroyed: ${server.ip}`);
-
-      // Rename new server to permanent name
-      const permanentName = `${projectName}-${environment}${server.role ? `-${server.role}` : ''}`;
-      try {
-        await provider.renameServer(newServerId, permanentName);
-      } catch {
-        // Non-critical — server works fine with the temporary name
-      }
-
-      // Update server entry in the config. We spread the original `server`
-      // entry first so any field we don't explicitly touch (e.g.
-      // `dbIp` on shapes that have it) carries over verbatim — then
-      // override the fields that actually changed during the migration.
-      // We deliberately keep `server.name` (the role label —
-      // 'master' / 'primary' / 'standby') because failover.js, diagnose.js,
-      // and destroy.js all filter on it (e.g. `s.name === 'master'`). The
-      // Hetzner-API name goes into `providerServerName` so destroy's
-      // name-fallback can locate the VPS.
-      server._replacement = {
-        ...server,
-        id: newServerId,
-        providerServerName: permanentName,
-        ip: newIp,
-        region: server.region || region,
-        serverType: newType,
-      };
+      await renameReplacement(ctx, server._replacement);
     } catch (scaleErr) {
-      // Clean up the new server so it doesn't become orphaned infrastructure.
-      p.log.error(`Scale failed: ${scaleErr.message}`);
-      p.log.info(`Cleaning up new server ${newIp || 'unknown'} (id: ${newServerId})...`);
-      try {
-        await provider.deleteServer(newServerId);
-        p.log.info('New server deleted. Old server is still running.');
-      } catch (cleanupErr) {
-        p.log.error(
-          `Failed to delete new server ${newServerId}: ${cleanupErr.message}. Delete it manually.`,
+      if (!flipped) {
+        p.log.error(`Scale failed: ${scaleErr.message}`);
+        // C19: put the old server back the way it served.
+        if (cutover) {
+          p.log.info(`Rolling ${label} back: it takes writes again...`);
+          const back = await rollbackComposeCutover({
+            ip: server.ip,
+            sshKeyPath,
+            projectName,
+            stopped: cutover.stopped,
+            demoted,
+            cronRemoved,
+            backupConfig: envConfig.backup,
+          });
+          if (!back.ok) {
+            for (const problem of back.problems) p.log.error(problem);
+          }
+        }
+        await deleteUnusedReplacement(
+          provider,
+          newServerId,
+          newIp,
+          'New server deleted. Old server is still running.',
         );
+        throw scaleErr;
       }
-      throw scaleErr;
+      // Past the flip: the new server serves, nothing rolls back.
+      throw new Error(
+        `scale cut ${label} over to the new server ${newIp}, which serves now, then failed: ` +
+          `${firstLineOf(scaleErr)}. The old server ${server.ip} (id ${server.id}) is kept, ` +
+          'write-fenced and demoted; delete it once the new server is healthy.',
+      );
     }
   };
 
-  const ha = isHATier(tier);
-  if (ha && targetServers.length > 1) {
-    // Wrap parallel scale in a perfTimer so the wall-clock win is visible
-    // in perf_substep alongside the per-server scale.* timings.
-    await perfAsync('scale.ha.fan', () => Promise.all(targetServers.map(scaleSingleServer)));
-  } else {
-    for (const server of targetServers) {
-      await scaleSingleServer(server);
+  const scaleStandbyArm = async (server) => {
+    const s = spinner();
+    const newServerId = await createReplacementServer(ctx, server, s);
+    let newIp;
+    let primary;
+    try {
+      newIp = await prepareReplacementServer(ctx, server, newServerId, s);
+      // The primary it reseeds from: the new one once the primary arm serves,
+      // else the live one.
+      primary = primaryReady
+        ? await primaryReady.promise
+        : { ip: primaryEntry.ip, entry: primaryEntry };
+      if (envConfig.backup) {
+        // compose-backup.sh skips on a standby (WALG_ROLE); the cron is there
+        // for when a failover promotes this node.
+        await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup);
+      }
+    } catch (scaleErr) {
+      p.log.error(`Scale of the standby failed: ${scaleErr.message}`);
+      await deleteUnusedReplacement(
+        provider,
+        newServerId,
+        newIp,
+        'New standby server deleted. The old standby is still running.',
+      );
+      throw scaleErr;
+    }
+    server._replacement = replacementEntry(ctx, server, { newServerId, newIp });
+    s.start(`Reseeding the new standby ${newIp} from the primary ${primary.ip}...`);
+    const replication = await rejoinComposeStandby({
+      environment,
+      projectName,
+      envConfig,
+      primary,
+      standby: { ip: newIp, entry: server },
+      sshKeyPath,
+      provider,
+    });
+    s.stop(
+      replication === 'streaming'
+        ? 'New standby streaming from the primary'
+        : 'New standby not proven streaming',
+    );
+    s.start(`Destroying old standby ${server.ip}...`);
+    await perfAsync('scale.destroyOldServer', () => provider.deleteServer(server.id));
+    s.stop(`Old standby destroyed: ${server.ip}`);
+    await renameReplacement(ctx, server._replacement);
+  };
+
+  const arms = [
+    // A primary arm that fails anywhere releases the standby arm's wait.
+    ...(primaryTarget
+      ? [
+          scalePrimaryArm(primaryTarget).catch((err) => {
+            primaryReady?.reject(err);
+            throw err;
+          }),
+        ]
+      : []),
+    ...(standbyTarget ? [scaleStandbyArm(standbyTarget)] : []),
+  ];
+  // allSettled: every arm finishes its own cleanup before the effect returns.
+  const settled = ha
+    ? await perfAsync('scale.ha.fan', () => Promise.allSettled(arms))
+    : await Promise.allSettled(arms);
+  const failure = settled.find((r) => r.status === 'rejected');
+
+  // The primary moved and the standby was not replaced (a primary-only
+  // scale, or a standby arm that stopped): the standby streamed from the old
+  // primary. Reseed it from the new one.
+  if (ha && primaryTarget?._replacement && !standbyTarget?._replacement) {
+    const standbyEntry = (envConfig.servers ?? []).find((sv) => sv.role === 'standby');
+    if (standbyEntry?.ip) {
+      // Never throws: an unproven reseed marks replication degraded and warns.
+      await rejoinComposeStandby({
+        environment,
+        projectName,
+        envConfig,
+        primary: { ip: primaryTarget._replacement.ip, entry: primaryTarget },
+        standby: { ip: standbyEntry.ip, entry: standbyEntry },
+        sshKeyPath,
+        provider,
+      });
     }
   }
+
+  if (failure) {
+    // A server that took over is recorded even though the scale failed, so
+    // every later command reaches the server that serves.
+    if (targetServers.some((sv) => sv._replacement)) saveScaledServers(ctx);
+    throw failure.reason;
+  }
+}
+
+/**
+ * Write the scaled servers into the CURRENT .vibecarbon.json: loaded fresh,
+ * because a reseed's proof (ha.systemIdentifier) or an unproven one
+ * (replication: degraded) was saved during the scale, and the in-memory env
+ * config predates both. `extra` lands on the env entry.
+ */
+function saveScaledServers(ctx, extra = {}) {
+  const { environment, envConfig, projectConfig, servers } = ctx;
+  const fresh = loadProjectConfig() ?? projectConfig;
+  const freshEnv = fresh?.environments?.[environment] ?? envConfig;
+  const byOldId = new Map(
+    servers.filter((sv) => sv._replacement).map((sv) => [sv.id, sv._replacement]),
+  );
+  const updatedServers = (freshEnv.servers ?? servers).map((sv) => byOldId.get(sv.id) ?? sv);
+  saveProjectConfig({
+    ...fresh,
+    environments: {
+      ...fresh.environments,
+      [environment]: { ...freshEnv, ...extra, servers: updatedServers },
+    },
+  });
 }
 
 /** compose/compose-ha `update-project-config` effect: persist the scaled
  *  server identities (+ unified serverType, when every server was scaled)
  *  into .vibecarbon.json. */
 async function scaleUpdateComposeConfig(ctx) {
-  const { environment, envConfig, projectConfig, servers, targetServers, newType } = ctx;
-  const updatedServers = servers.map((server) => {
-    if (server._replacement) {
-      const replacement = { ...server._replacement };
-      delete server._replacement;
-      return replacement;
-    }
-    return server;
-  });
-
+  const { servers, targetServers, newType } = ctx;
   const allScaled = servers.every((s) => !s.id || targetServers.some((t) => t.id === s.id));
-  const updatedConfig = {
-    ...projectConfig,
-    environments: {
-      ...projectConfig.environments,
-      [environment]: {
-        ...envConfig,
-        ...(allScaled && { serverType: newType }),
-        servers: updatedServers,
-      },
-    },
-  };
-  saveProjectConfig(updatedConfig);
+  saveScaledServers(ctx, allScaled ? { serverType: newType } : {});
+  for (const server of servers) delete server._replacement;
 }
 
 /** compose/compose-ha `finish-outro` effect. */
 async function scaleFinishComposeOutro(ctx) {
-  const { currentType, newType, provider, projectName, environment } = ctx;
+  const { currentType, newType, provider, projectName, environment, writePauseMs } = ctx;
   // Replacement servers are new droplets — re-file them into the dedicated
   // cloud project where the provider needs post-hoc assignment (DO).
   await runProjectAssignment(provider, { projectName, environment });
-  p.outro(
-    `${c.success('Scale complete!')} ${c.bold(currentType)} → ${c.bold(newType)} (zero downtime)`,
-  );
+  const pause = Number.isFinite(writePauseMs)
+    ? ` (writes paused ${formatPause(writePauseMs)})`
+    : '';
+  p.outro(`${c.success('Scale complete!')} ${c.bold(currentType)} → ${c.bold(newType)}${pause}`);
 }
 
 /**

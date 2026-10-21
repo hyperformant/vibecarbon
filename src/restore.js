@@ -24,6 +24,7 @@ import { resolveEnvContext } from './lib/cli/env-context.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
+import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
@@ -819,7 +820,7 @@ export async function runComposeRestore({
   // it says why and names `vibecarbon deploy`. A failover still in flight never
   // gets here: the restore refuses up front.
   if (envConfig.deployMode === 'compose-ha') {
-    const primary = envConfig.servers?.find((sv) => sv.role === 'primary');
+    const primary = resolvePrimary(envConfig, { env: envName })?.entry;
     const standby = envConfig.servers?.find((sv) => sv.role === 'standby');
     if (
       detectComposeHaRoleSwap({ projectName, environment: envName, envConfig }) ||

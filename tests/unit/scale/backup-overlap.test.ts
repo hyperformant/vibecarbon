@@ -1,18 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 
-// Finding #2 (compose scale): the wal-g base backup of the OLD server must be
-// kicked off in the BACKGROUND at the top of the per-server migration and only
-// awaited just before the restore that consumes it — NOT awaited up front on the
-// critical path. The backup SSHes the OLD server while every provisioning step
-// (create / wait / provision / copy / pull / compose-up) touches the NEW server:
-// different hosts, zero contention, so its ~11s hides entirely behind
-// provisioning. Correctness is preserved: the restore still waits for the backup
-// to finish landing in S3, and a backup failure still aborts before restore.
+// Compose scale's final base backup of the OLD server (H6, B6). It used to be
+// kicked off in the background at the top of the per-server migration, which
+// hid its cost behind provisioning but left the old server taking writes after
+// the base: every one of them was lost when the old server was destroyed. It
+// now runs after the write fence (scale-cutover.js), once the new server is
+// provisioned and started, and the restore consumes exactly that base.
 //
-// We assert the two orderings that distinguish "overlapped" from "serial":
-//   1. createNewServer runs BEFORE the backup resolves  → backup is overlapped
-//   2. the backup resolves BEFORE restore is invoked    → correctness preserved
+// We assert:
+//   1. the new server is provisioned and started BEFORE the fence;
+//   2. the backup runs AFTER the fence and resolves BEFORE the restore;
+//   3. a skipped or failed backup aborts before any restore.
 
 const h = vi.hoisted(() => {
   const events: string[] = [];
@@ -58,6 +57,11 @@ vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
   };
 });
 
+vi.mock('../../../src/lib/config.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, loadProjectConfig: () => null, saveProjectConfig: () => {} };
+});
+
 vi.mock('@clack/prompts', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -100,6 +104,16 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   };
 });
 
+// The fenced cutover's remote steps (compose-scale-fence.test.ts covers them).
+vi.mock('../../../src/lib/deploy/compose/scale-cutover.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubScaleCutover(await orig(), () =>
+    h.events.push('fence'),
+  ),
+);
+vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubDemote(await orig()),
+);
+
 vi.mock('../../../src/lib/build.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return { ...actual, getGHCRCredentials: async () => ({}) };
@@ -113,6 +127,7 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
 
 function makeCtx() {
+  const server = { ip: '1.1.1.1', id: 'old-id' };
   const provider = {
     createServer: vi.fn(async () => {
       h.events.push('create');
@@ -144,13 +159,15 @@ function makeCtx() {
       dnsChallenge: true, // skip the HTTP-01 ACME reset path
       dnsProvider: null,
       apiToken: 'tok',
-      targetServers: [{ ip: '1.1.1.1', id: 'old-id' }],
+      projectConfig: { projectName: 'myapp', environments: {} },
+      servers: [server],
+      targetServers: [server],
     },
   };
 }
 
-describe('scaleServers — background backup overlap (finding #2)', () => {
-  it('kicks the OLD-server backup off in the background and only awaits it before restore', async () => {
+describe('scaleServers — the final backup runs after the write fence (H6)', () => {
+  it('provisions and starts the new server, fences, then backs up the old one before the restore', async () => {
     h.events.length = 0;
     const { ctx } = makeCtx();
 
@@ -162,12 +179,14 @@ describe('scaleServers — background backup overlap (finding #2)', () => {
     expect(h.events).toContain('backup:resolved');
     expect(h.events).toContain('restore:call');
 
-    // 1. Overlap: the new server is created before the backup finishes — i.e.
-    //    provisioning did NOT block on the backup. (Serial code resolves the
-    //    backup before it ever calls createServer, failing this.)
-    expect(h.events.indexOf('create')).toBeLessThan(h.events.indexOf('backup:resolved'));
+    // 1. The new server is provisioned and its stack started before the fence:
+    //    the write pause never includes provisioning.
+    expect(h.events.indexOf('create')).toBeLessThan(h.events.indexOf('composeUp'));
+    expect(h.events.indexOf('composeUp')).toBeLessThan(h.events.indexOf('fence'));
 
-    // 2. Correctness: the backup completes before the restore that consumes it.
+    // 2. The backup runs after the fence (it holds every write), and completes
+    //    before the restore that consumes it.
+    expect(h.events.indexOf('fence')).toBeLessThan(h.events.indexOf('backup:call'));
     expect(h.events.indexOf('backup:resolved')).toBeLessThan(h.events.indexOf('restore:call'));
   });
 
@@ -189,7 +208,7 @@ describe('scaleServers — background backup overlap (finding #2)', () => {
     }
   });
 
-  it('still aborts (and cleans up the new server) if the background backup fails', async () => {
+  it('still aborts (and cleans up the new server) if the final backup fails', async () => {
     h.events.length = 0;
     const { provider, ctx } = makeCtx();
     const compose = await import('../../../src/lib/deploy/compose/index.js');
@@ -220,7 +239,7 @@ describe('scaleServers — background backup overlap (finding #2)', () => {
     expect(push).toBeLessThan(h.events.indexOf('delete:old-id'));
   });
 
-  it('a post-restore push that skips fails the scale: the new server goes, the old one stays', async () => {
+  it('a post-restore push that skips fails the scale after the cutover: no rollback, both servers stay (C8)', async () => {
     h.events.length = 0;
     h.backupIps.length = 0;
     const { provider, ctx } = makeCtx();
@@ -236,8 +255,8 @@ describe('scaleServers — background backup overlap (finding #2)', () => {
       await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
         'promoted, but the first base backup on the new timeline failed: the backup was skipped (in-recovery); run vibecarbon backup prod now',
       );
-      expect(provider.deleteServer).toHaveBeenCalledWith('new-id');
-      expect(provider.deleteServer).not.toHaveBeenCalledWith('old-id');
+      // The new server serves; the old one is kept (demoted) for the operator.
+      expect(provider.deleteServer).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }

@@ -37,7 +37,6 @@ const ALLOWED: Record<string, string> = {
     'role writer: swapComposeHaRoles reads the old roles in order to flip them, one separable step',
   'src/scale.js':
     'the resize menu offers primary and standby as labelled choices; it does not act on "the" primary',
-  'src/restore.js': 'Task 7 converts: the compose-ha reseed block still reads the roles by hand',
   'src/lib/cloudflare-dns.js':
     'setupHA receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
   'src/lib/digitalocean-dns.js':
