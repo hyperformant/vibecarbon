@@ -28,16 +28,19 @@ export const APP_NAMESPACE = 'vibecarbon';
  * The primary is whatever resolvePrimary names (k8s-ha: `ha.primary.masterIp`;
  * compose-ha: the `role: 'primary'` entry), so this block can never disagree
  * with backup, restore or failover about which node is live. The standby is
- * the `ha.standby.masterIp` entry, else the `role: 'standby'` one. The
+ * the `ha.standby.masterIp` entry, else the `role: 'standby'` one. No
+ * name or position fallback: with the primary resolved from recorded roles, a
+ * standby that carries neither an address nor a role is unknown, and guessing
+ * one is how a status row ends up reporting the retired node. The
  * returned entries keep their own `name`, so the Servers block can still find
  * its rollup by name.
  *
  * @param {object} envConfig
  * @returns {object[]} `[primary, standby]`, minus any side that could not be resolved
  */
-function pickHaPair(envConfig) {
+function pickHaPair(envConfig, env) {
   const servers = envConfig.servers || [];
-  const primaryIp = resolvePrimary(envConfig)?.ip;
+  const primaryIp = resolvePrimary(envConfig, { env })?.ip;
   const standbyIp = envConfig.ha?.standby?.masterIp;
   const primary = servers.find((s) => s.ip === primaryIp);
   const standby =
@@ -57,18 +60,18 @@ function pickHaPair(envConfig) {
  * @param {{deployMode?: string, servers?: Array<{name?: string, ip?: string, role?: string}>, ha?: {primary?: {masterIp?: string}, standby?: {masterIp?: string}}}} envConfig
  * @returns {Array<{serverName: string, ip: string, kind: 'compose'|'k8s'}>}
  */
-export function planContainerTargets(envConfig) {
+export function planContainerTargets(envConfig, { env } = {}) {
   const servers = envConfig?.servers || [];
   if (servers.length === 0) return [];
   const mode = envConfig.deployMode || 'compose';
   const target = (s, kind) => ({ serverName: s.name || s.ip || '', ip: s.ip || '', kind });
 
-  if (mode === 'compose') return [target(resolvePrimary(envConfig) ?? {}, 'compose')];
-  if (mode === 'compose-ha') return pickHaPair(envConfig).map((s) => target(s, 'compose'));
-  if (mode === 'kubernetes-ha') return pickHaPair(envConfig).map((s) => target(s, 'k8s'));
+  if (mode === 'compose') return [target(resolvePrimary(envConfig, { env }) ?? {}, 'compose')];
+  if (mode === 'compose-ha') return pickHaPair(envConfig, env).map((s) => target(s, 'compose'));
+  if (mode === 'kubernetes-ha') return pickHaPair(envConfig, env).map((s) => target(s, 'k8s'));
   // kubernetes: the control plane, which resolvePrimary names (the master
   // entry, or the only server for configs that never recorded roles).
-  return [target(resolvePrimary(envConfig) ?? {}, 'k8s')];
+  return [target(resolvePrimary(envConfig, { env }) ?? {}, 'k8s')];
 }
 
 // Waiting reasons a pod passes through on its way up (not a retry
@@ -302,7 +305,7 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
     timeoutMs: deps.timeoutMs ?? 10_000,
   };
   if (!projectName) return null;
-  const targets = planContainerTargets(envConfig);
+  const targets = planContainerTargets(envConfig, { env: envName });
   if (targets.length === 0) return null;
 
   const keyPath = d.getSSHKeyPath(envName);

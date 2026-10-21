@@ -4,10 +4,16 @@
  * would back up, restore into, or reseed from the retired node.
  */
 export class AmbiguousPrimaryError extends Error {
-  /** @param {string} message */
-  constructor(message) {
-    super(message);
+  /**
+   * @param {string} message - what is wrong with the recorded roles
+   * @param {string} [env] - the environment, named in the remedy
+   */
+  constructor(message, env) {
+    super(
+      `${env ? `${env}: ` : ''}${message} Run \`vibecarbon deploy ${env ?? '<env>'}\` to record the server roles.`,
+    );
     this.name = 'AmbiguousPrimaryError';
+    this.env = env;
   }
 }
 
@@ -26,12 +32,13 @@ export class AmbiguousPrimaryError extends Error {
  * same persisted roles.
  *
  * @param {object} envConfig
- * @returns {{ip: string, name?: string}|null} null when nothing is deployed yet
+ * @param {{env?: string}} [opts] env names the environment in an AmbiguousPrimaryError
+ * @returns {{ip: string, name?: string, entry?: object}|null} entry is the matching servers[] record null when nothing is deployed yet
  * @throws {AmbiguousPrimaryError} HA env with zero or two primaries, or disagreeing records
  */
-export function resolvePrimary(envConfig) {
+export function resolvePrimary(envConfig, { env } = {}) {
   const servers = envConfig?.servers ?? [];
-  const entry = (sv) => (sv.name ? { ip: sv.ip ?? '', name: sv.name } : { ip: sv.ip ?? '' });
+  const entry = (sv) => ({ ip: sv.ip ?? '', ...(sv.name && { name: sv.name }), entry: sv });
   const rolePrimaries = servers.filter((sv) => sv.role === 'primary');
   const haIp = envConfig?.ha?.primary?.masterIp;
 
@@ -39,11 +46,13 @@ export function resolvePrimary(envConfig) {
     if (rolePrimaries.length > 1) {
       throw new AmbiguousPrimaryError(
         `${rolePrimaries.length} servers claim role 'primary'; cannot tell which holds the live database.`,
+        env,
       );
     }
     if (rolePrimaries[0] && rolePrimaries[0].ip !== haIp) {
       throw new AmbiguousPrimaryError(
         `servers[] names ${rolePrimaries[0].ip} as primary but ha.primary is ${haIp}; the role swap was only half saved.`,
+        env,
       );
     }
     const match = servers.find((sv) => sv.ip === haIp);
@@ -54,12 +63,14 @@ export function resolvePrimary(envConfig) {
     envConfig?.deployMode === 'compose-ha' ||
     envConfig?.ha?.enabled === true ||
     !!envConfig?.secondaryRegion ||
+    !!envConfig?.ha?.failoverRegion ||
     servers.some((sv) => sv.role === 'standby');
   if (isHa) {
     if (servers.length === 0) return null;
     if (rolePrimaries.length !== 1) {
       throw new AmbiguousPrimaryError(
         `expected exactly one server with role 'primary', found ${rolePrimaries.length}.`,
+        env,
       );
     }
     return entry(rolePrimaries[0]);

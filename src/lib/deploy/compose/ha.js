@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { reapChallengeRecords } from '../../acme-challenge.js';
 import { exitCancelled, exitDeclined } from '../../cli/exit-guard.js';
+import { resolvePrimary } from '../../cli/resolve-primary.js';
 import { c } from '../../colors.js';
 import { loadProjectConfig, saveProjectConfig } from '../../config.js';
 import { environmentServerNames } from '../../destroy/server-naming.js';
@@ -1744,7 +1745,11 @@ export function composeFailoverAbortBackend({
     writeFence = writeComposeBackupFence,
   } = deps;
   const servers = envConfig.servers || [];
-  const primaryServer = servers.find((sv) => sv.role === 'primary');
+  // Zero primaries keeps the refusal below; two throw from the resolver
+  // instead of first-wins.
+  const primaryServer = servers.some((sv) => sv.role === 'primary')
+    ? resolvePrimary(envConfig, { env: envName })?.entry
+    : undefined;
   const standbyServer = servers.find((sv) => sv.role === 'standby');
   if (!primaryServer?.ip || !standbyServer?.ip) {
     throw new FailoverRefusedError(
@@ -1945,7 +1950,11 @@ export async function failoverComposeHA(
   } = deps ?? {};
 
   const servers = envConfig.servers || [];
-  const primaryServer = servers.find((s) => s.role === 'primary');
+  // Zero primaries keeps the "could not identify" exit below; two throw from
+  // the resolver instead of first-wins.
+  const primaryServer = servers.some((s) => s.role === 'primary')
+    ? resolvePrimary(envConfig, { env: envName })?.entry
+    : undefined;
   const standbyServer = servers.find((s) => s.role === 'standby');
   const writerServices = failoverFenceServices(envConfig);
   const promotionServices = composePromotionServices(enabledAddonNames(envConfig));

@@ -51,19 +51,22 @@ const composeHa = () => ({
 
 describe('resolvePrimary', () => {
   it('k8s-ha: ha.primary.masterIp', () => {
-    expect(resolvePrimary(k8sHa())).toEqual({ ip: A, name: 'primary' });
+    expect(resolvePrimary(k8sHa())).toMatchObject({ ip: A, name: 'primary' });
   });
 
   it('compose-ha: the role primary, whatever the array order', () => {
     const env = composeHa();
     env.servers.reverse();
-    expect(resolvePrimary(env)).toEqual({ ip: A, name: 'app-prod-primary' });
+    expect(resolvePrimary(env)).toMatchObject({ ip: A, name: 'app-prod-primary' });
   });
 
   it('single-node modes: the only server, or the k8s master', () => {
-    expect(resolvePrimary({ deployMode: 'compose', servers: [{ name: 'master', ip: A }] })).toEqual(
-      { ip: A, name: 'master' },
-    );
+    expect(
+      resolvePrimary({ deployMode: 'compose', servers: [{ name: 'master', ip: A }] }),
+    ).toMatchObject({
+      ip: A,
+      name: 'master',
+    });
     expect(
       resolvePrimary({
         deployMode: 'kubernetes',
@@ -72,7 +75,7 @@ describe('resolvePrimary', () => {
           { name: 'master', role: 'master', ip: A },
         ],
       }),
-    ).toEqual({ ip: A, name: 'master' });
+    ).toMatchObject({ ip: A, name: 'master' });
   });
 
   it('nothing deployed yet is null, not a throw', () => {

@@ -14,13 +14,30 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = process.cwd();
 
-/** `servers[0]`, `servers?.[0]`, `envConfig.servers?.[0]`. */
-const POSITIONAL_PRIMARY_RE = /\bservers\s*\??\.?\s*\[\s*0\s*\]/;
+/**
+ * The ways to pick "the primary" out of a servers list by hand:
+ *   - `servers[0]`, `servers?.[0]`, `envConfig.servers?.[0]`
+ *   - `servers.at(0)`
+ *   - `servers.find(...)` whose predicate tests role === 'primary' or
+ *     name === 'primary' | 'master' (also `resizableServers` and the like)
+ */
+const POSITIONAL_PRIMARY_RE = /\bservers\s*\??\.?\s*\[\s*0\s*\]/i;
+const AT_ZERO_RE = /\bservers\s*\??\.at\(\s*0\s*\)/i;
+const FIND_PRIMARY_RE =
+  /servers\s*\??\.find\([^\n]*(role\s*===\s*('primary'|PRIMARY\b)|name\s*===\s*'(primary|master)')/i;
+const PATTERNS = [POSITIONAL_PRIMARY_RE, AT_ZERO_RE, FIND_PRIMARY_RE];
 
-/** Files allowed to read servers[0], each with why index 0 is right there. */
+/** Files allowed to pick a server by hand, each with why that is not "find the primary". */
 const ALLOWED: Record<string, string> = {
   'src/lib/cli/resolve-primary.js':
     'the resolver itself: single-node modes (compose, kubernetes) have exactly one master, so index 0 is the only server by definition',
+  'src/lib/deploy/compose/ha-role-swap.js':
+    'role classifier: reads the persisted promoted/retired roles of a swapped pair, the data the resolver also reads',
+  'src/lib/deploy/compose/ha.js':
+    'role writer: swapComposeHaRoles reads the old roles in order to flip them, one separable step',
+  'src/scale.js':
+    'the resize menu offers primary and standby as labelled choices; it does not act on "the" primary',
+  'src/restore.js': 'Task 7 converts: the compose-ha reseed block still reads the roles by hand',
   'src/lib/cloudflare-dns.js':
     'setupHA receives an explicit [primary, standby] list from the deploy effect that just provisioned them; it is a target list, not a lookup',
   'src/lib/digitalocean-dns.js':
@@ -49,7 +66,9 @@ const isComment = (line: string) => /^\s*(\/\/|\*|\/\*)/.test(line);
 function hits(file: string): number[] {
   return readFileSync(file, 'utf-8')
     .split('\n')
-    .flatMap((line, i) => (!isComment(line) && POSITIONAL_PRIMARY_RE.test(line) ? [i + 1] : []));
+    .flatMap((line, i) =>
+      !isComment(line) && PATTERNS.some((re) => re.test(line)) ? [i + 1] : [],
+    );
 }
 
 describe('no positional servers[0] primary under src/', () => {

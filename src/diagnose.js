@@ -36,6 +36,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
+import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig } from './lib/config.js';
 import { isComposeTier, resolveTier } from './lib/deploy/tier-registry.js';
@@ -864,10 +865,28 @@ export async function dispatchDiagnose(ctx, deps = {}) {
   return 'k8s';
 }
 
+/**
+ * The control plane to probe: the role primary's master. Roles flip at a
+ * failover while server names never do, so a name match diagnoses the retired
+ * cluster. Ambiguous roles skip the host probes with the reason on stderr
+ * (a diagnostic must still run on a broken config).
+ *
+ * @param {object|undefined} envCfg
+ * @param {string} envName
+ * @returns {string|null}
+ */
+export function controlplaneIpOf(envCfg, envName) {
+  try {
+    return resolvePrimary(envCfg, { env: envName })?.ip || null;
+  } catch (err) {
+    if (!(err instanceof AmbiguousPrimaryError)) throw err;
+    console.error(`host probes skipped: ${err.message}`);
+    return null;
+  }
+}
+
 function readControlplaneIp(envName) {
-  const envCfg = loadProjectConfig()?.environments?.[envName];
-  const masterServer = envCfg?.servers?.find((s) => s.name === 'master' || s.name === 'primary');
-  return masterServer?.ip ?? null;
+  return controlplaneIpOf(loadProjectConfig()?.environments?.[envName], envName);
 }
 
 export async function run(args) {

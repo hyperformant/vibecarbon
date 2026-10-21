@@ -73,7 +73,7 @@ export async function resolveEnvContext({
 
   if (!serverIp) return { envName, envConfig };
 
-  const ip = resolvePrimary(envConfig)?.ip;
+  const ip = resolvePrimary(envConfig, { env: envName })?.ip;
   if (!ip) {
     p.log.error(`No server IP found for environment '${envName}'.`);
     process.exit(1);

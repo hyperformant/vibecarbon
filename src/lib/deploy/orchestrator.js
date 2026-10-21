@@ -474,8 +474,8 @@ export function assertBucketReady(result, role) {
 const isHaTier = (tier) => tier === 'compose-ha' || tier === 'k8s-ha';
 
 /** The node the persisted roles call primary, as the write-fence marker names it. */
-function rolePrimaryOf(_tier, envConfig) {
-  return resolvePrimary(envConfig);
+function rolePrimaryOf(_tier, envConfig, environment) {
+  return resolvePrimary(envConfig, { env: environment });
 }
 
 /** psql on the role primary over the tier's transport (the write-fence checks). */
@@ -611,9 +611,11 @@ export async function executeDeployment(args, gatheredConfig) {
   // this deploy restarts the app onto it (write-fence.js). Unreachable or
   // failing here is a warning: the post-bring-up probe below checks again.
   if (isHaTier(tier) && envConfig?.ha?.writeFence) {
-    const rolePrimary = rolePrimaryOf(tier, envConfig);
-    if (rolePrimary?.ip) {
-      try {
+    // Inside the try: `vibecarbon deploy` is the remedy an ambiguous-roles
+    // error recommends, so that error can never be what stops this deploy.
+    try {
+      const rolePrimary = rolePrimaryOf(tier, envConfig, environment);
+      if (rolePrimary?.ip) {
         await liftStrandedWriteFence({
           environment,
           envConfig,
@@ -621,11 +623,11 @@ export async function executeDeployment(args, gatheredConfig) {
           exec: await rolePrimaryPsql(tier, environment, projectConfig.projectName, rolePrimary.ip),
           log: (line) => p.log.info(line),
         });
-      } catch (err) {
-        p.log.warn(
-          `${String(err?.message ?? err).split('\n')[0]}; deploy checks the primary again after bring-up`,
-        );
       }
+    } catch (err) {
+      p.log.warn(
+        `${String(err?.message ?? err).split('\n')[0]}; deploy checks the primary again after bring-up`,
+      );
     }
   }
   // Fail fast with install guidance if host-side tools (pulumi, ssh) are
@@ -1504,7 +1506,7 @@ export async function executeDeployment(args, gatheredConfig) {
     // reads back into the single-server deployResult shape below.
     const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
     // Single-node compose: its one server, whichever record resolvePrimary names.
-    const composeServer = envConfig.servers?.find((sv) => sv.ip === resolvePrimary(envConfig)?.ip);
+    const composeServer = resolvePrimary(envConfig, { env: environment })?.entry;
     const composeCtx = {
       ...deployCtx,
       sshKeyPath,
@@ -2032,13 +2034,10 @@ export async function executeDeployment(args, gatheredConfig) {
     // K8s: in addition to the master entry, persist one entry per node
     // role (db + worker-N) so post-deploy commands (scale, destroy,
     // e2e verify-scale) can enumerate every IP without having to
-    // re-derive worker IPs from Pulumi outputs. Master stays at index 0 —
-    // a handful of compose-only paths read `envConfig.servers?.[0]`, and
-    // preserving that contract is cheap. `dbIp` is also kept on the
-    // master entry so failover.js can read `servers[0].dbIp` without
-    // first iterating to find the db entry — redundant with the
-    // dedicated db entry below, but keeps the existing failover
-    // path working.
+    // re-derive worker IPs from Pulumi outputs. The master entry is found
+    // by its role through resolvePrimary, never by position. `dbIp` is also
+    // kept on the master entry so a reader of that entry needs no second
+    // lookup for the db node; it duplicates the dedicated db entry below.
     servers.push({
       name: 'master',
       ...(deployResult.serverId &&

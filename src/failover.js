@@ -237,7 +237,7 @@ export function identifyServers(envName, envConfig, _projectConfig) {
   const standbyRegion = envConfig.secondaryRegion || envConfig.ha?.failoverRegion;
 
   if (servers.length >= 2 && primaryRegion && standbyRegion) {
-    const primaryIp = resolvePrimary(envConfig)?.ip;
+    const primaryIp = resolvePrimary(envConfig, { env: envName })?.ip;
     const primary = servers.find((s) => s.ip === primaryIp);
     const standby = servers.find((s) => s.role === 'standby') || servers.find((s) => s !== primary);
 

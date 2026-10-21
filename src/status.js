@@ -495,6 +495,22 @@ export function replicationSlotRow(slot, envName) {
   return { level: 'ok', text };
 }
 
+/**
+ * The reasons behind rejected Promise.allSettled entries, by check name, or
+ * null when every check settled. A rejected check is a finding, not an absence.
+ *
+ * @param {Record<string, PromiseSettledResult<unknown>>} settled
+ * @returns {Record<string, string>|null}
+ */
+export function rejectedChecks(settled) {
+  const failed = Object.fromEntries(
+    Object.entries(settled)
+      .filter(([, r]) => r.status === 'rejected')
+      .map(([name, r]) => [name, r.reason?.message || String(r.reason)]),
+  );
+  return Object.keys(failed).length > 0 ? failed : null;
+}
+
 export async function checkReplication(envName, envConfig, projectName, deps = {}) {
   const {
     sshRun: _sshRun = sshRun,
@@ -507,7 +523,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
   const isHA = !!(envConfig.ha?.enabled || envConfig.ha === true || envConfig.secondaryRegion);
   if (!isHA) return null;
 
-  const primary = resolvePrimary(envConfig);
+  const primary = resolvePrimary(envConfig, { env: envName });
   if (!primary?.ip) return null;
 
   const sshKeyPath = _getKey(envName);
@@ -1337,6 +1353,10 @@ function renderEnvironment(envName, envConfig, checks) {
       }
     }
 
+    for (const [name, reason] of Object.entries(checks.checkErrors || {})) {
+      lines.push(`${c.dim('Check failed')}   ${c.error(`${name}: ${reason}`)}`);
+    }
+
     const fenceRow = writeFenceRow(envConfig, checks.replication);
     if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
 
@@ -1647,6 +1667,12 @@ async function main(argv = []) {
       checks.replication =
         replicationResult.status === 'fulfilled' ? replicationResult.value : null;
       const containers = containersResult.status === 'fulfilled' ? containersResult.value : null;
+      // Say which check failed and why, so a missing row never reads as healthy.
+      const failed = rejectedChecks({
+        replication: replicationResult,
+        containers: containersResult,
+      });
+      if (failed) checks.checkErrors = failed;
       // Omitted, not null, when there is nothing to query (no servers, no
       // project name) — spec §6; consumers key on the key's absence.
       if (containers) checks.containers = containers;

@@ -12,7 +12,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
-import { resolvePrimary } from './lib/cli/resolve-primary.js';
+import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { runCommand } from './lib/command.js';
 
 // Handle Ctrl+C — without this, SIGINT is swallowed during subprocess/fetch
@@ -261,6 +261,26 @@ async function findOrphanPulumiStacks(projectConfig) {
  * observed in compose restore re-deploys hitting this exact NoSuchBucket
  * error.
  */
+/**
+ * The server a pre-destroy backup would run on, or null. Destroy is the escape
+ * hatch for a misconfigured environment, so roles that name no single primary
+ * skip the backup offer with a warning instead of blocking teardown.
+ *
+ * @param {object} envConfig
+ * @param {string} envName
+ * @param {(msg: string) => void} [warn]
+ * @returns {string|undefined}
+ */
+export function backupOfferIp(envConfig, envName, warn = (msg) => p.log.warn(msg)) {
+  try {
+    return resolvePrimary(envConfig, { env: envName })?.ip;
+  } catch (err) {
+    if (!(err instanceof AmbiguousPrimaryError)) throw err;
+    warn(`Skipping the pre-destroy backup offer, the primary is unknown. ${err.message}`);
+    return undefined;
+  }
+}
+
 /**
  * Release all Hetzner CSI volumes via the cluster's own finalizers
  * before Pulumi tears the cluster down, so the underlying volumes
@@ -1952,7 +1972,7 @@ async function destroyComposeTier({
   const Provider = providerFor(envConfig);
   const provider = new Provider(providerToken);
   // Compose single-node: its one server, found through the resolver.
-  const composeServer = envConfig.servers?.find((sv) => sv.ip === resolvePrimary(envConfig)?.ip);
+  const composeServer = resolvePrimary(envConfig, { env: environment })?.entry;
   const serverIp = composeServer?.ip;
   const sshKeyPath = join(cwd, '.vibecarbon', `deploy_key_${environment}`);
 
@@ -3573,7 +3593,7 @@ async function main(argv = []) {
   }
 
   // Offer to create a backup before destroying
-  const serverIp = resolvePrimary(envConfig)?.ip;
+  const serverIp = backupOfferIp(envConfig, envName);
   const sshKeyPath = join(cwd, '.vibecarbon', `deploy_key_${envName}`);
   if (serverIp && existsSync(sshKeyPath) && !args.yes) {
     const offerBackup = await p.confirm({

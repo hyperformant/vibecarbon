@@ -105,7 +105,8 @@ describe('planContainerTargets', () => {
   });
 
   it('kubernetes-ha after failover: ha.primary.masterIp picks the promoted entry first', () => {
-    // swapHaRoles (failover.js) swaps ha.primary/ha.standby, never servers[].
+    // swapHaRoles (failover.js) swaps ha.primary/ha.standby and the servers[] roles;
+    // the primary is read from ha.primary.masterIp.
     expect(
       planContainerTargets({
         deployMode: 'kubernetes-ha',
