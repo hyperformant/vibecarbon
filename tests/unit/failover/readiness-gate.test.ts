@@ -23,6 +23,7 @@ import {
   checkPromotedAddonRollouts,
   gatePromotedApiReadiness,
   promotedProbeArgv,
+  scaleDeployments,
   waitForPromotedApiServing,
 } from '../../../src/failover.js';
 
@@ -253,6 +254,41 @@ describe('checkPromotedAddonRollouts (after the DNS flip, warn-only)', () => {
     expect(line).toContain(
       "ssh root@9.9.9.9 'kubectl rollout status deployment/metabase -n vibecarbon'",
     );
+  });
+});
+
+describe('scaleDeployments reports whether the cluster answered and what failed', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const LIST = [
+    { name: 'app', namespace: 'vibecarbon', replicas: 2 },
+    { name: 'n8n', namespace: 'vibecarbon', replicas: 1, addon: true },
+    { name: 'gone', namespace: 'vibecarbon', replicas: 1 },
+  ];
+  const exitErr = (status: number | undefined, msg: string) =>
+    Object.assign(new Error(msg), { status });
+
+  it('kubectl ran but n8n would not scale: reached, n8n failed, a missing one is skipped', async () => {
+    vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const kubectl = vi.fn(async (_ip: string, _k: string, argv: string[]) => {
+      if (argv.includes('n8n')) throw exitErr(1, 'Error from server (Forbidden)');
+      if (argv.includes('gone')) throw exitErr(1, 'deployments.apps "gone" not found');
+      return 'scaled';
+    });
+    await expect(scaleDeployments('1.1.1.1', '/k', LIST, 0, 'x', { kubectl })).resolves.toEqual({
+      reached: true,
+      failed: ['n8n'],
+    });
+  });
+
+  it('ssh itself failed (exit 255) for every call: not reached', async () => {
+    vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const kubectl = vi.fn(async () => {
+      throw exitErr(255, 'ssh: connect to host 1.1.1.1 port 22: Connection timed out');
+    });
+    await expect(scaleDeployments('1.1.1.1', '/k', LIST, 0, 'x', { kubectl })).resolves.toEqual({
+      reached: false,
+      failed: ['app', 'n8n', 'gone'],
+    });
   });
 });
 

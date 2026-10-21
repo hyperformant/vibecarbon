@@ -538,12 +538,24 @@ export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, deps = {} }) {
   return { patched };
 }
 
-async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label) {
+/**
+ * Scale each deployment on one cluster, best-effort: a missing one is skipped,
+ * any other failure is warned and named in `failed`. `reached` is true once
+ * kubectl itself ran on the far end (a success, or an exit status other than
+ * ssh's own 255), so a caller can tell a cluster that answered and refused
+ * from one that never answered.
+ *
+ * @returns {Promise<{ reached: boolean, failed: string[] }>}
+ */
+export async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label, opts = {}) {
+  const { kubectl = sshKubectl } = opts;
+  let reached = false;
+  const failed = [];
   for (const dep of deployments) {
     const ns = dep.namespace || 'vibecarbon';
     const target = replicas === 'up' ? (dep.replicas ?? 1) : replicas;
     try {
-      await sshKubectl(ip, sshKeyPath, [
+      await kubectl(ip, sshKeyPath, [
         'scale',
         'deployment',
         dep.name,
@@ -551,7 +563,9 @@ async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label) {
         ns,
         `--replicas=${target}`,
       ]);
+      reached = true;
     } catch (err) {
+      if (typeof err?.status === 'number' && err.status !== 255) reached = true;
       const msg = err instanceof Error ? err.message : String(err);
       // "no objects passed to scale" / "deployments.apps not found" → log and continue.
       // Anything else (auth failure, network) we still want to surface.
@@ -559,10 +573,12 @@ async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label) {
       if (isMissing) {
         p.log.warn(`${label}: ${dep.name} not found; skipped`);
       } else {
+        failed.push(dep.name);
         p.log.warn(`${label}: ${dep.name} failed: ${msg.split('\n')[0]}`);
       }
     }
   }
+  return { reached, failed };
 }
 
 // ============================================================================
@@ -2184,16 +2200,26 @@ export async function failoverHA(
   // mode the primary is already quiesced; when it was unreachable we could not
   // quiesce pre-promotion, so scale its app tier down NOW — after the gate,
   // BEFORE the DNS flip. If the old primary is still unreachable this no-ops.
+  // An old cluster that answered but did not scale everything down may still
+  // run its primary-only add-ons: starting ours too would fire the same cron
+  // and webhooks twice, so STEP 6c holds them back. One that never answered
+  // keeps today's behaviour (it is fenced when it comes back).
+  let oldPrimaryStillWriting = false;
   if (!planned) {
     s.start('Scaling down the old primary app tier (best-effort split-brain prevention)');
-    await scale(
+    const down = await scale(
       servers.primary.ip,
       sshKeyPath,
       scaleUpList,
       0,
       'scale-down old primary (best-effort)',
     );
-    s.stop('Old primary app tier scaled down (best-effort)');
+    oldPrimaryStillWriting = Boolean(down?.reached && down.failed?.length > 0);
+    s.stop(
+      oldPrimaryStillWriting
+        ? `Old primary app tier NOT fully scaled down (${down.failed.join(', ')})`
+        : 'Old primary app tier scaled down (best-effort)',
+    );
   }
 
   // STEP 6c — Start the primary-only add-ons on the promoted cluster, now that
@@ -2202,7 +2228,20 @@ export async function failoverHA(
   // leave two n8n instances firing the same cron and webhooks while the old
   // primary still answers. Not awaited here: checkPromotedAddonRollouts names
   // a slow one after the DNS flip.
-  if (primaryOnlyAddons.length > 0) {
+  if (primaryOnlyAddons.length > 0 && oldPrimaryStillWriting) {
+    const startCmd = primaryOnlyAddons
+      .map(
+        (d) =>
+          `kubectl -n ${d.namespace || 'vibecarbon'} scale deployment/${d.name} --replicas=${d.replicas ?? 1}`,
+      )
+      .join(' && ');
+    p.log.warn(
+      `Not starting the primary-only add-ons (${primaryOnlyAddons.map((d) => d.name).join(', ')}) ` +
+        `on the promoted cluster: the old primary (${servers.primary.ip}) answered but did not ` +
+        'scale everything down, so both would run them. Once its app tier and add-ons are at ' +
+        `zero, start them: ssh root@${servers.standby.ip} '${startCmd}'`,
+    );
+  } else if (primaryOnlyAddons.length > 0) {
     s.start('Starting the primary-only add-ons on the promoted cluster');
     await scale(
       servers.standby.ip,

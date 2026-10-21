@@ -1514,7 +1514,9 @@ export async function promoteComposeStandby(standbyIp, sshKeyPath, remoteDir, op
  * container that will not stop, or an unconfirmed session, fails the call.
  *
  * @param {string[]} [services] defaults to the app tier
- * @returns {Promise<boolean>} false when the stop could not be confirmed
+ * @returns {Promise<{ ok: boolean, reached: boolean }>} ok is false when the
+ *   stop could not be confirmed; reached is true when the stop loop ran on
+ *   the node (it answered), so `!ok && reached` is a node that refused
  */
 export async function stopOldPrimaryApp(
   ip,
@@ -1522,7 +1524,8 @@ export async function stopOldPrimaryApp(
   projectName,
   services = APP_TIER_RESTART_SERVICES,
 ) {
-  return (await stopOldPrimaryWriters(ip, sshKeyPath, projectName, services)).ok;
+  const { ok, reached } = await stopOldPrimaryWriters(ip, sshKeyPath, projectName, services);
+  return { ok, reached };
 }
 
 /**
@@ -1568,8 +1571,9 @@ const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
  * container is tried, so `stopped` names all that did stop even on a failure.
  *
  * @param {string[]} services the writer services (failoverFenceServices)
- * @returns {Promise<{ ok: boolean, stopped: string[] }>} the containers this
- *   call stopped, which the un-fence starts again
+ * @returns {Promise<{ ok: boolean, stopped: string[], reached: boolean }>} the
+ *   containers this call stopped, which the un-fence starts again; reached
+ *   is true when the loop ran to its end on the node
  */
 export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName, services) {
   const containers = services.map((svc) => `${projectName}-${svc}`).join(' ');
@@ -1597,8 +1601,9 @@ export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName, service
     lines.filter((l) => l.startsWith(`${tag} `)).map((l) => l.slice(tag.length + 1));
   const stopped = named('STOPPED');
   // FENCE_DONE proves the loop ran to its end over a live ssh session.
-  const ok = lines.includes('FENCE_DONE') && named('FAILED').length === 0;
-  return { ok, stopped };
+  const reached = lines.includes('FENCE_DONE');
+  const ok = reached && named('FAILED').length === 0;
+  return { ok, stopped, reached };
 }
 
 /**
@@ -2262,7 +2267,7 @@ export async function failoverComposeHA(
       // DNS is not flipped and the journal stays set.
       const appStopped =
         fenced ||
-        (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName, writerServices));
+        (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName, writerServices)).ok;
       if (!appStopped) {
         p.log.warn(
           `Could not stop the writers on the old primary (${primaryServer.ip}). If any is up, stop ` +
@@ -2402,8 +2407,13 @@ export async function failoverComposeHA(
   // By container name, see stopOldPrimaryApp.
   const oldPrimaryContainers = writerServices.map((svc) => `${projectName}-${svc}`).join(' ');
   // A planned run fenced it before the promote; stopping again is a no-op.
-  const stopped =
-    fenced || (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName, writerServices));
+  const stop = fenced
+    ? { ok: true, reached: true }
+    : await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName, writerServices);
+  const stopped = stop.ok;
+  // It answered (the stop loop ran) yet a writer would not stop: it may still
+  // run its primary-only add-ons, so step 2a must not start ours.
+  const oldPrimaryStillWriting = !stop.ok && stop.reached;
   if (!stopped) {
     p.log.warn(
       `Could not stop services on the old primary (${primaryServer.ip}). SPLIT-BRAIN RISK: ` +
@@ -2429,7 +2439,13 @@ export async function failoverComposeHA(
   // must not abort a DR flip, it names the exact command to run by hand.
   // Idempotent on a resumed run (`up -d` of a running service is a no-op).
   const addonStart = composeStartPrimaryOnlyCmd(projectName, promotionServices);
-  if (addonStart) {
+  if (addonStart && oldPrimaryStillWriting) {
+    p.log.warn(
+      `Not starting the primary-only add-ons on the new primary: the old primary ` +
+        `(${primaryServer.ip}) answered but its writers did not stop, so both would run them. ` +
+        `Once its writers are stopped, start them: ssh root@${standbyServer.ip} '${addonStart}'`,
+    );
+  } else if (addonStart) {
     s.start('Starting primary-only add-ons on the new primary');
     const started = await sshRun(standbyServer.ip, sshKeyPath, addonStart, { timeout: 180_000 });
     if (started === false) {

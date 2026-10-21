@@ -469,6 +469,8 @@ interface RunOpts {
   primaryReachable: boolean;
   scaleUpList?: Array<{ name: string; namespace: string; replicas: number; addon?: true }>;
   addonRolloutsThrows?: boolean;
+  /** What the old primary's scale-down reports (default: the real shape is not returned). */
+  oldPrimaryScaleDown?: { reached: boolean; failed: string[] };
   /** The promote verdict is 'unknown': the promotion could not be confirmed. */
   promoteUnknown?: boolean;
   manualDns?: boolean;
@@ -496,6 +498,7 @@ async function runFailoverHA(opts: RunOpts) {
     standbyOutputs,
     scaleUpList = SCALE_UP_LIST,
     addonRolloutsThrows = false,
+    oldPrimaryScaleDown,
   } = opts;
   const order: string[] = [];
   let thrown: unknown;
@@ -584,6 +587,7 @@ async function runFailoverHA(opts: RunOpts) {
       } else if (/scale-down old primary/.test(label)) {
         order.push('scaleDownOldPrimary');
         captured.scaleDown = { list, replicas };
+        return oldPrimaryScaleDown;
       }
     },
     reseed: async (srv: { standby: { dbPrivateIp?: string; dbIp?: string } }) => {
@@ -760,6 +764,38 @@ describe('failoverHA step order', () => {
     expect(order.indexOf('startPrimaryOnly')).toBeLessThan(order.indexOf('dns'));
     // The app-tier gate still receives the full list (it skips add-ons itself).
     expect(captured.gateScaleUpList).toBe(WITH_ADDONS);
+  });
+
+  it('unplanned, old cluster answers but its scale-down failed: primary-only add-ons are NOT started, the command is printed', async () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const { order, thrown } = await runFailoverHA({
+      primaryReachable: false,
+      scaleUpList: WITH_ADDONS,
+      oldPrimaryScaleDown: { reached: true, failed: ['n8n'] },
+    });
+    expect(thrown).toBeUndefined();
+    expect(order).not.toContain('startPrimaryOnly');
+    expect(order).toContain('dns');
+    const hint = warn.mock.calls.map((c) => String(c[0])).find((w) => /Not starting/.test(w));
+    expect(hint).toContain('n8n');
+    expect(hint).toContain(
+      "ssh root@10.0.0.9 'kubectl -n vibecarbon scale deployment/n8n --replicas=1 && kubectl -n vibecarbon scale deployment/metabase --replicas=1'",
+    );
+    warn.mockRestore();
+  });
+
+  it('unplanned, old cluster unreachable or scaled down: primary-only add-ons start as before', async () => {
+    for (const oldPrimaryScaleDown of [
+      { reached: false, failed: ['app', 'n8n'] },
+      { reached: true, failed: [] },
+    ]) {
+      const { order } = await runFailoverHA({
+        primaryReachable: false,
+        scaleUpList: WITH_ADDONS,
+        oldPrimaryScaleDown,
+      });
+      expect(order).toContain('startPrimaryOnly');
+    }
   });
 
   it('planned: primary-only add-ons start after the quiesce and the gate, before dns', async () => {

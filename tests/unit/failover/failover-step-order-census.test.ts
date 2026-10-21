@@ -329,7 +329,7 @@ async function runCompose(primaryReachable: boolean) {
     },
     fenceOldPrimary: async (ip: string) => {
       order.push(ip === PRIMARY_IP ? 'stopApp' : 'stopApp@standby');
-      return true;
+      return { ok: true, reached: true };
     },
     confirmUnproven: async () => {},
     swapRoles: () => {},
