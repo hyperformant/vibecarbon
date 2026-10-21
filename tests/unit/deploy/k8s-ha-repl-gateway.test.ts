@@ -196,7 +196,7 @@ describe('reestablishReplicationTransport — post-resize belt (item I-1)', () =
     sshKeyPath: '/tmp/key',
   };
 
-  it('recreates wg0 then bounces + re-applies the gateway on both clusters', async () => {
+  it('recreates wg0 then re-applies + restarts the gateway on both clusters', async () => {
     vi.mocked(runCommandAsync).mockClear();
     vi.mocked(runCommandAsync).mockImplementation(happyExec());
     vi.mocked(exchangeAndBringUpTunnel).mockClear();
@@ -214,16 +214,18 @@ describe('reestablishReplicationTransport — post-resize belt (item I-1)', () =
     const calls = vi.mocked(runCommandAsync).mock.calls;
     const joined = calls.map(([argv]) => (argv as string[]).join(' '));
 
-    // Delete BEFORE apply on each cluster's MASTER (a bare Pod isn't recreated
-    // by any controller, so delete-then-apply gives a fresh, cleanly-binding Pod).
+    // Apply, then restart the Deployment on each cluster's MASTER: the
+    // controller replaces the crash-looped pod with one that binds cleanly now
+    // wg0 exists. Nothing deletes a pod by hand.
     for (const master of ['1.1.1.1', '2.2.2.2']) {
-      const del = joined.findIndex(
-        (c) => c.includes(master) && c.includes('delete pod repl-gateway'),
-      );
       const apply = joined.findIndex((c) => c.includes(master) && c.includes('apply -f -'));
-      expect(del).toBeGreaterThanOrEqual(0);
-      expect(apply).toBeGreaterThan(del);
+      const restart = joined.findIndex(
+        (c) => c.includes(master) && c.includes('rollout restart deployment/repl-gateway'),
+      );
+      expect(apply).toBeGreaterThanOrEqual(0);
+      expect(restart).toBeGreaterThan(apply);
     }
+    expect(joined.some((c) => c.includes('delete pod repl-gateway'))).toBe(false);
 
     // The re-applied manifests carry the per-role relay direction.
     const applyInputs = calls
@@ -277,9 +279,9 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(applyCalls.length).toBe(2);
 
     const applyInputs = applyCalls.map(([, o]) => (o as { input?: string }).input ?? '');
-    // Both applies carry the gateway Pod + the additive egress NetworkPolicy.
+    // Both applies carry the gateway Deployment + the additive egress NetworkPolicy.
     for (const input of applyInputs) {
-      expect(input).toContain('kind: Pod');
+      expect(input).toContain('kind: Deployment');
       expect(input).toContain('repl-gateway');
       expect(input).toContain('allow-db-repl-gateway-egress');
       expect(input).toContain('cidr: 10.0.1.2/32');

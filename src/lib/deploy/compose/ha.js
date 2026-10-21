@@ -57,6 +57,11 @@ import {
   unfenceDatabaseWrites,
   waitForStandbyCaughtUp,
 } from '../replication.js';
+import {
+  dropInactiveReplicationSlots,
+  ensureReplicationSlotSql,
+  slotDropWarning,
+} from '../replication-slot.js';
 import { reconcileRetiredFence } from '../retired-fence.js';
 import { waitForTrustedTls } from '../tls-ready.js';
 import { mergeRemoteDotenv, pinnedSshOptsString, readReplPassword } from '../utils.js';
@@ -396,17 +401,9 @@ BEGIN
   END IF;
 END $$;
 
--- Create the physical replication slot if missing. pg_create_physical_replication_slot
--- returns a row when successful, so wrap in a DO block that swallows the
--- 'already exists' error for idempotent reruns.
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_replication_slots WHERE slot_name = 'vibecarbon_standby_slot'
-  ) THEN
-    PERFORM pg_create_physical_replication_slot('vibecarbon_standby_slot');
-  END IF;
-END $$;
+-- The physical replication slot: dropped when lost (WAL past the
+-- max_slot_wal_keep_size cap, it can never stream again), created if missing.
+${ensureReplicationSlotSql()}
 `;
   await sshRunChecked(
     primaryIp,
@@ -528,16 +525,9 @@ export async function configureStandbyReplication(
   // buildStagedBasebackupScript — so it no longer depends on this slot; streaming
   // does.) Idempotent (IF NOT EXISTS), so it's a safe no-op on the deploy path
   // where the slot already exists. RCA 2026-06-01: compose-ha failover after
-  // wal-g restore.
-  const ensureSlotSql = `DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_replication_slots WHERE slot_name = 'vibecarbon_standby_slot'
-  ) THEN
-    PERFORM pg_create_physical_replication_slot('vibecarbon_standby_slot');
-  END IF;
-END $$;`;
-  const ensureSlotB64 = Buffer.from(ensureSlotSql).toString('base64');
+  // wal-g restore. It also drops a LOST slot (its WAL passed the
+  // max_slot_wal_keep_size cap), so this reseed streams through a fresh one.
+  const ensureSlotB64 = Buffer.from(ensureReplicationSlotSql()).toString('base64');
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
@@ -1387,6 +1377,10 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
  * recreates its db container, and compose-HA keeps the old primary serving
  * until the promoted node is confirmed.
  *
+ * Then it drops the old primary's inactive replication slots: the standby
+ * that streamed through them is the new primary, so they would only pin WAL
+ * on this node up to the slot cap. A failed drop warns and leaves the verdict.
+ *
  * @param {object} args
  * @param {string} args.oldPrimaryIp
  * @param {string} args.sshKeyPath
@@ -1417,7 +1411,6 @@ export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectN
       retries: 1,
     });
     log(`[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`);
-    return true;
   } catch (err) {
     warn(
       `Could not demote the old primary's wal-g write-guard (${oldPrimaryIp}): ${err.message}. ` +
@@ -1426,6 +1419,29 @@ export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectN
     );
     return false;
   }
+  // Nobody streams from the old primary's slot now, and it would pin WAL there
+  // up to the slot cap. After the recreate, whose script waited for the db to
+  // accept connections. A failed drop leaves the demotion verdict alone.
+  const slots = await dropInactiveReplicationSlots((sql) =>
+    run(oldPrimaryIp, sshKeyPath, `cd ${remoteDir} && ${composeDbPsqlShell(sql)}`, {
+      timeout: 30_000,
+      retries: 1,
+    }),
+  );
+  if (!slots.ok) warn(slotDropWarning(oldPrimaryIp, slots.error));
+  return true;
+}
+
+/**
+ * `docker compose exec` psql for one statement with no quotes in it (the
+ * caller's SQL is wrapped in double quotes for the remote shell).
+ *
+ * @param {string} sql
+ * @returns {string}
+ */
+function composeDbPsqlShell(sql) {
+  if (/["'$`\\]/.test(sql)) throw new Error('composeDbPsqlShell: SQL must carry no quotes');
+  return `docker compose exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -tAc "${sql}"`;
 }
 
 /**

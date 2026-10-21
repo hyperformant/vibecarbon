@@ -20,6 +20,7 @@
 import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
 import { DB_PVC, DB_STATEFULSET } from './db-workload.js';
+import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
 import { REPL_GATEWAY_PORT } from './wireguard.js';
 
 /**
@@ -40,11 +41,6 @@ export const DB_STS_BOOT_TIMEOUT_S = 600;
 // Staging subdir INSIDE PGDATA for the swap:false re-seed — on the PVC
 // filesystem so the node-side promotion is an atomic same-fs rename.
 const RESEED_STAGING_DIR = '/var/lib/postgresql/data/.reseed_staging';
-
-// The physical replication slot name is a project-wide constant — the primary
-// creates it, the standby's pg_basebackup -S references it, and streaming uses
-// it so the primary holds WAL for this standby specifically.
-const REPLICATION_SLOT = 'vibecarbon_standby_slot';
 
 /**
  * The planned-failover write fence: a server-wide default set with ALTER
@@ -1185,8 +1181,9 @@ export async function getReplPasswordFromSecret(ip, sshKeyPath) {
  * standby connects and immediately errors `replication slot "…" does not exist`,
  * so it never streams. (The basebackup itself no longer needs the slot — it uses
  * a temporary slot now — but streaming does.) Recreate it idempotently BEFORE the
- * re-seed — the same IF-NOT-EXISTS DO-block primary-init.sql (and the compose-HA
- * re-seed) uses, so all three sites create the identical slot.
+ * re-seed with ensureReplicationSlotSql, the one builder primary-init.sql and the
+ * compose-HA sites use too: it also drops a `lost` slot (WAL past the
+ * max_slot_wal_keep_size cap), which could never stream again.
  *
  * Failover does NOT need this: its re-seed sources from a live, untouched
  * primary whose slot survives.
@@ -1198,17 +1195,7 @@ export async function getReplPasswordFromSecret(ip, sshKeyPath) {
  */
 export async function ensureReplicationSlot(primaryIp, sshKeyPath, slotName = REPLICATION_SLOT) {
   const pod = await getPostgresPod(primaryIp, sshKeyPath);
-  const sql = `
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_replication_slots WHERE slot_name = '${slotName}'
-  ) THEN
-    PERFORM pg_create_physical_replication_slot('${slotName}');
-  END IF;
-END
-$$;
-`;
+  const sql = `${ensureReplicationSlotSql(slotName)}\n`;
   await sshKubectl(
     primaryIp,
     sshKeyPath,

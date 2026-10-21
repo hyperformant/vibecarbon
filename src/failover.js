@@ -61,6 +61,7 @@ import {
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from './lib/deploy/walg-audit.js';
 import {
+  demoteK8sWalgRole,
   k8sDbRolloutStatusArgv,
   k8sSetWalgRoleArgv,
   walgRoleDegradedMessage,
@@ -1385,9 +1386,10 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
     // never serving at this point: a PLANNED failover quiesced it to zero before
     // the promotion, and an UNPLANNED one is running precisely because its
     // postgres stopped answering. So the roll this triggers on its db pod has no
-    // live traffic to disturb.
+    // live traffic to disturb. demoteK8sWalgRole also drops the old primary's
+    // inactive replication slots, which would otherwise pin WAL there.
     try {
-      await kubectl(oldPrimaryIp, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 });
+      await demoteK8sWalgRole({ ip: oldPrimaryIp, kubectl, warn });
       log(`[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`);
       health.demoted = { ok: true };
     } catch (err) {

@@ -51,7 +51,7 @@ import { sshRun as composeSshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
 import { swappedSinceLastDeploy } from './failover-guard.js';
 import { fenceDatabaseWrites, k8sPsqlRunner, WRITE_FENCE_SETTING } from './replication.js';
-import { k8sDbRolloutStatusArgv, k8sSetWalgRoleArgv } from './walg-role.js';
+import { demoteK8sWalgRole, k8sDbRolloutStatusArgv } from './walg-role.js';
 
 /** The vibecarbon-config key the k8s backup CronJob reads. */
 export const RETIRED_ROLE_KEY = 'VIBECARBON_ROLE';
@@ -364,8 +364,9 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads }) {
       {
         key: 'walgStandby',
         what: 'WALG_ROLE=standby',
-        apply: (ip) =>
-          attempt(() => kubectl(ip, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 })),
+        // demoteK8sWalgRole drops the retired side's inactive replication
+        // slots first (nobody streams from them), then writes the role.
+        apply: (ip) => attempt(() => demoteK8sWalgRole({ ip, kubectl, warn: () => {} })),
       },
     ],
     // The db pod was down or mid-roll: wait for it (bounded) before the second pass.

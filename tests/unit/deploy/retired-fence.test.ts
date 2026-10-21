@@ -196,6 +196,10 @@ function fakeCluster(
     }
     if (argv.includes('exec') && !db.up) throw new Error('pod db-0 is not running');
     if (argv.includes('exec') && a.includes('[ -f')) return state.dbMarker ? 'present' : 'absent';
+    if (argv.includes('exec') && a.includes('pg_drop_replication_slot')) {
+      writes.push('dropInactiveSlots');
+      return '';
+    }
     if (argv.includes('patch') && argv.includes('configmap')) {
       const body = JSON.parse(argv[argv.indexOf('-p') + 1]);
       const v = body.data[RETIRED_ROLE_KEY];
@@ -355,6 +359,8 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
       'dbMarker',
       'readOnly',
       'scale app 0',
+      // demoteK8sWalgRole: nobody streams from the retired side's slot.
+      'dropInactiveSlots',
       'walg=standby',
     ]);
     expect(cluster.db.readOnly).toBe(true);
@@ -397,6 +403,7 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
       'readOnly',
       'flux suspend vibecarbon-base',
       'scale app 0',
+      'dropInactiveSlots',
       'walg=standby',
     ]);
     cluster.writes.length = 0;
@@ -428,6 +435,7 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     cluster.db.up = false;
     const result = await reconcileRetiredFence(argsFor(cluster));
     expect(result.fenced).toEqual([RETIRED_IP]);
+    // The db is down, so the slot drop fails (best-effort); the role still lands.
     expect(cluster.writes).toEqual([
       `marker=${RETIRED_ROLE}`,
       'scale app 0',

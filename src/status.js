@@ -29,6 +29,7 @@ import {
   buildStandbyReplayQuery,
   formatReplicationLagLine,
 } from './lib/deploy/replication.js';
+import { REPLICATION_SLOT_HEALTH_SQL, SLOT_WAL_SETTINGS } from './lib/deploy/replication-slot.js';
 import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { parseDotenv } from './lib/dotenv.js';
@@ -358,7 +359,7 @@ function parseStandbyReplayRow(out) {
  * to a null row — it never fails the whole probe, so the pre-existing
  * streaming/DR-not-guaranteed path above is unaffected.
  *
- * @returns {Promise<{ streaming: boolean, state: string, lagBytes: number|null, lagLine: string, primaryRow: {state:string,lagSeconds:number}|null, standbyRow: {inRecovery:boolean,lastWalReplayLsn:string,secondsSinceReplay:number}|null } | null>}
+ * @returns {Promise<{ streaming: boolean, state: string, lagBytes: number|null, lagLine: string, primaryRow: {state:string,lagSeconds:number}|null, standbyRow: {inRecovery:boolean,lastWalReplayLsn:string,secondsSinceReplay:number}|null, slot: {walStatus:string,retainedBytes:number}|'none'|null } | null>}
  */
 /** Bytes as the largest whole unit (KiB, MiB, GiB). */
 function formatBytes(n) {
@@ -434,6 +435,62 @@ export function writeFenceRow(envConfig, replication) {
     ? 'a failover is in flight; vibecarbon failover finishes it'
     : 'an interrupted failover left it; vibecarbon deploy or failover lifts it';
   return `database write-fenced: the primary refuses writes (${why})`;
+}
+
+/**
+ * Parse `psql -tAc REPLICATION_SLOT_HEALTH_SQL` ("wal_status|bytes"). An empty
+ * answer is 'none' (the primary has no slot); a slot no standby has used yet
+ * has no wal_status and reads as 'unused'.
+ *
+ * @param {unknown} out
+ * @returns {{walStatus: string, retainedBytes: number} | 'none'}
+ */
+export function parseReplicationSlotRow(out) {
+  const line = String(out ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)[0];
+  if (!line) return 'none';
+  const [status, bytes] = line.split('|');
+  const retainedBytes = Number.parseFloat(bytes);
+  return {
+    walStatus: status || 'unused',
+    retainedBytes: Number.isFinite(retainedBytes) ? retainedBytes : 0,
+  };
+}
+
+/**
+ * The primary's replication slot row: its wal_status and the WAL it holds.
+ * `lost` (the standby fell past the slot cap and can never catch up) is an
+ * error that names the deploy that reseeds; null when the slot was unreadable.
+ *
+ * @param {{walStatus: string, retainedBytes: number} | 'none' | null | undefined} slot
+ * @param {string} envName
+ * @returns {{level: 'ok'|'warn'|'error', text: string} | null}
+ */
+export function replicationSlotRow(slot, envName) {
+  if (!slot) return null;
+  const cap = SLOT_WAL_SETTINGS.max_slot_wal_keep_size;
+  if (slot === 'none') {
+    return {
+      level: 'warn',
+      text: `none: nothing holds WAL for the standby, run vibecarbon deploy ${envName} to create it`,
+    };
+  }
+  const text = `${slot.walStatus}, ${Math.round(slot.retainedBytes / 1024 ** 2)} MB retained`;
+  if (slot.walStatus === 'lost') {
+    return {
+      level: 'error',
+      text: `${text}: the standby fell more than ${cap} behind and cannot catch up, run vibecarbon deploy ${envName} to reseed`,
+    };
+  }
+  if (slot.walStatus === 'unreserved') {
+    return {
+      level: 'warn',
+      text: `${text}: past the ${cap} cap, the slot is lost at the next checkpoint unless the standby catches up`,
+    };
+  }
+  return { level: 'ok', text };
 }
 
 export async function checkReplication(envName, envConfig, projectName, deps = {}) {
@@ -563,6 +620,15 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
       }
     }
 
+    // The replication slot (replication-slot.js): its WAL is capped, so a
+    // standby away long enough finds it lost. No quotes in the SQL.
+    let slot = null;
+    try {
+      slot = parseReplicationSlotRow(await runPrimaryPsql(REPLICATION_SLOT_HEALTH_SQL));
+    } catch {
+      slot = null;
+    }
+
     // The planned-failover write fence (write-fence.js): a primary left
     // read-only refuses every write. SHOW, so the SQL carries no quotes.
     let writeFenced = null;
@@ -577,6 +643,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
       ...replication,
       primaryRow,
       standbyRow,
+      slot,
       writeFenced,
       lagLine: formatReplicationLagLine({ primaryRow, standbyRow }),
     };
@@ -1245,6 +1312,12 @@ function renderEnvironment(envName, envConfig, checks) {
           ? c.error(r.lagLine)
           : c.dim(r.lagLine);
         lines.push(`${c.dim('Repl. Lag')}      ${lagDisplay}`);
+      }
+
+      const slotRow = replicationSlotRow(r.slot, envName);
+      if (slotRow) {
+        const paint = { ok: c.dim, warn: c.warning, error: c.error }[slotRow.level];
+        lines.push(`${c.dim('Repl. Slot')}     ${paint(slotRow.text)}`);
       }
     }
 

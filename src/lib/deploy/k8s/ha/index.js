@@ -63,7 +63,7 @@ const HA_SCRIPTS_PATH = join(__dirname, '../../../../../carbon/ha');
 // node's cni0 gateway (a per-node /24 inside this CIDR) as the source.
 const K3S_POD_CIDR = '10.42.0.0/16';
 
-// The repl-gateway manifest (Pod + additive egress NetworkPolicy). HA-only, so
+// The repl-gateway manifest (Deployment + additive egress NetworkPolicy). HA-only, so
 // it lives outside the base kustomization; setupReplication renders its
 // placeholders per-cluster and applies it via `kubectl apply -f -`.
 const REPL_GATEWAY_MANIFEST = join(
@@ -73,7 +73,7 @@ const REPL_GATEWAY_MANIFEST = join(
 
 /**
  * The two socat address specs for the repl-gateway relay, keyed by cluster
- * role. Pure — unit-tested; rendered into the repl-gateway Pod manifest.
+ * role. Pure — unit-tested; rendered into the repl-gateway manifest.
  *
  *   - primary: bind the tunnel IP (10.99.0.1:15433) and forward to the local
  *     postgres hostPort (127.0.0.1:5433). Reachable only via wg0.
@@ -165,7 +165,7 @@ export function buildDbHostPortPatch() {
  * tunnel between the two database nodes. Shared by setupReplication (the
  * serial path) and prepareReplicationTransport (the deploy fan-out overlap) so
  * the two paths cannot drift. Idempotent: kubectl apply reconciles the gateway
- * pod/netpol, and exchangeAndBringUpTunnel regenerates + re-exchanges keys on
+ * Deployment/netpol, and exchangeAndBringUpTunnel regenerates + re-exchanges keys on
  * every call.
  */
 async function applyGatewaysAndBringUpTunnel({
@@ -179,44 +179,16 @@ async function applyGatewaysAndBringUpTunnel({
   sshKeyPath,
 }) {
   const gatewayTemplate = readFileSync(REPL_GATEWAY_MANIFEST, 'utf-8');
-  // repl-gateway is a BARE Pod, and bare-Pod specs are immutable beyond
-  // image/tolerations. A role-swapped redeploy (post-failover reconverge)
-  // renders each cluster's gateway with the OPPOSITE relay direction, so a
-  // plain `kubectl apply` over the surviving pod fails with
-  //   The Pod "repl-gateway" is invalid: spec: Forbidden: pod updates may
-  //   not change fields other than ...
-  // (RCA 2026-07-17 e4 run 5 — same-role redeploys render byte-identical
-  // specs and never hit this). On that rejection, delete the pod and
-  // re-apply: the relay drops for the seconds between delete and re-create,
-  // which is fine — replication re-establishes and the serial path's
-  // recovery waits already cover a briefly-absent transport.
-  const applyGatewayPod = async (masterIp, rendered) => {
-    const apply = () =>
-      runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, 'kubectl apply -f -'], {
-        silent: true,
-        input: rendered,
-      });
-    try {
-      await apply();
-    } catch (err) {
-      const msg = err?.message || String(err);
-      if (!/Forbidden: pod updates may not change fields/.test(msg)) throw err;
-      console.error(
-        '[repl-gateway] pod spec changed (role-swapped redeploy), deleting and re-creating the gateway pod',
-      );
-      await runCommandAsync(
-        [
-          'ssh',
-          ...sshOpts,
-          `root@${masterIp}`,
-          'kubectl delete pod repl-gateway -n vibecarbon --ignore-not-found --wait=true --timeout=60s',
-        ],
-        { silent: true },
-      );
-      await apply();
-    }
-  };
-  await applyGatewayPod(
+  // repl-gateway is a one-replica Deployment, so a plain apply takes a changed
+  // relay direction (a role-swapped redeploy after a failover renders each
+  // cluster's gateway the opposite way): the controller replaces the pod, with
+  // `Recreate` so the old relay frees the port before the new one binds it.
+  const applyGateway = (masterIp, rendered) =>
+    runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, 'kubectl apply -f -'], {
+      silent: true,
+      input: rendered,
+    });
+  await applyGateway(
     primaryIp,
     renderReplGatewayManifest({
       template: gatewayTemplate,
@@ -224,7 +196,7 @@ async function applyGatewaysAndBringUpTunnel({
       nodePrivateIp: primaryDbPrivateIp,
     }),
   );
-  await applyGatewayPod(
+  await applyGateway(
     standbyIp,
     renderReplGatewayManifest({
       template: gatewayTemplate,
@@ -364,12 +336,11 @@ export async function prepareReplicationTransport({
  *   1. Re-run exchangeAndBringUpTunnel (idempotent): recreates wg0 on both
  *      database nodes AND (re)installs the systemd unit, so an env deployed
  *      before this fix gets persistence retrofitted during scale.
- *   2. Per cluster: delete the crash-looped `repl-gateway` Pod (it couldn't
- *      bind its tunnel IP while wg0 was gone) then re-apply the gateway
- *      manifest — a bare Pod isn't recreated by any controller, so delete THEN
- *      apply gives a fresh Pod that binds cleanly now wg0 exists, skipping the
- *      up-to-5-min CrashLoopBackOff that otherwise wedges the primary's
- *      post-resize `kubectl wait --for=Ready pods --all -n vibecarbon`.
+ *   2. Per cluster: re-apply the gateway manifest, then restart the
+ *      `repl-gateway` Deployment. Its pod crash-looped while wg0 was gone (it
+ *      could not bind its tunnel IP); a fresh pod binds cleanly now wg0
+ *      exists, skipping the up-to-5-min CrashLoopBackOff that otherwise wedges
+ *      the primary's post-resize `kubectl wait --for=Ready pods --all -n vibecarbon`.
  *
  * All args mirror setupReplication's. Same known-hosts pinning + sshOpts.
  *
@@ -412,25 +383,25 @@ export async function reestablishReplicationTransport(options) {
     sshKeyPath,
   });
 
-  // 2. Bounce + re-apply the repl-gateway on each cluster.
+  // 2. Re-apply + restart the repl-gateway on each cluster.
   const gatewayTemplate = readFileSync(REPL_GATEWAY_MANIFEST, 'utf-8');
   for (const [masterIp, role, nodePrivateIp] of [
     [primaryIp, 'primary', primaryDbPrivateIp],
     [standbyIp, 'standby', standbyDbPrivateIp],
   ]) {
+    await runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, 'kubectl apply -f -'], {
+      silent: true,
+      input: renderReplGatewayManifest({ template: gatewayTemplate, role, nodePrivateIp }),
+    });
     await runCommandAsync(
       [
         'ssh',
         ...sshOpts,
         `root@${masterIp}`,
-        'kubectl delete pod repl-gateway -n vibecarbon --ignore-not-found',
+        'kubectl rollout restart deployment/repl-gateway -n vibecarbon',
       ],
-      { silent: true, ignoreError: true },
+      { silent: true },
     );
-    await runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, 'kubectl apply -f -'], {
-      silent: true,
-      input: renderReplGatewayManifest({ template: gatewayTemplate, role, nodePrivateIp }),
-    });
   }
 }
 

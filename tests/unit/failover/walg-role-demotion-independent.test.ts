@@ -343,7 +343,8 @@ const insideNestedFunction = (code: string, offset: number) =>
 describe('census: restorePromotedWalgRole demotes before any return', () => {
   it('the demotion call sits in a finally, and no return precedes it outside one', () => {
     const { raw, code } = functionBody();
-    const demotion = raw.indexOf("k8sSetWalgRoleArgv('standby')");
+    // demoteK8sWalgRole: the one k8s standby role write (slot-drop-on-demotion census).
+    const demotion = raw.indexOf('demoteK8sWalgRole(');
     expect(demotion, 'the old-primary demotion call is missing').toBeGreaterThan(-1);
     expect(insideFinally(code, demotion), 'the demotion must run in a finally block').toBe(true);
     const offenders: number[] = [];
