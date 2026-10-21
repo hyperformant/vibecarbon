@@ -212,4 +212,27 @@ describe('sweepOrphanedDigitalOceanResources', () => {
     });
     expect(enumFailed).toBe(true);
   });
+
+  it("revokes this run's app storage keys (vc-app-<project>…) and leaves every other key", async () => {
+    const fetchImpl = fakeFetch({
+      '/spaces/keys': {
+        keys: [
+          { access_key: 'SENTINEL_AK_1', name: 'vc-app-testapp-d3-abc123-prod' },
+          { access_key: 'SENTINEL_AK_2', name: 'vc-app-otherapp-prod' },
+          { access_key: 'SENTINEL_AK_3', name: 'operator-spaces-key' },
+        ],
+      },
+    });
+    const { counts, enumFailed } = await sweepOrphanedDigitalOceanResources(TAG, 'testapp-d3', {
+      provider: fakeProvider(),
+      spaces: fakeSpaces(),
+      fetchImpl,
+    });
+    const deletes = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')
+      .map(([url]) => String(url));
+    expect(deletes).toEqual(['https://api.digitalocean.com/v2/spaces/keys/SENTINEL_AK_1']);
+    expect(counts.storageKeys).toBe(1);
+    expect(enumFailed).toBe(false);
+  });
 });

@@ -420,9 +420,16 @@ and delete a fenced bucket while it is empty. The strongest isolation is an
 app bucket in a separate Hetzner project with its own key, which vibecarbon
 does not set up for you.
 
-`vibecarbon destroy` takes a pasted key out of every fence and prints a
-reminder to delete it in the console, since vibecarbon cannot revoke a key it
-did not make.
+vibecarbon cannot revoke a key it did not make. So when you destroy an
+environment, or paste a replacement key, the old pasted key is retired: it
+stays denied in every bucket fence, and destroy reminds you to delete it in
+the console. Once it is deleted there, run
+`vibecarbon configure storage -forget <access key id>`; the next deploy then
+drops it from the fences.
+
+A fenced environment's key must be on the machine that deploys it. If it is
+missing (a fresh checkout, say), the deploy stops and asks you to paste it
+again, rather than quietly hand the app the shared key.
 
 ## Security notes
 

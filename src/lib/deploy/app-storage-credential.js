@@ -21,8 +21,15 @@
  * project's `.env.local` under per-environment names (appStorageSecretKeys),
  * written through setEnvVar, so formatDotenvLine, and never shipped. A
  * redeploy reuses the key while its secret is here and the provider still
- * lists it. Otherwise it mints one new key, records it and revokes the old
- * id: a state reconcile, not a retry. Every destroy revokes it.
+ * lists it. Otherwise it mints one new key and records it, with the old id
+ * under `retiring`: a state reconcile, not a retry. The old key is revoked
+ * only once the deploy succeeds (finishAppKeyRotation), so a failed deploy
+ * never leaves the running app on a dead key. Every destroy revokes them all.
+ *
+ * Hetzner pasted keys cannot be revoked by the CLI. One that is replaced or
+ * whose env is destroyed moves to `projectConfig.retiredAppKeys` (ids only)
+ * and stays denied in every fence until the operator deletes it in the
+ * console and runs `vibecarbon configure storage -forget <id>`.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -149,8 +156,10 @@ export async function storageAccessLine(envConfig, provider) {
  * @param {{ accessKey: string, secretKey: string, endpoint: string }} args.infraCredential
  * @param {{ get(key: string): string|undefined, set(key: string, value: string): void }} args.secrets
  * @param {string|null} [args.apiToken] - the provider API token (mint only)
- * @param {{ warn: (m: string) => void }} [args.log]
- * @returns {Promise<{ accessKey: string, secretKey: string, tier: 'isolated'|'fenced'|'shared', reason: string, record: { id: string, scoping: string, tier: string, bucket: string } | null, scoping: 'mint'|'paste-fence'|'none' }>}
+ * @returns {Promise<{ accessKey: string, secretKey: string, tier: 'isolated'|'fenced'|'shared', reason: string, record: { id: string, scoping: string, tier: string, bucket?: string, retiring?: string[] } | null, scoping: 'mint'|'paste-fence'|'none', retire: string|null }>}
+ *   `record.bucket` (mint only) is the bucket the key is limited to; `retiring`
+ *   lists replaced minted keys still to revoke after the deploy succeeds;
+ *   `retire` is a replaced pasted key id to keep denied (retiredAppKeys).
  */
 export async function resolveAppStorageCredential({
   provider,
@@ -160,7 +169,6 @@ export async function resolveAppStorageCredential({
   infraCredential,
   secrets,
   apiToken,
-  log = { warn: () => {} },
 }) {
   const { S3Class, scoping } = await scopingOf(provider);
   const names = appStorageSecretKeys(environment);
@@ -170,6 +178,7 @@ export async function resolveAppStorageCredential({
     ...describeAppStorageAccess({ provider, scoping, envConfig: {} }),
     record: null,
     scoping,
+    retire: null,
   });
 
   if (scoping === 'none') return shared();
@@ -177,19 +186,32 @@ export async function resolveAppStorageCredential({
   if (scoping === 'paste-fence') {
     const accessKey = secrets.get(names.accessKey);
     const secretKey = secrets.get(names.secretKey);
-    if (!accessKey || !secretKey) return shared();
+    const prior = envConfig?.s3?.appKey?.scoping === 'paste-fence' ? envConfig.s3.appKey : null;
+    if (!accessKey || !secretKey) {
+      // Never a silent downgrade: an env that was fenced stays fenced, or the
+      // deploy stops, rather than hand its app the account-wide key.
+      if (prior) {
+        throw new Error(
+          `${environment} is fenced with pasted app storage key ${prior.id}, but that key is not stored on this machine. Paste it (or a replacement) with \`vibecarbon configure storage ${environment}\` and deploy again.`,
+        );
+      }
+      return shared();
+    }
     if (accessKey === infraCredential.accessKey) {
       throw new Error(
         `the app storage key pasted for ${environment} is the deploy's own key, so fencing it would lock the deploy out. Make a second key in the console and paste it with \`vibecarbon configure storage ${environment}\`.`,
       );
     }
-    const record = { id: accessKey, scoping, tier: 'fenced', bucket };
+    const record = { id: accessKey, scoping, tier: 'fenced' };
     return {
       accessKey,
       secretKey,
       ...describeAppStorageAccess({ provider, scoping, envConfig: { s3: { appKey: record } } }),
       record,
       scoping,
+      // A replaced pasted key stays denied in every fence until the operator
+      // forgets it (retiredAppKeys, `configure storage -forget <id>`).
+      retire: prior && prior.id !== accessKey ? prior.id : null,
     };
   }
 
@@ -221,16 +243,21 @@ export async function resolveAppStorageCredential({
     secrets.set(names.secretKey, minted.secretKey);
     accessKey = minted.accessKey;
     secretKey = minted.secretKey;
-    record = { id: minted.id, scoping, tier: 'isolated', bucket };
-    if (prior && prior.id !== minted.id) {
-      try {
-        await S3Class.revokeAppKey(prior.id, { apiToken: token });
-      } catch (err) {
-        log.warn(
-          `the old app storage key ${prior.id} was not revoked (${err.message}); delete it in the ${provider} console`,
-        );
-      }
-    }
+    // The old key is NOT revoked here: the running app still uses it until
+    // the new one is rolled out. It is recorded as `retiring` and revoked
+    // only once the deploy succeeds (finishAppKeyRotation); a failed deploy
+    // leaves it working, and destroy revokes it with the rest.
+    const retiring = [
+      ...(prior?.retiring ?? []),
+      ...(prior && prior.id !== minted.id ? [prior.id] : []),
+    ];
+    record = {
+      id: minted.id,
+      scoping,
+      tier: 'isolated',
+      bucket,
+      ...(retiring.length > 0 && { retiring }),
+    };
   }
   return {
     accessKey,
@@ -238,7 +265,37 @@ export async function resolveAppStorageCredential({
     ...describeAppStorageAccess({ provider, scoping, envConfig: { s3: { appKey: record } } }),
     record,
     scoping,
+    retire: null,
   };
+}
+
+/**
+ * Revoke the keys a re-mint replaced (`record.retiring`), once the deploy
+ * that rolled out the new key has succeeded. A key that cannot be revoked
+ * stays in `retiring` (so the next deploy or destroy tries again) and is
+ * reported as one warn line.
+ *
+ * @param {{ provider: string, record: object|null, apiToken?: string|null, log?: { warn: (m: string) => void } }} args
+ * @returns {Promise<object|null>} the record with what is still retiring
+ */
+export async function finishAppKeyRotation({ provider, record, apiToken, log = { warn() {} } }) {
+  if (!record?.retiring?.length) return record;
+  const { S3Class } = await scopingOf(provider);
+  const token = apiToken ?? resolveProviderToken(provider);
+  const left = [];
+  for (const id of record.retiring) {
+    try {
+      if (!token) throw new Error(`no ${provider} API token`);
+      await S3Class.revokeAppKey(id, { apiToken: token });
+    } catch (err) {
+      left.push(id);
+      log.warn(
+        `the replaced app storage key ${id} was not revoked (${err.message}); the next deploy or destroy tries again, or delete it in the ${provider} console`,
+      );
+    }
+  }
+  const { retiring: _done, ...rest } = record;
+  return left.length > 0 ? { ...rest, retiring: left } : rest;
 }
 
 /**
@@ -255,15 +312,19 @@ export async function revokeAppStorageCredential({ provider, envConfig, apiToken
   if (record?.scoping !== 'mint' || !record.id) return { revoked: false };
   const { S3Class } = await scopingOf(provider);
   const token = apiToken ?? resolveProviderToken(provider);
+  const ids = [record.id, ...(record.retiring ?? [])];
   if (!token) {
-    return { revoked: false, leak: `app storage key ${record.id}: no ${provider} API token` };
+    return { revoked: false, leak: `app storage key ${ids.join(', ')}: no ${provider} API token` };
   }
-  try {
-    await S3Class.revokeAppKey(record.id, { apiToken: token });
-    return { revoked: true };
-  } catch (err) {
-    return { revoked: false, leak: `app storage key ${record.id}: ${err.message}` };
+  const failed = [];
+  for (const id of ids) {
+    try {
+      await S3Class.revokeAppKey(id, { apiToken: token });
+    } catch (err) {
+      failed.push(`app storage key ${id}: ${err.message}`);
+    }
   }
+  return failed.length === 0 ? { revoked: true } : { revoked: false, leak: failed.join('; ') };
 }
 
 /**

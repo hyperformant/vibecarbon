@@ -28,6 +28,7 @@ import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-ba
 import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
 import {
+  finishAppKeyRotation,
   localAppStorageSecrets,
   resolveAppStorageCredential,
   syncHetznerFences,
@@ -307,7 +308,7 @@ function sameOrigins(a, b) {
  * @param {string} [opts.domain]
  * @param {() => Promise<{ canHeadBucket(bucket: string): Promise<boolean> }>} [opts.createAppProvider]
  *   - a client on the env's own app key; absent on the shared tier
- * @param {() => Promise<{ unverified?: string[] }>} [opts.fence] - the Hetzner fence sync
+ * @param {() => Promise<{ unverified?: string[], skipped?: string[] }>} [opts.fence] - the Hetzner fence sync
  * @param {(ms: number) => Promise<void>} [opts.sleep] - test seam for the readiness poll
  * @returns {{
  *   done: Promise<void>,
@@ -360,6 +361,11 @@ export function startAppBucketFinalize({
       for (const message of warnings) log.warn(message);
       await appKeyReady;
       const fence = await fenced;
+      if (fence?.skipped?.length) {
+        log.info(
+          `app key fence skipped for ${fence.skipped.join(', ')}: the bucket does not exist and no environment finished a deploy into it`,
+        );
+      }
       if (fence?.unverified?.length) {
         log.info(
           `app key fence written on ${fence.unverified.join(', ')}, not probed: no fenced key for it is stored on this machine`,
@@ -967,7 +973,6 @@ export async function executeDeployment(args, gatheredConfig) {
       },
       secrets: localAppStorageSecrets(),
       apiToken,
-      log: p.log,
     });
   } catch (err) {
     p.log.error(`App storage key: ${err.message}`);
@@ -976,6 +981,13 @@ export async function executeDeployment(args, gatheredConfig) {
   }
   s3Config.appCredential = { accessKey: appStorage.accessKey, secretKey: appStorage.secretKey };
   s3Config.appKey = appStorage.record;
+  // A replaced pasted key stays denied in every fence until the operator
+  // forgets it (the CLI cannot revoke a key it did not make).
+  if (appStorage.retire) {
+    projectConfig.retiredAppKeys = [
+      ...new Set([...(projectConfig.retiredAppKeys ?? []), appStorage.retire]),
+    ];
+  }
   p.log.info(`storage access: ${appStorage.tier} (${appStorage.reason})`);
   if (appStorage.tier === 'shared' && appStorage.scoping === 'paste-fence') {
     p.log.info(
@@ -988,6 +1000,7 @@ export async function executeDeployment(args, gatheredConfig) {
   const fenceNeeded =
     appStorage.record?.scoping === 'paste-fence' ||
     priorAppKey?.scoping === 'paste-fence' ||
+    (projectConfig.retiredAppKeys ?? []).length > 0 ||
     Object.values(projectConfig.environments ?? {}).some(
       (e) => e?.s3?.appKey?.scoping === 'paste-fence',
     );
@@ -1923,6 +1936,15 @@ export async function executeDeployment(args, gatheredConfig) {
     writeLogDetail(`# app storage finalize error detail: ${err?.stack || err}`);
     process.exit(1);
   }
+  // The deploy succeeded with the new key in place: only now revoke the keys
+  // a re-mint replaced (R9). A failure is a warn line, and the id stays
+  // recorded so the next deploy or destroy revokes it.
+  s3Config.appKey = await finishAppKeyRotation({
+    provider: storageProviderId,
+    record: s3Config.appKey,
+    apiToken,
+    log: p.log,
+  });
 
   // Re-read the on-disk project config before merging. Inner deploy paths
   // (compose/ha.js, k8s/ha/index.js) call saveProjectConfig themselves

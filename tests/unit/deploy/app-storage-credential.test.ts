@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   appStorageSecretKeys,
   describeAppStorageAccess,
+  finishAppKeyRotation,
   localAppStorageSecrets,
   resolveAppStorageCredential,
   revokeAppStorageCredential,
@@ -114,7 +115,7 @@ describe('R9 lifecycle on a mint provider', () => {
     expect(out).toMatchObject({ accessKey: 'SENTINEL_KEY_0', record });
   });
 
-  it('a redeploy with the secret missing locally mints a new key, records it, and revokes the old id', async () => {
+  it('a redeploy with the secret missing locally mints a new key and records the old id as retiring, unrevoked', async () => {
     const spies = mintSpies(DigitalOceanSpacesProvider);
     const record = {
       id: 'SENTINEL_KEY_0',
@@ -124,8 +125,83 @@ describe('R9 lifecycle on a mint provider', () => {
     };
     const out = await resolveDo({ s3: { appKey: record } }, memorySecrets());
     expect(spies.mint).toHaveBeenCalledTimes(1);
-    expect(out.record?.id).toBe('SENTINEL_KEY_1');
+    expect(out.record).toMatchObject({ id: 'SENTINEL_KEY_1', retiring: ['SENTINEL_KEY_0'] });
+    // The running app still uses the old key until the deploy succeeds.
+    expect(spies.revoke).not.toHaveBeenCalled();
+  });
+
+  it('a successful deploy then revokes the retiring key and drops it from the record', async () => {
+    const spies = mintSpies(DigitalOceanSpacesProvider);
+    const record = {
+      id: 'SENTINEL_KEY_1',
+      scoping: 'mint',
+      tier: 'isolated',
+      bucket: 'proj-abc-prod',
+      retiring: ['SENTINEL_KEY_0'],
+    };
+    const after = await finishAppKeyRotation({
+      provider: 'digitalocean',
+      record,
+      apiToken: 'SENTINEL_DO_TOKEN',
+    });
     expect(spies.revoke).toHaveBeenCalledWith('SENTINEL_KEY_0', { apiToken: 'SENTINEL_DO_TOKEN' });
+    expect(after).toEqual({
+      id: 'SENTINEL_KEY_1',
+      scoping: 'mint',
+      tier: 'isolated',
+      bucket: 'proj-abc-prod',
+    });
+  });
+
+  it('a revoke that fails after the deploy is a warn line, and the id stays retiring for the next try', async () => {
+    const spies = mintSpies(DigitalOceanSpacesProvider);
+    spies.revoke.mockRejectedValue(new Error('HTTP 500'));
+    const log = { warn: vi.fn() };
+    const after = await finishAppKeyRotation({
+      provider: 'digitalocean',
+      record: {
+        id: 'SENTINEL_KEY_1',
+        scoping: 'mint',
+        tier: 'isolated',
+        retiring: ['SENTINEL_KEY_0'],
+      },
+      apiToken: 'SENTINEL_DO_TOKEN',
+      log,
+    });
+    expect(after?.retiring).toEqual(['SENTINEL_KEY_0']);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/SENTINEL_KEY_0 was not revoked \(HTTP 500\)/),
+    );
+  });
+
+  it('a failed deploy never revokes the old key: rotation runs only after finish() and before the final save', async () => {
+    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/orchestrator.js'), 'utf-8');
+    const finish = src.indexOf('appBucketFinal = await appBucketFinalize.finish(p.log);');
+    const exit = src.indexOf('process.exit(1);', finish);
+    const rotate = src.indexOf('await finishAppKeyRotation(', finish);
+    const finalSave = src.indexOf('const persistedConfig = loadProjectConfig()', finish);
+    expect(finish).toBeGreaterThan(-1);
+    expect(exit).toBeGreaterThan(finish);
+    expect(rotate).toBeGreaterThan(exit);
+    expect(finalSave).toBeGreaterThan(rotate);
+    expect([...src.matchAll(/finishAppKeyRotation\(/g)]).toHaveLength(1);
+    // And destroy revokes a still-retiring key with the current one.
+    const spies = mintSpies(DigitalOceanSpacesProvider);
+    await revokeAppStorageCredential({
+      provider: 'digitalocean',
+      envConfig: {
+        s3: {
+          appKey: {
+            id: 'SENTINEL_KEY_1',
+            scoping: 'mint',
+            tier: 'isolated',
+            retiring: ['SENTINEL_KEY_0'],
+          },
+        },
+      },
+      apiToken: 'SENTINEL_DO_TOKEN',
+    });
+    expect(spies.revoke.mock.calls.map((c) => c[0])).toEqual(['SENTINEL_KEY_1', 'SENTINEL_KEY_0']);
   });
 
   it('a key the provider no longer lists is replaced the same way', async () => {
@@ -280,6 +356,50 @@ describe('revoke on destroy', () => {
       }
     },
   );
+
+  it('(a) destroying a fenced env retires its pasted key and says how to forget it', async () => {
+    const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
+    const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
+    const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
+    const prompts = await import('@clack/prompts');
+    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue(null);
+    const warn = vi.spyOn(prompts.log, 'warn').mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), 'vc-retire-'));
+    const cwd = process.cwd();
+    try {
+      process.chdir(dir);
+      const projectConfig = {
+        projectName: 'proj',
+        environments: {
+          staging: {
+            provider: 'hetzner',
+            s3: {
+              bucket: 'proj-abc-staging',
+              appKey: { id: 'AK_S', scoping: 'paste-fence', tier: 'fenced' },
+            },
+          },
+        },
+      };
+      const leaks = createLeakLedger();
+      await DESTROY_EFFECTS.revokeAppStorageKey({
+        envConfig: projectConfig.environments.staging,
+        projectConfig,
+        environment: 'staging',
+        args: {},
+        results: { leaks },
+        cwd: dir,
+        spinner: { start: vi.fn(), stop: vi.fn() },
+      });
+      expect(projectConfig).toMatchObject({ retiredAppKeys: ['AK_S'] });
+      const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8'));
+      expect(saved.retiredAppKeys).toEqual(['AK_S']);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/configure storage -forget AK_S/));
+      expect(leaks.entries).toEqual([]);
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('the destroy preview names the key it will revoke', async () => {
     const { destroyPreviewBody } = await import('../../../src/lib/destroy/preview.js');

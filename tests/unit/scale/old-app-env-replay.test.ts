@@ -88,4 +88,15 @@ describe('scale keeps the .env replay when the app.env read fails', () => {
     // cannot reach that catch.
     expect(appRead).toBeGreaterThan(catchAfter);
   });
+
+  it('a failed old-server .env read stops that server scale instead of using the project .env', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const src = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
+    const envRead = src.indexOf('oldEnv = dropUnportableEnv(parseDotenv(envText));');
+    const nextStep = src.indexOf("s.start('Copying project files...');", envRead);
+    const between = src.slice(envRead, nextStep);
+    expect(between).toMatch(/throw new Error\(\s*`could not read \.env on the old server/);
+    expect(between).not.toMatch(/falling back to project \.env/);
+  });
 });

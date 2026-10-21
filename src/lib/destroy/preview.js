@@ -121,7 +121,7 @@ export function destroyPreviewBody({
     ${
       appKey.scoping === 'mint'
         ? `${c.error('•')} App storage key ${appKey.id} (WILL BE REVOKED)`
-        : `${c.error('•')} App storage key ${appKey.id} (pasted: taken out of the bucket fences; delete it in the console)`
+        : `${c.error('•')} App storage key ${appKey.id} (pasted: stays denied in the bucket fences; delete it in the console, then forget it)`
     }
 `
     : '';

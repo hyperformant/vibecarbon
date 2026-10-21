@@ -100,6 +100,9 @@ export const SPEC = {
     '               of every other vibecarbon bucket. Optional: skip it and the',
     '               app keeps sharing the deploy key. Linode and DigitalOcean',
     '               mint a per-env key on their own, so there is nothing to paste.',
+    '  storage -forget <id>',
+    "               After you delete a replaced or destroyed env's pasted key in",
+    '               the console: stop denying it in the bucket fences.',
     '',
     'CONFIGURABLE FEATURES',
     '  Providers, cloud/DNS credentials for deploys (written to .env.local; never committed, never shipped to servers)',
@@ -1729,6 +1732,45 @@ export async function runConfigureStorage(envArg) {
   );
 }
 
+/**
+ * `vibecarbon configure storage -forget <id>`: the operator's word that a
+ * retired pasted app storage key (projectConfig.retiredAppKeys) has been
+ * deleted in the console, so the fences may stop denying it. The next deploy
+ * of the project rewrites them. A key an environment still uses is refused.
+ * @param {string|undefined} id
+ */
+export async function runForgetAppStorageKey(id) {
+  const cwd = process.cwd();
+  const projectConfig = assertInProjectDir(cwd);
+  introCommand('configure storage');
+  if (!id) {
+    p.log.error('Name the key: vibecarbon configure storage -forget <access key id>');
+    process.exit(1);
+  }
+  const user = Object.entries(projectConfig.environments ?? {}).find(
+    ([, e]) => e?.s3?.appKey?.id === id,
+  );
+  if (user) {
+    p.log.error(
+      `${id} is still ${user[0]}'s app storage key, so it cannot be forgotten. Paste a replacement with \`vibecarbon configure storage ${user[0]}\` and deploy first.`,
+    );
+    process.exit(1);
+  }
+  const retired = projectConfig.retiredAppKeys ?? [];
+  if (!retired.includes(id)) {
+    p.outro(`${id} is not a retired app storage key here, so there is nothing to forget.`);
+    return;
+  }
+  const { saveProjectConfig } = await import('./lib/config.js');
+  const rest = retired.filter((k) => k !== id);
+  if (rest.length > 0) projectConfig.retiredAppKeys = rest;
+  else delete projectConfig.retiredAppKeys;
+  saveProjectConfig(projectConfig);
+  p.outro(
+    `Forgot ${id}. The next deploy takes it out of the bucket fences, so make sure it is deleted in the Hetzner console.`,
+  );
+}
+
 export async function run(args) {
   // Subcommand routing: `vibecarbon configure cicd <env>` skips the
   // interactive feature menu and runs the GitOps add-on flow directly.
@@ -1736,6 +1778,7 @@ export async function run(args) {
     return runConfigureCicd(args[1]);
   }
   if (args[0] === 'storage') {
+    if (args[1] === '-forget' || args[1] === '--forget') return runForgetAppStorageKey(args[2]);
     return runConfigureStorage(args[1]);
   }
 

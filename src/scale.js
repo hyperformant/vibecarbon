@@ -646,19 +646,20 @@ async function scaleServers(ctx) {
         // or `'` beside `"`) — mid-scale, after the new server exists. Drop
         // and warn here instead; the operator re-enters it with configure.
         oldEnv = dropUnportableEnv(parseDotenv(envText));
-      } catch {
-        // Old server may be unreachable; renderBundle will fall back to the
-        // project's local `.env`. That path is degraded (missing S3 secrets)
-        // but at least surfaces a meaningful error during reconcile rather
-        // than crashing scale silently.
-        s.stop('Could not read old-server config, falling back to project .env');
+      } catch (err) {
+        // No fallback to the project's local `.env`: it lacks the values the
+        // deploy merged in, and its S3_* would be the account-wide pair, not
+        // the app's own key (security plan R2). Stop this server's scale; the
+        // catch below deletes the new server.
+        s.stop('Could not read old-server config, so this server is not scaled', 1);
+        throw new Error(
+          `could not read .env on the old server ${server.ip} (${err?.message ?? err}), so scale stopped rather than build the new server from the project .env. Run scale again once the old server answers.`,
+        );
       }
-      // Only once the .env replay is in hand: its own read decides whether
-      // the old server answers at all. A failed app.env read throws here, so
-      // the catch below deletes the new server instead of guessing a pair.
-      if (Object.keys(oldEnv).length > 0) {
-        oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
-      }
+      // Only once the .env replay is in hand. A failed app.env read throws
+      // here, so the catch below deletes the new server instead of guessing
+      // a pair.
+      oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
       const oldAppImage = oldEnv.APP_IMAGE || '';
 
       s.start('Copying project files...');

@@ -89,7 +89,7 @@ describe('fenceTargets (Review Focus 7)', () => {
     });
   });
 
-  it('destroying staging takes AK_S out of every remaining fence', () => {
+  it('leaving without retiring takes the key out (destroy always retires first, see (a))', () => {
     const after = byBucket(
       fenceTargets({ projectConfig: project(), environment: 'staging', leaving: true }),
     );
@@ -233,7 +233,7 @@ describe('applyHetznerFences', () => {
     expect(foreign.puts).toEqual([]);
   });
 
-  it('syncHetznerFences on destroy takes the leaving key out of every fence it wrote', async () => {
+  it('(a) destroy retires the leaving key: it stays denied in every fence it was in', async () => {
     const cfg = project();
     const s3 = makeS3();
     const clock = fakeClock();
@@ -246,6 +246,8 @@ describe('applyHetznerFences', () => {
       createProbe: async () => scriptedProbe([true]),
       ...clock,
     });
+    // What destroy's revoke step does before its sync.
+    Object.assign(cfg, { retiredAppKeys: ['AK_S'] });
     await syncHetznerFences({
       projectConfig: cfg,
       environment: 'staging',
@@ -255,10 +257,164 @@ describe('applyHetznerFences', () => {
       createProbe: async () => scriptedProbe([true]),
       ...clock,
     });
-    for (const [bucket, policy] of s3.policies) {
-      expect(JSON.stringify(policy), bucket).not.toContain('AK_S');
+    for (const bucket of ['proj-abc-state', 'proj-abc-backups', 'proj-abc-prod']) {
+      expect(JSON.stringify(s3.policies.get(bucket)), bucket).toContain('AK_S');
     }
-    expect(s3.deletes).toEqual(['proj-abc-prod']);
+    expect(s3.deletes).toEqual([]);
+  });
+
+  it('(c) a replaced pasted key stays denied everywhere, the env own bucket included', () => {
+    const cfg = { ...project(), retiredAppKeys: ['AK_P_OLD'] };
+    const targets = byBucket(fenceTargets({ projectConfig: cfg, environment: 'prod' }));
+    for (const ids of Object.values(targets)) expect(ids).toContain('AK_P_OLD');
+    expect(targets['proj-abc-prod']).toEqual(['AK_P_OLD', 'AK_S']);
+  });
+
+  it('a re-run after an exhausted budget verifies again instead of trusting the unchanged policy', async () => {
+    const s3 = makeS3();
+    const clock = fakeClock();
+    const targets = [{ bucket: 'proj-abc-state', deniedAccessKeyIds: ['AK_P'] }];
+    await expect(
+      applyHetznerFences({
+        s3,
+        ownerId: OWNER,
+        targets,
+        probes: { AK_P: scriptedProbe([false]) },
+        ...clock,
+      }),
+    ).rejects.toThrow(/did not hold/);
+    // Policy now unchanged: still probed, and still failing while it leaks.
+    const leaking = scriptedProbe([false]);
+    await expect(
+      applyHetznerFences({ s3, ownerId: OWNER, targets, probes: { AK_P: leaking }, ...clock }),
+    ).rejects.toThrow(/proj-abc-state.*1 denied probe/);
+    expect(leaking.calls()).toBeGreaterThan(0);
+    // Once it holds, one denied probe passes the unchanged fence.
+    const holding = scriptedProbe([true]);
+    await applyHetznerFences({ s3, ownerId: OWNER, targets, probes: { AK_P: holding }, ...clock });
+    expect(holding.calls()).toBe(1);
+    expect(s3.puts).toEqual(['proj-abc-state']);
+  });
+
+  it('a bucket no env finished a deploy into is skipped and named when it is confirmed gone', async () => {
+    const noSuch = Object.assign(new Error('The specified bucket does not exist'), {
+      name: 'NoSuchBucket',
+    });
+    const s3 = {
+      ...makeS3(),
+      getBucketPolicy: vi.fn(async () => {
+        throw noSuch;
+      }),
+      bucketExists: vi.fn(async () => false),
+    };
+    const out = await applyHetznerFences({
+      s3,
+      ownerId: OWNER,
+      targets: [{ bucket: 'proj-abc-staging', deniedAccessKeyIds: ['AK_P'], mayBeAbsent: true }],
+      ...fakeClock(),
+    });
+    expect(out.skipped).toEqual(['proj-abc-staging']);
+    // A deployed env's bucket answering NoSuchBucket (a young Hetzner bucket)
+    // is never skipped silently.
+    await expect(
+      applyHetznerFences({
+        s3,
+        ownerId: OWNER,
+        targets: [{ bucket: 'proj-abc-prod', deniedAccessKeyIds: ['AK_S'], mayBeAbsent: false }],
+        ...fakeClock(),
+      }),
+    ).rejects.toThrow(/proj-abc-prod answered NoSuchBucket.*deployed environment/);
+  });
+
+  it('mayBeAbsent is true only for buckets no referencing env finished a deploy into', () => {
+    const cfg = project();
+    Object.assign(cfg.environments.prod, { status: 'deployed' });
+    const by = Object.fromEntries(
+      fenceTargets({ projectConfig: cfg, environment: 'staging' }).map((t) => [
+        t.bucket,
+        t.mayBeAbsent,
+      ]),
+    );
+    expect(by).toEqual({
+      'proj-abc-backups': false,
+      'proj-abc-prod': false,
+      'proj-abc-staging': true,
+      'proj-abc-state': false,
+    });
+  });
+});
+
+describe('(b) a fenced env whose key is not on this machine', () => {
+  it('refuses the deploy rather than downgrade to shared', async () => {
+    await expect(
+      resolveAppStorageCredential({
+        provider: 'hetzner',
+        environment: 'prod',
+        envConfig: { s3: { appKey: { id: 'AK_P', scoping: 'paste-fence', tier: 'fenced' } } },
+        bucket: 'proj-abc-prod',
+        infraCredential: {
+          accessKey: 'SENTINEL_INFRA_AK',
+          secretKey: 'SENTINEL_INFRA_SK',
+          endpoint: 'https://fsn1.your-objectstorage.com',
+        },
+        secrets: { get: () => undefined, set: vi.fn() },
+      }),
+    ).rejects.toThrow(
+      /prod is fenced with pasted app storage key AK_P, but that key is not stored on this machine/,
+    );
+  });
+
+  it('a re-paste of a different key returns the old id to retire', async () => {
+    const names = appStorageSecretKeys('prod');
+    const store: Record<string, string> = {
+      [names.accessKey]: 'AK_P_NEW',
+      [names.secretKey]: 'SENTINEL_NEW_SK',
+    };
+    const out = await resolveAppStorageCredential({
+      provider: 'hetzner',
+      environment: 'prod',
+      envConfig: { s3: { appKey: { id: 'AK_P', scoping: 'paste-fence', tier: 'fenced' } } },
+      bucket: 'proj-abc-prod',
+      infraCredential: {
+        accessKey: 'SENTINEL_INFRA_AK',
+        secretKey: 'SENTINEL_INFRA_SK',
+        endpoint: 'https://fsn1.your-objectstorage.com',
+      },
+      secrets: { get: (k: string) => store[k], set: vi.fn() },
+    });
+    expect(out.retire).toBe('AK_P');
+    expect(out.record).toEqual({ id: 'AK_P_NEW', scoping: 'paste-fence', tier: 'fenced' });
+  });
+});
+
+describe('configure storage -forget', () => {
+  it('removes a retired id, refuses one still in use, and the next fence drops it', async () => {
+    const { mkdtempSync, rmSync, writeFileSync, readFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'vc-forget-'));
+    const cwd = process.cwd();
+    const cfg = { ...project(), retiredAppKeys: ['AK_OLD', 'AK_OTHER'] };
+    writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(cfg));
+    writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('exit');
+    }) as never);
+    try {
+      process.chdir(dir);
+      const { runForgetAppStorageKey } = await import('../../../src/configure.js');
+      await runForgetAppStorageKey('AK_OLD');
+      const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8'));
+      expect(saved.retiredAppKeys).toEqual(['AK_OTHER']);
+      for (const t of fenceTargets({ projectConfig: saved, environment: 'prod' })) {
+        expect(t.deniedAccessKeyIds).not.toContain('AK_OLD');
+      }
+      await expect(runForgetAppStorageKey('AK_P')).rejects.toThrow('exit');
+    } finally {
+      process.chdir(cwd);
+      exit.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
