@@ -13,7 +13,7 @@ import {
   tlsSnapshotS3Prefix,
   writeTlsSnapshot,
 } from '../../../src/lib/deploy/tls-snapshot.js';
-import { walgPrefixFor } from '../../../src/lib/walg/restore-base.js';
+import { envBackupPrefix, walgPrefixFor } from '../../../src/lib/walg/restore-base.js';
 import { acmeJson, DAY_MS, k8sSecretJson } from './_tls-fixtures.ts';
 
 const s3Config = {
@@ -36,6 +36,13 @@ describe('caSlug', () => {
   });
   it('maps empty to prod', () => {
     expect(caSlug('')).toBe('prod');
+  });
+});
+
+describe('envBackupPrefix', () => {
+  it('is the folder walgPrefixFor and snapshot keys live under', () => {
+    expect(envBackupPrefix('myapp', 'prod')).toBe('backups/myapp/prod/');
+    expect(walgPrefixFor('myapp', 'prod')).toBe('backups/myapp/prod/walg');
   });
 });
 
@@ -85,6 +92,52 @@ describe('inspectComposeAcme', () => {
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.reason).not.toContain('SECRETTEXT');
   });
+  it('skips a wrong-CA resolver and finds the cert under the right one', () => {
+    const parsed = JSON.parse(acmeJson({}));
+    const wrong = {
+      Account: { Registration: { uri: 'https://acme-v02.api.letsencrypt.org/acme/acct/9' } },
+      Certificates: null,
+    };
+    const text = JSON.stringify({ other: wrong, ...parsed });
+    expect(inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' }).ok).toBe(true);
+  });
+  it('tolerates a null Certificates list', () => {
+    const text = JSON.stringify({
+      r: {
+        Account: { Registration: { uri: 'https://acme-staging-v02.api.letsencrypt.org/x' } },
+        Certificates: null,
+      },
+    });
+    const v = inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' });
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.reason).toContain('app.example.com');
+  });
+  it('rejects a self-signed certificate', () => {
+    expect(
+      inspectComposeAcme(acmeJson({ selfSigned: true }), {
+        domain: 'app.example.com',
+        ca: 'staging',
+      }).ok,
+    ).toBe(false);
+  });
+  it('rejects a key that does not match the certificate', () => {
+    const v = inspectComposeAcme(acmeJson({ mismatchedKey: true }), {
+      domain: 'app.example.com',
+      ca: 'staging',
+    });
+    expect(v).toEqual({ ok: false, reason: 'certificate and key do not match' });
+  });
+  it('rejects a cert that is not base64 PEM', () => {
+    const text = JSON.stringify({
+      r: {
+        Account: { Registration: { uri: 'https://acme-staging-v02.api.letsencrypt.org/x' } },
+        Certificates: [
+          { domain: { main: 'app.example.com' }, certificate: 'bm9wZQ==', key: 'a2V5' },
+        ],
+      },
+    });
+    expect(inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' }).ok).toBe(false);
+  });
   it('exposes a validity floor of at least a few days', () => {
     expect(MIN_REMAINING_VALIDITY_MS).toBeGreaterThan(3 * DAY_MS);
   });
@@ -120,6 +173,35 @@ describe('inspectK8sTlsSecret', () => {
       false,
     );
   });
+  it('fails when the secret carries no cert-manager issuer annotation', () => {
+    expect(inspectK8sTlsSecret(k8sSecretJson({ omitIssuer: true }), { dnsNames: names })).toEqual({
+      ok: false,
+      reason: 'secret has no cert-manager issuer',
+    });
+  });
+  it('fails for a self-signed certificate', () => {
+    expect(inspectK8sTlsSecret(k8sSecretJson({ selfSigned: true }), { dnsNames: names }).ok).toBe(
+      false,
+    );
+  });
+  it('fails for a key that does not match the certificate', () => {
+    expect(
+      inspectK8sTlsSecret(k8sSecretJson({ mismatchedKey: true }), { dnsNames: names }),
+    ).toEqual({
+      ok: false,
+      reason: 'certificate and key do not match',
+    });
+  });
+  it('fails for unparsable JSON without echoing it', () => {
+    const v = inspectK8sTlsSecret('{nope SECRETTEXT', { dnsNames: names });
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.reason).not.toContain('SECRETTEXT');
+  });
+  it('fails when tls.crt is not a certificate', () => {
+    const s = JSON.parse(k8sSecretJson({}));
+    s.data['tls.crt'] = Buffer.from('nope').toString('base64');
+    expect(inspectK8sTlsSecret(JSON.stringify(s), { dnsNames: names }).ok).toBe(false);
+  });
   it('fails for a nearly expired certificate', () => {
     expect(inspectK8sTlsSecret(k8sSecretJson({ days: 3 }), { dnsNames: names }).ok).toBe(false);
   });
@@ -153,6 +235,32 @@ describe('buildRestoredTlsSecret', () => {
     ]) {
       expect(out.metadata).not.toHaveProperty(f);
     }
+  });
+});
+
+describe('buildRestoredTlsSecret errors', () => {
+  const opts = { namespace: 'vibecarbon', issuerName: 'i' };
+  it('throws a fixed message that never echoes unparsable input', () => {
+    expect(() => buildRestoredTlsSecret('{oops SECRETTEXT', opts)).toThrow(
+      'snapshot secret is unparsable',
+    );
+    try {
+      buildRestoredTlsSecret('{oops SECRETTEXT', opts);
+    } catch (e) {
+      expect((e as Error).message).not.toContain('SECRETTEXT');
+    }
+  });
+  it('throws when tls.crt or tls.key is missing', () => {
+    const s = JSON.parse(k8sSecretJson({}));
+    delete s.data['tls.key'];
+    expect(() => buildRestoredTlsSecret(JSON.stringify(s), opts)).toThrow(
+      'snapshot secret is unparsable',
+    );
+    const t = JSON.parse(k8sSecretJson({}));
+    delete t.data['tls.crt'];
+    expect(() => buildRestoredTlsSecret(JSON.stringify(t), opts)).toThrow(
+      'snapshot secret is unparsable',
+    );
   });
 });
 

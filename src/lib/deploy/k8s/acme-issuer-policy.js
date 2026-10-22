@@ -32,8 +32,10 @@
  * referenced).
  */
 
-/** The local, contention-free issuer a pilot-standby's Certificates use. */
-export const STANDBY_SELFSIGNED_ISSUER = 'vibecarbon-standby-selfsigned';
+import { STANDBY_SELFSIGNED_ISSUER } from '../tls-issuer-names.js';
+
+// The local, contention-free issuer a pilot-standby's Certificates use.
+export { STANDBY_SELFSIGNED_ISSUER };
 
 /**
  * Annotation carrying the environment's real ACME ClusterIssuer name

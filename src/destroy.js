@@ -76,6 +76,7 @@ import { generateBucketSalt } from './lib/secrets.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
 import { recordLeakedVolumes } from './lib/volume-ledger.js';
+import { envBackupPrefix as envBackupPrefixFor } from './lib/walg/restore-base.js';
 
 /**
  * Pure planner: derive every teardown target from persisted config, with no
@@ -1168,7 +1169,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
   // Every environment archives under its own backups/<project>/<env>/ prefix,
   // so -purge removes this environment's backups and the bucket itself only
   // goes with the last live environment.
-  const envBackupPrefix = `backups/${projectConfig.projectName}/${environment}/`;
+  const envBackupPrefix = envBackupPrefixFor(projectConfig.projectName, environment);
   const preservedHolders = preservedBackupHolders(projectConfig, environment, bucketName);
   const deleteBucket =
     otherEnvironmentNames(projectConfig, environment).length === 0 && preservedHolders.length === 0;

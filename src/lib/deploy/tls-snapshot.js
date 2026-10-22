@@ -8,12 +8,15 @@
  * never the input text, and the read/write helpers never log (the caller
  * prints the one info line).
  */
-import { X509Certificate } from 'node:crypto';
-import { createS3Client } from '../walg/restore-base.js';
-// paid-boundary-ignore: acme-issuer-policy.js is an import-free constants leaf, so the free compose path shares the issuer name without pulling in engine code
-import { STANDBY_SELFSIGNED_ISSUER } from './k8s/acme-issuer-policy.js';
+import { createPrivateKey, X509Certificate } from 'node:crypto';
+import { createS3Client, envBackupPrefix } from '../walg/restore-base.js';
+import { STANDBY_SELFSIGNED_ISSUER } from './tls-issuer-names.js';
 
-/** A stored or live certificate with less than this left is not worth serving. */
+/**
+ * A stored or live certificate with less than this left is not worth serving.
+ * Let's Encrypt's 6-day short-lived certificates are therefore always refused,
+ * which is intended: they are never worth snapshotting.
+ */
 export const MIN_REMAINING_VALIDITY_MS = 7 * 24 * 60 * 60 * 1000;
 
 const K8S_SECRET_NAME = 'vibecarbon-tls';
@@ -25,12 +28,12 @@ export function caSlug(acmeServerOrIssuerName) {
 
 /** Object key of a snapshot, inside the env folder `-purge` deletes. */
 export function tlsSnapshotKey({ projectName, envName, ca, format }) {
-  return `backups/${projectName}/${envName}/tls/${ca}/${format}.json`;
+  return `${envBackupPrefix(projectName, envName)}tls/${ca}/${format}.json`;
 }
 
 /** `s3://` prefix holding the snapshots of one CA, for server-side `st put`. */
 export function tlsSnapshotS3Prefix({ backupBucket, projectName, envName, ca }) {
-  return `s3://${backupBucket}/backups/${projectName}/${envName}/tls/${ca}`;
+  return `s3://${backupBucket}/${envBackupPrefix(projectName, envName)}tls/${ca}`;
 }
 
 function parseJson(text) {
@@ -57,9 +60,22 @@ function sanDnsNames(cert) {
     .map((s) => s.slice(4));
 }
 
-/** `{ ok: true, notAfter }` when the cert has enough validity left. */
-function checkValidity(cert, now) {
-  const notAfter = new Date(cert.validTo);
+/**
+ * Judge one certificate + key pair: parsable, issued by a CA (not
+ * self-signed), the key belongs to it, and enough validity is left.
+ *
+ * @returns {{ ok: true, notAfter: Date } | { ok: false, reason: string }}
+ */
+function checkCertAndKey(certPem, keyPem, now) {
+  const cert = parseCert(certPem);
+  if (!cert) return { ok: false, reason: 'certificate is unparsable' };
+  if (cert.checkIssued(cert)) return { ok: false, reason: 'certificate is self-signed' };
+  try {
+    if (!cert.checkPrivateKey(createPrivateKey(keyPem))) throw new Error('mismatch');
+  } catch {
+    return { ok: false, reason: 'certificate and key do not match' };
+  }
+  const notAfter = cert.validToDate;
   if (notAfter.getTime() - now.getTime() < MIN_REMAINING_VALIDITY_MS) {
     return { ok: false, reason: `certificate expires ${notAfter.toISOString()}, too soon` };
   }
@@ -76,20 +92,26 @@ export function inspectComposeAcme(acmeJsonText, { domain, ca, now = new Date() 
   const parsed = parseJson(acmeJsonText);
   if (!parsed || typeof parsed !== 'object')
     return { ok: false, reason: 'acme.json is not valid JSON' };
+  let wrongCa = false;
   for (const resolver of Object.values(parsed)) {
     const uri = resolver?.Account?.Registration?.uri;
     if (typeof uri !== 'string') continue;
-    if (caSlug(uri) !== ca)
-      return { ok: false, reason: `acme.json was issued by a different CA than ${ca}` };
-    const entry = (resolver.Certificates ?? []).find((c) => c?.domain?.main === domain);
+    const certs = Array.isArray(resolver.Certificates) ? resolver.Certificates : [];
+    const entry = certs.find((c) => c?.domain?.main === domain);
     if (!entry) continue;
-    const pem = Buffer.from(String(entry.certificate ?? ''), 'base64').toString('utf8');
-    const cert = parseCert(pem);
-    if (!cert) return { ok: false, reason: `certificate for ${domain} is unparsable` };
-    if (!entry.key) return { ok: false, reason: `certificate for ${domain} has no key` };
-    return checkValidity(cert, now);
+    if (caSlug(uri) !== ca) {
+      wrongCa = true;
+      continue;
+    }
+    const decode = (v) => Buffer.from(String(v ?? ''), 'base64').toString('utf8');
+    return checkCertAndKey(decode(entry.certificate), decode(entry.key), now);
   }
-  return { ok: false, reason: `no certificate for ${domain} in acme.json` };
+  return {
+    ok: false,
+    reason: wrongCa
+      ? `certificate for ${domain} was issued by a different CA than ${ca}`
+      : `no certificate for ${domain} in acme.json`,
+  };
 }
 
 function decodeSecretField(secret, field) {
@@ -109,23 +131,29 @@ export function inspectK8sTlsSecret(secretJsonText, { dnsNames, now = new Date()
   if (!secret || typeof secret !== 'object')
     return { ok: false, reason: 'secret is not valid JSON' };
   const issuerName = secret.metadata?.annotations?.['cert-manager.io/issuer-name'] ?? '';
+  if (!issuerName) return { ok: false, reason: 'secret has no cert-manager issuer' };
   if (issuerName === STANDBY_SELFSIGNED_ISSUER)
     return { ok: false, reason: 'secret is standby self-signed' };
-  if (!decodeSecretField(secret, 'tls.key')) return { ok: false, reason: 'secret has no tls.key' };
-  const cert = parseCert(decodeSecretField(secret, 'tls.crt'));
+  const certPem = decodeSecretField(secret, 'tls.crt');
+  const keyPem = decodeSecretField(secret, 'tls.key');
+  if (!keyPem) return { ok: false, reason: 'secret has no tls.key' };
+  const cert = parseCert(certPem);
   if (!cert) return { ok: false, reason: 'tls.crt is missing or unparsable' };
   const have = new Set(sanDnsNames(cert));
   const want = new Set(dnsNames);
   if (have.size !== want.size || [...want].some((n) => !have.has(n))) {
     return { ok: false, reason: 'certificate names differ from the required names' };
   }
-  const validity = checkValidity(cert, now);
-  return validity.ok ? { ...validity, issuerName } : validity;
+  const verdict = checkCertAndKey(certPem, keyPem, now);
+  return verdict.ok ? { ...verdict, issuerName } : verdict;
 }
 
 /** A clean vibecarbon-tls manifest from a snapshot, ready for `kubectl apply -f -`. */
 export function buildRestoredTlsSecret(secretJsonText, { namespace, issuerName }) {
-  const secret = JSON.parse(secretJsonText);
+  const secret = parseJson(secretJsonText);
+  if (!secret?.data?.['tls.crt'] || !secret.data['tls.key']) {
+    throw new Error('snapshot secret is unparsable');
+  }
   return {
     apiVersion: 'v1',
     kind: 'Secret',
