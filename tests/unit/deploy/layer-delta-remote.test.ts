@@ -16,6 +16,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +24,7 @@ import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { REMOTE_SCRIPT } from '../../../src/lib/deploy/layer-delta.js';
+import { TARGET_PLATFORM } from '../../../src/lib/deploy/platform.js';
 
 const sha = (b: string | Buffer) => createHash('sha256').update(b).digest('hex');
 const BODIES = ['base-0', 'base-1', 'base-2', 'app-3', 'app-4'];
@@ -100,11 +102,12 @@ case "$1 $2" in
   "load "*|"load")
     cat > "$STUB/loaded.tar"
     if [ -n "\${STUB_LOAD_FAIL:-}" ]; then echo "$STUB_LOAD_FAIL" >&2; echo "second line" >&2; exit 1; fi
+    echo "$STUB_TAG" >> "$STUB/tags"
     echo "Loaded image: $STUB_TAG"; exit 0 ;;
   "image inspect")
     cat "$STUB/inspect"; exit 0 ;;
   "image rm")
-    exit 0 ;;
+    grep -vxF "$3" "$STUB/tags" > "$STUB/tags.new" || true; mv "$STUB/tags.new" "$STUB/tags"; exit 0 ;;
 esac
 echo "stub docker: unexpected $*" >&2; exit 2
 `;
@@ -122,12 +125,15 @@ case "$1 $2" in
   "images import")
     cat > "$STUB/loaded.tar"
     if [ -n "\${STUB_LOAD_FAIL:-}" ]; then echo "$STUB_LOAD_FAIL" >&2; exit 1; fi
+    echo "$STUB_REF" >> "$STUB/tags"
     echo "unpacking $STUB_REF (sha256:feed)...done"; exit 0 ;;
   "images ls")
     echo "REF TYPE DIGEST SIZE PLATFORMS LABELS"
     echo "$STUB_REF application/vnd.docker.distribution.manifest.v2+json sha256:$(cat "$STUB/manifest-digest") 5.0 MiB linux/amd64 -"
     exit 0 ;;
-  "images tag"|"images push"|"images rm")
+  "images rm")
+    grep -vxF "$3" "$STUB/tags" > "$STUB/tags.new" || true; mv "$STUB/tags.new" "$STUB/tags"; exit 0 ;;
+  "images tag"|"images push")
     exit 0 ;;
 esac
 echo "stub ctr: unexpected $*" >&2; exit 2
@@ -165,8 +171,16 @@ function storeLoaded({ diffIds = DIFF_IDS }: { diffIds?: string[] } = {}) {
 
 const SHELLS = ['bash', 'sh'];
 
-function runScript(shell: string, args: string[], input: Buffer, env: Record<string, string> = {}) {
-  const r = spawnSync(shell, ['-c', REMOTE_SCRIPT, 'layer-delta', ...args], {
+/** args: runtime, tag, ref, registry-ref; the platform goes in after runtime. */
+function runScript(
+  shell: string,
+  args: string[],
+  input: Buffer,
+  env: Record<string, string> = {},
+  platform = TARGET_PLATFORM,
+) {
+  const [runtime, ...rest] = args;
+  const r = spawnSync(shell, ['-c', REMOTE_SCRIPT, 'layer-delta', runtime, platform, ...rest], {
     input,
     encoding: 'buffer',
     env: {
@@ -181,6 +195,10 @@ function runScript(shell: string, args: string[], input: Buffer, env: Record<str
   return { status: r.status, stdout: r.stdout.toString(), stderr: r.stderr.toString() };
 }
 
+const tags = () =>
+  existsSync(join(stub, 'tags'))
+    ? readFileSync(join(stub, 'tags'), 'utf-8').split('\n').filter(Boolean)
+    : [];
 const calls = () =>
   existsSync(join(stub, 'calls')) ? readFileSync(join(stub, 'calls'), 'utf-8') : '';
 const loaded = () => {
@@ -219,7 +237,36 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       // One save per source image, pinned to the platform deploys run.
       expect(calls().match(/docker save/g)).toHaveLength(1);
       expect(calls()).toContain(`docker save --platform linux/amd64 ${SRC_ID}`);
+      expect(tags()).toEqual([TAG]);
       expect(readdirSync(deltaRoot)).toEqual([]);
+    });
+
+    it('saves the source image for the platform the host passes, not a literal', () => {
+      writeSourceSave();
+      storeLoaded();
+      const r = runScript(
+        shell,
+        ['docker', TAG, TAG, ''],
+        deltaTar({ fill: dockerFill }),
+        {},
+        'linux/arm64',
+      );
+      expect(r.status).toBe(0);
+      expect(calls()).toContain(`docker save --platform linux/arm64 ${SRC_ID}`);
+    });
+
+    it('sweeps work dirs an hour old that a killed host left behind, and only those', () => {
+      mkdirSync(join(deltaRoot, 'd.stale'), { recursive: true });
+      mkdirSync(join(deltaRoot, 'd.fresh'));
+      mkdirSync(join(deltaRoot, 'other'));
+      writeFileSync(join(deltaRoot, 'd.stale', 'l0'), 'x');
+      const old = new Date(Date.now() - 2 * 3600_000);
+      for (const p of ['d.stale/l0', 'd.stale', 'other']) utimesSync(join(deltaRoot, p), old, old);
+      writeSourceSave();
+      storeLoaded();
+      const r = runScript(shell, ['docker', TAG, TAG, ''], deltaTar({ fill: dockerFill }));
+      expect(r.status).toBe(0);
+      expect(readdirSync(deltaRoot).sort()).toEqual(['d.fresh', 'other']);
     });
 
     it('loads a full delta (nothing held) without saving anything', () => {
@@ -286,6 +333,7 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       expect(r.status).not.toBe(0);
       expect(r.stderr.split('\n')[0]).toContain('do not match');
       expect(calls()).toContain(`docker image rm ${TAG}`);
+      expect(tags()).not.toContain(TAG);
       expect(readdirSync(deltaRoot)).toEqual([]);
     });
   });
@@ -377,14 +425,29 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       expect(r.status).not.toBe(0);
       expect(r.stderr.split('\n')[0]).toContain('do not match');
       expect(calls()).toContain(`ctr -n k8s.io images rm ${REF}`);
+      expect(tags()).not.toContain(REF);
       expect(calls()).not.toContain('images push');
     });
   });
 });
 
 describe('layer-delta-remote.sh text', () => {
-  it('never echoes the environment or enables tracing (its stderr becomes the deploy error line)', () => {
-    expect(REMOTE_SCRIPT).not.toMatch(/set -x|\benv\b\s*$|printenv/m);
+  it('never prints an environment value, on success or failure (its stderr becomes the deploy error line)', () => {
+    const secret = 'vc-secret-probe-7f3a9c';
+    const env = { HCLOUD_TOKEN: secret, VC_SECRET_PROBE: secret, AWS_SECRET_ACCESS_KEY: secret };
+    for (const shell of SHELLS) {
+      for (const fail of ['', 'no space left on device']) {
+        writeSourceSave();
+        storeLoaded();
+        const r = runScript(shell, ['docker', TAG, TAG, ''], deltaTar({ fill: dockerFill }), {
+          ...env,
+          ...(fail ? { STUB_LOAD_FAIL: fail } : {}),
+        });
+        expect(r.status).toBe(fail ? 1 : 0);
+        expect(r.stdout + r.stderr).not.toContain(secret);
+      }
+    }
+    expect(REMOTE_SCRIPT).not.toMatch(/^\s*set\s+-[a-z]*x/m);
   });
 
   it('works under /var/lib/vibecarbon/delta by default and removes its dir on every exit', () => {

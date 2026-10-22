@@ -132,6 +132,13 @@ describe('listTargetLayers / listTargetDiffIds', () => {
     expect(new Set(layers.values())).toEqual(new Set([ID_B]));
   });
 
+  it('docker: ignores a line that is not an image id (a daemon warning on stdout)', async () => {
+    const run = async () => `WARNING: ${DIFF_IDS[4]}\n${ID_A} ${BASE_DIFF_IDS.join(' ')} \n`;
+    const layers = await listTargetLayers({ run, runtime: 'docker' });
+    expect(new Set(layers.values())).toEqual(new Set([ID_A]));
+    expect(layers.has(DIFF_IDS[4])).toBe(false);
+  });
+
   it('k3s: reads diffIDs from the content store uncompressed labels and names the blob that holds each', async () => {
     const gz = (i: number) => `sha256:${sha(`gz-${i}`)}`;
     const run = async (cmd: string) => {
@@ -256,7 +263,7 @@ describe('deliverImage', () => {
       BASE_DIFF_IDS.map((d, i) => `${i} ${d} ${ID_BASE}\n`).join(''),
     );
     expect(ssh.sent[0].cmd).toMatch(/^sh -c '/);
-    expect(ssh.sent[0].cmd).toContain(` layer-delta 'docker' '${TAG}' '${TAG}' ''`);
+    expect(ssh.sent[0].cmd).toContain(` layer-delta 'docker' 'linux/amd64' '${TAG}' '${TAG}' ''`);
   });
 
   it('k3s: names the imported image as ctr will and passes the registry ref for the push', async () => {
@@ -274,7 +281,9 @@ describe('deliverImage', () => {
         acquireLock: noLock,
       },
     });
-    expect(ssh.sent[0].cmd).toContain(` layer-delta 'k3s' '${ref}' '${ref}' '${ref}'`);
+    expect(ssh.sent[0].cmd).toContain(
+      ` layer-delta 'k3s' 'linux/amd64' '${ref}' '${ref}' '${ref}'`,
+    );
   });
 
   it('maps a failed remote load to one line and never retries', async () => {
@@ -411,6 +420,32 @@ describe('deliverImage', () => {
     expect(order).toEqual(['list', `lock:delta tag=${TAG}`, 'send', 'unlock']);
   });
 
+  it('frees the uplink once the stream is handed over, while the target still loads', async () => {
+    const order: string[] = [];
+    await deliverImage({
+      ...args,
+      deps: {
+        run: listBase,
+        saveImage: saveFixture,
+        send: async (_cmd: string, stdin: Readable) => {
+          for await (const _ of stdin) {
+            // drain, as ssh does
+          }
+          order.push('stream:sent');
+          // The target's own save, load and push run after the last byte.
+          await new Promise((r) => setTimeout(r, 20));
+          order.push('target:done');
+          return { code: 0, stderr: '' };
+        },
+        acquireLock: async () => {
+          order.push('lock');
+          return () => order.push('unlock');
+        },
+      },
+    });
+    expect(order).toEqual(['lock', 'unlock', 'stream:sent', 'target:done']);
+  });
+
   it('releases the uplink lock when the send fails', async () => {
     const order: string[] = [];
     const ssh = stubSsh({ exit: 255, stderr: 'Connection reset' });
@@ -429,6 +464,53 @@ describe('deliverImage', () => {
       }),
     ).rejects.toThrow('image delivery failed: Connection reset');
     expect(order).toEqual(['lock', 'unlock']);
+  });
+
+  it('says the base package must be public when the pull is refused, with the local build command on its own line', async () => {
+    for (const cause of [
+      'Error response from daemon: Head "https://ghcr.io/v2/hyperformant/node-runtime/manifests/24": unauthorized',
+      'denied: permission_denied',
+      'manifest unknown: not found',
+    ]) {
+      const basePull = Promise.reject(new Error(cause));
+      basePull.catch(() => {});
+      const err = await deliverImage({
+        ...args,
+        basePull,
+        deps: { run: listBase, send: stubSsh().send, saveImage: saveFixture, acquireLock: noLock },
+      }).catch((e: Error) => e);
+      const lines = (err as Error).message.split('\n');
+      expect(lines[0]).toContain(`image delivery failed: base image pull failed: ${cause}`);
+      expect(lines[0]).toContain('must be public on GHCR');
+      expect(lines.at(-1)?.trim()).toBe('pnpm node-runtime:build-local');
+    }
+  });
+
+  it('a failed pull waits for the host save to settle before the work dir goes', async () => {
+    const order: string[] = [];
+    const basePull = Promise.reject(new Error('connection reset'));
+    basePull.catch(() => {});
+    const err = await deliverImage({
+      ...args,
+      basePull,
+      deps: {
+        run: listBase,
+        send: stubSsh().send,
+        saveImage: async (_tag: string, dir: string) => {
+          await new Promise((r) => setTimeout(r, 30));
+          writeFixture(dir); // throws if the work dir were already removed
+          order.push('save:done');
+        },
+        acquireLock: noLock,
+      },
+    }).catch((e: Error) => {
+      order.push('rejected');
+      return e;
+    });
+    expect(order).toEqual(['save:done', 'rejected']);
+    expect((err as Error).message).toBe(
+      'image delivery failed: base image pull failed: connection reset',
+    );
   });
 
   it('refuses a registry ref for a docker target (only k3s pushes into a registry)', async () => {

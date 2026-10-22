@@ -52,6 +52,7 @@ import { knownHostsPathForKey, SSH_CONNECTION_OPTS } from '../host-keys.js';
 import { NODE_RUNTIME_IMAGE } from '../images.js';
 import { perfTimer } from '../perf.js';
 import { shEscape } from '../shell.js';
+import { TARGET_PLATFORM } from './platform.js';
 import { acquireUplinkLock } from './uplink-lock.js';
 
 /** The target half, shipped inline as `sh -c '<script>'` (nothing is staged). */
@@ -68,6 +69,23 @@ class DeliveryError extends Error {
     super(`image delivery failed: ${cause}`);
     this.name = 'DeliveryError';
   }
+}
+
+const PULL_DENIED = /unauthorized|denied|not found/i;
+
+/**
+ * The delivery's cause for a failed base pull. A refused pull of the runtime
+ * base almost always means its GHCR package is private (servers pull it
+ * anonymously) or not published yet, so say how to fix that.
+ */
+function basePullCause(err) {
+  const cause = `base image pull failed: ${firstLine(err?.message ?? err)}`;
+  if (!PULL_DENIED.test(cause)) return cause;
+  return (
+    `${cause}. The node-runtime package must be public on GHCR, since servers ` +
+    'pull it without credentials. For local work, build it on this machine with:\n' +
+    '  pnpm node-runtime:build-local'
+  );
 }
 
 /** The first line worth showing: ssh's host-key notice is not the cause. */
@@ -136,7 +154,7 @@ export async function listTargetLayers({ run, runtime = 'docker', refs = [] }) {
   const images = (await run(cmd))
     .split('\n')
     .map((l) => l.trim().split(/\s+/))
-    .filter(([id]) => id)
+    .filter(([id]) => DIFF_ID.test(id))
     .map(([id, ...diffIds]) => ({ id, diffIds: diffIds.filter((d) => DIFF_ID.test(d)) }))
     .sort((a, b) => b.diffIds.length - a.diffIds.length);
   for (const { id, diffIds } of images) {
@@ -377,9 +395,12 @@ export async function deliverImage({
       throw new DeliveryError(firstLine(err?.message) || 'docker save failed');
     });
     const pulled = Promise.resolve(basePull).catch((err) => {
-      throw new DeliveryError(`base image pull failed: ${firstLine(err?.message ?? err)}`);
+      throw new DeliveryError(basePullCause(err));
     });
-    await Promise.all([saved, pulled]);
+    // allSettled: a failed pull must not remove the work dir under a save
+    // still writing into it.
+    const failed = (await Promise.allSettled([pulled, saved])).find((r) => r.status === 'rejected');
+    if (failed) throw failed.reason;
 
     const layerSources = await listTargetLayers({
       run,
@@ -394,6 +415,7 @@ export async function deliverImage({
     const ref = runtime === 'k3s' ? normalizeImageRef(tag) : tag;
     const cmd = `sh -c ${shEscape(REMOTE_SCRIPT)} layer-delta ${[
       runtime,
+      TARGET_PLATFORM,
       tag,
       ref,
       registryRef ?? '',
@@ -402,14 +424,23 @@ export async function deliverImage({
       .join(' ')}`;
 
     let bytes = 0;
-    const release = await acquireLock({ label: `delta tag=${tag}` });
+    const releaseLock = await acquireLock({ label: `delta tag=${tag}` });
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      releaseLock();
+    };
     let result;
     let tarExit;
-    const tar = spawn('tar', ['-c', '-f', '-', '-C', stageDir, ...members], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    let tar;
     try {
-      const tarDone = settle(tar, 'tar');
+      tar = spawn('tar', ['-c', '-f', '-', '-C', stageDir, ...members], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      // Caught now, re-thrown below: a spawn error must not surface as an
+      // unhandled rejection while the send is still running.
+      const tarDone = settle(tar, 'tar').catch((err) => ({ code: 1, stderr: err.message }));
       const counted = tar.stdout.pipe(
         new Transform({
           transform(chunk, _enc, cb) {
@@ -418,13 +449,16 @@ export async function deliverImage({
           },
         }),
       );
+      // The uplink is free once the last byte is handed to ssh: the target's
+      // own save, load and push must not hold up another process's transfer.
+      counted.on('end', release);
       result = await send(cmd, counted);
       // A target that failed mid-stream stopped reading: close the pipe so a
       // tar still writing exits instead of blocking forever.
       tar.stdout.destroy();
       tarExit = await tarDone;
     } catch (err) {
-      tar.kill();
+      tar?.kill();
       throw err;
     } finally {
       release();
