@@ -673,7 +673,7 @@ export const DOCKERHUB_MIRRORS = [
  * by digest through the same `kubectl set image` seam. DO's v4.17.0
  * driver.yaml runs its `automount-udev-deleter` init container as bare
  * `alpine:3`, a floating major on Docker Hub; it now runs our alpine mirror
- * (DOCKERHUB_MIRRORS below), so a rate-limited Docker Hub cannot hold up the
+ * (ALPINE_MIRROR above), so a rate-limited Docker Hub cannot hold up the
  * node plugin. `kubectl set image` addresses init containers by name too.
  * Values are full refs. csiSidecarSetImagePlan merges these into the same
  * per-workload call as the mirrors, so no extra rollout happens.
