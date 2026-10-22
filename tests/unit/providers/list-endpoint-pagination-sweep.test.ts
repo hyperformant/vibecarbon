@@ -57,6 +57,13 @@ const EXCEPTIONS: Array<{ file: string; pathPrefix: string; reason: string }> = 
       'Hetzner does not paginate it.',
   },
   {
+    file: 'scripts/cost-grid.js',
+    pathPrefix: '/pricing',
+    reason:
+      'The same singleton `pricing` object as the hetzner.js row, read for the floating IP and ' +
+      'volume prices (and named as their source URL); not a collection.',
+  },
+  {
     file: 'src/lib/scaleway-guided-setup.js',
     pathPrefix: '/instance/v1/zones/fr-par-1/servers?per_page=1',
     reason:
