@@ -151,7 +151,9 @@ async function haProvisionServers(ctx) {
   const primaryStackRegion = birth('primary')?.region ?? region;
   const standbyRegion =
     birth('standby')?.region ??
-    (ctx.secondaryRegion || Provider.getDefaultStandbyRegion(primaryStackRegion, ['compose']));
+    (ctx.secondaryRegion ||
+      // Fits the primary's type without shrinking it, as the wizard's default.
+      Provider.getDefaultStandbyRegion(primaryStackRegion, ['compose'], { compose: serverType }));
   // The standby STACK's region; re-pointed at the role standby's once the pair
   // is resolved below (the same node unless this is a reconverge).
   ctx.standbyRegion = standbyRegion;
