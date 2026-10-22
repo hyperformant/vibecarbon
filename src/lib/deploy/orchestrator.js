@@ -585,15 +585,36 @@ export function resolveKubeconfigPath(environment, envConfig) {
  * every other one keeps its value on disk. An HA deploy sets its replication
  * state and the standby's proven identifier (or leaves none when it could not
  * prove streaming); every deploy records its backup lineage, which names or
- * clears the unrestored prior one.
+ * clears the unrestored prior one, and its TLS record (finalSaveTls).
  *
  * @param {boolean} isHADeploy
  * @returns {string[]}
  */
 export function finalSaveSafetyOwns(isHADeploy) {
   return isHADeploy
-    ? ['replication', 'degraded', 'degradedCause', 'ha.systemIdentifier', 'backup.unrestoredPrior']
-    : ['backup.unrestoredPrior'];
+    ? [
+        'replication',
+        'degraded',
+        'degradedCause',
+        'ha.systemIdentifier',
+        'backup.unrestoredPrior',
+        'tls',
+      ]
+    : ['backup.unrestoredPrior', 'tls'];
+}
+
+/**
+ * The env's TLS record after this deploy: the verdict the tier reported
+ * (deployResult.tls, `{ state, checkedAt, reason?, ca }`), else the record
+ * on disk. Failover and scale read its `ca` to pick a certificate snapshot,
+ * and status shows its state.
+ *
+ * @param {{ tls?: object }|undefined} deployResult
+ * @param {{ tls?: object }|undefined} persistedEnvConfig - the env as it is on disk now
+ * @returns {object|undefined}
+ */
+export function finalSaveTls(deployResult, persistedEnvConfig) {
+  return deployResult?.tls ?? persistedEnvConfig?.tls;
 }
 
 /**
@@ -1725,6 +1746,8 @@ export async function executeDeployment(args, gatheredConfig) {
       serverId: composeCtx.providerServerId || 'manual',
       serverName: composeCtx.providerServerName,
       firewallId: composeCtx.providerFirewallId,
+      // The verify-tls verdict (trusted or pending), persisted as envConfig.tls.
+      ...(composeCtx.tlsState && { tls: composeCtx.tlsState }),
     };
   } else if (tier === 'compose-ha') {
     // Compose-HA runs through the same pure step-plan + effect registry as
@@ -1793,6 +1816,7 @@ export async function executeDeployment(args, gatheredConfig) {
       replicationStatus: composeHaCtx.replActive && !haDegraded ? 'streaming' : 'degraded',
       systemIdentifier: composeHaCtx.systemIdentifier ?? null,
       reconvergeIncomplete,
+      ...(composeHaCtx.tlsState && { tls: composeHaCtx.tlsState }),
     };
   } else if (tier === 'k8s') {
     // Single-cluster k3s runs through the plan as a single black-box step that
@@ -2569,6 +2593,10 @@ export async function executeDeployment(args, gatheredConfig) {
       backup: { ...backupConfig, ...backupLineage },
       services,
     };
+    // The TLS verdict this deploy reported, else the one on disk (none: no key).
+    const tls = finalSaveTls(deployResult, persistedEnvConfig);
+    if (tls) nextEnv.tls = tls;
+    else delete nextEnv.tls;
     const finalConfig = {
       ...persistedConfig,
       environments: {

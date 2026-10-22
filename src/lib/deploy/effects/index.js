@@ -17,6 +17,7 @@ import * as p from '@clack/prompts';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
+import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { requireDnsSetup } from '../dns-result.js';
@@ -554,44 +555,51 @@ async function verifyHealth(ctx) {
 }
 
 /**
- * TLS-ready gate (shared by compose and compose-ha — it reads the primary's
- * identity from either ctx shape): the deploy is not done until the domain
- * serves a certificate the platform trust store accepts. Traefik/lego ACME
- * runs asynchronously from start-compose-stack onward; before this gate the
- * deploy could report success while the apex still served the Traefik
- * self-signed default (or, on compose-ha, an apex-less wildcard) — a
- * browser security warning presented as a successful deploy (DigitalOcean
- * DNS-01 propagation, run 33252884427). On failure the Traefik log tail is
- * fetched into the error so the ACME cause travels with the failure.
- * Manual-DNS deploys degrade to a warning instead: issuance can't complete
- * before the customer points the domain (see tls-ready.js).
+ * TLS verdict (shared by compose and compose-ha; it reads the primary's
+ * identity from either ctx shape): a deploy reports its TLS state; it does
+ * not wait out a CA. Traefik/lego ACME runs asynchronously from
+ * start-compose-stack onward, so this looks for a trusted apex certificate
+ * for one first-look window and then sets ctx.tlsState, trusted or pending,
+ * which the orchestrator's final save persists as envConfig.tls. It never
+ * fails the deploy: a pending state is one warning that names the cause
+ * (with the Traefik log tail on managed DNS, where the ACME error lives) and
+ * points at `vibecarbon status`. On the server, the tls-retry cron restarts
+ * Traefik to retry issuance (carbon/backup/tls-retry.sh). Manual DNS gets a
+ * shorter courtesy window: issuance can't complete before the customer
+ * points the domain (see tls-ready.js).
  */
 async function verifyTlsReady(ctx) {
   const { domain, dnsProvider, sshKeyPath, projectConfig } = ctx;
   const ip = ctx.serverIp ?? ctx.primary?.ip ?? null;
   const managedDns = Boolean(dnsProvider) && dnsProvider !== 'manual';
-  const { TLS_READY_MANUAL_BUDGET_MS, assertTlsReadyOrDegraded, waitForTrustedTls } = await import(
-    '../tls-ready.js'
-  );
+  const { TLS_FIRST_LOOK_BUDGET_MS, TLS_READY_MANUAL_BUDGET_MS, tlsVerdict, waitForTrustedTls } =
+    await import('../tls-ready.js');
+  const { caSlug } = await import('../tls-snapshot.js');
+  // The CA the bundle wrote into the server .env (ACME_CA_SERVER, unset is
+  // prod): failover and scale pick the snapshot by it, never by a guess.
+  const ca = caSlug(readOperatorVar('ACME_CA_SERVER').value ?? '');
   const tlsSpinner = spinner({ indicator: 'timer' });
   tlsSpinner.start(`Waiting for ${domain} to serve a trusted TLS certificate`);
   const result = await perfAsync('deploy.tls.ready', () =>
     waitForTrustedTls(domain, {
-      ...(managedDns ? {} : { budgetMs: TLS_READY_MANUAL_BUDGET_MS }),
+      budgetMs: managedDns ? TLS_FIRST_LOOK_BUDGET_MS : TLS_READY_MANUAL_BUDGET_MS,
       onProgress: (msg) => tlsSpinner.message(msg),
     }),
   );
+  const checkedAt = new Date().toISOString();
   if (result.trusted) {
     tlsSpinner.stop(
       `TLS certificate trusted (issued within ${Math.round(result.elapsedMs / 1000)}s)`,
     );
+    ctx.tlsState = { state: 'trusted', checkedAt, ca };
     return;
   }
-  tlsSpinner.stop('Domain is not serving a trusted TLS certificate', managedDns ? 1 : 0);
-  // Name the cause in the failure itself: the ACME error lives in Traefik's
-  // log, which was previously nowhere in any failure surface.
+  tlsSpinner.stop('TLS pending: the domain does not serve a trusted certificate yet');
+  // Name the cause in the warning itself: the ACME error lives in Traefik's
+  // log. Manual DNS skips it, since the usual cause there is a domain that
+  // does not point here yet.
   let traefikLogTail = '';
-  if (ip && sshKeyPath) {
+  if (managedDns && ip && sshKeyPath) {
     const { sshRunAsync } = await import('../compose/index.js');
     traefikLogTail =
       (await sshRunAsync(
@@ -601,21 +609,22 @@ async function verifyTlsReady(ctx) {
         { timeout: 15_000, ignoreError: true },
       )) || '';
   }
-  const { degraded, reason } = assertTlsReadyOrDegraded({
+  const verdict = tlsVerdict({
     trusted: false,
     managedDns,
     reason: result.reason,
     served: result.served,
     traefikLogTail,
-    fixHint: managedDns
-      ? `Check Traefik's ACME DNS-01 solver for ${dnsProvider} (token validity, zone ownership) in the log tail below.`
-      : '',
+    fixHint: `Check the ACME DNS-01 solver for ${dnsProvider} (token validity, zone ownership) in the log tail below.`,
   });
-  if (degraded) {
-    p.log.warn(
-      `TLS is not trusted yet (manual DNS — Traefik finishes issuance once the domain points here): ${reason}`,
-    );
-  }
+  ctx.tlsState = { state: 'pending', checkedAt, reason: verdict.reason, ca };
+  const next = managedDns
+    ? 'The server retries issuance every 30 minutes.'
+    : 'Once the domain points at this server, it retries issuance every 30 minutes.';
+  p.log.warn(
+    `TLS pending: ${domain} does not serve a trusted certificate yet (${verdict.reason}). ` +
+      `The app is deployed. ${next} Run \`vibecarbon status\` to follow it.\n${verdict.detail}`,
+  );
 }
 
 /**

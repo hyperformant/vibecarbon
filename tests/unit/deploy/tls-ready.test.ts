@@ -1,14 +1,16 @@
 /**
- * The TLS-ready deploy gate: a compose(-ha) deploy is not done until the
- * apex domain serves a certificate the platform trust store accepts.
+ * The compose(-ha) TLS verdict: a deploy reports its TLS state; it does not
+ * wait out a CA. It looks for a trusted apex certificate for a bounded
+ * first-look window, then finishes trusted or pending.
  *
  * Why this exists (2026-08-29, run 33252884427): compose fired Traefik/lego
  * ACME issuance asynchronously and declared the deploy done — on
  * DigitalOcean DNS the apex cert routinely wasn't issued yet, so the domain
  * served a self-signed default (compose) or an apex-less wildcard
  * (compose-ha) and the strict e2e ssl_valid check failed 15 minutes from
- * the cause. The k8s path was green on the same provider because it AWAITS
- * cert-manager; this module gives compose the same contract.
+ * the cause. The gate then waited up to 480s and failed the deploy; a slow
+ * CA failed deploys whose app was healthy. Now the verdict is recorded
+ * (envConfig.tls) and the server's tls-retry cron finishes issuance.
  *
  * Pattern: pure decision function + injectable-deps poll loop
  * (waitForNewPrimaryApi / assertReplicationStreamingOrDegraded shape) —
@@ -16,10 +18,10 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
-  assertTlsReadyOrDegraded,
-  TLS_READY_BUDGET_MS,
+  TLS_FIRST_LOOK_BUDGET_MS,
   TLS_READY_MANUAL_BUDGET_MS,
   TLS_READY_POLL_MS,
+  tlsVerdict,
   waitForTrustedTls,
 } from '../../../src/lib/deploy/tls-ready.js';
 
@@ -103,58 +105,73 @@ describe('waitForTrustedTls', () => {
   });
 });
 
-describe('assertTlsReadyOrDegraded', () => {
-  it('returns non-degraded when trusted', () => {
-    expect(assertTlsReadyOrDegraded({ trusted: true, managedDns: true })).toEqual({
-      degraded: false,
+describe('tlsVerdict', () => {
+  it('is trusted when the probe trusted the chain', () => {
+    expect(tlsVerdict({ trusted: true })).toEqual({ state: 'trusted' });
+  });
+
+  it('is pending, never a throw, on managed DNS: the deploy reports its TLS state', () => {
+    let verdict: ReturnType<typeof tlsVerdict> | undefined;
+    expect(() => {
+      verdict = tlsVerdict({ trusted: false, managedDns: true, reason: 'x' });
+    }).not.toThrow();
+    expect(verdict).toMatchObject({ state: 'pending', reason: 'x' });
+  });
+
+  it('carries the served cert, the fix hint and the log tail in its detail', () => {
+    const verdict = tlsVerdict({
+      trusted: false,
+      managedDns: true,
+      reason: 'self-signed certificate',
+      served: { subject: 'TRAEFIK DEFAULT CERT', issuer: 'TRAEFIK DEFAULT CERT' },
+      traefikLogTail: 'time="..." level=error msg="unable to obtain ACME certificate"',
+      fixHint: 'Check the DNS-01 token for digitalocean.',
     });
+
+    expect(verdict.state).toBe('pending');
+    expect(verdict.reason).toBe('self-signed certificate');
+    const detail = verdict.detail ?? '';
+    expect(detail).toContain('TRAEFIK DEFAULT CERT');
+    expect(detail).toContain('unable to obtain ACME certificate');
+    expect(detail).toContain('Check the DNS-01 token for digitalocean.');
   });
 
-  it('throws an actionable error on managed DNS: reason, served cert, log tail, re-run guidance', () => {
-    let thrown: Error | undefined;
-    try {
-      assertTlsReadyOrDegraded({
-        trusted: false,
-        managedDns: true,
-        reason: 'self-signed certificate',
-        served: { subject: 'TRAEFIK DEFAULT CERT', issuer: 'TRAEFIK DEFAULT CERT' },
-        traefikLogTail: 'time="..." level=error msg="unable to obtain ACME certificate"',
-        fixHint: 'Check the DNS-01 token for digitalocean.',
-      });
-    } catch (e) {
-      thrown = e as Error;
-    }
-
-    expect(thrown).toBeDefined();
-    const msg = thrown?.message ?? '';
-    expect(msg).toContain('self-signed certificate');
-    expect(msg).toContain('TRAEFIK DEFAULT CERT');
-    expect(msg).toContain('unable to obtain ACME certificate');
-    expect(msg).toContain('Check the DNS-01 token for digitalocean.');
-    expect(msg).toContain('vibecarbon deploy');
-  });
-
-  it('degrades instead of throwing on manual DNS — the customer may not have pointed DNS yet', () => {
-    const result = assertTlsReadyOrDegraded({
+  it('is pending on manual DNS too: the customer may not have pointed DNS yet', () => {
+    const verdict = tlsVerdict({
       trusted: false,
       managedDns: false,
       reason: 'getaddrinfo ENOTFOUND example.com',
     });
 
-    expect(result.degraded).toBe(true);
-    expect(result.reason).toContain('ENOTFOUND');
+    expect(verdict.state).toBe('pending');
+    expect(verdict.reason).toContain('ENOTFOUND');
   });
 });
 
 describe('budget constants', () => {
-  it('pins the gate budget and poll interval', () => {
-    // 480s mirrors CERT_MANAGER_READY_BUDGET_MS on the k8s path: DNS-01
-    // propagation on DigitalOcean's anycast POPs is the slow tail this gate
-    // exists to absorb. 5s polling matches the house TLS retry cadence.
-    expect(TLS_READY_BUDGET_MS).toBe(480_000);
+  it('pins the first-look budget and poll interval', () => {
+    // 180s: the DNS-01 settle floor puts healthy issuance at about 120s
+    // (2026-10-20 trials: wildcard 119s, apex 124s). A slower CA no longer
+    // holds the deploy open: it finishes with TLS pending and the server's
+    // tls-retry cron takes over. 5s polling matches the house TLS cadence.
+    expect(TLS_FIRST_LOOK_BUDGET_MS).toBe(180_000);
     expect(TLS_READY_POLL_MS).toBe(5_000);
-    // Manual DNS can't gate hard (the customer may not have pointed the
-    // domain yet) — one short courtesy window, then degrade with a warning.
+    // Manual DNS: one short courtesy window, then pending.
     expect(TLS_READY_MANUAL_BUDGET_MS).toBe(60_000);
+  });
+
+  it('uses the first-look budget when the caller names none', async () => {
+    const probe = vi.fn().mockResolvedValue({ trusted: false, reason: 'self-signed certificate' });
+    const result = await waitForTrustedTls('cid3.do.example.dev', {
+      probe,
+      sleep: noSleep,
+      intervalMs: 60_000,
+      now: fakeNow(60_000),
+    });
+
+    expect(result.trusted).toBe(false);
+    // The fake clock steps 60s per read (the start read included), so 180s
+    // allows 3 probes; the old 480s default would have allowed 8.
+    expect(probe).toHaveBeenCalledTimes(3);
   });
 });

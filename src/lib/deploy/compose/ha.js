@@ -73,7 +73,7 @@ import {
   slotDropWarning,
 } from '../replication-slot.js';
 import { reconcileRetiredFence } from '../retired-fence.js';
-import { waitForTrustedTls } from '../tls-ready.js';
+import { TLS_FIRST_LOOK_BUDGET_MS, waitForTrustedTls } from '../tls-ready.js';
 import { mergeRemoteDotenv, pinnedSshOptsString, readReplPassword } from '../utils.js';
 import {
   assertWalgBackupsWorking,
@@ -2565,11 +2565,15 @@ export async function failoverComposeHA(
   // (DigitalOcean anycast) that can outlive downstream checks that assume
   // the cert exists — run 33279912405's verify-failover expired mid-issuance.
   // Warn-don't-abort: the DR flip is complete and the site serves; a pending
-  // cert is degraded TLS, not a failed failover. Managed DNS only — on
-  // manual DNS the operator hasn't repointed the domain yet.
+  // cert is degraded TLS, not a failed failover. The same first-look budget
+  // as deploy: past it, the promoted node's tls-retry cron (installed on both
+  // nodes, a no-op while a node is disarmed) restarts Traefik to retry, since
+  // Traefik never retries a failed first issuance itself. Managed DNS only:
+  // on manual DNS the operator hasn't repointed the domain yet.
   if (dnsFlip.ok && hasAutomatedDns(envConfig.dns?.provider) && envConfig.domain) {
     s.start(`Waiting for ${envConfig.domain} to serve a trusted TLS certificate`);
     const tls = await waitForTrustedTls(envConfig.domain, {
+      budgetMs: TLS_FIRST_LOOK_BUDGET_MS,
       onProgress: (msg) => s.message(msg),
     });
     if (tls.trusted) {
@@ -2578,9 +2582,9 @@ export async function failoverComposeHA(
       s.stop('Domain not yet serving a trusted TLS certificate', 1);
       p.log.warn(
         `The failover is complete and the site is serving, but ${envConfig.domain} still ` +
-          `presents an untrusted certificate (${tls.reason}). Traefik on the promoted node ` +
-          `retries issuance automatically; if this persists, check its logs ` +
-          `(docker compose logs traefik) for the ACME error.`,
+          `presents an untrusted certificate (${tls.reason}). The tls-retry cron on the ` +
+          `promoted node restarts Traefik to retry issuance every 30 minutes. If this ` +
+          `persists, check the ACME error in \`docker compose logs traefik\` on that node.`,
       );
     }
   }

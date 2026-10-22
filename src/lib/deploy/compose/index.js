@@ -1314,7 +1314,7 @@ export async function backupCompose(ip, sshKeyPath, projectName, options = {}) {
 }
 
 /**
- * Set up the automated wal-g backup cron on the VPS.
+ * Set up the automated wal-g backup cron, and the TLS retry cron, on the VPS.
  *
  * Installs a crontab entry that runs compose-backup.sh on the configured
  * schedule — the SAME builder the on-demand path uses, so there is exactly
@@ -1343,18 +1343,29 @@ export async function setupComposeBackupCron(ip, sshKeyPath, projectName, backup
   const { schedule, retentionDays: retain } = resolveBackupSettings(backupConfig);
 
   const cronLine = `${schedule} ${composeBackupCmd(remoteDir, retain)} >> ${remoteDir}/backups/backup.log 2>&1`;
+  // TLS issuance scheduling (carbon/backup/tls-retry.sh): Traefik never
+  // retries a failed first issuance, so a deploy that finished with TLS
+  // pending relies on this to restart it. Every 30 minutes keeps the apex and
+  // wildcard orders at 4 an hour, under Let's Encrypt's 5 failed validations
+  // per hostname per hour; the script itself skips a Traefik younger than 15
+  // minutes and gives up after 48 restarts.
+  const tlsRetryLine = `*/30 * * * * cd ${remoteDir} && bash backup/tls-retry.sh >> ${remoteDir}/backups/tls-retry.log 2>&1`;
 
   // Install quote-safely: build the next crontab on the server (existing minus
-  // any prior compose-backup.sh line, plus our line) and pipe via stdin. The
-  // cron line is fed to `cat` through a heredoc so no shell quoting can mangle
-  // it — there are no single quotes in it to collide with anyway.
+  // any prior compose-backup.sh or tls-retry.sh line, plus ours) and pipe via
+  // stdin. The cron lines are fed to `cat` through a heredoc so no shell
+  // quoting can mangle them; there are no single quotes in them anyway.
+  // A deploy re-arms the retry budget: the give-up counter is cleared, so a
+  // redeploy after fixing the cause gets a fresh 48 restarts.
   const installScript = [
     'set -e',
     `mkdir -p ${remoteDir}/backups`,
+    `rm -f ${remoteDir}/backups/tls-retry.count`,
     'TMP_CRON=$(mktemp)',
-    'crontab -l 2>/dev/null | grep -v \'compose-backup.sh\' > "$TMP_CRON" || true',
+    "crontab -l 2>/dev/null | grep -v -e 'compose-backup.sh' -e 'tls-retry.sh' > \"$TMP_CRON\" || true",
     'cat >> "$TMP_CRON" <<\'VC_CRON_EOF\'',
     cronLine,
+    tlsRetryLine,
     'VC_CRON_EOF',
     'crontab "$TMP_CRON"',
     'rm -f "$TMP_CRON"',

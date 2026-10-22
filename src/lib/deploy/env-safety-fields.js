@@ -30,6 +30,10 @@ export const ENV_SAFETY_FIELDS = Object.freeze([
   'degraded',
   'degradedCause',
   'backup.unrestoredPrior',
+  // The TLS verdict ({ state, checkedAt, reason?, ca }). Only the deploy's
+  // final save writes it; failover and scale pick a certificate snapshot by
+  // its `ca`, so a whole-env writer from an older copy must not roll it back.
+  'tls',
 ]);
 
 /**

@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_BACKUP_RETENTION_DAYS,
   DEFAULT_BACKUP_SCHEDULE,
@@ -59,13 +63,14 @@ describe('setupComposeBackupCron', () => {
     expect(s).toContain('RETAIN=14');
   });
 
-  it('removes any prior compose-backup.sh cron line so reinstalls are idempotent', () => {
+  it('removes any prior compose-backup.sh and tls-retry.sh cron line so reinstalls are idempotent', () => {
     const { script, runScript } = capture();
     setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, { runScript });
 
-    // The install script strips existing compose-backup.sh lines before
-    // appending the fresh one — re-running deploy never stacks duplicate crons.
-    expect(script()).toContain("grep -v 'compose-backup.sh'");
+    // The install script strips existing compose-backup.sh and tls-retry.sh
+    // lines before appending the fresh ones: re-running deploy never stacks
+    // duplicate crons.
+    expect(script()).toContain("grep -v -e 'compose-backup.sh' -e 'tls-retry.sh'");
   });
 
   it.each([-3, 0, Number.NaN, 2.5])(
@@ -78,4 +83,60 @@ describe('setupComposeBackupCron', () => {
       expect(runScript).not.toHaveBeenCalled();
     },
   );
+
+  it('installs the tls-retry line every 30 minutes beside the backup line', () => {
+    const { script, runScript } = capture();
+    setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, { runScript });
+
+    const lines = script().split('\n');
+    expect(
+      lines.filter(
+        (l) =>
+          l ===
+          '*/30 * * * * cd /opt/myapp && bash backup/tls-retry.sh >> /opt/myapp/backups/tls-retry.log 2>&1',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('re-arms the retry budget: a deploy clears the give-up counter', () => {
+    const { script, runScript } = capture();
+    setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, { runScript });
+    expect(script()).toContain('rm -f /opt/myapp/backups/tls-retry.count');
+  });
+
+  describe('run against a stub crontab', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'backup-cron-'));
+    afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+    /** Run the install script with /opt/myapp moved into scratch and `crontab` stubbed. */
+    function install(state: string, remote: string) {
+      const { script, runScript } = capture();
+      setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, { runScript });
+      const bin = join(scratch, 'bin');
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(
+        join(bin, 'crontab'),
+        `#!/bin/sh\nif [ "$1" = "-l" ]; then cat "${state}" 2>/dev/null; exit 0; fi\ncat "$1" > "${state}"\n`,
+      );
+      chmodSync(join(bin, 'crontab'), 0o755);
+      const r = spawnSync('bash', ['-c', script().replaceAll('/opt/myapp', remote)], {
+        encoding: 'utf-8',
+        env: { PATH: `${bin}:${process.env.PATH}` },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      return readFileSync(state, 'utf-8');
+    }
+
+    it('re-running it never duplicates either line, and keeps other cron lines', () => {
+      const state = join(scratch, 'crontab.txt');
+      const remote = join(scratch, 'opt-myapp');
+      writeFileSync(state, '0 1 * * * /usr/bin/unrelated\n');
+      install(state, remote);
+      const after = install(state, remote).split('\n').filter(Boolean);
+
+      expect(after.filter((l) => l.includes('compose-backup.sh'))).toHaveLength(1);
+      expect(after.filter((l) => l.includes('tls-retry.sh'))).toHaveLength(1);
+      expect(after).toContain('0 1 * * * /usr/bin/unrelated');
+    });
+  });
 });
