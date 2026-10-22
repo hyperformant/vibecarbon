@@ -128,12 +128,16 @@ updates:
   #   3. `db-image`: docker/postgres-walg (postgres base, wal-g stage). Red
   #      until DB_IMAGE_TAG's -r revision and DB_IMAGE_INPUTS_SHA256 move
   #      (tests/unit/deploy/db-image-fingerprint.test.ts).
+  #   4. `node-runtime`: docker/node-runtime (node image, alpine base). Red
+  #      until NODE_RUNTIME_IMAGE's -r revision, its copy in carbon/Dockerfile
+  #      (`ARG RUNTIME_IMAGE=`) and NODE_RUNTIME_INPUTS_SHA256 move
+  #      (tests/unit/deploy/node-runtime-image-fingerprint.test.ts).
   #
   # Not reachable by any ecosystem: the registry.k8s.io mirror digests in
   # src/lib/images.js (re-derived with the CSI / cluster-autoscaler version,
   # and verified by publish-images.yml on every run), and the project's own
-  # app image and our own db / carbon-autoscaler images (published by this
-  # repo's workflows; see the census allowlist). Compose overlays named
+  # app image and our own db / carbon-autoscaler / node-runtime images
+  # (published by this repo's workflows; see the census allowlist). Compose overlays named
   # docker-compose.<a>.<b>.yml (e.g. docker-compose.n8n.prod.yml) do not match
   # Dependabot's compose filename pattern; they carry no images, and the
   # census fails if one ever gains an `image:` line.
@@ -160,6 +164,11 @@ updates:
       # tag's index digest, so a Dependabot "update" would only break the
       # parity guard. images.js owns this ref.
       - dependency-name: ghcr.io/hyperformant/cluster-autoscaler
+      # Our node runtime base, carbon/Dockerfile's `ARG RUNTIME_IMAGE=`. It
+      # must equal NODE_RUNTIME_IMAGE byte for byte (census), so a Dependabot
+      # tag or digest move here would only break parity. images.js owns this
+      # ref; docker/node-runtime has its own entry below.
+      - dependency-name: ghcr.io/hyperformant/node-runtime
     # commit-message is group-only for multi-ecosystem entries (set below).
     labels:
       - dependencies
@@ -216,6 +225,23 @@ updates:
       - dependencies
     groups:
       db-image:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /docker/node-runtime
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(docker-deps)
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      node-runtime:
         patterns: ["*"]
 
 multi-ecosystem-groups:
