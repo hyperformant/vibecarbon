@@ -53,6 +53,7 @@ import {
 } from '../k8s/ha/index.js';
 import { deployK3s } from '../k8s/k3s.js';
 import { assertReplicationStreamingOrDegraded } from '../replication.js';
+import { k8sStandbyTypes } from '../standby-types.js';
 import { StateTracker } from '../state.js';
 import { generateSSHKeyPair } from '../utils.js';
 
@@ -134,18 +135,27 @@ async function haK8sProvisionClusters(ctx) {
 
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(options);
-  // Resolve equivalent server types for the standby region — an SKU stocked in
-  // the primary's region isn't necessarily stocked in the standby's. Always
-  // returns an x86 type (vibecarbon is amd64-only; see lib/deploy/platform.js),
-  // including the ARM→x86 rescue for an environment that predates that
-  // standardization.
-  // A type the standby region does not stock is re-picked there for its role
-  // (src/lib/sizing.js standbyStandIn): the cheapest stocked candidate, never
-  // smaller than the primary's type.
-  const resolve = (type, role) => Provider.resolveServerTypeForRegion(type, standbyRegion, role);
-  const standbyMasterType = resolve(options.masterServerType || options.serverType, 'master');
-  const standbyDbType = resolve(options.dbServerType || options.serverType, 'db');
-  const standbyWorkerType = resolve(options.workerServerType || options.serverType, 'worker');
+  // The standby's types: what this env has on record for the standby side
+  // (a redeploy never resizes or refuses an existing env), unless
+  // `deploy -server-type` asked for new sizes; else each primary type where
+  // the standby location stocks it, else the role's cheapest stocked pick
+  // there, never smaller (src/lib/deploy/standby-types.js, which the deploy
+  // wizard also resolves through). Always x86, including the ARM->x86 rescue
+  // for an environment that predates the amd64 standardization.
+  const standby = k8sStandbyTypes({
+    Provider,
+    standbyRegion,
+    primary: {
+      master: options.masterServerType || options.serverType,
+      db: options.dbServerType || options.serverType,
+      worker: options.workerServerType || options.serverType,
+    },
+    recorded: options.haStacks?.standby,
+    requested: options.serverTypeRequested,
+  });
+  const standbyMasterType = standby.masterServerType;
+  const standbyDbType = standby.dbServerType;
+  let standbyWorkerType = standby.workerServerType;
   // The pilot-light standby places a master and a db. The deploy wizard
   // refuses a standby role with nothing orderable before anything is created;
   // a direct caller gets the same cause rather than a null type at Pulumi.
@@ -158,6 +168,16 @@ async function haK8sProvisionClusters(ctx) {
     if (type === null) {
       throw new Error(`no k8s ${role} server is orderable in ${standbyRegion} right now`);
     }
+  }
+  // The standby's worker is only recorded, for failover to bring up. With
+  // nothing stocked for it there, record the default and say so once, rather
+  // than persisting an unstocked type in silence.
+  if (standby.workerUnstocked) {
+    standbyWorkerType = Provider.DEFAULT_K8S_NODE_TYPE;
+    p.log.warn(
+      `no k8s worker server is orderable in ${standbyRegion} right now; the standby's ` +
+        `failover worker is recorded as ${standbyWorkerType}, which may not be in stock there`,
+    );
   }
 
   if (

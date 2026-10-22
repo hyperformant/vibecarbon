@@ -222,4 +222,91 @@ describe('deploy wizard HA standby', () => {
     });
     expect(out.secondaryRegion).toBe('sfo3');
   });
+
+  it('k8s-ha: standby types on record are kept, so a stocked-out standby location still passes', async () => {
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean', {
+      drop: { sfo3: [...DO_SFO3.fourGb, ...DO_SFO3.twoGb] },
+    });
+    const out = await runPrompts({
+      mode: 'k8s',
+      args: { yes: true },
+      envConfig: {
+        deployMode: 'kubernetes',
+        ha: {
+          enabled: true,
+          standby: { masterServerType: 's-2vcpu-4gb-amd', dbServerType: 's-1vcpu-2gb-amd' },
+          standbyWorkerSpec: { count: 1, serverType: 's-2vcpu-4gb-amd' },
+        },
+        region: 'nyc3',
+        secondaryRegion: 'sfo3',
+      },
+    });
+    expect(out.secondaryRegion).toBe('sfo3');
+    expect(out.standbyServerTypes).toEqual({
+      masterServerType: 's-2vcpu-4gb-amd',
+      dbServerType: 's-1vcpu-2gb-amd',
+      workerServerType: 's-2vcpu-4gb-amd',
+    });
+  });
+
+  it('k8s-ha: a fresh standby returns the types resolved for its location, for the skeleton save', async () => {
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const out = await runPrompts({
+      mode: 'k8s',
+      args: { yes: true, region: 'nyc3', secondaryRegion: 'sfo3' },
+    });
+    expect(out.standbyServerTypes).toEqual({
+      masterServerType: 's-2vcpu-4gb-amd',
+      dbServerType: 's-1vcpu-2gb-amd',
+      workerServerType: 's-2vcpu-4gb-amd',
+    });
+  });
+
+  describe('a primary bigger than every candidate', () => {
+    const hetznerHa = (extra: Record<string, unknown> = {}) => ({
+      provider: 'hetzner',
+      args: { yes: true },
+      envConfig: {
+        deployMode: 'compose-ha',
+        ha: { enabled: true },
+        region: 'nbg1',
+        serverType: 'cpx32',
+        ...extra,
+      },
+    });
+
+    it('defaults to the partner that stocks it', async () => {
+      seed(HetznerProvider, '2026-10-22/hetzner', { drop: { fsn1: ['cpx32'] } });
+      const out = await runPrompts(hetznerHa());
+      expect(out.secondaryRegion).toBe('hel1');
+    });
+
+    it('refuses a recorded standby location without it, never shrinking the standby', async () => {
+      seed(HetznerProvider, '2026-10-22/hetzner', { drop: { fsn1: ['cpx32'] } });
+      await expect(runPrompts(hetznerHa({ secondaryRegion: 'fsn1' }))).rejects.toThrow(/exit 1/);
+      expect(String(clackMock.log.error.mock.calls[0][0])).toBe(
+        'no standby compose server with 8 GB+ RAM is orderable in fsn1 right now; ' +
+          'orderable nearby: hel1 (cpx32 $42.59/mo)',
+      );
+      const hint = String(clackMock.log.info.mock.calls.at(-1)?.[0]);
+      expect(hint.split('\n').at(-1)).toBe('  vibecarbon deploy prod -standby-region hel1');
+      expect(providerWrites).toEqual([]);
+    });
+
+    it('with nothing nearby either, says standby and that -server-type sizes both', async () => {
+      seed(HetznerProvider, '2026-10-22/hetzner', { drop: { fsn1: ['cpx32'], hel1: ['cpx32'] } });
+      await expect(runPrompts(hetznerHa({ secondaryRegion: 'fsn1' }))).rejects.toThrow(/exit 1/);
+      const line = String(clackMock.log.error.mock.calls[0][0]);
+      expect(line).toBe(
+        'no standby compose server with 8 GB+ RAM is orderable in fsn1 right now, ' +
+          'and no other standby location on this continent has one either',
+      );
+      const hint = String(clackMock.log.info.mock.calls.at(-1)?.[0]);
+      expect(hint).toContain('-server-type sizes the primary and its standby together');
+      expect(hint).not.toContain('\u2014');
+      expect(line).not.toContain('\u2014');
+      expect(hint.split('\n').at(-1)).toBe('  vibecarbon deploy prod -server-type <type>');
+      expect(providerWrites).toEqual([]);
+    });
+  });
 });

@@ -214,3 +214,84 @@ describe('haK8sProvisionClusters standby sizes', () => {
     }
   });
 });
+
+describe('haK8sProvisionClusters keeps the standby sizes on record', () => {
+  async function seededFanOut(options: Record<string, unknown>, drop: Record<string, string[]>) {
+    const { seedCatalog } = await import('../helpers/catalog-fixtures.js');
+    const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
+    const restore = seedCatalog(HetznerProvider, '2026-10-22/hetzner', { drop });
+    try {
+      return await runFanOut({
+        environment: 'e4',
+        region: 'nbg1',
+        secondaryRegion: 'fsn1',
+        masterServerType: 'cpx22',
+        dbServerType: 'cpx12',
+        workerServerType: 'cpx22',
+        ...options,
+      });
+    } finally {
+      restore();
+    }
+  }
+  const standbyOf = (ctx: Record<string, unknown>) => ctx.standbyResult as Record<string, unknown>;
+
+  it('a recorded cpx22 master is kept when the catalog no longer stocks it there', async () => {
+    const ctx = await seededFanOut(
+      {
+        haStacks: {
+          primary: { masterServerType: 'cpx22', dbServerType: 'cpx12' },
+          standby: { masterServerType: 'cpx22', dbServerType: 'cpx12', workerServerType: 'cpx22' },
+        },
+      },
+      // Nothing 4 GB is left in fsn1: a fresh resolve would refuse.
+      { fsn1: ['cpx22', 'cx23', 'cpx21'] },
+    );
+    expect(standbyOf(ctx).masterServerType).toBe('cpx22');
+    expect(standbyOf(ctx).dbServerType).toBe('cpx12');
+    expect(standbyOf(ctx).workerServerType).toBe('cpx22');
+  });
+
+  it('deploy -server-type re-sizes the standby: the record is not used', async () => {
+    const ctx = await seededFanOut(
+      {
+        serverTypeRequested: true,
+        masterServerType: 'cpx32',
+        dbServerType: 'cpx32',
+        workerServerType: 'cpx32',
+        haStacks: { standby: { masterServerType: 'cpx22', dbServerType: 'cpx12' } },
+      },
+      {},
+    );
+    expect(standbyOf(ctx).masterServerType).toBe('cpx32');
+    expect(standbyOf(ctx).dbServerType).toBe('cpx32');
+  });
+
+  it('a standby worker with nothing stocked falls back to the default and warns, naming the location and type', async () => {
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    try {
+      const ctx = await seededFanOut(
+        { haStacks: { standby: { masterServerType: 'cpx22', dbServerType: 'cpx12' } } },
+        { fsn1: ['cpx22', 'cx23', 'cpx21'] },
+      );
+      expect(standbyOf(ctx).workerServerType).toBe('cpx22'); // DEFAULT_K8S_NODE_TYPE
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines.filter((l) => l.includes('fsn1') && l.includes('cpx22'))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a stocked primary worker type is the standby worker, with no warning', async () => {
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    try {
+      const ctx = await seededFanOut({}, {});
+      expect(standbyOf(ctx).workerServerType).toBe('cpx22');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

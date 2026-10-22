@@ -78,6 +78,7 @@ import { k8sPsqlRunner } from './replication.js';
 import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retired-fence.js';
 import { envS3Record } from './s3-record.js';
 import { stagingProbeCa } from './staging-ca.js';
+import { haStacksFrom } from './standby-types.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
 import { TLS_FIRST_LOOK_BUDGET_MS } from './tls-ready.js';
@@ -861,6 +862,39 @@ export async function finishK8sRetiredFence({
 /**
  * Execute the deployment based on gathered configuration
  */
+/**
+ * The skeleton save's record of the k8s-ha standby types: master and db under
+ * `ha.standby`, the worker under `ha.standbyWorkerSpec.serverType`, each
+ * merged onto what the env already has and only when defined.
+ *
+ * @param {object|undefined} existingHa - the env's `ha` on disk
+ * @param {{masterServerType?: string, dbServerType?: string, workerServerType?: string}|undefined} types
+ * @returns {object}
+ */
+function standbyTypesRecord(existingHa, types) {
+  if (!types) return {};
+  const { masterServerType, dbServerType, workerServerType } = types;
+  return {
+    ...(masterServerType || dbServerType
+      ? {
+          standby: {
+            ...(existingHa?.standby ?? {}),
+            ...(masterServerType ? { masterServerType } : {}),
+            ...(dbServerType ? { dbServerType } : {}),
+          },
+        }
+      : {}),
+    ...(workerServerType
+      ? {
+          standbyWorkerSpec: {
+            ...(existingHa?.standbyWorkerSpec ?? {}),
+            serverType: workerServerType,
+          },
+        }
+      : {}),
+  };
+}
+
 export async function executeDeployment(args, gatheredConfig) {
   // Arm the silent-success guard FIRST. If this function's awaited work never
   // settles (2026-07-07 k8s-ha RCA: a standby deployK3s promise dangled and Node
@@ -1171,6 +1205,11 @@ export async function executeDeployment(args, gatheredConfig) {
                 ...(existingEnv.ha ?? {}),
                 enabled: true,
                 ...(secondaryRegion ? { failoverRegion: secondaryRegion } : {}),
+                // k8s-ha: the standby's resolved types, so a rerun of a deploy
+                // that fails later places the same standby (the fan-out keeps
+                // a recorded type). A worker with nothing stocked is not
+                // recorded; the fan-out falls back and says so.
+                ...standbyTypesRecord(existingEnv.ha, gatheredConfig.standbyServerTypes),
               },
             }
           : {}),
@@ -1812,13 +1851,12 @@ export async function executeDeployment(args, gatheredConfig) {
   // /`persistedEnvConfig` re-read further down (~line 1290) — that re-read
   // exists to pick up THIS deploy's own mid-flight saves and must not be
   // pulled forward, or a fresh deploy could see its own in-progress writes.
-  const haStacks =
-    envConfig?.ha?.primary?.stack && envConfig?.ha?.standby?.stack
-      ? {
-          primary: { stack: envConfig.ha.primary.stack, region: envConfig.ha.primary?.region },
-          standby: { stack: envConfig.ha.standby.stack, region: envConfig.ha.standby?.region },
-        }
-      : null;
+  //
+  // Each side also carries its recorded master/db types (and the standby its
+  // worker, from ha.standbyWorkerSpec), with or without a stack: the fan-out
+  // keeps them, so a redeploy never resizes or refuses an existing env
+  // (src/lib/deploy/standby-types.js haStacksFrom).
+  const haStacks = haStacksFrom(envConfig);
   const stateBucketYoung = await stateBucketYoungRead;
   if (stateBucketYoung) {
     emitStateScopeYoung(s3Config.stateBucket);
@@ -1841,6 +1879,9 @@ export async function executeDeployment(args, gatheredConfig) {
     domain,
     ha: config.ha,
     haStacks,
+    // `deploy -server-type` given: new sizes for both clusters, so the
+    // standby's recorded types give way (k8s-ha fan-out).
+    serverTypeRequested: !!args.serverType,
     observability: config.observability,
     services,
     apiToken,

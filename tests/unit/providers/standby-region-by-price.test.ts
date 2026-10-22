@@ -72,6 +72,25 @@ describe('getDefaultStandbyRegion by price', () => {
     expect(DigitalOceanProvider.getDefaultStandbyRegion('nyc3')).toBe('sfo3');
   });
 
+  it('a bigger primary type pairs with a partner that stocks it, not the tie-break pair', () => {
+    // cpx32 (8 GB) is bigger than every compose candidate, so a standby where
+    // it is not stocked has no fit (never shrunk). fsn1 is the conventional
+    // pair for nbg1; with cpx32 gone there, hel1 is the one that fits.
+    seed(HetznerProvider, '2026-10-22/hetzner', { drop: { fsn1: ['cpx32'] } });
+    expect(HetznerProvider.getDefaultStandbyRegion('nbg1', ['compose'], { compose: 'cpx32' })).toBe(
+      'hel1',
+    );
+    // Without the primary type, the 4 GB pick fits fsn1 and the pair stands.
+    expect(HetznerProvider.getDefaultStandbyRegion('nbg1', ['compose'])).toBe('fsn1');
+  });
+
+  it('a stocked primary type keeps the conventional pair on a price tie', () => {
+    seed(HetznerProvider, '2026-10-22/hetzner');
+    expect(HetznerProvider.getDefaultStandbyRegion('nbg1', ['compose'], { compose: 'cpx32' })).toBe(
+      'fsn1',
+    );
+  });
+
   it('compose-only providers keep a same-continent partner for k8s roles they have no candidates for', () => {
     for (const [P, name, primary] of [
       [VultrProvider, 'vultr', 'ewr'],

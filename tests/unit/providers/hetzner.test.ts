@@ -270,6 +270,22 @@ describe('HetznerProvider', () => {
         }
       }
     });
+
+    it('an x86 input resolves to a type wherever an x86 fit is stocked, never null', () => {
+      // The sweep above accepts null (nothing x86 fits: the deploy refuses).
+      // That must never stand in for a real answer where an x86 fit exists.
+      seed({
+        nbg1: new Set(['cax11', 'cax21', 'cx23', 'cpx22', 'cpx12']),
+        fsn1: new Set(['cax11', 'cx23', 'cpx22', 'cpx12']),
+      });
+      for (const region of ['nbg1', 'fsn1']) {
+        for (const type of ['cpx11', 'cpx21', 'cx23', 'cpx22', 'cpx12']) {
+          const resolved = HetznerProvider.resolveServerTypeForRegion(type, region);
+          expect(resolved, `${type} in ${region}`).toBeTruthy();
+          expect(resolved).not.toMatch(/^cax/);
+        }
+      }
+    });
   });
 
   describe('amd64-only catalog + guards', () => {

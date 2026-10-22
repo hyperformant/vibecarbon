@@ -192,9 +192,11 @@ export function standbyStandIn(Provider, type, region, role) {
 }
 
 /**
- * A provider's `getDefaultStandbyRegion(primaryRegion, roles)`: the cheapest
- * same-continent partner of `primaryRegion` (never the primary itself) where
- * every role in `roles` is orderable, priced as `rankLocationsByPrice` does.
+ * A provider's `getDefaultStandbyRegion(primaryRegion, roles, primaryTypes)`:
+ * the cheapest same-continent partner of `primaryRegion` (never the primary
+ * itself) where every role in `roles` can be placed, priced as
+ * `rankStandbyLocations` does. With the primary's types, a partner must fit
+ * them without shrinking (a cpx32 primary pairs where cpx32 is stocked).
  * Ties keep `conventional` (the provider's static pair) first, then
  * `REGION_CONTINENT` order. `conventional` stands when no catalog is loaded
  * or no partner qualifies; the deploy wizard then refuses at type resolution.
@@ -204,16 +206,23 @@ export function standbyStandIn(Provider, type, region, role) {
  * @param {string[]} roles - ['compose'], or ['master', 'db'] for a k8s-ha
  *   pilot-light standby (it has no worker)
  * @param {string} conventional - the static pair for `primaryRegion`
+ * @param {Record<string, string|undefined>} [primaryTypes] - by role
  * @returns {string}
  */
-export function cheapestStandbyRegion(Provider, primaryRegion, roles, conventional) {
+export function cheapestStandbyRegion(
+  Provider,
+  primaryRegion,
+  roles,
+  conventional,
+  primaryTypes = {},
+) {
   if (!Provider._locationTypes) return conventional;
   const continentOf = Provider.REGION_CONTINENT ?? {};
   const continent = continentOf[primaryRegion];
   const partners = [...new Set([conventional, ...Object.keys(continentOf)])].filter(
     (r) => r !== primaryRegion && continent && continentOf[r] === continent,
   );
-  return rankLocationsByPrice(Provider, partners, roles)[0]?.location ?? conventional;
+  return rankStandbyLocations(Provider, partners, roles, primaryTypes)[0]?.location ?? conventional;
 }
 
 /**
@@ -224,13 +233,50 @@ export function cheapestStandbyRegion(Provider, primaryRegion, roles, convention
  * @param {object} Provider - a provider class
  * @param {string[]} locations
  * @param {string[]} roles
- * @param {Record<string, number>} [minRamGb] - per-role floors, as in cheapestRoleSet
  * @returns {Array<{location: string, monthly: number|null, types: Record<string, string>}>}
  */
-export function rankLocationsByPrice(Provider, locations, roles, minRamGb = {}) {
+export function rankLocationsByPrice(Provider, locations, roles) {
+  return rankSets(locations, (location) => cheapestRoleSet(Provider, location, roles));
+}
+
+/**
+ * `rankLocationsByPrice` for a standby: each role is what the standby would
+ * place at the location, `Provider.resolveServerTypeForRegion(primaryType,
+ * location, role)` (the primary's type where stocked, else the role's pick of
+ * at least its RAM), or the role's plain pick when no primary type is given.
+ * Locations where any role resolves to nothing are left out, so a primary
+ * bigger than every candidate only ranks locations that stock its type.
+ *
+ * @param {object} Provider - a provider class
+ * @param {string[]} locations
+ * @param {string[]} roles
+ * @param {Record<string, string|undefined>} [primaryTypes] - by role
+ * @returns {Array<{location: string, monthly: number|null, types: Record<string, string>}>}
+ */
+export function rankStandbyLocations(Provider, locations, roles, primaryTypes = {}) {
+  return rankSets(locations, (location) => {
+    const { priceFor } = catalogFor(Provider, location);
+    const types = {};
+    let monthly = typeof Provider.IPV4_MONTHLY === 'number' ? 0 : null;
+    for (const role of roles) {
+      const primary = primaryTypes[role];
+      const type = primary
+        ? Provider.resolveServerTypeForRegion(primary, location, role)
+        : (cheapestRoleSet(Provider, location, [role])?.types[role] ?? null);
+      if (!type) return null;
+      types[role] = type;
+      const price = priceFor(type, location);
+      monthly = monthly === null || price === null ? null : monthly + price + Provider.IPV4_MONTHLY;
+    }
+    return { types, monthly: monthly === null ? null : Math.round(monthly * 100) / 100 };
+  });
+}
+
+/** Rank `setAt(location)` results cheapest first; see rankLocationsByPrice. */
+function rankSets(locations, setAt) {
   const ranked = [];
   for (const location of locations) {
-    const set = cheapestRoleSet(Provider, location, roles, minRamGb);
+    const set = setAt(location);
     if (set) ranked.push({ location, monthly: set.monthly, types: set.types });
   }
   // Array.prototype.sort is stable, so equal keys keep the given order.

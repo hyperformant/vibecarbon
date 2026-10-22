@@ -172,6 +172,33 @@ describe('the skeleton save records the sizes the deploy picked', () => {
     });
   });
 
+  it('k8s-ha: the resolved standby types are recorded under ha.standby, so a rerun reuses them', async () => {
+    const env = await deployUntilFailure({
+      ...gathered('kubernetes', true, {
+        masterServerType: 'cpx22',
+        dbServerType: 'cpx12',
+        workerServerType: 'cpx22',
+      }),
+      standbyServerTypes: {
+        masterServerType: 'cpx22',
+        dbServerType: 'cpx12',
+        workerServerType: 'cpx22',
+      },
+    });
+    expect(env.ha.standby).toEqual({ masterServerType: 'cpx22', dbServerType: 'cpx12' });
+    expect(env.ha.standbyWorkerSpec).toEqual({ serverType: 'cpx22' });
+    expect(env.ha.primary).toBeUndefined();
+  });
+
+  it('k8s-ha: a standby worker with no stocked type is not recorded', async () => {
+    const env = await deployUntilFailure({
+      ...gathered('kubernetes', true, { masterServerType: 'cpx22', dbServerType: 'cpx12' }),
+      standbyServerTypes: { masterServerType: 'cpx22', dbServerType: 'cpx12' },
+    });
+    expect(env.ha.standby).toEqual({ masterServerType: 'cpx22', dbServerType: 'cpx12' });
+    expect(env.ha.standbyWorkerSpec).toBeUndefined();
+  });
+
   it('writes no key for a size that is not defined', async () => {
     const env = await deployUntilFailure(
       gathered('kubernetes', false, { masterServerType: 'cpx22', dbServerType: 'cpx12' }),

@@ -1029,10 +1029,24 @@ export class BaseProvider {
    * src/lib/sizing.js cheapestStandbyRegion), else the static pair.
    * @param {string} primaryRegion
    * @param {string[]} [roles] - ['compose'], or ['master', 'db'] for k8s-ha
+   * @param {Record<string, string|undefined>} [primaryTypes] - the primary's
+   *   type by role, which the standby must fit without shrinking
    * @returns {string}
    */
-  static getDefaultStandbyRegion(_primaryRegion, _roles) {
+  static getDefaultStandbyRegion(_primaryRegion, _roles, _primaryTypes) {
     throw new Error('getDefaultStandbyRegion() must be implemented by subclass');
+  }
+
+  /**
+   * The provider's static HA standby pair for a primary region: a different
+   * region on the same continent, chosen without prices. getDefaultStandbyRegion
+   * keeps it offline, on a price tie, and when no partner can place the
+   * standby.
+   * @param {string} primaryRegion
+   * @returns {string}
+   */
+  static conventionalStandbyRegion(_primaryRegion) {
+    throw new Error('conventionalStandbyRegion() must be implemented by subclass');
   }
 
   /**

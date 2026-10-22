@@ -431,14 +431,17 @@ export class VultrProvider extends BaseProvider {
    * interactive standby prompt and the headless default.
    * @param {string} primaryRegion
    * @param {string[]} [roles] - the roles the standby places
+   * @param {Record<string, string|undefined>} [primaryTypes] - the primary's
+   *   type by role: a partner must fit each without shrinking it
    * @returns {string}
    */
-  static getDefaultStandbyRegion(primaryRegion, roles = ['compose']) {
+  static getDefaultStandbyRegion(primaryRegion, roles = ['compose'], primaryTypes = {}) {
     return cheapestStandbyRegion(
       VultrProvider,
       primaryRegion,
       roles,
       VultrProvider.conventionalStandbyRegion(primaryRegion),
+      primaryTypes,
     );
   }
 

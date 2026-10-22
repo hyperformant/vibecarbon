@@ -37,7 +37,7 @@ import {
   deriveEnvAppBucketName,
   deriveProjectBucketName,
 } from '../providers/s3-base.js';
-import { ROLE_MIN_RAM_GB, rankLocationsByPrice } from '../sizing.js';
+import { ROLE_MIN_RAM_GB, rankLocationsByPrice, rankStandbyLocations } from '../sizing.js';
 import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
@@ -45,6 +45,7 @@ import { walgPrefixFor } from '../walg/restore-base.js';
 import { composeHaStackOf } from './compose/ha-role-swap.js';
 import { collectDeployDelta, formatDeployDeltaLines } from './delta.js';
 import { assertOperatorConfig } from './preflight.js';
+import { haStacksFrom, k8sStandbyTypes } from './standby-types.js';
 import { resolveTier } from './tier-registry.js';
 import {
   DEFAULT_WORKER_MAX,
@@ -629,14 +630,17 @@ const ROLE_LABEL = {
  * For an HA standby (`options.standby`), `region` is the standby location:
  * the line says so, the primary's location is never offered as a standby
  * (`options.exclude`), each role needs at least the RAM of the primary node
- * it stands in for (`options.minRamGb`), and the hint names `-standby-region`.
+ * it stands in for (`options.minRamGb` in the line; nearby locations are
+ * ranked by what the standby would place there, `rankStandbyLocations` over
+ * `options.primaryTypes`), and the hint names `-standby-region`.
  *
  * @param {object} Provider - the provider class
  * @param {string} region
  * @param {string} role - the role with nothing orderable
  * @param {string[]} roles - every role this deploy places
  * @param {string} environment - for the command in the hint
- * @param {{standby?: boolean, exclude?: string[], minRamGb?: Record<string, number>}} [options]
+ * @param {{standby?: boolean, exclude?: string[], minRamGb?: Record<string, number>,
+ *   primaryTypes?: Record<string, string|undefined>}} [options]
  * @returns {{line: string, hint: string}} one error line, and the next step
  *   with its command on its own line
  */
@@ -646,7 +650,7 @@ export function unorderableDefaultRefusal(
   role,
   roles,
   environment,
-  { standby = false, exclude = [], minRamGb = {} } = {},
+  { standby = false, exclude = [], minRamGb = {}, primaryTypes = {} } = {},
 ) {
   const label = `${standby ? 'standby ' : ''}${ROLE_LABEL[role] ?? role}`;
   const cause =
@@ -660,12 +664,23 @@ export function unorderableDefaultRefusal(
       continent &&
       Provider.REGION_CONTINENT?.[r] === continent,
   );
-  const nearby = rankLocationsByPrice(Provider, neighbours, roles, minRamGb).slice(0, 3);
+  const nearby = (
+    standby
+      ? rankStandbyLocations(Provider, neighbours, roles, primaryTypes)
+      : rankLocationsByPrice(Provider, neighbours, roles)
+  ).slice(0, 3);
   if (nearby.length === 0) {
-    return {
-      line: `${cause}, and none is orderable in the other regions on this continent either`,
-      hint: `name a server type that is in stock, and deploy again:\n  vibecarbon deploy ${environment} -server-type <type>`,
-    };
+    return standby
+      ? {
+          line: `${cause}, and no other standby location on this continent has one either`,
+          hint:
+            '-server-type sizes the primary and its standby together; name one that is in ' +
+            `stock in both locations, and deploy again:\n  vibecarbon deploy ${environment} -server-type <type>`,
+        }
+      : {
+          line: `${cause}, and none is orderable in the other regions on this continent either`,
+          hint: `name a server type that is in stock, and deploy again:\n  vibecarbon deploy ${environment} -server-type <type>`,
+        };
   }
   const options = nearby.map(({ location, monthly, types }) => {
     const price = monthly === null ? '' : ` $${monthly.toFixed(2)}/mo`;
@@ -925,10 +940,16 @@ export async function gatherDeploymentConfig(args) {
   // The prompt pre-selects it, so the common case is one Enter; it is skipped
   // when set via -standby-region, saved config, or -y.
   let secondaryRegion = null;
+  // k8s-ha: the standby's resolved types, for the skeleton save to record.
+  let standbyServerTypes;
   if (ha) {
     // The k8s-ha pilot-light standby places a master and a db, no worker.
     const standbyRoles = isComposeDeploy ? ['compose'] : ['master', 'db'];
-    const standbyDefault = Provider.getDefaultStandbyRegion(region, standbyRoles);
+    const primaryTypes = isComposeDeploy
+      ? { compose: serverType }
+      : { master: masterServerType, db: dbServerType };
+    // The default must fit the primary's types without shrinking them.
+    const standbyDefault = Provider.getDefaultStandbyRegion(region, standbyRoles, primaryTypes);
     secondaryRegion = args.secondaryRegion || envConfig.secondaryRegion || standbyDefault;
     if (!args.secondaryRegion && !envConfig.secondaryRegion && !args.yes) {
       const standbyOptions = Object.entries(providerConfig.regions)
@@ -944,28 +965,45 @@ export async function gatherDeploymentConfig(args) {
       }
     }
 
-    // The standby's own sizes: each primary type where the standby location
-    // stocks it, else that role's cheapest stocked pick of at least the same
-    // RAM (resolveServerTypeForRegion, as the HA effects resolve it). Null
-    // means nothing fits there: refuse now, before the S3 keys or any write,
-    // naming the cheapest nearby locations other than the primary (B6). A
-    // compose-ha standby already on record keeps its type, so it is not
-    // re-checked (deploy -server-type re-sizes both, so then it is).
-    const primaryTypes = { compose: serverType, master: masterServerType, db: dbServerType };
-    const standbyOnRecord =
-      isComposeDeploy &&
-      !args.serverType &&
-      (envConfig.servers ?? []).some(
-        (sv) =>
-          sv?.serverType &&
-          composeHaStackOf(sv, projectConfig.projectName, environment) === 'standby',
-      );
-    const unplaceable = standbyOnRecord
-      ? undefined
-      : standbyRoles.find(
-          (role) =>
-            Provider.resolveServerTypeForRegion(primaryTypes[role], secondaryRegion, role) === null,
+    // The standby's own sizes, resolved as the HA effects resolve them: a
+    // type on record for the standby is kept (a redeploy never resizes or
+    // refuses an existing env; deploy -server-type re-sizes both, and then
+    // the record gives way). Otherwise each primary type where the standby
+    // location stocks it, else that role's cheapest stocked pick of at least
+    // the same RAM. Null means nothing fits there: refuse now, before the S3
+    // keys or any write, naming the cheapest nearby locations other than the
+    // primary (B6).
+    let resolved;
+    if (isComposeDeploy) {
+      const standbyOnRecord =
+        !args.serverType &&
+        (envConfig.servers ?? []).some(
+          (sv) =>
+            sv?.serverType &&
+            composeHaStackOf(sv, projectConfig.projectName, environment) === 'standby',
         );
+      resolved = {
+        compose: standbyOnRecord
+          ? undefined
+          : Provider.resolveServerTypeForRegion(serverType, secondaryRegion, 'compose'),
+      };
+    } else {
+      const standby = k8sStandbyTypes({
+        Provider,
+        standbyRegion: secondaryRegion,
+        primary: { master: masterServerType, db: dbServerType, worker: workerServerType },
+        recorded: haStacksFrom(envConfig)?.standby,
+        requested: Boolean(args.serverType),
+      });
+      resolved = { master: standby.masterServerType, db: standby.dbServerType };
+      // The worker is only recorded when something is stocked for it.
+      standbyServerTypes = {
+        masterServerType: standby.masterServerType,
+        dbServerType: standby.dbServerType,
+        ...(standby.workerServerType ? { workerServerType: standby.workerServerType } : {}),
+      };
+    }
+    const unplaceable = standbyRoles.find((role) => resolved[role] === null);
     if (unplaceable) {
       const minRamGb = Object.fromEntries(
         standbyRoles.map((role) => [
@@ -979,7 +1017,7 @@ export async function gatherDeploymentConfig(args) {
         unplaceable,
         standbyRoles,
         environment,
-        { standby: true, exclude: [region], minRamGb },
+        { standby: true, exclude: [region], minRamGb, primaryTypes },
       );
       p.log.error(line);
       p.log.info(hint);
@@ -987,12 +1025,12 @@ export async function gatherDeploymentConfig(args) {
     }
   }
 
-  // Object-storage keys come right after the API token (only the prompt-free
+  // Object-storage keys come right after the API token. Only the prompt-free
   // server-type resolution and, for HA, the standby question above sit
-  // between them): on every provider
-  // both are generated in the same console visit (Hetzner: project, then
-  // Security, then API tokens / S3 credentials), so asking for them back to
-  // back saves the operator a second trip before the DNS questions.
+  // between them: on every provider both are generated in the same console
+  // visit (Hetzner: project, then Security, then API tokens / S3
+  // credentials), so asking for them back to back saves the operator a
+  // second trip before the DNS questions.
   const providerId = providerIdFor(envConfig);
 
   // S3 (Standardized)
@@ -1305,6 +1343,7 @@ export async function gatherDeploymentConfig(args) {
     masterServerType,
     dbServerType,
     workerServerType,
+    ...(standbyServerTypes ? { standbyServerTypes } : {}),
     minWorkers: args.minWorkers ?? DEFAULT_WORKER_MIN,
     maxWorkers: args.maxWorkers ?? DEFAULT_WORKER_MAX,
     domain,

@@ -59,6 +59,14 @@ describe.each(Object.entries(PROVIDERS))('Provider contract: %s', (id, Provider)
       expect(Provider.promptObjectStorageCredentials.constructor.name).toBe('AsyncFunction');
     });
 
+    it('conventionalStandbyRegion names another known region for every region', () => {
+      for (const region of Object.keys(Provider.REGIONS)) {
+        const pair = Provider.conventionalStandbyRegion(region);
+        expect(pair).not.toBe(region);
+        expect(Object.keys(Provider.REGIONS)).toContain(pair);
+      }
+    });
+
     it('declares catalog statics with the expected shapes', () => {
       expect(typeof Provider.REGIONS).toBe('object');
       expect(typeof Provider.SERVER_TYPES).toBe('object');
@@ -68,6 +76,8 @@ describe.each(Object.entries(PROVIDERS))('Provider contract: %s', (id, Provider)
       expect(typeof Provider.getServerTypesForRegion).toBe('function');
       expect(typeof Provider.getRegionDefaults).toBe('function');
       expect(typeof Provider.getDefaultStandbyRegion).toBe('function');
+      // Its own static pair, not BaseProvider's throwing stub.
+      expect(Object.hasOwn(Provider, 'conventionalStandbyRegion')).toBe(true);
       expect(typeof Provider.resolveServerTypeForRegion).toBe('function');
       expect(typeof Provider.getPublicIP).toBe('function');
       expect(typeof Provider.getPublicIPv6).toBe('function');
