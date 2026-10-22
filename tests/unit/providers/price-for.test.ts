@@ -65,6 +65,11 @@ describe('Hetzner', () => {
     });
   });
 
+  it('ash cpx11 stock-out: the db falls to cpx21, the US 4 GB last resort', () => {
+    restore = seedCatalog(HetznerProvider, '2026-10-22/hetzner', { drop: { ash: ['cpx11'] } });
+    expect(HetznerProvider.getRegionDefaults('ash').dbType).toBe('cpx21');
+  });
+
   it('a location with nothing orderable has no default (live knowledge, not fallback optimism)', () => {
     restore = seedCatalog(HetznerProvider, '2026-10-22/hetzner', {
       drop: { nbg1: ['cpx22', 'cpx21', 'cx23'] },

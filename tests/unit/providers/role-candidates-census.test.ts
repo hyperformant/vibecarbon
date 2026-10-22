@@ -38,6 +38,9 @@ describe.each(listProviders().map((p) => p.id))('%s role candidates', (id) => {
     for (const r of roles) expect(P.ROLE_CANDIDATES[r]?.length).toBeGreaterThan(0);
   });
 
+  // (b) bites only on Hetzner and Scaleway, whose isArmServerType has an ARM
+  // line to name; DO/Vultr/Linode payloads carry no architecture, so (c) and
+  // their curated x86 fallback catalogs guard them.
   it('(b) no candidate is ARM', () => {
     for (const list of Object.values<string[]>(P.ROLE_CANDIDATES)) {
       for (const t of list) expect(P.isArmServerType(t)).toBe(false);

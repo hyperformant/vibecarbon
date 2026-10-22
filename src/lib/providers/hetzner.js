@@ -276,11 +276,13 @@ export class HetznerProvider extends BaseProvider {
   // Declared order is the offline order, most reliably stocked first: `cpx22`
   // is live in every EU location, `cx23` is the cheapest 4 GB shape when
   // Hetzner stocks it (it flips), `cpx21` is the US line. `cpx11` is 2 GB,
-  // so it is a db-only candidate. Live, the cheapest orderable one wins.
+  // so it is a db-only candidate; `cpx21` closes the db list as the US 4 GB
+  // last resort, so an ash/hil cpx11 stock-out still has a db default. Live,
+  // the cheapest orderable one wins.
   static ROLE_CANDIDATES = {
     compose: ['cpx22', 'cx23', 'cpx21'],
     master: ['cpx22', 'cx23', 'cpx21'],
-    db: ['cpx12', 'cx23', 'cpx22', 'cpx11'],
+    db: ['cpx12', 'cx23', 'cpx22', 'cpx11', 'cpx21'],
     worker: ['cpx22', 'cx23', 'cpx21'],
   };
 

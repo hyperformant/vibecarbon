@@ -323,7 +323,9 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   // where `cpx21` (the previous literal) stopped being orderable on 2026-01-01,
   // so it seeded the picker's initialValue with a type the region no longer
   // sells. getRegionDefaults tracks the live catalog and the EU/US split.
-  const currentType = envConfig.serverType || Provider.getRegionDefaults(region).dbType;
+  // composeType, never dbType: the k8s db is a 2 GB role, and a default-sized
+  // compose box (no persisted serverType) was deployed on composeType.
+  const currentType = envConfig.serverType || Provider.getRegionDefaults(region).composeType;
 
   // Display current configuration
   const pad = 18;
