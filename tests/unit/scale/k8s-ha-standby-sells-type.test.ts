@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seedCatalog } from '../helpers/catalog-fixtures.js';
 
-// k8s-ha `scale -type X` resizes the standby cluster too. With the live
-// catalog loaded, a type the standby's location does not sell is refused
-// before any Pulumi run, naming the location and the type. With no catalog
-// loaded, scale behaves as before.
+// k8s `scale -type X` resizes the cluster, and on k8s-ha the standby
+// cluster too. With the live catalog loaded, a type the primary's (or the
+// standby's) location does not sell is refused before any Pulumi run, naming
+// the location and the type. With no catalog loaded, scale behaves as before.
 //
 // DigitalOcean 2026-10-22: sfo3 sells the -amd Basic droplets, tor1 does not.
 
@@ -98,6 +98,37 @@ describe('k8s-ha scale -type the standby location does not sell', () => {
   it('a type both locations sell passes the check', async () => {
     restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
     await expect(run(['prod', '-y', '-type', 's-4vcpu-8gb-intel'])).rejects.toThrow('exit 1');
+    expect(errors).toEqual(['API token required for server type changes']);
+  });
+
+  it("refuses a type the primary's own location does not sell", async () => {
+    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
+    // tor1 sells the plain type, sfo3 (the primary) does not.
+    await expect(run(['prod', '-y', '-type', 's-4vcpu-8gb'])).rejects.toThrow('exit 1');
+    expect(errors).toEqual([
+      "the primary's location sfo3 does not sell s-4vcpu-8gb, so the primary cannot be scaled to it",
+    ]);
+    expect(infos.at(-1)).toMatch(/both sfo3 and tor1 sell/);
+    expect(convergeClusterInfra).not.toHaveBeenCalled();
+  });
+
+  it('plain k8s: refuses a type its location does not sell', async () => {
+    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const { ha: _ha, secondaryRegion: _s, ...single } = env;
+    projectConfig = { projectName: 'proj', environments: { prod: single } };
+    await expect(run(['prod', '-y', '-type', 's-4vcpu-8gb'])).rejects.toThrow('exit 1');
+    expect(errors).toEqual([
+      "the cluster's location sfo3 does not sell s-4vcpu-8gb, so the cluster cannot be scaled to it",
+    ]);
+    expect(infos.at(-1)).toMatch(/a type sfo3 sells/);
+    expect([...errors, ...infos].join('\n')).not.toContain('\u2014');
+    expect(DigitalOceanProvider.promptApiToken).not.toHaveBeenCalled();
+  });
+
+  it('plain k8s with no catalog loaded behaves as before', async () => {
+    const { ha: _ha, secondaryRegion: _s, ...single } = env;
+    projectConfig = { projectName: 'proj', environments: { prod: single } };
+    await expect(run(['prod', '-y', '-type', 's-4vcpu-8gb'])).rejects.toThrow('exit 1');
     expect(errors).toEqual(['API token required for server type changes']);
   });
 
