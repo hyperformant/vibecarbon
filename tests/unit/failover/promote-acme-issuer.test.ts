@@ -125,7 +125,13 @@ describe('promoteAcmeIssuer', () => {
 const TARGET = 'letsencrypt-staging-digitalocean';
 const DNS = ['app.example.com', '*.app.example.com'];
 const S3 = { bucket: 'proj-backups', accessKey: 'AK', secretKey: 'SK', endpoint: 'https://s3' };
-const SNAPSHOT_INPUTS = { s3Config: S3, projectName: 'proj', envName: 'prod', ca: 'staging' };
+const SNAPSHOT_INPUTS = {
+  s3Config: S3,
+  projectName: 'proj',
+  envName: 'prod',
+  ca: 'staging',
+  domain: 'app.example.com' as string | null,
+};
 const SNAP = k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: TARGET });
 const SNAP_KEY_B64 = JSON.parse(SNAP).data['tls.key'] as string;
 const SNAP_CRT_B64 = JSON.parse(SNAP).data['tls.crt'] as string;
@@ -456,6 +462,48 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
       expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
     });
 
+    it('names come in the deploy order, not the Secret order, so the GitOps apply does not conflict', async () => {
+      const reversed = k8sSecretJson({
+        dnsNames: [...DNS].reverse(),
+        days: 60,
+        issuerName: TARGET,
+      });
+      const c = cluster({ certMissing: true, liveSecret: reversed });
+      const result = await run(c);
+      const [apply] = mutations(c.calls);
+      expect(apply.opts.input).toBe(
+        renderTlsCertificateManifest({
+          dnsNames: DNS,
+          issuerName: TARGET,
+          effectiveIssuer: TARGET,
+        }),
+      );
+      expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    });
+
+    it.each([
+      ['no recorded domain', { ...SNAPSHOT_INPUTS, domain: null }, /no recorded domain/],
+      [
+        'a Secret for other names than the deploy renders',
+        { ...SNAPSHOT_INPUTS, domain: 'other.example.com' },
+        /live Secret names differ from the deploy names/,
+      ],
+    ])('%s: nothing is re-created; warns and prints the deploy command', async (_l, snap, re) => {
+      const c = cluster({ certMissing: true, liveSecret: LIVE_RESTORED });
+      const warns: string[] = [];
+      const messages: string[] = [];
+      const result = await run(c, {
+        snapshot: snap,
+        warn: (m) => warns.push(m),
+        message: (m) => messages.push(m),
+      });
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toMatch(re);
+      expect(messages).toEqual(['vibecarbon deploy prod']);
+      expect(mutations(c.calls)).toEqual([]);
+      expect(result.patched).toEqual([]);
+    });
+
     it.each([
       ['the standby self-signed Secret', LIVE_STANDBY],
       ['no Secret', ''],
@@ -524,14 +572,14 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
 describe('k8sTlsSnapshotInputs', () => {
   it('resolves the backup S3 config without prompting, with the recorded CA', async () => {
     const resolveS3 = vi.fn(async () => S3);
-    const envConfig = { tls: { state: 'trusted', ca: 'staging' } };
+    const envConfig = { domain: 'app.example.com', tls: { state: 'trusted', ca: 'staging' } };
     const r = await k8sTlsSnapshotInputs({
       envName: 'prod',
       envConfig,
       projectName: 'proj',
       deps: { resolveS3 },
     });
-    expect(r).toEqual({ s3Config: S3, projectName: 'proj', envName: 'prod', ca: 'staging' });
+    expect(r).toEqual({ ...SNAPSHOT_INPUTS, domain: 'app.example.com' });
     expect(resolveS3).toHaveBeenCalledWith({
       isCompose: false,
       envName: 'prod',

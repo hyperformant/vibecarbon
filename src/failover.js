@@ -508,8 +508,9 @@ export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {})
  * @param {string} args.promotedIp - promoted cluster master IP (kubectl target)
  * @param {string} args.sshKeyPath
  * @param {{ s3Config: object|null, projectName: string, envName: string,
- *   ca: 'prod'|'staging'|null }} [args.snapshot] - where the env's TLS
- *   snapshot lives; `ca` is the one the last deploy recorded (envConfig.tls.ca)
+ *   ca: 'prod'|'staging'|null, domain?: string|null }} [args.snapshot] - where
+ *   the env's TLS snapshot lives; `ca` is the one the last deploy recorded
+ *   (envConfig.tls.ca), `domain` the env's apex
  * @param {{kubectl?: Function, quietKubectl?: Function, readSnapshot?: Function,
  *   trustRoots?: readonly string[], warn?: (msg: string) => void,
  *   message?: (msg: string) => void}} [args.deps] - `message` prints a command on its own line
@@ -622,7 +623,7 @@ export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, snapshot, deps
  * @param {{ envName: string, envConfig: object, projectName: string,
  *   deps?: { resolveS3?: Function } }} args
  * @returns {Promise<{ s3Config: object|null, projectName: string, envName: string,
- *   ca: 'prod'|'staging'|null }>}
+ *   ca: 'prod'|'staging'|null, domain: string|null }>}
  */
 export async function k8sTlsSnapshotInputs({ envName, envConfig, projectName, deps = {} }) {
   const { resolveS3 = resolveS3Config } = deps;
@@ -641,7 +642,8 @@ export async function k8sTlsSnapshotInputs({ envName, envConfig, projectName, de
       s3Config = null;
     }
   }
-  return { s3Config, projectName, envName, ca };
+  const domain = envConfig?.domain || envConfig?.dns?.domain || null;
+  return { s3Config, projectName, envName, ca, domain };
 }
 
 const TLS_NAMESPACE = 'vibecarbon';
@@ -670,10 +672,13 @@ export function promoteTlsKubectl(ip, sshKeyPath, { makeQuiet = quietSshKubectl 
  * Certificate/vibecarbon-tls is missing on the promoted cluster while a
  * snapshot restore was asked for: a failover that crashed between the
  * restore's delete and its re-create, then resumed. When the live Secret is
- * a valid issued certificate (liveK8sTlsIdentity), the Certificate is
- * re-created from the Secret's issuer annotation and names, so it finds a
- * matching Secret and issues nothing. Otherwise the operator is told the
- * Certificate is missing and how to bring it back. Never throws.
+ * a valid issued certificate (liveK8sTlsIdentity) for the names the deploy
+ * renders for this domain and issuer, the Certificate is re-created from the
+ * Secret's issuer annotation and those names in the deploy's order
+ * (certificateDnsNames), so it finds a matching Secret and issues nothing,
+ * and the GitOps workflow's server-side apply of the same Certificate does
+ * not conflict on dnsNames. Otherwise the operator is told the Certificate is
+ * missing and how to bring it back. Never throws.
  *
  * @returns {Promise<boolean>} true when the Certificate was re-created
  */
@@ -686,20 +691,30 @@ async function recreateMissingTlsCertificate({ promotedIp, sshKeyPath, snapshot,
   } = deps;
   let reason;
   try {
-    const live = await liveK8sTlsIdentity(quietKubectl);
-    if (live.issuerName) {
-      const certificate = renderTlsCertificateManifest({
-        dnsNames: live.dnsNames,
-        issuerName: live.issuerName,
-        effectiveIssuer: live.issuerName,
-      });
-      await kubectl(promotedIp, sshKeyPath, ['apply', '-f', '-'], {
-        timeout: PROMOTE_TLS_KUBECTL_TIMEOUT_MS,
-        input: certificate,
-      });
-      return true;
+    const live = snapshot.domain
+      ? await liveK8sTlsIdentity(quietKubectl)
+      : { reason: 'no recorded domain' };
+    if (!live.issuerName) {
+      reason = live.reason;
+    } else {
+      // Dynamic: k3s.js is the k8s deploy, which failover loads lazily (R6a).
+      const { certificateDnsNames } = await import('./lib/deploy/k8s/k3s.js');
+      const dnsNames = certificateDnsNames(snapshot.domain, live.issuerName);
+      if (!sameNames(dnsNames, live.dnsNames)) {
+        reason = 'live Secret names differ from the deploy names';
+      } else {
+        const certificate = renderTlsCertificateManifest({
+          dnsNames,
+          issuerName: live.issuerName,
+          effectiveIssuer: live.issuerName,
+        });
+        await kubectl(promotedIp, sshKeyPath, ['apply', '-f', '-'], {
+          timeout: PROMOTE_TLS_KUBECTL_TIMEOUT_MS,
+          input: certificate,
+        });
+        return true;
+      }
     }
-    reason = live.reason;
   } catch (err) {
     reason = firstErrorLine(err);
   }
@@ -710,6 +725,12 @@ async function recreateMissingTlsCertificate({ promotedIp, sshKeyPath, snapshot,
   );
   message(`vibecarbon deploy ${snapshot.envName}`);
   return false;
+}
+
+/** The same DNS names, in any order. */
+function sameNames(a, b) {
+  const set = new Set(b);
+  return a.length === set.size && a.every((n) => set.has(n));
 }
 
 /**

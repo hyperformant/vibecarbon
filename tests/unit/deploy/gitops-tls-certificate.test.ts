@@ -44,6 +44,7 @@ const { deployK8sGitOps, gitopsTargets, refreshGitopsTlsVars } = await import(
 type Doc = any;
 
 const RENDERER = 'carbon/scripts/render-tls-certificate.mjs';
+const NO_DOMAIN = 'the TLS Certificate needs a domain, and this environment has none';
 const WF = readFileSync('carbon/.github/workflows/deploy.yml', 'utf8');
 const TLS = {
   dnsNames: ['app.example.test', '*.app.example.test'],
@@ -131,6 +132,14 @@ describe('deploy.yml applies Certificate/vibecarbon-tls (deploy-owned, not Flux)
     expect(step.slice(0, step.indexOf('\n      - name:', 10))).not.toContain('--force-conflicts');
   });
 
+  it('a conflicting apply fails with one error line naming the repair, and no secret', () => {
+    const body = step.slice(0, step.indexOf('\n      - name:', 10));
+    expect(body).toContain(
+      '-f "$RUNNER_TEMP/certificate.yaml" || { echo "::error::the TLS Certificate apply conflicted. Run vibecarbon deploy <env> (or vibecarbon configure cicd <env> if the roles changed), then re-run this workflow"; exit 1; }',
+    );
+    expect(body).not.toMatch(/secrets\./);
+  });
+
   it('the workflow carries no apostrophe in the step (embedded-shell rule)', () => {
     expect(step.slice(0, step.indexOf('\n      - name:', 10))).not.toContain("'");
   });
@@ -180,6 +189,11 @@ describe('deployK8sGitOps seeds the Certificate vars', () => {
       TLS_CERT_EFFECTIVE_ISSUER: 'letsencrypt-staging-hetzner',
       TLS_CERT_DNS_NAMES: 'app.example.test,*.app.example.test',
     });
+  });
+
+  it('refuses to seed without a domain instead of rendering a localhost Certificate', async () => {
+    await expect(seedFor('nodomain', { domain: null })).rejects.toThrow(NO_DOMAIN);
+    expect(seedEnvironmentSecrets).not.toHaveBeenCalled();
   });
 
   it('the standby role issues from the self-signed issuer; the real one rides the annotation', async () => {
@@ -257,6 +271,19 @@ describe('refreshGitopsTlsVars (after a k8s-ha failover)', () => {
     // Every gh call is bounded.
     expect(byEnv['prod-standby'][3]).toEqual({ timeout: expect.any(Number) });
     expect(listVars).toHaveBeenCalledWith('prod-primary', { timeout: expect.any(Number) });
+  });
+
+  it('reports a missing domain as the reason and seeds nothing', async () => {
+    const seed = vi.fn(async () => {});
+    const noDomain = structuredClone(swapped) as { environments: { prod: { domain?: string } } };
+    delete noDomain.environments.prod.domain;
+    const r = await refreshGitopsTlsVars({
+      envName: 'prod',
+      projectDir: project,
+      deps: { loadConfig: () => noDomain, listVars: async () => ['TLS_CERT_ISSUER'], seed },
+    });
+    expect(r).toEqual({ ok: false, reason: NO_DOMAIN });
+    expect(seed).not.toHaveBeenCalled();
   });
 
   it('leaves an environment without the TLS vars alone (not GitOps-managed)', async () => {

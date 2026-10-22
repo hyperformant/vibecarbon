@@ -357,18 +357,18 @@ export function gitopsTargets(envName, envConfig) {
  * The TLS_CERT_* vars deploy.yml renders the vibecarbon-tls Certificate from
  * (scripts/render-tls-certificate.mjs): the same issuer and names the CLI
  * deploy renders, validated. A standby issues from the local self-signed
- * issuer, with the real ACME issuer in the promote annotation.
+ * issuer, with the real ACME issuer in the promote annotation. Throws when
+ * there is no domain.
  *
  * @param {{ projectDir: string, dnsProvider?: string|null, domain?: string|null,
  *   role?: 'primary'|'standby' }} args
  * @returns {{ TLS_CERT_ISSUER: string, TLS_CERT_EFFECTIVE_ISSUER: string, TLS_CERT_DNS_NAMES: string }}
  */
 export function gitopsTlsCertificateVars({ projectDir, dnsProvider, domain, role = 'primary' }) {
-  const { issuerName, dnsNames } = k8sTlsIdentity({
-    projectDir,
-    dnsProvider,
-    domain: domain || 'localhost',
-  });
+  // No fallback name: a Certificate for another name than the env's is one
+  // the cluster would issue and serve, and never trusted.
+  if (!domain) throw new Error('the TLS Certificate needs a domain, and this environment has none');
+  const { issuerName, dnsNames } = k8sTlsIdentity({ projectDir, dnsProvider, domain });
   return tlsCertificateVars({
     dnsNames,
     issuerName,
