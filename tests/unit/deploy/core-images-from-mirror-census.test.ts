@@ -439,6 +439,11 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
       expect(doc.mirrors[K3S_SYSTEM_REGISTRY]).toEqual(EXPECTED_ALIAS_MIRROR);
       expect(Object.keys(doc.mirrors)).toHaveLength(2);
       expect(forbiddenMirrors(doc.mirrors)).toEqual([]);
+      // No fallback to a mirrored registry's own host, not even the alias's
+      // DNS lookup: the flag sits on the one k3s install line (server or agent;
+      // both accept it in v1.31, pkg/cli/cmds/agent.go and server.go).
+      const install = script.match(/sh -s - (?:server|agent) \\\n([\s\S]*?); then/)?.[1] ?? '';
+      expect(install).toContain('--disable-default-registry-endpoint \\');
       // Only one registries.yaml write per script, and no other mirror config.
       expect(script.match(/registries\.yaml << /g)).toHaveLength(1);
       // k3s reads registries.yaml only at start, so it must exist before install.

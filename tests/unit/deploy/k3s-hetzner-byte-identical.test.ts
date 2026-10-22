@@ -37,7 +37,8 @@
  *
  * RE-CAPTURED 2026-10-22 (k3s system images from the ghcr mirror, ruling
  * D3): worker-init.sh's registries.yaml heredoc gained the system-image
- * alias mirror from _k3s-system-image-mirror.yaml; the embedded `cloudInit` diff is
+ * alias mirror from _k3s-system-image-mirror.yaml and its k3s agent install
+ * gained --disable-default-registry-endpoint; the embedded `cloudInit` diff is
  * confined to those lines.
  */
 import { readFileSync } from 'node:fs';

@@ -676,6 +676,10 @@ describe('publish workflow mirrors exactly the set', () => {
     const runs = drift.steps.map((st) => st.run ?? '').join('\n');
     expect(runs).toMatch(/node scripts\/mirror-drift\.mjs > "\$RUNNER_TEMP\/drift\.md"/);
     expect(runs).toContain('$GITHUB_STEP_SUMMARY');
+    // A failed lookup still reaches the summary, then fails the job.
+    expect(runs).toMatch(
+      /drift\.md" \|\| rc=\$\?\n\s*cat "\$RUNNER_TEMP\/drift\.md" >> "\$GITHUB_STEP_SUMMARY"\n\s*exit "\$rc"/,
+    );
     // One issue, fixed title: updated when open, created otherwise, untouched
     // when the report carries the no-drift marker.
     expect(runs).toContain(`grep -q '^${NO_DRIFT_MARKER}$'`);

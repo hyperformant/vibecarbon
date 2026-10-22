@@ -605,7 +605,11 @@ export const K3S_SYSTEM_REGISTRY = 'vibecarbon-system.invalid';
  * mirror: one with a ghcr endpoint would try every docker.io pull as
  * ghcr.io/<same org>/<same name> first (namespace confusion). The cost: no
  * fallback, so a missing or private mirror fails the pull (release.yml's
- * mirrored-images gate covers every entry).
+ * mirrored-images gate covers every entry): every role also runs k3s with
+ * --disable-default-registry-endpoint, so containerd never tries the alias's
+ * own host. The snippet is spliced into an UNQUOTED heredoc by the
+ * DigitalOcean scripts: no capture groups, backticks or dollar-variables in
+ * it (a dollar sign followed by a quote stays literal).
  *
  * Tags are k3s-images.txt of K3S_VERSION (v1.31.5+k3s1). Unmirrored on
  * purpose: klipper-helm and mirrored-library-traefik (`--disable traefik`)
