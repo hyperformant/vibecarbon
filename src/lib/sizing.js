@@ -110,10 +110,12 @@ function catalogFor(Provider, location) {
  * @param {object} Provider - a provider class
  * @param {string} location
  * @param {string[]} roles - e.g. ['compose'] or ['master', 'db', 'worker']
+ * @param {Record<string, number>} [minRamGb] - a higher floor for some roles
+ *   (a standby never smaller than its primary); ROLE_MIN_RAM_GB otherwise
  * @returns {{types: Record<string, string>, monthly: number|null}|null}
  *   null when any role has no orderable candidate
  */
-export function cheapestRoleSet(Provider, location, roles) {
+export function cheapestRoleSet(Provider, location, roles, minRamGb = {}) {
   const { catalog, orderable, priceFor } = catalogFor(Provider, location);
   const isArm = (type) => Provider.isArmServerType(type);
   const types = {};
@@ -126,7 +128,7 @@ export function cheapestRoleSet(Provider, location, roles) {
       location,
       priceFor,
       isArm,
-      minRamGb: ROLE_MIN_RAM_GB[role],
+      minRamGb: minRamGb[role] ?? ROLE_MIN_RAM_GB[role],
     });
     if (!type) return null;
     types[role] = type;
@@ -162,23 +164,56 @@ export function regionRoleDefaults(Provider, region) {
 }
 
 /**
- * The region default of the same RAM tier as `type`, for a standby region
- * that does not sell `type`: the db pick (the 2 GB tier) for a type at or
- * under the db floor, else the compose pick (4 GB). Never shrinks a 4 GB
- * node to 2 GB. Falls back to `type` itself when the region has no such
- * default (the caller's create then names the refusal).
+ * What a standby places in `region` for `role` when `region` does not sell
+ * `type`, the primary's type: the role's cheapest orderable candidate there
+ * with at least the RAM of `type` (and never under the role's floor), so a
+ * standby is never smaller than the node it stands in for. With no `role`,
+ * the RAM tier names it: the db role for a type at or under the db floor,
+ * else compose. A provider without candidates for the role (compose-only)
+ * picks from its compose candidates.
+ *
+ * Null when nothing fits: the caller refuses by name (the deploy wizard,
+ * ruling B6), never an unstocked type the create would fail on.
  *
  * @param {object} Provider - a provider class
  * @param {string} type
  * @param {string} region
+ * @param {string} [role] - compose, master, db or worker
+ * @returns {string|null}
+ */
+export function standbyStandIn(Provider, type, region, role) {
+  const ram = Provider.SERVER_TYPES[type]?.ram;
+  let pickRole = role ?? (typeof ram === 'number' && ram <= ROLE_MIN_RAM_GB.db ? 'db' : 'compose');
+  if (!Provider.ROLE_CANDIDATES?.[pickRole]) pickRole = 'compose';
+  const minRam = Math.max(ROLE_MIN_RAM_GB[pickRole], typeof ram === 'number' ? ram : 0);
+  return (
+    cheapestRoleSet(Provider, region, [pickRole], { [pickRole]: minRam })?.types[pickRole] ?? null
+  );
+}
+
+/**
+ * A provider's `getDefaultStandbyRegion(primaryRegion, roles)`: the cheapest
+ * same-continent partner of `primaryRegion` (never the primary itself) where
+ * every role in `roles` is orderable, priced as `rankLocationsByPrice` does.
+ * Ties keep `conventional` (the provider's static pair) first, then
+ * `REGION_CONTINENT` order. `conventional` stands when no catalog is loaded
+ * or no partner qualifies; the deploy wizard then refuses at type resolution.
+ *
+ * @param {object} Provider - a provider class
+ * @param {string} primaryRegion
+ * @param {string[]} roles - ['compose'], or ['master', 'db'] for a k8s-ha
+ *   pilot-light standby (it has no worker)
+ * @param {string} conventional - the static pair for `primaryRegion`
  * @returns {string}
  */
-export function sameTierRegionDefault(Provider, type, region) {
-  const defaults = Provider.getRegionDefaults(region);
-  const ram = Provider.SERVER_TYPES[type]?.ram;
-  const pick =
-    typeof ram === 'number' && ram <= ROLE_MIN_RAM_GB.db ? defaults.dbType : defaults.composeType;
-  return pick ?? type;
+export function cheapestStandbyRegion(Provider, primaryRegion, roles, conventional) {
+  if (!Provider._locationTypes) return conventional;
+  const continentOf = Provider.REGION_CONTINENT ?? {};
+  const continent = continentOf[primaryRegion];
+  const partners = [...new Set([conventional, ...Object.keys(continentOf)])].filter(
+    (r) => r !== primaryRegion && continent && continentOf[r] === continent,
+  );
+  return rankLocationsByPrice(Provider, partners, roles)[0]?.location ?? conventional;
 }
 
 /**
@@ -189,12 +224,13 @@ export function sameTierRegionDefault(Provider, type, region) {
  * @param {object} Provider - a provider class
  * @param {string[]} locations
  * @param {string[]} roles
+ * @param {Record<string, number>} [minRamGb] - per-role floors, as in cheapestRoleSet
  * @returns {Array<{location: string, monthly: number|null, types: Record<string, string>}>}
  */
-export function rankLocationsByPrice(Provider, locations, roles) {
+export function rankLocationsByPrice(Provider, locations, roles, minRamGb = {}) {
   const ranked = [];
   for (const location of locations) {
-    const set = cheapestRoleSet(Provider, location, roles);
+    const set = cheapestRoleSet(Provider, location, roles, minRamGb);
     if (set) ranked.push({ location, monthly: set.monthly, types: set.types });
   }
   // Array.prototype.sort is stable, so equal keys keep the given order.

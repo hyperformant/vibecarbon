@@ -263,7 +263,10 @@ describe('HetznerProvider', () => {
       });
       for (const region of ['nbg1', 'fsn1', 'ash']) {
         for (const type of ['cpx11', 'cpx21', 'cpx31', 'cx23', 'cax11', 'cax21', 'cax41']) {
-          expect(HetznerProvider.resolveServerTypeForRegion(type, region)).not.toMatch(/^cax/);
+          // null (nothing x86 fits there: the deploy refuses) is not ARM either.
+          expect(HetznerProvider.resolveServerTypeForRegion(type, region) ?? '').not.toMatch(
+            /^cax/,
+          );
         }
       }
     });

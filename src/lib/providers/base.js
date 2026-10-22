@@ -1024,21 +1024,27 @@ export class BaseProvider {
   }
 
   /**
-   * Default HA standby region for a given primary region.
+   * Default HA standby region for a given primary region: the cheapest
+   * same-continent partner where every role in `roles` is orderable (see
+   * src/lib/sizing.js cheapestStandbyRegion), else the static pair.
    * @param {string} primaryRegion
+   * @param {string[]} [roles] - ['compose'], or ['master', 'db'] for k8s-ha
    * @returns {string}
    */
-  static getDefaultStandbyRegion(_primaryRegion) {
+  static getDefaultStandbyRegion(_primaryRegion, _roles) {
     throw new Error('getDefaultStandbyRegion() must be implemented by subclass');
   }
 
   /**
-   * Returns the equivalent server type available in a target region.
+   * Returns the equivalent server type available in a target region: the
+   * type itself when stocked there, else the role's cheapest orderable pick
+   * of at least its RAM (src/lib/sizing.js standbyStandIn).
    * @param {string} serverType - Original server type
    * @param {string} targetRegion - Region to resolve for
-   * @returns {string}
+   * @param {string} [role] - compose, master, db or worker
+   * @returns {string|null} null when nothing fits, for the caller to refuse
    */
-  static resolveServerTypeForRegion(_serverType, _targetRegion) {
+  static resolveServerTypeForRegion(_serverType, _targetRegion, _role) {
     throw new Error('resolveServerTypeForRegion() must be implemented by subclass');
   }
 

@@ -164,3 +164,53 @@ describe('haK8sProvisionClusters pilot-light asymmetry', () => {
     expect((ctx.standbyResult as Record<string, unknown>).region).toBe('nbg1');
   });
 });
+
+describe('haK8sProvisionClusters standby sizes', () => {
+  it('Review Focus 4: each standby role is re-picked for its own location', async () => {
+    const { seedCatalog } = await import('../helpers/catalog-fixtures.js');
+    const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
+    // cx23 is orderable in hel1 only in this catalog, and the cheapest 4 GB
+    // server there; the 2 GB db default (cpx12) is stocked in both.
+    const restore = seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1');
+    try {
+      const ctx = await runFanOut({
+        environment: 'e4',
+        region: 'hel1',
+        secondaryRegion: 'fsn1',
+        masterServerType: 'cx23',
+        dbServerType: 'cpx12',
+        workerServerType: 'cx23',
+      });
+      const standby = ctx.standbyResult as Record<string, unknown>;
+      expect(standby.masterServerType).toBe('cpx22');
+      expect(standby.dbServerType).toBe('cpx12');
+      const standbyCall = deployK3s.mock.calls
+        .map(([o]) => o as Record<string, unknown>)
+        .find((o) => o.role === 'standby');
+      expect(standbyCall?.masterServerType).toBe('cpx22');
+      expect(standbyCall?.dbServerType).toBe('cpx12');
+    } finally {
+      restore();
+    }
+  });
+
+  it('a 4 GB db re-picks as a 4 GB db: never smaller than the primary it stands in for', async () => {
+    const { seedCatalog } = await import('../helpers/catalog-fixtures.js');
+    const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
+    const restore = seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1');
+    try {
+      const ctx = await runFanOut({
+        environment: 'e4',
+        region: 'hel1',
+        secondaryRegion: 'fsn1',
+        masterServerType: 'cx23',
+        dbServerType: 'cx23',
+        workerServerType: 'cx23',
+      });
+      // The db role's candidates at 4 GB+, cheapest first in fsn1: cpx22.
+      expect((ctx.standbyResult as Record<string, unknown>).dbServerType).toBe('cpx22');
+    } finally {
+      restore();
+    }
+  });
+});

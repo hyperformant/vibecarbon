@@ -139,10 +139,26 @@ async function haK8sProvisionClusters(ctx) {
   // returns an x86 type (vibecarbon is amd64-only; see lib/deploy/platform.js),
   // including the ARM→x86 rescue for an environment that predates that
   // standardization.
-  const resolve = (type) => Provider.resolveServerTypeForRegion(type, standbyRegion);
-  const standbyMasterType = resolve(options.masterServerType || options.serverType);
-  const standbyDbType = resolve(options.dbServerType || options.serverType);
-  const standbyWorkerType = resolve(options.workerServerType || options.serverType);
+  // A type the standby region does not stock is re-picked there for its role
+  // (src/lib/sizing.js standbyStandIn): the cheapest stocked candidate, never
+  // smaller than the primary's type.
+  const resolve = (type, role) => Provider.resolveServerTypeForRegion(type, standbyRegion, role);
+  const standbyMasterType = resolve(options.masterServerType || options.serverType, 'master');
+  const standbyDbType = resolve(options.dbServerType || options.serverType, 'db');
+  const standbyWorkerType = resolve(options.workerServerType || options.serverType, 'worker');
+  // The pilot-light standby places a master and a db. The deploy wizard
+  // refuses a standby role with nothing orderable before anything is created;
+  // a direct caller gets the same cause rather than a null type at Pulumi.
+  // (Undefined means no type was given at all, which the DEFAULT_K8S_NODE_TYPE
+  // fallbacks below still cover.)
+  for (const [role, type] of [
+    ['master', standbyMasterType],
+    ['database', standbyDbType],
+  ]) {
+    if (type === null) {
+      throw new Error(`no k8s ${role} server is orderable in ${standbyRegion} right now`);
+    }
+  }
 
   if (
     standbyMasterType !== options.masterServerType ||

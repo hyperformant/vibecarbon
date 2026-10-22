@@ -113,7 +113,9 @@ describe('DigitalOceanProvider — identity/credentials statics (exact values)',
   });
 });
 
-describe('DigitalOceanProvider.getDefaultStandbyRegion', () => {
+// Offline (no catalog loaded) the static pairs stand. With a live catalog the
+// cheapest stocked partner wins: standby-region-by-price.test.ts.
+describe('DigitalOceanProvider.getDefaultStandbyRegion offline', () => {
   it('pairs nyc3<->sfo3 and fra1<->ams3 and sgp1<->syd1 (conventional pairings)', () => {
     expect(DigitalOceanProvider.getDefaultStandbyRegion('nyc3')).toBe('sfo3');
     expect(DigitalOceanProvider.getDefaultStandbyRegion('sfo3')).toBe('nyc3');

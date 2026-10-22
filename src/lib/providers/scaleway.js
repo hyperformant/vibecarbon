@@ -55,7 +55,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
-import { regionRoleDefaults, sameTierRegionDefault } from '../sizing.js';
+import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
 import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
@@ -689,15 +689,34 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
-   * Default HA standby zone — cross-country pairs (fr-par ↔ nl-ams, same
+   * Default HA standby region for a given primary: the cheapest
+   * same-continent partner where every standby role is orderable right now
+   * (src/lib/sizing.js cheapestStandbyRegion), ties and offline keeping
+   * conventionalStandbyRegion's pair. The pre-selected value in the
+   * interactive standby prompt and the headless default.
+   * @param {string} primaryRegion
+   * @param {string[]} [roles] - the roles the standby places
+   * @returns {string}
+   */
+  static getDefaultStandbyRegion(primaryRegion, roles = ['compose']) {
+    return cheapestStandbyRegion(
+      ScalewayProvider,
+      primaryRegion,
+      roles,
+      ScalewayProvider.conventionalStandbyRegion(primaryRegion),
+    );
+  }
+
+  /**
+   * The static HA standby pair — cross-country pairs (fr-par ↔ nl-ams, same
    * AZ ordinal so both sides carry the same catalog subset), then
    * same-continent, mirroring the sibling providers' contract. DEV1-M is
    * the documented type fallback if BASIC3 is ever absent from a chosen
    * zone (audit: capacityPreferences zone set).
    * @param {string} primaryRegion - zone
-   * @returns {string}
+   * @returns {string} the static pair, before prices
    */
-  static getDefaultStandbyRegion(primaryRegion) {
+  static conventionalStandbyRegion(primaryRegion) {
     const PAIRS = {
       'fr-par-1': 'nl-ams-1',
       'fr-par-2': 'nl-ams-2',
@@ -719,14 +738,17 @@ export class ScalewayProvider extends BaseProvider {
    * available (same walk shape as DO's/Vultr's).
    * @param {string} serverType
    * @param {string} targetRegion - zone
-   * @returns {string}
+   * @param {string} [role] - the role the node plays (compose, master, db,
+   *   worker): a type not stocked there is re-picked for that role
+   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
+   * @returns {string|null} null when nothing fits, for the caller to refuse
    */
-  static resolveServerTypeForRegion(serverType, targetRegion) {
+  static resolveServerTypeForRegion(serverType, targetRegion, role) {
     const available = ScalewayProvider._locationTypes?.[targetRegion];
 
     if (available) {
       if (available.has(serverType)) return serverType;
-      return sameTierRegionDefault(ScalewayProvider, serverType, targetRegion);
+      return standbyStandIn(ScalewayProvider, serverType, targetRegion, role);
     }
 
     return serverType;

@@ -4,7 +4,9 @@
  * The provider API token and the object-storage keys are made in the same
  * console visit (Hetzner: project, then Security, then API tokens / S3
  * credentials), so the wizard asks for them back to back: S3 keys right
- * after the token, before the DNS provider pick and its zone lookup.
+ * after the token, before the DNS provider pick and its zone lookup. An HA
+ * deploy's standby question is the one thing between them: its default is
+ * priced from the catalog the token unlocks.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -78,6 +80,10 @@ describe('deploy wizard credential order', () => {
         events.push('dns-provider');
         return 'manual';
       }
+      if (message === 'Standby region (HA failover target):') {
+        events.push('standby-region');
+        return 'ash';
+      }
       throw new Error(`unexpected select: ${message}`);
     });
   });
@@ -97,6 +103,19 @@ describe('deploy wizard credential order', () => {
       region: 'hil',
     });
     expect(events).toEqual(['api-token', 's3-credentials', 'dns-provider']);
+  });
+
+  it('HA asks for the standby between the API token and the S3 keys', async () => {
+    // The standby default is priced from the live catalog, which the API
+    // token unlocks, so the standby question waits for the token.
+    await gatherDeploymentConfig({
+      env: 'prod',
+      provider: 'hetzner',
+      compose: true,
+      ha: true,
+      region: 'hil',
+    });
+    expect(events).toEqual(['api-token', 'standby-region', 's3-credentials', 'dns-provider']);
   });
 
   it('verifies the S3 keys right away, naming where they came from, and asks again when S3 rejects them', async () => {

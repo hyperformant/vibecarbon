@@ -22,7 +22,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
-import { regionRoleDefaults, sameTierRegionDefault } from '../sizing.js';
+import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
 import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
@@ -612,13 +612,32 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
-   * Default HA standby region for a given primary: a DIFFERENT region on
+   * Default HA standby region for a given primary: the cheapest
+   * same-continent partner where every standby role is orderable right now
+   * (src/lib/sizing.js cheapestStandbyRegion), ties and offline keeping
+   * conventionalStandbyRegion's pair. The pre-selected value in the
+   * interactive standby prompt and the headless default.
+   * @param {string} primaryRegion
+   * @param {string[]} [roles] - the roles the standby places
+   * @returns {string}
+   */
+  static getDefaultStandbyRegion(primaryRegion, roles = ['compose']) {
+    return cheapestStandbyRegion(
+      DigitalOceanProvider,
+      primaryRegion,
+      roles,
+      DigitalOceanProvider.conventionalStandbyRegion(primaryRegion),
+    );
+  }
+
+  /**
+   * The static HA standby pair for a given primary: a DIFFERENT region on
    * the same continent, so failover stays intra-continent. Mirrors
    * HetznerProvider.getDefaultStandbyRegion's contract.
    * @param {string} primaryRegion
-   * @returns {string}
+   * @returns {string} the static pair, before prices
    */
-  static getDefaultStandbyRegion(primaryRegion) {
+  static conventionalStandbyRegion(primaryRegion) {
     // Conventional pairings, kept where they apply (bidirectional).
     const PAIRS = {
       nyc3: 'sfo3',
@@ -644,20 +663,23 @@ export class DigitalOceanProvider extends BaseProvider {
    * Returns the equivalent server type available in a target region.
    * Mirrors HetznerProvider.resolveServerTypeForRegion's walk: if live data
    * shows the requested type isn't available in the target region, fall
-   * back to the region default of the same RAM tier; offline, DO's
+   * back to the role's cheapest stocked pick of at least its RAM; offline, DO's
    * uniform Basic droplet line means the requested type is always assumed
    * available (no architecture-split fallback to reconcile, unlike
    * Hetzner's cax/cpx case).
    * @param {string} serverType - Original server type slug
    * @param {string} targetRegion - Region to resolve for
-   * @returns {string}
+   * @param {string} [role] - the role the node plays (compose, master, db,
+   *   worker): a type not stocked there is re-picked for that role
+   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
+   * @returns {string|null} null when nothing fits, for the caller to refuse
    */
-  static resolveServerTypeForRegion(serverType, targetRegion) {
+  static resolveServerTypeForRegion(serverType, targetRegion, role) {
     const available = DigitalOceanProvider._locationTypes?.[targetRegion];
 
     if (available) {
       if (available.has(serverType)) return serverType;
-      return sameTierRegionDefault(DigitalOceanProvider, serverType, targetRegion);
+      return standbyStandIn(DigitalOceanProvider, serverType, targetRegion, role);
     }
 
     // Offline fallback — no architecture split to reconcile.

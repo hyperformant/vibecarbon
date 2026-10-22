@@ -151,7 +151,7 @@ async function haProvisionServers(ctx) {
   const primaryStackRegion = birth('primary')?.region ?? region;
   const standbyRegion =
     birth('standby')?.region ??
-    (ctx.secondaryRegion || Provider.getDefaultStandbyRegion(primaryStackRegion));
+    (ctx.secondaryRegion || Provider.getDefaultStandbyRegion(primaryStackRegion, ['compose']));
   // The standby STACK's region; re-pointed at the role standby's once the pair
   // is resolved below (the same node unless this is a reconverge).
   ctx.standbyRegion = standbyRegion;
@@ -164,6 +164,10 @@ async function haProvisionServers(ctx) {
   // meant a default compose-HA deploy could provision a primary fine and then
   // fail placing the standby, with an error naming a region the operator never
   // chose (getDefaultStandbyRegion picked it).
+  //
+  // A type the standby region does not stock is re-picked there for the
+  // compose role (src/lib/sizing.js standbyStandIn): the cheapest stocked
+  // candidate, never smaller than the primary's type.
   //
   // resolveServerTypeForRegion also carries the ARM->x86 rescue (vibecarbon is
   // amd64-only, see deploy/platform.js), so an environment predating that
@@ -184,7 +188,15 @@ async function haProvisionServers(ctx) {
   const primaryStackServerType = recordedType('primary') ?? serverType;
   ctx.primaryStackServerType = primaryStackServerType;
   const standbyServerType =
-    recordedType('standby') ?? Provider.resolveServerTypeForRegion(serverType, standbyRegion);
+    recordedType('standby') ??
+    Provider.resolveServerTypeForRegion(serverType, standbyRegion, 'compose');
+  if (!standbyServerType) {
+    // The deploy wizard refuses this before anything is created; a direct
+    // caller gets the same cause rather than a null type at the provider.
+    throw new Error(
+      `no compose server of at least ${serverType}'s size is orderable in ${standbyRegion} right now`,
+    );
+  }
   ctx.standbyServerType = standbyServerType;
   if (!recordedType('standby') && standbyServerType !== serverType) {
     p.log.info(

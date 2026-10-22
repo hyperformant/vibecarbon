@@ -9,7 +9,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
-import { regionRoleDefaults, sameTierRegionDefault } from '../sizing.js';
+import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
 import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
 
@@ -184,14 +184,33 @@ export class HetznerProvider extends BaseProvider {
   };
 
   /**
-   * Default HA standby region for a given primary: a DIFFERENT region on the
-   * same continent, so failover stays intra-continent (a US primary fails over
-   * to the other US region, not across the Atlantic). Used as the pre-selected
-   * value in the interactive standby prompt and as the headless default.
+   * Default HA standby region for a given primary: the cheapest
+   * same-continent partner where every standby role is orderable right now
+   * (src/lib/sizing.js cheapestStandbyRegion), ties and offline keeping
+   * conventionalStandbyRegion's pair. The pre-selected value in the
+   * interactive standby prompt and the headless default.
    * @param {string} primaryRegion
+   * @param {string[]} [roles] - the roles the standby places
    * @returns {string}
    */
-  static getDefaultStandbyRegion(primaryRegion) {
+  static getDefaultStandbyRegion(primaryRegion, roles = ['compose']) {
+    return cheapestStandbyRegion(
+      HetznerProvider,
+      primaryRegion,
+      roles,
+      HetznerProvider.conventionalStandbyRegion(primaryRegion),
+    );
+  }
+
+  /**
+   * The static HA standby pair for a given primary: a DIFFERENT region on the
+   * same continent, so failover stays intra-continent (a US primary fails over
+   * to the other US region, not across the Atlantic). getDefaultStandbyRegion
+   * keeps it offline and on a price tie.
+   * @param {string} primaryRegion
+   * @returns {string} the static pair, before prices
+   */
+  static conventionalStandbyRegion(primaryRegion) {
     const continent = HetznerProvider.REGION_CONTINENT[primaryRegion];
     const sameContinent = Object.keys(HetznerProvider.REGION_CONTINENT).filter(
       (r) => r !== primaryRegion && HetznerProvider.REGION_CONTINENT[r] === continent,
@@ -721,8 +740,12 @@ export class HetznerProvider extends BaseProvider {
    * 2026-08-20, deploy/effects/compose-ha.js) to translate the primary's types
    * into SKUs the standby region actually offers. Result is always x86 —
    * vibecarbon is amd64-only (src/lib/deploy/platform.js).
+   * @param {string} [role] - the role the node plays (compose, master, db,
+   *   worker): a type not stocked there is re-picked for that role
+   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
+   * @returns {string|null} null when nothing fits, for the caller to refuse
    */
-  static resolveServerTypeForRegion(serverType, targetRegion) {
+  static resolveServerTypeForRegion(serverType, targetRegion, role) {
     // ARM→x86 rescue, applied up front and REGARDLESS of availability.
     //
     // "Regardless of availability" is load-bearing: cax IS available in
@@ -747,16 +770,17 @@ export class HetznerProvider extends BaseProvider {
     if (available) {
       if (available.has(requested)) return requested;
 
-      // Fall back to the region default of the same RAM tier. There is NO
+      // Fall back to the role's cheapest stocked pick of at least the same
+      // RAM (sizing.js standbyStandIn), or null to refuse. There is NO
       // x86→ARM (cpx→cax) leg here any more. It used to convert an x86
       // primary's cpx11 into ARM cax11 on an EU standby — an arch flip the
       // amd64 app image cannot survive, chasing scarcer ARM capacity besides
       // (RCA 2026-06-23: nbg1 standby failed resource_unavailable on cax). The
       // offline branch below was hardened at the time; this live-data branch
       // was missed and kept flipping until the x86-64 standardization.
-      // getRegionDefaults only ever returns x86 SKUs, so the tier fallback is
-      // arch-safe by construction.
-      return sameTierRegionDefault(HetznerProvider, requested, targetRegion);
+      // The picker drops ARM candidates, so the fallback is arch-safe by
+      // construction.
+      return standbyStandIn(HetznerProvider, requested, targetRegion, role);
     }
 
     // Offline fallback — no live catalog to consult. x86 shared-vCPU (cx/cpx)

@@ -16,7 +16,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
-import { regionRoleDefaults, sameTierRegionDefault } from '../sizing.js';
+import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
 import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
@@ -564,14 +564,33 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * Default HA standby region: a DIFFERENT region on the same continent
+   * Default HA standby region for a given primary: the cheapest
+   * same-continent partner where every standby role is orderable right now
+   * (src/lib/sizing.js cheapestStandbyRegion), ties and offline keeping
+   * conventionalStandbyRegion's pair. The pre-selected value in the
+   * interactive standby prompt and the headless default.
+   * @param {string} primaryRegion
+   * @param {string[]} [roles] - the roles the standby places
+   * @returns {string}
+   */
+  static getDefaultStandbyRegion(primaryRegion, roles = ['compose']) {
+    return cheapestStandbyRegion(
+      LinodeProvider,
+      primaryRegion,
+      roles,
+      LinodeProvider.conventionalStandbyRegion(primaryRegion),
+    );
+  }
+
+  /**
+   * The static HA standby pair: a DIFFERENT region on the same continent
    * (conventional pairs first), mirroring the DO/Hetzner contract. Only
    * reachable once compose-ha is declared, but contract-tested for every
    * region regardless.
    * @param {string} primaryRegion
-   * @returns {string}
+   * @returns {string} the static pair, before prices
    */
-  static getDefaultStandbyRegion(primaryRegion) {
+  static conventionalStandbyRegion(primaryRegion) {
     const PAIRS = {
       'us-iad': 'us-ord',
       'us-ord': 'us-iad',
@@ -600,18 +619,21 @@ export class LinodeProvider extends BaseProvider {
   /**
    * Equivalent server type in a target region. Linode's global catalog
    * means the requested type is available everywhere the live data says it
-   * exists; the role-tier fallback mirrors DO's shape for the (unlikely)
+   * exists; the role-pick fallback mirrors DO's shape for the (unlikely)
    * case a future per-region axis appears in the live data.
    * @param {string} serverType
    * @param {string} targetRegion
-   * @returns {string}
+   * @param {string} [role] - the role the node plays (compose, master, db,
+   *   worker): a type not stocked there is re-picked for that role
+   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
+   * @returns {string|null} null when nothing fits, for the caller to refuse
    */
-  static resolveServerTypeForRegion(serverType, targetRegion) {
+  static resolveServerTypeForRegion(serverType, targetRegion, role) {
     const available = LinodeProvider._locationTypes?.[targetRegion];
 
     if (available) {
       if (available.has(serverType)) return serverType;
-      return sameTierRegionDefault(LinodeProvider, serverType, targetRegion);
+      return standbyStandIn(LinodeProvider, serverType, targetRegion, role);
     }
 
     return serverType;
