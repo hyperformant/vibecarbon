@@ -69,6 +69,7 @@ import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retire
 import { envS3Record } from './s3-record.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
+import { caSlug, tlsSnapshotS3Prefix } from './tls-snapshot.js';
 import {
   assertNoScaleCutoverInFlight,
   assertRolePrimaryWritable,
@@ -1547,6 +1548,17 @@ export async function executeDeployment(args, gatheredConfig) {
     redis: services.redis,
     s3: s3Config,
     backupS3: backupS3Config,
+    // Where the server saves its TLS certificate after every base backup
+    // (backup/tls-snapshot.sh): the env backup folder, per CA, the same CA
+    // verifyTlsReady records. No backup bucket: no snapshot.
+    tlsSnapshotPrefix: backupS3Config?.bucket
+      ? tlsSnapshotS3Prefix({
+          backupBucket: backupS3Config.bucket,
+          projectName: projectConfig.projectName,
+          envName: environment,
+          ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
+        })
+      : '',
     dnsChallenge,
     dnsProvider,
     dnsToken,

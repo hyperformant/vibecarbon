@@ -18,7 +18,9 @@
  * Script usage: `node scripts/render-backup-settings.mjs [k8s/base]` prints the
  * CronJob (its schedule filled in) and the settings ConfigMap as YAML on
  * stdout; pipe it to `kubectl apply -n vibecarbon -f -`. The two env vars are
- * required: no value is invented on a cluster that was never told one.
+ * required: no value is invented on a cluster that was never told one. An
+ * optional TLS_SNAPSHOT_S3_PREFIX lands in the ConfigMap for the CronJob TLS
+ * snapshot step.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -78,8 +80,21 @@ export function renderBackupCronJob(template, settings) {
   return template.replaceAll('{{BACKUP_SCHEDULE}}', settings.schedule);
 }
 
-/** The per-cluster settings ConfigMap, as YAML. */
+/** A plain `s3://<bucket>/<path>` folder: safe as a YAML scalar and as kubectl exec argv. */
+const TLS_SNAPSHOT_PREFIX = /^s3:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._/-]+$/;
+
+/**
+ * The per-cluster settings ConfigMap, as YAML. `settings.tlsSnapshotPrefix`
+ * (tlsSnapshotS3Prefix in src/lib/deploy/tls-snapshot.js) is where the backup
+ * CronJob saves the vibecarbon-tls Secret; without it no snapshot is taken.
+ */
 export function renderBackupSettingsConfigMap(settings) {
+  const prefix = settings.tlsSnapshotPrefix;
+  if (prefix && !TLS_SNAPSHOT_PREFIX.test(prefix)) {
+    throw new Error(
+      `TLS snapshot prefix ${JSON.stringify(prefix)} is not an s3://<bucket>/<path> folder`,
+    );
+  }
   return [
     'apiVersion: v1',
     'kind: ConfigMap',
@@ -92,6 +107,7 @@ export function renderBackupSettingsConfigMap(settings) {
     '    kustomize.toolkit.fluxcd.io/prune: disabled',
     'data:',
     `  BACKUP_RETENTION_DAYS: "${settings.retentionDays}"`,
+    ...(prefix ? [`  TLS_SNAPSHOT_S3_PREFIX: "${prefix}"`] : []),
     '',
   ].join('\n');
 }
@@ -112,10 +128,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.exit(1);
   }
   try {
-    const settings = resolveBackupSettings({
-      schedule: BACKUP_SCHEDULE,
-      retentionDays: BACKUP_RETENTION_DAYS,
-    });
+    const settings = {
+      ...resolveBackupSettings({
+        schedule: BACKUP_SCHEDULE,
+        retentionDays: BACKUP_RETENTION_DAYS,
+      }),
+      // Optional: the TLS snapshot folder `vibecarbon configure cicd` seeds.
+      tlsSnapshotPrefix: process.env.TLS_SNAPSHOT_S3_PREFIX || '',
+    };
     process.stdout.write(renderBackupManifests(process.argv[2] || 'k8s/base', settings));
   } catch (err) {
     console.error(err.message);

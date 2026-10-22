@@ -20,6 +20,12 @@ set -e
 # failed" (the CronJob fails its Job on 3 instead of re-pushing). Refusals (retired node, backup-prefix fence) and a
 # failed push exit 1 with no marker.
 #
+# TLS SNAPSHOT (backup/tls-snapshot.sh): after a run that exits 0 or 3 (the
+# db exec ran its course), the server saves its TLS certificate to the
+# backups bucket beside the base. It writes stderr only, never a marker, and
+# never changes the exit code: a skipped or failed snapshot is a note on
+# stderr, and a refusal or failed push (1) never writes one.
+#
 # Invoked as `cd <project-dir> && RETAIN=<n> bash backup/compose-backup.sh`, so
 # it operates relative to the current working directory — no PROJECT_NAME
 # needed. Both the cron path and the on-demand path use the SAME invocation
@@ -98,6 +104,7 @@ echo "Retain: ${RETAIN} days of base backups"
 # would `set -e`-fail nightly into backup.log on no-S3 deploys. Checking inside
 # the container is robust: it tests the actual env wal-g sees (source of truth),
 # covers both the cron and on-demand paths, and needs no deploy-time S3 plumbing.
+rc=0
 docker compose exec -T db bash -c '
   export PGUSER=postgres PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
   # This database lineage folder (walg-env.sh). A system identifier it cannot
@@ -230,6 +237,17 @@ docker compose exec -T db bash -c '
     exit 3
   }
   printf "%s\n" "$retain_out" >&2
-'
+' || rc=$?
 
-echo "=== Backup completed at $(date) ==="
+# The TLS snapshot runs after a run that reached the push (0, including its
+# skips, and 3, base pushed with retention failed), never after a refusal or
+# a failed push (1). Its stdout goes to stderr, so the one marker above stays
+# the only BACKUP_RESULT line, and it never changes the exit code.
+if [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; then
+  bash backup/tls-snapshot.sh >&2 || echo "tls snapshot skipped" >&2
+fi
+
+if [ "$rc" -eq 0 ]; then
+  echo "=== Backup completed at $(date) ==="
+fi
+exit "$rc"

@@ -94,6 +94,7 @@ import {
 } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
 import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
+import { caSlug, tlsSnapshotS3Prefix } from '../tls-snapshot.js';
 import {
   assertWalgBackupsWorking,
   k8sWalgAuditArgv,
@@ -3983,6 +3984,28 @@ export async function applyK3sManifests({
   // one beside it would be empty. Refuse before anything is created.
   await assertNoRetiredChartDb({ env });
   await assertDbStorageClass({ storageClass, env });
+  // Issuer choice: `ACME_CA_SERVER` points at staging for e2e tests
+  // (and any dev env that wants to avoid LE rate limits). Read from
+  // .env.local first (per-project), then fall back to process.env so the
+  // e2e harness can inject the staging URL via env without writing
+  // it into the project's .env.local. Anything else gets the prod issuer.
+  // Provider suffix (cloudflare/hetzner/manual) determines which solver
+  // — DNS-01 vs HTTP-01 — cert-manager actually uses; see pickIssuerName.
+  // Computed before the base is applied: the backup settings below (the TLS
+  // snapshot folder is per CA) and the Certificate patch further down both
+  // need it.
+  const acmeServer = envLocal?.ACME_CA_SERVER || readOperatorVar('ACME_CA_SERVER').value || '';
+  const issuerName = pickIssuerName({ dnsProvider, acmeServer });
+  // Where the backup CronJob saves the vibecarbon-tls Secret: the env backup
+  // bucket (none: no snapshot) under backups/<project>/<env>/tls/<ca>.
+  const tlsSnapshotPrefix = backupBucketName
+    ? tlsSnapshotS3Prefix({
+        backupBucket: backupBucketName,
+        projectName,
+        envName: operatorEnv,
+        ca: caSlug(issuerName),
+      })
+    : '';
   const baseDir = renderK8sBase(
     join(projectDir, 'k8s/base'),
     {
@@ -4017,7 +4040,7 @@ export async function applyK3sManifests({
   // tree, so no Flux reconcile can touch it).
   await runKubectlWithRetry(['-n', 'vibecarbon', 'apply', '-f', '-'], {
     env,
-    input: renderBackupSettingsConfigMap(backupSettings),
+    input: renderBackupSettingsConfigMap({ ...backupSettings, tlsSnapshotPrefix }),
     description: 'applyK3sManifests: kubectl apply ConfigMap/vibecarbon-backup-settings',
   });
   if (pilotStandby) {
@@ -4231,15 +4254,7 @@ export async function applyK3sManifests({
   //     placeholder is intentional in the template (the comment says
   //     "patched at deploy time"); this is the patch.
   //
-  // Issuer choice: `ACME_CA_SERVER` points at staging for e2e tests
-  // (and any dev env that wants to avoid LE rate limits). Read from
-  // .env.local first (per-project), then fall back to process.env so the
-  // e2e harness can inject the staging URL via env without writing
-  // it into the project's .env.local. Anything else gets the prod issuer.
-  // Provider suffix (cloudflare/hetzner/manual) determines which solver
-  // — DNS-01 vs HTTP-01 — cert-manager actually uses; see pickIssuerName.
-  const acmeServer = envLocal?.ACME_CA_SERVER || readOperatorVar('ACME_CA_SERVER').value || '';
-  const issuerName = pickIssuerName({ dnsProvider, acmeServer });
+  // (Issuer choice: acmeServer / issuerName, computed before renderK8sBase.)
   // DNS-01 issuers (cloudflare, hetzner) support wildcard SANs — one cert
   // covers *.${domain} so every IngressRoute subdomain is included without
   // separate per-router ACME orders. Manual (HTTP-01) falls back to apex-only.

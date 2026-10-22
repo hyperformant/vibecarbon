@@ -102,6 +102,17 @@ spec:
                       name: vibecarbon-config
                       key: VIBECARBON_ROLE
                       optional: true
+                # Where the TLS snapshot step below saves the vibecarbon-tls
+                # Secret (s3://<backup bucket>/backups/<project>/<env>/tls/<ca>).
+                # In the deploy-owned settings ConfigMap, never in
+                # vibecarbon-config, which Flux resets from git. Unset: no
+                # snapshot.
+                - name: TLS_SNAPSHOT_S3_PREFIX
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vibecarbon-backup-settings
+                      key: TLS_SNAPSHOT_S3_PREFIX
+                      optional: true
               command:
                 - /bin/bash
                 - -c
@@ -319,6 +330,33 @@ spec:
                     }
                     printf "%s\n" "$retain_out" >&2
                   ' || rc=$?
+                  # TLS SNAPSHOT: after a run that reached the push (0, its
+                  # skips included, 3, base pushed with retention failed, and
+                  # 75, another Job holds the lock), save the vibecarbon-tls
+                  # Secret beside the base, never after a refusal or a failed
+                  # push (1). The Secret streams from kubectl straight into
+                  # wal-g st put in the db container (which holds the bucket
+                  # credentials): never printed, never a file on this pod.
+                  # Only a Secret an ACME issuer signed is saved; the standby
+                  # self-signed one would replace a good snapshot. Prints to
+                  # stderr only and never changes rc. No jq: the annotation
+                  # is read with jsonpath.
+                  if [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || [ "$rc" -eq 75 ]; then
+                    tls_prefix="${TLS_SNAPSHOT_S3_PREFIX:-}"
+                    if ! [[ "$tls_prefix" =~ ^s3://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$ ]]; then
+                      echo "tls snapshot skipped: no valid TLS_SNAPSHOT_S3_PREFIX in ConfigMap vibecarbon-backup-settings" >&2
+                    else
+                      tls_issuer="$(kubectl get secret vibecarbon-tls -n vibecarbon -o jsonpath="{.metadata.annotations.cert-manager\.io/issuer-name}" 2>/dev/null)" || tls_issuer=""
+                      if [ -z "$tls_issuer" ] || [ "$tls_issuer" = "vibecarbon-standby-selfsigned" ]; then
+                        echo "tls snapshot skipped: Secret vibecarbon-tls is missing or not issued by an ACME issuer (issuer: ${tls_issuer:-none})" >&2
+                      elif kubectl get secret vibecarbon-tls -n vibecarbon -o json |
+                        kubectl exec -i -n vibecarbon statefulset/db -c db -- env WALG_S3_PREFIX="$TLS_SNAPSHOT_S3_PREFIX" wal-g st put -s -f --no-compress --no-encrypt k8s-secret.json >&2; then
+                        echo "tls snapshot saved to ${tls_prefix}/k8s-secret.json" >&2
+                      else
+                        echo "tls snapshot failed: ${tls_prefix}/k8s-secret.json was not written (see the error above)" >&2
+                      fi
+                    fi
+                  fi
                   if [ "$rc" -eq 75 ]; then
                     exit 0
                   fi

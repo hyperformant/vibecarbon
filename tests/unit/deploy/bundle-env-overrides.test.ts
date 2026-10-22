@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderBundle } from '../../../src/lib/deploy/bundle.js';
-import { parseDotenv } from '../../../src/lib/dotenv.js';
+import { formatDotenvLine, parseDotenv } from '../../../src/lib/dotenv.js';
 
 // renderBundle runs against `process.cwd()`, so each test gets its own
 // throwaway directory containing a project-shaped `.env`.
@@ -373,6 +373,23 @@ describe('renderBundle tls-default.yml', () => {
       expect(env.VC_ENV).toBe('staging');
     } finally {
       rmSync(stage, { recursive: true, force: true });
+    }
+  });
+
+  it('a tlsSnapshotPrefix option writes TLS_SNAPSHOT_S3_PREFIX through formatDotenvLine', () => {
+    projectDir = makeProjectDir('FOO=1');
+    process.chdir(projectDir);
+    const prefix = 's3://proj-backups/backups/proj/prod/tls/prod';
+    const stage = renderBundle('myproj', { tlsSnapshotPrefix: prefix });
+    const none = renderBundle('myproj', {});
+    try {
+      const text = readFileSync(join(stage, '.env'), 'utf-8');
+      expect(text.split('\n')).toContain(formatDotenvLine('TLS_SNAPSHOT_S3_PREFIX', prefix));
+      expect(parseDotenv(text).TLS_SNAPSHOT_S3_PREFIX).toBe(prefix);
+      expect(readFileSync(join(none, '.env'), 'utf-8')).not.toContain('TLS_SNAPSHOT_S3_PREFIX');
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+      rmSync(none, { recursive: true, force: true });
     }
   });
 });

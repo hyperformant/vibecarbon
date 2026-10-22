@@ -87,6 +87,9 @@ jobs:
         env:
           BACKUP_SCHEDULE: ${{ vars.BACKUP_SCHEDULE }}
           BACKUP_RETENTION_DAYS: ${{ vars.BACKUP_RETENTION_DAYS }}
+          # Optional: where the CronJob saves the TLS certificate (seeded by
+          # `vibecarbon configure cicd` when the env has a backup bucket).
+          TLS_SNAPSHOT_S3_PREFIX: ${{ vars.TLS_SNAPSHOT_S3_PREFIX }}
         run: |
           node scripts/render-backup-settings.mjs k8s/base > "$RUNNER_TEMP/backup.yaml"
           kubectl apply --namespace=vibecarbon --server-side --force-conflicts \

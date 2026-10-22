@@ -899,6 +899,10 @@ async function bootstrap(cliArgs) {
   // apex certificate is still missing (setupComposeBackupCron installs it).
   copyTemplate('backup/tls-retry.sh', join(projectDir, 'backup/tls-retry.sh'), variables);
   chmodSync(join(projectDir, 'backup/tls-retry.sh'), 0o755);
+  // Compose TLS snapshot: saves acme.json to the backups bucket after every
+  // pushed base (compose-backup.sh runs it) and once a deploy's TLS is trusted.
+  copyTemplate('backup/tls-snapshot.sh', join(projectDir, 'backup/tls-snapshot.sh'), variables);
+  chmodSync(join(projectDir, 'backup/tls-snapshot.sh'), 0o755);
   // CI/CD workflow files are NOT shipped at create time — `vibecarbon
   // configure` → CI/CD installs them from src/lib/ci-setup.js when the user
   // explicitly opts in. Direct deploy is the default; shipping the workflow

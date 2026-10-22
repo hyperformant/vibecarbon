@@ -200,6 +200,9 @@ function commitAndPushManifests(cwd, message) {
  * @param {{schedule?: string, retentionDays?: number}} [args.backupConfig] - envConfig.backup:
  *   seeded as the environment's BACKUP_SCHEDULE / BACKUP_RETENTION_DAYS vars, which deploy.yml renders
  *   into the backup CronJob and its settings ConfigMap (never into the shared committed k8s/base)
+ * @param {string} [args.tlsSnapshotPrefix] - tlsSnapshotS3Prefix for this environment: seeded as the
+ *   TLS_SNAPSHOT_S3_PREFIX var, which deploy.yml renders into vibecarbon-backup-settings for the
+ *   CronJob's TLS snapshot step. Omitted: no snapshot is taken.
  * @param {string} [args.imageTag] - specific image tag to bake into app Deployment (default "main")
  * @param {number} [args.workflowTimeoutSec] - default 60 min. deploy.yml's
  *   internal Flux wait caps at 10m (vibecarbon-base), on top of ~5m Flux
@@ -220,6 +223,7 @@ export async function deployK8sGitOps(args) {
     appStorage,
     imageTag,
     backupConfig,
+    tlsSnapshotPrefix,
     workflowTimeoutSec = 3600,
     skipCi = false,
   } = args;
@@ -291,6 +295,9 @@ export async function deployK8sGitOps(args) {
     // these (scripts/render-backup-settings.mjs).
     BACKUP_SCHEDULE: backupSettings.schedule,
     BACKUP_RETENTION_DAYS: String(backupSettings.retentionDays),
+    // Where the backup CronJob saves the TLS certificate; deploy.yml puts it
+    // in the same settings ConfigMap. Empty (no backup bucket): not seeded.
+    TLS_SNAPSHOT_S3_PREFIX: tlsSnapshotPrefix || '',
   };
   await seedEnvironmentSecrets(environment, perEnvSecrets, perEnvVars);
   await uploadKubeconfig(environment, kubeconfigPath);

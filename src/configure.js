@@ -1638,6 +1638,22 @@ export async function runConfigureCicd(envName) {
     process.exit(1);
   }
 
+  // Where the backup CronJob saves the TLS certificate: the backup bucket the
+  // deploy recorded (never created or derived here) under
+  // backups/<project>/<env>/tls/<ca>, the folder the CLI deploy renders. One
+  // for both HA clusters: the standby never writes (its Secret is the
+  // self-signed one).
+  const { caSlug, tlsSnapshotS3Prefix } = await import('./lib/deploy/tls-snapshot.js');
+  const backupBucket = envConfig.backupS3?.bucket;
+  const tlsSnapshotPrefix = backupBucket
+    ? tlsSnapshotS3Prefix({
+        backupBucket,
+        projectName: projectConfig.projectName,
+        envName,
+        ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
+      })
+    : '';
+
   // HA clusters split into <env>-primary and <env>-standby kubeconfigs;
   // each needs its own GitOps handover. The orchestrator used to iterate
   // over `[{suffix:'primary'}, {suffix:'standby'}]` in HA, single in non-HA.
@@ -1671,6 +1687,7 @@ export async function runConfigureCicd(envName) {
       appStorage,
       imageTag,
       backupConfig: subEnvConfig.backup || envConfig.backup,
+      tlsSnapshotPrefix,
     });
   }
 

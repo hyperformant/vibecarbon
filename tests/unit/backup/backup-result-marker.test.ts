@@ -734,3 +734,93 @@ describe('the backup Job fails, not retries, on a retention failure', () => {
     expect(maj * 100 + min).toBeGreaterThanOrEqual(131);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The TLS snapshot step (carbon/backup/tls-snapshot.sh) after the db exec
+// ---------------------------------------------------------------------------
+
+/**
+ * compose-backup.sh with the db exec stubbed to exit `dbExecRc` (printing the
+ * marker a real run prints with that code) and a stand-in tls-snapshot.sh
+ * that records it ran and tries to print a second marker on stdout. The
+ * contract: the TLS step runs after a pushed base (rc 0) and after a push
+ * whose retention failed (rc 3), never after a refusal or failed push (rc 1),
+ * writes stderr only, and never changes the exit code.
+ */
+function runComposeBackup({
+  dbExecRc,
+  tlsFails = false,
+}: {
+  dbExecRc: number;
+  tlsFails?: boolean;
+}) {
+  const root = mkdtempSync(join(work, 'tls-step-'));
+  const dir = join(root, 'proj');
+  const bin = join(root, 'bin');
+  mkdirSync(join(dir, 'backup'), { recursive: true });
+  mkdirSync(bin);
+  const calls = join(root, 'calls.log');
+  writeFileSync(calls, '');
+  writeFileSync(join(dir, 'backup/compose-backup.sh'), readFileSync(COMPOSE_BACKUP));
+  writeFileSync(
+    join(dir, 'backup/tls-snapshot.sh'),
+    `printf '%s\\n' "bash backup/tls-snapshot.sh" >> "${calls}"\necho "BACKUP_RESULT=pushed:not-a-backup"\nexit ${tlsFails ? 1 : 0}\n`,
+  );
+  const marker = dbExecRc === 0 || dbExecRc === 3 ? `echo "BACKUP_RESULT=pushed:${NAME}"` : ':';
+  writeFileSync(
+    join(bin, 'docker'),
+    `#!/bin/bash\nprintf '%s\\n' "docker $1 $2 $3 $4" >> "${calls}"\n${marker}\nexit ${dbExecRc}\n`,
+  );
+  writeFileSync(join(bin, 'flock'), '#!/bin/bash\nexit 0\n');
+  chmodSync(join(bin, 'docker'), 0o755);
+  chmodSync(join(bin, 'flock'), 0o755);
+  const r = spawnSync('bash', ['backup/compose-backup.sh'], {
+    cwd: dir,
+    encoding: 'utf-8',
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      VC_BACKUP_LOCKFILE: join(root, 'lock'),
+      RETAIN: '2',
+    },
+    timeout: 10_000,
+  });
+  return {
+    code: r.status,
+    stdout: r.stdout,
+    stderr: r.stderr,
+    calls: readFileSync(calls, 'utf-8').split('\n').filter(Boolean),
+  };
+}
+
+describe('compose-backup.sh runs the TLS snapshot after the push, inside the marker contract', () => {
+  it.each([
+    [0, true],
+    [3, true],
+    [1, false],
+    [75, false],
+  ])('db exec rc %i: tls step runs=%s, exit code unchanged, one marker at most', (rc, runs) => {
+    const run = runComposeBackup({ dbExecRc: rc });
+    expect(run.code).toBe(rc);
+    expect(run.calls.some((c) => c.includes('backup/tls-snapshot.sh'))).toBe(runs);
+    expect(run.stdout.match(/^BACKUP_RESULT=/gm)?.length ?? 0).toBeLessThanOrEqual(1);
+  });
+
+  it('the TLS step runs after the db exec, and its stdout goes to stderr', () => {
+    const run = runComposeBackup({ dbExecRc: 0 });
+    expect(run.calls).toEqual(['docker compose exec -T db', 'bash backup/tls-snapshot.sh']);
+    expect(markers(run.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
+    expect(run.stderr).toContain('BACKUP_RESULT=pushed:not-a-backup');
+    expect(run.stdout).toMatch(/=== Backup completed at /);
+  });
+
+  it('a failed TLS step is a note on stderr, never a failed backup', () => {
+    const ok = runComposeBackup({ dbExecRc: 0, tlsFails: true });
+    expect(ok.code).toBe(0);
+    expect(ok.stderr).toContain('tls snapshot skipped');
+    expect(markers(ok.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
+    const retain = runComposeBackup({ dbExecRc: 3, tlsFails: true });
+    expect(retain.code).toBe(3);
+    // No completion line after a retention failure.
+    expect(retain.stdout).not.toMatch(/=== Backup completed/);
+  });
+});
