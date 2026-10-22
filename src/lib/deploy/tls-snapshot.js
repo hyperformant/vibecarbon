@@ -166,11 +166,13 @@ function checkAcmeEntry(entry, { ca, now, trustRoots }) {
 }
 
 /**
- * Judge every certificate of the resolver holding the apex, since a restore
- * writes them all: one bad entry refuses the whole file. The apex entry is
- * judged first; its reason is bare, another entry's names that entry.
+ * Judge the certificates of the resolver holding the apex. The apex entry
+ * must pass (its reason is bare); any other entry that fails is stale (an old
+ * hostname whose certificate expired, say) and is dropped, not a reason to
+ * refuse the file. `kept` is the entries a restore writes.
  *
- * @returns {{ ok: true, notAfter: Date } | { ok: false, reason: string }}
+ * @returns {{ ok: true, notAfter: Date, kept: object[], dropped: number }
+ *   | { ok: false, reason: string }}
  */
 function checkAcmeResolver(certs, { domain, ca, now, trustRoots }) {
   const entries = certs.filter((c) => c !== null && c !== undefined);
@@ -180,26 +182,24 @@ function checkAcmeResolver(certs, { domain, ca, now, trustRoots }) {
   const apex = entries.find((c) => c.domain.main === domain);
   const apexVerdict = checkAcmeEntry(apex, { ca, now, trustRoots });
   if (!apexVerdict.ok) return apexVerdict;
-  for (const entry of entries) {
-    if (entry === apex) continue;
-    const verdict = checkAcmeEntry(entry, { ca, now, trustRoots });
-    if (!verdict.ok) {
-      return { ok: false, reason: `certificate for ${entry.domain.main}: ${verdict.reason}` };
-    }
-  }
-  return apexVerdict;
+  const kept = entries.filter(
+    (entry) => entry === apex || checkAcmeEntry(entry, { ca, now, trustRoots }).ok,
+  );
+  return { ...apexVerdict, kept, dropped: entries.length - kept.length };
 }
 
 /**
- * Judge a Traefik acme.json: right CA, a certificate for `domain`, and every
- * certificate of that resolver valid (checkAcmeResolver), each with enough
- * validity left.
+ * Judge a Traefik acme.json: right CA, a valid certificate for `domain`
+ * (checkAcmeResolver). Stale non-apex entries are dropped: `text` is the file
+ * to restore, the input untouched when nothing was dropped, else re-serialized
+ * without them (2-space indent, as Traefik writes it); `dropped` counts them.
  *
  * @param {string} acmeJsonText
  * @param {{ domain: string, ca: 'prod'|'staging', now?: Date,
  *   trustRoots?: readonly string[] }} args - `trustRoots` defaults to
  *   tls.rootCertificates and is only used for the prod CA
- * @returns {{ ok: true, notAfter: Date } | { ok: false, reason: string }}
+ * @returns {{ ok: true, notAfter: Date, text: string, dropped: number }
+ *   | { ok: false, reason: string }}
  */
 export function inspectComposeAcme(
   acmeJsonText,
@@ -218,7 +218,12 @@ export function inspectComposeAcme(
       wrongCa = true;
       continue;
     }
-    return checkAcmeResolver(certs, { domain, ca, now, trustRoots });
+    const verdict = checkAcmeResolver(certs, { domain, ca, now, trustRoots });
+    if (!verdict.ok) return verdict;
+    const { kept, dropped, ...rest } = verdict;
+    if (dropped === 0) return { ...rest, text: acmeJsonText, dropped };
+    resolver.Certificates = kept;
+    return { ...rest, text: JSON.stringify(parsed, null, 2), dropped };
   }
   return {
     ok: false,

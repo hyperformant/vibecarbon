@@ -31,7 +31,7 @@ vi.mock('../../../src/lib/deploy/tls-snapshot.js', async (orig) => {
 
 const p = await import('@clack/prompts');
 const { RECONCILE_FLAGS_SED } = await import('../../../src/lib/deploy/bundle.js');
-const { restoreComposeTls, snapshotComposeTlsNow } = await import(
+const { restoreComposeTls, snapshotComposeTlsNow, tlsRestoreLine } = await import(
   '../../../src/lib/deploy/compose/tls-restore.js'
 );
 const { EFFECTS } = await import('../../../src/lib/deploy/effects/index.js');
@@ -187,6 +187,33 @@ describe('restoreComposeTls: a valid snapshot fills an empty acme.json', () => {
   });
 });
 
+describe('restoreComposeTls: stale extra entries are left out', () => {
+  it('streams the filtered file and reports the count', async () => {
+    const { ssh, calls } = fakeSsh();
+    const r = await restoreComposeTls({
+      ...args(),
+      deps: { ssh, read: async () => ({ text: BAD_SECOND }) },
+    });
+    expect(r).toEqual({ restored: true, reason: 'restored from the last snapshot', dropped: 1 });
+    const sent = String((calls[1].opts as { input: string }).input);
+    expect(JSON.parse(sent).letsencrypt.Certificates).toHaveLength(1);
+    expect(calls[1].argv[2]).toContain(` ${Buffer.byteLength(sent)}\n`);
+    expect(tlsRestoreLine(r, 'app.example.com')).toMatch(/Left out 1 stale certificate entry/);
+  });
+  it('an apex that fails is still refused', async () => {
+    const { ssh, calls } = fakeSsh();
+    const r = await restoreComposeTls({
+      ...args(),
+      deps: {
+        ssh,
+        read: async () => ({ text: acmeJson({ days: 3, extra: [{ main: '*.app.example.com' }] }) }),
+      },
+    });
+    expect(r.restored).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe('restoreComposeTls: nothing is written for a bad or missing snapshot', () => {
   const cases: Array<[string, Record<string, unknown>, () => unknown, RegExp]> = [
     ['absent', {}, async () => ({ text: null, reason: 'no snapshot' }), /^no snapshot$/],
@@ -195,12 +222,6 @@ describe('restoreComposeTls: nothing is written for a bad or missing snapshot', 
     ['self-signed', {}, async () => ({ text: SELF_SIGNED }), /self-signed/],
     ['from the other CA', { ca: 'prod' }, async () => ({ text: VALID }), /different CA/],
     ['naming the domain only in its label', {}, async () => ({ text: WRONG_SAN }), /names do not/],
-    [
-      'with a bad second entry',
-      {},
-      async () => ({ text: BAD_SECOND }),
-      /^snapshot refused: certificate for \*\.app\.example\.com: .*too soon$/,
-    ],
     [
       'from prod, not chained to a platform root',
       { ca: 'prod' },

@@ -18,7 +18,7 @@
  * (inspectComposeAcme, for every certificate of the apex's resolver: key
  * matches certificate, the leaf's names cover the entry, issuing CA, at
  * least 7 days left, not self-signed, and for the prod CA a chain to a root
- * of the platform store; one bad entry refuses the file). It reaches the server on ssh stdin,
+ * of the platform store; a bad apex entry refuses the file, a bad other entry is left out of what is written). It reaches the server on ssh stdin,
  * never on argv, and goes straight into the traefik service container, which
  * writes it with mode 600 as Traefik's own user. There is no temp file on the
  * operator or on the host; the only copy outside acme.json is a sibling in
@@ -179,7 +179,7 @@ export async function readLiveApexCertificate({
  *   s3Config: object|null, checkTimeoutMs?: number, writeTimeoutMs?: number,
  *   s3ClientOptions?: object, restart?: boolean,
  *   deps?: { read?: Function, ssh?: Function, trustRoots?: readonly string[] } }} args
- * @returns {Promise<{ restored: boolean, reason: string }>}
+ * @returns {Promise<{ restored: boolean, reason: string, dropped?: number }>}
  */
 export async function restoreComposeTls({
   ip,
@@ -229,25 +229,29 @@ export async function restoreComposeTls({
       ...(deps.trustRoots ? { trustRoots: deps.trustRoots } : {}),
     });
     if (!verdict.ok) return skip(`snapshot refused: ${verdict.reason}`);
+    // Stale non-apex entries are left out of what is written.
+    const body = verdict.text;
+    const droppedField = verdict.dropped ? { dropped: verdict.dropped } : {};
 
     try {
       await ssh(
         ip,
         sshKeyPath,
-        ['bash', '-c', writeScript(projectName, domain, Buffer.byteLength(text), restart)],
+        ['bash', '-c', writeScript(projectName, domain, Buffer.byteLength(body), restart)],
         // No transport retry: a write whose connection dropped after it ran
         // would rerun and meet its own file (exit 3, misreported as a
         // certificate that appeared on the server).
-        { timeout: writeTimeoutMs, input: text, transportRetry: false },
+        { timeout: writeTimeoutMs, input: body, transportRetry: false },
       );
     } catch (err) {
       if (err?.timedOut) return skip(RESTORE_TIMED_OUT);
       if (err?.status === 3) return skip('a certificate appeared on the server, kept');
       if (err?.status === 4) return skip('the snapshot arrived incomplete, nothing written');
-      if (err?.status === 5) return { restored: true, reason: 'restored, traefik did not restart' };
+      if (err?.status === 5)
+        return { restored: true, reason: 'restored, traefik did not restart', ...droppedField };
       return skip(`could not write acme.json (exit ${err?.status ?? 'unknown'})`);
     }
-    return { restored: true, reason: 'restored from the last snapshot' };
+    return { restored: true, reason: 'restored from the last snapshot', ...droppedField };
   } catch {
     return skip('restore errored');
   }
@@ -283,7 +287,7 @@ export async function snapshotComposeTlsNow({ ip, sshKeyPath, projectName, deps 
  * The one info line a caller prints for a restore result. A reason is one of
  * restoreComposeTls's fixed phrases, never command output.
  *
- * @param {{ restored: boolean, reason: string }} result
+ * @param {{ restored: boolean, reason: string, dropped?: number }} result
  * @param {string|null} domain
  * @returns {string}
  */
@@ -295,7 +299,10 @@ export function tlsRestoreLine(result, domain) {
   const restartNote = /did not restart/.test(result.reason)
     ? ' Traefik did not restart, so it loads it on its next start.'
     : '';
-  return `TLS certificate for ${domain} restored from its last snapshot.${restartNote}`;
+  const droppedNote = result.dropped
+    ? ` Left out ${result.dropped} stale certificate ${result.dropped === 1 ? 'entry' : 'entries'} that no longer passed the checks.`
+    : '';
+  return `TLS certificate for ${domain} restored from its last snapshot.${droppedNote}${restartNote}`;
 }
 
 /**

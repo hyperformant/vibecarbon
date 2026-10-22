@@ -173,7 +173,7 @@ describe('inspectComposeAcme', () => {
     });
     expect(v).toEqual({ ok: false, reason: 'certificate names do not cover its domain' });
   });
-  it('rejects a leaf missing one of the sans its entry asks for', () => {
+  it('drops a non-apex entry whose leaf misses one of the sans it asks for', () => {
     const text = acmeJson({
       extra: [
         {
@@ -184,10 +184,7 @@ describe('inspectComposeAcme', () => {
       ],
     });
     const v = inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' });
-    expect(v).toEqual({
-      ok: false,
-      reason: 'certificate for www.app.example.com: certificate names do not cover its domain',
-    });
+    expect(v.ok && v.dropped).toBe(1);
   });
   it('prod: rejects a chain that does not reach a trusted root', () => {
     const { json } = acmeJsonWithCas({ registrationUri: PROD_URI });
@@ -206,7 +203,27 @@ describe('inspectComposeAcme', () => {
     });
     expect(v).toEqual({ ok: false, reason: 'certificate does not chain to a trusted root' });
   });
-  it('prod: refuses the file when a second entry does not chain to a trusted root', () => {
+  it('drops a second entry that is near expiry and keeps the apex', () => {
+    const v = inspectComposeAcme(acmeJson({ extra: [{ main: '*.app.example.com', days: 3 }] }), {
+      domain: 'app.example.com',
+      ca: 'staging',
+    });
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.dropped).toBe(1);
+    const out = JSON.parse(v.text);
+    expect(
+      out.letsencrypt.Certificates.map((c: { domain: { main: string } }) => c.domain.main),
+    ).toEqual(['app.example.com']);
+    expect(out.letsencrypt.Account.Registration.uri).toContain('acme-staging');
+    expect(v.text).toBe(JSON.stringify(out, null, 2));
+  });
+  it('drops a second entry whose key is another certificate', () => {
+    const text = acmeJson({ extra: [{ main: 'www.app.example.com', mismatchedKey: true }] });
+    const v = inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' });
+    expect(v.ok && v.dropped).toBe(1);
+  });
+  it('prod: drops a second entry that does not chain to a trusted root', () => {
     const { json, cas } = acmeJsonWithCas({
       registrationUri: PROD_URI,
       extra: [{ main: '*.app.example.com' }],
@@ -216,25 +233,15 @@ describe('inspectComposeAcme', () => {
       ca: 'prod',
       trustRoots: [cas[0]],
     });
-    expect(v).toEqual({
-      ok: false,
-      reason: 'certificate for *.app.example.com: certificate does not chain to a trusted root',
-    });
+    expect(v.ok && v.dropped).toBe(1);
   });
-  it('refuses the whole file when a second entry is near expiry', () => {
-    const v = inspectComposeAcme(acmeJson({ extra: [{ main: '*.app.example.com', days: 3 }] }), {
+  it('refuses the file when the apex entry is near expiry, even with valid others', () => {
+    const v = inspectComposeAcme(acmeJson({ days: 3, extra: [{ main: '*.app.example.com' }] }), {
       domain: 'app.example.com',
       ca: 'staging',
     });
     expect(v.ok).toBe(false);
-    if (!v.ok) expect(v.reason).toMatch(/^certificate for \*\.app\.example\.com: .*too soon$/);
-  });
-  it('refuses the whole file when a second entry has a key of another certificate', () => {
-    const text = acmeJson({ extra: [{ main: 'www.app.example.com', mismatchedKey: true }] });
-    expect(inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' })).toEqual({
-      ok: false,
-      reason: 'certificate for www.app.example.com: certificate and key do not match',
-    });
+    if (!v.ok) expect(v.reason).toMatch(/too soon$/);
   });
   it('refuses an entry without a valid domain label, without echoing it', () => {
     const parsed = JSON.parse(acmeJson({ extra: [{ main: 'www.app.example.com' }] }));
@@ -249,7 +256,12 @@ describe('inspectComposeAcme', () => {
     const text = acmeJson({
       extra: [{ main: '*.app.example.com' }, { main: 'www.app.example.com' }],
     });
-    expect(inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' }).ok).toBe(true);
+    const v = inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' });
+    expect(v.ok).toBe(true);
+    if (v.ok) {
+      expect(v.dropped).toBe(0);
+      expect(v.text).toBe(text); // byte-for-byte, nothing re-serialized
+    }
   });
   it('exposes a validity floor of at least a few days', () => {
     expect(MIN_REMAINING_VALIDITY_MS).toBeGreaterThan(3 * DAY_MS);
