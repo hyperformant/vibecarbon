@@ -57,20 +57,20 @@ function allScenarios() {
 }
 
 describe('e2e scenarios deploy the default sizes', () => {
-  it('no scenario seeds a server type unless it is on the allow-list', async () => {
-    // scenario id -> reason. Starts empty: a pinned size needs a reason here.
-    const ALLOW: Record<string, string> = {};
+  it('every registered scenario resolves on the fixtures, primary and standby in known locations', async () => {
+    // The resolver hands every scenario serverType undefined by construction
+    // (ResolvedCapacity), so what this proves is that the picker, the scale
+    // ladder and the standby default line up for every registered scenario:
+    // resolution throws on any gap.
     const scenarios = allScenarios();
     expect(scenarios.length).toBeGreaterThan(0);
     for (const s of scenarios) {
-      seed(s.provider);
+      const P = seed(s.provider);
       const opts = { provider: s.provider, mode: s.mode, loadCatalog: seededCatalog };
       const resolved = s.mode.endsWith('-ha')
         ? Object.values(await resolveCapacityPair(PREFS[s.provider], 'token', opts))
         : [await resolveCapacity(PREFS[s.provider], 'token', opts)];
-      if (!(s.id in ALLOW)) {
-        for (const r of resolved) expect(r.serverType, s.id).toBeUndefined();
-      }
+      for (const r of resolved) expect(Object.keys(P.REGIONS), s.id).toContain(r.region);
     }
   });
 });
@@ -107,6 +107,25 @@ describe.each(PROVIDER_IDS)('capacityPreferences.%s.scaleTo (scale ladder census
       const b = Provider.FALLBACK_SERVER_TYPES[to];
       expect(b.ram, `${from} -> ${to}`).toBeGreaterThan(a.ram);
     }
+  });
+
+  it('every compose and master default has its scale target sold where it is the default', () => {
+    // deployedScaleTarget keys on the compose or master type, so its target
+    // must be orderable wherever that type is the picker's default: otherwise
+    // the location is unusable as a primary and nothing says so.
+    const P = seed(id);
+    const unsellable: string[] = [];
+    for (const location of Object.keys(P._locationTypes)) {
+      const d = P.getRegionDefaults(location);
+      for (const type of new Set([d.composeType, d.masterType])) {
+        if (!type) continue;
+        const target = PREFS[id].scaleTo[type];
+        if (target && !P._locationTypes[location].has(target)) {
+          unsellable.push(`${type} -> ${target} in ${location}`);
+        }
+      }
+    }
+    expect(unsellable, 'scale targets not sold where their type is the default').toEqual([]);
   });
 
   it('every type the picker defaults to, for any role in any location, has a ladder entry', () => {

@@ -179,9 +179,16 @@ export const testConfig = {
     // `scaleTo` is the scale ladder: the type the deploy recorded -> the type
     // the scale step moves it to. Every entry is amd64 (vibecarbon is x86-64
     // only, owner decision 2026-07-30; see src/lib/deploy/platform.js) and in
-    // the provider's fallback catalog, and every type the picker can default
-    // to has an entry: tests/unit/e2e/default-sizes-unpinned-census.test.ts
+    // the provider's fallback catalog, every type the picker can default to
+    // has an entry, and a compose or master default's target is sold where
+    // that type is the default: tests/unit/e2e/default-sizes-unpinned-census.test.ts
     // fails otherwise. A recorded type with no entry fails the scale step.
+    //
+    // The scale step keys on the compose or master type only
+    // (deployedScaleTarget), and `scale -type` resizes the db with every
+    // other role. The db-role rows (cpx12, cpx11, s-1vcpu-2gb,
+    // s-1vcpu-2gb-amd) exist only so the census's "every default has an
+    // entry" rule holds; no scale step reads them.
     capacityPreferences: {
       hetzner: {
         // EU only. Hetzner's 2026-06-15 repricing raised CPX ~3x in the US
@@ -211,16 +218,18 @@ export const testConfig = {
       // the subset of DigitalOceanProvider.REGIONS that also carry Spaces
       // (object storage) — keeps backup/S3 traffic in-region. The ladder
       // covers the Basic line and the `-amd` / `-intel` variants the picker
-      // falls to where a region does not sell the plain size (sfo3 sold only
-      // the variants on 2026-10-22).
+      // falls to where a region does not sell the plain size (nyc2 and sfo3
+      // sold only the variants on 2026-10-22). Each variant scales to its own
+      // 8 GB sibling, the size sold where the variant is; the plain
+      // s-4vcpu-8gb is not sold in nyc2 or sfo3.
       digitalocean: {
         regions: ['nyc3', 'sfo3', 'ams3', 'fra1'] as const,
         scaleTo: {
           's-2vcpu-4gb': 's-4vcpu-8gb',
           's-1vcpu-2gb': 's-2vcpu-4gb',
           's-1vcpu-2gb-amd': 's-2vcpu-4gb-amd',
-          's-2vcpu-4gb-amd': 's-4vcpu-8gb',
-          's-2vcpu-4gb-intel': 's-4vcpu-8gb',
+          's-2vcpu-4gb-amd': 's-4vcpu-8gb-amd',
+          's-2vcpu-4gb-intel': 's-4vcpu-8gb-intel',
         },
       },
       // Linode runs compose + compose-ha (2026-08 expansion phase 1 +

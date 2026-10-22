@@ -178,8 +178,9 @@ export async function resolveCapacity(
  * deploy's standby resolves, `Provider.resolveServerTypeForRegion` per role
  * (the primary's type where stocked, else the role's pick of at least its
  * RAM). `scale -type` resizes both sides, so the standby must sell the scale
- * target too; when it does not, preflight fails naming the provider, the
- * location and the type, and no other location is tried.
+ * target too, and the target must have more RAM than each standby type; when
+ * either fails, preflight fails with a line naming the provider, the location
+ * and the types, and no other location is tried.
  */
 export async function resolveCapacityPair(
   prefs: CapacityPreferences,
@@ -219,6 +220,21 @@ export async function resolveCapacityPair(
       `region-resolver: ${name} default standby location ${region} does not sell the scale ` +
         `target ${target}, so the ${mode} scale step would fail there.`,
     );
+  }
+  // The standby's own types can differ from the primary's (a stand-in of at
+  // least the same RAM), so the target must grow each of them too: verify-
+  // scale needs every node to change, and scale must never shrink one.
+  const ramOf = (type: string): number | undefined => Provider.SERVER_TYPES?.[type]?.ram;
+  for (const role of roles) {
+    const own = types[role];
+    const targetRam = ramOf(target);
+    const ownRam = ramOf(own);
+    if (targetRam === undefined || ownRam === undefined || targetRam <= ownRam) {
+      throw new Error(
+        `region-resolver: ${name} scale target ${target} (${targetRam ?? '?'} GB) is not bigger ` +
+          `than the ${role} standby type ${own} (${ownRam ?? '?'} GB) in ${region}.`,
+      );
+    }
   }
 
   return { primary, standby: resolved(region, types) };

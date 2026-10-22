@@ -76,8 +76,8 @@ describe('capacityPreferences.digitalocean', () => {
       's-2vcpu-4gb': 's-4vcpu-8gb',
       's-1vcpu-2gb': 's-2vcpu-4gb',
       's-1vcpu-2gb-amd': 's-2vcpu-4gb-amd',
-      's-2vcpu-4gb-amd': 's-4vcpu-8gb',
-      's-2vcpu-4gb-intel': 's-4vcpu-8gb',
+      's-2vcpu-4gb-amd': 's-4vcpu-8gb-amd',
+      's-2vcpu-4gb-intel': 's-4vcpu-8gb-intel',
     });
   });
 

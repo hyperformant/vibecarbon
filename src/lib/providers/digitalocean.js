@@ -209,7 +209,8 @@ export class DigitalOceanProvider extends BaseProvider {
   // is why the live per-region data decides whenever a token is present.
   // Entries live-verified 2026-07-24 via DO API; the `-amd` / `-intel`
   // variants (ROLE_CANDIDATES' stock-out fallbacks) from GET /v2/sizes on
-  // 2026-10-22.
+  // 2026-10-22, as are their 8 GB siblings (the sizes `scale -type` moves an
+  // `-amd` / `-intel` box to, sold where the 4 GB variant is).
   static FALLBACK_SERVER_TYPES = {
     's-1vcpu-2gb': { vcpu: 1, ram: 2, disk: 50 },
     's-1vcpu-2gb-amd': { vcpu: 1, ram: 2, disk: 50 },
@@ -219,6 +220,8 @@ export class DigitalOceanProvider extends BaseProvider {
     's-2vcpu-4gb-amd': { vcpu: 2, ram: 4, disk: 80 },
     's-2vcpu-4gb-intel': { vcpu: 2, ram: 4, disk: 80 },
     's-4vcpu-8gb': { vcpu: 4, ram: 8, disk: 160 },
+    's-4vcpu-8gb-amd': { vcpu: 4, ram: 8, disk: 160 },
+    's-4vcpu-8gb-intel': { vcpu: 4, ram: 8, disk: 160 },
   };
 
   // Live catalog populated by fetchServerTypes(). Falls back to

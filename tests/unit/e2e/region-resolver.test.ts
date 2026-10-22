@@ -150,6 +150,17 @@ describe('resolveCapacityPair', () => {
     expect(Object.keys(standby.types)).toEqual(['master', 'db']);
   });
 
+  it('fails preflight when the scale target is not bigger than a standby type', async () => {
+    seedHetzner();
+    // A ladder whose target is the type itself: the standby would not grow.
+    const flat: CapacityPreferences = { regions: ['nbg1'], scaleTo: { cpx22: 'cpx22' } };
+    await expect(
+      resolveCapacityPair(flat, 't', { mode: 'compose-ha', loadCatalog: seeded }),
+    ).rejects.toThrow(
+      /region-resolver: Hetzner Cloud scale target cpx22 \(4 GB\) is not bigger than the compose standby type cpx22 \(4 GB\) in \w+/,
+    );
+  });
+
   it('fails preflight naming provider, location and type when the standby cannot sell the scale target', async () => {
     seedHetzner();
     const standbyRegion = HetznerProvider.getDefaultStandbyRegion('nbg1', ['compose'], {

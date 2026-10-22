@@ -1186,9 +1186,11 @@ export async function sweepOrphanedHetznerResources(
     // biome-ignore lint/suspicious/noExplicitAny: JS module interop
     const { HetznerS3Provider } = (await import('../../../src/lib/providers/hetzner-s3.js')) as any;
 
-    // Hetzner Object Storage has three regions — deploy may use any of them
-    // (nbg1 for primary e2e scenarios, hel1 as secondaryRegion for HA
-    // scenarios). Scan all three so we don't strand standby-region buckets.
+    // Hetzner Object Storage has three regions. A deploy's buckets live in
+    // the storage region resolved from its primary region (whichever EU
+    // location the resolver picked); an HA standby goes wherever
+    // getDefaultStandbyRegion puts it. Scan all three so no bucket is
+    // stranded whichever location a scenario landed in.
     for (const region of ['nbg1', 'fsn1', 'hel1']) {
       try {
         const s3 = new S3Client({

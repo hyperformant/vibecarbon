@@ -109,6 +109,8 @@ describe('DigitalOceanProvider — identity/credentials statics (exact values)',
       's-2vcpu-4gb-amd': { vcpu: 2, ram: 4, disk: 80 },
       's-2vcpu-4gb-intel': { vcpu: 2, ram: 4, disk: 80 },
       's-4vcpu-8gb': { vcpu: 4, ram: 8, disk: 160 },
+      's-4vcpu-8gb-amd': { vcpu: 4, ram: 8, disk: 160 },
+      's-4vcpu-8gb-intel': { vcpu: 4, ram: 8, disk: 160 },
     });
   });
 });
