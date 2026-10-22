@@ -85,8 +85,13 @@ put(join('carbon', '.nvmrc'), `${nodeMajor}\n`);
 // Each Dockerfile carries exactly ONE `ARG NODE_IMAGE=node:<major>...` line;
 // every other stage derives from it inside the build. Only the major is
 // rewritten — the alpine suffix is a deliberate, separately-reasoned pin (in
-// carbon/Dockerfile it must track the runner stage's `alpine:` version).
-for (const relPath of [join('carbon', 'Dockerfile'), join('docker', 'carbon-autoscaler', 'Dockerfile')]) {
+// docker/node-runtime it must track that image's `alpine:` base, and
+// carbon/Dockerfile builds on the same alpine the runtime runs).
+for (const relPath of [
+  join('carbon', 'Dockerfile'),
+  join('docker', 'carbon-autoscaler', 'Dockerfile'),
+  join('docker', 'node-runtime', 'Dockerfile'),
+]) {
   edit(relPath, (text) => {
     const next = text.replace(/^(ARG NODE_IMAGE=node:)\d+/m, `$1${nodeMajor}`);
     if (next === text && !new RegExp(`^ARG NODE_IMAGE=node:${nodeMajor}\\b`, 'm').test(text)) {
@@ -94,6 +99,40 @@ for (const relPath of [join('carbon', 'Dockerfile'), join('docker', 'carbon-auto
       process.exit(1);
     }
     return next;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 2b. The node runtime base's tag, which names the Node major.
+// ---------------------------------------------------------------------------
+// NODE_RUNTIME_IMAGE (src/lib/images.js) and its byte-for-byte copy, the
+// `ARG RUNTIME_IMAGE=` default in carbon/Dockerfile, are
+// `<repo>:<node major>-alpine<alpine minor>-r<N>[@sha256:<digest>]`. A new
+// major is a new image, so the revision resets to -r1 and any digest (which
+// named the old image) is dropped until the new tag is published. Moving docker/node-runtime's pin also changes
+// its fingerprint: tests/unit/deploy/node-runtime-image-fingerprint.test.ts
+// then prints the NODE_RUNTIME_INPUTS_SHA256 to paste.
+const RUNTIME_TAG = /(ghcr\.io\/hyperformant\/node-runtime:)(\d+)(-alpine[\d.]+-r)(\d+)(@sha256:[0-9a-f]{64})?/;
+for (const [relPath, anchor] of [
+  [join('src', 'lib', 'images.js'), /^export const NODE_RUNTIME_IMAGE = '/m],
+  [join('carbon', 'Dockerfile'), /^ARG RUNTIME_IMAGE=/m],
+]) {
+  edit(relPath, (text) => {
+    const at = text.search(anchor);
+    if (at === -1) {
+      console.error(`${relPath}: no NODE_RUNTIME_IMAGE / ARG RUNTIME_IMAGE= line to update`);
+      process.exit(1);
+    }
+    const lineEnd = text.indexOf('\n', at);
+    const line = text.slice(at, lineEnd === -1 ? undefined : lineEnd);
+    const m = line.match(RUNTIME_TAG);
+    if (!m) {
+      console.error(`${relPath}: the runtime ref is not ghcr.io/hyperformant/node-runtime:<major>-alpine<x.y>-r<N>`);
+      process.exit(1);
+    }
+    if (m[2] === nodeMajor) return text;
+    const next = line.replace(RUNTIME_TAG, `$1${nodeMajor}$3` + '1');
+    return text.slice(0, at) + next + text.slice(at + line.length);
   });
 }
 

@@ -45,7 +45,6 @@ const values = () => ({
   ...buildDbManifestValues({
     dbImageTag: 'ghcr.io/org/postgres:17-walg1',
     storageClass: 'provider-csi',
-    dbPrivateIp: '10.0.1.2',
     walArchiveSha: 'abc',
   }),
   MASTER_PRIVATE_IP: '10.0.1.1',

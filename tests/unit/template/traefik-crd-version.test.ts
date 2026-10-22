@@ -23,6 +23,7 @@ const repo = (rel: string) =>
 const CRD_KUSTOMIZATION = 'carbon/k8s/infra/traefik-crds/kustomization.yaml';
 const K8S_DEPLOYMENT = 'carbon/k8s/base/traefik/deployment.yaml';
 const COMPOSE = 'carbon/docker-compose.yml';
+const COMPOSE_PROD = 'carbon/docker-compose.prod.yml';
 
 /** Tag from the raw.githubusercontent.com CRD URL in the kustomization. */
 function crdTag(): string {
@@ -33,16 +34,20 @@ function crdTag(): string {
   return m[1];
 }
 
-/** Tag from an `image: traefik:vX.Y.Z` line. */
+/**
+ * Tag from an `image: traefik:vX.Y.Z` line, or its ghcr mirror
+ * (`image: ghcr.io/hyperformant/traefik:vX.Y.Z@...`, servers).
+ */
 function imageTag(rel: string): string {
-  const m = repo(rel).match(/image:\s*traefik:(v[\d.]+)/);
+  const m = repo(rel).match(/image:\s*(?:ghcr\.io\/hyperformant\/)?traefik:(v[\d.]+)/);
   if (!m) throw new Error(`no traefik image pin found in ${rel}`);
   return m[1];
 }
 
 describe('Traefik CRD version matches the running Traefik version', () => {
-  it('k8s Traefik deployment and compose agree on one Traefik tag', () => {
+  it('k8s Traefik deployment and compose (local and server) agree on one Traefik tag', () => {
     expect(imageTag(K8S_DEPLOYMENT)).toBe(imageTag(COMPOSE));
+    expect(imageTag(COMPOSE_PROD)).toBe(imageTag(COMPOSE));
   });
 
   it('the installed CRD tag equals the Traefik image tag', () => {

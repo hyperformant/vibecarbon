@@ -34,6 +34,12 @@
  * again. Same reasoning as above — the static-IP invariants this file
  * exists to prove are untouched; the diff is confined to the removed loop
  * and the two apt-get lines.
+ *
+ * RE-CAPTURED 2026-10-22 (k3s system images from the ghcr mirror, ruling
+ * D3): worker-init.sh's registries.yaml heredoc gained the system-image
+ * alias mirror from _k3s-system-image-mirror.yaml and its k3s agent install
+ * gained --disable-default-registry-endpoint; the embedded `cloudInit` diff is
+ * confined to those lines.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -62,7 +68,7 @@ vi.mock('../../../src/lib/deploy/image.js', async (orig) => {
   };
 });
 
-const { renderCarbonAutoscalerConfig, buildAppImage, pushImageToLocalRegistry } = await import(
+const { renderCarbonAutoscalerConfig, buildAppImage } = await import(
   '../../../src/lib/deploy/k8s/k3s.js'
 );
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
@@ -123,32 +129,5 @@ describe('M3 Task 2 — Hetzner byte-identical pin', () => {
     // infraOutputs.masterPrivateIp on a Hetzner deploy.
     await buildAppImage('/tmp/proj', 'proj', false, undefined, '10.0.1.1');
     expect(H.lastBuildLocalImageOptions?.tagPrefix).toBe('10.0.1.1:5000');
-  });
-
-  it('pushImageToLocalRegistry still requires (and validates against) the 10.0.1.1:5000/ prefix by default', async () => {
-    // Validation runs before any spawn()/SSH call, so no child_process
-    // mocking is needed to reach this assertion — see
-    // k3s-push-image.test.ts for the full spawn-mocked push-flow pins,
-    // left untouched by this refactor (their unmodified pass is itself
-    // corroborating evidence of byte-identical default behavior).
-    await expect(
-      pushImageToLocalRegistry({
-        tag: 'wrong.example.com:5000/p:t',
-        masterIp: '1.2.3.4',
-        sshKey: '/tmp/k',
-        khPath: '/tmp/kh',
-      }),
-    ).rejects.toThrow(/expected tag prefixed with '10\.0\.1\.1:5000\/'/);
-
-    // Explicit Hetzner static must reject the SAME way.
-    await expect(
-      pushImageToLocalRegistry({
-        tag: 'wrong.example.com:5000/p:t',
-        masterIp: '1.2.3.4',
-        sshKey: '/tmp/k',
-        khPath: '/tmp/kh',
-        masterPrivateIp: '10.0.1.1',
-      }),
-    ).rejects.toThrow(/expected tag prefixed with '10\.0\.1\.1:5000\/'/);
   });
 });

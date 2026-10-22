@@ -38,19 +38,37 @@
  * e2e matrix siblings, still share the source IP; that is what the retry
  * classifier remains for.
  *
- * COST, stated honestly (review finding 2026-08-15 — an earlier version of
- * this header understated it): the lock is held for the ENTIRE wrapped Pulumi
- * operation, and for `up` that includes the full cloud PROVISIONING the engine
- * performs, plus any retry backoff the holder sleeps through (deliberate: the
- * store is already throttling, and letting the sibling engine in mid-backoff
- * adds load at the worst moment). So an HA deploy's two `up`s serialize
- * end-to-end: compose-ha's provisioning wall-clock roughly doubles (~2min on a
- * ~15min deploy), and k8s-ha's primary/standby INFRA provisioning serializes
- * (~1-3min added) while everything after upStack returns — k3s install, helm,
- * cert-manager, rollouts, the bulk of its 50+ minutes — still runs in
- * parallel. Serializing the engine any more narrowly is not possible from
- * outside the pulumi subprocess; the engine interleaves state reads and writes
- * throughout the operation.
+ * WHAT IT COVERS depends on the state bucket's age (Ruling A′, 2026-10-21).
+ * `upStack` takes `options.stateBucketYoung`, read once per deploy against
+ * the provider's declared settle window (`static bucketSettleWindowMs`:
+ * Hetzner 20 min, every other provider 0, so they never read the age):
+ *
+ *   - past the window: the lock covers the state-backend preparation only,
+ *     stack select, stale-lock cancel, pre-up refresh and the Vultr repair
+ *     (labels `stack-select <s>` and `refresh <s>`), and is released before
+ *     `stack.up()`. An HA pair's two engines provision in parallel.
+ *   - inside the window, or with an unknown age: the whole `upStack` holds it
+ *     (label `up <s>`), provisioning and any retry backoff included, so the
+ *     two `up`s serialize end to end as they did from 2026-08-15 on.
+ *
+ * The evidence for the split (run 31898658781, job 95045761606 log, re-read
+ * 2026-10-21): all 11 `up` throttles landed 39-150 s after their state bucket
+ * was created, every `stack-select` throttle 2-14 s after it, and four of the
+ * `up` throttles came from a single-cluster deploy with no second engine at
+ * all. Young buckets throttle; settled ones did not. The one compose-ha pair
+ * that overlapped its `up`s did it on a ~95 s old bucket, and failed, which is
+ * why a young bucket keeps the whole-operation lock: a customer's first HA
+ * deploy runs on a minutes-old bucket. Holding it past the window cost every
+ * HA deploy the primary's whole provisioning time (compose-ha's standby `up`
+ * finished ~95 s after the primary's, `state lock acquired after 93s`).
+ *
+ * If that is wrong, two `up`s overlap on a settled bucket and any throttle is
+ * still absorbed by withStateBackendRetry and counted as `backpressure` in the
+ * `[state]` line, which the e2e budgets fail on. The second engine always
+ * waits a few seconds for the first one's select and refresh.
+ *
+ * `syncServerState` (server-state.js) keeps a whole-operation lock in every
+ * case: it is a state read-modify-write, not provisioning.
  *
  * RE-ENTRANCY is the part that has to be right. The public operations nest:
  * `upStack` calls `getOrCreateStack`, which calls `listStacks`; `destroyStack`

@@ -188,6 +188,7 @@ describe('repo-wide: no Dockerfile downloads a pinned-arch binary unverified', (
       [
         join('carbon', 'Dockerfile'),
         join('docker', 'carbon-autoscaler', 'Dockerfile'),
+        join('docker', 'node-runtime', 'Dockerfile'),
         join('docker', 'postgres-walg', 'Dockerfile'),
         join('docker', 'wal-g', 'Dockerfile'),
       ].sort(),

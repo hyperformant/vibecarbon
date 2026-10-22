@@ -65,15 +65,6 @@ const REGISTRY = [
     deepTests: ['tests/unit/lib/delete-apex-and-wildcard.test.ts'],
   },
   {
-    helper: 'pushImageOverSshTunnel',
-    definition: 'src/lib/deploy/registry-push.js',
-    consumers: [
-      'src/lib/deploy/k8s/k3s.js', // k8s app/backup image push
-      'src/lib/deploy/effects/index.js', // compose warm-redeploy layer push
-    ],
-    deepTests: ['tests/unit/deploy/registry-push.test.ts'],
-  },
-  {
     helper: 'isBucketAlreadyGone',
     definition: 'tests/e2e/utils/bucket-already-gone.ts',
     consumers: [

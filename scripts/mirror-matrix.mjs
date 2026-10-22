@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 /**
  * Emit the ghcr mirror matrix as JSON: one {src, dst, digest} entry per image
- * in `MIRRORED_K8S_IMAGES` (src/lib/images.js). `dst` is the tag the job
+ * in `MIRRORED_IMAGES` (src/lib/images.js), registry.k8s.io and docker.io
+ * alike. `src` is the upstream ref (`docker.io/library/traefik:v3.6.11`,
+ * `registry.k8s.io/pause:3.9`); `dst` is the tag the job
  * pushes; `digest` is the pinned upstream linux/amd64 manifest the job copies
- * (and the digest every deployed ref carries).
+ * (and the digest every deployed ref carries); `index` is the upstream index
+ * that child is read from, or '' to read it from the tag (MirroredImage.index).
  *
  * Consumed by the `mirror-matrix` job in
  * .github/workflows/publish-images.yml, which feeds it
@@ -22,12 +25,13 @@
  *
  * Usage: node scripts/mirror-matrix.mjs
  */
-import { MIRRORED_K8S_IMAGES, k8sMirrorTagRef, k8sUpstreamRef } from '../src/lib/images.js';
+import { k8sMirrorTagRef, MIRRORED_IMAGES, upstreamRef } from '../src/lib/images.js';
 
-const matrix = MIRRORED_K8S_IMAGES.map((image) => ({
-  src: k8sUpstreamRef(image),
+const matrix = MIRRORED_IMAGES.map((image) => ({
+  src: upstreamRef(image),
   dst: k8sMirrorTagRef(image),
   digest: image.digest,
+  index: image.index ?? '',
 }));
 
 // Single line: the workflow assigns this to a $GITHUB_OUTPUT value, and

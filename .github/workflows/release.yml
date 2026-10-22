@@ -42,8 +42,22 @@ jobs:
   # children present (amd64 for servers, arm64 for Apple Silicon `up`).
   # It is one read, not a wait: if publish-db-image has not finished, let it
   # finish and dispatch again.
+  #
+  # The node runtime base (NODE_RUNTIME_IMAGE) gets the same check: every
+  # generated project's app image builds FROM it, locally and on servers, so
+  # a release naming an unpublished or still-private tag breaks the first
+  # `up` and deploy just as surely. A new ghcr package starts private; flip
+  # it public after publish-node-runtime-image's first run.
+  #
+  # The runtime base must also be pinned BY DIGEST before any release: a tag
+  # alone lets whoever can push to the package change what every generated
+  # project runs on. The tag pin is the pre-publish state only (the digest
+  # does not exist until the image is published); the post-publish commit
+  # appends `@sha256:` to NODE_RUNTIME_IMAGE and carbon/Dockerfile's
+  # `ARG RUNTIME_IMAGE=` (docker/node-runtime/README.md). This refuses until
+  # both carry it, and until the pinned digest is what the tag resolves to.
   db-image:
-    name: Verify the pinned db image is public and multi-arch
+    name: Verify the pinned db and node runtime images are public and multi-arch
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -54,32 +68,107 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Read the db image ref the CLI pins
-        run: node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log('DB_IMAGE=' + m.DB_IMAGE); console.log('DB_IMAGE_TAG=' + m.DB_IMAGE_TAG);" >> "$GITHUB_ENV"
+      - name: Read the image refs the CLI pins
+        run: node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log('DB_IMAGE=' + m.DB_IMAGE); console.log('DB_IMAGE_TAG=' + m.DB_IMAGE_TAG); console.log('NODE_RUNTIME_IMAGE=' + m.NODE_RUNTIME_IMAGE);" >> "$GITHUB_ENV"
 
-      - name: Inspect it anonymously and require linux/amd64 + linux/arm64
+      - name: Inspect each anonymously and require linux/amd64 + linux/arm64
         run: |
-          ref="$DB_IMAGE:$DB_IMAGE_TAG"
           DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
           export DOCKER_CONFIG
           mkdir -p "$DOCKER_CONFIG"
-          if ! manifest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}'); then
-            echo "::error::refusing to release: $ref is not pullable anonymously. Wait for publish-db-image to finish on main, or make the ghcr package public, then dispatch again."
+          case "$NODE_RUNTIME_IMAGE" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::refusing to release: NODE_RUNTIME_IMAGE ($NODE_RUNTIME_IMAGE) is not pinned by digest. Once publish-node-runtime-image has published it and the package is public, append the @sha256: the tag resolves to (docker/node-runtime/README.md), then dispatch again."
+              exit 1
+              ;;
+          esac
+          runtime_arg=$(grep -oP '^ARG RUNTIME_IMAGE=\K\S+' carbon/Dockerfile || true)
+          if [ "$runtime_arg" != "$NODE_RUNTIME_IMAGE" ]; then
+            echo "::error::refusing to release: carbon/Dockerfile's ARG RUNTIME_IMAGE ($runtime_arg) is not NODE_RUNTIME_IMAGE ($NODE_RUNTIME_IMAGE)."
             exit 1
           fi
-          platforms=$(printf '%s' "$manifest" | jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' | sort -u)
-          echo "Platforms in $ref:"
-          echo "$platforms"
-          for want in linux/amd64 linux/arm64; do
-            if ! printf '%s\n' "$platforms" | grep -qx "$want"; then
-              echo "::error::refusing to release: $ref has no $want child. Re-run publish-db-image for this tag, then dispatch again."
+          for ref in "$DB_IMAGE:$DB_IMAGE_TAG" "$NODE_RUNTIME_IMAGE"; do
+            if ! manifest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}'); then
+              echo "::error::refusing to release: $ref is not pullable anonymously. Wait for its publish workflow (publish-db-image or publish-node-runtime-image) to finish on main, or make the ghcr package public, then dispatch again."
               exit 1
             fi
+            platforms=$(printf '%s' "$manifest" | jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' | sort -u)
+            echo "Platforms in $ref:"
+            echo "$platforms"
+            for want in linux/amd64 linux/arm64; do
+              if ! printf '%s\n' "$platforms" | grep -qx "$want"; then
+                echo "::error::refusing to release: $ref has no $want child. Re-run its publish workflow for this tag, then dispatch again."
+                exit 1
+              fi
+            done
           done
+          runtime_tag=${NODE_RUNTIME_IMAGE%@*}
+          runtime_pinned=${NODE_RUNTIME_IMAGE##*@}
+          runtime_resolved=$(docker buildx imagetools inspect "$runtime_tag" --format '{{json .Manifest}}' | jq -r '.digest // empty' || true)
+          if [ "$runtime_resolved" != "$runtime_pinned" ]; then
+            echo "::error::refusing to release: $runtime_tag resolves to ${runtime_resolved:-nothing} anonymously, but NODE_RUNTIME_IMAGE pins $runtime_pinned. The tag moved or the pin is wrong; re-pin from the published tag, then dispatch again."
+            exit 1
+          fi
+
+  # Every ghcr mirror (MIRRORED_IMAGES in src/lib/images.js: the
+  # registry.k8s.io set, and since the cold-deploy-speed plan's Task 7 the
+  # core-path Docker Hub images and k3s's system images) is pulled by servers
+  # ANONYMOUSLY. A newly mirrored package starts PRIVATE and stays so until it
+  # is flipped public by hand, and a mirror leg that never ran leaves no tag at
+  # all; either way every deploy dies on ImagePullBackOff or a compose pull
+  # error. This refuses a release until each digest-pinned mirror ref resolves
+  # with an empty DOCKER_CONFIG (no login), the same way a server pulls it. One
+  # read, not a wait: run publish-images, flip any new package public
+  # (mirroredPackageNames()), then dispatch again.
+  mirrored-images:
+    name: Verify every ghcr mirror ref is pullable anonymously
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+
+      - name: Inspect each mirror ref and tag anonymously
+        run: |
+          set -euo pipefail
+          DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
+          export DOCKER_CONFIG
+          mkdir -p "$DOCKER_CONFIG"
+          # One "<tag ref> <pinned digest>" line per mirror.
+          pairs=$(node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log(m.MIRRORED_IMAGES.map((i) => m.k8sMirrorTagRef(i) + ' ' + i.digest).join('\n'));")
+          test -n "$pairs"
+          missing=0
+          while read -r tag pinned; do
+            ref="$tag@$pinned"
+            # The digest servers pin, and the TAG k3s pulls its system images
+            # by: its linux/amd64 child must be exactly the pinned digest.
+            if ! docker buildx imagetools inspect "$ref" > /dev/null; then
+              echo "::error::$ref is not pullable anonymously"
+              missing=1
+              continue
+            fi
+            tagged=$(docker buildx imagetools inspect --raw "$tag" \
+              | jq -r '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0]' || true)
+            if [ "$tagged" != "$pinned" ]; then
+              echo "::error::$tag's linux/amd64 child is ${tagged:-unreadable}, not the pinned $pinned"
+              missing=1
+              continue
+            fi
+            echo "ok $ref"
+          done <<< "$pairs"
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to release: a ghcr mirror ref or tag above is missing, private or moved. Run publish-images (mirror-upstream-images) on main, flip every new package public by hand (mirroredPackageNames() in src/lib/images.js), then dispatch again."
+            exit 1
+          fi
 
   release:
     name: Semantic Release
-    needs: db-image
+    needs: [db-image, mirrored-images]
     runs-on: ubuntu-latest
     permissions:
       contents: write

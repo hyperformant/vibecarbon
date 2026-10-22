@@ -4,13 +4,17 @@
 # The ONE Node pin in this file. Every other stage derives from it, so a Node
 # upgrade is a single-line edit here — and `pnpm node:sync` writes even this
 # line from the repo's .nvmrc. Dockerfiles can't read .nvmrc, so
-# tests/unit/lib/node-version-pins.test.ts asserts this tag's major matches it.
-#
-# The alpine minor is load-bearing, not cosmetic: the runner stage below is a
-# bare `alpine:3.24` that the node binary is COPY'd into, so this must stay
-# pinned to the SAME alpine as that stage or the binary hits a musl/libstdc++
-# mismatch at runtime.
+# tests/unit/lib/node-version-pins.test.ts asserts this tag's major matches it,
+# and that its alpine minor matches the runtime base below.
 ARG NODE_IMAGE=node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf
+
+# The runtime base the app runs on: vibecarbon's published node runtime
+# (Alpine + the node binary + libstdc++ + the `hono` user, built from
+# docker/node-runtime in the vibecarbon repo). Every vibecarbon app shares it,
+# so a server pulls it from the registry once and a deploy ships only the
+# layers below that are this app's own. Written by vibecarbon, and the one
+# place the CLI looks for the base a deploy can pre-pull on a server.
+ARG RUNTIME_IMAGE=ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1
 
 # Base image can be overridden for Turbo Layer Caching
 # Default is the standard node image
@@ -83,26 +87,15 @@ RUN npm run build:client
 RUN npm run build:server
 
 # Dependency stage — install runtime deps in a throwaway container.
-# Also the source of the node binary for the runner stage below (see there).
 FROM ${NODE_IMAGE} AS deps
 WORKDIR /deps
 RUN npm init -y > /dev/null 2>&1 && \
     npm install --no-package-lock pino@10
 
-# Production stage — minimal Alpine with just the node binary
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS runner
-
-RUN apk add --no-cache libstdc++ && \
-    addgroup -g 1001 -S hono && \
-    adduser -S hono -u 1001 -G hono
-
-# Take the node binary from the `deps` stage rather than naming the image a
-# second time. BuildKit REJECTS `COPY --from=${NODE_IMAGE}` outright
-# ("variable expansion is not supported for --from") and points at exactly
-# this workaround: a stage built FROM a global ARG. `deps` is already
-# FROM ${NODE_IMAGE} and already built, so this also drops a redundant
-# resolve of the same image.
-COPY --from=deps /usr/local/bin/node /usr/local/bin/node
+# Production stage: the shared runtime base plus this app's own files. Add
+# nothing here that belongs to every app (packages, users, the node binary):
+# it would ride in every deploy instead of in the base servers already hold.
+FROM ${RUNTIME_IMAGE} AS runner
 
 WORKDIR /app
 

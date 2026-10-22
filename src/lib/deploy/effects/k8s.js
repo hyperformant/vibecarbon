@@ -3,7 +3,7 @@
  *
  * The single-cluster k3s deploy is orchestrated by `deployK3s` in ../k8s/k3s.js
  * — a cohesive, internally state-gated pipeline (preflight → Pulumi up →
- * wait-ready → kubeconfig → build → sideload → applyK3sManifests) that k8s-ha
+ * wait-ready → kubeconfig → build → applyK3sManifests, which delivers) that k8s-ha
  * REUSES VERBATIM, running two copies in parallel with per-cluster
  * state/tracker/perfPrefix isolation. Cracking deployK3s into separate effects
  * would break that parallel isolation (two clusters would collide on one shared

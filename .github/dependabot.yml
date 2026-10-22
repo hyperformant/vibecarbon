@@ -120,20 +120,37 @@ updates:
   #      loki, prometheus, n8n, metabase, redis) moves in both at once; the
   #      census also fails when their tags differ.
   #   2. `js-pins`: .github/image-pins/Dockerfile, the never-built mirror of
-  #      the pins held in JS constants (socat, registry, diagnose probes, DO CSI
-  #      init, binfmt). Red until the constant named in that file's header is
-  #      updated in the same PR. alpine/socat and registry are bumped ONLY
-  #      here (every other entry ignores them): their k8s copies must equal the
-  #      JS constant, so they move together by hand.
+  #      the Docker Hub pins still held in JS constants (diagnose probes,
+  #      binfmt). Red until the constant named in that file's header is
+  #      updated in the same PR.
   #   3. `db-image`: docker/postgres-walg (postgres base, wal-g stage). Red
   #      until DB_IMAGE_TAG's -r revision and DB_IMAGE_INPUTS_SHA256 move
   #      (tests/unit/deploy/db-image-fingerprint.test.ts).
+  #   4. `node-runtime`: docker/node-runtime (node image, alpine base). Red
+  #      until NODE_RUNTIME_IMAGE's -r revision, its copy in carbon/Dockerfile
+  #      (`ARG RUNTIME_IMAGE=`) and NODE_RUNTIME_INPUTS_SHA256 move
+  #      (tests/unit/deploy/node-runtime-image-fingerprint.test.ts).
   #
-  # Not reachable by any ecosystem: the registry.k8s.io mirror digests in
-  # src/lib/images.js (re-derived with the CSI / cluster-autoscaler version,
-  # and verified by publish-images.yml on every run), and the project's own
-  # app image and our own db / carbon-autoscaler images (published by this
-  # repo's workflows; see the census allowlist). Compose overlays named
+  # OUR GHCR MIRRORS ARE NOT DEPENDABOT'S (cold-deploy-speed plan, Task 7).
+  # Every image a deploy pulls that upstream hosts on registry.k8s.io or Docker
+  # Hub is mirrored into ghcr.io/hyperformant/<name> by publish-images.yml:
+  # cluster-autoscaler, the CSI sidecars, pause, and since Task 7 traefik (on
+  # servers), docker-socket-proxy, alpine, registry, socat, alpine/k8s and
+  # k3s's own system images. Their refs pin upstream's linux/amd64 CHILD
+  # digest, which no ecosystem can propose (the mirror tag's own digest is the
+  # index the job mints), so the entries below ignore every mirror name and a
+  # bump follows the registry.k8s.io mirrors' flow: edit {tag, digest, index} in
+  # src/lib/images.js and the literal compose / k8s copies (the mirror census
+  # fails until every copy names an entry exactly), merge, and publish-images
+  # mirrors the new tag. Its weekly `mirror-upstream-drift` job lists newer
+  # upstream tags, so a release upstream is not missed. The base compose
+  # traefik (local `up`, Docker Hub's multi-arch index) stays Dependabot's;
+  # its bump goes red until TRAEFIK_MIRROR moves to the same tag.
+  #
+  # Not reachable by any ecosystem: the mirror digests above (verified by
+  # publish-images.yml on every run), and the project's own
+  # app image and our own db / carbon-autoscaler / node-runtime images
+  # (published by this repo's workflows; see the census allowlist). Compose overlays named
   # docker-compose.<a>.<b>.yml (e.g. docker-compose.n8n.prod.yml) do not match
   # Dependabot's compose filename pattern; they carry no images, and the
   # census fails if one ever gains an `image:` line.
@@ -147,19 +164,20 @@ updates:
     multi-ecosystem-group: images
     patterns: ["*"]
     ignore:
-      # Bumped only by the js-pins entry (see 2. above).
-      - dependency-name: alpine/socat
-      - dependency-name: registry
-      # alpine/k8s tags track Kubernetes minors and the backup CronJob's
-      # kubectl must stay within one minor of k3s (K3S_VERSION in
-      # src/lib/deploy/k8s/k3s.js). Patches and digest moves still come.
-      - dependency-name: alpine/k8s
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
-      # Our ghcr mirror: the manifest pins upstream's amd64 child digest
-      # (CLUSTER_AUTOSCALER_DIGEST in src/lib/images.js), not the mirror
-      # tag's index digest, so a Dependabot "update" would only break the
-      # parity guard. images.js owns this ref.
+      # Our ghcr mirrors (see OUR GHCR MIRRORS above): each manifest pins
+      # upstream's amd64 child digest, not the mirror tag's index digest, so
+      # a Dependabot "update" would only break the mirror census. images.js
+      # owns these refs.
       - dependency-name: ghcr.io/hyperformant/cluster-autoscaler
+      - dependency-name: ghcr.io/hyperformant/traefik
+      - dependency-name: ghcr.io/hyperformant/registry
+      - dependency-name: ghcr.io/hyperformant/socat
+      - dependency-name: ghcr.io/hyperformant/k8s
+      # Our node runtime base, carbon/Dockerfile's `ARG RUNTIME_IMAGE=`. It
+      # must equal NODE_RUNTIME_IMAGE byte for byte (census), so a Dependabot
+      # tag or digest move here would only break parity. images.js owns this
+      # ref; docker/node-runtime has its own entry below.
+      - dependency-name: ghcr.io/hyperformant/node-runtime
     # commit-message is group-only for multi-ecosystem entries (set below).
     labels:
       - dependencies
@@ -175,6 +193,10 @@ updates:
       - /scripts/acme-iso
     multi-ecosystem-group: images
     patterns: ["*"]
+    ignore:
+      # Our ghcr mirrors in docker-compose.prod.yml (see OUR GHCR MIRRORS).
+      - dependency-name: ghcr.io/hyperformant/traefik
+      - dependency-name: ghcr.io/hyperformant/docker-socket-proxy
     labels:
       - dependencies
 
@@ -216,6 +238,23 @@ updates:
       - dependencies
     groups:
       db-image:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /docker/node-runtime
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(docker-deps)
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      node-runtime:
         patterns: ["*"]
 
 multi-ecosystem-groups:

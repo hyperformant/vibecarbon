@@ -133,6 +133,23 @@ export function emitStateTelemetry(label, providerId) {
   );
 }
 
+/**
+ * The line a deploy prints when its state bucket is inside the provider's
+ * settle window (Ruling A′): each `upStack` then holds the state lock end to
+ * end, so an HA pair's ups serialize by design. The e2e budget reads it to
+ * skip the lock-wait and fan checks that only hold past the window.
+ *
+ * @param {string} bucket - the state bucket's name (not a secret)
+ */
+export function formatStateScopeYoung(bucket) {
+  return `[state] scope young ${bucket}`;
+}
+
+/** @param {string} bucket */
+export function emitStateScopeYoung(bucket) {
+  progressLog(formatStateScopeYoung(bucket));
+}
+
 /** Test-only. */
 export function resetStateTelemetryForTest() {
   ops.clear();

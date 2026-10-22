@@ -34,7 +34,7 @@ import {
   isHistoryWriteOnlyFailure,
 } from './state-error.js';
 import { withStateLock } from './state-lock.js';
-import { emitStateTelemetry, recordStateRetry } from './state-telemetry.js';
+import { emitStateTelemetry, recordStateOp, recordStateRetry } from './state-telemetry.js';
 
 // Re-exported so this module stays the iac layer's public surface while the
 // verb extractor lives with the classifier that depends on it — one
@@ -541,8 +541,27 @@ export async function repairVultrFirewallRuleInputs(stack) {
 /**
  * Run `pulumi up` and return the raw outputs. Streams Pulumi logs to an
  * optional `onOutput` sink so callers can forward progress to a spinner.
+ *
+ * The state-backend preparation (select, stale-lock cancel, pre-up refresh,
+ * Vultr repair) always runs under the per-bucket state lock; `upStack`
+ * decides whether `up` itself does too (state-lock.js, SCOPE).
  */
 async function upStackImpl(stackName, program, options = {}) {
+  const stack = await withStateLock(
+    resolveBackendUrl(options.s3Config, options.provider),
+    `refresh ${stackName}`,
+    () => prepareStackForUp(stackName, program, options),
+  );
+  return runUp(stack, options);
+}
+
+/**
+ * Select (or create) the stack and bring its state up to date for `up`:
+ * clear a stale update lock, refresh a populated stack, repair what the
+ * refresh poisons. Every step here reads or writes the state bucket, which is
+ * why it all sits inside one lock acquisition.
+ */
+async function prepareStackForUp(stackName, program, options) {
   const stack = await getOrCreateStack(stackName, program, options);
   // Clear any stale update lock before `up` — when a prior run aborted
   // mid-flight (Ctrl-C, scenario timeout, background-task stop), Pulumi's
@@ -605,7 +624,14 @@ async function upStackImpl(stackName, program, options = {}) {
     // refresh poisons state just as thoroughly as a complete one.
     await repairVultrFirewallRuleInputs(stack);
   }
+  return stack;
+}
 
+/**
+ * The `up` itself and its post-mutation recovery. Runs inside the state lock
+ * only when `upStack` holds the whole operation (a young state bucket).
+ */
+async function runUp(stack, options) {
   // The up path widens what counts as transient to the two fresh-bucket
   // read-after-write spellings — a 404 of the state bucket itself, and a 404 of
   // the CLI's own just-written lock blob. Both are retried in place here; see
@@ -1059,7 +1085,8 @@ export async function listStacks(options = {}) {
 
 /**
  * Public entry points for the two operations the throttle evidence points at,
- * each serialized per state bucket.
+ * each serialized per state bucket: the select always, `up` only on a young
+ * state bucket (its preparation always; see `upStack` and state-lock.js).
  *
  * Of the 40 state-backend recovery events in run 31898658781's hetzner leg, 38
  * were throttle, and 35 of those came from these two: `up` 11, and
@@ -1083,8 +1110,20 @@ export async function getOrCreateStack(stackName, program, options = {}) {
   );
 }
 
+/**
+ * `options.stateBucketYoung` sets the lock's scope (Ruling A′, state-lock.js
+ * header). `false`, the state bucket is past its provider's settle window:
+ * only the preparation in `upStackImpl` is serialized and two stacks' `up`s
+ * provision in parallel. `true`, or unstated (the safe side): the whole
+ * operation holds the lock, provisioning included.
+ */
 export async function upStack(stackName, program, options = {}) {
   try {
+    if (options.stateBucketYoung === false) {
+      // Counted here because no `up` lock label is taken to count it.
+      recordStateOp('up');
+      return await upStackImpl(stackName, program, options);
+    }
     return await withStateLock(
       resolveBackendUrl(options.s3Config, options.provider),
       `up ${stackName}`,

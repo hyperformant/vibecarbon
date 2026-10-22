@@ -170,6 +170,11 @@ export async function readLiveApexCertificate({
  * Restore the last compose-acme snapshot into the server's acme.json when the
  * server has no apex certificate. Never throws, never logs.
  *
+ * The snapshot is read and validated first, and the server is touched only
+ * when one is worth restoring: with none (a first deploy) no ssh happens, so
+ * a cold server does not pull Traefik just to learn it has no certificate.
+ * The live check still runs before any write.
+ *
  * Each piece has its own bound (`checkTimeoutMs`, `writeTimeoutMs`,
  * `s3ClientOptions` for the read); one that outlives it returns
  * RESTORE_TIMED_OUT. `restart: false` leaves a running Traefik alone.
@@ -205,18 +210,6 @@ export async function restoreComposeTls({
   if (!ip) return skip('no server address');
   if (!SAFE_PROJECT_RE.test(String(projectName ?? ''))) return skip('no valid project name');
   try {
-    const live = await readLiveApexCertificate({
-      ip,
-      sshKeyPath,
-      projectName,
-      domain,
-      timeoutMs: checkTimeoutMs,
-      deps,
-    });
-    if (live.state === 'present') return skip(LIVE_CERTIFICATE_PRESENT);
-    if (live.timedOut) return skip(RESTORE_TIMED_OUT);
-    if (live.state !== 'absent') return skip(live.reason);
-
     const key = tlsSnapshotKey({ projectName, envName, ca, format: 'compose-acme' });
     const { text, reason, timedOut } = s3ClientOptions
       ? await read(s3Config, key, { clientOptions: s3ClientOptions })
@@ -232,6 +225,20 @@ export async function restoreComposeTls({
     // Stale non-apex entries are left out of what is written.
     const body = verdict.text;
     const droppedField = verdict.dropped ? { dropped: verdict.dropped } : {};
+
+    // Only now, with a snapshot worth restoring in hand, touch the server: a
+    // brand-new server has nothing to restore, and the check would pull Traefik.
+    const live = await readLiveApexCertificate({
+      ip,
+      sshKeyPath,
+      projectName,
+      domain,
+      timeoutMs: checkTimeoutMs,
+      deps,
+    });
+    if (live.state === 'present') return skip(LIVE_CERTIFICATE_PRESENT);
+    if (live.timedOut) return skip(RESTORE_TIMED_OUT);
+    if (live.state !== 'absent') return skip(live.reason);
 
     try {
       await ssh(
@@ -294,6 +301,11 @@ export async function snapshotComposeTlsNow({ ip, sshKeyPath, projectName, deps 
 export function tlsRestoreLine(result, domain) {
   if (result.reason === LIVE_CERTIFICATE_PRESENT) {
     return 'TLS certificate already on the server; nothing to restore.';
+  }
+  // The S3 read now runs first, so a warm server that was never snapshotted
+  // lands here too: say what happens, not that something failed.
+  if (result.reason === 'no snapshot') {
+    return 'No saved TLS certificate yet; Traefik keeps the one on the server, or requests its own.';
   }
   if (!result.restored) return `TLS certificate not restored (${result.reason}).`;
   const restartNote = /did not restart/.test(result.reason)

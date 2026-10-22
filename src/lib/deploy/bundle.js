@@ -13,7 +13,6 @@ import { resolveDbImage } from '../images.js';
 import { composeStandbyScaledServices, enabledAddonNames } from '../services/standby-policy.js';
 import { DNS01_OVERRIDE_FILE, dnsChallengeEnv } from './acme.js';
 import { appStorageCredential, buildAppRuntimeEnv } from './app-runtime-env.js';
-import { registryEnsureShell } from './compose/registry-config.js';
 
 /**
  * The two compose files EVERY deployed server carries, in `-f` order.
@@ -163,17 +162,6 @@ for container_id in $(docker ps -aq --filter "label=com.docker.compose.project=$
     fi
   done
 done
-
-# 1b. Self-heal the per-server image registry (warm-redeploy layer transfer).
-# Standalone container outside the compose stack; --restart unless-stopped
-# covers reboots, this covers removal/wedge. Runs AFTER dockerhubLogin in the
-# deploy plan, so this ensure's Hub pull is authenticated even when the
-# deploy-time (pre-login) ensure was rate-limited. Additive — guarded so a
-# registry failure never breaks the rest of reconcile.
-# Emitted for EVERY compose mode and both compose-ha nodes on purpose, not
-# just the "local" mode that pushes — see registryEnsureShell()'s docblock
-# for the cost measurements and the mode-is-not-durable reasoning.
-${registryEnsureShell()}
 ${pullStep}
 # 3. Re-create containers if state differs
 #

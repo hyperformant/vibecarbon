@@ -37,6 +37,7 @@ import {
   OAUTH_CANARY_CLIENT_ID,
   runConfigCanaryChecks,
 } from '../checks/config-canary.js';
+import { checkDeployBudget, type DeployBudgetResult } from '../checks/deploy-budget.js';
 import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
@@ -612,7 +613,7 @@ async function captureFailureDiagnostics(
       // crash-looping db pod, and its FATAL went uncaptured. Each logs call
       // is `timeout`-bounded so one slow pod can't starve the rest, and the
       // section gets a larger budget. --all-containers includes init containers
-      // (walg-restore / seed-standby).
+      // (walg-restore).
       sections.push([
         `${label}: logs from crash-looping pods (--previous, all containers)`,
         safeRun(
@@ -1265,10 +1266,11 @@ export async function sweepOrphanedHetznerResources(
  * removes:
  *
  *   - k8s / k8s-ha build `10.0.1.1:5000/<projectName>:<sha>-<ts>` locally
- *     (buildLocalImage in src/lib/deploy/image.js) to sideload + push. Only the
- *     transient `localhost:<port>/…` push aliases get reaped (pushImageToLocalRegistry);
- *     the original registry-prefixed tag is kept for the Deployment and never
- *     removed. Iterating a kept rig mints a fresh timestamped tag every rebuild,
+ *     (buildLocalImage in src/lib/deploy/image.js) for the layer delta into the
+ *     master's registry. Only `localhost:<port>/…` aliases get reaped (the
+ *     retired ssh-tunnel push minted them; an operator machine that ran an older
+ *     CLI may still hold some); the original registry-prefixed tag is kept for
+ *     the Deployment and never removed. Iterating a kept rig mints a fresh timestamped tag every rebuild,
  *     so these pile up unbounded → `docker builder prune` / `docker system df`
  *     showed hundreds of `testapp-k8s-*` images (60GB+ reclaimable).
  *   - compose local builds tag `<projectName>-app:local` / `vibecarbon-local/<projectName>`.
@@ -1376,6 +1378,10 @@ export async function runLifecycle(
   let adminCreds: AdminCredentials | null = null;
   let serverIps: string[] = [];
   let sshKeyPath: string | null = null;
+  // A cold deploy's budget miss, recorded at the deploy step and thrown at the
+  // end of verify-deploy, so the first (uncalibrated) real runs still reach
+  // every downstream correctness check.
+  let deployBudgetMiss: DeployBudgetResult | null = null;
 
   // The SSH-unreachability memo is process-wide; a parallel/kept-rig run must
   // not inherit a previous scenario's dead hosts (IPs get recycled).
@@ -2502,6 +2508,12 @@ export async function runLifecycle(
             `${unexpectedFailures.length} verification(s) failed: ${failNames}\n${detailLines}`,
           );
         }
+
+        // The cold deploy's budget miss (recorded at the deploy step) fails
+        // the scenario here, once verify-deploy's own checks have run.
+        if (stepName === 'verify-deploy' && deployBudgetMiss) {
+          throw new Error(`deploy: deploy_budget: ${deployBudgetMiss.message}`);
+        }
       }),
     );
   }
@@ -3201,7 +3213,12 @@ EOF`;
         executeStep(
           'deploy',
           `vibecarbon deploy ${config.envPrefix} --${config.mode} --domain ${config.domain}`,
-          async () => {
+          async (stepId) => {
+            // Cold by the e2e db's own definition (no passing deploy of this
+            // project and env in 24 h), read before this deploy can count.
+            // Every scenario's first deploy is cold: project names are unique
+            // per run.
+            const cold = db.classifyColdWarm(config.projectName, config.envPrefix) === 'cold';
             // No --direct flag needed — direct is the default for compose
             // deploys (CI/CD is opt-in via `vibecarbon configure`). K8s ignores
             // the flag and uses its 'local' build path either way.
@@ -3297,6 +3314,23 @@ EOF`;
             if (serverIps.length === 0) {
               throw new Error(
                 'Deploy exited successfully but no server IPs found in .vibecarbon.json — deployment likely failed silently',
+              );
+            }
+
+            // Per-mode cold-deploy budgets (deploy-budget.ts): the deploy's
+            // own [perf] and [state] lines against D1's two columns, the cold
+            // image bytes and the HA lock invariants. The numbers land in
+            // e2e.db with the verdict, pass or fail.
+            if (cold) {
+              const budget = checkDeployBudget(`${result.stdout}\n${result.stderr}`, config.mode);
+              console.log(`${tag} [deploy] deploy_budget: ${budget.status} (${budget.message})`);
+              collector.recordVerifications(stepId, [budget]);
+              if (budget.status !== 'pass') {
+                deployBudgetMiss = budget;
+              }
+            } else {
+              console.log(
+                `${tag} [deploy] deploy_budget not judged: warm (a deploy of ${config.projectName}/${config.envPrefix} passed in the last 24 h)`,
               );
             }
           },

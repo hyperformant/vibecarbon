@@ -33,6 +33,11 @@
  *    with what an earlier step recorded. Its hollow shape is a missing
  *    baseline (no serial recorded, no CertificateRequest listing read): that
  *    must FAIL, never pass because there was nothing to compare.
+ *
+ * 5. DEPLOY BUDGET. tests/e2e/checks/deploy-budget.ts judges a cold deploy
+ *    from its own [perf] and [state] lines. Its hollow shape is a log without
+ *    them (VIBECARBON_PERF off, a truncated capture): that must FAIL, never
+ *    pass because no marker was over budget.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -51,6 +56,7 @@ import {
   checkAuthSignin,
   checkAuthSignup,
 } from '../../e2e/checks/app-functional.js';
+import * as deployBudget from '../../e2e/checks/deploy-budget.js';
 import {
   FORWARDAUTH_COOKIE,
   runObservabilityChecks,
@@ -682,5 +688,36 @@ describe('TLS REUSE: every check fails without its baseline', () => {
   it('every exported check in tls-reuse.ts is registered', () => {
     const exported = Object.keys(tlsReuse).filter((k) => /^check[A-Z]/.test(k));
     expect(exported.sort()).toEqual(Object.keys(TLS_REUSE_HANDLELESS).sort());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deploy budget: a log without the markers fails, never passes
+// ---------------------------------------------------------------------------
+
+const DEPLOY_BUDGET_MARKERLESS: Record<string, Array<() => VerificationResult>> = {
+  checkDeployBudget: (['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const).flatMap((mode) => [
+    () => deployBudget.checkDeployBudget('', mode),
+    () =>
+      deployBudget.checkDeployBudget(
+        '◆  Deployment to e1 complete! (1m 2s)\n[perf] deploy.iac.upStack 1000ms',
+        mode,
+      ),
+  ]),
+};
+
+describe('DEPLOY BUDGET: every check fails on a log without its markers', () => {
+  const cases = Object.entries(DEPLOY_BUDGET_MARKERLESS).flatMap(([name, runs]) =>
+    runs.map((run, i) => [`${name} #${i + 1}`, run] as const),
+  );
+
+  it.each(cases)('%s fails', (_label, run) => {
+    const r = run();
+    expect(r.status, r.errorMessage).toBe('fail');
+  });
+
+  it('every exported check in deploy-budget.ts is registered', () => {
+    const exported = Object.keys(deployBudget).filter((k) => /^check[A-Z]/.test(k));
+    expect(exported.sort()).toEqual(Object.keys(DEPLOY_BUDGET_MARKERLESS).sort());
   });
 });

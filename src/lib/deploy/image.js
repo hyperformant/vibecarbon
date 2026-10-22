@@ -1,21 +1,22 @@
 /**
- * Sideload primitives for local-first deploys.
+ * Image primitives for local-first deploys.
  *
- * Three responsibilities:
+ * Four responsibilities:
  *   1. Generate a unique local image tag (pure)
  *   2. Inspect git state (sha + dirty)
- *   3. Build + sideload to a compose-mode server (laptop → docker daemon)
+ *   3. Build the image on the operator's machine
+ *   4. Read the runtime base the Dockerfile builds FROM
  *
- * The k8s-mode sideload lives in src/lib/deploy/k8s/k3s.js (`sideloadK3s`).
- * No registry round-trip; the image goes operator → target directly.
+ * Delivery to a server, compose or k8s, is the layer delta (layer-delta.js,
+ * deliverImage).
  *
  * See the local-first-deploy-design spec §1.
  */
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { gitSafeEnv, runCommandAsync } from '../command.js';
-import { knownHostsPathForKey, SSH_CONNECTION_OPTS } from '../host-keys.js';
-import { shEscape } from '../shell.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 
 const LOCAL_REGISTRY_PREFIX = 'vibecarbon-local';
@@ -152,92 +153,26 @@ function defaultTimestamp() {
 }
 
 /**
- * Sideload a built local image to a compose-mode server.
+ * The runtime base a project's Dockerfile builds its app image FROM: the
+ * `ARG RUNTIME_IMAGE=<ref>` default (carbon/Dockerfile, NODE_RUNTIME_IMAGE in
+ * images.js). A deploy pulls exactly this ref on the server so the layer delta
+ * (layer-delta.js) ships only the app's own layers. A Dockerfile without the
+ * ARG (a customer's own) gets null: no base pull, and the delta carries every
+ * layer, which is the same algorithm.
  *
- * `set -o pipefail && docker save | gzip -1 | ssh target gunzip | docker load`
- * streams the image tarball compressed over the wire — no temp file on
- * either end, no registry. The image lands in the server's docker daemon
- * and is immediately referenceable by tag for `docker compose up`.
- *
- * gzip on the wire: Node app images compress 3-5x (most layers are JS
- * source + node_modules text), so a ~600MB save becomes ~150-200MB on
- * the wire. The K8s sideload (sideloadK3s in k3s.js) used the same trick
- * to drop sideload time from 23-29 min to 5-10 min on the operator's
- * residential upload — compose-mode missed the optimization until now.
- * `gzip -1` is universally present and dominant cost is network, not CPU.
- *
- * `pipefail` so a docker-save / gzip failure isn't masked by ssh's exit code.
- *
- * @param {{tag: string, sshTarget: string, sshKey?: string}} args
- * @returns {Promise<void>}
+ * @param {string} projectDir - Project root holding the Dockerfile.
+ * @returns {string|null}
  */
-export async function sideloadCompose({ tag, sshTarget, sshKey }) {
-  // SSH options mirror remote-build.js's wrapper + the compose deploy path:
-  //   * Host-key pinned per-env (knownHostsPathForKey), NOT /dev/null + no.
-  //     accept-new TOFU's an ephemeral/recycled Hetzner IP but rejects a
-  //     changed key for an already-pinned host (MITM on an established env
-  //     fails). GlobalKnownHostsFile=/dev/null ignores the system file; the
-  //     operator's ~/.ssh/known_hosts is never touched (a stale entry there
-  //     would otherwise reject a recycled IP — iter-perfwave4 hit this).
-  //   * ConnectTimeout=30: bound the network half of dial; sideload's own
-  //     stream is unbounded (limited by docker save throughput). Placed
-  //     BEFORE the shared opts' ConnectTimeout=10 — OpenSSH takes the FIRST
-  //     value obtained per option, so 30 wins for this long-haul stream.
-  //   * SSH_CONNECTION_OPTS supplies the rest (BatchMode, ServerAlive
-  //     keepalives, ControlMaster) from the single shared source — this
-  //     site's hand-rolled subset had silently dropped the keepalives, the
-  //     exact gap that bit the bundle upload in run 31961619204 (raw-ssh
-  //     census now pins every such site).
-  const sshFlags = ['-o', 'StrictHostKeyChecking=accept-new'];
-  if (sshKey) {
-    // shEscape the known_hosts assignment so a project dir with spaces can't
-    // split the argument in the bash -c string below.
-    sshFlags.push('-o', shEscape(`UserKnownHostsFile=${knownHostsPathForKey(sshKey)}`));
-    sshFlags.push('-o', 'GlobalKnownHostsFile=/dev/null');
-  }
-  sshFlags.push('-o', 'ConnectTimeout=30');
-  // Every path-valued shared token (ControlPath) shEscaped for the bash -c
-  // string, same rule as composeSshOptsString.
-  sshFlags.push(...SSH_CONNECTION_OPTS.map((tok) => (tok === '-o' ? tok : shEscape(tok))));
-  if (sshKey) sshFlags.unshift('-i', shEscape(sshKey));
-  const cmd = `set -o pipefail && docker save ${tag} | gzip -1 | ssh ${sshFlags.join(' ')} ${sshTarget} 'gunzip | docker load'`;
-  // Capture stdio rather than inheriting it: ssh's "Permanently added" host-
-  // key warning + `docker load`'s "Loaded image:" success line both bypass
-  // the clack gutter when inherited and print flush-left, breaking the
-  // visual flow. On success we don't need either; on failure we surface
-  // the captured stderr for debugging via the thrown Error. silent:true is
-  // required both to get the capture and because runCommandAsync only
-  // rejects (rather than resolving `false`) on nonzero exit in that mode.
+export function readRuntimeBaseRef(projectDir) {
+  let text;
   try {
-    await runCommandAsync(['bash', '-c', cmd], { silent: true });
+    text = readFileSync(join(projectDir, 'Dockerfile'), 'utf-8');
   } catch (err) {
-    const stderr = err.stderr?.toString().trim() || '';
-    const stdout = err.stdout?.toString().trim() || '';
-    // Surface whatever signal the operator can act on: child stderr first
-    // (real ssh / docker errors), then stdout, then the wrapping error's
-    // message (preserves "Connection refused" when runCommandAsync's own
-    // error string is the only thing we have).
-    const detail = [stderr, stdout, err.message].filter(Boolean).join('\n').trim();
-    // An SSH connect timeout/refusal on port 22 is almost always the operator
-    // allowlist (SSH is firewalled to an IP allowlist while the app's 80/443
-    // stay open), not a dead server — point there instead of leaving a raw
-    // "Connection timed out" that sends the operator debugging their network.
-    const host = sshTarget.split('@').pop();
-    const looksLikeSshBlocked =
-      /connect to host .* port 22|Connection timed out|Connection refused|Operation timed out|No route to host/i.test(
-        detail,
-      );
-    const hint = looksLikeSshBlocked
-      ? `, could not reach ${host} over SSH (port 22). This usually means your ` +
-        `current IP isn't on the operator allowlist (SSH is locked to an allowlist; ` +
-        `the app's 80/443 stay open, so the server is likely fine). Run ` +
-        `\`vibecarbon access add <your-cidr>\` to add it, or check your connection / ` +
-        `an outbound port-22 block.`
-      : '';
-    const wrapped = new Error(
-      `sideloadCompose failed (exit ${err.status ?? '?'}): ${detail}${hint}`,
-    );
-    wrapped.cause = err;
-    throw wrapped;
+    if (err?.code === 'ENOENT') return null;
+    throw err;
   }
+  // A Dockerfile may quote the default (`ARG RUNTIME_IMAGE="ref"`); the ref is
+  // what the build resolved, without them.
+  const m = /^ARG RUNTIME_IMAGE=(?:"([^"\s]+)"|'([^'\s]+)'|([^"'\s]\S*))\s*$/m.exec(text);
+  return m ? (m[1] ?? m[2] ?? m[3]) : null;
 }

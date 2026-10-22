@@ -88,8 +88,10 @@ export function ciAvailable(cwd = process.cwd()) {
  * Returns one of: 'local' | 'direct' | 'push'.
  *
  *   - 'local'  — k3s + compose default: build the image on the operator's
- *                machine, sideload the tarball via `docker save | ssh
- *                docker load`. No registry round-trip. Compose runs the
+ *                machine and ship it to the server directly (compose: the
+ *                layer delta, deploy/layer-delta.js, into the server or the
+ *                k3s master's registry). No
+ *                registry round-trip. Compose runs the
  *                local build in parallel with `iac.upStack` (Pulumi VPS
  *                provisioning) so the build cost is hidden behind the
  *                ~109s VM-provisioning window.

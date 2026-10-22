@@ -108,7 +108,7 @@ You have memory at `.claude/agent-memory/e2e-perf-optimizer/`. Its contents pers
 Use it to record:
 - **Baseline numbers per scenario, broken down by step + cold/warm**, with the `runs.git_sha` they came from. So a future run can be compared.
 - **Optimizations attempted that didn't pan out**, with the reason (e.g. "tried parallel sideload to all 6 k8s-ha nodes — Hetzner API rate-limited beyond 4 concurrent SSH sessions; reverted").
-- **Stage definitions and what they mean** (e.g. "`deploy.image.directBuild` includes `DOCKER_HOST=ssh:` build only — does not include the subsequent transferImageBetweenServers; that's `scale.sideloadImage`").
+- **Stage definitions and what they mean** (e.g. "`deploy.image.directBuild` includes `DOCKER_HOST=ssh:` build only; a local-mode compose delivery is `deploy.image.transfer` (the layer delta, `deploy.image.delta`), with the server's base pull as `deploy.image.basePull`").
 - **Performance targets** the user has stated (e.g. "warm compose redeploy < 3 min").
 
 Don't save:

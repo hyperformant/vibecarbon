@@ -35,6 +35,7 @@ import {
   restoreComposeTls,
   restoreFailoverTls,
 } from '../../../src/lib/deploy/compose/tls-restore.js';
+import { acmeJson } from './_tls-fixtures.ts';
 
 describe('policy constants', () => {
   it('pins the disarm env var name and the reserved-.invalid sentinel URL', () => {
@@ -308,10 +309,11 @@ describe('restoreFailoverTls (the restore armComposeAcme runs on the promoted no
           ),
         ),
     );
-    const read = vi.fn();
+    // A snapshot exists (it is read first), so the live check is what hangs.
+    const read = vi.fn(async () => ({ text: acmeJson({}) }));
     const pending = restoreFailoverTls({
       ...base,
-      envConfig: envConfig({ tls: { ca: 'prod' } }),
+      envConfig: envConfig({ tls: { ca: 'staging' } }),
       deps: {
         resolveS3: async () => S3,
         restore: (a: Parameters<typeof restoreComposeTls>[0]) =>
@@ -321,7 +323,7 @@ describe('restoreFailoverTls (the restore armComposeAcme runs on the promoted no
     await vi.advanceTimersByTimeAsync(30_000);
     const r = await pending;
     expect(r).toMatchObject({ restored: false, reason: 'restore timed out' });
-    expect(read).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(1);
   });
 
   it('a credential lookup that throws degrades to re-issuance, never a throw', async () => {

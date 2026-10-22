@@ -133,7 +133,6 @@ describe('state-resumed k8s deploy keeps the provider StorageClass', () => {
         projectName: 'proj',
         dbImageTag: 'ghcr.io/org/postgres:17-walg1',
         storageClass: HetznerProvider.K8S_STORAGE_CLASS,
-        dbPrivateIp: '10.0.1.2',
         walArchiveSha: 'abc',
       }),
       undefined,

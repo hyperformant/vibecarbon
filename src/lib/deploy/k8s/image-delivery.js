@@ -25,12 +25,15 @@ export function standbyImageRef({ primaryRef, standbyMasterPrivateIp }) {
   return `${standbyMasterPrivateIp}:5000/${repoTag}`;
 }
 
-/** What a deploy does about the app image, by HA role. Only a standby copies. */
+/**
+ * What a deploy does about the app image, by HA role. The operator builds it
+ * and delivers it once (`deliver`: a layer delta into the master's registry,
+ * which every node pulls from). A k8s-ha standby does neither: it copies the
+ * primary's image into its own registry.
+ */
 export function planImageDelivery({ role } = {}) {
-  if (role === 'standby') {
-    return { build: false, sideload: false, registryPush: false, awaitPeerImage: true };
-  }
-  return { build: true, sideload: true, registryPush: true, awaitPeerImage: false };
+  if (role === 'standby') return { build: false, deliver: false, awaitPeerImage: true };
+  return { build: true, deliver: true, awaitPeerImage: false };
 }
 
 /** Manifest media types a registry may serve a tag as; the digest HEAD must accept all. */

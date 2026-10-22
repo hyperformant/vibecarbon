@@ -4,7 +4,7 @@
  *
  * What this file pins:
  *   - `kubectl kustomize k8s/base` renders the StatefulSet with its image
- *     placeholder, both init containers (walg-restore, seed-standby), the
+ *     placeholder, its walg-restore init container, the
  *     `data` volumeClaimTemplate with the StorageClass placeholder, and the
  *     dedicated database-node placement, under the names the CLI's kubectl
  *     calls use (src/lib/deploy/db-workload.js);
@@ -76,7 +76,6 @@ const values = (overrides: Record<string, unknown> = {}) =>
     },
     backupBucketName: 'proj-backups',
     walgRole: 'primary',
-    dbPrivateIp: '10.0.1.2',
     storageClass: 'hcloud-volumes',
     walArchiveSha: '0123456789abcdef',
     ...overrides,
@@ -116,13 +115,13 @@ describe('k8s/base renders the db StatefulSet', () => {
     expect(statusRoute).toContain("'vibecarbon-db': 'PostgreSQL'");
   });
 
-  it('runs the db image placeholder in the container and both inits', () => {
+  it('runs the db image placeholder in the container and its walg-restore init', () => {
     expect(container.image).toBe('{{DB_IMAGE}}:{{DB_IMAGE_TAG}}');
-    expect(pod.initContainers.map((c: Doc) => c.name)).toEqual(['walg-restore', 'seed-standby']);
+    expect(pod.initContainers.map((c: Doc) => c.name)).toEqual(['walg-restore']);
     for (const init of pod.initContainers) expect(init.image).toBe('{{DB_IMAGE}}:{{DB_IMAGE_TAG}}');
   });
 
-  it('keeps PGDATA one level below the volume root, and the seed init on the raw volume', () => {
+  it('keeps PGDATA one level below the volume root', () => {
     const pgdata = container.volumeMounts.find(
       (m: Doc) => m.mountPath === '/var/lib/postgresql/data',
     );
@@ -133,8 +132,6 @@ describe('k8s/base renders the db StatefulSet', () => {
     });
     const restore = pod.initContainers.find((c: Doc) => c.name === 'walg-restore');
     expect(restore.volumeMounts).toContainEqual(pgdata);
-    const seed = pod.initContainers.find((c: Doc) => c.name === 'seed-standby');
-    expect(seed.volumeMounts).toContainEqual({ name: 'data', mountPath: '/seed-volume' });
   });
 
   it('claims the provider StorageClass through a placeholder, never the cluster default', () => {
@@ -272,15 +269,8 @@ describe('buildDbManifestValues', () => {
     expect(values({ walgRole: 'standby' }).WALG_ROLE).toBe('standby');
   });
 
-  it('renders the relay the standby seed init dials: the cluster’s own db node + gateway port', () => {
-    const v = values({ dbPrivateIp: '10.10.0.7' });
-    expect(v.REPL_RELAY_HOST).toBe('10.10.0.7');
-    expect(v.REPL_RELAY_PORT).toBe('15433');
-  });
-
-  it('refuses to render without an image, a db node IP or a StorageClass', () => {
+  it('refuses to render without an image or a StorageClass', () => {
     expect(() => values({ dbImageTag: '' })).toThrow(/dbImageTag is required/);
-    expect(() => values({ dbPrivateIp: undefined })).toThrow(/dbPrivateIp is required/);
     expect(() => values({ storageClass: '' })).toThrow(/storageClass/);
   });
 });

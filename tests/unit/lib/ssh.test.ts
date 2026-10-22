@@ -504,9 +504,11 @@ describe('SSH_TUNNEL_NO_MUX_OPTS — port-forward tunnels bypass multiplexing', 
         }
       }
     }
-    // The registry push tunnel (the compose admin tunnel went with the
-    // external auth service). Floor of 1 keeps the census from passing empty.
-    expect(tunnels).toBeGreaterThanOrEqual(1);
+    // None is left: the compose admin tunnel went with the external auth
+    // service and the k8s registry push tunnel with registry-push.js (every
+    // image now ships by layer delta over one plain ssh stdin). An exact count,
+    // so a new tunnel lands here and is checked above, not silently.
+    expect(tunnels).toBe(0);
   });
 
   it('the opt-out really overrides: OpenSSH takes the FIRST -o value, so it must PRECEDE the shared opts', async () => {
@@ -562,8 +564,10 @@ describe('SSH_TUNNEL_NO_MUX_OPTS — port-forward tunnels bypass multiplexing', 
         }
       }
     }
-    // The registry push tunnel (the compose admin tunnel went with the
-    // external auth service). Floor of 1 keeps the census from passing empty.
-    expect(tunnels).toBeGreaterThanOrEqual(1);
+    // None is left: the compose admin tunnel went with the external auth
+    // service and the k8s registry push tunnel with registry-push.js (every
+    // image now ships by layer delta over one plain ssh stdin). An exact count,
+    // so a new tunnel lands here and is checked above, not silently.
+    expect(tunnels).toBe(0);
   });
 });

@@ -15,6 +15,7 @@ import { loadProjectConfig, registerProject, updateProjectConfig } from '../conf
 import { writeLogDetail } from '../deploy-logger.js';
 import { getDnsProvider, hasAutomatedDns, operatorConfigForDns } from '../dns-provider.js';
 import { clearDestroyedRecord } from '../env-identity.js';
+import { emitStateScopeYoung } from '../iac/state-telemetry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { ensureOperatorIpAccess } from '../operator-ip.js';
 import { perfAsync, perfTimer } from '../perf.js';
@@ -47,7 +48,12 @@ import {
 } from './app-storage-credential.js';
 import { backupFenceWarning, recordBackupFence, writeK8sBackupFence } from './backup-fence.js';
 import { recordDeployedLineage } from './backup-lineage.js';
-import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
+import {
+  bucketSettleNote,
+  readStateBucketYoung,
+  settleWindowFor,
+  storageSettleStatus,
+} from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
@@ -862,6 +868,9 @@ export async function executeDeployment(args, gatheredConfig) {
   // reached), the process 'exit' handler forces a non-zero code. markDeployCompleted()
   // is only reached after the terminal config write at the end of this fn.
   armDeployCompletionGuard();
+  // The whole deploy, start to success outro: the e2e cold-deploy budgets
+  // (tests/e2e/checks/deploy-budget.ts) read it, minus the TLS first look.
+  const deployTotalTimer = perfTimer('deploy.total');
   const {
     projectConfig,
     envConfig,
@@ -1386,6 +1395,23 @@ export async function executeDeployment(args, gatheredConfig) {
   // .vibecarbon.json so scale / failover / destroy resolve the same backend.
   s3Config.stateBucket = s3Result?.stateBucket || stateBucket;
 
+  // The state lock's scope for an HA pair's `up`s (Ruling A′, lib/iac/
+  // state-lock.js): one read of the state bucket's creation time, and only on
+  // a provider with a non-zero settle window. Started here so it runs beside
+  // the image and restore-point work, and awaited where the tier ctx is built.
+  // Never rejects: an unreadable age answers young.
+  const stateBucketYoungRead = readStateBucketYoung({
+    providerId: providerIdFor(envConfig),
+    createProvider: () =>
+      getObjectStorageProvider(
+        providerIdFor(envConfig),
+        s3Config.accessKey,
+        s3Config.secretKey,
+        s3Config.stateBucketRegion ?? s3Config.region,
+      ),
+    bucket: s3Config.stateBucket,
+  });
+
   // DR (`deploy -restore latest|<base>|<ISO-8601>`, k8s tiers): resolve the
   // exact base backup now, from the stop sentinels in the bucket and prefix
   // the db pod's wal-g reads, before anything is minted or provisioned. No
@@ -1531,12 +1557,13 @@ export async function executeDeployment(args, gatheredConfig) {
   // --- STEP 2: Image Resolve ---
   // resolveBuildMode (ci-setup.js) returns one of — see also transferImage
   // in effects/index.js, which must stay in sync with these descriptions:
-  //   'local'  — build the app image on the operator's machine, then sideload
-  //              it to the server (docker save | gzip | ssh | docker load) —
-  //              the FULL image crosses the wire each deploy. The compose
-  //              default when local docker is present (the build runs in
-  //              parallel behind VPS provisioning); also the k8s/k3s path
-  //              (deployK3s builds + sideloads + applies manifests inline).
+  //   'local'  — build the app image on the operator's machine. Compose
+  //              sends it by layer delta (deliverImage): the server pulls the
+  //              runtime base itself and only the app's own layers cross the
+  //              wire. The compose default when local docker is present (the
+  //              build runs in parallel behind VPS provisioning); also the
+  //              k8s/k3s path (deployK3s builds, delivers the delta to the
+  //              master's registry and applies manifests inline).
   //   'direct' — build ON the server via DOCKER_HOST=ssh:// (buildRemote);
   //              only the build context (source) transfers, no image. Compose
   //              fallback when local docker is ABSENT, or forced with -direct.
@@ -1623,7 +1650,7 @@ export async function executeDeployment(args, gatheredConfig) {
       isLocal: true,
     });
   } else if (buildMode === 'local') {
-    // K8s 'local' build mode: deployK3s handles the build + sideload +
+    // K8s 'local' build mode: deployK3s handles the build + delivery +
     // manifest apply inline. No CI image to wait for; stub the
     // image-ready contract so downstream code sees a deterministic shape.
     imageReadyPromise = Promise.resolve({
@@ -1778,6 +1805,13 @@ export async function executeDeployment(args, gatheredConfig) {
           standby: { stack: envConfig.ha.standby.stack, region: envConfig.ha.standby?.region },
         }
       : null;
+  const stateBucketYoung = await stateBucketYoungRead;
+  if (stateBucketYoung) {
+    emitStateScopeYoung(s3Config.stateBucket);
+    writeLogDetail(
+      `# state bucket ${s3Config.stateBucket} is inside its settle window: each Pulumi up holds the state lock end to end`,
+    );
+  }
   const deploymentConfig = {
     projectName: projectConfig.projectName,
     environment: config.environment,
@@ -1817,6 +1851,7 @@ export async function executeDeployment(args, gatheredConfig) {
     imageReadyPromise,
     tracker,
     state,
+    stateBucketYoung,
   };
 
   const deployCtx = {
@@ -1846,6 +1881,7 @@ export async function executeDeployment(args, gatheredConfig) {
     isComposeLocal,
     localImageTag,
     composeLocalBuildPromise,
+    stateBucketYoung,
   };
 
   // All four tiers are now plan-driven: planDeploy(tier) → runPlan → EFFECTS.
@@ -2065,7 +2101,7 @@ export async function executeDeployment(args, gatheredConfig) {
     {
       const kubeconfigPath = join(process.cwd(), '.vibecarbon', `kubeconfig-${environment}`);
       const masterIp = deployResult.primary?.masterIp || deployResult.masterIp;
-      p.log.success('Local-first deploy complete. App is sideloaded + running on the cluster.');
+      p.log.success('Local-first deploy complete. App is delivered + running on the cluster.');
       p.note(
         formatCommandNote([
           `Kubeconfig:  ${kubeconfigPath}`,
@@ -2488,7 +2524,9 @@ export async function executeDeployment(args, gatheredConfig) {
   // it never waits for the bucket to settle (R5).
   let appBucketFinal;
   try {
-    appBucketFinal = await appBucketFinalize.finish(p.log);
+    appBucketFinal = await perfAsync('deploy.storage.finish', () =>
+      appBucketFinalize.finish(p.log),
+    );
   } catch (err) {
     p.log.error(`App storage key: ${err.message}`);
     writeLogDetail(`# app storage finalize error detail: ${err?.stack || err}`);
@@ -2773,6 +2811,7 @@ export async function executeDeployment(args, gatheredConfig) {
   });
 
   const { formatted: timeStr } = tracker.finish();
+  deployTotalTimer.end();
   p.log.success(`Deployment to ${c.bold(environment)} complete! ${c.dim(`(${timeStr})`)}`);
   p.note(
     formatCommandNote(

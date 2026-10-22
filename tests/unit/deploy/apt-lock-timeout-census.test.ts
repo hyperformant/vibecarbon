@@ -105,7 +105,7 @@ describe('apt lock-timeout census', () => {
   it('finds the whole known class, so the census cannot pass vacuously', () => {
     const sites = aptSites();
     // wireguard.js (2) + apt.js helper (1) + 4 cloud-init programs (8)
-    // + 6 k3s init scripts (12) + the exempt Dockerfile (2).
+    // + 6 k3s init scripts (12). The db Dockerfile that used to add 2 is gone.
     expect(sites.length).toBeGreaterThanOrEqual(20);
 
     // The three groups must each still be represented — a refactor that moves
@@ -171,9 +171,9 @@ describe('outer ssh timeouts outlast the inner apt lock budget', () => {
   // lock-wait while apt was lawfully inside its 300s window (reproduced
   // three times on vultr restore re-deploys, 2026-09-01/02 — the re-deploy
   // reaches WG setup while first-boot unattended-upgrades still holds
-  // dpkg). Same meta-class as the seed-standby-vs-helm-wait and
-  // cloud-init-budget bounds: an inner budget exceeding its outer timeout
-  // is a bound that does not exist.
+  // dpkg). Same meta-class as the cloud-init-budget bound (and the retired
+  // first-boot standby seed's init-container-vs-helm-wait bound): an inner
+  // budget exceeding its outer timeout is a bound that does not exist.
   it('every file mixing sshRun with aptGet passes a timeout derived from the budget', () => {
     const files = execFileSyncLike();
     for (const rel of files) {

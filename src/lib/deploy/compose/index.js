@@ -15,7 +15,9 @@ import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-
 import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
+import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
 import { perfAsync, perfTimer } from '../../perf.js';
+import { redactCredentials } from '../../redact-credentials.js';
 import { pollUntil } from '../../retry.js';
 import { shEscape } from '../../shell.js';
 import {
@@ -647,54 +649,6 @@ export function isLocalOnlyImageTag(imageRef) {
 }
 
 /**
- * Distribute a locally-built Docker image from one server's daemon to another
- * via an SSH-piped `docker save | docker load`.
- *
- * Direct-mode deploys build the image into a single server's local Docker
- * daemon (via `DOCKER_HOST=ssh://<source>`). Multi-server scenarios (HA
- * standby, compose-scale's blue-green new VM) need that image on the other
- * servers before reconcile.sh runs `docker compose up -d` — otherwise compose
- * tries to `docker pull <local-tag>`, which is not a registry path, and fails
- * with `pull access denied`.
- *
- * The pure SSH-pipe approach avoids any temp-file or scp intermediate: stdout
- * of `docker save` on the source streams directly into `docker load` on the
- * destination. For a 600MB image across hel1↔nbg1 this typically lands in
- * 30-60s; we budget 10 minutes (large images + slow inter-DC links).
- *
- * No-op (returns without erroring) when imageRef looks like a registry path,
- * since `docker compose pull` will already handle those.
- *
- * @param {string} sourceIp - Server that already has the image in its daemon
- * @param {string} destIp   - Server that needs the image
- * @param {string} sshKeyPath
- * @param {string} imageRef - Tag to transfer (e.g. `<project>-app:local`)
- * @returns {Promise<void>}
- */
-export async function transferImageBetweenServers(sourceIp, destIp, sshKeyPath, imageRef) {
-  if (!isLocalOnlyImageTag(imageRef)) {
-    // Registry-path image — let `docker compose pull` handle it.
-    return;
-  }
-  if (sourceIp === destIp) return;
-  // shEscape the imageRef so a future tag with shell metacharacters (':',
-  // '@', '/' are all fine; we still escape for defense-in-depth) can't
-  // break out of `docker save`. The other tokens (ip, sshKeyPath) are
-  // controlled by the deploy code, not user input.
-  // gzip on the wire — same trick as sideloadCompose / sideloadK3s. Node
-  // images compress 3-5x; without gzip a ~600MB save streams uncompressed
-  // across two regions on top of the operator's residential upload, which
-  // risks tripping the 600s timeout under load.
-  const sshOpts = composeSshOptsString(sshKeyPath);
-  const saveCmd = `ssh ${sshOpts} -i ${shEscape(sshKeyPath)} root@${sourceIp} docker save ${shEscape(imageRef)}`;
-  const loadCmd = `ssh ${sshOpts} -i ${shEscape(sshKeyPath)} root@${destIp} 'gunzip | docker load'`;
-  await runCommandAsync(['bash', '-c', `set -o pipefail && ${saveCmd} | gzip -1 | ${loadCmd}`], {
-    silent: true,
-    timeout: 600_000,
-  });
-}
-
-/**
  * Wait for Docker daemon to be ready on a remote server.
  *
  * On Hetzner docker-ce VPSes Docker is already running once cloud-init
@@ -1122,6 +1076,34 @@ export async function pullComposeImages(ip, sshKeyPath, projectName, options = {
         `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`,
       { timeout: 600_000 },
     ),
+  ).catch((err) => {
+    throw stackPullError(ip, err);
+  });
+}
+
+/** How much of the pull's output a failure quotes: enough for the failing images and docker's reason. */
+const PULL_OUTPUT_TAIL_LINES = 20;
+
+/**
+ * The pull's own words, not the ssh command line. The remote command ends in
+ * `2>&1`, so docker's output (which image, and why: rate limit, denied, DNS)
+ * is in the error's stdout while its message is only `Command failed: ssh …`.
+ * Quotes the last lines, credential-shaped values masked, with the next step.
+ */
+function stackPullError(ip, err) {
+  const tail = String(err?.stdout ?? '')
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter(Boolean)
+    .slice(-PULL_OUTPUT_TAIL_LINES)
+    .map(redactCredentials);
+  const detail = tail.length ? tail.join('\n') : String(err?.message ?? err);
+  return new Error(
+    `stack image pull failed on ${ip}:\n${detail}\n` +
+      'The images above failed to pull; set Docker Hub credentials (dockerhub-login) or retry. ' +
+      `If one is a ${K8S_MIRROR_ORG} mirror, its package may still be private: servers pull ` +
+      `mirrors without credentials, so these packages must be public: ${mirroredPackageNames().join(', ')}.`,
+    { cause: err },
   );
 }
 

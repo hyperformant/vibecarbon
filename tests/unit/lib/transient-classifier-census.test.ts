@@ -30,9 +30,8 @@
  * Accepted limits (mirrors shared-helper-consumers.test.ts): a classifier
  * whose identifier avoids transient/retryable vocabulary AND whose pattern
  * carries fewer than two canonical transient wordings escapes detection.
- * Known deliberate instances: WALG_STALE_STORAGE_PATTERN (stale-storage
- * wordings, walg-staleness.js) and PUSH_PERMANENT_PATTERN (auth/manifest
- * wordings, registry-push.js) — both domain-specific by construction. A new
+ * Known deliberate instance: WALG_STALE_STORAGE_PATTERN (stale-storage
+ * wordings, walg-staleness.js), domain-specific by construction. A new
  * escape needs a reviewer to miss all three detectors at once; the positive
  * controls at the bottom keep the detectors themselves honest.
  *
@@ -243,12 +242,6 @@ const REGISTRY: RegistryRow[] = [
     domain: 'delegating',
     notes:
       'Flag-driven: retries unless the thrower stamped walgRetryable=false (NON_RETRYABLE_CODES).',
-  },
-  {
-    file: 'src/lib/deploy/registry-push.js',
-    name: 'isTransient@1',
-    domain: 'delegating',
-    notes: 'Negation of PUSH_PERMANENT_PATTERN (auth/manifest errors terminal; all else retries).',
   },
 ];
 

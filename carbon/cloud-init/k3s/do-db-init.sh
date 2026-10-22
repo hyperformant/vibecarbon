@@ -94,6 +94,7 @@ mirrors:
   "${master_ip}:5000":
     endpoint:
       - "http://${master_ip}:5000"
+# @include _k3s-system-image-mirror.yaml
 REGEOF
 
 # Wait for master k3s API to be ready before joining (private IP -- see
@@ -135,6 +136,7 @@ fi
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" K3S_URL="https://${master_ip}:6443" K3S_TOKEN="${k3s_token}" sh -s - agent \
+      --disable-default-registry-endpoint \
       --node-ip "$PRIVATE_IP" \
       --node-external-ip "$PUBLIC_IP" \
       --flannel-iface "eth1" \

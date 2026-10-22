@@ -12,7 +12,8 @@ import { buildReplicationOverlay, SOCAT_IMAGE } from '../../../src/lib/deploy/co
  * (implicit :latest) with imagePullPolicy/pull behaviour that never re-pulls,
  * so each node froze on whatever :latest meant at its first pull and two nodes
  * in the same pair could run different socat builds. Both now pin the same
- * tag AND multi-arch index digest.
+ * tag AND digest, on our ghcr mirror (upstream's amd64 child; Docker Hub's
+ * anonymous rate limit never reaches a deploy).
  */
 
 const K8S_MANIFEST = fileURLToPath(
@@ -20,12 +21,14 @@ const K8S_MANIFEST = fileURLToPath(
 );
 
 function k8sSocatRef(): string {
-  const m = readFileSync(K8S_MANIFEST, 'utf8').match(/image:\s*(alpine\/socat:[^\s]+)/);
-  if (!m) throw new Error('no pinned alpine/socat image found in repl-gateway.yaml');
+  const m = readFileSync(K8S_MANIFEST, 'utf8').match(
+    /image:\s*(ghcr\.io\/hyperformant\/socat:[^\s]+)/,
+  );
+  if (!m) throw new Error('no pinned socat mirror image found in repl-gateway.yaml');
   return m[1];
 }
 
-const PINNED_SOCAT = /^alpine\/socat:\d+\.\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
+const PINNED_SOCAT = /^ghcr\.io\/hyperformant\/socat:\d+\.\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
 
 describe('replication gateway socat pin', () => {
   it('compose overlay pins an explicit socat tag and digest', () => {
@@ -33,7 +36,7 @@ describe('replication gateway socat pin', () => {
     expect(SOCAT_IMAGE).toMatch(PINNED_SOCAT);
     expect(yaml).toContain(`image: ${SOCAT_IMAGE}`);
     // Never the bare/implicit-latest form that caused the drift.
-    expect(yaml).not.toMatch(/image:\s*alpine\/socat\s*$/m);
+    expect(yaml).not.toMatch(/image:\s*(alpine\/)?socat\s*$/m);
   });
 
   it('k8s repl-gateway pins an explicit socat tag and digest', () => {

@@ -113,7 +113,7 @@ describe('planDeploy(compose)', () => {
 
 // The k8s (single-cluster) deploy plan wraps `deployK3s` as ONE step. deployK3s
 // is a cohesive, internally state-gated pipeline (Pulumi up → wait-ready →
-// kubeconfig → build → sideload → applyK3sManifests) that k8s-ha REUSES
+// kubeconfig → build → applyK3sManifests, which delivers) that k8s-ha REUSES
 // verbatim, running two copies in parallel with per-cluster state/tracker
 // isolation. Cracking it into separate effects would break that parallel
 // isolation (two clusters colliding on one ctx) and risk drift on a hardened

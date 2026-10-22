@@ -17,7 +17,7 @@
  *   - deploy-side dbHostPort recreate  (src/lib/deploy/k8s/ha/index.js)
  *   - failover/restore-side reseed boot (src/lib/deploy/replication.js,
  *     whose SSH client timeout must stay ABOVE the kubectl budget —
- *     reseed-standby.test.ts pins that invariant with the numbers)
+ *     tests/unit/failover/reseed-standby.test.ts pins that invariant with the numbers)
  * Deliberately NOT members: the postgres-dependent Deployment rollout
  * waits (no PVCs — nothing attaches; best-effort ignoreError) and the
  * k3s.js cluster rollout machinery (its own retry wrapper and budgets).

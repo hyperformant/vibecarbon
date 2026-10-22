@@ -6,10 +6,12 @@ import { deliverAppImage } from '../../../src/lib/deploy/k8s/k3s.js';
 import { StateTracker } from '../../../src/lib/deploy/state.js';
 
 /**
- * A k8s-ha standby takes the primary's app image by copy: it never builds,
- * sideloads or pushes its own. deliverAppImage is the image step deployK3s
- * runs, extracted with injectable deps because deployK3s itself can't be
- * driven in a unit test.
+ * A k8s-ha standby takes the primary's app image by copy: it never builds or
+ * delivers its own. deliverAppImage is the build step deployK3s runs,
+ * extracted with injectable deps because deployK3s itself can't be driven in a
+ * unit test. It only builds: the one delivery to the master's registry runs in
+ * applyK3sManifests (k8s-image-delivery-order.test.ts), and no node gets the
+ * image from the operator any more.
  */
 function harness(role?: 'primary' | 'standby', extra: Record<string, unknown> = {}) {
   // StateTracker writes under process.cwd()/.vibecarbon (state.js:26).
@@ -19,7 +21,6 @@ function harness(role?: 'primary' | 'standby', extra: Record<string, unknown> = 
     gitSha: 'abc',
     isDirty: false,
   }));
-  const sideloadK3s = vi.fn(async () => {});
   const buildK3sBuildInputs = vi.fn(() => ({
     projectName: 'quorum',
     masterPrivateIp: '10.0.1.1',
@@ -34,28 +35,24 @@ function harness(role?: 'primary' | 'standby', extra: Record<string, unknown> = 
     projectDir: '/p',
     projectName: 'quorum',
     masterPrivateIp: '10.0.1.1',
-    sshTargets: ['root@m', 'root@d'],
-    privateKeyPath: '/k',
-    khPath: '/kh',
     perfPrefix: `k3s.${role ?? 'x'}`,
     spinner: { start() {}, stop() {} },
-    deps: { buildAppImage, sideloadK3s, buildK3sBuildInputs },
+    deps: { buildAppImage, buildK3sBuildInputs },
     ...extra,
   };
-  return { args, buildAppImage, sideloadK3s, buildK3sBuildInputs, onImageBuilt };
+  return { args, buildAppImage, buildK3sBuildInputs, onImageBuilt };
 }
 
 describe('deliverAppImage', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('standby: no build, no sideload, the peer ref re-prefixed', async () => {
+  it('standby: no build, the peer ref re-prefixed', async () => {
     const h = harness('standby', {
       masterPrivateIp: '10.120.0.3',
       peerImageRef: Promise.resolve('10.110.0.2:5000/quorum:t1'),
     });
     await expect(deliverAppImage(h.args)).resolves.toBe('10.120.0.3:5000/quorum:t1');
     expect(h.buildAppImage).not.toHaveBeenCalled();
-    expect(h.sideloadK3s).not.toHaveBeenCalled();
     expect(h.onImageBuilt).not.toHaveBeenCalled();
   });
 
@@ -85,10 +82,9 @@ describe('deliverAppImage', () => {
     );
   });
 
-  it('primary: build, sideload, onImageBuilt once with the built tag; a warm rerun still reports the tag', async () => {
+  it('primary: build, onImageBuilt once with the built tag; a warm rerun still reports the tag', async () => {
     const h = harness('primary');
     await expect(deliverAppImage(h.args)).resolves.toBe('10.0.1.1:5000/quorum:built');
-    expect(h.sideloadK3s).toHaveBeenCalledTimes(1);
     expect(h.buildK3sBuildInputs).toHaveBeenCalledWith(
       expect.objectContaining({
         projectDir: '/p',
@@ -107,6 +103,12 @@ describe('deliverAppImage', () => {
     const h = harness(undefined, { onImageBuilt: undefined });
     await expect(deliverAppImage(h.args)).resolves.toBe('10.0.1.1:5000/quorum:built');
     expect(h.buildAppImage).toHaveBeenCalledTimes(1);
-    expect(h.sideloadK3s).toHaveBeenCalledTimes(1);
+  });
+
+  it('primary: records no per-node sideload step', async () => {
+    const h = harness('primary');
+    const state = h.args.state as InstanceType<typeof StateTracker>;
+    await deliverAppImage(h.args);
+    expect(state.state.steps['k3s-sideload']).toBeUndefined();
   });
 });

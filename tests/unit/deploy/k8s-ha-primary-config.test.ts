@@ -47,9 +47,11 @@ describe('fan-out chaining + streaming fast-path', () => {
     'utf-8',
   );
 
-  it('earlyPrep chains transport → primary completion → primary config, opportunistically', () => {
-    const prep = effects.slice(effects.indexOf('const earlyPrep'));
-    expect(prep).toMatch(/prepareReplicationTransport\([\s\S]+?configurePrimaryForReplication\(/);
+  it('early prep chains transport → primary completion → primary config, opportunistically', () => {
+    const prep = effects.slice(effects.indexOf('const transportPrep'));
+    expect(prep).toMatch(
+      /prepareReplicationTransport\([\s\S]+?const primaryConfig = transportPrep[\s\S]+?await primaryPromise;[\s\S]+?configurePrimaryForReplication\(/,
+    );
     expect(effects).toMatch(/ctx\.primaryReplicationConfigured/);
   });
 

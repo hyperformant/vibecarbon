@@ -375,7 +375,6 @@ describe('(c) nothing sets WALG_S3_PREFIX but walg-env.sh', () => {
       dbImageTag: 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r2',
       s3Config: { bucket: 'b', walgPrefix: 'backups/proj/prod/walg', endpoint: 'e', region: 'r' },
       backupBucketName: 'proj-backups',
-      dbPrivateIp: '10.0.1.2',
       storageClass: 'hcloud-volumes',
       walArchiveSha: 'x',
     });

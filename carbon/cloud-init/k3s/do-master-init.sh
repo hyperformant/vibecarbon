@@ -111,6 +111,7 @@ mirrors:
   "$PRIVATE_IP:5000":
     endpoint:
       - "http://$PRIVATE_IP:5000"
+# @include _k3s-system-image-mirror.yaml
 REGEOF
 
 # Install k3s master with pre-shared token.
@@ -149,9 +150,12 @@ REGEOF
 # general requirement, and DigitalOcean's flat 1500-MTU VPC underlay has
 # no known issue at vxlan's auto-computed 1450 MTU. The d3 e2e scenario
 # validates this in practice.
+# --system-default-registry: k3s system images come only from our ghcr mirror
+# (registries.yaml above; K3S_SYSTEM_IMAGE_MIRRORS). Agents inherit it.
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" sh -s - server \
+      --disable-default-registry-endpoint \
       --cluster-init \
       --token "${k3s_token}" \
       --tls-san "$PUBLIC_IP" \
@@ -163,6 +167,7 @@ for attempt in 1 2 3 4 5; do
       --disable traefik \
       --disable=servicelb \
       --disable-cloud-controller \
+      --system-default-registry "vibecarbon-system.invalid" \
       --kubelet-arg="cloud-provider=external" \
       --kubelet-arg="provider-id=digitalocean://$DROPLET_ID" \
       --write-kubeconfig-mode=644; then

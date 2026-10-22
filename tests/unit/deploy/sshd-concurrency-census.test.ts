@@ -18,7 +18,7 @@
  * new provider's init script cannot silently ship without it.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const CLOUD_INIT_DIR = join(process.cwd(), 'carbon', 'cloud-init');
@@ -40,8 +40,9 @@ describe('sshd concurrency provisioning census', () => {
     expect(files.length).toBeGreaterThanOrEqual(5);
   });
 
-  // _private-net-guard.sh is a sourced fragment, not a node init entrypoint.
-  const entrypoints = files.filter((f) => !f.includes('_private-net-guard'));
+  // `_`-prefixed files (_private-net-guard.sh, _k3s-system-image-mirror.yaml)
+  // are fragments spliced in by loadCloudInit's include, not node entrypoints.
+  const entrypoints = files.filter((f) => !basename(f).startsWith('_'));
 
   it.each(entrypoints.map((f) => [f.slice(CLOUD_INIT_DIR.length + 1)]))(
     '%s raises sshd MaxStartups for the deploy’s connection fan-out',

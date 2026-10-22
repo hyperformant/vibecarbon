@@ -8,8 +8,8 @@
  * - The k8s marker KEYS on Secret vibecarbon-infra-secrets
  *   (RESTORE_MARKER_KEYS). The db pod's walg-restore init container restores
  *   when RESTORE_BACKUP is set, fetching exactly that backup and applying
- *   RESTORE_RECOVERY_CONF. RESTORE_TARGET stays for the seed-standby init,
- *   which skips its seed while a restore runs. RESTORE_ATTEMPT (a new random
+ *   RESTORE_RECOVERY_CONF. The same init reads RESTORE_TARGET too.
+ *   RESTORE_ATTEMPT (a new random
  *   id per restore), RESTORE_ORIGIN and RESTORE_LINEAGE (the archive folder the
  *   fetch reads) go with them. All are set and cleared
  *   together, by one patch.
