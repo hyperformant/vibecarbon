@@ -24,6 +24,7 @@ import {
   runWithTransportRetry,
   sshRunScript,
 } from '../../ssh.js';
+import { validateDomain } from '../../validators.js';
 import { hasBackupResult, parseBackupResult } from '../../walg/backup-result.js';
 import {
   assertRestoreFits,
@@ -1332,11 +1333,21 @@ export async function backupCompose(ip, sshKeyPath, projectName, options = {}) {
  * @param {string} [backupConfig.schedule]
  * @param {number} [backupConfig.retentionDays]
  * @param {object} [opts]
+ * @param {string|null} [opts.domain] the env's apex: the tls-retry line is
+ *   installed only with one (no domain, no TLS to retry), validated with the
+ *   CLI's hostname rule before it goes into the crontab.
  * @param {(ip: string, key: string, script: string, o: object) => unknown} [opts.runScript=sshRunScript]
  *   Injectable script runner — defaults to the real SSH runner; overridden in unit tests.
  */
 export async function setupComposeBackupCron(ip, sshKeyPath, projectName, backupConfig, opts = {}) {
-  const { runScript = sshRunScript } = opts;
+  const { runScript = sshRunScript, domain = null } = opts;
+  if (domain) {
+    const problem = validateDomain(domain);
+    if (problem)
+      throw new Error(
+        `tls-retry cron: ${JSON.stringify(domain)} is not a valid domain (${problem})`,
+      );
+  }
   const remoteDir = `/opt/${projectName}`;
   // The same defaults and validation as the k8s side (one resolver): a retention
   // of 0 or NaN throws instead of becoming some other number.
@@ -1345,27 +1356,30 @@ export async function setupComposeBackupCron(ip, sshKeyPath, projectName, backup
   const cronLine = `${schedule} ${composeBackupCmd(remoteDir, retain)} >> ${remoteDir}/backups/backup.log 2>&1`;
   // TLS issuance scheduling (carbon/backup/tls-retry.sh): Traefik never
   // retries a failed first issuance, so a deploy that finished with TLS
-  // pending relies on this to restart it. Every 30 minutes keeps the apex and
-  // wildcard orders at 4 an hour, under Let's Encrypt's 5 failed validations
-  // per hostname per hour; the script itself skips a Traefik younger than 15
-  // minutes and gives up after 48 restarts.
-  const tlsRetryLine = `*/30 * * * * cd ${remoteDir} && bash backup/tls-retry.sh >> ${remoteDir}/backups/tls-retry.log 2>&1`;
+  // pending relies on this to restart it, every 30 minutes (see the script
+  // header for the rate-limit reasoning). The script waits while the apex
+  // does not point at the host, skips a Traefik younger than 15 minutes and
+  // gives up after 48 restarts.
+  const tlsRetryLine = domain
+    ? `*/30 * * * * cd ${remoteDir} && bash backup/tls-retry.sh ${domain} >> ${remoteDir}/backups/tls-retry.log 2>&1`
+    : null;
 
   // Install quote-safely: build the next crontab on the server (existing minus
   // any prior compose-backup.sh or tls-retry.sh line, plus ours) and pipe via
   // stdin. The cron lines are fed to `cat` through a heredoc so no shell
   // quoting can mangle them; there are no single quotes in them anyway.
-  // A deploy re-arms the retry budget: the give-up counter is cleared, so a
-  // redeploy after fixing the cause gets a fresh 48 restarts.
+  // A deploy re-arms the retry budget: the give-up counter and the last
+  // logged state are cleared, so a redeploy after fixing the cause gets a
+  // fresh 48 restarts and logs its first state again.
   const installScript = [
     'set -e',
     `mkdir -p ${remoteDir}/backups`,
-    `rm -f ${remoteDir}/backups/tls-retry.count`,
+    `rm -f ${remoteDir}/backups/tls-retry.count ${remoteDir}/backups/tls-retry.state`,
     'TMP_CRON=$(mktemp)',
     "crontab -l 2>/dev/null | grep -v -e 'compose-backup.sh' -e 'tls-retry.sh' > \"$TMP_CRON\" || true",
     'cat >> "$TMP_CRON" <<\'VC_CRON_EOF\'',
     cronLine,
-    tlsRetryLine,
+    ...(tlsRetryLine ? [tlsRetryLine] : []),
     'VC_CRON_EOF',
     'crontab "$TMP_CRON"',
     'rm -f "$TMP_CRON"',

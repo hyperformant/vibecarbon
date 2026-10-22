@@ -581,6 +581,7 @@ describe('rollbackComposeCutover', () => {
       stopped: ['myapp-app', 'myapp-n8n'],
       cronRemoved: true,
       backupConfig: { schedule: '0 2 * * *' },
+      domain: 'app.example.com',
       deps: {
         clearMarker: () => {
           calls.push('clear');
@@ -594,8 +595,10 @@ describe('rollbackComposeCutover', () => {
           calls.push(`start:${c.join(',')}`);
           return true;
         },
-        setupCron: async () => {
+        setupCron: async (...args: unknown[]) => {
           calls.push('cron');
+          // The tls-retry line comes back with the apex it retries for.
+          expect(args[4]).toEqual({ domain: 'app.example.com' });
         },
       },
     });
@@ -645,6 +648,20 @@ describe('removeComposeBackupCron', () => {
     await expect(
       removeComposeBackupCron('1.1.1.1', '/key', { run: async () => 'VC_CRON_REMOVED\n' }),
     ).resolves.toBeUndefined();
+  });
+
+  it('strips the tls-retry line too: a fenced old primary must not restart its Traefik', async () => {
+    const { removeComposeBackupCron } = await import(
+      '../../../src/lib/deploy/compose/scale-cutover.js'
+    );
+    let sent = '';
+    await removeComposeBackupCron('1.1.1.1', '/key', {
+      run: async (_ip: string, _k: string, cmd: string) => {
+        sent = cmd;
+        return 'VC_CRON_REMOVED\n';
+      },
+    });
+    expect(sent).toContain("grep -v -e 'compose-backup.sh' -e 'tls-retry.sh'");
   });
 });
 

@@ -84,24 +84,50 @@ describe('setupComposeBackupCron', () => {
     },
   );
 
-  it('installs the tls-retry line every 30 minutes beside the backup line', () => {
+  it('installs the tls-retry line every 30 minutes beside the backup line, with the apex', () => {
     const { script, runScript } = capture();
-    setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, { runScript });
+    setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, {
+      runScript,
+      domain: 'app.example.com',
+    });
 
     const lines = script().split('\n');
     expect(
       lines.filter(
         (l) =>
           l ===
-          '*/30 * * * * cd /opt/myapp && bash backup/tls-retry.sh >> /opt/myapp/backups/tls-retry.log 2>&1',
+          '*/30 * * * * cd /opt/myapp && bash backup/tls-retry.sh app.example.com >> /opt/myapp/backups/tls-retry.log 2>&1',
       ),
     ).toHaveLength(1);
   });
 
-  it('re-arms the retry budget: a deploy clears the give-up counter', () => {
+  it('no domain: no tls-retry line, and any earlier one is still stripped', () => {
     const { script, runScript } = capture();
     setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, { runScript });
-    expect(script()).toContain('rm -f /opt/myapp/backups/tls-retry.count');
+    expect(script()).not.toContain('bash backup/tls-retry.sh');
+    expect(script()).toContain("-e 'tls-retry.sh'");
+  });
+
+  it.each(['bad domain', 'x;rm -rf /', '-flag.example.com', 'nodot'])(
+    'refuses an apex of %j instead of writing it into the crontab',
+    async (domain) => {
+      const { runScript } = capture();
+      await expect(
+        setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, { runScript, domain }),
+      ).rejects.toThrow(/not a valid domain/);
+      expect(runScript).not.toHaveBeenCalled();
+    },
+  );
+
+  it('re-arms the retry budget: a deploy clears the give-up counter and the logged state', () => {
+    const { script, runScript } = capture();
+    setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, {
+      runScript,
+      domain: 'app.example.com',
+    });
+    expect(script()).toContain(
+      'rm -f /opt/myapp/backups/tls-retry.count /opt/myapp/backups/tls-retry.state',
+    );
   });
 
   describe('run against a stub crontab', () => {
@@ -111,7 +137,10 @@ describe('setupComposeBackupCron', () => {
     /** Run the install script with /opt/myapp moved into scratch and `crontab` stubbed. */
     function install(state: string, remote: string) {
       const { script, runScript } = capture();
-      setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, { runScript });
+      setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, {
+        runScript,
+        domain: 'app.example.com',
+      });
       const bin = join(scratch, 'bin');
       mkdirSync(bin, { recursive: true });
       writeFileSync(

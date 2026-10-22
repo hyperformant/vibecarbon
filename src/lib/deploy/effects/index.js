@@ -618,12 +618,20 @@ async function verifyTlsReady(ctx) {
     fixHint: `Check the ACME DNS-01 solver for ${dnsProvider} (token validity, zone ownership) in the log tail below.`,
   });
   ctx.tlsState = { state: 'pending', checkedAt, reason: verdict.reason, ca };
-  const next = managedDns
+  // Manual DNS ("deploy first, point DNS after"): the server waits until the
+  // domain points at it, then retries for 24 hours; past that only a deploy
+  // re-arms the retries (setupComposeBackupCron clears the counter).
+  const retries = managedDns
     ? 'The server retries issuance every 30 minutes.'
-    : 'Once the domain points at this server, it retries issuance every 30 minutes.';
+    : `Once ${domain} points at this server, it retries issuance every 30 minutes for 24 hours.`;
+  const rearm = managedDns
+    ? ''
+    : 'If it still has no certificate after that, this restarts the retries:\n' +
+      `  vibecarbon deploy ${ctx.environment}\n`;
   p.log.warn(
     `TLS pending: ${domain} does not serve a trusted certificate yet (${verdict.reason}). ` +
-      `The app is deployed. ${next} Run \`vibecarbon status\` to follow it.\n${verdict.detail}`,
+      `The app is deployed. ${retries} Run \`vibecarbon status\` to follow it.\n` +
+      `${rearm}${verdict.detail}`,
   );
 }
 
@@ -638,7 +646,9 @@ async function setupBackupCron(ctx) {
   const { setupComposeBackupCron } = await import('../compose/index.js');
   try {
     await perfAsync('deploy.compose.backupCron', async () =>
-      setupComposeBackupCron(serverIp, sshKeyPath, projectConfig.projectName, backupConfig),
+      setupComposeBackupCron(serverIp, sshKeyPath, projectConfig.projectName, backupConfig, {
+        domain: ctx.domain,
+      }),
     );
   } catch (err) {
     p.log.warn(`Scheduled backup cron install failed (deploy still succeeded): ${err.message}`);

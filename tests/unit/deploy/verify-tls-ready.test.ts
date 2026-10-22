@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const H = vi.hoisted(() => ({
   wait: vi.fn(),
   ssh: vi.fn(async () => 'time="..." level=error msg="unable to obtain ACME certificate"'),
+  cron: vi.fn(async (..._args: unknown[]) => {}),
 }));
 
 vi.mock('../../../src/lib/deploy/tls-ready.js', async (orig) => {
@@ -29,11 +30,12 @@ vi.mock('../../../src/lib/cli/progress.js', async (orig) => {
 
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, sshRunAsync: H.ssh };
+  return { ...actual, sshRunAsync: H.ssh, setupComposeBackupCron: H.cron };
 });
 
 const p = await import('@clack/prompts');
 const { EFFECTS } = await import('../../../src/lib/deploy/effects/index.js');
+const { COMPOSE_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/compose-ha.js');
 const { TLS_FIRST_LOOK_BUDGET_MS, TLS_READY_MANUAL_BUDGET_MS } = await import(
   '../../../src/lib/deploy/tls-ready.js'
 );
@@ -139,5 +141,44 @@ describe('verifyTlsReady: manual DNS', () => {
     expect(c.tlsState).toMatchObject({ state: 'pending', reason: 'getaddrinfo ENOTFOUND' });
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0][0])).toContain('TLS pending');
+  });
+
+  it('says the retries run for 24 hours once DNS points here, then a deploy restarts them', async () => {
+    H.wait.mockResolvedValue({ trusted: false, reason: 'getaddrinfo ENOTFOUND', served: null });
+    await EFFECTS.verifyTlsReady(ctx({ dnsProvider: 'manual', environment: 'prod' }));
+    const msg = String(warn.mock.calls[0][0]);
+    expect(msg).toContain('every 30 minutes for 24 hours');
+    expect(msg).toContain('Once app.example.com points at this server');
+    // The command on its own indented line, nothing glued to it.
+    expect(msg.split('\n')).toContain('  vibecarbon deploy prod');
+  });
+});
+
+describe('the retry cron gets the apex', () => {
+  beforeEach(() => H.cron.mockClear());
+
+  it('compose: setupBackupCron passes ctx.domain', async () => {
+    await EFFECTS.setupBackupCron(ctx({ backupConfig: { schedule: '0 2 * * *' } }));
+    expect(H.cron).toHaveBeenCalledWith(
+      '10.0.0.1',
+      '/k',
+      'myapp',
+      { schedule: '0 2 * * *' },
+      { domain: 'app.example.com' },
+    );
+  });
+
+  it('compose-ha: both nodes get it', async () => {
+    await COMPOSE_HA_EFFECTS.haSetupBackupCron(
+      ctx({
+        primary: { ip: '1.1.1.1' },
+        standby: { ip: '2.2.2.2' },
+        onProgress: () => {},
+      }),
+    );
+    expect(H.cron.mock.calls.map((c) => [c[0], c[4]])).toEqual([
+      ['1.1.1.1', { domain: 'app.example.com' }],
+      ['2.2.2.2', { domain: 'app.example.com' }],
+    ]);
   });
 });

@@ -738,7 +738,9 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
   // compose-backup.sh on schedule — no separate S3 plumbing.
   await step('cron', async () => {
     if (envConfig.backup) {
-      await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup);
+      await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup, {
+        domain: envConfig.domain,
+      });
       p.log.info('Backup cron restored on new server');
     }
   });
@@ -826,6 +828,7 @@ export async function resumeComposeCutover(ctx) {
       stopped: cutover.stopped ?? [],
       cronRemoved: cutover.cronRemoved !== false,
       backupConfig: envConfig.backup,
+      domain: envConfig.domain,
     });
     clearScaleCutoverJournal({ environment });
     const problems = [...back.problems];
@@ -1612,6 +1615,7 @@ async function scaleServers(ctx) {
             stopped: cutover.stopped,
             cronRemoved,
             backupConfig: envConfig.backup,
+            domain: envConfig.domain,
           });
           if (!back.ok) {
             for (const problem of back.problems) p.log.error(problem);
@@ -1652,7 +1656,9 @@ async function scaleServers(ctx) {
       if (envConfig.backup) {
         // compose-backup.sh skips on a standby (WALG_ROLE); the cron is there
         // for when a failover promotes this node.
-        await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup);
+        await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup, {
+          domain: envConfig.domain,
+        });
       }
     } catch (scaleErr) {
       p.log.error(`Scale of the standby failed: ${scaleErr.message}`);
