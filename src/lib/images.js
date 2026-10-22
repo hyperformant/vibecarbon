@@ -141,6 +141,30 @@ export function localComposeEnv(base = process.env) {
   return { ...base, DB_IMAGE: image, DB_IMAGE_TAG: tag };
 }
 
+// The node runtime base every app image builds FROM (docker/node-runtime/):
+// Alpine + the node binary + libstdc++ + the `hono` user. Built once per
+// revision by .github/workflows/publish-node-runtime-image.yml for linux/amd64
+// and linux/arm64. carbon/Dockerfile's `ARG RUNTIME_IMAGE=` default is this
+// exact string (tests/unit/deploy/image-digest-census.test.ts), so a deploy
+// can pre-pull the base on a server and ship only the app's own layers. The package must be PUBLIC so servers and developer
+// machines pull it without a secret.
+//
+// Tag scheme, the db image's: <node major>-alpine<alpine minor>-r<N>. The
+// first two parts are the Dockerfile's pins (tests/unit/lib/node-version-pins.test.ts),
+// and -r<N> is OUR revision: it must move whenever docker/node-runtime changes,
+// since a machine that already holds a tag never sees a republish under it.
+// `pnpm node:sync` rewrites the major (and resets to -r1) when .nvmrc moves.
+// `pnpm node-runtime:build-local` builds an unpublished tag into the local
+// Docker image store for testing.
+export const NODE_RUNTIME_IMAGE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1';
+
+// sha256 fingerprint of docker/node-runtime's inputs (every file there but
+// README.md; tests/unit/deploy/node-runtime-image-fingerprint.test.ts has the
+// hashing). Changing an input fails that test until the -r revision above, the
+// carbon/Dockerfile copy and this hash all move: a deliberate edit.
+export const NODE_RUNTIME_INPUTS_SHA256 =
+  'fc728a693706c1c1a7c169f250c1699694138e1bb2d371e25cbc8bafd29637c7';
+
 // Single source of truth for the pre-published carbon-autoscaler image
 // (src/autoscaler/). Built once per version by
 // .github/workflows/publish-images.yml; pulled (never

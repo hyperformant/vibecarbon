@@ -44,6 +44,7 @@ import {
   dbImageRef,
   k8sMirrorRef,
   MIRRORED_K8S_IMAGES,
+  NODE_RUNTIME_IMAGE,
   pauseImageRef,
 } from '../../../src/lib/images.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
@@ -85,6 +86,11 @@ const ALLOWLIST: Record<string, string> = {
   // the tag in src/lib/images.js, which must move with any content change.
   '{{CARBON_AUTOSCALER_IMAGE}}': 'carbon-autoscaler, published by this repo after merge',
   [carbonAutoscalerImageRef()]: 'carbon-autoscaler, published by this repo after merge',
+  // The node runtime base the app image builds FROM: built from
+  // docker/node-runtime by publish-node-runtime-image.yml AFTER the commit
+  // that names the tag merges. Revisioned like the db image (-r<N>, enforced
+  // by node-runtime-image-fingerprint.test.ts), so a tag names one build.
+  [NODE_RUNTIME_IMAGE]: 'node runtime base, published by this repo after merge',
 };
 
 type Site = { where: string; ref: string };
@@ -229,6 +235,7 @@ const JS_REFS: Record<string, string[]> = {
     .flatMap((p) => csiSidecarSetImagePlan(p))
     .flatMap(({ setImageArgs }) => setImageArgs.map((a) => a.slice(a.indexOf('=') + 1))),
   'dbImageRef()': [dbImageRef()],
+  NODE_RUNTIME_IMAGE: [NODE_RUNTIME_IMAGE],
 };
 
 function jsSites(): Site[] {
@@ -333,6 +340,7 @@ describe('every shipped image ref is pinned by digest', () => {
       expect.arrayContaining([
         'carbon/Dockerfile',
         'docker/carbon-autoscaler/Dockerfile',
+        'docker/node-runtime/Dockerfile',
         'docker/postgres-walg/Dockerfile',
         'docker/wal-g/Dockerfile',
         '.github/image-pins/Dockerfile',
@@ -436,6 +444,22 @@ describe('every shipped image ref is pinned by digest', () => {
         ref.includes('(repository with no tag)'),
       ),
     ).toEqual([]);
+  });
+
+  it('the app image runs on the CLI-pinned node runtime base, and only on it', () => {
+    // carbon/Dockerfile's runner is FROM ${RUNTIME_IMAGE}, whose default is
+    // byte-for-byte NODE_RUNTIME_IMAGE (src/lib/images.js, the one CLI pin
+    // the deploy reads to pre-pull the base). The runner adds only the app's
+    // own layers: anything the base provides (libstdc++, the hono user, the
+    // node binary) re-added here would ride in every deploy's delta.
+    const df = read('carbon/Dockerfile');
+    expect(df).toMatch(new RegExp(`^ARG RUNTIME_IMAGE=${escapeRegExp(NODE_RUNTIME_IMAGE)}$`, 'm'));
+    expect(df).toMatch(/^FROM \$\{RUNTIME_IMAGE\} AS runner$/m);
+    const runner = df.slice(df.indexOf('AS runner'));
+    expect(runner).not.toMatch(
+      /\bapk\b|\badduser\b|\baddgroup\b|COPY[^\n]*\/usr\/local\/bin\/node/,
+    );
+    expect(runner).toMatch(/^USER hono$/m);
   });
 
   it('an image used in both compose and k8s runs the same tag in both', () => {
@@ -580,7 +604,7 @@ describe('Dependabot can bump every pinned location', () => {
           u['package-ecosystem'] === 'docker' &&
           (u.directory === dir || u.directories?.includes(dir)),
       );
-    for (const dir of ['/.github/image-pins', '/docker/postgres-walg']) {
+    for (const dir of ['/.github/image-pins', '/docker/postgres-walg', '/docker/node-runtime']) {
       const entries = entryFor(dir);
       expect(entries, dir).toHaveLength(1);
       expect(entries[0].directories ?? [entries[0].directory]).toEqual([dir]);

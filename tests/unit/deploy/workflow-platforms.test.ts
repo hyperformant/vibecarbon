@@ -82,14 +82,17 @@ const PUBLISHED_IMAGES = [
     job: 'build',
     image:
       'ghcr.io/hyperformant/postgres and ghcr.io/hyperformant/wal-g (release, via ' +
-      'publish-db-image.yml), and both into ghcr.io/hyperformant/postgres-dev (branches, via ' +
-      'publish-db-image-dev.yml)',
+      'publish-db-image.yml), both into ghcr.io/hyperformant/postgres-dev (branches, via ' +
+      'publish-db-image-dev.yml), and ghcr.io/hyperformant/node-runtime (release, via ' +
+      'publish-node-runtime-image.yml)',
     platforms: ['linux/amd64', 'linux/arm64'],
     consumers:
       'servers (amd64 only, src/lib/deploy/platform.js) pull the db amd64 child; the arm64 child ' +
       'exists solely for local `vibecarbon up` on Apple Silicon, which pulls this image too. ' +
       'wal-g is consumed only by the db build (COPY --from, both arches). The dev channel is the ' +
-      'same build, selected only by VIBECARBON_DB_IMAGE.',
+      'same build, selected only by VIBECARBON_DB_IMAGE. node-runtime is the base every app ' +
+      'image builds FROM: servers and amd64 CI pull the amd64 child, and the arm64 child lets ' +
+      'local `vibecarbon up` on Apple Silicon build and run the app natively.',
   },
   {
     workflow: '.github/workflows/publish-images.yml',
@@ -413,6 +416,7 @@ describe('packages: write only on the jobs that publish', () => {
     '.github/workflows/native-multiarch-image.yml': ['build', 'merge'],
     '.github/workflows/publish-db-image.yml': ['build-db', 'publish-walg'],
     '.github/workflows/publish-db-image-dev.yml': ['build-db', 'build-walg'],
+    '.github/workflows/publish-node-runtime-image.yml': ['build-runtime'],
   };
 
   it.each(Object.entries(PUBLISHING))('%s', (file, publishing) => {
@@ -477,6 +481,53 @@ describe('the release db publish is unchanged by the dev channel', () => {
   });
 });
 
+describe('the node runtime base publishes on merge, once per revision tag', () => {
+  const FILE = '.github/workflows/publish-node-runtime-image.yml';
+  const wf = workflowOf(FILE);
+  const build = wf.jobs['build-runtime'] as CallerJob;
+  const ref = runsOf(wf.jobs['runtime-ref']);
+
+  it('runs only on pushes to main that touch its inputs (and by hand), never on pull requests', () => {
+    expect(Object.keys(wf.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    const push = wf.on.push as { branches: string[]; paths: string[] };
+    expect(push.branches).toEqual(['main']);
+    expect(push.paths).toEqual(
+      expect.arrayContaining(['docker/node-runtime/**', 'src/lib/images.js', FILE]),
+    );
+  });
+
+  it('builds amd64 + arm64 natively through the shared workflow, smoke-tested per arch', () => {
+    expect(build.uses).toBe(REUSABLE);
+    expect(build.needs).toBe('runtime-ref');
+    expect(build.with).toMatchObject({
+      context: 'docker/node-runtime',
+      image: expr('needs.runtime-ref.outputs.image'),
+      tag: expr('needs.runtime-ref.outputs.tag'),
+      smoke: '.github/scripts/smoke-node-runtime-image.sh',
+    });
+    // The shared workflow's matrix is the one that names both platforms.
+    expect(builtPlatforms(jobsOf(REUSABLE).build)).toEqual(['linux/amd64', 'linux/arm64']);
+  });
+
+  it('reads the ref from NODE_RUNTIME_IMAGE in src/lib/images.js, the CLI authority', () => {
+    expect(ref).toMatch(/grep -oP "\^export const NODE_RUNTIME_IMAGE\\s\*=/);
+  });
+
+  it('never re-mints an existing tag: skipped when present, immutable when racing', () => {
+    expect(ref).toMatch(/docker buildx imagetools inspect "\$IMG:\$TAG"/);
+    expect(ref).toMatch(/grep -q 'not found'/);
+    expect(build.if).toBe("needs.runtime-ref.outputs.exists != 'true'");
+    expect(build.with?.immutable).toBe(true);
+  });
+
+  it('the smoke script runs node, checks the hono user, and refuses npm', () => {
+    const smoke = read('.github/scripts/smoke-node-runtime-image.sh');
+    expect(smoke).toMatch(/node --version|node -e/);
+    expect(smoke).toMatch(/id -u hono/);
+    expect(smoke).toMatch(/command -v npm/);
+  });
+});
+
 describe('release.yml refuses a release whose pinned db image users cannot pull', () => {
   // Every mode pulls DB_IMAGE:DB_IMAGE_TAG, local `up` included. A release
   // cut before publish-db-image finished (or with a private package, or a
@@ -493,6 +544,13 @@ describe('release.yml refuses a release whose pinned db image users cannot pull'
   it('reads the pair from src/lib/images.js, the CLI authority', () => {
     expect(run).toContain("import('./src/lib/images.js')");
     expect(run).toContain('$GITHUB_ENV');
+  });
+
+  it('verifies the node runtime base the app image builds FROM the same way', () => {
+    // A generated project's first build pulls NODE_RUNTIME_IMAGE; a release
+    // naming an unpublished or private tag breaks every `up` and deploy.
+    expect(run).toContain("'NODE_RUNTIME_IMAGE=' + m.NODE_RUNTIME_IMAGE");
+    expect(run).toMatch(/for ref in "\$DB_IMAGE:\$DB_IMAGE_TAG" "\$NODE_RUNTIME_IMAGE"; do/);
   });
 
   it('inspects anonymously: an empty DOCKER_CONFIG and no login anywhere in the job', () => {

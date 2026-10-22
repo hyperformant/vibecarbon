@@ -4,8 +4,20 @@ import {
   DB_IMAGE_TAG,
   DEV_DB_IMAGE,
   dbImageRef,
+  NODE_RUNTIME_IMAGE,
   resolveDbImage,
 } from '../../../src/lib/images.js';
+
+describe('node runtime base image ref', () => {
+  it('is the pre-published revision tag the app image builds FROM', () => {
+    expect(NODE_RUNTIME_IMAGE).toBe('ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1');
+  });
+  it('follows <node major>-alpine<alpine minor>-r<N>, with no digest or per-build suffix', () => {
+    expect(NODE_RUNTIME_IMAGE).toMatch(
+      /^ghcr\.io\/hyperformant\/node-runtime:\d+-alpine\d+\.\d+-r[1-9]\d*$/,
+    );
+  });
+});
 
 describe('db image ref', () => {
   it('is the pre-published multi-arch tag (no project/sha/timestamp)', () => {

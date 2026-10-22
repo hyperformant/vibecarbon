@@ -23,8 +23,8 @@
 # Not here, by design: the registry.k8s.io mirrors (MirroredImage.digest in
 # src/lib/images.js) are re-pinned when a CSI or cluster-autoscaler version
 # moves, and publish-images.yml fails a mirror leg whose upstream tag no
-# longer resolves to the pinned digest. Our own images (db, carbon-autoscaler)
-# are tag-pinned by revision; see the census allowlist for why.
+# longer resolves to the pinned digest. Our own images (db, carbon-autoscaler,
+# node-runtime) are tag-pinned by revision; see the census allowlist for why.
 FROM alpine/socat:1.8.1.3@sha256:fb3862c949af7c79996d0e514ee96128644d840835ed5368eeecb14a869de361 AS socat
 FROM registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 AS registry
 FROM busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 AS busybox

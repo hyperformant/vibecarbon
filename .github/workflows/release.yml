@@ -42,8 +42,14 @@ jobs:
   # children present (amd64 for servers, arm64 for Apple Silicon `up`).
   # It is one read, not a wait: if publish-db-image has not finished, let it
   # finish and dispatch again.
+  #
+  # The node runtime base (NODE_RUNTIME_IMAGE) gets the same check: every
+  # generated project's app image builds FROM it, locally and on servers, so
+  # a release naming an unpublished or still-private tag breaks the first
+  # `up` and deploy just as surely. A new ghcr package starts private; flip
+  # it public after publish-node-runtime-image's first run.
   db-image:
-    name: Verify the pinned db image is public and multi-arch
+    name: Verify the pinned db and node runtime images are public and multi-arch
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -54,27 +60,28 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Read the db image ref the CLI pins
-        run: node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log('DB_IMAGE=' + m.DB_IMAGE); console.log('DB_IMAGE_TAG=' + m.DB_IMAGE_TAG);" >> "$GITHUB_ENV"
+      - name: Read the image refs the CLI pins
+        run: node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log('DB_IMAGE=' + m.DB_IMAGE); console.log('DB_IMAGE_TAG=' + m.DB_IMAGE_TAG); console.log('NODE_RUNTIME_IMAGE=' + m.NODE_RUNTIME_IMAGE);" >> "$GITHUB_ENV"
 
-      - name: Inspect it anonymously and require linux/amd64 + linux/arm64
+      - name: Inspect each anonymously and require linux/amd64 + linux/arm64
         run: |
-          ref="$DB_IMAGE:$DB_IMAGE_TAG"
           DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
           export DOCKER_CONFIG
           mkdir -p "$DOCKER_CONFIG"
-          if ! manifest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}'); then
-            echo "::error::refusing to release: $ref is not pullable anonymously. Wait for publish-db-image to finish on main, or make the ghcr package public, then dispatch again."
-            exit 1
-          fi
-          platforms=$(printf '%s' "$manifest" | jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' | sort -u)
-          echo "Platforms in $ref:"
-          echo "$platforms"
-          for want in linux/amd64 linux/arm64; do
-            if ! printf '%s\n' "$platforms" | grep -qx "$want"; then
-              echo "::error::refusing to release: $ref has no $want child. Re-run publish-db-image for this tag, then dispatch again."
+          for ref in "$DB_IMAGE:$DB_IMAGE_TAG" "$NODE_RUNTIME_IMAGE"; do
+            if ! manifest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}'); then
+              echo "::error::refusing to release: $ref is not pullable anonymously. Wait for its publish workflow (publish-db-image or publish-node-runtime-image) to finish on main, or make the ghcr package public, then dispatch again."
               exit 1
             fi
+            platforms=$(printf '%s' "$manifest" | jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' | sort -u)
+            echo "Platforms in $ref:"
+            echo "$platforms"
+            for want in linux/amd64 linux/arm64; do
+              if ! printf '%s\n' "$platforms" | grep -qx "$want"; then
+                echo "::error::refusing to release: $ref has no $want child. Re-run its publish workflow for this tag, then dispatch again."
+                exit 1
+              fi
+            done
           done
 
   release:

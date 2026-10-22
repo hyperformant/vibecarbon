@@ -41,6 +41,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { NODE_RUNTIME_IMAGE } from '../../../src/lib/images.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
 
 const ROOT = process.cwd();
@@ -61,6 +62,7 @@ const WORKFLOWS = [
   join('.github', 'workflows', 'publish-db-image-dev.yml'),
   join('.github', 'workflows', 'publish-db-image.yml'),
   join('.github', 'workflows', 'publish-images.yml'),
+  join('.github', 'workflows', 'publish-node-runtime-image.yml'),
   join('.github', 'workflows', 'release.yml'),
   // Scorecard runs prebuilt analysis actions only — no setup-node, no Node pin.
   join('.github', 'workflows', 'scorecard.yml'),
@@ -134,6 +136,7 @@ function jobRunCommands(relPath: string, jobId: string): string[] {
 const NODE_DOCKERFILES = [
   join('carbon', 'Dockerfile'),
   join('docker', 'carbon-autoscaler', 'Dockerfile'),
+  join('docker', 'node-runtime', 'Dockerfile'),
 ];
 const NON_NODE_DOCKERFILES = [
   join('docker', 'postgres-walg', 'Dockerfile'),
@@ -354,16 +357,37 @@ describe('Dockerfiles pin the same Node major', () => {
     expect(read(relPath)).not.toMatch(NODE_IMAGE_REF);
   });
 
-  it('carbon/Dockerfile keeps its node base and runner stage on the SAME alpine', () => {
-    // The runner is a bare `alpine:X` that the node binary is COPY'd into.
-    // A mismatch builds fine and dies at runtime on musl/libstdc++.
-    const dockerfile = read('carbon', 'Dockerfile');
-    const nodeAlpine = dockerfile.match(/^ARG NODE_IMAGE=node:\d+-alpine([\d.]+)/m)?.[1];
-    const runnerAlpine = dockerfile.match(
-      /^FROM alpine:([\d.]+)(?:@sha256:[0-9a-f]{64})? AS runner/m,
-    )?.[1];
-    expect(nodeAlpine).toBeDefined();
-    expect(runnerAlpine).toBe(nodeAlpine);
+  // The app's runner is the published node runtime base, a bare `alpine:X`
+  // that the node binary is COPY'd into. A mismatch anywhere in this chain
+  // builds fine and dies at runtime on musl/libstdc++, so every link names
+  // the same alpine minor: the runtime's own node pin and its alpine base,
+  // the tag the CLI pins, and the node the app is BUILT with in carbon/.
+  const runtime = read('docker', 'node-runtime', 'Dockerfile');
+  const runtimeNodeAlpine = runtime.match(/^ARG NODE_IMAGE=node:\d+-alpine([\d.]+)@/m)?.[1];
+  const runtimeBaseAlpine = runtime.match(/^FROM alpine:([\d.]+)@sha256:[0-9a-f]{64}$/m)?.[1];
+  const tag = NODE_RUNTIME_IMAGE.match(/:(\d+)-alpine([\d.]+)-r\d+$/);
+
+  it('docker/node-runtime copies node onto the SAME alpine its node image is built on', () => {
+    expect(runtimeNodeAlpine).toBeDefined();
+    expect(runtimeBaseAlpine).toBe(runtimeNodeAlpine);
+  });
+
+  it("NODE_RUNTIME_IMAGE's tag names the runtime's node major and alpine minor", () => {
+    expect(tag, NODE_RUNTIME_IMAGE).not.toBeNull();
+    expect(tag?.[1]).toBe(NODE_MAJOR);
+    expect(tag?.[2]).toBe(runtimeNodeAlpine);
+  });
+
+  it('carbon/Dockerfile builds the app with node on the alpine it runs on', () => {
+    const builder = read('carbon', 'Dockerfile').match(/^ARG NODE_IMAGE=node:\d+-alpine([\d.]+)/m);
+    expect(builder?.[1]).toBe(runtimeNodeAlpine);
+  });
+
+  it('`pnpm node:sync` writes the runtime image pins too', () => {
+    const script = read('scripts', 'sync-node-version.js');
+    expect(script).toContain("join('docker', 'node-runtime', 'Dockerfile')");
+    expect(script).toMatch(/NODE_RUNTIME_IMAGE/);
+    expect(script).toMatch(/ARG RUNTIME_IMAGE=/);
   });
 });
 
