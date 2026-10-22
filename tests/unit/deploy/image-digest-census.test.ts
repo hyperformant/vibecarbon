@@ -43,7 +43,7 @@ import {
   DIAG_NETSHOOT_IMAGE,
   dbImageRef,
   k8sMirrorRef,
-  MIRRORED_K8S_IMAGES,
+  MIRRORED_IMAGES,
   NODE_RUNTIME_IMAGE,
   pauseImageRef,
 } from '../../../src/lib/images.js';
@@ -235,7 +235,7 @@ const JS_REFS: Record<string, string[]> = {
   'clusterAutoscalerImageRef()': [clusterAutoscalerImageRef()],
   'carbonAutoscalerImageRef()': [carbonAutoscalerImageRef()],
   'pauseImageRef()': [pauseImageRef()],
-  'k8sMirrorRef(MIRRORED_K8S_IMAGES)': MIRRORED_K8S_IMAGES.map(k8sMirrorRef),
+  'k8sMirrorRef(MIRRORED_IMAGES)': MIRRORED_IMAGES.map(k8sMirrorRef),
   'csiSidecarSetImagePlan()': Object.keys({ ...CSI_SIDECAR_MIRRORS, ...CSI_UPSTREAM_IMAGE_PINS })
     .flatMap((p) => csiSidecarSetImagePlan(p))
     .flatMap(({ setImageArgs }) => setImageArgs.map((a) => a.slice(a.indexOf('=') + 1))),
