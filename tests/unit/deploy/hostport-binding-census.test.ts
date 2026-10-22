@@ -206,7 +206,6 @@ describe("the rendered registry binds the deploy's master private IP", () => {
       ...buildDbManifestValues({
         dbImageTag: 'ghcr.io/org/postgres:17-walg1',
         storageClass: 'provider-csi',
-        dbPrivateIp: '10.0.1.2',
         walArchiveSha: 'abc',
       }),
       MASTER_PRIVATE_IP: masterPrivateIp as string,

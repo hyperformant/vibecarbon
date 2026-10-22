@@ -612,7 +612,7 @@ async function captureFailureDiagnostics(
       // crash-looping db pod, and its FATAL went uncaptured. Each logs call
       // is `timeout`-bounded so one slow pod can't starve the rest, and the
       // section gets a larger budget. --all-containers includes init containers
-      // (walg-restore / seed-standby).
+      // (walg-restore).
       sections.push([
         `${label}: logs from crash-looping pods (--previous, all containers)`,
         safeRun(

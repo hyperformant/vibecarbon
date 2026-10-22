@@ -26,7 +26,6 @@ import {
   reestablishReplicationTransport,
   setupReplication,
 } from '../../../src/lib/deploy/k8s/ha/index.js';
-import { buildDbManifestValues } from '../../../src/lib/deploy/k8s/k3s.js';
 import { reseedStandbyFromPrimary } from '../../../src/lib/deploy/replication.js';
 
 const ROOT = join(__dirname, '../../..');
@@ -76,19 +75,6 @@ describe('dbPrivateIp is required (no 10.0.1.2 fallback)', () => {
         standbyDbIp: '203.0.113.21',
       }),
     ).rejects.toThrow(/standbyDbPrivateIp.*required/i);
-  });
-
-  it('buildDbManifestValues throws when dbPrivateIp is absent (before any shell-out)', () => {
-    expect(() =>
-      buildDbManifestValues({
-        projectName: 'testapp',
-        s3Config: {},
-        dbImageTag: 'ghcr.io/x/postgres:1',
-        backupBucketName: 'b',
-        storageClass: 'hcloud-volumes',
-        walArchiveSha: 'abc',
-      }),
-    ).toThrow(/dbPrivateIp.*required/i);
   });
 });
 

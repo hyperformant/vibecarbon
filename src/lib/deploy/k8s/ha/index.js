@@ -350,44 +350,14 @@ async function applyGatewaysAndBringUpTunnel({
 }
 
 /**
- * Wait (bounded) until `kubectl get namespace <ns>` answers on a cluster.
- * Injectable runner + sleep for unit tests (same pattern as waitForDnsToPoint).
- * Best-effort: returns false on budget exhaustion, never throws — the caller
- * decides whether a missing namespace is fatal.
- *
- * @param {(cmd: string) => Promise<string|false|null>} runKubectl - executes a
- *   kubectl command on the target cluster (SSH-wrapped in production) and
- *   resolves its stdout, or false/null on failure.
- */
-export async function waitForNamespace(
-  runKubectl,
-  {
-    namespace = 'vibecarbon',
-    attempts = 36,
-    delayMs = 5000,
-    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  } = {},
-) {
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const out = await runKubectl(`kubectl get namespace ${namespace} -o name`);
-      if (typeof out === 'string' && out.includes(`namespace/${namespace}`)) return true;
-    } catch {
-      // cluster still coming up (SSH refused, apiserver not answering) — keep polling
-    }
-    if (i < attempts - 1) await sleep(delayMs);
-  }
-  return false;
-}
-
-/**
  * Deploy-fan-out transport prep: bring up the replication transport (gateway
  * pods + WireGuard tunnel) while the two clusters are still installing
  * manifests/helm — this work only needs the database NODES and each cluster's
  * k3s apiserver, both available minutes before the cluster deploys finish.
- * The one k8s-level prerequisite is the vibecarbon namespace (applyBase
- * creates it early in each cluster's applyManifests), so wait for it on both
- * sides first; prep must NOT create the namespace itself — applyBase owns it.
+ * The one k8s-level prerequisite is the vibecarbon namespace, which each
+ * cluster's applyVibecarbonSecrets creates. The caller starts prep only once
+ * both clusters have signalled it (onNamespaceReady, effects/k8s-ha.js); prep
+ * never polls for it and never creates it.
  *
  * Opportunistic by contract: the caller treats any throw as "not prepared"
  * and setupReplication then brings the transport up on the serial path
@@ -428,22 +398,6 @@ export async function prepareReplicationTransport({
     await seedKnownHosts(khPath, primaryIp);
     await seedKnownHosts(khPath, standbyIp);
     const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
-
-    const nsOk = await Promise.all(
-      [primaryIp, standbyIp].map((ip) =>
-        waitForNamespace((cmd) =>
-          runCommandAsync(['ssh', ...sshOpts, `root@${ip}`, cmd], {
-            silent: true,
-            ignoreError: true,
-          }),
-        ),
-      ),
-    );
-    if (!nsOk.every(Boolean)) {
-      throw new Error(
-        'vibecarbon namespace did not appear on both clusters within the wait budget',
-      );
-    }
     await applyGatewaysAndBringUpTunnel({
       primaryIp,
       standbyIp,
@@ -816,8 +770,8 @@ export async function setupReplication(options) {
 
   // UNCONDITIONAL fast-path (spec: streaming probe is NOT gated on the
   // opportunistic flags — a lost flag must never trigger a pointless
-  // re-swap of a healthy replica). If the standby is already streaming —
-  // the seed-standby init's happy path — the entire
+  // re-swap of a healthy replica). If the standby is already streaming (a
+  // redeploy of a healthy pair), the entire
   // resolvePvc/stage/swap/standbyBoot/recoveryWait block is unnecessary.
   const probe = await perfAsync('deploy.ha.replication.streamingProbe', () =>
     probeStreaming({

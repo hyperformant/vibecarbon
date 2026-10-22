@@ -216,6 +216,11 @@ async function haK8sProvisionClusters(ctx) {
   };
   const primaryInfra = deferInfra();
   const standbyInfra = deferInfra();
+  // The `vibecarbon` namespace, signalled by each cluster's onNamespaceReady
+  // (right after applyVibecarbonSecrets creates it). The transport's gateways
+  // are applied into it, so early prep starts once both have fired. Settled
+  // by the deploy's own settlement too, like the infra signals.
+  const namespaceReady = { primary: deferInfra(), standby: deferInfra() };
   // The primary's built image ref, handed to the standby's deployK3s, which
   // waits for it and runs that image from its own registry. Rejected when the
   // primary deploy fails, so the standby never waits on an image that will not
@@ -237,6 +242,7 @@ async function haK8sProvisionClusters(ctx) {
       minWorkers: options.minWorkers,
       maxWorkers: options.maxWorkers,
       onInfraReady: primaryInfra.resolve,
+      onNamespaceReady: () => namespaceReady.primary.resolve(true),
       onImageBuilt: primaryImage.resolve,
       // Tag every internal sub-stage perf marker with .primary so
       // perf_substep can attribute primary vs standby — without this
@@ -273,6 +279,7 @@ async function haK8sProvisionClusters(ctx) {
       // re-render the Secret.
       caBoundsMin: options.minWorkers ?? 1,
       onInfraReady: standbyInfra.resolve,
+      onNamespaceReady: () => namespaceReady.standby.resolve(true),
       peerImageRef: primaryImage.promise,
       perfPrefix: 'k3s.standby',
       // DR restore seeds the PRIMARY only. The standby re-syncs from the
@@ -288,31 +295,47 @@ async function haK8sProvisionClusters(ctx) {
   // The primary's settlement also settles its image ref, so the standby never
   // waits on a primary that finished without reporting one (each is a no-op
   // once onImageBuilt has resolved it).
+  // A failed cluster settles its namespace signal false, so early prep ends
+  // instead of waiting on a namespace that will not come.
   primaryPromise.then(
     (r) => {
       primaryInfra.resolve(r);
+      namespaceReady.primary.resolve(true);
       if (r?.imageTag) primaryImage.resolve(r.imageTag);
       else primaryImage.reject(new Error('primary image unavailable: primary reported no image'));
     },
     () => {
       primaryInfra.resolve(null);
+      namespaceReady.primary.resolve(false);
       primaryImage.reject(new Error('primary image unavailable: primary deploy failed'));
     },
   );
   standbyPromise.then(
-    (r) => standbyInfra.resolve(r),
-    () => standbyInfra.resolve(null),
+    (r) => {
+      standbyInfra.resolve(r);
+      namespaceReady.standby.resolve(true);
+    },
+    () => {
+      standbyInfra.resolve(null);
+      namespaceReady.standby.resolve(false);
+    },
   );
 
   // Early replication prep — firewall (UDP 51821 peer rules) + gateway pods +
   // WireGuard tunnel — runs WHILE the clusters finish manifests/helm, hiding
-  // its cost inside the fan-out instead of paying it serially afterwards.
-  // Opportunistic: any failure logs and returns false, and setupReplication
-  // then brings up the transport on the serial path exactly as before.
+  // its cost inside the fan-out instead of paying it serially afterwards. It
+  // starts on signals, never on a timed poll: both clusters' infra and both
+  // namespaces. Opportunistic: any failure logs and returns false, and
+  // setupReplication then brings up the transport on the serial path.
   ctx.primaryReplicationConfigured = false;
-  const earlyPrep = (async () => {
-    const [pInfra, sInfra] = await Promise.all([primaryInfra.promise, standbyInfra.promise]);
-    if (!pInfra?.masterIp || !sInfra?.masterIp) return false;
+  const transportPrep = (async () => {
+    const [pInfra, sInfra, pNs, sNs] = await Promise.all([
+      primaryInfra.promise,
+      standbyInfra.promise,
+      namespaceReady.primary.promise,
+      namespaceReady.standby.promise,
+    ]);
+    if (!pInfra?.masterIp || !sInfra?.masterIp || !pNs || !sNs) return false;
     // Firewall first — WireGuard's handshake needs UDP 51821 admitted for
     // the peer before the tunnel can come up. Conditional construction on
     // purpose: BaseProvider throws on a falsy token, the opener no-ops.
@@ -333,19 +356,6 @@ async function haK8sProvisionClusters(ctx) {
       sshKeyPath: sharedSshKeyPath,
     });
     console.error('[k8s-ha] replication transport prepared during the cluster fan-out');
-
-    // Chain: with the transport up, make the PRIMARY replication-ready the
-    // moment its cluster completes — the standby's seed-standby init is
-    // polling for exactly this (spec: standby-init-seeding). Same
-    // opportunistic contract: any failure below resolves false and the
-    // serial path in setupReplication covers it.
-    const primaryResult = await primaryPromise; // rejection → outer .catch → false
-    await configurePrimaryForReplication({
-      primaryIp: primaryResult.masterIp,
-      sshKeyPath: sharedSshKeyPath,
-    });
-    ctx.primaryReplicationConfigured = true;
-    console.error('[k8s-ha] primary replication config applied during the cluster fan-out');
     return true;
   })().catch((err) => {
     console.error(
@@ -353,6 +363,30 @@ async function haK8sProvisionClusters(ctx) {
     );
     return false;
   });
+
+  // With the transport up, make the PRIMARY replication-ready the moment its
+  // whole deploy completes, never earlier: the hostPort patch recreates the
+  // primary db pod, which must not overlap the primary's own migrations,
+  // audits and backup verification (ruling R6). It overlaps the standby arm
+  // whenever the primary finishes first. Same opportunistic contract: false
+  // leaves it to setupReplication's serial path.
+  const primaryConfig = transportPrep
+    .then(async (prepared) => {
+      if (!prepared) return false;
+      const primaryResult = await primaryPromise; // rejection → .catch → false
+      await configurePrimaryForReplication({
+        primaryIp: primaryResult.masterIp,
+        sshKeyPath: sharedSshKeyPath,
+      });
+      console.error('[k8s-ha] primary replication config applied during the cluster fan-out');
+      return true;
+    })
+    .catch((err) => {
+      console.error(
+        `[k8s-ha] early primary replication config did not complete (the serial path will apply it): ${err?.message || err}`,
+      );
+      return false;
+    });
 
   const settled = await Promise.allSettled([primaryPromise, standbyPromise]);
   // Surface per-cluster success/failure distinctly. Without this, a standby
@@ -417,19 +451,20 @@ async function haK8sProvisionClusters(ctx) {
     dbServerType: standbyDbType || Provider.DEFAULT_K8S_NODE_TYPE,
     workerServerType: standbyWorkerType || Provider.DEFAULT_K8S_NODE_TYPE,
   };
-  // Bounded: the prep task's namespace wait + WG bring-up finish well inside
-  // the clusters' own runtimes on the happy path; on the unhappy path the
-  // catch above resolves false. Await AFTER the hard-fail check so a cluster
-  // failure surfaces immediately without waiting on prep.
-  ctx.transportPrepared = await earlyPrep;
+  // Both clusters have settled, so every signal prep waits on has fired; on
+  // the unhappy path the catch above resolves false. Await AFTER the
+  // hard-fail check so a cluster failure surfaces immediately.
+  ctx.transportPrepared = await transportPrep;
   if (ctx.transportPrepared) {
     p.log.info('Replication transport prepared in parallel with the cluster deploys');
-    // wg0 is up: start the image copy now, behind the replication setup. The
-    // copy-standby-image step settles it; the catch only keeps a failure that
-    // lands before then from reading as an unhandled rejection.
+    // wg0 is up: start the image copy now, beside the primary's replication
+    // config and the replication setup. The copy-standby-image step settles
+    // it; the catch only keeps a failure that lands before then from reading
+    // as an unhandled rejection.
     ctx.standbyImageCopy = startStandbyImageCopy(ctx);
     ctx.standbyImageCopy.catch(() => {});
   }
+  ctx.primaryReplicationConfigured = await primaryConfig;
 }
 
 /** A promise with its resolve and reject, for a value another task produces. */

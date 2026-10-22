@@ -89,11 +89,7 @@ import { collectComposeBuildArgs } from '../compose/build-args.js';
 import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
-import {
-  buildStandbySeedInitScript,
-  READ_WRITE_PGOPTIONS,
-  restoreRolloutTimeoutS,
-} from '../replication.js';
+import { READ_WRITE_PGOPTIONS, restoreRolloutTimeoutS } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
 import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
 import { caSlug, tlsSnapshotS3Prefix } from '../tls-snapshot.js';
@@ -102,7 +98,6 @@ import {
   k8sWalgAuditArgv,
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from '../walg-audit.js';
-import { REPL_GATEWAY_PORT } from '../wireguard.js';
 import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import {
   MANIFEST_DIGEST_SH,
@@ -2233,10 +2228,8 @@ async function describeDbPods(env) {
 /**
  * Budget for the db StatefulSet to become Ready after `k8s/base` is applied.
  * A cold first boot pays the CSI volume provision + attach, the db image pull
- * (when the pre-pull has not finished) and initdb; a standby's first boot adds
- * the seed-standby init's pg_basebackup (up to ~6 minutes of retries before it
- * gives up and lets the serial reseed take over). 15 minutes is the budget the
- * chart install had for the same work.
+ * (when the pre-pull has not finished) and initdb. 15 minutes is the budget
+ * the chart install had for the same work.
  *
  * Deliberately longer than DB_STS_BOOT_TIMEOUT_S (600s, src/lib/deploy/
  * replication.js), the shared budget for re-booting an EXISTING db pod (the
@@ -2382,44 +2375,6 @@ export async function awaitDbRollout({ env, timeoutS = DB_ROLLOUT_TIMEOUT_S }) {
 }
 
 /**
- * Apply the `vibecarbon-seed-standby` ConfigMap the db pod's seed-standby
- * init mounts. Rendered fresh every deploy from the shared builder (one
- * source of truth with the failover/restore reseeds) and applied BEFORE
- * `k8s/base`, so the init can mount it on the pod's first boot. Secret-free by
- * contract: REPL_PASSWORD reaches the script via env only.
- *
- * Best-effort: the ConfigMap's ABSENCE is already fully handled — the init's
- * volume is optional and its command guards on the mounted file being present
- * — so losing this apply just means a standby's first-boot seed self-skips and
- * the serial reseed path covers replication later. Logged loudly, not thrown.
- *
- * @param {{env: NodeJS.ProcessEnv}} args
- */
-export async function applyDbSeedConfigMap({ env }) {
-  const seedScript = buildStandbySeedInitScript();
-  const seedConfigMap = [
-    'apiVersion: v1',
-    'kind: ConfigMap',
-    'metadata:',
-    '  name: vibecarbon-seed-standby',
-    '  namespace: vibecarbon',
-    'data:',
-    '  seed-standby.sh: |',
-    ...seedScript.split('\n').map((l) => `    ${l}`),
-    '',
-  ].join('\n');
-  await runCommandAsync(['kubectl', 'apply', '-f', '-'], {
-    silent: true,
-    env,
-    input: seedConfigMap,
-  }).catch((err) => {
-    console.error(
-      `[seed-standby] ConfigMap apply failed (${err?.message || err}), seed init will self-skip; serial reseed covers replication`,
-    );
-  });
-}
-
-/**
  * The deploy-time values for the db StatefulSet's `{{PLACEHOLDER}}` tokens
  * (k8s/base/db/statefulset.yaml), one per token. Pure.
  *
@@ -2428,7 +2383,6 @@ export async function applyDbSeedConfigMap({ env }) {
  * @param {{bucket?: string, walgPrefix?: string, endpoint?: string, region?: string}} [o.s3Config]
  * @param {string|null} [o.backupBucketName]
  * @param {'primary'|'standby'} [o.walgRole]
- * @param {string} o.dbPrivateIp - this cluster's database node private IP
  * @param {string} o.storageClass - `ProviderClass.K8S_STORAGE_CLASS`
  * @param {string} o.walArchiveSha - sha of k8s/base/backup/configmap-walg.yaml
  * @returns {Record<string, string>}
@@ -2438,23 +2392,12 @@ export function buildDbManifestValues({
   s3Config,
   backupBucketName,
   walgRole = 'primary',
-  dbPrivateIp,
   storageClass,
   walArchiveSha,
 }) {
   if (!dbImageTag) {
     throw new Error(
       'buildDbManifestValues: dbImageTag is required (the pre-published wal-g db image, pulled from ghcr).',
-    );
-  }
-  if (!dbPrivateIp) {
-    // Rendered into {{REPL_RELAY_HOST}}. A real IaC output on every provider
-    // (Hetzner pins 10.0.1.2 statically; DO exports the Pulumi-assigned VPC
-    // address) — never assume a Hetzner-shaped address: a standby's seed init
-    // would dial a relay that exists on no node.
-    throw new Error(
-      'buildDbManifestValues: dbPrivateIp is required — the IaC program outputs it; ' +
-        'a missing value means the infra step result is incomplete',
     );
   }
   if (!storageClass) {
@@ -2495,11 +2438,6 @@ export function buildDbManifestValues({
     WALG_ROLE: walgRole,
     S3_ENDPOINT: s3Config?.endpoint ?? '',
     S3_REGION: s3Config?.region ?? '',
-    // Repl-gateway relay endpoint for the standby seed init: the cluster's
-    // OWN database-node private IP + the relay port. Rendered on every tier;
-    // only a standby's first boot ever dials it.
-    REPL_RELAY_HOST: dbPrivateIp,
-    REPL_RELAY_PORT: String(REPL_GATEWAY_PORT),
     K8S_STORAGE_CLASS: storageClass,
     WAL_ARCHIVE_SHA: walArchiveSha || 'none',
   };
@@ -3313,7 +3251,7 @@ export async function ensureCertManagerControllerFlags({ env, kubectl = runKubec
  * Local-first by default — no Flux on the deploy path; Flux is opt-in
  * via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, basePull?: Promise<unknown>, dbPrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, basePull?: Promise<unknown>, onNamespaceReady?: () => void, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
  *   `restore` is the resolved `deploy -restore` point (resolveDeployRestorePoint,
  *   src/lib/walg/restore-base.js). With it the restore marker goes into the
  *   infra Secret before the db StatefulSet applies, so the db pod's
@@ -3376,13 +3314,11 @@ export async function applyK3sManifests({
   // it at infra-ready, ruling R3), or undefined for a Dockerfile without
   // the RUNTIME_IMAGE ARG. deliverImage awaits it and owns its failure.
   basePull,
+  // Called once the `vibecarbon` namespace exists (applyVibecarbonSecrets
+  // creates it). The k8s-ha fan-out starts the replication transport on it.
+  onNamespaceReady,
   // perfPrefix tags internal sub-stage perf timings — see deployK3s.
   perfPrefix = 'k3s',
-  // The database node's Hetzner private-network IP (deterministic in the IaC
-  // program; deployK3s threads it through from infraOutputs). Rendered into
-  // the db StatefulSet's seed-standby init as SEED_PRIMARY_HOST
-  // ({{REPL_RELAY_HOST}}, see buildDbManifestValues).
-  dbPrivateIp,
   // The master's private-network IP (deterministic on Hetzner — static
   // 10.0.1.1 — but a real Pulumi output on DO, which can't pin VPC IPs).
   // deployK3s threads it through from infraOutputs. Passed to
@@ -3769,6 +3705,7 @@ export async function applyK3sManifests({
   //    With `deploy -restore` the infra Secret also carries the restore
   //    marker, so the db pod's first boot restores that backup.
   await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore });
+  onNamespaceReady?.();
   // 4b. Create the kube-system/carbon-autoscaler-config Secret the
   //     carbon-autoscaler sidecar reads on startup (and on every
   //     mtime-changed Refresh — see ConfigWatcher). Two keys:
@@ -3829,13 +3766,10 @@ export async function applyK3sManifests({
       description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
     });
   }
-  // 4c. The db pod's seed-standby init mounts this ConfigMap on its FIRST
-  //     boot, so it lands before base creates the StatefulSet.
-  await applyDbSeedConfigMap({ env });
   // 5. Apply base (namespace, network-policies, db, app, backup, traefik,
   //    config), always from a rendered temp copy (renderK8sBase): the db
   //    StatefulSet carries deploy-time placeholders (image, wal-g prefix and
-  //    role, S3 endpoint, relay address, StorageClass), and so do the PVCs
+  //    role, S3 endpoint, StorageClass), and so do the PVCs
   //    `add redis` / `add n8n` copy into k8s/base/<addon>/. kubectl accepts a
   //    literal storageClassName and the PVC sits Pending forever, and neither
   //    a PVC's class nor a StatefulSet's volumeClaimTemplates can be changed
@@ -3897,7 +3831,6 @@ export async function applyK3sManifests({
         s3Config,
         backupBucketName,
         walgRole,
-        dbPrivateIp,
         storageClass,
         walArchiveSha: walArchiveConfigSha(projectDir),
       }),
@@ -5023,6 +4956,18 @@ export async function deployK3s(options) {
     }
   }
 
+  // HA fan-out hook: the `vibecarbon` namespace exists, so the replication
+  // gateways can be applied into it. Fired from applyK3sManifests right after
+  // applyVibecarbonSecrets creates it, or below when the apply is skipped.
+  // Same contract as onInfraReady: never awaited, never fails this deploy.
+  const signalNamespaceReady = () => {
+    try {
+      options.onNamespaceReady?.();
+    } catch {
+      // opportunistic hook — a listener bug must not break the deploy
+    }
+  };
+
   // The app's runtime base, pulled onto the master now so the layer delta in
   // applyK3sManifests, minutes later, sends only the app's own layers (ruling
   // R3). Only an operator-built image has one (a standby copies the primary's
@@ -5043,7 +4988,7 @@ export async function deployK3s(options) {
 
   // The wal-g-equipped db image is a pre-published image pulled from ghcr —
   // no per-deploy build or delivery. The db StatefulSet's container and both
-  // its inits reference it (see buildDbManifestValues).
+  // its walg-restore init reference it (see buildDbManifestValues).
   const dbImageTag = resolveDbImageTag();
 
   // Opportunistic image pre-pull on every node — deliberately NOT awaited: it
@@ -5198,10 +5143,7 @@ export async function deployK3s(options) {
         masterIp,
         sshKeyPath: privateKeyPath,
         basePull,
-        // The database node's own private IP — rendered (buildDbManifestValues)
-        // into the seed-standby init's SEED_PRIMARY_HOST (repl-gateway relay
-        // endpoint). Already in scope from infraOutputs (returned below).
-        dbPrivateIp,
+        onNamespaceReady: signalNamespaceReady,
         // M3 Task 2: the master's own private IP — renderCarbonAutoscalerConfig
         // (CA-spawned worker join target) and the registry hostPort render.
         // Already in scope from infraOutputs (returned below).
@@ -5215,6 +5157,9 @@ export async function deployK3s(options) {
     );
     state.completeStep('k3s-apply');
     s.stop('App rolled out');
+  } else {
+    // Skipped apply: a prior one created the namespace.
+    signalNamespaceReady();
   }
 
   // 8b. Ground-truth BACKUP audit — OUTSIDE the `k3s-apply` gate on purpose.

@@ -2,7 +2,7 @@
  * Task 6: fan-out asymmetry + role↔stack mapping.
  *
  * haK8sProvisionClusters fans out deployK3s ×2 (primary + standby in
- * parallel). Pilot-light standby (spec: standby-init-seeding) needs it to
+ * parallel). Pilot-light standby needs it to
  * produce a specific ASYMMETRY, not a symmetric HA pair:
  *   - primary: role 'primary', full sizing (minWorkers/maxWorkers as
  *     configured).

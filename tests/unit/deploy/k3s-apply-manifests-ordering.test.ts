@@ -398,9 +398,6 @@ function baseArgs(projectDir: string) {
     minWorkers: 1,
     maxWorkers: 3,
     workerServerType: 'cx23',
-    // Required since the d4 lift — buildDbManifestValues refuses to assume the
-    // Hetzner-static relay host. See db-private-ip-required.test.ts.
-    dbPrivateIp: '10.0.1.2',
     k3sToken: 'k3s-token',
     masterIp: '1.2.3.4',
     sshKeyPath: '/tmp/key',

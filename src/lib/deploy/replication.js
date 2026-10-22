@@ -33,7 +33,7 @@ import { REPL_GATEWAY_PORT } from './wireguard.js';
  * CSI reattach was already documented as "minutes" beside those waits. Any
  * SSH client timeout wrapping a wait on this budget must exceed it, or the
  * transport kills kubectl before kubectl can name the stuck sts
- * (reseed-standby.test.ts pins that; db-sts-boot-timeout-census.test.ts
+ * (tests/unit/failover/reseed-standby.test.ts pins that; db-sts-boot-timeout-census.test.ts
  * drafts new waits into this budget).
  */
 export const DB_STS_BOOT_TIMEOUT_S = 600;
@@ -83,7 +83,7 @@ export const SYSTEM_IDENTIFIER_SQL = 'SELECT system_identifier FROM pg_control_s
  * (5433) for the compose path where the standby dials the primary db directly;
  * the k8s-ha path passes the repl-gateway relay port (15433) since it dials its
  * local socat gateway rather than postgres directly.
- * @param {{primaryHost:string, replPassword?:string, applicationName?:string, port?:string|number, passwordExpr?:string|null}} o
+ * @param {{primaryHost:string, replPassword:string, applicationName?:string, port?:string|number}} o
  * @returns {string}
  */
 export function buildPrimaryConninfo({
@@ -91,14 +91,10 @@ export function buildPrimaryConninfo({
   replPassword,
   applicationName = 'standby',
   port = REPL_PORT,
-  // When set, rendered VERBATIM instead of replPassword — lets a script that
-  // must stay secret-free (ConfigMap-delivered seed init) expand the password
-  // from its environment at runtime: passwordExpr: '$REPL_PASSWORD'.
-  passwordExpr = null,
 }) {
   return (
     `host=${primaryHost} port=${port} user=replicator ` +
-    `password=${passwordExpr ?? replPassword} sslmode=disable ` +
+    `password=${replPassword} sslmode=disable ` +
     `application_name=${applicationName}`
   );
 }
@@ -215,40 +211,6 @@ export function buildReplicationHbaLines(cidrs) {
  *   (used by swap:false so the conninfo is in place before the node-side swap;
  *   the password is embedded here and MUST be delivered over stdin, never argv).
  * @param {string} [opts.label='reseed'] - tag for the script's stderr breadcrumbs
- * @param {number} [opts.basebackupAttempts=1] - bounded retry budget for
- *   pg_basebackup itself (distinct from probeAttempts, which only gates
- *   pg_isready reachability before any destructive work). >1 wraps the
- *   staging + pg_basebackup + PG_VERSION check in a loop that wipes staging
- *   between attempts, so a ConfigMap-delivered init container can keep
- *   retrying until the primary becomes replication-ready. Default 1
- *   reproduces the old single-shot behavior byte-for-byte.
- * @param {number} [opts.basebackupDelayS=15] - seconds between basebackup
- *   attempts (only relevant when basebackupAttempts > 1).
- * @param {boolean} [opts.exhaustExitZero=false] - when the attempt budget is
- *   exhausted, exit 0 instead of 1 — the image's own initdb boots the db
- *   independently and the serial reseed path still covers replication later,
- *   so a bounded-wait init container should not be treated as a hard failure.
- * @param {boolean} [opts.passwordFromEnv=false] - source PGPASSWORD from the
- *   `$REPL_PASSWORD` environment variable at runtime instead of embedding the
- *   literal password in the script — lets the script live in a secret-free
- *   ConfigMap.
- * @param {number|null} [opts.connectTimeoutS=null] - when set, the script's
- *   preamble exports `PGCONNECT_TIMEOUT=<n>` (libpq honors it for
- *   pg_basebackup's connection phase). Without it, an absent transport (e.g.
- *   a missing NetworkPolicy silently dropping SYNs) hangs EACH attempt at the
- *   OS TCP connect timeout (~127s on Linux) — turning a bounded retry budget
- *   like 24×15s≈6min into 50+ minutes wall-clock. Default null → nothing
- *   emitted, byte-compat with every existing caller.
- * @param {number|null} [opts.deadlineSeconds=null] - when set (only
- *   meaningful with basebackupAttempts > 1), the retry loop also breaks once
- *   bash's builtin `$SECONDS` reaches this value, regardless of how many
- *   attempts remain in the budget — a second, wall-clock-based bound that
- *   holds even if connectTimeoutS is unset or an attempt hangs for some other
- *   reason. On break, the normal exhaustion path runs (same seed_ok check →
- *   exhaustExitZero handling). `$SECONDS` requires bash (not plain POSIX sh);
- *   every caller of this script (the k8s-ha standby seed init container, the
- *   helper-pod swap) invokes it as `bash -c`/`exec bash <script>`, so bash is
- *   guaranteed. Default null → nothing emitted, byte-compat.
  * @returns {string}
  */
 export function buildStagedBasebackupScript({
@@ -265,33 +227,7 @@ export function buildStagedBasebackupScript({
   pgdataDir = '/var/lib/postgresql/data',
   primaryConninfo = '',
   label = 'reseed',
-  basebackupAttempts = 1,
-  basebackupDelayS = 15,
-  exhaustExitZero = false,
-  passwordFromEnv = false,
-  connectTimeoutS = null,
-  deadlineSeconds = null,
 }) {
-  // libpq honors PGCONNECT_TIMEOUT for pg_basebackup's connection phase — see
-  // opts.connectTimeoutS above for why this matters (transport-absent hangs).
-  const connectTimeoutBlock =
-    connectTimeoutS != null
-      ? `
-export PGCONNECT_TIMEOUT=${connectTimeoutS}
-`
-      : '';
-
-  // Wall-clock guard injected at the top of the retry loop body (only used
-  // when basebackupAttempts > 1) — see opts.deadlineSeconds above.
-  const deadlineGuardBlock =
-    deadlineSeconds != null
-      ? `  if [ "\${SECONDS}" -ge ${deadlineSeconds} ]; then
-    echo "[${label}] wall-clock deadline (${deadlineSeconds}s) reached before pg_basebackup succeeded, aborting the retry loop" >&2
-    break
-  fi
-`
-      : '';
-
   const probeBlock = probeFirst
     ? `
 # Probe primary's postgres from inside the standby container, WITH a retry
@@ -327,15 +263,10 @@ fi
 
   // Explicit primary_conninfo (last entry in postgresql.auto.conf wins). Written
   // into the STAGING dir so it survives the node-side swap. Heredoc-quoted so the
-  // interpolated value (already a literal) is not re-expanded by the shell —
-  // EXCEPT when passwordFromEnv is true: primaryConninfo then embeds a runtime
-  // expression (e.g. `password=$REPL_PASSWORD`, from buildPrimaryConninfo's
-  // passwordExpr) that must actually expand, so the delimiter is left
-  // unquoted to let the shell interpolate it while writing the heredoc body.
-  const conninfoHeredocEof = passwordFromEnv ? 'REPL_CONNINFO_EOF' : "'REPL_CONNINFO_EOF'";
+  // interpolated value (already a literal) is not re-expanded by the shell.
   const conninfoBlock = primaryConninfo
     ? `
-cat >> ${stagingDir}/postgresql.auto.conf <<${conninfoHeredocEof}
+cat >> ${stagingDir}/postgresql.auto.conf <<'REPL_CONNINFO_EOF'
 primary_conninfo = '${primaryConninfo}'
 REPL_CONNINFO_EOF
 `
@@ -368,23 +299,13 @@ chown -R postgres:postgres ${pgdataDir}
   // with an already-streaming standby's live walreceiver ("slot is active").
   const basebackupSlotFlag = basebackupSlot ? ` -S ${basebackupSlot}` : '';
 
-  const pgpassword = passwordFromEnv
-    ? `PGPASSWORD="$REPL_PASSWORD"`
-    : `PGPASSWORD='${replPassword}'`;
-
-  // basebackupAttempts<=1 (the default) reproduces the original single-shot
-  // block byte-for-byte, so every existing caller is unaffected. >1 wraps it
-  // in a bounded retry loop that wipes staging between attempts (a partial
-  // fetch must never poison the next attempt or a fallback initdb).
-  const basebackupBlock =
-    basebackupAttempts <= 1
-      ? `
+  const basebackupBlock = `
 # Stage into a tmp dir; atomic swap only after basebackup verifies good.
 rm -rf ${stagingDir}
 mkdir -p ${stagingDir}
 chown postgres:postgres ${stagingDir}
 
-${pgpassword} pg_basebackup \\
+PGPASSWORD='${replPassword}' pg_basebackup \\
   -h ${primaryHost} -p ${primaryPort} \\
   -U replicator -D ${stagingDir} \\
   -Fp -Xs -R -c fast${basebackupSlotFlag}
@@ -394,39 +315,11 @@ if [ ! -f ${stagingDir}/PG_VERSION ]; then
   echo "[${label}] pg_basebackup produced no PG_VERSION, refusing to swap" >&2
   rm -rf ${stagingDir}
   exit 1
-fi`
-      : (() => {
-          const exhaustBlock = exhaustExitZero
-            ? `echo "[${label}] pg_basebackup budget exhausted (${basebackupAttempts} attempts) — exiting UNSEEDED; the image's initdb boots the db independent and the serial reseed path covers replication." >&2; exit 0`
-            : `echo "[${label}] pg_basebackup failed after ${basebackupAttempts} attempt(s)" >&2
-  exit 1`;
-          return `
-seed_ok=0
-for seed_attempt in $(seq 1 ${basebackupAttempts}); do
-${deadlineGuardBlock}  rm -rf ${stagingDir}
-  mkdir -p ${stagingDir}
-  chown postgres:postgres ${stagingDir}
-  if ${pgpassword} pg_basebackup \\
-      -h ${primaryHost} -p ${primaryPort} \\
-      -U replicator -D ${stagingDir} \\
-      -Fp -Xs -R -c fast${basebackupSlotFlag} && [ -f ${stagingDir}/PG_VERSION ]; then
-    seed_ok=1
-    break
-  fi
-  echo "[${label}] pg_basebackup attempt \${seed_attempt}/${basebackupAttempts} failed, primary not replication-ready yet" >&2
-  if [ "\${seed_attempt}" -lt ${basebackupAttempts} ]; then
-    sleep ${basebackupDelayS}
-  fi
-done
-if [ "\${seed_ok}" != "1" ]; then
-  rm -rf ${stagingDir}
-  ${exhaustBlock}
 fi`;
-        })();
 
   return `
 set -e -o pipefail
-${connectTimeoutBlock}${probeBlock}${basebackupBlock}
+${probeBlock}${basebackupBlock}
 # -R should already have created standby.signal; touch belt-and-suspenders.
 touch ${stagingDir}/standby.signal
 echo "primary_slot_name = '${slotName}'" >> ${stagingDir}/postgresql.auto.conf
@@ -445,90 +338,6 @@ echo "hot_standby = on" >> ${stagingDir}/postgresql.auto.conf
 sed -i '/^[[:space:]]*${WRITE_FENCE_SETTING}[[:space:]]*=/d' ${stagingDir}/postgresql.auto.conf
 ${conninfoBlock}chown -R postgres:postgres ${stagingDir}
 ${swapBlock}`.trim();
-}
-
-/**
- * Standby seed init-container script (spec: standby-init-seeding-design).
- *
- * WIRED for the pilot-light standby (spec: pilot-light-standby-design): the
- * standby installs with every app-tier Deployment at replicas 0, so the
- * Ecto write-lock incompatibility that forced the original unwire (f5b0ea8)
- * no longer applies — nothing app-tier boots against the read-only replica.
- *
- * Runs on EVERY db pod boot on every tier; the gates make it a no-op
- * everywhere except the k8s-ha standby's FIRST boot:
- *   - WALG_ROLE != standby            → exit 0 (primary + single-cluster k8s)
- *   - PGDATA/PG_VERSION exists        → exit 0 (any later boot: restarts,
- *                                        scale events, post-swap boots)
- *   - RESTORE_TARGET set              → exit 0 (belt: restore wins; the
- *                                        standby always deploys restore:null)
- * When active it retries pg_basebackup through the local repl-gateway relay
- * for up to 6 minutes (24 × 15s — the basebackup attempt IS the readiness
- * probe; pg_isready cannot see pg_hba/wal_level state), staging into a
- * sibling dir on the raw volume mount and swapping in-script (no running
- * postmaster exists yet, so the in-place swap is safe here, unlike the
- * failover/restore paths). On exhaustion it exits 0 UNSEEDED — the image's
- * initdb then boots the db independent and setupReplication's serial swap
- * path covers replication (bounded wait + fallback, decision #2).
- *
- * Env contract (injected by the seed-standby init container in
- * carbon/k8s/base/db/statefulset.yaml): WALG_ROLE, RESTORE_TARGET
- * (optional), REPL_PASSWORD (secretKeyRef), SEED_PRIMARY_HOST,
- * SEED_PRIMARY_PORT. Mount contract: db PVC mounted RAW (no subPath) at
- * /seed-volume; PGDATA lives at /seed-volume/postgres-data.
- *
- * SECURITY: delivered via ConfigMap — the generated text must contain no
- * secret values; the password is expanded from env at runtime only.
- */
-export function buildStandbySeedInitScript() {
-  const conninfo = buildPrimaryConninfo({
-    primaryHost: '$SEED_PRIMARY_HOST',
-    port: '$SEED_PRIMARY_PORT',
-    passwordExpr: '$REPL_PASSWORD',
-    applicationName: 'standby',
-  });
-  const core = buildStagedBasebackupScript({
-    passwordFromEnv: true,
-    primaryHost: '$SEED_PRIMARY_HOST',
-    primaryPort: '$SEED_PRIMARY_PORT',
-    basebackupAttempts: 24,
-    basebackupDelayS: 15,
-    exhaustExitZero: true,
-    swap: true,
-    stagingDir: '/seed-volume/.seed_staging',
-    pgdataDir: '/seed-volume/postgres-data',
-    primaryConninfo: conninfo,
-    label: 'seed-standby',
-    // Binding contract: this init container gives up and exits 0 UNSEEDED
-    // within ~6 minutes wall-clock NO MATTER WHAT, so a missing transport
-    // (e.g. netpol gap dropping SYNs) can never turn a bounded seed attempt
-    // into a 50+ minute hang that blows the standby's `helm --wait --timeout
-    // 15m`. connectTimeoutS bounds each individual pg_basebackup connection
-    // attempt; deadlineSeconds bounds the loop's TOTAL wall-clock time as a
-    // second, independent backstop (24×15s≈6min already approximates this,
-    // but only if every attempt fails fast — the deadline holds even if one
-    // doesn't).
-    connectTimeoutS: 10,
-    deadlineSeconds: 360,
-  });
-  return `
-if [ "\${WALG_ROLE:-primary}" != "standby" ]; then
-  echo "[seed-standby] WALG_ROLE=\${WALG_ROLE:-primary}, not a standby, skipping seed"
-  exit 0
-fi
-if [ -f /seed-volume/postgres-data/PG_VERSION ]; then
-  echo "[seed-standby] PGDATA already initialized, not a first boot, skipping seed"
-  exit 0
-fi
-if [ -n "\${RESTORE_TARGET:-}" ]; then
-  echo "[seed-standby] RESTORE_TARGET set, restore wins, skipping seed"
-  exit 0
-fi
-mkdir -p /seed-volume/postgres-data
-echo "[seed-standby] first boot of a standby, seeding PGDATA from the primary via $SEED_PRIMARY_HOST:$SEED_PRIMARY_PORT"
-${core}
-echo "[seed-standby] SEEDED, postgres will boot directly into recovery as a streaming replica"
-`.trim();
 }
 
 /**
