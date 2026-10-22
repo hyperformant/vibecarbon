@@ -118,7 +118,15 @@ describe('backup CronJob TLS snapshot step', () => {
       'kubectl exec -i -n vibecarbon statefulset/db -c db -- env WALG_S3_PREFIX="$TLS_SNAPSHOT_S3_PREFIX" wal-g st put -s -f --no-compress --no-encrypt k8s-secret.json',
     );
     expect(step).toMatch(/"\$rc" -eq 0 \] \|\| \[ "\$rc" -eq 3 \] \|\| \[ "\$rc" -eq 75 \]/);
-    expect(step).not.toMatch(/rc=/);
+    // The step never assigns rc (its own status lives in tls_rc).
+    expect(step).not.toMatch(/\brc=/);
+    // Both ends of the upload are bounded, the upload by the shorter one, and
+    // a timeout (GNU 124, busybox 143) is a note.
+    expect(step).toContain('timeout 130 kubectl get secret vibecarbon-tls -n vibecarbon -o json |');
+    expect(step).toContain('timeout 120 kubectl exec -i -n vibecarbon statefulset/db');
+    expect(step).toMatch(
+      /"\$tls_rc" -eq 124 \] \|\| \[ "\$tls_rc" -eq 143 \][\s\S]{0,200}timed out after 120s/,
+    );
   });
 
   it('prints only to stderr, never echoes the Secret, and carries no apostrophes', () => {

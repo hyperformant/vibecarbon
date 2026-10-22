@@ -346,14 +346,23 @@ spec:
                     if ! [[ "$tls_prefix" =~ ^s3://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$ ]]; then
                       echo "tls snapshot skipped: no valid TLS_SNAPSHOT_S3_PREFIX in ConfigMap vibecarbon-backup-settings" >&2
                     else
-                      tls_issuer="$(kubectl get secret vibecarbon-tls -n vibecarbon -o jsonpath="{.metadata.annotations.cert-manager\.io/issuer-name}" 2>/dev/null)" || tls_issuer=""
+                      tls_issuer="$(timeout 60 kubectl get secret vibecarbon-tls -n vibecarbon -o jsonpath="{.metadata.annotations.cert-manager\.io/issuer-name}" 2>/dev/null)" || tls_issuer=""
                       if [ -z "$tls_issuer" ] || [ "$tls_issuer" = "vibecarbon-standby-selfsigned" ]; then
                         echo "tls snapshot skipped: Secret vibecarbon-tls is missing or not issued by an ACME issuer (issuer: ${tls_issuer:-none})" >&2
-                      elif kubectl get secret vibecarbon-tls -n vibecarbon -o json |
-                        kubectl exec -i -n vibecarbon statefulset/db -c db -- env WALG_S3_PREFIX="$TLS_SNAPSHOT_S3_PREFIX" wal-g st put -s -f --no-compress --no-encrypt k8s-secret.json >&2; then
+                      # Bounded (busybox timeout), so a hung exec cannot run
+                      # the Job into its deadline. The upload bound is the
+                      # shorter one: if the read hangs, the upload is killed
+                      # first and never completes an object from a short stream.
+                      elif timeout 130 kubectl get secret vibecarbon-tls -n vibecarbon -o json |
+                        timeout 120 kubectl exec -i -n vibecarbon statefulset/db -c db -- env WALG_S3_PREFIX="$TLS_SNAPSHOT_S3_PREFIX" wal-g st put -s -f --no-compress --no-encrypt k8s-secret.json >&2; then
                         echo "tls snapshot saved to ${tls_prefix}/k8s-secret.json" >&2
                       else
-                        echo "tls snapshot failed: ${tls_prefix}/k8s-secret.json was not written (see the error above)" >&2
+                        tls_rc=$?
+                        if [ "$tls_rc" -eq 124 ] || [ "$tls_rc" -eq 143 ]; then
+                          echo "tls snapshot failed: ${tls_prefix}/k8s-secret.json timed out after 120s" >&2
+                        else
+                          echo "tls snapshot failed: ${tls_prefix}/k8s-secret.json was not written (see the error above)" >&2
+                        fi
                       fi
                     fi
                   fi

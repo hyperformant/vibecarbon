@@ -153,6 +153,23 @@ describe('renderBundle envOverrides', () => {
       rmSync(stage, { recursive: true, force: true });
     }
   });
+
+  it('a tlsSnapshotPrefix option writes TLS_SNAPSHOT_S3_PREFIX through formatDotenvLine', () => {
+    projectDir = makeProjectDir('FOO=1');
+    process.chdir(projectDir);
+    const prefix = 's3://proj-backups/backups/proj/prod/tls/prod';
+    const stage = renderBundle('myproj', { tlsSnapshotPrefix: prefix });
+    const none = renderBundle('myproj', {});
+    try {
+      const text = readFileSync(join(stage, '.env'), 'utf-8');
+      expect(text.split('\n')).toContain(formatDotenvLine('TLS_SNAPSHOT_S3_PREFIX', prefix));
+      expect(parseDotenv(text).TLS_SNAPSHOT_S3_PREFIX).toBe(prefix);
+      expect(readFileSync(join(none, '.env'), 'utf-8')).not.toContain('TLS_SNAPSHOT_S3_PREFIX');
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+      rmSync(none, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('renderBundle DNS-01 challenge', () => {
@@ -373,23 +390,6 @@ describe('renderBundle tls-default.yml', () => {
       expect(env.VC_ENV).toBe('staging');
     } finally {
       rmSync(stage, { recursive: true, force: true });
-    }
-  });
-
-  it('a tlsSnapshotPrefix option writes TLS_SNAPSHOT_S3_PREFIX through formatDotenvLine', () => {
-    projectDir = makeProjectDir('FOO=1');
-    process.chdir(projectDir);
-    const prefix = 's3://proj-backups/backups/proj/prod/tls/prod';
-    const stage = renderBundle('myproj', { tlsSnapshotPrefix: prefix });
-    const none = renderBundle('myproj', {});
-    try {
-      const text = readFileSync(join(stage, '.env'), 'utf-8');
-      expect(text.split('\n')).toContain(formatDotenvLine('TLS_SNAPSHOT_S3_PREFIX', prefix));
-      expect(parseDotenv(text).TLS_SNAPSHOT_S3_PREFIX).toBe(prefix);
-      expect(readFileSync(join(none, '.env'), 'utf-8')).not.toContain('TLS_SNAPSHOT_S3_PREFIX');
-    } finally {
-      rmSync(stage, { recursive: true, force: true });
-      rmSync(none, { recursive: true, force: true });
     }
   });
 });

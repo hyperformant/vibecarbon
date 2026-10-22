@@ -79,6 +79,11 @@ type Fixture = {
   retired?: boolean;
   traefikRunning?: boolean;
   uploadFails?: boolean;
+  /** The upload (or the acme.json read) hangs for this many seconds. */
+  uploadHangs?: number;
+  readHangs?: number;
+  /** VC_TLS_UPLOAD_TIMEOUT_S for the run. */
+  timeoutS?: number;
 };
 
 function run(f: Fixture = {}) {
@@ -91,6 +96,9 @@ function run(f: Fixture = {}) {
     retired = false,
     traefikRunning = true,
     uploadFails = false,
+    uploadHangs = 0,
+    readHangs = 0,
+    timeoutS,
   } = f;
   const root = mkdtempSync(join(scratch, 'p-'));
   const dir = join(root, 'project');
@@ -130,9 +138,14 @@ case "$*" in
     shift 5
     set -- "\${@:1:$(($# - 1))}" "${fx}/acme.json"
     exec grep "$@" ;;
-  "compose exec -T traefik cat /letsencrypt/acme.json") cat "${fx}/acme.json" ;;
+  "compose exec -T traefik cat /letsencrypt/acme.json")
+    ${readHangs ? `sleep ${readHangs}` : ':'}
+    cat "${fx}/acme.json" ;;
   "compose exec -T -e WALG_S3_PREFIX="*" db wal-g st put "*)
-    cat > "${fx}/uploaded"
+    # The object exists only once the whole stream is read (as on S3).
+    data="$(cat; echo .)"
+    ${uploadHangs ? `sleep ${uploadHangs}` : ':'}
+    printf '%s' "\${data%.}" > "${fx}/uploaded"
     ${uploadFails ? 'echo "ERROR: AccessDenied" >&2; exit 1' : 'echo "INFO: put ok" >&2'} ;;
   *) echo "unexpected docker call: $*" >&2; exit 99 ;;
 esac
@@ -142,7 +155,10 @@ esac
   const r = spawnSync('bash', [SCRIPT], {
     cwd: dir,
     encoding: 'utf-8',
-    env: { PATH: `${bin}:${process.env.PATH}` },
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      ...(timeoutS ? { VC_TLS_UPLOAD_TIMEOUT_S: String(timeoutS) } : {}),
+    },
     timeout: 30_000,
   });
   const uploadedPath = join(fx, 'uploaded');
@@ -243,6 +259,24 @@ describe('tls-snapshot.sh', () => {
     expect(r.stderr).not.toContain(KEY_MARKER);
     expect(r.stdout).toBe('');
   });
+
+  it('a hung upload is cut off at the bound: no object, exit 1, a timeout note', () => {
+    const started = Date.now();
+    const r = run({ uploadHangs: 20, timeoutS: 1 });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(r.code).toBe(1);
+    expect(r.uploaded).toBeNull();
+    expect(r.stderr).toMatch(/tls snapshot upload failed: \S+ timed out after 1s/);
+    expect(r.stdout).toBe('');
+  });
+
+  it('a hung acme.json read: the upload is killed first, so no short object lands', () => {
+    const r = run({ readHangs: 20, timeoutS: 1 });
+    expect(r.code).toBe(1);
+    expect(r.uploaded).toBeNull();
+    expect(r.stderr).toMatch(/timed out after 1s/);
+    // The read has the longer bound (upload + 10 s), so this run takes ~11 s.
+  }, 20_000);
 
   it('the script sets umask 077, writes only stderr, and never prints a backup marker', () => {
     const text = readFileSync(SCRIPT, 'utf-8');

@@ -38,6 +38,11 @@ umask 077
 # (compose-backup.sh prints the only one).
 # ============================================================================
 
+# Seconds the upload may take (acme.json is a few KB; a healthy put takes
+# about a second). VC_TLS_UPLOAD_TIMEOUT_S exists for the script tests only.
+UPLOAD_TIMEOUT_S="${VC_TLS_UPLOAD_TIMEOUT_S:-120}"
+[[ "$UPLOAD_TIMEOUT_S" =~ ^[1-9][0-9]*$ ]] || UPLOAD_TIMEOUT_S=120
+
 skip() {
   echo "tls snapshot skipped: $*" >&2
   exit 0
@@ -78,10 +83,18 @@ if ! docker compose exec -T traefik grep -Eq "\"main\": ?\"${apex_re}\"" /letsen
 fi
 
 dest="${prefix}/compose-acme.json"
-if docker compose exec -T traefik cat /letsencrypt/acme.json |
-  docker compose exec -T -e "WALG_S3_PREFIX=${prefix}" db wal-g st put -s -f --no-compress --no-encrypt compose-acme.json >&2; then
+# Bounded, so a hung exec never holds the backup lock compose-backup.sh took.
+# The upload's bound is the shorter one: if the read hangs, the upload is
+# killed first and never completes an object from a short stream.
+if timeout "$((UPLOAD_TIMEOUT_S + 10))" docker compose exec -T traefik cat /letsencrypt/acme.json |
+  timeout "$UPLOAD_TIMEOUT_S" docker compose exec -T -e "WALG_S3_PREFIX=${prefix}" db wal-g st put -s -f --no-compress --no-encrypt compose-acme.json >&2; then
   echo "tls snapshot saved to ${dest}" >&2
 else
-  echo "tls snapshot upload failed: ${dest} was not written (see the wal-g error above)" >&2
+  up_rc=$?
+  if [ "$up_rc" -eq 124 ] || [ "$up_rc" -eq 143 ]; then
+    echo "tls snapshot upload failed: ${dest} timed out after ${UPLOAD_TIMEOUT_S}s" >&2
+  else
+    echo "tls snapshot upload failed: ${dest} was not written (see the wal-g error above)" >&2
+  fi
   exit 1
 fi

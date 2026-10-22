@@ -56,10 +56,11 @@ const TLS_SNAPSHOT_SH = 'carbon/backup/tls-snapshot.sh';
 /**
  * The TLS snapshot upload (compose tls-snapshot.sh, the CronJob TLS step): the
  * prefix is the TLS snapshot folder the deploy rendered (tlsSnapshotS3Prefix),
- * the one object a fixed name.
+ * the one object a fixed name, and nothing after it on the line (an exempted
+ * line cannot carry a second, lineage-breaking command).
  */
 const TLS_SNAPSHOT_PUT =
-  /WALG_S3_PREFIX=(?:\$\{prefix\}"|"\$TLS_SNAPSHOT_S3_PREFIX")\s+(?:db\s+)?wal-g st put -s -f --no-compress --no-encrypt (?:compose-acme|k8s-secret)\.json\b/;
+  /WALG_S3_PREFIX=(?:\$\{prefix\}"|"\$TLS_SNAPSHOT_S3_PREFIX")\s+(?:db\s+)?wal-g st put -s -f --no-compress --no-encrypt (?:compose-acme|k8s-secret)\.json(?:\s*>&2)?(?:;\s*then)?\s*$/;
 const CONFIGMAP = 'carbon/k8s/base/backup/configmap-walg.yaml';
 const SYSID = '7699032860122738725';
 
@@ -278,7 +279,8 @@ describe('(c) nothing sets WALG_S3_PREFIX but walg-env.sh', () => {
   const SETS = [
     /(?:^|[;&|]\s*|\bexport\s+)WALG_S3_PREFIX=/,
     /\s-e\s+["']?WALG_S3_PREFIX=/,
-    /\benv\s+["']?WALG_S3_PREFIX=/,
+    /\benv\s+(?:-\S+\s+|\w+=\S*\s+)*["']?WALG_S3_PREFIX=/,
+    /\s--env(?:\s+|=)["']?WALG_S3_PREFIX=/,
     /^["']?WALG_S3_PREFIX["']?\s*:(?!-)/,
     /name:\s*["']?WALG_S3_PREFIX["']?\s*$/,
     /\.WALG_S3_PREFIX\s*=(?!=)/,
@@ -288,6 +290,54 @@ describe('(c) nothing sets WALG_S3_PREFIX but walg-env.sh', () => {
   const files = [...tracked('carbon'), ...tracked('src')].filter((f) =>
     /\.(sh|ya?ml|js|mjs|ts|tsx|json|toml|conf)$|\.env\.example$/.test(f),
   );
+
+  it.each([
+    'export WALG_S3_PREFIX=s3://b/x',
+    'x; WALG_S3_PREFIX=s3://b/x wal-g backup-push',
+    'docker compose exec -T -e WALG_S3_PREFIX=s3://b/x db wal-g backup-push',
+    'docker compose exec -T -e "WALG_S3_PREFIX=s3://b/x" db wal-g backup-push',
+    'docker compose exec -T --env WALG_S3_PREFIX=s3://b/x db wal-g backup-push',
+    'docker compose exec -T --env=WALG_S3_PREFIX=s3://b/x db wal-g backup-push',
+    'docker exec --env "WALG_S3_PREFIX=s3://b/x" db wal-g backup-push',
+    'kubectl exec db -- env WALG_S3_PREFIX=s3://b/x wal-g backup-push',
+    'kubectl exec db -- env -i WALG_S3_PREFIX=s3://b/x wal-g backup-push',
+    'kubectl exec db -- env LOCK_WAIT=0 PGUSER= WALG_S3_PREFIX=s3://b/x wal-g backup-push',
+    'kubectl exec db -- env -i "WALG_S3_PREFIX=s3://b/x" wal-g backup-push',
+  ])('the patterns catch the spelling %j', (line) => {
+    expect(sets(line)).toBe(true);
+  });
+
+  it('the TLS exemption covers only the bare snapshot upload, with nothing appended', () => {
+    // The real upload lines, as the census reads them (trimmed).
+    const putLine = (f: string) => {
+      const lines = read(f)
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => !isComment(l) && /wal-g st put/.test(l));
+      expect(lines, f).toHaveLength(1);
+      return lines[0];
+    };
+    const compose = putLine(TLS_SNAPSHOT_SH);
+    const k8s = putLine('carbon/k8s/base/backup/cronjob.yaml');
+    for (const line of [compose, k8s]) {
+      expect(sets(line)).toBe(true);
+      expect(TLS_SNAPSHOT_PUT.test(line)).toBe(true);
+      expect(TLS_SNAPSHOT_PUT.test(line.replace(/; then$/, ''))).toBe(true);
+      for (const tail of [
+        ' && WALG_S3_PREFIX=x wal-g backup-push',
+        '; WALG_S3_PREFIX=x wal-g backup-push',
+        ' | wal-g backup-push',
+      ]) {
+        expect(TLS_SNAPSHOT_PUT.test(line + tail), tail).toBe(false);
+        expect(TLS_SNAPSHOT_PUT.test(line.replace(/ >&2; then$/, tail)), tail).toBe(false);
+      }
+    }
+    // Another object name, or a lineage prefix, is not exempt.
+    expect(TLS_SNAPSHOT_PUT.test(compose.replace('compose-acme.json', 'base_1'))).toBe(false);
+    expect(
+      TLS_SNAPSHOT_PUT.test(k8s.replace('$TLS_SNAPSHOT_S3_PREFIX', '$WALG_S3_PREFIX_BASE')),
+    ).toBe(false);
+  });
 
   it('walg-env.sh sets it (the patterns are live)', () => {
     expect(read(WALG_ENV_FILE).split('\n').filter(sets).length).toBeGreaterThanOrEqual(3);

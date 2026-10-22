@@ -16,6 +16,7 @@ import {
   DEFAULT_BACKUP_SCHEDULE,
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { gitSafeEnv } from '../../../src/lib/command.js';
+import { tlsSnapshotS3Prefix } from '../../../src/lib/deploy/tls-snapshot.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
   seedOrgSecrets: vi.fn(async () => {}),
@@ -105,7 +106,12 @@ describe('deployK8sGitOps seeds the backup settings per environment, never into 
   });
 
   it('the TLS snapshot prefix is seeded beside the backup vars (deploy.yml renders it into vibecarbon-backup-settings)', async () => {
-    const tlsSnapshotPrefix = 's3://proj-backups/backups/proj/tls/tls/prod';
+    const tlsSnapshotPrefix = tlsSnapshotS3Prefix({
+      backupBucket: 'proj-backups',
+      projectName: 'proj',
+      envName: 'tls',
+      ca: 'prod',
+    });
     const t = await deployWith('tls', undefined, { tlsSnapshotPrefix });
     expect(t.vars.TLS_SNAPSHOT_S3_PREFIX).toBe(tlsSnapshotPrefix);
     expect(t.cronjob + t.configmap).not.toContain(tlsSnapshotPrefix);
