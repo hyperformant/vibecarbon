@@ -95,6 +95,7 @@ describe('redeploy keeps the persisted Pulumi state bucket', () => {
     vi.spyOn(HetznerProvider, 'promptApiToken').mockResolvedValue('a'.repeat(64) as never);
     vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(undefined as never);
     vi.spyOn(HetznerProvider, 'getRegionDefaults').mockReturnValue({
+      composeType: 'cpx31',
       dbType: 'cpx31',
       masterType: 'cpx31',
       workerType: 'cpx31',

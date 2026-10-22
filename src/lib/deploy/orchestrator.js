@@ -1141,6 +1141,20 @@ export async function executeDeployment(args, gatheredConfig) {
         provider: config.provider,
         region,
         ...(secondaryRegion ? { secondaryRegion } : {}),
+        // The sizes this deploy picked, recorded before any remote work so a
+        // rerun of a deploy that fails later builds the same servers instead
+        // of re-picking from a catalog whose prices may have moved (the
+        // prompts take a recorded type over the role default). Compose is one
+        // host (`serverType`); k8s records each role, as the final save does.
+        ...(deployMode === 'kubernetes'
+          ? {
+              ...(masterServerType ? { masterServerType } : {}),
+              ...(dbServerType ? { dbServerType } : {}),
+              ...(workerServerType ? { workerServerType } : {}),
+            }
+          : serverType
+            ? { serverType }
+            : {}),
         ...(domain ? { domain } : {}),
         ...(dnsProvider ? { dnsProvider } : {}),
         s3: envS3Record(s3Config, existingEnv.s3),

@@ -37,6 +37,7 @@ import {
   deriveEnvAppBucketName,
   deriveProjectBucketName,
 } from '../providers/s3-base.js';
+import { ROLE_MIN_RAM_GB, rankLocationsByPrice } from '../sizing.js';
 import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
@@ -609,6 +610,54 @@ export async function promptAppStorageKey({ environment, projectName }) {
   return { accessKey: String(accessKey).trim(), secretKey: String(secretKey).trim() };
 }
 
+/** How a role reads in the out-of-stock refusal. */
+const ROLE_LABEL = {
+  compose: 'compose',
+  master: 'k8s master',
+  db: 'k8s database',
+  worker: 'k8s worker',
+};
+
+/**
+ * The refusal for a role whose default is null: nothing among the provider's
+ * candidates for it is orderable in `region` right now (P7, ruling B6). The
+ * deploy fails closed rather than falling to a pricier type, and names the
+ * cheapest same-continent regions (at most 3) that can place every role of
+ * this deploy, each with its monthly price (servers plus billed IPv4).
+ *
+ * @param {object} Provider - the provider class
+ * @param {string} region
+ * @param {string} role - the role with nothing orderable
+ * @param {string[]} roles - every role this deploy places
+ * @param {string} environment - for the command in the hint
+ * @returns {{line: string, hint: string}} one error line, and the next step
+ *   with its command on its own line
+ */
+export function unorderableDefaultRefusal(Provider, region, role, roles, environment) {
+  const cause =
+    `no ${ROLE_LABEL[role] ?? role} server with ${ROLE_MIN_RAM_GB[role]} GB+ RAM ` +
+    `is orderable in ${region} right now`;
+  const continent = Provider.REGION_CONTINENT?.[region];
+  const neighbours = Object.keys(Provider.REGIONS).filter(
+    (r) => r !== region && continent && Provider.REGION_CONTINENT?.[r] === continent,
+  );
+  const nearby = rankLocationsByPrice(Provider, neighbours, roles).slice(0, 3);
+  if (nearby.length === 0) {
+    return {
+      line: `${cause}, and none is orderable in the other regions on this continent either`,
+      hint: `name a server type that is in stock, and deploy again:\n  vibecarbon deploy ${environment} -server-type <type>`,
+    };
+  }
+  const options = nearby.map(({ location, monthly, types }) => {
+    const price = monthly === null ? '' : ` $${monthly.toFixed(2)}/mo`;
+    return `${location} (${roles.map((r) => types[r]).join(' + ')}${price})`;
+  });
+  return {
+    line: `${cause}; orderable nearby: ${options.join(', ')}`,
+    hint: `deploy in ${nearby[0].location}, the cheapest of those, with:\n  vibecarbon deploy ${environment} -region ${nearby[0].location}`,
+  };
+}
+
 export async function gatherDeploymentConfig(args) {
   console.clear();
   printBanner();
@@ -823,6 +872,32 @@ export async function gatherDeploymentConfig(args) {
     workerServerType =
       args.workerServerType || envConfig.workerServerType || blanket || regionDefaults.workerType;
     serverType = workerServerType;
+  }
+
+  // A role default is null when nothing among the provider's candidates for
+  // it is orderable in this region right now. Refuse here, before the S3 keys
+  // are asked for and before anything is created: a null type would otherwise
+  // reach Pulumi and the env record (ruling B6: fail closed, never a pricier
+  // fallback). Only a default can be null; a flag or a recorded type is kept.
+  const roleTypes = isComposeDeploy
+    ? [['compose', serverType]]
+    : [
+        ['master', masterServerType],
+        ['db', dbServerType],
+        ['worker', workerServerType],
+      ];
+  const unorderable = roleTypes.find(([, type]) => !type);
+  if (unorderable) {
+    const { line, hint } = unorderableDefaultRefusal(
+      Provider,
+      region,
+      unorderable[0],
+      roleTypes.map(([role]) => role),
+      environment,
+    );
+    p.log.error(line);
+    p.log.info(hint);
+    process.exit(1);
   }
 
   // Guard every resolved type. The region defaults and any option list are
