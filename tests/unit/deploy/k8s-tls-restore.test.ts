@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { expectNoKeyLeak, forbiddenStrings } from './_no-key-leak.ts';
-import { k8sSecretJson, k8sSecretJsonWithCa, makeChain } from './_tls-fixtures.ts';
+import { k8sSecretJson, k8sSecretJsonWithCa } from './_tls-fixtures.ts';
 
 const H = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn() }));
 
@@ -245,16 +245,6 @@ describe('restoreK8sTlsSecret', () => {
       runKubectl: k.run,
     });
     expect(r.reason).toBe('snapshot refused: certificate does not chain to a trusted root');
-  });
-
-  it('a chain carried in tls.crt reaches the root through its intermediate', async () => {
-    const { chainReachesTrustedRoot } = await import('../../../src/lib/deploy/k8s/tls-restore.js');
-    const { leaf, intermediate, root } = makeChain();
-    expect(chainReachesTrustedRoot(`${leaf}${intermediate}`, [root])).toBe(true);
-    expect(chainReachesTrustedRoot(leaf, [root])).toBe(false);
-    expect(chainReachesTrustedRoot(`${leaf}${intermediate}`, [intermediate])).toBe(true);
-    expect(chainReachesTrustedRoot(`${leaf}${intermediate}`, [])).toBe(false);
-    expect(chainReachesTrustedRoot('not a pem', [root])).toBe(false);
   });
 
   it('staging: the chain is not checked against the platform roots', async () => {

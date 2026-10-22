@@ -4,6 +4,7 @@ import { STANDBY_SELFSIGNED_ISSUER } from '../../../src/lib/deploy/k8s/acme-issu
 import {
   buildRestoredTlsSecret,
   caSlug,
+  chainReachesTrustedRoot,
   inspectComposeAcme,
   inspectK8sTlsSecret,
   isSnapshotBetter,
@@ -14,7 +15,7 @@ import {
   writeTlsSnapshot,
 } from '../../../src/lib/deploy/tls-snapshot.js';
 import { envBackupPrefix, walgPrefixFor } from '../../../src/lib/walg/restore-base.js';
-import { acmeJson, DAY_MS, k8sSecretJson } from './_tls-fixtures.ts';
+import { acmeJson, acmeJsonWithCas, DAY_MS, k8sSecretJson, makeChain } from './_tls-fixtures.ts';
 
 const s3Config = {
   region: 'r',
@@ -60,6 +61,19 @@ describe('keys', () => {
     expect(
       tlsSnapshotS3Prefix({ backupBucket: 'b', projectName: 'myapp', envName: 'prod', ca: 'prod' }),
     ).toBe('s3://b/backups/myapp/prod/tls/prod');
+  });
+});
+
+const PROD_URI = 'https://acme-v02.api.letsencrypt.org/acme/acct/1';
+
+describe('chainReachesTrustedRoot', () => {
+  it('reaches the root through the intermediate the bundle carries', () => {
+    const { leaf, intermediate, root } = makeChain();
+    expect(chainReachesTrustedRoot(`${leaf}${intermediate}`, [root])).toBe(true);
+    expect(chainReachesTrustedRoot(leaf, [root])).toBe(false);
+    expect(chainReachesTrustedRoot(`${leaf}${intermediate}`, [intermediate])).toBe(true);
+    expect(chainReachesTrustedRoot(`${leaf}${intermediate}`, [])).toBe(false);
+    expect(chainReachesTrustedRoot('not a pem', [root])).toBe(false);
   });
 });
 
@@ -151,6 +165,91 @@ describe('inspectComposeAcme', () => {
   it('rejects a resolver with null Account and Certificates', () => {
     const text = '{"letsencrypt":{"Account":null,"Certificates":null}}';
     expect(inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' }).ok).toBe(false);
+  });
+  it('rejects a leaf whose names do not include the domain, whatever the entry label says', () => {
+    const v = inspectComposeAcme(acmeJson({ sanNames: ['other.example.com'] }), {
+      domain: 'app.example.com',
+      ca: 'staging',
+    });
+    expect(v).toEqual({ ok: false, reason: 'certificate names do not cover its domain' });
+  });
+  it('rejects a leaf missing one of the sans its entry asks for', () => {
+    const text = acmeJson({
+      extra: [
+        {
+          main: 'www.app.example.com',
+          sans: ['api.app.example.com'],
+          sanNames: ['www.app.example.com'],
+        },
+      ],
+    });
+    const v = inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' });
+    expect(v).toEqual({
+      ok: false,
+      reason: 'certificate for www.app.example.com: certificate names do not cover its domain',
+    });
+  });
+  it('prod: rejects a chain that does not reach a trusted root', () => {
+    const { json } = acmeJsonWithCas({ registrationUri: PROD_URI });
+    const v = inspectComposeAcme(json, { domain: 'app.example.com', ca: 'prod', trustRoots: [] });
+    expect(v).toEqual({ ok: false, reason: 'certificate does not chain to a trusted root' });
+  });
+  it('prod: accepts a chain that reaches one of the trust roots', () => {
+    const { json, cas } = acmeJsonWithCas({ registrationUri: PROD_URI });
+    const v = inspectComposeAcme(json, { domain: 'app.example.com', ca: 'prod', trustRoots: cas });
+    expect(v.ok).toBe(true);
+  });
+  it('prod: defaults to the platform roots, which no fixture CA is in', () => {
+    const v = inspectComposeAcme(acmeJson({ registrationUri: PROD_URI }), {
+      domain: 'app.example.com',
+      ca: 'prod',
+    });
+    expect(v).toEqual({ ok: false, reason: 'certificate does not chain to a trusted root' });
+  });
+  it('prod: refuses the file when a second entry does not chain to a trusted root', () => {
+    const { json, cas } = acmeJsonWithCas({
+      registrationUri: PROD_URI,
+      extra: [{ main: '*.app.example.com' }],
+    });
+    const v = inspectComposeAcme(json, {
+      domain: 'app.example.com',
+      ca: 'prod',
+      trustRoots: [cas[0]],
+    });
+    expect(v).toEqual({
+      ok: false,
+      reason: 'certificate for *.app.example.com: certificate does not chain to a trusted root',
+    });
+  });
+  it('refuses the whole file when a second entry is near expiry', () => {
+    const v = inspectComposeAcme(acmeJson({ extra: [{ main: '*.app.example.com', days: 3 }] }), {
+      domain: 'app.example.com',
+      ca: 'staging',
+    });
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.reason).toMatch(/^certificate for \*\.app\.example\.com: .*too soon$/);
+  });
+  it('refuses the whole file when a second entry has a key of another certificate', () => {
+    const text = acmeJson({ extra: [{ main: 'www.app.example.com', mismatchedKey: true }] });
+    expect(inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' })).toEqual({
+      ok: false,
+      reason: 'certificate for www.app.example.com: certificate and key do not match',
+    });
+  });
+  it('refuses an entry without a valid domain label, without echoing it', () => {
+    const parsed = JSON.parse(acmeJson({ extra: [{ main: 'www.app.example.com' }] }));
+    parsed.letsencrypt.Certificates[1].domain.main = "x'; SECRETTEXT";
+    const v = inspectComposeAcme(JSON.stringify(parsed), {
+      domain: 'app.example.com',
+      ca: 'staging',
+    });
+    expect(v).toEqual({ ok: false, reason: 'a certificate entry has no valid domain' });
+  });
+  it('accepts a resolver whose every entry is valid', () => {
+    const text = acmeJson({
+      extra: [{ main: '*.app.example.com' }, { main: 'www.app.example.com' }],
+    });
+    expect(inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' }).ok).toBe(true);
   });
   it('exposes a validity floor of at least a few days', () => {
     expect(MIN_REMAINING_VALIDITY_MS).toBeGreaterThan(3 * DAY_MS);

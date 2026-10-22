@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { expectNoKeyLeak, forbiddenStrings } from './_no-key-leak.ts';
-import { acmeJson } from './_tls-fixtures.ts';
+import { acmeJson, acmeJsonWithCas } from './_tls-fixtures.ts';
 
 const H = vi.hoisted(() => ({
   ssh: vi.fn(),
@@ -41,6 +41,11 @@ const { restoreTlsStep, snapshotTlsStep } = await import('../../../src/lib/deplo
 const VALID = acmeJson({});
 const SHORT = acmeJson({ days: 3 });
 const SELF_SIGNED = acmeJson({ selfSigned: true });
+const WRONG_SAN = acmeJson({ sanNames: ['other.example.com'] });
+const BAD_SECOND = acmeJson({ extra: [{ main: '*.app.example.com', days: 3 }] });
+const PROD = acmeJsonWithCas({
+  registrationUri: 'https://acme-v02.api.letsencrypt.org/acme/acct/1',
+});
 const KEY_B64 = JSON.parse(VALID).letsencrypt.Certificates[0].key as string;
 
 type Call = { ip: string; argv: string[]; opts: Record<string, unknown> };
@@ -189,6 +194,19 @@ describe('restoreComposeTls: nothing is written for a bad or missing snapshot', 
     ['near expiry', {}, async () => ({ text: SHORT }), /too soon/],
     ['self-signed', {}, async () => ({ text: SELF_SIGNED }), /self-signed/],
     ['from the other CA', { ca: 'prod' }, async () => ({ text: VALID }), /different CA/],
+    ['naming the domain only in its label', {}, async () => ({ text: WRONG_SAN }), /names do not/],
+    [
+      'with a bad second entry',
+      {},
+      async () => ({ text: BAD_SECOND }),
+      /^snapshot refused: certificate for \*\.app\.example\.com: .*too soon$/,
+    ],
+    [
+      'from prod, not chained to a platform root',
+      { ca: 'prod' },
+      async () => ({ text: PROD.json }),
+      /does not chain to a trusted root/,
+    ],
     [
       'for another domain',
       { domain: 'other.example.com' },
@@ -202,6 +220,16 @@ describe('restoreComposeTls: nothing is written for a bad or missing snapshot', 
     expect(r.restored).toBe(false);
     expect(r.reason).toMatch(re);
     expect(calls).toHaveLength(1); // the live check only
+  });
+
+  it('a prod snapshot chained to a trust root is restored', async () => {
+    const { ssh, calls } = fakeSsh();
+    const r = await restoreComposeTls({
+      ...args({ ca: 'prod' }),
+      deps: { ssh, read: async () => ({ text: PROD.json }), trustRoots: PROD.cas },
+    });
+    expect(r).toEqual({ restored: true, reason: 'restored from the last snapshot' });
+    expect(calls).toHaveLength(2);
   });
 
   it.each([

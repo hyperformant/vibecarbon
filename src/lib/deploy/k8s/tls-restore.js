@@ -32,13 +32,14 @@
  * (k8sTlsRestoreLine).
  */
 import { spawn } from 'node:child_process';
-import { X509Certificate } from 'node:crypto';
 import tls from 'node:tls';
 import { sshKubectlArgv } from '../../ssh.js';
 import {
   buildRestoredTlsSecret,
   caSlug,
+  chainReachesTrustedRoot,
   inspectK8sTlsSecret,
+  pemCertificates,
   readTlsSnapshot,
   tlsSnapshotKey,
   writeTlsSnapshot,
@@ -159,52 +160,6 @@ export function quietKubectl(env, { timeoutMs = QUIET_TIMEOUT_MS } = {}) {
 export function quietSshKubectl(ip, sshKeyPath, { timeoutMs = QUIET_TIMEOUT_MS, env } = {}) {
   return (argv, { input } = {}) =>
     runQuiet(sshKubectlArgv(ip, sshKeyPath, argv), { env, input, timeoutMs });
-}
-
-/** Every certificate in a PEM bundle, in order; [] when any block is unparsable. */
-function pemCertificates(pem) {
-  const blocks = String(pem ?? '').match(
-    /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g,
-  );
-  if (!blocks) return [];
-  try {
-    return blocks.map((b) => new X509Certificate(b));
-  } catch {
-    return [];
-  }
-}
-
-/** `issuer` issued `cert`: the names match and the signature verifies. */
-function issuedBy(cert, issuer) {
-  try {
-    return cert.checkIssued(issuer) && cert.verify(issuer.publicKey);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * True when the leaf (the first certificate of `certPem`) reaches one of
- * `trustRoots` through the intermediates the bundle carries, each link a
- * verified signature. Expiry of the links is not judged here (the leaf's own
- * validity is inspectK8sTlsSecret's).
- *
- * @param {string} certPem - a tls.crt: leaf first, then its chain
- * @param {readonly string[]} trustRoots - PEM roots (tls.rootCertificates)
- */
-export function chainReachesTrustedRoot(certPem, trustRoots) {
-  const bundle = pemCertificates(certPem);
-  const roots = trustRoots.flatMap((r) => pemCertificates(r));
-  if (bundle.length === 0 || roots.length === 0) return false;
-  let current = bundle[0];
-  const unused = bundle.slice(1);
-  for (let hops = 0; hops <= bundle.length; hops++) {
-    if (roots.some((root) => issuedBy(current, root))) return true;
-    const next = unused.findIndex((c) => issuedBy(current, c));
-    if (next < 0) return false;
-    [current] = unused.splice(next, 1);
-  }
-  return false;
 }
 
 /** The live Secret's JSON text ('' when absent), or null when it could not be read. */
@@ -410,7 +365,6 @@ export async function liveK8sTlsIdentity(runKubectl) {
 }
 
 /**
- * Save the live Secret/vibecarbon-tls as this env's k8s-secret snapshot, once/**
  * Save the live Secret/vibecarbon-tls as this env's k8s-secret snapshot, once
  * the domain serves it trusted. Refuses a Secret that would not be restored:
  * standby self-signed, not covering `dnsNames`, under 7 days left, or issued

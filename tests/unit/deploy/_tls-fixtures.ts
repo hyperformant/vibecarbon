@@ -99,27 +99,59 @@ export function makeCert(
 
 const b64 = (s: string) => Buffer.from(s).toString('base64');
 
+interface AcmeEntryOpts {
+  main: string;
+  /** Domain.sans of the entry (names besides main the entry asks for). */
+  sans?: string[];
+  /** SAN DNS names of the issued leaf; defaults to main plus sans. */
+  sanNames?: string[];
+  days?: number;
+  selfSigned?: boolean;
+  mismatchedKey?: boolean;
+}
+
+function acmeEntry(o: AcmeEntryOpts) {
+  const names = o.sanNames ?? [o.main, ...(o.sans ?? [])];
+  const { cert, key: ownKey, ca } = makeCert(names, { days: o.days, selfSigned: o.selfSigned });
+  const key = o.mismatchedKey ? makeCert(names).key : ownKey;
+  const domain = o.sans ? { main: o.main, sans: o.sans } : { main: o.main };
+  return { entry: { domain, certificate: b64(cert), key: b64(key) }, ca };
+}
+
 /** Traefik acme.json text with one certificate for `main`, registered at `registrationUri`. */
 export function acmeJson(opts: {
   main?: string;
+  sanNames?: string[];
   days?: number;
   registrationUri?: string;
   selfSigned?: boolean;
   mismatchedKey?: boolean;
+  /** More certificate entries in the same resolver, after the `main` one. */
+  extra?: AcmeEntryOpts[];
 }): string {
-  const main = opts.main ?? 'app.example.com';
-  const { cert, key: ownKey } = makeCert([main], { days: opts.days, selfSigned: opts.selfSigned });
-  const key = opts.mismatchedKey ? makeCert([main]).key : ownKey;
-  return JSON.stringify({
+  return acmeJsonWithCas(opts).json;
+}
+
+/** acmeJson plus the PEM of every throwaway CA that signed an entry (none when self-signed). */
+export function acmeJsonWithCas(opts: Parameters<typeof acmeJson>[0]): {
+  json: string;
+  cas: string[];
+} {
+  const entries = [
+    acmeEntry({ ...opts, main: opts.main ?? 'app.example.com' }),
+    ...(opts.extra ?? []).map(acmeEntry),
+  ];
+  const json = JSON.stringify({
     letsencrypt: {
       Account: {
         Registration: {
           uri: opts.registrationUri ?? 'https://acme-staging-v02.api.letsencrypt.org/acme/acct/1',
         },
       },
-      Certificates: [{ domain: { main }, certificate: b64(cert), key: b64(key) }],
+      Certificates: entries.map((e) => e.entry),
     },
   });
+  return { json, cas: entries.flatMap((e) => (e.ca ? [e.ca] : [])) };
 }
 
 interface K8sSecretOpts {

@@ -9,6 +9,7 @@
  * prints the one info line).
  */
 import { createPrivateKey, X509Certificate } from 'node:crypto';
+import tls from 'node:tls';
 import { createS3Client, envBackupPrefix } from '../walg/restore-base.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './tls-issuer-names.js';
 
@@ -69,6 +70,52 @@ function sanDnsNames(cert) {
     .map((s) => s.slice(4));
 }
 
+/** Every certificate in a PEM bundle, in order; [] when any block is unparsable. */
+export function pemCertificates(pem) {
+  const blocks = String(pem ?? '').match(
+    /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g,
+  );
+  if (!blocks) return [];
+  try {
+    return blocks.map((b) => new X509Certificate(b));
+  } catch {
+    return [];
+  }
+}
+
+/** `issuer` issued `cert`: the names match and the signature verifies. */
+function issuedBy(cert, issuer) {
+  try {
+    return cert.checkIssued(issuer) && cert.verify(issuer.publicKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the leaf (the first certificate of `certPem`) reaches one of
+ * `trustRoots` through the intermediates the bundle carries, each link a
+ * verified signature. Expiry of the links is not judged here (the leaf's own
+ * validity is checkCertAndKey's).
+ *
+ * @param {string} certPem - leaf first, then its chain (a tls.crt, an acme.json certificate)
+ * @param {readonly string[]} trustRoots - PEM roots (tls.rootCertificates)
+ */
+export function chainReachesTrustedRoot(certPem, trustRoots) {
+  const bundle = pemCertificates(certPem);
+  const roots = trustRoots.flatMap((r) => pemCertificates(r));
+  if (bundle.length === 0 || roots.length === 0) return false;
+  let current = bundle[0];
+  const unused = bundle.slice(1);
+  for (let hops = 0; hops <= bundle.length; hops++) {
+    if (roots.some((root) => issuedBy(current, root))) return true;
+    const next = unused.findIndex((c) => issuedBy(current, c));
+    if (next < 0) return false;
+    [current] = unused.splice(next, 1);
+  }
+  return false;
+}
+
 /**
  * Judge one certificate + key pair: parsable, issued by a CA (not
  * self-signed), the key belongs to it, and enough validity is left.
@@ -91,13 +138,73 @@ function checkCertAndKey(certPem, keyPem, now) {
   return { ok: true, notAfter };
 }
 
+/** A DNS name or wildcard as Traefik labels an entry; anything else is never echoed. */
+const ACME_ENTRY_NAME_RE = /^(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$/;
+
 /**
- * Judge a Traefik acme.json: right CA, a certificate for `domain`, enough
- * validity left.
+ * Judge one acme.json certificate entry: checkCertAndKey, the leaf's SAN
+ * names cover the entry's `domain.main` and every `domain.sans` (the label
+ * alone proves nothing), and, for the prod CA, the chain reaches one of
+ * `trustRoots`.
  *
  * @returns {{ ok: true, notAfter: Date } | { ok: false, reason: string }}
  */
-export function inspectComposeAcme(acmeJsonText, { domain, ca, now = new Date() }) {
+function checkAcmeEntry(entry, { ca, now, trustRoots }) {
+  const decode = (v) => Buffer.from(String(v ?? ''), 'base64').toString('utf8');
+  const certPem = decode(entry.certificate);
+  const verdict = checkCertAndKey(certPem, decode(entry.key), now);
+  if (!verdict.ok) return verdict;
+  const sans = Array.isArray(entry.domain.sans) ? entry.domain.sans : [];
+  const have = new Set(sanDnsNames(parseCert(certPem)));
+  if ([entry.domain.main, ...sans].some((n) => !have.has(n))) {
+    return { ok: false, reason: 'certificate names do not cover its domain' };
+  }
+  if (ca === 'prod' && !chainReachesTrustedRoot(certPem, trustRoots)) {
+    return { ok: false, reason: 'certificate does not chain to a trusted root' };
+  }
+  return verdict;
+}
+
+/**
+ * Judge every certificate of the resolver holding the apex, since a restore
+ * writes them all: one bad entry refuses the whole file. The apex entry is
+ * judged first; its reason is bare, another entry's names that entry.
+ *
+ * @returns {{ ok: true, notAfter: Date } | { ok: false, reason: string }}
+ */
+function checkAcmeResolver(certs, { domain, ca, now, trustRoots }) {
+  const entries = certs.filter((c) => c !== null && c !== undefined);
+  if (entries.some((c) => !ACME_ENTRY_NAME_RE.test(String(c?.domain?.main ?? '')))) {
+    return { ok: false, reason: 'a certificate entry has no valid domain' };
+  }
+  const apex = entries.find((c) => c.domain.main === domain);
+  const apexVerdict = checkAcmeEntry(apex, { ca, now, trustRoots });
+  if (!apexVerdict.ok) return apexVerdict;
+  for (const entry of entries) {
+    if (entry === apex) continue;
+    const verdict = checkAcmeEntry(entry, { ca, now, trustRoots });
+    if (!verdict.ok) {
+      return { ok: false, reason: `certificate for ${entry.domain.main}: ${verdict.reason}` };
+    }
+  }
+  return apexVerdict;
+}
+
+/**
+ * Judge a Traefik acme.json: right CA, a certificate for `domain`, and every
+ * certificate of that resolver valid (checkAcmeResolver), each with enough
+ * validity left.
+ *
+ * @param {string} acmeJsonText
+ * @param {{ domain: string, ca: 'prod'|'staging', now?: Date,
+ *   trustRoots?: readonly string[] }} args - `trustRoots` defaults to
+ *   tls.rootCertificates and is only used for the prod CA
+ * @returns {{ ok: true, notAfter: Date } | { ok: false, reason: string }}
+ */
+export function inspectComposeAcme(
+  acmeJsonText,
+  { domain, ca, now = new Date(), trustRoots = tls.rootCertificates },
+) {
   const parsed = parseJson(acmeJsonText);
   if (!parsed || typeof parsed !== 'object')
     return { ok: false, reason: 'acme.json is not valid JSON' };
@@ -106,14 +213,12 @@ export function inspectComposeAcme(acmeJsonText, { domain, ca, now = new Date() 
     const uri = resolver?.Account?.Registration?.uri;
     if (typeof uri !== 'string') continue;
     const certs = Array.isArray(resolver.Certificates) ? resolver.Certificates : [];
-    const entry = certs.find((c) => c?.domain?.main === domain);
-    if (!entry) continue;
+    if (!certs.some((c) => c?.domain?.main === domain)) continue;
     if (caSlug(uri) !== ca) {
       wrongCa = true;
       continue;
     }
-    const decode = (v) => Buffer.from(String(v ?? ''), 'base64').toString('utf8');
-    return checkCertAndKey(decode(entry.certificate), decode(entry.key), now);
+    return checkAcmeResolver(certs, { domain, ca, now, trustRoots });
   }
   return {
     ok: false,

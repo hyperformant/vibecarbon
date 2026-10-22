@@ -15,8 +15,10 @@
  * replaces the file, so a certificate Traefik issued meanwhile is kept too.
  *
  * Key handling. The snapshot is validated in full before anything is written
- * (inspectComposeAcme: key matches certificate, apex name, issuing CA, at
- * least 7 days left, not self-signed). It reaches the server on ssh stdin,
+ * (inspectComposeAcme, for every certificate of the apex's resolver: key
+ * matches certificate, the leaf's names cover the entry, issuing CA, at
+ * least 7 days left, not self-signed, and for the prod CA a chain to a root
+ * of the platform store; one bad entry refuses the file). It reaches the server on ssh stdin,
  * never on argv, and goes straight into the traefik service container, which
  * writes it with mode 600 as Traefik's own user. There is no temp file on the
  * operator or on the host; the only copy outside acme.json is a sibling in
@@ -176,7 +178,7 @@ export async function readLiveApexCertificate({
  *   domain: string|null, envName: string, ca: 'prod'|'staging'|null,
  *   s3Config: object|null, checkTimeoutMs?: number, writeTimeoutMs?: number,
  *   s3ClientOptions?: object, restart?: boolean,
- *   deps?: { read?: Function, ssh?: Function } }} args
+ *   deps?: { read?: Function, ssh?: Function, trustRoots?: readonly string[] } }} args
  * @returns {Promise<{ restored: boolean, reason: string }>}
  */
 export async function restoreComposeTls({
@@ -221,7 +223,11 @@ export async function restoreComposeTls({
       : await read(s3Config, key);
     if (timedOut) return skip(RESTORE_TIMED_OUT);
     if (!text) return skip(reason ?? 'no snapshot');
-    const verdict = inspectComposeAcme(text, { domain, ca });
+    const verdict = inspectComposeAcme(text, {
+      domain,
+      ca,
+      ...(deps.trustRoots ? { trustRoots: deps.trustRoots } : {}),
+    });
     if (!verdict.ok) return skip(`snapshot refused: ${verdict.reason}`);
 
     try {
