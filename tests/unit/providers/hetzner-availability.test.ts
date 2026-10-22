@@ -29,6 +29,9 @@ const originalServerTypes = HetznerProvider.SERVER_TYPES;
 afterEach(() => {
   (HetznerProvider as unknown as { _locationTypes: unknown })._locationTypes = null;
   (HetznerProvider as unknown as { _prices: unknown })._prices = null;
+  // The live fetch below also records the pricing read.
+  delete (HetznerProvider as unknown as { _currency?: unknown })._currency;
+  delete (HetznerProvider as unknown as { _ipv4Monthly?: unknown })._ipv4Monthly;
   HetznerProvider.SERVER_TYPES = originalServerTypes;
   vi.unstubAllGlobals();
 });

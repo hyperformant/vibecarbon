@@ -7,8 +7,8 @@
  * (`ROLE_CANDIDATES`, declared order = offline order, most reliably stocked
  * first), caches live prices from the catalog fetch it already makes
  * (`priceFor(type, location)`), and states its billed IPv4 per server
- * (`IPV4_MONTHLY`). This module is the one picker over those: it never calls a
- * provider API itself.
+ * (`IPV4_MONTHLY`, or the live `_ipv4Monthly` where its API states it). This
+ * module is the one picker over those: it never calls a provider API itself.
  */
 
 import { filterAmd64Types } from './server-types.js';
@@ -103,8 +103,8 @@ function catalogFor(Provider, location) {
 
 /**
  * The cheapest type for each role in `location`, and what the set costs per
- * month: each pick's price plus `Provider.IPV4_MONTHLY` per server (one server
- * per role), rounded to cents at the end. `monthly` is null when any price,
+ * month: each pick's price plus the billed IPv4 per server (`ipv4MonthlyAt`,
+ * one server per role), rounded to cents at the end. `monthly` is null when any price,
  * or the IPv4 price, is unknown.
  *
  * @param {object} Provider - a provider class
@@ -119,7 +119,8 @@ export function cheapestRoleSet(Provider, location, roles, minRamGb = {}) {
   const { catalog, orderable, priceFor } = catalogFor(Provider, location);
   const isArm = (type) => Provider.isArmServerType(type);
   const types = {};
-  let monthly = typeof Provider.IPV4_MONTHLY === 'number' ? 0 : null;
+  const ipv4 = ipv4MonthlyAt(Provider, location);
+  let monthly = ipv4 === null ? null : 0;
   for (const role of roles) {
     const type = pickRoleType({
       candidates: Provider.ROLE_CANDIDATES?.[role] ?? [],
@@ -133,7 +134,7 @@ export function cheapestRoleSet(Provider, location, roles, minRamGb = {}) {
     if (!type) return null;
     types[role] = type;
     const price = priceFor(type, location);
-    monthly = monthly === null || price === null ? null : monthly + price + Provider.IPV4_MONTHLY;
+    monthly = monthly === null || price === null ? null : monthly + price + ipv4;
   }
   return { types, monthly: monthly === null ? null : Math.round(monthly * 100) / 100 };
 }
@@ -257,7 +258,8 @@ export function rankStandbyLocations(Provider, locations, roles, primaryTypes = 
   return rankSets(locations, (location) => {
     const { priceFor } = catalogFor(Provider, location);
     const types = {};
-    let monthly = typeof Provider.IPV4_MONTHLY === 'number' ? 0 : null;
+    const ipv4 = ipv4MonthlyAt(Provider, location);
+    let monthly = ipv4 === null ? null : 0;
     for (const role of roles) {
       const primary = primaryTypes[role];
       const type = primary
@@ -266,15 +268,15 @@ export function rankStandbyLocations(Provider, locations, roles, primaryTypes = 
       if (!type) return null;
       types[role] = type;
       const price = priceFor(type, location);
-      monthly = monthly === null || price === null ? null : monthly + price + Provider.IPV4_MONTHLY;
+      monthly = monthly === null || price === null ? null : monthly + price + ipv4;
     }
     return { types, monthly: monthly === null ? null : Math.round(monthly * 100) / 100 };
   });
 }
 
 /**
- * A monthly price as the CLI prints it: the provider's currency symbol
- * (`Provider.CURRENCY`) and the amount to the cent, e.g. `$7.09` or
+ * A monthly price as the CLI prints it: the provider's currency symbol (the
+ * live `Provider._currency`, else `Provider.CURRENCY`) and the amount to the cent, e.g. `$7.09` or
  * `€18.39`.
  *
  * @param {object} Provider - a provider class
@@ -282,7 +284,28 @@ export function rankStandbyLocations(Provider, locations, roles, primaryTypes = 
  * @returns {string}
  */
 export function formatMonthly(Provider, monthly) {
-  return `${Provider.CURRENCY}${monthly.toFixed(2)}`;
+  return `${Provider._currency ?? Provider.CURRENCY}${monthly.toFixed(2)}`;
+}
+
+/**
+ * The billed IPv4 per server per month in `location`, the one read every
+ * priced or ranked set adds: the live price for the location
+ * (`Provider._ipv4Monthly`, read with the catalog where the provider's API
+ * states it), else the first live one, else the static `IPV4_MONTHLY`. null
+ * when none is known, which makes a set's monthly unknown.
+ *
+ * @param {object} Provider - a provider class
+ * @param {string} location
+ * @returns {number|null}
+ */
+export function ipv4MonthlyAt(Provider, location) {
+  const live = Provider._ipv4Monthly;
+  if (live) {
+    if (typeof live[location] === 'number') return live[location];
+    const first = Object.values(live).find((n) => typeof n === 'number');
+    if (first !== undefined) return first;
+  }
+  return typeof Provider.IPV4_MONTHLY === 'number' ? Provider.IPV4_MONTHLY : null;
 }
 
 /**

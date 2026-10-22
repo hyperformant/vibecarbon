@@ -973,10 +973,24 @@ export class BaseProvider {
    * The currency symbol this provider's prices (`priceFor`, `IPV4_MONTHLY`)
    * are in, for the prices the CLI prints (src/lib/sizing.js formatMonthly).
    * Each provider states it; null here, so a provider that forgets fails the
-   * provider contract instead of printing a wrong symbol.
+   * provider contract instead of printing a wrong symbol. A provider whose
+   * billing currency is per account reads it live into `_currency`, which
+   * wins.
    * @type {string|null}
    */
   static CURRENCY = null;
+
+  /**
+   * Live pricing a provider reads alongside its catalog, when its API states
+   * it (Hetzner `/v1/pricing`): the billing currency's symbol, and the billed
+   * IPv4 per server per month by location. null before a live read, or when
+   * it failed; `CURRENCY` and `IPV4_MONTHLY` stand then (src/lib/sizing.js
+   * formatMonthly, ipv4MonthlyAt).
+   * @type {string|null}
+   */
+  static _currency = null;
+  /** @type {Record<string, number>|null} */
+  static _ipv4Monthly = null;
 
   /**
    * Monthly server prices captured by fetchServerTypes from the payload it

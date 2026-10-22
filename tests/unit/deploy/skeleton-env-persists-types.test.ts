@@ -208,6 +208,40 @@ describe('the skeleton save records the sizes the deploy picked', () => {
     expect(env).not.toHaveProperty('serverType');
   });
 
+  it('a rerun under -y keeps the recorded region, though another is now preselected', async () => {
+    // The first deploy chose nbg1; the skeleton save records it before any
+    // remote work. A rerun under -y must not take the new preselection (hel1,
+    // where cx23 is now in stock) and move a half-built environment.
+    const env = await deployUntilFailure({
+      ...gathered('compose', false, { serverType: 'cpx22' }),
+      region: 'nbg1',
+    });
+    expect(env.region).toBe('nbg1');
+
+    restore = seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1');
+    vi.spyOn(console, 'clear').mockImplementation(() => {});
+    vi.spyOn(HetznerProvider, 'promptApiToken').mockResolvedValue('a'.repeat(64));
+    vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(undefined as never);
+    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue({
+      accessKey: S3.accessKey,
+      secretKey: S3.secretKey,
+      source: 'prompt',
+    } as never);
+    vi.spyOn(S3CompatibleProvider.prototype, 'validateCredentials').mockResolvedValue({
+      valid: true,
+    });
+    // Positive control: a new project would preselect hel1 here.
+    const fresh = await gatherDeploymentConfig({
+      env: 'staging',
+      provider: 'hetzner',
+      yes: true,
+    });
+    expect(fresh.region).toBe('hel1');
+    const rerun = await gatherDeploymentConfig({ env: 'prod', yes: true });
+    expect(rerun.resuming).toBe(true);
+    expect(rerun.region).toBe('nbg1');
+  });
+
   it('a rerun of the failed deploy keeps the recorded type, though another is now cheaper', async () => {
     await deployUntilFailure(gathered('compose', false, { serverType: 'cpx22' }));
 

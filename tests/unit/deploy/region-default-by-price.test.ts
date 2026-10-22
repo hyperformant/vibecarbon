@@ -59,6 +59,10 @@ vi.mock('../../../src/lib/deploy/delta.js', () => ({
 }));
 vi.mock('../../../src/lib/deploy/preflight.js', () => ({ assertOperatorConfig: vi.fn() }));
 vi.mock('../../../src/lib/ci-setup.js', () => ({ ciAvailable: () => false }));
+vi.mock('../../../src/lib/colors.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  printBanner: vi.fn(),
+}));
 
 import { gatherDeploymentConfig } from '../../../src/lib/deploy/prompts.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
@@ -227,6 +231,30 @@ describe('new-project region default by price', () => {
     expect(labelOf(regionSelect, 'nbg1')).toBe(
       'nbg1 - Nuremberg, Germany · not orderable right now',
     );
+  });
+
+  it('never preselects another continent, even when ash is cheaper than every EU location', async () => {
+    // cpx22 is the only compose type the EU stocks on 2026-10-22; priced
+    // above ash's cpx21 everywhere, hel1 is still the cheapest EU location.
+    seed(HetznerProvider, '2026-10-22/hetzner', {
+      prices: { cpx22: { fsn1: 50, nbg1: 60, hel1: 45 } },
+    });
+    const { region, selectCalls } = await runPrompts({});
+    const regionSelect = regionSelectOf(selectCalls);
+    expect(labelOf(regionSelect, 'ash')).toBe('ash - Ashburn, Virginia, USA · from $38.09/mo');
+    expect(labelOf(regionSelect, 'hel1')).toBe('hel1 - Helsinki, Finland · from $45.60/mo');
+    expect(regionSelect.initialValue).toBe('hel1');
+    expect(region).toBe('hel1');
+  });
+
+  it("a EUR-billed Hetzner account sees EUR prices with Hetzner's EUR IPv4", async () => {
+    seed(HetznerProvider, 'flux-hetzner-cx23-hel1', { pricing: 'hetzner-pricing-eur' });
+    const { selectCalls } = await runPrompts({});
+    const regionSelect = regionSelectOf(selectCalls);
+    expect(regionSelect.initialValue).toBe('hel1');
+    expect(labelOf(regionSelect, 'hel1')).toBe('hel1 - Helsinki, Finland · from \u20ac6.99/mo');
+    // ash reads its own IPv4 entry (0.55): cpx21 37.49 + 0.55.
+    expect(labelOf(regionSelect, 'ash')).toBe('ash - Ashburn, Virginia, USA · from \u20ac38.04/mo');
   });
 
   it('with no live catalog the labels and default read as before', async () => {

@@ -50,6 +50,13 @@ const EXCEPTIONS: Array<{ file: string; pathPrefix: string; reason: string }> = 
     reason: 'Singleton resource (the account itself), not a collection — nothing to paginate.',
   },
   {
+    file: 'src/lib/providers/hetzner.js',
+    pathPrefix: '/pricing',
+    reason:
+      "Singleton resource (the account's price list, one `pricing` object), not a collection: " +
+      'Hetzner does not paginate it.',
+  },
+  {
     file: 'src/lib/scaleway-guided-setup.js',
     pathPrefix: '/instance/v1/zones/fr-par-1/servers?per_page=1',
     reason:

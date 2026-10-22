@@ -29,10 +29,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
+import { withHetznerPricing } from '../helpers/catalog-fixtures.js';
 
 type ProviderStatics = {
   SERVER_TYPES: unknown;
   _locationTypes: unknown;
+  _currency?: unknown;
+  _ipv4Monthly?: unknown;
 };
 
 const hetznerOriginal: ProviderStatics = {
@@ -47,6 +50,9 @@ const doOriginal: ProviderStatics = {
 afterEach(() => {
   HetznerProvider.SERVER_TYPES = hetznerOriginal.SERVER_TYPES as never;
   (HetznerProvider as unknown as ProviderStatics)._locationTypes = hetznerOriginal._locationTypes;
+  // A live fetch also records the pricing read; put it back to the inherited null.
+  delete (HetznerProvider as unknown as ProviderStatics)._currency;
+  delete (HetznerProvider as unknown as ProviderStatics)._ipv4Monthly;
   DigitalOceanProvider.SERVER_TYPES = doOriginal.SERVER_TYPES as never;
   (DigitalOceanProvider as unknown as ProviderStatics)._locationTypes = doOriginal._locationTypes;
   vi.unstubAllGlobals();
@@ -92,7 +98,7 @@ describe('HetznerProvider.fetchServerTypes', () => {
           meta: { pagination: {} },
         }),
       );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withHetznerPricing(fetchMock));
 
     expect(await HetznerProvider.fetchServerTypes('tok')).toBe(true);
     // The page-2 SKU is present — the exact entry a single-page GET drops.
@@ -114,7 +120,7 @@ describe('HetznerProvider.fetchServerTypes', () => {
     const keysBefore = Object.keys(before as Record<string, unknown>).length;
     expect(keysBefore).toBeGreaterThan(0); // positive control: something to lose
     const fetchMock = vi.fn().mockResolvedValue(jsonResp({}));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withHetznerPricing(fetchMock));
 
     expect(await HetznerProvider.fetchServerTypes('tok')).toBe(false);
     expect(HetznerProvider.SERVER_TYPES).toBe(before);
@@ -177,7 +183,7 @@ describe('HetznerProvider.fetchServerTypes', () => {
         meta: { pagination: {} },
       }),
     );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withHetznerPricing(fetchMock));
 
     expect(await HetznerProvider.fetchServerTypes('tok')).toBe(false);
     expect(HetznerProvider.SERVER_TYPES).toBe(before);
@@ -240,7 +246,7 @@ describe('HetznerProvider.fetchServerTypes', () => {
         meta: { pagination: {} },
       }),
     );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withHetznerPricing(fetchMock));
 
     expect(await HetznerProvider.fetchServerTypes('tok')).toBe(true);
     // Live spec table replaces the fallback — both SKUs present as specs.
@@ -288,7 +294,7 @@ describe('HetznerProvider.fetchServerTypes', () => {
       )
       // 404 is non-transient — fetchWithRetry returns it without retrying.
       .mockResolvedValueOnce(jsonResp({}, 404));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withHetznerPricing(fetchMock));
 
     expect(await HetznerProvider.fetchServerTypes('tok')).toBe(false);
     expect(HetznerProvider.SERVER_TYPES).toBe(before);

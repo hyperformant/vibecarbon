@@ -313,9 +313,10 @@ export class HetznerProvider extends BaseProvider {
   // read 2026-10-22.
   static IPV4_MONTHLY = 0.6;
 
-  // The account's billing currency. `/v1/server_types` prices state none
-  // (only `/v1/pricing` does, which the catalog fetch does not read), and the
-  // accounts vibecarbon is run with bill in USD (the 2026-10-22 capture).
+  // The static currency, for offline use or when `/v1/pricing` can't be
+  // read. Prices are in the account's billing currency: `/v1/server_types`
+  // does not state it, so fetchServerTypes reads `/v1/pricing` (`_currency`,
+  // `_ipv4Monthly`, see parsePricing). The 2026-10-22 capture was USD.
   static CURRENCY = '$';
 
   // Generic default / prompt seed, and the "e.g. …" in the amd64 guard's error
@@ -517,6 +518,10 @@ export class HetznerProvider extends BaseProvider {
   static async fetchServerTypes(apiToken) {
     if (HetznerProvider._locationTypes) return true; // already fetched
 
+    // The billing currency and IPv4 price, asked for in parallel with the
+    // catalog walk. Never rejects: a failed read keeps the statics.
+    const pricing = HetznerProvider.fetchPricing(apiToken);
+
     try {
       // Walk pagination via the shared walker. /server_types fits in one
       // 50-entry page today, but "fits today" is exactly how truncated-listing
@@ -566,7 +571,11 @@ export class HetznerProvider extends BaseProvider {
       // ("availability blackout is NOT an empty catalog").
       if (Object.keys(catalog.SERVER_TYPES).length === 0) return false;
 
-      Object.assign(HetznerProvider, catalog);
+      const { currency, ipv4Monthly } = await pricing;
+      Object.assign(HetznerProvider, catalog, {
+        _currency: currency,
+        _ipv4Monthly: ipv4Monthly,
+      });
       return true;
     } catch {
       return false;
@@ -627,6 +636,55 @@ export class HetznerProvider extends BaseProvider {
     }
 
     return { SERVER_TYPES: types, _locationTypes: locationTypes, _prices: prices };
+  }
+
+  /**
+   * Read `GET /v1/pricing` (one object, no pagination) through parsePricing.
+   * Never rejects: a failure answers nulls, so the static CURRENCY and
+   * IPV4_MONTHLY stand and the catalog is not failed over a price label.
+   * @param {string} apiToken
+   * @returns {Promise<{currency: string|null, ipv4Monthly: Record<string, number>|null}>}
+   */
+  static async fetchPricing(apiToken) {
+    try {
+      const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/pricing`, {
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+      if (!response.ok) return HetznerProvider.parsePricing(null);
+      return HetznerProvider.parsePricing(await response.json());
+    } catch {
+      return HetznerProvider.parsePricing(null);
+    }
+  }
+
+  /**
+   * The billing currency and IPv4 price from a `/v1/pricing` body. Pure, so
+   * the unit fixtures load through it as the live path does.
+   *
+   * `currency` is the symbol for `pricing.currency`: EUR is `€`, USD is `$`,
+   * any other code is the code and a space (`CHF 7.09`). `ipv4Monthly` is
+   * the net monthly price per location of `pricing.primary_ips` type ipv4.
+   * Either is null when the body does not state it.
+   *
+   * @param {unknown} payload - the `/v1/pricing` response body
+   * @returns {{currency: string|null, ipv4Monthly: Record<string, number>|null}}
+   */
+  static parsePricing(payload) {
+    const pricing = payload && typeof payload === 'object' ? payload.pricing : null;
+    const code = typeof pricing?.currency === 'string' ? pricing.currency : null;
+    const SYMBOLS = { EUR: '€', USD: '$' };
+    const currency = code ? (SYMBOLS[code] ?? `${code} `) : null;
+
+    const ipv4 = Array.isArray(pricing?.primary_ips)
+      ? pricing.primary_ips.find((ip) => ip?.type === 'ipv4')
+      : null;
+    let ipv4Monthly = null;
+    for (const entry of ipv4?.prices ?? []) {
+      const monthly = Number(entry?.price_monthly?.net);
+      if (!entry?.location || !Number.isFinite(monthly)) continue;
+      ipv4Monthly = { ...ipv4Monthly, [entry.location]: monthly };
+    }
+    return { currency, ipv4Monthly };
   }
 
   /**

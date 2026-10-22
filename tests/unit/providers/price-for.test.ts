@@ -15,7 +15,11 @@ import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import { pickRoleType, ROLE_MIN_RAM_GB } from '../../../src/lib/sizing.js';
-import { readCatalogFixture, seedCatalog } from '../helpers/catalog-fixtures.js';
+import {
+  readCatalogFixture,
+  seedCatalog,
+  withHetznerPricing,
+} from '../helpers/catalog-fixtures.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: provider classes are untyped JS
 type AnyProvider = any;
@@ -204,7 +208,14 @@ function jsonResp(body: unknown, status = 200) {
 
 /** Snapshot the catalog statics a live fetch replaces, and put them back. */
 function snapshot(P: AnyProvider) {
-  const keys = ['SERVER_TYPES', '_locationTypes', '_prices', '_typeArch'];
+  const keys = [
+    'SERVER_TYPES',
+    '_locationTypes',
+    '_prices',
+    '_typeArch',
+    '_currency',
+    '_ipv4Monthly',
+  ];
   const saved = keys.map((k) => [k, Object.hasOwn(P, k), P[k]] as const);
   return () => {
     for (const [k, owned, v] of saved) {
@@ -221,9 +232,11 @@ describe('fetchServerTypes captures prices', () => {
     const fetchMock = vi.fn(async () =>
       jsonResp({ server_types: fixture.server_types, meta: { pagination: {} } }),
     );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withHetznerPricing(fetchMock));
     expect(await HetznerProvider.fetchServerTypes('tok')).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(1); // no extra request for prices
+    // Server prices come from the catalog walk itself (/v1/pricing is read
+    // only for the currency and IPv4, hetzner-pricing.test.ts).
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(HetznerProvider._prices.cpx22).toMatchObject({ nbg1: 22.99, sin: 30.99 });
     expect(HetznerProvider.priceFor('cpx12', 'fsn1')).toBe(13.49);
   });

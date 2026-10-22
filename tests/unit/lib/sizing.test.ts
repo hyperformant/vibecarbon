@@ -18,6 +18,7 @@ import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import {
   cheapestRoleSet,
   formatMonthly,
+  ipv4MonthlyAt,
   pickRoleType,
   ROLE_MIN_RAM_GB,
   rankLocationsByPrice,
@@ -445,5 +446,21 @@ describe('formatMonthly', () => {
     expect(formatMonthly(VultrProvider, 20)).toBe('$20.00');
     expect(formatMonthly(LinodeProvider, 28.8)).toBe('$28.80');
     expect(formatMonthly(ScalewayProvider, 18.39)).toBe('\u20ac18.39');
+  });
+
+  it('a live currency wins over the static one', () => {
+    expect(formatMonthly({ CURRENCY: '$', _currency: '\u20ac' }, 7)).toBe('\u20ac7.00');
+    expect(formatMonthly({ CURRENCY: '$', _currency: null }, 7)).toBe('$7.00');
+  });
+});
+
+describe('ipv4MonthlyAt', () => {
+  it("reads the location's live price, else the first live one, else the static", () => {
+    const live = { IPV4_MONTHLY: 0.6, _ipv4Monthly: { fsn1: 0.5, ash: 0.55 } };
+    expect(ipv4MonthlyAt(live, 'ash')).toBe(0.55);
+    expect(ipv4MonthlyAt(live, 'sin')).toBe(0.5);
+    expect(ipv4MonthlyAt({ IPV4_MONTHLY: 0.6, _ipv4Monthly: null }, 'ash')).toBe(0.6);
+    expect(ipv4MonthlyAt({ IPV4_MONTHLY: 0.6, _ipv4Monthly: {} }, 'ash')).toBe(0.6);
+    expect(ipv4MonthlyAt({ IPV4_MONTHLY: null }, 'ash')).toBeNull();
   });
 });
