@@ -61,24 +61,27 @@ mirrors:
       - "http://10.0.1.1:5000"
   # k3s system images from our ghcr mirror, spliced into every role's
   # registries.yaml by loadCloudInit's include directive (one copy, six
-  # scripts).
-  # k3s pulls coredns, local-path-provisioner, metrics-server and pause by
-  # tag from docker.io/rancher on every node, anonymously, and Docker Hub
-  # rate-limits anonymous pulls per IP. containerd tries this endpoint first
-  # with the rewrite (ghcr.io/hyperformant/<basename>, mirrored by
-  # publish-images.yml from K3S_SYSTEM_IMAGE_MIRRORS in src/lib/images.js),
-  # and any other docker.io image misses here and falls back to Docker Hub's
-  # default endpoint, which is never rewritten.
+  # scripts). The master runs k3s with --system-default-registry
+  # vibecarbon-system.invalid (K3S_SYSTEM_REGISTRY in src/lib/images.js;
+  # agents inherit it), so k3s names coredns, local-path-provisioner,
+  # metrics-server, the local-path helper and pause under that alias, and
+  # this is the only mirror that reaches them: each rewrite lands on
+  # ghcr.io/hyperformant/<basename>, mirrored by publish-images.yml from
+  # K3S_SYSTEM_IMAGE_MIRRORS. The alias never resolves (.invalid), so there
+  # is no fallback: a missing mirror fails the pull, loudly.
+  # Deliberately NOT a docker.io mirror: that would try every docker.io pull
+  # as ghcr.io with the same org and name first (namespace confusion).
   # No capture groups, backticks or dollar-variables anywhere in this file:
   # the DigitalOcean scripts write it through an UNQUOTED heredoc, where the
   # shell would expand them. A dollar sign followed by a quote stays literal.
-  docker.io:
+  "vibecarbon-system.invalid":
     endpoint:
       - "https://ghcr.io"
     rewrite:
       "^rancher/mirrored-coredns-coredns$": "hyperformant/mirrored-coredns-coredns"
       "^rancher/local-path-provisioner$": "hyperformant/local-path-provisioner"
       "^rancher/mirrored-metrics-server$": "hyperformant/mirrored-metrics-server"
+      "^rancher/mirrored-library-busybox$": "hyperformant/mirrored-library-busybox"
       "^rancher/mirrored-pause$": "hyperformant/mirrored-pause"
 REGEOF
 
@@ -487,6 +490,10 @@ echo "Private-NIC address guard installed (iface $PRIVATE_IFACE, ip $PRIVATE_IP)
 # GitHub failures happen inside the install script where we can't hand --retry through.
 # Wrap the whole pipeline in a bash retry loop - up to 5 attempts with 20s backoff -
 # so a transient CDN hiccup doesn't kill a fresh provision.
+# --system-default-registry names k3s's system images under an alias that
+# only our ghcr mirror serves (see _k3s-system-image-mirror.yaml in the
+# registries.yaml block above): no anonymous Docker Hub pull for coredns,
+# metrics-server, local-path or pause. Agents inherit it from this server.
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="v1.31.5+k3s1" sh -s - server \
@@ -502,6 +509,7 @@ for attempt in 1 2 3 4 5; do
       --disable traefik \
       --disable servicelb \
       --disable-cloud-controller \
+      --system-default-registry "vibecarbon-system.invalid" \
       --flannel-backend=wireguard-native \
       --kubelet-arg="cloud-provider=external" \
       --write-kubeconfig-mode=644; then

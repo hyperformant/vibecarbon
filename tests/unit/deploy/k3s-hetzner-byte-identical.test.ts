@@ -36,8 +36,8 @@
  * and the two apt-get lines.
  *
  * RE-CAPTURED 2026-10-22 (k3s system images from the ghcr mirror, ruling
- * D3): worker-init.sh's registries.yaml heredoc gained the docker.io mirror
- * from _k3s-system-image-mirror.yaml; the embedded `cloudInit` diff is
+ * D3): worker-init.sh's registries.yaml heredoc gained the system-image
+ * alias mirror from _k3s-system-image-mirror.yaml; the embedded `cloudInit` diff is
  * confined to those lines.
  */
 import { readFileSync } from 'node:fs';

@@ -127,9 +127,7 @@ jobs:
   # must be flipped to public by hand in the org's package settings — there is
   # no REST API for container package visibility. The exact list is
   # `mirroredPackageNames()` in src/lib/images.js. Verify each with an
-  # unauthenticated `docker pull` BEFORE merging any code that consumes it;
-  # release.yml's mirrored-images job refuses a release until every mirror
-  # ref is pullable anonymously.
+  # unauthenticated `docker pull` BEFORE merging any code that consumes it.
   #
   # PACKAGE PAGE: bare on purpose — it cannot currently be otherwise, and the
   # failure mode is silent, so read this before "fixing" it.
@@ -251,6 +249,7 @@ jobs:
           SRC: ${{ matrix.src }}
           DST: ${{ matrix.dst }}
           PINNED: ${{ matrix.digest }}
+          INDEX: ${{ matrix.index }}
         # SRC is `<registry>/<repo>:<tag>` for both registries, e.g.
         # docker.io/library/traefik:v3.6.11 or registry.k8s.io/pause:3.9.
         # Upstream publishes a multi-platform index. vibecarbon runs x86-64
@@ -258,15 +257,22 @@ jobs:
         # the linux/amd64 child manifest and copy just that — hauling the other
         # platforms' blobs into our org would be pure storage tax. The digest is
         # PINNED in src/lib/images.js (MirroredImage.digest) and every deployed
-        # ref carries it (`name:tag@digest`). The job resolves upstream's tag at
-        # run time only to prove it still points at that pin: if upstream
-        # retagged, the leg fails and asks for a re-pin rather than shipping
-        # bits nobody reviewed.
+        # ref carries it (`name:tag@digest`).
+        #
+        # WHERE THE CHILD IS READ: from upstream's pinned INDEX
+        # (MirroredImage.index, `${SRC%:*}@$INDEX`) when the entry has one,
+        # which every Docker Hub entry does, so an upstream re-push of the tag
+        # cannot fail or change the leg; otherwise from the tag, to prove it
+        # still points at the pin (a moved tag fails the leg and asks for a
+        # re-pin rather than shipping bits nobody reviewed).
+        #
+        # IDEMPOTENT: when ghcr already holds $DST@$PINNED and the ghcr TAG's
+        # amd64 child is $PINNED, the leg is done before it touches upstream,
+        # so a re-run neither depends on upstream nor spends Docker Hub quota.
         #
         # `imagetools create` is a registry-side manifest copy: it re-pushes
         # the same layer blobs and the same config, so the mirrored image is
-        # bit-identical to upstream's. Re-running is a no-op that lands on the
-        # same digest, which is what makes this safe to fire on every push.
+        # bit-identical to upstream's.
         # The select is on PLATFORM ONLY, deliberately. Upstream's index uses
         # `application/vnd.docker.distribution.manifest.v2+json`, not the OCI
         # `image.manifest` type (verified against the live index 2026-07-31),
@@ -277,20 +283,32 @@ jobs:
         # this exact jq program against a captured copy of upstream's index.
         run: |
           set -euo pipefail
-          echo "mirroring $SRC -> $DST"
-          DIGEST=$(docker buildx imagetools inspect --raw "$SRC" \
-            | jq -r '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0]')
+          amd64_child() {
+            docker buildx imagetools inspect --raw "$1" \
+              | jq -r '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0]'
+          }
+          if docker buildx imagetools inspect "$DST@$PINNED" > /dev/null 2>&1 \
+            && [ "$(amd64_child "$DST" 2> /dev/null || true)" = "$PINNED" ]; then
+            echo "$DST already names $PINNED; nothing to copy"
+            exit 0
+          fi
+          READ="$SRC"
+          if [ -n "$INDEX" ]; then
+            READ="${SRC%:*}@$INDEX"
+          fi
+          echo "mirroring $READ -> $DST"
+          DIGEST=$(amd64_child "$READ")
           if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-            echo "::error::no linux/amd64 manifest found in $SRC" >&2
+            echo "::error::no linux/amd64 manifest found in $READ" >&2
             exit 1
           fi
           echo "resolved amd64 manifest: $DIGEST"
           if [ "$DIGEST" != "$PINNED" ]; then
-            echo "::error::$SRC linux/amd64 is $DIGEST, but src/lib/images.js pins $PINNED; re-pin after reviewing upstream's change" >&2
+            echo "::error::$READ linux/amd64 is $DIGEST, but src/lib/images.js pins $PINNED; re-pin after reviewing upstream's change" >&2
             exit 1
           fi
           docker buildx imagetools create --tag "$DST" "${SRC%:*}@$PINNED"
-      - name: Verify the mirrored tag and the pinned digest resolve
+      - name: Verify the mirrored digest resolves and the tag names it
         env:
           DST: ${{ matrix.dst }}
           PINNED: ${{ matrix.digest }}
@@ -298,22 +316,59 @@ jobs:
         # That flip is a manual, one-time operator step (see the job header),
         # and it is per PACKAGE, not per tag: flipping csi-provisioner once
         # covers every tag this matrix pushes under that name.
+        #
+        # The TAG check matters for pulls by tag: k3s names its system images
+        # by tag (K3S_SYSTEM_IMAGE_MIRRORS), so the ghcr tag's amd64 child must
+        # be exactly the pinned digest, not merely present in the repo.
         run: |
           set -euo pipefail
-          docker buildx imagetools inspect "$DST"
           docker buildx imagetools inspect "$DST@$PINNED"
+          TAGGED=$(docker buildx imagetools inspect --raw "$DST" \
+            | jq -r '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0]')
+          if [ "$TAGGED" != "$PINNED" ]; then
+            echo "::error::$DST's linux/amd64 child is $TAGGED, not the pinned $PINNED" >&2
+            exit 1
+          fi
 
-  # Weekly: newer upstream tags for every mirrored repo, into the job summary.
-  # REPORT ONLY, never a re-pin: Dependabot cannot see refs that point at our
-  # mirror, so this is how an upstream release gets noticed, and a bump stays
-  # a reviewed edit of {tag, digest} in src/lib/images.js. Read-only token, no
-  # environment, no login (tags/list takes an anonymous token).
+  # Weekly: newer upstream tags for every mirrored repo. REPORT ONLY, never a
+  # re-pin: Dependabot cannot see refs that point at our mirror, so this is
+  # how an upstream release gets noticed, and a bump stays a reviewed edit of
+  # {tag, digest, index} in src/lib/images.js. Per-entry ceilings in
+  # scripts/mirror-drift.mjs hold back tags we must not take (alpine/k8s past
+  # one minor of K3S_VERSION, registry 3.x, k3s system images and CSI
+  # sidecars, which move only with K3S_VERSION / the CSI driver). With
+  # anything to take it opens, or updates, ONE issue with a fixed title.
+  # Schedule only: a lookup failure fails this job loudly, and must never
+  # turn a dispatched publish red. No environment, no login (tags/list takes
+  # an anonymous token); the only write is `issues`.
   mirror-upstream-drift:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write   # open or update the one drift issue
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: List newer upstream tags per mirrored repo
         run: |
           set -euo pipefail
-          node scripts/mirror-drift.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+          node scripts/mirror-drift.mjs > "$RUNNER_TEMP/drift.md"
+          cat "$RUNNER_TEMP/drift.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Open or update the drift issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: 'Mirror drift: newer upstream tags for ghcr mirrors'
+        run: |
+          set -euo pipefail
+          if grep -q '^<!-- mirror-drift: none -->$' "$RUNNER_TEMP/drift.md"; then
+            echo "no actionable drift"
+            exit 0
+          fi
+          NUM=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number,title \
+            --jq "map(select(.title == env.TITLE))[0].number // empty")
+          if [ -n "$NUM" ]; then
+            gh issue edit "$NUM" --body-file "$RUNNER_TEMP/drift.md"
+          else
+            gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/drift.md"
+          fi

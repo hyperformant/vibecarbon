@@ -27,9 +27,10 @@
  *       entry exactly (name, tag AND digest), except this repo's own images.
  *
  * k3s's own system images (coredns, local-path-provisioner, metrics-server,
- * pause) are referenced by k3s itself, by tag, from docker.io. They reach the
- * mirror through a containerd docker.io mirror in /etc/rancher/k3s/registries.yaml
- * (the shared snippet below), asserted at the bottom against K3S_VERSION.
+ * the local-path helper, pause) are referenced by k3s itself, by tag. k3s runs
+ * with --system-default-registry set to a never-resolving alias, and the only
+ * ghcr-bound containerd mirror is for that alias (never for docker.io:
+ * namespace confusion), asserted at the bottom against K3S_VERSION.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -51,6 +52,7 @@ import {
   DOCKERHUB_MIRRORS,
   DOCKERHUB_UPSTREAM_REGISTRY,
   K3S_SYSTEM_IMAGE_MIRRORS,
+  K3S_SYSTEM_REGISTRY,
   k8sMirrorRef,
   MIRRORED_IMAGES,
   mirroredImageName,
@@ -285,6 +287,10 @@ describe('core-path images come from our ghcr mirror', () => {
     expect(PROD_IMAGES.traefik).toBe(traefikImageRef());
     // A Dependabot bump of the base tag goes red here until the mirror moves.
     expect(base.split('@')[0]).toBe(`traefik:${TRAEFIK_MIRROR.tag}`);
+    // Same bits, not just the same tag: the base pins Docker Hub's index, and
+    // TRAEFIK_MIRROR.index is that index, whose amd64 child the live mirror
+    // job asserts equals TRAEFIK_MIRROR.digest before copying.
+    expect(base.split('@')[1]).toBe(TRAEFIK_MIRROR.index);
   });
 
   it('every core-path image named in the plan is mirrored and reaches a deploy', () => {
@@ -315,15 +321,16 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
    * The system images k3s itself pulls, from the k3s-images.txt asset of the
    * pinned release (https://github.com/k3s-io/k3s/releases, v1.31.5+k3s1,
    * fetched 2026-10-22). traefik/klipper-helm (helm-controller's traefik
-   * chart, `--disable traefik`), klipper-lb (`--disable servicelb`) and the
-   * local-path helper busybox (only for a local-path PVC, which the deploy
-   * refuses) are never pulled on our clusters and are not mirrored.
+   * chart, `--disable traefik`) and klipper-lb (`--disable servicelb`) are
+   * never pulled on our clusters and are not mirrored. The local-path helper
+   * busybox is mirrored: through the alias there is no Docker Hub fallback.
    */
   const K3S_IMAGES_TXT = {
     version: 'v1.31.5+k3s1',
     mirrored: [
       'docker.io/rancher/local-path-provisioner:v0.0.30',
       'docker.io/rancher/mirrored-coredns-coredns:1.12.0',
+      'docker.io/rancher/mirrored-library-busybox:1.36.1',
       'docker.io/rancher/mirrored-metrics-server:v0.7.2',
       'docker.io/rancher/mirrored-pause:3.6',
     ],
@@ -337,6 +344,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
     'do-worker-init.sh',
     'do-db-init.sh',
   ];
+  const SERVER_SCRIPTS = ['master-init.sh', 'do-master-init.sh'];
 
   it('the mirrored set is exactly the pinned k3s release’s system images we pull', () => {
     const k3sVersion = read('src/lib/deploy/k8s/k3s.js').match(/K3S_VERSION = '([^']+)'/)?.[1];
@@ -347,7 +355,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
     for (const image of K3S_SYSTEM_IMAGE_MIRRORS) expect(MIRRORED_IMAGES).toContain(image);
   });
 
-  const EXPECTED_HUB_MIRROR = {
+  const EXPECTED_ALIAS_MIRROR = {
     endpoint: ['https://ghcr.io'],
     rewrite: Object.fromEntries(
       K3S_SYSTEM_IMAGE_MIRRORS.map((i) => [
@@ -357,34 +365,86 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
     ),
   };
 
-  it('the registries.yaml snippet mirrors docker.io onto ghcr and rewrites exactly those repos', () => {
+  it('the alias is a reserved name that never resolves', () => {
+    // RFC 2606 `.invalid`: only the registries.yaml mirror can serve it, and
+    // containerd's last-resort default endpoint fails fast.
+    expect(K3S_SYSTEM_REGISTRY).toMatch(/^[a-z0-9-]+\.invalid$/);
+  });
+
+  it('the registries.yaml snippet mirrors ONLY the alias onto ghcr, rewriting exactly those repos', () => {
     const doc = loadYaml(`mirrors:\n${read(SNIPPET)}`) as {
       mirrors: Record<string, unknown>;
     };
-    expect(doc.mirrors['docker.io']).toEqual(EXPECTED_HUB_MIRROR);
+    expect(doc.mirrors).toEqual({ [K3S_SYSTEM_REGISTRY]: EXPECTED_ALIAS_MIRROR });
     // Nothing a shell would expand: the DO scripts write registries.yaml
     // through an UNQUOTED heredoc.
     expect(read(SNIPPET)).not.toMatch(/[`\\]|\$[\w{(]/);
   });
 
-  it.each(ROLE_SCRIPTS)('%s writes the mirror into registries.yaml before k3s starts', (name) => {
-    const script = loadCloudInit(name);
-    const heredoc = script.match(
-      /cat > \/etc\/rancher\/k3s\/registries\.yaml (<< '?REGEOF'?\n[\s\S]*?\nREGEOF)\n/,
-    )?.[1];
-    expect(heredoc, `${name} has no registries.yaml heredoc`).toBeDefined();
-    // Run the heredoc through bash exactly as cloud-init will (quoted or not),
-    // with the per-node local-registry address the script would know.
-    const written = execFileSync('bash', ['-c', `cat ${heredoc}`], {
-      encoding: 'utf8',
-      env: { PATH: process.env.PATH, PRIVATE_IP: '10.0.0.9', master_ip: '10.0.0.1' },
-    }).replace(/\$\{(\w+)\}/g, '10.0.0.1'); // renderScript's ${var}s in quoted heredocs
-    const doc = loadYaml(written) as { mirrors: Record<string, unknown> };
-    expect(doc.mirrors['docker.io']).toEqual(EXPECTED_HUB_MIRROR);
-    expect(Object.keys(doc.mirrors)).toHaveLength(2);
-    // k3s reads registries.yaml only at start, so it must exist before install.
-    expect(script.indexOf('registries.yaml << ')).toBeLessThan(
-      script.search(/curl[^\n]*get\.k3s\.io/),
-    );
+  it.each(SERVER_SCRIPTS)('%s runs k3s with the alias as its system default registry', (name) => {
+    // Agents inherit it from the server (k3s pkg/agent/config: PauseImage and
+    // the packaged manifests are prefixed with controlConfig.SystemDefaultRegistry).
+    const flags = loadCloudInit(name).match(/sh -s - server \\\n([\s\S]*?); then/)?.[1] ?? '';
+    expect(flags).toContain(`--system-default-registry "${K3S_SYSTEM_REGISTRY}" \\`);
   });
+
+  /**
+   * SECURITY: a mirror for a PUBLIC registry whose endpoint is a different
+   * public registry tries every pull from the first under the same org/name on
+   * the second (docker.io/<org>/<name> as ghcr.io/<org>/<name>): namespace
+   * confusion. Allowed mirrors: the node-local registry (a private
+   * IP:port that mirrors itself over http) and the alias.
+   */
+  function forbiddenMirrors(mirrors: Record<string, { endpoint?: string[] }>): string[] {
+    const bad: string[] = [];
+    for (const [host, cfg] of Object.entries(mirrors)) {
+      if (host === K3S_SYSTEM_REGISTRY) continue;
+      const local = /^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\.\d+\.\d+(\.\d+)?:\d+$/.test(host);
+      if (local && (cfg.endpoint ?? []).every((e) => e === `http://${host}`)) continue;
+      bad.push(`${host} -> ${(cfg.endpoint ?? []).join(', ')}`);
+    }
+    return bad;
+  }
+
+  it('the namespace-confusion rule bites on a public-registry mirror', () => {
+    expect(forbiddenMirrors({ 'docker.io': { endpoint: ['https://ghcr.io'] } })).toEqual([
+      'docker.io -> https://ghcr.io',
+    ]);
+    expect(forbiddenMirrors({ '10.0.1.1:5000': { endpoint: ['https://ghcr.io'] } })).toHaveLength(
+      1,
+    );
+    expect(
+      forbiddenMirrors({
+        '10.0.1.1:5000': { endpoint: ['http://10.0.1.1:5000'] },
+        [K3S_SYSTEM_REGISTRY]: EXPECTED_ALIAS_MIRROR,
+      }),
+    ).toEqual([]);
+  });
+
+  it.each(ROLE_SCRIPTS)(
+    '%s writes the alias mirror into registries.yaml before k3s starts',
+    (name) => {
+      const script = loadCloudInit(name);
+      const heredoc = script.match(
+        /cat > \/etc\/rancher\/k3s\/registries\.yaml (<< '?REGEOF'?\n[\s\S]*?\nREGEOF)\n/,
+      )?.[1];
+      expect(heredoc, `${name} has no registries.yaml heredoc`).toBeDefined();
+      // Run the heredoc through bash exactly as cloud-init will (quoted or not),
+      // with the per-node local-registry address the script would know.
+      const written = execFileSync('bash', ['-c', `cat ${heredoc}`], {
+        encoding: 'utf8',
+        env: { PATH: process.env.PATH, PRIVATE_IP: '10.0.0.9', master_ip: '10.0.0.1' },
+      }).replace(/\$\{(\w+)\}/g, '10.0.0.1'); // renderScript's ${var}s in quoted heredocs
+      const doc = loadYaml(written) as { mirrors: Record<string, { endpoint?: string[] }> };
+      expect(doc.mirrors[K3S_SYSTEM_REGISTRY]).toEqual(EXPECTED_ALIAS_MIRROR);
+      expect(Object.keys(doc.mirrors)).toHaveLength(2);
+      expect(forbiddenMirrors(doc.mirrors)).toEqual([]);
+      // Only one registries.yaml write per script, and no other mirror config.
+      expect(script.match(/registries\.yaml << /g)).toHaveLength(1);
+      // k3s reads registries.yaml only at start, so it must exist before install.
+      expect(script.indexOf('registries.yaml << ')).toBeLessThan(
+        script.search(/curl[^\n]*get\.k3s\.io/),
+      );
+    },
+  );
 });

@@ -133,25 +133,36 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Inspect each mirror ref anonymously
+      - name: Inspect each mirror ref and tag anonymously
         run: |
           set -euo pipefail
           DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
           export DOCKER_CONFIG
           mkdir -p "$DOCKER_CONFIG"
-          refs=$(node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log(m.MIRRORED_IMAGES.map(m.k8sMirrorRef).join('\n'));")
-          test -n "$refs"
+          # One "<tag ref> <pinned digest>" line per mirror.
+          pairs=$(node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log(m.MIRRORED_IMAGES.map((i) => m.k8sMirrorTagRef(i) + ' ' + i.digest).join('\n'));")
+          test -n "$pairs"
           missing=0
-          for ref in $refs; do
-            if docker buildx imagetools inspect "$ref" > /dev/null; then
-              echo "ok $ref"
-            else
+          while read -r tag pinned; do
+            ref="$tag@$pinned"
+            # The digest servers pin, and the TAG k3s pulls its system images
+            # by: its linux/amd64 child must be exactly the pinned digest.
+            if ! docker buildx imagetools inspect "$ref" > /dev/null; then
               echo "::error::$ref is not pullable anonymously"
               missing=1
+              continue
             fi
-          done
+            tagged=$(docker buildx imagetools inspect --raw "$tag" \
+              | jq -r '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0]' || true)
+            if [ "$tagged" != "$pinned" ]; then
+              echo "::error::$tag's linux/amd64 child is ${tagged:-unreadable}, not the pinned $pinned"
+              missing=1
+              continue
+            fi
+            echo "ok $ref"
+          done <<< "$pairs"
           if [ "$missing" -ne 0 ]; then
-            echo "::error::refusing to release: a ghcr mirror ref above is missing or private. Run publish-images (mirror-upstream-images) on main, flip every new package public by hand (mirroredPackageNames() in src/lib/images.js), then dispatch again."
+            echo "::error::refusing to release: a ghcr mirror ref or tag above is missing, private or moved. Run publish-images (mirror-upstream-images) on main, flip every new package public by hand (mirroredPackageNames() in src/lib/images.js), then dispatch again."
             exit 1
           fi
 

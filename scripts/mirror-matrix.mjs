@@ -5,7 +5,8 @@
  * alike. `src` is the upstream ref (`docker.io/library/traefik:v3.6.11`,
  * `registry.k8s.io/pause:3.9`); `dst` is the tag the job
  * pushes; `digest` is the pinned upstream linux/amd64 manifest the job copies
- * (and the digest every deployed ref carries).
+ * (and the digest every deployed ref carries); `index` is the upstream index
+ * that child is read from, or '' to read it from the tag (MirroredImage.index).
  *
  * Consumed by the `mirror-matrix` job in
  * .github/workflows/publish-images.yml, which feeds it
@@ -30,6 +31,7 @@ const matrix = MIRRORED_IMAGES.map((image) => ({
   src: upstreamRef(image),
   dst: k8sMirrorTagRef(image),
   digest: image.digest,
+  index: image.index ?? '',
 }));
 
 // Single line: the workflow assigns this to a $GITHUB_OUTPUT value, and

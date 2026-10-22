@@ -634,8 +634,8 @@ describe('release.yml refuses a release while any ghcr mirror ref is not anonymo
 
   it('reads every mirror ref from src/lib/images.js, the CLI authority', () => {
     expect(run).toContain("import('./src/lib/images.js')");
-    expect(run).toContain('m.MIRRORED_IMAGES.map(m.k8sMirrorRef)');
-    expect(run).toContain('test -n "$refs"');
+    expect(run).toContain("m.MIRRORED_IMAGES.map((i) => m.k8sMirrorTagRef(i) + ' ' + i.digest)");
+    expect(run).toContain('test -n "$pairs"');
   });
 
   it('inspects each digest-pinned ref anonymously and refuses on any miss', () => {
@@ -645,6 +645,12 @@ describe('release.yml refuses a release while any ghcr mirror ref is not anonymo
     expect(run).toMatch(/::error::refusing to release/);
     expect(run).toMatch(/exit 1/);
     expect(JSON.stringify(gate)).not.toMatch(/docker\/login-action|docker login|secrets\./);
+  });
+
+  it('refuses when a mirror TAG’s amd64 child is not the pinned digest (k3s pulls by tag)', () => {
+    expect(run).toContain('docker buildx imagetools inspect --raw "$tag"');
+    expect(run).toMatch(/architecture == "amd64"/);
+    expect(run).toContain('if [ "$tagged" != "$pinned" ]; then');
   });
 });
 

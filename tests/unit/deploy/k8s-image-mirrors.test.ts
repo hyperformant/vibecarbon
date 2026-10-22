@@ -37,8 +37,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import { extname, join, sep } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { newerTags } from '../../../scripts/mirror-drift.mjs';
 import {
+  holdFor,
+  NO_DRIFT_MARKER,
+  newerTags,
+  readK3sVersion,
+  renderReport,
+} from '../../../scripts/mirror-drift.mjs';
+import {
+  ALPINE_K8S_MIRROR,
   alpineImageRef,
   alpineK8sImageRef,
   assertDistinctPackageNames,
@@ -52,6 +59,7 @@ import {
   DOCKERHUB_UPSTREAM_REGISTRY,
   dockerSocketProxyImageRef,
   HETZNER_CSI_VERSION,
+  K3S_SYSTEM_IMAGE_MIRRORS,
   K8S_MIRROR_ORG,
   K8S_UPSTREAM_REGISTRY,
   k8sMirrorRef,
@@ -60,8 +68,10 @@ import {
   mirroredImageName,
   mirroredPackageNames,
   pauseImageRef,
+  REGISTRY_MIRROR,
   registryImageRef,
   socatImageRef,
+  TRAEFIK_MIRROR,
   traefikImageRef,
   upstreamRef,
 } from '../../../src/lib/images.js';
@@ -252,6 +262,7 @@ describe('mirror set shape', () => {
       'livenessprobe',
       'local-path-provisioner',
       'mirrored-coredns-coredns',
+      'mirrored-library-busybox',
       'mirrored-metrics-server',
       'mirrored-pause',
       'pause',
@@ -608,6 +619,7 @@ describe('publish workflow mirrors exactly the set', () => {
         src: upstreamRef(image),
         dst: k8sMirrorTagRef(image),
         digest: image.digest,
+        index: image.index ?? '',
       })),
     );
     // Docker Hub mirrors ride the same matrix: the copy reads docker.io.
@@ -615,6 +627,7 @@ describe('publish workflow mirrors exactly the set', () => {
       src: 'docker.io/library/traefik:v3.6.11',
       dst: 'ghcr.io/hyperformant/traefik:v3.6.11',
       digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      index: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
     });
     // Every destination is a distinct tag under the org — the mirror job runs
     // one matrix leg per entry and must never have two legs racing one ref.
@@ -655,12 +668,20 @@ describe('publish workflow mirrors exactly the set', () => {
     };
     expect(wf.on.schedule?.length).toBe(1);
     const drift = wf.jobs['mirror-upstream-drift'];
-    expect(drift.if).toMatch(/github\.event_name == 'schedule'/);
-    expect(drift.permissions).toBeUndefined(); // read-only default
+    // Schedule only: its lookup failure must never turn a dispatched publish red.
+    expect(drift.if).toBe("github.event_name == 'schedule'");
+    // Least privilege: read the repo, write issues, nothing else.
+    expect(drift.permissions).toEqual({ contents: 'read', issues: 'write' });
     expect(drift.environment).toBeUndefined();
-    expect(drift.steps.map((st) => st.run ?? '').join('\n')).toMatch(
-      /node scripts\/mirror-drift\.mjs \| tee -a "\$GITHUB_STEP_SUMMARY"/,
-    );
+    const runs = drift.steps.map((st) => st.run ?? '').join('\n');
+    expect(runs).toMatch(/node scripts\/mirror-drift\.mjs > "\$RUNNER_TEMP\/drift\.md"/);
+    expect(runs).toContain('$GITHUB_STEP_SUMMARY');
+    // One issue, fixed title: updated when open, created otherwise, untouched
+    // when the report carries the no-drift marker.
+    expect(runs).toContain(`grep -q '^${NO_DRIFT_MARKER}$'`);
+    expect(runs).toMatch(/gh issue edit "\$NUM" --body-file/);
+    expect(runs).toMatch(/gh issue create --title "\$TITLE" --body-file/);
+    expect(runs).toContain('map(select(.title == env.TITLE))[0].number');
     // A schedule must never push to ghcr: every other job skips it.
     for (const [name, job] of Object.entries(wf.jobs)) {
       if (name === 'mirror-upstream-drift' || name === 'mirror-upstream-images') continue;
@@ -668,6 +689,80 @@ describe('publish workflow mirrors exactly the set', () => {
     }
     // mirror-upstream-images needs mirror-matrix, so it skips with it.
     expect(code).toMatch(/mirror-upstream-images:\n\s+needs: mirror-matrix/);
+  });
+
+  it('the drift report holds back tags we must not take, and marks a report with nothing to take', () => {
+    const k3s = readK3sVersion();
+    expect(k3s).toMatch(/^v1\.\d+\.\d+\+k3s\d+$/);
+    const [, minor] = k3s.replace(/^v/, '').split('.').map(Number);
+    const kubectl = holdFor(ALPINE_K8S_MIRROR, k3s);
+    expect(kubectl?.allows(`1.${minor + 1}.0`)).toBe(true);
+    expect(kubectl?.allows(`1.${minor + 2}.0`)).toBe(false);
+    const registry = holdFor(REGISTRY_MIRROR, k3s);
+    expect(registry?.allows('2.8.4')).toBe(true);
+    expect(registry?.allows('3.0.0')).toBe(false);
+    for (const image of K3S_SYSTEM_IMAGE_MIRRORS)
+      expect(holdFor(image, k3s)?.allows('9.9.9')).toBe(false);
+    for (const spec of CSI_SIDECAR_MIRRORS.hetzner) {
+      for (const image of Object.values(spec.containers))
+        expect(holdFor(image, k3s)?.allows('v99.0.0')).toBe(false);
+    }
+    expect(holdFor(TRAEFIK_MIRROR, k3s)).toBeNull();
+    const none = renderReport([
+      { upstream: 'docker.io/library/traefik', pinned: 'v3.6.11', newer: [], hold: null },
+    ]);
+    expect(none).toContain(NO_DRIFT_MARKER);
+    const some = renderReport([
+      { upstream: 'docker.io/library/traefik', pinned: 'v3.6.11', newer: ['v3.6.12'], hold: null },
+      {
+        upstream: 'docker.io/library/registry',
+        pinned: '2.8.3',
+        newer: [],
+        hold: 'registry stays on 2.x',
+      },
+    ]);
+    expect(some).not.toContain(NO_DRIFT_MARKER);
+    expect(some).toContain('| docker.io/library/traefik | v3.6.11 | v3.6.12 |');
+    expect(some).toContain('- docker.io/library/registry (2.8.3): registry stays on 2.x');
+    // A lookup failure is a row, never a silent "no drift".
+    const failed = renderReport([
+      { upstream: 'x/y', pinned: '1.0', newer: [], hold: null, error: '503' },
+    ]);
+    expect(failed).not.toContain(NO_DRIFT_MARKER);
+  });
+
+  it('the mirror leg reads the child from the pinned index, skips when already mirrored, and checks the tag', () => {
+    const leg = code.slice(
+      code.indexOf('mirror-upstream-images:'),
+      code.indexOf('mirror-upstream-drift:'),
+    );
+    expect(leg).toMatch(/INDEX: \$\{\{ matrix\.index \}\}/);
+    expect(leg).toMatch(/READ="\$\{SRC%:\*\}@\$INDEX"/);
+    expect(leg).toMatch(/DIGEST=\$\(amd64_child "\$READ"\)/);
+    // Idempotent: a re-run that finds $DST@$PINNED (and the tag naming it)
+    // exits before any upstream read.
+    const skip = leg.indexOf('nothing to copy');
+    expect(leg).toMatch(/imagetools inspect "\$DST@\$PINNED" > \/dev\/null 2>&1/);
+    expect(skip).toBeGreaterThan(-1);
+    expect(skip).toBeLessThan(leg.indexOf('READ="$SRC"'));
+    // The verify step: the ghcr TAG's amd64 child is the pin (k3s pulls by tag).
+    expect(leg).toMatch(/TAGGED=\$\(docker buildx imagetools inspect --raw "\$DST"/);
+    expect(leg).toContain('if [ "$TAGGED" != "$PINNED" ]; then');
+  });
+
+  it('every Docker Hub entry pins its upstream index (tags there move)', () => {
+    for (const image of DOCKERHUB_MIRRORS) {
+      expect(image.index, image.repo).toMatch(/^sha256:[a-f0-9]{64}$/);
+      expect(image.index).not.toBe(image.digest);
+    }
+    // socat keeps the bits pinned before the mirror: the old index and its child.
+    const socat = DOCKERHUB_MIRRORS.find((i) => i.repo === 'alpine/socat');
+    expect(socat?.index).toBe(
+      'sha256:fb3862c949af7c79996d0e514ee96128644d840835ed5368eeecb14a869de361',
+    );
+    expect(socat?.digest).toBe(
+      'sha256:99316fc7e1e8b5f40308105c54c9bed5a45891acee6480e8f0f9d2f4e69dee02',
+    );
   });
 
   it('the drift filter keeps only same-shape tags newer than the pin', () => {

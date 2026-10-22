@@ -27,9 +27,10 @@
  * wrap adds nothing, and they hold regardless of the stored bytes.
  *
  * RE-CAPTURED 2026-10-22 (k3s system images from the ghcr mirror, ruling
- * D3): each registries.yaml heredoc gained the docker.io mirror spliced in
- * from _k3s-system-image-mirror.yaml. The diff is confined to those lines
- * (checked at capture: old fixture + snippet == fresh render).
+ * D3): each registries.yaml heredoc gained the system-image alias mirror
+ * spliced in from _k3s-system-image-mirror.yaml, and master-init.sh's k3s
+ * server gained --system-default-registry. The diff is confined to those
+ * lines (checked at capture against the pre-change fixture).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

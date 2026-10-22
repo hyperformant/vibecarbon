@@ -139,7 +139,7 @@ updates:
   # k3s's own system images. Their refs pin upstream's linux/amd64 CHILD
   # digest, which no ecosystem can propose (the mirror tag's own digest is the
   # index the job mints), so the entries below ignore every mirror name and a
-  # bump follows the registry.k8s.io mirrors' flow: edit {tag, digest} in
+  # bump follows the registry.k8s.io mirrors' flow: edit {tag, digest, index} in
   # src/lib/images.js and the literal compose / k8s copies (the mirror census
   # fails until every copy names an entry exactly), merge, and publish-images
   # mirrors the new tag. Its weekly `mirror-upstream-drift` job lists newer

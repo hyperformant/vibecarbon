@@ -4,10 +4,21 @@
  * (`MIRRORED_IMAGES`, src/lib/images.js), as a Markdown table on stdout.
  *
  * Run weekly by the `mirror-upstream-drift` job in
- * .github/workflows/publish-images.yml, which appends the table to the job
- * summary. It REPORTS ONLY, never re-pins: a mirror bump is a reviewed edit of
- * {tag, digest} in images.js (and the literal compose / k8s copies), because
- * Dependabot cannot see refs that point at our mirror.
+ * .github/workflows/publish-images.yml, which writes the table to the job
+ * summary and to one GitHub issue. It REPORTS ONLY, never re-pins: a mirror
+ * bump is a reviewed edit of {tag, digest, index} in images.js (and the
+ * literal compose / k8s copies), because Dependabot cannot see refs that
+ * point at our mirror.
+ *
+ * CEILINGS (`holdFor`): some newer tags must not be taken, and listing them
+ * would keep the issue open forever. alpine/k8s stays within one minor of
+ * K3S_VERSION (kubectl's skew policy); registry stays on 2.x (3 changed the
+ * config format); cluster-autoscaler stays on its minor (it tracks the
+ * Kubernetes minor); k3s system images move only with K3S_VERSION, and CSI
+ * sidecars only with the CSI driver release, so neither is listed. Held
+ * entries are named under the table, not counted. When nothing is
+ * actionable the report carries the marker `<!-- mirror-drift: none -->`,
+ * which the workflow reads to leave the issue alone.
  *
  * Tags are read from each upstream registry's `/v2/<repo>/tags/list`
  * (anonymous bearer token when the registry asks for one, following `Link`
@@ -20,8 +31,19 @@
  *
  * Usage: node scripts/mirror-drift.mjs
  */
-import { pathToFileURL } from 'node:url';
-import { MIRRORED_IMAGES, upstreamRef } from '../src/lib/images.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  ALPINE_K8S_MIRROR,
+  CSI_SIDECAR_MIRRORS,
+  K3S_SYSTEM_IMAGE_MIRRORS,
+  MIRRORED_IMAGES,
+  REGISTRY_MIRROR,
+  upstreamRef,
+} from '../src/lib/images.js';
+
+/** The marker the workflow greps for: nothing to take, leave the issue alone. */
+export const NO_DRIFT_MARKER = '<!-- mirror-drift: none -->';
 
 /** Registries whose API host differs from the name in an image ref. */
 const API_HOST = { 'docker.io': 'registry-1.docker.io' };
@@ -61,6 +83,60 @@ export function newerTags(current, tags) {
     .map(({ tag }) => tag);
 }
 
+/** `[major, minor]` of a version string (leading `v` allowed). */
+const majorMinor = (v) => v.replace(/^v/, '').split('.').slice(0, 2).map(Number);
+
+/**
+ * K3S_VERSION read from k3s.js's source, not imported: k3s.js pulls the whole
+ * deploy graph, and the drift job runs with no install step.
+ */
+export function readK3sVersion(
+  file = fileURLToPath(new URL('../src/lib/deploy/k8s/k3s.js', import.meta.url)),
+) {
+  const v = readFileSync(file, 'utf8').match(/K3S_VERSION = '(v[^']+)'/)?.[1];
+  if (!v) throw new Error(`no K3S_VERSION in ${file}`);
+  return v;
+}
+
+/**
+ * Why an entry's newer tags are held back, as {reason, allows(tag)}; null
+ * when every newer tag is fair game.
+ * @param {import('../src/lib/images.js').MirroredImage} image
+ * @param {string} k3sVersion
+ */
+export function holdFor(image, k3sVersion) {
+  const [k3sMajor, k3sMinor] = majorMinor(k3sVersion);
+  const sameRepo = (other) => other.repo === image.repo && (other.upstream ?? '') === (image.upstream ?? '');
+  if (K3S_SYSTEM_IMAGE_MIRRORS.some(sameRepo)) {
+    return { reason: 'moves with K3S_VERSION (k3s-images.txt)', allows: () => false };
+  }
+  const csi = Object.values(CSI_SIDECAR_MIRRORS).flatMap((specs) =>
+    specs.flatMap((spec) => Object.values(spec.containers)),
+  );
+  if (csi.some(sameRepo)) {
+    return { reason: 'moves with the CSI driver release', allows: () => false };
+  }
+  if (sameRepo(ALPINE_K8S_MIRROR)) {
+    return {
+      reason: `kubectl stays within one minor of k3s ${k3sVersion}`,
+      allows: (tag) => {
+        const [major, minor] = majorMinor(tag);
+        return major === k3sMajor && minor <= k3sMinor + 1;
+      },
+    };
+  }
+  if (sameRepo(REGISTRY_MIRROR)) {
+    return { reason: 'registry stays on 2.x (3 changed the config format)', allows: (tag) => majorMinor(tag)[0] === 2 };
+  }
+  if (image.repo === 'autoscaling/cluster-autoscaler') {
+    return {
+      reason: 'cluster-autoscaler stays on its Kubernetes minor',
+      allows: (tag) => majorMinor(tag).join('.') === majorMinor(image.tag).join('.'),
+    };
+  }
+  return null;
+}
+
 /** GET with one anonymous-token retry when the registry answers 401. */
 async function registryGet(url, token) {
   const res = await fetch(url, token ? { headers: { Authorization: `Bearer ${token}` } } : {});
@@ -96,33 +172,47 @@ async function listTags(registry, repo) {
   return tags;
 }
 
+/**
+ * The Markdown report: actionable rows in a table, held entries named below,
+ * and the no-drift marker when there is nothing to take.
+ * @param {Array<{upstream: string, pinned: string, newer: string[], hold: string | null, error?: string}>} entries
+ */
+export function renderReport(entries) {
+  const rows = entries
+    .filter((e) => e.error || e.newer.length > 0)
+    .map((e) => `| ${e.upstream} | ${e.pinned} | ${e.error ? `lookup failed: ${e.error}` : e.newer.join(', ')} |`);
+  const held = [...new Set(entries.filter((e) => e.hold).map((e) => `- ${e.upstream} (${e.pinned}): ${e.hold}`))];
+  return [
+    '## Mirror drift: newer upstream tags',
+    '',
+    'Report only. To bump one, edit its {tag, digest, index} in src/lib/images.js and',
+    'the literal compose / k8s copies; publish-images mirrors it on merge.',
+    '',
+    ...(rows.length
+      ? ['| upstream | pinned | newer |', '| --- | --- | --- |', ...rows]
+      : [NO_DRIFT_MARKER, 'Nothing to take.']),
+    '',
+    ...(held.length ? ['Held back by a ceiling (not counted):', '', ...held, ''] : []),
+  ].join('\n');
+}
+
 async function main() {
-  const rows = [];
-  let failed = false;
+  const k3sVersion = readK3sVersion();
+  const entries = [];
   for (const image of MIRRORED_IMAGES) {
-    const registry = upstreamRef(image).split('/')[0];
+    const upstream = upstreamRef(image).split(':')[0];
+    const registry = upstream.split('/')[0];
+    const hold = holdFor(image, k3sVersion);
     try {
-      const newer = newerTags(image.tag, await listTags(registry, image.repo));
-      rows.push(`| ${registry}/${image.repo} | ${image.tag} | ${newer.join(', ') || 'none'} |`);
+      const all = newerTags(image.tag, await listTags(registry, image.repo));
+      const newer = hold ? all.filter((t) => hold.allows(t)) : all;
+      entries.push({ upstream, pinned: image.tag, newer, hold: hold?.reason ?? null });
     } catch (err) {
-      failed = true;
-      rows.push(`| ${registry}/${image.repo} | ${image.tag} | lookup failed: ${err.message} |`);
+      entries.push({ upstream, pinned: image.tag, newer: [], hold: null, error: err.message });
     }
   }
-  process.stdout.write(
-    [
-      '## Mirror drift: newer upstream tags',
-      '',
-      'Report only. To bump one, edit its {tag, digest} in src/lib/images.js and the',
-      'literal compose / k8s copies; publish-images mirrors it on merge.',
-      '',
-      '| upstream | pinned | newer |',
-      '| --- | --- | --- |',
-      ...rows,
-      '',
-    ].join('\n'),
-  );
-  if (failed) process.exitCode = 1;
+  process.stdout.write(renderReport(entries));
+  if (entries.some((e) => e.error)) process.exitCode = 1;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) await main();

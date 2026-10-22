@@ -311,7 +311,7 @@ export const K8S_MIRROR_ORG = 'ghcr.io/hyperformant';
 export const K8S_UPSTREAM_REGISTRY = 'registry.k8s.io';
 
 /**
- * @typedef {{repo: string, tag: string, digest: string, upstream?: string}} MirroredImage
+ * @typedef {{repo: string, tag: string, digest: string, upstream?: string, index?: string}} MirroredImage
  * `upstream` is the registry the mirror job copies FROM, defaulting to
  * `K8S_UPSTREAM_REGISTRY` (every entry that predates the Docker Hub mirrors
  * leaves it out); Docker Hub entries set `DOCKERHUB_UPSTREAM_REGISTRY`.
@@ -325,6 +325,12 @@ export const K8S_UPSTREAM_REGISTRY = 'registry.k8s.io';
  * off upstream before mirroring:
  *   docker buildx imagetools inspect --raw <upstream>/<repo>:<tag> \
  *     | jq -r '.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest'
+ *
+ * `index` (optional) is the upstream multi-arch INDEX digest the pinned child
+ * belongs to. When set, the mirror job reads the amd64 child from
+ * `<upstream>/<repo>@<index>` instead of the tag, so an upstream re-push of
+ * the tag (Docker Hub tags move) cannot fail or change a leg. Every Docker Hub
+ * entry sets it.
  */
 
 /**
@@ -471,31 +477,6 @@ export const CSI_SIDECAR_MIRRORS = {
 };
 
 /**
- * Upstream CSI containers that ship FLOATING in upstream's manifest, re-pinned
- * by digest through the same `kubectl set image` seam. DO's v4.17.0
- * driver.yaml runs its `automount-udev-deleter` init container as bare
- * `alpine:3`, a floating major on Docker Hub; it now runs our alpine mirror
- * (DOCKERHUB_MIRRORS below), so a rate-limited Docker Hub cannot hold up the
- * node plugin. `kubectl set image` addresses init containers by name too.
- * Values are full refs, built by getters because DOCKERHUB_MIRRORS is defined
- * further down this module. csiSidecarSetImagePlan merges these into the same
- * per-workload call as the mirrors, so no extra rollout happens.
- * @type {Record<string, Array<{workload: string, containers: Record<string, string>}>>}
- */
-export const CSI_UPSTREAM_IMAGE_PINS = {
-  digitalocean: [
-    {
-      workload: 'daemonset/csi-do-node',
-      containers: {
-        get 'automount-udev-deleter'() {
-          return alpineImageRef();
-        },
-      },
-    },
-  ],
-};
-
-/**
  * The `pause` image, used as a do-nothing placeholder container in two places:
  * the local kustomize overlay's stand-in for the app, and the e2e
  * scale-trigger Deployment (whose whole job is to force the autoscaler to add
@@ -530,7 +511,7 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 //
 // BUMPING ONE: Dependabot cannot see these (the refs point at our mirror, and
 // the mirror tag's digest is the index the job mints, not this child digest).
-// Edit {tag, digest} here AND the literal copies (compose files and k8s base
+// Edit {tag, digest, index} here AND the literal copies (compose files and k8s base
 // manifests, which cannot import JS; the census
 // tests/unit/deploy/core-images-from-mirror-census.test.ts fails until every
 // copy names an entry exactly), merge, and publish-images mirrors the new tag.
@@ -546,6 +527,7 @@ export const TRAEFIK_MIRROR = {
   repo: 'library/traefik',
   tag: 'v3.6.11',
   digest: 'sha256:2b6506fde98570702dd026bc70ed307a0f22c2cf693329e91b46f94d371097a1',
+  index: 'sha256:acfc80650104f0194a15f73dc1648f517561bc1645391a15705332a064cfc33c',
 };
 /** @type {MirroredImage} compose prod's two socket proxies (traefik's and the app's) */
 export const DOCKER_SOCKET_PROXY_MIRROR = {
@@ -553,6 +535,7 @@ export const DOCKER_SOCKET_PROXY_MIRROR = {
   repo: 'tecnativa/docker-socket-proxy',
   tag: 'v0.4.2',
   digest: 'sha256:bd2241b3bec83abcff25927a0a7ae518e0c5bef624b3cc247dcb31e68b53f417',
+  index: 'sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476',
 };
 /** @type {MirroredImage} DO CSI's automount-udev-deleter init container */
 export const ALPINE_MIRROR = {
@@ -560,6 +543,7 @@ export const ALPINE_MIRROR = {
   repo: 'library/alpine',
   tag: '3.24.2',
   digest: 'sha256:d56c381f961d307a21b3ca004cf1e3910f106644aefb1f43e654c8a56c4fd395',
+  index: 'sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6',
 };
 /**
  * @type {MirroredImage} the k8s in-cluster registry
@@ -571,19 +555,22 @@ export const REGISTRY_MIRROR = {
   repo: 'library/registry',
   tag: '2.8.3',
   digest: 'sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278',
+  index: 'sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373',
 };
 /**
  * @type {MirroredImage} the replication gateway (compose-ha SOCAT_IMAGE,
- * k8s-ha repl-gateway.yaml and registry-relay.yaml). Upstream re-pushed the
- * 1.8.1.3 tag after the old index pin (sha256:fb3862c9…) was taken; this is
- * the tag's amd64 child as of 2026-10-22, because the mirror job refuses a
- * pin the tag no longer resolves to.
+ * k8s-ha repl-gateway.yaml and registry-relay.yaml). Upstream has since
+ * re-pushed Docker Hub's 1.8.1.3 tag; `index` keeps the bits this repo has
+ * always pinned (the old index, sha256:fb3862c9…, and its amd64 child), so
+ * the move to the mirror is content-neutral. ghcr's socat:1.8.1.3 therefore
+ * names those OLD bits, not what Docker Hub's tag resolves to today.
  */
 export const SOCAT_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
   repo: 'alpine/socat',
   tag: '1.8.1.3',
-  digest: 'sha256:c3fd2a0733ac5e45d1274a525334634ac88fb6ea0487b7128d172b7c0bd58753',
+  digest: 'sha256:99316fc7e1e8b5f40308105c54c9bed5a45891acee6480e8f0f9d2f4e69dee02',
+  index: 'sha256:fb3862c949af7c79996d0e514ee96128644d840835ed5368eeecb14a869de361',
 };
 /**
  * @type {MirroredImage} the backup CronJob's kubectl (carbon/k8s/base/backup/
@@ -595,21 +582,36 @@ export const ALPINE_K8S_MIRROR = {
   repo: 'alpine/k8s',
   tag: '1.31.12',
   digest: 'sha256:d57b0d2e1837411db2616cd680e474a3564b3a129d942d3464deb2b19790c2e4',
+  index: 'sha256:5aab84f0ca8ee3ae12dbe2c9fef9502a0c1e2bb0fac913bb3e71e422b642986e',
 };
 
 /**
- * k3s's OWN system images (ruling D3): k3s references these by tag from
- * docker.io/rancher on every node. They reach the mirror through a containerd
- * docker.io mirror with per-repo rewrites onto ghcr
+ * The alias k3s's `--system-default-registry` names its system images under.
+ * `.invalid` is reserved (RFC 2606): it never resolves, so the only way an
+ * image named here is reachable is the ghcr mirror in registries.yaml, and
+ * containerd's last-resort default endpoint fails fast on DNS.
+ */
+export const K3S_SYSTEM_REGISTRY = 'vibecarbon-system.invalid';
+
+/**
+ * k3s's OWN system images (ruling D3): k3s pulls these by tag on every node,
+ * from docker.io/rancher by default. The master runs k3s with
+ * `--system-default-registry K3S_SYSTEM_REGISTRY` (agents inherit it from the
+ * server), so k3s names them `<alias>/rancher/<repo>:<tag>`, and the ONLY
+ * containerd mirror pointing at ghcr is for that alias, with per-repo
+ * rewrites onto ghcr.io/hyperformant/<basename>
  * (carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml, spliced into every
- * role's /etc/rancher/k3s/registries.yaml). Any other docker.io pull is
- * unaffected: containerd tries the ghcr endpoint, misses, and falls back to
- * Docker Hub's default endpoint with no rewrite.
+ * role's /etc/rancher/k3s/registries.yaml). There is deliberately NO docker.io
+ * mirror: one with a ghcr endpoint would try every docker.io pull as
+ * ghcr.io/<same org>/<same name> first (namespace confusion). The cost: no
+ * fallback, so a missing or private mirror fails the pull (release.yml's
+ * mirrored-images gate covers every entry).
  *
  * Tags are k3s-images.txt of K3S_VERSION (v1.31.5+k3s1). Unmirrored on
- * purpose: klipper-helm and mirrored-library-traefik (`--disable traefik`),
- * klipper-lb (`--disable servicelb`), and mirrored-library-busybox (the
- * local-path helper, only for a local-path PVC, which the deploy refuses).
+ * purpose: klipper-helm and mirrored-library-traefik (`--disable traefik`)
+ * and klipper-lb (`--disable servicelb`). mirrored-library-busybox (the
+ * local-path helper) IS mirrored although the deploy refuses local-path
+ * PVCs: through the alias registry below there is no Docker Hub fallback.
  * A K3S_VERSION bump re-derives these from the new release's k3s-images.txt
  * (the census pins the version).
  * @type {MirroredImage[]}
@@ -620,24 +622,35 @@ export const K3S_SYSTEM_IMAGE_MIRRORS = [
     repo: 'rancher/mirrored-coredns-coredns',
     tag: '1.12.0',
     digest: 'sha256:2324f485c8db937628a18c293d946327f3a7229b9f77213e8f2256f0b616a4ee',
+    index: 'sha256:82979ddf442c593027a57239ad90616deb874e90c365d1a96ad508c2104bdea5',
   },
   {
     upstream: DOCKERHUB_UPSTREAM_REGISTRY,
     repo: 'rancher/local-path-provisioner',
     tag: 'v0.0.30',
     digest: 'sha256:fe541e6e7ee182cd6469c831f74026a4e36a5fa059d582459eca40b17c5275b3',
+    index: 'sha256:9b914881170048f80ae9302f36e5b99b4a6b18af73a38adc1c66d12f65d360be',
   },
   {
     upstream: DOCKERHUB_UPSTREAM_REGISTRY,
     repo: 'rancher/mirrored-metrics-server',
     tag: 'v0.7.2',
     digest: 'sha256:78e46b57096ec75e302fbc853e36359555df5c827bb009ecfe66f97474cc2a5a',
+    index: 'sha256:dccf8474fb910fef261d31d9483d7e4c1df7b86cf4d638fb6a7d7c88bd51600a',
+  },
+  {
+    upstream: DOCKERHUB_UPSTREAM_REGISTRY,
+    repo: 'rancher/mirrored-library-busybox',
+    tag: '1.36.1',
+    digest: 'sha256:ec15a5bd53cf9507beb851574654669e778a9735f8e605e0ee3d71fd07debbe1',
+    index: 'sha256:8a45424ddf949bbe9bb3231b05f9032a45da5cd036eb4867b511b00734756d6f',
   },
   {
     upstream: DOCKERHUB_UPSTREAM_REGISTRY,
     repo: 'rancher/mirrored-pause',
     tag: '3.6',
     digest: 'sha256:c2280d2f5f56cf9c9a01bb64b2db4651e35efd6d62a54dcfc12049fe6449c5e4',
+    index: 'sha256:74c4244427b7312c5b901fe0f67cbc53683d06f4f24c6faee65d4182bf0fa893',
   },
 ];
 
@@ -654,6 +667,28 @@ export const DOCKERHUB_MIRRORS = [
   ALPINE_K8S_MIRROR,
   ...K3S_SYSTEM_IMAGE_MIRRORS,
 ];
+
+/**
+ * Upstream CSI containers that ship FLOATING in upstream's manifest, re-pinned
+ * by digest through the same `kubectl set image` seam. DO's v4.17.0
+ * driver.yaml runs its `automount-udev-deleter` init container as bare
+ * `alpine:3`, a floating major on Docker Hub; it now runs our alpine mirror
+ * (DOCKERHUB_MIRRORS below), so a rate-limited Docker Hub cannot hold up the
+ * node plugin. `kubectl set image` addresses init containers by name too.
+ * Values are full refs. csiSidecarSetImagePlan merges these into the same
+ * per-workload call as the mirrors, so no extra rollout happens.
+ * @type {Record<string, Array<{workload: string, containers: Record<string, string>}>>}
+ */
+export const CSI_UPSTREAM_IMAGE_PINS = {
+  digitalocean: [
+    {
+      workload: 'daemonset/csi-do-node',
+      containers: {
+        'automount-udev-deleter': k8sMirrorRef(ALPINE_MIRROR),
+      },
+    },
+  ],
+};
 
 /**
  * Every image we mirror (registry.k8s.io and Docker Hub), in publish order.
