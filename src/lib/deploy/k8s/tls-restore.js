@@ -373,7 +373,44 @@ function liveResourceVersion(liveText) {
   }
 }
 
+/** The DNS names of the first certificate in a Secret's tls.crt; [] when unreadable. */
+function secretDnsNames(secretJsonText) {
+  try {
+    const crt = Buffer.from(JSON.parse(secretJsonText).data['tls.crt'], 'base64').toString('utf8');
+    const [leaf] = pemCertificates(crt);
+    return String(leaf?.subjectAltName ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.startsWith('DNS:'))
+      .map((s) => s.slice(4));
+  } catch {
+    return [];
+  }
+}
+
 /**
+ * The issuer and names of the live Secret/vibecarbon-tls when it is a valid
+ * issued certificate for its own names (inspectK8sTlsSecret: issuer
+ * annotation, not standby self-signed, key matches, at least 7 days left).
+ * For a Certificate that went missing: it can be re-created from what the
+ * Secret holds. Read through the quiet runner; never throws, never logs.
+ *
+ * @param {(argv: string[], opts?: object) => Promise<string>} runKubectl
+ * @returns {Promise<{ issuerName: string, dnsNames: string[] } | { reason: string }>}
+ */
+export async function liveK8sTlsIdentity(runKubectl) {
+  const live = await readLiveSecret(runKubectl);
+  if (live === null) return { reason: 'could not read the live Secret' };
+  if (!live) return { reason: 'no live Secret' };
+  const dnsNames = secretDnsNames(live);
+  if (dnsNames.length === 0) return { reason: 'live Secret has no readable names' };
+  const verdict = inspectK8sTlsSecret(live, { dnsNames });
+  if (!verdict.ok) return { reason: `live Secret refused: ${verdict.reason}` };
+  return { issuerName: verdict.issuerName, dnsNames };
+}
+
+/**
+ * Save the live Secret/vibecarbon-tls as this env's k8s-secret snapshot, once/**
  * Save the live Secret/vibecarbon-tls as this env's k8s-secret snapshot, once
  * the domain serves it trusted. Refuses a Secret that would not be restored:
  * standby self-signed, not covering `dnsNames`, under 7 days left, or issued

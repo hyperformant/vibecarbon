@@ -18,7 +18,11 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { renderTlsCertificateManifest } from '../../../carbon/scripts/render-tls-certificate.mjs';
-import { k8sTlsSnapshotInputs, promoteAcmeIssuer } from '../../../src/failover.js';
+import {
+  k8sTlsSnapshotInputs,
+  promoteAcmeIssuer,
+  promoteTlsKubectl,
+} from '../../../src/failover.js';
 import { tlsSnapshotKey } from '../../../src/lib/deploy/tls-snapshot.js';
 import { expectNoKeyLeak } from '../deploy/_no-key-leak.ts';
 import { k8sSecretJson, k8sSecretJsonWithCa } from '../deploy/_tls-fixtures.ts';
@@ -147,19 +151,29 @@ type Call = { via: 'kubectl' | 'quiet'; argv: string[]; opts: Record<string, unk
 
 interface Cluster {
   grafana?: boolean;
+  /** Certificate/vibecarbon-tls is gone (a crash between the delete and the re-create). */
+  certMissing?: boolean;
   liveSecret?: string;
   failOn?: (argv: string[]) => Error | null;
 }
 
 /** One recorder for both runners: the plain kubectl and the quiet one. */
-function cluster({ grafana = false, liveSecret = LIVE_STANDBY, failOn }: Cluster = {}) {
+function cluster({
+  grafana = false,
+  certMissing = false,
+  liveSecret = LIVE_STANDBY,
+  failOn,
+}: Cluster = {}) {
   const calls: Call[] = [];
   const answer = async (via: Call['via'], argv: string[], opts: Record<string, unknown> = {}) => {
     calls.push({ via, argv, opts });
     const err = failOn?.(argv);
     if (err) throw err;
     if (argv[0] === 'get' && argv[1] === 'certificate') {
-      if (argv[2] === 'grafana-tls' && !grafana) {
+      if (
+        (argv[2] === 'grafana-tls' && !grafana) ||
+        (argv[2] === 'vibecarbon-tls' && certMissing)
+      ) {
         throw new Error('Error from server (NotFound): certificates.cert-manager.io not found');
       }
       return LIVE_CERT(argv[2]);
@@ -186,10 +200,12 @@ function run(
     snapshot = SNAPSHOT_INPUTS as typeof SNAPSHOT_INPUTS | null,
     read = vi.fn(async () => ({ text: SNAP })),
     warn,
+    message,
   }: {
     snapshot?: typeof SNAPSHOT_INPUTS | null;
     read?: ReturnType<typeof vi.fn>;
     warn?: (m: string) => void;
+    message?: (m: string) => void;
   } = {},
 ) {
   return promoteAcmeIssuer({
@@ -201,6 +217,7 @@ function run(
       quietKubectl: c.quietKubectl,
       readSnapshot: read,
       ...(warn ? { warn } : {}),
+      ...(message ? { message } : {}),
     },
   });
 }
@@ -371,11 +388,6 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
       { failOn: (a: string[]) => (a[0] === 'delete' ? new Error('ssh: timeout') : null) },
       false,
     ],
-    [
-      'the Certificate re-create throws',
-      { failOn: (a: string[]) => (a[0] === 'apply' ? new Error('ssh: timeout') : null) },
-      false,
-    ],
   ])(
     '%s: falls back to the patch path, warns once, never throws',
     async (_label, opts, readThrows) => {
@@ -396,6 +408,101 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
       expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
     },
   );
+
+  it('the Certificate re-create throws after the delete: says there is no Certificate until the next deploy, prints the command, no patch', async () => {
+    const c = cluster({
+      failOn: (a: string[]) => (a[0] === 'apply' ? new Error('ssh: timeout') : null),
+    });
+    const warns: string[] = [];
+    const messages: string[] = [];
+    const result = await run(c, {
+      warn: (m) => warns.push(m),
+      message: (m) => messages.push(m),
+    });
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatch(/no Certificate on the promoted cluster until the next deploy/);
+    expect(messages).toEqual(['vibecarbon deploy prod']);
+    expect(c.calls.some((x) => x.argv[0] === 'patch' && x.argv.includes('vibecarbon-tls'))).toBe(
+      false,
+    );
+    expect(result.patched).toEqual([]);
+    // The Secret itself was restored before the re-create failed.
+    expect(result.tls?.restored).toBe(true);
+  });
+
+  describe('Certificate NotFound with snapshot inputs (a resume after a crash between the delete and the re-create)', () => {
+    const LIVE_RESTORED = k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: TARGET });
+
+    it('a valid live Secret: the Certificate is re-created from its issuer annotation and names', async () => {
+      const c = cluster({ certMissing: true, liveSecret: LIVE_RESTORED });
+      const warns: string[] = [];
+      const { result } = await expectNoKeyLeak(LIVE_RESTORED, () =>
+        run(c, { warn: (m) => warns.push(m) }),
+      );
+      expect(warns).toEqual([]);
+      const m = mutations(c.calls);
+      expect(m.map((x) => [x.via, ...x.argv])).toEqual([['kubectl', 'apply', '-f', '-']]);
+      expect(m[0].opts.input).toBe(
+        renderTlsCertificateManifest({
+          dnsNames: DNS,
+          issuerName: TARGET,
+          effectiveIssuer: TARGET,
+        }),
+      );
+      // Judged through the quiet runner only.
+      expect(
+        c.calls.filter((x) => x.argv[0] === 'get' && x.argv[1] === 'secret').map((x) => x.via),
+      ).toEqual(['quiet']);
+      expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    });
+
+    it.each([
+      ['the standby self-signed Secret', LIVE_STANDBY],
+      ['no Secret', ''],
+      ['an expired Secret', k8sSecretJson({ dnsNames: DNS, days: 3, issuerName: TARGET })],
+    ])(
+      '%s: warns that the Certificate is missing and prints the deploy command',
+      async (_l, live) => {
+        const c = cluster({ certMissing: true, liveSecret: live });
+        const warns: string[] = [];
+        const messages: string[] = [];
+        const result = await run(c, {
+          warn: (m) => warns.push(m),
+          message: (m) => messages.push(m),
+        });
+        expect(warns).toHaveLength(1);
+        expect(warns[0]).toMatch(/vibecarbon\/vibecarbon-tls is missing/);
+        expect(messages).toEqual(['vibecarbon deploy prod']);
+        expect(mutations(c.calls)).toEqual([]);
+        expect(result.patched).toEqual([]);
+      },
+    );
+
+    it('without snapshot inputs a missing Certificate is still skipped quietly', async () => {
+      const c = cluster({ certMissing: true });
+      const warns: string[] = [];
+      await run(c, { snapshot: null, warn: (m) => warns.push(m) });
+      expect(warns).toEqual([]);
+      expect(c.quietKubectl).not.toHaveBeenCalled();
+    });
+  });
+
+  it('promoteTlsKubectl: the live Secret read is bounded at 30s, the write at 60s', async () => {
+    const made: Array<{ timeoutMs: number; calls: string[][] }> = [];
+    const makeQuiet = (_ip: string, _key: string, { timeoutMs }: { timeoutMs: number }) => {
+      const rec = { timeoutMs, calls: [] as string[][] };
+      made.push(rec);
+      return async (argv: string[]) => {
+        rec.calls.push(argv);
+        return '';
+      };
+    };
+    const runner = promoteTlsKubectl('203.0.113.9', '/k', { makeQuiet });
+    await runner(['get', 'secret', 'vibecarbon-tls', '-n', 'vibecarbon', '-o', 'json']);
+    await runner(['replace', '-f', '-'], { input: '{}' });
+    const byTimeout = Object.fromEntries(made.map((r) => [r.timeoutMs, r.calls.map((a) => a[0])]));
+    expect(byTimeout).toEqual({ 30000: ['get'], 60000: ['replace'] });
+  });
 
   it('a Certificate already on its ACME issuer is left alone: no snapshot read', async () => {
     const read = vi.fn(async () => ({ text: SNAP }));

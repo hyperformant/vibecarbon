@@ -379,17 +379,30 @@ export function gitopsTlsCertificateVars({ projectDir, dnsProvider, domain, role
 /** Bound of each gh call when a failover refreshes the GitOps TLS vars. */
 const REFRESH_GH_TIMEOUT_MS = 20_000;
 
+/** Bound of the whole refresh: each call gets at most what is left of it. */
+const REFRESH_DEADLINE_MS = 60_000;
+
+/** A gh call refused for lack of time, reported as GitHub not answering. */
+class RefreshDeadlineError extends Error {
+  constructor() {
+    super('GitHub did not answer in time');
+    this.timedOut = true;
+  }
+}
+
 /**
  * After a k8s-ha failover swapped the roles: re-seed the TLS_CERT_* vars of
  * each GitHub Environment `vibecarbon configure cicd` seeded (the ones that
  * hold TLS_CERT_ISSUER), from the roles .vibecarbon.json now records, so the
  * next GitOps deploy renders each cluster's Certificate for its new role.
  * Environments without the vars are not GitOps-managed and are left alone.
- * Each gh call is bounded. Never throws and never logs: the caller prints
+ * Each gh call is bounded (20s), and so is the whole refresh (60s): a call
+ * gets at most what is left. Never throws and never logs: the caller prints
  * the one warning, with the command that repairs it.
  *
  * @param {{ envName: string, projectDir: string,
- *   deps?: { loadConfig?: Function, listVars?: Function, seed?: Function, timeoutMs?: number } }} args
+ *   deps?: { loadConfig?: Function, listVars?: Function, seed?: Function, timeoutMs?: number,
+ *     deadlineMs?: number, now?: () => number } }} args
  * @returns {Promise<{ ok: true, refreshed: string[] } | { ok: false, reason: string }>}
  */
 export async function refreshGitopsTlsVars({ envName, projectDir, deps = {} }) {
@@ -398,14 +411,23 @@ export async function refreshGitopsTlsVars({ envName, projectDir, deps = {} }) {
     listVars = listEnvironmentVariables,
     seed = seedEnvironmentSecrets,
     timeoutMs = REFRESH_GH_TIMEOUT_MS,
+    deadlineMs = REFRESH_DEADLINE_MS,
+    now = Date.now,
   } = deps;
+  const deadline = now() + deadlineMs;
+  /** The bound of the next gh call; throws once the deadline is spent. */
+  const bound = () => {
+    const left = deadline - now();
+    if (left <= 0) throw new RefreshDeadlineError();
+    return { timeout: Math.min(timeoutMs, left) };
+  };
   try {
     const projectConfig = loadConfig(projectDir);
     const envConfig = projectConfig?.environments?.[envName];
     if (!envConfig) return { ok: false, reason: `no ${envName} in .vibecarbon.json` };
     const refreshed = [];
     for (const target of gitopsTargets(envName, envConfig)) {
-      const names = await listVars(target.envName, { timeout: timeoutMs });
+      const names = await listVars(target.envName, bound());
       if (!names.includes('TLS_CERT_ISSUER')) continue;
       const subEnvConfig = projectConfig.environments?.[target.envName] ?? envConfig;
       const vars = gitopsTlsCertificateVars({
@@ -414,7 +436,7 @@ export async function refreshGitopsTlsVars({ envName, projectDir, deps = {} }) {
         domain: subEnvConfig.domain || envConfig.domain,
         role: target.role,
       });
-      await seed(target.envName, {}, vars, { timeout: timeoutMs });
+      await seed(target.envName, {}, vars, bound());
       refreshed.push(target.envName);
     }
     return { ok: true, refreshed };

@@ -561,6 +561,29 @@ describe('quietSshKubectl', () => {
   });
 });
 
+describe('quietSshKubectl timeout', () => {
+  it('an ssh that outlives its bound is killed and fails with a fixed message', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-quiet-ssh-slow-'));
+    const bin = join(dir, 'ssh');
+    writeFileSync(bin, '#!/bin/sh\nexec sleep 5\n');
+    chmodSync(bin, 0o755);
+    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
+    const started = Date.now();
+    try {
+      const err = await quietSshKubectl('203.0.113.9', '/k', { env, timeoutMs: 200 })([
+        'get',
+        'secret',
+        'vibecarbon-tls',
+      ]).catch((e: unknown) => e);
+      expect((err as Error).message).toBe('kubectl failed');
+      expect((err as { reason?: string }).reason).toBe('failed');
+      expect(Date.now() - started).toBeLessThan(4000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('readRestorableK8sTlsSnapshot', () => {
   const ARGS = { ...BASE, dnsNames: DNS };
 
@@ -594,6 +617,32 @@ describe('readRestorableK8sTlsSnapshot', () => {
     } as never);
     expect(r.text).toBeNull();
     expect((r as { reason: string }).reason).toMatch(reason);
+  });
+
+  it.each([
+    ['no issuer', { issuerName: null }, 'no issuer'],
+    ['no certificate names', { dnsNames: [] }, 'no certificate names'],
+  ])('refuses on %s before any read', async (_l, over, reason) => {
+    const read = vi.fn(async () => ({ text: SNAP }));
+    const r = await readRestorableK8sTlsSnapshot({
+      ...ARGS,
+      ...over,
+      deps: { ...BASE.deps, read },
+    } as never);
+    expect(r).toEqual({ text: null, reason });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('a CA-only mismatch (the snapshot issuer equals issuerName, but is the staging CA) is another issuer', async () => {
+    const staging = 'letsencrypt-staging-hetzner';
+    const text = k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: staging });
+    const r = await readRestorableK8sTlsSnapshot({
+      ...ARGS,
+      ca: 'prod',
+      issuerName: staging,
+      deps: { read: async () => ({ text }), trustRoots: [] },
+    });
+    expect(r).toEqual({ text: null, reason: 'snapshot refused: issued by another issuer' });
   });
 
   it('a prod snapshot that does not chain to a trusted root is refused', async () => {

@@ -496,7 +496,7 @@ interface RunOpts {
   /** projectConfig.cicdEnabled (GitOps layered on). */
   cicdEnabled?: boolean;
   /** What the GitOps TLS refresh returns, or throws when an Error. */
-  gitopsRefresh?: { ok: boolean; reason?: string } | Error;
+  gitopsRefresh?: { ok: boolean; reason?: string; refreshed?: string[] } | Error;
 }
 
 /**
@@ -519,7 +519,7 @@ async function runFailoverHA(opts: RunOpts) {
     tlsCa,
     promoteTls,
     cicdEnabled = false,
-    gitopsRefresh = { ok: true },
+    gitopsRefresh = { ok: true, refreshed: ['e4-primary', 'e4-standby'] },
   } = opts;
   const order: string[] = [];
   let thrown: unknown;
@@ -797,7 +797,14 @@ describe('failoverHA step order', () => {
     const ok = await runFailoverHA({ primaryReachable: true, cicdEnabled: true });
     expect(ok.order.indexOf('saveConfig')).toBeLessThan(ok.order.indexOf('gitopsRefresh'));
     expect(ok.captured.gitopsRefreshArgs).toMatchObject({ envName: 'e4' });
-    for (const gitopsRefresh of [{ ok: false, reason: 'gh: HTTP 502' }, new Error('gh crashed')]) {
+    // A clean refresh says nothing.
+    expect(ok.thrown).toBeUndefined();
+    for (const gitopsRefresh of [
+      { ok: false, reason: 'gh: HTTP 502' },
+      new Error('gh crashed'),
+      // GitOps is on, yet no environment of this env carries the TLS vars.
+      { ok: true, refreshed: [] },
+    ]) {
       const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
       const message = vi.spyOn(p.log, 'message').mockImplementation(() => {});
       const { thrown, order } = await runFailoverHA({

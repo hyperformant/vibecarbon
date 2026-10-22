@@ -54,6 +54,7 @@ import {
 } from './lib/deploy/k8s/acme-issuer-policy.js';
 import {
   k8sTlsRestoreLine,
+  liveK8sTlsIdentity,
   quietSshKubectl,
   readRestorableK8sTlsSnapshot,
   restoreK8sTlsSecret,
@@ -510,16 +511,23 @@ export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {})
  *   ca: 'prod'|'staging'|null }} [args.snapshot] - where the env's TLS
  *   snapshot lives; `ca` is the one the last deploy recorded (envConfig.tls.ca)
  * @param {{kubectl?: Function, quietKubectl?: Function, readSnapshot?: Function,
- *   trustRoots?: readonly string[], warn?: (msg: string) => void}} [args.deps]
+ *   trustRoots?: readonly string[], warn?: (msg: string) => void,
+ *   message?: (msg: string) => void}} [args.deps] - `message` prints a command on its own line
  * @returns {Promise<{patched: string[], tls?: {restored: boolean, reason: string}}>}
  *   `ns/name` keys actually re-pointed, and the TLS restore outcome when a
  *   snapshot was asked for
  */
 export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, snapshot, deps = {} }) {
-  const { kubectl = sshKubectl, warn = (m) => p.log.warn(m) } = deps;
+  const {
+    kubectl = sshKubectl,
+    warn = (m) => p.log.warn(m),
+    message = (m) => p.log.message(m),
+  } = deps;
   const patched = [];
   let tls;
   for (const { namespace, name } of PROMOTABLE_CERTIFICATES) {
+    const isTls = namespace === TLS_NAMESPACE && name === TLS_CERTIFICATE;
+    let fetched = false;
     try {
       const raw = await kubectl(promotedIp, sshKeyPath, [
         'get',
@@ -530,13 +538,14 @@ export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, snapshot, deps
         '-o',
         'json',
       ]);
+      fetched = true;
       const cert = JSON.parse(String(raw));
       const target = cert?.metadata?.annotations?.[PROMOTE_ISSUER_ANNOTATION];
       const current = cert?.spec?.issuerRef?.name;
       // No annotation = a pre-policy cluster (or a hand-managed cert): its
       // issuerRef was never redirected, so there is nothing to promote.
       if (!target || target === current) continue;
-      if (snapshot && namespace === TLS_NAMESPACE && name === TLS_CERTIFICATE) {
+      if (snapshot && isTls) {
         const outcome = await promoteTlsFromSnapshot({
           promotedIp,
           sshKeyPath,
@@ -548,6 +557,17 @@ export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, snapshot, deps
         tls = outcome.tls;
         if (outcome.promoted) {
           patched.push(`${namespace}/${name}`);
+          continue;
+        }
+        if (outcome.deleted) {
+          // The Certificate is gone and was not re-created: a patch has
+          // nothing to re-point.
+          warn(
+            `promote-issuer: ${namespace}/${name} could not be re-created after the certificate ` +
+              `restore (${outcome.error}): no Certificate on the promoted cluster until the next ` +
+              'deploy re-creates it. The site serves the restored certificate meanwhile. Run:',
+          );
+          message(`vibecarbon deploy ${snapshot.envName}`);
           continue;
         }
         if (outcome.error) {
@@ -572,7 +592,16 @@ export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, snapshot, deps
       patched.push(`${namespace}/${name}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (/not found|no objects passed/i.test(msg)) continue;
+      const notFound = /not found|no objects passed/i.test(msg);
+      if (notFound && !fetched && snapshot && isTls) {
+        // A resumed failover whose first run crashed between the
+        // certificate restore's delete and its re-create.
+        if (await recreateMissingTlsCertificate({ promotedIp, sshKeyPath, snapshot, deps })) {
+          patched.push(`${namespace}/${name}`);
+        }
+        continue;
+      }
+      if (notFound) continue;
       warn(
         `promote-issuer: could not re-point ${namespace}/${name} at its ACME issuer ` +
           `(${msg.split('\n')[0]}). The site serves on the standby self-signed cert until ` +
@@ -623,6 +652,67 @@ const PROMOTE_TLS_KUBECTL_TIMEOUT_MS = 30_000;
 const PROMOTE_TLS_WRITE_TIMEOUT_MS = 60_000;
 
 /**
+ * The quiet runner of the promotion's key-bearing calls: a read (`get`) is
+ * bounded at 30s, a write at 60s. Both print nothing (quietSshKubectl).
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {{ makeQuiet?: typeof quietSshKubectl }} [options]
+ * @returns {(argv: string[], opts?: { input?: string }) => Promise<string>}
+ */
+export function promoteTlsKubectl(ip, sshKeyPath, { makeQuiet = quietSshKubectl } = {}) {
+  const read = makeQuiet(ip, sshKeyPath, { timeoutMs: PROMOTE_TLS_KUBECTL_TIMEOUT_MS });
+  const write = makeQuiet(ip, sshKeyPath, { timeoutMs: PROMOTE_TLS_WRITE_TIMEOUT_MS });
+  return (argv, opts) => (argv[0] === 'get' ? read : write)(argv, opts);
+}
+
+/**
+ * Certificate/vibecarbon-tls is missing on the promoted cluster while a
+ * snapshot restore was asked for: a failover that crashed between the
+ * restore's delete and its re-create, then resumed. When the live Secret is
+ * a valid issued certificate (liveK8sTlsIdentity), the Certificate is
+ * re-created from the Secret's issuer annotation and names, so it finds a
+ * matching Secret and issues nothing. Otherwise the operator is told the
+ * Certificate is missing and how to bring it back. Never throws.
+ *
+ * @returns {Promise<boolean>} true when the Certificate was re-created
+ */
+async function recreateMissingTlsCertificate({ promotedIp, sshKeyPath, snapshot, deps }) {
+  const {
+    kubectl = sshKubectl,
+    quietKubectl = promoteTlsKubectl(promotedIp, sshKeyPath),
+    warn = (m) => p.log.warn(m),
+    message = (m) => p.log.message(m),
+  } = deps;
+  let reason;
+  try {
+    const live = await liveK8sTlsIdentity(quietKubectl);
+    if (live.issuerName) {
+      const certificate = renderTlsCertificateManifest({
+        dnsNames: live.dnsNames,
+        issuerName: live.issuerName,
+        effectiveIssuer: live.issuerName,
+      });
+      await kubectl(promotedIp, sshKeyPath, ['apply', '-f', '-'], {
+        timeout: PROMOTE_TLS_KUBECTL_TIMEOUT_MS,
+        input: certificate,
+      });
+      return true;
+    }
+    reason = live.reason;
+  } catch (err) {
+    reason = firstErrorLine(err);
+  }
+  warn(
+    `promote-issuer: ${TLS_NAMESPACE}/${TLS_CERTIFICATE} is missing on the promoted cluster and ` +
+      `could not be re-created from its Secret (${reason}). The site has no managed certificate ` +
+      'until the next deploy re-creates it. Run:',
+  );
+  message(`vibecarbon deploy ${snapshot.envName}`);
+  return false;
+}
+
+/**
  * Serve the primary's certificate on the promoted cluster. Only when the
  * env's snapshot is restorable for the promote annotation's issuer and the
  * live Certificate's names (read and judged first, nothing touched yet):
@@ -640,9 +730,12 @@ const PROMOTE_TLS_WRITE_TIMEOUT_MS = 60_000;
  *
  * `promoted: false` without `error`: no restorable snapshot, nothing was
  * touched, and the caller patches as before. With `error`: a step threw, and
- * the caller warns once and patches. Never throws.
+ * the caller warns once and patches; with `deleted` too, the Certificate was
+ * deleted and not re-created, and the caller warns once without a patch.
+ * Never throws.
  *
- * @returns {Promise<{ promoted: boolean, tls: {restored: boolean, reason: string}, error?: string }>}
+ * @returns {Promise<{ promoted: boolean, tls: {restored: boolean, reason: string},
+ *   error?: string, deleted?: true }>}
  */
 async function promoteTlsFromSnapshot({
   promotedIp,
@@ -654,9 +747,7 @@ async function promoteTlsFromSnapshot({
 }) {
   const {
     kubectl = sshKubectl,
-    quietKubectl = quietSshKubectl(promotedIp, sshKeyPath, {
-      timeoutMs: PROMOTE_TLS_WRITE_TIMEOUT_MS,
-    }),
+    quietKubectl = promoteTlsKubectl(promotedIp, sshKeyPath),
     readSnapshot,
     trustRoots,
   } = deps;
@@ -683,6 +774,10 @@ async function promoteTlsFromSnapshot({
       effectiveIssuer: target,
     });
     const bounded = { timeout: PROMOTE_TLS_KUBECTL_TIMEOUT_MS };
+    // Precondition: cert-manager runs WITHOUT --enable-certificate-owner-ref
+    // (its default; cert-manager-owner-ref-census.test.ts pins that nothing
+    // here turns it on), so deleting the Certificate keeps its Secret. With
+    // owner references the delete would garbage-collect the Secret.
     await kubectl(
       promotedIp,
       sshKeyPath,
@@ -705,7 +800,7 @@ async function promoteTlsFromSnapshot({
         input: certificate,
       });
     } catch (err) {
-      return { promoted: false, tls: restored, error: firstErrorLine(err) };
+      return { promoted: false, deleted: true, tls: restored, error: firstErrorLine(err) };
     }
     return { promoted: true, tls: restored };
   } catch (err) {
@@ -2568,6 +2663,12 @@ export async function failoverHA(
       p.log.warn(
         `could not update the GitOps TLS settings for the new roles (${refresh?.reason ?? 'unknown'}). ` +
           'A GitOps deploy fails on the TLS Certificate until you run:',
+      );
+      p.log.message(`vibecarbon configure cicd ${envName}`);
+    } else if (!refresh.refreshed?.length) {
+      p.log.warn(
+        `no GitHub Environment of ${envName} holds the GitOps TLS settings, so none was updated ` +
+          'for the new roles. If this environment deploys through GitOps, run:',
       );
       p.log.message(`vibecarbon configure cicd ${envName}`);
     }

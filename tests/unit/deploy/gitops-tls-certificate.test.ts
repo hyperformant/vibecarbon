@@ -274,6 +274,31 @@ describe('refreshGitopsTlsVars (after a k8s-ha failover)', () => {
     expect(seed).toHaveBeenCalledTimes(1);
   });
 
+  it('holds an overall deadline: each call is bounded by what is left, and a spent deadline stops', async () => {
+    let clock = 0;
+    const timeouts: number[] = [];
+    const r = await refreshGitopsTlsVars({
+      envName: 'prod',
+      projectDir: project,
+      deps: {
+        loadConfig: () => swapped,
+        now: () => clock,
+        listVars: async (_env: string, { timeout }: { timeout: number }) => {
+          timeouts.push(timeout);
+          clock += 50_000;
+          return ['TLS_CERT_ISSUER'];
+        },
+        seed: async (_e: string, _s: unknown, _v: unknown, { timeout }: { timeout: number }) => {
+          timeouts.push(timeout);
+          clock += 5_000;
+        },
+      },
+    });
+    // 60s overall: 20s, then the 10s left, then the 5s left, then nothing.
+    expect(timeouts).toEqual([20_000, 10_000, 5_000]);
+    expect(r).toEqual({ ok: false, reason: 'GitHub did not answer in time' });
+  });
+
   it('never throws: a gh failure or timeout is a reason', async () => {
     const failing = await refreshGitopsTlsVars({
       envName: 'prod',
