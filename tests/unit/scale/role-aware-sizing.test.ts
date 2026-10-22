@@ -293,6 +293,136 @@ describe('scaleApplyK8sChanges — role-aware HA stack/region resolution', () =>
   });
 });
 
+describe('scaleApplyK8sChanges: each cluster keeps its own recorded types for the roles a scale does not change', () => {
+  // DigitalOcean 2026-10-22: sfo3 sells only the -amd Basic droplets, tor1
+  // only the plain ones. The top level describes the first primary.
+  const AMD = { master: 's-2vcpu-4gb-amd', db: 's-1vcpu-2gb-amd', worker: 's-2vcpu-4gb-amd' };
+  const PLAIN = { master: 's-2vcpu-4gb', db: 's-1vcpu-2gb', worker: 's-2vcpu-4gb' };
+  const mixed = (swapped: boolean) => {
+    const sfo3 = {
+      stack: 'prod-primary',
+      region: 'sfo3',
+      masterServerType: AMD.master,
+      dbServerType: AMD.db,
+    };
+    const tor1 = {
+      stack: 'prod-standby',
+      region: 'tor1',
+      masterServerType: PLAIN.master,
+      dbServerType: PLAIN.db,
+    };
+    return {
+      minWorkers: 1,
+      maxWorkers: 3,
+      masterServerType: AMD.master,
+      dbServerType: AMD.db,
+      workerServerType: AMD.worker,
+      ha: swapped
+        ? {
+            primary: { ...tor1, workerServerType: PLAIN.worker },
+            standby: sfo3,
+            standbyWorkerSpec: { count: 1, serverType: AMD.worker },
+          }
+        : {
+            primary: { ...sfo3, workerServerType: AMD.worker },
+            standby: tor1,
+            standbyWorkerSpec: { count: 1, serverType: PLAIN.worker },
+          },
+    };
+  };
+  const types = (t: typeof AMD) => ({ masterType: t.master, dbType: t.db, workerType: t.worker });
+
+  async function scale(envConfig: object, changes: string[], newValues: Record<string, unknown>) {
+    vi.mocked(convergeClusterInfra).mockClear();
+    vi.mocked(runCommand).mockClear();
+    await SCALE_EFFECTS.scaleApplyK8sChanges({
+      ...baseApplyCtx,
+      envConfig,
+      region: 'sfo3',
+      secondaryRegion: 'tor1',
+      isHA: true,
+      changes,
+      infraChanges: changes.filter((c) => c !== 'workerBounds'),
+      newValues,
+      currentWorkerType: AMD.worker,
+    });
+    const calls = vi.mocked(convergeClusterInfra).mock.calls.map((c) => c[0] as ConfigJson);
+    const byStack = Object.fromEntries(calls.map((c) => [c.clusterEnv, c.overrides]));
+    return { byStack, caType: (stack: string) => caWorkerPool(stack)?.serverType };
+  }
+  const caWorkerPool = (clusterEnv: string) => {
+    const call = vi
+      .mocked(runCommand)
+      .mock.calls.find(
+        ([args, options]) =>
+          Array.isArray(args) &&
+          args.includes('apply') &&
+          args.some((a) => typeof a === 'string' && a.includes(`kubeconfig-${clusterEnv}`)) &&
+          typeof (options as { input?: string } | undefined)?.input === 'string',
+      );
+    if (!call) return null;
+    const line = (call[1] as { input: string }).input
+      .split('\n')
+      .find((l) => l.startsWith('  config.json: '));
+    return JSON.parse(JSON.parse((line as string).slice('  config.json: '.length))).nodeGroups[
+      'worker-pool'
+    ];
+  };
+
+  for (const swapped of [false, true]) {
+    const when = swapped ? 'after a failover' : 'before a failover';
+    const sfo3Primary = !swapped;
+
+    it(`${when}: a worker-only scale keeps each side's master and db`, async () => {
+      const { byStack, caType } = await scale(mixed(swapped), ['workerType'], {
+        workerType: 's-4vcpu-8gb-intel',
+      });
+      const sfo3 = { ...types(AMD), workerType: 's-4vcpu-8gb-intel' };
+      const tor1 = { ...types(PLAIN), workerType: 's-4vcpu-8gb-intel' };
+      const pilot = { minWorkers: 0, maxWorkers: 0 };
+      expect(byStack['prod-primary']).toEqual(sfo3Primary ? sfo3 : { ...sfo3, ...pilot });
+      expect(byStack['prod-standby']).toEqual(sfo3Primary ? { ...tor1, ...pilot } : tor1);
+      expect(caType('prod-primary')).toBe('s-4vcpu-8gb-intel');
+      expect(caType('prod-standby')).toBe('s-4vcpu-8gb-intel');
+    });
+
+    it(`${when}: a db-only scale keeps each side's master and worker`, async () => {
+      const { byStack } = await scale(mixed(swapped), ['dbType'], { dbType: 's-2vcpu-4gb-intel' });
+      expect(byStack['prod-primary']).toMatchObject({ ...types(AMD), dbType: 's-2vcpu-4gb-intel' });
+      expect(byStack['prod-standby']).toMatchObject({
+        ...types(PLAIN),
+        dbType: 's-2vcpu-4gb-intel',
+      });
+    });
+
+    it(`${when}: a bounds-only scale re-patches each side's autoscaler with its own worker type`, async () => {
+      const { byStack, caType } = await scale(mixed(swapped), ['workerBounds'], {
+        minWorkers: 2,
+        maxWorkers: 5,
+      });
+      expect(byStack).toEqual({});
+      expect(caType('prod-primary')).toBe(AMD.worker);
+      expect(caType('prod-standby')).toBe(PLAIN.worker);
+    });
+  }
+
+  it('plain k8s is unchanged: the overrides are the new values alone', async () => {
+    vi.mocked(convergeClusterInfra).mockClear();
+    await SCALE_EFFECTS.scaleApplyK8sChanges({
+      ...baseApplyCtx,
+      envConfig: { minWorkers: 1, maxWorkers: 2, masterServerType: 'cx22', dbServerType: 'cx22' },
+      region: 'nbg1',
+      secondaryRegion: undefined,
+      isHA: false,
+      newValues: { dbType: 'cx33' },
+      changes: ['dbType'],
+      infraChanges: ['dbType'],
+    });
+    const [call] = vi.mocked(convergeClusterInfra).mock.calls.map((c) => c[0] as ConfigJson);
+    expect(call.overrides).toEqual({ dbType: 'cx33' });
+  });
+});
+
 type SavedProjectConfig = {
   environments: Record<
     string,

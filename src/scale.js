@@ -72,6 +72,7 @@ import { runPlan } from './lib/deploy/plan/runner.js';
 import { planScale } from './lib/deploy/plan/scale-plan.js';
 import { buildRemote } from './lib/deploy/remote-build.js';
 import { isRetiredSide } from './lib/deploy/retired-fence.js';
+import { haStacksFrom } from './lib/deploy/standby-types.js';
 import { isHATier, resolveTier } from './lib/deploy/tier-registry.js';
 import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from './lib/deploy/utils.js';
 import {
@@ -2185,6 +2186,14 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
     p.log.error(err.message);
     process.exit(1);
   }
+  // k8s-ha: the serving primary's own record, not the top level, which
+  // describes the side that was primary at the first deploy.
+  if (envConfig.ha?.enabled) {
+    const primary = haStacksFrom(envConfig)?.primary;
+    currentMasterType = primary?.masterServerType || currentMasterType;
+    currentDbType = primary?.dbServerType || currentDbType;
+    currentWorkerType = primary?.workerServerType || currentWorkerType;
+  }
 
   // 3. Display current config
   const pad = 18;
@@ -2664,12 +2673,32 @@ async function scaleApplyK8sChanges(ctx) {
   // stack-birth `${environment}-primary`/`-standby` names.
   const haRoles = resolveHaClusterRoles({ environment, envConfig, region, secondaryRegion, isHA });
 
+  // k8s-ha: each cluster keeps its OWN recorded types for every role this
+  // scale does not change. The top-level types describe the side that was
+  // primary at the first deploy; the two sides may run different types (the
+  // standby's location may not sell the primary's), and a failover swaps
+  // them. Seeding each cluster's overrides from its own record keeps Pulumi
+  // from resizing an unchanged role to a type its location does not sell,
+  // and the CA re-patch on that cluster's own worker type. The new values
+  // win. Plain k8s keeps the new values alone.
+  const sides = isHA ? haStacksFrom(envConfig) : null;
+  const ownTypes = (side) => {
+    const recorded = {
+      masterType: side?.masterServerType,
+      dbType: side?.dbServerType,
+      workerType: side?.workerServerType,
+    };
+    return Object.fromEntries(
+      Object.entries(recorded).filter(([key, type]) => type && newValues[key] == null),
+    );
+  };
+
   // Apply to primary (or single) cluster — keeps envConfig's persisted sizing.
   await applyScaleChanges({
     clusterEnv: haRoles.primary.clusterEnv,
     clusterRegion: haRoles.primary.clusterRegion,
     label: isHA ? `primary: ${haRoles.primary.clusterRegion}` : haRoles.primary.clusterRegion,
-    overrides: newValues,
+    overrides: isHA ? { ...ownTypes(sides?.primary), ...newValues } : newValues,
   });
 
   // Apply to standby cluster if HA — Pulumi's static worker floor forced to
@@ -2686,7 +2715,7 @@ async function scaleApplyK8sChanges(ctx) {
       clusterEnv: haRoles.standby.clusterEnv,
       clusterRegion: haRoles.standby.clusterRegion,
       label: `standby: ${haRoles.standby.clusterRegion}`,
-      overrides: { ...newValues, minWorkers: 0, maxWorkers: 0 },
+      overrides: { ...ownTypes(sides?.standby), ...newValues, minWorkers: 0, maxWorkers: 0 },
       caBounds: {
         min: newValues.minWorkers ?? envConfig.minWorkers ?? 1,
         max: newValues.maxWorkers ?? envConfig.maxWorkers ?? DEFAULT_WORKER_MAX,
