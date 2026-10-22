@@ -22,7 +22,8 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import * as p from '@clack/prompts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ACME_DISARM_ENV,
   ACME_DISARMED_CA_SERVER,
@@ -30,7 +31,10 @@ import {
   composeTraefikRecreateShell,
   disarmComposeAcme,
 } from '../../../src/lib/deploy/acme-role.js';
-import { restoreFailoverTls } from '../../../src/lib/deploy/compose/tls-restore.js';
+import {
+  restoreComposeTls,
+  restoreFailoverTls,
+} from '../../../src/lib/deploy/compose/tls-restore.js';
 
 describe('policy constants', () => {
   it('pins the disarm env var name and the reserved-.invalid sentinel URL', () => {
@@ -179,6 +183,36 @@ describe('armComposeAcme restores the saved certificate before the recreate (fai
     expect(order).toEqual(['merge', 'restore', 'recreate']);
   });
 
+  it('says the restored certificate is served when the restore landed', async () => {
+    const log = vi.fn();
+    await armComposeAcme({
+      ...baseArgs,
+      deps: {
+        mergeEnv: vi.fn().mockResolvedValue(undefined),
+        run: vi.fn().mockResolvedValue('ok'),
+        restore: async () => ({ restored: true, reason: 'restored from the last snapshot' }),
+        log,
+      },
+    });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0][0]).toContain('serving the restored certificate');
+    expect(log.mock.calls[0][0]).not.toContain('issuance');
+  });
+
+  it('says issuance started when nothing was restored', async () => {
+    const log = vi.fn();
+    await armComposeAcme({
+      ...baseArgs,
+      deps: {
+        mergeEnv: vi.fn().mockResolvedValue(undefined),
+        run: vi.fn().mockResolvedValue('ok'),
+        restore: async () => ({ restored: false, reason: 'no recorded CA' }),
+        log,
+      },
+    });
+    expect(log.mock.calls[0][0]).toContain('certificate issuance started');
+  });
+
   it('a restore that throws still recreates traefik and returns true (a DR path never throws over certificates)', async () => {
     const run = vi.fn().mockResolvedValue('ok');
     const warn = vi.fn();
@@ -200,45 +234,41 @@ describe('armComposeAcme restores the saved certificate before the recreate (fai
 });
 
 describe('restoreFailoverTls (the restore armComposeAcme runs on the promoted node)', () => {
+  afterEach(() => vi.useRealTimers());
   const envConfig = (over: Record<string, unknown> = {}) => ({
     domain: 'app.example.com',
     provider: 'hetzner',
     ...over,
   });
   const S3 = { bucket: 'b', accessKey: 'AK', secretKey: 'SK', region: 'r', endpoint: 'e' };
+  const base = { envName: 'prod', projectName: 'demo', ip: '10.0.0.2', sshKeyPath: '/k' };
 
-  it('no recorded CA: never resolves credentials, never restores, says why in one info line', async () => {
+  it('no recorded CA: never resolves credentials, never restores, returns the line saying why', async () => {
     const resolveS3 = vi.fn();
     const restore = vi.fn();
-    const log = vi.fn();
     const r = await restoreFailoverTls({
-      envName: 'prod',
+      ...base,
       envConfig: envConfig(),
-      projectName: 'demo',
-      ip: '10.0.0.2',
-      sshKeyPath: '/k',
-      deps: { resolveS3, restore, log },
+      deps: { resolveS3, restore },
     });
-    expect(r).toEqual({ restored: false, reason: 'no recorded CA' });
+    expect(r).toEqual({
+      restored: false,
+      reason: 'no recorded CA',
+      line: 'TLS certificate not restored (no recorded CA).',
+    });
     expect(resolveS3).not.toHaveBeenCalled();
     expect(restore).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(log.mock.calls[0][0]).toBe('TLS certificate not restored (no recorded CA).');
   });
 
-  it('with a recorded CA: resolves the backup bucket without prompting and restores with the recorded CA and domain', async () => {
+  it('with a recorded CA: no prompt, the recorded CA and domain, each piece bounded, no restart', async () => {
     const resolveS3 = vi.fn().mockResolvedValue(S3);
     const restore = vi
       .fn()
       .mockResolvedValue({ restored: true, reason: 'restored from the last snapshot' });
-    const log = vi.fn();
-    await restoreFailoverTls({
-      envName: 'prod',
+    const r = await restoreFailoverTls({
+      ...base,
       envConfig: envConfig({ tls: { state: 'trusted', ca: 'prod' } }),
-      projectName: 'demo',
-      ip: '10.0.0.2',
-      sshKeyPath: '/k',
-      deps: { resolveS3, restore, log },
+      deps: { resolveS3, restore },
     });
     expect(resolveS3).toHaveBeenCalledTimes(1);
     expect(resolveS3.mock.calls[0][0]).toMatchObject({
@@ -247,47 +277,69 @@ describe('restoreFailoverTls (the restore armComposeAcme runs on the promoted no
       projectName: 'demo',
       skipPrompts: true,
     });
-    expect(restore).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ip: '10.0.0.2',
-        sshKeyPath: '/k',
-        projectName: 'demo',
-        domain: 'app.example.com',
-        envName: 'prod',
-        ca: 'prod',
-        s3Config: S3,
-      }),
-    );
-    expect(log.mock.calls.map((c) => c[0])).toEqual([
-      'TLS certificate for app.example.com restored from its last snapshot.',
-    ]);
-  });
-
-  it('a credential lookup that throws degrades to re-issuance with one line, never a throw', async () => {
-    const log = vi.fn();
-    const restore = vi.fn();
-    const r = await restoreFailoverTls({
-      envName: 'prod',
-      envConfig: envConfig({ tls: { ca: 'staging' } }),
-      projectName: 'demo',
+    const a = restore.mock.calls[0][0];
+    expect(a).toMatchObject({
       ip: '10.0.0.2',
       sshKeyPath: '/k',
-      deps: { resolveS3: vi.fn().mockRejectedValue(new Error('boom')), restore, log },
+      projectName: 'demo',
+      domain: 'app.example.com',
+      envName: 'prod',
+      ca: 'prod',
+      s3Config: S3,
+      restart: false,
+      s3ClientOptions: {
+        maxAttempts: 1,
+        requestHandler: { connectionTimeout: 10_000, requestTimeout: 10_000 },
+      },
     });
-    expect(r.restored).toBe(false);
-    expect(restore).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(log.mock.calls[0][0]).toBe('TLS certificate not restored (restore errored).');
+    expect(a.checkTimeoutMs).toBeLessThanOrEqual(30_000);
+    expect(a.writeTimeoutMs).toBeLessThanOrEqual(60_000);
+    expect(r.line).toBe('TLS certificate for app.example.com restored from its last snapshot.');
   });
-});
 
-describe('failoverComposeHA wiring', () => {
-  it('arms the promoted node with the saved-certificate restore', () => {
-    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/compose/ha.js'), 'utf8');
-    const call = src.slice(src.indexOf('const acmeArmed = await armComposeAcme({'));
-    const body = call.slice(0, call.indexOf('});'));
-    expect(body).toContain('restore: () =>');
-    expect(body).toContain('restoreFailoverTls({');
-    expect(body).toContain('envConfig,');
+  it('a promoted node that never answers the check: restore timed out, the failover goes on', async () => {
+    vi.useFakeTimers();
+    const hang = vi.fn(
+      (_ip: string, _k: string, _argv: string[], opts: { timeout?: number } = {}) =>
+        new Promise((_res, rej) =>
+          setTimeout(
+            () => rej(Object.assign(new Error('Command timed out'), { timedOut: true })),
+            opts.timeout,
+          ),
+        ),
+    );
+    const read = vi.fn();
+    const pending = restoreFailoverTls({
+      ...base,
+      envConfig: envConfig({ tls: { ca: 'prod' } }),
+      deps: {
+        resolveS3: async () => S3,
+        restore: (a: Parameters<typeof restoreComposeTls>[0]) =>
+          restoreComposeTls({ ...a, deps: { ssh: hang, read } }),
+      },
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    const r = await pending;
+    expect(r).toMatchObject({ restored: false, reason: 'restore timed out' });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('a credential lookup that throws degrades to re-issuance, never a throw', async () => {
+    const restore = vi.fn();
+    const r = await restoreFailoverTls({
+      ...base,
+      envConfig: envConfig({ tls: { ca: 'staging' } }),
+      deps: { resolveS3: vi.fn().mockRejectedValue(new Error('boom')), restore },
+    });
+    expect(r).toMatchObject({ restored: false, reason: 'restore errored' });
+    expect(r.line).toBe('TLS certificate not restored (restore errored).');
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it('logs nothing itself (the failover prints the line after its spinner stops)', async () => {
+    const info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
+    await restoreFailoverTls({ ...base, envConfig: envConfig(), deps: {} });
+    expect(info).not.toHaveBeenCalled();
+    info.mockRestore();
   });
 });

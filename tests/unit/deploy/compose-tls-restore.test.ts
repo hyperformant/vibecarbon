@@ -513,3 +513,86 @@ describe('effects: one shared effect per step for both compose tiers', () => {
     expect(info).not.toHaveBeenCalled();
   });
 });
+
+describe('restoreComposeTls: bounded per piece, no restart (the failover path)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  const timedOut = () => Object.assign(new Error('Command timed out'), { timedOut: true });
+  /** An ssh that hangs until its own timeout, as the real one does. */
+  const slowSsh = (slow: 'check' | 'write') =>
+    vi.fn(async (_ip: string, _k: string, argv: string[], opts: { timeout?: number } = {}) => {
+      const isCheck = (argv[2] ?? '').includes('echo present');
+      if ((slow === 'check') !== isCheck) return isCheck ? 'absent' : '';
+      return new Promise((_res, rej) => setTimeout(() => rej(timedOut()), opts.timeout));
+    });
+
+  it('passes the check and write bounds and the S3 client options through', async () => {
+    const { ssh, calls } = fakeSsh();
+    const read = vi.fn(async () => ({ text: VALID }));
+    const s3ClientOptions = { maxAttempts: 1 };
+    await restoreComposeTls({
+      ...args(),
+      checkTimeoutMs: 30_000,
+      writeTimeoutMs: 60_000,
+      s3ClientOptions,
+      deps: { ssh, read },
+    });
+    expect(calls[0].opts.timeout).toBe(30_000);
+    expect(calls[1].opts.timeout).toBe(60_000);
+    expect(read).toHaveBeenCalledWith(S3, expect.any(String), { clientOptions: s3ClientOptions });
+  });
+
+  it('restart: false writes the file and leaves Traefik alone (the caller recreates it)', async () => {
+    const { ssh, calls } = fakeSsh();
+    const r = await restoreComposeTls({
+      ...args(),
+      restart: false,
+      deps: { ssh, read: async () => ({ text: VALID }) },
+    });
+    expect(r).toEqual({ restored: true, reason: 'restored from the last snapshot' });
+    expect(calls[1].argv[2]).not.toContain('restart traefik');
+  });
+
+  it('by default the running Traefik is restarted after the write', async () => {
+    const { ssh, calls } = fakeSsh();
+    await restoreComposeTls({ ...args(), deps: { ssh, read: async () => ({ text: VALID }) } });
+    expect(calls[1].argv[2]).toContain('restart traefik');
+  });
+
+  it('a check that hangs past its bound: restore timed out, nothing read', async () => {
+    vi.useFakeTimers();
+    const read = vi.fn();
+    const pending = restoreComposeTls({
+      ...args(),
+      checkTimeoutMs: 30_000,
+      deps: { ssh: slowSsh('check'), read },
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await pending).toEqual({ restored: false, reason: 'restore timed out' });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('a write that hangs past its bound: restore timed out', async () => {
+    vi.useFakeTimers();
+    const pending = restoreComposeTls({
+      ...args(),
+      writeTimeoutMs: 60_000,
+      deps: { ssh: slowSsh('write'), read: async () => ({ text: VALID }) },
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await pending).toEqual({ restored: false, reason: 'restore timed out' });
+  });
+
+  it('a snapshot read that timed out: restore timed out, nothing written', async () => {
+    const { ssh, calls } = fakeSsh();
+    const r = await restoreComposeTls({
+      ...args(),
+      deps: {
+        ssh,
+        read: async () => ({ text: null, reason: 'S3 TimeoutError', timedOut: true }),
+      },
+    });
+    expect(r).toEqual({ restored: false, reason: 'restore timed out' });
+    expect(calls).toHaveLength(1);
+  });
+});

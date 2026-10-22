@@ -140,9 +140,10 @@ export async function armComposeAcme({ promotedIp, sshKeyPath, projectName, deps
     await mergeEnv(promotedIp, pinnedSshOptsString(sshKeyPath), remoteDir, {
       [ACME_DISARM_ENV]: '',
     });
+    let restored = false;
     if (restore) {
       try {
-        await restore();
+        restored = (await restore())?.restored === true;
       } catch {
         // restoreFailoverTls never throws; any other restore degrades to issuance.
       }
@@ -152,7 +153,11 @@ export async function armComposeAcme({ promotedIp, sshKeyPath, projectName, deps
       timeout: 120_000,
       retries: 1,
     });
-    log(`[acme-role] promoted node ${promotedIp} ACME issuer armed; certificate issuance started.`);
+    log(
+      restored
+        ? `[acme-role] promoted node ${promotedIp} ACME issuer armed; serving the restored certificate.`
+        : `[acme-role] promoted node ${promotedIp} ACME issuer armed; certificate issuance started.`,
+    );
     return true;
   } catch (err) {
     warn(

@@ -180,17 +180,26 @@ export function isSnapshotBetter(liveVerdict, storedVerdict) {
 }
 
 /** Read a snapshot object. Never throws, never logs. */
-export async function readTlsSnapshot(s3Config, key, { makeClient = createS3Client } = {}) {
+export async function readTlsSnapshot(
+  s3Config,
+  key,
+  { makeClient = createS3Client, clientOptions } = {},
+) {
   try {
     const { GetObjectCommand } = await import('@aws-sdk/client-s3');
-    const client = await makeClient(s3Config);
+    const client = await makeClient(s3Config, clientOptions);
     const res = await client.send(new GetObjectCommand({ Bucket: s3Config.bucket, Key: key }));
     return { text: await res.Body.transformToString() };
   } catch (err) {
     if (err?.name === 'NoSuchKey' || err?.$metadata?.httpStatusCode === 404) {
       return { text: null, reason: 'no snapshot' };
     }
-    return { text: null, reason: `S3 ${err?.name ?? 'error'}` };
+    const reason = `S3 ${err?.name ?? 'error'}`;
+    // The SDK's request handler names a connection or request timeout so.
+    if (err?.name === 'TimeoutError' || err?.code === 'ETIMEDOUT') {
+      return { text: null, reason, timedOut: true };
+    }
+    return { text: null, reason };
   }
 }
 

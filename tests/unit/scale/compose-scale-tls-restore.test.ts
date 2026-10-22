@@ -30,6 +30,7 @@ const h = vi.hoisted(() => {
     // What the new server's acme.json holds: a successful write makes it present.
     live: {} as Record<string, 'present' | 'absent'>,
     snapshot: null as string | null,
+    checkTimeouts: [] as number[],
   };
   return { events, state };
 });
@@ -200,10 +201,16 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    sshRun: async (ip: string, _k: string, argv: string[] | string) => {
+    sshRun: async (
+      ip: string,
+      _k: string,
+      argv: string[] | string,
+      opts: { timeout?: number } = {},
+    ) => {
       const script = Array.isArray(argv) ? (argv[2] ?? '') : String(argv);
       if (script.includes('echo present')) {
         h.events.push(`tls:check:${ip}`);
+        h.state.checkTimeouts.push(opts.timeout ?? 0);
         return h.state.live[ip] ?? 'absent';
       }
       if (script.includes('.acme.json.restore')) {
@@ -265,6 +272,7 @@ function reset({ snapshot = acmeJson({}) as string | null } = {}) {
   h.events.length = 0;
   h.state.live = {};
   h.state.snapshot = snapshot;
+  h.state.checkTimeouts = [];
 }
 
 const tlsAndStack = (events: string[]) =>
@@ -296,7 +304,9 @@ describe('scale restores the certificate on the replacement primary', () => {
     ctx.targetServers = [(ctx.servers as Array<Record<string, unknown>>)[1]];
     // The streaming proof is not faked here, so the arm fails after its
     // stack is up; what matters is what ran before that.
-    await SCALE_EFFECTS.scaleServers(ctx).catch(() => {});
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+      /the new standby 9\.9\.9\.9 could not be proven streaming/,
+    );
     expect(h.events).toContain('up:9.9.9.9');
     expect(h.events.some((e) => e.startsWith('tls:'))).toBe(false);
   });
@@ -321,6 +331,8 @@ describe('the HTTP-01 recreate wipes acme.json only when the new server has no a
     // One check before the stack starts (the restore), one in the recreate.
     expect(h.events.filter((e) => e === 'tls:check:9.9.9.9')).toHaveLength(2);
     expect(h.events).not.toContain('tls:wipe:9.9.9.9');
+    // The recreate's check reads a running stack: bounded at 30 s.
+    expect(h.state.checkTimeouts.at(-1)).toBe(30_000);
   });
 
   it('the live check finds nothing (no snapshot to restore): the wipe is sent as before', async () => {

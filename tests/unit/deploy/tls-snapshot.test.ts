@@ -333,6 +333,21 @@ describe('readTlsSnapshot', () => {
     });
     expect(await readTlsSnapshot(s3Config, 'k', { makeClient })).toEqual({ text: 'hello' });
   });
+  it('hands the client options to the client factory (the failover bound)', async () => {
+    const clientOptions = { maxAttempts: 1, requestHandler: { requestTimeout: 10_000 } };
+    const makeClient = vi.fn(async () => ({
+      send: async () => ({ Body: { transformToString: async () => 'hello' } }),
+    }));
+    await readTlsSnapshot(s3Config, 'k', { makeClient, clientOptions });
+    expect(makeClient).toHaveBeenCalledWith(s3Config, clientOptions);
+  });
+  it('marks a request that timed out', async () => {
+    expect(await readTlsSnapshot(s3Config, 'k', failing('TimeoutError'))).toEqual({
+      text: null,
+      reason: 'S3 TimeoutError',
+      timedOut: true,
+    });
+  });
 });
 
 describe('writeTlsSnapshot', () => {

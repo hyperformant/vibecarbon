@@ -687,7 +687,14 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
     if (!dnsChallenge) {
       // No domain: no certificate to keep, so the reset runs as it always has.
       live = apex
-        ? await readLiveApexCertificate({ ip: newIp, sshKeyPath, projectName, domain: apex })
+        ? await readLiveApexCertificate({
+            ip: newIp,
+            sshKeyPath,
+            projectName,
+            domain: apex,
+            // The stack is up, so the traefik image is local.
+            timeoutMs: 30_000,
+          })
         : { state: 'absent' };
     }
     if (live?.state === 'absent') {

@@ -22,16 +22,32 @@
  * operator or on the host; the only copy outside acme.json is a sibling in
  * the volume itself, created under umask 077 and removed on exit. A failed
  * command is reported by its exit status and a fixed phrase, never by its
- * output. Only restoreFailoverTls logs; every other caller prints the one
- * info line (tlsRestoreLine) itself.
+ * output. Nothing here logs: callers print the one info line (tlsRestoreLine).
  */
-import * as p from '@clack/prompts';
 import { sshRun } from '../../ssh.js';
 import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import { inspectComposeAcme, readTlsSnapshot, tlsSnapshotKey } from '../tls-snapshot.js';
 
 /** The reason a restore leaves a live apex certificate alone. */
 export const LIVE_CERTIFICATE_PRESENT = 'live certificate present';
+
+/** The reason a restore gave up on a piece that outlived its bound. */
+export const RESTORE_TIMED_OUT = 'restore timed out';
+
+/**
+ * The failover bounds, per piece (never a race around the whole call: an
+ * abandoned write could land after the caller recreated Traefik). The
+ * promoted standby already runs Traefik, so its image is local and the check
+ * is quick; the S3 read makes one attempt.
+ */
+export const FAILOVER_TLS_BOUNDS = {
+  checkTimeoutMs: 30_000,
+  writeTimeoutMs: 60_000,
+  s3ClientOptions: {
+    maxAttempts: 1,
+    requestHandler: { connectionTimeout: 10_000, requestTimeout: 10_000 },
+  },
+};
 
 const SAFE_NAME_RE = /^[A-Za-z0-9.-]+$/;
 const SAFE_PROJECT_RE = /^[A-Za-z0-9._-]+$/;
@@ -76,9 +92,10 @@ function liveCheckScript(projectName, domain) {
 /**
  * Reads the snapshot on stdin into the volume. Exit 3: an apex certificate
  * appeared since the check (kept). Exit 4: fewer bytes arrived than sent.
- * Exit 5: written, but the running Traefik did not restart.
+ * Exit 5: written, but the running Traefik did not restart. With `restart`
+ * false the running Traefik is left alone: the caller recreates it.
  */
-function writeScript(projectName, domain, bytes) {
+function writeScript(projectName, domain, bytes, restart) {
   const inner =
     'umask 077; f=/letsencrypt/acme.json; t=/letsencrypt/.acme.json.restore; ' +
     'trap "rm -f $t" EXIT; ' +
@@ -94,9 +111,11 @@ function writeScript(projectName, domain, bytes) {
     `sh '${apexPattern(domain)}' ${bytes}\n` +
     // A running Traefik read acme.json at start; restart it to load the file.
     // A stopped one loads it when start-compose-stack brings it up.
-    'if [ -n "$(docker compose $FLAGS ps -q traefik 2>/dev/null)" ]; then\n' +
-    '  docker compose $FLAGS restart traefik >/dev/null 2>&1 || exit 5\n' +
-    'fi\n'
+    (restart
+      ? 'if [ -n "$(docker compose $FLAGS ps -q traefik 2>/dev/null)" ]; then\n' +
+        '  docker compose $FLAGS restart traefik >/dev/null 2>&1 || exit 5\n' +
+        'fi\n'
+      : '')
   );
 }
 
@@ -106,10 +125,17 @@ function writeScript(projectName, domain, bytes) {
  * the check could not answer. Never throws, never logs.
  *
  * @param {{ ip: string|null, sshKeyPath: string, projectName: string,
- *   domain: string|null, deps?: { ssh?: Function } }} args
- * @returns {Promise<{ state: 'present'|'absent'|'unknown', reason?: string }>}
+ *   domain: string|null, timeoutMs?: number, deps?: { ssh?: Function } }} args
+ * @returns {Promise<{ state: 'present'|'absent'|'unknown', reason?: string, timedOut?: boolean }>}
  */
-export async function readLiveApexCertificate({ ip, sshKeyPath, projectName, domain, deps = {} }) {
+export async function readLiveApexCertificate({
+  ip,
+  sshKeyPath,
+  projectName,
+  domain,
+  timeoutMs = CHECK_TIMEOUT_MS,
+  deps = {},
+}) {
   const ssh = deps.ssh ?? sshRun;
   const unknown = (reason) => ({ state: 'unknown', reason });
   if (!domain || !SAFE_NAME_RE.test(domain)) return unknown('no valid domain');
@@ -118,13 +144,14 @@ export async function readLiveApexCertificate({ ip, sshKeyPath, projectName, dom
   let live;
   try {
     const out = await ssh(ip, sshKeyPath, ['bash', '-c', liveCheckScript(projectName, domain)], {
-      timeout: CHECK_TIMEOUT_MS,
+      timeout: timeoutMs,
     });
     live = String(out ?? '')
       .trim()
       .split('\n')
       .pop();
   } catch (err) {
+    if (err?.timedOut) return { state: 'unknown', reason: 'live check timed out', timedOut: true };
     return unknown(
       err?.status === NO_COMPOSE_FLAGS_EXIT
         ? 'reconcile.sh on the server has no compose files'
@@ -139,9 +166,15 @@ export async function readLiveApexCertificate({ ip, sshKeyPath, projectName, dom
  * Restore the last compose-acme snapshot into the server's acme.json when the
  * server has no apex certificate. Never throws, never logs.
  *
+ * Each piece has its own bound (`checkTimeoutMs`, `writeTimeoutMs`,
+ * `s3ClientOptions` for the read); one that outlives it returns
+ * RESTORE_TIMED_OUT. `restart: false` leaves a running Traefik alone.
+ *
  * @param {{ ip: string|null, sshKeyPath: string, projectName: string,
  *   domain: string|null, envName: string, ca: 'prod'|'staging'|null,
- *   s3Config: object|null, deps?: { read?: Function, ssh?: Function } }} args
+ *   s3Config: object|null, checkTimeoutMs?: number, writeTimeoutMs?: number,
+ *   s3ClientOptions?: object, restart?: boolean,
+ *   deps?: { read?: Function, ssh?: Function } }} args
  * @returns {Promise<{ restored: boolean, reason: string }>}
  */
 export async function restoreComposeTls({
@@ -152,6 +185,10 @@ export async function restoreComposeTls({
   envName,
   ca,
   s3Config,
+  checkTimeoutMs = CHECK_TIMEOUT_MS,
+  writeTimeoutMs = WRITE_TIMEOUT_MS,
+  s3ClientOptions,
+  restart = true,
   deps = {},
 }) {
   const read = deps.read ?? readTlsSnapshot;
@@ -164,12 +201,23 @@ export async function restoreComposeTls({
   if (!ip) return skip('no server address');
   if (!SAFE_PROJECT_RE.test(String(projectName ?? ''))) return skip('no valid project name');
   try {
-    const live = await readLiveApexCertificate({ ip, sshKeyPath, projectName, domain, deps });
+    const live = await readLiveApexCertificate({
+      ip,
+      sshKeyPath,
+      projectName,
+      domain,
+      timeoutMs: checkTimeoutMs,
+      deps,
+    });
     if (live.state === 'present') return skip(LIVE_CERTIFICATE_PRESENT);
+    if (live.timedOut) return skip(RESTORE_TIMED_OUT);
     if (live.state !== 'absent') return skip(live.reason);
 
     const key = tlsSnapshotKey({ projectName, envName, ca, format: 'compose-acme' });
-    const { text, reason } = await read(s3Config, key);
+    const { text, reason, timedOut } = s3ClientOptions
+      ? await read(s3Config, key, { clientOptions: s3ClientOptions })
+      : await read(s3Config, key);
+    if (timedOut) return skip(RESTORE_TIMED_OUT);
     if (!text) return skip(reason ?? 'no snapshot');
     const verdict = inspectComposeAcme(text, { domain, ca });
     if (!verdict.ok) return skip(`snapshot refused: ${verdict.reason}`);
@@ -178,13 +226,14 @@ export async function restoreComposeTls({
       await ssh(
         ip,
         sshKeyPath,
-        ['bash', '-c', writeScript(projectName, domain, Buffer.byteLength(text))],
+        ['bash', '-c', writeScript(projectName, domain, Buffer.byteLength(text), restart)],
         // No transport retry: a write whose connection dropped after it ran
         // would rerun and meet its own file (exit 3, misreported as a
         // certificate that appeared on the server).
-        { timeout: WRITE_TIMEOUT_MS, input: text, transportRetry: false },
+        { timeout: writeTimeoutMs, input: text, transportRetry: false },
       );
     } catch (err) {
+      if (err?.timedOut) return skip(RESTORE_TIMED_OUT);
       if (err?.status === 3) return skip('a certificate appeared on the server, kept');
       if (err?.status === 4) return skip('the snapshot arrived incomplete, nothing written');
       if (err?.status === 5) return { restored: true, reason: 'restored, traefik did not restart' };
@@ -243,16 +292,18 @@ export function tlsRestoreLine(result, domain) {
 
 /**
  * The restore a compose-ha failover runs on the promoted node, inside
- * armComposeAcme (before its traefik recreate). The CA is the one the last
- * deploy recorded (envConfig.tls.ca), never a guess: with none, nothing is
- * read and Traefik issues a new certificate. The backup credentials come from
- * the record and the environment only; a failover never prompts. Prints one
- * info line and never throws.
+ * armComposeAcme (before its traefik recreate, so the write never restarts
+ * Traefik itself). The CA is the one the last deploy recorded
+ * (envConfig.tls.ca), never a guess: with none, nothing is read and Traefik
+ * issues a new certificate. The backup credentials come from the record and
+ * the environment only; a failover never prompts. Each piece is bounded
+ * (FAILOVER_TLS_BOUNDS). Never throws and never logs: the result carries
+ * the one info line for the caller to print once its spinner stops.
  *
  * @param {{ envName: string, envConfig: object, projectName: string,
  *   ip: string, sshKeyPath: string,
- *   deps?: { resolveS3?: Function, restore?: Function, log?: Function } }} args
- * @returns {Promise<{ restored: boolean, reason: string }>}
+ *   deps?: { resolveS3?: Function, restore?: Function } }} args
+ * @returns {Promise<{ restored: boolean, reason: string, line: string }>}
  */
 export async function restoreFailoverTls({
   envName,
@@ -263,7 +314,6 @@ export async function restoreFailoverTls({
   deps = {},
 }) {
   const restore = deps.restore ?? restoreComposeTls;
-  const log = deps.log ?? ((msg) => p.log.info(msg));
   const domain = envConfig?.domain ?? null;
   let result;
   try {
@@ -280,11 +330,20 @@ export async function restoreFailoverTls({
         envConfig,
         skipPrompts: true,
       });
-      result = await restore({ ip, sshKeyPath, projectName, domain, envName, ca, s3Config });
+      result = await restore({
+        ip,
+        sshKeyPath,
+        projectName,
+        domain,
+        envName,
+        ca,
+        s3Config,
+        restart: false,
+        ...FAILOVER_TLS_BOUNDS,
+      });
     }
   } catch {
     result = { restored: false, reason: 'restore errored' };
   }
-  log(tlsRestoreLine(result, domain));
-  return result;
+  return { ...result, line: tlsRestoreLine(result, domain) };
 }

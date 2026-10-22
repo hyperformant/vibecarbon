@@ -89,7 +89,23 @@ vi.mock('../../../src/lib/deploy/tls-ready.js', () => ({
   waitForTrustedTls: async () => ({ trusted: true, elapsedMs: 0 }),
 }));
 
+// The saved-certificate restore on the promoted node (tls-restore tests own
+// its behaviour); here, where and with what the failover calls it.
+let onTlsRestore: (() => void) | undefined;
+vi.mock('../../../src/lib/deploy/compose/tls-restore.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  restoreFailoverTls: vi.fn(async () => {
+    onTlsRestore?.();
+    return {
+      restored: false,
+      reason: 'no recorded CA',
+      line: 'TLS certificate not restored (no recorded CA).',
+    };
+  }),
+}));
+
 const composeSsh = await import('../../../src/lib/deploy/compose/index.js');
+const { restoreFailoverTls } = await import('../../../src/lib/deploy/compose/tls-restore.js');
 const {
   failoverComposeHA,
   flipComposeDns,
@@ -202,6 +218,7 @@ async function run(opts: RunOpts = {}) {
     realFence = false,
   } = opts;
   const order: string[] = [];
+  onTlsRestore = () => order.push('tlsRestore');
   const captured: Record<string, unknown> = {};
   let reseeded = false;
   const deps = {
@@ -389,6 +406,26 @@ describe('failoverComposeHA state matrix', () => {
     expect(
       sshCalls.some((c) => c.ip === STANDBY_IP && c.command === 'docker restart myapp-app'),
     ).toBe(true);
+  });
+
+  it('restores the saved certificate on the promoted node, from the env record, before the DNS flip', async () => {
+    const envConfig = baseEnvConfig({
+      domain: 'app.example.com',
+      dns: { provider: 'cloudflare', zoneId: 'z1' },
+      tls: { ca: 'prod' },
+    });
+    const { order, thrown } = await run({ envConfig });
+    expect(thrown).toBeUndefined();
+    expect(restoreFailoverTls).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(restoreFailoverTls).mock.calls[0][0]).toMatchObject({
+      envName: 'prod',
+      envConfig,
+      projectName: 'myapp',
+      ip: STANDBY_IP,
+    });
+    expect(order.indexOf('tlsRestore')).toBeGreaterThan(order.indexOf('promote'));
+    expect(order).toContain('dns');
+    expect(order.indexOf('tlsRestore')).toBeLessThan(order.indexOf('dns'));
   });
 
   it('starts the enabled primary-only add-ons on the promoted node, no-deps, never the setup jobs', async () => {

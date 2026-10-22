@@ -2337,26 +2337,32 @@ export async function failoverComposeHA(
   // The saved certificate is restored first (restoreFailoverTls), so the
   // recreated Traefik serves it at once; with none, it issues a new one.
   s.start("Arming the promoted node's ACME issuer");
+  let tlsRestore = null;
   const acmeArmed = await armComposeAcme({
     promotedIp: standbyServer.ip,
     sshKeyPath,
     projectName,
     deps: {
-      restore: () =>
-        restoreFailoverTls({
+      restore: async () => {
+        tlsRestore = await restoreFailoverTls({
           envName,
           envConfig,
           projectName,
           ip: standbyServer.ip,
           sshKeyPath,
-        }),
+        });
+        return tlsRestore;
+      },
     },
   });
   s.stop(
     acmeArmed
-      ? 'Promoted node ACME issuer armed (certificate issuance underway)'
+      ? tlsRestore?.restored
+        ? 'Promoted node ACME issuer armed (saved certificate restored)'
+        : 'Promoted node ACME issuer armed (certificate issuance underway)'
       : 'Promoted node ACME issuer NOT armed — domain serves an untrusted cert (see warning)',
   );
+  if (tlsRestore) p.log.info(tlsRestore.line);
   s.stop(
     backupHealth.ok
       ? 'wal-g write-guard moved, new primary is archiving'
