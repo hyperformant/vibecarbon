@@ -1667,7 +1667,10 @@ function swapServerRoles(servers) {
  * `standbyWorkerSpec.serverType`, and `standbyWorkerSpec.serverType` becomes
  * the old primary's (`ha.primary.workerServerType`, else the env's top-level
  * `workerServerType` for a record that predates it), so neither side is handed
- * a type its location may not sell. scaleUpList is role-agnostic and stays.
+ * a type its location may not sell. The top-level master, db and worker
+ * types follow too: they take the new primary's recorded types, so the top
+ * level always describes the serving primary. scaleUpList is role-agnostic
+ * and stays.
  *
  * `workerServerType` is the type the promoted side's workers were provisioned
  * with when it differs from the record (`failover -server-type`); it wins.
@@ -1696,6 +1699,14 @@ export function swapHaRoles(envName, { override, workerServerType } = {}) {
     if (standbyWorker) ha.primary.workerServerType = standbyWorker;
     if (primaryWorker && ha.standbyWorkerSpec) {
       ha.standbyWorkerSpec = { ...ha.standbyWorkerSpec, serverType: primaryWorker };
+    }
+    // The top-level types describe the serving primary, as the top-level
+    // region does: the deploy wizard reads them as the primary's, and they
+    // are what a destroy keeps (env-identity.js, which drops `ha`), so a
+    // rebuild after a destroy must not put the old primary's types in the
+    // new primary's location.
+    for (const key of ['masterServerType', 'dbServerType', 'workerServerType']) {
+      if (ha.primary[key]) envConfig[key] = ha.primary[key];
     }
     // servers[] records the same roles; resolvePrimary refuses a config whose
     // two records disagree. db, worker and master entries carry other roles.

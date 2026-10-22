@@ -61,6 +61,7 @@ const { haSidesRecord } = await import('../../../src/lib/deploy/orchestrator.js'
 const { haStacksFrom } = await import('../../../src/lib/deploy/standby-types.js');
 const { swapHaRoles } = await import('../../../src/failover.js');
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
+const { envIdentityOf } = await import('../../../src/lib/env-identity.js');
 
 const AMD = { master: 's-2vcpu-4gb-amd', db: 's-1vcpu-2gb-amd', worker: 's-2vcpu-4gb-amd' };
 const PLAIN = { master: 's-2vcpu-4gb', db: 's-1vcpu-2gb', worker: 's-2vcpu-4gb' };
@@ -197,6 +198,28 @@ describe('k8s-ha failover with mixed standby types (DigitalOcean sfo3 + tor1)', 
       dbServerType: after.standby.dbServerType,
       workerServerType: after.standbyWorkerSpec.serverType,
     });
+  });
+
+  it('destroy after a failover, then a redeploy: each side on its own types again', async () => {
+    const first = await fanOut(store.current?.state.disk.environments.prod);
+    saveSuccess(first.ctx);
+    swapHaRoles('prod');
+    // The top level now describes the serving primary.
+    const env = store.current?.state.disk.environments.prod;
+    expect(env).toMatchObject({
+      region: 'tor1',
+      masterServerType: PLAIN.master,
+      dbServerType: PLAIN.db,
+      workerServerType: PLAIN.worker,
+    });
+    // destroy keeps the identity only (no ha record); the redeploy starts from it.
+    const identity = envIdentityOf(env);
+    expect(identity).not.toHaveProperty('ha');
+    const rebuilt = await fanOut(identity);
+    expect(rebuilt.primary).toEqual({ ...first.standby });
+    expect(rebuilt.standby).toEqual({ ...first.primary });
+    expectSoldWhereBuilt(rebuilt.primary);
+    expectSoldWhereBuilt(rebuilt.standby);
   });
 
   it('a type scale sticks: no redeploy, before or after a failover, resizes either side back', async () => {
