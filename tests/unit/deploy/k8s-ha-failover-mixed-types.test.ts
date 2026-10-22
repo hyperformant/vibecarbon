@@ -223,6 +223,20 @@ describe('k8s-ha failover with mixed standby types (DigitalOcean sfo3 + tor1)', 
     expect(after.standby).toEqual({ ...scaled, region: 'sfo3' });
   });
 
+  it('failover -server-type: the new primary records the worker type it was provisioned with', () => {
+    store.current?.updateProjectConfig((config: Config) => {
+      config.environments.prod.ha = {
+        primary: { stack: 'prod-primary', region: 'sfo3', workerServerType: AMD.worker },
+        standby: { stack: 'prod-standby', region: 'tor1' },
+        standbyWorkerSpec: { count: 1, serverType: PLAIN.worker },
+      };
+    });
+    swapHaRoles('prod', { workerServerType: 's-4vcpu-8gb-intel' });
+    const ha = store.current?.state.disk.environments.prod.ha;
+    expect(ha.primary.workerServerType).toBe('s-4vcpu-8gb-intel');
+    expect(ha.standbyWorkerSpec).toEqual({ count: 1, serverType: AMD.worker });
+  });
+
   it('a record without ha.primary.workerServerType swaps the top-level worker into the standby spec', () => {
     store.current?.updateProjectConfig((config: Config) => {
       config.environments.prod.ha = {

@@ -1669,12 +1669,16 @@ function swapServerRoles(servers) {
  * `workerServerType` for a record that predates it), so neither side is handed
  * a type its location may not sell. scaleUpList is role-agnostic and stays.
  *
+ * `workerServerType` is the type the promoted side's workers were provisioned
+ * with when it differs from the record (`failover -server-type`); it wins.
+ *
  * Patches the FRESH project config under the config lock (never a stale
  * in-memory envConfig — the deploy paths save mid-flight). Exported for tests.
  *
  * @param {string} envName
+ * @param {{override?: string, workerServerType?: string}} [options]
  */
-export function swapHaRoles(envName, { override } = {}) {
+export function swapHaRoles(envName, { override, workerServerType } = {}) {
   let swapped = false;
   updateProjectConfig((config) => {
     const envConfig = config.environments?.[envName];
@@ -1683,7 +1687,7 @@ export function swapHaRoles(envName, { override } = {}) {
     swapped = true;
     const ha = envConfig.ha;
     const primaryWorker = ha.primary.workerServerType || envConfig.workerServerType;
-    const standbyWorker = ha.standbyWorkerSpec?.serverType;
+    const standbyWorker = workerServerType || ha.standbyWorkerSpec?.serverType;
     // Swap the role objects wholesale (stack / region / IP fields ride along).
     [ha.primary, ha.standby] = [ha.standby, ha.primary];
     // The worker records follow the roles. The standby's worker record is
@@ -2666,7 +2670,13 @@ export async function failoverHA(
     : mode === 'resume'
       ? envConfig?.ha?.failoverInFlight?.override
       : undefined;
-  swapRoles(envName, override ? { override } : undefined);
+  // The promoted side's workers came up on -server-type when given
+  // (provisionStandbyCapacity), so the swap records that type for them.
+  const swapOptions = {
+    ...(override && { override }),
+    ...(parsed.serverType && { workerServerType: parsed.serverType }),
+  };
+  swapRoles(envName, Object.keys(swapOptions).length > 0 ? swapOptions : undefined);
   // The old primary is now the retired side: fence it (marker, app at zero,
   // WALG_ROLE=standby) if it answers. One that does not is fenced by the next
   // status, failover or deploy that reaches it, before it can push a backup.
