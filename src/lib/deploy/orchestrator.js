@@ -15,6 +15,7 @@ import { loadProjectConfig, registerProject, updateProjectConfig } from '../conf
 import { writeLogDetail } from '../deploy-logger.js';
 import { getDnsProvider, hasAutomatedDns, operatorConfigForDns } from '../dns-provider.js';
 import { clearDestroyedRecord } from '../env-identity.js';
+import { emitStateScopeYoung } from '../iac/state-telemetry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { ensureOperatorIpAccess } from '../operator-ip.js';
 import { perfAsync, perfTimer } from '../perf.js';
@@ -1806,6 +1807,7 @@ export async function executeDeployment(args, gatheredConfig) {
       : null;
   const stateBucketYoung = await stateBucketYoungRead;
   if (stateBucketYoung) {
+    emitStateScopeYoung(s3Config.stateBucket);
     writeLogDetail(
       `# state bucket ${s3Config.stateBucket} is inside its settle window: each Pulumi up holds the state lock end to end`,
     );

@@ -37,7 +37,7 @@ import {
   OAUTH_CANARY_CLIENT_ID,
   runConfigCanaryChecks,
 } from '../checks/config-canary.js';
-import { checkDeployBudget } from '../checks/deploy-budget.js';
+import { checkDeployBudget, type DeployBudgetResult } from '../checks/deploy-budget.js';
 import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
@@ -1378,6 +1378,10 @@ export async function runLifecycle(
   let adminCreds: AdminCredentials | null = null;
   let serverIps: string[] = [];
   let sshKeyPath: string | null = null;
+  // A cold deploy's budget miss, recorded at the deploy step and thrown at the
+  // end of verify-deploy, so the first (uncalibrated) real runs still reach
+  // every downstream correctness check.
+  let deployBudgetMiss: DeployBudgetResult | null = null;
 
   // The SSH-unreachability memo is process-wide; a parallel/kept-rig run must
   // not inherit a previous scenario's dead hosts (IPs get recycled).
@@ -2504,6 +2508,12 @@ export async function runLifecycle(
             `${unexpectedFailures.length} verification(s) failed: ${failNames}\n${detailLines}`,
           );
         }
+
+        // The cold deploy's budget miss (recorded at the deploy step) fails
+        // the scenario here, once verify-deploy's own checks have run.
+        if (stepName === 'verify-deploy' && deployBudgetMiss) {
+          throw new Error(`deploy: deploy_budget: ${deployBudgetMiss.message}`);
+        }
       }),
     );
   }
@@ -3316,7 +3326,7 @@ EOF`;
               console.log(`${tag} [deploy] deploy_budget: ${budget.status} (${budget.message})`);
               collector.recordVerifications(stepId, [budget]);
               if (budget.status !== 'pass') {
-                throw new Error(`deploy: ${budget.checkName}: ${budget.message}`);
+                deployBudgetMiss = budget;
               }
             } else {
               console.log(

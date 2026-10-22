@@ -10,6 +10,9 @@
  *   deploy waits up to 180 s for Let's Encrypt; that wait is the CA's, not ours.
  * - END-TO-END: `deploy.total` itself, a first-ever deploy with TLS issued.
  *
+ * `deploy.total` starts when executeDeployment does (after config gathering
+ * and the local preflight) and ends at the success outro.
+ *
  * Hard limits, no uplink exemption: the cold image delta's bytes are asserted
  * too (10 MB), so a slow uplink moves a deploy by seconds, not minutes. If
  * real runs miss, the budgets are recalibrated from data, never loosened
@@ -19,6 +22,9 @@
  * `backpressure` in any `[state] up` line, and a lock wait of at most 15 s
  * (select and refresh still serialize, so the second engine always waits a
  * little). compose-ha's infra fan must stay within 1.25x its slower arm.
+ * Inside a young state bucket (the deploy prints `[state] scope young`,
+ * Ruling A′) the whole upStack is locked, so those two are not judged and the
+ * details say why; backpressure still is.
  * k8s-ha's standby must not wait on its database for a minute, and the early
  * replication transport must not fail.
  *
@@ -48,15 +54,28 @@ export const STANDBY_AWAIT_DB_MAX_MS = 60_000;
 const DELTA_MODES: ReadonlySet<DeployMode> = new Set(['compose', 'k8s', 'k8s-ha']);
 
 /**
- * Markers that are not serial work of their own: the total, the umbrellas
- * that wrap other markers, and the compose image pull that runs in the
- * background (its residue on the critical path is stackPull.await).
+ * Markers that are not serial work of their own, kept out of the "slowest"
+ * list a failure names:
+ * - umbrellas that wrap other markers: the total, `.full`, the k8s-ha arms,
+ *   every fan (`.fan`, `setupFan`, `pullFan`), and the image delta, which runs
+ *   inside `image.transfer` (compose) or `image.deliver` (k8s);
+ * - work that runs in the background, whose residue on the critical path has
+ *   its own `.await` marker or overlaps a later step: the base pulls, the
+ *   compose stack pull (stackPull.await), the compose image transfer
+ *   (transfer.await) and k8s-ha's early replication transport.
  */
 const NOT_SERIAL =
-  /^deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|^deploy\.compose\.imagesPull$/;
+  /^deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|Fan$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$/;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
 const ANSI = /\x1b\[[0-9;]*m/g;
+/**
+ * The deploy's Ruling A′ line (src/lib/iac/state-telemetry.js
+ * formatStateScopeYoung): the state bucket is inside its provider's settle
+ * window, so each upStack holds the lock end to end and the HA pair's ups
+ * serialize by design.
+ */
+export const STATE_SCOPE_YOUNG = /\[state\] scope young (\S+)/;
 const STATE_UP =
   /\[state\] up (\S+): .*?\| backpressure (.+?) \| lock-waits (\d+)(?: \((\d+)s\))?/g;
 
@@ -127,9 +146,18 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     }
   }
 
-  // HA state-lock invariants.
+  // HA state-lock invariants. Inside a young state bucket the whole upStack
+  // is locked (Ruling A′), so the second engine waits out the first one's up
+  // and the fan runs near the sum of its arms: the lock-wait and fan checks
+  // only hold past the window. Backpressure is judged either way.
+  const youngStateBucket = STATE_SCOPE_YOUNG.exec(clean)?.[1] ?? null;
+  const ha = mode === 'compose-ha' || mode === 'k8s-ha';
+  const skipped =
+    ha && youngStateBucket
+      ? `lock wait and fan ratio not judged: state bucket ${youngStateBucket} was inside its settle window, so each up held the state lock end to end`
+      : null;
   let lockWaitS: number | null = null;
-  if (mode === 'compose-ha' || mode === 'k8s-ha') {
+  if (ha) {
     const states = [...clean.matchAll(STATE_UP)];
     if (states.length === 0) {
       failures.push('no [state] up line, so the state-lock invariants are unread');
@@ -142,13 +170,13 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     // The counters are cumulative per process: the largest is the total.
     if (states.length > 0) {
       lockWaitS = Math.max(...states.map((m) => Number(m[4] ?? 0)));
-      if (lockWaitS > HA_LOCK_WAIT_MAX_S) {
+      if (!youngStateBucket && lockWaitS > HA_LOCK_WAIT_MAX_S) {
         failures.push(`lock wait ${lockWaitS}s > ${HA_LOCK_WAIT_MAX_S}s`);
       }
     }
   }
 
-  if (mode === 'compose-ha') {
+  if (mode === 'compose-ha' && !youngStateBucket) {
     const one = (name: string) => all(name)[0]?.ms;
     const fan = one('deploy.ha.compose.iac.upStack.fan');
     const primary = one('deploy.ha.compose.iac.upStack.primary');
@@ -197,6 +225,8 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     endToEndBudgetS: budget.endToEndS,
     deltaBytes,
     lockWaitS,
+    youngStateBucket,
+    skipped,
     slowest,
   };
 
