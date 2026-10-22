@@ -110,17 +110,18 @@ classes:
       awaitPostgresAccepting, src/lib/deploy/k8s/readiness.js) replace the
       warm-up ladders, which are DELETED, not retained. What survives here is
       transport vocabulary only; whether these residues are weather or our
-      fan-out is the same open experiment as ssh-transport-blips.
+      fan-out is the same open experiment as ssh-transport-blips. The
+      sideload ladder (SIDELOAD_DELAYS_MS) is DELETED with the per-node
+      sideload itself (2026-10-22): k8s delivers one layer delta to the
+      master, never retried.
     proofDebtSpec: docs/attribution-ledger.md
-    frozenSites: 6
+    frozenSites: 5
     sites:
       - site: "src/lib/deploy/k8s/k3s.js :: KUBECTL_TRANSIENT_PATTERN"
       - site: "src/lib/deploy/k8s/k3s.js :: isTransient@1"
       - site: "src/lib/deploy/k8s/k3s.js :: isTransient@2"
       - site: "src/lib/deploy/k8s/k3s.js :: RETRY_DELAYS_MS"
       - site: "src/lib/deploy/k8s/k3s.js :: ROLLOUT_RETRY_DELAYS_MS"
-      - site: "src/lib/deploy/k8s/k3s.js :: SIDELOAD_DELAYS_MS"
-        notes: WAN drop mid-transfer on a multi-GB pipe; 2 bounded attempts
   - class: ssh-transport-blips
     attribution: external-asserted
     evidence: >-
@@ -235,15 +236,15 @@ classes:
       (DEFAULT_PUSH_SETTLE_DELAYS_MS shrunk to registry-pod-reschedule scale).
       What survives here absorbs single-connection WAN weather only; whether
       any residue is still our load is the same uplink experiment as
-      ssh-transport-blips.
+      ssh-transport-blips. The tunnel push and its settle ladder are DELETED
+      (2026-10-22, registry-push.js): every tier now sends one layer delta
+      under the same uplink lock, never retried.
     proofDebtSpec: docs/attribution-ledger.md
-    frozenSites: 5
+    frozenSites: 3
     sites:
       - site: "src/lib/deploy/remote-build.js :: isTransientBuildError"
       - site: "src/lib/deploy/remote-build.js :: transient"
       - site: "src/lib/deploy/remote-build.js :: TRANSPORT_DROP_RETRY_DELAYS_MS"
-      - site: "src/lib/deploy/registry-push.js :: isTransient@1"
-      - site: "src/lib/deploy/registry-push.js :: DEFAULT_PUSH_SETTLE_DELAYS_MS"
 
   - class: hetzner-ip-release-lag
     attribution: external-asserted

@@ -10,10 +10,12 @@ import { namesHost } from '../../_shared/hosts.js';
 /**
  * Integration-style unit tests for applyK3sManifests deploy-time behavior:
  *
- *   #1 — the in-cluster registry push runs CONCURRENTLY with the CA rollout +
- *        db rollout + app rollout (nothing between reads the registry —
- *        app pods use the sideloaded image via IfNotPresent), yet it is still
- *        AWAITED before the function returns so a failed push fails the deploy.
+ *   #1 — the one image delivery (deliverImage: a layer delta into the
+ *        master, then `ctr images push` into its registry) starts after the
+ *        registry pod is Ready and runs CONCURRENTLY with the CA apply, the
+ *        observability apply and the CA rollout, and is AWAITED before the
+ *        deployment/app patch, the first reference to the tag, so a failed
+ *        delivery fails the deploy before any pod asks for the image.
  *
  *   #2 — the carbon-autoscaler config Secret is applied via stdin as PLAIN
  *        JSON (Task 8: retired the old base64-encoded legacy CA config
@@ -23,13 +25,16 @@ import { namesHost } from '../../_shared/hosts.js';
  *        gates the roll (no `--nodes=` patch, no HCLOUD_* env upsert).
  *
  * Every shell-out in applyK3sManifests ultimately reaches node's `spawn` —
- * either directly (cert-manager wait, docker push, ssh tunnel, rollout status,
+ * either directly (cert-manager wait, rollout status,
  * kubectl exec, port-forward) or via command.js `runCommandAsync`
  * (kubectl/helm/docker-tag/pkill). So mocking ONLY `spawn` drives the whole
  * function: the fake child succeeds everywhere and captures every stdin
  * write (so tests can inspect the Secret YAML piped via `apply -f -`).
  * retry.js / perf.js / command.js / fs stay real; the temp projectDir carries
- * the real db StatefulSet that renderK8sBase reads.
+ * the real db StatefulSet that renderK8sBase reads. The image delivery is the
+ * one exception: deliverImage (layer-delta.js) is mocked, so its own ssh and
+ * `docker save` children never reach the spawn mock; its call is logged into
+ * cmdCalls as ['deliverImage'] so it orders against the kubectl calls.
  *
  * Admin: applyK3sManifests no longer provisions an account. It waits for
  * the app to report its super admin ready (`kubectl exec deploy/app … node
@@ -40,6 +45,14 @@ vi.mock('node:child_process', async () => {
   const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
   return { ...actual, spawn: vi.fn() };
 });
+
+// The one app image delivery. Its transport is layer-delta.test.ts's subject;
+// here only where it starts and where it is awaited matter.
+const deliverImage = vi.hoisted(() => vi.fn());
+vi.mock('../../../src/lib/deploy/layer-delta.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  deliverImage,
+}));
 
 // The TLS restore before `apply -k base` reads the env's snapshot from S3;
 // here there is never one, so no test opens a socket.
@@ -65,10 +78,10 @@ let cmdCalls: string[][] = [];
 let stdinCalls: { argv: string[]; data: string; seq: number }[] = [];
 // Per-Secret resourceVersion stdout; unset = "1", an empty string is unreadable.
 let secretVersionOut: Record<string, string> = {};
-// A manual gate the `docker push` child's exit waits on (concurrency test).
-let pushGate: { promise: Promise<void>; release: () => void } | null = null;
-// Exit code/stderr the `docker push` child settles with.
-let pushExit = { code: 0, stderr: '' };
+// A manual gate the image delivery waits on (concurrency test).
+let deliverGate: { promise: Promise<void>; release: () => void } | null = null;
+// What the image delivery rejects with, or null for success.
+let deliverError: Error | null = null;
 // Exit codes for the cert-manager DNS-01 webhook install pair (helm install /
 // kubectl wait) — drives the fail-loud tests below.
 let webhookHelmExit = 0;
@@ -101,7 +114,7 @@ function makeGate() {
  * hand-rolled spawns in k3s.js (settle on 'exit', read stderr). Emits `stdout`
  * / `stderr` data to any registered listener; fires 'exit' AND 'close' with
  * `exitCode` on a microtask — unless `gate` is supplied, in which case it waits
- * for the gate first (used to hold the docker push open).
+ * for the gate first.
  */
 function fakeChild({
   exitCode = 0,
@@ -236,14 +249,6 @@ function installSpawnMock() {
         ? 'certificate.cert-manager.io/grafana-tls\n'
         : 'namespace/vibecarbon-observability\n';
       return fakeChild({ stdout, argv: full }) as unknown as ReturnType<typeof spawn>;
-    }
-    if (cmd === 'docker' && argv[0] === 'push') {
-      return fakeChild({
-        exitCode: pushExit.code,
-        stderr: pushExit.stderr,
-        gate: pushGate?.promise ?? null,
-        argv: full,
-      }) as unknown as ReturnType<typeof spawn>;
     }
     if (cmd === 'helm' && argv[0] === 'upgrade' && argv.includes('cert-manager-webhook-hetzner')) {
       return fakeChild({ exitCode: webhookHelmExit, argv: full }) as unknown as ReturnType<
@@ -399,7 +404,6 @@ function baseArgs(projectDir: string) {
     k3sToken: 'k3s-token',
     masterIp: '1.2.3.4',
     sshKeyPath: '/tmp/key',
-    khPath: join(projectDir, 'known_hosts'),
     perfPrefix: 'k3s',
   };
 }
@@ -442,30 +446,16 @@ function findAppliedSecretConfigJson(secretName: string) {
   return { hit, config: JSON.parse(configJson) };
 }
 
-// Happy registry v2 fake for the round-trip probe that now gates every push
-// attempt (probe coverage lives in registry-push.test.ts) — this file pins
-// manifest/push ORDERING around it. File-level so every describe gets it.
+// The delivery succeeds unless a test sets deliverGate / deliverError. File-level
+// so every describe gets it (an outer beforeEach runs before each inner one).
 beforeEach(() => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string | URL, init?: { method?: string }) => {
-      const method = init?.method ?? 'GET';
-      const headers = {
-        get: (h: string) =>
-          method === 'POST' && h.toLowerCase() === 'location'
-            ? `${String(url)}probe-upload-1`
-            : null,
-      };
-      if (method === 'POST') return { status: 202, headers };
-      if (method === 'PUT') return { status: 201, headers };
-      if (method === 'HEAD') return { status: 200, headers };
-      return { status: 202, headers };
-    }),
-  );
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
+  deliverImage.mockReset();
+  deliverImage.mockImplementation(async () => {
+    cmdCalls.push(['deliverImage']);
+    if (deliverGate) await deliverGate.promise;
+    if (deliverError) throw deliverError;
+    return { bytes: 1, layersSent: 1, layersReused: 0 };
+  });
 });
 
 describe('applyK3sManifests refuses a chart-era cluster', () => {
@@ -473,8 +463,8 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
@@ -542,8 +532,8 @@ describe("applyK3sManifests binds the registry hostPort to the deploy's master p
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     registryAtBaseApply = null;
@@ -575,40 +565,69 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
   });
 
-  it('#1 registry push runs concurrently with the db rollout wait, yet stays awaited', async () => {
+  const isLocalRegistryWait = (a: string[]) =>
+    a[0] === 'kubectl' && a.includes('wait') && a.includes('app=local-registry');
+  const isCaApply = (a: string[]) =>
+    a[0] === 'kubectl' &&
+    a.includes('apply') &&
+    a.includes('-k') &&
+    a.some((x) => typeof x === 'string' && x.includes('cluster-autoscaler'));
+  const isAppPatch = (a: string[]) =>
+    a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app');
+  const isDelivery = (a: string[]) => a[0] === 'deliverImage';
+
+  it('#1 the delivery starts after the registry is Ready, overlaps the CA apply, and gates the app patch', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
-    // Hold the docker push open: a SERIAL (awaited-inline) push would block the
-    // whole function here and the db wait would never be reached; a
-    // BACKGROUNDED push lets the function proceed while the push is pending.
-    pushGate = makeGate();
-
+    // Hold the delivery open: the CA apply must still run (it overlaps), and
+    // the deployment/app patch must not (it is the barrier).
+    deliverGate = makeGate();
     const done = applyK3sManifests(baseArgs(projectDir));
     done.catch(() => {}); // avoid unhandled-rejection noise during the poll window
 
-    const dbWaitRanWhilePushPending = await waitFor(() => cmdCalls.some(isDbRolloutWait), 2000);
-
-    // Release the push so the function can complete its end-of-run await.
-    pushGate.release();
+    const caAppliedWhilePending = await waitFor(() => cmdCalls.some(isCaApply), 2000);
+    const patchedWhilePending = cmdCalls.some(isAppPatch);
+    deliverGate.release();
     await done;
 
-    expect(dbWaitRanWhilePushPending).toBe(true);
+    expect(caAppliedWhilePending).toBe(true);
+    expect(patchedWhilePending).toBe(false);
+    const delivery = cmdCalls.findIndex(isDelivery);
+    expect(cmdCalls.findIndex(isLocalRegistryWait)).toBeLessThan(delivery);
+    expect(delivery).toBeLessThan(cmdCalls.findIndex(isCaApply));
+    expect(delivery).toBeLessThan(cmdCalls.findIndex(isAppPatch));
   });
 
-  it('#1 a failed registry push still fails the deploy (push stays awaited)', async () => {
+  it('#1 one delivery, to the master only, of the tag the pods run, with the base pull', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir();
-    // Permanent push failure → fails fast (one attempt) → must reject the deploy.
-    pushExit = { code: 1, stderr: 'denied: requested access to the resource is denied' };
+    const basePull = Promise.resolve('pulled');
+    const args = { ...baseArgs(makeProjectDir()), basePull };
+    await applyK3sManifests(args);
+    expect(deliverImage).toHaveBeenCalledTimes(1);
+    expect(deliverImage).toHaveBeenCalledWith({
+      tag: args.imageTag,
+      sshTarget: 'root@1.2.3.4',
+      sshKey: '/tmp/key',
+      runtime: 'k3s',
+      registryRef: args.imageTag,
+      basePull,
+    });
+  });
 
-    await expect(applyK3sManifests(baseArgs(projectDir))).rejects.toThrow(/docker push|denied/i);
+  it('#1 a failed delivery fails the deploy before any pod references the tag', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    deliverError = new Error('image delivery failed: the import did not create x');
+    await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
+      'image delivery failed: the import did not create x',
+    );
+    expect(cmdCalls.some(isAppPatch)).toBe(false);
   });
 
   it('#2 renders ONE plain-JSON carbon-autoscaler-config Secret via stdin (no base64, no legacy CA config Secret)', async () => {
@@ -711,7 +730,7 @@ describe('applyK3sManifests deploy-time optimizations', () => {
  * certificate/configmap placeholder patches below the k8s/base apply — TYPE
  * and NAME as separate argv tokens, not slash-joined) and skips every
  * app-tier step that would exec against pods that don't exist yet.
- * Registry wait+push, cert-manager, traefik, and the cert/config patches
+ * Registry wait + image delivery, cert-manager, traefik, and the cert/config patches
  * all stay — failover needs the registry (CA-spawned workers pull from it)
  * and the serving master.
  */
@@ -721,8 +740,8 @@ describe('applyK3sManifests pilot-standby role', () => {
     getNodesOut = '';
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
@@ -820,13 +839,13 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(cmdCalls.some(isDbRolloutWait)).toBe(true);
 
     // The registry wait stays (the primary's image is copied into it); the
-    // standby pushes nothing of its own — see the image-delivery cases below.
+    // standby delivers nothing of its own — see the image-delivery cases below.
     expect(
       cmdCalls.some(
         (a) => a[0] === 'kubectl' && a.includes('wait') && a.includes('app=local-registry'),
       ),
     ).toBe(true);
-    expect(cmdCalls.some((a) => a[0] === 'docker' && a.includes('push'))).toBe(false);
+    expect(deliverImage).not.toHaveBeenCalled();
 
     // Observability follows the app tier — zeroed on the standby (I6). Even
     // though the observability dir exists, the role gate skips its apply.
@@ -1108,8 +1127,8 @@ describe('applyK3sManifests restores the TLS Secret before applying the base', (
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
@@ -1172,26 +1191,25 @@ describe('applyK3sManifests restores the TLS Secret before applying the base', (
 
 describe('applyK3sManifests image delivery by role', () => {
   // A k8s-ha standby receives the primary's image by copy into its registry,
-  // so it never opens a push tunnel; the primary pushes exactly as before.
+  // so it delivers nothing; the primary delivers once, into its own registry.
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
   });
 
-  const dockerPushes = () => cmdCalls.filter((a) => a[0] === 'docker' && a[1] === 'push');
   const sshTunnels = () => cmdCalls.filter((a) => a[0] === 'ssh' && a.includes('-L'));
 
-  it('standby: no docker push, no ssh -L tunnel, registry still waited, app patched to imageTag', async () => {
+  it('standby: no delivery, no ssh -L tunnel, registry still waited, app patched to imageTag', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const args = { ...baseArgs(makeProjectDir()), role: 'standby' };
     await applyK3sManifests(args);
-    expect(dockerPushes()).toEqual([]);
+    expect(deliverImage).not.toHaveBeenCalled();
     expect(sshTunnels()).toEqual([]);
     expect(
       cmdCalls.some(
@@ -1211,12 +1229,13 @@ describe('applyK3sManifests image delivery by role', () => {
     expect(body.spec.template.spec.initContainers[0].image).toBe(args.imageTag);
   });
 
-  it('primary: the docker push is spawned as before', async () => {
+  it('primary: one delivery, no docker push, no ssh -L tunnel', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const args = { ...baseArgs(makeProjectDir()), role: 'primary' };
     await applyK3sManifests(args);
-    expect(dockerPushes()).toHaveLength(1);
-    expect(sshTunnels()).toHaveLength(1);
+    expect(deliverImage).toHaveBeenCalledTimes(1);
+    expect(cmdCalls.some((a) => a[0] === 'docker' && a.includes('push'))).toBe(false);
+    expect(sshTunnels()).toEqual([]);
   });
 });
 
@@ -1230,8 +1249,8 @@ describe('cert-manager DNS-01 webhook install fails loud', () => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
@@ -1283,8 +1302,8 @@ describe('DNS-01 Secret precedes the ClusterIssuers that reference it (digitaloc
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
@@ -1350,8 +1369,8 @@ describe('readiness probes are wired in (mitigation-audit clusters 1+4 root fix)
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
@@ -1419,8 +1438,8 @@ describe('postgres accepting-gate precedes the first psql (cluster 5 root fix)',
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
@@ -1465,8 +1484,8 @@ describe('applyK3sManifests — waits for the app to report its super admin', ()
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
@@ -1575,8 +1594,8 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
@@ -1679,8 +1698,8 @@ describe('a changed app Secret rolls deployment/app', () => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
     stdinCalls = [];
-    pushGate = null;
-    pushExit = { code: 0, stderr: '' };
+    deliverGate = null;
+    deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     secretVersionOut = {

@@ -11,18 +11,19 @@
  *
  * Calls are found with vite's parseAst over every `.js` file under `src/`, so
  * comments never count. A call counts whether the callee is the bare name or a
- * member (`d.buildAppImage(`, `deps.sideloadK3s(`), on any object. Each site is
+ * member (`d.buildAppImage(`, `deps.deliverImage(`), on any object. Each site is
  * keyed `file:enclosingFunction` (nearest named function).
  *
  * The second describe holds the transport itself: no string in src/ spells a
  * whole-image `docker save` / `docker load` / `ctr images import` outside the
  * layer delta (layer-delta.js and its target half, layer-delta-remote.sh, which
- * is not a .js file and so is never walked) and, until the cold-deploy-speed
- * plan's Task 5 moves k8s onto the delta, k3s.js:sideloadK3s. A whole-image
- * send is the 562 s cold compose transfer this census exists to keep gone.
+ * is not a .js file and so is never walked). A whole-image send is the 562 s
+ * cold compose transfer and the 629 s + 523 s k8s sideload and registry push
+ * this census exists to keep gone.
  *
- * The cold-deploy-speed plan's Task 5 deletes sideloadK3s and
- * pushImageToLocalRegistry (R7) and rewrites the k3s rows here.
+ * The cold-deploy-speed plan's Task 5 deleted sideloadK3s,
+ * pushImageToLocalRegistry and pushImageOverSshTunnel: k8s delivers once, by
+ * layer delta, into the master's registry, and every node pulls from it.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -32,14 +33,7 @@ import { describe, expect, it } from 'vitest';
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const SRC = join(REPO, 'src');
-const PRIMITIVES = new Set([
-  'deliverImage',
-  'sideloadK3s',
-  'pushImageToLocalRegistry',
-  'pushImageOverSshTunnel',
-  'buildAppImage',
-  'copyAppImageToStandby',
-]);
+const PRIMITIVES = new Set(['deliverImage', 'buildAppImage', 'copyAppImageToStandby']);
 
 // biome-ignore lint/suspicious/noExplicitAny: ESTree nodes from vite's parseAst.
 type Node = any;
@@ -47,18 +41,14 @@ type Node = any;
 /** file:fn site -> primitives called there, with the reason a standby cannot (or does) reach it. */
 const SITES: Record<string, { calls: string[]; why: string; gated?: boolean }> = {
   'lib/deploy/k8s/k3s.js:deliverAppImage': {
-    calls: ['buildAppImage', 'sideloadK3s'],
+    calls: ['buildAppImage'],
     gated: true,
-    why: 'primary only: planImageDelivery returns no build or sideload for role standby',
+    why: 'primary only: planImageDelivery returns no build for role standby',
   },
   'lib/deploy/k8s/k3s.js:applyK3sManifests': {
-    calls: ['pushImageToLocalRegistry'],
+    calls: ['deliverImage'],
     gated: true,
-    why: 'primary only: planImageDelivery registryPush is false for role standby',
-  },
-  'lib/deploy/k8s/k3s.js:pushImageToLocalRegistry': {
-    calls: ['pushImageOverSshTunnel'],
-    why: 'thin delegate; reached only through the gated applyK3sManifests call',
+    why: 'primary only: planImageDelivery deliver is false for role standby',
   },
   'lib/deploy/effects/index.js:transferImage': {
     calls: ['deliverImage'],
@@ -130,7 +120,7 @@ function findSites(path: string, text: string): Site[] {
 }
 
 /**
- * `import { sideloadK3s as ship }` would hide every call from the name match
+ * `import { copyAppImageToStandby as ship }` would hide every call from the name match
  * above, so a rename of a primitive on import is itself a finding.
  */
 function findAliasedImports(path: string, text: string): string[] {
@@ -192,7 +182,7 @@ describe('image-delivery call-site census', () => {
     }
   });
 
-  it('positive control: the walk sees at least the five classified sites', () => {
+  it('positive control: the walk sees at least the classified sites', () => {
     expect(new Set(allSites().map((s) => s.key)).size).toBeGreaterThanOrEqual(
       Object.keys(SITES).length,
     );
@@ -237,11 +227,7 @@ function isDockerSaveLoadArgv(words: string[]): boolean {
 }
 
 /** Where a whole-image save or load may still be spelled, by file or by file:function. */
-const WHOLE_IMAGE_EXEMPT = new Set([
-  'lib/deploy/layer-delta.js',
-  // k8s until the cold-deploy-speed plan's Task 5 moves it onto deliverImage.
-  'lib/deploy/k8s/k3s.js:sideloadK3s',
-]);
+const WHOLE_IMAGE_EXEMPT = new Set(['lib/deploy/layer-delta.js']);
 
 /** Named functions enclosing a node, nearest first ('<module>' when none). */
 function enclosingFnNames(ancestors: Node[]): string[] {
@@ -276,8 +262,8 @@ const stringValue = (n: Node): string | null => {
 
 /**
  * String literals and templates that spell a whole-image save or load, keyed
- * file:nearestFunction. A site inside an exempt function (at any depth, so
- * sideloadK3s's inner runOnce counts as sideloadK3s) is skipped.
+ * file:nearestFunction. A site inside an exempt function (at any depth, so an
+ * inner arrow counts as its named parent) is skipped.
  */
 function findWholeImageStrings(path: string, text: string): string[] {
   const out: string[] = [];
@@ -300,14 +286,14 @@ describe('only the layer delta ships a whole image', () => {
     expect(found, 'deliver the image with deliverImage (layer-delta.js)').toEqual([]);
   });
 
-  it('positive control: sideloadK3s still spells one, so the walk can see it', () => {
-    const k3s = readFileSync(join(SRC, 'lib/deploy/k8s/k3s.js'), 'utf-8');
+  it('positive control: the layer delta itself spells one, so the walk can see it', () => {
+    const delta = readFileSync(join(SRC, 'lib/deploy/layer-delta.js'), 'utf-8');
     const chains: string[][] = [];
-    walk(parseAst(k3s), (n, ancestors) => {
+    walk(parseAst(delta), (n, ancestors) => {
       const v = stringValue(n);
       if (v !== null && WHOLE_IMAGE.test(v)) chains.push(enclosingFnNames(ancestors));
     });
-    expect(chains.some((c) => c.includes('sideloadK3s'))).toBe(true);
+    expect(chains.some((c) => c.includes('saveImageToDir'))).toBe(true);
   });
 });
 
@@ -323,19 +309,22 @@ describe('image-delivery primitives are never imported under another name', () =
 describe('planted fixtures', () => {
   it('flags a primitive imported under another name', () => {
     expect(
-      findAliasedImports('f.js', "import { sideloadK3s as ship, other } from './k3s.js';"),
-    ).toEqual(['f.js: sideloadK3s imported as ship']);
+      findAliasedImports(
+        'f.js',
+        "import { copyAppImageToStandby as ship, other } from './image-copy.js';",
+      ),
+    ).toEqual(['f.js: copyAppImageToStandby imported as ship']);
   });
 
   it('flags a primitive renamed while destructuring a dynamic import', () => {
     const text = [
       "async function a() { const { deliverImage: send } = await import('./layer-delta.js'); }",
-      "async function b() { const { sideloadK3s: s = null, other: o } = await import('./k3s.js'); }",
+      "async function b() { const { copyAppImageToStandby: s = null, other: o } = await import('./k3s.js'); }",
       "async function c() { const { deliverImage } = await import('./layer-delta.js'); }",
     ].join('\n');
     expect(findAliasedImports('f.js', text)).toEqual([
       'f.js: deliverImage imported as send',
-      'f.js: sideloadK3s imported as s',
+      'f.js: copyAppImageToStandby imported as s',
     ]);
   });
 
@@ -343,18 +332,20 @@ describe('planted fixtures', () => {
     expect(
       findAliasedImports(
         'f.js',
-        "import { sideloadK3s, buildAppImage } from './k3s.js';\nimport { other as o } from './x.js';",
+        "import { copyAppImageToStandby, buildAppImage } from './k3s.js';\nimport { other as o } from './x.js';",
       ),
     ).toEqual([]);
   });
 
   it('flags a member call and names its enclosing function', () => {
-    const s = findSites('f.js', 'async function scratch(d) { await d.sideloadK3s({}); }');
+    const s = findSites('f.js', 'async function scratch(d) { await d.copyAppImageToStandby({}); }');
     expect(s.map((x) => x.key)).toEqual(['f.js:scratch']);
   });
 
   it('does not count comments or strings', () => {
-    expect(findSites('f.js', "// sideloadK3s(x)\nconst a = 'buildAppImage(';")).toEqual([]);
+    expect(findSites('f.js', "// copyAppImageToStandby(x)\nconst a = 'buildAppImage(';")).toEqual(
+      [],
+    );
   });
 
   it('flags a whole-image save in a string or a template, never in a comment', () => {
@@ -391,12 +382,13 @@ describe('planted fixtures', () => {
     expect(findWholeImageStrings('f.js', text)).toEqual([]);
   });
 
-  it('exempts the layer delta file and k3s.js:sideloadK3s only', () => {
+  it('exempts the layer delta file only: a k8s sideload is a finding again', () => {
     const text =
       "function sideloadK3s() { const runOnce = () => 'docker save x'; return runOnce(); }\n" +
       "function other() { return 'docker load'; }";
     expect(findWholeImageStrings('lib/deploy/layer-delta.js', text)).toEqual([]);
     expect(findWholeImageStrings('lib/deploy/k8s/k3s.js', text)).toEqual([
+      'lib/deploy/k8s/k3s.js:runOnce: docker save x',
       'lib/deploy/k8s/k3s.js:other: docker load',
     ]);
   });

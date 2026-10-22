@@ -263,7 +263,7 @@ export const haFinalizeConfigStep = () =>
 // k8s (single-cluster) step factory
 //
 // deployK3s is a cohesive, internally state-gated pipeline (Pulumi up →
-// wait-ready → kubeconfig → build → sideload → applyK3sManifests) that k8s-ha
+// wait-ready → kubeconfig → build → applyK3sManifests, which delivers) that k8s-ha
 // reuses VERBATIM, running two copies in parallel with per-cluster isolation.
 // Cracking it into separate effects would break that isolation and risk drift
 // on a hardened path, so — per the Task 5 brief's "wrap the existing function

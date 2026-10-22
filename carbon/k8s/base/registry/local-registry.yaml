@@ -79,8 +79,8 @@ spec:
               # barrier). Every consumer dials <masterPrivateIp>:5000: kubelet
               # on each node (registries.yaml mirror; kubelet uses node DNS,
               # not cluster DNS, so it can't resolve the "local-registry"
-              # Service name), and the operator's push tunnel
-              # (ssh -L <port>:<masterPrivateIp>:5000, registry-push.js).
+              # Service name), and the master itself, where the deploy's
+              # layer delta runs `ctr images push` (layer-delta-remote.sh).
               # {{MASTER_PRIVATE_IP}} is rendered at deploy time
               # (renderK8sBase): Hetzner's static 10.0.1.1, DigitalOcean's
               # Pulumi-assigned VPC address.

@@ -7,8 +7,8 @@
  *   3. Build the image on the operator's machine
  *   4. Read the runtime base the Dockerfile builds FROM
  *
- * Delivery to a server is the layer delta (layer-delta.js, deliverImage). The
- * k8s-mode sideload lives in src/lib/deploy/k8s/k3s.js (`sideloadK3s`).
+ * Delivery to a server, compose or k8s, is the layer delta (layer-delta.js,
+ * deliverImage).
  *
  * See the local-first-deploy-design spec §1.
  */

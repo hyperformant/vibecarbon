@@ -165,7 +165,7 @@ async function haK8sProvisionClusters(ctx) {
   // name. Without this, both deployK3s calls share `options.state` (the
   // orchestrator's tracker for the user-facing env) and write to the same
   // deploy-state-<env>.json. When standby completes `k3s-apply` first
-  // (typical — standby tends to finish sideload faster), primary's
+  // (typical — standby builds nothing), primary's
   // `state.shouldSkip('k3s-apply', { imageTag })` then matches the stored
   // hash and SKIPS manifest install on primary. cert-manager + the db
   // never land on primary → public probe to e<env>.<domain> (which DNS

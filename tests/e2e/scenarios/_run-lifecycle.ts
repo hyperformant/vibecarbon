@@ -1265,10 +1265,11 @@ export async function sweepOrphanedHetznerResources(
  * removes:
  *
  *   - k8s / k8s-ha build `10.0.1.1:5000/<projectName>:<sha>-<ts>` locally
- *     (buildLocalImage in src/lib/deploy/image.js) to sideload + push. Only the
- *     transient `localhost:<port>/…` push aliases get reaped (pushImageToLocalRegistry);
- *     the original registry-prefixed tag is kept for the Deployment and never
- *     removed. Iterating a kept rig mints a fresh timestamped tag every rebuild,
+ *     (buildLocalImage in src/lib/deploy/image.js) for the layer delta into the
+ *     master's registry. Only `localhost:<port>/…` aliases get reaped (the
+ *     retired ssh-tunnel push minted them; an operator machine that ran an older
+ *     CLI may still hold some); the original registry-prefixed tag is kept for
+ *     the Deployment and never removed. Iterating a kept rig mints a fresh timestamped tag every rebuild,
  *     so these pile up unbounded → `docker builder prune` / `docker system df`
  *     showed hundreds of `testapp-k8s-*` images (60GB+ reclaimable).
  *   - compose local builds tag `<projectName>-app:local` / `vibecarbon-local/<projectName>`.

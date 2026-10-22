@@ -1536,8 +1536,8 @@ export async function executeDeployment(args, gatheredConfig) {
   //              runtime base itself and only the app's own layers cross the
   //              wire. The compose default when local docker is present (the
   //              build runs in parallel behind VPS provisioning); also the
-  //              k8s/k3s path (deployK3s builds + sideloads + applies
-  //              manifests inline).
+  //              k8s/k3s path (deployK3s builds, delivers the delta to the
+  //              master's registry and applies manifests inline).
   //   'direct' — build ON the server via DOCKER_HOST=ssh:// (buildRemote);
   //              only the build context (source) transfers, no image. Compose
   //              fallback when local docker is ABSENT, or forced with -direct.
@@ -1624,7 +1624,7 @@ export async function executeDeployment(args, gatheredConfig) {
       isLocal: true,
     });
   } else if (buildMode === 'local') {
-    // K8s 'local' build mode: deployK3s handles the build + sideload +
+    // K8s 'local' build mode: deployK3s handles the build + delivery +
     // manifest apply inline. No CI image to wait for; stub the
     // image-ready contract so downstream code sees a deterministic shape.
     imageReadyPromise = Promise.resolve({
@@ -2066,7 +2066,7 @@ export async function executeDeployment(args, gatheredConfig) {
     {
       const kubeconfigPath = join(process.cwd(), '.vibecarbon', `kubeconfig-${environment}`);
       const masterIp = deployResult.primary?.masterIp || deployResult.masterIp;
-      p.log.success('Local-first deploy complete. App is sideloaded + running on the cluster.');
+      p.log.success('Local-first deploy complete. App is delivered + running on the cluster.');
       p.note(
         formatCommandNote([
           `Kubeconfig:  ${kubeconfigPath}`,

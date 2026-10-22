@@ -11,9 +11,11 @@
  * network step can take the incident-critical CA pair down with it.
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // prePullImages shells out once per node over ssh. Mocking the command
 // layer — not node:child_process — keeps the test off the flaky builtin-mock
@@ -29,6 +31,7 @@ import {
   clusterAutoscalerPodImages,
   formatPrePullSummary,
   prePullImages,
+  pullK3sRuntimeBase,
 } from '../../../src/lib/deploy/k8s/k3s.js';
 import {
   carbonAutoscalerImageRef,
@@ -143,5 +146,71 @@ describe('deployK3s wiring', () => {
 
   it('pre-pulls the db image the StatefulSet runs', () => {
     expect(k3s).toMatch(/prePullImages\(\{[\s\S]{0,200}?extraImages: \[dbImageTag\]/);
+  });
+});
+
+/**
+ * The runtime base pull is not opportunistic: the app image's layer delta
+ * (deliverImage) awaits it, so a master holding the base is sent only the
+ * app's own layers. Inspect first, so a warm master asks no registry.
+ */
+describe('pullK3sRuntimeBase', () => {
+  const BASE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1';
+  let dir = '';
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = '';
+  });
+
+  /** Runs the script against a stub `k3s`; `held` is what `images ls -q` lists. */
+  function stubK3s(held: string, pullExit = 0) {
+    dir = mkdtempSync(join(tmpdir(), 'k3s-base-'));
+    const log = join(dir, 'calls');
+    writeFileSync(
+      join(dir, 'k3s'),
+      `#!/bin/sh\necho "$*" >> ${log}\ncase "$4 $5" in\n  "images ls") printf '%s' '${held}' ;;\n  "images pull") [ ${pullExit} -eq 0 ] || { echo 'ctr: failed to resolve reference "x": unauthorized' >&2; exit 1; } ;;\nesac\n`,
+    );
+    chmodSync(join(dir, 'k3s'), 0o755);
+    const run = async (script: string) => {
+      const r = spawnSync('sh', ['-s'], {
+        input: script,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+      });
+      if (r.status !== 0) {
+        throw Object.assign(new Error('Command failed: ssh root@m sh -s'), { stderr: r.stderr });
+      }
+      return r.stdout;
+    };
+    const calls = () => readFileSync(log, 'utf-8').trim().split('\n');
+    return { run, calls };
+  }
+
+  it('a master that holds the base asks no registry', async () => {
+    const k = stubK3s(`${BASE}\n`);
+    await pullK3sRuntimeBase({ masterIp: 'm', sshKeyPath: '/k', baseRef: BASE, run: k.run });
+    expect(k.calls()).toEqual([`ctr -n k8s.io images ls -q name==${BASE}`]);
+  });
+
+  it('a cold master pulls it into the k8s.io namespace the delta reads', async () => {
+    const k = stubK3s('');
+    await pullK3sRuntimeBase({ masterIp: 'm', sshKeyPath: '/k', baseRef: BASE, run: k.run });
+    expect(k.calls()).toEqual([
+      `ctr -n k8s.io images ls -q name==${BASE}`,
+      `ctr -n k8s.io images pull ${BASE}`,
+    ]);
+  });
+
+  it("a refused pull rejects with ctr's own line, not the ssh argv", async () => {
+    const k = stubK3s('', 1);
+    await expect(
+      pullK3sRuntimeBase({ masterIp: 'm', sshKeyPath: '/k', baseRef: BASE, run: k.run }),
+    ).rejects.toThrow(/^ctr: failed to resolve reference "x": unauthorized$/);
+  });
+
+  it('quotes the ref into the script', async () => {
+    const run = vi.fn(async () => '');
+    await pullK3sRuntimeBase({ masterIp: 'm', sshKeyPath: '/k', baseRef: "a'b", run });
+    expect(String(run.mock.calls[0]?.[0])).toContain(`name=='a'\\''b'`);
   });
 });

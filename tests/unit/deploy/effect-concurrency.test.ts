@@ -64,14 +64,6 @@ vi.mock('../../../src/lib/deploy/layer-delta.js', () => ({
   }),
 }));
 
-// Still on disk for k8s until the plan's Task 5; compose must never reach it.
-vi.mock('../../../src/lib/deploy/registry-push.js', () => ({
-  pushImageOverSshTunnel: vi.fn(() => {
-    H.state.order.push('push-start');
-    return Promise.resolve();
-  }),
-}));
-
 vi.mock('../../../src/lib/deploy/image.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return { ...actual, readRuntimeBaseRef: vi.fn(() => H.state.baseRef) };
@@ -126,7 +118,6 @@ const { EFFECTS } = await import('../../../src/lib/deploy/effects/index.js');
 const { COMPOSE_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/compose-ha.js');
 const { planDeploy } = await import('../../../src/lib/deploy/plan/deploy-plan.js');
 const { runPlan } = await import('../../../src/lib/deploy/plan/runner.js');
-const registryPush = await import('../../../src/lib/deploy/registry-push.js');
 
 // transferImage's compose-local branch dynamically imports these per the
 // file's convention (never a top-level import of the compose stack). Pre-warm
@@ -150,7 +141,6 @@ beforeEach(() => {
   H.state.basePull = deferred();
   H.state.stackPull = deferred();
   H.state.build = deferred();
-  vi.mocked(registryPush.pushImageOverSshTunnel).mockClear();
 });
 
 const fakeState = () => ({
@@ -220,8 +210,6 @@ describe('F2 — compose single: transferImage is non-blocking, startComposeStac
     // The very promise the pull returned, so deliverImage awaits the real pull.
     H.state.basePull?.resolve('pulled');
     await expect(args.basePull).resolves.toBe('pulled');
-    expect(registryPush.pushImageOverSshTunnel).not.toHaveBeenCalled();
-    expect(H.state.order).not.toContain('push-start');
   });
 
   it('a Dockerfile with no RUNTIME_IMAGE ARG means no base pull: the delta sends every layer', async () => {

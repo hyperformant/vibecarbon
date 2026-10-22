@@ -62,7 +62,7 @@ vi.mock('../../../src/lib/deploy/image.js', async (orig) => {
   };
 });
 
-const { renderCarbonAutoscalerConfig, buildAppImage, pushImageToLocalRegistry } = await import(
+const { renderCarbonAutoscalerConfig, buildAppImage } = await import(
   '../../../src/lib/deploy/k8s/k3s.js'
 );
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
@@ -123,32 +123,5 @@ describe('M3 Task 2 — Hetzner byte-identical pin', () => {
     // infraOutputs.masterPrivateIp on a Hetzner deploy.
     await buildAppImage('/tmp/proj', 'proj', false, undefined, '10.0.1.1');
     expect(H.lastBuildLocalImageOptions?.tagPrefix).toBe('10.0.1.1:5000');
-  });
-
-  it('pushImageToLocalRegistry still requires (and validates against) the 10.0.1.1:5000/ prefix by default', async () => {
-    // Validation runs before any spawn()/SSH call, so no child_process
-    // mocking is needed to reach this assertion — see
-    // k3s-push-image.test.ts for the full spawn-mocked push-flow pins,
-    // left untouched by this refactor (their unmodified pass is itself
-    // corroborating evidence of byte-identical default behavior).
-    await expect(
-      pushImageToLocalRegistry({
-        tag: 'wrong.example.com:5000/p:t',
-        masterIp: '1.2.3.4',
-        sshKey: '/tmp/k',
-        khPath: '/tmp/kh',
-      }),
-    ).rejects.toThrow(/expected tag prefixed with '10\.0\.1\.1:5000\/'/);
-
-    // Explicit Hetzner static must reject the SAME way.
-    await expect(
-      pushImageToLocalRegistry({
-        tag: 'wrong.example.com:5000/p:t',
-        masterIp: '1.2.3.4',
-        sshKey: '/tmp/k',
-        khPath: '/tmp/kh',
-        masterPrivateIp: '10.0.1.1',
-      }),
-    ).rejects.toThrow(/expected tag prefixed with '10\.0\.1\.1:5000\/'/);
   });
 });
