@@ -426,6 +426,9 @@ export function seedDeployEnvConfig(
   const envCfg = config.environments[envName];
   if (settings.region) envCfg.region = settings.region;
   if (settings.secondaryRegion) envCfg.secondaryRegion = settings.secondaryRegion;
+  // Only a scenario that pins a type seeds one. The matrix pins none
+  // (region-resolver.ts hands serverType undefined), so the deploy picks the
+  // default sizes and records them, and a re-seed never overwrites that record.
   if (settings.serverType) envCfg.serverType = settings.serverType;
   // Only written when explicitly set (mirrors region/serverType above) — the
   // 4 release scenarios never pass `provider`, so their seeded

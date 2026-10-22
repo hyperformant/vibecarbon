@@ -78,6 +78,7 @@ import { k8sPsqlRunner } from './replication.js';
 import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retired-fence.js';
 import { envS3Record } from './s3-record.js';
 import { stagingProbeCa } from './staging-ca.js';
+import { haStacksFrom } from './standby-types.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
 import { TLS_FIRST_LOOK_BUDGET_MS } from './tls-ready.js';
@@ -861,6 +862,117 @@ export async function finishK8sRetiredFence({
 /**
  * Execute the deployment based on gathered configuration
  */
+/**
+ * The skeleton save's record of the k8s-ha standby types: master and db under
+ * `ha.standby`, the worker under `ha.standbyWorkerSpec.serverType`, each
+ * merged onto what the env already has and only when defined.
+ *
+ * @param {object|undefined} existingHa - the env's `ha` on disk
+ * @param {{masterServerType?: string, dbServerType?: string, workerServerType?: string}|undefined} types
+ * @returns {object}
+ */
+function standbyTypesRecord(existingHa, types) {
+  if (!types) return {};
+  const { masterServerType, dbServerType, workerServerType } = types;
+  return {
+    ...(masterServerType || dbServerType
+      ? {
+          standby: {
+            ...(existingHa?.standby ?? {}),
+            ...(masterServerType ? { masterServerType } : {}),
+            ...(dbServerType ? { dbServerType } : {}),
+          },
+        }
+      : {}),
+    ...(workerServerType
+      ? {
+          standbyWorkerSpec: {
+            ...(existingHa?.standbyWorkerSpec ?? {}),
+            serverType: workerServerType,
+          },
+        }
+      : {}),
+  };
+}
+
+/**
+ * The skeleton save's record of the compose-ha standby type, resolved before
+ * the standby server exists: `ha.pendingStandby`, with the location it was
+ * resolved for, so a rerun of a deploy that fails before the server is
+ * created places the same type (effects/compose-ha.js). Once the server
+ * exists its servers[] entry is the record and the pending save drops this.
+ *
+ * @param {string|null} secondaryRegion
+ * @param {{serverType?: string}|undefined} types
+ * @returns {object}
+ */
+function pendingStandbyRecord(secondaryRegion, types) {
+  if (!secondaryRegion || !types?.serverType) return {};
+  return { pendingStandby: { region: secondaryRegion, serverType: types.serverType } };
+}
+
+/**
+ * The success save's per-side k8s-ha record: each cluster's IPs, region,
+ * stack identity and the server types it ACTUALLY deployed with, plus the
+ * pilot standby's worker spec. Exported for tests.
+ *
+ * @param {{primary: object, standby: object}} deployResult - the fan-out's per-side results
+ * @param {{region: string, secondaryRegion: string, minWorkers?: number}} fallback
+ * @returns {{primary: object, standby: object, standbyWorkerSpec: object}}
+ */
+export function haSidesRecord(deployResult, { region, secondaryRegion, minWorkers }) {
+  return {
+    primary: {
+      masterIp: deployResult.primary.masterIp,
+      floatingIp: deployResult.primary.floatingIp,
+      dbIp: deployResult.primary.dbIp,
+      // The database node's PRIVATE IP — the local WireGuard-relay
+      // endpoint the failover/restore re-seed dials (deterministic
+      // 10.0.1.2 in the IaC program; persisted so identifyServers
+      // can surface it without hardcoding).
+      dbPrivateIp: deployResult.primary.dbPrivateIp,
+      // The region + server types this side ACTUALLY deployed to,
+      // from the fan-out result (fall back to the options value only
+      // if absent). A failover/scale converge reads these back for the
+      // stack's Pulumi `location` and current server types, so they
+      // must reflect the deployed reality, not the (possibly swapped)
+      // options-level flags or the shared primary types.
+      region: deployResult.primary.region ?? region,
+      masterServerType: deployResult.primary.masterServerType,
+      dbServerType: deployResult.primary.dbServerType,
+      // The standby's worker is recorded in standbyWorkerSpec below; a
+      // failover swaps the two worker records with the roles.
+      workerServerType: deployResult.primary.workerServerType,
+      // Task 6/7: cluster identity (Pulumi stack name). A redeploy
+      // reads THIS back as `envConfig.ha.primary.stack` (see the
+      // haStacks derivation above, ~line 702) so a post-failover
+      // redeploy follows the role↔stack mapping instead of
+      // re-birthing the `${environment}-primary` default.
+      stack: deployResult.primary.stack,
+    },
+    standby: {
+      masterIp: deployResult.standby.masterIp,
+      floatingIp: deployResult.standby.floatingIp,
+      dbIp: deployResult.standby.dbIp,
+      dbPrivateIp: deployResult.standby.dbPrivateIp,
+      region: deployResult.standby.region ?? secondaryRegion,
+      // The standby's region-resolved types (may differ from the
+      // primary's) — provisionStandbyCapacity pins them so a failover
+      // converge never resizes the standby's master/db node.
+      masterServerType: deployResult.standby.masterServerType,
+      dbServerType: deployResult.standby.dbServerType,
+      stack: deployResult.standby.stack,
+    },
+    // Pilot-light failover config: what `vibecarbon failover` will
+    // provision (worker count/type) and bring up (app tier), derived
+    // from this deploy's own inputs — never hardcoded in failover.
+    standbyWorkerSpec: {
+      count: minWorkers ?? 1,
+      serverType: deployResult.standby.workerServerType,
+    },
+  };
+}
+
 export async function executeDeployment(args, gatheredConfig) {
   // Arm the silent-success guard FIRST. If this function's awaited work never
   // settles (2026-07-07 k8s-ha RCA: a standby deployK3s promise dangled and Node
@@ -1141,6 +1253,20 @@ export async function executeDeployment(args, gatheredConfig) {
         provider: config.provider,
         region,
         ...(secondaryRegion ? { secondaryRegion } : {}),
+        // The sizes this deploy picked, recorded before any remote work so a
+        // rerun of a deploy that fails later builds the same servers instead
+        // of re-picking from a catalog whose prices may have moved (the
+        // prompts take a recorded type over the role default). Compose is one
+        // host (`serverType`); k8s records each role, as the final save does.
+        ...(deployMode === 'kubernetes'
+          ? {
+              ...(masterServerType ? { masterServerType } : {}),
+              ...(dbServerType ? { dbServerType } : {}),
+              ...(workerServerType ? { workerServerType } : {}),
+            }
+          : serverType
+            ? { serverType }
+            : {}),
         ...(domain ? { domain } : {}),
         ...(dnsProvider ? { dnsProvider } : {}),
         s3: envS3Record(s3Config, existingEnv.s3),
@@ -1157,6 +1283,13 @@ export async function executeDeployment(args, gatheredConfig) {
                 ...(existingEnv.ha ?? {}),
                 enabled: true,
                 ...(secondaryRegion ? { failoverRegion: secondaryRegion } : {}),
+                // k8s-ha: the standby's resolved types, so a rerun of a deploy
+                // that fails later places the same standby (the fan-out keeps
+                // a recorded type). A worker with nothing stocked is not
+                // recorded; the fan-out falls back and says so.
+                ...(deployMode === 'compose-ha'
+                  ? pendingStandbyRecord(secondaryRegion, gatheredConfig.standbyServerTypes)
+                  : standbyTypesRecord(existingEnv.ha, gatheredConfig.standbyServerTypes)),
               },
             }
           : {}),
@@ -1798,13 +1931,12 @@ export async function executeDeployment(args, gatheredConfig) {
   // /`persistedEnvConfig` re-read further down (~line 1290) — that re-read
   // exists to pick up THIS deploy's own mid-flight saves and must not be
   // pulled forward, or a fresh deploy could see its own in-progress writes.
-  const haStacks =
-    envConfig?.ha?.primary?.stack && envConfig?.ha?.standby?.stack
-      ? {
-          primary: { stack: envConfig.ha.primary.stack, region: envConfig.ha.primary?.region },
-          standby: { stack: envConfig.ha.standby.stack, region: envConfig.ha.standby?.region },
-        }
-      : null;
+  //
+  // Each side also carries its recorded master/db types (and the standby its
+  // worker, from ha.standbyWorkerSpec), with or without a stack: the fan-out
+  // keeps them, so a redeploy never resizes or refuses an existing env
+  // (src/lib/deploy/standby-types.js haStacksFrom).
+  const haStacks = haStacksFrom(envConfig);
   const stateBucketYoung = await stateBucketYoungRead;
   if (stateBucketYoung) {
     emitStateScopeYoung(s3Config.stateBucket);
@@ -1827,6 +1959,12 @@ export async function executeDeployment(args, gatheredConfig) {
     domain,
     ha: config.ha,
     haStacks,
+    // `deploy -server-type` given: new sizes for both clusters, so the
+    // standby's recorded types give way (k8s-ha fan-out).
+    serverTypeRequested: !!args.serverType,
+    // A first-deploy rerun with a different -standby-region: the standby's
+    // recorded types were resolved for the old location and give way too.
+    standbyRetargeted: !!gatheredConfig.standbyRetargeted,
     observability: config.observability,
     services,
     apiToken,
@@ -2640,51 +2778,7 @@ export async function executeDeployment(args, gatheredConfig) {
           // leaves it unset, so an unplanned failover refuses until one does.
           ...haSeedRecord(deployResult),
           ...(deployResult.primary && {
-            primary: {
-              masterIp: deployResult.primary.masterIp,
-              floatingIp: deployResult.primary.floatingIp,
-              dbIp: deployResult.primary.dbIp,
-              // The database node's PRIVATE IP — the local WireGuard-relay
-              // endpoint the failover/restore re-seed dials (deterministic
-              // 10.0.1.2 in the IaC program; persisted so identifyServers
-              // can surface it without hardcoding).
-              dbPrivateIp: deployResult.primary.dbPrivateIp,
-              // The region + server types this side ACTUALLY deployed to,
-              // from the fan-out result (fall back to the options value only
-              // if absent). A failover/scale converge reads these back for the
-              // stack's Pulumi `location` and current server types, so they
-              // must reflect the deployed reality, not the (possibly swapped)
-              // options-level flags or the shared primary types.
-              region: deployResult.primary.region ?? region,
-              masterServerType: deployResult.primary.masterServerType,
-              dbServerType: deployResult.primary.dbServerType,
-              // Task 6/7: cluster identity (Pulumi stack name). A redeploy
-              // reads THIS back as `envConfig.ha.primary.stack` (see the
-              // haStacks derivation above, ~line 702) so a post-failover
-              // redeploy follows the role↔stack mapping instead of
-              // re-birthing the `${environment}-primary` default.
-              stack: deployResult.primary.stack,
-            },
-            standby: {
-              masterIp: deployResult.standby.masterIp,
-              floatingIp: deployResult.standby.floatingIp,
-              dbIp: deployResult.standby.dbIp,
-              dbPrivateIp: deployResult.standby.dbPrivateIp,
-              region: deployResult.standby.region ?? secondaryRegion,
-              // The standby's region-resolved types (may differ from the
-              // primary's) — provisionStandbyCapacity pins them so a failover
-              // converge never resizes the standby's master/db node.
-              masterServerType: deployResult.standby.masterServerType,
-              dbServerType: deployResult.standby.dbServerType,
-              stack: deployResult.standby.stack,
-            },
-            // Pilot-light failover config: what `vibecarbon failover` will
-            // provision (worker count/type) and bring up (app tier), derived
-            // from this deploy's own inputs — never hardcoded in failover.
-            standbyWorkerSpec: {
-              count: minWorkers ?? 1,
-              serverType: deployResult.standby.workerServerType,
-            },
+            ...haSidesRecord(deployResult, { region, secondaryRegion, minWorkers }),
             scaleUpList: deriveScaleUpList({
               appManifestText: readFileSync(
                 join(process.cwd(), 'k8s/base/app/deployment.yaml'),

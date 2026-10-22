@@ -1,0 +1,1704 @@
+{
+  "provider": "hetzner",
+  "captured": "2026-10-22 (edited)",
+  "source": "Synthetic: the 2026-10-22 Hetzner capture with cx23 available in hel1 only (the 2026-10-20 shape)",
+  "note": "Trimmed to the fields fetchServerTypes reads. Public catalog data, no account identifiers.",
+  "server_types": [
+    {
+      "name": "cpx11",
+      "architecture": "x86",
+      "cores": 2,
+      "memory": 2,
+      "disk": 40,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "nbg1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "hel1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "20.4900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "5.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "5.9900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "20.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "5.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "11.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx21",
+      "architecture": "x86",
+      "cores": 3,
+      "memory": 4,
+      "disk": 80,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "nbg1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "hel1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "37.4900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "10.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "10.9900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "37.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "10.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "21.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx31",
+      "architecture": "x86",
+      "cores": 4,
+      "memory": 8,
+      "disk": 160,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "nbg1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "hel1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "73.4900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "20.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "20.4900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "73.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "20.4900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "38.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx41",
+      "architecture": "x86",
+      "cores": 8,
+      "memory": 16,
+      "disk": 240,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "nbg1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "hel1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "141.4900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "37.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "37.9900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "141.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "37.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "65.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx51",
+      "architecture": "x86",
+      "cores": 16,
+      "memory": 32,
+      "disk": 360,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "nbg1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "hel1",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": false,
+          "deprecation": {
+            "announced": "2025-10-16T06:00:00Z",
+            "unavailable_after": "2025-12-31T23:59:59Z"
+          }
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "279.4900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "83.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "83.4900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "279.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "83.4900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "117.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cax11",
+      "architecture": "arm",
+      "cores": 2,
+      "memory": 4,
+      "disk": 40,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "6.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "6.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "6.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cax21",
+      "architecture": "arm",
+      "cores": 4,
+      "memory": 8,
+      "disk": 80,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "12.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "12.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "12.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cax31",
+      "architecture": "arm",
+      "cores": 8,
+      "memory": 16,
+      "disk": 160,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "24.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "24.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "24.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cax41",
+      "architecture": "arm",
+      "cores": 16,
+      "memory": 32,
+      "disk": 320,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": false,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "48.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "48.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "48.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ccx13",
+      "architecture": "x86",
+      "cores": 2,
+      "memory": 8,
+      "disk": 80,
+      "cpu_type": "dedicated",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "50.9900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "50.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "50.4900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "50.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "50.4900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "63.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ccx23",
+      "architecture": "x86",
+      "cores": 4,
+      "memory": 16,
+      "disk": 160,
+      "cpu_type": "dedicated",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "102.9900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "101.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "101.4900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "102.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "101.4900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "127.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ccx33",
+      "architecture": "x86",
+      "cores": 8,
+      "memory": 32,
+      "disk": 240,
+      "cpu_type": "dedicated",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "165.9900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "162.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "162.9900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "165.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "162.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "205.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ccx43",
+      "architecture": "x86",
+      "cores": 16,
+      "memory": 64,
+      "disk": 360,
+      "cpu_type": "dedicated",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "329.4900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "325.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "325.4900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "329.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "325.4900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "401.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ccx53",
+      "architecture": "x86",
+      "cores": 32,
+      "memory": 128,
+      "disk": 600,
+      "cpu_type": "dedicated",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "635.4900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "629.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "629.4900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "635.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "629.4900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "769.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ccx63",
+      "architecture": "x86",
+      "cores": 48,
+      "memory": 192,
+      "disk": 960,
+      "cpu_type": "dedicated",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "ash",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hil",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "ash",
+          "price_monthly": {
+            "net": "1014.4900000000"
+          }
+        },
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "1006.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "1006.9900000000"
+          }
+        },
+        {
+          "location": "hil",
+          "price_monthly": {
+            "net": "1014.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "1006.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "1223.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx12",
+      "architecture": "x86",
+      "cores": 1,
+      "memory": 2,
+      "disk": 40,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "13.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "13.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "13.4900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "17.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx22",
+      "architecture": "x86",
+      "cores": 2,
+      "memory": 4,
+      "disk": 80,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "22.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "22.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "22.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "30.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx32",
+      "architecture": "x86",
+      "cores": 4,
+      "memory": 8,
+      "disk": 160,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "41.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "41.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "41.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "57.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx42",
+      "architecture": "x86",
+      "cores": 8,
+      "memory": 16,
+      "disk": 320,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "81.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "81.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "81.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "109.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx52",
+      "architecture": "x86",
+      "cores": 12,
+      "memory": 24,
+      "disk": 480,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "118.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "118.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "118.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "158.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx62",
+      "architecture": "x86",
+      "cores": 16,
+      "memory": 32,
+      "disk": 640,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "152.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "152.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "152.9900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "202.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cx23",
+      "architecture": "x86",
+      "cores": 2,
+      "memory": 4,
+      "disk": 40,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": false,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": false,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "6.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "6.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "6.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cx33",
+      "architecture": "x86",
+      "cores": 4,
+      "memory": 8,
+      "disk": 80,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": false,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": false,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": false,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "9.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "9.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "9.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cx43",
+      "architecture": "x86",
+      "cores": 8,
+      "memory": 16,
+      "disk": 160,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": false,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": false,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": false,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "18.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "18.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "18.4900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cx53",
+      "architecture": "x86",
+      "cores": 16,
+      "memory": 32,
+      "disk": 320,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": false,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": false,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": false,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "34.9900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "34.9900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "34.9900000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cpx02",
+      "architecture": "x86",
+      "cores": 1,
+      "memory": 1,
+      "disk": 20,
+      "cpu_type": "shared",
+      "deprecation": null,
+      "locations": [
+        {
+          "name": "fsn1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "nbg1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "hel1",
+          "available": true,
+          "deprecation": null
+        },
+        {
+          "name": "sin",
+          "available": true,
+          "deprecation": null
+        }
+      ],
+      "prices": [
+        {
+          "location": "fsn1",
+          "price_monthly": {
+            "net": "7.4900000000"
+          }
+        },
+        {
+          "location": "hel1",
+          "price_monthly": {
+            "net": "7.4900000000"
+          }
+        },
+        {
+          "location": "nbg1",
+          "price_monthly": {
+            "net": "7.4900000000"
+          }
+        },
+        {
+          "location": "sin",
+          "price_monthly": {
+            "net": "8.9900000000"
+          }
+        }
+      ]
+    }
+  ]
+}

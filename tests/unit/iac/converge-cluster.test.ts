@@ -279,6 +279,23 @@ describe('convergeClusterInfra', () => {
     );
   });
 
+  it('(g4) refuses an ARM type that arrives as an override (a hand-edited ha.standby record)', async () => {
+    // k8s-ha scale seeds each cluster's overrides from its own record
+    // (ha.standby.masterServerType here), so an ARM type hand-edited there
+    // reaches converge as an override, not a persisted top-level type.
+    const { Provider, programCalls } = makeProvider();
+    const args = baseArgs({
+      envConfig: { minWorkers: 2, maxWorkers: 5, serverType: 'cpx22' },
+      overrides: { masterType: 'cax21', minWorkers: 0, maxWorkers: 0 },
+    });
+    await expect(convergeClusterInfra({ ...args, Provider })).rejects.toThrow(
+      /'cax21' is an ARM \(aarch64\) Hetzner Cloud server type/,
+    );
+    expect(programCalls).toHaveLength(0);
+    expect(getOrCreateStackMock).not.toHaveBeenCalled();
+    expect(upStackMock).not.toHaveBeenCalled();
+  });
+
   it('(g3) does not refuse a persisted ARM role the run overrides with an x86 type', async () => {
     const { Provider, programCalls } = makeProvider();
     const args = baseArgs({

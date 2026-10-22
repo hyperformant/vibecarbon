@@ -71,10 +71,14 @@ describe('providers.digitalocean (DO opt-in reference scenarios)', () => {
 });
 
 describe('capacityPreferences.digitalocean', () => {
-  it('has one blanket typePair backing every DO reference scenario (d1–d4 all share it)', () => {
-    expect(testConfig.e2e.capacityPreferences.digitalocean.typePairs).toEqual([
-      ['s-2vcpu-4gb', 's-4vcpu-8gb'],
-    ]);
+  it('scales each default Basic droplet one size up (d1–d4 deploy the picker default)', () => {
+    expect(testConfig.e2e.capacityPreferences.digitalocean.scaleTo).toEqual({
+      's-2vcpu-4gb': 's-4vcpu-8gb',
+      's-1vcpu-2gb': 's-2vcpu-4gb',
+      's-1vcpu-2gb-amd': 's-2vcpu-4gb-amd',
+      's-2vcpu-4gb-amd': 's-4vcpu-8gb-amd',
+      's-2vcpu-4gb-intel': 's-4vcpu-8gb-intel',
+    });
   });
 
   it('carries the Spaces-supporting regions subset', () => {

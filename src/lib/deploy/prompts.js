@@ -11,6 +11,7 @@ import {
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { exitCancelled, exitDeclined } from '../cli/exit-guard.js';
 import { spinner } from '../cli/progress.js';
+import { primaryEntryServerType } from '../cli/resolve-primary.js';
 import { c, printBanner } from '../colors.js';
 import { loadProjectConfig } from '../config.js';
 import {
@@ -37,12 +38,22 @@ import {
   deriveEnvAppBucketName,
   deriveProjectBucketName,
 } from '../providers/s3-base.js';
+import {
+  cheapestDefaultRegion,
+  cheapestRoleSet,
+  formatMonthly,
+  ROLE_MIN_RAM_GB,
+  rankLocationsByPrice,
+  rankStandbyLocations,
+} from '../sizing.js';
 import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
 import { walgPrefixFor } from '../walg/restore-base.js';
+import { composeHaStackOf } from './compose/ha-role-swap.js';
 import { collectDeployDelta, formatDeployDeltaLines } from './delta.js';
 import { assertOperatorConfig } from './preflight.js';
+import { haStacksFrom, k8sStandbyTypes } from './standby-types.js';
 import { resolveTier } from './tier-registry.js';
 import {
   DEFAULT_WORKER_MAX,
@@ -609,6 +620,115 @@ export async function promptAppStorageKey({ environment, projectName }) {
   return { accessKey: String(accessKey).trim(), secretKey: String(secretKey).trim() };
 }
 
+/** How a role reads in the out-of-stock refusal. */
+const ROLE_LABEL = {
+  compose: 'compose',
+  master: 'k8s master',
+  db: 'k8s database',
+  worker: 'k8s worker',
+};
+
+/**
+ * The refusal for a role whose default is null: nothing among the provider's
+ * candidates for it is orderable in `region` right now (P7, ruling B6). The
+ * deploy fails closed rather than falling to a pricier type, and names the
+ * cheapest same-continent regions (at most 3) that can place every role of
+ * this deploy, each with its monthly price (servers plus billed IPv4).
+ *
+ * For an HA standby (`options.standby`), `region` is the standby location:
+ * the line says so, the primary's location is never offered as a standby
+ * (`options.exclude`), each role needs at least the RAM of the primary node
+ * it stands in for (`options.minRamGb` in the line; nearby locations are
+ * ranked by what the standby would place there, `rankStandbyLocations` over
+ * `options.primaryTypes`), and the hint names `-standby-region`.
+ *
+ * @param {object} Provider - the provider class
+ * @param {string} region
+ * @param {string} role - the role with nothing orderable
+ * @param {string[]} roles - every role this deploy places
+ * @param {string} environment - for the command in the hint
+ * @param {{standby?: boolean, exclude?: string[], minRamGb?: Record<string, number>,
+ *   primaryTypes?: Record<string, string|undefined>}} [options]
+ * @returns {{line: string, hint: string}} one error line, and the next step
+ *   with its command on its own line
+ */
+export function unorderableDefaultRefusal(
+  Provider,
+  region,
+  role,
+  roles,
+  environment,
+  { standby = false, exclude = [], minRamGb = {}, primaryTypes = {} } = {},
+) {
+  const label = `${standby ? 'standby ' : ''}${ROLE_LABEL[role] ?? role}`;
+  const cause =
+    `no ${label} server with ${minRamGb[role] ?? ROLE_MIN_RAM_GB[role]} GB+ RAM ` +
+    `is orderable in ${region} right now`;
+  const continent = Provider.REGION_CONTINENT?.[region];
+  const neighbours = Object.keys(Provider.REGIONS).filter(
+    (r) =>
+      r !== region &&
+      !exclude.includes(r) &&
+      continent &&
+      Provider.REGION_CONTINENT?.[r] === continent,
+  );
+  const nearby = (
+    standby
+      ? rankStandbyLocations(Provider, neighbours, roles, primaryTypes)
+      : rankLocationsByPrice(Provider, neighbours, roles)
+  ).slice(0, 3);
+  if (nearby.length === 0) {
+    return standby
+      ? {
+          line: `${cause}, and no other standby location on this continent has one either`,
+          hint:
+            '-server-type sizes the primary and its standby together; name one that is in ' +
+            `stock in both locations, and deploy again:\n  vibecarbon deploy ${environment} -server-type <type>`,
+        }
+      : {
+          line: `${cause}, and none is orderable in the other regions on this continent either`,
+          hint: `name a server type that is in stock, and deploy again:\n  vibecarbon deploy ${environment} -server-type <type>`,
+        };
+  }
+  const options = nearby.map(({ location, monthly, types }) => {
+    const price = monthly === null ? '' : ` ${formatMonthly(Provider, monthly)}/mo`;
+    return `${location} (${roles.map((r) => types[r]).join(' + ')}${price})`;
+  });
+  return {
+    line: `${cause}; orderable nearby: ${options.join(', ')}`,
+    hint: `deploy in ${nearby[0].location}, the cheapest of those, with:\n  vibecarbon deploy ${environment} ${standby ? '-standby-region' : '-region'} ${nearby[0].location}`,
+  };
+}
+
+/**
+ * The region prompt's options and pre-selection for a new project. With a
+ * live catalog, each label shows what the deploy would cost there per month
+ * (`<id> - <name> · from $7.09/mo`: the cheapest role set for `roles` plus
+ * billed IPv4, `cheapestRoleSet`), or `· not orderable right now` where some
+ * role has nothing in stock (still selectable: the P7 refusal then names
+ * where to go). The pre-selection is `cheapestDefaultRegion`, ranked from the
+ * same sets, so it never disagrees with a label. With no catalog (offline,
+ * or a failed fetch) the labels are the plain `<id> - <name>` and the
+ * pre-selection is the provider's default region.
+ *
+ * @param {object} Provider - the provider class
+ * @param {Record<string, string>} regions - id to display name
+ * @param {string[]} roles - the roles this deploy places
+ * @returns {{options: Array<{value: string, label: string}>, initialValue: string}}
+ */
+export function regionPromptChoices(Provider, regions, roles) {
+  const live = Boolean(Provider._locationTypes);
+  const options = Object.entries(regions).map(([id, name]) => {
+    const plain = `${id} - ${name}`;
+    if (!live) return { value: id, label: plain };
+    const set = cheapestRoleSet(Provider, id, roles);
+    if (!set) return { value: id, label: `${plain} · not orderable right now` };
+    if (set.monthly === null) return { value: id, label: plain };
+    return { value: id, label: `${plain} · from ${formatMonthly(Provider, set.monthly)}/mo` };
+  });
+  return { options, initialValue: cheapestDefaultRegion(Provider, roles) };
+}
+
 export async function gatherDeploymentConfig(args) {
   console.clear();
   printBanner();
@@ -740,74 +860,59 @@ export async function gatherDeploymentConfig(args) {
     }
   }
 
-  // Region Selection (Aggressive Default)
-  // args.region validity against Provider.REGIONS was already checked above
-  // — region here is either unset, a known-good -region value, a
-  // previously-persisted (already-valid) envConfig.region, or the provider
-  // default.
-  let region = args.region || envConfig.region || Provider.DEFAULT_REGION; // Nuremberg as default robust region
-  if (!args.region && !envConfig.region && !args.yes) {
-    const regionOptions = Object.entries(providerConfig.regions).map(([id, name]) => ({
-      value: id,
-      label: `${id} - ${name}`,
-    }));
-    region = await p.select({
-      message: 'Region:',
-      options: regionOptions,
-      initialValue: region,
-    });
-    if (p.isCancel(region)) {
-      exitCancelled();
-    }
-  }
-
-  let secondaryRegion = null;
-  if (ha) {
-    const standbyDefault = Provider.getDefaultStandbyRegion(region);
-    secondaryRegion = args.secondaryRegion || envConfig.secondaryRegion || standbyDefault;
-    // HA spans TWO regions, but the prompt above only picks the primary. Ask
-    // for the standby too (same-continent partner pre-selected, so the common
-    // case is one Enter) — otherwise a non-EU primary like `ash` silently fails
-    // over across the Atlantic to `nbg1`. Skipped when set via -standby-region,
-    // saved config, or -y.
-    if (!args.secondaryRegion && !envConfig.secondaryRegion && !args.yes) {
-      const standbyOptions = Object.entries(providerConfig.regions)
-        .filter(([id]) => id !== region)
-        .map(([id, name]) => ({ value: id, label: `${id} - ${name}` }));
-      secondaryRegion = await p.select({
-        message: 'Standby region (HA failover target):',
-        options: standbyOptions,
-        initialValue: standbyDefault,
-      });
-      if (p.isCancel(secondaryRegion)) {
-        exitCancelled();
-      }
-    }
-  }
-
   const apiToken = await Provider.promptApiToken(projectConfig.projectName);
   if (!apiToken) {
     p.log.error('API token required');
     process.exit(1);
   }
 
-  // Server types resolve (and the ARM guard runs) straight after the API
-  // token, which the live catalog needs, and BEFORE the object-storage keys.
-  // The guard needs nothing from S3, and a persisted ARM type in
-  // .vibecarbon.json is a dead end: refuse it before asking the operator for
-  // (and live-verifying) secrets the run can never use. Nothing here prompts,
-  // so the API token and the S3 keys are still asked back to back.
+  // The live catalog loads straight after the API token, which it needs. The
+  // region, server types (and the ARM guard) and the HA standby all resolve
+  // from it, BEFORE the object-storage keys: the guard needs nothing from S3,
+  // and a persisted ARM type in .vibecarbon.json is a dead end, so refuse it
+  // before asking the operator for (and live-verifying) secrets the run can
+  // never use. The only questions here are the region and the HA standby,
+  // both priced from this catalog.
   await Provider.fetchServerTypes(apiToken);
+
+  // Region. args.region validity against Provider.REGIONS was already
+  // checked above, so region here is a known-good -region value, a
+  // previously-persisted (already-valid) envConfig.region, or, for a new
+  // project, the cheapest location on the provider's default continent
+  // (regionPromptChoices), which -y takes as is. The prompt shows each
+  // location's monthly price for this deploy mode; a region on record or
+  // given with -region is never moved and never asked about.
+  let region = args.region || envConfig.region;
+  if (!region) {
+    const regionRoles = isComposeDeploy ? ['compose'] : ['master', 'db', 'worker'];
+    const { options, initialValue } = regionPromptChoices(
+      Provider,
+      providerConfig.regions,
+      regionRoles,
+    );
+    region = initialValue;
+    if (!args.yes) {
+      region = await p.select({ message: 'Region:', options, initialValue });
+      if (p.isCancel(region)) {
+        exitCancelled();
+      }
+    }
+  }
   const regionDefaults = Provider.getRegionDefaults(region);
 
   // Server Type Selection (Streamlined)
   let serverType, masterServerType, workerServerType, dbServerType;
 
   if (isComposeDeploy) {
-    // Compose = the whole stack on one host, so use the medium-tier default
-    // (2+ vCPU, 4+ GB) for the whole box. regionDefaults.dbType is
-    // live-catalog-derived so it avoids retired SKUs like cpx21 in EU.
-    serverType = args.serverType || envConfig.serverType || regionDefaults.dbType;
+    // Compose = the whole stack on one host: the compose role's default (the
+    // cheapest orderable 4 GB+ type in the region, src/lib/sizing.js). Never
+    // the k8s db default, which is a 2 GB role. An env deployed before the
+    // top-level record keeps its size on the server entry.
+    serverType =
+      args.serverType ||
+      envConfig.serverType ||
+      primaryEntryServerType(envConfig) ||
+      regionDefaults.composeType;
     masterServerType = workerServerType = dbServerType = serverType;
   } else {
     // `args.serverType` acts as a blanket fallback for all three node roles
@@ -823,6 +928,32 @@ export async function gatherDeploymentConfig(args) {
     workerServerType =
       args.workerServerType || envConfig.workerServerType || blanket || regionDefaults.workerType;
     serverType = workerServerType;
+  }
+
+  // A role default is null when nothing among the provider's candidates for
+  // it is orderable in this region right now. Refuse here, before the S3 keys
+  // are asked for and before anything is created: a null type would otherwise
+  // reach Pulumi and the env record (ruling B6: fail closed, never a pricier
+  // fallback). Only a default can be null; a flag or a recorded type is kept.
+  const roleTypes = isComposeDeploy
+    ? [['compose', serverType]]
+    : [
+        ['master', masterServerType],
+        ['db', dbServerType],
+        ['worker', workerServerType],
+      ];
+  const unorderable = roleTypes.find(([, type]) => !type);
+  if (unorderable) {
+    const { line, hint } = unorderableDefaultRefusal(
+      Provider,
+      region,
+      unorderable[0],
+      roleTypes.map(([role]) => role),
+      environment,
+    );
+    p.log.error(line);
+    p.log.info(hint);
+    process.exit(1);
   }
 
   // Guard every resolved type. The region defaults and any option list are
@@ -847,11 +978,122 @@ export async function gatherDeploymentConfig(args) {
     }
   }
 
-  // Object-storage keys come right after the API token (only the prompt-free
-  // server-type resolution above sits between them): on every provider
-  // both are generated in the same console visit (Hetzner: project, then
-  // Security, then API tokens / S3 credentials), so asking for them back to
-  // back saves the operator a second trip before the DNS questions.
+  // HA standby location and size. Both come from the role picker
+  // (src/lib/sizing.js) over the live catalog, so this runs after the fetch
+  // above: the default is the cheapest same-continent partner where every
+  // standby role is orderable (DigitalOcean nyc3 pairs with tor1, since the
+  // static nyc3 -> sfo3 pair sold none of the default sizes on 2026-10-22).
+  // The prompt pre-selects it, so the common case is one Enter; it is skipped
+  // when set via -standby-region, saved config, or -y.
+  let secondaryRegion = null;
+  // k8s-ha: the standby's resolved types, for the skeleton save to record.
+  let standbyServerTypes;
+  // A first deploy rerun with a different -standby-region: the standby types
+  // on record were resolved for the old location and no standby exists yet,
+  // so they are re-resolved for the new one, as if requested. The fan-out
+  // follows the same flag (orchestrator deploymentConfig).
+  const standbyRetargeted = Boolean(
+    ha &&
+      args.secondaryRegion &&
+      envConfig.secondaryRegion &&
+      args.secondaryRegion !== envConfig.secondaryRegion &&
+      !envConfig.ha?.standby?.stack,
+  );
+  if (ha) {
+    // The k8s-ha pilot-light standby places a master and a db, no worker.
+    const standbyRoles = isComposeDeploy ? ['compose'] : ['master', 'db'];
+    const primaryTypes = isComposeDeploy
+      ? { compose: serverType }
+      : { master: masterServerType, db: dbServerType };
+    // The default must fit the primary's types without shrinking them.
+    const standbyDefault = Provider.getDefaultStandbyRegion(region, standbyRoles, primaryTypes);
+    secondaryRegion = args.secondaryRegion || envConfig.secondaryRegion || standbyDefault;
+    if (!args.secondaryRegion && !envConfig.secondaryRegion && !args.yes) {
+      const standbyOptions = Object.entries(providerConfig.regions)
+        .filter(([id]) => id !== region)
+        .map(([id, name]) => ({ value: id, label: `${id} - ${name}` }));
+      secondaryRegion = await p.select({
+        message: 'Standby region (HA failover target):',
+        options: standbyOptions,
+        initialValue: standbyDefault,
+      });
+      if (p.isCancel(secondaryRegion)) {
+        exitCancelled();
+      }
+    }
+
+    // The standby's own sizes, resolved as the HA effects resolve them: a
+    // type on record for the standby is kept (a redeploy never resizes or
+    // refuses an existing env; deploy -server-type re-sizes both, and then
+    // the record gives way). Otherwise each primary type where the standby
+    // location stocks it, else that role's cheapest stocked pick of at least
+    // the same RAM. Null means nothing fits there: refuse now, before the S3
+    // keys or any write, naming the cheapest nearby locations other than the
+    // primary (B6).
+    let resolved;
+    if (isComposeDeploy) {
+      // On record: the standby server's entry, or before it exists the type
+      // a failed first deploy's skeleton save resolved for this location.
+      const standbyOnRecord =
+        !args.serverType &&
+        ((envConfig.servers ?? []).some(
+          (sv) =>
+            sv?.serverType &&
+            composeHaStackOf(sv, projectConfig.projectName, environment) === 'standby',
+        ) ||
+          Boolean(
+            envConfig.ha?.pendingStandby?.serverType &&
+              envConfig.ha.pendingStandby.region === secondaryRegion,
+          ));
+      resolved = {
+        compose: standbyOnRecord
+          ? undefined
+          : Provider.resolveServerTypeForRegion(serverType, secondaryRegion, 'compose'),
+      };
+      if (resolved.compose) standbyServerTypes = { serverType: resolved.compose };
+    } else {
+      const standby = k8sStandbyTypes({
+        Provider,
+        standbyRegion: secondaryRegion,
+        primary: { master: masterServerType, db: dbServerType, worker: workerServerType },
+        recorded: haStacksFrom(envConfig)?.standby,
+        requested: Boolean(args.serverType) || standbyRetargeted,
+      });
+      resolved = { master: standby.masterServerType, db: standby.dbServerType };
+      // The worker is only recorded when something is stocked for it.
+      standbyServerTypes = {
+        masterServerType: standby.masterServerType,
+        dbServerType: standby.dbServerType,
+        ...(standby.workerServerType ? { workerServerType: standby.workerServerType } : {}),
+      };
+    }
+    const unplaceable = standbyRoles.find((role) => resolved[role] === null);
+    if (unplaceable) {
+      const minRamGb = Object.fromEntries(
+        standbyRoles.map((role) => [
+          role,
+          Math.max(ROLE_MIN_RAM_GB[role], Provider.SERVER_TYPES?.[primaryTypes[role]]?.ram ?? 0),
+        ]),
+      );
+      const { line, hint } = unorderableDefaultRefusal(
+        Provider,
+        secondaryRegion,
+        unplaceable,
+        standbyRoles,
+        environment,
+        { standby: true, exclude: [region], minRamGb, primaryTypes },
+      );
+      p.log.error(line);
+      p.log.info(hint);
+      process.exit(1);
+    }
+  }
+
+  // Object-storage keys come after the region and, for HA, the standby: the
+  // object-storage endpoint follows the region, and both questions are priced
+  // from the catalog the API token unlocks. They are one Enter each in the
+  // common case (and absent with a region on record), so the keys still
+  // follow the token closely, before the DNS questions.
   const providerId = providerIdFor(envConfig);
 
   // S3 (Standardized)
@@ -1164,6 +1406,8 @@ export async function gatherDeploymentConfig(args) {
     masterServerType,
     dbServerType,
     workerServerType,
+    ...(standbyServerTypes ? { standbyServerTypes } : {}),
+    standbyRetargeted,
     minWorkers: args.minWorkers ?? DEFAULT_WORKER_MIN,
     maxWorkers: args.maxWorkers ?? DEFAULT_WORKER_MAX,
     domain,

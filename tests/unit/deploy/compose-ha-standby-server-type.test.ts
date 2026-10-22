@@ -13,7 +13,9 @@
  * from generateSSHKeyPair halts the effect right after the server-type and
  * standby-region decisions, keeping the test off Pulumi/SSH/provider HTTP.
  */
-import { describe, expect, it, vi } from 'vitest';
+import * as p from '@clack/prompts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { seedCatalog } from '../helpers/catalog-fixtures.js';
 
 vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -28,7 +30,12 @@ vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
 const { COMPOSE_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/compose-ha.js');
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 
-async function runDecision(opts: { serverType?: string; region?: string; secondary?: string }) {
+async function runDecision(opts: {
+  serverType?: string;
+  region?: string;
+  secondary?: string;
+  envConfig?: Record<string, unknown>;
+}) {
   const ctx: Record<string, unknown> = {
     projectConfig: { projectName: 'testapp' },
     environment: 'production',
@@ -38,7 +45,7 @@ async function runDecision(opts: { serverType?: string; region?: string; seconda
     serverType: opts.serverType,
     apiToken: 'test-token',
     imageRef: 'ghcr.io/owner/repo:tag',
-    envConfig: { provider: 'hetzner' },
+    envConfig: opts.envConfig ?? { provider: 'hetzner' },
     onProgress: () => {},
   };
   await expect(COMPOSE_HA_EFFECTS.haProvisionServers(ctx)).rejects.toThrow(
@@ -54,9 +61,10 @@ describe('compose-ha standby server type', () => {
     const spy = vi.spyOn(HetznerProvider, 'resolveServerTypeForRegion');
     try {
       const ctx = await runDecision({ serverType: 'cpx31', region: 'nbg1' });
-      expect(spy).toHaveBeenCalledWith('cpx31', ctx.standbyRegion);
+      // The compose role: a stock-out re-picks the compose role's type there.
+      expect(spy).toHaveBeenCalledWith('cpx31', ctx.standbyRegion, 'compose');
       // Never the PRIMARY's region — that would resolve the wrong catalogue.
-      expect(spy).not.toHaveBeenCalledWith('cpx31', 'nbg1');
+      expect(spy).not.toHaveBeenCalledWith('cpx31', 'nbg1', 'compose');
     } finally {
       spy.mockRestore();
     }
@@ -87,5 +95,50 @@ describe('compose-ha standby server type', () => {
     // provisioned on an arch the app image cannot run.
     const ctx = await runDecision({ serverType: 'cax11' });
     expect(String(ctx.standbyServerType).startsWith('cax')).toBe(false);
+  });
+
+  describe('against a live catalog', () => {
+    const restores: Array<() => void> = [];
+    afterEach(() => {
+      for (const restore of restores.splice(0).reverse()) restore();
+      vi.restoreAllMocks();
+    });
+
+    it('Review Focus 4: a cx23 primary in hel1 gets the fsn1 compose pick, and says so', async () => {
+      restores.push(seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1'));
+      const info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
+      const ctx = await runDecision({ serverType: 'cx23', region: 'hel1', secondary: 'fsn1' });
+      expect(ctx.standbyServerType).toBe('cpx22');
+      expect(info).toHaveBeenCalledWith('Standby server type adjusted for fsn1: cx23 -> cpx22');
+    });
+
+    it('a recorded standby type is kept as is', async () => {
+      restores.push(seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1'));
+      const ctx = await runDecision({
+        serverType: 'cx23',
+        region: 'hel1',
+        secondary: 'fsn1',
+        envConfig: {
+          provider: 'hetzner',
+          servers: [
+            { role: 'primary', serverType: 'cx23', region: 'hel1' },
+            { role: 'standby', serverType: 'cpx32', region: 'fsn1' },
+          ],
+        },
+      });
+      expect(ctx.standbyServerType).toBe('cpx32');
+    });
+
+    it('DigitalOcean with no standby given pairs nyc3 with tor1, where the default size is stocked', async () => {
+      const { DigitalOceanProvider } = await import('../../../src/lib/providers/digitalocean.js');
+      restores.push(seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean'));
+      const ctx = await runDecision({
+        serverType: 's-2vcpu-4gb',
+        region: 'nyc3',
+        envConfig: { provider: 'digitalocean' },
+      });
+      expect(ctx.standbyRegion).toBe('tor1');
+      expect(ctx.standbyServerType).toBe('s-2vcpu-4gb');
+    });
   });
 });

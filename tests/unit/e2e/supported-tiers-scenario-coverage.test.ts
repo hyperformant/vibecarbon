@@ -59,13 +59,13 @@ describe('provider registry ↔ scenario map', () => {
   it('every provider a scenario names has a capacityPreferences block', () => {
     const prefs = testConfig.e2e.capacityPreferences as Record<
       string,
-      { regions: readonly string[]; typePairs: readonly (readonly [string, string])[] }
+      { regions: readonly string[]; scaleTo: Readonly<Record<string, string>> }
     >;
     for (const [id, scenarios] of Object.entries(SCENARIOS_BY_PROVIDER)) {
       if (scenarios.length === 0) continue;
       expect(prefs[id], `capacityPreferences missing block for provider "${id}"`).toBeDefined();
       expect(prefs[id].regions.length).toBeGreaterThan(0);
-      expect(prefs[id].typePairs.length).toBeGreaterThan(0);
+      expect(Object.keys(prefs[id].scaleTo).length).toBeGreaterThan(0);
     }
   });
 });

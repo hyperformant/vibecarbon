@@ -26,6 +26,6 @@
     }
   },
   "files": {
-    "includes": ["src/**/*.js", "tests/**/*.ts"]
+    "includes": ["src/**/*.js", "tests/**/*.ts", "scripts/cost-grid.js"]
   }
 }

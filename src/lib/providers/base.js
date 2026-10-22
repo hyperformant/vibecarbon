@@ -951,6 +951,72 @@ export class BaseProvider {
   }
 
   /**
+   * The x86 server types this provider uses per role, declared order = the
+   * offline order (most reliably stocked first). Live, src/lib/sizing.js
+   * picks the cheapest orderable one that meets the role's RAM floor. A
+   * provider declares every role its SUPPORTED_TIERS place: `compose`, and
+   * `master` / `db` / `worker` once it supports k8s.
+   * @type {{compose?: string[], master?: string[], db?: string[], worker?: string[]}}
+   */
+  static ROLE_CANDIDATES = {};
+
+  /**
+   * Billed public IPv4 per server per month, in the account's billing
+   * currency (0 when the server price includes it). Each provider states it
+   * with a dated source. null here: an unknown IPv4 price makes a priced
+   * role set's monthly unknown rather than silently low.
+   * @type {number|null}
+   */
+  static IPV4_MONTHLY = null;
+
+  /**
+   * The currency symbol this provider's prices (`priceFor`, `IPV4_MONTHLY`)
+   * are in, for the prices the CLI prints (src/lib/sizing.js formatMonthly).
+   * Each provider states it; null here, so a provider that forgets fails the
+   * provider contract instead of printing a wrong symbol. A provider whose
+   * billing currency is per account reads it live into `_currency`, which
+   * wins.
+   * @type {string|null}
+   */
+  static CURRENCY = null;
+
+  /**
+   * Live pricing a provider reads alongside its catalog, when its API states
+   * it (Hetzner `/v1/pricing`): the billing currency's symbol, and the billed
+   * IPv4 per server per month by location. null before a live read, or when
+   * it failed; `CURRENCY` and `IPV4_MONTHLY` stand then (src/lib/sizing.js
+   * formatMonthly, ipv4MonthlyAt).
+   * @type {string|null}
+   */
+  static _currency = null;
+  /** @type {Record<string, number>|null} */
+  static _ipv4Monthly = null;
+
+  /**
+   * Monthly server prices captured by fetchServerTypes from the payload it
+   * already reads: `{ [type]: { [location]: number|null } }`, or
+   * `{ [type]: number|null }` where the provider's prices are the same in
+   * every location. null before a live fetch.
+   * @type {Record<string, number|null|Record<string, number|null>>|null}
+   */
+  static _prices = null;
+
+  /**
+   * Monthly price of `type` in `location` from the live capture (`_prices`).
+   * @param {string} type
+   * @param {string} location
+   * @returns {number|null} null before a live fetch, or for an unpriced type
+   */
+  static priceFor(type, location) {
+    // Polymorphic on purpose: reads the CALLING subclass's `_prices` (see
+    // assertAmd64ServerType below for why `this` must stay).
+    // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic
+    const price = this._prices?.[type];
+    if (typeof price === 'number') return price;
+    return typeof price?.[location] === 'number' ? price[location] : null;
+  }
+
+  /**
    * Returns server types available in the given region.
    *
    * Each entry SHOULD carry an `architecture` field — 'x86' (or the equivalent
@@ -969,30 +1035,53 @@ export class BaseProvider {
   }
 
   /**
-   * Returns region-appropriate default server types.
+   * Default server type per role in `region`: each the cheapest orderable
+   * `ROLE_CANDIDATES` entry that meets the role's RAM floor
+   * (src/lib/sizing.js regionRoleDefaults). A role with nothing orderable is
+   * null. Compose-only providers return `composeType` for all four.
    * @param {string} region - Region ID
-   * @returns {{masterType: string, dbType: string, workerType: string}}
+   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
    */
   static getRegionDefaults(_region) {
     throw new Error('getRegionDefaults() must be implemented by subclass');
   }
 
   /**
-   * Default HA standby region for a given primary region.
+   * Default HA standby region for a given primary region: the cheapest
+   * same-continent partner where every role in `roles` is orderable (see
+   * src/lib/sizing.js cheapestStandbyRegion), else the static pair.
    * @param {string} primaryRegion
+   * @param {string[]} [roles] - ['compose'], or ['master', 'db'] for k8s-ha
+   * @param {Record<string, string|undefined>} [primaryTypes] - the primary's
+   *   type by role, which the standby must fit without shrinking
    * @returns {string}
    */
-  static getDefaultStandbyRegion(_primaryRegion) {
+  static getDefaultStandbyRegion(_primaryRegion, _roles, _primaryTypes) {
     throw new Error('getDefaultStandbyRegion() must be implemented by subclass');
   }
 
   /**
-   * Returns the equivalent server type available in a target region.
-   * @param {string} serverType - Original server type
-   * @param {string} targetRegion - Region to resolve for
+   * The provider's static HA standby pair for a primary region: a different
+   * region on the same continent, chosen without prices. getDefaultStandbyRegion
+   * keeps it offline, on a price tie, and when no partner can place the
+   * standby.
+   * @param {string} primaryRegion
    * @returns {string}
    */
-  static resolveServerTypeForRegion(_serverType, _targetRegion) {
+  static conventionalStandbyRegion(_primaryRegion) {
+    throw new Error('conventionalStandbyRegion() must be implemented by subclass');
+  }
+
+  /**
+   * Returns the equivalent server type available in a target region: the
+   * type itself when stocked there, else the role's cheapest orderable pick
+   * of at least its RAM (src/lib/sizing.js standbyStandIn).
+   * @param {string} serverType - Original server type
+   * @param {string} targetRegion - Region to resolve for
+   * @param {string} [role] - compose, master, db or worker
+   * @returns {string|null} null when nothing fits, for the caller to refuse
+   */
+  static resolveServerTypeForRegion(_serverType, _targetRegion, _role) {
     throw new Error('resolveServerTypeForRegion() must be implemented by subclass');
   }
 

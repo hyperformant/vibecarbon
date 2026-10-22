@@ -81,3 +81,21 @@ export function resolvePrimary(envConfig, { env } = {}) {
   const only = servers.find((sv) => sv.role === 'master') ?? servers[0];
   return only ? entry(only) : null;
 }
+
+/**
+ * The server type on record for the primary's servers[] entry: where an env
+ * deployed before the top-level `serverType` record keeps its size. Undefined
+ * when nothing is deployed, the entry records no type, or the HA roles are
+ * ambiguous (the deploy that records them is the fix, so it must not refuse).
+ *
+ * @param {object} envConfig
+ * @returns {string|undefined}
+ */
+export function primaryEntryServerType(envConfig) {
+  try {
+    return resolvePrimary(envConfig)?.entry?.serverType;
+  } catch (err) {
+    if (err instanceof AmbiguousPrimaryError) return undefined;
+    throw err;
+  }
+}

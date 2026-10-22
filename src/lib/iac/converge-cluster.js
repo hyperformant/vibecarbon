@@ -131,6 +131,17 @@ export async function convergeClusterInfra({
     dbType: currentDbType,
     workerType: currentWorkerType,
   } = assertPersistedRoleTypes(Provider, envConfig, normalizedOverrides);
+  // The overrides are guarded too: a k8s-ha scale seeds each cluster's
+  // overrides from its own ha record, and failover passes the persisted
+  // standby types, so a hand-edited ARM type there arrives as an override.
+  // vibecarbon is x86-64 only (src/lib/deploy/platform.js).
+  for (const [role, type] of [
+    ['master', normalizedOverrides.masterType],
+    ['database', normalizedOverrides.dbType],
+    ['worker', normalizedOverrides.workerType],
+  ]) {
+    if (type != null) Provider.assertAmd64ServerType(type, `the ${role} server type for ${label}`);
+  }
 
   // Apply server type changes via Pulumi. Hetzner server_type is an in-place
   // resize via the provider's update path (~2 min reboot), so a legitimate

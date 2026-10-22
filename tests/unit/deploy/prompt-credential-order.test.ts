@@ -1,10 +1,16 @@
 /**
- * Credential prompt order in the new-environment deploy wizard.
+ * Prompt order in the new-environment deploy wizard: API token, then the
+ * catalog fetch, then the region, then (HA) the standby, then the
+ * object-storage keys, then DNS.
  *
- * The provider API token and the object-storage keys are made in the same
- * console visit (Hetzner: project, then Security, then API tokens / S3
- * credentials), so the wizard asks for them back to back: S3 keys right
- * after the token, before the DNS provider pick and its zone lookup.
+ * The region select shows each location's monthly price and pre-selects the
+ * cheapest one on the default continent, and a live price needs the API
+ * token, so the region comes after the token. The standby default is priced
+ * from that region, so it comes next. The S3 keys come after both, because
+ * the object-storage endpoint follows the region. This ends the old "token
+ * and S3 keys back to back" order on purpose: the region and standby prompts
+ * are one Enter each in the common case, and a run with a region on record
+ * asks neither.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -60,6 +66,7 @@ describe('deploy wizard credential order', () => {
     });
     vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(undefined as never);
     vi.spyOn(HetznerProvider, 'getRegionDefaults').mockReturnValue({
+      composeType: 'cpx31',
       dbType: 'cpx31',
       masterType: 'cpx31',
       workerType: 'cpx31',
@@ -77,6 +84,14 @@ describe('deploy wizard credential order', () => {
         events.push('dns-provider');
         return 'manual';
       }
+      if (message === 'Region:') {
+        events.push('region');
+        return 'hil';
+      }
+      if (message === 'Standby region (HA failover target):') {
+        events.push('standby-region');
+        return 'ash';
+      }
       throw new Error(`unexpected select: ${message}`);
     });
   });
@@ -88,7 +103,23 @@ describe('deploy wizard credential order', () => {
     clackMock.log.error.mockClear();
   });
 
-  it('asks for the S3 keys right after the API token, before the DNS provider', async () => {
+  it('asks for the region after the API token, then the S3 keys, then the DNS provider', async () => {
+    await gatherDeploymentConfig({ env: 'prod', provider: 'hetzner', compose: true });
+    expect(events).toEqual(['api-token', 'region', 's3-credentials', 'dns-provider']);
+  });
+
+  it('HA asks for the region, then the standby, between the API token and the S3 keys', async () => {
+    await gatherDeploymentConfig({ env: 'prod', provider: 'hetzner', compose: true, ha: true });
+    expect(events).toEqual([
+      'api-token',
+      'region',
+      'standby-region',
+      's3-credentials',
+      'dns-provider',
+    ]);
+  });
+
+  it('with -region there is no region question: the S3 keys follow the API token', async () => {
     await gatherDeploymentConfig({
       env: 'prod',
       provider: 'hetzner',
@@ -96,6 +127,19 @@ describe('deploy wizard credential order', () => {
       region: 'hil',
     });
     expect(events).toEqual(['api-token', 's3-credentials', 'dns-provider']);
+  });
+
+  it('HA asks for the standby between the API token and the S3 keys', async () => {
+    // The standby default is priced from the live catalog, which the API
+    // token unlocks, so the standby question waits for the token.
+    await gatherDeploymentConfig({
+      env: 'prod',
+      provider: 'hetzner',
+      compose: true,
+      ha: true,
+      region: 'hil',
+    });
+    expect(events).toEqual(['api-token', 'standby-region', 's3-credentials', 'dns-provider']);
   });
 
   it('verifies the S3 keys right away, naming where they came from, and asks again when S3 rejects them', async () => {
