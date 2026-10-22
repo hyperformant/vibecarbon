@@ -16,6 +16,7 @@ import {
   DEFAULT_BACKUP_SCHEDULE,
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { gitSafeEnv } from '../../../src/lib/command.js';
+import { tlsSnapshotS3Prefix } from '../../../src/lib/deploy/tls-snapshot.js';
 
 vi.mock('../../../src/lib/github-environments.js', () => ({
   seedOrgSecrets: vi.fn(async () => {}),
@@ -34,7 +35,11 @@ afterAll(() => rmSync(work, { recursive: true, force: true }));
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, env: gitSafeEnv(), encoding: 'utf-8' }).trim();
 
-async function deployWith(name: string, backupConfig: unknown) {
+async function deployWith(
+  name: string,
+  backupConfig: unknown,
+  extra: Record<string, unknown> = {},
+) {
   const origin = join(work, `${name}-origin.git`);
   const project = join(work, `${name}-project`);
   mkdirSync(origin, { recursive: true });
@@ -59,6 +64,7 @@ async function deployWith(name: string, backupConfig: unknown) {
     appStorage: { accessKey: 'a', secretKey: 'b' },
     githubOwner: 'acme',
     backupConfig,
+    ...extra,
   });
   const show = (f: string) => git(origin, 'show', `main:k8s/base/${f}`);
   const [, , vars] = vi.mocked(seedEnvironmentSecrets).mock.calls[0];
@@ -97,5 +103,19 @@ describe('deployK8sGitOps seeds the backup settings per environment, never into 
       /5-field cron/,
     );
     await expect(deployWith('bad0', { retentionDays: 0 })).rejects.toThrow(/positive whole number/);
+  });
+
+  it('the TLS snapshot prefix is seeded beside the backup vars (deploy.yml renders it into vibecarbon-backup-settings)', async () => {
+    const tlsSnapshotPrefix = tlsSnapshotS3Prefix({
+      backupBucket: 'proj-backups',
+      projectName: 'proj',
+      envName: 'tls',
+      ca: 'prod',
+    });
+    const t = await deployWith('tls', undefined, { tlsSnapshotPrefix });
+    expect(t.vars.TLS_SNAPSHOT_S3_PREFIX).toBe(tlsSnapshotPrefix);
+    expect(t.cronjob + t.configmap).not.toContain(tlsSnapshotPrefix);
+    const none = await deployWith('notls', undefined);
+    expect(none.vars.TLS_SNAPSHOT_S3_PREFIX ?? '').toBe('');
   });
 });

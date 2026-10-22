@@ -68,6 +68,20 @@ spec:
       target:
         kind: CronJob
         name: backup
+    # The TLS Certificate is DEPLOY-owned too: the CLI deploy renders it with
+    # the environment's names and issuer (renderK8sBase), while this
+    # k8s/base only carries an app.example.com placeholder, which Flux would
+    # otherwise put back on every reconcile. The live object carries
+    # kustomize.toolkit.fluxcd.io/prune: disabled.
+    - patch: |
+        $patch: delete
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata:
+          name: vibecarbon-tls
+      target:
+        kind: Certificate
+        name: vibecarbon-tls
     # The registry's hostPort binds {{MASTER_PRIVATE_IP}}, rendered per
     # cluster by the CLI's deploy (renderK8sBase), so the CLI owns this
     # Deployment like the db. Its Service and NetworkPolicy stay with Flux.

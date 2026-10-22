@@ -61,19 +61,51 @@ import {
   createAcmeIssuanceWatchdog,
   deriveScaleUpList,
   failoverAddonManifests,
+  k8sTlsIdentity,
+  quietKubectl,
+  snapshotK8sTlsSecret,
 } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
+import { makePublicDnsLookup } from './public-dns-lookup.js';
 import { k8sPsqlRunner } from './replication.js';
 import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retired-fence.js';
 import { envS3Record } from './s3-record.js';
+import { stagingProbeCa } from './staging-ca.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
+import { TLS_FIRST_LOOK_BUDGET_MS } from './tls-ready.js';
+import { caSlug, tlsSnapshotS3Prefix } from './tls-snapshot.js';
 import {
   assertNoScaleCutoverInFlight,
   assertRolePrimaryWritable,
   liftStrandedWriteFence,
 } from './write-fence.js';
+
+/**
+ * The socket options of the public health probe: resolution pinned to public
+ * DNS (makePublicDnsLookup, see probePublicHealth), SNI pinned to the domain.
+ *
+ * Staging runs get FULL verification against system roots + the vendored
+ * LE staging roots (src/lib/deploy/staging-ca.js), never a verification
+ * opt-out, which would also wave through self-signed/expired/wrong-host
+ * chains, the exact misconfigurations this probe exists to catch. The one
+ * opt-out is `verifyTls: false`, for the k8s app phase only: its trust
+ * verdict is the TLS phase's, recorded as pending on a miss, never passed.
+ *
+ * @param {string} domain
+ * @param {{ verifyTls?: boolean }} opts
+ * @returns {Record<string, unknown>} undici `connect` options
+ */
+export function probeConnectOptions(domain, { verifyTls = true } = {}) {
+  const connectOpts = { lookup: makePublicDnsLookup(), servername: domain };
+  if (verifyTls === false) {
+    connectOpts.rejectUnauthorized = false;
+  } else if ((readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')) {
+    connectOpts.ca = stagingProbeCa();
+  }
+  return connectOpts;
+}
 
 /**
  * Probe the public /api/health endpoint to verify the app is reachable
@@ -96,6 +128,13 @@ import {
  * so an actually-broken chain still fails the probe. Real-world prod
  * runs are unaffected.
  *
+ * `verifyTls: false` is the ONE verification opt-out, and only the k8s
+ * deploy's app phase passes it: that phase asks whether the app answers from
+ * the public internet, while the trust verdict is the TLS phase's
+ * (verifyK8sTls), which probes with full verification and records a miss as
+ * TLS pending. A chain is never silently passed. Everything else (SNI,
+ * public DNS) is the same in both phases (probeConnectOptions).
+ *
  * Returns `{ ok: true, status }` on first 2xx, or a structured failure
  * descriptor on timeout — never null. Capturing last-status and last-error
  * lets the caller throw with actionable context (e.g. "lastStatus=503 over
@@ -106,7 +145,13 @@ import {
  */
 async function probePublicHealth(
   domain,
-  { timeoutMs = 60_000, intervalMs = 10_000, onPoll = null, onPollEvery = 6 } = {},
+  {
+    timeoutMs = 60_000,
+    intervalMs = 10_000,
+    onPoll = null,
+    onPollEvery = 6,
+    verifyTls = true,
+  } = {},
 ) {
   const url = `https://${domain}/api/health`;
   const deadline = Date.now() + timeoutMs;
@@ -140,17 +185,8 @@ async function probePublicHealth(
   // — which is what dominated every k8s + k8s-ha matrix failure for weeks.
   // Always pair Agent + fetch from the same undici instance.
   //
-  // Staging runs get FULL verification against system roots + the vendored
-  // LE staging roots (src/lib/deploy/staging-ca.js) — never a verification
-  // opt-out, which would also wave through self-signed/expired/wrong-host
-  // chains, the exact misconfigurations this probe exists to catch.
   const undici = await import('undici');
-  const { makePublicDnsLookup } = await import('./public-dns-lookup.js');
-  const connectOpts = { lookup: makePublicDnsLookup() };
-  if ((readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')) {
-    const { stagingProbeCa } = await import('./staging-ca.js');
-    connectOpts.ca = stagingProbeCa();
-  }
+  const connectOpts = probeConnectOptions(domain, { verifyTls });
   const dispatcher = new undici.Agent({ connect: connectOpts });
   const fetchFn = undici.fetch;
   // Periodic progress logging: every 5 attempts, write a one-line summary
@@ -581,19 +617,155 @@ export function resolveKubeconfigPath(environment, envConfig) {
 }
 
 /**
+ * One-line summary of a failed probePublicHealth run. A watchdog abort wins
+ * over the network-level summary: "order errored: 403 orderNotReady ..." is
+ * the cause, while "self-signed certificate (118 attempts)" is only the
+ * symptom of it.
+ *
+ * @param {object|null|undefined} probeResult
+ * @returns {string}
+ */
+function probeFailureReason(probeResult) {
+  const r = probeResult ?? {};
+  if (r.abortReason) return `${r.abortReason}, probe stopped after ${r.attempts} attempts`;
+  if (r.lastStatus) {
+    return `last HTTP status ${r.lastStatus} after ${r.attempts} attempts over ${Math.round((r.timeoutMs ?? 0) / 1000)}s`;
+  }
+  if (r.lastErrorClass) {
+    return `${r.lastErrorClass}: ${r.lastErrorMessage}${r.lastErrorCause ? ` (cause: ${r.lastErrorCause})` : ''} (${r.attempts} attempts)`;
+  }
+  return 'never connected';
+}
+
+/**
+ * The k8s deploy's TLS phase, after the app phase found the app answering:
+ * does the domain serve a trusted chain? One first look
+ * (TLS_FIRST_LOOK_BUDGET_MS) with full verification and the ACME issuance
+ * watchdog, which repairs a terminally-failed Order in place or aborts the
+ * look with the ACME problem as the reason (acme-order-recovery.js).
+ *
+ * THE RULE: a deploy reports its TLS state; it does not wait out a CA. A miss
+ * is TLS pending: recorded (the final save persists it as envConfig.tls),
+ * one warning, and the deploy still succeeds, while cert-manager keeps
+ * retrying in the background (its minimum backoff is CERT_MANAGER_MIN_BACKOFF).
+ * A hit is trusted, and the primary cluster's Secret is saved as the env's
+ * snapshot now instead of at the next scheduled backup. Never throws.
+ *
+ * @param {{ domain: string, environment: string, projectName: string,
+ *   dnsProvider?: string|null, kubeconfig: string, s3Config?: object,
+ *   backupS3Config?: { bucket?: string }, deps?: object }} args
+ * @returns {Promise<{ state: 'trusted'|'pending', checkedAt: string, reason?: string, ca: string }>}
+ */
+export async function verifyK8sTls({
+  domain,
+  environment,
+  projectName,
+  dnsProvider,
+  kubeconfig,
+  s3Config,
+  backupS3Config,
+  deps = {},
+}) {
+  const probe = deps.probe ?? probePublicHealth;
+  const identity = deps.identity ?? k8sTlsIdentity;
+  const kubeconfigExists = deps.kubeconfigExists ?? existsSync;
+  const kubectlFor =
+    deps.kubectlFor ?? ((path) => quietKubectl({ ...process.env, KUBECONFIG: path }));
+  const makeWatchdog =
+    deps.makeWatchdog ??
+    ((path) =>
+      createAcmeIssuanceWatchdog({
+        runKubectl: async (argv) =>
+          (
+            await runCommandAsync(['kubectl', '--kubeconfig', path, ...argv], {
+              silent: true,
+              timeout: 30_000,
+            })
+          ).trim(),
+        log: (msg) => progressLog(msg),
+      }));
+  const snapshot = deps.snapshot ?? snapshotK8sTlsSecret;
+  const { dnsNames, ca } = identity({ projectDir: process.cwd(), dnsProvider, domain });
+  const haveKubeconfig = kubeconfigExists(kubeconfig);
+  const s = (deps.spinner ?? spinner)({ indicator: 'timer' });
+  s.start(`Waiting for ${domain} to serve a trusted TLS certificate`);
+  const result = await perfAsync('deploy.tls.ready', () =>
+    probe(domain, {
+      timeoutMs: TLS_FIRST_LOOK_BUDGET_MS,
+      onPoll: haveKubeconfig ? makeWatchdog(kubeconfig) : null,
+    }),
+  );
+  const checkedAt = new Date().toISOString();
+  if (!result?.ok) {
+    const reason = result?.abortReason ?? probeFailureReason(result);
+    s.stop('TLS pending: the domain does not serve a trusted certificate yet');
+    p.log.warn(
+      `TLS pending: ${domain} does not serve a trusted certificate yet (${reason}). ` +
+        'The app is deployed, and cert-manager keeps retrying issuance in the background. ' +
+        'Run `vibecarbon status` to follow it.',
+    );
+    return { state: 'pending', checkedAt, reason, ca };
+  }
+  s.stop('TLS certificate trusted');
+  if (!haveKubeconfig) {
+    p.log.warn(
+      `TLS certificate snapshot not saved (no kubeconfig at ${kubeconfig}). The deploy still succeeded, and the next scheduled backup saves it.`,
+    );
+  } else {
+    const saved = await perfAsync('deploy.tls.snapshot', () =>
+      snapshot({
+        s3Config: { ...s3Config, bucket: backupS3Config?.bucket },
+        projectName,
+        envName: environment,
+        ca,
+        dnsNames,
+        runKubectl: kubectlFor(kubeconfig),
+      }),
+    );
+    if (!saved?.ok) {
+      p.log.warn(
+        `TLS certificate snapshot not saved (${saved?.reason ?? 'unknown'}). The deploy still succeeded, and the next scheduled backup saves it.`,
+      );
+    }
+  }
+  return { state: 'trusted', checkedAt, ca };
+}
+
+/**
  * The env safety fields the deploy's final write decides (env-safety-fields.js);
  * every other one keeps its value on disk. An HA deploy sets its replication
  * state and the standby's proven identifier (or leaves none when it could not
  * prove streaming); every deploy records its backup lineage, which names or
- * clears the unrestored prior one.
+ * clears the unrestored prior one, and its TLS record (finalSaveTls).
  *
  * @param {boolean} isHADeploy
  * @returns {string[]}
  */
 export function finalSaveSafetyOwns(isHADeploy) {
   return isHADeploy
-    ? ['replication', 'degraded', 'degradedCause', 'ha.systemIdentifier', 'backup.unrestoredPrior']
-    : ['backup.unrestoredPrior'];
+    ? [
+        'replication',
+        'degraded',
+        'degradedCause',
+        'ha.systemIdentifier',
+        'backup.unrestoredPrior',
+        'tls',
+      ]
+    : ['backup.unrestoredPrior', 'tls'];
+}
+
+/**
+ * The env's TLS record after this deploy: the verdict the tier reported
+ * (deployResult.tls, `{ state, checkedAt, reason?, ca }`), else the record
+ * on disk. Failover and scale read its `ca` to pick a certificate snapshot,
+ * and status shows its state.
+ *
+ * @param {{ tls?: object }|undefined} deployResult
+ * @param {{ tls?: object }|undefined} persistedEnvConfig - the env as it is on disk now
+ * @returns {object|undefined}
+ */
+export function finalSaveTls(deployResult, persistedEnvConfig) {
+  return deployResult?.tls ?? persistedEnvConfig?.tls;
 }
 
 /**
@@ -1526,6 +1698,17 @@ export async function executeDeployment(args, gatheredConfig) {
     redis: services.redis,
     s3: s3Config,
     backupS3: backupS3Config,
+    // Where the server saves its TLS certificate after every base backup
+    // (backup/tls-snapshot.sh): the env backup folder, per CA, the same CA
+    // verifyTlsReady records. No backup bucket: no snapshot.
+    tlsSnapshotPrefix: backupS3Config?.bucket
+      ? tlsSnapshotS3Prefix({
+          backupBucket: backupS3Config.bucket,
+          projectName: projectConfig.projectName,
+          envName: environment,
+          ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
+        })
+      : '',
     dnsChallenge,
     dnsProvider,
     dnsToken,
@@ -1649,6 +1832,9 @@ export async function executeDeployment(args, gatheredConfig) {
     dnsZoneId,
     dnsToken,
     backupConfig,
+    // The backups bucket: compose-ha's replication and both compose tiers'
+    // restore-tls / snapshot-tls read it.
+    backupS3Config,
     imageRef,
     bundlePath,
     ciReady,
@@ -1725,6 +1911,8 @@ export async function executeDeployment(args, gatheredConfig) {
       serverId: composeCtx.providerServerId || 'manual',
       serverName: composeCtx.providerServerName,
       firewallId: composeCtx.providerFirewallId,
+      // The verify-tls verdict (trusted or pending), persisted as envConfig.tls.
+      ...(composeCtx.tlsState && { tls: composeCtx.tlsState }),
     };
   } else if (tier === 'compose-ha') {
     // Compose-HA runs through the same pure step-plan + effect registry as
@@ -1755,7 +1943,6 @@ export async function executeDeployment(args, gatheredConfig) {
       // it each keeps its server's recorded type (a scale may have changed one).
       serverTypeRequested: !!args.serverType,
       secondaryRegion: secondaryRegion || undefined,
-      backupS3Config,
       // Docker Hub + GHCR creds gate the HA login fan-out; loaded here so the
       // effects stay pure of credential I/O (mirrors the single-compose ctx).
       dockerHubCreds: resolveDockerHubCreds(),
@@ -1793,6 +1980,7 @@ export async function executeDeployment(args, gatheredConfig) {
       replicationStatus: composeHaCtx.replActive && !haDegraded ? 'streaming' : 'degraded',
       systemIdentifier: composeHaCtx.systemIdentifier ?? null,
       reconvergeIncomplete,
+      ...(composeHaCtx.tlsState && { tls: composeHaCtx.tlsState }),
     };
   } else if (tier === 'k8s') {
     // Single-cluster k3s runs through the plan as a single black-box step that
@@ -1936,55 +2124,43 @@ export async function executeDeployment(args, gatheredConfig) {
     // --- Verifiable success gate for k8s ---
     // The GHA deploy workflow already waits for Flux reconciliation; this
     // extra probe confirms the app is reachable from the public internet
-    // (not just healthy inside the cluster). DNS propagation, cert issuance,
-    // and ingress routing all need to land before a user can actually load
-    // the URL — any of those failing mid-deploy would leave us exiting 0
-    // while the URL returns 5xx.
+    // (not just healthy inside the cluster). DNS propagation and ingress
+    // routing need to land before a user can actually load the URL, and
+    // either one failing mid-deploy would leave us exiting 0 while the URL
+    // returns 5xx. Certificate issuance is judged separately (the TLS phase
+    // below) and never fails the deploy.
     //
-    // K8s first-deploy timing on a cold cluster:
-    //   - DNS warmup record (0.0.0.0) → real IP swap propagates through
-    //     Cloudflare's edge in 1-3 min (TTL=auto = 5 min worst case).
-    //   - cert-manager HTTP-01 challenge: needs DNS to resolve to origin,
-    //     then LE issues. Typical 1-3 min once DNS is correct, but
-    //     orange-cloud + CF redirect quirks can push it to 8-12 min.
-    //   - Traefik picks up the new cert: ~30s.
-    // Old 10-min budget tripped on the cold tail (observed 2026-04-25 batch
-    // run #1 — k8s standalone, k8s-ha both failed at the probe). 20 min
-    // covers the p99 cold path; warm rollouts still finish in <60s.
+    // K8s first-deploy timing on a cold cluster: the DNS warmup record
+    // (0.0.0.0) → real IP swap propagates through Cloudflare's edge in 1-3
+    // min (TTL=auto = 5 min worst case). Old 10-min budget tripped on the
+    // cold tail (observed 2026-04-25 batch run #1, k8s standalone and k8s-ha
+    // both failed at the probe). 20 min covers the p99 cold path; warm
+    // rollouts still finish in <60s.
     if (domain) {
       const s = spinner();
       s.start(`Probing https://${domain}/api/health ...`);
-      // ACME issuance watchdog. Until this existed, a terminally-failed
-      // cert-manager Order (2026-08-11 e3 restore: 403 orderNotReady
-      // "Order was already processing" after both DNS-01 challenges had
-      // validated) made the probe below unwinnable: cert-manager's own
-      // reissue backoff starts at an hour, so the cert could not land
-      // inside any budget we hold, and the probe spent 20 minutes
-      // reporting "self-signed certificate" — the Traefik default cert —
-      // with the actual ACME error visible only in a post-mortem dump.
-      // The watchdog repairs the failure in-place (bounded), and if it
-      // can't, aborts the probe with the ACME problem as the reason.
-      // See src/lib/deploy/k8s/acme-order-recovery.js.
+      // Two phases. The APP phase (here) asks whether the app answers from
+      // the public internet: DNS propagation and ingress routing roll up
+      // here, with TLS verification off so a certificate still being issued
+      // cannot hold it (p99 cold k8s-ha = 8-12 min; warm <60s). Its failure
+      // is the hard one. The TLS phase (verifyK8sTls, below) then gives the
+      // CA one first look with full verification and the ACME watchdog: a
+      // miss finishes the deploy with TLS pending instead of failing it.
       const { path: probeKubeconfig } = resolveKubeconfigPath(environment, envConfig);
-      const acmeWatchdog = existsSync(probeKubeconfig)
-        ? createAcmeIssuanceWatchdog({
-            runKubectl: async (argv) =>
-              (
-                await runCommandAsync(['kubectl', '--kubeconfig', probeKubeconfig, ...argv], {
-                  silent: true,
-                  timeout: 30_000,
-                })
-              ).trim(),
-            log: (msg) => progressLog(msg),
-          })
-        : null;
-      // Public health probe — DNS propagation + cert issuance + ingress
-      // routing all roll up here. p99 cold k8s-ha = 8-12 min; warm <60s.
       const probeResult = await perfAsync('deploy.health.probe', () =>
-        probePublicHealth(domain, { timeoutMs: 1_200_000, onPoll: acmeWatchdog }),
+        probePublicHealth(domain, { timeoutMs: 1_200_000, verifyTls: false }),
       );
       if (probeResult?.ok) {
         s.stop(`App is serving requests (HTTP ${probeResult.status})`);
+        deployResult.tls = await verifyK8sTls({
+          domain,
+          environment,
+          projectName: projectConfig.projectName,
+          dnsProvider,
+          kubeconfig: probeKubeconfig,
+          s3Config,
+          backupS3Config,
+        });
       } else {
         // Build a concise one-line failure summary as the spinner stop text
         // AND as the first line of the diagnostic dump below. The runner
@@ -1994,17 +2170,7 @@ export async function executeDeployment(args, gatheredConfig) {
         // network error class) instead of just dumping curl HEAD response
         // headers — which was the 2026-04-27 morning matrix's "[unknown]
         // CSP header dump" failure mode.
-        const r = probeResult ?? {};
-        // A watchdog abort wins over the network-level summary: "order
-        // errored: 403 orderNotReady ..." is the cause, while "self-signed
-        // certificate (118 attempts)" is only the symptom of it.
-        const reason = r.abortReason
-          ? `${r.abortReason}, probe stopped after ${r.attempts} attempts`
-          : r.lastStatus
-            ? `last HTTP status ${r.lastStatus} after ${r.attempts} attempts over ${Math.round((r.timeoutMs ?? 0) / 1000)}s`
-            : r.lastErrorClass
-              ? `${r.lastErrorClass}: ${r.lastErrorMessage}${r.lastErrorCause ? ` (cause: ${r.lastErrorCause})` : ''} (${r.attempts} attempts)`
-              : 'never connected';
+        const reason = probeFailureReason(probeResult);
         s.stop(`Public health probe failed against https://${domain}/api/health; ${reason}`);
         // Capture diagnostics inline so a CI run failure surfaces the
         // root cause without requiring a follow-up `vibecarbon diagnose`.
@@ -2569,6 +2735,10 @@ export async function executeDeployment(args, gatheredConfig) {
       backup: { ...backupConfig, ...backupLineage },
       services,
     };
+    // The TLS verdict this deploy reported, else the one on disk (none: no key).
+    const tls = finalSaveTls(deployResult, persistedEnvConfig);
+    if (tls) nextEnv.tls = tls;
+    else delete nextEnv.tls;
     const finalConfig = {
       ...persistedConfig,
       environments: {

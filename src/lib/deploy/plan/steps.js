@@ -101,6 +101,33 @@ export const verifyHealthStep = () => defineStep({ name: 'verify-health', effect
 export const verifyTlsReadyStep = () =>
   defineStep({ name: 'verify-tls', effect: 'verifyTlsReady', when: (ctx) => Boolean(ctx.domain) });
 
+/**
+ * Put the last issued certificate back into Traefik's acme.json before
+ * Traefik starts, so a rebuilt or redeployed server serves it at once instead
+ * of asking the CA again (compose/tls-restore.js holds the overwrite rule).
+ * Shared by the compose-ha plan, where it writes on the primary. Runs after
+ * setup-server-files (reconcile.sh and .env must be there) and never fails
+ * the deploy.
+ */
+export const restoreTlsStep = () =>
+  defineStep({
+    name: 'restore-tls',
+    effect: 'restoreTlsSnapshot',
+    when: (ctx) => Boolean(ctx.domain),
+  });
+
+/**
+ * Save a fresh certificate snapshot to the backups bucket once verify-tls
+ * found the domain trusted, so the next server has one without waiting for
+ * the scheduled backup. Shared by the compose-ha plan; best-effort.
+ */
+export const snapshotTlsStep = () =>
+  defineStep({
+    name: 'snapshot-tls',
+    effect: 'snapshotTls',
+    when: (ctx) => ctx.tlsState?.state === 'trusted',
+  });
+
 /** Install the scheduled wal-g backup cron on the VPS (shipped-bug guard). */
 export const setupBackupCronStep = () =>
   defineStep({ name: 'setup-backup-cron', effect: 'setupBackupCron' });

@@ -416,6 +416,11 @@ export function renderBundle(projectName, options = {}) {
   if (options.backupS3) {
     envOverrides.S3_BACKUP_BUCKET = options.backupS3.bucket;
   }
+  // Where backup/tls-snapshot.sh saves acme.json (tlsSnapshotS3Prefix), read
+  // through the traefik service env (docker-compose.prod.yml).
+  if (options.tlsSnapshotPrefix) {
+    envOverrides.TLS_SNAPSHOT_S3_PREFIX = options.tlsSnapshotPrefix;
+  }
   if (projectName) {
     envOverrides.PROJECT_NAME = projectName;
   }

@@ -137,6 +137,51 @@ describe('github-environments', () => {
     });
   });
 
+  describe('listEnvironmentVariables', () => {
+    it('lists the variable names of an environment, bounded by the timeout', async () => {
+      runCommandAsyncMock.mockImplementation(async () => 'SITE_URL\nTLS_CERT_ISSUER\n');
+      const { listEnvironmentVariables } = await freshImport();
+      expect(await listEnvironmentVariables('prod-primary', { timeout: 5000 })).toEqual([
+        'SITE_URL',
+        'TLS_CERT_ISSUER',
+      ]);
+      expect(runCommandAsyncMock.mock.calls[0]).toEqual([
+        ['gh', 'variable', 'list', '--env', 'prod-primary', '--json', 'name', '-q', '.[].name'],
+        { silent: true, timeout: 5000 },
+      ]);
+    });
+
+    it('an environment that does not exist has no variables; any other failure throws', async () => {
+      const { listEnvironmentVariables } = await freshImport();
+      runCommandAsyncMock.mockImplementation(async () => {
+        throw Object.assign(new Error('Command failed'), { stderr: 'HTTP 404: Not Found' });
+      });
+      expect(await listEnvironmentVariables('nope')).toEqual([]);
+      runCommandAsyncMock.mockImplementation(async () => {
+        throw Object.assign(new Error('Command failed'), { stderr: 'HTTP 502: Bad Gateway' });
+      });
+      await expect(listEnvironmentVariables('prod')).rejects.toThrow('Command failed');
+    });
+  });
+
+  describe('seedEnvironmentSecrets timeout', () => {
+    it('bounds every gh call when given a timeout', async () => {
+      const { seedEnvironmentSecrets } = await freshImport();
+      await seedEnvironmentSecrets(
+        'prod',
+        { DB_PASSWORD: 'pw' },
+        { SITE_URL: 'https://x' },
+        {
+          timeout: 7000,
+        },
+      );
+      for (const [, opts] of runCommandAsyncMock.mock.calls) {
+        expect(opts.timeout).toBe(7000);
+      }
+      expect(runCommandAsyncMock.mock.calls.length).toBeGreaterThanOrEqual(4);
+    });
+  });
+
   describe('triggerDeployWorkflow', () => {
     it('fires deploy.yml on main with -F environment=<env>', async () => {
       const { triggerDeployWorkflow } = await freshImport();

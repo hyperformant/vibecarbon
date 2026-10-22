@@ -28,6 +28,11 @@
  *    handle (no key, no node IP, no reader): HA scenarios always have one, so
  *    each must FAIL without it, never pass or skip, and must not even try the
  *    remote. Every exported `check*` there is drafted into this audit.
+ *
+ * 4. TLS REUSE. tests/e2e/checks/tls-reuse.ts compares what is served now
+ *    with what an earlier step recorded. Its hollow shape is a missing
+ *    baseline (no serial recorded, no CertificateRequest listing read): that
+ *    must FAIL, never pass because there was nothing to compare.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -58,6 +63,7 @@ import {
   checkUnknownPathNotFound,
 } from '../../e2e/checks/health.js';
 import * as standbyAddons from '../../e2e/checks/standby-addons.js';
+import * as tlsReuse from '../../e2e/checks/tls-reuse.js';
 import type { VerificationResult } from '../../e2e/scenarios/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -632,5 +638,49 @@ describe('STANDBY ADD-ONS: every check fails without its handle', () => {
   it('every exported check in standby-addons.ts is registered', () => {
     const exported = Object.keys(standbyAddons).filter((k) => /^check[A-Z]/.test(k));
     expect(exported.sort()).toEqual(Object.keys(ADDON_HANDLELESS).sort());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TLS reuse: a missing baseline or an unread certificate fails, never passes
+// ---------------------------------------------------------------------------
+
+const TLS_REUSE_HANDLELESS: Record<
+  string,
+  Array<() => Promise<VerificationResult> | VerificationResult>
+> = {
+  checkTlsReused: [
+    () =>
+      tlsReuse.checkTlsReused('', D, {
+        readServed: async () => {
+          throw new Error('the check read the served certificate without a baseline');
+        },
+      }),
+    () =>
+      tlsReuse.checkTlsReused('04A1B2', D, {
+        readServed: async () => {
+          throw new Error('ECONNREFUSED');
+        },
+      }),
+  ],
+  checkNoNewCertificateRequest: [
+    () => tlsReuse.checkNoNewCertificateRequest({ before: null, after: [], where: 'e3' }),
+    () => tlsReuse.checkNoNewCertificateRequest({ before: [], after: null, where: 'e3' }),
+  ],
+};
+
+describe('TLS REUSE: every check fails without its baseline', () => {
+  const cases = Object.entries(TLS_REUSE_HANDLELESS).flatMap(([name, runs]) =>
+    runs.map((run, i) => [`${name} #${i + 1}`, run] as const),
+  );
+
+  it.each(cases)('%s fails', async (_label, run) => {
+    const r = await run();
+    expect(r.status, r.errorMessage).toBe('fail');
+  });
+
+  it('every exported check in tls-reuse.ts is registered', () => {
+    const exported = Object.keys(tlsReuse).filter((k) => /^check[A-Z]/.test(k));
+    expect(exported.sort()).toEqual(Object.keys(TLS_REUSE_HANDLELESS).sort());
   });
 });

@@ -16,6 +16,7 @@ const green = {
       config: {},
       checks: {
         remoteHealth: { ok: true, url: 'https://x/api/health/ready' },
+        tls: { state: 'trusted', expires: '2026-12-30' } as Record<string, unknown>,
         containers: {
           p: {
             kind: 'k8s',
@@ -43,6 +44,30 @@ describe('assessStatusJson', () => {
       ok: false,
       retryable: false,
       problems: ['p: traefik CrashLoopBackOff restarts 3'],
+    });
+  });
+  it('fails, retryable, while TLS is not trusted, and names the state and reason', () => {
+    const j = structuredClone(green);
+    j.environments.prod.checks.tls = { state: 'pending', reason: 'self-signed certificate' };
+    expect(assessStatusJson(j, 'prod')).toEqual({
+      ok: false,
+      retryable: true,
+      problems: ['tls pending: self-signed certificate'],
+    });
+  });
+  it('fails, non-retryable, when status -json carries no TLS row (never a hollow pass)', () => {
+    const j = structuredClone(green);
+    delete (j.environments.prod.checks as { tls?: unknown }).tls;
+    expect(assessStatusJson(j, 'prod')).toEqual({
+      ok: false,
+      retryable: false,
+      problems: ['no tls data for prod'],
+    });
+    const k = structuredClone(green);
+    k.environments.prod.checks.tls = {};
+    expect(assessStatusJson(k, 'prod')).toMatchObject({
+      ok: false,
+      problems: ['tls unknown'],
     });
   });
   it('is retryable on starting rows only', () => {
@@ -95,6 +120,7 @@ describe('assessStatusJson with a retired compose-ha node', () => {
         config: {},
         checks: {
           remoteHealth: { ok: true, url: 'https://x/api/health/ready' },
+          tls: { state: 'trusted' },
           containers: {
             'letsgo-prod-standby': {
               kind: 'compose',

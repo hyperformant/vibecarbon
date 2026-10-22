@@ -143,7 +143,9 @@ vi.mock('../../../src/lib/deploy/tls-ready.js', async (orig) => {
 });
 
 const { failoverComposeHA } = await import('../../../src/lib/deploy/compose/ha.js');
-const { waitForTrustedTls } = await import('../../../src/lib/deploy/tls-ready.js');
+const { TLS_FIRST_LOOK_BUDGET_MS, waitForTrustedTls } = await import(
+  '../../../src/lib/deploy/tls-ready.js'
+);
 const { updateProjectConfig } = await import('../../../src/lib/config.js');
 
 const envConfig = {
@@ -265,7 +267,12 @@ describe('failoverComposeHA — standby already streaming', () => {
     // issuance in the normal case.
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
-    expect(waitForTrustedTls).toHaveBeenCalledWith('app.example.com', expect.anything());
+    // The deploy's first-look budget: past it the promoted node's tls-retry
+    // cron takes over, so failover never holds the outage report open longer.
+    expect(waitForTrustedTls).toHaveBeenCalledWith(
+      'app.example.com',
+      expect.objectContaining({ budgetMs: TLS_FIRST_LOOK_BUDGET_MS }),
+    );
   });
 
   it('recreates traefik on both nodes so the re-armed/disarmed caserver takes (command env is create-time)', async () => {

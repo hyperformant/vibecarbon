@@ -1,10 +1,11 @@
 /**
  * verify-status: `vibecarbon status -json` must report every server of the
- * environment fully healthy — the public readiness probe ok, every
- * container/pod healthy (or a finished one-shot), every k8s platform
- * namespace full, every node Ready. `starting` rows are retried until
- * timeoutMs (a pod may still be rolling right after verify-deploy);
- * anything else fails on first sight. Non-perf step: excluded from the
+ * environment fully healthy — the public readiness probe ok, the TLS row
+ * trusted, every container/pod healthy (or a finished one-shot), every k8s
+ * platform namespace full, every node Ready. `starting` rows and a TLS row not
+ * yet trusted are retried until timeoutMs (a pod may still be rolling, a
+ * certificate still landing, right after verify-deploy); anything else fails
+ * on first sight. Non-perf step: excluded from the
  * reporter's totals (NON_PERF_STEPS) and never a PERF_TABLE_ROWS entry.
  */
 import type { VerificationResult } from '../scenarios/types.js';
@@ -75,6 +76,18 @@ export function assessStatusJson(
   if (!probe?.ok) {
     problems.push(`readiness probe failed: ${probe?.error || `HTTP ${probe?.status}`}`);
     retryable = false;
+  }
+  // The TLS row must say trusted: the live handshake status ran, not the
+  // deploy's record. A missing row (no domain, a stale CLI) fails instead of
+  // passing hollow; pending or untrusted is retried, since the certificate
+  // can still land.
+  const tls = checks.tls as { state?: unknown; reason?: unknown } | undefined;
+  if (!tls) {
+    problems.push(`no tls data for ${envName}`);
+    retryable = false;
+  } else if (tls.state !== 'trusted') {
+    const state = typeof tls.state === 'string' ? tls.state : 'unknown';
+    problems.push(`tls ${state}${typeof tls.reason === 'string' ? `: ${tls.reason}` : ''}`);
   }
   for (const [server, sc] of Object.entries(containers)) {
     if (sc.error) {

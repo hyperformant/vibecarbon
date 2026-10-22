@@ -35,6 +35,7 @@ import {
   DEFAULT_BACKUP_RETENTION_DAYS,
   DEFAULT_BACKUP_SCHEDULE,
   renderBackupManifests,
+  renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { setupComposeBackupCron } from '../../../src/lib/deploy/compose/index.js';
@@ -267,5 +268,70 @@ describe('Flux cannot revert a deploy-owned backup, and the workflow applies it 
         /\$patch: delete\n\s+apiVersion: batch\/v1\n\s+kind: CronJob\n\s+metadata:\n\s+name: backup/,
       );
     }
+  });
+});
+
+// The k8s TLS snapshot prefix (tls-cert-reuse Task 3) rides in the same
+// deploy-owned ConfigMap, for the same reason: vibecarbon-config is
+// Flux-reconciled from git, so a key there would be reset on every reconcile.
+describe('the TLS snapshot prefix rides in vibecarbon-backup-settings', () => {
+  const settings = resolveBackupSettings(FIXTURE);
+  const data = (yaml: string) => (loadYaml(yaml) as { data: Record<string, string> }).data;
+
+  it('is written when set and absent without it', () => {
+    const tlsSnapshotPrefix = 's3://b/backups/p/e/tls/prod';
+    const withPrefix = renderBackupSettingsConfigMap({ ...settings, tlsSnapshotPrefix });
+    expect(withPrefix).toContain('TLS_SNAPSHOT_S3_PREFIX');
+    expect(data(withPrefix)).toEqual({
+      BACKUP_RETENTION_DAYS: '14',
+      TLS_SNAPSHOT_S3_PREFIX: tlsSnapshotPrefix,
+    });
+    const without = renderBackupSettingsConfigMap(settings);
+    expect(without).not.toContain('TLS_SNAPSHOT_S3_PREFIX');
+    expect(renderBackupSettingsConfigMap({ ...settings, tlsSnapshotPrefix: '' })).not.toContain(
+      'TLS_SNAPSHOT_S3_PREFIX',
+    );
+  });
+
+  it.each(['https://b/x', 's3://b', 's3://b/x"\n  EVIL: "1', 's3://b/x y'])(
+    'a prefix that is not a plain s3 URL (%j) is refused, never rendered',
+    (tlsSnapshotPrefix) => {
+      expect(() => renderBackupSettingsConfigMap({ ...settings, tlsSnapshotPrefix })).toThrow(
+        /TLS snapshot prefix/,
+      );
+    },
+  );
+
+  it('script mode reads an optional TLS_SNAPSHOT_S3_PREFIX', () => {
+    const dir = join(tmp, 'tlsrun');
+    cpSync('carbon/k8s/base', join(dir, 'k8s/base'), { recursive: true });
+    cpSync(RENDERER, join(dir, 'render.mjs'));
+    const env = {
+      PATH: process.env.PATH ?? '',
+      BACKUP_SCHEDULE: '15 3 * * *',
+      BACKUP_RETENTION_DAYS: '21',
+    };
+    const run = (extra: Record<string, string>) =>
+      spawnSync('node', [join(dir, 'render.mjs'), join(dir, 'k8s/base')], {
+        encoding: 'utf8',
+        env: { ...env, ...extra },
+      });
+    const withPrefix = run({ TLS_SNAPSHOT_S3_PREFIX: 's3://b/backups/p/e/tls/prod' });
+    expect(withPrefix.status, withPrefix.stderr).toBe(0);
+    const cm = (
+      loadAll(withPrefix.stdout) as Array<{ kind: string; data?: Record<string, string> }>
+    ).find((d) => d.kind === 'ConfigMap');
+    expect(cm?.data?.TLS_SNAPSHOT_S3_PREFIX).toBe('s3://b/backups/p/e/tls/prod');
+    const without = run({ TLS_SNAPSHOT_S3_PREFIX: '' });
+    expect(without.status, without.stderr).toBe(0);
+    const cmWithout = (
+      loadAll(without.stdout) as Array<{ kind: string; data?: Record<string, string> }>
+    ).find((d) => d.kind === 'ConfigMap');
+    expect(cmWithout?.data).toEqual({ BACKUP_RETENTION_DAYS: '21' });
+  });
+
+  it('deploy.yml passes the environment var to the renderer', () => {
+    const wf = readFileSync('carbon/.github/workflows/deploy.yml', 'utf8');
+    expect(wf).toMatch(/TLS_SNAPSHOT_S3_PREFIX: \$\{\{ vars\.TLS_SNAPSHOT_S3_PREFIX \}\}/);
   });
 });

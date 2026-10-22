@@ -60,6 +60,11 @@ import {
   serverStateRecovery,
   syncScaledServerState,
 } from './lib/deploy/compose/server-state-sync.js';
+import {
+  readLiveApexCertificate,
+  restoreComposeTls,
+  tlsRestoreLine,
+} from './lib/deploy/compose/tls-restore.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { preserveSafetyFields } from './lib/deploy/env-safety-fields.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
@@ -672,14 +677,37 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
     // moved, so failed challenges are cached as errors in letsencrypt_data.
     // DNS-01 has no such cached HTTP-01 failure to clear (and wiping acme.json
     // would force a needless re-issue), so skip it.
+    // An apex certificate already in acme.json (the restored one) is kept: the
+    // server is asked, never this process's memory, so a cutover resumed from
+    // its journal decides the same way. A check that cannot answer keeps the
+    // file too; the recreate below still restarts Traefik's issuance.
     // Uses an SCP'd script so quoting/redirection stay intact without local shell.
+    const apex = ctx.domain ?? envConfig.domain ?? null;
+    let live = null;
     if (!dnsChallenge) {
+      // No domain: no certificate to keep, so the reset runs as it always has.
+      live = apex
+        ? await readLiveApexCertificate({
+            ip: newIp,
+            sshKeyPath,
+            projectName,
+            domain: apex,
+            // The stack is up, so the traefik image is local.
+            timeoutMs: 30_000,
+          })
+        : { state: 'absent' };
+    }
+    if (live?.state === 'absent') {
       await sshRunScript(
         newIp,
         sshKeyPath,
         `cd ${remoteDir} && docker compose exec -T traefik sh -c 'echo "{}" > /letsencrypt/acme.json && chmod 600 /letsencrypt/acme.json'`,
         { timeout: 30_000 },
       );
+    } else if (live?.state === 'present') {
+      p.log.info('TLS certificate already on the new server; ACME state kept.');
+    } else if (live) {
+      p.log.info(`ACME state kept (${live.reason}).`);
     }
 
     // 13b. Recreate all services after restore so they reconnect to the restored DB.
@@ -738,7 +766,9 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
   // compose-backup.sh on schedule — no separate S3 plumbing.
   await step('cron', async () => {
     if (envConfig.backup) {
-      await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup);
+      await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup, {
+        domain: envConfig.domain,
+      });
       p.log.info('Backup cron restored on new server');
     }
   });
@@ -826,6 +856,7 @@ export async function resumeComposeCutover(ctx) {
       stopped: cutover.stopped ?? [],
       cronRemoved: cutover.cronRemoved !== false,
       backupConfig: envConfig.backup,
+      domain: envConfig.domain,
     });
     clearScaleCutoverJournal({ environment });
     const problems = [...back.problems];
@@ -1004,9 +1035,13 @@ async function createReplacementServer(ctx, server, s) {
  * image, and compose up. On compose-ha the replication overlay is written
  * first, so the stack starts with the db's 5433 publish and the repl-gateway.
  * Touches the old server only to read its configuration.
+ *
+ * `backupS3` (the primary arm only, from the preflight) restores the saved TLS
+ * certificate into the new server's acme.json before its stack starts, so it
+ * serves HTTPS as soon as DNS moves (restoreReplacementTls).
  * @returns {Promise<string>} the new server's public IP
  */
-async function prepareReplacementServer(ctx, server, newServerId, s) {
+async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 = null } = {}) {
   const {
     tier,
     provider,
@@ -1239,6 +1274,9 @@ async function prepareReplacementServer(ctx, server, newServerId, s) {
   );
   s.stop('Docker images ready');
 
+  // 5b. The saved certificate, before Traefik's first start (primary only).
+  if (backupS3) await restoreReplacementTls(ctx, newIp, backupS3, s);
+
   // 6. Start compose stack on new server
   s.start('Starting services on new server...');
   await perfAsync('scale.composeUp', () =>
@@ -1246,6 +1284,34 @@ async function prepareReplacementServer(ctx, server, newServerId, s) {
   );
   s.stop('Services started');
   return newIp;
+}
+
+/**
+ * Put the last saved certificate into a replacement primary's acme.json. The
+ * CA is the one the last deploy recorded (envConfig.tls.ca): with none,
+ * nothing is read and Traefik issues a new certificate. One info line; never
+ * throws, so certificates never stop a scale.
+ */
+async function restoreReplacementTls(ctx, newIp, backupS3, s) {
+  const { envConfig, projectName, environment, sshKeyPath } = ctx;
+  const domain = ctx.domain ?? envConfig.domain ?? null;
+  const ca = envConfig.tls?.ca ?? null;
+  s.start('Restoring the saved TLS certificate...');
+  const result = ca
+    ? await perfAsync('scale.tlsRestore', () =>
+        restoreComposeTls({
+          ip: newIp,
+          sshKeyPath,
+          projectName,
+          domain,
+          envName: environment,
+          ca,
+          s3Config: backupS3,
+        }),
+      )
+    : { restored: false, reason: 'no recorded CA' };
+  s.stop(result.restored ? 'TLS certificate restored' : 'TLS certificate not restored');
+  p.log.info(tlsRestoreLine(result, domain));
 }
 
 /** The servers[] entry for a replacement: the original entry, with what changed. */
@@ -1399,7 +1465,7 @@ async function scaleServers(ctx) {
     // The post-flip steps done, for the resume message.
     const progress = [];
     try {
-      newIp = await prepareReplacementServer(ctx, server, newServerId, s);
+      newIp = await prepareReplacementServer(ctx, server, newServerId, s, { backupS3 });
 
       // 7. Fence writes on the old server: writers stopped, database
       //    read-only, WAL switched and archived through the fence. From here
@@ -1612,6 +1678,7 @@ async function scaleServers(ctx) {
             stopped: cutover.stopped,
             cronRemoved,
             backupConfig: envConfig.backup,
+            domain: envConfig.domain,
           });
           if (!back.ok) {
             for (const problem of back.problems) p.log.error(problem);
@@ -1652,7 +1719,9 @@ async function scaleServers(ctx) {
       if (envConfig.backup) {
         // compose-backup.sh skips on a standby (WALG_ROLE); the cron is there
         // for when a failover promotes this node.
-        await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup);
+        await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup, {
+          domain: envConfig.domain,
+        });
       }
     } catch (scaleErr) {
       p.log.error(`Scale of the standby failed: ${scaleErr.message}`);

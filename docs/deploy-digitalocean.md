@@ -97,4 +97,7 @@ A deployment executes the following steps:
 | Manage operator IP allowlist | `vibecarbon access` |
 | Teardown resources | `vibecarbon destroy <env>` |
 
+### Certificates
+Your certificate is issued once and then reused: it is saved to the environment's Spaces backup bucket, and a restore, a scale onto new Droplets, or a failover puts it back instead of ordering a new one. A deploy whose certificate is not trusted yet finishes with TLS pending and the server keeps retrying; the TLS row of `vibecarbon status <env>` shows the live state, and the command to run if the retries gave up. GitOps environments need the `TLS_CERT_*` and `TLS_SNAPSHOT_S3_PREFIX` variables that `vibecarbon configure cicd <env>` seeds. The full story is in [Certificates](./deploy-hetzner.md#certificates); it is the same on every provider.
+
 For security details, firewall locking, and process isolation, refer to [docs/security.md](./security.md).

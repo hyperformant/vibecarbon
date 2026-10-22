@@ -118,6 +118,12 @@ export function composeTraefikRecreateShell(remoteDir) {
  * command takes. Called early in failoverComposeHA — before the app-tier
  * restart and DNS flip — so issuance overlaps the remaining failover work.
  *
+ * `deps.restore` (optional) puts the saved certificate into the node's
+ * acme.json between the .env merge and the recreate, so the recreated Traefik
+ * starts on it and serves HTTPS without issuing (failover passes
+ * restoreFailoverTls). It never blocks the re-arm: a restore that throws is
+ * ignored and Traefik issues a new certificate.
+ *
  * @param {{promotedIp: string, sshKeyPath: string, projectName: string, deps?: object}} args
  * @returns {Promise<boolean>} whether the re-arm landed
  */
@@ -125,6 +131,7 @@ export async function armComposeAcme({ promotedIp, sshKeyPath, projectName, deps
   const {
     run = sshRunAsync,
     mergeEnv = mergeRemoteDotenv,
+    restore = null,
     log = (msg) => p.log.info(msg),
     warn = (msg) => p.log.warn(msg),
   } = deps;
@@ -133,12 +140,24 @@ export async function armComposeAcme({ promotedIp, sshKeyPath, projectName, deps
     await mergeEnv(promotedIp, pinnedSshOptsString(sshKeyPath), remoteDir, {
       [ACME_DISARM_ENV]: '',
     });
+    let restored = false;
+    if (restore) {
+      try {
+        restored = (await restore())?.restored === true;
+      } catch {
+        // restoreFailoverTls never throws; any other restore degrades to issuance.
+      }
+    }
     // Single attempt on the DR path — same reasoning as restoreComposeWalgRole.
     await run(promotedIp, sshKeyPath, composeTraefikRecreateShell(remoteDir), {
       timeout: 120_000,
       retries: 1,
     });
-    log(`[acme-role] promoted node ${promotedIp} ACME issuer armed; certificate issuance started.`);
+    log(
+      restored
+        ? `[acme-role] promoted node ${promotedIp} ACME issuer armed; serving the restored certificate.`
+        : `[acme-role] promoted node ${promotedIp} ACME issuer armed; certificate issuance started.`,
+    );
     return true;
   } catch (err) {
     warn(

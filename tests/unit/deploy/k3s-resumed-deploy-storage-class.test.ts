@@ -136,6 +136,12 @@ describe('state-resumed k8s deploy keeps the provider StorageClass', () => {
         dbPrivateIp: '10.0.1.2',
         walArchiveSha: 'abc',
       }),
+      undefined,
+      {
+        dnsNames: ['app.example.test'],
+        issuerName: 'letsencrypt-prod-manual',
+        effectiveIssuer: 'letsencrypt-prod-manual',
+      },
     );
     try {
       const sts = readFileSync(join(rendered, 'db', 'statefulset.yaml'), 'utf-8');

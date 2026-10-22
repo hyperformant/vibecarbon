@@ -88,6 +88,7 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
 });
 
 vi.mock('../../../src/lib/deploy/tls-ready.js', () => ({
+  TLS_FIRST_LOOK_BUDGET_MS: 180_000,
   waitForTrustedTls: async () => ({ trusted: true, elapsedMs: 0 }),
 }));
 

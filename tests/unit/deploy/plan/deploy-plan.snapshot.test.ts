@@ -18,11 +18,13 @@ describe('compose deploy plan snapshot', () => {
         "ghcr-login",
         "setup-server-files",
         "update-dns",
+        "restore-tls",
         "start-compose-stack",
         "wait-admin-ready",
         "audit-database",
         "verify-health",
         "verify-tls",
+        "snapshot-tls",
         "setup-backup-cron",
       ]
     `);
@@ -43,6 +45,7 @@ describe('compose deploy plan snapshot', () => {
         "merge-walg-role",
         "pull-images",
         "update-dns",
+        "restore-tls",
         "start-compose-stack",
         "wait-admin-ready",
         "audit-database",
@@ -51,6 +54,7 @@ describe('compose deploy plan snapshot', () => {
         "configure-replication",
         "verify-streaming",
         "verify-tls",
+        "snapshot-tls",
         "setup-backup-cron",
         "finalize-config",
       ]

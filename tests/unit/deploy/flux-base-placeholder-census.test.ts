@@ -107,6 +107,10 @@ describe('Flux applies no unrendered placeholder from k8s/base', () => {
       // The backup CronJob is deploy-owned (per environment): Flux never builds
       // it, and the shared base carries no retention setting for it either.
       expect(has('CronJob', 'backup')).toBe(false);
+      // The TLS Certificate is deploy-owned too: the CLI renders it with the
+      // environment's names and issuer (renderK8sBase). Flux applying the
+      // base's app.example.com placeholder would reset it on every reconcile.
+      expect(has('Certificate', 'vibecarbon-tls')).toBe(false);
       const cfg = docs.find(
         (d) => d.kind === 'ConfigMap' && d.metadata?.name === 'vibecarbon-config',
       );
@@ -125,6 +129,7 @@ describe('Flux applies no unrendered placeholder from k8s/base', () => {
           { kind: 'StatefulSet', name: 'db' },
           { kind: 'Deployment', name: 'local-registry' },
           { kind: 'CronJob', name: 'backup' },
+          { kind: 'Certificate', name: 'vibecarbon-tls' },
         ]),
       );
       const docs = (loadAll(fluxBuild([])) as Doc[]).filter(Boolean);

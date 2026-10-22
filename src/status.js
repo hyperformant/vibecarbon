@@ -53,6 +53,7 @@ import {
   SERVICE_DISPLAY_NAMES,
 } from './lib/status/container-rows.js';
 import { checkRemoteContainers } from './lib/status/remote-containers.js';
+import { checkTls, formatTlsLines } from './lib/status/tls-row.js';
 import { deriveComposeProjectName } from './lib/subnet.js';
 import { VERSION } from './lib/version.js';
 
@@ -1420,6 +1421,12 @@ function renderEnvironment(envName, envConfig, checks) {
     lines.push(...formatHealthLines(checks.remoteHealth));
   }
 
+  // TLS: the live certificate verdict, and on compose what the retries do.
+  if (envConfig.domain && checks.tls) {
+    lines.push('');
+    lines.push(...formatTlsLines(checks.tls));
+  }
+
   // Services
   const enabledServices = [];
   if (envConfig.observability) enabledServices.push('observability');
@@ -1655,9 +1662,17 @@ async function main(argv = []) {
         if (fence.fenced.length > 0 || fence.unreachable.length > 0) checks.retiredFence = fence;
       }
 
-      // Remote health check
+      // Remote health and the TLS row (both read-only probes of the domain,
+      // run together; checkTls never throws).
       if (envConfig.domain) {
-        checks.remoteHealth = await checkRemoteHealth(envConfig.domain);
+        [checks.remoteHealth, checks.tls] = await Promise.all([
+          checkRemoteHealth(envConfig.domain),
+          checkTls(envConfig.domain, {
+            envName,
+            envConfig,
+            projectName: projectConfig.projectName,
+          }),
+        ]);
       }
 
       // Server info from the environment's provider API. Provider resolved
