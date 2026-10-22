@@ -3,10 +3,10 @@
  * the cheapest orderable amd64 server that meets the role's RAM floor, priced
  * at the target location.
  *
- * The provider-level tests run against a stub shaped like HetznerProvider
- * (ROLE_CANDIDATES, IPV4_MONTHLY, priceFor), seeded from the dated catalog
- * fixtures. Task 2 of the price-optimized defaults plan gives the real
- * provider classes those statics and switches these tests to them.
+ * The provider-level tests run against the real HetznerProvider (its
+ * ROLE_CANDIDATES, IPV4_MONTHLY and priceFor), seeded from the dated catalog
+ * fixtures. A stub stands in only where a case needs a provider shape no
+ * real class has (no IPv4 price, a custom offline offer, a missing role).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -183,9 +183,9 @@ describe('pickRoleType', () => {
   });
 });
 
-// A HetznerProvider-shaped stub until Task 2 gives the real class these
-// statics. The catalog state (SERVER_TYPES, _locationTypes, _prices) comes
-// from seedCatalog, exactly as it would land on the real class.
+// A HetznerProvider-shaped stub for the synthetic edge cases below. The
+// catalog state (SERVER_TYPES, _locationTypes, _prices) comes from
+// seedCatalog, exactly as it lands on the real class.
 function hetznerStub(
   roleCandidates: Record<string, string[]> = { compose: ['cpx22', 'cx23', 'cpx21'] },
 ) {
@@ -203,25 +203,17 @@ function hetznerStub(
   };
 }
 
-const K8S_CANDIDATES = {
-  master: ['cpx22', 'cx23', 'cpx21'],
-  db: ['cpx12', 'cx23', 'cpx22', 'cpx11'],
-  worker: ['cpx22', 'cx23', 'cpx21'],
-};
-
 describe('rankLocationsByPrice', () => {
-  let HetznerStub: ReturnType<typeof hetznerStub>;
   let restore: () => void;
   afterEach(() => restore?.());
 
   describe('flux fixture', () => {
     beforeEach(() => {
-      HetznerStub = hetznerStub();
-      restore = seedCatalog(HetznerStub, 'flux-hetzner-cx23-hel1');
+      restore = seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1');
     });
 
     it('cx23 stocked in hel1 only puts hel1 first at $7.09', () => {
-      const ranked = rankLocationsByPrice(HetznerStub, ['nbg1', 'fsn1', 'hel1'], ['compose']);
+      const ranked = rankLocationsByPrice(HetznerProvider, ['nbg1', 'fsn1', 'hel1'], ['compose']);
       expect(ranked[0]).toMatchObject({
         location: 'hel1',
         monthly: 7.09,
@@ -233,12 +225,11 @@ describe('rankLocationsByPrice', () => {
 
   describe('2026-10-22 fixture', () => {
     beforeEach(() => {
-      HetznerStub = hetznerStub();
-      restore = seedCatalog(HetznerStub, '2026-10-22/hetzner');
+      restore = seedCatalog(HetznerProvider, '2026-10-22/hetzner');
     });
 
     it('the EU ties at $23.59 and keeps the given order', () => {
-      const ranked = rankLocationsByPrice(HetznerStub, ['nbg1', 'fsn1', 'hel1'], ['compose']);
+      const ranked = rankLocationsByPrice(HetznerProvider, ['nbg1', 'fsn1', 'hel1'], ['compose']);
       expect(ranked.map((r) => [r.location, r.monthly])).toEqual([
         ['nbg1', 23.59],
         ['fsn1', 23.59],
@@ -248,13 +239,13 @@ describe('rankLocationsByPrice', () => {
 
     it('omits a location where a role is unorderable', () => {
       restore();
-      restore = seedCatalog(HetznerStub, '2026-10-22/hetzner', { drop: { fsn1: ['cpx22'] } });
-      const ranked = rankLocationsByPrice(HetznerStub, ['nbg1', 'fsn1', 'hel1'], ['compose']);
+      restore = seedCatalog(HetznerProvider, '2026-10-22/hetzner', { drop: { fsn1: ['cpx22'] } });
+      const ranked = rankLocationsByPrice(HetznerProvider, ['nbg1', 'fsn1', 'hel1'], ['compose']);
       expect(ranked.map((r) => r.location)).toEqual(['nbg1', 'hel1']);
     });
 
     it('sorts by price across geographies (sin and ash cost more)', () => {
-      const ranked = rankLocationsByPrice(HetznerStub, ['ash', 'sin', 'nbg1'], ['compose']);
+      const ranked = rankLocationsByPrice(HetznerProvider, ['ash', 'sin', 'nbg1'], ['compose']);
       expect(ranked).toEqual([
         { location: 'nbg1', monthly: 23.59, types: { compose: 'cpx22' } },
         { location: 'sin', monthly: 31.59, types: { compose: 'cpx22' } },
@@ -269,7 +260,7 @@ describe('cheapestRoleSet', () => {
   afterEach(() => restore?.());
 
   it('k8s in nbg1: 4 GB master and worker, 2 GB db, one IPv4 per server', () => {
-    const P = hetznerStub(K8S_CANDIDATES);
+    const P = HetznerProvider;
     restore = seedCatalog(P, '2026-10-22/hetzner');
     // 22.99 + 13.49 + 22.99 + 3 x 0.60
     expect(cheapestRoleSet(P, 'nbg1', ['master', 'db', 'worker'])).toEqual({
@@ -279,7 +270,7 @@ describe('cheapestRoleSet', () => {
   });
 
   it('flux fixture: cx23 in hel1 wins every k8s role there', () => {
-    const P = hetznerStub(K8S_CANDIDATES);
+    const P = HetznerProvider;
     restore = seedCatalog(P, 'flux-hetzner-cx23-hel1');
     expect(cheapestRoleSet(P, 'hel1', ['master', 'db', 'worker'])).toEqual({
       types: { master: 'cx23', db: 'cx23', worker: 'cx23' },
@@ -288,7 +279,7 @@ describe('cheapestRoleSet', () => {
   });
 
   it('ash: the US line and its price', () => {
-    const P = hetznerStub(K8S_CANDIDATES);
+    const P = HetznerProvider;
     restore = seedCatalog(P, '2026-10-22/hetzner');
     // 37.49 + 20.49 + 2 x 0.60
     expect(cheapestRoleSet(P, 'ash', ['master', 'db'])).toEqual({
@@ -298,7 +289,7 @@ describe('cheapestRoleSet', () => {
   });
 
   it('returns null when any role is unorderable', () => {
-    const P = hetznerStub(K8S_CANDIDATES);
+    const P = HetznerProvider;
     restore = seedCatalog(P, '2026-10-22/hetzner', { drop: { nbg1: ['cpx12', 'cpx22'] } });
     expect(cheapestRoleSet(P, 'nbg1', ['master', 'db'])).toBeNull();
   });
@@ -310,9 +301,10 @@ describe('cheapestRoleSet', () => {
   });
 
   it('monthly is null when a price is unknown, or the IPv4 price is', () => {
-    const P = hetznerStub();
+    const P = HetznerProvider;
     restore = seedCatalog(P, '2026-10-22/hetzner');
-    P._prices.cpx22 = { nbg1: null };
+    // biome-ignore lint/suspicious/noExplicitAny: poke one seeded price
+    (P as any)._prices.cpx22 = { nbg1: null };
     expect(cheapestRoleSet(P, 'nbg1', ['compose'])).toEqual({
       types: { compose: 'cpx22' },
       monthly: null,
@@ -430,13 +422,14 @@ describe('seedCatalog', () => {
     }
   });
 
-  it('Vultr: flat plan prices and per-plan locations', () => {
+  it('Vultr: per-location plan prices (sao carries its own) and per-plan locations', () => {
     const restore = seedCatalog(VultrProvider, '2026-10-22/vultr');
-    // biome-ignore lint/suspicious/noExplicitAny: _prices is not on the class until Task 2
+    // biome-ignore lint/suspicious/noExplicitAny: provider classes are untyped JS
     const P = VultrProvider as any;
     try {
-      expect(P._prices['vc2-2c-4gb']).toBe(20);
-      expect(P._prices['vhf-2c-4gb']).toBe(24);
+      expect(P._prices['vc2-2c-4gb'].ewr).toBe(20);
+      expect(P._prices['vc2-2c-4gb'].sao).toBe(30);
+      expect(P._prices['vhf-2c-4gb'].ewr).toBe(24);
       expect(P._locationTypes.ewr.has('vc2-2c-4gb')).toBe(true);
     } finally {
       restore();

@@ -55,6 +55,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
+import { regionRoleDefaults, sameTierRegionDefault } from '../sizing.js';
 import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
@@ -330,11 +331,13 @@ export class ScalewayProvider extends BaseProvider {
   // zone). BASIC3 cannot use local SSD (l_ssd max 0) — its root volume is
   // always SBS, provisioned at COMPOSE_ROOT_VOLUME_GB by our compose
   // program, hence that `disk` value; DEV1-M's 40 GB is its own bundled
-  // volume constraint.
+  // volume constraint. PLAY2-NANO (the third compose candidate, l_ssd max 0
+  // like BASIC3, so an SBS root too) from the same endpoint on 2026-10-22.
   static FALLBACK_SERVER_TYPES = {
     'BASIC3-X2C-4G': { vcpu: 2, ram: 4, disk: 40 },
     'BASIC3-X4C-8G': { vcpu: 4, ram: 8, disk: 40 },
     'DEV1-M': { vcpu: 3, ram: 4, disk: 40 },
+    'PLAY2-NANO': { vcpu: 2, ram: 4, disk: 40 },
   };
 
   // Live catalog populated by fetchServerTypes(); object map (name → spec).
@@ -344,6 +347,24 @@ export class ScalewayProvider extends BaseProvider {
   // catalog is genuinely per-zone (no type spans all zones — audit), so
   // this map is real data, same shape as DO's/Vultr's.
   static _locationTypes = null;
+
+  // Monthly prices captured by fetchServerTypes() from the same payload
+  // (`monthly_price`, EUR): type → zone → price. null until a live fetch.
+  static _prices = null;
+
+  // Compose candidates (see BaseProvider.ROLE_CANDIDATES). Offline keeps
+  // the audited default first; live, the cheapest orderable one wins
+  // (DEV1-M at €14.74 on 2026-10-22, with BASIC3-X2C-4G `scarce` in both
+  // Paris zones). DEV1-M takes the 40 GB SBS root the compose program
+  // provisions: its volumes_constraint.min_size is 0 (no local volume
+  // required) and it has block bandwidth.
+  static ROLE_CANDIDATES = {
+    compose: ['BASIC3-X2C-4G', 'DEV1-M', 'PLAY2-NANO'],
+  };
+
+  // Billed flexible IPv4 per server per month, EUR: zonal flexible IPv4 at
+  // €0.005/h x 730 h (scaleway.com/en/pricing, read 2026-10-22).
+  static IPV4_MONTHLY = 3.65;
 
   static DEFAULT_TYPE = 'BASIC3-X2C-4G';
 
@@ -509,13 +530,13 @@ export class ScalewayProvider extends BaseProvider {
 
   /**
    * Fetch the per-zone server-type catalog from the PUBLIC
-   * `GET /instance/v1/zones/{zone}/products/servers` endpoint (one walk
-   * per REGIONS zone — the audit's "no type exists everywhere" finding
-   * makes the zone axis real data). Page-walked at per_page=100 (the
-   * fr-par-1 catalog is 136 types, so a single page silently truncates).
-   * arm64 types are EXCLUDED from SERVER_TYPES — vibecarbon is amd64-only
-   * and the catalog invariants require an ARM-free own catalog.
-   * Incomplete/empty walks return false so the fallback catalog survives.
+   * `GET /instance/v1/zones/{zone}/products/servers` endpoint and its
+   * `/availability` twin, for every REGIONS zone (the audit's "no type
+   * exists everywhere" finding makes the zone axis real data). All eight
+   * walks start together under one Promise.all. Each is page-walked at
+   * per_page=100 (the fr-par-1 catalog is 136 types, so a single page
+   * silently truncates). Any failed page fails the whole fetch, so the
+   * fallback catalog survives an incomplete walk; so does an empty one.
    * @param {string} apiToken - sent as X-Auth-Token when given (the
    *   endpoint is public; the header only aids rate-limit accounting)
    * @returns {Promise<boolean>} true if live data was loaded
@@ -523,51 +544,108 @@ export class ScalewayProvider extends BaseProvider {
   static async fetchServerTypes(apiToken) {
     if (ScalewayProvider._locationTypes) return true; // already fetched
 
-    try {
-      const types = {};
-      const locationTypes = {};
-      const typeArch = {};
-      for (const zone of Object.keys(ScalewayProvider.REGIONS)) {
-        const servers = {};
-        for (let page = 1; page <= 20; page++) {
-          const response = await fetchWithRetry(
-            `${ScalewayProvider.API_BASE}/instance/v1/zones/${zone}/products/servers?per_page=100&page=${page}`,
-            apiToken ? { headers: { 'X-Auth-Token': apiToken } } : {},
-          );
-          if (!response.ok) return false;
-          const data = await response.json();
-          const pageServers = data.servers || {};
-          Object.assign(servers, pageServers);
-          if (Object.keys(pageServers).length < 100) break;
-        }
-        for (const [name, spec] of Object.entries(servers)) {
-          // Record every type's arch (arm64 too) so isArmServerType can
-          // classify a typed-in SKU by what Scaleway says it is.
-          if (spec.arch) typeArch[name.toUpperCase()] = spec.arch;
-          if (spec.arch !== 'x86_64') continue; // amd64-only catalog
-          if (spec.end_of_service) continue;
-          types[name] = {
-            vcpu: spec.ncpus,
-            ram: spec.ram / 2 ** 30,
-            // SBS-only types (BASIC3/COMPUTE3) bundle no disk — surface the
-            // root-volume size the compose tier provisions instead of 0.
-            disk:
-              Math.round((spec.volumes_constraint?.max_size ?? 0) / GB) ||
-              ScalewayProvider.COMPOSE_ROOT_VOLUME_GB,
-          };
-          if (!locationTypes[zone]) locationTypes[zone] = new Set();
-          locationTypes[zone].add(name);
-        }
+    const init = apiToken ? { headers: { 'X-Auth-Token': apiToken } } : {};
+    // One paged `{servers: {...}}` listing; null when a page fails.
+    const walk = async (path) => {
+      const servers = {};
+      for (let page = 1; page <= 20; page++) {
+        const response = await fetchWithRetry(
+          `${ScalewayProvider.API_BASE}${path}?per_page=100&page=${page}`,
+          init,
+        );
+        if (!response.ok) return null;
+        const data = await response.json();
+        const pageServers = data.servers || {};
+        Object.assign(servers, pageServers);
+        if (Object.keys(pageServers).length < 100) return servers;
       }
-      if (Object.keys(types).length === 0) return false;
+      return null; // never reached the last page
+    };
 
-      ScalewayProvider.SERVER_TYPES = types;
-      ScalewayProvider._locationTypes = locationTypes;
-      ScalewayProvider._typeArch = typeArch;
+    try {
+      const zones = Object.keys(ScalewayProvider.REGIONS);
+      const walked = await Promise.all(
+        zones.map(async (zone) => {
+          const base = `/instance/v1/zones/${zone}/products/servers`;
+          const [servers, availability] = await Promise.all([
+            walk(base),
+            walk(`${base}/availability`),
+          ]);
+          return { zone, servers, availability };
+        }),
+      );
+      if (walked.some((z) => z.servers === null || z.availability === null)) return false;
+
+      const catalog = ScalewayProvider.parseCatalog(
+        Object.fromEntries(
+          walked.map(({ zone, servers, availability }) => [
+            zone,
+            {
+              servers,
+              availability: Object.fromEntries(
+                Object.entries(availability).map(([name, a]) => [name, a?.availability]),
+              ),
+            },
+          ]),
+        ),
+      );
+      if (Object.keys(catalog.SERVER_TYPES).length === 0) return false;
+
+      Object.assign(ScalewayProvider, catalog);
       return true;
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The catalog statics fetchServerTypes sets, from each zone's
+   * products/servers map and availability map. Pure, so the unit fixtures
+   * load through the same filters as the live path
+   * (tests/unit/helpers/catalog-fixtures.ts).
+   *
+   * Records every type's arch (arm64 too) in `_typeArch`, so
+   * isArmServerType can classify a typed-in SKU by what Scaleway says it is.
+   * arm64 and end-of-service types are EXCLUDED from SERVER_TYPES
+   * (vibecarbon is amd64-only and the catalog invariants require an
+   * ARM-free own catalog). A type whose availability is `shortage` is left
+   * out of that zone's orderable set; `scarce` can still be placed.
+   *
+   * @param {Record<string, {servers: Record<string, object>, availability: Record<string, string>}>} zones
+   * @returns {{SERVER_TYPES: object, _locationTypes: Record<string, Set<string>>, _prices: Record<string, Record<string, number|null>>, _typeArch: Record<string, string>}}
+   */
+  static parseCatalog(zones) {
+    const types = {};
+    const locationTypes = {};
+    const prices = {};
+    const typeArch = {};
+    for (const [zone, { servers, availability }] of Object.entries(zones)) {
+      for (const [name, spec] of Object.entries(servers)) {
+        if (spec.arch) typeArch[name.toUpperCase()] = spec.arch;
+        if (spec.arch !== 'x86_64') continue; // amd64-only catalog
+        if (spec.end_of_service) continue;
+        types[name] = {
+          vcpu: spec.ncpus,
+          ram: spec.ram / 2 ** 30,
+          // SBS-only types (BASIC3/COMPUTE3) bundle no disk — surface the
+          // root-volume size the compose tier provisions instead of 0.
+          disk:
+            Math.round((spec.volumes_constraint?.max_size ?? 0) / GB) ||
+            ScalewayProvider.COMPOSE_ROOT_VOLUME_GB,
+        };
+        if (!prices[name]) prices[name] = {};
+        prices[name][zone] = typeof spec.monthly_price === 'number' ? spec.monthly_price : null;
+        if (availability?.[name] === 'shortage') continue;
+        if (!locationTypes[zone]) locationTypes[zone] = new Set();
+        locationTypes[zone].add(name);
+      }
+    }
+    return {
+      SERVER_TYPES: types,
+      _locationTypes: locationTypes,
+      _prices: prices,
+      _typeArch: typeArch,
+    };
   }
 
   /**
@@ -600,19 +678,14 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /**
-   * Region-appropriate default server types — fixed roles. DEV1-M is the
-   * audited fallback family (present wherever BASIC3 is, in our REGIONS
-   * set) and carries the master/worker roles for cost; db gets the
-   * baseline type.
-   * @param {string} _region - interface parity; unused
-   * @returns {{masterType: string, dbType: string, workerType: string}}
+   * Default type per role in `region` (compose-only: all four are the
+   * compose pick) — the cheapest orderable ROLE_CANDIDATES entry that meets
+   * the RAM floor (src/lib/sizing.js).
+   * @param {string} region - zone
+   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
    */
-  static getRegionDefaults(_region) {
-    return {
-      masterType: 'DEV1-M',
-      dbType: ScalewayProvider.DEFAULT_TYPE,
-      workerType: 'DEV1-M',
-    };
+  static getRegionDefaults(region) {
+    return regionRoleDefaults(ScalewayProvider, region);
   }
 
   /**
@@ -653,9 +726,7 @@ export class ScalewayProvider extends BaseProvider {
 
     if (available) {
       if (available.has(serverType)) return serverType;
-      const defaults = ScalewayProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.dbType) return defaults.dbType;
-      return defaults.masterType;
+      return sameTierRegionDefault(ScalewayProvider, serverType, targetRegion);
     }
 
     return serverType;

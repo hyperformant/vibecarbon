@@ -181,9 +181,11 @@ describe.each(Object.entries(PROVIDERS))('Provider contract: %s', (id, Provider)
       }
     });
 
-    it('getRegionDefaults returns a valid {masterType, dbType, workerType} shape for every known region', () => {
+    it('getRegionDefaults returns a valid {composeType, masterType, dbType, workerType} shape for every known region', () => {
       for (const region of Object.keys(Provider.REGIONS)) {
         const defaults = Provider.getRegionDefaults(region);
+        expect(typeof defaults.composeType).toBe('string');
+        expect(defaults.composeType.length).toBeGreaterThan(0);
         expect(typeof defaults.masterType).toBe('string');
         expect(defaults.masterType.length).toBeGreaterThan(0);
         expect(typeof defaults.dbType).toBe('string');
@@ -195,12 +197,27 @@ describe.each(Object.entries(PROVIDERS))('Provider contract: %s', (id, Provider)
 
     it('getRegionDefaults returns a valid shape for an unknown region (no throw)', () => {
       const defaults = Provider.getRegionDefaults('nonexistent-region');
+      expect(typeof defaults.composeType).toBe('string');
+      expect(defaults.composeType.length).toBeGreaterThan(0);
       expect(typeof defaults.masterType).toBe('string');
       expect(defaults.masterType.length).toBeGreaterThan(0);
       expect(typeof defaults.dbType).toBe('string');
       expect(defaults.dbType.length).toBeGreaterThan(0);
       expect(typeof defaults.workerType).toBe('string');
       expect(defaults.workerType.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('price contract', () => {
+    it('states a billed IPv4 price and answers priceFor null with no live catalog', () => {
+      expect(typeof Provider.IPV4_MONTHLY).toBe('number');
+      expect(Provider.IPV4_MONTHLY).toBeGreaterThanOrEqual(0);
+      expect(Provider._prices).toBeNull();
+      expect(Provider.priceFor(Provider.DEFAULT_TYPE, Provider.DEFAULT_REGION)).toBeNull();
+    });
+
+    it('declares a pure parseCatalog for fetchServerTypes', () => {
+      expect(typeof Provider.parseCatalog).toBe('function');
     });
   });
 

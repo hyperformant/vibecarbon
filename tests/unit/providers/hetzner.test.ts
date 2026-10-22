@@ -244,8 +244,9 @@ describe('HetznerProvider', () => {
       const resolved = HetznerProvider.resolveServerTypeForRegion('cpx11', 'nbg1');
       expect(resolved).not.toBe('cax11');
       expect(resolved).not.toMatch(/^cax/);
-      // Falls back to the region default at the same role tier, which is x86.
-      expect(resolved).toBe(HetznerProvider.getRegionDefaults('nbg1').masterType);
+      // Falls back to the region default of the same RAM tier (cpx11 is
+      // 2 GB, so the db default), which is x86.
+      expect(resolved).toBe(HetznerProvider.getRegionDefaults('nbg1').dbType);
     });
 
     it('rescues an ARM type to x86 even when the region stocks ARM', () => {
@@ -414,8 +415,17 @@ describe('HetznerProvider', () => {
     // x86 SKU is orderable in all five supported regions. The cx*3 line is not
     // the EU answer either — it reads available:false in all three EU
     // locations, which is why the offline EU default is cpx*2.
+    // Offline, the picker walks ROLE_CANDIDATES in declared order over
+    // getServerTypesForRegion's offline offer, which leaves out the lines a
+    // geography cannot place (OFFLINE_UNORDERABLE). The db role's floor is
+    // 2 GB, so it takes the 2 GB shape of each geography's line.
     it('returns current-generation cpx defaults for EU regions', () => {
-      const eu = { masterType: 'cpx22', dbType: 'cpx32', workerType: 'cpx22' };
+      const eu = {
+        composeType: 'cpx22',
+        masterType: 'cpx22',
+        dbType: 'cpx12',
+        workerType: 'cpx22',
+      };
       expect(HetznerProvider.getRegionDefaults('fsn1')).toEqual(eu);
       expect(HetznerProvider.getRegionDefaults('nbg1')).toEqual(eu);
       expect(HetznerProvider.getRegionDefaults('hel1')).toEqual(eu);
@@ -425,6 +435,7 @@ describe('HetznerProvider', () => {
       const retiredInEu = ['cpx11', 'cpx21', 'cpx31', 'cpx41', 'cpx51'];
       for (const region of HetznerProvider.EU_REGIONS) {
         const d = HetznerProvider.getRegionDefaults(region);
+        expect(retiredInEu).not.toContain(d.composeType);
         expect(retiredInEu).not.toContain(d.masterType);
         expect(retiredInEu).not.toContain(d.dbType);
         expect(retiredInEu).not.toContain(d.workerType);
@@ -434,30 +445,29 @@ describe('HetznerProvider', () => {
     it('every offline default is a known catalog SKU', () => {
       for (const region of [...HetznerProvider.EU_REGIONS, ...HetznerProvider.US_REGIONS]) {
         const d = HetznerProvider.getRegionDefaults(region);
-        for (const t of [d.masterType, d.dbType, d.workerType]) {
+        for (const t of [d.composeType, d.masterType, d.dbType, d.workerType]) {
           expect(HetznerProvider.FALLBACK_SERVER_TYPES).toHaveProperty(t);
         }
       }
     });
 
     it('returns x86 (cpx) defaults for US regions', () => {
-      expect(HetznerProvider.getRegionDefaults('ash')).toEqual({
-        masterType: 'cpx11',
-        dbType: 'cpx21',
-        workerType: 'cpx11',
-      });
-      expect(HetznerProvider.getRegionDefaults('hil')).toEqual({
-        masterType: 'cpx11',
-        dbType: 'cpx21',
-        workerType: 'cpx11',
-      });
+      const us = {
+        composeType: 'cpx21',
+        masterType: 'cpx21',
+        dbType: 'cpx11',
+        workerType: 'cpx21',
+      };
+      expect(HetznerProvider.getRegionDefaults('ash')).toEqual(us);
+      expect(HetznerProvider.getRegionDefaults('hil')).toEqual(us);
     });
 
     it('returns x86 defaults for unknown regions', () => {
       // Unknown regions are not in US_REGIONS, so they take the EU branch.
       expect(HetznerProvider.getRegionDefaults('unknown')).toEqual({
+        composeType: 'cpx22',
         masterType: 'cpx22',
-        dbType: 'cpx32',
+        dbType: 'cpx12',
         workerType: 'cpx22',
       });
     });

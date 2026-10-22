@@ -22,8 +22,14 @@ const seed = (locationTypes: Record<string, Set<string>>) => {
   (HetznerProvider as unknown as { _locationTypes: unknown })._locationTypes = locationTypes;
 };
 
+// A live fetch below replaces SERVER_TYPES and _prices wholesale; put them
+// back so the offer-path tests read the real spec table, not the two
+// synthetic SKUs (getRegionDefaults only picks catalog members).
+const originalServerTypes = HetznerProvider.SERVER_TYPES;
 afterEach(() => {
   (HetznerProvider as unknown as { _locationTypes: unknown })._locationTypes = null;
+  (HetznerProvider as unknown as { _prices: unknown })._prices = null;
+  HetznerProvider.SERVER_TYPES = originalServerTypes;
   vi.unstubAllGlobals();
 });
 
@@ -120,7 +126,7 @@ describe('offered SKUs never escape the live catalog', () => {
     it(`getRegionDefaults returns only catalog members (${label})`, () => {
       seed({ testregion: new Set(names) });
       const d = HetznerProvider.getRegionDefaults('testregion');
-      for (const t of [d.masterType, d.dbType, d.workerType]) {
+      for (const t of [d.composeType, d.masterType, d.dbType, d.workerType]) {
         expect(names).toContain(t);
       }
     });
@@ -171,7 +177,7 @@ describe('offline constants are coherent', () => {
   it('every offline EU default avoids permanently retired SKUs', () => {
     for (const region of HetznerProvider.EU_REGIONS) {
       const d = HetznerProvider.getRegionDefaults(region);
-      for (const t of [d.masterType, d.dbType, d.workerType]) {
+      for (const t of [d.composeType, d.masterType, d.dbType, d.workerType]) {
         expect(RETIRED_IN_EU).not.toContain(t);
         expect(RETIRED_EVERYWHERE).not.toContain(t);
       }
@@ -181,7 +187,8 @@ describe('offline constants are coherent', () => {
   it('no default anywhere names a globally retired SKU', () => {
     for (const region of [...HetznerProvider.EU_REGIONS, ...HetznerProvider.US_REGIONS]) {
       const d = HetznerProvider.getRegionDefaults(region);
-      for (const t of [d.masterType, d.dbType, d.workerType]) {
+      for (const t of [d.composeType, d.masterType, d.dbType, d.workerType]) {
+        expect(t).toBeTruthy();
         expect(RETIRED_EVERYWHERE).not.toContain(t);
       }
     }

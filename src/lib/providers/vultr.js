@@ -24,6 +24,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
+import { regionRoleDefaults, sameTierRegionDefault } from '../sizing.js';
 import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
@@ -176,11 +177,14 @@ export class VultrProvider extends BaseProvider {
   static HA_REGIONS = ['ewr', 'ord'];
 
   // Offline fallback catalog — vc2 shared line, live-verified 2026-08-08
-  // via the public GET /v2/plans (ram is MB on the wire; stored as GB).
+  // via the public GET /v2/plans (ram is MB on the wire; stored as GB);
+  // `vhf-2c-4gb` (the compose fallback candidate) from the same endpoint on
+  // 2026-10-22.
   static FALLBACK_SERVER_TYPES = {
     'vc2-1c-2gb': { vcpu: 1, ram: 2, disk: 55 },
     'vc2-2c-4gb': { vcpu: 2, ram: 4, disk: 80 },
     'vc2-4c-8gb': { vcpu: 4, ram: 8, disk: 160 },
+    'vhf-2c-4gb': { vcpu: 2, ram: 4, disk: 128 },
   };
 
   // Live catalog populated by fetchServerTypes(); object map (name → spec).
@@ -190,6 +194,22 @@ export class VultrProvider extends BaseProvider {
   // carry a real per-region axis (`plan.locations[]`) — unlike Linode's
   // global catalog — so this map is genuine data, same shape as DO's.
   static _locationTypes = null;
+
+  // Monthly prices captured by fetchServerTypes() from the same payload
+  // (USD): plan → location → price, for each location the plan is sold in.
+  // `monthly_cost` everywhere, except where `location_cost` names a
+  // location's own price (sao, 1.5x, on 2026-10-22). null until a live fetch.
+  static _prices = null;
+
+  // Compose candidates (see BaseProvider.ROLE_CANDIDATES): the regular vc2
+  // 4 GB plan, then the high-frequency one as its stock-out fallback.
+  static ROLE_CANDIDATES = {
+    compose: ['vc2-2c-4gb', 'vhf-2c-4gb'],
+  };
+
+  // Every instance's public IPv4 is included in its plan price
+  // (vultr.com/pricing, read 2026-10-22).
+  static IPV4_MONTHLY = 0;
 
   static DEFAULT_TYPE = 'vc2-2c-4gb';
 
@@ -326,27 +346,42 @@ export class VultrProvider extends BaseProvider {
       if (!complete) return false;
       if (plans.length === 0) return false;
 
-      const types = {};
-      const locationTypes = {};
-      for (const plan of plans) {
-        types[plan.id] = {
-          vcpu: plan.vcpu_count,
-          ram: plan.ram / 1024,
-          disk: plan.disk,
-        };
-        for (const region of plan.locations || []) {
-          if (!locationTypes[region]) locationTypes[region] = new Set();
-          locationTypes[region].add(plan.id);
-        }
-      }
-      if (Object.keys(types).length === 0) return false;
+      const catalog = VultrProvider.parseCatalog(plans);
+      if (Object.keys(catalog.SERVER_TYPES).length === 0) return false;
 
-      VultrProvider.SERVER_TYPES = types;
-      VultrProvider._locationTypes = locationTypes;
+      Object.assign(VultrProvider, catalog);
       return true;
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The catalog statics fetchServerTypes sets, from the `/v2/plans` entries
+   * it walked. Pure, so the unit fixtures load through the same code as the
+   * live path (tests/unit/helpers/catalog-fixtures.ts).
+   * @param {object[]} plans
+   * @returns {{SERVER_TYPES: object, _locationTypes: Record<string, Set<string>>, _prices: Record<string, Record<string, number|null>>}}
+   */
+  static parseCatalog(plans) {
+    const types = {};
+    const locationTypes = {};
+    const prices = {};
+    for (const plan of plans) {
+      types[plan.id] = {
+        vcpu: plan.vcpu_count,
+        ram: plan.ram / 1024,
+        disk: plan.disk,
+      };
+      prices[plan.id] = {};
+      for (const region of plan.locations || []) {
+        if (!locationTypes[region]) locationTypes[region] = new Set();
+        locationTypes[region].add(plan.id);
+        const monthly = plan.location_cost?.[region]?.monthly_cost ?? plan.monthly_cost;
+        prices[plan.id][region] = typeof monthly === 'number' ? monthly : null;
+      }
+    }
+    return { SERVER_TYPES: types, _locationTypes: locationTypes, _prices: prices };
   }
 
   /**
@@ -378,17 +413,14 @@ export class VultrProvider extends BaseProvider {
   }
 
   /**
-   * Region-appropriate default server types — fixed roles (the vc2 line is
-   * near-uniform; per-region gaps are handled by resolveServerTypeForRegion).
-   * @param {string} _region - interface parity; unused
-   * @returns {{masterType: string, dbType: string, workerType: string}}
+   * Default type per role in `region` (compose-only: all four are the
+   * compose pick) — the cheapest orderable ROLE_CANDIDATES entry that meets
+   * the RAM floor (src/lib/sizing.js).
+   * @param {string} region
+   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
    */
-  static getRegionDefaults(_region) {
-    return {
-      masterType: 'vc2-1c-2gb',
-      dbType: VultrProvider.DEFAULT_TYPE,
-      workerType: 'vc2-1c-2gb',
-    };
+  static getRegionDefaults(region) {
+    return regionRoleDefaults(VultrProvider, region);
   }
 
   /**
@@ -431,9 +463,7 @@ export class VultrProvider extends BaseProvider {
 
     if (available) {
       if (available.has(serverType)) return serverType;
-      const defaults = VultrProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.dbType) return defaults.dbType;
-      return defaults.masterType;
+      return sameTierRegionDefault(VultrProvider, serverType, targetRegion);
     }
 
     return serverType;

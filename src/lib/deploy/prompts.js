@@ -804,10 +804,10 @@ export async function gatherDeploymentConfig(args) {
   let serverType, masterServerType, workerServerType, dbServerType;
 
   if (isComposeDeploy) {
-    // Compose = the whole stack on one host, so use the medium-tier default
-    // (2+ vCPU, 4+ GB) for the whole box. regionDefaults.dbType is
-    // live-catalog-derived so it avoids retired SKUs like cpx21 in EU.
-    serverType = args.serverType || envConfig.serverType || regionDefaults.dbType;
+    // Compose = the whole stack on one host: the compose role's default (the
+    // cheapest orderable 4 GB+ type in the region, src/lib/sizing.js). Never
+    // the k8s db default, which is a 2 GB role.
+    serverType = args.serverType || envConfig.serverType || regionDefaults.composeType;
     masterServerType = workerServerType = dbServerType = serverType;
   } else {
     // `args.serverType` acts as a blanket fallback for all three node roles

@@ -22,6 +22,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
+import { regionRoleDefaults, sameTierRegionDefault } from '../sizing.js';
 import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
@@ -202,14 +203,21 @@ export class DigitalOceanProvider extends BaseProvider {
 
   // Offline fallback catalog — used when the API is unreachable or no token
   // is available. Specs only; prices are intentionally not hard-coded here
-  // (see PRICING_URL). DigitalOcean's Basic (`s-*`) droplet line is uniform
-  // across all regions (unlike Hetzner's architecture-split cx/cpx/cax), so
-  // there's no per-region fallback variant to maintain here.
-  // Entries live-verified 2026-07-24 via DO API.
+  // (see PRICING_URL). Offline there is no per-region rule: the whole
+  // catalog is offered everywhere. That is optimistic (on 2026-10-22 sfo3
+  // sold only the `-amd` / `-intel` basic sizes and atl1 none of these), which
+  // is why the live per-region data decides whenever a token is present.
+  // Entries live-verified 2026-07-24 via DO API; the `-amd` / `-intel`
+  // variants (ROLE_CANDIDATES' stock-out fallbacks) from GET /v2/sizes on
+  // 2026-10-22.
   static FALLBACK_SERVER_TYPES = {
     's-1vcpu-2gb': { vcpu: 1, ram: 2, disk: 50 },
+    's-1vcpu-2gb-amd': { vcpu: 1, ram: 2, disk: 50 },
+    's-1vcpu-2gb-intel': { vcpu: 1, ram: 2, disk: 50 },
     's-2vcpu-2gb': { vcpu: 2, ram: 2, disk: 60 },
     's-2vcpu-4gb': { vcpu: 2, ram: 4, disk: 80 },
+    's-2vcpu-4gb-amd': { vcpu: 2, ram: 4, disk: 80 },
+    's-2vcpu-4gb-intel': { vcpu: 2, ram: 4, disk: 80 },
     's-4vcpu-8gb': { vcpu: 4, ram: 8, disk: 160 },
   };
 
@@ -225,6 +233,26 @@ export class DigitalOceanProvider extends BaseProvider {
   // slug -> Set of available server-type slugs. Convention shared with
   // HetznerProvider._locationTypes (see base.js's catalog-statics doc).
   static _locationTypes = null;
+
+  // Monthly prices captured by fetchServerTypes() from the same payload
+  // (`price_monthly`, USD): type → price. DO prices a size the same in
+  // every region. null until a live fetch.
+  static _prices = null;
+
+  // Per-role candidates (see BaseProvider.ROLE_CANDIDATES). The plain basic
+  // sizes lead; their `-amd` / `-intel` twins ($4 / $2 more) are the
+  // stock-out fallbacks, and the only ones some regions sell (sfo3 on
+  // 2026-10-22). The 4 GB size is the db's last resort.
+  static ROLE_CANDIDATES = {
+    compose: ['s-2vcpu-4gb', 's-2vcpu-4gb-amd', 's-2vcpu-4gb-intel'],
+    master: ['s-2vcpu-4gb', 's-2vcpu-4gb-amd', 's-2vcpu-4gb-intel'],
+    db: ['s-1vcpu-2gb', 's-1vcpu-2gb-amd', 's-1vcpu-2gb-intel', 's-2vcpu-4gb'],
+    worker: ['s-2vcpu-4gb', 's-2vcpu-4gb-amd', 's-2vcpu-4gb-intel'],
+  };
+
+  // Every droplet's public IPv4 is included in its price
+  // (digitalocean.com/pricing/droplets, read 2026-10-22).
+  static IPV4_MONTHLY = 0;
 
   static DEFAULT_TYPE = 's-2vcpu-4gb';
 
@@ -477,24 +505,7 @@ export class DigitalOceanProvider extends BaseProvider {
       // catalog is never legitimately empty, so empty means failure.
       if (sizes.length === 0) return false;
 
-      const types = {};
-      const locationTypes = {};
-
-      for (const s of sizes) {
-        if (s.available === false) continue;
-
-        types[s.slug] = {
-          vcpu: s.vcpus,
-          ram: s.memory / 1024,
-          disk: s.disk,
-          regions: s.regions,
-        };
-
-        for (const region of s.regions || []) {
-          if (!locationTypes[region]) locationTypes[region] = new Set();
-          locationTypes[region].add(s.slug);
-        }
-      }
+      const catalog = DigitalOceanProvider.parseCatalog(sizes);
 
       // Post-FILTER empty guard (PR #214 re-review): a catalog whose every
       // entry is `available: false` would pass the raw-items guard above
@@ -510,10 +521,9 @@ export class DigitalOceanProvider extends BaseProvider {
       // (provider-contract pins DEFAULT_TYPE ∈ SERVER_TYPES). Hetzner's
       // availability lives on the LOCATION axis instead, so its guard
       // deliberately ignores availability — see the twin comment there.
-      if (Object.keys(types).length === 0) return false;
+      if (Object.keys(catalog.SERVER_TYPES).length === 0) return false;
 
-      DigitalOceanProvider.SERVER_TYPES = types;
-      DigitalOceanProvider._locationTypes = locationTypes;
+      Object.assign(DigitalOceanProvider, catalog);
       return true;
     } catch {
       return false;
@@ -521,11 +531,44 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
+   * The catalog statics fetchServerTypes sets, from the `/v2/sizes` entries
+   * it walked. Pure, so the unit fixtures load through the same filter as
+   * the live path (tests/unit/helpers/catalog-fixtures.ts). Drops
+   * `available: false` sizes.
+   * @param {object[]} sizes
+   * @returns {{SERVER_TYPES: object, _locationTypes: Record<string, Set<string>>, _prices: Record<string, number|null>}}
+   */
+  static parseCatalog(sizes) {
+    const types = {};
+    const locationTypes = {};
+    const prices = {};
+
+    for (const s of sizes) {
+      if (s.available === false) continue;
+
+      types[s.slug] = {
+        vcpu: s.vcpus,
+        ram: s.memory / 1024,
+        disk: s.disk,
+        regions: s.regions,
+      };
+
+      for (const region of s.regions || []) {
+        if (!locationTypes[region]) locationTypes[region] = new Set();
+        locationTypes[region].add(s.slug);
+      }
+
+      prices[s.slug] = typeof s.price_monthly === 'number' ? s.price_monthly : null;
+    }
+
+    return { SERVER_TYPES: types, _locationTypes: locationTypes, _prices: prices };
+  }
+
+  /**
    * Returns server types available in the given region. Uses live
    * per-region data when available (populated by fetchServerTypes),
-   * otherwise falls back to the full FALLBACK_SERVER_TYPES catalog — DO's
-   * Basic droplet line is available uniformly across all regions, so there
-   * is no prefix-filtering equivalent to Hetzner's US/EU split.
+   * otherwise falls back to the full FALLBACK_SERVER_TYPES catalog (no
+   * offline per-region rule; see FALLBACK_SERVER_TYPES).
    *
    * Entries carry `architecture: 'x86'` for parity with
    * HetznerProvider.getServerTypesForRegion — the field the shared prompt
@@ -558,19 +601,14 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
-   * Returns region-appropriate default server types. Fixed roles (not
-   * region-branched) — see FALLBACK_SERVER_TYPES's doc comment for why DO
-   * doesn't need Hetzner's per-region preference-list walk.
-   * @param {string} _region - Region slug (accepted for interface parity
-   *   with HetznerProvider.getRegionDefaults; unused — see above)
-   * @returns {{masterType: string, dbType: string, workerType: string}}
+   * Default type per role in `region`: the cheapest orderable
+   * ROLE_CANDIDATES entry that meets the role's RAM floor
+   * (src/lib/sizing.js). Offline, declared order over the fallback catalog.
+   * @param {string} region - Region slug
+   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
    */
-  static getRegionDefaults(_region) {
-    return {
-      masterType: 's-2vcpu-2gb',
-      dbType: DigitalOceanProvider.DEFAULT_TYPE,
-      workerType: 's-2vcpu-2gb',
-    };
+  static getRegionDefaults(region) {
+    return regionRoleDefaults(DigitalOceanProvider, region);
   }
 
   /**
@@ -606,7 +644,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * Returns the equivalent server type available in a target region.
    * Mirrors HetznerProvider.resolveServerTypeForRegion's walk: if live data
    * shows the requested type isn't available in the target region, fall
-   * back to the region-default type at the same role tier; offline, DO's
+   * back to the region default of the same RAM tier; offline, DO's
    * uniform Basic droplet line means the requested type is always assumed
    * available (no architecture-split fallback to reconcile, unlike
    * Hetzner's cax/cpx case).
@@ -619,10 +657,7 @@ export class DigitalOceanProvider extends BaseProvider {
 
     if (available) {
       if (available.has(serverType)) return serverType;
-
-      const defaults = DigitalOceanProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.dbType) return defaults.dbType;
-      return defaults.masterType;
+      return sameTierRegionDefault(DigitalOceanProvider, serverType, targetRegion);
     }
 
     // Offline fallback — no architecture split to reconcile.

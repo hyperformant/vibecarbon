@@ -951,6 +951,49 @@ export class BaseProvider {
   }
 
   /**
+   * The x86 server types this provider uses per role, declared order = the
+   * offline order (most reliably stocked first). Live, src/lib/sizing.js
+   * picks the cheapest orderable one that meets the role's RAM floor. A
+   * provider declares every role its SUPPORTED_TIERS place: `compose`, and
+   * `master` / `db` / `worker` once it supports k8s.
+   * @type {{compose?: string[], master?: string[], db?: string[], worker?: string[]}}
+   */
+  static ROLE_CANDIDATES = {};
+
+  /**
+   * Billed public IPv4 per server per month, in the account's billing
+   * currency (0 when the server price includes it). Each provider states it
+   * with a dated source. null here: an unknown IPv4 price makes a priced
+   * role set's monthly unknown rather than silently low.
+   * @type {number|null}
+   */
+  static IPV4_MONTHLY = null;
+
+  /**
+   * Monthly server prices captured by fetchServerTypes from the payload it
+   * already reads: `{ [type]: { [location]: number|null } }`, or
+   * `{ [type]: number|null }` where the provider's prices are the same in
+   * every location. null before a live fetch.
+   * @type {Record<string, number|null|Record<string, number|null>>|null}
+   */
+  static _prices = null;
+
+  /**
+   * Monthly price of `type` in `location` from the live capture (`_prices`).
+   * @param {string} type
+   * @param {string} location
+   * @returns {number|null} null before a live fetch, or for an unpriced type
+   */
+  static priceFor(type, location) {
+    // Polymorphic on purpose: reads the CALLING subclass's `_prices` (see
+    // assertAmd64ServerType below for why `this` must stay).
+    // biome-ignore lint/complexity/noThisInStatic: deliberately polymorphic
+    const price = this._prices?.[type];
+    if (typeof price === 'number') return price;
+    return typeof price?.[location] === 'number' ? price[location] : null;
+  }
+
+  /**
    * Returns server types available in the given region.
    *
    * Each entry SHOULD carry an `architecture` field — 'x86' (or the equivalent
@@ -969,9 +1012,12 @@ export class BaseProvider {
   }
 
   /**
-   * Returns region-appropriate default server types.
+   * Default server type per role in `region`: each the cheapest orderable
+   * `ROLE_CANDIDATES` entry that meets the role's RAM floor
+   * (src/lib/sizing.js regionRoleDefaults). A role with nothing orderable is
+   * null. Compose-only providers return `composeType` for all four.
    * @param {string} region - Region ID
-   * @returns {{masterType: string, dbType: string, workerType: string}}
+   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
    */
   static getRegionDefaults(_region) {
     throw new Error('getRegionDefaults() must be implemented by subclass');

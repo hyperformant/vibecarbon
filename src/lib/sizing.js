@@ -137,6 +137,51 @@ export function cheapestRoleSet(Provider, location, roles) {
 }
 
 /**
+ * A provider's `getRegionDefaults(region)`: the cheapest fitting type per
+ * role, each picked on its own (`cheapestRoleSet` with one role). A role
+ * with nothing orderable is null; the caller refuses by name. A provider
+ * without k8s candidates (compose-only) answers `composeType` for all four,
+ * for interface parity.
+ *
+ * @param {object} Provider - a provider class
+ * @param {string} region
+ * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
+ */
+export function regionRoleDefaults(Provider, region) {
+  const pick = (role) => cheapestRoleSet(Provider, region, [role])?.types[role] ?? null;
+  const composeType = pick('compose');
+  if (!Provider.ROLE_CANDIDATES?.master) {
+    return { composeType, masterType: composeType, dbType: composeType, workerType: composeType };
+  }
+  return {
+    composeType,
+    masterType: pick('master'),
+    dbType: pick('db'),
+    workerType: pick('worker'),
+  };
+}
+
+/**
+ * The region default of the same RAM tier as `type`, for a standby region
+ * that does not sell `type`: the db pick (the 2 GB tier) for a type at or
+ * under the db floor, else the compose pick (4 GB). Never shrinks a 4 GB
+ * node to 2 GB. Falls back to `type` itself when the region has no such
+ * default (the caller's create then names the refusal).
+ *
+ * @param {object} Provider - a provider class
+ * @param {string} type
+ * @param {string} region
+ * @returns {string}
+ */
+export function sameTierRegionDefault(Provider, type, region) {
+  const defaults = Provider.getRegionDefaults(region);
+  const ram = Provider.SERVER_TYPES[type]?.ram;
+  const pick =
+    typeof ram === 'number' && ram <= ROLE_MIN_RAM_GB.db ? defaults.dbType : defaults.composeType;
+  return pick ?? type;
+}
+
+/**
  * `cheapestRoleSet` for each location, cheapest first. Ties, and locations
  * with an unknown monthly (which go last), keep the order of `locations`.
  * Locations where any role is unorderable are left out.

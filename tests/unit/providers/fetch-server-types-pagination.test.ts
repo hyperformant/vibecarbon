@@ -209,7 +209,7 @@ describe('HetznerProvider.fetchServerTypes', () => {
     // orderable in zero locations is still a spec entry. So a catalog
     // where every location of every SKU reads available:false must load
     // (true), keep the live spec table, offer NO types in the blacked-out
-    // region, and let getRegionDefaults degrade to its offline branch.
+    // region, and leave getRegionDefaults with nothing to name there.
     // Falling back wholesale here would be WRONG: it would trade live
     // "nothing orderable" knowledge for the fallback catalog's optimism.
     const fetchMock = vi.fn().mockResolvedValue(
@@ -255,12 +255,14 @@ describe('HetznerProvider.fetchServerTypes', () => {
         .map((t) => t.name)
         .sort(),
     ).toEqual(['cpx22', 'cpx32']);
-    // …and getRegionDefaults returns its offline EU branch, not a pick
-    // from a live per-region set that doesn't exist.
+    // …and getRegionDefaults names nothing: live "nothing orderable here"
+    // beats the fallback's optimism, and the deploy refuses by name rather
+    // than order a SKU the API will refuse.
     expect(HetznerProvider.getRegionDefaults('fsn1')).toEqual({
-      masterType: 'cpx22',
-      dbType: 'cpx32',
-      workerType: 'cpx22',
+      composeType: null,
+      masterType: null,
+      dbType: null,
+      workerType: null,
     });
   });
 

@@ -16,6 +16,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
+import { regionRoleDefaults, sameTierRegionDefault } from '../sizing.js';
 import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
@@ -309,6 +310,21 @@ export class LinodeProvider extends BaseProvider {
   // the "already fetched" short-circuit works the same way.
   static _locationTypes = null;
 
+  // Monthly prices captured by fetchServerTypes() from the same payload
+  // (USD): type → region → price, `price.monthly` for every REGIONS key,
+  // overridden by the type's `region_prices` (id-cgk, br-gru). Dedicated
+  // plans carry null. null until a live fetch.
+  static _prices = null;
+
+  // Compose candidates (see BaseProvider.ROLE_CANDIDATES).
+  static ROLE_CANDIDATES = {
+    compose: ['g6-standard-2'],
+  };
+
+  // Every Linode's public IPv4 is included in its plan price
+  // (linode.com/pricing, read 2026-10-22).
+  static IPV4_MONTHLY = 0;
+
   static DEFAULT_TYPE = 'g6-standard-2';
 
   // ── Engine-literal statics ──────────────────────────────────────────────
@@ -457,34 +473,54 @@ export class LinodeProvider extends BaseProvider {
       // populated fallback must survive.
       if (types.length === 0) return false;
 
-      const catalog = {};
-      for (const t of types) {
-        // GPU/accelerated lines excluded: irrelevant to this workload
-        // shape, and their per-region scarcity would need an availability
-        // axis GET /linode/types doesn't carry.
-        if (t.class === 'gpu' || t.class === 'accelerated') continue;
-        catalog[t.id] = {
-          vcpu: t.vcpus,
-          ram: t.memory / 1024,
-          disk: t.disk / 1024,
-        };
-      }
-      if (Object.keys(catalog).length === 0) return false;
+      const catalog = LinodeProvider.parseCatalog(types);
+      if (Object.keys(catalog.SERVER_TYPES).length === 0) return false;
 
-      // Global catalog → every region maps to the same full slug set (see
-      // _locationTypes' doc for why the shared shape is kept).
-      const allSlugs = new Set(Object.keys(catalog));
-      const locationTypes = {};
-      for (const region of Object.keys(LinodeProvider.REGIONS)) {
-        locationTypes[region] = allSlugs;
-      }
-
-      LinodeProvider.SERVER_TYPES = catalog;
-      LinodeProvider._locationTypes = locationTypes;
+      Object.assign(LinodeProvider, catalog);
       return true;
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The catalog statics fetchServerTypes sets, from the `/linode/types`
+   * entries it walked. Pure, so the unit fixtures load through the same
+   * filter as the live path (tests/unit/helpers/catalog-fixtures.ts).
+   *
+   * GPU/accelerated lines are excluded: irrelevant to this workload shape,
+   * and their per-region scarcity would need an availability axis
+   * GET /linode/types doesn't carry. The catalog is global, so every REGIONS
+   * key maps to the same full slug set (see _locationTypes' doc for why the
+   * shared shape is kept).
+   * @param {object[]} types
+   * @returns {{SERVER_TYPES: object, _locationTypes: Record<string, Set<string>>, _prices: Record<string, Record<string, number|null>>}}
+   */
+  static parseCatalog(types) {
+    const catalog = {};
+    const prices = {};
+    const regions = Object.keys(LinodeProvider.REGIONS);
+    for (const t of types) {
+      if (t.class === 'gpu' || t.class === 'accelerated') continue;
+      catalog[t.id] = {
+        vcpu: t.vcpus,
+        ram: t.memory / 1024,
+        disk: t.disk / 1024,
+      };
+      const overrides = Object.fromEntries((t.region_prices || []).map((r) => [r.id, r.monthly]));
+      prices[t.id] = Object.fromEntries(
+        regions.map((region) => {
+          const monthly = region in overrides ? overrides[region] : t.price?.monthly;
+          return [region, typeof monthly === 'number' ? monthly : null];
+        }),
+      );
+    }
+
+    const allSlugs = new Set(Object.keys(catalog));
+    const locationTypes = {};
+    for (const region of regions) locationTypes[region] = allSlugs;
+
+    return { SERVER_TYPES: catalog, _locationTypes: locationTypes, _prices: prices };
   }
 
   /**
@@ -517,17 +553,14 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * Region-appropriate default server types. Fixed roles — Linode's Standard
-   * line is uniform across regions, so no per-region preference walk.
-   * @param {string} _region - Accepted for interface parity; unused
-   * @returns {{masterType: string, dbType: string, workerType: string}}
+   * Default type per role in `region` (compose-only: all four are the
+   * compose pick) — the cheapest orderable ROLE_CANDIDATES entry that meets
+   * the RAM floor (src/lib/sizing.js).
+   * @param {string} region
+   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
    */
-  static getRegionDefaults(_region) {
-    return {
-      masterType: 'g6-standard-1',
-      dbType: LinodeProvider.DEFAULT_TYPE,
-      workerType: 'g6-standard-1',
-    };
+  static getRegionDefaults(region) {
+    return regionRoleDefaults(LinodeProvider, region);
   }
 
   /**
@@ -578,10 +611,7 @@ export class LinodeProvider extends BaseProvider {
 
     if (available) {
       if (available.has(serverType)) return serverType;
-
-      const defaults = LinodeProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.dbType) return defaults.dbType;
-      return defaults.masterType;
+      return sameTierRegionDefault(LinodeProvider, serverType, targetRegion);
     }
 
     return serverType;
