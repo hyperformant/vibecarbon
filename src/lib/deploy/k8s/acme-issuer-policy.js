@@ -14,8 +14,8 @@
  * THE POLICY: only the cluster currently in the PRIMARY role holds an
  * ACME-issued Certificate.
  *
- *   - Deploy half (applyK3sManifests): a pilot-standby deploy patches the
- *     Certificate's issuerRef to STANDBY_SELFSIGNED_ISSUER — issues locally
+ *   - Deploy half (applyK3sManifests): a pilot-standby deploy renders the
+ *     Certificate's issuerRef as STANDBY_SELFSIGNED_ISSUER — issues locally
  *     in seconds, zero ACME traffic — and stamps the REAL issuer name into
  *     PROMOTE_ISSUER_ANNOTATION (on the primary too, where it is simply a
  *     record of the current ref).

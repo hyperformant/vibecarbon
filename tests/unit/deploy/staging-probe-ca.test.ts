@@ -36,14 +36,17 @@ describe('stagingProbeCa', () => {
     expect(stagingRootsPem()).toBe(e2eCopy);
   });
 
-  it('orchestrator no longer contains any TLS-verification opt-out', () => {
+  it('orchestrator has one TLS-verification opt-out: the k8s app phase, never staging', () => {
     // Extends the e2e-side drift guard (staging-ca-trust.test.ts) to src/:
-    // the probe must never regress to rejectUnauthorized: false.
+    // staging must never regress to rejectUnauthorized: false. The one
+    // exception is the k8s app-phase probe (verifyTls: false), whose trust
+    // verdict is the TLS phase's (k8s-tls-phase.test.ts).
     const src = readFileSync(
       join(__dirname, '..', '..', '..', 'src', 'lib', 'deploy', 'orchestrator.js'),
       'utf8',
     );
-    expect(src).not.toMatch(/rejectUnauthorized/);
+    expect(src.match(/rejectUnauthorized/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(/if \(verifyTls === false\) \{[^}]*rejectUnauthorized = false/);
   });
 });
 

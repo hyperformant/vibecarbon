@@ -22,7 +22,10 @@ export { createAcmeIssuanceWatchdog } from './acme-order-recovery.js';
 export { reestablishReplicationTransport } from './ha/index.js';
 // Re-exported so callers outside src/lib/deploy/k8s/ (e.g. src/scale.js)
 // don't reach into ./k3s.js directly — see paid-boundary guard.
-export { K3S_VERSION } from './k3s.js';
+// Re-exported so the orchestrator's TLS phase (outside src/lib/deploy/k8s/)
+// can name the deploy's issuer and save the trusted certificate without
+// reaching into ./k3s.js or ./tls-restore.js directly — see paid-boundary guard.
+export { K3S_VERSION, k8sTlsIdentity } from './k3s.js';
 // Re-exported so src/backup.js can gate the manual backup Job on the
 // exec+pg condition (RCA 2026-08-16, run 31927810430) without reaching into
 // ./readiness.js directly — see paid-boundary guard.
@@ -31,6 +34,7 @@ export { awaitPostgresAccepting } from './readiness.js';
 // can derive the pilot-light scale-up list without reaching into
 // ./standby-config.js directly — see paid-boundary guard.
 export { deriveScaleUpList, failoverAddonManifests } from './standby-config.js';
+export { quietKubectl, snapshotK8sTlsSecret } from './tls-restore.js';
 
 /**
  * Destroy a K8s deployment.

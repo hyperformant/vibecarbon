@@ -324,14 +324,15 @@ describe('the snapshot prefix and apex reach the servers as data', () => {
     const src = read('src/lib/deploy/k8s/k3s.js');
     const start = src.indexOf('export async function applyK3sManifests(');
     const fn = src.slice(start, src.indexOf('\nexport ', start + 1));
-    const issuer = fn.indexOf('const issuerName = pickIssuerName(');
+    const issuer = fn.indexOf('const issuerName = k8sIssuerName(');
     expect(issuer).toBeGreaterThan(-1);
     expect(issuer).toBeLessThan(fn.indexOf('renderK8sBase('));
     expect(fn).toMatch(
       /renderBackupSettingsConfigMap\(\{\s*\.\.\.backupSettings,\s*tlsSnapshotPrefix/,
     );
     // One computation of the issuer per deploy.
-    expect(fn.match(/pickIssuerName\(/g)).toHaveLength(1);
+    expect(fn.match(/k8sIssuerName\(/g)).toHaveLength(1);
+    expect(fn.match(/pickIssuerName\(/g)).toBeNull();
   });
 
   it('create copies the script, executable', () => {
