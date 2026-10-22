@@ -85,15 +85,55 @@ const args = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+const readValid = async () => ({ text: VALID });
+
 const APEX_RE_ARG = `'"main": ?"app\\.example\\.com"'`;
 
-describe('restoreComposeTls: the live certificate wins', () => {
-  it('apex present in the volume: no read, no write, live certificate present', async () => {
+describe('restoreComposeTls: the snapshot is asked for before the server is touched', () => {
+  it('never touches the server when there is no snapshot', async () => {
+    const ssh = vi.fn();
+    const r = await restoreComposeTls({
+      ...args(),
+      deps: { read: async () => ({ text: null, reason: 'no snapshot' }), ssh },
+    });
+    expect(r).toEqual({ restored: false, reason: 'no snapshot' });
+    expect(ssh).not.toHaveBeenCalled();
+  });
+
+  it('never touches the server for a refused snapshot', async () => {
+    const ssh = vi.fn();
+    const r = await restoreComposeTls({
+      ...args(),
+      deps: { read: async () => ({ text: SELF_SIGNED }), ssh },
+    });
+    expect(r.reason).toMatch(/^snapshot refused: /);
+    expect(ssh).not.toHaveBeenCalled();
+  });
+
+  it('still leaves a live certificate alone when a snapshot exists', async () => {
     const { ssh, calls } = fakeSsh({ live: 'present' });
-    const read = vi.fn();
+    const r = await restoreComposeTls({ ...args(), deps: { ssh, read: readValid } });
+    expect(r).toEqual({ restored: false, reason: 'live certificate present' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].argv[2]).toContain('echo present'); // the check ran, the write did not
+  });
+
+  it('still restores onto a rebuilt server that has none', async () => {
+    const { ssh, calls } = fakeSsh({ live: 'absent' });
+    const r = await restoreComposeTls({ ...args(), deps: { ssh, read: readValid } });
+    expect(r).toEqual({ restored: true, reason: 'restored from the last snapshot' });
+    expect(calls).toHaveLength(2);
+    expect(calls[0].argv[2]).toContain('echo present'); // the live check precedes the write
+  });
+});
+
+describe('restoreComposeTls: the live certificate wins', () => {
+  it('apex present in the volume: a snapshot exists, but no write, live certificate present', async () => {
+    const { ssh, calls } = fakeSsh({ live: 'present' });
+    const read = vi.fn(async () => ({ text: VALID }));
     const r = await restoreComposeTls({ ...args(), deps: { ssh, read } });
     expect(r).toEqual({ restored: false, reason: 'live certificate present' });
-    expect(read).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(1);
     expect(calls).toHaveLength(1);
     const script = calls[0].argv[2];
     expect(calls[0].argv.slice(0, 2)).toEqual(['bash', '-c']);
@@ -106,26 +146,23 @@ describe('restoreComposeTls: the live certificate wins', () => {
     expect(script).toContain(APEX_RE_ARG);
   });
 
-  it('a failed live check is never read as absent: nothing is read or written', async () => {
+  it('a failed live check is never read as absent: nothing is written', async () => {
     const { ssh, calls } = fakeSsh({ live: statusError(1) });
-    const read = vi.fn();
-    const r = await restoreComposeTls({ ...args(), deps: { ssh, read } });
+    const r = await restoreComposeTls({ ...args(), deps: { ssh, read: readValid } });
     expect(r).toEqual({ restored: false, reason: 'could not check the live certificate' });
-    expect(read).not.toHaveBeenCalled();
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(1); // the check only, no write
   });
 
   it('unexpected check output is not absent either', async () => {
-    const { ssh } = fakeSsh({ live: 'Pulling traefik' });
-    const read = vi.fn();
-    const r = await restoreComposeTls({ ...args(), deps: { ssh, read } });
+    const { ssh, calls } = fakeSsh({ live: 'Pulling traefik' });
+    const r = await restoreComposeTls({ ...args(), deps: { ssh, read: readValid } });
     expect(r.restored).toBe(false);
-    expect(read).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
   });
 
   it('a server whose reconcile.sh has no -f set refuses instead of guessing', async () => {
     const { ssh } = fakeSsh({ live: statusError(20) });
-    const r = await restoreComposeTls({ ...args(), deps: { ssh, read: vi.fn() } });
+    const r = await restoreComposeTls({ ...args(), deps: { ssh, read: readValid } });
     expect(r).toEqual({
       restored: false,
       reason: 'reconcile.sh on the server has no compose files',
@@ -210,7 +247,7 @@ describe('restoreComposeTls: stale extra entries are left out', () => {
       },
     });
     expect(r.restored).toBe(false);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(0);
   });
 });
 
@@ -240,7 +277,7 @@ describe('restoreComposeTls: nothing is written for a bad or missing snapshot', 
     const r = await restoreComposeTls({ ...args(over), deps: { ssh, read: vi.fn(readImpl) } });
     expect(r.restored).toBe(false);
     expect(r.reason).toMatch(re);
-    expect(calls).toHaveLength(1); // the live check only
+    expect(calls).toHaveLength(0); // the server is never touched
   });
 
   it('a prod snapshot chained to a trust root is restored', async () => {
@@ -500,8 +537,8 @@ describe('effects: one shared effect per step for both compose tiers', () => {
   it('warm redeploy with a live certificate: one neutral info line', async () => {
     const { ssh } = fakeSsh({ live: 'present' });
     H.ssh.mockImplementation(ssh);
+    H.read.mockResolvedValue({ text: VALID });
     await EFFECTS.restoreTlsSnapshot(ctx({ serverIp: '10.0.0.1' }));
-    expect(H.read).not.toHaveBeenCalled();
     expect(info).toHaveBeenCalledTimes(1);
     expect(info.mock.calls[0][0]).toBe(
       'TLS certificate already on the server; nothing to restore.',
@@ -608,17 +645,15 @@ describe('restoreComposeTls: bounded per piece, no restart (the failover path)',
     expect(calls[1].argv[2]).toContain('restart traefik');
   });
 
-  it('a check that hangs past its bound: restore timed out, nothing read', async () => {
+  it('a check that hangs past its bound: restore timed out', async () => {
     vi.useFakeTimers();
-    const read = vi.fn();
     const pending = restoreComposeTls({
       ...args(),
       checkTimeoutMs: 30_000,
-      deps: { ssh: slowSsh('check'), read },
+      deps: { ssh: slowSsh('check'), read: readValid },
     });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(await pending).toEqual({ restored: false, reason: 'restore timed out' });
-    expect(read).not.toHaveBeenCalled();
   });
 
   it('a write that hangs past its bound: restore timed out', async () => {
@@ -642,6 +677,6 @@ describe('restoreComposeTls: bounded per piece, no restart (the failover path)',
       },
     });
     expect(r).toEqual({ restored: false, reason: 'restore timed out' });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(0);
   });
 });
