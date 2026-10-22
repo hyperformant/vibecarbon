@@ -21,7 +21,7 @@ import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
-import { resolvePrimary } from './lib/cli/resolve-primary.js';
+import { primaryEntryServerType, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
@@ -324,8 +324,12 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   // so it seeded the picker's initialValue with a type the region no longer
   // sells. getRegionDefaults tracks the live catalog and the EU/US split.
   // composeType, never dbType: the k8s db is a 2 GB role, and a default-sized
-  // compose box (no persisted serverType) was deployed on composeType.
-  const currentType = envConfig.serverType || Provider.getRegionDefaults(region).composeType;
+  // compose box (no persisted serverType) was deployed on composeType. An env
+  // deployed before the top-level record keeps its size on the server entry.
+  const currentType =
+    envConfig.serverType ||
+    primaryEntryServerType(envConfig) ||
+    Provider.getRegionDefaults(region).composeType;
 
   // Display current configuration
   const pad = 18;

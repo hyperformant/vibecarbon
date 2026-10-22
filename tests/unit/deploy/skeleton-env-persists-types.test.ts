@@ -263,4 +263,34 @@ describe('the skeleton save records the sizes the deploy picked', () => {
     expect(rerun.region).toBe('hel1');
     expect(rerun.serverType).toBe('cpx22');
   });
+
+  it('an env deployed before the top-level serverType keeps its server record type on a redeploy', async () => {
+    // Before this record existed a compose env saved its size only on the
+    // server entry. A redeploy reads it from there, not the new default
+    // (cx23 in hel1 here), and the skeleton save records it.
+    await deployUntilFailure(gathered('compose', false, { serverType: 'cpx22' }));
+    store.current?.updateProjectConfig((config) => {
+      const prod = (config.environments as Record<string, Record<string, unknown>>).prod;
+      delete prod.serverType;
+      prod.servers = [{ id: 7, ip: '203.0.113.10', serverType: 'cpx32' }];
+    });
+
+    restore = seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1');
+    expect(HetznerProvider.getRegionDefaults('hel1').composeType).toBe('cx23');
+    vi.spyOn(console, 'clear').mockImplementation(() => {});
+    vi.spyOn(HetznerProvider, 'promptApiToken').mockResolvedValue('a'.repeat(64));
+    vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(undefined as never);
+    vi.spyOn(HetznerProvider, 'promptObjectStorageCredentials').mockResolvedValue({
+      accessKey: S3.accessKey,
+      secretKey: S3.secretKey,
+      source: 'prompt',
+    } as never);
+    vi.spyOn(S3CompatibleProvider.prototype, 'validateCredentials').mockResolvedValue({
+      valid: true,
+    });
+    const rerun = await gatherDeploymentConfig({ env: 'prod', yes: true });
+    expect(rerun.serverType).toBe('cpx32');
+    const env = await deployUntilFailure(rerun as never);
+    expect(env.serverType).toBe('cpx32');
+  });
 });

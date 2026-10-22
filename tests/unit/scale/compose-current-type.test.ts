@@ -80,4 +80,22 @@ describe('compose scale with no persisted serverType', () => {
     expect(notes.join('\n')).toMatch(/Server type\s+\S*cpx22/);
     expect(infos.join('\n')).toMatch(/Already using .*cpx22.*nothing to change/);
   });
+
+  it('an env deployed before the top-level serverType reads the server record, not the new default', async () => {
+    projectConfig = {
+      projectName: 'proj',
+      environments: {
+        prod: {
+          status: 'deployed',
+          provider: 'hetzner',
+          deployMode: 'compose',
+          region: 'nbg1',
+          servers: [{ id: 1, ip: '203.0.113.10', serverType: 'cpx32' }],
+        },
+      },
+    };
+    await run(['prod', '-y', '-type', 'cpx32']);
+    expect(notes.join('\n')).toMatch(/Server type\s+\S*cpx32/);
+    expect(infos.join('\n')).toMatch(/Already using .*cpx32.*nothing to change/);
+  });
 });

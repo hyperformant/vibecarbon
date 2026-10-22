@@ -11,6 +11,7 @@ import {
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { exitCancelled, exitDeclined } from '../cli/exit-guard.js';
 import { spinner } from '../cli/progress.js';
+import { primaryEntryServerType } from '../cli/resolve-primary.js';
 import { c, printBanner } from '../colors.js';
 import { loadProjectConfig } from '../config.js';
 import {
@@ -905,8 +906,13 @@ export async function gatherDeploymentConfig(args) {
   if (isComposeDeploy) {
     // Compose = the whole stack on one host: the compose role's default (the
     // cheapest orderable 4 GB+ type in the region, src/lib/sizing.js). Never
-    // the k8s db default, which is a 2 GB role.
-    serverType = args.serverType || envConfig.serverType || regionDefaults.composeType;
+    // the k8s db default, which is a 2 GB role. An env deployed before the
+    // top-level record keeps its size on the server entry.
+    serverType =
+      args.serverType ||
+      envConfig.serverType ||
+      primaryEntryServerType(envConfig) ||
+      regionDefaults.composeType;
     masterServerType = workerServerType = dbServerType = serverType;
   } else {
     // `args.serverType` acts as a blanket fallback for all three node roles
