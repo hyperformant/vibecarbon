@@ -1,6 +1,7 @@
 /**
- * Census: every call site that puts the app image on a node (k8s-ha registry
- * copy plan, Task 7, rulings R5 and R7).
+ * Census: every call site that puts the app image on a node, for every tier
+ * (k8s-ha registry copy plan, Task 7, rulings R5 and R7; cold-deploy-speed
+ * plan, Task 4, ruling R2).
  *
  * The pilot-light standby must never get its image from the operator: it
  * receives it from the primary's registry over wg0 (copyAppImageToStandby).
@@ -13,8 +14,15 @@
  * member (`d.buildAppImage(`, `deps.sideloadK3s(`), on any object. Each site is
  * keyed `file:enclosingFunction` (nearest named function).
  *
+ * The second describe holds the transport itself: no string in src/ spells a
+ * whole-image `docker save` / `docker load` / `ctr images import` outside the
+ * layer delta (layer-delta.js and its target half, layer-delta-remote.sh, which
+ * is not a .js file and so is never walked) and, until the cold-deploy-speed
+ * plan's Task 5 moves k8s onto the delta, k3s.js:sideloadK3s. A whole-image
+ * send is the 562 s cold compose transfer this census exists to keep gone.
+ *
  * The cold-deploy-speed plan's Task 5 deletes sideloadK3s and
- * pushImageToLocalRegistry (R7). Whichever plan lands second updates SITES.
+ * pushImageToLocalRegistry (R7) and rewrites the k3s rows here.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -25,6 +33,7 @@ import { describe, expect, it } from 'vitest';
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const SRC = join(REPO, 'src');
 const PRIMITIVES = new Set([
+  'deliverImage',
   'sideloadK3s',
   'pushImageToLocalRegistry',
   'pushImageOverSshTunnel',
@@ -52,8 +61,8 @@ const SITES: Record<string, { calls: string[]; why: string; gated?: boolean }> =
     why: 'thin delegate; reached only through the gated applyK3sManifests call',
   },
   'lib/deploy/effects/index.js:transferImage': {
-    calls: ['pushImageOverSshTunnel'],
-    why: 'compose tier, not k8s; single compose only (compose-ha builds natively on both servers); at most one push per deploy, the mutex is a guard',
+    calls: ['deliverImage'],
+    why: 'compose tier, not k8s; single compose only (compose-ha builds natively on both servers); one layer delta per deploy',
   },
   'lib/deploy/effects/k8s-ha.js:startStandbyImageCopy': {
     calls: ['copyAppImageToStandby'],
@@ -148,7 +157,7 @@ function allSites(): Site[] {
   return jsFiles(SRC).flatMap((abs) => findSites(relative(SRC, abs), readFileSync(abs, 'utf-8')));
 }
 
-describe('k8s image-delivery call-site census', () => {
+describe('image-delivery call-site census', () => {
   it('every call site is classified, and every classified site still exists', () => {
     const found = new Map<string, Set<string>>();
     for (const s of allSites()) {
@@ -190,6 +199,72 @@ describe('k8s image-delivery call-site census', () => {
   });
 });
 
+/** A whole-image save or load: the transport only the layer delta may spell. */
+const WHOLE_IMAGE = /docker save|docker load|ctr (-n k8s\.io )?images import/;
+
+/** Where a whole-image save or load may still be spelled, by file or by file:function. */
+const WHOLE_IMAGE_EXEMPT = new Set([
+  'lib/deploy/layer-delta.js',
+  // k8s until the cold-deploy-speed plan's Task 5 moves it onto deliverImage.
+  'lib/deploy/k8s/k3s.js:sideloadK3s',
+]);
+
+/** Named functions enclosing a node, nearest first ('<module>' when none). */
+function enclosingFnNames(ancestors: Node[]): string[] {
+  const names: string[] = [];
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    if (!isFn(ancestors[i])) continue;
+    const nm = nameOfFn(ancestors[i], ancestors[i - 1]);
+    if (nm) names.push(nm);
+  }
+  return names.length ? names : ['<module>'];
+}
+
+const stringValue = (n: Node): string | null => {
+  if (n.type === 'Literal' && typeof n.value === 'string') return n.value;
+  if (n.type === 'TemplateLiteral') {
+    return n.quasis.map((q: Node) => q.value.cooked ?? q.value.raw).join('');
+  }
+  return null;
+};
+
+/**
+ * String literals and templates that spell a whole-image save or load, keyed
+ * file:nearestFunction. A site inside an exempt function (at any depth, so
+ * sideloadK3s's inner runOnce counts as sideloadK3s) is skipped.
+ */
+function findWholeImageStrings(path: string, text: string): string[] {
+  const out: string[] = [];
+  walk(parseAst(text), (n, ancestors) => {
+    const value = stringValue(n);
+    if (value === null || !WHOLE_IMAGE.test(value)) return;
+    const names = enclosingFnNames(ancestors);
+    if (WHOLE_IMAGE_EXEMPT.has(path)) return;
+    if (names.some((nm) => WHOLE_IMAGE_EXEMPT.has(`${path}:${nm}`))) return;
+    out.push(`${path}:${names[0]}: ${value.slice(0, 80)}`);
+  });
+  return out;
+}
+
+describe('only the layer delta ships a whole image', () => {
+  it('no string in src/ spells docker save, docker load or ctr images import outside it', () => {
+    const found = jsFiles(SRC).flatMap((abs) =>
+      findWholeImageStrings(relative(SRC, abs), readFileSync(abs, 'utf-8')),
+    );
+    expect(found, 'deliver the image with deliverImage (layer-delta.js)').toEqual([]);
+  });
+
+  it('positive control: sideloadK3s still spells one, so the walk can see it', () => {
+    const k3s = readFileSync(join(SRC, 'lib/deploy/k8s/k3s.js'), 'utf-8');
+    const chains: string[][] = [];
+    walk(parseAst(k3s), (n, ancestors) => {
+      const v = stringValue(n);
+      if (v !== null && WHOLE_IMAGE.test(v)) chains.push(enclosingFnNames(ancestors));
+    });
+    expect(chains.some((c) => c.includes('sideloadK3s'))).toBe(true);
+  });
+});
+
 describe('image-delivery primitives are never imported under another name', () => {
   it('no file in src/ aliases one', () => {
     const aliased = jsFiles(SRC).flatMap((abs) =>
@@ -222,5 +297,28 @@ describe('planted fixtures', () => {
 
   it('does not count comments or strings', () => {
     expect(findSites('f.js', "// sideloadK3s(x)\nconst a = 'buildAppImage(';")).toEqual([]);
+  });
+
+  it('flags a whole-image save in a string or a template, never in a comment', () => {
+    const text =
+      '// docker save x | docker load\n' +
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
+      "function ship(t) { const a = 'docker load'; return `docker save ${t} | gzip`; }\n" +
+      "const b = 'k3s ctr -n k8s.io images import -';";
+    expect(findWholeImageStrings('f.js', text)).toEqual([
+      'f.js:ship: docker load',
+      'f.js:ship: docker save  | gzip',
+      'f.js:<module>: k3s ctr -n k8s.io images import -',
+    ]);
+  });
+
+  it('exempts the layer delta file and k3s.js:sideloadK3s only', () => {
+    const text =
+      "function sideloadK3s() { const runOnce = () => 'docker save x'; return runOnce(); }\n" +
+      "function other() { return 'docker load'; }";
+    expect(findWholeImageStrings('lib/deploy/layer-delta.js', text)).toEqual([]);
+    expect(findWholeImageStrings('lib/deploy/k8s/k3s.js', text)).toEqual([
+      'lib/deploy/k8s/k3s.js:other: docker load',
+    ]);
   });
 });

@@ -14,14 +14,13 @@
 
 import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
-import { progressLog, spinner } from '../../cli/progress.js';
-import { runCommandAsync } from '../../command.js';
+import { spinner } from '../../cli/progress.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { shEscape } from '../../shell.js';
 import { requireDnsSetup } from '../dns-result.js';
-import { sideloadCompose } from '../image.js';
 import { buildRemote } from '../remote-build.js';
 import { fingerprintSecret } from '../secret-fingerprint.js';
 import { generateSSHKeyPair } from '../utils.js';
@@ -123,7 +122,7 @@ async function provisionServer(ctx) {
 /**
  * Wait for cloud-init to finish (ufw + unattended-upgrades). For local /
  * direct build modes also wait for dockerd — those modes need the daemon up
- * before they can sideload / build; push mode pulls from GHCR after compose-up.
+ * before they can deliver / build; push mode pulls from GHCR after compose-up.
  * State-gated: a warm redeploy against an unchanged server skips it.
  *
  * The readiness budget is provider-owned (see
@@ -156,12 +155,13 @@ async function setupServer(ctx) {
 }
 
 /**
- * Get the app image onto the server. Local: await the parallel build kicked
- * off during provisioning, then push it to the server's per-server registry
- * over an SSH tunnel (falling back to a full sideload tarball over SSH on any
- * registry-path failure). Direct: build on the server via DOCKER_HOST=ssh://.
- * Gated by `when` to local/direct modes; push mode is a no-op (server pulls
- * from GHCR at compose-up).
+ * Get the app image onto the server. Local: start the server's pull of the
+ * runtime base the project's Dockerfile names, await the parallel build kicked
+ * off during provisioning, then send the image by layer delta (deliverImage,
+ * layer-delta.js): only the layers the server does not already hold, which on
+ * a cold server is the app's own layers on top of the pulled base. Direct:
+ * build on the server via DOCKER_HOST=ssh://. Gated by `when` to local/direct
+ * modes; push mode is a no-op (server pulls from GHCR at compose-up).
  */
 async function transferImage(ctx) {
   const {
@@ -180,55 +180,40 @@ async function transferImage(ctx) {
   // before `docker compose up` — compose references the app image, so it MUST be
   // present by reconcile time (LOAD-BEARING barrier; do not remove).
   if (isComposeLocal) {
+    const { readRuntimeBaseRef } = await import('../image.js');
+    const { sshRunAsync } = await import('../compose/index.js');
+    const { deliverImage } = await import('../layer-delta.js');
+    // The base pull runs on the server at datacenter speed, alongside the local
+    // build and the host-side save. It starts here, before the build is
+    // awaited, so a cold server holds the base by the time the delta asks what
+    // it has (ruling R3). The ref is the one the image was built FROM, and the
+    // delta looks up exactly that ref.
+    const baseRef = readRuntimeBaseRef(process.cwd());
+    const basePull = baseRef
+      ? perfAsync('deploy.image.basePull', () =>
+          sshRunAsync(serverIp, sshKeyPath, `docker pull ${shEscape(baseRef)}`, {
+            timeout: 600_000,
+          }),
+        )
+      : undefined;
+    // deliverImage owns the pull's failure (with its own hint); this only keeps
+    // a pull that fails while the build is still running from surfacing as an
+    // unhandled rejection before deliverImage attaches its await.
+    basePull?.catch(() => {});
     ctx.transferImagePromise = (async () => {
       // The local build was kicked off in the orchestrator in parallel with
       // provisioning; it is usually already done by now.
       await composeLocalBuildPromise;
-      await perfAsync('deploy.image.transfer', async () => {
-        // Registry-first: push only the changed layers to the server's own
-        // registry:2 over an SSH tunnel, then have the server pull+retag
-        // locally. The server-side retag is the seamlessness trick — it
-        // lands the image back under `localImageTag` (`<proj>-app:local`),
-        // so compose files, reconcile.sh's `pull --policy missing`, and the
-        // sideload fallback below all see the same tag regardless of which
-        // path actually delivered the image. Any failure in the registry
-        // path (registry create, push, or server pull/retag) falls back to
-        // the full-image sideload rather than failing the deploy.
-        const { COMPOSE_PUSH_SETTLE_DELAYS_MS, ensureComposeRegistry, REGISTRY_PREFIX } =
-          await import('../compose/registry.js');
-        const { pushImageOverSshTunnel } = await import('../registry-push.js');
-        const { sshRunAsync } = await import('../compose/index.js');
-        const registryTag = `${REGISTRY_PREFIX}${localImageTag}`;
-        try {
-          await ensureComposeRegistry(serverIp, sshKeyPath);
-          await runCommandAsync(['docker', 'tag', localImageTag, registryTag], { silent: true });
-          await pushImageOverSshTunnel({
-            tag: registryTag,
-            remotePrefix: REGISTRY_PREFIX,
-            serverIp,
-            sshKey: sshKeyPath,
-            khPath: knownHostsPathForKey(sshKeyPath),
-            // Compose's own ladder, NOT the shared helper's k8s default: this
-            // registry is filesystem-backed on a single server with one
-            // pusher (no S3 throttling, no parallel HA cluster), and the
-            // sideload fallback below bounds the cost of giving up early at
-            // one full-image transfer. See COMPOSE_PUSH_SETTLE_DELAYS_MS.
-            settleDelaysMs: COMPOSE_PUSH_SETTLE_DELAYS_MS,
-          });
-          await sshRunAsync(
-            serverIp,
-            sshKeyPath,
-            `docker pull ${registryTag} && docker tag ${registryTag} ${localImageTag}`,
-          );
-        } catch (e) {
-          progressLog(`[registry] falling back to sideload: ${e?.message ?? e}`);
-          await sideloadCompose({
-            tag: localImageTag,
-            sshTarget: `root@${serverIp}`,
-            sshKey: sshKeyPath,
-          });
-        }
-      });
+      await perfAsync('deploy.image.transfer', () =>
+        deliverImage({
+          tag: localImageTag,
+          sshTarget: `root@${serverIp}`,
+          sshKey: sshKeyPath,
+          runtime: 'docker',
+          basePull,
+          baseRef: baseRef ?? '',
+        }),
+      );
       // Completion is announced by the barrier spinner in startComposeStack, not
       // here — this promise resolves mid-flight (concurrent with the bundle
       // upload) so logging from inside it would land at an unpredictable spot.
@@ -318,11 +303,22 @@ async function ghcrLogin(ctx) {
   }
 }
 
-/** Tar the rendered bundle locally, stream over SSH, extract on the server. */
+/**
+ * Tar the rendered bundle locally, stream over SSH, extract on the server.
+ * Then start the stack's image pull (every service but `app`) in the
+ * background: it needs the compose files this step just wrote, and both
+ * registry logins ran before it. startComposeStack awaits ctx.stackPullPromise
+ * before reconcile, so the pulls overlap the image transfer, DNS and
+ * restore-tls instead of running inside `compose up`. A warm redeploy whose
+ * bundle is unchanged still starts it: the files are already there, and
+ * `--policy missing` makes it a no-op when the images are present.
+ */
 async function setupServerFiles(ctx) {
   const { state, serverIp, sshKeyPath, projectConfig, imageRef, domain, services, bundlePath } =
     ctx;
-  const { setupServerFiles: setupServerFilesRemote } = await import('../compose/index.js');
+  const { setupServerFiles: setupServerFilesRemote, pullComposeImages } = await import(
+    '../compose/index.js'
+  );
   const { digestDir } = await import('../digest.js');
   const bundleInputs = {
     serverIp,
@@ -349,6 +345,16 @@ async function setupServerFiles(ctx) {
     );
     state.completeStep('compose-setup-files', { serverIp });
   }
+  ctx.stackPullPromise = pullComposeImages(
+    serverIp,
+    sshKeyPath,
+    projectConfig.projectName,
+    services,
+  );
+  // Same contract as transferImagePromise: the real throw happens at the
+  // barrier in startComposeStack; this only keeps an early failure from being
+  // an unhandledRejection before that await attaches.
+  ctx.stackPullPromise.catch(() => {});
 }
 
 /**
@@ -470,12 +476,11 @@ async function startComposeStack(ctx) {
   // first — await the transfer here. LOAD-BEARING: never remove this barrier.
   if (ctx.transferImagePromise) {
     // The transfer/build was kicked off in transferImage and streamed
-    // concurrently with the bundle upload + DNS. For compose-local the transfer
-    // (registry push, or sideload — docker save | gzip | ssh | docker load, on
-    // fallback) runs SILENTLY, and a large image over a slow uplink can take
-    // minutes — so show a spinner at the barrier instead of sitting on a dead
-    // cursor. Direct deploy's buildRemote drives its own spinner, so don't
-    // double up there.
+    // concurrently with the bundle upload + DNS. For compose-local the layer
+    // delta runs SILENTLY, and a large delta (a custom Dockerfile with no
+    // pulled base) over a slow uplink can take minutes — so show a spinner at
+    // the barrier instead of sitting on a dead cursor. Direct deploy's
+    // buildRemote drives its own spinner, so don't double up there.
     const s = ctx.isComposeLocal ? spinner() : null;
     s?.start(`Transferring app image to ${serverIp}...`);
     try {
@@ -485,6 +490,12 @@ async function startComposeStack(ctx) {
       s?.stop('App image transfer failed', 1);
       throw err;
     }
+  }
+  // The stack's image pull, started in background by setupServerFiles once the
+  // compose files were on the server. Awaited here so a failed pull fails at
+  // its own step with its own stderr, never as `No such image` from `up`.
+  if (ctx.stackPullPromise) {
+    await perfAsync('deploy.compose.stackPull.await', () => ctx.stackPullPromise);
   }
   const { startComposeStack: startComposeStackRemote } = await import('../compose/index.js');
   await perfAsync('deploy.reconcile.run', () =>

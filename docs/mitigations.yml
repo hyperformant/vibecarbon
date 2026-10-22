@@ -237,14 +237,13 @@ classes:
       any residue is still our load is the same uplink experiment as
       ssh-transport-blips.
     proofDebtSpec: docs/attribution-ledger.md
-    frozenSites: 6
+    frozenSites: 5
     sites:
       - site: "src/lib/deploy/remote-build.js :: isTransientBuildError"
       - site: "src/lib/deploy/remote-build.js :: transient"
       - site: "src/lib/deploy/remote-build.js :: TRANSPORT_DROP_RETRY_DELAYS_MS"
       - site: "src/lib/deploy/registry-push.js :: isTransient@1"
       - site: "src/lib/deploy/registry-push.js :: DEFAULT_PUSH_SETTLE_DELAYS_MS"
-      - site: "src/lib/deploy/compose/registry-config.js :: COMPOSE_PUSH_SETTLE_DELAYS_MS"
 
   - class: hetzner-ip-release-lag
     attribution: external-asserted

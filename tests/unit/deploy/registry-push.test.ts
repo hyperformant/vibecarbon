@@ -358,28 +358,6 @@ describe('settle ladders are per-tier', () => {
     expect(callSites.length).toBeGreaterThan(0);
     for (const call of callSites) expect(call).not.toContain('settleDelaysMs');
   });
-
-  it('compose is strictly cheaper to abandon than k8s (it has a sideload fallback)', async () => {
-    const { DEFAULT_PUSH_SETTLE_DELAYS_MS } = await modulePromise;
-    const { COMPOSE_PUSH_SETTLE_DELAYS_MS } = await import(
-      '../../../src/lib/deploy/compose/registry-config.js'
-    );
-    const sum = (a: number[]) => a.reduce((t, n) => t + n, 0);
-    // Post-shrink the two tiers are the same order of magnitude; compose must
-    // simply never exceed k8s — it has a sideload fallback to reach for.
-    expect(sum(COMPOSE_PUSH_SETTLE_DELAYS_MS)).toBeLessThanOrEqual(
-      sum(DEFAULT_PUSH_SETTLE_DELAYS_MS),
-    );
-    // Head entry is the tunnel-bind settle, not a backoff — it applies before
-    // the FIRST push in both tiers, so the happy path stays equally fast.
-    expect(COMPOSE_PUSH_SETTLE_DELAYS_MS[0]).toBe(DEFAULT_PUSH_SETTLE_DELAYS_MS[0]);
-    // Monotonic, so a later attempt always waits longer than an earlier one.
-    for (let i = 1; i < COMPOSE_PUSH_SETTLE_DELAYS_MS.length; i++) {
-      expect(COMPOSE_PUSH_SETTLE_DELAYS_MS[i]).toBeGreaterThan(
-        COMPOSE_PUSH_SETTLE_DELAYS_MS[i - 1],
-      );
-    }
-  });
 });
 
 /**

@@ -2,21 +2,20 @@
  * Push a locally-built image to a loopback OCI registry via an SSH
  * local-port-forward.
  *
- * Shared by both deploy tiers: k8s (the registry pod hostPorted on the
- * master's private IP, `10.0.1.1:5000` on Hetzner) and compose (a standalone `registry:2` container
- * on the server, `127.0.0.1:5000`). Callers supply the registry's
+ * k8s only: the registry pod hostPorted on the master's private IP
+ * (`10.0.1.1:5000` on Hetzner). Compose delivers its image by layer delta
+ * (layer-delta.js) and has no registry. Callers supply the registry's
  * `remotePrefix` (the tag prefix the image was BUILT with, e.g.
- * `10.0.1.1:5000/` or `127.0.0.1:5000/`) and the `serverIp` to tunnel to;
- * everything else — settle-on-exit tunnel lifecycle, bind-race port walk,
- * idempotent teardown, BatchMode, transient/permanent push classification —
- * is identical between tiers.
+ * `10.0.1.1:5000/`) and the `serverIp` to tunnel to; this owns the
+ * settle-on-exit tunnel lifecycle, bind-race port walk, idempotent teardown,
+ * BatchMode, and transient/permanent push classification.
  *
  * Why an SSH tunnel: the registry listens on a port that isn't exposed to
  * the public internet (it binds a private or loopback address only). Without
  * DNS/L4 pointing the operator at `server:5000`, we forward locally, and the
  * tunnel's far end is the registry's own bind address, the host of
- * `remotePrefix` (`<masterPrivateIp>:5000` on k8s, where the registry
- * hostPort's hostIP binds; `127.0.0.1:5000` on compose):
+ * `remotePrefix` (`<masterPrivateIp>:5000`, where the registry hostPort's
+ * hostIP binds):
  *
  *     ssh -L 5000:<registry host>:5000 -N -f <server>
  *     docker tag <remotePrefix><repo>:<tag> localhost:5000/<repo>:<tag>
@@ -37,13 +36,12 @@
  * registry).
  *
  * The `remotePrefix` MUST match the prefix the image was built with
- * (`buildAppImage` for k8s, the compose build path's own tagPrefix) — keep
- * builder and pusher in sync.
+ * (`buildAppImage`) — keep builder and pusher in sync.
  *
  * Sideload remains the primary distribution path for static workers/servers;
  * the registry push is additive — it lets late-joining consumers (CA-spawned
- * k8s workers that don't exist at sideload time; a compose warm-redeploy
- * pulling only changed layers) fetch the same tag afterward.
+ * k8s workers that don't exist at sideload time) fetch the same tag
+ * afterward.
  *
  * Idempotency: a stale forward from a prior crashed run blocks `-L 5000`
  * binding. We tear down any existing tunnel first (best-effort), open a
@@ -58,8 +56,8 @@
  * Concurrency: calls are SERIALIZED process-wide by a mutex, because two
  * simultaneous uploads over one operator uplink stall each other's blobs into
  * `unknown blob` failures. After the k8s-ha registry copy one deploy makes at most ONE tunnel
- * push (single compose and the k8s primary push; the k8s-ha standby gets its
- * image by copy over wg0, and compose-ha builds natively on both servers), so
+ * push (the k8s primary push; the k8s-ha standby gets its image by copy over
+ * wg0), so
  * the mutex is a guard against a second caller, not a hot path. Separate processes are covered by uplink-lock.js. See the
  * "Uplink serialization" block below for the evidence and the alternatives
  * that were rejected.
@@ -214,12 +212,6 @@ function acquireTunnelPushLock(label) {
  * account at once) is now removed by the push mutex, but cross-process
  * siblings — a parallel e2e matrix, a second operator — still share the
  * account, so the tail stays.
- *
- * Compose's registry is a filesystem-backed container on a single server with
- * one pusher, and compose has an automatic sideload fallback — neither
- * condition holds — so it passes its own much shorter ladder
- * (`COMPOSE_PUSH_SETTLE_DELAYS_MS` in `compose/registry-config.js`). Keep the
- * two separate: shortening this one would regress k8s-HA.
  */
 // Shrunk 2026-08-16 (band-aid removal) on the premise the 60s/120s tail
 // absorbed OUR parallel-push load, fixed by the push mutex. RE-GROWN
@@ -245,12 +237,11 @@ export const DEFAULT_PUSH_SETTLE_DELAYS_MS = [1_000, 10_000, 20_000, 60_000, 120
  *   localTunnelPort?: number,
  * }} args
  *   `remotePrefix` is the tag prefix the image was built with (e.g.
- *   `'10.0.1.1:5000/'` for k8s, `'127.0.0.1:5000/'` for compose) — `tag`
+ *   `'10.0.1.1:5000/'`) — `tag`
  *   MUST start with it. `settleDelaysMs` controls the per-attempt sleep
  *   between opening the tunnel and dialing it. Length of the array is the
  *   attempt count. Omitting it takes `DEFAULT_PUSH_SETTLE_DELAYS_MS`, the
- *   k8s budget (see comment in the loop); the compose tier passes its own
- *   shorter `COMPOSE_PUSH_SETTLE_DELAYS_MS`. Tests pass `[0, 0, 0]` to keep
+ *   k8s budget (see comment in the loop). Tests pass `[0, 0, 0]` to keep
  *   the suite fast.
  * @param {{ spawn?: typeof spawn }} [deps] - injection seam for tests. Mocking
  *   `node:child_process` itself is flaky under the parallel unit run (sibling
@@ -436,7 +427,7 @@ export async function pushImageOverSshTunnel(args, deps = {}) {
  * The registry's bind address on the server, `<host>:<port>`, read off the
  * build-time `remotePrefix` (`'10.0.1.1:5000/'` → `'10.0.1.1:5000'`). It is
  * the SSH tunnel's far end: the registry listens there and nowhere else (the
- * k8s hostPort's hostIP, compose's `-p 127.0.0.1:5000:5000`), and it is also
+ * k8s hostPort's hostIP), and it is also
  * the address every node pulls the same tag from. Null when the prefix is
  * not a `host:port/` pair.
  * @param {string} remotePrefix
@@ -679,13 +670,6 @@ async function runTunnelPush(
   // while the 30s/60s/120s tail rides out genuine restarts + S3 throttling.
   // Note docker push is content-addressable: layers whose S3 write already
   // succeeded are skipped on retry, so later attempts get progressively cheaper.
-  //
-  // Modes 2 and 3 are BOTH k8s-shaped, which is why the default is the k8s
-  // budget and the compose tier passes its own (COMPOSE_PUSH_SETTLE_DELAYS_MS):
-  // a filesystem-backed registry container restarts in ~1-2s rather than
-  // ~10-20s, there is no object-storage account to throttle and no sibling
-  // cluster pushing into it, and a compose push that gives up falls back to
-  // sideload instead of failing the deploy.
   const settleDelays = settleDelaysMs ?? DEFAULT_PUSH_SETTLE_DELAYS_MS;
   const maxAttempts = settleDelays.length;
   const attemptErrors = [];

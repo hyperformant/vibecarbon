@@ -21,7 +21,7 @@ const OWNED_SSH_FILES = [
   'src/lib/host-keys.js',
   'src/lib/ssh.js',
   'src/lib/deploy/compose/index.js',
-  'src/lib/deploy/image.js',
+  'src/lib/deploy/layer-delta.js',
   'src/lib/deploy/remote-build.js',
   'src/lib/deploy/k8s/k3s.js',
   'src/lib/deploy/utils.js',

@@ -9,7 +9,7 @@
 #
 #   socat      SOCAT_IMAGE              src/lib/deploy/compose/ha.js
 #                                        (and carbon/k8s/base/repl-gateway/repl-gateway.yaml)
-#   registry   REGISTRY_IMAGE           src/lib/deploy/compose/registry-config.js
+#   registry   REGISTRY_IMAGE           src/lib/images.js
 #   busybox    DIAG_BUSYBOX_IMAGE       src/lib/images.js
 #   netshoot   DIAG_NETSHOOT_IMAGE      src/lib/images.js
 #   csi-init   CSI_UPSTREAM_IMAGE_PINS  src/lib/images.js (DO automount-udev-deleter)

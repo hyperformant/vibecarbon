@@ -1,12 +1,17 @@
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildLocalImage,
   generateLocalImageTag,
   inspectGitState,
-  sideloadCompose,
+  readRuntimeBaseRef,
 } from '../../../src/lib/deploy/image.js';
 import { PLATFORM_BUILD_FLAG } from '../../../src/lib/deploy/platform.js';
+import { NODE_RUNTIME_IMAGE } from '../../../src/lib/images.js';
 
 vi.mock('node:child_process', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -16,7 +21,7 @@ vi.mock('node:child_process', async (orig) => {
   };
 });
 
-// buildLocalImage/sideloadCompose shell out via runCommandAsync (async seam)
+// buildLocalImage shells out via runCommandAsync (async seam)
 // while inspectGitState stays on execFileSync (sync policy) — mock both.
 vi.mock('../../../src/lib/command.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -266,73 +271,34 @@ describe('buildLocalImage', () => {
   });
 });
 
-describe('sideloadCompose', () => {
+describe('readRuntimeBaseRef', () => {
+  let dir: string;
   beforeEach(() => {
-    vi.mocked(runCommandAsync).mockReset();
-    vi.mocked(runCommandAsync).mockResolvedValue('');
+    dir = mkdtempSync(join(tmpdir(), 'vc-base-ref-'));
   });
   afterEach(() => {
-    vi.mocked(runCommandAsync).mockReset();
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  it('shells out to a gzipped docker save | ssh ... gunzip | docker load pipeline with pipefail', async () => {
-    await sideloadCompose({
-      tag: 'vibecarbon-local/myproj:abc-123',
-      sshTarget: 'root@138.199.196.128',
-    });
-
-    const call = vi.mocked(runCommandAsync).mock.calls[0];
-    expect(call[0][0]).toBe('bash');
-    expect(call[0][1]).toBe('-c');
-    const cmd = call[0][2] as string;
-    // Host-key pinned (H-1): accept-new, NOT /dev/null + no. Without an
-    // sshKey there's no per-env known_hosts to reference. The transport opts
-    // come from SSH_CONNECTION_OPTS (raw-ssh census, run 31961619204) — not
-    // asserted as one exact string because ControlPath embeds the runner's
-    // home dir.
-    expect(
-      cmd.startsWith(
-        'set -o pipefail && docker save vibecarbon-local/myproj:abc-123 | gzip -1 | ssh ',
-      ),
-    ).toBe(true);
-    expect(cmd.endsWith("root@138.199.196.128 'gunzip | docker load'")).toBe(true);
-    expect(cmd).toContain('StrictHostKeyChecking=accept-new');
-    expect(cmd).toContain('BatchMode=yes');
-    expect(cmd).toContain('ServerAliveInterval=15');
-    expect(cmd).toContain('ControlMaster=auto');
-    // OpenSSH takes the FIRST value obtained per option: the long-haul dial
-    // bound (30) must precede the shared opts' ConnectTimeout=10 to win.
-    expect(cmd.indexOf('ConnectTimeout=30')).toBeGreaterThan(-1);
-    expect(cmd.indexOf('ConnectTimeout=30')).toBeLessThan(cmd.indexOf('ConnectTimeout=10'));
-    // Captured (not inherited) stdio, so runCommandAsync must reject rather
-    // than resolve `false` on failure.
-    expect(call[1]).toMatchObject({ silent: true });
+  it('reads the ARG RUNTIME_IMAGE default the image builds FROM', () => {
+    writeFileSync(
+      join(dir, 'Dockerfile'),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: Dockerfile ARG expansion
+      'FROM node:24 AS build\nARG RUNTIME_IMAGE=ghcr.io/o/node-runtime:24-r1@sha256:abc\nFROM ${RUNTIME_IMAGE}\n',
+    );
+    expect(readRuntimeBaseRef(dir)).toBe('ghcr.io/o/node-runtime:24-r1@sha256:abc');
   });
 
-  it('passes a custom ssh identity file and per-env known_hosts pin when a key is provided', async () => {
-    await sideloadCompose({
-      tag: 'vibecarbon-local/myproj:abc-123',
-      sshTarget: 'root@138.199.196.128',
-      sshKey: '/home/op/.vibecarbon/deploy_key_prod',
-    });
-
-    const call = vi.mocked(runCommandAsync).mock.calls[0];
-    const cmd = call[0][2] as string;
-    // key path is shEscaped; host key is pinned to the derived per-env file.
-    expect(cmd).toContain("-i '/home/op/.vibecarbon/deploy_key_prod'");
-    expect(cmd).toContain('UserKnownHostsFile=/home/op/.vibecarbon/known_hosts_prod');
-    expect(cmd).toContain('GlobalKnownHostsFile=/dev/null');
-    expect(cmd).toContain('StrictHostKeyChecking=accept-new');
-    expect(cmd).not.toContain('UserKnownHostsFile=/dev/null');
-    expect(cmd).not.toContain('StrictHostKeyChecking=no');
+  it('is null for a Dockerfile without the ARG, or with no Dockerfile at all', () => {
+    writeFileSync(join(dir, 'Dockerfile'), 'FROM node:24-alpine\n# ARG RUNTIME_IMAGE=x\n');
+    expect(readRuntimeBaseRef(dir)).toBeNull();
+    rmSync(join(dir, 'Dockerfile'));
+    expect(readRuntimeBaseRef(dir)).toBeNull();
   });
 
-  it('rethrows ssh failures', async () => {
-    const err = new Error('ssh: connect to host: Connection refused');
-    vi.mocked(runCommandAsync).mockRejectedValueOnce(err);
-
-    await expect(sideloadCompose({ tag: 'tag', sshTarget: 'root@x' })).rejects.toThrow(
-      /Connection refused/,
+  it("matches the shipped template's pin", () => {
+    expect(readRuntimeBaseRef(fileURLToPath(new URL('../../../carbon', import.meta.url)))).toBe(
+      NODE_RUNTIME_IMAGE,
     );
   });
 });

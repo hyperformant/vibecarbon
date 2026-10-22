@@ -67,7 +67,9 @@ describe('raw-string ssh invocations carry the shared transport opts', () => {
         ).toBe(true);
       });
     }
-    // bundle upload, image sideload, remote-build wrapper at minimum.
-    expect(sites).toBeGreaterThanOrEqual(3);
+    // bundle upload and remote-build wrapper at minimum. The compose image
+    // sideload is gone: the layer delta (layer-delta.js) spawns ssh with an
+    // argv built from SSH_CONNECTION_OPTS, which no raw-string line carries.
+    expect(sites).toBeGreaterThanOrEqual(2);
   });
 });

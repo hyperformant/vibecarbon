@@ -31,7 +31,6 @@ import { dirname, join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { SOCAT_IMAGE } from '../../../src/lib/deploy/compose/ha.js';
-import { REGISTRY_IMAGE } from '../../../src/lib/deploy/compose/registry-config.js';
 import { BINFMT_IMAGE } from '../../../src/lib/deploy/platform.js';
 import {
   CSI_SIDECAR_MIRRORS,
@@ -46,6 +45,7 @@ import {
   MIRRORED_K8S_IMAGES,
   NODE_RUNTIME_IMAGE,
   pauseImageRef,
+  REGISTRY_IMAGE,
 } from '../../../src/lib/images.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
 
@@ -677,7 +677,7 @@ describe('Dependabot can bump every pinned location', () => {
     expect(k8s).toEqual([SOCAT_IMAGE]);
   });
 
-  it('the k8s local registry runs the same registry ref as the compose registry', () => {
+  it('the k8s local registry runs REGISTRY_IMAGE', () => {
     const k8s = yamlImageSites('carbon/k8s/base/registry/local-registry.yaml').map((s) => s.ref);
     expect(new Set(k8s)).toEqual(new Set([REGISTRY_IMAGE]));
   });

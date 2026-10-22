@@ -1,25 +1,32 @@
 /**
  * Concurrency/barrier contracts for the compose deploy effects.
  *
- * F2 (compose single): `transferImage` must kick the image transfer off WITHOUT
+ * F2 (compose single): `transferImage` must kick the image delivery off WITHOUT
  * awaiting (so it overlaps the logins + bundle upload), and `startComposeStack`
- * must AWAIT that transfer before `docker compose up` (load-bearing barrier —
- * compose references the app image). The transfer is registry-first (ensure →
- * operator-side tag → SSH-tunnel push → server pull+retag) with a sideload
- * fallback on any failure in that chain — see compose-registry-transfer.test.ts
- * for the success/fallback outcome coverage; this file covers only the overlap
- * timing, for both the registry path and a push-failure-triggered fallback.
+ * must AWAIT it before `docker compose up` (load-bearing barrier: compose
+ * references the app image). The delivery is a layer delta (deliverImage,
+ * layer-delta.js): the server pulls the runtime base the project's Dockerfile
+ * names (`ARG RUNTIME_IMAGE=`) at datacenter speed while the host saves the
+ * image, and the delta carries only the app's own layers. No registry, no
+ * whole-image fallback.
+ *
+ * Stack pulls (cold-deploy-speed plan, Task 4): `setupServerFiles` starts the
+ * stack's image pull (every service but `app`) in the background once the
+ * bundle's compose files are on the server, and `startComposeStack` awaits it
+ * before reconcile, so the pulls overlap the image transfer, DNS and restore-tls
+ * instead of running inside `compose up`.
  *
  * F1 (compose-ha): `haRemoteBuild` must start the two-node build fan WITHOUT
  * awaiting (so it overlaps setupServerFiles → mergeWalgRole → pullImages), and
  * `haStartComposeStack` must AWAIT the fan before `docker compose up`.
  *
  * We drive real effects with controllable deferred promises for the underlying
- * side-effecting calls (pushImageOverSshTunnel / sideloadCompose / buildRemote /
- * startComposeStack) and assert the ordering: the transfer/build starts, the
- * effect returns while it is still in flight, and reconcile only begins after
- * the barrier releases.
+ * side-effecting calls (deliverImage / the base pull / pullComposeImages /
+ * buildRemote / startComposeStack) and assert the ordering.
  */
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 type Deferred = {
@@ -31,9 +38,13 @@ type Deferred = {
 const H = vi.hoisted(() => ({
   state: {
     order: [] as string[],
-    registryPush: null as Deferred | null,
-    sideload: null as Deferred | null,
+    deliver: null as Deferred | null,
+    basePull: null as Deferred | null,
+    stackPull: null as Deferred | null,
     build: null as Deferred | null,
+    baseRef: 'ghcr.io/o/node-runtime:1' as string | null,
+    sshCommands: [] as string[],
+    deliverArgs: [] as Record<string, unknown>[],
   },
 }));
 
@@ -47,39 +58,25 @@ function deferred(): Deferred {
   return { promise, resolve, reject };
 }
 
-// The registry ensure/tag/server-retag steps are fast preconditions, not the
-// thing under test here — they resolve immediately. The push is the in-flight
-// long pole, so it alone is a controllable deferred (mirrors sideload below).
-// Every named export transferImage destructures must appear here: the
-// destructuring sits OUTSIDE the try/catch, so a missing mock export throws
-// before the sideload fallback can catch it and the whole promise rejects.
-vi.mock('../../../src/lib/deploy/compose/registry.js', () => ({
-  ensureComposeRegistry: vi.fn(() => Promise.resolve()),
-  REGISTRY_PREFIX: '127.0.0.1:5000/',
-  COMPOSE_PUSH_SETTLE_DELAYS_MS: [0, 0, 0],
-}));
-
-vi.mock('../../../src/lib/deploy/registry-push.js', () => ({
-  pushImageOverSshTunnel: vi.fn(() => {
-    H.state.order.push('push-start');
-    return H.state.registryPush?.promise;
+vi.mock('../../../src/lib/deploy/layer-delta.js', () => ({
+  deliverImage: vi.fn((args: Record<string, unknown>) => {
+    H.state.order.push('deliver-start');
+    H.state.deliverArgs.push(args);
+    return H.state.deliver?.promise;
   }),
 }));
 
-vi.mock('../../../src/lib/command.js', async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, runCommandAsync: vi.fn(() => Promise.resolve('')) };
-});
+// Still on disk for k8s until the plan's Task 5; compose must never reach it.
+vi.mock('../../../src/lib/deploy/registry-push.js', () => ({
+  pushImageOverSshTunnel: vi.fn(() => {
+    H.state.order.push('push-start');
+    return Promise.resolve();
+  }),
+}));
 
 vi.mock('../../../src/lib/deploy/image.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return {
-    ...actual,
-    sideloadCompose: vi.fn(() => {
-      H.state.order.push('sideload-start');
-      return H.state.sideload?.promise;
-    }),
-  };
+  return { ...actual, readRuntimeBaseRef: vi.fn(() => H.state.baseRef) };
 });
 
 vi.mock('../../../src/lib/deploy/remote-build.js', async (orig) => {
@@ -98,30 +95,46 @@ vi.mock('../../../src/lib/deploy/compose/build-args.js', async (orig) => {
   return { ...actual, collectComposeBuildArgs: vi.fn(() => ({})) };
 });
 
+vi.mock('../../../src/lib/deploy/digest.js', () => ({ digestDir: vi.fn(() => 'digest') }));
+
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    // Server-side pull+retag after a successful push — not the long pole
-    // here, so it resolves immediately (fast precondition, like the registry
-    // ensure/tag steps above).
-    sshRunAsync: vi.fn(() => Promise.resolve('')),
+    sshRunAsync: vi.fn((_ip: string, _key: string, cmd: string) => {
+      H.state.sshCommands.push(cmd);
+      if (cmd.startsWith('docker pull ')) {
+        H.state.order.push('basePull:start');
+        return H.state.basePull?.promise;
+      }
+      return Promise.resolve('');
+    }),
+    setupServerFiles: vi.fn(async () => {
+      H.state.order.push('setup-server-files:bundle');
+    }),
+    pullComposeImages: vi.fn(() => {
+      H.state.order.push('stackPull:start');
+      return H.state.stackPull?.promise.then(() => {
+        H.state.order.push('stackPull:awaited');
+      });
+    }),
     startComposeStack: vi.fn(async () => {
-      H.state.order.push('reconcile-start');
+      H.state.order.push('reconcile.run');
     }),
   };
 });
 
 const { EFFECTS } = await import('../../../src/lib/deploy/effects/index.js');
 const { COMPOSE_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/compose-ha.js');
+const { planDeploy } = await import('../../../src/lib/deploy/plan/deploy-plan.js');
+const { runPlan } = await import('../../../src/lib/deploy/plan/runner.js');
+const registryPush = await import('../../../src/lib/deploy/registry-push.js');
 
 // transferImage's compose-local branch dynamically imports these per the
 // file's convention (never a top-level import of the compose stack). Pre-warm
 // them here so the FIRST call inside a test doesn't pay the module loader's
-// first-resolution cost — the in-flight assertions below rely on a fixed
-// microtask-tick budget, which a cold `import()` can blow past.
-await import('../../../src/lib/deploy/compose/registry.js');
-await import('../../../src/lib/deploy/registry-push.js');
+// first-resolution cost.
+await import('../../../src/lib/deploy/layer-delta.js');
 await import('../../../src/lib/deploy/compose/index.js');
 
 const tick = async () => {
@@ -132,9 +145,20 @@ const tick = async () => {
 
 beforeEach(() => {
   H.state.order = [];
-  H.state.registryPush = deferred();
-  H.state.sideload = deferred();
+  H.state.sshCommands = [];
+  H.state.deliverArgs = [];
+  H.state.baseRef = 'ghcr.io/o/node-runtime:1';
+  H.state.deliver = deferred();
+  H.state.basePull = deferred();
+  H.state.stackPull = deferred();
   H.state.build = deferred();
+  vi.mocked(registryPush.pushImageOverSshTunnel).mockClear();
+});
+
+const fakeState = () => ({
+  shouldSkip: () => false,
+  startStep: () => {},
+  completeStep: () => {},
 });
 
 function composeSingleCtx(): Record<string, unknown> {
@@ -148,60 +172,146 @@ function composeSingleCtx(): Record<string, unknown> {
     projectConfig: { projectName: 'p' },
     services: {},
     domain: null,
+    state: fakeState(),
+    bundlePath: '/bundle',
   };
 }
 
 describe('F2 — compose single: transferImage is non-blocking, startComposeStack is the barrier', () => {
-  it('kicks the registry push off without awaiting, then reconcile waits for it', async () => {
+  it('kicks the layer delta off without awaiting, then reconcile waits for it', async () => {
     const ctx = composeSingleCtx();
 
-    // transferImage returns while the registry push is still in flight. The
-    // push sits behind a chain of dynamic imports (the file's convention for
-    // the compose stack), so wait for it rather than assuming a fixed
-    // microtask-tick budget spans that chain — the negative assertions below
-    // stay valid regardless of how long that takes, since nothing downstream
-    // can complete while registryPush's deferred is still unresolved.
     await EFFECTS.transferImage(ctx);
     expect(ctx.transferImagePromise).toBeDefined();
-    await vi.waitFor(() => expect(H.state.order).toContain('push-start'));
-    expect(H.state.order).not.toContain('sideload-start'); // registry path, no fallback
-    expect(H.state.order).not.toContain('reconcile-start');
+    await vi.waitFor(() => expect(H.state.order).toContain('deliver-start'));
+    expect(H.state.order).not.toContain('reconcile.run');
 
-    // The barrier blocks reconcile until the transfer resolves.
     const barrier = EFFECTS.startComposeStack(ctx);
     await tick();
-    expect(H.state.order).not.toContain('reconcile-start');
+    expect(H.state.order).not.toContain('reconcile.run');
 
-    H.state.registryPush?.resolve();
+    H.state.deliver?.resolve({ bytes: 1, layersSent: 1, layersReused: 9 });
     await barrier;
-    expect(H.state.order).toContain('reconcile-start');
-    expect(H.state.order.indexOf('reconcile-start')).toBeGreaterThan(
-      H.state.order.indexOf('push-start'),
+    expect(H.state.order.indexOf('reconcile.run')).toBeGreaterThan(
+      H.state.order.indexOf('deliver-start'),
     );
   });
 
-  it('fallback ordering: a rejected push falls back to sideload, and the barrier still waits for it', async () => {
+  it('starts docker pull <baseRef> on the server and passes that promise as basePull', async () => {
     const ctx = composeSingleCtx();
-
     await EFFECTS.transferImage(ctx);
-    await vi.waitFor(() => expect(H.state.order).toContain('push-start'));
+    await vi.waitFor(() => expect(H.state.order).toContain('deliver-start'));
 
-    // The barrier is already waiting when the push fails.
-    const barrier = EFFECTS.startComposeStack(ctx);
-    await tick();
-    expect(H.state.order).not.toContain('reconcile-start');
-
-    H.state.registryPush?.reject(new Error('push failed'));
-    await tick();
-    expect(H.state.order).toContain('sideload-start');
-    expect(H.state.order).not.toContain('reconcile-start'); // barrier still waiting, now on sideload
-
-    H.state.sideload?.resolve();
-    await barrier;
-    expect(H.state.order).toContain('reconcile-start');
-    expect(H.state.order.indexOf('reconcile-start')).toBeGreaterThan(
-      H.state.order.indexOf('sideload-start'),
+    // The pull starts before the delivery (it overlaps the host-side save).
+    expect(H.state.order.indexOf('basePull:start')).toBeLessThan(
+      H.state.order.indexOf('deliver-start'),
     );
+    expect(H.state.sshCommands).toContain("docker pull 'ghcr.io/o/node-runtime:1'");
+    const [args] = H.state.deliverArgs;
+    expect(args).toMatchObject({
+      tag: 'p-app:local',
+      sshTarget: 'root@1.1.1.1',
+      sshKey: '/k',
+      runtime: 'docker',
+      baseRef: 'ghcr.io/o/node-runtime:1',
+    });
+    // The very promise the pull returned, so deliverImage awaits the real pull.
+    H.state.basePull?.resolve('pulled');
+    await expect(args.basePull).resolves.toBe('pulled');
+    expect(registryPush.pushImageOverSshTunnel).not.toHaveBeenCalled();
+    expect(H.state.order).not.toContain('push-start');
+  });
+
+  it('a Dockerfile with no RUNTIME_IMAGE ARG means no base pull: the delta sends every layer', async () => {
+    H.state.baseRef = null;
+    const ctx = composeSingleCtx();
+    await EFFECTS.transferImage(ctx);
+    await vi.waitFor(() => expect(H.state.order).toContain('deliver-start'));
+    expect(H.state.sshCommands.some((c) => c.startsWith('docker pull'))).toBe(false);
+    const [args] = H.state.deliverArgs;
+    expect(args.basePull).toBeUndefined();
+    expect(args.baseRef).toBe('');
+  });
+
+  it('a failed base pull with the build still running is no unhandled rejection', async () => {
+    const build = deferred();
+    const ctx = { ...composeSingleCtx(), composeLocalBuildPromise: build.promise };
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      await EFFECTS.transferImage(ctx);
+      H.state.basePull?.reject(new Error('denied'));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      build.resolve();
+    }
+  });
+});
+
+describe('stack pulls overlap the transfer (cold-deploy-speed Task 4)', () => {
+  /** The compose plan's own order, cut to the three effects under test. */
+  async function runComposePlanWithFakes(): Promise<string[]> {
+    const wanted = new Set(['transferImage', 'setupServerFiles', 'startComposeStack']);
+    const steps = planDeploy('compose', {}).filter((s: { effect: string }) => wanted.has(s.effect));
+    const ctx = composeSingleCtx();
+    const run = runPlan(steps, ctx, EFFECTS);
+    await vi.waitFor(() => expect(H.state.order).toContain('stackPull:start'));
+    H.state.deliver?.resolve({ bytes: 1, layersSent: 1, layersReused: 0 });
+    await tick();
+    // The transfer is done, but reconcile still waits on the stack pull.
+    expect(H.state.order).not.toContain('reconcile.run');
+    H.state.stackPull?.resolve();
+    await run;
+    return H.state.order;
+  }
+
+  it('starts after the bundle lands and is awaited before reconcile', async () => {
+    const order = await runComposePlanWithFakes();
+    expect(order.indexOf('stackPull:start')).toBeGreaterThan(
+      order.indexOf('setup-server-files:bundle'),
+    );
+    expect(order.indexOf('stackPull:awaited')).toBeLessThan(order.indexOf('reconcile.run'));
+  });
+
+  it('setupServerFiles returns while the pull is still running', async () => {
+    const ctx = composeSingleCtx();
+    await EFFECTS.setupServerFiles(ctx);
+    expect(H.state.order).toEqual(['setup-server-files:bundle', 'stackPull:start']);
+    expect(H.state.order).not.toContain('stackPull:awaited');
+    expect(ctx.stackPullPromise).toBeDefined();
+    H.state.stackPull?.resolve();
+  });
+
+  it('a failed stack pull fails the deploy at the barrier, before reconcile', async () => {
+    const ctx = composeSingleCtx();
+    await EFFECTS.setupServerFiles(ctx);
+    H.state.stackPull?.reject(new Error('toomanyrequests'));
+    await expect(EFFECTS.startComposeStack(ctx)).rejects.toThrow(/toomanyrequests/);
+    expect(H.state.order).not.toContain('reconcile.run');
+  });
+});
+
+describe('cloud-init never pre-pulls images (re-pins 7babb8e)', () => {
+  const CLOUD_INIT = fileURLToPath(new URL('../../../carbon/cloud-init', import.meta.url));
+  const files = (dir: string): string[] =>
+    readdirSync(dir).flatMap((e) => {
+      const p = join(dir, e);
+      return statSync(p).isDirectory() ? files(p) : [p];
+    });
+
+  it('no file under carbon/cloud-init/ runs docker pull (shell or YAML-list form) outside a comment', () => {
+    // Unauthenticated pulls from fresh datacenter IPs hit Docker Hub's per-IP
+    // limit and hold the cloud-init marker; stack pulls run after the logins.
+    const found = files(CLOUD_INIT).flatMap((f) =>
+      readFileSync(f, 'utf-8')
+        .split('\n')
+        .filter((l) => !/^\s*#/.test(l) && /\bdocker\b[\s,'"]+pull\b/.test(l))
+        .map((l) => `${f}: ${l.trim()}`),
+    );
+    expect(files(CLOUD_INIT).length, 'positive control: the walk read files').toBeGreaterThan(0);
+    expect(found).toEqual([]);
   });
 });
 
@@ -223,16 +333,16 @@ describe('F1 — compose-ha: haRemoteBuild is non-blocking, haStartComposeStack 
     // Both nodes' builds kicked off; the effect returned while they run.
     expect(H.state.order.filter((x) => x === 'build-start')).toHaveLength(2);
     expect(ctx.remoteBuildPromise).toBeDefined();
-    expect(H.state.order).not.toContain('reconcile-start');
+    expect(H.state.order).not.toContain('reconcile.run');
 
     const barrier = COMPOSE_HA_EFFECTS.haStartComposeStack(ctx);
     await tick();
-    expect(H.state.order).not.toContain('reconcile-start');
+    expect(H.state.order).not.toContain('reconcile.run');
 
     H.state.build?.resolve(true);
     await barrier;
-    expect(H.state.order).toContain('reconcile-start');
-    expect(H.state.order.indexOf('reconcile-start')).toBeGreaterThan(
+    expect(H.state.order).toContain('reconcile.run');
+    expect(H.state.order.indexOf('reconcile.run')).toBeGreaterThan(
       H.state.order.indexOf('build-start'),
     );
   });

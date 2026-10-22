@@ -30,7 +30,7 @@ export const setupServerStep = () => defineStep({ name: 'setup-server', effect: 
 export const checkDbLedgerStep = () =>
   defineStep({ name: 'check-db-ledger', effect: 'checkDbLedger' });
 
-/** Ship the app image to the server (local sideload or direct remote build). */
+/** Ship the app image to the server (local layer delta or direct remote build). */
 export const transferImageStep = () =>
   defineStep({
     name: 'transfer-image',

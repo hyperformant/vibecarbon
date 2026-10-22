@@ -629,6 +629,17 @@ export const DIAG_BUSYBOX_IMAGE =
 export const DIAG_NETSHOOT_IMAGE =
   'nicolaka/netshoot:v0.16@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70';
 
+/**
+ * The k8s in-cluster registry (carbon/k8s/base/registry/local-registry.yaml),
+ * which runs exactly this ref (tests/unit/deploy/image-digest-census.test.ts).
+ * Pinned by the multi-arch index digest. Stays on the 2.x line: registry 3
+ * changed the config format. Dependabot proposes digest moves through
+ * .github/image-pins/Dockerfile, which the census keeps byte-identical to this
+ * constant.
+ */
+export const REGISTRY_IMAGE =
+  'registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373';
+
 /** @returns {string} the mirrored pause ref — e.g. "ghcr.io/hyperformant/pause:3.9@sha256:…" */
 export function pauseImageRef() {
   return k8sMirrorRef(PAUSE_IMAGE);

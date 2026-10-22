@@ -1531,12 +1531,13 @@ export async function executeDeployment(args, gatheredConfig) {
   // --- STEP 2: Image Resolve ---
   // resolveBuildMode (ci-setup.js) returns one of — see also transferImage
   // in effects/index.js, which must stay in sync with these descriptions:
-  //   'local'  — build the app image on the operator's machine, then sideload
-  //              it to the server (docker save | gzip | ssh | docker load) —
-  //              the FULL image crosses the wire each deploy. The compose
-  //              default when local docker is present (the build runs in
-  //              parallel behind VPS provisioning); also the k8s/k3s path
-  //              (deployK3s builds + sideloads + applies manifests inline).
+  //   'local'  — build the app image on the operator's machine. Compose
+  //              sends it by layer delta (deliverImage): the server pulls the
+  //              runtime base itself and only the app's own layers cross the
+  //              wire. The compose default when local docker is present (the
+  //              build runs in parallel behind VPS provisioning); also the
+  //              k8s/k3s path (deployK3s builds + sideloads + applies
+  //              manifests inline).
   //   'direct' — build ON the server via DOCKER_HOST=ssh:// (buildRemote);
   //              only the build context (source) transfers, no image. Compose
   //              fallback when local docker is ABSENT, or forced with -direct.

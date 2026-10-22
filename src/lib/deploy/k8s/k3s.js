@@ -1857,9 +1857,7 @@ export { isPermanentPushError, PUSH_PERMANENT_PATTERN } from '../registry-push.j
  * Nothing about the push mechanics lives in this file any more — including
  * `-o BatchMode=yes` / `buildHostKeyOptsForPath`, which the shared helper
  * applies to its own tunnel rather than going through this file's
- * `sshHostKeyOpts`. Fix push behavior in registry-push.js, not here; note it
- * is shared with the compose tier, which passes its own shorter
- * `settleDelaysMs` (see `COMPOSE_PUSH_SETTLE_DELAYS_MS`).
+ * `sshHostKeyOpts`. Fix push behavior in registry-push.js, not here.
  *
  * `masterIp` is validated here (rather than inside the shared helper, which
  * only knows a generic `serverIp`) so this function's own error message
