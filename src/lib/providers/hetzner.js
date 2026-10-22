@@ -830,7 +830,10 @@ export class HetznerProvider extends BaseProvider {
     // substitution is size-preserving (armToAmd64Equivalent), so if it ever
     // does fire it cannot quietly downsize a node.
     const requested = HetznerProvider.armToAmd64Equivalent(serverType);
-    const available = HetznerProvider._locationTypes?.[targetRegion];
+    // A live catalog that does not list the location stocks nothing there:
+    // the stand-in below then answers null, as cheapestRoleSet does.
+    const live = HetznerProvider._locationTypes;
+    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
 
     // If live data available, check directly
     if (available) {

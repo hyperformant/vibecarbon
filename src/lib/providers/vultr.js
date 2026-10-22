@@ -487,7 +487,10 @@ export class VultrProvider extends BaseProvider {
    * @returns {string|null} null when nothing fits, for the caller to refuse
    */
   static resolveServerTypeForRegion(serverType, targetRegion, role) {
-    const available = VultrProvider._locationTypes?.[targetRegion];
+    // A live catalog that does not list the location stocks nothing there:
+    // the stand-in below then answers null, as cheapestRoleSet does.
+    const live = VultrProvider._locationTypes;
+    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
 
     if (available) {
       if (available.has(serverType)) return serverType;
