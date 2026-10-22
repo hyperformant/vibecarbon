@@ -37,6 +37,7 @@ import {
   OAUTH_CANARY_CLIENT_ID,
   runConfigCanaryChecks,
 } from '../checks/config-canary.js';
+import { checkDeployBudget } from '../checks/deploy-budget.js';
 import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
@@ -3202,7 +3203,12 @@ EOF`;
         executeStep(
           'deploy',
           `vibecarbon deploy ${config.envPrefix} --${config.mode} --domain ${config.domain}`,
-          async () => {
+          async (stepId) => {
+            // Cold by the e2e db's own definition (no passing deploy of this
+            // project and env in 24 h), read before this deploy can count.
+            // Every scenario's first deploy is cold: project names are unique
+            // per run.
+            const cold = db.classifyColdWarm(config.projectName, config.envPrefix) === 'cold';
             // No --direct flag needed — direct is the default for compose
             // deploys (CI/CD is opt-in via `vibecarbon configure`). K8s ignores
             // the flag and uses its 'local' build path either way.
@@ -3298,6 +3304,23 @@ EOF`;
             if (serverIps.length === 0) {
               throw new Error(
                 'Deploy exited successfully but no server IPs found in .vibecarbon.json — deployment likely failed silently',
+              );
+            }
+
+            // Per-mode cold-deploy budgets (deploy-budget.ts): the deploy's
+            // own [perf] and [state] lines against D1's two columns, the cold
+            // image bytes and the HA lock invariants. The numbers land in
+            // e2e.db with the verdict, pass or fail.
+            if (cold) {
+              const budget = checkDeployBudget(`${result.stdout}\n${result.stderr}`, config.mode);
+              console.log(`${tag} [deploy] deploy_budget: ${budget.status} (${budget.message})`);
+              collector.recordVerifications(stepId, [budget]);
+              if (budget.status !== 'pass') {
+                throw new Error(`deploy: ${budget.checkName}: ${budget.message}`);
+              }
+            } else {
+              console.log(
+                `${tag} [deploy] deploy_budget not judged: warm (a deploy of ${config.projectName}/${config.envPrefix} passed in the last 24 h)`,
               );
             }
           },

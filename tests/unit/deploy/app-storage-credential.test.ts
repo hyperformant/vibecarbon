@@ -177,7 +177,7 @@ describe('R9 lifecycle on a mint provider', () => {
 
   it('a failed deploy never revokes the old key: rotation runs only after finish() and before the final save', async () => {
     const src = readFileSync(join(process.cwd(), 'src/lib/deploy/orchestrator.js'), 'utf-8');
-    const finish = src.indexOf('appBucketFinal = await appBucketFinalize.finish(p.log);');
+    const finish = src.indexOf('appBucketFinalize.finish(p.log)');
     const exit = src.indexOf('process.exit(1);', finish);
     const rotate = src.indexOf('await finishAppKeyRotation(', finish);
     const finalSave = src.indexOf('updateProjectConfig((persistedConfig) =>', finish);

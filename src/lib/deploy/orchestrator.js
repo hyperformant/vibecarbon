@@ -867,6 +867,9 @@ export async function executeDeployment(args, gatheredConfig) {
   // reached), the process 'exit' handler forces a non-zero code. markDeployCompleted()
   // is only reached after the terminal config write at the end of this fn.
   armDeployCompletionGuard();
+  // The whole deploy, start to success outro: the e2e cold-deploy budgets
+  // (tests/e2e/checks/deploy-budget.ts) read it, minus the TLS first look.
+  const deployTotalTimer = perfTimer('deploy.total');
   const {
     projectConfig,
     envConfig,
@@ -2519,7 +2522,9 @@ export async function executeDeployment(args, gatheredConfig) {
   // it never waits for the bucket to settle (R5).
   let appBucketFinal;
   try {
-    appBucketFinal = await appBucketFinalize.finish(p.log);
+    appBucketFinal = await perfAsync('deploy.storage.finish', () =>
+      appBucketFinalize.finish(p.log),
+    );
   } catch (err) {
     p.log.error(`App storage key: ${err.message}`);
     writeLogDetail(`# app storage finalize error detail: ${err?.stack || err}`);
@@ -2804,6 +2809,7 @@ export async function executeDeployment(args, gatheredConfig) {
   });
 
   const { formatted: timeStr } = tracker.finish();
+  deployTotalTimer.end();
   p.log.success(`Deployment to ${c.bold(environment)} complete! ${c.dim(`(${timeStr})`)}`);
   p.note(
     formatCommandNote(

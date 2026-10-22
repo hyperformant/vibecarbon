@@ -210,7 +210,7 @@ describe('orchestrator call site', () => {
   });
 
   it('awaits the finalize after the tier deploy and before the success outro', () => {
-    const finish = src.indexOf('await appBucketFinalize.finish(');
+    const finish = src.indexOf('appBucketFinalize.finish(p.log)');
     expect(finish).toBeGreaterThan(-1);
     expect(finish).toBeGreaterThan(src.lastIndexOf("perfAsync('deploy.ha.k8s.full'"));
     expect(finish).toBeLessThan(src.indexOf('complete! ${c.dim('));
