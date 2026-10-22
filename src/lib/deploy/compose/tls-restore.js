@@ -22,8 +22,10 @@
  * operator or on the host; the only copy outside acme.json is a sibling in
  * the volume itself, created under umask 077 and removed on exit. A failed
  * command is reported by its exit status and a fixed phrase, never by its
- * output. Nothing here logs: callers print the one info line.
+ * output. Only restoreFailoverTls logs; every other caller prints the one
+ * info line (tlsRestoreLine) itself.
  */
+import * as p from '@clack/prompts';
 import { sshRun } from '../../ssh.js';
 import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import { inspectComposeAcme, readTlsSnapshot, tlsSnapshotKey } from '../tls-snapshot.js';
@@ -99,6 +101,41 @@ function writeScript(projectName, domain, bytes) {
 }
 
 /**
+ * Ask the server whether the acme.json in its letsencrypt volume holds a
+ * certificate whose "main" is the apex domain. `unknown` carries the reason
+ * the check could not answer. Never throws, never logs.
+ *
+ * @param {{ ip: string|null, sshKeyPath: string, projectName: string,
+ *   domain: string|null, deps?: { ssh?: Function } }} args
+ * @returns {Promise<{ state: 'present'|'absent'|'unknown', reason?: string }>}
+ */
+export async function readLiveApexCertificate({ ip, sshKeyPath, projectName, domain, deps = {} }) {
+  const ssh = deps.ssh ?? sshRun;
+  const unknown = (reason) => ({ state: 'unknown', reason });
+  if (!domain || !SAFE_NAME_RE.test(domain)) return unknown('no valid domain');
+  if (!ip) return unknown('no server address');
+  if (!SAFE_PROJECT_RE.test(String(projectName ?? ''))) return unknown('no valid project name');
+  let live;
+  try {
+    const out = await ssh(ip, sshKeyPath, ['bash', '-c', liveCheckScript(projectName, domain)], {
+      timeout: CHECK_TIMEOUT_MS,
+    });
+    live = String(out ?? '')
+      .trim()
+      .split('\n')
+      .pop();
+  } catch (err) {
+    return unknown(
+      err?.status === NO_COMPOSE_FLAGS_EXIT
+        ? 'reconcile.sh on the server has no compose files'
+        : 'could not check the live certificate',
+    );
+  }
+  if (live === 'present' || live === 'absent') return { state: live };
+  return unknown('could not check the live certificate');
+}
+
+/**
  * Restore the last compose-acme snapshot into the server's acme.json when the
  * server has no apex certificate. Never throws, never logs.
  *
@@ -127,24 +164,9 @@ export async function restoreComposeTls({
   if (!ip) return skip('no server address');
   if (!SAFE_PROJECT_RE.test(String(projectName ?? ''))) return skip('no valid project name');
   try {
-    let live;
-    try {
-      const out = await ssh(ip, sshKeyPath, ['bash', '-c', liveCheckScript(projectName, domain)], {
-        timeout: CHECK_TIMEOUT_MS,
-      });
-      live = String(out ?? '')
-        .trim()
-        .split('\n')
-        .pop();
-    } catch (err) {
-      return skip(
-        err?.status === NO_COMPOSE_FLAGS_EXIT
-          ? 'reconcile.sh on the server has no compose files'
-          : 'could not check the live certificate',
-      );
-    }
-    if (live === 'present') return skip(LIVE_CERTIFICATE_PRESENT);
-    if (live !== 'absent') return skip('could not check the live certificate');
+    const live = await readLiveApexCertificate({ ip, sshKeyPath, projectName, domain, deps });
+    if (live.state === 'present') return skip(LIVE_CERTIFICATE_PRESENT);
+    if (live.state !== 'absent') return skip(live.reason);
 
     const key = tlsSnapshotKey({ projectName, envName, ca, format: 'compose-acme' });
     const { text, reason } = await read(s3Config, key);
@@ -198,4 +220,71 @@ export async function snapshotComposeTlsNow({ ip, sshKeyPath, projectName, deps 
   } catch (err) {
     throw new Error(`tls-snapshot.sh exited ${err?.status ?? 'abnormally'}`);
   }
+}
+
+/**
+ * The one info line a caller prints for a restore result. A reason is one of
+ * restoreComposeTls's fixed phrases, never command output.
+ *
+ * @param {{ restored: boolean, reason: string }} result
+ * @param {string|null} domain
+ * @returns {string}
+ */
+export function tlsRestoreLine(result, domain) {
+  if (result.reason === LIVE_CERTIFICATE_PRESENT) {
+    return 'TLS certificate already on the server; nothing to restore.';
+  }
+  if (!result.restored) return `TLS certificate not restored (${result.reason}).`;
+  const restartNote = /did not restart/.test(result.reason)
+    ? ' Traefik did not restart, so it loads it on its next start.'
+    : '';
+  return `TLS certificate for ${domain} restored from its last snapshot.${restartNote}`;
+}
+
+/**
+ * The restore a compose-ha failover runs on the promoted node, inside
+ * armComposeAcme (before its traefik recreate). The CA is the one the last
+ * deploy recorded (envConfig.tls.ca), never a guess: with none, nothing is
+ * read and Traefik issues a new certificate. The backup credentials come from
+ * the record and the environment only; a failover never prompts. Prints one
+ * info line and never throws.
+ *
+ * @param {{ envName: string, envConfig: object, projectName: string,
+ *   ip: string, sshKeyPath: string,
+ *   deps?: { resolveS3?: Function, restore?: Function, log?: Function } }} args
+ * @returns {Promise<{ restored: boolean, reason: string }>}
+ */
+export async function restoreFailoverTls({
+  envName,
+  envConfig,
+  projectName,
+  ip,
+  sshKeyPath,
+  deps = {},
+}) {
+  const restore = deps.restore ?? restoreComposeTls;
+  const log = deps.log ?? ((msg) => p.log.info(msg));
+  const domain = envConfig?.domain ?? null;
+  let result;
+  try {
+    const ca = envConfig?.tls?.ca ?? null;
+    if (!ca) {
+      result = { restored: false, reason: 'no recorded CA' };
+    } else {
+      const resolveS3 =
+        deps.resolveS3 ?? (await import('../../walg/restore-base.js')).resolveS3Config;
+      const s3Config = await resolveS3({
+        isCompose: true,
+        envName,
+        projectName,
+        envConfig,
+        skipPrompts: true,
+      });
+      result = await restore({ ip, sshKeyPath, projectName, domain, envName, ca, s3Config });
+    }
+  } catch {
+    result = { restored: false, reason: 'restore errored' };
+  }
+  log(tlsRestoreLine(result, domain));
+  return result;
 }

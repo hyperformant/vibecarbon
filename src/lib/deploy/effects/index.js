@@ -645,13 +645,11 @@ async function verifyTlsReady(ctx) {
  */
 async function restoreTlsSnapshot(ctx) {
   let result;
-  let livePresent;
+  let line;
   try {
     const { domain, sshKeyPath, projectConfig, environment } = ctx;
-    const { LIVE_CERTIFICATE_PRESENT, restoreComposeTls } = await import(
-      '../compose/tls-restore.js'
-    );
-    livePresent = LIVE_CERTIFICATE_PRESENT;
+    const { restoreComposeTls, tlsRestoreLine } = await import('../compose/tls-restore.js');
+    line = tlsRestoreLine;
     const { caSlug } = await import('../tls-snapshot.js');
     result = await perfAsync('deploy.tls.restore', () =>
       restoreComposeTls({
@@ -669,18 +667,7 @@ async function restoreTlsSnapshot(ctx) {
     p.log.info('TLS certificate not restored (restore errored). Traefik requests a new one.');
     return;
   }
-  if (result.reason === livePresent) {
-    p.log.info('TLS certificate already on the server; nothing to restore.');
-    return;
-  }
-  if (!result.restored) {
-    p.log.info(`TLS certificate not restored (${result.reason}).`);
-    return;
-  }
-  const restartNote = /did not restart/.test(result.reason)
-    ? ' Traefik did not restart, so it loads it on its next start.'
-    : '';
-  p.log.info(`TLS certificate for ${ctx.domain} restored from its last snapshot.${restartNote}`);
+  p.log.info(line(result, ctx.domain));
 }
 
 /**

@@ -99,6 +99,7 @@ import {
   composeHaStackOf,
 } from './ha-role-swap.js';
 import { sshRun, sshRunAsync, sshRunChecked } from './index.js';
+import { restoreFailoverTls } from './tls-restore.js';
 
 /**
  * Resolve the VPS set that destroyComposeHA should delete.
@@ -2333,11 +2334,23 @@ export async function failoverComposeHA(
   // included) overlaps the app-tier restart, API gate, and DNS flip below.
   // Best-effort like the write-guard — a failed re-arm degrades TLS, it
   // must never abort a DR flip (armComposeAcme warns with the manual fix).
+  // The saved certificate is restored first (restoreFailoverTls), so the
+  // recreated Traefik serves it at once; with none, it issues a new one.
   s.start("Arming the promoted node's ACME issuer");
   const acmeArmed = await armComposeAcme({
     promotedIp: standbyServer.ip,
     sshKeyPath,
     projectName,
+    deps: {
+      restore: () =>
+        restoreFailoverTls({
+          envName,
+          envConfig,
+          projectName,
+          ip: standbyServer.ip,
+          sshKeyPath,
+        }),
+    },
   });
   s.stop(
     acmeArmed
