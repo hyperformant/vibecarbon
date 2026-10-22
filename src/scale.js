@@ -2307,6 +2307,27 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   // below also requires a configured standby region (registry predicate alone
   // is NOT equivalent here).
   const isHA = isHATier(parsed.tier) && envConfig.secondaryRegion;
+
+  // k8s-ha resizes the standby cluster with the same new types. With the
+  // live catalog loaded, refuse a type the standby's location does not sell
+  // before any Pulumi run (offline there is nothing to check against).
+  if (isHA && Provider._locationTypes) {
+    const standbyRegion = envConfig.ha?.standby?.region ?? envConfig.secondaryRegion;
+    const primaryRegion = envConfig.ha?.primary?.region ?? region;
+    const sold = Provider._locationTypes[standbyRegion] ?? new Set();
+    const unsold = [newValues.masterType, newValues.dbType, newValues.workerType].find(
+      (type) => type && !sold.has(type),
+    );
+    if (unsold) {
+      p.log.error(
+        `the standby's location ${standbyRegion} does not sell ${unsold}, so the standby cannot be scaled to it`,
+      );
+      p.log.info(
+        `pick a type both ${primaryRegion} and ${standbyRegion} sell:\n  vibecarbon scale ${environment} -type <type>`,
+      );
+      process.exit(1);
+    }
+  }
   p.note(`Current ${Provider.NAME} pricing: ${Provider.PRICING_URL}`, 'Cost');
 
   // 6. Require API token if infra changes (server type swap) needed
