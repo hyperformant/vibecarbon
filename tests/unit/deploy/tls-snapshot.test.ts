@@ -138,6 +138,20 @@ describe('inspectComposeAcme', () => {
     });
     expect(inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' }).ok).toBe(false);
   });
+  it('rejects a compose entry with the key missing', () => {
+    const parsed = JSON.parse(acmeJson({}));
+    delete parsed.letsencrypt.Certificates[0].key;
+    expect(
+      inspectComposeAcme(JSON.stringify(parsed), { domain: 'app.example.com', ca: 'staging' }).ok,
+    ).toBe(false);
+  });
+  it('rejects an empty acme.json', () => {
+    expect(inspectComposeAcme('', { domain: 'app.example.com', ca: 'staging' }).ok).toBe(false);
+  });
+  it('rejects a resolver with null Account and Certificates', () => {
+    const text = '{"letsencrypt":{"Account":null,"Certificates":null}}';
+    expect(inspectComposeAcme(text, { domain: 'app.example.com', ca: 'staging' }).ok).toBe(false);
+  });
   it('exposes a validity floor of at least a few days', () => {
     expect(MIN_REMAINING_VALIDITY_MS).toBeGreaterThan(3 * DAY_MS);
   });
@@ -285,6 +299,20 @@ describe('readTlsSnapshot', () => {
   });
   it('maps NoSuchKey to no snapshot', async () => {
     expect(await readTlsSnapshot(s3Config, 'k', failing('NoSuchKey'))).toEqual({
+      text: null,
+      reason: 'no snapshot',
+    });
+  });
+  it('treats a bare 404 NotFound (HEAD-style) as no snapshot', async () => {
+    const makeClient = async () => ({
+      send: async () => {
+        throw Object.assign(new Error('x'), {
+          name: 'NotFound',
+          $metadata: { httpStatusCode: 404 },
+        });
+      },
+    });
+    expect(await readTlsSnapshot(s3Config, 'k', { makeClient })).toEqual({
       text: null,
       reason: 'no snapshot',
     });
