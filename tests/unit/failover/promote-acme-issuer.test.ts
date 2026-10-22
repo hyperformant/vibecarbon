@@ -17,7 +17,11 @@
  * the reconverge redeploy repairs issuer ownership.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { promoteAcmeIssuer } from '../../../src/failover.js';
+import { renderTlsCertificateManifest } from '../../../carbon/scripts/render-tls-certificate.mjs';
+import { k8sTlsSnapshotInputs, promoteAcmeIssuer } from '../../../src/failover.js';
+import { tlsSnapshotKey } from '../../../src/lib/deploy/tls-snapshot.js';
+import { expectNoKeyLeak } from '../deploy/_no-key-leak.ts';
+import { k8sSecretJson, k8sSecretJsonWithCa } from '../deploy/_tls-fixtures.ts';
 
 const CERT_JSON = (issuer: string, annotation?: string) =>
   JSON.stringify({
@@ -102,5 +106,358 @@ describe('promoteAcmeIssuer', () => {
       }),
     ).resolves.toMatchObject({ patched: [] });
     expect(warns.join('\n')).toMatch(/promote-issuer|issuer/i);
+  });
+});
+
+// ============================================================================
+// TLS certificate reuse: the promoted cluster serves the primary's certificate.
+// With a valid snapshot from this env's own issuer, vibecarbon-tls is not
+// re-pointed by a patch (cert-manager would then see a self-signed Secret and
+// issue): its Certificate is deleted, the snapshot goes into the Secret, and
+// the Certificate comes back on the ACME issuer, finding a Secret that
+// matches it. grafana-tls always takes the patch path.
+// ============================================================================
+
+const TARGET = 'letsencrypt-staging-digitalocean';
+const DNS = ['app.example.com', '*.app.example.com'];
+const S3 = { bucket: 'proj-backups', accessKey: 'AK', secretKey: 'SK', endpoint: 'https://s3' };
+const SNAPSHOT_INPUTS = { s3Config: S3, projectName: 'proj', envName: 'prod', ca: 'staging' };
+const SNAP = k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: TARGET });
+const SNAP_KEY_B64 = JSON.parse(SNAP).data['tls.key'] as string;
+const SNAP_CRT_B64 = JSON.parse(SNAP).data['tls.crt'] as string;
+// The pilot standby's own Secret: issued by the local self-signed issuer.
+const LIVE_STANDBY = k8sSecretJson({
+  dnsNames: DNS,
+  days: 80,
+  issuerName: 'vibecarbon-standby-selfsigned',
+  selfSigned: true,
+});
+
+const LIVE_CERT = (name: string) =>
+  JSON.stringify({
+    metadata: { name, annotations: { 'vibecarbon.dev/promote-issuer': TARGET } },
+    spec: {
+      secretName: name,
+      issuerRef: { name: 'vibecarbon-standby-selfsigned', kind: 'ClusterIssuer' },
+      dnsNames: name === 'grafana-tls' ? ['app.example.com'] : DNS,
+    },
+  });
+
+type Call = { via: 'kubectl' | 'quiet'; argv: string[]; opts: Record<string, unknown> };
+
+interface Cluster {
+  grafana?: boolean;
+  liveSecret?: string;
+  failOn?: (argv: string[]) => Error | null;
+}
+
+/** One recorder for both runners: the plain kubectl and the quiet one. */
+function cluster({ grafana = false, liveSecret = LIVE_STANDBY, failOn }: Cluster = {}) {
+  const calls: Call[] = [];
+  const answer = async (via: Call['via'], argv: string[], opts: Record<string, unknown> = {}) => {
+    calls.push({ via, argv, opts });
+    const err = failOn?.(argv);
+    if (err) throw err;
+    if (argv[0] === 'get' && argv[1] === 'certificate') {
+      if (argv[2] === 'grafana-tls' && !grafana) {
+        throw new Error('Error from server (NotFound): certificates.cert-manager.io not found');
+      }
+      return LIVE_CERT(argv[2]);
+    }
+    if (argv[0] === 'get' && argv[1] === 'secret') return liveSecret;
+    return '';
+  };
+  const kubectl = vi.fn(
+    (_ip: string, _key: string, argv: string[], opts?: Record<string, unknown>) =>
+      answer('kubectl', argv, opts),
+  );
+  const quietKubectl = vi.fn((argv: string[], opts?: Record<string, unknown>) =>
+    answer('quiet', argv, opts),
+  );
+  return { calls, kubectl, quietKubectl };
+}
+
+const mutations = (calls: Call[]) => calls.filter((c) => c.argv[0] !== 'get');
+const argvs = (calls: Call[]) => calls.map((c) => c.argv);
+
+function run(
+  c: ReturnType<typeof cluster>,
+  {
+    snapshot = SNAPSHOT_INPUTS as typeof SNAPSHOT_INPUTS | null,
+    read = vi.fn(async () => ({ text: SNAP })),
+    warn,
+  }: {
+    snapshot?: typeof SNAPSHOT_INPUTS | null;
+    read?: ReturnType<typeof vi.fn>;
+    warn?: (m: string) => void;
+  } = {},
+) {
+  return promoteAcmeIssuer({
+    promotedIp: '203.0.113.9',
+    sshKeyPath: '/k',
+    ...(snapshot ? { snapshot } : {}),
+    deps: {
+      kubectl: c.kubectl,
+      quietKubectl: c.quietKubectl,
+      readSnapshot: read,
+      ...(warn ? { warn } : {}),
+    },
+  });
+}
+
+/** Today's patch-path argv, from a run with no snapshot inputs at all. */
+async function patchPathArgv(opts: Cluster = {}) {
+  const c = cluster(opts);
+  await run(c, { snapshot: null });
+  return argvs(c.calls);
+}
+
+describe('promoteAcmeIssuer with a TLS snapshot', () => {
+  it('restores the snapshot: delete Certificate, write Secret, re-create the Certificate on the ACME issuer', async () => {
+    const c = cluster();
+    const read = vi.fn(async () => ({ text: SNAP }));
+    const { result } = await expectNoKeyLeak(SNAP, () => run(c, { read }));
+
+    expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    expect(result.tls).toEqual({ restored: true, reason: 'restored from the last snapshot' });
+
+    // The snapshot key of this env and CA, read once with the DR client options.
+    expect(read).toHaveBeenCalledTimes(1);
+    const [s3, key, readOpts] = read.mock.calls[0] as unknown as [
+      unknown,
+      string,
+      { clientOptions: { maxAttempts: number } },
+    ];
+    expect(s3).toEqual(S3);
+    expect(key).toBe(
+      tlsSnapshotKey({ projectName: 'proj', envName: 'prod', ca: 'staging', format: 'k8s-secret' }),
+    );
+    expect(readOpts.clientOptions.maxAttempts).toBe(1);
+
+    const m = mutations(c.calls);
+    expect(m.map((x) => [x.via, ...x.argv])).toEqual([
+      [
+        'kubectl',
+        'delete',
+        'certificate',
+        'vibecarbon-tls',
+        '-n',
+        'vibecarbon',
+        '--ignore-not-found',
+      ],
+      ['quiet', 'replace', '-f', '-'],
+      ['kubectl', 'apply', '-f', '-'],
+    ]);
+    // The restored Secret carries the promote annotation's issuer.
+    const secret = JSON.parse(String(m[1].opts.input));
+    expect(secret.metadata.annotations['cert-manager.io/issuer-name']).toBe(TARGET);
+    expect(secret.data['tls.key']).toBe(SNAP_KEY_B64);
+    // The Certificate as the shared renderer renders it, on the ACME issuer.
+    expect(m[2].opts.input).toBe(
+      renderTlsCertificateManifest({ dnsNames: DNS, issuerName: TARGET, effectiveIssuer: TARGET }),
+    );
+    // The live Secret (key material) is read through the quiet runner only.
+    expect(
+      c.calls.filter((x) => x.argv[0] === 'get' && x.argv[1] === 'secret').map((x) => x.via),
+    ).toEqual(['quiet']);
+    // No patch of vibecarbon-tls, and no argv anywhere carries certificate data.
+    expect(c.calls.some((x) => x.argv[0] === 'patch' && x.argv.includes('vibecarbon-tls'))).toBe(
+      false,
+    );
+    for (const x of c.calls) {
+      const joined = x.argv.join(' ');
+      expect(joined.includes(SNAP_KEY_B64) || joined.includes(SNAP_CRT_B64)).toBe(false);
+      expect(joined).not.toMatch(/BEGIN|PRIVATE KEY/);
+    }
+  });
+
+  it('an absent live Secret is filled with create, never replace', async () => {
+    const c = cluster({ liveSecret: '' });
+    const result = await run(c);
+    expect(result.tls?.restored).toBe(true);
+    expect(mutations(c.calls).map((x) => x.argv[0])).toEqual(['delete', 'create', 'apply']);
+  });
+
+  it('a prod snapshot must chain to a trusted root', async () => {
+    const { json, ca } = k8sSecretJsonWithCa({
+      dnsNames: DNS,
+      days: 60,
+      issuerName: 'letsencrypt-prod-digitalocean',
+    });
+    const prodCert = (name: string) =>
+      LIVE_CERT(name).replaceAll(TARGET, 'letsencrypt-prod-digitalocean');
+    for (const [roots, restored] of [
+      [[ca as string], true],
+      [[], false],
+    ] as const) {
+      const c = cluster();
+      const kubectl = vi.fn(async (ip: string, key: string, argv: string[], o?: object) =>
+        argv[0] === 'get' && argv[1] === 'certificate' && argv[2] === 'vibecarbon-tls'
+          ? prodCert('vibecarbon-tls')
+          : c.kubectl(ip, key, argv, o as Record<string, unknown>),
+      );
+      const result = await promoteAcmeIssuer({
+        promotedIp: '203.0.113.9',
+        sshKeyPath: '/k',
+        snapshot: { ...SNAPSHOT_INPUTS, ca: 'prod' },
+        deps: {
+          kubectl,
+          quietKubectl: c.quietKubectl,
+          readSnapshot: vi.fn(async () => ({ text: json })),
+          trustRoots: roots,
+        },
+      });
+      expect(result.tls?.restored).toBe(restored);
+      expect(mutations(c.calls).some((x) => x.argv[0] === 'delete')).toBe(restored);
+    }
+  });
+
+  it.each([
+    ['no snapshot', { text: null, reason: 'no snapshot' }],
+    ['an S3 timeout', { text: null, reason: 'S3 TimeoutError', timedOut: true }],
+    [
+      'an expired snapshot',
+      { text: k8sSecretJson({ dnsNames: DNS, days: 3, issuerName: TARGET }) },
+    ],
+    [
+      'a snapshot from another issuer',
+      {
+        text: k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: 'letsencrypt-staging-hetzner' }),
+      },
+    ],
+    [
+      'a snapshot for other names',
+      { text: k8sSecretJson({ dnsNames: ['other.example.com'], days: 60, issuerName: TARGET }) },
+    ],
+  ])('%s: today’s patch path, byte-identical argv, no delete', async (_label, answer) => {
+    const c = cluster();
+    const result = await run(c, { read: vi.fn(async () => answer) });
+    expect(argvs(c.calls)).toEqual(await patchPathArgv());
+    expect(c.quietKubectl).not.toHaveBeenCalled();
+    expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    expect(result.tls?.restored).toBe(false);
+  });
+
+  it.each([
+    ['no s3Config', { ...SNAPSHOT_INPUTS, s3Config: null }],
+    ['no recorded CA', { ...SNAPSHOT_INPUTS, ca: null }],
+  ])('%s: today’s patch path without reading S3', async (_label, snapshot) => {
+    const c = cluster();
+    const read = vi.fn(async () => ({ text: SNAP }));
+    // biome-ignore lint/suspicious/noExplicitAny: the null fields are the point.
+    await run(c, { snapshot: snapshot as any, read });
+    expect(read).not.toHaveBeenCalled();
+    expect(argvs(c.calls)).toEqual(await patchPathArgv());
+  });
+
+  it('grafana-tls always takes the patch path', async () => {
+    const c = cluster({ grafana: true });
+    const result = await run(c);
+    expect(result.patched).toEqual([
+      'vibecarbon/vibecarbon-tls',
+      'vibecarbon-observability/grafana-tls',
+    ]);
+    const grafana = c.calls.filter((x) => x.argv.includes('grafana-tls'));
+    expect(grafana.map((x) => x.argv[0])).toEqual(['get', 'patch']);
+    expect(c.calls.some((x) => x.argv[0] === 'delete' && x.argv.includes('grafana-tls'))).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ['the S3 read throws', {}, true],
+    [
+      'the delete throws',
+      { failOn: (a: string[]) => (a[0] === 'delete' ? new Error('ssh: timeout') : null) },
+      false,
+    ],
+    [
+      'the Certificate re-create throws',
+      { failOn: (a: string[]) => (a[0] === 'apply' ? new Error('ssh: timeout') : null) },
+      false,
+    ],
+  ])(
+    '%s: falls back to the patch path, warns once, never throws',
+    async (_label, opts, readThrows) => {
+      const c = cluster(opts as Cluster);
+      const warns: string[] = [];
+      const read = readThrows
+        ? vi.fn(async () => {
+            throw new Error('boom');
+          })
+        : vi.fn(async () => ({ text: SNAP }));
+      const result = await run(c, { read, warn: (m) => warns.push(m) });
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toMatch(/vibecarbon-tls/);
+      expect(warns[0]).not.toMatch(/BEGIN|PRIVATE KEY/);
+      // The patch path ran after the snapshot path gave up.
+      const tlsCalls = c.calls.filter((x) => x.argv.includes('vibecarbon-tls'));
+      expect(tlsCalls.at(-1)?.argv[0]).toBe('patch');
+      expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    },
+  );
+
+  it('a Certificate already on its ACME issuer is left alone: no snapshot read', async () => {
+    const read = vi.fn(async () => ({ text: SNAP }));
+    const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
+      if (argv.includes('get')) return CERT_JSON(TARGET, TARGET);
+      return '';
+    });
+    const result = await promoteAcmeIssuer({
+      promotedIp: '203.0.113.9',
+      sshKeyPath: '/k',
+      snapshot: SNAPSHOT_INPUTS,
+      deps: { kubectl, quietKubectl: vi.fn(), readSnapshot: read },
+    });
+    expect(result.patched).toEqual([]);
+    expect(read).not.toHaveBeenCalled();
+  });
+});
+
+describe('k8sTlsSnapshotInputs', () => {
+  it('resolves the backup S3 config without prompting, with the recorded CA', async () => {
+    const resolveS3 = vi.fn(async () => S3);
+    const envConfig = { tls: { state: 'trusted', ca: 'staging' } };
+    const r = await k8sTlsSnapshotInputs({
+      envName: 'prod',
+      envConfig,
+      projectName: 'proj',
+      deps: { resolveS3 },
+    });
+    expect(r).toEqual({ s3Config: S3, projectName: 'proj', envName: 'prod', ca: 'staging' });
+    expect(resolveS3).toHaveBeenCalledWith({
+      isCompose: false,
+      envName: 'prod',
+      projectName: 'proj',
+      envConfig,
+      skipPrompts: true,
+    });
+  });
+
+  it('no recorded CA: nothing resolved, never a guess', async () => {
+    const resolveS3 = vi.fn(async () => S3);
+    const r = await k8sTlsSnapshotInputs({
+      envName: 'prod',
+      envConfig: {},
+      projectName: 'proj',
+      deps: { resolveS3 },
+    });
+    expect(r.ca).toBeNull();
+    expect(r.s3Config).toBeNull();
+    expect(resolveS3).not.toHaveBeenCalled();
+  });
+
+  it('a throwing resolve is no S3 config, never a throw', async () => {
+    const r = await k8sTlsSnapshotInputs({
+      envName: 'prod',
+      envConfig: { tls: { ca: 'prod' } },
+      projectName: 'proj',
+      deps: {
+        resolveS3: async () => {
+          throw new Error('no creds');
+        },
+      },
+    });
+    expect(r).toMatchObject({ s3Config: null, ca: 'prod' });
   });
 });

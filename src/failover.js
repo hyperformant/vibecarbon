@@ -12,6 +12,7 @@
 
 import { existsSync } from 'node:fs';
 import * as p from '@clack/prompts';
+import { renderTlsCertificateManifest } from '../carbon/scripts/render-tls-certificate.mjs';
 import { resolveEnvContext } from './lib/cli/env-context.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
@@ -52,6 +53,12 @@ import {
   PROMOTE_ISSUER_ANNOTATION,
 } from './lib/deploy/k8s/acme-issuer-policy.js';
 import {
+  k8sTlsRestoreLine,
+  quietSshKubectl,
+  readRestorableK8sTlsSnapshot,
+  restoreK8sTlsSecret,
+} from './lib/deploy/k8s/tls-restore.js';
+import {
   assertStandbyNotWriteFenced,
   DB_STS_BOOT_TIMEOUT_S,
   fenceDatabaseWrites,
@@ -65,6 +72,7 @@ import {
   waitForStandbyCaughtUp,
 } from './lib/deploy/replication.js';
 import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
+import { DR_S3_CLIENT_OPTIONS } from './lib/deploy/tls-snapshot.js';
 import {
   assertWalgBackupsWorking,
   k8sWalgAuditArgv,
@@ -101,6 +109,7 @@ import {
   backupCredentialVars,
   printBaseBackupList,
   readEnvBaseBackups,
+  resolveS3Config,
 } from './lib/walg/restore-base.js';
 
 // Shared with the compose-ha failover; re-exported where tests and callers
@@ -483,6 +492,10 @@ export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {})
  * when the live issuerRef differs, patch it to the annotated ACME issuer —
  * making the promoted cluster the environment's sole ACME solver.
  *
+ * TLS certificate reuse (`snapshot`): vibecarbon-tls serves the primary's
+ * certificate instead of a new one (promoteTlsFromSnapshot). grafana-tls
+ * always takes the patch.
+ *
  * Best-effort BY CONTRACT: this runs after the point of no return (standby
  * promoted, DNS about to flip), and a promoted site serving on the
  * self-signed cert is strictly better than an aborted failover. Not-found
@@ -493,12 +506,19 @@ export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {})
  * @param {object} args
  * @param {string} args.promotedIp - promoted cluster master IP (kubectl target)
  * @param {string} args.sshKeyPath
- * @param {{kubectl?: Function, warn?: (msg: string) => void}} [args.deps]
- * @returns {Promise<{patched: string[]}>} `ns/name` keys actually re-pointed
+ * @param {{ s3Config: object|null, projectName: string, envName: string,
+ *   ca: 'prod'|'staging'|null }} [args.snapshot] - where the env's TLS
+ *   snapshot lives; `ca` is the one the last deploy recorded (envConfig.tls.ca)
+ * @param {{kubectl?: Function, quietKubectl?: Function, readSnapshot?: Function,
+ *   trustRoots?: readonly string[], warn?: (msg: string) => void}} [args.deps]
+ * @returns {Promise<{patched: string[], tls?: {restored: boolean, reason: string}}>}
+ *   `ns/name` keys actually re-pointed, and the TLS restore outcome when a
+ *   snapshot was asked for
  */
-export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, deps = {} }) {
+export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, snapshot, deps = {} }) {
   const { kubectl = sshKubectl, warn = (m) => p.log.warn(m) } = deps;
   const patched = [];
+  let tls;
   for (const { namespace, name } of PROMOTABLE_CERTIFICATES) {
     try {
       const raw = await kubectl(promotedIp, sshKeyPath, [
@@ -516,6 +536,29 @@ export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, deps = {} }) {
       // No annotation = a pre-policy cluster (or a hand-managed cert): its
       // issuerRef was never redirected, so there is nothing to promote.
       if (!target || target === current) continue;
+      if (snapshot && namespace === TLS_NAMESPACE && name === TLS_CERTIFICATE) {
+        const outcome = await promoteTlsFromSnapshot({
+          promotedIp,
+          sshKeyPath,
+          snapshot,
+          target,
+          dnsNames: cert?.spec?.dnsNames,
+          deps,
+        });
+        tls = outcome.tls;
+        if (outcome.promoted) {
+          patched.push(`${namespace}/${name}`);
+          continue;
+        }
+        if (outcome.error) {
+          warn(
+            `promote-issuer: the certificate restore for ${namespace}/${name} stopped ` +
+              `(${outcome.error}); re-pointing it at its ACME issuer instead, so cert-manager ` +
+              `requests a new certificate. If the site has no certificate after the failover, ` +
+              `the next deploy re-creates it.`,
+          );
+        }
+      }
       await kubectl(promotedIp, sshKeyPath, [
         'patch',
         'certificate',
@@ -537,7 +580,141 @@ export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, deps = {} }) {
       );
     }
   }
-  return { patched };
+  return tls ? { patched, tls } : { patched };
+}
+
+/**
+ * Where a k8s-ha failover finds the env's TLS snapshot. The CA is the one
+ * the last deploy recorded (envConfig.tls.ca), never a guess: with none the
+ * S3 config is not even resolved, and the promotion re-points the
+ * Certificate as before. The backup credentials come from the record and
+ * the environment only; a failover never prompts. Never throws.
+ *
+ * @param {{ envName: string, envConfig: object, projectName: string,
+ *   deps?: { resolveS3?: Function } }} args
+ * @returns {Promise<{ s3Config: object|null, projectName: string, envName: string,
+ *   ca: 'prod'|'staging'|null }>}
+ */
+export async function k8sTlsSnapshotInputs({ envName, envConfig, projectName, deps = {} }) {
+  const { resolveS3 = resolveS3Config } = deps;
+  const ca = envConfig?.tls?.ca ?? null;
+  let s3Config = null;
+  if (ca) {
+    try {
+      s3Config = await resolveS3({
+        isCompose: false,
+        envName,
+        projectName,
+        envConfig,
+        skipPrompts: true,
+      });
+    } catch {
+      s3Config = null;
+    }
+  }
+  return { s3Config, projectName, envName, ca };
+}
+
+const TLS_NAMESPACE = 'vibecarbon';
+const TLS_CERTIFICATE = 'vibecarbon-tls';
+
+/** Per-piece bounds of the promotion's certificate restore (kubectl over ssh). */
+const PROMOTE_TLS_KUBECTL_TIMEOUT_MS = 30_000;
+const PROMOTE_TLS_WRITE_TIMEOUT_MS = 60_000;
+
+/**
+ * Serve the primary's certificate on the promoted cluster. Only when the
+ * env's snapshot is restorable for the promote annotation's issuer and the
+ * live Certificate's names (read and judged first, nothing touched yet):
+ *
+ *   1. delete Certificate/vibecarbon-tls (cert-manager keeps the Secret), so
+ *      nothing re-issues the Secret while it is written;
+ *   2. restore the Secret (restoreK8sTlsSecret: its overwrite rule and
+ *      create/replace preconditions), with the target as issuer annotation;
+ *   3. re-create the Certificate from the shared renderer with the target as
+ *      its issuer: it finds a Secret that matches it and issues nothing.
+ *
+ * The key-bearing calls (the live Secret read, the Secret write) run through
+ * quietSshKubectl; the Secret and the Certificate travel on stdin. Each piece
+ * is bounded: the S3 read (DR_S3_CLIENT_OPTIONS), every kubectl call.
+ *
+ * `promoted: false` without `error`: no restorable snapshot, nothing was
+ * touched, and the caller patches as before. With `error`: a step threw, and
+ * the caller warns once and patches. Never throws.
+ *
+ * @returns {Promise<{ promoted: boolean, tls: {restored: boolean, reason: string}, error?: string }>}
+ */
+async function promoteTlsFromSnapshot({
+  promotedIp,
+  sshKeyPath,
+  snapshot,
+  target,
+  dnsNames,
+  deps,
+}) {
+  const {
+    kubectl = sshKubectl,
+    quietKubectl = quietSshKubectl(promotedIp, sshKeyPath, {
+      timeoutMs: PROMOTE_TLS_WRITE_TIMEOUT_MS,
+    }),
+    readSnapshot,
+    trustRoots,
+  } = deps;
+  const snapshotDeps = {
+    ...(readSnapshot ? { read: readSnapshot } : {}),
+    ...(trustRoots ? { trustRoots } : {}),
+  };
+  try {
+    const found = await readRestorableK8sTlsSnapshot({
+      s3Config: snapshot.s3Config,
+      projectName: snapshot.projectName,
+      envName: snapshot.envName,
+      ca: snapshot.ca,
+      issuerName: target,
+      dnsNames,
+      clientOptions: DR_S3_CLIENT_OPTIONS,
+      deps: snapshotDeps,
+    });
+    if (!found.text) return { promoted: false, tls: { restored: false, reason: found.reason } };
+    // Rendered (and validated) before anything is deleted.
+    const certificate = renderTlsCertificateManifest({
+      dnsNames,
+      issuerName: target,
+      effectiveIssuer: target,
+    });
+    const bounded = { timeout: PROMOTE_TLS_KUBECTL_TIMEOUT_MS };
+    await kubectl(
+      promotedIp,
+      sshKeyPath,
+      ['delete', 'certificate', TLS_CERTIFICATE, '-n', TLS_NAMESPACE, '--ignore-not-found'],
+      bounded,
+    );
+    const restored = await restoreK8sTlsSecret({
+      s3Config: snapshot.s3Config,
+      projectName: snapshot.projectName,
+      envName: snapshot.envName,
+      ca: snapshot.ca,
+      issuerName: target,
+      dnsNames,
+      runKubectl: quietKubectl,
+      deps: { ...snapshotDeps, read: async () => ({ text: found.text }) },
+    });
+    try {
+      await kubectl(promotedIp, sshKeyPath, ['apply', '-f', '-'], {
+        ...bounded,
+        input: certificate,
+      });
+    } catch (err) {
+      return { promoted: false, tls: restored, error: firstErrorLine(err) };
+    }
+    return { promoted: true, tls: restored };
+  } catch (err) {
+    return {
+      promoted: false,
+      tls: { restored: false, reason: 'restore errored' },
+      error: firstErrorLine(err),
+    };
+  }
 }
 
 /**
@@ -1749,6 +1926,10 @@ export async function failoverHA(
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
     promoteIssuer = promoteAcmeIssuer,
+    tlsSnapshotInputs = k8sTlsSnapshotInputs,
+    // Dynamic: the GitOps module pulls in the k8s deploy (R6a).
+    refreshGitopsTls = async (args) =>
+      (await import('./lib/deploy/k8s/gitops-deploy.js')).refreshGitopsTlsVars(args),
     addonRollouts = checkPromotedAddonRollouts,
     writeFence = (srv, key) =>
       writeK8sBackupFence({ ip: srv.standby.ip, sshKeyPath: key, primaryNode: srv.standby.ip }),
@@ -2242,13 +2423,28 @@ export async function failoverHA(
   // the gate on purpose; best-effort inside (a promoted site serving on the
   // self-signed cert is strictly better than an aborted failover, and the
   // reconverge redeploy repairs issuer ownership).
+  //
+  // The TLS certificate reuse rides this step: the promoted cluster's
+  // vibecarbon-tls Secret is restored from the env's snapshot first, so the
+  // promoted site serves a trusted certificate when the DNS flip brings
+  // traffic (promoteTlsFromSnapshot). Bounded per piece; a miss re-points
+  // the Certificate as before, and cert-manager issues.
   s.start('Promoting ACME issuer on the promoted cluster');
-  const promoted = await promoteIssuer({ promotedIp: servers.standby.ip, sshKeyPath });
+  const promoted = await promoteIssuer({
+    promotedIp: servers.standby.ip,
+    sshKeyPath,
+    snapshot: await tlsSnapshotInputs({
+      envName,
+      envConfig,
+      projectName: projectConfig?.projectName,
+    }),
+  });
   s.stop(
     promoted.patched.length > 0
       ? `ACME issuer promoted (${promoted.patched.join(', ')})`
       : 'ACME issuer already in place',
   );
+  if (promoted.tls) p.log.info(k8sTlsRestoreLine(promoted.tls));
 
   // STEP 6 — Readiness gate: rollout-status each scaled deployment on the
   // promoted cluster, then gate on the public API actually serving. Best-effort;
@@ -2355,6 +2551,26 @@ export async function failoverHA(
       `could not fence the retired node (${String(err?.message ?? err).split('\n')[0]}); the ` +
         'next status, failover or deploy that reaches it fences it',
     );
+  }
+
+  // GitOps: each cluster's TLS_CERT_* vars name its Certificate's issuer by
+  // role, and the roles just swapped. Re-seed them now, or the next GitOps
+  // deploy applies the old roles' Certificates and fails on the conflict.
+  // Never fails the failover: a miss prints the command that repairs it.
+  if (projectConfig?.cicdEnabled === true) {
+    let refresh;
+    try {
+      refresh = await refreshGitopsTls({ envName, projectDir: process.cwd() });
+    } catch (err) {
+      refresh = { ok: false, reason: firstErrorLine(err) };
+    }
+    if (!refresh?.ok) {
+      p.log.warn(
+        `could not update the GitOps TLS settings for the new roles (${refresh?.reason ?? 'unknown'}). ` +
+          'A GitOps deploy fails on the TLS Certificate until you run:',
+      );
+      p.log.message(`vibecarbon configure cicd ${envName}`);
+    }
   }
 
   // Every add-on's rollout, now that it no longer holds the outage open.

@@ -36,7 +36,9 @@ vi.mock('../../../src/lib/github-environments.js', () => ({
 }));
 
 const { seedEnvironmentSecrets } = await import('../../../src/lib/github-environments.js');
-const { deployK8sGitOps } = await import('../../../src/lib/deploy/k8s/gitops-deploy.js');
+const { deployK8sGitOps, gitopsTargets, refreshGitopsTlsVars } = await import(
+  '../../../src/lib/deploy/k8s/gitops-deploy.js'
+);
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 type Doc = any;
@@ -190,10 +192,111 @@ describe('deployK8sGitOps seeds the Certificate vars', () => {
 });
 
 describe('configure cicd seeds each HA cluster by its current role', () => {
-  it('passes role from ha.primary.stack, so a failed-over pair seeds the promoted side as primary', () => {
+  it('passes each target role from gitopsTargets', () => {
     const src = readFileSync('src/configure.js', 'utf8');
     const call = src.slice(src.indexOf('await deployK8sGitOps({'));
     expect(call.slice(0, call.indexOf('});'))).toMatch(/\brole: target\.role\b/);
-    expect(src).toMatch(/envConfig\.ha\?\.primary\?\.stack \?\? `\$\{envName\}-primary`/);
+    expect(src).toMatch(/const targets = gitopsTargets\(envName, envConfig\)/);
+  });
+
+  it('gitopsTargets reads the roles from ha.primary.stack, so a failed-over pair seeds the promoted side as primary', () => {
+    expect(gitopsTargets('prod', { deployMode: 'k8s-ha' })).toEqual([
+      { suffix: 'primary', envName: 'prod-primary', role: 'primary' },
+      { suffix: 'standby', envName: 'prod-standby', role: 'standby' },
+    ]);
+    expect(
+      gitopsTargets('prod', { deployMode: 'k8s-ha', ha: { primary: { stack: 'prod-standby' } } }),
+    ).toEqual([
+      { suffix: 'primary', envName: 'prod-primary', role: 'standby' },
+      { suffix: 'standby', envName: 'prod-standby', role: 'primary' },
+    ]);
+    expect(gitopsTargets('dev', { deployMode: 'k8s' })).toEqual([
+      { suffix: null, envName: 'dev', role: 'primary' },
+    ]);
+  });
+});
+
+describe('refreshGitopsTlsVars (after a k8s-ha failover)', () => {
+  const project = join(work, 'refresh-project');
+  mkdirSync(project, { recursive: true });
+  writeFileSync(
+    join(project, '.env.local'),
+    'ACME_CA_SERVER=https://acme-staging-v02.api.letsencrypt.org/directory\n',
+  );
+  // After the failover: the old standby stack is primary.
+  const swapped = {
+    environments: {
+      prod: {
+        deployMode: 'k8s-ha',
+        domain: 'app.example.test',
+        dnsProvider: 'hetzner',
+        ha: { primary: { stack: 'prod-standby' }, standby: { stack: 'prod-primary' } },
+      },
+    },
+  };
+
+  it('re-seeds each GitOps-managed environment for its new role', async () => {
+    const seed = vi.fn(async () => {});
+    const listVars = vi.fn(async () => ['SITE_URL', 'TLS_CERT_ISSUER']);
+    const r = await refreshGitopsTlsVars({
+      envName: 'prod',
+      projectDir: project,
+      deps: { loadConfig: () => swapped, listVars, seed },
+    });
+    expect(r).toEqual({ ok: true, refreshed: ['prod-primary', 'prod-standby'] });
+    const byEnv = Object.fromEntries(seed.mock.calls.map((c) => [c[0], c]));
+    expect(byEnv['prod-primary'][1]).toEqual({});
+    expect(byEnv['prod-primary'][2]).toEqual({
+      TLS_CERT_ISSUER: 'letsencrypt-staging-hetzner',
+      TLS_CERT_EFFECTIVE_ISSUER: STANDBY_SELFSIGNED_ISSUER,
+      TLS_CERT_DNS_NAMES: 'app.example.test,*.app.example.test',
+    });
+    expect(byEnv['prod-standby'][2]).toMatchObject({
+      TLS_CERT_EFFECTIVE_ISSUER: 'letsencrypt-staging-hetzner',
+    });
+    // Every gh call is bounded.
+    expect(byEnv['prod-standby'][3]).toEqual({ timeout: expect.any(Number) });
+    expect(listVars).toHaveBeenCalledWith('prod-primary', { timeout: expect.any(Number) });
+  });
+
+  it('leaves an environment without the TLS vars alone (not GitOps-managed)', async () => {
+    const seed = vi.fn(async () => {});
+    const r = await refreshGitopsTlsVars({
+      envName: 'prod',
+      projectDir: project,
+      deps: {
+        loadConfig: () => swapped,
+        listVars: async (env: string) => (env === 'prod-primary' ? [] : ['TLS_CERT_ISSUER']),
+        seed,
+      },
+    });
+    expect(r).toEqual({ ok: true, refreshed: ['prod-standby'] });
+    expect(seed).toHaveBeenCalledTimes(1);
+  });
+
+  it('never throws: a gh failure or timeout is a reason', async () => {
+    const failing = await refreshGitopsTlsVars({
+      envName: 'prod',
+      projectDir: project,
+      deps: {
+        loadConfig: () => swapped,
+        listVars: async () => {
+          throw new Error('Command failed: gh variable list\nHTTP 502');
+        },
+      },
+    });
+    expect(failing).toEqual({ ok: false, reason: 'Command failed: gh variable list' });
+    const slow = await refreshGitopsTlsVars({
+      envName: 'prod',
+      projectDir: project,
+      deps: {
+        loadConfig: () => swapped,
+        listVars: async () => ['TLS_CERT_ISSUER'],
+        seed: async () => {
+          throw Object.assign(new Error('Command failed: gh variable set'), { timedOut: true });
+        },
+      },
+    });
+    expect(slow).toEqual({ ok: false, reason: 'GitHub did not answer in time' });
   });
 });

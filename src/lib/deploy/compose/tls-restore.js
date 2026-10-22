@@ -26,7 +26,12 @@
  */
 import { sshRun } from '../../ssh.js';
 import { RECONCILE_FLAGS_SED } from '../bundle.js';
-import { inspectComposeAcme, readTlsSnapshot, tlsSnapshotKey } from '../tls-snapshot.js';
+import {
+  DR_S3_CLIENT_OPTIONS,
+  inspectComposeAcme,
+  readTlsSnapshot,
+  tlsSnapshotKey,
+} from '../tls-snapshot.js';
 
 /** The reason a restore leaves a live apex certificate alone. */
 export const LIVE_CERTIFICATE_PRESENT = 'live certificate present';
@@ -43,10 +48,7 @@ export const RESTORE_TIMED_OUT = 'restore timed out';
 export const FAILOVER_TLS_BOUNDS = {
   checkTimeoutMs: 30_000,
   writeTimeoutMs: 60_000,
-  s3ClientOptions: {
-    maxAttempts: 1,
-    requestHandler: { connectionTimeout: 10_000, requestTimeout: 10_000 },
-  },
+  s3ClientOptions: DR_S3_CLIENT_OPTIONS,
 };
 
 const SAFE_NAME_RE = /^[A-Za-z0-9.-]+$/;

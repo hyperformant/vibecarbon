@@ -27,9 +27,11 @@ import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-
 import { tlsCertificateVars } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { spinner } from '../../cli/progress.js';
 import { gitSafeEnv } from '../../command.js';
+import { loadProjectConfig } from '../../config.js';
 import { featureConfigKeys, featureSecretKeys } from '../../config-registry.js';
 import { parseDotenv } from '../../dotenv.js';
 import {
+  listEnvironmentVariables,
   seedEnvironmentSecrets,
   seedOrgSecrets,
   triggerDeployWorkflow,
@@ -244,19 +246,8 @@ export async function deployK8sGitOps(args) {
 
   // Before anything is committed or seeded: a malformed backup config fails here.
   const backupSettings = resolveBackupSettings(backupConfig);
-  // The Certificate deploy.yml renders (scripts/render-tls-certificate.mjs):
-  // the same issuer and names the CLI deploy renders, computed once here and
-  // validated before anything is seeded.
-  const { issuerName, dnsNames } = k8sTlsIdentity({
-    projectDir,
-    dnsProvider,
-    domain: domain || 'localhost',
-  });
-  const tlsCertVars = tlsCertificateVars({
-    dnsNames,
-    issuerName,
-    effectiveIssuer: role === 'standby' ? STANDBY_SELFSIGNED_ISSUER : issuerName,
-  });
+  // The Certificate deploy.yml renders, validated before anything is seeded.
+  const tlsCertVars = gitopsTlsCertificateVars({ projectDir, dnsProvider, domain, role });
 
   const s = spinner();
   const skipCiStr = skipCi ? ' [skip ci]' : '';
@@ -338,6 +329,99 @@ export async function deployK8sGitOps(args) {
   s.stop(`Workflow run ${result.runId} succeeded`);
 
   return { runId: result.runId, pushed };
+}
+
+/**
+ * The GitHub Environments of an environment, one per cluster, each with its
+ * cluster's CURRENT role: a k8s-ha env has `<env>-primary` and
+ * `<env>-standby`, and a failover swaps which stack is primary
+ * (envConfig.ha.primary.stack); any other env has one, the primary.
+ *
+ * @param {string} envName
+ * @param {object} envConfig
+ * @returns {Array<{ suffix: 'primary'|'standby'|null, envName: string, role: 'primary'|'standby' }>}
+ */
+export function gitopsTargets(envName, envConfig) {
+  const isHA = envConfig?.deployMode === 'kubernetes-ha' || envConfig?.deployMode === 'k8s-ha';
+  if (!isHA) return [{ suffix: null, envName, role: 'primary' }];
+  const primaryStack = envConfig.ha?.primary?.stack ?? `${envName}-primary`;
+  const roleOf = (stack) => (stack === primaryStack ? 'primary' : 'standby');
+  return ['primary', 'standby'].map((suffix) => ({
+    suffix,
+    envName: `${envName}-${suffix}`,
+    role: roleOf(`${envName}-${suffix}`),
+  }));
+}
+
+/**
+ * The TLS_CERT_* vars deploy.yml renders the vibecarbon-tls Certificate from
+ * (scripts/render-tls-certificate.mjs): the same issuer and names the CLI
+ * deploy renders, validated. A standby issues from the local self-signed
+ * issuer, with the real ACME issuer in the promote annotation.
+ *
+ * @param {{ projectDir: string, dnsProvider?: string|null, domain?: string|null,
+ *   role?: 'primary'|'standby' }} args
+ * @returns {{ TLS_CERT_ISSUER: string, TLS_CERT_EFFECTIVE_ISSUER: string, TLS_CERT_DNS_NAMES: string }}
+ */
+export function gitopsTlsCertificateVars({ projectDir, dnsProvider, domain, role = 'primary' }) {
+  const { issuerName, dnsNames } = k8sTlsIdentity({
+    projectDir,
+    dnsProvider,
+    domain: domain || 'localhost',
+  });
+  return tlsCertificateVars({
+    dnsNames,
+    issuerName,
+    effectiveIssuer: role === 'standby' ? STANDBY_SELFSIGNED_ISSUER : issuerName,
+  });
+}
+
+/** Bound of each gh call when a failover refreshes the GitOps TLS vars. */
+const REFRESH_GH_TIMEOUT_MS = 20_000;
+
+/**
+ * After a k8s-ha failover swapped the roles: re-seed the TLS_CERT_* vars of
+ * each GitHub Environment `vibecarbon configure cicd` seeded (the ones that
+ * hold TLS_CERT_ISSUER), from the roles .vibecarbon.json now records, so the
+ * next GitOps deploy renders each cluster's Certificate for its new role.
+ * Environments without the vars are not GitOps-managed and are left alone.
+ * Each gh call is bounded. Never throws and never logs: the caller prints
+ * the one warning, with the command that repairs it.
+ *
+ * @param {{ envName: string, projectDir: string,
+ *   deps?: { loadConfig?: Function, listVars?: Function, seed?: Function, timeoutMs?: number } }} args
+ * @returns {Promise<{ ok: true, refreshed: string[] } | { ok: false, reason: string }>}
+ */
+export async function refreshGitopsTlsVars({ envName, projectDir, deps = {} }) {
+  const {
+    loadConfig = loadProjectConfig,
+    listVars = listEnvironmentVariables,
+    seed = seedEnvironmentSecrets,
+    timeoutMs = REFRESH_GH_TIMEOUT_MS,
+  } = deps;
+  try {
+    const projectConfig = loadConfig(projectDir);
+    const envConfig = projectConfig?.environments?.[envName];
+    if (!envConfig) return { ok: false, reason: `no ${envName} in .vibecarbon.json` };
+    const refreshed = [];
+    for (const target of gitopsTargets(envName, envConfig)) {
+      const names = await listVars(target.envName, { timeout: timeoutMs });
+      if (!names.includes('TLS_CERT_ISSUER')) continue;
+      const subEnvConfig = projectConfig.environments?.[target.envName] ?? envConfig;
+      const vars = gitopsTlsCertificateVars({
+        projectDir,
+        dnsProvider: subEnvConfig.dnsProvider || envConfig.dnsProvider,
+        domain: subEnvConfig.domain || envConfig.domain,
+        role: target.role,
+      });
+      await seed(target.envName, {}, vars, { timeout: timeoutMs });
+      refreshed.push(target.envName);
+    }
+    return { ok: true, refreshed };
+  } catch (err) {
+    const line = String(err?.message ?? err).split('\n')[0];
+    return { ok: false, reason: err?.timedOut ? 'GitHub did not answer in time' : line };
+  }
 }
 
 /**

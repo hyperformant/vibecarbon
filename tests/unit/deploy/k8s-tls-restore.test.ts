@@ -26,6 +26,8 @@ const {
   LIVE_SECRET_VALID,
   k8sTlsRestoreLine,
   quietKubectl,
+  quietSshKubectl,
+  readRestorableK8sTlsSnapshot,
   restoreK8sTlsSecret,
   snapshotK8sTlsSecret,
 } = await import('../../../src/lib/deploy/k8s/tls-restore.js');
@@ -492,5 +494,121 @@ describe('quietKubectl', () => {
       else process.env.CI = prevCi;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('quietSshKubectl', () => {
+  /** An `ssh` on PATH that records its argv and stdin, prints the snapshot, exits `code`. */
+  function fakeSshBin(code: number, stderrLine = '') {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-quiet-ssh-'));
+    const payload = join(dir, 'payload.json');
+    writeFileSync(payload, SNAP);
+    const bin = join(dir, 'ssh');
+    writeFileSync(
+      bin,
+      `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done > "${dir}/argv"\ncat > "${dir}/stdin"\ncat "${payload}"\ncat "${payload}" >&2\necho "${stderrLine}" >&2\nexit ${code}\n`,
+    );
+    chmodSync(bin, 0o755);
+    return { dir, env: { ...process.env, PATH: `${dir}:${process.env.PATH}` } };
+  }
+
+  it('runs kubectl on the server as sshKubectl does, stdin forwarded, nothing printed', async () => {
+    const { dir, env } = fakeSshBin(0);
+    try {
+      const { result } = await expectNoKeyLeak(SNAP, () =>
+        quietSshKubectl('203.0.113.9', '/keys/deploy_key_prod', { env })(['replace', '-f', '-'], {
+          input: SNAP,
+        }),
+      );
+      expect(result.trim()).toBe(SNAP);
+      const { readFileSync } = await import('node:fs');
+      const argv = readFileSync(join(dir, 'argv'), 'utf8').trim().split('\n');
+      expect(argv).toContain('BatchMode=yes');
+      expect(argv).toContain('root@203.0.113.9');
+      expect(argv.at(-1)).toBe(
+        "'env' 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml' 'kubectl' 'replace' '-f' '-'",
+      );
+      // The Secret travels on stdin, never on argv.
+      expect(readFileSync(join(dir, 'stdin'), 'utf8')).toBe(SNAP);
+      expect(argv.join(' ')).not.toContain(SNAP_KEY_B64);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a failure under CI prints nothing and throws a fixed message with its class', async () => {
+    const { dir, env } = fakeSshBin(
+      1,
+      'Error from server (Conflict): the object has been modified',
+    );
+    const prevCi = process.env.CI;
+    process.env.CI = '1';
+    try {
+      const { result } = await expectNoKeyLeak(SNAP, async () => {
+        try {
+          await quietSshKubectl('203.0.113.9', '/k', { env })(['get', 'secret', 'vibecarbon-tls']);
+          return 'no throw';
+        } catch (err) {
+          return `${(err as Error).message}|${(err as { reason?: string }).reason}`;
+        }
+      });
+      expect(result).toBe('kubectl failed|Conflict');
+    } finally {
+      if (prevCi === undefined) delete process.env.CI;
+      else process.env.CI = prevCi;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('readRestorableK8sTlsSnapshot', () => {
+  const ARGS = { ...BASE, dnsNames: DNS };
+
+  it('returns a snapshot a restore would accept, read with the given client options', async () => {
+    const read = vi.fn(async () => ({ text: SNAP }));
+    const clientOptions = { maxAttempts: 1 };
+    const r = await readRestorableK8sTlsSnapshot({
+      ...ARGS,
+      clientOptions,
+      deps: { ...BASE.deps, read },
+    });
+    expect(r).toEqual({ text: SNAP });
+    expect(read).toHaveBeenCalledWith(
+      S3,
+      tlsSnapshotKey({ projectName: 'proj', envName: 'prod', ca: 'prod', format: 'k8s-secret' }),
+      { clientOptions },
+    );
+  });
+
+  it.each([
+    ['no recorded CA', { ca: null }, /no recorded CA/],
+    ['no backup bucket', { s3Config: null }, /no backup bucket/],
+    ['another issuer', { issuerName: 'letsencrypt-prod-digitalocean' }, /another issuer/],
+    ['other names', { dnsNames: ['other.example.com'] }, /names differ/],
+  ])('refuses on %s, with a fixed reason', async (_l, over, reason) => {
+    const read = vi.fn(async () => ({ text: SNAP }));
+    const r = await readRestorableK8sTlsSnapshot({
+      ...ARGS,
+      ...over,
+      deps: { ...BASE.deps, read },
+    } as never);
+    expect(r.text).toBeNull();
+    expect((r as { reason: string }).reason).toMatch(reason);
+  });
+
+  it('a prod snapshot that does not chain to a trusted root is refused', async () => {
+    const r = await readRestorableK8sTlsSnapshot({
+      ...ARGS,
+      deps: { read: async () => ({ text: SNAP }), trustRoots: [] },
+    });
+    expect((r as { reason: string }).reason).toMatch(/trusted root/);
+  });
+
+  it('passes an S3 timeout through', async () => {
+    const r = await readRestorableK8sTlsSnapshot({
+      ...ARGS,
+      deps: { read: async () => ({ text: null, reason: 'S3 TimeoutError', timedOut: true }) },
+    });
+    expect(r).toEqual({ text: null, reason: 'S3 TimeoutError', timedOut: true });
   });
 });

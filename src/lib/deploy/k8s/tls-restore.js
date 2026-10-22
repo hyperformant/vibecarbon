@@ -25,7 +25,8 @@
  * (key matches certificate, exact names, at least 7 days left, not
  * self-signed). The restored Secret goes to kubectl on stdin, never on argv
  * and never through a temp file. Every kubectl command whose output or input
- * can carry key material runs through quietKubectl, which prints nothing, not
+ * can carry key material runs through quietKubectl (quietSshKubectl on the
+ * failover promotion, which reaches the cluster over ssh), which prints nothing, not
  * even on failure, and a failure is reported by a fixed phrase, never by the
  * command's output. Nothing here logs: callers print the one line
  * (k8sTlsRestoreLine).
@@ -33,6 +34,7 @@
 import { spawn } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
 import tls from 'node:tls';
+import { sshKubectlArgv } from '../../ssh.js';
 import {
   buildRestoredTlsSecret,
   caSlug,
@@ -79,6 +81,48 @@ function kubectlFailureClass(stderr) {
 }
 
 /**
+ * Run one command printing nothing, not even on failure: stdout is piped and
+ * returned, stdin carries `input` (closed right after, or at once when there
+ * is none), and a failure throws the fixed message `kubectl failed` with a
+ * `reason` class read from stderr; the output itself never leaves here.
+ */
+function runQuiet(argv, { env, input, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const fail = (stderr = '') =>
+      reject(Object.assign(new Error('kubectl failed'), { reason: kubectlFailureClass(stderr) }));
+    let child;
+    try {
+      child = spawn(argv[0], argv.slice(1), { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch {
+      fail();
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (d) => {
+      stdout += d;
+    });
+    child.stderr?.on('data', (d) => {
+      stderr += d;
+    });
+    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
+    child.on('error', () => {
+      clearTimeout(timer);
+      fail();
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout);
+      else fail(stderr);
+    });
+    // A command that exits before reading its stdin must not surface EPIPE.
+    child.stdin?.on?.('error', () => {});
+    if (input !== undefined) child.stdin?.write(input);
+    child.stdin?.end();
+  });
+}
+
+/**
  * A kubectl runner that prints nothing, not even under CI or DEBUG: stdout is
  * piped and returned, stdin carries `input` (closed right after, or at once
  * when there is none), and a failure throws the fixed message
@@ -96,40 +140,25 @@ function kubectlFailureClass(stderr) {
  * @returns {(argv: string[], opts?: { input?: string, captureStdout?: boolean, description?: string }) => Promise<string>}
  */
 export function quietKubectl(env, { timeoutMs = QUIET_TIMEOUT_MS } = {}) {
+  return (argv, { input } = {}) => runQuiet(['kubectl', ...argv], { env, input, timeoutMs });
+}
+
+/**
+ * quietKubectl for a k3s server reached over ssh, as sshKubectl reaches it
+ * (same argv, host-key pinning and BatchMode), for the failover promotion.
+ * No transport retry: a write whose connection dropped after it ran would
+ * meet its own Secret. Prints nothing; a failure throws `kubectl failed`
+ * with its class (an ssh failure is `failed`).
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {{ timeoutMs?: number, env?: NodeJS.ProcessEnv }} [options] - `env`
+ *   defaults to this process's own
+ * @returns {(argv: string[], opts?: { input?: string }) => Promise<string>}
+ */
+export function quietSshKubectl(ip, sshKeyPath, { timeoutMs = QUIET_TIMEOUT_MS, env } = {}) {
   return (argv, { input } = {}) =>
-    new Promise((resolve, reject) => {
-      const fail = (stderr = '') =>
-        reject(Object.assign(new Error('kubectl failed'), { reason: kubectlFailureClass(stderr) }));
-      let child;
-      try {
-        child = spawn('kubectl', argv, { env, stdio: ['pipe', 'pipe', 'pipe'] });
-      } catch {
-        fail();
-        return;
-      }
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d) => {
-        stdout += d;
-      });
-      child.stderr?.on('data', (d) => {
-        stderr += d;
-      });
-      const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
-      child.on('error', () => {
-        clearTimeout(timer);
-        fail();
-      });
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        if (code === 0) resolve(stdout);
-        else fail(stderr);
-      });
-      // A kubectl that exits before reading its stdin must not surface EPIPE.
-      child.stdin?.on?.('error', () => {});
-      if (input !== undefined) child.stdin?.write(input);
-      child.stdin?.end();
-    });
+    runQuiet(sshKubectlArgv(ip, sshKeyPath, argv), { env, input, timeoutMs });
 }
 
 /** Every certificate in a PEM bundle, in order; [] when any block is unparsable. */
@@ -199,6 +228,75 @@ function backupPreconditions(s3Config, ca) {
 }
 
 /**
+ * Why a k8s-secret snapshot is not restorable for this issuer and these
+ * names, or null when it is: valid in full (inspectK8sTlsSecret), issued by
+ * this very issuer (same CA and same provider issuer), and, for the prod CA,
+ * chaining to one of `trustRoots`. The reason is a fixed phrase.
+ *
+ * @param {string} text - the snapshot's Secret JSON
+ * @param {{ dnsNames: string[], issuerName: string, ca: 'prod'|'staging',
+ *   trustRoots: readonly string[] }} args
+ * @returns {string|null}
+ */
+function judgeK8sTlsSnapshot(text, { dnsNames, issuerName, ca, trustRoots }) {
+  const verdict = inspectK8sTlsSecret(text, { dnsNames });
+  if (!verdict.ok) return `snapshot refused: ${verdict.reason}`;
+  // Only this deploy's own issuer: another CA's or another provider's
+  // certificate is no reuse (the Certificate's issuerRef would not match
+  // what was issued), and the restored annotation would misstate it.
+  if (verdict.issuerName !== issuerName || caSlug(verdict.issuerName) !== ca) {
+    return 'snapshot refused: issued by another issuer';
+  }
+  if (ca === 'prod') {
+    const crt = Buffer.from(JSON.parse(text).data['tls.crt'], 'base64').toString('utf8');
+    if (!chainReachesTrustedRoot(crt, trustRoots)) {
+      return 'snapshot refused: certificate does not chain to a trusted root';
+    }
+  }
+  return null;
+}
+
+/**
+ * Read the k8s-secret snapshot of this env and CA and judge it as a restore
+ * would (judgeK8sTlsSnapshot), before anything on the cluster is touched. A
+ * failover reads first because its restore has a step to undo: the
+ * Certificate is deleted only once there is a snapshot worth restoring.
+ * Never logs, and throws only when its reader does (readTlsSnapshot never
+ * does); the reason is a fixed phrase.
+ *
+ * @param {{ s3Config: object|null, projectName: string, envName: string,
+ *   ca: 'prod'|'staging'|null, issuerName: string, dnsNames: string[],
+ *   clientOptions?: object,
+ *   deps?: { read?: Function, trustRoots?: readonly string[] } }} args
+ * @returns {Promise<{ text: string } | { text: null, reason: string, timedOut?: boolean }>}
+ */
+export async function readRestorableK8sTlsSnapshot({
+  s3Config,
+  projectName,
+  envName,
+  ca,
+  issuerName,
+  dnsNames,
+  clientOptions,
+  deps = {},
+}) {
+  const read = deps.read ?? readTlsSnapshot;
+  const trustRoots = deps.trustRoots ?? tls.rootCertificates;
+  const none = (reason, extra = {}) => ({ text: null, reason, ...extra });
+  const missing = backupPreconditions(s3Config, ca);
+  if (missing) return none(missing);
+  if (!issuerName) return none('no issuer');
+  if (!Array.isArray(dnsNames) || dnsNames.length === 0) return none('no certificate names');
+  const key = tlsSnapshotKey({ projectName, envName, ca, format: 'k8s-secret' });
+  const { text, reason, timedOut } = clientOptions
+    ? await read(s3Config, key, { clientOptions })
+    : await read(s3Config, key);
+  if (!text) return none(reason ?? 'no snapshot', timedOut ? { timedOut: true } : {});
+  const refused = judgeK8sTlsSnapshot(text, { dnsNames, issuerName, ca, trustRoots });
+  return refused ? none(refused) : { text };
+}
+
+/**
  * Restore the last k8s-secret snapshot into Secret/vibecarbon-tls when the
  * cluster has no valid one (the overwrite rule in the header). Runs before
  * the Certificate is applied, so cert-manager finds a Secret that matches it
@@ -241,20 +339,8 @@ export async function restoreK8sTlsSecret({
     const key = tlsSnapshotKey({ projectName, envName, ca, format: 'k8s-secret' });
     const { text, reason } = await read(s3Config, key);
     if (!text) return skip(reason ?? 'no snapshot');
-    const verdict = inspectK8sTlsSecret(text, { dnsNames });
-    if (!verdict.ok) return skip(`snapshot refused: ${verdict.reason}`);
-    // Only this deploy's own issuer: another CA's or another provider's
-    // certificate is no reuse (the Certificate's issuerRef would not match
-    // what was issued), and the restored annotation would misstate it.
-    if (verdict.issuerName !== issuerName || caSlug(verdict.issuerName) !== ca) {
-      return skip('snapshot refused: issued by another issuer');
-    }
-    if (ca === 'prod') {
-      const crt = Buffer.from(JSON.parse(text).data['tls.crt'], 'base64').toString('utf8');
-      if (!chainReachesTrustedRoot(crt, trustRoots)) {
-        return skip('snapshot refused: certificate does not chain to a trusted root');
-      }
-    }
+    const refused = judgeK8sTlsSnapshot(text, { dnsNames, issuerName, ca, trustRoots });
+    if (refused) return skip(refused);
     const manifest = buildRestoredTlsSecret(text, { namespace: NAMESPACE, issuerName });
     if (liveVersion) manifest.metadata.resourceVersion = liveVersion;
 

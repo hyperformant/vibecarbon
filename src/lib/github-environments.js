@@ -31,10 +31,10 @@ import { DNS_PROVIDERS } from './dns-provider.js';
  * Get the current repo's `owner/name` from the gh CLI. Relies on a git
  * remote being configured (which `vibecarbon create` sets up).
  */
-async function getRepoSlug() {
+async function getRepoSlug({ timeout } = {}) {
   const out = await runCommandAsync(
     ['gh', 'repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
-    { silent: true },
+    { silent: true, timeout },
   );
   return out.toString().trim();
 }
@@ -43,11 +43,36 @@ async function getRepoSlug() {
  * Ensure a GitHub Environment exists on the customer's repo. Idempotent.
  * `gh api -X PUT` creates if missing, no-op if present.
  */
-export async function ensureEnvironment(envName) {
-  const repo = await getRepoSlug();
+export async function ensureEnvironment(envName, { timeout } = {}) {
+  const repo = await getRepoSlug({ timeout });
   await runCommandAsync(['gh', 'api', `repos/${repo}/environments/${envName}`, '-X', 'PUT'], {
     silent: true,
+    timeout,
   });
+}
+
+/**
+ * The names of the variables a GitHub Environment holds; [] when the
+ * environment does not exist (gh answers HTTP 404). Any other failure throws.
+ *
+ * @param {string} envName
+ * @param {{ timeout?: number }} [options] - per gh call, in ms
+ * @returns {Promise<string[]>}
+ */
+export async function listEnvironmentVariables(envName, { timeout } = {}) {
+  try {
+    const out = await runCommandAsync(
+      ['gh', 'variable', 'list', '--env', envName, '--json', 'name', '-q', '.[].name'],
+      { silent: true, timeout },
+    );
+    return String(out ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch (err) {
+    if (/HTTP 404|Not Found/i.test(String(err?.stderr ?? ''))) return [];
+    throw err;
+  }
 }
 
 /**
@@ -64,11 +89,11 @@ export async function ensureEnvironment(envName) {
  * Returns false if the value is empty (skips the call — GH rejects empty
  * secrets). True on successful write.
  */
-async function setSecretFromBodyFile(key, value, env) {
+async function setSecretFromBodyFile(key, value, env, { timeout } = {}) {
   if (!value) return false;
   const args = ['gh', 'secret', 'set', key];
   if (env) args.push('--env', env);
-  await runCommandAsync(args, { silent: true, input: value });
+  await runCommandAsync(args, { silent: true, input: value, timeout });
   return true;
 }
 
@@ -77,11 +102,11 @@ async function setSecretFromBodyFile(key, value, env) {
  * --body-file, so the value goes on argv. Acceptable since these are
  * non-secret (network IDs, URLs).
  */
-async function setVariable(key, value, env) {
+async function setVariable(key, value, env, { timeout } = {}) {
   if (value === undefined || value === null || value === '') return false;
   const args = ['gh', 'variable', 'set', key, '--body', String(value)];
   if (env) args.push('--env', env);
-  await runCommandAsync(args, { silent: true });
+  await runCommandAsync(args, { silent: true, timeout });
   return true;
 }
 
@@ -156,18 +181,20 @@ export async function seedBuildVars(viteArgs) {
  * @param {string} envName - "dev" | "staging" | "prod"
  * @param {object} secrets - Key-value map of secret names → values.
  * @param {object} vars - Key-value map of variable names → values.
+ * @param {{ timeout?: number }} [options] - bound of each gh call, in ms
+ *   (none by default; a failover passes one so it never waits on GitHub)
  */
-export async function seedEnvironmentSecrets(envName, secrets, vars = {}) {
-  await ensureEnvironment(envName);
+export async function seedEnvironmentSecrets(envName, secrets, vars = {}, { timeout } = {}) {
+  await ensureEnvironment(envName, { timeout });
 
   const appliedSecrets = [];
   for (const [key, value] of Object.entries(secrets)) {
-    if (await setSecretFromBodyFile(key, value, envName)) appliedSecrets.push(key);
+    if (await setSecretFromBodyFile(key, value, envName, { timeout })) appliedSecrets.push(key);
   }
 
   const appliedVars = [];
   for (const [key, value] of Object.entries(vars)) {
-    if (await setVariable(key, value, envName)) appliedVars.push(key);
+    if (await setVariable(key, value, envName, { timeout })) appliedVars.push(key);
   }
   return { secrets: appliedSecrets, vars: appliedVars };
 }

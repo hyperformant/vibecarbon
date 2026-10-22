@@ -1596,7 +1596,7 @@ export async function runConfigureCicd(envName) {
   // cluster. This is the body that orchestrator.js used to run inline when
   // --gitops was passed (deleted in PR 5).
   p.log.step('Stage 2: install Flux + seed GitHub Environment + trigger first reconcile');
-  const { deployK8sGitOps } = await import('./lib/deploy/k8s/gitops-deploy.js');
+  const { deployK8sGitOps, gitopsTargets } = await import('./lib/deploy/k8s/gitops-deploy.js');
   const { getImageTag } = await import('./lib/ci-setup.js');
   const providerCreds = {
     hetznerApiToken: readOperatorVar('HETZNER_API_TOKEN').value || '',
@@ -1657,17 +1657,9 @@ export async function runConfigureCicd(envName) {
   // HA clusters split into <env>-primary and <env>-standby kubeconfigs;
   // each needs its own GitOps handover. The orchestrator used to iterate
   // over `[{suffix:'primary'}, {suffix:'standby'}]` in HA, single in non-HA.
-  const isHA = envConfig.deployMode === 'kubernetes-ha' || envConfig.deployMode === 'k8s-ha';
   // Each cluster's Certificate follows its CURRENT role (a failover swaps
   // which stack is primary), as the CLI deploy renders it.
-  const primaryStack = envConfig.ha?.primary?.stack ?? `${envName}-primary`;
-  const roleOf = (stack) => (stack === primaryStack ? 'primary' : 'standby');
-  const targets = isHA
-    ? [
-        { suffix: 'primary', envName: `${envName}-primary`, role: roleOf(`${envName}-primary`) },
-        { suffix: 'standby', envName: `${envName}-standby`, role: roleOf(`${envName}-standby`) },
-      ]
-    : [{ suffix: null, envName, role: 'primary' }];
+  const targets = gitopsTargets(envName, envConfig);
 
   for (const target of targets) {
     const targetKubeconfig = join(cwd, '.vibecarbon', `kubeconfig-${target.envName}`);
