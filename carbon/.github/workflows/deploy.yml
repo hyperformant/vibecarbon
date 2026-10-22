@@ -337,7 +337,7 @@ jobs:
         run: |
           node scripts/render-tls-certificate.mjs > "$RUNNER_TEMP/certificate.yaml"
           kubectl apply --server-side --field-manager=github-actions-deploy \
-            -f "$RUNNER_TEMP/certificate.yaml" || { echo "::error::the TLS Certificate apply conflicted. Run vibecarbon deploy <env> (or vibecarbon configure cicd <env> if the roles changed), then re-run this workflow"; exit 1; }
+            -f "$RUNNER_TEMP/certificate.yaml" || { echo "::error::the TLS Certificate apply failed (most often a field conflict with a CLI deploy or a failover). Run vibecarbon deploy <env> (or vibecarbon configure cicd <env> if the roles changed), then re-run this workflow"; exit 1; }
 
       - name: Create flux-system Secret (Git auth for private repo)
         # Flux uses `username`/`password` keys on a namespace Secret to

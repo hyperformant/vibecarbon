@@ -132,10 +132,10 @@ describe('deploy.yml applies Certificate/vibecarbon-tls (deploy-owned, not Flux)
     expect(step.slice(0, step.indexOf('\n      - name:', 10))).not.toContain('--force-conflicts');
   });
 
-  it('a conflicting apply fails with one error line naming the repair, and no secret', () => {
+  it('a failed apply fails with one error line naming the repair, and no secret', () => {
     const body = step.slice(0, step.indexOf('\n      - name:', 10));
     expect(body).toContain(
-      '-f "$RUNNER_TEMP/certificate.yaml" || { echo "::error::the TLS Certificate apply conflicted. Run vibecarbon deploy <env> (or vibecarbon configure cicd <env> if the roles changed), then re-run this workflow"; exit 1; }',
+      '-f "$RUNNER_TEMP/certificate.yaml" || { echo "::error::the TLS Certificate apply failed (most often a field conflict with a CLI deploy or a failover). Run vibecarbon deploy <env> (or vibecarbon configure cicd <env> if the roles changed), then re-run this workflow"; exit 1; }',
     );
     expect(body).not.toMatch(/secrets\./);
   });
