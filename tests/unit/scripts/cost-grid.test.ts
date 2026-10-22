@@ -8,10 +8,11 @@
  * location picked as the deploy wizard picks it for a new project.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BILLING_EXTRAS,
   computeEnvMonthly,
+  main,
   parseHetznerExtras,
   providerEntry,
   renderCostGrid,
@@ -90,6 +91,10 @@ describe('renderCostGrid', () => {
       storage: { vultr: '$18' },
     });
     expect(md).toContain('| Vultr | $20 (ewr) | $40 (ewr + ord) | not yet | not yet |');
+  });
+
+  it('dates the static peak-RAM figures', () => {
+    expect(renderCostGrid(fixture)).toMatch(/Peak RAM was measured 20 October 2026 on Hetzner/);
   });
 
   it('keeps ARM out of customer copy (ruling B5)', () => {
@@ -244,7 +249,56 @@ describe('on the 2026-10-22 catalogs', () => {
   });
 });
 
+describe('the command line', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+  const spies = () => {
+    const fetches = [
+      HetznerProvider,
+      DigitalOceanProvider,
+      VultrProvider,
+      LinodeProvider,
+      ScalewayProvider,
+    ].map((P) => vi.spyOn(P, 'fetchServerTypes').mockResolvedValue(true));
+    const net = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('no network in tests'));
+    return { fetches, net };
+  };
+
+  it('--help and -h print usage and read no catalog or token', async () => {
+    for (const flag of ['--help', '-h']) {
+      const { fetches, net } = spies();
+      const out = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const env = new Proxy({} as NodeJS.ProcessEnv, {
+        get: (_t, key) => {
+          throw new Error(`read env ${String(key)}`);
+        },
+      });
+      await main([flag], env);
+      expect(String(out.mock.calls[0]?.[0])).toMatch(/Usage:[\s\S]*--write/);
+      for (const f of fetches) expect(f).not.toHaveBeenCalled();
+      expect(net).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('refuses an unknown argument before any network or token read', async () => {
+    const { fetches, net } = spies();
+    await expect(main(['--wirte'], {})).rejects.toThrow(/unknown argument --wirte/);
+    for (const f of fetches) expect(f).not.toHaveBeenCalled();
+    expect(net).not.toHaveBeenCalled();
+  });
+});
+
 describe('billing extras', () => {
+  it('the Scaleway root volume price is marked unverified, with both SKUs it may bill as', () => {
+    const root = BILLING_EXTRAS.scaleway.rootVolume as Record<string, unknown>;
+    expect(root.verified).toBe(false);
+    expect(String(root.note)).toMatch(/€3\.45/);
+    expect(String(root.note)).toMatch(/€3\.80/);
+    expect(String(root.note)).toMatch(/Low Latency 5K/);
+  });
+
   it('every declared extra names its source and the date it was checked', () => {
     for (const [provider, extras] of Object.entries(BILLING_EXTRAS)) {
       for (const [name, extra] of Object.entries(extras as Record<string, unknown>)) {

@@ -7,6 +7,7 @@
  * Usage:
  *   node scripts/cost-grid.js          print the section's markdown
  *   node scripts/cost-grid.js --write  replace README.md's cost-grid section
+ *   node scripts/cost-grid.js --help   print the usage
  *
  * Reads each provider's live catalog with read-only GETs (fetchServerTypes,
  * plus Hetzner's /v1/pricing for the floating IP and volume prices). Hetzner
@@ -109,6 +110,9 @@ export const BILLING_EXTRAS = {
       hoursPerMonth: 730,
       source: 'https://www.scaleway.com/en/pricing/storage/',
       checked: '2026-10-22',
+      // Which SBS SKU the root volume bills as is not confirmed on an invoice.
+      verified: false,
+      note: '€3.45/mo as SBS 5K (the price used); €3.80/mo if it bills as Low Latency 5K',
     },
     objectStorage: {
       text: 'usage-based (cents at this size)',
@@ -332,7 +336,7 @@ export function renderCostGrid({ providers, date, storage }) {
     'Each server has at least twice its measured peak RAM, and compose servers never go below 4 GB.',
     "Totals include billed public IPv4 (Hetzner, Scaleway), the k8s ingress IP and database volume, and Scaleway's 40 GB root volume.",
     "The region in a cell is where a new project deploys by default, the cheapest location on the provider's home continent; HA standbys sit in a second location on the same continent.",
-    'Peak RAM was measured on Hetzner with the observability add-on running, so a default install uses less.',
+    'Peak RAM was measured 20 October 2026 on Hetzner with the observability add-on running, so a default install uses less.',
   ];
   if (hetzner) {
     const code = currencyCode(hetzner.currency);
@@ -443,8 +447,28 @@ export async function buildGrid(env, log) {
   return renderCostGrid({ providers, date: today(), storage });
 }
 
+const USAGE = `Usage: node scripts/cost-grid.js [--write]
+
+Prints the README's cost-grid section, priced from each provider's live catalog.
+
+  --write     replace the section in README.md
+  -h, --help  print this usage
+
+Hetzner and DigitalOcean need HETZNER_API_TOKEN and DIGITALOCEAN_API_TOKEN;
+without one, that provider is skipped with a note.`;
+
+const KNOWN_ARGS = new Set(['--write', '--help', '-h']);
+
 /** The CLI: print the section, or with --write replace it in README.md. */
 export async function main(argv = process.argv.slice(2), env = process.env) {
+  // Arguments first: a typo must not cost a catalog fetch, and --help reads
+  // no token.
+  const unknown = argv.find((arg) => !KNOWN_ARGS.has(arg));
+  if (unknown) throw new Error(`cost-grid: unknown argument ${unknown}; run with --help`);
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(USAGE);
+    return;
+  }
   const section = await buildGrid(env, (line) => console.error(line));
   if (!argv.includes('--write')) {
     console.log(section);
