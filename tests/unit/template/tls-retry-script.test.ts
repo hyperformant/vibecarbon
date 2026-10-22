@@ -57,6 +57,8 @@ type Fixture = {
   resolvesV6?: string[];
   /** What `hostname -I` prints. */
   hostAddrs?: string[];
+  /** The stand-in backup/tls-snapshot.sh exits 1. */
+  snapshotFails?: boolean;
 };
 
 /** A project dir with shims answering from fixture files. */
@@ -70,6 +72,7 @@ function project(f: Fixture = {}) {
     resolvesV4 = [HOST_V4],
     resolvesV6 = [],
     hostAddrs = [HOST_V4, '10.0.0.2', '172.17.0.1'],
+    snapshotFails = false,
   } = f;
   const dir = mkdtempSync(join(scratch, 'p-'));
   const bin = join(dir, 'bin');
@@ -103,6 +106,12 @@ function project(f: Fixture = {}) {
   );
   writeFileSync(join(fx, 'host'), `${hostAddrs.join(' ')} \n`);
   if (retired) writeFileSync(join(dir, '.vibecarbon-retired'), '');
+  // A stand-in for the snapshot script: records its run, prints a marker on stdout.
+  mkdirSync(join(dir, 'backup'));
+  writeFileSync(
+    join(dir, 'backup', 'tls-snapshot.sh'),
+    `printf '%s\\n' "bash backup/tls-snapshot.sh" >> "${log}"\necho "SNAPSHOT-STDOUT"\nexit ${snapshotFails ? 1 : 0}\n`,
+  );
   if (countText !== undefined) writeFileSync(join(dir, 'backups', 'tls-retry.count'), countText);
   const shim = (name: string, body: string) => {
     writeFileSync(join(bin, name), `#!/bin/sh\n${body}`);
@@ -306,6 +315,36 @@ describe('tls-retry.sh: state-change logging', () => {
     const p = project({ acmeHasApex: true });
     expect(run(p).stdout).toContain('certificate for app.example.com is present');
     expect(run(p).stdout).toBe('');
+  });
+
+  const snapshots = (r: ReturnType<typeof run>) =>
+    r.calls.filter((c) => c === 'bash backup/tls-snapshot.sh');
+
+  it('the first tick that finds the certificate snapshots it once, on stderr', () => {
+    const p = project({ acmeHasApex: true });
+    const first = run(p);
+    expect(snapshots(first)).toHaveLength(1);
+    expect(first.stdout).not.toContain('SNAPSHOT-STDOUT');
+    expect(first.stderr).toContain('SNAPSHOT-STDOUT');
+    // The calls log is cumulative: still the one run.
+    expect(snapshots(run(p))).toHaveLength(1);
+  });
+
+  it('a certificate that lands after restarts is snapshotted when it is first seen', () => {
+    const p = project({ acmeHasApex: false });
+    expect(snapshots(run(p))).toHaveLength(0);
+    writeFileSync(join(p.dir, 'fx', 'apex'), '0');
+    expect(snapshots(run(p))).toHaveLength(1);
+  });
+
+  it('a failed snapshot never fails the tick', () => {
+    const r = runRetry({ acmeHasApex: true, snapshotFails: true });
+    expect(r.code, r.stderr).toBe(0);
+    expect(snapshots(r)).toHaveLength(1);
+  });
+
+  it('no certificate: no snapshot', () => {
+    expect(snapshots(runRetry({ acmeHasApex: false }))).toHaveLength(0);
   });
 
   it('a young Traefik is logged once', () => {

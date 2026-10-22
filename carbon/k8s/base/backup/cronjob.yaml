@@ -347,8 +347,17 @@ spec:
                       echo "tls snapshot skipped: no valid TLS_SNAPSHOT_S3_PREFIX in ConfigMap vibecarbon-backup-settings" >&2
                     else
                       tls_issuer="$(timeout 60 kubectl get secret vibecarbon-tls -n vibecarbon -o jsonpath="{.metadata.annotations.cert-manager\.io/issuer-name}" 2>/dev/null)" || tls_issuer=""
+                      # The prefix ends in its CA folder (tls/prod or
+                      # tls/staging); the issuer CA is staging when its name
+                      # says so (caSlug). A snapshot under the other folder
+                      # would be restored as the wrong CA.
+                      tls_ca="${tls_prefix##*/}"
+                      tls_issuer_ca=prod
+                      if [[ "$tls_issuer" == *staging* ]]; then tls_issuer_ca=staging; fi
                       if [ -z "$tls_issuer" ] || [ "$tls_issuer" = "vibecarbon-standby-selfsigned" ]; then
                         echo "tls snapshot skipped: Secret vibecarbon-tls is missing or not issued by an ACME issuer (issuer: ${tls_issuer:-none})" >&2
+                      elif [ "$tls_issuer_ca" != "$tls_ca" ]; then
+                        echo "tls snapshot skipped: Secret vibecarbon-tls was issued by ${tls_issuer}, another CA than the ${tls_ca} folder of the snapshot prefix" >&2
                       # Bounded (busybox timeout), so a hung exec cannot run
                       # the Job into its deadline. The upload bound is the
                       # shorter one: if the read hangs, the upload is killed

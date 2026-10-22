@@ -25,8 +25,10 @@ set -u
 #   4. A disarmed issuer (compose-ha standby, src/lib/deploy/acme-role.js):
 #      exit 0. Read from the RUNNING container command, never from .env.
 #   5. acme.json already holds a certificate whose "main" is the apex: done,
-#      the restart counter resets, exit 0. acme.json is only ever grep -q-ed
-#      inside the traefik container; its content never reaches this output.
+#      the restart counter resets, exit 0. The first run that sees it also
+#      runs backup/tls-snapshot.sh once, so the certificate is saved before
+#      the next nightly backup. acme.json is only ever grep -q-ed inside the
+#      traefik container; its content never reaches this output.
 #   6. The apex does not resolve to this host ("deploy first, point DNS
 #      after"): waiting for DNS, exit 0, neither restarting nor counting. A
 #      host with no public address of its own (behind NAT) cannot tell, so it
@@ -63,6 +65,7 @@ log() {
 }
 
 # note <state> <message>: log the message only when the state changed.
+# Returns 0 when it changed, 1 when it did not.
 note() {
   local last=""
   if [ -f "$STATE_FILE" ]; then
@@ -72,7 +75,9 @@ note() {
     log "$2"
     mkdir -p backups
     printf '%s\n' "$1" > "$STATE_FILE"
+    return 0
   fi
+  return 1
 }
 
 if [ -f .vibecarbon-retired ]; then
@@ -107,7 +112,12 @@ esac
 apex_re="$(printf '%s' "$domain" | sed 's/[.]/\\./g')"
 if docker compose exec -T traefik grep -Eq "\"main\": ?\"${apex_re}\"" /letsencrypt/acme.json; then
   rm -f "$COUNT_FILE"
-  note present "certificate for ${domain} is present"
+  if note present "certificate for ${domain} is present"; then
+    # First tick that sees it: save the snapshot now, so a certificate this
+    # retry landed is in the bucket before the next nightly backup. Output to
+    # stderr (the log); its status never changes this run.
+    bash backup/tls-snapshot.sh >&2 || true
+  fi
   exit 0
 fi
 

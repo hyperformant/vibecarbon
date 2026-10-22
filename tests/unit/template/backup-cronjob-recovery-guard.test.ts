@@ -230,6 +230,40 @@ esac
     }
   });
 
+  // The issuer's CA must be the CA folder the prefix ends in (tls/<ca>):
+  // caSlug's rule, "staging" in the issuer name. A project or env merely
+  // named staging is no staging folder.
+  it.each([
+    ['a staging issuer, the prod folder', 'letsencrypt-staging-cloudflare', PREFIX, false],
+    [
+      'a prod issuer, the staging folder',
+      'letsencrypt-prod-cloudflare',
+      's3://proj-backups/backups/proj/prod/tls/staging',
+      false,
+    ],
+    [
+      'a staging issuer, the staging folder',
+      'letsencrypt-staging-cloudflare',
+      's3://proj-backups/backups/proj/prod/tls/staging',
+      true,
+    ],
+    [
+      'a prod issuer, the prod folder of an env named staging',
+      'letsencrypt-prod-cloudflare',
+      's3://proj-backups/backups/proj/staging/tls/prod',
+      true,
+    ],
+  ])('%s: the upload follows the CA folder, exit unchanged', (_l, issuer, prefix, upload) => {
+    const r = runCron({ rc: 0, issuer, prefix });
+    expect(r.code, r.stderr).toBe(0);
+    expect(uploads(r).length).toBe(upload ? 1 : 0);
+    if (!upload) {
+      expect(r.stderr).toContain(
+        `tls snapshot skipped: Secret vibecarbon-tls was issued by ${issuer}, another CA than the ${prefix.split('/').pop()} folder of the snapshot prefix`,
+      );
+    }
+  });
+
   it.each([
     ['empty', ''],
     ['not an s3 URL', 'https://x/y'],
