@@ -16,14 +16,19 @@
  * (waitForNewPrimaryApi / assertReplicationStreamingOrDegraded shape) —
  * no sockets in unit tests.
  */
+import { X509Certificate } from 'node:crypto';
+import tls from 'node:tls';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  probeTlsTrustOnce,
   TLS_FIRST_LOOK_BUDGET_MS,
   TLS_READY_MANUAL_BUDGET_MS,
   TLS_READY_POLL_MS,
   tlsVerdict,
   waitForTrustedTls,
 } from '../../../src/lib/deploy/tls-ready.js';
+
+import { makeCert } from './_tls-fixtures.js';
 
 const noSleep = () => Promise.resolve();
 
@@ -173,5 +178,44 @@ describe('budget constants', () => {
     // The fake clock steps 60s per read (the start read included), so 180s
     // allows 3 probes; the old 480s default would have allowed 8.
     expect(probe).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('probeTlsTrustOnce', () => {
+  /** A local TLS server presenting `cert`; resolves its port. */
+  async function serve(cert: string, key: string) {
+    const server = tls.createServer({ cert, key }, (s) => s.end());
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { server, port: (server.address() as { port: number }).port };
+  }
+
+  it('a trusted handshake names the expiry and serial it verified, nothing more', async () => {
+    const { cert, key, ca } = makeCert(['localhost'], 30);
+    const { server, port } = await serve(cert, key);
+    try {
+      const result = await probeTlsTrustOnce('localhost', { port, ca: [ca as string] });
+      const x509 = new X509Certificate(cert);
+      expect(result).toEqual({
+        trusted: true,
+        validTo: new Date(x509.validTo).toISOString(),
+        serialNumber: x509.serialNumber,
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('an untrusted chain is not trusted and names what was served', async () => {
+    const { cert, key } = makeCert(['localhost'], { selfSigned: true });
+    const other = makeCert(['localhost']);
+    const { server, port } = await serve(cert, key);
+    try {
+      const result = await probeTlsTrustOnce('localhost', { port, ca: [other.ca as string] });
+      expect(result.trusted).toBe(false);
+      expect(result).toMatchObject({ served: { subject: 'localhost', issuer: 'localhost' } });
+      expect(result).not.toHaveProperty('serialNumber');
+    } finally {
+      server.close();
+    }
   });
 });

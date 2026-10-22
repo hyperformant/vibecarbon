@@ -59,22 +59,39 @@ export const TLS_PROBE_TIMEOUT_MS = 10_000;
  * verification purely to NAME the served cert for the error message — that
  * insecure attempt can never produce trusted:true.
  *
+ * A trusted handshake also names the certificate it verified: its expiry
+ * (`validTo`, ISO 8601) and `serialNumber` (hex), for `vibecarbon status`.
+ * Never the key or the certificate body.
+ *
  * @param {string} domain
- * @param {{ timeoutMs?: number }} [opts]
- * @returns {Promise<{trusted: boolean, reason?: string, served?: {subject: string, issuer: string}|null}>}
+ * @param {{ timeoutMs?: number, port?: number, ca?: string[] }} [opts] `port`
+ *   and `ca` are test seams (a local server and its throwaway CA).
+ * @returns {Promise<{trusted: true, validTo: string|null, serialNumber: string|null} |
+ *   {trusted: false, reason: string, served: {subject: string, issuer: string}|null}>}
  */
-export async function probeTlsTrustOnce(domain, { timeoutMs = TLS_PROBE_TIMEOUT_MS } = {}) {
-  const ca = (readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')
-    ? stagingProbeCa()
-    : undefined;
+export async function probeTlsTrustOnce(
+  domain,
+  {
+    timeoutMs = TLS_PROBE_TIMEOUT_MS,
+    port = 443,
+    ca = (readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')
+      ? stagingProbeCa()
+      : undefined,
+  } = {},
+) {
   try {
-    await tlsHandshake(domain, { ca, rejectUnauthorized: true, timeoutMs });
-    return { trusted: true };
+    const peer = await tlsHandshake(domain, { ca, port, rejectUnauthorized: true, timeoutMs });
+    return {
+      trusted: true,
+      validTo: peer?.validTo ?? null,
+      serialNumber: peer?.serialNumber ?? null,
+    };
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     let served = null;
     try {
-      served = await tlsHandshake(domain, { ca, rejectUnauthorized: false, timeoutMs });
+      const peer = await tlsHandshake(domain, { ca, port, rejectUnauthorized: false, timeoutMs });
+      served = peer ? { subject: peer.subject, issuer: peer.issuer } : null;
     } catch {
       // Connection-level failure (refused, reset, no DNS) — nothing served.
     }
@@ -84,23 +101,26 @@ export async function probeTlsTrustOnce(domain, { timeoutMs = TLS_PROBE_TIMEOUT_
 
 /**
  * @param {string} domain
- * @param {{ ca?: string[], rejectUnauthorized: boolean, timeoutMs: number }} opts
- * @returns {Promise<{subject: string, issuer: string}|null>} peer cert
- *   identity (insecure mode) or null; resolves only on a completed
- *   handshake, rejects otherwise.
+ * @param {{ ca?: string[], port: number, rejectUnauthorized: boolean, timeoutMs: number }} opts
+ * @returns {Promise<{subject: string, issuer: string, validTo: string|null, serialNumber: string|null}|null>}
+ *   the peer certificate's identity, expiry and serial, or null when none
+ *   was presented; resolves only on a completed handshake, rejects otherwise.
  */
-function tlsHandshake(domain, { ca, rejectUnauthorized, timeoutMs }) {
+function tlsHandshake(domain, { ca, port, rejectUnauthorized, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const socket = tls.connect(
-      { host: domain, port: 443, servername: domain, ca, rejectUnauthorized },
+      { host: domain, port, servername: domain, ca, rejectUnauthorized },
       () => {
         const peer = socket.getPeerCertificate();
         socket.destroy();
+        const validTo = peer?.valid_to ? new Date(peer.valid_to) : null;
         resolve(
           peer?.subject
             ? {
                 subject: peer.subject.CN ?? JSON.stringify(peer.subject),
                 issuer: peer.issuer?.CN ?? JSON.stringify(peer.issuer ?? {}),
+                validTo: validTo && !Number.isNaN(validTo.getTime()) ? validTo.toISOString() : null,
+                serialNumber: peer.serialNumber || null,
               }
             : null,
         );

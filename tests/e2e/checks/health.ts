@@ -597,6 +597,8 @@ export async function checkSslValid(
   deps: {
     attemptFn?: (rejectUnauthorized: boolean) => Promise<SslAttemptResult>;
     sleep?: (ms: number) => Promise<void>;
+    /** The CLI recorded TLS pending for this env (envConfig.tls.state). */
+    tlsPending?: boolean;
   } = {},
 ): Promise<VerificationResult> {
   const start = process.hrtime();
@@ -649,6 +651,9 @@ export async function checkSslValid(
               subject: cert?.subject?.CN ?? 'unknown',
               issuer,
               staging: !rejectUnauthorized,
+              // Public identity only: tls_reused compares it at later steps.
+              serialNumber: cert?.serialNumber ?? '',
+              fingerprint256: cert?.fingerprint256 ?? '',
             },
           });
         },
@@ -679,7 +684,14 @@ export async function checkSslValid(
   // 12 x 15s = 180s of TRUSTED retries — covers the post-failover ACME
   // issuance window (run 11b: ~2 min) with margin, inside the verify step's
   // 600s budget. There is no untrusted pass path.
-  const MAX_SSL_RETRIES = 12;
+  //
+  // A deploy that finished TLS PENDING (envConfig.tls.state, src/lib/deploy/
+  // tls-ready.js) stopped looking after its 180s first look, while issuance
+  // carried on. It gets 32 x 15s = 480s here, so deploy plus this check
+  // still cover the 660s the deploy used to wait on its own. Still no
+  // untrusted pass: past it, the env's state is what `vibecarbon status`
+  // shows and the server's tls-retry cron owns the next attempt.
+  const MAX_SSL_RETRIES = deps.tlsPending ? 32 : 12;
   const SSL_RETRY_DELAY_MS = 15_000;
   const attemptFn = deps.attemptFn ?? attempt;
   const sleepFn = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -707,7 +719,8 @@ export async function checkSslValid(
           responseTimeMs: result.responseTimeMs,
           errorMessage:
             `certificate not trusted after ${Math.round((MAX_SSL_RETRIES * SSL_RETRY_DELAY_MS) / 1000)}s ` +
-            `of trusted retries (staging roots ARE in the trust store, so this is a real ` +
+            `of trusted retries${deps.tlsPending ? ' (the deploy recorded TLS pending)' : ''} ` +
+            `(staging roots ARE in the trust store, so this is a real ` +
             `defect — Traefik default or standby self-signed cert). ` +
             `Served: subject=${lastServed?.subject ?? 'unknown'} issuer=${lastServed?.issuer ?? 'unknown'}. ` +
             `Underlying: ${result.errorMessage ?? 'unknown'}`,
@@ -738,13 +751,16 @@ export async function checkSslValid(
  * All checks are fault-tolerant -- they catch errors and return a fail status
  * rather than throwing.
  */
-export async function runHealthChecks(domain: string): Promise<VerificationResult[]> {
+export async function runHealthChecks(
+  domain: string,
+  opts: { tlsPending?: boolean } = {},
+): Promise<VerificationResult[]> {
   // Run checks concurrently -- they are independent of each other.
   const results = await Promise.all([
     checkApiHealth(domain),
     checkAuthHealth(domain),
     checkUnknownPathNotFound(domain),
-    checkSslValid(domain),
+    checkSslValid(domain, { tlsPending: opts.tlsPending }),
   ]);
 
   return results;
