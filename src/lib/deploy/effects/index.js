@@ -644,20 +644,35 @@ async function verifyTlsReady(ctx) {
  * verify-tls records. Prints one info line and never fails the deploy.
  */
 async function restoreTlsSnapshot(ctx) {
-  const { domain, sshKeyPath, projectConfig, environment } = ctx;
-  const { restoreComposeTls } = await import('../compose/tls-restore.js');
-  const { caSlug } = await import('../tls-snapshot.js');
-  const result = await perfAsync('deploy.tls.restore', () =>
-    restoreComposeTls({
-      ip: ctx.serverIp ?? ctx.primary?.ip ?? null,
-      sshKeyPath,
-      projectName: projectConfig.projectName,
-      domain,
-      envName: environment,
-      ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
-      s3Config: { ...ctx.s3Config, bucket: ctx.backupS3Config?.bucket },
-    }),
-  );
+  let result;
+  let livePresent;
+  try {
+    const { domain, sshKeyPath, projectConfig, environment } = ctx;
+    const { LIVE_CERTIFICATE_PRESENT, restoreComposeTls } = await import(
+      '../compose/tls-restore.js'
+    );
+    livePresent = LIVE_CERTIFICATE_PRESENT;
+    const { caSlug } = await import('../tls-snapshot.js');
+    result = await perfAsync('deploy.tls.restore', () =>
+      restoreComposeTls({
+        ip: ctx.serverIp ?? ctx.primary?.ip ?? null,
+        sshKeyPath,
+        projectName: projectConfig.projectName,
+        domain,
+        envName: environment,
+        ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
+        s3Config: { ...ctx.s3Config, bucket: ctx.backupS3Config?.bucket },
+      }),
+    );
+  } catch {
+    // Fixed phrase: the error could come from anywhere in the restore path.
+    p.log.info('TLS certificate not restored (restore errored). Traefik requests a new one.');
+    return;
+  }
+  if (result.reason === livePresent) {
+    p.log.info('TLS certificate already on the server; nothing to restore.');
+    return;
+  }
   if (!result.restored) {
     p.log.info(`TLS certificate not restored (${result.reason}).`);
     return;
@@ -665,7 +680,7 @@ async function restoreTlsSnapshot(ctx) {
   const restartNote = /did not restart/.test(result.reason)
     ? ' Traefik did not restart, so it loads it on its next start.'
     : '';
-  p.log.info(`TLS certificate for ${domain} restored from its last snapshot.${restartNote}`);
+  p.log.info(`TLS certificate for ${ctx.domain} restored from its last snapshot.${restartNote}`);
 }
 
 /**
@@ -675,8 +690,8 @@ async function restoreTlsSnapshot(ctx) {
  * scheduled backup. A failure is one warning; the deploy still succeeds.
  */
 async function snapshotTls(ctx) {
-  const { snapshotComposeTlsNow } = await import('../compose/tls-restore.js');
   try {
+    const { snapshotComposeTlsNow } = await import('../compose/tls-restore.js');
     await perfAsync('deploy.tls.snapshot', () =>
       snapshotComposeTlsNow({
         ip: ctx.serverIp ?? ctx.primary?.ip ?? null,

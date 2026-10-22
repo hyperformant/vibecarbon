@@ -28,6 +28,9 @@ import { sshRun } from '../../ssh.js';
 import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import { inspectComposeAcme, readTlsSnapshot, tlsSnapshotKey } from '../tls-snapshot.js';
 
+/** The reason a restore leaves a live apex certificate alone. */
+export const LIVE_CERTIFICATE_PRESENT = 'live certificate present';
+
 const SAFE_NAME_RE = /^[A-Za-z0-9.-]+$/;
 const SAFE_PROJECT_RE = /^[A-Za-z0-9._-]+$/;
 
@@ -140,7 +143,7 @@ export async function restoreComposeTls({
           : 'could not check the live certificate',
       );
     }
-    if (live === 'present') return skip('live certificate present');
+    if (live === 'present') return skip(LIVE_CERTIFICATE_PRESENT);
     if (live !== 'absent') return skip('could not check the live certificate');
 
     const key = tlsSnapshotKey({ projectName, envName, ca, format: 'compose-acme' });
@@ -154,7 +157,10 @@ export async function restoreComposeTls({
         ip,
         sshKeyPath,
         ['bash', '-c', writeScript(projectName, domain, Buffer.byteLength(text))],
-        { timeout: WRITE_TIMEOUT_MS, input: text },
+        // No transport retry: a write whose connection dropped after it ran
+        // would rerun and meet its own file (exit 3, misreported as a
+        // certificate that appeared on the server).
+        { timeout: WRITE_TIMEOUT_MS, input: text, transportRetry: false },
       );
     } catch (err) {
       if (err?.status === 3) return skip('a certificate appeared on the server, kept');

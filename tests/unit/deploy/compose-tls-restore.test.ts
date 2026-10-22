@@ -6,6 +6,10 @@
  * saves a fresh snapshot. Neither ever fails the deploy, and no key material
  * reaches operator output or argv.
  */
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { expectNoKeyLeak, forbiddenStrings } from './_no-key-leak.ts';
 import { acmeJson } from './_tls-fixtures.ts';
@@ -137,6 +141,8 @@ describe('restoreComposeTls: a valid snapshot fills an empty acme.json', () => {
     expect(write.argv.slice(0, 2)).toEqual(['bash', '-c']);
     // The key travels on stdin only: never on argv.
     expect(write.opts.input).toBe(VALID);
+    // A dropped connection must not rerun the write (it would meet its own file).
+    expect(write.opts.transportRetry).toBe(false);
     for (const bad of forbiddenStrings(VALID)) {
       expect(write.argv.join(' ').includes(bad)).toBe(false);
     }
@@ -239,6 +245,114 @@ describe('restoreComposeTls: a failed write is reported by exit status only', ()
   });
 });
 
+/**
+ * The rendered scripts run for real under bash/sh, with a fake `docker` on
+ * PATH that executes the in-container command against a temp dir standing in
+ * for the letsencrypt volume. Proves the scripts print no key material, on
+ * success and on every failure exit.
+ */
+describe('rendered restore scripts, executed locally', () => {
+  const SHIM = `#!/bin/bash
+args=("$@")
+for ((i = 0; i < \${#args[@]}; i++)); do
+  case "\${args[$i]}" in
+    ps) echo fake-traefik-id; exit 0 ;;
+    restart) exit "\${FAKE_RESTART_RC:-0}" ;;
+    -c) inner="\${args[$((i + 1))]}"; rest=("\${args[@]:$((i + 2))}"); break ;;
+  esac
+done
+inner="\${inner///letsencrypt/$LE_DIR}"
+if [ -n "\${FAKE_TRUNCATE:-}" ]; then head -c 100 | sh -c "$inner" "\${rest[@]}"; exit $?; fi
+exec sh -c "$inner" "\${rest[@]}"
+`;
+  const RECONCILE =
+    "docker compose -f docker-compose.yml -f docker-compose.prod.yml $([ -f docker-compose.replication.yml ] && echo '-f docker-compose.replication.yml') up -d --remove-orphans\n";
+
+  /** Render both scripts through restoreComposeTls, the way a deploy sends them. */
+  async function renderScripts() {
+    const { ssh, calls } = fakeSsh();
+    await restoreComposeTls({ ...args(), deps: { ssh, read: async () => ({ text: VALID }) } });
+    return { check: calls[0].argv[2], write: calls[1].argv[2] };
+  }
+
+  function rig() {
+    const root = mkdtempSync(join(tmpdir(), 'vc-tls-restore-'));
+    const bin = join(root, 'bin');
+    const project = join(root, 'project');
+    const le = join(root, 'le');
+    for (const d of [bin, project, le]) spawnSync('mkdir', ['-p', d]);
+    writeFileSync(join(bin, 'docker'), SHIM);
+    chmodSync(join(bin, 'docker'), 0o755);
+    writeFileSync(join(project, 'reconcile.sh'), RECONCILE);
+    const run = (script: string, input: string, env: Record<string, string> = {}) => {
+      const r = spawnSync('bash', ['-c', script.replace('cd /opt/myapp', `cd ${project}`)], {
+        input,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, LE_DIR: le, ...env },
+      });
+      const output = `${r.stdout}${r.stderr}`;
+      for (const bad of forbiddenStrings(VALID)) {
+        expect(output.includes(bad), 'key material in script output').toBe(false);
+      }
+      return { code: r.status, stdout: r.stdout };
+    };
+    return { root, le, run };
+  }
+
+  let r: ReturnType<typeof rig>;
+  beforeEach(() => {
+    r = rig();
+  });
+  afterEach(() => {
+    rmSync(r.root, { recursive: true, force: true });
+  });
+
+  it('success: writes acme.json mode 600, leaves no temp copy, prints nothing', async () => {
+    const { write } = await renderScripts();
+    const res = r.run(write, VALID);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toBe('');
+    const f = join(r.le, 'acme.json');
+    expect(readFileSync(f, 'utf8')).toBe(VALID);
+    expect(statSync(f).mode & 0o777).toBe(0o600);
+    expect(spawnSync('ls', ['-A', r.le], { encoding: 'utf8' }).stdout.trim()).toBe('acme.json');
+  });
+
+  it('exit 3: an apex certificate already in the volume is kept', async () => {
+    const { write } = await renderScripts();
+    writeFileSync(join(r.le, 'acme.json'), '{"main": "app.example.com"}');
+    expect(r.run(write, VALID).code).toBe(3);
+    expect(readFileSync(join(r.le, 'acme.json'), 'utf8')).toBe('{"main": "app.example.com"}');
+  });
+
+  it('exit 4: a truncated stream writes nothing', async () => {
+    const { write } = await renderScripts();
+    writeFileSync(join(r.le, 'acme.json'), '{}');
+    expect(r.run(write, VALID, { FAKE_TRUNCATE: '1' }).code).toBe(4);
+    expect(readFileSync(join(r.le, 'acme.json'), 'utf8')).toBe('{}');
+    expect(spawnSync('ls', ['-A', r.le], { encoding: 'utf8' }).stdout.trim()).toBe('acme.json');
+  });
+
+  it('exit 5: written, but the running traefik did not restart', async () => {
+    const { write } = await renderScripts();
+    expect(r.run(write, VALID, { FAKE_RESTART_RC: '1' }).code).toBe(5);
+    expect(readFileSync(join(r.le, 'acme.json'), 'utf8')).toBe(VALID);
+  });
+
+  it('exit 20: a reconcile.sh with no -f set refuses', async () => {
+    const { write } = await renderScripts();
+    writeFileSync(join(r.root, 'project', 'reconcile.sh'), '#!/bin/sh\n');
+    expect(r.run(write, VALID).code).toBe(20);
+  });
+
+  it('the live check prints only present or absent, never the file', async () => {
+    const { check } = await renderScripts();
+    expect(r.run(check, '').stdout.trim()).toBe('absent');
+    writeFileSync(join(r.le, 'acme.json'), VALID);
+    expect(r.run(check, '').stdout.trim()).toBe('present');
+  });
+});
+
 describe('snapshotComposeTlsNow', () => {
   it('runs backup/tls-snapshot.sh from the project dir', async () => {
     const ssh = vi.fn(async () => '');
@@ -332,6 +446,27 @@ describe('effects: one shared effect per step for both compose tiers', () => {
     );
     expect(info).toHaveBeenCalledTimes(1);
     expect(String(info.mock.calls[0][0])).toMatch(/restored/i);
+  });
+
+  it('warm redeploy with a live certificate: one neutral info line', async () => {
+    const { ssh } = fakeSsh({ live: 'present' });
+    H.ssh.mockImplementation(ssh);
+    await EFFECTS.restoreTlsSnapshot(ctx({ serverIp: '10.0.0.1' }));
+    expect(H.read).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls[0][0]).toBe(
+      'TLS certificate already on the server; nothing to restore.',
+    );
+  });
+
+  it('never fails the deploy: a throw anywhere in the effect is one fixed info line', async () => {
+    await expect(
+      EFFECTS.restoreTlsSnapshot(ctx({ serverIp: '10.0.0.1', projectConfig: undefined })),
+    ).resolves.toBeUndefined();
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls[0][0]).toBe(
+      'TLS certificate not restored (restore errored). Traefik requests a new one.',
+    );
   });
 
   it('single compose ctx without a backup bucket: one info line naming the reason', async () => {
