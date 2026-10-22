@@ -146,16 +146,20 @@ A deploy:
    opt-in; or manual if you manage DNS elsewhere)
 3. Issues TLS certificates via ACME DNS-01 (wildcard-capable), or puts back
    the environment's saved certificate ([Certificates](#certificates))
-4. Builds your app image locally and pushes it to the servers over SSH (on
-   k8s-ha the standby cluster is not pushed to: it copies the image from the
-   primary over the private tunnel; if that copy fails the deploy fails, unless
-   `-allow-degraded` is set, which finishes and marks the standby image-missing)
+4. Builds your app image locally and sends only your app's own layers over
+   SSH; servers pull the shared runtime base themselves (compose-ha builds the
+   image on both servers instead). On k8s the image goes once into the
+   cluster's registry and every node pulls it from there. On k8s-ha the
+   standby cluster is not sent to: it copies the image from the primary over
+   the private tunnel; if that copy fails the deploy fails, unless
+   `-allow-degraded` is set, which finishes and marks the standby image-missing
 5. Starts the stack (Postgres, Traefik, your app); a one-shot migrate step
    applies the migrations as the database owner before the app starts, the
    app creates the admin user at startup, and the deploy verifies health
-6. On HA modes: seeds the standby via `pg_basebackup` and verifies TLS
-   streaming replication is live: the deploy **fails** if the standby is not
-   confirmably streaming (use `-allow-degraded` to accept a warm standby)
+6. On HA modes: reseeds the standby from the primary via `pg_basebackup`
+   (every deploy, after both sides are up) and verifies streaming replication
+   is live: the deploy **fails** if the standby is not confirmably streaming
+   (use `-allow-degraded` to accept a warm standby)
 
 Deploys are resumable: a failed run picks up where it left off. Use `-full` to
 redo every step from scratch.
@@ -351,7 +355,7 @@ The k8s-ha standby region is deployed as a minimal, cost-optimized replica:
 - **Idle floor: 2 nodes**, a master (control plane, ingress, replication gateway) and a dedicated database node (the streaming replica database)
 - **Cold app tier:** All app-tier workloads are at `replicas: 0` (the app and cluster-autoscaler)
 - **Add-ons held at zero:** every installed add-on (n8n, Metabase, Redis, observability) is scaled to zero with the app tier; failover scales n8n, Metabase and Redis back up with the app, and the follow-up `vibecarbon deploy` brings observability back
-- **Seeded at deploy:** The database boots from a seed snapshot on first start, immediately becoming a live streaming replica, with no separate reseed cycle
+- **Reseeded at deploy:** Every deploy reseeds the standby database from the primary once both clusters are up, then verifies it is streaming. There is no first-boot seed
 - **Workers provisioned at failover time** via the IaC layer, not idling in advance
 
 **Image delivery:** The operator uploads the app image once, to the primary cluster. The standby then copies it from the primary's registry over the private WireGuard tunnel, so a promoted standby can pull the app from its own registry. If the copy fails, the deploy fails. With `-allow-degraded` it finishes, records the standby as missing its image, and failover refuses it until a deploy copies it. `vibecarbon status` shows a `Standby image` line when the standby is known to be missing it.

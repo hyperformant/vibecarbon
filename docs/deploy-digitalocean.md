@@ -81,7 +81,7 @@ A deployment executes the following steps:
 1. Provisions Droplets, Cloud Firewalls, and Private Networks via Pulumi
 2. Configures S3 state buckets and continuous WAL-G backup buckets in Spaces
 3. Creates DNS records and issues Let's Encrypt TLS certificates
-4. Sideloads container images over SSH
+4. Sends only your app's own image layers over SSH; servers pull the shared runtime base
 5. Starts application services, applies database migrations, seeds admin user, and runs health probes
 
 ---
