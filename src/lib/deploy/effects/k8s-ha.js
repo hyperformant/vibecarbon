@@ -28,6 +28,9 @@
  *     sharedSshKeyPath, sharedSshPublicKey, sharedSshKeyId
  *     primaryResult, standbyResult             // per-cluster deployK3s returns
  *     transportPrepared                        // early fan-out prep succeeded
+ *     standbyImageCopy                         // the image copy, started early once the transport is up
+ *     standbyImageDigest                       // the app image digest the standby now holds
+ *     standbyImageMissing                      // the copy failed under -allow-degraded
  *     primaryReplicationConfigured             // primary-side repl config applied during fan-out
  *     replicationStatus, replStreaming, replLastState, replError, lastStateHint
  *     allowDegraded
@@ -42,6 +45,7 @@ import { perfAsync } from '../../perf.js';
 import { providerFor } from '../../providers/index.js';
 import { createPrefixedTracker } from '../../tracker.js';
 import { requireDnsSetup } from '../dns-result.js';
+import { copyAppImageToStandby } from '../k8s/ha/image-copy.js';
 import {
   configurePrimaryForReplication,
   prepareReplicationTransport,
@@ -98,7 +102,10 @@ async function haK8sUploadSshKey(ctx) {
 /**
  * Deploy the primary and standby clusters in parallel (deployK3s ×2 — the k8s
  * per-cluster block reused ×2), each with its OWN StateTracker + PrefixedTracker
- * + perfPrefix + local tunnel port so the two concurrent deploys stay isolated.
+ * + perfPrefix so the two concurrent deploys stay isolated. The standby takes
+ * its app image from the primary: the primary's built ref reaches it as a
+ * promise, and the copy into its registry starts once the WireGuard transport
+ * is up (here, when the early prep brought it up; else in copy-standby-image).
  * Pre-inits the Pulumi S3 backend before the parallel fan-out. Surfaces
  * per-cluster success/failure distinctly; hard-fails if either cluster failed.
  */
@@ -189,13 +196,6 @@ async function haK8sProvisionClusters(ctx) {
   // never re-render the Secret. maxWorkers stays shared across both sides so
   // CA's headroom (maxWorkers - caBoundsMin) matches what primary would have
   // once the standby is promoted.
-  // Distinct local tunnel ports per cluster — both deployK3s calls run
-  // on the same operator host and each opens `ssh -L <port>:<masterPrivateIp>:5000`
-  // for the registry push. Default 5000 collides; the loser of the
-  // bind race aborts via ExitOnForwardFailure=yes (RCA from k8s-ha
-  // 2026-04-30: primary deploy failed at the tunnel-open step while
-  // standby's tunnel held the port). 5000/5001 keeps each cluster's
-  // push self-contained.
   // Wrap each per-cluster deploy in perfAsync so the parallel fan-out is
   // visible in perf_substep — without this, k8s-ha emits only
   // deploy.ha.k8s.full and we can't tell which cluster dominated the
@@ -214,6 +214,11 @@ async function haK8sProvisionClusters(ctx) {
   };
   const primaryInfra = deferInfra();
   const standbyInfra = deferInfra();
+  // The primary's built image ref, handed to the standby's deployK3s, which
+  // waits for it and runs that image from its own registry. Rejected when the
+  // primary deploy fails, so the standby never waits on an image that will not
+  // come; the standby's own rejection is then reported beside the primary's.
+  const primaryImage = deferValue();
 
   const primaryPromise = perfAsync('deploy.ha.k8s.primary', () =>
     deployK3s({
@@ -229,8 +234,8 @@ async function haK8sProvisionClusters(ctx) {
       role: 'primary',
       minWorkers: options.minWorkers,
       maxWorkers: options.maxWorkers,
-      localTunnelPort: 5000,
       onInfraReady: primaryInfra.resolve,
+      onImageBuilt: primaryImage.resolve,
       // Tag every internal sub-stage perf marker with .primary so
       // perf_substep can attribute primary vs standby — without this
       // both clusters write to identical names and we can't see which
@@ -265,8 +270,8 @@ async function haK8sProvisionClusters(ctx) {
       // is 0), so promotion only has to flip CA's replica count, not
       // re-render the Secret.
       caBoundsMin: options.minWorkers ?? 1,
-      localTunnelPort: 5001,
       onInfraReady: standbyInfra.resolve,
+      peerImageRef: primaryImage.promise,
       perfPrefix: 'k3s.standby',
       // DR restore seeds the PRIMARY only. The standby re-syncs from the
       // promoted primary via replication — running wal-g backup-fetch here
@@ -278,9 +283,19 @@ async function haK8sProvisionClusters(ctx) {
   // Settlement fallbacks: a warm redeploy may resolve without a fresh
   // onInfraReady (the deferred is already resolved — resolve is idempotent);
   // a failed cluster resolves null so the prep task bails instead of hanging.
+  // The primary's settlement also settles its image ref, so the standby never
+  // waits on a primary that finished without reporting one (each is a no-op
+  // once onImageBuilt has resolved it).
   primaryPromise.then(
-    (r) => primaryInfra.resolve(r),
-    () => primaryInfra.resolve(null),
+    (r) => {
+      primaryInfra.resolve(r);
+      if (r?.imageTag) primaryImage.resolve(r.imageTag);
+      else primaryImage.reject(new Error('primary image unavailable: primary reported no image'));
+    },
+    () => {
+      primaryInfra.resolve(null);
+      primaryImage.reject(new Error('primary image unavailable: primary deploy failed'));
+    },
   );
   standbyPromise.then(
     (r) => standbyInfra.resolve(r),
@@ -407,7 +422,46 @@ async function haK8sProvisionClusters(ctx) {
   ctx.transportPrepared = await earlyPrep;
   if (ctx.transportPrepared) {
     p.log.info('Replication transport prepared in parallel with the cluster deploys');
+    // wg0 is up: start the image copy now, behind the replication setup. The
+    // copy-standby-image step settles it; the catch only keeps a failure that
+    // lands before then from reading as an unhandled rejection.
+    ctx.standbyImageCopy = startStandbyImageCopy(ctx);
+    ctx.standbyImageCopy.catch(() => {});
   }
+}
+
+/** A promise with its resolve and reject, for a value another task produces. */
+function deferValue() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  // Nobody may be waiting yet when it rejects; the awaiting side still sees it.
+  promise.catch(() => {});
+  return { promise, resolve, reject };
+}
+
+/**
+ * Copy the app image from the role primary's registry into the role
+ * standby's, over wg0 (copyAppImageToStandby). primaryResult/standbyResult
+ * are role-mapped, so a reconverge copies the new primary into the new
+ * standby. The tunnel must be up.
+ */
+function startStandbyImageCopy(ctx) {
+  const { primaryResult, standbyResult } = ctx;
+  return perfAsync('deploy.ha.image.copyToStandby', () =>
+    copyAppImageToStandby({
+      primaryRef: primaryResult.imageTag,
+      primaryIp: primaryResult.masterIp,
+      standbyIp: standbyResult.masterIp,
+      primaryMasterPrivateIp: primaryResult.masterPrivateIp,
+      standbyMasterPrivateIp: standbyResult.masterPrivateIp,
+      standbyDbIp: standbyResult.dbIp,
+      sshKeyPath: ctx.sharedSshKeyPath,
+    }),
+  );
 }
 
 /**
@@ -610,6 +664,34 @@ async function haK8sVerifyStreaming(ctx) {
   ctx.replicationStatus = replicationStatus;
 }
 
+/**
+ * Settle the standby's image copy: await the one provision-clusters started,
+ * or start it now (the transport is up after configure-replication). A failure
+ * fails the deploy; under -allow-degraded the standby is recorded without its
+ * image instead (R14), and failover refuses it until a deploy copies it.
+ */
+async function haK8sCopyStandbyImage(ctx) {
+  const s = ctx.s;
+  ctx.standbyImageMissing = false;
+  s.start('Copying the app image to the standby');
+  try {
+    const { digest } = await (ctx.standbyImageCopy ?? startStandbyImageCopy(ctx));
+    ctx.standbyImageDigest = digest;
+    s.stop(`Standby has the app image (${digest})`);
+  } catch (err) {
+    if (!ctx.options.allowDegraded) {
+      s.stop('Standby image copy failed, aborting HA deploy');
+      throw err;
+    }
+    ctx.standbyImageMissing = true;
+    s.stop('Standby image MISSING, continuing (-allow-degraded)');
+    p.log.warn(
+      `DEGRADED HA: ${/[.?!]$/.test(err.message) ? err.message : `${err.message}.`} The standby cannot start the app, so failover refuses ` +
+        'it. You proceeded with -allow-degraded; rerun `vibecarbon deploy` to copy the image.',
+    );
+  }
+}
+
 /** Configure managed-DNS HA for failover — registry-driven over DNS_PROVIDERS. */
 async function haK8sUpdateDns(ctx) {
   const options = ctx.options;
@@ -656,6 +738,11 @@ async function haK8sFinalize(ctx) {
       `Standby (${options.secondaryRegion}):   ${c.bold(standbyResult.floatingIp)} ${c.dim(`(master: ${standbyResult.masterIp})`)}`,
       '',
       `Replication:           ${replicationStatus === 'streaming' ? c.success(replicationStatus) : c.warning(replicationStatus.length > 60 ? `${replicationStatus.slice(0, 60)}…` : replicationStatus)}`,
+      ...(ctx.standbyImageMissing
+        ? [
+            `Standby image:         ${c.warning('MISSING (failover refuses until a deploy copies it)')}`,
+          ]
+        : []),
       '',
       `Kubeconfig (primary):  ${c.dim(primaryResult.kubeconfig)}`,
       `Kubeconfig (standby):  ${c.dim(standbyResult.kubeconfig)}`,
@@ -678,6 +765,7 @@ export const K8S_HA_EFFECTS = {
   haK8sOpenReplicationFirewall,
   haK8sConfigureReplication,
   haK8sVerifyStreaming,
+  haK8sCopyStandbyImage,
   haK8sUpdateDns,
   haK8sFinalize,
 };

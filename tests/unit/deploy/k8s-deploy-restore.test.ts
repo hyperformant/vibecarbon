@@ -440,7 +440,6 @@ function args(restore: typeof RESTORE | null) {
     masterIp: '1.2.3.4',
     sshKeyPath: '/tmp/key',
     khPath: join(dir, 'known_hosts'),
-    localTunnelPort: 5000,
     perfPrefix: 'k3s',
   };
 }
@@ -709,8 +708,8 @@ describe('applyK3sManifests with a restore point', () => {
     };
     const check = at('await assertRestoreMarkerState({');
     expect(check).toBeGreaterThan(at("state.completeStep('k3s-kubeconfig'"));
-    expect(check).toBeLessThan(at('buildK3sBuildInputs({'));
-    expect(check).toBeLessThan(at("state.shouldSkip('k3s-apply'"));
+    expect(check).toBeLessThan(at('await deliverAppImage({'));
+    expect(check).toBeLessThan(at('await shouldSkipK3sApply({'));
     // Outside every step gate: a skipped apply must not skip the check.
     const before = body.slice(at("state.getStepResult('k3s-kubeconfig')"), check);
     expect(before).not.toMatch(/shouldSkip/);

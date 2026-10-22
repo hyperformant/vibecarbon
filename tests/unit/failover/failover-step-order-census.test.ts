@@ -223,6 +223,8 @@ async function runK8s(primaryReachable: boolean) {
     identify: () => servers,
     getKeyPath: () => '/fake/key',
     keyExists: () => true,
+    // The live standby image check (standby-image-precheck.test.ts): present.
+    assertStandbyImage: async () => 'sha256:aa',
     preflight: async () => ({
       workerSpec: { count: 2, serverType: 'cx23' },
       scaleUpList: [{ name: 'app', namespace: 'vibecarbon', replicas: 2 }],

@@ -168,6 +168,7 @@ const EXPECTED_K8S_HA_SEQUENCE = [
   'open-replication-firewall',
   'configure-replication',
   'verify-streaming',
+  'copy-standby-image',
   'update-dns',
   'finalize',
 ];
@@ -187,6 +188,10 @@ describe('planDeploy(k8s-ha)', () => {
     expect(idx('verify-streaming')).toBeGreaterThan(idx('configure-replication'));
     // DNS + finalize come last (mirrors deployK8sHA's tail).
     expect(idx('update-dns')).toBeGreaterThan(idx('verify-streaming'));
+    // The standby's image copy is settled right after the streaming gate and
+    // before DNS points anything at either cluster.
+    expect(idx('copy-standby-image')).toBe(idx('verify-streaming') + 1);
+    expect(idx('update-dns')).toBeGreaterThan(idx('copy-standby-image'));
     expect(idx('finalize')).toBe(names.length - 1);
   });
 
@@ -227,7 +232,12 @@ describe('planDeploy(k8s-ha)', () => {
     // when-predicate that evaluates falsy under the real ctx, runPlan aborts
     // loudly instead of shipping a deploy with no verified replica.
     const byName = Object.fromEntries(planDeploy('k8s-ha', {}).map((s) => [s.name, s]));
-    for (const gate of ['configure-replication', 'verify-streaming', 'finalize']) {
+    for (const gate of [
+      'configure-replication',
+      'verify-streaming',
+      'copy-standby-image',
+      'finalize',
+    ]) {
       expect(byName[gate].required).toBe(true);
     }
     // update-dns is best-effort (deployK8sHA warned + continued) — NOT required.
@@ -237,7 +247,7 @@ describe('planDeploy(k8s-ha)', () => {
   it('runs EVERY step (incl. the replication hard-gate + finalize) under a realistic cold-deploy ctx', async () => {
     // Pin the tonight-failing invariant directly: given a cold-deploy ctx (the
     // shape the orchestrator builds — `{ options: deploymentConfig }` with no
-    // primaryResult/replicationStatus yet), runPlan must execute all 8 effects
+    // primaryResult/replicationStatus yet), runPlan must execute all 9 effects
     // in order. No step may be when-skipped out; the replication setup,
     // verify-streaming gate and finalize MUST all fire. Effects are stubbed so
     // this stays a pure ordering assertion (no SSH/kubectl).
@@ -252,6 +262,7 @@ describe('planDeploy(k8s-ha)', () => {
       haK8sOpenReplicationFirewall: record('open-replication-firewall'),
       haK8sConfigureReplication: record('configure-replication'),
       haK8sVerifyStreaming: record('verify-streaming'),
+      haK8sCopyStandbyImage: record('copy-standby-image'),
       haK8sUpdateDns: record('update-dns'),
       haK8sFinalize: record('finalize'),
     };

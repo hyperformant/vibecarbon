@@ -46,6 +46,10 @@ export function wgIpOf({ stackIdentity }) {
 // the host.
 export const REPL_GATEWAY_PORT = 15433;
 
+// The TCP port the standby image copy's registry relay listens on. Bound only
+// on the wg0 address of the primary (never 0.0.0.0), and only for the copy.
+export const REGISTRY_RELAY_PORT = 15000;
+
 // The on-node WireGuard private key. Generated on each database node with
 // umask 077 and NEVER read back into this process — only the derived public
 // key ever crosses the wire.

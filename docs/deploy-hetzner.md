@@ -145,7 +145,10 @@ A deploy:
 2. Creates DNS records for your domain (Hetzner DNS by default; Cloudflare
    opt-in; or manual if you manage DNS elsewhere)
 3. Issues TLS certificates via ACME DNS-01 (wildcard-capable)
-4. Builds your app image locally and pushes it to the servers over SSH
+4. Builds your app image locally and pushes it to the servers over SSH (on
+   k8s-ha the standby cluster is not pushed to: it copies the image from the
+   primary over the private tunnel; if that copy fails the deploy fails, unless
+   `-allow-degraded` is set, which finishes and marks the standby image-missing)
 5. Starts the stack (Postgres, Traefik, your app); a one-shot migrate step
    applies the migrations as the database owner before the app starts, the
    app creates the admin user at startup, and the deploy verifies health
@@ -336,6 +339,8 @@ The k8s-ha standby region is deployed as a minimal, cost-optimized replica:
 - **Seeded at deploy:** The database boots from a seed snapshot on first start, immediately becoming a live streaming replica, with no separate reseed cycle
 - **Workers provisioned at failover time** via the IaC layer, not idling in advance
 
+**Image delivery:** The operator uploads the app image once, to the primary cluster. The standby then copies it from the primary's registry over the private WireGuard tunnel, so a promoted standby can pull the app from its own registry. If the copy fails, the deploy fails. With `-allow-degraded` it finishes, records the standby as missing its image, and failover refuses it until a deploy copies it. `vibecarbon status` shows a `Standby image` line when the standby is known to be missing it.
+
 **Deployment as role reconciler:** After any failover, re-running `vibecarbon deploy` converges each cluster to its current role: the new primary keeps its warm tier and workers and gets the add-ons a primary runs (observability included), while the recovered ex-primary reconverges to pilot-light (cold app tier, observability scaled to zero, workers removed).
 
 ### Failover (k8s-ha)
@@ -354,6 +359,8 @@ the point of no return last**:
 4. **Reseeds and promotes** the standby database (final catch-up against a quiesced primary)
 5. **Scales up the app tier** (0 → target replicas) and verifies public API readiness
 6. **Repoints DNS** to the new primary
+
+**Standby image check:** Before changing anything, failover reads the standby registry live, for planned and unplanned failovers alike. If the image is missing, a planned failover refuses and tells you to run `vibecarbon deploy` first; an unplanned failover refuses unless you pass `-force-unproven`, and then the promoted app stays down until a deploy delivers the image. If the registry cannot be read at all, a planned failover refuses even with `-force-unproven`, because the fault is access to the standby master, and a deploy cannot fix that.
 
 **Clean abort on failure:** If provisioning fails, the command attempts to converge workers back to 0. If that also fails, it reports the exact state and the primary remains untouched. Re-run the command (optionally with `-server-type` for different hardware) to retry: every step is convergent, so reruns resume instead of duplicating.
 

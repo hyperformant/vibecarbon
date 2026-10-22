@@ -31,6 +31,7 @@ import { abortFailover } from './lib/deploy/failover-abort.js';
 import {
   assertFailoverClassified,
   assertFailoverPreconditions,
+  assertStandbyImageRule,
   classifyFailover,
   clearFailoverJournal,
   confirmUnprovenFailover,
@@ -38,6 +39,7 @@ import {
   FailoverDnsError,
   FailoverRefusedError,
   flipAndVerifyDns,
+  liveStandbyImageGap,
   promotionNotIssuedMessage,
   promotionUnknownMessage,
   readReplicaState,
@@ -1683,6 +1685,7 @@ export function walgVerdictsDetail(health) {
 /**
  * Pilot-light HA failover core (shared across DNS-provider strategies). Order:
  *   1. preflight (verify persisted config + probe standby state backend)
+ *  1a. live standby app image check                    (refuse = nothing touched; skipped on resume)
  *  1b. replica proof (failover-guard)                  (refuse = nothing touched)
  *   2. provision standby worker capacity 0→N          (abort = clean exit)
  *   3. quiesce + write-fence the primary               (planned only; unproven = abort)
@@ -1711,6 +1714,12 @@ export async function failoverHA(
     getKeyPath = getSSHKeyPath,
     keyExists = existsSync,
     preflight = preflightPilotFailover,
+    // Dynamic: failover.js imports no k8s deploy module statically (R6a).
+    assertStandbyImage = async (srv, key) =>
+      (await import('./lib/deploy/k8s/ha/image-copy.js')).assertStandbyHasAppImage({
+        standbyIp: srv.standby.ip,
+        sshKeyPath: key,
+      }),
     provision = provisionStandbyCapacity,
     isPrimaryReady = isPrimaryPostgresReady,
     readStandbyState = (srv, key) => readReplicaState({ exec: k8sPsqlRunner(srv.standby.ip, key) }),
@@ -1841,13 +1850,48 @@ export async function failoverHA(
     servers.standby.dbPrivateIp = freshDbPrivateIp;
   }
 
+  // Whether the old primary answers: planned (a switchover) or unplanned.
+  const planned = await isPrimaryReady(servers.primary.ip, sshKeyPath);
+
+  // STEP 1a — the standby's registry must hold the image its app Deployment
+  // names, or the promoted standby serves nothing. Read live, before the first
+  // write (liftStranded), and ruled like the recorded standby-image-missing
+  // cause: planned refuses (a deploy copies it), unplanned needs
+  // -force-unproven. A resumed failover already promoted, so it is let finish
+  // (R6); its readiness gate reports a missing image.
+  // `present` (an external image included) overrides a recorded
+  // standby-image-missing; `ruled` means the rule below already spoke.
+  let standbyImageLive;
+  if (!envConfig?.ha?.failoverInFlight) {
+    let gap = null;
+    try {
+      await assertStandbyImage(servers, sshKeyPath);
+      standbyImageLive = 'present';
+    } catch (err) {
+      gap = liveStandbyImageGap(err);
+    }
+    if (gap) {
+      try {
+        assertStandbyImageRule({
+          ...gap,
+          environment: envName,
+          planned,
+          forceUnproven: !!parsed.forceUnproven,
+        });
+      } catch (err) {
+        p.log.error(err.message);
+        process.exit(1);
+      }
+      standbyImageLive = 'ruled';
+    }
+  }
+
   // STEP 1b — Positive replica proof (R1), before any cloud change, quiesce or
   // kubectl write. Reads the standby's recovery flag, system identifier and
   // walreceiver, plus the primary's identifier when it answers (planned mode).
   // A refusal throws FailoverRefusedError naming the reason and the deploy that
   // fixes it; `resume` means a previous run of THIS failover (its journal) already
   // promoted the standby, so reseed and promote are skipped.
-  const planned = await isPrimaryReady(servers.primary.ip, sshKeyPath);
   const primaryPsql = psql(servers.primary.ip, sshKeyPath);
   // A planned run that died between its database fence and its journal left
   // the primary read-only with nothing promoted: lift it first (a journal
@@ -1884,6 +1928,7 @@ export async function failoverHA(
     primaryState,
     forceUnproven: !!parsed.forceUnproven,
     allowDegraded: !!parsed.allowDegraded,
+    standbyImageLive,
   });
   if (unproven) {
     // The operator asked to skip the identifier proof on a dead primary. Say the

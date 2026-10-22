@@ -74,6 +74,7 @@ describe('compose deploy plan snapshot', () => {
         "open-replication-firewall",
         "configure-replication",
         "verify-streaming",
+        "copy-standby-image",
         "update-dns",
         "finalize",
       ]

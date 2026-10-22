@@ -269,6 +269,7 @@ export const k8sDeployClusterStep = () =>
 //   ctx.primaryResult        // deployK3s return for the primary cluster
 //   ctx.standbyResult        // deployK3s return for the standby cluster
 //   ctx.replicationStatus / ctx.replStreaming / ctx.degraded  // repl verdict
+//   ctx.standbyImageCopy / ctx.standbyImageDigest / ctx.standbyImageMissing  // image copy
 // ============================================================================
 
 /** Generate the shared HA SSH key + print the deployment banner. */
@@ -298,6 +299,10 @@ export const haK8sConfigureReplicationStep = () =>
 /** Hard-gate the deploy on streaming replication (unless -allow-degraded). */
 export const haK8sVerifyStreamingStep = () =>
   defineStep({ name: 'verify-streaming', effect: 'haK8sVerifyStreaming', required: true });
+
+/** Settle the app image copy into the standby's registry (over wg0). */
+export const haK8sCopyStandbyImageStep = () =>
+  defineStep({ name: 'copy-standby-image', effect: 'haK8sCopyStandbyImage', required: true });
 
 /** Configure managed-DNS HA (Cloudflare/Hetzner) for failover. */
 export const haK8sUpdateDnsStep = () =>
