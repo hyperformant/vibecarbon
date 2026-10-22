@@ -111,9 +111,53 @@ jobs:
             exit 1
           fi
 
+  # Every ghcr mirror (MIRRORED_IMAGES in src/lib/images.js: the
+  # registry.k8s.io set, and since the cold-deploy-speed plan's Task 7 the
+  # core-path Docker Hub images and k3s's system images) is pulled by servers
+  # ANONYMOUSLY. A newly mirrored package starts PRIVATE and stays so until it
+  # is flipped public by hand, and a mirror leg that never ran leaves no tag at
+  # all; either way every deploy dies on ImagePullBackOff or a compose pull
+  # error. This refuses a release until each digest-pinned mirror ref resolves
+  # with an empty DOCKER_CONFIG (no login), the same way a server pulls it. One
+  # read, not a wait: run publish-images, flip any new package public
+  # (mirroredPackageNames()), then dispatch again.
+  mirrored-images:
+    name: Verify every ghcr mirror ref is pullable anonymously
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+
+      - name: Inspect each mirror ref anonymously
+        run: |
+          set -euo pipefail
+          DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
+          export DOCKER_CONFIG
+          mkdir -p "$DOCKER_CONFIG"
+          refs=$(node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log(m.MIRRORED_IMAGES.map(m.k8sMirrorRef).join('\n'));")
+          test -n "$refs"
+          missing=0
+          for ref in $refs; do
+            if docker buildx imagetools inspect "$ref" > /dev/null; then
+              echo "ok $ref"
+            else
+              echo "::error::$ref is not pullable anonymously"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to release: a ghcr mirror ref above is missing or private. Run publish-images (mirror-upstream-images) on main, flip every new package public by hand (mirroredPackageNames() in src/lib/images.js), then dispatch again."
+            exit 1
+          fi
+
   release:
     name: Semantic Release
-    needs: db-image
+    needs: [db-image, mirrored-images]
     runs-on: ubuntu-latest
     permissions:
       contents: write

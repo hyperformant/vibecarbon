@@ -15,6 +15,10 @@ on:
       - 'scripts/mirror-matrix.mjs'
       - '.github/workflows/publish-images.yml'
   workflow_dispatch: {}
+  # Weekly drift report only (mirror-upstream-drift). Every publishing job
+  # skips scheduled runs: a schedule must never push to ghcr.
+  schedule:
+    - cron: '0 14 * * 1'
 # Job-scoped writes only (OpenSSF Scorecard Token-Permissions: any
 # top-level write zeroes the check). A job-level block replaces this
 # wholesale, so jobs re-declare contents: read. mirror-matrix stays on
@@ -23,6 +27,7 @@ permissions:
   contents: read
 jobs:
   publish:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     environment: e2e-infra
     permissions:
@@ -75,11 +80,21 @@ jobs:
           docker run --rm --entrypoint node ${{ steps.ref.outputs.image }} \
             -e "import('/app/src/autoscaler/server.js').then(()=>console.log('server import ok')).catch(e=>{console.error(e.message);process.exit(1)})"
 
-  # Everything below mirrors UPSTREAM registry.k8s.io images (never rebuilds
-  # them) into our ghcr org. One workflow owns both of the cluster-autoscaler
-  # pod's images plus every CSI sidecar a cluster needs to have storage at all.
+  # Everything below mirrors UPSTREAM images (never rebuilds them) into our
+  # ghcr org, from two registries: registry.k8s.io (both of the
+  # cluster-autoscaler pod's images, every CSI sidecar a cluster needs to have
+  # storage at all, pause) and, since the cold-deploy-speed plan's Task 7,
+  # Docker Hub (traefik, docker-socket-proxy, alpine, registry, socat,
+  # alpine/k8s, and k3s's own system images).
   #
-  # WHY — the same failure, twice, on two different image sets:
+  # WHY DOCKER HUB — it rate-limits ANONYMOUS pulls per source IP, and a fresh
+  # cloud server often inherits an IP that has already spent its quota, so a
+  # deploy's pull could stall for minutes or fail outright (a cloud-init
+  # pre-pull was reverted over exactly this, 7babb8e). This job logs in to
+  # Docker Hub so the copy itself is not rate-limited; servers then pull from
+  # ghcr only.
+  #
+  # WHY registry.k8s.io — the same failure, twice, on two different image sets:
   #
   #   2026-07-31, e3 k8s e2e. Kubelet on the control-plane node:
   #
@@ -111,8 +126,10 @@ jobs:
   # PRIVATE. k3s nodes pull anonymously (no imagePullSecret), so EVERY package
   # must be flipped to public by hand in the org's package settings — there is
   # no REST API for container package visibility. The exact list is
-  # `mirroredK8sPackageNames()` in src/lib/images.js. Verify each with an
-  # unauthenticated `docker pull` BEFORE merging any code that consumes it.
+  # `mirroredPackageNames()` in src/lib/images.js. Verify each with an
+  # unauthenticated `docker pull` BEFORE merging any code that consumes it;
+  # release.yml's mirrored-images job refuses a release until every mirror
+  # ref is pullable anonymously.
   #
   # PACKAGE PAGE: bare on purpose — it cannot currently be otherwise, and the
   # failure mode is silent, so read this before "fixing" it.
@@ -183,6 +200,7 @@ jobs:
   # install step. Guarded by tests/unit/deploy/k8s-image-mirrors.test.ts, which
   # runs THAT EXACT SCRIPT and compares its output to the constants.
   mirror-matrix:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     outputs:
       include: ${{ steps.gen.outputs.include }}
@@ -217,6 +235,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Docker Hub legs read upstream with the CI account, so the mirror job
+      # is never the one throttled. Same credential the e2e workflow uses
+      # (e2e-infra: the username is an environment VARIABLE since 2026-08-07,
+      # the token a secret). registry.k8s.io legs ignore it.
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: ${{ vars.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
       - name: Mirror the amd64 manifest to ghcr (digest-preserving copy, never a rebuild)
         env:
           # Via env, never inlined into the script body: matrix values are
@@ -225,6 +251,8 @@ jobs:
           SRC: ${{ matrix.src }}
           DST: ${{ matrix.dst }}
           PINNED: ${{ matrix.digest }}
+        # SRC is `<registry>/<repo>:<tag>` for both registries, e.g.
+        # docker.io/library/traefik:v3.6.11 or registry.k8s.io/pause:3.9.
         # Upstream publishes a multi-platform index. vibecarbon runs x86-64
         # only (see tests/unit/deploy/workflow-platforms.test.ts), so resolve
         # the linux/amd64 child manifest and copy just that — hauling the other
@@ -274,3 +302,18 @@ jobs:
           set -euo pipefail
           docker buildx imagetools inspect "$DST"
           docker buildx imagetools inspect "$DST@$PINNED"
+
+  # Weekly: newer upstream tags for every mirrored repo, into the job summary.
+  # REPORT ONLY, never a re-pin: Dependabot cannot see refs that point at our
+  # mirror, so this is how an upstream release gets noticed, and a bump stays
+  # a reviewed edit of {tag, digest} in src/lib/images.js. Read-only token, no
+  # environment, no login (tags/list takes an anonymous token).
+  mirror-upstream-drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: List newer upstream tags per mirrored repo
+        run: |
+          set -euo pipefail
+          node scripts/mirror-drift.mjs | tee -a "$GITHUB_STEP_SUMMARY"

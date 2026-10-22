@@ -1,5 +1,6 @@
 /**
- * Drift guards for the registry.k8s.io -> ghcr mirror set (src/lib/images.js,
+ * Drift guards for the ghcr mirror set (registry.k8s.io and, since the
+ * cold-deploy-speed plan Task 7, docker.io; src/lib/images.js,
  * scripts/mirror-matrix.mjs, .github/workflows/publish-images.yml).
  *
  * WHY THE MIRROR SET EXISTS — two incidents, same root cause. registry.k8s.io
@@ -34,23 +35,35 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, join, sep } from 'node:path';
+import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { newerTags } from '../../../scripts/mirror-drift.mjs';
 import {
+  alpineImageRef,
+  alpineK8sImageRef,
+  assertDistinctPackageNames,
   CSI_SIDECAR_MIRRORS,
   CSI_UPSTREAM_IMAGE_PINS,
   clusterAutoscalerImageRef,
   clusterAutoscalerUpstreamRef,
   csiSidecarSetImagePlan,
   DO_CSI_VERSION,
+  DOCKERHUB_MIRRORS,
+  DOCKERHUB_UPSTREAM_REGISTRY,
+  dockerSocketProxyImageRef,
   HETZNER_CSI_VERSION,
   K8S_MIRROR_ORG,
   K8S_UPSTREAM_REGISTRY,
   k8sMirrorRef,
   k8sMirrorTagRef,
-  k8sUpstreamRef,
-  MIRRORED_K8S_IMAGES,
-  mirroredK8sPackageNames,
+  MIRRORED_IMAGES,
+  mirroredImageName,
+  mirroredPackageNames,
   pauseImageRef,
+  registryImageRef,
+  socatImageRef,
+  traefikImageRef,
+  upstreamRef,
 } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 import { namesHost } from '../../_shared/hosts.js';
@@ -111,13 +124,58 @@ const UPSTREAM_CSI_MANIFESTS = {
 } as const;
 
 describe('mirror set shape', () => {
-  it('every entry mirrors registry.k8s.io into our ghcr org', () => {
-    expect(MIRRORED_K8S_IMAGES.length).toBeGreaterThanOrEqual(12);
-    for (const image of MIRRORED_K8S_IMAGES) {
-      expect(k8sUpstreamRef(image)).toBe(`${K8S_UPSTREAM_REGISTRY}/${image.repo}:${image.tag}`);
-      expect(k8sUpstreamRef(image)).toMatch(/^registry\.k8s\.io\//);
+  it('every entry mirrors registry.k8s.io or docker.io into our ghcr org', () => {
+    expect(MIRRORED_IMAGES.length).toBeGreaterThanOrEqual(22);
+    for (const image of MIRRORED_IMAGES) {
+      const upstream = image.upstream ?? K8S_UPSTREAM_REGISTRY;
+      expect([K8S_UPSTREAM_REGISTRY, DOCKERHUB_UPSTREAM_REGISTRY]).toContain(upstream);
+      expect(upstreamRef(image)).toBe(`${upstream}/${image.repo}:${image.tag}`);
       expect(k8sMirrorRef(image)).toMatch(/^ghcr\.io\/hyperformant\//);
     }
+    // Existing registry.k8s.io entries carry no field; the default keeps them there.
+    expect(upstreamRef({ repo: 'pause', tag: '3.9', digest: 'sha256:x' })).toBe(
+      'registry.k8s.io/pause:3.9',
+    );
+    for (const image of DOCKERHUB_MIRRORS) {
+      expect(image.upstream).toBe(DOCKERHUB_UPSTREAM_REGISTRY);
+      expect(MIRRORED_IMAGES).toContain(image);
+    }
+  });
+
+  it('package names are flat basenames, and two different repos may never share one', () => {
+    expect(mirroredImageName('library/traefik')).toBe('traefik');
+    expect(mirroredImageName('alpine/k8s')).toBe('k8s');
+    expect(mirroredImageName('library/alpine')).toBe('alpine');
+    // The guard: a second repo mapping onto an existing package would make one
+    // package hold two unrelated images.
+    expect(() =>
+      assertDistinctPackageNames([
+        { repo: 'library/alpine', tag: '1', digest: 'sha256:a' },
+        { repo: 'someone/alpine', tag: '1', digest: 'sha256:b' },
+      ]),
+    ).toThrow(/library\/alpine.*someone\/alpine|someone\/alpine.*library\/alpine/);
+    // Same repo at two tags is one package, not a collision.
+    expect(() =>
+      assertDistinctPackageNames([
+        { repo: 'sig-storage/csi-attacher', tag: 'v1', digest: 'sha256:a' },
+        { repo: 'sig-storage/csi-attacher', tag: 'v2', digest: 'sha256:b' },
+      ]),
+    ).not.toThrow();
+    expect(() => assertDistinctPackageNames(MIRRORED_IMAGES)).not.toThrow();
+  });
+
+  it('the per-image ref helpers return the digest-pinned mirror refs', () => {
+    const byRepo = (repo: string) =>
+      k8sMirrorRef(DOCKERHUB_MIRRORS.find((i) => i.repo === repo) as (typeof DOCKERHUB_MIRRORS)[0]);
+    expect(traefikImageRef()).toBe(byRepo('library/traefik'));
+    expect(dockerSocketProxyImageRef()).toBe(byRepo('tecnativa/docker-socket-proxy'));
+    expect(alpineImageRef()).toBe(byRepo('library/alpine'));
+    expect(registryImageRef()).toBe(byRepo('library/registry'));
+    expect(socatImageRef()).toBe(byRepo('alpine/socat'));
+    expect(alpineK8sImageRef()).toBe(byRepo('alpine/k8s'));
+    expect(traefikImageRef()).toMatch(
+      /^ghcr\.io\/hyperformant\/traefik:v3\.6\.11@sha256:[a-f0-9]{64}$/,
+    );
   });
 
   it('mirror targets are FLAT under the org — upstream basename, upstream tag', () => {
@@ -125,7 +183,7 @@ describe('mirror set shape', () => {
     // mirrors to `ghcr.io/hyperformant/cluster-autoscaler`, NOT to a nested
     // `.../autoscaling/cluster-autoscaler`. ghcr has no nested-path packages;
     // a slash in the name would create a package nobody can flip public.
-    for (const image of MIRRORED_K8S_IMAGES) {
+    for (const image of MIRRORED_IMAGES) {
       const mirror = k8sMirrorRef(image);
       const afterOrg = mirror.slice(`${K8S_MIRROR_ORG}/`.length);
       expect(afterOrg).not.toContain('/');
@@ -140,21 +198,21 @@ describe('mirror set shape', () => {
     // must mean the same bits as `v2.15.0` upstream. One tag field feeds both
     // refs, and one digest field (upstream's linux/amd64 manifest, which the
     // job copies verbatim) pins what clusters pull.
-    for (const image of MIRRORED_K8S_IMAGES) {
+    for (const image of MIRRORED_IMAGES) {
       expect(image.tag).not.toContain('@');
       expect(image.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
       expect(k8sMirrorRef(image).endsWith(`@${image.digest}`)).toBe(true);
-      expect(k8sMirrorTagRef(image).split(':').pop()).toBe(k8sUpstreamRef(image).split(':').pop());
+      expect(k8sMirrorTagRef(image).split(':').pop()).toBe(upstreamRef(image).split(':').pop());
     }
   });
 
   it('no two entries share a digest (a copy-paste pin would point one image at another)', () => {
-    const digests = MIRRORED_K8S_IMAGES.map((i) => i.digest);
+    const digests = MIRRORED_IMAGES.map((i) => i.digest);
     expect(digests).toEqual([...new Set(digests)]);
   });
 
   it('has no duplicate (repo, tag) entries', () => {
-    const refs = MIRRORED_K8S_IMAGES.map(k8sUpstreamRef);
+    const refs = MIRRORED_IMAGES.map(upstreamRef);
     expect(refs).toEqual([...new Set(refs)]);
   });
 
@@ -163,7 +221,7 @@ describe('mirror set shape', () => {
     // that collapsed by package NAME would drop one provider's tag and
     // reintroduce the 403 on that provider only — the nastiest possible shape.
     const byName = new Map<string, Set<string>>();
-    for (const image of MIRRORED_K8S_IMAGES) {
+    for (const image of MIRRORED_IMAGES) {
       const name = image.repo.slice(image.repo.lastIndexOf('/') + 1);
       byName.set(name, (byName.get(name) ?? new Set()).add(image.tag));
     }
@@ -176,20 +234,30 @@ describe('mirror set shape', () => {
     ]);
   });
 
-  it('mirroredK8sPackageNames() is the operator’s public-flip checklist', () => {
+  it('mirroredPackageNames() is the operator’s public-flip checklist', () => {
     // Every name here is a ghcr package that must be flipped PUBLIC by hand
     // after the first publish run — k3s nodes pull anonymously.
-    const names = mirroredK8sPackageNames();
+    const names = mirroredPackageNames();
     expect(names).toEqual([...new Set(names)].sort());
     expect(names).toEqual([
+      'alpine',
       'cluster-autoscaler',
       'csi-attacher',
       'csi-node-driver-registrar',
       'csi-provisioner',
       'csi-resizer',
       'csi-snapshotter',
+      'docker-socket-proxy',
+      'k8s',
       'livenessprobe',
+      'local-path-provisioner',
+      'mirrored-coredns-coredns',
+      'mirrored-metrics-server',
+      'mirrored-pause',
       'pause',
+      'registry',
+      'socat',
+      'traefik',
     ]);
   });
 
@@ -198,9 +266,9 @@ describe('mirror set shape', () => {
     // but it must be mirrored by the SAME job as everything else — one
     // mechanism, not two. These assertions are what keep the list entry and
     // the named constants from drifting apart.
-    const ca = MIRRORED_K8S_IMAGES.filter((i) => i.repo === 'autoscaling/cluster-autoscaler');
+    const ca = MIRRORED_IMAGES.filter((i) => i.repo === 'autoscaling/cluster-autoscaler');
     expect(ca).toHaveLength(1);
-    expect(k8sUpstreamRef(ca[0])).toBe(clusterAutoscalerUpstreamRef());
+    expect(upstreamRef(ca[0])).toBe(clusterAutoscalerUpstreamRef());
     expect(k8sMirrorRef(ca[0])).toBe(clusterAutoscalerImageRef());
   });
 
@@ -208,7 +276,7 @@ describe('mirror set shape', () => {
     expect(pauseImageRef()).toBe(
       'ghcr.io/hyperformant/pause:3.9@sha256:8d4106c88ec0bd28001e34c975d65175d994072d65341f62a8ab0754b0fafe10',
     );
-    expect(MIRRORED_K8S_IMAGES.some((i) => i.repo === 'pause' && i.tag === '3.9')).toBe(true);
+    expect(MIRRORED_IMAGES.some((i) => i.repo === 'pause' && i.tag === '3.9')).toBe(true);
   });
 });
 
@@ -324,7 +392,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
       >;
       for (const { workload, containers } of CSI_SIDECAR_MIRRORS[provider]) {
         for (const [container, image] of Object.entries(containers)) {
-          expect(k8sUpstreamRef(image), `${workload}/${container}`).toBe(
+          expect(upstreamRef(image), `${workload}/${container}`).toBe(
             upstream[workload][container],
           );
         }
@@ -336,12 +404,12 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
     // A re-pin pointing at a package the publish workflow never mirrors is
     // strictly worse than no re-pin: ImagePullBackOff on a 404 instead of a
     // working upstream pull.
-    const mirrored = new Set(MIRRORED_K8S_IMAGES.map(k8sUpstreamRef));
+    const mirrored = new Set(MIRRORED_IMAGES.map(upstreamRef));
     for (const specs of Object.values(CSI_SIDECAR_MIRRORS)) {
       for (const { workload, containers } of specs) {
         for (const [container, image] of Object.entries(containers)) {
           expect(mirrored, `${workload}/${container} is not mirrored`).toContain(
-            k8sUpstreamRef(image),
+            upstreamRef(image),
           );
         }
       }
@@ -400,7 +468,7 @@ describe('csiSidecarSetImagePlan()', () => {
 
   it('re-pins DO’s floating alpine:3 init container in the same call as its node sidecar', () => {
     // Upstream's driver.yaml ships `automount-udev-deleter` as bare alpine:3.
-    // It needs no mirror (Docker Hub, not registry.k8s.io), only a pin, and it
+    // It is pinned onto our alpine mirror (Docker Hub rate limits, Task 7) and
     // rides the csi-do-node `set image` that already happens.
     const upstream = UPSTREAM_CSI_MANIFESTS.digitalocean.workloads['daemonset/csi-do-node'];
     expect(upstream['automount-udev-deleter']).toBe('alpine:3');
@@ -409,7 +477,10 @@ describe('csiSidecarSetImagePlan()', () => {
     );
     expect(node).toHaveLength(1);
     const arg = node[0].setImageArgs.find((a) => a.startsWith('automount-udev-deleter='));
-    expect(arg).toMatch(/^automount-udev-deleter=alpine:3\.\d+\.\d+@sha256:[a-f0-9]{64}$/);
+    expect(arg).toBe(`automount-udev-deleter=${alpineImageRef()}`);
+    expect(arg).toMatch(
+      /^automount-udev-deleter=ghcr\.io\/hyperformant\/alpine:3\.\d+\.\d+@sha256:[a-f0-9]{64}$/,
+    );
     // Every in-place pin addresses a container upstream actually ships.
     for (const [provider, specs] of Object.entries(CSI_UPSTREAM_IMAGE_PINS)) {
       const workloads = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS]
@@ -533,12 +604,18 @@ describe('publish workflow mirrors exactly the set', () => {
     const out = execFileSync('node', [join(ROOT, MATRIX_SCRIPT)], { encoding: 'utf8' });
     const matrix = JSON.parse(out);
     expect(matrix).toEqual(
-      MIRRORED_K8S_IMAGES.map((image) => ({
-        src: k8sUpstreamRef(image),
+      MIRRORED_IMAGES.map((image) => ({
+        src: upstreamRef(image),
         dst: k8sMirrorTagRef(image),
         digest: image.digest,
       })),
     );
+    // Docker Hub mirrors ride the same matrix: the copy reads docker.io.
+    expect(matrix).toContainEqual({
+      src: 'docker.io/library/traefik:v3.6.11',
+      dst: 'ghcr.io/hyperformant/traefik:v3.6.11',
+      digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+    });
     // Every destination is a distinct tag under the org — the mirror job runs
     // one matrix leg per entry and must never have two legs racing one ref.
     const dsts = matrix.map((m: { dst: string }) => m.dst);
@@ -556,6 +633,53 @@ describe('publish workflow mirrors exactly the set', () => {
     const jobEnvironments = [...workflow.matchAll(/^\s{4}environment:\s*(\S+)/gm)].map((m) => m[1]);
     expect(jobEnvironments.length).toBeGreaterThanOrEqual(2);
     for (const env of jobEnvironments) expect(env).toBe('e2e-infra');
+  });
+
+  it('the mirror job logs in to Docker Hub with the CI credential before copying', () => {
+    const steps = (workflow.split('  mirror-upstream-images:')[1] ?? '').split(
+      '\n  mirror-upstream-drift:',
+    )[0];
+    const hub = steps.indexOf('vars.DOCKER_HUB_USERNAME');
+    expect(hub).toBeGreaterThan(-1);
+    expect(steps).toContain('secrets.DOCKER_HUB_TOKEN');
+    expect(hub).toBeLessThan(steps.indexOf('imagetools create'));
+  });
+
+  it('a weekly drift job reports newer upstream tags and never publishes', () => {
+    const wf = loadYaml(workflow) as {
+      on: { schedule?: Array<{ cron: string }> };
+      jobs: Record<
+        string,
+        { if?: string; permissions?: unknown; environment?: string; steps: Array<{ run?: string }> }
+      >;
+    };
+    expect(wf.on.schedule?.length).toBe(1);
+    const drift = wf.jobs['mirror-upstream-drift'];
+    expect(drift.if).toMatch(/github\.event_name == 'schedule'/);
+    expect(drift.permissions).toBeUndefined(); // read-only default
+    expect(drift.environment).toBeUndefined();
+    expect(drift.steps.map((st) => st.run ?? '').join('\n')).toMatch(
+      /node scripts\/mirror-drift\.mjs \| tee -a "\$GITHUB_STEP_SUMMARY"/,
+    );
+    // A schedule must never push to ghcr: every other job skips it.
+    for (const [name, job] of Object.entries(wf.jobs)) {
+      if (name === 'mirror-upstream-drift' || name === 'mirror-upstream-images') continue;
+      expect(job.if, name).toBe("github.event_name != 'schedule'");
+    }
+    // mirror-upstream-images needs mirror-matrix, so it skips with it.
+    expect(code).toMatch(/mirror-upstream-images:\n\s+needs: mirror-matrix/);
+  });
+
+  it('the drift filter keeps only same-shape tags newer than the pin', () => {
+    expect(
+      newerTags('v3.6.11', ['v3.6.10', 'v3.6.12', 'v3.7.0', '3.6.13', 'v3.6.12-rc1', 'latest']),
+    ).toEqual(['v3.6.12', 'v3.7.0']);
+    expect(newerTags('1.8.1.3', ['1.8.1.4', '1.8.2', '1.8.1.3', '1.10.0.0'])).toEqual([
+      '1.8.1.4',
+      '1.10.0.0',
+    ]);
+    expect(newerTags('3.6', ['3.10', '3.7', '3.6.1'])).toEqual(['3.7', '3.10']);
+    expect(newerTags('main', ['v1'])).toEqual([]);
   });
 
   it('re-runs on any change to the mirror set or its generator', () => {

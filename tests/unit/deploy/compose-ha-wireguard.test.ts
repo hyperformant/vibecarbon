@@ -102,7 +102,7 @@ describe('buildReplicationOverlay', () => {
     expect(y).toContain('"5433:5432"');
     // The gateway relay.
     expect(y).toContain('repl-gateway');
-    expect(y).toContain('alpine/socat');
+    expect(y).toContain('ghcr.io/hyperformant/socat:');
     expect(y).toContain('network_mode: host');
     expect(y).toContain('TCP-LISTEN:15433,bind=10.99.0.1,fork,reuseaddr');
     expect(y).toContain('TCP:127.0.0.1:5433');

@@ -25,6 +25,11 @@
  * DPkg::Lock::Timeout=300` (see src/lib/deploy/apt.js). Same standing
  * reasoning — the "algebraically identical" cases below are what prove the
  * wrap adds nothing, and they hold regardless of the stored bytes.
+ *
+ * RE-CAPTURED 2026-10-22 (k3s system images from the ghcr mirror, ruling
+ * D3): each registries.yaml heredoc gained the docker.io mirror spliced in
+ * from _k3s-system-image-mirror.yaml. The diff is confined to those lines
+ * (checked at capture: old fixture + snippet == fresh render).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -59,6 +59,27 @@ mirrors:
   "10.0.1.1:5000":
     endpoint:
       - "http://10.0.1.1:5000"
+  # k3s system images from our ghcr mirror, spliced into every role's
+  # registries.yaml by loadCloudInit's include directive (one copy, six
+  # scripts).
+  # k3s pulls coredns, local-path-provisioner, metrics-server and pause by
+  # tag from docker.io/rancher on every node, anonymously, and Docker Hub
+  # rate-limits anonymous pulls per IP. containerd tries this endpoint first
+  # with the rewrite (ghcr.io/hyperformant/<basename>, mirrored by
+  # publish-images.yml from K3S_SYSTEM_IMAGE_MIRRORS in src/lib/images.js),
+  # and any other docker.io image misses here and falls back to Docker Hub's
+  # default endpoint, which is never rewritten.
+  # No capture groups, backticks or dollar-variables anywhere in this file:
+  # the DigitalOcean scripts write it through an UNQUOTED heredoc, where the
+  # shell would expand them. A dollar sign followed by a quote stays literal.
+  docker.io:
+    endpoint:
+      - "https://ghcr.io"
+    rewrite:
+      "^rancher/mirrored-coredns-coredns$": "hyperformant/mirrored-coredns-coredns"
+      "^rancher/local-path-provisioner$": "hyperformant/local-path-provisioner"
+      "^rancher/mirrored-metrics-server$": "hyperformant/mirrored-metrics-server"
+      "^rancher/mirrored-pause$": "hyperformant/mirrored-pause"
 REGEOF
 
 # Configure Floating IP on the OS so the kernel accepts packets destined for it.

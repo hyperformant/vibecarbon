@@ -111,6 +111,7 @@ mirrors:
   "$PRIVATE_IP:5000":
     endpoint:
       - "http://$PRIVATE_IP:5000"
+# @include _k3s-system-image-mirror.yaml
 REGEOF
 
 # Install k3s master with pre-shared token.

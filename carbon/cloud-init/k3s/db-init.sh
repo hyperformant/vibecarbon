@@ -60,6 +60,7 @@ mirrors:
   "10.0.1.1:5000":
     endpoint:
       - "http://10.0.1.1:5000"
+# @include _k3s-system-image-mirror.yaml
 REGEOF
 
 # Get node IPs for k3s configuration.

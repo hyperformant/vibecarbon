@@ -570,9 +570,9 @@ describe('release.yml refuses a release whose pinned db image users cannot pull'
   const gate = jobs['db-image'];
   const run = runsOf(gate);
 
-  it('the release job needs the db-image gate', () => {
+  it('the release job needs the db-image and mirrored-images gates', () => {
     expect(gate).toBeDefined();
-    expect(jobs.release.needs).toBe('db-image');
+    expect(jobs.release.needs).toEqual(['db-image', 'mirrored-images']);
   });
 
   it('reads the pair from src/lib/images.js, the CLI authority', () => {
@@ -621,6 +621,30 @@ describe('release.yml refuses a release whose pinned db image users cannot pull'
     expect(run).toMatch(/for want in linux\/amd64 linux\/arm64; do/);
     expect(run).toMatch(/grep -qx "\$want"/);
     expect(run.match(/::error::refusing to release: \$ref /g)?.length).toBe(2);
+  });
+});
+
+describe('release.yml refuses a release while any ghcr mirror ref is not anonymously pullable', () => {
+  // Servers pull every mirror (MIRRORED_IMAGES) with no login. A new mirror
+  // package starts private, so merging refs before publishing and flipping
+  // them public breaks every deploy at the first pull.
+  const jobs = jobsOf('.github/workflows/release.yml') as Record<string, Job>;
+  const gate = jobs['mirrored-images'];
+  const run = runsOf(gate);
+
+  it('reads every mirror ref from src/lib/images.js, the CLI authority', () => {
+    expect(run).toContain("import('./src/lib/images.js')");
+    expect(run).toContain('m.MIRRORED_IMAGES.map(m.k8sMirrorRef)');
+    expect(run).toContain('test -n "$refs"');
+  });
+
+  it('inspects each digest-pinned ref anonymously and refuses on any miss', () => {
+    expect(run).toMatch(/DOCKER_CONFIG="\$RUNNER_TEMP\/[^"]+"/);
+    expect(run.indexOf('export DOCKER_CONFIG')).toBeLessThan(run.indexOf('imagetools inspect'));
+    expect(run).toContain('docker buildx imagetools inspect "$ref"');
+    expect(run).toMatch(/::error::refusing to release/);
+    expect(run).toMatch(/exit 1/);
+    expect(JSON.stringify(gate)).not.toMatch(/docker\/login-action|docker login|secrets\./);
   });
 });
 

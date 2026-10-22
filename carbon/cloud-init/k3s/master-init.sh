@@ -59,6 +59,7 @@ mirrors:
   "10.0.1.1:5000":
     endpoint:
       - "http://10.0.1.1:5000"
+# @include _k3s-system-image-mirror.yaml
 REGEOF
 
 # Configure Floating IP on the OS so the kernel accepts packets destined for it.

@@ -93,6 +93,7 @@ mirrors:
   "${master_ip}:5000":
     endpoint:
       - "http://${master_ip}:5000"
+# @include _k3s-system-image-mirror.yaml
 REGEOF
 
 # Wait for master k3s API to be ready before joining (private IP -- see
