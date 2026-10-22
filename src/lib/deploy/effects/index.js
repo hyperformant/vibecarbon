@@ -191,9 +191,15 @@ async function transferImage(ctx) {
     const baseRef = readRuntimeBaseRef(process.cwd());
     const basePull = baseRef
       ? perfAsync('deploy.image.basePull', () =>
-          sshRunAsync(serverIp, sshKeyPath, `docker pull ${shEscape(baseRef)}`, {
-            timeout: 600_000,
-          }),
+          // Inspect first: the ref is immutable (tag pinned, digest once
+          // published), so a server that already holds it, which is every warm
+          // redeploy, asks no registry and a GHCR blip cannot fail it.
+          sshRunAsync(
+            serverIp,
+            sshKeyPath,
+            `docker image inspect ${shEscape(baseRef)} >/dev/null 2>&1 || docker pull ${shEscape(baseRef)}`,
+            { timeout: 600_000 },
+          ),
         )
       : undefined;
     // deliverImage owns the pull's failure (with its own hint); this only keeps
@@ -493,7 +499,8 @@ async function startComposeStack(ctx) {
   }
   // The stack's image pull, started in background by setupServerFiles once the
   // compose files were on the server. Awaited here so a failed pull fails at
-  // its own step with its own stderr, never as `No such image` from `up`.
+  // this step, quoting docker's own pull output (pullComposeImages), never as
+  // `No such image` from `up`.
   if (ctx.stackPullPromise) {
     await perfAsync('deploy.compose.stackPull.await', () => ctx.stackPullPromise);
   }

@@ -20,6 +20,7 @@
 import { existsSync } from 'node:fs';
 import { DEFAULT_BACKUP_SCHEDULE } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { resolvePrimary } from '../cli/resolve-primary.js';
+import { redactCredentials } from '../redact-credentials.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from '../ssh.js';
 import { hasBackupResult, pushedBackupNames } from '../walg/backup-result.js';
 import { backupCredentialVars, readEnvBaseBackups } from '../walg/restore-base.js';
@@ -316,18 +317,6 @@ export function parseWalGapRecord(text) {
   return { count: segments.length, first: segments[0], last: segments.at(-1) };
 }
 
-const SECRETISH = /([A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASS)[A-Za-z0-9_]*)\s*[=:]\s*\S+/gi;
-const BEARER = /\b(Bearer|Basic)\s+\S+/gi;
-const URL_CREDS = /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
-
-/** A log line with credential-shaped values (assignments, auth headers, URL userinfo) masked. */
-function redact(line) {
-  return line
-    .replace(URL_CREDS, '$1<redacted>@')
-    .replace(BEARER, '$1 <redacted>')
-    .replace(SECRETISH, '$1=<redacted>');
-}
-
 /** The compose backup lock (compose-backup.sh's default path). */
 const COMPOSE_BACKUP_LOCK = '/tmp/vibecarbon-backup.lock';
 
@@ -366,7 +355,7 @@ export function parseComposeBackupLog(text) {
   if (marker && !retentionFailed) return null;
   if (!marker && running) return null;
   const last = [...block].reverse().find((l) => l.trim() && !hasBackupResult(l));
-  const detail = redact(last ?? '')
+  const detail = redactCredentials(last ?? '')
     .trim()
     .slice(0, 200);
   return { name: 'backup.log', failed: true, retentionFailed, log: true, detail };

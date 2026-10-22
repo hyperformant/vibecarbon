@@ -14,7 +14,8 @@
  * stack's image pull (every service but `app`) in the background once the
  * bundle's compose files are on the server, and `startComposeStack` awaits it
  * before reconcile, so the pulls overlap the image transfer, DNS and restore-tls
- * instead of running inside `compose up`.
+ * instead of running inside `compose up`. The pull never moves into
+ * cloud-init (cloud-init-no-image-pull.test.ts).
  *
  * F1 (compose-ha): `haRemoteBuild` must start the two-node build fan WITHOUT
  * awaiting (so it overlaps setupServerFiles → mergeWalgRole → pullImages), and
@@ -24,9 +25,6 @@
  * side-effecting calls (deliverImage / the base pull / pullComposeImages /
  * buildRemote / startComposeStack) and assert the ordering.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 type Deferred = {
@@ -103,7 +101,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     ...actual,
     sshRunAsync: vi.fn((_ip: string, _key: string, cmd: string) => {
       H.state.sshCommands.push(cmd);
-      if (cmd.startsWith('docker pull ')) {
+      if (cmd.includes('docker pull ')) {
         H.state.order.push('basePull:start');
         return H.state.basePull?.promise;
       }
@@ -206,7 +204,11 @@ describe('F2 — compose single: transferImage is non-blocking, startComposeStac
     expect(H.state.order.indexOf('basePull:start')).toBeLessThan(
       H.state.order.indexOf('deliver-start'),
     );
-    expect(H.state.sshCommands).toContain("docker pull 'ghcr.io/o/node-runtime:1'");
+    // Inspect first: the ref is immutable, so a server that holds it (every
+    // warm redeploy) asks no registry, and a GHCR blip cannot fail it.
+    expect(H.state.sshCommands).toContain(
+      "docker image inspect 'ghcr.io/o/node-runtime:1' >/dev/null 2>&1 || docker pull 'ghcr.io/o/node-runtime:1'",
+    );
     const [args] = H.state.deliverArgs;
     expect(args).toMatchObject({
       tag: 'p-app:local',
@@ -227,7 +229,7 @@ describe('F2 — compose single: transferImage is non-blocking, startComposeStac
     const ctx = composeSingleCtx();
     await EFFECTS.transferImage(ctx);
     await vi.waitFor(() => expect(H.state.order).toContain('deliver-start'));
-    expect(H.state.sshCommands.some((c) => c.startsWith('docker pull'))).toBe(false);
+    expect(H.state.sshCommands.some((c) => c.includes('docker pull'))).toBe(false);
     const [args] = H.state.deliverArgs;
     expect(args.basePull).toBeUndefined();
     expect(args.baseRef).toBe('');
@@ -290,28 +292,6 @@ describe('stack pulls overlap the transfer (cold-deploy-speed Task 4)', () => {
     H.state.stackPull?.reject(new Error('toomanyrequests'));
     await expect(EFFECTS.startComposeStack(ctx)).rejects.toThrow(/toomanyrequests/);
     expect(H.state.order).not.toContain('reconcile.run');
-  });
-});
-
-describe('cloud-init never pre-pulls images (re-pins 7babb8e)', () => {
-  const CLOUD_INIT = fileURLToPath(new URL('../../../carbon/cloud-init', import.meta.url));
-  const files = (dir: string): string[] =>
-    readdirSync(dir).flatMap((e) => {
-      const p = join(dir, e);
-      return statSync(p).isDirectory() ? files(p) : [p];
-    });
-
-  it('no file under carbon/cloud-init/ runs docker pull (shell or YAML-list form) outside a comment', () => {
-    // Unauthenticated pulls from fresh datacenter IPs hit Docker Hub's per-IP
-    // limit and hold the cloud-init marker; stack pulls run after the logins.
-    const found = files(CLOUD_INIT).flatMap((f) =>
-      readFileSync(f, 'utf-8')
-        .split('\n')
-        .filter((l) => !/^\s*#/.test(l) && /\bdocker\b[\s,'"]+pull\b/.test(l))
-        .map((l) => `${f}: ${l.trim()}`),
-    );
-    expect(files(CLOUD_INIT).length, 'positive control: the walk read files').toBeGreaterThan(0);
-    expect(found).toEqual([]);
   });
 });
 

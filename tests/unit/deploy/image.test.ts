@@ -289,6 +289,13 @@ describe('readRuntimeBaseRef', () => {
     expect(readRuntimeBaseRef(dir)).toBe('ghcr.io/o/node-runtime:24-r1@sha256:abc');
   });
 
+  it('strips the quotes a Dockerfile may put around the default', () => {
+    writeFileSync(join(dir, 'Dockerfile'), 'ARG RUNTIME_IMAGE="ghcr.io/o/r:1"\n');
+    expect(readRuntimeBaseRef(dir)).toBe('ghcr.io/o/r:1');
+    writeFileSync(join(dir, 'Dockerfile'), "ARG RUNTIME_IMAGE='ghcr.io/o/r:2'\n");
+    expect(readRuntimeBaseRef(dir)).toBe('ghcr.io/o/r:2');
+  });
+
   it('is null for a Dockerfile without the ARG, or with no Dockerfile at all', () => {
     writeFileSync(join(dir, 'Dockerfile'), 'FROM node:24-alpine\n# ARG RUNTIME_IMAGE=x\n');
     expect(readRuntimeBaseRef(dir)).toBeNull();

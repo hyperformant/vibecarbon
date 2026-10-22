@@ -16,6 +16,7 @@ import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
 import { perfAsync, perfTimer } from '../../perf.js';
+import { redactCredentials } from '../../redact-credentials.js';
 import { pollUntil } from '../../retry.js';
 import { shEscape } from '../../shell.js';
 import {
@@ -1074,6 +1075,32 @@ export async function pullComposeImages(ip, sshKeyPath, projectName, options = {
         `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`,
       { timeout: 600_000 },
     ),
+  ).catch((err) => {
+    throw stackPullError(ip, err);
+  });
+}
+
+/** How much of the pull's output a failure quotes: enough for the failing images and docker's reason. */
+const PULL_OUTPUT_TAIL_LINES = 20;
+
+/**
+ * The pull's own words, not the ssh command line. The remote command ends in
+ * `2>&1`, so docker's output (which image, and why: rate limit, denied, DNS)
+ * is in the error's stdout while its message is only `Command failed: ssh …`.
+ * Quotes the last lines, credential-shaped values masked, with the next step.
+ */
+function stackPullError(ip, err) {
+  const tail = String(err?.stdout ?? '')
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter(Boolean)
+    .slice(-PULL_OUTPUT_TAIL_LINES)
+    .map(redactCredentials);
+  const detail = tail.length ? tail.join('\n') : String(err?.message ?? err);
+  return new Error(
+    `stack image pull failed on ${ip}:\n${detail}\n` +
+      'The images above failed to pull; set Docker Hub credentials (dockerhub-login) or retry.',
+    { cause: err },
   );
 }
 

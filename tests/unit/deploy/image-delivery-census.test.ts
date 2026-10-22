@@ -135,11 +135,26 @@ function findSites(path: string, text: string): Site[] {
  */
 function findAliasedImports(path: string, text: string): string[] {
   const out: string[] = [];
+  const flag = (imported: string, local: string | undefined) => {
+    if (PRIMITIVES.has(imported) && local !== imported) {
+      out.push(`${path}: ${imported} imported as ${local}`);
+    }
+  };
   walk(parseAst(text), (n) => {
-    if (n.type !== 'ImportSpecifier') return;
-    const imported = n.imported?.name ?? n.imported?.value;
-    if (PRIMITIVES.has(imported) && n.local?.name !== imported) {
-      out.push(`${path}: ${imported} imported as ${n.local?.name}`);
+    if (n.type === 'ImportSpecifier') {
+      flag(n.imported?.name ?? n.imported?.value, n.local?.name);
+      return;
+    }
+    // `const { deliverImage: send } = await import('./layer-delta.js')`: the
+    // file's lazy-import convention renames by destructuring, not a specifier.
+    if (n.type !== 'VariableDeclarator' || n.id?.type !== 'ObjectPattern') return;
+    const init = n.init?.type === 'AwaitExpression' ? n.init.argument : n.init;
+    if (init?.type !== 'ImportExpression') return;
+    for (const prop of n.id.properties) {
+      if (prop.type !== 'Property' || prop.computed) continue;
+      const imported = prop.key?.name ?? prop.key?.value;
+      const target = prop.value?.type === 'AssignmentPattern' ? prop.value.left : prop.value;
+      flag(imported, target?.name);
     }
   });
   return out;
@@ -200,7 +215,26 @@ describe('image-delivery call-site census', () => {
 });
 
 /** A whole-image save or load: the transport only the layer delta may spell. */
-const WHOLE_IMAGE = /docker save|docker load|ctr (-n k8s\.io )?images import/;
+const WHOLE_IMAGE = /\bdocker (image )?(save|load)\b|\bctr\b.*\bimages import\b/;
+
+const SAVE_OR_LOAD = new Set(['save', 'load']);
+
+/** The leading string elements of an argv array, up to the first non-string. */
+function leadingStrings(elements: Node[]): string[] {
+  const out: string[] = [];
+  for (const el of elements) {
+    if (el?.type !== 'Literal' || typeof el.value !== 'string') break;
+    out.push(el.value);
+  }
+  return out;
+}
+
+/** `docker save`/`docker image load` as argv words, whatever splits them. */
+function isDockerSaveLoadArgv(words: string[]): boolean {
+  if (words[0] !== 'docker') return false;
+  const verb = words[1] === 'image' ? words[2] : words[1];
+  return SAVE_OR_LOAD.has(verb);
+}
 
 /** Where a whole-image save or load may still be spelled, by file or by file:function. */
 const WHOLE_IMAGE_EXEMPT = new Set([
@@ -224,6 +258,18 @@ const stringValue = (n: Node): string | null => {
   if (n.type === 'Literal' && typeof n.value === 'string') return n.value;
   if (n.type === 'TemplateLiteral') {
     return n.quasis.map((q: Node) => q.value.cooked ?? q.value.raw).join('');
+  }
+  // ['docker', 'save', tag] handed to runCommandAsync / execFile.
+  if (n.type === 'ArrayExpression') {
+    const words = leadingStrings(n.elements);
+    return isDockerSaveLoadArgv(words) ? words.join(' ') : null;
+  }
+  // spawn('docker', ['load', ...]): the command and its argv are two arguments.
+  if (n.type === 'CallExpression' && n.arguments[1]?.type === 'ArrayExpression') {
+    const head = n.arguments[0];
+    if (head?.type !== 'Literal' || typeof head.value !== 'string') return null;
+    const words = [head.value, ...leadingStrings(n.arguments[1].elements)];
+    return isDockerSaveLoadArgv(words) ? words.join(' ') : null;
   }
   return null;
 };
@@ -281,6 +327,18 @@ describe('planted fixtures', () => {
     ).toEqual(['f.js: sideloadK3s imported as ship']);
   });
 
+  it('flags a primitive renamed while destructuring a dynamic import', () => {
+    const text = [
+      "async function a() { const { deliverImage: send } = await import('./layer-delta.js'); }",
+      "async function b() { const { sideloadK3s: s = null, other: o } = await import('./k3s.js'); }",
+      "async function c() { const { deliverImage } = await import('./layer-delta.js'); }",
+    ].join('\n');
+    expect(findAliasedImports('f.js', text)).toEqual([
+      'f.js: deliverImage imported as send',
+      'f.js: sideloadK3s imported as s',
+    ]);
+  });
+
   it('accepts a plain import, an unrelated alias, and an export-only rename', () => {
     expect(
       findAliasedImports(
@@ -310,6 +368,27 @@ describe('planted fixtures', () => {
       'f.js:ship: docker save  | gzip',
       'f.js:<module>: k3s ctr -n k8s.io images import -',
     ]);
+  });
+
+  it('flags the spellings a plain substring would miss', () => {
+    const text = [
+      "const a = 'docker image save x';",
+      "const b = 'k3s ctr --address /run/x -n k8s.io images import -';",
+      "function argv(t) { return runCommandAsync(['docker', 'save', t]); }",
+      "function child(t) { return spawn('docker', ['image', 'load', '-i', t]); }",
+    ].join('\n');
+    expect(findWholeImageStrings('f.js', text)).toEqual([
+      'f.js:<module>: docker image save x',
+      'f.js:<module>: k3s ctr --address /run/x -n k8s.io images import -',
+      'f.js:argv: docker save',
+      'f.js:child: docker image load -i',
+    ]);
+  });
+
+  it('leaves other docker argv alone', () => {
+    const text =
+      "runCommandAsync(['docker', 'tag', a, b]); spawn('docker', ['build', '-t', t]); const s = 'docker saved';";
+    expect(findWholeImageStrings('f.js', text)).toEqual([]);
   });
 
   it('exempts the layer delta file and k3s.js:sideloadK3s only', () => {

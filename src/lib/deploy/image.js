@@ -171,5 +171,8 @@ export function readRuntimeBaseRef(projectDir) {
     if (err?.code === 'ENOENT') return null;
     throw err;
   }
-  return /^ARG RUNTIME_IMAGE=(\S+)\s*$/m.exec(text)?.[1] ?? null;
+  // A Dockerfile may quote the default (`ARG RUNTIME_IMAGE="ref"`); the ref is
+  // what the build resolved, without them.
+  const m = /^ARG RUNTIME_IMAGE=(?:"([^"\s]+)"|'([^'\s]+)'|([^"'\s]\S*))\s*$/m.exec(text);
+  return m ? (m[1] ?? m[2] ?? m[3]) : null;
 }
