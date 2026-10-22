@@ -237,6 +237,13 @@ describe('restoreComposeTls: stale extra entries are left out', () => {
     expect(calls[1].argv[2]).toContain(` ${Buffer.byteLength(sent)}\n`);
     expect(tlsRestoreLine(r, 'app.example.com')).toMatch(/Left out 1 stale certificate entry/);
   });
+  it('a never-snapshotted env reads as normal, not as a failure', () => {
+    const line = tlsRestoreLine({ restored: false, reason: 'no snapshot' }, 'app.example.com');
+    expect(line).toBe(
+      'No saved TLS certificate yet; Traefik keeps the one on the server, or requests its own.',
+    );
+    expect(line).not.toMatch(/not restored/);
+  });
   it('an apex that fails is still refused', async () => {
     const { ssh, calls } = fakeSsh();
     const r = await restoreComposeTls({

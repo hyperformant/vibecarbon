@@ -302,6 +302,11 @@ export function tlsRestoreLine(result, domain) {
   if (result.reason === LIVE_CERTIFICATE_PRESENT) {
     return 'TLS certificate already on the server; nothing to restore.';
   }
+  // The S3 read now runs first, so a warm server that was never snapshotted
+  // lands here too: say what happens, not that something failed.
+  if (result.reason === 'no snapshot') {
+    return 'No saved TLS certificate yet; Traefik keeps the one on the server, or requests its own.';
+  }
   if (!result.restored) return `TLS certificate not restored (${result.reason}).`;
   const restartNote = /did not restart/.test(result.reason)
     ? ' Traefik did not restart, so it loads it on its next start.'
