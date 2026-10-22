@@ -6,11 +6,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * state-lock.test.ts exercises the mechanism in isolation; that would still
  * pass if nothing called it. This drives the real `upStack` entry point the way
  * the HA runners do — two stacks, one state bucket, both started in the same
- * tick under Promise.all — and asserts the two Pulumi updates never overlap.
+ * tick under Promise.all.
  *
- * That fan-out is the shape behind 16 of the 38 throttle events in run
- * 31898658781: `stack-select ci4-primary` 8 and `stack-select ci4-standby` 8,
- * the k8s-ha pair hitting one bucket together.
+ * Its scope follows Ruling A′ (state-lock.js header): while the state bucket
+ * is inside its provider's settle window the two Pulumi updates never overlap;
+ * past it only select and refresh are serialized and the two updates run in
+ * parallel. state-lock-scope.test.ts counts the peaks.
  */
 
 const selectStackMock = vi.fn();
@@ -57,7 +58,7 @@ beforeEach(() => {
 });
 
 describe('state lock — wiring', () => {
-  it('never runs two ups against one state bucket at the same time', async () => {
+  it('on a young state bucket, never runs two ups against it at the same time', async () => {
     const { upStack } = await import('../../../src/lib/iac/index.js');
     const { resetStateLocksForTest } = await import('../../../src/lib/iac/state-lock.js');
     resetStateLocksForTest();
@@ -76,14 +77,15 @@ describe('state lock — wiring', () => {
       ),
     );
 
+    const young = { s3Config, projectName: 'testproj', stateBucketYoung: true };
     const fan = Promise.all([
-      upStack('e2-primary', () => ({}), { s3Config, projectName: 'testproj' }),
-      upStack('e2-standby', () => ({}), { s3Config, projectName: 'testproj' }),
+      upStack('e2-primary', () => ({}), young),
+      upStack('e2-standby', () => ({}), young),
     ]);
 
-    // Let every microtask that can run, run. Without the lock the standby's up
-    // would have started by now — that is precisely the concurrency we are
-    // removing.
+    // Let every microtask that can run, run. Without the whole-operation lock
+    // the standby's up would have started by now, which is the overlap a
+    // young bucket must not see.
     for (let i = 0; i < 50; i++) await Promise.resolve();
     expect(log).toEqual(['e2-primary:start']);
 
@@ -97,6 +99,38 @@ describe('state lock — wiring', () => {
       'e2-standby:start',
       'e2-standby:end',
     ]);
+  });
+
+  it('past the settle window, the second up starts while the first is still running', async () => {
+    const { upStack } = await import('../../../src/lib/iac/index.js');
+    const { resetStateLocksForTest } = await import('../../../src/lib/iac/state-lock.js');
+    resetStateLocksForTest();
+
+    const log: string[] = [];
+    let openPrimary!: () => void;
+    const primaryGate = new Promise<void>((r) => {
+      openPrimary = r;
+    });
+    selectStackMock.mockImplementation((args: { stackName: string }) =>
+      Promise.resolve(
+        args.stackName === 'e2-primary'
+          ? makeStack('e2-primary', log, primaryGate)
+          : makeStack('e2-standby', log, Promise.resolve()),
+      ),
+    );
+
+    const settled = { s3Config, projectName: 'testproj', stateBucketYoung: false };
+    const fan = Promise.all([
+      upStack('e2-primary', () => ({}), settled),
+      upStack('e2-standby', () => ({}), settled),
+    ]);
+    for (let i = 0; i < 200; i++) await Promise.resolve();
+    // The standby provisioned to completion while the primary's up was held.
+    expect(log).toEqual(['e2-primary:start', 'e2-standby:start', 'e2-standby:end']);
+
+    openPrimary();
+    await fan;
+    expect(log.at(-1)).toBe('e2-primary:end');
   });
 
   it('does not serialize stacks in different state buckets', async () => {

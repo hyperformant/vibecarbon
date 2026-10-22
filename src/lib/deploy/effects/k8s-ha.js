@@ -180,10 +180,12 @@ async function haK8sProvisionClusters(ctx) {
   // `pulumi stack select` failed with `could not list bucket: blob
   // (code=NotFound): NoSuchKey`, killing the deploy in under 20s. The fix was a
   // sequential no-op stack that forced `.pulumi/meta.yaml` to be written first.
-  // The per-bucket state lock (lib/iac/state-lock.js) now serializes those
-  // stack operations outright, so the first one initializes the backend and the
-  // second cannot race it — the workaround has nothing left to prevent, and its
-  // `__init` stack create plus delete leave with it.
+  // The per-bucket state lock (lib/iac/state-lock.js) serializes every stack
+  // select and pre-up refresh in every scope (the two ups themselves overlap
+  // once the state bucket is past its settle window), so the first select
+  // initializes the backend and the second cannot race it — the workaround has
+  // nothing left to prevent, and its `__init` stack create plus delete leave
+  // with it.
 
   // Pilot-light sizing: primary gets full sizing (role: 'primary',
   // minWorkers/maxWorkers as configured); standby is a dormant DR target, not

@@ -47,7 +47,12 @@ import {
 } from './app-storage-credential.js';
 import { backupFenceWarning, recordBackupFence, writeK8sBackupFence } from './backup-fence.js';
 import { recordDeployedLineage } from './backup-lineage.js';
-import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
+import {
+  bucketSettleNote,
+  readStateBucketYoung,
+  settleWindowFor,
+  storageSettleStatus,
+} from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
@@ -1386,6 +1391,23 @@ export async function executeDeployment(args, gatheredConfig) {
   // .vibecarbon.json so scale / failover / destroy resolve the same backend.
   s3Config.stateBucket = s3Result?.stateBucket || stateBucket;
 
+  // The state lock's scope for an HA pair's `up`s (Ruling A′, lib/iac/
+  // state-lock.js): one read of the state bucket's creation time, and only on
+  // a provider with a non-zero settle window. Started here so it runs beside
+  // the image and restore-point work, and awaited where the tier ctx is built.
+  // Never rejects: an unreadable age answers young.
+  const stateBucketYoungRead = readStateBucketYoung({
+    providerId: providerIdFor(envConfig),
+    createProvider: () =>
+      getObjectStorageProvider(
+        providerIdFor(envConfig),
+        s3Config.accessKey,
+        s3Config.secretKey,
+        s3Config.stateBucketRegion ?? s3Config.region,
+      ),
+    bucket: s3Config.stateBucket,
+  });
+
   // DR (`deploy -restore latest|<base>|<ISO-8601>`, k8s tiers): resolve the
   // exact base backup now, from the stop sentinels in the bucket and prefix
   // the db pod's wal-g reads, before anything is minted or provisioned. No
@@ -1779,6 +1801,12 @@ export async function executeDeployment(args, gatheredConfig) {
           standby: { stack: envConfig.ha.standby.stack, region: envConfig.ha.standby?.region },
         }
       : null;
+  const stateBucketYoung = await stateBucketYoungRead;
+  if (stateBucketYoung) {
+    writeLogDetail(
+      `# state bucket ${s3Config.stateBucket} is inside its settle window: each Pulumi up holds the state lock end to end`,
+    );
+  }
   const deploymentConfig = {
     projectName: projectConfig.projectName,
     environment: config.environment,
@@ -1818,6 +1846,7 @@ export async function executeDeployment(args, gatheredConfig) {
     imageReadyPromise,
     tracker,
     state,
+    stateBucketYoung,
   };
 
   const deployCtx = {
@@ -1847,6 +1876,7 @@ export async function executeDeployment(args, gatheredConfig) {
     isComposeLocal,
     localImageTag,
     composeLocalBuildPromise,
+    stateBucketYoung,
   };
 
   // All four tiers are now plan-driven: planDeploy(tier) → runPlan → EFFECTS.

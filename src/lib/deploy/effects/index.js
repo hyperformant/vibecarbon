@@ -75,6 +75,7 @@ async function provisionServer(ctx) {
         providerToken: apiToken,
         s3Config,
         projectName: projectConfig.projectName,
+        stateBucketYoung: ctx.stateBucketYoung,
         // Recover stale-EMPTY outputs reads in place (read-only poll inside
         // upStack) — the hard gate below stays as the loud last resort.
         requiredOutputs: ['serverIp'],
