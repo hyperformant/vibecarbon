@@ -92,6 +92,10 @@ describe('renderCostGrid', () => {
     expect(md).toContain('| Vultr | $20 (ewr) | $40 (ewr + ord) | not yet | not yet |');
   });
 
+  it('keeps ARM out of customer copy (ruling B5)', () => {
+    expect(renderCostGrid(fixture)).not.toMatch(/\bARM\b/i);
+  });
+
   it('names the account currency in the footnote', () => {
     expect(renderCostGrid(fixture)).toMatch(/Hetzner bills this account in USD/);
     const eur = {

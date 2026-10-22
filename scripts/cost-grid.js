@@ -340,7 +340,6 @@ export function renderCostGrid({ providers, date, storage }) {
     footnote.push(
       `Hetzner bills this account in ${code}; ${other} accounts are billed in ${other}.`,
       "Hetzner's cheaper cx23 comes and goes from stock in the EU, and new deploys pick it automatically when it is in stock.",
-      'ARM servers come later; on Hetzner they would cost less than half of these prices.',
     );
   }
 
