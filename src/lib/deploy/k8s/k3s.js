@@ -45,6 +45,7 @@ import {
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../../carbon/scripts/render-backup-settings.mjs';
+import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { DNS01_PROVIDERS } from '../../dns-provider.js';
@@ -120,7 +121,6 @@ import {
   CERT_MANAGER_MIN_BACKOFF,
   k8sTlsRestoreLine,
   quietKubectl,
-  renderTlsCertificateManifest,
   restoreK8sTlsSecret,
 } from './tls-restore.js';
 

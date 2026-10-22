@@ -20,7 +20,7 @@ function openssl(args: string[]) {
 export function makeCert(
   dnsNames: string[],
   opts: CertOpts | number = {},
-): { cert: string; key: string } {
+): { cert: string; key: string; ca?: string } {
   const { days = 60, selfSigned = false } = typeof opts === 'number' ? { days: opts } : opts;
   const dir = mkdtempSync(join(tmpdir(), 'tls-fixture-'));
   const p = (f: string) => join(dir, f);
@@ -87,7 +87,11 @@ export function makeCert(
         p('ext.cnf'),
       ]);
     }
-    return { cert: readFileSync(p('c.pem'), 'utf8'), key: readFileSync(p('k.pem'), 'utf8') };
+    return {
+      cert: readFileSync(p('c.pem'), 'utf8'),
+      key: readFileSync(p('k.pem'), 'utf8'),
+      ...(selfSigned ? {} : { ca: readFileSync(p('ca.pem'), 'utf8') }),
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -118,8 +122,7 @@ export function acmeJson(opts: {
   });
 }
 
-/** `kubectl get secret -o json` text for a kubernetes.io/tls Secret. */
-export function k8sSecretJson(opts: {
+interface K8sSecretOpts {
   dnsNames?: string[];
   days?: number;
   issuerName?: string;
@@ -127,14 +130,26 @@ export function k8sSecretJson(opts: {
   omitIssuer?: boolean;
   selfSigned?: boolean;
   mismatchedKey?: boolean;
-}): string {
+}
+
+/** `kubectl get secret -o json` text for a kubernetes.io/tls Secret. */
+export function k8sSecretJson(opts: K8sSecretOpts): string {
+  return k8sSecretJsonWithCa(opts).json;
+}
+
+/** k8sSecretJson plus the PEM of the throwaway CA that signed it (none when self-signed). */
+export function k8sSecretJsonWithCa(opts: K8sSecretOpts): { json: string; ca?: string } {
   const dnsNames = opts.dnsNames ?? ['app.example.com', '*.app.example.com'];
-  const { cert, key: ownKey } = makeCert(dnsNames, {
+  const {
+    cert,
+    key: ownKey,
+    ca,
+  } = makeCert(dnsNames, {
     days: opts.days,
     selfSigned: opts.selfSigned,
   });
   const key = opts.mismatchedKey ? makeCert(dnsNames).key : ownKey;
-  return JSON.stringify({
+  const json = JSON.stringify({
     apiVersion: 'v1',
     kind: 'Secret',
     type: 'kubernetes.io/tls',
@@ -155,4 +170,65 @@ export function k8sSecretJson(opts: {
       ...(opts.omitKey ? {} : { 'tls.key': b64(key) }),
     },
   });
+  return { json, ca };
+}
+
+/** A leaf signed by an intermediate signed by a root, as PEM text each. */
+export function makeChain(): { leaf: string; intermediate: string; root: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'tls-chain-'));
+  const p = (f: string) => join(dir, f);
+  const ec = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes'];
+  try {
+    openssl(
+      ['req', '-x509', ...ec, '-keyout', p('root.key'), '-out', p('root.pem')].concat([
+        '-days',
+        '365',
+        '-subj',
+        '/CN=fixture-root',
+      ]),
+    );
+    writeFileSync(p('ca.cnf'), 'basicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\n');
+    openssl(
+      ['req', '-new', ...ec, '-keyout', p('int.key'), '-out', p('int.csr')].concat([
+        '-subj',
+        '/CN=fixture-intermediate',
+      ]),
+    );
+    openssl(
+      ['x509', '-req', '-in', p('int.csr'), '-CA', p('root.pem'), '-CAkey', p('root.key')].concat([
+        '-CAcreateserial',
+        '-out',
+        p('int.pem'),
+        '-days',
+        '365',
+        '-extfile',
+        p('ca.cnf'),
+      ]),
+    );
+    openssl(
+      ['req', '-new', ...ec, '-keyout', p('leaf.key'), '-out', p('leaf.csr')].concat([
+        '-subj',
+        '/CN=app.example.com',
+      ]),
+    );
+    writeFileSync(p('leaf.cnf'), 'subjectAltName=DNS:app.example.com\n');
+    openssl(
+      ['x509', '-req', '-in', p('leaf.csr'), '-CA', p('int.pem'), '-CAkey', p('int.key')].concat([
+        '-CAcreateserial',
+        '-out',
+        p('leaf.pem'),
+        '-days',
+        '60',
+        '-extfile',
+        p('leaf.cnf'),
+      ]),
+    );
+    return {
+      leaf: readFileSync(p('leaf.pem'), 'utf8'),
+      intermediate: readFileSync(p('int.pem'), 'utf8'),
+      root: readFileSync(p('root.pem'), 'utf8'),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }

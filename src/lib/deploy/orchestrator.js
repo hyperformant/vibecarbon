@@ -707,7 +707,11 @@ export async function verifyK8sTls({
     return { state: 'pending', checkedAt, reason, ca };
   }
   s.stop('TLS certificate trusted');
-  if (haveKubeconfig) {
+  if (!haveKubeconfig) {
+    p.log.warn(
+      `TLS certificate snapshot not saved (no kubeconfig at ${kubeconfig}). The deploy still succeeded, and the next scheduled backup saves it.`,
+    );
+  } else {
     const saved = await perfAsync('deploy.tls.snapshot', () =>
       snapshot({
         s3Config: { ...s3Config, bucket: backupS3Config?.bucket },

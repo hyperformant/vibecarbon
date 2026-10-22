@@ -1658,12 +1658,16 @@ export async function runConfigureCicd(envName) {
   // each needs its own GitOps handover. The orchestrator used to iterate
   // over `[{suffix:'primary'}, {suffix:'standby'}]` in HA, single in non-HA.
   const isHA = envConfig.deployMode === 'kubernetes-ha' || envConfig.deployMode === 'k8s-ha';
+  // Each cluster's Certificate follows its CURRENT role (a failover swaps
+  // which stack is primary), as the CLI deploy renders it.
+  const primaryStack = envConfig.ha?.primary?.stack ?? `${envName}-primary`;
+  const roleOf = (stack) => (stack === primaryStack ? 'primary' : 'standby');
   const targets = isHA
     ? [
-        { suffix: 'primary', envName: `${envName}-primary` },
-        { suffix: 'standby', envName: `${envName}-standby` },
+        { suffix: 'primary', envName: `${envName}-primary`, role: roleOf(`${envName}-primary`) },
+        { suffix: 'standby', envName: `${envName}-standby`, role: roleOf(`${envName}-standby`) },
       ]
-    : [{ suffix: null, envName }];
+    : [{ suffix: null, envName, role: 'primary' }];
 
   for (const target of targets) {
     const targetKubeconfig = join(cwd, '.vibecarbon', `kubeconfig-${target.envName}`);
@@ -1688,6 +1692,7 @@ export async function runConfigureCicd(envName) {
       imageTag,
       backupConfig: subEnvConfig.backup || envConfig.backup,
       tlsSnapshotPrefix,
+      role: target.role,
     });
   }
 

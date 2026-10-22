@@ -18,9 +18,9 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { renderTlsCertificateManifest } from '../../../carbon/scripts/render-tls-certificate.mjs';
 import { PROMOTE_ISSUER_ANNOTATION } from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
 import { buildDbManifestValues, renderK8sBase } from '../../../src/lib/deploy/k8s/k3s.js';
-import { renderTlsCertificateManifest } from '../../../src/lib/deploy/k8s/tls-restore.js';
 
 const ROOT = join(__dirname, '../../..');
 const BASE = join(ROOT, 'carbon/k8s/base');

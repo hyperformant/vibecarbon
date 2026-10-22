@@ -24,6 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-settings.mjs';
+import { tlsCertificateVars } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { spinner } from '../../cli/progress.js';
 import { gitSafeEnv } from '../../command.js';
 import { featureConfigKeys, featureSecretKeys } from '../../config-registry.js';
@@ -35,6 +36,8 @@ import {
   uploadKubeconfig,
   waitForLatestWorkflowRun,
 } from '../../github-environments.js';
+import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
+import { k8sTlsIdentity } from './k3s.js';
 
 /**
  * Build the operator-facing warning when observability is installed but this
@@ -203,6 +206,9 @@ function commitAndPushManifests(cwd, message) {
  * @param {string} [args.tlsSnapshotPrefix] - tlsSnapshotS3Prefix for this environment: seeded as the
  *   TLS_SNAPSHOT_S3_PREFIX var, which deploy.yml renders into vibecarbon-backup-settings for the
  *   CronJob's TLS snapshot step. Omitted: no snapshot is taken.
+ * @param {'primary'|'standby'} [args.role] - this cluster's current role (k8s-ha; default primary).
+ *   A standby's Certificate issues from the local self-signed issuer, with the real ACME issuer in
+ *   the promote annotation, exactly as the CLI deploy renders it.
  * @param {string} [args.imageTag] - specific image tag to bake into app Deployment (default "main")
  * @param {number} [args.workflowTimeoutSec] - default 60 min. deploy.yml's
  *   internal Flux wait caps at 10m (vibecarbon-base), on top of ~5m Flux
@@ -224,6 +230,7 @@ export async function deployK8sGitOps(args) {
     imageTag,
     backupConfig,
     tlsSnapshotPrefix,
+    role = 'primary',
     workflowTimeoutSec = 3600,
     skipCi = false,
   } = args;
@@ -237,6 +244,19 @@ export async function deployK8sGitOps(args) {
 
   // Before anything is committed or seeded: a malformed backup config fails here.
   const backupSettings = resolveBackupSettings(backupConfig);
+  // The Certificate deploy.yml renders (scripts/render-tls-certificate.mjs):
+  // the same issuer and names the CLI deploy renders, computed once here and
+  // validated before anything is seeded.
+  const { issuerName, dnsNames } = k8sTlsIdentity({
+    projectDir,
+    dnsProvider,
+    domain: domain || 'localhost',
+  });
+  const tlsCertVars = tlsCertificateVars({
+    dnsNames,
+    issuerName,
+    effectiveIssuer: role === 'standby' ? STANDBY_SELFSIGNED_ISSUER : issuerName,
+  });
 
   const s = spinner();
   const skipCiStr = skipCi ? ' [skip ci]' : '';
@@ -298,6 +318,9 @@ export async function deployK8sGitOps(args) {
     // Where the backup CronJob saves the TLS certificate; deploy.yml puts it
     // in the same settings ConfigMap. Empty (no backup bucket): not seeded.
     TLS_SNAPSHOT_S3_PREFIX: tlsSnapshotPrefix || '',
+    // The deploy-owned vibecarbon-tls Certificate (Flux drops it from its
+    // build); deploy.yml renders and applies it from these.
+    ...tlsCertVars,
   };
   await seedEnvironmentSecrets(environment, perEnvSecrets, perEnvVars);
   await uploadKubeconfig(environment, kubeconfigPath);

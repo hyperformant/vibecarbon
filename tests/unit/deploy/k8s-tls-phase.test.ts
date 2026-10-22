@@ -14,6 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadSourceTree, maskSource } from '../helpers/runtime-reach-walk.js';
 import { expectNoKeyLeak } from './_no-key-leak.ts';
 import { k8sSecretJson } from './_tls-fixtures.ts';
 
@@ -120,6 +121,15 @@ describe('app phase', () => {
   });
 });
 
+describe('census: the verification opt-out is passed exactly once in src/', () => {
+  it('`verifyTls: false` appears once as code (the k8s app phase), comments and strings aside', () => {
+    const hits = loadSourceTree('src').flatMap((f) =>
+      (maskSource(f.src).match(/verifyTls:\s*false/g) ?? []).map(() => f.path),
+    );
+    expect(hits).toEqual(['src/lib/deploy/orchestrator.js']);
+  });
+});
+
 describe('TLS phase (verifyK8sTls)', () => {
   it('probes with verification and the ACME watchdog for the first-look budget', async () => {
     const h = harness({ ok: true, status: '200', attempts: 1 });
@@ -209,6 +219,10 @@ describe('TLS phase (verifyK8sTls)', () => {
     expect(opts.onPoll).toBeNull();
     expect(h.deps.makeWatchdog).not.toHaveBeenCalled();
     expect(h.snapshot).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(
+      /^TLS certificate snapshot not saved \(no kubeconfig at \/proj\/\.vibecarbon\/kubeconfig-prod-primary\)\./,
+    );
   });
 
   it('a snapshot run through the TLS phase leaks no key material', async () => {

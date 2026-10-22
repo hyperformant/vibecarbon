@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { expectNoKeyLeak, forbiddenStrings } from './_no-key-leak.ts';
-import { k8sSecretJson } from './_tls-fixtures.ts';
+import { k8sSecretJson, k8sSecretJsonWithCa, makeChain } from './_tls-fixtures.ts';
 
 const H = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn() }));
 
@@ -33,37 +33,49 @@ const {
 const DNS = ['app.example.com', '*.app.example.com'];
 const ISSUER = 'letsencrypt-prod-hetzner';
 const S3 = { bucket: 'proj-backups', accessKey: 'AK', secretKey: 'SK', endpoint: 'https://s3' };
-const BASE = { s3Config: S3, projectName: 'proj', envName: 'prod', ca: 'prod', issuerName: ISSUER };
 
-const SNAP = k8sSecretJson({ dnsNames: DNS, days: 60 });
+// The snapshot is signed by a throwaway CA; the prod chain check trusts it
+// here in place of the platform roots.
+const { json: SNAP, ca: SNAP_CA } = k8sSecretJsonWithCa({ dnsNames: DNS, days: 60 });
+const BASE = {
+  s3Config: S3,
+  projectName: 'proj',
+  envName: 'prod',
+  ca: 'prod',
+  issuerName: ISSUER,
+  deps: { trustRoots: [SNAP_CA as string] },
+};
 const LIVE_VALID = k8sSecretJson({ dnsNames: DNS, days: 80 });
 const SNAP_KEY_B64 = JSON.parse(SNAP).data['tls.key'] as string;
 const SNAP_CRT_B64 = JSON.parse(SNAP).data['tls.crt'] as string;
 
 type Call = { argv: string[]; opts: Record<string, unknown> };
 
-/** A fake kubectl: `get secret` answers `live`; `apply` answers `apply`. */
-function fakeKubectl({ live = '' as string | Error, apply = '' as string | Error } = {}) {
+/** A kubectl error as quietKubectl throws it: a fixed message plus a class. */
+const kubectlError = (reason: string) => Object.assign(new Error('kubectl failed'), { reason });
+
+/** A fake kubectl: `get secret` answers `live`; `create`/`replace` answer `write`. */
+function fakeKubectl({ live = '' as string | Error, write = '' as string | Error } = {}) {
   const calls: Call[] = [];
   const run = vi.fn(async (argv: string[], opts: Record<string, unknown> = {}) => {
     calls.push({ argv, opts });
-    const answer = argv.includes('get') ? live : apply;
+    const answer = argv.includes('get') ? live : write;
     if (answer instanceof Error) throw answer;
     return answer;
   });
   return { run, calls };
 }
 
-const applies = (calls: Call[]) => calls.filter((c) => c.argv.includes('apply'));
+const writes = (calls: Call[]) => calls.filter((c) => !c.argv.includes('get'));
 
 describe('restoreK8sTlsSecret', () => {
-  it('leaves a valid live Secret alone: no S3 read, no apply', async () => {
+  it('leaves a valid live Secret alone: no S3 read, no write', async () => {
     H.read.mockReset();
     const k = fakeKubectl({ live: LIVE_VALID });
     const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
     expect(r).toEqual({ restored: false, reason: LIVE_SECRET_VALID });
     expect(H.read).not.toHaveBeenCalled();
-    expect(applies(k.calls)).toHaveLength(0);
+    expect(writes(k.calls)).toHaveLength(0);
   });
 
   it('never replaces a valid live Secret, even with a longer-lived snapshot', async () => {
@@ -73,10 +85,10 @@ describe('restoreK8sTlsSecret', () => {
     const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
     expect(r.restored).toBe(false);
     expect(H.read).not.toHaveBeenCalled();
-    expect(applies(k.calls)).toHaveLength(0);
+    expect(writes(k.calls)).toHaveLength(0);
   });
 
-  it('fills a missing Secret from the snapshot with one apply on stdin', async () => {
+  it('fills a missing Secret from the snapshot with one create on stdin', async () => {
     H.read.mockReset();
     H.read.mockResolvedValue({ text: SNAP });
     const k = fakeKubectl({ live: '' });
@@ -99,16 +111,18 @@ describe('restoreK8sTlsSecret', () => {
     expect(H.read.mock.calls[0][1]).toBe(
       tlsSnapshotKey({ projectName: 'proj', envName: 'prod', ca: 'prod', format: 'k8s-secret' }),
     );
-    const [apply] = applies(k.calls);
-    expect(applies(k.calls)).toHaveLength(1);
-    expect(apply.argv).toEqual(['apply', '-f', '-']);
-    expect(apply.opts.input).toBe(
+    // Absent: `create`, which never overwrites a Secret issued meanwhile.
+    const [create] = writes(k.calls);
+    expect(writes(k.calls)).toHaveLength(1);
+    expect(create.argv).toEqual(['create', '-f', '-']);
+    expect(create.opts.input).toBe(
       JSON.stringify(buildRestoredTlsSecret(SNAP, { namespace: 'vibecarbon', issuerName: ISSUER })),
     );
     // The restored Secret carries this deploy's issuer (cert-manager compares
     // it with the Certificate's issuerRef).
-    const manifest = JSON.parse(String(apply.opts.input));
+    const manifest = JSON.parse(String(create.opts.input));
     expect(manifest.metadata.annotations['cert-manager.io/issuer-name']).toBe(ISSUER);
+    expect(manifest.metadata.resourceVersion).toBeUndefined();
     for (const c of k.calls) {
       const argv = c.argv.join(' ');
       expect(argv).not.toContain(SNAP_KEY_B64);
@@ -116,13 +130,37 @@ describe('restoreK8sTlsSecret', () => {
     }
   });
 
-  it('fills a Secret cert-manager has not issued (no issuer annotation)', async () => {
+  it('a Secret issued between the read and the create is kept', async () => {
     H.read.mockReset();
     H.read.mockResolvedValue({ text: SNAP });
-    const k = fakeKubectl({ live: k8sSecretJson({ dnsNames: DNS, omitIssuer: true }) });
+    const k = fakeKubectl({ live: '', write: kubectlError('AlreadyExists') });
+    const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
+    expect(r).toEqual({ restored: false, reason: 'a Secret was issued meanwhile, kept' });
+  });
+
+  it('an invalid live Secret is replaced only at the resourceVersion that was judged', async () => {
+    H.read.mockReset();
+    H.read.mockResolvedValue({ text: SNAP });
+    const live = k8sSecretJson({ dnsNames: DNS, omitIssuer: true });
+    const k = fakeKubectl({ live });
     const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
     expect(r.restored).toBe(true);
-    expect(applies(k.calls)).toHaveLength(1);
+    const [replace] = writes(k.calls);
+    expect(writes(k.calls)).toHaveLength(1);
+    expect(replace.argv).toEqual(['replace', '-f', '-']);
+    const manifest = JSON.parse(String(replace.opts.input));
+    expect(manifest.metadata.resourceVersion).toBe(JSON.parse(live).metadata.resourceVersion);
+  });
+
+  it('a live Secret that changed since it was judged is kept (Conflict)', async () => {
+    H.read.mockReset();
+    H.read.mockResolvedValue({ text: SNAP });
+    const k = fakeKubectl({
+      live: k8sSecretJson({ dnsNames: DNS, omitIssuer: true }),
+      write: kubectlError('Conflict'),
+    });
+    const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
+    expect(r).toEqual({ restored: false, reason: 'the Secret changed meanwhile, kept' });
   });
 
   it('replaces a live Secret from the standby self-signed issuer', async () => {
@@ -156,7 +194,81 @@ describe('restoreK8sTlsSecret', () => {
     const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
     expect(r.restored).toBe(false);
     expect(r.reason).toMatch(/^snapshot refused: certificate names differ/);
-    expect(applies(k.calls)).toHaveLength(0);
+    expect(writes(k.calls)).toHaveLength(0);
+  });
+
+  it.each([
+    ['a staging issuer', 'letsencrypt-staging-hetzner'],
+    ['another provider', 'letsencrypt-prod-cloudflare'],
+  ])('skips a snapshot from %s', async (_label, snapIssuer) => {
+    H.read.mockReset();
+    const { json, ca } = k8sSecretJsonWithCa({ dnsNames: DNS, issuerName: snapIssuer });
+    H.read.mockResolvedValue({ text: json });
+    const k = fakeKubectl({ live: '' });
+    const r = await restoreK8sTlsSecret({
+      ...BASE,
+      deps: { trustRoots: [ca as string] },
+      dnsNames: DNS,
+      runKubectl: k.run,
+    });
+    expect(r).toEqual({ restored: false, reason: 'snapshot refused: issued by another issuer' });
+    expect(writes(k.calls)).toHaveLength(0);
+  });
+
+  it('prod: skips a snapshot whose chain does not reach a trusted root', async () => {
+    H.read.mockReset();
+    H.read.mockResolvedValue({ text: SNAP });
+    const k = fakeKubectl({ live: '' });
+    const r = await restoreK8sTlsSecret({
+      ...BASE,
+      deps: { trustRoots: [] },
+      dnsNames: DNS,
+      runKubectl: k.run,
+    });
+    expect(r).toEqual({
+      restored: false,
+      reason: 'snapshot refused: certificate does not chain to a trusted root',
+    });
+    expect(writes(k.calls)).toHaveLength(0);
+  });
+
+  it('prod: by default trusts only the platform roots (a private CA is refused)', async () => {
+    H.read.mockReset();
+    H.read.mockResolvedValue({ text: SNAP });
+    const k = fakeKubectl({ live: '' });
+    const r = await restoreK8sTlsSecret({
+      ...BASE,
+      deps: {},
+      dnsNames: DNS,
+      runKubectl: k.run,
+    });
+    expect(r.reason).toBe('snapshot refused: certificate does not chain to a trusted root');
+  });
+
+  it('a chain carried in tls.crt reaches the root through its intermediate', async () => {
+    const { chainReachesTrustedRoot } = await import('../../../src/lib/deploy/k8s/tls-restore.js');
+    const { leaf, intermediate, root } = makeChain();
+    expect(chainReachesTrustedRoot(`${leaf}${intermediate}`, [root])).toBe(true);
+    expect(chainReachesTrustedRoot(leaf, [root])).toBe(false);
+    expect(chainReachesTrustedRoot(`${leaf}${intermediate}`, [intermediate])).toBe(true);
+    expect(chainReachesTrustedRoot(`${leaf}${intermediate}`, [])).toBe(false);
+    expect(chainReachesTrustedRoot('not a pem', [root])).toBe(false);
+  });
+
+  it('staging: the chain is not checked against the platform roots', async () => {
+    H.read.mockReset();
+    const staging = 'letsencrypt-staging-hetzner';
+    H.read.mockResolvedValue({ text: k8sSecretJson({ dnsNames: DNS, issuerName: staging }) });
+    const k = fakeKubectl({ live: '' });
+    const r = await restoreK8sTlsSecret({
+      ...BASE,
+      ca: 'staging',
+      issuerName: staging,
+      deps: {},
+      dnsNames: DNS,
+      runKubectl: k.run,
+    });
+    expect(r.restored).toBe(true);
   });
 
   it('skips with no snapshot, no bucket, no credentials or no recorded CA', async () => {
@@ -189,7 +301,7 @@ describe('restoreK8sTlsSecret', () => {
     expect(H.read).not.toHaveBeenCalled();
   });
 
-  it('a failed apply reports a fixed phrase, never the command output', async () => {
+  it('a failed write reports a fixed phrase, never the command output', async () => {
     H.read.mockReset();
     H.read.mockResolvedValue({ text: SNAP });
     const pem = Buffer.from(SNAP_KEY_B64, 'base64').toString('utf8');
@@ -198,11 +310,11 @@ describe('restoreK8sTlsSecret', () => {
       stderr: `error: ${SNAP_KEY_B64}\n${pem}`,
       stdout: SNAP,
     });
-    const k = fakeKubectl({ live: '', apply: err });
+    const k = fakeKubectl({ live: '', write: err });
     const { result } = await expectNoKeyLeak(SNAP, () =>
       restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run }),
     );
-    expect(result).toEqual({ restored: false, reason: 'could not apply the Secret' });
+    expect(result).toEqual({ restored: false, reason: 'could not write the Secret' });
     const line = k8sTlsRestoreLine(result);
     for (const bad of forbiddenStrings(SNAP)) {
       expect(result.reason.includes(bad)).toBe(false);
@@ -335,12 +447,15 @@ describe('CERT_MANAGER_MIN_BACKOFF', () => {
 
 describe('quietKubectl', () => {
   /** A `kubectl` on PATH that prints the snapshot (key included) and exits `code`. */
-  function fakeKubectlBin(code: number) {
+  function fakeKubectlBin(code: number, stderrLine = '') {
     const dir = mkdtempSync(join(tmpdir(), 'vc-quiet-kubectl-'));
     const payload = join(dir, 'payload.json');
     writeFileSync(payload, SNAP);
     const bin = join(dir, 'kubectl');
-    writeFileSync(bin, `#!/bin/sh\ncat "${payload}"\ncat "${payload}" >&2\nexit ${code}\n`);
+    writeFileSync(
+      bin,
+      `#!/bin/sh\ncat > /dev/null\ncat "${payload}"\ncat "${payload}" >&2\necho "${stderrLine}" >&2\nexit ${code}\n`,
+    );
     chmodSync(bin, 0o755);
     return { dir, env: { ...process.env, PATH: `${dir}:${process.env.PATH}` } };
   }
@@ -349,7 +464,7 @@ describe('quietKubectl', () => {
     const { dir, env } = fakeKubectlBin(0);
     try {
       const { result } = await expectNoKeyLeak(SNAP, () =>
-        quietKubectl(env)(['get', 'secret', 'vibecarbon-tls']),
+        quietKubectl(env)(['get', 'secret', 'vibecarbon-tls'], { captureStdout: true }),
       );
       expect(result.trim()).toBe(SNAP);
     } finally {
@@ -358,19 +473,20 @@ describe('quietKubectl', () => {
   });
 
   it('a failure under CI prints nothing and throws a fixed message', async () => {
-    const { dir, env } = fakeKubectlBin(1);
+    const { dir, env } = fakeKubectlBin(1, 'Error from server (AlreadyExists): already exists');
     const prevCi = process.env.CI;
     process.env.CI = '1';
     try {
       const { result } = await expectNoKeyLeak(SNAP, async () => {
         try {
-          await quietKubectl(env)(['apply', '-f', '-'], { input: SNAP });
+          await quietKubectl(env)(['create', '-f', '-'], { input: SNAP });
           return 'no throw';
         } catch (err) {
-          return (err as Error).message;
+          return `${(err as Error).message}|${(err as { reason?: string }).reason}`;
         }
       });
-      expect(result).toBe('kubectl failed');
+      // A fixed message plus a class read from stderr, never stderr itself.
+      expect(result).toBe('kubectl failed|AlreadyExists');
     } finally {
       if (prevCi === undefined) delete process.env.CI;
       else process.env.CI = prevCi;

@@ -1,7 +1,8 @@
 /**
- * k8s TLS certificate reuse: the vibecarbon-tls Certificate the deploy
- * renders, the Secret it restores from the last snapshot before cert-manager
- * would issue, and the snapshot it saves once the domain is trusted.
+ * k8s TLS certificate reuse: the Secret the deploy restores from the last
+ * snapshot before cert-manager would issue, and the snapshot it saves once
+ * the domain is trusted. (The Certificate itself is rendered by
+ * carbon/scripts/render-tls-certificate.mjs, shared with the GitOps workflow.)
  *
  * The overwrite rule. A restore writes Secret/vibecarbon-tls only when the
  * cluster has none, or has one that does not pass inspectK8sTlsSecret for
@@ -9,18 +10,29 @@
  * Secret is not issued), the standby self-signed issuer, another issuer than
  * this Certificate's, unparsable, other names, or under 7 days left. A live
  * Secret that passes is never replaced, not even by a longer-lived snapshot:
- * cert-manager renews it by itself.
+ * cert-manager renews it by itself. The write holds the read's verdict as a
+ * precondition: an absent Secret is filled with `kubectl create` (a Secret
+ * issued meanwhile makes it AlreadyExists, and it is kept), an invalid one
+ * with `kubectl replace` at the resourceVersion that was judged (a change
+ * meanwhile makes it Conflict, and the change is kept).
+ *
+ * The snapshot is restored only when it is from this deploy's own issuer
+ * (same CA and same provider issuer as the Certificate), and, for the prod
+ * CA, only when the chain in its tls.crt reaches a root of the platform
+ * store.
  *
  * Key handling. The snapshot is validated in full before anything is written
  * (key matches certificate, exact names, at least 7 days left, not
- * self-signed). The restored Secret goes to `kubectl apply -f -` on stdin,
- * never on argv and never through a temp file. Every kubectl command whose
- * output or input can carry key material runs through quietKubectl, which
- * prints nothing, not even on failure, and a failure is reported by a fixed
- * phrase, never by the command's output. Nothing here logs: callers print
- * the one line (k8sTlsRestoreLine).
+ * self-signed). The restored Secret goes to kubectl on stdin, never on argv
+ * and never through a temp file. Every kubectl command whose output or input
+ * can carry key material runs through quietKubectl, which prints nothing, not
+ * even on failure, and a failure is reported by a fixed phrase, never by the
+ * command's output. Nothing here logs: callers print the one line
+ * (k8sTlsRestoreLine).
  */
-import { runCommandAsync } from '../../command.js';
+import { spawn } from 'node:child_process';
+import { X509Certificate } from 'node:crypto';
+import tls from 'node:tls';
 import {
   buildRestoredTlsSecret,
   caSlug,
@@ -29,7 +41,6 @@ import {
   tlsSnapshotKey,
   writeTlsSnapshot,
 } from '../tls-snapshot.js';
-import { PROMOTE_ISSUER_ANNOTATION } from './acme-issuer-policy.js';
 
 /**
  * cert-manager's minimum backoff after a failed CertificateRequest (the
@@ -59,68 +70,112 @@ const LIVE_SECRET_ARGV = Object.freeze([
   '--ignore-not-found',
 ]);
 
-/**
- * The vibecarbon-tls Certificate for this deploy, as YAML. `effectiveIssuer`
- * is what cert-manager issues from (a pilot standby's local self-signed
- * issuer); the real ACME issuer rides the promote annotation on every role.
- * Flux never prunes it: it is deploy-owned (k8s/flux/clusters/*).
- *
- * @param {{ dnsNames: string[], issuerName: string, effectiveIssuer: string }} args
- * @returns {string}
- */
-export function renderTlsCertificateManifest({ dnsNames, issuerName, effectiveIssuer }) {
-  if (!Array.isArray(dnsNames) || dnsNames.length === 0 || dnsNames.some((n) => !n)) {
-    throw new Error('renderTlsCertificateManifest: dnsNames is empty');
-  }
-  if (!issuerName || !effectiveIssuer) {
-    throw new Error('renderTlsCertificateManifest: no issuer');
-  }
-  // Every scalar is a JSON string, which YAML reads verbatim (no YAML
-  // library ships with the CLI).
-  const q = (v) => JSON.stringify(String(v));
-  return [
-    '# Rendered by the vibecarbon deploy (renderTlsCertificateManifest); Flux does not own it.',
-    'apiVersion: cert-manager.io/v1',
-    'kind: Certificate',
-    'metadata:',
-    `  name: ${NAME}`,
-    `  namespace: ${NAMESPACE}`,
-    '  annotations:',
-    `    ${q(PROMOTE_ISSUER_ANNOTATION)}: ${q(issuerName)}`,
-    `    ${q('kustomize.toolkit.fluxcd.io/prune')}: ${q('disabled')}`,
-    'spec:',
-    `  secretName: ${NAME}`,
-    '  issuerRef:',
-    `    name: ${q(effectiveIssuer)}`,
-    '    kind: ClusterIssuer',
-    '  dnsNames:',
-    ...dnsNames.map((n) => `    - ${q(n)}`),
-    '',
-  ].join('\n');
+/** The class of a failed kubectl call, read from its stderr (never the text itself). */
+function kubectlFailureClass(stderr) {
+  if (/\(AlreadyExists\)/.test(stderr)) return 'AlreadyExists';
+  if (/\(Conflict\)/.test(stderr)) return 'Conflict';
+  if (/\(NotFound\)/.test(stderr)) return 'NotFound';
+  return 'failed';
 }
 
 /**
- * A kubectl runner that prints nothing: output is piped and returned, and a
- * failure throws a fixed message (runCommandAsync's ignoreError path skips
- * its CI/DEBUG dump of a failed command's stdout and stderr). For commands
- * whose stdin or stdout can carry key material. No retry: a restore or
- * snapshot that fails is skipped, and cert-manager issues as it would anyway.
+ * A kubectl runner that prints nothing, not even under CI or DEBUG: stdout is
+ * piped and returned, stdin carries `input` (closed right after, or at once
+ * when there is none), and a failure throws the fixed message
+ * `kubectl failed` with a `reason` class (AlreadyExists, Conflict, NotFound,
+ * failed) read from stderr; the output itself never leaves this function.
+ * For commands whose stdin or stdout can carry key material. No retry: a
+ * restore or snapshot that fails is skipped, and cert-manager issues as it
+ * would anyway.
+ *
+ * The runner accepts the runKubectlWithRetry option shape, but only `input`
+ * means anything here: `captureStdout` is always the behavior (nothing is
+ * ever streamed) and `description` is unused (nothing is ever printed).
  *
  * @param {NodeJS.ProcessEnv} env - carries KUBECONFIG
- * @returns {(argv: string[], opts?: { input?: string }) => Promise<string>}
+ * @returns {(argv: string[], opts?: { input?: string, captureStdout?: boolean, description?: string }) => Promise<string>}
  */
 export function quietKubectl(env, { timeoutMs = QUIET_TIMEOUT_MS } = {}) {
-  return async (argv, { input } = {}) => {
-    const out = await runCommandAsync(['kubectl', ...argv], {
-      env,
-      input,
-      silent: true,
-      ignoreError: true,
-      timeout: timeoutMs,
+  return (argv, { input } = {}) =>
+    new Promise((resolve, reject) => {
+      const fail = (stderr = '') =>
+        reject(Object.assign(new Error('kubectl failed'), { reason: kubectlFailureClass(stderr) }));
+      let child;
+      try {
+        child = spawn('kubectl', argv, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      } catch {
+        fail();
+        return;
+      }
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', (d) => {
+        stdout += d;
+      });
+      child.stderr?.on('data', (d) => {
+        stderr += d;
+      });
+      const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
+      child.on('error', () => {
+        clearTimeout(timer);
+        fail();
+      });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve(stdout);
+        else fail(stderr);
+      });
+      // A kubectl that exits before reading its stdin must not surface EPIPE.
+      child.stdin?.on?.('error', () => {});
+      if (input !== undefined) child.stdin?.write(input);
+      child.stdin?.end();
     });
-    if (typeof out !== 'string') throw new Error('kubectl failed');
-    return out;
-  };
+}
+
+/** Every certificate in a PEM bundle, in order; [] when any block is unparsable. */
+function pemCertificates(pem) {
+  const blocks = String(pem ?? '').match(
+    /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g,
+  );
+  if (!blocks) return [];
+  try {
+    return blocks.map((b) => new X509Certificate(b));
+  } catch {
+    return [];
+  }
+}
+
+/** `issuer` issued `cert`: the names match and the signature verifies. */
+function issuedBy(cert, issuer) {
+  try {
+    return cert.checkIssued(issuer) && cert.verify(issuer.publicKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the leaf (the first certificate of `certPem`) reaches one of
+ * `trustRoots` through the intermediates the bundle carries, each link a
+ * verified signature. Expiry of the links is not judged here (the leaf's own
+ * validity is inspectK8sTlsSecret's).
+ *
+ * @param {string} certPem - a tls.crt: leaf first, then its chain
+ * @param {readonly string[]} trustRoots - PEM roots (tls.rootCertificates)
+ */
+export function chainReachesTrustedRoot(certPem, trustRoots) {
+  const bundle = pemCertificates(certPem);
+  const roots = trustRoots.flatMap((r) => pemCertificates(r));
+  if (bundle.length === 0 || roots.length === 0) return false;
+  let current = bundle[0];
+  const unused = bundle.slice(1);
+  for (let hops = 0; hops <= bundle.length; hops++) {
+    if (roots.some((root) => issuedBy(current, root))) return true;
+    const next = unused.findIndex((c) => issuedBy(current, c));
+    if (next < 0) return false;
+    [current] = unused.splice(next, 1);
+  }
+  return false;
 }
 
 /** The live Secret's JSON text ('' when absent), or null when it could not be read. */
@@ -152,7 +207,7 @@ function backupPreconditions(s3Config, ca) {
  * @param {{ s3Config: object|null, projectName: string, envName: string,
  *   ca: 'prod'|'staging'|null, issuerName: string, dnsNames: string[],
  *   runKubectl: (argv: string[], opts?: object) => Promise<string>,
- *   deps?: { read?: Function } }} args
+ *   deps?: { read?: Function, trustRoots?: readonly string[] } }} args
  * @returns {Promise<{ restored: boolean, reason: string }>}
  */
 export async function restoreK8sTlsSecret({
@@ -166,6 +221,7 @@ export async function restoreK8sTlsSecret({
   deps = {},
 }) {
   const read = deps.read ?? readTlsSnapshot;
+  const trustRoots = deps.trustRoots ?? tls.rootCertificates;
   const skip = (reason) => ({ restored: false, reason });
   const missing = backupPreconditions(s3Config, ca);
   if (missing) return skip(missing);
@@ -174,9 +230,12 @@ export async function restoreK8sTlsSecret({
   try {
     const live = await readLiveSecret(runKubectl);
     if (live === null) return skip('could not read the live Secret');
+    let liveVersion = null;
     if (live) {
       const verdict = inspectK8sTlsSecret(live, { dnsNames });
       if (verdict.ok && verdict.issuerName === issuerName) return skip(LIVE_SECRET_VALID);
+      liveVersion = liveResourceVersion(live);
+      if (!liveVersion) return skip('could not read the live Secret');
     }
 
     const key = tlsSnapshotKey({ projectName, envName, ca, format: 'k8s-secret' });
@@ -184,20 +243,47 @@ export async function restoreK8sTlsSecret({
     if (!text) return skip(reason ?? 'no snapshot');
     const verdict = inspectK8sTlsSecret(text, { dnsNames });
     if (!verdict.ok) return skip(`snapshot refused: ${verdict.reason}`);
+    // Only this deploy's own issuer: another CA's or another provider's
+    // certificate is no reuse (the Certificate's issuerRef would not match
+    // what was issued), and the restored annotation would misstate it.
+    if (verdict.issuerName !== issuerName || caSlug(verdict.issuerName) !== ca) {
+      return skip('snapshot refused: issued by another issuer');
+    }
+    if (ca === 'prod') {
+      const crt = Buffer.from(JSON.parse(text).data['tls.crt'], 'base64').toString('utf8');
+      if (!chainReachesTrustedRoot(crt, trustRoots)) {
+        return skip('snapshot refused: certificate does not chain to a trusted root');
+      }
+    }
     const manifest = buildRestoredTlsSecret(text, { namespace: NAMESPACE, issuerName });
+    if (liveVersion) manifest.metadata.resourceVersion = liveVersion;
 
     try {
-      await runKubectl(['apply', '-f', '-'], {
+      // Absent: create (never overwrites). Present but invalid: replace at
+      // the judged resourceVersion (never overwrites a change made since).
+      await runKubectl([liveVersion ? 'replace' : 'create', '-f', '-'], {
         input: JSON.stringify(manifest),
         captureStdout: true,
         description: 'restore Secret/vibecarbon-tls',
       });
-    } catch {
-      return skip('could not apply the Secret');
+    } catch (err) {
+      if (err?.reason === 'AlreadyExists') return skip('a Secret was issued meanwhile, kept');
+      if (err?.reason === 'Conflict') return skip('the Secret changed meanwhile, kept');
+      return skip('could not write the Secret');
     }
     return { restored: true, reason: 'restored from the last snapshot' };
   } catch {
     return skip('restore errored');
+  }
+}
+
+/** The live Secret's resourceVersion, or null when it has none readable. */
+function liveResourceVersion(liveText) {
+  try {
+    const v = JSON.parse(liveText)?.metadata?.resourceVersion;
+    return typeof v === 'string' && v ? v : null;
+  } catch {
+    return null;
   }
 }
 

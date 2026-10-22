@@ -316,6 +316,28 @@ jobs:
             deployment/cert-manager-cainjector \
             --timeout=5m
 
+      # The vibecarbon-tls Certificate is DEPLOY-owned: its names and issuer
+      # are per environment, while the committed k8s/base is shared by every
+      # environment on the branch, so Flux drops it from its build
+      # (k8s/flux/clusters/*) and this step owns it, after the cert-manager
+      # CRDs above. The values are the GitHub Environment vars that
+      # `vibecarbon configure cicd` seeds; the same renderer the CLI deploy
+      # uses (scripts/render-tls-certificate.mjs) validates them and refuses
+      # to run with any unset. Rendered to a file first: the default run
+      # shell has no pipefail, so a failed render must not reach kubectl.
+      # No --force-conflicts: a Certificate the CLI deploy or a failover
+      # promotion set differently fails this apply instead of being
+      # overwritten; re-run `vibecarbon configure cicd <env>` to re-seed.
+      - name: Render and apply the TLS Certificate (deploy-owned, not Flux)
+        env:
+          TLS_CERT_ISSUER: ${{ vars.TLS_CERT_ISSUER }}
+          TLS_CERT_EFFECTIVE_ISSUER: ${{ vars.TLS_CERT_EFFECTIVE_ISSUER }}
+          TLS_CERT_DNS_NAMES: ${{ vars.TLS_CERT_DNS_NAMES }}
+        run: |
+          node scripts/render-tls-certificate.mjs > "$RUNNER_TEMP/certificate.yaml"
+          kubectl apply --server-side --field-manager=github-actions-deploy \
+            -f "$RUNNER_TEMP/certificate.yaml"
+
       - name: Create flux-system Secret (Git auth for private repo)
         # Flux uses `username`/`password` keys on a namespace Secret to
         # pull the GitRepository. Using the workflow's GITHUB_TOKEN keeps
