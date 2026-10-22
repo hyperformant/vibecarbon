@@ -47,6 +47,9 @@ const untrustedProbe = async () => ({
   served: { subject: 'TRAEFIK DEFAULT CERT', issuer: 'TRAEFIK DEFAULT CERT' },
 });
 
+/** Fails for the reason the pending record holds. */
+const pendingProbe = async () => ({ trusted: false as const, reason: 'self-signed certificate' });
+
 async function row(envConfig: object, deps: object, envName = 'prod') {
   const tls = await checkTls(D, { envName, envConfig, projectName: 'demo' }, deps);
   return { tls, lines: formatTlsLines(tls).map(strip) };
@@ -70,9 +73,9 @@ describe('checkTls + formatTlsLines', () => {
     expect(readRetry).not.toHaveBeenCalled();
   });
 
-  it('untrusted with a pending record renders pending, the stored reason and the hint', async () => {
+  it('untrusted with a pending record for the same reason renders pending, the reason and the hint', async () => {
     const { tls, lines } = await row(composeEnv(pendingRecord), {
-      probe: untrustedProbe,
+      probe: pendingProbe,
       readRetry: async () => '',
     });
     expect(tls.state).toBe('pending');
@@ -81,6 +84,51 @@ describe('checkTls + formatTlsLines', () => {
       '  ● pending  (self-signed certificate)',
       '  issuance retries in the background',
     ]);
+  });
+
+  it('pending, and the live probe fails differently: the live reason leads, the deploy one follows', async () => {
+    const { tls, lines } = await row(composeEnv(pendingRecord), {
+      probe: untrustedProbe,
+      readRetry: async () => '',
+    });
+    expect(tls).toMatchObject({
+      state: 'pending',
+      reason: 'unable to verify the first certificate',
+      deployReason: 'self-signed certificate',
+    });
+    expect(lines).toEqual([
+      'TLS',
+      '  ● pending  (unable to verify the first certificate)',
+      '  at the last deploy: self-signed certificate',
+      '  issuance retries in the background',
+    ]);
+  });
+
+  it('disarmed on the primary: says no certificate can be issued and names the deploy command', async () => {
+    const { tls, lines } = await row(composeEnv(pendingRecord), {
+      probe: pendingProbe,
+      readRetry: async () => 'STATE=disarmed\nCOUNT=',
+    });
+    expect(tls.retry).toEqual({ kind: 'disarmed', command: 'vibecarbon deploy prod' });
+    expect(lines).toEqual([
+      'TLS',
+      '  ● pending  (self-signed certificate)',
+      '  the issuer is disarmed on the primary, so no certificate can be issued. Run:',
+      '    vibecarbon deploy prod',
+    ]);
+  });
+
+  it.each([
+    ['no-traefik', 'traefik is not running on the primary, so nothing retries issuance'],
+    ['no-cmd', 'could not read the traefik command on the primary, so issuance is not retried'],
+    ['no-age', 'could not read when traefik started on the primary, so issuance is not retried'],
+  ])('cron state %s: one short line saying why nothing retries', async (state, line) => {
+    const { tls, lines } = await row(composeEnv(pendingRecord), {
+      probe: pendingProbe,
+      readRetry: async () => `STATE=${state}\nCOUNT=4`,
+    });
+    expect(tls.retry).toEqual({ kind: state });
+    expect(lines).toEqual(['TLS', '  ● pending  (self-signed certificate)', `  ${line}`]);
   });
 
   it('untrusted and not pending renders untrusted with the live reason', async () => {
@@ -122,7 +170,7 @@ describe('checkTls + formatTlsLines', () => {
   it('gave up: says so and puts the re-arming command on its own line', async () => {
     const { tls, lines } = await row(
       composeEnv(pendingRecord),
-      { probe: untrustedProbe, readRetry: async () => 'STATE=gave-up\nCOUNT=48' },
+      { probe: pendingProbe, readRetry: async () => 'STATE=gave-up\nCOUNT=48' },
       'staging',
     );
     expect(tls.retry).toEqual({ kind: 'gave-up', count: 48, command: 'vibecarbon deploy staging' });
@@ -152,7 +200,7 @@ describe('checkTls + formatTlsLines', () => {
     const readRetry = vi.fn();
     const { lines } = await row(
       { deployMode: 'kubernetes', domain: D, servers: [{ ip: '203.0.113.9' }], tls: pendingRecord },
-      { probe: untrustedProbe, readRetry },
+      { probe: pendingProbe, readRetry },
     );
     expect(readRetry).not.toHaveBeenCalled();
     expect(lines).toEqual([
@@ -193,7 +241,15 @@ describe('lockstep with carbon/backup/tls-retry.sh', () => {
   });
 
   it('the state words the row maps are the ones the script writes', () => {
-    for (const word of ['restart', 'waiting-dns', 'gave-up']) {
+    for (const word of [
+      'restart',
+      'waiting-dns',
+      'gave-up',
+      'disarmed',
+      'no-traefik',
+      'no-cmd',
+      'no-age',
+    ]) {
       expect(script).toMatch(new RegExp(`(note ${word} |printf '%s\\\\n' ${word} )`));
     }
     expect(script).toContain('COUNT_FILE=backups/tls-retry.count');

@@ -12,7 +12,9 @@
  *   tls-retry cron's own record on the role primary (backups/tls-retry.state
  *   and backups/tls-retry.count, carbon/backup/tls-retry.sh). It shows the
  *   retry count, "waiting for DNS", or that the retries gave up, with the
- *   command that re-arms them (a deploy clears the counter). k8s has no
+ *   command that re-arms them (a deploy clears the counter), a disarmed
+ *   issuer on the primary (nothing can issue until a deploy), or why the
+ *   cron is not restarting traefik at all. k8s has no
  *   cron: cert-manager retries on its own backoff.
  *
  * Read-only: one TLS handshake (two when untrusted, the second only to name
@@ -64,7 +66,12 @@ function retryFacts({ state, count }, envName) {
   if (state === 'gave-up') {
     return { kind: 'gave-up', count, command: `vibecarbon deploy ${envName}` };
   }
+  // The primary's Traefik runs the standby's disarmed issuer: no retry can
+  // ever issue, and a deploy re-arms it.
+  if (state === 'disarmed') return { kind: 'disarmed', command: `vibecarbon deploy ${envName}` };
   if (state === 'waiting-dns') return { kind: 'waiting-dns' };
+  // States in which the cron does not restart traefik at all.
+  if (state === 'no-traefik' || state === 'no-cmd' || state === 'no-age') return { kind: state };
   if (count > 0) return { kind: 'retrying', count };
   return null;
 }
@@ -89,8 +96,9 @@ function readRetryOnPrimary(envName, envConfig, projectName) {
  * @param {{ probe?: typeof probeTlsTrustOnce, readRetry?: () => Promise<string> }} [deps] test seams
  * @returns {Promise<
  *   { state: 'trusted', expires: string|null, validTo: string|null, serialNumber: string|null } |
- *   { state: 'pending'|'untrusted', reason: string,
- *     retry?: { kind: 'gave-up', count: number, command: string } | { kind: 'waiting-dns' } |
+ *   { state: 'pending'|'untrusted', reason: string, deployReason?: string,
+ *     retry?: { kind: 'gave-up'|'disarmed', count?: number, command: string } |
+ *       { kind: 'waiting-dns'|'no-traefik'|'no-cmd'|'no-age' } |
  *       { kind: 'retrying', count: number } | { kind: 'unknown', error: string } }
  * >}
  */
@@ -114,10 +122,13 @@ export async function checkTls(domain, { envName, envConfig, projectName }, deps
 
   const record = envConfig?.tls;
   const pending = record?.state === 'pending';
+  // The live reason is what is served now; the deploy's, when it differs,
+  // is shown after it.
   const row = {
     state: pending ? 'pending' : 'untrusted',
-    reason: (pending ? record.reason : live.reason) || live.reason || 'untrusted',
+    reason: live.reason || (pending && record.reason) || 'untrusted',
   };
+  if (pending && record.reason && record.reason !== row.reason) row.deployReason = record.reason;
   const isCompose = envConfig?.deployMode === 'compose' || envConfig?.deployMode === 'compose-ha';
   if (!isCompose) return row;
 
@@ -132,6 +143,13 @@ export async function checkTls(domain, { envName, envConfig, projectName }, deps
 }
 
 const HINT = 'issuance retries in the background';
+
+/** Why the cron does not restart traefik, per state it logs. */
+const STOPPED_LINES = Object.freeze({
+  'no-traefik': 'traefik is not running on the primary, so nothing retries issuance',
+  'no-cmd': 'could not read the traefik command on the primary, so issuance is not retried',
+  'no-age': 'could not read when traefik started on the primary, so issuance is not retried',
+});
 
 /**
  * The row's lines: a `TLS` header, the verdict, and on an untrusted domain
@@ -148,12 +166,18 @@ export function formatTlsLines(tls) {
   }
   const paint = tls.state === 'pending' ? c.warning : c.error;
   lines.push(`  ${paint('●')} ${paint(tls.state)}  ${c.dim(`(${tls.reason})`)}`);
+  if (tls.deployReason) lines.push(`  ${c.dim(`at the last deploy: ${tls.deployReason}`)}`);
   const retry = tls.retry;
   if (retry?.kind === 'gave-up') {
     lines.push(
       `  gave up after ${retry.count} retries. Once the ACME error in the Traefik log is fixed, run:`,
     );
     lines.push(`    ${c.info(retry.command)}`);
+  } else if (retry?.kind === 'disarmed') {
+    lines.push('  the issuer is disarmed on the primary, so no certificate can be issued. Run:');
+    lines.push(`    ${c.info(retry.command)}`);
+  } else if (retry && STOPPED_LINES[retry.kind]) {
+    lines.push(`  ${c.dim(STOPPED_LINES[retry.kind])}`);
   } else if (retry?.kind === 'retrying') {
     lines.push(`  ${c.dim(`${HINT}: retrying ${retry.count}/${TLS_RETRY_MAX}`)}`);
   } else if (retry?.kind === 'waiting-dns') {
