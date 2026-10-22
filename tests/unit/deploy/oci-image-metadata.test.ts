@@ -29,7 +29,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CARBON_AUTOSCALER_IMAGE, DB_IMAGE } from '../../../src/lib/images.js';
+import { CARBON_AUTOSCALER_IMAGE, DB_IMAGE, NODE_RUNTIME_IMAGE } from '../../../src/lib/images.js';
 
 const ROOT = process.cwd();
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
@@ -70,6 +70,14 @@ const OWNED_IMAGES = [
     // a mix of licenses; our contribution is a config file and an entrypoint. Any
     // single SPDX expression would be a compliance claim we cannot back, and an
     // absent label reads as "unknown" — which is the truth. See the Dockerfile.
+    declaresLicense: false,
+  },
+  {
+    dockerfile: join('docker', 'node-runtime', 'Dockerfile'),
+    // The ref is `<repo>:<tag>`; the package is the repo's last segment.
+    packageName: packageName(NODE_RUNTIME_IMAGE.split(':')[0]),
+    // Upstream bits only (Node.js, Alpine, libstdc++) plus a user account, so
+    // the same "absent reads as unknown" reasoning as postgres-walg applies.
     declaresLicense: false,
   },
   {
