@@ -502,7 +502,9 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 // pull costs minutes or fails the deploy (a cloud-init pre-pull was reverted
 // over exactly this, 7babb8e). So every Docker Hub image on the core deploy
 // path is mirrored into ghcr by the same matrix as the registry.k8s.io set,
-// and consumers pull `ghcr.io/hyperformant/<basename>:<tag>@<amd64 digest>`.
+// and consumers pull `ghcr.io/hyperformant/<basename>:<tag>@<amd64 digest>`
+// (the consumers land with the cold-deploy speed change; until then this set
+// is only published).
 //
 // `digest` is upstream's linux/amd64 CHILD manifest, not the multi-arch index
 // Docker Hub refs used to pin (deploy is amd64-only, src/lib/deploy/platform.js;
@@ -513,8 +515,9 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 // the mirror tag's digest is the index the job mints, not this child digest).
 // Edit {tag, digest, index} here AND the literal copies (compose files and k8s base
 // manifests, which cannot import JS; the census
-// tests/unit/deploy/core-images-from-mirror-census.test.ts fails until every
-// copy names an entry exactly), merge, and publish-images mirrors the new tag.
+// tests/unit/deploy/core-images-from-mirror-census.test.ts, which lands with
+// the cold-deploy speed change, fails until every copy names an entry
+// exactly), merge, and publish-images mirrors the new tag.
 // The weekly `mirror-upstream-drift` job lists newer upstream tags.
 //
 // Not here, deliberately: the add-ons (n8n, Metabase, Redis, observability)
@@ -595,17 +598,23 @@ export const K3S_SYSTEM_REGISTRY = 'vibecarbon-system.invalid';
 
 /**
  * k3s's OWN system images (ruling D3): k3s pulls these by tag on every node,
- * from docker.io/rancher by default. The master runs k3s with
+ * from docker.io/rancher by default. With the cold-deploy speed change (not
+ * yet on this branch), the master runs k3s with
  * `--system-default-registry K3S_SYSTEM_REGISTRY` (agents inherit it from the
  * server), so k3s names them `<alias>/rancher/<repo>:<tag>`, and the ONLY
  * containerd mirror pointing at ghcr is for that alias, with per-repo
  * rewrites onto ghcr.io/hyperformant/<basename>
- * (carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml, spliced into every
- * role's /etc/rancher/k3s/registries.yaml). There is deliberately NO docker.io
+ * (carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml, which lands with that
+ * change, spliced into every role's /etc/rancher/k3s/registries.yaml). There is deliberately NO docker.io
  * mirror: one with a ghcr endpoint would try every docker.io pull as
  * ghcr.io/<same org>/<same name> first (namespace confusion). The cost: no
  * fallback, so a missing or private mirror fails the pull (release.yml's
- * mirrored-images gate covers every entry).
+ * mirrored-images gate, which lands with the same change, covers every
+ * entry): every role also runs k3s with
+ * --disable-default-registry-endpoint, so containerd never tries the alias's
+ * own host. The snippet is spliced into an UNQUOTED heredoc by the
+ * DigitalOcean scripts: no capture groups, backticks or dollar-variables in
+ * it (a dollar sign followed by a quote stays literal).
  *
  * Tags are k3s-images.txt of K3S_VERSION (v1.31.5+k3s1). Unmirrored on
  * purpose: klipper-helm and mirrored-library-traefik (`--disable traefik`)

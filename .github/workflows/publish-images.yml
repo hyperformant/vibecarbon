@@ -352,8 +352,12 @@ jobs:
       - name: List newer upstream tags per mirrored repo
         run: |
           set -euo pipefail
-          node scripts/mirror-drift.mjs > "$RUNNER_TEMP/drift.md"
+          # A failed lookup still writes its row: publish the report, then
+          # fail with the script's status.
+          rc=0
+          node scripts/mirror-drift.mjs > "$RUNNER_TEMP/drift.md" || rc=$?
           cat "$RUNNER_TEMP/drift.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
       - name: Open or update the drift issue
         env:
           GH_TOKEN: ${{ github.token }}
