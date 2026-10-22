@@ -60,6 +60,7 @@ const { K8S_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/k8s-ha.
 const { haSidesRecord } = await import('../../../src/lib/deploy/orchestrator.js');
 const { haStacksFrom } = await import('../../../src/lib/deploy/standby-types.js');
 const { swapHaRoles } = await import('../../../src/failover.js');
+const { SCALE_EFFECTS } = await import('../../../src/scale.js');
 
 const AMD = { master: 's-2vcpu-4gb-amd', db: 's-1vcpu-2gb-amd', worker: 's-2vcpu-4gb-amd' };
 const PLAIN = { master: 's-2vcpu-4gb', db: 's-1vcpu-2gb', worker: 's-2vcpu-4gb' };
@@ -196,6 +197,30 @@ describe('k8s-ha failover with mixed standby types (DigitalOcean sfo3 + tor1)', 
       dbServerType: after.standby.dbServerType,
       workerServerType: after.standbyWorkerSpec.serverType,
     });
+  });
+
+  it('a type scale sticks: no redeploy, before or after a failover, resizes either side back', async () => {
+    const first = await fanOut(store.current?.state.disk.environments.prod);
+    saveSuccess(first.ctx);
+    // `scale -type`: every role on both clusters, to a type both locations sell.
+    const X = 's-2vcpu-4gb-intel';
+    const scaled = { region: '', masterServerType: X, dbServerType: X, workerServerType: X };
+    await SCALE_EFFECTS.scaleUpdateK8sConfig({
+      environment: 'prod',
+      envConfig: store.current?.state.disk.environments.prod,
+      newValues: { masterType: X, dbType: X, workerType: X },
+      isHA: true,
+    });
+
+    const redeploy = await fanOut(store.current?.state.disk.environments.prod);
+    expect(redeploy.primary).toEqual({ ...scaled, region: 'sfo3' });
+    expect(redeploy.standby).toEqual({ ...scaled, region: 'tor1' });
+    saveSuccess(redeploy.ctx);
+
+    swapHaRoles('prod');
+    const after = await fanOut(store.current?.state.disk.environments.prod);
+    expect(after.primary).toEqual({ ...scaled, region: 'tor1' });
+    expect(after.standby).toEqual({ ...scaled, region: 'sfo3' });
   });
 
   it('a record without ha.primary.workerServerType swaps the top-level worker into the standby spec', () => {

@@ -344,7 +344,7 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
     expect(savedEnv.workerServerType).toBe('cx33');
   });
 
-  it("a type scale updates the primary's own record, so a redeploy (which builds the primary from it) keeps the scale", async () => {
+  it("a type scale updates each side's own record, so a redeploy (which builds each side from it) keeps the scale", async () => {
     const envConfig = {
       masterServerType: 'cx22',
       dbServerType: 'cx22',
@@ -376,7 +376,12 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
       dbServerType: 'cx43',
       workerServerType: 'cx22',
     });
-    expect(ha.standby).toEqual({ stack: 'prod-standby', masterServerType: 'cpx22' });
+    // scaleApplyK8sChanges resized the standby's master and db too.
+    expect(ha.standby).toEqual({
+      stack: 'prod-standby',
+      masterServerType: 'cx33',
+      dbServerType: 'cx43',
+    });
     expect(ha.standbyWorkerSpec).toEqual({ count: 1, serverType: 'cx22' });
   });
 
