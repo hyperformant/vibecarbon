@@ -34,6 +34,24 @@ the workflow's first run on main, set `node-runtime`'s visibility to public by
 hand (package settings, Change visibility). Until then nothing can pull it
 anonymously, and `release.yml` refuses to cut a release.
 
+## After the first publish (and after every new revision)
+
+A new tag is pinned by tag alone, because its digest does not exist until the
+workflow runs on main. A tag can be moved by anyone who can push the package,
+so `release.yml` refuses to release until the ref also names the digest.
+Once the tag is published and public:
+
+```bash
+DOCKER_CONFIG=$(mktemp -d) docker buildx imagetools inspect \
+  ghcr.io/hyperformant/node-runtime:<tag> --format '{{json .Manifest}}' | jq -r .digest
+```
+
+Append `@<that digest>` to `NODE_RUNTIME_IMAGE` in `src/lib/images.js` and to
+`carbon/Dockerfile`'s `ARG RUNTIME_IMAGE=` (the census keeps the two equal),
+in one commit. The release gate then checks, anonymously, that the tag still
+resolves to exactly that digest. A new revision drops the digest again until
+its own tag is published.
+
 ## Tag scheme and bumping
 
 `<NODE_MAJOR>-alpine<ALPINE_MINOR>-r<N>`, e.g. `24-alpine3.24-r1`, the same
@@ -48,15 +66,21 @@ enforces it: it hashes the inputs and compares with `NODE_RUNTIME_INPUTS_SHA256`
 printing the new hash when they differ. A bump is:
 
 1. edit `docker/node-runtime/Dockerfile`;
-2. in `src/lib/images.js`, move `NODE_RUNTIME_IMAGE`'s `-r<N>` and paste the
-   printed `NODE_RUNTIME_INPUTS_SHA256`;
+2. in `src/lib/images.js`, move `NODE_RUNTIME_IMAGE`'s `-r<N>` (dropping any
+   `@sha256:`) and paste the printed `NODE_RUNTIME_INPUTS_SHA256`. The test
+   also compares the pair with the last commit: a new hash under the old tag
+   fails;
 3. copy the new `NODE_RUNTIME_IMAGE` into `carbon/Dockerfile`'s
-   `ARG RUNTIME_IMAGE=` (the census fails until they are equal).
+   `ARG RUNTIME_IMAGE=` (the census fails until they are equal);
+4. after merge and publish, pin the digest as above.
 
 A Node major comes from `.nvmrc`: `pnpm node:sync` rewrites this Dockerfile's
 major and both copies of the tag, resetting the revision to `-r1`; then paste
 the new hash. Dependabot's `node-runtime` group proposes digest moves here; its
-PR is red until steps 2 and 3 land in it.
+PR is red until steps 2 and 3 land in it. carbon/Dockerfile's `NODE_IMAGE` must
+be the same digest as this Dockerfile's (the app is built with the node it runs
+on), so move both in that PR. Dependabot never touches carbon's
+`ARG RUNTIME_IMAGE=`: `src/lib/images.js` owns that ref.
 
 ## Testing an unpublished tag
 

@@ -23,7 +23,9 @@ import { fileURLToPath } from 'node:url';
 import { NODE_RUNTIME_IMAGE } from '../src/lib/images.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const ref = NODE_RUNTIME_IMAGE;
+// The tag alone: `docker build -t` cannot carry a digest, and a digest-pinned
+// ref already names a published image this machine can pull.
+const ref = NODE_RUNTIME_IMAGE.split('@')[0];
 console.log(`Building ${ref} from docker/node-runtime (local only, not pushed)`);
 const res = spawnSync('docker', ['build', '-t', ref, join(root, 'docker', 'node-runtime')], {
   stdio: 'inherit',

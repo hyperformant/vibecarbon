@@ -164,6 +164,11 @@ updates:
       # tag's index digest, so a Dependabot "update" would only break the
       # parity guard. images.js owns this ref.
       - dependency-name: ghcr.io/hyperformant/cluster-autoscaler
+      # Our node runtime base, carbon/Dockerfile's `ARG RUNTIME_IMAGE=`. It
+      # must equal NODE_RUNTIME_IMAGE byte for byte (census), so a Dependabot
+      # tag or digest move here would only break parity. images.js owns this
+      # ref; docker/node-runtime has its own entry below.
+      - dependency-name: ghcr.io/hyperformant/node-runtime
     # commit-message is group-only for multi-ecosystem entries (set below).
     labels:
       - dependencies

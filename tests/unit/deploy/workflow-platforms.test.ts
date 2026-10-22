@@ -494,6 +494,8 @@ describe('the node runtime base publishes on merge, once per revision tag', () =
     expect(push.paths).toEqual(
       expect.arrayContaining(['docker/node-runtime/**', 'src/lib/images.js', FILE]),
     );
+    // The README is not an image input (the fingerprint skips it too).
+    expect(push.paths).toContain('!docker/node-runtime/README.md');
   });
 
   it('builds amd64 + arm64 natively through the shared workflow, smoke-tested per arch', () => {
@@ -511,6 +513,10 @@ describe('the node runtime base publishes on merge, once per revision tag', () =
 
   it('reads the ref from NODE_RUNTIME_IMAGE in src/lib/images.js, the CLI authority', () => {
     expect(ref).toMatch(/grep -oP "\^export const NODE_RUNTIME_IMAGE\\s\*=/);
+    // A post-publish ref carries @sha256; the tag is split off it first.
+    const strip = ref.search(/REF=\$\{REF%@\*\}/);
+    expect(strip).toBeGreaterThan(-1);
+    expect(strip).toBeLessThan(ref.search(/IMG=\$\{REF%:\*\}/));
   });
 
   it('never re-mints an existing tag: skipped when present, immutable when racing', () => {
@@ -525,6 +531,34 @@ describe('the node runtime base publishes on merge, once per revision tag', () =
     expect(smoke).toMatch(/node --version|node -e/);
     expect(smoke).toMatch(/id -u hono/);
     expect(smoke).toMatch(/command -v npm/);
+    expect(smoke).toMatch(/< \.nvmrc/);
+  });
+});
+
+describe("test.yml builds the app FROM this commit's node runtime base", () => {
+  const job = jobsOf('.github/workflows/test.yml')['app-image'];
+  const steps = job?.steps ?? [];
+  const at = (re: RegExp) => steps.findIndex((s) => re.test(s.run ?? ''));
+
+  it('exists, reading the ref from src/lib/images.js', () => {
+    expect(job).toBeDefined();
+    expect(runsOf(job)).toContain("import('./src/lib/images.js')");
+    expect(runsOf(job)).toContain("m.NODE_RUNTIME_IMAGE.split('@')[0]");
+  });
+
+  it('builds the runtime from docker/node-runtime, then carbon FROM it, then runs node', () => {
+    const runtime = at(/docker build -t "\$NODE_RUNTIME_TAG_REF" docker\/node-runtime/);
+    const app = at(
+      /docker build --build-arg RUNTIME_IMAGE="\$NODE_RUNTIME_TAG_REF" -t vibecarbon-app:ci carbon/,
+    );
+    const run = at(/docker run --rm vibecarbon-app:ci node -e 1/);
+    expect(runtime).toBeGreaterThan(-1);
+    expect(app).toBeGreaterThan(runtime);
+    expect(run).toBeGreaterThan(app);
+  });
+
+  it('needs no secret and no login (it runs on fork and Dependabot PRs)', () => {
+    expect(JSON.stringify(job)).not.toMatch(/secrets\.|docker\/login-action|docker login/);
   });
 });
 
@@ -553,6 +587,29 @@ describe('release.yml refuses a release whose pinned db image users cannot pull'
     expect(run).toMatch(/for ref in "\$DB_IMAGE:\$DB_IMAGE_TAG" "\$NODE_RUNTIME_IMAGE"; do/);
   });
 
+  it('refuses while the runtime base is pinned by tag alone, or the carbon ARG drifts', () => {
+    // A tag is mutable by whoever can push the package; a release must name
+    // the exact image every generated project will run on.
+    expect(run).toMatch(/case "\$NODE_RUNTIME_IMAGE" in\s+\*@sha256:\*\) ;;/);
+    expect(run).toMatch(/is not pinned by digest/);
+    expect(run).toContain("grep -oP '^ARG RUNTIME_IMAGE=\\K\\S+' carbon/Dockerfile");
+    expect(run).toContain('if [ "$runtime_arg" != "$NODE_RUNTIME_IMAGE" ]; then');
+    expect(run.indexOf('is not pinned by digest')).toBeLessThan(run.indexOf('for ref in'));
+  });
+
+  it('refuses unless the pinned digest is what the tag resolves to anonymously', () => {
+    expect(run).toMatch(/runtime_tag=\$\{NODE_RUNTIME_IMAGE%@\*\}/);
+    expect(run).toContain('docker buildx imagetools inspect "$runtime_tag"');
+    expect(run).toContain('if [ "$runtime_resolved" != "$runtime_pinned" ]; then');
+    expect(run.indexOf('export DOCKER_CONFIG')).toBeLessThan(run.indexOf('"$runtime_tag"'));
+  });
+
+  it('every refusal exits non-zero', () => {
+    const refusals = run.match(/::error::refusing to release/g)?.length ?? 0;
+    expect(refusals).toBe(5);
+    expect(run.match(/exit 1/g)?.length).toBe(refusals);
+  });
+
   it('inspects anonymously: an empty DOCKER_CONFIG and no login anywhere in the job', () => {
     expect(run).toMatch(/DOCKER_CONFIG="\$RUNNER_TEMP\/[^"]+"/);
     expect(run).toMatch(/docker buildx imagetools inspect "\$ref"/);
@@ -563,8 +620,7 @@ describe('release.yml refuses a release whose pinned db image users cannot pull'
   it('requires both linux/amd64 and linux/arm64 children and refuses otherwise', () => {
     expect(run).toMatch(/for want in linux\/amd64 linux\/arm64; do/);
     expect(run).toMatch(/grep -qx "\$want"/);
-    expect(run.match(/::error::refusing to release/g)?.length).toBe(2);
-    expect(run.match(/exit 1/g)?.length).toBe(2);
+    expect(run.match(/::error::refusing to release: \$ref /g)?.length).toBe(2);
   });
 });
 

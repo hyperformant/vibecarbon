@@ -107,11 +107,12 @@ for (const relPath of [
 // ---------------------------------------------------------------------------
 // NODE_RUNTIME_IMAGE (src/lib/images.js) and its byte-for-byte copy, the
 // `ARG RUNTIME_IMAGE=` default in carbon/Dockerfile, are
-// `<repo>:<node major>-alpine<alpine minor>-r<N>`. A new major is a new image,
-// so the revision resets to -r1. Moving docker/node-runtime's pin also changes
+// `<repo>:<node major>-alpine<alpine minor>-r<N>[@sha256:<digest>]`. A new
+// major is a new image, so the revision resets to -r1 and any digest (which
+// named the old image) is dropped until the new tag is published. Moving docker/node-runtime's pin also changes
 // its fingerprint: tests/unit/deploy/node-runtime-image-fingerprint.test.ts
 // then prints the NODE_RUNTIME_INPUTS_SHA256 to paste.
-const RUNTIME_TAG = /(ghcr\.io\/hyperformant\/node-runtime:)(\d+)(-alpine[\d.]+-r)(\d+)/;
+const RUNTIME_TAG = /(ghcr\.io\/hyperformant\/node-runtime:)(\d+)(-alpine[\d.]+-r)(\d+)(@sha256:[0-9a-f]{64})?/;
 for (const [relPath, anchor] of [
   [join('src', 'lib', 'images.js'), /^export const NODE_RUNTIME_IMAGE = '/m],
   [join('carbon', 'Dockerfile'), /^ARG RUNTIME_IMAGE=/m],

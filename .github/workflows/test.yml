@@ -304,6 +304,42 @@ jobs:
       - name: Build
         run: npm run build
 
+  # The app image builds on this commit's node runtime base. carbon/Dockerfile's
+  # runner is FROM the ref src/lib/images.js pins (NODE_RUNTIME_IMAGE), which
+  # publish-node-runtime-image.yml publishes only on main, so a branch that
+  # moves the tag (or edits the runner) has nothing to pull. This builds
+  # docker/node-runtime under that tag first, then the app FROM it, then runs
+  # node inside the result: a broken base or a runner that depends on
+  # something the base lacks fails here, not on a server. Any `@sha256:` is
+  # dropped for the local tag and the build arg, so the app always builds on
+  # THIS commit's base, never on whatever the registry holds. Guarded by
+  # tests/unit/deploy/workflow-platforms.test.ts.
+  app-image:
+    name: App Image (carbon FROM this commit's node runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+
+      - name: Read the node runtime ref the CLI pins
+        run: node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log('NODE_RUNTIME_TAG_REF=' + m.NODE_RUNTIME_IMAGE.split('@')[0]);" >> "$GITHUB_ENV"
+
+      - name: Build the node runtime base from this commit
+        run: docker build -t "$NODE_RUNTIME_TAG_REF" docker/node-runtime
+        timeout-minutes: 10
+
+      - name: Build the app image FROM it
+        run: docker build --build-arg RUNTIME_IMAGE="$NODE_RUNTIME_TAG_REF" -t vibecarbon-app:ci carbon
+        timeout-minutes: 15
+
+      - name: Run node inside the app image
+        run: docker run --rm vibecarbon-app:ci node -e 1
+
   # The template's RLS proof. The data layer runs user requests as role
   # app_user and lets row-level security decide what they see, so the
   # boundary between tenants lives in SQL policies, and only the engine

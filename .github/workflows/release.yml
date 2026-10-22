@@ -48,6 +48,14 @@ jobs:
   # a release naming an unpublished or still-private tag breaks the first
   # `up` and deploy just as surely. A new ghcr package starts private; flip
   # it public after publish-node-runtime-image's first run.
+  #
+  # The runtime base must also be pinned BY DIGEST before any release: a tag
+  # alone lets whoever can push to the package change what every generated
+  # project runs on. The tag pin is the pre-publish state only (the digest
+  # does not exist until the image is published); the post-publish commit
+  # appends `@sha256:` to NODE_RUNTIME_IMAGE and carbon/Dockerfile's
+  # `ARG RUNTIME_IMAGE=` (docker/node-runtime/README.md). This refuses until
+  # both carry it, and until the pinned digest is what the tag resolves to.
   db-image:
     name: Verify the pinned db and node runtime images are public and multi-arch
     runs-on: ubuntu-latest
@@ -68,6 +76,18 @@ jobs:
           DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
           export DOCKER_CONFIG
           mkdir -p "$DOCKER_CONFIG"
+          case "$NODE_RUNTIME_IMAGE" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::refusing to release: NODE_RUNTIME_IMAGE ($NODE_RUNTIME_IMAGE) is not pinned by digest. Once publish-node-runtime-image has published it and the package is public, append the @sha256: the tag resolves to (docker/node-runtime/README.md), then dispatch again."
+              exit 1
+              ;;
+          esac
+          runtime_arg=$(grep -oP '^ARG RUNTIME_IMAGE=\K\S+' carbon/Dockerfile || true)
+          if [ "$runtime_arg" != "$NODE_RUNTIME_IMAGE" ]; then
+            echo "::error::refusing to release: carbon/Dockerfile's ARG RUNTIME_IMAGE ($runtime_arg) is not NODE_RUNTIME_IMAGE ($NODE_RUNTIME_IMAGE)."
+            exit 1
+          fi
           for ref in "$DB_IMAGE:$DB_IMAGE_TAG" "$NODE_RUNTIME_IMAGE"; do
             if ! manifest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}'); then
               echo "::error::refusing to release: $ref is not pullable anonymously. Wait for its publish workflow (publish-db-image or publish-node-runtime-image) to finish on main, or make the ghcr package public, then dispatch again."
@@ -83,6 +103,13 @@ jobs:
               fi
             done
           done
+          runtime_tag=${NODE_RUNTIME_IMAGE%@*}
+          runtime_pinned=${NODE_RUNTIME_IMAGE##*@}
+          runtime_resolved=$(docker buildx imagetools inspect "$runtime_tag" --format '{{json .Manifest}}' | jq -r '.digest // empty' || true)
+          if [ "$runtime_resolved" != "$runtime_pinned" ]; then
+            echo "::error::refusing to release: $runtime_tag resolves to ${runtime_resolved:-nothing} anonymously, but NODE_RUNTIME_IMAGE pins $runtime_pinned. The tag moved or the pin is wrong; re-pin from the published tag, then dispatch again."
+            exit 1
+          fi
 
   release:
     name: Semantic Release

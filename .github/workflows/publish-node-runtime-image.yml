@@ -28,6 +28,7 @@ on:
     branches: [main]
     paths:
       - 'docker/node-runtime/**'
+      - '!docker/node-runtime/README.md'
       - 'src/lib/images.js'
       - '.github/scripts/smoke-node-runtime-image.sh'
       - '.github/workflows/publish-node-runtime-image.yml'
@@ -59,6 +60,9 @@ jobs:
         run: |
           set -euo pipefail
           REF=$(grep -oP "^export const NODE_RUNTIME_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
+          # A published ref carries @sha256:<index digest>; the tag is what
+          # this workflow publishes, so drop the digest first.
+          REF=${REF%@*}
           IMG=${REF%:*}
           TAG=${REF##*:}
           test -n "$IMG" && test -n "$TAG" && test "$IMG:$TAG" = "$REF"

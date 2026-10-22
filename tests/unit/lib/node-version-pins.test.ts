@@ -365,7 +365,7 @@ describe('Dockerfiles pin the same Node major', () => {
   const runtime = read('docker', 'node-runtime', 'Dockerfile');
   const runtimeNodeAlpine = runtime.match(/^ARG NODE_IMAGE=node:\d+-alpine([\d.]+)@/m)?.[1];
   const runtimeBaseAlpine = runtime.match(/^FROM alpine:([\d.]+)@sha256:[0-9a-f]{64}$/m)?.[1];
-  const tag = NODE_RUNTIME_IMAGE.match(/:(\d+)-alpine([\d.]+)-r\d+$/);
+  const tag = NODE_RUNTIME_IMAGE.match(/:(\d+)-alpine([\d.]+)-r\d+(?:@sha256:[0-9a-f]{64})?$/);
 
   it('docker/node-runtime copies node onto the SAME alpine its node image is built on', () => {
     expect(runtimeNodeAlpine).toBeDefined();

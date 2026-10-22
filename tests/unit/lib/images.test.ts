@@ -10,11 +10,16 @@ import {
 
 describe('node runtime base image ref', () => {
   it('is the pre-published revision tag the app image builds FROM', () => {
-    expect(NODE_RUNTIME_IMAGE).toBe('ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1');
+    // The tag part; the post-publish commit appends @sha256 without moving it.
+    expect(NODE_RUNTIME_IMAGE.split('@')[0]).toBe(
+      'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1',
+    );
   });
-  it('follows <node major>-alpine<alpine minor>-r<N>, with no digest or per-build suffix', () => {
+  it('follows <node major>-alpine<alpine minor>-r<N>, optionally @sha256 once published', () => {
+    // Pre-publish the tag alone; the post-publish commit appends the index
+    // digest (release.yml refuses to release without it).
     expect(NODE_RUNTIME_IMAGE).toMatch(
-      /^ghcr\.io\/hyperformant\/node-runtime:\d+-alpine\d+\.\d+-r[1-9]\d*$/,
+      /^ghcr\.io\/hyperformant\/node-runtime:\d+-alpine\d+\.\d+-r[1-9]\d*(@sha256:[a-f0-9]{64})?$/,
     );
   });
 });

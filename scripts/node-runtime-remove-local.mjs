@@ -10,7 +10,9 @@
 import { spawnSync } from 'node:child_process';
 import { NODE_RUNTIME_IMAGE } from '../src/lib/images.js';
 
-const ref = NODE_RUNTIME_IMAGE;
+// The tag alone: `docker build -t` cannot carry a digest, and a digest-pinned
+// ref already names a published image this machine can pull.
+const ref = NODE_RUNTIME_IMAGE.split('@')[0];
 const present = spawnSync('docker', ['image', 'inspect', ref], { stdio: 'ignore' });
 if (present.error) {
   console.error(present.error.message);

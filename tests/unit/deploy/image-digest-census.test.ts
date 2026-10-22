@@ -90,7 +90,12 @@ const ALLOWLIST: Record<string, string> = {
   // docker/node-runtime by publish-node-runtime-image.yml AFTER the commit
   // that names the tag merges. Revisioned like the db image (-r<N>, enforced
   // by node-runtime-image-fingerprint.test.ts), so a tag names one build.
-  [NODE_RUNTIME_IMAGE]: 'node runtime base, published by this repo after merge',
+  // Exempt only while the tag is unpublished: the post-publish commit appends
+  // its @sha256 (release.yml refuses to release until it does), and from then
+  // on the ref is pinned like any other and needs no exemption.
+  ...(PINNED.test(NODE_RUNTIME_IMAGE)
+    ? {}
+    : { [NODE_RUNTIME_IMAGE]: 'node runtime base, published by this repo after merge' }),
 };
 
 type Site = { where: string; ref: string };
@@ -462,6 +467,16 @@ describe('every shipped image ref is pinned by digest', () => {
     expect(runner).toMatch(/^USER hono$/m);
   });
 
+  it('the app is built with the very node the runtime base runs', () => {
+    // carbon's builder and deps stages compile and install against
+    // NODE_IMAGE; the runner executes the result on the node binary
+    // docker/node-runtime copied out of ITS NODE_IMAGE. Same index digest,
+    // so build and run are one Node release on one alpine.
+    const nodeImage = (rel: string) => read(rel).match(/^ARG NODE_IMAGE=(\S+)$/m)?.[1];
+    expect(nodeImage('carbon/Dockerfile')).toMatch(PINNED);
+    expect(nodeImage('carbon/Dockerfile')).toBe(nodeImage('docker/node-runtime/Dockerfile'));
+  });
+
   it('an image used in both compose and k8s runs the same tag in both', () => {
     // Dependabot moves them in one `images` PR; this catches a hand edit
     // that bumps one tier and forgets the other.
@@ -624,7 +639,12 @@ describe('Dependabot can bump every pinned location', () => {
       (dockerMain?.ignore ?? []).filter((i) => !i['update-types']).map((i) => i['dependency-name']),
     );
     expect(ignored).toEqual(
-      new Set(['alpine/socat', 'registry', 'ghcr.io/hyperformant/cluster-autoscaler']),
+      new Set([
+        'alpine/socat',
+        'registry',
+        'ghcr.io/hyperformant/cluster-autoscaler',
+        'ghcr.io/hyperformant/node-runtime',
+      ]),
     );
   });
 
