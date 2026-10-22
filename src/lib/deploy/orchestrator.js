@@ -1682,6 +1682,9 @@ export async function executeDeployment(args, gatheredConfig) {
     dnsZoneId,
     dnsToken,
     backupConfig,
+    // The backups bucket: compose-ha's replication and both compose tiers'
+    // restore-tls / snapshot-tls read it.
+    backupS3Config,
     imageRef,
     bundlePath,
     ciReady,
@@ -1790,7 +1793,6 @@ export async function executeDeployment(args, gatheredConfig) {
       // it each keeps its server's recorded type (a scale may have changed one).
       serverTypeRequested: !!args.serverType,
       secondaryRegion: secondaryRegion || undefined,
-      backupS3Config,
       // Docker Hub + GHCR creds gate the HA login fan-out; loaded here so the
       // effects stay pure of credential I/O (mirrors the single-compose ctx).
       dockerHubCreds: resolveDockerHubCreds(),

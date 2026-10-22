@@ -19,11 +19,13 @@ const EXPECTED_COMPOSE_SEQUENCE = [
   'ghcr-login',
   'setup-server-files',
   'update-dns',
+  'restore-tls',
   'start-compose-stack',
   'wait-admin-ready',
   'audit-database',
   'verify-health',
   'verify-tls',
+  'snapshot-tls',
   'setup-backup-cron',
 ];
 
@@ -326,6 +328,7 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'merge-walg-role',
   'pull-images',
   'update-dns',
+  'restore-tls',
   'start-compose-stack',
   'wait-admin-ready',
   'audit-database',
@@ -334,6 +337,7 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'configure-replication',
   'verify-streaming',
   'verify-tls',
+  'snapshot-tls',
   'setup-backup-cron',
   'finalize-config',
 ];

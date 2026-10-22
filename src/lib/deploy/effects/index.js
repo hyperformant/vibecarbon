@@ -636,6 +636,62 @@ async function verifyTlsReady(ctx) {
 }
 
 /**
+ * restore-tls (shared by compose and compose-ha; it reads the primary's
+ * identity from either ctx shape): put the last validated snapshot from the
+ * backups bucket into Traefik's acme.json when the server has no apex
+ * certificate (compose/tls-restore.js holds the rule). The CA is the one the
+ * bundle wrote into the server .env (ACME_CA_SERVER), the same value
+ * verify-tls records. Prints one info line and never fails the deploy.
+ */
+async function restoreTlsSnapshot(ctx) {
+  const { domain, sshKeyPath, projectConfig, environment } = ctx;
+  const { restoreComposeTls } = await import('../compose/tls-restore.js');
+  const { caSlug } = await import('../tls-snapshot.js');
+  const result = await perfAsync('deploy.tls.restore', () =>
+    restoreComposeTls({
+      ip: ctx.serverIp ?? ctx.primary?.ip ?? null,
+      sshKeyPath,
+      projectName: projectConfig.projectName,
+      domain,
+      envName: environment,
+      ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
+      s3Config: { ...ctx.s3Config, bucket: ctx.backupS3Config?.bucket },
+    }),
+  );
+  if (!result.restored) {
+    p.log.info(`TLS certificate not restored (${result.reason}).`);
+    return;
+  }
+  const restartNote = /did not restart/.test(result.reason)
+    ? ' Traefik did not restart, so it loads it on its next start.'
+    : '';
+  p.log.info(`TLS certificate for ${domain} restored from its last snapshot.${restartNote}`);
+}
+
+/**
+ * snapshot-tls (shared by compose and compose-ha): once verify-tls found the
+ * domain trusted, save acme.json to the backups bucket now (the server's
+ * backup/tls-snapshot.sh, with all its guards) instead of waiting for the
+ * scheduled backup. A failure is one warning; the deploy still succeeds.
+ */
+async function snapshotTls(ctx) {
+  const { snapshotComposeTlsNow } = await import('../compose/tls-restore.js');
+  try {
+    await perfAsync('deploy.tls.snapshot', () =>
+      snapshotComposeTlsNow({
+        ip: ctx.serverIp ?? ctx.primary?.ip ?? null,
+        sshKeyPath: ctx.sshKeyPath,
+        projectName: ctx.projectConfig.projectName,
+      }),
+    );
+  } catch (err) {
+    p.log.warn(
+      `TLS certificate snapshot not saved (${err.message}). The deploy still succeeded, and the next scheduled backup saves it.`,
+    );
+  }
+}
+
+/**
  * Install the scheduled wal-g backup cron on the VPS. Shipped-bug guard: a
  * fresh compose deploy used to collect backupConfig but never schedule a
  * backup. A cron-install failure must NOT fail an already-healthy deploy —
@@ -671,6 +727,8 @@ export const EFFECTS = {
   auditDatabase,
   verifyHealth,
   verifyTlsReady,
+  restoreTlsSnapshot,
+  snapshotTls,
   setupBackupCron,
   // compose-ha deploy tier (fan-out over primary + standby)
   ...COMPOSE_HA_EFFECTS,

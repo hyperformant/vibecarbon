@@ -45,9 +45,11 @@ import {
   haWriteReplicationOverlayStep,
   k8sDeployClusterStep,
   provisionServerStep,
+  restoreTlsStep,
   setupBackupCronStep,
   setupServerFilesStep,
   setupServerStep,
+  snapshotTlsStep,
   startComposeStackStep,
   transferImageStep,
   updateDnsStep,
@@ -72,11 +74,13 @@ export function planDeploy(tier, _config) {
       ghcrLoginStep(),
       setupServerFilesStep(),
       updateDnsStep(),
+      restoreTlsStep(),
       startComposeStackStep(),
       waitAdminReadyStep(),
       auditDatabaseStep(),
       verifyHealthStep(),
       verifyTlsReadyStep(),
+      snapshotTlsStep(),
       setupBackupCronStep(),
     ];
   }
@@ -99,6 +103,8 @@ export function planDeploy(tier, _config) {
       haMergeWalgRoleStep(),
       haPullImagesStep(),
       haUpdateDnsStep(),
+      // Shared with single compose: restores on the primary only.
+      restoreTlsStep(),
       haStartComposeStackStep(),
       haWaitAdminReadyStep(),
       haAuditDatabaseStep(),
@@ -109,6 +115,7 @@ export function planDeploy(tier, _config) {
       // Shared with single compose (same step name, same effect): the TLS
       // gate must precede finalize-config, which persists status:'deployed'.
       verifyTlsReadyStep(),
+      snapshotTlsStep(),
       haSetupBackupCronStep(),
       haFinalizeConfigStep(),
     ];
