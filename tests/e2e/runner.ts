@@ -726,11 +726,12 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
   // Cloudflare along with every other backend, and covers it EARLIER, before
   // preflight rather than after.)
 
-  // Capacity resolution: pick concrete (region, serverType, scaleToType) per
-  // scenario from `capacityPreferences` so the matrix doesn't trip on Hetzner
-  // per-DC capacity flux mid-run. HA scenarios get TWO distinct regions both
-  // with the same type-pair (so primary/standby can't end up on different
-  // arch families).
+  // Capacity resolution: pick the region per scenario from
+  // `capacityPreferences`, the first where the customer's price picker can
+  // place the default sizes (and their scale target) on the live catalog, so
+  // the matrix doesn't trip on capacity flux mid-run. HA scenarios get two
+  // distinct same-continent regions. No server type is pinned: the deploy
+  // picks the sizes a customer gets by default.
   const { resolveCapacity, resolveCapacityPair, overrideRegions } = await import(
     './utils/region-resolver.js'
   );
@@ -762,7 +763,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
   const capacityWiring: Record<
     string,
     {
-      prefs: { regions: readonly string[]; typePairs: readonly (readonly [string, string])[] };
+      prefs: { regions: readonly string[]; scaleTo: Readonly<Record<string, string>> };
       token: string;
     }
   > = {
@@ -792,11 +793,15 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
   // envPrefix to string, so the pre-remap literal types can never admit the
   // remapped values.
   type ResolvedScenario = (typeof namespacedScenarios)[number] & {
-    serverType: string;
+    serverType: undefined;
     region: string;
     secondaryRegion?: string;
-    scaleToType: string;
+    scaleTo: Readonly<Record<string, string>>;
   };
+  const typesLabel = (types: Record<string, string>) =>
+    Object.entries(types)
+      .map(([role, type]) => `${role}=${type}`)
+      .join(' ');
   const scenarios: ResolvedScenario[] = [];
   console.log('\n  Resolving capacity:');
   for (const s of namespacedScenarios) {
@@ -806,28 +811,32 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     const { prefs: capacityPrefs, token } = capacityWiringFor(provider);
     const isHa = s.mode.endsWith('-ha');
     if (isHa) {
-      const pair = await resolveCapacityPair(capacityPrefs, token, { provider });
+      const pair = await resolveCapacityPair(capacityPrefs, token, {
+        provider,
+        mode: s.mode as DeployMode,
+      });
       console.log(
-        `    ${s.mode.padEnd(10)} (${provider}) → primary ${pair.primary.region}/${pair.primary.serverType}→${pair.primary.scaleToType}, ` +
-          `standby ${pair.standby.region}/${pair.standby.serverType}→${pair.standby.scaleToType}`,
+        `    ${s.mode.padEnd(10)} (${provider}) → primary ${pair.primary.region} (${typesLabel(pair.primary.types)}), ` +
+          `standby ${pair.standby.region} (${typesLabel(pair.standby.types)})`,
       );
       scenarios.push({
         ...s,
         serverType: pair.primary.serverType,
         region: pair.primary.region,
         secondaryRegion: pair.standby.region,
-        scaleToType: pair.primary.scaleToType,
+        scaleTo: capacityPrefs.scaleTo,
       });
     } else {
-      const r = await resolveCapacity(capacityPrefs, token, { provider });
-      console.log(
-        `    ${s.mode.padEnd(10)} (${provider}) → ${r.region}/${r.serverType}→${r.scaleToType}`,
-      );
+      const r = await resolveCapacity(capacityPrefs, token, {
+        provider,
+        mode: s.mode as DeployMode,
+      });
+      console.log(`    ${s.mode.padEnd(10)} (${provider}) → ${r.region} (${typesLabel(r.types)})`);
       scenarios.push({
         ...s,
         serverType: r.serverType,
         region: r.region,
-        scaleToType: r.scaleToType,
+        scaleTo: capacityPrefs.scaleTo,
       });
     }
   }
@@ -902,7 +911,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     scenario: (typeof scenarios)[number],
     attemptNumber: number,
   ): Promise<ScenarioResult> => {
-    const { mode, dnsProvider, envPrefix, serverType, region, scaleToType } = scenario;
+    const { mode, dnsProvider, envPrefix, serverType, region, scaleTo } = scenario;
     const secondaryRegion = scenario.secondaryRegion;
     const provider = scenario.provider;
     const domain = `${envPrefix}.${resolveBaseDomain(config.domains, dnsProvider, process.env.E2E_DOMAIN)}`;
@@ -959,7 +968,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       features: scenarioFeatures,
       adminEmail: config.adminEmail,
       adminPassword: config.adminPassword,
-      scaleToType,
+      scaleTo,
       projectName,
       projectDir,
       provider,

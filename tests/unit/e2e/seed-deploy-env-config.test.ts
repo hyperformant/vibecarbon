@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -59,6 +59,22 @@ describe('seedDeployEnvConfig', () => {
     const envCfg = readEnvConfig('prod');
     expect(envCfg).not.toHaveProperty('provider');
     expect(envCfg.region).toBe('fsn1');
+  });
+
+  it('seeds no serverType for an unpinned scenario, and a re-seed keeps the one the deploy recorded', () => {
+    // The matrix deploys the default sizes: the resolver hands every scenario
+    // serverType undefined, so the CLI picks and records the type itself.
+    const settings = { region: 'nbg1', domain: 'app.example.com', dnsProvider: 'hetzner' };
+    seedDeployEnvConfig(projectDir, 'e1', settings);
+    expect(readEnvConfig('e1')).not.toHaveProperty('serverType');
+
+    // What the deploy (or a scale) recorded survives the warm redeploy's re-seed.
+    const configPath = join(projectDir, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    config.environments.e1.serverType = 'cpx32';
+    writeFileSync(configPath, JSON.stringify(config));
+    seedDeployEnvConfig(projectDir, 'e1', settings);
+    expect(readEnvConfig('e1').serverType).toBe('cpx32');
   });
 
   it('is idempotent across a re-seed (restore-after-destroy re-invocation): provider set once, stays set', () => {

@@ -58,14 +58,13 @@ describe('providers.scaleway (Scaleway opt-in scenarios)', () => {
 });
 
 describe('capacityPreferences.scaleway', () => {
-  it('has one blanket typePair backing the compose scenario — the 2c/4G baseline, not DEV1', () => {
-    // BASIC3-X2C-4G is the apples-to-apples 2-vCPU/4GB baseline (cx23 /
-    // s-2vcpu-4gb / g6-standard-2 / vc2-2c-4gb). DEV1-M is cheaper but has
-    // THREE vCPUs — a positioning problem for the perf table, not just a
-    // spec mismatch (audit).
-    expect(testConfig.e2e.capacityPreferences.scaleway.typePairs).toEqual([
-      ['BASIC3-X2C-4G', 'BASIC3-X4C-8G'],
-    ]);
+  it('scales the default (DEV1-M) and the BASIC3 baseline one size up', () => {
+    // The matrix deploys what a customer gets by default, and on 2026-10-22
+    // that is DEV1-M (the cheapest 4 GB compose candidate in every zone).
+    expect(testConfig.e2e.capacityPreferences.scaleway.scaleTo).toEqual({
+      'DEV1-M': 'DEV1-L',
+      'BASIC3-X2C-4G': 'BASIC3-X4C-8G',
+    });
   });
 
   it('carries only ZONES that offer both pair members AND the DEV1-M fallback', () => {
@@ -75,7 +74,7 @@ describe('capacityPreferences.scaleway', () => {
     // BASIC3 or the DEV1 fallback is missing there, and it-mil's S3 region
     // has ONEZONE_IA only.
     // ORDER IS LOAD-BEARING: the first two viable zones become s2's HA pair
-    // (resolveScalewayCapacityPair), and fr-par-1+nl-ams-1 mirrors
+    // (resolveCapacityPair), and fr-par-1+nl-ams-1 mirrors
     // ScalewayProvider.HA_REGIONS / getDefaultStandbyRegion's cross-country
     // pairing — fr-par-2 second would hand s2 a same-city pair.
     expect(testConfig.e2e.capacityPreferences.scaleway.regions).toEqual([

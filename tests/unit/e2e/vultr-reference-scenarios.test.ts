@@ -59,10 +59,10 @@ describe('providers.vultr (Vultr opt-in scenarios)', () => {
 });
 
 describe('capacityPreferences.vultr', () => {
-  it('has one blanket typePair backing the compose scenario', () => {
-    expect(testConfig.e2e.capacityPreferences.vultr.typePairs).toEqual([
-      ['vc2-2c-4gb', 'vc2-4c-8gb'],
-    ]);
+  it('scales the default vc2 plan one size up', () => {
+    expect(testConfig.e2e.capacityPreferences.vultr.scaleTo).toEqual({
+      'vc2-2c-4gb': 'vc2-4c-8gb',
+    });
   });
 
   it('keeps ewr then ord first so the v2 HA pair mirrors HA_REGIONS when viable', () => {

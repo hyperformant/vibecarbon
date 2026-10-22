@@ -1,320 +1,233 @@
 /**
- * Hetzner capacity resolver for e2e scenarios.
+ * Capacity resolver for e2e scenarios: picks where each scenario deploys,
+ * never what it deploys.
  *
- * The matrix used to hardcode `(region, serverType, scaleToType)` per
- * scenario. Hetzner's per-DC capacity for cx/cpx/cax shifts through the
- * day; one bad slot in `hel1` for cx33 (the scale target) used to fail
- * an entire scenario at the `scale` step even though `nbg1` had headroom
- * the whole time. This resolver queries `/v1/server_types` once at
- * preflight and picks the first preferred type-pair for which some region,
- * in the operator's preferred order, has BOTH `serverType` and
- * `scaleToType` currently available (type-pairs are a price ladder, so
- * pair preference outranks region preference).
+ * The matrix deploys the sizes a customer gets by default. At preflight the
+ * resolver reads each provider's live catalog through the provider class
+ * (`fetchServerTypes`, the same read the CLI makes) and runs the customer's
+ * price picker over it (`cheapestRoleSet`, src/lib/sizing.js). It returns the
+ * first preferred region where the picker can place every role the scenario
+ * needs, with `serverType: undefined`: the deploy under test then picks its
+ * types itself, cold, exactly as a customer's first deploy does, and records
+ * them in `.vibecarbon.json`. The scale step reads that record and looks the
+ * target up in the scenario's ladder (`scaleTo`, tests/config.ts) through
+ * `deployedScaleTarget`.
  *
- * Scenarios declare preferences instead of literals — see
- * `CapacityPreferences` below. The runner calls `resolveCapacity` per
- * scenario and feeds the result into `ScenarioConfig` so downstream
- * lifecycle code (which still reads `serverType` / `region` /
- * `scaleToType` directly) is unaffected.
+ * A region also has to sell the scale target of the type the picker chose
+ * there, or the scale step would fail 20 minutes in on a stock-out the
+ * preflight could see (the reason this resolver exists: Hetzner capacity
+ * shifts through the day).
  *
- * HA scenarios call `resolveCapacityPair` to get two distinct regions
- * both with the same type-pair available — picking different type-pairs
- * for primary vs standby would mean architecture mismatch on cluster
- * join (an x86 master can't run an ARM worker, etc.).
+ * No catalog means no run: a missing token or an API failure fails preflight
+ * naming the provider, so the matrix never deploys a type a customer would
+ * not get.
  */
+import { getProviderClass } from '../../../src/lib/providers/index.js';
+import { cheapestRoleSet } from '../../../src/lib/sizing.js';
+import type { DeployMode } from '../scenarios/types.js';
 
 export interface CapacityPreferences {
-  /** Hetzner location names in operator-preferred order (best first). */
+  /** Locations (Scaleway: zones) in operator-preferred order, best first. */
   regions: readonly string[];
-  /**
-   * `[deployType, scaleToType]` pairs in preference order. The pair must
-   * be the same arch family — they share kubelet images and registries.
-   */
-  typePairs: readonly (readonly [string, string])[];
+  /** Scale ladder: the type a deploy recorded -> the type the scale step moves it to. */
+  scaleTo: Readonly<Record<string, string>>;
 }
 
 export interface ResolvedCapacity {
   region: string;
-  serverType: string;
-  scaleToType: string;
-  /** Where the capacity was found, for diagnostics: the Hetzner location or DO region. */
+  /**
+   * Always undefined: the deploy picks the default sizes itself. Kept on the
+   * result so the census can prove no scenario pins one.
+   */
+  serverType: undefined;
+  /** What the picker chose per role at preflight, for the run log. */
+  types: Record<string, string>;
+  /** Where the capacity was found, for diagnostics (the region itself). */
   datacenter: string;
 }
 
-/**
- * A server type as `GET /v1/server_types` returns it. Hetzner removed
- * `/v1/datacenters` on 2026-10-01 (410 Gone); per-location availability now
- * lives on each type (changelog 2026-04-01-datacenter-deprecations). A
- * location missing from `locations` means the type is not offered there.
- */
-interface HetznerServerType {
-  name: string;
-  locations?: { name: string; available: boolean }[];
-}
-
-/** A single DigitalOcean droplet size, as returned by `GET /v2/sizes`. */
-interface DigitalOceanSize {
-  slug: string;
-  regions: string[];
-}
-
-const HETZNER_API = 'https://api.hetzner.cloud/v1';
-const DIGITALOCEAN_API = 'https://api.digitalocean.com/v2';
-
-/** Provider a scenario provisions against. Defaults to 'hetzner' everywhere upstream. */
+/** Provider a scenario provisions against. */
 export type CapacityProvider = 'hetzner' | 'digitalocean' | 'linode' | 'vultr' | 'scaleway';
 
-/** location name -> server type names currently available there. */
-let hetznerCache: Map<string, Set<string>> | null = null;
-let digitaloceanCache: { sizeRegions: Map<string, Set<string>> } | null = null;
-let vultrCache: { planLocations: Map<string, Set<string>> } | null = null;
-let scalewayCache: Map<string, Set<string>> | null = null;
+/** The deploy mode whose roles a scenario places. */
+export type CapacityMode = DeployMode;
 
-/** Reset the in-process API cache(s). Tests use this between mocked runs. */
-export function clearResolverCache(): void {
-  hetznerCache = null;
-  digitaloceanCache = null;
-  vultrCache = null;
-  scalewayCache = null;
+// biome-ignore lint/suspicious/noExplicitAny: a provider class (src/lib/providers/*.js)
+type ProviderClass = any;
+
+interface ResolveOptions {
+  /** Defaults to 'hetzner'. */
+  provider?: CapacityProvider;
+  /** Which roles to place. Defaults to 'compose'. */
+  mode?: CapacityMode;
+  /**
+   * Loads the live catalog into the provider class; resolves false when it
+   * could not. Defaults to `Provider.fetchServerTypes(token)`. Unit tests seed
+   * the class from a fixture and inject `async () => true`.
+   */
+  loadCatalog?: (Provider: ProviderClass, token: string) => Promise<boolean>;
 }
 
-async function loadHetznerInventory(
-  token: string,
-  fetchFn: typeof fetch = fetch,
-): Promise<Map<string, Set<string>>> {
-  if (hetznerCache) return hetznerCache;
-  const headers = { Authorization: `Bearer ${token}` };
-  const available = new Map<string, Set<string>>();
-  for (let page: number | null = 1; page != null; ) {
-    const res = await fetchFn(`${HETZNER_API}/server_types?per_page=50&page=${page}`, { headers });
-    if (!res.ok) throw new Error(`region-resolver: GET /server_types → ${res.status}`);
-    const data = (await res.json()) as {
-      server_types: HetznerServerType[];
-      meta?: { pagination?: { next_page?: number | null } };
-    };
-    for (const type of data.server_types) {
-      for (const loc of type.locations ?? []) {
-        if (!loc.available) continue;
-        const names = available.get(loc.name) ?? new Set<string>();
-        names.add(type.name);
-        available.set(loc.name, names);
-      }
-    }
-    page = data.meta?.pagination?.next_page ?? null;
-  }
-  hetznerCache = available;
-  return hetznerCache;
+/** The roles the deploy places on the primary side for `mode`. */
+function primaryRoles(mode: CapacityMode): string[] {
+  return mode.startsWith('k8s') ? ['master', 'db', 'worker'] : ['compose'];
+}
+
+/** The roles an HA standby places: k8s-ha's pilot light has no worker. */
+function standbyRoles(mode: CapacityMode): string[] {
+  return mode === 'k8s-ha' ? ['master', 'db'] : ['compose'];
 }
 
 /**
- * DigitalOcean has no Hetzner-style datacenters/server_types split — a
- * single `GET /v2/sizes` call returns every droplet size with its
- * available regions inline, so region availability is just a slug → region
- * set lookup (no per-datacenter granularity to diagnose against; a DO
- * "region" like `nyc3` IS the deployable unit).
+ * The role whose type keys the scale ladder. `scale -type X` resizes every
+ * node (k8s: master, db and worker alike), so one target covers the env; the
+ * master is the role at the 4 GB floor, so its target fits every role.
  */
-async function loadDigitalOceanInventory(
+function scaleKeyRole(mode: CapacityMode): string {
+  return mode.startsWith('k8s') ? 'master' : 'compose';
+}
+
+function noScaleTarget(type: string): Error {
+  return new Error(`no scale target for ${type} in tests/config.ts scaleTo`);
+}
+
+async function loadProvider(
+  provider: CapacityProvider,
   token: string,
-  fetchFn: typeof fetch = fetch,
-): Promise<{ sizeRegions: Map<string, Set<string>> }> {
-  if (digitaloceanCache) return digitaloceanCache;
-  const res = await fetchFn(`${DIGITALOCEAN_API}/sizes?per_page=200`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error(`region-resolver: GET /sizes → ${res.status}`);
-  const data = (await res.json()) as { sizes: DigitalOceanSize[] };
-  const sizeRegions = new Map<string, Set<string>>(
-    data.sizes.map((s) => [s.slug, new Set(s.regions)]),
-  );
-  digitaloceanCache = { sizeRegions };
-  return digitaloceanCache;
+  loadCatalog: ResolveOptions['loadCatalog'],
+): Promise<ProviderClass> {
+  const Provider = getProviderClass(provider);
+  if (!Provider) {
+    throw new Error(`region-resolver: no provider class registered for '${provider}'.`);
+  }
+  const loaded = loadCatalog
+    ? await loadCatalog(Provider, token)
+    : await Provider.fetchServerTypes(token);
+  if (!loaded) {
+    throw new Error(
+      `region-resolver: could not read the ${Provider.NAME ?? provider} catalog ` +
+        `(missing API token or an API failure). The matrix deploys only the sizes a ` +
+        `customer gets by default, so it will not guess a server type.`,
+    );
+  }
+  return Provider;
 }
 
 /**
- * Pick a single `(region, serverType, scaleToType)` combo where both
- * types are available in some datacenter for one of the preferred
- * regions. Throws with a diagnostic listing what was tried if nothing
- * fits — preflight catches that and aborts the matrix before any
- * scenario provisions.
- *
- * @param excludeRegions Regions to skip (used by `resolveCapacityPair`
- *                       to force the standby into a different location).
+ * The picker's set for `roles` in `region`, or null when a role has nothing
+ * orderable there or the scale target of the ladder role is not sold there.
+ */
+function placeableSet(
+  Provider: ProviderClass,
+  prefs: CapacityPreferences,
+  region: string,
+  roles: string[],
+  keyRole: string | null,
+): Record<string, string> | null {
+  const set = cheapestRoleSet(Provider, region, roles);
+  if (!set) return null;
+  if (keyRole) {
+    const key = set.types[keyRole];
+    const target = prefs.scaleTo[key];
+    if (!target) throw noScaleTarget(key);
+    if (!Provider._locationTypes?.[region]?.has(target)) return null;
+  }
+  return set.types;
+}
+
+function resolved(region: string, types: Record<string, string>): ResolvedCapacity {
+  return { region, serverType: undefined, types, datacenter: region };
+}
+
+/**
+ * The first preferred region (not excluded) where the picker places every
+ * role of `options.mode` and the scale target is sold. Throws listing what
+ * was tried when none fits; preflight catches that and aborts the matrix
+ * before any scenario provisions.
  */
 export async function resolveCapacity(
   prefs: CapacityPreferences,
   token: string,
-  options: {
-    excludeRegions?: readonly string[];
-    fetchFn?: typeof fetch;
-    /** Which cloud to resolve against. Defaults to 'hetzner' — every existing caller is unaffected. */
-    provider?: CapacityProvider;
-  } = {},
+  options: ResolveOptions & { excludeRegions?: readonly string[] } = {},
 ): Promise<ResolvedCapacity> {
-  return capacityResolverFor(options.provider).resolve(prefs, token, options);
-}
-
-async function resolveHetznerCapacity(
-  prefs: CapacityPreferences,
-  token: string,
-  options: {
-    excludeRegions?: readonly string[];
-    fetchFn?: typeof fetch;
-  } = {},
-): Promise<ResolvedCapacity> {
-  const available = await loadHetznerInventory(token, options.fetchFn ?? fetch);
+  const provider = options.provider ?? 'hetzner';
+  const mode = options.mode ?? 'compose';
+  const Provider = await loadProvider(provider, token, options.loadCatalog);
   const excluded = new Set(options.excludeRegions ?? []);
+  const roles = primaryRoles(mode);
 
-  // Type-pair-major, region-minor — the same walk resolveHetznerCapacityPair
-  // does. `typePairs` is a PRICE ladder (cx ~$0.01/h → cpx22 ~$0.04/h → ccx
-  // ~$0.08/h after Hetzner's 2026-06-15 repricing), so the cheapest pair in
-  // any listed region must beat a pricier pair in an earlier-listed one.
-  // Region order still breaks ties within a pair.
-  for (const [deployType, scaleType] of prefs.typePairs) {
-    for (const region of prefs.regions) {
-      if (excluded.has(region)) continue;
-      const here = available.get(region);
-      if (here?.has(deployType) && here.has(scaleType)) {
-        return { region, serverType: deployType, scaleToType: scaleType, datacenter: region };
-      }
-    }
+  for (const region of prefs.regions) {
+    if (excluded.has(region)) continue;
+    const types = placeableSet(Provider, prefs, region, roles, scaleKeyRole(mode));
+    if (types) return resolved(region, types);
   }
 
   const tried = prefs.regions.filter((r) => !excluded.has(r));
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
   throw new Error(
-    `region-resolver: no Hetzner region has a viable type-pair available right now. ` +
-      `tried regions=[${tried.join(',')}] type-pairs=[${pairs}]. ` +
-      `Hetzner capacity is fluid — try again in a few minutes, or add additional ` +
-      `x86 type-pair fallbacks to the scenario's capacityPreferences (ARM is not ` +
-      `an option: vibecarbon is amd64-only).`,
+    `region-resolver: no ${Provider.NAME ?? provider} region can place the default ` +
+      `${mode} sizes and their scale target right now. tried regions=[${tried.join(',')}] ` +
+      `roles=[${roles.join(',')}]. Capacity is fluid: try again in a few minutes, or ` +
+      `add a region to tests/config.ts capacityPreferences.${provider}.regions.`,
   );
 }
 
 /**
- * HA: pick two distinct regions both with the SAME type-pair available.
- * The standby's resolver excludes the primary's region. We pin both
- * sides to the same type-pair (rather than re-resolving independently)
- * so cross-region replication never has to bridge an arch mismatch.
+ * HA: a primary region and a distinct standby region on the same continent
+ * (`Provider.REGION_CONTINENT`), each where the picker places its side's
+ * roles. The two sides may land on different types, each the cheapest where
+ * it sits, as a customer's HA pair does. The scale target is checked where
+ * the ladder key lives, on the primary.
  */
 export async function resolveCapacityPair(
   prefs: CapacityPreferences,
   token: string,
-  options: { fetchFn?: typeof fetch; provider?: CapacityProvider } = {},
+  options: ResolveOptions = {},
 ): Promise<{ primary: ResolvedCapacity; standby: ResolvedCapacity }> {
-  return capacityResolverFor(options.provider).resolvePair(prefs, token, options);
-}
+  const provider = options.provider ?? 'hetzner';
+  const mode = options.mode ?? 'compose-ha';
+  const Provider = await loadProvider(provider, token, options.loadCatalog);
+  const continentOf: Record<string, string> = Provider.REGION_CONTINENT ?? {};
 
-async function resolveHetznerCapacityPair(
-  prefs: CapacityPreferences,
-  token: string,
-  options: { fetchFn?: typeof fetch } = {},
-): Promise<{ primary: ResolvedCapacity; standby: ResolvedCapacity }> {
-  const available = await loadHetznerInventory(token, options.fetchFn ?? fetch);
-
-  // Walk type-pairs in preference order; for each, find at least two
-  // distinct regions where the pair is available. This is stricter than
-  // resolving primary then standby separately, which could legally pick
-  // mismatched families for the two sides.
-  for (const [deployType, scaleType] of prefs.typePairs) {
-    const viableRegions: { region: string; datacenter: string }[] = [];
-    for (const region of prefs.regions) {
-      const here = available.get(region);
-      if (here?.has(deployType) && here.has(scaleType)) {
-        viableRegions.push({ region, datacenter: region });
+  for (const p of prefs.regions) {
+    const primaryTypes = placeableSet(Provider, prefs, p, primaryRoles(mode), scaleKeyRole(mode));
+    if (!primaryTypes || !continentOf[p]) continue;
+    for (const s of prefs.regions) {
+      if (s === p || continentOf[s] !== continentOf[p]) continue;
+      const standbyTypes = placeableSet(Provider, prefs, s, standbyRoles(mode), null);
+      if (standbyTypes) {
+        return { primary: resolved(p, primaryTypes), standby: resolved(s, standbyTypes) };
       }
-      if (viableRegions.length >= 2) break;
-    }
-
-    if (viableRegions.length >= 2) {
-      const [p, s] = viableRegions;
-      return {
-        primary: {
-          region: p.region,
-          serverType: deployType,
-          scaleToType: scaleType,
-          datacenter: p.datacenter,
-        },
-        standby: {
-          region: s.region,
-          serverType: deployType,
-          scaleToType: scaleType,
-          datacenter: s.datacenter,
-        },
-      };
     }
   }
 
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
   throw new Error(
-    `region-resolver: HA needs two distinct regions sharing one type-pair, none found. ` +
-      `tried regions=[${prefs.regions.join(',')}] type-pairs=[${pairs}].`,
+    `region-resolver: HA needs two distinct same-continent ${Provider.NAME ?? provider} ` +
+      `regions that can place the default ${mode} sizes, none found. ` +
+      `tried regions=[${prefs.regions.join(',')}].`,
   );
 }
 
 /**
- * DigitalOcean counterpart to the Hetzner walk above `resolveCapacity`
- * performs — same preference-order semantics, but region availability
- * comes straight off each size's `regions` array (see
- * `loadDigitalOceanInventory`), so there's no per-datacenter inner loop.
- * `datacenter` in the result is just the region slug — DO exposes no
- * finer-grained placement id via `/v2/sizes`.
+ * The scale step's target: the ladder entry for the type the deploy recorded
+ * in `.vibecarbon.json` (compose: `serverType`; k8s: `masterServerType`,
+ * since `scale -type` resizes every role). Throws when the deploy recorded no
+ * type, or when the ladder has no entry for it.
  */
-async function resolveDigitalOceanCapacity(
-  prefs: CapacityPreferences,
-  token: string,
-  options: { excludeRegions?: readonly string[]; fetchFn?: typeof fetch } = {},
-): Promise<ResolvedCapacity> {
-  const { sizeRegions } = await loadDigitalOceanInventory(token, options.fetchFn ?? fetch);
-  const excluded = new Set(options.excludeRegions ?? []);
-
-  for (const region of prefs.regions) {
-    if (excluded.has(region)) continue;
-    for (const [deployType, scaleType] of prefs.typePairs) {
-      const deployRegions = sizeRegions.get(deployType);
-      const scaleRegions = sizeRegions.get(scaleType);
-      if (!deployRegions || !scaleRegions) continue;
-      if (deployRegions.has(region) && scaleRegions.has(region)) {
-        return { region, serverType: deployType, scaleToType: scaleType, datacenter: region };
-      }
-    }
+export function deployedScaleTarget(
+  envConfig: { serverType?: string; masterServerType?: string },
+  mode: CapacityMode,
+  scaleTo: Readonly<Record<string, string>>,
+): string {
+  const field = mode.startsWith('k8s') ? 'masterServerType' : 'serverType';
+  const type = envConfig[field];
+  if (!type) {
+    throw new Error(
+      `the deploy recorded no ${field} in .vibecarbon.json, so the scale target is unknown`,
+    );
   }
-
-  const tried = prefs.regions.filter((r) => !excluded.has(r));
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
-  throw new Error(
-    `region-resolver: no DigitalOcean region has a viable type-pair available right now. ` +
-      `tried regions=[${tried.join(',')}] type-pairs=[${pairs}].`,
-  );
-}
-
-/** DigitalOcean counterpart to `resolveCapacityPair` — see its doc. */
-async function resolveDigitalOceanCapacityPair(
-  prefs: CapacityPreferences,
-  token: string,
-  options: { fetchFn?: typeof fetch } = {},
-): Promise<{ primary: ResolvedCapacity; standby: ResolvedCapacity }> {
-  const { sizeRegions } = await loadDigitalOceanInventory(token, options.fetchFn ?? fetch);
-
-  for (const [deployType, scaleType] of prefs.typePairs) {
-    const deployRegions = sizeRegions.get(deployType);
-    const scaleRegions = sizeRegions.get(scaleType);
-    if (!deployRegions || !scaleRegions) continue;
-
-    const viable = prefs.regions.filter((r) => deployRegions.has(r) && scaleRegions.has(r));
-    if (viable.length >= 2) {
-      const [p, s] = viable;
-      return {
-        primary: { region: p, serverType: deployType, scaleToType: scaleType, datacenter: p },
-        standby: { region: s, serverType: deployType, scaleToType: scaleType, datacenter: s },
-      };
-    }
-  }
-
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
-  throw new Error(
-    `region-resolver: HA needs two distinct DigitalOcean regions sharing one type-pair, none found. ` +
-      `tried regions=[${prefs.regions.join(',')}] type-pairs=[${pairs}].`,
-  );
+  const target = scaleTo[type];
+  if (!target) throw noScaleTarget(type);
+  return target;
 }
 
 /**
@@ -325,342 +238,6 @@ async function resolveDigitalOceanCapacityPair(
  * `ash,hil` explicitly. Returns the input unchanged when the override is
  * absent or empty.
  */
-/**
- * Linode counterpart to the walks above. Linode's type catalog is GLOBAL —
- * `GET /v4/linode/types` carries no region axis and the Standard line is
- * uniformly available (linode-step0-audit.md) — so "capacity resolution"
- * reduces to: verify both pair members exist in the live catalog (a retired
- * slug must fail loudly here, not 20 minutes into a deploy), then take the
- * first non-excluded preferred region. The types endpoint is public but the
- * token is sent for rate-limit accounting parity.
- */
-async function loadLinodeTypeIds(token: string, fetchFn: typeof fetch): Promise<Set<string>> {
-  const ids = new Set<string>();
-  let page = 1;
-  for (let guard = 0; guard < 20; guard++) {
-    const res = await fetchFn(
-      `https://api.linode.com/v4/linode/types?page=${page}&page_size=200`,
-      token ? { headers: { Authorization: `Bearer ${token}` } } : {},
-    );
-    if (!res.ok) {
-      throw new Error(`region-resolver: Linode types listing failed (${res.status})`);
-    }
-    const data = (await res.json()) as {
-      data?: Array<{ id: string }>;
-      page?: number;
-      pages?: number;
-    };
-    for (const t of data.data ?? []) ids.add(t.id);
-    if (!data.pages || page >= data.pages) break;
-    page++;
-  }
-  return ids;
-}
-
-async function resolveLinodeCapacity(
-  prefs: CapacityPreferences,
-  token: string,
-  options: { excludeRegions?: readonly string[]; fetchFn?: typeof fetch } = {},
-): Promise<ResolvedCapacity> {
-  const typeIds = await loadLinodeTypeIds(token, options.fetchFn ?? fetch);
-  const excluded = new Set(options.excludeRegions ?? []);
-
-  for (const region of prefs.regions) {
-    if (excluded.has(region)) continue;
-    for (const [deployType, scaleType] of prefs.typePairs) {
-      if (typeIds.has(deployType) && typeIds.has(scaleType)) {
-        return { region, serverType: deployType, scaleToType: scaleType, datacenter: region };
-      }
-    }
-  }
-
-  const tried = prefs.regions.filter((r) => !excluded.has(r));
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
-  throw new Error(
-    `region-resolver: no Linode region has a viable type-pair available right now. ` +
-      `tried regions=[${tried.join(',')}] type-pairs=[${pairs}].`,
-  );
-}
-
-/** Linode counterpart to `resolveCapacityPair` — see its doc. */
-async function resolveLinodeCapacityPair(
-  prefs: CapacityPreferences,
-  token: string,
-  options: { fetchFn?: typeof fetch } = {},
-): Promise<{ primary: ResolvedCapacity; standby: ResolvedCapacity }> {
-  const typeIds = await loadLinodeTypeIds(token, options.fetchFn ?? fetch);
-
-  for (const [deployType, scaleType] of prefs.typePairs) {
-    if (!typeIds.has(deployType) || !typeIds.has(scaleType)) continue;
-    if (prefs.regions.length >= 2) {
-      const [p, s] = prefs.regions;
-      return {
-        primary: { region: p, serverType: deployType, scaleToType: scaleType, datacenter: p },
-        standby: { region: s, serverType: deployType, scaleToType: scaleType, datacenter: s },
-      };
-    }
-  }
-
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
-  throw new Error(
-    `region-resolver: HA needs two distinct Linode regions sharing one type-pair, none found. ` +
-      `tried regions=[${prefs.regions.join(',')}] type-pairs=[${pairs}].`,
-  );
-}
-
-/**
- * Vultr counterpart to the walks above. Vultr's catalog sits between
- * Hetzner's and Linode's: `GET /v2/plans` is a single public listing (no
- * datacenters/server_types split) but each plan carries its own
- * `locations: []` array, so there IS a real per-region availability axis to
- * check — a plan absent from a region is a hard create failure, not a
- * capacity blip. Cursor pagination (`meta.links.next` fed back as
- * `&cursor=`), not a page counter — see sweep-vultr.ts's header. The
- * endpoint is public; the token rides along for rate-limit accounting
- * parity with the Linode loader.
- */
-async function loadVultrPlanLocations(
-  token: string,
-  fetchFn: typeof fetch,
-): Promise<Map<string, Set<string>>> {
-  if (vultrCache) return vultrCache.planLocations;
-  const planLocations = new Map<string, Set<string>>();
-  let cursor = '';
-  for (let guard = 0; guard < 20; guard++) {
-    const url =
-      `https://api.vultr.com/v2/plans?per_page=500` +
-      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-    const res = await fetchFn(url, token ? { headers: { Authorization: `Bearer ${token}` } } : {});
-    if (!res.ok) {
-      throw new Error(`region-resolver: Vultr plans listing failed (${res.status})`);
-    }
-    const data = (await res.json()) as {
-      plans?: Array<{ id: string; locations?: string[] }>;
-      meta?: { links?: { next?: string } };
-    };
-    for (const p of data.plans ?? []) planLocations.set(p.id, new Set(p.locations ?? []));
-    const next = data.meta?.links?.next;
-    if (!next) break;
-    cursor = next;
-  }
-  vultrCache = { planLocations };
-  return planLocations;
-}
-
-async function resolveVultrCapacity(
-  prefs: CapacityPreferences,
-  token: string,
-  options: { excludeRegions?: readonly string[]; fetchFn?: typeof fetch } = {},
-): Promise<ResolvedCapacity> {
-  const planLocations = await loadVultrPlanLocations(token, options.fetchFn ?? fetch);
-  const excluded = new Set(options.excludeRegions ?? []);
-
-  for (const region of prefs.regions) {
-    if (excluded.has(region)) continue;
-    for (const [deployType, scaleType] of prefs.typePairs) {
-      const deployRegions = planLocations.get(deployType);
-      const scaleRegions = planLocations.get(scaleType);
-      // Both members must list the region: scaling into a plan the region
-      // doesn't carry fails at the scale step, 20 minutes in.
-      if (!deployRegions || !scaleRegions) continue;
-      if (deployRegions.has(region) && scaleRegions.has(region)) {
-        return { region, serverType: deployType, scaleToType: scaleType, datacenter: region };
-      }
-    }
-  }
-
-  const tried = prefs.regions.filter((r) => !excluded.has(r));
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
-  throw new Error(
-    `region-resolver: no Vultr region has a viable type-pair available right now. ` +
-      `tried regions=[${tried.join(',')}] type-pairs=[${pairs}].`,
-  );
-}
-
-/** Vultr counterpart to `resolveCapacityPair` — see its doc. */
-async function resolveVultrCapacityPair(
-  prefs: CapacityPreferences,
-  token: string,
-  options: { fetchFn?: typeof fetch } = {},
-): Promise<{ primary: ResolvedCapacity; standby: ResolvedCapacity }> {
-  const planLocations = await loadVultrPlanLocations(token, options.fetchFn ?? fetch);
-
-  for (const [deployType, scaleType] of prefs.typePairs) {
-    const deployRegions = planLocations.get(deployType);
-    const scaleRegions = planLocations.get(scaleType);
-    if (!deployRegions || !scaleRegions) continue;
-
-    const viable = prefs.regions.filter((r) => deployRegions.has(r) && scaleRegions.has(r));
-    if (viable.length >= 2) {
-      const [p, s] = viable;
-      return {
-        primary: { region: p, serverType: deployType, scaleToType: scaleType, datacenter: p },
-        standby: { region: s, serverType: deployType, scaleToType: scaleType, datacenter: s },
-      };
-    }
-  }
-
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
-  throw new Error(
-    `region-resolver: HA needs two distinct Vultr regions sharing one type-pair, none found. ` +
-      `tried regions=[${prefs.regions.join(',')}] type-pairs=[${pairs}].`,
-  );
-}
-
-/**
- * Scaleway counterpart to the walks above — the only provider whose
- * capacity axis must be resolved JOINTLY per (zone, type): NO instance
- * type exists in all ten Scaleway zones (live per-zone catalog 2026-08-09,
- * step-0 audit "per-zone catalog divergence"), and stock is a real
- * per-type enum. Two PUBLIC endpoints answer both halves per zone:
- *   GET /instance/v1/zones/{zone}/products/servers      (catalog presence)
- *   GET /instance/v1/zones/{zone}/products/servers/availability (stock)
- * A type only counts as available in a zone when it is IN the catalog AND
- * its availability is not 'shortage' ('scarce' still sells — treating it
- * as absent would fail runs Scaleway would happily place, while 'shortage'
- * is the Hetzner resource_unavailable class this resolver exists to dodge
- * at preflight rather than at create time). Both endpoints page at 100.
- */
-async function loadScalewayZoneTypes(
-  zone: string,
-  token: string,
-  fetchFn: typeof fetch,
-): Promise<Set<string>> {
-  scalewayCache ??= new Map();
-  const cached = scalewayCache.get(zone);
-  if (cached) return cached;
-
-  const headers = token ? { 'X-Auth-Token': token } : undefined;
-  const walk = async (path: string): Promise<Record<string, { availability?: string }>> => {
-    const out: Record<string, { availability?: string }> = {};
-    for (let page = 1; page <= 20; page++) {
-      const res = await fetchFn(
-        `https://api.scaleway.com/instance/v1/zones/${zone}${path}?per_page=100&page=${page}`,
-        headers ? { headers } : {},
-      );
-      if (!res.ok) {
-        throw new Error(`region-resolver: Scaleway ${zone}${path} listing failed (${res.status})`);
-      }
-      const data = (await res.json()) as { servers?: Record<string, { availability?: string }> };
-      const pageServers = data.servers ?? {};
-      Object.assign(out, pageServers);
-      if (Object.keys(pageServers).length < 100) break;
-    }
-    return out;
-  };
-
-  const [catalog, availability] = await Promise.all([
-    walk('/products/servers'),
-    walk('/products/servers/availability'),
-  ]);
-  const available = new Set(
-    Object.keys(catalog).filter((t) => availability[t]?.availability !== 'shortage'),
-  );
-  scalewayCache.set(zone, available);
-  return available;
-}
-
-async function resolveScalewayCapacity(
-  prefs: CapacityPreferences,
-  token: string,
-  options: { excludeRegions?: readonly string[]; fetchFn?: typeof fetch } = {},
-): Promise<ResolvedCapacity> {
-  const fetchFn = options.fetchFn ?? fetch;
-  const excluded = new Set(options.excludeRegions ?? []);
-
-  for (const zone of prefs.regions) {
-    if (excluded.has(zone)) continue;
-    const available = await loadScalewayZoneTypes(zone, token, fetchFn);
-    for (const [deployType, scaleType] of prefs.typePairs) {
-      if (available.has(deployType) && available.has(scaleType)) {
-        return { region: zone, serverType: deployType, scaleToType: scaleType, datacenter: zone };
-      }
-    }
-  }
-
-  const tried = prefs.regions.filter((r) => !excluded.has(r));
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
-  throw new Error(
-    `region-resolver: no Scaleway zone has a viable type-pair in-catalog and in-stock right now. ` +
-      `tried zones=[${tried.join(',')}] type-pairs=[${pairs}]. ` +
-      `Scaleway's catalog is genuinely per-zone (no type spans all zones) and stock is a ` +
-      `per-type enum — try again shortly or widen the zone list.`,
-  );
-}
-
-/** Scaleway counterpart to `resolveCapacityPair` — see its doc. */
-async function resolveScalewayCapacityPair(
-  prefs: CapacityPreferences,
-  token: string,
-  options: { fetchFn?: typeof fetch } = {},
-): Promise<{ primary: ResolvedCapacity; standby: ResolvedCapacity }> {
-  const fetchFn = options.fetchFn ?? fetch;
-
-  for (const [deployType, scaleType] of prefs.typePairs) {
-    const viable: string[] = [];
-    for (const zone of prefs.regions) {
-      const available = await loadScalewayZoneTypes(zone, token, fetchFn);
-      if (available.has(deployType) && available.has(scaleType)) viable.push(zone);
-      if (viable.length >= 2) break;
-    }
-    if (viable.length >= 2) {
-      const [p, s] = viable;
-      return {
-        primary: { region: p, serverType: deployType, scaleToType: scaleType, datacenter: p },
-        standby: { region: s, serverType: deployType, scaleToType: scaleType, datacenter: s },
-      };
-    }
-  }
-
-  const pairs = prefs.typePairs.map(([a, b]) => `${a}+${b}`).join(', ');
-  throw new Error(
-    `region-resolver: HA needs two distinct Scaleway zones sharing one type-pair, none found. ` +
-      `tried zones=[${prefs.regions.join(',')}] type-pairs=[${pairs}].`,
-  );
-}
-
-/**
- * Provider → capacity-resolver dispatch (2026-08-07 audit: was an if/else
- * whose ELSE branch silently resolved Hetzner capacity for any provider id
- * it didn't recognize — provider N+1 would have "resolved" against the
- * wrong cloud's inventory). Adding a provider means adding a row here;
- * an unknown id throws instead of defaulting.
- */
-const CAPACITY_RESOLVERS: Record<
-  CapacityProvider,
-  {
-    resolve: (
-      prefs: CapacityPreferences,
-      token: string,
-      options: { excludeRegions?: readonly string[]; fetchFn?: typeof fetch },
-    ) => Promise<ResolvedCapacity>;
-    resolvePair: (
-      prefs: CapacityPreferences,
-      token: string,
-      options: { fetchFn?: typeof fetch },
-    ) => Promise<{ primary: ResolvedCapacity; standby: ResolvedCapacity }>;
-  }
-> = {
-  hetzner: { resolve: resolveHetznerCapacity, resolvePair: resolveHetznerCapacityPair },
-  digitalocean: {
-    resolve: resolveDigitalOceanCapacity,
-    resolvePair: resolveDigitalOceanCapacityPair,
-  },
-  linode: { resolve: resolveLinodeCapacity, resolvePair: resolveLinodeCapacityPair },
-  vultr: { resolve: resolveVultrCapacity, resolvePair: resolveVultrCapacityPair },
-  scaleway: { resolve: resolveScalewayCapacity, resolvePair: resolveScalewayCapacityPair },
-};
-
-function capacityResolverFor(provider: CapacityProvider | undefined) {
-  const impl = CAPACITY_RESOLVERS[provider ?? 'hetzner'];
-  if (!impl) {
-    throw new Error(
-      `region-resolver: no capacity resolver registered for provider '${String(provider)}' — add a CAPACITY_RESOLVERS row.`,
-    );
-  }
-  return impl;
-}
-
 export function overrideRegions(
   prefs: CapacityPreferences,
   regionsCsv: string | undefined,

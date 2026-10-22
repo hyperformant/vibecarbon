@@ -333,10 +333,14 @@ export class ScalewayProvider extends BaseProvider {
   // program, hence that `disk` value; DEV1-M's 40 GB is its own bundled
   // volume constraint. PLAY2-NANO (the third compose candidate, l_ssd max 0
   // like BASIC3, so an SBS root too) from the same endpoint on 2026-10-22.
+  // DEV1-L (4 vCPU, 8 GB, an 80 GB bundled volume) is DEV1-M's next size
+  // up, the type `scale -type` moves a default box to; same endpoint and
+  // date, x86_64 in all four REGIONS zones.
   static FALLBACK_SERVER_TYPES = {
     'BASIC3-X2C-4G': { vcpu: 2, ram: 4, disk: 40 },
     'BASIC3-X4C-8G': { vcpu: 4, ram: 8, disk: 40 },
     'DEV1-M': { vcpu: 3, ram: 4, disk: 40 },
+    'DEV1-L': { vcpu: 4, ram: 8, disk: 80 },
     'PLAY2-NANO': { vcpu: 2, ram: 4, disk: 40 },
   };
 

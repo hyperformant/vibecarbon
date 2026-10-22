@@ -1,390 +1,179 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import {
   type CapacityPreferences,
-  clearResolverCache,
+  deployedScaleTarget,
   overrideRegions,
   resolveCapacity,
   resolveCapacityPair,
 } from '../../e2e/utils/region-resolver.js';
+import { seedCatalog } from '../helpers/catalog-fixtures.js';
 
-interface DC {
-  name: string;
-  loc: string;
-  available: number[];
-  supported?: number[];
+// The resolver reads the provider's own catalog (fetchServerTypes) and runs
+// the customer's price picker over it. Here the class is seeded from a dated
+// fixture and `loadCatalog` is injected, so nothing touches the network.
+const seeded = async () => true;
+
+const HETZNER: CapacityPreferences = {
+  regions: ['nbg1', 'hel1', 'fsn1'],
+  scaleTo: { cpx22: 'cpx32', cpx12: 'cpx22', cx23: 'cx33', cpx21: 'cpx31' },
+};
+
+let restore: (() => void) | null = null;
+function seedHetzner(fixture = '2026-10-22/hetzner', options = {}) {
+  restore = seedCatalog(HetznerProvider, fixture, options);
 }
-
-/**
- * Minimal stub of `GET /v1/server_types`, the one Hetzner endpoint the
- * resolver hits since /v1/datacenters was removed (2026-10-01). Fixtures stay
- * per-datacenter (`available` = server-type IDs, matching production: cx23=114,
- * cx33=115, cpx21=23, cpx31=24, cpx22=45, cpx32=46; all x86, vibecarbon is
- * amd64-only) and are folded into each type's `locations[]` the way the real
- * API reports them: a type is available in a location when any of its
- * datacenters has it. The stub also asserts the resolver never calls the
- * removed endpoint.
- */
-function makeFetch(dcs: DC[], typeNameToId: Record<string, number>): typeof fetch {
-  const server_types = Object.entries(typeNameToId).map(([name, id]) => {
-    const locs = new Map<string, boolean>();
-    for (const d of dcs) {
-      const supported = d.supported ?? d.available;
-      if (!supported.includes(id) && !d.available.includes(id)) continue;
-      locs.set(d.loc, (locs.get(d.loc) ?? false) || d.available.includes(id));
-    }
-    return { id, name, locations: [...locs].map(([loc, available]) => ({ name: loc, available })) };
-  });
-  return (async (url: string) => {
-    if (url.includes('/datacenters')) throw new Error('resolver called the removed /datacenters');
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ server_types, meta: { pagination: { next_page: null } } }),
-    };
-  }) as unknown as typeof fetch;
-}
-
-const STD_TYPE_IDS = { cx23: 114, cx33: 115, cpx21: 23, cpx31: 24, cpx22: 45, cpx32: 46 };
-
-/**
- * Minimal stub of the single DigitalOcean endpoint the resolver hits
- * (`/v2/sizes`) — unlike Hetzner, region availability is inline on each
- * size, so there's no separate "datacenters" call to stub.
- */
-function makeDigitalOceanFetch(sizes: Array<{ slug: string; regions: string[] }>): typeof fetch {
-  return (async (url: string) => {
-    if (!url.includes('/sizes')) throw new Error(`unexpected DO URL: ${url}`);
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ sizes }),
-    };
-  }) as unknown as typeof fetch;
-}
-
 afterEach(() => {
-  clearResolverCache();
+  restore?.();
+  restore = null;
+  vi.restoreAllMocks();
 });
 
 describe('resolveCapacity', () => {
-  it('picks the first preferred region whose DC has both pair types available', async () => {
-    const prefs: CapacityPreferences = {
-      regions: ['nbg1', 'hel1', 'fsn1'],
-      typePairs: [['cx23', 'cx33']],
-    };
-    const fetchFn = makeFetch(
-      [
-        // hel1 has cx23 only — skip
-        { name: 'hel1-dc2', loc: 'hel1', available: [114] },
-        // nbg1 has both — but it's listed first so should win regardless of hel1
-        { name: 'nbg1-dc3', loc: 'nbg1', available: [114, 115] },
-        { name: 'fsn1-dc14', loc: 'fsn1', available: [114, 115] },
-      ],
-      STD_TYPE_IDS,
-    );
-
-    const r = await resolveCapacity(prefs, 't', { fetchFn });
+  it('picks the first preferred region the picker can place, and pins no server type', async () => {
+    seedHetzner();
+    const r = await resolveCapacity(HETZNER, 't', { mode: 'compose', loadCatalog: seeded });
     expect(r).toEqual({
       region: 'nbg1',
-      serverType: 'cx23',
-      scaleToType: 'cx33',
+      serverType: undefined,
+      types: { compose: 'cpx22' },
       datacenter: 'nbg1',
     });
   });
 
-  it('falls back to a later region when earlier ones lack capacity', async () => {
-    const prefs: CapacityPreferences = {
-      regions: ['hel1', 'nbg1', 'fsn1'],
-      typePairs: [['cx23', 'cx33']],
-    };
-    const fetchFn = makeFetch(
-      [
-        { name: 'hel1-dc2', loc: 'hel1', available: [114] }, // missing cx33
-        { name: 'nbg1-dc3', loc: 'nbg1', available: [114, 115] },
-      ],
-      STD_TYPE_IDS,
-    );
-    const r = await resolveCapacity(prefs, 't', { fetchFn });
-    expect(r.region).toBe('nbg1');
+  it('resolves every k8s role, the db on its own 2 GB pick', async () => {
+    seedHetzner();
+    const r = await resolveCapacity(HETZNER, 't', { mode: 'k8s', loadCatalog: seeded });
+    expect(r.types).toEqual({ master: 'cpx22', db: 'cpx12', worker: 'cpx22' });
+    expect(r.serverType).toBeUndefined();
   });
 
-  it('falls back to a later type-pair when no region has the first pair', async () => {
-    const prefs: CapacityPreferences = {
-      regions: ['ash', 'hil'],
-      typePairs: [
-        ['cx23', 'cx33'], // not supported in US DCs at all
-        ['cpx21', 'cpx31'],
-      ],
-    };
-    const fetchFn = makeFetch([{ name: 'ash-dc1', loc: 'ash', available: [23, 24] }], STD_TYPE_IDS);
-    const r = await resolveCapacity(prefs, 't', { fetchFn });
-    expect(r).toEqual({
-      region: 'ash',
-      serverType: 'cpx21',
-      scaleToType: 'cpx31',
-      datacenter: 'ash',
-    });
+  it('skips a region where a role has nothing orderable', async () => {
+    seedHetzner('2026-10-22/hetzner', { drop: { nbg1: ['cpx22', 'cx23', 'cpx21'] } });
+    const r = await resolveCapacity(HETZNER, 't', { mode: 'compose', loadCatalog: seeded });
+    expect(r.region).toBe('hel1');
   });
 
-  it('prefers the cheapest type-pair in ANY listed region over a pricier pair in an earlier region', async () => {
-    // Hetzner's 2026-06-15 repricing made the pair ladder a price ladder
-    // (cx ~$0.01/h, cpx22 ~$0.04/h). A region-major walk would take nbg1's
-    // cpx22 here just because nbg1 is listed first; the cheaper cx pair is
-    // sitting in hel1. Type-major wins — same walk the HA pair resolver
-    // has always done.
-    const prefs: CapacityPreferences = {
-      regions: ['nbg1', 'hel1', 'fsn1'],
-      typePairs: [
-        ['cx23', 'cx33'],
-        ['cpx22', 'cpx32'],
-      ],
-    };
-    const fetchFn = makeFetch(
-      [
-        { name: 'nbg1-dc3', loc: 'nbg1', available: [45, 46] }, // cpx22+cpx32 only
-        { name: 'hel1-dc2', loc: 'hel1', available: [114, 115] }, // cx23+cx33
-      ],
-      STD_TYPE_IDS,
-    );
-    const r = await resolveCapacity(prefs, 't', { fetchFn });
-    expect(r).toEqual({
-      region: 'hel1',
-      serverType: 'cx23',
-      scaleToType: 'cx33',
-      datacenter: 'hel1',
-    });
+  it("skips a region that does not sell the default's scale target", async () => {
+    seedHetzner('2026-10-22/hetzner', { drop: { nbg1: ['cpx32'] } });
+    const r = await resolveCapacity(HETZNER, 't', { mode: 'compose', loadCatalog: seeded });
+    expect(r.region).toBe('hel1');
   });
 
-  it('honors excludeRegions (used by the HA pair resolver to push standby elsewhere)', async () => {
-    const prefs: CapacityPreferences = {
-      regions: ['nbg1', 'fsn1'],
-      typePairs: [['cx23', 'cx33']],
-    };
-    const fetchFn = makeFetch(
-      [
-        { name: 'nbg1-dc3', loc: 'nbg1', available: [114, 115] },
-        { name: 'fsn1-dc14', loc: 'fsn1', available: [114, 115] },
-      ],
-      STD_TYPE_IDS,
-    );
-    const r = await resolveCapacity(prefs, 't', {
-      fetchFn,
+  it('honours excludeRegions', async () => {
+    seedHetzner();
+    const r = await resolveCapacity(HETZNER, 't', {
+      mode: 'compose',
       excludeRegions: ['nbg1'],
+      loadCatalog: seeded,
     });
-    expect(r.region).toBe('fsn1');
+    expect(r.region).toBe('hel1');
   });
 
-  it('throws a helpful error when no region/type-pair combo fits', async () => {
-    const prefs: CapacityPreferences = {
-      regions: ['hel1'],
-      typePairs: [['cx23', 'cx33']],
-    };
-    const fetchFn = makeFetch([{ name: 'hel1-dc2', loc: 'hel1', available: [114] }], STD_TYPE_IDS);
-    await expect(resolveCapacity(prefs, 't', { fetchFn })).rejects.toThrow(
-      /no Hetzner region has a viable type-pair/,
-    );
-  });
-
-  it('caches API responses across calls (fetch invoked once per endpoint)', async () => {
-    const prefs: CapacityPreferences = {
-      regions: ['nbg1'],
-      typePairs: [['cx23', 'cx33']],
-    };
-    const fn = vi.fn(
-      makeFetch([{ name: 'nbg1-dc3', loc: 'nbg1', available: [114, 115] }], STD_TYPE_IDS),
-    );
-    await resolveCapacity(prefs, 't', { fetchFn: fn as unknown as typeof fetch });
-    await resolveCapacity(prefs, 't', { fetchFn: fn as unknown as typeof fetch });
-    // One page of /server_types, fetched once across both calls.
-    expect(fn).toHaveBeenCalledTimes(1);
-  });
-
-  it('returns a clear error if the API returns non-2xx', async () => {
-    const fetchFn = (async () => ({ ok: false, status: 502 })) as unknown as typeof fetch;
+  it('fails naming the type when the default has no ladder entry', async () => {
+    seedHetzner();
     await expect(
-      resolveCapacity({ regions: ['nbg1'], typePairs: [['cx23', 'cx33']] }, 't', { fetchFn }),
-    ).rejects.toThrow(/GET \/server_types → 502/);
+      resolveCapacity({ regions: ['nbg1'], scaleTo: {} }, 't', {
+        mode: 'compose',
+        loadCatalog: seeded,
+      }),
+    ).rejects.toThrow('no scale target for cpx22 in tests/config.ts scaleTo');
   });
 
-  it('follows /server_types pagination and ignores locations marked unavailable', async () => {
-    const pages = [
-      {
-        server_types: [{ name: 'cx23', locations: [{ name: 'nbg1', available: true }] }],
-        meta: { pagination: { next_page: 2 } },
-      },
-      {
-        server_types: [
-          {
-            name: 'cx33',
-            locations: [
-              { name: 'nbg1', available: false },
-              { name: 'hel1', available: true },
-            ],
-          },
-          { name: 'cx23', locations: [{ name: 'hel1', available: true }] },
-        ],
-        meta: { pagination: { next_page: null } },
-      },
-    ];
-    const urls: string[] = [];
-    const fetchFn = (async (url: string) => {
-      urls.push(url);
-      const page = Number(new URL(url).searchParams.get('page'));
-      return { ok: true, status: 200, json: async () => pages[page - 1] };
-    }) as unknown as typeof fetch;
-    const r = await resolveCapacity(
-      { regions: ['nbg1', 'hel1'], typePairs: [['cx23', 'cx33']] },
-      't',
-      { fetchFn },
-    );
-    expect(r).toMatchObject({ region: 'hel1', serverType: 'cx23', scaleToType: 'cx33' });
-    expect(urls).toHaveLength(2);
+  it('fails naming the provider when no catalog can be read, and never guesses a type', async () => {
+    seedHetzner();
+    await expect(
+      resolveCapacity(HETZNER, '', { mode: 'compose', loadCatalog: async () => false }),
+    ).rejects.toThrow(/Hetzner Cloud catalog/);
   });
 
-  describe('provider: digitalocean', () => {
-    it('picks the first preferred region where both type-pair slugs are available', async () => {
-      const prefs: CapacityPreferences = {
-        regions: ['nyc3', 'sfo3', 'ams3', 'fra1'],
-        typePairs: [['s-2vcpu-4gb', 's-4vcpu-8gb']],
-      };
-      const fetchFn = makeDigitalOceanFetch([
-        // sfo3 only has the small type — skip
-        { slug: 's-2vcpu-4gb', regions: ['nyc3', 'sfo3', 'ams3', 'fra1'] },
-        // nyc3 is listed first and has both — should win over ams3/fra1
-        { slug: 's-4vcpu-8gb', regions: ['nyc3', 'ams3', 'fra1'] },
-      ]);
+  it('reads the live catalog through the provider class, as the CLI does', async () => {
+    seedHetzner();
+    const fetchSpy = vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(true);
+    await resolveCapacity(HETZNER, 'tok', { mode: 'compose' });
+    expect(fetchSpy).toHaveBeenCalledWith('tok');
+  });
 
-      const r = await resolveCapacity(prefs, 't', { fetchFn, provider: 'digitalocean' });
-      expect(r).toEqual({
-        region: 'nyc3',
-        serverType: 's-2vcpu-4gb',
-        scaleToType: 's-4vcpu-8gb',
-        datacenter: 'nyc3',
-      });
+  it('lists what it tried when no region fits', async () => {
+    seedHetzner('2026-10-22/hetzner', {
+      drop: { nbg1: ['cpx22'], hel1: ['cpx22'], fsn1: ['cpx22'] },
     });
-
-    it('falls back to a later region when an earlier one lacks the scale type', async () => {
-      const prefs: CapacityPreferences = {
-        regions: ['sfo3', 'nyc3'],
-        typePairs: [['s-2vcpu-4gb', 's-4vcpu-8gb']],
-      };
-      const fetchFn = makeDigitalOceanFetch([
-        { slug: 's-2vcpu-4gb', regions: ['sfo3', 'nyc3'] },
-        { slug: 's-4vcpu-8gb', regions: ['nyc3'] }, // missing in sfo3
-      ]);
-      const r = await resolveCapacity(prefs, 't', { fetchFn, provider: 'digitalocean' });
-      expect(r.region).toBe('nyc3');
-    });
-
-    it('throws a helpful error when no region has both slugs', async () => {
-      const prefs: CapacityPreferences = {
-        regions: ['nyc3'],
-        typePairs: [['s-2vcpu-4gb', 's-4vcpu-8gb']],
-      };
-      const fetchFn = makeDigitalOceanFetch([{ slug: 's-2vcpu-4gb', regions: ['nyc3'] }]);
-      await expect(
-        resolveCapacity(prefs, 't', { fetchFn, provider: 'digitalocean' }),
-      ).rejects.toThrow(/no DigitalOcean region has a viable type-pair/);
-    });
+    await expect(
+      resolveCapacity(HETZNER, 't', { mode: 'compose', loadCatalog: seeded }),
+    ).rejects.toThrow(/tried regions=\[nbg1,hel1,fsn1\]/);
   });
 });
 
 describe('resolveCapacityPair', () => {
-  it('picks two distinct regions sharing the first viable type-pair', async () => {
-    const prefs: CapacityPreferences = {
-      regions: ['nbg1', 'hel1', 'fsn1'],
-      typePairs: [['cx23', 'cx33']],
-    };
-    const fetchFn = makeFetch(
-      [
-        { name: 'nbg1-dc3', loc: 'nbg1', available: [114, 115] },
-        { name: 'hel1-dc2', loc: 'hel1', available: [114, 115] },
-      ],
-      STD_TYPE_IDS,
-    );
-    const { primary, standby } = await resolveCapacityPair(prefs, 't', { fetchFn });
-    expect(primary.region).toBe('nbg1');
-    expect(standby.region).toBe('hel1');
-    // Same arch family on both sides — non-negotiable.
-    expect(primary.serverType).toBe(standby.serverType);
-    expect(primary.scaleToType).toBe(standby.scaleToType);
-  });
-
-  it('skips a type-pair if only one region has it (HA needs two)', async () => {
-    const prefs: CapacityPreferences = {
-      regions: ['nbg1', 'fsn1'],
-      typePairs: [
-        ['cx23', 'cx33'], // only nbg1 has it → can't HA on cx
-        ['cpx22', 'cpx32'], // both nbg1 and fsn1 have it → use this
-      ],
-    };
-    const fetchFn = makeFetch(
-      [
-        { name: 'nbg1-dc3', loc: 'nbg1', available: [114, 115, 45, 46] },
-        { name: 'fsn1-dc14', loc: 'fsn1', available: [45, 46] },
-      ],
-      STD_TYPE_IDS,
-    );
-    const { primary, standby } = await resolveCapacityPair(prefs, 't', { fetchFn });
-    expect(primary.serverType).toBe('cpx22');
-    expect(standby.serverType).toBe('cpx22');
-    expect(new Set([primary.region, standby.region])).toEqual(new Set(['nbg1', 'fsn1']));
-  });
-
-  it('throws when no type-pair has two viable regions', async () => {
-    const prefs: CapacityPreferences = {
-      regions: ['nbg1', 'fsn1'],
-      typePairs: [['cx23', 'cx33']],
-    };
-    const fetchFn = makeFetch(
-      [{ name: 'nbg1-dc3', loc: 'nbg1', available: [114, 115] }],
-      STD_TYPE_IDS,
-    );
-    await expect(resolveCapacityPair(prefs, 't', { fetchFn })).rejects.toThrow(
-      /HA needs two distinct regions/,
-    );
-  });
-
-  describe('provider: digitalocean', () => {
-    it('picks two distinct regions sharing the first viable type-pair', async () => {
-      const prefs: CapacityPreferences = {
-        regions: ['nyc3', 'sfo3', 'ams3'],
-        typePairs: [['s-2vcpu-4gb', 's-4vcpu-8gb']],
-      };
-      const fetchFn = makeDigitalOceanFetch([
-        { slug: 's-2vcpu-4gb', regions: ['nyc3', 'sfo3', 'ams3'] },
-        { slug: 's-4vcpu-8gb', regions: ['nyc3', 'sfo3'] }, // ams3 missing scale type
-      ]);
-      const { primary, standby } = await resolveCapacityPair(prefs, 't', {
-        fetchFn,
-        provider: 'digitalocean',
-      });
-      expect(primary.region).toBe('nyc3');
-      expect(standby.region).toBe('sfo3');
-      expect(primary.serverType).toBe(standby.serverType);
-      expect(primary.scaleToType).toBe(standby.scaleToType);
+  it('pairs two distinct same-continent regions, neither pinning a type', async () => {
+    seedHetzner();
+    const { primary, standby } = await resolveCapacityPair(HETZNER, 't', {
+      mode: 'compose-ha',
+      loadCatalog: seeded,
     });
+    expect(primary).toMatchObject({ region: 'nbg1', serverType: undefined });
+    expect(standby).toMatchObject({ region: 'hel1', serverType: undefined });
+  });
 
-    it('throws when no type-pair has two viable regions', async () => {
-      const prefs: CapacityPreferences = {
-        regions: ['nyc3', 'sfo3'],
-        typePairs: [['s-2vcpu-4gb', 's-4vcpu-8gb']],
-      };
-      const fetchFn = makeDigitalOceanFetch([
-        { slug: 's-2vcpu-4gb', regions: ['nyc3'] },
-        { slug: 's-4vcpu-8gb', regions: ['nyc3'] },
-      ]);
-      await expect(
-        resolveCapacityPair(prefs, 't', { fetchFn, provider: 'digitalocean' }),
-      ).rejects.toThrow(/HA needs two distinct DigitalOcean regions/);
+  it('allows the two sides different types, each the cheapest where it sits', async () => {
+    // The flux catalog stocks cx23 in hel1 only, where it undercuts cpx22.
+    seedHetzner('flux-hetzner-cx23-hel1');
+    const { primary, standby } = await resolveCapacityPair(HETZNER, 't', {
+      mode: 'compose-ha',
+      loadCatalog: seeded,
     });
+    expect(primary.types).toEqual({ compose: 'cpx22' });
+    expect(standby).toMatchObject({ region: 'hel1', types: { compose: 'cx23' } });
+  });
+
+  it('places a k8s-ha standby as a pilot light: master and db, no worker', async () => {
+    seedHetzner();
+    const { primary, standby } = await resolveCapacityPair(HETZNER, 't', {
+      mode: 'k8s-ha',
+      loadCatalog: seeded,
+    });
+    expect(Object.keys(primary.types)).toEqual(['master', 'db', 'worker']);
+    expect(Object.keys(standby.types)).toEqual(['master', 'db']);
+  });
+
+  it('never pairs across continents', async () => {
+    seedHetzner();
+    await expect(
+      resolveCapacityPair({ ...HETZNER, regions: ['nbg1', 'ash'] }, 't', {
+        mode: 'compose-ha',
+        loadCatalog: seeded,
+      }),
+    ).rejects.toThrow(/two distinct same-continent/);
+  });
+});
+
+describe('deployedScaleTarget', () => {
+  const ladder = { cpx22: 'cpx32', cpx12: 'cpx22' };
+
+  it('scales compose from the serverType the deploy recorded', () => {
+    expect(deployedScaleTarget({ serverType: 'cpx22' }, 'compose-ha', ladder)).toBe('cpx32');
+  });
+
+  it('scales k8s from the recorded master type (scale -type resizes every role)', () => {
+    const env = { masterServerType: 'cpx22', dbServerType: 'cpx12', workerServerType: 'cpx22' };
+    expect(deployedScaleTarget(env, 'k8s-ha', ladder)).toBe('cpx32');
+  });
+
+  it('fails the step when the recorded type has no ladder entry', () => {
+    expect(() => deployedScaleTarget({ serverType: 'cx43' }, 'compose', ladder)).toThrow(
+      'no scale target for cx43 in tests/config.ts scaleTo',
+    );
+  });
+
+  it('fails the step when the deploy recorded no type', () => {
+    expect(() => deployedScaleTarget({}, 'k8s', ladder)).toThrow(/masterServerType/);
   });
 });
 
 describe('overrideRegions (E2E_REGIONS knob)', () => {
   const base: CapacityPreferences = {
     regions: ['nbg1', 'hel1', 'fsn1'],
-    typePairs: [['cx23', 'cx33']],
+    scaleTo: { cpx22: 'cpx32' },
   };
 
   it('returns prefs unchanged when csv is undefined or empty', () => {
@@ -396,7 +185,7 @@ describe('overrideRegions (E2E_REGIONS knob)', () => {
   it('replaces the region list, trimming whitespace and dropping empties', () => {
     const out = overrideRegions(base, ' ash , hil ,');
     expect(out.regions).toEqual(['ash', 'hil']);
-    expect(out.typePairs).toBe(base.typePairs); // untouched
+    expect(out.scaleTo).toBe(base.scaleTo); // untouched
     expect(base.regions).toEqual(['nbg1', 'hel1', 'fsn1']); // no mutation
   });
 });
