@@ -393,21 +393,21 @@ export async function prepareReplicationTransport({
         'outputs it; a missing value means the infra step result is incomplete',
     );
   }
-  return perfAsync('deploy.ha.replication.transportEarly', async () => {
-    const khPath = knownHostsPathForKey(sshKeyPath);
-    await seedKnownHosts(khPath, primaryIp);
-    await seedKnownHosts(khPath, standbyIp);
-    const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
-    await applyGatewaysAndBringUpTunnel({
-      primaryIp,
-      standbyIp,
-      primaryDbIp: primaryDbIp || primaryIp,
-      standbyDbIp: standbyDbIp || standbyIp,
-      primaryDbPrivateIp,
-      standbyDbPrivateIp,
-      sshOpts,
-      sshKeyPath,
-    });
+  // Timed by the caller's `deploy.ha.replication.transportEarly` marker,
+  // which also covers the peer firewall opened before this.
+  const khPath = knownHostsPathForKey(sshKeyPath);
+  await seedKnownHosts(khPath, primaryIp);
+  await seedKnownHosts(khPath, standbyIp);
+  const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
+  await applyGatewaysAndBringUpTunnel({
+    primaryIp,
+    standbyIp,
+    primaryDbIp: primaryDbIp || primaryIp,
+    standbyDbIp: standbyDbIp || standbyIp,
+    primaryDbPrivateIp,
+    standbyDbPrivateIp,
+    sshOpts,
+    sshKeyPath,
   });
 }
 

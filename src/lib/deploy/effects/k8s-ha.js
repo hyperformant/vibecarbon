@@ -336,24 +336,28 @@ async function haK8sProvisionClusters(ctx) {
       namespaceReady.standby.promise,
     ]);
     if (!pInfra?.masterIp || !sInfra?.masterIp || !pNs || !sNs) return false;
-    // Firewall first — WireGuard's handshake needs UDP 51821 admitted for
-    // the peer before the tunnel can come up. Conditional construction on
-    // purpose: BaseProvider throws on a falsy token, the opener no-ops.
-    await openReplicationFirewallForPeers({
-      provider: options.apiToken ? new Provider(options.apiToken) : null,
-      projectName: options.projectName,
-      environment: options.environment,
-      primaryDbIp: pInfra.dbIp,
-      standbyDbIp: sInfra.dbIp,
-    });
-    await prepareReplicationTransport({
-      primaryIp: pInfra.masterIp,
-      standbyIp: sInfra.masterIp,
-      primaryDbIp: pInfra.dbIp,
-      standbyDbIp: sInfra.dbIp,
-      primaryDbPrivateIp: pInfra.dbPrivateIp,
-      standbyDbPrivateIp: sInfra.dbPrivateIp,
-      sshKeyPath: sharedSshKeyPath,
+    // One marker over the firewall and the transport, so a throw from either
+    // records `(failed)`, which the e2e budget reads.
+    await perfAsync('deploy.ha.replication.transportEarly', async () => {
+      // Firewall first — WireGuard's handshake needs UDP 51821 admitted for
+      // the peer before the tunnel can come up. Conditional construction on
+      // purpose: BaseProvider throws on a falsy token, the opener no-ops.
+      await openReplicationFirewallForPeers({
+        provider: options.apiToken ? new Provider(options.apiToken) : null,
+        projectName: options.projectName,
+        environment: options.environment,
+        primaryDbIp: pInfra.dbIp,
+        standbyDbIp: sInfra.dbIp,
+      });
+      await prepareReplicationTransport({
+        primaryIp: pInfra.masterIp,
+        standbyIp: sInfra.masterIp,
+        primaryDbIp: pInfra.dbIp,
+        standbyDbIp: sInfra.dbIp,
+        primaryDbPrivateIp: pInfra.dbPrivateIp,
+        standbyDbPrivateIp: sInfra.dbPrivateIp,
+        sshKeyPath: sharedSshKeyPath,
+      });
     });
     console.error('[k8s-ha] replication transport prepared during the cluster fan-out');
     return true;

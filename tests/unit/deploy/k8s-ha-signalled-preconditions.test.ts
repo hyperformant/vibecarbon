@@ -104,6 +104,41 @@ vi.mock('@clack/prompts', async (orig) => ({
   log: { info: vi.fn(), warn: vi.fn(), step: vi.fn(), success: vi.fn(), error: vi.fn() },
 }));
 
+// The early transport's perf marker, as recorded: name and outcome.
+const perfEvents: string[] = [];
+vi.mock('../../../src/lib/perf.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/perf.js')>()),
+  perfAsync: async (name: string, fn: () => Promise<unknown>) => {
+    try {
+      const r = await fn();
+      perfEvents.push(name);
+      return r;
+    } catch (err) {
+      perfEvents.push(`${name} (failed)`);
+      throw err;
+    }
+  },
+}));
+
+// A provider whose construction throws, so the early firewall opener fails
+// the way an unusable API token would.
+let providerThrows = false;
+vi.mock('../../../src/lib/providers/index.js', async (orig) => {
+  const real = await orig<typeof import('../../../src/lib/providers/index.js')>();
+  return {
+    ...real,
+    providerFor: (o: Parameters<typeof real.providerFor>[0]) => {
+      const Real = real.providerFor(o) as unknown as new (...a: unknown[]) => object;
+      return class extends Real {
+        constructor(...a: unknown[]) {
+          if (providerThrows) throw new Error('provider token rejected');
+          super(...a);
+        }
+      };
+    },
+  };
+});
+
 const haIndex = await import('../../../src/lib/deploy/k8s/ha/index.js');
 const { K8S_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/k8s-ha.js');
 
@@ -120,6 +155,8 @@ const drain = () => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
   events.length = 0;
+  perfEvents.length = 0;
+  providerThrows = false;
   namespaceGates = { primary: gate(), standby: gate() };
   deployGates = { primary: gate(), standby: gate() };
   primaryConfigGate = gate();
@@ -198,5 +235,26 @@ describe('k8s-ha transport preconditions are signalled', () => {
     await K8S_HA_EFFECTS.haK8sConfigureReplication(ctx);
     expect(events.indexOf('copy')).toBeLessThan(events.indexOf('setupReplication'));
     expect(copyAppImageToStandby).toHaveBeenCalledOnce();
+  });
+
+  it('records the early transport as failed when opening the peer firewall throws', async () => {
+    providerThrows = true;
+    for (const g of [...Object.values(namespaceGates), ...Object.values(deployGates)]) g.open();
+    primaryConfigGate.open();
+    const ctx = newCtx();
+    (ctx.options as Record<string, unknown>).apiToken = 'tok';
+    await K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
+    expect(prepareReplicationTransport).not.toHaveBeenCalled();
+    expect(ctx.transportPrepared).toBe(false);
+    expect(perfEvents).toContain('deploy.ha.replication.transportEarly (failed)');
+  });
+
+  it('times the firewall and the transport under one transportEarly marker', async () => {
+    for (const g of [...Object.values(namespaceGates), ...Object.values(deployGates)]) g.open();
+    primaryConfigGate.open();
+    await K8S_HA_EFFECTS.haK8sProvisionClusters(newCtx());
+    expect(perfEvents.filter((e) => e.startsWith('deploy.ha.replication.transportEarly'))).toEqual([
+      'deploy.ha.replication.transportEarly',
+    ]);
   });
 });
