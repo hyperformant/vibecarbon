@@ -482,6 +482,7 @@ describe('deliverImage', () => {
       const lines = (err as Error).message.split('\n');
       expect(lines[0]).toContain(`image delivery failed: base image pull failed: ${cause}`);
       expect(lines[0]).toContain('must be public on GHCR');
+      expect(lines[0]).toMatch(/running this in the vibecarbon repo:$/);
       expect(lines.at(-1)?.trim()).toBe('pnpm node-runtime:build-local');
     }
   });

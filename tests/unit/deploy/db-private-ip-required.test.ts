@@ -115,10 +115,12 @@ describe('10.0.1.2 census — provider-generic files carry no db-IP literal', ()
 
   it('k3s.js masterPrivateIp renderer defaults stay at their audited count (2)', () => {
     // The two DELIBERATE test-convenience defaults (renderCarbonAutoscalerConfig,
-    // buildAppImage — "renderer default stays for tests", M3 Task 2; the third,
-    // pushImageToLocalRegistry's, went with the tunnel push). The live deployK3s path destructures the k3s-infra step
-    // result WITHOUT a default and validates instead. A 4th occurrence means
-    // the class is growing again — remove the new default, don't bump this.
+    // buildAppImage — "renderer default stays for tests", M3 Task 2; a third,
+    // pushImageToLocalRegistry's, went with the tunnel push when the image
+    // moved to the layer-delta delivery). The live deployK3s path destructures
+    // the k3s-infra step result WITHOUT a default and validates instead. A 3rd
+    // occurrence means the class is growing again — remove the new default,
+    // don't bump this.
     const code = codeWithoutComments(readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf8'));
     const occurrences = code.match(/masterPrivateIp\s*=\s*'10\.0\.1\.1'/g) ?? [];
     expect(occurrences).toHaveLength(2);

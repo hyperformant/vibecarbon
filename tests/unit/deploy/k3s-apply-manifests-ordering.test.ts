@@ -86,6 +86,10 @@ let deliverError: Error | null = null;
 // kubectl wait) — drives the fail-loud tests below.
 let webhookHelmExit = 0;
 let webhookWaitExit = 0;
+// Exit code of `kubectl rollout status deployment/local-registry`, and the
+// cluster events read when it fails (the mirror-pull diagnosis).
+let registryRolloutExit = 0;
+let eventsOut = '';
 // Exit code of the in-container /api/health probe (`kubectl exec deploy/app
 // … node -e`), and whether `kubectl rollout status deployment/app` hangs
 // (never exits, as when readiness stays 503) — drive the migration-failure
@@ -249,6 +253,18 @@ function installSpawnMock() {
         ? 'certificate.cert-manager.io/grafana-tls\n'
         : 'namespace/vibecarbon-observability\n';
       return fakeChild({ stdout, argv: full }) as unknown as ReturnType<typeof spawn>;
+    }
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('rollout') &&
+      argv.includes('deployment/local-registry')
+    ) {
+      return fakeChild({ exitCode: registryRolloutExit, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    if (cmd === 'kubectl' && argv.includes('get') && argv.includes('events')) {
+      return fakeChild({ stdout: eventsOut, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
     if (cmd === 'helm' && argv[0] === 'upgrade' && argv.includes('cert-manager-webhook-hetzner')) {
       return fakeChild({ exitCode: webhookHelmExit, argv: full }) as unknown as ReturnType<
@@ -566,11 +582,19 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     deliverError = null;
     webhookHelmExit = 0;
     webhookWaitExit = 0;
+    registryRolloutExit = 0;
+    eventsOut = '';
     installSpawnMock();
   });
 
+  // A rollout, not a pod wait: after an image ref change the Recreate
+  // strategy's old pod is still Ready while it terminates, and a pod wait
+  // would let the delivery push into it.
   const isLocalRegistryWait = (a: string[]) =>
-    a[0] === 'kubectl' && a.includes('wait') && a.includes('app=local-registry');
+    a[0] === 'kubectl' &&
+    a.includes('rollout') &&
+    a.includes('status') &&
+    a.includes('deployment/local-registry');
   const isCaApply = (a: string[]) =>
     a[0] === 'kubectl' &&
     a.includes('apply') &&
@@ -600,6 +624,47 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     expect(cmdCalls.findIndex(isLocalRegistryWait)).toBeLessThan(delivery);
     expect(delivery).toBeLessThan(cmdCalls.findIndex(isCaApply));
     expect(delivery).toBeLessThan(cmdCalls.findIndex(isAppPatch));
+  });
+
+  it('the registry is waited by rollout status, never by a pod Ready wait', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const waits = cmdCalls.filter(isLocalRegistryWait);
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toEqual([
+      'kubectl',
+      '-n',
+      'vibecarbon',
+      'rollout',
+      'status',
+      'deployment/local-registry',
+      '--timeout=120s',
+    ]);
+    expect(cmdCalls.some((a) => a.includes('wait') && a.includes('app=local-registry'))).toBe(
+      false,
+    );
+  });
+
+  it('a registry rollout that times out on an unpullable system image names the packages', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    registryRolloutExit = 1;
+    eventsOut =
+      'vibecarbon   local-registry-7f9   FailedCreatePodSandBox   failed to get sandbox image ' +
+      '"vibecarbon-system.invalid/rancher/mirrored-pause:3.6": failed to pull image ' +
+      '"vibecarbon-system.invalid/rancher/mirrored-pause:3.6": 401 Unauthorized\n';
+    const err = await applyK3sManifests(baseArgs(makeProjectDir())).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/local-registry rollout did not complete/);
+    expect(err.message).toContain('ghcr.io/hyperformant/mirrored-pause');
+    expect(cmdCalls.some(isDelivery)).toBe(false);
+  });
+
+  it('a registry rollout timeout with no mirror pull failure says only that', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    registryRolloutExit = 1;
+    const err = await applyK3sManifests(baseArgs(makeProjectDir())).catch((e) => e);
+    expect(err.message).toMatch(/local-registry rollout did not complete/);
+    expect(err.message).not.toMatch(/must be public/);
   });
 
   it('#1 one delivery, to the master only, of the tag the pods run, with the base pull', async () => {
@@ -839,7 +904,11 @@ describe('applyK3sManifests pilot-standby role', () => {
     // standby delivers nothing of its own — see the image-delivery cases below.
     expect(
       cmdCalls.some(
-        (a) => a[0] === 'kubectl' && a.includes('wait') && a.includes('app=local-registry'),
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('rollout') &&
+          a.includes('status') &&
+          a.includes('deployment/local-registry'),
       ),
     ).toBe(true);
     expect(deliverImage).not.toHaveBeenCalled();
@@ -1212,9 +1281,10 @@ describe('applyK3sManifests image delivery by role', () => {
       cmdCalls.some(
         (a) =>
           a[0] === 'kubectl' &&
-          a.includes('wait') &&
-          a.includes('--for=condition=Ready') &&
-          a.includes('app=local-registry'),
+          a.includes('rollout') &&
+          a.includes('status') &&
+          a.includes('deployment/local-registry') &&
+          a.includes('--timeout=120s'),
       ),
     ).toBe(true);
     const patch = cmdCalls.find(

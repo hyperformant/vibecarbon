@@ -15,6 +15,7 @@ import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-
 import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
+import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
 import { pollUntil } from '../../retry.js';
@@ -1099,7 +1100,9 @@ function stackPullError(ip, err) {
   const detail = tail.length ? tail.join('\n') : String(err?.message ?? err);
   return new Error(
     `stack image pull failed on ${ip}:\n${detail}\n` +
-      'The images above failed to pull; set Docker Hub credentials (dockerhub-login) or retry.',
+      'The images above failed to pull; set Docker Hub credentials (dockerhub-login) or retry. ' +
+      `If one is a ${K8S_MIRROR_ORG} mirror, its package may still be private: servers pull ` +
+      `mirrors without credentials, so these packages must be public: ${mirroredPackageNames().join(', ')}.`,
     { cause: err },
   );
 }

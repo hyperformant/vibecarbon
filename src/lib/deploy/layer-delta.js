@@ -83,7 +83,8 @@ function basePullCause(err) {
   if (!PULL_DENIED.test(cause)) return cause;
   return (
     `${cause}. The node-runtime package must be public on GHCR, since servers ` +
-    'pull it without credentials. For local work, build it on this machine with:\n' +
+    'pull it without credentials. For local work, build it on this machine by running ' +
+    'this in the vibecarbon repo:\n' +
     '  pnpm node-runtime:build-local'
   );
 }

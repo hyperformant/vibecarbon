@@ -28,6 +28,7 @@ vi.mock('../../../src/lib/command.js', async (orig) => {
 
 const { runCommandAsync } = await import('../../../src/lib/command.js');
 const { pullComposeImages } = await import('../../../src/lib/deploy/compose/index.js');
+const { mirroredPackageNames } = await import('../../../src/lib/images.js');
 
 /** The shape runCommandAsync rejects with: the remote command's `2>&1` puts docker's words in stdout. */
 function pullFailure(stdout: string) {
@@ -79,6 +80,10 @@ describe('pullComposeImages names what failed to pull', () => {
     expect(err.message).not.toContain('noise line 0\n');
     expect(err.message).toContain('noise line 29');
     expect(err.message).toMatch(/set Docker Hub credentials \(dockerhub-login\) or retry/);
+    // A private ghcr mirror package fails the same pull: the message names the
+    // packages that must be public.
+    expect(err.message).toMatch(/ghcr\.io\/hyperformant mirror, its package may still be private/);
+    for (const pkg of mirroredPackageNames()) expect(err.message).toContain(pkg);
     expect(err.cause).toBeInstanceOf(Error);
   });
 
