@@ -215,6 +215,15 @@ describe('the skeleton save records the sizes the deploy picked', () => {
     expect(env.ha.standbyWorkerSpec).toEqual({ serverType: 'cpx22' });
   });
 
+  it('compose-ha: the resolved standby type is recorded with its location, so a rerun reuses it', async () => {
+    const env = await deployUntilFailure({
+      ...gathered('compose-ha', true, { serverType: 'cpx22' }),
+      standbyServerTypes: { serverType: 'cpx32' },
+    });
+    expect(env.ha.pendingStandby).toEqual({ region: 'nbg1', serverType: 'cpx32' });
+    expect(env.servers).toBeUndefined();
+  });
+
   it('k8s-ha: a standby worker with no stocked type is not recorded', async () => {
     const env = await deployUntilFailure({
       ...gathered('kubernetes', true, { masterServerType: 'cpx22', dbServerType: 'cpx12' }),

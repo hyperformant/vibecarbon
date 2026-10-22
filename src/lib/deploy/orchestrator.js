@@ -896,6 +896,22 @@ function standbyTypesRecord(existingHa, types) {
 }
 
 /**
+ * The skeleton save's record of the compose-ha standby type, resolved before
+ * the standby server exists: `ha.pendingStandby`, with the location it was
+ * resolved for, so a rerun of a deploy that fails before the server is
+ * created places the same type (effects/compose-ha.js). Once the server
+ * exists its servers[] entry is the record and the pending save drops this.
+ *
+ * @param {string|null} secondaryRegion
+ * @param {{serverType?: string}|undefined} types
+ * @returns {object}
+ */
+function pendingStandbyRecord(secondaryRegion, types) {
+  if (!secondaryRegion || !types?.serverType) return {};
+  return { pendingStandby: { region: secondaryRegion, serverType: types.serverType } };
+}
+
+/**
  * The success save's per-side k8s-ha record: each cluster's IPs, region,
  * stack identity and the server types it ACTUALLY deployed with, plus the
  * pilot standby's worker spec. Exported for tests.
@@ -1271,7 +1287,9 @@ export async function executeDeployment(args, gatheredConfig) {
                 // that fails later places the same standby (the fan-out keeps
                 // a recorded type). A worker with nothing stocked is not
                 // recorded; the fan-out falls back and says so.
-                ...standbyTypesRecord(existingEnv.ha, gatheredConfig.standbyServerTypes),
+                ...(deployMode === 'compose-ha'
+                  ? pendingStandbyRecord(secondaryRegion, gatheredConfig.standbyServerTypes)
+                  : standbyTypesRecord(existingEnv.ha, gatheredConfig.standbyServerTypes)),
               },
             }
           : {}),

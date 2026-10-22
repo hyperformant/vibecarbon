@@ -1032,18 +1032,25 @@ export async function gatherDeploymentConfig(args) {
     // primary (B6).
     let resolved;
     if (isComposeDeploy) {
+      // On record: the standby server's entry, or before it exists the type
+      // a failed first deploy's skeleton save resolved for this location.
       const standbyOnRecord =
         !args.serverType &&
-        (envConfig.servers ?? []).some(
+        ((envConfig.servers ?? []).some(
           (sv) =>
             sv?.serverType &&
             composeHaStackOf(sv, projectConfig.projectName, environment) === 'standby',
-        );
+        ) ||
+          Boolean(
+            envConfig.ha?.pendingStandby?.serverType &&
+              envConfig.ha.pendingStandby.region === secondaryRegion,
+          ));
       resolved = {
         compose: standbyOnRecord
           ? undefined
           : Provider.resolveServerTypeForRegion(serverType, secondaryRegion, 'compose'),
       };
+      if (resolved.compose) standbyServerTypes = { serverType: resolved.compose };
     } else {
       const standby = k8sStandbyTypes({
         Provider,

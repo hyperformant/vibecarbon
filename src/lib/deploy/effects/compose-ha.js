@@ -181,12 +181,21 @@ async function haProvisionServers(ctx) {
   // or `up` would resize the scaled server back; only a type this deploy was
   // asked for (`deploy -server-type`, ctx.serverTypeRequested) applies to both
   // stacks, even one equal to the env's recorded type.
+  //
+  // Before the standby server exists, a first deploy that failed after the
+  // skeleton save has the standby type it resolved on record under
+  // ha.pendingStandby, for the location it resolved it for. A rerun to that
+  // location places the same type.
+  const pendingStandby = envConfig?.ha?.pendingStandby;
   const recordedType = (stack) =>
     ctx.serverTypeRequested
       ? undefined
-      : (envConfig?.servers ?? []).find(
+      : ((envConfig?.servers ?? []).find(
           (sv) => composeHaStackOf(sv, projectName, environment) === stack,
-        )?.serverType;
+        )?.serverType ??
+        (stack === 'standby' && pendingStandby?.region === standbyRegion
+          ? pendingStandby.serverType
+          : undefined));
   const primaryStackServerType = recordedType('primary') ?? serverType;
   ctx.primaryStackServerType = primaryStackServerType;
   const standbyServerType =

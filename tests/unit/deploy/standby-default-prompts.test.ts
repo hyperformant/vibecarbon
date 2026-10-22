@@ -223,6 +223,31 @@ describe('deploy wizard HA standby', () => {
     expect(out.secondaryRegion).toBe('sfo3');
   });
 
+  it('compose-ha: a fresh standby returns the type resolved for its location, for the skeleton save', async () => {
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const out = await runPrompts({ args: { yes: true, region: 'nyc3', secondaryRegion: 'sfo3' } });
+    expect(out.standbyServerTypes).toEqual({ serverType: 's-2vcpu-4gb-amd' });
+  });
+
+  it('compose-ha: a standby type on record for that location is kept, so a stocked-out location still passes', async () => {
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean', { drop: { sfo3: DO_SFO3.fourGb } });
+    const out = await runPrompts({
+      args: { yes: true },
+      envConfig: {
+        deployMode: 'compose-ha',
+        ha: {
+          enabled: true,
+          pendingStandby: { region: 'sfo3', serverType: 's-2vcpu-4gb-amd' },
+        },
+        region: 'nyc3',
+        secondaryRegion: 'sfo3',
+        serverType: 's-2vcpu-4gb',
+      },
+    });
+    expect(out.secondaryRegion).toBe('sfo3');
+    expect(out.standbyServerTypes).toBeUndefined();
+  });
+
   it('k8s-ha: standby types on record are kept, so a stocked-out standby location still passes', async () => {
     seed(DigitalOceanProvider, '2026-10-22/digitalocean', {
       drop: { sfo3: [...DO_SFO3.fourGb, ...DO_SFO3.twoGb] },
