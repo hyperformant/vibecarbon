@@ -67,7 +67,7 @@ const PLAIN = { master: 's-2vcpu-4gb', db: 's-1vcpu-2gb', worker: 's-2vcpu-4gb' 
 type Side = { masterServerType: string; dbServerType: string; workerServerType: string };
 
 /** One fan-out with this env on disk, as the deploy wizard hands it over. */
-async function fanOut(env: Record<string, unknown>) {
+async function fanOut(env: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   deployK3s.mockClear();
   const ctx: Record<string, unknown> = {
     s: { start: vi.fn(), stop: vi.fn(), message: vi.fn() },
@@ -86,6 +86,7 @@ async function fanOut(env: Record<string, unknown>) {
       minWorkers: 1,
       maxWorkers: 3,
       haStacks: haStacksFrom(env),
+      ...extra,
     },
   };
   await K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
@@ -210,6 +211,35 @@ describe('k8s-ha failover with mixed standby types (DigitalOcean sfo3 + tor1)', 
     expect(ha.primary.workerServerType).toBe(PLAIN.worker);
     expect(ha.standby).not.toHaveProperty('workerServerType');
     expect(ha.standbyWorkerSpec).toEqual({ count: 1, serverType: AMD.worker });
+  });
+});
+
+describe('k8s-ha first-deploy rerun with a different -standby-region', () => {
+  let restore: () => void;
+  beforeEach(() => {
+    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    restore();
+    vi.restoreAllMocks();
+  });
+
+  it('the fan-out re-resolves the standby for the new location, as the wizard did', async () => {
+    // The skeleton save recorded the sfo3 standby types; no stack exists yet.
+    const env = {
+      region: 'nyc3',
+      secondaryRegion: 'tor1',
+      masterServerType: 's-2vcpu-4gb',
+      dbServerType: 's-1vcpu-2gb',
+      workerServerType: 's-2vcpu-4gb',
+      ha: {
+        standby: { masterServerType: AMD.master, dbServerType: AMD.db },
+        standbyWorkerSpec: { serverType: AMD.worker },
+      },
+    };
+    const run = await fanOut(env, { standbyRetargeted: true });
+    expect(run.standby).toEqual({ region: 'tor1', ...typesOf(PLAIN) });
   });
 });
 

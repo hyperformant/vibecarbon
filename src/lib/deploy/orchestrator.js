@@ -1944,6 +1944,9 @@ export async function executeDeployment(args, gatheredConfig) {
     // `deploy -server-type` given: new sizes for both clusters, so the
     // standby's recorded types give way (k8s-ha fan-out).
     serverTypeRequested: !!args.serverType,
+    // A first-deploy rerun with a different -standby-region: the standby's
+    // recorded types were resolved for the old location and give way too.
+    standbyRetargeted: !!gatheredConfig.standbyRetargeted,
     observability: config.observability,
     services,
     apiToken,

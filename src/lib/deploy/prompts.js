@@ -988,6 +988,17 @@ export async function gatherDeploymentConfig(args) {
   let secondaryRegion = null;
   // k8s-ha: the standby's resolved types, for the skeleton save to record.
   let standbyServerTypes;
+  // A first deploy rerun with a different -standby-region: the standby types
+  // on record were resolved for the old location and no standby exists yet,
+  // so they are re-resolved for the new one, as if requested. The fan-out
+  // follows the same flag (orchestrator deploymentConfig).
+  const standbyRetargeted = Boolean(
+    ha &&
+      args.secondaryRegion &&
+      envConfig.secondaryRegion &&
+      args.secondaryRegion !== envConfig.secondaryRegion &&
+      !envConfig.ha?.standby?.stack,
+  );
   if (ha) {
     // The k8s-ha pilot-light standby places a master and a db, no worker.
     const standbyRoles = isComposeDeploy ? ['compose'] : ['master', 'db'];
@@ -1039,7 +1050,7 @@ export async function gatherDeploymentConfig(args) {
         standbyRegion: secondaryRegion,
         primary: { master: masterServerType, db: dbServerType, worker: workerServerType },
         recorded: haStacksFrom(envConfig)?.standby,
-        requested: Boolean(args.serverType),
+        requested: Boolean(args.serverType) || standbyRetargeted,
       });
       resolved = { master: standby.masterServerType, db: standby.dbServerType };
       // The worker is only recorded when something is stocked for it.
@@ -1389,6 +1400,7 @@ export async function gatherDeploymentConfig(args) {
     dbServerType,
     workerServerType,
     ...(standbyServerTypes ? { standbyServerTypes } : {}),
+    standbyRetargeted,
     minWorkers: args.minWorkers ?? DEFAULT_WORKER_MIN,
     maxWorkers: args.maxWorkers ?? DEFAULT_WORKER_MAX,
     domain,

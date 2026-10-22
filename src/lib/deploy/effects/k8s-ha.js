@@ -159,7 +159,7 @@ async function haK8sProvisionClusters(ctx) {
     standbyRegion,
     primary: { master: primaryMasterType, db: primaryDbType, worker: primaryWorkerType },
     recorded: options.haStacks?.standby,
-    requested: options.serverTypeRequested,
+    requested: options.serverTypeRequested || options.standbyRetargeted,
   });
   const standbyMasterType = standby.masterServerType;
   const standbyDbType = standby.dbServerType;

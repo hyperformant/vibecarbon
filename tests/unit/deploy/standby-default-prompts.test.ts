@@ -262,6 +262,70 @@ describe('deploy wizard HA standby', () => {
     });
   });
 
+  describe('k8s-ha: a first-deploy rerun with a different -standby-region', () => {
+    // A first deploy that failed after the skeleton save has the standby
+    // types it resolved for sfo3 on record, but no standby stack yet.
+    const skeleton = (standby: Record<string, unknown> = {}) => ({
+      deployMode: 'kubernetes',
+      ha: {
+        enabled: true,
+        standby: {
+          masterServerType: 's-2vcpu-4gb-amd',
+          dbServerType: 's-1vcpu-2gb-amd',
+          ...standby,
+        },
+        standbyWorkerSpec: { serverType: 's-2vcpu-4gb-amd' },
+      },
+      region: 'nyc3',
+      secondaryRegion: 'sfo3',
+    });
+
+    it('re-resolves the standby types for the new location', async () => {
+      seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+      const out = await runPrompts({
+        mode: 'k8s',
+        args: { yes: true, secondaryRegion: 'tor1' },
+        envConfig: skeleton(),
+      });
+      expect(out.secondaryRegion).toBe('tor1');
+      // tor1 sells none of the sfo3 -amd types.
+      expect(out.standbyServerTypes).toEqual({
+        masterServerType: 's-2vcpu-4gb',
+        dbServerType: 's-1vcpu-2gb',
+        workerServerType: 's-2vcpu-4gb',
+      });
+      expect(out.standbyRetargeted).toBe(true);
+    });
+
+    it('a standby that already has a stack keeps its record', async () => {
+      seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+      const envConfig = skeleton({ stack: 'prod-standby', region: 'sfo3' });
+      (envConfig.ha as Record<string, unknown>).primary = { stack: 'prod-primary', region: 'nyc3' };
+      const out = await runPrompts({
+        mode: 'k8s',
+        args: { yes: true, secondaryRegion: 'tor1' },
+        envConfig,
+      });
+      expect(out.standbyServerTypes).toEqual({
+        masterServerType: 's-2vcpu-4gb-amd',
+        dbServerType: 's-1vcpu-2gb-amd',
+        workerServerType: 's-2vcpu-4gb-amd',
+      });
+      expect(out.standbyRetargeted).toBe(false);
+    });
+
+    it('the same -standby-region as on record keeps the record', async () => {
+      seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+      const out = await runPrompts({
+        mode: 'k8s',
+        args: { yes: true, secondaryRegion: 'sfo3' },
+        envConfig: skeleton(),
+      });
+      expect(out.standbyServerTypes?.masterServerType).toBe('s-2vcpu-4gb-amd');
+      expect(out.standbyRetargeted).toBe(false);
+    });
+  });
+
   describe('a primary bigger than every candidate', () => {
     const hetznerHa = (extra: Record<string, unknown> = {}) => ({
       provider: 'hetzner',
