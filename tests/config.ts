@@ -226,11 +226,11 @@ export const testConfig = {
       // Linode runs compose + compose-ha (2026-08 expansion phase 1 +
       // tier-parity wave 1 — see LinodeProvider.SUPPORTED_TIERS). Regions are
       // the base-price subset of LinodeProvider.REGIONS (id-cgk/br-gru carry
-      // region-price uplifts) with geographic spread; the first two
-      // (us-iad, us-ord) are the HA pair resolveCapacityPair hands to l2 —
-      // they mirror LinodeProvider.HA_REGIONS and getDefaultStandbyRegion's
-      // us-iad↔us-ord pairing, so keep them first. Linode's Standard line
-      // is a global catalog with no per-region capacity flux.
+      // region-price uplifts) with geographic spread; us-iad first, the
+      // primary l1/l2 deploy to. The HA standby is not taken from this list:
+      // it goes where a customer's deploy puts it (getDefaultStandbyRegion
+      // on the live catalog). Linode's Standard line is a global catalog
+      // with no per-region capacity flux.
       linode: {
         regions: ['us-iad', 'us-ord', 'fr-par', 'us-sea'] as const,
         scaleTo: { 'g6-standard-2': 'g6-standard-4' },
@@ -255,13 +255,11 @@ export const testConfig = {
       // are per-subscription. Region order is therefore "co-located with the
       // usual ewr1 subscription first"; a fallback to sjc/lax/ams still
       // works, it just crosses regions for backup traffic. ewr stays first
-      // for that reason; ord second so resolveCapacityPair hands v2 the
-      // product-default ewr↔ord pairing (HA_REGIONS /
-      // getDefaultStandbyRegion — same principle as Linode's us-iad/us-ord
-      // above) whenever ord is viable. The resolver's live plan-locations
-      // check is the flux guard: if ord loses vc2 again (as it had on
-      // 2026-08-08) it is skipped and the pair degrades to ewr+sjc
-      // automatically — no dated snapshot to re-litigate.
+      // for that reason. The HA standby is not taken from this list: it goes
+      // where a customer's deploy puts it (getDefaultStandbyRegion on the
+      // live catalog). The resolver's live plan-locations check is the flux
+      // guard: a region that loses vc2 is skipped as a primary, and a
+      // default standby that cannot sell the scale target fails preflight.
       vultr: {
         regions: ['ewr', 'ord', 'sjc', 'lax', 'ams'] as const,
         scaleTo: { 'vc2-2c-4gb': 'vc2-4c-8gb' },
@@ -274,12 +272,10 @@ export const testConfig = {
       // NO Scaleway type exists in all ten zones (live per-zone catalog
       // 2026-08-09) and price is not zone-invariant, so the resolver
       // checks each (zone, type) against the live catalog + availability
-      // endpoints — never assume a type exists in a zone.
-      // The first two (fr-par-1, nl-ams-1) are the HA pair
-      // resolveCapacityPair hands to s2 — they mirror
-      // ScalewayProvider.HA_REGIONS and getDefaultStandbyRegion's
-      // fr-par-1↔nl-ams-1 cross-country pairing (fr-par-1+fr-par-2 would be
-      // same-city), so keep them first.
+      // endpoints — never assume a type exists in a zone. fr-par-1 first,
+      // the primary s1/s2 deploy to. The HA standby is not taken from this
+      // list: it goes where a customer's deploy puts it
+      // (getDefaultStandbyRegion on the live catalog).
       scaleway: {
         regions: ['fr-par-1', 'nl-ams-1', 'fr-par-2', 'nl-ams-2'] as const,
         scaleTo: { 'DEV1-M': 'DEV1-L', 'BASIC3-X2C-4G': 'BASIC3-X4C-8G' },
@@ -324,9 +320,9 @@ export const testConfig = {
           { mode: 'compose' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd1' },
           { mode: 'compose-ha' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd2' },
           { mode: 'k8s' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd3' },
-          // d4 (2026-08-27): the k8s-ha reference scenario. Same nyc3↔sfo3
-          // standby pairing the capacity resolver already hands d2
-          // (DigitalOceanProvider.HA_REGIONS); failover is a DNS flip on
+          // d4 (2026-08-27): the k8s-ha reference scenario. Its standby, like
+          // d2's, goes where a customer's nyc3 deploy puts it
+          // (getDefaultStandbyRegion: tor1 on 2026-10-22); failover is a DNS flip on
           // native DO DNS, so the flip exercises the SAME provider that owns
           // the compute — the self-contained default, like Hetzner's e4.
           { mode: 'k8s-ha' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd4' },

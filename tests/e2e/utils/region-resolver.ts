@@ -7,7 +7,8 @@
  * (`fetchServerTypes`, the same read the CLI makes) and runs the customer's
  * price picker over it (`cheapestRoleSet`, src/lib/sizing.js). It returns the
  * first preferred region where the picker can place every role the scenario
- * needs, with `serverType: undefined`: the deploy under test then picks its
+ * needs (an HA standby goes where the customer's deploy puts it), with
+ * `serverType: undefined`: the deploy under test then picks its
  * types itself, cold, exactly as a customer's first deploy does, and records
  * them in `.vibecarbon.json`. The scale step reads that record and looks the
  * target up in the scenario's ladder (`scaleTo`, tests/config.ts) through
@@ -122,16 +123,14 @@ function placeableSet(
   prefs: CapacityPreferences,
   region: string,
   roles: string[],
-  keyRole: string | null,
+  keyRole: string,
 ): Record<string, string> | null {
   const set = cheapestRoleSet(Provider, region, roles);
   if (!set) return null;
-  if (keyRole) {
-    const key = set.types[keyRole];
-    const target = prefs.scaleTo[key];
-    if (!target) throw noScaleTarget(key);
-    if (!Provider._locationTypes?.[region]?.has(target)) return null;
-  }
+  const key = set.types[keyRole];
+  const target = prefs.scaleTo[key];
+  if (!target) throw noScaleTarget(key);
+  if (!Provider._locationTypes?.[region]?.has(target)) return null;
   return set.types;
 }
 
@@ -172,11 +171,15 @@ export async function resolveCapacity(
 }
 
 /**
- * HA: a primary region and a distinct standby region on the same continent
- * (`Provider.REGION_CONTINENT`), each where the picker places its side's
- * roles. The two sides may land on different types, each the cheapest where
- * it sits, as a customer's HA pair does. The scale target is checked where
- * the ladder key lives, on the primary.
+ * HA: the primary is the first preferred region the picker can place (as
+ * `resolveCapacity`); the standby is where a customer's deploy puts it,
+ * `Provider.getDefaultStandbyRegion(primary, roles, primaryTypes)` on the
+ * same catalog, whatever the e2e region list says. Its types are what the
+ * deploy's standby resolves, `Provider.resolveServerTypeForRegion` per role
+ * (the primary's type where stocked, else the role's pick of at least its
+ * RAM). `scale -type` resizes both sides, so the standby must sell the scale
+ * target too; when it does not, preflight fails naming the provider, the
+ * location and the type, and no other location is tried.
  */
 export async function resolveCapacityPair(
   prefs: CapacityPreferences,
@@ -185,26 +188,40 @@ export async function resolveCapacityPair(
 ): Promise<{ primary: ResolvedCapacity; standby: ResolvedCapacity }> {
   const provider = options.provider ?? 'hetzner';
   const mode = options.mode ?? 'compose-ha';
-  const Provider = await loadProvider(provider, token, options.loadCatalog);
-  const continentOf: Record<string, string> = Provider.REGION_CONTINENT ?? {};
+  const primary = await resolveCapacity(prefs, token, { ...options, provider, mode });
+  const Provider: ProviderClass = getProviderClass(provider);
+  const name = Provider.NAME ?? provider;
 
-  for (const p of prefs.regions) {
-    const primaryTypes = placeableSet(Provider, prefs, p, primaryRoles(mode), scaleKeyRole(mode));
-    if (!primaryTypes || !continentOf[p]) continue;
-    for (const s of prefs.regions) {
-      if (s === p || continentOf[s] !== continentOf[p]) continue;
-      const standbyTypes = placeableSet(Provider, prefs, s, standbyRoles(mode), null);
-      if (standbyTypes) {
-        return { primary: resolved(p, primaryTypes), standby: resolved(s, standbyTypes) };
-      }
-    }
+  const roles = standbyRoles(mode);
+  const primaryTypes = Object.fromEntries(roles.map((role) => [role, primary.types[role]]));
+  const region: string = Provider.getDefaultStandbyRegion(primary.region, roles, primaryTypes);
+  if (!region || region === primary.region) {
+    throw new Error(
+      `region-resolver: ${name} has no default standby location for a ${mode} primary in ${primary.region}.`,
+    );
   }
 
-  throw new Error(
-    `region-resolver: HA needs two distinct same-continent ${Provider.NAME ?? provider} ` +
-      `regions that can place the default ${mode} sizes, none found. ` +
-      `tried regions=[${prefs.regions.join(',')}].`,
-  );
+  const types: Record<string, string> = {};
+  for (const role of roles) {
+    const type = Provider.resolveServerTypeForRegion(primaryTypes[role], region, role);
+    if (!type) {
+      throw new Error(
+        `region-resolver: ${name} default standby location ${region} cannot place the ` +
+          `${role} role for a ${primaryTypes[role]} primary, so the ${mode} deploy would refuse.`,
+      );
+    }
+    types[role] = type;
+  }
+
+  const target = prefs.scaleTo[primary.types[scaleKeyRole(mode)]];
+  if (!Provider._locationTypes?.[region]?.has(target)) {
+    throw new Error(
+      `region-resolver: ${name} default standby location ${region} does not sell the scale ` +
+        `target ${target}, so the ${mode} scale step would fail there.`,
+    );
+  }
+
+  return { primary, standby: resolved(region, types) };
 }
 
 /**

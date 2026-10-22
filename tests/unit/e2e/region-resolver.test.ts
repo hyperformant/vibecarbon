@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import {
   type CapacityPreferences,
@@ -105,25 +106,38 @@ describe('resolveCapacity', () => {
 });
 
 describe('resolveCapacityPair', () => {
-  it('pairs two distinct same-continent regions, neither pinning a type', async () => {
+  it("puts the Hetzner standby where the customer's deploy puts it, pinning no type", async () => {
     seedHetzner();
     const { primary, standby } = await resolveCapacityPair(HETZNER, 't', {
       mode: 'compose-ha',
       loadCatalog: seeded,
     });
     expect(primary).toMatchObject({ region: 'nbg1', serverType: undefined });
-    expect(standby).toMatchObject({ region: 'hel1', serverType: undefined });
+    expect(standby.serverType).toBeUndefined();
+    expect(standby.region).toBe(
+      HetznerProvider.getDefaultStandbyRegion('nbg1', ['compose'], { compose: 'cpx22' }),
+    );
+    expect(standby.region).not.toBe('nbg1');
+    expect(standby.types).toEqual({
+      compose: HetznerProvider.resolveServerTypeForRegion('cpx22', standby.region, 'compose'),
+    });
   });
 
-  it('allows the two sides different types, each the cheapest where it sits', async () => {
-    // The flux catalog stocks cx23 in hel1 only, where it undercuts cpx22.
-    seedHetzner('flux-hetzner-cx23-hel1');
-    const { primary, standby } = await resolveCapacityPair(HETZNER, 't', {
-      mode: 'compose-ha',
-      loadCatalog: seeded,
-    });
-    expect(primary.types).toEqual({ compose: 'cpx22' });
-    expect(standby).toMatchObject({ region: 'hel1', types: { compose: 'cx23' } });
+  it('pairs DigitalOcean nyc3 with tor1, the customer default, though tor1 is not in the e2e list', async () => {
+    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const DO: CapacityPreferences = {
+      regions: ['nyc3', 'sfo3', 'ams3', 'fra1'],
+      scaleTo: { 's-2vcpu-4gb': 's-4vcpu-8gb', 's-1vcpu-2gb': 's-2vcpu-4gb' },
+    };
+    for (const mode of ['compose-ha', 'k8s-ha'] as const) {
+      const { primary, standby } = await resolveCapacityPair(DO, 't', {
+        provider: 'digitalocean',
+        mode,
+        loadCatalog: seeded,
+      });
+      expect(primary.region, mode).toBe('nyc3');
+      expect(standby.region, mode).toBe('tor1');
+    }
   });
 
   it('places a k8s-ha standby as a pilot light: master and db, no worker', async () => {
@@ -136,14 +150,18 @@ describe('resolveCapacityPair', () => {
     expect(Object.keys(standby.types)).toEqual(['master', 'db']);
   });
 
-  it('never pairs across continents', async () => {
+  it('fails preflight naming provider, location and type when the standby cannot sell the scale target', async () => {
     seedHetzner();
+    const standbyRegion = HetznerProvider.getDefaultStandbyRegion('nbg1', ['compose'], {
+      compose: 'cpx22',
+    });
+    restore?.();
+    seedHetzner('2026-10-22/hetzner', { drop: { [standbyRegion]: ['cpx32'] } });
     await expect(
-      resolveCapacityPair({ ...HETZNER, regions: ['nbg1', 'ash'] }, 't', {
-        mode: 'compose-ha',
-        loadCatalog: seeded,
-      }),
-    ).rejects.toThrow(/two distinct same-continent/);
+      resolveCapacityPair(HETZNER, 't', { mode: 'compose-ha', loadCatalog: seeded }),
+    ).rejects.toThrow(
+      `region-resolver: Hetzner Cloud default standby location ${standbyRegion} does not sell the scale target cpx32`,
+    );
   });
 });
 

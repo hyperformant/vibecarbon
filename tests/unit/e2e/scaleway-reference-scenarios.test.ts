@@ -73,10 +73,8 @@ describe('capacityPreferences.scaleway', () => {
     // fr-par-3 / nl-ams-3 / pl-waw-* / it-mil-1 are deliberately absent:
     // BASIC3 or the DEV1 fallback is missing there, and it-mil's S3 region
     // has ONEZONE_IA only.
-    // ORDER IS LOAD-BEARING: the first two viable zones become s2's HA pair
-    // (resolveCapacityPair), and fr-par-1+nl-ams-1 mirrors
-    // ScalewayProvider.HA_REGIONS / getDefaultStandbyRegion's cross-country
-    // pairing — fr-par-2 second would hand s2 a same-city pair.
+    // The order picks the primary zone only: the s2 standby goes where a
+    // customer's deploy puts it (getDefaultStandbyRegion).
     expect(testConfig.e2e.capacityPreferences.scaleway.regions).toEqual([
       'fr-par-1',
       'nl-ams-1',

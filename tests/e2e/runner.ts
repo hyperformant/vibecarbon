@@ -729,9 +729,9 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
   // Capacity resolution: pick the region per scenario from
   // `capacityPreferences`, the first where the customer's price picker can
   // place the default sizes (and their scale target) on the live catalog, so
-  // the matrix doesn't trip on capacity flux mid-run. HA scenarios get two
-  // distinct same-continent regions. No server type is pinned: the deploy
-  // picks the sizes a customer gets by default.
+  // the matrix doesn't trip on capacity flux mid-run. An HA standby goes
+  // where a customer's deploy puts it (getDefaultStandbyRegion). No server
+  // type is pinned: the deploy picks the sizes a customer gets by default.
   const { resolveCapacity, resolveCapacityPair, overrideRegions } = await import(
     './utils/region-resolver.js'
   );

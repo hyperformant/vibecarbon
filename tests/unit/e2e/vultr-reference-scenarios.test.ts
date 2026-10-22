@@ -65,17 +65,13 @@ describe('capacityPreferences.vultr', () => {
     });
   });
 
-  it('keeps ewr then ord first so the v2 HA pair mirrors HA_REGIONS when viable', () => {
+  it('keeps ewr first, co-located with the usual ewr1 storage subscription', () => {
     // Compute region ids, NOT cluster slugs (ewr→ewr1, ord→chi3, sjc→sjc1,
-    // lax→lax1, ams→ams1 — VultrObjectStorageProvider.COMPUTE_TO_S3). ewr
-    // first (backup co-location with the usual ewr1 subscription), ord
-    // second so resolveVultrCapacityPair hands v2 the product-default
-    // ewr↔ord pairing (VultrProvider.HA_REGIONS / getDefaultStandbyRegion)
-    // whenever ord is viable — same principle as Linode's us-iad/us-ord.
-    // Plan availability FLUXES (vc2 was absent from ord on 2026-08-08,
-    // present again 2026-08-19); the resolver's live plan-locations check
-    // is the flux guard — if ord loses vc2 again it is skipped and the
-    // pair degrades to ewr+sjc automatically.
+    // lax→lax1, ams→ams1 — VultrObjectStorageProvider.COMPUTE_TO_S3). The
+    // list orders the primary only: the v2 standby goes where a customer's
+    // deploy puts it (getDefaultStandbyRegion). Plan availability FLUXES
+    // (vc2 was absent from ord on 2026-08-08, present again 2026-08-19); the
+    // resolver's live check skips a primary region that loses it.
     expect(testConfig.e2e.capacityPreferences.vultr.regions).toEqual([
       'ewr',
       'ord',
