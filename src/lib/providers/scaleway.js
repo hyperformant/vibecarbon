@@ -366,6 +366,9 @@ export class ScalewayProvider extends BaseProvider {
   // €0.005/h x 730 h (scaleway.com/en/pricing, read 2026-10-22).
   static IPV4_MONTHLY = 3.65;
 
+  // Prices are in EUR.
+  static CURRENCY = '€';
+
   static DEFAULT_TYPE = 'BASIC3-X2C-4G';
 
   // ── Engine-literal statics ──────────────────────────────────────────────

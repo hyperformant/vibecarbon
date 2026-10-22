@@ -226,6 +226,11 @@ describe.each(Object.entries(PROVIDERS))('Provider contract: %s', (id, Provider)
       expect(Provider.priceFor(Provider.DEFAULT_TYPE, Provider.DEFAULT_REGION)).toBeNull();
     });
 
+    it('states the currency symbol its prices are in', () => {
+      expect(typeof Provider.CURRENCY).toBe('string');
+      expect(Provider.CURRENCY.length).toBeGreaterThan(0);
+    });
+
     it('declares a pure parseCatalog for fetchServerTypes', () => {
       expect(typeof Provider.parseCatalog).toBe('function');
     });

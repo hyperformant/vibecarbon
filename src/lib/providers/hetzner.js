@@ -313,6 +313,11 @@ export class HetznerProvider extends BaseProvider {
   // read 2026-10-22.
   static IPV4_MONTHLY = 0.6;
 
+  // The account's billing currency. `/v1/server_types` prices state none
+  // (only `/v1/pricing` does, which the catalog fetch does not read), and the
+  // accounts vibecarbon is run with bill in USD (the 2026-10-22 capture).
+  static CURRENCY = '$';
+
   // Generic default / prompt seed, and the "e.g. …" in the amd64 guard's error
   // text. Must name something the DEFAULT (EU) region can actually place.
   //

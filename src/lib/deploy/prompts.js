@@ -37,7 +37,14 @@ import {
   deriveEnvAppBucketName,
   deriveProjectBucketName,
 } from '../providers/s3-base.js';
-import { ROLE_MIN_RAM_GB, rankLocationsByPrice, rankStandbyLocations } from '../sizing.js';
+import {
+  cheapestDefaultRegion,
+  cheapestRoleSet,
+  formatMonthly,
+  ROLE_MIN_RAM_GB,
+  rankLocationsByPrice,
+  rankStandbyLocations,
+} from '../sizing.js';
 import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
@@ -683,13 +690,42 @@ export function unorderableDefaultRefusal(
         };
   }
   const options = nearby.map(({ location, monthly, types }) => {
-    const price = monthly === null ? '' : ` $${monthly.toFixed(2)}/mo`;
+    const price = monthly === null ? '' : ` ${formatMonthly(Provider, monthly)}/mo`;
     return `${location} (${roles.map((r) => types[r]).join(' + ')}${price})`;
   });
   return {
     line: `${cause}; orderable nearby: ${options.join(', ')}`,
     hint: `deploy in ${nearby[0].location}, the cheapest of those, with:\n  vibecarbon deploy ${environment} ${standby ? '-standby-region' : '-region'} ${nearby[0].location}`,
   };
+}
+
+/**
+ * The region prompt's options and pre-selection for a new project. With a
+ * live catalog, each label shows what the deploy would cost there per month
+ * (`<id> - <name> · from $7.09/mo`: the cheapest role set for `roles` plus
+ * billed IPv4, `cheapestRoleSet`), or `· not orderable right now` where some
+ * role has nothing in stock (still selectable: the P7 refusal then names
+ * where to go). The pre-selection is `cheapestDefaultRegion`, ranked from the
+ * same sets, so it never disagrees with a label. With no catalog (offline,
+ * or a failed fetch) the labels are the plain `<id> - <name>` and the
+ * pre-selection is the provider's default region.
+ *
+ * @param {object} Provider - the provider class
+ * @param {Record<string, string>} regions - id to display name
+ * @param {string[]} roles - the roles this deploy places
+ * @returns {{options: Array<{value: string, label: string}>, initialValue: string}}
+ */
+export function regionPromptChoices(Provider, regions, roles) {
+  const live = Boolean(Provider._locationTypes);
+  const options = Object.entries(regions).map(([id, name]) => {
+    const plain = `${id} - ${name}`;
+    if (!live) return { value: id, label: plain };
+    const set = cheapestRoleSet(Provider, id, roles);
+    if (!set) return { value: id, label: `${plain} · not orderable right now` };
+    if (set.monthly === null) return { value: id, label: plain };
+    return { value: id, label: `${plain} · from ${formatMonthly(Provider, set.monthly)}/mo` };
+  });
+  return { options, initialValue: cheapestDefaultRegion(Provider, roles) };
 }
 
 export async function gatherDeploymentConfig(args) {
@@ -823,40 +859,44 @@ export async function gatherDeploymentConfig(args) {
     }
   }
 
-  // Region Selection (Aggressive Default)
-  // args.region validity against Provider.REGIONS was already checked above
-  // — region here is either unset, a known-good -region value, a
-  // previously-persisted (already-valid) envConfig.region, or the provider
-  // default.
-  let region = args.region || envConfig.region || Provider.DEFAULT_REGION; // Nuremberg as default robust region
-  if (!args.region && !envConfig.region && !args.yes) {
-    const regionOptions = Object.entries(providerConfig.regions).map(([id, name]) => ({
-      value: id,
-      label: `${id} - ${name}`,
-    }));
-    region = await p.select({
-      message: 'Region:',
-      options: regionOptions,
-      initialValue: region,
-    });
-    if (p.isCancel(region)) {
-      exitCancelled();
-    }
-  }
-
   const apiToken = await Provider.promptApiToken(projectConfig.projectName);
   if (!apiToken) {
     p.log.error('API token required');
     process.exit(1);
   }
 
-  // Server types resolve (and the ARM guard runs) straight after the API
-  // token, which the live catalog needs, and BEFORE the object-storage keys.
-  // The guard needs nothing from S3, and a persisted ARM type in
-  // .vibecarbon.json is a dead end: refuse it before asking the operator for
-  // (and live-verifying) secrets the run can never use. Nothing here prompts
-  // but the HA standby question, whose default is priced from this catalog.
+  // The live catalog loads straight after the API token, which it needs. The
+  // region, server types (and the ARM guard) and the HA standby all resolve
+  // from it, BEFORE the object-storage keys: the guard needs nothing from S3,
+  // and a persisted ARM type in .vibecarbon.json is a dead end, so refuse it
+  // before asking the operator for (and live-verifying) secrets the run can
+  // never use. The only questions here are the region and the HA standby,
+  // both priced from this catalog.
   await Provider.fetchServerTypes(apiToken);
+
+  // Region. args.region validity against Provider.REGIONS was already
+  // checked above, so region here is a known-good -region value, a
+  // previously-persisted (already-valid) envConfig.region, or, for a new
+  // project, the cheapest location on the provider's default continent
+  // (regionPromptChoices), which -y takes as is. The prompt shows each
+  // location's monthly price for this deploy mode; a region on record or
+  // given with -region is never moved and never asked about.
+  let region = args.region || envConfig.region;
+  if (!region) {
+    const regionRoles = isComposeDeploy ? ['compose'] : ['master', 'db', 'worker'];
+    const { options, initialValue } = regionPromptChoices(
+      Provider,
+      providerConfig.regions,
+      regionRoles,
+    );
+    region = initialValue;
+    if (!args.yes) {
+      region = await p.select({ message: 'Region:', options, initialValue });
+      if (p.isCancel(region)) {
+        exitCancelled();
+      }
+    }
+  }
   const regionDefaults = Provider.getRegionDefaults(region);
 
   // Server Type Selection (Streamlined)
@@ -1025,12 +1065,11 @@ export async function gatherDeploymentConfig(args) {
     }
   }
 
-  // Object-storage keys come right after the API token. Only the prompt-free
-  // server-type resolution and, for HA, the standby question above sit
-  // between them: on every provider both are generated in the same console
-  // visit (Hetzner: project, then Security, then API tokens / S3
-  // credentials), so asking for them back to back saves the operator a
-  // second trip before the DNS questions.
+  // Object-storage keys come after the region and, for HA, the standby: the
+  // object-storage endpoint follows the region, and both questions are priced
+  // from the catalog the API token unlocks. They are one Enter each in the
+  // common case (and absent with a region on record), so the keys still
+  // follow the token closely, before the DNS questions.
   const providerId = providerIdFor(envConfig);
 
   // S3 (Standardized)

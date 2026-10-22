@@ -325,6 +325,9 @@ export class LinodeProvider extends BaseProvider {
   // (linode.com/pricing, read 2026-10-22).
   static IPV4_MONTHLY = 0;
 
+  // Prices are in USD.
+  static CURRENCY = '$';
+
   static DEFAULT_TYPE = 'g6-standard-2';
 
   // ── Engine-literal statics ──────────────────────────────────────────────

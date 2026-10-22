@@ -211,6 +211,9 @@ export class VultrProvider extends BaseProvider {
   // (vultr.com/pricing, read 2026-10-22).
   static IPV4_MONTHLY = 0;
 
+  // Prices are in USD.
+  static CURRENCY = '$';
+
   static DEFAULT_TYPE = 'vc2-2c-4gb';
 
   // ── Engine-literal statics ──────────────────────────────────────────────

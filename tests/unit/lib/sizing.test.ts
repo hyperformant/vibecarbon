@@ -17,6 +17,7 @@ import { ScalewayProvider } from '../../../src/lib/providers/scaleway.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 import {
   cheapestRoleSet,
+  formatMonthly,
   pickRoleType,
   ROLE_MIN_RAM_GB,
   rankLocationsByPrice,
@@ -434,5 +435,15 @@ describe('seedCatalog', () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe('formatMonthly', () => {
+  it("prints a monthly in the provider's currency, to the cent", () => {
+    expect(formatMonthly(HetznerProvider, 7.09)).toBe('$7.09');
+    expect(formatMonthly(DigitalOceanProvider, 24)).toBe('$24.00');
+    expect(formatMonthly(VultrProvider, 20)).toBe('$20.00');
+    expect(formatMonthly(LinodeProvider, 28.8)).toBe('$28.80');
+    expect(formatMonthly(ScalewayProvider, 18.39)).toBe('\u20ac18.39');
   });
 });

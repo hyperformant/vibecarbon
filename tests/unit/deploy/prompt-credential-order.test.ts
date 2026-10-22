@@ -1,12 +1,16 @@
 /**
- * Credential prompt order in the new-environment deploy wizard.
+ * Prompt order in the new-environment deploy wizard: API token, then the
+ * catalog fetch, then the region, then (HA) the standby, then the
+ * object-storage keys, then DNS.
  *
- * The provider API token and the object-storage keys are made in the same
- * console visit (Hetzner: project, then Security, then API tokens / S3
- * credentials), so the wizard asks for them back to back: S3 keys right
- * after the token, before the DNS provider pick and its zone lookup. An HA
- * deploy's standby question is the one thing between them: its default is
- * priced from the catalog the token unlocks.
+ * The region select shows each location's monthly price and pre-selects the
+ * cheapest one on the default continent, and a live price needs the API
+ * token, so the region comes after the token. The standby default is priced
+ * from that region, so it comes next. The S3 keys come after both, because
+ * the object-storage endpoint follows the region. This ends the old "token
+ * and S3 keys back to back" order on purpose: the region and standby prompts
+ * are one Enter each in the common case, and a run with a region on record
+ * asks neither.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -80,6 +84,10 @@ describe('deploy wizard credential order', () => {
         events.push('dns-provider');
         return 'manual';
       }
+      if (message === 'Region:') {
+        events.push('region');
+        return 'hil';
+      }
       if (message === 'Standby region (HA failover target):') {
         events.push('standby-region');
         return 'ash';
@@ -95,7 +103,23 @@ describe('deploy wizard credential order', () => {
     clackMock.log.error.mockClear();
   });
 
-  it('asks for the S3 keys right after the API token, before the DNS provider', async () => {
+  it('asks for the region after the API token, then the S3 keys, then the DNS provider', async () => {
+    await gatherDeploymentConfig({ env: 'prod', provider: 'hetzner', compose: true });
+    expect(events).toEqual(['api-token', 'region', 's3-credentials', 'dns-provider']);
+  });
+
+  it('HA asks for the region, then the standby, between the API token and the S3 keys', async () => {
+    await gatherDeploymentConfig({ env: 'prod', provider: 'hetzner', compose: true, ha: true });
+    expect(events).toEqual([
+      'api-token',
+      'region',
+      'standby-region',
+      's3-credentials',
+      'dns-provider',
+    ]);
+  });
+
+  it('with -region there is no region question: the S3 keys follow the API token', async () => {
     await gatherDeploymentConfig({
       env: 'prod',
       provider: 'hetzner',

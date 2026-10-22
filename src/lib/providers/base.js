@@ -970,6 +970,15 @@ export class BaseProvider {
   static IPV4_MONTHLY = null;
 
   /**
+   * The currency symbol this provider's prices (`priceFor`, `IPV4_MONTHLY`)
+   * are in, for the prices the CLI prints (src/lib/sizing.js formatMonthly).
+   * Each provider states it; null here, so a provider that forgets fails the
+   * provider contract instead of printing a wrong symbol.
+   * @type {string|null}
+   */
+  static CURRENCY = null;
+
+  /**
    * Monthly server prices captured by fetchServerTypes from the payload it
    * already reads: `{ [type]: { [location]: number|null } }`, or
    * `{ [type]: number|null }` where the provider's prices are the same in

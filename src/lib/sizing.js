@@ -272,6 +272,44 @@ export function rankStandbyLocations(Provider, locations, roles, primaryTypes = 
   });
 }
 
+/**
+ * A monthly price as the CLI prints it: the provider's currency symbol
+ * (`Provider.CURRENCY`) and the amount to the cent, e.g. `$7.09` or
+ * `€18.39`.
+ *
+ * @param {object} Provider - a provider class
+ * @param {number} monthly
+ * @returns {string}
+ */
+export function formatMonthly(Provider, monthly) {
+  return `${Provider.CURRENCY}${monthly.toFixed(2)}`;
+}
+
+/**
+ * The region a new project pre-selects: the cheapest location for `roles` on
+ * the continent of `Provider.DEFAULT_REGION`, ranked by `rankLocationsByPrice`
+ * (so it always agrees with the prices the region prompt shows). Ties keep
+ * the default region; another continent is never picked. The default region
+ * stands when no live catalog is loaded or nothing on its continent can place
+ * every role (the deploy then refuses at type resolution, naming why).
+ *
+ * @param {object} Provider - a provider class
+ * @param {string[]} roles - e.g. ['compose'] or ['master', 'db', 'worker']
+ * @returns {string}
+ */
+export function cheapestDefaultRegion(Provider, roles) {
+  const fallback = Provider.DEFAULT_REGION;
+  if (!Provider._locationTypes) return fallback;
+  const continentOf = Provider.REGION_CONTINENT ?? {};
+  const continent = continentOf[fallback];
+  if (!continent) return fallback;
+  const sameContinent = [
+    fallback,
+    ...Object.keys(Provider.REGIONS).filter((r) => r !== fallback && continentOf[r] === continent),
+  ];
+  return rankLocationsByPrice(Provider, sameContinent, roles)[0]?.location ?? fallback;
+}
+
 /** Rank `setAt(location)` results cheapest first; see rankLocationsByPrice. */
 function rankSets(locations, setAt) {
   const ranked = [];

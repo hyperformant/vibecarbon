@@ -254,6 +254,9 @@ export class DigitalOceanProvider extends BaseProvider {
   // (digitalocean.com/pricing/droplets, read 2026-10-22).
   static IPV4_MONTHLY = 0;
 
+  // Prices are in USD.
+  static CURRENCY = '$';
+
   static DEFAULT_TYPE = 's-2vcpu-4gb';
 
   // ── Engine-literal statics (mirrors HetznerProvider's C7b/C7c fields) ──
