@@ -895,6 +895,68 @@ function standbyTypesRecord(existingHa, types) {
   };
 }
 
+/**
+ * The success save's per-side k8s-ha record: each cluster's IPs, region,
+ * stack identity and the server types it ACTUALLY deployed with, plus the
+ * pilot standby's worker spec. Exported for tests.
+ *
+ * @param {{primary: object, standby: object}} deployResult - the fan-out's per-side results
+ * @param {{region: string, secondaryRegion: string, minWorkers?: number}} fallback
+ * @returns {{primary: object, standby: object, standbyWorkerSpec: object}}
+ */
+export function haSidesRecord(deployResult, { region, secondaryRegion, minWorkers }) {
+  return {
+    primary: {
+      masterIp: deployResult.primary.masterIp,
+      floatingIp: deployResult.primary.floatingIp,
+      dbIp: deployResult.primary.dbIp,
+      // The database node's PRIVATE IP — the local WireGuard-relay
+      // endpoint the failover/restore re-seed dials (deterministic
+      // 10.0.1.2 in the IaC program; persisted so identifyServers
+      // can surface it without hardcoding).
+      dbPrivateIp: deployResult.primary.dbPrivateIp,
+      // The region + server types this side ACTUALLY deployed to,
+      // from the fan-out result (fall back to the options value only
+      // if absent). A failover/scale converge reads these back for the
+      // stack's Pulumi `location` and current server types, so they
+      // must reflect the deployed reality, not the (possibly swapped)
+      // options-level flags or the shared primary types.
+      region: deployResult.primary.region ?? region,
+      masterServerType: deployResult.primary.masterServerType,
+      dbServerType: deployResult.primary.dbServerType,
+      // The standby's worker is recorded in standbyWorkerSpec below; a
+      // failover swaps the two worker records with the roles.
+      workerServerType: deployResult.primary.workerServerType,
+      // Task 6/7: cluster identity (Pulumi stack name). A redeploy
+      // reads THIS back as `envConfig.ha.primary.stack` (see the
+      // haStacks derivation above, ~line 702) so a post-failover
+      // redeploy follows the role↔stack mapping instead of
+      // re-birthing the `${environment}-primary` default.
+      stack: deployResult.primary.stack,
+    },
+    standby: {
+      masterIp: deployResult.standby.masterIp,
+      floatingIp: deployResult.standby.floatingIp,
+      dbIp: deployResult.standby.dbIp,
+      dbPrivateIp: deployResult.standby.dbPrivateIp,
+      region: deployResult.standby.region ?? secondaryRegion,
+      // The standby's region-resolved types (may differ from the
+      // primary's) — provisionStandbyCapacity pins them so a failover
+      // converge never resizes the standby's master/db node.
+      masterServerType: deployResult.standby.masterServerType,
+      dbServerType: deployResult.standby.dbServerType,
+      stack: deployResult.standby.stack,
+    },
+    // Pilot-light failover config: what `vibecarbon failover` will
+    // provision (worker count/type) and bring up (app tier), derived
+    // from this deploy's own inputs — never hardcoded in failover.
+    standbyWorkerSpec: {
+      count: minWorkers ?? 1,
+      serverType: deployResult.standby.workerServerType,
+    },
+  };
+}
+
 export async function executeDeployment(args, gatheredConfig) {
   // Arm the silent-success guard FIRST. If this function's awaited work never
   // settles (2026-07-07 k8s-ha RCA: a standby deployK3s promise dangled and Node
@@ -2695,51 +2757,7 @@ export async function executeDeployment(args, gatheredConfig) {
           // leaves it unset, so an unplanned failover refuses until one does.
           ...haSeedRecord(deployResult),
           ...(deployResult.primary && {
-            primary: {
-              masterIp: deployResult.primary.masterIp,
-              floatingIp: deployResult.primary.floatingIp,
-              dbIp: deployResult.primary.dbIp,
-              // The database node's PRIVATE IP — the local WireGuard-relay
-              // endpoint the failover/restore re-seed dials (deterministic
-              // 10.0.1.2 in the IaC program; persisted so identifyServers
-              // can surface it without hardcoding).
-              dbPrivateIp: deployResult.primary.dbPrivateIp,
-              // The region + server types this side ACTUALLY deployed to,
-              // from the fan-out result (fall back to the options value only
-              // if absent). A failover/scale converge reads these back for the
-              // stack's Pulumi `location` and current server types, so they
-              // must reflect the deployed reality, not the (possibly swapped)
-              // options-level flags or the shared primary types.
-              region: deployResult.primary.region ?? region,
-              masterServerType: deployResult.primary.masterServerType,
-              dbServerType: deployResult.primary.dbServerType,
-              // Task 6/7: cluster identity (Pulumi stack name). A redeploy
-              // reads THIS back as `envConfig.ha.primary.stack` (see the
-              // haStacks derivation above, ~line 702) so a post-failover
-              // redeploy follows the role↔stack mapping instead of
-              // re-birthing the `${environment}-primary` default.
-              stack: deployResult.primary.stack,
-            },
-            standby: {
-              masterIp: deployResult.standby.masterIp,
-              floatingIp: deployResult.standby.floatingIp,
-              dbIp: deployResult.standby.dbIp,
-              dbPrivateIp: deployResult.standby.dbPrivateIp,
-              region: deployResult.standby.region ?? secondaryRegion,
-              // The standby's region-resolved types (may differ from the
-              // primary's) — provisionStandbyCapacity pins them so a failover
-              // converge never resizes the standby's master/db node.
-              masterServerType: deployResult.standby.masterServerType,
-              dbServerType: deployResult.standby.dbServerType,
-              stack: deployResult.standby.stack,
-            },
-            // Pilot-light failover config: what `vibecarbon failover` will
-            // provision (worker count/type) and bring up (app tier), derived
-            // from this deploy's own inputs — never hardcoded in failover.
-            standbyWorkerSpec: {
-              count: minWorkers ?? 1,
-              serverType: deployResult.standby.workerServerType,
-            },
+            ...haSidesRecord(deployResult, { region, secondaryRegion, minWorkers }),
             scaleUpList: deriveScaleUpList({
               appManifestText: readFileSync(
                 join(process.cwd(), 'k8s/base/app/deployment.yaml'),

@@ -13,9 +13,12 @@
  * before this deploy: each side's stack identity and region (only when both
  * sides carry a stack, the role mapping failover persists), and its recorded
  * master and db types (whether or not a stack exists yet: a first deploy that
- * failed after the skeleton save has types but no stack). The standby's
- * worker type comes from `ha.standbyWorkerSpec`. A failover swaps
- * `ha.primary` and `ha.standby` wholesale, so the record follows the role.
+ * failed after the skeleton save has types but no stack). The primary's
+ * worker type is `ha.primary.workerServerType`; the standby's is
+ * `ha.standbyWorkerSpec.serverType`, the one record failover brings the
+ * standby's workers up from and `scale -type` updates. A failover swaps
+ * `ha.primary` and `ha.standby` wholesale and moves the worker records with
+ * them (failover.js swapHaRoles), so the record follows the role.
  *
  * @param {object|undefined} envConfig
  * @returns {{primary: object, standby: object}|null} null when the env has no ha record
@@ -31,7 +34,7 @@ export function haStacksFrom(envConfig) {
     ...(workerServerType ? { workerServerType } : {}),
   });
   return {
-    primary: side(ha.primary),
+    primary: side(ha.primary, ha.primary?.workerServerType),
     standby: side(ha.standby, ha.standbyWorkerSpec?.serverType),
   };
 }

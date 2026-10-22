@@ -135,6 +135,18 @@ async function haK8sProvisionClusters(ctx) {
 
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(options);
+  // The primary's types: what this env has on record for the primary side
+  // (after a failover that is the old standby, sized for its own location),
+  // unless `deploy -server-type` asked for new sizes; else the deploy's
+  // top-level types. The top-level types describe the side that was primary
+  // at the first deploy, so after a failover they may not be sold where the
+  // new primary runs.
+  const primaryRecord = options.serverTypeRequested ? {} : (options.haStacks?.primary ?? {});
+  const primaryMasterType =
+    primaryRecord.masterServerType || options.masterServerType || options.serverType;
+  const primaryDbType = primaryRecord.dbServerType || options.dbServerType || options.serverType;
+  const primaryWorkerType =
+    primaryRecord.workerServerType || options.workerServerType || options.serverType;
   // The standby's types: what this env has on record for the standby side
   // (a redeploy never resizes or refuses an existing env), unless
   // `deploy -server-type` asked for new sizes; else each primary type where
@@ -145,11 +157,7 @@ async function haK8sProvisionClusters(ctx) {
   const standby = k8sStandbyTypes({
     Provider,
     standbyRegion,
-    primary: {
-      master: options.masterServerType || options.serverType,
-      db: options.dbServerType || options.serverType,
-      worker: options.workerServerType || options.serverType,
-    },
+    primary: { master: primaryMasterType, db: primaryDbType, worker: primaryWorkerType },
     recorded: options.haStacks?.standby,
     requested: options.serverTypeRequested,
   });
@@ -181,9 +189,9 @@ async function haK8sProvisionClusters(ctx) {
   }
 
   if (
-    standbyMasterType !== options.masterServerType ||
-    standbyDbType !== options.dbServerType ||
-    standbyWorkerType !== options.workerServerType
+    standbyMasterType !== primaryMasterType ||
+    standbyDbType !== primaryDbType ||
+    standbyWorkerType !== primaryWorkerType
   ) {
     p.log.info(
       `Standby server types adjusted for ${standbyRegion}: ` +
@@ -269,6 +277,11 @@ async function haK8sProvisionClusters(ctx) {
       region: primaryRegion,
       environment: primaryEnv,
       state: primaryState,
+      ...(primaryMasterType ? { masterServerType: primaryMasterType } : {}),
+      ...(primaryDbType ? { dbServerType: primaryDbType } : {}),
+      ...(primaryWorkerType
+        ? { workerServerType: primaryWorkerType, serverType: primaryWorkerType }
+        : {}),
       sharedSshKeyPath,
       sharedSshPublicKey,
       sharedSshKeyId,
@@ -477,11 +490,9 @@ async function haK8sProvisionClusters(ctx) {
     ...primaryResult,
     stack: primaryEnv,
     region: primaryRegion,
-    masterServerType:
-      options.masterServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
-    dbServerType: options.dbServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
-    workerServerType:
-      options.workerServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
+    masterServerType: primaryMasterType || Provider.DEFAULT_K8S_NODE_TYPE,
+    dbServerType: primaryDbType || Provider.DEFAULT_K8S_NODE_TYPE,
+    workerServerType: primaryWorkerType || Provider.DEFAULT_K8S_NODE_TYPE,
   };
   ctx.standbyResult = {
     ...standbyResult,

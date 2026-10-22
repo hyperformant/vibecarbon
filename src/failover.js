@@ -1662,9 +1662,12 @@ function swapServerRoles(servers) {
  * Swaps ha.primary↔ha.standby WHOLESALE — the objects carry their own stack +
  * region + IP fields, which ride along — and the top-level region↔secondaryRegion.
  * Flags the env `replication: 'degraded'` / `degraded: true`: honest until a
- * reconverge deploy re-establishes streaming from the NEW primary. The
- * role-agnostic pilot config (standbyWorkerSpec, scaleUpList) is preserved
- * untouched — it describes whatever cluster is currently the standby.
+ * reconverge deploy re-establishes streaming from the NEW primary. The worker
+ * types swap with the roles: the new primary's is the old standby's
+ * `standbyWorkerSpec.serverType`, and `standbyWorkerSpec.serverType` becomes
+ * the old primary's (`ha.primary.workerServerType`, else the env's top-level
+ * `workerServerType` for a record that predates it), so neither side is handed
+ * a type its location may not sell. scaleUpList is role-agnostic and stays.
  *
  * Patches the FRESH project config under the config lock (never a stale
  * in-memory envConfig — the deploy paths save mid-flight). Exported for tests.
@@ -1679,8 +1682,17 @@ export function swapHaRoles(envName, { override } = {}) {
     if (!envConfig?.ha?.primary || !envConfig.ha.standby) return;
     swapped = true;
     const ha = envConfig.ha;
+    const primaryWorker = ha.primary.workerServerType || envConfig.workerServerType;
+    const standbyWorker = ha.standbyWorkerSpec?.serverType;
     // Swap the role objects wholesale (stack / region / IP fields ride along).
     [ha.primary, ha.standby] = [ha.standby, ha.primary];
+    // The worker records follow the roles. The standby's worker record is
+    // standbyWorkerSpec alone, so the old primary's moves there.
+    delete ha.standby.workerServerType;
+    if (standbyWorker) ha.primary.workerServerType = standbyWorker;
+    if (primaryWorker && ha.standbyWorkerSpec) {
+      ha.standbyWorkerSpec = { ...ha.standbyWorkerSpec, serverType: primaryWorker };
+    }
     // servers[] records the same roles; resolvePrimary refuses a config whose
     // two records disagree. db, worker and master entries carry other roles.
     envConfig.servers = swapServerRoles(envConfig.servers);

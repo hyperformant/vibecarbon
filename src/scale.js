@@ -3082,16 +3082,29 @@ async function scaleUpdateK8sConfig(ctx) {
       // would still provision the OLD worker type even after an operator
       // scaled the live cluster to the new one. Spread envConfig.ha first so
       // the role↔stack mapping (primary/standby/.stack) and scaleUpList stay
-      // untouched — only standbyWorkerSpec.serverType changes.
+      // untouched — only the worker spec and the primary's types change.
+      // The primary's own record (ha.primary.*ServerType) takes the new types
+      // too: a redeploy builds the primary from it, so a stale record would
+      // undo this scale.
       ...(isHA &&
-        newValues.workerType &&
-        envConfig.ha && {
+        envConfig.ha &&
+        (newValues.workerType || newValues.masterType || newValues.dbType) && {
           ha: {
             ...envConfig.ha,
-            standbyWorkerSpec: {
-              ...envConfig.ha.standbyWorkerSpec,
-              serverType: newValues.workerType,
-            },
+            ...(envConfig.ha.primary && {
+              primary: {
+                ...envConfig.ha.primary,
+                ...(newValues.masterType && { masterServerType: newValues.masterType }),
+                ...(newValues.dbType && { dbServerType: newValues.dbType }),
+                ...(newValues.workerType && { workerServerType: newValues.workerType }),
+              },
+            }),
+            ...(newValues.workerType && {
+              standbyWorkerSpec: {
+                ...envConfig.ha.standbyWorkerSpec,
+                serverType: newValues.workerType,
+              },
+            }),
           },
         }),
     };

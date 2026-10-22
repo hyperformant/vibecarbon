@@ -344,6 +344,42 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
     expect(savedEnv.workerServerType).toBe('cx33');
   });
 
+  it("a type scale updates the primary's own record, so a redeploy (which builds the primary from it) keeps the scale", async () => {
+    const envConfig = {
+      masterServerType: 'cx22',
+      dbServerType: 'cx22',
+      workerServerType: 'cx22',
+      ha: {
+        primary: {
+          stack: 'prod-primary',
+          masterServerType: 'cx22',
+          dbServerType: 'cx22',
+          workerServerType: 'cx22',
+        },
+        standby: { stack: 'prod-standby', masterServerType: 'cpx22' },
+        standbyWorkerSpec: { count: 1, serverType: 'cx22' },
+      },
+    };
+    const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    store.reset(projectConfig);
+    await SCALE_EFFECTS.scaleUpdateK8sConfig({
+      environment: 'prod',
+      envConfig,
+      projectConfig,
+      newValues: { masterType: 'cx33', dbType: 'cx43' },
+      isHA: true,
+    });
+    const ha = (store.state.writes[0] as { environments: ConfigJson }).environments.prod.ha;
+    expect(ha.primary).toEqual({
+      stack: 'prod-primary',
+      masterServerType: 'cx33',
+      dbServerType: 'cx43',
+      workerServerType: 'cx22',
+    });
+    expect(ha.standby).toEqual({ stack: 'prod-standby', masterServerType: 'cpx22' });
+    expect(ha.standbyWorkerSpec).toEqual({ count: 1, serverType: 'cx22' });
+  });
+
   it('does not add an ha block for non-HA environments', async () => {
     const envConfig = { workerServerType: 'cx22' };
     const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
