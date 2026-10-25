@@ -86,6 +86,7 @@ const NON_PNPM_WORKFLOWS = [
   join('.github', 'workflows', 'publish-db-image-dev.yml'),
   join('.github', 'workflows', 'publish-db-image.yml'),
   join('.github', 'workflows', 'publish-images.yml'),
+  join('.github', 'workflows', 'publish-node-runtime-image.yml'),
   // CodeQL runs prebuilt analysis actions only — no Node, no pnpm.
   join('.github', 'workflows', 'codeql.yml'),
   // Scorecard runs prebuilt analysis actions only — no Node, no pnpm.
