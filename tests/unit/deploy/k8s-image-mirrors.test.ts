@@ -33,8 +33,8 @@
  *  (e) the workflow mirrors exactly the set, via the same generator this test runs.
  */
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
-import { extname, join, relative, sep } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { extname, join, sep } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import {
@@ -574,7 +574,12 @@ describe('every consuming reference resolves through the mirror', () => {
     // (Docs and plans are excluded on purpose: they narrate the incidents and
     // MUST be free to name the upstream refs.)
     const offenders: string[] = [];
-    for (const rel of sweepFiles()) {
+    const files = sweepFiles();
+    // Not vacuous: the listing reaches the manifests and the deploy code.
+    expect(files).toContain(join('carbon', 'k8s', 'base', 'db', 'statefulset.yaml'));
+    expect(files).toContain(join('src', 'lib', 'deploy', 'k8s', 'k3s.js'));
+    expect(files.some((f) => f.split(sep).includes('node_modules'))).toBe(false);
+    for (const rel of files) {
       if (rel === join('src', 'lib', 'images.js')) continue;
       read(rel)
         .split('\n')
@@ -793,20 +798,19 @@ function compareVersions(a: string, b: string): number {
 /**
  * Every deploy-facing source file, for the registry.k8s.io sweep above. Unit
  * tests are excluded (this file names the upstream refs in its own fixture);
- * docs and plans are excluded because they narrate the incidents.
+ * docs and plans are excluded because they narrate the incidents. Listed by
+ * git (tracked plus untracked-not-ignored), so a new file is swept before its
+ * first commit and carbon/node_modules is never walked.
  */
 function sweepFiles(): string[] {
-  const dirs = ['src', 'carbon', 'scripts', join('tests', 'e2e'), join('.github', 'workflows')];
+  const dirs = ['src', 'carbon', 'scripts', 'tests/e2e', '.github/workflows'];
   const exts = new Set(['.js', '.mjs', '.ts', '.yaml', '.yml', '.json', '.sh']);
-  const files: string[] = [];
-  for (const dir of dirs) {
-    for (const entry of readdirSync(join(ROOT, dir), { recursive: true, withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      const rel = relative(ROOT, join(entry.parentPath, entry.name));
-      if (rel.split(sep).includes('node_modules')) continue;
-      if (!exts.has(extname(entry.name))) continue;
-      files.push(rel);
-    }
-  }
-  return files;
+  return execFileSync(
+    'git',
+    ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...dirs],
+    { cwd: ROOT, encoding: 'utf-8' },
+  )
+    .split('\n')
+    .filter((rel) => rel && exts.has(extname(rel)) && existsSync(join(ROOT, rel)))
+    .map((rel) => rel.split('/').join(sep));
 }

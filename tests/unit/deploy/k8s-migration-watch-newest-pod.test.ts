@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { ADMIN_PROBE_EXIT } from '../../../src/lib/deploy/admin-ready.js';
 import {
   APP_POD_SELECTOR,
+  failedMigrateExitCode,
   newestAppPod,
   watchAppMigrationFailure,
 } from '../../../src/lib/deploy/k8s/readiness.js';
@@ -143,6 +144,55 @@ describe('watchAppMigrationFailure probes the rollout pod, not deploy/app', () =
       },
     });
     expect(calls.filter((a) => a.includes('pod/app-new-1') && a.includes('exec'))).toHaveLength(3);
+  });
+
+  it("rejects at once when the new pod's migrate init container exited non-zero", async () => {
+    const failing = pod('app-new-1', 'new', '2026-10-16T05:10:00Z');
+    Object.assign(failing, {
+      status: {
+        initContainerStatuses: [
+          {
+            name: 'migrate',
+            state: { waiting: { reason: 'CrashLoopBackOff' } },
+            lastState: { terminated: { exitCode: 1 } },
+          },
+        ],
+      },
+    });
+    const { exec, calls } = cluster({
+      sets: [rs(2, 'new')],
+      pods: [failing],
+      execExit: {},
+    });
+    const controller = new AbortController();
+    await expect(
+      watchAppMigrationFailure({
+        env: {},
+        signal: controller.signal,
+        exec,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(
+      /migrate init container exited 1 \(pod app-new-1\)[\s\S]*logs of pod\/app-new-1/,
+    );
+    const logs = calls.find((a) => a.includes('logs'));
+    expect(logs).toEqual(expect.arrayContaining(['-c', 'migrate', '--previous']));
+    // The app container never ran, so it is never probed.
+    expect(calls.some((a) => a.includes('exec'))).toBe(false);
+  });
+
+  it('a migrate init container that is still running or exited 0 is not a failure', () => {
+    const running = {
+      status: { initContainerStatuses: [{ name: 'migrate', state: { running: {} } }] },
+    };
+    const done = {
+      status: {
+        initContainerStatuses: [{ name: 'migrate', state: { terminated: { exitCode: 0 } } }],
+      },
+    };
+    expect(failedMigrateExitCode(running)).toBeNull();
+    expect(failedMigrateExitCode(done)).toBeNull();
+    expect(failedMigrateExitCode(null)).toBeNull();
   });
 
   it('a failing ReplicaSet lookup is "no pod yet", never a migration failure', async () => {

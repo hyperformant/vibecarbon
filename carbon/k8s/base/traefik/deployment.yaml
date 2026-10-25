@@ -38,6 +38,8 @@ spec:
         - --ping=true
         - --log.level=INFO
         - --accesslog=true
+        - --accesslog.format=json
+        - --accesslog.fields.names.RequestPath=drop
         ports:
         - containerPort: 80
           name: web

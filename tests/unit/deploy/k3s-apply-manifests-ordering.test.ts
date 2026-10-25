@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -52,6 +52,8 @@ let cmdCalls: string[][] = [];
 // argv-only calls; runCommandAsync writes stdin synchronously after spawn
 // returns, so no other spawn can slip in between.
 let stdinCalls: { argv: string[]; data: string; seq: number }[] = [];
+// Per-Secret resourceVersion stdout; unset = "1", an empty string is unreadable.
+let secretVersionOut: Record<string, string> = {};
 // A manual gate the `docker push` child's exit waits on (concurrency test).
 let pushGate: { promise: Promise<void>; release: () => void } | null = null;
 // Exit code/stderr the `docker push` child settles with.
@@ -66,6 +68,9 @@ let webhookWaitExit = 0;
 // short-circuit test.
 let appProbeExit = 0;
 let rolloutHangs = false;
+// The rendered registry manifest as `kubectl apply -k <rendered base>` saw it
+// (the rendered copy is removed right after the apply).
+let registryAtBaseApply: string | null = null;
 
 function makeGate() {
   let release!: () => void;
@@ -162,6 +167,13 @@ function installSpawnMock() {
     cmdCalls.push([cmd, ...(args ?? [])]);
     const argv = args ?? [];
     const full = [cmd, ...argv];
+    if (cmd === 'kubectl' && argv.includes('apply') && argv.includes('-k')) {
+      const target = String(argv[argv.indexOf('-k') + 1]);
+      const registry = join(target, 'registry', 'local-registry.yaml');
+      if (/k8s-base/.test(target) && existsSync(registry)) {
+        registryAtBaseApply = readFileSync(registry, 'utf-8');
+      }
+    }
     if (
       cmd === 'kubectl' &&
       argv.includes('get') &&
@@ -230,6 +242,18 @@ function installSpawnMock() {
     }
     // The migration watch resolves the rollout's newest pod first
     // (readiness.js newestAppPod): one current ReplicaSet, one pod.
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('get') &&
+      argv.includes('secret') &&
+      argv.includes('jsonpath={.metadata.resourceVersion}')
+    ) {
+      const name = String(argv[argv.indexOf('secret') + 1]);
+      return fakeChild({
+        stdout: secretVersionOut[name] ?? '1',
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
+    }
     if (cmd === 'kubectl' && argv.includes('get') && argv.includes('replicasets')) {
       return fakeChild({ stdout: APP_RS_JSON, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
@@ -273,7 +297,7 @@ function installSpawnMock() {
   }) as unknown as typeof spawn);
 }
 
-function makeProjectDir({ withObservability = false } = {}) {
+function makeProjectDir({ withObservability = false, withRegistry = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vc-k3s-apply-'));
   // renderK8sBase refuses a base without the db StatefulSet, so the project
   // carries the real one, as `create` lays it down.
@@ -283,6 +307,16 @@ function makeProjectDir({ withObservability = false } = {}) {
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
     readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
   );
+  if (withRegistry) {
+    mkdirSync(join(dir, 'k8s', 'base', 'registry'), { recursive: true });
+    writeFileSync(
+      join(dir, 'k8s', 'base', 'registry', 'local-registry.yaml'),
+      readFileSync(
+        join(__dirname, '../../../carbon/k8s/base/registry/local-registry.yaml'),
+        'utf-8',
+      ),
+    );
+  }
   if (withObservability) {
     // The isolated observability stack applies via `kubectl apply -k
     // k8s/base/observability` only when this dir exists (present after
@@ -482,6 +516,39 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
           a.some((x) => /k8s-base/.test(String(x))),
       ),
     ).toBe(true);
+  });
+});
+
+describe("applyK3sManifests binds the registry hostPort to the deploy's master private IP", () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    pushGate = null;
+    pushExit = { code: 0, stderr: '' };
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    registryAtBaseApply = null;
+    installSpawnMock();
+  });
+
+  it('renders hostIP from masterPrivateIp into the applied base (DO-shaped address)', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests({
+      ...baseArgs(makeProjectDir({ withRegistry: true })),
+      imageTag: '10.10.0.7:5000/proj:abc-20260101000000',
+      masterPrivateIp: '10.10.0.7',
+    });
+    expect(registryAtBaseApply).toMatch(/hostIP: "10\.10\.0\.7"/);
+    expect(registryAtBaseApply).not.toContain('{{MASTER_PRIVATE_IP}}');
+  });
+
+  it('refuses to apply the base when masterPrivateIp is missing', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await expect(
+      applyK3sManifests(baseArgs(makeProjectDir({ withRegistry: true }))),
+    ).rejects.toThrow(/MASTER_PRIVATE_IP/);
+    expect(registryAtBaseApply).toBeNull();
   });
 });
 
@@ -1222,7 +1289,7 @@ describe('postgres accepting-gate precedes the first psql (cluster 5 root fix)',
 
 describe('applyK3sManifests — waits for the app to report its super admin', () => {
   // The app creates the super admin itself at startup from ADMIN_EMAIL /
-  // ADMIN_PASSWORD (delivered via vibecarbon-secrets). The deploy's job is
+  // ADMIN_PASSWORD (delivered via vibecarbon-app-secrets). The deploy's job is
   // to ship those keys and then not report success until the app says the
   // admin is ready, so the operator can always sign in to what was deployed.
   beforeEach(() => {
@@ -1284,15 +1351,39 @@ describe('applyK3sManifests — waits for the app to report its super admin', ()
     expect(cmdCalls.some((a) => a.includes('-tAc'))).toBe(false);
   }, 15_000);
 
-  it('ships the session secret and the admin credentials in vibecarbon-secrets', async () => {
+  it('ships the session secret and the admin credentials in vibecarbon-app-secrets', async () => {
     const { applyK3sManifests } = await k3sPromise;
     await applyK3sManifests(baseArgs(makeProjectDir()));
 
-    const secret = stdinCalls.find((c) => c.data.includes('name: vibecarbon-secrets'));
-    expect(secret, 'vibecarbon-secrets apply missing').toBeDefined();
+    const secret = stdinCalls.find((c) => c.data.includes('name: vibecarbon-app-secrets'));
+    expect(secret, 'vibecarbon-app-secrets apply missing').toBeDefined();
+    const infra = stdinCalls.find((c) => c.data.includes('name: vibecarbon-infra-secrets'));
+    expect(infra, 'vibecarbon-infra-secrets apply missing').toBeDefined();
+    expect(infra?.data).not.toMatch(/\bBETTER_AUTH_SECRET:/);
     for (const key of ['BETTER_AUTH_SECRET', 'ADMIN_EMAIL', 'ADMIN_PASSWORD']) {
       expect(secret?.data, key).toMatch(new RegExp(`\\b${key}:`));
     }
+  });
+
+  it('deletes the pre-split vibecarbon-secrets Secret only after the app rollout', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+
+    const rolloutIdx = cmdCalls.findIndex(
+      (a) => a[0] === 'kubectl' && a.includes('rollout') && a.includes('deployment/app'),
+    );
+    const deleteIdx = cmdCalls.findIndex(
+      (a) =>
+        a[0] === 'kubectl' &&
+        a.includes('delete') &&
+        a.includes('secret') &&
+        a.includes('vibecarbon-secrets'),
+    );
+    expect(rolloutIdx, 'app rollout status missing').toBeGreaterThan(-1);
+    expect(deleteIdx, 'old Secret delete missing').toBeGreaterThan(rolloutIdx);
+    const del = cmdCalls[deleteIdx];
+    expect(del).toContain('--ignore-not-found');
+    expect(del.slice(del.indexOf('-n'), del.indexOf('-n') + 2)).toEqual(['-n', 'vibecarbon']);
   });
 });
 
@@ -1404,5 +1495,104 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     });
 
     expect(findS3EgressVpcApply()).toBeUndefined();
+  });
+});
+
+describe('a changed app Secret rolls deployment/app', () => {
+  // `set image` to the same tag is a no-op, and envFrom is read at container
+  // start, so a re-minted storage key or a rotated APP_DB_PASSWORD never
+  // reached the running pods (and the old key was then revoked under them).
+  // The pod template carries the resourceVersions of the Secrets the pod
+  // reads, read back after they are applied: any change rolls the pods and
+  // reruns migrate, an unchanged apply leaves the versions alone, and no
+  // secret value is ever hashed.
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    pushGate = null;
+    pushExit = { code: 0, stderr: '' };
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    secretVersionOut = {
+      'vibecarbon-app-secrets': '4101',
+      'vibecarbon-infra-secrets': '4102',
+    };
+    installSpawnMock();
+  });
+  afterEach(() => {
+    secretVersionOut = {};
+  });
+
+  const appPatches = () =>
+    cmdCalls.filter(
+      (a) => a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app'),
+    );
+  const rvReads = () =>
+    cmdCalls.filter(
+      (a) =>
+        a[0] === 'kubectl' &&
+        a.includes('secret') &&
+        a.includes('jsonpath={.metadata.resourceVersion}'),
+    );
+
+  it('points both containers at the image and stamps the Secret versions in one patch', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const args = baseArgs(makeProjectDir());
+    await applyK3sManifests(args);
+    expect(
+      cmdCalls.some(
+        (a) => a.includes('set') && a.includes('image') && a.includes('deployment/app'),
+      ),
+    ).toBe(false);
+    const patches = appPatches();
+    expect(patches).toHaveLength(1);
+    const body = JSON.parse(String(patches[0][patches[0].indexOf('-p') + 1]));
+    expect(body.spec.template.metadata.annotations['vibecarbon.dev/app-secrets-sha']).toBe(
+      'app:4101,infra:4102',
+    );
+    expect(body.spec.template.spec.containers).toEqual([{ name: 'app', image: args.imageTag }]);
+    expect(body.spec.template.spec.initContainers).toEqual([
+      { name: 'migrate', image: args.imageTag },
+    ]);
+    // A version, never a value, on argv.
+    expect(patches[0].join(' ')).not.toContain(args.envLocal.BETTER_AUTH_SECRET);
+  });
+
+  it('reads the versions after both Secrets are applied, before the patch', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const secretApplySeqs = stdinCalls
+      .filter((c) => /kind: Secret/.test(c.data) || /"kind":\s*"Secret"/.test(c.data))
+      .map((c) => c.seq);
+    expect(secretApplySeqs.length).toBeGreaterThanOrEqual(2);
+    const reads = rvReads();
+    expect(reads.map((a) => a[a.indexOf('secret') + 1])).toEqual([
+      'vibecarbon-app-secrets',
+      'vibecarbon-infra-secrets',
+    ]);
+    const firstRead = cmdCalls.indexOf(reads[0]);
+    expect(firstRead).toBeGreaterThan(Math.max(...secretApplySeqs));
+    expect(firstRead).toBeLessThan(cmdCalls.indexOf(appPatches()[0]));
+  });
+
+  it('a bumped Secret version changes the annotation', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    secretVersionOut['vibecarbon-infra-secrets'] = '9999';
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const p = appPatches()[0];
+    const body = JSON.parse(String(p[p.indexOf('-p') + 1]));
+    expect(body.spec.template.metadata.annotations['vibecarbon.dev/app-secrets-sha']).toBe(
+      'app:4101,infra:9999',
+    );
+  });
+
+  it('an unreadable resourceVersion fails the deploy and never patches', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    secretVersionOut['vibecarbon-app-secrets'] = '';
+    await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
+      /resourceVersion of Secret\/vibecarbon-app-secrets/,
+    );
+    expect(appPatches()).toHaveLength(0);
   });
 });

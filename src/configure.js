@@ -94,6 +94,16 @@ export const SPEC = {
     '               and needs no Flux, so naming a Compose env just does the',
     '               workflows.',
     '',
+    'STORAGE SUBCOMMAND',
+    "  storage <env> Paste a second Hetzner object storage key for <env>'s app.",
+    '               The next deploy hands the app that key and fences it out',
+    '               of every other vibecarbon bucket. Optional: skip it and the',
+    '               app keeps sharing the deploy key. Linode and DigitalOcean',
+    '               mint a per-env key on their own, so there is nothing to paste.',
+    '  storage -forget <id>',
+    "               After you delete a replaced or destroyed env's pasted key in",
+    '               the console: stop denying it in the bucket fences.',
+    '',
     'CONFIGURABLE FEATURES',
     '  Providers, cloud/DNS credentials for deploys (written to .env.local; never committed, never shipped to servers)',
     '  Globalization Which languages the app ships (English only by default)',
@@ -135,6 +145,10 @@ export const SPEC = {
     {
       command: 'vibecarbon configure cicd prod',
       description: 'The same, plus Flux GitOps when prod is a k8s cluster',
+    },
+    {
+      command: 'vibecarbon configure storage prod',
+      description: "Give prod's app its own Hetzner storage key",
     },
   ],
 };
@@ -1586,10 +1600,35 @@ export async function runConfigureCicd(envName) {
         readOperatorVar(row.tokenEnv).value || '',
       ]),
     ),
-    s3AccessKey: readOperatorVar('HETZNER_ACCESS_KEY').value || '',
-    s3SecretKey: readOperatorVar('HETZNER_SECRET_KEY').value || '',
   };
   const imageTag = getImageTag(cwd);
+  // The app pod's object-storage pair, per environment: the env's own key
+  // where the provider scopes one (security plan R2), never the infra pair
+  // there. Read from what deploy recorded and stored; no mint here.
+  const { storedAppStoragePair, localAppStorageSecrets } = await import(
+    './lib/deploy/app-storage-credential.js'
+  );
+  const { getProviderClass } = await import('./lib/providers/index.js');
+  const storageProviderId = (envConfig.provider || 'hetzner').toLowerCase();
+  const [accessEnv, secretEnv] = getProviderClass(storageProviderId).OBJECT_STORAGE_ENV;
+  const infraStoragePair = {
+    accessKey: (accessEnv && readOperatorVar(accessEnv).value) || '',
+    secretKey: (secretEnv && readOperatorVar(secretEnv).value) || '',
+  };
+  let appStorage;
+  try {
+    // One app key per environment; both HA stacks run the same app.
+    appStorage = await storedAppStoragePair({
+      provider: storageProviderId,
+      environment: envName,
+      envConfig,
+      infraCredential: infraStoragePair,
+      secrets: localAppStorageSecrets(cwd),
+    });
+  } catch (err) {
+    p.log.error(err.message);
+    process.exit(1);
+  }
 
   // HA clusters split into <env>-primary and <env>-standby kubeconfigs;
   // each needs its own GitOps handover. The orchestrator used to iterate
@@ -1621,6 +1660,7 @@ export async function runConfigureCicd(envName) {
       networkId: subEnvConfig.networkId || envConfig.networkId,
       dnsProvider: subEnvConfig.dnsProvider || envConfig.dnsProvider,
       providerCreds,
+      appStorage,
       imageTag,
     });
   }
@@ -1632,11 +1672,114 @@ export async function runConfigureCicd(envName) {
 // RUN FUNCTION (called by CLI entry point)
 // ============================================================================
 
+/**
+ * `vibecarbon configure storage <env>`: the optional per-environment app
+ * storage key paste (security plan R2). Only a `paste-fence` provider
+ * (Hetzner) has anything to paste; the pair goes to `.env.local` under the
+ * env's own names (never `.env`), and the next deploy fences it.
+ * @param {string|undefined} envArg
+ */
+export async function runConfigureStorage(envArg) {
+  const cwd = process.cwd();
+  const projectConfig = assertInProjectDir(cwd);
+  introCommand('configure storage');
+  if (!envArg) {
+    p.log.error('Name the environment: vibecarbon configure storage <env>');
+    process.exit(1);
+  }
+  const envName = String(envArg).toLowerCase();
+  const recorded =
+    projectConfig.environments?.[envName] ?? projectConfig.destroyedEnvironments?.[envName];
+  if (!recorded?.provider) {
+    p.log.error(
+      `${envName} has not been deployed yet, so its provider is unknown. Deploy it once, then paste the key and deploy again.`,
+    );
+    process.exit(1);
+  }
+  const providerId = String(recorded.provider).toLowerCase();
+  const { getProviderClass } = await import('./lib/providers/index.js');
+  const S3Class = await getProviderClass(providerId).getObjectStorageProviderClass();
+  if (S3Class.appKeyScoping === 'mint') {
+    p.outro(
+      `${envName} needs no paste: every deploy mints its app a key limited to its own bucket.`,
+    );
+    return;
+  }
+  if (S3Class.appKeyScoping !== 'paste-fence') {
+    p.outro(
+      `${envName}'s provider cannot scope a key to one bucket, so its app shares the deploy key. \`vibecarbon status\` shows why.`,
+    );
+    return;
+  }
+  const { promptAppStorageKey } = await import('./lib/deploy/prompts.js');
+  const { appStorageSecretKeys, localAppStorageSecrets } = await import(
+    './lib/deploy/app-storage-credential.js'
+  );
+  const pair = await promptAppStorageKey({
+    environment: envName,
+    projectName: projectConfig.projectName,
+  });
+  if (!pair) {
+    p.outro(`Skipped. ${envName}'s app keeps sharing the deploy key (storage access: shared).`);
+    return;
+  }
+  const names = appStorageSecretKeys(envName);
+  const secrets = localAppStorageSecrets(cwd);
+  secrets.set(names.accessKey, pair.accessKey);
+  secrets.set(names.secretKey, pair.secretKey);
+  p.outro(
+    `Saved to .env.local, never shipped. Run ${c.info(`vibecarbon deploy ${envName}`)} to hand the app this key and fence it.`,
+  );
+}
+
+/**
+ * `vibecarbon configure storage -forget <id>`: the operator's word that a
+ * retired pasted app storage key (projectConfig.retiredAppKeys) has been
+ * deleted in the console, so the fences may stop denying it. The next deploy
+ * of the project rewrites them. A key an environment still uses is refused.
+ * @param {string|undefined} id
+ */
+export async function runForgetAppStorageKey(id) {
+  const cwd = process.cwd();
+  const projectConfig = assertInProjectDir(cwd);
+  introCommand('configure storage');
+  if (!id) {
+    p.log.error('Name the key: vibecarbon configure storage -forget <access key id>');
+    process.exit(1);
+  }
+  const user = Object.entries(projectConfig.environments ?? {}).find(
+    ([, e]) => e?.s3?.appKey?.id === id,
+  );
+  if (user) {
+    p.log.error(
+      `${id} is still ${user[0]}'s app storage key, so it cannot be forgotten. Paste a replacement with \`vibecarbon configure storage ${user[0]}\` and deploy first.`,
+    );
+    process.exit(1);
+  }
+  const retired = projectConfig.retiredAppKeys ?? [];
+  if (!retired.includes(id)) {
+    p.outro(`${id} is not a retired app storage key here, so there is nothing to forget.`);
+    return;
+  }
+  const { saveProjectConfig } = await import('./lib/config.js');
+  const rest = retired.filter((k) => k !== id);
+  if (rest.length > 0) projectConfig.retiredAppKeys = rest;
+  else delete projectConfig.retiredAppKeys;
+  saveProjectConfig(projectConfig);
+  p.outro(
+    `Forgot ${id}. The next deploy that syncs the bucket fences (one with a pasted key in the project) takes it out of them; without one, the old deny stays, which does no harm to a deleted key. Make sure it is deleted in the Hetzner console.`,
+  );
+}
+
 export async function run(args) {
   // Subcommand routing: `vibecarbon configure cicd <env>` skips the
   // interactive feature menu and runs the GitOps add-on flow directly.
   if (args[0] === 'cicd') {
     return runConfigureCicd(args[1]);
+  }
+  if (args[0] === 'storage') {
+    if (args[1] === '-forget' || args[1] === '--forget') return runForgetAppStorageKey(args[2]);
+    return runConfigureStorage(args[1]);
   }
 
   // Direct-feature subcommands: `vibecarbon configure <feature> [provider]`

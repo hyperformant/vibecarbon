@@ -1,10 +1,10 @@
 # Non-secret runtime configuration consumed by the app and backup containers.
 # Committed to git; safe to reconcile via Flux.
 #
-# The vibecarbon-secrets Secret that used to live next to this file is
-# now created at deploy time — either by the vibecarbon CLI (imperative
+# The vibecarbon-app-secrets and vibecarbon-infra-secrets Secrets are
+# created at deploy time — either by the vibecarbon CLI (imperative
 # deploy) or by the GitHub Actions deploy workflow
-# (.github/workflows/deploy.yml, GitOps deploy). That Secret is NOT
+# (.github/workflows/deploy.yml, GitOps deploy). Those Secrets are NOT
 # reconciled by Flux — it's owned by field-manager=github-actions-deploy
 # (workflow) or field-manager=kubectl-client-side-apply (CLI), and Flux
 # leaves it alone. This lets us rotate secrets via `gh secret set --env

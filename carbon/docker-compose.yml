@@ -64,9 +64,9 @@ services:
     container_name: ${PROJECT_NAME}-app
     restart: unless-stopped
     # Make every configure-managed runtime key (billing/OAuth/SMTP) available to
-    # the app container. `create` writes .env and the deploy bundle stages it
-    # alongside this file; the `environment:` overrides below still take
-    # precedence over anything in .env.
+    # the app container in local dev. On a server the prod overlay swaps this
+    # for app.env, which holds only the app's own keys. The `environment:`
+    # overrides below still take precedence over either file.
     env_file:
       - .env
     security_opt:
@@ -84,17 +84,31 @@ services:
       # The prod overlay refuses to start without it.
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-}
       - BETTER_AUTH_URL=${SITE_URL:-http://localhost:5173}
-      # The API server talks to Postgres directly (src/server/db/client.ts).
-      # These win over .env, whose DB_HOST=localhost is for local dev.
-      # DB_USER/DB_NAME default to postgres.
+      # The API server talks to Postgres directly (src/server/db/client.ts),
+      # as its own role, app_service: never as the owner, whose password
+      # only app-migrate below gets. These win over .env, whose DB_HOST=localhost
+      # and owner DB_USER/DB_PASSWORD are for local tools. DB_NAME defaults
+      # to postgres.
       - DB_HOST=db
       - DB_PORT=5432
-      - DB_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_USER=app_service
+      - DB_PASSWORD=${APP_DB_PASSWORD:?APP_DB_PASSWORD missing, run vibecarbon upgrade to write it to .env}
+      # env_file above hands the app all of .env, owner credentials included.
+      # Blank them here (environment wins over env_file), so a local app holds
+      # no database password but its own.
+      - POSTGRES_PASSWORD=
+      - REPL_PASSWORD=
+      - N8N_DB_PASSWORD=
+      - METABASE_DB_PASSWORD=
+      - OBSERVABILITY_DB_PASSWORD=
     depends_on:
-      # Data and auth both live in Postgres, so the app waits for a healthy
-      # db and nothing else.
+      # Data and auth both live in Postgres. The app starts once the db is
+      # healthy and app-migrate has applied the migrations and set up the
+      # app_service role.
       db:
         condition: service_healthy
+      app-migrate:
+        condition: service_completed_successfully
     networks:
       - vibecarbon-network
     labels:
@@ -102,6 +116,46 @@ services:
       - "traefik.http.routers.app.rule=Host(`localhost`)"
       - "traefik.http.routers.app.entrypoints=web"
       - "traefik.http.services.app.loadbalancer.server.port=3000"
+
+  # The migrate step (src/server/db/migrate-cli.ts): a one-shot of the app
+  # image that applies db/migrations as the owner, postgres, then creates or
+  # updates the app's own role, app_service, with APP_DB_PASSWORD. It is the
+  # only service besides db that holds the owner password (the app's
+  # environment blanks the one its env_file carries), and it exits when
+  # done; the app waits for it to complete successfully. On a compose-ha
+  # standby it finds a read-only database and exits 0 at once: migrations and
+  # the role arrive from the primary by replication.
+  app-migrate:
+    build:
+      context: .
+      args:
+        VITE_PROJECT_NAME: ${PROJECT_NAME}
+        VITE_PLAUSIBLE_DOMAIN: ${VITE_PLAUSIBLE_DOMAIN:-}
+        VITE_PLAUSIBLE_SCRIPT_URL: ${VITE_PLAUSIBLE_SCRIPT_URL:-}
+        VITE_GITHUB_REPO_URL: ${VITE_GITHUB_REPO_URL:-}
+    container_name: ${PROJECT_NAME}-app-migrate
+    command: ["node", "dist/server/migrate-cli.js"]
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - NODE_ENV=production
+      - PROJECT_NAME=${PROJECT_NAME}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=${POSTGRES_PASSWORD}
+      - APP_DB_PASSWORD=${APP_DB_PASSWORD:?APP_DB_PASSWORD missing, run vibecarbon upgrade to write it to .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - vibecarbon-network
 
   # ===========================================
   # DATABASE

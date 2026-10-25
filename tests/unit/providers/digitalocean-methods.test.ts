@@ -1057,7 +1057,7 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       ).toBeNull();
     });
 
-    it('appends rather than replacing when a rule for a different peer is present', () => {
+    it('replaces the rule for a previous peer with the current peer', () => {
       const existing = [
         { protocol: 'udp', ports: '51821', sources: { addresses: ['198.51.100.9/32'] } },
       ];
@@ -1070,7 +1070,7 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
         ports: '51821',
         sources: { addresses: ['203.0.113.7/32'] },
       });
-      expect(updated).toHaveLength(2);
+      expect(updated).toHaveLength(1);
     });
 
     // Lockout pin: given a REAL DO firewall object (findFirewallByName's

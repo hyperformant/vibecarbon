@@ -45,8 +45,9 @@ permissions:
 jobs:
   apply-secrets:
     # Reads env-specific secrets from GitHub Environments and applies them
-    # to the cluster as the `vibecarbon-secrets` Secret. Flux does NOT
-    # manage this Secret (no manifest in k8s/) so there's no drift.
+    # to the cluster as the `vibecarbon-app-secrets` and
+    # `vibecarbon-infra-secrets` Secrets. Flux does NOT manage them (no
+    # manifest in k8s/) so there's no drift.
     name: Apply env secrets → cluster
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment || 'prod' }}
@@ -72,40 +73,84 @@ jobs:
       - name: Ensure vibecarbon namespace exists
         run: kubectl create namespace vibecarbon --dry-run=client -o yaml | kubectl apply -f -
 
-      # Apply the vibecarbon-secrets Secret. Server-side apply with a
-      # distinct field manager ensures Flux doesn't try to prune these
-      # fields later, and that rotations simply overwrite.
+      # Apply the app's Secret (vibecarbon-app-secrets) and the infra Secret
+      # (vibecarbon-infra-secrets). Server-side apply with a distinct field
+      # manager ensures Flux doesn't try to prune these fields later, and that
+      # rotations simply overwrite.
       #
-      # Self-syncing: instead of enumerating every key (which silently drops
-      # any new `vibecarbon configure` secret that the CLI started seeding),
-      # we materialize ALL environment+repo secrets from `toJSON(secrets)` and
-      # build the Secret from them. Adding a feature key to the CLI's
-      # seedEnvironmentSecrets is enough — no edit here. The exclude list
-      # below is the only maintained piece, and it's an exclude (safe by
-      # default): drop infra/CI secrets that have their own Secret or that
-      # must never reach the app pod (the app envFrom's this whole Secret).
+      # Both Secrets are built from ALL environment+repo secrets
+      # (`toJSON(secrets)`), each by a positive list, so a secret seeded for
+      # some other purpose never lands in a pod by default:
+      #   - APP_KEYS: the app's runtime keys (APP_RUNTIME_KEYS and
+      #     APP_RUNTIME_EXTRA_KEYS in src/lib/deploy/app-runtime-env.js). The
+      #     app envFrom's this Secret whole. SITE_URL comes from vars instead.
+      #   - INFRA_KEYS: the infra passwords (INFRA_SECRET_KEYS in
+      #     src/lib/deploy/k8s/k3s.js), read by the db and add-on pods by key.
+      #   - the del() list, defence in depth: CI and every cloud/DNS token the
+      #     CLI can seed, which have their own Secrets or none.
+      # A new configure-managed key joins APP_KEYS here. All three lists are
+      # census-pinned to their sources by
+      # tests/unit/deploy/deploy-workflow-secret-sync.test.ts, which fails
+      # until this file matches.
       # `toJSON(secrets)` is bound to an env var (not interpolated inline in
       # the script) for defense-in-depth; kubectl --from-literal passes values
       # through argv with no shell interpretation.
-      - name: Apply vibecarbon-secrets Secret
+      - name: Apply vibecarbon-app-secrets and vibecarbon-infra-secrets
         env:
           ALL_SECRETS: ${{ toJSON(secrets) }}
           SITE_URL: ${{ vars.SITE_URL }}
         run: |
-          mapfile -t ARGS < <(printf '%s' "$ALL_SECRETS" | jq -r '
-            del(
-              .KUBECONFIG_B64,
-              .GITHUB_TOKEN, .github_token,
-              .HETZNER_API_TOKEN, .CLOUDFLARE_API_TOKEN,
-              .DIGITALOCEAN_TOKEN, .LINODE_TOKEN, .VULTR_API_KEY
-            )
-            | to_entries[]
-            | select(.value != null and .value != "")
-            | "--from-literal=\(.key)=\(.value)"')
-          kubectl create secret generic vibecarbon-secrets \
+          APP_KEYS='[
+            "BETTER_AUTH_SECRET","APP_DB_PASSWORD","ADMIN_EMAIL","ADMIN_PASSWORD","SITE_URL",
+            "CORS_ORIGINS","MAGIC_LINK_ENABLED","TRUSTED_PROXY_HOPS",
+            "FULLERENE_PRICE_ID","PROJECT_NAME","REDIS_ENABLED","N8N_ENABLED",
+            "METABASE_ENABLED","OBSERVABILITY_ENABLED",
+            "VITE_PLAUSIBLE_DOMAIN","VITE_PLAUSIBLE_SCRIPT_URL",
+            "STRIPE_SECRET_KEY","STRIPE_WEBHOOK_SECRET","PADDLE_API_KEY",
+            "PADDLE_WEBHOOK_SECRET","POLAR_ACCESS_TOKEN",
+            "POLAR_WEBHOOK_SECRET","GOOGLE_CLIENT_SECRET",
+            "MICROSOFT_CLIENT_SECRET","SMTP_PASS","BILLING_PROVIDER",
+            "STRIPE_PRICE_STARTER","STRIPE_PRICE_PRO","PADDLE_ENVIRONMENT",
+            "PADDLE_PRICE_STARTER","PADDLE_PRICE_PRO","POLAR_ORGANIZATION_ID",
+            "POLAR_PRICE_STARTER","POLAR_PRICE_PRO","GOOGLE_ENABLED",
+            "GOOGLE_CLIENT_ID","MICROSOFT_ENABLED","MICROSOFT_CLIENT_ID",
+            "MICROSOFT_TENANT_ID","SMTP_HOST","SMTP_PORT","SMTP_USER",
+            "SMTP_ADMIN_EMAIL","SMTP_SENDER_NAME","ACME_CA_SERVER",
+            "ALLOWED_SSH_IPS","S3_ACCESS_KEY","S3_SECRET_KEY","S3_BUCKET",
+            "S3_ENDPOINT","S3_REGION","REDIS_URL"
+          ]'
+          INFRA_KEYS='["DB_PASSWORD","REPL_PASSWORD","METABASE_DB_PASSWORD","N8N_DB_PASSWORD"]'
+          secret_args() {
+            printf '%s' "$ALL_SECRETS" | jq -r --argjson app "$APP_KEYS" --argjson infra "$INFRA_KEYS" --arg want "$1" '
+              del(
+                .KUBECONFIG_B64,
+                .GITHUB_TOKEN, .github_token,
+                .HETZNER_API_TOKEN, .HCLOUD_TOKEN,
+                .CLOUDFLARE_API_TOKEN, .CF_DNS_API_TOKEN,
+                .DIGITALOCEAN_API_TOKEN, .DIGITALOCEAN_TOKEN, .DO_AUTH_TOKEN,
+                .LINODE_API_TOKEN, .LINODE_TOKEN,
+                .VULTR_API_TOKEN, .VULTR_API_KEY,
+                .SCALEWAY_SECRET_KEY, .SCW_SECRET_KEY
+              )
+              | to_entries[]
+              | select(.value != null and .value != "")
+              | select(.key as $k
+                  | if $want == "infra" then ($infra | index($k)) != null
+                    else ($app | index($k)) != null and $k != "SITE_URL" end)
+              | "--from-literal=\(.key)=\(.value)"'
+          }
+          mapfile -t APP_ARGS < <(secret_args app)
+          mapfile -t INFRA_ARGS < <(secret_args infra)
+          kubectl create secret generic vibecarbon-app-secrets \
             --namespace=vibecarbon \
             --from-literal=SITE_URL="$SITE_URL" \
-            "${ARGS[@]}" \
+            "${APP_ARGS[@]}" \
+            --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts \
+              --field-manager=github-actions-deploy -f -
+          kubectl create secret generic vibecarbon-infra-secrets \
+            --namespace=vibecarbon \
+            "${INFRA_ARGS[@]}" \
             --dry-run=client -o yaml \
           | kubectl apply --server-side --force-conflicts \
               --field-manager=github-actions-deploy -f -
@@ -187,7 +232,7 @@ jobs:
     # After this job succeeds, Flux is in charge of reconciling
     # k8s/gitops/cert-manager-webhook-hetzner/ and k8s/base/
     # from the main branch. The apply-secrets job is what keeps the
-    # per-env vibecarbon-secrets / cert-manager `hetzner` / hcloud Secrets
+    # per-env app / infra / cert-manager `hetzner` / hcloud Secrets
     # in sync with GitHub Environment secrets.
     name: Bootstrap Flux + root Kustomization
     needs: apply-secrets

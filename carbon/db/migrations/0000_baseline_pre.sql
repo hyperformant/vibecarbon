@@ -8,8 +8,10 @@
 -- part 3 (0002_baseline_post.sql) has the remaining functions, triggers,
 -- revokes, pg_cron schedules and seed rows.
 --
--- The app applies every migration in one transaction at startup
--- (src/server/db/migrate.ts), as its connection role (`postgres`).
+-- The migrate step applies every migration in one transaction, as the owner
+-- (`postgres`), before the app starts (src/server/db/migrate-cli.ts). The
+-- app connects as its own role, app_service, which the same step creates
+-- (src/server/db/app-service-role.ts).
 
 -- The helper functions below are LANGUAGE sql and read public.memberships,
 -- public.customers and public."user", which 0001 creates later in this same
@@ -47,8 +49,8 @@ GRANT USAGE ON SCHEMA cron TO postgres;
 -- ============================================================================
 -- REQUEST ROLE AND IDENTITY (app_user + app.user_id())
 -- ============================================================================
--- The server connects as `postgres`, the superuser in the db image, so it
--- bypasses RLS (adminDb runs as it; see docs/security.md) and
+-- The server connects as `app_service` (BYPASSRLS, no superuser, owns
+-- nothing; adminDb runs as it, see src/server/db/app-service-role.ts) and
 -- runs every user request in a transaction that starts with ONE parameterized
 -- statement:
 --
@@ -73,10 +75,10 @@ END
 $$;
 --> statement-breakpoint
 
--- set_config('role', ...) requires membership. `postgres` is the app's
--- connection role: the superuser in the db image (adminDb runs as it; see
--- docs/security.md). A superuser passes the check anyway; the grant keeps a
--- non-superuser BYPASSRLS connection role (DB_USER) working.
+-- set_config('role', ...) requires membership. The app's connection role,
+-- app_service, is granted app_user by the migrate step that creates it. The
+-- owner, `postgres`, is a superuser and passes the check anyway; this grant
+-- keeps the suites and tools that connect as it working the same way.
 GRANT app_user TO postgres;
 --> statement-breakpoint
 

@@ -1,5 +1,7 @@
 /**
- * The app reaches Postgres directly, on every deploy path.
+ * The app reaches Postgres directly, on every deploy path, as its own role,
+ * app_service, with APP_DB_PASSWORD (never the owner's password; see
+ * app-db-credential-census.test.ts for who holds that).
  *
  * The template's API server queries the database through its own pg pool
  * (carbon/src/server/db/client.ts) with discrete DB_* vars; nothing else sits
@@ -12,14 +14,16 @@
  *     Deploys ship docker-compose.yml + docker-compose.prod.yml only
  *     (src/lib/deploy/bundle.js), so the base file must carry it.
  *   - k8s (+ k8s-ha): the Deployment names DB_HOST/DB_PORT/DB_NAME from the
- *     vibecarbon-config ConfigMap and DB_PASSWORD from vibecarbon-secrets,
+ *     vibecarbon-config ConfigMap and DB_PASSWORD from vibecarbon-app-secrets'
+ *     APP_DB_PASSWORD,
  *     and the app NetworkPolicy admits egress to the db StatefulSet's pod on 5432.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { load, loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
+import { APP_RUNTIME_KEYS } from '../../../src/lib/deploy/app-runtime-env.js';
+import { INFRA_SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 
 const carbon = (rel: string) =>
   readFileSync(fileURLToPath(new URL(`../../../carbon/${rel}`, import.meta.url)), 'utf8');
@@ -46,25 +50,29 @@ describe('compose: app → db', () => {
   const prod: Doc = load(carbon('docker-compose.prod.yml').replace(/!(reset|override)\b/g, ''));
   const app = base.services.app;
 
-  it('sets DB_HOST to the db service and the password from POSTGRES_PASSWORD', () => {
+  it('sets DB_HOST to the db service, DB_USER to app_service and the password from APP_DB_PASSWORD', () => {
     const env = envMap(app.environment);
     expect(env.DB_HOST).toBe('db');
     expect(env.DB_PORT).toBe('5432');
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: compose interpolation, literally
-    expect(env.DB_PASSWORD).toBe('${POSTGRES_PASSWORD}');
+    expect(env.DB_USER).toBe('app_service');
+    expect(env.DB_PASSWORD).toMatch(/^\$\{APP_DB_PASSWORD:\?/);
   });
 
   it('waits for a healthy db before starting', () => {
     expect(app.depends_on.db).toEqual({ condition: 'service_healthy' });
+    // ...and for the migrate step to have run.
+    expect(app.depends_on['app-migrate']).toEqual({ condition: 'service_completed_successfully' });
     // The db service has the healthcheck service_healthy relies on.
     expect(base.services.db.healthcheck?.test).toBeTruthy();
   });
 
-  it('the prod overlay does not repoint the app at another database', () => {
+  it('the prod overlay does not repoint the app at another database or role', () => {
     const env = envMap(prod.services.app.environment);
-    for (const key of ['DB_HOST', 'DB_PORT', 'DB_PASSWORD', 'DB_USER', 'DB_NAME']) {
+    for (const key of ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME']) {
       expect(env[key], key).toBeUndefined();
     }
+    // It only makes the app password required, for the deploy preflight.
+    expect(env.DB_PASSWORD).toMatch(/^\$\{APP_DB_PASSWORD:\?/);
   });
 });
 
@@ -89,12 +97,16 @@ describe('k8s: app → db', () => {
     }
   });
 
-  it('names DB_PASSWORD from vibecarbon-secrets, a key the deploy writes', () => {
+  it('connects as app_service, DB_PASSWORD from vibecarbon-app-secrets, a key the deploy writes', () => {
+    expect(env.DB_USER?.value).toBe('app_service');
     expect(env.DB_PASSWORD?.valueFrom?.secretKeyRef).toEqual({
-      name: 'vibecarbon-secrets',
-      key: 'DB_PASSWORD',
+      name: 'vibecarbon-app-secrets',
+      key: 'APP_DB_PASSWORD',
     });
-    expect(SECRET_KEYS).toContain('DB_PASSWORD');
+    expect(APP_RUNTIME_KEYS).toContain('APP_DB_PASSWORD');
+    // The owner password stays in the infra Secret, for the db and the
+    // migrate init container.
+    expect(INFRA_SECRET_KEYS).toContain('DB_PASSWORD');
   });
 
   it("DB_HOST is the db StatefulSet's Service in base and the production overlay", () => {

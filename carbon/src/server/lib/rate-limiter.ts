@@ -1,5 +1,6 @@
 import type { Context, Next } from 'hono';
 import Redis from 'ioredis';
+import { redactPath } from '../middleware/access-log';
 import { getClientIp } from './client-ip';
 import { env } from './env';
 import { logger } from './logger';
@@ -224,7 +225,10 @@ export function createRateLimiter(options: { windowMs: number; max: number }) {
 
     if (!result.allowed) {
       // Log rate limit violations for security monitoring
-      logger.warn({ identifier, path: c.req.path, count: result.count }, 'Rate limit exceeded');
+      logger.warn(
+        { identifier, path: redactPath(c.req.path), count: result.count },
+        'Rate limit exceeded'
+      );
       return c.json(
         { error: 'Too many requests', retryAfter: Math.ceil((result.resetTime - now) / 1000) },
         429

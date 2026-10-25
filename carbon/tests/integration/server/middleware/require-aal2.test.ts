@@ -130,10 +130,11 @@ describe('requireAal2', () => {
     expect(await res.json()).toEqual({ error: 'Unauthorized' });
   });
 
-  it('fails open (allows) and warns when the settings read throws', async () => {
+  it('fails closed (403 mfa_required) and warns when the settings read throws', async () => {
     selectMock.mockRejectedValueOnce(new Error('db down'));
     const res = await gatedApp({ user: aUser, aal: 'aal1' }).request('/gated', { method: 'DELETE' });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe('mfa_required');
     expect(warnMock).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error) }),
       expect.stringContaining('mfa-settings'),

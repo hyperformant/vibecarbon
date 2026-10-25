@@ -3,7 +3,7 @@
  * local-port-forward.
  *
  * Shared by both deploy tiers: k8s (the registry pod hostPorted on the
- * master, `10.0.1.1:5000`) and compose (a standalone `registry:2` container
+ * master's private IP, `10.0.1.1:5000` on Hetzner) and compose (a standalone `registry:2` container
  * on the server, `127.0.0.1:5000`). Callers supply the registry's
  * `remotePrefix` (the tag prefix the image was BUILT with, e.g.
  * `10.0.1.1:5000/` or `127.0.0.1:5000/`) and the `serverIp` to tunnel to;
@@ -12,13 +12,16 @@
  * is identical between tiers.
  *
  * Why an SSH tunnel: the registry listens on a port that isn't exposed to
- * the public internet (firewalled). Without DNS/L4 pointing the operator at
- * `server:5000`, we forward locally:
+ * the public internet (it binds a private or loopback address only). Without
+ * DNS/L4 pointing the operator at `server:5000`, we forward locally, and the
+ * tunnel's far end is the registry's own bind address, the host of
+ * `remotePrefix` (`<masterPrivateIp>:5000` on k8s, where the registry
+ * hostPort's hostIP binds; `127.0.0.1:5000` on compose):
  *
- *     ssh -L 5000:localhost:5000 -N -f <server>
+ *     ssh -L 5000:<registry host>:5000 -N -f <server>
  *     docker tag <remotePrefix><repo>:<tag> localhost:5000/<repo>:<tag>
  *     docker push localhost:5000/<repo>:<tag>
- *     pkill -f "ssh -L 5000:localhost:5000"
+ *     pkill -f "ssh -L 5000:<registry host>:5000"
  *
  * Why retag to localhost first: docker resolves the registry hostname in a
  * tag literally, so `docker push <remotePrefix>...` would dial the
@@ -425,6 +428,21 @@ export async function pushImageOverSshTunnel(args, deps = {}) {
 }
 
 /**
+ * The registry's bind address on the server, `<host>:<port>`, read off the
+ * build-time `remotePrefix` (`'10.0.1.1:5000/'` → `'10.0.1.1:5000'`). It is
+ * the SSH tunnel's far end: the registry listens there and nowhere else (the
+ * k8s hostPort's hostIP, compose's `-p 127.0.0.1:5000:5000`), and it is also
+ * the address every node pulls the same tag from. Null when the prefix is
+ * not a `host:port/` pair.
+ * @param {string} remotePrefix
+ * @returns {string|null}
+ */
+function registryAddress(remotePrefix) {
+  const m = /^([A-Za-z0-9.-]+):(\d{1,5})\/$/.exec(remotePrefix ?? '');
+  return m ? `${m[1]}:${m[2]}` : null;
+}
+
+/**
  * Reject malformed push arguments. Split out of the push body so the exported
  * entrypoint can validate before taking the mutex.
  * @param {Parameters<typeof pushImageOverSshTunnel>[0]} args
@@ -438,6 +456,12 @@ function assertPushArgs({ tag, remotePrefix, serverIp, sshKey, khPath, localTunn
   if (!Number.isInteger(localTunnelPort) || localTunnelPort < 1 || localTunnelPort > 65535) {
     throw new Error(
       `pushImageOverSshTunnel: localTunnelPort must be a port in [1, 65535], got: ${localTunnelPort}`,
+    );
+  }
+  // The tunnel's far end is the prefix's host:port, so the prefix must be one.
+  if (!registryAddress(remotePrefix)) {
+    throw new Error(
+      `pushImageOverSshTunnel: remotePrefix must be '<host>:<port>/', got: ${remotePrefix}`,
     );
   }
   // The push rewrites the build-time remotePrefix to localhost:<chosenPort> so
@@ -463,6 +487,9 @@ async function runTunnelPush(
 ) {
   const target = `root@${serverIp}`;
   const repository = tag.slice(remotePrefix.length).split(':')[0];
+  // The far end is the registry's bind address, never `localhost`: the k8s
+  // registry hostPort binds only the master's private IP.
+  const remoteAddress = registryAddress(remotePrefix);
 
   // chosenPort + localTag get re-bound on each open-tunnel attempt below.
   // We can't pick the port up-front because of a TOCTOU race: probing
@@ -478,7 +505,7 @@ async function runTunnelPush(
   let chosenPort = localTunnelPort;
   const setPort = (port) => {
     chosenPort = port;
-    forwardSpec = `${port}:localhost:5000`;
+    forwardSpec = `${port}:${remoteAddress}`;
     tunnelPattern = `ssh.*-L.*${forwardSpec}`;
     localTag = `localhost:${port}/${tag.slice(remotePrefix.length)}`;
   };

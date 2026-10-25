@@ -57,16 +57,14 @@ describe('github-environments', () => {
       const { seedOrgSecrets } = await freshImport();
       const applied = await seedOrgSecrets({
         hetznerApiToken: 'hcloud-abc',
-        cloudflareApiToken: '', // empty → skipped
-        s3AccessKey: 'AK123',
-        s3SecretKey: 'SK456',
+        dnsTokens: { CLOUDFLARE_API_TOKEN: 'cf-abc', DESEC_TOKEN: '' /* empty → skipped */ },
       });
-      expect(applied).toEqual(['HETZNER_API_TOKEN', 'S3_ACCESS_KEY', 'S3_SECRET_KEY']);
+      expect(applied).toEqual(['HETZNER_API_TOKEN', 'CLOUDFLARE_API_TOKEN']);
 
       const secretSetCalls = runCommandAsyncMock.mock.calls.filter(
         (c) => c[0][0] === 'gh' && c[0][1] === 'secret' && c[0][2] === 'set',
       );
-      expect(secretSetCalls).toHaveLength(3);
+      expect(secretSetCalls).toHaveLength(2);
 
       // Every secret-set call: value on stdin (options.input), never on argv.
       for (const [argv, opts] of secretSetCalls) {
@@ -78,6 +76,18 @@ describe('github-environments', () => {
         expect(typeof opts?.input).toBe('string');
         expect(opts.input.length).toBeGreaterThan(0);
       }
+    });
+
+    it('never seeds a repo-level object storage pair: the app gets its own per environment', async () => {
+      const { seedOrgSecrets } = await freshImport();
+      // A stray pair from an older caller is ignored, never uploaded.
+      const applied = await seedOrgSecrets({
+        s3AccessKey: 'SENTINEL_INFRA_AK',
+        s3SecretKey: 'SENTINEL_INFRA_SK',
+      } as Record<string, string>);
+      expect(applied).toEqual([]);
+      const uploaded = runCommandAsyncMock.mock.calls.map((c) => c[1]?.input).filter(Boolean);
+      expect(uploaded).not.toContain('SENTINEL_INFRA_AK');
     });
 
     it('defaults to an empty object and applies nothing when called with no args', async () => {

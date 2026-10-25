@@ -143,6 +143,8 @@ const RUNTIME_DETECTION: Record<string, string> = {
   COMPOSE_PROJECT_NAME: "docker compose's own project-name override for the dev stack (up.js)",
   VIBECARBON_PERF: 'internal perf-timer switch (perf.js)',
   VIBECARBON_UPLINK_LOCK_DIR: 'internal override for the uplink lock directory (uplink-lock.js)',
+  VIBECARBON_FINGERPRINT_KEY_DIR:
+    'internal override for the secret-fingerprint HMAC key directory (secret-fingerprint.js)',
   VIBECARBON_BUNDLE_VERBOSE: 'internal bundle-render verbosity (orchestrator.js)',
   VIBECARBON_SKIP_CONFIG_SHAPES:
     'escape hatch for a vendor token-format change: downgrades shape problems to warnings in ' +

@@ -77,9 +77,9 @@ describe('add-on database passwords', () => {
         }
       });
 
-      it(`k8s reads ${key} from vibecarbon-secrets`, () => {
+      it(`k8s reads ${key} from vibecarbon-infra-secrets`, () => {
         expect(read(`services/${name}/k8s/deployment.yaml`)).toMatch(
-          new RegExp(`secretKeyRef:\\s+name: vibecarbon-secrets\\s+key: ${key}`),
+          new RegExp(`secretKeyRef:\\s+name: vibecarbon-infra-secrets\\s+key: ${key}`),
         );
       });
 

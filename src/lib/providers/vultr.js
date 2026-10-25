@@ -24,7 +24,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
-import { BaseProvider } from './base.js';
+import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -949,31 +949,25 @@ export class VultrProvider extends BaseProvider {
   /**
    * Vultr-shaped replication-rule builder — see BaseProvider's abstract
    * doc. Operates on the AUGMENTED firewall object findFirewallByName
-   * returns (rules attached). Idempotent: null when the peer's UDP/51821
-   * rule is already present.
+   * returns (rules attached). The reconcile is the shared
+   * replaceWireguardPeerRules: the UDP/51821 rule follows the current peer
+   * (an old peer's rule is dropped), null when already correct.
    * @param {object} firewall - augmented group ({...group, rules})
    * @param {string} peerIp
    * @returns {object[]|null}
    */
   buildReplicationFirewallRules(firewall, peerIp) {
-    const existingRules = firewall.rules || [];
-    const hasExactRule = existingRules.some(
-      (r) =>
-        r.protocol === 'udp' &&
-        String(r.port) === WG_PORT &&
-        r.subnet === peerIp &&
-        r.subnet_size === 32,
-    );
-    if (hasExactRule) return null;
-    return [
-      ...existingRules.map(({ id: _id, ...rest }) => rest),
-      {
-        ...cidrToVultrRuleFields(`${peerIp}/32`),
+    const rules = replaceWireguardPeerRules(firewall.rules || [], peerIp, {
+      isWireguardRule: (r) => r.protocol === 'udp' && String(r.port) === WG_PORT,
+      admitsOnlyPeer: (r, ip) => r.subnet === ip && Number(r.subnet_size) === 32,
+      buildPeerRule: (ip) => ({
+        ...cidrToVultrRuleFields(`${ip}/32`),
         protocol: 'udp',
         port: WG_PORT,
         notes: 'wg-replication',
-      },
-    ];
+      }),
+    });
+    return rules === null ? null : rules.map(({ id: _id, ...rest }) => rest);
   }
 
   /**

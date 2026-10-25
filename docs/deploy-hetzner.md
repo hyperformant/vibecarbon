@@ -146,9 +146,9 @@ A deploy:
    opt-in; or manual if you manage DNS elsewhere)
 3. Issues TLS certificates via ACME DNS-01 (wildcard-capable)
 4. Builds your app image locally and pushes it to the servers over SSH
-5. Starts the stack (Postgres, Traefik, your app); the app applies its
-   migrations and creates the admin user at startup, and the deploy
-   verifies health
+5. Starts the stack (Postgres, Traefik, your app); a one-shot migrate step
+   applies the migrations as the database owner before the app starts, the
+   app creates the admin user at startup, and the deploy verifies health
 6. On HA modes: seeds the standby via `pg_basebackup` and verifies TLS
    streaming replication is live: the deploy **fails** if the standby is not
    confirmably streaming (use `-allow-degraded` to accept a warm standby)
@@ -389,6 +389,49 @@ After a failover completes:
   `journalctl -u vibecarbon-private-net` (or
   `/var/log/vibecarbon-private-net.log`) shows every repair it has made, and
   `ip -4 addr show enp7s0` shows the current state
+
+## The app's storage key
+
+Hetzner only makes object storage keys in the console, and every key reaches
+every bucket in the project. So by default the app holds the same key the
+deploy uses (`storage access: shared` in `vibecarbon status`). That is the
+residual risk to know about: a compromised app could read and delete every
+environment's uploads, all backups and the Pulumi state.
+
+You can give an environment's app a key of its own:
+
+1. In the [Hetzner Console](https://console.hetzner.cloud/projects), open the
+   project, then **Security**, then **S3 credentials**, and click
+   **Generate credentials**. Name it after the environment, for example
+   `myapp-prod-app`. This must be a new key, not the one deploys use.
+2. Run `vibecarbon configure storage prod` and paste the access key and the
+   secret key. They go to `.env.local` only and never ship to a server.
+3. Run `vibecarbon deploy prod`. The app gets the pasted key, and the deploy
+   puts a deny policy on every other bucket vibecarbon manages in the project
+   (the Pulumi state, the backups and each other environment's bucket). It
+   waits until Hetzner enforces it before it reports success. Status then
+   shows `storage access: fenced`.
+
+Skipping the paste is fine; the environment simply stays `shared`.
+
+What the fence cannot close (`fenced` tier): the app key can still list
+bucket names, create new buckets, use any bucket vibecarbon does not manage,
+and delete a fenced bucket while it is empty. The strongest isolation is an
+app bucket in a separate Hetzner project with its own key, which vibecarbon
+does not set up for you.
+
+vibecarbon cannot revoke a key it did not make. So when you destroy an
+environment, or paste a replacement key, the old pasted key is retired: it
+stays denied in every bucket fence, and destroy reminds you to delete it in
+the console. Once it is deleted there, run
+`vibecarbon configure storage -forget <access key id>`. The next deploy that
+syncs the fences (any deploy while the project still has a pasted or retired
+key) takes it out of them. If no such deploy runs, the old deny stays in
+place, which does no harm since the key no longer exists.
+
+A fenced environment's key must be on the machine that deploys it. If it is
+missing (a fresh checkout, say), the deploy stops and asks you to paste it
+again, rather than quietly hand the app the shared key.
 
 ## Security notes
 

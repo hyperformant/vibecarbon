@@ -159,10 +159,10 @@ describe('k8s/base renders the db StatefulSet', () => {
     expect(container.args).toContain('archive_command=bash /etc/postgresql/wal-archive.sh %p');
   });
 
-  it('reads its superuser password from vibecarbon-secrets and needs no other chart-era key', () => {
+  it('reads its superuser password from vibecarbon-infra-secrets and needs no other chart-era key', () => {
     const env = Object.fromEntries(container.env.map((e: Doc) => [e.name, e]));
     expect(env.POSTGRES_PASSWORD.valueFrom.secretKeyRef).toEqual({
-      name: 'vibecarbon-secrets',
+      name: 'vibecarbon-infra-secrets',
       key: 'DB_PASSWORD',
     });
     expect(env.POSTGRES_USER.value).toBe('postgres');
@@ -274,7 +274,9 @@ describe('buildDbManifestValues', () => {
 
 describe('renderK8sBase on the shipped base', () => {
   it('leaves no placeholder in the StatefulSet and pins the provider class', () => {
-    const rendered = renderK8sBase(BASE, values());
+    // The shipped base carries the registry too; its hostPort binds the
+    // master's private IP (hostport-binding-census.test.ts).
+    const rendered = renderK8sBase(BASE, { ...values(), MASTER_PRIVATE_IP: '10.0.1.1' });
     try {
       const raw = readFileSync(join(rendered, 'db', 'statefulset.yaml'), 'utf-8');
       expect(raw).not.toMatch(/\{\{[A-Z0-9_]+\}\}/);
@@ -655,6 +657,10 @@ describe('Flux never applies the unrendered db StatefulSet', () => {
   it('overlays/production drops StatefulSet/db and keeps Service/db and the app', () => {
     const docs = kustomize('carbon/k8s/overlays/production');
     expect(docs.some((d) => d.kind === 'StatefulSet')).toBe(false);
+    // The registry Deployment (hostIP {{MASTER_PRIVATE_IP}}) is CLI-owned too.
+    expect(docs.some((d) => d.kind === 'Deployment' && d.metadata.name === 'local-registry')).toBe(
+      false,
+    );
     expect(docs.some((d) => d.kind === 'Service' && d.metadata.name === 'db')).toBe(true);
     expect(docs.some((d) => d.kind === 'Deployment' && d.metadata.name === 'app')).toBe(true);
   }, 60_000);

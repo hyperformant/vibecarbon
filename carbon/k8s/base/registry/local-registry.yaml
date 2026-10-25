@@ -5,6 +5,11 @@ metadata:
   namespace: vibecarbon
   labels:
     app: local-registry
+  # The vibecarbon CLI's deploy owns this object; Flux strips it from its
+  # base build (flux/clusters/*). prune: disabled keeps Flux's garbage
+  # collection from deleting the live one in either handoff order.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   replicas: 1
   # Recreate (not RollingUpdate) because hostPort: 5000 can only be held by one pod at a time.
@@ -19,8 +24,8 @@ spec:
       labels:
         app: local-registry
     spec:
-      # Run only on master node — hostPort exposes 5000 on master's private IP
-      # for SSH tunnel access, and the hostPath volume below rides the same pin.
+      # Run only on master node — hostPort binds 5000 on master's private IP
+      # (see hostIP below), and the hostPath volume below rides the same pin.
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
       tolerations:
@@ -66,10 +71,19 @@ spec:
               value: "true"
           ports:
             - containerPort: 5000
-              # hostPort exposes the registry on the master's private IP (10.0.1.1:5000).
-              # Worker and database-node kubelets use 10.0.1.1:5000 to pull images — kubelet uses
-              # node DNS (not cluster DNS) so it can't resolve the "local-registry" service name.
+              # hostPort publishes the registry on the master's private IP ONLY
+              # (hostIP; without it the port is open on every node address,
+              # the public one included, and the cloud firewall is the only
+              # barrier). Every consumer dials <masterPrivateIp>:5000: kubelet
+              # on each node (registries.yaml mirror; kubelet uses node DNS,
+              # not cluster DNS, so it can't resolve the "local-registry"
+              # Service name), and the operator's push tunnel
+              # (ssh -L <port>:<masterPrivateIp>:5000, registry-push.js).
+              # {{MASTER_PRIVATE_IP}} is rendered at deploy time
+              # (renderK8sBase): Hetzner's static 10.0.1.1, DigitalOcean's
+              # Pulumi-assigned VPC address.
               hostPort: 5000
+              hostIP: "{{MASTER_PRIVATE_IP}}"
               protocol: TCP
           volumeMounts:
             - name: registry-storage

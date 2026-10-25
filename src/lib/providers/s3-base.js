@@ -28,9 +28,11 @@ import {
   CopyObjectCommand,
   CreateBucketCommand,
   DeleteBucketCommand,
+  DeleteBucketPolicyCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetBucketCorsCommand,
+  GetBucketPolicyCommand,
   GetObjectCommand,
   HeadBucketCommand,
   ListBucketsCommand,
@@ -38,6 +40,7 @@ import {
   ListObjectsV2Command,
   ListObjectVersionsCommand,
   PutBucketCorsCommand,
+  PutBucketPolicyCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -135,6 +138,13 @@ export function formatS3SetupFailure(error, { endpoint, source } = {}) {
   return `S3 setup failed: ${cause}${where ? ` (${where})` : ''}.${next}`;
 }
 
+/**
+ * Subclasses also declare `static appKeyScoping` ('mint' | 'paste-fence' |
+ * 'none'): how the env's app gets an object-storage key of its own (security
+ * plan R2). The base declares none on purpose, so a provider that forgets it
+ * fails tests/unit/providers/app-key-scoping-census.test.ts instead of
+ * inheriting a silent default, the same pattern as `bucketSettleWindowMs`.
+ */
 export class S3CompatibleProvider {
   /**
    * Create a new S3-compatible provider instance.
@@ -1027,6 +1037,80 @@ export class S3CompatibleProvider {
       if (err?.$metadata?.httpStatusCode === 404 && name !== 'NoSuchBucket') return [];
       throw err;
     }
+  }
+
+  /**
+   * One HeadBucket with exactly one attempt: can THESE keys reach the bucket
+   * right now? The app-key readiness check polls this inside the storage
+   * finalize task (security plan R9); it is a consistency probe, so `_send`'s
+   * transient retry would only blur what each probe saw.
+   * @param {string} bucketName
+   * @returns {Promise<boolean>}
+   */
+  async canHeadBucket(bucketName) {
+    try {
+      await this._send(new HeadBucketCommand({ Bucket: bucketName }), { maxAttempts: 1 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * One ListObjectsV2 with exactly one attempt: are THESE keys refused on the
+   * bucket? True only on a 403 (AccessDenied). A success, a 404 or a network
+   * error is not a denial, so the fence probe counts only clear refusals.
+   * @param {string} bucketName
+   * @returns {Promise<boolean>}
+   */
+  async isDeniedOn(bucketName) {
+    try {
+      await this._send(new ListObjectsV2Command({ Bucket: bucketName, MaxKeys: 1 }), {
+        maxAttempts: 1,
+      });
+      return false;
+    } catch (err) {
+      return err?.$metadata?.httpStatusCode === 403 || err?.name === 'AccessDenied';
+    }
+  }
+
+  /**
+   * The bucket's policy as an object, or null when it has none
+   * (NoSuchBucketPolicy, or a bare 404 that is not NoSuchBucket).
+   * @param {string} bucketName
+   * @returns {Promise<object|null>}
+   */
+  async getBucketPolicy(bucketName) {
+    try {
+      const result = await this._send(new GetBucketPolicyCommand({ Bucket: bucketName }));
+      return result?.Policy ? JSON.parse(result.Policy) : null;
+    } catch (err) {
+      const name = err?.name ?? err?.Code ?? '';
+      if (name === 'NoSuchBucketPolicy') return null;
+      if (err?.$metadata?.httpStatusCode === 404 && name !== 'NoSuchBucket') return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Replace the bucket's policy.
+   * @param {string} bucketName
+   * @param {object} policy
+   * @returns {Promise<void>}
+   */
+  async putBucketPolicy(bucketName, policy) {
+    await this._send(
+      new PutBucketPolicyCommand({ Bucket: bucketName, Policy: JSON.stringify(policy) }),
+    );
+  }
+
+  /**
+   * Remove the bucket's policy. Removing one that is already gone is fine.
+   * @param {string} bucketName
+   * @returns {Promise<void>}
+   */
+  async deleteBucketPolicy(bucketName) {
+    await this._send(new DeleteBucketPolicyCommand({ Bucket: bucketName }));
   }
 
   /**

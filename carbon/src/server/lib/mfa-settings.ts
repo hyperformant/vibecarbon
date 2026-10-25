@@ -13,15 +13,16 @@ export function __resetMfaSettingsCache(): void {
 }
 
 /**
- * Whether MFA is enabled application-wide (app_settings.mfa_enabled.enabled).
+ * Whether MFA is enabled application-wide (app_settings.mfa_enabled.enabled),
+ * or null when it cannot be known.
  *
  * Cached for 60s to keep the aal2 gate off the per-request DB hot path. On a
- * read failure this FAILS OPEN — returns the last-known value, or false (gate
- * inert) if none — because this control is opt-in and defaults off, so failing
- * open only restores pre-feature behavior. A held aal2 session is always
- * honored by the gate regardless of this value.
+ * read failure this returns the last value it read, and null when it has
+ * never read one (a fresh process). Callers treat null as enabled: a gate
+ * that cannot tell whether MFA is on must deny, not wave a session through.
+ * A held aal2 session is always honored by the gate regardless of this value.
  */
-export async function isMfaGloballyEnabled(): Promise<boolean> {
+export async function isMfaGloballyEnabled(): Promise<boolean | null> {
   if (cache && cache.expiresAt > Date.now()) {
     return cache.value;
   }
@@ -38,8 +39,8 @@ export async function isMfaGloballyEnabled(): Promise<boolean> {
   } catch (err) {
     logger.warn(
       { err: dbErrorForLog(err) },
-      'mfa-settings: failed to read app_settings.mfa_enabled; failing open'
+      'mfa-settings: failed to read app_settings.mfa_enabled; the MFA gate treats it as enabled'
     );
-    return cache?.value ?? false;
+    return cache?.value ?? null;
   }
 }

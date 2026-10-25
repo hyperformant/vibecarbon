@@ -532,6 +532,54 @@ export function resolveEnvStorage(envName, envConfig, projectConfig) {
   };
 }
 
+/**
+ * The optional per-environment "app storage key" paste, for a provider whose
+ * keys can only be made in its console (`appKeyScoping: 'paste-fence'`,
+ * Hetzner; security plan R2). Skipping is a fine answer: the env stays on the
+ * `shared` tier, where the app holds the deploy's own key. Pasting moves it to
+ * `fenced` on the next deploy: the app gets this key, and every other
+ * vibecarbon bucket in the project denies it.
+ *
+ * @param {{ environment: string, projectName?: string }} args
+ * @returns {Promise<{ accessKey: string, secretKey: string } | null>} null when skipped
+ */
+export async function promptAppStorageKey({ environment, projectName }) {
+  p.note(
+    [
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://console.hetzner.cloud/projects')}`,
+      `${c.dim('   └─')} Pick ${c.info(projectName || 'your-project')} → ${c.info('Security')} → ${c.info('S3 credentials')}`,
+      '',
+      `${c.bold('2.')} Click ${c.boldCyan('Generate credentials')}`,
+      `${c.dim('   └─')} Description: ${c.info(`"${projectName || 'vibecarbon'}-${environment}-app"`)}`,
+      '',
+      `${c.bold('3.')} Copy both values ${c.dim('(the secret is only shown once)')} and paste them below.`,
+      '',
+      c.dim(`This must be a NEW key, not the one deploys use. ${environment}'s app gets it,`),
+      c.dim('and every other vibecarbon bucket in the project denies it: the Pulumi state,'),
+      c.dim("the backups, and the other environments' uploads."),
+      c.dim('It can still list bucket names and use buckets vibecarbon does not manage.'),
+    ].join('\n'),
+    `App storage key for ${environment}`,
+  );
+  const paste = await p.confirm({
+    message: `Paste an app storage key for ${environment}? (skip to keep sharing the deploy key)`,
+    initialValue: true,
+  });
+  if (p.isCancel(paste)) exitCancelled();
+  if (!paste) return null;
+  const accessKey = await p.text({
+    message: 'Access key',
+    validate: (v) => (v?.trim() ? undefined : 'paste the access key, or press ctrl-c to stop'),
+  });
+  if (p.isCancel(accessKey)) exitCancelled();
+  const secretKey = await p.password({
+    message: 'Secret key',
+    validate: (v) => (v?.trim() ? undefined : 'paste the secret key, or press ctrl-c to stop'),
+  });
+  if (p.isCancel(secretKey)) exitCancelled();
+  return { accessKey: String(accessKey).trim(), secretKey: String(secretKey).trim() };
+}
+
 export async function gatherDeploymentConfig(args) {
   console.clear();
   printBanner();

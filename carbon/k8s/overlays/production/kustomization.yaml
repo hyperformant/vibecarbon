@@ -42,3 +42,14 @@ patches:
     target:
       kind: StatefulSet
       name: db
+  # Same for the registry Deployment: its hostPort binds {{MASTER_PRIVATE_IP}},
+  # which only the CLI's deploy renders.
+  - patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: local-registry
+    target:
+      kind: Deployment
+      name: local-registry

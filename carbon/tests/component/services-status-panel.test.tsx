@@ -80,6 +80,7 @@ describe('ServicesStatus panel', () => {
     respond({
       '/api/_internal/services/status': statusBody([
         { name: 'App', container: 'app', status: 'healthy', latencyMs: 1, restartable: false },
+        { name: 'App Docker Proxy', container: 'app-docker-proxy', status: 'healthy', latencyMs: 1, restartable: false },
         { name: 'Docker Socket Proxy', container: 'docker-socket-proxy', status: 'healthy', latencyMs: 1, restartable: false },
         { name: 'PostgreSQL', container: 'db', status: 'healthy', latencyMs: 2, restartable: false },
         { name: 'Traefik', container: 'traefik', status: 'healthy', latencyMs: 3, restartable: false },
@@ -88,6 +89,7 @@ describe('ServicesStatus panel', () => {
     renderWithQuery(<ServicesStatus />);
 
     expect(await screen.findByText('Docker Socket Proxy')).toBeInTheDocument();
+    expect(screen.getByText('App Docker Proxy')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Restart/ })).not.toBeInTheDocument();
   });
 });

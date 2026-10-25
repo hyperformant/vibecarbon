@@ -19,9 +19,11 @@ const envSchema = z.object({
   // Postgres. Discrete vars, never a URL, so a password needs no URL-encoding.
   // DB_USER must be able to bypass RLS (checked at startup, see db/startup.ts)
   // and be a member of app_user (withUserDb switches to it per transaction).
+  // It is app_service, the app's own role (db/app-service-role.ts), never
+  // the owner: the migrate step runs migrations as postgres, outside the app.
   DB_HOST: z.string().min(1),
   DB_PORT: z.coerce.number().int().positive().default(5432),
-  DB_USER: z.string().min(1).default('postgres'),
+  DB_USER: z.string().min(1).default('app_service'),
   DB_PASSWORD: z.string().min(1),
   DB_NAME: z.string().min(1).default('postgres'),
 

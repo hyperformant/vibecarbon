@@ -32,7 +32,7 @@ spec:
         - name: MB_DB_PASS
           valueFrom:
             secretKeyRef:
-              name: vibecarbon-secrets
+              name: vibecarbon-infra-secrets
               key: METABASE_DB_PASSWORD
         # The `db` Service in front of the db StatefulSet
         # (k8s/base/db/service.yaml).

@@ -8,9 +8,10 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripOperatorSecretLines } from '../config-registry.js';
-import { formatDotenvLine } from '../dotenv.js';
+import { formatDotenvLine, parseDotenv } from '../dotenv.js';
 import { resolveDbImage } from '../images.js';
 import { DNS01_OVERRIDE_FILE, dnsChallengeEnv } from './acme.js';
+import { appStorageCredential, buildAppRuntimeEnv } from './app-runtime-env.js';
 import { registryEnsureShell } from './compose/registry-config.js';
 
 /**
@@ -393,7 +394,29 @@ export function renderBundle(projectName, options = {}) {
   for (const [k, v] of Object.entries(envOverrides)) {
     if (!seen.has(k)) merged.push(formatDotenvLine(k, v));
   }
-  writeFileSync(join(stageDir, '.env'), merged.join('\n'));
+  const serverEnvText = merged.join('\n');
+  writeFileSync(join(stageDir, '.env'), serverEnvText);
+
+  // app.env: the only env file the app container reads on a server (the prod
+  // overlay's `env_file: !override [app.env]`). Built fresh from the server
+  // .env above, never copied from it: only the app's own keys, plus its
+  // storage keys from the one hand-off point. A scale replay passes the old
+  // server's app.env as `appEnvReplay`; a server deployed before app.env
+  // existed gave its app the whole .env, so its S3_* there are what it used.
+  const serverEnv = parseDotenv(serverEnvText);
+  const appEnv = buildAppRuntimeEnv(
+    serverEnv,
+    appStorageCredential({
+      s3Config: options.s3,
+      previousAppEnv: options.appEnvReplay ?? serverEnv,
+    }),
+  );
+  writeFileSync(
+    join(stageDir, 'app.env'),
+    `${Object.entries(appEnv)
+      .map(([k, v]) => formatDotenvLine(k, v))
+      .join('\n')}\n`,
+  );
 
   const isFast = Boolean(options.image?.endsWith(':local'));
   const flags = composeFileFlags(options);

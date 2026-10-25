@@ -32,7 +32,7 @@ const envSchema = z.object({
   // Postgres (the API server connects directly; discrete vars, no URL)
   DB_HOST: z.string().min(1),
   DB_PORT: z.coerce.number().int().positive().default(5432),
-  DB_USER: z.string().min(1).default('postgres'),
+  DB_USER: z.string().min(1).default('app_service'),
   DB_PASSWORD: z.string().min(1),
   DB_NAME: z.string().min(1).default('postgres'),
 
@@ -132,12 +132,12 @@ describe('Environment variable validation', () => {
       expect(envSchema.safeParse({ ...validEnv, DB_PASSWORD: '' }).success).toBe(false);
     });
 
-    it('defaults DB_PORT to 5432, DB_USER and DB_NAME to postgres', () => {
+    it('defaults DB_PORT to 5432, DB_USER to app_service and DB_NAME to postgres', () => {
       const result = envSchema.safeParse(validEnv);
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.DB_PORT).toBe(5432);
-        expect(result.data.DB_USER).toBe('postgres');
+        expect(result.data.DB_USER).toBe('app_service');
         expect(result.data.DB_NAME).toBe('postgres');
       }
     });
@@ -383,7 +383,7 @@ describe('Environment variable validation', () => {
     it('declares the DB_* vars exactly as this mirror does', () => {
       expect(src).toContain('DB_HOST: z.string().min(1),');
       expect(src).toContain('DB_PORT: z.coerce.number().int().positive().default(5432),');
-      expect(src).toContain("DB_USER: z.string().min(1).default('postgres'),");
+      expect(src).toContain("DB_USER: z.string().min(1).default('app_service'),");
       expect(src).toContain('DB_PASSWORD: z.string().min(1),');
       expect(src).toContain("DB_NAME: z.string().min(1).default('postgres'),");
       // Never a connection URL: a password would need URL-encoding.

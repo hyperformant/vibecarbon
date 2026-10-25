@@ -29,7 +29,7 @@ describe('seed-standby init container (db StatefulSet)', () => {
       expect(sts).toMatch(pattern);
     }
     expect(sts).toMatch(
-      /name: REPL_PASSWORD\s+valueFrom:\s+secretKeyRef:\s+name: vibecarbon-secrets\s+key: REPL_PASSWORD\s+optional: true/,
+      /name: REPL_PASSWORD\s+valueFrom:\s+secretKeyRef:\s+name: vibecarbon-infra-secrets\s+key: REPL_PASSWORD\s+optional: true/,
     );
   });
 

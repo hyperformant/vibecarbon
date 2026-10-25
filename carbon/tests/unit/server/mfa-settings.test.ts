@@ -55,9 +55,9 @@ describe('isMfaGloballyEnabled', () => {
     expect(selectMock).toHaveBeenCalledTimes(2);
   });
 
-  it('fails open to false (gate inert) and warns when the read throws', async () => {
+  it('returns null (unknown) and warns when the read throws with nothing cached', async () => {
     selectMock.mockRejectedValueOnce(new Error('db down'));
-    expect(await isMfaGloballyEnabled()).toBe(false);
+    expect(await isMfaGloballyEnabled()).toBeNull();
     expect(warnMock).toHaveBeenCalledTimes(1);
   });
 });

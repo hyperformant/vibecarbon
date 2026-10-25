@@ -27,6 +27,9 @@ const DEV = {
   // kept, so --force and a half-present pair don't sign everyone out.
   BETTER_AUTH_SECRET: existingAuthSecret() ?? randomBytes(48).toString('base64url'),
   DB_PASSWORD: 'local-postgres-password-for-dev-only',
+  // The app's own database role (app_service). `npm run db:migrate` sets it
+  // on the role; the dev server and the app container connect with it.
+  APP_DB_PASSWORD: 'local-app-db-password-for-dev-only',
   ADMIN_EMAIL: 'admin@example.com',
   ADMIN_PASSWORD: 'local-admin-password',
   // The key the local Garage imports at start (GARAGE_DEFAULT_* in
@@ -58,14 +61,17 @@ const envLines = [
   '# Auth session signing key (in-process auth, random per checkout)',
   formatDotenvLine('BETTER_AUTH_SECRET', DEV.BETTER_AUTH_SECRET),
   '',
-  '# Database. The API server connects with the DB_* vars (base port:',
-  '# DEV_DB_PORT or DEV_PORT_OFFSET is applied at runtime by env.ts)',
+  '# Database (base port: DEV_DB_PORT or DEV_PORT_OFFSET is applied at runtime',
+  '# by env.ts). DB_USER / DB_PASSWORD / POSTGRES_PASSWORD are the owner, which',
+  '# `npm run db:migrate` connects as. The API server connects as app_service',
+  '# with APP_DB_PASSWORD (scripts/dev.js), never as the owner.',
   formatDotenvLine('DB_HOST', 'localhost'),
   formatDotenvLine('DB_PORT', '5432'),
   formatDotenvLine('DB_USER', 'postgres'),
   formatDotenvLine('DB_PASSWORD', DEV.DB_PASSWORD),
   formatDotenvLine('DB_NAME', 'postgres'),
   formatDotenvLine('POSTGRES_PASSWORD', DEV.DB_PASSWORD),
+  formatDotenvLine('APP_DB_PASSWORD', DEV.APP_DB_PASSWORD),
   '',
   '# Super admin, created by the app at startup (password: at least 8 characters)',
   formatDotenvLine('ADMIN_EMAIL', DEV.ADMIN_EMAIL),

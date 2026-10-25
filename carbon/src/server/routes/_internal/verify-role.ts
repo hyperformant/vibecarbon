@@ -58,7 +58,7 @@ function getValidatedSiteUrl(): string {
  *     a session token (it never reaches page JS), so these have no
  *     legitimate sender, and a tool's own API token in them must not be
  *     taken for a session.
- * While MFA is globally on, the session must have passed two-factor (aal2).
+ * While MFA is globally on (or its setting is unreadable), the session must have passed two-factor (aal2).
  *
  * Returns:
  *   200 - User authenticated and has required role
@@ -139,7 +139,7 @@ verifyRoleRoutes.all('/', async (c) => {
     }
 
     const { user, session } = data;
-    if (session.twoFactorVerified !== true && (await isMfaGloballyEnabled())) {
+    if (session.twoFactorVerified !== true && (await isMfaGloballyEnabled()) !== false) {
       logger.info({ userId: user.id }, 'verify-role: session has not passed two-factor');
       return c.text('Unauthorized', 401);
     }

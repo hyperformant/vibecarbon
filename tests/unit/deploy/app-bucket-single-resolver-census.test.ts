@@ -70,16 +70,18 @@ describe('app bucket single resolver census', () => {
     expect(calls.filter((c) => !/'backups'/.test(c))).toEqual([]);
   });
 
-  it('(b) the compose S3_BUCKET writer assigns VC_ENV, the k8s one does not', () => {
+  it('(b) the compose S3_BUCKET writer assigns VC_ENV, the app-storage hand-off does not', () => {
     const assignsBucket = /S3_BUCKET\s*[=:]|\.S3_BUCKET\s*=/;
     const assignsEnv = /\.VC_ENV\s*=/;
     const writers = srcFiles
       .filter((f) => assignsBucket.test(readFileSync(f, 'utf-8')))
       // create.js writes the local-dev .env, which has no deployed environment.
       .filter((f) => rel(f) !== 'src/create.js');
+    // app-runtime-env.js is the app's storage hand-off (appStorageCredential),
+    // shared by the compose app.env and the k8s app Secret.
     expect(writers.map(rel).sort()).toEqual([
+      'src/lib/deploy/app-runtime-env.js',
       'src/lib/deploy/bundle.js',
-      'src/lib/deploy/k8s/k3s.js',
     ]);
     const read = (r: string) => readFileSync(join(ROOT, r), 'utf-8');
     // compose's WALG_S3_PREFIX reads ${VC_ENV}.
@@ -87,6 +89,7 @@ describe('app bucket single resolver census', () => {
     // k8s renders its WAL-G prefix from walgPrefix and nothing there reads
     // VC_ENV, so the Secret must not carry a dead (in k8s-ha, wrong) value.
     expect(read('src/lib/deploy/k8s/k3s.js')).not.toMatch(assignsEnv);
+    expect(read('src/lib/deploy/app-runtime-env.js')).not.toMatch(assignsEnv);
     const k8sReaders = walk(join(ROOT, 'carbon/k8s'), () => true)
       .filter((f) => readFileSync(f, 'utf-8').includes('VC_ENV'))
       .map(rel);

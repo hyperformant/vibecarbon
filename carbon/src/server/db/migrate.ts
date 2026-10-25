@@ -6,9 +6,12 @@ import pg from 'pg';
 
 /**
  * Apply db/migrations/ with drizzle-orm's migrator: the one way migrations
- * reach a database. The app runs it at startup (db/startup.ts
- * migrateAtStartup) and `npm run db:migrate` runs it locally
- * (scripts/db-migrate.ts); no deploy step applies SQL on its own.
+ * reach a database. They run as the owner (`postgres`) in a step of their
+ * own, never in the app: the compose `app-migrate` one-shot and the k8s
+ * `migrate` init container run db/migrate-cli.ts, and `npm run db:migrate`
+ * runs the same step locally (scripts/db-migrate.ts). The app only checks
+ * the ledger (verifyMigrations, db/startup.ts), so the request process never
+ * holds the owner password (security plan 2026-10-20, R8).
  *
  * The ledger is drizzle's default, `drizzle.__drizzle_migrations`. Pending
  * migrations run in ONE transaction, so a failure leaves none of them
@@ -47,8 +50,26 @@ async function ledger(client: pg.ClientBase): Promise<{ count: number; latest: n
 }
 
 /**
+ * Whether the ledger on `client` already has every migration in `folder`:
+ * its newest entry is at least as new as the newest migration file. Reads
+ * only, so the app runs it as `app_service` (which may read the ledger and
+ * nothing else in the `drizzle` schema), and a standby runs it on a
+ * read-only database. Never applies, locks or writes anything.
+ */
+export async function verifyMigrations(
+  client: pg.ClientBase,
+  folder: string = migrationsFolder()
+): Promise<{ upToDate: boolean }> {
+  const files = readMigrationFiles({ migrationsFolder: folder });
+  const newest = Math.max(0, ...files.map((m) => m.folderMillis));
+  const { latest } = await ledger(client);
+  return { upToDate: latest >= newest };
+}
+
+/**
  * Take every server-only table (RLS on, no policies, plus the Better Auth
- * tables) back from every role but superusers, its owner and this one:
+ * tables) back from every role but superusers, its owner, this one and the
+ * app's own role, app_service:
  * app.revoke_server_only_tables() in db/migrations/0002_baseline_post.sql.
  * Run after every migration run, new migrations or not, so a table a later
  * migration creates never stays readable to an RLS-bypass add-on role (the
@@ -86,10 +107,7 @@ export async function runMigrations(
     'select pg_is_in_recovery() as standby'
   );
   if (rows[0]?.standby) {
-    const files = readMigrationFiles({ migrationsFolder: folder });
-    const newest = Math.max(0, ...files.map((m) => m.folderMillis));
-    const { latest } = await ledger(client);
-    return { kind: 'standby', upToDate: latest >= newest };
+    return { kind: 'standby', ...(await verifyMigrations(client, folder)) };
   }
 
   await client.query('select pg_advisory_lock($1::bigint)', [MIGRATIONS_LOCK_KEY]);
@@ -117,27 +135,27 @@ export type MigrationConnection = Pick<
 >;
 
 /**
- * Apply pending migrations on a connection of their own, opened from
- * `connection` and closed afterwards. The one entry point the app's startup
- * (db/startup.ts) and `npm run db:migrate` (scripts/db-migrate.ts) share.
+ * Run `fn` on a connection of its own, opened from `connection` and closed
+ * afterwards: the migrate step (db/migrate-cli.ts, `npm run db:migrate`) and
+ * the app's startup ledger check (db/startup.ts) share it.
  *
  * Deliberately NOT a pool client: the request pool's statement, query and
  * idle-in-transaction timeouts (30-35 s, db/client.ts) are right for a web
  * request and wrong here. A long migration (an index build, a backfill)
- * would be cancelled the same way on every boot, and a replica waiting in
+ * would be cancelled the same way on every run, and a replica waiting in
  * pg_advisory_lock for another replica's run would be cancelled and report
  * the migration failed. Waiting on that lock is waiting for a dependency,
  * not a retry. So only the location and credentials are taken from
  * `connection`, and the session's timeouts are set to 0 (off) explicitly, in
  * case the role or database sets defaults.
  */
-export async function runMigrationsOnOwnConnection(
+export async function onOwnConnection<T>(
   connection: MigrationConnection,
-  folder: string = migrationsFolder()
-): Promise<MigrationOutcome> {
+  fn: (client: pg.Client) => Promise<T>
+): Promise<T> {
   const { host, port, user, password, database } = connection;
   // Only the connect itself is bounded (as for the pool), so an unreachable
-  // database fails fast into startup's connection-loss wait.
+  // database fails fast into the caller's connection-loss wait.
   const client = new pg.Client({
     host,
     port,
@@ -153,9 +171,25 @@ export async function runMigrationsOnOwnConnection(
     await client.query(
       'set statement_timeout = 0; set lock_timeout = 0; set idle_in_transaction_session_timeout = 0'
     );
-    return await runMigrations(client, folder);
+    return await fn(client);
   } finally {
     // Ending the session also drops the advisory lock if the unlock failed.
     await client.end().catch(() => undefined);
   }
+}
+
+/** Apply pending migrations on a connection of their own (onOwnConnection). */
+export function runMigrationsOnOwnConnection(
+  connection: MigrationConnection,
+  folder: string = migrationsFolder()
+): Promise<MigrationOutcome> {
+  return onOwnConnection(connection, (client) => runMigrations(client, folder));
+}
+
+/** Check the ledger on a connection of its own (onOwnConnection). */
+export function verifyMigrationsOnOwnConnection(
+  connection: MigrationConnection,
+  folder: string = migrationsFolder()
+): Promise<{ upToDate: boolean }> {
+  return onOwnConnection(connection, (client) => verifyMigrations(client, folder));
 }

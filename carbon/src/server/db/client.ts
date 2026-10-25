@@ -9,7 +9,8 @@ import * as schema from './schema';
 /**
  * The server's one connection to Postgres.
  *
- * - `adminDb` runs as the connection role (DB_USER), which bypasses RLS. Use
+ * - `adminDb` runs as the connection role (DB_USER, `app_service` in every
+ *   deploy and in local dev), which bypasses RLS but owns nothing. Use
  *   it only where the server acts for itself: webhooks, admin tooling, jobs,
  *   and the auth tables (which app_user cannot read).
  * - `withUserDb(userId, fn)` is the path for anything done on behalf of a
@@ -20,7 +21,7 @@ import * as schema from './schema';
  */
 /**
  * Where the database is and who to connect as: the pool below and the
- * startup migrations (db/migrate.ts, on a connection of their own without
+ * startup ledger check (db/migrate.ts, on a connection of their own without
  * the pool's request timeouts) share it.
  */
 export const connectionConfig = {
@@ -100,18 +101,28 @@ export async function withUserDb<T>(
 }
 
 /**
- * The connection role is wrong for `adminDb`: RLS would scope it, or it
- * cannot switch to `app_user`, so `withUserDb` would fail on every request.
+ * The connection role is wrong for the app: RLS would scope `adminDb`, it
+ * cannot switch to `app_user` (so `withUserDb` would fail on every request),
+ * or, in production, it holds more than the app needs (a superuser, or the
+ * owner of a table, either of which can change the schema or reach the
+ * database host).
  */
 export class DbRoleError extends Error {
-  constructor(role: string, reason: 'no-bypass' | 'not-app-user-member' = 'no-bypass') {
+  constructor(
+    role: string,
+    reason: 'no-bypass' | 'not-app-user-member' | 'privileged' = 'no-bypass'
+  ) {
     super(
       reason === 'no-bypass'
         ? `Postgres role "${role}" cannot bypass row-level security. ` +
-            'Set DB_USER to a role with BYPASSRLS (the default is postgres).'
-        : `Postgres role "${role}" is not a member of app_user, so it cannot run ` +
+            'Set DB_USER to a role with BYPASSRLS (app_service, which the migrate step creates).'
+        : reason === 'not-app-user-member'
+          ? `Postgres role "${role}" is not a member of app_user, so it cannot run ` +
             'user requests under RLS. Grant it (GRANT app_user TO ' +
-            `${role}) or set DB_USER to a role that is (the default is postgres).`
+            `${role}) or set DB_USER to a role that is (app_service, which the migrate step creates).`
+          : `Postgres role "${role}" is a superuser or owns tables, which the app must not ` +
+            'connect as in production. Set DB_USER=app_service and DB_PASSWORD to APP_DB_PASSWORD; ' +
+            'the migrate step (db/migrate-cli.ts) creates that role.'
     );
     this.name = 'DbRoleError';
   }
@@ -133,22 +144,33 @@ export class DbNotMigratedError extends Error {
  * connection failures propagate as they are: both mean "not ready yet",
  * which a caller retries, not "wrong role".
  *
+ * In production (`NODE_ENV=production`, or `production: true`) it also
+ * refuses a superuser or a role that owns any relation in the database: the
+ * app connects as `app_service`, which owns nothing, so it can neither alter
+ * the schema nor reach the superuser's powers. Local dev connects as
+ * `app_service` too; tests may use the owner.
+ *
  * `requireAppUser: false` checks the bypass half only: the startup check
- * before migrations run, when `app_user` (created by the baseline) may not
- * exist yet.
+ * before migrations are verified, when `app_user` (created by the baseline)
+ * may not exist yet.
  */
 export async function assertBypassRole(
   db: Executor = adminDb,
-  opts: { requireAppUser?: boolean } = {}
+  opts: { requireAppUser?: boolean; production?: boolean } = {}
 ): Promise<void> {
+  const production = opts.production ?? env.NODE_ENV === 'production';
   const { rows } = await db.execute<{
     role: string;
     bypass: boolean | null;
+    privileged: boolean | null;
     hasAppUser: boolean;
     member: boolean;
   }>(
     sql`select current_user as role,
       (select rolsuper or rolbypassrls from pg_roles where rolname = current_user) as bypass,
+      (select rolsuper from pg_roles where rolname = current_user)
+        or exists (select 1 from pg_class
+          where relowner = (select oid from pg_roles where rolname = current_user)) as privileged,
       exists (select 1 from pg_roles where rolname = 'app_user') as "hasAppUser",
       case when exists (select 1 from pg_roles where rolname = 'app_user')
         then pg_has_role(current_user, 'app_user', 'MEMBER') else false end as member`
@@ -156,6 +178,7 @@ export async function assertBypassRole(
   const row = rows[0];
   const role = row?.role ?? env.DB_USER;
   if (!row?.bypass) throw new DbRoleError(role);
+  if (production && row.privileged) throw new DbRoleError(role, 'privileged');
   if (opts.requireAppUser === false) return;
   if (!row.hasAppUser) throw new DbNotMigratedError();
   if (!row.member) throw new DbRoleError(role, 'not-app-user-member');

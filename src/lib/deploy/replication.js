@@ -1128,7 +1128,7 @@ export function assertReplicationStreamingOrDegraded({
 }
 
 /**
- * Read REPL_PASSWORD from the `vibecarbon-secrets` k8s Secret — the SAME source
+ * Read REPL_PASSWORD from the `vibecarbon-infra-secrets` k8s Secret — the SAME source
  * the db uses. k8s nodes have NO compose-style `/opt/<project>/.env.local`; the
  * old grep of that path always returned empty, so a re-seed silently no-op'd and
  * the caller promoted a possibly-stale (or empty) standby. jsonpath returns the
@@ -1144,7 +1144,7 @@ export async function getReplPasswordFromSecret(ip, sshKeyPath) {
   const b64 = await sshKubectl(ip, sshKeyPath, [
     'get',
     'secret',
-    'vibecarbon-secrets',
+    'vibecarbon-infra-secrets',
     '-n',
     'vibecarbon',
     '-o',
@@ -1242,7 +1242,7 @@ $$;
  *      exact regression this fix closes).
  *
  * Safety contract (unchanged):
- *   - REPL_PASSWORD is read from the `vibecarbon-secrets` Secret. If it is not
+ *   - REPL_PASSWORD is read from the `vibecarbon-infra-secrets` Secret. If it is not
  *     found we CANNOT safely re-seed → throw a HARD ERROR so the caller aborts
  *     rather than acting on a stale standby. Distinct from "primary unreachable".
  *   - Reachability is probed from inside the standby pod BEFORE any destructive
@@ -1317,7 +1317,7 @@ export async function reseedStandbyFromPrimary(
   const replPassword = await getReplPasswordFromSecret(standbyIp, sshKeyPath);
   if (!replPassword) {
     throw new Error(
-      're-seed aborted: REPL_PASSWORD not found in the vibecarbon-secrets Secret. ' +
+      're-seed aborted: REPL_PASSWORD not found in the vibecarbon-infra-secrets Secret. ' +
         'Cannot re-seed the standby from the primary, refusing to act on a ' +
         'possibly-stale standby. Verify the standby cluster was deployed with `vibecarbon deploy --ha`.',
     );

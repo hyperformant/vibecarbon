@@ -31,7 +31,8 @@ export const CORE_SERVICE_ORDER = Object.keys(SERVICE_DISPLAY_NAMES);
  *
  * A running container with no healthcheck is counted healthy but labelled
  * "running" so the table doesn't overclaim. One-shot init containers
- * (`*-setup`) that exited 0 are "done" and excluded from the healthy total.
+ * (`*-setup`, and `app-migrate`, the migrate step) that exited 0 are "done"
+ * and excluded from the healthy total.
  *
  * @param {string} container compose service name (prefix already stripped)
  * @param {string} state
@@ -51,7 +52,7 @@ export function classifyContainer(container, state, status) {
   }
   if (state === 'exited') {
     const exitCode = status.match(/^Exited \((\d+)\)/)?.[1];
-    if (exitCode === '0' && container.endsWith('-setup')) {
+    if (exitCode === '0' && (container.endsWith('-setup') || container === 'app-migrate')) {
       return { health: 'done', label: 'done', detail: '' };
     }
     return { health: 'unhealthy', label: 'exited', detail: status };

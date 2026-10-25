@@ -133,6 +133,7 @@ export async function sweepOrphanedDigitalOceanResources(
     s3Buckets: 0,
     sshKeys: 0,
     loadBalancers: 0,
+    storageKeys: 0,
   };
   let enumFailed = false;
   const markIncomplete = (what: string) => {
@@ -333,6 +334,48 @@ export async function sweepOrphanedDigitalOceanResources(
     console.warn(`${tag} [sweep] VPC cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
+  // 3c. App storage keys (security plan R9). Every deploy mints the env app a
+  // key labelled `vc-app-<env bucket>`, and env buckets start with the project
+  // name, so a key whose label starts with `vc-app-<project>` is this run's.
+  // Destroy revokes them; one left here is a destroy leak, or a deploy that
+  // crashed between the mint and the record (no destroy can see that one).
+  try {
+    const { appKeyLabel } = (await import('../../../src/lib/providers/app-key-api.js')) as {
+      appKeyLabel: (bucket: string, max: number) => string;
+    };
+    const labelPrefix = appKeyLabel(projectName, 63);
+    const { items, complete } = await walkPages<{ access_key: string; name: string }>(
+      '/spaces/keys',
+      'keys',
+    );
+    if (!complete) markIncomplete('app storage key list');
+    for (const key of items) {
+      if (!String(key.name ?? '').startsWith(labelPrefix)) continue;
+      console.log(`${tag} [sweep] Revoking orphaned app storage key (${key.name})`);
+      try {
+        const res = await fetchImpl(
+          `${API_BASE}/spaces/keys/${encodeURIComponent(key.access_key)}`,
+          { method: 'DELETE' },
+        );
+        if (res.ok || res.status === 404) counts.storageKeys = (counts.storageKeys ?? 0) + 1;
+        else {
+          enumFailed = true;
+          console.warn(`${tag} [sweep] app storage key ${key.name} revoke returned ${res.status}`);
+        }
+      } catch (err) {
+        enumFailed = true;
+        console.warn(
+          `${tag} [sweep] app storage key ${key.name} revoke failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+  } catch (e) {
+    markIncomplete('app storage key list');
+    console.warn(
+      `${tag} [sweep] App storage key cleanup failed: ${e instanceof Error ? e.message : e}`,
+    );
+  }
+
   // Reserved IPs. digitalocean-k8s.js's `ingress` ReservedIp mints one and it bills WHILE UNASSIGNED — deleting
   // the droplet it was attached to does NOT release it, so a failed destroy
   // strands a billing IP.
@@ -457,7 +500,8 @@ export async function sweepOrphanedDigitalOceanResources(
     (counts.loadBalancers ?? 0) +
     counts.networks +
     counts.s3Buckets +
-    counts.sshKeys;
+    counts.sshKeys +
+    (counts.storageKeys ?? 0);
   if (totalOrphans > 0) {
     const breakdown = [
       `droplets=${counts.servers}`,
@@ -467,6 +511,7 @@ export async function sweepOrphanedDigitalOceanResources(
       `vpcs=${counts.networks}`,
       `spaces-buckets=${counts.s3Buckets}`,
       `ssh-keys=${counts.sshKeys}`,
+      `app-storage-keys=${counts.storageKeys ?? 0}`,
     ].join(', ');
     console.warn(
       `${tag} [sweep] REGRESSION: destroy left ${totalOrphans} DigitalOcean orphan resource(s) (${breakdown}). vibecarbon destroy did not free these — fix the corresponding destroy code path.`,
