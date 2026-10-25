@@ -41,7 +41,7 @@ importers:
         version: 1.43.1(typescript@7.0.2)
       '@pulumi/linode':
         specifier: ^6.4.0
-        version: 6.7.1(typescript@7.0.2)
+        version: 6.8.0(typescript@7.0.2)
       '@pulumi/pulumi':
         specifier: ^3.260.0
         version: 3.269.0(typescript@7.0.2)
@@ -709,12 +709,14 @@ packages:
   '@opentelemetry/sdk-trace-base@2.12.0':
     resolution: {integrity: sha512-JOERgZCxRM06FEJ5kEWxlSRChah6MmXDx3KwCruqEv/iEyLkTokCSemf2y1w8oIHtfrr8EVTpzebq/31vn2Cpg==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
   '@opentelemetry/sdk-trace-node@2.12.0':
     resolution: {integrity: sha512-9DufH1IlmQMoKAfot5y/FhTP1RnmhLb5K6eKmJO/bvzPjYwPAazoiAUbTZFdPbqxOXN0FEbhZx/e6SB1Og4jmg==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.0.0 <1.10.0'
 
@@ -782,8 +784,8 @@ packages:
   '@pulumi/hcloud@1.43.1':
     resolution: {integrity: sha512-6UjewEWMjzrT5/9mGn/XKSDoXbn1ohZn9O55MaDQuqWoAzZvtqrDTmuN9rIvj6pdUl5yyRwKOnupabLV29l2mQ==}
 
-  '@pulumi/linode@6.7.1':
-    resolution: {integrity: sha512-wkSkToTrToMulEfzA+1+cLRz+RBaPPVjA6MkJno/Xen+Ay7Q19hoyhjsmiPMEQhHdOJfbPN9+Ked/+SguGM4OA==}
+  '@pulumi/linode@6.8.0':
+    resolution: {integrity: sha512-ywWLVKDNsU10bzeJAiNXyxJz9TiZpbDS4KTH4pE6eZIDS7qIq+DtGCvHdmXij24MZ+aJKwTE4tSL930v2QpPZw==}
 
   '@pulumi/pulumi@3.269.0':
     resolution: {integrity: sha512-budgf3lN9Iuf+Uu8+evbTw1LiZFa9GKgKdHBQQdDRv2IsD5oG8snyzvyNQp+ziD4B3ukyLaou+nHXsnVuqlT8A==}
@@ -3843,7 +3845,7 @@ snapshots:
       - ts-node
       - typescript
 
-  '@pulumi/linode@6.7.1(typescript@7.0.2)':
+  '@pulumi/linode@6.8.0(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.269.0(typescript@7.0.2)
     transitivePeerDependencies:
