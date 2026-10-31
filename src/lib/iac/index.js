@@ -539,6 +539,70 @@ export async function repairVultrFirewallRuleInputs(stack) {
 }
 
 /**
+ * DigitalOcean Droplets' `volumeIds`, which a refresh fills from the live API.
+ *
+ * terraform-provider-digitalocean's Droplet Delete detaches every volume id
+ * the Droplet's STATE lists before it deletes the Droplet, and a detach of a
+ * volume that no longer exists is a 404 that fails the whole delete. Our
+ * programs never set `volumeIds`: every volume on a cluster Droplet belongs
+ * to the DO CSI driver. destroy.js deletes the cluster's PVCs before Pulumi
+ * runs, which starts CSI's asynchronous detach and DeleteVolume, so the
+ * pre-destroy refresh can catch a volume still attached that CSI deletes a
+ * few seconds later. That is the d4-standby failure of 2026-10-31:
+ *
+ *   Error detaching volume "4c926666-..." from droplet (614595377):
+ *   POST /v2/volumes/4c926666-.../actions: 404
+ *
+ * The Droplet does not own those attachments, and deleting a Droplet
+ * detaches its volumes on DO's side (the cluster-autoscaler sweep in
+ * destroy.js deletes CSI-attached workers by API on exactly that basis), so
+ * the state forgets the list instead of racing CSI for it. The volumes
+ * themselves are still reaped by destroy.js's captured-id volume sweep.
+ */
+const DO_DROPLET_TYPE = 'digitalocean:index/droplet:Droplet';
+
+/**
+ * Empty every DigitalOcean Droplet's `volumeIds` in the stack's state, on
+ * inputs and outputs (the provider builds its Delete from the stored state;
+ * a refresh copies outputs into inputs). Only writes state when something
+ * changed, and never throws: a failure here leaves the destroy to report its
+ * own error, which is the better thing to surface.
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @returns {Promise<number>} count of Droplets released
+ */
+export async function releaseDropletVolumeIds(stack) {
+  try {
+    const state = await stack.exportStack();
+    const resources = state?.deployment?.resources ?? [];
+    let released = 0;
+    for (const r of resources) {
+      if (r?.type !== DO_DROPLET_TYPE) continue;
+      let touched = false;
+      for (const side of ['inputs', 'outputs']) {
+        const ids = r?.[side]?.volumeIds;
+        if (!Array.isArray(ids) || ids.length === 0) continue;
+        r[side].volumeIds = [];
+        touched = true;
+      }
+      if (touched) released++;
+    }
+    if (released > 0) {
+      await withStateBackendRetry(() => stack.importStack(state), 'pre-destroy state repair');
+      progressLog(
+        `[pulumi] released CSI volume ids from ${released} droplet ${
+          released === 1 ? 'record' : 'records'
+        }: the CSI driver owns those attachments, not the Droplet`,
+      );
+    }
+    return released;
+  } catch (err) {
+    progressLog(`[pulumi] droplet volume release warning: ${summarizePulumiError(err)}`);
+    return 0;
+  }
+}
+
+/**
  * Run `pulumi up` and return the raw outputs. Streams Pulumi logs to an
  * optional `onOutput` sink so callers can forward progress to a spinner.
  *
@@ -864,6 +928,9 @@ export async function destroyStack(stackName, program, options = {}) {
   } catch (err) {
     progressLog(`[pulumi] pre-destroy refresh warning: ${summarizePulumiError(err)}`);
   }
+  // The refresh above can record CSI volumes the cluster teardown is already
+  // deleting; see releaseDropletVolumeIds.
+  await releaseDropletVolumeIds(stack);
 
   // Pre-destroy resource snapshot — see the loud-partial-detection doc
   // above. Best-effort: if exportStack itself fails, skip the resource-count
