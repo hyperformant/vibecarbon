@@ -63,9 +63,13 @@ const SNAPSHOT_TIMEOUT_MS = 180_000; // tls-snapshot.sh bounds its own upload at
 /** Exit status of a server with no project dir or no `-f` set in reconcile.sh. */
 const NO_COMPOSE_FLAGS_EXIT = 20;
 
-/** The ERE matching an acme.json certificate entry for the apex domain. */
+/**
+ * The ERE matching an acme.json certificate entry for the apex domain. Every
+ * ERE metacharacter is escaped, backslash included (callers also refuse any
+ * domain outside SAFE_NAME_RE).
+ */
 function apexPattern(domain) {
-  return `"main": ?"${domain.replace(/\./g, '\\.')}"`;
+  return `"main": ?"${domain.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}"`;
 }
 
 /**
