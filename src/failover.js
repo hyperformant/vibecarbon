@@ -1662,16 +1662,26 @@ function swapServerRoles(servers) {
  * Swaps ha.primary↔ha.standby WHOLESALE — the objects carry their own stack +
  * region + IP fields, which ride along — and the top-level region↔secondaryRegion.
  * Flags the env `replication: 'degraded'` / `degraded: true`: honest until a
- * reconverge deploy re-establishes streaming from the NEW primary. The
- * role-agnostic pilot config (standbyWorkerSpec, scaleUpList) is preserved
- * untouched — it describes whatever cluster is currently the standby.
+ * reconverge deploy re-establishes streaming from the NEW primary. The worker
+ * types swap with the roles: the new primary's is the old standby's
+ * `standbyWorkerSpec.serverType`, and `standbyWorkerSpec.serverType` becomes
+ * the old primary's (`ha.primary.workerServerType`, else the env's top-level
+ * `workerServerType` for a record that predates it), so neither side is handed
+ * a type its location may not sell. The top-level master, db and worker
+ * types follow too: they take the new primary's recorded types, so the top
+ * level always describes the serving primary. scaleUpList is role-agnostic
+ * and stays.
+ *
+ * `workerServerType` is the type the promoted side's workers were provisioned
+ * with when it differs from the record (`failover -server-type`); it wins.
  *
  * Patches the FRESH project config under the config lock (never a stale
  * in-memory envConfig — the deploy paths save mid-flight). Exported for tests.
  *
  * @param {string} envName
+ * @param {{override?: string, workerServerType?: string}} [options]
  */
-export function swapHaRoles(envName, { override } = {}) {
+export function swapHaRoles(envName, { override, workerServerType } = {}) {
   let swapped = false;
   updateProjectConfig((config) => {
     const envConfig = config.environments?.[envName];
@@ -1679,8 +1689,25 @@ export function swapHaRoles(envName, { override } = {}) {
     if (!envConfig?.ha?.primary || !envConfig.ha.standby) return;
     swapped = true;
     const ha = envConfig.ha;
+    const primaryWorker = ha.primary.workerServerType || envConfig.workerServerType;
+    const standbyWorker = workerServerType || ha.standbyWorkerSpec?.serverType;
     // Swap the role objects wholesale (stack / region / IP fields ride along).
     [ha.primary, ha.standby] = [ha.standby, ha.primary];
+    // The worker records follow the roles. The standby's worker record is
+    // standbyWorkerSpec alone, so the old primary's moves there.
+    delete ha.standby.workerServerType;
+    if (standbyWorker) ha.primary.workerServerType = standbyWorker;
+    if (primaryWorker && ha.standbyWorkerSpec) {
+      ha.standbyWorkerSpec = { ...ha.standbyWorkerSpec, serverType: primaryWorker };
+    }
+    // The top-level types describe the serving primary, as the top-level
+    // region does: the deploy wizard reads them as the primary's, and they
+    // are what a destroy keeps (env-identity.js, which drops `ha`), so a
+    // rebuild after a destroy must not put the old primary's types in the
+    // new primary's location.
+    for (const key of ['masterServerType', 'dbServerType', 'workerServerType']) {
+      if (ha.primary[key]) envConfig[key] = ha.primary[key];
+    }
     // servers[] records the same roles; resolvePrimary refuses a config whose
     // two records disagree. db, worker and master entries carry other roles.
     envConfig.servers = swapServerRoles(envConfig.servers);
@@ -2654,7 +2681,13 @@ export async function failoverHA(
     : mode === 'resume'
       ? envConfig?.ha?.failoverInFlight?.override
       : undefined;
-  swapRoles(envName, override ? { override } : undefined);
+  // The promoted side's workers came up on -server-type when given
+  // (provisionStandbyCapacity), so the swap records that type for them.
+  const swapOptions = {
+    ...(override && { override }),
+    ...(parsed.serverType && { workerServerType: parsed.serverType }),
+  };
+  swapRoles(envName, Object.keys(swapOptions).length > 0 ? swapOptions : undefined);
   // The old primary is now the retired side: fence it (marker, app at zero,
   // WALG_ROLE=standby) if it answers. One that does not is fenced by the next
   // status, failover or deploy that reaches it, before it can push a backup.

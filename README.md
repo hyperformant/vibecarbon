@@ -318,6 +318,37 @@ _Latest green CI runs: Hetzner Cloud `2ed8109` (2026-09-22) · DigitalOcean `48e
 
 ---
 
+## What it costs to run
+
+<!-- BEGIN:cost-grid -->
+You pay your cloud provider directly, and vibecarbon starts every new project on the cheapest servers you can order today that fit the measured load. This is the monthly bill for one environment at those default sizes.
+
+**What each mode runs**
+
+| Mode | Servers | Peak RAM used per server |
+|---|---|---|
+| compose | 1 | 1.10 GB |
+| compose-ha | 2 (primary + standby in a second location) | 1.25 GB |
+| k8s | 3 (master, database, worker) | 1.49 GB master, 0.64 GB database, 1.05 GB worker |
+| k8s-ha | 5 (3 primary + 2 standby in a second location) | 1.56 GB master, 0.66 GB database |
+
+**Monthly cost per environment**
+
+| Provider | compose | compose-ha | k8s | k8s-ha |
+|---|---|---|---|---|
+| Hetzner (USD account) | $23.59 (nbg1) | $47.18 (nbg1 + fsn1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |
+| DigitalOcean | $24 (nyc3) | $48 (nyc3 + tor1) | $61 (nyc3) | $98 (nyc3 + tor1) |
+| Vultr | $20 (ewr) | $40 (ewr + ord) | not yet | not yet |
+| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | not yet | not yet |
+| Scaleway | €21.84 (fr-par-1) | €43.68 (fr-par-1 + nl-ams-1) | not yet | not yet |
+
+Plus object storage for backups and uploads, billed once per provider account and shared by every project on it: Hetzner $7.99 (this USD account; €6.49 on EUR accounts), DigitalOcean $5, Vultr $18, Linode $5, Scaleway usage-based (cents at this size).
+
+<sub>Prices and availability from each provider's API on 22 October 2026, excluding VAT. Each server has at least twice its measured peak RAM, and compose servers never go below 4 GB. Totals include billed public IPv4 (Hetzner, Scaleway), the k8s ingress IP and database volume, and Scaleway's 40 GB root volume. The region in a cell is where a new project deploys by default, the cheapest location on the provider's home continent; HA standbys sit in a second location on the same continent. Peak RAM was measured 20 October 2026 on Hetzner with the observability add-on running, so a default install uses less. Hetzner bills this account in USD; EUR accounts are billed in EUR. Hetzner's cheaper cx23 comes and goes from stock in the EU, and new deploys pick it automatically when it is in stock.</sub>
+<!-- END:cost-grid -->
+
+---
+
 ## License & Terms
 
 The CLI is Fair Source under the [Functional Source License 1.1 with MIT future license](./LICENSE). **Building from source is free for any non-competing use, and every release converts to the MIT license two years after publication.**

@@ -23,14 +23,25 @@ export interface ScenarioConfig {
   mode: DeployMode;
   dnsProvider: DnsProvider;
   envPrefix: string;
-  serverType: string;
+  /**
+   * A pinned server type, seeded into `.vibecarbon.json` before deploy. The
+   * matrix leaves it undefined so the deploy picks the default sizes a
+   * customer gets (tests/e2e/utils/region-resolver.ts); a scenario that pins
+   * one must be on the allow-list in
+   * tests/unit/e2e/default-sizes-unpinned-census.test.ts.
+   */
+  serverType?: string;
   region: string;
   secondaryRegion?: string;
   domain: string;
   features: readonly string[];
   adminEmail: string;
   adminPassword: string;
-  scaleToType: string;
+  /**
+   * Scale ladder (tests/config.ts `capacityPreferences.<provider>.scaleTo`):
+   * the scale step looks up the type the deploy recorded.
+   */
+  scaleTo: Readonly<Record<string, string>>;
   projectName: string;
   projectDir: string;
   testRepoSlug?: string;

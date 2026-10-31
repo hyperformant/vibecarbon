@@ -1,0 +1,6077 @@
+{
+  "provider": "scaleway",
+  "captured": "2026-10-22",
+  "source": "GET /instance/v1/zones/{zone}/products/servers and .../availability (EUR)",
+  "note": "Trimmed to the fields fetchServerTypes reads. Public catalog data, no account identifiers.",
+  "zones": {
+    "fr-par-1": {
+      "servers": {
+        "BASIC2-A12C-24G": {
+          "arch": "arm64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 115.194,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 335544320
+        },
+        "BASIC2-A12C-48G": {
+          "arch": "arm64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 131.911,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 335544320
+        },
+        "BASIC2-A16C-32G": {
+          "arch": "arm64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 150.891,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 503316480
+        },
+        "BASIC2-A16C-64G": {
+          "arch": "arm64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 201.188,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 503316480
+        },
+        "BASIC2-A2C-4G": {
+          "arch": "arm64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 16.79,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "BASIC2-A2C-8G": {
+          "arch": "arm64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 25.185,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "BASIC2-A4C-16G": {
+          "arch": "arm64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 50.297,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 125829120
+        },
+        "BASIC2-A4C-8G": {
+          "arch": "arm64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 37.741,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 125829120
+        },
+        "BASIC2-A6C-12G": {
+          "arch": "arm64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 57.597,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 188743680
+        },
+        "BASIC2-A6C-24G": {
+          "arch": "arm64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 65.919,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 188743680
+        },
+        "BASIC2-A8C-16G": {
+          "arch": "arm64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 75.482,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 251658240
+        },
+        "BASIC2-A8C-32G": {
+          "arch": "arm64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 100.594,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 251658240
+        },
+        "BASIC3-X12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 197.903,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 786432000
+        },
+        "BASIC3-X12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 226.592,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 786432000
+        },
+        "BASIC3-X16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 259.33031,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "BASIC3-X16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 345.49805,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "BASIC3-X2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 28.79777,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "BASIC3-X2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 43.23425,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "BASIC3-X4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 86.4685,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "BASIC3-X4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 57.67073,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "BASIC3-X6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 98.988,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 393216000
+        },
+        "BASIC3-X6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 113.369,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 393216000
+        },
+        "BASIC3-X8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 129.70275,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "BASIC3-X8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 172.86181,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "COMPUTE3-X12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 256.317,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 341.786,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X24C-48G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 51539607552,
+          "monthly_price": 512.3176,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "COMPUTE3-X2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 42.705,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X32C-64G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 68719476736,
+          "monthly_price": 683.499,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "COMPUTE3-X48C-96G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 103079215104,
+          "monthly_price": 1019.81,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "COMPUTE3-X4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 85.41,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X64C-128G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 137438953472,
+          "monthly_price": 1366.998,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "COMPUTE3-X6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 128.1588,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 170.893,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X96C-192G": {
+          "arch": "x86_64",
+          "ncpus": 96,
+          "ram": 206158430208,
+          "monthly_price": 2039.62,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "DEV1-L": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 31.2732,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 80000000000
+          },
+          "block_bandwidth": 209715200
+        },
+        "DEV1-M": {
+          "arch": "x86_64",
+          "ncpus": 3,
+          "ram": 4294967296,
+          "monthly_price": 14.74308,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 40000000000
+          },
+          "block_bandwidth": 157286400
+        },
+        "STARDUST1-S": {
+          "arch": "x86_64",
+          "ncpus": 1,
+          "ram": 1073741824,
+          "monthly_price": 0.438,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 10000000000
+          },
+          "block_bandwidth": 52428800
+        },
+        "DEV1-S": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 2147483648,
+          "monthly_price": 6.55248,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 20000000000
+          },
+          "block_bandwidth": 104857600
+        },
+        "DEV1-XL": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 12884901888,
+          "monthly_price": 47.50548,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 120000000000
+          },
+          "block_bandwidth": 262144000
+        },
+        "GP1-L": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 565.1514,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 1073741824
+        },
+        "GP1-M": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 279.9696,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 838860800
+        },
+        "GP1-S": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 139.2402,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 300000000000
+          },
+          "block_bandwidth": 524288000
+        },
+        "GP1-XL": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 274877906944,
+          "monthly_price": 1221.8886,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 2147483648
+        },
+        "GP1-XS": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 67.7586,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 150000000000
+          },
+          "block_bandwidth": 314572800
+        },
+        "L4-1-24G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 51539607552,
+          "monthly_price": 574.875,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "L4-2-24G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 103079215104,
+          "monthly_price": 1149.75,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1572864000
+        },
+        "L4-4-24G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 206158430208,
+          "monthly_price": 2299.5,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2621440000
+        },
+        "L4-8-24G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 412316860416,
+          "monthly_price": 4599.0,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5242880000
+        },
+        "MEMORY3-X12C-96G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 103079215104,
+          "monthly_price": 496.254,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X16C-128G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 137438953472,
+          "monthly_price": 661.672,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X24C-192G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 206158430208,
+          "monthly_price": 992.508,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "MEMORY3-X2C-16G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 17179869184,
+          "monthly_price": 82.709,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X32C-256G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 274877906944,
+          "monthly_price": 1323.344,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "MEMORY3-X48C-384G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 412316860416,
+          "monthly_price": 1983.41,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "MEMORY3-X4C-32G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 34359738368,
+          "monthly_price": 165.418,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X6C-48G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 51539607552,
+          "monthly_price": 248.127,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X8C-64G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 68719476736,
+          "monthly_price": 330.836,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "PLAY2-MICRO": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 40.2084,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 167772160
+        },
+        "PLAY2-NANO": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 20.1042,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "PLAY2-PICO": {
+          "arch": "x86_64",
+          "ncpus": 1,
+          "ram": 2147483648,
+          "monthly_price": 10.4244,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 41943040
+        },
+        "POP2-12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 317.55,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 430.7,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-16C-64G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 1063.391,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-24C-96G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 643.05,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 53.655,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-2C-8G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 133.079,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-32C-128G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 861.4,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-32C-128G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 2126.709,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-48C-192G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1292.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 107.31,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-4C-16G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 265.501,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-64C-256G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1715.5,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 160.965,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 211.7,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-8C-32G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 528.009,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HC-12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 233.016,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-HC-16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 310.688,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HC-24C-48G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 51539607552,
+          "monthly_price": 466.032,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HC-2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 38.836,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HC-32C-64G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 68719476736,
+          "monthly_price": 621.376,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-48C-96G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 103079215104,
+          "monthly_price": 927.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 77.672,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HC-64C-128G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 137438953472,
+          "monthly_price": 1242.752,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 116.508,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-HC-8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 155.344,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HM-12C-96G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 103079215104,
+          "monthly_price": 451.14,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-HM-16C-128G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 137438953472,
+          "monthly_price": 601.52,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HM-24C-192G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 206158430208,
+          "monthly_price": 902.28,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HM-2C-16G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 17179869184,
+          "monthly_price": 75.19,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HM-32C-256G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 274877906944,
+          "monthly_price": 1203.04,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-48C-384G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 412316860416,
+          "monthly_price": 1803.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-4C-32G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 34359738368,
+          "monthly_price": 150.38,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HM-64C-512G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 549755813888,
+          "monthly_price": 2406.08,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-6C-48G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 51539607552,
+          "monthly_price": 225.57,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-HM-8C-64G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 68719476736,
+          "monthly_price": 300.76,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HN-10": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 530.272,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HN-3": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 186.442,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HN-5": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 330.252,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "PRO2-L": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 653.0142,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2097152000
+        },
+        "PRO2-M": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 326.1348,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "PRO2-S": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 163.0674,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "PRO2-XS": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 81.906,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "PRO2-XXS": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 40.953,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "STANDARD2-A12C-48G": {
+          "arch": "arm64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 223.964,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "STANDARD2-A16C-64G": {
+          "arch": "arm64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 367.847,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "STANDARD2-A24C-96G": {
+          "arch": "arm64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 478.223,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A2C-8G": {
+          "arch": "arm64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 42.778,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "STANDARD2-A32C-128G": {
+          "arch": "arm64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 874.394,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A48C-192G": {
+          "arch": "arm64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1103.541,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A4C-16G": {
+          "arch": "arm64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 85.483,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "STANDARD2-A64C-256G": {
+          "arch": "arm64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1470.366,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A6C-24G": {
+          "arch": "arm64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 111.909,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "STANDARD2-A8C-32G": {
+          "arch": "arm64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 171.039,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "STANDARD3-X12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 337.698,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 473.77,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X24C-96G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 687.003,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "STANDARD3-X2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 59.057,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X32C-128G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 947.54,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "STANDARD3-X48C-192G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1421.31,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "STANDARD3-X4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 118.041,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X64C-256G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1887.05,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "STANDARD3-X6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 177.185,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 232.87,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        }
+      },
+      "availability": {
+        "BASIC2-A12C-24G": "available",
+        "BASIC2-A12C-48G": "available",
+        "BASIC2-A16C-32G": "available",
+        "BASIC2-A16C-64G": "available",
+        "BASIC2-A2C-4G": "available",
+        "BASIC2-A2C-8G": "available",
+        "BASIC2-A4C-16G": "available",
+        "BASIC2-A4C-8G": "available",
+        "BASIC2-A6C-12G": "available",
+        "BASIC2-A6C-24G": "available",
+        "BASIC2-A8C-16G": "available",
+        "BASIC2-A8C-32G": "available",
+        "BASIC3-X12C-24G": "scarce",
+        "BASIC3-X12C-48G": "scarce",
+        "BASIC3-X16C-32G": "scarce",
+        "BASIC3-X16C-64G": "scarce",
+        "BASIC3-X2C-4G": "scarce",
+        "BASIC3-X2C-8G": "scarce",
+        "BASIC3-X4C-16G": "scarce",
+        "BASIC3-X4C-8G": "scarce",
+        "BASIC3-X6C-12G": "scarce",
+        "BASIC3-X6C-24G": "scarce",
+        "BASIC3-X8C-16G": "scarce",
+        "BASIC3-X8C-32G": "scarce",
+        "COMPUTE3-X12C-24G": "scarce",
+        "COMPUTE3-X16C-32G": "scarce",
+        "COMPUTE3-X24C-48G": "scarce",
+        "COMPUTE3-X2C-4G": "available",
+        "COMPUTE3-X32C-64G": "shortage",
+        "COMPUTE3-X48C-96G": "shortage",
+        "COMPUTE3-X4C-8G": "scarce",
+        "COMPUTE3-X64C-128G": "shortage",
+        "COMPUTE3-X6C-12G": "scarce",
+        "COMPUTE3-X8C-16G": "scarce",
+        "COMPUTE3-X96C-192G": "shortage",
+        "DEV1-L": "available",
+        "DEV1-M": "available",
+        "STARDUST1-S": "shortage",
+        "DEV1-S": "available",
+        "DEV1-XL": "available",
+        "GP1-L": "available",
+        "GP1-M": "available",
+        "GP1-S": "available",
+        "GP1-XL": "available",
+        "GP1-XS": "available",
+        "L4-1-24G": "shortage",
+        "L4-2-24G": "shortage",
+        "L4-4-24G": "shortage",
+        "L4-8-24G": "shortage",
+        "MEMORY3-X12C-96G": "available",
+        "MEMORY3-X16C-128G": "scarce",
+        "MEMORY3-X24C-192G": "scarce",
+        "MEMORY3-X2C-16G": "available",
+        "MEMORY3-X32C-256G": "shortage",
+        "MEMORY3-X48C-384G": "shortage",
+        "MEMORY3-X4C-32G": "available",
+        "MEMORY3-X6C-48G": "available",
+        "MEMORY3-X8C-64G": "available",
+        "PLAY2-MICRO": "scarce",
+        "PLAY2-NANO": "scarce",
+        "PLAY2-PICO": "scarce",
+        "POP2-12C-48G": "shortage",
+        "POP2-16C-64G": "shortage",
+        "POP2-16C-64G-WIN": "available",
+        "POP2-24C-96G": "shortage",
+        "POP2-2C-8G": "scarce",
+        "POP2-2C-8G-WIN": "available",
+        "POP2-32C-128G": "shortage",
+        "POP2-32C-128G-WIN": "available",
+        "POP2-48C-192G": "shortage",
+        "POP2-4C-16G": "scarce",
+        "POP2-4C-16G-WIN": "available",
+        "POP2-64C-256G": "shortage",
+        "POP2-6C-24G": "scarce",
+        "POP2-8C-32G": "shortage",
+        "POP2-8C-32G-WIN": "available",
+        "POP2-HC-12C-24G": "shortage",
+        "POP2-HC-16C-32G": "shortage",
+        "POP2-HC-24C-48G": "shortage",
+        "POP2-HC-2C-4G": "scarce",
+        "POP2-HC-32C-64G": "shortage",
+        "POP2-HC-48C-96G": "shortage",
+        "POP2-HC-4C-8G": "scarce",
+        "POP2-HC-64C-128G": "shortage",
+        "POP2-HC-6C-12G": "scarce",
+        "POP2-HC-8C-16G": "shortage",
+        "POP2-HM-12C-96G": "shortage",
+        "POP2-HM-16C-128G": "shortage",
+        "POP2-HM-24C-192G": "shortage",
+        "POP2-HM-2C-16G": "scarce",
+        "POP2-HM-32C-256G": "shortage",
+        "POP2-HM-48C-384G": "shortage",
+        "POP2-HM-4C-32G": "scarce",
+        "POP2-HM-64C-512G": "shortage",
+        "POP2-HM-6C-48G": "scarce",
+        "POP2-HM-8C-64G": "shortage",
+        "POP2-HN-10": "available",
+        "POP2-HN-3": "available",
+        "POP2-HN-5": "scarce",
+        "PRO2-L": "shortage",
+        "PRO2-M": "shortage",
+        "PRO2-S": "scarce",
+        "PRO2-XS": "scarce",
+        "PRO2-XXS": "scarce",
+        "STANDARD2-A12C-48G": "available",
+        "STANDARD2-A16C-64G": "available",
+        "STANDARD2-A24C-96G": "available",
+        "STANDARD2-A2C-8G": "available",
+        "STANDARD2-A32C-128G": "available",
+        "STANDARD2-A48C-192G": "available",
+        "STANDARD2-A4C-16G": "available",
+        "STANDARD2-A64C-256G": "available",
+        "STANDARD2-A6C-24G": "available",
+        "STANDARD2-A8C-32G": "available",
+        "STANDARD3-X12C-48G": "scarce",
+        "STANDARD3-X16C-64G": "scarce",
+        "STANDARD3-X24C-96G": "scarce",
+        "STANDARD3-X2C-8G": "available",
+        "STANDARD3-X32C-128G": "shortage",
+        "STANDARD3-X48C-192G": "shortage",
+        "STANDARD3-X4C-16G": "scarce",
+        "STANDARD3-X64C-256G": "shortage",
+        "STANDARD3-X6C-24G": "scarce",
+        "STANDARD3-X8C-32G": "scarce"
+      }
+    },
+    "fr-par-2": {
+      "servers": {
+        "B300-SXM-8-288G": {
+          "arch": "x86_64",
+          "ncpus": 224,
+          "ram": 4123168604160,
+          "monthly_price": 43800.0,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5242880000
+        },
+        "BASIC2-A12C-24G": {
+          "arch": "arm64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 115.194,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 335544320
+        },
+        "BASIC2-A12C-48G": {
+          "arch": "arm64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 131.911,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 335544320
+        },
+        "BASIC2-A16C-32G": {
+          "arch": "arm64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 150.891,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 503316480
+        },
+        "BASIC2-A16C-64G": {
+          "arch": "arm64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 201.188,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 503316480
+        },
+        "BASIC2-A2C-4G": {
+          "arch": "arm64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 16.79,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "BASIC2-A2C-8G": {
+          "arch": "arm64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 25.185,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "BASIC2-A4C-16G": {
+          "arch": "arm64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 50.297,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 125829120
+        },
+        "BASIC2-A4C-8G": {
+          "arch": "arm64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 37.741,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 125829120
+        },
+        "BASIC2-A6C-12G": {
+          "arch": "arm64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 57.597,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 188743680
+        },
+        "BASIC2-A6C-24G": {
+          "arch": "arm64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 65.919,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 188743680
+        },
+        "BASIC2-A8C-16G": {
+          "arch": "arm64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 75.482,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 251658240
+        },
+        "BASIC2-A8C-32G": {
+          "arch": "arm64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 100.594,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 251658240
+        },
+        "BASIC3-X12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 197.903,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 786432000
+        },
+        "BASIC3-X12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 226.592,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 786432000
+        },
+        "BASIC3-X16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 259.33031,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "BASIC3-X16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 345.49805,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "BASIC3-X2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 28.79777,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "BASIC3-X2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 43.23425,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "BASIC3-X4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 86.4685,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "BASIC3-X4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 57.67073,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "BASIC3-X6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 98.988,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 393216000
+        },
+        "BASIC3-X6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 113.369,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 393216000
+        },
+        "BASIC3-X8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 129.70275,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "BASIC3-X8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 172.86181,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "COMPUTE3-X12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 256.317,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 341.786,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X24C-48G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 51539607552,
+          "monthly_price": 512.3176,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "COMPUTE3-X2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 42.705,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X32C-64G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 68719476736,
+          "monthly_price": 683.499,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "COMPUTE3-X48C-96G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 103079215104,
+          "monthly_price": 1019.81,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "COMPUTE3-X4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 85.41,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X64C-128G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 137438953472,
+          "monthly_price": 1366.998,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "COMPUTE3-X6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 128.1588,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 170.893,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X96C-192G": {
+          "arch": "x86_64",
+          "ncpus": 96,
+          "ram": 206158430208,
+          "monthly_price": 2039.62,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "DEV1-L": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 31.2732,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 80000000000
+          },
+          "block_bandwidth": 209715200
+        },
+        "DEV1-M": {
+          "arch": "x86_64",
+          "ncpus": 3,
+          "ram": 4294967296,
+          "monthly_price": 14.74308,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 40000000000
+          },
+          "block_bandwidth": 157286400
+        },
+        "DEV1-S": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 2147483648,
+          "monthly_price": 6.55248,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 20000000000
+          },
+          "block_bandwidth": 104857600
+        },
+        "DEV1-XL": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 12884901888,
+          "monthly_price": 47.50548,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 120000000000
+          },
+          "block_bandwidth": 262144000
+        },
+        "GP1-L": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 565.1514,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 1073741824
+        },
+        "GP1-M": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 279.9696,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 838860800
+        },
+        "GP1-S": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 139.2402,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 300000000000
+          },
+          "block_bandwidth": 524288000
+        },
+        "GP1-XL": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 274877906944,
+          "monthly_price": 1221.8886,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 2147483648
+        },
+        "GP1-XS": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 67.7586,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 150000000000
+          },
+          "block_bandwidth": 314572800
+        },
+        "RENDER-S": {
+          "arch": "x86_64",
+          "ncpus": 10,
+          "ram": 45097156608,
+          "monthly_price": 891.33,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 400000000000
+          },
+          "block_bandwidth": 2147483648
+        },
+        "H100-1-80G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 257698037760,
+          "monthly_price": 2092.545,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2097152000
+        },
+        "H100-2-80G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 515396075520,
+          "monthly_price": 4185.09,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 4194304000
+        },
+        "H100-SXM-2-80G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 257698037760,
+          "monthly_price": 4832.454,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5242880000
+        },
+        "H100-SXM-4-80G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 515396075520,
+          "monthly_price": 9322.83,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5242880000
+        },
+        "H100-SXM-8-80G": {
+          "arch": "x86_64",
+          "ncpus": 128,
+          "ram": 1030792151040,
+          "monthly_price": 18491.484,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5242880000
+        },
+        "L40S-1-48G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 103079215104,
+          "monthly_price": 1073.03868,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "L40S-2-48G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 206158430208,
+          "monthly_price": 2146.07736,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1572864000
+        },
+        "L40S-4-48G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 412316860416,
+          "monthly_price": 4292.15472,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2621440000
+        },
+        "L40S-8-48G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 824633720832,
+          "monthly_price": 8584.30944,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5242880000
+        },
+        "L4-1-24G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 51539607552,
+          "monthly_price": 574.875,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "L4-2-24G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 103079215104,
+          "monthly_price": 1149.75,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1572864000
+        },
+        "L4-4-24G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 206158430208,
+          "monthly_price": 2299.5,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2621440000
+        },
+        "L4-8-24G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 412316860416,
+          "monthly_price": 4599.0,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5242880000
+        },
+        "MEMORY3-X12C-96G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 103079215104,
+          "monthly_price": 496.254,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X16C-128G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 137438953472,
+          "monthly_price": 661.672,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X24C-192G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 206158430208,
+          "monthly_price": 992.508,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "MEMORY3-X2C-16G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 17179869184,
+          "monthly_price": 82.709,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X32C-256G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 274877906944,
+          "monthly_price": 1323.344,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "MEMORY3-X48C-384G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 412316860416,
+          "monthly_price": 1983.41,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "MEMORY3-X4C-32G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 34359738368,
+          "monthly_price": 165.418,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X6C-48G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 51539607552,
+          "monthly_price": 248.127,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X8C-64G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 68719476736,
+          "monthly_price": 330.836,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "PLAY2-MICRO": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 40.2084,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 167772160
+        },
+        "PLAY2-NANO": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 20.1042,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "PLAY2-PICO": {
+          "arch": "x86_64",
+          "ncpus": 1,
+          "ram": 2147483648,
+          "monthly_price": 10.4244,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 41943040
+        },
+        "POP2-12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 317.55,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 430.7,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-16C-64G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 1063.391,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-24C-96G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 643.05,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 53.655,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-2C-8G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 133.079,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-32C-128G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 861.4,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-32C-128G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 2126.709,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-48C-192G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1292.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 107.31,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-4C-16G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 265.501,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-64C-256G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1715.5,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 160.965,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 211.7,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-8C-32G-WIN": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 528.009,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HC-12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 233.016,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-HC-16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 310.688,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HC-24C-48G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 51539607552,
+          "monthly_price": 466.032,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HC-2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 38.836,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HC-32C-64G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 68719476736,
+          "monthly_price": 621.376,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-48C-96G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 103079215104,
+          "monthly_price": 927.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 77.672,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HC-64C-128G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 137438953472,
+          "monthly_price": 1242.752,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 116.508,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-HC-8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 155.344,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HM-12C-96G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 103079215104,
+          "monthly_price": 451.14,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-HM-16C-128G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 137438953472,
+          "monthly_price": 601.52,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HM-24C-192G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 206158430208,
+          "monthly_price": 902.28,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HM-2C-16G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 17179869184,
+          "monthly_price": 75.19,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HM-32C-256G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 274877906944,
+          "monthly_price": 1203.04,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-48C-384G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 412316860416,
+          "monthly_price": 1803.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-4C-32G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 34359738368,
+          "monthly_price": 150.38,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HM-64C-512G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 549755813888,
+          "monthly_price": 2406.08,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-6C-48G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 51539607552,
+          "monthly_price": 225.57,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-HM-8C-64G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 68719476736,
+          "monthly_price": 300.76,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HN-10": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 530.272,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HN-3": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 186.442,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HN-5": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 330.252,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "PRO2-L": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 653.0142,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2097152000
+        },
+        "PRO2-M": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 326.1348,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "PRO2-S": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 163.0674,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "PRO2-XS": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 81.906,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "PRO2-XXS": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 40.953,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "STANDARD2-A12C-48G": {
+          "arch": "arm64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 223.964,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "STANDARD2-A16C-64G": {
+          "arch": "arm64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 367.847,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "STANDARD2-A24C-96G": {
+          "arch": "arm64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 478.223,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A2C-8G": {
+          "arch": "arm64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 42.778,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "STANDARD2-A32C-128G": {
+          "arch": "arm64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 874.394,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A48C-192G": {
+          "arch": "arm64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1103.541,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A4C-16G": {
+          "arch": "arm64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 85.483,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "STANDARD2-A64C-256G": {
+          "arch": "arm64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1470.366,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A6C-24G": {
+          "arch": "arm64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 111.909,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "STANDARD2-A8C-32G": {
+          "arch": "arm64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 171.039,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "STANDARD3-X12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 337.698,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 473.77,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X24C-96G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 687.003,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "STANDARD3-X2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 59.057,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X32C-128G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 947.54,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "STANDARD3-X48C-192G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1421.31,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "STANDARD3-X4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 118.041,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X64C-256G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1887.05,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "STANDARD3-X6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 177.185,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 232.87,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        }
+      },
+      "availability": {
+        "B300-SXM-8-288G": "shortage",
+        "BASIC2-A12C-24G": "available",
+        "BASIC2-A12C-48G": "available",
+        "BASIC2-A16C-32G": "available",
+        "BASIC2-A16C-64G": "available",
+        "BASIC2-A2C-4G": "available",
+        "BASIC2-A2C-8G": "available",
+        "BASIC2-A4C-16G": "available",
+        "BASIC2-A4C-8G": "available",
+        "BASIC2-A6C-12G": "available",
+        "BASIC2-A6C-24G": "available",
+        "BASIC2-A8C-16G": "available",
+        "BASIC2-A8C-32G": "available",
+        "BASIC3-X12C-24G": "scarce",
+        "BASIC3-X12C-48G": "scarce",
+        "BASIC3-X16C-32G": "scarce",
+        "BASIC3-X16C-64G": "scarce",
+        "BASIC3-X2C-4G": "scarce",
+        "BASIC3-X2C-8G": "scarce",
+        "BASIC3-X4C-16G": "scarce",
+        "BASIC3-X4C-8G": "scarce",
+        "BASIC3-X6C-12G": "scarce",
+        "BASIC3-X6C-24G": "scarce",
+        "BASIC3-X8C-16G": "scarce",
+        "BASIC3-X8C-32G": "scarce",
+        "COMPUTE3-X12C-24G": "scarce",
+        "COMPUTE3-X16C-32G": "scarce",
+        "COMPUTE3-X24C-48G": "scarce",
+        "COMPUTE3-X2C-4G": "available",
+        "COMPUTE3-X32C-64G": "shortage",
+        "COMPUTE3-X48C-96G": "shortage",
+        "COMPUTE3-X4C-8G": "available",
+        "COMPUTE3-X64C-128G": "shortage",
+        "COMPUTE3-X6C-12G": "available",
+        "COMPUTE3-X8C-16G": "available",
+        "COMPUTE3-X96C-192G": "shortage",
+        "DEV1-L": "available",
+        "DEV1-M": "available",
+        "DEV1-S": "available",
+        "DEV1-XL": "available",
+        "GP1-L": "scarce",
+        "GP1-M": "scarce",
+        "GP1-S": "available",
+        "GP1-XL": "shortage",
+        "GP1-XS": "available",
+        "RENDER-S": "available",
+        "H100-1-80G": "shortage",
+        "H100-2-80G": "shortage",
+        "H100-SXM-2-80G": "shortage",
+        "H100-SXM-4-80G": "shortage",
+        "H100-SXM-8-80G": "shortage",
+        "L40S-1-48G": "shortage",
+        "L40S-2-48G": "shortage",
+        "L40S-4-48G": "shortage",
+        "L40S-8-48G": "shortage",
+        "L4-1-24G": "shortage",
+        "L4-2-24G": "shortage",
+        "L4-4-24G": "shortage",
+        "L4-8-24G": "shortage",
+        "MEMORY3-X12C-96G": "available",
+        "MEMORY3-X16C-128G": "available",
+        "MEMORY3-X24C-192G": "shortage",
+        "MEMORY3-X2C-16G": "available",
+        "MEMORY3-X32C-256G": "shortage",
+        "MEMORY3-X48C-384G": "shortage",
+        "MEMORY3-X4C-32G": "available",
+        "MEMORY3-X6C-48G": "available",
+        "MEMORY3-X8C-64G": "available",
+        "PLAY2-MICRO": "available",
+        "PLAY2-NANO": "available",
+        "PLAY2-PICO": "available",
+        "POP2-12C-48G": "scarce",
+        "POP2-16C-64G": "scarce",
+        "POP2-16C-64G-WIN": "available",
+        "POP2-24C-96G": "scarce",
+        "POP2-2C-8G": "scarce",
+        "POP2-2C-8G-WIN": "available",
+        "POP2-32C-128G": "shortage",
+        "POP2-32C-128G-WIN": "available",
+        "POP2-48C-192G": "shortage",
+        "POP2-4C-16G": "scarce",
+        "POP2-4C-16G-WIN": "available",
+        "POP2-64C-256G": "shortage",
+        "POP2-6C-24G": "scarce",
+        "POP2-8C-32G": "scarce",
+        "POP2-8C-32G-WIN": "available",
+        "POP2-HC-12C-24G": "scarce",
+        "POP2-HC-16C-32G": "scarce",
+        "POP2-HC-24C-48G": "scarce",
+        "POP2-HC-2C-4G": "scarce",
+        "POP2-HC-32C-64G": "shortage",
+        "POP2-HC-48C-96G": "shortage",
+        "POP2-HC-4C-8G": "scarce",
+        "POP2-HC-64C-128G": "shortage",
+        "POP2-HC-6C-12G": "scarce",
+        "POP2-HC-8C-16G": "scarce",
+        "POP2-HM-12C-96G": "scarce",
+        "POP2-HM-16C-128G": "scarce",
+        "POP2-HM-24C-192G": "shortage",
+        "POP2-HM-2C-16G": "scarce",
+        "POP2-HM-32C-256G": "shortage",
+        "POP2-HM-48C-384G": "shortage",
+        "POP2-HM-4C-32G": "scarce",
+        "POP2-HM-64C-512G": "shortage",
+        "POP2-HM-6C-48G": "scarce",
+        "POP2-HM-8C-64G": "scarce",
+        "POP2-HN-10": "available",
+        "POP2-HN-3": "available",
+        "POP2-HN-5": "available",
+        "PRO2-L": "available",
+        "PRO2-M": "available",
+        "PRO2-S": "available",
+        "PRO2-XS": "available",
+        "PRO2-XXS": "available",
+        "STANDARD2-A12C-48G": "available",
+        "STANDARD2-A16C-64G": "available",
+        "STANDARD2-A24C-96G": "available",
+        "STANDARD2-A2C-8G": "available",
+        "STANDARD2-A32C-128G": "available",
+        "STANDARD2-A48C-192G": "available",
+        "STANDARD2-A4C-16G": "available",
+        "STANDARD2-A64C-256G": "available",
+        "STANDARD2-A6C-24G": "available",
+        "STANDARD2-A8C-32G": "available",
+        "STANDARD3-X12C-48G": "scarce",
+        "STANDARD3-X16C-64G": "scarce",
+        "STANDARD3-X24C-96G": "shortage",
+        "STANDARD3-X2C-8G": "available",
+        "STANDARD3-X32C-128G": "shortage",
+        "STANDARD3-X48C-192G": "shortage",
+        "STANDARD3-X4C-16G": "available",
+        "STANDARD3-X64C-256G": "shortage",
+        "STANDARD3-X6C-24G": "scarce",
+        "STANDARD3-X8C-32G": "scarce"
+      }
+    },
+    "nl-ams-1": {
+      "servers": {
+        "BASIC2-A12C-24G": {
+          "arch": "arm64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 115.194,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 335544320
+        },
+        "BASIC2-A12C-48G": {
+          "arch": "arm64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 131.911,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 335544320
+        },
+        "BASIC2-A16C-32G": {
+          "arch": "arm64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 150.891,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 503316480
+        },
+        "BASIC2-A16C-64G": {
+          "arch": "arm64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 201.188,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 503316480
+        },
+        "BASIC2-A2C-4G": {
+          "arch": "arm64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 16.79,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "BASIC2-A2C-8G": {
+          "arch": "arm64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 25.185,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "BASIC2-A4C-16G": {
+          "arch": "arm64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 50.297,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 125829120
+        },
+        "BASIC2-A4C-8G": {
+          "arch": "arm64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 37.741,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 125829120
+        },
+        "BASIC2-A6C-12G": {
+          "arch": "arm64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 57.597,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 188743680
+        },
+        "BASIC2-A6C-24G": {
+          "arch": "arm64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 65.919,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 188743680
+        },
+        "BASIC2-A8C-16G": {
+          "arch": "arm64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 75.482,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 251658240
+        },
+        "BASIC2-A8C-32G": {
+          "arch": "arm64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 100.594,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 251658240
+        },
+        "BASIC3-X12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 197.903,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 786432000
+        },
+        "BASIC3-X12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 226.592,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 786432000
+        },
+        "BASIC3-X16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 259.33031,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "BASIC3-X16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 345.49805,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "BASIC3-X2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 28.79777,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "BASIC3-X2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 43.23425,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "BASIC3-X4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 86.4685,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "BASIC3-X4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 57.67073,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "BASIC3-X6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 98.988,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 393216000
+        },
+        "BASIC3-X6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 113.369,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 393216000
+        },
+        "BASIC3-X8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 129.70275,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "BASIC3-X8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 172.86181,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "COMPUTE3-X12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 256.317,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 341.786,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X24C-48G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 51539607552,
+          "monthly_price": 512.3176,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "COMPUTE3-X2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 42.705,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X32C-64G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 68719476736,
+          "monthly_price": 683.499,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "COMPUTE3-X48C-96G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 103079215104,
+          "monthly_price": 1019.81,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "COMPUTE3-X4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 85.41,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X64C-128G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 137438953472,
+          "monthly_price": 1366.998,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "COMPUTE3-X6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 128.1588,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 170.893,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X96C-192G": {
+          "arch": "x86_64",
+          "ncpus": 96,
+          "ram": 206158430208,
+          "monthly_price": 2039.62,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "DEV1-L": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 31.2732,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 80000000000
+          },
+          "block_bandwidth": 209715200
+        },
+        "DEV1-M": {
+          "arch": "x86_64",
+          "ncpus": 3,
+          "ram": 4294967296,
+          "monthly_price": 14.74308,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 40000000000
+          },
+          "block_bandwidth": 157286400
+        },
+        "STARDUST1-S": {
+          "arch": "x86_64",
+          "ncpus": 1,
+          "ram": 1073741824,
+          "monthly_price": 0.438,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 10000000000
+          },
+          "block_bandwidth": 52428800
+        },
+        "DEV1-S": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 2147483648,
+          "monthly_price": 6.55248,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 20000000000
+          },
+          "block_bandwidth": 104857600
+        },
+        "DEV1-XL": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 12884901888,
+          "monthly_price": 47.50548,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 120000000000
+          },
+          "block_bandwidth": 262144000
+        },
+        "GP1-L": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 565.1514,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 1073741824
+        },
+        "GP1-M": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 279.9696,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 838860800
+        },
+        "GP1-S": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 139.2402,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 300000000000
+          },
+          "block_bandwidth": 524288000
+        },
+        "GP1-XL": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 274877906944,
+          "monthly_price": 1221.8886,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 2147483648
+        },
+        "GP1-XS": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 67.7586,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 150000000000
+          },
+          "block_bandwidth": 314572800
+        },
+        "MEMORY3-X12C-96G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 103079215104,
+          "monthly_price": 496.254,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X16C-128G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 137438953472,
+          "monthly_price": 661.672,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X24C-192G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 206158430208,
+          "monthly_price": 992.508,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "MEMORY3-X2C-16G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 17179869184,
+          "monthly_price": 82.709,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X32C-256G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 274877906944,
+          "monthly_price": 1323.344,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "MEMORY3-X48C-384G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 412316860416,
+          "monthly_price": 1983.41,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "MEMORY3-X4C-32G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 34359738368,
+          "monthly_price": 165.418,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X6C-48G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 51539607552,
+          "monthly_price": 248.127,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X8C-64G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 68719476736,
+          "monthly_price": 330.836,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "PLAY2-MICRO": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 40.2084,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 167772160
+        },
+        "PLAY2-NANO": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 20.1042,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "PLAY2-PICO": {
+          "arch": "x86_64",
+          "ncpus": 1,
+          "ram": 2147483648,
+          "monthly_price": 10.4244,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 41943040
+        },
+        "POP2-12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 317.55,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 430.7,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-24C-96G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 643.05,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 53.655,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-32C-128G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 861.4,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-48C-192G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1292.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 107.31,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-64C-256G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1715.5,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 160.965,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 211.7,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HC-12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 233.016,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-HC-16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 310.688,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HC-24C-48G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 51539607552,
+          "monthly_price": 466.032,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HC-2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 38.836,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HC-32C-64G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 68719476736,
+          "monthly_price": 621.376,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-48C-96G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 103079215104,
+          "monthly_price": 927.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 77.672,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HC-64C-128G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 137438953472,
+          "monthly_price": 1242.752,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 116.508,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-HC-8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 155.344,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HM-12C-96G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 103079215104,
+          "monthly_price": 451.14,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-HM-16C-128G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 137438953472,
+          "monthly_price": 601.52,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HM-24C-192G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 206158430208,
+          "monthly_price": 902.28,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HM-2C-16G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 17179869184,
+          "monthly_price": 75.19,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HM-32C-256G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 274877906944,
+          "monthly_price": 1203.04,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-48C-384G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 412316860416,
+          "monthly_price": 1803.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-4C-32G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 34359738368,
+          "monthly_price": 150.38,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HM-64C-512G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 549755813888,
+          "monthly_price": 2406.08,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-6C-48G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 51539607552,
+          "monthly_price": 225.57,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-HM-8C-64G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 68719476736,
+          "monthly_price": 300.76,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HN-10": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 530.272,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HN-3": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 186.442,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HN-5": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 330.252,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "PRO2-L": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 653.0142,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2097152000
+        },
+        "PRO2-M": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 326.1348,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "PRO2-S": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 163.0674,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "PRO2-XS": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 81.906,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "PRO2-XXS": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 40.953,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "STANDARD2-A12C-48G": {
+          "arch": "arm64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 223.964,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "STANDARD2-A16C-64G": {
+          "arch": "arm64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 367.847,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "STANDARD2-A24C-96G": {
+          "arch": "arm64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 478.223,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A2C-8G": {
+          "arch": "arm64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 42.778,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "STANDARD2-A32C-128G": {
+          "arch": "arm64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 874.394,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A48C-192G": {
+          "arch": "arm64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1103.541,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A4C-16G": {
+          "arch": "arm64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 85.483,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "STANDARD2-A64C-256G": {
+          "arch": "arm64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1470.366,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5033164800
+        },
+        "STANDARD2-A6C-24G": {
+          "arch": "arm64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 111.909,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "STANDARD2-A8C-32G": {
+          "arch": "arm64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 171.039,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "STANDARD3-X12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 337.698,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 473.77,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X24C-96G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 687.003,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "STANDARD3-X2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 59.057,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X32C-128G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 947.54,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "STANDARD3-X48C-192G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1421.31,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "STANDARD3-X4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 118.041,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X64C-256G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1887.05,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "STANDARD3-X6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 177.185,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 232.87,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        }
+      },
+      "availability": {
+        "BASIC2-A12C-24G": "available",
+        "BASIC2-A12C-48G": "available",
+        "BASIC2-A16C-32G": "available",
+        "BASIC2-A16C-64G": "available",
+        "BASIC2-A2C-4G": "available",
+        "BASIC2-A2C-8G": "available",
+        "BASIC2-A4C-16G": "available",
+        "BASIC2-A4C-8G": "available",
+        "BASIC2-A6C-12G": "available",
+        "BASIC2-A6C-24G": "available",
+        "BASIC2-A8C-16G": "available",
+        "BASIC2-A8C-32G": "available",
+        "BASIC3-X12C-24G": "available",
+        "BASIC3-X12C-48G": "available",
+        "BASIC3-X16C-32G": "available",
+        "BASIC3-X16C-64G": "available",
+        "BASIC3-X2C-4G": "available",
+        "BASIC3-X2C-8G": "available",
+        "BASIC3-X4C-16G": "available",
+        "BASIC3-X4C-8G": "available",
+        "BASIC3-X6C-12G": "available",
+        "BASIC3-X6C-24G": "available",
+        "BASIC3-X8C-16G": "available",
+        "BASIC3-X8C-32G": "available",
+        "COMPUTE3-X12C-24G": "available",
+        "COMPUTE3-X16C-32G": "available",
+        "COMPUTE3-X24C-48G": "available",
+        "COMPUTE3-X2C-4G": "available",
+        "COMPUTE3-X32C-64G": "available",
+        "COMPUTE3-X48C-96G": "available",
+        "COMPUTE3-X4C-8G": "available",
+        "COMPUTE3-X64C-128G": "available",
+        "COMPUTE3-X6C-12G": "available",
+        "COMPUTE3-X8C-16G": "available",
+        "COMPUTE3-X96C-192G": "available",
+        "DEV1-L": "available",
+        "DEV1-M": "available",
+        "STARDUST1-S": "scarce",
+        "DEV1-S": "available",
+        "DEV1-XL": "available",
+        "GP1-L": "available",
+        "GP1-M": "available",
+        "GP1-S": "available",
+        "GP1-XL": "available",
+        "GP1-XS": "available",
+        "MEMORY3-X12C-96G": "available",
+        "MEMORY3-X16C-128G": "available",
+        "MEMORY3-X24C-192G": "available",
+        "MEMORY3-X2C-16G": "available",
+        "MEMORY3-X32C-256G": "available",
+        "MEMORY3-X48C-384G": "available",
+        "MEMORY3-X4C-32G": "available",
+        "MEMORY3-X6C-48G": "available",
+        "MEMORY3-X8C-64G": "available",
+        "PLAY2-MICRO": "available",
+        "PLAY2-NANO": "available",
+        "PLAY2-PICO": "available",
+        "POP2-12C-48G": "scarce",
+        "POP2-16C-64G": "scarce",
+        "POP2-24C-96G": "scarce",
+        "POP2-2C-8G": "available",
+        "POP2-32C-128G": "shortage",
+        "POP2-48C-192G": "shortage",
+        "POP2-4C-16G": "available",
+        "POP2-64C-256G": "shortage",
+        "POP2-6C-24G": "available",
+        "POP2-8C-32G": "available",
+        "POP2-HC-12C-24G": "scarce",
+        "POP2-HC-16C-32G": "scarce",
+        "POP2-HC-24C-48G": "scarce",
+        "POP2-HC-2C-4G": "available",
+        "POP2-HC-32C-64G": "shortage",
+        "POP2-HC-48C-96G": "shortage",
+        "POP2-HC-4C-8G": "available",
+        "POP2-HC-64C-128G": "shortage",
+        "POP2-HC-6C-12G": "available",
+        "POP2-HC-8C-16G": "available",
+        "POP2-HM-12C-96G": "available",
+        "POP2-HM-16C-128G": "available",
+        "POP2-HM-24C-192G": "scarce",
+        "POP2-HM-2C-16G": "available",
+        "POP2-HM-32C-256G": "scarce",
+        "POP2-HM-48C-384G": "scarce",
+        "POP2-HM-4C-32G": "available",
+        "POP2-HM-64C-512G": "shortage",
+        "POP2-HM-6C-48G": "available",
+        "POP2-HM-8C-64G": "available",
+        "POP2-HN-10": "available",
+        "POP2-HN-3": "available",
+        "POP2-HN-5": "available",
+        "PRO2-L": "shortage",
+        "PRO2-M": "shortage",
+        "PRO2-S": "scarce",
+        "PRO2-XS": "scarce",
+        "PRO2-XXS": "scarce",
+        "STANDARD2-A12C-48G": "available",
+        "STANDARD2-A16C-64G": "available",
+        "STANDARD2-A24C-96G": "available",
+        "STANDARD2-A2C-8G": "available",
+        "STANDARD2-A32C-128G": "available",
+        "STANDARD2-A48C-192G": "available",
+        "STANDARD2-A4C-16G": "available",
+        "STANDARD2-A64C-256G": "available",
+        "STANDARD2-A6C-24G": "available",
+        "STANDARD2-A8C-32G": "available",
+        "STANDARD3-X12C-48G": "available",
+        "STANDARD3-X16C-64G": "available",
+        "STANDARD3-X24C-96G": "available",
+        "STANDARD3-X2C-8G": "available",
+        "STANDARD3-X32C-128G": "available",
+        "STANDARD3-X48C-192G": "available",
+        "STANDARD3-X4C-16G": "available",
+        "STANDARD3-X64C-256G": "available",
+        "STANDARD3-X6C-24G": "available",
+        "STANDARD3-X8C-32G": "available"
+      }
+    },
+    "nl-ams-2": {
+      "servers": {
+        "BASIC3-X12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 197.903,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 786432000
+        },
+        "BASIC3-X12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 226.592,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 786432000
+        },
+        "BASIC3-X16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 259.33031,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "BASIC3-X16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 345.49805,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "BASIC3-X2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 28.79777,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "BASIC3-X2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 43.23425,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "BASIC3-X4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 86.4685,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "BASIC3-X4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 57.67073,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "BASIC3-X6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 98.988,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 393216000
+        },
+        "BASIC3-X6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 113.369,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 393216000
+        },
+        "BASIC3-X8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 129.70275,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "BASIC3-X8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 172.86181,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "COMPUTE3-X12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 256.317,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 341.786,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X24C-48G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 51539607552,
+          "monthly_price": 512.3176,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "COMPUTE3-X2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 42.705,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X32C-64G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 68719476736,
+          "monthly_price": 683.499,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "COMPUTE3-X48C-96G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 103079215104,
+          "monthly_price": 1019.81,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "COMPUTE3-X4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 85.41,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X64C-128G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 137438953472,
+          "monthly_price": 1366.998,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "COMPUTE3-X6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 128.1588,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 170.893,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "COMPUTE3-X96C-192G": {
+          "arch": "x86_64",
+          "ncpus": 96,
+          "ram": 206158430208,
+          "monthly_price": 2039.62,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "DEV1-L": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 31.2732,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 80000000000
+          },
+          "block_bandwidth": 209715200
+        },
+        "DEV1-M": {
+          "arch": "x86_64",
+          "ncpus": 3,
+          "ram": 4294967296,
+          "monthly_price": 14.74308,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 40000000000
+          },
+          "block_bandwidth": 157286400
+        },
+        "DEV1-S": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 2147483648,
+          "monthly_price": 6.55248,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 20000000000
+          },
+          "block_bandwidth": 104857600
+        },
+        "DEV1-XL": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 12884901888,
+          "monthly_price": 47.50548,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 120000000000
+          },
+          "block_bandwidth": 262144000
+        },
+        "GP1-L": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 565.1514,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 1073741824
+        },
+        "GP1-M": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 279.9696,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 838860800
+        },
+        "GP1-S": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 139.2402,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 300000000000
+          },
+          "block_bandwidth": 524288000
+        },
+        "GP1-XL": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 274877906944,
+          "monthly_price": 1221.8886,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 600000000000
+          },
+          "block_bandwidth": 2147483648
+        },
+        "GP1-XS": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 67.7586,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 150000000000
+          },
+          "block_bandwidth": 314572800
+        },
+        "MEMORY3-X12C-96G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 103079215104,
+          "monthly_price": 496.254,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X16C-128G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 137438953472,
+          "monthly_price": 661.672,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X24C-192G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 206158430208,
+          "monthly_price": 992.508,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "MEMORY3-X2C-16G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 17179869184,
+          "monthly_price": 82.709,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X32C-256G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 274877906944,
+          "monthly_price": 1323.344,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "MEMORY3-X48C-384G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 412316860416,
+          "monthly_price": 1983.41,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "MEMORY3-X4C-32G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 34359738368,
+          "monthly_price": 165.418,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X6C-48G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 51539607552,
+          "monthly_price": 248.127,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "MEMORY3-X8C-64G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 68719476736,
+          "monthly_price": 330.836,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "PLAY2-MICRO": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 40.2084,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 167772160
+        },
+        "PLAY2-NANO": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 20.1042,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 83886080
+        },
+        "PLAY2-PICO": {
+          "arch": "x86_64",
+          "ncpus": 1,
+          "ram": 2147483648,
+          "monthly_price": 10.4244,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 41943040
+        },
+        "POP2-12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 317.55,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 430.7,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-24C-96G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 643.05,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 53.655,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-32C-128G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 861.4,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-48C-192G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1292.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 107.31,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-64C-256G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1715.5,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 160.965,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 211.7,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HC-12C-24G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 25769803776,
+          "monthly_price": 233.016,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-HC-16C-32G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 34359738368,
+          "monthly_price": 310.688,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HC-24C-48G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 51539607552,
+          "monthly_price": 466.032,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HC-2C-4G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 38.836,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HC-32C-64G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 68719476736,
+          "monthly_price": 621.376,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-48C-96G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 103079215104,
+          "monthly_price": 927.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-4C-8G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 77.672,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HC-64C-128G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 137438953472,
+          "monthly_price": 1242.752,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HC-6C-12G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 12884901888,
+          "monthly_price": 116.508,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-HC-8C-16G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 17179869184,
+          "monthly_price": 155.344,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HM-12C-96G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 103079215104,
+          "monthly_price": 451.14,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2516582400
+        },
+        "POP2-HM-16C-128G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 137438953472,
+          "monthly_price": 601.52,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HM-24C-192G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 206158430208,
+          "monthly_price": 902.28,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 3355443200
+        },
+        "POP2-HM-2C-16G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 17179869184,
+          "monthly_price": 75.19,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HM-32C-256G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 274877906944,
+          "monthly_price": 1203.04,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-48C-384G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 412316860416,
+          "monthly_price": 1803.1,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-4C-32G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 34359738368,
+          "monthly_price": 150.38,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HM-64C-512G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 549755813888,
+          "monthly_price": 2406.08,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 5905580032
+        },
+        "POP2-HM-6C-48G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 51539607552,
+          "monthly_price": 225.57,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1258291200
+        },
+        "POP2-HM-8C-64G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 68719476736,
+          "monthly_price": 300.76,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1677721600
+        },
+        "POP2-HN-10": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 530.272,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "POP2-HN-3": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 4294967296,
+          "monthly_price": 186.442,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 419430400
+        },
+        "POP2-HN-5": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 8589934592,
+          "monthly_price": 330.252,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 838860800
+        },
+        "PRO2-L": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 653.0142,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 2097152000
+        },
+        "PRO2-M": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 326.1348,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1048576000
+        },
+        "PRO2-S": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 163.0674,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 524288000
+        },
+        "PRO2-XS": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 81.906,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 262144000
+        },
+        "PRO2-XXS": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 40.953,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 131072000
+        },
+        "STANDARD3-X12C-48G": {
+          "arch": "x86_64",
+          "ncpus": 12,
+          "ram": 51539607552,
+          "monthly_price": 337.698,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X16C-64G": {
+          "arch": "x86_64",
+          "ncpus": 16,
+          "ram": 68719476736,
+          "monthly_price": 473.77,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X24C-96G": {
+          "arch": "x86_64",
+          "ncpus": 24,
+          "ram": 103079215104,
+          "monthly_price": 687.003,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 749731840
+        },
+        "STANDARD3-X2C-8G": {
+          "arch": "x86_64",
+          "ncpus": 2,
+          "ram": 8589934592,
+          "monthly_price": 59.057,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X32C-128G": {
+          "arch": "x86_64",
+          "ncpus": 32,
+          "ram": 137438953472,
+          "monthly_price": 947.54,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1000341504
+        },
+        "STANDARD3-X48C-192G": {
+          "arch": "x86_64",
+          "ncpus": 48,
+          "ram": 206158430208,
+          "monthly_price": 1421.31,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "STANDARD3-X4C-16G": {
+          "arch": "x86_64",
+          "ncpus": 4,
+          "ram": 17179869184,
+          "monthly_price": 118.041,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X64C-256G": {
+          "arch": "x86_64",
+          "ncpus": 64,
+          "ram": 274877906944,
+          "monthly_price": 1887.05,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 1999634432
+        },
+        "STANDARD3-X6C-24G": {
+          "arch": "x86_64",
+          "ncpus": 6,
+          "ram": 25769803776,
+          "monthly_price": 177.185,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        },
+        "STANDARD3-X8C-32G": {
+          "arch": "x86_64",
+          "ncpus": 8,
+          "ram": 34359738368,
+          "monthly_price": 232.87,
+          "end_of_service": false,
+          "volumes_constraint": {
+            "min_size": 0,
+            "max_size": 0
+          },
+          "block_bandwidth": 500170752
+        }
+      },
+      "availability": {
+        "BASIC3-X12C-24G": "available",
+        "BASIC3-X12C-48G": "available",
+        "BASIC3-X16C-32G": "available",
+        "BASIC3-X16C-64G": "available",
+        "BASIC3-X2C-4G": "available",
+        "BASIC3-X2C-8G": "available",
+        "BASIC3-X4C-16G": "available",
+        "BASIC3-X4C-8G": "available",
+        "BASIC3-X6C-12G": "available",
+        "BASIC3-X6C-24G": "available",
+        "BASIC3-X8C-16G": "available",
+        "BASIC3-X8C-32G": "available",
+        "COMPUTE3-X12C-24G": "available",
+        "COMPUTE3-X16C-32G": "available",
+        "COMPUTE3-X24C-48G": "available",
+        "COMPUTE3-X2C-4G": "available",
+        "COMPUTE3-X32C-64G": "available",
+        "COMPUTE3-X48C-96G": "available",
+        "COMPUTE3-X4C-8G": "available",
+        "COMPUTE3-X64C-128G": "shortage",
+        "COMPUTE3-X6C-12G": "available",
+        "COMPUTE3-X8C-16G": "available",
+        "COMPUTE3-X96C-192G": "shortage",
+        "DEV1-L": "available",
+        "DEV1-M": "available",
+        "DEV1-S": "available",
+        "DEV1-XL": "available",
+        "GP1-L": "available",
+        "GP1-M": "available",
+        "GP1-S": "available",
+        "GP1-XL": "available",
+        "GP1-XS": "available",
+        "MEMORY3-X12C-96G": "available",
+        "MEMORY3-X16C-128G": "available",
+        "MEMORY3-X24C-192G": "available",
+        "MEMORY3-X2C-16G": "available",
+        "MEMORY3-X32C-256G": "available",
+        "MEMORY3-X48C-384G": "shortage",
+        "MEMORY3-X4C-32G": "available",
+        "MEMORY3-X6C-48G": "available",
+        "MEMORY3-X8C-64G": "available",
+        "PLAY2-MICRO": "available",
+        "PLAY2-NANO": "available",
+        "PLAY2-PICO": "available",
+        "POP2-12C-48G": "available",
+        "POP2-16C-64G": "available",
+        "POP2-24C-96G": "available",
+        "POP2-2C-8G": "available",
+        "POP2-32C-128G": "available",
+        "POP2-48C-192G": "available",
+        "POP2-4C-16G": "available",
+        "POP2-64C-256G": "available",
+        "POP2-6C-24G": "available",
+        "POP2-8C-32G": "available",
+        "POP2-HC-12C-24G": "available",
+        "POP2-HC-16C-32G": "available",
+        "POP2-HC-24C-48G": "available",
+        "POP2-HC-2C-4G": "available",
+        "POP2-HC-32C-64G": "available",
+        "POP2-HC-48C-96G": "available",
+        "POP2-HC-4C-8G": "available",
+        "POP2-HC-64C-128G": "available",
+        "POP2-HC-6C-12G": "available",
+        "POP2-HC-8C-16G": "available",
+        "POP2-HM-12C-96G": "available",
+        "POP2-HM-16C-128G": "available",
+        "POP2-HM-24C-192G": "available",
+        "POP2-HM-2C-16G": "available",
+        "POP2-HM-32C-256G": "available",
+        "POP2-HM-48C-384G": "available",
+        "POP2-HM-4C-32G": "available",
+        "POP2-HM-64C-512G": "available",
+        "POP2-HM-6C-48G": "available",
+        "POP2-HM-8C-64G": "available",
+        "POP2-HN-10": "available",
+        "POP2-HN-3": "available",
+        "POP2-HN-5": "available",
+        "PRO2-L": "available",
+        "PRO2-M": "available",
+        "PRO2-S": "available",
+        "PRO2-XS": "available",
+        "PRO2-XXS": "available",
+        "STANDARD3-X12C-48G": "available",
+        "STANDARD3-X16C-64G": "available",
+        "STANDARD3-X24C-96G": "available",
+        "STANDARD3-X2C-8G": "available",
+        "STANDARD3-X32C-128G": "available",
+        "STANDARD3-X48C-192G": "available",
+        "STANDARD3-X4C-16G": "available",
+        "STANDARD3-X64C-256G": "shortage",
+        "STANDARD3-X6C-24G": "available",
+        "STANDARD3-X8C-32G": "available"
+      }
+    }
+  }
+}

@@ -120,6 +120,12 @@ describe('BaseProvider', () => {
       expect(() => BaseProvider.getDefaultStandbyRegion('region')).toThrow('must be implemented');
     });
 
+    it('conventionalStandbyRegion throws not implemented', () => {
+      expect(() => BaseProvider.conventionalStandbyRegion('region')).toThrow(
+        'conventionalStandbyRegion() must be implemented by subclass',
+      );
+    });
+
     it('resolveServerTypeForRegion throws not implemented', () => {
       expect(() => BaseProvider.resolveServerTypeForRegion('type', 'region')).toThrow(
         'must be implemented',

@@ -497,6 +497,8 @@ interface RunOpts {
   cicdEnabled?: boolean;
   /** What the GitOps TLS refresh returns, or throws when an Error. */
   gitopsRefresh?: { ok: boolean; reason?: string; refreshed?: string[] } | Error;
+  /** `failover -server-type`. */
+  serverType?: string;
 }
 
 /**
@@ -670,8 +672,9 @@ async function runFailoverHA(opts: RunOpts) {
       if (gitopsRefresh instanceof Error) throw gitopsRefresh;
       return gitopsRefresh;
     },
-    swapRoles: (envName: string) => {
+    swapRoles: (envName: string, options?: unknown) => {
       captured.swapEnv = envName;
+      captured.swapOptions = options;
       order.push('saveConfig');
     },
     // The backup-prefix fence write (backup-fence.test.ts pins its place).
@@ -713,7 +716,7 @@ async function runFailoverHA(opts: RunOpts) {
     },
     ...(tlsCa ? { tls: { state: 'trusted', ca: tlsCa } } : {}),
   };
-  const parsed = { dryRun: false, yes: true, serverType: null };
+  const parsed = { dryRun: false, yes: true, serverType: opts.serverType ?? null };
   const tracker = { spinner: () => ({ start: () => {}, stop: () => {} }) };
 
   try {
@@ -1051,6 +1054,12 @@ describe('failoverHA step order', () => {
     expect(order.slice(-2)).toEqual(['saveConfig', 'fenceRetired']);
     expect(order.indexOf('saveConfig')).toBeGreaterThan(order.indexOf('dns'));
     expect(captured.swapEnv).toBe('e4');
+    expect(captured.swapOptions).toBeUndefined();
+  });
+
+  it('-server-type: the swap records the type the workers were provisioned with', async () => {
+    const { captured } = await runFailoverHA({ primaryReachable: true, serverType: 'cpx31' });
+    expect(captured.swapOptions).toEqual({ workerServerType: 'cpx31' });
   });
 });
 

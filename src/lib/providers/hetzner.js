@@ -9,6 +9,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
+import { cheapestStandbyRegion, regionRoleDefaults, standbyStandIn } from '../sizing.js';
 import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
 
@@ -183,14 +184,36 @@ export class HetznerProvider extends BaseProvider {
   };
 
   /**
-   * Default HA standby region for a given primary: a DIFFERENT region on the
-   * same continent, so failover stays intra-continent (a US primary fails over
-   * to the other US region, not across the Atlantic). Used as the pre-selected
-   * value in the interactive standby prompt and as the headless default.
+   * Default HA standby region for a given primary: the cheapest
+   * same-continent partner where every standby role is orderable right now
+   * (src/lib/sizing.js cheapestStandbyRegion), ties and offline keeping
+   * conventionalStandbyRegion's pair. The pre-selected value in the
+   * interactive standby prompt and the headless default.
    * @param {string} primaryRegion
+   * @param {string[]} [roles] - the roles the standby places
+   * @param {Record<string, string|undefined>} [primaryTypes] - the primary's
+   *   type by role: a partner must fit each without shrinking it
    * @returns {string}
    */
-  static getDefaultStandbyRegion(primaryRegion) {
+  static getDefaultStandbyRegion(primaryRegion, roles = ['compose'], primaryTypes = {}) {
+    return cheapestStandbyRegion(
+      HetznerProvider,
+      primaryRegion,
+      roles,
+      HetznerProvider.conventionalStandbyRegion(primaryRegion),
+      primaryTypes,
+    );
+  }
+
+  /**
+   * The static HA standby pair for a given primary: a DIFFERENT region on the
+   * same continent, so failover stays intra-continent (a US primary fails over
+   * to the other US region, not across the Atlantic). getDefaultStandbyRegion
+   * keeps it offline and on a price tie.
+   * @param {string} primaryRegion
+   * @returns {string} the static pair, before prices
+   */
+  static conventionalStandbyRegion(primaryRegion) {
     const continent = HetznerProvider.REGION_CONTINENT[primaryRegion];
     const sameContinent = Object.keys(HetznerProvider.REGION_CONTINENT).filter(
       (r) => r !== primaryRegion && HetznerProvider.REGION_CONTINENT[r] === continent,
@@ -266,6 +289,36 @@ export class HetznerProvider extends BaseProvider {
   // Maps location name → Set of available server type names.
   static _locationTypes = null;
 
+  // Monthly prices captured by fetchServerTypes() from the same payload:
+  // type → location → price (`prices[].price_monthly.net`, the account's
+  // billing currency). null until a live fetch.
+  static _prices = null;
+
+  // Per-role candidates, x86 only (see BaseProvider.ROLE_CANDIDATES).
+  // Declared order is the offline order, most reliably stocked first: `cpx22`
+  // is live in every EU location, `cx23` is the cheapest 4 GB shape when
+  // Hetzner stocks it (it flips), `cpx21` is the US line. `cpx11` is 2 GB,
+  // so it is a db-only candidate; `cpx21` closes the db list as the US 4 GB
+  // last resort, so an ash/hil cpx11 stock-out still has a db default. Live,
+  // the cheapest orderable one wins.
+  static ROLE_CANDIDATES = {
+    compose: ['cpx22', 'cx23', 'cpx21'],
+    master: ['cpx22', 'cx23', 'cpx21'],
+    db: ['cpx12', 'cx23', 'cpx22', 'cpx11', 'cpx21'],
+    worker: ['cpx22', 'cx23', 'cpx21'],
+  };
+
+  // Billed primary IPv4 per server per month, USD: GET /v1/pricing
+  // `primary_ips` (type ipv4, price_monthly.net 0.60 in every location),
+  // read 2026-10-22.
+  static IPV4_MONTHLY = 0.6;
+
+  // The static currency, for offline use or when `/v1/pricing` can't be
+  // read. Prices are in the account's billing currency: `/v1/server_types`
+  // does not state it, so fetchServerTypes reads `/v1/pricing` (`_currency`,
+  // `_ipv4Monthly`, see parsePricing). The 2026-10-22 capture was USD.
+  static CURRENCY = '$';
+
   // Generic default / prompt seed, and the "e.g. …" in the amd64 guard's error
   // text. Must name something the DEFAULT (EU) region can actually place.
   //
@@ -290,6 +343,18 @@ export class HetznerProvider extends BaseProvider {
   static REGION_TYPE_PREFIXES = {
     us: ['cpx', 'ccx'],
     eu: ['cx', 'cpx', 'ccx'],
+  };
+
+  // Lines the offline offer leaves out of a geography's prefix list, so the
+  // offline picks (and prompts) never name a SKU the region cannot place:
+  //   - `cx*2`: unorderable everywhere since 2026-01-01;
+  //   - `cpx*1` in the EU (and sin): deprecated there on 2026-01-01;
+  //   - `cpx*2` in the US: the current generation never reached ash/hil.
+  // Deprecations do not reverse, so these are durable; `available` flips are
+  // the live catalog's job.
+  static OFFLINE_UNORDERABLE = {
+    us: [/^cx\d2$/, /^cpx\d2$/],
+    eu: [/^cx\d2$/, /^cpx\d1$/],
   };
 
   // ── Engine-literal relocations (C7b) ───────────────
@@ -453,6 +518,10 @@ export class HetznerProvider extends BaseProvider {
   static async fetchServerTypes(apiToken) {
     if (HetznerProvider._locationTypes) return true; // already fetched
 
+    // The billing currency and IPv4 price, asked for in parallel with the
+    // catalog walk. Never rejects: a failed read keeps the statics.
+    const pricing = HetznerProvider.fetchPricing(apiToken);
+
     try {
       // Walk pagination via the shared walker. /server_types fits in one
       // 50-entry page today, but "fits today" is exactly how truncated-listing
@@ -480,39 +549,7 @@ export class HetznerProvider extends BaseProvider {
       // threw on that body and fell back — this preserves that outcome.)
       if (items.length === 0) return false;
 
-      const types = {};
-      const locationTypes = {};
-
-      for (const t of items) {
-        if (t.deprecation) continue;
-
-        // amd64-only (see src/lib/deploy/platform.js). Drop ARM at the source
-        // so it can never reach a prompt, a region default, or a persisted
-        // config: SERVER_TYPES and _locationTypes feed getServerTypesForRegion,
-        // getRegionDefaults and every option builder downstream, and removing
-        // `cax*` from the offline FALLBACK catalog alone would NOT have covered
-        // them (live data replaces that catalog wholesale). The API tags each
-        // SKU's `architecture` ('x86' | 'arm'); the name check is a belt-and-
-        // braces fallback should the field ever be absent.
-        if (t.architecture === 'arm' || HetznerProvider.isArmServerType(t.name)) continue;
-
-        // Build per-location availability from the `locations` field (actual availability),
-        // not `prices` (which includes regions where the type is priced but not placeable).
-        for (const loc of t.locations || []) {
-          const locName = loc.name || loc;
-          if (!HetznerProvider.isLocationOrderable(loc)) continue;
-          if (!locationTypes[locName]) locationTypes[locName] = new Set();
-          locationTypes[locName].add(t.name);
-        }
-
-        types[t.name] = {
-          vcpu: t.cores,
-          ram: t.memory,
-          disk: t.disk,
-          cpuType: t.cpu_type,
-          architecture: t.architecture,
-        };
-      }
+      const catalog = HetznerProvider.parseCatalog(items);
 
       // Post-FILTER empty guard (PR #214 re-review): the raw-items guard
       // above has the same hole one layer down — a catalog whose entries
@@ -528,18 +565,126 @@ export class HetznerProvider extends BaseProvider {
       // availability blackout can never trip this guard — correctly, since
       // live "nothing orderable" knowledge beats the fallback's optimism,
       // SERVER_TYPES must stay a usable spec table (provider-contract pins
-      // DEFAULT_TYPE ∈ SERVER_TYPES), and getRegionDefaults degrades
-      // per-region to its offline branch when a location has no orderable
-      // entry. Pinned in fetch-server-types-pagination.test.ts
+      // DEFAULT_TYPE ∈ SERVER_TYPES), and getRegionDefaults answers null
+      // for a location with no orderable entry (the deploy refuses by name).
+      // Pinned in fetch-server-types-pagination.test.ts
       // ("availability blackout is NOT an empty catalog").
-      if (Object.keys(types).length === 0) return false;
+      if (Object.keys(catalog.SERVER_TYPES).length === 0) return false;
 
-      HetznerProvider.SERVER_TYPES = types;
-      HetznerProvider._locationTypes = locationTypes;
+      const { currency, ipv4Monthly } = await pricing;
+      Object.assign(HetznerProvider, catalog, {
+        _currency: currency,
+        _ipv4Monthly: ipv4Monthly,
+      });
       return true;
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The catalog statics fetchServerTypes sets, from the `/server_types`
+   * items it walked. Pure, so the unit fixtures load through the same filters
+   * as the live path (tests/unit/helpers/catalog-fixtures.ts).
+   *
+   * Drops SKU-level deprecated and ARM types. Per-location availability comes
+   * from `locations[]` through isLocationOrderable (actual availability), not
+   * from `prices[]` (which also lists locations where the type is priced but
+   * not placeable); prices come from `prices[]`.
+   *
+   * @param {object[]} items - `/server_types` entries
+   * @returns {{SERVER_TYPES: object, _locationTypes: Record<string, Set<string>>, _prices: Record<string, Record<string, number|null>>}}
+   */
+  static parseCatalog(items) {
+    const types = {};
+    const locationTypes = {};
+    const prices = {};
+
+    for (const t of items) {
+      if (t.deprecation) continue;
+
+      // amd64-only (see src/lib/deploy/platform.js). Drop ARM at the source
+      // so it can never reach a prompt, a region default, or a persisted
+      // config: SERVER_TYPES and _locationTypes feed getServerTypesForRegion,
+      // getRegionDefaults and every option builder downstream, and removing
+      // `cax*` from the offline FALLBACK catalog alone would NOT have covered
+      // them (live data replaces that catalog wholesale). The API tags each
+      // SKU's `architecture` ('x86' | 'arm'); the name check is a belt-and-
+      // braces fallback should the field ever be absent.
+      if (t.architecture === 'arm' || HetznerProvider.isArmServerType(t.name)) continue;
+
+      for (const loc of t.locations || []) {
+        const locName = loc.name || loc;
+        if (!HetznerProvider.isLocationOrderable(loc)) continue;
+        if (!locationTypes[locName]) locationTypes[locName] = new Set();
+        locationTypes[locName].add(t.name);
+      }
+
+      types[t.name] = {
+        vcpu: t.cores,
+        ram: t.memory,
+        disk: t.disk,
+        cpuType: t.cpu_type,
+        architecture: t.architecture,
+      };
+
+      prices[t.name] = {};
+      for (const p of t.prices || []) {
+        const monthly = Number(p?.price_monthly?.net);
+        prices[t.name][p.location] = Number.isFinite(monthly) ? monthly : null;
+      }
+    }
+
+    return { SERVER_TYPES: types, _locationTypes: locationTypes, _prices: prices };
+  }
+
+  /**
+   * Read `GET /v1/pricing` (one object, no pagination) through parsePricing.
+   * Never rejects: a failure answers nulls, so the static CURRENCY and
+   * IPV4_MONTHLY stand and the catalog is not failed over a price label.
+   * @param {string} apiToken
+   * @returns {Promise<{currency: string|null, ipv4Monthly: Record<string, number>|null}>}
+   */
+  static async fetchPricing(apiToken) {
+    try {
+      const response = await fetchWithRetry(`${HetznerProvider.API_BASE}/pricing`, {
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+      if (!response.ok) return HetznerProvider.parsePricing(null);
+      return HetznerProvider.parsePricing(await response.json());
+    } catch {
+      return HetznerProvider.parsePricing(null);
+    }
+  }
+
+  /**
+   * The billing currency and IPv4 price from a `/v1/pricing` body. Pure, so
+   * the unit fixtures load through it as the live path does.
+   *
+   * `currency` is the symbol for `pricing.currency`: EUR is `€`, USD is `$`,
+   * any other code is the code and a space (`CHF 7.09`). `ipv4Monthly` is
+   * the net monthly price per location of `pricing.primary_ips` type ipv4.
+   * Either is null when the body does not state it.
+   *
+   * @param {unknown} payload - the `/v1/pricing` response body
+   * @returns {{currency: string|null, ipv4Monthly: Record<string, number>|null}}
+   */
+  static parsePricing(payload) {
+    const pricing = payload && typeof payload === 'object' ? payload.pricing : null;
+    const code = typeof pricing?.currency === 'string' ? pricing.currency : null;
+    const SYMBOLS = { EUR: '€', USD: '$' };
+    const currency = code ? (SYMBOLS[code] ?? `${code} `) : null;
+
+    const ipv4 = Array.isArray(pricing?.primary_ips)
+      ? pricing.primary_ips.find((ip) => ip?.type === 'ipv4')
+      : null;
+    let ipv4Monthly = null;
+    for (const entry of ipv4?.prices ?? []) {
+      const monthly = Number(entry?.price_monthly?.net);
+      if (!entry?.location || !Number.isFinite(monthly)) continue;
+      ipv4Monthly = { ...ipv4Monthly, [entry.location]: monthly };
+    }
+    return { currency, ipv4Monthly };
   }
 
   /**
@@ -575,73 +720,20 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
-   * Returns region-appropriate default server types.
-   *
-   * Hetzner's SKU availability is split by geography AND by generation:
-   *   - EU (fsn1/nbg1/hel1): `cpx*2` (AMD shared, current) + `ccx*` (dedicated).
-   *     The `cpx*1` line was DEPRECATED here on 2026-01-01, and the entire
-   *     `cx*3` line currently reads `available: false` in all three — so `cpx*2`
-   *     is the only shared-vCPU line actually placeable in the EU.
-   *   - US (ash/hil):        `cpx*1` (AMD shared) + `ccx*`. No `cx` line has
-   *     ever existed here, and the current `cpx*2` generation has not landed
-   *     here either — so the legacy names remain correct for these two.
-   * There is consequently no shared-vCPU x86 SKU valid in all five regions.
-   *
-   * These constants are a BEST-EFFORT offline fallback only. `available` flips
-   * without notice in both directions, so no hardcoded list can stay correct;
-   * the real guarantee is that the live path filters through
-   * isLocationOrderable and never offers a SKU outside that set.
-   *
-   * (Hetzner also sells a `cax*` ARM line in the three EU locations. It is
-   * excluded everywhere — vibecarbon is amd64-only; see
-   * src/lib/deploy/platform.js.)
-   *
-   * Shared-vCPU x86 for cluster nodes. Prefer tiers in this order for
-   * each role, falling back to the first available:
-   *   - master/worker: 2 vCPU, 2–4 GB RAM
-   *   - db:            2–4 vCPU, 4+ GB RAM
+   * Default type per role in `region`: the cheapest orderable
+   * ROLE_CANDIDATES entry that meets the role's RAM floor
+   * (src/lib/sizing.js). Live, that reads `_locationTypes` and `_prices`.
+   * Offline it reads getServerTypesForRegion's offline offer in declared
+   * order, which gives `cpx22` / `cpx12` (db) in the EU and `cpx21` /
+   * `cpx11` in ash/hil: Hetzner's catalog is split by geography AND
+   * generation (the `cpx*1` line was deprecated in the EU on 2026-01-01, the
+   * `cpx*2` line never reached ash/hil, and `cx*3` flips `available`), so no
+   * single shared x86 SKU is orderable in every location.
+   * @param {string} region
+   * @returns {{composeType: string|null, masterType: string|null, dbType: string|null, workerType: string|null}}
    */
   static getRegionDefaults(region) {
-    const available = HetznerProvider._locationTypes?.[region];
-
-    // Preference lists — order matters. First available in the region wins.
-    // Both current generations lead, then the legacy names, which are still
-    // orderable in ash/hil. `cx*3` stays in the list deliberately: it is
-    // `available: false` in the EU today, but that flag can flip back, and the
-    // live filter (isLocationOrderable) is what decides — the list only
-    // expresses preference, never availability.
-    const smallShared = ['cpx11', 'cpx22', 'cx23', 'cx22']; // ~2 vCPU, 2–4 GB
-    const mediumShared = ['cpx32', 'cx33', 'cpx21', 'cx23', 'cx32']; // 2–4 vCPU, 4–8 GB
-
-    // Offline defaults, by region. There is no single shared-vCPU x86 SKU that
-    // is orderable in every supported location: the EU locations lost the whole
-    // `cpx*1` generation on 2026-01-01 AND currently show the whole `cx*3` line
-    // as unavailable, while the `cpx*2` generation has not reached ash/hil,
-    // which have no `cx` line at all. So the offline path has to branch rather
-    // than "assume US" as it did until 2026-07 — that older comment claimed CPX
-    // was the stable family and EU `cx` the one that rotates, which is
-    // backwards: `cpx11`/`cpx21` are exactly the SKUs that went unorderable
-    // across all four EU+APAC locations.
-    const offline = HetznerProvider.US_REGIONS.includes(region)
-      ? { masterType: 'cpx11', dbType: 'cpx21', workerType: 'cpx11' }
-      : { masterType: 'cpx22', dbType: 'cpx32', workerType: 'cpx22' };
-
-    const pickAvailable = (prefs, fallback) => {
-      if (available) {
-        for (const t of prefs) if (available.has(t)) return t;
-      }
-      return fallback;
-    };
-
-    if (available) {
-      return {
-        masterType: pickAvailable(smallShared, offline.masterType),
-        dbType: pickAvailable(mediumShared, offline.dbType),
-        workerType: pickAvailable(smallShared, offline.workerType),
-      };
-    }
-
-    return offline;
+    return regionRoleDefaults(HetznerProvider, region);
   }
 
   /**
@@ -714,8 +806,12 @@ export class HetznerProvider extends BaseProvider {
    * 2026-08-20, deploy/effects/compose-ha.js) to translate the primary's types
    * into SKUs the standby region actually offers. Result is always x86 —
    * vibecarbon is amd64-only (src/lib/deploy/platform.js).
+   * @param {string} [role] - the role the node plays (compose, master, db,
+   *   worker): a type not stocked there is re-picked for that role
+   *   (src/lib/sizing.js standbyStandIn), never smaller than `serverType`
+   * @returns {string|null} null when nothing fits, for the caller to refuse
    */
-  static resolveServerTypeForRegion(serverType, targetRegion) {
+  static resolveServerTypeForRegion(serverType, targetRegion, role) {
     // ARM→x86 rescue, applied up front and REGARDLESS of availability.
     //
     // "Regardless of availability" is load-bearing: cax IS available in
@@ -734,26 +830,26 @@ export class HetznerProvider extends BaseProvider {
     // substitution is size-preserving (armToAmd64Equivalent), so if it ever
     // does fire it cannot quietly downsize a node.
     const requested = HetznerProvider.armToAmd64Equivalent(serverType);
-    const available = HetznerProvider._locationTypes?.[targetRegion];
+    // A live catalog that does not list the location stocks nothing there:
+    // the stand-in below then answers null, as cheapestRoleSet does.
+    const live = HetznerProvider._locationTypes;
+    const available = live ? (live[targetRegion] ?? new Set()) : undefined;
 
     // If live data available, check directly
     if (available) {
       if (available.has(requested)) return requested;
 
-      // Fall back to region defaults at the same role tier. There is NO
+      // Fall back to the role's cheapest stocked pick of at least the same
+      // RAM (sizing.js standbyStandIn), or null to refuse. There is NO
       // x86→ARM (cpx→cax) leg here any more. It used to convert an x86
       // primary's cpx11 into ARM cax11 on an EU standby — an arch flip the
       // amd64 app image cannot survive, chasing scarcer ARM capacity besides
       // (RCA 2026-06-23: nbg1 standby failed resource_unavailable on cax). The
       // offline branch below was hardened at the time; this live-data branch
       // was missed and kept flipping until the x86-64 standardization.
-      // getRegionDefaults only ever returns x86 SKUs, so the tier fallback is
-      // arch-safe by construction.
-      const suffix = requested.replace(/^[a-z]+/, '');
-      const defaults = HetznerProvider.getRegionDefaults(targetRegion);
-      if (suffix.startsWith('1')) return defaults.masterType;
-      if (suffix.startsWith('2')) return defaults.dbType;
-      return defaults.workerType;
+      // The picker drops ARM candidates, so the fallback is arch-safe by
+      // construction.
+      return standbyStandIn(HetznerProvider, requested, targetRegion, role);
     }
 
     // Offline fallback — no live catalog to consult. x86 shared-vCPU (cx/cpx)
@@ -789,12 +885,14 @@ export class HetznerProvider extends BaseProvider {
         .sort((a, b) => a.vcpu - b.vcpu || a.ram - b.ram);
     }
 
-    // Offline fallback — filter by prefix
-    const prefixes = HetznerProvider.US_REGIONS.includes(region)
-      ? HetznerProvider.REGION_TYPE_PREFIXES.us
-      : HetznerProvider.REGION_TYPE_PREFIXES.eu;
+    // Offline fallback — filter by prefix, minus the lines that geography
+    // cannot place (OFFLINE_UNORDERABLE).
+    const geo = HetznerProvider.US_REGIONS.includes(region) ? 'us' : 'eu';
+    const prefixes = HetznerProvider.REGION_TYPE_PREFIXES[geo];
+    const unorderable = HetznerProvider.OFFLINE_UNORDERABLE[geo];
     return Object.entries(HetznerProvider.SERVER_TYPES)
       .filter(([name]) => prefixes.some((prefix) => name.startsWith(prefix)))
+      .filter(([name]) => !unorderable.some((line) => line.test(name)))
       .map(([name, info]) => withArchitecture(name, info));
   }
 

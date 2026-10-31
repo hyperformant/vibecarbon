@@ -151,7 +151,9 @@ async function haProvisionServers(ctx) {
   const primaryStackRegion = birth('primary')?.region ?? region;
   const standbyRegion =
     birth('standby')?.region ??
-    (ctx.secondaryRegion || Provider.getDefaultStandbyRegion(primaryStackRegion));
+    (ctx.secondaryRegion ||
+      // Fits the primary's type without shrinking it, as the wizard's default.
+      Provider.getDefaultStandbyRegion(primaryStackRegion, ['compose'], { compose: serverType }));
   // The standby STACK's region; re-pointed at the role standby's once the pair
   // is resolved below (the same node unless this is a reconverge).
   ctx.standbyRegion = standbyRegion;
@@ -165,6 +167,10 @@ async function haProvisionServers(ctx) {
   // fail placing the standby, with an error naming a region the operator never
   // chose (getDefaultStandbyRegion picked it).
   //
+  // A type the standby region does not stock is re-picked there for the
+  // compose role (src/lib/sizing.js standbyStandIn): the cheapest stocked
+  // candidate, never smaller than the primary's type.
+  //
   // resolveServerTypeForRegion also carries the ARM->x86 rescue (vibecarbon is
   // amd64-only, see deploy/platform.js), so an environment predating that
   // standardization converges here too.
@@ -175,16 +181,33 @@ async function haProvisionServers(ctx) {
   // or `up` would resize the scaled server back; only a type this deploy was
   // asked for (`deploy -server-type`, ctx.serverTypeRequested) applies to both
   // stacks, even one equal to the env's recorded type.
+  //
+  // Before the standby server exists, a first deploy that failed after the
+  // skeleton save has the standby type it resolved on record under
+  // ha.pendingStandby, for the location it resolved it for. A rerun to that
+  // location places the same type.
+  const pendingStandby = envConfig?.ha?.pendingStandby;
   const recordedType = (stack) =>
     ctx.serverTypeRequested
       ? undefined
-      : (envConfig?.servers ?? []).find(
+      : ((envConfig?.servers ?? []).find(
           (sv) => composeHaStackOf(sv, projectName, environment) === stack,
-        )?.serverType;
+        )?.serverType ??
+        (stack === 'standby' && pendingStandby?.region === standbyRegion
+          ? pendingStandby.serverType
+          : undefined));
   const primaryStackServerType = recordedType('primary') ?? serverType;
   ctx.primaryStackServerType = primaryStackServerType;
   const standbyServerType =
-    recordedType('standby') ?? Provider.resolveServerTypeForRegion(serverType, standbyRegion);
+    recordedType('standby') ??
+    Provider.resolveServerTypeForRegion(serverType, standbyRegion, 'compose');
+  if (!standbyServerType) {
+    // The deploy wizard refuses this before anything is created; a direct
+    // caller gets the same cause rather than a null type at the provider.
+    throw new Error(
+      `no compose server of at least ${serverType}'s size is orderable in ${standbyRegion} right now`,
+    );
+  }
   ctx.standbyServerType = standbyServerType;
   if (!recordedType('standby') && standbyServerType !== serverType) {
     p.log.info(

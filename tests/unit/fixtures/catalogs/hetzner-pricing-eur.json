@@ -1,0 +1,28 @@
+{
+  "provider": "hetzner",
+  "captured": "2026-10-22 (synthetic)",
+  "source": "Synthetic: the GET /v1/pricing shape for an account billed in EUR, trimmed to the fields parsePricing reads (currency, primary_ips). ash/hil differ from the EU so a per-location read is visible.",
+  "note": "Public pricing shape, no account identifiers.",
+  "pricing": {
+    "currency": "EUR",
+    "vat_rate": "19.00",
+    "primary_ips": [
+      {
+        "type": "ipv4",
+        "prices": [
+          { "location": "fsn1", "price_monthly": { "net": "0.5000000000", "gross": "0.5950000000" } },
+          { "location": "nbg1", "price_monthly": { "net": "0.5000000000", "gross": "0.5950000000" } },
+          { "location": "hel1", "price_monthly": { "net": "0.5000000000", "gross": "0.5950000000" } },
+          { "location": "ash", "price_monthly": { "net": "0.5500000000", "gross": "0.6545000000" } },
+          { "location": "hil", "price_monthly": { "net": "0.5500000000", "gross": "0.6545000000" } }
+        ]
+      },
+      {
+        "type": "ipv6",
+        "prices": [
+          { "location": "fsn1", "price_monthly": { "net": "0.0000000000", "gross": "0.0000000000" } }
+        ]
+      }
+    ]
+  }
+}

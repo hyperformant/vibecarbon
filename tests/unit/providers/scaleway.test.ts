@@ -192,17 +192,21 @@ describe('ARM guard', () => {
     _typeArch: Record<string, string> | null;
     _locationTypes: Record<string, Set<string>> | null;
     SERVER_TYPES: Record<string, unknown>;
+    _prices: unknown;
   };
   const scw = ScalewayProvider as unknown as ScwStatics;
+  // A live fetch now also sets _prices; restore it with the rest.
   const saved = {
     typeArch: scw._typeArch,
     locationTypes: scw._locationTypes,
     serverTypes: scw.SERVER_TYPES,
+    prices: scw._prices,
   };
   afterEach(() => {
     scw._typeArch = saved.typeArch;
     scw._locationTypes = saved.locationTypes;
     scw.SERVER_TYPES = saved.serverTypes;
+    scw._prices = saved.prices;
   });
 
   // Every arm64 commercial type in the live products/servers catalog
@@ -269,6 +273,18 @@ describe('ARM guard', () => {
 
     it('still keeps arm64 out of the presented catalog', () => {
       expect(Object.keys(scw.SERVER_TYPES).sort()).toEqual(['BASIC3-X2C-4G', 'STANDARD3-X2C-8G']);
+    });
+
+    it('walks each zone servers listing and its availability listing', () => {
+      const urls = fetchWithRetryMock.mock.calls.map((c) => String(c[0]));
+      for (const zone of Object.keys(ScalewayProvider.REGIONS)) {
+        expect(urls).toContain(
+          `https://api.scaleway.com/instance/v1/zones/${zone}/products/servers?per_page=100&page=1`,
+        );
+        expect(urls).toContain(
+          `https://api.scaleway.com/instance/v1/zones/${zone}/products/servers/availability?per_page=100&page=1`,
+        );
+      }
     });
 
     it('falls back to the name rule for a type the catalog does not list', () => {

@@ -1,0 +1,1337 @@
+{
+  "provider": "linode",
+  "captured": "2026-10-22",
+  "source": "GET /v4/linode/types",
+  "note": "Trimmed to the fields fetchServerTypes reads. Public catalog data, no account identifiers.",
+  "data": [
+    {
+      "id": "g6-nanode-1",
+      "class": "nanode",
+      "vcpus": 1,
+      "memory": 1024,
+      "disk": 25600,
+      "price": {
+        "monthly": 5.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 6.0
+        },
+        {
+          "id": "br-gru",
+          "monthly": 7.0
+        }
+      ]
+    },
+    {
+      "id": "g6-standard-1",
+      "class": "standard",
+      "vcpus": 1,
+      "memory": 2048,
+      "disk": 51200,
+      "price": {
+        "monthly": 12.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 14.4
+        },
+        {
+          "id": "br-gru",
+          "monthly": 16.8
+        }
+      ]
+    },
+    {
+      "id": "g6-standard-2",
+      "class": "standard",
+      "vcpus": 2,
+      "memory": 4096,
+      "disk": 81920,
+      "price": {
+        "monthly": 24.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 28.8
+        },
+        {
+          "id": "br-gru",
+          "monthly": 33.6
+        }
+      ]
+    },
+    {
+      "id": "g6-standard-4",
+      "class": "standard",
+      "vcpus": 4,
+      "memory": 8192,
+      "disk": 163840,
+      "price": {
+        "monthly": 48.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 57.6
+        },
+        {
+          "id": "br-gru",
+          "monthly": 67.2
+        }
+      ]
+    },
+    {
+      "id": "g6-standard-6",
+      "class": "standard",
+      "vcpus": 6,
+      "memory": 16384,
+      "disk": 327680,
+      "price": {
+        "monthly": 96.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 115.2
+        },
+        {
+          "id": "br-gru",
+          "monthly": 134.4
+        }
+      ]
+    },
+    {
+      "id": "g6-standard-8",
+      "class": "standard",
+      "vcpus": 8,
+      "memory": 32768,
+      "disk": 655360,
+      "price": {
+        "monthly": 192.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 230.4
+        },
+        {
+          "id": "br-gru",
+          "monthly": 268.8
+        }
+      ]
+    },
+    {
+      "id": "g6-standard-16",
+      "class": "standard",
+      "vcpus": 16,
+      "memory": 65536,
+      "disk": 1310720,
+      "price": {
+        "monthly": 384.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 460.8
+        },
+        {
+          "id": "br-gru",
+          "monthly": 537.6
+        }
+      ]
+    },
+    {
+      "id": "g6-standard-20",
+      "class": "standard",
+      "vcpus": 20,
+      "memory": 98304,
+      "disk": 1966080,
+      "price": {
+        "monthly": 576.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 691.2
+        },
+        {
+          "id": "br-gru",
+          "monthly": 806.4
+        }
+      ]
+    },
+    {
+      "id": "g6-standard-24",
+      "class": "standard",
+      "vcpus": 24,
+      "memory": 131072,
+      "disk": 2621440,
+      "price": {
+        "monthly": 768.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 921.6
+        },
+        {
+          "id": "br-gru",
+          "monthly": 1075.2
+        }
+      ]
+    },
+    {
+      "id": "g6-standard-32",
+      "class": "standard",
+      "vcpus": 32,
+      "memory": 196608,
+      "disk": 3932160,
+      "price": {
+        "monthly": 1152.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 1382.4
+        },
+        {
+          "id": "br-gru",
+          "monthly": 1612.8
+        }
+      ]
+    },
+    {
+      "id": "g7-highmem-1",
+      "class": "highmem",
+      "vcpus": 2,
+      "memory": 24576,
+      "disk": 20480,
+      "price": {
+        "monthly": 60.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 72.0
+        },
+        {
+          "id": "br-gru",
+          "monthly": 84.0
+        }
+      ]
+    },
+    {
+      "id": "g7-highmem-2",
+      "class": "highmem",
+      "vcpus": 2,
+      "memory": 49152,
+      "disk": 40960,
+      "price": {
+        "monthly": 120.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 144.0
+        },
+        {
+          "id": "br-gru",
+          "monthly": 168.0
+        }
+      ]
+    },
+    {
+      "id": "g7-highmem-4",
+      "class": "highmem",
+      "vcpus": 4,
+      "memory": 92160,
+      "disk": 92160,
+      "price": {
+        "monthly": 240.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 288.0
+        },
+        {
+          "id": "br-gru",
+          "monthly": 336.0
+        }
+      ]
+    },
+    {
+      "id": "g7-highmem-8",
+      "class": "highmem",
+      "vcpus": 8,
+      "memory": 153600,
+      "disk": 204800,
+      "price": {
+        "monthly": 480.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 576.0
+        },
+        {
+          "id": "br-gru",
+          "monthly": 672.0
+        }
+      ]
+    },
+    {
+      "id": "g7-highmem-16",
+      "class": "highmem",
+      "vcpus": 16,
+      "memory": 307200,
+      "disk": 348160,
+      "price": {
+        "monthly": 960.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 1152.0
+        },
+        {
+          "id": "br-gru",
+          "monthly": 1344.0
+        }
+      ]
+    },
+    {
+      "id": "g6-dedicated-2",
+      "class": "dedicated",
+      "vcpus": 2,
+      "memory": 4096,
+      "disk": 81920,
+      "price": {
+        "monthly": 36.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 43.2
+        },
+        {
+          "id": "br-gru",
+          "monthly": 50.4
+        }
+      ]
+    },
+    {
+      "id": "g6-dedicated-4",
+      "class": "dedicated",
+      "vcpus": 4,
+      "memory": 8192,
+      "disk": 163840,
+      "price": {
+        "monthly": 72.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 86.4
+        },
+        {
+          "id": "br-gru",
+          "monthly": 100.8
+        }
+      ]
+    },
+    {
+      "id": "g6-dedicated-8",
+      "class": "dedicated",
+      "vcpus": 8,
+      "memory": 16384,
+      "disk": 327680,
+      "price": {
+        "monthly": 144.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 172.8
+        },
+        {
+          "id": "br-gru",
+          "monthly": 201.6
+        }
+      ]
+    },
+    {
+      "id": "g6-dedicated-16",
+      "class": "dedicated",
+      "vcpus": 16,
+      "memory": 32768,
+      "disk": 655360,
+      "price": {
+        "monthly": 288.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 345.6
+        },
+        {
+          "id": "br-gru",
+          "monthly": 403.2
+        }
+      ]
+    },
+    {
+      "id": "g6-dedicated-32",
+      "class": "dedicated",
+      "vcpus": 32,
+      "memory": 65536,
+      "disk": 1310720,
+      "price": {
+        "monthly": 576.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 691.2
+        },
+        {
+          "id": "br-gru",
+          "monthly": 806.4
+        }
+      ]
+    },
+    {
+      "id": "g6-dedicated-48",
+      "class": "dedicated",
+      "vcpus": 48,
+      "memory": 98304,
+      "disk": 1966080,
+      "price": {
+        "monthly": 864.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 1036.8
+        },
+        {
+          "id": "br-gru",
+          "monthly": 1209.6
+        }
+      ]
+    },
+    {
+      "id": "g6-dedicated-50",
+      "class": "dedicated",
+      "vcpus": 50,
+      "memory": 131072,
+      "disk": 2560000,
+      "price": {
+        "monthly": 1152.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 1382.4
+        },
+        {
+          "id": "br-gru",
+          "monthly": 1612.8
+        }
+      ]
+    },
+    {
+      "id": "g6-dedicated-56",
+      "class": "dedicated",
+      "vcpus": 56,
+      "memory": 262144,
+      "disk": 5120000,
+      "price": {
+        "monthly": 2304.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 2764.8
+        },
+        {
+          "id": "br-gru",
+          "monthly": 3225.6
+        }
+      ]
+    },
+    {
+      "id": "g1-gpu-rtx6000-1",
+      "class": "gpu",
+      "vcpus": 8,
+      "memory": 32768,
+      "disk": 655360,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g1-gpu-rtx6000-2",
+      "class": "gpu",
+      "vcpus": 16,
+      "memory": 65536,
+      "disk": 1310720,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g1-gpu-rtx6000-3",
+      "class": "gpu",
+      "vcpus": 20,
+      "memory": 98304,
+      "disk": 1966080,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g1-gpu-rtx6000-4",
+      "class": "gpu",
+      "vcpus": 24,
+      "memory": 131072,
+      "disk": 2621440,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g7-premium-2",
+      "class": "premium",
+      "vcpus": 2,
+      "memory": 4096,
+      "disk": 81920,
+      "price": {
+        "monthly": 43.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 51.84
+        },
+        {
+          "id": "br-gru",
+          "monthly": 60.48
+        }
+      ]
+    },
+    {
+      "id": "g7-premium-4",
+      "class": "premium",
+      "vcpus": 4,
+      "memory": 8192,
+      "disk": 163840,
+      "price": {
+        "monthly": 86.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 103.68
+        },
+        {
+          "id": "br-gru",
+          "monthly": 120.96
+        }
+      ]
+    },
+    {
+      "id": "g7-premium-8",
+      "class": "premium",
+      "vcpus": 8,
+      "memory": 16384,
+      "disk": 327680,
+      "price": {
+        "monthly": 173.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 207.36
+        },
+        {
+          "id": "br-gru",
+          "monthly": 241.92
+        }
+      ]
+    },
+    {
+      "id": "g7-premium-16",
+      "class": "premium",
+      "vcpus": 16,
+      "memory": 32768,
+      "disk": 655360,
+      "price": {
+        "monthly": 346.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 414.72
+        },
+        {
+          "id": "br-gru",
+          "monthly": 483.84
+        }
+      ]
+    },
+    {
+      "id": "g7-premium-32",
+      "class": "premium",
+      "vcpus": 32,
+      "memory": 65536,
+      "disk": 1310720,
+      "price": {
+        "monthly": 691.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 829.44
+        },
+        {
+          "id": "br-gru",
+          "monthly": 967.68
+        }
+      ]
+    },
+    {
+      "id": "g7-premium-48",
+      "class": "premium",
+      "vcpus": 48,
+      "memory": 98304,
+      "disk": 1966080,
+      "price": {
+        "monthly": 1037.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 1244.16
+        },
+        {
+          "id": "br-gru",
+          "monthly": 1451.52
+        }
+      ]
+    },
+    {
+      "id": "g7-premium-50",
+      "class": "premium",
+      "vcpus": 50,
+      "memory": 131072,
+      "disk": 2560000,
+      "price": {
+        "monthly": 1382.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 1658.88
+        },
+        {
+          "id": "br-gru",
+          "monthly": 1935.36
+        }
+      ]
+    },
+    {
+      "id": "g7-premium-56",
+      "class": "premium",
+      "vcpus": 56,
+      "memory": 262144,
+      "disk": 5120000,
+      "price": {
+        "monthly": 2765.0
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": 3317.76
+        },
+        {
+          "id": "br-gru",
+          "monthly": 3870.72
+        }
+      ]
+    },
+    {
+      "id": "g2-gpu-rtx4000a1-s",
+      "class": "gpu",
+      "vcpus": 4,
+      "memory": 16384,
+      "disk": 524288,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g2-gpu-rtx4000a1-m",
+      "class": "gpu",
+      "vcpus": 8,
+      "memory": 32768,
+      "disk": 524288,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g2-gpu-rtx4000a1-l",
+      "class": "gpu",
+      "vcpus": 16,
+      "memory": 65536,
+      "disk": 524288,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g2-gpu-rtx4000a1-xl",
+      "class": "gpu",
+      "vcpus": 32,
+      "memory": 131072,
+      "disk": 524288,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g2-gpu-rtx4000a2-s",
+      "class": "gpu",
+      "vcpus": 8,
+      "memory": 32768,
+      "disk": 1048576,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g2-gpu-rtx4000a2-m",
+      "class": "gpu",
+      "vcpus": 16,
+      "memory": 65536,
+      "disk": 1048576,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g2-gpu-rtx4000a2-hs",
+      "class": "gpu",
+      "vcpus": 16,
+      "memory": 65536,
+      "disk": 2097152,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g2-gpu-rtx4000a4-s",
+      "class": "gpu",
+      "vcpus": 32,
+      "memory": 131072,
+      "disk": 2097152,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g2-gpu-rtx4000a4-m",
+      "class": "gpu",
+      "vcpus": 48,
+      "memory": 200704,
+      "disk": 2097152,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g1-accelerated-netint-vpu-t1u1-s",
+      "class": "accelerated",
+      "vcpus": 8,
+      "memory": 16384,
+      "disk": 204800,
+      "price": {
+        "monthly": 280.0
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g1-accelerated-netint-vpu-t1u1-m",
+      "class": "accelerated",
+      "vcpus": 12,
+      "memory": 24576,
+      "disk": 307200,
+      "price": {
+        "monthly": 352.0
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g1-accelerated-netint-vpu-t1u2-s",
+      "class": "accelerated",
+      "vcpus": 12,
+      "memory": 24576,
+      "disk": 307200,
+      "price": {
+        "monthly": 488.0
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g1-accelerated-netint-vpu-t1u8-s",
+      "class": "accelerated",
+      "vcpus": 48,
+      "memory": 98304,
+      "disk": 307200,
+      "price": {
+        "monthly": 1952.0
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g1-accelerated-netint-vpu-t1u8-m",
+      "class": "accelerated",
+      "vcpus": 64,
+      "memory": 131072,
+      "disk": 307200,
+      "price": {
+        "monthly": 2240.0
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g1-accelerated-netint-vpu-t1u8-l",
+      "class": "accelerated",
+      "vcpus": 96,
+      "memory": 196608,
+      "disk": 307200,
+      "price": {
+        "monthly": 2816.0
+      },
+      "region_prices": []
+    },
+    {
+      "id": "g8-dedicated-4-2",
+      "class": "dedicated",
+      "vcpus": 2,
+      "memory": 4096,
+      "disk": 41984,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-8-4",
+      "class": "dedicated",
+      "vcpus": 4,
+      "memory": 8192,
+      "disk": 83968,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-16-8",
+      "class": "dedicated",
+      "vcpus": 8,
+      "memory": 16384,
+      "disk": 167936,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-32-16",
+      "class": "dedicated",
+      "vcpus": 16,
+      "memory": 32768,
+      "disk": 335872,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-64-32",
+      "class": "dedicated",
+      "vcpus": 32,
+      "memory": 65536,
+      "disk": 670720,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-96-48",
+      "class": "dedicated",
+      "vcpus": 48,
+      "memory": 98304,
+      "disk": 1006592,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-128-64",
+      "class": "dedicated",
+      "vcpus": 64,
+      "memory": 131072,
+      "disk": 1342464,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-256-128",
+      "class": "dedicated",
+      "vcpus": 128,
+      "memory": 262144,
+      "disk": 2683904,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-512-256",
+      "class": "dedicated",
+      "vcpus": 256,
+      "memory": 524288,
+      "disk": 5368832,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-8-2",
+      "class": "dedicated",
+      "vcpus": 2,
+      "memory": 8192,
+      "disk": 83968,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-16-4",
+      "class": "dedicated",
+      "vcpus": 4,
+      "memory": 16384,
+      "disk": 167936,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-32-8",
+      "class": "dedicated",
+      "vcpus": 8,
+      "memory": 32768,
+      "disk": 335872,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-64-16",
+      "class": "dedicated",
+      "vcpus": 16,
+      "memory": 65536,
+      "disk": 670720,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-96-24",
+      "class": "dedicated",
+      "vcpus": 24,
+      "memory": 98304,
+      "disk": 1006592,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-128-32",
+      "class": "dedicated",
+      "vcpus": 32,
+      "memory": 131072,
+      "disk": 1342464,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-256-64",
+      "class": "dedicated",
+      "vcpus": 64,
+      "memory": 262144,
+      "disk": 2683904,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g8-dedicated-512-128",
+      "class": "dedicated",
+      "vcpus": 128,
+      "memory": 524288,
+      "disk": 5368832,
+      "price": {
+        "monthly": null
+      },
+      "region_prices": [
+        {
+          "id": "id-cgk",
+          "monthly": null
+        },
+        {
+          "id": "br-gru",
+          "monthly": null
+        }
+      ]
+    },
+    {
+      "id": "g7-dedicated-4-2",
+      "class": "dedicated",
+      "vcpus": 2,
+      "memory": 4096,
+      "disk": 81920,
+      "price": {
+        "monthly": 43.0
+      },
+      "region_prices": [
+        {
+          "id": "br-gru",
+          "monthly": 60.2
+        },
+        {
+          "id": "id-cgk",
+          "monthly": 51.6
+        }
+      ]
+    },
+    {
+      "id": "g7-dedicated-8-4",
+      "class": "dedicated",
+      "vcpus": 4,
+      "memory": 8192,
+      "disk": 163840,
+      "price": {
+        "monthly": 86.0
+      },
+      "region_prices": [
+        {
+          "id": "br-gru",
+          "monthly": 120.4
+        },
+        {
+          "id": "id-cgk",
+          "monthly": 103.2
+        }
+      ]
+    },
+    {
+      "id": "g7-dedicated-16-8",
+      "class": "dedicated",
+      "vcpus": 8,
+      "memory": 16384,
+      "disk": 327680,
+      "price": {
+        "monthly": 173.0
+      },
+      "region_prices": [
+        {
+          "id": "br-gru",
+          "monthly": 242.2
+        },
+        {
+          "id": "id-cgk",
+          "monthly": 207.6
+        }
+      ]
+    },
+    {
+      "id": "g7-dedicated-32-16",
+      "class": "dedicated",
+      "vcpus": 16,
+      "memory": 32768,
+      "disk": 655360,
+      "price": {
+        "monthly": 346.0
+      },
+      "region_prices": [
+        {
+          "id": "br-gru",
+          "monthly": 484.4
+        },
+        {
+          "id": "id-cgk",
+          "monthly": 415.2
+        }
+      ]
+    },
+    {
+      "id": "g7-dedicated-64-32",
+      "class": "dedicated",
+      "vcpus": 32,
+      "memory": 65536,
+      "disk": 1310720,
+      "price": {
+        "monthly": 691.0
+      },
+      "region_prices": [
+        {
+          "id": "br-gru",
+          "monthly": 967.4
+        },
+        {
+          "id": "id-cgk",
+          "monthly": 829.2
+        }
+      ]
+    },
+    {
+      "id": "g7-dedicated-96-48",
+      "class": "dedicated",
+      "vcpus": 48,
+      "memory": 98304,
+      "disk": 1966080,
+      "price": {
+        "monthly": 1037.0
+      },
+      "region_prices": [
+        {
+          "id": "br-gru",
+          "monthly": 1451.8
+        },
+        {
+          "id": "id-cgk",
+          "monthly": 1244.4
+        }
+      ]
+    },
+    {
+      "id": "g7-dedicated-128-50",
+      "class": "dedicated",
+      "vcpus": 50,
+      "memory": 131072,
+      "disk": 2560000,
+      "price": {
+        "monthly": 1382.0
+      },
+      "region_prices": [
+        {
+          "id": "br-gru",
+          "monthly": 1934.8
+        },
+        {
+          "id": "id-cgk",
+          "monthly": 1658.4
+        }
+      ]
+    },
+    {
+      "id": "g7-dedicated-256-56",
+      "class": "dedicated",
+      "vcpus": 56,
+      "memory": 262144,
+      "disk": 5120000,
+      "price": {
+        "monthly": 2765.0
+      },
+      "region_prices": [
+        {
+          "id": "br-gru",
+          "monthly": 3871.0
+        },
+        {
+          "id": "id-cgk",
+          "monthly": 3318.0
+        }
+      ]
+    }
+  ]
+}

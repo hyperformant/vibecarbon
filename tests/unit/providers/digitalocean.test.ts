@@ -102,14 +102,22 @@ describe('DigitalOceanProvider — identity/credentials statics (exact values)',
   it('pins FALLBACK_SERVER_TYPES exact specs', () => {
     expect(DigitalOceanProvider.FALLBACK_SERVER_TYPES).toEqual({
       's-1vcpu-2gb': { vcpu: 1, ram: 2, disk: 50 },
+      's-1vcpu-2gb-amd': { vcpu: 1, ram: 2, disk: 50 },
+      's-1vcpu-2gb-intel': { vcpu: 1, ram: 2, disk: 50 },
       's-2vcpu-2gb': { vcpu: 2, ram: 2, disk: 60 },
       's-2vcpu-4gb': { vcpu: 2, ram: 4, disk: 80 },
+      's-2vcpu-4gb-amd': { vcpu: 2, ram: 4, disk: 80 },
+      's-2vcpu-4gb-intel': { vcpu: 2, ram: 4, disk: 80 },
       's-4vcpu-8gb': { vcpu: 4, ram: 8, disk: 160 },
+      's-4vcpu-8gb-amd': { vcpu: 4, ram: 8, disk: 160 },
+      's-4vcpu-8gb-intel': { vcpu: 4, ram: 8, disk: 160 },
     });
   });
 });
 
-describe('DigitalOceanProvider.getDefaultStandbyRegion', () => {
+// Offline (no catalog loaded) the static pairs stand. With a live catalog the
+// cheapest stocked partner wins: standby-region-by-price.test.ts.
+describe('DigitalOceanProvider.getDefaultStandbyRegion offline', () => {
   it('pairs nyc3<->sfo3 and fra1<->ams3 and sgp1<->syd1 (conventional pairings)', () => {
     expect(DigitalOceanProvider.getDefaultStandbyRegion('nyc3')).toBe('sfo3');
     expect(DigitalOceanProvider.getDefaultStandbyRegion('sfo3')).toBe('nyc3');
@@ -190,13 +198,16 @@ describe('DigitalOceanProvider.fetchServerTypes', () => {
 });
 
 describe('DigitalOceanProvider.getRegionDefaults', () => {
-  it('returns a valid {masterType, dbType, workerType} shape for every known region', () => {
+  it('offline: 4 GB compose, master and worker, 2 GB db, in every known region', () => {
+    // No live catalog: declared candidate order over the whole fallback
+    // catalog. Live picks are pinned in price-for.test.ts.
     for (const region of Object.keys(DigitalOceanProvider.REGIONS)) {
       const defaults = DigitalOceanProvider.getRegionDefaults(region);
       expect(defaults).toEqual({
-        masterType: 's-2vcpu-2gb',
-        dbType: 's-2vcpu-4gb',
-        workerType: 's-2vcpu-2gb',
+        composeType: 's-2vcpu-4gb',
+        masterType: 's-2vcpu-4gb',
+        dbType: 's-1vcpu-2gb',
+        workerType: 's-2vcpu-4gb',
       });
     }
   });

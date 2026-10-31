@@ -10,8 +10,11 @@
  * e2e project's bill.
  *
  * These pins keep the matrix on EU locations and current-generation shared
- * types, cheapest first, and keep CI from re-pinning itself to the US via
- * the `regions` dispatch default. Anyone who needs a US perf record run
+ * types, and keep CI from re-pinning itself to the US via the `regions`
+ * dispatch default. Cheapest-first is the price picker's job now
+ * (src/lib/sizing.js): the matrix deploys the size a customer gets by default,
+ * so what is pinned here is the EU region list, the resolver's EU result and
+ * the scale ladder's targets. Anyone who needs a US perf record run
  * passes `regions: ash,hil` explicitly at dispatch time — that path still
  * works, it just is not the default.
  */
@@ -19,7 +22,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { testConfig } from '../../config.js';
+import { resolveCapacity, resolveCapacityPair } from '../../e2e/utils/region-resolver.js';
+import { seedCatalog } from '../helpers/catalog-fixtures.js';
 
 const EU_LOCATIONS = ['nbg1', 'hel1', 'fsn1'] as const;
 const WORKFLOW_PATH = join(process.cwd(), '.github', 'workflows', 'e2e-us-perf.yml');
@@ -29,16 +35,43 @@ describe('capacityPreferences.hetzner (cost guard)', () => {
     expect(testConfig.e2e.capacityPreferences.hetzner.regions).toEqual(EU_LOCATIONS);
   });
 
-  it('walks type-pairs cheapest-first and never offers the legacy cpx*1 generation', () => {
-    const pairs = testConfig.e2e.capacityPreferences.hetzner.typePairs;
-    expect(pairs).toEqual([
-      ['cx23', 'cx33'],
-      ['cpx22', 'cpx32'],
-      ['ccx13', 'ccx23'],
-    ]);
-    for (const [deploy, scale] of pairs) {
-      expect(deploy).not.toMatch(/^cpx\d1$/);
-      expect(scale).not.toMatch(/^cpx\d1$/);
+  it('never scales an EU default onto the legacy cpx*1 generation', () => {
+    // The picker chooses the deploy size (cheapest orderable first), so the
+    // cost guard's remaining hand-written surface is the scale ladder: the
+    // target of every type the picker defaults to in the EU must stay on the
+    // current generation.
+    const restore = seedCatalog(HetznerProvider, '2026-10-22/hetzner');
+    try {
+      const { scaleTo } = testConfig.e2e.capacityPreferences.hetzner;
+      for (const location of EU_LOCATIONS) {
+        const d = HetznerProvider.getRegionDefaults(location);
+        for (const type of [d.composeType, d.masterType, d.dbType, d.workerType]) {
+          expect(type, `${location} default`).not.toMatch(/^cpx\d1$/);
+          const target = (scaleTo as Record<string, string>)[type as string];
+          expect(target, `${type} -> ${target} in ${location}`).not.toMatch(/^cpx\d1$/);
+        }
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('never resolves a US location by default', async () => {
+    const restore = seedCatalog(HetznerProvider, '2026-10-22/hetzner');
+    try {
+      const prefs = testConfig.e2e.capacityPreferences.hetzner;
+      const opts = { loadCatalog: async () => true };
+      for (const mode of ['compose', 'k8s'] as const) {
+        const r = await resolveCapacity(prefs, 't', { ...opts, mode });
+        expect(EU_LOCATIONS).toContain(r.region);
+      }
+      for (const mode of ['compose-ha', 'k8s-ha'] as const) {
+        const { primary, standby } = await resolveCapacityPair(prefs, 't', { ...opts, mode });
+        expect(EU_LOCATIONS).toContain(primary.region);
+        expect(EU_LOCATIONS).toContain(standby.region);
+      }
+    } finally {
+      restore();
     }
   });
 });

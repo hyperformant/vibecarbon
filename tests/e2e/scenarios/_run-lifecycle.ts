@@ -112,6 +112,7 @@ import { type ResolutionPin, withResolutionPin } from '../utils/dns-pin.js';
 import { getE2ELicenseStub } from '../utils/e2e-env.js';
 import { extractDeployFailureDetail } from '../utils/extract-failure-detail.js';
 import { sharedStateBucketName } from '../utils/namespace.js';
+import { deployedScaleTarget } from '../utils/region-resolver.js';
 import { fetchServerTypes } from '../utils/server-types.js';
 import {
   e2eSshOpts,
@@ -328,6 +329,21 @@ function readAdminCredentials(projectDir: string): AdminCredentials | null {
     };
   } catch {
     return null;
+  }
+}
+
+/**
+ * `environments[env]` from `.vibecarbon.json`; `{}` when the file or the env
+ * is missing (the caller then names the absent field).
+ */
+function readEnvConfig(projectDir: string, env: string): Record<string, string | undefined> {
+  try {
+    const config = JSON.parse(readFileSync(join(projectDir, '.vibecarbon.json'), 'utf-8')) as {
+      environments?: Record<string, Record<string, string | undefined>>;
+    };
+    return config.environments?.[env] ?? {};
+  } catch {
+    return {};
   }
 }
 
@@ -1170,9 +1186,11 @@ export async function sweepOrphanedHetznerResources(
     // biome-ignore lint/suspicious/noExplicitAny: JS module interop
     const { HetznerS3Provider } = (await import('../../../src/lib/providers/hetzner-s3.js')) as any;
 
-    // Hetzner Object Storage has three regions — deploy may use any of them
-    // (nbg1 for primary e2e scenarios, hel1 as secondaryRegion for HA
-    // scenarios). Scan all three so we don't strand standby-region buckets.
+    // Hetzner Object Storage has three regions. A deploy's buckets live in
+    // the storage region resolved from its primary region (whichever EU
+    // location the resolver picked); an HA standby goes wherever
+    // getDefaultStandbyRegion puts it. Scan all three so no bucket is
+    // stranded whichever location a scenario landed in.
     for (const region of ['nbg1', 'fsn1', 'hel1']) {
       try {
         const s3 = new S3Client({
@@ -1395,6 +1413,9 @@ export async function runLifecycle(
   let postScaleTypes: Record<string, string> | null = null;
   let scaleStdout = '';
   let scaleStderr = '';
+  // The scale target: the ladder entry (config.scaleTo) for the type the
+  // deploy recorded in .vibecarbon.json, read when the scale step starts.
+  let scaleToType: string | undefined;
 
   // HA-only: marker row written on the CURRENT primary immediately before the
   // failover step, then asserted present on the PROMOTED primary in
@@ -3682,6 +3703,14 @@ EOF`;
       name: 'scale',
       run: () =>
         executeStep('scale', `vibecarbon scale ${config.envPrefix}`, async () => {
+          // The deploy picked the default sizes and recorded them; scale moves
+          // the recorded type one rung up the ladder. A type with no ladder
+          // entry fails here, naming the type.
+          scaleToType = deployedScaleTarget(
+            readEnvConfig(config.projectDir, config.envPrefix),
+            config.mode,
+            config.scaleTo,
+          );
           // Snapshot server types BEFORE scale so verify-scale can assert
           // they actually changed. Without this, a silent no-op scale (CLI
           // exits 0 but Hetzner never resizes) goes undetected — observed
@@ -3700,7 +3729,7 @@ EOF`;
             cwd: config.projectDir,
             timeout: TIMEOUTS.scale,
             env: { HCLOUD_TOKEN: hetznerToken },
-            scaleToType: config.scaleToType,
+            scaleToType,
           });
           // Stash the scale CLI's output for verify-scale's grep-based fallback.
           // ANSI stripping happens inside the assertion (it's also useful to
@@ -3762,7 +3791,7 @@ EOF`;
 
           // 2. Type-comparison path (preferred). Both pre and post snapshots
           //    must be non-empty AND every node we observed must land on
-          //    `config.scaleToType`.
+          //    `scaleToType` (the ladder target the scale step looked up).
           //
           //    Compose / compose-HA: every VPS gets blue-green-replaced to
           //    the target type (scale.js's compose path defaults to `both`
@@ -3784,7 +3813,7 @@ EOF`;
             Object.keys(preScaleTypes).length > 0 &&
             Object.keys(postScaleTypes).length > 0
           ) {
-            const expectedType = config.scaleToType;
+            const expectedType = scaleToType;
             const beforeTypes = Object.values(preScaleTypes);
             const afterEntries = Object.entries(postScaleTypes);
 

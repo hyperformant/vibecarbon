@@ -52,10 +52,10 @@ describe('providers.linode (Linode opt-in scenarios)', () => {
 });
 
 describe('capacityPreferences.linode', () => {
-  it('has one blanket typePair backing the compose scenario', () => {
-    expect(testConfig.e2e.capacityPreferences.linode.typePairs).toEqual([
-      ['g6-standard-2', 'g6-standard-4'],
-    ]);
+  it('scales the default Standard plan one size up', () => {
+    expect(testConfig.e2e.capacityPreferences.linode.scaleTo).toEqual({
+      'g6-standard-2': 'g6-standard-4',
+    });
   });
 
   it('carries the base-price Object-Storage-supporting regions subset', () => {

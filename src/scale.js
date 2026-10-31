@@ -21,7 +21,7 @@ import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
-import { resolvePrimary } from './lib/cli/resolve-primary.js';
+import { primaryEntryServerType, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
@@ -72,6 +72,7 @@ import { runPlan } from './lib/deploy/plan/runner.js';
 import { planScale } from './lib/deploy/plan/scale-plan.js';
 import { buildRemote } from './lib/deploy/remote-build.js';
 import { isRetiredSide } from './lib/deploy/retired-fence.js';
+import { haStacksFrom } from './lib/deploy/standby-types.js';
 import { isHATier, resolveTier } from './lib/deploy/tier-registry.js';
 import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from './lib/deploy/utils.js';
 import {
@@ -323,7 +324,13 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   // where `cpx21` (the previous literal) stopped being orderable on 2026-01-01,
   // so it seeded the picker's initialValue with a type the region no longer
   // sells. getRegionDefaults tracks the live catalog and the EU/US split.
-  const currentType = envConfig.serverType || Provider.getRegionDefaults(region).dbType;
+  // composeType, never dbType: the k8s db is a 2 GB role, and a default-sized
+  // compose box (no persisted serverType) was deployed on composeType. An env
+  // deployed before the top-level record keeps its size on the server entry.
+  const currentType =
+    envConfig.serverType ||
+    primaryEntryServerType(envConfig) ||
+    Provider.getRegionDefaults(region).composeType;
 
   // Display current configuration
   const pad = 18;
@@ -2179,6 +2186,14 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
     p.log.error(err.message);
     process.exit(1);
   }
+  // k8s-ha: the serving primary's own record, not the top level, which
+  // describes the side that was primary at the first deploy.
+  if (envConfig.ha?.enabled) {
+    const primary = haStacksFrom(envConfig)?.primary;
+    currentMasterType = primary?.masterServerType || currentMasterType;
+    currentDbType = primary?.dbServerType || currentDbType;
+    currentWorkerType = primary?.workerServerType || currentWorkerType;
+  }
 
   // 3. Display current config
   const pad = 18;
@@ -2292,6 +2307,33 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   // below also requires a configured standby region (registry predicate alone
   // is NOT equivalent here).
   const isHA = isHATier(parsed.tier) && envConfig.secondaryRegion;
+
+  // The new types resize the cluster, and on k8s-ha the standby cluster too.
+  // With the live catalog loaded, refuse a type a cluster's location does not
+  // sell before any Pulumi run (offline there is nothing to check against).
+  if (Provider._locationTypes) {
+    const primaryRegion = (isHA && envConfig.ha?.primary?.region) || region;
+    const standbyRegion = isHA
+      ? (envConfig.ha?.standby?.region ?? envConfig.secondaryRegion)
+      : null;
+    const sides = [
+      [isHA ? 'primary' : 'cluster', primaryRegion],
+      ...(standbyRegion ? [['standby', standbyRegion]] : []),
+    ];
+    const newTypes = [newValues.masterType, newValues.dbType, newValues.workerType].filter(Boolean);
+    for (const [side, location] of sides) {
+      const sold = Provider._locationTypes[location] ?? new Set();
+      const unsold = newTypes.find((type) => !sold.has(type));
+      if (!unsold) continue;
+      p.log.error(
+        `the ${side}'s location ${location} does not sell ${unsold}, so the ${side} cannot be scaled to it`,
+      );
+      p.log.info(
+        `${standbyRegion ? `pick a type both ${primaryRegion} and ${standbyRegion} sell` : `pick a type ${primaryRegion} sells`}:\n  vibecarbon scale ${environment} -type <type>`,
+      );
+      process.exit(1);
+    }
+  }
   p.note(`Current ${Provider.NAME} pricing: ${Provider.PRICING_URL}`, 'Cost');
 
   // 6. Require API token if infra changes (server type swap) needed
@@ -2658,12 +2700,32 @@ async function scaleApplyK8sChanges(ctx) {
   // stack-birth `${environment}-primary`/`-standby` names.
   const haRoles = resolveHaClusterRoles({ environment, envConfig, region, secondaryRegion, isHA });
 
+  // k8s-ha: each cluster keeps its OWN recorded types for every role this
+  // scale does not change. The top-level types describe the side that was
+  // primary at the first deploy; the two sides may run different types (the
+  // standby's location may not sell the primary's), and a failover swaps
+  // them. Seeding each cluster's overrides from its own record keeps Pulumi
+  // from resizing an unchanged role to a type its location does not sell,
+  // and the CA re-patch on that cluster's own worker type. The new values
+  // win. Plain k8s keeps the new values alone.
+  const sides = isHA ? haStacksFrom(envConfig) : null;
+  const ownTypes = (side) => {
+    const recorded = {
+      masterType: side?.masterServerType,
+      dbType: side?.dbServerType,
+      workerType: side?.workerServerType,
+    };
+    return Object.fromEntries(
+      Object.entries(recorded).filter(([key, type]) => type && newValues[key] == null),
+    );
+  };
+
   // Apply to primary (or single) cluster — keeps envConfig's persisted sizing.
   await applyScaleChanges({
     clusterEnv: haRoles.primary.clusterEnv,
     clusterRegion: haRoles.primary.clusterRegion,
     label: isHA ? `primary: ${haRoles.primary.clusterRegion}` : haRoles.primary.clusterRegion,
-    overrides: newValues,
+    overrides: isHA ? { ...ownTypes(sides?.primary), ...newValues } : newValues,
   });
 
   // Apply to standby cluster if HA — Pulumi's static worker floor forced to
@@ -2680,7 +2742,7 @@ async function scaleApplyK8sChanges(ctx) {
       clusterEnv: haRoles.standby.clusterEnv,
       clusterRegion: haRoles.standby.clusterRegion,
       label: `standby: ${haRoles.standby.clusterRegion}`,
-      overrides: { ...newValues, minWorkers: 0, maxWorkers: 0 },
+      overrides: { ...ownTypes(sides?.standby), ...newValues, minWorkers: 0, maxWorkers: 0 },
       caBounds: {
         min: newValues.minWorkers ?? envConfig.minWorkers ?? 1,
         max: newValues.maxWorkers ?? envConfig.maxWorkers ?? DEFAULT_WORKER_MAX,
@@ -3080,16 +3142,38 @@ async function scaleUpdateK8sConfig(ctx) {
       // would still provision the OLD worker type even after an operator
       // scaled the live cluster to the new one. Spread envConfig.ha first so
       // the role↔stack mapping (primary/standby/.stack) and scaleUpList stay
-      // untouched — only standbyWorkerSpec.serverType changes.
+      // untouched — only the worker spec and each side's types change.
+      // Each side's own record (ha.{primary,standby}.*ServerType) takes the
+      // new types too: scaleApplyK8sChanges resized both clusters, and a
+      // redeploy builds each side from its record, so a stale one would undo
+      // this scale (and, after a failover, resize the live primary back).
       ...(isHA &&
-        newValues.workerType &&
-        envConfig.ha && {
+        envConfig.ha &&
+        (newValues.workerType || newValues.masterType || newValues.dbType) && {
           ha: {
             ...envConfig.ha,
-            standbyWorkerSpec: {
-              ...envConfig.ha.standbyWorkerSpec,
-              serverType: newValues.workerType,
-            },
+            ...(envConfig.ha.primary && {
+              primary: {
+                ...envConfig.ha.primary,
+                ...(newValues.masterType && { masterServerType: newValues.masterType }),
+                ...(newValues.dbType && { dbServerType: newValues.dbType }),
+                ...(newValues.workerType && { workerServerType: newValues.workerType }),
+              },
+            }),
+            ...(envConfig.ha.standby &&
+              (newValues.masterType || newValues.dbType) && {
+                standby: {
+                  ...envConfig.ha.standby,
+                  ...(newValues.masterType && { masterServerType: newValues.masterType }),
+                  ...(newValues.dbType && { dbServerType: newValues.dbType }),
+                },
+              }),
+            ...(newValues.workerType && {
+              standbyWorkerSpec: {
+                ...envConfig.ha.standbyWorkerSpec,
+                serverType: newValues.workerType,
+              },
+            }),
           },
         }),
     };
