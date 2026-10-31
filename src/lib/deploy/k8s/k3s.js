@@ -3416,6 +3416,212 @@ export async function applyK3sManifests({
       description: `applyK3sManifests: kubectl set image ${workload} (CSI sidecars → ghcr mirrors)`,
     });
   }
+  if (!apiToken) {
+    throw new Error(
+      'applyK3sManifests: apiToken (provider API token) required for carbon-autoscaler Secret/carbon-autoscaler-config',
+    );
+  }
+  if (!k3sToken) {
+    throw new Error('applyK3sManifests: k3sToken required to render carbon-autoscaler config.json');
+  }
+  // The cluster autoscaler, applied and rolled out ALONGSIDE the cert-manager
+  // chain below rather than after k8s/base (DO e2e 2026-10-31: its rollout
+  // was 15.6 s of the 127 s apply, in series). Nothing it needs comes from
+  // either: it runs in kube-system on the master's host network, from its own
+  // kustomization (k8s/base/cluster-autoscaler, applied standalone) and its
+  // own carbon-autoscaler-config Secret; no cert-manager resource, no
+  // vibecarbon-namespace object, no NetworkPolicy (hostNetwork) is involved.
+  // The order inside is unchanged: Secret, apply, set image, then the zero
+  // (pilot standby) or the rollout wait. The app is still patched only after
+  // this settles (awaited with the image delivery before step 6), so the CA
+  // is up before any app pod can ask it for a node, exactly as before, and a
+  // failed rollout fails the deploy there with its diagnostics.
+  const rollOutClusterAutoscaler = async () => {
+    // 4b. Create the kube-system/carbon-autoscaler-config Secret the
+    //     carbon-autoscaler sidecar reads on startup (and on every
+    //     mtime-changed Refresh — see ConfigWatcher). Two keys:
+    //     - `token`: the provider API token, exposed to the sidecar via
+    //       secretKeyRef→PROVIDER_API_TOKEN in deployment.yaml.
+    //     - `config.json`: the rendered node-group config from
+    //       renderCarbonAutoscalerConfig, PLAIN JSON — no base64
+    //       pre-encoding. That hack only existed for the old hcloud
+    //       cloudprovider's secretKeyRef→env path (Kubernetes auto-decodes
+    //       Secret data to plaintext once, and that binary wanted a SECOND,
+    //       still-encoded layer on top). The sidecar mounts this Secret as a
+    //       FILE (`CARBON_AUTOSCALER_CONFIG=/config-ca/config.json`), which
+    //       only ever goes through the one automatic decode — plain JSON is
+    //       exactly what it expects.
+    //     Stdin pipe keeps the token + JSON off argv (mirrors the dnsSecret
+    //     pattern at step 2b).
+    const clusterName = `${projectName}-${environment}`;
+    const carbonAutoscalerConfigJson = await renderCarbonAutoscalerConfig({
+      k3sVersion: K3S_VERSION,
+      k3sToken,
+      // M3 Task 2: output-driven master private IP (Hetzner's own default
+      // stays '10.0.1.1' when this is undefined — see renderCarbonAutoscalerConfig).
+      masterPrivateIp,
+      clusterName,
+      environment,
+      providerId,
+      ProviderClass,
+      region,
+      workerServerType,
+      minWorkers,
+      maxWorkers,
+      caBoundsMin,
+    });
+    {
+      const caSecretYaml = [
+        'apiVersion: v1',
+        'kind: Secret',
+        'metadata:',
+        '  name: carbon-autoscaler-config',
+        '  namespace: kube-system',
+        'type: Opaque',
+        'stringData:',
+        `  token: ${JSON.stringify(apiToken)}`,
+        `  config.json: ${JSON.stringify(carbonAutoscalerConfigJson)}`,
+        '',
+      ].join('\n');
+      await runKubectlWithRetry(['apply', '-f', '-'], {
+        env,
+        input: caSecretYaml,
+        description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
+      });
+    }
+    // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
+    //      kube-system but base/'s parent kustomization sets
+    //      `namespace: vibecarbon`, whose namespace transformer would
+    //      override our kube-system metadata. Mirrors the CCM/CSI
+    //      separate-install pattern (those are commented in
+    //      base/kustomization.yaml and applied via cloud-init). The
+    //      child kustomization at carbon/k8s/base/cluster-autoscaler/
+    //      sets `namespace: kube-system` explicitly, which only takes
+    //      effect when applied standalone like this.
+    await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/base/cluster-autoscaler')], {
+      env,
+      description: 'applyK3sManifests: kubectl apply -k cluster-autoscaler',
+    });
+    // 5a''. Patch BOTH container images in one call.
+    //
+    //       `carbon-autoscaler`: deployment.yaml ships the
+    //       `{{CARBON_AUTOSCALER_IMAGE}}` placeholder (kustomize has no
+    //       built-in var-substitution for a container image string), so
+    //       resolve it here the same way the domain/SITE_URL placeholders
+    //       below are patched at deploy time.
+    //
+    //       `cluster-autoscaler`: the manifest already carries the mirrored
+    //       ghcr ref as a literal, so this is belt-and-braces — but load-bearing
+    //       belt-and-braces. `apply -k` above reads the PROJECT's checked-in
+    //       copy of this manifest, and a project generated before the mirror
+    //       landed still pins registry.k8s.io there, i.e. still walks into the
+    //       403 that cost a deploy on 2026-07-31 (src/lib/images.js). Re-pinning
+    //       here makes images.js authoritative at deploy time no matter how old
+    //       the project's k8s/ tree is.
+    //
+    //       Both refs come from src/lib/images.js, the single source of truth.
+    await runKubectlWithRetry(
+      [
+        '-n',
+        'kube-system',
+        'set',
+        'image',
+        'deployment/cluster-autoscaler',
+        `carbon-autoscaler=${carbonAutoscalerImageRef()}`,
+        `cluster-autoscaler=${clusterAutoscalerImageRef()}`,
+      ],
+      {
+        env,
+        description:
+          'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
+      },
+    );
+    if (pilotStandby) {
+      // Pilot-light: CA has nothing to scale for until a failover promotes
+      // this cluster, so zero it the same way as the app Deployment (step 5).
+      // Its node-group bounds are already pre-rendered into the
+      // carbon-autoscaler-config Secret (step 4b) using the PRIMARY's
+      // caBoundsMin/maxWorkers — the standby's maxSize reflects the same
+      // headroom the primary would scale into — so a failover only has to
+      // flip replicas 0→1, never re-render the config.
+      await runKubectlWithRetry(
+        [
+          '-n',
+          'kube-system',
+          'patch',
+          'deployment',
+          'cluster-autoscaler',
+          '--type=merge',
+          '-p',
+          JSON.stringify({ spec: { replicas: 0 } }),
+        ],
+        {
+          env,
+          description: 'applyK3sManifests: zero cluster-autoscaler deployment (pilot standby)',
+        },
+      );
+    }
+    // 5e. Wait for the rollout the `apply -k cluster-autoscaler` + `set image`
+    //     steps above triggered (on `strategy: Recreate`, either one changing
+    //     the pod template rolls the pod). The status-wait is the clean
+    //     failure mode: a misconfigured sidecar (e.g. an unreachable image tag)
+    //     surfaces here instead of as a downstream "no nodes scaled" mystery.
+    if (pilotStandby) {
+      // The steps above just rolled a Deployment we then zeroed — there's
+      // no rollout to wait on (0 replicas converges immediately).
+      console.error(
+        '[pilot-standby] skipping cluster-autoscaler rollout wait, app tier is zeroed until failover',
+      );
+    } else {
+      await perfAsync(`deploy.${perfPrefix}.clusterAutoscaler.rollout`, async () => {
+        // rollout-status has its own --timeout and benefits from live progress;
+        // runs via runCommandAsync (kubectl rollout status). Internal
+        // apiserver-watch retries cover transient drops within the budget.
+        //
+        // 300s: ONE Recreate cycle (old pod terminate + new pod start) plus a
+        // cold pull of both container images from ghcr.io. The former THREE
+        // back-to-back rolls (now collapsed into the single 5d patch) were what
+        // pushed this past 180s on the standby (k8s-ha 2026-04-29 run); one
+        // cycle sits comfortably under 300s, and the node has been pre-pulling
+        // both images since k3s came up (clusterAutoscalerPodImages()). Capture
+        // pod state on failure so a timeout surfaces root cause instead of just
+        // "rollout status timed out" — that is how the 2026-07-31 registry.k8s.io
+        // 403 was finally identified.
+        try {
+          // Through the retry wrapper, NOT bare runCommandAsync (d4 run 4,
+          // 2026-08-28): kubectl's internal watch retries only survive drops on
+          // an established connection — a transient `TLS handshake timeout` on
+          // the INITIAL connect exited kubectl 13s into the 300s budget and
+          // failed the deploy while the pod went Ready seconds later. The
+          // classifier already knew the spelling; this call was the last
+          // rollout-status holdout outside the wrapper.
+          await runKubectlWithRetry(
+            [
+              '-n',
+              'kube-system',
+              'rollout',
+              'status',
+              'deploy/cluster-autoscaler',
+              '--timeout=300s',
+            ],
+            { env, description: 'applyK3sManifests: cluster-autoscaler rollout status' },
+          );
+        } catch (err) {
+          // Capture runs through runDeployDiagnostic (silent:true + re-emit) so
+          // every byte lands in ~/.vibecarbon/logs/<env>-<ts>.log. The previous
+          // `silent: false` version wrote to inherited fds, which the deploy-log
+          // tee cannot see — on the 2026-07-31 e3 run it left a bare header and
+          // cost a blind RCA. See the "Deploy-time diagnostic capture" block.
+          await captureClusterAutoscalerDiagnostics({ env });
+          throw err;
+        }
+      });
+    }
+  };
+  const clusterAutoscalerReady = rollOutClusterAutoscaler();
+  // Awaited before step 6; this only keeps a rollout that fails while the
+  // cert-manager chain is still running from being an unhandledRejection.
+  clusterAutoscalerReady.catch(() => {});
   // 1. Install cert-manager (raw YAML; not a kustomize base).
   await perfAsync(`deploy.${perfPrefix}.certManager.install`, () =>
     runKubectlWithRetry(['apply', '-f', CERT_MANAGER_URL], {
@@ -3706,66 +3912,6 @@ export async function applyK3sManifests({
   //    marker, so the db pod's first boot restores that backup.
   await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore });
   onNamespaceReady?.();
-  // 4b. Create the kube-system/carbon-autoscaler-config Secret the
-  //     carbon-autoscaler sidecar reads on startup (and on every
-  //     mtime-changed Refresh — see ConfigWatcher). Two keys:
-  //     - `token`: the provider API token, exposed to the sidecar via
-  //       secretKeyRef→PROVIDER_API_TOKEN in deployment.yaml.
-  //     - `config.json`: the rendered node-group config from
-  //       renderCarbonAutoscalerConfig, PLAIN JSON — no base64
-  //       pre-encoding. That hack only existed for the old hcloud
-  //       cloudprovider's secretKeyRef→env path (Kubernetes auto-decodes
-  //       Secret data to plaintext once, and that binary wanted a SECOND,
-  //       still-encoded layer on top). The sidecar mounts this Secret as a
-  //       FILE (`CARBON_AUTOSCALER_CONFIG=/config-ca/config.json`), which
-  //       only ever goes through the one automatic decode — plain JSON is
-  //       exactly what it expects.
-  //     Stdin pipe keeps the token + JSON off argv (mirrors the dnsSecret
-  //     pattern at step 2b).
-  if (!apiToken) {
-    throw new Error(
-      'applyK3sManifests: apiToken (provider API token) required for carbon-autoscaler Secret/carbon-autoscaler-config',
-    );
-  }
-  if (!k3sToken) {
-    throw new Error('applyK3sManifests: k3sToken required to render carbon-autoscaler config.json');
-  }
-  const clusterName = `${projectName}-${environment}`;
-  const carbonAutoscalerConfigJson = await renderCarbonAutoscalerConfig({
-    k3sVersion: K3S_VERSION,
-    k3sToken,
-    // M3 Task 2: output-driven master private IP (Hetzner's own default
-    // stays '10.0.1.1' when this is undefined — see renderCarbonAutoscalerConfig).
-    masterPrivateIp,
-    clusterName,
-    environment,
-    providerId,
-    ProviderClass,
-    region,
-    workerServerType,
-    minWorkers,
-    maxWorkers,
-    caBoundsMin,
-  });
-  {
-    const caSecretYaml = [
-      'apiVersion: v1',
-      'kind: Secret',
-      'metadata:',
-      '  name: carbon-autoscaler-config',
-      '  namespace: kube-system',
-      'type: Opaque',
-      'stringData:',
-      `  token: ${JSON.stringify(apiToken)}`,
-      `  config.json: ${JSON.stringify(carbonAutoscalerConfigJson)}`,
-      '',
-    ].join('\n');
-    await runKubectlWithRetry(['apply', '-f', '-'], {
-      env,
-      input: caSecretYaml,
-      description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
-    });
-  }
   // 5. Apply base (namespace, network-policies, db, app, backup, traefik,
   //    config), always from a rendered temp copy (renderK8sBase): the db
   //    StatefulSet carries deploy-time placeholders (image, wal-g prefix and
@@ -4014,53 +4160,6 @@ export async function applyK3sManifests({
     // deliveryPromise` before step 6 re-throws it and fails the deploy.
     deliveryPromise.catch(() => {});
   }
-  // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
-  //      kube-system but base/'s parent kustomization sets
-  //      `namespace: vibecarbon`, whose namespace transformer would
-  //      override our kube-system metadata. Mirrors the CCM/CSI
-  //      separate-install pattern (those are commented in
-  //      base/kustomization.yaml and applied via cloud-init). The
-  //      child kustomization at carbon/k8s/base/cluster-autoscaler/
-  //      sets `namespace: kube-system` explicitly, which only takes
-  //      effect when applied standalone like this.
-  await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/base/cluster-autoscaler')], {
-    env,
-    description: 'applyK3sManifests: kubectl apply -k cluster-autoscaler',
-  });
-  // 5a''. Patch BOTH container images in one call.
-  //
-  //       `carbon-autoscaler`: deployment.yaml ships the
-  //       `{{CARBON_AUTOSCALER_IMAGE}}` placeholder (kustomize has no
-  //       built-in var-substitution for a container image string), so
-  //       resolve it here the same way the domain/SITE_URL placeholders
-  //       below are patched at deploy time.
-  //
-  //       `cluster-autoscaler`: the manifest already carries the mirrored
-  //       ghcr ref as a literal, so this is belt-and-braces — but load-bearing
-  //       belt-and-braces. `apply -k` above reads the PROJECT's checked-in
-  //       copy of this manifest, and a project generated before the mirror
-  //       landed still pins registry.k8s.io there, i.e. still walks into the
-  //       403 that cost a deploy on 2026-07-31 (src/lib/images.js). Re-pinning
-  //       here makes images.js authoritative at deploy time no matter how old
-  //       the project's k8s/ tree is.
-  //
-  //       Both refs come from src/lib/images.js, the single source of truth.
-  await runKubectlWithRetry(
-    [
-      '-n',
-      'kube-system',
-      'set',
-      'image',
-      'deployment/cluster-autoscaler',
-      `carbon-autoscaler=${carbonAutoscalerImageRef()}`,
-      `cluster-autoscaler=${clusterAutoscalerImageRef()}`,
-    ],
-    {
-      env,
-      description:
-        'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
-    },
-  );
   // 5b. Patch the vibecarbon-config SITE_URL that the base/ kustomization
   //     ships with its `app.example.com` placeholder. (The vibecarbon-tls
   //     Certificate is no longer patched here: renderK8sBase renders it with
@@ -4187,28 +4286,6 @@ export async function applyK3sManifests({
       { env, description: 'applyK3sManifests: kubectl patch certificate/grafana-tls' },
     );
   }
-  if (pilotStandby) {
-    // Pilot-light: CA has nothing to scale for until a failover promotes
-    // this cluster, so zero it the same way as the app Deployment above.
-    // Its node-group bounds are already pre-rendered into the
-    // carbon-autoscaler-config Secret (step 4b) using the PRIMARY's
-    // caBoundsMin/maxWorkers — the standby's maxSize reflects the same
-    // headroom the primary would scale into — so a failover only has to
-    // flip replicas 0→1, never re-render the config.
-    await runKubectlWithRetry(
-      [
-        '-n',
-        'kube-system',
-        'patch',
-        'deployment',
-        'cluster-autoscaler',
-        '--type=merge',
-        '-p',
-        JSON.stringify({ spec: { replicas: 0 } }),
-      ],
-      { env, description: 'applyK3sManifests: zero cluster-autoscaler deployment (pilot standby)' },
-    );
-  }
   // (Considered: setting HCLOUD_NETWORK on the Hetzner CCM so it populates
   // each Node's InternalIP from the Hetzner private network. Reverted —
   // because k3s installs with `--node-ip=<public>` per master-init.sh,
@@ -4223,55 +4300,6 @@ export async function applyK3sManifests({
   // traefik rollout-restart below — kube-router's iptables can ship up
   // stale on first apply, and forcing traefik to re-establish its watch
   // after policies are in place clears it.)
-  // 5e. Wait for the rollout the `apply -k cluster-autoscaler` + `set image`
-  //     steps above triggered (on `strategy: Recreate`, either one changing
-  //     the pod template rolls the pod). The status-wait is the clean
-  //     failure mode: a misconfigured sidecar (e.g. an unreachable image tag)
-  //     surfaces here instead of as a downstream "no nodes scaled" mystery.
-  if (pilotStandby) {
-    // The steps above just rolled a Deployment we then zeroed — there's
-    // no rollout to wait on (0 replicas converges immediately).
-    console.error(
-      '[pilot-standby] skipping cluster-autoscaler rollout wait, app tier is zeroed until failover',
-    );
-  } else {
-    await perfAsync(`deploy.${perfPrefix}.clusterAutoscaler.rollout`, async () => {
-      // rollout-status has its own --timeout and benefits from live progress;
-      // runs via runCommandAsync (kubectl rollout status). Internal
-      // apiserver-watch retries cover transient drops within the budget.
-      //
-      // 300s: ONE Recreate cycle (old pod terminate + new pod start) plus a
-      // cold pull of both container images from ghcr.io. The former THREE
-      // back-to-back rolls (now collapsed into the single 5d patch) were what
-      // pushed this past 180s on the standby (k8s-ha 2026-04-29 run); one
-      // cycle sits comfortably under 300s, and the node has been pre-pulling
-      // both images since k3s came up (clusterAutoscalerPodImages()). Capture
-      // pod state on failure so a timeout surfaces root cause instead of just
-      // "rollout status timed out" — that is how the 2026-07-31 registry.k8s.io
-      // 403 was finally identified.
-      try {
-        // Through the retry wrapper, NOT bare runCommandAsync (d4 run 4,
-        // 2026-08-28): kubectl's internal watch retries only survive drops on
-        // an established connection — a transient `TLS handshake timeout` on
-        // the INITIAL connect exited kubectl 13s into the 300s budget and
-        // failed the deploy while the pod went Ready seconds later. The
-        // classifier already knew the spelling; this call was the last
-        // rollout-status holdout outside the wrapper.
-        await runKubectlWithRetry(
-          ['-n', 'kube-system', 'rollout', 'status', 'deploy/cluster-autoscaler', '--timeout=300s'],
-          { env, description: 'applyK3sManifests: cluster-autoscaler rollout status' },
-        );
-      } catch (err) {
-        // Capture runs through runDeployDiagnostic (silent:true + re-emit) so
-        // every byte lands in ~/.vibecarbon/logs/<env>-<ts>.log. The previous
-        // `silent: false` version wrote to inherited fds, which the deploy-log
-        // tee cannot see — on the 2026-07-31 e3 run it left a bare header and
-        // cost a blind RCA. See the "Deploy-time diagnostic capture" block.
-        await captureClusterAutoscalerDiagnostics({ env });
-        throw err;
-      }
-    });
-  }
   // The db wait: Ready (its readinessProbe: the real server accepting TCP),
   // then the condition itself, not the proxy: the pod being Ready is its
   // readiness probe's verdict at one instant, and awaitPostgresAccepting
@@ -4319,6 +4347,7 @@ export async function applyK3sManifests({
   //    change, one roll. Both containers: the app and its migrate init
   //    container run one image.
   if (deliveryPromise) await deliveryPromise;
+  await clusterAutoscalerReady;
   const appTemplatePatch = {
     spec: {
       template: {

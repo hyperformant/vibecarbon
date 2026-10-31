@@ -48,19 +48,22 @@ describe('applyK3sManifests: the one delivery', () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
     const start = at(body, '`deploy.${perfPrefix}.image.deliver`');
     const call = at(body, 'deliverImage({');
-    const caApply = body.indexOf("'cluster-autoscaler'");
     const awaited = at(body, 'await deliveryPromise');
     const patch = at(body, "'deployment/app',\n      '--type=strategic'");
     expect(registryReady).toBeLessThan(start);
     expect(start).toBeLessThan(call);
-    // The CA apply runs while the delivery is in flight.
-    expect(caApply).toBeGreaterThan(call);
-    expect(caApply).toBeLessThan(awaited);
+    // The observability apply runs while the delivery is in flight. (The CA
+    // apply and rollout now run alongside the cert-manager chain, from before
+    // the base; the app patch also waits for them: clusterAutoscalerReady.)
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
+    const observability = at(body, '`deploy.${perfPrefix}.applyObservability`');
+    expect(observability).toBeGreaterThan(call);
+    expect(observability).toBeLessThan(awaited);
     expect(awaited).toBeLessThan(patch);
-    // Nothing between the await and the patch but the patch itself and the
-    // Secret versions it stamps.
+    // Nothing between the await and the patch but the patch itself, the
+    // Secret versions it stamps, and the CA barrier.
     expect(body.slice(awaited, patch)).not.toMatch(
-      /\bawait (?!deliveryPromise|readAppSecretVersions|runKubectlWithRetry)/,
+      /\bawait (?!deliveryPromise|clusterAutoscalerReady|readAppSecretVersions|runKubectlWithRetry)/,
     );
   });
 

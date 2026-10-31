@@ -96,6 +96,11 @@ let eventsOut = '';
 // short-circuit test.
 let appProbeExit = 0;
 let rolloutHangs = false;
+// Gates on the cert-manager core readiness wait and on the cluster-autoscaler
+// rollout status, and the latter's exit code: drive the CA-overlap tests.
+let certManagerWaitGate: Promise<void> | null = null;
+let caRolloutGate: Promise<void> | null = null;
+let caRolloutExit = 0;
 // The rendered registry manifest as `kubectl apply -k <rendered base>` saw it
 // (the rendered copy is removed right after the apply).
 let registryAtBaseApply: string | null = null;
@@ -262,6 +267,31 @@ function installSpawnMock() {
       return fakeChild({ exitCode: registryRolloutExit, argv: full }) as unknown as ReturnType<
         typeof spawn
       >;
+    }
+    if (
+      certManagerWaitGate &&
+      cmd === 'kubectl' &&
+      argv.includes('wait') &&
+      argv.includes('deploy/cert-manager')
+    ) {
+      return fakeChild({ gate: certManagerWaitGate, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('rollout') &&
+      argv.includes('status') &&
+      argv.includes('deploy/cluster-autoscaler')
+    ) {
+      return fakeChild({
+        gate: caRolloutGate,
+        exitCode: caRolloutExit,
+        stderr: caRolloutExit
+          ? 'error: deployment "cluster-autoscaler" exceeded its progress deadline'
+          : '',
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
     }
     if (cmd === 'kubectl' && argv.includes('get') && argv.includes('events')) {
       return fakeChild({ stdout: eventsOut, argv: full }) as unknown as ReturnType<typeof spawn>;
@@ -604,26 +634,106 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app');
   const isDelivery = (a: string[]) => a[0] === 'deliverImage';
 
-  it('#1 the delivery starts after the registry is Ready, overlaps the CA apply, and gates the app patch', async () => {
+  it('#1 the delivery starts after the registry is Ready and gates the app patch', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
-    // Hold the delivery open: the CA apply must still run (it overlaps), and
-    // the deployment/app patch must not (it is the barrier).
+    // Hold the delivery open: the deployment/app patch must not run (it is
+    // the barrier).
     deliverGate = makeGate();
     const done = applyK3sManifests(baseArgs(projectDir));
     done.catch(() => {}); // avoid unhandled-rejection noise during the poll window
 
-    const caAppliedWhilePending = await waitFor(() => cmdCalls.some(isCaApply), 2000);
+    const delivering = await waitFor(() => cmdCalls.some(isDelivery), 2000);
+    await new Promise((r) => setTimeout(r, 50));
     const patchedWhilePending = cmdCalls.some(isAppPatch);
     deliverGate.release();
     await done;
 
-    expect(caAppliedWhilePending).toBe(true);
+    expect(delivering).toBe(true);
     expect(patchedWhilePending).toBe(false);
     const delivery = cmdCalls.findIndex(isDelivery);
     expect(cmdCalls.findIndex(isLocalRegistryWait)).toBeLessThan(delivery);
-    expect(delivery).toBeLessThan(cmdCalls.findIndex(isCaApply));
     expect(delivery).toBeLessThan(cmdCalls.findIndex(isAppPatch));
+  });
+
+  // The cluster autoscaler (kube-system, hostNetwork, its own Secret and
+  // kustomization) needs nothing cert-manager or k8s/base provides, so its
+  // apply and rollout run alongside the cert-manager readiness chain instead
+  // of after the base (DO e2e 2026-10-31: clusterAutoscaler.rollout 15.6 s on
+  // the critical path). The app still rolls only after it.
+  const isCertManagerWait = (a: string[]) =>
+    a[0] === 'kubectl' && a.includes('wait') && a.includes('deploy/cert-manager');
+  const isCaRollout = (a: string[]) =>
+    a[0] === 'kubectl' &&
+    a.includes('rollout') &&
+    a.includes('status') &&
+    a.includes('deploy/cluster-autoscaler');
+
+  it('the CA apply and rollout run while cert-manager is still becoming Available', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const gate = makeGate();
+    certManagerWaitGate = gate.promise;
+    try {
+      const done = applyK3sManifests(baseArgs(makeProjectDir()));
+      done.catch(() => {});
+      const waiting = await waitFor(() => cmdCalls.some(isCertManagerWait), 2000);
+      const rolledWhileWaiting = await waitFor(() => cmdCalls.some(isCaRollout), 2000);
+      const baseAppliedWhileWaiting = cmdCalls.some(
+        (a) => a[0] === 'kubectl' && a.includes('-k') && a.some((x) => /k8s-base/.test(String(x))),
+      );
+      gate.release();
+      await done;
+      expect(waiting).toBe(true);
+      expect(rolledWhileWaiting).toBe(true);
+      // The cert-manager chain itself is unchanged: the base still waits for it.
+      expect(baseAppliedWhileWaiting).toBe(false);
+      // Secret before apply, apply before set image, set image before the wait.
+      const caSecret = stdinCalls.find((c) => c.data.includes('name: carbon-autoscaler-config'));
+      const apply = cmdCalls.findIndex(isCaApply);
+      const setImage = cmdCalls.findIndex(
+        (a) =>
+          a.includes('set') && a.includes('image') && a.includes('deployment/cluster-autoscaler'),
+      );
+      expect(caSecret?.seq).toBeLessThan(apply);
+      expect(apply).toBeLessThan(setImage);
+      expect(setImage).toBeLessThan(cmdCalls.findIndex(isCaRollout));
+    } finally {
+      certManagerWaitGate = null;
+    }
+  });
+
+  it('the app is not patched until the CA rollout completes', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const gate = makeGate();
+    caRolloutGate = gate.promise;
+    try {
+      const done = applyK3sManifests(baseArgs(makeProjectDir()));
+      done.catch(() => {});
+      expect(await waitFor(() => cmdCalls.some(isCaRollout), 2000)).toBe(true);
+      // Everything up to the barrier may run; the app patch may not.
+      expect(await waitFor(() => cmdCalls.some(isDelivery), 2000)).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
+      const patchedEarly = cmdCalls.some(isAppPatch);
+      gate.release();
+      await done;
+      expect(patchedEarly).toBe(false);
+      expect(cmdCalls.findIndex(isCaRollout)).toBeLessThan(cmdCalls.findIndex(isAppPatch));
+    } finally {
+      caRolloutGate = null;
+    }
+  });
+
+  it('a failed CA rollout fails the deploy loudly, before the app is patched', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caRolloutExit = 1;
+    try {
+      await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
+        /progress deadline/,
+      );
+      expect(cmdCalls.some(isAppPatch)).toBe(false);
+    } finally {
+      caRolloutExit = 0;
+    }
   });
 
   it('the registry is waited by rollout status, never by a pod Ready wait', async () => {
