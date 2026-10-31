@@ -332,7 +332,7 @@ export function setEnvVar(key, value, cwd = process.cwd(), { localOnly = false }
     // `KEY=` line changes, everything else (comments, blanks, order) stays
     // verbatim, and no value is read out of the file. Allow-listed by exact
     // path in tests/unit/lib/dotenv-dialect-census.test.ts.
-    const regex = new RegExp(`^${key}=.*$`, 'm');
+    const regex = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=.*$`, 'm');
     if (regex.test(content)) {
       writeFileSync(
         envPath,

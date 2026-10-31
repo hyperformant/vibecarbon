@@ -4,8 +4,9 @@
  */
 
 // `@` is excluded from repo and tag so a digest ref (`repo@sha256:…`) is
-// refused rather than read as a tag named after the digest.
-const LOCAL_REGISTRY_REF = /^([^/\s]+:5000)\/([^\s:@]+(?:\/[^\s:@]+)*):([^\s/:@]+)$/;
+// refused rather than read as a tag named after the digest. `/` is excluded
+// from a repo segment so the segments split one way only (no backtracking).
+const LOCAL_REGISTRY_REF = /^([^/\s]+:5000)\/([^\s:@/]+(?:\/[^\s:@/]+)*):([^\s/:@]+)$/;
 
 /**
  * Split a `<host>:5000/<repo>:<tag>` ref. Throws unless the host is a cluster

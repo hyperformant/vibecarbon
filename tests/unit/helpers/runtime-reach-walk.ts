@@ -472,7 +472,10 @@ export function walkRuntimeReach({
         if (fn.name !== t.fn) continue;
         const local = fn.bindings.get(t.key);
         if (!local) continue;
-        const bare = new RegExp(`(?<![\\w$.])${local.replace(/\$/g, '\\$')}(?![\\w$])`, 'g');
+        const bare = new RegExp(
+          `(?<![\\w$.])${local.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`,
+          'g',
+        );
         const body = f.code.slice(fn.bodyStart, fn.bodyEnd);
         for (const m of body.matchAll(bare)) {
           const s = fn.bodyStart + (m.index ?? 0);
