@@ -27,8 +27,8 @@ describe('node runtime base image ref', () => {
 describe('db image ref', () => {
   it('is the pre-published multi-arch tag (no project/sha/timestamp)', () => {
     expect(DB_IMAGE).toBe('ghcr.io/hyperformant/postgres');
-    expect(DB_IMAGE_TAG).toBe('17.11-walg3.0.9-r2');
-    expect(dbImageRef()).toBe('ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r2');
+    expect(DB_IMAGE_TAG).toBe('17.11-walg3.0.9-r3');
+    expect(dbImageRef()).toBe('ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r3');
   });
   it('ref is stable — never per-deploy unique', () => {
     expect(dbImageRef()).toBe(dbImageRef());
