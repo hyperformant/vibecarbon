@@ -35,7 +35,9 @@ import {
   buildStagedBasebackupScript,
   DB_STS_BOOT_TIMEOUT_S,
   parsePgdataClaimFromPodJson,
+  probeStreaming,
   REPL_PORT,
+  SYSTEM_IDENTIFIER_SQL,
   swapPgdataViaHelperPod,
   verifyStreaming,
 } from '../../replication.js';
@@ -62,7 +64,7 @@ const HA_SCRIPTS_PATH = join(__dirname, '../../../../../carbon/ha');
 // node's cni0 gateway (a per-node /24 inside this CIDR) as the source.
 const K3S_POD_CIDR = '10.42.0.0/16';
 
-// The repl-gateway manifest (Pod + additive egress NetworkPolicy). HA-only, so
+// The repl-gateway manifest (Deployment + additive egress NetworkPolicy). HA-only, so
 // it lives outside the base kustomization; setupReplication renders its
 // placeholders per-cluster and applies it via `kubectl apply -f -`.
 const REPL_GATEWAY_MANIFEST = join(
@@ -72,7 +74,7 @@ const REPL_GATEWAY_MANIFEST = join(
 
 /**
  * The two socat address specs for the repl-gateway relay, keyed by cluster
- * role. Pure — unit-tested; rendered into the repl-gateway Pod manifest.
+ * role. Pure — unit-tested; rendered into the repl-gateway manifest.
  *
  *   - primary: bind the tunnel IP (10.99.0.1:15433) and forward to the local
  *     postgres hostPort (127.0.0.1:5433). Reachable only via wg0.
@@ -160,11 +162,23 @@ export function buildDbHostPortPatch() {
 }
 
 /**
+ * The repl-gateway apply, manifest on stdin. It first removes the bare
+ * `repl-gateway` Pod a cluster deployed before the Deployment shipped: that
+ * hostNetwork socat holds the gateway port, so the Deployment's pod would
+ * crash-loop beside it, and nothing else ever deletes a bare Pod. Deployment
+ * pods carry hashed names, so this only ever matches the legacy Pod, and
+ * `--ignore-not-found` makes it a no-op everywhere else. The delete waits for
+ * the pod to go, which frees the port before the apply.
+ */
+export const REPL_GATEWAY_APPLY_SHELL =
+  'kubectl delete pod repl-gateway -n vibecarbon --ignore-not-found >/dev/null && kubectl apply -f -';
+
+/**
  * Apply the repl-gateway manifest to both clusters and bring up the WireGuard
  * tunnel between the two database nodes. Shared by setupReplication (the
  * serial path) and prepareReplicationTransport (the deploy fan-out overlap) so
  * the two paths cannot drift. Idempotent: kubectl apply reconciles the gateway
- * pod/netpol, and exchangeAndBringUpTunnel regenerates + re-exchanges keys on
+ * Deployment/netpol, and exchangeAndBringUpTunnel regenerates + re-exchanges keys on
  * every call.
  */
 async function applyGatewaysAndBringUpTunnel({
@@ -178,44 +192,16 @@ async function applyGatewaysAndBringUpTunnel({
   sshKeyPath,
 }) {
   const gatewayTemplate = readFileSync(REPL_GATEWAY_MANIFEST, 'utf-8');
-  // repl-gateway is a BARE Pod, and bare-Pod specs are immutable beyond
-  // image/tolerations. A role-swapped redeploy (post-failover reconverge)
-  // renders each cluster's gateway with the OPPOSITE relay direction, so a
-  // plain `kubectl apply` over the surviving pod fails with
-  //   The Pod "repl-gateway" is invalid: spec: Forbidden: pod updates may
-  //   not change fields other than ...
-  // (RCA 2026-07-17 e4 run 5 — same-role redeploys render byte-identical
-  // specs and never hit this). On that rejection, delete the pod and
-  // re-apply: the relay drops for the seconds between delete and re-create,
-  // which is fine — replication re-establishes and the serial path's
-  // recovery waits already cover a briefly-absent transport.
-  const applyGatewayPod = async (masterIp, rendered) => {
-    const apply = () =>
-      runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, 'kubectl apply -f -'], {
-        silent: true,
-        input: rendered,
-      });
-    try {
-      await apply();
-    } catch (err) {
-      const msg = err?.message || String(err);
-      if (!/Forbidden: pod updates may not change fields/.test(msg)) throw err;
-      console.error(
-        '[repl-gateway] pod spec changed (role-swapped redeploy), deleting and re-creating the gateway pod',
-      );
-      await runCommandAsync(
-        [
-          'ssh',
-          ...sshOpts,
-          `root@${masterIp}`,
-          'kubectl delete pod repl-gateway -n vibecarbon --ignore-not-found --wait=true --timeout=60s',
-        ],
-        { silent: true },
-      );
-      await apply();
-    }
-  };
-  await applyGatewayPod(
+  // repl-gateway is a one-replica Deployment, so a plain apply takes a changed
+  // relay direction (a role-swapped redeploy after a failover renders each
+  // cluster's gateway the opposite way): the controller replaces the pod, with
+  // `Recreate` so the old relay frees the port before the new one binds it.
+  const applyGateway = (masterIp, rendered) =>
+    runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, REPL_GATEWAY_APPLY_SHELL], {
+      silent: true,
+      input: rendered,
+    });
+  await applyGateway(
     primaryIp,
     renderReplGatewayManifest({
       template: gatewayTemplate,
@@ -223,7 +209,7 @@ async function applyGatewaysAndBringUpTunnel({
       nodePrivateIp: primaryDbPrivateIp,
     }),
   );
-  await applyGatewayPod(
+  await applyGateway(
     standbyIp,
     renderReplGatewayManifest({
       template: gatewayTemplate,
@@ -363,12 +349,11 @@ export async function prepareReplicationTransport({
  *   1. Re-run exchangeAndBringUpTunnel (idempotent): recreates wg0 on both
  *      database nodes AND (re)installs the systemd unit, so an env deployed
  *      before this fix gets persistence retrofitted during scale.
- *   2. Per cluster: delete the crash-looped `repl-gateway` Pod (it couldn't
- *      bind its tunnel IP while wg0 was gone) then re-apply the gateway
- *      manifest — a bare Pod isn't recreated by any controller, so delete THEN
- *      apply gives a fresh Pod that binds cleanly now wg0 exists, skipping the
- *      up-to-5-min CrashLoopBackOff that otherwise wedges the primary's
- *      post-resize `kubectl wait --for=Ready pods --all -n vibecarbon`.
+ *   2. Per cluster: re-apply the gateway manifest, then restart the
+ *      `repl-gateway` Deployment. Its pod crash-looped while wg0 was gone (it
+ *      could not bind its tunnel IP); a fresh pod binds cleanly now wg0
+ *      exists, skipping the up-to-5-min CrashLoopBackOff that otherwise wedges
+ *      the primary's post-resize `kubectl wait --for=Ready pods --all -n vibecarbon`.
  *
  * All args mirror setupReplication's. Same known-hosts pinning + sshOpts.
  *
@@ -411,33 +396,33 @@ export async function reestablishReplicationTransport(options) {
     sshKeyPath,
   });
 
-  // 2. Bounce + re-apply the repl-gateway on each cluster.
+  // 2. Re-apply + restart the repl-gateway on each cluster.
   const gatewayTemplate = readFileSync(REPL_GATEWAY_MANIFEST, 'utf-8');
   for (const [masterIp, role, nodePrivateIp] of [
     [primaryIp, 'primary', primaryDbPrivateIp],
     [standbyIp, 'standby', standbyDbPrivateIp],
   ]) {
+    await runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, REPL_GATEWAY_APPLY_SHELL], {
+      silent: true,
+      input: renderReplGatewayManifest({ template: gatewayTemplate, role, nodePrivateIp }),
+    });
     await runCommandAsync(
       [
         'ssh',
         ...sshOpts,
         `root@${masterIp}`,
-        'kubectl delete pod repl-gateway -n vibecarbon --ignore-not-found',
+        'kubectl rollout restart deployment/repl-gateway -n vibecarbon',
       ],
-      { silent: true, ignoreError: true },
+      { silent: true },
     );
-    await runCommandAsync(['ssh', ...sshOpts, `root@${masterIp}`, 'kubectl apply -f -'], {
-      silent: true,
-      input: renderReplGatewayManifest({ template: gatewayTemplate, role, nodePrivateIp }),
-    });
   }
 }
 
 /**
  * Primary-side replication configuration — everything the primary needs
  * BEFORE a standby can basebackup from it: replication role/slot SQL,
- * the hostPort relay target, durable pg_hba admission, the wal_level
- * restart, and the post-restart rollout of postgres-dependent deployments.
+ * the hostPort relay target, and durable pg_hba admission with a reload. The
+ * db is never restarted: the replication settings are on its argv.
  * Extracted from setupReplication (phases + perf slices verbatim) so the HA
  * fan-out can run it opportunistically the moment the primary cluster
  * completes (mirrors prepareReplicationTransport) — the standby's seed init
@@ -568,14 +553,14 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   // random REPL_PASSWORD.
   //
   // DURABILITY: the rules must land in the file postgres actually reads AND
-  // survive the pod restart in step 3. Our db image leaves hba_file at its
+  // survive a pod restart. Our db image leaves hba_file at its
   // default, PGDATA/pg_hba.conf (docker/postgres-walg/postgresql.conf), which
   // lives on the PVC: it survives restarts, rides wal-g base backups, and is
   // inherited by the standby via pg_basebackup. The script resolves the live
   // path with SHOW hba_file and REFUSES (exit 1, failing this step) when it is
   // not under PGDATA — appending to a container-ephemeral file would be
   // reverted by the very next restart and fail replication much later and
-  // much less clearly. Step 3's restart then loads the new rules.
+  // much less clearly. The script ends with a reload that loads the new rules.
   const hbaLines = buildReplicationHbaLines([WG_SUBNET_CIDR, K3S_POD_CIDR]);
   const hbaSetupScript = [
     'set -e',
@@ -585,6 +570,9 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
     '  *) echo "hba_file is $HBA, not under PGDATA; replication rules there would not survive a restart" >&2; exit 1 ;;',
     'esac',
     ...hbaLines.map((l) => `grep -qxF '${l}' "$HBA" || echo '${l}' >> "$HBA"`),
+    // Reload, never restart: the serving primary's postgres is not bounced by a
+    // deploy. wal_level and the other replication settings are on the db argv.
+    `psql -U postgres -d postgres -tAc 'SELECT pg_reload_conf();'`,
   ].join('\n');
   await perfAsync('deploy.ha.replication.hba', () =>
     runCommandAsync(
@@ -595,84 +583,6 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         `kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- bash`,
       ],
       { silent: true, input: hbaSetupScript },
-    ),
-  );
-
-  // 3. Restart primary postgres to apply wal_level change (requires restart, not just reload)
-  await perfAsync('deploy.ha.replication.primaryRestart', async () => {
-    await runCommandAsync(
-      [
-        'ssh',
-        ...sshOpts,
-        `root@${primaryIp}`,
-        `kubectl delete pod ${DB_POD} -n vibecarbon --wait=true`,
-      ],
-      { silent: true },
-    );
-    // Wait for pod to come back
-    for (let i = 0; i < 30; i++) {
-      try {
-        const ready = await runCommandAsync(
-          [
-            'ssh',
-            ...sshOpts,
-            `root@${primaryIp}`,
-            // -h 127.0.0.1 (TCP): discriminates the real server from the
-            // docker-entrypoint's socket-only first-boot temp server — see
-            // awaitPostgresAccepting (readiness.js) for the d4 run-2 RCA.
-            // This pod restarts with existing PGDATA (no init flow), so the
-            // socket form was safe here, but TCP is the uniform condition.
-            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- pg_isready -h 127.0.0.1 -U postgres 2>/dev/null && echo IS_READY || echo NOT_READY`,
-          ],
-          { silent: true, ignoreError: true },
-        );
-        if (ready?.trim()?.includes('IS_READY')) break;
-      } catch {
-        // Retry
-      }
-      if (i === 29) break;
-      const interval = i < 5 ? 500 : 2000;
-      await new Promise((r) => setTimeout(r, interval));
-    }
-  });
-
-  // 3b. Rollout-restart the app on primary so it drops connections to the
-  //     (now-restarted) postgres.
-  //
-  //     RCA from k8s-ha 2026-04-28 deploy runs: after the primary postgres
-  //     restart, the db clients held stale connections, Service `app` had
-  //     zero Ready endpoints, and Traefik's IngressRoute fell through to its
-  //     default 404 backend on the public probe. The app's
-  //     `/api/health/ready` is now a direct db ping on its own pg pool, which
-  //     reconnects on its own, but the restart keeps the post-restart state
-  //     deterministic: the app is the only Deployment that holds postgres
-  //     connections now that the chart runs only the db.
-  //
-  //     Traefik is deliberately NOT restarted: hostPort 80/443 makes a
-  //     RollingUpdate race itself (the new pod can't bind while the old one
-  //     still listens), and it doesn't talk to postgres. Verified on a live
-  //     standby cluster on 2026-04-28: restarting every deployment hung on
-  //     traefik (10 min progress deadline).
-  await perfAsync('deploy.ha.replication.rolloutRestart', () =>
-    runCommandAsync(
-      [
-        'ssh',
-        ...sshOpts,
-        `root@${primaryIp}`,
-        'kubectl rollout restart deployment/app -n vibecarbon',
-      ],
-      { silent: true, ignoreError: true },
-    ),
-  );
-  await perfAsync('deploy.ha.replication.rolloutStatus', () =>
-    runCommandAsync(
-      [
-        'ssh',
-        ...sshOpts,
-        `root@${primaryIp}`,
-        'kubectl rollout status deployment/app -n vibecarbon --timeout=300s',
-      ],
-      { silent: true, ignoreError: true },
     ),
   );
 }
@@ -688,8 +598,9 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
  * @param {string} [options.primaryDbPrivateIp] - Primary database node private IP (gateway bind + egress netpol)
  * @param {string} [options.standbyDbPrivateIp] - Standby database node private IP (gateway bind + egress netpol)
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
- * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort patch, pg_hba, restart, dependent-deployment rollout) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
- * @returns {Promise<{streaming: boolean}>} Replication status
+ * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort patch, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
+ * @returns {Promise<{streaming: boolean, lastState: string, systemIdentifier: string|null}>} Replication status;
+ *   systemIdentifier is the standby's, set only when streaming was verified
  */
 export async function setupReplication(options) {
   const { primaryIp, standbyIp, sshKeyPath } = options;
@@ -789,26 +700,50 @@ export async function setupReplication(options) {
   // the seed-standby init's happy path — the entire
   // resolvePvc/stage/swap/standbyBoot/recoveryWait block is unnecessary.
   const probe = await perfAsync('deploy.ha.replication.streamingProbe', () =>
-    verifyStreaming({
-      readState: async () => {
-        const result = await runCommandAsync(
+    probeStreaming({
+      exec: (sql) =>
+        runCommandAsync(
           [
             'ssh',
             ...sshOpts,
             `root@${primaryIp}`,
-            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "${sql}"`,
           ],
           { silent: true, ignoreError: true },
-        );
-        return (typeof result === 'string' ? result : '').trim();
-      },
-      attempts: 3,
-      delaysMs: [2000],
+        ),
     }),
   );
+  // The verified-streaming result carries the standby's system identifier: the
+  // deploy persists it as envConfig.ha.systemIdentifier, the value failover's
+  // replica proof (R1) compares against. Read on the standby, the side failover
+  // will promote; streaming already implies the primary's identity matches.
+  const readStandbySystemIdentifier = async () => {
+    const out = await runCommandAsync(
+      [
+        'ssh',
+        ...sshOpts,
+        `root@${standbyIp}`,
+        `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "${SYSTEM_IDENTIFIER_SQL}"`,
+      ],
+      { silent: true },
+    );
+    const sysid = (typeof out === 'string' ? out : '').trim();
+    if (!/^\d+$/.test(sysid)) {
+      throw new Error(
+        `replication is streaming but the standby's system identifier could not be read ` +
+          `(got: ${sysid.slice(0, 80) || 'empty'})`,
+      );
+    }
+    return sysid;
+  };
+
   if (probe.streaming) {
     p.log.info('Standby already streaming (seeded at first boot), skipping the reseed');
-    return { streaming: true, lastState: probe.lastState || 'streaming' };
+    return {
+      streaming: true,
+      lastState: probe.lastState || 'streaming',
+      systemIdentifier: await readStandbySystemIdentifier(),
+    };
   }
 
   // 4. Initialize standby as a streaming replica of the primary.
@@ -906,9 +841,9 @@ export async function setupReplication(options) {
   // drift apart. The script (PGPASSWORD + conninfo password) is piped over stdin,
   // never argv.
   const stagingDir = '/var/lib/postgresql/data/.reseed_staging';
-  // Probe retry budget (RCA 2026-07-06 e4 rig): step 3 deleted the primary db
-  // pod moments ago, and the in-pod pg_isready wait can pass before the
-  // hostPort→relay path is reachable again — a single-shot probe then skips the
+  // Probe retry budget (RCA 2026-07-06 e4 rig): the in-pod pg_isready wait can
+  // pass before the hostPort→relay path is reachable (the hostPort patch above
+  // recreates the pod on a first deploy) — a single-shot probe then skips the
   // entire reseed silently. 12 × 10s ≈ 2 min, each attempt logged in-script.
   const PROBE_ATTEMPTS = 12;
   const PROBE_DELAY_S = 10;
@@ -1168,5 +1103,9 @@ export async function setupReplication(options) {
     }),
   );
 
-  return { streaming, lastState };
+  return {
+    streaming,
+    lastState,
+    systemIdentifier: streaming ? await readStandbySystemIdentifier() : null,
+  };
 }

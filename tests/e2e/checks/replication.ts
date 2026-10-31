@@ -462,7 +462,15 @@ async function sshExecWithRetry(
  * database the same way (one place to change the role or the pod name).
  */
 export async function runPsql(target: ReplTarget, sql: string): Promise<PsqlResult> {
-  const remote = buildPsqlCommand(target.mode, target.projectName, sql);
+  return runRemote(target, buildPsqlCommand(target.mode, target.projectName, sql));
+}
+
+/**
+ * Run a fixed remote command on `target` over SSH (retried, classified like
+ * runPsql). Never throws. The HA integrity checks read container and pod
+ * state through it.
+ */
+export async function runRemote(target: ReplTarget, remote: string): Promise<PsqlResult> {
   const res = await sshExecWithRetry(target, remote);
   if (res.ok) return { ok: true, output: res.stdout };
   // Prefix the error with WHERE it failed so the next triage is instant:

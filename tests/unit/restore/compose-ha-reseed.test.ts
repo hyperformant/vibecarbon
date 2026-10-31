@@ -1,3 +1,4 @@
+import * as p from '@clack/prompts';
 import { describe, expect, it, vi } from 'vitest';
 import { runComposeRestore } from '../../../src/restore.js';
 
@@ -24,6 +25,11 @@ const baseArgs = {
   projectName: 'myapp',
   serverIp: '10.0.0.1', // primary (servers[0])
   sshKeyPath: '/tmp/key',
+  // The post-reseed proof and the config writes (I2), inert by default.
+  readStandbyState: async () => ({ inRecovery: true, systemIdentifier: '7412345678901234567' }),
+  markStandbyUnproven: () => {},
+  recordSystemIdentifier: () => {},
+  assertWritable: async () => {},
 };
 
 // The restore target (serverIp) is derived in run() as the role==='primary'
@@ -74,12 +80,14 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
 
     // Primary restored first.
     expect(restoreCompose).toHaveBeenCalledWith('10.0.0.1', '/tmp/key', 'myapp', 'latest');
-    // Standby re-seeded FROM the restored primary: (standbyIp, primaryIp, key, name).
+    // Standby re-seeded FROM the restored primary: (standbyIp, primaryIp, key,
+    // name), dialing the primary's own tunnel address (its stack's, wgIpOf).
     expect(configureStandbyReplication).toHaveBeenCalledWith(
       '10.0.0.2',
       '10.0.0.1',
       '/tmp/key',
       'myapp',
+      { primaryHost: '10.99.0.1' },
     );
   });
 
@@ -170,5 +178,244 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
 
     expect(restoreCompose).not.toHaveBeenCalled();
     expect(configureStandbyReplication).not.toHaveBeenCalled();
+  });
+
+  it('never re-seeds a role-swapped env: it names the role-aware deploy instead', async () => {
+    // After a compose failover the retired node carries role standby and is
+    // frozen at the failover; rebuilding it by role is the deploy's reconverge
+    // (compose/ha-role-swap.js), so restore leaves it to that.
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const s = makeSpinner();
+
+    await runComposeRestore({
+      ...baseArgs,
+      serverIp: '10.0.0.2',
+      s,
+      envConfig: {
+        deployMode: 'compose-ha',
+        lastFailover: '2026-10-05T00:00:00.000Z',
+        servers: [
+          { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'standby' },
+          { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'primary' },
+        ],
+      },
+      restoreCompose,
+      configureStandbyReplication,
+    });
+
+    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.2', '/tmp/key', 'myapp', 'latest');
+    expect(configureStandbyReplication).not.toHaveBeenCalled();
+    const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(text).toMatch(/failed over/);
+    expect(text).toContain('vibecarbon deploy prod');
+    expect(text).toMatch(/rebuilds the standby/);
+    expect(text).not.toContain('vibecarbon destroy');
+    warn.mockRestore();
+  });
+
+  it('skips the re-seed on an older config without stack names when a failover came after the last deploy', async () => {
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const s = makeSpinner();
+
+    await runComposeRestore({
+      ...baseArgs,
+      serverIp: '10.0.0.2',
+      s,
+      envConfig: {
+        deployMode: 'compose-ha',
+        deployedAt: '2026-10-01T00:00:00.000Z',
+        lastFailover: '2026-10-05T00:00:00.000Z',
+        servers: [
+          { ip: '10.0.0.1', role: 'standby' },
+          { ip: '10.0.0.2', role: 'primary' },
+        ],
+      },
+      restoreCompose,
+      configureStandbyReplication,
+    });
+
+    expect(configureStandbyReplication).not.toHaveBeenCalled();
+    const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(text).toMatch(/failed over/);
+    expect(text).toContain('vibecarbon deploy prod');
+    expect(text).not.toContain('vibecarbon destroy');
+    warn.mockRestore();
+  });
+
+  it('with a failover still in flight, refuses before touching the old primary (C2)', async () => {
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    await expect(
+      runComposeRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: {
+          deployMode: 'compose-ha',
+          ha: { failoverInFlight: { id: 'j', target: 'standby' } },
+          servers: [
+            { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'primary' },
+            { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
+          ],
+        },
+        restoreCompose,
+        configureStandbyReplication,
+      }),
+    ).rejects.toThrow(
+      /Refusing to restore "prod": a failover is still in flight.*vibecarbon failover prod -abort/,
+    );
+    // The fenced old primary is never rewound or restarted next to a standby
+    // that may already be promoted.
+    expect(restoreCompose).not.toHaveBeenCalled();
+    expect(configureStandbyReplication).not.toHaveBeenCalled();
+  });
+
+  it('still re-seeds when the last deploy came after the last failover (reconverged)', async () => {
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: {
+        deployMode: 'compose-ha',
+        deployedAt: '2026-10-06T00:00:00.000Z',
+        lastFailover: '2026-10-05T00:00:00.000Z',
+        servers: [
+          { ip: '10.0.0.1', role: 'primary' },
+          { ip: '10.0.0.2', role: 'standby' },
+        ],
+      },
+      restoreCompose,
+      configureStandbyReplication,
+    });
+    expect(configureStandbyReplication).toHaveBeenCalledOnce();
+  });
+});
+
+describe('runComposeRestore: a standby not re-seeded and verified is marked unproven (I2)', () => {
+  const pair = {
+    deployMode: 'compose-ha',
+    servers: [
+      { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'primary' },
+      { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
+    ],
+  };
+  const run = async (over: Record<string, unknown>) => {
+    const markStandbyUnproven = vi.fn();
+    const recordSystemIdentifier = vi.fn();
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: pair,
+      restoreCompose: vi.fn().mockResolvedValue(undefined),
+      configureStandbyReplication: vi.fn().mockResolvedValue(true),
+      markStandbyUnproven,
+      recordSystemIdentifier,
+      ...over,
+    });
+    warn.mockRestore();
+    return { markStandbyUnproven, recordSystemIdentifier };
+  };
+
+  it('a verified reseed records the identifier and stays proven', async () => {
+    const { markStandbyUnproven, recordSystemIdentifier } = await run({});
+    expect(markStandbyUnproven).not.toHaveBeenCalled();
+    expect(recordSystemIdentifier).toHaveBeenCalledWith(
+      { environment: 'prod' },
+      '7412345678901234567',
+    );
+  });
+
+  it('a failed reseed marks it unproven', async () => {
+    const { markStandbyUnproven } = await run({
+      configureStandbyReplication: vi.fn().mockRejectedValue(new Error('basebackup failed')),
+    });
+    expect(markStandbyUnproven).toHaveBeenCalledWith({ environment: 'prod' });
+  });
+
+  it('a reseed that does not read back as a replica marks it unproven', async () => {
+    const { markStandbyUnproven, recordSystemIdentifier } = await run({
+      readStandbyState: async () => ({ inRecovery: false, systemIdentifier: '1' }),
+    });
+    expect(markStandbyUnproven).toHaveBeenCalledOnce();
+    expect(recordSystemIdentifier).not.toHaveBeenCalled();
+  });
+
+  it('a skipped reseed (failed-over pair) marks it unproven', async () => {
+    const { markStandbyUnproven } = await run({
+      envConfig: {
+        ...pair,
+        deployedAt: '2026-10-01T00:00:00.000Z',
+        lastFailover: '2026-10-05T00:00:00.000Z',
+      },
+    });
+    expect(markStandbyUnproven).toHaveBeenCalledOnce();
+  });
+});
+
+// Final review M4: a backup taken under a stranded write fence carries
+// default_transaction_read_only=on, so the restored primary must be proven
+// writable (or lifted) before anything else.
+describe('runComposeRestore: the restored primary is proven writable first (M4)', () => {
+  it('right after the restore, before the standby reseed', async () => {
+    const order: string[] = [];
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: {
+        deployMode: 'compose-ha',
+        servers: [
+          { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'primary' },
+          { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
+        ],
+      },
+      restoreCompose: vi.fn(async () => {
+        order.push('restore');
+      }),
+      configureStandbyReplication: vi.fn(async () => {
+        order.push('reseed');
+        return true;
+      }),
+      assertWritable: async () => {
+        order.push('writable');
+      },
+    });
+    expect(order).toEqual(['restore', 'writable', 'reseed']);
+  });
+});
+
+describe('assertRestoredPrimaryWritable', () => {
+  it('lifts a fence the backup carried, proving it off', async () => {
+    const { assertRestoredPrimaryWritable } = await import('../../../src/restore.js');
+    let setting = 'on';
+    const sqls: string[] = [];
+    const exec = vi.fn(async (sql: string) => {
+      sqls.push(sql);
+      if (sql.startsWith('ALTER SYSTEM RESET')) setting = 'off';
+      if (sql.includes('current_setting')) return setting;
+      return '';
+    });
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await assertRestoredPrimaryWritable({ environment: 'prod', envConfig: {}, exec });
+    expect(sqls).toContain('ALTER SYSTEM RESET default_transaction_read_only');
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(
+      /restored database: the primary was write-fenced/,
+    );
+    warn.mockRestore();
+  });
+
+  it('a lift that fails throws with the manual fix', async () => {
+    const { assertRestoredPrimaryWritable } = await import('../../../src/restore.js');
+    const exec = vi.fn(async (sql: string) => {
+      if (sql.startsWith('ALTER')) throw new Error('permission denied');
+      return 'on';
+    });
+    await expect(
+      assertRestoredPrimaryWritable({ environment: 'prod', envConfig: {}, exec }),
+    ).rejects.toThrow(/write-fenced and could not be lifted/);
   });
 });

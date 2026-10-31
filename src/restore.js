@@ -29,16 +29,34 @@ import { c } from './lib/colors.js';
 // Static imports (no cycle: neither compose/index.js nor compose/ha.js imports
 // restore.js). Aliased so runComposeRestore can default to the real functions
 // while still accepting injected mocks for unit tests.
-import { configureStandbyReplication as realConfigureStandbyReplication } from './lib/deploy/compose/ha.js';
-import { composeHaStandbyResyncHint } from './lib/deploy/compose/ha-role-swap.js';
+import {
+  composePsqlRunner,
+  configureStandbyReplication as realConfigureStandbyReplication,
+} from './lib/deploy/compose/ha.js';
+import {
+  composeHaStackOf,
+  composeHaStandbyResyncHint,
+  detectComposeHaRoleSwap,
+} from './lib/deploy/compose/ha-role-swap.js';
 import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index.js';
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import {
+  assertNoFailoverInFlight,
+  readReplicaState,
+  markStandbyUnproven as realMarkStandbyUnproven,
+  recordSystemIdentifier as realRecordSystemIdentifier,
+  swappedSinceLastDeploy,
+} from './lib/deploy/failover-guard.js';
+import {
+  DB_STS_BOOT_TIMEOUT_S,
+  k8sPsqlRunner,
   ensureReplicationSlot as realEnsureReplicationSlot,
   readK8sReplicationState as realReadK8sReplicationState,
   reseedStandbyFromPrimary as realReseedStandbyFromPrimary,
   verifyStreaming,
 } from './lib/deploy/replication.js';
+import { wgIpOf } from './lib/deploy/wireguard.js';
+import { assertRolePrimaryWritable } from './lib/deploy/write-fence.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
@@ -271,6 +289,19 @@ export async function run(args) {
     projectConfig,
     serverIp: 'primary',
   });
+
+  // A failover in flight (its journal set) may be promoting the standby while
+  // the old primary is fenced: a restore would rewind and restart the fenced
+  // old primary next to it (two writable primaries) and, on k8s, reseed the
+  // standby that may be the promoted one. Refuse before any prompt or SSH.
+  if (!values.l) {
+    try {
+      assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
+    } catch (err) {
+      p.log.error(err.message);
+      process.exit(1);
+    }
+  }
 
   // Source TTY guard fires *before* infrastructure checks so the
   // off-TTY error message is "needs -source" rather than "SSH key
@@ -538,7 +569,19 @@ export async function runComposeRestore({
   envConfig = {},
   restoreCompose = realRestoreCompose,
   configureStandbyReplication = realConfigureStandbyReplication,
+  markStandbyUnproven = realMarkStandbyUnproven,
+  recordSystemIdentifier = realRecordSystemIdentifier,
+  readStandbyState = (ip) =>
+    readReplicaState({ exec: composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`) }),
+  assertWritable = () =>
+    assertRestoredPrimaryWritable({
+      environment: envName,
+      envConfig,
+      exec: composePsqlRunner(serverIp, sshKeyPath, `/opt/${projectName}`),
+    }),
 }) {
+  // Also here, for every caller: see run().
+  assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
   if (chosenSource.kind === 'local') {
     throw new Error(
       'compose restore is wal-g-based and pulls from S3, local backup files are not supported. ' +
@@ -554,6 +597,7 @@ export async function runComposeRestore({
   s.start('Restoring database via wal-g (app will be temporarily unavailable)');
   await restoreCompose(serverIp, sshKeyPath, projectName, target);
   s.stop('Database restored');
+  await assertWritable();
 
   // compose-ha: the wal-g restore rewound the primary to an earlier LSN, so the
   // standby now has WAL AHEAD of the primary and cannot resume streaming. Re-seed
@@ -563,25 +607,53 @@ export async function runComposeRestore({
   //
   // A re-seed failure is NOT a restore failure: the primary is restored and
   // serving — only the standby is degraded. Warn (don't rethrow) so the restore
-  // still reports success. `deploy` is the resync — but only for an environment
-  // whose roles still match its Pulumi stacks; on a failed-over one deploy
-  // refuses, so the hint is rendered by composeHaStandbyResyncHint rather than
-  // hard-coded (compose/ha-role-swap.js).
+  // still reports success, with `deploy` as the resync (composeHaStandbyResyncHint).
+  //
+  // C2: on a failed-over env (roles swapped against the stacks, or a failover
+  // after the last deploy) the standby is rebuilt by role, and that is the
+  // deploy's reconverge (compose/ha-role-swap.js): restore never re-seeds there,
+  // it says why and names `vibecarbon deploy`. A failover still in flight never
+  // gets here: the restore refuses up front.
   if (envConfig.deployMode === 'compose-ha') {
+    const primary = envConfig.servers?.find((sv) => sv.role === 'primary');
     const standby = envConfig.servers?.find((sv) => sv.role === 'standby');
-    if (standby?.ip) {
+    if (
+      detectComposeHaRoleSwap({ projectName, environment: envName, envConfig }) ||
+      swappedSinceLastDeploy(envConfig)
+    ) {
+      markStandbyUnproven({ environment: envName });
+      p.log.warn(
+        'Primary restored and serving. Skipping the standby re-seed here: this pair has ' +
+          'failed over at some point, so its standby is rebuilt by `vibecarbon deploy`, which ' +
+          'resolves the nodes by role. ' +
+          composeHaStandbyResyncHint({ projectName, environment: envName, envConfig }),
+      );
+    } else if (standby?.ip) {
       try {
         s.start('Re-seeding standby from restored primary (pg_basebackup)');
-        await configureStandbyReplication(standby.ip, serverIp, sshKeyPath, projectName);
+        await configureStandbyReplication(standby.ip, serverIp, sshKeyPath, projectName, {
+          primaryHost: wgIpOf({
+            stackIdentity: composeHaStackOf(primary, projectName, envName) ?? 'primary',
+          }),
+        });
+        // Re-seeded is proven only by a reading in recovery with an identifier:
+        // that is what the next failover's replica proof compares against.
+        const seeded = await readStandbyState(standby.ip);
+        if (seeded.inRecovery !== true || !seeded.systemIdentifier) {
+          throw new Error('the re-seeded standby did not read back as a replica');
+        }
+        recordSystemIdentifier({ environment: envName }, seeded.systemIdentifier);
         s.stop('Standby re-seeded from restored primary');
       } catch (err) {
         s.stop('Standby re-seed failed');
+        markStandbyUnproven({ environment: envName });
         p.log.warn(
           `Primary restored and serving, but standby re-seed failed: ${err.message}. ` +
             composeHaStandbyResyncHint({ projectName, environment: envName, envConfig }),
         );
       }
     } else {
+      markStandbyUnproven({ environment: envName });
       p.log.warn(
         'compose-ha restore: no standby server found to re-seed, skipping (verify replication manually).',
       );
@@ -590,6 +662,31 @@ export async function runComposeRestore({
 
   p.log.success('Restore completed successfully');
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);
+}
+
+/**
+ * A restored database must take writes (final review M4). A base backup taken
+ * while a planned failover's write fence was stranded on the primary carries
+ * default_transaction_read_only=on in its postgresql.auto.conf, so the restore
+ * would bring back a read-only primary. Same check and lift as the deploy's
+ * (write-fence.js): fenced is lifted with a warning, a lift that fails throws
+ * with the manual fix, an unreadable setting warns.
+ *
+ * @param {{ environment: string, envConfig: object, exec: (sql: string, o?: object) => Promise<string> }} args
+ */
+export async function assertRestoredPrimaryWritable({ environment, envConfig, exec }) {
+  const state = await assertRolePrimaryWritable({
+    environment,
+    envConfig,
+    exec,
+    warn: (line) => p.log.warn(`restored database: ${line}`),
+  });
+  if (state === 'unknown') {
+    p.log.warn(
+      "could not read the restored database's write-fence setting; vibecarbon status shows it " +
+        'once the database answers',
+    );
+  }
 }
 
 // k8s restore is wal-g-native: postgres + wal-g live in the db pod,
@@ -627,10 +724,20 @@ export async function runK8sRestore({
   reseedStandbyFromPrimary = realReseedStandbyFromPrimary,
   ensureReplicationSlot = realEnsureReplicationSlot,
   readReplicationState = realReadK8sReplicationState,
+  markStandbyUnproven = realMarkStandbyUnproven,
+  recordSystemIdentifier = realRecordSystemIdentifier,
+  assertWritable = () =>
+    assertRestoredPrimaryWritable({
+      environment: envName,
+      envConfig,
+      exec: k8sPsqlRunner(serverIp, sshKeyPath),
+    }),
   // Pacing for the post-reseed streaming verify — injectable so tests don't wait
   // on real timers. Production uses the default setTimeout-backed sleep.
   verifySleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 }) {
+  // Also here, for every caller: see run().
+  assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
   if (chosenSource.kind === 'local') {
     throw new Error(
       'k8s restore is wal-g-based and pulls from S3 — local backup files are not supported. Use `-source latest` (or a timestamp for PITR).',
@@ -670,9 +777,9 @@ export async function runK8sRestore({
           `statefulset/${DB_STATEFULSET}`,
           '-n',
           'vibecarbon',
-          '--timeout=120s',
+          `--timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
         ],
-        { timeout: 130_000 },
+        { timeout: (DB_STS_BOOT_TIMEOUT_S + 30) * 1000 },
       );
     });
     // 4. Confirm postgres accepts connections post-recovery.
@@ -704,6 +811,8 @@ export async function runK8sRestore({
     //    re-fetch and wipe live data. Runs even if the restore failed.
     await setRestoreMarker(serverIp, sshKeyPath, '');
   }
+  // 5b. Before the app comes back: the restored database must take writes.
+  await assertWritable();
   // 6. Bring the app back.
   await perfAsync('restore.scaleUpApp', async () => scaleUpApp(serverIp, sshKeyPath));
   s.stop('Database restored');
@@ -724,91 +833,102 @@ export async function runK8sRestore({
   // can't complete — never silently leave a diverged standby.
   const isK8sHA = !!(envConfig.ha?.enabled || envConfig.ha === true || envConfig.secondaryRegion);
   if (isK8sHA) {
-    const servers = identifyServers(envName, envConfig, {});
-    const standbyIp = servers?.standby?.ip;
-    // The standby DATABASE node hosts the db pod's local-path PVC — the re-seed's
-    // node-side PGDATA swap ssh's there. No masterIp fallback: swapping on the
-    // wrong node would be destructive-in-the-wrong-place, so fail loudly instead.
-    const standbyDbIp = servers?.standby?.dbIp;
-    if (!standbyIp || !standbyDbIp) {
-      // We can't locate the standby — fail loudly rather than report a clean
-      // restore while the standby silently diverges.
-      throw new Error(
-        'HA restore: the primary was restored, but the standby cluster or its ' +
-          'database node could not be resolved from config, ' +
-          'so the standby could NOT be ' +
-          `re-seeded and now has a DIVERGED timeline. DR is not guaranteed. Resync with ` +
-          `\`vibecarbon deploy ${envName}\` (re-runs the verified replication setup).`,
-      );
-    }
-
-    // The wal-g restore wiped pg_replslot on the primary (slots are never part
-    // of a base backup). The reseeded standby STREAMS through this persistent
-    // slot post-swap (primary_slot_name) — without it, it connects and errors
-    // `replication slot "…" does not exist`, so it never streams. (The basebackup
-    // itself uses a temp slot now and no longer needs this — streaming does.)
-    // Recreate it idempotently first — same IF-NOT-EXISTS block primary-init.sql uses.
-    s.start('Recreating replication slot on restored primary');
+    // Every throw below leaves a standby that was not reseeded and verified:
+    // mark it unproven first (replication degraded, identifier dropped), so the
+    // replica proof cannot pass it on the identifier alone (I2).
     try {
-      await ensureReplicationSlot(serverIp, sshKeyPath);
-    } catch (err) {
-      s.stop('Replication slot recreation failed');
-      throw new Error(
-        `HA restore: the primary was restored, but recreating the replication slot ` +
-          `FAILED: ${err.message}\nWithout the slot the standby cannot be re-seeded and ` +
-          `has a DIVERGED timeline, DR is not guaranteed. Resync with ` +
-          `\`vibecarbon deploy ${envName}\`.`,
-      );
-    }
-    s.stop('Replication slot present on restored primary');
+      const servers = identifyServers(envName, envConfig, {});
+      const standbyIp = servers?.standby?.ip;
+      // The standby DATABASE node hosts the db pod's local-path PVC — the re-seed's
+      // node-side PGDATA swap ssh's there. No masterIp fallback: swapping on the
+      // wrong node would be destructive-in-the-wrong-place, so fail loudly instead.
+      const standbyDbIp = servers?.standby?.dbIp;
+      if (!standbyIp || !standbyDbIp) {
+        // We can't locate the standby — fail loudly rather than report a clean
+        // restore while the standby silently diverges.
+        throw new Error(
+          'HA restore: the primary was restored, but the standby cluster or its ' +
+            'database node could not be resolved from config, ' +
+            'so the standby could NOT be ' +
+            `re-seeded and now has a DIVERGED timeline. DR is not guaranteed. Resync with ` +
+            `\`vibecarbon deploy ${envName}\` (re-runs the verified replication setup).`,
+        );
+      }
 
-    s.start('Re-seeding standby cluster from restored primary (pg_basebackup)');
-    let reseedResult;
-    try {
-      reseedResult = await reseedStandbyFromPrimary(standbyIp, sshKeyPath, {
-        standbyDbIp,
-        // The re-seed dials the standby's LOCAL WireGuard relay (private IP :
-        // gateway port) — the deploy-time transport, unchanged by a restore.
-        standbyDbPrivateIp: servers?.standby?.dbPrivateIp,
+      // The wal-g restore wiped pg_replslot on the primary (slots are never part
+      // of a base backup). The reseeded standby STREAMS through this persistent
+      // slot post-swap (primary_slot_name) — without it, it connects and errors
+      // `replication slot "…" does not exist`, so it never streams. (The basebackup
+      // itself uses a temp slot now and no longer needs this — streaming does.)
+      // Recreate it idempotently first — same IF-NOT-EXISTS block primary-init.sql uses.
+      s.start('Recreating replication slot on restored primary');
+      try {
+        await ensureReplicationSlot(serverIp, sshKeyPath);
+      } catch (err) {
+        s.stop('Replication slot recreation failed');
+        throw new Error(
+          `HA restore: the primary was restored, but recreating the replication slot ` +
+            `FAILED: ${err.message}\nWithout the slot the standby cannot be re-seeded and ` +
+            `has a DIVERGED timeline, DR is not guaranteed. Resync with ` +
+            `\`vibecarbon deploy ${envName}\`.`,
+        );
+      }
+      s.stop('Replication slot present on restored primary');
+
+      s.start('Re-seeding standby cluster from restored primary (pg_basebackup)');
+      let reseedResult;
+      try {
+        reseedResult = await reseedStandbyFromPrimary(standbyIp, sshKeyPath, {
+          standbyDbIp,
+          // The re-seed dials the standby's LOCAL WireGuard relay (private IP :
+          // gateway port) — the deploy-time transport, unchanged by a restore.
+          standbyDbPrivateIp: servers?.standby?.dbPrivateIp,
+          // The restored primary may carry another lineage than the last seed
+          // (a backup from before a re-create): record what the standby now holds.
+          onSeeded: (sysid) => recordSystemIdentifier({ environment: envName }, sysid),
+        });
+      } catch (err) {
+        s.stop('Standby re-seed failed');
+        throw new Error(
+          `HA restore: the primary was restored and is serving, but re-seeding the standby ` +
+            `FAILED: ${err.message}\nThe standby has a DIVERGED timeline and is NOT replicating, ` +
+            `DR is not guaranteed. Resync with \`vibecarbon deploy ${envName}\`.`,
+        );
+      }
+      if (reseedResult === 'skipped') {
+        s.stop('Standby re-seed skipped, primary unreachable from standby');
+        throw new Error(
+          'HA restore: the standby could NOT reach the restored primary to re-seed ' +
+            '(cross-cluster connectivity). The standby has a DIVERGED timeline and is NOT ' +
+            `replicating, DR is not guaranteed. Verify the replication firewall/network, then ` +
+            `resync with \`vibecarbon deploy ${envName}\`.`,
+        );
+      }
+      s.stop('Standby re-seeded from restored primary');
+
+      // Confirm streaming from the restored primary — a re-seed that boots but
+      // never streams is still a diverged standby.
+      s.start('Verifying standby is streaming from restored primary');
+      const { streaming, lastState } = await verifyStreaming({
+        readState: async () => readReplicationState(servers.primary.ip, sshKeyPath),
+        attempts: 15,
+        delaysMs: [1000, 2000, 3000],
+        sleep: verifySleep,
       });
+      if (!streaming) {
+        s.stop('Standby streaming NOT confirmed');
+        throw new Error(
+          `HA restore: the standby was re-seeded but streaming replication is NOT confirmed ` +
+            `(last pg_stat_replication.state=${
+              lastState ? JSON.stringify(lastState) : 'no replica connected'
+            }). DR is not guaranteed. Resync with \`vibecarbon deploy ${envName}\`.`,
+        );
+      }
+      s.stop('Standby streaming from restored primary: DR restored');
     } catch (err) {
-      s.stop('Standby re-seed failed');
-      throw new Error(
-        `HA restore: the primary was restored and is serving, but re-seeding the standby ` +
-          `FAILED: ${err.message}\nThe standby has a DIVERGED timeline and is NOT replicating, ` +
-          `DR is not guaranteed. Resync with \`vibecarbon deploy ${envName}\`.`,
-      );
+      markStandbyUnproven({ environment: envName });
+      throw err;
     }
-    if (reseedResult === 'skipped') {
-      s.stop('Standby re-seed skipped, primary unreachable from standby');
-      throw new Error(
-        'HA restore: the standby could NOT reach the restored primary to re-seed ' +
-          '(cross-cluster connectivity). The standby has a DIVERGED timeline and is NOT ' +
-          `replicating, DR is not guaranteed. Verify the replication firewall/network, then ` +
-          `resync with \`vibecarbon deploy ${envName}\`.`,
-      );
-    }
-    s.stop('Standby re-seeded from restored primary');
-
-    // Confirm streaming from the restored primary — a re-seed that boots but
-    // never streams is still a diverged standby.
-    s.start('Verifying standby is streaming from restored primary');
-    const { streaming, lastState } = await verifyStreaming({
-      readState: async () => readReplicationState(servers.primary.ip, sshKeyPath),
-      attempts: 15,
-      delaysMs: [1000, 2000, 3000],
-      sleep: verifySleep,
-    });
-    if (!streaming) {
-      s.stop('Standby streaming NOT confirmed');
-      throw new Error(
-        `HA restore: the standby was re-seeded but streaming replication is NOT confirmed ` +
-          `(last pg_stat_replication.state=${
-            lastState ? JSON.stringify(lastState) : 'no replica connected'
-          }). DR is not guaranteed. Resync with \`vibecarbon deploy ${envName}\`.`,
-      );
-    }
-    s.stop('Standby streaming from restored primary: DR restored');
   }
 
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);

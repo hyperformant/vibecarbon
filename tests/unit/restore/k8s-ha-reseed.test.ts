@@ -65,6 +65,29 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+describe('runK8sRestore: a failover in flight (C2)', () => {
+  it('refuses before the restore marker, the db bounce or the standby reseed', async () => {
+    const reseedStandbyFromPrimary = vi.fn().mockResolvedValue('reseeded');
+    await expect(
+      runK8sRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: {
+          ...haEnvConfig,
+          ha: { ...haEnvConfig.ha, failoverInFlight: { id: 'j', target: 'standby' } },
+        },
+        ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+        reseedStandbyFromPrimary,
+      }),
+    ).rejects.toThrow(
+      /Refusing to restore "prod": a failover is still in flight.*vibecarbon failover prod -abort/,
+    );
+    // The standby may be the promoted primary: nothing touches either side.
+    expect(ssh.sshKubectl).not.toHaveBeenCalled();
+    expect(reseedStandbyFromPrimary).not.toHaveBeenCalled();
+  });
+});
+
 describe('runK8sRestore — k8s-HA standby re-seed', () => {
   it('bounds the post-restore db rollout-status inside the SSH client timeout (120s < 130s)', async () => {
     // Reconciliation invariant (see readiness-gate.test.ts): the old
@@ -87,8 +110,8 @@ describe('runK8sRestore — k8s-HA standby re-seed', () => {
         (argv as string[]).join(' ').includes('statefulset/'),
     );
     expect(call).toBeTruthy();
-    expect(call?.[2]).toContain('--timeout=120s');
-    expect(call?.[3]).toMatchObject({ timeout: 130_000 });
+    expect(call?.[2]).toContain('--timeout=600s');
+    expect(call?.[3]).toMatchObject({ timeout: 630_000 });
   });
 
   it('recreates the replication slot, re-seeds the standby, and verifies streaming', async () => {
@@ -124,6 +147,8 @@ describe('runK8sRestore — k8s-HA standby re-seed', () => {
     expect(reseedStandbyFromPrimary).toHaveBeenCalledWith('10.0.2.1', '/tmp/key', {
       standbyDbIp: '10.0.2.9',
       standbyDbPrivateIp: '10.0.1.2',
+      // The restored primary's lineage is what the standby now holds: record it.
+      onSeeded: expect.any(Function),
     });
     // Verify reads pg_stat_replication on the PRIMARY master.
     expect(readReplicationState).toHaveBeenCalledWith('10.0.1.1', '/tmp/key');
@@ -267,5 +292,106 @@ describe('runK8sRestore — planner statistics', () => {
     expect(analyzeIdx, `no ANALYZE in:\n${calls.join('\n')}`).toBeGreaterThan(-1);
     expect(analyzeIdx).toBeGreaterThan(readyIdx);
     if (scaleUpIdx > -1) expect(analyzeIdx).toBeLessThan(scaleUpIdx);
+  });
+});
+
+describe('runK8sRestore: a standby not re-seeded and verified is marked unproven (I2)', () => {
+  const run = async (over: Record<string, unknown>) => {
+    const markStandbyUnproven = vi.fn();
+    const outcome = runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnvConfig,
+      ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+      reseedStandbyFromPrimary: vi.fn().mockResolvedValue('reseeded'),
+      readReplicationState: vi.fn().mockResolvedValue('streaming'),
+      verifySleep: async () => {},
+      markStandbyUnproven,
+      recordSystemIdentifier: vi.fn(),
+      ...over,
+    });
+    return { outcome, markStandbyUnproven };
+  };
+
+  it('a verified reseed leaves the proof alone', async () => {
+    const { outcome, markStandbyUnproven } = await run({});
+    await outcome;
+    expect(markStandbyUnproven).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'the slot recreate fails',
+      { ensureReplicationSlot: vi.fn().mockRejectedValue(new Error('x')) },
+    ],
+    ['the reseed fails', { reseedStandbyFromPrimary: vi.fn().mockRejectedValue(new Error('x')) }],
+    ['the reseed is skipped', { reseedStandbyFromPrimary: vi.fn().mockResolvedValue('skipped') }],
+    ['streaming is never confirmed', { readReplicationState: vi.fn().mockResolvedValue('') }],
+    [
+      'the standby cannot be resolved',
+      {
+        envConfig: { ...haEnvConfig, ha: { ...haEnvConfig.ha, standby: { masterIp: '10.0.2.1' } } },
+      },
+    ],
+  ])('%s: throws, marked unproven first', async (_name, over) => {
+    const { outcome, markStandbyUnproven } = await run(over);
+    await expect(outcome).rejects.toThrow(/HA restore/);
+    expect(markStandbyUnproven).toHaveBeenCalledWith({ environment: 'prod' });
+  });
+});
+
+describe('markStandbyUnproven', () => {
+  it('sets replication degraded and drops the recorded identifier, keeping the rest', async () => {
+    const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { markStandbyUnproven } = await import('../../../src/lib/deploy/failover-guard.js');
+    const dir = mkdtempSync(join(tmpdir(), 'vc-unproven-'));
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'myapp',
+        environments: {
+          prod: { replication: 'streaming', ha: { enabled: true, systemIdentifier: '7' } },
+        },
+      }),
+    );
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    try {
+      markStandbyUnproven({ environment: 'prod' });
+      const env = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments
+        .prod;
+      expect(env).toEqual({ replication: 'degraded', degraded: true, ha: { enabled: true } });
+    } finally {
+      cwd.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runK8sRestore: the restored primary is proven writable before the app returns (M4)', () => {
+  it('after the db is back, before the app is scaled up', async () => {
+    const order: string[] = [];
+    vi.mocked(ssh.sshKubectl).mockImplementation(
+      async (_ip: string, _k: string, argv: string[]) => {
+        if (
+          argv.includes('scale') &&
+          argv.some((a) => a.startsWith('--replicas=') && a !== '--replicas=0')
+        ) {
+          order.push('scaleUp');
+        }
+        return '';
+      },
+    );
+    await runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: { deployMode: 'kubernetes' },
+      assertWritable: async () => {
+        order.push('writable');
+      },
+    });
+    expect(order[0]).toBe('writable');
+    expect(order).toContain('scaleUp');
   });
 });

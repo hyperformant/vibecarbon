@@ -41,6 +41,7 @@ import { summarizePulumiError } from '../../iac/index.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor } from '../../providers/index.js';
 import { createPrefixedTracker } from '../../tracker.js';
+import { requireDnsSetup } from '../dns-result.js';
 import {
   configurePrimaryForReplication,
   prepareReplicationTransport,
@@ -531,6 +532,9 @@ async function haK8sConfigureReplication(ctx) {
     });
     replStreaming = replResult.streaming;
     replLastState = replResult.lastState || '';
+    // Set only on verified streaming; the deploy persists it as
+    // ha.systemIdentifier for failover's replica proof.
+    ctx.systemIdentifier = replResult.systemIdentifier ?? null;
   } catch (error) {
     replError = error;
     // The fold below keeps only the last line for the gate message; the full
@@ -621,25 +625,18 @@ async function haK8sUpdateDns(ctx) {
     return;
   }
   const dnsName = DNS_PROVIDERS[options.dnsProvider].name;
-  try {
-    const { setupHA } = await getDnsProvider(options.dnsProvider);
-    const haResult = await setupHA(options.dnsToken, options.dnsZoneId, options.domain, [
-      { name: `${options.projectName}-${options.region}`, ip: primaryResult.floatingIp },
-      {
-        name: `${options.projectName}-${options.secondaryRegion}`,
-        ip: standbyResult.floatingIp,
-      },
-    ]);
-    if (haResult.success) {
-      p.log.info('DNS configured — use `vibecarbon failover` to switch regions');
-    } else {
-      p.log.warn(`${dnsName} DNS setup failed: ${haResult.error}`);
-      p.log.warn('Configure DNS manually');
-    }
-  } catch (error) {
-    p.log.warn(`${dnsName} DNS setup failed: ${error.message}`);
-    p.log.warn('Configure DNS manually');
-  }
+  const { setupHA } = await getDnsProvider(options.dnsProvider);
+  const haResult = await setupHA(options.dnsToken, options.dnsZoneId, options.domain, [
+    { name: `${options.projectName}-${options.region}`, ip: primaryResult.floatingIp },
+    {
+      name: `${options.projectName}-${options.secondaryRegion}`,
+      ip: standbyResult.floatingIp,
+    },
+  ]);
+  // A refused record write fails the deploy; "configure DNS manually" over a
+  // half-written zone is how a deploy reports success with the site unreachable.
+  requireDnsSetup(haResult, `${dnsName} HA DNS records for ${options.domain}`);
+  p.log.info('DNS configured — use `vibecarbon failover` to switch regions');
 }
 
 /** Print the Fullerene HA deploy summary + failover-command notes. */
@@ -667,10 +664,9 @@ async function haK8sFinalize(ctx) {
   );
 
   p.note(
-    [
-      `${c.dim('vibecarbon failover --target standby')}`,
-      `${c.dim('vibecarbon failover --target primary')}`,
-    ].join('\n'),
+    [`${c.dim('vibecarbon failover <env>')}`, `${c.dim('vibecarbon failover <env> -dry')}`].join(
+      '\n',
+    ),
     'Failover Commands',
   );
 }

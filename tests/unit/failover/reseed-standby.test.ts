@@ -29,9 +29,10 @@ vi.mock('../../../src/lib/ssh.js', () => ({
 }));
 
 const ssh = await import('../../../src/lib/ssh.js');
-const { getReplPasswordFromSecret, reseedAndPromoteOrAbort, reseedStandbyFromPrimary } =
-  await import('../../../src/failover.js');
-const { ensureReplicationSlot, isStandbyPromoted, isStandbyStreaming } = await import(
+const { getReplPasswordFromSecret, reseedStandbyOrAbort, reseedStandbyFromPrimary } = await import(
+  '../../../src/failover.js'
+);
+const { ensureReplicationSlot, isStandbyStreaming } = await import(
   '../../../src/lib/deploy/replication.js'
 );
 
@@ -101,6 +102,7 @@ function happyKubectl(
     if (cmd.includes('get pod') && cmd.includes('-o json')) return POD_JSON;
     if (cmd.includes('--ignore-not-found')) return ''; // db pod gone / swap-pod delete
     if (cmd.includes('pg_is_in_recovery')) return overrides.recovery ?? 't';
+    if (cmd.includes('pg_control_system')) return '7412345678901234567';
     return '';
   };
 }
@@ -237,6 +239,28 @@ describe('reseedStandbyFromPrimary', () => {
     expect(clientTimeout).toBe(610_000);
     // The invariant itself, independent of the concrete numbers.
     expect(clientTimeout).toBeGreaterThan(600 * 1000);
+  });
+
+  it("records the reseeded standby's system identifier through onSeeded", async () => {
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(happyKubectl());
+    const onSeeded = vi.fn();
+    await expect(
+      reseedStandbyFromPrimary('10.0.0.2', '/k', { ...STANDBY_OPTS, onSeeded }),
+    ).resolves.toBe('reseeded');
+    expect(onSeeded).toHaveBeenCalledWith('7412345678901234567');
+  });
+
+  it('a reseed whose system identifier is unreadable fails rather than recording nothing', async () => {
+    const base = happyKubectl();
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
+      async (ip: string, k: string, argv: string[]) =>
+        argv.join(' ').includes('pg_control_system') ? 'ERROR: x' : base(ip, k, argv),
+    );
+    const onSeeded = vi.fn();
+    await expect(
+      reseedStandbyFromPrimary('10.0.0.2', '/k', { ...STANDBY_OPTS, onSeeded }),
+    ).rejects.toThrow(/system identifier could not be read/);
+    expect(onSeeded).not.toHaveBeenCalled();
   });
 
   it('reseeds via stage → scale-0 → helper-pod swap → scale-1 → recovery confirm', async () => {
@@ -450,50 +474,21 @@ describe('isStandbyStreaming (k8s standby-side wal-receiver signal)', () => {
   });
 });
 
-describe('isStandbyPromoted (k8s standby-side recovery signal)', () => {
-  it('returns true only when pg_is_in_recovery() reports "f" (out of recovery)', async () => {
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockResolvedValue('f\n');
-    await expect(isStandbyPromoted('10.0.0.2', '/k')).resolves.toBe(true);
-    const argv = (ssh.sshKubectl as ReturnType<typeof vi.fn>).mock.calls[0][2] as string[];
-    expect(argv.join(' ')).toContain('SELECT pg_is_in_recovery()');
-  });
-
-  it('returns false while still in recovery ("t")', async () => {
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockResolvedValue('t');
-    await expect(isStandbyPromoted('10.0.0.2', '/k')).resolves.toBe(false);
-  });
-
-  it('returns false (never throws) when the exec fails', async () => {
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('pod down'));
-    await expect(isStandbyPromoted('10.0.0.2', '/k')).resolves.toBe(false);
-  });
-});
-
-describe('reseedAndPromoteOrAbort — skip re-seed when standby already streaming', () => {
+describe('reseedStandbyOrAbort: skip re-seed when standby already streaming', () => {
   const servers = { primary: { ip: '10.0.0.1' }, standby: { ip: '10.0.0.2' } };
 
-  it('SKIPS the pg_basebackup re-seed (no scale-to-zero, no bash exec) and promotes', async () => {
+  it('SKIPS the pg_basebackup re-seed (no scale-to-zero, no bash exec) and never promotes', async () => {
     const calls: string[][] = [];
-    // Stateful recovery signal: the standby is in recovery (streaming) until
-    // pg_ctl promote lands. isStandbyPromoted (the FIRST guard) must therefore
-    // see 't' and fall through to the streaming-skip + promote path.
-    let promoted = false;
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
       async (_ip: string, _k: string, argv: string[]) => {
         calls.push(argv);
-        const cmd = argv.join(' ');
-        if (cmd.includes('pg_stat_wal_receiver')) return 'streaming';
-        if (cmd.includes('pg_ctl promote')) {
-          promoted = true;
-          return '';
-        }
-        if (cmd.includes('pg_is_in_recovery')) return promoted ? 'f' : 't';
+        if (argv.join(' ').includes('pg_stat_wal_receiver')) return 'streaming';
         return '';
       },
     );
     const s = { start: vi.fn(), stop: vi.fn() };
 
-    await reseedAndPromoteOrAbort(servers, '/k', s);
+    await reseedStandbyOrAbort(servers, '/k', s);
 
     // No re-seed happened: streaming parity means no basebackup, no quiesce.
     expect(calls.some((a) => a.includes('bash'))).toBe(false);
@@ -502,32 +497,8 @@ describe('reseedAndPromoteOrAbort — skip re-seed when standby already streamin
     expect(ssh.sshRun).not.toHaveBeenCalled();
     // The primary-reachability probe is not even needed once streaming is seen.
     expect(calls.some((a) => a.join(' ').includes('pg_isready'))).toBe(false);
-    // Promotion still ran and was confirmed.
-    expect(calls.some((a) => a.join(' ').includes('pg_ctl promote'))).toBe(true);
-  });
-
-  it('short-circuits (no streaming probe, no reseed, no promote) when the standby is ALREADY promoted', async () => {
-    // Convergent rerun after a mid-flow crash: the standby already exited
-    // recovery. The alreadyPromoted guard is FIRST — without it a rerun would
-    // pg_basebackup OVER a promoted database.
-    const calls: string[][] = [];
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (_ip: string, _k: string, argv: string[]) => {
-        calls.push(argv);
-        if (argv.join(' ').includes('pg_is_in_recovery')) return 'f';
-        return '';
-      },
-    );
-    const s = { start: vi.fn(), stop: vi.fn() };
-
-    await expect(reseedAndPromoteOrAbort(servers, '/k', s)).resolves.toEqual({
-      alreadyPromoted: true,
-    });
-    // The guard runs BEFORE the streaming probe / reseed / promote.
-    expect(calls.some((a) => a.join(' ').includes('pg_stat_wal_receiver'))).toBe(false);
-    expect(calls.some((a) => a.join(' ').includes('pg_basebackup'))).toBe(false);
+    // Promotion is failoverHA's step, behind the replica proof and the journal.
     expect(calls.some((a) => a.join(' ').includes('pg_ctl promote'))).toBe(false);
-    expect(ssh.sshRun).not.toHaveBeenCalled();
   });
 });
 

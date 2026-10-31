@@ -25,9 +25,9 @@ import {
   preflightPilotFailover,
   provisionStandbyCapacity,
   swapHaRoles,
-  waitForStandbyCaughtUp,
   waitForWorkersReady,
 } from '../../../src/failover.js';
+import { waitForStandbyCaughtUp } from '../../../src/lib/deploy/replication.js';
 
 /** `kubectl get nodes --no-headers` output with `n` Ready worker rows (+ master). */
 function readyLines(n: number): string {
@@ -360,63 +360,92 @@ describe('waitForWorkersReady', () => {
   });
 });
 
-describe('waitForStandbyCaughtUp (planned zero-data-loss gate)', () => {
-  const servers = { primary: { ip: '10.0.0.1' }, standby: { ip: '10.0.0.9' } };
-  const baseDeps = () => ({
-    getPostgresPod: vi.fn(async () => 'db-0'),
-    isStreaming: vi.fn(async () => true),
-    sleep: vi.fn(async () => {}),
-  });
-  // kubectl stub: answers the primary's pg_current_wal_lsn() capture with
-  // `primaryLsn`, and each standby pg_wal_lsn_diff(...) >= 0 check with the next
-  // element of `standbyResponses` ('t' = caught up, 'f' = still lagging).
-  const makeKubectl = (primaryLsn: string, standbyResponses: string[]) => {
+describe('waitForStandbyCaughtUp (planned zero-data-loss gate, any transport)', () => {
+  const PRIMARY_LSN = '0/3000000';
+  /** A fake clock: sleep advances it, so the deadline (not a count) ends the wait. */
+  const clock = () => {
+    let t = 0;
+    return {
+      now: () => t,
+      sleep: vi.fn(async (ms: number) => {
+        t += ms;
+      }),
+    };
+  };
+  // The standby answers its replay lag behind the captured LSN in bytes, one
+  // element per read (the last one repeats).
+  const execs = (lags: string[], primaryOut = `${PRIMARY_LSN}\n`) => {
     let i = 0;
-    return vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      const sql = argv[argv.length - 1];
-      if (sql === 'SELECT pg_current_wal_lsn()') return primaryLsn;
-      return standbyResponses[Math.min(i++, standbyResponses.length - 1)];
-    });
+    return {
+      primaryExec: vi.fn(async () => primaryOut),
+      standbyExec: vi.fn(async (_sql: string) => lags[Math.min(i++, lags.length - 1)]),
+    };
   };
 
-  it('returns once the standby has replayed past the captured primary LSN', async () => {
-    const deps = { ...baseDeps(), kubectl: makeKubectl('0/3000000', ['t']) };
-    await expect(waitForStandbyCaughtUp(servers, '/key', { deps })).resolves.toBeUndefined();
-    // Captured the primary target once, then a single standby check (no sleep).
-    expect(deps.kubectl).toHaveBeenCalledTimes(2);
-    expect(deps.sleep).not.toHaveBeenCalled();
+  it('returns caught up once the standby has replayed to the captured primary LSN', async () => {
+    const e = execs(['0']);
+    const c = clock();
+    await expect(
+      waitForStandbyCaughtUp({ ...e, isStreaming: async () => true, ...c }),
+    ).resolves.toEqual({ caughtUp: true, lagBytes: 0, primaryLsn: PRIMARY_LSN });
+    expect(e.primaryExec).toHaveBeenCalledWith('SELECT pg_current_wal_lsn()');
+    expect(e.standbyExec.mock.calls[0][0]).toContain(`'${PRIMARY_LSN}'`);
+    expect(c.sleep).not.toHaveBeenCalled();
   });
 
   it('polls while the standby lags, then returns when it catches up', async () => {
-    const deps = { ...baseDeps(), kubectl: makeKubectl('0/3000000', ['f', 'f', 't']) };
-    await expect(
-      waitForStandbyCaughtUp(servers, '/key', { deps, intervalMs: 1 }),
-    ).resolves.toBeUndefined();
-    // 1 primary capture + 3 standby checks; slept between the 3 checks.
-    expect(deps.kubectl).toHaveBeenCalledTimes(4);
-    expect(deps.sleep).toHaveBeenCalledTimes(2);
+    const e = execs(['4096', '512', '0']);
+    const c = clock();
+    const r = await waitForStandbyCaughtUp({ ...e, isStreaming: async () => true, ...c });
+    expect(r.caughtUp).toBe(true);
+    expect(e.standbyExec).toHaveBeenCalledTimes(3);
+    expect(c.sleep).toHaveBeenCalledTimes(2);
   });
 
-  it('throws when the standby never catches up within the attempt budget', async () => {
-    const deps = { ...baseDeps(), kubectl: makeKubectl('0/3000000', ['f']) };
+  it('throws at the deadline when a streaming standby never catches up, naming the lag', async () => {
+    const e = execs(['4096']);
+    const c = clock();
     await expect(
-      waitForStandbyCaughtUp(servers, '/key', { deps, attempts: 3, intervalMs: 1 }),
-    ).rejects.toThrow(/did not replay|zero-data-loss/i);
-    expect(deps.sleep).toHaveBeenCalledTimes(2); // slept between attempts 1→2, 2→3
+      waitForStandbyCaughtUp({
+        ...e,
+        isStreaming: async () => true,
+        deadlineMs: 10_000,
+        pollMs: 2000,
+        ...c,
+      }),
+    ).rejects.toThrow(
+      /did not replay the primary's final WAL \(0\/3000000\) within 10s \(4096 bytes behind\)/,
+    );
+    // The deadline ended it: 10 s of 2 s polls is 5 sleeps, whatever the count.
+    expect(c.sleep).toHaveBeenCalledTimes(5);
   });
 
-  it('is N/A when the standby is not streaming (a full reseed copies all state)', async () => {
-    const kubectl = vi.fn(async () => 't');
-    const deps = {
-      getPostgresPod: vi.fn(),
-      isStreaming: vi.fn(async () => false),
-      sleep: vi.fn(),
-      kubectl,
-    };
-    await expect(waitForStandbyCaughtUp(servers, '/key', { deps })).resolves.toBeUndefined();
-    // Returned before touching postgres — no LSN capture, no pod resolution.
-    expect(kubectl).not.toHaveBeenCalled();
-    expect(deps.getPostgresPod).not.toHaveBeenCalled();
+  it('a standby that is not streaming is not caught up: the caller must reseed or refuse', async () => {
+    const e = execs(['0']);
+    await expect(
+      waitForStandbyCaughtUp({ ...e, isStreaming: async () => false, ...clock() }),
+    ).resolves.toEqual({ caughtUp: false, lagBytes: null, primaryLsn: PRIMARY_LSN });
+    expect(e.standbyExec).not.toHaveBeenCalled();
+  });
+
+  it('an unreadable primary LSN throws before any standby read', async () => {
+    const e = execs(['0'], '');
+    await expect(
+      waitForStandbyCaughtUp({ ...e, isStreaming: async () => true, ...clock() }),
+    ).rejects.toThrow(/could not read the primary's WAL position/);
+    expect(e.standbyExec).not.toHaveBeenCalled();
+  });
+
+  it('an unreadable replay position is not caught up', async () => {
+    const e = execs(['']);
+    await expect(
+      waitForStandbyCaughtUp({
+        ...e,
+        isStreaming: async () => true,
+        deadlineMs: 2000,
+        ...clock(),
+      }),
+    ).rejects.toThrow(/last read: no replay position/);
   });
 });
 
@@ -437,8 +466,8 @@ const SCALE_UP_LIST = [
 
 interface RunOpts {
   primaryReachable: boolean;
-  promoteThrows?: boolean;
-  alreadyPromoted?: boolean;
+  /** The promote verdict is 'unknown': the promotion could not be confirmed. */
+  promoteUnknown?: boolean;
   manualDns?: boolean;
   provisionThrows?: unknown;
   catchUpThrows?: boolean;
@@ -456,8 +485,7 @@ interface RunOpts {
 async function runFailoverHA(opts: RunOpts) {
   const {
     primaryReachable,
-    promoteThrows = false,
-    alreadyPromoted = false,
+    promoteUnknown = false,
     manualDns = false,
     provisionThrows,
     catchUpThrows = false,
@@ -503,11 +531,41 @@ async function runFailoverHA(opts: RunOpts) {
       return { provisioned: true as const };
     },
     isPrimaryReady: async () => primaryReachable,
+    // A proven replica: the matrix in failover-state-matrix.test.ts covers the
+    // refusals and the journal resume.
+    // A dead primary stops streaming to the standby; one still streaming is
+    // alive (R8), which classify-failover.test.ts covers.
+    readStandbyState: async () => ({
+      inRecovery: true,
+      systemIdentifier: '7412345678901234567',
+      replayLsn: '0/3000060',
+      receiverStatus: primaryReachable ? 'streaming' : null,
+      lastMsgAgeS: primaryReachable ? 1 : null,
+    }),
+    readPrimaryState: async () => ({
+      inRecovery: false,
+      systemIdentifier: '7412345678901234567',
+      replayLsn: null,
+      receiverStatus: null,
+      lastMsgAgeS: null,
+    }),
+    writeJournal: async () => 'journal-id',
+    clearJournal: async () => {},
+    // The quiesce proof and the database write fence: proven here, pinned in
+    // failover-state-matrix and failover-step-order-census.
+    confirmQuiesced: async () => ({ ok: true, remaining: [] }),
+    fenceWrites: async () => {},
+    unfenceWrites: async () => true,
+    assertUnfenced: async () => {},
+    writeMarker: () => {},
+    clearMarker: () => {},
+    liftStranded: async () => 'none',
     catchUp: async () => {
       order.push('catchup');
       if (catchUpThrows) {
         throw new Error("standby did not replay the primary's final WAL — aborting failover");
       }
+      return { caughtUp: true, lagBytes: 0, primaryLsn: '0/3000060' };
     },
     scale: async (_ip: string, _key: string, list: unknown, replicas: unknown, label: string) => {
       if (/un-quiesce/.test(label)) order.push('unquiesce');
@@ -520,23 +578,26 @@ async function runFailoverHA(opts: RunOpts) {
         captured.scaleDown = { list, replicas };
       }
     },
-    reseedPromote: async (srv: { standby: { dbPrivateIp?: string; dbIp?: string } }) => {
+    reseed: async (srv: { standby: { dbPrivateIp?: string; dbIp?: string } }) => {
       captured.reseedStandby = { ...srv.standby };
-      if (alreadyPromoted) {
-        order.push('alreadyPromoted');
-        return { alreadyPromoted: true as const };
-      }
       if (primaryReachable) order.push('reseed');
-      if (promoteThrows) throw new Error('promotion could not be confirmed — aborting failover');
+    },
+    promote: async () => {
       order.push('promote');
-      return undefined;
+      return promoteUnknown ? ('unknown' as const) : ('promoted' as const);
     },
     restoreWalgRole: async (a: { promotedIp: string; oldPrimaryIp: string }) => {
       captured.walgRoleArgs = a;
       order.push('walgRole');
       return walgRoleFails
-        ? { ok: false as const, error: new Error('wal-g audit: stale standby write-guard') }
-        : { ok: true as const };
+        ? {
+            promoted: {
+              ok: false as const,
+              error: new Error('wal-g audit: stale standby write-guard'),
+            },
+            demoted: { ok: true as const },
+          }
+        : { promoted: { ok: true as const }, demoted: { ok: true as const } };
     },
     gate: async (
       _domain: string,
@@ -558,22 +619,37 @@ async function runFailoverHA(opts: RunOpts) {
       captured.swapEnv = envName;
       order.push('saveConfig');
     },
+    // The backup-prefix fence write (backup-fence.test.ts pins its place).
+    writeFence: async () => ({ ok: true }),
+    recordFence: () => {},
+    reconcileRetired: async () => {
+      order.push('fenceRetired');
+      return { fenced: [], unreachable: [] };
+    },
   };
 
+  let flippedTo: string | null = null;
   const strategy = manualDns
     ? {}
     : {
         getAuth: async () => ({ token: 't', zoneId: 'z' }),
-        updateDns: async () => {
+        updateDns: async (_auth: unknown, _domain: string, ip: string) => {
           order.push('dns');
+          flippedTo = ip;
         },
+        readDns: async () => (flippedTo ? [flippedTo] : []),
       };
 
   const envConfig = {
     domain: 'app.example.com',
     region: 'nbg1',
     secondaryRegion: 'ash',
-    ha: { primary: { masterIp: '10.0.0.1' }, standby: { masterIp: '10.0.0.9' } },
+    replication: 'streaming',
+    ha: {
+      primary: { masterIp: '10.0.0.1' },
+      standby: { masterIp: '10.0.0.9' },
+      systemIdentifier: '7412345678901234567',
+    },
   };
   const parsed = { dryRun: false, yes: true, serverType: null };
   const tracker = { spinner: () => ({ start: () => {}, stop: () => {} }) };
@@ -607,6 +683,7 @@ describe('failoverHA step order', () => {
       'apiProbe',
       'dns',
       'saveConfig',
+      'fenceRetired',
     ]);
     // The wal-g write-guard moves onto the promoted cluster BETWEEN promotion
     // and scale-up: the env change rolls the db pod, and the app tier is still
@@ -658,8 +735,9 @@ describe('failoverHA step order', () => {
     expect(order).toContain('saveConfig');
     // …but the command must not report success.
     expect((thrown as Error)?.message).toMatch(/FAILOVER COMPLETED, BACKUPS DID NOT/);
-    // The throw is TERMINAL: it comes after the persisted role swap, never before.
-    expect(order[order.length - 1]).toBe('saveConfig');
+    // The throw is TERMINAL: it comes after the persisted role swap (and the
+    // retired side's fence that follows it), never before.
+    expect(order.slice(-2)).toEqual(['saveConfig', 'fenceRetired']);
   });
 
   it('a healthy wal-g write-guard move leaves the failover clean (no throw)', async () => {
@@ -667,11 +745,11 @@ describe('failoverHA step order', () => {
     expect(thrown).toBeUndefined();
   });
 
-  it('promote failure in planned mode un-quiesces the primary and aborts (no dns, no swap, no scale-up)', async () => {
-    const { order } = await runFailoverHA({ primaryReachable: true, promoteThrows: true });
-    // The aborted planned failover must NOT leave the primary quiesced.
-    expect(order).toContain('unquiesce');
-    expect(order.indexOf('unquiesce')).toBeGreaterThan(order.indexOf('quiesce'));
+  it('an unconfirmed promote keeps the primary quiesced and aborts (no dns, no swap, no scale-up)', async () => {
+    const { order } = await runFailoverHA({ primaryReachable: true, promoteUnknown: true });
+    // The standby may yet promote: un-quiescing the old primary would serve
+    // writes from both sides (R3).
+    expect(order).not.toContain('unquiesce');
     // Nothing past the promote ran: no scale-up, no gate, no dns, no swap.
     expect(order).not.toContain('scaleUp');
     expect(order).not.toContain('dns');
@@ -690,16 +768,6 @@ describe('failoverHA step order', () => {
     expect(order).not.toContain('scaleUp');
     expect(order).not.toContain('dns');
     expect(order).not.toContain('saveConfig');
-  });
-
-  it('already-promoted standby (convergent rerun): reseed AND promote skipped, later steps still run', async () => {
-    const { order } = await runFailoverHA({ primaryReachable: true, alreadyPromoted: true });
-    expect(order).not.toContain('reseed');
-    expect(order).not.toContain('promote');
-    // The rest of the flow is convergent and still executes.
-    expect(order).toContain('scaleUp');
-    expect(order).toContain('dns');
-    expect(order).toContain('saveConfig');
   });
 
   it('scale-up uses the persisted list (with namespaces, CA in kube-system), not a hardcoded list', async () => {
@@ -749,7 +817,8 @@ describe('failoverHA step order', () => {
 
   it('persists the role swap only at the very end (after dns)', async () => {
     const { order, captured } = await runFailoverHA({ primaryReachable: true });
-    expect(order[order.length - 1]).toBe('saveConfig');
+    // Then only the retired side's fence, which needs the swap saved.
+    expect(order.slice(-2)).toEqual(['saveConfig', 'fenceRetired']);
     expect(order.indexOf('saveConfig')).toBeGreaterThan(order.indexOf('dns'));
     expect(captured.swapEnv).toBe('e4');
   });
@@ -776,6 +845,7 @@ describe('preflightPilotFailover exit branches', () => {
       ha: {
         standbyWorkerSpec: { count: 2, serverType: 'cx23' },
         scaleUpList: SCALE_UP_LIST,
+        primary: { stack: 'e4-primary' },
         standby: { stack: 'e4-standby' },
       },
     };
@@ -798,6 +868,7 @@ describe('preflightPilotFailover exit branches', () => {
         ha: {
           standbyWorkerSpec: { count: 2, serverType: 'cx23' },
           scaleUpList: SCALE_UP_LIST,
+          primary: { stack: 'e4-primary' },
           standby: { stack: 'e4-standby' },
         },
       },

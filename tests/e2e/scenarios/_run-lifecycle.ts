@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { APP_TIER_RESTART_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { FAILOVER_FENCE_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
@@ -41,6 +41,18 @@ import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
 import { runFrontendSmokeChecks } from '../checks/frontend-smoke.js';
+import {
+  checkAppEndpointsReady,
+  checkDnsFlipVerified,
+  checkOldPrimaryDisarmed,
+  checkPrimaryNotRestarted,
+  checkSecondFailoverRefused,
+  checkSlotCapped,
+  providerApiAReader,
+  readDbIncarnation,
+  readServingIp,
+  readSwappedSinceLastDeploy,
+} from '../checks/ha-integrity.js';
 import {
   dnsSafeFetch,
   runHealthChecks,
@@ -115,6 +127,7 @@ import {
   provesObservabilityAfterReconverge,
   runPostReconvergeObservability,
 } from './observability-step-plan.js';
+import { expandSkippedSteps } from './step-dependencies.js';
 import type {
   ScenarioConfig,
   ScenarioResult,
@@ -229,7 +242,12 @@ const TIMEOUTS: Record<string, number> = {
   // calibrate it down.
   failover: 1_800_000,
   'verify-failover': 600_000,
-  // k8s-ha only. Same 75-min budget as the initial cold `deploy`: this
+  // The refusal happens in the guard before any remote write; the budget is
+  // the status -json poll that follows it.
+  'second-failover': 600_000,
+  failback: 1_800_000,
+  'verify-failback': 600_000,
+  // Both HA modes. Same 75-min budget as the initial cold `deploy`: this
   // redeploy converges ONE cluster's role (app tier + workers to zero) but
   // still pays a full serial pg_basebackup reseed of that cluster's
   // postgres off the new primary — the same order of magnitude as the
@@ -315,6 +333,16 @@ function readHaPrimary(
   } catch {
     return { stack: null, region: null };
   }
+}
+
+/**
+ * The steps that verify a promotion: verify-failover on both HA modes, and
+ * compose-ha's verify-failback. Both leave the retired side frozen with no
+ * standby streaming, so they share the pin, the DNS flip checks, the
+ * continuity marker and the disarm check.
+ */
+function isPostFailoverVerify(step: StepName): boolean {
+  return step === 'verify-failover' || step === 'verify-failback';
 }
 
 // ---------------------------------------------------------------------------
@@ -1298,6 +1326,9 @@ export async function runLifecycle(
   // Kept so verify-failover can prove it is not simply re-reading the marker
   // off its own origin node — see the false-green guard below.
   let failoverMarkerOriginIp: string | null = null;
+  // The primary before the first failover: compose-ha's failback must hand
+  // the primary role back to it.
+  let originalPrimaryIp: string | null = null;
 
   // Phase 9: when --expanded is set on a k8s/k8s-ha scenario, deploy with
   // --min-workers=1 / --max-workers=5 so verify-autoscale has headroom to
@@ -1466,6 +1497,45 @@ export async function runLifecycle(
   // and records results via the collector.
   // -------------------------------------------------------------------------
 
+  /** dns_flip_verified against the env's current serving IP, through the DNS provider API. */
+  async function runDnsFlipVerified(): Promise<VerificationResult> {
+    const reader = await providerApiAReader(config.projectDir, config.envPrefix, {
+      computeProviderId: config.provider ?? 'hetzner',
+      computeToken: hetznerToken,
+    });
+    return checkDnsFlipVerified({
+      domain: config.domain,
+      expectedIp: readServingIp(config.projectDir, config.envPrefix),
+      readA: reader.readA,
+      readerError: reader.error,
+      skipReason: reader.skipReason,
+    });
+  }
+
+  /**
+   * Run `deploy` with the serving primary's db incarnation read on both sides,
+   * and record primary_not_restarted: a warm or reconverge deploy must never
+   * bounce the live primary (no restart, no recreate).
+   */
+  async function assertPrimaryNotRestartedAcross(
+    stepId: string,
+    deploy: () => Promise<void>,
+  ): Promise<void> {
+    const { primaryIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
+    const read = () =>
+      readDbIncarnation({
+        mode: config.mode,
+        projectName: config.projectName,
+        ip: primaryIp,
+        sshKeyPath: sshKeyPath ?? getSshKeyPath(config.projectDir, config.envPrefix),
+      });
+    const before = await read();
+    await deploy();
+    const result = checkPrimaryNotRestarted({ ip: primaryIp, before, after: await read() });
+    collector.recordVerifications(stepId, [result]);
+    if (result.status !== 'pass') throw new Error(`${result.checkName}: ${result.errorMessage}`);
+  }
+
   async function runVerificationChecks(stepName: StepName): Promise<StepResult> {
     const command = `verify:${config.domain}`;
 
@@ -1495,21 +1565,21 @@ export async function runLifecycle(
     // public-resolver path because that IS the customer cold path, and k8s-ha
     // failover moves a floating IP without ever rewriting the A record.
     let verifyPin: ResolutionPin | null = null;
-    if (stepName === 'verify-failover' && config.mode === 'compose-ha') {
+    if (isPostFailoverVerify(stepName) && config.mode === 'compose-ha') {
       const { primaryIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
       if (primaryIp) {
         verifyPin = {
           domain: config.domain,
           ip: primaryIp,
-          reason: `verify-failover: promoted primary for ${config.envPrefix}`,
+          reason: `${stepName}: promoted primary for ${config.envPrefix}`,
         };
         console.log(
-          `${tag} [verify-failover] pinning HTTP checks for ${config.domain} (and *.${config.domain}) ` +
+          `${tag} [${stepName}] pinning HTTP checks for ${config.domain} (and *.${config.domain}) ` +
             `to the promoted primary ${primaryIp} — Host/SNI stay ${config.domain}`,
         );
       } else {
         console.warn(
-          `${tag} [verify-failover] no promoted primary IP in .vibecarbon.json — HTTP checks fall ` +
+          `${tag} [${stepName}] no promoted primary IP in .vibecarbon.json — HTTP checks fall ` +
             'back to the public resolvers and may hit the retired node mid-TTL',
         );
       }
@@ -1765,7 +1835,7 @@ export async function runLifecycle(
         // failoverComposeHA, k8s-ha via swapHaRoles' terminal write), so a
         // fresh resolveHaDbIps().primaryIp is the promoted master on both —
         // that's what sshCheckMasterIp already resolves to above.
-        if (stepName === 'verify-failover') {
+        if (isPostFailoverVerify(stepName)) {
           const promotedIp = sshCheckMasterIp;
           if (promotedIp) {
             console.log(
@@ -1822,6 +1892,11 @@ export async function runLifecycle(
                   : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (floating/reserved) — the harness doesn't track that IP, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
             }),
           );
+          // The same flip read back through the DNS provider's own API (the
+          // read the CLI's flipAndVerifyDns trusts), on BOTH modes: k8s-ha's
+          // record carries the promoted cluster's floating IP, which
+          // .vibecarbon.json does track.
+          allResults.push(await runDnsFlipVerified());
         }
 
         // Publish-half of the verify-scale assertion (mirrors the failover
@@ -2105,7 +2180,7 @@ export async function runLifecycle(
           const { primaryIp, standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
           const replResults: VerificationResult[] = [];
           if (
-            stepName === 'verify-failover' &&
+            isPostFailoverVerify(stepName) &&
             isContinuityTargetSameAsMarkerOrigin(primaryIp, failoverMarkerOriginIp)
           ) {
             // FALSE-GREEN GUARD — see isContinuityTargetSameAsMarkerOrigin for
@@ -2115,7 +2190,7 @@ export async function runLifecycle(
               status: 'fail',
               errorMessage: continuityTargetSameAsOriginMessage(String(primaryIp)),
             });
-          } else if (stepName === 'verify-failover') {
+          } else if (isPostFailoverVerify(stepName)) {
             replResults.push(
               await runFailoverContinuityCheck({
                 mode: config.mode,
@@ -2132,6 +2207,16 @@ export async function runLifecycle(
                 newPrimaryIp: primaryIp,
                 sshKeyPath,
                 markerId: failoverContinuityMarkerId,
+              }),
+            );
+            // The retired side (role standby now) must archive nothing and
+            // refuse its backups until a deploy rebuilds it.
+            replResults.push(
+              await checkOldPrimaryDisarmed({
+                mode: config.mode,
+                projectName: config.projectName,
+                retiredIp: standbyIp,
+                sshKeyPath,
               }),
             );
           } else if (
@@ -2158,6 +2243,19 @@ export async function runLifecycle(
             if (config.mode === 'k8s-ha' && stepName === 'verify-deploy') {
               replResults.push(
                 ...(await assertPilotLightStandby(standbyIp, { sshKeyPath, label: 'standby' })),
+              );
+              // The first deploy's hostPort patch recreates db-0 and nothing
+              // rollout-restarts the app any more: it must reconnect on its own.
+              replResults.push(await checkAppEndpointsReady({ primaryIp, sshKeyPath }));
+            }
+            if (stepName === 'verify-deploy') {
+              replResults.push(
+                await checkSlotCapped({
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  primaryIp,
+                  sshKeyPath,
+                }),
               );
             }
           }
@@ -3066,26 +3164,36 @@ EOF`;
         executeStep(
           'warm-deploy',
           `vibecarbon deploy ${config.envPrefix} --${config.mode} (warm)`,
-          async () => {
-            const result = await runDeploy(config.envPrefix, {
-              cwd: config.projectDir,
-              timeout: TIMEOUTS['warm-deploy'],
-              mode: config.mode,
-              domain: config.domain,
-              dnsProvider: config.dnsProvider,
-              serverType: config.serverType,
-              region: config.region,
-              secondaryRegion: config.secondaryRegion,
-              provider: config.provider,
-              env: { HCLOUD_TOKEN: hetznerToken },
-              ...expandedDeployBounds,
-            });
-            if (result.exitCode !== 0) {
-              // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
-              const stderrClean = (result.stderr || '').replace(/\x1b\[[0-9;]*m/g, '').trim();
-              throw new Error(
-                `Warm deploy exited with code ${result.exitCode}: ${stderrClean.slice(-1000)}`,
-              );
+          async (stepId) => {
+            const deploy = async () => {
+              const result = await runDeploy(config.envPrefix, {
+                cwd: config.projectDir,
+                timeout: TIMEOUTS['warm-deploy'],
+                mode: config.mode,
+                domain: config.domain,
+                dnsProvider: config.dnsProvider,
+                serverType: config.serverType,
+                region: config.region,
+                secondaryRegion: config.secondaryRegion,
+                provider: config.provider,
+                env: { HCLOUD_TOKEN: hetznerToken },
+                ...expandedDeployBounds,
+              });
+              if (result.exitCode !== 0) {
+                // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
+                const stderrClean = (result.stderr || '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+                throw new Error(
+                  `Warm deploy exited with code ${result.exitCode}: ${stderrClean.slice(-1000)}`,
+                );
+              }
+            };
+            // HA: a warm deploy must not bounce the serving primary (the
+            // replication settings are on the db argv, and on k8s the
+            // dbHostPort patch is a no-op once applied).
+            if (config.mode === 'compose-ha' || config.mode === 'k8s-ha') {
+              await assertPrimaryNotRestartedAcross(stepId, deploy);
+            } else {
+              await deploy();
             }
           },
         ),
@@ -3745,22 +3853,63 @@ EOF`;
 
   // Conditionally include failover steps for HA modes
   if (options.includeFailover) {
-    stepDefs.push(
-      // 11. Failover
-      {
-        name: 'failover',
-        run: () =>
-          executeStep('failover', `vibecarbon failover ${config.envPrefix}`, async () => {
-            // Data-continuity setup: write a marker row on the CURRENT primary
-            // BEFORE failover promotes the standby. verify-failover then asserts
-            // this exact row survived onto the promoted primary — proving the
-            // pre-failover write was replicated, not just that the app serves.
+    // compose-ha: the retired node (the one that is no longer the primary
+    // after the role flip) keeps its app tier `docker stop`ped by design
+    // (failoverComposeHA's pre-promote fence, FAILOVER_FENCE_SERVICES: app and
+    // the n8n/metabase add-ons when deployed) until a redeploy
+    // converges it. `status` reports that truthfully as `exited`, so those
+    // rows are excused on that node only; its db (recreated by the wal-g
+    // demote) and everything else must still be healthy. k8s-ha scales the
+    // ex-primary's Deployments to 0, leaving no pods to excuse.
+    const retiredAfterFailover = (step: StepName): RetiredServer | undefined => {
+      if (config.mode !== 'compose-ha') return undefined;
+      const { standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
+      if (standbyIp) return { ip: standbyIp, allowedExited: FAILOVER_FENCE_SERVICES };
+      console.log(
+        `${tag} [${step}] no retired-node IP in .vibecarbon.json — the old ` +
+          'primary is held to the full health bar',
+      );
+      return undefined;
+    };
+
+    /** Record a step's integrity results and throw with bounded details on any non-pass. */
+    const requireAllPass = (stepId: string, step: StepName, results: VerificationResult[]) => {
+      collector.recordVerifications(stepId, results);
+      const failures = results.filter((r) => r.status !== 'pass');
+      if (failures.length === 0) return;
+      const detailLines = failures
+        .map(
+          (f) =>
+            `[${f.status}] ${f.checkName}: ${(f.errorMessage || JSON.stringify(f.details || {})).slice(0, 400)}`,
+        )
+        .join('\n');
+      for (const line of detailLines.split('\n')) console.error(`${tag} ${line}`);
+      throw new Error(
+        `${step}: ${failures.length} check(s) did not pass: ` +
+          `${failures.map((f) => f.checkName).join(', ')}\n${detailLines}`,
+      );
+    };
+
+    // 11. Failover (and, on compose-ha, the failback after the reconverge).
+    // Data-continuity setup: write a marker row on the CURRENT primary BEFORE
+    // the promotion. The matching verify step then asserts this exact row
+    // survived onto the promoted primary, proving the pre-promotion write was
+    // replicated, not just that the app serves.
+    const promotionStep = (name: 'failover' | 'failback'): StepDef => ({
+      name,
+      run: () =>
+        executeStep(
+          name,
+          `vibecarbon failover ${config.envPrefix}${name === 'failback' ? ' (failback)' : ''}`,
+          async () => {
             failoverContinuityMarkerId = buildMarkerId(
               scenarioId,
-              'failover-continuity',
+              `${name}-continuity`,
               Date.now(),
             );
+            failoverMarkerOriginIp = null;
             const preFailover = resolveHaDbIps(config.projectDir, config.envPrefix);
+            if (name === 'failover') originalPrimaryIp = preFailover.primaryIp;
             if (preFailover.primaryIp && sshKeyPath) {
               const write = await writeReplicationMarker(
                 {
@@ -3768,34 +3917,34 @@ EOF`;
                   sshKeyPath,
                   mode: config.mode,
                   projectName: config.projectName,
-                  label: 'pre-failover-primary',
+                  label: `pre-${name}-primary`,
                 },
                 failoverContinuityMarkerId,
               );
               if (write.ok) {
                 failoverMarkerOriginIp = preFailover.primaryIp;
                 console.log(
-                  `${tag} [failover] wrote continuity marker ${failoverContinuityMarkerId} on primary ${preFailover.primaryIp}`,
+                  `${tag} [${name}] wrote continuity marker ${failoverContinuityMarkerId} on primary ${preFailover.primaryIp}`,
                 );
               } else {
                 console.warn(
-                  `${tag} [failover] could not write continuity marker (${write.error ?? 'unknown'}) — verify-failover continuity check will fail`,
+                  `${tag} [${name}] could not write continuity marker (${write.error ?? 'unknown'}) — verify-${name} continuity check will fail`,
                 );
               }
             } else {
               console.warn(
-                `${tag} [failover] no primary IP/ssh key to write continuity marker — continuity check will self-skip`,
+                `${tag} [${name}] no primary IP/ssh key to write continuity marker — continuity check will self-skip`,
               );
             }
 
             const result = await runFailover(config.envPrefix, {
               cwd: config.projectDir,
-              timeout: TIMEOUTS.failover,
+              timeout: TIMEOUTS[name],
               env: { HCLOUD_TOKEN: hetznerToken },
             });
             if (result.exitCode !== 0) {
               throw new Error(
-                `Failover exited with code ${result.exitCode}.\n` +
+                `${name === 'failback' ? 'Failback' : 'Failover'} exited with code ${result.exitCode}.\n` +
                   `STDERR: ${(result.stderr || '').slice(-1000) || '(empty)'}\n` +
                   `STDOUT tail: ${(result.stdout || '').slice(-2000) || '(empty)'}`,
               );
@@ -3804,9 +3953,23 @@ EOF`;
             // Refresh server info after failover (primary/standby swap)
             serverIps = getServerIps(config.projectDir, config.envPrefix);
             sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);
-          }),
-      },
-    );
+
+            // A failback is a failover back: the node the first failover
+            // retired must hold the primary role again (verify-failback then
+            // proves the A records followed it).
+            if (name === 'failback') {
+              const { primaryIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
+              if (!originalPrimaryIp || primaryIp !== originalPrimaryIp) {
+                throw new Error(
+                  `failback: expected the original primary ${originalPrimaryIp ?? '(unknown)'} to ` +
+                    `hold the primary role again, got ${primaryIp ?? '(none)'}`,
+                );
+              }
+            }
+          },
+        ),
+    });
+    stepDefs.push(promotionStep('failover'));
 
     // 12. Verify failover — runs for BOTH compose-ha and k8s-ha. The old
     // guard skipped k8s-ha because cross-cluster replication had "never
@@ -3815,14 +3978,17 @@ EOF`;
     // and compose-ha replication was verified green end-to-end (incl. failover)
     // per project_replication_broken.md.
     //
-    // Post-failover verification asserts ONLY app-serves (the shared
-    // health/app checks) + data CONTINUITY (replication_failover_continuity:
-    // the marker written on the old primary before failover survived onto the
-    // promoted primary). It deliberately does NOT assert streaming replication:
-    // after promotion the old primary is scaled down by design and there is no
-    // reverse reseed, so there is no standby streaming from the new primary.
-    // The streaming/data-propagation checks are gated to verify-deploy/scale/
-    // restore inside runVerificationChecks for exactly this reason.
+    // Post-failover verification asserts app-serves (the shared health/app
+    // checks), data CONTINUITY (replication_failover_continuity: the marker
+    // written on the old primary before failover survived onto the promoted
+    // primary), the DNS flip read back through the provider API
+    // (dns_flip_verified) and the old primary disarmed (old_primary_disarmed).
+    // It deliberately does NOT assert streaming replication: after promotion
+    // the old primary is retired by design and nothing reseeds it until the
+    // reconverge deploy, so there is no standby streaming from the new
+    // primary. The streaming/data-propagation checks are gated to
+    // verify-deploy/scale/restore inside runVerificationChecks and rerun by
+    // reconverge-deploy for exactly this reason.
     stepDefs.push({
       name: 'verify-failover',
       run: () => runVerificationChecks('verify-failover'),
@@ -3832,118 +3998,160 @@ EOF`;
     // assertion as the post-deploy verify-status, re-run after failover so a
     // promoted-but-unhealthy environment fails loudly here rather than
     // silently at the next customer-visible poll. Non-perf (see
-    // NON_PERF_STEPS).
-    //
-    // compose-ha: the retired node (the one that is no longer the primary
-    // after the role flip) keeps its app tier `docker stop`ped by design
-    // (failoverComposeHA step 2, APP_TIER_RESTART_SERVICES) until a redeploy
-    // converges it. `status` reports that truthfully as `exited`, so those
-    // rows are excused on that node only; its db (recreated by the wal-g
-    // demote) and everything else must still be healthy. k8s-ha scales the
-    // ex-primary's Deployments to 0, leaving no pods to excuse.
+    // NON_PERF_STEPS). The retired node is excused per retiredAfterFailover.
     stepDefs.push({
       name: 'verify-status',
       run: () =>
         executeStep('verify-status', 'vibecarbon status -json', async () => {
-          let retired: RetiredServer | undefined;
-          if (config.mode === 'compose-ha') {
-            const { standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
-            if (standbyIp) retired = { ip: standbyIp, allowedExited: APP_TIER_RESTART_SERVICES };
-            else
-              console.log(
-                `${tag} [verify-status] no retired-node IP in .vibecarbon.json — the old ` +
-                  'primary is held to the full health bar',
-              );
-          }
           const r = await checkStatusHealth({
             projectDir: config.projectDir,
             envName: config.envPrefix,
             timeoutMs: 180_000,
-            retired,
+            retired: retiredAfterFailover('verify-status'),
           });
           if (r.status !== 'pass') throw new Error(`verify-status: ${r.errorMessage}`);
         }),
     });
 
-    // 13. Reconverge deploy (k8s-ha only) — re-invoke `vibecarbon deploy`
+    // 12.2 Second failover, BEFORE the reconverge (both HA modes). Until a
+    // deploy rebuilds it, the standby is the retired old primary: frozen at
+    // the failover, holding none of the writes since. A failover now would
+    // promote stale data (compose once reseeded the retired node from its own
+    // address). It must exit non-zero naming `vibecarbon deploy`, with no infra
+    // change: the roles stay put, the DNS provider still answers with the
+    // promoted side, and `status` still reports it healthy.
+    stepDefs.push({
+      name: 'second-failover',
+      run: () =>
+        executeStep(
+          'second-failover',
+          `vibecarbon failover ${config.envPrefix} (before reconverge, must refuse)`,
+          async (stepId) => {
+            // A refusal only means something on an env that reads as failed over.
+            if (readSwappedSinceLastDeploy(config.projectDir, config.envPrefix) !== true) {
+              throw new Error(
+                'second-failover: .vibecarbon.json does not read as failed over and not ' +
+                  'reconverged, so a refusal here would prove nothing',
+              );
+            }
+            const rolesBefore = resolveHaDbIps(config.projectDir, config.envPrefix);
+            const result = await runFailover(config.envPrefix, {
+              cwd: config.projectDir,
+              timeout: TIMEOUTS['second-failover'],
+              env: { HCLOUD_TOKEN: hetznerToken },
+            });
+            const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
+            // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
+            const output = combined.replace(/\x1b\[[0-9;]*m/g, '');
+            const results: VerificationResult[] = [
+              checkSecondFailoverRefused({
+                exitCode: result.exitCode,
+                output,
+                rolesBefore,
+                rolesAfter: resolveHaDbIps(config.projectDir, config.envPrefix),
+              }),
+              await runDnsFlipVerified(),
+              await checkStatusHealth({
+                projectDir: config.projectDir,
+                envName: config.envPrefix,
+                timeoutMs: 180_000,
+                retired: retiredAfterFailover('second-failover'),
+              }),
+            ];
+            requireAllPass(stepId, 'second-failover', results);
+          },
+        ),
+    });
+
+    // 13. Reconverge deploy (both HA modes) — re-invoke `vibecarbon deploy`
     // against the post-failover env exactly like the warm-deploy step does
     // (same runDeploy call shape, re-run against the ALREADY-provisioned
     // env — NOT the initial create/setup path). `deploy` is the role
-    // reconciler: it reads ha.{primary,standby}.stack and converges
-    // whichever cluster is CURRENTLY the standby (the recovered ex-primary,
-    // per failover's terminal swapHaRoles write in src/failover.js) to
-    // pilot-light — app tier + worker fleet to zero, then a full serial
-    // reseed of that cluster's postgres as a streaming replica off the new
-    // primary. This step is what actually proves the "DR posture is
-    // restored after a failover" story: a customer who just failed over is
-    // running degraded (no standby) until they redeploy, and this is that
-    // redeploy, verified from the outside.
-    //
-    // k8s-ha only: the pilot-light role-reconciler architecture
-    // (ha.{primary,standby}.stack, the haStacks derivation in
-    // orchestrator.js, the standby-shaped k8s manifests) doesn't exist on
-    // compose-ha — its HA model has no equivalent "reconverge" step.
-    if (config.mode === 'k8s-ha') {
-      stepDefs.push({
-        name: 'reconverge-deploy',
-        run: () =>
-          executeStep(
-            'reconverge-deploy',
-            `vibecarbon deploy ${config.envPrefix} --${config.mode} (reconverge)`,
-            async (stepId) => {
-              // The ORIGINAL standby stack — failover's swapHaRoles swapped
-              // ha.primary/ha.standby WHOLESALE as its terminal write, so by
-              // the time this step runs ha.primary already IS this stack.
-              // Stacks are born `${env}-primary` / `${env}-standby`
-              // (src/lib/deploy/effects/k8s-ha.js) and keep that name for
-              // life — only the ROLE pointing at them moves. Reading it from
-              // config.envPrefix (this scenario's actual env prefix, e.g.
-              // 'e4') rather than hardcoding avoids baking in one scenario's
-              // naming.
-              const originalStandbyStack = `${config.envPrefix}-standby`;
+    // reconciler, never a role swapper:
+    //   - k8s-ha reads ha.{primary,standby}.stack and converges whichever
+    //     cluster is CURRENTLY the standby (the recovered ex-primary, per
+    //     failover's terminal swapHaRoles write in src/failover.js) to
+    //     pilot-light — app tier + worker fleet to zero, then a full serial
+    //     reseed of that cluster's postgres as a streaming replica off the
+    //     new primary;
+    //   - compose-ha keeps the promoted node serving and rebuilds the retired
+    //     node as its standby in the same run, clearing lastFailover only
+    //     once streaming and the system identifier are proven.
+    // This step is what actually proves the "DR posture is restored after a
+    // failover" story: a customer who just failed over is running degraded
+    // (no standby) until they redeploy, and this is that redeploy, verified
+    // from the outside: streaming from the promoted primary to the rebuilt
+    // node, the promoted primary's db never restarted, its slot capped, and
+    // rows written after the failover still there.
+    stepDefs.push({
+      name: 'reconverge-deploy',
+      run: () =>
+        executeStep(
+          'reconverge-deploy',
+          `vibecarbon deploy ${config.envPrefix} --${config.mode} (reconverge)`,
+          async (stepId) => {
+            // k8s-ha: the ORIGINAL standby stack — failover's swapHaRoles
+            // swapped ha.primary/ha.standby WHOLESALE as its terminal write,
+            // so by the time this step runs ha.primary already IS this stack.
+            // Stacks are born `${env}-primary` / `${env}-standby`
+            // (src/lib/deploy/effects/k8s-ha.js) and keep that name for
+            // life — only the ROLE pointing at them moves. Reading it from
+            // config.envPrefix (this scenario's actual env prefix, e.g.
+            // 'e4') rather than hardcoding avoids baking in one scenario's
+            // naming.
+            const originalStandbyStack = `${config.envPrefix}-standby`;
 
-              // Data-survival setup: write a FRESH marker on the acting
-              // primary BEFORE the reconverge deploy. The failover-time
-              // marker cannot be reused — runFailoverContinuityCheck's pass
-              // path DELETES it as cleanup (learned the hard way: matrix run
-              // 2026-07-17 flagged phantom "data loss" because verify-failover
-              // had already cleaned the row this guard then re-checked). The
-              // survival assertion after the deploy proves the reconverge
-              // reshapes roles without touching data (guards the
-              // fresh-k3s-token full-cluster-replace class).
-              const reconvergeMarkerId = buildMarkerId(
-                scenarioId,
-                'reconverge-survival',
-                Date.now(),
+            // Data-survival setup: write a FRESH marker on the acting
+            // primary BEFORE the reconverge deploy (an app row written after
+            // failover #1). The failover-time marker cannot be reused —
+            // runFailoverContinuityCheck's pass path DELETES it as cleanup
+            // (learned the hard way: matrix run 2026-07-17 flagged phantom
+            // "data loss" because verify-failover had already cleaned the row
+            // this guard then re-checked). The survival assertion after the
+            // deploy proves the reconverge reshapes roles without touching
+            // data (guards the fresh-k3s-token full-cluster-replace class).
+            const reconvergeMarkerId = buildMarkerId(scenarioId, 'reconverge-survival', Date.now());
+            // No silent skip: without the marker the survival assertion below
+            // could not run, and a reconverge that wiped data would pass.
+            const preReconverge = resolveHaDbIps(config.projectDir, config.envPrefix);
+            if (!preReconverge.primaryIp || !sshKeyPath) {
+              throw new Error(
+                `reconverge-deploy: cannot write the survival marker (` +
+                  `${!preReconverge.primaryIp ? 'no acting primary IP in .vibecarbon.json' : 'no sshKeyPath'}), ` +
+                  'so the reconverge could not be proven to keep data',
               );
-              let reconvergeMarkerWritten = false;
-              const preReconverge = resolveHaDbIps(config.projectDir, config.envPrefix);
-              if (preReconverge.primaryIp && sshKeyPath) {
-                const write = await writeReplicationMarker(
-                  {
-                    ip: preReconverge.primaryIp,
-                    sshKeyPath,
-                    mode: config.mode,
-                    projectName: config.projectName,
-                    label: 'pre-reconverge-primary',
-                  },
-                  reconvergeMarkerId,
-                );
-                reconvergeMarkerWritten = write.ok;
-                console.log(
-                  reconvergeMarkerWritten
-                    ? `${tag} [reconverge] wrote survival marker ${reconvergeMarkerId} on acting primary ${preReconverge.primaryIp}`
-                    : `${tag} [reconverge] could not write survival marker (${write.error}) — survival assertion will be skipped`,
-                );
-              }
+            }
+            const write = await writeReplicationMarker(
+              {
+                ip: preReconverge.primaryIp,
+                sshKeyPath,
+                mode: config.mode,
+                projectName: config.projectName,
+                label: 'pre-reconverge-primary',
+              },
+              reconvergeMarkerId,
+            );
+            if (!write.ok) {
+              throw new Error(
+                `reconverge-deploy: could not write survival marker ${reconvergeMarkerId} on the ` +
+                  `acting primary ${preReconverge.primaryIp} (${write.error ?? 'unknown'}), so the ` +
+                  'reconverge could not be proven to keep data',
+              );
+            }
+            console.log(
+              `${tag} [reconverge] wrote survival marker ${reconvergeMarkerId} on acting primary ${preReconverge.primaryIp}`,
+            );
 
+            // The promoted primary keeps serving through the reconverge: its
+            // db is never restarted or recreated (primary_not_restarted).
+            await assertPrimaryNotRestartedAcross(stepId, async () => {
               const result = await runDeploy(config.envPrefix, {
                 cwd: config.projectDir,
-                // This redeploy re-seeds the recovered ex-primary's postgres
-                // from scratch (full serial pg_basebackup reseed) — not the
-                // no-op convergence check warm-deploy times — so it gets the
-                // same generous budget as the initial cold deploy rather
-                // than warm-deploy's 30-min one.
+                // This redeploy re-seeds the retired side's postgres from
+                // scratch (full serial pg_basebackup reseed) — not the no-op
+                // convergence check warm-deploy times — so it gets the same
+                // generous budget as the initial cold deploy rather than
+                // warm-deploy's 30-min one.
                 timeout: TIMEOUTS['reconverge-deploy'],
                 mode: config.mode,
                 domain: config.domain,
@@ -3962,20 +4170,25 @@ EOF`;
                   `Reconverge deploy exited with code ${result.exitCode}: ${stderrClean.slice(-1000)}`,
                 );
               }
+            });
 
-              // Refresh cached server info — the reconverged ex-primary's
-              // database/worker topology changed shape (scaled to
-              // pilot-light).
-              serverIps = getServerIps(config.projectDir, config.envPrefix);
-              sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);
+            // Refresh cached server info — the reconverged side's database
+            // topology changed shape (rebuilt as the standby).
+            serverIps = getServerIps(config.projectDir, config.envPrefix);
+            sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);
 
-              // `deploy` is a role RECONCILER, not a role SWAPPER — it must
-              // NOT flip ha.primary/ha.standby again. Assert that from the
-              // re-read config: ha.primary.stack should still be the
-              // ORIGINAL standby stack (the promotion failover already
-              // made), proving this redeploy converged in place rather than
-              // re-promoting the cluster it just reconverged to pilot-light.
-              const currentPrimary = readHaPrimary(config.projectDir, config.envPrefix);
+            const { primaryIp: newPrimaryIp, standbyIp: newStandbyIp } = resolveHaDbIps(
+              config.projectDir,
+              config.envPrefix,
+            );
+
+            // `deploy` must NOT flip the roles again.
+            const currentPrimary = readHaPrimary(config.projectDir, config.envPrefix);
+            if (config.mode === 'k8s-ha') {
+              // ha.primary.stack should still be the ORIGINAL standby stack
+              // (the promotion failover already made), proving this redeploy
+              // converged in place rather than re-promoting the cluster it
+              // just reconverged to pilot-light.
               if (currentPrimary.stack !== originalStandbyStack) {
                 throw new Error(
                   `reconverge-deploy: expected ha.primary.stack to remain '${originalStandbyStack}' ` +
@@ -3997,41 +4210,71 @@ EOF`;
                     `'${currentPrimary.region}' — deploy persisted flag regions, not deployed regions.`,
                 );
               }
+            } else if (newPrimaryIp !== preReconverge.primaryIp) {
+              throw new Error(
+                `reconverge-deploy: expected the promoted node ${preReconverge.primaryIp} to keep ` +
+                  `the primary role, got ${newPrimaryIp} — deploy appears to have re-swapped HA roles.`,
+              );
+            }
 
+            // The reconverge is what lifts the failover guard: once it has
+            // proven streaming, the env must no longer read as failed over.
+            if (readSwappedSinceLastDeploy(config.projectDir, config.envPrefix) !== false) {
+              throw new Error(
+                'reconverge-deploy: the env still reads as failed over and not reconverged ' +
+                  '(lastFailover not cleared), so the next failover would still refuse',
+              );
+            }
+
+            // DATA-SURVIVAL GUARD (RCA 2026-07-17 e4 run 4): a reconverge
+            // deploy that fails to replay the stacks' k3s tokens makes
+            // Pulumi REPLACE every server — destroying the promoted
+            // primary's data — and the shape assertions below would still
+            // pass on the freshly recreated clusters. The marker written
+            // just before this redeploy must still be readable on the
+            // acting primary, proving the reconverge touched roles, not
+            // data. (Uses its OWN marker — the failover-time one is
+            // deleted by verify-failover's pass-path cleanup.)
+            const survival = await runFailoverContinuityCheck({
+              mode: config.mode,
+              projectName: config.projectName,
+              newPrimaryIp,
+              sshKeyPath,
+              markerId: reconvergeMarkerId,
+            });
+            collector.recordVerifications(stepId, [survival]);
+            if (survival.status !== 'pass') {
+              throw new Error(
+                `reconverge-deploy: survival marker ${reconvergeMarkerId} written just ` +
+                  `before the redeploy is no longer readable on the acting primary ` +
+                  `(${newPrimaryIp}) — the reconverge destroyed data it must only reshape ` +
+                  `[${survival.status}: ${survival.errorMessage ?? JSON.stringify(survival.details ?? {})}]`,
+              );
+            }
+
+            // DR restored: the rebuilt side streams from the promoted primary
+            // and a fresh write propagates to it; the promoted primary's slot
+            // is capped. A skip (no handle) is a failure here: HA always has one.
+            requireAllPass(stepId, 'reconverge-deploy', [
+              ...(await runReplicationChecks({
+                mode: config.mode,
+                projectName: config.projectName,
+                primaryIp: newPrimaryIp,
+                standbyIp: newStandbyIp,
+                sshKeyPath,
+                markerId: buildMarkerId(scenarioId, 'reconverge-streaming', Date.now()),
+              })),
+              await checkSlotCapped({
+                mode: config.mode,
+                projectName: config.projectName,
+                primaryIp: newPrimaryIp,
+                sshKeyPath,
+              }),
+            ]);
+
+            if (config.mode === 'k8s-ha') {
               // The NEW standby is the recovered ex-primary — assert it came
               // out of this redeploy in pilot-light shape.
-              const { primaryIp: newPrimaryIp, standbyIp: newStandbyIp } = resolveHaDbIps(
-                config.projectDir,
-                config.envPrefix,
-              );
-
-              // DATA-SURVIVAL GUARD (RCA 2026-07-17 e4 run 4): a reconverge
-              // deploy that fails to replay the stacks' k3s tokens makes
-              // Pulumi REPLACE every server — destroying the promoted
-              // primary's data — and the shape assertions below would still
-              // pass on the freshly recreated clusters. The marker written
-              // just before this redeploy must still be readable on the
-              // acting primary, proving the reconverge touched roles, not
-              // data. (Uses its OWN marker — the failover-time one is
-              // deleted by verify-failover's pass-path cleanup.)
-              if (reconvergeMarkerWritten) {
-                const survival = await runFailoverContinuityCheck({
-                  mode: config.mode,
-                  projectName: config.projectName,
-                  newPrimaryIp,
-                  sshKeyPath,
-                  markerId: reconvergeMarkerId,
-                });
-                collector.recordVerifications(stepId, [survival]);
-                if (survival.status === 'fail') {
-                  throw new Error(
-                    `reconverge-deploy: survival marker ${reconvergeMarkerId} written just ` +
-                      `before the redeploy is no longer readable on the acting primary ` +
-                      `(${newPrimaryIp}) — the reconverge destroyed data it must only reshape.`,
-                  );
-                }
-              }
-
               const pilotLightResults = await assertPilotLightStandby(newStandbyIp, {
                 sshKeyPath,
                 label: 'new-standby',
@@ -4058,53 +4301,68 @@ EOF`;
                   `${failures.length} pilot-light verification(s) failed: ${names}\n${detailLines}`,
                 );
               }
+            }
 
-              console.log(
-                `${tag} [reconverge-deploy] ha.primary.stack=${currentPrimary.stack} ` +
-                  `(new primary ${newPrimaryIp}, new standby ${newStandbyIp}) — pilot-light OK`,
+            console.log(
+              `${tag} [reconverge-deploy] primary ${newPrimaryIp}` +
+                `${currentPrimary.stack ? ` (ha.primary.stack=${currentPrimary.stack})` : ''}, ` +
+                `rebuilt standby ${newStandbyIp} streaming`,
+            );
+
+            // OBSERVABILITY RESTORED: the pilot-light standby never installed
+            // Grafana/Prometheus, so verify-failover skipped those checks
+            // (scenarios/observability-step-plan.ts). This redeploy applied
+            // observability to the promoted cluster as the full primary; prove
+            // it from the outside with a fresh super-admin session. No DNS pin:
+            // verify-failover already waited for the domain to resolve to the
+            // promoted cluster, and the ha.primary.stack assertion above proves
+            // this redeploy did not move it.
+            if (provesObservabilityAfterReconverge(config.mode, config.features)) {
+              if (!adminCreds) adminCreds = readAdminCredentials(config.projectDir);
+              const obsResults = await runPostReconvergeObservability(
+                {
+                  domain: config.domain,
+                  adminEmail: adminCreds?.adminEmail,
+                  adminPassword: adminCreds?.adminPassword,
+                  // Grafana's pod may still be starting right after the apply:
+                  // 12 x 5s instead of the verify steps' 4.
+                  attempts: 12,
+                },
+                { signIn: adminSignIn, runChecks: runObservabilityChecks },
               );
-
-              // OBSERVABILITY RESTORED: the pilot-light standby never installed
-              // Grafana/Prometheus, so verify-failover skipped those checks
-              // (scenarios/observability-step-plan.ts). This redeploy applied
-              // observability to the promoted cluster as the full primary; prove
-              // it from the outside with a fresh super-admin session. No DNS pin:
-              // verify-failover already waited for the domain to resolve to the
-              // promoted cluster, and the ha.primary.stack assertion above proves
-              // this redeploy did not move it.
-              if (provesObservabilityAfterReconverge(config.mode, config.features)) {
-                if (!adminCreds) adminCreds = readAdminCredentials(config.projectDir);
-                const obsResults = await runPostReconvergeObservability(
-                  {
-                    domain: config.domain,
-                    adminEmail: adminCreds?.adminEmail,
-                    adminPassword: adminCreds?.adminPassword,
-                    // Grafana's pod may still be starting right after the apply:
-                    // 12 x 5s instead of the verify steps' 4.
-                    attempts: 12,
-                  },
-                  { signIn: adminSignIn, runChecks: runObservabilityChecks },
+              collector.recordVerifications(stepId, obsResults);
+              const obsFailures = obsResults.filter((r) => r.status === 'fail');
+              if (obsFailures.length > 0) {
+                const detailLines = obsFailures
+                  .map(
+                    (f) =>
+                      `[fail] ${f.checkName}: ${(f.errorMessage || JSON.stringify(f.details || {})).slice(0, 400)}`,
+                  )
+                  .join('\n');
+                for (const line of detailLines.split('\n')) console.error(`${tag} ${line}`);
+                throw new Error(
+                  `reconverge-deploy: ${obsFailures.length} observability check(s) failed after ` +
+                    `the reconverge, so it did not restore Grafana/Prometheus on the primary: ` +
+                    `${obsFailures.map((f) => f.checkName).join(', ')}\n${detailLines}`,
                 );
-                collector.recordVerifications(stepId, obsResults);
-                const obsFailures = obsResults.filter((r) => r.status === 'fail');
-                if (obsFailures.length > 0) {
-                  const detailLines = obsFailures
-                    .map(
-                      (f) =>
-                        `[fail] ${f.checkName}: ${(f.errorMessage || JSON.stringify(f.details || {})).slice(0, 400)}`,
-                    )
-                    .join('\n');
-                  for (const line of detailLines.split('\n')) console.error(`${tag} ${line}`);
-                  throw new Error(
-                    `reconverge-deploy: ${obsFailures.length} observability check(s) failed after ` +
-                      `the reconverge, so it did not restore Grafana/Prometheus on the primary: ` +
-                      `${obsFailures.map((f) => f.checkName).join(', ')}\n${detailLines}`,
-                  );
-                }
-                console.log(`${tag} [reconverge-deploy] observability restored on the primary`);
               }
-            },
-          ),
+              console.log(`${tag} [reconverge-deploy] observability restored on the primary`);
+            }
+          },
+        ),
+    });
+
+    // 14. Failback (compose-ha only) — with streaming restored by the
+    // reconverge, a planned failover back to the original node must succeed,
+    // and verify-failback reruns the post-failover battery (serving, DNS flip
+    // through the provider API and the authoritative NS, continuity, the
+    // now-retired promoted node disarmed). k8s-ha's failback would repeat a
+    // 30-minute pilot-light scale-up for no signal the failover lacks.
+    if (config.mode === 'compose-ha') {
+      stepDefs.push(promotionStep('failback'));
+      stepDefs.push({
+        name: 'verify-failback',
+        run: () => runVerificationChecks('verify-failback'),
       });
     }
   }
@@ -4131,11 +4389,15 @@ EOF`;
   // scenarios from ~60min → ~25min when iterating on failover-class bugs.
   if (options.skipSteps && options.skipSteps.size > 0) {
     const before = filteredStepDefs.length;
-    filteredStepDefs = filteredStepDefs.filter((s) => !options.skipSteps?.has(s.name));
+    // A skipped step takes its dependents with it (failover -> second-failover
+    // and reconverge-deploy -> failback -> verify-failback): they assert the
+    // state it leaves and would only fail on their own precondition.
+    const dropped = expandSkippedSteps(options.skipSteps);
+    filteredStepDefs = filteredStepDefs.filter((s) => !dropped.has(s.name));
     const removed = before - filteredStepDefs.length;
     if (removed > 0) {
       console.log(
-        `${tag} --skip-steps: dropped ${removed} step(s) from lifecycle: ${[...options.skipSteps].join(', ')}`,
+        `${tag} --skip-steps: dropped ${removed} step(s) from lifecycle: ${[...dropped].join(', ')}`,
       );
     }
   }

@@ -345,7 +345,10 @@ export function logStepMatrix(
     'verify-restore',
     'failover',
     'verify-failover',
+    'second-failover',
     'reconverge-deploy',
+    'failback',
+    'verify-failback',
     'final-destroy',
     'teardown-repo',
   ];

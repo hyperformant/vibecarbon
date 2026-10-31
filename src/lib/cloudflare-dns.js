@@ -3,6 +3,7 @@
  * Shared across deploy.js and destroy.js
  */
 
+import * as p from '@clack/prompts';
 import { challengeRecordNames } from './acme-challenge.js';
 import { spinner } from './cli/progress.js';
 import { fetchWithRetry } from './fetch-retry.js';
@@ -93,6 +94,26 @@ export async function getZones(apiToken) {
 // ============================================================================
 
 /**
+ * Cloudflare reports failure two ways: a non-2xx status, or a 200 whose JSON
+ * carries `success: false`. Both must stop the caller; a 401/403 used to fall
+ * through as "DNS updated". Returns the parsed body on success. Never
+ * interpolates the token.
+ * @param {Response} response
+ * @param {string} prefix
+ * @returns {Promise<object>}
+ */
+async function readCloudflareJson(response, prefix) {
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.success === false) {
+    const detail = body.errors?.[0]?.message || response.statusText || 'request failed';
+    throw Object.assign(new Error(`${prefix} (HTTP ${response.status}): ${detail}`), {
+      status: response.status,
+    });
+  }
+  return body;
+}
+
+/**
  * Create or update a DNS record (uniform backend contract: the record
  * target arrives as `value`; Cloudflare's wire field `content` is an
  * internal mapping here).
@@ -121,7 +142,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
     },
   );
 
-  const listData = await listResponse.json();
+  const listData = await readCloudflareJson(listResponse, 'Failed to look up DNS record');
   const existing = listData.result?.find((r) => r.name === name && r.type === type);
 
   if (existing) {
@@ -137,7 +158,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
         body: JSON.stringify({ content, proxied, ttl }),
       },
     );
-    return updateResponse.json();
+    return readCloudflareJson(updateResponse, 'Failed to update DNS record');
   }
 
   // Create new record
@@ -153,7 +174,25 @@ export async function createDNSRecord(apiToken, zoneId, config) {
     },
   );
 
-  return response.json();
+  return readCloudflareJson(response, 'Failed to create DNS record');
+}
+
+/**
+ * Read every A record target at a name, for verifying a flip. Empty when the
+ * name has no A record; a stale second value must stay visible.
+ *
+ * @param {string} apiToken - Cloudflare API token
+ * @param {string} zoneId - Zone ID
+ * @param {string} name - Record name (FQDN)
+ * @returns {Promise<string[]>}
+ */
+export async function readARecord(apiToken, zoneId, name) {
+  const response = await fetchWithRetry(
+    `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=A&name=${name}`,
+    { headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' } },
+  );
+  const body = await readCloudflareJson(response, 'Failed to read DNS record');
+  return (body.result ?? []).filter((r) => r.name === name && r.type === 'A').map((r) => r.content);
 }
 
 /**
@@ -379,7 +418,30 @@ async function createHealthCheck(apiToken, zoneId, config) {
     },
   );
 
-  return response.json();
+  return readCloudflareJson(response, 'Failed to create health check');
+}
+
+/**
+ * Create a health check without letting an entitlement refusal sink the setup.
+ * Health checks are informational and need a paid Cloudflare plan; the DNS
+ * records are already written when this runs, so a 4xx here is a warning with
+ * the cause, never a failed deploy. Anything else (5xx, network) still throws.
+ *
+ * @returns {Promise<boolean>} whether the check was created
+ */
+async function createHealthCheckOrWarn(apiToken, zoneId, config) {
+  try {
+    await createHealthCheck(apiToken, zoneId, config);
+    return true;
+  } catch (error) {
+    if (error.status >= 400 && error.status < 500) {
+      p.log.warn(
+        `cloudflare refused the ${config.name} health check (${error.message}); health checks need a paid cloudflare plan, the dns records are set`,
+      );
+      return false;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -473,12 +535,16 @@ export async function setupHA(apiToken, zoneId, domain, servers) {
     // Create health checks for monitoring both regions
     for (const server of servers) {
       s.start(`Creating health check for ${server.name}`);
-      await createHealthCheck(apiToken, zoneId, {
+      const created = await createHealthCheckOrWarn(apiToken, zoneId, {
         name: `${server.name}-health`,
         address: server.ip,
         path: '/api/health',
       });
-      s.stop(`Health check created for ${server.name}`);
+      s.stop(
+        created
+          ? `Health check created for ${server.name}`
+          : `Health check skipped for ${server.name}`,
+      );
     }
 
     return {
@@ -548,13 +614,14 @@ export async function setupSimple(apiToken, zoneId, domain, serverIp, options = 
     // Create health check (informational, doesn't affect routing without LB)
     s?.start('Creating health check');
     onProgress?.('Creating health check');
-    await createHealthCheck(apiToken, zoneId, {
+    const created = await createHealthCheckOrWarn(apiToken, zoneId, {
       name: `${domain}-health`,
       address: serverIp,
       path: '/api/health',
     });
-    s?.stop('Health check created');
-    onProgress?.('Health check created');
+    const note = created ? 'Health check created' : 'Health check skipped';
+    s?.stop(note);
+    onProgress?.(note);
 
     return { success: true, mode: 'simple', record: result.result };
   } catch (error) {

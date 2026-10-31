@@ -18,29 +18,67 @@ import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
+import { assertInteractiveStdin } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import {
+  backupFenceWarning,
+  recordBackupFence,
+  writeK8sBackupFence,
+} from './lib/deploy/backup-fence.js';
+import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_STATEFULSET } from './lib/deploy/db-workload.js';
+import { abortFailover } from './lib/deploy/failover-abort.js';
+import {
+  assertFailoverClassified,
+  assertFailoverPreconditions,
+  classifyFailover,
+  clearFailoverJournal,
+  confirmUnprovenFailover,
+  dnsDidNotMessage,
+  FailoverDnsError,
+  FailoverRefusedError,
+  flipAndVerifyDns,
+  promotionNotIssuedMessage,
+  promotionUnknownMessage,
+  readReplicaState,
+  recordSystemIdentifier,
+  UNPROVEN_RISK_LINE,
+  writeFailoverJournal,
+} from './lib/deploy/failover-guard.js';
 import {
   PROMOTABLE_CERTIFICATES,
   PROMOTE_ISSUER_ANNOTATION,
 } from './lib/deploy/k8s/acme-issuer-policy.js';
 import {
+  assertStandbyNotWriteFenced,
+  DB_STS_BOOT_TIMEOUT_S,
+  fenceDatabaseWrites,
   getReplPasswordFromSecret,
-  isStandbyPromoted,
   isStandbyStreaming,
+  k8sPsqlRunner,
   promoteStandby,
   reseedStandbyFromPrimary,
+  UNFENCE_SQL_HINT,
+  unfenceDatabaseWrites,
+  waitForStandbyCaughtUp,
 } from './lib/deploy/replication.js';
+import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
 import {
   assertWalgBackupsWorking,
   k8sWalgAuditArgv,
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from './lib/deploy/walg-audit.js';
 import {
+  demoteK8sWalgRole,
   k8sDbRolloutStatusArgv,
   k8sSetWalgRoleArgv,
   walgRoleDegradedMessage,
 } from './lib/deploy/walg-role.js';
+import {
+  clearWriteFenceMarker,
+  liftStrandedWriteFence,
+  writeWriteFenceMarker,
+} from './lib/deploy/write-fence.js';
 import {
   DNS_PROVIDERS,
   getDnsProvider,
@@ -56,6 +94,10 @@ import { pollUntil } from './lib/retry.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { listWalgBackups } from './lib/walg-backups.js';
+
+// Shared with the compose-ha failover; re-exported where tests and callers
+// have always found them.
+export { confirmUnprovenFailover, promotionUnknownMessage, UNPROVEN_RISK_LINE };
 
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
@@ -84,6 +126,30 @@ const SPEC = {
     { name: 'v', boolean: true, description: 'Show version' },
     { name: 'y', boolean: true, description: 'Skip confirmation prompts' },
     { name: 'dry', boolean: true, description: 'Show plan without executing' },
+    {
+      name: 'force-unproven',
+      boolean: true,
+      description:
+        'Primary is dead and nothing proves the standby holds its data: promote it anyway (unplanned only)',
+    },
+    {
+      name: 'force-unplanned',
+      boolean: true,
+      description:
+        'Your machine cannot reach the primary but the standby still sees it streaming: fail over anyway, knowing the old primary may still be serving',
+    },
+    {
+      name: 'allow-degraded',
+      boolean: true,
+      description:
+        'Only applies together with -force-unproven (refused on its own): also accept a standby the last deploy flagged degraded',
+    },
+    {
+      name: 'abort',
+      boolean: true,
+      description:
+        'Call off a failover that is stuck mid-flight: stops the standby database, and the old primary serves again',
+    },
     { name: 'env', value: '<name>', description: 'Environment seed (alternative to positional)' },
     {
       name: 'server-type',
@@ -101,6 +167,10 @@ const SPEC = {
     { command: 'vibecarbon failover', description: 'prompts for env' },
     { command: 'vibecarbon failover prod -dry', description: 'preview the failover plan' },
     { command: 'vibecarbon failover prod -y', description: 'execute without confirmation' },
+    {
+      command: 'vibecarbon failover prod -abort',
+      description: 'call off a stuck failover and keep the old primary',
+    },
     {
       command: 'vibecarbon failover prod -server-type cpx42',
       description: 'provision failover workers on a specific server type',
@@ -230,191 +300,157 @@ async function isPrimaryPostgresReady(primaryIp, sshKeyPath) {
 async function promoteStandbyDatabase(standbyIp, sshKeyPath) {
   const _t = perfTimer('failover.promoteStandby');
   try {
-    return await promoteStandby(standbyIp, sshKeyPath);
+    return await promoteStandby(standbyIp, sshKeyPath, {
+      readState: () => readReplicaState({ exec: k8sPsqlRunner(standbyIp, sshKeyPath) }),
+    });
   } finally {
     _t.end();
   }
 }
 
 /**
- * Re-seed the standby from the primary (when reachable) then promote it.
- * ABORTS the whole failover (throws) if the re-seed fails or the promotion
- * cannot be confirmed — we must NEVER scale down the old primary and flip DNS
- * onto a standby that was left half-seeded or is still in recovery. Brings the
- * k8s failover path to parity with compose (compose/ha.js hard-fails both).
+ * Re-seed the standby from the primary when it needs it, before promotion.
+ * ABORTS the whole failover (throws) if the re-seed fails: we must NEVER flip
+ * DNS onto a standby that was left half-seeded. Promotion itself is a separate
+ * step (failoverHA), gated by failover-guard's preconditions and journal.
+ *
+ * @param {object} servers
+ * @param {string} sshKeyPath
+ * @param {{ start: Function, stop: Function }} s
+ * @param {{ onSeeded?: (systemIdentifier: string) => void }} [opts]
  */
-async function reseedAndPromoteOrAbort(servers, sshKeyPath, s) {
-  // Step -1 (convergent-rerun guard): if the standby has ALREADY exited
-  // recovery it was promoted by a prior (crashed mid-flow) run. Re-seeding now
-  // would pg_basebackup OVER a promoted — possibly already-serving — database.
-  // Skip re-seed + promote and let the rest of the flow re-converge idempotently.
-  if (await isStandbyPromoted(servers.standby.ip, sshKeyPath)) {
-    p.log.info('Standby already promoted, convergent rerun, skipping reseed + promote');
-    return { alreadyPromoted: true };
-  }
-
-  // Step 0: Re-seed standby from primary — UNLESS the standby is already
-  // verifiably streaming. A streaming standby is in-parity with the primary
-  // (that is exactly what streaming replication guarantees), so a pre-promotion
-  // pg_basebackup is wasted RTO — and worse, the standby's live walreceiver
-  // holds the persistent replication slot, so a basebackup that tried to attach
-  // to it would error "replication slot is active for PID …" (live RCA
-  // compose-ha 2026-07-07; the reseed's basebackup now uses a temp slot, but
-  // skipping entirely is still the right call for an already-streaming standby).
+async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded, mustReseed = false } = {}) {
+  // Skip the re-seed when the standby is already verifiably streaming. A
+  // streaming standby is in-parity with the primary (that is exactly what
+  // streaming replication guarantees), so a pre-promotion pg_basebackup is
+  // wasted RTO, and worse, the standby's live walreceiver holds the persistent
+  // replication slot, so a basebackup that tried to attach to it would error
+  // "replication slot is active for PID ..." (live RCA compose-ha 2026-07-07;
+  // the reseed's basebackup now uses a temp slot, but skipping entirely is
+  // still the right call for an already-streaming standby).
   // Prefer the STANDBY-side signal (pg_stat_wal_receiver): failover often runs
   // when the primary is unhealthy, and the standby can see its own receiver even
   // when the primary is unreachable.
-  if (await isStandbyStreaming(servers.standby.ip, sshKeyPath)) {
+  // mustReseed: the catch-up gate already read it not streaming, so a
+  // streaming read now carries no catch-up proof and cannot skip the reseed.
+  if (!mustReseed && (await isStandbyStreaming(servers.standby.ip, sshKeyPath))) {
     p.log.info(
       'Standby already streaming, skipping re-seed (parity guaranteed by streaming state)',
     );
-  } else if (await isPrimaryPostgresReady(servers.primary.ip, sshKeyPath)) {
-    s.start('Re-seeding standby from primary (pg_basebackup)');
-    let result;
-    try {
-      // standby.dbIp: the node the standby db pod is pinned to — the
-      // re-seed's node-side PGDATA swap ssh's there (roles are not yet swapped;
-      // the re-seed runs BEFORE promotion, so the deploy-time gateway relay
-      // directions still hold and the re-seed dials the standby's LOCAL
-      // WireGuard relay — no primary IP needed, no gateway re-render).
-      result = await reseedStandbyFromPrimary(servers.standby.ip, sshKeyPath, {
-        standbyDbIp: servers.standby.dbIp,
-        standbyDbPrivateIp: servers.standby.dbPrivateIp,
-      });
-    } catch (err) {
-      s.stop('Re-seed failed, aborting failover');
-      throw new Error(
-        `Failover aborted before promotion: ${err.message}\n` +
-          `The standby was NOT promoted and the old primary is untouched: no ` +
-          `split-brain and no DNS flip. Resolve the issue (or redeploy the ` +
-          `standby) and retry.`,
-      );
-    }
-    s.stop(
-      result === 'reseeded'
-        ? 'Standby re-seeded with primary state'
-        : 'Primary unreachable mid-probe, promoting standby with current state',
-    );
-  } else {
-    p.log.warn('Primary unreachable, skipping re-seed, promoting standby with current state');
-  }
-
-  // Step 1: Promote standby database. A failure here is FATAL: continuing would
-  // scale down the old primary and flip DNS onto a read-only standby.
-  s.start('Promoting standby database');
-  const promoted = await promoteStandbyDatabase(servers.standby.ip, sshKeyPath);
-  if (!promoted) {
-    s.stop('Promotion could not be confirmed, aborting failover');
-    throw new Error(
-      `Failover aborted: standby ${servers.standby.ip} did not exit recovery mode. ` +
-        `Refusing to scale down the old primary or flip DNS onto an unpromoted ` +
-        `standby (that would take the app read-only). Verify the standby db pod and retry.`,
-    );
-  }
-  s.stop('Standby database promoted to primary');
-}
-
-/**
- * PLANNED-mode zero-data-loss gate: after the primary's app tier is quiesced
- * (no new customer writes) and BEFORE promotion, ensure the standby has
- * replayed every byte of WAL the primary held at quiesce time.
- *
- * Why: streaming ≠ caught-up. reseedAndPromoteOrAbort's streaming short-circuit
- * skips the pre-promote reseed for an already-streaming standby, but the WAL
- * records written just before quiesce may still be in flight — promoting then
- * would silently drop them, making "RPO zero" merely probabilistic. This gate
- * closes that window and is what upgrades planned switchover to a TRUE
- * zero-data-loss guarantee.
- *
- * Scope: only ENFORCED when the standby is STREAMING (the short-circuit path).
- * A non-streaming standby is reseeded downstream by a full pg_basebackup from
- * the quiesced primary, which copies everything — so the WAL-replay gate does
- * not apply and we return early rather than time out against a frozen replay
- * position.
- *
- * Which side we query: we capture the target ONCE on the PRIMARY (reachable by
- * definition in planned mode) via pg_current_wal_lsn(); after quiesce that
- * high-water mark is stable for customer writes. Then each poll runs a single
- * boolean query on the STANDBY (the node we are about to promote — guaranteed
- * reachable) comparing its live pg_last_wal_replay_lsn() to the captured target
- * with pg_wal_lsn_diff(...) >= 0 — one round-trip, freshest replay position. On
- * timeout we THROW so the caller's abort + un-quiesce path runs; a lagging
- * standby is never promoted.
- *
- * @param {{ primary: { ip: string }, standby: { ip: string } }} servers
- * @param {string} sshKeyPath
- * @param {{ attempts?: number, intervalMs?: number, deps?: { kubectl?: Function, getPostgresPod?: Function, isStreaming?: Function, sleep?: Function } }} [opts]
- * @returns {Promise<void>}
- */
-export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
-  const { attempts = 30, intervalMs = 2000, deps = {} } = opts;
-  const kubectl = deps.kubectl ?? sshKubectl;
-  const getPod = deps.getPostgresPod ?? getPostgresPod;
-  const streamingCheck = deps.isStreaming ?? isStandbyStreaming;
-  const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-
-  // Only the streaming short-circuit needs this gate; a non-streaming standby
-  // gets a full reseed downstream which is caught-up by construction.
-  if (!(await streamingCheck(servers.standby.ip, sshKeyPath))) {
-    p.log.info(
-      'Standby not streaming, catch-up gate N/A (the downstream reseed copies all state).',
-    );
     return;
   }
-
-  // Capture the primary's WAL high-water mark ONCE, after quiesce.
-  const primaryPod = await getPod(servers.primary.ip, sshKeyPath);
-  const targetRaw = await kubectl(servers.primary.ip, sshKeyPath, [
-    'exec',
-    '-n',
-    'vibecarbon',
-    primaryPod,
-    '--',
-    'psql',
-    '-U',
-    'postgres',
-    '-tAc',
-    'SELECT pg_current_wal_lsn()',
-  ]);
-  const target = (typeof targetRaw === 'string' ? targetRaw : '').trim();
-  if (!/^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/.test(target)) {
+  if (!(await isPrimaryPostgresReady(servers.primary.ip, sshKeyPath))) {
+    p.log.warn('Primary unreachable, skipping re-seed, promoting standby with current state');
+    return;
+  }
+  s.start('Re-seeding standby from primary (pg_basebackup)');
+  let result;
+  try {
+    // standby.dbIp: the node the standby db pod is pinned to; the re-seed's
+    // node-side PGDATA swap ssh's there (roles are not yet swapped; the
+    // re-seed runs BEFORE promotion, so the deploy-time gateway relay
+    // directions still hold and the re-seed dials the standby's LOCAL
+    // WireGuard relay: no primary IP needed, no gateway re-render).
+    result = await reseedStandbyFromPrimary(servers.standby.ip, sshKeyPath, {
+      standbyDbIp: servers.standby.dbIp,
+      standbyDbPrivateIp: servers.standby.dbPrivateIp,
+      onSeeded,
+    });
+  } catch (err) {
+    s.stop('Re-seed failed, aborting failover');
     throw new Error(
-      `Zero-data-loss gate: could not read the primary's WAL position before promote ` +
-        `(got: ${target.slice(0, 80) || 'empty'}). Aborting failover.`,
+      `Failover aborted before promotion: ${err.message}\n` +
+        `The standby was NOT promoted and the old primary is untouched: no ` +
+        `split-brain and no DNS flip. Resolve the issue (or redeploy the ` +
+        `standby) and retry.`,
     );
   }
+  s.stop(
+    result === 'reseeded'
+      ? 'Standby re-seeded with primary state'
+      : 'Primary unreachable mid-probe, promoting standby with current state',
+  );
+}
 
-  const standbyPod = await getPod(servers.standby.ip, sshKeyPath);
-  let last = '';
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    let out = '';
+/** How long a quiesce may take to show every quiesced pod gone. */
+export const QUIESCE_DEADLINE_MS = 180_000;
+
+/**
+ * Prove a quiesce: every Deployment in `deployments` has no pods left (none
+ * running, none terminating). A scale to 0 returns before its pods terminate,
+ * and a terminating app pod can still hold a database session. A Deployment
+ * that does not exist has nothing to wait for. Deadline-bounded (R3).
+ *
+ * @returns {Promise<{ ok: boolean, remaining: string[] }>} remaining names the
+ *   Deployments that still had pods (or could not be read) at the deadline
+ */
+export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {}) {
+  const {
+    kubectl = sshKubectl,
+    deadlineMs = QUIESCE_DEADLINE_MS,
+    pollMs = 3000,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    now = Date.now,
+  } = opts;
+  const deadline = now() + deadlineMs;
+  const selectors = [];
+  for (const dep of deployments) {
+    const ns = dep.namespace || 'vibecarbon';
+    let raw;
     try {
-      out = await kubectl(servers.standby.ip, sshKeyPath, [
-        'exec',
+      raw = await kubectl(ip, sshKeyPath, [
+        'get',
+        'deployment',
+        dep.name,
         '-n',
-        'vibecarbon',
-        standbyPod,
-        '--',
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        `SELECT pg_wal_lsn_diff(pg_last_wal_replay_lsn(), '${target}') >= 0`,
+        ns,
+        '-o',
+        'jsonpath={.spec.selector.matchLabels}',
       ]);
     } catch (err) {
-      out = '';
-      last = firstErrorLine(err);
+      if (/not found/i.test(String(err?.message ?? err))) continue;
+      return { ok: false, remaining: [`${dep.name} (unreadable: ${firstErrorLine(err)})`] };
     }
-    const caughtUp = (typeof out === 'string' ? out : '').trim();
-    if (caughtUp === 't') return; // standby replayed up to the primary's quiesce LSN
-    last = caughtUp || last;
-    if (attempt < attempts) await sleep(intervalMs);
+    let labels;
+    try {
+      labels = JSON.parse(String(raw ?? '').trim() || 'null');
+    } catch {
+      labels = null;
+    }
+    if (!labels || typeof labels !== 'object' || Object.keys(labels).length === 0) {
+      return { ok: false, remaining: [`${dep.name} (no pod selector)`] };
+    }
+    const selector = Object.entries(labels)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(',');
+    selectors.push({ name: dep.name, ns, selector });
   }
-  throw new Error(
-    `Zero-data-loss gate: standby did not replay the primary's final WAL (target ${target}) ` +
-      `within ${Math.round((attempts * intervalMs) / 1000)}s (last: ${last || 'none'}). ` +
-      `Aborting before promotion; the primary is un-quiesced and still serving.`,
-  );
+
+  let remaining = selectors.map((x) => x.name);
+  for (;;) {
+    const still = [];
+    for (const { name, ns, selector } of selectors) {
+      try {
+        const out = await kubectl(ip, sshKeyPath, [
+          'get',
+          'pods',
+          '-n',
+          ns,
+          '-l',
+          selector,
+          '-o',
+          'name',
+        ]);
+        if (String(out ?? '').trim() !== '') still.push(name);
+      } catch {
+        still.push(name);
+      }
+    }
+    remaining = still;
+    if (remaining.length === 0) return { ok: true, remaining };
+    if (now() >= deadline) return { ok: false, remaining };
+    await sleep(pollMs);
+  }
 }
 
 /**
@@ -845,7 +881,10 @@ export async function preflightPilotFailover(_envName, envConfig, deps = {}) {
   // Config-presence gate: these are written by `vibecarbon deploy` (Task 7).
   // Their absence means this env predates pilot-light HA (or was hand-edited) —
   // there is nothing to provision or scale, so fail fast with a fix-it hint.
-  if (!workerSpec || !Array.isArray(scaleUpList) || !standbyStack) {
+  // ha.primary / ha.standby are the role objects the terminal swap rewrites:
+  // without both, a promote would end with nothing to persist and the journal
+  // left set, so refuse here, before anything is written.
+  if (!workerSpec || !Array.isArray(scaleUpList) || !standbyStack || !ha.primary || !ha.standby) {
     p.log.error('Pilot-light failover config missing — run `vibecarbon deploy` first');
     process.exit(1);
   }
@@ -1196,7 +1235,7 @@ export async function waitForWorkersReady(
  * resolveDnsToken resolves env-first — for native DNS that env var IS the
  * compute credential, so it's normally already present.
  */
-function dnsStrategyFor(dnsProvider) {
+export function dnsStrategyFor(dnsProvider) {
   const row = DNS_PROVIDERS[dnsProvider];
   return {
     async getAuth(envConfig) {
@@ -1205,6 +1244,12 @@ function dnsStrategyFor(dnsProvider) {
         computeToken: undefined,
       });
       if (!token) {
+        // A prompt that can never be answered must not "cancel" (exit 0) in
+        // the middle of an incident: say what to export and fail.
+        assertInteractiveStdin({
+          what: `the ${row.name} API token`,
+          envVar: row.tokenEnv,
+        });
         token = await p.text({
           message: `${row.name} API token:`,
           validate: (v) => (!v ? 'Required' : undefined),
@@ -1221,6 +1266,10 @@ function dnsStrategyFor(dnsProvider) {
     async updateDns(auth, domain, ip) {
       const dns = await getDnsProvider(dnsProvider);
       return dns.upsertApexAndWildcard(auth, domain, ip);
+    },
+    async readDns(auth, name) {
+      const dns = await getDnsProvider(dnsProvider);
+      return dns.readARecord(auth.token, auth.zoneId, name);
     },
   };
 }
@@ -1246,7 +1295,7 @@ const MANUAL_DNS_STRATEGY = {};
  *
  * @param {string} envName
  */
-export function swapHaRoles(envName) {
+export function swapHaRoles(envName, { override } = {}) {
   const config = loadProjectConfig();
   const envConfig = config?.environments?.[envName];
   if (!envConfig?.ha?.primary || !envConfig.ha.standby) {
@@ -1265,7 +1314,165 @@ export function swapHaRoles(envName) {
   // Honest DR posture until a reconverge deploy re-establishes streaming.
   envConfig.replication = 'degraded';
   envConfig.degraded = true;
+  // The failback guard compares this with deployedAt: until a deploy
+  // reconverges, the new standby is the old primary and holds no replica.
+  envConfig.lastFailover = new Date().toISOString();
+  // A failover that skipped the replica proof says so on the record.
+  if (override) envConfig.lastFailoverOverride = override;
+  else delete envConfig.lastFailoverOverride;
+  // R2: the journal is cleared by the same save that persists the swap, so no
+  // crash can leave a swapped config that still claims a failover in flight.
+  delete ha.failoverInFlight;
+  // The retired side's read-only state now belongs to the retired-node
+  // handling, not to the interrupted-fence marker.
+  delete ha.writeFence;
   saveProjectConfig(config);
+}
+
+/** How long `-abort` waits for the standby's db pod to be gone after the scale to zero. */
+export const ABORT_DB_GONE_TIMEOUT_S = 180;
+
+/**
+ * The k8s-HA backend of `vibecarbon failover <env> -abort` (failover-abort.js).
+ * The standby's db StatefulSet is scaled to zero and its pod proven gone (the
+ * StatefulSet is never applied by Flux, so nothing scales it back); its app
+ * tier goes to zero and its db template to WALG_ROLE=standby, so a later scale
+ * up cannot archive. The old primary gets its write fence lifted, WALG_ROLE
+ * back to primary when a failover's demote got that far (the set env rolls its
+ * db pod, which serves nothing while its app is at zero), then its app tier up.
+ *
+ * @param {object} args
+ * @param {string} args.envName
+ * @param {object} args.envConfig
+ * @param {object} args.strategy - dnsStrategyFor(...) or MANUAL_DNS_STRATEGY
+ * @param {object} [args.deps] test seams
+ * @returns {import('./lib/deploy/failover-abort.js').AbortBackend}
+ */
+export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {} }) {
+  const sshKeyPath = deps.sshKeyPath ?? getSSHKeyPath(envName);
+  const {
+    kubectl = (ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts),
+    psql = (ip) => k8sPsqlRunner(ip, sshKeyPath),
+    isPrimaryReady = (ip) => isPrimaryPostgresReady(ip, sshKeyPath),
+    unfenceWrites = (exec) => unfenceDatabaseWrites({ exec }),
+    scale = (ip, list, replicas, label) => scaleDeployments(ip, sshKeyPath, list, replicas, label),
+  } = deps;
+  const servers = identifyServers(envName, envConfig, {});
+  if (!servers?.primary?.ip || !servers?.standby?.ip) {
+    throw new FailoverRefusedError(
+      `Abort refused: the primary and standby clusters of ${envName} could not be read from ` +
+        '.vibecarbon.json (ha.primary and ha.standby)',
+    );
+  }
+  const scaleUpList = Array.isArray(envConfig.ha?.scaleUpList) ? envConfig.ha.scaleUpList : [];
+  const { primary, standby } = servers;
+  const ns = ['-n', 'vibecarbon'];
+  const quietly = async (fn) => {
+    try {
+      await fn();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return {
+    ips: { primary: primary.floatingIp || primary.ip, standby: standby.ip },
+    stopDbHint: `ssh root@${standby.ip} 'kubectl scale statefulset/${DB_STATEFULSET} -n vibecarbon --replicas=0'`,
+    unfenceHint: `ssh root@${primary.ip} 'kubectl -n vibecarbon exec ${DB_POD} -- ${UNFENCE_SQL_HINT}'`,
+    stopStandbyDb: async () => {
+      try {
+        await kubectl(standby.ip, [
+          ...ns,
+          'scale',
+          `statefulset/${DB_STATEFULSET}`,
+          '--replicas=0',
+        ]);
+      } catch (err) {
+        return { ok: false, reason: firstErrorLine(err) };
+      }
+      // The wait reports a pod already gone as an error on some kubectl
+      // versions, so its verdict is the read that follows, not its exit.
+      await quietly(() =>
+        kubectl(
+          standby.ip,
+          [...ns, 'wait', '--for=delete', `pod/${DB_POD}`, `--timeout=${ABORT_DB_GONE_TIMEOUT_S}s`],
+          { timeout: (ABORT_DB_GONE_TIMEOUT_S + 30) * 1000 },
+        ),
+      );
+      let left;
+      try {
+        left = String(
+          (await kubectl(standby.ip, [
+            ...ns,
+            'get',
+            'pods',
+            '-l',
+            DB_POD_SELECTOR,
+            '-o',
+            'name',
+          ])) ?? '',
+        ).trim();
+      } catch (err) {
+        return { ok: false, reason: `its pods could not be listed: ${firstErrorLine(err)}` };
+      }
+      return left === ''
+        ? { ok: true }
+        : { ok: false, reason: `${left.split('\n').join(', ')} still exists` };
+    },
+    disarmStandby: async () => {
+      await scale(standby.ip, scaleUpList, 0, 'abort: standby app tier to zero');
+      // The slot drop inside fails quietly (its db pod is gone); the role write
+      // lands on the StatefulSet template, so a later scale up cannot archive.
+      return quietly(() => demoteK8sWalgRole({ ip: standby.ip, kubectl, warn: () => {} }));
+    },
+    repointDns: strategy?.updateDns
+      ? async () => {
+          const auth = strategy.getAuth ? await strategy.getAuth(envConfig) : null;
+          const domain = envConfig.domain || envConfig.dns?.domain;
+          const ip = primary.floatingIp || primary.ip;
+          return flipAndVerifyDns({
+            update: () => strategy.updateDns(auth, domain, ip),
+            read: (name) => strategy.readDns(auth, name),
+            domain,
+            ip,
+          });
+        }
+      : null,
+    primaryReachable: () => isPrimaryReady(primary.ip),
+    unfencePrimary: () => unfenceWrites(psql(primary.ip)),
+    writeBackupFence: () =>
+      (deps.writeFence ?? writeK8sBackupFence)({
+        ip: primary.ip,
+        sshKeyPath,
+        primaryNode: primary.ip,
+      }),
+    armPrimary: async () => {
+      let role;
+      try {
+        const sts = JSON.parse(
+          await kubectl(primary.ip, [...ns, 'get', `statefulset/${DB_STATEFULSET}`, '-o', 'json']),
+        );
+        const db = (sts?.spec?.template?.spec?.containers ?? []).find(
+          (ct) => ct.name === DB_CONTAINER,
+        );
+        role = (db?.env ?? []).find((e) => e.name === 'WALG_ROLE')?.value;
+      } catch {
+        return false;
+      }
+      if (role === 'primary') return true;
+      return quietly(async () => {
+        await kubectl(primary.ip, k8sSetWalgRoleArgv('primary'), { timeout: 60_000 });
+        await kubectl(primary.ip, k8sDbRolloutStatusArgv(DB_STS_BOOT_TIMEOUT_S), {
+          timeout: (DB_STS_BOOT_TIMEOUT_S + 30) * 1000,
+        });
+      });
+    },
+    startPrimaryWriters: async () => {
+      if (scaleUpList.length === 0) return false;
+      await scale(primary.ip, scaleUpList, 'up', 'abort: primary app tier back up');
+      return true;
+    },
+  };
 }
 
 /**
@@ -1285,12 +1492,18 @@ export function swapHaRoles(envName) {
  * standby is already promoted, so aborting here would strand it behind un-flipped
  * DNS. The caller finishes the failover and fails the command at the end.
  *
+ * Two verdicts, independent by construction (H3): arming the promoted side and
+ * disarming the old primary. The disarm runs in a `finally`, so a promoted
+ * rollout or audit that fails can never skip it. It used to: an early return
+ * left the stale ex-primary on WALG_ROLE=primary, and its nightly base backups
+ * could become LATEST in the shared prefix if it came back.
+ *
  * @param {object} args
  * @param {string} args.promotedIp    the promoted cluster's master (old standby)
  * @param {string} args.oldPrimaryIp  demoted best-effort; may be unreachable
  * @param {string} args.sshKeyPath
  * @param {object} [args.deps] injected seams for unit tests
- * @returns {Promise<{ok: boolean, error?: Error}>}
+ * @returns {Promise<{promoted: {ok: boolean, error?: Error}, demoted: {ok: boolean, error?: Error}}>}
  */
 export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKeyPath, deps = {} }) {
   const {
@@ -1300,12 +1513,16 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
     warn = (msg) => p.log.warn(msg),
   } = deps;
 
+  const asError = (err) => (err instanceof Error ? err : new Error(String(err)));
+  const health = { promoted: { ok: false }, demoted: { ok: false } };
   try {
     await kubectl(promotedIp, k8sSetWalgRoleArgv('primary'));
     // Blocks on the pod actually rolling. Budget sits just above the kubectl
     // --timeout so the remote command reports the rollout failure rather than
     // the SSH layer reporting a timeout with no detail.
-    await kubectl(promotedIp, k8sDbRolloutStatusArgv(300), { timeout: 330_000 });
+    await kubectl(promotedIp, k8sDbRolloutStatusArgv(DB_STS_BOOT_TIMEOUT_S), {
+      timeout: (DB_STS_BOOT_TIMEOUT_S + 30) * 1000,
+    });
     // requirePrimary: the ONLY reason this audit is here is to catch a promoted
     // node still reading `standby`, which the deploy-time probe treats as a
     // legitimate skip.
@@ -1324,39 +1541,65 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
     log(
       `[walg-role] promoted cluster ${promotedIp} is archiving (WALG_ROLE=primary, audit passed).`,
     );
+    health.promoted = { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+    health.promoted = { ok: false, error: asError(err) };
+  } finally {
+    // Demote the old primary so the two clusters never write the same canonical
+    // WAL prefix at once, WHATEVER the promoted side's verdict. Best-effort by
+    // design (an unreachable old primary is the usual reason to fail over) and
+    // NOT waited on: nothing downstream reads it, and the StatefulSet write is
+    // what carries the intent.
+    //
+    // Safe to do here, unlike on compose, because the old primary's app tier is
+    // never serving at this point: a PLANNED failover quiesced it to zero before
+    // the promotion, and an UNPLANNED one is running precisely because its
+    // postgres stopped answering. So the roll this triggers on its db pod has no
+    // live traffic to disturb. demoteK8sWalgRole also drops the old primary's
+    // inactive replication slots, which would otherwise pin WAL there.
+    try {
+      await demoteK8sWalgRole({ ip: oldPrimaryIp, kubectl, warn });
+      log(`[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`);
+      health.demoted = { ok: true };
+    } catch (err) {
+      const error = asError(err);
+      warn(
+        `Could not demote the old primary's wal-g write-guard (${oldPrimaryIp}): ${error.message}. ` +
+          `If it comes back up it may archive into the same backup prefix as the new primary, ` +
+          `\`vibecarbon deploy\` fixes this when it converges the ex-primary to pilot-light.`,
+      );
+      health.demoted = { ok: false, error };
+    }
   }
+  return health;
+}
 
-  // Demote the old primary so the two clusters never write the same canonical
-  // WAL prefix at once. Best-effort by design (an unreachable old primary is
-  // the usual reason to fail over) and NOT waited on: nothing downstream reads
-  // it, and the StatefulSet write is what carries the intent.
-  //
-  // Safe to do here, unlike on compose, because the old primary's app tier is
-  // never serving at this point: a PLANNED failover quiesced it to zero before
-  // the promotion, and an UNPLANNED one is running precisely because its
-  // postgres stopped answering. So the roll this triggers on its db pod has no
-  // live traffic to disturb.
-  try {
-    await kubectl(oldPrimaryIp, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 });
-    log(`[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`);
-  } catch (err) {
-    warn(
-      `Could not demote the old primary's wal-g write-guard (${oldPrimaryIp}): ${err.message}. ` +
-        `If it comes back up it may archive into the same backup prefix as the new primary, ` +
-        `\`vibecarbon deploy\` fixes this when it converges the ex-primary to pilot-light.`,
-    );
-  }
-  return { ok: true };
+/**
+ * One line per verdict of restorePromotedWalgRole, for the failure banner and
+ * the terminal error, so an operator sees which side needs the fix.
+ *
+ * @param {{promoted: {ok: boolean, error?: Error}, demoted: {ok: boolean, error?: Error}}} health
+ * @returns {string}
+ */
+export function walgVerdictsDetail(health) {
+  const promoted = health.promoted.ok
+    ? 'promoted cluster: armed (WALG_ROLE=primary, audit passed).'
+    : `promoted cluster: write-guard not confirmed, ${health.promoted.error?.message ?? 'unknown failure'}.`;
+  const demoted = health.demoted.ok
+    ? 'old primary: demoted to WALG_ROLE=standby.'
+    : `old primary: NOT demoted, ${health.demoted.error?.message ?? 'unknown failure'}; ` +
+      'if it comes back it may archive into the shared backup prefix until a deploy converges it.';
+  return `${promoted} ${demoted}`;
 }
 
 /**
  * Pilot-light HA failover core (shared across DNS-provider strategies). Order:
  *   1. preflight (verify persisted config + probe standby state backend)
+ *  1b. replica proof (failover-guard)                  (refuse = nothing touched)
  *   2. provision standby worker capacity 0→N          (abort = clean exit)
- *   3. quiesce primary app tier                        (planned only)
- *   4. re-seed + promote standby                       (abort = un-quiesce + throw)
+ *   3. quiesce + write-fence the primary               (planned only; unproven = abort)
+ *   4. catch-up, re-seed, journal, promote standby     (skipped on resume;
+ *                                                       unconfirmed = kept fenced)
  *   5. scale up promoted app tier
  *   6. readiness gate (rollout-status each + public API probe)
  *  6b. scale down old primary                          (unplanned only, best-effort)
@@ -1382,13 +1625,43 @@ export async function failoverHA(
     preflight = preflightPilotFailover,
     provision = provisionStandbyCapacity,
     isPrimaryReady = isPrimaryPostgresReady,
+    readStandbyState = (srv, key) => readReplicaState({ exec: k8sPsqlRunner(srv.standby.ip, key) }),
+    readPrimaryState = (srv, key) => readReplicaState({ exec: k8sPsqlRunner(srv.primary.ip, key) }),
     scale = scaleDeployments,
-    catchUp = waitForStandbyCaughtUp,
-    reseedPromote = reseedAndPromoteOrAbort,
+    psql = k8sPsqlRunner,
+    isStreaming = isStandbyStreaming,
+    confirmQuiesced = waitForAppTierGone,
+    fenceWrites = (exec) => fenceDatabaseWrites({ exec }),
+    unfenceWrites = (exec) => unfenceDatabaseWrites({ exec }),
+    assertUnfenced = (exec) => assertStandbyNotWriteFenced({ exec }),
+    writeMarker = writeWriteFenceMarker,
+    clearMarker = clearWriteFenceMarker,
+    liftStranded = liftStrandedWriteFence,
+    catchUp = (srv, key) =>
+      waitForStandbyCaughtUp({
+        primaryExec: psql(srv.primary.ip, key),
+        standbyExec: psql(srv.standby.ip, key),
+        isStreaming: () => isStreaming(srv.standby.ip, key),
+      }),
+    reseed = reseedStandbyOrAbort,
+    writeJournal = writeFailoverJournal,
+    clearJournal = clearFailoverJournal,
+    promote = (srv, key) => promoteStandbyDatabase(srv.standby.ip, key),
+    confirmUnproven = confirmUnprovenFailover,
     restoreWalgRole = restorePromotedWalgRole,
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
     promoteIssuer = promoteAcmeIssuer,
+    writeFence = (srv, key) =>
+      writeK8sBackupFence({ ip: srv.standby.ip, sshKeyPath: key, primaryNode: srv.standby.ip }),
+    recordFence = recordBackupFence,
+    reconcileRetired = () =>
+      reconcileRetiredFence({
+        environment: envName,
+        envConfig: loadProjectConfig()?.environments?.[envName],
+        projectConfig,
+        tier: 'k8s-ha',
+      }),
   } = deps;
 
   const servers = identify(envName, envConfig, projectConfig);
@@ -1478,6 +1751,63 @@ export async function failoverHA(
     servers.standby.dbPrivateIp = freshDbPrivateIp;
   }
 
+  // STEP 1b — Positive replica proof (R1), before any cloud change, quiesce or
+  // kubectl write. Reads the standby's recovery flag, system identifier and
+  // walreceiver, plus the primary's identifier when it answers (planned mode).
+  // A refusal throws FailoverRefusedError naming the reason and the deploy that
+  // fixes it; `resume` means a previous run of THIS failover (its journal) already
+  // promoted the standby, so reseed and promote are skipped.
+  const planned = await isPrimaryReady(servers.primary.ip, sshKeyPath);
+  const primaryPsql = psql(servers.primary.ip, sshKeyPath);
+  // A planned run that died between its database fence and its journal left
+  // the primary read-only with nothing promoted: lift it first (a journal
+  // means the promote may have started, and the journal flow owns it).
+  if (planned) {
+    await liftStranded({
+      environment: envName,
+      envConfig,
+      rolePrimary: { ip: servers.primary.ip },
+      exec: primaryPsql,
+      log: (line) => p.log.info(line),
+    });
+  } else if (envConfig?.ha?.writeFence && !envConfig?.ha?.failoverInFlight) {
+    p.log.warn(
+      'an interrupted failover left a write fence on the primary, which does not answer; ' +
+        'the next deploy or failover that reaches it lifts it',
+    );
+  }
+  const standbyState = await readStandbyState(servers, sshKeyPath);
+  // R8: "unreachable from here" is not "dead". A standby still streaming fresh
+  // WAL from the primary proves it alive behind a partition; refuse unless the
+  // operator passed -force-unplanned.
+  assertFailoverClassified(classifyFailover({ primaryReachable: planned, standbyState }), parsed);
+  const primaryState = planned ? await readPrimaryState(servers, sshKeyPath) : null;
+  // Whether an earlier run left a journal: only without one can a promote this
+  // run never sent prove that nothing will promote the standby.
+  const journalAtEntry = !!envConfig?.ha?.failoverInFlight;
+  const { mode, unproven } = assertFailoverPreconditions({
+    envConfig,
+    environment: envName,
+    standbyState,
+    tier: 'k8s-ha',
+    planned,
+    primaryState,
+    forceUnproven: !!parsed.forceUnproven,
+    allowDegraded: !!parsed.allowDegraded,
+  });
+  if (unproven) {
+    // The operator asked to skip the identifier proof on a dead primary. Say the
+    // risk once, and make them type the env name (or pass -y) before anything moves.
+    p.log.warn(UNPROVEN_RISK_LINE);
+    await confirmUnproven(envName, parsed);
+  }
+  if (mode === 'resume') {
+    p.log.info(
+      'Standby already promoted by an unfinished run of this failover (journal set), ' +
+        'resuming after the promote',
+    );
+  }
+
   // STEP 2 — Provision standby worker capacity (0→N). The ONLY step that adds
   // cloud capacity, and it runs FIRST: on ANY failure here (an
   // AbortProvisioningError OR a pre-converge cred-resolution throw) the
@@ -1504,62 +1834,209 @@ export async function failoverHA(
     process.exit(1);
   }
 
+  /**
+   * STEP 4: final catch-up gate, re-seed, journal, promote. Until the journal is
+   * written nothing is promoted, so any throw un-quiesces the primary (planned)
+   * and aborts. From the journal write on only two verdicts are answers (R3): a
+   * proven 'promoted', and a 'not-issued' (this run sent nothing) on a run that
+   * started with no journal, which clears the journal and un-quiesces. Anything
+   * else keeps the old primary fenced, leaves the journal set and exits
+   * non-zero, and the rerun resumes from the journal. With a journal from an
+   * earlier run, 'not-issued' proves nothing: that run's promote may be landing.
+   */
+  async function catchUpReseedAndPromote() {
+    try {
+      // STEP 3b (PLANNED only): zero-data-loss gate. The primary is quiesced, so
+      // wait for the STREAMING standby to replay the primary's WAL up to its
+      // quiesce-time position (R1d); its captured LSN goes into the journal. A
+      // standby that is not streaming cannot catch up: the reseed below copies
+      // it in full from the quiesced primary.
+      let primaryLsn = null;
+      let caughtUp = null;
+      if (planned) {
+        s.start("Verifying the standby replayed the primary's final WAL (zero-data-loss)");
+        try {
+          const caught = await catchUp(servers, sshKeyPath);
+          primaryLsn = caught.primaryLsn;
+          caughtUp = caught.caughtUp;
+          s.stop(
+            caught.caughtUp
+              ? 'Standby caught up to the primary: safe to promote'
+              : 'Standby not streaming, it is re-seeded from the quiesced primary',
+          );
+        } catch (cuErr) {
+          s.stop('Standby did not catch up, aborting failover');
+          throw cuErr;
+        }
+      }
+      // A reseed rewrites the standby's identity: the journal must name what
+      // was just seeded, not the pre-reseed reading.
+      let seededSysid = null;
+      let reseeded = false;
+      await reseed(servers, sshKeyPath, s, {
+        // A standby the gate found not streaming has no catch-up proof, so a
+        // later streaming read must not skip its reseed.
+        mustReseed: planned && caughtUp === false,
+        onSeeded: (sysid) => {
+          reseeded = true;
+          seededSysid = sysid;
+          recordSystemIdentifier({ environment: envName }, sysid);
+        },
+      });
+      // The basebackup copied the fenced primary's postgresql.auto.conf; the
+      // staged script strips the fence from it. Prove that before the promote,
+      // or the promoted primary would come up read-only.
+      if (reseeded && planned) {
+        try {
+          await assertUnfenced(psql(servers.standby.ip, sshKeyPath));
+        } catch (err) {
+          throw new Error(`Failover aborted before promotion: ${err.message}`);
+        }
+      }
+      // R2: the journal goes down immediately before the promote call.
+      await writeJournal(
+        { environment: envName },
+        {
+          target: 'standby',
+          primaryLsn: primaryLsn ?? null,
+          systemIdentifier: seededSysid ?? standbyState.systemIdentifier,
+          ...(unproven && { override: 'force-unproven' }),
+        },
+      );
+    } catch (err) {
+      // An aborted failover must not leave the site down. The error already
+      // states the world (standby NOT promoted, DNS NOT flipped) and the retry
+      // guidance, so rethrow it for the top-level handler.
+      await unquiesce();
+      throw err;
+    }
+
+    // STEP 4a: promote. The deadline bounds RTO only; the verdict decides.
+    s.start('Promoting standby database');
+    let verdict;
+    try {
+      verdict = await promote(servers, sshKeyPath);
+    } catch {
+      verdict = 'unknown';
+    }
+    if (verdict === 'promoted') {
+      s.stop('Standby database promoted to primary');
+      return;
+    }
+    // 'not-issued' un-fences only when this run started with no journal: then
+    // nothing anywhere asked the standby to promote. With a journal from an
+    // earlier run, its promote may still be landing, so it reads as 'unknown'.
+    if (verdict === 'not-issued' && !journalAtEntry) {
+      s.stop('Promote never sent, aborting failover');
+      // Un-fence first, and independently: a failed journal clear must not
+      // leave the serving primary read-only (unquiesce never throws).
+      await unquiesce();
+      await clearJournal({ environment: envName }).catch((err) =>
+        p.log.warn(`Could not clear the failover journal: ${firstErrorLine(err)}`),
+      );
+      throw new Error(promotionNotIssuedMessage(envName, servers.standby.ip));
+    }
+    s.stop('Promotion could not be confirmed, old primary kept fenced');
+    throw new Error(promotionUnknownMessage(envName));
+  }
+
   // STEP 3 — Quiesce the primary app tier (PLANNED failover only). Scaling the
   // scale-up list to 0 stops every writer while leaving postgres (a StatefulSet,
   // not in the list) up for the final catch-up re-seed. THE WRITE OUTAGE OPENS
-  // HERE — quiesce-BEFORE-promote is what makes this a true zero-data-loss
+  // HERE: quiesce-BEFORE-promote is what makes this a true zero-data-loss
   // upgrade (no writer can commit past the final catch-up). Unplanned (primary
   // unreachable) skips quiesce; the old primary's app tier is scaled down after
-  // the gate instead (step 6b).
-  const planned = await isPrimaryReady(servers.primary.ip, sshKeyPath);
-  if (planned) {
-    s.start('Quiescing primary app tier (write outage begins)');
-    await scale(servers.primary.ip, sshKeyPath, scaleUpList, 0, 'quiesce primary app tier');
-    s.stop('Primary app tier quiesced');
-  }
+  // the gate instead (step 6b). On resume the scale to 0 re-applies the fence.
+  //
+  // The scale is only the outward signal (scaleDeployments returns before pods
+  // terminate and swallows failures). The fence is proven: every quiesced
+  // Deployment's pods are gone, then the database itself is fenced (read-only
+  // default, client sessions terminated). Only then is the primary's WAL
+  // position final. A fence that cannot be proven aborts a promote-mode run.
+  let dbFenceAttempted = false;
 
-  // STEP 4 — Final catch-up re-seed (against the now-quiesced primary) + promote.
-  // A re-seed failure or unconfirmed promotion ABORTS (throws). In planned mode
-  // the primary was just quiesced, so before rethrowing we best-effort un-quiesce
-  // it — an aborted failover must NOT leave the site down.
-  try {
-    // STEP 3b (PLANNED only) — zero-data-loss gate. The primary is quiesced (no
-    // new customer writes), so before crossing the point of no return, wait for
-    // the STREAMING standby to replay the primary's WAL up to its quiesce-time
-    // position — streaming ≠ caught-up, and the streaming short-circuit would
-    // otherwise promote a standby that hasn't replayed the last pre-quiesce
-    // records. A timeout THROWS into the catch below → the primary is
-    // un-quiesced and the failover aborts (a lagging standby is never promoted).
-    if (planned) {
-      s.start("Verifying the standby replayed the primary's final WAL (zero-data-loss)");
-      try {
-        await catchUp(servers, sshKeyPath);
-        s.stop('Standby caught up to the primary: safe to promote');
-      } catch (cuErr) {
-        s.stop('Standby did not catch up, aborting failover');
-        throw cuErr;
-      }
+  /**
+   * Lift the fence after an abort that promoted nothing: only when this run
+   * started with no journal (R3). With an earlier run's journal its promote may
+   * still land, so the old primary stays quiesced. Never throws, so it cannot
+   * mask the abort it runs for.
+   */
+  const unquiesce = async () => {
+    if (!planned) return;
+    if (journalAtEntry) {
+      p.log.warn(
+        'The old primary stays quiesced: an earlier run of this failover journaled a promote ' +
+          'that may still land.',
+      );
+      return;
     }
-    await reseedPromote(servers, sshKeyPath, s);
-  } catch (err) {
-    if (planned) {
-      // The primary was quiesced moments ago — an aborted failover must not
-      // leave the site down. Un-quiesce (best-effort) BEFORE rethrowing.
-      p.log.warn('Failover aborted after quiesce, re-scaling the primary app tier back up.');
+    p.log.warn('Failover aborted after quiesce, lifting the fence on the primary.');
+    try {
+      if (dbFenceAttempted) {
+        if (await unfenceWrites(primaryPsql)) {
+          clearMarker({ environment: envName });
+        } else {
+          const pod = await getPostgresPod(servers.primary.ip, sshKeyPath).catch(() => '');
+          p.log.warn(
+            `Could not lift the database write fence on the primary (${servers.primary.ip}). ` +
+              `Lift it by hand: ssh root@${servers.primary.ip} 'kubectl -n vibecarbon exec ` +
+              `${String(pod || '').trim() || '<db pod>'} -- ${UNFENCE_SQL_HINT}'`,
+          );
+        }
+      }
       await scale(
         servers.primary.ip,
         sshKeyPath,
         scaleUpList,
         'up',
         'un-quiesce primary (failover aborted)',
-      ).catch(() => {});
+      );
       p.log.info('Primary app tier restored; the original primary is serving again.');
+    } catch (err) {
+      p.log.warn(`Could not lift the fence on the primary: ${firstErrorLine(err)}`);
     }
-    // reseedAndPromoteOrAbort's error already states the world (standby NOT
-    // promoted, DNS NOT flipped) and the retry guidance — rethrow so it
-    // surfaces once via the top-level handler instead of duplicating it here.
-    throw err;
+  };
+
+  if (planned) {
+    s.start('Quiescing primary app tier (write outage begins)');
+    try {
+      await scale(servers.primary.ip, sshKeyPath, scaleUpList, 0, 'quiesce primary app tier');
+      const gone = await confirmQuiesced(servers.primary.ip, sshKeyPath, scaleUpList);
+      if (!gone.ok) {
+        throw new Error(
+          `the quiesced app tier on the primary did not stop (still running: ` +
+            `${gone.remaining.join(', ') || 'unknown'})`,
+        );
+      }
+      // Recorded BEFORE it is applied: an interrupted run then leaves a marker
+      // the next failover or deploy lifts (write-fence.js).
+      writeMarker({ environment: envName }, { node: servers.primary.ip, ip: servers.primary.ip });
+      dbFenceAttempted = true;
+      await fenceWrites(primaryPsql);
+      s.stop('Primary fenced: app tier gone, database read-only');
+    } catch (err) {
+      s.stop('Primary NOT fenced');
+      if (mode === 'promote') {
+        await unquiesce();
+        throw new Error(
+          `Failover aborted: ${firstErrorLine(err)}. Nothing was promoted; fix it and rerun ` +
+            `vibecarbon failover ${envName}`,
+        );
+      }
+      p.log.warn(`Could not prove the primary fenced: ${firstErrorLine(err)}`);
+    }
   }
+
+  if (mode === 'promote') {
+    await catchUpReseedAndPromote();
+  }
+
+  // STEP 4a2 — The backup-prefix fence (backup-fence.js), before the DNS flip
+  // and the swap save: an old primary that reboots unreached refuses its own
+  // pushes once it reads this. On resume it is written again (idempotent).
+  const fenceWrite = await writeFence(servers, sshKeyPath);
+  if (!fenceWrite.ok) p.log.warn(backupFenceWarning(servers.standby.ip, fenceWrite.reason));
+  recordFence({ environment: envName }, fenceWrite);
 
   // STEP 4b — Move the wal-g WRITE-GUARD onto the promoted cluster. The standby
   // was deployed with WALG_ROLE=standby, which no-ops the base-backup CronJob
@@ -1578,18 +2055,22 @@ export async function failoverHA(
     oldPrimaryIp: servers.primary.ip,
     sshKeyPath,
   });
+  // Each verdict on its own: the old primary is disarmed whatever the promoted
+  // side's outcome, and a failed disarm is named even when the arm is clean.
   s.stop(
-    backupHealth.ok
-      ? 'wal-g write-guard moved, promoted cluster is archiving'
-      : 'wal-g write-guard NOT confirmed on the promoted cluster',
+    `${
+      backupHealth.promoted.ok
+        ? 'wal-g write-guard moved, promoted cluster is archiving'
+        : 'wal-g write-guard NOT confirmed on the promoted cluster'
+    }; ${backupHealth.demoted.ok ? 'old primary disarmed' : 'old primary NOT disarmed'}`,
   );
-  if (!backupHealth.ok) {
+  if (!backupHealth.promoted.ok) {
     p.log.error(
       walgRoleDegradedMessage({
         path: 'k8s',
         envName,
         promotedIp: servers.standby.ip,
-        detail: backupHealth.error?.message ?? 'unknown failure',
+        detail: walgVerdictsDetail(backupHealth),
       }),
     );
   }
@@ -1641,31 +2122,63 @@ export async function failoverHA(
 
   // STEP 7 — Switch apex + wildcard A records to the standby floating IP.
   // Manual DNS skips this — instructions are printed in the epilogue.
+  let dnsFlip = { ok: true };
   if (strategy.updateDns) {
     s.start('Updating DNS A record');
-    try {
-      await strategy.updateDns(auth, domain, standbyFloatingIp);
-      s.stop(`DNS updated: ${domain} → ${standbyFloatingIp}`);
-    } catch (error) {
-      s.stop('DNS update failed');
-      p.log.error(error.message);
-      p.log.warn(`Manually update the A record for ${domain} to ${standbyFloatingIp}`);
+    dnsFlip = await flipAndVerifyDns({
+      update: () => strategy.updateDns(auth, domain, standbyFloatingIp),
+      read: (name) => strategy.readDns(auth, name),
+      domain,
+      ip: standbyFloatingIp,
+    });
+    if (dnsFlip.ok) {
+      s.stop(`DNS updated and verified: ${domain} → ${standbyFloatingIp}`);
+    } else {
+      s.stop('DNS update not confirmed');
+      p.log.error(dnsFlip.reason);
     }
   }
 
-  // TERMINAL WRITE — persist the role swap LAST, after the DNS flip. A rerun
+  // TERMINAL WRITE: persist the role swap LAST, after the DNS flip. A rerun
   // BEFORE this point keeps the ORIGINAL direction (identifyServers reads the
-  // unswapped config), so a mid-flow crash re-runs the SAME failover — the
-  // already-promoted guard in reseedAndPromoteOrAbort makes that convergent.
-  // Persisting mid-flow would instead flip a rerun's direction. One write, here.
-  swapRoles(envName);
+  // unswapped config), so a mid-flow crash re-runs the SAME failover, and the
+  // journal written before the promote lets that rerun resume instead of
+  // promoting again. The same save clears the journal. One write, here.
+  // On resume the override was recorded by the run that skipped the proof.
+  const override = unproven
+    ? 'force-unproven'
+    : mode === 'resume'
+      ? envConfig?.ha?.failoverInFlight?.override
+      : undefined;
+  swapRoles(envName, override ? { override } : undefined);
+  // The old primary is now the retired side: fence it (marker, app at zero,
+  // WALG_ROLE=standby) if it answers. One that does not is fenced by the next
+  // status, failover or deploy that reaches it, before it can push a backup.
+  // Never fails the failover: it has completed, and the terminal checks below
+  // must still report.
+  try {
+    await reconcileRetired();
+  } catch (err) {
+    p.log.warn(
+      `could not fence the retired node (${String(err?.message ?? err).split('\n')[0]}); the ` +
+        'next status, failover or deploy that reaches it fences it',
+    );
+  }
 
-  if (strategy.updateDns) {
+  if (!dnsFlip.ok) {
+    p.log.warn(
+      'The standby is promoted and the roles are saved, but DNS still points at the old primary.',
+    );
+  } else if (strategy.updateDns) {
     p.log.success('Failover complete');
     p.log.info(c.bold('Recovery instructions:'));
     p.log.message(
       `  Re-run \`vibecarbon deploy ${envName}\`; it converges the recovered ex-primary ` +
         `(${servers.primary.ip}) to pilot-light and re-establishes streaming.`,
+    );
+    p.log.message(
+      `  If ${servers.primary.ip} was down, run \`vibecarbon status ${envName}\` as soon as it ` +
+        'answers: that fences it (backups and writes refused) before it can push a backup.',
     );
   } else {
     const displayDomain = domain || '<your-domain>';
@@ -1688,13 +2201,18 @@ export async function failoverHA(
   // LAST so the command exits non-zero — a failover that leaves the new primary
   // archiving nothing must never be reported as a clean success, and an
   // automated caller has to be able to see that.
-  if (!backupHealth.ok) {
+  if (!dnsFlip.ok) {
+    throw new FailoverDnsError(
+      dnsDidNotMessage({ domain, ip: standbyFloatingIp, reason: dnsFlip.reason }),
+    );
+  }
+  if (!backupHealth.promoted.ok) {
     throw new Error(
       walgRoleDegradedMessage({
         path: 'k8s',
         envName,
         promotedIp: servers.standby.ip,
-        detail: backupHealth.error?.message ?? 'unknown failure',
+        detail: walgVerdictsDetail(backupHealth),
       }),
     );
   }
@@ -1745,6 +2263,72 @@ async function failoverSingleServer(envName, envConfig) {
 }
 
 // ============================================================================
+// ABORT
+// ============================================================================
+
+/**
+ * `vibecarbon failover <env> -abort`, both HA tiers. Refuses on a non-HA env,
+ * and (inside abortFailover) when no journal is set or the standby's database
+ * cannot be proven down.
+ *
+ * @param {{ envName: string, envConfig: object, projectConfig: object, parsed: object }} args
+ * @param {object} [deps] test seams: backend, abort
+ */
+export async function runFailoverAbort({ envName, envConfig, projectConfig, parsed }, deps = {}) {
+  const tier = haTierOf(envConfig);
+  if (!tier) {
+    p.log.error(`-abort applies to an HA environment only; ${envName} has no standby`);
+    process.exit(1);
+  }
+  const { abort = abortFailover } = deps;
+  p.log.info(c.bold('This will (call off the failover in flight):'));
+  p.log.message("  1. Stop the standby's database and prove it down, so it cannot promote");
+  p.log.message('  2. Point DNS back at the old primary (managed DNS)');
+  p.log.message("  3. Lift the old primary's write fence and start its app tier");
+  p.log.message('  4. Clear the failover journal and mark replication degraded');
+  if (parsed.dryRun) {
+    p.log.info(c.dim('Dry run: no changes made'));
+    return;
+  }
+  // No journal: abortFailover refuses and says why, with nothing to confirm.
+  if (envConfig?.ha?.failoverInFlight && !parsed.yes) {
+    const confirm = await p.confirm({
+      message: `Call off the failover of ${c.bold(envName)} and keep the old primary?`,
+    });
+    if (p.isCancel(confirm)) exitCancelled();
+    if (!confirm) exitDeclined();
+  }
+  let backend = deps.backend;
+  if (!backend) {
+    if (tier === 'compose-ha') {
+      const { composeFailoverAbortBackend } = await import('./lib/deploy/compose/ha.js');
+      backend = composeFailoverAbortBackend({
+        envName,
+        envConfig,
+        projectName: projectConfig.projectName,
+        sshKeyPath: getSSHKeyPath(envName),
+      });
+    } else {
+      const scenario = detectScenario(envConfig);
+      backend = k8sFailoverAbortBackend({
+        envName,
+        envConfig,
+        strategy:
+          scenario === 'ha_dns' ? dnsStrategyFor(envConfig.dns.provider) : MANUAL_DNS_STRATEGY,
+      });
+    }
+  }
+  await abort({
+    environment: envName,
+    envConfig,
+    backend,
+    log: (line) => p.log.info(line),
+    warn: (line) => p.log.warn(line),
+  });
+  p.outro(c.success('Done'));
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -1782,6 +2366,10 @@ export async function run(args) {
     // Task 10's provisioning step (provisionStandbyCapacity's
     // serverTypeOverride) — null means "use the persisted standbyWorkerSpec".
     serverType: values['server-type'] || null,
+    forceUnproven: !!values['force-unproven'],
+    forceUnplanned: !!values['force-unplanned'],
+    allowDegraded: !!values['allow-degraded'],
+    abort: !!values.abort,
   };
 
   // `-server-type` is raw operator input that goes straight to the converge as
@@ -1822,6 +2410,30 @@ export async function run(args) {
     } catch (err) {
       p.log.error(`Operator-IP check failed: ${err.message}`);
       process.exit(1);
+    }
+  }
+
+  // -abort: call off a failover whose journal is set (failover-abort.js). It
+  // keeps the old primary, so it runs before the retirement fence and every
+  // promote step, behind the same production confirmation as a failover.
+  if (parsed.abort) {
+    if (!parsed.dryRun && envConfig?.ha?.failoverInFlight) {
+      await confirmProdOrExit(envName, {
+        actionLabel: 'failover -abort',
+        yes: !!parsed.yes,
+        confirm: parsed.confirm,
+      });
+    }
+    await runFailoverAbort({ envName, envConfig, projectConfig, parsed });
+    return;
+  }
+
+  // Re-apply the retirement fence first (R7): a side a past failover retired
+  // that has come back must refuse its backups before anything else runs.
+  if (!parsed.dryRun) {
+    const haTier = haTierOf(envConfig);
+    if (haTier) {
+      await reconcileRetiredFence({ environment: envName, envConfig, projectConfig, tier: haTier });
     }
   }
 
@@ -1904,4 +2516,4 @@ export async function run(args) {
 // waitForPromotedApiServing, promotedProbeArgv,
 // preflightPilotFailover, provisionStandbyCapacity, and AbortProvisioningError
 // are exported inline at their definitions above.)
-export { getReplPasswordFromSecret, reseedAndPromoteOrAbort, reseedStandbyFromPrimary, SPEC };
+export { getReplPasswordFromSecret, reseedStandbyFromPrimary, reseedStandbyOrAbort, SPEC };

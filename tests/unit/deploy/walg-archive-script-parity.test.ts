@@ -81,10 +81,27 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
     }
   });
 
-  it('every exit in the shared script is exit 0 — a non-zero archive_command fills the disk', () => {
+  it('every exit but the two retired-node refusals is exit 0 — a non-zero archive_command fills the disk', () => {
     const exits = composeBody.match(/^\s*exit \d+/gm) ?? [];
-    expect(exits.length).toBeGreaterThanOrEqual(4); // role guard, recovery gate, push success, exhausted
-    for (const e of exits) expect(e.trim()).toBe('exit 0');
+    expect(exits.length).toBeGreaterThanOrEqual(5); // retired, role guard, recovery gate, push success, exhausted
+    // The one deliberate exception (HA-correctness R7): a node a failover
+    // retired must refuse loudly rather than skip, and pg_wal growth on a node
+    // awaiting its rebuild is the lesser harm than its WAL in the new primary's
+    // prefix. It is the first guard and the only exit 1.
+    // The second (final review I1): the backup-prefix fence object names this
+    // database on a newer timeline, the same retired node seen from S3.
+    const nonZero = exits.filter((e) => e.trim() !== 'exit 0');
+    expect(nonZero.map((e) => e.trim())).toEqual(['exit 1', 'exit 1']);
+    expect(composeBody).toMatch(/backup prefix fenced to another primary[^\n]*\n\s*exit 1\n/);
+    expect(composeBody.indexOf('vibecarbon-fence.json')).toBeLessThan(
+      composeBody.indexOf('wal-push "$WAL_PATH"'),
+    );
+    expect(composeBody).toMatch(
+      /if \[ -f "\$\{PGDATA_DIR\}\/vibecarbon-retired" \]; then\n[^\n]*retired node: backups refused[^\n]*\n\s*exit 1\n/,
+    );
+    expect(composeBody.indexOf('vibecarbon-retired')).toBeLessThan(
+      composeBody.indexOf('WALG_ROLE:-primary'),
+    );
     // Including the one that runs after all retries are exhausted, which is the
     // whole reason this wrapper exists rather than a bare `wal-g wal-push %p`.
     expect(composeBody).toMatch(/WAL_ARCHIVE_FAILED[\s\S]*\nexit 0\n?$/);
@@ -168,7 +185,7 @@ describe('wal-archive.sh with no backup target', () => {
   it('the guard sits before the wal-g retry loop in both copies', () => {
     for (const body of [composeBody, k8sBody]) {
       expect(body.indexOf('""|s3:///*)')).toBeGreaterThan(-1);
-      expect(body.indexOf('""|s3:///*)')).toBeLessThan(body.indexOf('wal-g wal-push "$WAL_PATH"'));
+      expect(body.indexOf('""|s3:///*)')).toBeLessThan(body.indexOf('wal-push "$WAL_PATH"'));
     }
   });
 });
