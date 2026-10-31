@@ -47,7 +47,7 @@ importers:
         version: 3.269.0(typescript@7.0.2)
       '@pulumiverse/scaleway':
         specifier: ^1.54.0
-        version: 1.58.0(typescript@7.0.2)
+        version: 1.60.0(typescript@7.0.2)
       opentype.js:
         specifier: ^2.0.0
         version: 2.0.0
@@ -811,8 +811,8 @@ packages:
       typescript:
         optional: true
 
-  '@pulumiverse/scaleway@1.58.0':
-    resolution: {integrity: sha512-Qj4Aomita13N74uc+l+jH5xpTnO+coj0jXeIUCv56cy8oq3ma6C8nDwXX4nQu5h33IirpZHzGW0h/LvsFQP4FQ==}
+  '@pulumiverse/scaleway@1.60.0':
+    resolution: {integrity: sha512-ii3NoS0ts0VO3l43szVtVlsmp1+15ebRE30hZPl/1miwvJTvlKqUlP6f2TgSovj7f7104H6f15e0udfMuUiU9Q==}
 
   '@rolldown/binding-android-arm-eabi@1.2.15':
     resolution: {integrity: sha512-aLcgK9gIJ3YRvrrtfSBbRa27F5WrpiTaPulnFpsHPxpUHgFlSgnU4854MHwoRGEBhfRJDWCS2WQ7lIjskE9Olw==}
@@ -983,6 +983,7 @@ packages:
   '@smithy/core@3.36.0':
     resolution: {integrity: sha512-3hJiwG1F5t1SoXqp/yOCmYXziyx7ZVqF63S5W6YU201e/qwVaHPex+E/3vvyY9a3ORq/b+BydeNZpP2saQ9X2g==}
     engines: {node: '>=18.0.0'}
+    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/credential-provider-imds@4.5.2':
     resolution: {integrity: sha512-A9uSdn72ozbRUSit0eib0TW7nXuNPlaeM0zcGkJ+nE6tFcSDbnmtwoxbTCFBukVQcszDAyvsd7+rTduPTXpygg==}
@@ -3905,7 +3906,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@pulumiverse/scaleway@1.58.0(typescript@7.0.2)':
+  '@pulumiverse/scaleway@1.60.0(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.269.0(typescript@7.0.2)
     transitivePeerDependencies:
