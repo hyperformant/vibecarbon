@@ -41,7 +41,7 @@ importers:
         version: 1.43.3(typescript@7.0.2)
       '@pulumi/linode':
         specifier: ^6.4.0
-        version: 6.7.1(typescript@7.0.2)
+        version: 6.8.1(typescript@7.0.2)
       '@pulumi/pulumi':
         specifier: ^3.260.0
         version: 3.269.0(typescript@7.0.2)
@@ -796,8 +796,8 @@ packages:
   '@pulumi/hcloud@1.43.3':
     resolution: {integrity: sha512-fDKUoud52U0SkkF9crANNL9lmrwM3LrOtVR5qZXerqegZSDCaGyDzd92wuJrLlWn74xUirNKYJbmmY9yk3mZ9g==}
 
-  '@pulumi/linode@6.7.1':
-    resolution: {integrity: sha512-wkSkToTrToMulEfzA+1+cLRz+RBaPPVjA6MkJno/Xen+Ay7Q19hoyhjsmiPMEQhHdOJfbPN9+Ked/+SguGM4OA==}
+  '@pulumi/linode@6.8.1':
+    resolution: {integrity: sha512-DcrC7gkyhBwbanB/mJo45X9lbHUryylwRxWmbuXuJ74NS1TzWIvYftMzqu0XBdrd7SBOcsyBOlzK9bus+R3VQQ==}
 
   '@pulumi/pulumi@3.269.0':
     resolution: {integrity: sha512-budgf3lN9Iuf+Uu8+evbTw1LiZFa9GKgKdHBQQdDRv2IsD5oG8snyzvyNQp+ziD4B3ukyLaou+nHXsnVuqlT8A==}
@@ -3866,7 +3866,7 @@ snapshots:
       - ts-node
       - typescript
 
-  '@pulumi/linode@6.7.1(typescript@7.0.2)':
+  '@pulumi/linode@6.8.1(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.269.0(typescript@7.0.2)
     transitivePeerDependencies:
