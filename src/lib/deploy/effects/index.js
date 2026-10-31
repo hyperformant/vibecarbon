@@ -365,50 +365,73 @@ async function setupServerFiles(ctx) {
 }
 
 /**
- * Write the real DNS A record and (HTTP-01 only) wait for propagation BEFORE
- * compose-up so Traefik's first ACME challenge sees real DNS. DNS-01 (managed
- * providers) skips the propagation wait — lego validates via a TXT record.
- * `when` gates on a domain + a non-manual provider; state-gates the write.
+ * Write the real DNS A record (after the 0.0.0.0 warm-up write it must not
+ * race), state-gated on {domain, provider, serverIp}. Throws when the provider
+ * refuses the write. Silent by default: startDnsUpdate runs it in the
+ * background while another step owns the spinner, so `onProgress` is its only
+ * output.
+ *
+ * @returns {Promise<{written: boolean}>} written: false when the gate skipped it
  */
-async function updateDns(ctx) {
-  const {
-    serverIp,
-    domain,
-    dnsProvider,
-    dnsZoneId,
-    dnsToken,
-    state,
-    dnsWarmupPromise,
-    dnsChallenge,
-  } = ctx;
+async function writeDnsRecord(ctx, { onProgress: report = () => {} } = {}) {
+  const { serverIp, domain, dnsProvider, dnsZoneId, dnsToken, state, dnsWarmupPromise } = ctx;
   await perfAsync('deploy.dns.warm', async () => {
     await dnsWarmupPromise;
   });
   const dnsUpdateInputs = { domain, dnsProvider, serverIp };
-  if (!state.shouldSkip('compose-dns-update', dnsUpdateInputs)) {
-    state.startStep('compose-dns-update', dnsUpdateInputs);
-    const { getDnsProvider } = await import('../../dns-provider.js');
-    const { setupSimple: updateDnsIp } = await getDnsProvider(dnsProvider);
-    const dnsSpinner = spinner();
-    dnsSpinner.start(`Pointing ${domain} → ${serverIp}...`);
-    // onProgress suppresses setupSimple's own internal spinner — this caller
-    // already owns the "Pointing" spinner, so letting setupSimple start a
-    // SECOND one would overlap and garble the line. Route its one progress
-    // beat to this spinner's message instead.
-    const dnsResult = await perfAsync('deploy.dns.create', () =>
-      updateDnsIp(dnsToken, dnsZoneId, domain, serverIp, {
-        onProgress: (m) => dnsSpinner.message(m),
-      }),
-    );
-    try {
-      requireDnsSetup(dnsResult, `DNS A record for ${domain}`);
-    } catch (error) {
-      dnsSpinner.stop('DNS A record not set', 1);
-      throw error;
-    }
-    dnsSpinner.stop(`DNS A record set: ${domain} → ${serverIp}`);
-    state.completeStep('compose-dns-update', { serverIp });
+  if (state.shouldSkip('compose-dns-update', dnsUpdateInputs)) return { written: false };
+  state.startStep('compose-dns-update', dnsUpdateInputs);
+  const { getDnsProvider } = await import('../../dns-provider.js');
+  const { setupSimple: updateDnsIp } = await getDnsProvider(dnsProvider);
+  // onProgress suppresses setupSimple's own internal spinner, which would
+  // fight the caller's (or, in the background, another step's) for the line.
+  const dnsResult = await perfAsync('deploy.dns.create', () =>
+    updateDnsIp(dnsToken, dnsZoneId, domain, serverIp, { onProgress: report }),
+  );
+  requireDnsSetup(dnsResult, `DNS A record for ${domain}`);
+  state.completeStep('compose-dns-update', { serverIp });
+  return { written: true };
+}
+
+/**
+ * Start the A-record write the moment the server IP is known, in the
+ * background, so it (and the record's propagation) overlaps cloud-init instead
+ * of following the bundle upload (DO e2e 2026-10-31). The same record and the
+ * same gate as before; only the timing moves. update-dns, at its old place
+ * before anything starts Traefik, awaits it and fails the deploy on a refused
+ * write. Same `when` as update-dns.
+ */
+async function startDnsUpdate(ctx) {
+  ctx.dnsUpdatePromise = writeDnsRecord(ctx);
+  // Awaited (and thrown) by updateDns; this only keeps a refusal that lands
+  // while cloud-init is still running from being an unhandledRejection.
+  ctx.dnsUpdatePromise.catch(() => {});
+}
+
+/**
+ * The DNS barrier before compose-up: the A record written (by startDnsUpdate's
+ * background write, or now when nothing started it) and, HTTP-01 only, visible
+ * to public resolvers, so Traefik's first ACME challenge sees real DNS. DNS-01
+ * (managed providers) waits for the zone to be served instead — lego validates
+ * via a TXT record. `when` gates on a domain + a non-manual provider.
+ */
+async function updateDns(ctx) {
+  const { serverIp, domain, dnsChallenge } = ctx;
+  const dnsSpinner = spinner();
+  dnsSpinner.start(`Pointing ${domain} → ${serverIp}...`);
+  let written;
+  try {
+    ({ written } = await (ctx.dnsUpdatePromise ??
+      writeDnsRecord(ctx, { onProgress: (m) => dnsSpinner.message(m) })));
+  } catch (error) {
+    dnsSpinner.stop('DNS A record not set', 1);
+    throw error;
   }
+  dnsSpinner.stop(
+    written
+      ? `DNS A record set: ${domain} → ${serverIp}`
+      : `DNS A record already points ${domain} → ${serverIp}`,
+  );
   // Both challenge types gate on DNS here, but on DIFFERENT facts, because
   // they fail differently.
   //
@@ -741,6 +764,7 @@ export const EFFECTS = {
   dockerhubLogin,
   ghcrLogin,
   setupServerFiles,
+  startDnsUpdate,
   updateDns,
   checkDbLedger,
   startComposeStack,

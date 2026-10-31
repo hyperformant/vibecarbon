@@ -12,6 +12,7 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 // server-prep / login / DNS operations are their own gated steps.
 const EXPECTED_COMPOSE_SEQUENCE = [
   'provision-server',
+  'start-dns-update',
   'setup-server',
   'check-db-ledger',
   'transfer-image',
@@ -318,6 +319,7 @@ describe('planDeploy(k8s-ha)', () => {
 const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'provision-servers',
   'persist-pending-config',
+  'start-dns-update',
   'wait-for-ssh',
   'seed-known-hosts',
   'setup-servers',

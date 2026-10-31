@@ -59,8 +59,21 @@ export const setupServerFilesStep = () =>
   defineStep({ name: 'setup-server-files', effect: 'setupServerFiles' });
 
 /**
- * Write the real DNS A record and (HTTP-01 only) wait for propagation BEFORE
- * compose-up. Managed-DNS providers with a domain only.
+ * Start writing the real DNS A record in the background as soon as the server
+ * IP is known, so the write and its propagation overlap cloud-init. Same gate
+ * as update-dns, which awaits it.
+ */
+export const startDnsUpdateStep = () =>
+  defineStep({
+    name: 'start-dns-update',
+    effect: 'startDnsUpdate',
+    when: (ctx) => !!(ctx.domain && hasAutomatedDns(ctx.dnsProvider)),
+  });
+
+/**
+ * The DNS barrier before compose-up: the A record written (started by
+ * start-dns-update) and (HTTP-01 only) visible. Managed-DNS providers with a
+ * domain only.
  */
 export const updateDnsStep = () =>
   defineStep({
@@ -160,6 +173,13 @@ export const setupBackupCronStep = () =>
 /** Provision BOTH VPS (primary + standby) via two parallel Pulumi stacks. */
 export const haProvisionServersStep = () =>
   defineStep({ name: 'provision-servers', effect: 'haProvisionServers' });
+
+/**
+ * Start the HA DNS record write in the background once both server IPs are
+ * known (no-op without managed DNS); update-dns (haUpdateDns) awaits it.
+ */
+export const haStartDnsUpdateStep = () =>
+  defineStep({ name: 'start-dns-update', effect: 'haStartDnsUpdate' });
 
 /** Persist the mid-flight env entry (status:'deploying') so destroy can recover. */
 export const haPersistPendingConfigStep = () =>

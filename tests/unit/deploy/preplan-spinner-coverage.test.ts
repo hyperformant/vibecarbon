@@ -83,6 +83,14 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
     expect(effects).toMatch(/updateDnsIp\(dnsToken, dnsZoneId, domain, serverIp, \{\s*onProgress:/);
   });
 
+  it('the k8s early A-record write (under deployK3s’s spinner) suppresses setupSimple’s spinner', () => {
+    const k8sDns = readFileSync(
+      fileURLToPath(new URL('../../../src/lib/deploy/k8s/dns-record.js', import.meta.url)),
+      'utf8',
+    );
+    expect(k8sDns).toMatch(/early = write\(ip, \{ onProgress: /);
+  });
+
   it('setupSimple honors onProgress by skipping its internal spinner (EVERY registered backend)', async () => {
     // Registry walk (was a two-file hand-list — seam-audit hazard H17): a new
     // DNS backend that starts its own spinner under onProgress would garble

@@ -36,6 +36,7 @@ import {
   haSetupServerFilesStep,
   haSetupServersStep,
   haStartComposeStackStep,
+  haStartDnsUpdateStep,
   haUpdateDnsStep,
   haVerifyStreamingStep,
   haWaitAdminReadyStep,
@@ -51,6 +52,7 @@ import {
   setupServerStep,
   snapshotTlsStep,
   startComposeStackStep,
+  startDnsUpdateStep,
   transferImageStep,
   updateDnsStep,
   verifyHealthStep,
@@ -67,6 +69,8 @@ export function planDeploy(tier, _config) {
   if (tier === 'compose') {
     return [
       provisionServerStep(),
+      // The record write overlaps cloud-init; update-dns below is its barrier.
+      startDnsUpdateStep(),
       setupServerStep(),
       checkDbLedgerStep(),
       transferImageStep(),
@@ -93,6 +97,8 @@ export function planDeploy(tier, _config) {
     return [
       haProvisionServersStep(),
       haPersistPendingConfigStep(),
+      // The HA record write overlaps boot; update-dns below is its barrier.
+      haStartDnsUpdateStep(),
       haWaitForSshStep(),
       haSeedKnownHostsStep(),
       haSetupServersStep(),
