@@ -244,8 +244,9 @@ export async function unfenceComposePrimary({
 }
 
 /**
- * Remove the compose backup cron line from a server, proven by a marker the
- * script prints last (sshRunScript answers false, it never throws).
+ * Remove the compose backup and tls-retry cron lines from a server (a fenced
+ * old primary neither backs up nor restarts its Traefik), proven by a marker
+ * the script prints last (sshRunScript answers false, it never throws).
  *
  * @param {string} ip
  * @param {string} sshKeyPath
@@ -255,7 +256,7 @@ export async function removeComposeBackupCron(ip, sshKeyPath, { run = sshRunAsyn
   const out = await run(
     ip,
     sshKeyPath,
-    'set -e; TMP_CRON=$(mktemp); crontab -l 2>/dev/null | grep -v \'compose-backup.sh\' > "$TMP_CRON" || true; ' +
+    "set -e; TMP_CRON=$(mktemp); crontab -l 2>/dev/null | grep -v -e 'compose-backup.sh' -e 'tls-retry.sh' > \"$TMP_CRON\" || true; " +
       'crontab "$TMP_CRON"; rm -f "$TMP_CRON"; echo VC_CRON_REMOVED',
     { timeout: 30_000, retries: 1 },
   );
@@ -278,6 +279,7 @@ export async function removeComposeBackupCron(ip, sshKeyPath, { run = sshRunAsyn
  * @param {string[]} args.stopped the containers the fence stopped
  * @param {boolean} args.cronRemoved
  * @param {object} [args.backupConfig] envConfig.backup, to reinstall the cron
+ * @param {string|null} [args.domain] envConfig.domain, for the tls-retry line
  * @param {object} [args.deps]
  * @returns {Promise<{ ok: boolean, problems: string[] }>}
  */
@@ -289,6 +291,7 @@ export async function rollbackComposeCutover({
   stopped,
   cronRemoved,
   backupConfig,
+  domain = null,
   deps = {},
 }) {
   const { setupCron = setupComposeBackupCron } = deps;
@@ -304,7 +307,7 @@ export async function rollbackComposeCutover({
   problems.push(...back.problems);
   if (cronRemoved && backupConfig) {
     try {
-      await setupCron(ip, sshKeyPath, projectName, backupConfig);
+      await setupCron(ip, sshKeyPath, projectName, backupConfig, { domain });
     } catch (err) {
       problems.push(
         `the backup cron on ${ip} is not back (${firstLine(err)}); run vibecarbon deploy to reinstall it`,

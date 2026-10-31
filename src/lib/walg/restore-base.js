@@ -74,17 +74,34 @@ export class AmbiguousLineageError extends Error {
  * @param {string} envName
  */
 export function walgPrefixFor(projectName, envName) {
-  return `backups/${projectName}/${envName}/walg`;
+  return `${envBackupPrefix(projectName, envName)}walg`;
 }
 
-/** An S3 client for a resolved backup S3 config. */
-export async function createS3Client(s3Config) {
+/**
+ * Everything the environment keeps in the backup bucket lives under this
+ * prefix (wal-g archives, TLS snapshots), so `destroy -purge` deletes one
+ * folder. Ends with a slash.
+ *
+ * @param {string} projectName
+ * @param {string} envName
+ */
+export function envBackupPrefix(projectName, envName) {
+  return `backups/${projectName}/${envName}/`;
+}
+
+/**
+ * An S3 client for a resolved backup S3 config. `clientOptions` (optional) is
+ * merged into the S3Client config, e.g. a bounded requestHandler and
+ * maxAttempts for a read that must not hold a failover open.
+ */
+export async function createS3Client(s3Config, clientOptions = {}) {
   const { S3Client } = await import('@aws-sdk/client-s3');
   return new S3Client({
     region: s3Config.region,
     endpoint: s3Config.endpoint,
     forcePathStyle: true,
     credentials: { accessKeyId: s3Config.accessKey, secretAccessKey: s3Config.secretKey },
+    ...clientOptions,
   });
 }
 

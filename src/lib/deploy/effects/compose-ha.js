@@ -1167,10 +1167,14 @@ async function haSetupBackupCron(ctx) {
   const cronResults = await perfAsync('deploy.ha.compose.backupCron.both', () =>
     Promise.allSettled([
       perfAsync('deploy.ha.compose.backupCron.primary', async () =>
-        setupComposeBackupCron(primary.ip, sshKeyPath, projectName, backupConfig),
+        setupComposeBackupCron(primary.ip, sshKeyPath, projectName, backupConfig, {
+          domain: ctx.domain,
+        }),
       ),
       perfAsync('deploy.ha.compose.backupCron.standby', async () =>
-        setupComposeBackupCron(standby.ip, sshKeyPath, projectName, backupConfig),
+        setupComposeBackupCron(standby.ip, sshKeyPath, projectName, backupConfig, {
+          domain: ctx.domain,
+        }),
       ),
     ]),
   );

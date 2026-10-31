@@ -193,6 +193,14 @@ services:
       # empty/unset falls through to ACME_CA_SERVER or the prod default.
       - "--certificatesresolvers.letsencrypt.acme.caserver=${ACME_DISARMED_CA_SERVER:-${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}}"
       - "--log.level=WARN"
+    # Read by backup/tls-snapshot.sh (docker compose exec traefik printenv),
+    # which saves acme.json to the backups bucket: the s3:// folder for this
+    # environment's snapshots (TLS_SNAPSHOT_S3_PREFIX in .env, written by the
+    # deploy) and the apex whose certificate is worth saving. Traefik itself
+    # ignores both.
+    environment:
+      TLS_SNAPSHOT_S3_PREFIX: ${TLS_SNAPSHOT_S3_PREFIX:-}
+      TLS_SNAPSHOT_DOMAIN: ${DOMAIN:-}
     ports:
       - "80:80"
       - "443:443"

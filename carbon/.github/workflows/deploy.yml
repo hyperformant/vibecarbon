@@ -87,6 +87,9 @@ jobs:
         env:
           BACKUP_SCHEDULE: ${{ vars.BACKUP_SCHEDULE }}
           BACKUP_RETENTION_DAYS: ${{ vars.BACKUP_RETENTION_DAYS }}
+          # Optional: where the CronJob saves the TLS certificate (seeded by
+          # `vibecarbon configure cicd` when the env has a backup bucket).
+          TLS_SNAPSHOT_S3_PREFIX: ${{ vars.TLS_SNAPSHOT_S3_PREFIX }}
         run: |
           node scripts/render-backup-settings.mjs k8s/base > "$RUNNER_TEMP/backup.yaml"
           kubectl apply --namespace=vibecarbon --server-side --force-conflicts \
@@ -312,6 +315,29 @@ jobs:
             deployment/cert-manager-webhook \
             deployment/cert-manager-cainjector \
             --timeout=5m
+
+      # The vibecarbon-tls Certificate is DEPLOY-owned: its names and issuer
+      # are per environment, while the committed k8s/base is shared by every
+      # environment on the branch, so Flux drops it from its build
+      # (k8s/flux/clusters/*) and this step owns it, after the cert-manager
+      # CRDs above. The values are the GitHub Environment vars that
+      # `vibecarbon configure cicd` seeds; the same renderer the CLI deploy
+      # uses (scripts/render-tls-certificate.mjs) validates them and refuses
+      # to run with any unset. Rendered to a file first: the default run
+      # shell has no pipefail, so a failed render must not reach kubectl.
+      # No --force-conflicts: a Certificate the CLI deploy or a failover
+      # promotion set differently fails this apply instead of being
+      # overwritten, and the error line names the repair: a deploy, or
+      # `vibecarbon configure cicd <env>` to re-seed after a role change.
+      - name: Render and apply the TLS Certificate (deploy-owned, not Flux)
+        env:
+          TLS_CERT_ISSUER: ${{ vars.TLS_CERT_ISSUER }}
+          TLS_CERT_EFFECTIVE_ISSUER: ${{ vars.TLS_CERT_EFFECTIVE_ISSUER }}
+          TLS_CERT_DNS_NAMES: ${{ vars.TLS_CERT_DNS_NAMES }}
+        run: |
+          node scripts/render-tls-certificate.mjs > "$RUNNER_TEMP/certificate.yaml"
+          kubectl apply --server-side --field-manager=github-actions-deploy \
+            -f "$RUNNER_TEMP/certificate.yaml" || { echo "::error::the TLS Certificate apply failed (most often a field conflict with a CLI deploy or a failover). Run vibecarbon deploy <env> (or vibecarbon configure cicd <env> if the roles changed), then re-run this workflow"; exit 1; }
 
       - name: Create flux-system Secret (Git auth for private repo)
         # Flux uses `username`/`password` keys on a namespace Secret to

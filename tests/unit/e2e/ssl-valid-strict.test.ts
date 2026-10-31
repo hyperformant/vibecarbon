@@ -80,4 +80,32 @@ describe('checkSslValid strict trust policy', () => {
     expect(res.status).toBe('fail');
     expect(res.errorMessage).toContain('timed out');
   });
+
+  // Carry from the tls-ready change: deploy no longer holds open for the CA
+  // (TLS_FIRST_LOOK_BUDGET_MS 180s), so a deploy that finished TLS pending
+  // gets the longer window here, sized to the old 660s total; a trusted
+  // deploy keeps 180s.
+  it('waits 12 x 15s after a trusted deploy', async () => {
+    const attemptFn = vi.fn(async (rejectUnauthorized: boolean) =>
+      rejectUnauthorized ? certError : servedDefault,
+    );
+    const sleep = vi.fn(async () => {});
+    const res = await checkSslValid('d4.example.test', { attemptFn, sleep });
+    expect(res.status).toBe('fail');
+    expect(sleep).toHaveBeenCalledTimes(12);
+    expect(sleep).toHaveBeenCalledWith(15_000);
+    expect(res.errorMessage).toContain('after 180s');
+  });
+
+  it('waits 32 x 15s (480s) when the deploy recorded TLS pending', async () => {
+    const attemptFn = vi.fn(async (rejectUnauthorized: boolean) =>
+      rejectUnauthorized ? certError : servedDefault,
+    );
+    const sleep = vi.fn(async () => {});
+    const res = await checkSslValid('d4.example.test', { attemptFn, sleep, tlsPending: true });
+    expect(res.status).toBe('fail');
+    expect(sleep).toHaveBeenCalledTimes(32);
+    expect(res.errorMessage).toContain('after 480s');
+    expect(res.errorMessage).toContain('recorded TLS pending');
+  });
 });

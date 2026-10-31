@@ -17,6 +17,7 @@ import * as p from '@clack/prompts';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
+import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { requireDnsSetup } from '../dns-result.js';
@@ -554,44 +555,51 @@ async function verifyHealth(ctx) {
 }
 
 /**
- * TLS-ready gate (shared by compose and compose-ha — it reads the primary's
- * identity from either ctx shape): the deploy is not done until the domain
- * serves a certificate the platform trust store accepts. Traefik/lego ACME
- * runs asynchronously from start-compose-stack onward; before this gate the
- * deploy could report success while the apex still served the Traefik
- * self-signed default (or, on compose-ha, an apex-less wildcard) — a
- * browser security warning presented as a successful deploy (DigitalOcean
- * DNS-01 propagation, run 33252884427). On failure the Traefik log tail is
- * fetched into the error so the ACME cause travels with the failure.
- * Manual-DNS deploys degrade to a warning instead: issuance can't complete
- * before the customer points the domain (see tls-ready.js).
+ * TLS verdict (shared by compose and compose-ha; it reads the primary's
+ * identity from either ctx shape): a deploy reports its TLS state; it does
+ * not wait out a CA. Traefik/lego ACME runs asynchronously from
+ * start-compose-stack onward, so this looks for a trusted apex certificate
+ * for one first-look window and then sets ctx.tlsState, trusted or pending,
+ * which the orchestrator's final save persists as envConfig.tls. It never
+ * fails the deploy: a pending state is one warning that names the cause
+ * (with the Traefik log tail on managed DNS, where the ACME error lives) and
+ * points at `vibecarbon status`. On the server, the tls-retry cron restarts
+ * Traefik to retry issuance (carbon/backup/tls-retry.sh). Manual DNS gets a
+ * shorter courtesy window: issuance can't complete before the customer
+ * points the domain (see tls-ready.js).
  */
 async function verifyTlsReady(ctx) {
   const { domain, dnsProvider, sshKeyPath, projectConfig } = ctx;
   const ip = ctx.serverIp ?? ctx.primary?.ip ?? null;
   const managedDns = Boolean(dnsProvider) && dnsProvider !== 'manual';
-  const { TLS_READY_MANUAL_BUDGET_MS, assertTlsReadyOrDegraded, waitForTrustedTls } = await import(
-    '../tls-ready.js'
-  );
+  const { TLS_FIRST_LOOK_BUDGET_MS, TLS_READY_MANUAL_BUDGET_MS, tlsVerdict, waitForTrustedTls } =
+    await import('../tls-ready.js');
+  const { caSlug } = await import('../tls-snapshot.js');
+  // The CA the bundle wrote into the server .env (ACME_CA_SERVER, unset is
+  // prod): failover and scale pick the snapshot by it, never by a guess.
+  const ca = caSlug(readOperatorVar('ACME_CA_SERVER').value ?? '');
   const tlsSpinner = spinner({ indicator: 'timer' });
   tlsSpinner.start(`Waiting for ${domain} to serve a trusted TLS certificate`);
   const result = await perfAsync('deploy.tls.ready', () =>
     waitForTrustedTls(domain, {
-      ...(managedDns ? {} : { budgetMs: TLS_READY_MANUAL_BUDGET_MS }),
+      budgetMs: managedDns ? TLS_FIRST_LOOK_BUDGET_MS : TLS_READY_MANUAL_BUDGET_MS,
       onProgress: (msg) => tlsSpinner.message(msg),
     }),
   );
+  const checkedAt = new Date().toISOString();
   if (result.trusted) {
     tlsSpinner.stop(
       `TLS certificate trusted (issued within ${Math.round(result.elapsedMs / 1000)}s)`,
     );
+    ctx.tlsState = { state: 'trusted', checkedAt, ca };
     return;
   }
-  tlsSpinner.stop('Domain is not serving a trusted TLS certificate', managedDns ? 1 : 0);
-  // Name the cause in the failure itself: the ACME error lives in Traefik's
-  // log, which was previously nowhere in any failure surface.
+  tlsSpinner.stop('TLS pending: the domain does not serve a trusted certificate yet');
+  // Name the cause in the warning itself: the ACME error lives in Traefik's
+  // log. Manual DNS skips it, since the usual cause there is a domain that
+  // does not point here yet.
   let traefikLogTail = '';
-  if (ip && sshKeyPath) {
+  if (managedDns && ip && sshKeyPath) {
     const { sshRunAsync } = await import('../compose/index.js');
     traefikLogTail =
       (await sshRunAsync(
@@ -601,19 +609,86 @@ async function verifyTlsReady(ctx) {
         { timeout: 15_000, ignoreError: true },
       )) || '';
   }
-  const { degraded, reason } = assertTlsReadyOrDegraded({
+  const verdict = tlsVerdict({
     trusted: false,
     managedDns,
     reason: result.reason,
     served: result.served,
     traefikLogTail,
-    fixHint: managedDns
-      ? `Check Traefik's ACME DNS-01 solver for ${dnsProvider} (token validity, zone ownership) in the log tail below.`
-      : '',
+    fixHint: `Check the ACME DNS-01 solver for ${dnsProvider} (token validity, zone ownership) in the log tail below.`,
   });
-  if (degraded) {
+  ctx.tlsState = { state: 'pending', checkedAt, reason: verdict.reason, ca };
+  // Manual DNS ("deploy first, point DNS after"): the server waits until the
+  // domain points at it, then retries for 24 hours; past that only a deploy
+  // re-arms the retries (setupComposeBackupCron clears the counter).
+  const retries = managedDns
+    ? 'The server retries issuance every 30 minutes.'
+    : `Once ${domain} points at this server, it retries issuance every 30 minutes for 24 hours.`;
+  const rearm = managedDns
+    ? ''
+    : 'If it still has no certificate after that, this restarts the retries:\n' +
+      `  vibecarbon deploy ${ctx.environment}\n`;
+  p.log.warn(
+    `TLS pending: ${domain} does not serve a trusted certificate yet (${verdict.reason}). ` +
+      `The app is deployed. ${retries} Run \`vibecarbon status\` to follow it.\n` +
+      `${rearm}${verdict.detail}`,
+  );
+}
+
+/**
+ * restore-tls (shared by compose and compose-ha; it reads the primary's
+ * identity from either ctx shape): put the last validated snapshot from the
+ * backups bucket into Traefik's acme.json when the server has no apex
+ * certificate (compose/tls-restore.js holds the rule). The CA is the one the
+ * bundle wrote into the server .env (ACME_CA_SERVER), the same value
+ * verify-tls records. Prints one info line and never fails the deploy.
+ */
+async function restoreTlsSnapshot(ctx) {
+  let result;
+  let line;
+  try {
+    const { domain, sshKeyPath, projectConfig, environment } = ctx;
+    const { restoreComposeTls, tlsRestoreLine } = await import('../compose/tls-restore.js');
+    line = tlsRestoreLine;
+    const { caSlug } = await import('../tls-snapshot.js');
+    result = await perfAsync('deploy.tls.restore', () =>
+      restoreComposeTls({
+        ip: ctx.serverIp ?? ctx.primary?.ip ?? null,
+        sshKeyPath,
+        projectName: projectConfig.projectName,
+        domain,
+        envName: environment,
+        ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
+        s3Config: { ...ctx.s3Config, bucket: ctx.backupS3Config?.bucket },
+      }),
+    );
+  } catch {
+    // Fixed phrase: the error could come from anywhere in the restore path.
+    p.log.info('TLS certificate not restored (restore errored). Traefik requests a new one.');
+    return;
+  }
+  p.log.info(line(result, ctx.domain));
+}
+
+/**
+ * snapshot-tls (shared by compose and compose-ha): once verify-tls found the
+ * domain trusted, save acme.json to the backups bucket now (the server's
+ * backup/tls-snapshot.sh, with all its guards) instead of waiting for the
+ * scheduled backup. A failure is one warning; the deploy still succeeds.
+ */
+async function snapshotTls(ctx) {
+  try {
+    const { snapshotComposeTlsNow } = await import('../compose/tls-restore.js');
+    await perfAsync('deploy.tls.snapshot', () =>
+      snapshotComposeTlsNow({
+        ip: ctx.serverIp ?? ctx.primary?.ip ?? null,
+        sshKeyPath: ctx.sshKeyPath,
+        projectName: ctx.projectConfig.projectName,
+      }),
+    );
+  } catch (err) {
     p.log.warn(
-      `TLS is not trusted yet (manual DNS — Traefik finishes issuance once the domain points here): ${reason}`,
+      `TLS certificate snapshot not saved (${err.message}). The deploy still succeeded, and the next scheduled backup saves it.`,
     );
   }
 }
@@ -629,7 +704,9 @@ async function setupBackupCron(ctx) {
   const { setupComposeBackupCron } = await import('../compose/index.js');
   try {
     await perfAsync('deploy.compose.backupCron', async () =>
-      setupComposeBackupCron(serverIp, sshKeyPath, projectConfig.projectName, backupConfig),
+      setupComposeBackupCron(serverIp, sshKeyPath, projectConfig.projectName, backupConfig, {
+        domain: ctx.domain,
+      }),
     );
   } catch (err) {
     p.log.warn(`Scheduled backup cron install failed (deploy still succeeded): ${err.message}`);
@@ -652,6 +729,8 @@ export const EFFECTS = {
   auditDatabase,
   verifyHealth,
   verifyTlsReady,
+  restoreTlsSnapshot,
+  snapshotTls,
   setupBackupCron,
   // compose-ha deploy tier (fan-out over primary + standby)
   ...COMPOSE_HA_EFFECTS,

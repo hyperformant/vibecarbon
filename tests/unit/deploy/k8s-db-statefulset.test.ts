@@ -25,6 +25,13 @@ import { join } from 'node:path';
 import { load, loadAll } from 'js-yaml';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// renderK8sBase renders the vibecarbon-tls Certificate from these.
+const TEST_TLS = {
+  dnsNames: ['app.example.test'],
+  issuerName: 'letsencrypt-prod-manual',
+  effectiveIssuer: 'letsencrypt-prod-manual',
+};
+
 vi.mock('node:child_process', async () => {
   const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
   return { ...actual, spawn: vi.fn() };
@@ -282,7 +289,12 @@ describe('renderK8sBase on the shipped base', () => {
   it('leaves no placeholder in the StatefulSet and pins the provider class', () => {
     // The shipped base carries the registry too; its hostPort binds the
     // master's private IP (hostport-binding-census.test.ts).
-    const rendered = renderK8sBase(BASE, { ...values(), MASTER_PRIVATE_IP: '10.0.1.1' });
+    const rendered = renderK8sBase(
+      BASE,
+      { ...values(), MASTER_PRIVATE_IP: '10.0.1.1' },
+      undefined,
+      TEST_TLS,
+    );
     try {
       const raw = readFileSync(join(rendered, 'db', 'statefulset.yaml'), 'utf-8');
       expect(raw).not.toMatch(/\{\{[A-Z0-9_]+\}\}/);

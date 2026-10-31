@@ -489,6 +489,14 @@ interface RunOpts {
   walgRoleFails?: boolean;
   /** Live stack outputs the preflight stub reports (freshness refresh). */
   standbyOutputs?: Record<string, unknown>;
+  /** The CA the last deploy recorded (envConfig.tls.ca). */
+  tlsCa?: 'prod' | 'staging';
+  /** What the promotion reports for the certificate restore. */
+  promoteTls?: { restored: boolean; reason: string };
+  /** projectConfig.cicdEnabled (GitOps layered on). */
+  cicdEnabled?: boolean;
+  /** What the GitOps TLS refresh returns, or throws when an Error. */
+  gitopsRefresh?: { ok: boolean; reason?: string; refreshed?: string[] } | Error;
 }
 
 /**
@@ -508,6 +516,10 @@ async function runFailoverHA(opts: RunOpts) {
     scaleUpList = SCALE_UP_LIST,
     addonRolloutsThrows = false,
     oldPrimaryScaleDown,
+    tlsCa,
+    promoteTls,
+    cicdEnabled = false,
+    gitopsRefresh = { ok: true, refreshed: ['e4-primary', 'e4-standby'] },
   } = opts;
   const order: string[] = [];
   let thrown: unknown;
@@ -633,10 +645,30 @@ async function runFailoverHA(opts: RunOpts) {
       order.push('rollout');
       order.push('apiProbe');
     },
-    promoteIssuer: async (a: { promotedIp: string }) => {
+    promoteIssuer: async (a: { promotedIp: string; snapshot?: unknown }) => {
       captured.promoteIssuerIp = a.promotedIp;
+      captured.promoteSnapshot = a.snapshot;
       order.push('promoteIssuer');
-      return { patched: ['vibecarbon/vibecarbon-tls'] };
+      return {
+        patched: ['vibecarbon/vibecarbon-tls'],
+        ...(promoteTls ? { tls: promoteTls } : {}),
+      };
+    },
+    tlsSnapshotInputs: async (a: Record<string, unknown>) => {
+      captured.tlsSnapshotInputsArgs = a;
+      const envConfigArg = a.envConfig as { tls?: { ca?: string } };
+      return {
+        s3Config: envConfigArg?.tls?.ca ? { bucket: 'b', accessKey: 'A', secretKey: 'S' } : null,
+        projectName: a.projectName,
+        envName: a.envName,
+        ca: envConfigArg?.tls?.ca ?? null,
+      };
+    },
+    refreshGitopsTls: async (a: Record<string, unknown>) => {
+      captured.gitopsRefreshArgs = a;
+      order.push('gitopsRefresh');
+      if (gitopsRefresh instanceof Error) throw gitopsRefresh;
+      return gitopsRefresh;
     },
     swapRoles: (envName: string) => {
       captured.swapEnv = envName;
@@ -679,13 +711,22 @@ async function runFailoverHA(opts: RunOpts) {
       standby: { masterIp: '10.0.0.9' },
       systemIdentifier: '7412345678901234567',
     },
+    ...(tlsCa ? { tls: { state: 'trusted', ca: tlsCa } } : {}),
   };
   const parsed = { dryRun: false, yes: true, serverType: null };
   const tracker = { spinner: () => ({ start: () => {}, stop: () => {} }) };
 
   try {
-    // biome-ignore lint/suspicious/noExplicitAny: injected test deps bag.
-    await failoverHA('e4', envConfig, {}, parsed, tracker, strategy, deps as any);
+    await failoverHA(
+      'e4',
+      envConfig,
+      { projectName: 'proj', ...(cicdEnabled ? { cicdEnabled: true } : {}) },
+      parsed,
+      tracker,
+      strategy,
+      // biome-ignore lint/suspicious/noExplicitAny: injected test deps bag.
+      deps as any,
+    );
   } catch (err) {
     /* abort paths throw / process.exit — the order array is already recorded */
     thrown = err;
@@ -727,6 +768,60 @@ describe('failoverHA step order', () => {
     expect(order.indexOf('catchup')).toBeLessThan(order.indexOf('promote'));
     // No standalone scale-down in planned mode — the quiesce already stopped it.
     expect(order).not.toContain('scaleDownOldPrimary');
+  });
+
+  it('the promotion gets the env TLS snapshot inputs and prints the restore line, before the DNS flip', async () => {
+    const info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
+    const { order, captured } = await runFailoverHA({
+      primaryReachable: true,
+      tlsCa: 'staging',
+      promoteTls: { restored: true, reason: 'restored from the last snapshot' },
+    });
+    expect(captured.tlsSnapshotInputsArgs).toMatchObject({ envName: 'e4', projectName: 'proj' });
+    expect(captured.promoteSnapshot).toEqual({
+      s3Config: { bucket: 'b', accessKey: 'A', secretKey: 'S' },
+      projectName: 'proj',
+      envName: 'e4',
+      ca: 'staging',
+    });
+    expect(info.mock.calls.map((c) => String(c[0]))).toContain(
+      'TLS certificate restored from its last snapshot.',
+    );
+    expect(order.indexOf('promoteIssuer')).toBeLessThan(order.indexOf('dns'));
+    // No GitOps on this project: nothing is refreshed.
+    expect(order).not.toContain('gitopsRefresh');
+    info.mockRestore();
+  });
+
+  it('GitOps: the TLS vars are refreshed after the role swap, and a miss prints the repair command on its own line', async () => {
+    const ok = await runFailoverHA({ primaryReachable: true, cicdEnabled: true });
+    expect(ok.order.indexOf('saveConfig')).toBeLessThan(ok.order.indexOf('gitopsRefresh'));
+    expect(ok.captured.gitopsRefreshArgs).toMatchObject({ envName: 'e4' });
+    // A clean refresh says nothing.
+    expect(ok.thrown).toBeUndefined();
+    for (const gitopsRefresh of [
+      { ok: false, reason: 'gh: HTTP 502' },
+      new Error('gh crashed'),
+      // GitOps is on, yet no environment of this env carries the TLS vars.
+      { ok: true, refreshed: [] },
+    ]) {
+      const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+      const message = vi.spyOn(p.log, 'message').mockImplementation(() => {});
+      const { thrown, order } = await runFailoverHA({
+        primaryReachable: true,
+        cicdEnabled: true,
+        gitopsRefresh,
+      });
+      // Never fails the failover.
+      expect(thrown).toBeUndefined();
+      expect(order).toContain('fenceRetired');
+      expect(
+        warn.mock.calls.map((c) => String(c[0])).some((w) => /GitOps TLS settings/.test(w)),
+      ).toBe(true);
+      expect(message.mock.calls.map((c) => String(c[0]))).toContain('vibecarbon configure cicd e4');
+      warn.mockRestore();
+      message.mockRestore();
+    }
   });
 
   it('unplanned mode: no quiesce, no reseed; scale-down old primary is best-effort before dns', async () => {

@@ -25,6 +25,13 @@ import { pathToFileURL } from 'node:url';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 
+// renderK8sBase renders the vibecarbon-tls Certificate from these.
+const TEST_TLS = {
+  dnsNames: ['app.example.test'],
+  issuerName: 'letsencrypt-prod-manual',
+  effectiveIssuer: 'letsencrypt-prod-manual',
+};
+
 const ROOT = join(__dirname, '../../..');
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML / patch objects
@@ -207,7 +214,12 @@ describe("the rendered registry binds the deploy's master private IP", () => {
   };
   const renderedRegistryHostIps = async (masterPrivateIp: string) => {
     const { renderK8sBase } = await import('../../../src/lib/deploy/k8s/k3s.js');
-    const out = renderK8sBase(join(ROOT, 'carbon/k8s/base'), await values(masterPrivateIp));
+    const out = renderK8sBase(
+      join(ROOT, 'carbon/k8s/base'),
+      await values(masterPrivateIp),
+      undefined,
+      TEST_TLS,
+    );
     try {
       const docs = (
         loadAll(readFileSync(join(out, 'registry', 'local-registry.yaml'), 'utf-8')) as Node[]
@@ -230,9 +242,10 @@ describe("the rendered registry binds the deploy's master private IP", () => {
     const { renderK8sBase } = await import('../../../src/lib/deploy/k8s/k3s.js');
     for (const bad of [undefined, '', 'not-an-ip']) {
       const v = await values(bad);
-      expect(() => renderK8sBase(join(ROOT, 'carbon/k8s/base'), v), String(bad)).toThrow(
-        /MASTER_PRIVATE_IP/,
-      );
+      expect(
+        () => renderK8sBase(join(ROOT, 'carbon/k8s/base'), v, undefined, TEST_TLS),
+        String(bad),
+      ).toThrow(/MASTER_PRIVATE_IP/);
     }
   });
 });

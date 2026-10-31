@@ -274,6 +274,45 @@ export function runWithTransportRetry(fn) {
 }
 
 /**
+ * The ssh argv sshRun spawns: `argv` runs as root on `ip`, each remote token
+ * shell-escaped, with the host-key pinning and BatchMode of every call here.
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string[]} argv - the remote command
+ * @param {{ env?: string, firstConnect?: boolean }} [options]
+ * @returns {string[]} the full argv, starting with 'ssh'
+ */
+export function sshArgv(ip, sshKeyPath, argv, { env, firstConnect = false } = {}) {
+  return [
+    'ssh',
+    '-i',
+    sshKeyPath,
+    ...sshHostKeyOpts(env, { firstConnect, sshKeyPath }),
+    '--',
+    `root@${ip}`,
+    argv.map(shEscape).join(' '),
+  ];
+}
+
+/**
+ * The ssh argv sshKubectl spawns for a kubectl command on a k3s server.
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string[]} kubectlArgv - without the leading 'kubectl'
+ * @returns {string[]}
+ */
+export function sshKubectlArgv(ip, sshKeyPath, kubectlArgv) {
+  return sshArgv(ip, sshKeyPath, [
+    'env',
+    `KUBECONFIG=${K3S_KUBECONFIG}`,
+    'kubectl',
+    ...kubectlArgv,
+  ]);
+}
+
+/**
  * Execute a command on a remote server via SSH using argv form.
  *
  * NOTE: a second, unrelated `sshRun(ip, key, command: string)` exists in
@@ -331,16 +370,7 @@ export async function sshRun(ip, sshKeyPath, argv, options = {}) {
   if (!Array.isArray(argv) || argv.length === 0) {
     throw new Error('sshRun requires a non-empty argv array');
   }
-  const remoteCmd = argv.map(shEscape).join(' ');
-  const cmd = [
-    'ssh',
-    '-i',
-    sshKeyPath,
-    ...sshHostKeyOpts(env, { firstConnect, sshKeyPath }),
-    '--',
-    `root@${ip}`,
-    remoteCmd,
-  ];
+  const cmd = sshArgv(ip, sshKeyPath, argv, { env, firstConnect });
   const run = () => runCommandAsync(cmd, { silent, timeout, returnOutput: true, input });
   const out = await (transportRetry ? runWithTransportRetry(run) : run());
   return typeof out === 'string' ? out.trim() : '';

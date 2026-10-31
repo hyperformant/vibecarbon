@@ -45,6 +45,7 @@ import {
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../../carbon/scripts/render-backup-settings.mjs';
+import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { DNS01_PROVIDERS } from '../../dns-provider.js';
@@ -94,6 +95,7 @@ import {
 } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
 import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
+import { caSlug, tlsSnapshotS3Prefix } from '../tls-snapshot.js';
 import {
   assertWalgBackupsWorking,
   k8sWalgAuditArgv,
@@ -115,6 +117,12 @@ import {
   awaitPostgresPromoted,
   watchAppMigrationFailure,
 } from './readiness.js';
+import {
+  CERT_MANAGER_MIN_BACKOFF,
+  k8sTlsRestoreLine,
+  quietKubectl,
+  restoreK8sTlsSecret,
+} from './tls-restore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -979,7 +987,7 @@ const DNS01_ISSUER_SUFFIX_PATTERN = new RegExp(`-(${Object.keys(DNS01_PROVIDERS)
 
 /**
  * Map (dnsProvider, acmeServer) → ClusterIssuer name that
- * `applyK3sManifests` patches into `Certificate/vibecarbon-tls`.
+ * `applyK3sManifests` renders into `Certificate/vibecarbon-tls`.
  *
  * - cloudflare/hetzner: DNS-01 solver — works behind reverse proxies and
  *   has no port-80 dependency. Requires per-provider Secret + (for
@@ -1000,7 +1008,7 @@ export function pickIssuerName({ dnsProvider, acmeServer }) {
 }
 
 /**
- * Build the `dnsNames` list for the `Certificate/vibecarbon-tls` patch.
+ * Build the `dnsNames` list of the rendered `Certificate/vibecarbon-tls`.
  *
  * DNS-01 issuers (cloudflare, hetzner) support wildcard SANs — cert-manager
  * can obtain `*.${domain}` in a single ACME order, covering every subdomain
@@ -1029,6 +1037,41 @@ export function certificateDnsNames(domain, issuerName) {
   if (!isDns01) return [domain];
   // DNS-01 issuers (cloudflare, hetzner — prod or staging): issue one wildcard.
   return [domain, `*.${domain}`];
+}
+
+/**
+ * The ClusterIssuer this project's deploy uses. `ACME_CA_SERVER` points at
+ * staging for e2e tests (and any dev env that wants to avoid LE rate
+ * limits): read from .env.local first (per-project), then from the
+ * operator's environment, so the e2e harness can inject the staging URL
+ * without writing it into the project. Anything else gets the prod issuer.
+ *
+ * @param {{ envLocal?: Record<string, string>|null, dnsProvider?: string|null }} args
+ * @returns {string}
+ */
+export function k8sIssuerName({ envLocal, dnsProvider }) {
+  const acmeServer = envLocal?.ACME_CA_SERVER || readOperatorVar('ACME_CA_SERVER').value || '';
+  return pickIssuerName({ dnsProvider, acmeServer });
+}
+
+/**
+ * The project's TLS identity as the k8s deploy renders it: the issuer, the
+ * Certificate's names and the snapshot CA. Read from the project's
+ * .env.local the same way applyK3sManifests does, for the code that runs
+ * after the apply (the deploy's TLS phase).
+ *
+ * @param {{ projectDir: string, dnsProvider?: string|null, domain: string }} args
+ * @returns {{ issuerName: string, dnsNames: string[], ca: 'prod'|'staging' }}
+ */
+export function k8sTlsIdentity({ projectDir, dnsProvider, domain }) {
+  const envPath = join(projectDir, '.env.local');
+  const envLocal = existsSync(envPath) ? loadEnvLocal(envPath) : null;
+  const issuerName = k8sIssuerName({ envLocal, dnsProvider });
+  return {
+    issuerName,
+    dnsNames: certificateDnsNames(domain, issuerName),
+    ca: caSlug(issuerName),
+  };
 }
 
 /**
@@ -2862,6 +2905,9 @@ function renderK8sPlaceholders(dir, values, label) {
 /** The in-cluster registry manifest, relative to `k8s/base`. */
 const REGISTRY_MANIFEST = 'registry/local-registry.yaml';
 
+/** The vibecarbon-tls Certificate, relative to `k8s/base`. */
+const CERTIFICATE_MANIFEST = 'traefik/certificate.yaml';
+
 /**
  * Render `k8s/base` for apply: every db StatefulSet placeholder
  * (buildDbManifestValues) plus `{{K8S_STORAGE_CLASS}}`, which the db's
@@ -2881,11 +2927,22 @@ const REGISTRY_MANIFEST = 'registry/local-registry.yaml';
  * A project whose base predates the db StatefulSet (no `db/` at all) is
  * refused too: without it nothing would ever create the database.
  *
+ * The vibecarbon-tls Certificate is rendered too (renderTlsCertificateManifest),
+ * so cert-manager never sees the `app.example.com` placeholder: a rendered
+ * Certificate that still names it is refused, and a missing `tls` throws.
+ *
  * @param {string} dir - the project's `k8s/base`
  * @param {Record<string, string>} values - buildDbManifestValues' output
+ * @param {{schedule?: string, retentionDays?: number}} [backupConfig]
+ * @param {{ dnsNames: string[], issuerName: string, effectiveIssuer: string }} tls
  * @returns {string} the rendered temp copy to pass to `kubectl apply -k`
  */
-export function renderK8sBase(dir, values, backupConfig) {
+export function renderK8sBase(dir, values, backupConfig, tls) {
+  if (!tls?.dnsNames?.length || !tls.issuerName || !tls.effectiveIssuer) {
+    throw new Error(
+      'renderK8sBase: no TLS certificate to render (dnsNames, issuerName, effectiveIssuer)',
+    );
+  }
   if (!values?.K8S_STORAGE_CLASS) {
     throw new Error('renderK8sBase: K8S_STORAGE_CLASS is empty, refusing to render the db PVC');
   }
@@ -2915,15 +2972,22 @@ export function renderK8sBase(dir, values, backupConfig) {
       renderBackupCronJob(readFileSync(cronjob, 'utf-8'), resolveBackupSettings(backupConfig)),
     );
   }
+  // The TLS Certificate is deploy-owned (Flux does not build it): rendered
+  // with this deploy's names and issuer, so cert-manager never sees the
+  // base's app.example.com placeholder, and a Secret restored before this
+  // apply already matches it.
+  mkdirSync(join(rendered, 'traefik'), { recursive: true });
+  writeFileSync(join(rendered, CERTIFICATE_MANIFEST), renderTlsCertificateManifest(tls));
   const checks = [
     ...(existsSync(cronjob)
       ? [['backup/cronjob.yaml', 'a backup CronJob with an unresolved schedule']]
       : []),
     ['db/statefulset.yaml', 'a database with an unresolved image, prefix or StorageClass'],
     ...(hasRegistry ? [[REGISTRY_MANIFEST, 'a registry with an unresolved bind address']] : []),
+    [CERTIFICATE_MANIFEST, 'a placeholder TLS Certificate', /app\.example\.com/g],
   ];
-  for (const [file, what] of checks) {
-    const leftover = readFileSync(join(rendered, file), 'utf-8').match(/\{\{[A-Z0-9_]+\}\}/g);
+  for (const [file, what, pattern = /\{\{[A-Z0-9_]+\}\}/g] of checks) {
+    const leftover = readFileSync(join(rendered, file), 'utf-8').match(pattern);
     if (leftover) {
       rmSync(rendered, { recursive: true, force: true });
       throw new Error(
@@ -3382,6 +3446,83 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
 }
 
 /**
+ * The flags the cert-manager controller runs with, appended when absent:
+ *
+ * - The DNS-01 SELF-CHECK goes to public recursive resolvers instead of the
+ *   zone's authoritative servers. cert-manager's default self-check dials
+ *   the authoritative NS directly from the pod; both Hetzner DNS and
+ *   DigitalOcean DNS are served through ANYCAST fleets, and the POP a given
+ *   region's egress lands on can lag a freshly-written record by many
+ *   minutes (d4 run 3, 2026-08-28: the TXT was visible from every external
+ *   vantage and via the cluster's own CoreDNS, while the sfo3 pod's direct
+ *   query to the same anycast IP returned empty, and the issuance sat "not
+ *   yet propagated" indefinitely). Let's Encrypt validates from ITS OWN
+ *   vantage, not ours, so gating issuance on the one stale POP we happen to
+ *   egress through is strictly worse than gating on a public recursive answer.
+ * - The minimum backoff after a failed CertificateRequest is
+ *   CERT_MANAGER_MIN_BACKOFF instead of cert-manager's 1 hour. A first
+ *   issuance that misses the deploy's first look is retried within minutes
+ *   while the deploy has already finished with TLS pending.
+ */
+export const CERT_MANAGER_CONTROLLER_FLAGS = Object.freeze([
+  '--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53',
+  '--dns01-recursive-nameservers-only',
+  `--certificate-request-minimum-backoff-duration=${CERT_MANAGER_MIN_BACKOFF}`,
+]);
+
+/**
+ * Idempotent test-and-set of CERT_MANAGER_CONTROLLER_FLAGS on the
+ * cert-manager controller: one read, and one json patch appending only the
+ * flags that are absent, so warm re-deploys never duplicate.
+ *
+ * @param {{ env: NodeJS.ProcessEnv, kubectl?: typeof runKubectlWithRetry }} args
+ */
+export async function ensureCertManagerControllerFlags({ env, kubectl = runKubectlWithRetry }) {
+  const raw = await kubectl(
+    ['-n', 'cert-manager', 'get', 'deployment', 'cert-manager', '-o', 'json'],
+    { env, captureStdout: true, description: 'applyK3sManifests: read cert-manager args' },
+  );
+  let dep;
+  try {
+    dep = JSON.parse(raw?.toString() ?? '{}');
+  } catch {
+    // Unreadable deployment JSON: skip the patch rather than fail the
+    // deploy. Without the flags cert-manager falls back to its defaults
+    // (authoritative-direct self-check, 1h backoff), which is the pre-fix
+    // behavior, not an outage. The next deploy sets them.
+    progressLog('[k3s] cert-manager args unreadable, skipping the controller flags patch.');
+    return;
+  }
+  const containers = dep?.spec?.template?.spec?.containers ?? [];
+  const idx = containers.findIndex((c) => c?.name === 'cert-manager-controller');
+  const controllerIdx = idx >= 0 ? idx : 0;
+  const existing = containers[controllerIdx]?.args ?? [];
+  const missing = CERT_MANAGER_CONTROLLER_FLAGS.filter((f) => !existing.includes(f));
+  if (missing.length === 0) {
+    progressLog('[k3s] cert-manager controller flags already present.');
+    return;
+  }
+  const ops = missing.map((value) => ({
+    op: 'add',
+    path: `/spec/template/spec/containers/${controllerIdx}/args/-`,
+    value,
+  }));
+  await kubectl(
+    [
+      '-n',
+      'cert-manager',
+      'patch',
+      'deployment',
+      'cert-manager',
+      '--type=json',
+      '-p',
+      JSON.stringify(ops),
+    ],
+    { env, description: 'applyK3sManifests: cert-manager controller flags' },
+  );
+}
+
+/**
  * Apply cert-manager + the app and infra Secrets + the project's k8s/infra +
  * k8s/base kustomizations (the db StatefulSet included, rendered), wait for
  * the db, patch the app deployment to use the locally-sideloaded image, and
@@ -3609,67 +3750,13 @@ export async function applyK3sManifests({
       { env, description: `applyK3sManifests: pin ${certDeploy} to control-plane` },
     );
   }
-  // 1c. Point the DNS-01 SELF-CHECK at public recursive resolvers instead of
-  //     the zone's authoritative servers. cert-manager's default self-check
-  //     dials the authoritative NS directly from the pod; both Hetzner DNS
-  //     and DigitalOcean DNS are served through ANYCAST fleets, and the POP
-  //     a given region's egress lands on can lag a freshly-written record by
-  //     many minutes (d4 run 3, 2026-08-28: the TXT was visible from every
-  //     external vantage and via the cluster's own CoreDNS, while the sfo3
-  //     pod's direct query to the same anycast IP returned empty — the
-  //     issuance sat "not yet propagated" indefinitely). Let's Encrypt
-  //     validates from ITS OWN vantage, not ours, so gating issuance on the
-  //     one stale POP we happen to egress through is strictly worse than
-  //     gating on a public recursive answer. Idempotent test-and-set: args
-  //     are only appended when absent, so warm re-deploys never duplicate.
-  await perfAsync(`deploy.${perfPrefix}.certManager.recursiveNameservers`, async () => {
-    const dnsFlags = [
-      '--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53',
-      '--dns01-recursive-nameservers-only',
-    ];
-    const raw = await runKubectlWithRetry(
-      ['-n', 'cert-manager', 'get', 'deployment', 'cert-manager', '-o', 'json'],
-      { env, captureStdout: true, description: 'applyK3sManifests: read cert-manager args' },
-    );
-    let dep;
-    try {
-      dep = JSON.parse(raw?.toString() ?? '{}');
-    } catch {
-      // Unreadable deployment JSON — skip the patch rather than fail the
-      // deploy: without the flags cert-manager falls back to its default
-      // (authoritative-direct) self-check, which is the pre-fix behavior,
-      // not an outage. The next deploy retries.
-      progressLog('[k3s] cert-manager args unreadable, skipping recursive-nameserver patch.');
-      return;
-    }
-    const containers = dep?.spec?.template?.spec?.containers ?? [];
-    const idx = containers.findIndex((c) => c?.name === 'cert-manager-controller');
-    const controllerIdx = idx >= 0 ? idx : 0;
-    const existing = containers[controllerIdx]?.args ?? [];
-    const missing = dnsFlags.filter((f) => !existing.includes(f));
-    if (missing.length === 0) {
-      progressLog('[k3s] cert-manager recursive-nameserver flags already present.');
-      return;
-    }
-    const ops = missing.map((value) => ({
-      op: 'add',
-      path: `/spec/template/spec/containers/${controllerIdx}/args/-`,
-      value,
-    }));
-    await runKubectlWithRetry(
-      [
-        '-n',
-        'cert-manager',
-        'patch',
-        'deployment',
-        'cert-manager',
-        '--type=json',
-        '-p',
-        JSON.stringify(ops),
-      ],
-      { env, description: 'applyK3sManifests: cert-manager recursive-nameserver self-check' },
-    );
-  });
+  // 1c. cert-manager controller flags (ensureCertManagerControllerFlags):
+  //     the DNS-01 self-check through public recursive resolvers, and a
+  //     5 minute minimum backoff after a failed issuance. One read, at most
+  //     one patch, before the readiness wait so the rollout carries them.
+  await perfAsync(`deploy.${perfPrefix}.certManager.recursiveNameservers`, () =>
+    ensureCertManagerControllerFlags({ env }),
+  );
   // 2. Wait for cert-manager to be ready before applying ClusterIssuers.
   // Fan out the three deploys in parallel: kubectl wait blocks per-arg
   // sequentially, and the cainjector + webhook usually become Available
@@ -3983,6 +4070,42 @@ export async function applyK3sManifests({
   // one beside it would be empty. Refuse before anything is created.
   await assertNoRetiredChartDb({ env });
   await assertDbStorageClass({ storageClass, env });
+  // Issuer choice (k8sIssuerName): ACME_CA_SERVER from .env.local or the
+  // operator's environment picks staging or prod; the provider suffix
+  // (cloudflare/hetzner/manual) determines which solver, DNS-01 or HTTP-01,
+  // cert-manager actually uses (see pickIssuerName). Computed before the base
+  // is rendered: the backup settings below (the TLS snapshot folder is per
+  // CA), the rendered Certificate and the Secret restore all need it.
+  const issuerName = k8sIssuerName({ envLocal, dnsProvider });
+  // DNS-01 issuers (cloudflare, hetzner) support wildcard SANs: one cert
+  // covers *.${domain} so every IngressRoute subdomain is included without
+  // separate per-router ACME orders. Manual (HTTP-01) falls back to apex-only.
+  const dnsNames = certificateDnsNames(domain, issuerName);
+  // Single-ACME-issuer policy (d4 2026-08-28, acme-issuer-policy.js): a
+  // pilot-standby's Certificate references the local self-signed issuer so
+  // two clusters never solve DNS-01 for the same names concurrently
+  // (cert-manager's DO solver keys challenge records by name; concurrent
+  // issuers live-lock). The REAL issuer name rides along in the promote
+  // annotation on BOTH roles: the failover promote step (and every
+  // reconverge redeploy, via this same branch under the swapped role)
+  // re-points issuerRef from it.
+  const effectiveIssuer = pilotStandby ? STANDBY_SELFSIGNED_ISSUER : issuerName;
+  if (pilotStandby) {
+    console.error(
+      `[pilot-standby] certificate issuerRef -> ${STANDBY_SELFSIGNED_ISSUER} ` +
+        `(single-ACME-issuer policy; promote annotation carries ${issuerName})`,
+    );
+  }
+  // Where the backup CronJob saves the vibecarbon-tls Secret: the env backup
+  // bucket (none: no snapshot) under backups/<project>/<env>/tls/<ca>.
+  const tlsSnapshotPrefix = backupBucketName
+    ? tlsSnapshotS3Prefix({
+        backupBucket: backupBucketName,
+        projectName,
+        envName: operatorEnv,
+        ca: caSlug(issuerName),
+      })
+    : '';
   const baseDir = renderK8sBase(
     join(projectDir, 'k8s/base'),
     {
@@ -4000,8 +4123,28 @@ export async function applyK3sManifests({
       MASTER_PRIVATE_IP: masterPrivateIp,
     },
     backupConfig,
+    { dnsNames, issuerName, effectiveIssuer },
   );
   try {
+    // The last issued certificate goes back into Secret/vibecarbon-tls before
+    // this apply creates the Certificate, so cert-manager finds a Secret that
+    // matches it and does not issue (tls-restore.js holds the overwrite rule).
+    // The issuing cluster only: a pilot standby serves its self-signed
+    // certificate until a failover promotes it. Never fails the deploy.
+    if (!pilotStandby) {
+      const tlsRestore = await perfAsync(`deploy.${perfPrefix}.tlsRestore`, () =>
+        restoreK8sTlsSecret({
+          s3Config: s3Config ? { ...s3Config, bucket: backupBucketName } : null,
+          projectName,
+          envName: operatorEnv,
+          ca: caSlug(issuerName),
+          issuerName,
+          dnsNames,
+          runKubectl: quietKubectl(env),
+        }),
+      );
+      progressLog(`[k3s] ${k8sTlsRestoreLine(tlsRestore)}`);
+    }
     await perfAsync(`deploy.${perfPrefix}.applyBase`, () =>
       runKubectlWithRetry(['apply', '-k', baseDir], {
         env,
@@ -4017,7 +4160,7 @@ export async function applyK3sManifests({
   // tree, so no Flux reconcile can touch it).
   await runKubectlWithRetry(['-n', 'vibecarbon', 'apply', '-f', '-'], {
     env,
-    input: renderBackupSettingsConfigMap(backupSettings),
+    input: renderBackupSettingsConfigMap({ ...backupSettings, tlsSnapshotPrefix }),
     description: 'applyK3sManifests: kubectl apply ConfigMap/vibecarbon-backup-settings',
   });
   if (pilotStandby) {
@@ -4221,60 +4364,11 @@ export async function applyK3sManifests({
         'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
     },
   );
-  // 5b. Patch the domain-specific resources that the base/ kustomization
-  //     ships with placeholder values (`app.example.com` + a placeholder
-  //     ClusterIssuer name). Without this, cert-manager tries to issue a Let's
-  //     Encrypt prod cert for `app.example.com` — ACME refuses (IANA-reserved
-  //     domain), the Order errors, the Certificate's secret never lands,
-  //     ingress TLS fails, and the app's progressDeadlineSeconds expires
-  //     during rollout-status (step 9) → deploy fails ~26 min in. The
-  //     placeholder is intentional in the template (the comment says
-  //     "patched at deploy time"); this is the patch.
-  //
-  // Issuer choice: `ACME_CA_SERVER` points at staging for e2e tests
-  // (and any dev env that wants to avoid LE rate limits). Read from
-  // .env.local first (per-project), then fall back to process.env so the
-  // e2e harness can inject the staging URL via env without writing
-  // it into the project's .env.local. Anything else gets the prod issuer.
-  // Provider suffix (cloudflare/hetzner/manual) determines which solver
-  // — DNS-01 vs HTTP-01 — cert-manager actually uses; see pickIssuerName.
-  const acmeServer = envLocal?.ACME_CA_SERVER || readOperatorVar('ACME_CA_SERVER').value || '';
-  const issuerName = pickIssuerName({ dnsProvider, acmeServer });
-  // DNS-01 issuers (cloudflare, hetzner) support wildcard SANs — one cert
-  // covers *.${domain} so every IngressRoute subdomain is included without
-  // separate per-router ACME orders. Manual (HTTP-01) falls back to apex-only.
-  const dnsNames = certificateDnsNames(domain, issuerName);
-  // Single-ACME-issuer policy (d4 2026-08-28 — acme-issuer-policy.js): a
-  // pilot-standby's Certificate references the local self-signed issuer so
-  // two clusters never solve DNS-01 for the same names concurrently
-  // (cert-manager's DO solver keys challenge records by name; concurrent
-  // issuers live-lock). The REAL issuer name rides along in the promote
-  // annotation on BOTH roles — the failover promote step (and every
-  // reconverge redeploy, via this same branch under the swapped role)
-  // re-points issuerRef from it.
-  const effectiveIssuer = pilotStandby ? STANDBY_SELFSIGNED_ISSUER : issuerName;
-  if (pilotStandby) {
-    console.error(
-      `[pilot-standby] certificate issuerRef -> ${STANDBY_SELFSIGNED_ISSUER} ` +
-        `(single-ACME-issuer policy; promote annotation carries ${issuerName})`,
-    );
-  }
-  await runKubectlWithRetry(
-    [
-      '-n',
-      'vibecarbon',
-      'patch',
-      'certificate',
-      'vibecarbon-tls',
-      '--type=merge',
-      '-p',
-      JSON.stringify({
-        metadata: { annotations: { [PROMOTE_ISSUER_ANNOTATION]: issuerName } },
-        spec: { dnsNames, issuerRef: { name: effectiveIssuer, kind: 'ClusterIssuer' } },
-      }),
-    ],
-    { env, description: 'applyK3sManifests: kubectl patch certificate/vibecarbon-tls' },
-  );
+  // 5b. Patch the vibecarbon-config SITE_URL that the base/ kustomization
+  //     ships with its `app.example.com` placeholder. (The vibecarbon-tls
+  //     Certificate is no longer patched here: renderK8sBase renders it with
+  //     this deploy's names and issuer before the apply, so cert-manager
+  //     never acts on the placeholder.)
   await runKubectlWithRetry(
     [
       '-n',

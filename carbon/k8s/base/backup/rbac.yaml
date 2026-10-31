@@ -9,7 +9,9 @@ metadata:
 # The backup CronJob runs `kubectl exec` into the db pod to invoke
 # wal-g backup-push (wal-g needs local PGDATA access). That requires
 # pods/exec in the vibecarbon namespace. `pods` get/list is needed so
-# `kubectl exec statefulset/...` can resolve the pod.
+# `kubectl exec statefulset/...` can resolve the pod. `secrets` get on the
+# vibecarbon-tls Secret alone lets the job save the TLS certificate beside the
+# base backup (the TLS snapshot step in cronjob.yaml); no other Secret.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -28,6 +30,10 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["vibecarbon-tls"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

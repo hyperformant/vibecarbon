@@ -80,6 +80,11 @@ import {
   checkStandbyPrimaryOnlyAbsent,
 } from '../checks/standby-addons.js';
 import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
+import {
+  checkNoNewCertificateRequest,
+  checkTlsReused,
+  listCertificateRequestUids,
+} from '../checks/tls-reuse.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
 import {
@@ -345,6 +350,39 @@ function readHaPrimary(
     return { stack: primary?.stack ?? null, region: primary?.region ?? null };
   } catch {
     return { stack: null, region: null };
+  }
+}
+
+/**
+ * The kubeconfig of the k8s-ha cluster holding `role` now. Stacks keep their
+ * birth names (`${env}-primary`, `${env}-standby`) and the kubeconfig is
+ * named after the stack; only `ha.<role>.stack` moves on a failover.
+ */
+function haRoleKubeconfig(projectDir: string, env: string, role: 'primary' | 'standby'): string {
+  let stack: string | undefined;
+  try {
+    const config = JSON.parse(readFileSync(join(projectDir, '.vibecarbon.json'), 'utf-8')) as {
+      environments?: Record<string, { ha?: Record<string, { stack?: string }> }>;
+    };
+    stack = config.environments?.[env]?.ha?.[role]?.stack;
+  } catch {
+    // Unreadable config: fall back to the birth name below.
+  }
+  return join(projectDir, '.vibecarbon', `kubeconfig-${stack ?? `${env}-${role}`}`);
+}
+
+/**
+ * The TLS state the CLI recorded for `env` at its last deploy
+ * (`environments[env].tls.state`, src/lib/deploy/tls-ready.js), or null.
+ */
+function readRecordedTlsState(projectDir: string, env: string): string | null {
+  try {
+    const config = JSON.parse(readFileSync(join(projectDir, '.vibecarbon.json'), 'utf-8')) as {
+      environments?: Record<string, { tls?: { state?: string } }>;
+    };
+    return config.environments?.[env]?.tls?.state ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -1367,6 +1405,12 @@ export async function runLifecycle(
   // The primary before the first failover: compose-ha's failback must hand
   // the primary role back to it.
   let originalPrimaryIp: string | null = null;
+  // tls_reused: the certificate serial the domain served at the last verify
+  // step (verify-deploy first). Every later verify that follows a restore, a
+  // scale or a failover asserts the domain still serves it, then moves it to
+  // what is served now. Empty until verify-deploy's ssl_valid passes, and an
+  // empty baseline fails tls_reused (never a hollow pass).
+  let tlsServedSerial = '';
 
   // Phase 9: when --expanded is set on a k8s/k8s-ha scenario, deploy with
   // --min-workers=1 / --max-workers=5 so verify-autoscale has headroom to
@@ -1534,6 +1578,20 @@ export async function runLifecycle(
   // Verification helper — runs all health, functional, and feature checks
   // and records results via the collector.
   // -------------------------------------------------------------------------
+
+  /**
+   * tls_reused against the recorded serial, then the baseline moves to what
+   * the domain serves now (a re-issue fails once, at the step that caused it).
+   */
+  async function recordTlsReused(stepName: StepName): Promise<VerificationResult> {
+    const result = await checkTlsReused(tlsServedSerial, config.domain);
+    const served = result.details?.servedSerial;
+    if (typeof served === 'string' && served) tlsServedSerial = served;
+    console.log(
+      `${tag} [${stepName}] tls_reused: ${result.status}${result.errorMessage ? ` (${result.errorMessage})` : ''}`,
+    );
+    return result;
+  }
 
   /** dns_flip_verified against the env's current serving IP, through the DNS provider API. */
   async function runDnsFlipVerified(): Promise<VerificationResult> {
@@ -1968,9 +2026,24 @@ export async function runLifecycle(
           );
         }
 
-        // Infrastructure health checks (app endpoint, always on main domain)
-        const healthResults = await runHealthChecks(config.domain);
+        // Infrastructure health checks (app endpoint, always on main domain).
+        // A deploy that finished TLS pending gets ssl_valid's longer window.
+        const healthResults = await runHealthChecks(config.domain, {
+          tlsPending: readRecordedTlsState(config.projectDir, config.envPrefix) === 'pending',
+        });
         allResults.push(...healthResults);
+
+        // Certificate reuse: verify-deploy records the served serial; a
+        // verify after a restore or a promotion proves it is still served.
+        if (stepName === 'verify-deploy') {
+          const ssl = healthResults.find((r) => r.checkName === 'ssl_valid');
+          tlsServedSerial = ssl?.status === 'pass' ? String(ssl.details?.serialNumber ?? '') : '';
+          console.log(
+            `${tag} [${stepName}] recorded certificate serial ${tlsServedSerial || '(none: ssl_valid did not pass)'}`,
+          );
+        } else if (stepName === 'verify-restore' || isPostFailoverVerify(stepName)) {
+          allResults.push(await recordTlsReused(stepName));
+        }
 
         // Evidence for any SSH-unreachability diagnosis raised later in this
         // phase: a deployment serving HTTP while its :22 is black-holed is the
@@ -3320,8 +3393,18 @@ EOF`;
         executeStep(
           'warm-redeploy-change',
           `vibecarbon deploy ${config.envPrefix} --${config.mode} (warm, with change)`,
-          async () => {
+          async (stepId) => {
             const marker = warmRedeployMarker(`${config.envPrefix}-${Date.now().toString(36)}`);
+            const kubeconfig = join(
+              config.projectDir,
+              '.vibecarbon',
+              `kubeconfig-${config.envPrefix}`,
+            );
+            // A redeploy must not re-issue the certificate (the old
+            // `apply -k base` reset vibecarbon-tls to a placeholder and
+            // cert-manager issued again on every deploy). Listed before the
+            // deploy, compared at the end of the step.
+            const certificateRequestsBefore = listCertificateRequestUids(kubeconfig);
 
             // 1. Mutate a bundled manifest AND an app source file. Both
             //    mutators throw if their anchor is gone, so a template reshape
@@ -3366,11 +3449,6 @@ EOF`;
             //    apiserver with the kubeconfig the deploy itself fetched —
             //    same transport `applyK3sManifests` used, so a pass here means
             //    `kubectl apply -k` genuinely re-ran.
-            const kubeconfig = join(
-              config.projectDir,
-              '.vibecarbon',
-              `kubeconfig-${config.envPrefix}`,
-            );
             const readConfigMapMarker = (): string => {
               const r = spawnSync(
                 'kubectl',
@@ -3449,6 +3527,20 @@ EOF`;
               );
             }
             console.log(`${tag} [warm-redeploy-change] app source change is live (${marker})`);
+
+            // 5. No certificate re-issue: read last, after the polls above,
+            //    so cert-manager has had time to react to the apply.
+            const noReissue = checkNoNewCertificateRequest({
+              before: certificateRequestsBefore,
+              after: listCertificateRequestUids(kubeconfig),
+              where: config.envPrefix,
+            });
+            collector.recordVerifications(stepId, [noReissue]);
+            if (noReissue.status !== 'pass') {
+              throw new Error(
+                `warm-redeploy-change: ${noReissue.checkName}: ${noReissue.errorMessage}`,
+              );
+            }
           },
         ),
     },
@@ -3790,6 +3882,31 @@ EOF`;
             );
           }
           console.log(`${tag} [verify-scale] backup evidence OK after scale`);
+
+          // 6. The certificate survived the scale (compose replaces the
+          //    server and restores the snapshot; k8s resizes in place): the
+          //    domain still serves verify-deploy's serial. Compose dials the
+          //    replacement server directly, Host/SNI stay the domain, because
+          //    the A records were rewritten seconds ago (60s TTL).
+          const postScaleIp = config.mode.startsWith('compose')
+            ? (resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp ??
+              readSingleServerIp(config.projectDir, config.envPrefix) ??
+              null)
+            : null;
+          const reused = await withResolutionPin(
+            postScaleIp
+              ? {
+                  domain: config.domain,
+                  ip: postScaleIp,
+                  reason: `verify-scale: post-scale server for ${config.envPrefix}`,
+                }
+              : null,
+            () => recordTlsReused('verify-scale'),
+          );
+          collector.recordVerifications(stepId, [reused]);
+          if (reused.status !== 'pass') {
+            throw new Error(`verify-scale: ${reused.checkName}: ${reused.errorMessage}`);
+          }
         }),
     },
 
@@ -4086,7 +4203,7 @@ EOF`;
         executeStep(
           name,
           `vibecarbon failover ${config.envPrefix}${name === 'failback' ? ' (failback)' : ''}`,
-          async () => {
+          async (stepId) => {
             failoverContinuityMarkerId = buildMarkerId(
               scenarioId,
               `${name}-continuity`,
@@ -4132,6 +4249,18 @@ EOF`;
                   })
                 : null;
 
+            // k8s-ha: the promotion restores the primary's certificate onto
+            // the promoted cluster (src/failover.js) instead of ordering a
+            // new one. Its CertificateRequests are listed now, while it is
+            // the standby, and compared once it is the primary.
+            const promotedKubeconfig =
+              config.mode === 'k8s-ha'
+                ? haRoleKubeconfig(config.projectDir, config.envPrefix, 'standby')
+                : null;
+            const promotedRequestsBefore = promotedKubeconfig
+              ? listCertificateRequestUids(promotedKubeconfig)
+              : null;
+
             const result = await runFailover(config.envPrefix, {
               cwd: config.projectDir,
               timeout: TIMEOUTS[name],
@@ -4148,6 +4277,18 @@ EOF`;
             // Refresh server info after failover (primary/standby swap)
             serverIps = getServerIps(config.projectDir, config.envPrefix);
             sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);
+
+            if (promotedKubeconfig) {
+              const noReissue = checkNoNewCertificateRequest({
+                before: promotedRequestsBefore,
+                after: listCertificateRequestUids(promotedKubeconfig),
+                where: `the promoted cluster (${promotedKubeconfig})`,
+              });
+              collector.recordVerifications(stepId, [noReissue]);
+              if (noReissue.status !== 'pass') {
+                throw new Error(`${name}: ${noReissue.checkName}: ${noReissue.errorMessage}`);
+              }
+            }
 
             // A failback is a failover back: the node the first failover
             // retired must hold the primary role again (verify-failback then
@@ -4337,6 +4478,17 @@ EOF`;
               `${tag} [reconverge] wrote survival marker ${reconvergeMarkerId} on acting primary ${preReconverge.primaryIp}`,
             );
 
+            // k8s-ha: the reconverge redeploys the acting primary too, and
+            // must not re-issue its certificate (the k8s twin of this is
+            // warm-redeploy-change's check).
+            const actingPrimaryKubeconfig =
+              config.mode === 'k8s-ha'
+                ? haRoleKubeconfig(config.projectDir, config.envPrefix, 'primary')
+                : null;
+            const actingPrimaryRequestsBefore = actingPrimaryKubeconfig
+              ? listCertificateRequestUids(actingPrimaryKubeconfig)
+              : null;
+
             // The promoted primary keeps serving through the reconverge: its
             // db is never restarted or recreated (primary_not_restarted).
             await assertPrimaryNotRestartedAcross(stepId, async () => {
@@ -4457,6 +4609,20 @@ EOF`;
                   `(${newPrimaryIp}) — the reconverge destroyed data it must only reshape ` +
                   `[${survival.status}: ${survival.errorMessage ?? JSON.stringify(survival.details ?? {})}]`,
               );
+            }
+
+            if (actingPrimaryKubeconfig) {
+              const noReissue = checkNoNewCertificateRequest({
+                before: actingPrimaryRequestsBefore,
+                after: listCertificateRequestUids(actingPrimaryKubeconfig),
+                where: `the acting primary (${actingPrimaryKubeconfig})`,
+              });
+              collector.recordVerifications(stepId, [noReissue]);
+              if (noReissue.status !== 'pass') {
+                throw new Error(
+                  `reconverge-deploy: ${noReissue.checkName}: ${noReissue.errorMessage}`,
+                );
+              }
             }
 
             // DR restored: the rebuilt side streams from the promoted primary

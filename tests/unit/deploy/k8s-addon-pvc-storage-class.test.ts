@@ -9,6 +9,13 @@ import {
   renderK8sStorageClassPlaceholder,
 } from '../../../src/lib/deploy/k8s/k3s.js';
 
+// renderK8sBase renders the vibecarbon-tls Certificate from these.
+const TEST_TLS = {
+  dnsNames: ['app.example.test'],
+  issuerName: 'letsencrypt-prod-manual',
+  effectiveIssuer: 'letsencrypt-prod-manual',
+};
+
 // Two coupled defects, both silent.
 //
 // 1. services/redis/k8s/pvc.yaml declared NO storageClassName at all. Our
@@ -134,7 +141,7 @@ describe('renderK8sBase renders the whole tree k8s/base apply reads', () => {
     const root = baseWithDb();
     mkdirSync(join(root, 'n8n'), { recursive: true });
     writeFileSync(join(root, 'n8n', 'pvc.yaml'), `storageClassName: ${PLACEHOLDER}\n`);
-    const out = renderK8sBase(root, values());
+    const out = renderK8sBase(root, values(), undefined, TEST_TLS);
     expect(out).not.toBe(root);
     expect(readFileSync(join(out, 'n8n', 'pvc.yaml'), 'utf-8')).toContain('provider-csi');
     expect(readFileSync(join(out, 'db', 'statefulset.yaml'), 'utf-8')).toContain(
@@ -147,7 +154,9 @@ describe('renderK8sBase renders the whole tree k8s/base apply reads', () => {
   it('refuses a base that predates the db StatefulSet (nothing would create the database)', () => {
     const root = mkdtempSync(join(tmpdir(), 'vc-base-old-'));
     writeFileSync(join(root, 'kustomization.yaml'), 'resources: []\n');
-    expect(() => renderK8sBase(root, values())).toThrow(/predates the db StatefulSet/);
+    expect(() => renderK8sBase(root, values(), undefined, TEST_TLS)).toThrow(
+      /predates the db StatefulSet/,
+    );
   });
 
   it('refuses a db StatefulSet that still carries a placeholder after rendering', () => {
@@ -156,12 +165,14 @@ describe('renderK8sBase renders the whole tree k8s/base apply reads', () => {
       join(root, 'db', 'statefulset.yaml'),
       `${readFileSync(join(root, 'db', 'statefulset.yaml'), 'utf-8')}\n# {{SOMETHING_NEW}}\n`,
     );
-    expect(() => renderK8sBase(root, values())).toThrow(/\{\{SOMETHING_NEW\}\}/);
+    expect(() => renderK8sBase(root, values(), undefined, TEST_TLS)).toThrow(
+      /\{\{SOMETHING_NEW\}\}/,
+    );
   });
 
   it('refuses an empty storage class rather than binding the cluster default', () => {
-    expect(() => renderK8sBase(baseWithDb(), { ...values(), K8S_STORAGE_CLASS: '' })).toThrow(
-      /K8S_STORAGE_CLASS is empty/,
-    );
+    expect(() =>
+      renderK8sBase(baseWithDb(), { ...values(), K8S_STORAGE_CLASS: '' }, undefined, TEST_TLS),
+    ).toThrow(/K8S_STORAGE_CLASS is empty/);
   });
 });

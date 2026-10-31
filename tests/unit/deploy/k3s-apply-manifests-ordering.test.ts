@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { load } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-order-recovery.js';
 import { namesHost } from '../../_shared/hosts.js';
@@ -40,6 +41,16 @@ vi.mock('node:child_process', async () => {
   return { ...actual, spawn: vi.fn() };
 });
 
+// The TLS restore before `apply -k base` reads the env's snapshot from S3;
+// here there is never one, so no test opens a socket.
+vi.mock('../../../src/lib/deploy/tls-snapshot.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    readTlsSnapshot: vi.fn(async () => ({ text: null, reason: 'no snapshot' })),
+  };
+});
+
 const k3sPromise = import('../../../src/lib/deploy/k8s/k3s.js');
 const { RETIRED_CHART_DB_STATEFULSET, RETIRED_CHART_RELEASE } = await k3sPromise;
 
@@ -71,6 +82,10 @@ let rolloutHangs = false;
 // The rendered registry manifest as `kubectl apply -k <rendered base>` saw it
 // (the rendered copy is removed right after the apply).
 let registryAtBaseApply: string | null = null;
+// The rendered vibecarbon-tls Certificate as `kubectl apply -k <rendered
+// base>` saw it, parsed.
+// biome-ignore lint/suspicious/noExplicitAny: parsed YAML
+let certificateAtBaseApply: any = null;
 
 function makeGate() {
   let release!: () => void;
@@ -172,6 +187,10 @@ function installSpawnMock() {
       const registry = join(target, 'registry', 'local-registry.yaml');
       if (/k8s-base/.test(target) && existsSync(registry)) {
         registryAtBaseApply = readFileSync(registry, 'utf-8');
+      }
+      const certificate = join(target, 'traefik', 'certificate.yaml');
+      if (/k8s-base/.test(target) && existsSync(certificate)) {
+        certificateAtBaseApply = load(readFileSync(certificate, 'utf-8'));
       }
     }
     if (
@@ -954,10 +973,12 @@ describe('applyK3sManifests pilot-standby role', () => {
       if (!argv) throw new Error(`no patch found for certificate/${certName}`);
       return JSON.parse(argv[argv.length - 1]).spec.dnsNames;
     };
+    // vibecarbon-tls is rendered into the base before the apply, not patched.
+    const appDnsNames = certificateAtBaseApply?.spec?.dnsNames;
 
-    expect(patchedDnsNames('vibecarbon-tls')).toEqual(['app.example.test', '*.app.example.test']);
+    expect(appDnsNames).toEqual(['app.example.test', '*.app.example.test']);
     expect(patchedDnsNames('grafana-tls')).toEqual(['app.example.test']);
-    expect(patchedDnsNames('grafana-tls')).not.toEqual(patchedDnsNames('vibecarbon-tls'));
+    expect(patchedDnsNames('grafana-tls')).not.toEqual(appDnsNames);
   });
 
   it('single-ACME-issuer policy: a pilot-standby cert references the self-signed issuer, the promote annotation carries the real one', async () => {
@@ -975,11 +996,8 @@ describe('applyK3sManifests pilot-standby role', () => {
       role: 'standby',
     });
 
-    const argv = cmdCalls.find(
-      (a) => a.includes('patch') && a.includes('certificate') && a.includes('vibecarbon-tls'),
-    );
-    if (!argv) throw new Error('no patch found for certificate/vibecarbon-tls');
-    const body = JSON.parse(argv[argv.length - 1]);
+    const body = certificateAtBaseApply;
+    if (!body) throw new Error('no rendered certificate/vibecarbon-tls at the base apply');
     expect(body.spec.issuerRef).toEqual({
       name: 'vibecarbon-standby-selfsigned',
       kind: 'ClusterIssuer',
@@ -1000,11 +1018,8 @@ describe('applyK3sManifests pilot-standby role', () => {
       role: 'primary',
     });
 
-    const argv = cmdCalls.find(
-      (a) => a.includes('patch') && a.includes('certificate') && a.includes('vibecarbon-tls'),
-    );
-    if (!argv) throw new Error('no patch found for certificate/vibecarbon-tls');
-    const body = JSON.parse(argv[argv.length - 1]);
+    const body = certificateAtBaseApply;
+    if (!body) throw new Error('no rendered certificate/vibecarbon-tls at the base apply');
     expect(body.spec.issuerRef).toEqual({
       name: 'letsencrypt-prod-hetzner',
       kind: 'ClusterIssuer',
@@ -1014,7 +1029,7 @@ describe('applyK3sManifests pilot-standby role', () => {
     );
   });
 
-  it('patches exactly the Certificates the ACME watchdog is allowed to repair', async () => {
+  it('renders or patches exactly the Certificates the ACME watchdog is allowed to repair', async () => {
     // Cross-file pin. DEPLOY_OWNED_CERTIFICATES is a hand-written allowlist of
     // `<namespace>/<name>` keys, and the watchdog silently degrades to
     // read-only for anything absent from it. So a rename or a third
@@ -1035,10 +1050,15 @@ describe('applyK3sManifests pilot-standby role', () => {
     const patchedKeys = cmdCalls
       .filter((a) => a[0] === 'kubectl' && a.includes('patch') && a.includes('certificate'))
       .map((a) => `${a[a.indexOf('-n') + 1]}/${a[a.indexOf('certificate') + 1]}`);
+    const renderedKeys = certificateAtBaseApply
+      ? [`${certificateAtBaseApply.metadata.namespace}/${certificateAtBaseApply.metadata.name}`]
+      : [];
+    const deployKeys = [...renderedKeys, ...patchedKeys];
 
-    expect(new Set(patchedKeys)).toEqual(new Set(DEPLOY_OWNED_CERTIFICATES));
-    // No duplicates either — one patch per Certificate per deploy.
-    expect(patchedKeys).toHaveLength(DEPLOY_OWNED_CERTIFICATES.length);
+    expect(new Set(deployKeys)).toEqual(new Set(DEPLOY_OWNED_CERTIFICATES));
+    // No duplicates either — one render or patch per Certificate per deploy
+    // (the rendered vibecarbon-tls is no longer patched as well).
+    expect(deployKeys).toHaveLength(DEPLOY_OWNED_CERTIFICATES.length);
   });
 
   it('pins all three cert-manager deployments to the control-plane BEFORE the readiness wait', async () => {
@@ -1074,6 +1094,79 @@ describe('applyK3sManifests pilot-standby role', () => {
       // present on other distros) would strand the pinned pods
       expect(cmdCalls[idx].some((s) => s.includes('NoSchedule'))).toBe(true);
     }
+  });
+});
+
+/**
+ * The TLS Secret restore runs after the namespace exists and before
+ * `apply -k base` creates the Certificate, on the cluster that issues (single
+ * cluster or the k8s-ha primary). A pilot standby never restores: it serves
+ * its local self-signed certificate until a failover promotes it.
+ */
+describe('applyK3sManifests restores the TLS Secret before applying the base', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    pushGate = null;
+    pushExit = { code: 0, stderr: '' };
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    installSpawnMock();
+  });
+
+  const withBackups = (projectDir: string) => ({
+    ...baseArgs(projectDir),
+    s3Config: {
+      endpoint: 'https://s3.example.test',
+      region: 'eu',
+      bucket: 'proj-storage',
+      accessKey: 'AK',
+      secretKey: 'SK',
+      walgPrefix: 'backups/proj/e2e/walg',
+    },
+    backupBucketName: 'proj-backups',
+    operatorEnv: 'e2e',
+  });
+  const isLiveTlsRead = (a: string[]) =>
+    a[0] === 'kubectl' && a.includes('get') && a.includes('secret') && a.includes('vibecarbon-tls');
+  const isBaseApply = (a: string[]) =>
+    a[0] === 'kubectl' &&
+    a.includes('apply') &&
+    a.includes('-k') &&
+    a.some((x) => /k8s-base/.test(String(x)));
+
+  for (const role of [undefined, 'primary'] as const) {
+    it(`${role ?? 'single cluster'}: reads the live Secret after the namespace and before apply -k base`, async () => {
+      const { applyK3sManifests } = await k3sPromise;
+      await applyK3sManifests({ ...withBackups(makeProjectDir()), ...(role && { role }) });
+      const read = cmdCalls.findIndex(isLiveTlsRead);
+      const base = cmdCalls.findIndex(isBaseApply);
+      const namespace = cmdCalls.findIndex(
+        (a) => a.includes('create') && a.includes('namespace') && a.includes('vibecarbon'),
+      );
+      expect(read).toBeGreaterThan(-1);
+      expect(base).toBeGreaterThan(read);
+      expect(read).toBeGreaterThan(namespace);
+      expect(namespace).toBeGreaterThan(-1);
+    });
+  }
+
+  it('standby: never restores', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests({ ...withBackups(makeProjectDir()), role: 'standby' });
+    expect(cmdCalls.some(isLiveTlsRead)).toBe(false);
+    expect(cmdCalls.some(isBaseApply)).toBe(true);
+  });
+
+  it('no longer patches certificate/vibecarbon-tls after the apply', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(withBackups(makeProjectDir()));
+    expect(
+      cmdCalls.some(
+        (a) => a.includes('patch') && a.includes('certificate') && a.includes('vibecarbon-tls'),
+      ),
+    ).toBe(false);
   });
 });
 
