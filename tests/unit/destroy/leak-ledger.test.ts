@@ -7,7 +7,7 @@
  * "completed" destroy left live servers and firewalls behind and no script
  * could tell that apart from a clean teardown.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createLeakLedger,
   DESTROY_EXIT_CLEAN,
@@ -263,5 +263,59 @@ describe('reasons carrying a raw command envelope', () => {
     expect(ledger.entries[0].reason).toBe(
       'stack-state removal failed: error: error listing stacks: could not list bucket: NoSuchBucket: The specified bucket does not exist.',
     );
+  });
+});
+
+describe('isLeakReportLine against what destroy actually prints', () => {
+  // destroyOutro prints each verdict through clack's p.log.message, which
+  // prefixes the line with its "│" gutter. The renderer-only test above never
+  // saw that prefix, so the scraper matched nothing in a real run and the
+  // k8s-ha final-destroy of 2026-10-31 failed with "(no leak report lines
+  // captured)" over a report that had two lines.
+  it('matches the line exactly as the 2026-10-31 run captured it', () => {
+    expect(
+      isLeakReportLine(
+        '│    UNVERIFIED pulumi-stack   d4-standby (d4-standby): pulumi destroy failed: error: update failed',
+      ),
+    ).toBe(true);
+    expect(isLeakReportLine('│      ↳ Check for leftover resources in the console')).toBe(false);
+    expect(isLeakReportLine('│  [volume] DEFERRED pvc-1, kept because ...')).toBe(false);
+  });
+
+  it('scrapes every verdict out of destroyOutro’s real output', async () => {
+    const { destroyOutro } = await import('../../../src/destroy.js');
+    const ledger = createLeakLedger();
+    ledger.unverified({
+      resourceClass: 'server',
+      resource: 'p-d4-standby-db (id 614595377)',
+      reason: 'still in Pulumi stack d4-standby',
+      hint: 'Run `vibecarbon destroy d4` again to finish',
+    });
+    ledger.leak({ resourceClass: 'network', resource: 'p-d4-standby-network', reason: 'boom' });
+
+    const chunks: string[] = [];
+    const write = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk: string | Uint8Array) => {
+        chunks.push(String(chunk));
+        return true;
+      });
+    const previousExitCode = process.exitCode;
+    try {
+      destroyOutro('d4', '1s', { leaks: ledger });
+    } finally {
+      write.mockRestore();
+      process.exitCode = previousExitCode;
+    }
+
+    const scraped = chunks
+      .join('')
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI is the point
+      .replace(/\x1b\[[0-9;]*m/g, '')
+      .split('\n')
+      .filter((line) => isLeakReportLine(line));
+    expect(scraped).toHaveLength(2);
+    expect(scraped.join('\n')).toMatch(/p-d4-standby-db \(id 614595377\)/);
+    expect(scraped.join('\n')).toMatch(/p-d4-standby-network/);
   });
 });
