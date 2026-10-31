@@ -149,7 +149,7 @@ function fakeCluster(
     if (!state.reachable) throw new Error('ssh: connect to host 10.0.0.1 port 22: timed out');
     argvs.push(argv);
     const a = argv.join(' ');
-    if (a.includes('kustomizations.kustomize.toolkit.fluxcd.io')) {
+    if (argv.some((arg) => arg === 'kustomizations.kustomize.toolkit.fluxcd.io')) {
       if (!state.flux) {
         throw new Error('error: the server doesn\'t have a resource type "kustomizations"');
       }
