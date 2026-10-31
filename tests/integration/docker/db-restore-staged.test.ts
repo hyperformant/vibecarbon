@@ -65,7 +65,7 @@ const VOL = `${NAME}-data`;
 /** The streaming standby a promote test builds next to DB_CT. */
 const SB_CT = `${NAME}-sb`;
 const SB_VOL = `${NAME}-sb-data`;
-const DB_IMAGE = 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r2';
+const DB_IMAGE = 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r3';
 const GARAGE_IMAGE =
   'dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020';
 // Garage's fixed dev key (carbon/docker-compose.override.yml), never a real credential.
