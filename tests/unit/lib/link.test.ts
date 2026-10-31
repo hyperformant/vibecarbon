@@ -134,7 +134,7 @@ describe('a link inside a 40-column p.note', () => {
     const { out, text } = fakeTty(40);
     p.note(`Generate a token: ${c.boldCyanUnderline(URL_)} now`, 'DigitalOcean', { output: out });
     const lines = text().replace(SGR, '').split('\n');
-    expect(lines.some((l) => l.includes(URL_))).toBe(false);
+    expect(lines.some((l) => l.split(URL_).length > 1)).toBe(false);
   });
 
   it('keeps each linked URL whole in one OSC 8 span', () => {
