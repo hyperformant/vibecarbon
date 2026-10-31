@@ -46,7 +46,11 @@ import { workingTreeDirty } from './delta.js';
 import { requireDnsSetup } from './dns-result.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
 import { assertNoFailoverInFlight, haSeedRecord, readReplicaState } from './failover-guard.js';
-import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
+import {
+  createAcmeIssuanceWatchdog,
+  deriveScaleUpList,
+  failoverAddonManifests,
+} from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { k8sPsqlRunner } from './replication.js';
@@ -2246,6 +2250,9 @@ export async function executeDeployment(args, gatheredConfig) {
                   join(process.cwd(), 'k8s/base/app/deployment.yaml'),
                   'utf-8',
                 ),
+                // The pilot standby zeroes every declared add-on; failover
+                // brings back the ones in the app namespace.
+                addons: failoverAddonManifests(process.cwd()),
               }),
             }),
           },

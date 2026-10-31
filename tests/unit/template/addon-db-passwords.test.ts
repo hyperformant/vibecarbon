@@ -20,7 +20,7 @@ import { describe, expect, it } from 'vitest';
 import { buildPerEnvSecrets } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
 import { SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 import { formatDotenvLine, parseDotenv } from '../../../src/lib/dotenv.js';
-import { ensureAddonSecrets } from '../../../src/upgrade.js';
+import { addonSecretUpgradeNotes, ensureAddonSecrets } from '../../../src/upgrade.js';
 
 const ROOT = process.cwd();
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
@@ -131,15 +131,93 @@ describe('add-on database passwords', () => {
       expect(env(dir, '.env.local').N8N_DB_PASSWORD).toBeUndefined();
     });
 
+    it('n8n also gets one N8N_ENCRYPTION_KEY, so a promoted standby can read credentials', () => {
+      const manifest = JSON.parse(read('services/n8n/manifest.json'));
+      expect(manifest.envVars.N8N_ENCRYPTION_KEY).toMatchObject({
+        generate: 'password',
+        length: 48,
+      });
+      const dir = project(['n8n'], '');
+      expect(ensureAddonSecrets(dir)).toEqual([
+        { key: 'N8N_DB_PASSWORD', status: 'generated' },
+        {
+          key: 'N8N_ENCRYPTION_KEY',
+          status: 'generated',
+          upgradeNote: manifest.envVars.N8N_ENCRYPTION_KEY.upgradeNote,
+        },
+      ]);
+      expect(env(dir, '.env.local').N8N_ENCRYPTION_KEY).toHaveLength(48);
+      expect(env(dir, '.env').N8N_ENCRYPTION_KEY).toBe(env(dir, '.env.local').N8N_ENCRYPTION_KEY);
+      for (const f of [
+        'services/n8n/compose/docker-compose.yml',
+        'carbon/docker-compose.n8n.yml',
+      ]) {
+        expect(read(f), f).toContain('N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?');
+        expect(read(f), f).not.toContain('n8n_dev_encryption_key');
+      }
+      expect(read('services/n8n/k8s/deployment.yaml')).toMatch(
+        /name: N8N_ENCRYPTION_KEY\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: vibecarbon-infra-secrets\n\s+key: N8N_ENCRYPTION_KEY/,
+      );
+    });
+
+    it('every example env file leaves N8N_ENCRYPTION_KEY empty, so compose fails loudly without a real one', () => {
+      for (const f of ['carbon/.env.example']) {
+        expect(parseDotenv(read(f)), f).toHaveProperty('N8N_ENCRYPTION_KEY', '');
+      }
+    });
+
     it('never rotates one that is set, and copies it to the file that lacks it', () => {
       const dir = project(['n8n'], '');
       writeFileSync(
         join(dir, '.env.local'),
-        `PROJECT_NAME=demo\n${formatDotenvLine('N8N_DB_PASSWORD', 'k'.repeat(32))}\n`,
+        `PROJECT_NAME=demo\n${formatDotenvLine('N8N_DB_PASSWORD', 'k'.repeat(32))}\n${formatDotenvLine('N8N_ENCRYPTION_KEY', 'e'.repeat(48))}\n`,
       );
-      expect(ensureAddonSecrets(dir)).toEqual([{ key: 'N8N_DB_PASSWORD', status: 'copied' }]);
+      expect(ensureAddonSecrets(dir)).toEqual([
+        { key: 'N8N_DB_PASSWORD', status: 'copied' },
+        { key: 'N8N_ENCRYPTION_KEY', status: 'copied' },
+      ]);
       expect(env(dir, '.env').N8N_DB_PASSWORD).toBe('k'.repeat(32));
+      expect(env(dir, '.env').N8N_ENCRYPTION_KEY).toBe('e'.repeat(48));
       expect(ensureAddonSecrets(dir)).toEqual([]);
+    });
+
+    it('a generated encryption key warns how to keep the key n8n already uses, never printing a value', () => {
+      const dir = project(['n8n'], '');
+      const written = ensureAddonSecrets(dir);
+      const key = env(dir, '.env.local').N8N_ENCRYPTION_KEY;
+      const pw = env(dir, '.env.local').N8N_DB_PASSWORD;
+      const notes = written.map((w) => addonSecretUpgradeNotes(w, { projectName: 'demo' }));
+      const [dbPw, encKey] = notes;
+      // The role password keeps the restart advice; the encryption key gets
+      // its manifest note instead, because \\password cannot fix a key n8n
+      // already wrote into its own config.
+      expect(dbPw.info).toContain('Generated N8N_DB_PASSWORD');
+      expect(dbPw.info).toContain('\\password');
+      expect(dbPw.warn).toBeUndefined();
+      expect(encKey.info).toBe('Generated N8N_ENCRYPTION_KEY in .env and .env.local');
+      expect(encKey.warn).toContain('docker exec demo-n8n cat /home/node/.n8n/config');
+      expect(encKey.warn).toContain('encryptionKey');
+      expect(encKey.warn).toContain('Mismatching encryption keys');
+      expect(encKey.warn).not.toContain('\\password');
+      expect(encKey.warn).not.toContain('{{');
+      expect(encKey.warn).not.toMatch(/\u2014/);
+      expect(encKey.warn?.split('\n')).toHaveLength(1);
+      for (const n of notes) {
+        for (const text of [n.info, n.warn]) {
+          expect(text ?? '').not.toContain(key);
+          expect(text ?? '').not.toContain(pw);
+        }
+      }
+    });
+
+    it('a copied key carries no copy-the-key warning, and -dry previews it', () => {
+      const copied = addonSecretUpgradeNotes({ key: 'N8N_ENCRYPTION_KEY', status: 'copied' }, {});
+      expect(copied).toEqual({ info: 'Copied N8N_ENCRYPTION_KEY in .env and .env.local' });
+      const dir = project(['n8n'], '');
+      const [, enc] = ensureAddonSecrets(dir, { dryRun: true });
+      const dry = addonSecretUpgradeNotes(enc, { dryRun: true, projectName: 'demo' });
+      expect(dry.info).toBe('Would set N8N_ENCRYPTION_KEY in .env and .env.local');
+      expect(dry.warn).toContain('demo-n8n');
     });
 
     it('writes nothing under -dry, and nothing without a project manifest', () => {

@@ -40,6 +40,7 @@ import { providerFor, providerIdFor } from '../../providers/index.js';
 import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
+import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
   buildReplicationOverlay,
@@ -739,6 +740,7 @@ async function reconvergeStandbyStack(ctx, serviceOpts) {
     ip: standby.ip,
     projectName,
     sshKeyPath,
+    envConfig: ctx.envConfig,
   });
   if (!fence.fenced) {
     throw new Error(
@@ -871,7 +873,7 @@ async function haWriteReplicationOverlay(ctx) {
         ip,
         sshKeyPath,
         `cd /opt/${projectName} || exit 1; ` +
-          `FLAGS=$(sed -n 's/^docker compose \\(.*\\) \\$(\\[ -f docker-compose.replication.yml.*up -d --remove-orphans$/\\1/p' reconcile.sh | tail -1); ` +
+          `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1); ` +
           `[ -n "$FLAGS" ] || FLAGS='${REPL_COMPOSE_FLAGS_BASE}'; ` +
           `docker compose $FLAGS -f docker-compose.replication.yml pull db 2>&1`,
         { timeout: 600_000 },
@@ -884,7 +886,7 @@ async function haWriteReplicationOverlay(ctx) {
         ip,
         sshKeyPath,
         `cd /opt/${projectName} || exit 1; ` +
-          `FLAGS=$(sed -n 's/^docker compose \\(.*\\) \\$(\\[ -f docker-compose.replication.yml.*up -d --remove-orphans$/\\1/p' reconcile.sh | tail -1); ` +
+          `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1); ` +
           `[ -n "$FLAGS" ] || FLAGS='${REPL_COMPOSE_FLAGS_BASE}'; ` +
           `docker compose $FLAGS -f docker-compose.replication.yml up -d --no-build db 2>&1`,
         { timeout: 60_000 },

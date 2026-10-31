@@ -57,6 +57,7 @@ import {
   checkAuthHealth,
   checkUnknownPathNotFound,
 } from '../../e2e/checks/health.js';
+import * as standbyAddons from '../../e2e/checks/standby-addons.js';
 import type { VerificationResult } from '../../e2e/scenarios/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -532,5 +533,104 @@ describe('HA INTEGRITY: every check fails without its handle', () => {
     const exported = Object.keys(haIntegrity).filter((k) => /^check[A-Z]/.test(k));
     expect(exported.length).toBeGreaterThanOrEqual(6);
     expect(exported.sort()).toEqual(Object.keys(HA_HANDLELESS).sort());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Standby add-ons: a missing handle fails, only "no add-on enabled" skips
+// ---------------------------------------------------------------------------
+
+const ADDON_FEATURES = ['n8n', 'metabase'];
+const addonBase = { ...sshless, features: ADDON_FEATURES };
+const unread = { ok: false as const, error: 'unread' };
+
+const ADDON_HANDLELESS: Record<
+  string,
+  Array<() => Promise<VerificationResult> | VerificationResult>
+> = {
+  checkStandbyPrimaryOnlyAbsent: [
+    () =>
+      standbyAddons.checkStandbyPrimaryOnlyAbsent({
+        ...addonBase,
+        standbyIp: NODE,
+        sshKeyPath: null,
+      }),
+    () =>
+      standbyAddons.checkStandbyPrimaryOnlyAbsent({
+        ...addonBase,
+        standbyIp: null,
+        sshKeyPath: KEY,
+      }),
+  ],
+  checkPromotedPrimaryOnlyRunning: [
+    () =>
+      standbyAddons.checkPromotedPrimaryOnlyRunning({
+        ...addonBase,
+        primaryIp: NODE,
+        sshKeyPath: null,
+      }),
+    () =>
+      standbyAddons.checkPromotedPrimaryOnlyRunning({
+        ...addonBase,
+        primaryIp: null,
+        sshKeyPath: KEY,
+      }),
+  ],
+  checkPromotedDbNotRecreated: [
+    () =>
+      standbyAddons.checkPromotedDbNotRecreated({
+        features: ADDON_FEATURES,
+        ip: NODE,
+        before: unread,
+        after: unread,
+      }),
+  ],
+  checkN8nKeyShared: [
+    () =>
+      standbyAddons.checkN8nKeyShared({
+        ...addonBase,
+        primaryIp: NODE,
+        standbyIp: NODE,
+        sshKeyPath: null,
+      }),
+    () =>
+      standbyAddons.checkN8nKeyShared({
+        ...addonBase,
+        primaryIp: NODE,
+        standbyIp: null,
+        sshKeyPath: KEY,
+      }),
+  ],
+  checkPromotedAddonsReady: [
+    () =>
+      standbyAddons.checkPromotedAddonsReady({
+        ...addonBase,
+        mode: 'k8s-ha',
+        primaryIp: NODE,
+        sshKeyPath: null,
+      }),
+    () =>
+      standbyAddons.checkPromotedAddonsReady({
+        ...addonBase,
+        mode: 'k8s-ha',
+        primaryIp: null,
+        sshKeyPath: KEY,
+      }),
+  ],
+};
+
+describe('STANDBY ADD-ONS: every check fails without its handle', () => {
+  const cases = Object.entries(ADDON_HANDLELESS).flatMap(([name, runs]) =>
+    runs.map((run, i) => [`${name} #${i + 1}`, run] as const),
+  );
+
+  it.each(cases)('%s fails', async (_label, run) => {
+    const r = await run();
+    expect(r.status, r.errorMessage).toBe('fail');
+  });
+
+  it('every exported check in standby-addons.ts is registered', () => {
+    const exported = Object.keys(standbyAddons).filter((k) => /^check[A-Z]/.test(k));
+    expect(exported.sort()).toEqual(Object.keys(ADDON_HANDLELESS).sort());
   });
 });

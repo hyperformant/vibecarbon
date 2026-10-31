@@ -176,6 +176,7 @@ vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
     mergeRemoteDotenv: vi.fn(
       async (ip: string, _o: string, _d: string, vars: Record<string, string>) => {
         h.envMerges.push({ ip, vars });
+        if (vars.WALG_ROLE) h.events.push(`walg:${ip}:${vars.WALG_ROLE}`);
       },
     ),
   };
@@ -762,5 +763,52 @@ describe('the deploy wires the managed-DNS repoint into the reconverge check (I3
     );
     expect(call.slice(0, 1200)).toMatch(/repointDns: managedDns\s*\?/);
     expect(call.slice(0, 1400)).toContain('composeHaReconverge.dnsAnswer = ready.dnsAnswer;');
+  });
+});
+
+/**
+ * Primary-only add-ons stay at zero on the rebuilt standby (primary-only
+ * add-ons plan, Task 3). The standby's stack starts through startComposeStack,
+ * which runs reconcile.sh, whose `up` carries the standby-scale fragment; that
+ * fragment reads WALG_ROLE from the node's .env. So the WALG_ROLE=standby merge
+ * must land before either path that starts the retired node's stack.
+ */
+describe('the standby role is on the node before its stack starts (add-ons held at zero)', () => {
+  it('merge-walg-role precedes start-compose-stack and configure-replication in the compose-ha plan', async () => {
+    const { planDeploy } = await import('../../../src/lib/deploy/plan/deploy-plan.js');
+    const names = (planDeploy('compose-ha', {}) as Array<{ name: string }>).map((s) => s.name);
+    const merge = names.indexOf('merge-walg-role');
+    expect(merge).toBeGreaterThanOrEqual(0);
+    expect(merge).toBeLessThan(names.indexOf('start-compose-stack'));
+    expect(merge).toBeLessThan(names.indexOf('configure-replication'));
+  });
+
+  it('both standby start paths go through startComposeStack, which runs reconcile.sh', async () => {
+    const { readFileSync } = await import('node:fs');
+    const effects = readFileSync(
+      join(__dirname, '../../../src/lib/deploy/effects/compose-ha.js'),
+      'utf-8',
+    );
+    const body = (fn: string) => {
+      const at = effects.indexOf(`async function ${fn}(`);
+      expect(at, fn).toBeGreaterThan(-1);
+      return effects.slice(at, effects.indexOf('\n}\n', at));
+    };
+    expect(body('reconvergeStandbyStack')).toMatch(/startComposeStack\(standby\.ip/);
+    expect(body('reconcileRebuiltStandby')).toMatch(/startComposeStack\(standby\.ip/);
+    const compose = readFileSync(
+      join(__dirname, '../../../src/lib/deploy/compose/index.js'),
+      'utf-8',
+    );
+    const start = compose.slice(compose.indexOf('export async function startComposeStack('));
+    expect(start.slice(0, 2000)).toContain('/reconcile.sh');
+  });
+
+  it('a reconverge merges WALG_ROLE=standby onto the retired node before starting it', async () => {
+    await runReconverge(baseCtx());
+    const merged = h.events.indexOf(`walg:${RETIRED_IP}:standby`);
+    const started = h.events.indexOf(`start:${RETIRED_IP}`);
+    expect(merged).toBeGreaterThanOrEqual(0);
+    expect(started).toBeGreaterThan(merged);
   });
 });

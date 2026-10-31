@@ -21,6 +21,17 @@
     "METABASE_ADMIN_EMAIL": { "from": "ADMIN_EMAIL", "default": "admin@localhost" }
   },
 
+  "standby": {
+    "policy": "primary-only",
+    "compose": {
+      "services": ["metabase"],
+      "setup": ["metabase-setup"]
+    },
+    "k8s": [
+      { "kind": "Deployment", "name": "metabase", "namespace": "vibecarbon" }
+    ]
+  },
+
   "kustomization": {
     "entry": "metabase/"
   },

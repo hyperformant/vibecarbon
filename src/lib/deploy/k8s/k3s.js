@@ -55,6 +55,11 @@ import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
+import {
+  declaredAddonNames,
+  enabledK8sAddonNames,
+  k8sStandbyZeroedWorkloads,
+} from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
@@ -1825,6 +1830,7 @@ export const INFRA_SECRET_KEYS = [
   'REPL_PASSWORD',
   'METABASE_DB_PASSWORD',
   'N8N_DB_PASSWORD',
+  'N8N_ENCRYPTION_KEY',
 ];
 
 /**
@@ -2888,18 +2894,60 @@ export function renderS3EgressVpcManifest(template, vpcCidrs) {
 const OBSERVABILITY_NAMESPACE = 'vibecarbon-observability';
 
 /**
- * Pilot-light standby: scale down an observability stack this cluster still
- * carries from its life as a primary, and point its grafana-tls Certificate at
- * the standby's self-signed issuer (the real issuer rides the promote
- * annotation, as on vibecarbon-tls). No-op when the namespace is absent, which
- * is every freshly deployed standby.
+ * Pilot-light standby: hold every declared add-on workload at zero. Each
+ * `{kind, name, namespace}` (from `k8sStandbyZeroedWorkloads`) that exists is
+ * scaled to 0 with `kubectl scale`, never a patch (the HA ruling: a patch or
+ * set image would roll pods); one that does not exist (an add-on namespace
+ * never applied on this cluster) is skipped. The pod templates stay as
+ * applied, so a promotion only scales them back up.
  *
- * @param {{ env: Record<string, string|undefined>, issuerName: string }} args
- * @returns {Promise<boolean>} true when a leftover stack was demoted
+ * @param {{ env: Record<string, string|undefined>, workloads: Array<{kind: string, name: string, namespace: string}>, kubectl?: typeof runKubectlWithRetry }} args
+ * @returns {Promise<string[]>} the workload names it zeroed
  */
-export async function demoteObservabilityOnStandby({ env, issuerName }) {
+export async function zeroWorkloadsOnStandby({ env, workloads, kubectl = runKubectlWithRetry }) {
+  const zeroed = [];
+  for (const { kind, name, namespace } of workloads) {
+    const type = kind.toLowerCase();
+    const found = String(
+      (await kubectl(['-n', namespace, 'get', type, name, '--ignore-not-found', '-o', 'name'], {
+        env,
+        captureStdout: true,
+        description: `applyK3sManifests: look for ${namespace}/${name} (pilot standby)`,
+      })) ?? '',
+    ).trim();
+    if (!found) continue;
+    await kubectl(['-n', namespace, 'scale', type, name, '--replicas=0'], {
+      env,
+      description: `applyK3sManifests: zero ${namespace}/${name} (pilot standby)`,
+    });
+    zeroed.push(name);
+  }
+  if (zeroed.length > 0) console.error(`[pilot-standby] zeroed ${zeroed.join(', ')}`);
+  return zeroed;
+}
+
+/**
+ * Pilot-light standby: point the grafana-tls Certificate an observability
+ * stack left from this cluster's primary life at the standby's self-signed
+ * issuer (the real issuer rides the promote annotation, as on vibecarbon-tls).
+ * The stack's Deployments are zeroed by zeroWorkloadsOnStandby from the
+ * declaration when the add-on is in the project tree; `leftoverWorkloads`
+ * are the namespace's declared Deployments that list did not cover (the
+ * add-on left the tree but its stack is still on the cluster), zeroed here
+ * once the namespace is found. No-op when the namespace is absent, which is
+ * every freshly deployed standby.
+ *
+ * @param {{ env: Record<string, string|undefined>, issuerName: string, leftoverWorkloads?: Array<{kind: string, name: string, namespace: string}>, kubectl?: typeof runKubectlWithRetry }} args
+ * @returns {Promise<boolean>} true when a leftover stack's namespace was found
+ */
+export async function repointObservabilityCertOnStandby({
+  env,
+  issuerName,
+  leftoverWorkloads = [],
+  kubectl = runKubectlWithRetry,
+}) {
   const ns = String(
-    (await runKubectlWithRetry(
+    (await kubectl(
       ['get', 'namespace', OBSERVABILITY_NAMESPACE, '--ignore-not-found', '-o', 'name'],
       {
         env,
@@ -2909,15 +2957,9 @@ export async function demoteObservabilityOnStandby({ env, issuerName }) {
     )) ?? '',
   ).trim();
   if (!ns) return false;
-  console.error(
-    `[pilot-standby] demoting the observability stack left from this cluster's primary life`,
-  );
-  await runKubectlWithRetry(
-    ['-n', OBSERVABILITY_NAMESPACE, 'scale', 'deployment', '--all', '--replicas=0'],
-    { env, description: 'applyK3sManifests: zero observability deployments (pilot standby)' },
-  );
+  await zeroWorkloadsOnStandby({ env, workloads: leftoverWorkloads, kubectl });
   const cert = String(
-    (await runKubectlWithRetry(
+    (await kubectl(
       [
         '-n',
         OBSERVABILITY_NAMESPACE,
@@ -2936,7 +2978,7 @@ export async function demoteObservabilityOnStandby({ env, issuerName }) {
     )) ?? '',
   ).trim();
   if (cert) {
-    await runKubectlWithRetry(
+    await kubectl(
       [
         '-n',
         OBSERVABILITY_NAMESPACE,
@@ -3067,6 +3109,11 @@ export async function applyK3sManifests({
   // patches are NOT gated — failover needs the registry (CA-spawned workers
   // pull the app image from it) and the serving master.
   const pilotStandby = role === 'standby';
+  // The add-on workloads a pilot standby holds at zero: every add-on deployed
+  // into the project's k8s tree, both policies (the app tier is zeroed).
+  const standbyAddonWorkloads = pilotStandby
+    ? k8sStandbyZeroedWorkloads(enabledK8sAddonNames(projectDir))
+    : [];
   // 0. Validate DNS-01 prerequisites BEFORE any apply so the failure
   //    surfaces at deploy-start, not 20 min in when an Order pins Pending.
   //    Throws on missing token for any DNS01_PROVIDERS row; manual returns null.
@@ -3591,6 +3638,11 @@ export async function applyK3sManifests({
       ],
       { env, description: 'applyK3sManifests: zero app deployment (pilot standby)' },
     );
+    // Every declared add-on follows (primary-only ones write to the primary's
+    // database; with-app-tier ones follow the zeroed app tier), in the same
+    // window after `apply -k` as the app. Failover scales the app-namespace
+    // ones back up from ha.scaleUpList.
+    await zeroWorkloadsOnStandby({ env, workloads: standbyAddonWorkloads });
 
     // Reap stale worker Node OBJECTS. A pilot standby has minWorkers:0, so
     // ANY '-worker-' node here is stale by definition — after a failover,
@@ -3862,15 +3914,25 @@ export async function applyK3sManifests({
     // idempotent across redeploys, so nothing is lost).
     console.error('[pilot-standby] skipping observability, app tier is zeroed until failover');
     // A cluster demoted by the post-failover reconverge was a full primary
-    // and still runs the stack it was given then. Bring it to what a fresh
-    // pilot standby looks like: no observability pods (no scrape or Grafana
-    // spend, no second Prometheus watching a zeroed app tier) and no ACME
-    // issuer behind grafana-tls (single-ACME-issuer policy, see the
-    // vibecarbon-tls patch above). Scale, not delete, so the PVCs keep their
-    // history; the apply above restores `replicas: 1` from the manifests and
-    // re-points the issuer the day this cluster is promoted again. A fresh
-    // standby has no such namespace and this is a no-op.
-    await demoteObservabilityOnStandby({ env, issuerName });
+    // and still runs the stack it was given then. zeroWorkloadsOnStandby
+    // above already scaled its Deployments to zero from the declaration (no
+    // scrape or Grafana spend, no second Prometheus watching a zeroed app
+    // tier; scale, not delete, so the PVCs keep their history). What is left
+    // is the ACME issuer behind grafana-tls (single-ACME-issuer policy, see
+    // the vibecarbon-tls patch above); the apply restores `replicas: 1` and
+    // the issuer the day this cluster is promoted again. A fresh standby has
+    // no such namespace and this is a no-op.
+    await repointObservabilityCertOnStandby({
+      env,
+      issuerName,
+      // A stack left on the cluster after its add-on left the project tree:
+      // nothing above zeroed it, so the namespace check does.
+      leftoverWorkloads: k8sStandbyZeroedWorkloads(declaredAddonNames()).filter(
+        (w) =>
+          w.namespace === OBSERVABILITY_NAMESPACE &&
+          !standbyAddonWorkloads.some((z) => z.namespace === w.namespace && z.name === w.name),
+      ),
+    });
   } else if (
     existsSync(join(observabilityDir, 'kustomization.yaml')) &&
     !baseAggregatesObservability

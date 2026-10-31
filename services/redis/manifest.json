@@ -17,6 +17,17 @@
     "REDIS_PASSWORD": { "generate": "password", "length": 32 }
   },
 
+  "standby": {
+    "policy": "with-app-tier",
+    "compose": {
+      "services": ["redis"],
+      "setup": []
+    },
+    "k8s": [
+      { "kind": "Deployment", "name": "redis", "namespace": "vibecarbon" }
+    ]
+  },
+
   "kustomization": {
     "entry": "redis/"
   },

@@ -335,9 +335,12 @@ export function k8sDbRolloutStatusArgv(timeoutSeconds = DB_STS_BOOT_TIMEOUT_S) {
  * @param {string} args.envName
  * @param {string} args.promotedIp
  * @param {string} args.detail underlying failure text
+ * @param {string[]} [args.heldAtZero] compose: the primary-only add-ons the next
+ *   reconcile scales back to 0, when the failover never wrote WALG_ROLE=primary
+ *   into the promoted node's .env (it still reads standby)
  * @returns {string}
  */
-export function walgRoleDegradedMessage({ path, envName, promotedIp, detail }) {
+export function walgRoleDegradedMessage({ path, envName, promotedIp, detail, heldAtZero = [] }) {
   const verify =
     path === 'compose'
       ? `ssh root@${promotedIp} 'cd /opt/<project> && docker compose exec -T db printenv WALG_ROLE'`
@@ -349,6 +352,10 @@ export function walgRoleDegradedMessage({ path, envName, promotedIp, detail }) {
     `ONLY live copy of your data and is accumulating no recoverable backups. Check the ` +
     `write-guard with \`${verify}\` (it must print \`primary\`), then re-run ` +
     `\`vibecarbon deploy ${envName}\`; a deploy re-renders WALG_ROLE from the now-swapped ` +
-    `config and re-runs the same backup audit.`
+    `config and re-runs the same backup audit.` +
+    (heldAtZero.length > 0
+      ? ` Until WALG_ROLE=primary is in the new primary's .env, its next reconcile scales ` +
+        `${heldAtZero.join(', ')} back to 0; that deploy writes it.`
+      : '')
   );
 }

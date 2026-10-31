@@ -276,16 +276,17 @@ describe('failoverComposeHA — standby already streaming', () => {
     // and exited ~2s having stopped NOTHING — the old primary kept serving
     // writes behind the SPLIT-BRAIN warning.
     const stopIdx = sshCalls.findIndex(
-      (c) => c.ip === '1.1.1.1' && c.command.includes('docker stop myapp-app'),
+      (c) => c.ip === '1.1.1.1' && c.command.includes('for c in myapp-app;'),
     );
     const demoteIdx = sshCalls.findIndex(
       (c) => c.ip === '1.1.1.1' && c.command.includes('up -d --no-deps db'),
     );
     expect(stopIdx).toBeGreaterThanOrEqual(0);
     expect(demoteIdx).toBeGreaterThan(stopIdx);
-    // Exactly the app: a missing container makes `docker stop` exit non-zero,
-    // which reads as the split-brain warning.
-    expect(sshCalls[stopIdx].command).toBe('docker stop myapp-app');
+    // Exactly the app, and by inspect-then-stop: a missing container makes a
+    // plain `docker stop` exit non-zero, which reads as the split-brain warning.
+    expect(sshCalls[stopIdx].command).toContain('docker container inspect');
+    expect(sshCalls[stopIdx].command).toContain('docker stop "$c"');
     expect(sshCalls.some((c) => /docker compose stop app/.test(c.command))).toBe(false);
   });
 

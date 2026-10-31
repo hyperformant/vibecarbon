@@ -91,6 +91,7 @@ import { confirmProdOrExit } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { pollUntil } from './lib/retry.js';
+import { declaredAddonNames, k8sPrimaryOnlyWorkloads } from './lib/services/standby-policy.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { listWalgBackups } from './lib/walg-backups.js';
@@ -537,12 +538,24 @@ export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, deps = {} }) {
   return { patched };
 }
 
-async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label) {
+/**
+ * Scale each deployment on one cluster, best-effort: a missing one is skipped,
+ * any other failure is warned and named in `failed`. `reached` is true once
+ * kubectl itself ran on the far end (a success, or an exit status other than
+ * ssh's own 255), so a caller can tell a cluster that answered and refused
+ * from one that never answered.
+ *
+ * @returns {Promise<{ reached: boolean, failed: string[] }>}
+ */
+export async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label, opts = {}) {
+  const { kubectl = sshKubectl } = opts;
+  let reached = false;
+  const failed = [];
   for (const dep of deployments) {
     const ns = dep.namespace || 'vibecarbon';
     const target = replicas === 'up' ? (dep.replicas ?? 1) : replicas;
     try {
-      await sshKubectl(ip, sshKeyPath, [
+      await kubectl(ip, sshKeyPath, [
         'scale',
         'deployment',
         dep.name,
@@ -550,7 +563,9 @@ async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label) {
         ns,
         `--replicas=${target}`,
       ]);
+      reached = true;
     } catch (err) {
+      if (typeof err?.status === 'number' && err.status !== 255) reached = true;
       const msg = err instanceof Error ? err.message : String(err);
       // "no objects passed to scale" / "deployments.apps not found" → log and continue.
       // Anything else (auth failure, network) we still want to surface.
@@ -558,10 +573,12 @@ async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label) {
       if (isMissing) {
         p.log.warn(`${label}: ${dep.name} not found; skipped`);
       } else {
+        failed.push(dep.name);
         p.log.warn(`${label}: ${dep.name} failed: ${msg.split('\n')[0]}`);
       }
     }
   }
+  return { reached, failed };
 }
 
 // ============================================================================
@@ -656,6 +673,65 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
 }
 
 /**
+ * `kubectl rollout status` for one scale-up entry on the promoted cluster.
+ * The kubectl --timeout sits INSIDE the SSH client cap (10s more), or the
+ * client kills the connection first and the kubectl error, which names the
+ * stuck deployment, never surfaces (sshRun's default cap is 120s).
+ *
+ * @returns {Promise<string | null>} null once rolled out, else the error's first line
+ */
+async function rolloutStatus(kubectl, ip, sshKeyPath, dep, timeoutS) {
+  const ns = dep.namespace || 'vibecarbon';
+  try {
+    await kubectl(
+      ip,
+      sshKeyPath,
+      ['rollout', 'status', `deployment/${dep.name}`, '-n', ns, `--timeout=${timeoutS}s`],
+      { timeout: (timeoutS + 10) * 1000 },
+    );
+    return null;
+  } catch (err) {
+    return firstErrorLine(err);
+  }
+}
+
+/**
+ * After the DNS flip: wait (in parallel, 300s each) for every add-on entry of
+ * the scale-up list to roll out on the promoted cluster. The pre-flip gate
+ * skips them so a slow add-on never lengthens the outage; this is where an
+ * add-on that never comes up gets named. Warn-only: the failover has
+ * completed, so a not-ready add-on is a line telling the operator what to
+ * run, never a failure.
+ *
+ * @param {string} promotedIp
+ * @param {string} sshKeyPath
+ * @param {Array<{name: string, namespace?: string, addon?: true}>} scaleUpList
+ * @param {{ kubectl?: Function }} [opts]
+ * @returns {Promise<{ notReady: string[] }>}
+ */
+export async function checkPromotedAddonRollouts(promotedIp, sshKeyPath, scaleUpList, opts = {}) {
+  const { kubectl = sshKubectl } = opts;
+  const addons = scaleUpList.filter((dep) => dep.addon === true);
+  const results = await Promise.all(
+    addons.map(async (dep) => ({
+      dep,
+      err: await rolloutStatus(kubectl, promotedIp, sshKeyPath, dep, 300),
+    })),
+  );
+  const notReady = [];
+  for (const { dep, err } of results) {
+    if (!err) continue;
+    notReady.push(dep.name);
+    p.log.warn(
+      `add-on ${dep.name} is not ready on the promoted cluster (${err}); the failover ` +
+        `is complete, so check it with: ssh root@${promotedIp} 'kubectl rollout status ` +
+        `deployment/${dep.name} -n ${dep.namespace || 'vibecarbon'}'`,
+    );
+  }
+  return { notReady };
+}
+
+/**
  * Post-promotion readiness gate for the k8s failover paths. Runs AFTER the
  * promoted app tier is scaled up: rollout-status-waits EACH persisted scale-up
  * entry (so "Failover complete" means the freshly-scaled deployments actually
@@ -681,6 +757,19 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
 export async function gatePromotedApiReadiness(domain, promotedIp, sshKeyPath, s, opts = {}) {
   const { scaleUpList = [], kubectl = sshKubectl, runner = sshRun } = opts;
 
+  // Add-on entries (deriveScaleUpList marks them `addon: true`) are not
+  // awaited: this gate sits before the DNS flip, and a slow add-on (Metabase's
+  // cold JVM start) must not lengthen the outage. After the flip the failover
+  // checks their rollout (checkPromotedAddonRollouts) and warns on one that is
+  // not ready.
+  const appTier = scaleUpList.filter((dep) => dep.addon !== true);
+  const addons = scaleUpList.filter((dep) => dep.addon === true).map((dep) => dep.name);
+  if (addons.length > 0) {
+    p.log.info(
+      `add-ons not awaited before the DNS flip: ${addons.join(', ')} ` +
+        '(failover checks their rollout after the flip and warns if one is not ready)',
+    );
+  }
   s.start('Waiting for the promoted app tier to roll out');
   // Roll out every deployment IN PARALLEL. Serially, this gate waits up to
   // ~11 deployments × 130s ≈ 24 min in the worst case — enough to blow the e2e
@@ -690,23 +779,9 @@ export async function gatePromotedApiReadiness(domain, promotedIp, sshKeyPath, s
   // timeout per call. The deleted restartPromotedPostgresDependents fanned out
   // exactly like this.
   await Promise.all(
-    scaleUpList.map(async (dep) => {
-      const ns = dep.namespace || 'vibecarbon';
-      try {
-        // 120s server-side inside a 130s client cap: the kubectl --timeout must
-        // sit INSIDE the SSH client timeout or the client kills the connection
-        // first and the kubectl error (which names the stuck deployment) never
-        // surfaces (sshRun's default cap is 120s).
-        await kubectl(
-          promotedIp,
-          sshKeyPath,
-          ['rollout', 'status', `deployment/${dep.name}`, '-n', ns, '--timeout=120s'],
-          { timeout: 130_000 },
-        );
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        p.log.warn(`rollout status promoted: ${dep.name} did not settle: ${msg.split('\n')[0]}`);
-      }
+    appTier.map(async (dep) => {
+      const err = await rolloutStatus(kubectl, promotedIp, sshKeyPath, dep, 120);
+      if (err) p.log.warn(`rollout status promoted: ${dep.name} did not settle: ${err}`);
     }),
   );
   s.stop('Promoted app tier rolled out (best-effort)');
@@ -1652,6 +1727,7 @@ export async function failoverHA(
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
     promoteIssuer = promoteAcmeIssuer,
+    addonRollouts = checkPromotedAddonRollouts,
     writeFence = (srv, key) =>
       writeK8sBackupFence({ ip: srv.standby.ip, sshKeyPath: key, primaryNode: srv.standby.ip }),
     recordFence = recordBackupFence,
@@ -2076,9 +2152,25 @@ export async function failoverHA(
   }
 
   // STEP 5 — Scale up the promoted app tier from the persisted list ('up' = each
-  // entry's own deploy-rendered replica count), on the promoted cluster.
+  // entry's own deploy-rendered replica count), on the promoted cluster. The
+  // primary-only add-ons (n8n, metabase) are held back to STEP 6c: they run
+  // cron and webhooks against the database, so they start only once the old
+  // primary's copies are scaled down. Add-ons that follow the app tier (redis)
+  // come up with it.
+  const primaryOnlyKeys = new Set(
+    k8sPrimaryOnlyWorkloads(declaredAddonNames()).map((w) => `${w.namespace}/${w.name}`),
+  );
+  const isPrimaryOnly = (dep) =>
+    dep.addon === true && primaryOnlyKeys.has(`${dep.namespace || 'vibecarbon'}/${dep.name}`);
+  const primaryOnlyAddons = scaleUpList.filter(isPrimaryOnly);
   s.start('Scaling up the promoted app tier');
-  await scale(servers.standby.ip, sshKeyPath, scaleUpList, 'up', 'scale up promoted app tier');
+  await scale(
+    servers.standby.ip,
+    sshKeyPath,
+    scaleUpList.filter((dep) => !isPrimaryOnly(dep)),
+    'up',
+    'scale up promoted app tier',
+  );
   s.stop('Promoted app tier scaled up');
 
   // STEP 5b — Single-ACME-issuer policy, promote half (d4 2026-08-28): the
@@ -2108,16 +2200,57 @@ export async function failoverHA(
   // mode the primary is already quiesced; when it was unreachable we could not
   // quiesce pre-promotion, so scale its app tier down NOW — after the gate,
   // BEFORE the DNS flip. If the old primary is still unreachable this no-ops.
+  // An old cluster that answered but did not scale everything down may still
+  // run its primary-only add-ons: starting ours too would fire the same cron
+  // and webhooks twice, so STEP 6c holds them back. One that never answered
+  // keeps today's behaviour (it is fenced when it comes back).
+  let oldPrimaryStillWriting = false;
   if (!planned) {
     s.start('Scaling down the old primary app tier (best-effort split-brain prevention)');
-    await scale(
+    const down = await scale(
       servers.primary.ip,
       sshKeyPath,
       scaleUpList,
       0,
       'scale-down old primary (best-effort)',
     );
-    s.stop('Old primary app tier scaled down (best-effort)');
+    oldPrimaryStillWriting = Boolean(down?.reached && down.failed?.length > 0);
+    s.stop(
+      oldPrimaryStillWriting
+        ? `Old primary app tier NOT fully scaled down (${down.failed.join(', ')})`
+        : 'Old primary app tier scaled down (best-effort)',
+    );
+  }
+
+  // STEP 6c — Start the primary-only add-ons on the promoted cluster, now that
+  // the old primary's are scaled down (unplanned, STEP 6b, a no-op when it is
+  // unreachable) or quiesced (planned, STEP 2). Starting them earlier would
+  // leave two n8n instances firing the same cron and webhooks while the old
+  // primary still answers. Not awaited here: checkPromotedAddonRollouts names
+  // a slow one after the DNS flip.
+  if (primaryOnlyAddons.length > 0 && oldPrimaryStillWriting) {
+    const startCmd = primaryOnlyAddons
+      .map(
+        (d) =>
+          `kubectl -n ${d.namespace || 'vibecarbon'} scale deployment/${d.name} --replicas=${d.replicas ?? 1}`,
+      )
+      .join(' && ');
+    p.log.warn(
+      `Not starting the primary-only add-ons (${primaryOnlyAddons.map((d) => d.name).join(', ')}) ` +
+        `on the promoted cluster: the old primary (${servers.primary.ip}) answered but did not ` +
+        'scale everything down, so both would run them. Once its app tier and add-ons are at ' +
+        `zero, start them: ssh root@${servers.standby.ip} '${startCmd}'`,
+    );
+  } else if (primaryOnlyAddons.length > 0) {
+    s.start('Starting the primary-only add-ons on the promoted cluster');
+    await scale(
+      servers.standby.ip,
+      sshKeyPath,
+      primaryOnlyAddons,
+      'up',
+      'start primary-only add-ons on the promoted cluster',
+    );
+    s.stop(`Primary-only add-ons scaled up: ${primaryOnlyAddons.map((d) => d.name).join(', ')}`);
   }
 
   // STEP 7 — Switch apex + wildcard A records to the standby floating IP.
@@ -2163,6 +2296,23 @@ export async function failoverHA(
       `could not fence the retired node (${String(err?.message ?? err).split('\n')[0]}); the ` +
         'next status, failover or deploy that reaches it fences it',
     );
+  }
+
+  // Every add-on's rollout, now that it no longer holds the outage open.
+  // Warn-only: a not-ready add-on never fails a completed failover.
+  if (scaleUpList.some((dep) => dep.addon === true)) {
+    s.start('Checking the add-on rollouts on the promoted cluster');
+    try {
+      const { notReady } = await addonRollouts(servers.standby.ip, sshKeyPath, scaleUpList);
+      s.stop(
+        notReady.length === 0
+          ? 'Add-ons rolled out on the promoted cluster'
+          : `Add-ons not ready yet: ${notReady.join(', ')}`,
+      );
+    } catch (err) {
+      s.stop('Add-on rollouts not checked');
+      p.log.warn(`could not check the add-on rollouts: ${firstErrorLine(err)}`);
+    }
   }
 
   if (!dnsFlip.ok) {

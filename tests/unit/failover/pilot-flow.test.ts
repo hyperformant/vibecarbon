@@ -18,6 +18,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AbortProvisioningError,
@@ -466,6 +467,10 @@ const SCALE_UP_LIST = [
 
 interface RunOpts {
   primaryReachable: boolean;
+  scaleUpList?: Array<{ name: string; namespace: string; replicas: number; addon?: true }>;
+  addonRolloutsThrows?: boolean;
+  /** What the old primary's scale-down reports (default: the real shape is not returned). */
+  oldPrimaryScaleDown?: { reached: boolean; failed: string[] };
   /** The promote verdict is 'unknown': the promotion could not be confirmed. */
   promoteUnknown?: boolean;
   manualDns?: boolean;
@@ -491,6 +496,9 @@ async function runFailoverHA(opts: RunOpts) {
     catchUpThrows = false,
     walgRoleFails = false,
     standbyOutputs,
+    scaleUpList = SCALE_UP_LIST,
+    addonRolloutsThrows = false,
+    oldPrimaryScaleDown,
   } = opts;
   const order: string[] = [];
   let thrown: unknown;
@@ -518,7 +526,7 @@ async function runFailoverHA(opts: RunOpts) {
       order.push('preflight');
       return {
         workerSpec: { count: 2, serverType: 'cx23' },
-        scaleUpList: SCALE_UP_LIST,
+        scaleUpList,
         standbyStack: 'e4-standby',
         creds: { apiToken: 'threaded-token' },
         ...(standbyOutputs ? { standbyOutputs } : {}),
@@ -573,9 +581,13 @@ async function runFailoverHA(opts: RunOpts) {
       else if (/scale up promoted/.test(label)) {
         order.push('scaleUp');
         captured.scaleUp = { list, replicas };
+      } else if (/start primary-only add-ons/.test(label)) {
+        order.push('startPrimaryOnly');
+        captured.startPrimaryOnly = { list, replicas };
       } else if (/scale-down old primary/.test(label)) {
         order.push('scaleDownOldPrimary');
         captured.scaleDown = { list, replicas };
+        return oldPrimaryScaleDown;
       }
     },
     reseed: async (srv: { standby: { dbPrivateIp?: string; dbIp?: string } }) => {
@@ -625,6 +637,12 @@ async function runFailoverHA(opts: RunOpts) {
     reconcileRetired: async () => {
       order.push('fenceRetired');
       return { fenced: [], unreachable: [] };
+    },
+    addonRollouts: async (_ip: string, _key: string, list: unknown) => {
+      order.push('addonRollouts');
+      captured.addonRollouts = list;
+      if (addonRolloutsThrows) throw new Error('unexpected');
+      return { notReady: ['metabase'] };
     },
   };
 
@@ -713,6 +731,111 @@ describe('failoverHA step order', () => {
     expect(order.indexOf('promote')).toBeLessThan(order.indexOf('scaleUp'));
   });
 
+  const WITH_ADDONS = [
+    { name: 'app', namespace: 'vibecarbon', replicas: 2 },
+    { name: 'redis', namespace: 'vibecarbon', replicas: 1, addon: true as const },
+    { name: 'n8n', namespace: 'vibecarbon', replicas: 1, addon: true as const },
+    { name: 'metabase', namespace: 'vibecarbon', replicas: 1, addon: true as const },
+    { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
+  ];
+  const names = (v: unknown) => (v as Array<{ name: string }>).map((d) => d.name);
+
+  it('unplanned: primary-only add-ons start only after the old primary is scaled down; redis stays with the app', async () => {
+    // Two n8n instances against reachable primaries would both fire cron and
+    // webhooks, so n8n and metabase wait until the old primary's writers are
+    // scaled to zero. The app tier (and redis, which follows it) does not move.
+    const { order, captured } = await runFailoverHA({
+      primaryReachable: false,
+      scaleUpList: WITH_ADDONS,
+    });
+    expect(names((captured.scaleUp as { list: unknown }).list)).toEqual([
+      'app',
+      'redis',
+      'cluster-autoscaler',
+    ]);
+    expect(captured.startPrimaryOnly).toEqual({
+      list: [WITH_ADDONS[2], WITH_ADDONS[3]],
+      replicas: 'up',
+    });
+    // The old primary's scale-down still covers the whole list.
+    expect(names((captured.scaleDown as { list: unknown }).list)).toEqual(names(WITH_ADDONS));
+    expect(order.indexOf('scaleUp')).toBeLessThan(order.indexOf('rollout'));
+    expect(order.indexOf('scaleDownOldPrimary')).toBeLessThan(order.indexOf('startPrimaryOnly'));
+    expect(order.indexOf('startPrimaryOnly')).toBeLessThan(order.indexOf('dns'));
+    // The app-tier gate still receives the full list (it skips add-ons itself).
+    expect(captured.gateScaleUpList).toBe(WITH_ADDONS);
+  });
+
+  it('unplanned, old cluster answers but its scale-down failed: primary-only add-ons are NOT started, the command is printed', async () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const { order, thrown } = await runFailoverHA({
+      primaryReachable: false,
+      scaleUpList: WITH_ADDONS,
+      oldPrimaryScaleDown: { reached: true, failed: ['n8n'] },
+    });
+    expect(thrown).toBeUndefined();
+    expect(order).not.toContain('startPrimaryOnly');
+    expect(order).toContain('dns');
+    const hint = warn.mock.calls.map((c) => String(c[0])).find((w) => /Not starting/.test(w));
+    expect(hint).toContain('n8n');
+    expect(hint).toContain(
+      "ssh root@10.0.0.9 'kubectl -n vibecarbon scale deployment/n8n --replicas=1 && kubectl -n vibecarbon scale deployment/metabase --replicas=1'",
+    );
+    warn.mockRestore();
+  });
+
+  it('unplanned, old cluster unreachable or scaled down: primary-only add-ons start as before', async () => {
+    for (const oldPrimaryScaleDown of [
+      { reached: false, failed: ['app', 'n8n'] },
+      { reached: true, failed: [] },
+    ]) {
+      const { order } = await runFailoverHA({
+        primaryReachable: false,
+        scaleUpList: WITH_ADDONS,
+        oldPrimaryScaleDown,
+      });
+      expect(order).toContain('startPrimaryOnly');
+    }
+  });
+
+  it('planned: primary-only add-ons start after the quiesce and the gate, before dns', async () => {
+    const { order } = await runFailoverHA({ primaryReachable: true, scaleUpList: WITH_ADDONS });
+    expect(order.indexOf('quiesce')).toBeLessThan(order.indexOf('startPrimaryOnly'));
+    expect(order.indexOf('apiProbe')).toBeLessThan(order.indexOf('startPrimaryOnly'));
+    expect(order.indexOf('startPrimaryOnly')).toBeLessThan(order.indexOf('dns'));
+  });
+
+  it('checks every add-on rollout after the DNS flip and the role swap, warn-only', async () => {
+    const { order, captured, thrown } = await runFailoverHA({
+      primaryReachable: true,
+      scaleUpList: WITH_ADDONS,
+    });
+    // The fake reports metabase not ready: the failover still completes.
+    expect(thrown).toBeUndefined();
+    expect(order.indexOf('dns')).toBeLessThan(order.indexOf('addonRollouts'));
+    expect(order.indexOf('saveConfig')).toBeLessThan(order.indexOf('addonRollouts'));
+    expect(captured.addonRollouts).toBe(WITH_ADDONS);
+  });
+
+  it('an add-on rollout check that throws still never fails the failover', async () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const { thrown, order } = await runFailoverHA({
+      primaryReachable: true,
+      scaleUpList: WITH_ADDONS,
+      addonRolloutsThrows: true,
+    });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('addonRollouts');
+    expect(warn.mock.calls.some((c) => /add-on rollout/.test(String(c[0])))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('no add-ons: no primary-only start and no add-on rollout check', async () => {
+    const { order } = await runFailoverHA({ primaryReachable: false });
+    expect(order).not.toContain('startPrimaryOnly');
+    expect(order).not.toContain('addonRollouts');
+  });
+
   // The bug this guards: failover swapped ha.primary↔ha.standby in the project
   // config but nothing re-rendered WALG_ROLE, so the promoted cluster kept the
   // standby write-guard and its base backups (and, once the k8s archive wrapper
@@ -773,7 +896,8 @@ describe('failoverHA step order', () => {
   it('scale-up uses the persisted list (with namespaces, CA in kube-system), not a hardcoded list', async () => {
     const { captured } = await runFailoverHA({ primaryReachable: true });
     const scaleUp = captured.scaleUp as { list: typeof SCALE_UP_LIST; replicas: unknown };
-    expect(scaleUp.list).toBe(SCALE_UP_LIST);
+    // A copy without the primary-only add-ons (none here), so equal, not the same array.
+    expect(scaleUp.list).toEqual(SCALE_UP_LIST);
     expect(scaleUp.replicas).toBe('up');
     expect(scaleUp.list.find((d) => d.name === 'cluster-autoscaler')?.namespace).toBe(
       'kube-system',

@@ -17,10 +17,13 @@
  * the sign-in condition; there is no separate auth service to probe. Best-effort throughout (loud warning, never
  * throws) — the promotion + DNS flip already happened.
  */
-import { describe, expect, it, vi } from 'vitest';
+import * as p from '@clack/prompts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  checkPromotedAddonRollouts,
   gatePromotedApiReadiness,
   promotedProbeArgv,
+  scaleDeployments,
   waitForPromotedApiServing,
 } from '../../../src/failover.js';
 
@@ -76,6 +79,29 @@ describe('gatePromotedApiReadiness', () => {
     const firstProbe = trace.indexOf('probe');
     expect(firstProbe).toBeGreaterThan(-1);
     expect(lastRollout).toBeLessThan(firstProbe);
+  });
+
+  it('awaits only the app tier: an add-on entry is scaled up but never rollout-waited before the flip', async () => {
+    // Metabase's cold JVM start can take minutes; the gate sits before the DNS
+    // flip, so waiting on it would lengthen the outage. A never-settling add-on
+    // rollout must not hold the gate.
+    const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
+      if (argv.includes('deployment/metabase')) return new Promise<string>(() => {});
+      return '';
+    });
+    const runner = vi.fn(async () => '200');
+    await gatePromotedApiReadiness('app.example.com', '9.9.9.9', '/key', noopSpinner(), {
+      scaleUpList: [
+        { name: 'app', namespace: 'vibecarbon', replicas: 2 },
+        { name: 'metabase', namespace: 'vibecarbon', replicas: 1, addon: true },
+        { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
+      ],
+      kubectl,
+      runner,
+    });
+    const rolled = kubectl.mock.calls.map((c) => (c[2] as string[])[2]);
+    expect(rolled).toEqual(['deployment/app', 'deployment/cluster-autoscaler']);
+    expect(runner).toHaveBeenCalled();
   });
 
   it('dispatches all rollout-status waits in PARALLEL, not serially', async () => {
@@ -171,6 +197,98 @@ describe('gatePromotedApiReadiness', () => {
     // Rollouts still ran, but no probe fired without a domain.
     expect(kubectl.mock.calls.some((c) => c[2][0] === 'rollout')).toBe(true);
     expect(runner).not.toHaveBeenCalled();
+  });
+});
+
+describe('checkPromotedAddonRollouts (after the DNS flip, warn-only)', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const LIST = [
+    { name: 'app', namespace: 'vibecarbon', replicas: 2 },
+    { name: 'redis', namespace: 'vibecarbon', replicas: 1, addon: true },
+    { name: 'metabase', namespace: 'vibecarbon', replicas: 1, addon: true },
+    { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
+  ];
+
+  it('rollout-waits every add-on entry, and only those, in parallel inside the SSH cap', async () => {
+    const calls: Array<{ argv: string[]; opts?: { timeout?: number } }> = [];
+    let release!: () => void;
+    const barrier = new Promise<void>((r) => {
+      release = r;
+    });
+    const kubectl = vi.fn(
+      async (_ip: string, _key: string, argv: string[], opts?: { timeout?: number }) => {
+        calls.push({ argv, opts });
+        await barrier;
+        return '';
+      },
+    );
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const done = checkPromotedAddonRollouts('9.9.9.9', '/key', LIST, { kubectl });
+    expect(calls.map((c) => c.argv[2])).toEqual(['deployment/redis', 'deployment/metabase']);
+    release();
+    await expect(done).resolves.toEqual({ notReady: [] });
+    for (const c of calls) {
+      expect(c.argv).toEqual(expect.arrayContaining(['rollout', 'status', '-n', 'vibecarbon']));
+      expect(c.argv).toContain('--timeout=300s');
+      expect(c.opts).toMatchObject({ timeout: 310_000 });
+    }
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('a failed add-on rollout warns with the exact command to run, and never throws', async () => {
+    const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
+      if (argv.includes('deployment/metabase')) {
+        throw new Error('error: timed out waiting for the condition\nmore');
+      }
+      return '';
+    });
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await expect(checkPromotedAddonRollouts('9.9.9.9', '/key', LIST, { kubectl })).resolves.toEqual(
+      { notReady: ['metabase'] },
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0][0]);
+    expect(line).toContain('metabase');
+    expect(line).toContain('timed out waiting for the condition');
+    expect(line).not.toContain('more');
+    expect(line).toContain(
+      "ssh root@9.9.9.9 'kubectl rollout status deployment/metabase -n vibecarbon'",
+    );
+  });
+});
+
+describe('scaleDeployments reports whether the cluster answered and what failed', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const LIST = [
+    { name: 'app', namespace: 'vibecarbon', replicas: 2 },
+    { name: 'n8n', namespace: 'vibecarbon', replicas: 1, addon: true },
+    { name: 'gone', namespace: 'vibecarbon', replicas: 1 },
+  ];
+  const exitErr = (status: number | undefined, msg: string) =>
+    Object.assign(new Error(msg), { status });
+
+  it('kubectl ran but n8n would not scale: reached, n8n failed, a missing one is skipped', async () => {
+    vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const kubectl = vi.fn(async (_ip: string, _k: string, argv: string[]) => {
+      if (argv.includes('n8n')) throw exitErr(1, 'Error from server (Forbidden)');
+      if (argv.includes('gone')) throw exitErr(1, 'deployments.apps "gone" not found');
+      return 'scaled';
+    });
+    await expect(scaleDeployments('1.1.1.1', '/k', LIST, 0, 'x', { kubectl })).resolves.toEqual({
+      reached: true,
+      failed: ['n8n'],
+    });
+  });
+
+  it('ssh itself failed (exit 255) for every call: not reached', async () => {
+    vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const kubectl = vi.fn(async () => {
+      throw exitErr(255, 'ssh: connect to host 1.1.1.1 port 22: Connection timed out');
+    });
+    await expect(scaleDeployments('1.1.1.1', '/k', LIST, 0, 'x', { kubectl })).resolves.toEqual({
+      reached: false,
+      failed: ['app', 'n8n', 'gone'],
+    });
   });
 });
 

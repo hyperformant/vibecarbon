@@ -836,15 +836,19 @@ describe('applyK3sManifests pilot-standby role', () => {
       leftoverObservability = false;
     }
     expect(cmdCalls.some(isObservabilityApply)).toBe(false);
-    expect(cmdCalls).toContainEqual([
-      'kubectl',
-      '-n',
-      'vibecarbon-observability',
-      'scale',
-      'deployment',
-      '--all',
-      '--replicas=0',
-    ]);
+    // Each Deployment the observability manifest declares, by kubectl scale.
+    for (const name of ['grafana', 'prometheus', 'loki']) {
+      expect(cmdCalls).toContainEqual([
+        'kubectl',
+        '-n',
+        'vibecarbon-observability',
+        'scale',
+        'deployment',
+        name,
+        '--replicas=0',
+      ]);
+    }
+    expect(cmdCalls.some((a) => a.includes('scale') && a.includes('--all'))).toBe(false);
     const grafanaPatch =
       cmdCalls.find(
         (a) => a.includes('patch') && a.includes('grafana-tls') && a.includes('certificate'),
@@ -853,6 +857,28 @@ describe('applyK3sManifests pilot-standby role', () => {
     const body = JSON.parse(grafanaPatch[grafanaPatch.indexOf('-p') + 1]);
     expect(body.spec.issuerRef.name).toBe('vibecarbon-standby-selfsigned');
     expect(Object.values(body.metadata.annotations)[0]).toMatch(/^letsencrypt/);
+  });
+
+  it('a leftover observability stack whose add-on left the project tree is zeroed too', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir();
+    leftoverObservability = true;
+    try {
+      await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
+    } finally {
+      leftoverObservability = false;
+    }
+    for (const name of ['grafana', 'prometheus', 'loki']) {
+      expect(cmdCalls).toContainEqual([
+        'kubectl',
+        '-n',
+        'vibecarbon-observability',
+        'scale',
+        'deployment',
+        name,
+        '--replicas=0',
+      ]);
+    }
   });
 
   it('a fresh standby (no leftover namespace) scales and patches nothing in observability', async () => {
