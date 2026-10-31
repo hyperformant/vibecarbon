@@ -35,10 +35,10 @@ importers:
         version: 0.8.1
       '@pulumi/digitalocean':
         specifier: ^4.75.0
-        version: 4.84.1(typescript@7.0.2)
+        version: 4.84.2(typescript@7.0.2)
       '@pulumi/hcloud':
         specifier: ^1.39.0
-        version: 1.43.1(typescript@7.0.2)
+        version: 1.43.3(typescript@7.0.2)
       '@pulumi/linode':
         specifier: ^6.4.0
         version: 6.7.1(typescript@7.0.2)
@@ -790,11 +790,11 @@ packages:
   '@protobufjs/utf8@1.1.2':
     resolution: {integrity: sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==}
 
-  '@pulumi/digitalocean@4.84.1':
-    resolution: {integrity: sha512-d4+6qkGyOWIxdr4UkhGPP/hEEkilPsfFThMSY+mt/mLW6aPuhi+WjfOl+10RlLpB+TJcsLEFrH/DMepvOoaa1A==}
+  '@pulumi/digitalocean@4.84.2':
+    resolution: {integrity: sha512-yZd+Vz4HnNK1GVVjiVnrPkaFLCchhQzLc6jCiw6ePjFsSfgf8l16A1HV4+5IGLfC0CVxitKbzuCSN0PiKLBjzg==}
 
-  '@pulumi/hcloud@1.43.1':
-    resolution: {integrity: sha512-6UjewEWMjzrT5/9mGn/XKSDoXbn1ohZn9O55MaDQuqWoAzZvtqrDTmuN9rIvj6pdUl5yyRwKOnupabLV29l2mQ==}
+  '@pulumi/hcloud@1.43.3':
+    resolution: {integrity: sha512-fDKUoud52U0SkkF9crANNL9lmrwM3LrOtVR5qZXerqegZSDCaGyDzd92wuJrLlWn74xUirNKYJbmmY9yk3mZ9g==}
 
   '@pulumi/linode@6.7.1':
     resolution: {integrity: sha512-wkSkToTrToMulEfzA+1+cLRz+RBaPPVjA6MkJno/Xen+Ay7Q19hoyhjsmiPMEQhHdOJfbPN9+Ked/+SguGM4OA==}
@@ -983,6 +983,7 @@ packages:
   '@smithy/core@3.36.0':
     resolution: {integrity: sha512-3hJiwG1F5t1SoXqp/yOCmYXziyx7ZVqF63S5W6YU201e/qwVaHPex+E/3vvyY9a3ORq/b+BydeNZpP2saQ9X2g==}
     engines: {node: '>=18.0.0'}
+    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/credential-provider-imds@4.5.2':
     resolution: {integrity: sha512-A9uSdn72ozbRUSit0eib0TW7nXuNPlaeM0zcGkJ+nE6tFcSDbnmtwoxbTCFBukVQcszDAyvsd7+rTduPTXpygg==}
@@ -3849,7 +3850,7 @@ snapshots:
 
   '@protobufjs/utf8@1.1.2': {}
 
-  '@pulumi/digitalocean@4.84.1(typescript@7.0.2)':
+  '@pulumi/digitalocean@4.84.2(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.269.0(typescript@7.0.2)
     transitivePeerDependencies:
@@ -3857,7 +3858,7 @@ snapshots:
       - ts-node
       - typescript
 
-  '@pulumi/hcloud@1.43.1(typescript@7.0.2)':
+  '@pulumi/hcloud@1.43.3(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.269.0(typescript@7.0.2)
     transitivePeerDependencies:
