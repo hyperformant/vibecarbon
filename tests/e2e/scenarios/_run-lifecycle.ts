@@ -69,6 +69,7 @@ import {
   resolveHaDbIps,
   runFailoverContinuityCheck,
   runReplicationChecks,
+  runRestoreDeployContinuityCheck,
   writeReplicationMarker,
 } from '../checks/replication.js';
 import {
@@ -239,6 +240,9 @@ const TIMEOUTS: Record<string, number> = {
   // worst-case ladder we intentionally ship, or the timeout re-creates the
   // exact leak the ladder prevents.
   destroy: 1_200_000,
+  // 75 min, the cold deploy's budget: restore-deploy is a cold deploy whose
+  // db first boot also fetches the backup.
+  'restore-deploy': 4_500_000,
   restore: 4_500_000, // 75 min — restore re-deploys then restores
   'verify-restore': 600_000,
   // 30 min — the pilot-light failover step now includes REAL standby worker
@@ -1309,6 +1313,12 @@ export async function runLifecycle(
   options: LifecycleOptions,
 ): Promise<ScenarioResult> {
   const tag = `[${config.mode}]`;
+  // The base the backup step reported pushed; the restore step restores it
+  // by name (destroy -y takes its own, newer, pre-backup).
+  let pushedBackupName: string | undefined;
+  // k8s tiers: the marker row the backup step writes on the primary before
+  // the backup, which restore-deploy must find in the database it restores.
+  let restoreDeployMarkerId: string | null = null;
   const steps: StepResult[] = [];
   // Set by the teardown sweep when it finds orphans or cannot fully
   // enumerate — gates the scenario verdict (see the sweep block).
@@ -3788,6 +3798,38 @@ EOF`;
       name: 'backup',
       run: () =>
         executeStep('backup', `vibecarbon backup ${config.envPrefix}`, async () => {
+          // k8s tiers: a marker row the backup carries, for restore-deploy.
+          // No silent skip: without it restore-deploy could not tell a
+          // restored database from an empty one.
+          if (isK8sMode) {
+            const primaryIp =
+              config.mode === 'k8s-ha'
+                ? resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp
+                : serverIps[0];
+            if (!primaryIp || !sshKeyPath) {
+              throw new Error(
+                `backup: cannot write the restore-deploy marker (${!primaryIp ? 'no primary IP' : 'no sshKeyPath'})`,
+              );
+            }
+            const markerId = buildMarkerId(scenarioId, 'restore-deploy', Date.now());
+            const write = await writeReplicationMarker(
+              {
+                ip: primaryIp,
+                sshKeyPath,
+                mode: config.mode,
+                projectName: config.projectName,
+                label: 'pre-backup-primary',
+              },
+              markerId,
+            );
+            if (!write.ok) {
+              throw new Error(
+                `backup: could not write the restore-deploy marker ${markerId} on ${primaryIp} (${write.error ?? 'unknown'})`,
+              );
+            }
+            restoreDeployMarkerId = markerId;
+            console.log(`${tag} [backup] wrote restore-deploy marker ${markerId} on ${primaryIp}`);
+          }
           const result = await runBackup(config.envPrefix, {
             cwd: config.projectDir,
             timeout: TIMEOUTS.backup,
@@ -3799,35 +3841,22 @@ EOF`;
             );
           }
 
-          // S3 upload is REQUIRED for restore-after-destroy. Previously this
-          // was a soft warning, which let the lifecycle continue through
-          // destroy → restore — failing at restore with the misleading
-          // "No backups found in S3" message instead of at the actual
-          // fault site (backup). The detail line in stderr from
-          // src/backup.js (name=/code=/status=/bucket=/endpoint=/region=)
-          // is captured here so the next iteration has the AWS SDK error
-          // for RCA without a re-run.
-          //
-          // Case-insensitive match: compose path emits `Uploaded to S3`
-          // (src/backup.js:511, capital U); k8s/k3s path emits
-          // `Backup uploaded to S3` (src/backup.js:655, lowercase u).
-          // Anchoring to the exact compose phrasing falsely failed every
-          // k8s scenario whose backup actually succeeded.
+          // A pushed base is REQUIRED for restore-after-destroy. `vibecarbon
+          // backup` prints `base backup pushed: <name>` only when the backup
+          // script's BACKUP_RESULT marker said pushed (src/backup.js runCreate;
+          // a skip exits 1). Matching that line, not a generic "uploaded to S3",
+          // fails here, at the fault site, instead of at restore.
           const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
-          const s3UploadOk = /uploaded to s3/i.test(combined);
-          const s3UploadFail = /s3 upload failed/i.test(combined);
-          if (s3UploadFail || !s3UploadOk) {
-            const detail = (result.stderr || '')
-              .split('\n')
-              .filter((l) => l.includes('[backup] S3 upload failed') || l.startsWith('    at '))
-              .join('\n')
-              .slice(-2000);
+          const pushed = /base backup pushed: (base_[0-9A-Za-z_]+)/.exec(combined);
+          if (!pushed) {
             throw new Error(
-              `Backup S3 upload failed — restore-after-destroy cannot succeed.\n` +
-                `STDERR detail:\n${detail || '(no [backup] line in stderr)'}\n` +
-                `STDOUT tail: ${(result.stdout || '').slice(-500)}`,
+              `Backup exited 0 but reported no pushed base backup; restore-after-destroy cannot succeed.\n` +
+                `STDOUT tail: ${(result.stdout || '').slice(-1000)}\n` +
+                `STDERR tail: ${(result.stderr || '').slice(-500)}`,
             );
           }
+          pushedBackupName = pushed[1];
+          console.log(`${tag} [backup] base backup pushed: ${pushed[1]}`);
         }),
     },
 
@@ -3862,9 +3891,71 @@ EOF`;
         }),
     },
 
-    // 9. Re-deploy (restore requires running infrastructure)
-    //    The destroy step removed the environment. Re-deploy to create fresh
-    //    infrastructure, then restore the database backup onto it.
+    // 8b. k8s tiers: deploy -restore after the destroy. The destroy kept the
+    //     backups; `deploy -restore latest` must bring the environment back
+    //     with the database seeded from them (C1), which the marker row
+    //     written before the backup proves. Filtered out on compose below.
+    {
+      name: 'restore-deploy',
+      run: () =>
+        executeStep(
+          'restore-deploy',
+          `vibecarbon deploy ${config.envPrefix} -mode ${config.mode} -restore latest -y`,
+          async (stepId) => {
+            const deployResult = await runDeploy(config.envPrefix, {
+              cwd: config.projectDir,
+              timeout: TIMEOUTS['restore-deploy'],
+              mode: config.mode,
+              domain: config.domain,
+              dnsProvider: config.dnsProvider,
+              serverType: config.serverType,
+              region: config.region,
+              secondaryRegion: config.secondaryRegion,
+              provider: config.provider,
+              restore: 'latest',
+              env: { HCLOUD_TOKEN: hetznerToken },
+              ...expandedDeployBounds,
+            });
+            if (deployResult.exitCode !== 0) {
+              const detail = extractDeployFailureDetail(deployResult.stdout, deployResult.stderr);
+              throw new Error(
+                `deploy -restore latest exited with code ${deployResult.exitCode}: ${detail.slice(-1000)}`,
+              );
+            }
+            serverIps = getServerIps(config.projectDir, config.envPrefix);
+            sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);
+            const primaryIp =
+              config.mode === 'k8s-ha'
+                ? resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp
+                : (serverIps[0] ?? null);
+            const continuity = await runRestoreDeployContinuityCheck({
+              mode: config.mode,
+              projectName: config.projectName,
+              primaryIp,
+              sshKeyPath,
+              markerId: restoreDeployMarkerId,
+            });
+            collector.recordVerifications(stepId, [continuity]);
+            if (continuity.status !== 'pass') {
+              throw new Error(
+                `restore-deploy: ${continuity.checkName}: ${continuity.errorMessage}`,
+              );
+            }
+            console.log(
+              `${tag} [restore-deploy] marker ${restoreDeployMarkerId} restored on ${primaryIp}`,
+            );
+            adminCreds = readAdminCredentials(config.projectDir);
+          },
+        ),
+    },
+
+    // 9. Re-deploy, then `vibecarbon restore` onto it.
+    //    compose tiers: the destroy step removed the environment, so this
+    //    re-deploy is cold and the restore runs onto fresh infrastructure.
+    //    k8s tiers: restore-deploy (8b) already brought the environment back
+    //    from the backups, so this re-deploy is a warm one and the restore
+    //    rewinds a RUNNING database to the pushed base: the running-environment
+    //    restore path, which restore-deploy does not exercise.
     {
       name: 'restore',
       run: () =>
@@ -3912,7 +4003,7 @@ EOF`;
           console.log(`${tag} Re-deployed. Server IPs: [${serverIps.join(', ')}]`);
 
           // Now restore the database backup
-          const restoreResult = await runRestore(config.envPrefix, {
+          const restoreResult = await runRestore(config.envPrefix, pushedBackupName ?? 'latest', {
             cwd: config.projectDir,
             timeout: TIMEOUTS.restore,
             env: { HCLOUD_TOKEN: hetznerToken },
@@ -4497,6 +4588,10 @@ EOF`;
   // `reconverge-deploy` — see the step's own comment for the full rationale.
   if (config.mode !== 'k8s') {
     filteredStepDefs = filteredStepDefs.filter((s) => s.name !== 'warm-redeploy-change');
+  }
+  // restore-deploy is k8s and k8s-ha only: `deploy -restore` refuses compose.
+  if (!isK8sMode) {
+    filteredStepDefs = filteredStepDefs.filter((s) => s.name !== 'restore-deploy');
   }
 
   // Iteration accelerator — drop steps named in --skip-steps / --minimal.

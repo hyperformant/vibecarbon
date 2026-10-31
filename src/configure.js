@@ -1053,9 +1053,11 @@ async function promptCicd() {
 
   // Record opt-in on the project so `ciAvailable()` detects CI/CD without
   // shelling out to `gh` on every deploy.
-  const { saveProjectConfig: savePc } = await import('./lib/config.js');
+  const { updateProjectConfig } = await import('./lib/config.js');
   if (projectConfig) {
-    savePc({ ...projectConfig, cicdEnabled: true }, cwd);
+    updateProjectConfig((config) => {
+      config.cicdEnabled = true;
+    }, cwd);
     p.log.success('Marked CI/CD as enabled in .vibecarbon.json');
   } else {
     p.log.warn(
@@ -1651,7 +1653,7 @@ export async function runConfigureCicd(envName) {
     const targetKubeconfig = join(cwd, '.vibecarbon', `kubeconfig-${target.envName}`);
     if (!existsSync(targetKubeconfig)) {
       p.log.warn(
-        `Kubeconfig for ${target.envName} not found at ${targetKubeconfig}, skipping. Re-deploy that cluster with vibecarbon deploy first.`,
+        `Kubeconfig for ${target.envName} not found at ${targetKubeconfig}, skipping. Deploy that cluster first with \`vibecarbon deploy\`.`,
       );
       continue;
     }
@@ -1668,6 +1670,7 @@ export async function runConfigureCicd(envName) {
       providerCreds,
       appStorage,
       imageTag,
+      backupConfig: subEnvConfig.backup || envConfig.backup,
     });
   }
 
@@ -1767,11 +1770,12 @@ export async function runForgetAppStorageKey(id) {
     p.outro(`${id} is not a retired app storage key here, so there is nothing to forget.`);
     return;
   }
-  const { saveProjectConfig } = await import('./lib/config.js');
-  const rest = retired.filter((k) => k !== id);
-  if (rest.length > 0) projectConfig.retiredAppKeys = rest;
-  else delete projectConfig.retiredAppKeys;
-  saveProjectConfig(projectConfig);
+  const { updateProjectConfig } = await import('./lib/config.js');
+  updateProjectConfig((config) => {
+    const rest = (config.retiredAppKeys ?? []).filter((k) => k !== id);
+    if (rest.length > 0) config.retiredAppKeys = rest;
+    else delete config.retiredAppKeys;
+  });
   p.outro(
     `Forgot ${id}. The next deploy that syncs the bucket fences (one with a pasted key in the project) takes it out of them; without one, the old deny stays, which does no harm to a deleted key. Make sure it is deleted in the Hetzner console.`,
   );

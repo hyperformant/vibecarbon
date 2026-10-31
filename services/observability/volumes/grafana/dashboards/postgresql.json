@@ -320,6 +320,44 @@
       ],
       "title": "Cache Hit Ratio",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Seconds since postgres last archived a WAL segment (pg_stat_archiver). An idle database archives nothing, so a high value alone is not a failure: vibecarbon status judges it against the current WAL segment. It also cannot see wal-g pushes the archive wrapper gave up on; vibecarbon status counts those from the logs.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 20 },
+      "id": 8,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "pg_stat_archiver_last_archive_age",
+          "legendFormat": "last archive age",
+          "refId": "A"
+        }
+      ],
+      "title": "WAL Archive Age",
+      "type": "stat"
     }
   ],
   "refresh": "30s",

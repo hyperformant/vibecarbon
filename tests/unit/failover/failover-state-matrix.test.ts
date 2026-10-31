@@ -21,7 +21,23 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The real config writers (journal, proof, fence marker) run in these tests
+// against no project: point them at an empty dir, never the repo root, where
+// they would take the real config lock.
+const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+beforeEach(() => {
+  vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
+});
+
+// The first base backup on the new timeline has its own tests
+// (tests/unit/walg/post-promote-backup-census.test.ts, the step-order census);
+// here it lands.
+vi.mock('../../../src/lib/walg/post-promote-backup.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  pushBaseBackupAfterPromote: vi.fn(async () => ({ name: 'base_000000020000000000000004' })),
+}));
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -584,7 +600,7 @@ describe('failoverHA state matrix', () => {
     expect(order.filter((s) => s === 'unquiesce')).toHaveLength(0);
     expect(order).not.toContain('clearJournal');
     expect(thrown?.message).toMatch(/kept fenced/);
-    expect(thrown?.message).toMatch(/rerun vibecarbon failover e4 to finish/);
+    expect(thrown?.message).toMatch(/rerun `vibecarbon failover e4` to finish/);
     // Nothing past the promote ran on an unconfirmed promotion.
     expect(order).not.toContain('scaleUp');
     expect(order).not.toContain('dns');

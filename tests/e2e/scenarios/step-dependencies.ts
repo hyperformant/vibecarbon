@@ -8,6 +8,10 @@ import type { StepName } from './types.js';
 
 /** Each step, and the steps that need it to have run first. */
 export const STEP_DEPENDENTS: Readonly<Partial<Record<StepName, readonly StepName[]>>> = {
+  // The backup writes the marker row restore-deploy looks for; the destroy
+  // leaves the empty environment it deploys into.
+  backup: ['restore-deploy'],
+  destroy: ['restore-deploy'],
   failover: ['second-failover', 'reconverge-deploy'],
   'reconverge-deploy': ['failback'],
   failback: ['verify-failback'],

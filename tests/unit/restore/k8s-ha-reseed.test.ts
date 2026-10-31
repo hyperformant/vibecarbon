@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 /**
  * Finding #2: runK8sRestore performs a first-class VERIFIED standby re-seed for
  * k8s-HA envs (replacing the old warn-and-point-to-`deploy` behavior).
@@ -17,16 +20,27 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The real config writers (journal, proof, fence marker) run in these tests
+// against no project: point them at an empty dir, never the repo root, where
+// they would take the real config lock.
+const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+beforeEach(() => {
+  vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
+});
+
 // The db pod name (DB_POD in src/lib/deploy/db-workload.js), spelled out:
 // vi.mock factories are hoisted above every import.
+// The promotion poll reads pg_is_in_recovery(): report promoted.
+const promotedKubectl = async (_ip: string, _key: string, argv: string[]) =>
+  argv.join(' ').includes('pg_is_in_recovery') ? 'f' : '';
 vi.mock('../../../src/lib/ssh.js', () => ({
   getPostgresPod: vi.fn().mockResolvedValue('db-0'),
-  sshKubectl: vi.fn().mockResolvedValue(''),
+  sshKubectl: vi.fn(promotedKubectl),
   sshRun: vi.fn().mockResolvedValue(''),
   getSSHKeyPath: vi.fn(),
 }));
 
-const { runK8sRestore } = await import('../../../src/restore.js');
+const { runK8sRestore, RestoredDatabaseError } = await import('../../../src/restore.js');
 const ssh = await import('../../../src/lib/ssh.js');
 
 function makeSpinner() {
@@ -56,9 +70,21 @@ const haEnvConfig = {
 
 const baseArgs = {
   chosenSource: { kind: 's3' as const, name: 'latest' },
+  // The base run() resolved from the bucket's stop sentinels.
+  base: {
+    name: 'base_000000010000000000000002',
+    timeline: 1,
+    finishTime: new Date('2026-10-20T01:00:00Z'),
+    sizeBytes: 4_290_228,
+    uncompressedBytes: 23_439_374,
+  },
+  lineage: '7699032860122738725',
+  readFreeBytes: async () => 100 * 1024 ** 3,
+  assertWritable: async () => 'writable' as const,
   envName: 'prod',
   serverIp: '10.0.1.1', // restored primary master
   sshKeyPath: '/tmp/key',
+  pushBaseBackup: vi.fn(async () => ({ name: 'base_000000020000000000000004' })),
 };
 
 beforeEach(() => {
@@ -380,7 +406,7 @@ describe('runK8sRestore: the restored primary is proven writable before the app 
         ) {
           order.push('scaleUp');
         }
-        return '';
+        return promotedKubectl(_ip, _k, argv);
       },
     );
     await runK8sRestore({
@@ -389,9 +415,78 @@ describe('runK8sRestore: the restored primary is proven writable before the app 
       envConfig: { deployMode: 'kubernetes' },
       assertWritable: async () => {
         order.push('writable');
+        return 'writable' as const;
       },
     });
     expect(order[0]).toBe('writable');
     expect(order).toContain('scaleUp');
+  });
+});
+
+describe('runK8sRestore: the first base on the restored timeline (H2b)', () => {
+  it('pushes on the restored primary before the standby re-seed', async () => {
+    const reseedStandbyFromPrimary = vi.fn().mockResolvedValue('reseeded');
+    await runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnvConfig,
+      ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+      reseedStandbyFromPrimary,
+      readReplicationState: vi.fn().mockResolvedValue('streaming'),
+      verifySleep: async () => {},
+    });
+    expect(baseArgs.pushBaseBackup).toHaveBeenCalledWith(
+      expect.objectContaining({ tier: 'k8s', ip: '10.0.1.1', envName: 'prod' }),
+    );
+    expect(baseArgs.pushBaseBackup.mock.invocationCallOrder[0]).toBeLessThan(
+      reseedStandbyFromPrimary.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('a failed push still re-seeds the standby, then fails the restore with its message', async () => {
+    const fail = new Error(
+      'promoted, but the first base backup on the new timeline failed: boom; run vibecarbon backup prod now',
+    );
+    const reseedStandbyFromPrimary = vi.fn().mockResolvedValue('reseeded');
+    const markStandbyUnproven = vi.fn();
+    await expect(
+      runK8sRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: haEnvConfig,
+        pushBaseBackup: vi.fn().mockRejectedValue(fail),
+        ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+        reseedStandbyFromPrimary,
+        readReplicationState: vi.fn().mockResolvedValue('streaming'),
+        markStandbyUnproven,
+        verifySleep: async () => {},
+      }),
+    ).rejects.toBe(fail);
+    expect(reseedStandbyFromPrimary).toHaveBeenCalled();
+    // The standby re-seeded and streams: only the base is missing.
+    expect(markStandbyUnproven).not.toHaveBeenCalled();
+  });
+
+  it('a failed push AND a failed re-seed: one error carries both (the restore itself succeeded)', async () => {
+    const pushFail = new Error(
+      'promoted, but the first base backup on the new timeline failed: boom; run vibecarbon backup prod now',
+    );
+    const markStandbyUnproven = vi.fn();
+    const err = await runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnvConfig,
+      pushBaseBackup: vi.fn().mockRejectedValue(pushFail),
+      ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+      reseedStandbyFromPrimary: vi.fn().mockRejectedValue(new Error('pg_basebackup: no route')),
+      markStandbyUnproven,
+      verifySleep: async () => {},
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(RestoredDatabaseError);
+    expect(err.causes).toHaveLength(2);
+    expect(err.causes[0]).toBe(pushFail);
+    expect(err.message).toContain('the first base backup on the new timeline failed: boom');
+    expect(err.message).toContain('pg_basebackup: no route');
+    expect(markStandbyUnproven).toHaveBeenCalled();
   });
 });

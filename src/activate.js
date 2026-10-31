@@ -189,7 +189,7 @@ export async function runDeactivate(args) {
     'Check your email: click the link within an hour to release this key from its project.',
   );
   p.log.info(
-    'Nothing changes until you do. .vibecarbon.license stays here; run vibecarbon deactivate -rm to remove it.',
+    'Nothing changes until you do. .vibecarbon.license stays here; to remove it, run `vibecarbon deactivate -rm`',
   );
   p.outro('');
 }

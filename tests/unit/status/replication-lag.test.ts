@@ -108,7 +108,7 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
     deployMode: 'kubernetes',
     secondaryRegion: 'fsn1',
     ha: { enabled: true, standby: { masterIp: STANDBY_IP } },
-    servers: [{ name: 'primary', ip: PRIMARY_IP }],
+    servers: [{ name: 'primary', role: 'primary', ip: PRIMARY_IP }],
   });
 
   function makeDeps({ primaryLagOut, standbyOut, byteLagOut = 'streaming|1024' }) {
@@ -179,7 +179,7 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
       deployMode: 'compose-ha',
       secondaryRegion: 'fsn1',
       ha: { enabled: true, standby: { masterIp: STANDBY_IP } },
-      servers: [{ name: 'primary', ip: PRIMARY_IP }],
+      servers: [{ name: 'primary', role: 'primary', ip: PRIMARY_IP }],
     };
     const sshRun = vi.fn(async (_ip, _key, argv) => {
       const cmd = argv[argv.length - 1];

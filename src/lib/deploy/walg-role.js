@@ -329,6 +329,9 @@ export function k8sDbRolloutStatusArgv(timeoutSeconds = DB_STS_BOOT_TIMEOUT_S) {
  * land. Deliberately states the CURRENT state of the world (the failover itself
  * completed — the site is up on the new primary) before the problem, because
  * this is read mid-incident and the first question is always "am I serving?".
+ * It also names the base backup the failover did not push on the new timeline
+ * (pushBaseBackupAfterPromote is not attempted on a node still reading
+ * standby): one error, not two.
  *
  * @param {object} args
  * @param {'compose'|'k8s'} args.path
@@ -352,7 +355,9 @@ export function walgRoleDegradedMessage({ path, envName, promotedIp, detail, hel
     `ONLY live copy of your data and is accumulating no recoverable backups. Check the ` +
     `write-guard with \`${verify}\` (it must print \`primary\`), then re-run ` +
     `\`vibecarbon deploy ${envName}\`; a deploy re-renders WALG_ROLE from the now-swapped ` +
-    `config and re-runs the same backup audit.` +
+    `config and re-runs the same backup audit. There is also no base backup on the new ` +
+    `timeline (a node reading standby skips the push): once the write-guard reads primary, ` +
+    `run \`vibecarbon backup ${envName}\`.` +
     (heldAtZero.length > 0
       ? ` Until WALG_ROLE=primary is in the new primary's .env, its next reconcile scales ` +
         `${heldAtZero.join(', ')} back to 0; that deploy writes it.`

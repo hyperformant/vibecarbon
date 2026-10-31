@@ -23,7 +23,7 @@
  *   - ensureOperatorIpAccess — the all-in-one helper for command run()s
  */
 
-import { saveProjectConfig } from './config.js';
+import { updateProjectConfig } from './config.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { readOperatorVar } from './operator-env.js';
 import { providerFor } from './providers/index.js';
@@ -189,6 +189,33 @@ export function pruneCidrs(list, now = new Date(), maxAgeDays = 90) {
   });
 }
 
+/**
+ * Change the persisted allowlist under the config lock: `change` gets the
+ * list as it is on disk now (another terminal may have added or removed an
+ * entry since this command loaded its copy) and returns the new one. A change
+ * that would leave the list empty is refused, since that locks everyone out.
+ * The in-memory projectConfig is updated too. Returns the list as written,
+ * for the firewall push.
+ *
+ * @param {object} projectConfig
+ * @param {(list: Array<{cidr: string}>) => Array<{cidr: string}>} change
+ * @param {string} [cwd]
+ */
+export function updateOperatorCidrs(projectConfig, change, cwd) {
+  let written;
+  updateProjectConfig((config) => {
+    written = change(loadOperatorCidrs(config));
+    if (written.length === 0) {
+      throw new Error(
+        'Refusing to leave the operator allowlist empty; that would lock everyone out of every environment. Add another entry first.',
+      );
+    }
+    config.operatorCidrs = written;
+  }, cwd);
+  if (projectConfig) projectConfig.operatorCidrs = written;
+  return written;
+}
+
 export function refreshLastUsed(list, cidr, now = new Date()) {
   const nowIso = now.toISOString();
   return list.map((e) => (e.cidr === cidr ? { ...e, lastUsedAt: nowIso } : e));
@@ -267,7 +294,7 @@ export async function applyToFirewall({
  *   yes — non-interactive mode flag
  *   onMessage — optional callback invoked with a single info string when a
  *     new CIDR is added (caller wires this to its logger)
- *   cwd — passed to saveProjectConfig
+ *   cwd — the project directory whose .vibecarbon.json is updated
  *
  * Returns { added, cidr, list, fromEnv }:
  *   added — true if the list was modified this call
@@ -322,8 +349,9 @@ export async function ensureOperatorIpAccess({
       addedAt: now.toISOString(),
       lastUsedAt: now.toISOString(),
     }));
-    persist(projectConfig, newList, cwd);
-    return { added: true, cidr: envCidrs.join(','), list: newList, fromEnv: true };
+    // Another command may have seeded the list meanwhile: a persisted list wins.
+    const written = persist(projectConfig, (fresh) => (fresh.length > 0 ? fresh : newList), cwd);
+    return { added: true, cidr: envCidrs.join(','), list: written, fromEnv: true };
   }
 
   // Auto-detect path — interactive OR a non-CI `-y` deploy.
@@ -351,15 +379,15 @@ export async function ensureOperatorIpAccess({
 
   const match = findMatchingCidr(list, ip, version);
   if (match) {
-    const refreshed = refreshLastUsed(list, match.cidr);
-    persist(projectConfig, refreshed, cwd);
+    // addCidr refreshes lastUsedAt, and re-adds the entry if another terminal
+    // removed it meanwhile (this operator is connecting from it right now).
+    const refreshed = persist(projectConfig, (fresh) => addCidr(fresh, match.cidr), cwd);
     return { added: false, cidr: match.cidr, list: refreshed };
   }
 
   const newCidr = cidrFromIp(ip, version);
   if (onMessage) onMessage(`Detected your IP: ${newCidr}, adding to access list...`);
-  const updatedList = addCidr(list, newCidr);
-  persist(projectConfig, updatedList, cwd);
+  const updatedList = persist(projectConfig, (fresh) => addCidr(fresh, newCidr), cwd);
 
   // Apply to Hetzner firewall when the env is already deployed (firewall
   // exists). For first-deploy bootstrap, the deploy flow itself will create
@@ -381,12 +409,9 @@ export async function ensureOperatorIpAccess({
   return { added: true, cidr: newCidr, list: updatedList };
 }
 
-function persist(projectConfig, newList, cwd) {
-  if (!projectConfig) return;
-  const updated = { ...projectConfig, operatorCidrs: newList };
-  // Mutate in place so callers holding a reference see the new list.
-  projectConfig.operatorCidrs = newList;
-  saveProjectConfig(updated, cwd);
+function persist(projectConfig, change, cwd) {
+  if (!projectConfig) return change([]);
+  return updateOperatorCidrs(projectConfig, change, cwd);
 }
 
 export function parseAllowedSshIpsEnv(envVar) {

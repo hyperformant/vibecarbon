@@ -75,7 +75,7 @@ describe('checkReplication reads the slot on the primary', () => {
       {
         deployMode: 'kubernetes',
         ha: { enabled: true },
-        servers: [{ name: 'primary', ip: '10.1.2.2' }],
+        servers: [{ name: 'primary', role: 'primary', ip: '10.1.2.2' }],
       },
       'myproj',
       {

@@ -244,6 +244,63 @@ export async function awaitPostgresAccepting({
 }
 
 /**
+ * Wait until the db pod's postgres has left recovery: a restored database
+ * replays the WAL after its base, then promotes (recovery_target_action
+ * 'promote'). The pod is Ready (hot standby, accepting reads) before that,
+ * so the rollout wait cannot see it. Throws the last real answer at the
+ * budget; a recovery that fails outright crashes the pod instead.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
+ * @param {string} params.dbPod - e.g. db-0
+ * @param {string} params.dbContainer - e.g. db
+ * @param {string} [params.namespace]
+ * @param {number} [params.budgetMs]
+ * @param {Function} [params.exec] - test seam, defaults to runCommandAsync
+ * @param {Function} [params.sleep] - test seam
+ * @param {Function} [params.nowFn] - test seam
+ */
+export async function awaitPostgresPromoted({
+  env,
+  dbPod,
+  dbContainer,
+  namespace = 'vibecarbon',
+  budgetMs = 300_000,
+  exec = defaultExec,
+  sleep = defaultSleep,
+  nowFn,
+}) {
+  await pollCondition({
+    name: `restored postgres promoted (${dbPod})`,
+    budgetMs,
+    sleep,
+    nowFn,
+    attempt: async () => {
+      const out = await exec(
+        [
+          'kubectl',
+          '-n',
+          namespace,
+          'exec',
+          dbPod,
+          '-c',
+          dbContainer,
+          '--',
+          'psql',
+          '-U',
+          'postgres',
+          '-tAc',
+          'SELECT pg_is_in_recovery()',
+        ],
+        { env, silent: true },
+      );
+      const v = String(out ?? '').trim();
+      if (v !== 'f') throw new Error(`pg_is_in_recovery() = ${v || '(no answer)'}`);
+    },
+  });
+}
+
+/**
  * Prove the operator can sign in: the app reports `adminReady: true` on its
  * own `/api/health` (it creates the super admin at startup from ADMIN_EMAIL /
  * ADMIN_PASSWORD, see src/lib/deploy/admin-ready.js). Probed from inside an

@@ -40,8 +40,24 @@ describe('template migrations census', () => {
     };
     expect(journal.entries.map((e) => e.tag)).toEqual(TAGS);
     expect(journal.entries.map((e) => e.idx)).toEqual([0, 1, 2]);
-    const whens = journal.entries.map((e) => e.when);
-    expect([...whens].sort((a, b) => a - b)).toEqual(whens);
+  });
+
+  // drizzle's migrator applies only entries newer than the newest ledger row,
+  // so an entry whose `when` is not above its predecessor's would be skipped on
+  // any database that already ran the later one. Every entry, not just the
+  // baseline: this holds for whatever the journal grows to.
+  it('every journal entry is strictly newer than the one before it', () => {
+    const journal = JSON.parse(readFileSync(join(DIR, 'meta', '_journal.json'), 'utf8')) as {
+      entries: { tag: string; when: number }[];
+    };
+    journal.entries.forEach((entry, i) => {
+      const previous = journal.entries[i - 1];
+      if (previous) {
+        expect(entry.when, `${entry.tag} must be newer than ${previous.tag}`).toBeGreaterThan(
+          previous.when
+        );
+      }
+    });
   });
 
   it('the custom halves are filled in and the generated half is not hand-edited', () => {

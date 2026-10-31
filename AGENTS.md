@@ -216,7 +216,7 @@ When modifying template files in `carbon/`, these placeholders are replaced at g
 - `{{ADMIN_EMAIL}}` - Admin user email (entered during creation)
 - `{{GITHUB_OWNER}}`, `{{SITE_URL}}` - GitOps owner and the app's public origin
 - `{{DB_PASSWORD}}`, `{{REPL_PASSWORD}}`, `{{ADMIN_PASSWORD}}` - Secret placeholders (the admin password is entered during creation): never substituted into checked-in files; their values go to `.env.local` and deploy patches them in (`SECRET_PLACEHOLDERS` in `src/create.js`)
-- Deploy-time placeholders (`{{DOMAIN}}`, `{{DB_IMAGE}}`, `{{WALG_S3_PREFIX}}`, `{{K8S_STORAGE_CLASS}}`, ...) stay in the scaffold and are filled by `vibecarbon deploy`
+- Deploy-time placeholders (`{{DOMAIN}}`, `{{DB_IMAGE}}`, `{{WALG_S3_PREFIX_BASE}}`, `{{K8S_STORAGE_CLASS}}`, ...) stay in the scaffold and are filled by `vibecarbon deploy`
 
 ### Localization
 

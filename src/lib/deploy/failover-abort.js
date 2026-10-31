@@ -26,7 +26,7 @@
  * I/O; this module owns the order, the refusal and the single save.
  */
 
-import { loadProjectConfig, saveProjectConfig } from '../config.js';
+import { updateProjectConfig } from '../config.js';
 import { backupFenceRecord, backupFenceWarning } from './backup-fence.js';
 import { FailoverRefusedError } from './failover-guard.js';
 
@@ -59,22 +59,22 @@ import { FailoverRefusedError } from './failover-guard.js';
  *   the backup-prefix fence write's record (backup-fence.js), when one was tried
  */
 export function recordFailoverAbort(ctx, { fenceLifted, backupFence = null }) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[ctx.environment];
-  if (!envConfig) {
-    throw new Error(`failover abort: environment ${ctx.environment} is not in .vibecarbon.json`);
-  }
-  const ha = { ...(envConfig.ha ?? {}) };
-  delete ha.failoverInFlight;
-  // The standby's data is unknown now (it may have promoted): nothing proves
-  // it holds this database until a deploy reseeds it.
-  delete ha.systemIdentifier;
-  if (fenceLifted) delete ha.writeFence;
-  if (backupFence) ha.backupFence = backupFence;
-  envConfig.ha = ha;
-  envConfig.replication = 'degraded';
-  envConfig.degraded = true;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[ctx.environment];
+    if (!envConfig) {
+      throw new Error(`failover abort: environment ${ctx.environment} is not in .vibecarbon.json`);
+    }
+    const ha = { ...(envConfig.ha ?? {}) };
+    delete ha.failoverInFlight;
+    // The standby's data is unknown now (it may have promoted): nothing proves
+    // it holds this database until a deploy reseeds it.
+    delete ha.systemIdentifier;
+    if (fenceLifted) delete ha.writeFence;
+    if (backupFence) ha.backupFence = backupFence;
+    envConfig.ha = ha;
+    envConfig.replication = 'degraded';
+    envConfig.degraded = true;
+  });
 }
 
 /**

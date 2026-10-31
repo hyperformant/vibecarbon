@@ -197,6 +197,11 @@ describe('walgRoleDegradedMessage', () => {
     expect(msg).toContain('vibecarbon deploy prod');
   });
 
+  it('names the base backup the failover could not push on the new timeline (one error, not two)', () => {
+    expect(msg).toContain('no base backup on the new timeline');
+    expect(msg).toContain('`vibecarbon backup prod`');
+  });
+
   it('names the add-ons the next reconcile holds at zero only when it is given them', () => {
     expect(msg).not.toContain('next reconcile');
     const held = walgRoleDegradedMessage({

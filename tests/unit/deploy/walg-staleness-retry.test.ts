@@ -41,6 +41,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+/** A resolved restore point, as restore.js hands it to restoreCompose. */
+const RESTORE = {
+  backup: 'base_000000010000000000000002',
+  lineage: '7699032860122738725',
+  target: 'latest',
+  recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
+  assertWritable: async () => 'writable',
+};
+
 const runCommandAsync = vi.fn();
 vi.mock('../../../src/lib/command.js', async () => {
   const actual = await vi.importActual<typeof import('../../../src/lib/command.js')>(
@@ -258,7 +267,7 @@ describe('restoreCompose — wal-g backup-fetch staleness retry (the incident se
       }
     });
 
-    await restoreCompose('10.0.0.1', '/tmp/key', 'testapp', 'latest', {
+    await restoreCompose('10.0.0.1', '/tmp/key', 'testapp', RESTORE, {
       staleRetryDelaysMs: NO_DELAYS,
     });
 
@@ -278,7 +287,7 @@ describe('restoreCompose — wal-g backup-fetch staleness retry (the incident se
       }
     });
 
-    await restoreCompose('10.0.0.1', '/tmp/key', 'testapp', 'latest', {
+    await restoreCompose('10.0.0.1', '/tmp/key', 'testapp', RESTORE, {
       staleRetryDelaysMs: NO_DELAYS,
     });
 
@@ -294,7 +303,7 @@ describe('restoreCompose — wal-g backup-fetch staleness retry (the incident se
     });
 
     await expect(
-      restoreCompose('10.0.0.1', '/tmp/key', 'testapp', 'latest', {
+      restoreCompose('10.0.0.1', '/tmp/key', 'testapp', RESTORE, {
         staleRetryDelaysMs: NO_DELAYS,
       }),
     ).rejects.toThrow(/could not locate required checkpoint record/);
@@ -309,7 +318,7 @@ describe('restoreCompose — wal-g backup-fetch staleness retry (the incident se
     });
 
     await expect(
-      restoreCompose('10.0.0.1', '/tmp/key', 'testapp', 'latest', {
+      restoreCompose('10.0.0.1', '/tmp/key', 'testapp', RESTORE, {
         staleRetryDelaysMs: NO_DELAYS,
       }),
     ).rejects.toThrow(/NoSuchBucket/);
@@ -322,19 +331,167 @@ describe('backupCompose — wal-g backup-push staleness retry', () => {
     progressLog.mockReset();
   });
 
-  it('retries the push/prune on a stale-frontend 404 and completes', async () => {
-    const { backupCompose } = await composePromise;
-    let pushes = 0;
-    mockExec((cmd) => {
+  const PUSHED = 'BACKUP_RESULT=pushed:base_000000010000000000000003\n';
+
+  /** mockExec, with the backup script answering `onBackup`'s value. */
+  function mockBackup(onBackup: (n: number) => string) {
+    let n = 0;
+    runCommandAsync.mockReset();
+    runCommandAsync.mockImplementation(async (argv: string[]) => {
+      const cmd = Array.isArray(argv) ? argv.join(' ') : String(argv);
       if (cmd.includes('backup/compose-backup.sh')) {
-        pushes += 1;
-        if (pushes === 1) throw execError(INCIDENT_OUTPUT);
+        n += 1;
+        return onBackup(n);
       }
+      return '';
+    });
+  }
+
+  it('retries the push on a stale-frontend 404 and returns the pushed name', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup((n) => {
+      if (n === 1) throw execError(INCIDENT_OUTPUT);
+      return PUSHED;
     });
 
-    await backupCompose('10.0.0.1', '/tmp/key', 'testapp', { staleRetryDelaysMs: NO_DELAYS });
+    await expect(
+      backupCompose('10.0.0.1', '/tmp/key', 'testapp', { staleRetryDelaysMs: NO_DELAYS }),
+    ).resolves.toEqual({ result: 'pushed', name: 'base_000000010000000000000003' });
 
     expect(backupPushCount()).toBe(2);
+  });
+
+  it('a lock wait (LOCK_WAIT) rides on the command and stretches the ssh timeout by it', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => PUSHED);
+    await backupCompose('10.0.0.1', '/tmp/key', 'testapp', { lockWaitS: 900 });
+    const call = runCommandAsync.mock.calls.find(([argv]) =>
+      String(Array.isArray(argv) ? argv.join(' ') : argv).includes('backup/compose-backup.sh'),
+    );
+    const cmd = String(Array.isArray(call?.[0]) ? call?.[0].join(' ') : call?.[0]);
+    expect(cmd).toContain('LOCK_WAIT=900 RETAIN=7 bash backup/compose-backup.sh');
+    expect(call?.[1]).toMatchObject({ timeout: 1_800_000 });
+  });
+
+  it('returns a skip as a skip, including the lock skip (exit 75)', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => 'BACKUP_RESULT=skipped:in-recovery\n');
+    await expect(backupCompose('10.0.0.1', '/tmp/key', 'testapp')).resolves.toEqual({
+      result: 'skipped',
+      reason: 'in-recovery',
+    });
+    mockBackup(() => {
+      throw Object.assign(execError('Backup already running, skipping'), {
+        status: 75,
+        stdout: 'BACKUP_RESULT=skipped:already-running\n',
+      });
+    });
+    await expect(backupCompose('10.0.0.1', '/tmp/key', 'testapp')).resolves.toEqual({
+      result: 'skipped',
+      reason: 'already-running',
+    });
+    expect(backupPushCount()).toBe(1);
+  });
+
+  it('a retention failure after the push returns pushed with the cause, and is not retried', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => {
+      throw Object.assign(
+        execError(
+          'ERROR: object not found in storage NoSuchKey\nretention failed after pushing base_000000010000000000000003: ERROR: NoSuchKey',
+        ),
+        { stdout: PUSHED },
+      );
+    });
+    const r = await backupCompose('10.0.0.1', '/tmp/key', 'testapp', {
+      staleRetryDelaysMs: NO_DELAYS,
+    });
+    expect(r).toEqual({
+      result: 'pushed',
+      name: 'base_000000010000000000000003',
+      retentionError:
+        'retention failed after pushing base_000000010000000000000003: ERROR: NoSuchKey',
+    });
+    // A retry would push a second base.
+    expect(backupPushCount()).toBe(1);
+  });
+
+  // The generic SSH ladder (sshRunAsync's isTransientSshCommandError) retries
+  // on /timed out|timeout/ ANYWHERE in the message, which carries the remote
+  // stderr. A retention "i/o timeout" (or any remote timeout wording) after a
+  // pushed base would re-run the script and push a second base. The backup
+  // call retries only an ssh transport failure that provably never started
+  // the remote command (exit 255 + a pre-exec wording).
+  it('a remote timeout wording is not an ssh retry: one run, pushed result', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => {
+      throw Object.assign(
+        execError(
+          'retention failed after pushing base_000000010000000000000003: dial tcp: i/o timeout',
+        ),
+        { stdout: PUSHED, status: 3 },
+      );
+    });
+    const r = await backupCompose('10.0.0.1', '/tmp/key', 'testapp', {
+      staleRetryDelaysMs: NO_DELAYS,
+    });
+    expect(r).toMatchObject({ result: 'pushed', name: 'base_000000010000000000000003' });
+    expect(backupPushCount()).toBe(1);
+  });
+
+  it('a push that failed on a remote timeout (no marker) is not re-run either', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => {
+      throw execError('ERROR: backup-push: context deadline exceeded (Client.Timeout exceeded)');
+    });
+    await expect(
+      backupCompose('10.0.0.1', '/tmp/key', 'testapp', { staleRetryDelaysMs: NO_DELAYS }),
+    ).rejects.toThrow(/Timeout exceeded/);
+    expect(backupPushCount()).toBe(1);
+  });
+
+  // The shared never-started ladder waits 5s before its retry (node:timers/
+  // promises, which fake timers do not reach), hence the longer timeout.
+  it('an ssh connection that never started (exit 255) is retried', {
+    timeout: 15_000,
+  }, async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup((n) => {
+      if (n === 1) {
+        throw Object.assign(
+          execError('ssh: connect to host 10.0.0.1 port 22: Connection refused'),
+          {
+            status: 255,
+          },
+        );
+      }
+      return PUSHED;
+    });
+    await expect(
+      backupCompose('10.0.0.1', '/tmp/key', 'testapp', { staleRetryDelaysMs: NO_DELAYS }),
+    ).resolves.toMatchObject({ result: 'pushed' });
+    expect(backupPushCount()).toBe(2);
+  });
+
+  it('a failure with empty stderr falls back to the error message (no empty cause)', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => {
+      throw Object.assign(new Error('Command failed: ssh … (exit 3)'), {
+        stdout: PUSHED,
+        stderr: '',
+        status: 3,
+      });
+    });
+    const r = await backupCompose('10.0.0.1', '/tmp/key', 'testapp');
+    expect(r).toMatchObject({ retentionError: 'Command failed: ssh … (exit 3)' });
+  });
+
+  it('a run with no marker throws (nothing proves what it did)', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => 'Started\n');
+    await expect(backupCompose('10.0.0.1', '/tmp/key', 'testapp')).rejects.toThrow(
+      /no BACKUP_RESULT/,
+    );
   });
 
   it('propagates a failed push instead of swallowing it (scale must abort before the restore)', async () => {

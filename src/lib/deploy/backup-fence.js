@@ -5,13 +5,15 @@
  * reach: it places markers the node's own scripts check. An old primary that
  * stays unreachable through the failover and then reboots on its own still
  * reads WALG_ROLE=primary, out of recovery, and its archive_command and backup
- * cron push WAL, base backups and a `delete retain` into the shared prefix,
+ * cron push WAL, base backups and a `delete before` into the shared prefix,
  * where LATEST can become its stale timeline.
  *
  * So failover also writes a fence object into the env's backup prefix, which
  * stays reachable when the old primary is dead: `vibecarbon-fence.json` at the
- * root of WALG_S3_PREFIX, read and written with `wal-g st` from inside the db
- * container (its WALG_S3_PREFIX and AWS_* are the ones every push uses):
+ * root of WALG_S3_PREFIX, the database lineage's own folder that walg-env.sh
+ * exports (a promoted standby and its old primary are one lineage), read and
+ * written with `wal-g st` from inside the db container after sourcing that
+ * file (its prefix and AWS_* are the ones every push uses):
  *
  *   { "primaryNode", "systemIdentifier", "timeline", "switchSegment", "at" }
  *
@@ -30,7 +32,7 @@
  * file; when it cannot be read the fence records none and exempts nothing. No fence object means an env
  * that never failed over: allowed. Another system identifier is another
  * database (a destroyed and recreated env): allowed. `wal-g delete garbage` and
- * `delete retain` only touch basebackups_005/ and wal_005/, never the root
+ * `delete before` only touch basebackups_005/ and wal_005/, never the root
  * (verified on postgres:17.11-walg3.0.9-r2 against MinIO).
  *
  * Written BEFORE the DNS flip and the role-swap save of every failover, by
@@ -41,13 +43,14 @@
  */
 
 import * as p from '@clack/prompts';
-import { loadProjectConfig, saveProjectConfig } from '../config.js';
+import { updateProjectConfig } from '../config.js';
 import { sshKubectl } from '../ssh.js';
+import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
 import { sshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD } from './db-workload.js';
 import { k8sPsqlRunner } from './replication.js';
 
-/** The fence object, at the root of WALG_S3_PREFIX. */
+/** The fence object, at the root of WALG_S3_PREFIX (the lineage folder). */
 export const BACKUP_FENCE_OBJECT = 'vibecarbon-fence.json';
 
 /** The line every push path prints when the fence refuses it. */
@@ -120,8 +123,10 @@ export function parseBackupFenceSwitch(out, timeline) {
 /**
  * The `sh` script that writes the fence from inside the db container. The JSON
  * travels base64-encoded (no quote of any kind in the script, so it nests in
- * the ssh and kubectl transports). A db with no backup target (empty or
- * bucketless prefix, as wal-archive.sh reads it) has nothing to fence.
+ * the ssh and kubectl transports). walg-env.sh first, so the fence lands in
+ * this database lineage's folder, where its own push paths read it. A db with
+ * no backup target (empty or bucketless prefix, as wal-archive.sh reads it)
+ * has nothing to fence.
  *
  * @param {object} fence
  * @returns {string}
@@ -130,6 +135,7 @@ export function backupFenceWriteScript(fence) {
   const b64 = Buffer.from(`${JSON.stringify(fence)}\n`).toString('base64');
   const tmp = `/tmp/${BACKUP_FENCE_OBJECT}`;
   return [
+    WALG_ENV_SOURCE,
     'case "$WALG_S3_PREFIX" in ""|s3:///*) echo FENCE_SKIPPED; exit 0;; esac',
     `echo ${b64} | base64 -d > ${tmp}`,
     `wal-g st put --no-compress --no-encrypt -f ${tmp} ${BACKUP_FENCE_OBJECT} >/dev/null 2>&1 || exit 1`,
@@ -206,14 +212,14 @@ export function backupFenceRecord(result, now = () => new Date()) {
 export function recordBackupFence(ctx, result) {
   const record = backupFenceRecord(result);
   try {
-    const config = loadProjectConfig();
-    const envConfig = config?.environments?.[ctx.environment];
-    if (!envConfig) return record;
-    envConfig.ha = {
-      ...(typeof envConfig.ha === 'object' ? envConfig.ha : {}),
-      backupFence: record,
-    };
-    saveProjectConfig(config);
+    updateProjectConfig((config) => {
+      const envConfig = config.environments?.[ctx.environment];
+      if (!envConfig) return;
+      envConfig.ha = {
+        ...(typeof envConfig.ha === 'object' ? envConfig.ha : {}),
+        backupFence: record,
+      };
+    });
   } catch (err) {
     p.log.warn(
       `could not record the backup-prefix fence outcome in .vibecarbon.json ` +

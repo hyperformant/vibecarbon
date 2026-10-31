@@ -11,6 +11,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { runCommand } from './command.js';
 
@@ -25,6 +26,10 @@ export function getPackageManagerVersion(pm) {
       // a wrapper's `npm_execpath` / `npm_config_*` should not decide which
       // binary answers, or how. See PM_RUN_CONTEXT_RE in lib/command.js.
       cleanEnv: true,
+      // Corepack's shim honours the cwd's `packageManager` pin, so asking from
+      // inside a project answers for that pin (or 404s on one that does not
+      // exist) instead of for the host. Ask from outside any project.
+      cwd: homedir(),
     }).trim();
     // Validate it looks like a semver version
     if (/^\d+\.\d+\.\d+/.test(version)) {

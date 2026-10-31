@@ -7,7 +7,7 @@ import * as p from '@clack/prompts';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { checkDependency, runCommand } from './lib/command.js';
-import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { loadProjectConfig } from './lib/config.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import {
   checkExistingRepo,
@@ -117,9 +117,15 @@ const SPEC = {
     },
     {
       name: 'restore',
-      value: '<latest|timestamp>',
+      value: '<latest|base|timestamp>',
       description:
-        'Disaster recovery: seed the fresh DB from the latest wal-g backup in S3 (or PITR to an ISO-8601 timestamp). The restored DB keeps its migration history, so the app applies only newer migrations. k8s and k8s-ha only.',
+        'Disaster recovery: seed a new database from your wal-g backups in S3. Pass latest for the newest backup and all WAL, a base backup name (e.g. base_000000010000000000000004) for that backup and all WAL, or an ISO-8601 timestamp for point-in-time recovery. The restored database keeps its migration history, so the app applies only newer migrations. k8s and k8s-ha only, onto a fresh or destroyed environment.',
+    },
+    {
+      name: 'lineage',
+      value: '<system-identifier>',
+      description:
+        "With -restore: the database lineage to restore from. Each database archives in its own folder, so a destroyed and redeployed environment leaves its old backups beside the new database's. Needed only when more than one lineage holds backups; the refusal and restore -l name them.",
     },
     {
       name: 'allow-degraded',
@@ -205,6 +211,8 @@ function buildLegacyArgs(values, positional) {
     push: false,
     // DR: seed the fresh DB from S3 via wal-g (k8s only). null = normal deploy.
     restore: values.restore || null,
+    // DR: which database lineage -restore reads (its system identifier).
+    lineage: values.lineage || null,
     // HA gate opt-out: accept a warm/degraded standby instead of failing when
     // replication isn't verifiably streaming. Ignored for non-HA modes.
     allowDegraded: !!values['allow-degraded'],
@@ -496,7 +504,6 @@ export {
   runCommand,
   SPEC,
   sanitizeBucketName,
-  saveProjectConfig,
   setupGitHubEnvironment,
   setupGitHubIntegration,
   VERSION,

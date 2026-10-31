@@ -103,7 +103,7 @@ describe('finishK8sReconvergeRecord', () => {
     const call = src.search(
       /if \(tier === 'k8s-ha'\)\s*finishK8sReconvergeRecord\(finalConfig\.environments\[environment\], deployResult\);/,
     );
-    const save = src.indexOf('saveProjectConfig(clearDestroyedRecord(finalConfig, environment));');
+    const save = src.indexOf('return clearDestroyedRecord(finalConfig, environment);');
     expect(call).toBeGreaterThan(-1);
     expect(call).toBeLessThan(save);
   });

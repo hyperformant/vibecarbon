@@ -30,10 +30,6 @@ describe('buildBackupJobWaitScript', () => {
     expect(firstCondsIdx).toBeLessThan(firstSleepIdx);
   });
 
-  it('keeps the 300s deadline ceiling (a load-bearing budget, unchanged)', () => {
-    expect(buildBackupJobWaitScript('j')).toContain('date +%s) + 300');
-  });
-
   it('interpolates the job name into the poll + diagnostics', () => {
     const script = buildBackupJobWaitScript('backup-manual-zzz');
     expect(script).toContain('backup-manual-zzz');

@@ -11,7 +11,8 @@
  *       an object key prefix (S3_KEY_PREFIX / keyPrefix, removed by design);
  *   (c) no CORS rule is merged across environments;
  *   (d) every WAL-G prefix carries an env segment, so two envs never share a
- *       backup chain (the documented exception: local dev's empty string);
+ *       backup chain: now WALG_S3_PREFIX_BASE, held by arm (d) of
+ *       walg-lineage-prefix-census.test.ts;
  *   (e) nothing reads the retired storageBucketGeneration key.
  * These walk the tree rather than list sites, so a new site is caught.
  */
@@ -84,7 +85,7 @@ describe('app bucket single resolver census', () => {
       'src/lib/deploy/bundle.js',
     ]);
     const read = (r: string) => readFileSync(join(ROOT, r), 'utf-8');
-    // compose's WALG_S3_PREFIX reads ${VC_ENV}.
+    // compose's WALG_S3_PREFIX_BASE reads ${VC_ENV}.
     expect(read('src/lib/deploy/bundle.js')).toMatch(assignsEnv);
     // k8s renders its WAL-G prefix from walgPrefix and nothing there reads
     // VC_ENV, so the Secret must not carry a dead (in k8s-ha, wrong) value.
@@ -120,29 +121,6 @@ describe('app bucket single resolver census', () => {
       offenders,
       `the bucket has one owner env, so its CORS rule is never merged: ${offenders.join(', ')}`,
     ).toEqual([]);
-  });
-
-  it('(d) every WALG_S3_PREFIX construction has an env segment, except the empty dev override', () => {
-    const files = [
-      ...srcFiles,
-      ...walk(join(ROOT, 'carbon'), (f) => /docker-compose[^/]*\.yml$/.test(f)),
-      ...walk(join(ROOT, 'carbon/k8s'), (f) => /\.ya?ml$/.test(f)),
-    ];
-    const assignment = /^\s*(?:export\s+)?["']?WALG_S3_PREFIX["']?\s*[:=]\s*(\S.*)$/;
-    const seen: string[] = [];
-    const offenders: string[] = [];
-    for (const f of files) {
-      for (const [i, line] of readFileSync(f, 'utf-8').split('\n').entries()) {
-        const m = assignment.exec(line);
-        if (!m || line.trimStart().startsWith('#')) continue;
-        const value = m[1].trim();
-        seen.push(`${rel(f)}:${i + 1}`);
-        if (value === '""' || value === "''") continue;
-        if (!/walgPrefix|VC_ENV/.test(value)) offenders.push(`${rel(f)}:${i + 1}: ${value}`);
-      }
-    }
-    expect(seen.length).toBeGreaterThanOrEqual(3);
-    expect(offenders, `WALG_S3_PREFIX without an env segment: ${offenders.join('; ')}`).toEqual([]);
   });
 
   it('(e) no file under src/ mentions storageBucketGeneration', () => {

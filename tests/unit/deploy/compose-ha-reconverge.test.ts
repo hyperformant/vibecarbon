@@ -60,11 +60,14 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
   return {
     ...actual,
     loadProjectConfig: () => structuredClone(h.disk.config),
-    saveProjectConfig: (cfg: Record<string, unknown>) => {
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) => {
+      const current = structuredClone(h.disk.config ?? {}) as Record<string, unknown>;
+      const cfg = (fn(current) ?? current) as Record<string, unknown>;
       const env = (cfg as { environments?: Record<string, { status?: string }> }).environments
         ?.prod;
       h.events.push(`save:${env?.status}`);
       h.disk.config = structuredClone(cfg);
+      return cfg;
     },
     registerProject: () => {},
   };
@@ -652,6 +655,34 @@ describe('reconverge effects', () => {
       name: 'myapp-prod-primary',
       ip: RETIRED_IP,
     });
+  });
+
+  it('(f2) the final save keeps records written to disk mid-run, and owns only what it decided', async () => {
+    const ctx = baseCtx();
+    const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
+    await E.haPersistPendingConfig(ctx);
+    await E.haMergeWalgRole(ctx);
+    await E.haStartComposeStack(ctx);
+    await E.haWriteReplicationOverlay(ctx);
+    await E.haConfigureReplication(ctx);
+    await E.haVerifyStreaming(ctx);
+    // Written mid-run by other steps (or another terminal), after the pending save.
+    const env = envOnDisk();
+    env.pendingServerState = [{ stack: 'myapp-prod-primary', serverId: '9' }];
+    env.backup = { lineage: SYSID, unrestoredPrior: '6999' };
+    (env.ha as Record<string, unknown>).writeFence = { ip: '203.0.113.9', source: 'scale' };
+    await E.haFinalizeConfig(ctx);
+    const after = envOnDisk();
+    expect(after.pendingServerState).toEqual([{ stack: 'myapp-prod-primary', serverId: '9' }]);
+    expect(after.backup).toMatchObject({ unrestoredPrior: '6999' });
+    expect((after.ha as Record<string, unknown>).writeFence).toEqual({
+      ip: '203.0.113.9',
+      source: 'scale',
+    });
+    // Decided by this run: the reconverge's proof and replication state.
+    expect((after.ha as Record<string, unknown>).systemIdentifier).toBe(SYSID);
+    expect(after.replication).toBe('streaming');
+    expect(after.status).toBe('deployed');
   });
 
   it('(g) the retired node is fenced before its reseed, and the fence comes off only in finalize', async () => {

@@ -180,7 +180,7 @@ describe('R9 lifecycle on a mint provider', () => {
     const finish = src.indexOf('appBucketFinal = await appBucketFinalize.finish(p.log);');
     const exit = src.indexOf('process.exit(1);', finish);
     const rotate = src.indexOf('await finishAppKeyRotation(', finish);
-    const finalSave = src.indexOf('const persistedConfig = loadProjectConfig()', finish);
+    const finalSave = src.indexOf('updateProjectConfig((persistedConfig) =>', finish);
     expect(finish).toBeGreaterThan(-1);
     expect(exit).toBeGreaterThan(finish);
     expect(rotate).toBeGreaterThan(exit);

@@ -485,7 +485,7 @@ describe('message census: a refusal that fires on a journal names -abort', () =>
 
   it('promotionUnknownMessage names the resume and the abort', () => {
     expect(guard.promotionUnknownMessage('prod')).toMatch(
-      /rerun vibecarbon failover prod to finish it, or run vibecarbon failover prod -abort/,
+      /rerun `vibecarbon failover prod` to finish it, or run `vibecarbon failover prod -abort`/,
     );
   });
 

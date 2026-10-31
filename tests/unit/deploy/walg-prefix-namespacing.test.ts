@@ -20,9 +20,10 @@ const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
 describe('wal-g S3 prefix is a single canonical path (NO role segment)', () => {
   it('compose docker-compose.yml uses …/walg with no WALG_ROLE path segment', () => {
     const compose = read('carbon/docker-compose.yml');
-    // Canonical prefix ends at /walg (end of line — no trailing /role).
+    // Canonical prefix ends at /walg (end of line — no trailing /role). The
+    // lineage folder under it is walg-env.sh's, never a role.
     expect(compose).toMatch(
-      /WALG_S3_PREFIX:\s*s3:\/\/[^\n]*\/backups\/\$\{PROJECT_NAME\}\/\$\{VC_ENV:-local\}\/walg\s*$/m,
+      /WALG_S3_PREFIX_BASE:\s*s3:\/\/[^\n]*\/backups\/\$\{PROJECT_NAME\}\/\$\{VC_ENV:-local\}\/walg\s*$/m,
     );
     // The old role-segmented form must be gone.
     expect(compose).not.toMatch(/walg\/\$\{WALG_ROLE/);

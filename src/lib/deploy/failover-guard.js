@@ -21,7 +21,7 @@
 import { randomUUID } from 'node:crypto';
 import * as p from '@clack/prompts';
 import { exitCancelled, exitDeclined } from '../cli/exit-guard.js';
-import { loadProjectConfig, saveProjectConfig } from '../config.js';
+import { updateProjectConfig } from '../config.js';
 
 /** Refusal raised before any write. The message names the reason and `vibecarbon deploy`. */
 export class FailoverRefusedError extends Error {
@@ -137,8 +137,8 @@ export function assertFailoverClassified(kind, parsed) {
  */
 export function failoverInFlightNextStep(environment) {
   return (
-    `rerun vibecarbon failover ${environment} to finish it, or run vibecarbon failover ` +
-    `${environment} -abort to call it off and keep the old primary`
+    `rerun \`vibecarbon failover ${environment}\` to finish it, or run \`vibecarbon failover ` +
+    `${environment} -abort\` to call it off and keep the old primary`
   );
 }
 
@@ -312,24 +312,26 @@ export async function writeFailoverJournal(
   ctx,
   { target, primaryLsn, systemIdentifier, override },
 ) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[ctx.environment];
-  if (!envConfig) {
-    throw new Error(`failover journal: environment ${ctx.environment} is not in .vibecarbon.json`);
-  }
   const id = randomUUID();
-  envConfig.ha = {
-    ...(envConfig.ha ?? {}),
-    failoverInFlight: {
-      id,
-      target,
-      startedAt: new Date().toISOString(),
-      primaryLsn: primaryLsn ?? null,
-      systemIdentifier,
-      ...(override && { override }),
-    },
-  };
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[ctx.environment];
+    if (!envConfig) {
+      throw new Error(
+        `failover journal: environment ${ctx.environment} is not in .vibecarbon.json`,
+      );
+    }
+    envConfig.ha = {
+      ...(envConfig.ha ?? {}),
+      failoverInFlight: {
+        id,
+        target,
+        startedAt: new Date().toISOString(),
+        primaryLsn: primaryLsn ?? null,
+        systemIdentifier,
+        ...(override && { override }),
+      },
+    };
+  });
   return id;
 }
 
@@ -341,11 +343,10 @@ export async function writeFailoverJournal(
  * @returns {Promise<void>}
  */
 export async function clearFailoverJournal(ctx) {
-  const config = loadProjectConfig();
-  const ha = config?.environments?.[ctx.environment]?.ha;
-  if (!ha || !('failoverInFlight' in ha)) return;
-  delete ha.failoverInFlight;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const ha = config.environments?.[ctx.environment]?.ha;
+    if (ha) delete ha.failoverInFlight;
+  });
 }
 
 /**
@@ -356,11 +357,12 @@ export async function clearFailoverJournal(ctx) {
  * @param {string} systemIdentifier
  */
 export function recordSystemIdentifier(ctx, systemIdentifier) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[ctx.environment];
-  if (!envConfig || !systemIdentifier) return;
-  envConfig.ha = { ...(envConfig.ha ?? {}), systemIdentifier };
-  saveProjectConfig(config);
+  if (!systemIdentifier) return;
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[ctx.environment];
+    if (!envConfig) return;
+    envConfig.ha = { ...(envConfig.ha ?? {}), systemIdentifier };
+  });
 }
 
 /**
@@ -374,13 +376,13 @@ export function recordSystemIdentifier(ctx, systemIdentifier) {
  * @param {{ environment: string }} ctx
  */
 export function markStandbyUnproven(ctx) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[ctx.environment];
-  if (!envConfig) return;
-  envConfig.replication = 'degraded';
-  envConfig.degraded = true;
-  if (envConfig.ha && typeof envConfig.ha === 'object') delete envConfig.ha.systemIdentifier;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[ctx.environment];
+    if (!envConfig) return;
+    envConfig.replication = 'degraded';
+    envConfig.degraded = true;
+    if (envConfig.ha && typeof envConfig.ha === 'object') delete envConfig.ha.systemIdentifier;
+  });
 }
 
 /**
@@ -457,15 +459,21 @@ export class FailoverDnsError extends Error {
 }
 
 /**
- * @param {{ domain: string, ip: string, reason?: string }} args
+ * @param {{ domain: string, ip: string, reason?: string, noBaseFor?: string }} args
+ *   `noBaseFor`: the environment, when the failover skipped its first base
+ *   backup on the new timeline because the flip was not confirmed (the push
+ *   would only stretch an outage); the message then names the command.
  * @returns {string}
  */
-export function dnsDidNotMessage({ domain, ip, reason }) {
+export function dnsDidNotMessage({ domain, ip, reason, noBaseFor }) {
   return (
     `FAILOVER COMPLETED, DNS DID NOT: point A records for ${domain} (apex and *.${domain}) at ${ip}` +
     (reason ? `. ${reason}` : '') +
     `. until they move, ${domain} is down: the old primary is fenced or gone, so nothing serves it` +
-    '. the roles are saved; run vibecarbon deploy: it points the records at the promoted node, then rebuilds the old primary'
+    '. the roles are saved; run vibecarbon deploy to point the records at the promoted node and rebuild the old primary' +
+    (noBaseFor
+      ? `. no base backup was pushed on the new timeline either: once DNS points at ${ip}, run vibecarbon backup ${noBaseFor}`
+      : '')
   );
 }
 

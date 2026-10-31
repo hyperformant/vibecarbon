@@ -12,10 +12,11 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
+import { projectConfigStore } from '../helpers/project-config-store.js';
 
 const STATE = 'myapp-cd9ecc-storage-pulumi-state-aaaaaa';
 
-const saveProjectConfigMock = vi.fn();
+const store = projectConfigStore();
 const promptCreds = vi.fn(async () => ({ accessKey: 'ak', secretKey: 'sk' }));
 const s3 = {
   emptyAndDeleteBucket: vi.fn(async (_b: string) => ({ deleted: true, objectsRemoved: 3 })),
@@ -23,7 +24,11 @@ const s3 = {
 
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, saveProjectConfig: (...a: unknown[]) => saveProjectConfigMock(...a) };
+  return {
+    ...actual,
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
+      store.updateProjectConfig(fn),
+  };
 });
 
 vi.mock('../../../src/lib/providers/index.js', async (orig) => {
@@ -61,6 +66,8 @@ function project(names: string[]) {
 
 async function destroy(projectConfig: ReturnType<typeof project>, environment: string) {
   const messages: string[] = [];
+  // The file as it was when the destroy loaded it.
+  store.reset(structuredClone(projectConfig));
   const ctx = {
     envConfig: projectConfig.environments[environment],
     projectConfig,
@@ -76,12 +83,12 @@ async function destroy(projectConfig: ReturnType<typeof project>, environment: s
   };
   await DESTROY_EFFECTS.retainStateBucket(ctx);
   await DESTROY_EFFECTS.updateProjectConfig(ctx);
-  return { ctx, messages, saved: saveProjectConfigMock.mock.calls.at(-1)?.[0] };
+  return { ctx, messages, saved: store.lastWrite() as Record<string, unknown> };
 }
 
 describe('derived state bucket under -purge', () => {
   beforeEach(() => {
-    saveProjectConfigMock.mockReset();
+    store.reset();
     promptCreds.mockClear();
     s3.emptyAndDeleteBucket.mockClear();
   });

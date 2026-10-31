@@ -54,6 +54,20 @@ spec:
       target:
         kind: StatefulSet
         name: db
+    # The backup CronJob is DEPLOY-owned: its schedule and retention are per
+    # environment (the CLI deploy and deploy.yml fill them in from the
+    # environment's backup config, scripts/render-backup-settings.mjs), while
+    # this k8s/base is shared by every environment on the branch. The live
+    # object carries kustomize.toolkit.fluxcd.io/prune: disabled.
+    - patch: |
+        $patch: delete
+        apiVersion: batch/v1
+        kind: CronJob
+        metadata:
+          name: backup
+      target:
+        kind: CronJob
+        name: backup
     # The registry's hostPort binds {{MASTER_PRIVATE_IP}}, rendered per
     # cluster by the CLI's deploy (renderK8sBase), so the CLI owns this
     # Deployment like the db. Its Service and NetworkPolicy stay with Flux.

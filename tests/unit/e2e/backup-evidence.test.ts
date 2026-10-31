@@ -39,10 +39,10 @@ describe('wal-g prefix derivation', () => {
     expect(walgPrefixFor('myapp', 'e3')).toBe(`${walgPrefix}/`);
   });
 
-  it('builds the WAL segment key under wal_005/', () => {
-    expect(walSegmentKeyPrefix('myapp', 'e3', '000000010000000000000003')).toBe(
-      'backups/myapp/e3/walg/wal_005/000000010000000000000003',
-    );
+  it('builds the WAL segment key under the lineage folder and wal_005/', () => {
+    expect(
+      walSegmentKeyPrefix('myapp', 'e3', '7699032860122738725', '000000010000000000000003'),
+    ).toBe('backups/myapp/e3/walg/7699032860122738725/wal_005/000000010000000000000003');
   });
 
   it('pins the wal-g v3 subdirectory names the restore path depends on', () => {
@@ -63,6 +63,15 @@ describe('buildWalSwitchProbe', () => {
   // command and the step would fail with an inscrutable shell error.
   it('contains no single quote in any branch', () => {
     expect(probe).not.toContain("'");
+  });
+
+  it('reads the prefix through walg-env.sh, the lineage folder every push uses', () => {
+    expect(probe.indexOf('. /etc/postgresql/walg-env.sh')).toBeGreaterThan(-1);
+    expect(probe.indexOf('. /etc/postgresql/walg-env.sh')).toBeLessThan(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder
+      probe.indexOf('PFX="${WALG_S3_PREFIX:-}"'),
+    );
+    expect(probe).toContain('WAL_SWITCH=fail:no-lineage');
   });
 
   it('skips when no backup target is configured (empty or s3:/// form)', () => {
@@ -123,13 +132,15 @@ describe('parseWalSwitchOutput', () => {
     const parsed = parseWalSwitchOutput(
       [
         'WAL_SWITCH=switched',
-        'WAL_SWITCH_PREFIX=s3://myapp-backups/backups/myapp/e3/walg',
+        'WAL_SWITCH_PREFIX=s3://myapp-backups/backups/myapp/e3/walg/7699032860122738725',
+        'WAL_SWITCH_LINEAGE=7699032860122738725',
         'WAL_SWITCH_SEGMENT=000000010000000000000007',
       ].join('\n'),
     );
     expect(parsed.status).toBe('switched');
     expect(parsed.segment).toBe('000000010000000000000007');
-    expect(parsed.prefix).toBe('s3://myapp-backups/backups/myapp/e3/walg');
+    expect(parsed.lineage).toBe('7699032860122738725');
+    expect(parsed.prefix).toBe('s3://myapp-backups/backups/myapp/e3/walg/7699032860122738725');
   });
 
   it.each([
@@ -137,6 +148,7 @@ describe('parseWalSwitchOutput', () => {
     'fail:standby-role',
     'fail:in-recovery',
     'fail:switch-returned-nothing',
+    'fail:no-lineage',
   ])('parses the %s verdict', (status) => {
     expect(parseWalSwitchOutput(`WAL_SWITCH=${status}`).status).toBe(status);
   });
@@ -248,10 +260,12 @@ describe('runBackupEvidenceChecks', () => {
   let dir: string;
   const SEGMENT = '000000010000000000000009';
   const PROJECT = 'myapp';
+  const LINEAGE = '7699032860122738725';
 
   const probeOutput = [
     'WAL_SWITCH=switched',
-    'WAL_SWITCH_PREFIX=s3://myapp-backups/backups/myapp/e3/walg',
+    `WAL_SWITCH_PREFIX=s3://myapp-backups/backups/myapp/e3/walg/${LINEAGE}`,
+    `WAL_SWITCH_LINEAGE=${LINEAGE}`,
     `WAL_SWITCH_SEGMENT=${SEGMENT}`,
   ].join('\n');
 
@@ -294,14 +308,15 @@ describe('runBackupEvidenceChecks', () => {
         execRemote: () => probeOutput,
         probePrefix: async (prefix: string) => {
           seen.push(prefix);
-          return prefix === walSegmentKeyPrefix(PROJECT, 'e3', SEGMENT);
+          return prefix === walSegmentKeyPrefix(PROJECT, 'e3', LINEAGE, SEGMENT);
         },
       }),
     );
     expect(byName(results, 'backup_walg_wal_archived').status).toBe('pass');
     expect(byName(results, 'backup_walg_canonical_prefix').status).toBe('pass');
     // It probed for the exact segment, not a vague "anything under walg/".
-    expect(seen).toContain('backups/myapp/e3/walg/wal_005/000000010000000000000009');
+    // In the lineage folder the probe reported (walg-env.sh's).
+    expect(seen).toContain(`backups/myapp/e3/walg/${LINEAGE}/wal_005/000000010000000000000009`);
   });
 
   // The load-bearing mutation test: WAL is silently dropped (wal-archive.sh
@@ -327,7 +342,7 @@ describe('runBackupEvidenceChecks', () => {
           calls += 1;
           // Hetzner read-after-write staleness (#223) on the first two reads.
           if (calls <= 2) throw new Error('NoSuchBucket: status code: 404');
-          return prefix === walSegmentKeyPrefix(PROJECT, 'e3', SEGMENT);
+          return prefix === walSegmentKeyPrefix(PROJECT, 'e3', LINEAGE, SEGMENT);
         },
       }),
     );
@@ -340,7 +355,7 @@ describe('runBackupEvidenceChecks', () => {
       opts({
         execRemote: () => probeOutput,
         probePrefix: async (prefix: string) =>
-          prefix === walSegmentKeyPrefix(PROJECT, 'e3', SEGMENT) ||
+          prefix === walSegmentKeyPrefix(PROJECT, 'e3', LINEAGE, SEGMENT) ||
           prefix === 'backups/myapp/e3/walg/standby/',
       }),
     );

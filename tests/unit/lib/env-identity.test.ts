@@ -190,7 +190,8 @@ describe('deploy wiring (static)', () => {
     const prompts = readFileSync('src/lib/deploy/prompts.js', 'utf8');
     expect(prompts).toMatch(/resolveEnvSeed\(projectConfig,\s*environment\)/);
     const orch = readFileSync('src/lib/deploy/orchestrator.js', 'utf8');
-    // The final persist must go THROUGH the clear, not merely near it.
-    expect(orch).toMatch(/saveProjectConfig\(clearDestroyedRecord\(finalConfig,\s*environment\)\)/);
+    // The final persist must go THROUGH the clear, not merely near it: the
+    // final write's mutator returns the cleared config.
+    expect(orch).toMatch(/return clearDestroyedRecord\(finalConfig,\s*environment\);\s*\}\);/);
   });
 });

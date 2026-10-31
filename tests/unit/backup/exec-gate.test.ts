@@ -42,17 +42,31 @@ describe('triggerBackupJob exec+pg condition gate', () => {
         }
         return 'accepting connections';
       }
+      if (argv[0] === 'logs') return 'BACKUP_RESULT=pushed:base_000000010000000000000004';
       return '';
     });
     const runScriptImpl = vi.fn(async () => 'JOB_RESULT=complete');
 
-    const jobName = await triggerBackupJob('1.2.3.4', '/tmp/key', {
+    const backup = await triggerBackupJob('1.2.3.4', '/tmp/key', {
       kubectlImpl,
       runScriptImpl,
       sleep: async () => {},
     });
 
-    expect(jobName).toMatch(/^backup-manual-/);
+    // The outcome is read from the completed Job's logs.
+    expect(backup).toEqual({
+      result: 'pushed',
+      name: 'base_000000010000000000000004',
+      job: expect.stringMatching(/^backup-manual-/),
+    });
+    expect(calls.at(-1)).toEqual([
+      'logs',
+      '-n',
+      'vibecarbon',
+      '-l',
+      `job-name=${backup.job}`,
+      '--tail=-1',
+    ]);
     expect(readyAttempts).toBe(3);
 
     // The gate must EXEC into the db workload (proving the apiserver→kubelet
@@ -68,6 +82,49 @@ describe('triggerBackupJob exec+pg condition gate', () => {
     expect(createIdx).toBeGreaterThan(-1);
     expect(createIdx).toBeGreaterThan(lastProbeIdx);
     expect(runScriptImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('a Job that failed after printing a pushed marker returns pushed with the cause', async () => {
+    const { triggerBackupJob } = await modulePromise;
+    const kubectlImpl = vi.fn(async (_ip: string, _key: string, argv: string[]) =>
+      argv.includes('pg_isready') ? 'accepting connections' : '',
+    );
+    const waitErr = Object.assign(new Error('Command failed: ssh ... bash /tmp/vb-script.sh'), {
+      stdout:
+        'JOB_RESULT=failed\n=== current container logs ===\nBACKUP_RESULT=pushed:base_000000010000000000000009\n' +
+        'retention failed after pushing base_000000010000000000000009: ERROR: AccessDenied\n',
+    });
+    const runScriptImpl = vi
+      .fn()
+      .mockRejectedValueOnce(waitErr)
+      .mockResolvedValueOnce('(diagnostics)');
+    const backup = await triggerBackupJob('1.2.3.4', '/tmp/key', {
+      kubectlImpl,
+      runScriptImpl,
+      sleep: async () => {},
+    });
+    expect(backup).toMatchObject({ result: 'pushed', name: 'base_000000010000000000000009' });
+    expect(backup.retentionError).toContain(
+      'retention failed after pushing base_000000010000000000000009: ERROR: AccessDenied',
+    );
+  });
+
+  it('a Job that failed with no pushed marker throws with the diagnostics', async () => {
+    const { triggerBackupJob } = await modulePromise;
+    const kubectlImpl = vi.fn(async () => 'accepting connections');
+    const runScriptImpl = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('wait failed'), { stdout: 'JOB_RESULT=failed' }),
+      )
+      .mockResolvedValueOnce('pod crashed');
+    await expect(
+      triggerBackupJob('1.2.3.4', '/tmp/key', {
+        kubectlImpl,
+        runScriptImpl,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(/did not complete:\npod crashed/);
   });
 
   it('fails loud with the last real error on budget exhaustion — and never creates the Job', async () => {

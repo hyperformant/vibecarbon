@@ -32,6 +32,13 @@ carbon/k8s/
 
    **CLI-owned objects in base** (the db StatefulSet and the registry Deployment) are stripped from Flux's build with `$patch: delete` and carry `kustomize.toolkit.fluxcd.io/prune: disabled`, so Flux never garbage-collects the live ones the CLI deploy applies.
 
+   **The backup CronJob is deploy-owned too.** Its schedule and retention are per environment, but `k8s/base` is shared by every environment Flux reconciles from the branch, so `vibecarbon-base` drops the CronJob (`$patch: delete`, and the live object carries `prune: disabled`) and keeps no retention setting in the base ConfigMap. The CLI deploy and `.github/workflows/deploy.yml` both render the CronJob and the per-cluster `vibecarbon-backup-settings` ConfigMap with `scripts/render-backup-settings.mjs`; the workflow reads the GitHub Environment vars `BACKUP_SCHEDULE` and `BACKUP_RETENTION_DAYS` that `vibecarbon configure cicd <env>` seeds from the environment's backup config. To change them, edit `backup.schedule` (a cron expression) and `backup.retentionDays` under the environment in `.vibecarbon.json`, then run both of these so the CLI deploy and the workflow agree:
+
+   ```bash
+   vibecarbon deploy <env>
+   vibecarbon configure cicd <env>
+   ```
+
 Flux's 5-minute HelmRepository interval means transient source-controller fetch failures self-heal inside the HelmRelease wait budget. There is no client-side reconcile poking.
 
 ## Useful commands (post-deploy, for debugging)

@@ -35,14 +35,14 @@ describe('planContainerTargets', () => {
     ]);
   });
 
-  it('compose-ha (orchestrator shape): name-only primary and standby', () => {
+  it('compose-ha (orchestrator shape): orchestrator primary and standby', () => {
     expect(
       planContainerTargets({
         deployMode: 'compose-ha',
         ha: { enabled: true, failoverRegion: 'hel1' },
         servers: [
-          { name: 'primary', ip: '1.1.1.1', region: 'fsn1', serverType: 'cpx31' },
-          { name: 'standby', ip: '2.2.2.2', region: 'hel1', serverType: 'cpx31' },
+          { name: 'primary', role: 'primary', ip: '1.1.1.1', region: 'fsn1', serverType: 'cpx31' },
+          { name: 'standby', role: 'standby', ip: '2.2.2.2', region: 'hel1', serverType: 'cpx31' },
         ],
       }),
     ).toEqual([
@@ -89,13 +89,13 @@ describe('planContainerTargets', () => {
     ).toEqual([{ serverName: 'prod', ip: '1.1.1.1', kind: 'k8s' }]);
   });
 
-  it('kubernetes-ha: name-only primary and standby cluster masters, kind k8s', () => {
+  it('kubernetes-ha: primary and standby cluster masters, kind k8s', () => {
     expect(
       planContainerTargets({
         deployMode: 'kubernetes-ha',
         servers: [
-          { name: 'primary', ip: '1.1.1.1', dbIp: '3.3.3.3', region: 'fsn1' },
-          { name: 'standby', ip: '2.2.2.2', dbIp: '4.4.4.4', region: 'hel1' },
+          { name: 'primary', role: 'primary', ip: '1.1.1.1', dbIp: '3.3.3.3', region: 'fsn1' },
+          { name: 'standby', role: 'standby', ip: '2.2.2.2', dbIp: '4.4.4.4', region: 'hel1' },
         ],
       }),
     ).toEqual([
@@ -105,7 +105,8 @@ describe('planContainerTargets', () => {
   });
 
   it('kubernetes-ha after failover: ha.primary.masterIp picks the promoted entry first', () => {
-    // swapHaRoles (failover.js) swaps ha.primary/ha.standby, never servers[].
+    // swapHaRoles (failover.js) swaps ha.primary/ha.standby and the servers[] roles;
+    // the primary is read from ha.primary.masterIp.
     expect(
       planContainerTargets({
         deployMode: 'kubernetes-ha',

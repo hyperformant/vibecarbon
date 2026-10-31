@@ -16,9 +16,13 @@
 # volumeClaimTemplates cannot be changed afterwards.
 #
 #   DB_IMAGE / DB_IMAGE_TAG   the db image (resolveDbImage, src/lib/images.js)
-#   WALG_S3_PREFIX            s3://<backup bucket>/backups/<project>/<env>/walg,
+#   WALG_S3_PREFIX_BASE       s3://<backup bucket>/backups/<project>/<env>/walg,
 #                             one prefix per environment, shared by primary
-#                             and standby
+#                             and standby. Each database lineage archives in
+#                             its own folder under it, named by its system
+#                             identifier: walg-env.sh (vibecarbon-wal-archive
+#                             ConfigMap) exports WALG_S3_PREFIX from it, and
+#                             every wal-g caller sources that file first
 #   WALG_ROLE                 primary | standby: the wal-g WRITE-GUARD that
 #                             wal-archive.sh and the backup CronJob read
 #   S3_ENDPOINT / S3_REGION   the backup bucket's endpoint
@@ -89,12 +93,31 @@ spec:
           value: db
           effect: NoSchedule
       initContainers:
-        # Restore bootstrap: ONLY when a restore is requested (RESTORE_TARGET
-        # set in vibecarbon-infra-secrets), fetch the latest wal-g base backup into
-        # PGDATA before postgres starts. On a normal boot RESTORE_TARGET is
-        # empty and this is a logged no-op. Runs before postgres, so the app's
-        # startup migrations always see the restored database (its ledger
-        # included) and apply only what the backup lacks.
+        # Restore, and the interrupted-restore guard. Runs on EVERY boot.
+        #
+        # Normal boot (RESTORE_BACKUP empty): exit 0, unless a restore's
+        # in-progress marker is in PGDATA (a swap this init left half done);
+        # then exit 1 with "restore interrupted; rerun vibecarbon restore".
+        # It never sources walg-env.sh: a fresh volume has no system
+        # identifier to read.
+        #
+        # Restore (RESTORE_BACKUP set by `vibecarbon restore` on
+        # vibecarbon-infra-secrets, with RESTORE_RECOVERY_CONF rendered by the
+        # CLI and RESTORE_LINEAGE naming the archive folder, sourced through
+        # walg-env.sh): fetch exactly that base backup into $PGDATA/.vc-restore,
+        # write the recovery config and recovery.signal into it, then swap it
+        # in under the marker, the live cluster moving to $PGDATA/.vc-prev
+        # (or, when a surviving .vc-prev says PGDATA holds an unproven copy,
+        # that copy moving to $PGDATA/.vc-discard). Nothing touches the live
+        # cluster until the fetch is complete, and nothing here removes
+        # .vc-prev: the CLI renames it to .vc-discard and removes it once the
+        # restored database promoted and proved writable. Staging and .vc-prev live
+        # inside PGDATA because PGDATA is a mount point and cannot be
+        # renamed. The same steps as the compose restore script
+        # (composeRestoreScript, src/lib/deploy/compose/index.js); the census
+        # in tests/unit/deploy/restore-destroy-before-verify-census.test.ts
+        # holds both. Runs before postgres, so the app's migrations always
+        # see the restored database.
         - name: walg-restore
           image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
           imagePullPolicy: IfNotPresent
@@ -103,92 +126,190 @@ spec:
             - -c
             - |
               set -euo pipefail
-              if [ -z "${RESTORE_TARGET:-}" ]; then
-                echo "walg-restore: RESTORE_TARGET empty — normal boot, skipping."
+              VC_MARKER="$PGDATA/.vc-restore-in-progress"
+              if [ -z "${RESTORE_BACKUP:-}" ]; then
+                # Every boot: a swap this init left half done must not boot. Rerunning
+                # the restore settles it (see the settle step below).
+                if [ -e "$VC_MARKER" ]; then
+                  echo "restore interrupted; rerun vibecarbon restore" >&2
+                  exit 1
+                fi
+                echo "walg-restore: no restore requested, normal boot."
                 exit 0
               fi
-              echo "walg-restore: RESTORE_TARGET=${RESTORE_TARGET} — restoring from S3."
-              if [ -f "${PGDATA}/PG_VERSION" ]; then
-                echo "walg-restore: existing PGDATA — clearing for backup-fetch."
-                rm -rf "${PGDATA:?}/"* "${PGDATA:?}/".* 2>/dev/null || true
+              case "$RESTORE_BACKUP" in
+                base_*) ;;
+                *) echo "walg-restore: RESTORE_BACKUP=${RESTORE_BACKUP} is not a wal-g backup name" >&2; exit 1 ;;
+              esac
+              if [ -z "${RESTORE_RECOVERY_CONF:-}" ]; then
+                echo "walg-restore: RESTORE_BACKUP is set without RESTORE_RECOVERY_CONF; rerun vibecarbon restore" >&2
+                exit 1
               fi
-              # Fetch the latest base backup into PGDATA. (For PITR the base that
-              # precedes the target is also the latest base — base backups are
-              # frequent, so LATEST is the right starting point either way.)
+              # This init runs on EVERY boot while the marker is set. A completed swap
+              # of this same ATTEMPT (RESTORE_ATTEMPT, a new id per restore, recorded in
+              # .vc-restored-from; no swap in progress) means the CLI has not cleared the
+              # marker yet: boot it, never move the live cluster aside and restore it
+              # again. A new attempt of the same base (another target, or a record an
+              # earlier attempt left) has another id, so it restores. A marker with no
+              # attempt id always restores.
+              if [ -n "${RESTORE_ATTEMPT:-}" ] && [ ! -e "$VC_MARKER" ] && \
+                 [ -f "$PGDATA/.vc-restored-from" ] && \
+                 [ "$(cat "$PGDATA/.vc-restored-from")" = "$RESTORE_BACKUP $RESTORE_ATTEMPT" ]; then
+                echo "walg-restore: ${RESTORE_BACKUP} is already restored on this volume (marker not cleared yet), normal boot."
+                exit 0
+              fi
+              # The archive folder of the lineage being restored (walg-env.sh). PGDATA
+              # does not hold that database yet, so the marker names it. Only a restore that
+              # fetches sources it: a normal boot (a fresh volume included) has no wal-g call
+              # and nothing to read a system identifier from.
+              if [ -z "${RESTORE_LINEAGE:-}" ]; then
+                echo "walg-restore: RESTORE_BACKUP is set without RESTORE_LINEAGE; rerun vibecarbon restore" >&2
+                exit 1
+              fi
+              . /etc/postgresql/walg-env.sh
+              echo "walg-restore: restoring ${RESTORE_BACKUP} (target ${RESTORE_TARGET:-latest})."
+              VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf
+              printf '%s\n' "$RESTORE_RECOVERY_CONF" > "$VC_RECOVERY_CONF_FILE"
+
+              # --- prelude ---
+              VC_MARKER="$PGDATA/.vc-restore-in-progress"
+              # 1. One restore at a time on this volume. This runs as root in the postgres
+              #    user's PGDATA: the files it writes are never opened through a symlink.
+              if [ -L "$PGDATA/.vc-restore.lock" ]; then
+                echo "restore: $PGDATA/.vc-restore.lock is a symlink; refusing" >&2
+                exit 1
+              fi
+              exec 9>"$PGDATA/.vc-restore.lock"
+              if ! flock -n 9; then
+                echo "restore: another restore holds $PGDATA/.vc-restore.lock; refusing" >&2
+                exit 75
+              fi
+              # The marker is only ever replaced by rename, so a crash mid-write leaves
+              # the previous state, never a torn one.
+              vc_mark() {
+                rm -f "$VC_MARKER.tmp"
+                printf '%s' "$1" > "$VC_MARKER.tmp"
+                mv -f "$VC_MARKER.tmp" "$VC_MARKER"
+              }
+              # The cluster's own entries in PGDATA: everything but the restore's .vc-*.
+              vc_cluster_entries() {
+                find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name '.vc-*'
+              }
+              # --- end prelude ---
+
+              # 2. Fetch the named base backup into staging. The live cluster is untouched.
               #
-              # Bounded retry over Hetzner Object Storage read-after-write
-              # staleness: a frontend that has not caught up 404s a bucket/object
-              # that provably exists (NoSuchBucket / NoSuchKey / status code:
-              # 404 / wal-g's own "object '…' not found in storage" wording),
-              # which is how a compose scale died on 2026-07-31 seconds
-              # after a successful base-backup push — and again on 2026-08-06,
-              # in the wal-g wording the pattern didn't cover. Bash mirror of the compose
-              # path's JS retry (src/lib/deploy/walg-staleness.js) — same
+              # Bounded retry over Hetzner Object Storage read-after-write staleness
+              # (quarantined in docs/mitigations.yml): a frontend that has not caught
+              # up 404s a bucket/object that provably exists (NoSuchBucket / NoSuchKey /
+              # status code: 404 / wal-g's own "object '…' not found in storage"
+              # wording), which is how a compose scale died on 2026-07-31 seconds after
+              # a successful base-backup push, and again on 2026-08-06. Bash mirror of
+              # the compose path's JS retry (src/lib/deploy/walg-staleness.js): same
               # signatures, same 5-attempt 2/4/8/16s budget. It exists separately
-              # because there is no JS seam here: the kubelet runs this, and its
-              # own init-container restart is not a substitute (each restart
-              # burns the `rollout status --timeout=120s` the restore waits on,
-              # and leaves no breadcrumb saying why). Anything that is not a
-              # storage 404 fails on attempt 1, and a bucket that really is gone
-              # still fails once the budget is spent.
+              # because the kubelet runs this, with no JS seam. Each retry clears the
+              # staging dir, never PGDATA. Anything that is not a storage 404 fails on
+              # attempt 1.
               WALG_FETCH_ATTEMPTS=5
               WALG_FETCH_LOG=/tmp/walg-restore-fetch.log
               walg_attempt=1
               walg_delay=2
+              rm -rf "$PGDATA/.vc-restore"
+              mkdir -p "$PGDATA/.vc-restore"
               while :; do
-                if wal-g backup-fetch "${PGDATA}" LATEST 2>&1 | tee "${WALG_FETCH_LOG}"; then
+                if wal-g backup-fetch "$PGDATA/.vc-restore" "$RESTORE_BACKUP" 2>&1 | tee "${WALG_FETCH_LOG}"; then
                   break
                 fi
                 if [ "${walg_attempt}" -ge "${WALG_FETCH_ATTEMPTS}" ] || \
                    ! grep -qE "NoSuchBucket|NoSuchKey|status code: 404|object '[^']*' not found in storage" "${WALG_FETCH_LOG}"; then
-                  echo "walg-restore: backup-fetch FAILED on attempt ${walg_attempt}/${WALG_FETCH_ATTEMPTS} — see the output above."
+                  rm -rf "$PGDATA/.vc-restore"
+                  echo "walg-restore: backup-fetch of ${RESTORE_BACKUP} FAILED on attempt ${walg_attempt}/${WALG_FETCH_ATTEMPTS}, see the output above; nothing was moved." >&2
                   exit 1
                 fi
                 echo "[walg] backup-fetch hit a stale storage frontend (attempt ${walg_attempt}/${WALG_FETCH_ATTEMPTS}), retrying in ${walg_delay}s"
-                # backup-fetch requires an EMPTY target dir — clear whatever the
-                # failed attempt left so the retry starts from the state attempt
-                # 1 saw. (The staleness bites on the initial LIST, before any
-                # bytes land, but a mid-fetch 404 must not wedge the retry.)
-                rm -rf "${PGDATA:?}/"* "${PGDATA:?}/".* 2>/dev/null || true
+                rm -rf "$PGDATA/.vc-restore"
+                mkdir -p "$PGDATA/.vc-restore"
                 sleep "${walg_delay}"
                 walg_attempt=$((walg_attempt + 1))
                 walg_delay=$((walg_delay * 2))
               done
-              # Configure archive recovery. A fetched base backup is only
-              # consistent AFTER replaying the WAL from its redo point to its
-              # stop point — and that WAL lives in S3, not in the fetched PGDATA.
-              # Without restore_command + recovery.signal postgres aborts startup
-              # with "could not locate required checkpoint record".
-              # restore_command pulls each segment back from S3 via `wal-g
-              # wal-fetch`; recovery.signal puts postgres into archive recovery;
-              # on reaching the end of WAL (or the PITR target) it promotes to
-              # read-write. (RCA 2026-05-31: e2e k8s/k8s-ha restore — postgres
-              # crash-looped post-fetch.) postgresql.auto.conf lives in PGDATA,
-              # so it is read even though postgres starts with config_file
-              # pointing at the image's /etc/postgresql/postgresql.conf.
-              {
-                echo "restore_command = 'wal-g wal-fetch \"%f\" \"%p\"'"
-                echo "recovery_target_action = 'promote'"
-                # Pin recovery to the fetched base backup's OWN timeline. Default
-                # 'latest' makes postgres chase the newest timeline with a .history
-                # file; in HA, repeated restore→promote cycles leave DIVERGENT
-                # timelines in the shared wal-g S3 prefix, and 'latest' can pick one
-                # that forked before this base backup → crash-loop "requested
-                # timeline N is not a child of this server's history". 'current'
-                # recovers along the base backup's timeline, then promotes fresh.
-                echo "recovery_target_timeline = 'current'"
-                if [ "${RESTORE_TARGET}" != "latest" ]; then
-                  # PITR: RESTORE_TARGET is an ISO-8601 timestamp — replay only up
-                  # to that point instead of to the end of the WAL stream.
-                  echo "recovery_target_time = '${RESTORE_TARGET}'"
-                fi
-              } >> "${PGDATA}/postgresql.auto.conf"
-              touch "${PGDATA}/recovery.signal"
-              # This init runs as root. Hand the fetched tree to the image's
-              # postgres user (uid/gid 70) by name; the entrypoint would fix
-              # ownership too, but the restore should not depend on it.
-              chown -R postgres:postgres "${PGDATA}"
-              echo "walg-restore: backup-fetch complete; archive recovery configured."
+              # --- staged ---
+              if [ ! -f "$PGDATA/.vc-restore/PG_VERSION" ]; then
+                rm -rf "$PGDATA/.vc-restore"
+                echo "restore: $RESTORE_BACKUP fetched no PG_VERSION; nothing was moved" >&2
+                exit 1
+              fi
+              # 3. A base pushed while a restore left its dirs in PGDATA carries them:
+              #    drop them from the staged tree so they cannot wedge the swap. The
+              #    source database's WAL gap record goes too: the restored one has its own.
+              rm -rf "$PGDATA/.vc-restore/.vc-restore" "$PGDATA/.vc-restore/.vc-prev" "$PGDATA/.vc-restore/.vc-discard" "$PGDATA/.vc-restore/.vc-restore-in-progress" "$PGDATA/.vc-restore/.vc-restore-in-progress.tmp" "$PGDATA/.vc-restore/.vc-restore.lock" "$PGDATA/.vc-restore/.vc-restored-from" "$PGDATA/.vc-restore/.vc-restored-from.tmp" "$PGDATA/.vc-restore/vibecarbon-wal-gap" "$PGDATA/.vc-restore/vibecarbon-wal-gap.clearing"
+              # Recovery config into staging: strip the settings it rewrites, append the
+              # new ones (rendered by the CLI, the same text on both tiers).
+              VC_AUTO_CONF="$PGDATA/.vc-restore/postgresql.auto.conf"
+              # These writes run as root inside a tree fetched from the bucket: a
+              # symlink the base carries at either path is removed, never followed.
+              [ -L "$VC_AUTO_CONF" ] && rm -f "$VC_AUTO_CONF"
+              touch "$VC_AUTO_CONF"
+              while IFS= read -r vc_line; do
+                case "$vc_line" in
+                  -*) sed -i "/^[[:space:]]*${vc_line#-}[[:space:]]*=/d" "$VC_AUTO_CONF" ;;
+                  ?*) printf '%s\n' "$vc_line" >> "$VC_AUTO_CONF" ;;
+                esac
+              done < "$VC_RECOVERY_CONF_FILE"
+              [ -L "$PGDATA/.vc-restore/recovery.signal" ] && rm -f "$PGDATA/.vc-restore/recovery.signal"
+              touch "$PGDATA/.vc-restore/recovery.signal"
+              chown -R postgres:postgres "$PGDATA/.vc-restore"
+
+              # --- swap ---
+              # 4. Settle what PGDATA holds, then swap under the in-progress marker.
+              #    .vc-discard is only ever an unproven copy or a proven restore's old
+              #    cluster the CLI was removing: garbage.
+              rm -rf "$PGDATA/.vc-discard"
+              if [ -f "$VC_MARKER" ] && [ "$(cat "$VC_MARKER")" = in ]; then
+                vc_root=unproven
+              elif [ -f "$VC_MARKER" ]; then
+                vc_root=half-out
+              elif [ -d "$PGDATA/.vc-prev" ]; then
+                vc_root=unproven
+              else
+                vc_root=live
+              fi
+              case "$vc_root" in
+                unproven)
+                  # .vc-prev holds the database from before; PGDATA an unproven copy.
+                  vc_mark in
+                  mkdir -p "$PGDATA/.vc-discard"
+                  vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-discard/"; done
+                  ;;
+                half-out)
+                  mkdir -p "$PGDATA/.vc-prev"
+                  vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-prev/"; done
+                  vc_mark in
+                  ;;
+                live)
+                  if [ -n "$(vc_cluster_entries)" ]; then
+                    vc_mark out
+                    mkdir -p "$PGDATA/.vc-prev"
+                    vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-prev/"; done
+                  fi
+                  vc_mark in
+                  ;;
+              esac
+              find "$PGDATA/.vc-restore" -mindepth 1 -maxdepth 1 | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/"; done
+              rmdir "$PGDATA/.vc-restore"
+              # The slow removal goes before the marker: once the marker is gone, the
+              # only thing in PGDATA that says "swapped, not proven" is recovery.signal,
+              # and nothing slow may follow.
+              rm -rf "$PGDATA/.vc-discard"
+              # Record the attempt PGDATA now holds (renamed in, never torn), before the
+              # marker goes: a k8s pod start during this same attempt boots it instead of
+              # restoring it again.
+              rm -f "$PGDATA/.vc-restored-from.tmp"
+              printf '%s %s' "$RESTORE_BACKUP" "${RESTORE_ATTEMPT:-}" > "$PGDATA/.vc-restored-from.tmp"
+              mv -f "$PGDATA/.vc-restored-from.tmp" "$PGDATA/.vc-restored-from"
+              rm -f "$VC_MARKER"
+              echo "restore: $RESTORE_BACKUP staged and swapped in"
+              # --- end swap ---
           env:
             - name: PGDATA
               value: /var/lib/postgresql/data
@@ -198,8 +319,34 @@ spec:
                   name: vibecarbon-infra-secrets
                   key: RESTORE_TARGET
                   optional: true
-            - name: WALG_S3_PREFIX
-              value: "{{WALG_S3_PREFIX}}"
+            - name: RESTORE_BACKUP
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-infra-secrets
+                  key: RESTORE_BACKUP
+                  optional: true
+            - name: RESTORE_RECOVERY_CONF
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-infra-secrets
+                  key: RESTORE_RECOVERY_CONF
+                  optional: true
+            - name: RESTORE_ATTEMPT
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-infra-secrets
+                  key: RESTORE_ATTEMPT
+                  optional: true
+            - name: RESTORE_LINEAGE
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-infra-secrets
+                  key: RESTORE_LINEAGE
+                  optional: true
+            - name: WALG_S3_PREFIX_BASE
+              value: "{{WALG_S3_PREFIX_BASE}}"
+            - name: WALG_PREVENT_WAL_OVERWRITE
+              value: "true"
             - name: WALG_COMPRESSION_METHOD
               value: lz4
             - name: AWS_ENDPOINT
@@ -214,6 +361,10 @@ spec:
               subPath: postgres-data
             - name: walg-s3-creds
               mountPath: /etc/walg
+              readOnly: true
+            - name: wal-archive-script
+              mountPath: /etc/postgresql/walg-env.sh
+              subPath: walg-env.sh
               readOnly: true
         # Standby first-boot seeding (spec 2026-07-16-standby-init-seeding):
         # on the k8s-ha STANDBY's first boot only, pg_basebackup the primary's
@@ -340,8 +491,14 @@ spec:
             # and the backup CronJob's `kubectl exec` (which inherits this env)
             # both read it. The S3 keys are a mounted file (walg-s3-creds), not
             # env, so rotating them never needs a template change.
-            - name: WALG_S3_PREFIX
-              value: "{{WALG_S3_PREFIX}}"
+            # WALG_S3_PREFIX_BASE is the environment's prefix; walg-env.sh
+            # (sourced by every wal-g caller) appends this database's lineage
+            # folder. A segment name already archived with other bytes is
+            # refused, never overwritten.
+            - name: WALG_S3_PREFIX_BASE
+              value: "{{WALG_S3_PREFIX_BASE}}"
+            - name: WALG_PREVENT_WAL_OVERWRITE
+              value: "true"
             - name: WALG_ROLE
               value: "{{WALG_ROLE}}"
             - name: WALG_COMPRESSION_METHOD
@@ -391,6 +548,10 @@ spec:
             - name: wal-archive-script
               mountPath: /etc/postgresql/wal-archive.sh
               subPath: wal-archive.sh
+              readOnly: true
+            - name: wal-archive-script
+              mountPath: /etc/postgresql/walg-env.sh
+              subPath: walg-env.sh
               readOnly: true
             - name: walg-s3-creds
               mountPath: /etc/walg

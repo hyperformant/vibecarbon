@@ -13,7 +13,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { downloadS3Backup, listS3Backups } from './lib/backup-s3.js';
 import { resolveEnvContext } from './lib/cli/env-context.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
@@ -21,13 +20,13 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { selectAction } from './lib/cli/select-action.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { loadBackupS3Config, loadS3Config } from './lib/config.js';
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import { awaitPostgresAccepting } from './lib/deploy/k8s/index.js';
+import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
+import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import {
   getPostgresPod,
   getSSHKeyPath,
@@ -38,7 +37,15 @@ import {
 } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { validateBackupFilename } from './lib/validators.js';
-import { printWalgBackupList } from './lib/walg-backups.js';
+import { parseBackupResult, pushedBackupNames } from './lib/walg/backup-result.js';
+import {
+  AmbiguousLineageError,
+  backupCredentialVars,
+  printBaseBackupList,
+  readEnvBaseBackups,
+  resolveS3Config,
+  restoreLineageCommands,
+} from './lib/walg/restore-base.js';
 
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
@@ -132,9 +139,9 @@ async function downloadPodBackup(ip, sshKeyPath, filename) {
  * failure, captures pod diagnostics IN-LINE (before the controller GCs the
  * failed Pod). Extracted as a pure builder so the poll cadence is unit-testable.
  *
- * Poll cadence: we avoid `kubectl wait --for=condition=Complete --timeout=300s`
+ * Poll cadence: we avoid `kubectl wait --for=condition=Complete`
  * because the wait can only watch ONE condition, so on a CrashLoopBackOff that
- * ends in Failed it would burn the FULL 5 min before timing out. By that point
+ * ends in Failed it would burn the FULL timeout before returning. By that point
  * kubelet had GC'd the failed Pod (observed 2026-04-28 e2e — the Pod was visible
  * in events but kubectl get returned nothing, so the diagnostic captured no
  * logs). Polling for BOTH conditions returns promptly on Failed while the Pod is
@@ -145,7 +152,8 @@ async function downloadPodBackup(ip, sshKeyPath, filename) {
  * to 5s of tail latency after the condition fires. The ramp keeps early
  * detection tight while a genuinely slow job still settles to 5s pacing. The
  * first condition check runs BEFORE the first sleep, so a fast job is caught
- * immediately. The 300s DEADLINE is the load-bearing ceiling and is unchanged.
+ * immediately. The DEADLINE is the Job's own activeDeadlineSeconds plus the
+ * controller's grace (BACKUP_JOB_ACTIVE_DEADLINE_S): the Job is Failed by then.
  *
  * CRITICAL: capture pod logs + describe IN-LINE the moment Failed=True is
  * detected. Doing this in a follow-up SSH session race-loses to Pod GC (observed
@@ -153,9 +161,20 @@ async function downloadPodBackup(ip, sshKeyPath, filename) {
  * returned "No pod matching" because controller-manager already GC'd the failed
  * Pod within the ~1s window between SSH sessions).
  */
+/**
+ * The backup Job's activeDeadlineSeconds (carbon/k8s/base/backup/cronjob.yaml;
+ * a test pins the two equal). The CLI waits for a Job as long as the Job may
+ * run: a fixed 300s failed every post-promote push of a database whose
+ * backup-push took longer, while the Job went on pushing.
+ */
+export const BACKUP_JOB_ACTIVE_DEADLINE_S = 3600;
+
+/** After activeDeadlineSeconds the Job controller still has to mark it Failed. */
+const JOB_DEADLINE_GRACE_S = 60;
+
 export function buildBackupJobWaitScript(jobName) {
   return `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-DEADLINE=$(($(date +%s) + 300))
+DEADLINE=$(($(date +%s) + ${BACKUP_JOB_ACTIVE_DEADLINE_S + JOB_DEADLINE_GRACE_S}))
 RESULT="timeout"
 INTERVAL=2
 while [ $(date +%s) -lt $DEADLINE ]; do
@@ -208,8 +227,18 @@ exit 1`;
 // and restore.js address.
 
 /**
- * Trigger a one-off backup Job from the CronJob template and poll it to
- * completion.
+ * Trigger a one-off backup Job from the CronJob template, poll it to
+ * completion, and report what it did from the Job's logs (the CronJob prints
+ * the same BACKUP_RESULT marker compose-backup.sh does; see
+ * src/lib/walg/backup-result.js).
+ *
+ * Returns `{ result: 'pushed', name, job }` or `{ result: 'skipped', reason,
+ * job }`; callers read `.result`. A Job that FAILED after printing a pushed
+ * marker (retention failed: exit 3, which the CronJob's podFailurePolicy
+ * turns into a failed Job with no second pod, so no second push) returns
+ * `pushed` with `retentionError`: that base is in the bucket, and a pushed
+ * base must never read as "no backup". A failed Job with no pushed marker
+ * throws with the pod diagnostics.
  *
  * GATED on the condition the Job actually depends on (RCA 2026-08-16, run
  * 31927810430): the Job's first act is `kubectl exec` into the db pod, and
@@ -231,9 +260,18 @@ exit 1`;
  * @param {typeof sshRunScript} [opts.runScriptImpl]
  * @param {Function} [opts.sleep]
  * @param {Function} [opts.nowFn]
+ * @param {number} [opts.lockWaitS] seconds the Job waits for another backup
+ *   run's db-container lock before it skips (LOCK_WAIT on the Job's backup
+ *   container). Omitted: a held lock is an immediate skip:already-running.
+ * @returns {Promise<({result: 'pushed', name: string, retentionError?: string} | {result: 'skipped', reason: string}) & {job: string}>}
  */
 export async function triggerBackupJob(ip, sshKeyPath, opts = {}) {
-  const { kubectlImpl = sshKubectl, runScriptImpl = sshRunScript, sleep, nowFn } = opts;
+  const { kubectlImpl = sshKubectl, runScriptImpl = sshRunScript, sleep, nowFn, lockWaitS } = opts;
+  if (lockWaitS !== undefined && !(Number.isInteger(lockWaitS) && lockWaitS > 0)) {
+    throw new Error(
+      `the backup Job lock wait (lockWaitS) must be a positive whole number of seconds (got ${lockWaitS})`,
+    );
+  }
 
   await awaitPostgresAccepting({
     env: process.env,
@@ -253,22 +291,51 @@ export async function triggerBackupJob(ip, sshKeyPath, opts = {}) {
     .toLowerCase();
   const jobName = `backup-manual-${timestamp}`;
 
-  // Create a one-off Job from the CronJob template
-  await kubectlImpl(ip, sshKeyPath, [
-    'create',
-    'job',
-    `--from=cronjob/backup`,
-    jobName,
-    '-n',
-    'vibecarbon',
-  ]);
+  // Create a one-off Job from the CronJob template.
+  const createArgv = ['create', 'job', `--from=cronjob/backup`, jobName, '-n', 'vibecarbon'];
+  if (lockWaitS === undefined) {
+    await kubectlImpl(ip, sshKeyPath, createArgv);
+  } else {
+    // `create job --from` cannot set env, so render the Job, add LOCK_WAIT to
+    // the backup container, and create that.
+    const rendered = await kubectlImpl(
+      ip,
+      sshKeyPath,
+      [...createArgv, '--dry-run=client', '-o', 'json'],
+      { silent: true },
+    );
+    const job = JSON.parse(String(rendered));
+    const container = job?.spec?.template?.spec?.containers?.find((c) => c.name === 'backup');
+    if (!container) {
+      throw new Error('the backup CronJob template has no container named backup');
+    }
+    container.env = [
+      ...(container.env ?? []).filter((e) => e.name !== 'LOCK_WAIT'),
+      { name: 'LOCK_WAIT', value: String(lockWaitS) },
+    ];
+    await runScriptImpl(
+      ip,
+      sshKeyPath,
+      `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+kubectl create -f - <<'VC_BACKUP_JOB'
+${JSON.stringify(job)}
+VC_BACKUP_JOB`,
+      { timeout: 60_000 },
+    );
+  }
 
   // Poll the Job to completion (ramped-interval condition poll — see
   // buildBackupJobWaitScript for the both-conditions + inline-diagnostics
   // rationale) and capture failure diagnostics before the Pod is GC'd.
   try {
-    await runScriptImpl(ip, sshKeyPath, buildBackupJobWaitScript(jobName), { timeout: 420_000 });
+    await runScriptImpl(ip, sshKeyPath, buildBackupJobWaitScript(jobName), {
+      // The poll's own deadline, plus room for the ssh hop and the diagnostics.
+      timeout: (BACKUP_JOB_ACTIVE_DEADLINE_S + JOB_DEADLINE_GRACE_S + 120) * 1000,
+    });
   } catch (waitErr) {
+    // The wait script's inline diagnostics (stdout of the failed run) carry
+    // the pod logs captured before GC.
+    const inlineDiag = String(waitErr?.stdout ?? '');
     // Dump pod status, events, AND logs to help diagnose why the job didn't
     // complete. An earlier version of this block gated the --previous log
     // capture on a label-selector query that mysteriously returned "No
@@ -319,12 +386,33 @@ fi`,
     } catch {
       podDiag = '(diagnostic SSH failed)';
     }
+    const diag = `${inlineDiag}\n${podDiag}`;
+    const pushed = [...new Set(pushedBackupNames(diag))];
+    if (pushed.length > 0) {
+      const cause = /retention failed after pushing .*$/m.exec(diag)?.[0];
+      return {
+        result: 'pushed',
+        name: pushed[pushed.length - 1],
+        retentionError: `backup Job ${jobName} failed after it pushed ${pushed.join(', ')}: ${cause ?? waitErr.message.split('\n')[0]}`,
+        job: jobName,
+      };
+    }
     throw new Error(
       `Backup job ${jobName} did not complete:\n${podDiag}\n\nkubectl wait error: ${waitErr.message}`,
     );
   }
 
-  return jobName;
+  // Every pod of the Job, whole logs (a selector defaults to --tail=10). Under
+  // restartPolicy Never a push that failed first leaves a failed pod beside
+  // the succeeded one; only the succeeded pod printed a marker.
+  // `logs job/<name>` would read ONE pod, possibly the failed one.
+  const logs = await kubectlImpl(
+    ip,
+    sshKeyPath,
+    ['logs', '-n', 'vibecarbon', '-l', `job-name=${jobName}`, '--tail=-1'],
+    { silent: true },
+  );
+  return { ...parseBackupResult(logs), job: jobName };
 }
 
 // ============================================================================
@@ -382,21 +470,30 @@ export async function run(args) {
     seed: actionSeed,
   });
 
+  // -l lists from the backup bucket's stop sentinels: no firewall refresh, no
+  // SSH, the db need not be running.
+  if (action === 'list') {
+    await runList({
+      envName,
+      envConfig,
+      projectName: projectConfig.projectName || 'project',
+      yes: !!values.y,
+    });
+    p.outro('');
+    return;
+  }
+
   // Operator-IP whitelist refresh happens before any command that
-  // touches the live cluster. Listing is read-only via S3 only when
-  // S3 is configured; if we'd fall back to pod-listing it still hits
-  // the cluster. Run the firewall check for everything except the
-  // S3-only list path (handled inside the dispatch below).
+  // touches the live cluster.
   await ensureFirewallAccessIfNeeded({
-    action,
     projectConfig,
     envName,
     envConfig,
     yes: !!values.y,
   });
 
-  // SSH key is required for everything (compose path AND k8s pod-list
-  // fallback). Bail early with a clear message if it's missing.
+  // SSH key is required for create and download. Bail early with a clear
+  // message if it's missing.
   const sshKeyPath = getSSHKeyPath(envName);
   if (!existsSync(sshKeyPath)) {
     p.log.error(`SSH key not found: ${sshKeyPath}`);
@@ -446,12 +543,6 @@ export async function run(args) {
   const tracker = createTracker('backup', { environment: envName });
   const s = tracker.spinner();
 
-  if (action === 'list') {
-    await runList({ s, isCompose, serverIp, sshKeyPath, projectName, envName });
-    p.outro('');
-    return;
-  }
-
   if (action === 'download') {
     await runDownload({
       s,
@@ -469,12 +560,12 @@ export async function run(args) {
   await runCreate({
     s,
     isCompose,
-    useS3,
     s3Config,
     serverIp,
     sshKeyPath,
     projectName,
     envName,
+    envConfig,
     backupRetain: envConfig.backup?.retentionDays,
     yes: !!values.y,
   });
@@ -487,16 +578,10 @@ export async function run(args) {
 // ============================================================================
 
 /**
- * Refresh operator-IP firewall allowlist when the action would hit
- * the cluster. Listing via S3 alone doesn't need this; everything
- * else does.
+ * Refresh operator-IP firewall allowlist before an action that hits the
+ * cluster (create, download; list reads the bucket only).
  */
-async function ensureFirewallAccessIfNeeded({ action, projectConfig, envName, envConfig, yes }) {
-  // Skip the firewall check for read-only list ops — they may hit
-  // S3 only (when configured), and even when they fall back to the
-  // pod, the existing key-based SSH already establishes access.
-  if (action === 'list') return;
-
+async function ensureFirewallAccessIfNeeded({ projectConfig, envName, envConfig, yes }) {
   const apiToken = resolveProviderToken(providerIdFor(envConfig));
   if (!apiToken) return;
 
@@ -519,37 +604,47 @@ async function ensureFirewallAccessIfNeeded({ action, projectConfig, envName, en
   }
 }
 
-/** Resolve the S3 config for the deploy mode, merging credentials when needed. */
-async function resolveS3Config({ isCompose, envName, projectName, envConfig }) {
-  const Provider = providerFor(envConfig);
-
-  if (isCompose) {
-    const backupS3 = loadBackupS3Config(envName);
-    if (!backupS3) return null;
-    const creds = await Provider.promptObjectStorageCredentials(projectName, { save: false });
-    if (!creds) return null;
-    return { ...backupS3, accessKey: creds.accessKey, secretKey: creds.secretKey };
-  }
-
-  // K8s mode: prefer the dedicated backup bucket, fall back to
-  // storage. Either way, top up credentials from the environment
-  // (HETZNER_ACCESS_KEY/HETZNER_SECRET_KEY) when the config didn't carry them.
-  const backupS3 = loadBackupS3Config(envName);
-  const storageS3 = loadS3Config(envName);
-  let s3Config = backupS3 || storageS3;
-  if (s3Config && !s3Config.secretKey) {
-    const creds = await Provider.promptObjectStorageCredentials(projectName, { save: false });
-    if (creds) {
-      s3Config = { ...s3Config, accessKey: creds.accessKey, secretKey: creds.secretKey };
+/**
+ * `-l`: the environment's base backups, read from the backup bucket's stop
+ * sentinels (listBaseBackups), the same listing restore resolves from. Needs
+ * the bucket's credentials locally.
+ */
+async function runList({ envName, envConfig, projectName, yes }) {
+  let listing;
+  try {
+    listing = await readEnvBaseBackups({
+      envName,
+      envConfig,
+      projectName,
+      skipPrompts: yes || !process.stdin.isTTY,
+    });
+  } catch (err) {
+    // More than one database lineage holds backups: the lineages are the
+    // listing (vibecarbon restore -lineage <id> -l shows one's backups).
+    if (err instanceof AmbiguousLineageError) {
+      p.log.info(err.message);
+      // backup has no -lineage: name the restore listing of each one.
+      p.log.info(
+        [
+          'List one lineage with:',
+          ...restoreLineageCommands({ envName, lineages: err.lineages, suffix: ' -l' }),
+        ].join('\n'),
+      );
+      return;
     }
+    p.log.error(
+      `Could not read the base backups from the backup bucket: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(1);
   }
-  return s3Config;
-}
-
-async function runList({ s, isCompose, serverIp, sshKeyPath, projectName, envName }) {
-  // List the actual wal-g base backups (the restorable ones) — NOT the legacy
-  // backups/*_full.tar.gz S3 objects, which wal-g neither writes nor restores.
-  await printWalgBackupList({ spinner: s, serverIp, sshKeyPath, projectName, isCompose, envName });
+  if (!listing.s3Config) {
+    p.log.error(
+      `Listing backups reads ${envName}'s backup bucket and needs its credentials: ` +
+        `export ${backupCredentialVars(envConfig)}, then rerun.`,
+    );
+    process.exit(1);
+  }
+  printBaseBackupList({ backups: listing.backups, envName, location: listing.location });
 }
 
 /**
@@ -595,18 +690,27 @@ export async function runDownload({
   }
 }
 
-async function runCreate({
+/**
+ * `-action create`: push a base backup and report it. Exits 1 on a skip and on
+ * a retention failure after the push (naming the base that was pushed).
+ * `deps` is a test seam for the two backup runners.
+ */
+export async function runCreate({
   s,
   isCompose,
-  useS3,
   s3Config,
   serverIp,
   sshKeyPath,
   projectName,
   envName,
+  envConfig,
   backupRetain,
   yes,
+  deps = {},
 }) {
+  // A compose scale stopped mid-cutover: a base pushed now would come from the
+  // fenced old server, not yet demoted, while the database may serve elsewhere.
+  assertNoScaleCutoverInFlight({ environment: envName, envConfig, action: 'back up' });
   if (!yes) {
     const confirm = await p.confirm({
       message: `Create a database backup for ${c.bold(envName)} (${serverIp})?`,
@@ -621,72 +725,47 @@ async function runCreate({
     }
   }
 
-  if (isCompose) {
-    s.start('Creating wal-g base backup...');
-    try {
-      const { backupCompose } = await import('./lib/deploy/compose/index.js');
-      await backupCompose(serverIp, sshKeyPath, projectName, { retain: backupRetain });
-      // "uploaded to S3" wording matches the k8s path (line ~689) and the e2e
-      // backup-step verification (which greps /uploaded to s3/i to confirm the
-      // backup is durable before allowing destroy → restore).
-      s.stop('wal-g base backup uploaded to S3');
-      p.log.success('Backup uploaded to S3, wal-g pushed the base backup directly.');
-      p.log.info(`List backups: ${c.info(`vibecarbon backup ${envName} -l`)}`);
-    } catch (error) {
-      s.stop('Backup failed');
-      p.log.error(error.message);
-      process.exit(1);
-    }
-    return;
-  }
-
-  // K8s — trigger via CronJob template
-  s.start('Creating backup (triggering Kubernetes Job)');
+  s.start(
+    isCompose ? 'Creating wal-g base backup...' : 'Creating backup (triggering Kubernetes Job)',
+  );
+  const {
+    backupCompose = async (...a) => {
+      const { backupCompose: run } = await import('./lib/deploy/compose/index.js');
+      return run(...a);
+    },
+    triggerJob = triggerBackupJob,
+  } = deps;
+  let backup;
   try {
-    const jobName = await perfAsync(
-      'backup.triggerJob',
-      async () => await triggerBackupJob(serverIp, sshKeyPath),
-    );
-    s.stop('Backup created');
-
-    if (useS3) {
-      p.log.success(`Backup uploaded to S3: ${c.bold(s3Config.bucket)}/backups/`);
-      p.log.info(`Job: ${c.dim(jobName)}`);
-      p.log.info(`List backups: ${c.info(`vibecarbon backup ${envName} -l`)}`);
+    if (isCompose) {
+      backup = await backupCompose(serverIp, sshKeyPath, projectName, { retain: backupRetain });
     } else {
-      p.log.warn(`Backup Job ran: ${c.bold(jobName)}`);
-      p.log.warn('No S3 configured, backup was NOT persisted (lost when pod terminated).');
-      p.log.info('Configure S3 storage during deploy to enable persistent backups.');
-    }
-
-    // On a TTY, offer to download the freshly-created backup.
-    if (useS3 && !yes) {
-      const shouldDownload = await p.confirm({
-        message: 'Download the latest backup locally?',
-        initialValue: false,
-      });
-      if (shouldDownload && !p.isCancel(shouldDownload)) {
-        s.start('Fetching latest backup from S3');
-        const backups = await perfAsync('backup.listS3', () => listS3Backups(s3Config));
-        if (backups.length > 0) {
-          const latest = backups[0];
-          const localPath = join(process.cwd(), latest.name);
-          s.message(`Downloading ${latest.name} (${latest.size})`);
-          await perfAsync('backup.downloadS3', () =>
-            downloadS3Backup(s3Config, latest.key, localPath),
-          );
-          s.stop('Download complete');
-          p.log.success(`Saved to ${c.bold(localPath)}`);
-        } else {
-          s.stop('No backups found in S3 (backup may still be uploading).');
-        }
-      }
+      backup = await perfAsync('backup.triggerJob', () => triggerJob(serverIp, sshKeyPath));
     }
   } catch (error) {
     s.stop('Backup failed');
     p.log.error(error.message);
     process.exit(1);
   }
+
+  if (backup.result !== 'pushed') {
+    s.stop('Backup skipped');
+    p.log.error(
+      `backup skipped (${backup.reason}): nothing was pushed to ${s3Config?.bucket ?? 'the backup bucket'}.`,
+    );
+    process.exit(1);
+  }
+
+  // The e2e backup step keys on this line (tests/e2e/scenarios/_run-lifecycle.ts).
+  s.stop(`base backup pushed: ${backup.name}`);
+  if (backup.job) p.log.info(`Job: ${c.dim(backup.job)}`);
+  if (backup.retentionError) {
+    p.log.error(
+      `Base backup ${backup.name} was pushed and is restorable, but pruning old backups failed: ${backup.retentionError}`,
+    );
+    process.exit(1);
+  }
+  p.log.info(`List backups: ${c.info(`vibecarbon backup ${envName} -l`)}`);
 }
 
 // SPEC is exported for the arg-parser unit tests.

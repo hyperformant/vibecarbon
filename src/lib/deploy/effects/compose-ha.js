@@ -32,7 +32,7 @@
 import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { c } from '../../colors.js';
-import { loadProjectConfig, registerProject, saveProjectConfig } from '../../config.js';
+import { loadProjectConfig, registerProject, updateProjectConfig } from '../../config.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { perfAsync } from '../../perf.js';
@@ -51,7 +51,7 @@ import {
   openWireguardPortHetznerFirewall,
   openWireguardPortUfw,
 } from '../compose/ha.js';
-import { assertReseedTargetNotServing } from '../compose/ha-role-swap.js';
+import { assertReseedTargetNotServing, composeHaStackOf } from '../compose/ha-role-swap.js';
 import {
   dockerLoginOnServer,
   pullComposeImages,
@@ -67,6 +67,7 @@ import {
   waitForSSH,
 } from '../compose/index.js';
 import { requireDnsSetup } from '../dns-result.js';
+import { preserveSafetyFields } from '../env-safety-fields.js';
 import { readReplicaState } from '../failover-guard.js';
 import { resolvePublicA } from '../public-dns-lookup.js';
 import {
@@ -167,9 +168,25 @@ async function haProvisionServers(ctx) {
   // resolveServerTypeForRegion also carries the ARM->x86 rescue (vibecarbon is
   // amd64-only, see deploy/platform.js), so an environment predating that
   // standardization converges here too.
-  const standbyServerType = Provider.resolveServerTypeForRegion(serverType, standbyRegion);
+  //
+  // A compose scale replaces a server outside the programs and records its new
+  // type on that server's servers[] entry (a primary-only scale leaves the
+  // env-level serverType alone). Each stack keeps its server's recorded type,
+  // or `up` would resize the scaled server back; only a type this deploy was
+  // asked for (`deploy -server-type`, ctx.serverTypeRequested) applies to both
+  // stacks, even one equal to the env's recorded type.
+  const recordedType = (stack) =>
+    ctx.serverTypeRequested
+      ? undefined
+      : (envConfig?.servers ?? []).find(
+          (sv) => composeHaStackOf(sv, projectName, environment) === stack,
+        )?.serverType;
+  const primaryStackServerType = recordedType('primary') ?? serverType;
+  ctx.primaryStackServerType = primaryStackServerType;
+  const standbyServerType =
+    recordedType('standby') ?? Provider.resolveServerTypeForRegion(serverType, standbyRegion);
   ctx.standbyServerType = standbyServerType;
-  if (standbyServerType !== serverType) {
+  if (!recordedType('standby') && standbyServerType !== serverType) {
     p.log.info(
       `Standby server type adjusted for ${standbyRegion}: ${serverType} -> ${standbyServerType}`,
     );
@@ -203,7 +220,7 @@ async function haProvisionServers(ctx) {
     sshPublicKey: publicKey,
     existingSshKeyId: sharedSshKeyId,
     location: primaryStackRegion,
-    serverType,
+    serverType: primaryStackServerType,
     labels: { 'managed-by': 'vibecarbon', role: 'primary' },
     allowedSshIps,
   });
@@ -272,7 +289,7 @@ async function haProvisionServers(ctx) {
       firewallId: primaryResult.outputs.firewallId || null,
       stack: 'primary',
       region: primaryStackRegion,
-      serverType,
+      serverType: primaryStackServerType,
     },
     standby: {
       ip: standbyResult.outputs.serverIp,
@@ -394,16 +411,28 @@ async function haPersistPendingConfig(ctx) {
     services,
     lastAttempt: new Date().toISOString(),
   };
-  saveProjectConfig({
-    ...loadedProjectConfig,
-    provider: envConfig.provider ?? 'hetzner',
-    environments: {
-      ...loadedProjectConfig.environments,
-      [environment]: pendingEnvConfig,
-    },
-  });
+  persistComposeHaEnv(environment, envConfig, pendingEnvConfig);
   ctx.loadedProjectConfig = loadedProjectConfig;
   ctx.pendingEnvConfig = pendingEnvConfig;
+}
+
+/**
+ * Write this deploy's env entry (and the project provider) onto the file as it
+ * is now, under the config lock: every other environment and top-level field
+ * keeps what was saved since this deploy loaded the config, and so do the
+ * env's safety records (a stranded write fence, the journals, the standby's
+ * proof, a pending state sync), except the ones in `owns`.
+ */
+function persistComposeHaEnv(environment, envConfig, envEntry, { owns = [] } = {}) {
+  updateProjectConfig((config) => {
+    config.provider = envConfig.provider ?? 'hetzner';
+    config.environments = config.environments ?? {};
+    config.environments[environment] = preserveSafetyFields(
+      config.environments[environment],
+      envEntry,
+      { owns },
+    );
+  });
 }
 
 /** Wait for SSH on both servers; hard-fail if either times out. */
@@ -1170,7 +1199,6 @@ async function haFinalizeConfig(ctx) {
     primary,
     standby,
     domain,
-    loadedProjectConfig,
     pendingEnvConfig,
     replActive,
     degraded,
@@ -1227,13 +1255,15 @@ async function haFinalizeConfig(ctx) {
     delete finalEnv.lastFailoverOverride;
     finalEnv.ha = { ...(finalEnv.ha ?? {}), systemIdentifier: ctx.systemIdentifier };
   }
-  saveProjectConfig({
-    ...loadedProjectConfig,
-    provider: envConfig.provider ?? 'hetzner',
-    environments: {
-      ...loadedProjectConfig.environments,
-      [environment]: finalEnv,
-    },
+  persistComposeHaEnv(environment, envConfig, finalEnv, {
+    // Decided here: replication state, the backup-prefix fence record and, on
+    // a completed reconverge, the proven identifier. The rest stays as on disk.
+    owns: [
+      'replication',
+      'degraded',
+      'ha.backupFence',
+      ...(ctx.reconverge && reconvergeComplete ? ['ha.systemIdentifier'] : []),
+    ],
   });
   registerProject(projectName, process.cwd());
 

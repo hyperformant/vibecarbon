@@ -7,6 +7,7 @@
  * has its own app bucket and owns its CORS rule outright).
  */
 import { describe, expect, it, vi } from 'vitest';
+import type { Config as ConfigJson } from '../helpers/project-config-store.js';
 
 const disk = vi.hoisted(() => ({
   config: null as Record<string, unknown> | null,
@@ -17,8 +18,11 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
   return {
     ...actual,
     loadProjectConfig: () => disk.config,
-    saveProjectConfig: (cfg: Record<string, unknown>) => {
-      disk.saved = cfg;
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) => {
+      const current = structuredClone(disk.config ?? {});
+      const next = (fn(current) ?? current) as Record<string, unknown>;
+      disk.saved = next;
+      return next;
     },
     registerProject: () => {},
   };
@@ -126,5 +130,42 @@ describe('haPersistPendingConfig keeps the per-environment storage fields', () =
     (c.s3Config as Record<string, unknown>).appKey = null;
     await COMPOSE_HA_EFFECTS.haPersistPendingConfig(c);
     expect(s3Of(disk.saved)).not.toHaveProperty('appKey');
+  });
+
+  it('keeps the safety records on disk that the in-memory env predates (a stranded fence, the journals, the proof, a pending sync)', async () => {
+    const onDisk = {
+      replication: 'degraded',
+      degraded: true,
+      pendingServerState: [{ stack: 'myapp-prod-primary', serverId: '9' }],
+      backup: { lineage: '7412', unrestoredPrior: '6999' },
+      ha: {
+        enabled: true,
+        systemIdentifier: '7412',
+        backupFence: { written: true },
+        failoverInFlight: { id: 'j1' },
+        writeFence: { node: 'myapp-prod-primary', ip: '10.0.0.1' },
+      },
+    };
+    disk.config = { projectName: 'myapp', environments: { prod: onDisk } };
+    // The deploy loaded its env before any of these were written.
+    const c = ctx({ provider: 'hetzner', replication: 'streaming', degraded: false });
+    c.backupConfig = { schedule: '0 3 * * *', lineage: '7412' };
+    await COMPOSE_HA_EFFECTS.haPersistPendingConfig(c);
+    const env = (disk.saved as { environments: Record<string, ConfigJson> }).environments.prod;
+    expect(env.ha).toMatchObject({ ...onDisk.ha, failoverRegion: 'nbg1' });
+    expect(env.pendingServerState).toEqual(onDisk.pendingServerState);
+    expect(env.replication).toBe('degraded');
+    expect(env.degraded).toBe(true);
+    expect(env.backup).toEqual({ schedule: '0 3 * * *', lineage: '7412', unrestoredPrior: '6999' });
+    expect(env.status).toBe('deploying');
+  });
+
+  it('a record cleared on disk stays cleared, though the in-memory env still had it', async () => {
+    disk.config = { projectName: 'myapp', environments: { prod: { ha: { enabled: true } } } };
+    await COMPOSE_HA_EFFECTS.haPersistPendingConfig(
+      ctx({ provider: 'hetzner', ha: { enabled: true, writeFence: { ip: '10.0.0.1' } } }),
+    );
+    const env = (disk.saved as { environments: Record<string, ConfigJson> }).environments.prod;
+    expect(env.ha).not.toHaveProperty('writeFence');
   });
 });

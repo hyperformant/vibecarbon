@@ -4,7 +4,7 @@ import { load as parseYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 
 /**
- * The base compose file points WAL-G at the app's S3 vars (WALG_S3_PREFIX
+ * The base compose file points WAL-G at the app's S3 vars (WALG_S3_PREFIX_BASE
  * falls back to S3_BUCKET, AWS_ENDPOINT is S3_ENDPOINT). In dev those vars
  * name the local S3 on `localhost:8333`, which from inside the db container is
  * the container itself, so every WAL segment would fail to archive. (It used
@@ -19,7 +19,12 @@ type Compose = {
 };
 const load = (rel: string) => parseYaml(readFileSync(join(ROOT, rel), 'utf-8')) as Compose;
 
-const BLANKED = ['WALG_S3_PREFIX', 'AWS_ENDPOINT', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'];
+const BLANKED = [
+  'WALG_S3_PREFIX_BASE',
+  'AWS_ENDPOINT',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+];
 
 describe('dev db has WAL-G disabled', () => {
   const base = load('carbon/docker-compose.yml').services?.db?.environment;

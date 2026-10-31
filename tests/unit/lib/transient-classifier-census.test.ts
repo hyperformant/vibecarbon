@@ -245,14 +245,6 @@ const REGISTRY: RegistryRow[] = [
       'Flag-driven: retries unless the thrower stamped walgRetryable=false (NON_RETRYABLE_CODES).',
   },
   {
-    file: 'src/lib/backup-s3.js',
-    name: 'isTransient@1',
-    domain: 'inverse-terminal',
-    notes:
-      'Restore download: retries everything except terminal S3 answer names (NoSuchBucket/' +
-      'NoSuchKey/...), which are real answers, not blips.',
-  },
-  {
     file: 'src/lib/deploy/registry-push.js',
     name: 'isTransient@1',
     domain: 'delegating',

@@ -23,7 +23,6 @@ import { renderHelp } from './lib/cli/help.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { c, printBanner } from './lib/colors.js';
-import { saveProjectConfig } from './lib/config.js';
 import {
   addCidr,
   applyToFirewall,
@@ -32,6 +31,7 @@ import {
   loadOperatorCidrs,
   pruneCidrs,
   removeCidr,
+  updateOperatorCidrs,
 } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
@@ -206,10 +206,8 @@ async function addAction(projectConfig, cidr, apiToken) {
   }
   const list = loadOperatorCidrs(projectConfig);
   const existed = list.some((e) => e.cidr === cidr);
-  const newList = addCidr(list, cidr);
-
-  saveProjectConfig({ ...projectConfig, operatorCidrs: newList });
-  projectConfig.operatorCidrs = newList;
+  // Applied to the list on disk now, so an entry another terminal added stays.
+  const newList = updateOperatorCidrs(projectConfig, (fresh) => addCidr(fresh, cidr));
 
   if (existed) {
     p.log.info(`${cidr} was already in the list, refreshed lastUsedAt.`);
@@ -264,9 +262,7 @@ async function removeAction(projectConfig, cidr, apiToken) {
     }
   }
 
-  const newList = removeCidr(list, cidr);
-  saveProjectConfig({ ...projectConfig, operatorCidrs: newList });
-  projectConfig.operatorCidrs = newList;
+  const newList = updateOperatorCidrs(projectConfig, (fresh) => removeCidr(fresh, cidr));
   p.log.success(`Removed ${cidr} from the operator allowlist.`);
 
   const s = spinner();
@@ -287,12 +283,11 @@ async function pruneAction(projectConfig, apiToken) {
       `Refusing to prune all ${dropped} entries; that would lock everyone out. Run \`vibecarbon access add <cidr>\` first to seed at least one fresh entry, then re-run prune.`,
     );
   }
-  saveProjectConfig({ ...projectConfig, operatorCidrs: newList });
-  projectConfig.operatorCidrs = newList;
+  const written = updateOperatorCidrs(projectConfig, (fresh) => pruneCidrs(fresh, now, 90));
   p.log.success(`Pruned ${dropped} stale entr${dropped === 1 ? 'y' : 'ies'}.`);
 
   const s = spinner();
-  await pushToAllFirewalls(projectConfig, newList, apiToken, s);
+  await pushToAllFirewalls(projectConfig, written, apiToken, s);
 }
 
 // ============================================================================

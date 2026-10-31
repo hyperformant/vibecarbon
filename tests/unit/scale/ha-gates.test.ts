@@ -97,7 +97,7 @@ describe('census: scale and restore refuse on a journal before their prompts', (
   });
 
   it('restore run() gates before the backup prompt and the prod confirmation', () => {
-    const run = body('src/restore.js', 'export async function run(args)');
+    const run = body('src/restore.js', 'export async function run(args, deps = {})');
     const gate = run.indexOf("action: 'restore'");
     expect(gate).toBeGreaterThan(-1);
     expect(gate).toBeLessThan(run.indexOf('pickInteractiveSource('));

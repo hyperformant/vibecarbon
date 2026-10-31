@@ -171,6 +171,12 @@ describe('k8s/base renders the db StatefulSet', () => {
       expect([
         '"key":"DB_PASSWORD"',
         '"key":"RESTORE_TARGET"',
+        '"key":"RESTORE_BACKUP"',
+        '"key":"RESTORE_RECOVERY_CONF"',
+        // The restore marker's attempt id: the walg-restore init's repeat guard.
+        '"key":"RESTORE_ATTEMPT"',
+        // The lineage the restore fetches from (walg-env.sh's RESTORE_LINEAGE).
+        '"key":"RESTORE_LINEAGE"',
         '"key":"REPL_PASSWORD"',
         '"key":"S3_CREDENTIALS_INI"',
       ]).toContain(k);
@@ -241,21 +247,21 @@ describe('buildDbManifestValues', () => {
   });
 
   it('uses ONE canonical wal-g prefix: backup bucket first, then the storage bucket', () => {
-    expect(values().WALG_S3_PREFIX).toBe('s3://proj-backups/backups/proj/prod/walg');
-    expect(values({ backupBucketName: null }).WALG_S3_PREFIX).toBe(
+    expect(values().WALG_S3_PREFIX_BASE).toBe('s3://proj-backups/backups/proj/prod/walg');
+    expect(values({ backupBucketName: null }).WALG_S3_PREFIX_BASE).toBe(
       's3://proj-storage/backups/proj/prod/walg',
     );
-    expect(values({ backupBucketName: null, s3Config: undefined }).WALG_S3_PREFIX).toBe('');
+    expect(values({ backupBucketName: null, s3Config: undefined }).WALG_S3_PREFIX_BASE).toBe('');
     // Another environment of the same project archives under its own prefix.
     expect(
       values({
         s3Config: { bucket: 'proj-storage', walgPrefix: 'backups/proj/staging/walg' },
-      }).WALG_S3_PREFIX,
+      }).WALG_S3_PREFIX_BASE,
     ).toBe('s3://proj-backups/backups/proj/staging/walg');
     // A bucket with no resolved prefix would write into a shared path: refuse.
     expect(() => values({ s3Config: { bucket: 'proj-storage' } })).toThrow(/walgPrefix/);
     // The role is a write-guard, never a path segment.
-    expect(values({ walgRole: 'standby' }).WALG_S3_PREFIX).not.toMatch(/standby/);
+    expect(values({ walgRole: 'standby' }).WALG_S3_PREFIX_BASE).not.toMatch(/standby/);
     expect(values({ walgRole: 'standby' }).WALG_ROLE).toBe('standby');
   });
 
@@ -285,7 +291,9 @@ describe('renderK8sBase on the shipped base', () => {
       expect(container.image).toBe('ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r1');
       expect(sts.spec.volumeClaimTemplates[0].spec.storageClassName).toBe('hcloud-volumes');
       const env = Object.fromEntries(container.env.map((e: Doc) => [e.name, e.value]));
-      expect(env.WALG_S3_PREFIX).toBe('s3://proj-backups/backups/proj/prod/walg');
+      expect(env.WALG_S3_PREFIX_BASE).toBe('s3://proj-backups/backups/proj/prod/walg');
+      expect(env.WALG_PREVENT_WAL_OVERWRITE).toBe('true');
+      expect(env).not.toHaveProperty('WALG_S3_PREFIX');
       expect(env.WALG_ROLE).toBe('primary');
       expect(env.AWS_ENDPOINT).toBe('https://nbg1.example');
       // The source tree is untouched.

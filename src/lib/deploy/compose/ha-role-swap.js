@@ -159,7 +159,7 @@ export function composeHaStackOf(entry, projectName, environment) {
  * @returns {string[]}
  */
 export const COMPOSE_HA_SWAPPED_RECOVERY = (environment) => [
-  `Run vibecarbon deploy ${environment} to get back to two nodes: it keeps the promoted node`,
+  `Run \`vibecarbon deploy ${environment}\` to get back to two nodes: it keeps the promoted node`,
   'serving as the primary and rebuilds the retired node as the new standby from it,',
   'with no downtime.',
 ];
@@ -368,7 +368,7 @@ export async function assertComposeHaReconvergeReady({
   if (promotedState.inRecovery === true) {
     refuse(
       `the promoted node ${promoted.ip} is still in recovery, so the failover never finished ` +
-        `promoting it. run vibecarbon failover ${environment} to finish it, then deploy`,
+        `promoting it. run \`vibecarbon failover ${environment}\` to finish it, then deploy`,
     );
   }
   if (!domain) return { dnsAnswer: null };

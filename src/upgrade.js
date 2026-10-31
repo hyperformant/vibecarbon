@@ -30,6 +30,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandAsync } from './lib/command.js';
+import { updateProjectConfig } from './lib/config.js';
 import { resolveDisplayName } from './lib/display-name.js';
 import { parseDotenv } from './lib/dotenv.js';
 import { localComposeEnv, resolveDbImage } from './lib/images.js';
@@ -46,7 +47,6 @@ import {
   loadEnvVariables,
   loadManifest,
   repairLegacyEnvQuoting,
-  saveManifest,
   setEnvVar,
 } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -977,7 +977,10 @@ async function main(cliArgs) {
 
     manifest.templateVersion = VERSION;
     manifest.fileChecksums = newChecksums;
-    saveManifest(manifest, cwd);
+    updateProjectConfig((config) => {
+      config.templateVersion = VERSION;
+      config.fileChecksums = newChecksums;
+    }, cwd);
   }
 
   // Summary

@@ -341,6 +341,7 @@ export function logStepMatrix(
     'verify-scale',
     'backup',
     'destroy',
+    'restore-deploy',
     'restore',
     'verify-restore',
     'failover',
