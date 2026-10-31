@@ -31,7 +31,6 @@ import { dirname, join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { SOCAT_IMAGE } from '../../../src/lib/deploy/compose/ha.js';
-import { REGISTRY_IMAGE } from '../../../src/lib/deploy/compose/registry-config.js';
 import { BINFMT_IMAGE } from '../../../src/lib/deploy/platform.js';
 import {
   CSI_SIDECAR_MIRRORS,
@@ -46,6 +45,7 @@ import {
   MIRRORED_IMAGES,
   NODE_RUNTIME_IMAGE,
   pauseImageRef,
+  registryImageRef,
 } from '../../../src/lib/images.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
 
@@ -228,7 +228,7 @@ function workflowSites(rel: string): Site[] {
  */
 const JS_REFS: Record<string, string[]> = {
   SOCAT_IMAGE: [SOCAT_IMAGE],
-  REGISTRY_IMAGE: [REGISTRY_IMAGE],
+  'registryImageRef()': [registryImageRef()],
   DIAG_BUSYBOX_IMAGE: [DIAG_BUSYBOX_IMAGE],
   DIAG_NETSHOOT_IMAGE: [DIAG_NETSHOOT_IMAGE],
   BINFMT_IMAGE: [BINFMT_IMAGE],
@@ -451,6 +451,22 @@ describe('every shipped image ref is pinned by digest', () => {
     ).toEqual([]);
   });
 
+  it('the app image runs on the CLI-pinned node runtime base, and only on it', () => {
+    // carbon/Dockerfile's runner is FROM ${RUNTIME_IMAGE}, whose default is
+    // byte-for-byte NODE_RUNTIME_IMAGE (src/lib/images.js, the one CLI pin
+    // the deploy reads to pre-pull the base). The runner adds only the app's
+    // own layers: anything the base provides (libstdc++, the hono user, the
+    // node binary) re-added here would ride in every deploy's delta.
+    const df = read('carbon/Dockerfile');
+    expect(df).toMatch(new RegExp(`^ARG RUNTIME_IMAGE=${escapeRegExp(NODE_RUNTIME_IMAGE)}$`, 'm'));
+    expect(df).toMatch(/^FROM \$\{RUNTIME_IMAGE\} AS runner$/m);
+    const runner = df.slice(df.indexOf('AS runner'));
+    expect(runner).not.toMatch(
+      /\bapk\b|\badduser\b|\baddgroup\b|COPY[^\n]*\/usr\/local\/bin\/node/,
+    );
+    expect(runner).toMatch(/^USER hono$/m);
+  });
+
   it('the app is built with the very node the runtime base runs', () => {
     // carbon's builder and deps stages compile and install against
     // NODE_IMAGE; the runner executes the result on the node binary
@@ -616,20 +632,32 @@ describe('Dependabot can bump every pinned location', () => {
       'docker',
       'docker-compose',
     ]);
-    // socat and registry also live in k8s manifests that must equal a JS
-    // constant, so only the js-pins entry may bump them.
-    const dockerMain = inImages.find((u) => u['package-ecosystem'] === 'docker');
-    const ignored = new Set(
-      (dockerMain?.ignore ?? []).filter((i) => !i['update-types']).map((i) => i['dependency-name']),
-    );
-    expect(ignored).toEqual(
+    // Our ghcr mirrors pin upstream's amd64 CHILD digest, not the mirror
+    // tag's index digest, so a Dependabot "update" of one would only break
+    // the mirror census. Each entry ignores exactly the mirror names its
+    // files carry (images.js owns them), plus our node runtime base.
+    const ignoredBy = (eco: string) =>
+      new Set(
+        (inImages.find((u) => u['package-ecosystem'] === eco)?.ignore ?? [])
+          .filter((i) => !i['update-types'])
+          .map((i) => i['dependency-name']),
+      );
+    const mirrorNamesIn = (sites: Site[]) =>
+      sites
+        .map(({ ref }) => ref.split(/[:@]/)[0])
+        .filter((name) => name.startsWith('ghcr.io/hyperformant/'))
+        .filter((name) => !name.endsWith('/node-runtime'));
+    expect(ignoredBy('docker')).toEqual(
       new Set([
-        'alpine/socat',
-        'registry',
-        'ghcr.io/hyperformant/cluster-autoscaler',
+        ...mirrorNamesIn(K8S_FILES.flatMap(yamlImageSites)),
         'ghcr.io/hyperformant/node-runtime',
       ]),
     );
+    expect(ignoredBy('docker')).toContain('ghcr.io/hyperformant/cluster-autoscaler');
+    expect(ignoredBy('docker-compose')).toEqual(
+      new Set(mirrorNamesIn(COMPOSE_FILES.flatMap(yamlImageSites))),
+    );
+    expect(ignoredBy('docker-compose')).toContain('ghcr.io/hyperformant/traefik');
   });
 
   it('github-actions is watched (workflow actions are SHA-pinned)', () => {
@@ -643,17 +671,19 @@ describe('Dependabot can bump every pinned location', () => {
     const fromPins = dockerfileSites(PINS_DOCKERFILE)
       .map((s) => s.ref)
       .sort();
-    const jsThirdParty = [
+    // socat, registry and the DO CSI alpine moved onto our ghcr mirror
+    // (MirroredImage entries, bumped by hand like the registry.k8s.io set),
+    // so only the Docker Hub refs JS still holds remain here.
+    const jsThirdParty = [DIAG_BUSYBOX_IMAGE, DIAG_NETSHOOT_IMAGE, BINFMT_IMAGE];
+    expect(fromPins).toEqual([...new Set(jsThirdParty)].sort());
+    const mirrored = [
       SOCAT_IMAGE,
-      REGISTRY_IMAGE,
-      DIAG_BUSYBOX_IMAGE,
-      DIAG_NETSHOOT_IMAGE,
-      BINFMT_IMAGE,
+      registryImageRef(),
       ...Object.values(CSI_UPSTREAM_IMAGE_PINS).flatMap((specs) =>
         specs.flatMap((s) => Object.values(s.containers)),
       ),
     ];
-    expect(fromPins).toEqual([...new Set(jsThirdParty)].sort());
+    for (const ref of mirrored) expect(ref).toMatch(/^ghcr\.io\/hyperformant\//);
   });
 
   it('the k8s repl-gateway runs the same socat ref as the compose-ha overlay', () => {
@@ -661,8 +691,8 @@ describe('Dependabot can bump every pinned location', () => {
     expect(k8s).toEqual([SOCAT_IMAGE]);
   });
 
-  it('the k8s local registry runs the same registry ref as the compose registry', () => {
+  it('the k8s local registry runs registryImageRef()', () => {
     const k8s = yamlImageSites('carbon/k8s/base/registry/local-registry.yaml').map((s) => s.ref);
-    expect(new Set(k8s)).toEqual(new Set([REGISTRY_IMAGE]));
+    expect(new Set(k8s)).toEqual(new Set([registryImageRef()]));
   });
 });

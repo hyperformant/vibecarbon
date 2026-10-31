@@ -26,8 +26,6 @@
 #   WALG_ROLE                 primary | standby: the wal-g WRITE-GUARD that
 #                             wal-archive.sh and the backup CronJob read
 #   S3_ENDPOINT / S3_REGION   the backup bucket's endpoint
-#   REPL_RELAY_HOST/PORT      the local repl-gateway relay the standby's
-#                             seed-standby init dials (k8s-ha only)
 #   K8S_STORAGE_CLASS         the provider's CSI class (never the cluster
 #                             default, which can be k3s' node-local local-path)
 #
@@ -366,54 +364,6 @@ spec:
               mountPath: /etc/postgresql/walg-env.sh
               subPath: walg-env.sh
               readOnly: true
-        # Standby first-boot seeding (spec 2026-07-16-standby-init-seeding):
-        # on the k8s-ha STANDBY's first boot only, pg_basebackup the primary's
-        # data into empty PGDATA (via the local repl-gateway relay) so postgres
-        # boots directly into recovery as a streaming replica — no independent
-        # boot, no scale-to-zero swap. Self-gates (in-script) on
-        # WALG_ROLE=standby + empty PGDATA + no RESTORE_TARGET, so it is a
-        # logged no-op on the primary, on single-cluster k8s, on restores, and
-        # on every non-first boot. Bounded: ~6 min of retries, then exits 0
-        # UNSEEDED and the serial reseed path takes over. Script delivered via
-        # the vibecarbon-seed-standby ConfigMap (rendered at deploy time from
-        # the shared basebackup builder in src/lib/deploy/replication.js —
-        # secret-free; REPL_PASSWORD arrives via env below). Mounts the RAW
-        # volume (no subPath): PGDATA is <mount>/postgres-data, staging a
-        # sibling — the same layout the helper-pod swap uses.
-        - name: seed-standby
-          image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/bash
-            - -c
-            # An optional ConfigMap that is MISSING mounts as an empty dir — a
-            # bare `bash <script>` would then fail the init and block the pod.
-            - '[ -f /etc/vibecarbon/seed-standby.sh ] && exec bash /etc/vibecarbon/seed-standby.sh; echo "[seed-standby] no script mounted — skipping"; exit 0'
-          env:
-            - name: WALG_ROLE
-              value: "{{WALG_ROLE}}"
-            - name: SEED_PRIMARY_HOST
-              value: "{{REPL_RELAY_HOST}}"
-            - name: SEED_PRIMARY_PORT
-              value: "{{REPL_RELAY_PORT}}"
-            - name: RESTORE_TARGET
-              valueFrom:
-                secretKeyRef:
-                  name: vibecarbon-infra-secrets
-                  key: RESTORE_TARGET
-                  optional: true
-            - name: REPL_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: vibecarbon-infra-secrets
-                  key: REPL_PASSWORD
-                  optional: true
-          volumeMounts:
-            - name: data
-              mountPath: /seed-volume
-            - name: seed-standby-script
-              mountPath: /etc/vibecarbon
-              readOnly: true
       containers:
         - name: db
           image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
@@ -571,13 +521,6 @@ spec:
             items:
               - key: S3_CREDENTIALS_INI
                 path: credentials
-        # Optional: a deploy path that never created the map must not wedge
-        # the db pod in ContainerCreating (the init's command guards on the
-        # script being present).
-        - name: seed-standby-script
-          configMap:
-            name: vibecarbon-seed-standby
-            optional: true
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -168,8 +168,10 @@ describe('mitigation attribution census', () => {
   it('the detectors still see the mitigation population (not vacuously green)', () => {
     // ~45 sites existed when this was written (22 classifiers + 23 ladders).
     // A collapse toward zero means the sweep went blind — fix the detectors.
+    // 17: the k8s tunnel push's classifier (registry-push.js isTransient) was
+    // deleted with the push itself (cold-deploy-speed Task 5).
     expect(detectLadderSites().size).toBeGreaterThanOrEqual(15);
-    expect(scrapeClassifierSites().size).toBeGreaterThanOrEqual(18);
+    expect(scrapeClassifierSites().size).toBeGreaterThanOrEqual(17);
   });
 
   it('R5: every detected mitigation site is registered in exactly one class', () => {

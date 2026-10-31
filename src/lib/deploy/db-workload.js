@@ -19,7 +19,7 @@ export const DB_STATEFULSET = 'db';
 /** Its only pod: StatefulSet pods are `<name>-<ordinal>`. */
 export const DB_POD = `${DB_STATEFULSET}-0`;
 
-/** The postgres container inside the pod (the inits are walg-restore and seed-standby). */
+/** The postgres container inside the pod (its one init is walg-restore). */
 export const DB_CONTAINER = 'db';
 
 /** The volumeClaimTemplate name; its claim is `<template>-<pod>`. */

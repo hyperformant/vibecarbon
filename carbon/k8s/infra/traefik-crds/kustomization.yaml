@@ -6,8 +6,9 @@ kind: Kustomization
 # Usage: kubectl apply -k k8s/infra/traefik-crds/
 
 # LOCKSTEP PIN — the tag below MUST equal the Traefik image tag we run:
-#   carbon/k8s/base/traefik/deployment.yaml   (image: traefik:vX.Y.Z)
+#   carbon/k8s/base/traefik/deployment.yaml   (image: ghcr.io/hyperformant/traefik:vX.Y.Z@...)
 #   carbon/docker-compose.yml                 (image: traefik:vX.Y.Z)
+#   carbon/docker-compose.prod.yml            (image: ghcr.io/hyperformant/traefik:vX.Y.Z@...)
 # tests/unit/template/traefik-crd-version.test.ts fails the build if they drift.
 #
 # Why it matters: the CRDs define the schema the API server validates against,

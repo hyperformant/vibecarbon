@@ -6,6 +6,10 @@ services:
   # REVERSE PROXY
   # ===========================================
   traefik:
+    # Docker Hub's multi-arch index, for local `vibecarbon up` (Apple Silicon
+    # included). Servers never pull this: docker-compose.prod.yml swaps in our
+    # amd64 ghcr mirror of the SAME tag, so a cloud IP's anonymous Docker Hub
+    # quota cannot stall a deploy (tests/unit/deploy/core-images-from-mirror-census.test.ts).
     image: traefik:v3.6.11@sha256:acfc80650104f0194a15f73dc1648f517561bc1645391a15705332a064cfc33c
     container_name: ${PROJECT_NAME}-traefik
     restart: unless-stopped

@@ -566,7 +566,7 @@ The standby cluster is deployed as a cost-optimized, non-serving replica designe
 - **2 nodes only:** master (control plane, ingress, cert-manager, replication gateway, in-cluster registry) + dedicated database node (the streaming replica database)
 - Same server types as the primary's master and database nodes: cost savings come from eliminating workers and the warm app tier, not from downsizing
 - **Cold app tier, declaratively:** All app-tier workloads (the app Deployment and cluster-autoscaler) are set to `replicas: 0`; the only active workloads are the db StatefulSet and replication gateway
-- **Seeded on first boot:** The standby database is initialized by a seed container running `pg_basebackup` at deploy time, booting as a live streaming replica. The 200s stage/swap/reboot reseed cycle is eliminated
+- **Reseeded on every deploy:** The deploy's replication step reseeds the standby database from the primary with a staged `pg_basebackup`, swaps it in, and verifies it is streaming. It runs once, serially, after both clusters are up; there is no separate first-boot seed
 
 **Deploy as role reconciler:**
 Re-running `vibecarbon deploy` after any failover converges each cluster to its current role:
@@ -669,7 +669,7 @@ never reported as a clean success.
 
 ### Error Handling (k8s-ha)
 
-- **Seed init failure at deploy** (primary unreachable, bad credentials): the db pod fails its init container, the deploy verification fails, and the deploy fails loud. Retry `vibecarbon deploy`: no partial states to clean.
+- **Reseed failure at deploy** (primary unreachable over the tunnel, bad credentials): the replication step fails and the deploy fails loud, unless `-allow-degraded` is set, which finishes with a warm standby. The staged copy is swapped in only once it is complete, so retry `vibecarbon deploy`: no partial states to clean.
 - **Provisioning failure at failover:** The provisioning step attempts to converge workers to 0 on abort; if that also fails, the exact resource state is reported. The primary is untouched. Re-run `vibecarbon failover` (optionally with a different `-server-type`) to retry.
 - **Promotion failure:** The existing abort-before-anything-moves check stands. If promotion is not confirmed, the failover stops before any other resource moves.
 - Every failure path reports what state the world is in and what the operator's next command should be.

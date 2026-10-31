@@ -6,10 +6,12 @@ import { primaryRegistryHasImage, shouldSkipK3sApply } from '../../../src/lib/de
 import { StateTracker } from '../../../src/lib/deploy/state.js';
 
 /**
- * The primary's registry push lives inside the k3s-apply gate. The gate's
- * inputs (manifests, tags) can't see a registry that lost its contents, so a
- * warm primary deploy verifies the tag is still there and re-runs the apply
- * (and so the push) when it is not. A standby has no push and skips on the hash.
+ * The primary's one image delivery (deliverImage: a layer delta into the
+ * master, then `ctr images push` into its registry) lives inside the k3s-apply
+ * gate. The gate's inputs (manifests, tags) can't see a registry that lost its
+ * contents, so a warm primary deploy verifies the tag is still there and
+ * re-runs the apply (and so the delivery) when it is not. A standby delivers
+ * nothing and skips on the hash.
  */
 const IMAGE = '10.0.1.1:5000/quorum:abc-123';
 const inputs = { imageTag: IMAGE };
@@ -38,7 +40,7 @@ describe('shouldSkipK3sApply', () => {
     expect(imageInRegistry).toHaveBeenCalledTimes(1);
   });
 
-  it('primary, tag missing: does not skip, so the push runs again', async () => {
+  it('primary, tag missing: does not skip, so the delivery runs again', async () => {
     await expect(
       shouldSkipK3sApply({
         state: warmState(),

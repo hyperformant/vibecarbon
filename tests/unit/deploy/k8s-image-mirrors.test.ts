@@ -479,7 +479,7 @@ describe('csiSidecarSetImagePlan()', () => {
 
   it('re-pins DO’s floating alpine:3 init container in the same call as its node sidecar', () => {
     // Upstream's driver.yaml ships `automount-udev-deleter` as bare alpine:3.
-    // It needs no mirror (Docker Hub, not registry.k8s.io), only a pin, and it
+    // It is pinned onto our alpine mirror (Docker Hub rate limits, Task 7) and
     // rides the csi-do-node `set image` that already happens.
     const upstream = UPSTREAM_CSI_MANIFESTS.digitalocean.workloads['daemonset/csi-do-node'];
     expect(upstream['automount-udev-deleter']).toBe('alpine:3');
@@ -488,7 +488,10 @@ describe('csiSidecarSetImagePlan()', () => {
     );
     expect(node).toHaveLength(1);
     const arg = node[0].setImageArgs.find((a) => a.startsWith('automount-udev-deleter='));
-    expect(arg).toMatch(/^automount-udev-deleter=alpine:3\.\d+\.\d+@sha256:[a-f0-9]{64}$/);
+    expect(arg).toBe(`automount-udev-deleter=${alpineImageRef()}`);
+    expect(arg).toMatch(
+      /^automount-udev-deleter=ghcr\.io\/hyperformant\/alpine:3\.\d+\.\d+@sha256:[a-f0-9]{64}$/,
+    );
     // Every in-place pin addresses a container upstream actually ships.
     for (const [provider, specs] of Object.entries(CSI_UPSTREAM_IMAGE_PINS)) {
       const workloads = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS]

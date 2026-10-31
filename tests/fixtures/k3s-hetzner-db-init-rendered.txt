@@ -60,6 +60,19 @@ mirrors:
   "10.0.1.1:5000":
     endpoint:
       - "http://10.0.1.1:5000"
+  # k3s system images (--system-default-registry alias) from our ghcr mirror.
+  # Never mirror docker.io here: namespace confusion. Why, and the rules for
+  # this file (no shell-expandable characters): K3S_SYSTEM_IMAGE_MIRRORS in
+  # src/lib/images.js.
+  "vibecarbon-system.invalid":
+    endpoint:
+      - "https://ghcr.io"
+    rewrite:
+      "^rancher/mirrored-coredns-coredns$": "hyperformant/mirrored-coredns-coredns"
+      "^rancher/local-path-provisioner$": "hyperformant/local-path-provisioner"
+      "^rancher/mirrored-metrics-server$": "hyperformant/mirrored-metrics-server"
+      "^rancher/mirrored-library-busybox$": "hyperformant/mirrored-library-busybox"
+      "^rancher/mirrored-pause$": "hyperformant/mirrored-pause"
 REGEOF
 
 # Get node IPs for k3s configuration.
@@ -435,6 +448,7 @@ fi
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="v1.31.5+k3s1" K3S_URL="https://10.0.1.1:6443" K3S_TOKEN="deadbeefcafe1234567890abcdef" sh -s - agent \
+      --disable-default-registry-endpoint \
       --node-ip "$PUBLIC_IP" \
       --node-external-ip "$PUBLIC_IP" \
       --flannel-iface "$PRIVATE_IFACE" \

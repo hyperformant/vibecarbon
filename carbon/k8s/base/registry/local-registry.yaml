@@ -37,7 +37,7 @@ spec:
       # keeps runAsNonRoot).
       initContainers:
         - name: chown-storage
-          image: registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          image: ghcr.io/hyperformant/registry:2.8.3@sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
           command: ["/bin/sh", "-c", "chown -R 1000:1000 /var/lib/registry && chmod 700 /var/lib/registry"]
           securityContext:
             runAsUser: 0
@@ -47,7 +47,7 @@ spec:
               mountPath: /var/lib/registry
       containers:
         - name: registry
-          image: registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          image: ghcr.io/hyperformant/registry:2.8.3@sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
           # ROOT FIX (2026-08-30, run 33332292268): image layers live on the
           # MASTER NODE DISK, never object storage. The registry is a
           # transport cache — every deploy builds and pushes the image to the
@@ -79,8 +79,8 @@ spec:
               # barrier). Every consumer dials <masterPrivateIp>:5000: kubelet
               # on each node (registries.yaml mirror; kubelet uses node DNS,
               # not cluster DNS, so it can't resolve the "local-registry"
-              # Service name), and the operator's push tunnel
-              # (ssh -L <port>:<masterPrivateIp>:5000, registry-push.js).
+              # Service name), and the master itself, where the deploy's
+              # layer delta runs `ctr images push` (layer-delta-remote.sh).
               # {{MASTER_PRIVATE_IP}} is rendered at deploy time
               # (renderK8sBase): Hetzner's static 10.0.1.1, DigitalOcean's
               # Pulumi-assigned VPC address.

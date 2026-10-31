@@ -535,6 +535,33 @@ describe('the node runtime base publishes on merge, once per revision tag', () =
   });
 });
 
+describe("test.yml builds the app FROM this commit's node runtime base", () => {
+  const job = jobsOf('.github/workflows/test.yml')['app-image'];
+  const steps = job?.steps ?? [];
+  const at = (re: RegExp) => steps.findIndex((s) => re.test(s.run ?? ''));
+
+  it('exists, reading the ref from src/lib/images.js', () => {
+    expect(job).toBeDefined();
+    expect(runsOf(job)).toContain("import('./src/lib/images.js')");
+    expect(runsOf(job)).toContain("m.NODE_RUNTIME_IMAGE.split('@')[0]");
+  });
+
+  it('builds the runtime from docker/node-runtime, then carbon FROM it, then runs node', () => {
+    const runtime = at(/docker build -t "\$NODE_RUNTIME_TAG_REF" docker\/node-runtime/);
+    const app = at(
+      /docker build --build-arg RUNTIME_IMAGE="\$NODE_RUNTIME_TAG_REF" -t vibecarbon-app:ci carbon/,
+    );
+    const run = at(/docker run --rm vibecarbon-app:ci node -e 1/);
+    expect(runtime).toBeGreaterThan(-1);
+    expect(app).toBeGreaterThan(runtime);
+    expect(run).toBeGreaterThan(app);
+  });
+
+  it('needs no secret and no login (it runs on fork and Dependabot PRs)', () => {
+    expect(JSON.stringify(job)).not.toMatch(/secrets\.|docker\/login-action|docker login/);
+  });
+});
+
 describe('release.yml refuses a release whose pinned db image users cannot pull', () => {
   // Every mode pulls DB_IMAGE:DB_IMAGE_TAG, local `up` included. A release
   // cut before publish-db-image finished (or with a private package, or a
@@ -543,14 +570,44 @@ describe('release.yml refuses a release whose pinned db image users cannot pull'
   const gate = jobs['db-image'];
   const run = runsOf(gate);
 
-  it('the release job needs the db-image gate', () => {
+  it('the release job needs the db-image and mirrored-images gates', () => {
     expect(gate).toBeDefined();
-    expect(jobs.release.needs).toBe('db-image');
+    expect(jobs.release.needs).toEqual(['db-image', 'mirrored-images']);
   });
 
   it('reads the pair from src/lib/images.js, the CLI authority', () => {
     expect(run).toContain("import('./src/lib/images.js')");
     expect(run).toContain('$GITHUB_ENV');
+  });
+
+  it('verifies the node runtime base the app image builds FROM the same way', () => {
+    // A generated project's first build pulls NODE_RUNTIME_IMAGE; a release
+    // naming an unpublished or private tag breaks every `up` and deploy.
+    expect(run).toContain("'NODE_RUNTIME_IMAGE=' + m.NODE_RUNTIME_IMAGE");
+    expect(run).toMatch(/for ref in "\$DB_IMAGE:\$DB_IMAGE_TAG" "\$NODE_RUNTIME_IMAGE"; do/);
+  });
+
+  it('refuses while the runtime base is pinned by tag alone, or the carbon ARG drifts', () => {
+    // A tag is mutable by whoever can push the package; a release must name
+    // the exact image every generated project will run on.
+    expect(run).toMatch(/case "\$NODE_RUNTIME_IMAGE" in\s+\*@sha256:\*\) ;;/);
+    expect(run).toMatch(/is not pinned by digest/);
+    expect(run).toContain("grep -oP '^ARG RUNTIME_IMAGE=\\K\\S+' carbon/Dockerfile");
+    expect(run).toContain('if [ "$runtime_arg" != "$NODE_RUNTIME_IMAGE" ]; then');
+    expect(run.indexOf('is not pinned by digest')).toBeLessThan(run.indexOf('for ref in'));
+  });
+
+  it('refuses unless the pinned digest is what the tag resolves to anonymously', () => {
+    expect(run).toMatch(/runtime_tag=\$\{NODE_RUNTIME_IMAGE%@\*\}/);
+    expect(run).toContain('docker buildx imagetools inspect "$runtime_tag"');
+    expect(run).toContain('if [ "$runtime_resolved" != "$runtime_pinned" ]; then');
+    expect(run.indexOf('export DOCKER_CONFIG')).toBeLessThan(run.indexOf('"$runtime_tag"'));
+  });
+
+  it('every refusal exits non-zero', () => {
+    const refusals = run.match(/::error::refusing to release/g)?.length ?? 0;
+    expect(refusals).toBe(5);
+    expect(run.match(/exit 1/g)?.length).toBe(refusals);
   });
 
   it('inspects anonymously: an empty DOCKER_CONFIG and no login anywhere in the job', () => {
@@ -563,8 +620,37 @@ describe('release.yml refuses a release whose pinned db image users cannot pull'
   it('requires both linux/amd64 and linux/arm64 children and refuses otherwise', () => {
     expect(run).toMatch(/for want in linux\/amd64 linux\/arm64; do/);
     expect(run).toMatch(/grep -qx "\$want"/);
-    expect(run.match(/::error::refusing to release/g)?.length).toBe(2);
-    expect(run.match(/exit 1/g)?.length).toBe(2);
+    expect(run.match(/::error::refusing to release: \$ref /g)?.length).toBe(2);
+  });
+});
+
+describe('release.yml refuses a release while any ghcr mirror ref is not anonymously pullable', () => {
+  // Servers pull every mirror (MIRRORED_IMAGES) with no login. A new mirror
+  // package starts private, so merging refs before publishing and flipping
+  // them public breaks every deploy at the first pull.
+  const jobs = jobsOf('.github/workflows/release.yml') as Record<string, Job>;
+  const gate = jobs['mirrored-images'];
+  const run = runsOf(gate);
+
+  it('reads every mirror ref from src/lib/images.js, the CLI authority', () => {
+    expect(run).toContain("import('./src/lib/images.js')");
+    expect(run).toContain("m.MIRRORED_IMAGES.map((i) => m.k8sMirrorTagRef(i) + ' ' + i.digest)");
+    expect(run).toContain('test -n "$pairs"');
+  });
+
+  it('inspects each digest-pinned ref anonymously and refuses on any miss', () => {
+    expect(run).toMatch(/DOCKER_CONFIG="\$RUNNER_TEMP\/[^"]+"/);
+    expect(run.indexOf('export DOCKER_CONFIG')).toBeLessThan(run.indexOf('imagetools inspect'));
+    expect(run).toContain('docker buildx imagetools inspect "$ref"');
+    expect(run).toMatch(/::error::refusing to release/);
+    expect(run).toMatch(/exit 1/);
+    expect(JSON.stringify(gate)).not.toMatch(/docker\/login-action|docker login|secrets\./);
+  });
+
+  it('refuses when a mirror TAG’s amd64 child is not the pinned digest (k3s pulls by tag)', () => {
+    expect(run).toContain('docker buildx imagetools inspect --raw "$tag"');
+    expect(run).toMatch(/architecture == "amd64"/);
+    expect(run).toContain('if [ "$tagged" != "$pinned" ]; then');
   });
 });
 

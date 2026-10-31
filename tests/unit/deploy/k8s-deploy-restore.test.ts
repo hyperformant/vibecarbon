@@ -22,12 +22,19 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('node:child_process', async () => {
   const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
   return { ...actual, spawn: vi.fn() };
 });
+
+// The app image delivery (a layer delta over its own ssh) is not this file's
+// subject; k8s-image-delivery-order.test.ts and the ordering harness pin it.
+vi.mock('../../../src/lib/deploy/layer-delta.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  deliverImage: vi.fn(async () => ({ bytes: 0, layersSent: 0, layersReused: 0 })),
+}));
 
 const k3s = await import('../../../src/lib/deploy/k8s/k3s.js');
 const {
@@ -481,20 +488,6 @@ describe('applyK3sManifests with a restore point', () => {
     pgdataState = 'VC_OK\n';
     markerClearExit = 0;
     installSpawn();
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string | URL, init?: { method?: string }) => {
-        const method = init?.method ?? 'GET';
-        const headers = {
-          get: (h: string) =>
-            method === 'POST' && h.toLowerCase() === 'location' ? `${String(url)}u1` : null,
-        };
-        return { status: method === 'PUT' ? 201 : method === 'HEAD' ? 200 : 202, headers };
-      }),
-    );
-  });
-  afterEach(() => {
-    vi.unstubAllGlobals();
   });
 
   it('marks the restore before the db applies, proves it, then clears it and rolls the app', async () => {

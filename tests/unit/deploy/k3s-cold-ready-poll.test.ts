@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
-// The two cold-ready waits (waitForK3sReady + waitForK3sBinary) poll an SSH
-// marker under a time budget. They MUST pass a tight `maxDelayMs` so the
+// The cold-ready wait (waitForK3sReady) polls an SSH marker under a time
+// budget. It MUST pass a tight `maxDelayMs` so the
 // exponential backoff tail doesn't add up to ~15s of dead time past the moment
 // the node actually becomes ready (the shared pollUntil default is 15_000,
 // tuned for multi-minute waits — over-long for a 34–50s cold-ready event).
@@ -34,18 +34,5 @@ describe('cold-ready polls pass a tight maxDelayMs (not the 15s shared default)'
     expect(opts?.maxDelayMs).toBe(5000);
     // Budget must still be honoured (derived from maxWaitSec).
     expect(opts?.budgetMs).toBe(600_000);
-  });
-
-  it('waitForK3sBinary caps the poll tail at 5s', async () => {
-    const { pollUntil } = await import('../../../src/lib/retry.js');
-    const { waitForK3sBinary } = await import('../../../src/lib/deploy/k8s/k3s.js');
-    vi.mocked(pollUntil).mockClear();
-
-    await waitForK3sBinary('root@1.2.3.4', '/tmp/key', '/tmp/kh', 300);
-
-    expect(pollUntil).toHaveBeenCalledTimes(1);
-    const opts = vi.mocked(pollUntil).mock.calls[0][1];
-    expect(opts?.maxDelayMs).toBe(5000);
-    expect(opts?.budgetMs).toBe(300_000);
   });
 });

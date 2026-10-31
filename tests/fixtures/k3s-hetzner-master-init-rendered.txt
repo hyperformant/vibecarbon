@@ -59,6 +59,19 @@ mirrors:
   "10.0.1.1:5000":
     endpoint:
       - "http://10.0.1.1:5000"
+  # k3s system images (--system-default-registry alias) from our ghcr mirror.
+  # Never mirror docker.io here: namespace confusion. Why, and the rules for
+  # this file (no shell-expandable characters): K3S_SYSTEM_IMAGE_MIRRORS in
+  # src/lib/images.js.
+  "vibecarbon-system.invalid":
+    endpoint:
+      - "https://ghcr.io"
+    rewrite:
+      "^rancher/mirrored-coredns-coredns$": "hyperformant/mirrored-coredns-coredns"
+      "^rancher/local-path-provisioner$": "hyperformant/local-path-provisioner"
+      "^rancher/mirrored-metrics-server$": "hyperformant/mirrored-metrics-server"
+      "^rancher/mirrored-library-busybox$": "hyperformant/mirrored-library-busybox"
+      "^rancher/mirrored-pause$": "hyperformant/mirrored-pause"
 REGEOF
 
 # Configure Floating IP on the OS so the kernel accepts packets destined for it.
@@ -466,9 +479,12 @@ echo "Private-NIC address guard installed (iface $PRIVATE_IFACE, ip $PRIVATE_IP)
 # GitHub failures happen inside the install script where we can't hand --retry through.
 # Wrap the whole pipeline in a bash retry loop - up to 5 attempts with 20s backoff -
 # so a transient CDN hiccup doesn't kill a fresh provision.
+# --system-default-registry: k3s system images come only from our ghcr mirror
+# (registries.yaml above; K3S_SYSTEM_IMAGE_MIRRORS). Agents inherit it.
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="v1.31.5+k3s1" sh -s - server \
+      --disable-default-registry-endpoint \
       --cluster-init \
       --token "deadbeefcafe1234567890abcdef" \
       --tls-san "$PUBLIC_IP" \
@@ -481,6 +497,7 @@ for attempt in 1 2 3 4 5; do
       --disable traefik \
       --disable servicelb \
       --disable-cloud-controller \
+      --system-default-registry "vibecarbon-system.invalid" \
       --flannel-backend=wireguard-native \
       --kubelet-arg="cloud-provider=external" \
       --write-kubeconfig-mode=644; then

@@ -207,7 +207,7 @@ describe('reseedStandbyFromPrimary', () => {
     expect(probe?.join(' ')).not.toContain('5432');
   });
 
-  it('bounds the post-swap db rollout-status inside the SSH client timeout (300s < 310s)', async () => {
+  it('bounds the post-swap db rollout-status inside the SSH client timeout (600s < 610s)', async () => {
     // Reconciliation invariant (see readiness-gate.test.ts): kubectl's
     // --timeout must sit inside the SSH client timeout so kubectl's own
     // error surfaces instead of a generic SSH kill. (An earlier 300s was

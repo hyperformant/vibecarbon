@@ -18,8 +18,8 @@ import { StateTracker } from '../../../src/lib/deploy/state.js';
  * The gate's inputs were `{projectName, domain, siteUrl, masterPrivateIp}`
  * — no signal at all from the app source tree the build consumes. On a warm
  * redeploy all four are unchanged, so `k3s-build` skipped, `imageTag` was read
- * back from the PRIOR step result, `k3s-sideload` skipped on that same tag, and
- * `k3s-apply` saw an unchanged image: an app-only edit NEVER reached the
+ * back from the PRIOR step result, and `k3s-apply` (which holds the image
+ * delivery) saw an unchanged image: an app-only edit NEVER reached the
  * cluster and push-to-deploy silently kept serving the stale image.
  *
  * Compose never had the hole — its `compose-setup-files` gate folds in
@@ -100,7 +100,7 @@ describe('buildK3sBuildInputs — the app source tree is part of the gate', () =
     expect(t2.shouldSkip('k3s-build', buildK3sBuildInputs(args()))).toBe(false);
   });
 
-  it('still skips an unchanged warm redeploy (no needless rebuild + sideload)', () => {
+  it('still skips an unchanged warm redeploy (no needless rebuild + delivery)', () => {
     const t1 = new StateTracker('proj', 'e3');
     t1.startStep('k3s-build', buildK3sBuildInputs(args()));
     t1.completeStep('k3s-build', { tag: '10.0.1.1:5000/proj:abc-1' });
@@ -152,7 +152,7 @@ describe('buildK3sBuildInputs — the app source tree is part of the gate', () =
     const before = digestAppSource(dir);
     // `.vibecarbon/deploy-state-<env>.json` is rewritten by THIS deploy on
     // every step transition — digesting it would bust the gate on every single
-    // run and turn the most expensive step (build + 5-10 min sideload) into an
+    // run and turn the most expensive step (build + delivery) into an
     // unconditional one.
     mkdirSync(join(dir, '.vibecarbon'), { recursive: true });
     writeFileSync(join(dir, '.vibecarbon', 'deploy-state-e3.json'), '{"version":2,"steps":{}}');
@@ -169,7 +169,7 @@ describe('buildK3sBuildInputs — the app source tree is part of the gate', () =
 
   it('does NOT fold in the k8s manifest tree — that is k3s-apply’s gate', () => {
     // Deliberate boundary: a manifest-only edit must re-APPLY (buildK3sApplyInputs
-    // digests both trees) without forcing a rebuild + full re-sideload of an
+    // digests both trees) without forcing a rebuild + re-delivery of an
     // image whose bytes are identical.
     const before = digestAppSource(dir);
     writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources: [app.yaml]\n');
@@ -237,7 +237,7 @@ describe('buildK3sBuildInputs — the docker build args are part of the gate', (
   });
 });
 
-describe('a source change cascades build → sideload → apply', () => {
+describe('a source change cascades build → apply (which delivers)', () => {
   let dir: string;
   let cwdSpy: ReturnType<typeof vi.spyOn>;
 
@@ -252,7 +252,8 @@ describe('a source change cascades build → sideload → apply', () => {
   });
 
   /**
-   * Mirrors deployK3s's build → sideload → apply gate chain. `nextTag` stands
+   * Mirrors deployK3s's build → apply gate chain (the image delivery runs
+   * inside the apply). `nextTag` stands
    * in for buildAppImage's return: a fresh tag every build (the real one
    * carries a UTC timestamp, so a rebuild always yields a new ref).
    */
@@ -272,14 +273,6 @@ describe('a source change cascades build → sideload → apply', () => {
     }
     const { tag: imageTag } = tracker.getStepResult('k3s-build');
 
-    const sideloadInputs = { imageTag, targets: 'root@1.2.3.4,root@1.2.3.5' };
-    let sideloaded = false;
-    if (!tracker.shouldSkip('k3s-sideload', sideloadInputs)) {
-      tracker.startStep('k3s-sideload', sideloadInputs);
-      tracker.completeStep('k3s-sideload');
-      sideloaded = true;
-    }
-
     const applyInputs = { imageTag, dbImageTag: 'ghcr.io/o/db:v1', restore: '' };
     let applied = false;
     if (!tracker.shouldSkip('k3s-apply', applyInputs)) {
@@ -287,17 +280,16 @@ describe('a source change cascades build → sideload → apply', () => {
       tracker.completeStep('k3s-apply');
       applied = true;
     }
-    return { built, sideloaded, applied, imageTag };
+    return { built, applied, imageTag };
   }
 
   it('re-runs all three steps, exactly as a cold deploy would', () => {
     const cold = runDeployGates('e3', 'tag-1');
-    expect(cold).toMatchObject({ built: true, sideloaded: true, applied: true });
+    expect(cold).toMatchObject({ built: true, applied: true });
 
     // Unchanged warm redeploy: nothing re-runs.
     expect(runDeployGates('e3', 'tag-2')).toMatchObject({
       built: false,
-      sideloaded: false,
       applied: false,
       imageTag: 'tag-1',
     });
@@ -308,7 +300,6 @@ describe('a source change cascades build → sideload → apply', () => {
     const warm = runDeployGates('e3', 'tag-3');
     expect(warm).toMatchObject({
       built: true,
-      sideloaded: true,
       applied: true,
       imageTag: 'tag-3',
     });
@@ -345,7 +336,7 @@ describe('a source change cascades build → sideload → apply', () => {
 describe('deployK3s wires the content-aware gate end to end', () => {
   const K3S_SRC = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8') as string;
   const deployBody = K3S_SRC.slice(K3S_SRC.indexOf('export async function deployK3s('));
-  // The build + sideload gates live in deliverAppImage, which deployK3s calls.
+  // The build gate lives in deliverAppImage, which deployK3s calls.
   const deliverBody = K3S_SRC.slice(
     K3S_SRC.indexOf('export async function deliverAppImage('),
     K3S_SRC.indexOf('export async function deployK3s('),
@@ -372,14 +363,13 @@ describe('deployK3s wires the content-aware gate end to end', () => {
     expect(deliverBody).toContain("state.shouldSkip('k3s-build', buildInputs)");
   });
 
-  it('keeps the cascade: the build’s tag is what both downstream gates key on', () => {
+  it('keeps the cascade: the build’s tag is what the apply gate keys on', () => {
     // If any of these three shapes drift, a busted build digest stops
     // propagating and the fix silently reverts to shipping a stale image.
     const chain = deliverBody.slice(deliverBody.indexOf("state.completeStep('k3s-build'"));
     expect(chain).toContain("({ tag: imageTag } = state.getStepResult('k3s-build'))");
-    expect(chain.slice(0, chain.indexOf("shouldSkip('k3s-sideload'"))).toContain(
-      'const sideloadInputs = { imageTag,',
-    );
+    // No per-node sideload gate any more: the one delivery is inside k3s-apply.
+    expect(K3S_SRC).not.toContain("'k3s-sideload'");
     expect(deployBody).toContain('const imageTag = await deliverAppImage({');
     const applyCall = deployBody.slice(deployBody.indexOf('buildK3sApplyInputs({'));
     expect(applyCall.slice(0, applyCall.indexOf('});'))).toContain('imageTag,');

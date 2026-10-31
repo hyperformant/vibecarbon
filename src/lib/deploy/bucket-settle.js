@@ -100,6 +100,34 @@ export async function settleWindowFor(providerId) {
 }
 
 /**
+ * Whether the Pulumi STATE bucket is still inside its provider's settle
+ * window, which sets the state lock's scope for an HA pair's `up`s (Ruling
+ * A′, src/lib/iac/state-lock.js). A 0-window provider answers false without
+ * reading anything. An unreadable creation time, or a provider class that
+ * does not declare its window, answers true: a young bucket keeps the
+ * whole-operation lock, the safe side.
+ *
+ * @param {{ providerId: string, createProvider: () => Promise<{ bucketCreatedAt(bucket: string): Promise<Date|null> }>, bucket: string, now?: () => number }} opts
+ * @returns {Promise<boolean>}
+ */
+export async function readStateBucketYoung({ providerId, createProvider, bucket, now = Date.now }) {
+  let windowMs;
+  try {
+    windowMs = await settleWindowFor(providerId);
+  } catch {
+    return true;
+  }
+  if (windowMs === 0) return false;
+  let createdAt = null;
+  try {
+    createdAt = await (await createProvider()).bucketCreatedAt(bucket);
+  } catch {
+    // Unknown age: young.
+  }
+  return storageSettleStatus(createdAt, now(), windowMs).settling;
+}
+
+/**
  * Probe until BUCKET_SETTLE_STREAK consecutive rounds come back clean, or
  * the budget runs out. A round with any failure resets the streak.
  *

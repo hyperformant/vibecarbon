@@ -206,8 +206,8 @@ async function haProvisionServers(ctx) {
 
   // No backend pre-init here any more. It existed because parallel `stack
   // select` against a just-created bucket raced the backend's own metadata
-  // write; the per-bucket state lock (lib/iac/state-lock.js) means the two
-  // stack operations below can no longer overlap, so the race it worked around
+  // write; the per-bucket state lock (lib/iac/state-lock.js) serializes the two
+  // stacks' selects and refreshes in every scope, so the race it worked around
   // cannot occur. Removing it also drops the `__init` stack create and delete
   // it performed on every HA deploy.
   const allowedSshIps = (ctx.projectConfig.operatorCidrs ?? []).map((e) => e.cidr);
@@ -242,6 +242,9 @@ async function haProvisionServers(ctx) {
           providerToken: apiToken,
           s3Config,
           projectName,
+          // Past the state bucket's settle window the two ups provision in
+          // parallel; inside it they serialize (lib/iac/state-lock.js).
+          stateBucketYoung: ctx.stateBucketYoung,
           // Recover stale-EMPTY outputs reads in place (read-only poll inside
           // upStack); the hard gate below stays the loud last resort. This
           // path is the MOST exposed member of the class: two parallel ups
@@ -255,6 +258,7 @@ async function haProvisionServers(ctx) {
           providerToken: apiToken,
           s3Config,
           projectName,
+          stateBucketYoung: ctx.stateBucketYoung,
           requiredOutputs: ['serverIp'],
         }),
       ),

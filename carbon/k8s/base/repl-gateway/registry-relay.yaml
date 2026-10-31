@@ -49,7 +49,7 @@ spec:
     - name: relay
       # Same pinned image as repl-gateway. The ENTRYPOINT is `socat`; args are
       # its two address specs.
-      image: alpine/socat:1.8.1.3@sha256:fb3862c949af7c79996d0e514ee96128644d840835ed5368eeecb14a869de361
+      image: ghcr.io/hyperformant/socat:1.8.1.3@sha256:99316fc7e1e8b5f40308105c54c9bed5a45891acee6480e8f0f9d2f4e69dee02
       imagePullPolicy: IfNotPresent
       securityContext:
         runAsNonRoot: true

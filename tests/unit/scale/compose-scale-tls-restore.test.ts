@@ -349,7 +349,8 @@ describe('the HTTP-01 recreate wipes acme.json only when the new server has no a
   it('DNS-01: no check and no wipe in the recreate, as before', async () => {
     reset({ snapshot: null });
     await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }));
-    expect(h.events.filter((e) => e === 'tls:check:9.9.9.9')).toHaveLength(1);
+    // No snapshot: the restore never reaches the server, and DNS-01 skips the recreate check.
+    expect(h.events.filter((e) => e === 'tls:check:9.9.9.9')).toHaveLength(0);
     expect(h.events).not.toContain('tls:wipe:9.9.9.9');
   });
 });

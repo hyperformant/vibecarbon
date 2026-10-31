@@ -379,8 +379,8 @@ export const DO_CSI_VERSION = 'v4.17.0';
  * (docker.io/hetznercloud/hcloud-csi-driver, digitalocean/do-csi-plugin) are
  * deliberately not mirrored: no evidence of a pull failure on those hosts, and
  * mirroring on speculation would add packages nobody has a reason to trust.
- * DO's floating `alpine:3` init container is not mirrored either, but it IS
- * re-pinned in place by digest (CSI_UPSTREAM_IMAGE_PINS below).
+ * DO's floating `alpine:3` init container is re-pinned onto our alpine mirror
+ * by digest (CSI_UPSTREAM_IMAGE_PINS below).
  *
  * @type {Record<string, Array<{workload: string, containers: Record<string, MirroredImage>}>>}
  */
@@ -502,9 +502,7 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 // pull costs minutes or fails the deploy (a cloud-init pre-pull was reverted
 // over exactly this, 7babb8e). So every Docker Hub image on the core deploy
 // path is mirrored into ghcr by the same matrix as the registry.k8s.io set,
-// and consumers pull `ghcr.io/hyperformant/<basename>:<tag>@<amd64 digest>`
-// (the consumers land with the cold-deploy speed change; until then this set
-// is only published).
+// and consumers pull `ghcr.io/hyperformant/<basename>:<tag>@<amd64 digest>`.
 //
 // `digest` is upstream's linux/amd64 CHILD manifest, not the multi-arch index
 // Docker Hub refs used to pin (deploy is amd64-only, src/lib/deploy/platform.js;
@@ -515,9 +513,8 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 // the mirror tag's digest is the index the job mints, not this child digest).
 // Edit {tag, digest, index} here AND the literal copies (compose files and k8s base
 // manifests, which cannot import JS; the census
-// tests/unit/deploy/core-images-from-mirror-census.test.ts, which lands with
-// the cold-deploy speed change, fails until every copy names an entry
-// exactly), merge, and publish-images mirrors the new tag.
+// tests/unit/deploy/core-images-from-mirror-census.test.ts fails until every
+// copy names an entry exactly), merge, and publish-images mirrors the new tag.
 // The weekly `mirror-upstream-drift` job lists newer upstream tags.
 //
 // Not here, deliberately: the add-ons (n8n, Metabase, Redis, observability)
@@ -598,19 +595,17 @@ export const K3S_SYSTEM_REGISTRY = 'vibecarbon-system.invalid';
 
 /**
  * k3s's OWN system images (ruling D3): k3s pulls these by tag on every node,
- * from docker.io/rancher by default. With the cold-deploy speed change (not
- * yet on this branch), the master runs k3s with
+ * from docker.io/rancher by default. The master runs k3s with
  * `--system-default-registry K3S_SYSTEM_REGISTRY` (agents inherit it from the
  * server), so k3s names them `<alias>/rancher/<repo>:<tag>`, and the ONLY
  * containerd mirror pointing at ghcr is for that alias, with per-repo
  * rewrites onto ghcr.io/hyperformant/<basename>
- * (carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml, which lands with that
- * change, spliced into every role's /etc/rancher/k3s/registries.yaml). There is deliberately NO docker.io
+ * (carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml, spliced into every
+ * role's /etc/rancher/k3s/registries.yaml). There is deliberately NO docker.io
  * mirror: one with a ghcr endpoint would try every docker.io pull as
  * ghcr.io/<same org>/<same name> first (namespace confusion). The cost: no
  * fallback, so a missing or private mirror fails the pull (release.yml's
- * mirrored-images gate, which lands with the same change, covers every
- * entry): every role also runs k3s with
+ * mirrored-images gate covers every entry): every role also runs k3s with
  * --disable-default-registry-endpoint, so containerd never tries the alias's
  * own host. The snippet is spliced into an UNQUOTED heredoc by the
  * DigitalOcean scripts: no capture groups, backticks or dollar-variables in
@@ -678,11 +673,12 @@ export const DOCKERHUB_MIRRORS = [
 ];
 
 /**
- * Upstream CSI containers re-pinned IN PLACE (same registry, digest-pinned
- * ref) through the same `kubectl set image` seam, for images that need no
- * mirror but ship floating in upstream's manifest. DO's v4.17.0 driver.yaml
- * runs its `automount-udev-deleter` init container as bare `alpine:3`, a
- * floating major; `kubectl set image` addresses init containers by name too.
+ * Upstream CSI containers that ship FLOATING in upstream's manifest, re-pinned
+ * by digest through the same `kubectl set image` seam. DO's v4.17.0
+ * driver.yaml runs its `automount-udev-deleter` init container as bare
+ * `alpine:3`, a floating major on Docker Hub; it now runs our alpine mirror
+ * (ALPINE_MIRROR above), so a rate-limited Docker Hub cannot hold up the
+ * node plugin. `kubectl set image` addresses init containers by name too.
  * Values are full refs. csiSidecarSetImagePlan merges these into the same
  * per-workload call as the mirrors, so no extra rollout happens.
  * @type {Record<string, Array<{workload: string, containers: Record<string, string>}>>}
@@ -692,8 +688,7 @@ export const CSI_UPSTREAM_IMAGE_PINS = {
     {
       workload: 'daemonset/csi-do-node',
       containers: {
-        'automount-udev-deleter':
-          'alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6',
+        'automount-udev-deleter': k8sMirrorRef(ALPINE_MIRROR),
       },
     },
   ],

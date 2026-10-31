@@ -95,7 +95,7 @@ services:
   # container inspect, env included, so it sits on the internal socket-proxy
   # network that only traefik joins. Nothing else can resolve or reach it.
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+    image: ghcr.io/hyperformant/docker-socket-proxy:v0.4.2@sha256:bd2241b3bec83abcff25927a0a7ae518e0c5bef624b3cc247dcb31e68b53f417
     container_name: ${PROJECT_NAME}-socket-proxy
     restart: unless-stopped
     security_opt:
@@ -143,7 +143,7 @@ services:
   # other section and every non-GET. Only the app shares its network.
   # Guarded by tests/integration/docker/compose-secret-reach.test.ts.
   app-docker-proxy:
-    image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+    image: ghcr.io/hyperformant/docker-socket-proxy:v0.4.2@sha256:bd2241b3bec83abcff25927a0a7ae518e0c5bef624b3cc247dcb31e68b53f417
     container_name: ${PROJECT_NAME}-app-docker-proxy
     restart: unless-stopped
     security_opt:
@@ -168,6 +168,9 @@ services:
 
   # Override Traefik to use socket proxy and secure dashboard behind ForwardAuth
   traefik:
+    # Our ghcr mirror of the base file's tag (amd64, servers only): no Docker
+    # Hub pull on a deploy. Same tag as carbon/docker-compose.yml, by census.
+    image: ghcr.io/hyperformant/traefik:v3.6.11@sha256:2b6506fde98570702dd026bc70ed307a0f22c2cf693329e91b46f94d371097a1
     command:
       - "--api.dashboard=true"
       - "--providers.docker=true"

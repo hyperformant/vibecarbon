@@ -11,14 +11,15 @@
  *   4. Wait for SSH on master + `/tmp/k3s-ready` marker.
  *   5. scp `/etc/rancher/k3s/k3s.yaml` from master, patch server URL to public IP.
  *   6. Build app image locally (10.0.1.1:5000/<project>:<sha>[-dirty]-<ts>).
- *   7. Sideload via `docker save TAG | ssh node 'k3s ctr images import -'` per node.
- *   8. `kubectl apply -k` a rendered copy of `k8s/base/` (db StatefulSet,
- *      traefik, app; cert-manager via infra/).
+ *   7. `kubectl apply -k` a rendered copy of `k8s/base/` (db StatefulSet,
+ *      traefik, app, the master's local registry; cert-manager via infra/).
+ *   8. Deliver the image once, by layer delta, into the master's registry
+ *      (deliverImage); every node pulls it from there.
  *   9. `kubectl rollout status statefulset/db`.
  *   10. `kubectl patch deploy/app` (image + Secret versions) + rollout-status.
  *
- * Warm path: skip 1-5; rebuild image (6); sideload (7) skipping unchanged tag;
- * apply changed manifests (8); rollout (10).
+ * Warm path: skip 1-5; rebuild image (6); apply changed manifests and deliver
+ * a changed tag (7-8); rollout (10).
  *
  * Target cold-deploy time: ≤ 3 min for single-master + database + 0 workers.
  * Spike on 2026-04-25 measured 82s for cluster bring-up alone.
@@ -87,12 +88,8 @@ import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../a
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
-import { pushImageOverSshTunnel } from '../registry-push.js';
-import {
-  buildStandbySeedInitScript,
-  READ_WRITE_PGOPTIONS,
-  restoreRolloutTimeoutS,
-} from '../replication.js';
+import { deliverImage } from '../layer-delta.js';
+import { READ_WRITE_PGOPTIONS, restoreRolloutTimeoutS } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
 import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
 import { caSlug, tlsSnapshotS3Prefix } from '../tls-snapshot.js';
@@ -101,7 +98,6 @@ import {
   k8sWalgAuditArgv,
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from '../walg-audit.js';
-import { REPL_GATEWAY_PORT } from '../wireguard.js';
 import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import {
   MANIFEST_DIGEST_SH,
@@ -109,6 +105,7 @@ import {
   planImageDelivery,
   standbyImageRef,
 } from './image-delivery.js';
+import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
 import {
   awaitAppAdminReady,
   awaitCertManagerAdmission,
@@ -163,8 +160,8 @@ const S3_EGRESS_VPC_MANIFEST = join(BUNDLED_K8S_DIR, 'base/s3-egress-vpc/s3-egre
  * digesting `projectDir` wholesale would fold in `.vibecarbon/`, which this
  * very deploy rewrites on every step transition (gate busts every run), plus
  * `dist/` and the k8s manifest tree — and a manifest-only edit must re-APPLY
- * without also forcing a rebuild and a 5-10 minute re-sideload of a
- * byte-identical image. `tests/unit/deploy/k3s-build-gate-inputs.test.ts` pins
+ * without also forcing a rebuild and a re-delivery of a byte-identical
+ * image. `tests/unit/deploy/k3s-build-gate-inputs.test.ts` pins
  * this list against the shipped Dockerfile so a new COPY source can't be added
  * to the template without the gate learning about it.
  */
@@ -258,7 +255,7 @@ export function digestAppSource(projectDir) {
  * customer-visible bug, not a theoretical one: on a warm redeploy
  * projectName/domain/siteUrl/masterPrivateIp are all unchanged, so
  * `k3s-build` skipped, `imageTag` came back from the PRIOR step result,
- * `k3s-sideload` skipped on that same tag and `k3s-apply` saw an unchanged
+ * the image delivery skipped on that same tag and `k3s-apply` saw an unchanged
  * image — an app-only edit NEVER reached the cluster and k8s push-to-deploy
  * silently kept serving the stale image. Compose never had the hole: its
  * `compose-setup-files` gate folds in `digestDir(bundlePath)` (prod bug
@@ -287,9 +284,9 @@ export function digestAppSource(projectDir) {
  * reuse a wrongly-prefixed tag.
  *
  * A rebuild mints a fresh tag (`generateLocalImageTag` carries a UTC
- * timestamp), and both downstream gates key off that tag — `k3s-sideload` via
- * `sideloadInputs.imageTag` and `k3s-apply` via `buildK3sApplyInputs` — so one
- * busted digest cascades through the whole chain exactly as a cold deploy does.
+ * timestamp), and the downstream `k3s-apply` gate (which holds the image
+ * delivery) keys off that tag via `buildK3sApplyInputs`, so one busted digest
+ * cascades through the whole chain exactly as a cold deploy does.
  *
  * @param {{ projectName: string, domain?: string, masterPrivateIp: string, projectDir: string }} args
  * @returns {{ projectName: string, domain: string|undefined, siteUrl: string|undefined, masterPrivateIp: string, sourceDigest: string, buildArgsDigest: string }}
@@ -446,7 +443,7 @@ export function digestEnvLocalSecrets(projectDir) {
   return hash.digest('hex').slice(0, 16);
 }
 
-/** The db image is pre-published + multi-arch — pulled, never built/sideloaded. */
+/** The db image is pre-published + multi-arch — pulled, never built or delivered. */
 export function resolveDbImageTag() {
   return resolveDbImage().ref;
 }
@@ -1258,7 +1255,7 @@ export async function ensureSshKey(projectDir, environment) {
 function sshHostKeyOpts(khPath) {
   // Shared builder also carries BatchMode=yes (key-auth failures abort
   // instead of hanging on a password prompt — critical for stdio:'inherit'
-  // pipelines like sideloadK3s) plus the ConnectTimeout/ServerAlive
+  // children) plus the ConnectTimeout/ServerAlive
   // keepalives from the banner-exchange-hang RCA (see host-keys.js).
   return buildHostKeyOptsForPath(khPath);
 }
@@ -1416,7 +1413,7 @@ export function formatPrePullSummary(result, elapsedMs) {
 /**
  * Opportunistic image pre-pull. Firing `ctr images pull` on every node right
  * after k3s is Ready moves the pulls 2-3 minutes earlier, overlapping the
- * build / sideload / manifest work, so kubelet finds the images already
+ * build / manifest work, so kubelet finds the images already
  * present: the cluster-autoscaler pod's pair (see clusterAutoscalerPodImages)
  * and, on a deploy, the db image the db StatefulSet's inits and container all
  * run (pulled from ghcr; slow-pull regions measured over two minutes of a
@@ -1493,11 +1490,11 @@ function loadEnvLocal(envPath) {
  * pre-M3 caller keeps producing byte-identical tags; deployK3s threads the
  * real value from `infraOutputs.masterPrivateIp` (M3 — DO can't pin VPC
  * IPs the way Hetzner's program does). The same tag is used at every step
- * (build → sideload → push → Deployment), so:
- *   - static workers get the image via `sideloadK3s` (containerd cache
- *     hit, kubelet `imagePullPolicy: IfNotPresent` finds it),
- *   - CA-spawned workers (which don't exist at sideload time) pull the
- *     same tag from master's registry pod via `registries.yaml`.
+ * (build → delivery → Deployment): applyK3sManifests delivers it once, by
+ * layer delta, into the master's containerd and pushes it into the master's
+ * registry pod (deliverImage, layer-delta.js), and every other node, static
+ * or cluster-autoscaler-spawned, pulls that tag from the registry through
+ * `registries.yaml`.
  *
  * A k8s-ha standby never calls this: it receives the primary's tag, copied
  * from the primary's registry into its own and re-prefixed with its own
@@ -1534,72 +1531,6 @@ export async function buildAppImage(
     tagPrefix: `${masterPrivateIp}:5000`,
     buildArgs,
   });
-}
-
-/**
- * Wait until the `k3s` binary is installed and on PATH on a given node.
- *
- * waitForK3sReady only polls the master's /tmp/k3s-ready marker. Workers
- * and the database node run their own k3s install asynchronously
- * (worker-init.sh / db-init.sh) which can take 1-3 min after the
- * master is ready (apt update, dpkg locks, k3s install script). If
- * sideload runs in that window, the remote `k3s ctr images import -`
- * exits 127 ("command not found") and one node's import fails,
- * cancelling the entire batch (observed 2026-04-26 e2e run #2 —
- * worker @ 204.168.185.124 returned 127).
- *
- * We poll up to maxWaitSec for `command -v k3s` to succeed. Cheap (~10ms
- * SSH per probe), idempotent, and resolves the race without changing
- * cloud-init.
- *
- * @param {string} target - SSH target (e.g. root@1.2.3.4)
- * @param {string} sshKeyPath
- * @param {string} khPath - per-env known_hosts file
- * @param {number} [maxWaitSec=300]
- * @returns {Promise<void>}
- */
-export async function waitForK3sBinary(target, sshKeyPath, khPath, maxWaitSec = 300) {
-  try {
-    await pollUntil(
-      async () => {
-        await runCommandAsync(
-          [
-            'ssh',
-            '-i',
-            sshKeyPath,
-            ...sshHostKeyOpts(khPath),
-            '-o',
-            'ConnectTimeout=5',
-            '-o',
-            'BatchMode=yes',
-            target,
-            'command -v k3s >/dev/null',
-          ],
-          { silent: true },
-        );
-        return true;
-      },
-      {
-        budgetMs: maxWaitSec * 1000,
-        // Tight tail — same rationale as waitForK3sReady: don't pay a 15s
-        // backoff past the moment `command -v k3s` first succeeds.
-        initialDelayMs: 1000,
-        maxDelayMs: 5000,
-        description: 'k3s binary on PATH',
-      },
-    );
-  } catch (err) {
-    // Same diagnostic capture as waitForK3sReady — see that function for why.
-    // `target` here is `root@<ip>` form; strip the user@ prefix for the host.
-    const lastErr = err.cause ?? err;
-    const ip = String(target).includes('@') ? String(target).split('@').pop() : String(target);
-    const diag = await captureK3sInstallDiag(ip, sshKeyPath, khPath);
-    throw new Error(
-      `k3s binary did not appear on ${target} within ${maxWaitSec}s. ` +
-        `Last SSH error: ${lastErr instanceof Error ? lastErr.message : 'unknown'}` +
-        (diag ? `\n\n--- install diagnostics from ${ip} ---\n${diag}` : ''),
-    );
-  }
 }
 
 /**
@@ -1748,164 +1679,12 @@ async function captureK3sInstallDiag(host, sshKeyPath, khPath) {
 }
 
 /**
- * Sideload an image to every node in a k3s cluster via parallel SSH.
- *
- * Per node: `docker save TAG | ssh -i KEY -o ... TARGET 'k3s ctr images import -'`.
- * Pipeline streams the tarball over SSH; no temp files on either end, no registry.
- * Parallel via Promise.all + spawn — wall-clock dominated by the slowest node.
- *
- * Before each `docker save | ssh` we wait for `command -v k3s` on the target
- * (workers and the database node finish their k3s install asynchronously after the master
- * marker — see waitForK3sBinary). 5-min cap per node; total budget bounded
- * by the deploy step's lifecycle timeout.
- *
- * @param {{tag: string, sshTargets: string[], sshKey: string, khPath: string}} args
- * @returns {Promise<void>}
- */
-export async function sideloadK3s({ tag, sshTargets, sshKey, khPath }) {
-  if (!sshTargets || sshTargets.length === 0) {
-    throw new Error('sideloadK3s: at least one SSH target is required');
-  }
-  if (!khPath) {
-    throw new Error('sideloadK3s: khPath is required');
-  }
-  const { spawn } = await import('node:child_process');
-  // We're going through `bash -c` because of the `docker save | ssh` pipe, so
-  // khPath/sshKey/target are interpolated into the shell. shEscape the file
-  // paths so spaces in cwd don't break the command (and so a hostile env
-  // name — already validated upstream — couldn't smuggle metacharacters).
-  const q = shEscape;
-  // BatchMode=yes mirrors sshHostKeyOpts() — without it, a missing key on
-  // the target falls back to interactive password prompt and the docker
-  // save | gzip | ssh pipeline hangs (stdio:'inherit' surfaces the prompt
-  // on the operator's terminal).
-  const sshOptsStr = `-o UserKnownHostsFile=${q(khPath)} -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=accept-new -o BatchMode=yes`;
-  await Promise.all(
-    sshTargets.map(async (target) => {
-      // Pre-flight: ensure k3s is on PATH before piping the tarball.
-      // Docker save streams ~600MB; if we ssh into a node that doesn't
-      // have k3s yet, the import errors mid-stream and we waste the
-      // bandwidth + cancel parallel imports on other healthy nodes.
-      // 600s mirrors waitForK3sReady — same cold-init story, same
-      // remedy as the comment there.
-      await waitForK3sBinary(target, sshKey, khPath, 600);
-
-      // Retry the docker-save | ssh pipe on transient failures.
-      // Observed in iter-wave1a (2026-05-01): standby k3s sideload failed
-      // with `kex_exchange_identification: read: Connection timed out`
-      // 21min into a successful deploy — cluster healthy, just an SSH
-      // socket flake. Retrying the pipe is the cheapest fix; the cost on
-      // the genuine-failure path is one extra ~5-10 min attempt, vs the
-      // current cost of throwing away an entire 21-min HA deploy.
-      const SIDELOAD_DELAYS_MS = [5_000, 15_000];
-      const runOnce = () =>
-        new Promise((resolve, reject) => {
-          // gzip on the wire: Node app images compress 3-5x (most layers
-          // are JS source + node_modules text). Without gzip, sideloading
-          // ~600MB to 6 nodes (HA) saturated the laptop's upload at ~25
-          // Mbps each, taking 23-29 min wall-clock (e2e run #1+#2).
-          // With gzip, the same payload is ~150-200MB → expected 5-10 min.
-          // We could reach for `pigz` for parallel compression, but plain
-          // `gzip -1` is universally present and dominant cost is network,
-          // not CPU. `gunzip` is available on Ubuntu 24.04 cloud-init by
-          // default (part of base image). pipefail propagates either side
-          // of the pipeline failing.
-          const cmd =
-            `set -o pipefail && docker save ${q(tag)} | gzip -1 | ` +
-            `ssh -i ${q(sshKey)} ${sshOptsStr} ${q(target)} ` +
-            `'gunzip | k3s ctr images import -'`;
-          const child = spawn('bash', ['-c', cmd], { stdio: 'inherit' });
-          child.on('error', (err) =>
-            reject(new Error(`sideloadK3s spawn failed for ${target}: ${err.message}`)),
-          );
-          child.on('exit', (code) => {
-            if (code === 0) resolve(undefined);
-            else reject(new Error(`sideloadK3s failed on ${target} with exit code ${code}`));
-          });
-        });
-
-      await runWithRetry(runOnce, {
-        delaysMs: SIDELOAD_DELAYS_MS,
-        onRetry: (err, attempt) => {
-          progressLog(
-            `[sideloadK3s] ${target} attempt ${attempt} failed (${err.message}); retrying in ${SIDELOAD_DELAYS_MS[attempt - 1] / 1000}s`,
-          );
-        },
-      });
-    }),
-  );
-}
-
-// PUSH_PERMANENT_PATTERN / isPermanentPushError now live in registry-push.js
-// (shared by the compose tier's push too). Re-exported here for API
-// stability — no external importers exist today, but the symbols were
-// public and free to keep.
-export { isPermanentPushError, PUSH_PERMANENT_PATTERN } from '../registry-push.js';
-
-/**
- * Push a locally-built image to the master's local OCI registry.
- *
- * Thin delegate over the shared `pushImageOverSshTunnel` (registry-push.js —
- * settle-on-exit tunnel, bind-race port walk, idempotent teardown, BatchMode /
- * known-hosts opts, transient/permanent push classification, and the settle
- * ladder itself); the k8s registry pod listens on the master's private
- * `<masterPrivateIp>:5000` (Phase 1's `registries.yaml` maps that hostname to
- * the registry pod). `masterPrivateIp` MUST match the value `buildAppImage`
- * used to build `tag` (both default to Hetzner's static `10.0.1.1`) or the
- * shared helper's prefix check throws.
- *
- * Nothing about the push mechanics lives in this file any more — including
- * `-o BatchMode=yes` / `buildHostKeyOptsForPath`, which the shared helper
- * applies to its own tunnel rather than going through this file's
- * `sshHostKeyOpts`. Fix push behavior in registry-push.js, not here; note it
- * is shared with the compose tier, which passes its own shorter
- * `settleDelaysMs` (see `COMPOSE_PUSH_SETTLE_DELAYS_MS`).
- *
- * `masterIp` is validated here (rather than inside the shared helper, which
- * only knows a generic `serverIp`) so this function's own error message
- * stays pinned for existing callers/tests.
- *
- * @param {{
- *   tag: string,
- *   masterIp: string,
- *   sshKey: string,
- *   khPath: string,
- *   settleDelaysMs?: number[],
- *   localTunnelPort?: number,
- *   masterPrivateIp?: string,
- * }} args
- * @returns {Promise<void>}
- */
-export async function pushImageToLocalRegistry({
-  tag,
-  masterIp,
-  sshKey,
-  khPath,
-  settleDelaysMs,
-  localTunnelPort = 5000,
-  masterPrivateIp = '10.0.1.1',
-}) {
-  // async (not a plain function returning the delegate's promise) so this
-  // synchronous check rejects rather than throwing to the caller directly —
-  // callers pass the call expression straight into expect(...).rejects.
-  if (!masterIp) throw new Error('pushImageToLocalRegistry: masterIp is required');
-  return pushImageOverSshTunnel({
-    tag,
-    remotePrefix: `${masterPrivateIp}:5000/`,
-    serverIp: masterIp,
-    sshKey,
-    khPath,
-    settleDelaysMs,
-    localTunnelPort,
-  });
-}
-
-/**
  * Generated infra passwords that land in Secret `vibecarbon-infra-secrets`,
  * never in the app's Secret. Each is read by key (secretKeyRef), only by the
  * pod that uses it: DB_PASSWORD (the db superuser; the db StatefulSet and the
  * app pod's migrate init container, never the app container), REPL_PASSWORD
- * (the standby's seed init) and the add-on roles' own database passwords
+ * (no pod reads it: setupReplication takes it from .env.local and the reseed
+ * reads it back from this Secret over SSH) and the add-on roles' own database passwords
  * (generated by `vibecarbon add`, healed by `upgrade`; read by the metabase
  * and n8n Deployments, present only when the add-on is installed).
  *
@@ -2451,10 +2230,8 @@ async function describeDbPods(env) {
 /**
  * Budget for the db StatefulSet to become Ready after `k8s/base` is applied.
  * A cold first boot pays the CSI volume provision + attach, the db image pull
- * (when the pre-pull has not finished) and initdb; a standby's first boot adds
- * the seed-standby init's pg_basebackup (up to ~6 minutes of retries before it
- * gives up and lets the serial reseed take over). 15 minutes is the budget the
- * chart install had for the same work.
+ * (when the pre-pull has not finished) and initdb. 15 minutes is the budget
+ * the chart install had for the same work.
  *
  * Deliberately longer than DB_STS_BOOT_TIMEOUT_S (600s, src/lib/deploy/
  * replication.js), the shared budget for re-booting an EXISTING db pod (the
@@ -2600,44 +2377,6 @@ export async function awaitDbRollout({ env, timeoutS = DB_ROLLOUT_TIMEOUT_S }) {
 }
 
 /**
- * Apply the `vibecarbon-seed-standby` ConfigMap the db pod's seed-standby
- * init mounts. Rendered fresh every deploy from the shared builder (one
- * source of truth with the failover/restore reseeds) and applied BEFORE
- * `k8s/base`, so the init can mount it on the pod's first boot. Secret-free by
- * contract: REPL_PASSWORD reaches the script via env only.
- *
- * Best-effort: the ConfigMap's ABSENCE is already fully handled — the init's
- * volume is optional and its command guards on the mounted file being present
- * — so losing this apply just means a standby's first-boot seed self-skips and
- * the serial reseed path covers replication later. Logged loudly, not thrown.
- *
- * @param {{env: NodeJS.ProcessEnv}} args
- */
-export async function applyDbSeedConfigMap({ env }) {
-  const seedScript = buildStandbySeedInitScript();
-  const seedConfigMap = [
-    'apiVersion: v1',
-    'kind: ConfigMap',
-    'metadata:',
-    '  name: vibecarbon-seed-standby',
-    '  namespace: vibecarbon',
-    'data:',
-    '  seed-standby.sh: |',
-    ...seedScript.split('\n').map((l) => `    ${l}`),
-    '',
-  ].join('\n');
-  await runCommandAsync(['kubectl', 'apply', '-f', '-'], {
-    silent: true,
-    env,
-    input: seedConfigMap,
-  }).catch((err) => {
-    console.error(
-      `[seed-standby] ConfigMap apply failed (${err?.message || err}), seed init will self-skip; serial reseed covers replication`,
-    );
-  });
-}
-
-/**
  * The deploy-time values for the db StatefulSet's `{{PLACEHOLDER}}` tokens
  * (k8s/base/db/statefulset.yaml), one per token. Pure.
  *
@@ -2646,7 +2385,6 @@ export async function applyDbSeedConfigMap({ env }) {
  * @param {{bucket?: string, walgPrefix?: string, endpoint?: string, region?: string}} [o.s3Config]
  * @param {string|null} [o.backupBucketName]
  * @param {'primary'|'standby'} [o.walgRole]
- * @param {string} o.dbPrivateIp - this cluster's database node private IP
  * @param {string} o.storageClass - `ProviderClass.K8S_STORAGE_CLASS`
  * @param {string} o.walArchiveSha - sha of k8s/base/backup/configmap-walg.yaml
  * @returns {Record<string, string>}
@@ -2656,23 +2394,12 @@ export function buildDbManifestValues({
   s3Config,
   backupBucketName,
   walgRole = 'primary',
-  dbPrivateIp,
   storageClass,
   walArchiveSha,
 }) {
   if (!dbImageTag) {
     throw new Error(
       'buildDbManifestValues: dbImageTag is required (the pre-published wal-g db image, pulled from ghcr).',
-    );
-  }
-  if (!dbPrivateIp) {
-    // Rendered into {{REPL_RELAY_HOST}}. A real IaC output on every provider
-    // (Hetzner pins 10.0.1.2 statically; DO exports the Pulumi-assigned VPC
-    // address) — never assume a Hetzner-shaped address: a standby's seed init
-    // would dial a relay that exists on no node.
-    throw new Error(
-      'buildDbManifestValues: dbPrivateIp is required — the IaC program outputs it; ' +
-        'a missing value means the infra step result is incomplete',
     );
   }
   if (!storageClass) {
@@ -2713,11 +2440,6 @@ export function buildDbManifestValues({
     WALG_ROLE: walgRole,
     S3_ENDPOINT: s3Config?.endpoint ?? '',
     S3_REGION: s3Config?.region ?? '',
-    // Repl-gateway relay endpoint for the standby seed init: the cluster's
-    // OWN database-node private IP + the relay port. Rendered on every tier;
-    // only a standby's first boot ever dials it.
-    REPL_RELAY_HOST: dbPrivateIp,
-    REPL_RELAY_PORT: String(REPL_GATEWAY_PORT),
     K8S_STORAGE_CLASS: storageClass,
     WAL_ARCHIVE_SHA: walArchiveSha || 'none',
   };
@@ -3525,13 +3247,13 @@ export async function ensureCertManagerControllerFlags({ env, kubectl = runKubec
 /**
  * Apply cert-manager + the app and infra Secrets + the project's k8s/infra +
  * k8s/base kustomizations (the db StatefulSet included, rendered), wait for
- * the db, patch the app deployment to use the locally-sideloaded image, and
- * wait for rollout.
+ * the db, deliver the app image into the master's registry (primary only),
+ * patch the app deployment to that image, and wait for rollout.
  *
  * Local-first by default — no Flux on the deploy path; Flux is opt-in
  * via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, dbPrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, basePull?: Promise<unknown>, onNamespaceReady?: () => void, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
  *   `restore` is the resolved `deploy -restore` point (resolveDeployRestorePoint,
  *   src/lib/walg/restore-base.js). With it the restore marker goes into the
  *   infra Secret before the db StatefulSet applies, so the db pod's
@@ -3585,28 +3307,27 @@ export async function applyK3sManifests({
   caBoundsMin,
   workerServerType,
   k3sToken,
-  // Phase 6: registry-push wiring. masterIp/sshKeyPath/khPath are the
-  // SSH coordinates needed to open a local-port-forward to master:5000
-  // for `docker push` (mirrors what sideloadK3s already received via a
-  // different shape — this set is operator → master only).
+  // The app image delivery's ssh coordinates: operator → master only. The
+  // delta lands in the master's containerd and is pushed into its registry
+  // pod from there (deliverImage), so no other node is ever reached.
   masterIp,
   sshKeyPath,
-  khPath,
+  // The in-flight pull of the runtime base on the master (deployK3s starts
+  // it at infra-ready, ruling R3), or undefined for a Dockerfile without
+  // the RUNTIME_IMAGE ARG. deliverImage awaits it and owns its failure.
+  basePull,
+  // Called once the `vibecarbon` namespace exists (applyVibecarbonSecrets
+  // creates it). The k8s-ha fan-out starts the replication transport on it.
+  onNamespaceReady,
   // perfPrefix tags internal sub-stage perf timings — see deployK3s.
   perfPrefix = 'k3s',
-  // The database node's Hetzner private-network IP (deterministic in the IaC
-  // program; deployK3s threads it through from infraOutputs). Rendered into
-  // the db StatefulSet's seed-standby init as SEED_PRIMARY_HOST
-  // ({{REPL_RELAY_HOST}}, see buildDbManifestValues).
-  dbPrivateIp,
   // The master's private-network IP (deterministic on Hetzner — static
   // 10.0.1.1 — but a real Pulumi output on DO, which can't pin VPC IPs).
   // deployK3s threads it through from infraOutputs. Passed to
-  // renderCarbonAutoscalerConfig (CA-spawned worker join target) and
-  // pushImageToLocalRegistry (registry-ref host, must match buildAppImage's
-  // own masterPrivateIp). Undefined here falls through to each callee's own
-  // '10.0.1.1' default — old callers that never pass this keep producing
-  // byte-identical Hetzner output.
+  // renderCarbonAutoscalerConfig (CA-spawned worker join target) and the
+  // registry hostPort render (renderK8sBase). Undefined here falls through to
+  // the callee's own '10.0.1.1' default — old callers that never pass this
+  // keep producing byte-identical Hetzner output.
   masterPrivateIp,
   // M3 Task 9c: this deploy's cluster VPC CIDR (DO real Pulumi output, or
   // its resume-compat fallback — see deployK3s). Passed to
@@ -3986,6 +3707,7 @@ export async function applyK3sManifests({
   //    With `deploy -restore` the infra Secret also carries the restore
   //    marker, so the db pod's first boot restores that backup.
   await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore });
+  onNamespaceReady?.();
   // 4b. Create the kube-system/carbon-autoscaler-config Secret the
   //     carbon-autoscaler sidecar reads on startup (and on every
   //     mtime-changed Refresh — see ConfigWatcher). Two keys:
@@ -4046,13 +3768,10 @@ export async function applyK3sManifests({
       description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
     });
   }
-  // 4c. The db pod's seed-standby init mounts this ConfigMap on its FIRST
-  //     boot, so it lands before base creates the StatefulSet.
-  await applyDbSeedConfigMap({ env });
   // 5. Apply base (namespace, network-policies, db, app, backup, traefik,
   //    config), always from a rendered temp copy (renderK8sBase): the db
   //    StatefulSet carries deploy-time placeholders (image, wal-g prefix and
-  //    role, S3 endpoint, relay address, StorageClass), and so do the PVCs
+  //    role, S3 endpoint, StorageClass), and so do the PVCs
   //    `add redis` / `add n8n` copy into k8s/base/<addon>/. kubectl accepts a
   //    literal storageClassName and the PVC sits Pending forever, and neither
   //    a PVC's class nor a StatefulSet's volumeClaimTemplates can be changed
@@ -4114,7 +3833,6 @@ export async function applyK3sManifests({
         s3Config,
         backupBucketName,
         walgRole,
-        dbPrivateIp,
         storageClass,
         walArchiveSha: walArchiveConfigSha(projectDir),
       }),
@@ -4234,88 +3952,69 @@ export async function applyK3sManifests({
       description: 'applyK3sManifests: kubectl apply -f - s3-egress-vpc (S3-egress VPC allowance)',
     });
   }
-  // 5b'. Wait for the local registry pod (Phase 1) to be Ready before
-  //      pushing images. The pod is part of base/, so it just landed.
-  //      Without this wait, the SSH-tunnel push race-targets a Pending
-  //      pod (registry container not started → connection refused on
-  //      :5000). 120s mirrors other base-pod readiness budgets.
+  // 5b'. Wait for the local registry's rollout (Phase 1) before the delivery
+  //      pushes into it. The registry is part of base/, so it just landed.
+  //      A rollout, not a pod Ready wait: the Deployment uses Recreate, and
+  //      after an image ref change the old pod is still Ready while it
+  //      terminates, so a pod wait could hand the delivery a registry that is
+  //      going away. A pod still Pending refuses `ctr images push` on :5000.
+  //      120s mirrors other base-pod readiness budgets. On a timeout, the
+  //      events say whether a mirror package nobody can pull is the cause.
   await perfAsync(`deploy.${perfPrefix}.localRegistry.wait`, async () => {
-    const ok = await runCommandAsync(
-      [
-        'kubectl',
-        '-n',
-        'vibecarbon',
-        'wait',
-        '--for=condition=Ready',
-        'pod',
-        '-l',
-        'app=local-registry',
-        '--timeout=120s',
-      ],
-      { silent: false, env },
-    );
-    if (ok === false) throw new Error('local-registry pod not Ready');
+    try {
+      await runKubectlWithRetry(
+        ['-n', 'vibecarbon', 'rollout', 'status', 'deployment/local-registry', '--timeout=120s'],
+        { env, description: 'applyK3sManifests: kubectl rollout status deployment/local-registry' },
+      );
+    } catch (err) {
+      const events = await runCommandAsync(MIRROR_PULL_EVENTS_ARGV, {
+        silent: true,
+        env,
+        timeout: 30_000,
+        ignoreError: true,
+      });
+      const hint = mirrorPullFailureHint(typeof events === 'string' ? events : '');
+      throw new Error(`local-registry rollout did not complete: ${hint ?? err.message}`, {
+        cause: err,
+      });
+    }
   });
-  // 5b''. Push the app image to the local registry on master so
-  //       CA-spawned workers (which don't exist at sideload time) can
-  //       pull on first schedule. Sideload remains primary distribution
-  //       for static workers — this is additive. Both paths use the
-  //       same `<masterPrivateIp>:5000/<project>:<tag>` reference (Phase 1's
-  //       registries.yaml maps that hostname to the registry pod).
-  //       A k8s-ha standby pushes nothing: the primary's image is copied
+  // 5b''. Deliver the app image, once, into the master's registry: a layer
+  //       delta into the master's containerd (only the layers the base pull
+  //       did not already put there), checked against the image's diffIDs,
+  //       then `ctr images push` into the registry pod that just became
+  //       Ready. Every other node, static or CA-spawned, pulls the same
+  //       `<masterPrivateIp>:5000/<project>:<tag>` from it (registries.yaml),
+  //       so nothing goes to a node per node. Started here, NOT awaited here:
+  //       it overlaps the CA apply, the observability apply and the CA rollout
+  //       below, and is awaited right before step 6 points deployment/app at
+  //       the tag, the first time any pod references it.
+  //       A k8s-ha standby delivers nothing: the primary's image is copied
   //       into this registry over wg0 (planImageDelivery), so the wait above
-  //       stays and only the push is skipped.
-  const { registryPush } = planImageDelivery({ role });
-  let registryPushPromise = null;
-  if (registryPush) {
+  //       stays and only the delivery is skipped.
+  const { deliver } = planImageDelivery({ role });
+  let deliveryPromise = null;
+  if (deliver) {
     if (!masterIp) {
-      throw new Error('applyK3sManifests: masterIp required for registry push (Phase 6)');
+      throw new Error('applyK3sManifests: masterIp required for the image delivery');
     }
     if (!sshKeyPath) {
-      throw new Error('applyK3sManifests: sshKeyPath required for registry push (Phase 6)');
+      throw new Error('applyK3sManifests: sshKeyPath required for the image delivery');
     }
-    if (!khPath) {
-      throw new Error('applyK3sManifests: khPath required for registry push (Phase 6)');
-    }
-    // Push the app image to the in-cluster registry so CA-spawned workers
-    // (which don't exist at sideload time) can pull it on first schedule.
-    // The db image is NOT pushed here: it's pulled from ghcr by the database
-    // node (pinned there, see k8s/base/db/statefulset.yaml) — CA workers never
-    // run postgres.
-    //
-    // Kick off the registry push CONCURRENTLY — do NOT await it here. It exists
-    // only so future cluster-autoscaler-spawned workers can pull the app image;
-    // the app pods themselves run the SIDELOADED image (step 6 sets
-    // deployment/app to imageTag with imagePullPolicy: IfNotPresent), and NOTHING
-    // between here and the end of this function reads the in-cluster registry. So
-    // this ~90-140s S3-blob upload overlaps the CA rollout + db rollout +
-    // migrations + app rollout instead of serializing onto the critical path. It
-    // is still AWAITED at the end of applyK3sManifests (see the await below the
-    // traefik restart) so a failed push — which would leave CA-scaled workers
-    // unable to pull the app image — still fails the deploy.
-    //
-    // An HA deploy makes one push now: only the primary pushes, and the standby
-    // receives the same image by registry-to-registry copy. The process-wide
-    // mutex in pushImageOverSshTunnel (see "Uplink serialization" in
-    // registry-push.js) still guards against a concurrent push from elsewhere.
-    registryPushPromise = perfAsync(`deploy.${perfPrefix}.registryPush.app`, () =>
-      pushImageToLocalRegistry({
+    deliveryPromise = perfAsync(`deploy.${perfPrefix}.image.deliver`, () =>
+      deliverImage({
         tag: imageTag,
-        masterIp,
+        sshTarget: `root@${masterIp}`,
         sshKey: sshKeyPath,
-        khPath,
-        // Must match the masterPrivateIp buildAppImage used to build imageTag's
-        // registry-ref prefix (M3 Task 2) — undefined falls through to this
-        // callee's own '10.0.1.1' default, same as the renderCarbonAutoscalerConfig
-        // call site above.
-        masterPrivateIp,
+        runtime: 'k3s',
+        registryRef: imageTag,
+        basePull,
       }),
     );
-    // Attach a no-op rejection guard so a push failure that lands WHILE the CA /
-    // db work below is still running doesn't surface as an
-    // unhandledRejection — the real `await registryPushPromise` at the end
-    // re-throws it and fails the deploy.
-    registryPushPromise.catch(() => {});
+    // A delivery that fails while the CA / observability work below is still
+    // running must not surface as an unhandledRejection: the `await
+    // deliveryPromise` before step 6 re-throws it and fails the deploy.
+    deliveryPromise.catch(() => {});
   }
   // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
   //      kube-system but base/'s parent kustomization sets
@@ -4607,18 +4306,21 @@ export async function applyK3sManifests({
       finishDeployRestore({ env, restore, environment, operatorEnv }),
     );
   }
-  // 6. Patch the app deployment to use the sideloaded image BEFORE waiting on
+  // 6. Patch the app deployment to the delivered image BEFORE waiting on
   //    the db (after it on a restore, see 5b). base/ ships
   //    image=ghcr.io/<owner>/<repo>:main — no pull secret in local-first mode,
   //    so leaving it pointed at GHCR triggers an ImagePullBackOff for the
-  //    whole db wait. Switching now means the app
-  //    pods come up on the sideloaded image immediately (their readiness stays
-  //    503 until the db answers); we still wait for their rollout below.
+  //    whole db wait. Switching now means the app pods come up on the
+  //    delivered image immediately (their readiness stays 503 until the db
+  //    answers); we still wait for their rollout below. The delivery (5b'')
+  //    is the barrier: this patch is the first reference to the tag, so the
+  //    registry holds it before any kubelet asks.
   //    One patch also stamps the resourceVersions of the Secrets the pod reads
   //    (readAppSecretVersions), so a re-minted storage key or a rotated password
   //    rolls the pods even when the image tag is unchanged; one template
   //    change, one roll. Both containers: the app and its migrate init
   //    container run one image.
+  if (deliveryPromise) await deliveryPromise;
   const appTemplatePatch = {
     spec: {
       template: {
@@ -4665,9 +4367,10 @@ export async function applyK3sManifests({
   //    what the backup lacks; the one restore special case is the ordering in
   //    5b (the app rolls only once the restored database has promoted).
   // 9. Wait for app rollout. The deployment template already has
-  //    imagePullPolicy: IfNotPresent, so kubelet uses the sideloaded image
-  //    without pulling. 300s wasn't enough on a cold deploy where the app
-  //    pods stay unready until the database converges, hence 10m.
+  //    imagePullPolicy: IfNotPresent, so the master's kubelet uses the
+  //    delivered image without pulling and every other node pulls it once
+  //    from the master's registry. 300s wasn't enough on a cold deploy where
+  //    the app pods stay unready until the database converges, hence 10m.
   //
   //    Retry on apiserver-warm-up transients. iter-postpush + iter-validate2
   //    both saw `kubectl rollout status` fast-fail in ~10s on the k8s-ha
@@ -4844,29 +4547,22 @@ export async function applyK3sManifests({
   } catch (err) {
     progressLog(`[k3s] traefik post-apply restart warning: ${err.message?.split('\n')[0] || err}`);
   }
-  // Block on the backgrounded in-cluster registry push (kicked off right after
-  // localRegistry.wait, above). It ran concurrently with the CA rollout +
-  // db rollout + migrations + app rollout — nothing above reads the
-  // registry — so awaiting it here keeps a failed push FATAL to the deploy
-  // (CA-scaled workers must be able to pull the app image) without having
-  // serialized its ~90-140s S3 upload onto the critical path. A standby
-  // started none.
-  if (registryPushPromise) await registryPushPromise;
 }
 
 /**
- * Put the app image where this cluster's nodes can run it, and return its tag.
+ * Build the app image this cluster will run, and return its tag.
  *
  * Single-cluster k8s and a k8s-ha primary build the image locally (the
- * `k3s-build` gate) and sideload it to every node (`k3s-sideload`). A k8s-ha
- * standby does neither: it awaits the primary's built ref (`peerImageRef`),
+ * `k3s-build` gate); applyK3sManifests then delivers it once into the
+ * master's registry, which every node pulls from. A k8s-ha standby builds
+ * nothing: it awaits the primary's built ref (`peerImageRef`),
  * which is copied into its own registry, and re-prefixes it for its own
  * master (`standbyImageRef`). `onImageBuilt` reports the built tag whether
  * the build gate ran or skipped, so a warm rerun still hands the standby a ref.
  *
  * `deps` exists for tests: deployK3s can't be unit-driven and same-module
- * calls can't be mocked. Calls stay spelled `d.buildAppImage(` /
- * `d.sideloadK3s(` so call-site censuses see them.
+ * calls can't be mocked. The call stays spelled `d.buildAppImage(` so the
+ * call-site census sees it.
  *
  * @returns {Promise<string>} the image tag deployment/app runs
  */
@@ -4879,14 +4575,10 @@ export async function deliverAppImage({
   projectName,
   domain,
   masterPrivateIp,
-  sshTargets,
-  privateKeyPath,
-  khPath,
-  perfPrefix,
   spinner,
   deps = {},
 }) {
-  const d = { buildAppImage, sideloadK3s, buildK3sBuildInputs, ...deps };
+  const d = { buildAppImage, buildK3sBuildInputs, ...deps };
   const plan = planImageDelivery({ role });
   if (plan.awaitPeerImage) {
     if (!peerImageRef) throw new Error('deployK3s: role standby requires peerImageRef');
@@ -4917,30 +4609,54 @@ export async function deliverAppImage({
     ({ tag: imageTag } = state.getStepResult('k3s-build'));
     onImageBuilt?.(imageTag);
   }
-  // Sideload to every node (parallel SSH within sideloadK3s): `docker save |
-  // ssh ... gunzip | k3s ctr import` per target. The db image is not
-  // sideloaded; the database node pulls it from ghcr.
-  if (plan.sideload) {
-    const sideloadInputs = { imageTag, targets: sshTargets.join(',') };
-    if (!state.shouldSkip('k3s-sideload', sideloadInputs)) {
-      state.startStep('k3s-sideload', sideloadInputs);
-      spinner.start(`Sideloading app to ${sshTargets.length} node(s)`);
-      await perfAsync(`deploy.${perfPrefix}.sideload.app`, () =>
-        d.sideloadK3s({ tag: imageTag, sshTargets, sshKey: privateKeyPath, khPath }),
-      );
-      state.completeStep('k3s-sideload');
-      spinner.stop('Sideload complete (app)');
-    }
-  }
   return imageTag;
+}
+
+/**
+ * Pull the app's runtime base into the master's k8s.io containerd namespace,
+ * where the layer delta (deliverImage, runtime k3s) finds its layers and so
+ * sends only the app's own. Inspect first: the ref is immutable (a pinned
+ * tag, a digest once published), so a master that already holds it, which is
+ * every warm redeploy, asks no registry and a GHCR blip cannot fail it.
+ *
+ * Rejects with ctr's own one-line cause (deliverImage adds the GHCR hint).
+ *
+ * @param {object} o
+ * @param {string} o.masterIp
+ * @param {string} o.sshKeyPath
+ * @param {string} o.baseRef - the Dockerfile's `ARG RUNTIME_IMAGE=` default
+ * @param {(script: string) => Promise<string>} [o.run] - test seam
+ * @returns {Promise<void>}
+ */
+export async function pullK3sRuntimeBase({ masterIp, sshKeyPath, baseRef, run }) {
+  const ref = shEscape(baseRef);
+  const script = [
+    'set -eu',
+    `if k3s ctr -n k8s.io images ls -q name==${ref} | grep -q .; then exit 0; fi`,
+    `k3s ctr -n k8s.io images pull ${ref} >/dev/null`,
+    '',
+  ].join('\n');
+  const exec =
+    run ?? ((sc) => sshRun(masterIp, sshKeyPath, ['sh', '-s'], { input: sc, timeout: 600_000 }));
+  try {
+    await exec(script);
+  } catch (err) {
+    const cause = String(err?.stderr ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l && !l.startsWith('Warning:'));
+    throw new Error(cause || String(err?.message ?? err).split('\n')[0], { cause: err });
+  }
 }
 
 /**
  * Does the primary's own registry still hold the app image tag? One ssh round
  * trip to the master: a manifest HEAD against the registry the image was
- * pushed to. The k3s-apply gate hashes manifests and tags, none of which see
- * a registry that lost its contents (a rebuilt master disk), so the gate asks
- * here. `false` only when the registry answered with no such tag.
+ * pushed to (by `ctr images push` at the end of deliverImage: one docker v2
+ * manifest, which MANIFEST_ACCEPT names; ruling R8). The k3s-apply gate
+ * hashes manifests and tags, none of which see a registry that lost its
+ * contents (a rebuilt master disk), so the gate asks here. `false` only when
+ * the registry answered with no such tag.
  *
  * @param {object} o
  * @param {string} o.masterIp
@@ -4965,29 +4681,21 @@ export async function primaryRegistryHasImage({ masterIp, sshKeyPath, imageTag, 
 }
 
 /**
- * The k3s-apply skip decision. A role that pushes to its own registry
- * (planImageDelivery.registryPush) only skips when that registry still holds
- * the image: the push lives inside the gated apply, so a warm deploy against a
- * registry that lost the tag must re-run it, or the standby copy has nothing
- * to read. A probe that throws keeps the hash decision
- * (state.shouldSkipWithVerify); a standby has no push and skips on the hash.
+ * The k3s-apply skip decision. A role that delivers into its own registry
+ * (planImageDelivery.deliver) only skips when that registry still holds the
+ * image: the delivery lives inside the gated apply, so a warm deploy against a
+ * registry that lost the tag must re-run it, or no node can pull it and the
+ * standby copy has nothing to read. A probe that throws keeps the hash
+ * decision (state.shouldSkipWithVerify); a standby delivers nothing and skips
+ * on the hash.
  *
  * @returns {Promise<boolean>}
  */
 export async function shouldSkipK3sApply({ state, applyInputs, role, imageInRegistry }) {
-  if (!planImageDelivery({ role }).registryPush) return state.shouldSkip('k3s-apply', applyInputs);
+  if (!planImageDelivery({ role }).deliver) return state.shouldSkip('k3s-apply', applyInputs);
   return state.shouldSkipWithVerify('k3s-apply', applyInputs, imageInRegistry);
 }
 
-/**
- * Deploy a k3s cluster on Hetzner.
- *
- * Cold-path implementation through to "kubeconfig saved + cluster reachable."
- * App install + sideload land in a follow-up commit (Task 7).
- *
- * @param {K3sDeployOptions} options
- * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string}>}
- */
 /**
  * Probe an existing Pulumi stack for its k3s token so a re-deploy replays it.
  *
@@ -5030,6 +4738,18 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
   return probe.priorK3sToken;
 }
 
+/**
+ * Deploy one k3s cluster on any provider: infra (Pulumi), k3s install and
+ * kubeconfig, the app image built locally and delivered once into the
+ * master's registry by layer delta (every node pulls it from there), then the
+ * manifests, cert-manager and the app rollout. A k8s-ha standby delivers
+ * nothing of its own: the primary's image is copied into its registry.
+ * `onInfraReady` fires once the nodes answer and `onNamespaceReady` once the
+ * `vibecarbon` namespace exists, so the HA fan-out can start on signals.
+ *
+ * @param {K3sDeployOptions} options
+ * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, masterPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string, imageTag: string}>}
+ */
 export async function deployK3s(options) {
   // A `deploy -restore` point arrives resolved (C5); refuse a partial one
   // before anything is provisioned or applied.
@@ -5152,6 +4872,9 @@ export async function deployK3s(options) {
         providerToken: options.apiToken,
         s3Config: options.s3Config,
         projectName: options.projectName,
+        // k8s-ha fans two of these out against one state bucket: past its
+        // settle window they provision in parallel (lib/iac/state-lock.js).
+        stateBucketYoung: options.stateBucketYoung,
         // Recover stale-EMPTY outputs reads in place (read-only poll inside
         // upStack) — the hard gate below stays the loud last resort. Same
         // family member as the compose provision sites (bc94b18): this gate
@@ -5243,13 +4966,43 @@ export async function deployK3s(options) {
     }
   }
 
+  // HA fan-out hook: the `vibecarbon` namespace exists, so the replication
+  // gateways can be applied into it. Fired from applyK3sManifests right after
+  // applyVibecarbonSecrets creates it, or below when the apply is skipped.
+  // Same contract as onInfraReady: never awaited, never fails this deploy.
+  const signalNamespaceReady = () => {
+    try {
+      options.onNamespaceReady?.();
+    } catch {
+      // opportunistic hook — a listener bug must not break the deploy
+    }
+  };
+
+  // The app's runtime base, pulled onto the master now so the layer delta in
+  // applyK3sManifests, minutes later, sends only the app's own layers (ruling
+  // R3). Only an operator-built image has one (a standby copies the primary's
+  // image), and a Dockerfile without the RUNTIME_IMAGE ARG has none: the delta
+  // then sends every layer, the same algorithm. Not awaited here: deliverImage
+  // awaits it and owns its failure; the catch only keeps a pull that fails
+  // before then from surfacing as an unhandledRejection.
+  const { readRuntimeBaseRef } = await import('../image.js');
+  const baseRef = planImageDelivery({ role: options.role }).deliver
+    ? readRuntimeBaseRef(projectDir)
+    : null;
+  const basePull = baseRef
+    ? perfAsync(`deploy.${perfPrefix}.image.basePull`, () =>
+        pullK3sRuntimeBase({ masterIp, sshKeyPath: privateKeyPath, baseRef }),
+      )
+    : undefined;
+  basePull?.catch(() => {});
+
   // The wal-g-equipped db image is a pre-published image pulled from ghcr —
-  // no per-deploy build or sideload. The db StatefulSet's container and both
-  // its inits reference it (see buildDbManifestValues).
+  // no per-deploy build or delivery. The db StatefulSet's container and both
+  // its walg-restore init reference it (see buildDbManifestValues).
   const dbImageTag = resolveDbImageTag();
 
   // Opportunistic image pre-pull on every node — deliberately NOT awaited: it
-  // overlaps the build/sideload/manifest work below so kubelet finds the
+  // overlaps the build/manifest work below so kubelet finds the
   // images already present when the db StatefulSet starts (its image pull
   // is a cold boot's first cost) and when the cluster-autoscaler rollout wait
   // starts (a 403'd CA pull ate the full 300s budget on 2026-07-31). Any
@@ -5301,12 +5054,9 @@ export async function deployK3s(options) {
     });
   }
 
-  // 6-7. Deliver the app image: build + sideload it, or, on a k8s-ha standby,
-  // take the primary's ref (deliverAppImage).
-  // The sideload targets: every node.
-  const sshTargets = [`root@${masterIp}`];
-  if (dbIp) sshTargets.push(`root@${dbIp}`);
-  for (const wIp of workerIps ?? []) sshTargets.push(`root@${wIp}`);
+  // 6-7. The app image: build it, or, on a k8s-ha standby, take the primary's
+  // ref (deliverAppImage). applyK3sManifests delivers a built one to the
+  // master's registry.
   const imageTag = await deliverAppImage({
     role: options.role,
     peerImageRef: options.peerImageRef,
@@ -5316,10 +5066,6 @@ export async function deployK3s(options) {
     projectName: options.projectName,
     domain: options.domain,
     masterPrivateIp,
-    sshTargets,
-    privateKeyPath,
-    khPath,
-    perfPrefix,
     spinner: s,
   });
 
@@ -5402,20 +5148,15 @@ export async function deployK3s(options) {
         workerServerType:
           options.workerServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
         k3sToken: infraOutputs.k3sToken,
-        // Phase 6: registry-push wiring. operator opens an SSH tunnel
-        // to master:5000 inside applyK3sManifests; the same SSH coords
-        // sideloadK3s already used (privateKeyPath + per-env khPath).
+        // The image delivery's target (the master only) and the base pull
+        // started at infra-ready, which deliverImage awaits.
         masterIp,
         sshKeyPath: privateKeyPath,
-        khPath,
-        // The database node's own private IP — rendered (buildDbManifestValues)
-        // into the seed-standby init's SEED_PRIMARY_HOST (repl-gateway relay
-        // endpoint). Already in scope from infraOutputs (returned below).
-        dbPrivateIp,
+        basePull,
+        onNamespaceReady: signalNamespaceReady,
         // M3 Task 2: the master's own private IP — renderCarbonAutoscalerConfig
-        // (CA-spawned worker join target) and pushImageToLocalRegistry
-        // (registry-ref host, must match buildAppImage's masterPrivateIp
-        // above). Already in scope from infraOutputs (returned below).
+        // (CA-spawned worker join target) and the registry hostPort render.
+        // Already in scope from infraOutputs (returned below).
         masterPrivateIp,
         // M3 Task 9c: this cluster's VPC CIDR — drives the provider-
         // conditional S3-egress-VPC-allowance manifest. Already in scope
@@ -5426,6 +5167,9 @@ export async function deployK3s(options) {
     );
     state.completeStep('k3s-apply');
     s.stop('App rolled out');
+  } else {
+    // Skipped apply: a prior one created the namespace.
+    signalNamespaceReady();
   }
 
   // 8b. Ground-truth BACKUP audit — OUTSIDE the `k3s-apply` gate on purpose.

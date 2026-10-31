@@ -238,9 +238,7 @@ export function composeDbRecreateShell(remoteDir) {
  *
  * No `--containers` selector: the default `*` covers the db pod's single app
  * container and stays correct if the chart renames it. `kubectl set env` does
- * not touch initContainers, so the seed-standby init keeps its rendered value —
- * harmless, since it also self-gates on PGDATA being empty and the promoted
- * node's is not.
+ * not touch initContainers, and none of them reads WALG_ROLE.
  *
  * @param {'primary'|'standby'} role
  * @returns {string[]}

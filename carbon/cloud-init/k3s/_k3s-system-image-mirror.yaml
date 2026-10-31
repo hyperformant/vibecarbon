@@ -1,0 +1,13 @@
+  # k3s system images (--system-default-registry alias) from our ghcr mirror.
+  # Never mirror docker.io here: namespace confusion. Why, and the rules for
+  # this file (no shell-expandable characters): K3S_SYSTEM_IMAGE_MIRRORS in
+  # src/lib/images.js.
+  "vibecarbon-system.invalid":
+    endpoint:
+      - "https://ghcr.io"
+    rewrite:
+      "^rancher/mirrored-coredns-coredns$": "hyperformant/mirrored-coredns-coredns"
+      "^rancher/local-path-provisioner$": "hyperformant/local-path-provisioner"
+      "^rancher/mirrored-metrics-server$": "hyperformant/mirrored-metrics-server"
+      "^rancher/mirrored-library-busybox$": "hyperformant/mirrored-library-busybox"
+      "^rancher/mirrored-pause$": "hyperformant/mirrored-pause"

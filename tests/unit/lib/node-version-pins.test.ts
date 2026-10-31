@@ -357,23 +357,11 @@ describe('Dockerfiles pin the same Node major', () => {
     expect(read(relPath)).not.toMatch(NODE_IMAGE_REF);
   });
 
-  it('carbon/Dockerfile keeps its node base and runner stage on the SAME alpine', () => {
-    // The runner is a bare `alpine:X` that the node binary is COPY'd into.
-    // A mismatch builds fine and dies at runtime on musl/libstdc++.
-    const dockerfile = read('carbon', 'Dockerfile');
-    const nodeAlpine = dockerfile.match(/^ARG NODE_IMAGE=node:\d+-alpine([\d.]+)/m)?.[1];
-    const runnerAlpine = dockerfile.match(
-      /^FROM alpine:([\d.]+)(?:@sha256:[0-9a-f]{64})? AS runner/m,
-    )?.[1];
-    expect(nodeAlpine).toBeDefined();
-    expect(runnerAlpine).toBe(nodeAlpine);
-  });
-
-  // The node runtime base (docker/node-runtime), the runner every app image
-  // will build FROM, follows the same rule: a bare `alpine:X` that the node
-  // binary is COPY'd into. Every link names the same alpine minor: the
-  // runtime's own node pin and its alpine base, the tag the CLI pins, and the
-  // node the app is BUILT with in carbon/.
+  // The app's runner is the published node runtime base, a bare `alpine:X`
+  // that the node binary is COPY'd into. A mismatch anywhere in this chain
+  // builds fine and dies at runtime on musl/libstdc++, so every link names
+  // the same alpine minor: the runtime's own node pin and its alpine base,
+  // the tag the CLI pins, and the node the app is BUILT with in carbon/.
   const runtime = read('docker', 'node-runtime', 'Dockerfile');
   const runtimeNodeAlpine = runtime.match(/^ARG NODE_IMAGE=node:\d+-alpine([\d.]+)@/m)?.[1];
   const runtimeBaseAlpine = runtime.match(/^FROM alpine:([\d.]+)@sha256:[0-9a-f]{64}$/m)?.[1];
@@ -393,6 +381,13 @@ describe('Dockerfiles pin the same Node major', () => {
   it('carbon/Dockerfile builds the app with node on the alpine it runs on', () => {
     const builder = read('carbon', 'Dockerfile').match(/^ARG NODE_IMAGE=node:\d+-alpine([\d.]+)/m);
     expect(builder?.[1]).toBe(runtimeNodeAlpine);
+  });
+
+  it('`pnpm node:sync` writes the runtime image pins too', () => {
+    const script = read('scripts', 'sync-node-version.js');
+    expect(script).toContain("join('docker', 'node-runtime', 'Dockerfile')");
+    expect(script).toMatch(/NODE_RUNTIME_IMAGE/);
+    expect(script).toMatch(/ARG RUNTIME_IMAGE=/);
   });
 });
 
