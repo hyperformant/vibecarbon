@@ -29,6 +29,12 @@ describe('image-delivery helpers', () => {
       /not a local-registry ref/,
     );
   });
+  it('refuses a long slash-run ref in linear time (no ReDoS)', () => {
+    const ref = `!:5000/${'!/'.repeat(50_000)} `;
+    const t = performance.now();
+    expect(() => parseLocalRegistryRef(ref)).toThrow(/not a local-registry ref/);
+    expect(performance.now() - t).toBeLessThan(250);
+  });
   it('keeps a multi-segment repo whole', () => {
     expect(parseLocalRegistryRef('10.0.1.1:5000/team/quorum:t1').repo).toBe('team/quorum');
   });
