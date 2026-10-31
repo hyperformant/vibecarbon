@@ -89,13 +89,14 @@ export function parseDeploymentList(
  * Floor components the pilot-light spec KEEPS running on the standby's
  * 2-node floor (idle-state architecture): traefik serves the master's
  * hostPort ingress (cert issuance still happens at deploy) and the
- * in-cluster registry holds the app image failover's scale-up pulls.
- * Everything else in ns vibecarbon must be zeroed. (repl-gateway is a bare
- * Pod, not a Deployment, so it never enters this check.)
+ * in-cluster registry holds the app image failover's scale-up pulls, and
+ * repl-gateway carries the standby db's replication to the primary (a
+ * Deployment since #235; it was a bare Pod before). Everything else in ns
+ * vibecarbon must be zeroed, the short-lived registry relay included.
  * First live run (2026-07-17 e4) failed here because the check swept the
  * whole namespace — the deploy was correct, the assertion was not.
  */
-export const PILOT_KEPT_DEPLOYMENTS = ['traefik', 'local-registry'];
+export const PILOT_KEPT_DEPLOYMENTS = ['traefik', 'local-registry', 'repl-gateway'];
 
 export function findNonZeroReplicaDeployments(deployments: K8sDeploymentSummary[]): string[] {
   return deployments
