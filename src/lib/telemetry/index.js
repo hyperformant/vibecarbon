@@ -5,7 +5,7 @@
  * Wire contract: vibecarbon-web /api/v1/telemetry/{events,errors}.
  */
 
-import { c } from '../colors.js';
+import { c, link } from '../colors.js';
 import { ensureProjectId, loadManifest, manifestExists } from '../project.js';
 import { VERSION } from '../version.js';
 import { sanitizeError } from './sanitize.js';
@@ -165,7 +165,7 @@ function maybeShowFirstRunNotice(stateDir) {
         '',
         'vibecarbon collects anonymous usage data (command names + versions,',
         'never arguments, paths, or personal data) to improve the CLI.',
-        'Details: https://vibecarbon.com/docs/telemetry',
+        `Details: ${link('https://vibecarbon.com/docs/telemetry', undefined, { stream: process.stderr })}`,
         'Opt out: vibecarbon telemetry off   (or export DO_NOT_TRACK=1)',
         '',
       ].join('\n'),

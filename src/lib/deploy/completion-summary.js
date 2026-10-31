@@ -6,6 +6,8 @@
  * the deploy ended on "complete!" alone, so the one thing the operator needed
  * next (where is my site?) was buried. This note restates it last.
  */
+
+import { link } from '../colors.js';
 import { hasAutomatedDns } from '../dns-provider.js';
 
 /**
@@ -40,9 +42,9 @@ export function completionSummaryLines({ environment, domain, dnsProvider, entry
   const lines = [];
 
   if (domain) {
-    lines.push(`Open:     https://${domain}`);
+    lines.push(`Open:     ${link(`https://${domain}`)}`);
   } else if (entryIp) {
-    lines.push(`Open:     http://${entryIp}`);
+    lines.push(`Open:     ${link(`http://${entryIp}`)}`);
   }
 
   // HA tiers list both sides so the operator knows where the standby lives;

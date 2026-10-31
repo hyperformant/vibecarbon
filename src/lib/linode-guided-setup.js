@@ -17,7 +17,7 @@ import * as p from '@clack/prompts';
 import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
-import { c } from './colors.js';
+import { c, link } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import {
   dotenvPromptProblem,
@@ -76,7 +76,7 @@ async function validateLinodeToken(token) {
 export function displayApiTokenGuide(projectName) {
   p.note(
     [
-      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://cloud.linode.com/profile/tokens')}`,
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline(link('https://cloud.linode.com/profile/tokens'))}`,
       '',
       `${c.bold('2.')} Click ${c.boldCyan('Create a Personal Access Token')}`,
       `${c.dim('   ├─')} Label: ${c.info(`"${projectName || 'vibecarbon'}-deploy"`)}`,
@@ -101,7 +101,7 @@ export function displayApiTokenGuide(projectName) {
 export function displayS3CredentialsGuide(projectName) {
   p.note(
     [
-      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://cloud.linode.com/object-storage/access-keys')}`,
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline(link('https://cloud.linode.com/object-storage/access-keys'))}`,
       '',
       `${c.bold('2.')} Click ${c.boldCyan('Create Access Key')}`,
       `${c.dim('   ├─')} Label: ${c.info(`"${projectName || 'vibecarbon'}-s3"`)}`,

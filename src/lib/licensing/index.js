@@ -11,7 +11,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spinner } from '../cli/progress.js';
-import { c } from '../colors.js';
+import { c, link } from '../colors.js';
 import { ensureProjectId, loadManifest, manifestExists } from '../project.js';
 import { bindLicense, requestRelease } from './bind.js';
 import { checkLicense } from './check.js';
@@ -172,11 +172,11 @@ export async function activateLicense(
 function bindErrorMessage(bound) {
   switch (bound.reason) {
     case 'bound_to_other_project':
-      return 'This key is already bound to another project. Run `vibecarbon deactivate` in that project, or release it from https://vibecarbon.com/license, then activate again.';
+      return `This key is already bound to another project. Run \`vibecarbon deactivate\` in that project, or release it from ${link('https://vibecarbon.com/license')}, then activate again.`;
     case 'project_already_licensed':
       return bound.message || 'This project already has an active subscription.';
     case 'subscription_inactive':
-      return 'This subscription is no longer active. Renew it from https://vibecarbon.com/license.';
+      return `This subscription is no longer active. Renew it from ${link('https://vibecarbon.com/license')}.`;
     case 'unknown_key':
       return 'This key is not recognised by vibecarbon.com. Check the key from your purchase email.';
     case 'bad_signature':

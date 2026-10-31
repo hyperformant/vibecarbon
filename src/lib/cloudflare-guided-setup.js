@@ -19,7 +19,7 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { verifyToken } from './cloudflare-dns.js';
-import { c } from './colors.js';
+import { c, link } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { describeCredentialSource, setEnvVar } from './project.js';
@@ -30,7 +30,7 @@ import { describeCredentialSource, setEnvVar } from './project.js';
 export function displayApiTokenGuide(projectName) {
   p.note(
     [
-      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://dash.cloudflare.com/profile/api-tokens')}`,
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline(link('https://dash.cloudflare.com/profile/api-tokens'))}`,
       '',
       `${c.bold('2.')} Click ${c.boldCyan('Create Token')}`,
       `${c.dim('   ├─')} Template: ${c.info('Edit zone DNS')}`,

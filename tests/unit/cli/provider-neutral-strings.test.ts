@@ -48,7 +48,7 @@ describe('scale.js pricing line — Provider.NAME + Provider.PRICING_URL (sancti
 
   it('both call sites interpolate Provider.NAME and Provider.PRICING_URL', () => {
     const pattern =
-      /p\.note\(`Current \$\{Provider\.NAME\} pricing: \$\{Provider\.PRICING_URL\}`, 'Cost'\)/g;
+      /p\.note\(`Current \$\{Provider\.NAME\} pricing: \$\{link\(Provider\.PRICING_URL\)\}`, 'Cost'\)/g;
     expect(SCALE_SRC.match(pattern) || []).toHaveLength(2);
   });
 

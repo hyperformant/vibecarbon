@@ -23,7 +23,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { primaryEntryServerType, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
-import { c } from './lib/colors.js';
+import { c, link } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
 import { useDnsChallenge } from './lib/deploy/acme.js';
@@ -415,7 +415,7 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   }
 
   const services = projectConfig.services || {};
-  p.note(`Current ${Provider.NAME} pricing: ${Provider.PRICING_URL}`, 'Cost');
+  p.note(`Current ${Provider.NAME} pricing: ${link(Provider.PRICING_URL)}`, 'Cost');
 
   // Confirmation
   const serverLabel =
@@ -2334,7 +2334,7 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
       process.exit(1);
     }
   }
-  p.note(`Current ${Provider.NAME} pricing: ${Provider.PRICING_URL}`, 'Cost');
+  p.note(`Current ${Provider.NAME} pricing: ${link(Provider.PRICING_URL)}`, 'Cost');
 
   // 6. Require API token if infra changes (server type swap) needed
   let apiToken = null;

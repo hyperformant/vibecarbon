@@ -18,7 +18,7 @@ import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { resolvePrimary } from './lib/cli/resolve-primary.js';
-import { c } from './lib/colors.js';
+import { c, link } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
 import { storageAccessLine, unfencedBucketsLine } from './lib/deploy/app-storage-credential.js';
@@ -1249,7 +1249,7 @@ function formatServerLines(servers, checks) {
 function formatHealthLines(remoteHealth) {
   const lines = [];
   lines.push(c.bold('Health'));
-  lines.push(`  ${c.dim(remoteHealth.url)}`);
+  lines.push(`  ${c.dim(link(remoteHealth.url))}`);
   if (remoteHealth.ok) {
     const data = remoteHealth.data;
     let details = '';

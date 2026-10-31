@@ -17,7 +17,7 @@
  * never `--name`. See memory:feedback_cli_single_dash_flags.
  */
 
-import { c } from '../colors.js';
+import { c, link } from '../colors.js';
 
 /**
  * @typedef {object} HelpExample
@@ -135,7 +135,11 @@ export function renderHelp(spec) {
   lines.push('');
 
   if (spec.description) {
-    lines.push(spec.description);
+    // The spec text is plain (it also feeds the generated docs); its URLs
+    // become links only here, at print time. Sentence punctuation stays out.
+    lines.push(
+      spec.description.replace(/https?:\/\/[^\s'"`)<>]*[^\s'"`)<>.,;:]/g, (url) => link(url)),
+    );
     lines.push('');
   }
 

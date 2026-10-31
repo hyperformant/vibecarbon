@@ -5,7 +5,7 @@
  */
 
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
-import { c } from './lib/colors.js';
+import { c, link } from './lib/colors.js';
 import {
   getTelemetryState,
   isAnalyticsDisabled,
@@ -58,7 +58,7 @@ export async function run(args, { stateDir = undefined, env = process.env } = {}
   if (sub === 'on') {
     setTelemetryDisabled(false, stateDir);
     console.log(
-      `${c.success('✓')} Telemetry enabled. Details: https://vibecarbon.com/docs/telemetry`,
+      `${c.success('✓')} Telemetry enabled. Details: ${link('https://vibecarbon.com/docs/telemetry')}`,
     );
     return;
   }
@@ -75,7 +75,7 @@ export async function run(args, { stateDir = undefined, env = process.env } = {}
       else if (state.disabled)
         console.log(c.dim('  reason: disabled via `vibecarbon telemetry off`'));
     }
-    console.log(c.dim('  what is collected: https://vibecarbon.com/docs/telemetry'));
+    console.log(c.dim(`  what is collected: ${link('https://vibecarbon.com/docs/telemetry')}`));
     return;
   }
   console.error(`Unknown subcommand '${sub}'. Usage: vibecarbon telemetry [on|off|status]`);

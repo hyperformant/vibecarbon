@@ -12,7 +12,7 @@ import { basename, join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
-import { c } from './lib/colors.js';
+import { c, link } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
 import { releaseMovedStack, resolveComposeProjectName } from './lib/compose-project-name.js';
 import { devS3Endpoint, devS3Port } from './lib/dev-s3.js';
@@ -301,7 +301,7 @@ export function assertDockerRunning({ probe = dockerInfoOk } = {}) {
     p.log.error(
       'Docker is not available. Start Docker (Docker Desktop, or `sudo systemctl start docker`) and try again.',
     );
-    p.log.info('If Docker is not installed, see https://docs.docker.com/get-docker/');
+    p.log.info(`If Docker is not installed, see ${link('https://docs.docker.com/get-docker/')}`);
     process.exit(1);
   }
 }

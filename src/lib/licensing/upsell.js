@@ -21,6 +21,7 @@
  * anything, and "free" never sits next to "server" or "deploy".
  */
 
+import { link } from '../colors.js';
 import { graceEndOf, LICENSE_GRACE_DAYS } from './entitlement.js';
 import { getTier } from './tiers.js';
 
@@ -45,10 +46,12 @@ function deployTierLabel(deployTier) {
 }
 
 function subscribeUrl(requiredTier) {
-  return `${PRICING_URL}?tier=${requiredTier}`;
+  return link(`${PRICING_URL}?tier=${requiredTier}`);
 }
 
-const TERMS_LINE = 'Terms: TERMS.md or https://vibecarbon.com/terms';
+const TERMS_URL = 'https://vibecarbon.com/terms';
+/** A function, not a constant: link() reads the terminal when it prints. */
+const termsLine = () => `Terms: TERMS.md or ${link(TERMS_URL)}`;
 const FREE_LINE =
   'Single-server Compose needs no key. Backing up, restoring, failing over, and scaling never require a license.';
 
@@ -103,8 +106,8 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
         `This project is on ${tierName(held)}.`,
         '',
         ...(proj ? [proj] : []),
-        `Switch plans: ${LICENSE_URL}`,
-        TERMS_LINE,
+        `Switch plans: ${link(LICENSE_URL)}`,
+        termsLine(),
       ];
     case 'past-due': {
       const graceEnd = graceEndOf(verdict.verdict.periodEnd);
@@ -115,8 +118,8 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
         `Update your card to deploy to ${mode} again.`,
         '',
         ...(proj ? [proj] : []),
-        `Billing: ${LICENSE_URL}`,
-        TERMS_LINE,
+        `Billing: ${link(LICENSE_URL)}`,
+        termsLine(),
       ];
     }
     case 'canceled':
@@ -128,7 +131,7 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
         '',
         ...(proj ? [proj] : []),
         `Renew: ${subscribeUrl(requiredTier)}`,
-        TERMS_LINE,
+        termsLine(),
       ];
     case 'unbound':
       return [
@@ -139,7 +142,7 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
         '',
         'Run this inside the project:',
         '  vibecarbon activate <key>',
-        TERMS_LINE,
+        termsLine(),
       ];
     case 'wrong-project':
       return [
@@ -149,8 +152,8 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
         ...(proj ? [proj] : []),
         '',
         'Release it there first (`vibecarbon deactivate` in that project, or from',
-        `${LICENSE_URL}), then run \`vibecarbon activate <key>\` here.`,
-        TERMS_LINE,
+        `${link(LICENSE_URL)}), then run \`vibecarbon activate <key>\` here.`,
+        termsLine(),
       ];
     default: {
       const lines = ['License required', '', needs];
@@ -161,7 +164,7 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
       lines.push(
         `Subscribe: ${subscribeUrl(requiredTier)}`,
         'Activate:  vibecarbon activate <key>',
-        TERMS_LINE,
+        termsLine(),
       );
       return lines;
     }
@@ -187,7 +190,7 @@ export function buildDeployWarning({ warning, requiredTier = null }) {
     case 'past-due':
       return [
         `Payment for this project's ${tierName(warning.tier)} subscription failed. Deploys keep working ${days}.`,
-        `Update your card: ${LICENSE_URL}`,
+        `Update your card: ${link(LICENSE_URL)}`,
       ];
     case 'canceled':
       return [

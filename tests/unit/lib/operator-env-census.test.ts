@@ -100,6 +100,8 @@ const ALIAS_ALLOWLIST: Record<string, string> = {
     'resolveDbImage({ env }) reads env.VIBECARBON_DB_IMAGE only (a test image ref, not a credential); localComposeEnv(base) is the local compose child env bag (a spawn bag) plus the resolved db image',
   [join('lib', 'operator-ip.js')]:
     'shouldAutoDetectOperatorIp({ env }) reads env.CI only (the CIDR itself goes through the reader)',
+  [join('lib', 'colors.js')]:
+    'supportsHyperlinks reads terminal facts only: FORCE_HYPERLINK/NO_COLOR/FORCE_COLOR/VIBECARBON_PLAIN/CI/TERM/TERM_PROGRAM/VTE_VERSION/WT_SESSION/KONSOLE_VERSION',
   [join('lib', 'cli', 'progress.js')]:
     'shouldAnimateSpinner reads TTY facts: VIBECARBON_PLAIN/NO_COLOR/TERM/CI',
   [join('lib', 'licensing', 'check.js')]:
