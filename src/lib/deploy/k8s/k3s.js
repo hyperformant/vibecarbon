@@ -3416,6 +3416,58 @@ export async function applyK3sManifests({
       description: `applyK3sManifests: kubectl set image ${workload} (CSI sidecars → ghcr mirrors)`,
     });
   }
+  // 0b. Deliver the app image, once, into the master's registry: a layer
+  //     delta into the master's containerd (only the layers the base pull
+  //     did not already put there), checked against the image's diffIDs,
+  //     then `ctr images push` into the local registry pod. Every other node,
+  //     static or CA-spawned, pulls the same
+  //     `<masterPrivateIp>:5000/<project>:<tag>` from it (registries.yaml),
+  //     so nothing goes to a node per node. The transfer and import need only
+  //     ssh and the base pull, so they start HERE, alongside the cert-manager
+  //     chain and the base apply (DO e2e 2026-10-31: 12 s); only the push
+  //     waits (pushAfter) for the registry rollout, step 5b', because a
+  //     registry pod still Pending refuses `ctr images push` on :5000. It is
+  //     awaited right before step 6 points deployment/app at the tag, the
+  //     first time any pod references it.
+  //     A k8s-ha standby delivers nothing: the primary's image is copied
+  //     into this registry over wg0 (planImageDelivery); the registry wait
+  //     stays and only the delivery is skipped.
+  let markRegistryServing;
+  const registryServing = {
+    promise: new Promise((resolve, reject) => {
+      markRegistryServing = { resolve, reject };
+    }),
+    resolve: () => markRegistryServing.resolve(),
+    reject: (err) => markRegistryServing.reject(err),
+  };
+  // A registry that never serves fails the deploy at its own wait; this only
+  // keeps the rejected signal from being an unhandledRejection.
+  registryServing.promise.catch(() => {});
+  const { deliver } = planImageDelivery({ role });
+  let deliveryPromise = null;
+  if (deliver) {
+    if (!masterIp) {
+      throw new Error('applyK3sManifests: masterIp required for the image delivery');
+    }
+    if (!sshKeyPath) {
+      throw new Error('applyK3sManifests: sshKeyPath required for the image delivery');
+    }
+    deliveryPromise = perfAsync(`deploy.${perfPrefix}.image.deliver`, () =>
+      deliverImage({
+        tag: imageTag,
+        sshTarget: `root@${masterIp}`,
+        sshKey: sshKeyPath,
+        runtime: 'k3s',
+        registryRef: imageTag,
+        basePull,
+        pushAfter: registryServing.promise,
+      }),
+    );
+    // A delivery that fails while the work below is still running must not
+    // surface as an unhandledRejection: the await before step 6 re-throws it
+    // and fails the deploy.
+    deliveryPromise.catch(() => {});
+  }
   if (!apiToken) {
     throw new Error(
       'applyK3sManifests: apiToken (provider API token) required for carbon-autoscaler Secret/carbon-autoscaler-config',
@@ -4104,61 +4156,33 @@ export async function applyK3sManifests({
   //      going away. A pod still Pending refuses `ctr images push` on :5000.
   //      120s mirrors other base-pod readiness budgets. On a timeout, the
   //      events say whether a mirror package nobody can pull is the cause.
-  await perfAsync(`deploy.${perfPrefix}.localRegistry.wait`, async () => {
-    try {
-      await runKubectlWithRetry(
-        ['-n', 'vibecarbon', 'rollout', 'status', 'deployment/local-registry', '--timeout=120s'],
-        { env, description: 'applyK3sManifests: kubectl rollout status deployment/local-registry' },
-      );
-    } catch (err) {
-      const events = await runCommandAsync(MIRROR_PULL_EVENTS_ARGV, {
-        silent: true,
-        env,
-        timeout: 30_000,
-        ignoreError: true,
-      });
-      const hint = mirrorPullFailureHint(typeof events === 'string' ? events : '');
-      throw new Error(`local-registry rollout did not complete: ${hint ?? err.message}`, {
-        cause: err,
-      });
-    }
-  });
-  // 5b''. Deliver the app image, once, into the master's registry: a layer
-  //       delta into the master's containerd (only the layers the base pull
-  //       did not already put there), checked against the image's diffIDs,
-  //       then `ctr images push` into the registry pod that just became
-  //       Ready. Every other node, static or CA-spawned, pulls the same
-  //       `<masterPrivateIp>:5000/<project>:<tag>` from it (registries.yaml),
-  //       so nothing goes to a node per node. Started here, NOT awaited here:
-  //       it overlaps the CA apply, the observability apply and the CA rollout
-  //       below, and is awaited right before step 6 points deployment/app at
-  //       the tag, the first time any pod references it.
-  //       A k8s-ha standby delivers nothing: the primary's image is copied
-  //       into this registry over wg0 (planImageDelivery), so the wait above
-  //       stays and only the delivery is skipped.
-  const { deliver } = planImageDelivery({ role });
-  let deliveryPromise = null;
-  if (deliver) {
-    if (!masterIp) {
-      throw new Error('applyK3sManifests: masterIp required for the image delivery');
-    }
-    if (!sshKeyPath) {
-      throw new Error('applyK3sManifests: sshKeyPath required for the image delivery');
-    }
-    deliveryPromise = perfAsync(`deploy.${perfPrefix}.image.deliver`, () =>
-      deliverImage({
-        tag: imageTag,
-        sshTarget: `root@${masterIp}`,
-        sshKey: sshKeyPath,
-        runtime: 'k3s',
-        registryRef: imageTag,
-        basePull,
-      }),
-    );
-    // A delivery that fails while the CA / observability work below is still
-    // running must not surface as an unhandledRejection: the `await
-    // deliveryPromise` before step 6 re-throws it and fails the deploy.
-    deliveryPromise.catch(() => {});
+  try {
+    await perfAsync(`deploy.${perfPrefix}.localRegistry.wait`, async () => {
+      try {
+        await runKubectlWithRetry(
+          ['-n', 'vibecarbon', 'rollout', 'status', 'deployment/local-registry', '--timeout=120s'],
+          {
+            env,
+            description: 'applyK3sManifests: kubectl rollout status deployment/local-registry',
+          },
+        );
+      } catch (err) {
+        const events = await runCommandAsync(MIRROR_PULL_EVENTS_ARGV, {
+          silent: true,
+          env,
+          timeout: 30_000,
+          ignoreError: true,
+        });
+        const hint = mirrorPullFailureHint(typeof events === 'string' ? events : '');
+        throw new Error(`local-registry rollout did not complete: ${hint ?? err.message}`, {
+          cause: err,
+        });
+      }
+    });
+    registryServing.resolve();
+  } catch (err) {
+    registryServing.reject(err);
+    throw err;
   }
   // 5b. Patch the vibecarbon-config SITE_URL that the base/ kustomization
   //     ships with its `app.example.com` placeholder. (The vibecarbon-tls

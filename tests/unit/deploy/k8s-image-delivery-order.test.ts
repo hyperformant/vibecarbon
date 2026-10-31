@@ -42,29 +42,35 @@ function at(body: string, needle: string, times = 1): number {
 describe('applyK3sManifests: the one delivery', () => {
   const body = fnBody('applyK3sManifests');
 
-  it('starts after the registry pod is Ready and is awaited right before the deployment/app patch', () => {
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
-    const registryReady = at(body, '`deploy.${perfPrefix}.localRegistry.wait`');
+  it('transfers before cert-manager, pushes once the registry serves, and is awaited right before the deployment/app patch', () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
     const start = at(body, '`deploy.${perfPrefix}.image.deliver`');
     const call = at(body, 'deliverImage({');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
+    const certManager = at(body, '`deploy.${perfPrefix}.certManager.install`');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
+    const registryReady = at(body, '`deploy.${perfPrefix}.localRegistry.wait`');
+    const served = at(body, 'registryServing.resolve()');
     const awaited = at(body, 'await deliveryPromise');
     const patch = at(body, "'deployment/app',\n      '--type=strategic'");
-    expect(registryReady).toBeLessThan(start);
+    // The transfer starts with the apply, before the cert-manager chain...
     expect(start).toBeLessThan(call);
-    // The observability apply runs while the delivery is in flight. (The CA
-    // apply and rollout now run alongside the cert-manager chain, from before
-    // the base; the app patch also waits for them: clusterAutoscalerReady.)
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: source text under test
-    const observability = at(body, '`deploy.${perfPrefix}.applyObservability`');
-    expect(observability).toBeGreaterThan(call);
-    expect(observability).toBeLessThan(awaited);
+    expect(call).toBeLessThan(certManager);
+    // ...and its push is held on the registry rollout, signalled only after it.
+    expect(body.slice(call, body.indexOf('})', call))).toContain(
+      'pushAfter: registryServing.promise',
+    );
+    expect(registryReady).toBeLessThan(served);
     expect(awaited).toBeLessThan(patch);
     // Nothing between the await and the patch but the patch itself, the
     // Secret versions it stamps, and the CA barrier.
     expect(body.slice(awaited, patch)).not.toMatch(
       /\bawait (?!deliveryPromise|clusterAutoscalerReady|readAppSecretVersions|runKubectlWithRetry)/,
     );
+  });
+
+  it('a registry that never serves rejects the push signal (no push into it)', () => {
+    expect(body).toMatch(/registryServing\.reject\(err\)/);
   });
 
   it('delivers to the master only, as the k3s runtime, with the tag pods will run', () => {

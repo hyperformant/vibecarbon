@@ -493,10 +493,16 @@ function findAppliedSecretConfigJson(secretName: string) {
 // so every describe gets it (an outer beforeEach runs before each inner one).
 beforeEach(() => {
   deliverImage.mockReset();
-  deliverImage.mockImplementation(async () => {
+  deliverImage.mockImplementation(async (opts: { pushAfter?: Promise<unknown> }) => {
     cmdCalls.push(['deliverImage']);
     if (deliverGate) await deliverGate.promise;
     if (deliverError) throw deliverError;
+    // deliverImage pushes into the registry only once pushAfter resolves
+    // (layer-delta.test.ts pins that); logged so it orders against kubectl.
+    if (opts?.pushAfter) {
+      await opts.pushAfter;
+      cmdCalls.push(['registryPush']);
+    }
     return { bytes: 1, layersSent: 1, layersReused: 0 };
   });
 });
@@ -634,7 +640,15 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app');
   const isDelivery = (a: string[]) => a[0] === 'deliverImage';
 
-  it('#1 the delivery starts after the registry is Ready and gates the app patch', async () => {
+  const isRegistryPush = (a: string[]) => a[0] === 'registryPush';
+  const isCertManagerInstall = (a: string[]) =>
+    a[0] === 'kubectl' && a.includes('apply') && a.some((x) => /cert-manager.*\.yaml$/.test(x));
+
+  // The layer delta into the master's containerd needs only ssh and the base
+  // pull, so it starts with the apply, before cert-manager; only its push
+  // waits for the registry pod, which k8s/base creates (DO e2e 2026-10-31:
+  // image.deliver 12 s, which the CA rollout had hidden until it moved out).
+  it('#1 the transfer starts before cert-manager; the push waits for the registry; the app patch waits for both', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
     // Hold the delivery open: the deployment/app patch must not run (it is
@@ -652,8 +666,11 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     expect(delivering).toBe(true);
     expect(patchedWhilePending).toBe(false);
     const delivery = cmdCalls.findIndex(isDelivery);
-    expect(cmdCalls.findIndex(isLocalRegistryWait)).toBeLessThan(delivery);
-    expect(delivery).toBeLessThan(cmdCalls.findIndex(isAppPatch));
+    expect(delivery).toBeLessThan(cmdCalls.findIndex(isCertManagerInstall));
+    expect(cmdCalls.findIndex(isLocalRegistryWait)).toBeLessThan(
+      cmdCalls.findIndex(isRegistryPush),
+    );
+    expect(cmdCalls.findIndex(isRegistryPush)).toBeLessThan(cmdCalls.findIndex(isAppPatch));
   });
 
   // The cluster autoscaler (kube-system, hostNetwork, its own Secret and
@@ -766,7 +783,9 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toMatch(/local-registry rollout did not complete/);
     expect(err.message).toContain('ghcr.io/hyperformant/mirrored-pause');
-    expect(cmdCalls.some(isDelivery)).toBe(false);
+    // The transfer may have run; nothing is pushed into a registry that never served.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(cmdCalls.some(isRegistryPush)).toBe(false);
   });
 
   it('a registry rollout timeout with no mirror pull failure says only that', async () => {
@@ -790,6 +809,7 @@ describe('applyK3sManifests deploy-time optimizations', () => {
       runtime: 'k3s',
       registryRef: args.imageTag,
       basePull,
+      pushAfter: expect.any(Promise),
     });
   });
 

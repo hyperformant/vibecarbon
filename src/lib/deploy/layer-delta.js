@@ -332,6 +332,24 @@ async function stageDelta({ archiveDir, stageDir, tag, keep, layerSources }) {
 }
 
 /**
+ * Push an image the delta imported into a k3s node's containerd (as `ref`)
+ * into the node's local registry under `registryRef`: the same two ctr steps
+ * layer-delta-remote.sh runs when it is given a registry ref, for a push
+ * deferred until the registry serves (deliverImage `pushAfter`).
+ */
+async function pushToRegistry({ run, ref, registryRef }) {
+  const target = shEscape(registryRef);
+  const script = ['set -eu'];
+  if (registryRef !== ref) {
+    script.push(`k3s ctr -n k8s.io images tag --force ${shEscape(ref)} ${target} > /dev/null`);
+  }
+  script.push(`k3s ctr -n k8s.io images push --plain-http ${target} ${target} > /dev/null`);
+  await run(`sh -c ${shEscape(script.join('\n'))}`).catch((err) => {
+    throw new DeliveryError(`registry push: ${firstLine(err?.message) || 'failed'}`);
+  });
+}
+
+/**
  * Deliver a locally built image to a deploy target, sending only the layers it
  * lacks. See the file header for the protocol.
  *
@@ -344,6 +362,13 @@ async function stageDelta({ archiveDir, stageDir, tag, keep, layerSources }) {
  * The ssh send holds the host-wide uplink lock (uplink-lock.js), and only the
  * send: two processes' transfers over one operator uplink stall each other.
  *
+ * `pushAfter` (k3s, with `registryRef`) splits the k3s target's work in two:
+ * the delta is sent and imported into containerd at once, and the push into
+ * the registry waits for `pushAfter` to resolve, the registry pod serving.
+ * The transfer then overlaps whatever creates the registry instead of
+ * following it. A `pushAfter` that rejects fails the delivery with its own
+ * error and pushes nothing.
+ *
  * @param {{
  *   tag: string,
  *   sshTarget: string,
@@ -352,6 +377,7 @@ async function stageDelta({ archiveDir, stageDir, tag, keep, layerSources }) {
  *   registryRef?: string,
  *   basePull?: Promise<unknown>,
  *   baseRef?: string,
+ *   pushAfter?: Promise<unknown>,
  *   deps?: {
  *     run?: (cmd: string) => Promise<string>,
  *     send?: (cmd: string, stdin: import('node:stream').Readable) => Promise<{code: number, stderr: string}>,
@@ -369,6 +395,7 @@ export async function deliverImage({
   registryRef,
   basePull,
   baseRef = NODE_RUNTIME_IMAGE,
+  pushAfter,
   deps = {},
 }) {
   if (runtime !== 'docker' && runtime !== 'k3s') {
@@ -376,6 +403,9 @@ export async function deliverImage({
   }
   if (registryRef && runtime !== 'k3s') {
     throw new Error('deliverImage: registryRef is only for a k3s target');
+  }
+  if (pushAfter && !registryRef) {
+    throw new Error('deliverImage: pushAfter needs a registryRef to push to');
   }
   const sshArgs = deliverySshArgs({ sshTarget, sshKey });
   const {
@@ -386,6 +416,7 @@ export async function deliverImage({
   } = deps;
 
   const timer = perfTimer('deploy.image.delta');
+  let delivered;
   const work = mkdtempSync(join(tmpdir(), 'vibecarbon-delta-'));
   const archiveDir = join(work, 'save');
   const stageDir = join(work, 'stage');
@@ -419,7 +450,8 @@ export async function deliverImage({
       TARGET_PLATFORM,
       tag,
       ref,
-      registryRef ?? '',
+      // A deferred push runs as its own step below, once pushAfter resolves.
+      pushAfter ? '' : (registryRef ?? ''),
     ]
       .map(shEscape)
       .join(' ')}`;
@@ -473,11 +505,19 @@ export async function deliverImage({
     const layersReused = keep.length;
     const layersSent = totalLayers - layersReused;
     timer.end(`bytes=${bytes} sent=${layersSent} reused=${layersReused}`);
-    return { bytes, layersSent, layersReused };
+    delivered = { bytes, layersSent, layersReused, ref };
   } catch (err) {
     timer.end('(failed)');
     throw err;
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+  // After the work dir is gone: a pushAfter that never settles (the deploy
+  // failed before the registry served) holds nothing on this machine.
+  if (pushAfter) {
+    await pushAfter;
+    await pushToRegistry({ run, ref: delivered.ref, registryRef });
+  }
+  const { ref: _ref, ...result } = delivered;
+  return result;
 }

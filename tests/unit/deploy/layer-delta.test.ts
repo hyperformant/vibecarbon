@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { gunzipSync } from 'node:zlib';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildDelta,
   deliverImage,
@@ -284,6 +284,131 @@ describe('deliverImage', () => {
     expect(ssh.sent[0].cmd).toContain(
       ` layer-delta 'k3s' 'linux/amd64' '${ref}' '${ref}' '${ref}'`,
     );
+  });
+
+  // The delta into the master's containerd needs only ssh and the base pull;
+  // only the push needs the registry pod, which k8s/base creates minutes
+  // later. pushAfter lets the transfer start at once and holds just the push.
+  describe('k3s pushAfter: import now, push once the registry serves', () => {
+    const ref = '10.0.1.1:5000/app:abc123-20261021000000';
+    const k3s = (extra: Record<string, unknown>) => ({
+      ...args,
+      tag: ref,
+      runtime: 'k3s' as const,
+      registryRef: ref,
+      ...extra,
+    });
+
+    it('imports with no registry ref, then pushes only after pushAfter resolves', async () => {
+      const ssh = stubSsh();
+      const runs: string[] = [];
+      let release!: () => void;
+      const pushAfter = new Promise<void>((r) => {
+        release = r;
+      });
+      const done = deliverImage(
+        k3s({
+          pushAfter,
+          deps: {
+            run: async (cmd: string) => {
+              runs.push(cmd);
+              return '';
+            },
+            send: ssh.send,
+            saveImage: saveFixture,
+            acquireLock: noLock,
+          },
+        }),
+      );
+      await vi.waitFor(() => expect(ssh.sent).toHaveLength(1));
+      expect(ssh.sent[0].cmd).toContain(` layer-delta 'k3s' 'linux/amd64' '${ref}' '${ref}' ''`);
+      await new Promise((r) => setTimeout(r, 20));
+      const pushes = () => runs.filter((c) => c.includes('images push'));
+      expect(pushes()).toHaveLength(0);
+      release();
+      await done;
+      expect(pushes()).toHaveLength(1);
+      expect(pushes()[0]).toContain(`k3s ctr -n k8s.io images push --plain-http`);
+      expect(pushes()[0]).toContain(ref);
+    });
+
+    it('tags the import under the registry ref first when ctr named it differently', async () => {
+      const runs: string[] = [];
+      const local = 'quorum:abc';
+      await deliverImage({
+        ...args,
+        tag: local,
+        runtime: 'k3s',
+        registryRef: ref,
+        pushAfter: Promise.resolve(),
+        deps: {
+          run: async (cmd: string) => {
+            runs.push(cmd);
+            return '';
+          },
+          send: stubSsh().send,
+          saveImage: saveFixture,
+          acquireLock: noLock,
+        },
+      });
+      const push = runs.find((c) => c.includes('images push')) ?? '';
+      expect(push).toContain('images tag --force');
+      expect(push).toContain('docker.io/library/quorum:abc');
+      expect(push.indexOf('images tag')).toBeLessThan(push.indexOf('images push'));
+    });
+
+    it('a failed push is one delivery error line', async () => {
+      await expect(
+        deliverImage(
+          k3s({
+            pushAfter: Promise.resolve(),
+            deps: {
+              run: async (cmd: string) => {
+                if (cmd.includes('images push')) throw new Error('connection refused\nmore');
+                return '';
+              },
+              send: stubSsh().send,
+              saveImage: saveFixture,
+              acquireLock: noLock,
+            },
+          }),
+        ),
+      ).rejects.toThrow(/^image delivery failed: registry push: connection refused$/);
+    });
+
+    it('a pushAfter that rejects fails the delivery with its own error, and pushes nothing', async () => {
+      const runs: string[] = [];
+      const pushAfter = Promise.reject(new Error('local-registry rollout did not complete'));
+      pushAfter.catch(() => {});
+      await expect(
+        deliverImage(
+          k3s({
+            pushAfter,
+            deps: {
+              run: async (cmd: string) => {
+                runs.push(cmd);
+                return '';
+              },
+              send: stubSsh().send,
+              saveImage: saveFixture,
+              acquireLock: noLock,
+            },
+          }),
+        ),
+      ).rejects.toThrow('local-registry rollout did not complete');
+      expect(runs.some((c) => c.includes('images push'))).toBe(false);
+    });
+
+    it('is refused without a registry ref', async () => {
+      await expect(
+        deliverImage({
+          ...args,
+          runtime: 'k3s',
+          pushAfter: Promise.resolve(),
+          deps: { saveImage: saveFixture },
+        }),
+      ).rejects.toThrow(/pushAfter/);
+    });
   });
 
   it('maps a failed remote load to one line and never retries', async () => {
