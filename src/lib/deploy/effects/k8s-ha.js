@@ -38,7 +38,7 @@
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { spinner } from '../../cli/progress.js';
-import { c } from '../../colors.js';
+import { c, link } from '../../colors.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { summarizePulumiError } from '../../iac/index.js';
 import { perfAsync } from '../../perf.js';
@@ -817,7 +817,7 @@ async function haK8sFinalize(ctx) {
   p.log.success(`${c.success('Fullerene HA deployment complete!')}`);
 
   if (options.domain) {
-    p.log.info(`\n  ${c.bold(c.success(`🌐 https://${options.domain}`))}\n`);
+    p.log.info(`\n  ${c.bold(c.success(`🌐 ${link(`https://${options.domain}`)}`))}\n`);
   }
 
   p.note(

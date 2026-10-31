@@ -20,7 +20,7 @@
 import { execFileSync } from 'node:child_process';
 import { renderHelp } from './lib/cli/help.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
-import { c } from './lib/colors.js';
+import { c, link } from './lib/colors.js';
 import { loadProjectConfig } from './lib/config.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 
@@ -167,7 +167,7 @@ export async function run(args) {
   } catch {
     // Fallback: print the Hetzner Cloud Console URL.
     console.log(
-      `${c.bold('Open in Hetzner Cloud Console:')} https://console.hetzner.cloud/projects/_/servers/${server.id}/graphics`,
+      `${c.bold('Open in Hetzner Cloud Console:')} ${link(`https://console.hetzner.cloud/projects/_/servers/${server.id}/graphics`)}`,
     );
     console.log(c.dim('(Replace `_` with your project ID — visible in the URL when logged in.)'));
   }

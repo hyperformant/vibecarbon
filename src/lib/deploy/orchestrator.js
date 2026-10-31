@@ -9,7 +9,7 @@ import * as p from '@clack/prompts';
 import { formatCommandNote } from '../cli/help.js';
 import { progressLog, spinner } from '../cli/progress.js';
 import { resolvePrimary } from '../cli/resolve-primary.js';
-import { c } from '../colors.js';
+import { c, link } from '../colors.js';
 import { runCommand, runCommandAsync } from '../command.js';
 import { loadProjectConfig, registerProject, updateProjectConfig } from '../config.js';
 import { writeLogDetail } from '../deploy-logger.js';
@@ -2312,7 +2312,7 @@ export async function executeDeployment(args, gatheredConfig) {
     // rollouts still finish in <60s.
     if (domain) {
       const s = spinner();
-      s.start(`Probing https://${domain}/api/health ...`);
+      s.start(`Probing ${link(`https://${domain}/api/health`)} ...`);
       // Two phases. The APP phase (here) asks whether the app answers from
       // the public internet: DNS propagation and ingress routing roll up
       // here, with TLS verification off so a certificate still being issued
@@ -2345,7 +2345,9 @@ export async function executeDeployment(args, gatheredConfig) {
         // headers — which was the 2026-04-27 morning matrix's "[unknown]
         // CSP header dump" failure mode.
         const reason = probeFailureReason(probeResult);
-        s.stop(`Public health probe failed against https://${domain}/api/health; ${reason}`);
+        s.stop(
+          `Public health probe failed against ${link(`https://${domain}/api/health`)}; ${reason}`,
+        );
         // Capture diagnostics inline so a CI run failure surfaces the
         // root cause without requiring a follow-up `vibecarbon diagnose`.
         // The cluster is about to be destroyed by the test runner; once

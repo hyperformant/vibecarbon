@@ -27,7 +27,7 @@ import { exitCancelled } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
-import { c } from './lib/colors.js';
+import { c, link } from './lib/colors.js';
 import { loadProjectConfig } from './lib/config.js';
 import {
   featureKeys,
@@ -307,17 +307,17 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
     p.note(
       [
         `${c.bold('1. Create your products in Stripe FIRST')}`,
-        `   ${c.info('https://dashboard.stripe.com/products')}`,
+        `   ${c.info(link('https://dashboard.stripe.com/products'))}`,
         '   Add a product for each plan you want to sell and give it a price, ',
         `   ${c.dim('recurring')} for subscriptions or ${c.dim('one-time')} for single purchases.`,
         `   Name them anything you like; we'll sync them in and let you pick which to activate.`,
         '',
         `${c.bold('2. Secret key')}`,
-        `   ${c.info('https://dashboard.stripe.com/apikeys')}`,
+        `   ${c.info(link('https://dashboard.stripe.com/apikeys'))}`,
         `   Use ${c.dim('sk_test_...')} for testing or ${c.dim('sk_live_...')} in production.`,
         '',
         `${c.bold('3. Webhook')} (Workbench → Webhooks → Create an event destination)`,
-        `   ${c.info('https://dashboard.stripe.com/webhooks')}`,
+        `   ${c.info(link('https://dashboard.stripe.com/webhooks'))}`,
         `   • Endpoint URL: ${c.dim(`https://<your-domain>${BILLING_WEBHOOK_PATH}`)}`,
         '   • Events to send:',
         '       checkout.session.completed',
@@ -404,11 +404,11 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
     p.note(
       [
         `${c.bold('1. API key')} (Developer Tools → Authentication → API keys → New API key)`,
-        `   ${c.info('https://vendors.paddle.com')}`,
+        `   ${c.info(link('https://vendors.paddle.com'))}`,
         '   Generate a new key with read + write scope.',
         '',
         `${c.bold('2. Webhook')} (Developer Tools → Notifications → New destination)`,
-        `   ${c.info('https://vendors.paddle.com')}`,
+        `   ${c.info(link('https://vendors.paddle.com'))}`,
         `   • Endpoint URL: ${c.dim(`https://<your-domain>${BILLING_WEBHOOK_PATH}`)}`,
         '   • Events to send:',
         '       transaction.completed',
@@ -420,7 +420,7 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
         '   • Copy the secret key shown after creating the destination.',
         '',
         `${c.bold('3. Price IDs')} (Catalog → Products → pick product → Prices)`,
-        `   ${c.info('https://vendors.paddle.com')}`,
+        `   ${c.info(link('https://vendors.paddle.com'))}`,
         '   Create a Startup and Pro product, then copy each recurring',
         `   price's ${c.dim('pri_...')} ID.`,
       ].join('\n'),
@@ -467,10 +467,10 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
     p.note(
       [
         `${c.bold('1. Access token')} (Settings → Developers → New access token)`,
-        `   ${c.info('https://polar.sh/dashboard/<org>/settings')}`,
+        `   ${c.info(link('https://polar.sh/dashboard/<org>/settings'))}`,
         '',
         `${c.bold('2. Webhook')} (Settings → Webhooks → Add Endpoint)`,
-        `   ${c.info('https://polar.sh/dashboard/<org>/settings/webhooks')}`,
+        `   ${c.info(link('https://polar.sh/dashboard/<org>/settings/webhooks'))}`,
         `   • Endpoint URL: ${c.dim(`https://<your-domain>${BILLING_WEBHOOK_PATH}`)}`,
         '   • Events to send:',
         '       checkout.created',
@@ -484,7 +484,7 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
         `   Shown in the dashboard URL after ${c.dim('/dashboard/')}.`,
         '',
         `${c.bold('4. Price IDs')}`,
-        `   ${c.info('https://polar.sh/dashboard/<org>/products')}`,
+        `   ${c.info(link('https://polar.sh/dashboard/<org>/products'))}`,
       ].join('\n'),
       'Polar setup',
     );
@@ -544,15 +544,15 @@ async function promptGoogleOAuth(env, ctx) {
   p.note(
     [
       `${c.bold('1. Configure consent screen')} (one-time prerequisite)`,
-      `   ${c.info('https://console.cloud.google.com/auth/branding')}`,
+      `   ${c.info(link('https://console.cloud.google.com/auth/branding'))}`,
       '   Google Auth Platform → Branding. Add app name + support email.',
       '',
       `${c.bold('2. Create OAuth client')} (Clients → Create client)`,
-      `   ${c.info('https://console.cloud.google.com/auth/clients')}`,
+      `   ${c.info(link('https://console.cloud.google.com/auth/clients'))}`,
       `   Application type: ${c.dim('Web application')}.`,
       '',
       `${c.bold('3. Authorized redirect URI')}`,
-      `   ${c.dim(oauthCallbackUrl(env, ctx, 'google'))}`,
+      `   ${c.dim(link(oauthCallbackUrl(env, ctx, 'google')))}`,
       '   (paste this exact URL, Google must match it character-for-character)',
       '',
       `${c.bold('4. Copy the Client ID and Client secret')}`,
@@ -586,11 +586,11 @@ async function promptMicrosoftOAuth(env, ctx) {
   p.note(
     [
       `${c.bold('1. Register an app')} (App registrations → New registration)`,
-      `   ${c.info('https://entra.microsoft.com')}`,
+      `   ${c.info(link('https://entra.microsoft.com'))}`,
       '   Microsoft Entra ID → App registrations → New registration.',
       '',
       `${c.bold('2. Redirect URI')} (platform: Web)`,
-      `   ${c.dim(oauthCallbackUrl(env, ctx, 'microsoft'))}`,
+      `   ${c.dim(link(oauthCallbackUrl(env, ctx, 'microsoft')))}`,
       '',
       `${c.bold('3. Client secret')} (Certificates & secrets → New client secret)`,
       `   ${c.dim('Copy the Value (not the Secret ID), Entra only shows it once.')}`,
@@ -686,12 +686,12 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
   if (provider === 'resend') {
     p.note(
       [
-        `${c.bold('1. Add your sending domain')}  ${c.info('https://resend.com/domains')}`,
+        `${c.bold('1. Add your sending domain')}  ${c.info(link('https://resend.com/domains'))}`,
         `   Use your ${c.bold('root domain')} ${c.dim('(e.g. yourdomain.com)')} — not a subdomain`,
         `   ${c.dim('like mail.yourdomain.com')}. Add the DNS records it shows you,`,
         `   then wait for the status to read ${c.dim('"Verified"')}.`,
         '',
-        `${c.bold('2. Create an API key')}  ${c.info('https://resend.com/api-keys')}`,
+        `${c.bold('2. Create an API key')}  ${c.info(link('https://resend.com/api-keys'))}`,
         `   ${c.dim('"Sending access"')} permission is all you need ${c.dim('(not "Full access")')}.`,
         '',
         '3. Paste the API key below.',
@@ -712,11 +712,11 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
     // password (https://postmarkapp.com/developer/user-guide/send-email-with-smtp).
     p.note(
       [
-        `${c.bold('1. Verify your sender')}  ${c.info('https://account.postmarkapp.com/signatures')}`,
+        `${c.bold('1. Verify your sender')}  ${c.info(link('https://account.postmarkapp.com/signatures'))}`,
         `   Add a ${c.dim('Sender Signature')} for your "from" address, or verify your`,
         `   whole domain ${c.dim('(DKIM + Return-Path)')} so production email is accepted.`,
         '',
-        `${c.bold('2. Server API Token')}  ${c.info('https://account.postmarkapp.com/servers')}`,
+        `${c.bold('2. Server API Token')}  ${c.info(link('https://account.postmarkapp.com/servers'))}`,
         `   Open your server → ${c.dim('API Tokens')} and copy the ${c.dim('Server API Token')}.`,
         `   ${c.dim('Postmark uses this same token as both the SMTP username and password.')}`,
       ].join('\n'),
@@ -738,11 +738,11 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
     // API key (https://www.twilio.com/docs/sendgrid/for-developers/sending-email/integrating-with-the-smtp-api).
     p.note(
       [
-        `${c.bold('1. Verify a sender')}  ${c.info('https://app.sendgrid.com/settings/sender_auth')}`,
+        `${c.bold('1. Verify a sender')}  ${c.info(link('https://app.sendgrid.com/settings/sender_auth'))}`,
         `   Complete ${c.dim('Single Sender Verification')} for your "from" address, or set`,
         '   up domain authentication so production email is not rejected.',
         '',
-        `${c.bold('2. API key')}  ${c.info('https://app.sendgrid.com/settings/api_keys')}`,
+        `${c.bold('2. API key')}  ${c.info(link('https://app.sendgrid.com/settings/api_keys'))}`,
         `   Create a key with at least ${c.dim('"Mail Send"')} permission and copy it`,
         `   ${c.dim('(shown only once)')}. The SMTP username is the literal word ${c.dim('apikey')}.`,
       ].join('\n'),
@@ -853,7 +853,7 @@ async function promptPlausible(env, ctx = {}) {
   p.note(
     [
       `${c.bold('1. Add your site')}`,
-      `   ${c.info('https://plausible.io/sites/new')}`,
+      `   ${c.info(link('https://plausible.io/sites/new'))}`,
       ...domainLines,
       '',
       `   Plausible then shows an ${c.dim('"Install Plausible"')} screen with a`,
@@ -861,9 +861,9 @@ async function promptPlausible(env, ctx = {}) {
       '   the snippet for you. Just come back here.',
       '',
       `${c.bold('2. Script URL')}`,
-      `   Keep the default ${c.dim('(https://plausible.io/js/script.js)')} unless you`,
+      `   Keep the default ${c.dim(`(${link('https://plausible.io/js/script.js')})`)} unless you`,
       '   self-host, e.g.',
-      `   ${c.dim('https://analytics.yourdomain.com/js/script.js')}.`,
+      `   ${c.dim(link('https://analytics.yourdomain.com/js/script.js'))}.`,
     ].join('\n'),
     'Plausible setup',
   );
@@ -941,7 +941,7 @@ async function promptCicd() {
 
   if (!checkDependency('gh', 'GitHub CLI')) {
     p.log.error(
-      '`gh` CLI is required. Install from https://cli.github.com/, then run `gh auth login`.',
+      `\`gh\` CLI is required. Install from ${link('https://cli.github.com/')}, then run \`gh auth login\`.`,
     );
     return null;
   }

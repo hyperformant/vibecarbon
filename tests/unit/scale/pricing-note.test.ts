@@ -23,7 +23,7 @@ const SCALE_SRC = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
 describe('scale.js pricing note — exact string pin', () => {
   it('both note call sites interpolate Provider.NAME and Provider.PRICING_URL', () => {
     const pattern =
-      /p\.note\(`Current \$\{Provider\.NAME\} pricing: \$\{Provider\.PRICING_URL\}`, 'Cost'\)/g;
+      /p\.note\(`Current \$\{Provider\.NAME\} pricing: \$\{link\(Provider\.PRICING_URL\)\}`, 'Cost'\)/g;
     const occurrences = SCALE_SRC.match(pattern) || [];
     expect(occurrences).toHaveLength(2);
   });

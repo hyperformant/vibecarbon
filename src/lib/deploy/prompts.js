@@ -12,7 +12,7 @@ import {
 import { exitCancelled, exitDeclined } from '../cli/exit-guard.js';
 import { spinner } from '../cli/progress.js';
 import { primaryEntryServerType } from '../cli/resolve-primary.js';
-import { c, printBanner } from '../colors.js';
+import { c, link, printBanner } from '../colors.js';
 import { loadProjectConfig } from '../config.js';
 import {
   DNS_PROVIDERS,
@@ -586,7 +586,7 @@ export function resolveEnvStorage(envName, envConfig, projectConfig) {
 export async function promptAppStorageKey({ environment, projectName }) {
   p.note(
     [
-      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://console.hetzner.cloud/projects')}`,
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline(link('https://console.hetzner.cloud/projects'))}`,
       `${c.dim('   └─')} Pick ${c.info(projectName || 'your-project')} → ${c.info('Security')} → ${c.info('S3 credentials')}`,
       '',
       `${c.bold('2.')} Click ${c.boldCyan('Generate credentials')}`,

@@ -30,7 +30,7 @@
 import * as p from '@clack/prompts';
 import { exitCancelled } from './cli/exit-guard.js';
 import { getApiToken as getCloudflareApiToken } from './cloudflare-guided-setup.js';
-import { c } from './colors.js';
+import { c, link } from './colors.js';
 import { isSecretKey, registryEntry } from './config-registry.js';
 import * as digitaloceanGuidedSetup from './digitalocean-guided-setup.js';
 import { envSummaryLines } from './env-summary.js';
@@ -282,7 +282,7 @@ const dockerHubEntry = {
         `Export ${c.bold('DOCKER_HUB_USERNAME')} and ${c.bold('DOCKER_HUB_TOKEN')} in your`,
         'shell (or CI secrets, or tests/.env.e2e for e2e runs).',
         '',
-        `${c.bold('Create a token:')} ${c.boldCyanUnderline('https://hub.docker.com/settings/security')}`,
+        `${c.bold('Create a token:')} ${c.boldCyanUnderline(link('https://hub.docker.com/settings/security'))}`,
       ].join('\n'),
       'Docker Hub: informational',
     );

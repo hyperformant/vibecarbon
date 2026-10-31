@@ -73,7 +73,7 @@ import * as p from '@clack/prompts';
 import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
-import { c } from './colors.js';
+import { c, link } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import { resolveNameservers } from './dns-propagation.js';
 import { DNS_PROVIDERS, getDnsProvider, locateDomainBackend } from './dns-provider.js';
@@ -167,21 +167,21 @@ export function displayApiTokenGuide(projectName) {
   p.note(
     [
       `${c.bold('1.')} Create a ${c.boldCyan('DEDICATED Project')} FIRST ${c.dim('(console project switcher → create project)')} and keep it ${c.bold('selected')} for every step below.`,
-      `${c.dim('   ├─')} Name it e.g. ${c.info(`"${appName}"`)}; copy its ${c.boldCyan('Project ID')} ${c.dim('(a UUID) from')} ${c.boldCyanUnderline('https://console.scaleway.com/project/settings')}`,
+      `${c.dim('   ├─')} Name it e.g. ${c.info(`"${appName}"`)}; copy its ${c.boldCyan('Project ID')} ${c.dim('(a UUID) from')} ${c.boldCyanUnderline(link('https://console.scaleway.com/project/settings'))}`,
       `${c.dim('   └─')} ${c.boldYellow('⚠️  Why dedicated:')} ${c.dim('Scaleway SSH keys are Project-wide and re-applied to EVERY instance at each boot, sharing a Project shares root access.')}`,
       '',
       `${c.bold('2.')} Create an ${c.boldCyan('IAM application')} as the key's bearer, and ${c.boldYellow('ATTACH A POLICY to it')}:`,
-      `${c.dim('   ├─')} ${c.boldCyanUnderline('https://console.scaleway.com/iam/applications')} ${c.dim('→ Create application, name it e.g.')} ${c.info(`"${appName}"`)} ${c.dim('(a non-human identity; the credential outlives people and rotates independently).')}`,
-      `${c.dim('   ├─')} ${c.boldCyanUnderline('https://console.scaleway.com/iam/policies')} ${c.dim('→ Create policy: principal = the application; rule =')} ${c.info('AllProductsFullAccess')} ${c.dim('(or minimally Instances + BlockStorage + ObjectStorage + SSHKeys FullAccess), scope =')} ${c.bold('the dedicated Project')}${c.dim('.')}`,
+      `${c.dim('   ├─')} ${c.boldCyanUnderline(link('https://console.scaleway.com/iam/applications'))} ${c.dim('→ Create application, name it e.g.')} ${c.info(`"${appName}"`)} ${c.dim('(a non-human identity; the credential outlives people and rotates independently).')}`,
+      `${c.dim('   ├─')} ${c.boldCyanUnderline(link('https://console.scaleway.com/iam/policies'))} ${c.dim('→ Create policy: principal = the application; rule =')} ${c.info('AllProductsFullAccess')} ${c.dim('(or minimally Instances + BlockStorage + ObjectStorage + SSHKeys FullAccess), scope =')} ${c.bold('the dedicated Project')}${c.dim('.')}`,
       `${c.dim('   └─')} ${c.boldYellow('⚠️  Without a policy the application has ZERO permissions')} ${c.dim('; its key 401/403s every call. Object Storage permissions can take ~5 minutes to apply.')}`,
       '',
-      `${c.bold('3.')} Generate the API key: ${c.boldCyanUnderline('https://console.scaleway.com/iam/api-keys')} ${c.dim(', one dialog, four decisions:')}`,
+      `${c.bold('3.')} Generate the API key: ${c.boldCyanUnderline(link('https://console.scaleway.com/iam/api-keys'))} ${c.dim(', one dialog, four decisions:')}`,
       `${c.dim('   ├─')} Bearer: ${c.boldCyan('An application')} ${c.dim('→ select')} ${c.info(`"${appName}"`)} ${c.dim('("Myself" works but ties the credential to a personal user).')}`,
       `${c.dim('   ├─')} ${c.boldYellow('⚠️  Expiration: pick the MAXIMUM offered (capped at 1 year)')} ${c.dim('and set a renewal reminder NOW; the key expires SILENTLY and every later deploy/failover/destroy 401s. No sibling provider token does this.')}`,
       `${c.dim('   └─')} "Used for Object Storage?" → ${c.boldCyan('Yes, set up preferred Project')} ${c.dim('→ the')} ${c.bold('same dedicated Project')} ${c.dim('— "skip" silently binds whichever Project the console had selected.')}`,
       '',
       `${c.bold('4.')} The next screen reveals the ${c.boldCyan('access key')} ${c.dim('(SCW…)')} and the ${c.boldCyan('secret key')} ${c.dim('(a UUID, ')} ${c.boldYellow('shown ONCE')}${c.dim(', copy it immediately). Paste both + the Project ID below.')}`,
-      `${c.dim('   └─')} ${c.dim('Also validate your identity (not just payment) at')} ${c.boldCyanUnderline('https://console.scaleway.com/organization/settings')} ${c.dim(', instance quotas roughly double and several types are gated on it.')}`,
+      `${c.dim('   └─')} ${c.dim('Also validate your identity (not just payment) at')} ${c.boldCyanUnderline(link('https://console.scaleway.com/organization/settings'))} ${c.dim(', instance quotas roughly double and several types are gated on it.')}`,
     ].join('\n'),
     c.boldCyan('🔑 Scaleway API Key Setup'),
   );
@@ -201,7 +201,7 @@ export function displayS3CredentialsGuide(_projectName) {
       '',
       `${c.bold('2.')} ${c.boldYellow('⚠️  Check the key’s preferred Project:')} S3 has no Project parameter, so every key carries a ${c.boldCyan('preferred Project for Object Storage')} — chosen INSIDE the Generate-API-key dialog ("Will this API key be used for Object Storage?").`,
       `${c.dim('   ├─')} ${c.dim('It must be the SAME dedicated Project your servers deploy into, or buckets land where neither the console nor the sweep will look.')}`,
-      `${c.dim('   └─')} ${c.dim('Answering "skip" binds whichever Project the console had selected — if in doubt, regenerate the key at')} ${c.boldCyanUnderline('https://console.scaleway.com/iam/api-keys')} ${c.dim('(the preference is fixed at creation).')}`,
+      `${c.dim('   └─')} ${c.dim('Answering "skip" binds whichever Project the console had selected. If in doubt, regenerate the key at')} ${c.boldCyanUnderline(link('https://console.scaleway.com/iam/api-keys'))} ${c.dim('(the preference is fixed at creation).')}`,
       '',
       c.dim('Why Object Storage? Required for database backups and file uploads.'),
     ].join('\n'),

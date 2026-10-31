@@ -20,7 +20,7 @@ import * as p from '@clack/prompts';
 import { loadAllSpecs } from './lib/cli/command-registry.js';
 import { installUnsettledExitGuard } from './lib/cli/exit-guard.js';
 import { formatExamples, renderCommandList } from './lib/cli/help.js';
-import { c } from './lib/colors.js';
+import { c, link } from './lib/colors.js';
 import { dbImageOverrideProblem, setDbImageWarningSink } from './lib/images.js';
 import { shouldGate } from './lib/licensing/gate.js';
 import { perfTimer } from './lib/perf.js';
@@ -60,7 +60,9 @@ delete process.env.DISPLAY;
 export function checkPlatform(platform = process.platform) {
   if (platform === 'win32') {
     console.error('Windows native is not supported. Please run vibecarbon inside WSL2.');
-    console.error('See: https://learn.microsoft.com/en-us/windows/wsl/install');
+    console.error(
+      `See: ${link('https://learn.microsoft.com/en-us/windows/wsl/install', undefined, { stream: process.stderr })}`,
+    );
     process.exit(1);
   }
 }
@@ -141,7 +143,9 @@ export function checkNodeVersion(current = process.versions.node, floor = nodeEn
     (a[0] === b[0] && a[1] === b[1] && a[2] < b[2]);
   if (below) {
     console.error(`vibecarbon requires Node.js ${floor} or newer; you are running ${current}.`);
-    console.error('Upgrade Node (e.g. `nvm install 24 && nvm use 24`) or see https://nodejs.org.');
+    console.error(
+      `Upgrade Node (e.g. \`nvm install 24 && nvm use 24\`) or see ${link('https://nodejs.org', undefined, { stream: process.stderr })}.`,
+    );
     process.exit(1);
   }
 }
@@ -213,7 +217,7 @@ ${c.bold('GLOBAL FLAGS')}
 ${c.bold('EXAMPLES')}
 ${formatExamples(GLOBAL_EXAMPLES).join('\n')}
 ${c.bold('DOCUMENTATION')}
-  https://github.com/hyperformant/vibecarbon
+  ${link('https://github.com/hyperformant/vibecarbon')}
 `);
 }
 

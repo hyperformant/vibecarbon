@@ -16,7 +16,7 @@ import * as p from '@clack/prompts';
 import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
-import { c } from './colors.js';
+import { c, link } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import {
   dotenvPromptProblem,
@@ -87,10 +87,10 @@ async function validateDigitalOceanToken(token) {
 export function displayApiTokenGuide(projectName) {
   p.note(
     [
-      `${c.bold('1.')} Create a dedicated project for this app: ${c.boldCyanUnderline('https://cloud.digitalocean.com/projects/new')}`,
+      `${c.bold('1.')} Create a dedicated project for this app: ${c.boldCyanUnderline(link('https://cloud.digitalocean.com/projects/new'))}`,
       `${c.dim('   └─')} Name it ${c.info(`"${projectName || 'vibecarbon'}"`)} ${c.dim('— deploy files this app’s resources into it automatically (and creates it if missing, so this step is optional).')}`,
       '',
-      `${c.bold('2.')} Generate a token: ${c.boldCyanUnderline('https://cloud.digitalocean.com/account/api/tokens')} → ${c.boldCyan('Generate New Token')}`,
+      `${c.bold('2.')} Generate a token: ${c.boldCyanUnderline(link('https://cloud.digitalocean.com/account/api/tokens'))} → ${c.boldCyan('Generate New Token')}`,
       `${c.dim('   ├─')} Name: ${c.info(`"${projectName || 'vibecarbon'}-deploy"`)}`,
       `${c.dim('   └─')} Scope: ${c.info('Full Access')} ${c.dim('(required)')}`,
       '',
@@ -113,7 +113,7 @@ export function displayApiTokenGuide(projectName) {
 export function displayS3CredentialsGuide(projectName) {
   p.note(
     [
-      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://cloud.digitalocean.com/spaces/access_keys')}`,
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline(link('https://cloud.digitalocean.com/spaces/access_keys'))}`,
       `${c.dim('   └─')} ${c.dim('Full Access keys, not under Applications & API; the console moved this page here.')}`,
       '',
       `${c.bold('2.')} Click ${c.boldCyan('Create Access Key')}`,

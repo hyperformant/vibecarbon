@@ -10,7 +10,7 @@ import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
-import { c } from './lib/colors.js';
+import { c, link } from './lib/colors.js';
 import {
   activateLicense,
   deactivateLicense,
@@ -105,9 +105,9 @@ export async function runActivate(args) {
     s.stop('Activation failed', 1);
     p.log.error(c.error(`Error: ${result.error}`));
     if (result.reason === 'project_already_licensed' && result.switchPlan) {
-      p.log.info(`${c.dim('Switch plans at')} ${c.info(LICENSE_URL)}`);
+      p.log.info(`${c.dim('Switch plans at')} ${c.info(link(LICENSE_URL))}`);
     } else if (result.reason === 'invalid' || result.reason === 'unknown_key') {
-      p.log.info(`${c.dim('Buy a license at')} ${c.info(PRICING_URL)}`);
+      p.log.info(`${c.dim('Buy a license at')} ${c.info(link(PRICING_URL))}`);
     }
     process.exit(1);
   }

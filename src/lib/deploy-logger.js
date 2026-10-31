@@ -25,11 +25,27 @@ import { join } from 'node:path';
 import { armDeadAirGuard, disarmDeadAirGuard } from './cli/progress.js';
 import { perfEnabled } from './perf.js';
 
-// Strip ANSI CSI sequences (ESC + `[` + params + final byte) and bare CRs.
-// Built from String.fromCharCode to avoid biome's no-control-characters lint
-// rejecting a literal escape in the regex; equivalent to
-// `/\x1b\[[0-9;?]*[a-zA-Z]|\r/g`.
-const ANSI_RE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[a-zA-Z]|\\r`, 'g');
+// Strip ANSI CSI sequences (ESC + `[` + params + final byte), OSC sequences
+// (ESC + `]` ... BEL or ESC + backslash, which is how link() prints a hyperlink;
+// its visible text stays) and bare CRs. Built from String.fromCharCode to
+// avoid biome's no-control-characters lint rejecting a literal escape in the
+// regex; equivalent to
+// `/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r/g`.
+const ESC = String.fromCharCode(0x1b);
+const BEL = String.fromCharCode(0x07);
+const ANSI_RE = new RegExp(
+  `${ESC}\\[[0-9;?]*[a-zA-Z]|${ESC}\\][^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)|\\r`,
+  'g',
+);
+
+/**
+ * Terminal output as plain text for the log file.
+ * @param {string} text
+ * @returns {string}
+ */
+export function stripTerminalEscapes(text) {
+  return String(text).replace(ANSI_RE, '');
+}
 
 /** The running deploy log's writer, or null outside withDeployLog. */
 let activeLogWriter = null;
@@ -43,7 +59,7 @@ let activeLogWriter = null;
  */
 export function writeLogDetail(text) {
   if (!activeLogWriter) return;
-  const s = String(text ?? '').replace(ANSI_RE, '');
+  const s = stripTerminalEscapes(text ?? '');
   activeLogWriter(s.endsWith('\n') ? s : `${s}\n`);
 }
 
@@ -84,7 +100,7 @@ export async function withDeployLog(envName, fn) {
   const tee = (orig) => (chunk, encoding, cb) => {
     try {
       const s = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
-      writeLog(s.replace(ANSI_RE, ''));
+      writeLog(stripTerminalEscapes(s));
     } catch {
       // best-effort — never break terminal output for the sake of logging
     }

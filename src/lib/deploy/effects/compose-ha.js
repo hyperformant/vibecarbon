@@ -31,7 +31,7 @@
  */
 import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
-import { c } from '../../colors.js';
+import { c, link } from '../../colors.js';
 import { loadProjectConfig, registerProject, updateProjectConfig } from '../../config.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
@@ -1300,7 +1300,7 @@ async function haFinalizeConfig(ctx) {
 
   p.log.success('');
   if (domain) {
-    p.log.message(`  ${c.dim('URL')}            ${c.info(`https://${domain}`)}`);
+    p.log.message(`  ${c.dim('URL')}            ${c.info(link(`https://${domain}`))}`);
   }
   p.log.message(`  ${c.dim('Primary')}        ${c.info(primary.ip)} (${primary.region ?? region})`);
   p.log.message(

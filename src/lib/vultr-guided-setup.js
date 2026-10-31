@@ -26,7 +26,7 @@ import * as p from '@clack/prompts';
 import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
-import { c } from './colors.js';
+import { c, link } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import {
   dotenvPromptProblem,
@@ -105,7 +105,7 @@ async function validateVultrToken(token) {
 export function displayApiTokenGuide(_projectName) {
   p.note(
     [
-      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://my.vultr.com/settings/#settingsapi')}`,
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline(link('https://my.vultr.com/settings/#settingsapi'))}`,
       `${c.dim('   └─')} ${c.dim('Or in the console: Account → API (under "Other").')}`,
       '',
       `${c.bold('2.')} Click ${c.boldCyan('Enable API')}, then copy the ${c.boldCyan('API Key')}`,
@@ -130,8 +130,8 @@ export function displayApiTokenGuide(_projectName) {
 export function displayS3CredentialsGuide(projectName) {
   p.note(
     [
-      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://my.vultr.com/objectstorage/')} ${c.dim('and click')} ${c.boldCyan('Create Object Storage')}`,
-      `${c.dim('   ├─')} Tier + location: ${c.dim('availability and price vary by location: see')} ${c.boldCyanUnderline('https://www.vultr.com/pricing/')}`,
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline(link('https://my.vultr.com/objectstorage/'))} ${c.dim('and click')} ${c.boldCyan('Create Object Storage')}`,
+      `${c.dim('   ├─')} Tier + location: ${c.dim('availability and price vary by location: see')} ${c.boldCyanUnderline(link('https://www.vultr.com/pricing/'))}`,
       `${c.dim('   ├─')} Name: ${c.info(`"${projectName || 'vibecarbon'}-s3"`)}`,
       `${c.dim('   └─')} ${c.boldYellow('Note:')} ${c.dim('each subscription bills a FLAT monthly fee, one is enough.')}`,
       '',

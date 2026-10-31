@@ -17,7 +17,7 @@ import * as p from '@clack/prompts';
 import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
-import { c } from './colors.js';
+import { c, link } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import {
   dotenvPromptProblem,
@@ -59,7 +59,7 @@ async function validateHetznerToken(token) {
 export function displayApiTokenGuide(projectName) {
   p.note(
     [
-      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://console.hetzner.cloud/projects')}`,
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline(link('https://console.hetzner.cloud/projects'))}`,
       `${c.dim('   └─')} Pick ${c.info(projectName || 'your-project')} ${c.dim('(or create it)')} → ${c.info('Security')} → ${c.info('API tokens')}`,
       '',
       `${c.bold('2.')} Click ${c.boldCyan('Generate API token')}`,
@@ -83,7 +83,7 @@ export function displayApiTokenGuide(projectName) {
 export function displayS3CredentialsGuide(projectName) {
   p.note(
     [
-      `${c.bold('1.')} Open: ${c.boldCyanUnderline('https://console.hetzner.cloud/projects')}`,
+      `${c.bold('1.')} Open: ${c.boldCyanUnderline(link('https://console.hetzner.cloud/projects'))}`,
       `${c.dim('   └─')} Pick ${c.info(projectName || 'your-project')} → ${c.info('Security')} → ${c.info('S3 credentials')}`,
       '',
       `${c.bold('2.')} Click ${c.boldCyan('Generate credentials')}`,
