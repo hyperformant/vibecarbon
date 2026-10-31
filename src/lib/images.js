@@ -164,7 +164,7 @@ export function localComposeEnv(base = process.env) {
 // `pnpm node:sync` rewrites the major (resetting to -r1, digest dropped) when
 // .nvmrc moves. `pnpm node-runtime:build-local` builds an unpublished tag into
 // the local Docker image store for testing.
-export const NODE_RUNTIME_IMAGE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1';
+export const NODE_RUNTIME_IMAGE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r2';
 
 // sha256 fingerprint of docker/node-runtime's inputs (every file there but
 // README.md; tests/unit/deploy/node-runtime-image-fingerprint.test.ts has the
@@ -172,7 +172,7 @@ export const NODE_RUNTIME_IMAGE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.
 // fails that test until the hash AND the -r revision move together (and the
 // carbon/Dockerfile copy with them).
 export const NODE_RUNTIME_INPUTS_SHA256 =
-  'fc728a693706c1c1a7c169f250c1699694138e1bb2d371e25cbc8bafd29637c7';
+  '6ed48efc09951538f09ee3bf9ab7638f2c9dceb6cf4a6ca455fafe1a252a824e';
 
 // Single source of truth for the pre-published carbon-autoscaler image
 // (src/autoscaler/). Built once per version by
@@ -541,9 +541,9 @@ export const DOCKER_SOCKET_PROXY_MIRROR = {
 export const ALPINE_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
   repo: 'library/alpine',
-  tag: '3.24.2',
-  digest: 'sha256:d56c381f961d307a21b3ca004cf1e3910f106644aefb1f43e654c8a56c4fd395',
-  index: 'sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6',
+  tag: '3.24.3',
+  digest: 'sha256:c26612752c78b18faacd63c7d50f4592c2e7b0f25e0e20e82bd74e465c57ab0d',
+  index: 'sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a',
 };
 /**
  * @type {MirroredImage} the k8s in-cluster registry

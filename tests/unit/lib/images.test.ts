@@ -12,7 +12,7 @@ describe('node runtime base image ref', () => {
   it('is the pre-published revision tag the app image builds FROM', () => {
     // The tag part; the post-publish commit appends @sha256 without moving it.
     expect(NODE_RUNTIME_IMAGE.split('@')[0]).toBe(
-      'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1',
+      'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r2',
     );
   });
   it('follows <node major>-alpine<alpine minor>-r<N>, optionally @sha256 once published', () => {
