@@ -19,6 +19,20 @@ export function parseLocalRegistryRef(ref) {
   return { host, repo, tag, repoTag: `${repo}:${tag}` };
 }
 
+/**
+ * The registry ref of an image the operator built locally (`<prefix>/<repo>:<tag>`,
+ * image.js generateLocalImageTag): the same repo and tag under the master's
+ * registry. The build runs before the cluster exists, so it cannot know the
+ * master's private IP (a real Pulumi output on DigitalOcean); deliverAppImage
+ * retags the built image with this once it does.
+ */
+export function registryImageTag(localTag, masterPrivateIp) {
+  if (!masterPrivateIp) throw new Error('masterPrivateIp is required');
+  const slash = String(localTag ?? '').indexOf('/');
+  if (slash < 1) throw new Error(`not a locally built image tag: ${localTag}`);
+  return `${masterPrivateIp}:5000/${localTag.slice(slash + 1)}`;
+}
+
 /** The primary's image ref re-prefixed for the standby master's registry. */
 export function standbyImageRef({ primaryRef, standbyMasterPrivateIp }) {
   if (!standbyMasterPrivateIp) throw new Error('standbyMasterPrivateIp is required');

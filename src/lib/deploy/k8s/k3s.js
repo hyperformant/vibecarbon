@@ -103,6 +103,7 @@ import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
   planImageDelivery,
+  registryImageTag,
   standbyImageRef,
 } from './image-delivery.js';
 import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
@@ -1481,19 +1482,15 @@ function loadEnvLocal(envPath) {
  *
  * Reuses the buildLocalImage primitive from src/lib/deploy/image.js, which
  * already handles git sha + dirty-state + timestamp. Tag scheme:
- * `<masterPrivateIp>:5000/<projectName>:<sha>[-dirty]-<utcTimestamp>`.
- *
- * The `<masterPrivateIp>:5000/` prefix points at the master's local OCI
- * registry pod (Phase 1's `registries.yaml` configures kubelet on every
- * node to resolve `<masterPrivateIp>:5000` → that pod). `masterPrivateIp`
- * defaults to Hetzner's static `10.0.1.1` (see hetzner-k8s.js) so every
- * pre-M3 caller keeps producing byte-identical tags; deployK3s threads the
- * real value from `infraOutputs.masterPrivateIp` (M3 — DO can't pin VPC
- * IPs the way Hetzner's program does). The same tag is used at every step
- * (build → delivery → Deployment): applyK3sManifests delivers it once, by
- * layer delta, into the master's containerd and pushes it into the master's
+ * `vibecarbon-local/<projectName>:<sha>[-dirty]-<utcTimestamp>`, for no
+ * particular cluster: the build starts before the cluster exists
+ * (startAppImageBuild), so it cannot know the master's private IP, a real
+ * Pulumi output on DigitalOcean. deliverAppImage then retags it
+ * `<masterPrivateIp>:5000/<projectName>:<same tag>` (registryImageTag), the
+ * ref used at every later step: applyK3sManifests delivers it once, by layer
+ * delta, into the master's containerd and pushes it into the master's
  * registry pod (deliverImage, layer-delta.js), and every other node, static
- * or cluster-autoscaler-spawned, pulls that tag from the registry through
+ * or cluster-autoscaler-spawned, pulls it from the registry through
  * `registries.yaml`.
  *
  * A k8s-ha standby never calls this: it receives the primary's tag, copied
@@ -1504,7 +1501,8 @@ function loadEnvLocal(envPath) {
  * @param {string} projectName
  * @param {boolean} [rebuild]
  * @param {string} [domain]
- * @param {string} [masterPrivateIp]
+ * @param {{quiet?: boolean}} [opts] - quiet: capture the build output (it
+ *   overlaps the provisioning spinner); a failure carries its tail.
  * @returns {Promise<{tag: string, gitSha: string, isDirty: boolean}>}
  */
 export async function buildAppImage(
@@ -1512,7 +1510,7 @@ export async function buildAppImage(
   projectName,
   rebuild = false,
   domain = undefined,
-  masterPrivateIp = '10.0.1.1',
+  { quiet = false } = {},
 ) {
   const { buildLocalImage } = await import('../image.js');
   // App image: collect VITE_* build args (incl. VITE_PUBLIC_URL rewritten to
@@ -1525,12 +1523,12 @@ export async function buildAppImage(
     const { collectComposeBuildArgs } = await import('../compose/build-args.js');
     buildArgs = collectComposeBuildArgs(projectDir, { projectName, domain });
   }
-  return await buildLocalImage(projectDir, {
-    projectName,
-    rebuild,
-    tagPrefix: `${masterPrivateIp}:5000`,
-    buildArgs,
-  });
+  return await buildLocalImage(projectDir, { projectName, rebuild, buildArgs, quiet });
+}
+
+/** Give a locally built image its registry name (a local `docker tag`, no copy). */
+async function tagLocalImage(source, target) {
+  await runCommandAsync(['docker', 'tag', source, target], { silent: true });
 }
 
 /**
@@ -4550,15 +4548,70 @@ export async function applyK3sManifests({
 }
 
 /**
+ * Start building the app image before the cluster is provisioned, so the build
+ * runs while Pulumi creates the servers instead of after k3s is Ready (DO e2e
+ * 2026-10-31: the up took 78 s, more than a cold build). The build needs
+ * nothing from the cluster: its tag names no registry until deliverAppImage
+ * retags it with the master's private IP.
+ *
+ * Returns the in-flight build, or null when this deploy will not build: a
+ * k8s-ha standby (it copies the primary's image), or a rerun whose `k3s-build`
+ * gate will skip, judged with the master IP the last provisioning recorded, so
+ * an unchanged redeploy builds nothing and leaves no stray local tag. A rerun
+ * the prediction misses still builds, after provisioning, in deliverAppImage.
+ * A failure is not reported here: deliverAppImage awaits the build and fails
+ * the deploy with it, at the point a serial build would have.
+ *
+ * @returns {Promise<{tag: string, gitSha: string, isDirty: boolean}>|null}
+ */
+export function startAppImageBuild({
+  role,
+  state,
+  projectDir,
+  projectName,
+  domain,
+  priorMasterPrivateIp,
+  perfPrefix = 'k3s',
+  deps = {},
+}) {
+  const d = { buildAppImage, buildK3sBuildInputs, ...deps };
+  if (!planImageDelivery({ role }).build) return null;
+  if (
+    priorMasterPrivateIp &&
+    state.shouldSkip(
+      'k3s-build',
+      d.buildK3sBuildInputs({
+        projectName,
+        domain,
+        masterPrivateIp: priorMasterPrivateIp,
+        projectDir,
+      }),
+    )
+  ) {
+    return null;
+  }
+  const build = perfAsync(`deploy.${perfPrefix}.image.localBuild`, () =>
+    d.buildAppImage(projectDir, projectName, false, domain, { quiet: true }),
+  );
+  // Awaited (and its failure thrown) by deliverAppImage; this only keeps a
+  // build that fails while Pulumi is still running from being an
+  // unhandledRejection before then.
+  build.catch(() => {});
+  return build;
+}
+
+/**
  * Build the app image this cluster will run, and return its tag.
  *
  * Single-cluster k8s and a k8s-ha primary build the image locally (the
- * `k3s-build` gate); applyK3sManifests then delivers it once into the
- * master's registry, which every node pulls from. A k8s-ha standby builds
- * nothing: it awaits the primary's built ref (`peerImageRef`),
- * which is copied into its own registry, and re-prefixes it for its own
- * master (`standbyImageRef`). `onImageBuilt` reports the built tag whether
- * the build gate ran or skipped, so a warm rerun still hands the standby a ref.
+ * `k3s-build` gate), usually by taking the build startAppImageBuild began
+ * before provisioning (`earlyBuild`), then name it for this cluster's
+ * registry (registryImageTag); applyK3sManifests then delivers it once into
+ * the master's registry, which every node pulls from. A k8s-ha standby builds
+ * nothing: it awaits the primary's built ref (`peerImageRef`), which is
+ * copied into its own registry, and re-prefixes it for its own master
+ * (`standbyImageRef`). `onImageBuilt` reports the built tag whether the build
+ * gate ran or skipped, so a warm rerun still hands the standby a ref.
  *
  * `deps` exists for tests: deployK3s can't be unit-driven and same-module
  * calls can't be mocked. The call stays spelled `d.buildAppImage(` so the
@@ -4575,10 +4628,11 @@ export async function deliverAppImage({
   projectName,
   domain,
   masterPrivateIp,
+  earlyBuild = null,
   spinner,
   deps = {},
 }) {
-  const d = { buildAppImage, buildK3sBuildInputs, ...deps };
+  const d = { buildAppImage, buildK3sBuildInputs, tagImage: tagLocalImage, ...deps };
   const plan = planImageDelivery({ role });
   if (plan.awaitPeerImage) {
     if (!peerImageRef) throw new Error('deployK3s: role standby requires peerImageRef');
@@ -4598,13 +4652,21 @@ export async function deliverAppImage({
     if (!state.shouldSkip('k3s-build', buildInputs)) {
       state.startStep('k3s-build', buildInputs);
       spinner.start(`Building app image (${masterPrivateIp}:5000/...)`);
-      const built = await d.buildAppImage(projectDir, projectName, false, domain, masterPrivateIp);
+      let built;
+      try {
+        built = await (earlyBuild ?? d.buildAppImage(projectDir, projectName, false, domain));
+      } catch (err) {
+        spinner.stop('App image build failed', 1);
+        throw err;
+      }
+      const tag = registryImageTag(built.tag, masterPrivateIp);
+      await d.tagImage(built.tag, tag);
       state.completeStep('k3s-build', {
-        tag: built.tag,
+        tag,
         gitSha: built.gitSha,
         isDirty: built.isDirty,
       });
-      spinner.stop(`Image built: ${built.tag}`);
+      spinner.stop(`Image built: ${tag}`);
     }
     ({ tag: imageTag } = state.getStepResult('k3s-build'));
     onImageBuilt?.(imageTag);
@@ -4783,6 +4845,20 @@ export async function deployK3s(options) {
     }
   }
   s.stop('Preflight OK');
+
+  // 1b. The app image build, started now so it runs while Pulumi provisions
+  //     the cluster (startAppImageBuild); deliverAppImage takes it below. The
+  //     master IP the last provisioning recorded lets an unchanged rerun skip
+  //     it, as its build gate will.
+  const earlyBuild = startAppImageBuild({
+    role: options.role,
+    state,
+    projectDir,
+    projectName: options.projectName,
+    domain: options.domain,
+    priorMasterPrivateIp: state.getStepResult('k3s-infra')?.masterPrivateIp,
+    perfPrefix,
+  });
 
   // 2. SSH key
   const { privateKeyPath, publicKey } = options.sharedSshKeyPath
@@ -5042,8 +5118,8 @@ export async function deployK3s(options) {
   // 5b. The cluster's restore marker decides what this deploy may do (a
   //     pending restore stops a plain deploy; a running database stops
   //     `deploy -restore`). Outside every step gate on purpose: a skipped
-  //     k3s-apply must not skip it. Before the image build, so a refusal
-  //     costs nothing.
+  //     k3s-apply must not skip it. Before the image is recorded or
+  //     delivered, so a refusal changes nothing on the cluster.
   {
     const kubeEnv = { ...process.env, KUBECONFIG: kubeconfig };
     await awaitControlPlaneServing({ env: kubeEnv });
@@ -5054,10 +5130,12 @@ export async function deployK3s(options) {
     });
   }
 
-  // 6-7. The app image: build it, or, on a k8s-ha standby, take the primary's
-  // ref (deliverAppImage). applyK3sManifests delivers a built one to the
-  // master's registry.
+  // 6-7. The app image: finish the build started before provisioning (or
+  // build it now), or, on a k8s-ha standby, take the primary's ref
+  // (deliverAppImage). applyK3sManifests delivers a built one to the master's
+  // registry.
   const imageTag = await deliverAppImage({
+    earlyBuild,
     role: options.role,
     peerImageRef: options.peerImageRef,
     onImageBuilt: options.onImageBuilt,

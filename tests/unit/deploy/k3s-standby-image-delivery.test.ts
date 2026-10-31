@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { deliverAppImage } from '../../../src/lib/deploy/k8s/k3s.js';
+import { deliverAppImage, startAppImageBuild } from '../../../src/lib/deploy/k8s/k3s.js';
 import { StateTracker } from '../../../src/lib/deploy/state.js';
 
 /**
@@ -16,11 +16,14 @@ import { StateTracker } from '../../../src/lib/deploy/state.js';
 function harness(role?: 'primary' | 'standby', extra: Record<string, unknown> = {}) {
   // StateTracker writes under process.cwd()/.vibecarbon (state.js:26).
   vi.spyOn(process, 'cwd').mockReturnValue(mkdtempSync(join(tmpdir(), 'vc-deliver-')));
+  // The build tags the image for no particular cluster; deliverAppImage
+  // retags it for the master's registry once the master's private IP is known.
   const buildAppImage = vi.fn(async () => ({
-    tag: '10.0.1.1:5000/quorum:built',
+    tag: 'vibecarbon-local/quorum:built',
     gitSha: 'abc',
     isDirty: false,
   }));
+  const tagImage = vi.fn(async () => {});
   const buildK3sBuildInputs = vi.fn(() => ({
     projectName: 'quorum',
     masterPrivateIp: '10.0.1.1',
@@ -37,10 +40,10 @@ function harness(role?: 'primary' | 'standby', extra: Record<string, unknown> = 
     masterPrivateIp: '10.0.1.1',
     perfPrefix: `k3s.${role ?? 'x'}`,
     spinner: { start() {}, stop() {} },
-    deps: { buildAppImage, buildK3sBuildInputs },
+    deps: { buildAppImage, buildK3sBuildInputs, tagImage },
     ...extra,
   };
-  return { args, buildAppImage, buildK3sBuildInputs, onImageBuilt };
+  return { args, buildAppImage, buildK3sBuildInputs, tagImage, onImageBuilt };
 }
 
 describe('deliverAppImage', () => {
@@ -110,5 +113,128 @@ describe('deliverAppImage', () => {
     const state = h.args.state as InstanceType<typeof StateTracker>;
     await deliverAppImage(h.args);
     expect(state.state.steps['k3s-sideload']).toBeUndefined();
+  });
+});
+
+/**
+ * The app image build runs on the operator's machine and needs nothing from
+ * the cluster but the master's private IP, which only names the registry the
+ * image is pushed to. So it starts before the cluster is provisioned, while
+ * Pulumi creates the servers (DO e2e 2026-10-31: it ran serially after k3s
+ * was Ready), and deliverAppImage retags it for the registry afterwards.
+ */
+describe('startAppImageBuild: the build overlaps provisioning', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const startArgs = (h: ReturnType<typeof harness>, extra: Record<string, unknown> = {}) => ({
+    role: h.args.role,
+    state: h.args.state,
+    projectDir: '/p',
+    projectName: 'quorum',
+    domain: 'q.example.test',
+    perfPrefix: 'k3s',
+    deps: h.args.deps,
+    ...extra,
+  });
+
+  it('cold deploy: starts the build at once, quietly, before any cluster exists', () => {
+    const h = harness('primary');
+    const build = startAppImageBuild(startArgs(h, { priorMasterPrivateIp: undefined }));
+    expect(build).toBeInstanceOf(Promise);
+    // Synchronously started: nothing has to settle first.
+    expect(h.buildAppImage).toHaveBeenCalledExactlyOnceWith(
+      '/p',
+      'quorum',
+      false,
+      'q.example.test',
+      {
+        quiet: true,
+      },
+    );
+  });
+
+  it('standby: starts nothing (it copies the primary image)', () => {
+    const h = harness('standby');
+    expect(startAppImageBuild(startArgs(h))).toBeNull();
+    expect(h.buildAppImage).not.toHaveBeenCalled();
+  });
+
+  it('warm rerun whose build gate will skip: starts nothing', async () => {
+    const h = harness('primary');
+    await deliverAppImage(h.args); // completes k3s-build under 10.0.1.1
+    h.buildAppImage.mockClear();
+    expect(startAppImageBuild(startArgs(h, { priorMasterPrivateIp: '10.0.1.1' }))).toBeNull();
+    expect(h.buildAppImage).not.toHaveBeenCalled();
+  });
+
+  it('warm rerun whose inputs changed: starts the build early too', async () => {
+    const h = harness('primary');
+    await deliverAppImage(h.args);
+    h.buildAppImage.mockClear();
+    h.buildK3sBuildInputs.mockReturnValue({
+      projectName: 'quorum',
+      masterPrivateIp: '10.0.1.1',
+      sourceDigest: 'changed',
+      buildArgsDigest: 'b',
+    });
+    expect(startAppImageBuild(startArgs(h, { priorMasterPrivateIp: '10.0.1.1' }))).not.toBeNull();
+    expect(h.buildAppImage).toHaveBeenCalledTimes(1);
+  });
+
+  it('a build that fails before anyone awaits it is not an unhandled rejection', async () => {
+    const h = harness('primary');
+    h.buildAppImage.mockRejectedValueOnce(new Error('docker build failed'));
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      startAppImageBuild(startArgs(h));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+});
+
+describe('deliverAppImage: takes the early build and retags it for the registry', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('uses the early build, builds nothing itself, and records the registry tag', async () => {
+    const h = harness('primary', { masterPrivateIp: '10.110.0.2' });
+    const earlyBuild = Promise.resolve({
+      tag: 'vibecarbon-local/quorum:early',
+      gitSha: 'abc',
+      isDirty: false,
+    });
+    await expect(deliverAppImage({ ...h.args, earlyBuild })).resolves.toBe(
+      '10.110.0.2:5000/quorum:early',
+    );
+    expect(h.buildAppImage).not.toHaveBeenCalled();
+    expect(h.tagImage).toHaveBeenCalledExactlyOnceWith(
+      'vibecarbon-local/quorum:early',
+      '10.110.0.2:5000/quorum:early',
+    );
+    expect(h.onImageBuilt).toHaveBeenCalledExactlyOnceWith('10.110.0.2:5000/quorum:early');
+  });
+
+  it('a failed early build fails the deploy loudly and records no build', async () => {
+    const h = harness('primary');
+    const earlyBuild = Promise.reject(new Error('buildLocalImage: docker build failed for x'));
+    earlyBuild.catch(() => {});
+    await expect(deliverAppImage({ ...h.args, earlyBuild })).rejects.toThrow(
+      'buildLocalImage: docker build failed for x',
+    );
+    expect(h.args.state.getStepResult('k3s-build')).toBeNull();
+    expect(h.tagImage).not.toHaveBeenCalled();
+  });
+
+  it('no early build: builds now and retags the same way', async () => {
+    const h = harness('primary');
+    await expect(deliverAppImage(h.args)).resolves.toBe('10.0.1.1:5000/quorum:built');
+    expect(h.buildAppImage).toHaveBeenCalledExactlyOnceWith('/p', 'quorum', false, undefined);
+    expect(h.tagImage).toHaveBeenCalledExactlyOnceWith(
+      'vibecarbon-local/quorum:built',
+      '10.0.1.1:5000/quorum:built',
+    );
   });
 });

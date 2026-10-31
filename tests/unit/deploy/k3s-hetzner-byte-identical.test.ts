@@ -51,8 +51,8 @@ const H = vi.hoisted(() => ({
 
 // buildAppImage delegates to buildLocalImage (src/lib/deploy/image.js) for
 // the actual `docker build` shell-out — mocked here so the pin exercises
-// ONLY buildAppImage's own contribution (the tagPrefix it constructs from
-// masterPrivateIp), without needing a real Dockerfile/docker daemon.
+// ONLY buildAppImage's own contribution (the options it passes), without
+// needing a real Dockerfile/docker daemon.
 vi.mock('../../../src/lib/deploy/image.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -60,7 +60,7 @@ vi.mock('../../../src/lib/deploy/image.js', async (orig) => {
     buildLocalImage: vi.fn(async (_projectDir: string, options: Record<string, unknown>) => {
       H.lastBuildLocalImageOptions = options;
       return {
-        tag: `${options.tagPrefix}/proj:abc1234-20260101000000`,
+        tag: `${options.tagPrefix ?? 'vibecarbon-local'}/proj:abc1234-20260101000000`,
         gitSha: 'abc1234',
         isDirty: false,
       };
@@ -119,15 +119,17 @@ describe('M3 Task 2 — Hetzner byte-identical pin', () => {
     expect(JSON.parse(expected).nodeGroups['worker-pool'].image).toBe('ubuntu-24.04');
   });
 
-  it('buildAppImage constructs the SAME 10.0.1.1:5000 registry-ref tagPrefix whether masterPrivateIp is passed explicitly or defaulted', async () => {
-    // No 5th arg — mirrors every pre-M3 call site (deployK3s now always
-    // passes one, but the default must still match).
-    await buildAppImage('/tmp/proj', 'proj', false, undefined);
-    expect(H.lastBuildLocalImageOptions?.tagPrefix).toBe('10.0.1.1:5000');
-
-    // Explicit Hetzner static — the value deployK3s now threads from
-    // infraOutputs.masterPrivateIp on a Hetzner deploy.
-    await buildAppImage('/tmp/proj', 'proj', false, undefined, '10.0.1.1');
-    expect(H.lastBuildLocalImageOptions?.tagPrefix).toBe('10.0.1.1:5000');
+  it('buildAppImage names no registry; the Hetzner registry ref is still 10.0.1.1:5000', async () => {
+    // The build now starts before the cluster exists, so it tags for no
+    // registry (buildLocalImage's vibecarbon-local default) and
+    // deliverAppImage retags it with the master's private IP. Hetzner's
+    // program exports the static 10.0.1.1, so the ref the pods run is the
+    // same bytes as before.
+    const built = await buildAppImage('/tmp/proj', 'proj', false, undefined);
+    expect(H.lastBuildLocalImageOptions?.tagPrefix).toBeUndefined();
+    const { registryImageTag } = await import('../../../src/lib/deploy/k8s/image-delivery.js');
+    expect(registryImageTag(built.tag, '10.0.1.1')).toBe(
+      '10.0.1.1:5000/proj:abc1234-20260101000000',
+    );
   });
 });

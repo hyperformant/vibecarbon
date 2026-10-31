@@ -101,11 +101,11 @@ export function inspectGitState(cwd) {
  * pod (Phase 1 wired the registries.yaml; Phase 6 wires the push).
  *
  * @param {string} projectDir - Project root with the Dockerfile.
- * @param {{projectName: string, timestamp?: string, rebuild?: boolean, tagPrefix?: string, buildArgs?: Record<string,string>}} options
+ * @param {{projectName: string, timestamp?: string, rebuild?: boolean, tagPrefix?: string, buildArgs?: Record<string,string>, quiet?: boolean}} options
  * @returns {Promise<{tag: string, gitSha: string, isDirty: boolean}>}
  */
 export async function buildLocalImage(projectDir, options) {
-  const { projectName, rebuild = false, tagPrefix, buildArgs = {} } = options;
+  const { projectName, rebuild = false, tagPrefix, buildArgs = {}, quiet = false } = options;
   if (!projectName) {
     throw new Error('buildLocalImage: projectName is required');
   }
@@ -136,6 +136,22 @@ export async function buildLocalImage(projectDir, options) {
   }
   args.push('-t', tag, projectDir);
 
+  // quiet: the build runs while something else owns the terminal (the k8s
+  // build overlaps Pulumi's spinner), so its output is captured, and a failure
+  // carries its last lines instead of losing them.
+  if (quiet) {
+    try {
+      await runCommandAsync(['docker', ...args], { silent: true });
+    } catch (err) {
+      const detail = `${err?.stderr || ''}${err?.stdout || ''}`.trim();
+      throw new Error(
+        `buildLocalImage: docker build failed for ${tag}. ${AMD64_BUILD_HINT}` +
+          (detail ? `\n${detail.split('\n').slice(-40).join('\n')}` : ''),
+        { cause: err },
+      );
+    }
+    return { tag, gitSha, isDirty };
+  }
   // silent: false (the default) inherits stdio so the operator sees layer
   // progress — but runCommandAsync only *rejects* on nonzero exit when
   // silent:true; with inherited stdio it resolves `false` instead (see
