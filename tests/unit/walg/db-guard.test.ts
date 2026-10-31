@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 /**
@@ -12,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
  * it refuses and says what to do. Otherwise it hands over to the image's own
  * db-entrypoint.sh unchanged.
  */
-const GUARD = join(process.cwd(), 'carbon/volumes/db/db-guard.sh');
+const GUARD = fileURLToPath(new URL('../../../carbon/volumes/db/db-guard.sh', import.meta.url));
 
 let dir: string;
 let pgdata: string;

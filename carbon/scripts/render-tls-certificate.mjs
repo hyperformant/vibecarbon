@@ -48,22 +48,35 @@ const DNS_NAME = /^(\*\.)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-
  *
  * @param {{ dnsNames: string[], issuerName: string, effectiveIssuer: string }} tls
  */
+/**
+ * An invalid setting. `summary` names the variable without echoing its value,
+ * for the workflow log; `message` keeps the value for callers that show it.
+ */
+function invalid(field, message) {
+  return Object.assign(new Error(message), { summary: `${field} is not valid.` });
+}
+
 export function validateTlsCertificate({ dnsNames, issuerName, effectiveIssuer }) {
   if (!Array.isArray(dnsNames) || dnsNames.length === 0) {
-    throw new Error('the TLS Certificate dnsNames is empty');
+    throw invalid('TLS_CERT_DNS_NAMES', 'the TLS Certificate dnsNames is empty');
   }
   for (const name of dnsNames) {
     if (typeof name !== 'string' || name.length > 253 || !DNS_NAME.test(name)) {
-      throw new Error(`the TLS Certificate DNS name ${JSON.stringify(name)} is not a DNS name`);
+      throw invalid(
+        'TLS_CERT_DNS_NAMES',
+        `the TLS Certificate DNS name ${JSON.stringify(name)} is not a DNS name`,
+      );
     }
   }
   if (!ACME_ISSUER.test(String(issuerName ?? ''))) {
-    throw new Error(
+    throw invalid(
+      'TLS_CERT_ISSUER',
       `the TLS Certificate issuer ${JSON.stringify(issuerName ?? null)} is not a letsencrypt-<stage>-<provider> ClusterIssuer`,
     );
   }
   if (effectiveIssuer !== issuerName && effectiveIssuer !== STANDBY_SELFSIGNED_ISSUER) {
-    throw new Error(
+    throw invalid(
+      'TLS_CERT_EFFECTIVE_ISSUER',
       `the TLS Certificate effective issuer ${JSON.stringify(effectiveIssuer ?? null)} is neither the ACME issuer nor ${STANDBY_SELFSIGNED_ISSUER}`,
     );
   }
@@ -115,9 +128,9 @@ export function tlsCertificateVars(tls) {
 export function tlsCertificateFromVars(env) {
   const { TLS_CERT_ISSUER, TLS_CERT_EFFECTIVE_ISSUER, TLS_CERT_DNS_NAMES } = env;
   if (!TLS_CERT_ISSUER || !TLS_CERT_EFFECTIVE_ISSUER || !TLS_CERT_DNS_NAMES) {
-    throw new Error(
-      'TLS_CERT_ISSUER, TLS_CERT_EFFECTIVE_ISSUER and TLS_CERT_DNS_NAMES are not set for this environment.',
-    );
+    const missing =
+      'TLS_CERT_ISSUER, TLS_CERT_EFFECTIVE_ISSUER and TLS_CERT_DNS_NAMES are not set for this environment.';
+    throw Object.assign(new Error(missing), { summary: missing });
   }
   return validateTlsCertificate({
     dnsNames: TLS_CERT_DNS_NAMES.split(','),
@@ -130,8 +143,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     process.stdout.write(renderTlsCertificateManifest(tlsCertificateFromVars(process.env)));
   } catch (err) {
+    // Name the variable, never its value: these come from the workflow's
+    // environment, and CI logs are wider-read than the settings themselves.
+    const what = err?.summary ?? 'The TLS Certificate settings are not valid.';
     console.error(
-      `${err.message} Run \`vibecarbon configure cicd <env>\` from the project to seed them, then re-run this workflow.`,
+      `${what} Run \`vibecarbon configure cicd <env>\` from the project to seed them, then re-run this workflow.`,
     );
     process.exit(1);
   }
