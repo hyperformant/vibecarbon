@@ -12,7 +12,7 @@ describe('node runtime base image ref', () => {
   it('is the pre-published revision tag the app image builds FROM', () => {
     // The tag part; the post-publish commit appends @sha256 without moving it.
     expect(NODE_RUNTIME_IMAGE.split('@')[0]).toBe(
-      'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1',
+      'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r2',
     );
   });
   it('follows <node major>-alpine<alpine minor>-r<N>, optionally @sha256 once published', () => {
@@ -27,8 +27,8 @@ describe('node runtime base image ref', () => {
 describe('db image ref', () => {
   it('is the pre-published multi-arch tag (no project/sha/timestamp)', () => {
     expect(DB_IMAGE).toBe('ghcr.io/hyperformant/postgres');
-    expect(DB_IMAGE_TAG).toBe('17.11-walg3.0.9-r2');
-    expect(dbImageRef()).toBe('ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r2');
+    expect(DB_IMAGE_TAG).toBe('17.11-walg3.0.9-r3');
+    expect(dbImageRef()).toBe('ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r3');
   });
   it('ref is stable — never per-deploy unique', () => {
     expect(dbImageRef()).toBe(dbImageRef());

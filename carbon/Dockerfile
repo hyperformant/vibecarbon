@@ -14,7 +14,7 @@ ARG NODE_IMAGE=node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b
 # so a server pulls it from the registry once and a deploy ships only the
 # layers below that are this app's own. Written by vibecarbon, and the one
 # place the CLI looks for the base a deploy can pre-pull on a server.
-ARG RUNTIME_IMAGE=ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1
+ARG RUNTIME_IMAGE=ghcr.io/hyperformant/node-runtime:24-alpine3.24-r2@sha256:83cfe107168c1a63deb63dbedb5947ba473cb00142d242a1bce0218dbdc14646
 
 # Base image can be overridden for Turbo Layer Caching
 # Default is the standard node image

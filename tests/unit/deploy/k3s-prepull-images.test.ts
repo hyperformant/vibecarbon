@@ -155,7 +155,7 @@ describe('deployK3s wiring', () => {
  * app's own layers. Inspect first, so a warm master asks no registry.
  */
 describe('pullK3sRuntimeBase', () => {
-  const BASE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r1';
+  const BASE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r2';
   let dir = '';
   afterEach(() => {
     if (dir) rmSync(dir, { recursive: true, force: true });
