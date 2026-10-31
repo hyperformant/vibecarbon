@@ -190,7 +190,7 @@ describe('vibecarbon activate', () => {
       expect(r.exitCode).toBe(1);
       const out = `${r.stdout}\n${r.stderr}`;
       expect(out).toContain('Error: This key is already bound to another project.');
-      expect(out).toContain('Run vibecarbon deactivate in that project');
+      expect(out).toContain('Run `vibecarbon deactivate` in that project');
       expect(existsSync(licenseFile)).toBe(false);
       // A refused bind must not have moved the binding.
       expect(s.state.get(licenseId)?.projectId).toBe(OTHER_PROJECT_ID);
