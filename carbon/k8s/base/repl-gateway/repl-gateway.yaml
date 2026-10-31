@@ -29,8 +29,8 @@
 # immutable spec forced a delete-and-recreate on every role-swapped redeploy.
 # The controller recreates the pod, and a changed relay direction rolls through
 # a plain `kubectl apply`. `Recreate`, never a surge: two hostNetwork relays on
-# one node cannot both bind the gateway port. The pod spec is unchanged;
-# hostNetwork and the primary's relay to 127.0.0.1:5433 stay (#234 bound the db
+# one node cannot both bind the gateway port. The pod runs under a
+# locked-down securityContext; hostNetwork and the primary's relay to 127.0.0.1:5433 stay (#234 bound the db
 # hostPort to loopback, and this gateway is its only consumer).
 apiVersion: apps/v1
 kind: Deployment
@@ -79,6 +79,13 @@ spec:
           # The image ENTRYPOINT is `socat`; args are its two address specs.
           image: alpine/socat:1.8.1.3@sha256:fb3862c949af7c79996d0e514ee96128644d840835ed5368eeecb14a869de361
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           args:
             - "__RELAY_LISTEN__"
             - "__RELAY_TARGET__"

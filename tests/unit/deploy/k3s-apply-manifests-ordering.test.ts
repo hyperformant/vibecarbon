@@ -381,7 +381,6 @@ function baseArgs(projectDir: string) {
     masterIp: '1.2.3.4',
     sshKeyPath: '/tmp/key',
     khPath: join(projectDir, 'known_hosts'),
-    localTunnelPort: 5000,
     perfPrefix: 'k3s',
   };
 }
@@ -801,13 +800,14 @@ describe('applyK3sManifests pilot-standby role', () => {
     // The db itself still comes up (a streaming replica) and is waited on.
     expect(cmdCalls.some(isDbRolloutWait)).toBe(true);
 
-    // Registry wait + push stay: failover pulls the app image from it.
+    // The registry wait stays (the primary's image is copied into it); the
+    // standby pushes nothing of its own — see the image-delivery cases below.
     expect(
       cmdCalls.some(
         (a) => a[0] === 'kubectl' && a.includes('wait') && a.includes('app=local-registry'),
       ),
     ).toBe(true);
-    expect(cmdCalls.some((a) => a[0] === 'docker' && a.includes('push'))).toBe(true);
+    expect(cmdCalls.some((a) => a[0] === 'docker' && a.includes('push'))).toBe(false);
 
     // Observability follows the app tier — zeroed on the standby (I6). Even
     // though the observability dir exists, the role gate skips its apply.
@@ -1074,6 +1074,56 @@ describe('applyK3sManifests pilot-standby role', () => {
       // present on other distros) would strand the pinned pods
       expect(cmdCalls[idx].some((s) => s.includes('NoSchedule'))).toBe(true);
     }
+  });
+});
+
+describe('applyK3sManifests image delivery by role', () => {
+  // A k8s-ha standby receives the primary's image by copy into its registry,
+  // so it never opens a push tunnel; the primary pushes exactly as before.
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    pushGate = null;
+    pushExit = { code: 0, stderr: '' };
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    installSpawnMock();
+  });
+
+  const dockerPushes = () => cmdCalls.filter((a) => a[0] === 'docker' && a[1] === 'push');
+  const sshTunnels = () => cmdCalls.filter((a) => a[0] === 'ssh' && a.includes('-L'));
+
+  it('standby: no docker push, no ssh -L tunnel, registry still waited, app patched to imageTag', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const args = { ...baseArgs(makeProjectDir()), role: 'standby' };
+    await applyK3sManifests(args);
+    expect(dockerPushes()).toEqual([]);
+    expect(sshTunnels()).toEqual([]);
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('wait') &&
+          a.includes('--for=condition=Ready') &&
+          a.includes('app=local-registry'),
+      ),
+    ).toBe(true);
+    const patch = cmdCalls.find(
+      (a) => a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app'),
+    );
+    expect(patch).toBeDefined();
+    const body = JSON.parse(String(patch?.[(patch?.indexOf('-p') ?? -2) + 1]));
+    expect(body.spec.template.spec.containers[0].image).toBe(args.imageTag);
+    expect(body.spec.template.spec.initContainers[0].image).toBe(args.imageTag);
+  });
+
+  it('primary: the docker push is spawned as before', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const args = { ...baseArgs(makeProjectDir()), role: 'primary' };
+    await applyK3sManifests(args);
+    expect(dockerPushes()).toHaveLength(1);
+    expect(sshTunnels()).toHaveLength(1);
   });
 });
 

@@ -600,9 +600,9 @@ describe('k8s audit is NOT behind the persisted k3s-apply skip gate', () => {
     'utf-8',
   );
 
-  /** Source span of the `if (!state.shouldSkip('k3s-apply', …)) { … }` block. */
+  /** Source span of the `if (!skipApply) { … }` block (skipApply = shouldSkipK3sApply). */
   function applyGateBlock(): string {
-    const gateStart = SRC.indexOf("if (!state.shouldSkip('k3s-apply'");
+    const gateStart = SRC.indexOf('if (!skipApply) {');
     expect(gateStart, 'the k3s-apply gate must still exist').toBeGreaterThan(-1);
     const open = SRC.indexOf('{', gateStart);
     let depth = 0;

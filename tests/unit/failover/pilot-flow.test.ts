@@ -531,6 +531,8 @@ async function runFailoverHA(opts: RunOpts) {
     identify: () => servers,
     getKeyPath: () => '/fake/key',
     keyExists: () => true,
+    // The live standby image check (standby-image-precheck.test.ts): present.
+    assertStandbyImage: async () => 'sha256:aa',
     preflight: async () => {
       order.push('preflight');
       return {

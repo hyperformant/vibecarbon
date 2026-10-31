@@ -23,6 +23,12 @@ vi.mock('../../../src/lib/deploy/k8s/ha/index.js', async (importOriginal) => ({
   setupReplication: vi.fn(),
 }));
 
+// The standby image copy runs once the transport is up; stubbed so no test
+// reaches the real ssh copy.
+vi.mock('../../../src/lib/deploy/k8s/ha/image-copy.js', () => ({
+  copyAppImageToStandby: vi.fn(async () => ({ digest: 'sha256:aa', skipped: true })),
+}));
+
 const { setupReplication } = await import('../../../src/lib/deploy/k8s/ha/index.js');
 const { K8S_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/k8s-ha.js');
 const { haSeedRecord } = await import('../../../src/lib/deploy/failover-guard.js');

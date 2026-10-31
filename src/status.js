@@ -25,6 +25,7 @@ import { storageAccessLine, unfencedBucketsLine } from './lib/deploy/app-storage
 import { backupFenceRow } from './lib/deploy/backup-fence.js';
 import { settleWindowFor, storageSettleStatus } from './lib/deploy/bucket-settle.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
+import { DEGRADED_CAUSE } from './lib/deploy/env-safety-fields.js';
 import { operatorCheckEnvs } from './lib/deploy/preflight.js';
 import {
   buildPrimaryLagQuery,
@@ -441,6 +442,22 @@ export function writeFenceRow(envConfig, replication, envName) {
       ? `a compose scale stopped mid-cutover; rerun vibecarbon scale${envName ? ` ${envName}` : ''} to finish or roll it back`
       : 'an interrupted failover or scale left it; vibecarbon deploy lifts it';
   return `database write-fenced: the primary refuses writes (${why})`;
+}
+
+/**
+ * The standby image row: shown when the last k8s-ha deploy finished under
+ * -allow-degraded without copying the app image to the standby. Null otherwise.
+ *
+ * @param {object} envConfig
+ * @param {string} [envName] for the repair command
+ * @returns {string|null}
+ */
+export function standbyImageRow(envConfig, envName) {
+  if (envConfig?.degradedCause !== DEGRADED_CAUSE.STANDBY_IMAGE_MISSING) return null;
+  return (
+    'app image missing on the standby: failover refuses it until ' +
+    `vibecarbon deploy${envName ? ` ${envName}` : ''} copies it`
+  );
 }
 
 /**
@@ -1363,6 +1380,9 @@ function renderEnvironment(envName, envConfig, checks) {
         lines.push(`${c.dim('Repl. Slot')}     ${paint(slotRow.text)}`);
       }
     }
+
+    const imageRow = standbyImageRow(envConfig, envName);
+    if (imageRow) lines.push(`${c.dim('Standby image')}  ${c.error(imageRow)}`);
 
     for (const [name, reason] of Object.entries(checks.checkErrors || {})) {
       lines.push(`${c.dim('Check failed')}   ${c.error(`${name}: ${reason}`)}`);

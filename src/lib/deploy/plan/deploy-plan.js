@@ -18,6 +18,7 @@ import {
   haConfigureReplicationStep,
   haFinalizeConfigStep,
   haK8sConfigureReplicationStep,
+  haK8sCopyStandbyImageStep,
   haK8sFinalizeStep,
   haK8sGenerateSshKeyStep,
   haK8sOpenReplicationFirewallStep,
@@ -139,6 +140,7 @@ export function planDeploy(tier, _config) {
       haK8sOpenReplicationFirewallStep(),
       haK8sConfigureReplicationStep(),
       haK8sVerifyStreamingStep(),
+      haK8sCopyStandbyImageStep(),
       haK8sUpdateDnsStep(),
       haK8sFinalizeStep(),
     ];

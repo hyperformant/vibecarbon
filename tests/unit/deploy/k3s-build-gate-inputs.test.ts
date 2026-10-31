@@ -345,27 +345,43 @@ describe('a source change cascades build → sideload → apply', () => {
 describe('deployK3s wires the content-aware gate end to end', () => {
   const K3S_SRC = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8') as string;
   const deployBody = K3S_SRC.slice(K3S_SRC.indexOf('export async function deployK3s('));
+  // The build + sideload gates live in deliverAppImage, which deployK3s calls.
+  const deliverBody = K3S_SRC.slice(
+    K3S_SRC.indexOf('export async function deliverAppImage('),
+    K3S_SRC.indexOf('export async function deployK3s('),
+  );
 
   it('feeds buildK3sBuildInputs into the k3s-build skip-gate', () => {
     expect(deployBody.indexOf('export async function deployK3s(')).toBe(0);
-    const gateCall = deployBody.slice(deployBody.indexOf('const buildInputs ='));
-    const call = gateCall.slice(0, gateCall.indexOf('});'));
-    expect(call).toContain('buildK3sBuildInputs({');
+    expect(deliverBody.indexOf('export async function deliverAppImage(')).toBe(0);
+    // deployK3s no longer hashes the source: a standby builds nothing, so the
+    // inputs are computed inside deliverAppImage's build branch.
+    expect(deployBody).not.toContain('buildK3sBuildInputs(');
+    const buildBranch = deliverBody.slice(deliverBody.indexOf('if (plan.build) {'));
+    const call = buildBranch.slice(0, buildBranch.indexOf('});'));
+    expect(call).toContain('d.buildK3sBuildInputs({');
     // The digest is computed FROM the tree the build is handed — the same
-    // `projectDir` that reaches buildAppImage two lines later.
+    // `projectDir` that deliverAppImage hands buildAppImage.
     expect(call).toContain('projectDir');
-    expect(gateCall).toContain("state.shouldSkip('k3s-build', buildInputs)");
+    expect(deliverBody.indexOf('d.buildK3sBuildInputs(')).toBeGreaterThan(
+      deliverBody.indexOf('plan.awaitPeerImage'),
+    );
+    const deliverCall = deployBody.slice(deployBody.indexOf('await deliverAppImage({'));
+    const deliverArgs = deliverCall.slice(0, deliverCall.indexOf('});'));
+    expect(deliverArgs).toContain('projectDir,');
+    expect(deliverBody).toContain("state.shouldSkip('k3s-build', buildInputs)");
   });
 
   it('keeps the cascade: the build’s tag is what both downstream gates key on', () => {
     // If any of these three shapes drift, a busted build digest stops
     // propagating and the fix silently reverts to shipping a stale image.
-    const chain = deployBody.slice(deployBody.indexOf("state.completeStep('k3s-build'"));
-    expect(chain).toContain("const { tag: imageTag } = state.getStepResult('k3s-build')");
+    const chain = deliverBody.slice(deliverBody.indexOf("state.completeStep('k3s-build'"));
+    expect(chain).toContain("({ tag: imageTag } = state.getStepResult('k3s-build'))");
     expect(chain.slice(0, chain.indexOf("shouldSkip('k3s-sideload'"))).toContain(
       'const sideloadInputs = { imageTag,',
     );
-    const applyCall = chain.slice(chain.indexOf('buildK3sApplyInputs({'));
+    expect(deployBody).toContain('const imageTag = await deliverAppImage({');
+    const applyCall = deployBody.slice(deployBody.indexOf('buildK3sApplyInputs({'));
     expect(applyCall.slice(0, applyCall.indexOf('});'))).toContain('imageTag,');
   });
 });

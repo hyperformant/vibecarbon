@@ -1,0 +1,70 @@
+# =============================================================================
+# VIBECARBON REGISTRY RELAY (HA k8s only, per standby image copy)
+# =============================================================================
+# The standby cluster pulls the app image from the primary's in-cluster
+# registry over WireGuard. The registry hostPort is bound to the primary
+# master's private IP (never wg0), so this short-lived socat relay bridges the
+# tunnel to it:
+#
+#   standby image copy ──tcp 10.99.0.1:15000──► registry-relay (this pod, wg0 only)
+#                                                  └─ socat → <primary master private IP>:5000
+#
+# It listens ONLY on the wg0 address and admits ONLY the standby's tunnel IP
+# (socat `range=`), so the unauthenticated registry is reachable by nothing but
+# the peer cluster, and only for the length of the copy.
+#
+# It is applied after wg0 is up and deleted when the copy ends, by
+# withRegistryRelay (src/lib/deploy/k8s/ha/index.js). It is NOT in any
+# kustomization, and never part of repl-gateway: a spec change to that
+# Deployment would roll the replication relay.
+#
+# A bare Pod with restartPolicy: Never: a relay that dies mid-copy fails the
+# copy loudly instead of coming back. hostNetwork shares the host netns so
+# socat binds wg0 and reaches the node's private IP; host-network pods are
+# outside pod NetworkPolicy, and the pod needs no extra capabilities.
+#
+# Placeholders (rendered by renderRegistryRelayManifest, never at runtime):
+#   __RELAY_LISTEN__   socat listen spec (wg0 address, standby-only range)
+#   __RELAY_TARGET__   socat target (primary master private IP : registry port)
+# =============================================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: registry-relay
+  namespace: vibecarbon
+  labels:
+    app: registry-relay
+spec:
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: db
+      effect: NoSchedule
+  nodeSelector:
+    dedicated: db
+  restartPolicy: Never
+  containers:
+    - name: relay
+      # Same pinned image as repl-gateway. The ENTRYPOINT is `socat`; args are
+      # its two address specs.
+      image: alpine/socat:1.8.1.3@sha256:fb3862c949af7c79996d0e514ee96128644d840835ed5368eeecb14a869de361
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      args:
+        - "__RELAY_LISTEN__"
+        - "__RELAY_TARGET__"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 250m
+          memory: 64Mi

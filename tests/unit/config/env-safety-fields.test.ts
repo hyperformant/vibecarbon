@@ -97,9 +97,15 @@ describe('preserveSafetyFields', () => {
 });
 
 describe("the deploy's final write", () => {
-  it('owns replication and the standby proof only on an HA deploy, and the lineage always', () => {
+  it('owns replication, its degraded cause and the standby proof only on an HA deploy, and the lineage always', () => {
     expect(finalSaveSafetyOwns(true).sort()).toEqual(
-      ['backup.unrestoredPrior', 'degraded', 'ha.systemIdentifier', 'replication'].sort(),
+      [
+        'backup.unrestoredPrior',
+        'degraded',
+        'degradedCause',
+        'ha.systemIdentifier',
+        'replication',
+      ].sort(),
     );
     expect(finalSaveSafetyOwns(false)).toEqual(['backup.unrestoredPrior']);
     for (const f of [...finalSaveSafetyOwns(true), ...finalSaveSafetyOwns(false)]) {

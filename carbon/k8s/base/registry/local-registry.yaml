@@ -50,9 +50,11 @@ spec:
           image: registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
           # ROOT FIX (2026-08-30, run 33332292268): image layers live on the
           # MASTER NODE DISK, never object storage. The registry is a
-          # transport cache — every deploy (each k8s-ha cluster separately,
-          # every restore re-deploy) builds and pushes its own image, and
-          # nodes pull through this pod regardless of backend — so the old S3
+          # transport cache — every deploy builds and pushes the image to the
+          # primary cluster (the k8s-ha standby instead receives it from the
+          # primary's registry over wg0, via registry-relay, and a replaced
+          # master is refilled by the next deploy), and nodes pull through
+          # this pod regardless of backend — so the old S3
           # backend bought no durability anyone consumed while coupling every
           # k8s deploy to the one backend with documented read-after-write
           # weather ("s3aws: NoSuchBucket" completing an upload mid-push →
