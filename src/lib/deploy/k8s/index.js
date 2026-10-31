@@ -75,7 +75,9 @@ export async function destroyK8s(options) {
     return result;
   } catch (error) {
     s.stop('Destruction failed');
-    p.log.error(error.message);
+    // destroyStack's error is a one-line summary that names what is left; the
+    // full Pulumi output rides on `cause`, and the log is where it belongs.
+    p.log.error(error.cause instanceof Error ? error.cause.message : error.message);
     throw error;
   }
 }

@@ -944,10 +944,20 @@ export async function destroyStack(stackName, program, options = {}) {
     /* unknown — skip the cross-check, still rely on result.summary.result */
   }
 
-  const result = await withStateBackendRetry(
-    () => stack.destroy({ onOutput: options.onOutput, color: 'never' }),
-    'destroy',
-  );
+  // continueOnError: without it Pulumi stops scheduling deletes at the first
+  // resource error, so one failed Droplet strands every unrelated resource
+  // in the stack (d4-standby, 2026-10-31: "1 deleted, 2 errored", master,
+  // reserved IP, firewall and VPC never attempted). With it, everything that
+  // does not depend on the failed resource is still deleted.
+  let result;
+  try {
+    result = await withStateBackendRetry(
+      () => stack.destroy({ onOutput: options.onOutput, color: 'never', continueOnError: true }),
+      'destroy',
+    );
+  } catch (err) {
+    throw await describeDestroyFailure(stack, stackName, err);
+  }
 
   if (result.summary?.result && result.summary.result !== 'succeeded') {
     throw new Error(
@@ -969,6 +979,76 @@ export async function destroyStack(stackName, program, options = {}) {
 
   await stack.workspace.removeStack(stackName);
   return { destroyed: true, resourceCount: resourceCountBefore ?? deleteCount };
+}
+
+/**
+ * The provider's own complaint out of a failed `pulumi destroy`'s output.
+ *
+ * The Automation API error is the whole command envelope, and the generic
+ * summarizer picks its first `error:` line, which for a destroy is the
+ * stack's `error: update failed`: true, and useless to an operator. The
+ * resource diagnostic below it is what says why. Falls back to the first
+ * line of anything that is not a Pulumi diagnostic.
+ *
+ * @param {string} message
+ * @returns {string}
+ */
+export function pulumiDestroyFailureCause(message) {
+  const lines = String(message ?? '').split('\n');
+  for (const line of lines) {
+    const m = /^\s*(?:\*\s|error:\s)\s*(.+)$/.exec(line);
+    if (!m) continue;
+    const text = m[1]
+      .replace(/^sdk-v2\/\S+:\s*/, '')
+      .replace(/^sdk\.helper_schema:\s*/, '')
+      .trim();
+    if (!text || /^update failed$/i.test(text) || /^deleting urn:/i.test(text)) continue;
+    return text;
+  }
+  return lines.find((l) => l.trim())?.trim() ?? '';
+}
+
+/**
+ * Turn a failed destroy into an error that names what is left: every
+ * resource still in the stack's state (read back after the failure), and
+ * the provider's actual complaint. The original error rides along as
+ * `cause` for the log. Reading the state back is best-effort: an
+ * unreadable state yields `remainingResources: null`, which the caller
+ * reports as "the whole stack is unverified".
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {string} stackName
+ * @param {unknown} err
+ * @returns {Promise<Error & { remainingResources: Array<{type: string, logicalName: string, name: string|null, id: string|null}>|null }>}
+ */
+async function describeDestroyFailure(stack, stackName, err) {
+  const original = err instanceof Error ? err : new Error(String(err));
+  let remainingResources = null;
+  try {
+    const state = await stack.exportStack();
+    remainingResources = (state?.deployment?.resources ?? [])
+      .filter((r) => r?.type && r.type !== 'pulumi:pulumi:Stack' && !r.type.startsWith('pulumi:'))
+      .map((r) => ({
+        type: r.type,
+        logicalName: String(r.urn ?? '')
+          .split('::')
+          .pop(),
+        name: r.outputs?.name ?? null,
+        id: r.id ?? null,
+      }));
+  } catch {
+    /* state unreadable: the caller treats the whole stack as unverified */
+  }
+  const cause = pulumiDestroyFailureCause(original.message);
+  const left =
+    remainingResources === null
+      ? 'its remaining resources could not be read back'
+      : `${remainingResources.length} resource(s) remain in its state`;
+  const error = new Error(`pulumi destroy for stack "${stackName}" failed, ${left}: ${cause}`, {
+    cause: original,
+  });
+  error.remainingResources = remainingResources;
+  return error;
 }
 
 /**
