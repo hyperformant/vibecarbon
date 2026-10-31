@@ -1054,28 +1054,33 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
  * `--policy missing` stays: warm nodes must not re-download ~2GB.
  * Pinned by tests/unit/deploy/pull-images-loud.test.ts.
  */
+/**
+ * The remote stack pull: every service EXCEPT those that run the app's image.
+ * prod.yml resets the app's `build:` (`build: !reset null`), so
+ * `--ignore-buildable` does NOT skip it, and `compose pull` ignores
+ * `pull_policy: never`; its image is a local-only tag no registry serves. The
+ * first loud run (linode 32640636398) showed what that does to a plain
+ * `compose pull`: `pull access denied for <project>-app` ABORTS the whole
+ * command and every sibling image logs `Interrupted`. Excluding by NAME broke
+ * again when app-migrate (#234) began running the same image (every compose-ha
+ * deploy, DO e2e 2026-10-31), so the filter is by IMAGE: a service whose
+ * `config --images` equals app's is never pulled, whatever it is called.
+ * Exported for tests/unit/deploy/pull-images-loud.test.ts, which runs it.
+ */
+export function stackPullCommand(remoteDir, flags) {
+  return (
+    `cd ${remoteDir} && app_image=$(docker compose ${flags} config --images app) && ` +
+    `docker compose ${flags} config --services | while read -r svc; do ` +
+    `[ "$(docker compose ${flags} config --images "$svc")" = "$app_image" ] || echo "$svc"; done | ` +
+    `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`
+  );
+}
+
 export async function pullComposeImages(ip, sshKeyPath, projectName, options = {}) {
   const remoteDir = `/opt/${projectName}`;
   const flags = composeFileFlags(options);
-  // The app service must be EXCLUDED from the pre-pull. prod.yml resets its
-  // `build:` (`build: !reset null`), so `--ignore-buildable` does NOT skip it
-  // — and its image is a local-only tag that no registry serves. The first
-  // loud run (linode 32640636398) showed what that does to a plain
-  // `compose pull`: `pull access denied for <project>-app` ABORTS the whole
-  // command and every sibling image logs `Interrupted` — fifteen of them.
-  // The old silencers had been eating exactly this on every compose-ha
-  // deploy, leaving nodes to pull ad-hoc during `up` — the missing-images
-  // family's true origin. Pulling the service LIST minus `app` keeps the
-  // pull loud for real failures while never asking a registry for an image
-  // that only exists in a docker daemon.
   await perfAsync('deploy.compose.imagesPull', () =>
-    sshRunAsync(
-      ip,
-      sshKeyPath,
-      `cd ${remoteDir} && docker compose ${flags} config --services | grep -vx app | ` +
-        `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`,
-      { timeout: 600_000 },
-    ),
+    sshRunAsync(ip, sshKeyPath, stackPullCommand(remoteDir, flags), { timeout: 600_000 }),
   ).catch((err) => {
     throw stackPullError(ip, err);
   });

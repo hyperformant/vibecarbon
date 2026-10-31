@@ -19,6 +19,10 @@
  *   - the remote command has NO `|| true` / fallback-chain silencers
  *   - `--ignore-buildable` stays (db/app are built, never pulled)
  */
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/command.js', async (orig) => {
@@ -27,7 +31,9 @@ vi.mock('../../../src/lib/command.js', async (orig) => {
 });
 
 const { runCommandAsync } = await import('../../../src/lib/command.js');
-const { pullComposeImages } = await import('../../../src/lib/deploy/compose/index.js');
+const { pullComposeImages, stackPullCommand } = await import(
+  '../../../src/lib/deploy/compose/index.js'
+);
 const { mirroredPackageNames } = await import('../../../src/lib/images.js');
 
 /** The shape runCommandAsync rejects with: the remote command's `2>&1` puts docker's words in stdout. */
@@ -44,11 +50,13 @@ describe('pullComposeImages failure contract', () => {
     // Structural pin on the source, not the mock: `|| true` and chained
     // `|| docker compose` fallbacks are the four-deep silencer this test
     // exists to keep dead.
-    const { readFileSync } = await import('node:fs');
     const src = readFileSync('src/lib/deploy/compose/index.js', 'utf-8');
-    const fnStart = src.indexOf('export async function pullComposeImages');
+    // The command builder and its caller, read as one region.
+    const fnStart = src.indexOf('export function stackPullCommand');
+    const callStart = src.indexOf('export async function pullComposeImages');
     expect(fnStart).toBeGreaterThan(-1);
-    const fnBody = src.slice(fnStart, src.indexOf('\n}', fnStart));
+    expect(callStart).toBeGreaterThan(fnStart);
+    const fnBody = src.slice(fnStart, src.indexOf('\n}', callStart));
     expect(fnBody, 'pull must not end in || true').not.toMatch(/\|\|\s*true/);
     expect(fnBody, 'pull must not chain fallback pulls').not.toMatch(/pull[^\n]*\|\|[^\n]*pull/);
     expect(fnBody, 'pull must not use ignoreError').not.toMatch(/ignoreError:\s*true/);
@@ -57,9 +65,64 @@ describe('pullComposeImages failure contract', () => {
     // its local-only tag aborts a plain `compose pull` and interrupts every
     // sibling image (linode 32640636398, fifteen `Interrupted` lines). The
     // pull must enumerate services minus app.
-    expect(fnBody, 'app must be excluded from the pre-pull').toMatch(
-      /config --services \| grep -vx app/,
+  });
+});
+
+describe('the stack pull never asks a registry for the app image', () => {
+  // prod.yml resets the app's `build:`, so --ignore-buildable does not cover
+  // it, and compose pull ignores `pull_policy: never`. Its local-only tag
+  // aborts a plain `compose pull` and interrupts every sibling image (linode
+  // 32640636398). app-migrate (#234) runs the same image, and excluding only
+  // the service named `app` broke every compose-ha deploy (DO e2e,
+  // 2026-10-31). The pull must skip every service whose image is the app's.
+  function runPull(services: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-stack-pull-'));
+    const pulled = join(dir, 'pulled');
+    const map = Object.entries(services)
+      .map(([svc, img]) => `${svc}) echo '${img}' ;;`)
+      .join('\n      ');
+    writeFileSync(
+      join(dir, 'docker'),
+      `#!/bin/sh
+shift # compose
+while [ "$1" = "-f" ]; do shift 2; done
+if [ "$1 $2" = "config --services" ]; then
+  printf '%s\\n' ${Object.keys(services).join(' ')}
+elif [ "$1 $2" = "config --images" ]; then
+  case "$3" in
+      ${map}
+  esac
+elif [ "$1" = "pull" ]; then
+  shift
+  for a; do case "$a" in --*) ;; missing) ;; *) echo "$a" >> "${pulled}" ;; esac; done
+fi
+`,
     );
+    chmodSync(join(dir, 'docker'), 0o755);
+    const cmd = stackPullCommand(dir, '-f a.yml -f b.yml');
+    const r = spawnSync('sh', ['-c', cmd], {
+      encoding: 'utf-8',
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+    });
+    const out = existsSync(pulled) ? readFileSync(pulled, 'utf-8').trim().split('\n').sort() : [];
+    rmSync(dir, { recursive: true, force: true });
+    return { status: r.status, pulled: out };
+  }
+
+  it('skips app and every other service on the app image (app-migrate)', () => {
+    const r = runPull({
+      app: 'demo-app:local',
+      'app-migrate': 'demo-app:local',
+      db: 'ghcr.io/hyperformant/postgres:17',
+      traefik: 'ghcr.io/hyperformant/traefik:v3',
+    });
+    expect(r.status).toBe(0);
+    expect(r.pulled).toEqual(['db', 'traefik']);
+  });
+
+  it('pulls every service when none shares the app image', () => {
+    const r = runPull({ app: 'demo-app:local', db: 'pg:17', redis: 'redis:7' });
+    expect(r.pulled).toEqual(['db', 'redis']);
   });
 });
 
