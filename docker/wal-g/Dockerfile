@@ -34,7 +34,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOEXPERIMENT=jsonv2 \
 # above runs on BUILDPLATFORM and may have cross-compiled, so the exec has
 # to happen in a TARGETPLATFORM stage. A wrong-arch or dynamically-linked
 # binary fails HERE, in the build — not silently in archive_command later.
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS smoke
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS smoke
 COPY --from=build /out/wal-g /usr/local/bin/wal-g
 RUN wal-g --version
 
