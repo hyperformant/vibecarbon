@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import { APP_SERVICE_FUNCTIONS } from '@server/db/app-service-role';
 import { verifyMigrationsOnOwnConnection } from '@server/db/migrate';
 import { migrateMain, runMigrateStep } from '@server/db/migrate-cli';
 import { connectTestDb, dbTestsEnabled } from './_helpers';
+import { readEnvFiles } from '../../scripts/lib/dotenv.js';
 
 /**
  * Every journal migration must be proven applied, not just the newest one.
@@ -58,7 +59,14 @@ describe.skipIf(!dbTestsEnabled)('a skipped journal migration', () => {
   let admin: pg.Client;
   const dbName = `migrate_journal_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
   const root = mkdtempSync(join(tmpdir(), 'migrate-journal-'));
-  const APP_PW = 'journal-test-app-password';
+  // app_service is cluster-wide and the migrate step sets its password, so use
+  // the password the rest of the suite and a local dev server connect with
+  // (app-service-role.test.ts resolves it the same way). A test-only password
+  // here locked every later test out of app_service.
+  const APP_PW =
+    process.env.TEST_APP_DB_PASSWORD ||
+    readEnvFiles('.').APP_DB_PASSWORD ||
+    randomBytes(24).toString('base64url');
   const conn = () => ({
     host: process.env.TEST_DB_HOST,
     port: Number(process.env.TEST_DB_PORT ?? 5432),
