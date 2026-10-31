@@ -90,7 +90,7 @@ describe('renderK8sBase renders the Certificate', () => {
       // domain is the vibecarbon-config SITE_URL, which the deploy patches
       // right after the apply (and Flux owns; a separate follow-up).
       const leftovers = walkFiles(out)
-        .filter((f) => readFileSync(f, 'utf-8').includes('app.example.com'))
+        .filter((f) => /app\.example\.com/.test(readFileSync(f, 'utf-8')))
         .map((f) => relative(out, f));
       expect(leftovers).toEqual(['config/configmap.yaml']);
       expect(readFileSync(join(out, 'config', 'configmap.yaml'), 'utf-8')).toMatch(

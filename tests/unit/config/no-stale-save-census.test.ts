@@ -168,17 +168,22 @@ function wholeEnvWrites(body: string): { line: string; rhs: string }[] {
   return out;
 }
 
+/** Escape every regex metacharacter, backslash included. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function mutatorOffenders(src: Source): string[] {
   return mutators(src).flatMap(({ at, param, body, inline }) => {
     if (!inline) return [`${at}: the mutator is not an inline arrow function`];
     const problems: string[] = [];
     if (!param) problems.push(`${at}: the mutator takes no config argument`);
-    else if (!new RegExp(`\\b${param.replace(/\$/g, '\\$')}\\b`).test(body)) {
+    else if (!new RegExp(`\\b${escapeRegExp(param)}\\b`).test(body)) {
       problems.push(`${at}: the mutator ignores its config argument (${param})`);
     }
     for (const m of body.matchAll(STALE_CONFIG)) {
       const name = m[1];
-      const declared = new RegExp(`\\b(const|let|var)\\s+${name.replace(/[.$]/g, '\\$&')}\\b`);
+      const declared = new RegExp(`\\b(const|let|var)\\s+${escapeRegExp(name)}\\b`);
       if (name !== param && !declared.test(body)) {
         problems.push(`${at}: the mutator spreads ${name}, a config loaded outside the lock`);
       }
