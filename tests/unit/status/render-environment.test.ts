@@ -345,11 +345,48 @@ describe('isHaConfigured', () => {
     expect(isHaConfigured({})).toBe(false);
   });
 
-  it('a recorded stack, or any other HA record, is', async () => {
+  // Minor 5: the deploy skeleton (orchestrator.js saveSkeletonEnv) writes
+  // `ha: { enabled, failoverRegion, ...standby types or pendingStandby }`
+  // before anything is provisioned. A first deploy that died there is not HA.
+  it('the deploy skeleton alone is not HA (k8s-ha and compose-ha shapes)', async () => {
+    const { isHaConfigured } = await import('../../../src/status.js');
+    expect(
+      isHaConfigured({
+        deployMode: 'kubernetes',
+        ha: {
+          enabled: true,
+          failoverRegion: 'hel1',
+          standby: { masterServerType: 'cx23', dbServerType: 'cx23' },
+          standbyWorkerSpec: { serverType: 'cpx21' },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isHaConfigured({
+        deployMode: 'compose-ha',
+        ha: {
+          enabled: true,
+          failoverRegion: 'hel1',
+          pendingStandby: { region: 'hel1', serverType: 'cx23' },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it('a recorded stack is: k8s-ha sides, or compose-ha role-tagged servers', async () => {
     const { isHaConfigured } = await import('../../../src/status.js');
     expect(
       isHaConfigured({ ha: { primary: { stack: 'e4-primary', floatingIp: '203.0.113.1' } } }),
     ).toBe(true);
-    expect(isHaConfigured({ ha: { enabled: true, failoverRegion: 'hel1' } })).toBe(true);
+    expect(
+      isHaConfigured({
+        deployMode: 'compose-ha',
+        ha: { enabled: true, failoverRegion: 'hel1' },
+        servers: [
+          { name: 'q-e2-primary', ip: '1.1.1.1', role: 'primary' },
+          { name: 'q-e2-standby', ip: '2.2.2.2', role: 'standby' },
+        ],
+      }),
+    ).toBe(true);
   });
 });

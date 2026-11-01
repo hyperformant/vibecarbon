@@ -1321,20 +1321,19 @@ function isEnvironmentUnhealthy(entry) {
 }
 
 /**
- * Whether an env has an HA record to show. A write fence alone is not one,
- * and neither are primary/standby sides that only carry the floating IP the
- * early k8s-ha DNS write persists (a first deploy that failed after it): a
- * side counts once its stack is recorded.
+ * Whether an env has an HA pair to show: a recorded stack. k8s-ha records
+ * each cluster's stack under ha.primary/standby (the success save); compose-ha
+ * records its two servers, named by stack, with their roles (from
+ * persist-pending-config on). Neither the deploy skeleton's `ha` (enabled,
+ * failoverRegion, the standby's planned types) nor the floating IPs the early
+ * k8s-ha DNS write persists count: a first deploy that died there has no pair.
  * @param {object} envConfig
  */
 export function isHaConfigured(envConfig) {
   const ha = envConfig?.ha;
   if (!ha) return false;
-  return Object.entries(ha).some(([k, v]) => {
-    if (k === 'writeFence') return false;
-    if (k === 'primary' || k === 'standby') return Boolean(v?.stack);
-    return true;
-  });
+  if (ha.primary?.stack || ha.standby?.stack) return true;
+  return (envConfig.servers ?? []).some((sv) => sv?.role === 'standby');
 }
 
 function renderEnvironment(envName, envConfig, checks) {
