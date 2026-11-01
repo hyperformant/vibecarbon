@@ -132,6 +132,33 @@ describe('server-class create timeouts (census)', () => {
     },
   );
 
+  // Safety: a cloud-init edit must never replace an existing server. Every
+  // provider's user-data input forces a replacement on change, and a compose
+  // server's (or a k8s db node's) database lives on its disk. The boot-time
+  // image pull edits these files, so this lands first.
+  it.each(Object.keys(PROGRAMS))(
+    '%s: every server-class resource ignores changes to its user data',
+    async (file) => {
+      const resources = await runProgram(file);
+      const servers = resources.filter((r) => r.token in SERVER_RESOURCE_TYPES);
+      expect(servers.length).toBeGreaterThan(0);
+      for (const server of servers) {
+        const input =
+          SERVER_RESOURCE_TYPES[server.token as keyof typeof SERVER_RESOURCE_TYPES].userDataInput;
+        // Non-vacuous: the input really is where this server's user data goes.
+        expect(
+          Object.keys((server.args ?? {}) as object),
+          `${file}: ${server.type} "${server.name}" carries no ${input}`,
+        ).toContain(input);
+        const opts = (server.opts ?? {}) as { ignoreChanges?: string[] };
+        expect(
+          opts.ignoreChanges ?? [],
+          `${file}: ${server.type} "${server.name}" would be replaced by a user-data change`,
+        ).toContain(input);
+      }
+    },
+  );
+
   it.each(Object.keys(PROGRAMS))(
     '%s: every VM-shaped class is a known server class',
     async (file) => {

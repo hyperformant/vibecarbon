@@ -34,7 +34,7 @@ import {
   squeezeLinodeInstanceLabel,
   squeezeLinodeLabel,
 } from '../../providers/linode.js';
-import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
+import { serverResourceOptions } from '../create-timeout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -215,7 +215,7 @@ export function buildLinodeComposeProgram(config) {
       },
       // Bounded create: a provider host that never finishes the create fails the
       // deploy at 15 minutes instead of holding it forever (see create-timeout.js).
-      { customTimeouts: SERVER_CUSTOM_TIMEOUTS },
+      serverResourceOptions('linode:index/instance:Instance'),
     );
 
     return {
