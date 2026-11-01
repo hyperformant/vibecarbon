@@ -29,11 +29,9 @@ const LOCAL_REGISTRY_PREFIX = 'vibecarbon-local';
  * stale rebuilds from a clean tree don't collide with iterative
  * uncommitted work. Timestamp is UTC YYYYMMDDHHMMSS for sortability.
  *
- * `prefix` defaults to the compose-mode default `vibecarbon-local`. The
- * k8s-mode caller (buildAppImage in k8s/k3s.js) passes `10.0.1.1:5000` so
- * the same tag works as both a sideload reference (kubelet `IfNotPresent`
- * on static workers) and a registry-pull reference (CA-spawned workers
- * pulling from master's local registry pod via `registries.yaml`).
+ * `prefix` defaults to `vibecarbon-local`, which every caller now builds
+ * under: the k8s build names no registry until deliverAppImage retags it for
+ * the master's local registry (registryImageTag in k8s/image-delivery.js).
  *
  * @param {{projectName: string, gitSha: string, isDirty: boolean, timestamp: string, prefix?: string}} args
  * @returns {string}
@@ -93,12 +91,14 @@ export function inspectGitState(cwd) {
  *
  * Combines `inspectGitState` for cache-busting inputs, `generateLocalImageTag`
  * for the tag scheme, and a `docker build` shell-out. Side-effecting; the
- * docker build step inherits stdio so the operator sees layer progress.
+ * docker build step inherits stdio so the operator sees layer progress,
+ * unless `quiet` (output captured, its tail in the error; the k8s build runs
+ * under Pulumi's spinner). `signal` aborts the build (a failed deploy reaps it).
  *
- * `tagPrefix` defaults to `vibecarbon-local` (compose-mode behavior). k8s
- * mode passes `10.0.1.1:5000` so the resulting tag is a valid registry
- * reference that CA-spawned workers can pull from master's local registry
- * pod (Phase 1 wired the registries.yaml; Phase 6 wires the push).
+ * `tagPrefix` defaults to `vibecarbon-local`, which both callers use: the k8s
+ * build (buildAppImage in k8s/k3s.js) starts before the cluster exists, so it
+ * names no registry, and deliverAppImage retags it
+ * `<masterPrivateIp>:5000/...` (registryImageTag) once the master is up.
  *
  * @param {string} projectDir - Project root with the Dockerfile.
  * @param {{projectName: string, timestamp?: string, rebuild?: boolean, tagPrefix?: string, buildArgs?: Record<string,string>, quiet?: boolean, signal?: AbortSignal}} options

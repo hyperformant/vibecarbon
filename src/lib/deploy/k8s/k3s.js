@@ -6,20 +6,28 @@
  *
  * End-to-end flow on a cold deploy:
  *   1. Preflight: docker, ssh, kubectl, helm on PATH; server-type architecture.
- *   2. Generate (or reuse) the SSH keypair under projectDir/.vibecarbon/ssh-<env>.
- *   3. Pulumi up — cloud-init installs k3s + hcloud-ccm/csi on each node.
- *   4. Wait for SSH on master + `/tmp/k3s-ready` marker.
- *   5. scp `/etc/rancher/k3s/k3s.yaml` from master, patch server URL to public IP.
- *   6. Build app image locally (10.0.1.1:5000/<project>:<sha>[-dirty]-<ts>).
- *   7. `kubectl apply -k` a rendered copy of `k8s/base/` (db StatefulSet,
- *      traefik, app, the master's local registry; cert-manager via infra/).
- *   8. Deliver the image once, by layer delta, into the master's registry
- *      (deliverImage); every node pulls it from there.
+ *   2. Start the app image build locally, in the background, before anything
+ *      is provisioned (startAppImageBuild: `vibecarbon-local/<project>:<sha>
+ *      [-dirty]-<ts>`, its k3s-build gate inputs read first).
+ *   3. Generate (or reuse) the SSH keypair under projectDir/.vibecarbon/ssh-<env>.
+ *   4. Pulumi up — cloud-init installs k3s + the provider's CCM/CSI on each node.
+ *   5. Wait for SSH on master + `/tmp/k3s-ready` marker (onInfraReady fires:
+ *      single k8s starts its DNS A record write here).
+ *   6. scp `/etc/rancher/k3s/k3s.yaml` from master, patch server URL to public IP.
+ *   7. Finish the build and retag it `<masterPrivateIp>:5000/<project>:<tag>`
+ *      (deliverAppImage).
+ *   8. applyK3sManifests: the image's layer delta into the master's
+ *      containerd and the cluster autoscaler rollout start alongside the
+ *      cert-manager chain; then `kubectl apply -k` a rendered copy of
+ *      `k8s/base/` (db StatefulSet, traefik, app, the master's local
+ *      registry); the image is pushed into that registry once it serves
+ *      (deliverImage pushAfter), and every node pulls it from there.
  *   9. `kubectl rollout status statefulset/db`.
  *   10. `kubectl patch deploy/app` (image + Secret versions) + rollout-status.
  *
- * Warm path: skip 1-5; rebuild image (6); apply changed manifests and deliver
- * a changed tag (7-8); rollout (10).
+ * Warm path: skip what is unchanged (state-gated); a changed source rebuilds
+ * (2, 7), changed manifests or a changed tag re-apply and re-deliver (8);
+ * rollout (10).
  *
  * Target cold-deploy time: ≤ 3 min for single-master + database + 0 workers.
  * Spike on 2026-04-25 measured 82s for cluster bring-up alone.
@@ -3461,6 +3469,10 @@ export async function applyK3sManifests({
     if (!sshKeyPath) {
       throw new Error('applyK3sManifests: sshKeyPath required for the image delivery');
     }
+    // `deploy.<prefix>.image.deliver` now spans the transfer AND the wait for
+    // the registry before the push, so it is not comparable with the pre-
+    // pushAfter figure (12 s on DO, 2026-10-31); `deploy.image.delta` alone
+    // times the transfer.
     deliveryPromise = perfAsync(`deploy.${perfPrefix}.image.deliver`, () =>
       deliverImage({
         tag: imageTag,
