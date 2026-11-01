@@ -808,7 +808,8 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
 }
 
 /**
- * Wait for all compose services with healthchecks to reach "healthy".
+ * Wait for the CORE compose services with healthchecks to reach "healthy"
+ * (the add-ons the background job starts are not waited for).
  *
  * `docker compose up -d` returns as soon as containers are *created*, not
  * when their healthchecks pass. A service probed while it is still starting
@@ -819,9 +820,45 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
  * Non-critical — on timeout or error we log but don't fail, since the
  * caller's primary gate is the app-container probe which already passed.
  */
+/**
+ * The remote read waitForServicesHealthy polls: the services this node defers
+ * to the add-on job (addon-services.sh, `DEFERRED <svc>` lines; none on a
+ * standby or without background add-ons), then `<service> <health>` per
+ * container.
+ */
+export function servicesHealthCommand(remoteDir) {
+  return (
+    `cd ${remoteDir} && { if [ -f ${ADDON_SERVICES_SCRIPT} ]; then sh ${ADDON_SERVICES_SCRIPT}; fi; } | ` +
+    `sed 's/^/DEFERRED /'; docker compose ps --format '{{.Service}} {{.Health}}' 2>&1`
+  );
+}
+
+/**
+ * The core services still starting or unhealthy in servicesHealthCommand's
+ * output. The deferred add-ons are the background job's to bring up
+ * (services/addon-start.js); the deploy does not wait for them.
+ * @param {string} out
+ * @returns {string[]} `<service> <health>` lines
+ */
+export function coreServicesWarming(out) {
+  const lines = String(out ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const deferred = new Set(
+    lines.filter((l) => l.startsWith('DEFERRED ')).map((l) => l.slice('DEFERRED '.length)),
+  );
+  return lines.filter(
+    (l) =>
+      !l.startsWith('DEFERRED ') &&
+      !deferred.has(l.split(' ')[0]) &&
+      (l.endsWith(' starting') || l.endsWith(' unhealthy')),
+  );
+}
+
 async function waitForServicesHealthy(ip, sshKeyPath, projectName, maxWaitMs = 180_000) {
   const remoteDir = `/opt/${projectName}`;
-  const cmd = `cd ${remoteDir} && docker compose ps --format '{{.Service}} {{.Health}}' 2>&1`;
+  const cmd = servicesHealthCommand(remoteDir);
   let lastState = '';
   try {
     await pollUntil(
@@ -830,16 +867,9 @@ async function waitForServicesHealthy(ip, sshKeyPath, projectName, maxWaitMs = 1
           timeout: 15_000,
           ignoreError: true,
         });
-        const lines = (out || '')
-          .trim()
-          .split('\n')
-          .map((l) => l.trim())
-          .filter(Boolean);
-        // Partition by health state. Services without a declared healthcheck
-        // report empty/no-health — skip those, they don't block readiness.
-        const stillWarming = lines.filter(
-          (l) => l.endsWith(' starting') || l.endsWith(' unhealthy'),
-        );
+        // Services without a declared healthcheck report empty/no-health and
+        // don't block readiness; neither do the deferred add-ons.
+        const stillWarming = coreServicesWarming(out || '');
         lastState = stillWarming.join(', ') || 'all healthy';
         return stillWarming.length === 0;
       },
