@@ -1320,6 +1320,23 @@ function isEnvironmentUnhealthy(entry) {
   return false;
 }
 
+/**
+ * Whether an env has an HA record to show. A write fence alone is not one,
+ * and neither are primary/standby sides that only carry the floating IP the
+ * early k8s-ha DNS write persists (a first deploy that failed after it): a
+ * side counts once its stack is recorded.
+ * @param {object} envConfig
+ */
+export function isHaConfigured(envConfig) {
+  const ha = envConfig?.ha;
+  if (!ha) return false;
+  return Object.entries(ha).some(([k, v]) => {
+    if (k === 'writeFence') return false;
+    if (k === 'primary' || k === 'standby') return Boolean(v?.stack);
+    return true;
+  });
+}
+
 function renderEnvironment(envName, envConfig, checks) {
   const lines = [];
 
@@ -1375,7 +1392,7 @@ function renderEnvironment(envName, envConfig, checks) {
 
   // HA. A single-server compose env carries `ha` only for scale's write-fence
   // marker, which is no HA config.
-  const haConfigured = !!envConfig.ha && Object.keys(envConfig.ha).some((k) => k !== 'writeFence');
+  const haConfigured = isHaConfigured(envConfig);
   if (haConfigured) {
     const failoverRegion = envConfig.secondaryRegion || envConfig.failoverRegion;
     const haDisplay = failoverRegion

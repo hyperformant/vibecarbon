@@ -327,3 +327,29 @@ describe('formatServerLines: background add-ons', () => {
     expect(isEnvironmentUnhealthy({ checks })).toBe(false);
   });
 });
+
+/**
+ * M-C1: a failed first k8s-ha deploy can leave only the early DNS write's
+ * floating IPs under ha.primary/standby. That is not an HA environment yet:
+ * a side counts only once its stack is recorded.
+ */
+describe('isHaConfigured', () => {
+  it('floating IPs alone are not HA', async () => {
+    const { isHaConfigured } = await import('../../../src/status.js');
+    expect(
+      isHaConfigured({
+        ha: { primary: { floatingIp: '203.0.113.1' }, standby: { floatingIp: '203.0.113.2' } },
+      }),
+    ).toBe(false);
+    expect(isHaConfigured({ ha: { writeFence: {} } })).toBe(false);
+    expect(isHaConfigured({})).toBe(false);
+  });
+
+  it('a recorded stack, or any other HA record, is', async () => {
+    const { isHaConfigured } = await import('../../../src/status.js');
+    expect(
+      isHaConfigured({ ha: { primary: { stack: 'e4-primary', floatingIp: '203.0.113.1' } } }),
+    ).toBe(true);
+    expect(isHaConfigured({ ha: { enabled: true, failoverRegion: 'hel1' } })).toBe(true);
+  });
+});
