@@ -2202,7 +2202,9 @@ export async function executeDeployment(args, gatheredConfig) {
     // HA deployResult the post-dispatch block + config-persist expect. The
     // headline `deploy.ha.k8s.full` perf span (which contains the effects'
     // deploy.ha.k8s.* sub-stages) wraps the whole pipeline, as before.
-    const k8sHaCtx = { options: deploymentConfig };
+    // dnsWarmupPromise: the early HA DNS write (haK8sProvisionClusters) must
+    // not race the 0.0.0.0 warm-up write of the same apex record.
+    const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise };
     await perfAsync('deploy.ha.k8s.full', () =>
       runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
     );

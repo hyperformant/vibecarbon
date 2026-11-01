@@ -104,7 +104,9 @@ describe('orchestrator persistence', () => {
   const src = readFileSync(join(REPO, 'src/lib/deploy/orchestrator.js'), 'utf-8');
 
   it('the k8s-ha deployResult carries the replication status and the identifier', () => {
-    const after = src.slice(src.indexOf('const k8sHaCtx = { options: deploymentConfig };'));
+    const after = src.slice(
+      src.indexOf('const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise };'),
+    );
     const block = after.slice(after.indexOf('deployResult = {'));
     const result = block.slice(0, block.indexOf('};') + 2);
     expect(result).toContain('replicationStatus: k8sHaCtx.replicationStatus');
