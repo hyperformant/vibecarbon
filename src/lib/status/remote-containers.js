@@ -13,7 +13,11 @@
 
 import { existsSync as fsExistsSync } from 'node:fs';
 import { resolvePrimary } from '../cli/resolve-primary.js';
-import { ADDON_STATUS_FILE, backgroundAddons, parseAddonStatus } from '../services/addon-start.js';
+import {
+  ADDON_STATUS_READ_CMD,
+  backgroundAddons,
+  resolveAddonStates,
+} from '../services/addon-start.js';
 import { enabledAddonNames } from '../services/standby-policy.js';
 import {
   getSSHKeyPath as defaultGetKey,
@@ -242,28 +246,38 @@ function describeSshError(err) {
 }
 
 /**
- * The background add-ons' states on one compose server, from the job's
- * `.vc-addons/status` (services/addon-start.js). A file not there yet (the job
- * has not written it, or the server predates it) reads as every expected
- * add-on starting.
+ * The background add-ons' states on one compose server: the job's status file
+ * when it is from the current deploy or failover (its `#started` stamp at or
+ * after the env's lastAttempt / lastFailover), else the add-ons' own
+ * containers (resolveAddonStates). A promoted node that never ran the job, or
+ * a file left from before a failback, is read from the containers.
  */
-async function collectAddons(target, projectName, keyPath, deps, expected) {
+async function collectAddons(target, projectName, keyPath, deps, expected, rows, notBeforeMs) {
+  let text = '';
   try {
-    const text = await withTimeout(
-      deps.sshRun(target.ip, keyPath, ['cat', `/opt/${projectName}/${ADDON_STATUS_FILE}`], {
+    text = await withTimeout(
+      deps.sshRun(target.ip, keyPath, ['sh', '-c', ADDON_STATUS_READ_CMD(projectName)], {
         silent: true,
         timeout: deps.timeoutMs,
         transportRetry: false,
       }),
       deps.timeoutMs,
     );
-    return parseAddonStatus(text);
   } catch {
-    return expected.map((name) => ({ name, state: 'starting', reason: 'no status recorded yet' }));
+    // Unreadable: the containers decide.
   }
+  const containers = new Map(rows.map((r) => [r.container, r]));
+  return resolveAddonStates({ text, expected, notBeforeMs, containers });
 }
 
-async function collectCompose(target, projectName, keyPath, deps, expectedAddons = []) {
+async function collectCompose(
+  target,
+  projectName,
+  keyPath,
+  deps,
+  expectedAddons = [],
+  notBeforeMs = 0,
+) {
   const argv = dockerPsArgv(projectName);
   const listing = await withTimeout(
     deps.sshRun(target.ip, keyPath, argv, {
@@ -282,7 +296,15 @@ async function collectCompose(target, projectName, keyPath, deps, expectedAddons
   // A compose-ha standby runs its add-ons in its whole-stack up (no job): only
   // the role primary (or the single server) has a status file to read.
   if (expectedAddons.length) {
-    const addons = await collectAddons(target, projectName, keyPath, deps, expectedAddons);
+    const addons = await collectAddons(
+      target,
+      projectName,
+      keyPath,
+      deps,
+      expectedAddons,
+      rows,
+      notBeforeMs,
+    );
     return { kind: 'compose', ip: target.ip, rows, addons };
   }
   return { kind: 'compose', ip: target.ip, rows };
@@ -341,7 +363,15 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
   const keyPath = d.getSSHKeyPath(envName);
   const haveKey = !!keyPath && d.existsSync(keyPath);
   // The add-ons this env starts in the background, whose states the job records.
-  const expectedAddons = backgroundAddons(enabledAddonNames(envConfig)).map((a) => a.name);
+  const expectedAddons = backgroundAddons(enabledAddonNames(envConfig)).map((a) => ({
+    name: a.name,
+    services: a.services,
+  }));
+  // A status file from before the env's last deploy attempt or failover is stale.
+  const notBeforeMs = Math.max(
+    Date.parse(envConfig.lastAttempt ?? '') || 0,
+    Date.parse(envConfig.lastFailover ?? '') || 0,
+  );
 
   const results = await Promise.all(
     targets.map(async (t) => {
@@ -359,6 +389,7 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
                 d,
                 // planContainerTargets lists a compose-ha pair primary first.
                 envConfig.deployMode === 'compose-ha' && t !== targets[0] ? [] : expectedAddons,
+                notBeforeMs,
               );
         return [t.serverName, value];
       } catch (err) {

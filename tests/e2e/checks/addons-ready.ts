@@ -14,13 +14,16 @@
  * FAILS (hollow-pass-census.test.ts).
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   ADDON_STATE_DIR,
-  ADDON_STATUS_FILE,
+  ADDON_STATUS_READ_CMD,
   backgroundAddons,
-  parseAddonStatus,
+  resolveAddonStates,
 } from '../../../src/lib/services/addon-start.js';
 import { enabledAddonNames } from '../../../src/lib/services/standby-policy.js';
+import { classifyContainer, rowsFromDockerPs } from '../../../src/lib/status/container-rows.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
 import { defaultRun, fail, missingHandle, type RemoteRun } from './ha-integrity.js';
 
@@ -41,12 +44,40 @@ export interface AddonsReadyOptions {
   budgetMs?: number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /**
+   * A status file whose job started before this (the env's last deploy
+   * attempt or failover, addonStatusNotBefore) is stale: the add-ons'
+   * containers decide instead.
+   */
+  notBeforeMs?: number;
+}
+
+/** The env's last deploy attempt or failover, from the project's .vibecarbon.json. */
+export function addonStatusNotBefore(projectDir: string, env: string): number {
+  try {
+    const path = join(projectDir, '.vibecarbon.json');
+    if (!existsSync(path)) return 0;
+    const envConfig = JSON.parse(readFileSync(path, 'utf8'))?.environments?.[env] ?? {};
+    return Math.max(
+      Date.parse(envConfig.lastAttempt ?? '') || 0,
+      Date.parse(envConfig.lastFailover ?? '') || 0,
+    );
+  } catch {
+    return 0;
+  }
 }
 
 /** The add-ons the deploy left to the background job, by name. */
 export function expectedBackgroundAddons(features: readonly string[]): string[] {
+  return expectedAddonServices(features).map((a) => a.name);
+}
+
+function expectedAddonServices(features: readonly string[]) {
   const envConfig = Object.fromEntries(features.map((f) => [f, true]));
-  return backgroundAddons(enabledAddonNames(envConfig)).map((a) => a.name);
+  return backgroundAddons(enabledAddonNames(envConfig)).map((a) => ({
+    name: a.name,
+    services: a.services,
+  }));
 }
 
 export async function checkAddonsReady(opts: AddonsReadyOptions): Promise<VerificationResult> {
@@ -74,12 +105,31 @@ export async function checkAddonsReady(opts: AddonsReadyOptions): Promise<Verifi
   const deadline = started + (opts.budgetMs ?? ADDONS_READY_BUDGET_MS);
   const dir = `/opt/${opts.projectName}`;
 
-  let states: ReturnType<typeof parseAddonStatus> = [];
+  const withServices = expectedAddonServices(opts.features);
+  let states: ReturnType<typeof resolveAddonStates> = [];
   for (;;) {
-    const read = await run(ip, `cat ${dir}/${ADDON_STATUS_FILE} 2>/dev/null || true`);
-    states = read.ok ? parseAddonStatus(read.output) : states;
+    // The job's status (current only if it started after notBeforeMs), and the
+    // add-ons' containers for when it is missing or stale (a promoted node,
+    // or a file left from before a failback): resolveAddonStates decides.
+    const read = await run(ip, ADDON_STATUS_READ_CMD(opts.projectName));
+    const ps = await run(
+      ip,
+      `docker ps -a --filter name=^${opts.projectName}- --format '{{.Names}}\t{{.State}}\t{{.Status}}'`,
+    );
+    const containers = new Map(
+      rowsFromDockerPs(ps.ok ? ps.output : '', opts.projectName).map((r) => [
+        r.container,
+        classifyContainer(r.container, r.state, r.status),
+      ]),
+    );
+    states = resolveAddonStates({
+      text: read.ok ? read.output : '',
+      expected: withServices,
+      notBeforeMs: opts.notBeforeMs ?? 0,
+      containers,
+    });
     const by = new Map(states.map((s) => [s.name, s]));
-    const failed = expected.filter((n) => by.get(n)?.state === 'failed');
+    const failed = expected.filter((n) => ['failed', 'stopped'].includes(by.get(n)?.state ?? ''));
     const done = expected.every((n) => by.get(n)?.state === 'running');
     if (done) {
       return {

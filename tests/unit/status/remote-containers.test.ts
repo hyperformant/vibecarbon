@@ -500,40 +500,60 @@ describe('checkRemoteContainers', () => {
     ).toBeNull();
   });
 
-  it("compose with background add-ons: also reads each server's add-on status file", async () => {
-    const withAddons = {
-      deployMode: 'compose',
-      services: { observability: true, n8n: true, redis: true },
-      servers: [{ name: 'p', id: 1, ip: '1.1.1.1', role: 'primary' }],
-    };
-    const sshRun = vi.fn(async (_ip: string, _k: string, argv: string[]) =>
-      argv[0] === 'cat'
-        ? 'observability\trunning\t\nn8n\tfailed\tsetup n8n-setup exited 1\n'
-        : 'letsgo-app\trunning\tUp 1h (healthy)\n',
+  const NOW_S = 1_800_000_000;
+  const withAddons = (extra: Record<string, unknown> = {}) => ({
+    deployMode: 'compose',
+    services: { observability: true, n8n: true, redis: true },
+    lastAttempt: new Date((NOW_S - 600) * 1000).toISOString(),
+    servers: [{ name: 'p', id: 1, ip: '1.1.1.1', role: 'primary' }],
+    ...extra,
+  });
+  const addonRun = (statusText: string, ps: string) =>
+    vi.fn(async (_ip: string, _k: string, argv: string[]) => (argv[0] === 'sh' ? statusText : ps));
+
+  it('compose with background add-ons: reads the current add-on status file', async () => {
+    const sshRun = addonRun(
+      `#started ${NOW_S}\nobservability\trunning\t\nn8n\tfailed\tsetup n8n-setup exited 1\n`,
+      'letsgo-app\trunning\tUp 1h (healthy)\n',
     );
-    const out = await checkRemoteContainers('prod', withAddons, 'letsgo', { ...base(), sshRun });
-    expect(sshRun.mock.calls.map((c) => c[2][0])).toEqual(['docker', 'cat']);
-    expect(sshRun.mock.calls[1][2]).toEqual(['cat', '/opt/letsgo/.vc-addons/status']);
+    const out = await checkRemoteContainers('prod', withAddons(), 'letsgo', { ...base(), sshRun });
+    expect(sshRun.mock.calls.map((c) => c[2][0])).toEqual(['docker', 'sh']);
+    expect(sshRun.mock.calls[1][2][2]).toContain('cat /opt/letsgo/.vc-addons/status');
     expect(out?.p.addons).toEqual([
       { name: 'observability', state: 'running', reason: '' },
       { name: 'n8n', state: 'failed', reason: 'setup n8n-setup exited 1' },
     ]);
   });
 
-  it('compose with background add-ons but no status file yet: each reads starting', async () => {
-    const withAddons = {
-      deployMode: 'compose',
-      services: { metabase: true },
-      servers: [{ name: 'p', id: 1, ip: '1.1.1.1', role: 'primary' }],
-    };
-    const sshRun = vi.fn(async (_ip: string, _k: string, argv: string[]) => {
-      if (argv[0] === 'cat') throw Object.assign(new Error('x'), { stderr: 'No such file' });
-      return 'letsgo-app\trunning\tUp 1h (healthy)\n';
-    });
-    const out = await checkRemoteContainers('prod', withAddons, 'letsgo', { ...base(), sshRun });
+  // I-A1: a promoted node that never ran the job has no file; after a
+  // failback the node can hold one from before the failover. Either way the
+  // add-ons' own containers decide.
+  it('no status file: the add-ons read from their containers', async () => {
+    const sshRun = addonRun(
+      '',
+      'letsgo-app\trunning\tUp 1h (healthy)\nletsgo-grafana\trunning\tUp 2m (healthy)\n' +
+        'letsgo-loki\trunning\tUp 2m\nletsgo-prometheus\trunning\tUp 2m\n' +
+        'letsgo-promtail\trunning\tUp 2m\nletsgo-postgres-exporter\trunning\tUp 2m\n',
+    );
+    const out = await checkRemoteContainers('prod', withAddons(), 'letsgo', { ...base(), sshRun });
     expect(out?.p.addons).toEqual([
-      { name: 'metabase', state: 'starting', reason: 'no status recorded yet' },
+      { name: 'observability', state: 'running', reason: '' },
+      { name: 'n8n', state: 'stopped', reason: 'no n8n container' },
     ]);
+  });
+
+  it('a file older than the last failover is stale: containers decide', async () => {
+    const sshRun = addonRun(
+      `#started ${NOW_S - 3600}\nobservability\trunning\t\nn8n\trunning\t\n`,
+      'letsgo-app\trunning\tUp 1h (healthy)\n',
+    );
+    const out = await checkRemoteContainers(
+      'prod',
+      withAddons({ lastFailover: new Date((NOW_S - 60) * 1000).toISOString() }),
+      'letsgo',
+      { ...base(), sshRun },
+    );
+    expect(out?.p.addons?.map((a: { state: string }) => a.state)).toEqual(['stopped', 'stopped']);
   });
 
   it('reports "no ssh key" for every server without touching the network', async () => {

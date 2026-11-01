@@ -38,7 +38,7 @@ export const ADDON_SERVICES_SCRIPT = 'addon-services.sh';
 /** Upper bound the job gives one add-on to become healthy (compose --wait). */
 export const ADDON_WAIT_TIMEOUT_S = 900;
 
-export const ADDON_STATES = ['starting', 'running', 'failed'];
+export const ADDON_STATES = ['starting', 'running', 'failed', 'stopped'];
 
 /** The compose overlay files an add-on ships (dev overrides excluded). */
 function overlayTexts(name) {
@@ -91,6 +91,77 @@ export function parseAddonStatus(text) {
     .map((line) => line.split('\t'))
     .filter(([name, state]) => name && ADDON_STATES.includes(state))
     .map(([name, state, ...reason]) => ({ name, state, reason: reason.join(' ').trim() }));
+}
+
+/**
+ * The remote read `vibecarbon status` and the e2e check run on a node: the
+ * status file, then `#live` when the recorded job pid really is the job (a
+ * /proc cmdline match: a recycled pid is not).
+ * @param {string} projectName
+ */
+export function ADDON_STATUS_READ_CMD(projectName) {
+  const dir = `/opt/${projectName}/${ADDON_STATE_DIR}`;
+  return (
+    `cat ${dir}/status 2>/dev/null; ` +
+    `if [ -f ${dir}/job.pid ] && grep -q ${ADDON_JOB_SCRIPT} "/proc/$(cat ${dir}/job.pid)/cmdline" 2>/dev/null; ` +
+    `then echo '#live'; fi; true`
+  );
+}
+
+/**
+ * Parse ADDON_STATUS_READ_CMD's output.
+ * @param {string} text
+ * @returns {{started: number|null, live: boolean, addons: ReturnType<typeof parseAddonStatus>}}
+ */
+export function parseAddonStatusFile(text) {
+  const lines = String(text ?? '').split('\n');
+  const stamp = lines.map((l) => /^#started (\d+)$/.exec(l.trim())).find(Boolean);
+  return {
+    started: stamp ? Number(stamp[1]) : null,
+    live: lines.some((l) => l.trim() === '#live'),
+    addons: parseAddonStatus(text),
+  };
+}
+
+/**
+ * Each expected add-on's state, from the job's status file when it is
+ * current, else from the add-ons' own containers.
+ *
+ * The file is current when the job that wrote it started at or after
+ * `notBeforeMs` (the env's last deploy attempt or failover): a promoted node
+ * that never ran the job has no file, and after a failback the re-promoted
+ * node can hold one from before, which must not read as a pass. An add-on the
+ * file still says is starting while no job is alive reads `stopped`.
+ *
+ * @param {object} o
+ * @param {string} o.text ADDON_STATUS_READ_CMD output
+ * @param {Array<{name: string, services: string[]}>} o.expected
+ * @param {number} o.notBeforeMs
+ * @param {Map<string, {health: string, label: string}>} [o.containers] by service
+ */
+export function resolveAddonStates({ text, expected, notBeforeMs, containers = new Map() }) {
+  const file = parseAddonStatusFile(text);
+  const current = file.started !== null && file.started * 1000 >= (notBeforeMs || 0);
+  if (current) {
+    const by = new Map(file.addons.map((a) => [a.name, a]));
+    return expected.map(({ name }) => {
+      const a = by.get(name) ?? { name, state: 'starting', reason: '' };
+      if (a.state === 'starting' && !file.live) {
+        return { name, state: 'stopped', reason: `the add-on job stopped before ${name} came up` };
+      }
+      return { name, state: a.state, reason: a.reason };
+    });
+  }
+  return expected.map(({ name, services }) => {
+    const missing = services.find((svc) => !containers.has(svc));
+    if (missing) return { name, state: 'stopped', reason: `no ${missing} container` };
+    const bad = services.find((svc) => containers.get(svc).health === 'unhealthy');
+    if (bad) return { name, state: 'failed', reason: `${bad} ${containers.get(bad).label}` };
+    if (services.every((svc) => containers.get(svc).health === 'healthy')) {
+      return { name, state: 'running', reason: '' };
+    }
+    return { name, state: 'starting', reason: 'no add-on status; from its containers' };
+  });
 }
 
 /**
@@ -162,6 +233,11 @@ if [ "\${1:-}" = stop ]; then
   stop_job
   exit 0
 fi
+# promoted: a compose-ha failover runs this on the node it promoted. The
+# one-shot setups do not run there: the replicated database already holds
+# their work.
+skip_setup=""
+[ "\${1:-}" = promoted ] && skip_setup=1
 stop_job
 echo "$$" > "$dir/job.pid"
 
@@ -185,6 +261,7 @@ run_addon() {
   name=$1
   services=$2
   setup=$3
+  if [ -n "$skip_setup" ]; then setup=""; fi
   log="$dir/$name.log"
   : > "$log"
   pull=""

@@ -315,6 +315,13 @@ describe('formatServerLines: background add-ons', () => {
     expect(isEnvironmentUnhealthy({ checks })).toBe(true);
   });
 
+  it('a stopped add-on needs attention too, with its reason', () => {
+    const checks = sc([{ name: 'n8n', state: 'stopped', reason: 'no n8n container' }]);
+    const lines = formatServerLines([servers[0]], checks).map(strip);
+    expect(lines).toContain('      n8n                         ● stopped  no n8n container');
+    expect(isEnvironmentUnhealthy({ checks })).toBe(true);
+  });
+
   it('starting alone does not make the environment unhealthy', () => {
     const checks = sc([{ name: 'observability', state: 'starting', reason: '' }]);
     expect(isEnvironmentUnhealthy({ checks })).toBe(false);

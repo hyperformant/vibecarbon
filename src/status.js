@@ -1166,12 +1166,18 @@ function serverContainersHealthy(sc) {
   if (counted.some((r) => r.health !== 'healthy')) return false;
   for (const ns of Object.values(sc.platform || {})) if (ns.healthy !== ns.total) return false;
   if (sc.nodes && sc.nodes.ready !== sc.nodes.total) return false;
-  // A background add-on that failed needs attention; one still starting does not.
-  if ((sc.addons || []).some((a) => a.state === 'failed')) return false;
+  // A background add-on that failed or stopped needs attention; one still
+  // starting does not.
+  if ((sc.addons || []).some((a) => a.state === 'failed' || a.state === 'stopped')) return false;
   return true;
 }
 
-const ADDON_ROW_HEALTH = { running: 'healthy', starting: 'starting', failed: 'unhealthy' };
+const ADDON_ROW_HEALTH = {
+  running: 'healthy',
+  starting: 'starting',
+  failed: 'unhealthy',
+  stopped: 'unhealthy',
+};
 
 /**
  * The Servers block body: one line per server, then — when container data
@@ -1227,7 +1233,7 @@ function formatServerLines(servers, checks) {
     // its reason.
     if (sc.addons?.length) {
       const running = sc.addons.filter((a) => a.state === 'running').length;
-      const failed = sc.addons.some((a) => a.state === 'failed');
+      const failed = sc.addons.some((a) => a.state === 'failed' || a.state === 'stopped');
       const paintAddons = failed ? c.error : running === sc.addons.length ? c.success : c.warning;
       lines.push(
         `    ${c.dim('add-ons')} ${paintAddons(`● ${running}/${sc.addons.length} running`)}`,

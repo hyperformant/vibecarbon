@@ -28,6 +28,7 @@ import {
 } from '../../dns-provider.js';
 import { socatImageRef } from '../../images.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { ADDON_JOB_SCRIPT } from '../../services/addon-start.js';
 import {
   composePromotionServices,
   composeWriterServices,
@@ -1568,6 +1569,20 @@ export function composeStartPrimaryOnlyCmd(projectName, services) {
   );
 }
 
+/**
+ * The add-on job (services/addon-start.js) on a node a failover promoted,
+ * detached: it never ran there (reconcile.sh starts it on the role primary
+ * only), so without this the node has no current add-on status. `promoted`
+ * mode runs no one-shot setup: the replicated database already holds their
+ * work. A no-op on a node deployed before the job existed.
+ */
+export function composeStartAddonJobCmd(projectName) {
+  return (
+    `cd /opt/${projectName} && if [ -f ${ADDON_JOB_SCRIPT} ]; then ` +
+    `setsid nohup /bin/sh ${ADDON_JOB_SCRIPT} promoted > /dev/null 2>&1 < /dev/null & fi`
+  );
+}
+
 const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
 
 /**
@@ -2497,6 +2512,24 @@ export async function failoverComposeHA(
         ? 'Primary-only add-ons NOT started (continuing: see warning)'
         : 'Primary-only add-ons started',
     );
+  }
+  // Step 2a': the add-on job on the promoted node, so it records every
+  // background add-on's state for `vibecarbon status` (and brings up any not
+  // running). Not while the old primary's writers still run: the job would
+  // start the primary-only add-ons the step above held back. Best-effort.
+  if (!(addonStart && oldPrimaryStillWriting)) {
+    const jobStarted = await sshRun(
+      standbyServer.ip,
+      sshKeyPath,
+      composeStartAddonJobCmd(projectName),
+      { timeout: 30_000 },
+    );
+    if (jobStarted === false) {
+      p.log.warn(
+        `Could not start the add-on job on the new primary (${standbyServer.ip}); ` +
+          'vibecarbon status reads its add-ons from their containers until the next deploy',
+      );
+    }
   }
 
   // Step 2b: Demote the old primary's wal-g write-guard, so it stops pushing

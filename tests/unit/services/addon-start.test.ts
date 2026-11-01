@@ -428,3 +428,28 @@ describe('addons-start.sh stop', () => {
     expect(text).toMatch(/^#started \d{10}$/m);
   });
 });
+
+/**
+ * I-A1: a compose-ha failover runs the same job on the promoted node, so its
+ * status file is current. `promoted` mode skips the one-shot setups: the
+ * replicated database already holds their work (the failover never runs them).
+ */
+describe('addons-start.sh promoted', () => {
+  it('starts the add-ons, records them, and runs no setup', () => {
+    const dir = tempDir();
+    writeFileSync(
+      join(dir, ADDON_JOB_SCRIPT),
+      renderAddonJobScript('demo', '-f docker-compose.yml', [
+        { name: 'n8n', services: ['n8n'], setup: ['n8n-setup'] },
+      ]),
+    );
+    stubDocker(dir);
+    spawnSync('sh', [ADDON_JOB_SCRIPT, 'promoted'], {
+      cwd: dir,
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, VC_PROJECT_DIR: dir },
+    });
+    expect(status(dir)).toEqual([{ name: 'n8n', state: 'running', reason: '' }]);
+    expect(calls(dir)).not.toContain('n8n-setup');
+    expect(calls(dir)).toMatch(/up -d --no-deps --wait .* n8n$/m);
+  });
+});
