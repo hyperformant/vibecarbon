@@ -539,6 +539,74 @@ export async function repairVultrFirewallRuleInputs(stack) {
 }
 
 /**
+ * DigitalOcean Droplets' `volumeIds`, which a refresh fills from the live API.
+ *
+ * terraform-provider-digitalocean's Droplet Delete detaches every volume id
+ * the Droplet's STATE lists before it deletes the Droplet, and a detach of a
+ * volume that no longer exists is a 404 that fails the whole delete. Our
+ * programs never set `volumeIds`: every volume on a cluster Droplet belongs
+ * to the DO CSI driver. destroy.js deletes the cluster's PVCs before Pulumi
+ * runs, which starts CSI's asynchronous detach and DeleteVolume, so the
+ * pre-destroy refresh can catch a volume still attached that CSI deletes a
+ * few seconds later. That is the d4-standby failure of 2026-10-31:
+ *
+ *   Error detaching volume "4c926666-..." from droplet (614595377):
+ *   POST /v2/volumes/4c926666-.../actions: 404
+ *
+ * The Droplet does not own those attachments, and deleting a Droplet
+ * detaches its volumes on DO's side (the cluster-autoscaler sweep in
+ * destroy.js deletes CSI-attached workers by API on exactly that basis), so
+ * the state forgets the list instead of racing CSI for it. The volumes
+ * themselves are still reaped by destroy.js's captured-id volume sweep.
+ */
+const DO_DROPLET_TYPE = 'digitalocean:index/droplet:Droplet';
+
+/**
+ * Empty every DigitalOcean Droplet's `volumeIds` in the stack's state, on
+ * inputs and outputs (the provider builds its Delete from the stored state;
+ * a refresh copies outputs into inputs). Only writes state when something
+ * changed, and never throws: a failure here leaves the destroy to report its
+ * own error, which is the better thing to surface.
+ *
+ * Returns the state it read (after the release, if one was written) so the
+ * caller's pre-destroy snapshot needs no second export, or `state: null`
+ * when the export failed.
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @returns {Promise<{ released: number, state: object|null }>}
+ */
+export async function releaseDropletVolumeIds(stack) {
+  try {
+    const state = await stack.exportStack();
+    const resources = state?.deployment?.resources ?? [];
+    let released = 0;
+    for (const r of resources) {
+      if (r?.type !== DO_DROPLET_TYPE) continue;
+      let touched = false;
+      for (const side of ['inputs', 'outputs']) {
+        const ids = r?.[side]?.volumeIds;
+        if (!Array.isArray(ids) || ids.length === 0) continue;
+        r[side].volumeIds = [];
+        touched = true;
+      }
+      if (touched) released++;
+    }
+    if (released > 0) {
+      await withStateBackendRetry(() => stack.importStack(state), 'pre-destroy state repair');
+      progressLog(
+        `[pulumi] released CSI volume ids from ${released} droplet ${
+          released === 1 ? 'record' : 'records'
+        }: the CSI driver owns those attachments, not the Droplet`,
+      );
+    }
+    return { released, state };
+  } catch (err) {
+    progressLog(`[pulumi] droplet volume release warning: ${summarizePulumiError(err)}`);
+    return { released: 0, state: null };
+  }
+}
+
+/**
  * Run `pulumi up` and return the raw outputs. Streams Pulumi logs to an
  * optional `onOutput` sink so callers can forward progress to a spinner.
  *
@@ -864,23 +932,36 @@ export async function destroyStack(stackName, program, options = {}) {
   } catch (err) {
     progressLog(`[pulumi] pre-destroy refresh warning: ${summarizePulumiError(err)}`);
   }
+  // The refresh above can record CSI volumes the cluster teardown is already
+  // deleting; see releaseDropletVolumeIds.
+  const { state: releasedState } = await releaseDropletVolumeIds(stack);
 
   // Pre-destroy resource snapshot — see the loud-partial-detection doc
   // above. Best-effort: if exportStack itself fails, skip the resource-count
   // cross-check below rather than guessing.
   let resourceCountBefore = null;
   try {
-    const state = await stack.exportStack();
+    const state = releasedState ?? (await stack.exportStack());
     const resources = state?.deployment?.resources ?? [];
     resourceCountBefore = resources.filter((r) => r.type !== 'pulumi:pulumi:Stack').length;
   } catch {
     /* unknown — skip the cross-check, still rely on result.summary.result */
   }
 
-  const result = await withStateBackendRetry(
-    () => stack.destroy({ onOutput: options.onOutput, color: 'never' }),
-    'destroy',
-  );
+  // continueOnError: without it Pulumi stops scheduling deletes at the first
+  // resource error, so one failed Droplet strands every unrelated resource
+  // in the stack (d4-standby, 2026-10-31: "1 deleted, 2 errored", master,
+  // reserved IP, firewall and VPC never attempted). With it, everything that
+  // does not depend on the failed resource is still deleted.
+  let result;
+  try {
+    result = await withStateBackendRetry(
+      () => stack.destroy({ onOutput: options.onOutput, color: 'never', continueOnError: true }),
+      'destroy',
+    );
+  } catch (err) {
+    throw await describeDestroyFailure(stack, stackName, err);
+  }
 
   if (result.summary?.result && result.summary.result !== 'succeeded') {
     throw new Error(
@@ -902,6 +983,134 @@ export async function destroyStack(stackName, program, options = {}) {
 
   await stack.workspace.removeStack(stackName);
   return { destroyed: true, resourceCount: resourceCountBefore ?? deleteCount };
+}
+
+/**
+ * The provider's own complaint out of a failed `pulumi destroy`'s output.
+ *
+ * The Automation API error is the whole command envelope, and the generic
+ * summarizer picks its first `error:` line, which for a destroy is the
+ * stack's `error: update failed`: true, and useless to an operator. The
+ * resource diagnostic below it is what says why. Falls back to the first
+ * line of anything that is not a Pulumi diagnostic.
+ *
+ * @param {string} message
+ * @returns {string}
+ */
+export function pulumiDestroyFailureCause(message) {
+  const lines = String(message ?? '').split('\n');
+  for (const line of lines) {
+    const text = diagnosticText(line);
+    if (text) return text;
+  }
+  return lines.find((l) => l.trim())?.trim() ?? '';
+}
+
+/**
+ * The useful text of one Pulumi error line, or null. Skips the stack's own
+ * `update failed` and the engine's `deleting urn:...` wrapper, and strips the
+ * terraform-bridge location prefix.
+ * @param {string} line
+ * @returns {string|null}
+ */
+function diagnosticText(line) {
+  const m = /^\s*(?:\*\s|error:\s)\s*(.+)$/.exec(line);
+  if (!m) return null;
+  const text = m[1]
+    .replace(/^sdk-v2\/\S+:\s*/, '')
+    .replace(/^sdk\.helper_schema:\s*/, '')
+    .trim();
+  if (!text || /^update failed$/i.test(text) || /^deleting urn:/i.test(text)) return null;
+  return text;
+}
+
+/**
+ * Each resource's own error, from the `Diagnostics:` block of a failed
+ * `pulumi destroy`. The engine heads every resource's diagnostics with
+ * `  <pkg>:<module>:<Type> (<logical name>):`, so the key is
+ * `<pkg>:<module>:<Type>::<logical name>` (see `diagnosticKey` for the state
+ * side). The stack's own entry is skipped: it only ever says `update failed`.
+ *
+ * @param {string} message
+ * @returns {Map<string, string>}
+ */
+export function pulumiDiagnosticsByResource(message) {
+  const map = new Map();
+  const lines = String(message ?? '').split('\n');
+  const start = lines.findIndex((l) => /^\s*Diagnostics:\s*$/.test(l));
+  if (start < 0) return map;
+  let key = null;
+  for (const line of lines.slice(start + 1)) {
+    const head = /^\s*([\w-]+:[\w/-]+:\w+) \((.+)\):\s*$/.exec(line);
+    if (head) {
+      key = head[1].startsWith('pulumi:pulumi:') ? null : `${head[1]}::${head[2]}`;
+      continue;
+    }
+    if (!key || map.has(key)) continue;
+    const text = diagnosticText(line);
+    if (text) map.set(key, text);
+  }
+  return map;
+}
+
+/**
+ * State type `digitalocean:index/droplet:Droplet` plus logical name `db` to
+ * the diagnostics key `digitalocean:index:Droplet::db`.
+ * @param {string} type
+ * @param {string} logicalName
+ */
+function diagnosticKey(type, logicalName) {
+  return `${String(type).replace(/^([^:]+):([^/:]+)\/[^:]+:(\w+)$/, '$1:$2:$3')}::${logicalName}`;
+}
+
+/**
+ * Turn a failed destroy into an error that names what is left: every
+ * resource still in the stack's state (read back after the failure), and
+ * the provider's actual complaint. The original error rides along as
+ * `cause` for the log. Reading the state back is best-effort: an
+ * unreadable state yields `remainingResources: null`, which the caller
+ * reports as "the whole stack is unverified".
+ *
+ * @param {import('@pulumi/pulumi/automation').Stack} stack
+ * @param {string} stackName
+ * @param {unknown} err
+ * @returns {Promise<Error & { remainingResources: Array<{type: string, logicalName: string, name: string|null, id: string|null, error: string|null}>|null }>}
+ */
+async function describeDestroyFailure(stack, stackName, err) {
+  const original = err instanceof Error ? err : new Error(String(err));
+  let remainingResources = null;
+  try {
+    const state = await stack.exportStack();
+    const diagnostics = pulumiDiagnosticsByResource(original.message);
+    remainingResources = (state?.deployment?.resources ?? [])
+      .filter((r) => r?.type && r.type !== 'pulumi:pulumi:Stack' && !r.type.startsWith('pulumi:'))
+      .map((r) => {
+        const logicalName = String(r.urn ?? '')
+          .split('::')
+          .pop();
+        return {
+          type: r.type,
+          logicalName,
+          name: r.outputs?.name ?? null,
+          id: r.id ?? null,
+          // Its own diagnostic, or null when it failed on nothing itself
+          // (blocked behind a dependency, or never attempted).
+          error: diagnostics.get(diagnosticKey(r.type, logicalName)) ?? null,
+        };
+      });
+  } catch {
+    /* state unreadable: the caller treats the whole stack as unverified */
+  }
+  const cause = pulumiDestroyFailureCause(original.message);
+  const left =
+    remainingResources === null
+      ? 'its remaining resources could not be read back'
+      : `${remainingResources.length} resource(s) remain in its state`;
+  const error = new Error(`pulumi destroy for stack "${stackName}" failed, ${left}: ${cause}`, {
+    cause: original,
+  });
+  error.remainingResources = remainingResources;
+  return error;
 }
 
 /**

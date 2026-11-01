@@ -57,6 +57,7 @@ vi.mock('../../../src/lib/hetzner-guided-setup.js', async (orig) => {
 });
 
 const { run } = await import('../../../src/destroy.js');
+const { isLeakReportLine } = await import('../../../src/lib/destroy/leak-ledger.js');
 
 class ProcessExitError extends Error {
   code: number;
@@ -195,6 +196,60 @@ describe('destroy orphan-gate (never auto-destroy orphan stacks without -orphans
 
     expect(hetznerGetS3CredentialsMock).not.toHaveBeenCalled();
     expect(destroyK8sMock).not.toHaveBeenCalled();
+  });
+
+  // A failed orphan-stack destroy used to print one spinner line and still
+  // exit 0, which hid the leak from every scripted caller. It now reports
+  // into the same leak ledger as an environment destroy: one UNVERIFIED line
+  // per resource left in the stack, the command that finishes, exit 2.
+  it('exits 2 and names what a failed orphan-stack destroy left behind', async () => {
+    primeUntracked(['leaked-env', 'clean-env']);
+    const failure = new Error(
+      'pulumi destroy for stack "leaked-env" failed, 1 resource(s) remain in its state: boom',
+    ) as Error & { remainingResources?: unknown };
+    failure.remainingResources = [
+      {
+        type: 'hcloud:index/server:Server',
+        logicalName: 'master',
+        name: 'proj-leaked-env-master',
+        id: '42',
+        error: 'server delete failed: 500',
+      },
+    ];
+    destroyK8sMock.mockImplementation(async ({ environment }: { environment: string }) => {
+      if (environment === 'leaked-env') throw failure;
+    });
+    const exit = mockProcessExit();
+    const chunks: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+
+    await expect(run(['-y', '-orphans'])).rejects.toThrow(ProcessExitError);
+
+    // Both stacks were attempted: one failure does not stop the rest.
+    expect(destroyK8sMock).toHaveBeenCalledTimes(2);
+    expect(exit).toHaveBeenCalledWith(2);
+    const out = chunks
+      .join('')
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI is the point
+      .replace(/\x1b\[[0-9;]*m/g, '');
+    const verdicts = out.split('\n').filter((line) => isLeakReportLine(line));
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0]).toMatch(/UNVERIFIED\s+server\s+proj-leaked-env-master \(id 42\)/);
+    expect(verdicts[0]).toMatch(/server delete failed: 500/);
+    expect(out).toMatch(/`vibecarbon destroy -orphans`/);
+  });
+
+  it('exits 0 when every orphan stack is destroyed', async () => {
+    primeUntracked(['leaked-env']);
+    destroyK8sMock.mockResolvedValue(undefined);
+    const exit = mockProcessExit();
+
+    await expect(run(['-y', '-orphans'])).rejects.toThrow(ProcessExitError);
+
+    expect(exit).toHaveBeenCalledWith(0);
   });
 
   it('never calls destroyK8s when there are no orphan stacks at all', async () => {
