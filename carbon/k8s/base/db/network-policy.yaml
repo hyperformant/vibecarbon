@@ -10,8 +10,8 @@
 #     `kubectl exec`s wal-g into this pod through the apiserver
 #     (backup-policy, k8s/base/backup/network-policy.yaml);
 #   - on k8s-ha, the primary repl-gateway relaying the standby's replication
-#     connection to this pod's hostPort (patched in by the HA deploy,
-#     buildDbHostPortPatch in src/lib/deploy/k8s/ha/index.js), and this pod's
+#     connection to this pod's hostPort (rendered in by the HA deploy before
+#     the first apply, buildDbHostPortPatch in src/lib/deploy/k8s/k3s.js), and this pod's
 #     own egress to the local gateway (allow-db-repl-gateway-egress, shipped
 #     inside k8s/base/repl-gateway/repl-gateway.yaml).
 #

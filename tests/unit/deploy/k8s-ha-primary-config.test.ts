@@ -28,7 +28,17 @@ describe('configurePrimaryForReplication', () => {
     // The serving primary is reloaded, never restarted, so nothing downstream
     // of it needs a rollout (HA-correctness Task 8; the census is
     // no-warm-primary-restart-census.test.ts).
-    for (const gone of ['primaryRestart', 'rolloutRestart', 'rolloutStatus', 'rollout restart']) {
+    // Nor is its StatefulSet patched: the replication hostPort is rendered
+    // before the db's first apply, and a patch recreated the freshly attached
+    // primary db pod (DO e2e 2026-11-01, k8s-ha-db-hostport-render.test.ts).
+    for (const gone of [
+      'primaryRestart',
+      'rolloutRestart',
+      'rolloutStatus',
+      'rollout restart',
+      'rollout status',
+      'patch statefulset',
+    ]) {
       expect(body).not.toContain(gone);
     }
     expect(body).toContain('pg_reload_conf');

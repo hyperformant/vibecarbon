@@ -39,6 +39,29 @@ const POD_JSON = JSON.stringify(
   2,
 );
 
+const STS_JSON = JSON.stringify({
+  spec: {
+    template: {
+      spec: {
+        containers: [
+          {
+            name: 'db',
+            ports: [
+              {
+                name: 'postgres',
+                containerPort: 5432,
+                protocol: 'TCP',
+                hostPort: 5433,
+                hostIP: '127.0.0.1',
+              },
+            ],
+          },
+        ],
+      },
+    },
+  },
+});
+
 // Shared happy-path exec behavior, incl. the helper-pod swap lifecycle
 // (apply → status.phase=Succeeded via -o json → logs RESEED_SWAPPED → delete).
 // `swapLog`/`swapPhase`/`swapConditions` let a test flip the swap-pod's
@@ -73,6 +96,8 @@ function happyExec({
     if (cmd.includes('get pod') && cmd.includes('-o json')) return POD_JSON;
     // db pod-gone poll after scale-to-zero: report the pod as already gone.
     if (cmd.includes('get pod') && cmd.includes('--ignore-not-found')) return '';
+    // The primary's db StatefulSet, rendered with its replication hostPort.
+    if (cmd.includes('get statefulset db') && cmd.includes('-o json')) return STS_JSON;
     if (cmd.includes('pg_isready')) return 'IS_READY';
     if (cmd.includes('pg_is_in_recovery')) return 't';
     if (cmd.includes('pg_stat_replication')) return reseeded ? 'streaming' : '';
@@ -304,10 +329,12 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       sshKeyPath: '/tmp/key',
     });
 
-    // The db hostPort patch is STILL applied (primary gateway relays to it).
-    expect(
-      calls.some(([argv]) => (argv as string[]).join(' ').includes('patch statefulset db')),
-    ).toBe(true);
+    // The db hostPort the primary gateway relays to is READ, never patched:
+    // it is rendered into the StatefulSet before its first apply, and a patch
+    // would recreate the freshly attached primary db (DO e2e 2026-11-01).
+    const joined = calls.map(([argv]) => (argv as string[]).join(' '));
+    expect(joined.some((c) => c.includes('get statefulset db'))).toBe(true);
+    expect(joined.some((c) => c.includes('patch statefulset db'))).toBe(false);
 
     // No TLS-era plumbing anywhere in the SSH stream.
     const everything = calls

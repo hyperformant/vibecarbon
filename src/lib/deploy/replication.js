@@ -25,7 +25,7 @@ import { REPL_GATEWAY_PORT } from './wireguard.js';
 
 /**
  * Shared budget for every db-StatefulSet boot/rollout wait (the deploy-side
- * reseed standbyBoot + dbHostPort recreate in k8s/ha/index.js, and the
+ * reseed standbyBoot in k8s/ha/index.js, and the
  * failover/restore-side reseed wait below). 600s, raised from 300s
  * 2026-08-29: DigitalOcean CSI detach/attach settle pushed a HEALTHY
  * standby boot past 300s (run 33252884427 — the rollout wait timed out and

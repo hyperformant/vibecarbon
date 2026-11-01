@@ -302,7 +302,17 @@ classes:
       Trigger amplitude is ours (the re-seed's four attach/detach transitions
       on one volume in ~2 min) and is separately narrowed at the root by the
       detach-settle waits (waitForPvDetach) at both churn points; the
-      recovery below covers the provider-side residual only.
+      recovery below covers the provider-side residual only. Recurred on a
+      COLD k8s-ha deploy (DO e2e 2026-11-01, d4, main a159ff7): the primary
+      db-0's first attach held, then configurePrimaryForReplication's
+      hostPort `kubectl patch` recreated db-0 about a minute later, the
+      same-node detach/re-attach recorded an attach that never held
+      (AttachVolume succeeded, MountDevice mkfs on a missing device for
+      600s), while the standby db (never recreated) and the single-tier k8s
+      db (never recreated) came up clean. Root fix: the hostPort is rendered
+      into the db StatefulSet before its first apply on both HA roles
+      (rendersReplicationHostPort, src/lib/deploy/k8s/k3s.js), so a cold
+      deploy attaches the primary db volume exactly once.
     sites:
       - site: "src/lib/deploy/replication.js :: reseedStandbyFromPrimary rollout-wait stale-attachment repair"
         detectable: false

@@ -2439,8 +2439,10 @@ export async function runLifecycle(
               replResults.push(
                 ...(await assertPilotLightStandby(standbyIp, { sshKeyPath, label: 'standby' })),
               );
-              // The first deploy's hostPort patch recreates db-0 and nothing
-              // rollout-restarts the app any more: it must reconnect on its own.
+              // Nothing rollout-restarts the app after the db is up (the db's
+              // replication hostPort is rendered before its first apply, so
+              // the replication setup never recreates db-0): the app's
+              // endpoints must be Ready on their own.
               replResults.push(await checkAppEndpointsReady({ primaryIp, sshKeyPath }));
             }
             if (stepName === 'verify-deploy') {
@@ -3436,7 +3438,8 @@ EOF`;
             };
             // HA: a warm deploy must not bounce the serving primary (the
             // replication settings are on the db argv, and on k8s the
-            // dbHostPort patch is a no-op once applied).
+            // replication hostPort is rendered into the db StatefulSet, so a
+            // re-apply leaves its pod template unchanged).
             if (config.mode === 'compose-ha' || config.mode === 'k8s-ha') {
               await assertPrimaryNotRestartedAcross(stepId, deploy);
             } else {

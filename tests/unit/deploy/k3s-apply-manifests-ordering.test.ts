@@ -400,6 +400,11 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
     readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
   );
+  // A k8s-ha role renders its replication hostPort into db/ as a kustomize patch.
+  writeFileSync(
+    join(dir, 'k8s', 'base', 'db', 'kustomization.yaml'),
+    readFileSync(join(__dirname, '../../../carbon/k8s/base/db/kustomization.yaml'), 'utf-8'),
+  );
   if (withRegistry) {
     mkdirSync(join(dir, 'k8s', 'base', 'registry'), { recursive: true });
     writeFileSync(

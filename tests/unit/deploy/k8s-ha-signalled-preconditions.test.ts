@@ -219,8 +219,8 @@ describe('k8s-ha transport preconditions are signalled', () => {
   it('with early prep resolved true, the image copy starts before configure-replication returns', async () => {
     for (const g of [...Object.values(namespaceGates), ...Object.values(deployGates)]) g.open();
     const ctx = newCtx();
-    // The primary's replication config is still running (its hostPort patch
-    // recreates the primary db pod): the copy must not wait behind it.
+    // The primary's replication config is still running (SQL and pg_hba
+    // against the primary db): the copy must not wait behind it.
     const provisioned = K8S_HA_EFFECTS.haK8sProvisionClusters(ctx);
     await drain();
     await drain();
