@@ -80,6 +80,38 @@ export const ADDON_WAIT_TIMEOUT_S = 900;
 
 export const ADDON_STATES = ['starting', 'running', 'failed', 'stopped'];
 
+/**
+ * Reads `docker compose config --format json` on stdin and prints, one per
+ * line, every service whose image is not the app service's own. The app image
+ * is a local-only tag built on the server, so no registry serves it, and every
+ * service that runs it (app, app-migrate) must stay out of a `compose pull`.
+ * With no `app` service, or an app without an image, nothing is excluded.
+ *
+ * Why the JSON, not `config --images <svc>`: that command also prints the
+ * images of the service's dependencies (Compose 5.6.1: `app`, which depends
+ * on app-migrate and db, prints the app image twice and then db's), so a
+ * comparison of it against one image never matches (DO e2e, 2026-11-01).
+ * python3 is on every server (cloud-init); stdlib json only. `-I` keeps the
+ * project directory off sys.path. Malformed or empty input fails non-zero.
+ */
+const NON_APP_IMAGE_SERVICES_PY =
+  'import json,sys; s=json.load(sys.stdin)["services"]; ' +
+  'a=s.get("app", {}).get("image"); ' +
+  'sys.stdout.write("".join(n+"\\n" for n,v in s.items() if a is None or v.get("image")!=a))';
+
+/** Shell filter: `config --format json` in, the services not on the app image out. */
+export const NON_APP_IMAGE_SERVICES_FILTER = `python3 -I -c '${NON_APP_IMAGE_SERVICES_PY}'`;
+
+/**
+ * Shell that prints the services a pull may ask a registry for: every service
+ * not on the app image (see NON_APP_IMAGE_SERVICES_PY). Its exit status is the
+ * parser's, so an unreadable config fails it.
+ * @param {string} compose the compose invocation with its `-f` set, e.g. `docker compose -f a.yml`
+ */
+export function nonAppImageServicesShell(compose) {
+  return `${compose} config --format json | ${NON_APP_IMAGE_SERVICES_FILTER}`;
+}
+
 /** The compose overlay files an add-on ships (dev overrides excluded). */
 function overlayTexts(name) {
   return ['docker-compose.yml', 'docker-compose.prod.yml']
@@ -228,7 +260,7 @@ ${list}exit 0
  * addons-start.sh: the detached add-on job. One run at a time: a newer run
  * (the next deploy's reconcile) stops the older one's process group first.
  * Per add-on: pull its images (never the app's local-only image, the same
- * filter as the stack pull), `up -d --wait` its services, run its one-shot
+ * filter as the stack pull: nonAppImageServicesShell), `up -d --wait` its services, run its one-shot
  * setups to completion, and record `running`, or `failed` with the reason;
  * the output goes to `.vc-addons/<name>.log`, with the services' log tail on a
  * failure.
@@ -299,8 +331,6 @@ set_status() {
   mv "$tmp" "$dir/status"
 }
 
-app_image=$(dc config --images app 2>/dev/null)
-
 # <name> '<services>' '<setup services>'
 run_addon() {
   name=$1
@@ -309,9 +339,20 @@ run_addon() {
   if [ -n "$skip_setup" ]; then setup=""; fi
   log="$dir/$name.log"
   : > "$log"
+  # Never the app's local-only image (app, app-migrate): no registry serves
+  # it. The service-to-image map is read once per add-on, at the current -f
+  # set; an unreadable config fails the add-on with compose's own words.
+  if ! config=$(dc config --format json 2>> "$log"); then
+    set_status "$name" failed "could not read the compose config: $(tail -n 1 "$log")"
+    return
+  fi
+  if ! pullable=$(printf '%s' "$config" | ${NON_APP_IMAGE_SERVICES_FILTER} 2>> "$log"); then
+    set_status "$name" failed "could not read the compose config: $(tail -n 1 "$log")"
+    return
+  fi
   pull=""
   for s in $services $setup; do
-    [ "$(dc config --images "$s" 2>/dev/null)" = "$app_image" ] || pull="$pull $s"
+    if printf '%s\\n' "$pullable" | grep -qxF "$s"; then pull="$pull $s"; fi
   done
   # shellcheck disable=SC2086 # service word lists
   if [ -n "$pull" ] && ! dc pull --policy missing $pull >> "$log" 2>&1; then

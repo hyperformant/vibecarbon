@@ -24,6 +24,10 @@ import {
   renderAddonServicesScript,
 } from '../../../src/lib/services/addon-start.js';
 import { declaredAddonNames, loadAddonStandby } from '../../../src/lib/services/standby-policy.js';
+import {
+  COMPOSE_DEPENDS_ON_FIXTURE,
+  composeConfigStub,
+} from '../../_shared/compose-config-stub.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
 
@@ -162,8 +166,9 @@ describe('addon-services.sh', () => {
 
 /**
  * The job, run against a stub `docker` that logs every call and answers the
- * compose subcommands it uses. STUB_FAIL_UP / STUB_FAIL_PULL / STUB_SETUP_RC
- * drive the failure paths.
+ * compose subcommands it uses; `config` answers with real compose output
+ * (tests/_shared/compose-config-stub.ts). STUB_FAIL_UP / STUB_FAIL_PULL /
+ * STUB_SETUP_RC / STUB_FAIL_CONFIG drive the failure paths.
  */
 function stubDocker(dir: string) {
   writeFileSync(
@@ -174,7 +179,10 @@ if [ "$1" = wait ]; then echo "\${STUB_SETUP_RC:-0}"; exit 0; fi
 shift # compose
 while [ "$1" = "-f" ]; do shift 2; done
 case "$1" in
-  config) [ "$3" = app ] || [ "$3" = app-sidecar ] && echo 'demo-app:local' || echo "img/$3"; exit 0 ;;
+  config)
+    [ -n "$STUB_FAIL_CONFIG" ] && { echo "service n8n refers to undefined volume" >&2; exit 15; }
+    ${composeConfigStub(dir, COMPOSE_DEPENDS_ON_FIXTURE)}
+    exit 0 ;;
   pull) [ -n "$STUB_FAIL_PULL" ] && { echo "toomanyrequests: rate limit"; exit 1; }; exit 0 ;;
   up)
     if [ -n "$STUB_HANG_UP" ]; then sleep 30; fi
@@ -233,12 +241,16 @@ describe('addons-start.sh', () => {
     expect(existsSync(join(dir, '.vc-addons', 'job.pid'))).toBe(false);
   });
 
+  // `config --images <svc>` prints the images of the service's dependencies
+  // too, so comparing it to app's never matched and the job pulled the
+  // local-only app image (DO e2e, 2026-11-01). The fixture's app-migrate runs
+  // the app image and depends on db, as the deploy's does.
   it('never pulls the app image', () => {
     const dir = tempDir();
     writeFileSync(
       join(dir, ADDON_JOB_SCRIPT),
       renderAddonJobScript('demo', '-f a.yml', [
-        { name: 'x', services: ['app-sidecar', 'grafana'], setup: [] },
+        { name: 'x', services: ['app-migrate', 'grafana'], setup: [] },
       ]),
     );
     stubDocker(dir);
@@ -250,8 +262,19 @@ describe('addons-start.sh', () => {
       calls(dir)
         .split('\n')
         .find((l) => / pull /.test(l)) ?? '';
-    expect(pull).toContain('grafana');
-    expect(pull).not.toContain('app-sidecar');
+    expect(pull).toMatch(/ pull --policy missing +grafana$/);
+    expect(pull).not.toContain('app-migrate');
+  });
+
+  it('an unreadable compose config fails the add-on with the reason, and pulls nothing', () => {
+    const dir = tempDir();
+    runJob(dir, { STUB_FAIL_CONFIG: '1' });
+    expect(status(dir).every((a) => a.state === 'failed')).toBe(true);
+    expect(status(dir)[0].reason).toMatch(
+      /could not read the compose config: .*service n8n refers to undefined volume/,
+    );
+    expect(calls(dir)).not.toMatch(/ pull /);
+    expect(calls(dir)).not.toMatch(/ up /);
   });
 
   it('a service that never gets healthy is failed, with the reason and its logs', () => {
@@ -389,7 +412,10 @@ describe('addons-start.sh stop', () => {
     first.on('exit', () => {
       exited = true;
     });
-    for (let i = 0; i < 200 && !existsSync(join(dir, '.vc-addons', 'job.pid')); i++) {
+    // Stop it while it hangs inside its `up` (the pull before it is not instant).
+    const inUp = () =>
+      existsSync(join(dir, 'calls')) && / up -d/.test(readFileSync(join(dir, 'calls'), 'utf8'));
+    for (let i = 0; i < 300 && !inUp(); i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
     expect(await runAsync('sh', [ADDON_JOB_SCRIPT, 'stop'], { cwd: dir, env: env(dir) })).toBe(0);
