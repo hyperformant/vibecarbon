@@ -7,14 +7,16 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-settings.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
+import { writeLogDetail } from '../../deploy-logger.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
+import { loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
 import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
@@ -69,7 +71,6 @@ const __dirname = dirname(__filename);
 
 // Path to the cloud-init YAML shipped with the CLI package. Referenced from
 // carbon/cloud-init/ (one level up from src/ in the installed tree).
-const CLOUD_INIT_PATH = join(__dirname, '../../../../carbon/cloud-init/docker-ce-setup.yaml');
 
 /**
  * Read the cloud-init user-data YAML that runs at VPS boot to front-load
@@ -80,7 +81,7 @@ const CLOUD_INIT_PATH = join(__dirname, '../../../../carbon/cloud-init/docker-ce
  * upgrade` has a single place to notice layout changes.
  */
 export function loadCloudInitScript() {
-  return readFileSync(CLOUD_INIT_PATH, 'utf-8');
+  return loadComposeCloudInit();
 }
 
 /**
@@ -368,6 +369,44 @@ export function buildSetupServerError(ip, everConnected, tail, timeoutMs = 180_0
   );
 }
 
+/** Where the compose cloud-init's boot image pull records its outcome. */
+export const BOOT_PULL_STATUS_PATH = '/var/lib/vibecarbon/boot-pull/status';
+
+/**
+ * The deploy-log line for what the boot image pull (carbon/cloud-init/
+ * docker-ce-setup.yaml boot-pull.sh) reported on one server.
+ * @param {string} ip
+ * @param {string} status the status file's content, or 'absent'
+ */
+export function bootPullLogLine(ip, status) {
+  const s = String(status ?? '').trim();
+  if (s === 'ok') return `[boot-pull] ${ip}: core images already pulled at boot`;
+  if (s === 'running') {
+    return `[boot-pull] ${ip}: still pulling at boot; the deploy pull shares the work`;
+  }
+  if (s.startsWith('failed')) return `[boot-pull] ${ip}: ${s}; the deploy pull does the work`;
+  return `[boot-pull] ${ip}: no boot pull on this server (booted before it existed)`;
+}
+
+/**
+ * Note in the deploy log what the boot pull reported. One read, never waited
+ * on by the deploy (setupServer does not await it) and never retried: the
+ * deploy's own pull does whatever the boot pull did not.
+ */
+export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync } = {}) {
+  try {
+    const status = await run(
+      ip,
+      sshKeyPath,
+      `cat ${BOOT_PULL_STATUS_PATH} 2>/dev/null || echo absent`,
+      { timeout: 15_000, ignoreError: true, retries: 1 },
+    );
+    writeLogDetail(bootPullLogLine(ip, status ?? 'absent'));
+  } catch {
+    // The note is informational: a failed read changes nothing.
+  }
+}
+
 /**
  * @param {string} ip
  * @param {string} sshKeyPath
@@ -406,6 +445,8 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
     if (result != null) everConnected = true; // any output means SSH connected
     if (result?.trim()?.endsWith('READY') && !result.includes('NOT_READY')) {
       s.stop(`Server ${ip} ready (cloud-init complete)`);
+      // Not awaited: the deploy never waits on the boot pull.
+      noteBootPull(ip, sshKeyPath);
       return;
     }
     const elapsed = Math.round((Date.now() - start) / 1000);

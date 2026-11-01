@@ -11,12 +11,42 @@
 # tells the CLI it's safe to proceed. If user-data fails, the marker never
 # appears; the CLI reports and dumps /var/log/cloud-init-output.log.
 
+# ufw and unattended-upgrades install in runcmd, AFTER Docker is up and the
+# boot image pull has started, so Docker (and the pull) start as early as the
+# boot allows instead of waiting for these packages.
 package_update: true
-packages:
-  - ufw
-  - unattended-upgrades
 
 write_files:
+  # The boot image pull: the pinned core images (the db image, the traefik and
+  # docker-socket-proxy mirrors; the CLI fills the list from src/lib/images.js,
+  # the same refs the compose files use) pulled in the background while the
+  # rest of boot runs, so the deploy's own `docker compose pull --policy
+  # missing` finds them present. Never waited on and never retried: if a pull
+  # fails, the deploy's pull does the work, loud on failure as always, and the
+  # deploy log quotes what this one reported (status + log below).
+  - path: /usr/local/lib/vibecarbon/boot-pull.sh
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      out=/var/lib/vibecarbon/boot-pull
+      mkdir -p "$out"
+      echo running > "$out/status"
+      : > "$out/log"
+      pids=""
+      for ref in __VIBECARBON_BOOT_PULL_IMAGES__; do
+        docker pull -q "$ref" >> "$out/log" 2>&1 &
+        pids="$pids $!"
+      done
+      failed=0
+      for pid in $pids; do
+        wait "$pid" || failed=$((failed + 1))
+      done
+      if [ "$failed" -eq 0 ]; then
+        echo ok > "$out/status"
+      else
+        echo "failed: $failed image(s), $(tail -n 1 "$out/log")" > "$out/status"
+      fi
+
   - path: /etc/apt/apt.conf.d/20auto-upgrades
     permissions: '0644'
     content: |
@@ -58,10 +88,27 @@ write_files:
       MaxSessions 64
 
 runcmd:
+  # Docker first (a provider that installs it splices that install above this
+  # line). Ensure it is running and restart it so it picks up
+  # /etc/docker/daemon.json written above: write_files runs before runcmd, but
+  # the docker-ce app has usually already started the daemon with the OLD
+  # config, so `enable --now` alone would leave the log cap unapplied. The
+  # restart is cheap here - no containers exist yet at boot. Nothing below
+  # restarts Docker again, so the boot pull started next never races a restart.
+  - [systemctl, enable, --now, docker]
+  - [systemctl, restart, docker]
+  # The boot image pull, detached so it overlaps the rest of boot and never
+  # holds the ready marker.
+  - [sh, -c, 'setsid nohup /usr/local/lib/vibecarbon/boot-pull.sh > /dev/null 2>&1 < /dev/null &']
+
   # Pick up the sshd drop-in written above (write_files runs first; ssh is
   # already up serving cloud-init's own channel, so reload - never restart,
   # which would sever the session provisioning us).
   - [systemctl, reload, ssh]
+  # UFW and unattended-upgrades, now that Docker and the pull are going.
+  # Lock timeout, not bare apt-get: unattended-upgrades may hold dpkg's lock
+  # on first boot (src/lib/deploy/apt.js).
+  - [sh, -c, 'apt-get -o DPkg::Lock::Timeout=300 install -y ufw unattended-upgrades']
   # UFW defaults + the three ports Traefik needs. Ordering matters: we enable
   # last so the allow rules are in place before the first policy flip.
   - [ufw, default, deny, incoming]
@@ -71,24 +118,12 @@ runcmd:
   - [ufw, allow, '443/tcp']
   - [sh, -c, 'echo y | ufw enable']
 
-  # Ensure Docker is running (docker-ce app usually starts it, but be defensive)
-  # and restart so it picks up /etc/docker/daemon.json written above. write_files
-  # runs before runcmd, but the docker-ce app has usually already started the
-  # daemon with the OLD config, so `enable --now` alone would leave the log cap
-  # unapplied. The restart is cheap here - no app containers exist yet at boot.
-  - [systemctl, enable, --now, docker]
-  - [systemctl, restart, docker]
-
-  # Note: an earlier iteration (iter-perfwave4b 2026-05-06) added parallel
-  # `docker pull` of the stack's service images here to overlap pulls with
-  # iac.upStack. Net result was -25s: the unauthenticated pulls from
-  # Hetzner DC IPs hit Docker Hub's per-IP rate limit, serializing/
-  # throttling them, which extended cloudInitReady by ~61s while only
-  # saving ~35s on compose.up. The marker file can't land until cloud-init
-  # finishes runcmd, so a slow pre-pull blocks the operator longer than
-  # paying the same cost during compose.up (which uses authenticated
-  # pulls - quota-exempt). Reverted; reconcile.sh's `docker compose pull`
-  # is the right place for this work, post-dockerLoginOnServer.
+  # History: an earlier boot pull (iter-perfwave4b 2026-05-06) ran in the
+  # foreground against Docker Hub and was reverted: Hetzner DC IPs hit Docker
+  # Hub's per-IP rate limit, and the marker waited for it (cloudInitReady
+  # +61s). Today's differs on both counts: the core images come from the
+  # public ghcr mirror (src/lib/images.js MIRRORED_IMAGES), and the pull is
+  # detached, so it never holds the marker.
 
   # Marker file - the CLI's setupServer polls for this. The parent dir may
   # not exist yet on a first boot; mkdir -p is safe either way.

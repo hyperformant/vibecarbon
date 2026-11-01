@@ -1,63 +1,4 @@
-/**
- * Pulumi program for a single Scaleway Docker Compose instance.
- *
- * Mirrors the hetzner/digitalocean/linode/vultr compose programs: one
- * server, one security group, one flexible IP.
- *
- * EXPORT CASINGS — enumerated from the installed @pulumiverse/scaleway
- * 1.54.0 type declarations, per the step-0 audit (the @ediri/vultr SSHKey
- * casing bug cost a live run; never guess these):
- *   - `scaleway.instance.Server` / `scaleway.instance.SecurityGroup` /
- *     `scaleway.instance.Ip` — note `Ip`, not `IP`.
- *   - `scaleway.iam.SshKey` — note `SshKey`, not `SSHKey`; prefer the iam
- *     namespace over the flat deprecated `AccountSshKey`.
- *   The flat top-level exports (`scaleway.InstanceServer`, …) are
- *   DEPRECATED in favor of these namespaced paths — do not use them.
- *
- * SSH KEYS ARE PROJECT-SCOPED (the audit's biggest design flag): Scaleway
- * has no per-instance key resource; `scw-fetch-ssh-keys` rewrites
- * /root/.ssh/authorized_keys from ALL of the Project's IAM keys at every
- * boot. The iam.SshKey below therefore grants access to EVERY instance in
- * the Project and its deletion on destroy revokes access to unrelated
- * servers — which is exactly why vibecarbon requires a DEDICATED Scaleway
- * Project per vibecarbon project (guided setup enforces the message; the
- * provider class header carries the doctrine). The frozen `sshKeyId`
- * output is that Project-level iam.SshKey's id.
- *
- * Cloud-init: `ubuntu_noble` ships no Docker (the Docker InstantApp's base
- * OS is unpinnable — audit), so the shared file gets the
- * official-Docker-apt-repo install spliced into `runcmd:` — keep
- * DOCKER_INSTALL_RUNCMD in lockstep with the digitalocean/linode/vultr
- * copies (not imported: each program's module graph must only load its own
- * Pulumi provider package).
- *
- * userData ENCODING: plain text under the `cloud-init` user-data key —
- * Scaleway has NO base64 leg (unlike Linode/Vultr) and gzip is explicitly
- * unsupported, so there is no 7-bit-clean safety net; assertAsciiCloudInit
- * (providers/scaleway.js — shared with the REST path) refuses non-ASCII
- * payloads loudly instead of trusting fidelity (DO precedent).
- *
- * Root volume: BASIC3 admits no local SSD (l_ssd max 0), so the root is an
- * SBS volume — with `deleteOnTermination: true` set EXPLICITLY, never
- * default-trusted: the API's `terminate` action only DETACHES sbs_volume
- * (SDK verbatim, audit), and a billed orphan volume per deploy is the
- * failure mode if this pin ever regresses.
- *
- * Security group: created first, attached at create via `securityGroupId`
- * (no unfirewalled window — the provider otherwise auto-creates an
- * untracked default group). Zone-scoped: compose is single-zone so ONE
- * group; a multi-zone tier needs one per zone. `stateful: true` pinned
- * explicitly (API-created groups default stateful, the per-AZ default
- * group is stateless — never rely on the default). Rules carry one
- * ipRange each, so operator-scoped ports expand to one rule per CIDR;
- * inbound default drop / outbound accept per the H-2 operator-lock
- * doctrine.
- *
- * Outputs: serverIp, serverId, firewallId, sshKeyId.
- */
-
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as scaleway from '@pulumiverse/scaleway';
 import { APT_LOCK_OPT } from '../../deploy/apt.js';
@@ -66,12 +7,8 @@ import {
   encodeLabels,
   transliterateCloudInitToAscii,
 } from '../../providers/scaleway.js';
+import { loadComposeCloudInit } from '../compose-cloud-init.js';
 import { serverResourceOptions } from '../create-timeout.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const CLOUD_INIT_PATH = join(__dirname, '../../../../carbon/cloud-init/docker-ce-setup.yaml');
 
 // SBS root-volume size — MUST byte-match
 // ScalewayProvider.COMPOSE_ROOT_VOLUME_GB (the REST replacement path
@@ -125,7 +62,7 @@ export function renderScalewayUserData(sharedYaml) {
  */
 export function loadScalewayComposeUserData() {
   return assertAsciiCloudInit(
-    transliterateCloudInitToAscii(renderScalewayUserData(readFileSync(CLOUD_INIT_PATH, 'utf-8'))),
+    transliterateCloudInitToAscii(renderScalewayUserData(loadComposeCloudInit())),
   );
 }
 

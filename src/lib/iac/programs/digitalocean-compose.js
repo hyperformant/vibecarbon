@@ -1,38 +1,10 @@
-/**
- * Pulumi program for a single DigitalOcean Docker Compose droplet.
- *
- * Mirrors hetzner-compose.js: one server, one firewall, no floating IP.
- *
- * Cloud-init parity (Step 1, blocking): Hetzner uses the `docker-ce`
- * marketplace image, which ships Docker pre-installed, so
- * carbon/cloud-init/docker-ce-setup.yaml can assume `docker.service`
- * already exists (its own comment: "Ensure Docker is running (docker-ce
- * app usually starts it, but be defensive)" — a bare `systemctl enable
- * --now docker` with no install step). DigitalOcean's `docker-ce` slug
- * situation could not be verified against the real Marketplace API (no DO
- * credentials in this environment yet — see the TODO(B7) below), so this
- * program uses the plain `ubuntu-24-04-x64` base image and renders an
- * extended user-data via renderDoUserData(): the shared file's `runcmd:`
- * block gets an official-Docker-apt-repo install sequence spliced in
- * immediately after the `runcmd:` key, so it runs BEFORE the shared file's
- * `systemctl enable --now docker` step. Every other line of the shared
- * file (ufw rules, unattended-upgrades, the ready-marker) is reused as-is.
- *
- * Outputs: serverIp, serverId, firewallId, sshKeyId.
- */
-
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as digitalocean from '@pulumi/digitalocean';
 import { APT_LOCK_OPT } from '../../deploy/apt.js';
 import { encodeLabels } from '../../providers/digitalocean.js';
+import { loadComposeCloudInit } from '../compose-cloud-init.js';
 import { serverResourceOptions } from '../create-timeout.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const CLOUD_INIT_PATH = join(__dirname, '../../../../carbon/cloud-init/docker-ce-setup.yaml');
 
 // Official Docker apt-repo install, spliced into the shared cloud-init's
 // `runcmd:` list (see renderDoUserData). Idempotent / safe to re-run:
@@ -156,7 +128,7 @@ export function renderDoUserData(sharedYaml) {
  * @returns {string}
  */
 export function loadDoComposeUserData() {
-  return renderDoUserData(readFileSync(CLOUD_INIT_PATH, 'utf-8'));
+  return renderDoUserData(loadComposeCloudInit());
 }
 
 /**

@@ -1,30 +1,4 @@
-/**
- * Pulumi program for a single Linode Docker Compose instance.
- *
- * Mirrors hetzner-compose.js / digitalocean-compose.js: one server, one
- * firewall, no floating IP.
- *
- * Cloud-init: `linode/ubuntu24.04` ships no Docker (Linode's Marketplace
- * Docker app is a StackScript, not an image — linode-step0-audit.md), so
- * this program renders an extended user-data via renderLinodeUserData():
- * the shared file's `runcmd:` block gets the official-Docker-apt-repo
- * install sequence spliced in immediately after the `runcmd:` key — same
- * splice as digitalocean-compose.js (keep DOCKER_INSTALL_RUNCMD in
- * lockstep with that module's copy; not imported from it because the DO
- * program's module graph top-level-imports @pulumi/digitalocean, which a
- * Linode deploy has no reason to load).
- *
- * NO ASCII transliteration here, unlike the DO program: Linode user-data
- * is delivered base64-encoded (`metadatas[].userData`, caller-encoded —
- * verified 2026-08-07 on the Pulumi registry), and base64 is 7-bit clean
- * end-to-end, so DO's double-encoding failure class cannot occur. Bytes are
- * preserved verbatim; the l1 e2e run's ready-marker is the fidelity proof.
- *
- * Outputs: serverIp, serverId, firewallId, sshKeyId.
- */
-
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as linode from '@pulumi/linode';
 import { APT_LOCK_OPT } from '../../deploy/apt.js';
@@ -34,12 +8,8 @@ import {
   squeezeLinodeInstanceLabel,
   squeezeLinodeLabel,
 } from '../../providers/linode.js';
+import { loadComposeCloudInit } from '../compose-cloud-init.js';
 import { serverResourceOptions } from '../create-timeout.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const CLOUD_INIT_PATH = join(__dirname, '../../../../carbon/cloud-init/docker-ce-setup.yaml');
 
 // Official Docker apt-repo install — keep in LOCKSTEP with
 // digitalocean-compose.js's DOCKER_INSTALL_RUNCMD (same idempotency
@@ -91,7 +61,7 @@ export function renderLinodeUserData(sharedYaml) {
  * @returns {string}
  */
 export function loadLinodeComposeUserData() {
-  return renderLinodeUserData(readFileSync(CLOUD_INIT_PATH, 'utf-8'));
+  return renderLinodeUserData(loadComposeCloudInit());
 }
 
 /**

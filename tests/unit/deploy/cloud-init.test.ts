@@ -21,9 +21,12 @@ describe('compose cloud-init user_data', () => {
   });
 
   it('cloud-init installs ufw + unattended-upgrades at boot (so setupServer skips apt-get)', () => {
+    // In runcmd, after Docker and the boot image pull have started
+    // (tests/unit/iac/compose-boot-pull.test.ts pins the order).
     const contents = readFileSync(cloudInitPath, 'utf-8');
-    expect(contents).toMatch(/^\s*-\s+ufw\b/m);
-    expect(contents).toMatch(/^\s*-\s+unattended-upgrades\b/m);
+    expect(contents).toMatch(
+      /apt-get -o DPkg::Lock::Timeout=\d+ install -y ufw unattended-upgrades/,
+    );
   });
 
   it('cloud-init touches /var/lib/vibecarbon/ready as the marker file setupServer polls', () => {
