@@ -7,6 +7,7 @@ import {
   podDisplayName,
   rowsFromPods,
 } from '../../../src/lib/status/remote-containers.js';
+import { withSshContract } from '../../_shared/ssh-contract.js';
 
 describe('planContainerTargets', () => {
   it('compose: the single server, kind compose', () => {
@@ -478,6 +479,18 @@ describe('nodeReadiness', () => {
   });
 });
 
+/** checkRemoteContainers with its injected sshRun held to ssh.js's argv contract. */
+const checkWithContract = (
+  env: string,
+  cfg: Parameters<typeof checkRemoteContainers>[1],
+  project: string | undefined,
+  deps: Record<string, unknown>,
+) =>
+  checkRemoteContainers(env, cfg, project, {
+    ...deps,
+    ...(deps.sshRun ? { sshRun: withSshContract(deps.sshRun as () => unknown) } : {}),
+  } as Parameters<typeof checkRemoteContainers>[3]);
+
 describe('checkRemoteContainers', () => {
   // effects/compose-ha.js shape, names shortened for the assertions below
   const composeHa = {
@@ -494,9 +507,9 @@ describe('checkRemoteContainers', () => {
   });
 
   it('returns null with no project name or no servers', async () => {
-    expect(await checkRemoteContainers('prod', composeHa, undefined, base())).toBeNull();
+    expect(await checkWithContract('prod', composeHa, undefined, base())).toBeNull();
     expect(
-      await checkRemoteContainers('prod', { deployMode: 'compose', servers: [] }, 'letsgo', base()),
+      await checkWithContract('prod', { deployMode: 'compose', servers: [] }, 'letsgo', base()),
     ).toBeNull();
   });
 
@@ -516,7 +529,7 @@ describe('checkRemoteContainers', () => {
       `#attempt ${ATTEMPT}\nobservability\trunning\t\nn8n\tfailed\tsetup n8n-setup exited 1\n`,
       'letsgo-app\trunning\tUp 1h (healthy)\n',
     );
-    const out = await checkRemoteContainers('prod', withAddons(), 'letsgo', { ...base(), sshRun });
+    const out = await checkWithContract('prod', withAddons(), 'letsgo', { ...base(), sshRun });
     expect(sshRun.mock.calls.map((c) => c[2][0])).toEqual(['docker', 'sh']);
     expect(sshRun.mock.calls[1][2][2]).toContain('cat /opt/letsgo/.vc-addons/status');
     expect(out?.p.addons).toEqual([
@@ -535,7 +548,7 @@ describe('checkRemoteContainers', () => {
         'letsgo-loki\trunning\tUp 2m\nletsgo-prometheus\trunning\tUp 2m\n' +
         'letsgo-promtail\trunning\tUp 2m\nletsgo-postgres-exporter\trunning\tUp 2m\n',
     );
-    const out = await checkRemoteContainers('prod', withAddons(), 'letsgo', { ...base(), sshRun });
+    const out = await checkWithContract('prod', withAddons(), 'letsgo', { ...base(), sshRun });
     expect(out?.p.addons).toEqual([
       { name: 'observability', state: 'running', reason: '' },
       { name: 'n8n', state: 'stopped', reason: 'no n8n container' },
@@ -547,7 +560,7 @@ describe('checkRemoteContainers', () => {
       `#attempt ${ATTEMPT}\nobservability\trunning\t\nn8n\trunning\t\n`,
       'letsgo-app\trunning\tUp 1h (healthy)\n',
     );
-    const out = await checkRemoteContainers(
+    const out = await checkWithContract(
       'prod',
       withAddons({ lastAttemptId: 'f00f00f00f00' }),
       'letsgo',
@@ -558,7 +571,7 @@ describe('checkRemoteContainers', () => {
 
   it('reports "no ssh key" for every server without touching the network', async () => {
     const deps = { ...base(), existsSync: vi.fn(() => false), sshRun: vi.fn() };
-    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', deps);
+    const out = await checkWithContract('prod', composeHa, 'letsgo', deps);
     expect(out).toEqual({
       p: { kind: 'compose', ip: '1.1.1.1', rows: [], error: 'no ssh key' },
       s: { kind: 'compose', ip: '2.2.2.2', rows: [], error: 'no ssh key' },
@@ -572,7 +585,7 @@ describe('checkRemoteContainers', () => {
         ? 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-app\trunning\tUp 1h (healthy)\n'
         : 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-app\texited\tExited (128) 3 hours ago\n',
     );
-    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
+    const out = await checkWithContract('prod', composeHa, 'letsgo', { ...base(), sshRun });
     expect(sshRun).toHaveBeenCalledTimes(2);
     expect(sshRun.mock.calls[0][2]).toEqual([
       'docker',
@@ -631,7 +644,7 @@ describe('checkRemoteContainers', () => {
       }
       return 'letsgo-db\trunning\tUp 1h (healthy)\n';
     });
-    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
+    const out = await checkWithContract('prod', composeHa, 'letsgo', { ...base(), sshRun });
     expect(out).not.toBeNull();
     expect(out?.p.error).toBeUndefined();
     expect(out?.p.rows).toHaveLength(1);
@@ -654,7 +667,7 @@ describe('checkRemoteContainers', () => {
       }
       return 'letsgo-db\trunning\tUp 1h (healthy)\n';
     });
-    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
+    const out = await checkWithContract('prod', composeHa, 'letsgo', { ...base(), sshRun });
     expect(out).not.toBeNull();
     expect(out?.s.error).toBe('ssh: connect to host 2.2.2.2 port 22: Connection refused');
   });
@@ -667,7 +680,7 @@ describe('checkRemoteContainers', () => {
           "Warning: Permanently added '1.1.1.1' (ED25519) to the list of known hosts.\n",
       });
     });
-    const out = await checkRemoteContainers(
+    const out = await checkWithContract(
       'prod',
       { deployMode: 'compose', servers: [{ name: 'p', ip: '1.1.1.1' }] },
       'letsgo',
@@ -687,14 +700,14 @@ describe('checkRemoteContainers', () => {
       }
       return 'letsgo-db\trunning\tUp 1h (healthy)\n';
     });
-    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
+    const out = await checkWithContract('prod', composeHa, 'letsgo', { ...base(), sshRun });
     expect(out).not.toBeNull();
     expect(out?.s).toEqual({ kind: 'compose', ip: '2.2.2.2', rows: [], error: 'ssh timeout' });
   });
 
   it('a server with no ip is reported, not queried', async () => {
     const sshRun = vi.fn();
-    const out = await checkRemoteContainers(
+    const out = await checkWithContract(
       'prod',
       { deployMode: 'compose', servers: [{ name: 'p' }] },
       'letsgo',
@@ -706,7 +719,7 @@ describe('checkRemoteContainers', () => {
 
   it('bounds each server by timeoutMs', async () => {
     const sshRun = vi.fn(() => new Promise(() => {}));
-    const out = await checkRemoteContainers(
+    const out = await checkWithContract(
       'prod',
       { deployMode: 'compose', servers: [{ name: 'p', ip: '1.1.1.1' }] },
       'letsgo',
@@ -747,7 +760,7 @@ describe('checkRemoteContainers', () => {
     const sshKubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) =>
       argv[1] === 'pods' ? JSON.stringify(pods) : JSON.stringify(nodes),
     );
-    const out = await checkRemoteContainers(
+    const out = await checkWithContract(
       'prod',
       { deployMode: 'kubernetes', servers: [{ name: 'm', ip: '1.1.1.1', role: 'master' }] },
       'letsgo',
@@ -782,7 +795,7 @@ describe('checkRemoteContainers', () => {
   });
 
   it('k8s: unparseable kubectl output is an error row', async () => {
-    const out = await checkRemoteContainers(
+    const out = await checkWithContract(
       'prod',
       { deployMode: 'kubernetes', servers: [{ name: 'm', ip: '1.1.1.1', role: 'master' }] },
       'letsgo',

@@ -21,6 +21,7 @@
  * deps-injection pattern — sshKubectl/getPostgresPod/getSSHKeyPath/sshRun —
  * so this stubs those instead of mocking the ssh.js module wholesale.
  */
+
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -29,6 +30,7 @@ import {
   formatReplicationLagLine,
 } from '../../../src/lib/deploy/replication.js';
 import { checkReplication } from '../../../src/status.js';
+import { withSshContract } from '../../_shared/ssh-contract.js';
 
 describe('buildPrimaryLagQuery', () => {
   it('returns the exact SQL (state + replay_lag seconds, COALESCE to 0, single row)', () => {
@@ -124,7 +126,7 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
     return {
       getPostgresPod,
       sshKubectl,
-      sshRun: vi.fn(),
+      sshRun: withSshContract(vi.fn()),
       getSSHKeyPath: vi.fn(() => FAKE_KEY_PATH),
       timeoutMs: 5000,
     };
@@ -188,7 +190,7 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
     });
     const sshKubectl = vi.fn();
     const deps = {
-      sshRun,
+      sshRun: withSshContract(sshRun),
       sshKubectl,
       getPostgresPod: vi.fn(),
       getSSHKeyPath: vi.fn(() => FAKE_KEY_PATH),

@@ -4,6 +4,7 @@
  * capped (max_slot_wal_keep_size), so a standby that stays away long enough
  * loses its slot: `lost` is an error that says how to recover.
  */
+
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { REPLICATION_SLOT_HEALTH_SQL } from '../../../src/lib/deploy/replication-slot.js';
@@ -12,6 +13,7 @@ import {
   parseReplicationSlotRow,
   replicationSlotRow,
 } from '../../../src/status.js';
+import { withSshContract } from '../../_shared/ssh-contract.js';
 
 const MiB = 1024 ** 2;
 
@@ -81,7 +83,7 @@ describe('checkReplication reads the slot on the primary', () => {
       {
         getPostgresPod: vi.fn(async () => 'db-0'),
         sshKubectl,
-        sshRun: vi.fn(),
+        sshRun: withSshContract(vi.fn()),
         getSSHKeyPath: vi.fn(() => fileURLToPath(import.meta.url)),
         timeoutMs: 5000,
       },
@@ -121,7 +123,7 @@ describe('the slot query names the standby slot and travels quoting-safe', () =>
       {
         getPostgresPod: vi.fn(),
         sshKubectl: vi.fn(),
-        sshRun,
+        sshRun: withSshContract(sshRun),
         getSSHKeyPath: vi.fn(() => fileURLToPath(import.meta.url)),
         timeoutMs: 5000,
       },

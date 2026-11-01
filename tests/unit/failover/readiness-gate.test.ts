@@ -17,6 +17,7 @@
  * the sign-in condition; there is no separate auth service to probe. Best-effort throughout (loud warning, never
  * throws) — the promotion + DNS flip already happened.
  */
+
 import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -26,6 +27,7 @@ import {
   scaleDeployments,
   waitForPromotedApiServing,
 } from '../../../src/failover.js';
+import { withSshContract } from '../../_shared/ssh-contract.js';
 
 /**
  * Persisted scale-up list: app + another vibecarbon-namespace Deployment + CA
@@ -55,7 +57,7 @@ describe('gatePromotedApiReadiness', () => {
     await gatePromotedApiReadiness('app.example.com', '9.9.9.9', '/key', noopSpinner(), {
       scaleUpList: SCALE_UP_LIST,
       kubectl,
-      runner,
+      runner: withSshContract(runner),
     });
 
     const rollouts = trace.filter((t) => t.startsWith('rollout:'));
@@ -97,7 +99,7 @@ describe('gatePromotedApiReadiness', () => {
         { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
       ],
       kubectl,
-      runner,
+      runner: withSshContract(runner),
     });
     const rolled = kubectl.mock.calls.map((c) => (c[2] as string[])[2]);
     expect(rolled).toEqual(['deployment/app', 'deployment/cluster-autoscaler']);
@@ -155,7 +157,7 @@ describe('gatePromotedApiReadiness', () => {
     await gatePromotedApiReadiness('app.example.com', '9.9.9.9', '/key', noopSpinner(), {
       scaleUpList: SCALE_UP_LIST,
       kubectl,
-      runner,
+      runner: withSshContract(runner),
     });
 
     const statuses = calls.filter((c) => c.argv[0] === 'rollout' && c.argv[1] === 'status');
@@ -179,7 +181,7 @@ describe('gatePromotedApiReadiness', () => {
       gatePromotedApiReadiness('app.example.com', '9.9.9.9', '/key', noopSpinner(), {
         scaleUpList: SCALE_UP_LIST,
         kubectl,
-        runner,
+        runner: withSshContract(runner),
       }),
     ).resolves.toBeUndefined();
     // The gate still went on to probe the public API.
@@ -192,7 +194,7 @@ describe('gatePromotedApiReadiness', () => {
     await gatePromotedApiReadiness('', '9.9.9.9', '/key', noopSpinner(), {
       scaleUpList: SCALE_UP_LIST,
       kubectl,
-      runner,
+      runner: withSshContract(runner),
     });
     // Rollouts still ran, but no probe fired without a domain.
     expect(kubectl.mock.calls.some((c) => c[2][0] === 'rollout')).toBe(true);
@@ -341,7 +343,7 @@ describe('waitForPromotedApiServing', () => {
 
     // Tiny budget so pollUntil gives up after a single probe round.
     const ok = await waitForPromotedApiServing('app.example.com', '9.9.9.9', '/key', {
-      runner,
+      runner: withSshContract(runner),
       budgetMs: 10,
     });
     expect(ok).toBe(false);

@@ -21,12 +21,16 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../../../src/lib/ssh.js', () => ({
-  getPostgresPod: vi.fn(),
-  sshKubectl: vi.fn(),
-  sshRun: vi.fn(),
-  getSSHKeyPath: vi.fn(),
-}));
+vi.mock('../../../src/lib/ssh.js', async () => {
+  // The real argv contract (tests/_shared/ssh-contract.ts).
+  const { contractSshRun } = await import('../../_shared/ssh-contract.js');
+  return {
+    getPostgresPod: vi.fn(),
+    sshKubectl: vi.fn(),
+    sshRun: vi.fn(contractSshRun(() => undefined)),
+    getSSHKeyPath: vi.fn(),
+  };
+});
 
 const ssh = await import('../../../src/lib/ssh.js');
 const { getReplPasswordFromSecret, reseedStandbyOrAbort, reseedStandbyFromPrimary } = await import(

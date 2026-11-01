@@ -43,7 +43,8 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
     getSSHKeyPath: () => keyPath,
     getPostgresPod: vi.fn(async () => 'db-0'),
     sshKubectl: vi.fn(async () => ''),
-    sshRun: vi.fn(async () => ''),
+    // The real argv contract (tests/_shared/ssh-contract.ts).
+    sshRun: vi.fn((await import('../../_shared/ssh-contract.js')).contractSshRun()),
     sshRunScript: vi.fn(async () => ''),
   };
 });

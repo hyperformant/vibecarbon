@@ -33,12 +33,16 @@ beforeEach(() => {
 // The promotion poll reads pg_is_in_recovery(): report promoted.
 const promotedKubectl = async (_ip: string, _key: string, argv: string[]) =>
   argv.join(' ').includes('pg_is_in_recovery') ? 'f' : '';
-vi.mock('../../../src/lib/ssh.js', () => ({
-  getPostgresPod: vi.fn().mockResolvedValue('db-0'),
-  sshKubectl: vi.fn(promotedKubectl),
-  sshRun: vi.fn().mockResolvedValue(''),
-  getSSHKeyPath: vi.fn(),
-}));
+vi.mock('../../../src/lib/ssh.js', async () => {
+  // The real argv contract (tests/_shared/ssh-contract.ts).
+  const { contractSshRun } = await import('../../_shared/ssh-contract.js');
+  return {
+    getPostgresPod: vi.fn().mockResolvedValue('db-0'),
+    sshKubectl: vi.fn(promotedKubectl),
+    sshRun: vi.fn(contractSshRun()),
+    getSSHKeyPath: vi.fn(),
+  };
+});
 
 const { runK8sRestore, RestoredDatabaseError } = await import('../../../src/restore.js');
 const ssh = await import('../../../src/lib/ssh.js');
