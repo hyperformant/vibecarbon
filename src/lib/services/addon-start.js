@@ -147,9 +147,11 @@ if [ -f "$dir/job.pid" ]; then
 fi
 echo "$$" > "$dir/job.pid"
 
-repl=$([ -f docker-compose.replication.yml ] && echo '-f docker-compose.replication.yml')
-# shellcheck disable=SC2086 # the -f set is a word list
-dc() { docker compose ${composeFlags} $repl "$@"; }
+# The -f set, resolved at EVERY call: compose-ha writes the replication
+# overlay after the core up, while this job runs, and a stale set would
+# render db without it.
+# shellcheck disable=SC2046,SC2086 # the -f set is a word list
+dc() { docker compose ${composeFlags} $([ -f docker-compose.replication.yml ] && echo '-f docker-compose.replication.yml') "$@"; }
 
 # <name> <state> <reason>: replace the add-on's line, atomically.
 set_status() {
@@ -177,14 +179,16 @@ run_addon() {
     return
   fi
   # shellcheck disable=SC2086
-  if [ -n "$services" ] && ! dc up -d --wait --wait-timeout ${ADDON_WAIT_TIMEOUT_S} $services >> "$log" 2>&1; then
+  # --no-deps on every up: the add-ons depend on db, and the job must never
+  # recreate a core service (reconcile.sh owns those).
+  if [ -n "$services" ] && ! dc up -d --no-deps --wait --wait-timeout ${ADDON_WAIT_TIMEOUT_S} $services >> "$log" 2>&1; then
     reason=$(tail -n 1 "$log")
     dc logs --tail 40 $services >> "$log" 2>&1
     set_status "$name" failed "did not become healthy: $reason"
     return
   fi
   for s in $setup; do
-    if ! dc up -d "$s" >> "$log" 2>&1; then
+    if ! dc up -d --no-deps "$s" >> "$log" 2>&1; then
       set_status "$name" failed "setup $s did not start: $(tail -n 1 "$log")"
       return
     fi

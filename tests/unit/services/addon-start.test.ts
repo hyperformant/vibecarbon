@@ -217,9 +217,9 @@ describe('addons-start.sh', () => {
       { name: 'n8n', state: 'running', reason: '' },
     ]);
     expect(calls(dir)).toMatch(
-      /compose -f docker-compose\.yml up -d --wait --wait-timeout 900 grafana loki/,
+      /compose -f docker-compose\.yml up -d --no-deps --wait --wait-timeout 900 grafana loki/,
     );
-    expect(calls(dir)).toMatch(/compose -f docker-compose\.yml up -d n8n-setup/);
+    expect(calls(dir)).toMatch(/compose -f docker-compose\.yml up -d --no-deps n8n-setup/);
     expect(calls(dir)).toMatch(/^wait cid$/m);
     // The job leaves no pid behind once it is done.
     expect(existsSync(join(dir, '.vc-addons', 'job.pid'))).toBe(false);
@@ -298,5 +298,52 @@ describe('addons-start.sh', () => {
     expect(await exited).not.toBe(0);
     expect(status(dir)).toEqual([{ name: 'x', state: 'running', reason: '' }]);
     expect(readdirSync(join(dir, '.vc-addons'))).not.toContain('job.pid');
+  });
+});
+
+/**
+ * C1: the job must never touch a core service. n8n and metabase declare
+ * `depends_on: db`, so an `up` without --no-deps let compose recreate db from
+ * the job's file set; and the job's file set was fixed at its start, before
+ * compose-ha writes the replication overlay, so that db came back without it
+ * (no 5433, a mid-deploy db restart).
+ */
+describe('addons-start.sh never touches the core stack', () => {
+  it('every `up` it runs carries --no-deps', () => {
+    const script = renderAddonJobScript('demo', '-f a.yml', [
+      { name: 'n8n', services: ['n8n'], setup: ['n8n-setup'] },
+    ]);
+    const ups = script.split('\n').filter((l) => /\bdc up\b/.test(l));
+    expect(ups.length).toBeGreaterThanOrEqual(2);
+    for (const l of ups) expect(l, l).toMatch(/\bdc up -d --no-deps\b/);
+  });
+
+  it('resolves the replication overlay at each call, not once at job start', () => {
+    const dir = tempDir();
+    writeFileSync(
+      join(dir, ADDON_JOB_SCRIPT),
+      renderAddonJobScript('demo', '-f docker-compose.yml', [
+        { name: 'n8n', services: ['n8n'], setup: [] },
+      ]),
+    );
+    stubDocker(dir);
+    // The overlay appears mid-job (compose-ha writes it after the core up).
+    writeFileSync(
+      join(dir, 'docker'),
+      readFileSync(join(dir, 'docker'), 'utf8').replace(
+        'echo "$*" >> ',
+        `case "$*" in *pull*) touch "${dir}/docker-compose.replication.yml" ;; esac\necho "$*" >> `,
+      ),
+    );
+    spawnSync('sh', [ADDON_JOB_SCRIPT], {
+      cwd: dir,
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, VC_PROJECT_DIR: dir },
+    });
+    const up =
+      calls(dir)
+        .split('\n')
+        .find((l) => / up -d/.test(l)) ?? '';
+    expect(up).toContain('-f docker-compose.replication.yml');
+    expect(up).toMatch(/up -d --no-deps --wait/);
   });
 });
