@@ -498,9 +498,10 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
     apiToken,
     services,
     serverStateOptions,
-    // This scale's attempt id (services/addon-start.js): the new server's
-    // add-on job writes it, and the cutover saves it once that job is
-    // relaunched on the serving server.
+    // This scale's attempt id (services/addon-start.js), for the new
+    // server's reconcile-time add-on job only. That job is stopped before the
+    // restore, so this id is never saved: the cutover relaunches the job
+    // under a FRESH id and saves that one once the relaunch ran.
     attemptId: mintAttemptId(),
   };
   await runPlan(planScale(tier, envConfig), ctx, SCALE_EFFECTS);
