@@ -714,6 +714,63 @@ export const STALE_ATTACH_EVENT_PATTERN =
   /MountVolume\.MountDevice failed[\s\S]*?(does not exist and no size was specified|formatting disk failed)/;
 
 /**
+ * How long the stale-attachment signature must have held before a db rollout
+ * wait gives up on it. kubelet retries MountDevice with an exponential
+ * backoff (0.5s doubling, capped near 2 minutes), so a device that is merely
+ * slow to appear clears within the first few retries; two minutes of
+ * `mkfs` on a device that still does not exist is the stale state itself.
+ */
+export const STALE_ATTACH_PERSIST_MS = 120_000;
+
+/**
+ * A signature older than this has stopped recurring (kubelet would have
+ * retried within its ~2 minute backoff cap): an earlier db pod that healed or
+ * was replaced, not the one being waited on.
+ */
+const STALE_ATTACH_RECENT_MS = 180_000;
+
+/**
+ * Read `kubectl get events -o json` for the db pod and decide whether it is in
+ * the stale-attachment state (STALE_ATTACH_EVENT_PATTERN), held for at least
+ * `minPersistMs` and still recurring. Pure. Unreadable input is no evidence.
+ * Reads both the core/v1 shape (firstTimestamp/lastTimestamp/count) and the
+ * events.k8s.io one (eventTime + series).
+ *
+ * A diagnosis, not a recovery: the rollout waits use it to stop waiting on a
+ * state that does not clear by itself and to say so, never to retry.
+ *
+ * @param {string} eventsJson
+ * @param {{minPersistMs?: number, now?: number}} [opts]
+ * @returns {{volume: string, count: number, persistedS: number}|null}
+ */
+export function persistentStaleAttach(
+  eventsJson,
+  { minPersistMs = STALE_ATTACH_PERSIST_MS, now = Date.now() } = {},
+) {
+  let items;
+  try {
+    items = JSON.parse(String(eventsJson))?.items;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(items)) return null;
+  for (const ev of items) {
+    const message = String(ev?.message ?? '');
+    if (!STALE_ATTACH_EVENT_PATTERN.test(message)) continue;
+    const first = Date.parse(ev.firstTimestamp ?? ev.eventTime ?? '');
+    const last = Date.parse(ev.series?.lastObservedTime ?? ev.lastTimestamp ?? ev.eventTime ?? '');
+    if (!Number.isFinite(first) || !Number.isFinite(last)) continue;
+    if (last - first < minPersistMs || now - last > STALE_ATTACH_RECENT_MS) continue;
+    return {
+      volume: message.match(/for volume "([^"]+)"/)?.[1] ?? 'the db volume',
+      count: Number(ev.series?.count ?? ev.count ?? 1),
+      persistedS: Math.round((last - first) / 1000),
+    };
+  }
+  return null;
+}
+
+/**
  * PersistentVolume names bound to the db StatefulSet's claim (DB_PVC,
  * `data-db-0`: the StatefulSet's only volumeClaimTemplate). Matched exactly,
  * not by suffix, so an add-on StatefulSet whose name happens to end in `db`
