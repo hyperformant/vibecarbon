@@ -326,3 +326,22 @@ describe('cleanEnv package-manager run-context stripping', () => {
     );
   });
 });
+
+describe('runCommandAsync signal', () => {
+  // A deploy that fails reaps the children it started in the background (the
+  // early image build, the CA rollout watch) instead of leaving them running.
+  it('an abort kills the child and rejects at once', async () => {
+    const { runCommandAsync } = await import('../../../src/lib/command.js');
+    const ac = new AbortController();
+    const started = Date.now();
+    const run = runCommandAsync(['sleep', '5'], { silent: true, signal: ac.signal });
+    setTimeout(() => ac.abort(), 20);
+    await expect(run).rejects.toThrow(/abort/i);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('no signal: unchanged', async () => {
+    const { runCommandAsync } = await import('../../../src/lib/command.js');
+    await expect(runCommandAsync(['true'], { silent: true })).resolves.toBe('');
+  });
+});

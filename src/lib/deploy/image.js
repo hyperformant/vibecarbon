@@ -101,11 +101,18 @@ export function inspectGitState(cwd) {
  * pod (Phase 1 wired the registries.yaml; Phase 6 wires the push).
  *
  * @param {string} projectDir - Project root with the Dockerfile.
- * @param {{projectName: string, timestamp?: string, rebuild?: boolean, tagPrefix?: string, buildArgs?: Record<string,string>, quiet?: boolean}} options
+ * @param {{projectName: string, timestamp?: string, rebuild?: boolean, tagPrefix?: string, buildArgs?: Record<string,string>, quiet?: boolean, signal?: AbortSignal}} options
  * @returns {Promise<{tag: string, gitSha: string, isDirty: boolean}>}
  */
 export async function buildLocalImage(projectDir, options) {
-  const { projectName, rebuild = false, tagPrefix, buildArgs = {}, quiet = false } = options;
+  const {
+    projectName,
+    rebuild = false,
+    tagPrefix,
+    buildArgs = {},
+    quiet = false,
+    signal,
+  } = options;
   if (!projectName) {
     throw new Error('buildLocalImage: projectName is required');
   }
@@ -141,7 +148,7 @@ export async function buildLocalImage(projectDir, options) {
   // carries its last lines instead of losing them.
   if (quiet) {
     try {
-      await runCommandAsync(['docker', ...args], { silent: true });
+      await runCommandAsync(['docker', ...args], { silent: true, ...(signal && { signal }) });
     } catch (err) {
       const detail = `${err?.stderr || ''}${err?.stdout || ''}`.trim();
       throw new Error(

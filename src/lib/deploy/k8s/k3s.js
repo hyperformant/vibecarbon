@@ -543,7 +543,7 @@ export function kubectlErrorHaystack(err) {
  */
 export async function runKubectlWithRetry(
   args,
-  { env, input, captureStdout = false, description, transientExtra, delaysMs } = {},
+  { env, input, captureStdout = false, description, transientExtra, delaysMs, signal } = {},
 ) {
   const RETRY_DELAYS_MS = delaysMs ?? [2000, 4000];
   const ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -552,7 +552,12 @@ export async function runKubectlWithRetry(
     return await runWithRetry(
       async () => {
         try {
-          const out = await runCommandAsync(['kubectl', ...args], { env, input, silent: true });
+          const out = await runCommandAsync(['kubectl', ...args], {
+            env,
+            input,
+            silent: true,
+            ...(signal && { signal }),
+          });
           // Stream captured stdout through to the operator's terminal so the
           // success path looks identical to the legacy `stdio: 'inherit'` shape.
           // captureStdout suppresses stdout streaming because the caller wants
@@ -568,6 +573,7 @@ export async function runKubectlWithRetry(
       {
         delaysMs: RETRY_DELAYS_MS,
         isTransient: (err) => {
+          if (signal?.aborted) return false;
           const text = kubectlErrorHaystack(err);
           return KUBECTL_TRANSIENT_PATTERN.test(text) || (transientExtra?.test(text) ?? false);
         },
@@ -1510,7 +1516,7 @@ export async function buildAppImage(
   projectName,
   rebuild = false,
   domain = undefined,
-  { quiet = false } = {},
+  { quiet = false, signal } = {},
 ) {
   const { buildLocalImage } = await import('../image.js');
   // App image: collect VITE_* build args (incl. VITE_PUBLIC_URL rewritten to
@@ -1523,7 +1529,7 @@ export async function buildAppImage(
     const { collectComposeBuildArgs } = await import('../compose/build-args.js');
     buildArgs = collectComposeBuildArgs(projectDir, { projectName, domain });
   }
-  return await buildLocalImage(projectDir, { projectName, rebuild, buildArgs, quiet });
+  return await buildLocalImage(projectDir, { projectName, rebuild, buildArgs, quiet, signal });
 }
 
 /** Give a locally built image its registry name (a local `docker tag`, no copy). */
@@ -3343,6 +3349,9 @@ export async function applyK3sManifests({
   // The environment as the operator names it (HA clusters deploy under their
   // stack names), for the commands an error prints.
   operatorEnv,
+  // Where this registers what it runs alongside its main chain (the CA
+  // rollout), so deployK3s can stop and settle it when the deploy fails.
+  inFlight = {},
 }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   // The schedule and retention this environment runs backups with, validated
@@ -3488,6 +3497,10 @@ export async function applyK3sManifests({
   // this settles (awaited with the image delivery before step 6), so the CA
   // is up before any app pod can ask it for a node, exactly as before, and a
   // failed rollout fails the deploy there with its diagnostics.
+  // Stopped (its kubectl children killed) when the main chain below fails,
+  // so it settles before applyK3sManifests rethrows: no CA diagnostics print
+  // after the deploy's own failure and no kubectl outlives it.
+  const caStop = new AbortController();
   const rollOutClusterAutoscaler = async () => {
     // 4b. Create the kube-system/carbon-autoscaler-config Secret the
     //     carbon-autoscaler sidecar reads on startup (and on every
@@ -3537,6 +3550,7 @@ export async function applyK3sManifests({
       ].join('\n');
       await runKubectlWithRetry(['apply', '-f', '-'], {
         env,
+        signal: caStop.signal,
         input: caSecretYaml,
         description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
       });
@@ -3552,6 +3566,7 @@ export async function applyK3sManifests({
     //      effect when applied standalone like this.
     await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/base/cluster-autoscaler')], {
       env,
+      signal: caStop.signal,
       description: 'applyK3sManifests: kubectl apply -k cluster-autoscaler',
     });
     // 5a''. Patch BOTH container images in one call.
@@ -3584,6 +3599,7 @@ export async function applyK3sManifests({
       ],
       {
         env,
+        signal: caStop.signal,
         description:
           'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
       },
@@ -3609,6 +3625,7 @@ export async function applyK3sManifests({
         ],
         {
           env,
+          signal: caStop.signal,
           description: 'applyK3sManifests: zero cluster-autoscaler deployment (pilot standby)',
         },
       );
@@ -3656,7 +3673,11 @@ export async function applyK3sManifests({
               'deploy/cluster-autoscaler',
               '--timeout=300s',
             ],
-            { env, description: 'applyK3sManifests: cluster-autoscaler rollout status' },
+            {
+              env,
+              signal: caStop.signal,
+              description: 'applyK3sManifests: cluster-autoscaler rollout status',
+            },
           );
         } catch (err) {
           // Capture runs through runDeployDiagnostic (silent:true + re-emit) so
@@ -3664,6 +3685,9 @@ export async function applyK3sManifests({
           // `silent: false` version wrote to inherited fds, which the deploy-log
           // tee cannot see — on the 2026-07-31 e3 run it left a bare header and
           // cost a blind RCA. See the "Deploy-time diagnostic capture" block.
+          // Stopped because the deploy already failed: no diagnostics after
+          // that failure (applyK3sManifests).
+          if (caStop.signal.aborted) throw err;
           await captureClusterAutoscalerDiagnostics({ env });
           throw err;
         }
@@ -3674,6 +3698,10 @@ export async function applyK3sManifests({
   // Awaited before step 6; this only keeps a rollout that fails while the
   // cert-manager chain is still running from being an unhandledRejection.
   clusterAutoscalerReady.catch(() => {});
+  inFlight.stopClusterAutoscaler = async () => {
+    caStop.abort();
+    await clusterAutoscalerReady.catch(() => {});
+  };
   // 1. Install cert-manager (raw YAML; not a kustomize base).
   await perfAsync(`deploy.${perfPrefix}.certManager.install`, () =>
     runKubectlWithRetry(['apply', '-f', CERT_MANAGER_URL], {
@@ -4624,7 +4652,7 @@ export async function applyK3sManifests({
  * the build and fails the deploy with it, at the point a serial build would
  * have.
  *
- * @returns {{build: Promise<{tag: string, gitSha: string, isDirty: boolean}>|null, inputs: object}|null}
+ * @returns {{build: Promise<{tag: string, gitSha: string, isDirty: boolean}>|null, inputs: object, abort?: () => void}|null}
  */
 export function startAppImageBuild({
   role,
@@ -4647,14 +4675,17 @@ export function startAppImageBuild({
   if (priorMasterPrivateIp && state.shouldSkip('k3s-build', inputs)) {
     return { build: null, inputs };
   }
+  // abort(): a deploy that fails while this runs reaps the docker build
+  // (deployK3s), instead of leaving it running after the error.
+  const reap = new AbortController();
   const build = perfAsync(`deploy.${perfPrefix}.image.localBuild`, () =>
-    d.buildAppImage(projectDir, projectName, false, domain, { quiet: true }),
+    d.buildAppImage(projectDir, projectName, false, domain, { quiet: true, signal: reap.signal }),
   );
   // Awaited (and its failure thrown) by deliverAppImage; this only keeps a
   // build that fails while Pulumi is still running from being an
   // unhandledRejection before then.
   build.catch(() => {});
-  return { build, inputs };
+  return { build, inputs, abort: () => reap.abort() };
 }
 
 /**
@@ -4879,6 +4910,21 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
  * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, masterPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string, imageTag: string}>}
  */
 export async function deployK3s(options) {
+  // What deployK3sSteps started in the background and must not outlive a
+  // failed deploy: the early app image build, and applyK3sManifests' cluster
+  // autoscaler rollout. Both are stopped, and the rollout settled, before the
+  // failure is rethrown: no CA diagnostics print after it, no child outlives it.
+  const inFlight = {};
+  try {
+    return await deployK3sSteps(options, inFlight);
+  } catch (err) {
+    inFlight.early?.abort();
+    await inFlight.stopClusterAutoscaler?.();
+    throw err;
+  }
+}
+
+async function deployK3sSteps(options, inFlight) {
   // A `deploy -restore` point arrives resolved (C5); refuse a partial one
   // before anything is provisioned or applied.
   assertDeployRestorePoint({ restore: options.restore });
@@ -4925,6 +4971,7 @@ export async function deployK3s(options) {
     priorMasterPrivateIp: state.getStepResult('k3s-infra')?.masterPrivateIp,
     perfPrefix,
   });
+  inFlight.early = early;
 
   // 2. SSH key
   const { privateKeyPath, publicKey } = options.sharedSshKeyPath
@@ -5246,6 +5293,7 @@ export async function deployK3s(options) {
     const envLocal = loadEnvLocal(join(projectDir, '.env.local'));
     await perfAsync(`deploy.${perfPrefix}.applyManifests`, () =>
       applyK3sManifests({
+        inFlight,
         perfPrefix,
         kubeconfig,
         projectDir,

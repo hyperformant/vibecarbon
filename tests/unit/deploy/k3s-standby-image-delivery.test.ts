@@ -193,6 +193,16 @@ describe('startAppImageBuild: the build overlaps provisioning', () => {
     expect(h.buildAppImage).toHaveBeenCalledTimes(1);
   });
 
+  // M3: a deploy that fails while the early build runs reaps it.
+  it('abort() cancels the build (its signal reaches docker build)', () => {
+    const h = harness('primary');
+    const early = startAppImageBuild(startArgs(h));
+    const opts = h.buildAppImage.mock.calls[0][4] as { signal: AbortSignal };
+    expect(opts.signal.aborted).toBe(false);
+    early?.abort();
+    expect(opts.signal.aborted).toBe(true);
+  });
+
   it('a build that fails before anyone awaits it is not an unhandled rejection', async () => {
     const h = harness('primary');
     h.buildAppImage.mockRejectedValueOnce(new Error('docker build failed'));

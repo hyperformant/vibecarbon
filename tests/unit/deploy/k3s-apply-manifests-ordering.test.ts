@@ -101,6 +101,10 @@ let rolloutHangs = false;
 let certManagerWaitGate: Promise<void> | null = null;
 let caRolloutGate: Promise<void> | null = null;
 let caRolloutExit = 0;
+// Children killed through their abort signal (argv), in order.
+let killed: string[][] = [];
+// Exit code of `kubectl wait deploy/cert-manager` (drives a main-chain failure).
+let certManagerWaitExit = 0;
 // The rendered registry manifest as `kubectl apply -k <rendered base>` saw it
 // (the rendered copy is removed right after the apply).
 let registryAtBaseApply: string | null = null;
@@ -131,12 +135,14 @@ function fakeChild({
   stderr = '',
   gate = null,
   argv = [],
+  signal = null,
 }: {
   exitCode?: number;
   stdout?: string;
   stderr?: string;
   gate?: Promise<void> | null;
   argv?: string[];
+  signal?: AbortSignal | null;
 } = {}) {
   const child: Record<string, unknown> = {
     stdout: {
@@ -160,6 +166,16 @@ function fakeChild({
     kill() {},
     unref() {},
     on(ev: string, cb: (...a: unknown[]) => void) {
+      // Like node's spawn: an aborted signal kills the child and emits
+      // 'error' (AbortError).
+      if (ev === 'error' && signal) {
+        const fire = () => {
+          killed.push(argv);
+          cb(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+        };
+        if (signal.aborted) Promise.resolve().then(fire);
+        else signal.addEventListener('abort', fire, { once: true });
+      }
       if (ev === 'exit' || ev === 'close') {
         if (gate) gate.then(() => cb(exitCode));
         else Promise.resolve().then(() => cb(exitCode));
@@ -200,7 +216,11 @@ const APP_PODS_JSON = JSON.stringify({
 });
 
 function installSpawnMock() {
-  vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
+  vi.mocked(spawn).mockImplementation(((
+    cmd: string,
+    args: string[] = [],
+    opts: { signal?: AbortSignal } = {},
+  ) => {
     cmdCalls.push([cmd, ...(args ?? [])]);
     const argv = args ?? [];
     const full = [cmd, ...argv];
@@ -269,14 +289,16 @@ function installSpawnMock() {
       >;
     }
     if (
-      certManagerWaitGate &&
+      (certManagerWaitGate || certManagerWaitExit) &&
       cmd === 'kubectl' &&
       argv.includes('wait') &&
       argv.includes('deploy/cert-manager')
     ) {
-      return fakeChild({ gate: certManagerWaitGate, argv: full }) as unknown as ReturnType<
-        typeof spawn
-      >;
+      return fakeChild({
+        gate: certManagerWaitGate,
+        exitCode: certManagerWaitExit,
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
     }
     if (
       cmd === 'kubectl' &&
@@ -286,6 +308,7 @@ function installSpawnMock() {
     ) {
       return fakeChild({
         gate: caRolloutGate,
+        signal: opts?.signal ?? null,
         exitCode: caRolloutExit,
         stderr: caRolloutExit
           ? 'error: deployment "cluster-autoscaler" exceeded its progress deadline'
@@ -716,6 +739,41 @@ describe('applyK3sManifests deploy-time optimizations', () => {
       expect(setImage).toBeLessThan(cmdCalls.findIndex(isCaRollout));
     } finally {
       certManagerWaitGate = null;
+    }
+  });
+
+  // M3: when the main chain fails, the CA chain still in flight is stopped
+  // and settled before the error is rethrown, so its diagnostics never print
+  // after the deploy's failure and no kubectl outlives it.
+  it('a failed main chain leaves a stop that kills the in-flight CA rollout, with no CA diagnostics', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    caRolloutGate = new Promise<void>(() => {}); // the rollout never ends on its own
+    certManagerWaitExit = 1;
+    killed = [];
+    // The cert-manager wait polls within a long budget: let it give up fast.
+    const realNow = Date.now;
+    let t = realNow();
+    vi.spyOn(Date, 'now').mockImplementation(() => (t += 60_000));
+    try {
+      const inFlight: { stopClusterAutoscaler?: () => Promise<void> } = {};
+      const err = await applyK3sManifests({ ...baseArgs(makeProjectDir()), inFlight }).catch(
+        (e) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/cert-manager/);
+      // What deployK3s's catch runs before rethrowing (k3s-build-overlaps-infra.test.ts).
+      await inFlight.stopClusterAutoscaler?.();
+      expect(killed.some(isCaRollout)).toBe(true);
+      const after = cmdCalls.length;
+      await new Promise((r) => setTimeout(r, 20));
+      expect(cmdCalls.length).toBe(after);
+      expect(cmdCalls.some((a) => a.includes('get') && a.includes('app=cluster-autoscaler'))).toBe(
+        false,
+      );
+    } finally {
+      vi.mocked(Date.now).mockRestore();
+      caRolloutGate = null;
+      certManagerWaitExit = 0;
     }
   });
 

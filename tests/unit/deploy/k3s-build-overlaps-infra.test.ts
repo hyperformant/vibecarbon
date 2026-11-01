@@ -35,3 +35,14 @@ describe('deployK3s starts the app image build before provisioning', () => {
     expect(deliver).toMatch(/^deliverAppImage\(\{\s*early,/);
   });
 });
+
+describe('a failed deploy reaps what it started in the background', () => {
+  it('deployK3s aborts the early build and settles the CA rollout before rethrowing', () => {
+    const wrapper = functionBody('deployK3s');
+    expect(wrapper).toMatch(
+      /catch \(err\) \{\s*inFlight\.early\?\.abort\(\);\s*await inFlight\.stopClusterAutoscaler\?\.\(\);\s*throw err;/,
+    );
+    expect(wrapper).toMatch(/applyK3sManifests\(\{\s*inFlight,/);
+    expect(wrapper).toMatch(/inFlight\.early = early;/);
+  });
+});
