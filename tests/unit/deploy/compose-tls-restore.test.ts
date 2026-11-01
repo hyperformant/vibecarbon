@@ -21,7 +21,15 @@ const H = vi.hoisted(() => ({
 
 vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, sshRun: H.ssh };
+  // The real argv contract (tests/_shared/ssh-contract.ts), then the test's fake.
+  const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
+  return {
+    ...actual,
+    sshRun: (ip: string, key: string, argv: unknown, opts?: unknown) => {
+      assertSshRunArgv(argv);
+      return H.ssh(ip, key, argv, opts);
+    },
+  };
 });
 
 vi.mock('../../../src/lib/deploy/tls-snapshot.js', async (orig) => {

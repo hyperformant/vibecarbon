@@ -1,23 +1,8 @@
-/**
- * Pulumi program for a single Hetzner Docker Compose VPS.
- *
- * Much simpler than the k8s program — one server, one firewall, optional
- * floating IP. Cloud-init installs Docker via the shipped docker-ce-setup.yaml
- * (carbon/cloud-init/), which is reused as-is (no templating needed).
- *
- * Outputs: serverIp, serverId, firewallId, sshKeyId.
- */
-
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as hcloud from '@pulumi/hcloud';
-import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const CLOUD_INIT_PATH = join(__dirname, '../../../../carbon/cloud-init/docker-ce-setup.yaml');
+import { loadComposeCloudInit } from '../compose-cloud-init.js';
+import { serverResourceOptions } from '../create-timeout.js';
 
 /**
  * @typedef {Object} ComposeStackConfig
@@ -51,7 +36,7 @@ export function buildHetznerComposeProgram(config) {
     );
   }
   const allowedSshIps = config.allowedSshIps;
-  const userData = readFileSync(CLOUD_INIT_PATH, 'utf-8');
+  const userData = loadComposeCloudInit();
 
   return async () => {
     let sshKeyId;
@@ -128,7 +113,7 @@ export function buildHetznerComposeProgram(config) {
       },
       // Bounded create: a provider host that never finishes the create fails the
       // deploy at 15 minutes instead of holding it forever (see create-timeout.js).
-      { customTimeouts: SERVER_CUSTOM_TIMEOUTS },
+      serverResourceOptions('hcloud:index/server:Server'),
     );
 
     return {

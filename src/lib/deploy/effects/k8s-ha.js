@@ -39,6 +39,7 @@ import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { spinner } from '../../cli/progress.js';
 import { c, link } from '../../colors.js';
+import { updateProjectConfig } from '../../config.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { summarizePulumiError } from '../../iac/index.js';
 import { perfAsync } from '../../perf.js';
@@ -369,6 +370,30 @@ async function haK8sProvisionClusters(ctx) {
       namespaceReady.standby.resolve(false);
     },
   );
+
+  // The HA DNS records, written as soon as both clusters' ingress IPs exist,
+  // so the first certificate's issuance overlaps the rest of the deploy
+  // instead of following the replication gate. The role primary here is the
+  // SERVING primary (the persisted role mapping, haStacks, which a failover's
+  // swapHaRoles flips), and a failover in flight was refused at deploy entry
+  // (assertNoFailoverInFlight), so this never points DNS anywhere else. Same
+  // records, same setupHA call; haK8sUpdateDns awaits it as the barrier.
+  ctx.dnsUpdatePromise = writesK8sHaDns(options)
+    ? Promise.all([primaryInfra.promise, standbyInfra.promise]).then(([pInfra, sInfra]) =>
+        pInfra?.floatingIp && sInfra?.floatingIp
+          ? writeK8sHaDnsRecords(options, {
+              primaryIp: pInfra.floatingIp,
+              standbyIp: sInfra.floatingIp,
+              warmup: ctx.dnsWarmupPromise,
+              // Silent: the cluster spinners own the line.
+              onProgress: () => {},
+            })
+          : null,
+      )
+    : Promise.resolve(null);
+  // Awaited (and thrown) by haK8sUpdateDns; this only keeps a refusal that
+  // lands mid-deploy from being an unhandledRejection before then.
+  ctx.dnsUpdatePromise.catch(() => {});
 
   // Early replication prep — firewall (UDP 51821 peer rules) + gateway pods +
   // WireGuard tunnel — runs WHILE the clusters finish manifests/helm, hiding
@@ -781,6 +806,57 @@ async function haK8sCopyStandbyImage(ctx) {
 }
 
 /** Configure managed-DNS HA for failover — registry-driven over DNS_PROVIDERS. */
+/** Whether this deploy writes managed HA DNS records (a domain, a managed provider, its token and zone). */
+const writesK8sHaDns = (options) =>
+  Boolean(
+    options.domain && hasAutomatedDns(options.dnsProvider) && options.dnsToken && options.dnsZoneId,
+  );
+
+/**
+ * Write the HA records: apex + wildcard at the role primary's ingress
+ * (floating) IP, both clusters named for setupHA's health checks. The targets
+ * go on disk first (ha.primary/standby.floatingIp, the role slots destroy's
+ * ownedIps reads and failover swaps), so a deploy that fails after this write
+ * leaves records destroy removes. A refused write throws.
+ *
+ * @param {object} options the deploy options (ctx.options)
+ * @param {{primaryIp: string, standbyIp: string, warmup?: Promise<unknown>, onProgress?: Function}} o
+ */
+async function writeK8sHaDnsRecords(options, { primaryIp, standbyIp, warmup, onProgress }) {
+  // The 0.0.0.0 warm-up write (deploy start) targets the same apex record.
+  await warmup;
+  updateProjectConfig((onDisk) => {
+    const env = onDisk.environments?.[options.environment];
+    if (!env) return;
+    env.ha = env.ha ?? {};
+    env.ha.primary = { ...(env.ha.primary ?? {}), floatingIp: primaryIp };
+    env.ha.standby = { ...(env.ha.standby ?? {}), floatingIp: standbyIp };
+  });
+  const dnsName = DNS_PROVIDERS[options.dnsProvider].name;
+  const { setupHA } = await getDnsProvider(options.dnsProvider);
+  const haResult = await setupHA(
+    options.dnsToken,
+    options.dnsZoneId,
+    options.domain,
+    [
+      { name: `${options.projectName}-${options.region}`, ip: primaryIp },
+      { name: `${options.projectName}-${options.secondaryRegion}`, ip: standbyIp },
+    ],
+    { onProgress },
+  );
+  // A refused record write fails the deploy; "configure DNS manually" over a
+  // half-written zone is how a deploy reports success with the site unreachable.
+  requireDnsSetup(haResult, `${dnsName} HA DNS records for ${options.domain}`);
+  return { primaryIp, standbyIp };
+}
+
+/**
+ * The DNS barrier after the replication gate. haK8sProvisionClusters started
+ * the write as soon as both clusters' ingress IPs were known
+ * (ctx.dnsUpdatePromise): this awaits it (a refusal fails the deploy here)
+ * and writes again only if the clusters' final IPs differ from what it wrote,
+ * or when nothing started it.
+ */
 async function haK8sUpdateDns(ctx) {
   const options = ctx.options;
   const { primaryResult, standbyResult } = ctx;
@@ -788,24 +864,23 @@ async function haK8sUpdateDns(ctx) {
   // token/zone HAPPENED to be present, which is how a mis-threaded cred
   // could route DNS to the wrong cloud silently).
   if (!options.domain || !hasAutomatedDns(options.dnsProvider)) return;
-  if (!options.dnsToken || !options.dnsZoneId) {
+  if (!writesK8sHaDns(options)) {
     p.log.warn(
       `${DNS_PROVIDERS[options.dnsProvider].name} HA DNS skipped (missing token or zone id): configure DNS manually`,
     );
     return;
   }
-  const dnsName = DNS_PROVIDERS[options.dnsProvider].name;
-  const { setupHA } = await getDnsProvider(options.dnsProvider);
-  const haResult = await setupHA(options.dnsToken, options.dnsZoneId, options.domain, [
-    { name: `${options.projectName}-${options.region}`, ip: primaryResult.floatingIp },
-    {
-      name: `${options.projectName}-${options.secondaryRegion}`,
-      ip: standbyResult.floatingIp,
-    },
-  ]);
-  // A refused record write fails the deploy; "configure DNS manually" over a
-  // half-written zone is how a deploy reports success with the site unreachable.
-  requireDnsSetup(haResult, `${dnsName} HA DNS records for ${options.domain}`);
+  const early = await ctx.dnsUpdatePromise;
+  if (
+    !early ||
+    early.primaryIp !== primaryResult.floatingIp ||
+    early.standbyIp !== standbyResult.floatingIp
+  ) {
+    await writeK8sHaDnsRecords(options, {
+      primaryIp: primaryResult.floatingIp,
+      standbyIp: standbyResult.floatingIp,
+    });
+  }
   p.log.info('DNS configured — use `vibecarbon failover` to switch regions');
 }
 

@@ -439,6 +439,40 @@ describe('failoverComposeHA state matrix', () => {
     expect(starts[0].command).not.toContain('app-migrate');
   });
 
+  // I-A1: the promoted node never ran the add-on job, so it had no status
+  // file: `vibecarbon status` and the e2e check would wait on nothing. The
+  // failover runs the same job there (promoted mode: no setups), detached.
+  const isJobStart = (c: { command: string }) =>
+    c.command.includes('addons-start.sh promoted') && c.command.includes('setsid nohup');
+  it('runs the add-on job (promoted, detached) on the promoted node, after the add-on start', async () => {
+    const { thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
+    expect(thrown).toBeUndefined();
+    const job = sshCalls.findIndex(isJobStart);
+    expect(job).toBeGreaterThan(-1);
+    expect(sshCalls[job].ip).toBe(STANDBY_IP);
+    expect(job).toBeGreaterThan(
+      sshCalls.findIndex((c) => c.command.includes('replication.yml up -d --no-deps n8n')),
+    );
+  });
+
+  it('runs the add-on job with no primary-only add-on enabled too (it records the rest)', async () => {
+    const { thrown } = await run({ envConfig: baseEnvConfig({}) });
+    expect(thrown).toBeUndefined();
+    expect(sshCalls.filter(isJobStart).map((c) => c.ip)).toEqual([STANDBY_IP]);
+  });
+
+  it('old primary writers will not stop: no add-on job either (it would start them)', async () => {
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    sshOverride = (c) =>
+      c.includes('docker stop "$c"')
+        ? 'STOPPED myapp-app\nFAILED myapp-n8n\nFENCE_DONE'
+        : undefined;
+    await run({ envConfig: baseEnvConfig({ n8n: true }), realFence: true });
+    expect(sshCalls.some(isJobStart)).toBe(false);
+    warn.mockRestore();
+  });
+
   it('an add-on start that fails warns with the exact command and the failover continues', async () => {
     const p = await import('@clack/prompts');
     const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});

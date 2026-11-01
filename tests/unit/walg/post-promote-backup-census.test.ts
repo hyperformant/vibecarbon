@@ -211,7 +211,7 @@ describe('every promotion ends with a base backup on the new timeline (census)',
         'src/restore.js#runComposeRestore',
         'src/restore.js#runK8sRestore',
         'src/scale.js#scaleServers',
-        'src/lib/deploy/k8s/k3s.js#deployK3s',
+        'src/lib/deploy/k8s/k3s.js#deployK3sSteps',
       ]),
     );
     expect(result.sites.length).toBeGreaterThanOrEqual(6);

@@ -56,12 +56,70 @@ export const SERVER_CUSTOM_TIMEOUTS = Object.freeze({ create: SERVER_CREATE_TIME
  * input that holds the resource's location.
  */
 export const SERVER_RESOURCE_TYPES = Object.freeze({
-  'hcloud:index/server:Server': { noun: 'server', locationInput: 'location' },
-  'digitalocean:index/droplet:Droplet': { noun: 'droplet', locationInput: 'region' },
-  'vultr:index/instance:Instance': { noun: 'instance', locationInput: 'region' },
-  'linode:index/instance:Instance': { noun: 'instance', locationInput: 'region' },
-  'scaleway:instance/server:Server': { noun: 'server', locationInput: 'zone' },
+  'hcloud:index/server:Server': {
+    noun: 'server',
+    locationInput: 'location',
+    userDataInput: 'userData',
+  },
+  'digitalocean:index/droplet:Droplet': {
+    noun: 'droplet',
+    locationInput: 'region',
+    userDataInput: 'userData',
+  },
+  'vultr:index/instance:Instance': {
+    noun: 'instance',
+    locationInput: 'region',
+    userDataInput: 'userData',
+  },
+  'linode:index/instance:Instance': {
+    noun: 'instance',
+    locationInput: 'region',
+    userDataInput: 'metadatas',
+  },
+  'scaleway:instance/server:Server': {
+    noun: 'server',
+    locationInput: 'zone',
+    userDataInput: 'userData',
+  },
 });
+
+/**
+ * The resource options every server-class resource is created with: the
+ * bounded create (SERVER_CUSTOM_TIMEOUTS) and `ignoreChanges` on its
+ * user-data input. Every provider replaces a server whose user data changes,
+ * and a compose server's database (a k8s db node's too) lives on its disk, so
+ * an edit to a cloud-init file must reach new servers only, never replace an
+ * existing one. tests/unit/iac/server-create-timeouts-census.test.ts runs
+ * every program and fails on a server built without these.
+ *
+ * @param {keyof typeof SERVER_RESOURCE_TYPES} type the server's Pulumi type token
+ * @param {object} [extra] other resource options (dependsOn, ...)
+ */
+export function serverResourceOptions(type, extra = {}) {
+  const serverClass = SERVER_RESOURCE_TYPES[type];
+  if (!serverClass) throw new Error(`serverResourceOptions: unknown server type ${type}`);
+  return {
+    ...extra,
+    customTimeouts: SERVER_CUSTOM_TIMEOUTS,
+    ignoreChanges: [...(extra.ignoreChanges ?? []), serverClass.userDataInput],
+  };
+}
+
+/**
+ * The options for a k8s WORKER: the bounded create, but no `ignoreChanges` on
+ * its user data. A worker holds no data, and its user data carries its join
+ * target (the k3s token, the master's private IP), so it must be rebuilt when
+ * that changes rather than keep joining a master that is gone.
+ *
+ * @param {keyof typeof SERVER_RESOURCE_TYPES} type
+ * @param {object} [extra]
+ */
+export function workerResourceOptions(type, extra = {}) {
+  if (!SERVER_RESOURCE_TYPES[type]) {
+    throw new Error(`workerResourceOptions: unknown server type ${type}`);
+  }
+  return { ...extra, customTimeouts: SERVER_CUSTOM_TIMEOUTS };
+}
 
 /** Provider display names and status pages, keyed by Pulumi package. */
 const PROVIDER_PACKAGES = Object.freeze({

@@ -1,45 +1,10 @@
-/**
- * Pulumi program for a single Vultr Docker Compose instance.
- *
- * Mirrors the hetzner/digitalocean/linode compose programs: one server,
- * one firewall group, no floating IP.
- *
- * Cloud-init: no Docker-preinstalled os_id exists on Vultr (Marketplace
- * Docker is an app, not an OS), so the shared file gets the
- * official-Docker-apt-repo install spliced into `runcmd:` — keep
- * DOCKER_INSTALL_RUNCMD in lockstep with the digitalocean/linode copies
- * (not imported: each program's module graph must only load its own
- * @pulumi provider package).
- *
- * userData ENCODING — VERIFIED at the first live v1 run (2026-08-12,
- * full lifecycle green): @ediri/vultr's `userData` input takes RAW
- * cloud-init YAML (the provider base64-encodes for Vultr's REST API,
- * the common TF-provider convention). Keep passing RAW; a pre-encoded
- * payload would double-encode and break cloud-init.
- *
- * Firewall shape: Vultr rules are INBOUND-ONLY, one subnet per rule
- * resource (world-open ports need one v4 + one v6 rule; operator-scoped
- * ports need one rule per CIDR), attached to a FirewallGroup whose
- * identity field is `description`. Instances attach the group at create
- * via `firewallGroupId` — no unfirewalled window. Group default is DENY
- * for inbound once attached, so no explicit drop rules are needed;
- * outbound is unrestricted by design on Vultr.
- *
- * Outputs: serverIp, serverId, firewallId, sshKeyId.
- */
-
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as vultr from '@ediri/vultr';
 import { APT_LOCK_OPT } from '../../deploy/apt.js';
 import { cidrToVultrRuleFields, encodeLabels } from '../../providers/vultr.js';
-import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const CLOUD_INIT_PATH = join(__dirname, '../../../../carbon/cloud-init/docker-ce-setup.yaml');
+import { loadComposeCloudInit } from '../compose-cloud-init.js';
+import { serverResourceOptions } from '../create-timeout.js';
 
 // Official Docker apt-repo install — LOCKSTEP with the digitalocean-compose
 // and linode-compose copies (see digitalocean-compose.js for the
@@ -84,7 +49,7 @@ export function renderVultrUserData(sharedYaml) {
  * @returns {string}
  */
 export function loadVultrComposeUserData() {
-  return renderVultrUserData(readFileSync(CLOUD_INIT_PATH, 'utf-8'));
+  return renderVultrUserData(loadComposeCloudInit());
 }
 
 /**
@@ -199,7 +164,7 @@ export function buildVultrComposeProgram(config) {
       },
       // Bounded create: a provider host that never finishes the create fails the
       // deploy at 15 minutes instead of holding it forever (see create-timeout.js).
-      { customTimeouts: SERVER_CUSTOM_TIMEOUTS },
+      serverResourceOptions('vultr:index/instance:Instance'),
     );
 
     return {

@@ -138,7 +138,9 @@ vi.mock('../../../src/lib/build.js', async (orig) => {
 
 vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, sshRun: async () => '', sshRunScript: async () => '' };
+  // The real argv contract (tests/_shared/ssh-contract.ts).
+  const { contractSshRun } = await import('../../_shared/ssh-contract.js');
+  return { ...actual, sshRun: contractSshRun(), sshRunScript: async () => '' };
 });
 
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');

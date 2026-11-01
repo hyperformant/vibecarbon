@@ -28,6 +28,7 @@ import {
 } from '../../dns-provider.js';
 import { socatImageRef } from '../../images.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { addonJobStartCmd, mintAttemptId } from '../../services/addon-start.js';
 import {
   composePromotionServices,
   composeWriterServices,
@@ -1568,6 +1569,17 @@ export function composeStartPrimaryOnlyCmd(projectName, services) {
   );
 }
 
+/**
+ * The add-on job (services/addon-start.js) on a node a failover promoted,
+ * detached: it never ran there (reconcile.sh starts it on the role primary
+ * only), so without this the node has no current add-on status. `promoted`
+ * mode runs no one-shot setup: the replicated database already holds their
+ * work. A no-op on a node deployed before the job existed.
+ */
+export function composeStartAddonJobCmd(projectName, attemptId) {
+  return addonJobStartCmd(projectName, attemptId, 'promoted');
+}
+
 const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
 
 /**
@@ -1638,7 +1650,7 @@ export async function startOldPrimaryWriters(ip, sshKeyPath, containers) {
  * @param {string} envName
  * @param {{ override?: string }} [opts]
  */
-export function swapComposeHaRoles(envName, { override } = {}) {
+export function swapComposeHaRoles(envName, { override, attemptId } = {}) {
   updateProjectConfig((config) => {
     const envConfig = config.environments?.[envName];
     if (!envConfig) {
@@ -1662,6 +1674,9 @@ export function swapComposeHaRoles(envName, { override } = {}) {
     envConfig.replication = 'degraded';
     envConfig.degraded = true;
     envConfig.lastFailover = new Date().toISOString();
+    // The failover's attempt id, the one its add-on job on the promoted node
+    // was started with: that node's status file is the current one now.
+    if (attemptId) envConfig.lastAttemptId = attemptId;
     if (override) envConfig.lastFailoverOverride = override;
     else delete envConfig.lastFailoverOverride;
   });
@@ -1921,6 +1936,9 @@ export async function failoverComposeHA(
   assertNoComposeHaRoleSwap({ projectName, environment: envName, envConfig });
   // A compose scale stopped mid-cutover may have moved the primary already.
   assertNoScaleCutoverInFlight({ environment: envName, envConfig, action: 'fail over' });
+  // This failover's attempt id: its add-on job on the promoted node writes it,
+  // and the swap save records it (services/addon-start.js).
+  const attemptId = mintAttemptId();
 
   const {
     keyExists = existsSync,
@@ -2498,6 +2516,24 @@ export async function failoverComposeHA(
         : 'Primary-only add-ons started',
     );
   }
+  // Step 2a': the add-on job on the promoted node, so it records every
+  // background add-on's state for `vibecarbon status` (and brings up any not
+  // running). Not while the old primary's writers still run: the job would
+  // start the primary-only add-ons the step above held back. Best-effort.
+  if (!(addonStart && oldPrimaryStillWriting)) {
+    const jobStarted = await sshRun(
+      standbyServer.ip,
+      sshKeyPath,
+      composeStartAddonJobCmd(projectName, attemptId),
+      { timeout: 30_000 },
+    );
+    if (jobStarted === false) {
+      p.log.warn(
+        `Could not start the add-on job on the new primary (${standbyServer.ip}); ` +
+          'vibecarbon status reads its add-ons from their containers until the next deploy',
+      );
+    }
+  }
 
   // Step 2b: Demote the old primary's wal-g write-guard, so it stops pushing
   // WAL into the prefix the new primary now owns. Deliberately AFTER step 2:
@@ -2561,6 +2597,7 @@ export async function failoverComposeHA(
       : mode === 'resume'
         ? envConfig?.ha?.failoverInFlight?.override
         : undefined,
+    attemptId,
   });
   // The old primary is now the retired side: fence it if it answers (marker,
   // every writer stopped, not just the app, WALG_ROLE=standby). One that does

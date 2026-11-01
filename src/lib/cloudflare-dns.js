@@ -496,8 +496,11 @@ export async function deleteHealthCheck(apiToken, zoneId, name) {
  * @param {Array} servers - Array of server objects with name and ip
  * @returns {Promise<object>} - Setup result
  */
-export async function setupHA(apiToken, zoneId, domain, servers) {
-  const s = spinner();
+export async function setupHA(apiToken, zoneId, domain, servers, options = {}) {
+  // onProgress: the caller owns the line (or another step does, for a
+  // background write); no spinner of our own then. Same contract as setupSimple.
+  const { onProgress } = options;
+  const s = onProgress ? null : spinner();
 
   try {
     // Create A record pointing to primary server.
@@ -514,14 +517,15 @@ export async function setupHA(apiToken, zoneId, domain, servers) {
     // both are direct-to-origin via Traefik + Let's Encrypt.
     // RCA: k8s-ha 2026-04-30 deploy probe got 404 for 1200s — DNS
     // resolved fine, but CF proxy returned 404 instead of forwarding.
-    s.start(`Creating DNS record for ${domain}`);
+    s?.start(`Creating DNS record for ${domain}`);
+    onProgress?.(`Creating DNS record for ${domain}`);
     await createDNSRecord(apiToken, zoneId, {
       type: 'A',
       name: domain,
       value: servers[0].ip,
       proxied: false,
     });
-    s.stop('Primary DNS record created');
+    s?.stop('Primary DNS record created');
 
     // Create wildcard A record for subdomains (registry, api, etc.)
     // DNS-only (not proxied) — Traefik handles TLS via Let's Encrypt
@@ -534,13 +538,13 @@ export async function setupHA(apiToken, zoneId, domain, servers) {
 
     // Create health checks for monitoring both regions
     for (const server of servers) {
-      s.start(`Creating health check for ${server.name}`);
+      s?.start(`Creating health check for ${server.name}`);
       const created = await createHealthCheckOrWarn(apiToken, zoneId, {
         name: `${server.name}-health`,
         address: server.ip,
         path: '/api/health',
       });
-      s.stop(
+      s?.stop(
         created
           ? `Health check created for ${server.name}`
           : `Health check skipped for ${server.name}`,
@@ -554,7 +558,7 @@ export async function setupHA(apiToken, zoneId, domain, servers) {
       standbyIp: servers[1]?.ip,
     };
   } catch (error) {
-    s.stop(`Cloudflare DNS setup failed: ${error.message}`);
+    s?.stop(`Cloudflare DNS setup failed: ${error.message}`);
     return { success: false, error: error.message };
   }
 }

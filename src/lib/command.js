@@ -236,10 +236,13 @@ export function runCommandAsync(cmd, options = {}) {
 
     const stdio = options.silent ? 'pipe' : 'inherit';
     const [executable, ...args] = argv;
+    // options.signal: aborting it kills the child (SIGTERM) and rejects, so a
+    // caller can reap work it started in the background when it fails.
     const child = spawn(executable, args, {
       stdio,
       env,
       cwd: options.cwd,
+      ...(options.signal && { signal: options.signal }),
     });
 
     activeChildren.add(child);

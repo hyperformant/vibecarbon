@@ -1166,8 +1166,18 @@ function serverContainersHealthy(sc) {
   if (counted.some((r) => r.health !== 'healthy')) return false;
   for (const ns of Object.values(sc.platform || {})) if (ns.healthy !== ns.total) return false;
   if (sc.nodes && sc.nodes.ready !== sc.nodes.total) return false;
+  // A background add-on that failed or stopped needs attention; one still
+  // starting does not.
+  if ((sc.addons || []).some((a) => a.state === 'failed' || a.state === 'stopped')) return false;
   return true;
 }
+
+const ADDON_ROW_HEALTH = {
+  running: 'healthy',
+  starting: 'starting',
+  failed: 'unhealthy',
+  stopped: 'unhealthy',
+};
 
 /**
  * The Servers block body: one line per server, then — when container data
@@ -1217,6 +1227,33 @@ function formatServerLines(servers, checks) {
     for (const r of sc.rows) {
       if (r.health === 'healthy' || r.health === 'done') continue;
       lines.push(formatContainerRow(r, '      '));
+    }
+    // Add-ons start in the background after the core stack (services/
+    // addon-start.js): a rollup, then each one not yet running, a failure with
+    // its reason.
+    if (sc.addons?.length) {
+      const running = sc.addons.filter((a) => a.state === 'running').length;
+      const failed = sc.addons.some((a) => a.state === 'failed' || a.state === 'stopped');
+      const paintAddons = failed ? c.error : running === sc.addons.length ? c.success : c.warning;
+      lines.push(
+        `    ${c.dim('add-ons')} ${paintAddons(`● ${running}/${sc.addons.length} running`)}`,
+      );
+      for (const a of sc.addons) {
+        if (a.state === 'running') continue;
+        lines.push(
+          formatContainerRow(
+            {
+              name: a.name,
+              container: a.name,
+              health: ADDON_ROW_HEALTH[a.state] ?? 'unknown',
+              label: a.state,
+              detail: a.reason,
+              latencyMs: 0,
+            },
+            '      ',
+          ),
+        );
+      }
     }
     for (const [ns, n] of Object.entries(sc.platform || {})) {
       if (n.healthy === n.total) continue;
@@ -1283,6 +1320,22 @@ function isEnvironmentUnhealthy(entry) {
   return false;
 }
 
+/**
+ * Whether an env has an HA pair to show: a recorded stack. k8s-ha records
+ * each cluster's stack under ha.primary/standby (the success save); compose-ha
+ * records its two servers, named by stack, with their roles (from
+ * persist-pending-config on). Neither the deploy skeleton's `ha` (enabled,
+ * failoverRegion, the standby's planned types) nor the floating IPs the early
+ * k8s-ha DNS write persists count: a first deploy that died there has no pair.
+ * @param {object} envConfig
+ */
+export function isHaConfigured(envConfig) {
+  const ha = envConfig?.ha;
+  if (!ha) return false;
+  if (ha.primary?.stack || ha.standby?.stack) return true;
+  return (envConfig.servers ?? []).some((sv) => sv?.role === 'standby');
+}
+
 function renderEnvironment(envName, envConfig, checks) {
   const lines = [];
 
@@ -1338,7 +1391,7 @@ function renderEnvironment(envName, envConfig, checks) {
 
   // HA. A single-server compose env carries `ha` only for scale's write-fence
   // marker, which is no HA config.
-  const haConfigured = !!envConfig.ha && Object.keys(envConfig.ha).some((k) => k !== 'writeFence');
+  const haConfigured = isHaConfigured(envConfig);
   if (haConfigured) {
     const failoverRegion = envConfig.secondaryRegion || envConfig.failoverRegion;
     const haDisplay = failoverRegion

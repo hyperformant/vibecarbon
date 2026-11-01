@@ -132,6 +132,59 @@ describe('server-class create timeouts (census)', () => {
     },
   );
 
+  // Safety: a cloud-init edit must never replace an existing server that
+  // holds data. Every provider's user-data input forces a replacement on
+  // change, and a compose server's (or a k8s master's or db node's) data lives
+  // on its disk. k8s WORKERS are the exception, the other way round: they are
+  // stateless, and their user data carries the join target (k3s token, master
+  // private IP), so a worker must still be rebuilt when that changes.
+  it.each(Object.keys(PROGRAMS))(
+    '%s: k8s workers follow their user data, with the create bound',
+    async (file) => {
+      const resources = await runProgram(file);
+      const workers = resources.filter(
+        (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
+      );
+      if (file.endsWith('-k8s.js'))
+        expect(workers.length, `${file} has no worker`).toBeGreaterThan(0);
+      for (const w of workers) {
+        const input =
+          SERVER_RESOURCE_TYPES[w.token as keyof typeof SERVER_RESOURCE_TYPES].userDataInput;
+        const opts = (w.opts ?? {}) as { ignoreChanges?: string[]; customTimeouts?: object };
+        expect(opts.ignoreChanges ?? [], `${file}: worker "${w.name}"`).not.toContain(input);
+        expect(
+          opts.customTimeouts,
+          `${file}: worker "${w.name}" keeps the create bound`,
+        ).toBeTruthy();
+      }
+    },
+  );
+
+  it.each(Object.keys(PROGRAMS))(
+    '%s: every non-worker server-class resource ignores changes to its user data',
+    async (file) => {
+      const resources = await runProgram(file);
+      const servers = resources.filter(
+        (r) => r.token in SERVER_RESOURCE_TYPES && !/^worker-/.test(r.name),
+      );
+      expect(servers.length).toBeGreaterThan(0);
+      for (const server of servers) {
+        const input =
+          SERVER_RESOURCE_TYPES[server.token as keyof typeof SERVER_RESOURCE_TYPES].userDataInput;
+        // Non-vacuous: the input really is where this server's user data goes.
+        expect(
+          Object.keys((server.args ?? {}) as object),
+          `${file}: ${server.type} "${server.name}" carries no ${input}`,
+        ).toContain(input);
+        const opts = (server.opts ?? {}) as { ignoreChanges?: string[] };
+        expect(
+          opts.ignoreChanges ?? [],
+          `${file}: ${server.type} "${server.name}" would be replaced by a user-data change`,
+        ).toContain(input);
+      }
+    },
+  );
+
   it.each(Object.keys(PROGRAMS))(
     '%s: every VM-shaped class is a known server class',
     async (file) => {

@@ -6,20 +6,28 @@
  *
  * End-to-end flow on a cold deploy:
  *   1. Preflight: docker, ssh, kubectl, helm on PATH; server-type architecture.
- *   2. Generate (or reuse) the SSH keypair under projectDir/.vibecarbon/ssh-<env>.
- *   3. Pulumi up — cloud-init installs k3s + hcloud-ccm/csi on each node.
- *   4. Wait for SSH on master + `/tmp/k3s-ready` marker.
- *   5. scp `/etc/rancher/k3s/k3s.yaml` from master, patch server URL to public IP.
- *   6. Build app image locally (10.0.1.1:5000/<project>:<sha>[-dirty]-<ts>).
- *   7. `kubectl apply -k` a rendered copy of `k8s/base/` (db StatefulSet,
- *      traefik, app, the master's local registry; cert-manager via infra/).
- *   8. Deliver the image once, by layer delta, into the master's registry
- *      (deliverImage); every node pulls it from there.
+ *   2. Start the app image build locally, in the background, before anything
+ *      is provisioned (startAppImageBuild: `vibecarbon-local/<project>:<sha>
+ *      [-dirty]-<ts>`, its k3s-build gate inputs read first).
+ *   3. Generate (or reuse) the SSH keypair under projectDir/.vibecarbon/ssh-<env>.
+ *   4. Pulumi up — cloud-init installs k3s + the provider's CCM/CSI on each node.
+ *   5. Wait for SSH on master + `/tmp/k3s-ready` marker (onInfraReady fires:
+ *      single k8s starts its DNS A record write here).
+ *   6. scp `/etc/rancher/k3s/k3s.yaml` from master, patch server URL to public IP.
+ *   7. Finish the build and retag it `<masterPrivateIp>:5000/<project>:<tag>`
+ *      (deliverAppImage).
+ *   8. applyK3sManifests: the image's layer delta into the master's
+ *      containerd and the cluster autoscaler rollout start alongside the
+ *      cert-manager chain; then `kubectl apply -k` a rendered copy of
+ *      `k8s/base/` (db StatefulSet, traefik, app, the master's local
+ *      registry); the image is pushed into that registry once it serves
+ *      (deliverImage pushAfter), and every node pulls it from there.
  *   9. `kubectl rollout status statefulset/db`.
  *   10. `kubectl patch deploy/app` (image + Secret versions) + rollout-status.
  *
- * Warm path: skip 1-5; rebuild image (6); apply changed manifests and deliver
- * a changed tag (7-8); rollout (10).
+ * Warm path: skip what is unchanged (state-gated); a changed source rebuilds
+ * (2, 7), changed manifests or a changed tag re-apply and re-deliver (8);
+ * rollout (10).
  *
  * Target cold-deploy time: ≤ 3 min for single-master + database + 0 workers.
  * Spike on 2026-04-25 measured 82s for cluster bring-up alone.
@@ -103,6 +111,7 @@ import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
   planImageDelivery,
+  registryImageTag,
   standbyImageRef,
 } from './image-delivery.js';
 import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
@@ -542,7 +551,7 @@ export function kubectlErrorHaystack(err) {
  */
 export async function runKubectlWithRetry(
   args,
-  { env, input, captureStdout = false, description, transientExtra, delaysMs } = {},
+  { env, input, captureStdout = false, description, transientExtra, delaysMs, signal } = {},
 ) {
   const RETRY_DELAYS_MS = delaysMs ?? [2000, 4000];
   const ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -551,7 +560,12 @@ export async function runKubectlWithRetry(
     return await runWithRetry(
       async () => {
         try {
-          const out = await runCommandAsync(['kubectl', ...args], { env, input, silent: true });
+          const out = await runCommandAsync(['kubectl', ...args], {
+            env,
+            input,
+            silent: true,
+            ...(signal && { signal }),
+          });
           // Stream captured stdout through to the operator's terminal so the
           // success path looks identical to the legacy `stdio: 'inherit'` shape.
           // captureStdout suppresses stdout streaming because the caller wants
@@ -567,6 +581,7 @@ export async function runKubectlWithRetry(
       {
         delaysMs: RETRY_DELAYS_MS,
         isTransient: (err) => {
+          if (signal?.aborted) return false;
           const text = kubectlErrorHaystack(err);
           return KUBECTL_TRANSIENT_PATTERN.test(text) || (transientExtra?.test(text) ?? false);
         },
@@ -1481,19 +1496,15 @@ function loadEnvLocal(envPath) {
  *
  * Reuses the buildLocalImage primitive from src/lib/deploy/image.js, which
  * already handles git sha + dirty-state + timestamp. Tag scheme:
- * `<masterPrivateIp>:5000/<projectName>:<sha>[-dirty]-<utcTimestamp>`.
- *
- * The `<masterPrivateIp>:5000/` prefix points at the master's local OCI
- * registry pod (Phase 1's `registries.yaml` configures kubelet on every
- * node to resolve `<masterPrivateIp>:5000` → that pod). `masterPrivateIp`
- * defaults to Hetzner's static `10.0.1.1` (see hetzner-k8s.js) so every
- * pre-M3 caller keeps producing byte-identical tags; deployK3s threads the
- * real value from `infraOutputs.masterPrivateIp` (M3 — DO can't pin VPC
- * IPs the way Hetzner's program does). The same tag is used at every step
- * (build → delivery → Deployment): applyK3sManifests delivers it once, by
- * layer delta, into the master's containerd and pushes it into the master's
+ * `vibecarbon-local/<projectName>:<sha>[-dirty]-<utcTimestamp>`, for no
+ * particular cluster: the build starts before the cluster exists
+ * (startAppImageBuild), so it cannot know the master's private IP, a real
+ * Pulumi output on DigitalOcean. deliverAppImage then retags it
+ * `<masterPrivateIp>:5000/<projectName>:<same tag>` (registryImageTag), the
+ * ref used at every later step: applyK3sManifests delivers it once, by layer
+ * delta, into the master's containerd and pushes it into the master's
  * registry pod (deliverImage, layer-delta.js), and every other node, static
- * or cluster-autoscaler-spawned, pulls that tag from the registry through
+ * or cluster-autoscaler-spawned, pulls it from the registry through
  * `registries.yaml`.
  *
  * A k8s-ha standby never calls this: it receives the primary's tag, copied
@@ -1504,7 +1515,8 @@ function loadEnvLocal(envPath) {
  * @param {string} projectName
  * @param {boolean} [rebuild]
  * @param {string} [domain]
- * @param {string} [masterPrivateIp]
+ * @param {{quiet?: boolean}} [opts] - quiet: capture the build output (it
+ *   overlaps the provisioning spinner); a failure carries its tail.
  * @returns {Promise<{tag: string, gitSha: string, isDirty: boolean}>}
  */
 export async function buildAppImage(
@@ -1512,7 +1524,7 @@ export async function buildAppImage(
   projectName,
   rebuild = false,
   domain = undefined,
-  masterPrivateIp = '10.0.1.1',
+  { quiet = false, signal } = {},
 ) {
   const { buildLocalImage } = await import('../image.js');
   // App image: collect VITE_* build args (incl. VITE_PUBLIC_URL rewritten to
@@ -1525,12 +1537,12 @@ export async function buildAppImage(
     const { collectComposeBuildArgs } = await import('../compose/build-args.js');
     buildArgs = collectComposeBuildArgs(projectDir, { projectName, domain });
   }
-  return await buildLocalImage(projectDir, {
-    projectName,
-    rebuild,
-    tagPrefix: `${masterPrivateIp}:5000`,
-    buildArgs,
-  });
+  return await buildLocalImage(projectDir, { projectName, rebuild, buildArgs, quiet, signal });
+}
+
+/** Give a locally built image its registry name (a local `docker tag`, no copy). */
+async function tagLocalImage(source, target) {
+  await runCommandAsync(['docker', 'tag', source, target], { silent: true });
 }
 
 /**
@@ -3345,6 +3357,9 @@ export async function applyK3sManifests({
   // The environment as the operator names it (HA clusters deploy under their
   // stack names), for the commands an error prints.
   operatorEnv,
+  // Where this registers what it runs alongside its main chain (the CA
+  // rollout), so deployK3s can stop and settle it when the deploy fails.
+  inFlight = {},
 }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   // The schedule and retention this environment runs backups with, validated
@@ -3418,6 +3433,287 @@ export async function applyK3sManifests({
       description: `applyK3sManifests: kubectl set image ${workload} (CSI sidecars → ghcr mirrors)`,
     });
   }
+  // 0b. Deliver the app image, once, into the master's registry: a layer
+  //     delta into the master's containerd (only the layers the base pull
+  //     did not already put there), checked against the image's diffIDs,
+  //     then `ctr images push` into the local registry pod. Every other node,
+  //     static or CA-spawned, pulls the same
+  //     `<masterPrivateIp>:5000/<project>:<tag>` from it (registries.yaml),
+  //     so nothing goes to a node per node. The transfer and import need only
+  //     ssh and the base pull, so they start HERE, alongside the cert-manager
+  //     chain and the base apply (DO e2e 2026-10-31: 12 s); only the push
+  //     waits (pushAfter) for the registry rollout, step 5b', because a
+  //     registry pod still Pending refuses `ctr images push` on :5000. It is
+  //     awaited right before step 6 points deployment/app at the tag, the
+  //     first time any pod references it.
+  //     A k8s-ha standby delivers nothing: the primary's image is copied
+  //     into this registry over wg0 (planImageDelivery); the registry wait
+  //     stays and only the delivery is skipped.
+  let markRegistryServing;
+  const registryServing = {
+    promise: new Promise((resolve, reject) => {
+      markRegistryServing = { resolve, reject };
+    }),
+    resolve: () => markRegistryServing.resolve(),
+    reject: (err) => markRegistryServing.reject(err),
+  };
+  // A registry that never serves fails the deploy at its own wait; this only
+  // keeps the rejected signal from being an unhandledRejection.
+  registryServing.promise.catch(() => {});
+  const { deliver } = planImageDelivery({ role });
+  let deliveryPromise = null;
+  if (deliver) {
+    if (!masterIp) {
+      throw new Error('applyK3sManifests: masterIp required for the image delivery');
+    }
+    if (!sshKeyPath) {
+      throw new Error('applyK3sManifests: sshKeyPath required for the image delivery');
+    }
+    // `deploy.<prefix>.image.deliver` now spans the transfer AND the wait for
+    // the registry before the push, so it is not comparable with the pre-
+    // pushAfter figure (12 s on DO, 2026-10-31); `deploy.image.delta` alone
+    // times the transfer.
+    deliveryPromise = perfAsync(`deploy.${perfPrefix}.image.deliver`, () =>
+      deliverImage({
+        tag: imageTag,
+        sshTarget: `root@${masterIp}`,
+        sshKey: sshKeyPath,
+        runtime: 'k3s',
+        registryRef: imageTag,
+        basePull,
+        pushAfter: registryServing.promise,
+      }),
+    );
+    // A delivery that fails while the work below is still running must not
+    // surface as an unhandledRejection: the await before step 6 re-throws it
+    // and fails the deploy.
+    deliveryPromise.catch(() => {});
+  }
+  if (!apiToken) {
+    throw new Error(
+      'applyK3sManifests: apiToken (provider API token) required for carbon-autoscaler Secret/carbon-autoscaler-config',
+    );
+  }
+  if (!k3sToken) {
+    throw new Error('applyK3sManifests: k3sToken required to render carbon-autoscaler config.json');
+  }
+  // The cluster autoscaler, applied and rolled out ALONGSIDE the cert-manager
+  // chain below rather than after k8s/base (DO e2e 2026-10-31: its rollout
+  // was 15.6 s of the 127 s apply, in series). Nothing it needs comes from
+  // either: it runs in kube-system on the master's host network, from its own
+  // kustomization (k8s/base/cluster-autoscaler, applied standalone) and its
+  // own carbon-autoscaler-config Secret; no cert-manager resource, no
+  // vibecarbon-namespace object, no NetworkPolicy (hostNetwork) is involved.
+  // The order inside is unchanged: Secret, apply, set image, then the zero
+  // (pilot standby) or the rollout wait. The app is still patched only after
+  // this settles (awaited with the image delivery before step 6), so the CA
+  // is up before any app pod can ask it for a node, exactly as before, and a
+  // failed rollout fails the deploy there with its diagnostics.
+  // Stopped (its kubectl children killed) when the main chain below fails,
+  // so it settles before applyK3sManifests rethrows: no CA diagnostics print
+  // after the deploy's own failure and no kubectl outlives it.
+  const caStop = new AbortController();
+  const rollOutClusterAutoscaler = async () => {
+    // 4b. Create the kube-system/carbon-autoscaler-config Secret the
+    //     carbon-autoscaler sidecar reads on startup (and on every
+    //     mtime-changed Refresh — see ConfigWatcher). Two keys:
+    //     - `token`: the provider API token, exposed to the sidecar via
+    //       secretKeyRef→PROVIDER_API_TOKEN in deployment.yaml.
+    //     - `config.json`: the rendered node-group config from
+    //       renderCarbonAutoscalerConfig, PLAIN JSON — no base64
+    //       pre-encoding. That hack only existed for the old hcloud
+    //       cloudprovider's secretKeyRef→env path (Kubernetes auto-decodes
+    //       Secret data to plaintext once, and that binary wanted a SECOND,
+    //       still-encoded layer on top). The sidecar mounts this Secret as a
+    //       FILE (`CARBON_AUTOSCALER_CONFIG=/config-ca/config.json`), which
+    //       only ever goes through the one automatic decode — plain JSON is
+    //       exactly what it expects.
+    //     Stdin pipe keeps the token + JSON off argv (mirrors the dnsSecret
+    //     pattern at step 2b).
+    const clusterName = `${projectName}-${environment}`;
+    const carbonAutoscalerConfigJson = await renderCarbonAutoscalerConfig({
+      k3sVersion: K3S_VERSION,
+      k3sToken,
+      // M3 Task 2: output-driven master private IP (Hetzner's own default
+      // stays '10.0.1.1' when this is undefined — see renderCarbonAutoscalerConfig).
+      masterPrivateIp,
+      clusterName,
+      environment,
+      providerId,
+      ProviderClass,
+      region,
+      workerServerType,
+      minWorkers,
+      maxWorkers,
+      caBoundsMin,
+    });
+    {
+      const caSecretYaml = [
+        'apiVersion: v1',
+        'kind: Secret',
+        'metadata:',
+        '  name: carbon-autoscaler-config',
+        '  namespace: kube-system',
+        'type: Opaque',
+        'stringData:',
+        `  token: ${JSON.stringify(apiToken)}`,
+        `  config.json: ${JSON.stringify(carbonAutoscalerConfigJson)}`,
+        '',
+      ].join('\n');
+      await runKubectlWithRetry(['apply', '-f', '-'], {
+        env,
+        signal: caStop.signal,
+        input: caSecretYaml,
+        description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
+      });
+    }
+    // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
+    //      kube-system but base/'s parent kustomization sets
+    //      `namespace: vibecarbon`, whose namespace transformer would
+    //      override our kube-system metadata. Mirrors the CCM/CSI
+    //      separate-install pattern (those are commented in
+    //      base/kustomization.yaml and applied via cloud-init). The
+    //      child kustomization at carbon/k8s/base/cluster-autoscaler/
+    //      sets `namespace: kube-system` explicitly, which only takes
+    //      effect when applied standalone like this.
+    await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/base/cluster-autoscaler')], {
+      env,
+      signal: caStop.signal,
+      description: 'applyK3sManifests: kubectl apply -k cluster-autoscaler',
+    });
+    // 5a''. Patch BOTH container images in one call.
+    //
+    //       `carbon-autoscaler`: deployment.yaml ships the
+    //       `{{CARBON_AUTOSCALER_IMAGE}}` placeholder (kustomize has no
+    //       built-in var-substitution for a container image string), so
+    //       resolve it here the same way the domain/SITE_URL placeholders
+    //       below are patched at deploy time.
+    //
+    //       `cluster-autoscaler`: the manifest already carries the mirrored
+    //       ghcr ref as a literal, so this is belt-and-braces — but load-bearing
+    //       belt-and-braces. `apply -k` above reads the PROJECT's checked-in
+    //       copy of this manifest, and a project generated before the mirror
+    //       landed still pins registry.k8s.io there, i.e. still walks into the
+    //       403 that cost a deploy on 2026-07-31 (src/lib/images.js). Re-pinning
+    //       here makes images.js authoritative at deploy time no matter how old
+    //       the project's k8s/ tree is.
+    //
+    //       Both refs come from src/lib/images.js, the single source of truth.
+    await runKubectlWithRetry(
+      [
+        '-n',
+        'kube-system',
+        'set',
+        'image',
+        'deployment/cluster-autoscaler',
+        `carbon-autoscaler=${carbonAutoscalerImageRef()}`,
+        `cluster-autoscaler=${clusterAutoscalerImageRef()}`,
+      ],
+      {
+        env,
+        signal: caStop.signal,
+        description:
+          'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
+      },
+    );
+    if (pilotStandby) {
+      // Pilot-light: CA has nothing to scale for until a failover promotes
+      // this cluster, so zero it the same way as the app Deployment (step 5).
+      // Its node-group bounds are already pre-rendered into the
+      // carbon-autoscaler-config Secret (step 4b) using the PRIMARY's
+      // caBoundsMin/maxWorkers — the standby's maxSize reflects the same
+      // headroom the primary would scale into — so a failover only has to
+      // flip replicas 0→1, never re-render the config.
+      await runKubectlWithRetry(
+        [
+          '-n',
+          'kube-system',
+          'patch',
+          'deployment',
+          'cluster-autoscaler',
+          '--type=merge',
+          '-p',
+          JSON.stringify({ spec: { replicas: 0 } }),
+        ],
+        {
+          env,
+          signal: caStop.signal,
+          description: 'applyK3sManifests: zero cluster-autoscaler deployment (pilot standby)',
+        },
+      );
+    }
+    // 5e. Wait for the rollout the `apply -k cluster-autoscaler` + `set image`
+    //     steps above triggered (on `strategy: Recreate`, either one changing
+    //     the pod template rolls the pod). The status-wait is the clean
+    //     failure mode: a misconfigured sidecar (e.g. an unreachable image tag)
+    //     surfaces here instead of as a downstream "no nodes scaled" mystery.
+    if (pilotStandby) {
+      // The steps above just rolled a Deployment we then zeroed — there's
+      // no rollout to wait on (0 replicas converges immediately).
+      console.error(
+        '[pilot-standby] skipping cluster-autoscaler rollout wait, app tier is zeroed until failover',
+      );
+    } else {
+      await perfAsync(`deploy.${perfPrefix}.clusterAutoscaler.rollout`, async () => {
+        // rollout-status has its own --timeout and benefits from live progress;
+        // runs via runCommandAsync (kubectl rollout status). Internal
+        // apiserver-watch retries cover transient drops within the budget.
+        //
+        // 300s: ONE Recreate cycle (old pod terminate + new pod start) plus a
+        // cold pull of both container images from ghcr.io. The former THREE
+        // back-to-back rolls (now collapsed into the single 5d patch) were what
+        // pushed this past 180s on the standby (k8s-ha 2026-04-29 run); one
+        // cycle sits comfortably under 300s, and the node has been pre-pulling
+        // both images since k3s came up (clusterAutoscalerPodImages()). Capture
+        // pod state on failure so a timeout surfaces root cause instead of just
+        // "rollout status timed out" — that is how the 2026-07-31 registry.k8s.io
+        // 403 was finally identified.
+        try {
+          // Through the retry wrapper, NOT bare runCommandAsync (d4 run 4,
+          // 2026-08-28): kubectl's internal watch retries only survive drops on
+          // an established connection — a transient `TLS handshake timeout` on
+          // the INITIAL connect exited kubectl 13s into the 300s budget and
+          // failed the deploy while the pod went Ready seconds later. The
+          // classifier already knew the spelling; this call was the last
+          // rollout-status holdout outside the wrapper.
+          await runKubectlWithRetry(
+            [
+              '-n',
+              'kube-system',
+              'rollout',
+              'status',
+              'deploy/cluster-autoscaler',
+              '--timeout=300s',
+            ],
+            {
+              env,
+              signal: caStop.signal,
+              description: 'applyK3sManifests: cluster-autoscaler rollout status',
+            },
+          );
+        } catch (err) {
+          // Capture runs through runDeployDiagnostic (silent:true + re-emit) so
+          // every byte lands in ~/.vibecarbon/logs/<env>-<ts>.log. The previous
+          // `silent: false` version wrote to inherited fds, which the deploy-log
+          // tee cannot see — on the 2026-07-31 e3 run it left a bare header and
+          // cost a blind RCA. See the "Deploy-time diagnostic capture" block.
+          // Stopped because the deploy already failed: no diagnostics after
+          // that failure (applyK3sManifests).
+          if (caStop.signal.aborted) throw err;
+          await captureClusterAutoscalerDiagnostics({ env });
+          throw err;
+        }
+      });
+    }
+  };
+  const clusterAutoscalerReady = rollOutClusterAutoscaler();
+  // Awaited before step 6; this only keeps a rollout that fails while the
+  // cert-manager chain is still running from being an unhandledRejection.
+  clusterAutoscalerReady.catch(() => {});
+  inFlight.stopClusterAutoscaler = async () => {
+    caStop.abort();
+    await clusterAutoscalerReady.catch(() => {});
+  };
   // 1. Install cert-manager (raw YAML; not a kustomize base).
   await perfAsync(`deploy.${perfPrefix}.certManager.install`, () =>
     runKubectlWithRetry(['apply', '-f', CERT_MANAGER_URL], {
@@ -3708,66 +4004,6 @@ export async function applyK3sManifests({
   //    marker, so the db pod's first boot restores that backup.
   await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore });
   onNamespaceReady?.();
-  // 4b. Create the kube-system/carbon-autoscaler-config Secret the
-  //     carbon-autoscaler sidecar reads on startup (and on every
-  //     mtime-changed Refresh — see ConfigWatcher). Two keys:
-  //     - `token`: the provider API token, exposed to the sidecar via
-  //       secretKeyRef→PROVIDER_API_TOKEN in deployment.yaml.
-  //     - `config.json`: the rendered node-group config from
-  //       renderCarbonAutoscalerConfig, PLAIN JSON — no base64
-  //       pre-encoding. That hack only existed for the old hcloud
-  //       cloudprovider's secretKeyRef→env path (Kubernetes auto-decodes
-  //       Secret data to plaintext once, and that binary wanted a SECOND,
-  //       still-encoded layer on top). The sidecar mounts this Secret as a
-  //       FILE (`CARBON_AUTOSCALER_CONFIG=/config-ca/config.json`), which
-  //       only ever goes through the one automatic decode — plain JSON is
-  //       exactly what it expects.
-  //     Stdin pipe keeps the token + JSON off argv (mirrors the dnsSecret
-  //     pattern at step 2b).
-  if (!apiToken) {
-    throw new Error(
-      'applyK3sManifests: apiToken (provider API token) required for carbon-autoscaler Secret/carbon-autoscaler-config',
-    );
-  }
-  if (!k3sToken) {
-    throw new Error('applyK3sManifests: k3sToken required to render carbon-autoscaler config.json');
-  }
-  const clusterName = `${projectName}-${environment}`;
-  const carbonAutoscalerConfigJson = await renderCarbonAutoscalerConfig({
-    k3sVersion: K3S_VERSION,
-    k3sToken,
-    // M3 Task 2: output-driven master private IP (Hetzner's own default
-    // stays '10.0.1.1' when this is undefined — see renderCarbonAutoscalerConfig).
-    masterPrivateIp,
-    clusterName,
-    environment,
-    providerId,
-    ProviderClass,
-    region,
-    workerServerType,
-    minWorkers,
-    maxWorkers,
-    caBoundsMin,
-  });
-  {
-    const caSecretYaml = [
-      'apiVersion: v1',
-      'kind: Secret',
-      'metadata:',
-      '  name: carbon-autoscaler-config',
-      '  namespace: kube-system',
-      'type: Opaque',
-      'stringData:',
-      `  token: ${JSON.stringify(apiToken)}`,
-      `  config.json: ${JSON.stringify(carbonAutoscalerConfigJson)}`,
-      '',
-    ].join('\n');
-    await runKubectlWithRetry(['apply', '-f', '-'], {
-      env,
-      input: caSecretYaml,
-      description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
-    });
-  }
   // 5. Apply base (namespace, network-policies, db, app, backup, traefik,
   //    config), always from a rendered temp copy (renderK8sBase): the db
   //    StatefulSet carries deploy-time placeholders (image, wal-g prefix and
@@ -3960,109 +4196,34 @@ export async function applyK3sManifests({
   //      going away. A pod still Pending refuses `ctr images push` on :5000.
   //      120s mirrors other base-pod readiness budgets. On a timeout, the
   //      events say whether a mirror package nobody can pull is the cause.
-  await perfAsync(`deploy.${perfPrefix}.localRegistry.wait`, async () => {
-    try {
-      await runKubectlWithRetry(
-        ['-n', 'vibecarbon', 'rollout', 'status', 'deployment/local-registry', '--timeout=120s'],
-        { env, description: 'applyK3sManifests: kubectl rollout status deployment/local-registry' },
-      );
-    } catch (err) {
-      const events = await runCommandAsync(MIRROR_PULL_EVENTS_ARGV, {
-        silent: true,
-        env,
-        timeout: 30_000,
-        ignoreError: true,
-      });
-      const hint = mirrorPullFailureHint(typeof events === 'string' ? events : '');
-      throw new Error(`local-registry rollout did not complete: ${hint ?? err.message}`, {
-        cause: err,
-      });
-    }
-  });
-  // 5b''. Deliver the app image, once, into the master's registry: a layer
-  //       delta into the master's containerd (only the layers the base pull
-  //       did not already put there), checked against the image's diffIDs,
-  //       then `ctr images push` into the registry pod that just became
-  //       Ready. Every other node, static or CA-spawned, pulls the same
-  //       `<masterPrivateIp>:5000/<project>:<tag>` from it (registries.yaml),
-  //       so nothing goes to a node per node. Started here, NOT awaited here:
-  //       it overlaps the CA apply, the observability apply and the CA rollout
-  //       below, and is awaited right before step 6 points deployment/app at
-  //       the tag, the first time any pod references it.
-  //       A k8s-ha standby delivers nothing: the primary's image is copied
-  //       into this registry over wg0 (planImageDelivery), so the wait above
-  //       stays and only the delivery is skipped.
-  const { deliver } = planImageDelivery({ role });
-  let deliveryPromise = null;
-  if (deliver) {
-    if (!masterIp) {
-      throw new Error('applyK3sManifests: masterIp required for the image delivery');
-    }
-    if (!sshKeyPath) {
-      throw new Error('applyK3sManifests: sshKeyPath required for the image delivery');
-    }
-    deliveryPromise = perfAsync(`deploy.${perfPrefix}.image.deliver`, () =>
-      deliverImage({
-        tag: imageTag,
-        sshTarget: `root@${masterIp}`,
-        sshKey: sshKeyPath,
-        runtime: 'k3s',
-        registryRef: imageTag,
-        basePull,
-      }),
-    );
-    // A delivery that fails while the CA / observability work below is still
-    // running must not surface as an unhandledRejection: the `await
-    // deliveryPromise` before step 6 re-throws it and fails the deploy.
-    deliveryPromise.catch(() => {});
+  try {
+    await perfAsync(`deploy.${perfPrefix}.localRegistry.wait`, async () => {
+      try {
+        await runKubectlWithRetry(
+          ['-n', 'vibecarbon', 'rollout', 'status', 'deployment/local-registry', '--timeout=120s'],
+          {
+            env,
+            description: 'applyK3sManifests: kubectl rollout status deployment/local-registry',
+          },
+        );
+      } catch (err) {
+        const events = await runCommandAsync(MIRROR_PULL_EVENTS_ARGV, {
+          silent: true,
+          env,
+          timeout: 30_000,
+          ignoreError: true,
+        });
+        const hint = mirrorPullFailureHint(typeof events === 'string' ? events : '');
+        throw new Error(`local-registry rollout did not complete: ${hint ?? err.message}`, {
+          cause: err,
+        });
+      }
+    });
+    registryServing.resolve();
+  } catch (err) {
+    registryServing.reject(err);
+    throw err;
   }
-  // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
-  //      kube-system but base/'s parent kustomization sets
-  //      `namespace: vibecarbon`, whose namespace transformer would
-  //      override our kube-system metadata. Mirrors the CCM/CSI
-  //      separate-install pattern (those are commented in
-  //      base/kustomization.yaml and applied via cloud-init). The
-  //      child kustomization at carbon/k8s/base/cluster-autoscaler/
-  //      sets `namespace: kube-system` explicitly, which only takes
-  //      effect when applied standalone like this.
-  await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/base/cluster-autoscaler')], {
-    env,
-    description: 'applyK3sManifests: kubectl apply -k cluster-autoscaler',
-  });
-  // 5a''. Patch BOTH container images in one call.
-  //
-  //       `carbon-autoscaler`: deployment.yaml ships the
-  //       `{{CARBON_AUTOSCALER_IMAGE}}` placeholder (kustomize has no
-  //       built-in var-substitution for a container image string), so
-  //       resolve it here the same way the domain/SITE_URL placeholders
-  //       below are patched at deploy time.
-  //
-  //       `cluster-autoscaler`: the manifest already carries the mirrored
-  //       ghcr ref as a literal, so this is belt-and-braces — but load-bearing
-  //       belt-and-braces. `apply -k` above reads the PROJECT's checked-in
-  //       copy of this manifest, and a project generated before the mirror
-  //       landed still pins registry.k8s.io there, i.e. still walks into the
-  //       403 that cost a deploy on 2026-07-31 (src/lib/images.js). Re-pinning
-  //       here makes images.js authoritative at deploy time no matter how old
-  //       the project's k8s/ tree is.
-  //
-  //       Both refs come from src/lib/images.js, the single source of truth.
-  await runKubectlWithRetry(
-    [
-      '-n',
-      'kube-system',
-      'set',
-      'image',
-      'deployment/cluster-autoscaler',
-      `carbon-autoscaler=${carbonAutoscalerImageRef()}`,
-      `cluster-autoscaler=${clusterAutoscalerImageRef()}`,
-    ],
-    {
-      env,
-      description:
-        'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
-    },
-  );
   // 5b. Patch the vibecarbon-config SITE_URL that the base/ kustomization
   //     ships with its `app.example.com` placeholder. (The vibecarbon-tls
   //     Certificate is no longer patched here: renderK8sBase renders it with
@@ -4189,28 +4350,6 @@ export async function applyK3sManifests({
       { env, description: 'applyK3sManifests: kubectl patch certificate/grafana-tls' },
     );
   }
-  if (pilotStandby) {
-    // Pilot-light: CA has nothing to scale for until a failover promotes
-    // this cluster, so zero it the same way as the app Deployment above.
-    // Its node-group bounds are already pre-rendered into the
-    // carbon-autoscaler-config Secret (step 4b) using the PRIMARY's
-    // caBoundsMin/maxWorkers — the standby's maxSize reflects the same
-    // headroom the primary would scale into — so a failover only has to
-    // flip replicas 0→1, never re-render the config.
-    await runKubectlWithRetry(
-      [
-        '-n',
-        'kube-system',
-        'patch',
-        'deployment',
-        'cluster-autoscaler',
-        '--type=merge',
-        '-p',
-        JSON.stringify({ spec: { replicas: 0 } }),
-      ],
-      { env, description: 'applyK3sManifests: zero cluster-autoscaler deployment (pilot standby)' },
-    );
-  }
   // (Considered: setting HCLOUD_NETWORK on the Hetzner CCM so it populates
   // each Node's InternalIP from the Hetzner private network. Reverted —
   // because k3s installs with `--node-ip=<public>` per master-init.sh,
@@ -4225,55 +4364,6 @@ export async function applyK3sManifests({
   // traefik rollout-restart below — kube-router's iptables can ship up
   // stale on first apply, and forcing traefik to re-establish its watch
   // after policies are in place clears it.)
-  // 5e. Wait for the rollout the `apply -k cluster-autoscaler` + `set image`
-  //     steps above triggered (on `strategy: Recreate`, either one changing
-  //     the pod template rolls the pod). The status-wait is the clean
-  //     failure mode: a misconfigured sidecar (e.g. an unreachable image tag)
-  //     surfaces here instead of as a downstream "no nodes scaled" mystery.
-  if (pilotStandby) {
-    // The steps above just rolled a Deployment we then zeroed — there's
-    // no rollout to wait on (0 replicas converges immediately).
-    console.error(
-      '[pilot-standby] skipping cluster-autoscaler rollout wait, app tier is zeroed until failover',
-    );
-  } else {
-    await perfAsync(`deploy.${perfPrefix}.clusterAutoscaler.rollout`, async () => {
-      // rollout-status has its own --timeout and benefits from live progress;
-      // runs via runCommandAsync (kubectl rollout status). Internal
-      // apiserver-watch retries cover transient drops within the budget.
-      //
-      // 300s: ONE Recreate cycle (old pod terminate + new pod start) plus a
-      // cold pull of both container images from ghcr.io. The former THREE
-      // back-to-back rolls (now collapsed into the single 5d patch) were what
-      // pushed this past 180s on the standby (k8s-ha 2026-04-29 run); one
-      // cycle sits comfortably under 300s, and the node has been pre-pulling
-      // both images since k3s came up (clusterAutoscalerPodImages()). Capture
-      // pod state on failure so a timeout surfaces root cause instead of just
-      // "rollout status timed out" — that is how the 2026-07-31 registry.k8s.io
-      // 403 was finally identified.
-      try {
-        // Through the retry wrapper, NOT bare runCommandAsync (d4 run 4,
-        // 2026-08-28): kubectl's internal watch retries only survive drops on
-        // an established connection — a transient `TLS handshake timeout` on
-        // the INITIAL connect exited kubectl 13s into the 300s budget and
-        // failed the deploy while the pod went Ready seconds later. The
-        // classifier already knew the spelling; this call was the last
-        // rollout-status holdout outside the wrapper.
-        await runKubectlWithRetry(
-          ['-n', 'kube-system', 'rollout', 'status', 'deploy/cluster-autoscaler', '--timeout=300s'],
-          { env, description: 'applyK3sManifests: cluster-autoscaler rollout status' },
-        );
-      } catch (err) {
-        // Capture runs through runDeployDiagnostic (silent:true + re-emit) so
-        // every byte lands in ~/.vibecarbon/logs/<env>-<ts>.log. The previous
-        // `silent: false` version wrote to inherited fds, which the deploy-log
-        // tee cannot see — on the 2026-07-31 e3 run it left a bare header and
-        // cost a blind RCA. See the "Deploy-time diagnostic capture" block.
-        await captureClusterAutoscalerDiagnostics({ env });
-        throw err;
-      }
-    });
-  }
   // The db wait: Ready (its readinessProbe: the real server accepting TCP),
   // then the condition itself, not the proxy: the pod being Ready is its
   // readiness probe's verdict at one instant, and awaitPostgresAccepting
@@ -4321,6 +4411,7 @@ export async function applyK3sManifests({
   //    change, one roll. Both containers: the app and its migrate init
   //    container run one image.
   if (deliveryPromise) await deliveryPromise;
+  await clusterAutoscalerReady;
   const appTemplatePatch = {
     spec: {
       template: {
@@ -4550,15 +4641,77 @@ export async function applyK3sManifests({
 }
 
 /**
+ * Start building the app image before the cluster is provisioned, so the build
+ * runs while Pulumi creates the servers instead of after k3s is Ready (DO e2e
+ * 2026-10-31: the up took 78 s, more than a cold build). The build needs
+ * nothing from the cluster: its tag names no registry until deliverAppImage
+ * retags it with the master's private IP.
+ *
+ * The `k3s-build` gate inputs (source and build-arg digests) are read HERE,
+ * before `docker build` reads the source, and handed to deliverAppImage with
+ * the build. The gate then records what the image was built from: an edit
+ * made while the cluster provisions is not recorded against the older image,
+ * so the next deploy rebuilds it. Only the master's private IP, unknown
+ * until provisioning, is filled in later; it names the registry, not the
+ * image's content.
+ *
+ * Returns null for a k8s-ha standby (it copies the primary's image).
+ * Otherwise `{ build, inputs }`, where `build` is null for a rerun whose
+ * `k3s-build` gate will skip (judged with the master IP the last
+ * provisioning recorded), so an unchanged redeploy builds nothing and leaves
+ * no stray local tag, and deliverAppImage reuses `inputs` instead of hashing
+ * the source again. A failure is not reported here: deliverAppImage awaits
+ * the build and fails the deploy with it, at the point a serial build would
+ * have.
+ *
+ * @returns {{build: Promise<{tag: string, gitSha: string, isDirty: boolean}>|null, inputs: object, abort?: () => void}|null}
+ */
+export function startAppImageBuild({
+  role,
+  state,
+  projectDir,
+  projectName,
+  domain,
+  priorMasterPrivateIp,
+  perfPrefix = 'k3s',
+  deps = {},
+}) {
+  const d = { buildAppImage, buildK3sBuildInputs, ...deps };
+  if (!planImageDelivery({ role }).build) return null;
+  const inputs = d.buildK3sBuildInputs({
+    projectName,
+    domain,
+    masterPrivateIp: priorMasterPrivateIp ?? null,
+    projectDir,
+  });
+  if (priorMasterPrivateIp && state.shouldSkip('k3s-build', inputs)) {
+    return { build: null, inputs };
+  }
+  // abort(): a deploy that fails while this runs reaps the docker build
+  // (deployK3s), instead of leaving it running after the error.
+  const reap = new AbortController();
+  const build = perfAsync(`deploy.${perfPrefix}.image.localBuild`, () =>
+    d.buildAppImage(projectDir, projectName, false, domain, { quiet: true, signal: reap.signal }),
+  );
+  // Awaited (and its failure thrown) by deliverAppImage; this only keeps a
+  // build that fails while Pulumi is still running from being an
+  // unhandledRejection before then.
+  build.catch(() => {});
+  return { build, inputs, abort: () => reap.abort() };
+}
+
+/**
  * Build the app image this cluster will run, and return its tag.
  *
  * Single-cluster k8s and a k8s-ha primary build the image locally (the
- * `k3s-build` gate); applyK3sManifests then delivers it once into the
- * master's registry, which every node pulls from. A k8s-ha standby builds
- * nothing: it awaits the primary's built ref (`peerImageRef`),
- * which is copied into its own registry, and re-prefixes it for its own
- * master (`standbyImageRef`). `onImageBuilt` reports the built tag whether
- * the build gate ran or skipped, so a warm rerun still hands the standby a ref.
+ * `k3s-build` gate), usually by taking the build startAppImageBuild began
+ * before provisioning (`early`, with the gate inputs it read), then name it for this cluster's
+ * registry (registryImageTag); applyK3sManifests then delivers it once into
+ * the master's registry, which every node pulls from. A k8s-ha standby builds
+ * nothing: it awaits the primary's built ref (`peerImageRef`), which is
+ * copied into its own registry, and re-prefixes it for its own master
+ * (`standbyImageRef`). `onImageBuilt` reports the built tag whether the build
+ * gate ran or skipped, so a warm rerun still hands the standby a ref.
  *
  * `deps` exists for tests: deployK3s can't be unit-driven and same-module
  * calls can't be mocked. The call stays spelled `d.buildAppImage(` so the
@@ -4575,10 +4728,11 @@ export async function deliverAppImage({
   projectName,
   domain,
   masterPrivateIp,
+  early = null,
   spinner,
   deps = {},
 }) {
-  const d = { buildAppImage, buildK3sBuildInputs, ...deps };
+  const d = { buildAppImage, buildK3sBuildInputs, tagImage: tagLocalImage, ...deps };
   const plan = planImageDelivery({ role });
   if (plan.awaitPeerImage) {
     if (!peerImageRef) throw new Error('deployK3s: role standby requires peerImageRef');
@@ -4594,17 +4748,34 @@ export async function deliverAppImage({
     // buildK3sBuildInputs for why each one is load-bearing, and for the
     // stale-image bug the coarse inputs alone shipped. Computed here, not in
     // deployK3s, so a standby (which builds nothing) never hashes the source.
-    const buildInputs = d.buildK3sBuildInputs({ projectName, domain, masterPrivateIp, projectDir });
+    // With an early start, the inputs it read before `docker build` (plus the
+    // master IP, now known): the gate records what the image was built from.
+    const readInputs = () =>
+      d.buildK3sBuildInputs({ projectName, domain, masterPrivateIp, projectDir });
+    let buildInputs = early ? { ...early.inputs, masterPrivateIp } : readInputs();
+    // A predicted skip that missed (the master IP moved) builds now, so it
+    // gates on the source as it is now.
+    if (early && !early.build && !state.shouldSkip('k3s-build', buildInputs)) {
+      buildInputs = readInputs();
+    }
     if (!state.shouldSkip('k3s-build', buildInputs)) {
       state.startStep('k3s-build', buildInputs);
       spinner.start(`Building app image (${masterPrivateIp}:5000/...)`);
-      const built = await d.buildAppImage(projectDir, projectName, false, domain, masterPrivateIp);
+      let built;
+      try {
+        built = await (early?.build ?? d.buildAppImage(projectDir, projectName, false, domain));
+      } catch (err) {
+        spinner.stop('App image build failed', 1);
+        throw err;
+      }
+      const tag = registryImageTag(built.tag, masterPrivateIp);
+      await d.tagImage(built.tag, tag);
       state.completeStep('k3s-build', {
-        tag: built.tag,
+        tag,
         gitSha: built.gitSha,
         isDirty: built.isDirty,
       });
-      spinner.stop(`Image built: ${built.tag}`);
+      spinner.stop(`Image built: ${tag}`);
     }
     ({ tag: imageTag } = state.getStepResult('k3s-build'));
     onImageBuilt?.(imageTag);
@@ -4751,6 +4922,21 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
  * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, masterPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string, imageTag: string}>}
  */
 export async function deployK3s(options) {
+  // What deployK3sSteps started in the background and must not outlive a
+  // failed deploy: the early app image build, and applyK3sManifests' cluster
+  // autoscaler rollout. Both are stopped, and the rollout settled, before the
+  // failure is rethrown: no CA diagnostics print after it, no child outlives it.
+  const inFlight = {};
+  try {
+    return await deployK3sSteps(options, inFlight);
+  } catch (err) {
+    inFlight.early?.abort();
+    await inFlight.stopClusterAutoscaler?.();
+    throw err;
+  }
+}
+
+async function deployK3sSteps(options, inFlight) {
   // A `deploy -restore` point arrives resolved (C5); refuse a partial one
   // before anything is provisioned or applied.
   assertDeployRestorePoint({ restore: options.restore });
@@ -4783,6 +4969,21 @@ export async function deployK3s(options) {
     }
   }
   s.stop('Preflight OK');
+
+  // 1b. The app image build, started now so it runs while Pulumi provisions
+  //     the cluster (startAppImageBuild); deliverAppImage takes it below. The
+  //     master IP the last provisioning recorded lets an unchanged rerun skip
+  //     it, as its build gate will.
+  const early = startAppImageBuild({
+    role: options.role,
+    state,
+    projectDir,
+    projectName: options.projectName,
+    domain: options.domain,
+    priorMasterPrivateIp: state.getStepResult('k3s-infra')?.masterPrivateIp,
+    perfPrefix,
+  });
+  inFlight.early = early;
 
   // 2. SSH key
   const { privateKeyPath, publicKey } = options.sharedSshKeyPath
@@ -5042,8 +5243,8 @@ export async function deployK3s(options) {
   // 5b. The cluster's restore marker decides what this deploy may do (a
   //     pending restore stops a plain deploy; a running database stops
   //     `deploy -restore`). Outside every step gate on purpose: a skipped
-  //     k3s-apply must not skip it. Before the image build, so a refusal
-  //     costs nothing.
+  //     k3s-apply must not skip it. Before the image is recorded or
+  //     delivered, so a refusal changes nothing on the cluster.
   {
     const kubeEnv = { ...process.env, KUBECONFIG: kubeconfig };
     await awaitControlPlaneServing({ env: kubeEnv });
@@ -5054,10 +5255,12 @@ export async function deployK3s(options) {
     });
   }
 
-  // 6-7. The app image: build it, or, on a k8s-ha standby, take the primary's
-  // ref (deliverAppImage). applyK3sManifests delivers a built one to the
-  // master's registry.
+  // 6-7. The app image: finish the build started before provisioning (or
+  // build it now), or, on a k8s-ha standby, take the primary's ref
+  // (deliverAppImage). applyK3sManifests delivers a built one to the master's
+  // registry.
   const imageTag = await deliverAppImage({
+    early,
     role: options.role,
     peerImageRef: options.peerImageRef,
     onImageBuilt: options.onImageBuilt,
@@ -5102,6 +5305,7 @@ export async function deployK3s(options) {
     const envLocal = loadEnvLocal(join(projectDir, '.env.local'));
     await perfAsync(`deploy.${perfPrefix}.applyManifests`, () =>
       applyK3sManifests({
+        inFlight,
         perfPrefix,
         kubeconfig,
         projectDir,

@@ -32,6 +32,10 @@ const h = vi.hoisted(() => {
     dnsUnreadable: false,
     dnsReadBackLater: null as null | string[][],
     saved: [] as unknown[],
+    // What updateProjectConfig's mutator starts from (null: an empty config).
+    seed: null as null | Record<string, unknown>,
+    // A remote command containing this text fails (null: none do).
+    sshFail: null as null | string,
   };
   return { events, state };
 });
@@ -66,10 +70,17 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
     ...actual,
     loadProjectConfig: () => null,
     updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) => {
-      // Nothing on disk; a no-op mutator writes nothing, as the real one.
-      const current: Record<string, unknown> = {};
+      // Nothing on disk (unless a test seeds it); a no-op mutator writes
+      // nothing, as the real one.
+      const current: Record<string, unknown> = h.state.seed
+        ? JSON.parse(JSON.stringify(h.state.seed))
+        : {};
+      const before = JSON.stringify(current);
       const next = fn(current) ?? current;
-      if (JSON.stringify(next) !== '{}') h.state.saved.push(next);
+      if (JSON.stringify(next) !== before) {
+        h.state.saved.push(next);
+        h.events.push(`config:save:${JSON.stringify(next)}`);
+      }
       return next;
     },
   };
@@ -255,7 +266,29 @@ vi.mock('../../../src/lib/build.js', async (orig) => {
 
 vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, sshRun: async () => '', sshRunScript: async () => '' };
+  // Every remote command, in order, for the add-on job sequencing tests. The
+  // fakes keep the REAL contracts: sshRun takes an argv array and throws on
+  // anything else (as src/lib/ssh.js does), sshRunScript takes a script. A
+  // string-accepting fake let fix round 3 ship a scale that threw before its
+  // restore.
+  const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
+  const sshRun = async (ip: string, _k: string, argv: unknown) => {
+    assertSshRunArgv(argv);
+    h.events.push(`ssh:${ip}:${argv.join(' ')}`);
+    if (h.state.sshFail && argv.join(' ').includes(h.state.sshFail)) {
+      throw new Error(`ssh: ${h.state.sshFail} failed`);
+    }
+    return '';
+  };
+  const sshRunScript = async (ip: string, _k: string, script: unknown) => {
+    if (typeof script !== 'string') throw new Error('sshRunScript requires a script');
+    h.events.push(`ssh:${ip}:${script}`);
+    if (h.state.sshFail && script.includes(h.state.sshFail)) {
+      throw new Error(`ssh: ${h.state.sshFail} failed`);
+    }
+    return '';
+  };
+  return { ...actual, sshRun, sshRunScript };
 });
 
 const { SCALE_EFFECTS, resumeComposeCutover } = await import('../../../src/scale.js');
@@ -313,6 +346,8 @@ function reset(failAt = '') {
   h.state.dnsUnreadable = false;
   h.state.dnsReadBackLater = null;
   h.state.saved.length = 0;
+  h.state.seed = null;
+  h.state.sshFail = null;
 }
 
 describe('fenceComposePrimary', () => {
@@ -435,6 +470,18 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     ];
     const seen = h.events.filter((e) => order.includes(e));
     expect(seen).toEqual(order);
+    // The add-on job on the new server: stopped before the restore runs under
+    // it, then relaunched only after the cutover's whole-stack recreate.
+    const iStop = h.events.findIndex(
+      (e) => e.startsWith('ssh:9.9.9.9:') && e.includes('addons-start.sh stop'),
+    );
+    const iRestore = h.events.indexOf(`restore:9.9.9.9:${PUSHED}`);
+    const iRecreate = h.events.findIndex((e) => e.includes('up -d --force-recreate'));
+    const iRelaunch = h.events.findIndex((e) => e.includes('addons-start.sh promoted'));
+    expect(iStop).toBeGreaterThan(-1);
+    expect(iStop).toBeLessThan(iRestore);
+    expect(iRestore).toBeLessThan(iRecreate);
+    expect(iRecreate).toBeLessThan(iRelaunch);
     // The write pause is measured for the outro.
     expect(typeof ctx.writePauseMs).toBe('number');
   });
@@ -755,6 +802,85 @@ describe('resumeComposeCutover (a scale stopped mid-cutover)', () => {
       environments: Record<string, { servers: Array<{ ip: string; id: string }> }>;
     };
     expect(saved.environments.prod.servers.map((sv) => sv.id)).toEqual(['new-id']);
+  });
+
+  // Important (fix round 3): the cutover's whole-stack recreate stops the
+  // add-on job on the new server; it must start it again, under a fresh
+  // attempt id that is saved, so the status file is true after the scale.
+  it('the recreate relaunches the add-on job (promoted, detached) and saves its attempt id', async () => {
+    reset();
+    h.state.seed = { environments: { prod: {} } };
+    h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
+    const { ctx } = resumeCtx();
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    const ssh = h.events.filter((e) => e.startsWith('ssh:9.9.9.9:'));
+    const recreate = ssh.findIndex((e) => e.includes('up -d --force-recreate'));
+    const relaunch = ssh.findIndex((e) =>
+      /VC_ATTEMPT_ID=[0-9a-f]{12} setsid nohup \/bin\/sh addons-start\.sh promoted/.test(e),
+    );
+    expect(recreate).toBeGreaterThan(-1);
+    expect(relaunch).toBeGreaterThan(recreate);
+    // The stop before the recreate is in the same command, ahead of it.
+    expect(ssh[recreate]).toMatch(/addons-start\.sh stop; .*up -d --force-recreate/);
+    const id = /VC_ATTEMPT_ID=([0-9a-f]{12})/.exec(ssh[relaunch])?.[1];
+    // The id is saved only once its job runs on the serving server: a job the
+    // restore or the recreate stopped never left a file naming the saved id.
+    const firstSave = h.events.findIndex(
+      (e) => e.startsWith('config:save:') && e.includes(`${id}`),
+    );
+    expect(firstSave).toBeGreaterThan(
+      h.events.indexOf(`ssh:9.9.9.9:${ssh[relaunch].slice('ssh:9.9.9.9:'.length)}`),
+    );
+    const savedIds = h.state.saved
+      .map(
+        (c) =>
+          (c as { environments?: Record<string, { lastAttemptId?: string }> }).environments?.prod
+            ?.lastAttemptId,
+      )
+      .filter(Boolean);
+    expect(savedIds).toContain(id);
+  });
+
+  // Fix round 4: the relaunch gets its OWN fresh id (never the one the
+  // stopped reconcile-time job wrote), saved only once the relaunch ran.
+  it('the relaunch id is fresh: not the scale ctx id the stopped job wrote', async () => {
+    reset();
+    h.state.seed = { environments: { prod: {} } };
+    h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
+    const { ctx } = resumeCtx();
+    ctx.attemptId = 'aaaaaaaaaaaa';
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    const relaunch = h.events.find((e) => e.includes('addons-start.sh promoted')) ?? '';
+    const id = /VC_ATTEMPT_ID=([0-9a-f]{12})/.exec(relaunch)?.[1];
+    expect(id).toBeDefined();
+    expect(id).not.toBe('aaaaaaaaaaaa');
+    // Through sshRun's argv contract: sh -c <command>.
+    expect(relaunch.startsWith('ssh:9.9.9.9:sh -c ')).toBe(true);
+  });
+
+  it('a failed relaunch does not fail the scale, warns, and saves no id', async () => {
+    reset();
+    h.state.seed = { environments: { prod: {} } };
+    h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
+    h.state.sshFail = 'addons-start.sh promoted';
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn');
+    const { ctx } = resumeCtx();
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    expect(
+      warn.mock.calls.some((c) =>
+        /could not restart the add-on job on 9\.9\.9\.9/.test(String(c[0])),
+      ),
+    ).toBe(true);
+    const savedIds = h.state.saved
+      .map(
+        (c) =>
+          (c as { environments?: Record<string, { lastAttemptId?: string }> }).environments?.prod
+            ?.lastAttemptId,
+      )
+      .filter(Boolean);
+    expect(savedIds).toEqual([]);
+    warn.mockRestore();
   });
 
   it('skips the post-flip steps the journal says are done', async () => {

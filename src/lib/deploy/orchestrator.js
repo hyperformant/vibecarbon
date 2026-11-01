@@ -27,6 +27,7 @@ import {
   providerIdFor,
 } from '../providers/index.js';
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
+import { mintAttemptId } from '../services/addon-start.js';
 import { getSSHKeyPath } from '../ssh.js';
 import { createTracker } from '../tracker.js';
 import {
@@ -59,7 +60,6 @@ import { armDeployCompletionGuard, markDeployCompleted } from './completion-guar
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
 import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compose/ha-role-swap.js';
 import { workingTreeDirty } from './delta.js';
-import { requireDnsSetup } from './dns-result.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
 import { DEGRADED_CAUSE, preserveSafetyFields } from './env-safety-fields.js';
 import { assertNoFailoverInFlight, haSeedRecord, readReplicaState } from './failover-guard.js';
@@ -1242,6 +1242,10 @@ export async function executeDeployment(args, gatheredConfig) {
   // A pasted app key this deploy replaced (set below): the skeleton save adds
   // it to the project's retiredAppKeys.
   let retiredAppKey = null;
+  // This deploy's attempt id (services/addon-start.js): saved with the
+  // skeleton, never cleared, and handed to reconcile.sh's environment so the
+  // add-on job's status file names it.
+  const attemptId = mintAttemptId();
   const saveSkeletonEnv = () => {
     const written = updateProjectConfig((onDisk) => {
       const existingEnv = onDisk.environments?.[environment] ?? {};
@@ -1294,6 +1298,7 @@ export async function executeDeployment(args, gatheredConfig) {
             }
           : {}),
         lastAttempt: new Date().toISOString(),
+        lastAttemptId: attemptId,
       };
       onDisk.environments = onDisk.environments ?? {};
       onDisk.environments[environment] = preserveSafetyFields(existingEnv, skeletonEnv);
@@ -2020,6 +2025,7 @@ export async function executeDeployment(args, gatheredConfig) {
     localImageTag,
     composeLocalBuildPromise,
     stateBucketYoung,
+    attemptId,
   };
 
   // All four tiers are now plan-driven: planDeploy(tier) → runPlan → EFFECTS.
@@ -2051,6 +2057,32 @@ export async function executeDeployment(args, gatheredConfig) {
       },
     });
   }
+
+  // The k8s tiers' A record (k8s/dns-record.js): single k8s starts it from
+  // deployK3s's onInfraReady; the post-deploy block below finishes it. Loaded
+  // for the k8s tiers only: compose never touches the paid k8s engine.
+  const k8sDns = isK8sTier(tier)
+    ? (await import('./k8s/index.js')).createK8sDnsWriter({
+        domain,
+        dnsProvider,
+        dnsToken,
+        dnsZoneId,
+        state,
+        dnsWarmupPromise,
+        getDnsProvider,
+        // Single k8s: the record's target is on disk before the record points
+        // at it, so destroy owns it if the deploy fails (the final save
+        // writes the same floatingIp). k8s-ha persists per cluster instead.
+        persistOwnedIp:
+          tier === 'k8s'
+            ? (ip) =>
+                updateProjectConfig((onDisk) => {
+                  const env = onDisk.environments?.[environment];
+                  if (env) env.floatingIp = ip;
+                })
+            : null,
+      })
+    : null;
 
   let deployResult;
   if (tier === 'compose') {
@@ -2162,7 +2194,10 @@ export async function executeDeployment(args, gatheredConfig) {
     // the deploymentConfig deployK3s consumes UNCHANGED under ctx.options; the
     // effect fills ctx.clusterResult, which is deployK3s's return read back into
     // the single-cluster deployResult the post-dispatch k8s block expects.
-    const k8sCtx = { options: deploymentConfig };
+    // One addition: onInfraReady starts the domain's A record write the moment
+    // the cluster's addresses exist (k8s/dns-record.js), so it overlaps the
+    // image delivery and manifest apply. k8s-ha's fan-out owns its own hook.
+    const k8sCtx = { options: { ...deploymentConfig, onInfraReady: k8sDns.onInfraReady } };
     await runPlan(planDeploy('k8s', config), k8sCtx, EFFECTS);
     deployResult = k8sCtx.clusterResult;
   } else {
@@ -2174,7 +2209,9 @@ export async function executeDeployment(args, gatheredConfig) {
     // HA deployResult the post-dispatch block + config-persist expect. The
     // headline `deploy.ha.k8s.full` perf span (which contains the effects'
     // deploy.ha.k8s.* sub-stages) wraps the whole pipeline, as before.
-    const k8sHaCtx = { options: deploymentConfig };
+    // dnsWarmupPromise: the early HA DNS write (haK8sProvisionClusters) must
+    // not race the 0.0.0.0 warm-up write of the same apex record.
+    const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise };
     await perfAsync('deploy.ha.k8s.full', () =>
       runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
     );
@@ -2277,21 +2314,9 @@ export async function executeDeployment(args, gatheredConfig) {
         deployResult.primary?.masterIp ||
         deployResult.masterIp;
       if (domain && hasAutomatedDns(dnsProvider) && k8sFloatingIp) {
-        await perfAsync('deploy.dns.warm', async () => {
-          await dnsWarmupPromise;
-        });
-        const dnsUpdateInputs = { domain, dnsProvider, serverIp: k8sFloatingIp };
-        if (!state.shouldSkip('k8s-dns-update', dnsUpdateInputs)) {
-          state.startStep('k8s-dns-update', dnsUpdateInputs);
-          const { setupSimple: updateDnsIp } = await getDnsProvider(dnsProvider);
-          requireDnsSetup(
-            await perfAsync('deploy.dns.create', () =>
-              updateDnsIp(dnsToken, dnsZoneId, domain, k8sFloatingIp),
-            ),
-            `DNS A record for ${domain}`,
-          );
-          state.completeStep('k8s-dns-update', { serverIp: k8sFloatingIp });
-        }
+        // Single k8s usually wrote it already (started at infra-ready): this
+        // awaits that write and is then a gated no-op. k8s-ha writes it here.
+        await k8sDns.finish(k8sFloatingIp);
       }
     }
 

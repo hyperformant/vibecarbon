@@ -14,6 +14,12 @@
 import { existsSync as fsExistsSync } from 'node:fs';
 import { resolvePrimary } from '../cli/resolve-primary.js';
 import {
+  ADDON_STATUS_READ_CMD,
+  backgroundAddons,
+  resolveAddonStates,
+} from '../services/addon-start.js';
+import { enabledAddonNames } from '../services/standby-policy.js';
+import {
   getSSHKeyPath as defaultGetKey,
   sshKubectl as defaultKubectl,
   sshRun as defaultSsh,
@@ -239,7 +245,39 @@ function describeSshError(err) {
   return msg.split('\n')[0].trim();
 }
 
-async function collectCompose(target, projectName, keyPath, deps) {
+/**
+ * The background add-ons' states on one compose server: the job's status file
+ * when it names the env's last attempt (deploy, scale or failover:
+ * envConfig.lastAttemptId), else the add-ons' own
+ * containers (resolveAddonStates). A promoted node that never ran the job, or
+ * a file left from before a failback, is read from the containers.
+ */
+async function collectAddons(target, projectName, keyPath, deps, expected, rows, attemptId) {
+  let text = '';
+  try {
+    text = await withTimeout(
+      deps.sshRun(target.ip, keyPath, ['sh', '-c', ADDON_STATUS_READ_CMD(projectName)], {
+        silent: true,
+        timeout: deps.timeoutMs,
+        transportRetry: false,
+      }),
+      deps.timeoutMs,
+    );
+  } catch {
+    // Unreadable: the containers decide.
+  }
+  const containers = new Map(rows.map((r) => [r.container, r]));
+  return resolveAddonStates({ text, expected, attemptId, containers });
+}
+
+async function collectCompose(
+  target,
+  projectName,
+  keyPath,
+  deps,
+  expectedAddons = [],
+  attemptId = null,
+) {
   const argv = dockerPsArgv(projectName);
   const listing = await withTimeout(
     deps.sshRun(target.ip, keyPath, argv, {
@@ -255,6 +293,20 @@ async function collectCompose(target, projectName, keyPath, deps) {
     ...classifyContainer(container, state, status),
     latencyMs: 0,
   }));
+  // A compose-ha standby runs its add-ons in its whole-stack up (no job): only
+  // the role primary (or the single server) has a status file to read.
+  if (expectedAddons.length) {
+    const addons = await collectAddons(
+      target,
+      projectName,
+      keyPath,
+      deps,
+      expectedAddons,
+      rows,
+      attemptId,
+    );
+    return { kind: 'compose', ip: target.ip, rows, addons };
+  }
   return { kind: 'compose', ip: target.ip, rows };
 }
 
@@ -310,6 +362,14 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
 
   const keyPath = d.getSSHKeyPath(envName);
   const haveKey = !!keyPath && d.existsSync(keyPath);
+  // The add-ons this env starts in the background, whose states the job records.
+  const expectedAddons = backgroundAddons(enabledAddonNames(envConfig)).map((a) => ({
+    name: a.name,
+    services: a.services,
+  }));
+  // The status file is current only for the env's last attempt (deploy, scale
+  // or failover), by id.
+  const attemptId = envConfig.lastAttemptId ?? null;
 
   const results = await Promise.all(
     targets.map(async (t) => {
@@ -320,7 +380,15 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
         const value =
           t.kind === 'k8s'
             ? await collectK8s(t, keyPath, d)
-            : await collectCompose(t, projectName, keyPath, d);
+            : await collectCompose(
+                t,
+                projectName,
+                keyPath,
+                d,
+                // planContainerTargets lists a compose-ha pair primary first.
+                envConfig.deployMode === 'compose-ha' && t !== targets[0] ? [] : expectedAddons,
+                attemptId,
+              );
         return [t.serverName, value];
       } catch (err) {
         return empty(describeSshError(err));

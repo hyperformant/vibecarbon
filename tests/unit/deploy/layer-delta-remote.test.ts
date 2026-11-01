@@ -389,6 +389,43 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       expect(calls()).toContain(`ctr -n k8s.io images push --plain-http ${REF} ${REF}`);
     });
 
+    // M5: the push deliverImage defers until the registry serves (pushAfter)
+    // runs this same script in push mode, through the same ctr steps.
+    it('push mode: tags and pushes an imported image, nothing else', () => {
+      const imported = 'docker.io/vibecarbon-local/app:abc-1';
+      const r = spawnSync(shell, ['-c', REMOTE_SCRIPT, 'layer-delta', 'push', imported, REF], {
+        encoding: 'buffer',
+        env: {
+          PATH: `${stub}:${process.env.PATH}`,
+          STUB: stub,
+          VC_DELTA_ROOT: deltaRoot,
+          ...env,
+          VC_CTR: join(stub, 'ctr'),
+        },
+      });
+      expect(r.stderr.toString()).toBe('');
+      expect(r.status).toBe(0);
+      expect(calls()).toContain(`ctr -n k8s.io images tag --force ${imported} ${REF}`);
+      expect(calls()).toContain(`ctr -n k8s.io images push --plain-http ${REF} ${REF}`);
+      expect(calls()).not.toContain('images import');
+    });
+
+    it('push mode with the same ref: pushes without a tag', () => {
+      const r = spawnSync(shell, ['-c', REMOTE_SCRIPT, 'layer-delta', 'push', REF, REF], {
+        encoding: 'buffer',
+        env: {
+          PATH: `${stub}:${process.env.PATH}`,
+          STUB: stub,
+          VC_DELTA_ROOT: deltaRoot,
+          ...env,
+          VC_CTR: join(stub, 'ctr'),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(calls()).not.toContain('images tag');
+      expect(calls()).toContain(`ctr -n k8s.io images push --plain-http ${REF} ${REF}`);
+    });
+
     it('a failed import leaves no dir and pushes nothing', () => {
       holdBlobs();
       storeLoaded();

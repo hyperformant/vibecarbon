@@ -45,6 +45,11 @@ const SITES: Record<string, { calls: string[]; why: string; gated?: boolean }> =
     gated: true,
     why: 'primary only: planImageDelivery returns no build for role standby',
   },
+  'lib/deploy/k8s/k3s.js:startAppImageBuild': {
+    calls: ['buildAppImage'],
+    gated: true,
+    why: 'primary only: the same build, started before provisioning; planImageDelivery returns no build for role standby',
+  },
   'lib/deploy/k8s/k3s.js:applyK3sManifests': {
     calls: ['deliverImage'],
     gated: true,

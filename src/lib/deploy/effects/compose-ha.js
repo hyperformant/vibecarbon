@@ -92,6 +92,8 @@ const haServiceOpts = (ctx) => {
     metabase: services.metabase,
     redis: services.redis,
     bundlePath: ctx.bundlePath,
+    // The add-on job's attempt id, for reconcile.sh's environment.
+    attemptId: ctx.attemptId,
   };
 };
 
@@ -673,13 +675,16 @@ async function haPullImages(ctx) {
   );
 }
 
+/** Whether this deploy writes managed HA DNS records (else: manual or none). */
+const writesHaDns = (ctx) =>
+  Boolean(ctx.domain && hasAutomatedDns(ctx.dnsProvider) && ctx.dnsToken && ctx.dnsZoneId);
+
 /**
- * Set up managed-DNS HA (Cloudflare health-checks+LB or Hetzner) BEFORE
- * starting services so Traefik ACME challenges resolve immediately; or print
- * manual instructions. HTTP-01 (non-managed, non-manual) then blocks on apex
- * propagation so LE's challenge burst sees the real IP.
+ * Write the managed-DNS HA records (Cloudflare health-checks+LB or Hetzner)
+ * for both servers. Throws when the provider refuses the write: it would
+ * otherwise run on to a certificate and health probe that can never pass.
  */
-async function haUpdateDns(ctx) {
+async function writeHaDnsRecords(ctx, { onProgress } = {}) {
   const projectName = ctx.projectConfig.projectName;
   const {
     primary,
@@ -692,12 +697,17 @@ async function haUpdateDns(ctx) {
     region,
     standbyRegion,
   } = ctx;
-  if (domain && hasAutomatedDns(dnsProvider) && dnsToken && dnsZoneId) {
-    const dnsName = DNS_PROVIDERS[dnsProvider].name;
-    ctx.onProgress(`Setting up ${dnsName} for HA...`);
-    const { setupHA } = await getDnsProvider(dnsProvider);
-    const haResult = await perfAsync('deploy.ha.compose.dns.setup', () =>
-      setupHA(dnsToken, dnsZoneId, domain, [
+  // The 0.0.0.0 warm-up started at deploy start writes the same apex record;
+  // this write, started as soon as both servers exist, must not race it.
+  await ctx.dnsWarmupPromise;
+  const dnsName = DNS_PROVIDERS[dnsProvider].name;
+  const { setupHA } = await getDnsProvider(dnsProvider);
+  const haResult = await perfAsync('deploy.ha.compose.dns.setup', () =>
+    setupHA(
+      dnsToken,
+      dnsZoneId,
+      domain,
+      [
         {
           name: `${projectName}-${environment}-${stackOf(primary, 'primary')}`,
           ip: primary.ip,
@@ -708,11 +718,42 @@ async function haUpdateDns(ctx) {
           ip: standby.ip,
           region: standby.region ?? standbyRegion,
         },
-      ]),
-    );
-    // A refused record write fails the deploy: it would otherwise run on to a
-    // certificate and health probe that can never pass.
-    requireDnsSetup(haResult, `${dnsName} HA DNS records for ${domain}`);
+      ],
+      { onProgress },
+    ),
+  );
+  requireDnsSetup(haResult, `${dnsName} HA DNS records for ${domain}`);
+}
+
+/**
+ * Start the HA record write in the background as soon as provision-servers
+ * has named the role primary and standby, so it overlaps both servers' boot
+ * instead of following the image pull (DO e2e 2026-10-31). The same records
+ * from the same ctx; only the timing moves. haUpdateDns, at its old place
+ * before either stack starts, awaits it. No-op without managed DNS.
+ */
+async function haStartDnsUpdate(ctx) {
+  if (!writesHaDns(ctx)) return;
+  // Silent: the servers' boot owns the line, and setupHA's own spinner would
+  // fight it.
+  ctx.dnsUpdatePromise = writeHaDnsRecords(ctx, { onProgress: () => {} });
+  // Awaited (and thrown) by haUpdateDns; this only keeps a refusal that lands
+  // while the servers boot from being an unhandledRejection.
+  ctx.dnsUpdatePromise.catch(() => {});
+}
+
+/**
+ * The DNS barrier BEFORE starting services, so Traefik ACME challenges
+ * resolve immediately: the managed-DNS HA records written (by
+ * haStartDnsUpdate's background write, or now), or manual instructions
+ * printed. HTTP-01 (non-managed, non-manual) then blocks on apex propagation
+ * so LE's challenge burst sees the real IP.
+ */
+async function haUpdateDns(ctx) {
+  const { primary, standby, domain, dnsProvider } = ctx;
+  if (writesHaDns(ctx)) {
+    ctx.onProgress(`Setting up ${DNS_PROVIDERS[dnsProvider].name} for HA...`);
+    await (ctx.dnsUpdatePromise ?? writeHaDnsRecords(ctx));
   } else if (domain && dnsProvider === 'manual') {
     p.log.info(c.bold('Manual DNS Configuration:'));
     p.log.message(`  Point ${c.bold(domain)} to ${c.bold(primary.ip)} (primary)`);
@@ -1329,6 +1370,7 @@ export const COMPOSE_HA_EFFECTS = {
   haSetupServerFiles,
   haMergeWalgRole,
   haPullImages,
+  haStartDnsUpdate,
   haUpdateDns,
   haStartComposeStack,
   haWaitAdminReady,

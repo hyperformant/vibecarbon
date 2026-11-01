@@ -19,6 +19,10 @@ import { spinner } from '../../cli/progress.js';
 // issuance without reaching into ./acme-order-recovery.js directly — see
 // paid-boundary guard.
 export { createAcmeIssuanceWatchdog } from './acme-order-recovery.js';
+// Re-exported so the orchestrator's k8s DNS step (outside src/lib/deploy/k8s/)
+// can start the A record at infra-ready without reaching into
+// ./dns-record.js directly — see paid-boundary guard.
+export { createK8sDnsWriter } from './dns-record.js';
 export { reestablishReplicationTransport } from './ha/index.js';
 // Re-exported so callers outside src/lib/deploy/k8s/ (e.g. src/scale.js)
 // don't reach into ./k3s.js directly — see paid-boundary guard.

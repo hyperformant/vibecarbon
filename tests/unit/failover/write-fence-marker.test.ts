@@ -14,6 +14,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { withSshContract } from '../../_shared/ssh-contract.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -316,7 +317,8 @@ describe('status shows a write-fenced primary', () => {
       {
         sshKubectl,
         getPostgresPod: vi.fn(async () => 'db-0'),
-        sshRun: vi.fn(),
+        // Never reached on k8s, but held to ssh.js's argv contract all the same.
+        sshRun: withSshContract(vi.fn()),
         getSSHKeyPath: () => __filename,
         timeoutMs: 5000,
       },

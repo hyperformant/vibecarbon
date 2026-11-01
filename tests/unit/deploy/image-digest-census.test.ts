@@ -25,6 +25,7 @@
  * mirrored byte-for-byte in .github/image-pins/Dockerfile so Dependabot can
  * propose their bumps too.
  */
+
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -32,6 +33,7 @@ import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { SOCAT_IMAGE } from '../../../src/lib/deploy/compose/ha.js';
 import { BINFMT_IMAGE } from '../../../src/lib/deploy/platform.js';
+import { bootPullImages } from '../../../src/lib/iac/compose-cloud-init.js';
 import {
   CSI_SIDECAR_MIRRORS,
   CSI_UPSTREAM_IMAGE_PINS,
@@ -93,6 +95,11 @@ const ALLOWLIST: Record<string, string> = {
   // Exempt only while the tag is unpublished: the post-publish commit appends
   // its @sha256 (release.yml refuses to release until it does), and from then
   // on the ref is pinned like any other and needs no exemption.
+  // The compose boot pull's loop variable (carbon/cloud-init/docker-ce-setup.yaml
+  // boot-pull.sh): the CLI fills its list from bootPullImages() in
+  // src/lib/iac/compose-cloud-init.js, which the test below holds to this
+  // same rule (pinned, or the allowlisted db image).
+  '"$ref"': 'boot pull loop variable, refs from bootPullImages() (checked below)',
   ...(PINNED.test(NODE_RUNTIME_IMAGE)
     ? {}
     : { [NODE_RUNTIME_IMAGE]: 'node runtime base, published by this repo after merge' }),
@@ -366,6 +373,11 @@ describe('every shipped image ref is pinned by digest', () => {
     expect(offenders(sites)).toEqual([]);
   });
 
+  it('the compose boot pull refs (filled into cloud-init at render)', () => {
+    const bad = bootPullImages().filter((ref) => !PINNED.test(ref) && !(ref in ALLOWLIST));
+    expect(bad).toEqual([]);
+  });
+
   it('cloud-init', () => {
     expect(offenders(CLOUD_INIT_FILES.flatMap(cloudInitSites))).toEqual([]);
   });
@@ -508,6 +520,7 @@ describe('every shipped image ref is pinned by digest', () => {
     const all = [
       ...COMPOSE_FILES.flatMap(yamlImageSites),
       ...K8S_FILES.flatMap(yamlImageSites),
+      ...CLOUD_INIT_FILES.flatMap(cloudInitSites),
       ...jsSites(),
     ].map((s) => s.ref);
     for (const ref of Object.keys(ALLOWLIST)) expect(all, ref).toContain(ref);

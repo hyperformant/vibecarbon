@@ -8,6 +8,7 @@ import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
   planImageDelivery,
+  registryImageTag,
   standbyImageRef,
 } from '../../../src/lib/deploy/k8s/image-delivery.js';
 
@@ -48,6 +49,22 @@ describe('image-delivery helpers', () => {
     expect(() =>
       standbyImageRef({ primaryRef: '10.0.1.1:5000/q:t', standbyMasterPrivateIp: '' }),
     ).toThrow(/standbyMasterPrivateIp is required/);
+  });
+  it('names a locally built image for the master registry (Hetzner static and DO VPC IPs)', () => {
+    expect(registryImageTag('vibecarbon-local/quorum:abc-20261031', '10.0.1.1')).toBe(
+      '10.0.1.1:5000/quorum:abc-20261031',
+    );
+    expect(registryImageTag('vibecarbon-local/quorum:abc-dirty-1', '10.110.0.2')).toBe(
+      '10.110.0.2:5000/quorum:abc-dirty-1',
+    );
+    // The result is a ref the rest of the pipeline parses.
+    expect(
+      parseLocalRegistryRef(registryImageTag('vibecarbon-local/q:t', '10.0.1.1')).repoTag,
+    ).toBe('q:t');
+    expect(() => registryImageTag('vibecarbon-local/q:t', '')).toThrow(
+      /masterPrivateIp is required/,
+    );
+    expect(() => registryImageTag('q:t', '10.0.1.1')).toThrow(/not a locally built image tag/);
   });
   it('plans delivery by role: one delivery for the operator, none for a standby', () => {
     const operator = { build: true, deliver: true, awaitPeerImage: false };

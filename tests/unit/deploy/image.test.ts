@@ -261,6 +261,41 @@ describe('buildLocalImage', () => {
     }
   });
 
+  // quiet: the k8s build overlaps Pulumi's spinner, so BuildKit's progress
+  // must not stream into the terminal; a failure still names the build and
+  // carries docker's own last lines.
+  it('quiet: captures the build output and fails with its tail', async () => {
+    vi.mocked(execFileSync).mockReturnValueOnce('abc1234\n').mockReturnValueOnce('');
+    vi.mocked(runCommandAsync).mockRejectedValueOnce(
+      Object.assign(new Error('Command failed: docker build'), {
+        stdout: '#7 [build 3/9] RUN npm ci\n',
+        stderr: 'ERROR: failed to solve: process "/bin/sh -c npm ci" did not complete\n',
+      }),
+    );
+    const err = await buildLocalImage('/p', {
+      projectName: 'myproj',
+      timestamp: '20260425143000',
+      quiet: true,
+    }).catch((e) => e);
+    expect(vi.mocked(runCommandAsync).mock.calls[0][1]).toEqual({ silent: true });
+    expect(err.message).toMatch(
+      /docker build failed for vibecarbon-local\/myproj:abc1234-20260425143000/,
+    );
+    expect(err.message).toMatch(/linux\/amd64/);
+    expect(err.message).toContain('failed to solve');
+  });
+
+  it('quiet: a successful build returns the same tag', async () => {
+    vi.mocked(execFileSync).mockReturnValueOnce('abc1234\n').mockReturnValueOnce('');
+    vi.mocked(runCommandAsync).mockResolvedValueOnce('');
+    const result = await buildLocalImage('/p', {
+      projectName: 'myproj',
+      timestamp: '20260425143000',
+      quiet: true,
+    });
+    expect(result.tag).toBe('vibecarbon-local/myproj:abc1234-20260425143000');
+  });
+
   it('failure message explains the amd64 pin (arm64 hosts need emulation)', async () => {
     vi.mocked(execFileSync).mockReturnValueOnce('abc1234\n').mockReturnValueOnce('');
     vi.mocked(runCommandAsync).mockResolvedValueOnce(false);

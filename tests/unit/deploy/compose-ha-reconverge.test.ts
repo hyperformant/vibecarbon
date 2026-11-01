@@ -832,7 +832,9 @@ describe('the standby role is on the node before its stack starts (add-ons held 
       'utf-8',
     );
     const start = compose.slice(compose.indexOf('export async function startComposeStack('));
-    expect(start.slice(0, 2000)).toContain('/reconcile.sh');
+    expect(start.slice(0, 2000)).toContain('reconcileCommand(remoteDir');
+    const cmd = compose.slice(compose.indexOf('export function reconcileCommand('));
+    expect(cmd.slice(0, 300)).toContain('/reconcile.sh');
   });
 
   it('a reconverge merges WALG_ROLE=standby onto the retired node before starting it', async () => {

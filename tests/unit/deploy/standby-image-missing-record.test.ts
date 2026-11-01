@@ -98,7 +98,9 @@ describe('k8sHaDegradedVerdict (the k8s-ha deployResult from the plan ctx)', () 
       fileURLToPath(new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url)),
       'utf-8',
     );
-    const after = src.slice(src.indexOf('const k8sHaCtx = { options: deploymentConfig };'));
+    const after = src.slice(
+      src.indexOf('const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise };'),
+    );
     const block = after.slice(after.indexOf('deployResult = {'));
     expect(block.slice(0, block.indexOf('};'))).toContain('...k8sHaDegradedVerdict(k8sHaCtx),');
   });

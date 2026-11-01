@@ -31,6 +31,9 @@ vi.mock('../../../src/lib/command.js', async (orig) => {
 });
 
 const { runCommandAsync } = await import('../../../src/lib/command.js');
+const { ADDON_SERVICES_SCRIPT, renderAddonServicesScript } = await import(
+  '../../../src/lib/services/addon-start.js'
+);
 const { pullComposeImages, stackPullCommand } = await import(
   '../../../src/lib/deploy/compose/index.js'
 );
@@ -75,8 +78,11 @@ describe('the stack pull never asks a registry for the app image', () => {
   // 32640636398). app-migrate (#234) runs the same image, and excluding only
   // the service named `app` broke every compose-ha deploy (DO e2e,
   // 2026-10-31). The pull must skip every service whose image is the app's.
-  function runPull(services: Record<string, string>) {
+  function runPull(services: Record<string, string>, deferred: string[] = []) {
     const dir = mkdtempSync(join(tmpdir(), 'vc-stack-pull-'));
+    if (deferred.length) {
+      writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(deferred));
+    }
     const pulled = join(dir, 'pulled');
     const map = Object.entries(services)
       .map(([svc, img]) => `${svc}) echo '${img}' ;;`)
@@ -116,6 +122,17 @@ fi
       db: 'ghcr.io/hyperformant/postgres:17',
       traefik: 'ghcr.io/hyperformant/traefik:v3',
     });
+    expect(r.status).toBe(0);
+    expect(r.pulled).toEqual(['db', 'traefik']);
+  });
+
+  // Add-ons are off the critical path: their images are the background
+  // job's to pull (services/addon-start.js), not the deploy's.
+  it('skips the add-on services the background job starts', () => {
+    const r = runPull(
+      { app: 'demo-app:local', db: 'pg:17', traefik: 't:3', grafana: 'g:1', n8n: 'n:2' },
+      ['grafana', 'n8n'],
+    );
     expect(r.status).toBe(0);
     expect(r.pulled).toEqual(['db', 'traefik']);
   });

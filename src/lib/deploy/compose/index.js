@@ -7,18 +7,21 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-settings.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
+import { writeLogDetail } from '../../deploy-logger.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
-import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
+import { bootPullImages, loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
+import { K8S_MIRROR_ORG, mirroredPackageNames, resolveDbImage } from '../../images.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
 import { pollUntil } from '../../retry.js';
+import { ADDON_SERVICES_SCRIPT, attemptEnv } from '../../services/addon-start.js';
 import { shEscape } from '../../shell.js';
 import {
   isDnsNotSettledSshCommandError,
@@ -68,7 +71,6 @@ const __dirname = dirname(__filename);
 
 // Path to the cloud-init YAML shipped with the CLI package. Referenced from
 // carbon/cloud-init/ (one level up from src/ in the installed tree).
-const CLOUD_INIT_PATH = join(__dirname, '../../../../carbon/cloud-init/docker-ce-setup.yaml');
 
 /**
  * Read the cloud-init user-data YAML that runs at VPS boot to front-load
@@ -79,7 +81,7 @@ const CLOUD_INIT_PATH = join(__dirname, '../../../../carbon/cloud-init/docker-ce
  * upgrade` has a single place to notice layout changes.
  */
 export function loadCloudInitScript() {
-  return readFileSync(CLOUD_INIT_PATH, 'utf-8');
+  return loadComposeCloudInit();
 }
 
 /**
@@ -367,6 +369,61 @@ export function buildSetupServerError(ip, everConnected, tail, timeoutMs = 180_0
   );
 }
 
+/** Where the compose cloud-init's boot image pull records its outcome. */
+export const BOOT_PULL_STATUS_PATH = '/var/lib/vibecarbon/boot-pull/status';
+
+/**
+ * The deploy-log line for what the boot image pull (carbon/cloud-init/
+ * docker-ce-setup.yaml boot-pull.sh) reported on one server.
+ * @param {string} ip
+ * @param {string} status the status file's content, or 'absent'
+ */
+export function bootPullLogLine(ip, status) {
+  const s = String(status ?? '').trim();
+  if (s === 'ok') return `[boot-pull] ${ip}: core images already pulled at boot`;
+  if (s === 'running') {
+    return `[boot-pull] ${ip}: still pulling at boot; the deploy pull shares the work`;
+  }
+  if (s.startsWith('failed')) return `[boot-pull] ${ip}: ${s}; the deploy pull does the work`;
+  return `[boot-pull] ${ip}: no boot pull on this server (booted before it existed)`;
+}
+
+/**
+ * Note in the deploy log what the boot pull reported. One read, never waited
+ * on by the deploy (setupServer does not await it) and never retried: the
+ * deploy's own pull does whatever the boot pull did not.
+ */
+export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync, deployDbImage } = {}) {
+  try {
+    const status = await run(
+      ip,
+      sshKeyPath,
+      `cat ${BOOT_PULL_STATUS_PATH} 2>/dev/null || echo absent`,
+      { timeout: 15_000, ignoreError: true, retries: 1 },
+    );
+    writeLogDetail(bootPullLogLine(ip, status ?? 'absent'));
+    // The boot pull fetches the pinned db image; a deploy running another
+    // (VIBECARBON_DB_IMAGE) pulls its own, which the log should explain.
+    const [bootDb] = bootPullImages();
+    // Resolved here, inside the try: a malformed VIBECARBON_DB_IMAGE throws,
+    // and this note runs unawaited (setupServer), so it must never reject.
+    let deployDb = deployDbImage;
+    try {
+      deployDb ??= resolveDbImage({ warn: () => {} }).ref;
+    } catch {
+      deployDb = null;
+    }
+    if (deployDb && deployDb !== bootDb) {
+      writeLogDetail(
+        `[boot-pull] ${ip}: this deploy runs db image ${deployDb}, not the pinned ` +
+          `${bootDb} the boot pull fetched; the deploy pull fetches it`,
+      );
+    }
+  } catch {
+    // The note is informational: a failed read changes nothing.
+  }
+}
+
 /**
  * @param {string} ip
  * @param {string} sshKeyPath
@@ -405,6 +462,8 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
     if (result != null) everConnected = true; // any output means SSH connected
     if (result?.trim()?.endsWith('READY') && !result.includes('NOT_READY')) {
       s.stop(`Server ${ip} ready (cloud-init complete)`);
+      // Not awaited: the deploy never waits on the boot pull.
+      noteBootPull(ip, sshKeyPath);
       return;
     }
     const elapsed = Math.round((Date.now() - start) / 1000);
@@ -694,6 +753,14 @@ function composeFileFlags(options = {}) {
 /**
  * Start the Docker Compose stack on the remote server
  */
+/**
+ * The reconcile.sh run, with the attempt id (services/addon-start.js
+ * attemptEnv) in its environment for the add-on job it starts.
+ */
+export function reconcileCommand(remoteDir, attemptId) {
+  return `${attemptEnv(attemptId)}/bin/bash ${remoteDir}/reconcile.sh`;
+}
+
 export async function startComposeStack(ip, sshKeyPath, projectName, _options = {}) {
   const remoteDir = `/opt/${projectName}`;
   // Spinner over the long silent compose.up — typical 60-130s warm, longer
@@ -717,7 +784,9 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
     // without masking a true regression (a real hang would still surface
     // via the 60s ServerAlive keepalives in lib/ssh.js + composeSshOpts).
     await perfAsync('deploy.compose.up', () =>
-      sshRunAsync(ip, sshKeyPath, `/bin/bash ${remoteDir}/reconcile.sh`, { timeout: 1_800_000 }),
+      sshRunAsync(ip, sshKeyPath, reconcileCommand(remoteDir, _options.attemptId), {
+        timeout: 1_800_000,
+      }),
     );
     reconcileSpinner.stop('Stack reconciled');
   } catch (err) {
@@ -766,7 +835,8 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
 }
 
 /**
- * Wait for all compose services with healthchecks to reach "healthy".
+ * Wait for the CORE compose services with healthchecks to reach "healthy"
+ * (the add-ons the background job starts are not waited for).
  *
  * `docker compose up -d` returns as soon as containers are *created*, not
  * when their healthchecks pass. A service probed while it is still starting
@@ -777,9 +847,45 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
  * Non-critical — on timeout or error we log but don't fail, since the
  * caller's primary gate is the app-container probe which already passed.
  */
+/**
+ * The remote read waitForServicesHealthy polls: the services this node defers
+ * to the add-on job (addon-services.sh, `DEFERRED <svc>` lines; none on a
+ * standby or without background add-ons), then `<service> <health>` per
+ * container.
+ */
+export function servicesHealthCommand(remoteDir) {
+  return (
+    `cd ${remoteDir} && { if [ -f ${ADDON_SERVICES_SCRIPT} ]; then sh ${ADDON_SERVICES_SCRIPT}; fi; } | ` +
+    `sed 's/^/DEFERRED /'; docker compose ps --format '{{.Service}} {{.Health}}' 2>&1`
+  );
+}
+
+/**
+ * The core services still starting or unhealthy in servicesHealthCommand's
+ * output. The deferred add-ons are the background job's to bring up
+ * (services/addon-start.js); the deploy does not wait for them.
+ * @param {string} out
+ * @returns {string[]} `<service> <health>` lines
+ */
+export function coreServicesWarming(out) {
+  const lines = String(out ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const deferred = new Set(
+    lines.filter((l) => l.startsWith('DEFERRED ')).map((l) => l.slice('DEFERRED '.length)),
+  );
+  return lines.filter(
+    (l) =>
+      !l.startsWith('DEFERRED ') &&
+      !deferred.has(l.split(' ')[0]) &&
+      (l.endsWith(' starting') || l.endsWith(' unhealthy')),
+  );
+}
+
 async function waitForServicesHealthy(ip, sshKeyPath, projectName, maxWaitMs = 180_000) {
   const remoteDir = `/opt/${projectName}`;
-  const cmd = `cd ${remoteDir} && docker compose ps --format '{{.Service}} {{.Health}}' 2>&1`;
+  const cmd = servicesHealthCommand(remoteDir);
   let lastState = '';
   try {
     await pollUntil(
@@ -788,16 +894,9 @@ async function waitForServicesHealthy(ip, sshKeyPath, projectName, maxWaitMs = 1
           timeout: 15_000,
           ignoreError: true,
         });
-        const lines = (out || '')
-          .trim()
-          .split('\n')
-          .map((l) => l.trim())
-          .filter(Boolean);
-        // Partition by health state. Services without a declared healthcheck
-        // report empty/no-health — skip those, they don't block readiness.
-        const stillWarming = lines.filter(
-          (l) => l.endsWith(' starting') || l.endsWith(' unhealthy'),
-        );
+        // Services without a declared healthcheck report empty/no-health and
+        // don't block readiness; neither do the deferred add-ons.
+        const stillWarming = coreServicesWarming(out || '');
         lastState = stillWarming.join(', ') || 'all healthy';
         return stillWarming.length === 0;
       },
@@ -1065,13 +1164,18 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
  * again when app-migrate (#234) began running the same image (every compose-ha
  * deploy, DO e2e 2026-10-31), so the filter is by IMAGE: a service whose
  * `config --images` equals app's is never pulled, whatever it is called.
+ * The add-ons the background job starts (addon-services.sh, see
+ * services/addon-start.js) are skipped too: the job pulls their images after
+ * the core stack is up, off the deploy's critical path.
  * Exported for tests/unit/deploy/pull-images-loud.test.ts, which runs it.
  */
 export function stackPullCommand(remoteDir, flags) {
   return (
     `cd ${remoteDir} && app_image=$(docker compose ${flags} config --images app) && ` +
+    `deferred=$(if [ -f ${ADDON_SERVICES_SCRIPT} ]; then sh ${ADDON_SERVICES_SCRIPT}; fi) && ` +
     `docker compose ${flags} config --services | while read -r svc; do ` +
-    `[ "$(docker compose ${flags} config --images "$svc")" = "$app_image" ] || echo "$svc"; done | ` +
+    `[ "$(docker compose ${flags} config --images "$svc")" = "$app_image" ] && continue; ` +
+    `printf '%s\n' "$deferred" | grep -qxF "$svc" && continue; echo "$svc"; done | ` +
     `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`
   );
 }

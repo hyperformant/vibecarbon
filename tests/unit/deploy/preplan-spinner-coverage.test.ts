@@ -83,6 +83,40 @@ describe('deploy DNS writes never run a second spinner concurrently', () => {
     expect(effects).toMatch(/updateDnsIp\(dnsToken, dnsZoneId, domain, serverIp, \{\s*onProgress:/);
   });
 
+  it('the k8s early A-record write (under deployK3s’s spinner) suppresses setupSimple’s spinner', () => {
+    const k8sDns = readFileSync(
+      fileURLToPath(new URL('../../../src/lib/deploy/k8s/dns-record.js', import.meta.url)),
+      'utf8',
+    );
+    expect(k8sDns).toMatch(/early = write\(ip, \{ onProgress: /);
+  });
+
+  it('the compose-ha early HA write (under the boot spinner) suppresses setupHA’s spinner', () => {
+    const composeHa = readFileSync(
+      fileURLToPath(new URL('../../../src/lib/deploy/effects/compose-ha.js', import.meta.url)),
+      'utf8',
+    );
+    expect(composeHa).toMatch(/ctx\.dnsUpdatePromise = writeHaDnsRecords\(ctx, \{ onProgress: /);
+    expect(composeHa).toMatch(
+      /setupHA\(\s*dnsToken,\s*dnsZoneId,\s*domain,\s*\[[\s\S]*?\],\s*\{ onProgress \}/,
+    );
+  });
+
+  it('setupHA honors onProgress by skipping its internal spinner (EVERY registered backend)', async () => {
+    const { DNS_PROVIDERS } = await import('../../../src/lib/dns-provider.js');
+    for (const [id, row] of Object.entries(DNS_PROVIDERS)) {
+      const rel = `../../../src/lib/${row.modulePath.replace(/^\.\//, '')}`;
+      const provider = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+      const setupHA = provider.slice(provider.indexOf('export async function setupHA('));
+      const body = setupHA.slice(
+        0,
+        setupHA.indexOf('\nexport ') === -1 ? undefined : setupHA.indexOf('\nexport '),
+      );
+      expect(body, id).toMatch(/const s = onProgress \? null : spinner\(\)/);
+      expect(body, id).not.toMatch(/\bs\.(start|stop|message)\(/);
+    }
+  });
+
   it('setupSimple honors onProgress by skipping its internal spinner (EVERY registered backend)', async () => {
     // Registry walk (was a two-file hand-list — seam-audit hazard H17): a new
     // DNS backend that starts its own spinner under onProgress would garble

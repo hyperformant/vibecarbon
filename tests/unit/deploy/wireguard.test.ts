@@ -15,6 +15,7 @@ import {
   WG_UNIT_PATH,
 } from '../../../src/lib/deploy/wireguard.js';
 import * as ssh from '../../../src/lib/ssh.js';
+import { assertSshRunArgv } from '../../_shared/ssh-contract.js';
 
 describe('wireguard constants', () => {
   it('uses a port distinct from flannel-wg (51820)', () => {
@@ -160,6 +161,7 @@ describe('exchangeAndBringUpTunnel', () => {
   it('generates keys on each node and cross-configures peers', async () => {
     const calls: string[] = [];
     vi.spyOn(ssh, 'sshRun').mockImplementation(async (_ip, _k, cmd) => {
+      assertSshRunArgv(cmd); // the real argv contract
       calls.push(String(cmd));
       if (String(cmd).includes('wg pubkey')) return 'FWxNbddwB9ap1+Nfhv++GcS2CtEh/5CNPiCKF9UIkS4=';
       return '';
@@ -184,6 +186,7 @@ describe('exchangeAndBringUpTunnel', () => {
   it('installs the reboot-persistence systemd unit on BOTH nodes (item I-1)', async () => {
     const perNode: Record<string, string[]> = {};
     vi.spyOn(ssh, 'sshRun').mockImplementation(async (ip, _k, cmd) => {
+      assertSshRunArgv(cmd); // the real argv contract
       const key = String(ip);
       if (!perNode[key]) perNode[key] = [];
       perNode[key].push(String(cmd));

@@ -13,12 +13,16 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../../../src/lib/ssh.js', () => ({
-  getPostgresPod: vi.fn().mockResolvedValue('db-0'),
-  sshKubectl: vi.fn(),
-  sshRun: vi.fn().mockResolvedValue(''),
-  getSSHKeyPath: vi.fn(),
-}));
+vi.mock('../../../src/lib/ssh.js', async () => {
+  // The real argv contract (tests/_shared/ssh-contract.ts).
+  const { contractSshRun } = await import('../../_shared/ssh-contract.js');
+  return {
+    getPostgresPod: vi.fn().mockResolvedValue('db-0'),
+    sshKubectl: vi.fn(),
+    sshRun: vi.fn(contractSshRun()),
+    getSSHKeyPath: vi.fn(),
+  };
+});
 
 const { runK8sRestore } = await import('../../../src/restore.js');
 const { RESTORE_MARKER_KEYS } = await import('../../../src/lib/walg/restore-marker.js');

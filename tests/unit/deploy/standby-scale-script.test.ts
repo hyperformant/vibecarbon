@@ -120,7 +120,9 @@ describe('the fragment rides every whole-stack up', () => {
     const lines = script.split('\n');
     const up = lines.filter((l) => /^docker compose .* up -d/.test(l));
     expect(up).toHaveLength(1);
-    expect(up[0].endsWith(`up -d --remove-orphans ${STANDBY_SCALE_FLAG}`)).toBe(true);
+    // Then the core service list (empty without background add-ons, and on a
+    // standby): reconcile-addons-background.test.ts.
+    expect(up[0].endsWith(`up -d --remove-orphans ${STANDBY_SCALE_FLAG} $up_services`)).toBe(true);
     const config = lines.find((l) => /^docker compose .* config /.test(l));
     const pull = lines.find((l) => /^docker compose .* pull /.test(l));
     expect(config).toBeDefined();

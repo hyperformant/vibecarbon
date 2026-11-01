@@ -271,3 +271,122 @@ describe('storageSettleLine (R5: age-based, no network)', () => {
     await expect(storageSettleLine({ provider: 'hetzner' }, now)).resolves.toBeNull();
   });
 });
+
+/**
+ * Add-ons start in the background after the core stack (services/
+ * addon-start.js), so a deploy can finish with one still starting or failed.
+ * status shows each one's state, and a failed one with its reason; a failed
+ * add-on makes the environment need attention, a starting one does not.
+ */
+describe('formatServerLines: background add-ons', () => {
+  const sc = (addons: Array<{ name: string; state: string; reason: string }>) => ({
+    containers: {
+      'prod-primary': {
+        kind: 'compose',
+        ip: '1.1.1.1',
+        rows: [row('db', 'healthy'), row('app', 'healthy')],
+        addons,
+      },
+    },
+  });
+
+  it('all running: one rollup line', () => {
+    const lines = formatServerLines(
+      [servers[0]],
+      sc([
+        { name: 'observability', state: 'running', reason: '' },
+        { name: 'n8n', state: 'running', reason: '' },
+      ]),
+    ).map(strip);
+    expect(lines).toContain('    add-ons ● 2/2 running');
+  });
+
+  it('starting and failed add-ons get their own line, a failure with its reason', () => {
+    const checks = sc([
+      { name: 'observability', state: 'starting', reason: '' },
+      { name: 'n8n', state: 'failed', reason: 'did not become healthy: n8n exited (1)' },
+    ]);
+    const lines = formatServerLines([servers[0]], checks).map(strip);
+    expect(lines).toContain('    add-ons ● 0/2 running');
+    expect(lines).toContain('      observability               ● starting  ');
+    expect(lines).toContain(
+      '      n8n                         ● failed  did not become healthy: n8n exited (1)',
+    );
+    expect(isEnvironmentUnhealthy({ checks })).toBe(true);
+  });
+
+  it('a stopped add-on needs attention too, with its reason', () => {
+    const checks = sc([{ name: 'n8n', state: 'stopped', reason: 'no n8n container' }]);
+    const lines = formatServerLines([servers[0]], checks).map(strip);
+    expect(lines).toContain('      n8n                         ● stopped  no n8n container');
+    expect(isEnvironmentUnhealthy({ checks })).toBe(true);
+  });
+
+  it('starting alone does not make the environment unhealthy', () => {
+    const checks = sc([{ name: 'observability', state: 'starting', reason: '' }]);
+    expect(isEnvironmentUnhealthy({ checks })).toBe(false);
+  });
+});
+
+/**
+ * M-C1: a failed first k8s-ha deploy can leave only the early DNS write's
+ * floating IPs under ha.primary/standby. That is not an HA environment yet:
+ * a side counts only once its stack is recorded.
+ */
+describe('isHaConfigured', () => {
+  it('floating IPs alone are not HA', async () => {
+    const { isHaConfigured } = await import('../../../src/status.js');
+    expect(
+      isHaConfigured({
+        ha: { primary: { floatingIp: '203.0.113.1' }, standby: { floatingIp: '203.0.113.2' } },
+      }),
+    ).toBe(false);
+    expect(isHaConfigured({ ha: { writeFence: {} } })).toBe(false);
+    expect(isHaConfigured({})).toBe(false);
+  });
+
+  // Minor 5: the deploy skeleton (orchestrator.js saveSkeletonEnv) writes
+  // `ha: { enabled, failoverRegion, ...standby types or pendingStandby }`
+  // before anything is provisioned. A first deploy that died there is not HA.
+  it('the deploy skeleton alone is not HA (k8s-ha and compose-ha shapes)', async () => {
+    const { isHaConfigured } = await import('../../../src/status.js');
+    expect(
+      isHaConfigured({
+        deployMode: 'kubernetes',
+        ha: {
+          enabled: true,
+          failoverRegion: 'hel1',
+          standby: { masterServerType: 'cx23', dbServerType: 'cx23' },
+          standbyWorkerSpec: { serverType: 'cpx21' },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isHaConfigured({
+        deployMode: 'compose-ha',
+        ha: {
+          enabled: true,
+          failoverRegion: 'hel1',
+          pendingStandby: { region: 'hel1', serverType: 'cx23' },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it('a recorded stack is: k8s-ha sides, or compose-ha role-tagged servers', async () => {
+    const { isHaConfigured } = await import('../../../src/status.js');
+    expect(
+      isHaConfigured({ ha: { primary: { stack: 'e4-primary', floatingIp: '203.0.113.1' } } }),
+    ).toBe(true);
+    expect(
+      isHaConfigured({
+        deployMode: 'compose-ha',
+        ha: { enabled: true, failoverRegion: 'hel1' },
+        servers: [
+          { name: 'q-e2-primary', ip: '1.1.1.1', role: 'primary' },
+          { name: 'q-e2-standby', ip: '2.2.2.2', role: 'standby' },
+        ],
+      }),
+    ).toBe(true);
+  });
+});

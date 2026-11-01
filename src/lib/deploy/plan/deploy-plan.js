@@ -36,6 +36,7 @@ import {
   haSetupServerFilesStep,
   haSetupServersStep,
   haStartComposeStackStep,
+  haStartDnsUpdateStep,
   haUpdateDnsStep,
   haVerifyStreamingStep,
   haWaitAdminReadyStep,
@@ -44,6 +45,7 @@ import {
   haWaitPrimaryPostgresStep,
   haWriteReplicationOverlayStep,
   k8sDeployClusterStep,
+  persistProvisionedServerStep,
   provisionServerStep,
   restoreTlsStep,
   setupBackupCronStep,
@@ -51,6 +53,7 @@ import {
   setupServerStep,
   snapshotTlsStep,
   startComposeStackStep,
+  startDnsUpdateStep,
   transferImageStep,
   updateDnsStep,
   verifyHealthStep,
@@ -67,6 +70,10 @@ export function planDeploy(tier, _config) {
   if (tier === 'compose') {
     return [
       provisionServerStep(),
+      // On disk before DNS points at it, so destroy owns the record.
+      persistProvisionedServerStep(),
+      // The record write overlaps cloud-init; update-dns below is its barrier.
+      startDnsUpdateStep(),
       setupServerStep(),
       checkDbLedgerStep(),
       transferImageStep(),
@@ -93,6 +100,8 @@ export function planDeploy(tier, _config) {
     return [
       haProvisionServersStep(),
       haPersistPendingConfigStep(),
+      // The HA record write overlaps boot; update-dns below is its barrier.
+      haStartDnsUpdateStep(),
       haWaitForSshStep(),
       haSeedKnownHostsStep(),
       haSetupServersStep(),

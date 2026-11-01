@@ -113,17 +113,18 @@ describe('10.0.1.2 census — provider-generic files carry no db-IP literal', ()
     expect(code).not.toMatch(/['"`]10\.0\.1\.2['"`]/);
   });
 
-  it('k3s.js masterPrivateIp renderer defaults stay at their audited count (2)', () => {
-    // The two DELIBERATE test-convenience defaults (renderCarbonAutoscalerConfig,
-    // buildAppImage — "renderer default stays for tests", M3 Task 2; a third,
-    // pushImageToLocalRegistry's, went with the tunnel push when the image
-    // moved to the layer-delta delivery). The live deployK3s path destructures
-    // the k3s-infra step result WITHOUT a default and validates instead. A 3rd
-    // occurrence means the class is growing again — remove the new default,
-    // don't bump this.
+  it('k3s.js masterPrivateIp renderer defaults stay at their audited count (1)', () => {
+    // The one DELIBERATE test-convenience default (renderCarbonAutoscalerConfig,
+    // "renderer default stays for tests", M3 Task 2). buildAppImage's went when
+    // the build moved ahead of provisioning and stopped naming a registry (the
+    // retag takes the real IP, registryImageTag); pushImageToLocalRegistry's
+    // went with the tunnel push when the image moved to the layer-delta
+    // delivery. The live deployK3s path destructures the k3s-infra step result
+    // WITHOUT a default and validates instead. A 2nd occurrence means the class
+    // is growing again — remove the new default, don't bump this.
     const code = codeWithoutComments(readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf8'));
     const occurrences = code.match(/masterPrivateIp\s*=\s*'10\.0\.1\.1'/g) ?? [];
-    expect(occurrences).toHaveLength(2);
+    expect(occurrences).toHaveLength(1);
   });
 
   it("positive control: hetzner-k8s.js still pins the statics ('10.0.1.1'/'10.0.1.2')", () => {
