@@ -19,6 +19,7 @@ import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
 import { pollUntil } from '../../retry.js';
+import { ADDON_SERVICES_SCRIPT } from '../../services/addon-start.js';
 import { shEscape } from '../../shell.js';
 import {
   isDnsNotSettledSshCommandError,
@@ -1065,13 +1066,18 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
  * again when app-migrate (#234) began running the same image (every compose-ha
  * deploy, DO e2e 2026-10-31), so the filter is by IMAGE: a service whose
  * `config --images` equals app's is never pulled, whatever it is called.
+ * The add-ons the background job starts (addon-services.sh, see
+ * services/addon-start.js) are skipped too: the job pulls their images after
+ * the core stack is up, off the deploy's critical path.
  * Exported for tests/unit/deploy/pull-images-loud.test.ts, which runs it.
  */
 export function stackPullCommand(remoteDir, flags) {
   return (
     `cd ${remoteDir} && app_image=$(docker compose ${flags} config --images app) && ` +
+    `deferred=$(if [ -f ${ADDON_SERVICES_SCRIPT} ]; then sh ${ADDON_SERVICES_SCRIPT}; fi) && ` +
     `docker compose ${flags} config --services | while read -r svc; do ` +
-    `[ "$(docker compose ${flags} config --images "$svc")" = "$app_image" ] || echo "$svc"; done | ` +
+    `[ "$(docker compose ${flags} config --images "$svc")" = "$app_image" ] && continue; ` +
+    `printf '%s\n' "$deferred" | grep -qxF "$svc" && continue; echo "$svc"; done | ` +
     `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`
   );
 }

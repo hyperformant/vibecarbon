@@ -500,6 +500,42 @@ describe('checkRemoteContainers', () => {
     ).toBeNull();
   });
 
+  it("compose with background add-ons: also reads each server's add-on status file", async () => {
+    const withAddons = {
+      deployMode: 'compose',
+      services: { observability: true, n8n: true, redis: true },
+      servers: [{ name: 'p', id: 1, ip: '1.1.1.1', role: 'primary' }],
+    };
+    const sshRun = vi.fn(async (_ip: string, _k: string, argv: string[]) =>
+      argv[0] === 'cat'
+        ? 'observability\trunning\t\nn8n\tfailed\tsetup n8n-setup exited 1\n'
+        : 'letsgo-app\trunning\tUp 1h (healthy)\n',
+    );
+    const out = await checkRemoteContainers('prod', withAddons, 'letsgo', { ...base(), sshRun });
+    expect(sshRun.mock.calls.map((c) => c[2][0])).toEqual(['docker', 'cat']);
+    expect(sshRun.mock.calls[1][2]).toEqual(['cat', '/opt/letsgo/.vc-addons/status']);
+    expect(out?.p.addons).toEqual([
+      { name: 'observability', state: 'running', reason: '' },
+      { name: 'n8n', state: 'failed', reason: 'setup n8n-setup exited 1' },
+    ]);
+  });
+
+  it('compose with background add-ons but no status file yet: each reads starting', async () => {
+    const withAddons = {
+      deployMode: 'compose',
+      services: { metabase: true },
+      servers: [{ name: 'p', id: 1, ip: '1.1.1.1', role: 'primary' }],
+    };
+    const sshRun = vi.fn(async (_ip: string, _k: string, argv: string[]) => {
+      if (argv[0] === 'cat') throw Object.assign(new Error('x'), { stderr: 'No such file' });
+      return 'letsgo-app\trunning\tUp 1h (healthy)\n';
+    });
+    const out = await checkRemoteContainers('prod', withAddons, 'letsgo', { ...base(), sshRun });
+    expect(out?.p.addons).toEqual([
+      { name: 'metabase', state: 'starting', reason: 'no status recorded yet' },
+    ]);
+  });
+
   it('reports "no ssh key" for every server without touching the network', async () => {
     const deps = { ...base(), existsSync: vi.fn(() => false), sshRun: vi.fn() };
     const out = await checkRemoteContainers('prod', composeHa, 'letsgo', deps);

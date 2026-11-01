@@ -1166,8 +1166,12 @@ function serverContainersHealthy(sc) {
   if (counted.some((r) => r.health !== 'healthy')) return false;
   for (const ns of Object.values(sc.platform || {})) if (ns.healthy !== ns.total) return false;
   if (sc.nodes && sc.nodes.ready !== sc.nodes.total) return false;
+  // A background add-on that failed needs attention; one still starting does not.
+  if ((sc.addons || []).some((a) => a.state === 'failed')) return false;
   return true;
 }
+
+const ADDON_ROW_HEALTH = { running: 'healthy', starting: 'starting', failed: 'unhealthy' };
 
 /**
  * The Servers block body: one line per server, then — when container data
@@ -1217,6 +1221,33 @@ function formatServerLines(servers, checks) {
     for (const r of sc.rows) {
       if (r.health === 'healthy' || r.health === 'done') continue;
       lines.push(formatContainerRow(r, '      '));
+    }
+    // Add-ons start in the background after the core stack (services/
+    // addon-start.js): a rollup, then each one not yet running, a failure with
+    // its reason.
+    if (sc.addons?.length) {
+      const running = sc.addons.filter((a) => a.state === 'running').length;
+      const failed = sc.addons.some((a) => a.state === 'failed');
+      const paintAddons = failed ? c.error : running === sc.addons.length ? c.success : c.warning;
+      lines.push(
+        `    ${c.dim('add-ons')} ${paintAddons(`● ${running}/${sc.addons.length} running`)}`,
+      );
+      for (const a of sc.addons) {
+        if (a.state === 'running') continue;
+        lines.push(
+          formatContainerRow(
+            {
+              name: a.name,
+              container: a.name,
+              health: ADDON_ROW_HEALTH[a.state] ?? 'unknown',
+              label: a.state,
+              detail: a.reason,
+              latencyMs: 0,
+            },
+            '      ',
+          ),
+        );
+      }
     }
     for (const [ns, n] of Object.entries(sc.platform || {})) {
       if (n.healthy === n.total) continue;

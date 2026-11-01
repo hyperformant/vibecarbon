@@ -271,3 +271,52 @@ describe('storageSettleLine (R5: age-based, no network)', () => {
     await expect(storageSettleLine({ provider: 'hetzner' }, now)).resolves.toBeNull();
   });
 });
+
+/**
+ * Add-ons start in the background after the core stack (services/
+ * addon-start.js), so a deploy can finish with one still starting or failed.
+ * status shows each one's state, and a failed one with its reason; a failed
+ * add-on makes the environment need attention, a starting one does not.
+ */
+describe('formatServerLines: background add-ons', () => {
+  const sc = (addons: Array<{ name: string; state: string; reason: string }>) => ({
+    containers: {
+      'prod-primary': {
+        kind: 'compose',
+        ip: '1.1.1.1',
+        rows: [row('db', 'healthy'), row('app', 'healthy')],
+        addons,
+      },
+    },
+  });
+
+  it('all running: one rollup line', () => {
+    const lines = formatServerLines(
+      [servers[0]],
+      sc([
+        { name: 'observability', state: 'running', reason: '' },
+        { name: 'n8n', state: 'running', reason: '' },
+      ]),
+    ).map(strip);
+    expect(lines).toContain('    add-ons ● 2/2 running');
+  });
+
+  it('starting and failed add-ons get their own line, a failure with its reason', () => {
+    const checks = sc([
+      { name: 'observability', state: 'starting', reason: '' },
+      { name: 'n8n', state: 'failed', reason: 'did not become healthy: n8n exited (1)' },
+    ]);
+    const lines = formatServerLines([servers[0]], checks).map(strip);
+    expect(lines).toContain('    add-ons ● 0/2 running');
+    expect(lines).toContain('      observability               ● starting  ');
+    expect(lines).toContain(
+      '      n8n                         ● failed  did not become healthy: n8n exited (1)',
+    );
+    expect(isEnvironmentUnhealthy({ checks })).toBe(true);
+  });
+
+  it('starting alone does not make the environment unhealthy', () => {
+    const checks = sc([{ name: 'observability', state: 'starting', reason: '' }]);
+    expect(isEnvironmentUnhealthy({ checks })).toBe(false);
+  });
+});

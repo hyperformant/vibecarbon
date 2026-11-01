@@ -21,6 +21,7 @@ import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
+import { checkAddonsReady } from '../checks/addons-ready.js';
 import { runAppApiChecks } from '../checks/app-api.js';
 import {
   adminSignIn,
@@ -2161,6 +2162,23 @@ export async function runLifecycle(
           const fwServers = resolveComposeFirewallServers(config.projectDir, config.envPrefix);
           const firewallResults = await runCloudFirewallChecks(fwProvider, fwServers);
           allResults.push(...firewallResults);
+        }
+
+        // Add-ons start in the background after a compose deploy serves
+        // (src/lib/services/addon-start.js). Require every one running before
+        // the feature checks below look for it: bounded, failing with the
+        // add-on's own log. Not a relaxation: deploy.total ends at a serving
+        // app, and the add-ons are still verified here.
+        if (isCompose) {
+          allResults.push(
+            await checkAddonsReady({
+              mode: config.mode,
+              projectName: config.projectName,
+              features: config.features,
+              ip: sshCheckMasterIp,
+              sshKeyPath: sshKeyPath ?? null,
+            }),
+          );
         }
 
         // Feature-specific checks (only if the feature is enabled)

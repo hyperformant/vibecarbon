@@ -13,6 +13,8 @@
 
 import { existsSync as fsExistsSync } from 'node:fs';
 import { resolvePrimary } from '../cli/resolve-primary.js';
+import { ADDON_STATUS_FILE, backgroundAddons, parseAddonStatus } from '../services/addon-start.js';
+import { enabledAddonNames } from '../services/standby-policy.js';
 import {
   getSSHKeyPath as defaultGetKey,
   sshKubectl as defaultKubectl,
@@ -239,7 +241,29 @@ function describeSshError(err) {
   return msg.split('\n')[0].trim();
 }
 
-async function collectCompose(target, projectName, keyPath, deps) {
+/**
+ * The background add-ons' states on one compose server, from the job's
+ * `.vc-addons/status` (services/addon-start.js). A file not there yet (the job
+ * has not written it, or the server predates it) reads as every expected
+ * add-on starting.
+ */
+async function collectAddons(target, projectName, keyPath, deps, expected) {
+  try {
+    const text = await withTimeout(
+      deps.sshRun(target.ip, keyPath, ['cat', `/opt/${projectName}/${ADDON_STATUS_FILE}`], {
+        silent: true,
+        timeout: deps.timeoutMs,
+        transportRetry: false,
+      }),
+      deps.timeoutMs,
+    );
+    return parseAddonStatus(text);
+  } catch {
+    return expected.map((name) => ({ name, state: 'starting', reason: 'no status recorded yet' }));
+  }
+}
+
+async function collectCompose(target, projectName, keyPath, deps, expectedAddons = []) {
   const argv = dockerPsArgv(projectName);
   const listing = await withTimeout(
     deps.sshRun(target.ip, keyPath, argv, {
@@ -255,6 +279,12 @@ async function collectCompose(target, projectName, keyPath, deps) {
     ...classifyContainer(container, state, status),
     latencyMs: 0,
   }));
+  // A compose-ha standby runs its add-ons in its whole-stack up (no job): only
+  // the role primary (or the single server) has a status file to read.
+  if (expectedAddons.length) {
+    const addons = await collectAddons(target, projectName, keyPath, deps, expectedAddons);
+    return { kind: 'compose', ip: target.ip, rows, addons };
+  }
   return { kind: 'compose', ip: target.ip, rows };
 }
 
@@ -310,6 +340,8 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
 
   const keyPath = d.getSSHKeyPath(envName);
   const haveKey = !!keyPath && d.existsSync(keyPath);
+  // The add-ons this env starts in the background, whose states the job records.
+  const expectedAddons = backgroundAddons(enabledAddonNames(envConfig)).map((a) => a.name);
 
   const results = await Promise.all(
     targets.map(async (t) => {
@@ -320,7 +352,14 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
         const value =
           t.kind === 'k8s'
             ? await collectK8s(t, keyPath, d)
-            : await collectCompose(t, projectName, keyPath, d);
+            : await collectCompose(
+                t,
+                projectName,
+                keyPath,
+                d,
+                // planContainerTargets lists a compose-ha pair primary first.
+                envConfig.deployMode === 'compose-ha' && t !== targets[0] ? [] : expectedAddons,
+              );
         return [t.serverName, value];
       } catch (err) {
         return empty(describeSshError(err));
