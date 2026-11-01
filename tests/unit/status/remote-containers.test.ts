@@ -570,13 +570,14 @@ describe('checkRemoteContainers', () => {
   });
 
   it('reports "no ssh key" for every server without touching the network', async () => {
-    const deps = { ...base(), existsSync: vi.fn(() => false), sshRun: vi.fn() };
+    const sshRun = vi.fn();
+    const deps = { ...base(), existsSync: vi.fn(() => false), sshRun: withSshContract(sshRun) };
     const out = await checkWithContract('prod', composeHa, 'letsgo', deps);
     expect(out).toEqual({
       p: { kind: 'compose', ip: '1.1.1.1', rows: [], error: 'no ssh key' },
       s: { kind: 'compose', ip: '2.2.2.2', rows: [], error: 'no ssh key' },
     });
-    expect(deps.sshRun).not.toHaveBeenCalled();
+    expect(sshRun).not.toHaveBeenCalled();
   });
 
   it('compose: runs docker ps -a per server and classifies rows', async () => {
