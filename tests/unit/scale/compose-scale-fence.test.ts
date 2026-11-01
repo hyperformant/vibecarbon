@@ -470,6 +470,18 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     ];
     const seen = h.events.filter((e) => order.includes(e));
     expect(seen).toEqual(order);
+    // The add-on job on the new server: stopped before the restore runs under
+    // it, then relaunched only after the cutover's whole-stack recreate.
+    const iStop = h.events.findIndex(
+      (e) => e.startsWith('ssh:9.9.9.9:') && e.includes('addons-start.sh stop'),
+    );
+    const iRestore = h.events.indexOf(`restore:9.9.9.9:${PUSHED}`);
+    const iRecreate = h.events.findIndex((e) => e.includes('up -d --force-recreate'));
+    const iRelaunch = h.events.findIndex((e) => e.includes('addons-start.sh promoted'));
+    expect(iStop).toBeGreaterThan(-1);
+    expect(iStop).toBeLessThan(iRestore);
+    expect(iRestore).toBeLessThan(iRecreate);
+    expect(iRecreate).toBeLessThan(iRelaunch);
     // The write pause is measured for the outro.
     expect(typeof ctx.writePauseMs).toBe('number');
   });
