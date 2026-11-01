@@ -82,7 +82,7 @@ import { randomBytes } from 'node:crypto';
 import * as digitalocean from '@pulumi/digitalocean';
 import * as pulumi from '@pulumi/pulumi';
 import { DigitalOceanProvider, encodeLabels } from '../../providers/digitalocean.js';
-import { serverResourceOptions } from '../create-timeout.js';
+import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
 import { transliterateToAscii } from './digitalocean-compose.js';
 
 /**
@@ -459,7 +459,7 @@ export function buildDigitalOceanK8sProgram(config) {
           // dependsOn firewall explicitly (M3 Task 5b), not just
           // transitively through master — see master's own dependsOn
           // comment.
-          serverResourceOptions('digitalocean:index/droplet:Droplet', {
+          workerResourceOptions('digitalocean:index/droplet:Droplet', {
             dependsOn: [master, firewall],
           }),
         ),

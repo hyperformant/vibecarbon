@@ -23,7 +23,7 @@ import { randomBytes } from 'node:crypto';
 import * as hcloud from '@pulumi/hcloud';
 import * as pulumi from '@pulumi/pulumi';
 import { loadCloudInit, renderScript } from '../cloud-init.js';
-import { serverResourceOptions } from '../create-timeout.js';
+import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
 
 // Hetzner location → private-network zone. Single source of truth: this is
 // the ONLY place that derives a networkZone, and it's derived here — inside
@@ -368,7 +368,7 @@ export function buildHetznerK8sProgram(config) {
             ],
             userData: workerUserData,
           },
-          serverResourceOptions('hcloud:index/server:Server', { dependsOn: [subnet] }),
+          workerResourceOptions('hcloud:index/server:Server', { dependsOn: [subnet] }),
         ),
       );
     }

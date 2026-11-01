@@ -105,6 +105,22 @@ export function serverResourceOptions(type, extra = {}) {
   };
 }
 
+/**
+ * The options for a k8s WORKER: the bounded create, but no `ignoreChanges` on
+ * its user data. A worker holds no data, and its user data carries its join
+ * target (the k3s token, the master's private IP), so it must be rebuilt when
+ * that changes rather than keep joining a master that is gone.
+ *
+ * @param {keyof typeof SERVER_RESOURCE_TYPES} type
+ * @param {object} [extra]
+ */
+export function workerResourceOptions(type, extra = {}) {
+  if (!SERVER_RESOURCE_TYPES[type]) {
+    throw new Error(`workerResourceOptions: unknown server type ${type}`);
+  }
+  return { ...extra, customTimeouts: SERVER_CUSTOM_TIMEOUTS };
+}
+
 /** Provider display names and status pages, keyed by Pulumi package. */
 const PROVIDER_PACKAGES = Object.freeze({
   hcloud: { label: 'Hetzner', statusUrl: 'https://status.hetzner.com' },
