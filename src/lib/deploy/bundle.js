@@ -152,6 +152,11 @@ else
 fi
 
 
+# 0. The previous deploy's add-on job, if one is still going, is stopped
+# before ANY container change below (the removed-network sweep included):
+# this deploy's compose operations must never overlap its.
+if [ -f ${ADDON_JOB_SCRIPT} ]; then sh ${ADDON_JOB_SCRIPT} stop; fi
+
 # 1. Self-heal containers pointing at a removed network
 # When a network's definition changes (e.g. an IPAM subnet pin arriving in the
 # base file), compose stops every attached container, removes the network and
@@ -172,10 +177,6 @@ for container_id in $(docker ps -aq --filter "label=com.docker.compose.project=$
     fi
   done
 done
-
-# The previous deploy's add-on job, if one is still going, is stopped first:
-# this deploy's pull and up must never overlap its compose operations.
-if [ -f ${ADDON_JOB_SCRIPT} ]; then sh ${ADDON_JOB_SCRIPT} stop; fi
 
 # Add-ons off the critical path: the services ${ADDON_SERVICES_SCRIPT} prints (none
 # on a compose-ha standby, none without background add-ons) are left out of the

@@ -123,6 +123,18 @@ describe('reconcile.sh: core first, add-ons in the background', () => {
     expect(stop).toBeLessThan(lines.findIndex((l) => l.includes(' up -d')));
   });
 
+  // Minor 4: the stop comes before ANY container change, the removed-network
+  // sweep's `docker rm -f` included.
+  it('stops the add-on job before the removed-network sweep', () => {
+    const script = renderReconcileScript('demo', '-f a.yml', true);
+    const stop = script.indexOf('sh addons-start.sh stop');
+    expect(stop).toBeGreaterThan(-1);
+    expect(stop).toBeLessThan(script.indexOf('docker rm -f'));
+    expect(stop).toBeLessThan(
+      script.indexOf('Checking for containers attached to removed networks'),
+    );
+  });
+
   // I-A1: a node that runs no job (a compose-ha standby, or no background
   // add-on) keeps no status file a reader could take for current.
   it('a node that starts no job removes any old add-on status file', () => {
