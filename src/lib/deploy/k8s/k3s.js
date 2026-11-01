@@ -4607,15 +4607,24 @@ export async function applyK3sManifests({
  * nothing from the cluster: its tag names no registry until deliverAppImage
  * retags it with the master's private IP.
  *
- * Returns the in-flight build, or null when this deploy will not build: a
- * k8s-ha standby (it copies the primary's image), or a rerun whose `k3s-build`
- * gate will skip, judged with the master IP the last provisioning recorded, so
- * an unchanged redeploy builds nothing and leaves no stray local tag. A rerun
- * the prediction misses still builds, after provisioning, in deliverAppImage.
- * A failure is not reported here: deliverAppImage awaits the build and fails
- * the deploy with it, at the point a serial build would have.
+ * The `k3s-build` gate inputs (source and build-arg digests) are read HERE,
+ * before `docker build` reads the source, and handed to deliverAppImage with
+ * the build. The gate then records what the image was built from: an edit
+ * made while the cluster provisions is not recorded against the older image,
+ * so the next deploy rebuilds it. Only the master's private IP, unknown
+ * until provisioning, is filled in later; it names the registry, not the
+ * image's content.
  *
- * @returns {Promise<{tag: string, gitSha: string, isDirty: boolean}>|null}
+ * Returns null for a k8s-ha standby (it copies the primary's image).
+ * Otherwise `{ build, inputs }`, where `build` is null for a rerun whose
+ * `k3s-build` gate will skip (judged with the master IP the last
+ * provisioning recorded), so an unchanged redeploy builds nothing and leaves
+ * no stray local tag, and deliverAppImage reuses `inputs` instead of hashing
+ * the source again. A failure is not reported here: deliverAppImage awaits
+ * the build and fails the deploy with it, at the point a serial build would
+ * have.
+ *
+ * @returns {{build: Promise<{tag: string, gitSha: string, isDirty: boolean}>|null, inputs: object}|null}
  */
 export function startAppImageBuild({
   role,
@@ -4629,19 +4638,14 @@ export function startAppImageBuild({
 }) {
   const d = { buildAppImage, buildK3sBuildInputs, ...deps };
   if (!planImageDelivery({ role }).build) return null;
-  if (
-    priorMasterPrivateIp &&
-    state.shouldSkip(
-      'k3s-build',
-      d.buildK3sBuildInputs({
-        projectName,
-        domain,
-        masterPrivateIp: priorMasterPrivateIp,
-        projectDir,
-      }),
-    )
-  ) {
-    return null;
+  const inputs = d.buildK3sBuildInputs({
+    projectName,
+    domain,
+    masterPrivateIp: priorMasterPrivateIp ?? null,
+    projectDir,
+  });
+  if (priorMasterPrivateIp && state.shouldSkip('k3s-build', inputs)) {
+    return { build: null, inputs };
   }
   const build = perfAsync(`deploy.${perfPrefix}.image.localBuild`, () =>
     d.buildAppImage(projectDir, projectName, false, domain, { quiet: true }),
@@ -4650,7 +4654,7 @@ export function startAppImageBuild({
   // build that fails while Pulumi is still running from being an
   // unhandledRejection before then.
   build.catch(() => {});
-  return build;
+  return { build, inputs };
 }
 
 /**
@@ -4658,7 +4662,7 @@ export function startAppImageBuild({
  *
  * Single-cluster k8s and a k8s-ha primary build the image locally (the
  * `k3s-build` gate), usually by taking the build startAppImageBuild began
- * before provisioning (`earlyBuild`), then name it for this cluster's
+ * before provisioning (`early`, with the gate inputs it read), then name it for this cluster's
  * registry (registryImageTag); applyK3sManifests then delivers it once into
  * the master's registry, which every node pulls from. A k8s-ha standby builds
  * nothing: it awaits the primary's built ref (`peerImageRef`), which is
@@ -4681,7 +4685,7 @@ export async function deliverAppImage({
   projectName,
   domain,
   masterPrivateIp,
-  earlyBuild = null,
+  early = null,
   spinner,
   deps = {},
 }) {
@@ -4701,13 +4705,22 @@ export async function deliverAppImage({
     // buildK3sBuildInputs for why each one is load-bearing, and for the
     // stale-image bug the coarse inputs alone shipped. Computed here, not in
     // deployK3s, so a standby (which builds nothing) never hashes the source.
-    const buildInputs = d.buildK3sBuildInputs({ projectName, domain, masterPrivateIp, projectDir });
+    // With an early start, the inputs it read before `docker build` (plus the
+    // master IP, now known): the gate records what the image was built from.
+    const readInputs = () =>
+      d.buildK3sBuildInputs({ projectName, domain, masterPrivateIp, projectDir });
+    let buildInputs = early ? { ...early.inputs, masterPrivateIp } : readInputs();
+    // A predicted skip that missed (the master IP moved) builds now, so it
+    // gates on the source as it is now.
+    if (early && !early.build && !state.shouldSkip('k3s-build', buildInputs)) {
+      buildInputs = readInputs();
+    }
     if (!state.shouldSkip('k3s-build', buildInputs)) {
       state.startStep('k3s-build', buildInputs);
       spinner.start(`Building app image (${masterPrivateIp}:5000/...)`);
       let built;
       try {
-        built = await (earlyBuild ?? d.buildAppImage(projectDir, projectName, false, domain));
+        built = await (early?.build ?? d.buildAppImage(projectDir, projectName, false, domain));
       } catch (err) {
         spinner.stop('App image build failed', 1);
         throw err;
@@ -4903,7 +4916,7 @@ export async function deployK3s(options) {
   //     the cluster (startAppImageBuild); deliverAppImage takes it below. The
   //     master IP the last provisioning recorded lets an unchanged rerun skip
   //     it, as its build gate will.
-  const earlyBuild = startAppImageBuild({
+  const early = startAppImageBuild({
     role: options.role,
     state,
     projectDir,
@@ -5188,7 +5201,7 @@ export async function deployK3s(options) {
   // (deliverAppImage). applyK3sManifests delivers a built one to the master's
   // registry.
   const imageTag = await deliverAppImage({
-    earlyBuild,
+    early,
     role: options.role,
     peerImageRef: options.peerImageRef,
     onImageBuilt: options.onImageBuilt,

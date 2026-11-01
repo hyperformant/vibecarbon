@@ -32,6 +32,6 @@ describe('deployK3s starts the app image build before provisioning', () => {
 
   it('hands the in-flight build to deliverAppImage', () => {
     const deliver = body.slice(body.indexOf('deliverAppImage({'));
-    expect(deliver).toMatch(/^deliverAppImage\(\{[\s\S]*?earlyBuild[\s\S]*?\}\)/);
+    expect(deliver).toMatch(/^deliverAppImage\(\{\s*early,/);
   });
 });
