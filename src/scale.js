@@ -100,6 +100,7 @@ import { providerFor, providerIdFor, resolveProviderToken } from './lib/provider
 import { pollUntil } from './lib/retry.js';
 import { assertPersistedRoleTypes, planK8sScaleChanges } from './lib/scale-plan.js';
 import { buildComposeTypeOptions, buildSimpleTypeOptions } from './lib/server-types.js';
+import { ADDON_JOB_SCRIPT } from './lib/services/addon-start.js';
 import { enabledAddonNames } from './lib/services/standby-policy.js';
 import { sshRun, sshRunScript } from './lib/ssh.js';
 import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
@@ -742,6 +743,9 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
       newIp,
       sshKeyPath,
       `cd ${remoteDir} && ` +
+        // An add-on job (reconcile.sh started it) must not be mid compose
+        // operation while the whole stack is recreated: stop it first.
+        `if [ -f ${ADDON_JOB_SCRIPT} ]; then sh ${ADDON_JOB_SCRIPT} stop; fi; ` +
         `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1); ` +
         `[ -n "$FLAGS" ] || FLAGS='-f docker-compose.yml -f docker-compose.prod.yml'; ` +
         `docker compose $FLAGS ${replOverlayFlag} up -d --force-recreate ${STANDBY_SCALE_FLAG} 2>&1`,
