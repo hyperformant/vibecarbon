@@ -151,6 +151,21 @@ describe('destroyStack: a Droplet never carries CSI volume ids into destroy', ()
     expect(importAt).toBeLessThan(destroyAt);
   });
 
+  it('reads the state back once between the refresh and the destroy', async () => {
+    const { stack } = makeRacingStack();
+    selectStackMock.mockResolvedValue(stack);
+
+    const { destroyStack } = await import('../../../src/lib/iac/index.js');
+    const out = await destroyStack('d4-standby', () => ({}), {
+      projectName: 'p',
+      provider: 'digitalocean',
+    });
+
+    expect(stack.exportStack).toHaveBeenCalledTimes(1);
+    // The pre-destroy count still comes from that one read.
+    expect(out.resourceCount).toBe(2);
+  });
+
   it('writes no state when no Droplet lists a volume', async () => {
     const { stack } = makeRacingStack();
     stack.refresh.mockImplementation(async () => undefined);
@@ -182,10 +197,30 @@ describe('releaseDropletVolumeIds', () => {
     };
     const { releaseDropletVolumeIds } = await import('../../../src/lib/iac/index.js');
 
-    expect(await releaseDropletVolumeIds(stack as never)).toBe(0);
+    expect((await releaseDropletVolumeIds(stack as never)).released).toBe(0);
     expect(stack.importStack).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Does this program source give a Droplet Pulumi-owned volumes? Comments are
+ * dropped first; what is left is checked for any `volumeIds` (including the
+ * `{ volumeIds }` shorthand), `digitalocean.Volume(Attachment)`, and a named
+ * `Volume` / `VolumeAttachment` import from `@pulumi/digitalocean`.
+ */
+function ownsDropletVolumes(source: string): boolean {
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
+    .join('\n');
+  if (/\bvolumeIds\b/.test(code)) return true;
+  if (/\bdigitalocean\.(Volume|VolumeAttachment)\b/.test(code)) return true;
+  for (const m of code.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"]@pulumi\/digitalocean['"]/g)) {
+    if (/\bVolume(Attachment)?\b/.test(m[1])) return true;
+  }
+  return false;
+}
 
 describe('precondition: no program gives a Droplet Pulumi-owned volumes', () => {
   // releaseDropletVolumeIds is only correct while every Droplet volume is
@@ -200,12 +235,31 @@ describe('precondition: no program gives a Droplet Pulumi-owned volumes', () => 
     const programs = readdirSync(dir).filter((f) => f.startsWith('digitalocean'));
     expect(programs.length).toBeGreaterThan(0);
     for (const file of programs) {
-      const code = readFileSync(join(dir, file), 'utf8')
-        .split('\n')
-        .filter((line) => !/^\s*(\/\/|\*)/.test(line))
-        .join('\n');
-      expect(code, file).not.toMatch(/\bvolumeIds\s*:/);
-      expect(code, file).not.toMatch(/digitalocean\.(Volume|VolumeAttachment)\b/);
+      expect(ownsDropletVolumes(readFileSync(join(dir, file), 'utf8')), file).toBe(false);
     }
+  });
+
+  it.each([
+    ['a volumeIds property', 'new digitalocean.Droplet("db", { volumeIds: [v.id] });'],
+    [
+      'the { volumeIds } shorthand',
+      'const volumeIds = [v.id];\nnew digitalocean.Droplet("db", { volumeIds });',
+    ],
+    ['a namespaced Volume', 'new digitalocean.Volume("data", { size: 10 });'],
+    ['a named Volume import', "import { Droplet, Volume } from '@pulumi/digitalocean';"],
+    [
+      'a named VolumeAttachment import',
+      'import {\n  Droplet,\n  VolumeAttachment,\n} from "@pulumi/digitalocean";',
+    ],
+  ])('the guard catches %s', (_label, source) => {
+    expect(ownsDropletVolumes(source)).toBe(true);
+  });
+
+  it('the guard ignores comments and unrelated imports', () => {
+    expect(
+      ownsDropletVolumes(
+        "// volumeIds are CSI-owned\n/* digitalocean.Volume */\nimport { Volume } from './local.js';\nconst url = 'https://x';",
+      ),
+    ).toBe(false);
   });
 });

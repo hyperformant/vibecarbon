@@ -568,8 +568,12 @@ const DO_DROPLET_TYPE = 'digitalocean:index/droplet:Droplet';
  * changed, and never throws: a failure here leaves the destroy to report its
  * own error, which is the better thing to surface.
  *
+ * Returns the state it read (after the release, if one was written) so the
+ * caller's pre-destroy snapshot needs no second export, or `state: null`
+ * when the export failed.
+ *
  * @param {import('@pulumi/pulumi/automation').Stack} stack
- * @returns {Promise<number>} count of Droplets released
+ * @returns {Promise<{ released: number, state: object|null }>}
  */
 export async function releaseDropletVolumeIds(stack) {
   try {
@@ -595,10 +599,10 @@ export async function releaseDropletVolumeIds(stack) {
         }: the CSI driver owns those attachments, not the Droplet`,
       );
     }
-    return released;
+    return { released, state };
   } catch (err) {
     progressLog(`[pulumi] droplet volume release warning: ${summarizePulumiError(err)}`);
-    return 0;
+    return { released: 0, state: null };
   }
 }
 
@@ -930,14 +934,14 @@ export async function destroyStack(stackName, program, options = {}) {
   }
   // The refresh above can record CSI volumes the cluster teardown is already
   // deleting; see releaseDropletVolumeIds.
-  await releaseDropletVolumeIds(stack);
+  const { state: releasedState } = await releaseDropletVolumeIds(stack);
 
   // Pre-destroy resource snapshot — see the loud-partial-detection doc
   // above. Best-effort: if exportStack itself fails, skip the resource-count
   // cross-check below rather than guessing.
   let resourceCountBefore = null;
   try {
-    const state = await stack.exportStack();
+    const state = releasedState ?? (await stack.exportStack());
     const resources = state?.deployment?.resources ?? [];
     resourceCountBefore = resources.filter((r) => r.type !== 'pulumi:pulumi:Stack').length;
   } catch {
