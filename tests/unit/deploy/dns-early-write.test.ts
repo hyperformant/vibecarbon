@@ -26,6 +26,16 @@ vi.mock('../../../src/lib/dns-propagation.js', () => ({
   resolveNameservers: vi.fn(),
 }));
 
+// The project config, in memory: the persist step's writes land here, in order.
+const disk: { environments: Record<string, Record<string, unknown>> } = { environments: {} };
+vi.mock('../../../src/lib/config.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  updateProjectConfig: (mutator: (c: typeof disk) => unknown) => {
+    calls.push('config:persist');
+    mutator(disk);
+  },
+}));
+
 vi.mock('@clack/prompts', () => {
   const mk = () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() });
   return {
@@ -206,5 +216,98 @@ describe('compose-ha: the HA records are written while both servers boot', () =>
       /\[step:update-dns\].*rate limited/s,
     );
     expect(calls).not.toContain('haStartComposeStack');
+  });
+});
+
+/**
+ * I2: the early write points the record at the new server before the deploy
+ * ends. destroy deletes only records whose target it can attribute to this
+ * env (planDestroyTargets ownedIps, from envConfig.servers), so the server
+ * must be on disk BEFORE the write, as compose-ha's persist-pending-config
+ * already is. Otherwise a deploy that fails later leaves an A record that
+ * destroy keeps as unowned.
+ */
+describe('compose: the provisioned server is on disk before the early write', () => {
+  const provisioned = () => ({
+    environment: 'e1',
+    region: 'nyc3',
+    serverType: 's-2vcpu-4gb',
+    domain: 'e1.example.com',
+    dnsProvider: 'digitalocean',
+    dnsZoneId: 'zone-1',
+    dnsToken: 'tok',
+    dnsChallenge: true,
+    dnsWarmupPromise: Promise.resolve(),
+    state: state(),
+  });
+  const REAL = ['persistProvisionedServer', 'startDnsUpdate', 'updateDns'];
+
+  /** A provisionServer that does what the real one does to ctx. */
+  const withProvision = (fx: Record<string, (ctx: never) => Promise<void>>) => ({
+    ...fx,
+    provisionServer: async (ctx: Record<string, unknown>) => {
+      calls.push('provisionServer');
+      Object.assign(ctx, {
+        serverIp: '203.0.113.10',
+        providerServerId: '4242',
+        providerServerName: 'quorum-e1',
+        providerFirewallId: 'fw-1',
+        serverProvisioned: true,
+      });
+    },
+  });
+
+  beforeEach(() => {
+    disk.environments = { e1: { envName: 'e1', status: 'deploying', deployMode: 'compose' } };
+  });
+
+  it('persists the server before the record write starts', async () => {
+    await runPlan(
+      planDeploy('compose', {}),
+      { ...provisioned(), serverIp: null },
+      withProvision(effects(REAL)),
+    );
+    expect(calls.indexOf('config:persist')).toBeGreaterThan(-1);
+    expect(calls.indexOf('config:persist')).toBeLessThan(calls.indexOf('dns:setupSimple'));
+    expect(disk.environments.e1.servers).toEqual([
+      {
+        name: 'master',
+        id: '4242',
+        providerServerName: 'quorum-e1',
+        firewallId: 'fw-1',
+        ip: '203.0.113.10',
+        region: 'nyc3',
+        serverType: 's-2vcpu-4gb',
+      },
+    ]);
+    expect(disk.environments.e1.status).toBe('deploying');
+  });
+
+  it('a deploy that fails after the write leaves a record destroy owns', async () => {
+    const run = runPlan(
+      planDeploy('compose', {}),
+      { ...provisioned(), serverIp: null },
+      withProvision({
+        ...effects(REAL),
+        startComposeStack: async () => {
+          throw new Error('compose up failed');
+        },
+      }),
+    );
+    await expect(run).rejects.toThrow('compose up failed');
+    const { planDestroyTargets } = await import('../../../src/destroy.js');
+    const { ownedIps } = planDestroyTargets(disk.environments.e1, { projectName: 'quorum' }, 'e1');
+    // The A record the early write set points here: destroy deletes it.
+    expect(setupSimple.mock.calls[0][3]).toBe('203.0.113.10');
+    expect(ownedIps).toContain('203.0.113.10');
+  });
+
+  it('a warm deploy (server already recorded) writes nothing to disk', async () => {
+    await runPlan(
+      planDeploy('compose', {}),
+      { ...provisioned(), serverIp: '203.0.113.10' },
+      effects(REAL),
+    );
+    expect(calls).not.toContain('config:persist');
   });
 });

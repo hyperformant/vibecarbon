@@ -12,7 +12,9 @@
  * there) and then writes the record itself when nothing did, which is every
  * k8s-ha deploy (its fan-out owns onInfraReady) and any rerun whose IP moved.
  * The gate makes that second call a no-op when the early write already set
- * the same IP, so the record is written once.
+ * the same IP, so the record is written once. Every write first persists its
+ * target (`persistOwnedIp`, single k8s) so destroy owns the record even when
+ * the deploy fails before its final save.
  */
 import { hasAutomatedDns } from '../../dns-provider.js';
 import { perfAsync } from '../../perf.js';
@@ -27,6 +29,7 @@ import { requireDnsSetup } from '../dns-result.js';
  *   state: import('../state.js').StateTracker,
  *   dnsWarmupPromise: Promise<unknown>,
  *   getDnsProvider: (id: string) => Promise<{setupSimple: Function}>,
+ *   persistOwnedIp?: ((ip: string) => void)|null,
  * }} o
  */
 export function createK8sDnsWriter({
@@ -37,8 +40,14 @@ export function createK8sDnsWriter({
   state,
   dnsWarmupPromise,
   getDnsProvider,
+  persistOwnedIp = null,
 }) {
   const write = async (ip, progress) => {
+    // On disk before the record points at it: destroy deletes only records
+    // whose target it can attribute to this env (planDestroyTargets reads
+    // envConfig.floatingIp), so a deploy that fails after this write must
+    // already own the IP. Single k8s only; k8s-ha persists per cluster.
+    persistOwnedIp?.(ip);
     // The 0.0.0.0 warm-up write targets the same record: never race it.
     await perfAsync('deploy.dns.warm', async () => {
       await dnsWarmupPromise;
@@ -60,8 +69,11 @@ export function createK8sDnsWriter({
   let early = null;
   return {
     /** deployK3s's onInfraReady: start the write in the background, once. */
-    onInfraReady({ floatingIp, masterIp } = {}) {
-      const ip = floatingIp || masterIp;
+    onInfraReady({ floatingIp } = {}) {
+      // The floating IP only: it is what single k8s persists (envConfig
+      // floatingIp) and what both k8s programs always output. A cluster
+      // without one leaves the write to finish().
+      const ip = floatingIp;
       if (early || !ip || !domain || !hasAutomatedDns(dnsProvider)) return;
       // Silent: deployK3s's spinner owns the line, and setupSimple's own
       // spinner (shown when no onProgress is passed) would fight it.

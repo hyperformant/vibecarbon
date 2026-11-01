@@ -97,6 +97,9 @@ async function provisionServer(ctx) {
       );
     }
     ctx.serverIp = result.outputs.serverIp;
+    // This deploy created (or converged) the server: persist-provisioned-server
+    // records it before anything points DNS at it.
+    ctx.serverProvisioned = true;
     ctx.providerServerId = result.outputs.serverId || null;
     ctx.providerServerName = `${projectConfig.projectName}-${environment}`;
     // Both compose programs export firewallId; nothing used to read it, so
@@ -118,6 +121,48 @@ async function provisionServer(ctx) {
   // (accept-new) become a strict pin. Re-seeding cleanly re-pins a Hetzner-
   // recycled IP (destroy → redeploy). Best-effort: falls back to accept-new.
   await seedKnownHosts(knownHostsPathForKey(sshKeyPath), ctx.serverIp);
+}
+
+/**
+ * The env's `servers` entry for a compose VPS: the same record the
+ * orchestrator's final save builds (name 'master', the provider id and name
+ * destroy and scale look the server up by, its firewall, IP, region, type).
+ */
+export function composeServerRecord({
+  serverIp,
+  providerServerId,
+  providerServerName,
+  providerFirewallId,
+  region,
+  serverType,
+}) {
+  return {
+    name: 'master',
+    ...(providerServerId && providerServerId !== 'manual' && { id: providerServerId }),
+    ...(providerServerName && { providerServerName }),
+    ...(providerFirewallId && { firewallId: providerFirewallId }),
+    ip: serverIp,
+    region,
+    serverType,
+  };
+}
+
+/**
+ * Record the server provision-server just created in the env (status stays
+ * 'deploying'), before start-dns-update points the domain at it. destroy
+ * deletes only DNS records whose target it can attribute to this env
+ * (planDestroyTargets ownedIps, read from `servers`), so a deploy that fails
+ * after the early write must already have the IP on disk; compose-ha's
+ * persist-pending-config does the same. The final save keeps this entry (it
+ * prefers a persisted one carrying an id) and it is the same record.
+ */
+async function persistProvisionedServer(ctx) {
+  const { updateProjectConfig } = await import('../../config.js');
+  const record = composeServerRecord(ctx);
+  updateProjectConfig((onDisk) => {
+    const env = onDisk.environments?.[ctx.environment];
+    if (env) env.servers = [record];
+  });
 }
 
 /**
@@ -764,6 +809,7 @@ export const EFFECTS = {
   dockerhubLogin,
   ghcrLogin,
   setupServerFiles,
+  persistProvisionedServer,
   startDnsUpdate,
   updateDns,
   checkDbLedger,

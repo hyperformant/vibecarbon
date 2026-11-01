@@ -45,6 +45,7 @@ import {
   haWaitPrimaryPostgresStep,
   haWriteReplicationOverlayStep,
   k8sDeployClusterStep,
+  persistProvisionedServerStep,
   provisionServerStep,
   restoreTlsStep,
   setupBackupCronStep,
@@ -69,6 +70,8 @@ export function planDeploy(tier, _config) {
   if (tier === 'compose') {
     return [
       provisionServerStep(),
+      // On disk before DNS points at it, so destroy owns the record.
+      persistProvisionedServerStep(),
       // The record write overlaps cloud-init; update-dns below is its barrier.
       startDnsUpdateStep(),
       setupServerStep(),

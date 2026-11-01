@@ -11,6 +11,7 @@ describe('compose deploy plan snapshot', () => {
     expect(planStepNames(planDeploy('compose', {}))).toMatchInlineSnapshot(`
       [
         "provision-server",
+        "persist-provisioned-server",
         "start-dns-update",
         "setup-server",
         "check-db-ledger",

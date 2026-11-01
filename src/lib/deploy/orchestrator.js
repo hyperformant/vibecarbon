@@ -2063,6 +2063,17 @@ export async function executeDeployment(args, gatheredConfig) {
         state,
         dnsWarmupPromise,
         getDnsProvider,
+        // Single k8s: the record's target is on disk before the record points
+        // at it, so destroy owns it if the deploy fails (the final save
+        // writes the same floatingIp). k8s-ha persists per cluster instead.
+        persistOwnedIp:
+          tier === 'k8s'
+            ? (ip) =>
+                updateProjectConfig((onDisk) => {
+                  const env = onDisk.environments?.[environment];
+                  if (env) env.floatingIp = ip;
+                })
+            : null,
       })
     : null;
 

@@ -59,6 +59,18 @@ export const setupServerFilesStep = () =>
   defineStep({ name: 'setup-server-files', effect: 'setupServerFiles' });
 
 /**
+ * Record the server this deploy just provisioned in the env before anything
+ * points DNS at it, so destroy owns the record if the deploy fails later.
+ * Only when provision-server ran: a warm deploy's server is already recorded.
+ */
+export const persistProvisionedServerStep = () =>
+  defineStep({
+    name: 'persist-provisioned-server',
+    effect: 'persistProvisionedServer',
+    when: (ctx) => !!ctx.serverProvisioned,
+  });
+
+/**
  * Start writing the real DNS A record in the background as soon as the server
  * IP is known, so the write and its propagation overlap cloud-init. Same gate
  * as update-dns, which awaits it.

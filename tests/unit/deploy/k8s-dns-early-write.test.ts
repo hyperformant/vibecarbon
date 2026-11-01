@@ -57,7 +57,7 @@ describe('createK8sDnsWriter', () => {
     expect(state.getStepResult('k8s-dns-update')).toEqual({ serverIp: '203.0.113.9' });
   });
 
-  it('falls back to the master IP, as the post-deploy block does', async () => {
+  it('the post-deploy block still falls back to the master IP', async () => {
     const { w } = writer();
     w.onInfraReady({ masterIp: '198.51.100.7' });
     await w.finish('198.51.100.7');
@@ -127,6 +127,57 @@ describe('createK8sDnsWriter', () => {
   });
 });
 
+/**
+ * I2: destroy deletes only records whose target it can attribute to the env
+ * (planDestroyTargets ownedIps, which reads envConfig.floatingIp for single
+ * k8s). The writer persists the IP before writing the record, so a deploy
+ * that fails afterwards leaves a record destroy removes.
+ */
+describe('createK8sDnsWriter persists the target before writing', () => {
+  it('the floating IP is on disk before the early write starts', async () => {
+    const persisted: string[] = [];
+    const persistOwnedIp = vi.fn((ip: string) => {
+      persisted.push(ip);
+      calls.push(`persist ${ip}`);
+    });
+    const { w } = writer({ persistOwnedIp });
+    w.onInfraReady({ masterIp: '198.51.100.7', floatingIp: '203.0.113.9' });
+    await w.finish('203.0.113.9');
+    expect(calls[0]).toBe('persist 203.0.113.9');
+    expect(calls.indexOf('persist 203.0.113.9')).toBeLessThan(calls.indexOf('write 203.0.113.9'));
+    // destroy, reading what was persisted after a failed deploy, owns it.
+    const { planDestroyTargets } = await import('../../../src/destroy.js');
+    const { ownedIps } = planDestroyTargets(
+      { deployMode: 'kubernetes', floatingIp: persisted[0] },
+      { projectName: 'quorum' },
+      'e3',
+    );
+    expect(ownedIps).toContain('203.0.113.9');
+  });
+
+  it('a target that could not be persisted is not written early', async () => {
+    const persistOwnedIp = vi.fn(() => {
+      throw new Error('config lock timeout');
+    });
+    const { w } = writer({ persistOwnedIp });
+    w.onInfraReady({ floatingIp: '203.0.113.9' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(setupSimple).not.toHaveBeenCalled();
+    // The post-deploy write persists first too, and fails loudly on it.
+    await expect(w.finish('203.0.113.9')).rejects.toThrow('config lock timeout');
+    expect(setupSimple).not.toHaveBeenCalled();
+  });
+
+  it('no floating IP: the early hook writes nothing (only the floating IP is persisted)', async () => {
+    const persistOwnedIp = vi.fn();
+    const { w } = writer({ persistOwnedIp });
+    w.onInfraReady({ masterIp: '198.51.100.7' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(setupSimple).not.toHaveBeenCalled();
+    expect(persistOwnedIp).not.toHaveBeenCalled();
+  });
+});
+
 describe('the orchestrator wires it', () => {
   const src = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf-8');
 
@@ -134,6 +185,14 @@ describe('the orchestrator wires it', () => {
     const branch = src.slice(src.indexOf("} else if (tier === 'k8s') {"));
     const body = branch.slice(0, branch.indexOf('} else {'));
     expect(body).toMatch(/onInfraReady: k8sDns\.onInfraReady/);
+  });
+
+  it('single k8s, and only single k8s, persists envConfig.floatingIp through updateProjectConfig', () => {
+    const wiring = src.slice(src.indexOf('createK8sDnsWriter({'));
+    const args = wiring.slice(0, wiring.indexOf('})'));
+    expect(args).toMatch(/persistOwnedIp:\s*tier === 'k8s'/);
+    expect(args).toContain('updateProjectConfig(');
+    expect(args).toMatch(/\.floatingIp = ip/);
   });
 
   it('the post-deploy DNS block goes through the same writer', () => {
