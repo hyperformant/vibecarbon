@@ -48,7 +48,7 @@ import {
   pulumiStackEnvs,
   resolveTier,
 } from './lib/deploy/tier-registry.js';
-import { detachCsiVolumesBeforeDestroy } from './lib/destroy/csi-detach.js';
+import { runCsiDetachStep } from './lib/destroy/csi-detach.js';
 import { createLeakLedger, describeResource, formatLeakReport } from './lib/destroy/leak-ledger.js';
 import { destroyPreviewBody, readS3SetupCompleted } from './lib/destroy/preview.js';
 import { checkS3CredentialMismatch } from './lib/destroy/s3-credential-check.js';
@@ -3003,23 +3003,14 @@ async function destroyK8sTier({
     // just deleted can still be listed, so its detach 404s and the droplet
     // (and everything that depends on it) survives. Detach the captured CSI
     // volumes here and wait for DO to agree; see lib/destroy/csi-detach.js.
-    if (typeof provider.detachVolume === 'function' && capturedCsiVolumeIds.length > 0) {
-      s.start('Detaching CSI volumes from cluster servers');
-      const detach = await detachCsiVolumesBeforeDestroy(provider, {
+    if (typeof provider.detachVolume === 'function') {
+      await runCsiDetachStep(provider, {
         serverIds: clusterServerIds,
         csiVolumeIds: capturedCsiVolumeIds,
+        spinner: s,
+        warn: (msg) => p.log.warn(msg),
         log: (line) => console.log(`  ${line}`),
       });
-      const settled = detach.detached.length + detach.gone.length;
-      s.stop(
-        detach.stillAttached.length > 0
-          ? `${detach.stillAttached.length} CSI volume(s) still attached after the wait: ${detach.stillAttached
-              .map((t) => `${t.volumeId} on ${t.serverId}`)
-              .join(', ')}`
-          : settled > 0
-            ? `${settled} CSI volume(s) detached or already gone`
-            : 'No CSI volumes attached to cluster servers',
-      );
     }
 
     const { destroyK8s: destroyK8sStack } = await import('./lib/deploy/k8s/index.js');

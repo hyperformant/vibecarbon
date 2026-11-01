@@ -139,3 +139,56 @@ export async function detachCsiVolumesBeforeDestroy(
   }
   return { detached, gone, stillAttached: targets };
 }
+
+/**
+ * destroy's step around detachCsiVolumesBeforeDestroy: decides whether it can
+ * run and says how it went. A skip is a warning, a volume still listed after
+ * the budget is an error naming each `volume on droplet`, and only a clean
+ * result is reported as success.
+ *
+ * @param {Parameters<typeof detachCsiVolumesBeforeDestroy>[0]} provider
+ * @param {{
+ *   serverIds: Array<number|string>,
+ *   csiVolumeIds: string[],
+ *   spinner: { start(msg: string): void, stop(msg: string): void, error(msg: string): void },
+ *   warn: (msg: string) => void,
+ *   budgetMs?: number,
+ *   pollIntervalMs?: number,
+ *   log?: (line: string) => void,
+ * }} options
+ * @returns {Promise<Awaited<ReturnType<typeof detachCsiVolumesBeforeDestroy>> | null>}
+ *   null when the step did not run.
+ */
+export async function runCsiDetachStep(
+  provider,
+  { serverIds, csiVolumeIds, spinner, warn, ...options },
+) {
+  if (csiVolumeIds.length === 0) return null;
+  if (serverIds.length === 0) {
+    warn(
+      'Skipped CSI detach: the server pre-scan found no cluster servers, so pulumi destroy may still fail detaching a CSI volume',
+    );
+    return null;
+  }
+  spinner.start('Detaching CSI volumes from cluster servers');
+  const out = await detachCsiVolumesBeforeDestroy(provider, {
+    serverIds,
+    csiVolumeIds,
+    ...options,
+  });
+  if (out.stillAttached.length > 0) {
+    spinner.error(
+      `${out.stillAttached.length} CSI volume(s) still attached after the wait: ${out.stillAttached
+        .map((t) => `${t.volumeId} on droplet ${t.serverId}`)
+        .join(', ')}`,
+    );
+  } else {
+    const settled = out.detached.length + out.gone.length;
+    spinner.stop(
+      settled > 0
+        ? `${settled} CSI volume(s) detached or already gone`
+        : 'No CSI volumes attached to cluster servers',
+    );
+  }
+  return out;
+}

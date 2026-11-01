@@ -36,7 +36,9 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 });
 
 const { DigitalOceanProvider } = await import('../../../src/lib/providers/digitalocean.js');
-const { detachCsiVolumesBeforeDestroy } = await import('../../../src/lib/destroy/csi-detach.js');
+const { detachCsiVolumesBeforeDestroy, runCsiDetachStep } = await import(
+  '../../../src/lib/destroy/csi-detach.js'
+);
 
 const API = 'https://api.digitalocean.com/v2';
 const DB = 614810181;
@@ -280,6 +282,77 @@ describe('detachCsiVolumesBeforeDestroy', () => {
   });
 });
 
+function fakeSpinner() {
+  const events: Array<[string, string?]> = [];
+  return {
+    events,
+    start: (m: string) => events.push(['start', m]),
+    stop: (m: string) => events.push(['stop', m]),
+    error: (m: string) => events.push(['error', m]),
+  };
+}
+
+describe('runCsiDetachStep output', () => {
+  let provider: InstanceType<typeof DigitalOceanProvider>;
+  beforeEach(() => {
+    fetchWithRetryMock.mockReset();
+    provider = new DigitalOceanProvider('test-do-token');
+  });
+
+  it('says it skipped when the pre-scan found no cluster servers, and calls DO for nothing', async () => {
+    const world = makeWorld();
+    const spinner = fakeSpinner();
+    const warn = vi.fn();
+
+    await runCsiDetachStep(provider, {
+      serverIds: [],
+      csiVolumeIds: [LIVE],
+      spinner,
+      warn,
+      ...FAST,
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/skipped CSI detach: the server pre-scan found no cluster servers/i),
+    );
+    expect(spinner.events).toEqual([]);
+    expect(world.calls).toEqual([]);
+  });
+
+  it('reports a timeout as an error naming each volume on its droplet', async () => {
+    makeWorld({ staleReads: Number.POSITIVE_INFINITY });
+    const spinner = fakeSpinner();
+
+    await runCsiDetachStep(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [DELETED],
+      spinner,
+      warn: vi.fn(),
+      budgetMs: 50,
+      pollIntervalMs: 5,
+    });
+
+    const last = spinner.events.at(-1);
+    expect(last?.[0]).toBe('error');
+    expect(last?.[1]).toContain(`${DELETED} on droplet ${DB}`);
+  });
+
+  it('reports success with stop when DO lists nothing', async () => {
+    makeWorld();
+    const spinner = fakeSpinner();
+
+    await runCsiDetachStep(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [LIVE, DELETED],
+      spinner,
+      warn: vi.fn(),
+      ...FAST,
+    });
+
+    expect(spinner.events.at(-1)).toEqual(['stop', '2 CSI volume(s) detached or already gone']);
+  });
+});
+
 describe('destroyK8sTier wiring', () => {
   // destroyK8sTier is not exported (it needs the whole destroy context); the
   // step's behaviour is covered above, this pins where it runs.
@@ -290,7 +363,7 @@ describe('destroyK8sTier wiring', () => {
     );
     const body = src.slice(src.indexOf('async function destroyK8sTier('));
     const release = body.indexOf('await cleanupClusterPVCs(');
-    const detach = body.indexOf('detachCsiVolumesBeforeDestroy(');
+    const detach = body.indexOf('runCsiDetachStep(');
     const destroy = body.indexOf('destroyK8sStack({');
     expect(release).toBeGreaterThan(0);
     expect(detach).toBeGreaterThan(release);
