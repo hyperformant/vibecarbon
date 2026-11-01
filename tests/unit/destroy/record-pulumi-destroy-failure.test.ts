@@ -8,10 +8,7 @@
  * which named no resource and no cause.
  */
 import { describe, expect, it } from 'vitest';
-import {
-  describeRemainingPulumiResources,
-  recordPulumiDestroyFailure,
-} from '../../../src/destroy.js';
+import { recordPulumiDestroyFailure } from '../../../src/destroy.js';
 import {
   createLeakLedger,
   formatLeakReport,
@@ -148,26 +145,5 @@ describe('recordPulumiDestroyFailure', () => {
       resource: 'd4-standby (d4-standby)',
     });
     expect(results.leaks.entries[0].hint).toMatch(/`vibecarbon destroy d4`/);
-  });
-});
-
-describe('describeRemainingPulumiResources', () => {
-  it('names each leftover with its class and own error, for the orphan-stack path', () => {
-    expect(
-      describeRemainingPulumiResources([
-        {
-          type: 'digitalocean:index/droplet:Droplet',
-          logicalName: 'db',
-          name: 'p-db',
-          id: '1',
-          error: 'boom',
-        },
-        { type: 'digitalocean:index/vpc:Vpc', logicalName: 'network', name: null, id: '2' },
-      ]),
-    ).toEqual(['server p-db (id 1): boom', 'network network (id 2)']);
-  });
-
-  it('returns nothing when the state could not be read back', () => {
-    expect(describeRemainingPulumiResources(null)).toEqual([]);
   });
 });

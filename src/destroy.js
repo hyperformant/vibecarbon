@@ -1448,6 +1448,21 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks,
  * actually verified, so the absence of a leak report can't be confused with a
  * destroy that never checked.
  */
+/** Print a non-clean leak report's verdict lines, hints and summary. */
+function printLeakReportLines(report) {
+  const paint = {
+    leak: c.error,
+    unverified: c.error,
+    foreign: c.warning,
+    risk: c.warning,
+  };
+  for (const line of report.lines) {
+    p.log.message(`  ${(paint[line.severity] ?? ((s) => s))(line.text)}`);
+    if (line.hint) p.log.message(`    ${c.dim(`↳ ${line.hint}`)}`);
+  }
+  p.log.message(`  ${c.bold(report.summary)}`);
+}
+
 export function destroyOutro(envName, timeStr, results) {
   const ledger = results.leaks;
   const report = formatLeakReport(ledger, { environment: envName });
@@ -1472,17 +1487,7 @@ export function destroyOutro(envName, timeStr, results) {
     p.log.warn(`Environment "${envName}" destroyed — with observations:`);
   }
 
-  const paint = {
-    leak: c.error,
-    unverified: c.error,
-    foreign: c.warning,
-    risk: c.warning,
-  };
-  for (const line of report.lines) {
-    p.log.message(`  ${(paint[line.severity] ?? ((s) => s))(line.text)}`);
-    if (line.hint) p.log.message(`    ${c.dim(`↳ ${line.hint}`)}`);
-  }
-  p.log.message(`  ${c.bold(report.summary)}`);
+  printLeakReportLines(report);
   p.outro(
     survivors > 0 ? `Done with leaks ${c.dim(`(${timeStr})`)}` : `Done ${c.dim(`(${timeStr})`)}`,
   );
@@ -2404,6 +2409,8 @@ function pulumiResourceClass(type) {
  * @param {string} params.stackEnv
  * @param {string} params.dirLabel - HA's " (stackEnv)" suffix, or '' for single k8s.
  * @param {string} params.environment - the user-facing environment name.
+ * @param {string} [params.finishCommand] - the command that finishes the
+ *   teardown; defaults to `vibecarbon destroy <environment>`.
  * @param {object} params.results - the shared destroy `results` accumulator (mutated).
  * @param {string} params.providerName - `Provider.NAME`, for the hint.
  */
@@ -2412,11 +2419,12 @@ export function recordPulumiDestroyFailure({
   stackEnv,
   dirLabel,
   environment,
+  finishCommand,
   results,
   providerName,
 }) {
   results.pulumiDestroyFailed = true;
-  const finish = `vibecarbon destroy ${environment}`;
+  const finish = finishCommand ?? `vibecarbon destroy ${environment}`;
   const hint = `Run \`${finish}\` again to finish; it refreshes the stack and deletes what is left. If it fails the same way, delete it in the ${providerName} console, then run it once more.`;
   const remaining = Array.isArray(error?.remainingResources) ? error.remainingResources : null;
   if (remaining && remaining.length > 0) {
@@ -2447,23 +2455,6 @@ export function recordPulumiDestroyFailure({
     resource: `${stackEnv}${dirLabel}`,
     reason: `pulumi destroy failed: ${error?.message}, every Pulumi-managed resource in this stack (servers, firewall, network, SSH key, floating IP) is unverified`,
     hint: `Check for leftover resources in the ${providerName} console, then run \`${finish}\` again to finish. Pulumi state was preserved for this stack.`,
-  });
-}
-
-/**
- * One line per resource a failed destroy left in state: class, name or
- * logical name with id, and its own error when it has one. For callers that
- * print rather than ledger (the orphan-stack path). Empty when the state
- * could not be read back.
- *
- * @param {Array<{type: string, logicalName: string, name: string|null, id: string|null, error?: string|null}>|null|undefined} remaining
- * @returns {string[]}
- */
-export function describeRemainingPulumiResources(remaining) {
-  if (!Array.isArray(remaining)) return [];
-  return remaining.map((r) => {
-    const head = `${pulumiResourceClass(r.type)} ${describeResource({ name: r.name || r.logicalName, id: r.id })}`;
-    return r.error ? `${head}: ${r.error}` : head;
   });
 }
 
@@ -3797,6 +3788,10 @@ async function main(argv = []) {
         projectConfig?.s3Config,
       );
 
+      // Same ledger and exit policy as an environment destroy: a failed
+      // orphan stack is a leak the scripted caller must see, not a spinner
+      // line under an exit 0.
+      const orphanResults = { leaks: createLeakLedger(), pulumiDestroyFailed: false };
       const orphanSpinner = spinner();
       for (const orphan of orphans) {
         orphanSpinner.start(`Destroying orphan stack ${c.bold(orphan.name)} (pulumi destroy)...`);
@@ -3810,17 +3805,27 @@ async function main(argv = []) {
           orphanSpinner.stop(`Destroyed: ${orphan.name}`);
         } catch (error) {
           orphanSpinner.error(`Failed to destroy ${orphan.name}: ${error.message}`);
-          const left = describeRemainingPulumiResources(error?.remainingResources);
-          if (left.length > 0) {
-            p.log.message(
-              [`Still in stack ${orphan.name}:`, ...left.map((line) => `  ${line}`)].join('\n'),
-            );
-          }
+          recordPulumiDestroyFailure({
+            error,
+            stackEnv: orphan.name,
+            dirLabel: '',
+            environment: orphan.name,
+            finishCommand: 'vibecarbon destroy -orphans',
+            results: orphanResults,
+            providerName: orphanProvider.NAME,
+          });
         }
       }
 
-      p.outro('Orphan cleanup complete');
-      process.exit(0);
+      const report = formatLeakReport(orphanResults.leaks);
+      if (report.clean) {
+        p.outro('Orphan cleanup complete');
+      } else {
+        p.log.error('Orphan cleanup did NOT finish. These survived or could not be verified:');
+        printLeakReportLines(report);
+        p.outro('Orphan cleanup done with leaks');
+      }
+      process.exit(report.exitCode);
     }
 
     p.log.error('No environments found in .vibecarbon.json');
