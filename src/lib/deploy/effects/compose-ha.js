@@ -682,7 +682,7 @@ const writesHaDns = (ctx) =>
  * for both servers. Throws when the provider refuses the write: it would
  * otherwise run on to a certificate and health probe that can never pass.
  */
-async function writeHaDnsRecords(ctx) {
+async function writeHaDnsRecords(ctx, { onProgress } = {}) {
   const projectName = ctx.projectConfig.projectName;
   const {
     primary,
@@ -701,18 +701,24 @@ async function writeHaDnsRecords(ctx) {
   const dnsName = DNS_PROVIDERS[dnsProvider].name;
   const { setupHA } = await getDnsProvider(dnsProvider);
   const haResult = await perfAsync('deploy.ha.compose.dns.setup', () =>
-    setupHA(dnsToken, dnsZoneId, domain, [
-      {
-        name: `${projectName}-${environment}-${stackOf(primary, 'primary')}`,
-        ip: primary.ip,
-        region: primary.region ?? region,
-      },
-      {
-        name: `${projectName}-${environment}-${stackOf(standby, 'standby')}`,
-        ip: standby.ip,
-        region: standby.region ?? standbyRegion,
-      },
-    ]),
+    setupHA(
+      dnsToken,
+      dnsZoneId,
+      domain,
+      [
+        {
+          name: `${projectName}-${environment}-${stackOf(primary, 'primary')}`,
+          ip: primary.ip,
+          region: primary.region ?? region,
+        },
+        {
+          name: `${projectName}-${environment}-${stackOf(standby, 'standby')}`,
+          ip: standby.ip,
+          region: standby.region ?? standbyRegion,
+        },
+      ],
+      { onProgress },
+    ),
   );
   requireDnsSetup(haResult, `${dnsName} HA DNS records for ${domain}`);
 }
@@ -726,7 +732,9 @@ async function writeHaDnsRecords(ctx) {
  */
 async function haStartDnsUpdate(ctx) {
   if (!writesHaDns(ctx)) return;
-  ctx.dnsUpdatePromise = writeHaDnsRecords(ctx);
+  // Silent: the servers' boot owns the line, and setupHA's own spinner would
+  // fight it.
+  ctx.dnsUpdatePromise = writeHaDnsRecords(ctx, { onProgress: () => {} });
   // Awaited (and thrown) by haUpdateDns; this only keeps a refusal that lands
   // while the servers boot from being an unhandledRejection.
   ctx.dnsUpdatePromise.catch(() => {});

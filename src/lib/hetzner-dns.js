@@ -563,21 +563,26 @@ export async function setupSimple(apiToken, zoneId, domain, serverIp, options = 
  * @param {string} zoneId - DNS zone ID
  * @param {string} domain - Domain name
  * @param {Array} servers - Array of { name, ip } objects (primary first)
+ * @param {{onProgress?: (msg: string) => void}} [options]
  * @returns {Promise<object>} Setup result
  */
-export async function setupHA(apiToken, zoneId, domain, servers) {
-  const s = spinner();
+export async function setupHA(apiToken, zoneId, domain, servers, options = {}) {
+  // onProgress: the caller owns the line (or another step does, for a
+  // background write); no spinner of our own then. Same contract as setupSimple.
+  const { onProgress } = options;
+  const s = onProgress ? null : spinner();
 
   try {
     // Root A record (low TTL for fast failover)
-    s.start(`Creating DNS record for ${domain}`);
+    s?.start(`Creating DNS record for ${domain}`);
+    onProgress?.(`Creating DNS record for ${domain}`);
     await createDNSRecord(apiToken, zoneId, {
       type: 'A',
       name: domain,
       value: servers[0].ip,
       ttl: HA_TTL,
     });
-    s.stop('Primary DNS record created');
+    s?.stop('Primary DNS record created');
 
     // Wildcard A record (low TTL for fast failover)
     await createDNSRecord(apiToken, zoneId, {
@@ -594,7 +599,7 @@ export async function setupHA(apiToken, zoneId, domain, servers) {
       standbyIp: servers[1]?.ip,
     };
   } catch (error) {
-    s.stop(`Hetzner DNS setup failed: ${error.message}`);
+    s?.stop(`Hetzner DNS setup failed: ${error.message}`);
     return { success: false, error: error.message };
   }
 }

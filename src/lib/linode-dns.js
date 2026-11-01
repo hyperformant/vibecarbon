@@ -523,20 +523,24 @@ export async function setupSimple(apiToken, zoneId, domain, serverIp, options = 
  * @param {Array} servers - Array of { name, ip, region } objects (primary first)
  * @returns {Promise<object>} Setup result
  */
-export async function setupHA(apiToken, zoneId, domain, servers) {
-  const s = spinner();
+export async function setupHA(apiToken, zoneId, domain, servers, options = {}) {
+  // onProgress: the caller owns the line (or another step does, for a
+  // background write); no spinner of our own then. Same contract as setupSimple.
+  const { onProgress } = options;
+  const s = onProgress ? null : spinner();
 
   try {
     const zoneName = await getZoneName(apiToken, zoneId);
 
-    s.start(`Creating DNS record for ${domain}`);
+    s?.start(`Creating DNS record for ${domain}`);
+    onProgress?.(`Creating DNS record for ${domain}`);
     await putRecord(apiToken, zoneId, zoneName, {
       type: 'A',
       name: domain,
       value: servers[0].ip,
       ttl: HA_TTL,
     });
-    s.stop('Primary DNS record created');
+    s?.stop('Primary DNS record created');
 
     await putRecord(apiToken, zoneId, zoneName, {
       type: 'A',
@@ -552,7 +556,7 @@ export async function setupHA(apiToken, zoneId, domain, servers) {
       standbyIp: servers[1]?.ip,
     };
   } catch (error) {
-    s.stop(`Linode DNS setup failed: ${error.message}`);
+    s?.stop(`Linode DNS setup failed: ${error.message}`);
     return { success: false, error: error.message };
   }
 }

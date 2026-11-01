@@ -202,10 +202,16 @@ describe('compose-ha: the HA records are written while both servers boot', () =>
     await vi.waitFor(() => expect(setupHA).toHaveBeenCalledTimes(1));
     cloudInit.release();
     await run;
-    expect(setupHA).toHaveBeenCalledWith('tok', 'zone-1', 'e2.example.com', [
-      { name: 'quorum-e2-e2-primary', ip: '203.0.113.1', region: 'nyc3' },
-      { name: 'quorum-e2-e2-standby', ip: '203.0.113.2', region: 'sfo3' },
-    ]);
+    expect(setupHA).toHaveBeenCalledWith(
+      'tok',
+      'zone-1',
+      'e2.example.com',
+      [
+        { name: 'quorum-e2-e2-primary', ip: '203.0.113.1', region: 'nyc3' },
+        { name: 'quorum-e2-e2-standby', ip: '203.0.113.2', region: 'sfo3' },
+      ],
+      { onProgress: expect.any(Function) },
+    );
     expect(setupHA).toHaveBeenCalledTimes(1);
     expect(calls.indexOf('dns:setupHA')).toBeLessThan(calls.indexOf('haPullImages'));
   });
