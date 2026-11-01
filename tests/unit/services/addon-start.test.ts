@@ -204,6 +204,14 @@ function runJob(dir: string, env: Record<string, string> = {}) {
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, VC_PROJECT_DIR: dir, ...env },
   });
 }
+
+/** Run a command without blocking the event loop, so node reaps the detached job it ends (a blocked parent leaves a zombie that still looks alive). */
+function runAsync(cmd: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }) {
+  return new Promise<number | null>((resolve) => {
+    const c = spawn(cmd, args, { ...opts, stdio: 'ignore' });
+    c.on('exit', (code) => resolve(code));
+  });
+}
 const status = (dir: string) =>
   parseAddonStatus(readFileSync(join(dir, ADDON_STATUS_FILE), 'utf8'));
 const calls = (dir: string) => readFileSync(join(dir, 'calls'), 'utf8');
@@ -294,7 +302,7 @@ describe('addons-start.sh', () => {
     for (let i = 0; i < 200 && !existsSync(join(dir, '.vc-addons', 'job.pid')); i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
-    expect(spawnSync('sh', [ADDON_JOB_SCRIPT], { cwd: dir, env }).status).toBe(0);
+    expect(await runAsync('sh', [ADDON_JOB_SCRIPT], { cwd: dir, env })).toBe(0);
     expect(await exited).not.toBe(0);
     expect(status(dir)).toEqual([{ name: 'x', state: 'running', reason: '' }]);
     expect(readdirSync(join(dir, '.vc-addons'))).not.toContain('job.pid');
@@ -345,5 +353,78 @@ describe('addons-start.sh never touches the core stack', () => {
         .find((l) => / up -d/.test(l)) ?? '';
     expect(up).toContain('-f docker-compose.replication.yml');
     expect(up).toMatch(/up -d --no-deps --wait/);
+  });
+});
+
+/**
+ * I-A3 / M-A4 / M-A6: `addons-start.sh stop` ends a running job (reconcile.sh
+ * and the scale cutover run it before their own compose operations, so two
+ * never run at once), and only ever kills a process that really is the job.
+ */
+describe('addons-start.sh stop', () => {
+  const jobDir = () => {
+    const dir = tempDir();
+    writeFileSync(
+      join(dir, ADDON_JOB_SCRIPT),
+      renderAddonJobScript('demo', '-f a.yml', [{ name: 'x', services: ['grafana'], setup: [] }]),
+    );
+    stubDocker(dir);
+    return dir;
+  };
+  const env = (dir: string) => ({
+    ...process.env,
+    PATH: `${dir}:${process.env.PATH}`,
+    VC_PROJECT_DIR: dir,
+  });
+
+  it('stops a running job and waits for it to be gone', async () => {
+    const dir = jobDir();
+    const first = spawn('sh', [ADDON_JOB_SCRIPT], {
+      cwd: dir,
+      env: { ...env(dir), STUB_HANG_UP: '1' },
+      detached: true,
+      stdio: 'ignore',
+    });
+    let exited = false;
+    first.on('exit', () => {
+      exited = true;
+    });
+    for (let i = 0; i < 200 && !existsSync(join(dir, '.vc-addons', 'job.pid')); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(await runAsync('sh', [ADDON_JOB_SCRIPT, 'stop'], { cwd: dir, env: env(dir) })).toBe(0);
+    await new Promise((res) => setTimeout(res, 50));
+    expect(exited).toBe(true);
+    // stop starts nothing: the only `up` is the first job's.
+    const ups = readFileSync(join(dir, 'calls'), 'utf8')
+      .split('\n')
+      .filter((l) => / up -d/.test(l));
+    expect(ups).toHaveLength(1);
+  });
+
+  it('never kills a pid that is not the job (a recycled pid)', async () => {
+    const dir = jobDir();
+    // A long-lived unrelated process owns the recorded pid.
+    const other = spawn('sleep', ['5'], { stdio: 'ignore' });
+    spawnSync('mkdir', ['-p', join(dir, '.vc-addons')]);
+    writeFileSync(join(dir, '.vc-addons', 'job.pid'), `${other.pid}\n`);
+    spawnSync('sh', [ADDON_JOB_SCRIPT, 'stop'], { cwd: dir, env: env(dir) });
+    await new Promise((res) => setTimeout(res, 100));
+    expect(other.exitCode).toBeNull();
+    expect(other.signalCode).toBeNull();
+    expect(other.killed).toBe(false);
+    other.kill();
+  });
+
+  it('with no job running, stop is a no-op that succeeds', () => {
+    const dir = jobDir();
+    expect(spawnSync('sh', [ADDON_JOB_SCRIPT, 'stop'], { cwd: dir, env: env(dir) }).status).toBe(0);
+  });
+
+  it('a run records when it started (stale-status detection)', () => {
+    const dir = jobDir();
+    spawnSync('sh', [ADDON_JOB_SCRIPT], { cwd: dir, env: env(dir) });
+    const text = readFileSync(join(dir, ADDON_STATUS_FILE), 'utf8');
+    expect(text).toMatch(/^#started \d{10}$/m);
   });
 });

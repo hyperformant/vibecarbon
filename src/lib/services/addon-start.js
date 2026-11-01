@@ -138,13 +138,31 @@ cd "\${VC_PROJECT_DIR:-/opt/${projectName}}" || exit 1
 dir=${ADDON_STATE_DIR}
 mkdir -p "$dir"
 
-# One job at a time: this run supersedes an older one still going.
-if [ -f "$dir/job.pid" ]; then
+# One job at a time. stop_job ends the recorded job and waits until it is
+# gone, so the caller's compose operation never overlaps it: a newer run, and
+# \`${ADDON_JOB_SCRIPT} stop\`, which reconcile.sh and the scale cutover run
+# before their own. Only a process whose command line is this script is
+# killed: a recorded pid can be recycled by an unrelated process.
+stop_job() {
+  [ -f "$dir/job.pid" ] || return 0
   old=$(cat "$dir/job.pid")
-  if [ -n "$old" ] && [ "$old" != "$$" ]; then
-    kill -TERM -- "-$old" 2>/dev/null || kill -TERM "$old" 2>/dev/null || true
-  fi
+  if [ -z "$old" ] || [ "$old" = "$$" ]; then return 0; fi
+  case "$(tr '\\000' ' ' < "/proc/$old/cmdline" 2>/dev/null)" in
+    *${ADDON_JOB_SCRIPT}*) ;;
+    *)
+      rm -f "$dir/job.pid"
+      return 0
+      ;;
+  esac
+  kill -TERM -- "-$old" 2>/dev/null || kill -TERM "$old" 2>/dev/null || true
+  timeout 60 tail --pid="$old" -f /dev/null 2>/dev/null || true
+  rm -f "$dir/job.pid"
+}
+if [ "\${1:-}" = stop ]; then
+  stop_job
+  exit 0
 fi
+stop_job
 echo "$$" > "$dir/job.pid"
 
 # The -f set, resolved at EVERY call: compose-ha writes the replication
@@ -203,7 +221,9 @@ run_addon() {
 }
 
 # This run's add-ons only: an add-on removed since the last deploy drops out.
-rm -f "$dir/status"
+# The first line stamps when this run started (server clock): a reader treats
+# a file from before the current deploy or failover as stale.
+printf '#started %s\n' "$(date +%s)" > "$dir/status"
 ${starting}
 ${runs}
 [ "$(cat "$dir/job.pid" 2>/dev/null)" = "$$" ] && rm -f "$dir/job.pid"

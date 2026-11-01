@@ -26,16 +26,25 @@ function reconcile({
   deferred,
   env,
   isFast = true,
+  status,
 }: {
   deferred: string[];
   env?: string;
   isFast?: boolean;
+  status?: string;
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'vc-reconcile-addons-'));
   dirs.push(dir);
   writeFileSync(join(dir, 'reconcile.sh'), renderReconcileScript('demo', '-f a.yml', isFast));
   writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(deferred));
-  writeFileSync(join(dir, ADDON_JOB_SCRIPT), `#!/bin/sh\necho started > "${dir}/job-started"\n`);
+  writeFileSync(
+    join(dir, ADDON_JOB_SCRIPT),
+    `#!/bin/sh\nif [ "$1" = stop ]; then echo "job-stop" >> "${dir}/calls"; exit 0; fi\necho started > "${dir}/job-started"\n`,
+  );
+  if (status) {
+    spawnSync('mkdir', ['-p', join(dir, '.vc-addons')]);
+    writeFileSync(join(dir, '.vc-addons', 'status'), status);
+  }
   if (env) writeFileSync(join(dir, '.env'), env);
   writeFileSync(
     join(dir, 'docker'),
@@ -77,8 +86,9 @@ describe('reconcile.sh: core first, add-ons in the background', () => {
     expect(await jobStarted(dir)).toBe(true);
   });
 
-  it('the image pull (non-local image) also covers the core only', () => {
-    const { calls } = reconcile({ deferred: ['grafana'], isFast: false });
+  it('the image pull (non-local image) also covers the core only', async () => {
+    const { calls, dir } = reconcile({ deferred: ['grafana'], isFast: false });
+    await jobStarted(dir);
     const pull = calls.split('\n').find((l) => l.includes(' pull ')) ?? '';
     expect(pull).toContain('app app-migrate db traefik loki n8n n8n-setup');
     expect(pull).not.toContain('grafana');
@@ -99,6 +109,29 @@ describe('reconcile.sh: core first, add-ons in the background', () => {
     expect(up).toMatch(/up -d --remove-orphans\s*$/);
     await new Promise((res) => setTimeout(res, 50));
     expect(existsSync(join(dir, 'job-started'))).toBe(false);
+  });
+
+  // I-A3: the previous deploy's add-on job is stopped before this deploy's
+  // pull and core up, so two compose operations never run at once.
+  it('stops the previous add-on job before the pull and the core up', async () => {
+    const { calls, dir } = reconcile({ deferred: ['grafana'], isFast: false });
+    await jobStarted(dir); // the detached job settles before the dir is removed
+    const lines = calls.split('\n');
+    const stop = lines.indexOf('job-stop');
+    expect(stop).toBeGreaterThan(-1);
+    expect(stop).toBeLessThan(lines.findIndex((l) => l.includes(' pull ')));
+    expect(stop).toBeLessThan(lines.findIndex((l) => l.includes(' up -d')));
+  });
+
+  // I-A1: a node that runs no job (a compose-ha standby, or no background
+  // add-on) keeps no status file a reader could take for current.
+  it('a node that starts no job removes any old add-on status file', () => {
+    const { dir } = reconcile({
+      deferred: ['grafana'],
+      env: 'WALG_ROLE=standby\n',
+      status: '#started 1\nobservability\trunning\t\n',
+    });
+    expect(existsSync(join(dir, '.vc-addons', 'status'))).toBe(false);
   });
 
   it('the up line still yields the baked -f set to RECONCILE_FLAGS_SED', () => {

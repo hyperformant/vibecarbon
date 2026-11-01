@@ -173,6 +173,10 @@ for container_id in $(docker ps -aq --filter "label=com.docker.compose.project=$
   done
 done
 
+# The previous deploy's add-on job, if one is still going, is stopped first:
+# this deploy's pull and up must never overlap its compose operations.
+if [ -f ${ADDON_JOB_SCRIPT} ]; then sh ${ADDON_JOB_SCRIPT} stop; fi
+
 # Add-ons off the critical path: the services ${ADDON_SERVICES_SCRIPT} prints (none
 # on a compose-ha standby, none without background add-ons) are left out of the
 # up below and started by ${ADDON_JOB_SCRIPT} in the background afterwards. The
@@ -201,6 +205,10 @@ docker compose ${composeFlags} ${replOverlayFlag} up -d --remove-orphans ${STAND
 if [ -n "$up_services" ]; then
   echo "Starting add-ons in the background (progress: ${ADDON_STATUS_FILE})"
   setsid nohup /bin/sh ${ADDON_JOB_SCRIPT} > /dev/null 2>&1 < /dev/null &
+else
+  # No job on this node (a compose-ha standby, or no background add-on): no
+  # status file a reader could take for this deploy's.
+  rm -f ${ADDON_STATUS_FILE}
 fi
 
 # 4. Ensure systemd service is active (if applicable)
