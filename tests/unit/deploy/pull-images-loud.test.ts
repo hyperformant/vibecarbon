@@ -24,6 +24,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import type { ComposeConfigFixture } from '../../_shared/compose-config-stub.js';
 
 vi.mock('../../../src/lib/command.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -38,6 +39,9 @@ const { pullComposeImages, stackPullCommand } = await import(
   '../../../src/lib/deploy/compose/index.js'
 );
 const { mirroredPackageNames } = await import('../../../src/lib/images.js');
+const { COMPOSE_DEPENDS_ON_FIXTURE, composeConfigStub, flatFixture } = await import(
+  '../../_shared/compose-config-stub.js'
+);
 
 /** The shape runCommandAsync rejects with: the remote command's `2>&1` puts docker's words in stdout. */
 function pullFailure(stdout: string) {
@@ -78,26 +82,23 @@ describe('the stack pull never asks a registry for the app image', () => {
   // 32640636398). app-migrate (#234) runs the same image, and excluding only
   // the service named `app` broke every compose-ha deploy (DO e2e,
   // 2026-10-31). The pull must skip every service whose image is the app's.
-  function runPull(services: Record<string, string>, deferred: string[] = []) {
+  // The stub docker answers `config` with REAL compose output
+  // (tests/_shared/compose-config-stub.ts): `config --images app` prints the
+  // images of app's dependencies too, which the #278 filter compared against
+  // one image and so never matched (DO e2e, 2026-11-01).
+  function runPull(fixture: ComposeConfigFixture, deferred: string[] = []) {
     const dir = mkdtempSync(join(tmpdir(), 'vc-stack-pull-'));
     if (deferred.length) {
       writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(deferred));
     }
     const pulled = join(dir, 'pulled');
-    const map = Object.entries(services)
-      .map(([svc, img]) => `${svc}) echo '${img}' ;;`)
-      .join('\n      ');
     writeFileSync(
       join(dir, 'docker'),
       `#!/bin/sh
 shift # compose
 while [ "$1" = "-f" ]; do shift 2; done
-if [ "$1 $2" = "config --services" ]; then
-  printf '%s\\n' ${Object.keys(services).join(' ')}
-elif [ "$1 $2" = "config --images" ]; then
-  case "$3" in
-      ${map}
-  esac
+if [ "$1" = config ]; then
+  ${composeConfigStub(dir, fixture)}
 elif [ "$1" = "pull" ]; then
   shift
   for a; do case "$a" in --*) ;; missing) ;; *) echo "$a" >> "${pulled}" ;; esac; done
@@ -112,34 +113,33 @@ fi
     });
     const out = existsSync(pulled) ? readFileSync(pulled, 'utf-8').trim().split('\n').sort() : [];
     rmSync(dir, { recursive: true, force: true });
-    return { status: r.status, pulled: out };
+    return { status: r.status, pulled: out, output: `${r.stdout}${r.stderr}` };
   }
 
   it('skips app and every other service on the app image (app-migrate)', () => {
-    const r = runPull({
-      app: 'demo-app:local',
-      'app-migrate': 'demo-app:local',
-      db: 'ghcr.io/hyperformant/postgres:17',
-      traefik: 'ghcr.io/hyperformant/traefik:v3',
-    });
-    expect(r.status).toBe(0);
-    expect(r.pulled).toEqual(['db', 'traefik']);
+    const r = runPull(COMPOSE_DEPENDS_ON_FIXTURE);
+    expect(r.status, r.output).toBe(0);
+    expect(r.pulled).toEqual(['db', 'grafana', 'loki', 'n8n', 'n8n-setup', 'traefik']);
   });
 
   // Add-ons are off the critical path: their images are the background
   // job's to pull (services/addon-start.js), not the deploy's.
   it('skips the add-on services the background job starts', () => {
-    const r = runPull(
-      { app: 'demo-app:local', db: 'pg:17', traefik: 't:3', grafana: 'g:1', n8n: 'n:2' },
-      ['grafana', 'n8n'],
-    );
-    expect(r.status).toBe(0);
+    const r = runPull(COMPOSE_DEPENDS_ON_FIXTURE, ['grafana', 'loki', 'n8n', 'n8n-setup']);
+    expect(r.status, r.output).toBe(0);
     expect(r.pulled).toEqual(['db', 'traefik']);
   });
 
   it('pulls every service when none shares the app image', () => {
-    const r = runPull({ app: 'demo-app:local', db: 'pg:17', redis: 'redis:7' });
+    const r = runPull(flatFixture({ app: 'demo-app:local', db: 'pg:17', redis: 'redis:7' }));
+    expect(r.status, r.output).toBe(0);
     expect(r.pulled).toEqual(['db', 'redis']);
+  });
+
+  it('fails loudly when the compose config cannot be read', () => {
+    const r = runPull({ ...COMPOSE_DEPENDS_ON_FIXTURE, config: '' });
+    expect(r.status).not.toBe(0);
+    expect(r.pulled).toEqual([]);
   });
 });
 

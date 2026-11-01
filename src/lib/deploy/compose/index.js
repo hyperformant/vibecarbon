@@ -21,7 +21,11 @@ import { K8S_MIRROR_ORG, mirroredPackageNames, resolveDbImage } from '../../imag
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
 import { pollUntil } from '../../retry.js';
-import { ADDON_SERVICES_SCRIPT, attemptEnv } from '../../services/addon-start.js';
+import {
+  ADDON_SERVICES_SCRIPT,
+  attemptEnv,
+  nonAppImageServicesShell,
+} from '../../services/addon-start.js';
 import { shEscape } from '../../shell.js';
 import {
   isDnsNotSettledSshCommandError,
@@ -1163,7 +1167,10 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
  * command and every sibling image logs `Interrupted`. Excluding by NAME broke
  * again when app-migrate (#234) began running the same image (every compose-ha
  * deploy, DO e2e 2026-10-31), so the filter is by IMAGE: a service whose
- * `config --images` equals app's is never pulled, whatever it is called.
+ * image equals app's is never pulled, whatever it is called. The map comes
+ * from one `config --format json` (nonAppImageServicesShell): `config
+ * --images <svc>` also prints the images of the service's dependencies, so
+ * comparing it to app's never matched (#278; DO e2e 2026-11-01).
  * The add-ons the background job starts (addon-services.sh, see
  * services/addon-start.js) are skipped too: the job pulls their images after
  * the core stack is up, off the deploy's critical path.
@@ -1171,12 +1178,13 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
  */
 export function stackPullCommand(remoteDir, flags) {
   return (
-    `cd ${remoteDir} && app_image=$(docker compose ${flags} config --images app) && ` +
+    `cd ${remoteDir} && { ` +
+    `pullable=$(${nonAppImageServicesShell(`docker compose ${flags}`)}) && ` +
     `deferred=$(if [ -f ${ADDON_SERVICES_SCRIPT} ]; then sh ${ADDON_SERVICES_SCRIPT}; fi) && ` +
-    `docker compose ${flags} config --services | while read -r svc; do ` +
-    `[ "$(docker compose ${flags} config --images "$svc")" = "$app_image" ] && continue; ` +
-    `printf '%s\n' "$deferred" | grep -qxF "$svc" && continue; echo "$svc"; done | ` +
-    `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`
+    `printf '%s\\n' "$pullable" | while read -r svc; do ` +
+    `[ -n "$svc" ] || continue; ` +
+    `printf '%s\\n' "$deferred" | grep -qxF "$svc" && continue; echo "$svc"; done | ` +
+    `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable; } 2>&1`
   );
 }
 

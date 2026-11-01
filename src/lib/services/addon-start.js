@@ -80,6 +80,35 @@ export const ADDON_WAIT_TIMEOUT_S = 900;
 
 export const ADDON_STATES = ['starting', 'running', 'failed', 'stopped'];
 
+/**
+ * Reads `docker compose config --format json` on stdin and prints, one per
+ * line, every service whose image is not the app service's own. The app image
+ * is a local-only tag built on the server, so no registry serves it, and every
+ * service that runs it (app, app-migrate) must stay out of a `compose pull`.
+ * With no `app` service, or an app without an image, nothing is excluded.
+ *
+ * Why the JSON, not `config --images <svc>`: that command also prints the
+ * images of the service's dependencies (Compose 5.6.1: `app`, which depends
+ * on app-migrate and db, prints the app image twice and then db's), so a
+ * comparison of it against one image never matches (DO e2e, 2026-11-01).
+ * python3 is on every server (cloud-init); stdlib json only. `-I` keeps the
+ * project directory off sys.path. Malformed or empty input fails non-zero.
+ */
+const NON_APP_IMAGE_SERVICES_PY =
+  'import json,sys; s=json.load(sys.stdin)["services"]; ' +
+  'a=s.get("app", {}).get("image"); ' +
+  'sys.stdout.write("".join(n+"\\n" for n,v in s.items() if a is None or v.get("image")!=a))';
+
+/**
+ * Shell that prints the services a pull may ask a registry for: every service
+ * not on the app image (see NON_APP_IMAGE_SERVICES_PY). Its exit status is the
+ * parser's, so an unreadable config fails it.
+ * @param {string} compose the compose invocation with its `-f` set, e.g. `docker compose -f a.yml`
+ */
+export function nonAppImageServicesShell(compose) {
+  return `${compose} config --format json | python3 -I -c '${NON_APP_IMAGE_SERVICES_PY}'`;
+}
+
 /** The compose overlay files an add-on ships (dev overrides excluded). */
 function overlayTexts(name) {
   return ['docker-compose.yml', 'docker-compose.prod.yml']
