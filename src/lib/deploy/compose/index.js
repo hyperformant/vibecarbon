@@ -16,8 +16,8 @@ import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { writeLogDetail } from '../../deploy-logger.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
-import { loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
-import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
+import { bootPullImages, loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
+import { K8S_MIRROR_ORG, mirroredPackageNames, resolveDbImage } from '../../images.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
 import { pollUntil } from '../../retry.js';
@@ -393,7 +393,11 @@ export function bootPullLogLine(ip, status) {
  * on by the deploy (setupServer does not await it) and never retried: the
  * deploy's own pull does whatever the boot pull did not.
  */
-export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync } = {}) {
+export async function noteBootPull(
+  ip,
+  sshKeyPath,
+  { run = sshRunAsync, deployDbImage = resolveDbImage({ warn: () => {} }).ref } = {},
+) {
   try {
     const status = await run(
       ip,
@@ -402,6 +406,15 @@ export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync } = {}) {
       { timeout: 15_000, ignoreError: true, retries: 1 },
     );
     writeLogDetail(bootPullLogLine(ip, status ?? 'absent'));
+    // The boot pull fetches the pinned db image; a deploy running another
+    // (VIBECARBON_DB_IMAGE) pulls its own, which the log should explain.
+    const [bootDb] = bootPullImages();
+    if (deployDbImage && deployDbImage !== bootDb) {
+      writeLogDetail(
+        `[boot-pull] ${ip}: this deploy runs db image ${deployDbImage}, not the pinned ` +
+          `${bootDb} the boot pull fetched; the deploy pull fetches it`,
+      );
+    }
   } catch {
     // The note is informational: a failed read changes nothing.
   }
