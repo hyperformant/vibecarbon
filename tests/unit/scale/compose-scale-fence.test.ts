@@ -32,6 +32,8 @@ const h = vi.hoisted(() => {
     dnsUnreadable: false,
     dnsReadBackLater: null as null | string[][],
     saved: [] as unknown[],
+    // What updateProjectConfig's mutator starts from (null: an empty config).
+    seed: null as null | Record<string, unknown>,
   };
   return { events, state };
 });
@@ -66,10 +68,17 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
     ...actual,
     loadProjectConfig: () => null,
     updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) => {
-      // Nothing on disk; a no-op mutator writes nothing, as the real one.
-      const current: Record<string, unknown> = {};
+      // Nothing on disk (unless a test seeds it); a no-op mutator writes
+      // nothing, as the real one.
+      const current: Record<string, unknown> = h.state.seed
+        ? JSON.parse(JSON.stringify(h.state.seed))
+        : {};
+      const before = JSON.stringify(current);
       const next = fn(current) ?? current;
-      if (JSON.stringify(next) !== '{}') h.state.saved.push(next);
+      if (JSON.stringify(next) !== before) {
+        h.state.saved.push(next);
+        h.events.push(`config:save:${JSON.stringify(next)}`);
+      }
       return next;
     },
   };
@@ -255,7 +264,12 @@ vi.mock('../../../src/lib/build.js', async (orig) => {
 
 vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, sshRun: async () => '', sshRunScript: async () => '' };
+  // Every remote command, in order, for the add-on job sequencing tests.
+  const record = async (ip: string, _k: string, cmd: unknown) => {
+    h.events.push(`ssh:${ip}:${Array.isArray(cmd) ? cmd.join(' ') : String(cmd)}`);
+    return '';
+  };
+  return { ...actual, sshRun: record, sshRunScript: record };
 });
 
 const { SCALE_EFFECTS, resumeComposeCutover } = await import('../../../src/scale.js');
@@ -313,6 +327,7 @@ function reset(failAt = '') {
   h.state.dnsUnreadable = false;
   h.state.dnsReadBackLater = null;
   h.state.saved.length = 0;
+  h.state.seed = null;
 }
 
 describe('fenceComposePrimary', () => {
@@ -755,6 +770,43 @@ describe('resumeComposeCutover (a scale stopped mid-cutover)', () => {
       environments: Record<string, { servers: Array<{ ip: string; id: string }> }>;
     };
     expect(saved.environments.prod.servers.map((sv) => sv.id)).toEqual(['new-id']);
+  });
+
+  // Important (fix round 3): the cutover's whole-stack recreate stops the
+  // add-on job on the new server; it must start it again, under a fresh
+  // attempt id that is saved, so the status file is true after the scale.
+  it('the recreate relaunches the add-on job (promoted, detached) and saves its attempt id', async () => {
+    reset();
+    h.state.seed = { environments: { prod: {} } };
+    h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
+    const { ctx } = resumeCtx();
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    const ssh = h.events.filter((e) => e.startsWith('ssh:9.9.9.9:'));
+    const recreate = ssh.findIndex((e) => e.includes('up -d --force-recreate'));
+    const relaunch = ssh.findIndex((e) =>
+      /VC_ATTEMPT_ID=[0-9a-f]{12} setsid nohup \/bin\/sh addons-start\.sh promoted/.test(e),
+    );
+    expect(recreate).toBeGreaterThan(-1);
+    expect(relaunch).toBeGreaterThan(recreate);
+    // The stop before the recreate is in the same command, ahead of it.
+    expect(ssh[recreate]).toMatch(/addons-start\.sh stop; .*up -d --force-recreate/);
+    const id = /VC_ATTEMPT_ID=([0-9a-f]{12})/.exec(ssh[relaunch])?.[1];
+    // The id is saved only once its job runs on the serving server: a job the
+    // restore or the recreate stopped never left a file naming the saved id.
+    const firstSave = h.events.findIndex(
+      (e) => e.startsWith('config:save:') && e.includes(`${id}`),
+    );
+    expect(firstSave).toBeGreaterThan(
+      h.events.indexOf(`ssh:9.9.9.9:${ssh[relaunch].slice('ssh:9.9.9.9:'.length)}`),
+    );
+    const savedIds = h.state.saved
+      .map(
+        (c) =>
+          (c as { environments?: Record<string, { lastAttemptId?: string }> }).environments?.prod
+            ?.lastAttemptId,
+      )
+      .filter(Boolean);
+    expect(savedIds).toContain(id);
   });
 
   it('skips the post-flip steps the journal says are done', async () => {

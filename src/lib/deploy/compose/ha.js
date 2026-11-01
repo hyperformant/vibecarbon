@@ -28,7 +28,7 @@ import {
 } from '../../dns-provider.js';
 import { socatImageRef } from '../../images.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
-import { ADDON_JOB_SCRIPT, attemptEnv, mintAttemptId } from '../../services/addon-start.js';
+import { addonJobStartCmd, mintAttemptId } from '../../services/addon-start.js';
 import {
   composePromotionServices,
   composeWriterServices,
@@ -1577,10 +1577,7 @@ export function composeStartPrimaryOnlyCmd(projectName, services) {
  * work. A no-op on a node deployed before the job existed.
  */
 export function composeStartAddonJobCmd(projectName, attemptId) {
-  return (
-    `cd /opt/${projectName} && if [ -f ${ADDON_JOB_SCRIPT} ]; then ` +
-    `${attemptEnv(attemptId)}setsid nohup /bin/sh ${ADDON_JOB_SCRIPT} promoted > /dev/null 2>&1 < /dev/null & fi`
-  );
+  return addonJobStartCmd(projectName, attemptId, 'promoted');
 }
 
 const firstLine = (err) => String(err?.message ?? err).split('\n')[0];

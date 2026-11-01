@@ -49,6 +49,24 @@ export function attemptEnv(attemptId) {
   return `VC_ATTEMPT_ID=${attemptId} `;
 }
 
+/**
+ * Start the add-on job on a node, detached, with an attempt id in its
+ * environment. `mode` `promoted` runs no one-shot setup (a failover's promoted
+ * node, a scale's restored server: the database already holds their work).
+ * A no-op on a node deployed before the job existed.
+ */
+export function addonJobStartCmd(projectName, attemptId, mode = '') {
+  return (
+    `cd /opt/${projectName} && if [ -f ${ADDON_JOB_SCRIPT} ]; then ` +
+    `${attemptEnv(attemptId)}setsid nohup /bin/sh ${ADDON_JOB_SCRIPT}${mode ? ` ${mode}` : ''} > /dev/null 2>&1 < /dev/null & fi`
+  );
+}
+
+/** Stop a node's add-on job (and wait for it to be gone), if there is one. */
+export function addonJobStopCmd(projectName) {
+  return `cd /opt/${projectName} && if [ -f ${ADDON_JOB_SCRIPT} ]; then sh ${ADDON_JOB_SCRIPT} stop; fi`;
+}
+
 /** The node-side dir the add-on job keeps its state in (project dir relative). */
 export const ADDON_STATE_DIR = '.vc-addons';
 /** One line per add-on: `<name>\t<starting|running|failed>\t<reason>`. */

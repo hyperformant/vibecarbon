@@ -100,7 +100,12 @@ import { providerFor, providerIdFor, resolveProviderToken } from './lib/provider
 import { pollUntil } from './lib/retry.js';
 import { assertPersistedRoleTypes, planK8sScaleChanges } from './lib/scale-plan.js';
 import { buildComposeTypeOptions, buildSimpleTypeOptions } from './lib/server-types.js';
-import { ADDON_JOB_SCRIPT } from './lib/services/addon-start.js';
+import {
+  ADDON_JOB_SCRIPT,
+  addonJobStartCmd,
+  addonJobStopCmd,
+  mintAttemptId,
+} from './lib/services/addon-start.js';
 import { enabledAddonNames } from './lib/services/standby-policy.js';
 import { sshRun, sshRunScript } from './lib/ssh.js';
 import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
@@ -493,6 +498,10 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
     apiToken,
     services,
     serverStateOptions,
+    // This scale's attempt id (services/addon-start.js): the new server's
+    // add-on job writes it, and the cutover saves it once that job is
+    // relaunched on the serving server.
+    attemptId: mintAttemptId(),
   };
   await runPlan(planScale(tier, envConfig), ctx, SCALE_EFFECTS);
 }
@@ -618,6 +627,11 @@ export async function readOldAppEnv(
   }
   if (String(text ?? '').trim() === NO_APP_ENV_MARKER) return null;
   return dropUnportableEnv(parseDotenv(String(text ?? '')), { log });
+}
+
+/** Stop the add-on job on a server (services/addon-start.js), waiting until it is gone. */
+async function stopAddonJob(ip, sshKeyPath, projectName) {
+  await sshRun(ip, sshKeyPath, addonJobStopCmd(projectName));
 }
 
 /** How long a rolled-back resume waits before it reads DNS once more. */
@@ -752,6 +766,16 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
       { timeout: 600_000 },
     );
     s.stop('All services running');
+    // The recreate stopped the add-on job. Start it again, detached, under an
+    // attempt id saved as the env's lastAttemptId, so the add-on status is
+    // true for the serving server (promoted: the restored database already
+    // holds the one-shot setups' work).
+    const attemptId = ctx.attemptId ?? mintAttemptId();
+    await sshRun(newIp, sshKeyPath, addonJobStartCmd(projectName, attemptId, 'promoted'));
+    updateProjectConfig((onDisk) => {
+      const env = onDisk.environments?.[environment];
+      if (env) env.lastAttemptId = attemptId;
+    });
   });
   onServing?.();
 
@@ -1291,7 +1315,10 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   // 6. Start compose stack on new server
   s.start('Starting services on new server...');
   await perfAsync('scale.composeUp', () =>
-    startComposeStack(newIp, sshKeyPath, projectName, services),
+    startComposeStack(newIp, sshKeyPath, projectName, {
+      ...services,
+      attemptId: ctx.attemptId,
+    }),
   );
   s.stop('Services started');
   return newIp;
@@ -1544,6 +1571,11 @@ async function scaleServers(ctx) {
         );
       }
       s.stop(`Restoring ${base.name}`);
+
+      // The add-on job reconcile.sh started on the new server must not run
+      // under the restore (it would die or misreport mid-restore): stop it.
+      // The cutover's recreate starts it again once the restore is done.
+      await stopAddonJob(newIp, sshKeyPath, projectName);
 
       s.start('Restoring database from S3 via wal-g...');
       await perfAsync('scale.restoreDb', async () =>
