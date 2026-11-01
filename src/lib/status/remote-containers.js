@@ -247,12 +247,12 @@ function describeSshError(err) {
 
 /**
  * The background add-ons' states on one compose server: the job's status file
- * when it is from the current deploy or failover (its `#started` stamp at or
- * after the env's lastAttempt / lastFailover), else the add-ons' own
+ * when it names the env's last attempt (deploy, scale or failover:
+ * envConfig.lastAttemptId), else the add-ons' own
  * containers (resolveAddonStates). A promoted node that never ran the job, or
  * a file left from before a failback, is read from the containers.
  */
-async function collectAddons(target, projectName, keyPath, deps, expected, rows, notBeforeMs) {
+async function collectAddons(target, projectName, keyPath, deps, expected, rows, attemptId) {
   let text = '';
   try {
     text = await withTimeout(
@@ -267,7 +267,7 @@ async function collectAddons(target, projectName, keyPath, deps, expected, rows,
     // Unreadable: the containers decide.
   }
   const containers = new Map(rows.map((r) => [r.container, r]));
-  return resolveAddonStates({ text, expected, notBeforeMs, containers });
+  return resolveAddonStates({ text, expected, attemptId, containers });
 }
 
 async function collectCompose(
@@ -276,7 +276,7 @@ async function collectCompose(
   keyPath,
   deps,
   expectedAddons = [],
-  notBeforeMs = 0,
+  attemptId = null,
 ) {
   const argv = dockerPsArgv(projectName);
   const listing = await withTimeout(
@@ -303,7 +303,7 @@ async function collectCompose(
       deps,
       expectedAddons,
       rows,
-      notBeforeMs,
+      attemptId,
     );
     return { kind: 'compose', ip: target.ip, rows, addons };
   }
@@ -367,11 +367,9 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
     name: a.name,
     services: a.services,
   }));
-  // A status file from before the env's last deploy attempt or failover is stale.
-  const notBeforeMs = Math.max(
-    Date.parse(envConfig.lastAttempt ?? '') || 0,
-    Date.parse(envConfig.lastFailover ?? '') || 0,
-  );
+  // The status file is current only for the env's last attempt (deploy, scale
+  // or failover), by id.
+  const attemptId = envConfig.lastAttemptId ?? null;
 
   const results = await Promise.all(
     targets.map(async (t) => {
@@ -389,7 +387,7 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
                 d,
                 // planContainerTargets lists a compose-ha pair primary first.
                 envConfig.deployMode === 'compose-ha' && t !== targets[0] ? [] : expectedAddons,
-                notBeforeMs,
+                attemptId,
               );
         return [t.serverName, value];
       } catch (err) {

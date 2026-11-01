@@ -21,7 +21,7 @@ import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
-import { addonStatusNotBefore, checkAddonsReady } from '../checks/addons-ready.js';
+import { addonAttemptId, checkAddonsReady } from '../checks/addons-ready.js';
 import { runAppApiChecks } from '../checks/app-api.js';
 import {
   adminSignIn,
@@ -2177,7 +2177,7 @@ export async function runLifecycle(
               features: config.features,
               ip: sshCheckMasterIp,
               sshKeyPath: sshKeyPath ?? null,
-              notBeforeMs: addonStatusNotBefore(config.projectDir, config.envPrefix),
+              attemptId: addonAttemptId(config.projectDir, config.envPrefix),
             }),
           );
         }

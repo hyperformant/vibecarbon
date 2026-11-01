@@ -39,7 +39,7 @@ function reconcile({
   writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(deferred));
   writeFileSync(
     join(dir, ADDON_JOB_SCRIPT),
-    `#!/bin/sh\nif [ "$1" = stop ]; then echo "job-stop" >> "${dir}/calls"; exit 0; fi\necho started > "${dir}/job-started"\n`,
+    `#!/bin/sh\nif [ "$1" = stop ]; then echo "job-stop" >> "${dir}/calls"; exit 0; fi\necho "started $VC_ATTEMPT_ID" > "${dir}/job-started"\n`,
   );
   if (status) {
     spawnSync('mkdir', ['-p', join(dir, '.vc-addons')]);
@@ -61,7 +61,12 @@ exit 0
   const r = spawnSync('bash', ['reconcile.sh'], {
     cwd: dir,
     encoding: 'utf-8',
-    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, VC_PROJECT_DIR: dir },
+    env: {
+      ...process.env,
+      PATH: `${dir}:${process.env.PATH}`,
+      VC_PROJECT_DIR: dir,
+      VC_ATTEMPT_ID: 'a1b2c3d4e5f6',
+    },
   });
   const calls = existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '';
   return { r, dir, calls };
@@ -84,6 +89,13 @@ describe('reconcile.sh: core first, add-ons in the background', () => {
     expect(up).not.toMatch(/grafana|loki|n8n/);
     expect(r.stdout).toContain('Starting add-ons in the background');
     expect(await jobStarted(dir)).toBe(true);
+  });
+
+  // Minor 1: the job inherits the attempt id reconcile.sh was run with.
+  it('the job is started with the attempt id from the ssh command', async () => {
+    const { dir } = reconcile({ deferred: ['grafana'] });
+    expect(await jobStarted(dir)).toBe(true);
+    expect(readFileSync(join(dir, 'job-started'), 'utf8').trim()).toBe('started a1b2c3d4e5f6');
   });
 
   it('the image pull (non-local image) also covers the core only', async () => {
@@ -141,7 +153,7 @@ describe('reconcile.sh: core first, add-ons in the background', () => {
     const { dir } = reconcile({
       deferred: ['grafana'],
       env: 'WALG_ROLE=standby\n',
-      status: '#started 1\nobservability\trunning\t\n',
+      status: '#attempt a1b2c3d4e5f6\nobservability\trunning\t\n',
     });
     expect(existsSync(join(dir, '.vc-addons', 'status'))).toBe(false);
   });

@@ -27,6 +27,7 @@ import {
   providerIdFor,
 } from '../providers/index.js';
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
+import { mintAttemptId } from '../services/addon-start.js';
 import { getSSHKeyPath } from '../ssh.js';
 import { createTracker } from '../tracker.js';
 import {
@@ -1241,6 +1242,10 @@ export async function executeDeployment(args, gatheredConfig) {
   // A pasted app key this deploy replaced (set below): the skeleton save adds
   // it to the project's retiredAppKeys.
   let retiredAppKey = null;
+  // This deploy's attempt id (services/addon-start.js): saved with the
+  // skeleton, never cleared, and handed to reconcile.sh's environment so the
+  // add-on job's status file names it.
+  const attemptId = mintAttemptId();
   const saveSkeletonEnv = () => {
     const written = updateProjectConfig((onDisk) => {
       const existingEnv = onDisk.environments?.[environment] ?? {};
@@ -1293,6 +1298,7 @@ export async function executeDeployment(args, gatheredConfig) {
             }
           : {}),
         lastAttempt: new Date().toISOString(),
+        lastAttemptId: attemptId,
       };
       onDisk.environments = onDisk.environments ?? {};
       onDisk.environments[environment] = preserveSafetyFields(existingEnv, skeletonEnv);
@@ -2019,6 +2025,7 @@ export async function executeDeployment(args, gatheredConfig) {
     localImageTag,
     composeLocalBuildPromise,
     stateBucketYoung,
+    attemptId,
   };
 
   // All four tiers are now plan-driven: planDeploy(tier) → runPlan → EFFECTS.

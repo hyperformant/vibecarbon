@@ -20,12 +20,34 @@
  * base compose files and every add-on overlay against this.
  */
 
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadAddonStandby } from './standby-policy.js';
 
 const SERVICES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'services');
+
+/**
+ * An attempt id: one per deploy, scale or failover, persisted as
+ * envConfig.lastAttemptId (never cleared on success) and handed to the add-on
+ * job through the ssh command's environment (attemptEnv), never .env or the
+ * bundle. The job writes it into its status file; a reader trusts the file
+ * only when it names the env's lastAttemptId (resolveAddonStates). No clock
+ * is compared, so skew between the operator and the server cannot matter.
+ */
+export function mintAttemptId() {
+  return randomBytes(6).toString('hex');
+}
+
+const ATTEMPT_ID = /^[0-9a-f]{12}$/;
+
+/** `VC_ATTEMPT_ID=<id> ` for a remote command, or '' with no id. Validated: it lands in a shell line. */
+export function attemptEnv(attemptId) {
+  if (attemptId === undefined || attemptId === null) return '';
+  if (!ATTEMPT_ID.test(attemptId)) throw new Error(`invalid attempt id: ${attemptId}`);
+  return `VC_ATTEMPT_ID=${attemptId} `;
+}
 
 /** The node-side dir the add-on job keeps its state in (project dir relative). */
 export const ADDON_STATE_DIR = '.vc-addons';
@@ -111,13 +133,13 @@ export function ADDON_STATUS_READ_CMD(projectName) {
 /**
  * Parse ADDON_STATUS_READ_CMD's output.
  * @param {string} text
- * @returns {{started: number|null, live: boolean, addons: ReturnType<typeof parseAddonStatus>}}
+ * @returns {{attempt: string|null, live: boolean, addons: ReturnType<typeof parseAddonStatus>}}
  */
 export function parseAddonStatusFile(text) {
   const lines = String(text ?? '').split('\n');
-  const stamp = lines.map((l) => /^#started (\d+)$/.exec(l.trim())).find(Boolean);
+  const stamp = lines.map((l) => /^#attempt ?(\S*)$/.exec(l.trim())).find(Boolean);
   return {
-    started: stamp ? Number(stamp[1]) : null,
+    attempt: stamp ? stamp[1] || null : null,
     live: lines.some((l) => l.trim() === '#live'),
     addons: parseAddonStatus(text),
   };
@@ -127,21 +149,22 @@ export function parseAddonStatusFile(text) {
  * Each expected add-on's state, from the job's status file when it is
  * current, else from the add-ons' own containers.
  *
- * The file is current when the job that wrote it started at or after
- * `notBeforeMs` (the env's last deploy attempt or failover): a promoted node
- * that never ran the job has no file, and after a failback the re-promoted
- * node can hold one from before, which must not read as a pass. An add-on the
- * file still says is starting while no job is alive reads `stopped`.
+ * The file is current when it names the env's last attempt id (the deploy,
+ * scale or failover that last ran the job, envConfig.lastAttemptId): a
+ * promoted node that never ran the job has no file, and after a failback the
+ * re-promoted node can hold one from an earlier attempt, which must not read
+ * as a pass. An add-on the file still says is starting while no job is alive
+ * reads `stopped`.
  *
  * @param {object} o
  * @param {string} o.text ADDON_STATUS_READ_CMD output
  * @param {Array<{name: string, services: string[]}>} o.expected
- * @param {number} o.notBeforeMs
+ * @param {string|null|undefined} o.attemptId the env's lastAttemptId
  * @param {Map<string, {health: string, label: string}>} [o.containers] by service
  */
-export function resolveAddonStates({ text, expected, notBeforeMs, containers = new Map() }) {
+export function resolveAddonStates({ text, expected, attemptId, containers = new Map() }) {
   const file = parseAddonStatusFile(text);
-  const current = file.started !== null && file.started * 1000 >= (notBeforeMs || 0);
+  const current = Boolean(attemptId) && file.attempt === attemptId;
   if (current) {
     const by = new Map(file.addons.map((a) => [a.name, a]));
     return expected.map(({ name }) => {
@@ -302,9 +325,10 @@ run_addon() {
 }
 
 # This run's add-ons only: an add-on removed since the last deploy drops out.
-# The first line stamps when this run started (server clock): a reader treats
-# a file from before the current deploy or failover as stale.
-printf '#started %s\n' "$(date +%s)" > "$dir/status"
+# The first line names the attempt (deploy, scale or failover) this run is
+# for, from VC_ATTEMPT_ID in its environment: a reader trusts the file only
+# when it names the env's last attempt.
+printf '#attempt %s\n' "\${VC_ATTEMPT_ID:-}" > "$dir/status"
 ${starting}
 ${runs}
 [ "$(cat "$dir/job.pid" 2>/dev/null)" = "$$" ] && rm -f "$dir/job.pid"

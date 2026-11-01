@@ -575,7 +575,10 @@ async function startComposeStack(ctx) {
   }
   const { startComposeStack: startComposeStackRemote } = await import('../compose/index.js');
   await perfAsync('deploy.reconcile.run', () =>
-    startComposeStackRemote(serverIp, sshKeyPath, projectConfig.projectName, services),
+    startComposeStackRemote(serverIp, sshKeyPath, projectConfig.projectName, {
+      ...services,
+      attemptId: ctx.attemptId,
+    }),
   );
 }
 

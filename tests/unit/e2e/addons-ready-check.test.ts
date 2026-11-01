@@ -5,7 +5,7 @@ import { checkAddonsReady, expectedBackgroundAddons } from '../../e2e/checks/add
  * The deploy no longer waits for the add-ons; the harness still requires each
  * one healthy, within one bounded wait, and quotes its log when it is not.
  */
-const STARTED = 1_800_000_000;
+const ATTEMPT = 'a1b2c3d4e5f6';
 const base = {
   mode: 'compose' as const,
   projectName: 'demo',
@@ -13,14 +13,14 @@ const base = {
   ip: '1.1.1.1',
   sshKeyPath: '/k',
   sleep: async () => {},
-  notBeforeMs: (STARTED - 60) * 1000,
+  attemptId: ATTEMPT,
 };
 
 /** Each status body gets the job's start stamp and a live marker, as on a node mid-job. */
 function remote(
   statuses: string[],
   log = 'n8n | Error: Mismatching encryption keys',
-  { stamp = STARTED, live = true, ps = '' } = {},
+  { attempt = ATTEMPT, live = true, ps = '' } = {},
 ) {
   let i = 0;
   return vi.fn(async (_ip: string, cmd: string) => {
@@ -28,7 +28,7 @@ function remote(
     if (cmd.startsWith('docker ps')) return { ok: true, output: ps };
     const body = statuses[Math.min(i, statuses.length - 1)];
     i++;
-    const out = body ? `#started ${stamp}\n${body}${live ? '#live\n' : ''}` : '';
+    const out = body ? `#attempt ${attempt}\n${body}${live ? '#live\n' : ''}` : '';
     return { ok: true, output: out };
   });
 }
@@ -89,7 +89,7 @@ describe('addons_ready', () => {
 
   it('a stale "running" file does not pass: missing containers fail it', async () => {
     const run = remote(['observability\trunning\t\nn8n\trunning\t\n'], '', {
-      stamp: STARTED - 3600,
+      attempt: 'f00f00f00f00',
       live: false,
       ps: 'demo-grafana\trunning\tUp 1m (healthy)\n',
     });

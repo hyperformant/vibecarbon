@@ -500,11 +500,11 @@ describe('checkRemoteContainers', () => {
     ).toBeNull();
   });
 
-  const NOW_S = 1_800_000_000;
+  const ATTEMPT = 'a1b2c3d4e5f6';
   const withAddons = (extra: Record<string, unknown> = {}) => ({
     deployMode: 'compose',
     services: { observability: true, n8n: true, redis: true },
-    lastAttempt: new Date((NOW_S - 600) * 1000).toISOString(),
+    lastAttemptId: ATTEMPT,
     servers: [{ name: 'p', id: 1, ip: '1.1.1.1', role: 'primary' }],
     ...extra,
   });
@@ -513,7 +513,7 @@ describe('checkRemoteContainers', () => {
 
   it('compose with background add-ons: reads the current add-on status file', async () => {
     const sshRun = addonRun(
-      `#started ${NOW_S}\nobservability\trunning\t\nn8n\tfailed\tsetup n8n-setup exited 1\n`,
+      `#attempt ${ATTEMPT}\nobservability\trunning\t\nn8n\tfailed\tsetup n8n-setup exited 1\n`,
       'letsgo-app\trunning\tUp 1h (healthy)\n',
     );
     const out = await checkRemoteContainers('prod', withAddons(), 'letsgo', { ...base(), sshRun });
@@ -542,14 +542,14 @@ describe('checkRemoteContainers', () => {
     ]);
   });
 
-  it('a file older than the last failover is stale: containers decide', async () => {
+  it('a file from another attempt (the failover minted a new id) is stale: containers decide', async () => {
     const sshRun = addonRun(
-      `#started ${NOW_S - 3600}\nobservability\trunning\t\nn8n\trunning\t\n`,
+      `#attempt ${ATTEMPT}\nobservability\trunning\t\nn8n\trunning\t\n`,
       'letsgo-app\trunning\tUp 1h (healthy)\n',
     );
     const out = await checkRemoteContainers(
       'prod',
-      withAddons({ lastFailover: new Date((NOW_S - 60) * 1000).toISOString() }),
+      withAddons({ lastAttemptId: 'f00f00f00f00' }),
       'letsgo',
       { ...base(), sshRun },
     );

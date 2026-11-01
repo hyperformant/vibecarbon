@@ -17,22 +17,24 @@ const EXPECTED = [
   { name: 'observability', services: ['grafana', 'loki'] },
   { name: 'n8n', services: ['n8n'] },
 ];
-const NOW = 1_800_000_000; // epoch seconds
+const ATTEMPT = 'a1b2c3d4e5f6';
 const healthy = { health: 'healthy', label: 'healthy' };
 
 describe('parseAddonStatusFile', () => {
   it('reads the start stamp, the states and the liveness marker', () => {
     expect(
-      parseAddonStatusFile(`#started ${NOW}\nobservability\trunning\t\nn8n\tstarting\t\n#live\n`),
+      parseAddonStatusFile(
+        `#attempt ${ATTEMPT}\nobservability\trunning\t\nn8n\tstarting\t\n#live\n`,
+      ),
     ).toEqual({
-      started: NOW,
+      attempt: ATTEMPT,
       live: true,
       addons: [
         { name: 'observability', state: 'running', reason: '' },
         { name: 'n8n', state: 'starting', reason: '' },
       ],
     });
-    expect(parseAddonStatusFile('')).toEqual({ started: null, live: false, addons: [] });
+    expect(parseAddonStatusFile('')).toEqual({ attempt: null, live: false, addons: [] });
   });
 
   it('the remote read prints the file and #live only for a real job pid', () => {
@@ -45,14 +47,15 @@ describe('parseAddonStatusFile', () => {
 });
 
 describe('resolveAddonStates', () => {
-  const fresh = (body: string, live = false) => `#started ${NOW}\n${body}${live ? '#live\n' : ''}`;
+  const fresh = (body: string, live = false) =>
+    `#attempt ${ATTEMPT}\n${body}${live ? '#live\n' : ''}`;
 
   it('a current file is trusted', () => {
     expect(
       resolveAddonStates({
         text: fresh('observability\trunning\t\nn8n\tfailed\tsetup n8n-setup exited 1\n'),
         expected: EXPECTED,
-        notBeforeMs: (NOW - 60) * 1000,
+        attemptId: ATTEMPT,
       }),
     ).toEqual([
       { name: 'observability', state: 'running', reason: '' },
@@ -64,7 +67,7 @@ describe('resolveAddonStates', () => {
     const states = resolveAddonStates({
       text: fresh('observability\trunning\t\nn8n\tstarting\t\n'),
       expected: EXPECTED,
-      notBeforeMs: (NOW - 60) * 1000,
+      attemptId: ATTEMPT,
     });
     expect(states[1]).toEqual({
       name: 'n8n',
@@ -76,7 +79,7 @@ describe('resolveAddonStates', () => {
       resolveAddonStates({
         text: fresh('n8n\tstarting\t\n', true),
         expected: [EXPECTED[1]],
-        notBeforeMs: 0,
+        attemptId: ATTEMPT,
       })[0].state,
     ).toBe('starting');
   });
@@ -85,7 +88,7 @@ describe('resolveAddonStates', () => {
     const states = resolveAddonStates({
       text: '',
       expected: EXPECTED,
-      notBeforeMs: 0,
+      attemptId: ATTEMPT,
       containers: new Map([
         ['grafana', healthy],
         ['loki', { health: 'starting', label: 'starting' }],
@@ -98,11 +101,11 @@ describe('resolveAddonStates', () => {
     ]);
   });
 
-  it('a stale "running" file (from before the last deploy or failover) is not trusted', () => {
+  it('a "running" file from another attempt (before the last deploy, scale or failover) is not trusted', () => {
     const states = resolveAddonStates({
-      text: `#started ${NOW - 3600}\nobservability\trunning\t\nn8n\trunning\t\n`,
+      text: `#attempt 0ldattempt000\nobservability\trunning\t\nn8n\trunning\t\n`,
       expected: EXPECTED,
-      notBeforeMs: (NOW - 60) * 1000,
+      attemptId: ATTEMPT,
       containers: new Map([['grafana', healthy]]),
     });
     expect(states).toEqual([
@@ -116,7 +119,7 @@ describe('resolveAddonStates', () => {
       resolveAddonStates({
         text: '',
         expected: [EXPECTED[1]],
-        notBeforeMs: 0,
+        attemptId: ATTEMPT,
         containers: new Map([['n8n', healthy]]),
       }),
     ).toEqual([{ name: 'n8n', state: 'running', reason: '' }]);

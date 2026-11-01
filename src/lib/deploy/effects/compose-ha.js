@@ -92,6 +92,8 @@ const haServiceOpts = (ctx) => {
     metabase: services.metabase,
     redis: services.redis,
     bundlePath: ctx.bundlePath,
+    // The add-on job's attempt id, for reconcile.sh's environment.
+    attemptId: ctx.attemptId,
   };
 };
 

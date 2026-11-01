@@ -446,11 +446,23 @@ describe('addons-start.sh stop', () => {
     expect(spawnSync('sh', [ADDON_JOB_SCRIPT, 'stop'], { cwd: dir, env: env(dir) }).status).toBe(0);
   });
 
-  it('a run records when it started (stale-status detection)', () => {
+  // Minor 1: the file names the attempt (deploy, scale or failover) that ran
+  // the job, from VC_ATTEMPT_ID in the job's environment: never a clock.
+  it('a run records the attempt id it was started for', () => {
     const dir = jobDir();
-    spawnSync('sh', [ADDON_JOB_SCRIPT], { cwd: dir, env: env(dir) });
+    spawnSync('sh', [ADDON_JOB_SCRIPT], {
+      cwd: dir,
+      env: { ...env(dir), VC_ATTEMPT_ID: 'a1b2c3d4e5f6' },
+    });
     const text = readFileSync(join(dir, ADDON_STATUS_FILE), 'utf8');
-    expect(text).toMatch(/^#started \d{10}$/m);
+    expect(text.split('\n')[0]).toBe('#attempt a1b2c3d4e5f6');
+  });
+
+  it('started with no attempt id: the file names none, so it never reads as current', () => {
+    const dir = jobDir();
+    const { VC_ATTEMPT_ID: _drop, ...rest } = env(dir);
+    spawnSync('sh', [ADDON_JOB_SCRIPT], { cwd: dir, env: rest });
+    expect(readFileSync(join(dir, ADDON_STATUS_FILE), 'utf8').split('\n')[0]).toBe('#attempt ');
   });
 });
 

@@ -21,7 +21,7 @@ import { K8S_MIRROR_ORG, mirroredPackageNames, resolveDbImage } from '../../imag
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
 import { pollUntil } from '../../retry.js';
-import { ADDON_SERVICES_SCRIPT } from '../../services/addon-start.js';
+import { ADDON_SERVICES_SCRIPT, attemptEnv } from '../../services/addon-start.js';
 import { shEscape } from '../../shell.js';
 import {
   isDnsNotSettledSshCommandError,
@@ -753,6 +753,14 @@ function composeFileFlags(options = {}) {
 /**
  * Start the Docker Compose stack on the remote server
  */
+/**
+ * The reconcile.sh run, with the attempt id (services/addon-start.js
+ * attemptEnv) in its environment for the add-on job it starts.
+ */
+export function reconcileCommand(remoteDir, attemptId) {
+  return `${attemptEnv(attemptId)}/bin/bash ${remoteDir}/reconcile.sh`;
+}
+
 export async function startComposeStack(ip, sshKeyPath, projectName, _options = {}) {
   const remoteDir = `/opt/${projectName}`;
   // Spinner over the long silent compose.up — typical 60-130s warm, longer
@@ -776,7 +784,9 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
     // without masking a true regression (a real hang would still surface
     // via the 60s ServerAlive keepalives in lib/ssh.js + composeSshOpts).
     await perfAsync('deploy.compose.up', () =>
-      sshRunAsync(ip, sshKeyPath, `/bin/bash ${remoteDir}/reconcile.sh`, { timeout: 1_800_000 }),
+      sshRunAsync(ip, sshKeyPath, reconcileCommand(remoteDir, _options.attemptId), {
+        timeout: 1_800_000,
+      }),
     );
     reconcileSpinner.stop('Stack reconciled');
   } catch (err) {

@@ -45,25 +45,20 @@ export interface AddonsReadyOptions {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   /**
-   * A status file whose job started before this (the env's last deploy
-   * attempt or failover, addonStatusNotBefore) is stale: the add-ons'
-   * containers decide instead.
+   * The env's last attempt id (addonAttemptId): the status file is current
+   * only when it names it; otherwise the add-ons' containers decide.
    */
-  notBeforeMs?: number;
+  attemptId?: string | null;
 }
 
-/** The env's last deploy attempt or failover, from the project's .vibecarbon.json. */
-export function addonStatusNotBefore(projectDir: string, env: string): number {
+/** The env's last attempt id (deploy, scale or failover), from the project's .vibecarbon.json. */
+export function addonAttemptId(projectDir: string, env: string): string | null {
   try {
     const path = join(projectDir, '.vibecarbon.json');
-    if (!existsSync(path)) return 0;
-    const envConfig = JSON.parse(readFileSync(path, 'utf8'))?.environments?.[env] ?? {};
-    return Math.max(
-      Date.parse(envConfig.lastAttempt ?? '') || 0,
-      Date.parse(envConfig.lastFailover ?? '') || 0,
-    );
+    if (!existsSync(path)) return null;
+    return JSON.parse(readFileSync(path, 'utf8'))?.environments?.[env]?.lastAttemptId ?? null;
   } catch {
-    return 0;
+    return null;
   }
 }
 
@@ -108,7 +103,7 @@ export async function checkAddonsReady(opts: AddonsReadyOptions): Promise<Verifi
   const withServices = expectedAddonServices(opts.features);
   let states: ReturnType<typeof resolveAddonStates> = [];
   for (;;) {
-    // The job's status (current only if it started after notBeforeMs), and the
+    // The job's status (current only if it names attemptId), and the
     // add-ons' containers for when it is missing or stale (a promoted node,
     // or a file left from before a failback): resolveAddonStates decides.
     const read = await run(ip, ADDON_STATUS_READ_CMD(opts.projectName));
@@ -125,7 +120,7 @@ export async function checkAddonsReady(opts: AddonsReadyOptions): Promise<Verifi
     states = resolveAddonStates({
       text: read.ok ? read.output : '',
       expected: withServices,
-      notBeforeMs: opts.notBeforeMs ?? 0,
+      attemptId: opts.attemptId ?? null,
       containers,
     });
     const by = new Map(states.map((s) => [s.name, s]));
