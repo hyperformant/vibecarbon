@@ -55,9 +55,15 @@ type Action = { status: 'in-progress' | 'completed'; pollsLeft: number; finish: 
 function makeWorld({
   actionPolls = 2,
   staleReads = 2,
+  refuse = new Map<string, { status: number; message: string }>(),
+  volumeNames = new Map<string, string>(),
 }: {
   actionPolls?: number;
   staleReads?: number;
+  /** Volumes whose detach POST DO refuses (e.g. 422 pending event). */
+  refuse?: Map<string, { status: number; message: string }>;
+  /** Names for the GET /volumes listing. */
+  volumeNames?: Map<string, string>;
 } = {}) {
   const droplets = new Map<number, Set<string>>([
     [DB, new Set([LIVE, DELETED])],
@@ -97,6 +103,8 @@ function makeWorld({
         const vol = m[1];
         const body = JSON.parse(init.body ?? '{}');
         if (!volumes.has(vol)) return jsonResp({ id: 'not_found', message: 'not found' }, 404);
+        const refusal = refuse.get(vol);
+        if (refusal) return jsonResp({ message: refusal.message }, refusal.status);
         const id = nextAction++;
         const action: Action = {
           status: 'in-progress',
@@ -115,6 +123,12 @@ function makeWorld({
           action.finish();
         }
         return jsonResp({ action: { id: Number(m[1]), status: action.status } });
+      }
+      if (path.startsWith('/volumes?') && method === 'GET') {
+        return jsonResp({
+          volumes: [...volumes].map((id) => ({ id, name: volumeNames.get(id) ?? id })),
+          links: {},
+        });
       }
       throw new Error(`unexpected request ${method} ${path}`);
     },
@@ -139,7 +153,7 @@ function makeWorld({
     droplets.delete(id);
   };
 
-  return { droplets, calls, providerDropletDelete };
+  return { droplets, stale, calls, providerDropletDelete };
 }
 
 const FAST = { budgetMs: 2_000, pollIntervalMs: 1 };
@@ -217,6 +231,26 @@ describe('detachCsiVolumesBeforeDestroy', () => {
 
     expect(world.calls).not.toContain(`POST /volumes/${FOREIGN}/actions`);
     expect(world.droplets.get(DB)?.has(FOREIGN)).toBe(true);
+  });
+
+  it('a refused detach (CSI holds the volume) is not retried: it waits on the listing instead', async () => {
+    const world = makeWorld({
+      staleReads: 0,
+      refuse: new Map([[LIVE, { status: 422, message: 'pending event' }]]),
+    });
+    // CSI's own detach is in flight: the Droplet stops listing LIVE after 3 reads.
+    world.stale.set(LIVE, 3);
+
+    const out = await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [LIVE],
+      ...FAST,
+    });
+
+    expect(world.calls.filter((c) => c === `POST /volumes/${LIVE}/actions`)).toHaveLength(1);
+    expect(out.stillAttached).toEqual([]);
+    expect(out.detached).not.toContain(LIVE);
+    expect(out.gone).not.toContain(LIVE);
   });
 
   it('is bounded: a Droplet that never lets go is reported, not waited on forever', async () => {
