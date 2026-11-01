@@ -829,6 +829,48 @@ describe('resumeComposeCutover (a scale stopped mid-cutover)', () => {
     expect(savedIds).toContain(id);
   });
 
+  // Fix round 4: the relaunch gets its OWN fresh id (never the one the
+  // stopped reconcile-time job wrote), saved only once the relaunch ran.
+  it('the relaunch id is fresh: not the scale ctx id the stopped job wrote', async () => {
+    reset();
+    h.state.seed = { environments: { prod: {} } };
+    h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
+    const { ctx } = resumeCtx();
+    ctx.attemptId = 'aaaaaaaaaaaa';
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    const relaunch = h.events.find((e) => e.includes('addons-start.sh promoted')) ?? '';
+    const id = /VC_ATTEMPT_ID=([0-9a-f]{12})/.exec(relaunch)?.[1];
+    expect(id).toBeDefined();
+    expect(id).not.toBe('aaaaaaaaaaaa');
+    // Through sshRun's argv contract: sh -c <command>.
+    expect(relaunch.startsWith('ssh:9.9.9.9:sh -c ')).toBe(true);
+  });
+
+  it('a failed relaunch does not fail the scale, warns, and saves no id', async () => {
+    reset();
+    h.state.seed = { environments: { prod: {} } };
+    h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
+    h.state.sshFail = 'addons-start.sh promoted';
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn');
+    const { ctx } = resumeCtx();
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('finished');
+    expect(
+      warn.mock.calls.some((c) =>
+        /could not restart the add-on job on 9\.9\.9\.9/.test(String(c[0])),
+      ),
+    ).toBe(true);
+    const savedIds = h.state.saved
+      .map(
+        (c) =>
+          (c as { environments?: Record<string, { lastAttemptId?: string }> }).environments?.prod
+            ?.lastAttemptId,
+      )
+      .filter(Boolean);
+    expect(savedIds).toEqual([]);
+    warn.mockRestore();
+  });
+
   it('skips the post-flip steps the journal says are done', async () => {
     reset();
     const { ctx } = resumeCtx();

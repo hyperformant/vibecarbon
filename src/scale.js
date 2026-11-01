@@ -767,20 +767,29 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
       { timeout: 600_000 },
     );
     s.stop('All services running');
-    // The recreate stopped the add-on job. Start it again, detached, under an
-    // attempt id saved as the env's lastAttemptId, so the add-on status is
-    // true for the serving server (promoted: the restored database already
-    // holds the one-shot setups' work). sshRun takes an argv array (ssh.js).
-    const attemptId = ctx.attemptId ?? mintAttemptId();
-    await sshRun(newIp, sshKeyPath, [
-      'sh',
-      '-c',
-      addonJobStartCmd(projectName, attemptId, 'promoted'),
-    ]);
-    updateProjectConfig((onDisk) => {
-      const env = onDisk.environments?.[environment];
-      if (env) env.lastAttemptId = attemptId;
-    });
+    // The recreate stopped the add-on job. Start it again, detached, under a
+    // FRESH attempt id (never the one the stopped reconcile-time job wrote,
+    // whose file must not read as current), saved as the env's lastAttemptId
+    // only once the relaunch ran. Promoted: the restored database already
+    // holds the one-shot setups' work. Add-ons do not hold a scale: a failed
+    // relaunch warns and saves no id, so status reads their containers.
+    const attemptId = mintAttemptId();
+    try {
+      await sshRun(newIp, sshKeyPath, [
+        'sh',
+        '-c',
+        addonJobStartCmd(projectName, attemptId, 'promoted'),
+      ]);
+      updateProjectConfig((onDisk) => {
+        const env = onDisk.environments?.[environment];
+        if (env) env.lastAttemptId = attemptId;
+      });
+    } catch (err) {
+      p.log.warn(
+        `could not restart the add-on job on ${newIp} (${firstLineOf(err)}); the add-ons keep ` +
+          'running, and vibecarbon status reads them from their containers until the next deploy',
+      );
+    }
   });
   onServing?.();
 
