@@ -2367,6 +2367,107 @@ async function destroyComposeTier({
 }
 
 /**
+ * Leak-report class for a Pulumi resource type left in a stack's state.
+ * Unknown types report under their own Pulumi type token, so a new resource
+ * class still shows up by name instead of disappearing.
+ */
+const PULUMI_TYPE_RESOURCE_CLASS = [
+  [/\/(droplet:Droplet|server:Server)$/, 'server'],
+  [/\/firewall:Firewall$/, 'firewall'],
+  [/\/(vpc:Vpc|network:Network|networkSubnet:NetworkSubnet)$/, 'network'],
+  [/\/(reservedIp|reservedIpAssignment|floatingIp|floatingIpAssignment):\w+$/, 'floating-ip'],
+  [/\/sshKey:SshKey$/, 'ssh-key'],
+  [/\/volume:Volume$/, 'volume'],
+];
+
+function pulumiResourceClass(type) {
+  for (const [re, cls] of PULUMI_TYPE_RESOURCE_CLASS) if (re.test(type)) return cls;
+  return String(type).split(':').pop() || 'pulumi-resource';
+}
+
+/**
+ * Record a failed `pulumi destroy` (destroyStack's thrown error) in the leak
+ * ledger so the report names what is left. destroyStack reads the stack's
+ * state back after the failure and attaches it as `remainingResources`: one
+ * UNVERIFIED line per resource, each carrying its own Pulumi diagnostic (or
+ * saying it has none) and the command that finishes the teardown. When the state could not be read
+ * back, the whole stack is the unit, as before.
+ *
+ * UNVERIFIED, not LEAK: the DO name/address backstop that runs after this
+ * may still delete some of them, but the Pulumi state keeps listing them
+ * until a destroy completes against it, and only that re-run proves it.
+ *
+ * Exported for unit testing (destroyK8sTier itself is not).
+ *
+ * @param {object} params
+ * @param {Error & { remainingResources?: Array<{type: string, logicalName: string, name: string|null, id: string|null}>|null }} params.error
+ * @param {string} params.stackEnv
+ * @param {string} params.dirLabel - HA's " (stackEnv)" suffix, or '' for single k8s.
+ * @param {string} params.environment - the user-facing environment name.
+ * @param {object} params.results - the shared destroy `results` accumulator (mutated).
+ * @param {string} params.providerName - `Provider.NAME`, for the hint.
+ */
+export function recordPulumiDestroyFailure({
+  error,
+  stackEnv,
+  dirLabel,
+  environment,
+  results,
+  providerName,
+}) {
+  results.pulumiDestroyFailed = true;
+  const finish = `vibecarbon destroy ${environment}`;
+  const hint = `Run \`${finish}\` again to finish; it refreshes the stack and deletes what is left. If it fails the same way, delete it in the ${providerName} console, then run it once more.`;
+  const remaining = Array.isArray(error?.remainingResources) ? error.remainingResources : null;
+  if (remaining && remaining.length > 0) {
+    for (const r of remaining) {
+      results.leaks.unverified({
+        resourceClass: pulumiResourceClass(r.type),
+        resource: describeResource({ name: r.name || r.logicalName, id: r.id }),
+        reason: r.error
+          ? `still in Pulumi stack ${stackEnv}, its delete failed: ${r.error}`
+          : `still in Pulumi stack ${stackEnv}, no error of its own: it waits on a resource that failed, or was never attempted`,
+        hint,
+      });
+    }
+    // Every line above is honest about its own resource; when none of them
+    // carries the cause, it is stated once, here, rather than on each.
+    if (!remaining.some((r) => r.error)) {
+      results.leaks.unverified({
+        resourceClass: 'pulumi-stack',
+        resource: `${stackEnv}${dirLabel}`,
+        reason: error.message,
+        hint,
+      });
+    }
+    return;
+  }
+  results.leaks.unverified({
+    resourceClass: 'pulumi-stack',
+    resource: `${stackEnv}${dirLabel}`,
+    reason: `pulumi destroy failed: ${error?.message}, every Pulumi-managed resource in this stack (servers, firewall, network, SSH key, floating IP) is unverified`,
+    hint: `Check for leftover resources in the ${providerName} console, then run \`${finish}\` again to finish. Pulumi state was preserved for this stack.`,
+  });
+}
+
+/**
+ * One line per resource a failed destroy left in state: class, name or
+ * logical name with id, and its own error when it has one. For callers that
+ * print rather than ledger (the orphan-stack path). Empty when the state
+ * could not be read back.
+ *
+ * @param {Array<{type: string, logicalName: string, name: string|null, id: string|null, error?: string|null}>|null|undefined} remaining
+ * @returns {string[]}
+ */
+export function describeRemainingPulumiResources(remaining) {
+  if (!Array.isArray(remaining)) return [];
+  return remaining.map((r) => {
+    const head = `${pulumiResourceClass(r.type)} ${describeResource({ name: r.name || r.logicalName, id: r.id })}`;
+    return r.error ? `${head}: ${r.error}` : head;
+  });
+}
+
+/**
  * Decide what one stackEnv's `destroyK8s` (Pulumi) result means and record
  * it into `results` — either the "(all via Pulumi)" success shorthand, or a
  * loud, non-zero-exit issue (M3 Task 9f fix round 1).
@@ -2408,77 +2509,6 @@ async function destroyComposeTier({
  * @param {string} params.providerName - `Provider.NAME`, for the issue hint.
  * @returns {boolean} true if recorded as a verified success.
  */
-/**
- * Leak-report class for a Pulumi resource type left in a stack's state.
- * Unknown types report under their own Pulumi type token, so a new resource
- * class still shows up by name instead of disappearing.
- */
-const PULUMI_TYPE_RESOURCE_CLASS = [
-  [/\/(droplet:Droplet|server:Server)$/, 'server'],
-  [/\/firewall:Firewall$/, 'firewall'],
-  [/\/(vpc:Vpc|network:Network|networkSubnet:NetworkSubnet)$/, 'network'],
-  [/\/(reservedIp|reservedIpAssignment|floatingIp|floatingIpAssignment):\w+$/, 'floating-ip'],
-  [/\/sshKey:SshKey$/, 'ssh-key'],
-  [/\/volume:Volume$/, 'volume'],
-];
-
-function pulumiResourceClass(type) {
-  for (const [re, cls] of PULUMI_TYPE_RESOURCE_CLASS) if (re.test(type)) return cls;
-  return String(type).split(':').pop() || 'pulumi-resource';
-}
-
-/**
- * Record a failed `pulumi destroy` (destroyStack's thrown error) in the leak
- * ledger so the report names what is left. destroyStack reads the stack's
- * state back after the failure and attaches it as `remainingResources`: one
- * UNVERIFIED line per resource, each carrying the provider's own error and
- * the command that finishes the teardown. When the state could not be read
- * back, the whole stack is the unit, as before.
- *
- * UNVERIFIED, not LEAK: the DO name/address backstop that runs after this
- * may still delete some of them, but the Pulumi state keeps listing them
- * until a destroy completes against it, and only that re-run proves it.
- *
- * Exported for unit testing (destroyK8sTier itself is not).
- *
- * @param {object} params
- * @param {Error & { remainingResources?: Array<{type: string, logicalName: string, name: string|null, id: string|null}>|null }} params.error
- * @param {string} params.stackEnv
- * @param {string} params.dirLabel - HA's " (stackEnv)" suffix, or '' for single k8s.
- * @param {string} params.environment - the user-facing environment name.
- * @param {object} params.results - the shared destroy `results` accumulator (mutated).
- * @param {string} params.providerName - `Provider.NAME`, for the hint.
- */
-export function recordPulumiDestroyFailure({
-  error,
-  stackEnv,
-  dirLabel,
-  environment,
-  results,
-  providerName,
-}) {
-  results.pulumiDestroyFailed = true;
-  const finish = `vibecarbon destroy ${environment}`;
-  const remaining = Array.isArray(error?.remainingResources) ? error.remainingResources : null;
-  if (remaining && remaining.length > 0) {
-    for (const r of remaining) {
-      results.leaks.unverified({
-        resourceClass: pulumiResourceClass(r.type),
-        resource: describeResource({ name: r.name || r.logicalName, id: r.id }),
-        reason: `still in Pulumi stack ${stackEnv} after its destroy failed: ${error.message}`,
-        hint: `Run \`${finish}\` again to finish; it refreshes the stack and deletes what is left. If it fails the same way, delete it in the ${providerName} console, then run it once more.`,
-      });
-    }
-    return;
-  }
-  results.leaks.unverified({
-    resourceClass: 'pulumi-stack',
-    resource: `${stackEnv}${dirLabel}`,
-    reason: `pulumi destroy failed: ${error?.message}, every Pulumi-managed resource in this stack (servers, firewall, network, SSH key, floating IP) is unverified`,
-    hint: `Check for leftover resources in the ${providerName} console, then run \`${finish}\` again to finish. Pulumi state was preserved for this stack.`,
-  });
-}
-
 export function recordPulumiDestroyOutcome({
   destroyResult,
   envConfig,
@@ -3780,6 +3810,12 @@ async function main(argv = []) {
           orphanSpinner.stop(`Destroyed: ${orphan.name}`);
         } catch (error) {
           orphanSpinner.error(`Failed to destroy ${orphan.name}: ${error.message}`);
+          const left = describeRemainingPulumiResources(error?.remainingResources);
+          if (left.length > 0) {
+            p.log.message(
+              [`Still in stack ${orphan.name}:`, ...left.map((line) => `  ${line}`)].join('\n'),
+            );
+          }
         }
       }
 

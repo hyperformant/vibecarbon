@@ -1000,16 +1000,67 @@ export async function destroyStack(stackName, program, options = {}) {
 export function pulumiDestroyFailureCause(message) {
   const lines = String(message ?? '').split('\n');
   for (const line of lines) {
-    const m = /^\s*(?:\*\s|error:\s)\s*(.+)$/.exec(line);
-    if (!m) continue;
-    const text = m[1]
-      .replace(/^sdk-v2\/\S+:\s*/, '')
-      .replace(/^sdk\.helper_schema:\s*/, '')
-      .trim();
-    if (!text || /^update failed$/i.test(text) || /^deleting urn:/i.test(text)) continue;
-    return text;
+    const text = diagnosticText(line);
+    if (text) return text;
   }
   return lines.find((l) => l.trim())?.trim() ?? '';
+}
+
+/**
+ * The useful text of one Pulumi error line, or null. Skips the stack's own
+ * `update failed` and the engine's `deleting urn:...` wrapper, and strips the
+ * terraform-bridge location prefix.
+ * @param {string} line
+ * @returns {string|null}
+ */
+function diagnosticText(line) {
+  const m = /^\s*(?:\*\s|error:\s)\s*(.+)$/.exec(line);
+  if (!m) return null;
+  const text = m[1]
+    .replace(/^sdk-v2\/\S+:\s*/, '')
+    .replace(/^sdk\.helper_schema:\s*/, '')
+    .trim();
+  if (!text || /^update failed$/i.test(text) || /^deleting urn:/i.test(text)) return null;
+  return text;
+}
+
+/**
+ * Each resource's own error, from the `Diagnostics:` block of a failed
+ * `pulumi destroy`. The engine heads every resource's diagnostics with
+ * `  <pkg>:<module>:<Type> (<logical name>):`, so the key is
+ * `<pkg>:<module>:<Type>::<logical name>` (see `diagnosticKey` for the state
+ * side). The stack's own entry is skipped: it only ever says `update failed`.
+ *
+ * @param {string} message
+ * @returns {Map<string, string>}
+ */
+export function pulumiDiagnosticsByResource(message) {
+  const map = new Map();
+  const lines = String(message ?? '').split('\n');
+  const start = lines.findIndex((l) => /^\s*Diagnostics:\s*$/.test(l));
+  if (start < 0) return map;
+  let key = null;
+  for (const line of lines.slice(start + 1)) {
+    const head = /^\s*([\w-]+:[\w/-]+:\w+) \((.+)\):\s*$/.exec(line);
+    if (head) {
+      key = head[1].startsWith('pulumi:pulumi:') ? null : `${head[1]}::${head[2]}`;
+      continue;
+    }
+    if (!key || map.has(key)) continue;
+    const text = diagnosticText(line);
+    if (text) map.set(key, text);
+  }
+  return map;
+}
+
+/**
+ * State type `digitalocean:index/droplet:Droplet` plus logical name `db` to
+ * the diagnostics key `digitalocean:index:Droplet::db`.
+ * @param {string} type
+ * @param {string} logicalName
+ */
+function diagnosticKey(type, logicalName) {
+  return `${String(type).replace(/^([^:]+):([^/:]+)\/[^:]+:(\w+)$/, '$1:$2:$3')}::${logicalName}`;
 }
 
 /**
@@ -1023,23 +1074,30 @@ export function pulumiDestroyFailureCause(message) {
  * @param {import('@pulumi/pulumi/automation').Stack} stack
  * @param {string} stackName
  * @param {unknown} err
- * @returns {Promise<Error & { remainingResources: Array<{type: string, logicalName: string, name: string|null, id: string|null}>|null }>}
+ * @returns {Promise<Error & { remainingResources: Array<{type: string, logicalName: string, name: string|null, id: string|null, error: string|null}>|null }>}
  */
 async function describeDestroyFailure(stack, stackName, err) {
   const original = err instanceof Error ? err : new Error(String(err));
   let remainingResources = null;
   try {
     const state = await stack.exportStack();
+    const diagnostics = pulumiDiagnosticsByResource(original.message);
     remainingResources = (state?.deployment?.resources ?? [])
       .filter((r) => r?.type && r.type !== 'pulumi:pulumi:Stack' && !r.type.startsWith('pulumi:'))
-      .map((r) => ({
-        type: r.type,
-        logicalName: String(r.urn ?? '')
+      .map((r) => {
+        const logicalName = String(r.urn ?? '')
           .split('::')
-          .pop(),
-        name: r.outputs?.name ?? null,
-        id: r.id ?? null,
-      }));
+          .pop();
+        return {
+          type: r.type,
+          logicalName,
+          name: r.outputs?.name ?? null,
+          id: r.id ?? null,
+          // Its own diagnostic, or null when it failed on nothing itself
+          // (blocked behind a dependency, or never attempted).
+          error: diagnostics.get(diagnosticKey(r.type, logicalName)) ?? null,
+        };
+      });
   } catch {
     /* state unreadable: the caller treats the whole stack as unverified */
   }

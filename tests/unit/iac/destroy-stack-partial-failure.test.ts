@@ -29,6 +29,9 @@ const PULUMI_FAILURE = [
   '    error: deleting urn:pulumi:d4-standby::p::digitalocean:index/droplet:Droplet::db: 1 error occurred:',
 ].join('\n');
 
+const DB_ERROR =
+  'Error detaching the volumes from the droplet (614595377): Error detaching volume "4c926666" from droplet (614595377): POST https://api.digitalocean.com/v2/volumes/4c926666/actions: 404 error detaching volume from droplet: not found: provider=digitalocean@4.84.2';
+
 const LEFT_BEHIND = [
   {
     type: 'pulumi:pulumi:Stack',
@@ -106,12 +109,16 @@ describe('destroyStack partial failure', () => {
         logicalName: 'db',
         name: 'p-d4-standby-db',
         id: '614595377',
+        // Its own diagnostic, from the Diagnostics block for `Droplet (db)`.
+        error: DB_ERROR,
       },
       {
         type: 'digitalocean:index/vpc:Vpc',
         logicalName: 'network',
         name: 'p-d4-standby-network',
         id: 'vpc-uuid',
+        // No diagnostic of its own: blocked behind the db Droplet.
+        error: null,
       },
     ]);
     // The provider's complaint, not the stack-level "update failed".
@@ -121,6 +128,28 @@ describe('destroyStack partial failure', () => {
     // The original stays reachable for the log.
     expect((err.cause as Error).message).toBe(PULUMI_FAILURE);
     expect(stack.workspace.removeStack).not.toHaveBeenCalled();
+  });
+});
+
+describe('pulumiDiagnosticsByResource', () => {
+  it('maps each resource diagnostic to its type and logical name, skipping the stack', async () => {
+    const { pulumiDiagnosticsByResource } = await import('../../../src/lib/iac/index.js');
+    const twoFailures = `${PULUMI_FAILURE}
+
+  digitalocean:index:Firewall (firewall):
+    error: deleting firewall: 409 the firewall is still in use`;
+    const map = pulumiDiagnosticsByResource(twoFailures);
+
+    expect(map.get('digitalocean:index:Droplet::db')).toBe(DB_ERROR);
+    expect(map.get('digitalocean:index:Firewall::firewall')).toBe(
+      'deleting firewall: 409 the firewall is still in use',
+    );
+    expect([...map.keys()].some((k) => k.startsWith('pulumi:pulumi:Stack'))).toBe(false);
+  });
+
+  it('is empty when the output carries no Diagnostics block', async () => {
+    const { pulumiDiagnosticsByResource } = await import('../../../src/lib/iac/index.js');
+    expect(pulumiDiagnosticsByResource('connect ECONNREFUSED').size).toBe(0);
   });
 });
 
