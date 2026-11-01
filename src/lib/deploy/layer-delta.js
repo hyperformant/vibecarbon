@@ -333,18 +333,16 @@ async function stageDelta({ archiveDir, stageDir, tag, keep, layerSources }) {
 
 /**
  * Push an image the delta imported into a k3s node's containerd (as `ref`)
- * into the node's local registry under `registryRef`: the same two ctr steps
- * layer-delta-remote.sh runs when it is given a registry ref, for a push
- * deferred until the registry serves (deliverImage `pushAfter`).
+ * into the node's local registry under `registryRef`, for a push deferred
+ * until the registry serves (deliverImage `pushAfter`). It runs the remote
+ * script in its push mode, the same ctr steps the end of a delivery runs, so
+ * there is one push path.
  */
 async function pushToRegistry({ run, ref, registryRef }) {
-  const target = shEscape(registryRef);
-  const script = ['set -eu'];
-  if (registryRef !== ref) {
-    script.push(`k3s ctr -n k8s.io images tag --force ${shEscape(ref)} ${target} > /dev/null`);
-  }
-  script.push(`k3s ctr -n k8s.io images push --plain-http ${target} ${target} > /dev/null`);
-  await run(`sh -c ${shEscape(script.join('\n'))}`).catch((err) => {
+  const cmd = `sh -c ${shEscape(REMOTE_SCRIPT)} layer-delta ${['push', ref, registryRef]
+    .map(shEscape)
+    .join(' ')}`;
+  await run(cmd).catch((err) => {
     throw new DeliveryError(`registry push: ${firstLine(err?.message) || 'failed'}`);
   });
 }

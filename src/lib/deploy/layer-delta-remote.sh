@@ -1,5 +1,8 @@
 # The target half of the layer delta (src/lib/deploy/layer-delta.js). Run as
 #   ssh <target> sh -c '<this file>' layer-delta <runtime> <platform> <tag> <ref> [<registry-ref>]
+# or, for a push deferred until the registry serves (deliverImage pushAfter),
+#   ssh <target> sh -c '<this file>' layer-delta push <ref> <registry-ref>
+# which pushes an image an earlier run imported, through the same steps.
 # with the delta tar on stdin: manifest.json (Layers l0..lN-1, Config
 # config.json), config.json, the layer files the target lacked, and fill.txt,
 # one `<index> <diffID> <source>` line per layer the target already holds.
@@ -20,13 +23,28 @@
 # <first line>`), so it never echoes the environment and never traces.
 set -eu
 
+# `k3s ctr` on a node. Split on purpose: it is a command and its subcommand.
+ctr=${VC_CTR:-k3s ctr}
+
+# Tag <ref> as <registry-ref> when they differ, then push it to that registry.
+# The one push path: the end of a k3s delivery and push mode both use it.
+push_to_registry() {
+  if [ "$2" != "$1" ]; then
+    $ctr -n k8s.io images tag --force "$1" "$2" > /dev/null
+  fi
+  $ctr -n k8s.io images push --plain-http "$2" "$2" > /dev/null
+}
+
+if [ "$1" = push ]; then
+  push_to_registry "$2" "$3"
+  exit 0
+fi
+
 runtime=$1
 platform=$2
 tag=$3
 ref=$4
 registry_ref=${5:-}
-# `k3s ctr` on a node. Split on purpose: it is a command and its subcommand.
-ctr=${VC_CTR:-k3s ctr}
 root=${VC_DELTA_ROOT:-/var/lib/vibecarbon/delta}
 
 mkdir -p "$root"
@@ -128,10 +146,7 @@ if [ "$runtime" = k3s ]; then
     die "the imported layers of $ref do not match the delta manifest"
   fi
   if [ -n "$registry_ref" ]; then
-    if [ "$registry_ref" != "$ref" ]; then
-      $ctr -n k8s.io images tag --force "$ref" "$registry_ref" > /dev/null
-    fi
-    $ctr -n k8s.io images push --plain-http "$registry_ref" "$registry_ref" > /dev/null
+    push_to_registry "$ref" "$registry_ref"
   fi
 else
   load docker load

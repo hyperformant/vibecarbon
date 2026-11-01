@@ -323,13 +323,14 @@ describe('deliverImage', () => {
       await vi.waitFor(() => expect(ssh.sent).toHaveLength(1));
       expect(ssh.sent[0].cmd).toContain(` layer-delta 'k3s' 'linux/amd64' '${ref}' '${ref}' ''`);
       await new Promise((r) => setTimeout(r, 20));
-      const pushes = () => runs.filter((c) => c.includes('images push'));
+      const pushes = () => runs.filter((c) => c.includes(" layer-delta 'push'"));
       expect(pushes()).toHaveLength(0);
       release();
       await done;
       expect(pushes()).toHaveLength(1);
-      expect(pushes()[0]).toContain(`k3s ctr -n k8s.io images push --plain-http`);
-      expect(pushes()[0]).toContain(ref);
+      // The remote script's own push mode: one push path, live and tested.
+      expect(pushes()[0]).toMatch(/^sh -c '/);
+      expect(pushes()[0]).toContain(` layer-delta 'push' '${ref}' '${ref}'`);
     });
 
     it('tags the import under the registry ref first when ctr named it differently', async () => {
@@ -351,10 +352,8 @@ describe('deliverImage', () => {
           acquireLock: noLock,
         },
       });
-      const push = runs.find((c) => c.includes('images push')) ?? '';
-      expect(push).toContain('images tag --force');
-      expect(push).toContain('docker.io/library/quorum:abc');
-      expect(push.indexOf('images tag')).toBeLessThan(push.indexOf('images push'));
+      const push = runs.find((c) => c.includes(" layer-delta 'push'")) ?? '';
+      expect(push).toContain(` layer-delta 'push' 'docker.io/library/quorum:abc' '${ref}'`);
     });
 
     it('a failed push is one delivery error line', async () => {
@@ -364,7 +363,8 @@ describe('deliverImage', () => {
             pushAfter: Promise.resolve(),
             deps: {
               run: async (cmd: string) => {
-                if (cmd.includes('images push')) throw new Error('connection refused\nmore');
+                if (cmd.includes(" layer-delta 'push'"))
+                  throw new Error('connection refused\nmore');
                 return '';
               },
               send: stubSsh().send,
@@ -396,7 +396,7 @@ describe('deliverImage', () => {
           }),
         ),
       ).rejects.toThrow('local-registry rollout did not complete');
-      expect(runs.some((c) => c.includes('images push'))).toBe(false);
+      expect(runs.some((c) => c.includes(" layer-delta 'push'"))).toBe(false);
     });
 
     it('is refused without a registry ref', async () => {
