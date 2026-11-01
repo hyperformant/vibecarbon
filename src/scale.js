@@ -631,7 +631,8 @@ export async function readOldAppEnv(
 
 /** Stop the add-on job on a server (services/addon-start.js), waiting until it is gone. */
 async function stopAddonJob(ip, sshKeyPath, projectName) {
-  await sshRun(ip, sshKeyPath, addonJobStopCmd(projectName));
+  // sshRun takes an argv array (ssh.js); the command line runs under sh -c.
+  await sshRun(ip, sshKeyPath, ['sh', '-c', addonJobStopCmd(projectName)]);
 }
 
 /** How long a rolled-back resume waits before it reads DNS once more. */
@@ -769,9 +770,13 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
     // The recreate stopped the add-on job. Start it again, detached, under an
     // attempt id saved as the env's lastAttemptId, so the add-on status is
     // true for the serving server (promoted: the restored database already
-    // holds the one-shot setups' work).
+    // holds the one-shot setups' work). sshRun takes an argv array (ssh.js).
     const attemptId = ctx.attemptId ?? mintAttemptId();
-    await sshRun(newIp, sshKeyPath, addonJobStartCmd(projectName, attemptId, 'promoted'));
+    await sshRun(newIp, sshKeyPath, [
+      'sh',
+      '-c',
+      addonJobStartCmd(projectName, attemptId, 'promoted'),
+    ]);
     updateProjectConfig((onDisk) => {
       const env = onDisk.environments?.[environment];
       if (env) env.lastAttemptId = attemptId;

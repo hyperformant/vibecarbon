@@ -207,7 +207,10 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
       argv: string[] | string,
       opts: { timeout?: number } = {},
     ) => {
-      const script = Array.isArray(argv) ? (argv[2] ?? '') : String(argv);
+      // The real argv contract (tests/_shared/ssh-contract.ts).
+      const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
+      assertSshRunArgv(argv);
+      const script = argv[2] ?? '';
       if (script.includes('echo present')) {
         h.events.push(`tls:check:${ip}`);
         h.state.checkTimeouts.push(opts.timeout ?? 0);

@@ -34,6 +34,8 @@ const h = vi.hoisted(() => {
     saved: [] as unknown[],
     // What updateProjectConfig's mutator starts from (null: an empty config).
     seed: null as null | Record<string, unknown>,
+    // A remote command containing this text fails (null: none do).
+    sshFail: null as null | string,
   };
   return { events, state };
 });
@@ -264,12 +266,29 @@ vi.mock('../../../src/lib/build.js', async (orig) => {
 
 vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  // Every remote command, in order, for the add-on job sequencing tests.
-  const record = async (ip: string, _k: string, cmd: unknown) => {
-    h.events.push(`ssh:${ip}:${Array.isArray(cmd) ? cmd.join(' ') : String(cmd)}`);
+  // Every remote command, in order, for the add-on job sequencing tests. The
+  // fakes keep the REAL contracts: sshRun takes an argv array and throws on
+  // anything else (as src/lib/ssh.js does), sshRunScript takes a script. A
+  // string-accepting fake let fix round 3 ship a scale that threw before its
+  // restore.
+  const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
+  const sshRun = async (ip: string, _k: string, argv: unknown) => {
+    assertSshRunArgv(argv);
+    h.events.push(`ssh:${ip}:${argv.join(' ')}`);
+    if (h.state.sshFail && argv.join(' ').includes(h.state.sshFail)) {
+      throw new Error(`ssh: ${h.state.sshFail} failed`);
+    }
     return '';
   };
-  return { ...actual, sshRun: record, sshRunScript: record };
+  const sshRunScript = async (ip: string, _k: string, script: unknown) => {
+    if (typeof script !== 'string') throw new Error('sshRunScript requires a script');
+    h.events.push(`ssh:${ip}:${script}`);
+    if (h.state.sshFail && script.includes(h.state.sshFail)) {
+      throw new Error(`ssh: ${h.state.sshFail} failed`);
+    }
+    return '';
+  };
+  return { ...actual, sshRun, sshRunScript };
 });
 
 const { SCALE_EFFECTS, resumeComposeCutover } = await import('../../../src/scale.js');
@@ -328,6 +347,7 @@ function reset(failAt = '') {
   h.state.dnsReadBackLater = null;
   h.state.saved.length = 0;
   h.state.seed = null;
+  h.state.sshFail = null;
 }
 
 describe('fenceComposePrimary', () => {
