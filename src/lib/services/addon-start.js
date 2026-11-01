@@ -226,7 +226,11 @@ stop_job() {
       ;;
   esac
   kill -TERM -- "-$old" 2>/dev/null || kill -TERM "$old" 2>/dev/null || true
-  timeout 60 tail --pid="$old" -f /dev/null 2>/dev/null || true
+  # Bounded wait for it to go; past the bound, KILL the same verified group
+  # (and the pid), so no job keeps running once its pid file is dropped.
+  if ! timeout "\${VC_ADDON_STOP_WAIT:-60}" tail --pid="$old" -f /dev/null 2>/dev/null; then
+    kill -KILL -- "-$old" 2>/dev/null || kill -KILL "$old" 2>/dev/null || true
+  fi
   rm -f "$dir/job.pid"
 }
 if [ "\${1:-}" = stop ]; then

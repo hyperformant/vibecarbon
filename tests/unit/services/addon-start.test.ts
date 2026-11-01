@@ -416,6 +416,31 @@ describe('addons-start.sh stop', () => {
     other.kill();
   });
 
+  // Minor 3: a job that outlives the bounded wait (it ignores TERM, or a
+  // compose child hangs) is KILLed, its whole verified group, before the pid
+  // file is dropped: never a job still running with nothing recording it.
+  it('escalates to KILL when the job outlives the wait', async () => {
+    const dir = jobDir();
+    // The job ignores TERM (inherited across exec), so only KILL ends it.
+    const first = spawn('sh', ['-c', `trap '' TERM; exec sh ${ADDON_JOB_SCRIPT}`], {
+      cwd: dir,
+      env: { ...env(dir), STUB_HANG_UP: '1' },
+      detached: true,
+      stdio: 'ignore',
+    });
+    const exited = new Promise<string | null>((r) => first.on('exit', (_c, sig) => r(sig)));
+    for (let i = 0; i < 200 && !existsSync(join(dir, '.vc-addons', 'job.pid')); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const code = await runAsync('sh', [ADDON_JOB_SCRIPT, 'stop'], {
+      cwd: dir,
+      env: { ...env(dir), VC_ADDON_STOP_WAIT: '1' },
+    });
+    expect(code).toBe(0);
+    expect(await exited).toBe('SIGKILL');
+    expect(existsSync(join(dir, '.vc-addons', 'job.pid'))).toBe(false);
+  });
+
   it('with no job running, stop is a no-op that succeeds', () => {
     const dir = jobDir();
     expect(spawnSync('sh', [ADDON_JOB_SCRIPT, 'stop'], { cwd: dir, env: env(dir) }).status).toBe(0);
