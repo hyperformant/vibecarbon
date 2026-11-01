@@ -36,7 +36,7 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 });
 
 const { DigitalOceanProvider } = await import('../../../src/lib/providers/digitalocean.js');
-const { detachCsiVolumesBeforeDestroy, runCsiDetachStep } = await import(
+const { detachCsiVolumesBeforeDestroy, fallbackCsiVolumeIds, runCsiDetachStep } = await import(
   '../../../src/lib/destroy/csi-detach.js'
 );
 
@@ -282,6 +282,50 @@ describe('detachCsiVolumesBeforeDestroy', () => {
   });
 });
 
+const PVC_NAME = 'pvc-978e575c-00fc-4263-9665-bd6e67f628ee';
+
+describe('fallbackCsiVolumeIds (PersistentVolume capture failed)', () => {
+  let provider: InstanceType<typeof DigitalOceanProvider>;
+  beforeEach(() => {
+    fetchWithRetryMock.mockReset();
+    provider = new DigitalOceanProvider('test-do-token');
+  });
+
+  it('keeps only volumes attached to the cluster droplets whose names are CSI names', async () => {
+    makeWorld({
+      volumeNames: new Map([
+        [LIVE, PVC_NAME],
+        [FOREIGN, 'operator-data'],
+      ]),
+    });
+
+    // Both are attached to this env's droplets per the pre-scan; only the
+    // pvc-<uuid> one is CSI's.
+    expect(await fallbackCsiVolumeIds(provider, [LIVE, FOREIGN])).toEqual([LIVE]);
+  });
+
+  it('never picks up a CSI-named volume that is not on the cluster droplets', async () => {
+    makeWorld({ volumeNames: new Map([[FOREIGN, PVC_NAME]]) });
+
+    expect(await fallbackCsiVolumeIds(provider, [LIVE])).toEqual([]);
+  });
+
+  it('the fallback ids feed the detach like captured ids do', async () => {
+    const world = makeWorld({ staleReads: 0, volumeNames: new Map([[LIVE, PVC_NAME]]) });
+    world.droplets.get(DB)?.delete(DELETED);
+
+    const ids = await fallbackCsiVolumeIds(provider, [LIVE]);
+    const out = await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [DB],
+      csiVolumeIds: ids,
+      ...FAST,
+    });
+
+    expect(out.detached).toEqual([LIVE]);
+    expect(() => world.providerDropletDelete(DB)).not.toThrow();
+  });
+});
+
 function fakeSpinner() {
   const events: Array<[string, string?]> = [];
   return {
@@ -368,5 +412,17 @@ describe('destroyK8sTier wiring', () => {
     expect(release).toBeGreaterThan(0);
     expect(detach).toBeGreaterThan(release);
     expect(destroy).toBeGreaterThan(detach);
+  });
+
+  it('computes the fallback before the CSI release, while the volumes still exist', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../../../src/destroy.js', import.meta.url)),
+      'utf8',
+    );
+    const body = src.slice(src.indexOf('async function destroyK8sTier('));
+    const fallback = body.indexOf('fallbackCsiVolumeIds(');
+    const release = body.indexOf('await cleanupClusterPVCs(');
+    expect(fallback).toBeGreaterThan(0);
+    expect(fallback).toBeLessThan(release);
   });
 });

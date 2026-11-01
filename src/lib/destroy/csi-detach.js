@@ -20,13 +20,15 @@
  * lists, ask DO to detach it and wait for the action, then wait until DO
  * lists none of them on any droplet. A 404 means the volume is gone, which is
  * done. Only volumes captured from the cluster's own PersistentVolumes are
- * touched, never one we cannot prove is this cluster's.
+ * touched, or, when that capture failed, the `pvc-<uuid>` volumes attached to
+ * this environment's cluster droplets (fallbackCsiVolumeIds below).
  *
  * Bounded by one budget for the whole step, waiting on conditions only. On
  * timeout it returns what is still listed and destroy goes on: `pulumi
  * destroy` then reports the droplet itself, and the server sweep after it
  * deletes the droplet by API.
  */
+import { isCsiVolumeName } from '../csi-volumes.js';
 import { pollUntil } from '../retry.js';
 
 const DEFAULT_BUDGET_MS = 180_000;
@@ -191,4 +193,28 @@ export async function runCsiDetachStep(
     );
   }
   return out;
+}
+
+/**
+ * The CSI volume ids to detach when the PersistentVolume capture failed: of
+ * the volumes the pre-scan saw attached to this environment's cluster
+ * droplets, the ones named like a CSI volume (`pvc-<uuid>`). Safe to detach:
+ * the provider's Droplet delete would detach everything on those droplets
+ * anyway. Call it before the CSI release, while the volumes still exist to be
+ * named. Returns [] when the listing fails.
+ *
+ * @param {{ listVolumes(): Promise<Array<{ id: string, name?: string }>> }} provider
+ * @param {string[]} attachedVolumeIds
+ * @returns {Promise<string[]>}
+ */
+export async function fallbackCsiVolumeIds(provider, attachedVolumeIds) {
+  const attached = new Set(attachedVolumeIds);
+  if (attached.size === 0) return [];
+  let volumes;
+  try {
+    volumes = await provider.listVolumes();
+  } catch {
+    return [];
+  }
+  return volumes.filter((v) => attached.has(v.id) && isCsiVolumeName(v.name)).map((v) => v.id);
 }

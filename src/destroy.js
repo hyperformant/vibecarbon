@@ -48,7 +48,7 @@ import {
   pulumiStackEnvs,
   resolveTier,
 } from './lib/deploy/tier-registry.js';
-import { runCsiDetachStep } from './lib/destroy/csi-detach.js';
+import { fallbackCsiVolumeIds, runCsiDetachStep } from './lib/destroy/csi-detach.js';
 import { createLeakLedger, describeResource, formatLeakReport } from './lib/destroy/leak-ledger.js';
 import { destroyPreviewBody, readS3SetupCompleted } from './lib/destroy/preview.js';
 import { checkS3CredentialMismatch } from './lib/destroy/s3-credential-check.js';
@@ -2707,11 +2707,14 @@ async function destroyK8sTier({
   // the identity list is the whole answer, so a `pvc-*` volume we did not
   // capture is somebody else's and must not be deleted.
   let identityComplete = false;
-  // Only the PersistentVolume capture proves a volume is this cluster's CSI
-  // volume; the pre-detach step below touches nothing else.
+  // The volumes the pre-destroy CSI detach may touch: the PersistentVolume
+  // capture, or when that failed, the pvc-<uuid> volumes on this env's cluster
+  // servers. Nothing else.
   const capturedCsiVolumeIds = [];
-  // Droplets/servers on the cluster network(s), from the pre-scan.
+  // Droplets/servers on the cluster network(s), and the volumes attached to
+  // them, from the pre-scan.
   const clusterServerIds = [];
+  const prescanVolumeIds = [];
 
   // 1. Delete DNS resources first (while servers still exist for reference) —
   // registry-driven, ownership-filtered, incl. provider health checks.
@@ -2797,6 +2800,7 @@ async function destroyK8sTier({
             .some((id) => clusterNetworkIds.has(id));
           if (inCluster) {
             clusterServerIds.push(server.id);
+            prescanVolumeIds.push(...provider.serverVolumeIds(server));
             allClusterVolumeIds.push(...provider.serverVolumeIds(server));
             // clusterLocations feeds cleanupOrphanedVolumes's
             // isPvcInClusterLocation fallback — the ONLY thing that catches a
@@ -2893,6 +2897,16 @@ async function destroyK8sTier({
           }
         }),
       );
+    }
+
+    // No PersistentVolume capture, but the CSI release below still runs if the
+    // API answers: fall back to the pvc-<uuid> volumes on this env's cluster
+    // servers for the pre-destroy detach. Named now, while they still exist.
+    if (typeof provider.detachVolume === 'function' && !identityComplete) {
+      const known = new Set(capturedCsiVolumeIds);
+      for (const id of await fallbackCsiVolumeIds(provider, prescanVolumeIds)) {
+        if (!known.has(id)) capturedCsiVolumeIds.push(id);
+      }
     }
 
     // Pre-Pulumi: release Hetzner CSI volumes via the cluster's own
