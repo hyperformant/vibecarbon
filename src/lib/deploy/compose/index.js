@@ -393,11 +393,7 @@ export function bootPullLogLine(ip, status) {
  * on by the deploy (setupServer does not await it) and never retried: the
  * deploy's own pull does whatever the boot pull did not.
  */
-export async function noteBootPull(
-  ip,
-  sshKeyPath,
-  { run = sshRunAsync, deployDbImage = resolveDbImage({ warn: () => {} }).ref } = {},
-) {
+export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync, deployDbImage } = {}) {
   try {
     const status = await run(
       ip,
@@ -409,9 +405,17 @@ export async function noteBootPull(
     // The boot pull fetches the pinned db image; a deploy running another
     // (VIBECARBON_DB_IMAGE) pulls its own, which the log should explain.
     const [bootDb] = bootPullImages();
-    if (deployDbImage && deployDbImage !== bootDb) {
+    // Resolved here, inside the try: a malformed VIBECARBON_DB_IMAGE throws,
+    // and this note runs unawaited (setupServer), so it must never reject.
+    let deployDb = deployDbImage;
+    try {
+      deployDb ??= resolveDbImage({ warn: () => {} }).ref;
+    } catch {
+      deployDb = null;
+    }
+    if (deployDb && deployDb !== bootDb) {
       writeLogDetail(
-        `[boot-pull] ${ip}: this deploy runs db image ${deployDbImage}, not the pinned ` +
+        `[boot-pull] ${ip}: this deploy runs db image ${deployDb}, not the pinned ` +
           `${bootDb} the boot pull fetched; the deploy pull fetches it`,
       );
     }

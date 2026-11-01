@@ -82,3 +82,22 @@ describe('noteBootPull: a db image the boot pull did not fetch', () => {
     expect(writeLogDetail).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('noteBootPull: a malformed VIBECARBON_DB_IMAGE', () => {
+  it('is noted as unreadable, never an unhandled rejection or a throw', async () => {
+    const prev = process.env.VIBECARBON_DB_IMAGE;
+    process.env.VIBECARBON_DB_IMAGE = 'not a ref ::';
+    try {
+      writeLogDetail.mockClear();
+      await expect(
+        noteBootPull('1.2.3.4', '/k', { run: vi.fn(async () => 'ok') }),
+      ).resolves.toBeUndefined();
+      expect(writeLogDetail).toHaveBeenCalledWith(
+        '[boot-pull] 1.2.3.4: core images already pulled at boot',
+      );
+    } finally {
+      if (prev === undefined) delete process.env.VIBECARBON_DB_IMAGE;
+      else process.env.VIBECARBON_DB_IMAGE = prev;
+    }
+  });
+});
