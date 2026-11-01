@@ -210,6 +210,23 @@ describe('compose-ha: the HA records are written while both servers boot', () =>
     expect(calls.indexOf('dns:setupHA')).toBeLessThan(calls.indexOf('haPullImages'));
   });
 
+  // M1: the 0.0.0.0 warm-up (started at deploy start) writes the same apex
+  // record; the HA write, now minutes earlier, must not race it.
+  it('waits for the 0.0.0.0 warm-up write before writing the HA records', async () => {
+    const warm = makeGate();
+    const run = runPlan(
+      planDeploy('compose-ha', {}),
+      { ...haCtx(), dnsWarmupPromise: warm.promise },
+      effects(REAL),
+    );
+    await vi.waitFor(() => expect(calls).toContain('haSetupServers'));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(setupHA).not.toHaveBeenCalled();
+    warm.release();
+    await run;
+    expect(setupHA).toHaveBeenCalledTimes(1);
+  });
+
   it('a refused write fails the deploy at update-dns, before either stack starts', async () => {
     setupHA.mockImplementation(async () => ({ success: false, error: 'rate limited' }));
     await expect(runPlan(planDeploy('compose-ha', {}), haCtx(), effects(REAL))).rejects.toThrow(

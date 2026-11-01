@@ -695,6 +695,9 @@ async function writeHaDnsRecords(ctx) {
     region,
     standbyRegion,
   } = ctx;
+  // The 0.0.0.0 warm-up started at deploy start writes the same apex record;
+  // this write, started as soon as both servers exist, must not race it.
+  await ctx.dnsWarmupPromise;
   const dnsName = DNS_PROVIDERS[dnsProvider].name;
   const { setupHA } = await getDnsProvider(dnsProvider);
   const haResult = await perfAsync('deploy.ha.compose.dns.setup', () =>
