@@ -534,8 +534,8 @@ export function extractLeakReport(result: CliResult): string {
   const lines = text
     .split('\n')
     .filter((line) => isLeakReportLine(line))
-    // Drop clack's `│` gutter along with the indentation.
-    .map((line) => line.replace(/^[\s│]+/, '').trim());
+    // Drop clack's gutter (`│`, or `|` on ASCII terminals) and the indentation.
+    .map((line) => line.replace(/^[\s│|]+/, '').trim());
   return lines.length > 0 ? lines.join('\n') : '(no leak report lines captured)';
 }
 

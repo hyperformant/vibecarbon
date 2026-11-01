@@ -279,6 +279,11 @@ describe('isLeakReportLine against what destroy actually prints', () => {
       ),
     ).toBe(true);
     expect(isLeakReportLine('│      ↳ Check for leftover resources in the console')).toBe(false);
+    // clack falls back to an ASCII gutter on terminals without Unicode.
+    expect(isLeakReportLine('|    LEAK       server         p-db (id 1): delete failed')).toBe(
+      true,
+    );
+    expect(isLeakReportLine('|      ↳ Run `vibecarbon destroy d4` again')).toBe(false);
     expect(isLeakReportLine('│  [volume] DEFERRED pvc-1, kept because ...')).toBe(false);
   });
 
