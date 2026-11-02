@@ -69,6 +69,7 @@ import {
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { preserveSafetyFields } from './lib/deploy/env-safety-fields.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
+import { sweepStaleDeltaDirs } from './lib/deploy/layer-delta.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import { planScale } from './lib/deploy/plan/scale-plan.js';
 import { buildRemote } from './lib/deploy/remote-build.js';
@@ -2157,6 +2158,10 @@ export async function run(args) {
   // as the new server's baseline (renderBundle), and the provider token is
   // resolved from .env.local. A truncated read would ship as-is.
   repairLegacyEnvQuoting(process.cwd());
+
+  // A killed earlier deploy or scale leaves its host-side delta work dir (a
+  // full image save) in the temp dir: clear those before this run sends one.
+  sweepStaleDeltaDirs();
 
   const envs = projectConfig.environments || {};
   const deployedEnvs = Object.entries(envs)

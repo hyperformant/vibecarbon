@@ -1692,6 +1692,11 @@ export async function executeDeployment(args, gatheredConfig) {
     region,
   });
 
+  // A killed earlier run leaves its host-side delta work dir (a full image
+  // save) in the temp dir: clear those before this run makes its own.
+  const { sweepStaleDeltaDirs } = await import('./layer-delta.js');
+  sweepStaleDeltaDirs();
+
   // --- STEP 2: Image Resolve ---
   // resolveBuildMode (ci-setup.js) returns one of — see also transferImage
   // in effects/index.js, which must stay in sync with these descriptions:

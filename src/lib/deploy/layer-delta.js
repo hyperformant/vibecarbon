@@ -38,9 +38,11 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -347,6 +349,74 @@ async function pushToRegistry({ run, ref, registryRef }) {
   });
 }
 
+/** The host-side work dir's name prefix, under the OS temp dir. */
+const DELTA_DIR_PREFIX = 'vibecarbon-delta-';
+
+/** The owner record inside each work dir: `{pid, startedAt}`. */
+export const DELTA_OWNER_FILE = 'owner.json';
+
+/** Above any delivery: a save, a delta and a send take minutes, never a day. */
+const DELTA_DIR_SAFE_AGE_MS = 24 * 3_600_000;
+
+const pidAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: alive, owned by someone else.
+    return err?.code === 'EPERM';
+  }
+};
+
+/**
+ * Remove the host-side delta work dirs a killed run left behind (each holds a
+ * full `docker save` of the app image). Run at the start of a deploy and of a
+ * scale. A dir goes when its owner process is dead, or when it is past the
+ * safe age (a recycled pid, or a dir from before owner records). This
+ * process's own dirs are never touched, and neither is a live run's young
+ * one. Best effort: a dir that cannot be read or removed is skipped.
+ *
+ * @param {{ root?: string, now?: number, maxAgeMs?: number, isAlive?: (pid: number) => boolean }} [opts]
+ * @returns {string[]} the dirs removed
+ */
+export function sweepStaleDeltaDirs({
+  root = tmpdir(),
+  now = Date.now(),
+  maxAgeMs = DELTA_DIR_SAFE_AGE_MS,
+  isAlive = pidAlive,
+} = {}) {
+  const removed = [];
+  let names;
+  try {
+    names = readdirSync(root);
+  } catch {
+    return removed;
+  }
+  for (const name of names.sort()) {
+    if (!name.startsWith(DELTA_DIR_PREFIX)) continue;
+    const dir = join(root, name);
+    try {
+      let owner = null;
+      try {
+        owner = JSON.parse(readFileSync(join(dir, DELTA_OWNER_FILE), 'utf-8'));
+      } catch {
+        owner = null;
+      }
+      const pid = typeof owner?.pid === 'number' ? owner.pid : null;
+      if (pid === process.pid) continue;
+      const startedAt =
+        typeof owner?.startedAt === 'number' ? owner.startedAt : statSync(dir).mtimeMs;
+      const stale = now - startedAt > maxAgeMs || (pid !== null && !isAlive(pid));
+      if (!stale) continue;
+      rmSync(dir, { recursive: true, force: true });
+      removed.push(dir);
+    } catch {
+      // Not ours to fight over: skip it.
+    }
+  }
+  return removed;
+}
+
 /**
  * Deliver a locally built image to a deploy target, sending only the layers it
  * lacks. See the file header for the protocol.
@@ -415,7 +485,13 @@ export async function deliverImage({
 
   const timer = perfTimer('deploy.image.delta');
   let delivered;
-  const work = mkdtempSync(join(tmpdir(), 'vibecarbon-delta-'));
+  const work = mkdtempSync(join(tmpdir(), DELTA_DIR_PREFIX));
+  // Who owns this dir, for sweepStaleDeltaDirs: the finally below removes it,
+  // but a killed run never reaches that.
+  writeFileSync(
+    join(work, DELTA_OWNER_FILE),
+    JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
+  );
   const archiveDir = join(work, 'save');
   const stageDir = join(work, 'stage');
   mkdirSync(archiveDir);
