@@ -26,6 +26,8 @@ import { c } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+import { symlinkedComponent } from './lib/project-write-guard.js';
+import { templatePathFor } from './lib/template-paths.js';
 
 const CLI_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVICES_DIR = join(CLI_ROOT, 'services');
@@ -188,24 +190,39 @@ async function removeService(serviceName, options) {
     projectRoot: cwd,
   }).map((e) => e.relPath);
   const droppedChecksums = [];
+  const skipped = [];
+  // A path through a symlink is never deleted (the delete would land where
+  // the link points), and a file the template itself ships stays (the
+  // template's copy of volumes/db/n8n-init.sh, say): both are left, the
+  // symlinked ones with a warning.
+  const throughLink = (rel) => {
+    const link = symlinkedComponent(cwd, rel.replace(/\/$/, ''));
+    if (link) skipped.push(`${rel}: ${link} is a symlink, and remove never deletes through one`);
+    return Boolean(link);
+  };
+  const templateShips = (rel) => existsSync(join(TEMPLATE_DIR, templatePathFor(rel)));
+  const removeOne = (rel) => {
+    if (templateShips(rel) || throughLink(rel)) return false;
+    removeFile(join(cwd, rel));
+    return true;
+  };
   for (const [src, dest] of Object.entries(serviceManifest.files || {})) {
     if (!isContainedRelPath(dest)) continue;
-    const fullPath = join(cwd, dest);
     if (!src.endsWith('/')) {
-      removeFile(fullPath);
-      droppedChecksums.push((key) => key === posix.normalize(dest));
+      const rel = posix.normalize(dest);
+      if (removeOne(rel)) droppedChecksums.push((key) => key === rel);
       continue;
     }
     const prefix = `${posix.normalize(dest).replace(/\/$/, '')}/`;
     if (!existsSync(join(TEMPLATE_DIR, dest))) {
-      removeDirectory(fullPath);
+      if (throughLink(prefix)) continue;
+      removeDirectory(join(cwd, dest));
       droppedChecksums.push((key) => key.startsWith(prefix));
       continue;
     }
-    const mine = shipped.filter((rel) => rel.startsWith(prefix));
-    for (const rel of mine) removeFile(join(cwd, rel));
-    for (const rel of mine) pruneEmptyDirs(cwd, posix.dirname(rel), prefix);
-    const set = new Set(mine);
+    const removed = shipped.filter((rel) => rel.startsWith(prefix)).filter(removeOne);
+    for (const rel of removed) pruneEmptyDirs(cwd, posix.dirname(rel), prefix);
+    const set = new Set(removed);
     droppedChecksums.push((key) => set.has(key));
   }
 
@@ -226,6 +243,7 @@ async function removeService(serviceName, options) {
   });
 
   s.stop(`${serviceManifest.name} removed successfully`);
+  for (const why of skipped) p.log.warn(`Skipped ${why}.`);
 
   p.note(
     [

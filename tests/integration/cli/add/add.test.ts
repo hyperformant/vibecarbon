@@ -5,7 +5,16 @@
  * .vibecarbon.json mutation + the actual filesystem effects users
  * encounter.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hashContent } from '../../../../src/lib/checksum.js';
@@ -108,6 +117,23 @@ describe('vibecarbon add', () => {
       const ingress = join(project, 'k8s/base/observability/ingressroute.yaml');
       expect(existsSync(`${ingress}.upgrade-backup`)).toBe(false);
       expect(existsSync(`${ingress}.upgrade-new`)).toBe(false);
+    });
+
+    it('never writes through a symlinked path inside the project', () => {
+      // A cloned project whose k8s/base/observability is a symlink to a
+      // directory elsewhere: add must not write there.
+      const outside = mkdtempSync(join(tmpdir(), 'vc-add-outside-'));
+      mkdirSync(join(project, 'k8s', 'base'), { recursive: true });
+      symlinkSync(outside, join(project, 'k8s', 'base', 'observability'));
+      const r = runCli('add', ['observability', '-y'], { cwd: project, timeoutMs: 30_000 });
+      assertSuccess(r);
+      expect(readdirSync(outside)).toEqual([]);
+      expect(r.stdout + r.stderr).toMatch(/symlink/i);
+      // Everything else still lands, and only what landed is recorded.
+      expect(existsSync(join(project, 'docker-compose.observability.yml'))).toBe(true);
+      const sums = (readManifest(project) as { fileChecksums?: Record<string, string> })
+        .fileChecksums;
+      expect(sums?.['k8s/base/observability/ingressroute.yaml']).toBeUndefined();
     });
 
     it('multi-feature add records all in one shot', () => {

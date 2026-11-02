@@ -40,6 +40,7 @@ import { isHAConfigured, registerProject, updateProjectConfig } from './lib/conf
 import { fetchWithRetry } from './lib/fetch-retry.js';
 import { appendToEnv, loadEnvVariables, loadManifest, setEnvVar } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+import { symlinkedComponent } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -201,12 +202,21 @@ function applyVariables(content, variables) {
 
 /**
  * Write one add-on file into the project. `written` collects
- * `{ dest, content }` for the checksums addService records.
+ * `{ dest, content }` for the checksums addService records; `written.skipped`
+ * the files left alone, for its warning.
  */
 async function installServiceFile(serviceName, srcPath, destPath, variables, offline, written) {
+  const skipped = written.skipped;
   const content = await fetchServiceFile(serviceName, srcPath, offline);
   const processedContent = applyVariables(content, variables);
 
+  // A symlink on the way would send the write wherever it points: skipped,
+  // and not recorded, so the warning addService prints names it.
+  const link = symlinkedComponent(process.cwd(), destPath);
+  if (link) {
+    skipped.push(`${destPath}: ${link} is a symlink, and add never writes through one`);
+    return;
+  }
   const fullDestPath = join(process.cwd(), destPath);
   mkdirSync(dirname(fullDestPath), { recursive: true });
   writeFileSync(fullDestPath, processedContent);
@@ -435,7 +445,7 @@ async function addService(serviceName, options) {
 
   try {
     // Install files based on manifest mappings
-    const written = [];
+    const written = Object.assign([], { skipped: [] });
     for (const [src, dest] of Object.entries(manifest.files || {})) {
       if (src.endsWith('/')) {
         // Directory mapping
@@ -506,6 +516,7 @@ async function addService(serviceName, options) {
     });
 
     s.stop(`${manifest.name} added successfully`);
+    for (const why of written.skipped) p.log.warn(`Skipped ${why}.`);
 
     // Show credentials if defined
     if (manifest.credentials) {
