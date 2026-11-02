@@ -85,6 +85,20 @@ describe('acquireUplinkLock', () => {
     expect(vi.mocked(progressLog)).not.toHaveBeenCalled();
   });
 
+  it('a host release that throws still lets the next in-process acquirer in', async () => {
+    const lockDir = join(makeDir(), 'uplink-push.lock');
+    const acquireHost =
+      async ({ label }: { label: string }) =>
+      () => {
+        if (label === 'a') throw new Error('EACCES: rm failed');
+      };
+    const release1 = await acquireUplinkLock({ lockDir, label: 'a', acquireHost });
+    const b = acquireUplinkLock({ lockDir, label: 'b', acquireHost });
+    expect(() => release1()).toThrow(/EACCES/);
+    const release2 = await b;
+    release2();
+  });
+
   it('a wait on another process logs once and names its pid', async () => {
     vi.mocked(progressLog).mockClear();
     const lockDir = join(makeDir(), 'uplink-push.lock');

@@ -83,6 +83,7 @@ function holderIsStale(holder, staleMs, now) {
  * @param {string} [params.label] - short tag for the wait/acquire log lines
  * @param {number} [params.staleMs]
  * @param {(ms: number) => Promise<void>} [params.sleep] - test seam
+ * @param {(opts: object) => Promise<() => void>} [params.acquireHost] - test seam
  * @returns {Promise<() => void>}
  */
 export async function acquireUplinkLock(opts = {}) {
@@ -107,7 +108,8 @@ export async function acquireUplinkLock(opts = {}) {
   await previous;
   let releaseHost;
   try {
-    releaseHost = await acquireHostLock({ ...opts, lockDir });
+    // acquireHost: a test seam for the host-wide half.
+    releaseHost = await (opts.acquireHost ?? acquireHostLock)({ ...opts, lockDir });
   } catch (err) {
     leaveQueue();
     throw err;
@@ -116,8 +118,12 @@ export async function acquireUplinkLock(opts = {}) {
   return () => {
     if (released) return;
     released = true;
-    releaseHost();
-    leaveQueue();
+    // A host release that throws must not strand the in-process queue.
+    try {
+      releaseHost();
+    } finally {
+      leaveQueue();
+    }
   };
 }
 
