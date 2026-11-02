@@ -35,6 +35,8 @@ import {
   copyFileSync,
   createReadStream,
   createWriteStream,
+  constants as fsConstants,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -42,7 +44,6 @@ import {
   readFileSync,
   readSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -349,14 +350,45 @@ async function pushToRegistry({ run, ref, registryRef }) {
   });
 }
 
-/** The host-side work dir's name prefix, under the OS temp dir. */
-const DELTA_DIR_PREFIX = 'vibecarbon-delta-';
+/** Each work dir's name prefix, inside the private root (deltaWorkRoot). */
+const DELTA_DIR_PREFIX = 'delta-';
 
 /** The owner record inside each work dir: `{pid, startedAt}`. */
 export const DELTA_OWNER_FILE = 'owner.json';
 
 /** Above any delivery: a save, a delta and a send take minutes, never a day. */
 const DELTA_DIR_SAFE_AGE_MS = 24 * 3_600_000;
+
+const myUid = () => (typeof process.getuid === 'function' ? process.getuid() : null);
+
+/**
+ * The private per-user directory every host-side delta work dir lives in:
+ * `<base>/vibecarbon-<uid>` (base: the OS temp dir), created mode 0700. It is
+ * used only when lstat shows a real directory (not a symlink) owned by this
+ * user with no group or other bits; anything else is refused, since another
+ * local user could have planted it in a shared temp dir.
+ *
+ * @param {{ base?: string, lstat?: typeof lstatSync }} [opts]
+ * @returns {string}
+ */
+export function deltaWorkRoot({ base = tmpdir(), lstat = lstatSync } = {}) {
+  const uid = myUid();
+  const root = join(base, `vibecarbon-${uid ?? 'user'}`);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const st = lstat(root);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`${root} is not a real directory, so it is not used for image work dirs`);
+  }
+  if (uid !== null && st.uid !== uid) {
+    throw new Error(`${root} is owned by uid ${st.uid}, not ${uid}, so it is not used`);
+  }
+  if ((st.mode & 0o077) !== 0) {
+    throw new Error(
+      `${root} has mode ${(st.mode & 0o777).toString(8)}; it must be 0700. Fix it with: chmod 700 ${root}`,
+    );
+  }
+  return root;
+}
 
 const pidAlive = (pid) => {
   try {
@@ -368,26 +400,52 @@ const pidAlive = (pid) => {
   }
 };
 
+/** A real directory (not a symlink) owned by this user. */
+const ownDir = (st, uid) =>
+  st.isDirectory() && !st.isSymbolicLink() && (uid === null || st.uid === uid);
+
+/** owner.json, read only when it is a regular file, never through a symlink. */
+function readOwner(dir, lstat) {
+  const path = join(dir, DELTA_OWNER_FILE);
+  try {
+    if (!lstat(path).isFile()) return null;
+    const fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    try {
+      return JSON.parse(readFileSync(fd, 'utf-8'));
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Remove the host-side delta work dirs a killed run left behind (each holds a
- * full `docker save` of the app image). Run at the start of a deploy and of a
- * scale. A dir goes when its owner process is dead, or when it is past the
- * safe age (a recycled pid, or a dir from before owner records). This
- * process's own dirs are never touched, and neither is a live run's young
- * one. Best effort: a dir that cannot be read or removed is skipped.
+ * Remove the delta work dirs a killed run left behind (each holds a full
+ * `docker save` of the app image). Run at the start of a deploy and of a
+ * scale. It looks only inside the private root (deltaWorkRoot), and only at
+ * real directories owned by this user: a symlink or a foreign entry is
+ * skipped, never followed. A dir goes when its owner process is dead or it is
+ * past the safe age (a recycled pid, or no owner record). This process's own
+ * dirs, and a live run's young ones, are never touched. Best effort: a
+ * refused root, or a dir that cannot be read or removed, is skipped.
  *
- * @param {{ root?: string, now?: number, maxAgeMs?: number, isAlive?: (pid: number) => boolean }} [opts]
+ * @param {{ base?: string, now?: number, maxAgeMs?: number, isAlive?: (pid: number) => boolean, lstat?: typeof lstatSync }} [opts]
  * @returns {string[]} the dirs removed
  */
 export function sweepStaleDeltaDirs({
-  root = tmpdir(),
+  base = tmpdir(),
   now = Date.now(),
   maxAgeMs = DELTA_DIR_SAFE_AGE_MS,
   isAlive = pidAlive,
+  lstat = lstatSync,
 } = {}) {
   const removed = [];
+  const uid = myUid();
+  let root;
   let names;
   try {
+    root = deltaWorkRoot({ base, lstat });
     names = readdirSync(root);
   } catch {
     return removed;
@@ -396,18 +454,16 @@ export function sweepStaleDeltaDirs({
     if (!name.startsWith(DELTA_DIR_PREFIX)) continue;
     const dir = join(root, name);
     try {
-      let owner = null;
-      try {
-        owner = JSON.parse(readFileSync(join(dir, DELTA_OWNER_FILE), 'utf-8'));
-      } catch {
-        owner = null;
-      }
+      const st = lstat(dir);
+      if (!ownDir(st, uid)) continue;
+      const owner = readOwner(dir, lstat);
       const pid = typeof owner?.pid === 'number' ? owner.pid : null;
       if (pid === process.pid) continue;
-      const startedAt =
-        typeof owner?.startedAt === 'number' ? owner.startedAt : statSync(dir).mtimeMs;
+      const startedAt = typeof owner?.startedAt === 'number' ? owner.startedAt : st.mtimeMs;
       const stale = now - startedAt > maxAgeMs || (pid !== null && !isAlive(pid));
       if (!stale) continue;
+      // The root is ours alone (0700), so no other user can swap this entry
+      // between the lstat above and the remove.
       rmSync(dir, { recursive: true, force: true });
       removed.push(dir);
     } catch {
@@ -451,6 +507,7 @@ export function sweepStaleDeltaDirs({
  *     send?: (cmd: string, stdin: import('node:stream').Readable) => Promise<{code: number, stderr: string}>,
  *     saveImage?: (tag: string, dir: string) => Promise<void>,
  *     acquireLock?: (opts: {label: string}) => Promise<() => void>,
+ *     workBase?: string,
  *   },
  * }} args
  * @returns {Promise<{bytes: number, layersSent: number, layersReused: number}>}
@@ -481,11 +538,18 @@ export async function deliverImage({
     send = sshSender(sshArgs),
     saveImage = saveImageToDir,
     acquireLock = acquireUplinkLock,
+    workBase = tmpdir(),
   } = deps;
 
   const timer = perfTimer('deploy.image.delta');
   let delivered;
-  const work = mkdtempSync(join(tmpdir(), DELTA_DIR_PREFIX));
+  let workRoot;
+  try {
+    workRoot = deltaWorkRoot({ base: workBase });
+  } catch (err) {
+    throw new DeliveryError(err.message);
+  }
+  const work = mkdtempSync(join(workRoot, DELTA_DIR_PREFIX));
   // Who owns this dir, for sweepStaleDeltaDirs: the finally below removes it,
   // but a killed run never reaches that.
   writeFileSync(
