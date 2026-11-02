@@ -21,7 +21,10 @@
  *   - CORRUPT holder.json: counts as stale — a parse error must degrade to
  *     "reap and proceed", never to a permanent block.
  *
- * Waiting is logged (an operator watching a silent deploy would otherwise
+ * Within one process (compose-ha's two deltas) acquirers queue on a promise in
+ * front of the directory lock: no poll and no log for a wait on ourselves.
+ *
+ * Waiting on another process is logged (an operator watching a silent deploy would otherwise
  * read the queue as a hang), and acquisition after a wait emits an `[uplink]`
  * line mirroring the `[state]` telemetry so matrix logs show the contention
  * this lock absorbs.
@@ -81,12 +84,52 @@ function holderIsStale(holder, staleMs, now) {
  * @param {(ms: number) => Promise<void>} [params.sleep] - test seam
  * @returns {Promise<() => void>}
  */
-export async function acquireUplinkLock({
-  lockDir = UPLINK_LOCK_DIR,
+export async function acquireUplinkLock(opts = {}) {
+  const lockDir = opts.lockDir ?? UPLINK_LOCK_DIR;
+  // In-process queue in front of the host lock: compose-ha sends one delta
+  // per server from one deploy, and the second send must wait for the first
+  // without polling the lock directory or logging a wait on itself. Only the
+  // head of this queue touches the host lock.
+  const previous = inProcessTail.get(lockDir) ?? Promise.resolve();
+  let leave;
+  const slot = new Promise((resolve) => {
+    leave = resolve;
+  });
+  const tail = previous.then(() => slot);
+  inProcessTail.set(lockDir, tail);
+  // Leaving the queue lets the next member in; the last one out empties the
+  // map entry, so it never holds a settled promise per lock directory.
+  const leaveQueue = () => {
+    leave();
+    if (inProcessTail.get(lockDir) === tail) inProcessTail.delete(lockDir);
+  };
+  await previous;
+  let releaseHost;
+  try {
+    releaseHost = await acquireHostLock({ ...opts, lockDir });
+  } catch (err) {
+    leaveQueue();
+    throw err;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseHost();
+    leaveQueue();
+  };
+}
+
+/** lockDir -> the promise the next in-process acquirer waits on. */
+const inProcessTail = new Map();
+
+/** The host-wide half: one holder per operator machine, across processes. */
+async function acquireHostLock({
+  lockDir,
   label = 'push',
   staleMs = DEFAULT_STALE_MS,
   sleep = defaultSleep,
-} = {}) {
+}) {
   mkdirSync(dirname(lockDir), { recursive: true, mode: 0o700 });
   const queuedAt = Date.now();
   let waitedLogged = false;
@@ -127,12 +170,8 @@ export async function acquireUplinkLock({
         waitedLogged = true;
         // Without this a queued push looks like a hang — no docker output,
         // nothing, until the other process's transfer drains.
-        // compose-ha sends one delta per server from one deploy, so the
-        // holder can be this process's own other transfer.
         progressLog(
-          holder.pid === process.pid
-            ? `[uplink] ${label}: waiting for this deploy's other transfer`
-            : `[uplink] ${label}: waiting for a concurrent transfer in another process (pid ${holder.pid})`,
+          `[uplink] ${label}: waiting for a concurrent transfer in another process (pid ${holder.pid})`,
         );
       }
       await sleep(POLL_MS);

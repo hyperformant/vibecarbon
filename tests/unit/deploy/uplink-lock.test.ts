@@ -62,19 +62,52 @@ describe('acquireUplinkLock', () => {
     expect(events).toEqual(['a:acquired', 'b:acquired']);
   });
 
-  it("a wait on this process's own other transfer says so, not 'another process'", async () => {
+  it("a wait on this process's own other transfer neither polls nor logs", async () => {
     // compose-ha sends one delta to each server from one deploy: the second
-    // send queues behind the first, inside the same process.
+    // send queues behind the first in-process, and takes the lock the moment
+    // the first releases.
+    vi.mocked(progressLog).mockClear();
+    const sleep = vi.fn(fastSleep);
+    const lockDir = join(makeDir(), 'uplink-push.lock');
+    const release1 = await acquireUplinkLock({ lockDir, label: 'a', sleep });
+    let bAcquired = false;
+    const b = acquireUplinkLock({ lockDir, label: 'b', sleep }).then((rel) => {
+      bAcquired = true;
+      return rel;
+    });
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    expect(bAcquired).toBe(false);
+    release1();
+    const release2 = await b;
+    expect(JSON.parse(readFileSync(join(lockDir, 'holder.json'), 'utf-8')).label).toBe('b');
+    release2();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(vi.mocked(progressLog)).not.toHaveBeenCalled();
+  });
+
+  it('a wait on another process logs once and names its pid', async () => {
     vi.mocked(progressLog).mockClear();
     const lockDir = join(makeDir(), 'uplink-push.lock');
-    const release1 = await acquireUplinkLock({ lockDir, label: 'a', sleep: fastSleep });
-    const b = acquireUplinkLock({ lockDir, label: 'b', sleep: fastSleep });
-    for (let i = 0; i < 5; i++) await Promise.resolve();
-    release1();
-    (await b)();
+    mkdirSync(lockDir, { recursive: true });
+    // A live process that is not us: our parent.
+    writeFileSync(
+      join(lockDir, 'holder.json'),
+      JSON.stringify({ pid: process.ppid, startedAt: Date.now() }),
+    );
+    let polls = 0;
+    const release = await acquireUplinkLock({
+      lockDir,
+      label: 'x',
+      sleep: async () => {
+        polls++;
+        if (polls === 2) rmSync(lockDir, { recursive: true, force: true });
+      },
+    });
+    release();
     const lines = vi.mocked(progressLog).mock.calls.map((c) => String(c[0]));
-    expect(lines.some((l) => l.includes("b: waiting for this deploy's other transfer"))).toBe(true);
-    expect(lines.some((l) => l.includes('another process'))).toBe(false);
+    expect(lines.filter((l) => l.includes(`another process (pid ${process.ppid})`))).toHaveLength(
+      1,
+    );
   });
 
   it('reaps a stale holder whose process is dead', async () => {
