@@ -7,7 +7,7 @@
  * the grafana-tls certificate on every project that added it before the
  * one-certificate-per-name fix.
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -15,10 +15,12 @@ import {
   addonOwnedPaths,
   addonUpgradeEntries,
   installedAddonNames,
+  isContainedRelPath,
 } from '../../../src/lib/addon-upgrade-files.js';
 import { getFilePolicy } from '../../../src/lib/upgrade-policy.js';
 
 const SERVICES = join(process.cwd(), 'services');
+const ROOT = '/srv/project';
 
 /** A throwaway services/ tree with one add-on. */
 function fakeServices(): string {
@@ -54,7 +56,11 @@ describe('installedAddonNames', () => {
 describe('addonUpgradeEntries', () => {
   it('maps files and walks directories, project path to bundled source', () => {
     const dir = fakeServices();
-    const entries = addonUpgradeEntries({ installed: ['demo'], servicesDir: dir });
+    const entries = addonUpgradeEntries({
+      installed: ['demo'],
+      servicesDir: dir,
+      projectRoot: ROOT,
+    });
     expect(entries.map((e) => e.relPath).sort()).toEqual([
       'docker-compose.demo.prod.yml',
       'k8s/base/demo/kustomization.yaml',
@@ -65,11 +71,17 @@ describe('addonUpgradeEntries', () => {
   });
 
   it('nothing for an add-on the project did not install', () => {
-    expect(addonUpgradeEntries({ installed: [], servicesDir: fakeServices() })).toEqual([]);
+    expect(
+      addonUpgradeEntries({ installed: [], servicesDir: fakeServices(), projectRoot: ROOT }),
+    ).toEqual([]);
   });
 
   it('the real observability add-on: its k8s and compose files are shipped by upgrade', () => {
-    const entries = addonUpgradeEntries({ installed: ['observability'], servicesDir: SERVICES });
+    const entries = addonUpgradeEntries({
+      installed: ['observability'],
+      servicesDir: SERVICES,
+      projectRoot: ROOT,
+    });
     const paths = entries.map((e) => e.relPath);
     for (const p of [
       'k8s/base/observability/ingressroute.yaml',
@@ -98,7 +110,11 @@ describe('every add-on file upgrade can reach has a live policy', () => {
   });
 
   it('nothing but the integration docs is classified never', () => {
-    const never = addonUpgradeEntries({ installed: names, servicesDir: SERVICES })
+    const never = addonUpgradeEntries({
+      installed: names,
+      servicesDir: SERVICES,
+      projectRoot: ROOT,
+    })
       .map((e) => e.relPath)
       .filter((p) => getFilePolicy(p) === 'never');
     expect(never.sort()).toEqual([
@@ -116,5 +132,100 @@ describe('addonOwnedPaths', () => {
     expect(owned.has('docker-compose.n8n.prod.yml')).toBe(true);
     expect(owned.has('k8s/base/observability/ingressroute.yaml')).toBe(true);
     expect(owned.has('docker-compose.prod.yml')).toBe(false);
+  });
+});
+
+/**
+ * Hardening: service names come from the project's .vibecarbon.json, which a
+ * cloned project controls, and manifest paths are joined into file paths.
+ * Nothing may read outside the add-on's own bundled directory or write
+ * outside the project.
+ */
+describe('containment', () => {
+  /** A services/ tree whose one add-on maps `files`. */
+  function servicesWith(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-addon-contain-'));
+    mkdirSync(join(dir, 'demo', 'k8s'), { recursive: true });
+    writeFileSync(join(dir, 'demo', 'manifest.json'), JSON.stringify({ name: 'demo', files }));
+    writeFileSync(join(dir, 'demo', 'k8s', 'a.yaml'), 'kind: X\n');
+    writeFileSync(join(dir, 'secret.txt'), 'outside the add-on\n');
+    return dir;
+  }
+
+  it('accepts a service name only from the listing of the packaged services/ dir', () => {
+    const dir = servicesWith({ 'k8s/': 'k8s/base/demo/' });
+    const config = { services: { demo: {}, '../x': {}, 'demo/../demo': {}, '.': {}, '': {} } };
+    expect(installedAddonNames(config, dir)).toEqual(['demo']);
+  });
+
+  it('a name not in the listing yields no entries even if passed straight in', () => {
+    const dir = servicesWith({ 'k8s/': 'k8s/base/demo/' });
+    const rejected: string[] = [];
+    const entries = addonUpgradeEntries({
+      installed: ['../x', 'demo/..'],
+      servicesDir: join(dir, 'demo'),
+      projectRoot: ROOT,
+      onReject: (why: string) => rejected.push(why),
+    });
+    expect(entries).toEqual([]);
+    expect(rejected.length).toBe(2);
+  });
+
+  it('rejects a manifest src that resolves outside the add-on directory', () => {
+    const dir = servicesWith({ '../secret.txt': 'stolen.txt', 'k8s/': 'k8s/base/demo/' });
+    const rejected: string[] = [];
+    const entries = addonUpgradeEntries({
+      installed: ['demo'],
+      servicesDir: dir,
+      projectRoot: ROOT,
+      onReject: (why: string) => rejected.push(why),
+    });
+    expect(entries.map((e) => e.relPath)).toEqual(['k8s/base/demo/a.yaml']);
+    expect(rejected.join('\n')).toContain('../secret.txt');
+  });
+
+  it.each([
+    ['a .. segment', '../outside.yaml'],
+    ['a .. segment mid-path', 'k8s/../../outside.yaml'],
+    ['an absolute path', '/etc/cron.d/x'],
+    ['a Windows absolute path', 'C:\\x.yaml'],
+    ['the project root itself', '.'],
+  ])('rejects a dest with %s', (_label, dest) => {
+    const dir = servicesWith({ 'k8s/a.yaml': dest, 'k8s/': 'k8s/base/demo/' });
+    const rejected: string[] = [];
+    const entries = addonUpgradeEntries({
+      installed: ['demo'],
+      servicesDir: dir,
+      projectRoot: ROOT,
+      onReject: (why: string) => rejected.push(why),
+    });
+    expect(entries.map((e) => e.relPath)).toEqual(['k8s/base/demo/a.yaml']);
+    expect(rejected).toHaveLength(1);
+    expect(addonOwnedPaths(dir).has(dest)).toBe(false);
+  });
+
+  it('isContainedRelPath: only a relative path that stays inside the project', () => {
+    for (const ok of ['docker-compose.prod.yml', 'k8s/base/a.yaml', 'a/./b.yaml']) {
+      expect(isContainedRelPath(ok), ok).toBe(true);
+    }
+    for (const bad of ['', '.', '..', '../x', 'a/../../x', 'a/../b', '/abs', 'C:\\x', 'a\\..\\b']) {
+      expect(isContainedRelPath(bad), bad).toBe(false);
+    }
+  });
+});
+
+describe('upgrade.js refuses an uncontained path before its policy check', () => {
+  it('filters every upgrade entry through isContainedRelPath ahead of getFilePolicy', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'upgrade.js'), 'utf8');
+    const start = src.indexOf('const upgradeEntries = [');
+    const loop = src.indexOf('of upgradeEntries) {', start);
+    const build = src.slice(start, loop);
+    const contain = build.indexOf('.filter(({ relPath }) => isContainedRelPath(relPath))');
+    const policy = build.indexOf(".filter(({ relPath }) => getFilePolicy(relPath) !== 'never')");
+    expect(start).toBeGreaterThan(-1);
+    expect(contain).toBeGreaterThan(-1);
+    expect(policy).toBeGreaterThan(contain);
+    // Applied to the whole list (template and add-on entries), not one half.
+    expect(build.lastIndexOf(']', contain)).toBeGreaterThan(build.indexOf('addonUpgradeEntries('));
   });
 });

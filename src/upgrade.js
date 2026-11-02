@@ -25,6 +25,7 @@ import {
   addonOwnedPaths,
   addonUpgradeEntries,
   installedAddonNames,
+  isContainedRelPath,
 } from './lib/addon-upgrade-files.js';
 import { runDependencyAudit } from './lib/audit-advisories.js';
 import { isBinaryFile } from './lib/binary-files.js';
@@ -539,8 +540,14 @@ async function main(cliArgs) {
     ...addonUpgradeEntries({
       installed: installedAddonNames(manifest, SERVICES_DIR),
       servicesDir: SERVICES_DIR,
-    }).filter(({ relPath }) => getFilePolicy(relPath) !== 'never'),
-  ];
+      projectRoot: cwd,
+      onReject: (why) => p.log.warn(`Add-on file skipped: ${why}.`),
+    }),
+  ]
+    // Containment before any policy: a path with a `..` segment, or an
+    // absolute one, is never read or written, whatever its policy says.
+    .filter(({ relPath }) => isContainedRelPath(relPath))
+    .filter(({ relPath }) => getFilePolicy(relPath) !== 'never');
 
   // Classify each file
   const autoUpdated = []; // { path, reason: 'updated' | 'added' }
