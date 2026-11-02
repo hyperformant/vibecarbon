@@ -64,6 +64,7 @@ import {
   fenceDatabaseWrites,
   getReplPasswordFromSecret,
   isStandbyStreaming,
+  k8sDbRolloutWait,
   k8sPsqlRunner,
   promoteStandby,
   reseedStandbyFromPrimary,
@@ -80,7 +81,6 @@ import {
 } from './lib/deploy/walg-audit.js';
 import {
   demoteK8sWalgRole,
-  k8sDbRolloutWait,
   k8sSetWalgRoleArgv,
   walgRoleDegradedMessage,
 } from './lib/deploy/walg-role.js';

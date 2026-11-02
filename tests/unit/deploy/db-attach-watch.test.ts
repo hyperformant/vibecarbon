@@ -225,9 +225,22 @@ describe('watchDbAttach', () => {
   });
 });
 
-describe('k8sDbRolloutWait: the failover WALG_ROLE rolls run under the watch', () => {
+describe('k8sDbRolloutWait: a remote db roll runs under the watch', () => {
+  it('waits on the db StatefulSet with the budget it is given', async () => {
+    const { k8sDbRolloutStatusArgv } = await import('../../../src/lib/deploy/replication.js');
+    expect(k8sDbRolloutStatusArgv(300)).toEqual([
+      '-n',
+      'vibecarbon',
+      'rollout',
+      'status',
+      'statefulset/db',
+      '--timeout=300s',
+    ]);
+    expect(k8sDbRolloutStatusArgv().at(-1)).toBe('--timeout=600s');
+  });
+
   it('stops a roll whose re-attach went stale, on that cluster, by name', async () => {
-    const { k8sDbRolloutWait } = await import('../../../src/lib/deploy/walg-role.js');
+    const { k8sDbRolloutWait } = await import('../../../src/lib/deploy/replication.js');
     const cluster = fakeCluster({
       uid: 'promoted-uid',
       events: [failedMount('promoted-uid', '2026-11-01T16:07:07Z', '2026-11-01T16:15:22Z', 12)],
@@ -263,13 +276,6 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
       return statSync(p).isDirectory() ? walk(p) : /\.js$/.test(n) ? [p] : [];
     });
 
-  it('k8sDbRolloutStatusArgv is only spent inside k8sDbRolloutWait', () => {
-    const users = walk(join(ROOT, 'src'))
-      .filter((f) => !f.endsWith('walg-role.js'))
-      .filter((f) => /k8sDbRolloutStatusArgv\(/.test(readFileSync(f, 'utf-8')));
-    expect(users).toEqual([]);
-  });
-
   // Both spellings of a db rollout wait: one remote command string, or an
   // argv array ('rollout', 'status', `statefulset/${DB_STATEFULSET}`), with
   // any quote style and whitespace between the tokens.
@@ -284,7 +290,7 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
   const ALLOWED = new Map<string, string>([
     // The argv builder itself; the census above keeps it spent only inside
     // k8sDbRolloutWait, which runs it under watchDbAttach.
-    ['walg-role.js#k8sDbRolloutStatusArgv', 'builder for k8sDbRolloutWait'],
+    ['replication.js#k8sDbRolloutStatusArgv', 'builder for k8sDbRolloutWait'],
     // The failover/restore re-seed keeps its own signature-gated repair
     // (docs/mitigations.yml do-csi-stale-volumeattachment): on the
     // signature it clears the stale attachments and waits once more,
@@ -299,6 +305,25 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
     ];
     return `${file.split('/').pop()}#${fns.at(-1)?.[1] ?? '(top level)'}`;
   };
+
+  it('k8sDbRolloutStatusArgv is only spent inside k8sDbRolloutWait', () => {
+    let sites = 0;
+    for (const f of walk(join(ROOT, 'src'))) {
+      const src = readFileSync(f, 'utf-8');
+      for (const m of src.matchAll(/k8sDbRolloutStatusArgv\(/g)) {
+        // The site of the match's END, so the definition itself reads as
+        // replication.js#k8sDbRolloutStatusArgv.
+        const site = siteOf(f, src, (m.index ?? 0) + m[0].length);
+        expect(
+          ['replication.js#k8sDbRolloutWait', 'replication.js#k8sDbRolloutStatusArgv'],
+          site,
+        ).toContain(site);
+        sites += 1;
+      }
+    }
+    // The definition and its one call.
+    expect(sites).toBe(2);
+  });
 
   /** Every db rollout wait in `src` that is neither inside watchDbAttach nor allowlisted. */
   const unwatched = (file: string, src: string) => {
@@ -340,8 +365,10 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
       offenders.push(...unwatched(f, src));
     }
     expect(offenders, 'db rollout wait(s) outside watchDbAttach').toEqual([]);
-    // Positive control: awaitDbRollout, the reseed standby boot, the builder,
-    // the re-seed repair and restore are all spelled one of the two ways.
-    expect(seen).toBeGreaterThanOrEqual(5);
+    // Positive control, six sites: k3s.js awaitDbRollout (its argv and its
+    // description), the ha module's reseed standby boot, replication.js's
+    // k8sDbRolloutStatusArgv builder and reseedStandbyFromPrimary repair, and
+    // restore.js's db rollout. No WALG_ROLE roll is left to wait on.
+    expect(seen).toBeGreaterThanOrEqual(6);
   });
 });

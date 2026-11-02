@@ -36,7 +36,6 @@ import {
   DB_ROLE_CONFIGMAP,
   DB_ROLE_INTENT_KEY,
   dbRoleConfigMapManifest,
-  k8sDbRolloutStatusArgv,
   k8sSetWalgRoleArgv,
   k8sWalgRoleExecArgv,
   k8sWalgRoleIntentApplyArgv,
@@ -188,17 +187,6 @@ describe('k8s write-guard patch', () => {
 
   it('targets the StatefulSet, not the pod — a pod patch would be lost on the next roll', () => {
     expect(k8sSetWalgRoleArgv('primary')).not.toContain(DB_POD);
-  });
-
-  it('waits for the rollout, because the audit that follows reads the RUNNING pod', () => {
-    expect(k8sDbRolloutStatusArgv(300)).toEqual([
-      '-n',
-      'vibecarbon',
-      'rollout',
-      'status',
-      `statefulset/${DB_STATEFULSET}`,
-      '--timeout=300s',
-    ]);
   });
 });
 

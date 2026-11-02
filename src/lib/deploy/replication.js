@@ -801,8 +801,8 @@ const ATTACH_WATCH_READ_TIMEOUT_MS = 30_000;
  * state, and stop the wait early, with StaleVolumeAttachmentError, once it
  * has held (persistentStaleAttach). Every db rollout wait that (re)attaches
  * the db volume goes through here: the cold and redeploy rollout
- * (awaitDbRollout), the deploy-side reseed's standby boot, and the failover
- * WALG_ROLE rolls (k8sDbRolloutWait). A volume in that state never mounts by
+ * (awaitDbRollout), the deploy-side reseed's standby boot, and the remote
+ * db settles (k8sDbRolloutWait). A volume in that state never mounts by
  * itself (DO e2e 2026-11-01: 600s of the same event; docs/mitigations.yml
  * do-csi-stale-volumeattachment), so the rest of the budget would only delay
  * the same failure.
@@ -882,6 +882,49 @@ export async function watchDbAttach(waitRollout, { kubectl, pollMs = 15_000 }) {
     stop.abort();
     await watch;
   }
+}
+
+/**
+ * Wait for the db StatefulSet to roll on a remote cluster, under
+ * watchDbAttach: a db pod that is down or mid-roll re-attaches its volume on
+ * the way back (the do-csi-stale-volumeattachment trigger), so a stale
+ * attachment stops the wait early with StaleVolumeAttachmentError instead of
+ * burning the budget. The ssh budget sits 30s above the kubectl --timeout so
+ * kubectl reports a rollout failure itself. The one way a remote caller waits
+ * on a db roll (db-rollout-wait census in
+ * tests/unit/deploy/db-attach-watch.test.ts).
+ *
+ * @param {object} o
+ * @param {(ip: string, argv: string[], opts?: object) => Promise<string>} o.kubectl - sshKubectl-shaped
+ * @param {string} o.ip
+ * @param {number} [o.timeoutS]
+ * @param {number} [o.pollMs] - watchDbAttach's poll interval (test seam)
+ * @returns {Promise<string>}
+ */
+export function k8sDbRolloutWait({ kubectl, ip, timeoutS = DB_STS_BOOT_TIMEOUT_S, pollMs }) {
+  return watchDbAttach(
+    (signal) =>
+      kubectl(ip, k8sDbRolloutStatusArgv(timeoutS), { timeout: (timeoutS + 30) * 1000, signal }),
+    { kubectl: (argv, opts) => kubectl(ip, argv, opts), pollMs },
+  );
+}
+
+/**
+ * `kubectl` argv (no leading `kubectl`) that blocks until the db StatefulSet
+ * has finished rolling. Spent only by k8sDbRolloutWait.
+ *
+ * @param {number} [timeoutSeconds]
+ * @returns {string[]}
+ */
+export function k8sDbRolloutStatusArgv(timeoutSeconds = DB_STS_BOOT_TIMEOUT_S) {
+  return [
+    '-n',
+    'vibecarbon',
+    'rollout',
+    'status',
+    `statefulset/${DB_STATEFULSET}`,
+    `--timeout=${timeoutSeconds}s`,
+  ];
 }
 
 /**

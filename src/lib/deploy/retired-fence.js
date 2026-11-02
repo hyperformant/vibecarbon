@@ -59,11 +59,12 @@ import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
 import { swappedSinceLastDeploy } from './failover-guard.js';
 import {
   fenceDatabaseWrites,
+  k8sDbRolloutWait,
   k8sPsqlRunner,
   StaleVolumeAttachmentError,
   WRITE_FENCE_SETTING,
 } from './replication.js';
-import { demoteK8sWalgRole, k8sDbRolloutWait } from './walg-role.js';
+import { demoteK8sWalgRole } from './walg-role.js';
 
 /** The vibecarbon-config key the k8s backup CronJob reads. */
 export const RETIRED_ROLE_KEY = 'VIBECARBON_ROLE';

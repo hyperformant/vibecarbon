@@ -53,7 +53,6 @@ import { sshRun } from '../ssh.js';
 import { validateProjectName } from '../validators.js';
 import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
-import { DB_STS_BOOT_TIMEOUT_S, watchDbAttach } from './replication.js';
 import { dropInactiveReplicationSlots, slotDropWarning } from './replication-slot.js';
 
 /** In-container path, both tiers. */
@@ -605,51 +604,6 @@ export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
   await kubectl(ip, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 });
   if (!slots.ok) warn(slotDropWarning(ip, slots.error));
   return { slotsDropped: slots.ok };
-}
-
-/**
- * `kubectl` argv that blocks until the db StatefulSet has finished rolling the
- * pod that `k8sSetWalgRoleArgv` triggered. Load-bearing on the PROMOTED node:
- * the audit that follows reads the env of the RUNNING pod, so auditing before
- * the roll would read the old container and pass on a lie.
- *
- * @param {number} [timeoutSeconds]
- * @returns {string[]}
- */
-export function k8sDbRolloutStatusArgv(timeoutSeconds = DB_STS_BOOT_TIMEOUT_S) {
-  return [
-    '-n',
-    'vibecarbon',
-    'rollout',
-    'status',
-    `statefulset/${DB_STATEFULSET}`,
-    `--timeout=${timeoutSeconds}s`,
-  ];
-}
-
-/**
- * Wait for the db StatefulSet to roll on a remote cluster, under
- * watchDbAttach: every WALG_ROLE roll recreates db-0 on the same node, which
- * detaches and re-attaches its volume (the do-csi-stale-volumeattachment
- * trigger), so a stale attachment stops the wait early with
- * StaleVolumeAttachmentError instead of burning the budget. The ssh budget
- * sits 30s above the kubectl --timeout so kubectl reports a rollout failure
- * itself. The one way the failover paths wait on a db roll
- * (db-rollout-wait-census in tests/unit/deploy/db-attach-watch.test.ts).
- *
- * @param {object} o
- * @param {(ip: string, argv: string[], opts?: object) => Promise<string>} o.kubectl - sshKubectl-shaped
- * @param {string} o.ip
- * @param {number} [o.timeoutS]
- * @param {number} [o.pollMs] - watchDbAttach's poll interval (test seam)
- * @returns {Promise<string>}
- */
-export function k8sDbRolloutWait({ kubectl, ip, timeoutS = DB_STS_BOOT_TIMEOUT_S, pollMs }) {
-  return watchDbAttach(
-    (signal) =>
-      kubectl(ip, k8sDbRolloutStatusArgv(timeoutS), { timeout: (timeoutS + 30) * 1000, signal }),
-    { kubectl: (argv, opts) => kubectl(ip, argv, opts), pollMs },
-  );
 }
 
 /**
