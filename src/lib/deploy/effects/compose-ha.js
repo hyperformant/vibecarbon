@@ -519,7 +519,7 @@ async function haWaitDockerReady(ctx) {
 }
 
 /**
- * Put the app image on BOTH servers, in parallel, WITHOUT awaiting: it
+ * Put the app image on BOTH servers, WITHOUT awaiting: it
  * overlaps setupServerFiles, mergeWalgRole, pullImages, DNS and restore-tls,
  * and haStartComposeStack is the barrier (ctx.imageTransferPromise).
  *
@@ -554,7 +554,7 @@ async function haTransferImage(ctx) {
     });
   if (isComposeLocal) {
     const { deliverComposeAppImage } = await import('../compose/app-image.js');
-    ctx.onProgress('Sending the app image to primary + standby (layer delta, in parallel)...');
+    ctx.onProgress('Sending the app image to primary + standby (layer delta)...');
     ctx.imageTransferMarker = 'deploy.ha.compose.imageTransfer';
     ctx.imageTransferPromise = perfAsync(`${ctx.imageTransferMarker}.fan`, () =>
       Promise.all(
