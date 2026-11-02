@@ -1683,6 +1683,59 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
+   * Ask DO to detach a volume from a droplet. One request, no waiting: the
+   * caller waits on the returned action and on the droplet's own listing
+   * (lib/destroy/csi-detach.js).
+   * @param {string} volumeId
+   * @param {number|string} serverId
+   * @returns {Promise<{ actionId: number|null } | { gone: true } | { refused: string }>}
+   *   `gone` on 404 (the volume no longer exists), `refused` on any other
+   *   non-2xx (e.g. another action on the volume is in progress).
+   */
+  async detachVolume(volumeId, serverId) {
+    const response = await this.apiRequest(`/volumes/${volumeId}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'detach', droplet_id: Number(serverId) }),
+    });
+    if (response.status === 404) return { gone: true };
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      return { refused: error.message || `HTTP ${response.status}` };
+    }
+    const { action } = await response.json();
+    return { actionId: action?.id ?? null };
+  }
+
+  /**
+   * Status of a DO action: `in-progress`, `completed` or `errored`; `null`
+   * when DO no longer knows the action.
+   * @param {number} actionId
+   * @returns {Promise<string|null>}
+   */
+  async getActionStatus(actionId) {
+    const response = await this.apiRequest(`/actions/${actionId}`);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`Failed to read action ${actionId}: HTTP ${response.status}`);
+    const { action } = await response.json();
+    return action?.status ?? null;
+  }
+
+  /**
+   * The volume ids DO lists on a droplet right now, which is what
+   * terraform-provider-digitalocean's Droplet delete detaches. `null` when
+   * the droplet is gone.
+   * @param {number|string} serverId
+   * @returns {Promise<string[]|null>}
+   */
+  async getServerVolumeIds(serverId) {
+    const response = await this.apiRequest(`/droplets/${serverId}`);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`Failed to read server ${serverId}: HTTP ${response.status}`);
+    const { droplet } = await response.json();
+    return droplet?.volume_ids ?? [];
+  }
+
+  /**
    * Delete a Reserved IP by its address — the k8s destroy sweep's backstop
    * for `digitalocean-k8s.js`'s `reservedIp` resource (M3 Task 9f;
    * DO-only). Unlike every other resource this provider tears down by

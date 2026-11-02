@@ -48,6 +48,7 @@ import {
   pulumiStackEnvs,
   resolveTier,
 } from './lib/deploy/tier-registry.js';
+import { fallbackCsiVolumeIds, runCsiDetachStep } from './lib/destroy/csi-detach.js';
 import { createLeakLedger, describeResource, formatLeakReport } from './lib/destroy/leak-ledger.js';
 import { destroyPreviewBody, readS3SetupCompleted } from './lib/destroy/preview.js';
 import { checkS3CredentialMismatch } from './lib/destroy/s3-credential-check.js';
@@ -2706,6 +2707,14 @@ async function destroyK8sTier({
   // the identity list is the whole answer, so a `pvc-*` volume we did not
   // capture is somebody else's and must not be deleted.
   let identityComplete = false;
+  // The volumes the pre-destroy CSI detach may touch: the PersistentVolume
+  // capture, or when that failed, the pvc-<uuid> volumes on this env's cluster
+  // servers. Nothing else.
+  const capturedCsiVolumeIds = [];
+  // Droplets/servers on the cluster network(s), and the volumes attached to
+  // them, from the pre-scan.
+  const clusterServerIds = [];
+  const prescanVolumeIds = [];
 
   // 1. Delete DNS resources first (while servers still exist for reference) —
   // registry-driven, ownership-filtered, incl. provider health checks.
@@ -2738,6 +2747,7 @@ async function destroyK8sTier({
       const capture = captureClusterCsiVolumes(kubeconfigPath, { timeoutSeconds: 20 });
       if (capture.ok) {
         allClusterVolumeIds.push(...capture.volumeIds);
+        capturedCsiVolumeIds.push(...capture.volumeIds);
         for (const region of capture.regions) clusterLocations.add(region);
         console.log(
           `  Captured ${capture.volumeIds.length} CSI volume id(s) from PersistentVolumes${dirLabel}`,
@@ -2789,6 +2799,8 @@ async function destroyK8sTier({
             .serverNetworkIds(server)
             .some((id) => clusterNetworkIds.has(id));
           if (inCluster) {
+            clusterServerIds.push(server.id);
+            prescanVolumeIds.push(...provider.serverVolumeIds(server));
             allClusterVolumeIds.push(...provider.serverVolumeIds(server));
             // clusterLocations feeds cleanupOrphanedVolumes's
             // isPvcInClusterLocation fallback — the ONLY thing that catches a
@@ -2885,6 +2897,16 @@ async function destroyK8sTier({
           }
         }),
       );
+    }
+
+    // No PersistentVolume capture, but the CSI release below still runs if the
+    // API answers: fall back to the pvc-<uuid> volumes on this env's cluster
+    // servers for the pre-destroy detach. Named now, while they still exist.
+    if (typeof provider.detachVolume === 'function' && !identityComplete) {
+      const known = new Set(capturedCsiVolumeIds);
+      for (const id of await fallbackCsiVolumeIds(provider, prescanVolumeIds)) {
+        if (!known.has(id)) capturedCsiVolumeIds.push(id);
+      }
     }
 
     // Pre-Pulumi: release Hetzner CSI volumes via the cluster's own
@@ -2989,6 +3011,21 @@ async function destroyK8sTier({
         }
       }),
     );
+
+    // DigitalOcean: the provider's Droplet delete detaches every volume DO
+    // lists on the droplet at that moment, and a volume the CSI release has
+    // just deleted can still be listed, so its detach 404s and the droplet
+    // (and everything that depends on it) survives. Detach the captured CSI
+    // volumes here and wait for DO to agree; see lib/destroy/csi-detach.js.
+    if (typeof provider.detachVolume === 'function') {
+      await runCsiDetachStep(provider, {
+        serverIds: clusterServerIds,
+        csiVolumeIds: capturedCsiVolumeIds,
+        spinner: s,
+        warn: (msg) => p.log.warn(msg),
+        log: (line) => console.log(`  ${line}`),
+      });
+    }
 
     const { destroyK8s: destroyK8sStack } = await import('./lib/deploy/k8s/index.js');
     // HA: tear down primary + standby Pulumi stacks in parallel. Each stack

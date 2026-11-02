@@ -1,0 +1,428 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * DigitalOcean k8s destroy: vibecarbon detaches the cluster's CSI volumes
+ * itself, and waits for DO to agree, before `pulumi destroy` runs.
+ *
+ * The failure (DO k8s e2e, 2026-11-01, stack d3, after #280): `pulumi
+ * destroy` failed on `Droplet db` with
+ *
+ *   Error detaching volume "5e3fafa7-..." from droplet (614810181):
+ *   POST /v2/volumes/5e3fafa7-.../actions: 404 not found
+ *
+ * terraform-provider-digitalocean's Droplet Delete reads the Droplet LIVE
+ * before it detaches (resource_droplet.go: the unlock wait's refresh calls
+ * setDropletAttributes, which overwrites `volume_ids` from the API), then
+ * POSTs a detach for every id the API listed. The CSI release deletes those
+ * volumes asynchronously, so the Droplet can still list a volume that is
+ * already gone, and the detach 404s. Editing Pulumi state cannot help: the
+ * provider never reads it.
+ *
+ * The fake DO API below models exactly that: a volume the CSI driver has
+ * deleted 404s on detach, while the Droplet keeps listing it for a few more
+ * reads. `providerDropletDelete` is the provider's delete path.
+ */
+
+const fetchWithRetryMock = vi.fn();
+
+vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    fetchWithRetry: (...args: unknown[]) => fetchWithRetryMock(...args),
+  };
+});
+
+const { DigitalOceanProvider } = await import('../../../src/lib/providers/digitalocean.js');
+const { detachCsiVolumesBeforeDestroy, fallbackCsiVolumeIds, runCsiDetachStep } = await import(
+  '../../../src/lib/destroy/csi-detach.js'
+);
+
+const API = 'https://api.digitalocean.com/v2';
+const DB = 614810181;
+const MASTER = 614810180;
+const LIVE = '66321070-d60c-11f1-bea2-2258243ee23f';
+const DELETED = '5e3fafa7-d60c-11f1-bea2-2258243ee23f';
+const FOREIGN = 'aaaaaaaa-0000-11f1-0000-000000000000';
+
+function jsonResp(body: unknown, status = 200) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+}
+
+type Action = { status: 'in-progress' | 'completed'; pollsLeft: number; finish: () => void };
+
+/** A fake DigitalOcean API with the asynchrony that bit us. */
+function makeWorld({
+  actionPolls = 2,
+  staleReads = 2,
+  refuse = new Map<string, { status: number; message: string }>(),
+  volumeNames = new Map<string, string>(),
+}: {
+  actionPolls?: number;
+  staleReads?: number;
+  /** Volumes whose detach POST DO refuses (e.g. 422 pending event). */
+  refuse?: Map<string, { status: number; message: string }>;
+  /** Names for the GET /volumes listing. */
+  volumeNames?: Map<string, string>;
+} = {}) {
+  const droplets = new Map<number, Set<string>>([
+    [DB, new Set([LIVE, DELETED])],
+    [MASTER, new Set()],
+  ]);
+  // Volumes that still exist. DELETED is gone: CSI finished DeleteVolume.
+  const volumes = new Set([LIVE, FOREIGN]);
+  // The Droplet keeps listing a deleted volume for this many more reads.
+  const stale = new Map<string, number>([[DELETED, staleReads]]);
+  const actions = new Map<number, Action>();
+  const calls: string[] = [];
+  let nextAction = 1;
+
+  const readDroplet = (id: number) => {
+    const ids = droplets.get(id);
+    if (!ids) return null;
+    for (const [vol, left] of stale) {
+      if (!ids.has(vol)) continue;
+      if (left <= 0) ids.delete(vol);
+      else stale.set(vol, left - 1);
+    }
+    return { id, volume_ids: [...ids] };
+  };
+
+  fetchWithRetryMock.mockImplementation(
+    async (url: string, init: { method?: string; body?: string } = {}) => {
+      const method = init.method ?? 'GET';
+      const path = url.replace(API, '');
+      calls.push(`${method} ${path}`);
+      let m = path.match(/^\/droplets\/(\d+)$/);
+      if (m && method === 'GET') {
+        const droplet = readDroplet(Number(m[1]));
+        return droplet ? jsonResp({ droplet }) : jsonResp({ message: 'not found' }, 404);
+      }
+      m = path.match(/^\/volumes\/([^/]+)\/actions$/);
+      if (m && method === 'POST') {
+        const vol = m[1];
+        const body = JSON.parse(init.body ?? '{}');
+        if (!volumes.has(vol)) return jsonResp({ id: 'not_found', message: 'not found' }, 404);
+        const refusal = refuse.get(vol);
+        if (refusal) return jsonResp({ message: refusal.message }, refusal.status);
+        const id = nextAction++;
+        const action: Action = {
+          status: 'in-progress',
+          pollsLeft: actionPolls,
+          finish: () => droplets.get(Number(body.droplet_id))?.delete(vol),
+        };
+        actions.set(id, action);
+        return jsonResp({ action: { id, status: 'in-progress', type: body.type } }, 202);
+      }
+      m = path.match(/^\/actions\/(\d+)$/);
+      if (m && method === 'GET') {
+        const action = actions.get(Number(m[1]));
+        if (!action) return jsonResp({ message: 'not found' }, 404);
+        if (action.status === 'in-progress' && action.pollsLeft-- <= 0) {
+          action.status = 'completed';
+          action.finish();
+        }
+        return jsonResp({ action: { id: Number(m[1]), status: action.status } });
+      }
+      if (path.startsWith('/volumes?') && method === 'GET') {
+        return jsonResp({
+          volumes: [...volumes].map((id) => ({ id, name: volumeNames.get(id) ?? id })),
+          links: {},
+        });
+      }
+      throw new Error(`unexpected request ${method} ${path}`);
+    },
+  );
+
+  /**
+   * terraform-provider-digitalocean's resourceDigitalOceanDropletDelete:
+   * read the Droplet live, then detach each listed volume; a 404 fails the
+   * whole delete.
+   */
+  const providerDropletDelete = (id: number) => {
+    const droplet = readDroplet(id);
+    if (!droplet) return;
+    for (const vol of droplet.volume_ids) {
+      if (!volumes.has(vol)) {
+        throw new Error(
+          `Error detaching the volumes from the droplet (${id}): Error detaching volume "${vol}" from droplet (${id}): POST ${API}/volumes/${vol}/actions: 404`,
+        );
+      }
+      droplets.get(id)?.delete(vol);
+    }
+    droplets.delete(id);
+  };
+
+  return { droplets, stale, calls, providerDropletDelete };
+}
+
+const FAST = { budgetMs: 2_000, pollIntervalMs: 1 };
+
+describe('detachCsiVolumesBeforeDestroy', () => {
+  let provider: InstanceType<typeof DigitalOceanProvider>;
+  beforeEach(() => {
+    fetchWithRetryMock.mockReset();
+    provider = new DigitalOceanProvider('test-do-token');
+  });
+
+  it('reproduces the failure: without the detach, the provider delete 404s', () => {
+    const world = makeWorld();
+    expect(() => world.providerDropletDelete(DB)).toThrow(/404/);
+  });
+
+  it('detaches and waits until DO lists nothing, so the provider delete that follows succeeds', async () => {
+    const world = makeWorld();
+
+    const out = await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [DB, MASTER],
+      csiVolumeIds: [LIVE, DELETED],
+      ...FAST,
+    });
+
+    // Waited: by the time the step returns, DO lists no CSI volume.
+    expect([...(world.droplets.get(DB) ?? [])]).toEqual([]);
+    expect(out.stillAttached).toEqual([]);
+    expect(out.detached).toEqual([LIVE]);
+    expect(out.gone).toEqual([DELETED]);
+    // pulumi destroy runs next, and the provider's live read is clean.
+    expect(() => world.providerDropletDelete(DB)).not.toThrow();
+    expect(() => world.providerDropletDelete(MASTER)).not.toThrow();
+  });
+
+  it('waits on the action, not a fixed sleep: it polls the action until it completes', async () => {
+    const world = makeWorld({ actionPolls: 3, staleReads: 0 });
+
+    await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [LIVE],
+      ...FAST,
+    });
+
+    const polls = world.calls.filter((c) => c === 'GET /actions/1');
+    expect(polls.length).toBe(4);
+    // The detach was POSTed before the first poll.
+    expect(world.calls.indexOf(`POST /volumes/${LIVE}/actions`)).toBeLessThan(
+      world.calls.indexOf('GET /actions/1'),
+    );
+  });
+
+  it('treats a 404 on detach as done, never as an error', async () => {
+    makeWorld({ staleReads: 1 });
+
+    const out = await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [DELETED],
+      ...FAST,
+    });
+
+    expect(out.gone).toEqual([DELETED]);
+    expect(out.stillAttached).toEqual([]);
+  });
+
+  it('never detaches a volume it did not capture', async () => {
+    const world = makeWorld({ staleReads: 0 });
+    world.droplets.get(DB)?.add(FOREIGN);
+
+    await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [LIVE, DELETED],
+      ...FAST,
+    });
+
+    expect(world.calls).not.toContain(`POST /volumes/${FOREIGN}/actions`);
+    expect(world.droplets.get(DB)?.has(FOREIGN)).toBe(true);
+  });
+
+  it('a refused detach (CSI holds the volume) is not retried: it waits on the listing instead', async () => {
+    const world = makeWorld({
+      staleReads: 0,
+      refuse: new Map([[LIVE, { status: 422, message: 'pending event' }]]),
+    });
+    // CSI's own detach is in flight: the Droplet stops listing LIVE after 3 reads.
+    world.stale.set(LIVE, 3);
+
+    const out = await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [LIVE],
+      ...FAST,
+    });
+
+    expect(world.calls.filter((c) => c === `POST /volumes/${LIVE}/actions`)).toHaveLength(1);
+    expect(out.stillAttached).toEqual([]);
+    expect(out.detached).not.toContain(LIVE);
+    expect(out.gone).not.toContain(LIVE);
+  });
+
+  it('is bounded: a Droplet that never lets go is reported, not waited on forever', async () => {
+    makeWorld({ staleReads: Number.POSITIVE_INFINITY });
+
+    const out = await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [DELETED],
+      budgetMs: 50,
+      pollIntervalMs: 5,
+    });
+
+    expect(out.stillAttached).toEqual([{ serverId: DB, volumeId: DELETED }]);
+  });
+
+  it('does nothing when no captured volume is attached', async () => {
+    const world = makeWorld();
+
+    const out = await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [MASTER],
+      csiVolumeIds: [LIVE],
+      ...FAST,
+    });
+
+    expect(out).toEqual({ detached: [], gone: [], stillAttached: [] });
+    expect(world.calls).toEqual([`GET /droplets/${MASTER}`]);
+  });
+});
+
+const PVC_NAME = 'pvc-978e575c-00fc-4263-9665-bd6e67f628ee';
+
+describe('fallbackCsiVolumeIds (PersistentVolume capture failed)', () => {
+  let provider: InstanceType<typeof DigitalOceanProvider>;
+  beforeEach(() => {
+    fetchWithRetryMock.mockReset();
+    provider = new DigitalOceanProvider('test-do-token');
+  });
+
+  it('keeps only volumes attached to the cluster droplets whose names are CSI names', async () => {
+    makeWorld({
+      volumeNames: new Map([
+        [LIVE, PVC_NAME],
+        [FOREIGN, 'operator-data'],
+      ]),
+    });
+
+    // Both are attached to this env's droplets per the pre-scan; only the
+    // pvc-<uuid> one is CSI's.
+    expect(await fallbackCsiVolumeIds(provider, [LIVE, FOREIGN])).toEqual([LIVE]);
+  });
+
+  it('never picks up a CSI-named volume that is not on the cluster droplets', async () => {
+    makeWorld({ volumeNames: new Map([[FOREIGN, PVC_NAME]]) });
+
+    expect(await fallbackCsiVolumeIds(provider, [LIVE])).toEqual([]);
+  });
+
+  it('the fallback ids feed the detach like captured ids do', async () => {
+    const world = makeWorld({ staleReads: 0, volumeNames: new Map([[LIVE, PVC_NAME]]) });
+    world.droplets.get(DB)?.delete(DELETED);
+
+    const ids = await fallbackCsiVolumeIds(provider, [LIVE]);
+    const out = await detachCsiVolumesBeforeDestroy(provider, {
+      serverIds: [DB],
+      csiVolumeIds: ids,
+      ...FAST,
+    });
+
+    expect(out.detached).toEqual([LIVE]);
+    expect(() => world.providerDropletDelete(DB)).not.toThrow();
+  });
+});
+
+function fakeSpinner() {
+  const events: Array<[string, string?]> = [];
+  return {
+    events,
+    start: (m: string) => events.push(['start', m]),
+    stop: (m: string) => events.push(['stop', m]),
+    error: (m: string) => events.push(['error', m]),
+  };
+}
+
+describe('runCsiDetachStep output', () => {
+  let provider: InstanceType<typeof DigitalOceanProvider>;
+  beforeEach(() => {
+    fetchWithRetryMock.mockReset();
+    provider = new DigitalOceanProvider('test-do-token');
+  });
+
+  it('says it skipped when the pre-scan found no cluster servers, and calls DO for nothing', async () => {
+    const world = makeWorld();
+    const spinner = fakeSpinner();
+    const warn = vi.fn();
+
+    await runCsiDetachStep(provider, {
+      serverIds: [],
+      csiVolumeIds: [LIVE],
+      spinner,
+      warn,
+      ...FAST,
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/skipped CSI detach: the server pre-scan found no cluster servers/i),
+    );
+    expect(spinner.events).toEqual([]);
+    expect(world.calls).toEqual([]);
+  });
+
+  it('reports a timeout as an error naming each volume on its droplet', async () => {
+    makeWorld({ staleReads: Number.POSITIVE_INFINITY });
+    const spinner = fakeSpinner();
+
+    await runCsiDetachStep(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [DELETED],
+      spinner,
+      warn: vi.fn(),
+      budgetMs: 50,
+      pollIntervalMs: 5,
+    });
+
+    const last = spinner.events.at(-1);
+    expect(last?.[0]).toBe('error');
+    expect(last?.[1]).toContain(`${DELETED} on droplet ${DB}`);
+  });
+
+  it('reports success with stop when DO lists nothing', async () => {
+    makeWorld();
+    const spinner = fakeSpinner();
+
+    await runCsiDetachStep(provider, {
+      serverIds: [DB],
+      csiVolumeIds: [LIVE, DELETED],
+      spinner,
+      warn: vi.fn(),
+      ...FAST,
+    });
+
+    expect(spinner.events.at(-1)).toEqual(['stop', '2 CSI volume(s) detached or already gone']);
+  });
+});
+
+describe('destroyK8sTier wiring', () => {
+  // destroyK8sTier is not exported (it needs the whole destroy context); the
+  // step's behaviour is covered above, this pins where it runs.
+  it('detaches after the CSI release and before pulumi destroy', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../../../src/destroy.js', import.meta.url)),
+      'utf8',
+    );
+    const body = src.slice(src.indexOf('async function destroyK8sTier('));
+    const release = body.indexOf('await cleanupClusterPVCs(');
+    const detach = body.indexOf('runCsiDetachStep(');
+    const destroy = body.indexOf('destroyK8sStack({');
+    expect(release).toBeGreaterThan(0);
+    expect(detach).toBeGreaterThan(release);
+    expect(destroy).toBeGreaterThan(detach);
+  });
+
+  it('computes the fallback before the CSI release, while the volumes still exist', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../../../src/destroy.js', import.meta.url)),
+      'utf8',
+    );
+    const body = src.slice(src.indexOf('async function destroyK8sTier('));
+    const fallback = body.indexOf('fallbackCsiVolumeIds(');
+    const release = body.indexOf('await cleanupClusterPVCs(');
+    expect(fallback).toBeGreaterThan(0);
+    expect(fallback).toBeLessThan(release);
+  });
+});
