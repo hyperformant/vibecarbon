@@ -42,21 +42,21 @@ const PRIMARY_IP = '10.0.0.1';
 const STANDBY_IP = '10.0.0.9';
 const SYSID = '7412345678901234567';
 
-type Call = { ip: string; argv: string[] };
+type Call = { ip: string; argv: string[]; input?: string };
 
 /**
  * A kubectl seam that records every call and rejects the ones `fail` names.
  * `rollout` rejects the promoted side's rollout wait (the 300 s budget
- * expiring), `demote` rejects the old primary's `set env`.
+ * expiring), `demote` rejects the old primary's standby intent apply.
  */
 function fakeKubectl(fail: { rollout?: boolean; demote?: boolean }) {
   const calls: Call[] = [];
-  const kubectl = async (ip: string, argv: string[]) => {
-    calls.push({ ip, argv });
+  const kubectl = async (ip: string, argv: string[], opts?: { input?: string }) => {
+    calls.push({ ip, argv, input: opts?.input });
     if (fail.rollout && argv.includes('rollout')) {
       throw new Error('error: timed out waiting for the condition');
     }
-    if (fail.demote && ip === PRIMARY_IP && argv.includes('set')) {
+    if (fail.demote && ip === PRIMARY_IP && argv.includes('apply')) {
       throw new Error('ssh: connect to host 10.0.0.1 port 22: Connection refused');
     }
     return '';
@@ -65,12 +65,39 @@ function fakeKubectl(fail: { rollout?: boolean; demote?: boolean }) {
 }
 
 const isDemotion = (c: Call) =>
-  c.ip === PRIMARY_IP && c.argv.includes('set') && c.argv.includes('WALG_ROLE=standby');
+  c.ip === PRIMARY_IP &&
+  c.argv.includes('apply') &&
+  String(c.input).includes('VC_WALG_ROLE_INTENT: standby');
 
 const quiet = { log: () => {}, warn: () => {} };
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+describe('demoteK8sWalgRole', () => {
+  it('a dead old-primary pod still gets the standby intent (its next start applies it)', async () => {
+    const { demoteK8sWalgRole } = await import('../../../src/lib/deploy/walg-role.js');
+    const kubectl = vi.fn(
+      async (_ip: string, argv: string[], _o?: { input?: string; timeout?: number }) => {
+        if (argv.includes('get') && argv.includes('pod')) throw new Error('pods "db-0" not found');
+        return '';
+      },
+    );
+    const r = await demoteK8sWalgRole({ ip: '9.9.9.9', kubectl, warn: () => {} });
+    expect(
+      kubectl.mock.calls.some(
+        ([, a, o]) =>
+          a.join(' ').includes('apply -f -') &&
+          String(o?.input).includes('VC_WALG_ROLE_INTENT: standby'),
+      ),
+    ).toBe(true);
+    expect(r).toMatchObject({ intent: true, live: false });
+    // Nothing restarts the db for the role.
+    expect(kubectl.mock.calls.some(([, a]) => a.includes('set') || a.includes('rollout'))).toBe(
+      false,
+    );
+  });
 });
 
 describe('restorePromotedWalgRole: two independent verdicts', () => {

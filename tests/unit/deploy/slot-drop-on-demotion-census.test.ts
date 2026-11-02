@@ -9,14 +9,14 @@
  *
  *   - compose: demoteComposeWalgRole (failover, and the retired fence's compose
  *     WALG_ROLE step);
- *   - k8s: demoteK8sWalgRole (failover's restorePromotedWalgRole, and the
- *     retired fence's k8s WALG_ROLE step).
+ *   - k8s: demoteK8sWalgRole (failover's old-primary demotion, its abort, and
+ *     the retired fence's k8s wal-g role step).
  *
  * The drop works on a write-fenced server: verified on
  * postgres:17.11-walg3.0.9-r2 with default_transaction_read_only=on.
  *
- * Census: the k8s standby role write (`k8sSetWalgRoleArgv('standby')`) lives
- * only in demoteK8sWalgRole, and the compose one (`composeRoleEnv('standby')`)
+ * Census: the k8s standby role write (`setK8sWalgRole({ ..., role: 'standby' })`,
+ * or the standby intent manifest) lives only in demoteK8sWalgRole, and the compose one (`composeRoleEnv('standby')`)
  * only in demoteComposeWalgRole plus the deploy-time role merge, which runs on
  * a standby that is in recovery or about to be reseeded (a reseed replaces
  * PGDATA, slots included).
@@ -41,19 +41,19 @@ describe('DROP_INACTIVE_SLOTS_SQL', () => {
 describe('demoteK8sWalgRole', () => {
   const quiet = { warn: () => {} };
 
-  it('drops inactive slots before the role write rolls the db pod', async () => {
-    const calls: string[][] = [];
-    const kubectl = vi.fn(async (_ip: string, argv: string[]) => {
-      calls.push(argv);
+  it('drops inactive slots before the standby role write', async () => {
+    const calls: Array<{ argv: string[]; input?: string }> = [];
+    const kubectl = vi.fn(async (_ip: string, argv: string[], opts?: { input?: string }) => {
+      calls.push({ argv, input: opts?.input });
       return '';
     });
     const out = await demoteK8sWalgRole({ ip: '10.0.0.1', kubectl, ...quiet });
-    const drop = calls.findIndex((a) => a.includes(DROP_INACTIVE_SLOTS_SQL));
-    const role = calls.findIndex((a) => a.includes('WALG_ROLE=standby'));
+    const drop = calls.findIndex((c) => c.argv.includes(DROP_INACTIVE_SLOTS_SQL));
+    const role = calls.findIndex((c) => String(c.input).includes('VC_WALG_ROLE_INTENT: standby'));
     expect(drop).toBeGreaterThan(-1);
     expect(role).toBeGreaterThan(drop);
-    expect(calls[drop]).toEqual(expect.arrayContaining(['exec', 'db-0', 'psql']));
-    expect(out).toEqual({ slotsDropped: true });
+    expect(calls[drop].argv).toEqual(expect.arrayContaining(['exec', 'db-0', 'psql']));
+    expect(out).toMatchObject({ slotsDropped: true, intent: true });
   });
 
   it('a failed drop still demotes, and warns once with the cause', async () => {
@@ -63,8 +63,14 @@ describe('demoteK8sWalgRole', () => {
       return '';
     });
     const out = await demoteK8sWalgRole({ ip: '10.0.0.1', kubectl, warn });
-    expect(kubectl.mock.calls.some(([, a]) => a.includes('WALG_ROLE=standby'))).toBe(true);
-    expect(out).toEqual({ slotsDropped: false });
+    expect(
+      kubectl.mock.calls.some(([, , o]) =>
+        String((o as { input?: string } | undefined)?.input).includes(
+          'VC_WALG_ROLE_INTENT: standby',
+        ),
+      ),
+    ).toBe(true);
+    expect(out).toMatchObject({ slotsDropped: false, intent: true });
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0][0]).toContain('pod db-0 is not running');
   });
@@ -155,7 +161,8 @@ const SOURCES = walk(join(ROOT, 'src'))
   .filter((p) => p.endsWith('.js'))
   .map((p) => ({ path: relative(ROOT, p), text: readFileSync(p, 'utf-8') }));
 
-const K8S_STANDBY_WRITE = /k8sSetWalgRoleArgv\(\s*'standby'\s*\)/;
+const K8S_STANDBY_WRITE =
+  /setK8sWalgRole\(\{[^)]*role:\s*'standby'|dbRoleConfigMapManifest\(\s*'standby'\s*\)/;
 const COMPOSE_STANDBY_WRITE = /composeRoleEnv\(\s*'standby'\s*\)/;
 
 /** The only places a node is set to the standby role. */
@@ -171,7 +178,7 @@ const COMPOSE_DEMOTERS = [
 ];
 
 describe('census: every standby role write is a demotion that drops slots', () => {
-  it('k8s: only demoteK8sWalgRole writes WALG_ROLE=standby', () => {
+  it('k8s: only demoteK8sWalgRole writes the standby wal-g role', () => {
     expect(sitesOf(SOURCES, K8S_STANDBY_WRITE)).toEqual(K8S_DEMOTERS);
   });
 
@@ -189,7 +196,7 @@ describe('census: every standby role write is a demotion that drops slots', () =
   it('bites: a stray standby role write is reported with its function', () => {
     const stray = {
       path: 'src/lib/deploy/stray.js',
-      text: "async function sneakyDemote(ip) {\n  await kubectl(ip, k8sSetWalgRoleArgv('standby'));\n}\n",
+      text: "async function sneakyDemote(ip) {\n  await setK8sWalgRole({ ip, kubectl, role: 'standby' });\n}\n",
     };
     expect(sitesOf([...SOURCES, stray], K8S_STANDBY_WRITE)).toEqual([
       ...K8S_DEMOTERS,

@@ -559,22 +559,25 @@ export function k8sSetWalgRoleArgv(role) {
 }
 
 /**
- * Demote a k8s cluster's db: drop its inactive replication slots, then set
- * `WALG_ROLE=standby` on the db StatefulSet. The one k8s standby role write
+ * Demote a k8s cluster's db: drop its inactive replication slots, then set the
+ * standby wal-g role through setK8sWalgRole (the intent ConfigMap, then the
+ * live role file). The one k8s standby role write
  * (tests/unit/deploy/slot-drop-on-demotion-census.test.ts), shared by
- * failover's old-primary demotion and the retired fence.
+ * failover's old-primary demotion, its abort and the retired fence.
  *
- * The drop goes first because the role write rolls the db pod and nothing
- * here waits for the roll. Nobody streams from the old primary's slot after a
- * failover, so it would only pin WAL on that node up to the slot cap. A failed
- * drop still demotes and warns once, unless the role write fails too, which
- * throws and is the caller's one report.
+ * Nothing restarts. A db pod that is down or unreachable still gets the
+ * intent, which db-guard.sh applies on its next container start, so the
+ * result says whether the live file landed (`live`, and `reason` when not)
+ * and the caller decides what that is worth. Nobody streams from the old
+ * primary's slot after a failover, so it would only pin WAL on that node up
+ * to the slot cap. A failed drop still demotes and warns once, unless the
+ * intent apply fails too, which throws and is the caller's one report.
  *
  * @param {object} args
  * @param {string} args.ip - the cluster's master (kubectl target)
- * @param {(ip: string, argv: string[], opts?: object) => Promise<unknown>} args.kubectl
+ * @param {(ip: string, argv: string[], opts?: object) => Promise<string>} args.kubectl
  * @param {(msg: string) => void} args.warn
- * @returns {Promise<{slotsDropped: boolean}>}
+ * @returns {Promise<{slotsDropped: boolean, intent: true, live: boolean, reason?: string, error?: Error}>}
  */
 export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
   const slots = await dropInactiveReplicationSlots((sql) =>
@@ -601,9 +604,9 @@ export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
       { timeout: 30_000 },
     ),
   );
-  await kubectl(ip, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 });
+  const role = await setK8sWalgRole({ ip, kubectl, role: 'standby' });
   if (!slots.ok) warn(slotDropWarning(ip, slots.error));
-  return { slotsDropped: slots.ok };
+  return { slotsDropped: slots.ok, ...role };
 }
 
 /**

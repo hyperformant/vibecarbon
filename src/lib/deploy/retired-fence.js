@@ -31,7 +31,8 @@
  * the app and every deployed add-on through `kubectl scale --replicas=0`,
  * never a patch that would roll pods, after suspending any Flux Kustomization
  * that would scale them back; compose: the app and the primary-only add-ons)
- * and WALG_ROLE=standby.
+ * and the standby wal-g role (k8s: the intent ConfigMap and the live role
+ * file; compose: WALG_ROLE=standby).
  *
  * `vibecarbon status`, `failover` and `deploy` call reconcileRetiredFence
  * first, and failover again once its role swap is saved, so an old primary
@@ -55,7 +56,7 @@ import {
 } from '../services/standby-policy.js';
 import { getSSHKeyPath, sshKubectl } from '../ssh.js';
 import { sshRun as composeSshRun } from './compose/index.js';
-import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
+import { DB_CONTAINER, DB_POD } from './db-workload.js';
 import { swappedSinceLastDeploy } from './failover-guard.js';
 import {
   fenceDatabaseWrites,
@@ -64,7 +65,13 @@ import {
   StaleVolumeAttachmentError,
   WRITE_FENCE_SETTING,
 } from './replication.js';
-import { demoteK8sWalgRole } from './walg-role.js';
+import {
+  DB_ROLE_CONFIGMAP,
+  DB_ROLE_INTENT_KEY,
+  demoteK8sWalgRole,
+  WALG_ROLE_DIR,
+  walgRoleReadShell,
+} from './walg-role.js';
 
 /** The vibecarbon-config key the k8s backup CronJob reads. */
 export const RETIRED_ROLE_KEY = 'VIBECARBON_ROLE';
@@ -90,11 +97,11 @@ const FLUX_PREFIX = 'vibecarbon-';
 const DB_MARKER_PATH = `"\${PGDATA:-/var/lib/postgresql/data}/${RETIRED_DB_MARKER}"`;
 /** Reads are bounded: status calls this, and an unreachable side must not stall it. */
 const PROBE_TIMEOUT_MS = 20_000;
-/** The db roll a WALG_ROLE change triggers, waited before the second pass. */
+/** A db pod that is down or mid-roll, waited before the second pass. */
 const DB_SETTLE_TIMEOUT_S = 120;
 
 /** The fence parts that live in the database pod (the ones a db settle can make readable). */
-const DB_KEYS = ['dbMarker', 'dbReadOnly'];
+const DB_KEYS = ['dbMarker', 'dbReadOnly', 'walgStandby'];
 
 /** One read: recovery, the fence setting, and the pg_wal size (the retired node's disk clock). */
 export const RETIRED_DB_STATE_SQL =
@@ -313,8 +320,19 @@ async function k8sWorkloadsNotZero(ip, { kubectl, workloads, appNsItems, opts })
 
 const NOT_FOUND = /NotFound|not found/i;
 
-/** One read of everything the k8s fence covers; null when the cluster does not answer. */
-async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
+/**
+ * One read of everything the k8s fence covers; null when the cluster does not
+ * answer. Exported for its tests.
+ *
+ * `walgStandby` needs the vibecarbon-db-role intent to say `standby` (the role
+ * every later db start applies), and then the live role file to read
+ * `standby` through the one parser. A db pod that does not answer the read
+ * is `'unknown'`: the second pass reads it again after the db settle.
+ *
+ * @param {string} ip
+ * @param {{kubectl: Function, psqlFor: Function, workloads: Array<{namespace: string, kind: string, name: string}>}} o
+ */
+export async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
   const opts = { timeout: PROBE_TIMEOUT_MS, transportRetry: false };
   let items;
   try {
@@ -326,10 +344,10 @@ async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
           NS,
           'get',
           'configmap/vibecarbon-config',
+          `configmap/${DB_ROLE_CONFIGMAP}`,
           ...workloads
             .filter((w) => w.namespace === NS)
             .map((w) => `${w.kind.toLowerCase()}/${w.name}`),
-          `statefulset/${DB_STATEFULSET}`,
           '-o',
           'json',
           '--ignore-not-found',
@@ -340,16 +358,24 @@ async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
   } catch {
     return null;
   }
-  const of = (kind) => items.find((i) => i?.kind === kind);
+  const configMap = (name) =>
+    items.find((i) => i?.kind === 'ConfigMap' && i?.metadata?.name === name);
   const workloadsToZero = await k8sWorkloadsNotZero(ip, {
     kubectl,
     workloads,
     appNsItems: items,
     opts,
   });
-  const db = (of('StatefulSet')?.spec?.template?.spec?.containers ?? []).find(
-    (ct) => ct.name === DB_CONTAINER,
-  );
+  let walgStandby = false;
+  if (configMap(DB_ROLE_CONFIGMAP)?.data?.[DB_ROLE_INTENT_KEY] === 'standby') {
+    try {
+      const out = await kubectl(ip, k8sDbMarkerExec(walgRoleReadShell(WALG_ROLE_DIR)), opts);
+      walgStandby = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim() === 'standby';
+    } catch {
+      // db pod not running: the second pass, after the db settles, retries.
+      walgStandby = 'unknown';
+    }
+  }
   let dbMarker = 'unknown';
   try {
     const out = await kubectl(
@@ -373,7 +399,7 @@ async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
   }
   const dbState = await probeDb(psqlFor(ip));
   return {
-    marker: of('ConfigMap')?.data?.[RETIRED_ROLE_KEY] === RETIRED_ROLE,
+    marker: configMap('vibecarbon-config')?.data?.[RETIRED_ROLE_KEY] === RETIRED_ROLE,
     dbMarker,
     dbReadOnly: dbState.readOnly,
     walBytes: dbState.walBytes,
@@ -381,7 +407,7 @@ async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
     fluxToSuspend,
     workloadsZero: workloadsToZero.length === 0,
     workloadsToZero,
-    walgStandby: (db?.env ?? []).find((e) => e.name === 'WALG_ROLE')?.value === 'standby',
+    walgStandby,
   };
 }
 
@@ -416,8 +442,8 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads, warn }) {
   return {
     probe: (ip) => probeK8s(ip, { kubectl, psqlFor, workloads }),
     // Ordered so backups are refused first, the database stops taking writes
-    // next, Flux cannot scale the app back before it is zeroed, and the db
-    // marker lands before the WALG_ROLE change rolls the db pod.
+    // next, Flux cannot scale the app back before it is zeroed, and the wal-g
+    // role goes last (nothing restarts for it).
     steps: [
       {
         key: 'marker',
@@ -495,10 +521,17 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads, warn }) {
       },
       {
         key: 'walgStandby',
-        what: 'WALG_ROLE=standby',
+        what: 'the standby wal-g role',
         // demoteK8sWalgRole drops the retired side's inactive replication
-        // slots first (nobody streams from them), then writes the role.
-        apply: (ip) => attempt(() => demoteK8sWalgRole({ ip, kubectl, warn: () => {} })),
+        // slots first (nobody streams from them), then writes the intent and
+        // the live file. A db pod that cannot be reached applies the intent
+        // on its next start; a live write that ran and did not land (no role
+        // mount, a failed write) leaves the part missing.
+        apply: (ip) =>
+          attempt(async () => {
+            const r = await demoteK8sWalgRole({ ip, kubectl, warn: () => {} });
+            return r.live || r.reason === 'pod-unreachable';
+          }),
       },
     ],
     // The db pod was down or mid-roll: wait for it (bounded) before the second pass.
