@@ -5,8 +5,9 @@
  * read an empty `…/walg/standby` and fail restore/reseed with "No backups
  * found" (caught by compose-ha `scale` on real Hetzner). The anti-collision
  * guarantee (a standby must NEVER WRITE into the canonical prefix) is preserved
- * by turning WALG_ROLE into a WRITE-ONLY GUARD: wal-archive.sh, compose-backup.sh
- * and the k8s backup CronJob all no-op when WALG_ROLE=standby.
+ * by a WRITE-ONLY GUARD: the wal-g role file (walg-env.sh reads it into
+ * VC_WALG_ROLE). wal-archive.sh, compose-backup.sh and the k8s backup CronJob
+ * all no-op on a standby and refuse with no role.
  */
 
 import { readFileSync } from 'node:fs';
@@ -36,24 +37,21 @@ describe('wal-g S3 prefix is a single canonical path (NO role segment)', () => {
   });
 });
 
-describe('WALG_ROLE is exposed to the db container as the write-guard signal', () => {
-  it('compose docker-compose.yml sets WALG_ROLE in the db environment', () => {
+describe('the write-guard signal is the role file, never a WALG_ROLE env', () => {
+  it('compose docker-compose.yml sets no WALG_ROLE in the db environment', () => {
     const compose = read('carbon/docker-compose.yml');
-    expect(compose).toMatch(/WALG_ROLE:\s*\$\{WALG_ROLE:-primary\}/);
+    expect(compose).not.toMatch(/^\s*WALG_ROLE:/m);
   });
 
-  it('the k8s db StatefulSet renders WALG_ROLE into the db env', () => {
+  it('the k8s db StatefulSet renders no WALG_ROLE env', () => {
     const sts = read('carbon/k8s/base/db/statefulset.yaml');
-    expect(sts).toMatch(/- name: WALG_ROLE\s+value: "\{\{WALG_ROLE\}\}"/);
+    expect(sts).not.toMatch(/- name: WALG_ROLE\b/);
+    expect(sts).not.toContain('{{WALG_ROLE}}');
   });
 
-  it('k3s.js renders {{WALG_ROLE}} and derives the role from the explicit `role` option', () => {
+  it('k3s.js renders no {{WALG_ROLE}}', () => {
     const k3s = read('src/lib/deploy/k8s/k3s.js');
-    expect(k3s).toContain('WALG_ROLE: walgRole,');
-    // Pilot-light (Task 4): walgRole comes from the `role` option threaded
-    // through deployK3s/applyK3sManifests/buildDbManifestValues, NOT an
-    // `environment` suffix sniff — Task 6 fans out role: 'primary'/'standby'.
-    expect(k3s).toMatch(/walgRole\s*=\s*role\s*===\s*'standby'\s*\?\s*'standby'\s*:\s*'primary'/);
+    expect(k3s).not.toContain('WALG_ROLE: walgRole');
     expect(k3s).not.toMatch(/environment\?\.endsWith\('-standby'\)/);
   });
 
@@ -72,10 +70,13 @@ describe('WALG_ROLE is exposed to the db container as the write-guard signal', (
   });
 });
 
-describe('write paths no-op when WALG_ROLE=standby (never write the canonical prefix)', () => {
-  it('wal-archive.sh skips (exit 0) when WALG_ROLE=standby', () => {
+describe('write paths no-op on a standby role (never write the canonical prefix)', () => {
+  const STANDBY_SKIP =
+    /case "\$\{VC_WALG_ROLE:-\}" in\n\s*primary\) ;;\n\s*standby\)[\s\S]*?exit 0/;
+
+  it('wal-archive.sh skips (exit 0) on a standby role', () => {
     const script = read('carbon/volumes/db/wal-archive.sh');
-    expect(script).toMatch(/WALG_ROLE:-primary\}"\s*=\s*"standby"[\s\S]*?exit 0/);
+    expect(script).toMatch(STANDBY_SKIP);
     // AND keeps the pg_is_in_recovery defense-in-depth gate.
     expect(script).toMatch(/pg_is_in_recovery/);
     expect(script).toMatch(/standby\.signal/);
@@ -83,16 +84,16 @@ describe('write paths no-op when WALG_ROLE=standby (never write the canonical pr
     expect(script).toMatch(/wal-g wal-push/);
   });
 
-  it('compose-backup.sh skips base backup when WALG_ROLE=standby', () => {
+  it('compose-backup.sh skips base backup on a standby role', () => {
     const script = read('carbon/backup/compose-backup.sh');
-    expect(script).toMatch(/WALG_ROLE:-primary\}"\s*=\s*"standby"[\s\S]*?exit 0/);
+    expect(script).toMatch(STANDBY_SKIP);
     // Keeps the recovery guard too.
     expect(script).toMatch(/pg_is_in_recovery/);
   });
 
-  it('k8s backup CronJob skips base backup when WALG_ROLE=standby', () => {
+  it('k8s backup CronJob skips base backup on a standby role', () => {
     const cron = read('carbon/k8s/base/backup/cronjob.yaml');
-    expect(cron).toMatch(/WALG_ROLE:-primary\}"\s*=\s*"standby"[\s\S]*?exit 0/);
+    expect(cron).toMatch(STANDBY_SKIP);
     expect(cron).toMatch(/pg_is_in_recovery/);
   });
 });

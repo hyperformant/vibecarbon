@@ -363,7 +363,7 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * `role` (the k8s-ha pilot-light role) is an input because applyK3sManifests
  * renders a DIFFERENT cluster for each role: the standby zeroes the app tier and
  * the cluster-autoscaler, skips observability, points its Certificates at the
- * self-signed issuer and renders WALG_ROLE=standby into the db StatefulSet.
+ * self-signed issuer and records the standby wal-g role intent for the db.
  * Each cluster keeps its own deploy-state file keyed by its STACK name, and a
  * failover swaps which stack holds which role without touching either file. So
  * without this key the post-failover reconverge redeploy found byte-identical
@@ -2465,7 +2465,6 @@ function localKubectlReader(env) {
  * @param {string} o.dbImageTag - full db image ref, `<repo>:<tag>`
  * @param {{bucket?: string, walgPrefix?: string, endpoint?: string, region?: string}} [o.s3Config]
  * @param {string|null} [o.backupBucketName]
- * @param {'primary'|'standby'} [o.walgRole]
  * @param {string} o.storageClass - `ProviderClass.K8S_STORAGE_CLASS`
  * @param {string} o.walArchiveSha - sha of k8s/base/backup/configmap-walg.yaml
  * @returns {Record<string, string>}
@@ -2474,7 +2473,6 @@ export function buildDbManifestValues({
   dbImageTag,
   s3Config,
   backupBucketName,
-  walgRole = 'primary',
   storageClass,
   walArchiveSha,
 }) {
@@ -2502,8 +2500,9 @@ export function buildDbManifestValues({
   // role-segmented prefix made the standby read an empty `…/walg/standby` and
   // fail restore/reseed with "No backups found" (caught by compose-ha scale
   // e2e). Anti-collision (a standby / bring-up-phase independent primary must
-  // never WRITE here) is enforced by the WALG_ROLE WRITE-GUARD: wal-archive.sh
-  // and the backup CronJob both no-op when WALG_ROLE=standby.
+  // never WRITE here) is enforced by the wal-g role WRITE-GUARD: the role file
+  // (walg-role.js), which wal-archive.sh and the backup CronJob read through
+  // walg-env.sh. Neither archives unless it says primary.
   const walgBucket = backupBucketName || s3Config?.bucket || '';
   // The path inside the bucket is resolveEnvStorage's per-environment
   // `backups/<project>/<env>/walg`. Without it two environments would archive
@@ -2518,7 +2517,6 @@ export function buildDbManifestValues({
     DB_IMAGE: dbImageTag.slice(0, lastColon),
     DB_IMAGE_TAG: dbImageTag.slice(lastColon + 1),
     WALG_S3_PREFIX_BASE: walgBucket ? `s3://${walgBucket}/${walgPrefix}` : '',
-    WALG_ROLE: walgRole,
     S3_ENDPOINT: s3Config?.endpoint ?? '',
     S3_REGION: s3Config?.region ?? '',
     K8S_STORAGE_CLASS: storageClass,
@@ -3605,8 +3603,8 @@ export async function applyK3sManifests({
   // HetznerProvider.getS3EgressExtraCidrs ignores its argument entirely.
   vpcCidr,
   // Pilot-light: 'primary' | 'standby' | undefined (single-cluster ==
-  // primary behavior). Drives walgRole below (rendered into the db
-  // StatefulSet) and zeroes the app tier on a standby.
+  // primary behavior). Drives walgRole below (the db's wal-g role intent)
+  // and zeroes the app tier on a standby.
   role,
   // `deploy -restore`: { backup, target, recoveryConf, sizeBytes }, or null.
   restore = null,
@@ -4264,9 +4262,9 @@ export async function applyK3sManifests({
   // Derive the wal-g WRITE-GUARD role (NOT a path segment) from the explicit
   // `role` option — the k8s-ha fan-out passes role: 'primary' / 'standby';
   // single-cluster deploys leave role undefined → 'primary'. Recorded as the
-  // db's role intent above and rendered into the db container env as
-  // WALG_ROLE, so wal-archive.sh + the backup CronJob no-op on the standby.
-  // The S3 prefix itself stays canonical.
+  // db's role intent (vibecarbon-db-role), which db-guard.sh writes to the
+  // role file wal-archive.sh + the backup CronJob read, so both no-op on the
+  // standby. The S3 prefix itself stays canonical.
   const walgRole = role === 'standby' ? 'standby' : 'primary';
   await applyVibecarbonSecrets({
     kubeconfig,
@@ -4279,8 +4277,8 @@ export async function applyK3sManifests({
   onNamespaceReady?.();
   // 5. Apply base (namespace, network-policies, db, app, backup, traefik,
   //    config), always from a rendered temp copy (renderK8sBase): the db
-  //    StatefulSet carries deploy-time placeholders (image, wal-g prefix and
-  //    role, S3 endpoint, StorageClass), and so do the PVCs
+  //    StatefulSet carries deploy-time placeholders (image, wal-g prefix,
+  //    S3 endpoint, StorageClass), and so do the PVCs
   //    `add redis` / `add n8n` copy into k8s/base/<addon>/. kubectl accepts a
   //    literal storageClassName and the PVC sits Pending forever, and neither
   //    a PVC's class nor a StatefulSet's volumeClaimTemplates can be changed
@@ -4334,7 +4332,6 @@ export async function applyK3sManifests({
         dbImageTag,
         s3Config,
         backupBucketName,
-        walgRole,
         storageClass,
         walArchiveSha: walArchiveConfigSha(projectDir),
       }),
@@ -5683,7 +5680,7 @@ async function deployK3sSteps(options, inFlight) {
   //     with it. Cost is one S3 LIST.
   //     Gated only on S3 being configured at all (mirrors the archiving-enable
   //     block); the probe independently re-checks that from inside the
-  //     container and self-skips a WALG_ROLE=standby node.
+  //     container and self-skips a node whose role file says standby.
   //     THROWS on failure — see src/lib/deploy/walg-audit.js.
   if (options.s3Config?.accessKey) {
     await perfAsync(`deploy.${perfPrefix}.verifyWalgBackups`, () =>

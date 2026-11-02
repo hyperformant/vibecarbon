@@ -752,7 +752,7 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
     // The replication overlay is appended when present, same runtime conditional as
     // reconcile.sh itself — on single-server compose the file never exists.
     // STANDBY_SCALE_FLAG keeps primary-only add-ons at zero when the node's
-    // .env says WALG_ROLE=standby, the same fragment reconcile.sh's up runs.
+    // wal-g role file says standby, the same fragment reconcile.sh's up runs.
     const replOverlayFlag =
       "$([ -f docker-compose.replication.yml ] && echo '-f docker-compose.replication.yml')";
     s.start('Recreating all services after restore...');
@@ -1785,7 +1785,7 @@ async function scaleServers(ctx) {
         ? await primaryReady.promise
         : { ip: primaryEntry.ip, entry: primaryEntry };
       if (envConfig.backup) {
-        // compose-backup.sh skips on a standby (WALG_ROLE); the cron is there
+        // compose-backup.sh skips on a standby (its role file); the cron is there
         // for when a failover promotes this node.
         await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup, {
           domain: envConfig.domain,

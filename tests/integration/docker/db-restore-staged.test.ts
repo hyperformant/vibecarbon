@@ -77,12 +77,22 @@ const PGDATA = '/var/lib/postgresql/data';
 const GUARD = join(ROOT, 'carbon/volumes/db/db-guard.sh');
 const WALG_ENV_SH = join(ROOT, 'carbon/volumes/db/walg-env.sh');
 const WAL_ARCHIVE_SH = join(ROOT, 'carbon/volumes/db/wal-archive.sh');
-/** The two scripts, where the compose db service mounts them. */
+/**
+ * The wal-g role directory, bound read-only where docker-compose.prod.yml binds
+ * the host's .vibecarbon-role: every database here archives as the primary.
+ */
+const ROLE_DIR = mkdtempSync(join(tmpdir(), 'vctest-role-'));
+chmodSync(ROLE_DIR, 0o755);
+writeFileSync(join(ROLE_DIR, 'walg-role'), 'primary\n', { mode: 0o644 });
+afterAll(() => rmSync(ROLE_DIR, { recursive: true, force: true }));
+/** The two scripts and the role directory, where the compose db service mounts them. */
 const SCRIPT_MOUNTS = [
   '-v',
   `${WALG_ENV_SH}:/etc/postgresql/walg-env.sh:ro`,
   '-v',
   `${WAL_ARCHIVE_SH}:/etc/postgresql/wal-archive.sh:ro`,
+  '-v',
+  `${ROLE_DIR}:/var/lib/vibecarbon/role:ro`,
 ];
 
 const docker = (args: string[]) =>

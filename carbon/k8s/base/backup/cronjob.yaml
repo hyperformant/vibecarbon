@@ -193,16 +193,23 @@ spec:
                     # bytes is refused, never overwritten (as on the db container).
                     . "${WALG_ENV_SH:-/etc/postgresql/walg-env.sh}" || exit 1
                     export WALG_PREVENT_WAL_OVERWRITE=true
-                    # WRITE-GUARD (finding #3): never base-backup on a standby into
-                    # the single canonical lineage prefix. WALG_ROLE is rendered
-                    # into the db container env (db/statefulset.yaml) and inherited
-                    # by this kubectl-exec. Closes the bring-up window the recovery
-                    # check below cannot (independent primary, not yet in recovery).
-                    if [ "${WALG_ROLE:-primary}" = "standby" ]; then
-                      echo "WALG_ROLE=standby, skipping base backup (only the primary writes the canonical prefix)."
-                      echo "BACKUP_RESULT=skipped:standby-role"
-                      exit 0
-                    fi
+                    # WRITE-GUARD (src/lib/deploy/walg-role.js): only a node whose wal-g role
+                    # file says primary base-backs-up into the lineage prefix (walg-env.sh reads
+                    # it into VC_WALG_ROLE). This closes the bring-up window the
+                    # pg_is_in_recovery() check below cannot (an independent primary not yet in
+                    # recovery). No role, or an unknown one, refuses with no marker.
+                    case "${VC_WALG_ROLE:-}" in
+                      primary) ;;
+                      standby)
+                        echo "wal-g role standby, skipping base backup (only the primary writes the lineage prefix)."
+                        echo "BACKUP_RESULT=skipped:standby-role"
+                        exit 0
+                        ;;
+                      *)
+                        echo "backup refused: no wal-g role in ${VC_WALG_ROLE_FILE:-/var/lib/vibecarbon/role/walg-role} (vibecarbon deploy writes it)." >&2
+                        exit 1
+                        ;;
+                    esac
                     # The recovery probe must FAIL LOUD when it cannot prove
                     # primary vs standby. The previous form compared $(psql …)
                     # inside a test: a failed psql (database starting up, exec

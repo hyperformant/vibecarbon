@@ -653,7 +653,8 @@ async function haWriteNodeRoles(ctx) {
   // re-deploy over a node that once held the standby role converges it.
   // This runs before start-compose-stack, so the first `up` already
   // interpolates the right caserver — no recreate needed at deploy time.
-  // The .env WALG_ROLE stays until its last reader moves to the role file.
+  // No guard reads the .env WALG_ROLE any more (they read the role file); it
+  // stays until the compose role movers stop comparing it.
   await Promise.all([
     mergeRemoteDotenv(primary.ip, haSshOpts, haRemoteDir, {
       ...composeRoleEnv('primary'),

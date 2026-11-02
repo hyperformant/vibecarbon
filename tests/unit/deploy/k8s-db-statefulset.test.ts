@@ -75,7 +75,6 @@ const values = (overrides: Record<string, unknown> = {}) =>
       region: 'nbg1',
     },
     backupBucketName: 'proj-backups',
-    walgRole: 'primary',
     storageClass: 'hcloud-volumes',
     walArchiveSha: '0123456789abcdef',
     ...overrides,
@@ -92,6 +91,14 @@ describe('k8s/base renders the db StatefulSet', () => {
     pod = sts?.spec.template.spec;
     container = pod?.containers.find((c: Doc) => c.name === 'db');
   }, 60_000);
+
+  it('no WALG_ROLE env and no WALG_ROLE render value', () => {
+    expect(container.env.find((e: Doc) => e.name === 'WALG_ROLE')).toBeUndefined();
+    expect(values()).not.toHaveProperty('WALG_ROLE');
+    expect(readFileSync(join(ROOT, 'carbon/docker-compose.yml'), 'utf-8')).not.toMatch(
+      /^\s*WALG_ROLE:/m,
+    );
+  });
 
   it('uses the names every kubectl call relies on', () => {
     expect(sts, 'statefulset/db is in k8s/base').toBeTruthy();
@@ -296,9 +303,8 @@ describe('buildDbManifestValues', () => {
     ).toBe('s3://proj-backups/backups/proj/staging/walg');
     // A bucket with no resolved prefix would write into a shared path: refuse.
     expect(() => values({ s3Config: { bucket: 'proj-storage' } })).toThrow(/walgPrefix/);
-    // The role is a write-guard, never a path segment.
-    expect(values({ walgRole: 'standby' }).WALG_S3_PREFIX_BASE).not.toMatch(/standby/);
-    expect(values({ walgRole: 'standby' }).WALG_ROLE).toBe('standby');
+    // The role is a write-guard in its own file, never a path segment or a value.
+    expect(Object.values(values()).join(' ')).not.toMatch(/standby|primary/);
   });
 
   it('refuses to render without an image or a StorageClass', () => {
@@ -328,7 +334,7 @@ describe('renderK8sBase on the shipped base', () => {
       expect(env.WALG_S3_PREFIX_BASE).toBe('s3://proj-backups/backups/proj/prod/walg');
       expect(env.WALG_PREVENT_WAL_OVERWRITE).toBe('true');
       expect(env).not.toHaveProperty('WALG_S3_PREFIX');
-      expect(env.WALG_ROLE).toBe('primary');
+      expect(env).not.toHaveProperty('WALG_ROLE');
       expect(env.AWS_ENDPOINT).toBe('https://nbg1.example');
       // The source tree is untouched.
       expect(readFileSync(join(BASE, 'db', 'statefulset.yaml'), 'utf-8')).toContain(

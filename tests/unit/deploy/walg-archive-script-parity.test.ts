@@ -6,7 +6,7 @@
  * CLAIMED, in a header comment, to be "byte-for-byte in sync" with the compose
  * file. It was not. The k8s copy had lost BOTH guards the compose copy carries:
  *
- *   - the WALG_ROLE write-guard, so a k8s standby — or, worse, a standby whose
+ *   - the wal-g role write-guard, so a k8s standby — or, worse, a standby whose
  *     first-boot seed exited UNSEEDED and is therefore briefly an INDEPENDENT
  *     primary — pushed WAL straight into the primary's single canonical
  *     WALG_S3_PREFIX. Two writers, one backup stream.
@@ -68,6 +68,16 @@ function controldataBin(name: string, readable = true) {
   return bin;
 }
 
+/** A role directory holding `walg-role` with `content` (null: no file); returns the file. */
+function roleFile(name: string, content: string | null) {
+  const dir = join(work, `role-${name}`);
+  mkdirSync(dir, { recursive: true });
+  if (content !== null) writeFileSync(join(dir, 'walg-role'), content);
+  return join(dir, 'walg-role');
+}
+/** The role every run that is meant to reach the push carries. */
+const PRIMARY_ROLE_FILE = roleFile('primary', 'primary\n');
+
 describe('wal-archive.sh is byte-identical across compose and k8s', () => {
   it('the ConfigMap block scalar dedents to exactly the compose script', () => {
     if (k8sBody !== composeBody) {
@@ -77,7 +87,7 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
         .join('\n');
       throw new Error(
         `${K8S_CONFIGMAP} has drifted from ${COMPOSE_SCRIPT}. They must stay identical — ` +
-          `the k8s copy silently losing the WALG_ROLE write-guard is exactly how a standby ` +
+          `the k8s copy silently losing the wal-g role write-guard is exactly how a standby ` +
           `ended up archiving into the primary's WAL stream. Replace everything under ` +
           `\`wal-archive.sh: |\` with:\n\n${paste}`,
       );
@@ -117,16 +127,18 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
     }
   });
 
-  it('both tiers therefore carry the WALG_ROLE write-guard', () => {
+  it('both tiers therefore carry the wal-g role write-guard', () => {
     // The bring-up guard: a standby db can briefly be an independent primary
     // (not yet in recovery) before it is reseeded, which the recovery gate
-    // below cannot catch. This is the only thing that closes that window.
+    // below cannot catch. Only the role file saying primary arms archiving.
     for (const [name, body] of [
       [COMPOSE_SCRIPT, composeBody],
       [K8S_CONFIGMAP, k8sBody],
     ] as const) {
-      expect(body, name).toMatch(/if \[ "\$\{WALG_ROLE:-primary\}" = "standby" \]; then/);
-      expect(body, name).toMatch(/WALG_ROLE=standby[\s\S]*?exit 0/);
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder
+      expect(body, name).toContain('case "${VC_WALG_ROLE:-}" in');
+      expect(body, name).toMatch(/standby\)\n[^\n]*wal-g role standby[^\n]*\n\s*exit 0\n/);
+      expect(body, name).toMatch(/\*\)\n[^\n]*WAL_ARCHIVE_ROLE_UNKNOWN[^\n]*\n\s*exit 1\n/);
     }
   });
 
@@ -151,8 +163,9 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
   // durable record. The old pin (every exhausted path exits 0) was that bug.
   it('exit codes: refusals and a held segment exit 1; only the disk-pressure drop and the overwrite refusal give a segment up', () => {
     const exits = (composeBody.match(/^\s*exit \d+/gm) ?? []).map((e) => e.trim());
-    // retired, the walg-env source (|| exit 1, not a line of its own), fence, final hold
-    expect(exits.filter((e) => e === 'exit 1')).toHaveLength(3);
+    // retired, role unknown, fence, final hold (the walg-env source's
+    // `|| exit 1` is not a line of its own)
+    expect(exits.filter((e) => e === 'exit 1')).toHaveLength(4);
     expect(composeBody).toMatch(/backup prefix fenced to another primary[^\n]*\n\s*exit 1\n/);
     expect(composeBody.indexOf('vibecarbon-fence.json')).toBeLessThan(
       composeBody.indexOf('wal-push "$WAL_PATH"'),
@@ -161,7 +174,8 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
       /if \[ -f "\$\{PGDATA_DIR\}\/vibecarbon-retired" \]; then\n[^\n]*retired node: backups refused[^\n]*\n\s*exit 1\n/,
     );
     expect(composeBody.indexOf('vibecarbon-retired')).toBeLessThan(
-      composeBody.indexOf('WALG_ROLE:-primary'),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder
+      composeBody.indexOf('case "${VC_WALG_ROLE:-}" in'),
     );
     // The script ends holding the segment.
     expect(composeBody).toMatch(/WAL_ARCHIVE_FAILED[^\n]*keeping the segment[^\n]*\nexit 1\n?$/);
@@ -221,6 +235,7 @@ describe('wal-archive.sh with no backup target', () => {
         PATH: `${bin}:${process.env.PATH}`,
         WALG_S3_PREFIX_BASE: base,
         WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+        VC_WALG_ROLE_FILE: PRIMARY_ROLE_FILE,
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',
         PGDATA: '/nonexistent',
@@ -248,6 +263,7 @@ describe('wal-archive.sh with no backup target', () => {
           PATH: `${bin}:${process.env.PATH}`,
           WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
           WALG_ENV_SH: '/nonexistent/walg-env.sh',
+          VC_WALG_ROLE_FILE: PRIMARY_ROLE_FILE,
           PGDATA: '/nonexistent',
         },
         timeout: 10_000,
@@ -437,6 +453,7 @@ describe('wal-archive.sh on an overwrite refusal', () => {
           WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
           WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
           WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
+          VC_WALG_ROLE_FILE: PRIMARY_ROLE_FILE,
           WAL_ARCHIVE_RETRIES: '3',
           // A real backoff: an overwrite refusal must never sleep through it.
           WAL_ARCHIVE_SLEEP: '5',
@@ -486,6 +503,7 @@ describe('wal-archive.sh when every push fails', () => {
           WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
           WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
           WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
+          VC_WALG_ROLE_FILE: PRIMARY_ROLE_FILE,
           WAL_ARCHIVE_RETRIES: '2',
           WAL_ARCHIVE_SLEEP: '0',
           PGDATA: pgdata,
@@ -558,5 +576,156 @@ describe('wal-archive.sh when every push fails', () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
     expect(gap()).toBeNull();
+  });
+});
+
+// The role guard, run for real with bash (postgres runs the script that way),
+// against every role state. A wal-g stub records each call, so "never reached
+// wal-g" and "no segment dropped" are observed, not inferred.
+describe('wal-archive.sh role guard', () => {
+  const GiB = 1024 ** 3;
+  const SEG = '000000010000000000000009';
+  let n = 0;
+  /**
+   * One run. `role` is the role file's content (null: no file, `{symlink}`: a
+   * symlink to a file saying primary). Disk pressure is on by default, so a
+   * path that reaches the drop would drop: the guard must stop it first.
+   */
+  const archive = (
+    role: string | null | { symlink: true },
+    {
+      base = 's3://bucket/backups/acme',
+      retired = false,
+      pressure = true,
+    }: { base?: string; retired?: boolean; pressure?: boolean } = {},
+  ) => {
+    n += 1;
+    const bin = controldataBin(`guard-${n}`);
+    const calls = join(bin, 'walg-calls');
+    writeFileSync(calls, '');
+    writeFileSync(
+      join(bin, 'wal-g'),
+      [
+        '#!/bin/sh',
+        `echo "$*" >> ${calls}`,
+        'if [ "$1" = st ]; then echo "object not found in storage" >&2; exit 1; fi',
+        'echo "ERROR: dial tcp: connection refused" >&2',
+        'exit 1',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'wal-g'), 0o755);
+    const pgdata = join(work, `pgdata-guard-${n}`);
+    mkdirSync(join(pgdata, 'pg_wal'), { recursive: true });
+    writeFileSync(join(pgdata, 'pg_wal', SEG), 'x');
+    if (retired) writeFileSync(join(pgdata, 'vibecarbon-retired'), '');
+    const roleDir = join(work, `guard-role-${n}`);
+    mkdirSync(roleDir, { recursive: true });
+    const file = join(roleDir, 'walg-role');
+    if (role !== null && typeof role === 'object') {
+      writeFileSync(join(roleDir, 'target'), 'primary\n');
+      symlinkSync(join(roleDir, 'target'), file);
+    } else if (role !== null) writeFileSync(file, role);
+    const r = spawnSync('bash', [`${repoRoot}${COMPOSE_SCRIPT}`, join(pgdata, 'pg_wal', SEG)], {
+      encoding: 'utf-8',
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        WALG_S3_PREFIX_BASE: base,
+        WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+        WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
+        VC_WALG_ROLE_FILE: file,
+        WAL_ARCHIVE_RETRIES: '1',
+        WAL_ARCHIVE_SLEEP: '0',
+        PGDATA: pgdata,
+        ...(pressure
+          ? { VC_WAL_GUARD_TOTAL_BYTES: String(100 * GiB), VC_WAL_GUARD_FREE_BYTES: String(GiB) }
+          : {}),
+      },
+      timeout: 10_000,
+    });
+    let gap: string | null = null;
+    try {
+      gap = readFileSync(join(pgdata, 'vibecarbon-wal-gap'), 'utf-8');
+    } catch {}
+    return { ...r, walg: readFileSync(calls, 'utf-8'), gap };
+  };
+
+  it.each([
+    ['no role file', null],
+    ['an empty role file', ''],
+    ['a garbage role', 'leader\n'],
+    ['a role that is not the exact word', 'Primary\n'],
+    ['a symlinked role file', { symlink: true } as const],
+  ])('%s: holds the segment (exit 1) with a named line, never reaching wal-g', (_l, role) => {
+    const r = archive(role);
+    expect(r.status, r.stderr).toBe(1);
+    expect(r.stderr).toContain('WAL_ARCHIVE_ROLE_UNKNOWN');
+    expect(r.stderr).not.toContain('WAL_ARCHIVE_FAILED');
+    expect(r.walg).toBe('');
+  });
+
+  it('an unknown role under disk pressure still never drops a segment (D8)', () => {
+    const r = archive(null, { pressure: true });
+    expect(r.status).toBe(1);
+    expect(r.stderr).not.toContain('WAL_ARCHIVE_DROPPED');
+    expect(r.gap).toBeNull();
+    expect(r.walg).toBe('');
+  });
+
+  it('standby: explicit skip, exit 0 (D2), never reaching wal-g', () => {
+    const r = archive('standby\n');
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('wal-g role standby');
+    expect(r.walg).toBe('');
+    expect(r.gap).toBeNull();
+  });
+
+  it('primary: goes on to the push (it fails here, so it holds after the attempts)', () => {
+    const r = archive('primary\n', { pressure: false });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
+    expect(r.stderr).not.toContain('WAL_ARCHIVE_ROLE_UNKNOWN');
+    expect(r.walg).toContain('wal-push');
+  });
+
+  it('the retired node refuses (exit 1) whatever the role says, before the role is read', () => {
+    for (const role of ['primary\n', 'standby\n', null]) {
+      const r = archive(role, { retired: true });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('retired node: backups refused');
+      expect(r.stderr).not.toContain('WAL_ARCHIVE_ROLE_UNKNOWN');
+      expect(r.walg).toBe('');
+      expect(r.gap).toBeNull();
+    }
+  });
+
+  it('no backup target skips BEFORE the role is consulted (local dev never holds WAL)', () => {
+    for (const base of ['', 's3:///backups/acme']) {
+      const r = archive(null, { base });
+      expect(r.status).toBe(0);
+      expect(r.stderr).toContain('no backup target');
+      expect(r.stderr).not.toContain('WAL_ARCHIVE_ROLE_UNKNOWN');
+    }
+  });
+
+  it('never reads the WALG_ROLE env, in either copy', () => {
+    for (const body of [composeBody, k8sBody]) expect(body).not.toMatch(/\$\{?WALG_ROLE\b/);
+  });
+
+  it('guard order: retired, walg-env, no-target, role, recovery, fence, push', () => {
+    for (const body of [composeBody, k8sBody]) {
+      const at = (s: string) => {
+        const i = body.indexOf(s);
+        expect(i, s).toBeGreaterThan(-1);
+        return i;
+      };
+      expect(at('vibecarbon-retired" ]')).toBeLessThan(at('walg-env.sh}"'));
+      expect(at('walg-env.sh}"')).toBeLessThan(at('""|s3:///*)'));
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder
+      expect(at('""|s3:///*)')).toBeLessThan(at('case "${VC_WALG_ROLE:-}" in'));
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder
+      expect(at('case "${VC_WALG_ROLE:-}" in')).toBeLessThan(at('SELECT pg_is_in_recovery()'));
+      expect(at('SELECT pg_is_in_recovery()')).toBeLessThan(at('st cat vibecarbon-fence.json'));
+      expect(at('st cat vibecarbon-fence.json')).toBeLessThan(at('wal-push "$WAL_PATH"'));
+    }
   });
 });

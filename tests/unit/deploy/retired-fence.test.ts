@@ -858,6 +858,8 @@ describe('wal-archive.sh refuses on a retired node', () => {
       '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',
     );
     chmodSync(join(base, 'bin', 'pg_controldata'), 0o755);
+    // A primary: the role file walg-env.sh reads (the retired refusal comes first).
+    writeFileSync(join(base, 'walg-role'), 'primary\n');
     const r = spawnSync('bash', [script, 'pg_wal/000000010000000000000001'], {
       encoding: 'utf-8',
       env: {
@@ -867,7 +869,7 @@ describe('wal-archive.sh refuses on a retired node', () => {
         // appends the lineage folder.
         WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
         WALG_ENV_SH: join(repoRoot, 'carbon/volumes/db/walg-env.sh'),
-        WALG_ROLE: 'primary',
+        VC_WALG_ROLE_FILE: join(base, 'walg-role'),
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',
       },

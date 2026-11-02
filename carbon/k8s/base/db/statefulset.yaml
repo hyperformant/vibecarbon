@@ -23,8 +23,6 @@
 #                             identifier: walg-env.sh (vibecarbon-wal-archive
 #                             ConfigMap) exports WALG_S3_PREFIX from it, and
 #                             every wal-g caller sources that file first
-#   WALG_ROLE                 primary | standby: the wal-g WRITE-GUARD that
-#                             wal-archive.sh and the backup CronJob read
 #   S3_ENDPOINT / S3_REGION   the backup bucket's endpoint
 #   K8S_STORAGE_CLASS         the provider's CSI class (never the cluster
 #                             default, which can be k3s' node-local local-path)
@@ -456,8 +454,6 @@ spec:
               value: "{{WALG_S3_PREFIX_BASE}}"
             - name: WALG_PREVENT_WAL_OVERWRITE
               value: "true"
-            - name: WALG_ROLE
-              value: "{{WALG_ROLE}}"
             # The durable wal-g role intent, held in the CLI-owned ConfigMap
             # vibecarbon-db-role (never in this base, so Flux never sees it;
             # src/lib/deploy/walg-role.js). db-guard.sh writes it to the role

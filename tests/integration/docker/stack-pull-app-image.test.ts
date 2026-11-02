@@ -80,6 +80,9 @@ describeDocker('the stack pull against real compose skips the app image', () => 
     dir = mkdtempSync(join(tmpdir(), 'vctest-stackpull-'));
     writeFileSync(join(dir, 'docker-compose.yml'), COMPOSE);
     writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(['grafana', 'n8n']));
+    // A primary node (its wal-g role file), so addon-services.sh defers both.
+    execFileSync('mkdir', ['-p', join(dir, '.vibecarbon-role')]);
+    writeFileSync(join(dir, '.vibecarbon-role', 'walg-role'), 'primary\n');
     // A shim in front of the real docker that records each call: real
     // compose answers and pulls, the test reads which services were named.
     const bin = join(dir, 'bin');
