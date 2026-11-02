@@ -482,7 +482,7 @@ describe('--json', () => {
       walGap: null,
     });
     expect(readFileSync(join(__dirname, '../../../src/status.js'), 'utf8')).toContain(
-      'JSON.stringify(allData',
+      'writeJson(allData)',
     );
   });
 });

@@ -17,9 +17,10 @@ import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { loadAllSpecs } from './lib/cli/command-registry.js';
+import { COMMANDS, loadAllSpecs } from './lib/cli/command-registry.js';
 import { installUnsettledExitGuard } from './lib/cli/exit-guard.js';
 import { formatExamples, renderCommandList } from './lib/cli/help.js';
+import { enterJsonMode, wantsJson } from './lib/cli/json-mode.js';
 import { c, link } from './lib/colors.js';
 import { dbImageOverrideProblem, setDbImageWarningSink } from './lib/images.js';
 import { shouldGate } from './lib/licensing/gate.js';
@@ -291,6 +292,15 @@ async function main() {
     assertInProjectDir();
     const { requireLicense } = await import('./lib/licensing/index.js');
     requireLicense(command);
+  }
+
+  // JSON mode, decided once here for every command: from now on stdout is
+  // reserved for the JSON document (written via writeJson), and clack output,
+  // spinners, banners, warnings and stray console.log go to stderr. See
+  // lib/cli/json-mode.js.
+  const jsonEntry = COMMANDS.find((e) => e.name === command || e.aliases?.includes(command));
+  if (jsonEntry && subcommandArgs.includes('-json')) {
+    if (wantsJson(await jsonEntry.loadSpec(), subcommandArgs)) enterJsonMode();
   }
 
   const commandTimer = perfTimer(`cli.${command}.total`);
