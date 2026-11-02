@@ -73,6 +73,15 @@ describe('writeSidecar', () => {
     expect(lstatSync(path).isSymbolicLink()).toBe(true);
   });
 
+  it('refuses a directory at the sidecar path, leaving it as it is', () => {
+    const { root } = project();
+    const path = join(root, 'a.yaml.upgrade-backup');
+    mkdirSync(path);
+    writeFileSync(join(path, 'inside'), 'kept\n');
+    expect(writeSidecar(path, 'x\n')).toBe(false);
+    expect(readFileSync(join(path, 'inside'), 'utf-8')).toBe('kept\n');
+  });
+
   it('refuses a dangling symlink too, creating nothing where it points', () => {
     const { root, outside } = project();
     const path = join(root, 'a.yaml.upgrade-backup');

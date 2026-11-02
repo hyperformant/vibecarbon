@@ -56,7 +56,7 @@ import {
   setEnvVar,
 } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { isSymlink, symlinkedComponent, writeSidecar } from './lib/project-write-guard.js';
+import { sidecarBlocked, symlinkedComponent, writeSidecar } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
 import { templatePathFor } from './lib/template-paths.js';
 import { getAddonFilePolicy, getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
@@ -393,9 +393,14 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
  * @param {object} variables - Template variables
  * @returns {string} - Resolved content
  */
-/** The one line for a file upgrade leaves alone because a path on its way is a symlink. */
+/**
+ * The one line for a file upgrade leaves alone because a path on its way is
+ * a symlink, or a sidecar path holds something other than a plain file.
+ */
 function warnSymlinkSkip(relPath, link) {
-  p.log.warn(`Skipped ${relPath}: ${link} is a symlink, and upgrade never writes through one.`);
+  p.log.warn(
+    `Skipped ${relPath}: ${link} is a symlink or not a plain file, and upgrade never writes through one.`,
+  );
 }
 
 function resolveTemplate(fullPath, variables) {
@@ -536,7 +541,7 @@ async function main(cliArgs) {
   // add-on maps is the add-on's: the template's copy of it (the dev stack's
   // carbon/docker-compose.n8n.yml and the like) is never its source.
   const ownedByAddons = addonOwnedPaths(SERVICES_DIR);
-  const upgradeEntries = [
+  const shippedEntries = [
     ...getUpgradeableFiles(TEMPLATE_DIR)
       .filter((relPath) => !ownedByAddons.has(relPath))
       .map((relPath) => ({
@@ -553,7 +558,11 @@ async function main(cliArgs) {
       addon: true,
       policy: getAddonFilePolicy(entry.relPath, entry.src),
     })),
-  ]
+  ];
+  // Every path this CLI still ships to this project, whatever this run does
+  // with it: the checksums of anything else are dropped at the end.
+  const shippedPaths = new Set(shippedEntries.map(({ relPath }) => relPath));
+  const upgradeEntries = shippedEntries
     // Containment before any policy: a path with a `..` segment, or an
     // absolute one, is never read or written, whatever its policy says.
     .filter(({ relPath }) => isContainedRelPath(relPath))
@@ -565,7 +574,7 @@ async function main(cliArgs) {
         symlinkedComponent(cwd, relPath) ??
         ['.upgrade-backup', '.upgrade-new']
           .map((suffix) => `${relPath}${suffix}`)
-          .find((sidecar) => isSymlink(join(cwd, sidecar))) ??
+          .find((sidecar) => sidecarBlocked(join(cwd, sidecar))) ??
         null;
       if (link) warnSymlinkSkip(relPath, link);
       return !link;
@@ -1053,10 +1062,13 @@ async function main(cliArgs) {
     // matches the incoming content. A file left as it was (skipped, or its
     // new version saved as .upgrade-new) keeps its previous checksum:
     // recording the user's own content there would make the next upgrade
-    // read the file as unmodified and replace it with no backup. Paths this
-    // run does not manage (an add-on's integration doc `add` recorded) keep
-    // theirs.
-    const newChecksums = { ...storedChecksums };
+    // read the file as unmodified and replace it with no backup. A path still
+    // shipped but not upgraded here (an add-on's integration doc, a file
+    // skipped for a symlink) keeps its checksum; a path neither the template
+    // nor an installed add-on ships any more loses it.
+    const newChecksums = Object.fromEntries(
+      Object.entries(storedChecksums).filter(([relPath]) => shippedPaths.has(relPath)),
+    );
     for (const { relPath } of upgradeEntries) {
       if (isBinaryFile(relPath)) continue;
       const projectFilePath = join(cwd, relPath);
@@ -1068,8 +1080,6 @@ async function main(cliArgs) {
       }
       if (onDisk && (written.has(relPath) || onDisk === incomingHash.get(relPath))) {
         newChecksums[relPath] = onDisk;
-      } else if (!storedChecksums[relPath]) {
-        delete newChecksums[relPath];
       }
     }
 

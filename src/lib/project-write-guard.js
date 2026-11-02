@@ -35,14 +35,16 @@ export function symlinkedComponent(projectRoot, relPath) {
 
 /**
  * Write an upgrade sidecar (`.upgrade-backup`, `.upgrade-new`) without
- * following a symlink planted at its path: a symlink there (dangling or not)
- * is refused and left as it is, a plain old sidecar is unlinked first, and
+ * following a symlink planted at its path: anything there but a plain file
+ * (a symlink, dangling or not, or a directory) is refused and left as it
+ * is, a plain old sidecar is unlinked first, and
  * the write is an exclusive create (`wx`), so a link created in between
  * fails the write instead of redirecting it.
  *
  * @param {string} path
  * @param {string} content
- * @returns {boolean} false when the path is (or became) a symlink
+ * @returns {boolean} false when the path holds (or came to hold) something
+ *   other than a plain file
  */
 export function writeSidecar(path, content) {
   let stat = null;
@@ -51,7 +53,7 @@ export function writeSidecar(path, content) {
   } catch {
     stat = null;
   }
-  if (stat?.isSymbolicLink()) return false;
+  if (stat && !stat.isFile()) return false;
   if (stat) unlinkSync(path);
   try {
     writeFileSync(path, content, { flag: 'wx' });
@@ -62,10 +64,13 @@ export function writeSidecar(path, content) {
   return true;
 }
 
-/** True when `path` exists as a symlink (dangling or not). */
-export function isSymlink(path) {
+/**
+ * True when `path` exists as something writeSidecar refuses: anything but a
+ * plain file (a symlink, dangling or not, a directory).
+ */
+export function sidecarBlocked(path) {
   try {
-    return lstatSync(path).isSymbolicLink();
+    return !lstatSync(path).isFile();
   } catch {
     return false;
   }

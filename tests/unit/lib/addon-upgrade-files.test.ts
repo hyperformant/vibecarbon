@@ -217,7 +217,7 @@ describe('containment', () => {
 describe('upgrade.js refuses an uncontained path before its policy check', () => {
   it('filters every upgrade entry through isContainedRelPath ahead of getFilePolicy', () => {
     const src = readFileSync(join(process.cwd(), 'src', 'upgrade.js'), 'utf8');
-    const start = src.indexOf('const upgradeEntries = [');
+    const start = src.indexOf('const shippedEntries = [');
     const loop = src.indexOf('of upgradeEntries) {', start);
     const build = src.slice(start, loop);
     const contain = build.indexOf('.filter(({ relPath }) => isContainedRelPath(relPath))');
@@ -226,7 +226,9 @@ describe('upgrade.js refuses an uncontained path before its policy check', () =>
     expect(contain).toBeGreaterThan(-1);
     expect(policy).toBeGreaterThan(contain);
     // Applied to the whole list (template and add-on entries), not one half.
-    expect(build.lastIndexOf(']', contain)).toBeGreaterThan(build.indexOf('addonUpgradeEntries('));
+    const whole = build.indexOf('const upgradeEntries = shippedEntries');
+    expect(whole).toBeGreaterThan(build.indexOf('addonUpgradeEntries('));
+    expect(contain).toBeGreaterThan(whole);
   });
 });
 

@@ -428,4 +428,39 @@ describe('vibecarbon upgrade', () => {
       expect(readFileSync(target, 'utf-8')).toBe('outside\n');
     });
   });
+
+  it('-y skips a file whose .upgrade-backup path is a directory', () => {
+    installStaleObservability(project, { recordChecksums: false });
+    const rel = 'k8s/base/observability/ingressroute.yaml';
+    const before = readFileSync(join(project, rel), 'utf-8');
+    mkdirSync(join(project, `${rel}.upgrade-backup`));
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    assertSuccess(r);
+    expect(readFileSync(join(project, rel), 'utf-8')).toBe(before);
+    expect(r.stdout + r.stderr).toMatch(/upgrade-backup/);
+  });
+
+  it('drops the checksums of files no longer shipped, keeps those of files still shipped but skipped', () => {
+    installStaleObservability(project, { recordChecksums: true });
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    // A path neither the template nor an installed add-on ships any more.
+    config.fileChecksums['retired/old-file.yml'] = hashContent('old\n');
+    // A still-shipped template file left alone (customised over an older
+    // template): its previous checksum must survive.
+    const rel = 'docker-compose.prod.yml';
+    const older = `${readFileSync(join(project, rel), 'utf-8')}# older template\n`;
+    config.fileChecksums[rel] = hashContent(older);
+    writeFileSync(join(project, rel), `${older}# site-specific\n`);
+    // An installed add-on's integration doc (never upgraded, still shipped).
+    config.fileChecksums['observability-integration.md'] = hashContent('doc\n');
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    assertSuccess(runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 }));
+
+    const after = JSON.parse(readFileSync(configPath, 'utf-8')).fileChecksums;
+    expect(after['retired/old-file.yml']).toBeUndefined();
+    expect(after[rel]).toBe(hashContent(older));
+    expect(after['observability-integration.md']).toBe(hashContent('doc\n'));
+  });
 });
