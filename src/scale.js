@@ -1089,6 +1089,22 @@ async function createReplacementServer(ctx, server, s) {
 }
 
 /**
+ * One local build per tag per scale run, held on ctx: a compose-ha scale of
+ * both nodes sends the same image to both replacements instead of building it
+ * twice.
+ *
+ * @param {{ appImageBuilds?: Map<string, Promise<unknown>> }} ctx
+ * @param {string} tag
+ * @param {() => Promise<unknown>} build
+ * @returns {Promise<unknown>}
+ */
+function sharedAppImageBuild(ctx, tag, build) {
+  ctx.appImageBuilds ??= new Map();
+  if (!ctx.appImageBuilds.has(tag)) ctx.appImageBuilds.set(tag, build());
+  return ctx.appImageBuilds.get(tag);
+}
+
+/**
  * How a compose scale replacement gets the app image the old server ran:
  * 'delta' (built on this machine and sent by layer delta, as a deploy does),
  * 'remote-build' (the new server builds it: `-direct`, a deploy recorded in
@@ -1237,8 +1253,10 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
             ip: newIp,
             sshKeyPath,
             tag: oldAppImage,
-            built: perfAsync('scale.localBuild', () =>
-              buildComposeAppImage({ tag: oldAppImage, projectName, domain }),
+            built: sharedAppImageBuild(ctx, oldAppImage, () =>
+              perfAsync('scale.localBuild', () =>
+                buildComposeAppImage({ tag: oldAppImage, projectName, domain }),
+              ),
             ),
           }),
         )

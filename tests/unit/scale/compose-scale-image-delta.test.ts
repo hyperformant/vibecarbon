@@ -401,3 +401,14 @@ describe('compose scale: an operator can keep the server-side build', () => {
     expect(h.events).not.toContain('up:9.9.9.9');
   });
 });
+
+describe('compose-ha scale of both nodes', () => {
+  it('builds the app image once for the run and sends it to each replacement', async () => {
+    reset();
+    const ctx = makeCtx({ tier: 'compose-ha', dnsChallenge: true });
+    // Whatever the arms prove afterwards, both replacements got their image first.
+    await SCALE_EFFECTS.scaleServers(ctx).catch(() => {});
+    expect(h.events.filter((e) => e.startsWith('localBuild:'))).toHaveLength(1);
+    expect(h.events.filter((e) => e.startsWith('delta:')).length).toBeGreaterThanOrEqual(2);
+  });
+});
