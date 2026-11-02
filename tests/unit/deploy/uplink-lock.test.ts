@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { progressLog } from '../../../src/lib/cli/progress.js';
 import {
   acquireUplinkLock,
   // @ts-expect-error — JS module without types
@@ -59,6 +60,21 @@ describe('acquireUplinkLock', () => {
     const release2 = await b;
     release2();
     expect(events).toEqual(['a:acquired', 'b:acquired']);
+  });
+
+  it("a wait on this process's own other transfer says so, not 'another process'", async () => {
+    // compose-ha sends one delta to each server from one deploy: the second
+    // send queues behind the first, inside the same process.
+    vi.mocked(progressLog).mockClear();
+    const lockDir = join(makeDir(), 'uplink-push.lock');
+    const release1 = await acquireUplinkLock({ lockDir, label: 'a', sleep: fastSleep });
+    const b = acquireUplinkLock({ lockDir, label: 'b', sleep: fastSleep });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    release1();
+    (await b)();
+    const lines = vi.mocked(progressLog).mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => l.includes("b: waiting for this deploy's other transfer"))).toBe(true);
+    expect(lines.some((l) => l.includes('another process'))).toBe(false);
   });
 
   it('reaps a stale holder whose process is dead', async () => {

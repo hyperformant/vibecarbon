@@ -17,9 +17,12 @@
  * instead of running inside `compose up`. The pull never moves into
  * cloud-init (cloud-init-no-image-pull.test.ts).
  *
- * F1 (compose-ha): `haRemoteBuild` must start the two-node build fan WITHOUT
- * awaiting (so it overlaps setupServerFiles → mergeWalgRole → pullImages), and
- * `haStartComposeStack` must AWAIT the fan before `docker compose up`.
+ * F1 (compose-ha): `haTransferImage` ships the ONE local build to both servers
+ * by layer delta, in parallel, WITHOUT awaiting (so it overlaps
+ * setupServerFiles → mergeWalgRole → pullImages, as the per-server remote
+ * build it replaced did), and `haStartComposeStack` must AWAIT both deliveries
+ * before `docker compose up`. A local-mode compose-ha deploy never builds on a
+ * server; only direct mode (no local docker) still does.
  *
  * We drive real effects with controllable deferred promises for the underlying
  * side-effecting calls (deliverImage / the base pull / pullComposeImages /
@@ -43,6 +46,7 @@ const H = vi.hoisted(() => ({
     baseRef: 'ghcr.io/o/node-runtime:1' as string | null,
     sshCommands: [] as string[],
     deliverArgs: [] as Record<string, unknown>[],
+    deliverByTarget: {} as Record<string, Deferred>,
   },
 }));
 
@@ -60,7 +64,7 @@ vi.mock('../../../src/lib/deploy/layer-delta.js', () => ({
   deliverImage: vi.fn((args: Record<string, unknown>) => {
     H.state.order.push('deliver-start');
     H.state.deliverArgs.push(args);
-    return H.state.deliver?.promise;
+    return (H.state.deliverByTarget[String(args.sshTarget)] ?? H.state.deliver)?.promise;
   }),
 }));
 
@@ -136,6 +140,7 @@ beforeEach(() => {
   H.state.order = [];
   H.state.sshCommands = [];
   H.state.deliverArgs = [];
+  H.state.deliverByTarget = {};
   H.state.baseRef = 'ghcr.io/o/node-runtime:1';
   H.state.deliver = deferred();
   H.state.basePull = deferred();
@@ -283,35 +288,146 @@ describe('stack pulls overlap the transfer (cold-deploy-speed Task 4)', () => {
   });
 });
 
-describe('F1 — compose-ha: haRemoteBuild is non-blocking, haStartComposeStack is the barrier', () => {
-  it('starts the two-node build fan without awaiting, then reconcile waits for it', async () => {
-    const ctx: Record<string, unknown> = {
-      projectConfig: { projectName: 'p' },
-      primary: { ip: '1.1.1.1' },
-      standby: { ip: '2.2.2.2' },
-      sshKeyPath: '/k',
-      imageRef: 'p-app:local',
-      domain: null,
-      services: {},
-      isLocalOnlyImage: true,
-      onProgress: () => {},
-    };
+function composeHaCtx(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    projectConfig: { projectName: 'p' },
+    primary: { ip: '1.1.1.1' },
+    standby: { ip: '2.2.2.2' },
+    sshKeyPath: '/k',
+    imageRef: 'p-app:local',
+    localImageTag: 'p-app:local',
+    isComposeLocal: true,
+    isDirectDeploy: false,
+    composeLocalBuildPromise: Promise.resolve(),
+    domain: null,
+    services: {},
+    onProgress: () => {},
+    ...over,
+  };
+}
 
-    await COMPOSE_HA_EFFECTS.haRemoteBuild(ctx);
-    // Both nodes' builds kicked off; the effect returned while they run.
-    expect(H.state.order.filter((x) => x === 'build-start')).toHaveLength(2);
-    expect(ctx.remoteBuildPromise).toBeDefined();
+describe('F1 — compose-ha: one local build, a layer delta to both servers, haStartComposeStack is the barrier', () => {
+  it('delivers to both servers in parallel without awaiting, and never builds on a server', async () => {
+    const ctx = composeHaCtx();
+    await COMPOSE_HA_EFFECTS.haTransferImage(ctx);
+    expect(ctx.imageTransferPromise).toBeDefined();
+    // Both deltas are in flight at once: neither waited for the other.
+    await vi.waitFor(() =>
+      expect(H.state.order.filter((x) => x === 'deliver-start')).toHaveLength(2),
+    );
+    expect(H.state.order).not.toContain('build-start');
     expect(H.state.order).not.toContain('reconcile.run');
+    // The same tag on both nodes, and it is the APP_IMAGE each node's compose
+    // resolves (haServiceOpts stamps ctx.imageRef).
+    expect(H.state.deliverArgs.map((a) => a.sshTarget).sort()).toEqual([
+      'root@1.1.1.1',
+      'root@2.2.2.2',
+    ]);
+    for (const a of H.state.deliverArgs) {
+      expect(a).toMatchObject({
+        tag: 'p-app:local',
+        sshKey: '/k',
+        runtime: 'docker',
+        baseRef: 'ghcr.io/o/node-runtime:1',
+      });
+    }
+    // Each server pulls the runtime base itself, before its delta asks what it holds.
+    expect(
+      H.state.sshCommands.filter((c) => c.includes("docker pull 'ghcr.io/o/node-runtime:1'")),
+    ).toHaveLength(2);
 
     const barrier = COMPOSE_HA_EFFECTS.haStartComposeStack(ctx);
     await tick();
     expect(H.state.order).not.toContain('reconcile.run');
+    H.state.deliver?.resolve({ bytes: 1, layersSent: 1, layersReused: 9 });
+    await barrier;
+    expect(H.state.order.indexOf('reconcile.run')).toBeGreaterThan(
+      H.state.order.lastIndexOf('deliver-start'),
+    );
+    expect(H.state.order).not.toContain('build-start');
+  });
 
+  it('waits for the one local build before either delta reads the image', async () => {
+    const build = deferred();
+    const ctx = composeHaCtx({ composeLocalBuildPromise: build.promise });
+    await COMPOSE_HA_EFFECTS.haTransferImage(ctx);
+    await tick();
+    expect(H.state.order).not.toContain('deliver-start');
+    // The base pulls do not wait for the build: they overlap it.
+    expect(H.state.order.filter((x) => x === 'basePull:start')).toHaveLength(2);
+    build.resolve();
+    await vi.waitFor(() =>
+      expect(H.state.order.filter((x) => x === 'deliver-start')).toHaveLength(2),
+    );
+    H.state.deliver?.resolve({});
+    await ctx.imageTransferPromise;
+  });
+
+  it('a failed delta to one server fails the deploy at the barrier, naming that server, before reconcile', async () => {
+    H.state.deliverByTarget['root@2.2.2.2'] = deferred();
+    const ctx = composeHaCtx();
+    await COMPOSE_HA_EFFECTS.haTransferImage(ctx);
+    await vi.waitFor(() =>
+      expect(H.state.order.filter((x) => x === 'deliver-start')).toHaveLength(2),
+    );
+    H.state.deliver?.resolve({});
+    H.state.deliverByTarget['root@2.2.2.2'].reject(
+      new Error('image delivery failed: the target exited 1'),
+    );
+    await expect(COMPOSE_HA_EFFECTS.haStartComposeStack(ctx)).rejects.toThrow(
+      /standby 2\.2\.2\.2.*image delivery failed: the target exited 1/,
+    );
+    expect(H.state.order).not.toContain('reconcile.run');
+  });
+
+  it('a failed local build fails the deploy at the barrier with its own error', async () => {
+    const build = deferred();
+    const ctx = composeHaCtx({ composeLocalBuildPromise: build.promise });
+    await COMPOSE_HA_EFFECTS.haTransferImage(ctx);
+    build.reject(new Error('docker build failed for p-app:local'));
+    await expect(COMPOSE_HA_EFFECTS.haStartComposeStack(ctx)).rejects.toThrow(
+      /docker build failed for p-app:local/,
+    );
+    expect(H.state.order).not.toContain('deliver-start');
+    expect(H.state.order).not.toContain('reconcile.run');
+  });
+
+  it('the deltas overlap the stack pull fan in the plan, and reconcile waits for both', async () => {
+    const wanted = new Set(['haTransferImage', 'haPullImages', 'haStartComposeStack']);
+    const steps = planDeploy('compose-ha', {}).filter((s: { effect: string }) =>
+      wanted.has(s.effect),
+    );
+    expect(steps.map((s: { effect: string }) => s.effect)).toEqual([
+      'haTransferImage',
+      'haPullImages',
+      'haStartComposeStack',
+    ]);
+    const ctx = composeHaCtx();
+    const run = runPlan(steps, ctx, COMPOSE_HA_EFFECTS);
+    // The pull fan starts while both deltas are still in flight.
+    await vi.waitFor(() => expect(H.state.order).toContain('stackPull:start'));
+    expect(H.state.order.filter((x) => x === 'deliver-start')).toHaveLength(2);
+    H.state.stackPull?.resolve();
+    await tick();
+    expect(H.state.order).not.toContain('reconcile.run');
+    H.state.deliver?.resolve({});
+    await run;
+    expect(H.state.order).toContain('reconcile.run');
+    expect(H.state.order).not.toContain('build-start');
+  });
+
+  it('direct mode (no local docker) still builds on both servers, and reconcile waits for it', async () => {
+    const ctx = composeHaCtx({ isComposeLocal: false, isDirectDeploy: true });
+    await COMPOSE_HA_EFFECTS.haTransferImage(ctx);
+    await vi.waitFor(() =>
+      expect(H.state.order.filter((x) => x === 'build-start')).toHaveLength(2),
+    );
+    expect(H.state.order).not.toContain('deliver-start');
+    const barrier = COMPOSE_HA_EFFECTS.haStartComposeStack(ctx);
+    await tick();
+    expect(H.state.order).not.toContain('reconcile.run');
     H.state.build?.resolve(true);
     await barrier;
     expect(H.state.order).toContain('reconcile.run');
-    expect(H.state.order.indexOf('reconcile.run')).toBeGreaterThan(
-      H.state.order.indexOf('build-start'),
-    );
   });
 });

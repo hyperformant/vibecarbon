@@ -43,7 +43,7 @@ describe('compose deploy plan snapshot', () => {
         "setup-servers",
         "wait-docker-ready",
         "check-db-ledger",
-        "remote-build",
+        "transfer-image",
         "setup-server-files",
         "merge-walg-role",
         "pull-images",

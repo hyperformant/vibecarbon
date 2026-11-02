@@ -51,18 +51,20 @@ export const FAN_RATIO_MAX = 1.25;
 export const STANDBY_AWAIT_DB_MAX_MS = 60_000;
 
 /** Modes whose app image reaches the server by layer delta (deliverImage). */
-const DELTA_MODES: ReadonlySet<DeployMode> = new Set(['compose', 'k8s', 'k8s-ha']);
+const DELTA_MODES: ReadonlySet<DeployMode> = new Set(['compose', 'compose-ha', 'k8s', 'k8s-ha']);
 
 /**
  * Markers that are not serial work of their own, kept out of the "slowest"
  * list a failure names:
  * - umbrellas that wrap other markers: the total, `.full`, the k8s-ha arms,
  *   every fan (`.fan`, `setupFan`, `pullFan`), and the image delta, which runs
- *   inside `image.transfer` (compose) or `image.deliver` (k8s);
+ *   inside `image.transfer` (compose, once per compose-ha server) or
+ *   `image.deliver` (k8s);
  * - work that runs in the background, whose residue on the critical path has
  *   its own `.await` marker or overlaps a later step: the base pulls, the
  *   compose stack pull (stackPull.await), the compose image transfer
- *   (transfer.await) and k8s-ha's early replication transport.
+ *   (transfer.await, and compose-ha's imageTransfer.await) and k8s-ha's early
+ *   replication transport.
  */
 const NOT_SERIAL =
   /^deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|Fan$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$/;

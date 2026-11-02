@@ -71,7 +71,6 @@ import {
   quietKubectl,
   snapshotK8sTlsSecret,
 } from './k8s/index.js';
-import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { makePublicDnsLookup } from './public-dns-lookup.js';
 import { k8sPsqlRunner } from './replication.js';
@@ -1734,52 +1733,19 @@ export async function executeDeployment(args, gatheredConfig) {
     // critical path. State-tracker stepId 'compose-localbuild' is distinct
     // from 'compose-upstack' so concurrent state writes don't collide
     // (state.js uses last-writer-wins per stepId).
-    // silent: true so BuildKit progress doesn't interleave with the
-    // spinner output from upStack (which is running concurrently). On
-    // failure runCommandAsync includes captured stdout/stderr in the
-    // thrown error — operator still sees what went wrong.
-    // Plumb VITE_* build args through to docker build so the browser bundle
-    // ships with real client config (VITE_PUBLIC_URL etc.). Without these the
-    // Dockerfile's ARG VITE_* defaults to empty strings and Vite inlines
-    // empty values into the bundle. Mirrors what docker-compose.yml's build.args block does
-    // for local-dev `docker compose up --build`. See
-    // src/lib/deploy/compose/build-args.js for the rationale.
-    const { collectComposeBuildArgs, buildArgFlags } = await import('./compose/build-args.js');
-    const localBuildArgs = collectComposeBuildArgs(process.cwd(), {
-      projectName: projectConfig.projectName,
-      domain,
-    });
-    // PLATFORM_BUILD_FLAG: this build runs on the OPERATOR's machine, so
-    // without it the image inherits the operator's architecture (an Apple
-    // Silicon operator shipped arm64 to an amd64 VPS). vibecarbon is x86-64
-    // only — see platform.js. The pin can turn a previously-"succeeding"
-    // (wrong-arch) build into a hard failure on a host with no amd64
-    // emulation, which is the intended trade; the catch below makes that
-    // failure legible instead of a bare BuildKit "exec format error".
-    composeLocalBuildPromise = perfAsync('deploy.image.localBuild', async () => {
-      try {
-        return await runCommandAsync(
-          [
-            'docker',
-            'build',
-            PLATFORM_BUILD_FLAG,
-            ...buildArgFlags(localBuildArgs),
-            '-t',
-            localImageTag,
-            process.cwd(),
-          ],
-          { silent: true },
-        );
-      } catch (err) {
-        const detail = `${err.stderr || ''}${err.stdout || ''}`.trim();
-        const wrapped = new Error(
-          `docker build failed for ${localImageTag}. ${AMD64_BUILD_HINT}` +
-            (detail ? `\n${detail.split('\n').slice(-40).join('\n')}` : ''),
-        );
-        wrapped.cause = err;
-        throw wrapped;
-      }
-    });
+    // The build (compose/app-image.js) is silent so BuildKit progress doesn't
+    // interleave with the upStack spinner; a failure carries docker's last
+    // lines. It passes the VITE_* build args (Vite inlines them into the
+    // browser bundle) and pins amd64 (an Apple Silicon operator once shipped
+    // arm64 to an amd64 VPS; vibecarbon is x86-64 only, see platform.js).
+    // compose delivers it to its server, compose-ha to both, by layer delta.
+    const { buildComposeAppImage } = await import('./compose/app-image.js');
+    composeLocalBuildPromise = perfAsync('deploy.image.localBuild', () =>
+      buildComposeAppImage({ tag: localImageTag, projectName: projectConfig.projectName, domain }),
+    );
+    // Awaited by the image transfer; this keeps a build that fails while
+    // provisioning still runs from being an unhandled rejection first.
+    composeLocalBuildPromise.catch(() => {});
     imageReadyPromise = Promise.resolve({
       imageTag: localImageTag,
       githubOwner: 'noop',
@@ -2128,7 +2094,6 @@ export async function executeDeployment(args, gatheredConfig) {
     // deployComposeHA ran over the primary+standby pair; ctx threads the
     // mutable two-node identity the effects fill in (primary/standby/degraded)
     // and the orchestrator reads back into the HA deployResult shape below.
-    const { isLocalOnlyImageTag } = await import('./compose/index.js');
     const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
     const s = tracker.spinner();
     s.start('Starting HA deployment...');
@@ -2156,8 +2121,6 @@ export async function executeDeployment(args, gatheredConfig) {
       // Finding #1: hard-gate replication unless the operator opts into a
       // warm/degraded standby via `deploy -allow-degraded`.
       allowDegraded: !!args.allowDegraded,
-      // Pure gate for the remote-build step (local-only image ⇒ build on-node).
-      isLocalOnlyImage: isLocalOnlyImageTag(imageRef),
       // Role mapping on a failed-over pair (null otherwise): the effects resolve
       // ctx.primary / ctx.standby by role and keep each node's stack.
       reconverge: composeHaReconverge,

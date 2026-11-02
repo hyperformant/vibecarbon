@@ -303,8 +303,8 @@ jobs:
           mkdir -p tests/results
           # --skip-steps setup-repo: the throwaway GitHub repo only serves
           # the CI-image build path, which no perf scenario uses (compose =
-          # local build + sideload, compose-ha = remote build, k8s = local
-          # registry). Skipping it means no repo-create/delete PAT in CI;
+          # local build + delta, compose-ha = local build + delta to both
+          # servers, k8s = local registry). Skipping it means no repo-create/delete PAT in CI;
           # teardown-repo self-skips when no repo was created.
           FLAGS=(--skip-steps setup-repo --provider "$PROVIDER")
           if [ -n "$SCENARIOS" ]; then

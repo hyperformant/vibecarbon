@@ -147,8 +147,8 @@ A deploy:
 3. Issues TLS certificates via ACME DNS-01 (wildcard-capable), or puts back
    the environment's saved certificate ([Certificates](#certificates))
 4. Builds your app image locally and sends only your app's own layers over
-   SSH; servers pull the shared runtime base themselves (compose-ha builds the
-   image on both servers instead). On k8s the image goes once into the
+   SSH; servers pull the shared runtime base themselves (compose-ha sends the
+   same layers to both servers at once). On k8s the image goes once into the
    cluster's registry and every node pulls it from there. On k8s-ha the
    standby cluster is not sent to: it copies the image from the primary over
    the private tunnel; if that copy fails the deploy fails, unless

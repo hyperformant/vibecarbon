@@ -69,9 +69,9 @@ describe('platform constants', () => {
 
 describe('every docker-build site in the deploy path pins the platform', () => {
   // A `docker build` argv, however it is spelled: `['docker', 'build', ...]`
-  // (remote-build, orchestrator) or `['build', ...]` later prefixed with
+  // (remote-build, compose/app-image) or `['build', ...]` later prefixed with
   // 'docker' (image.js). Whitespace-tolerant so a prettier-wrapped multi-line
-  // argv still matches — the orchestrator's is exactly that shape.
+  // argv still matches.
   const DOCKER_BUILD_ARGV = /\[\s*(?:'docker',\s*)?'build',/;
 
   // The other way a build can be spelled: as a SHELL COMMAND rather than an
@@ -104,8 +104,8 @@ describe('every docker-build site in the deploy path pins the platform', () => {
   // travels with the argv rather than being retyped per call site.
   const REGISTERED = [
     'lib/deploy/image.js', // operator-side build (compose sideload + k8s buildAppImage)
-    'lib/deploy/orchestrator.js', // compose-single local build, inlined in the orchestrator
-    'lib/deploy/remote-build.js', // buildRemote: compose-ha fan, direct mode, scale
+    'lib/deploy/compose/app-image.js', // the compose tiers' local build (deploy and scale)
+    'lib/deploy/remote-build.js', // buildRemote: direct mode only (no local docker)
   ];
 
   // Comments legitimately discuss `docker build` (error-message context, RCA

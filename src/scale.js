@@ -24,10 +24,11 @@ import { spinner } from './lib/cli/progress.js';
 import { primaryEntryServerType, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c, link } from './lib/colors.js';
-import { runCommand } from './lib/command.js';
+import { checkDependency, runCommand } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
 import { useDnsChallenge } from './lib/deploy/acme.js';
 import { RECONCILE_FLAGS_SED, STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
+import { buildComposeAppImage, deliverComposeAppImage } from './lib/deploy/compose/app-image.js';
 import { collectComposeBuildArgs } from './lib/deploy/compose/build-args.js';
 import { composePsqlRunner, demoteComposeWalgRole } from './lib/deploy/compose/ha.js';
 import { composeHaStackOf } from './lib/deploy/compose/ha-role-swap.js';
@@ -1080,6 +1081,21 @@ async function createReplacementServer(ctx, server, s) {
 }
 
 /**
+ * How a compose scale replacement gets the app image the old server ran:
+ * 'delta' (built on this machine and sent by layer delta, as a deploy does),
+ * 'remote-build' (this machine has no docker, so the new server builds it),
+ * or 'pull' (a registry image: compose pulls it).
+ *
+ * @param {string} appImage - the old server's APP_IMAGE
+ * @param {boolean} localDocker - this machine has docker
+ * @returns {'delta' | 'remote-build' | 'pull'}
+ */
+export function replacementImagePlan(appImage, localDocker) {
+  if (!appImage || !isLocalOnlyImageTag(appImage)) return 'pull';
+  return localDocker ? 'delta' : 'remote-build';
+}
+
+/**
  * Bring a replacement server up to a running stack (steps 3-6): online, Docker
  * ready, the old server's .env and app.env replayed, registry logins, the app
  * image, and compose up. On compose-ha the replication overlay is written
@@ -1193,6 +1209,28 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   // here, so the caller deletes the new server instead of guessing a pair.
   oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
   const oldAppImage = oldEnv.APP_IMAGE || '';
+  // A local-only app image (a local or direct deploy built it, nothing pushed
+  // it) is built here and sent by layer delta, exactly as a deploy does, when
+  // this machine has docker. It starts now, so the build, the new server's
+  // base pull and the send overlap the bundle upload and the logins; 4c waits
+  // for it. With no docker here, 4c builds it on the new server instead.
+  const imagePlan = replacementImagePlan(oldAppImage, checkDependency('docker'));
+  const imageDelivery =
+    imagePlan === 'delta'
+      ? perfAsync('scale.imageDelivery', () =>
+          deliverComposeAppImage({
+            ip: newIp,
+            sshKeyPath,
+            tag: oldAppImage,
+            built: perfAsync('scale.localBuild', () =>
+              buildComposeAppImage({ tag: oldAppImage, projectName, domain }),
+            ),
+          }),
+        )
+      : null;
+  // Awaited (and thrown) at 4c; this only keeps a failure that lands during
+  // the bundle upload from being an unhandled rejection first.
+  imageDelivery?.catch(() => {});
 
   s.start('Copying project files...');
   await perfAsync('scale.setupFiles', () =>
@@ -1268,44 +1306,40 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
     /* non-fatal: image may be public */
   }
 
-  // 4c. Direct-mode image: build on the new server instead of sideloading.
-  //
-  // Original implementation piped `ssh old docker save | ssh new docker load`
-  // from the local shell — every image byte transited the local machine
-  // twice across the WAN, causing 16+ min hangs / timeouts on a ~500MB
-  // image during matrix runs. compose's `prod.yml` resets
-  // `build: !reset null`, so `docker compose up --build` can NOT rebuild
-  // it during the reconcile step — the image must already exist in the
-  // new server's daemon by the time compose pulls.
-  //
-  // buildRemote uses DOCKER_HOST=ssh://new and runs the build directly on
-  // the new server. BuildKit only ships the build context (~tens of MB
-  // of source), not the 500MB built image, so the data path is local →
-  // new (one short hop) instead of old → local → new (two long hops).
-  // Reuses the same code that does direct-mode deploy builds.
-  if (oldAppImage && isLocalOnlyImageTag(oldAppImage)) {
+  // 4c. The app image, before compose pulls and starts the stack (compose's
+  // prod.yml resets `build: !reset null`, so `up --build` cannot make it).
+  if (imageDelivery) {
+    s.start(`Sending image ${oldAppImage} to the new server...`);
+    try {
+      await imageDelivery;
+    } catch (err) {
+      s.stop('Could not put the app image on the new server', 1);
+      throw new Error(
+        `scale: ${err?.message ?? err} (app image ${oldAppImage} to new server ${newIp}), so scale stopped before compose up.`,
+        { cause: err },
+      );
+    }
+    s.stop('Image on new server');
+  } else if (imagePlan === 'remote-build') {
+    // No docker on this machine: build on the new server over
+    // DOCKER_HOST=ssh:// (the same code direct-mode deploys use). Only the
+    // build context crosses the wire, never the built image. The old path
+    // piped `ssh old docker save | ssh new docker load` through this
+    // machine and hung for 16+ min on a ~500MB image.
     s.start(`Building image ${oldAppImage} on new server...`);
     // Pass the VITE_* build args (same as deploy/HA). Vite inlines
     // import.meta.env.VITE_* at build time, so without these the new
-    // server's frontend bundle ships empty client config (VITE_PUBLIC_URL,
-    // feature flags). Deploy
-    // (orchestrator.js) and HA (ha.js) already do this — scale did not.
+    // server's frontend bundle ships empty client config.
     const scaleBuildArgs = collectComposeBuildArgs(process.cwd(), { projectName, domain });
-    // Perf label renamed 2026-08-23: this wrapped buildRemote under the
-    // name 'scale.sideloadImage', which made the 08-23 RCA read DO's
-    // successful native build as a sideload and manufacture a
-    // provider divergence that did not exist. The label now says what
-    // runs. (Perf history: entries before this date under
-    // scale.sideloadImage on the direct path were builds.)
+    // Perf history: before 2026-08-23 this build was labelled
+    // 'scale.sideloadImage'. From 2026-11 a scale with local docker records
+    // scale.localBuild and scale.imageDelivery instead.
     const built = await perfAsync('scale.remoteBuildImage', () =>
       buildRemote(newIp, sshKeyPath, oldAppImage, process.cwd(), scaleBuildArgs),
     );
-    // buildRemote returns false on failure (after its own retries). The app
-    // image is local-only, so if it isn't built on the new server, the
-    // `docker compose up` below pulls it and dies ~a minute later with
-    // "pull access denied / repository does not exist" — a confusing
-    // downstream symptom. Fail loudly here instead; this guard was missing
-    // (the HA deploy path has the equivalent check). RCA: e2e loop run #1.
+    // buildRemote returns false on failure (after its own retries). Without
+    // the image, `docker compose up` below would pull it and die a minute
+    // later with "pull access denied", so fail loudly here instead.
     if (!built) {
       s.stop('Remote image build failed on new server', 1);
       throw new Error(

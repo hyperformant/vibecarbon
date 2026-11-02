@@ -65,7 +65,15 @@ function fixture(mode: keyof typeof DEPLOY_BUDGETS, o: LogOpts = {}): string {
           ]),
       perf('deploy.ha.compose.iac.upStack.standby', 100_000),
       perf('deploy.ha.compose.iac.upStack.fan', o.fan ?? 101_000),
-      perf('deploy.ha.compose.remoteBuild.fan', 80_000),
+      // One local build, one delta per server, overlapping the setup fan.
+      perf('deploy.image.basePull', 15_000),
+      perf('deploy.image.basePull', 17_000),
+      ...delta(o.deltaBytes),
+      ...delta(o.deltaBytes),
+      perf('deploy.image.transfer', 22_000),
+      perf('deploy.image.transfer', 25_000),
+      perf('deploy.ha.compose.imageTransfer.fan', 25_000),
+      perf('deploy.ha.compose.imageTransfer.await', 1_000),
       perf('deploy.tls.ready', o.tlsReady ?? 50_000),
       perf('deploy.ha.compose.full', 280_000),
       perf('deploy.total', o.total ?? 340_000),
@@ -182,7 +190,9 @@ describe('checkDeployBudget: time budgets', () => {
     const ha = checkDeployBudget(fixture('k8s-ha', { total: 600_000 }), 'k8s-ha');
     expect(ha.message).not.toMatch(/transportEarly|deploy\.ha\.k8s\.full|image\.delta/);
     const cha = checkDeployBudget(fixture('compose-ha', { total: 600_000 }), 'compose-ha');
-    expect(cha.message).not.toMatch(/\.fan |deploy\.ha\.compose\.full/);
+    expect(cha.message).not.toMatch(
+      /\.fan |deploy\.ha\.compose\.full|image\.delta|image\.transfer |basePull/,
+    );
     expect(cha.message).toMatch(/slowest: deploy\.ha\.compose\.iac\.upStack\.standby 100s/);
   });
 
@@ -199,21 +209,23 @@ describe('checkDeployBudget: time budgets', () => {
 });
 
 describe('checkDeployBudget: cold image bytes', () => {
-  it.each(['compose', 'k8s', 'k8s-ha'] as const)('fails %s with a delta over 10 MB', (mode) => {
-    const r = checkDeployBudget(fixture(mode, { deltaBytes: 12_300_000 }), mode);
-    expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/cold image delta 12\.3 MB > 10 MB/);
-  });
+  it.each(['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const)(
+    'fails %s with a delta over 10 MB',
+    (mode) => {
+      const r = checkDeployBudget(fixture(mode, { deltaBytes: 12_300_000 }), mode);
+      expect(r.ok).toBe(false);
+      expect(r.message).toMatch(/cold image delta 12\.3 MB > 10 MB/);
+    },
+  );
 
-  it.each(['compose', 'k8s', 'k8s-ha'] as const)('fails %s with no delta marker', (mode) => {
-    const r = checkDeployBudget(fixture(mode, { deltaBytes: null }), mode);
-    expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/no \[perf\] deploy\.image\.delta bytes/);
-  });
-
-  it('does not ask compose-ha (remote build) for a delta', () => {
-    expect(checkDeployBudget(fixture('compose-ha'), 'compose-ha').ok).toBe(true);
-  });
+  it.each(['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const)(
+    'fails %s with no delta marker',
+    (mode) => {
+      const r = checkDeployBudget(fixture(mode, { deltaBytes: null }), mode);
+      expect(r.ok).toBe(false);
+      expect(r.message).toMatch(/no \[perf\] deploy\.image\.delta bytes/);
+    },
+  );
 });
 
 describe('checkDeployBudget: a young state bucket (Ruling A′)', () => {

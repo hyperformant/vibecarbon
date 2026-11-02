@@ -127,8 +127,12 @@ export async function acquireUplinkLock({
         waitedLogged = true;
         // Without this a queued push looks like a hang — no docker output,
         // nothing, until the other process's transfer drains.
+        // compose-ha sends one delta per server from one deploy, so the
+        // holder can be this process's own other transfer.
         progressLog(
-          `[uplink] ${label}: waiting for a concurrent transfer in another process (pid ${holder.pid})`,
+          holder.pid === process.pid
+            ? `[uplink] ${label}: waiting for this deploy's other transfer`
+            : `[uplink] ${label}: waiting for a concurrent transfer in another process (pid ${holder.pid})`,
         );
       }
       await sleep(POLL_MS);
