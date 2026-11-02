@@ -285,6 +285,24 @@ data:
     # it at /etc/postgresql/walg-env.sh; k8s ships a byte-identical copy in the
     # vibecarbon-wal-archive ConfigMap (carbon/k8s/base/backup/configmap-walg.yaml),
     # pinned by tests/unit/deploy/walg-archive-script-parity.test.ts.
+    # The wal-g WRITE-GUARD role (src/lib/deploy/walg-role.js WALG_ROLE_PARSE_SH,
+    # carried verbatim): one word in a file OUTSIDE PGDATA (k8s: a sibling subPath
+    # of the db volume; compose: a host directory bound read-only), so
+    # pg_basebackup never copies it into a standby. Exactly "primary" or
+    # "standby"; anything else, a missing file or a symlink is no role, which
+    # every writer of WAL or base backups treats as "do not write".
+    # Test seams, for the script tests only: VC_WALG_ROLE_FILE here (the file),
+    # VC_WALG_ROLE_DIR in db-guard.sh (its directory).
+    vc_walg_role_file="${VC_WALG_ROLE_FILE:-/var/lib/vibecarbon/role/walg-role}"
+    VC_WALG_ROLE=""
+    if [ -f "$vc_walg_role_file" ] && [ ! -L "$vc_walg_role_file" ]; then
+        case "$(cat "$vc_walg_role_file" 2>/dev/null)" in
+            primary) VC_WALG_ROLE=primary ;;
+            standby) VC_WALG_ROLE=standby ;;
+        esac
+    fi
+    export VC_WALG_ROLE
+    unset vc_walg_role_file
     vc_walg_base="${WALG_S3_PREFIX_BASE:-}"
     if [ -z "$vc_walg_base" ]; then
         WALG_S3_PREFIX=""

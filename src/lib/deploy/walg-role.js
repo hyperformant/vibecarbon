@@ -48,10 +48,40 @@
  * all, and refusing to finish a failover over it would be absurd.
  */
 
+import { shEscape } from '../shell.js';
 import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
 import { DB_STS_BOOT_TIMEOUT_S, watchDbAttach } from './replication.js';
 import { dropInactiveReplicationSlots, slotDropWarning } from './replication-slot.js';
+
+/** In-container path, both tiers. */
+export const WALG_ROLE_DIR = '/var/lib/vibecarbon/role';
+export const WALG_ROLE_FILE = `${WALG_ROLE_DIR}/walg-role`;
+
+/**
+ * THE role parser (POSIX sh). Reads "$vc_walg_role_file"; sets VC_WALG_ROLE to
+ * primary, standby or "". Never exits. Carried verbatim by walg-env.sh (both
+ * copies) and tls-snapshot.sh; rendered by walgRoleReadFragment everywhere else.
+ */
+export const WALG_ROLE_PARSE_SH = [
+  'VC_WALG_ROLE=""',
+  'if [ -f "$vc_walg_role_file" ] && [ ! -L "$vc_walg_role_file" ]; then',
+  '    case "$(cat "$vc_walg_role_file" 2>/dev/null)" in',
+  '        primary) VC_WALG_ROLE=primary ;;',
+  '        standby) VC_WALG_ROLE=standby ;;',
+  '    esac',
+  'fi',
+].join('\n');
+
+/**
+ * `vc_walg_role_file=<path>` + the parser + `unset vc_walg_role_file`.
+ *
+ * @param {string} path the role file to read
+ * @returns {string} POSIX sh that leaves VC_WALG_ROLE set (not exported)
+ */
+export function walgRoleReadFragment(path) {
+  return `vc_walg_role_file=${shEscape(path)}\n${WALG_ROLE_PARSE_SH}\nunset vc_walg_role_file`;
+}
 
 /** The env var both tiers read as the wal-g write-guard. */
 export const WALG_ROLE_ENV = 'WALG_ROLE';

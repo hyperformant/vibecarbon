@@ -23,12 +23,21 @@
  * signalling.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { afterAll, describe, expect, it } from 'vitest';
+import { WALG_ROLE_PARSE_SH, walgRoleReadFragment } from '../../../src/lib/deploy/walg-role.js';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const COMPOSE_SCRIPT = 'carbon/volumes/db/wal-archive.sh';
@@ -316,6 +325,75 @@ describe('walg-env.sh exports the lineage folder', () => {
     const r = spawnSync('sh', ['-n', `${repoRoot}${WALG_ENV_SCRIPT}`], { encoding: 'utf-8' });
     expect(r.status, r.stderr).toBe(0);
     expect(walgEnvBody).not.toMatch(/\[\[|\$\{[A-Za-z_]+:[0-9]/);
+  });
+});
+
+describe('the wal-g role parser (one text, carried by walg-env.sh)', () => {
+  const bin = controldataBin('role');
+  const roleDir = join(work, 'role');
+  mkdirSync(roleDir, { recursive: true });
+  const put = (content: string | null, { symlink = false } = {}) => {
+    const f = join(roleDir, 'walg-role');
+    rmSync(f, { force: true });
+    if (content === null) return f;
+    if (symlink) {
+      writeFileSync(join(roleDir, 'target'), content);
+      symlinkSync(join(roleDir, 'target'), f);
+    } else writeFileSync(f, content);
+    return f;
+  };
+  const viaEnv = (f: string) => {
+    const r = spawnSync(
+      'sh',
+      ['-c', `. "${repoRoot}${WALG_ENV_SCRIPT}" && printf 'R=[%s]' "$VC_WALG_ROLE"`],
+      {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          WALG_S3_PREFIX_BASE: 's3://b/backups/p/prod/walg',
+          PGDATA: '/x',
+          VC_WALG_ROLE_FILE: f,
+        },
+      },
+    );
+    expect(r.status).toBe(0);
+    return r.stdout.trim();
+  };
+  const viaFragment = (f: string) =>
+    spawnSync('sh', ['-c', `${walgRoleReadFragment(f)}\nprintf 'R=[%s]' "$VC_WALG_ROLE"`], {
+      encoding: 'utf-8',
+    }).stdout.trim();
+
+  it.each([
+    ['primary\n', 'R=[primary]'],
+    ['standby', 'R=[standby]'],
+    ['', 'R=[]'],
+    ['Primary\n', 'R=[]'],
+    ['primary\nstandby\n', 'R=[]'],
+  ])('%j reads as %s, through walg-env.sh and through the fragment alike', (content, want) => {
+    const f = put(content);
+    expect(viaEnv(f)).toBe(want);
+    expect(viaFragment(f)).toBe(want);
+  });
+  it('a missing file or a symlink is no role, never an exit', () => {
+    expect(viaEnv(put(null))).toBe('R=[]');
+    expect(viaEnv(put('primary\n', { symlink: true }))).toBe('R=[]');
+    expect(viaFragment(put('primary\n', { symlink: true }))).toBe('R=[]');
+  });
+  it('walg-env.sh carries the parser verbatim, in both copies', () => {
+    expect(walgEnvBody).toContain(WALG_ROLE_PARSE_SH);
+    expect(k8sWalgEnvBody).toContain(WALG_ROLE_PARSE_SH);
+  });
+  it('the fragment leaves no helper variable behind', () => {
+    const r = spawnSync(
+      'sh',
+      [
+        '-c',
+        `${walgRoleReadFragment('/nonexistent')}\nprintf '[%s]' "\${vc_walg_role_file-unset}"`,
+      ],
+      { encoding: 'utf-8' },
+    );
+    expect(r.stdout).toBe('[unset]');
   });
 });
 
