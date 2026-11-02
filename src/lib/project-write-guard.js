@@ -5,7 +5,7 @@
  * would have an upgrade write wherever the link points. Writers refuse such
  * a path instead.
  */
-import { lstatSync } from 'node:fs';
+import { lstatSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -31,4 +31,42 @@ export function symlinkedComponent(projectRoot, relPath) {
     if (stat.isSymbolicLink()) return rel;
   }
   return null;
+}
+
+/**
+ * Write an upgrade sidecar (`.upgrade-backup`, `.upgrade-new`) without
+ * following a symlink planted at its path: a symlink there (dangling or not)
+ * is refused and left as it is, a plain old sidecar is unlinked first, and
+ * the write is an exclusive create (`wx`), so a link created in between
+ * fails the write instead of redirecting it.
+ *
+ * @param {string} path
+ * @param {string} content
+ * @returns {boolean} false when the path is (or became) a symlink
+ */
+export function writeSidecar(path, content) {
+  let stat = null;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    stat = null;
+  }
+  if (stat?.isSymbolicLink()) return false;
+  if (stat) unlinkSync(path);
+  try {
+    writeFileSync(path, content, { flag: 'wx' });
+  } catch (err) {
+    if (err?.code === 'EEXIST') return false;
+    throw err;
+  }
+  return true;
+}
+
+/** True when `path` exists as a symlink (dangling or not). */
+export function isSymlink(path) {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }

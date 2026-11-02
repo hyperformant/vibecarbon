@@ -56,7 +56,7 @@ import {
   setEnvVar,
 } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { symlinkedComponent } from './lib/project-write-guard.js';
+import { isSymlink, symlinkedComponent, writeSidecar } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
 import { templatePathFor } from './lib/template-paths.js';
 import { getAddonFilePolicy, getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
@@ -393,6 +393,11 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
  * @param {object} variables - Template variables
  * @returns {string} - Resolved content
  */
+/** The one line for a file upgrade leaves alone because a path on its way is a symlink. */
+function warnSymlinkSkip(relPath, link) {
+  p.log.warn(`Skipped ${relPath}: ${link} is a symlink, and upgrade never writes through one.`);
+}
+
 function resolveTemplate(fullPath, variables) {
   let content = readFileSync(fullPath, 'utf-8');
 
@@ -556,12 +561,13 @@ async function main(cliArgs) {
     .filter(({ policy }) => policy !== 'never')
     // A symlink on the way would send the write wherever it points.
     .filter(({ relPath }) => {
-      const link = symlinkedComponent(cwd, relPath);
-      if (link) {
-        p.log.warn(
-          `Skipped ${relPath}: ${link} is a symlink, and upgrade never writes through one.`,
-        );
-      }
+      const link =
+        symlinkedComponent(cwd, relPath) ??
+        ['.upgrade-backup', '.upgrade-new']
+          .map((suffix) => `${relPath}${suffix}`)
+          .find((sidecar) => isSymlink(join(cwd, sidecar))) ??
+        null;
+      if (link) warnSymlinkSkip(relPath, link);
       return !link;
     });
   // Paths this run wrote, and the incoming content's hash per path: what the
@@ -713,11 +719,15 @@ async function main(cliArgs) {
     const userModified = storedHash ? currentHash !== storedHash : true;
 
     if (args.force) {
-      // Force mode: replace everything, backup modified files
-      if (userModified) {
-        if (!args.dryRun) {
-          writeFileSync(`${projectFilePath}.upgrade-backup`, currentContent);
-        }
+      // Force mode: replace everything, backup modified files. No backup,
+      // no replace: a backup refused (a symlink at its path) leaves the file.
+      if (
+        userModified &&
+        !args.dryRun &&
+        !writeSidecar(`${projectFilePath}.upgrade-backup`, currentContent)
+      ) {
+        warnSymlinkSkip(relPath, `${relPath}.upgrade-backup`);
+        continue;
       }
       autoUpdated.push({ path: relPath, reason: 'updated' });
       written.add(relPath);
@@ -743,10 +753,13 @@ async function main(cliArgs) {
         // project, and leaving it would leave the add-on as old as the day
         // it was added (the observability add-on kept issuing grafana-tls).
         // Replaced as -force does, the previous content kept beside it.
+        if (!args.dryRun && !writeSidecar(`${projectFilePath}.upgrade-backup`, currentContent)) {
+          warnSymlinkSkip(relPath, `${relPath}.upgrade-backup`);
+          continue;
+        }
         autoUpdated.push({ path: relPath, reason: 'updated (previous kept as .upgrade-backup)' });
         written.add(relPath);
         if (!args.dryRun) {
-          writeFileSync(`${projectFilePath}.upgrade-backup`, currentContent);
           writeFileSync(projectFilePath, newContent);
           if (relPath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
         }
@@ -806,7 +819,9 @@ async function main(cliArgs) {
       for (const { path: filePath, newContent } of needsReview) {
         const projectFilePath = join(cwd, filePath);
         mkdirSync(dirname(projectFilePath), { recursive: true });
-        writeFileSync(`${projectFilePath}.upgrade-new`, newContent);
+        if (!writeSidecar(`${projectFilePath}.upgrade-new`, newContent)) {
+          warnSymlinkSkip(filePath, `${filePath}.upgrade-new`);
+        }
       }
       p.log.info(
         `New versions saved as ${c.info('.upgrade-new')} files. Review and apply manually.`,
@@ -875,8 +890,14 @@ async function main(cliArgs) {
             exitCancelled();
           }
 
-          if (action2 === 'replace') {
-            if (oldContent) writeFileSync(`${projectFilePath}.upgrade-backup`, oldContent);
+          if (
+            action2 === 'replace' &&
+            oldContent &&
+            !writeSidecar(`${projectFilePath}.upgrade-backup`, oldContent)
+          ) {
+            warnSymlinkSkip(filePath, `${filePath}.upgrade-backup`);
+            skippedReviewCount++;
+          } else if (action2 === 'replace') {
             mkdirSync(dirname(projectFilePath), { recursive: true });
             writeFileSync(projectFilePath, newContent);
             written.add(filePath);
@@ -885,13 +906,21 @@ async function main(cliArgs) {
             reviewedCount++;
           } else if (action2 === 'new') {
             mkdirSync(dirname(projectFilePath), { recursive: true });
-            writeFileSync(`${projectFilePath}.upgrade-new`, newContent);
+            if (!writeSidecar(`${projectFilePath}.upgrade-new`, newContent)) {
+              warnSymlinkSkip(filePath, `${filePath}.upgrade-new`);
+            }
             skippedReviewCount++;
           } else {
             skippedReviewCount++;
           }
+        } else if (
+          action === 'replace' &&
+          oldContent &&
+          !writeSidecar(`${projectFilePath}.upgrade-backup`, oldContent)
+        ) {
+          warnSymlinkSkip(filePath, `${filePath}.upgrade-backup`);
+          skippedReviewCount++;
         } else if (action === 'replace') {
-          if (oldContent) writeFileSync(`${projectFilePath}.upgrade-backup`, oldContent);
           mkdirSync(dirname(projectFilePath), { recursive: true });
           writeFileSync(projectFilePath, newContent);
           written.add(filePath);
@@ -900,7 +929,9 @@ async function main(cliArgs) {
           reviewedCount++;
         } else if (action === 'new') {
           mkdirSync(dirname(projectFilePath), { recursive: true });
-          writeFileSync(`${projectFilePath}.upgrade-new`, newContent);
+          if (!writeSidecar(`${projectFilePath}.upgrade-new`, newContent)) {
+            warnSymlinkSkip(filePath, `${filePath}.upgrade-new`);
+          }
           skippedReviewCount++;
         } else {
           skippedReviewCount++;

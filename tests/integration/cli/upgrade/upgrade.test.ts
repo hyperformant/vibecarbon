@@ -385,4 +385,47 @@ describe('vibecarbon upgrade', () => {
     }
     expect(r.stdout + r.stderr).toMatch(/symlink/i);
   });
+
+  describe('a sidecar path that is a symlink', () => {
+    function plantSidecarLink(rel: string, suffix: '.upgrade-backup' | '.upgrade-new') {
+      const outside = mkdtempSync(join(tmpdir(), 'vc-upgrade-sidecar-'));
+      const target = join(outside, 'target');
+      writeFileSync(target, 'outside\n');
+      symlinkSync(target, join(project, `${rel}${suffix}`));
+      return target;
+    }
+
+    it('-y skips an unrecorded add-on file whose .upgrade-backup is a symlink', () => {
+      installStaleObservability(project, { recordChecksums: false });
+      const rel = 'k8s/base/observability/ingressroute.yaml';
+      const before = readFileSync(join(project, rel), 'utf-8');
+      const target = plantSidecarLink(rel, '.upgrade-backup');
+      const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+      assertSuccess(r);
+      expect(readFileSync(target, 'utf-8')).toBe('outside\n');
+      expect(readFileSync(join(project, rel), 'utf-8')).toBe(before);
+      expect(r.stdout + r.stderr).toMatch(/symlink/i);
+    });
+
+    it('-force skips a modified file whose .upgrade-backup is a symlink', () => {
+      const rel = 'docker-compose.yml';
+      const custom = `${readFileSync(join(project, rel), 'utf-8')}\n# local drift\n`;
+      writeFileSync(join(project, rel), custom);
+      const target = plantSidecarLink(rel, '.upgrade-backup');
+      const r = runCli('upgrade', ['-force', '-y'], { cwd: project, timeoutMs: 120_000 });
+      assertSuccess(r);
+      expect(readFileSync(target, 'utf-8')).toBe('outside\n');
+      expect(readFileSync(join(project, rel), 'utf-8')).toBe(custom);
+    });
+
+    it('-y does not write a review file through a symlinked .upgrade-new', () => {
+      installStaleObservability(project, { recordChecksums: true });
+      const rel = 'k8s/base/observability/ingressroute.yaml';
+      writeFileSync(join(project, rel), `${readFileSync(join(project, rel), 'utf-8')}# mine\n`);
+      const target = plantSidecarLink(rel, '.upgrade-new');
+      const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+      assertSuccess(r);
+      expect(readFileSync(target, 'utf-8')).toBe('outside\n');
+    });
+  });
 });
