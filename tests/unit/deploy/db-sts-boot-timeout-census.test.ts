@@ -112,7 +112,6 @@ describe('db StatefulSet boot/rollout budgets (the CSI-settle class)', () => {
       expect.arrayContaining([
         'src/failover.js',
         'src/restore.js',
-        'src/lib/deploy/walg-role.js',
         'src/lib/deploy/replication.js',
         'src/lib/deploy/k8s/ha/index.js',
       ]),

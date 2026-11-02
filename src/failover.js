@@ -64,7 +64,6 @@ import {
   fenceDatabaseWrites,
   getReplPasswordFromSecret,
   isStandbyStreaming,
-  k8sDbRolloutWait,
   k8sPsqlRunner,
   promoteStandby,
   reseedStandbyFromPrimary,
@@ -80,9 +79,14 @@ import {
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from './lib/deploy/walg-audit.js';
 import {
+  DB_ROLE_CONFIGMAP,
+  DB_ROLE_INTENT_KEY,
   demoteK8sWalgRole,
-  k8sSetWalgRoleArgv,
+  podMountsWalgRoleDir,
+  setK8sWalgRole,
+  WALG_ROLE_DIR,
   walgRoleDegradedMessage,
+  walgRoleReadShell,
 } from './lib/deploy/walg-role.js';
 import {
   clearWriteFenceMarker,
@@ -1745,10 +1749,10 @@ export const ABORT_DB_GONE_TIMEOUT_S = 180;
  * The k8s-HA backend of `vibecarbon failover <env> -abort` (failover-abort.js).
  * The standby's db StatefulSet is scaled to zero and its pod proven gone (the
  * StatefulSet is never applied by Flux, so nothing scales it back); its app
- * tier goes to zero and its db template to WALG_ROLE=standby, so a later scale
- * up cannot archive. The old primary gets its write fence lifted, WALG_ROLE
- * back to primary when a failover's demote got that far (the set env rolls its
- * db pod, which serves nothing while its app is at zero), then its app tier up.
+ * tier goes to zero and its wal-g role intent to standby, so a later scale up
+ * cannot archive. The old primary gets its write fence lifted, its wal-g role
+ * back to primary when a failover's demote got that far (the intent and the
+ * live role file, no db restart), then its app tier up.
  *
  * @param {object} args
  * @param {string} args.envName
@@ -1830,8 +1834,9 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
     },
     disarmStandby: async () => {
       await scale(standby.ip, scaleUpList, 0, 'abort: standby app tier to zero');
-      // The slot drop inside fails quietly (its db pod is gone); the role write
-      // lands on the StatefulSet template, so a later scale up cannot archive.
+      // The slot drop and the live write inside fail quietly (its db pod is
+      // gone); the standby intent lands, and the db applies it on any later
+      // start, so a scale up cannot archive.
       return quietly(() => demoteK8sWalgRole({ ip: standby.ip, kubectl, warn: () => {} }));
     },
     repointDns: strategy?.updateDns
@@ -1856,23 +1861,50 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
         primaryNode: primary.ip,
       }),
     armPrimary: async () => {
-      let role;
+      // Armed already when both the intent and the live role file say primary.
+      let intent;
+      let live;
       try {
-        const sts = JSON.parse(
-          await kubectl(primary.ip, [...ns, 'get', `statefulset/${DB_STATEFULSET}`, '-o', 'json']),
+        const cm = JSON.parse(
+          await kubectl(primary.ip, [
+            ...ns,
+            'get',
+            `configmap/${DB_ROLE_CONFIGMAP}`,
+            '-o',
+            'json',
+            '--ignore-not-found',
+          ]),
         );
-        const db = (sts?.spec?.template?.spec?.containers ?? []).find(
-          (ct) => ct.name === DB_CONTAINER,
-        );
-        role = (db?.env ?? []).find((e) => e.name === 'WALG_ROLE')?.value;
+        intent = cm?.data?.[DB_ROLE_INTENT_KEY];
       } catch {
-        return false;
+        // an empty answer (no ConfigMap) or an unreadable one: write it
       }
-      if (role === 'primary') return true;
-      return quietly(async () => {
-        await kubectl(primary.ip, k8sSetWalgRoleArgv('primary'), { timeout: 60_000 });
-        await k8sDbRolloutWait({ kubectl, ip: primary.ip, pollMs: deps.attachWatchPollMs });
-      });
+      try {
+        const out = await kubectl(primary.ip, [
+          ...ns,
+          'exec',
+          DB_POD,
+          '-c',
+          DB_CONTAINER,
+          '--',
+          'sh',
+          '-c',
+          walgRoleReadShell(WALG_ROLE_DIR),
+        ]);
+        live = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim();
+      } catch {
+        // the db does not answer: the write below says so
+      }
+      if (intent === 'primary' && live === 'primary') return true;
+      return quietly(() =>
+        setK8sWalgRole({
+          ip: primary.ip,
+          kubectl,
+          role: 'primary',
+          requireLive: true,
+          envName,
+        }),
+      );
     },
     startPrimaryWriters: async () => {
       if (scaleUpList.length === 0) return false;
@@ -1883,27 +1915,42 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
 }
 
 /**
- * Move the wal-g WRITE-GUARD onto the cluster this failover just promoted, and
- * PROVE it took — see src/lib/deploy/walg-role.js for why nothing else does.
+ * Arm the wal-g write-guard on the standby this failover is about to promote:
+ * the `primary` intent, then the live role file, read back (D2). Called right
+ * before the promote, while the standby is still in recovery, where
+ * archive_command never runs, so the write is inert until the promote makes
+ * it true. Nothing restarts. Throws when the live file does not read
+ * `primary`, so the failover aborts before promotion.
  *
- * On k8s, `WALG_ROLE` is rendered into the db container env at deploy
- * time and the backup CronJob has none of its own: it `kubectl exec`s
- * into the db pod and INHERITS it. So a promoted cluster that still reads
- * `standby` skips every base backup, and — once the k8s copy of wal-archive.sh
- * carries the same write-guard as the compose copy — every WAL segment too.
- * `kubectl set env` rewrites the StatefulSet, the resulting roll is what makes
- * the new value visible to postgres, and the rollout wait is what makes the
- * audit that follows read the NEW pod rather than the old one.
+ * @param {object} args
+ * @param {string} args.standbyIp
+ * @param {(ip: string, argv: string[], opts?: object) => Promise<string>} args.kubectl
+ * @param {string} [args.envName]
+ * @returns {Promise<{intent: true, live: true}>}
+ */
+export function armPromotedWalgRole({ standbyIp, kubectl, envName }) {
+  return setK8sWalgRole({ ip: standbyIp, kubectl, role: 'primary', requireLive: true, envName });
+}
+
+/**
+ * PROVE the wal-g write-guard is on the cluster this failover just promoted,
+ * and demote the old primary. See src/lib/deploy/walg-role.js.
+ *
+ * The promoted side was armed before the promote (armPromotedWalgRole): the
+ * intent and the live role file, no db restart. The backup CronJob
+ * `kubectl exec`s into the db pod and reads the same file, so the audit here
+ * runs in requirePrimary mode: a promoted cluster still reading `standby`
+ * fails it instead of passing as a legitimate skip.
  *
  * Returns rather than throws, for the same reason the compose sibling does: the
  * standby is already promoted, so aborting here would strand it behind un-flipped
  * DNS. The caller finishes the failover and fails the command at the end.
  *
- * Two verdicts, independent by construction (H3): arming the promoted side and
- * disarming the old primary. The disarm runs in a `finally`, so a promoted
- * rollout or audit that fails can never skip it. It used to: an early return
- * left the stale ex-primary on WALG_ROLE=primary, and its nightly base backups
- * could become LATEST in the shared prefix if it came back.
+ * Two verdicts, independent by construction (H3): the promoted side's audit
+ * and disarming the old primary. The disarm runs in a `finally`, so an audit
+ * that fails can never skip it. It used to: an early return left the stale
+ * ex-primary on the primary role, and its nightly base backups could become
+ * LATEST in the shared prefix if it came back.
  *
  * @param {object} args
  * @param {string} args.promotedIp    the promoted cluster's master (old standby)
@@ -1923,11 +1970,6 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
   const asError = (err) => (err instanceof Error ? err : new Error(String(err)));
   const health = { promoted: { ok: false }, demoted: { ok: false } };
   try {
-    await kubectl(promotedIp, k8sSetWalgRoleArgv('primary'));
-    // Blocks on the pod actually rolling (k8sDbRolloutWait: the ssh budget
-    // sits just above the kubectl --timeout, and a stale volume attachment
-    // on the re-attach stops the wait early, by name).
-    await k8sDbRolloutWait({ kubectl, ip: promotedIp, pollMs: deps.attachWatchPollMs });
     // requirePrimary: the ONLY reason this audit is here is to catch a promoted
     // node still reading `standby`, which the deploy-time probe treats as a
     // legitimate skip.
@@ -1944,7 +1986,7 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
       },
     });
     log(
-      `[walg-role] promoted cluster ${promotedIp} is archiving (WALG_ROLE=primary, audit passed).`,
+      `[walg-role] promoted cluster ${promotedIp} is archiving (wal-g role primary, audit passed).`,
     );
     health.promoted = { ok: true };
   } catch (err) {
@@ -1952,19 +1994,19 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
   } finally {
     // Demote the old primary so the two clusters never write the same canonical
     // WAL prefix at once, WHATEVER the promoted side's verdict. Best-effort by
-    // design (an unreachable old primary is the usual reason to fail over) and
-    // NOT waited on: nothing downstream reads it, and the StatefulSet write is
-    // what carries the intent.
-    //
-    // Safe to do here, unlike on compose, because the old primary's app tier is
-    // never serving at this point: a PLANNED failover quiesced it to zero before
-    // the promotion, and an UNPLANNED one is running precisely because its
-    // postgres stopped answering. So the roll this triggers on its db pod has no
-    // live traffic to disturb. demoteK8sWalgRole also drops the old primary's
+    // design (an unreachable old primary is the usual reason to fail over).
+    // The standby intent is what carries it: a db pod that is down applies it
+    // on its next start, so a live write that cannot land is logged, not
+    // failed. Nothing restarts. demoteK8sWalgRole also drops the old primary's
     // inactive replication slots, which would otherwise pin WAL there.
     try {
-      await demoteK8sWalgRole({ ip: oldPrimaryIp, kubectl, warn });
-      log(`[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`);
+      const r = await demoteK8sWalgRole({ ip: oldPrimaryIp, kubectl, warn });
+      log(
+        r.live
+          ? `[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`
+          : `[walg-role] old primary ${oldPrimaryIp}: standby intent set; its db applies it on ` +
+              `its next start (live role file not written: ${r.reason}).`,
+      );
       health.demoted = { ok: true };
     } catch (err) {
       const error = asError(err);
@@ -1988,10 +2030,10 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
  */
 export function walgVerdictsDetail(health) {
   const promoted = health.promoted.ok
-    ? 'promoted cluster: armed (WALG_ROLE=primary, audit passed).'
+    ? 'promoted cluster: armed (wal-g role primary, audit passed).'
     : `promoted cluster: write-guard not confirmed, ${health.promoted.error?.message ?? 'unknown failure'}.`;
   const demoted = health.demoted.ok
-    ? 'old primary: demoted to WALG_ROLE=standby.'
+    ? 'old primary: demoted to the standby wal-g role.'
     : `old primary: NOT demoted, ${health.demoted.error?.message ?? 'unknown failure'}; ` +
       'if it comes back it may archive into the shared backup prefix until a deploy converges it.';
   return `${promoted} ${demoted}`;
@@ -2060,6 +2102,9 @@ export async function failoverHA(
     clearJournal = clearFailoverJournal,
     promote = (srv, key) => promoteStandbyDatabase(srv.standby.ip, key),
     confirmUnproven = confirmUnprovenFailover,
+    // kubectl on a cluster's master, sshKubectl-shaped: the wal-g role seams.
+    kubectl: kubectlDep,
+    armWalgRole = armPromotedWalgRole,
     restoreWalgRole = restorePromotedWalgRole,
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
@@ -2094,6 +2139,7 @@ export async function failoverHA(
     p.log.error(`SSH key not found: ${sshKeyPath}`);
     process.exit(1);
   }
+  const kubectl = kubectlDep ?? ((ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts));
 
   const auth = strategy.getAuth ? await strategy.getAuth(envConfig) : null;
   const domain = envConfig.domain || envConfig.dns?.domain;
@@ -2151,6 +2197,33 @@ export async function failoverHA(
   // ONCE and returns them (threaded into provisioning below so an operator
   // without a creds file is prompted at most once). Exits 1 on either blocker.
   const { workerSpec, scaleUpList, creds, standbyOutputs } = await preflight(envName, envConfig);
+
+  // The promote arms the standby's wal-g role in its live role file (D2), which
+  // only a db pod that mounts the role directory can take: an exec write into
+  // one from before the mount lands in its container overlay and reads back
+  // as a false success. Refuse that cluster here, before anything changes
+  // (C18). A pod that cannot be read is left to the replica proof below. A
+  // resumed failover already promoted, so it is let finish: its audit reports
+  // the role.
+  if (!envConfig?.ha?.failoverInFlight) {
+    let pod = null;
+    try {
+      pod = await kubectl(
+        servers.standby.ip,
+        ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'],
+        { timeout: 30_000 },
+      );
+    } catch {
+      // unreadable: the replica proof names the standby's state
+    }
+    if (pod != null && !podMountsWalgRoleDir(pod)) {
+      throw new FailoverRefusedError(
+        `Failover refused: the standby cluster's db predates the live wal-g role (no ` +
+          `${WALG_ROLE_DIR} mount on ${DB_POD}); run \`vibecarbon deploy ${envName}\` once ` +
+          '(one db restart), then retry. Nothing was changed.',
+      );
+    }
+  }
 
   // Freshness refresh: prefer the LIVE stack output over the persisted
   // deploy-time snapshot for the standby database node's private IP — the
@@ -2298,6 +2371,32 @@ export async function failoverHA(
    * non-zero, and the rerun resumes from the journal. With a journal from an
    * earlier run, 'not-issued' proves nothing: that run's promote may be landing.
    */
+  async function armBeforePromote() {
+    try {
+      await armWalgRole({ standbyIp: servers.standby.ip, kubectl, envName });
+    } catch (err) {
+      // Never leave a half-armed standby: put its intent and live file back
+      // to standby (best-effort; the intent is what a restart applies).
+      let disarm;
+      try {
+        const r = await setK8sWalgRole({ ip: servers.standby.ip, kubectl, role: 'standby' });
+        disarm = r.live
+          ? 'The standby was disarmed (wal-g role standby).'
+          : `The standby's wal-g intent was set back to standby; its live role file was not ` +
+            `(${r.reason}).`;
+      } catch (disarmErr) {
+        disarm =
+          `The standby could NOT be disarmed (${firstErrorLine(disarmErr)}): run ` +
+          `\`vibecarbon deploy ${envName}\` before it can push a backup.`;
+      }
+      throw new Error(
+        `Failover aborted before promotion: the wal-g role could not be armed on the standby ` +
+          `(${firstErrorLine(err)}). ${disarm} Nothing was promoted; fix it and rerun ` +
+          `vibecarbon failover ${envName}`,
+      );
+    }
+  }
+
   async function catchUpReseedAndPromote() {
     try {
       // STEP 3b (PLANNED only): zero-data-loss gate. The primary is quiesced, so
@@ -2347,6 +2446,11 @@ export async function failoverHA(
           throw new Error(`Failover aborted before promotion: ${err.message}`);
         }
       }
+      // D2: the promoted side's wal-g role is armed before the promote, while
+      // the standby is still in recovery (archive_command never runs there),
+      // so the promotion's own .history and .partial files are archived. A
+      // failed arm aborts here, before promotion, and disarms the standby.
+      await armBeforePromote();
       // R2: the journal goes down immediately before the promote call.
       await writeJournal(
         { environment: envName },
@@ -2492,18 +2596,12 @@ export async function failoverHA(
   if (!fenceWrite.ok) p.log.warn(backupFenceWarning(servers.standby.ip, fenceWrite.reason));
   recordFence({ environment: envName }, fenceWrite);
 
-  // STEP 4b — Move the wal-g WRITE-GUARD onto the promoted cluster. The standby
-  // was deployed with WALG_ROLE=standby, which no-ops the base-backup CronJob
-  // (it inherits the db pod's env) and, with the write-guard now present in the
-  // k8s archive wrapper too, WAL archiving as well — on the cluster that from
-  // here on holds the only live copy of the data.
-  //
-  // Placed HERE, between promote and scale-up, because the env change rolls the
-  // db pod: the app tier is still at zero replicas (pilot-light), so the roll
-  // costs RTO and disturbs no traffic. Doing it after scale-up would bounce the
-  // database under a live app tier instead. Never throws — see
-  // restorePromotedWalgRole.
-  s.start('Moving the wal-g write-guard to the promoted cluster');
+  // STEP 4b — Prove the wal-g WRITE-GUARD on the promoted cluster (armed before
+  // the promote, D2) with the requirePrimary audit, and demote the old primary.
+  // A promoted cluster still reading standby would skip every base backup and
+  // WAL segment on the cluster that from here on holds the only live copy of
+  // the data. Nothing restarts. Never throws: see restorePromotedWalgRole.
+  s.start('Checking the wal-g write-guard on the promoted cluster');
   const backupHealth = await restoreWalgRole({
     promotedIp: servers.standby.ip,
     oldPrimaryIp: servers.primary.ip,
@@ -2684,7 +2782,7 @@ export async function failoverHA(
   };
   swapRoles(envName, Object.keys(swapOptions).length > 0 ? swapOptions : undefined);
   // The old primary is now the retired side: fence it (marker, app at zero,
-  // WALG_ROLE=standby) if it answers. One that does not is fenced by the next
+  // the standby wal-g role) if it answers. One that does not is fenced by the next
   // status, failover or deploy that reaches it, before it can push a backup.
   // Never fails the failover: it has completed, and the terminal checks below
   // must still report.
@@ -2741,7 +2839,7 @@ export async function failoverHA(
   }
 
   // The first base backup on the new timeline (post-promote-backup.js): after
-  // the DNS flip, the add-ons, the WALG_ROLE move and the swap save, so it never
+  // the DNS flip, the add-ons, the wal-g role check and the swap save, so it never
   // holds the outage open. Not attempted while the promoted cluster still reads
   // standby (it would skip), nor after a DNS flip that was not confirmed (the
   // site is down, and minutes of upload would only delay the error that says

@@ -11,6 +11,7 @@
  * `-force-unplanned`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -141,6 +142,8 @@ async function runK8s({
     readStandbyState: async () => standbyState,
     readPrimaryState: async () => null,
     psql: () => async () => '',
+    // The standby db pod mounts the wal-g role directory.
+    kubectl: k8sRoleKubectl(),
     confirmUnproven: async () => {},
   };
   const envConfig = {

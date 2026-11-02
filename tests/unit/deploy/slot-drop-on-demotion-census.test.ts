@@ -166,7 +166,12 @@ const K8S_STANDBY_WRITE =
 const COMPOSE_STANDBY_WRITE = /composeRoleEnv\(\s*'standby'\s*\)/;
 
 /** The only places a node is set to the standby role. */
-const K8S_DEMOTERS = ['src/lib/deploy/walg-role.js:demoteK8sWalgRole'];
+const K8S_DEMOTERS = [
+  // failover's disarm after a failed arm: the standby is still in recovery and
+  // was never promoted, so it holds no slot a failover leaves behind.
+  'src/failover.js:armBeforePromote',
+  'src/lib/deploy/walg-role.js:demoteK8sWalgRole',
+];
 const COMPOSE_DEMOTERS = [
   // deploy-time role merge: the standby is in recovery or is about to be
   // reseeded, which replaces PGDATA and every slot in it.

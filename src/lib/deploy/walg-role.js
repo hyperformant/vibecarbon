@@ -27,15 +27,15 @@
  *
  * THE MOVE HAS TO REACH THE RUNNING PROCESS
  * -----------------------------------------
- * `WALG_ROLE` is CONTAINER ENVIRONMENT on both tiers, and container environment
- * is fixed at container-create time. Writing `.env` does nothing on its own —
- * `docker compose restart` re-runs the SAME container with the SAME env — and
- * neither does patching a StatefulSet without letting the pod roll. So both
- * paths here end in a recreate, and both then PROVE the new value took by
- * running the deploy-time backup audit in `requirePrimary` mode against the
- * promoted node (src/lib/deploy/walg-audit.js): if the env did not actually
- * change, the probe still reports `WALG_ROLE=standby` and the audit fails.
- * A config file updated but never read is not a fix.
+ * On k8s the role is a one-word file outside PGDATA (WALG_ROLE_FILE), which
+ * every wal-g caller reads through the one parser on each run, plus a durable
+ * intent ConfigMap that db-guard.sh applies on every container start. So a
+ * move is one write, with no pod restart: setK8sWalgRole applies the intent,
+ * then writes the live file and reads it back. Failover arms the promoted
+ * side that way BEFORE pg_promote (D2) and then PROVES it took by running the
+ * deploy-time backup audit in `requirePrimary` mode against the promoted node
+ * (src/lib/deploy/walg-audit.js). Compose still recreates its db container
+ * from `.env` here until its movers switch to the role file too.
  *
  * BOTH DIRECTIONS OF THE SWAP
  * ---------------------------
@@ -52,7 +52,7 @@ import { shEscape } from '../shell.js';
 import { sshRun } from '../ssh.js';
 import { validateProjectName } from '../validators.js';
 import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
-import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
+import { DB_CONTAINER, DB_POD } from './db-workload.js';
 import { dropInactiveReplicationSlots, slotDropWarning } from './replication-slot.js';
 
 /** In-container path, both tiers. */
@@ -534,31 +534,6 @@ export function composeDbRecreateShell(remoteDir) {
 }
 
 /**
- * `kubectl` argv (no leading `kubectl`) that sets `WALG_ROLE` on the db
- * StatefulSet. The template change is what rolls the pod, which is what makes
- * the new value visible to postgres' `archive_command` and to the backup
- * CronJob's `kubectl exec` (it inherits the db container's env — the CronJob has
- * no `WALG_ROLE` of its own).
- *
- * No `--containers` selector: the default `*` covers the db pod's single app
- * container and stays correct if the chart renames it. `kubectl set env` does
- * not touch initContainers, and none of them reads WALG_ROLE.
- *
- * @param {'primary'|'standby'} role
- * @returns {string[]}
- */
-export function k8sSetWalgRoleArgv(role) {
-  return [
-    '-n',
-    'vibecarbon',
-    'set',
-    'env',
-    `statefulset/${DB_STATEFULSET}`,
-    `${WALG_ROLE_ENV}=${role}`,
-  ];
-}
-
-/**
  * Demote a k8s cluster's db: drop its inactive replication slots, then set the
  * standby wal-g role through setK8sWalgRole (the intent ConfigMap, then the
  * live role file). The one k8s standby role write
@@ -631,15 +606,15 @@ export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
 export function walgRoleDegradedMessage({ path, envName, promotedIp, detail, heldAtZero = [] }) {
   const verify =
     path === 'compose'
-      ? `ssh root@${promotedIp} 'cd /opt/<project> && docker compose exec -T db printenv WALG_ROLE'`
-      : `ssh root@${promotedIp} 'kubectl -n vibecarbon exec ${DB_POD} -- printenv WALG_ROLE'`;
+      ? `ssh root@${promotedIp} 'cat /opt/<project>/${COMPOSE_WALG_ROLE_HOST_DIR}/walg-role'`
+      : `ssh root@${promotedIp} 'kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- cat ${WALG_ROLE_FILE}'`;
   return (
     `FAILOVER COMPLETED, BACKUPS DID NOT. The promoted node (${promotedIp}) is serving, DNS ` +
     `is flipped and the role swap is persisted; but this failover could not prove that ` +
     `wal-g is archiving from it. ${detail} Until this is fixed the new primary holds the ` +
     `ONLY live copy of your data and is accumulating no recoverable backups. Check the ` +
     `write-guard with \`${verify}\` (it must print \`primary\`), then re-run ` +
-    `\`vibecarbon deploy ${envName}\`; a deploy re-renders WALG_ROLE from the now-swapped ` +
+    `\`vibecarbon deploy ${envName}\`; a deploy writes the wal-g role from the now-swapped ` +
     `config and re-runs the same backup audit. There is also no base backup on the new ` +
     `timeline (a node reading standby skips the push): once the write-guard reads primary, ` +
     `run \`vibecarbon backup ${envName}\`.` +

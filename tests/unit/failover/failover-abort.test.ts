@@ -15,6 +15,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -380,22 +381,50 @@ describe('k8s-ha abort backend', () => {
     });
   });
 
-  it('re-arms WALG_ROLE=primary on the old primary only when the StatefulSet lost it', async () => {
-    const sts = (role: string) =>
-      JSON.stringify({
-        spec: {
-          template: {
-            spec: { containers: [{ name: 'db', env: [{ name: 'WALG_ROLE', value: role }] }] },
-          },
-        },
-      });
-    const kept = make((argv) => (argv.includes('get') ? sts('primary') : ''));
-    await expect(kept.backend.armPrimary()).resolves.toBe(true);
-    expect(kept.calls.some((c) => c.argv.includes('set'))).toBe(false);
+  it('re-arms the wal-g role on the old primary only when its intent or live file lost it, with no db restart', async () => {
+    // intent: the vibecarbon-db-role ConfigMap; file: the live role file read back.
+    const cluster = (intent: string | null, file: string) => (argv: string[]) => {
+      if (argv.includes('configmap/vibecarbon-db-role')) {
+        return intent ? JSON.stringify({ data: { VC_WALG_ROLE_INTENT: intent } }) : '';
+      }
+      const reply = k8sRoleReply(argv);
+      if (
+        reply !== undefined &&
+        argv.includes('exec') &&
+        !argv.join(' ').includes('walg-role.tmp')
+      ) {
+        return `WALG_ROLE_FILE=${file}\n`;
+      }
+      return reply ?? '';
+    };
+    const writes = (calls: Array<{ argv: string[] }>) =>
+      calls.filter((c) => c.argv.includes('apply') || c.argv.join(' ').includes('walg-role.tmp'));
 
-    const lost = make((argv) => (argv.includes('get') ? sts('standby') : ''));
-    await expect(lost.backend.armPrimary()).resolves.toBe(true);
-    expect(lost.calls.find((c) => c.argv.includes('set'))?.argv).toContain('WALG_ROLE=primary');
+    const kept = make(cluster('primary', 'primary'));
+    await expect(kept.backend.armPrimary()).resolves.toBe(true);
+    expect(writes(kept.calls)).toEqual([]);
+
+    for (const [intent, file] of [
+      ['standby', 'standby'],
+      ['primary', 'standby'],
+      [null, 'primary'],
+    ] as const) {
+      const lost = make(cluster(intent, file));
+      await expect(lost.backend.armPrimary()).resolves.toBe(true);
+      expect(writes(lost.calls).map((c) => c.argv.includes('apply'))).toEqual([true, false]);
+      expect(lost.calls.every((c) => c.ip === '10.1.0.1')).toBe(true);
+      expect(lost.calls.some((c) => c.argv.includes('set') || c.argv.includes('rollout'))).toBe(
+        false,
+      );
+    }
+
+    // A primary db pod from before the role mount cannot be armed: a false, not a throw.
+    const old = make((argv) =>
+      argv.includes('configmap/vibecarbon-db-role')
+        ? ''
+        : (k8sRoleReply(argv, { roleMount: false }) ?? ''),
+    );
+    await expect(old.backend.armPrimary()).resolves.toBe(false);
   });
 
   it('scales the old primary app tier back up from the persisted list', async () => {
