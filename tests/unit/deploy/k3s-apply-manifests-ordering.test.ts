@@ -197,8 +197,8 @@ let getNodesOut = '';
 let retiredChartStsOut = '';
 // The chart's Helm release record (a Secret), which outlives a deleted StatefulSet.
 let retiredChartReleaseOut = '';
-// Whether the cluster still carries the observability stack (namespace +
-// grafana-tls) from a life as primary — the demoted-standby reconverge case.
+// Whether the cluster still carries the observability stack (its namespace)
+// from a life as primary — the demoted-standby reconverge case.
 // Default: absent, as on every freshly deployed cluster.
 let leftoverObservability = false;
 
@@ -282,11 +282,9 @@ function installSpawnMock() {
       cmd === 'kubectl' &&
       argv.includes('get') &&
       argv.includes('--ignore-not-found') &&
-      (argv.includes('vibecarbon-observability') || argv.includes('grafana-tls'))
+      argv.includes('vibecarbon-observability')
     ) {
-      const stdout = argv.includes('grafana-tls')
-        ? 'certificate.cert-manager.io/grafana-tls\n'
-        : 'namespace/vibecarbon-observability\n';
+      const stdout = 'namespace/vibecarbon-observability\n';
       return fakeChild({ stdout, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
     if (
@@ -506,6 +504,17 @@ const isObservabilityApply = (a: string[]) =>
   a.includes('apply') &&
   a.includes('-k') &&
   a.some((s) => typeof s === 'string' && s.includes('observability'));
+const retiredGrafanaDelete = (kind: 'certificate' | 'secret') => [
+  'kubectl',
+  '-n',
+  'vibecarbon-observability',
+  'delete',
+  kind,
+  'grafana-tls',
+  '--ignore-not-found',
+];
+const indexOfCall = (want: string[]) =>
+  cmdCalls.findIndex((a) => a.length === want.length && a.every((x, i) => x === want[i]));
 const caCalls = (pred: (a: string[]) => boolean) =>
   cmdCalls.filter((a) => a[0] === 'kubectl' && a.includes('deploy/cluster-autoscaler') && pred(a));
 // `apply -f -` calls carry their payload over stdin, not argv — this finds
@@ -1173,7 +1182,7 @@ describe('applyK3sManifests pilot-standby role', () => {
   // Reverse of the post-failover reconverge: the old primary is redeployed as
   // the pilot standby and still runs the observability stack it got as
   // primary. A fresh standby has none, so the demoted one must end up with
-  // its pods at zero and grafana-tls off the ACME issuer.
+  // its pods at zero and no grafana-tls Certificate left.
   it('a standby demoted from primary scales its leftover observability to zero', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir({ withObservability: true });
@@ -1197,14 +1206,11 @@ describe('applyK3sManifests pilot-standby role', () => {
       ]);
     }
     expect(cmdCalls.some((a) => a.includes('scale') && a.includes('--all'))).toBe(false);
-    const grafanaPatch =
-      cmdCalls.find(
-        (a) => a.includes('patch') && a.includes('grafana-tls') && a.includes('certificate'),
-      ) ?? [];
-    expect(grafanaPatch.length, 'grafana-tls must leave the ACME issuer').toBeGreaterThan(0);
-    const body = JSON.parse(grafanaPatch[grafanaPatch.indexOf('-p') + 1]);
-    expect(body.spec.issuerRef.name).toBe('vibecarbon-standby-selfsigned');
-    expect(Object.values(body.metadata.annotations)[0]).toMatch(/^letsencrypt/);
+    // One certificate per name: the grafana-tls Certificate its primary life
+    // left is deleted with its Secret, never re-pointed.
+    expect(cmdCalls).toContainEqual(retiredGrafanaDelete('certificate'));
+    expect(cmdCalls).toContainEqual(retiredGrafanaDelete('secret'));
+    expect(cmdCalls.some((a) => a.includes('patch') && a.includes('grafana-tls'))).toBe(false);
   });
 
   it('a leftover observability stack whose add-on left the project tree is zeroed too', async () => {
@@ -1275,16 +1281,13 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(cmdCalls.some(isObservabilityApply)).toBe(true);
   });
 
-  it('gives grafana-tls a DIFFERENT identifier set than vibecarbon-tls on a DNS-01 issuer', async () => {
-    // Both Certificates target the same ClusterIssuer, hence the same ACME
-    // account. Boulder returns ONE shared order to two new-order requests
-    // with an identical identifier set, both Order controllers finalize it,
-    // and the loser is marked terminally Errored with
-    //   403 orderNotReady :: Order was already processing
-    // (cert-manager#8960, unfixed in the v1.20.2 we pin). That is the
-    // 2026-08-11 e2e hetzner/k8s restore failure. This asserts the WIRING,
-    // not just the helper: the bug was the grafana patch reusing the app
-    // cert's `dnsNames` variable, which no helper-level test can catch.
+  it('one certificate per name: a primary deploy deletes the retired grafana-tls after the observability apply', async () => {
+    // The observability add-on used to issue grafana-tls for the bare app
+    // domain. Traefik's store is global, so the domain was served whichever
+    // of the two certificates Traefik picked at start, and a restore of
+    // vibecarbon-tls could still serve the other serial. A redeploy of such
+    // an env removes the Certificate and its Secret (cert-manager keeps a
+    // Secret its Certificate no longer owns), and patches no Certificate.
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir({ withObservability: true });
 
@@ -1295,19 +1298,17 @@ describe('applyK3sManifests pilot-standby role', () => {
       role: 'primary',
     });
 
-    const patchedDnsNames = (certName: string) => {
-      const argv = cmdCalls.find(
-        (a) => a.includes('patch') && a.includes('certificate') && a.includes(certName),
-      );
-      if (!argv) throw new Error(`no patch found for certificate/${certName}`);
-      return JSON.parse(argv[argv.length - 1]).spec.dnsNames;
-    };
-    // vibecarbon-tls is rendered into the base before the apply, not patched.
-    const appDnsNames = certificateAtBaseApply?.spec?.dnsNames;
-
-    expect(appDnsNames).toEqual(['app.example.test', '*.app.example.test']);
-    expect(patchedDnsNames('grafana-tls')).toEqual(['app.example.test']);
-    expect(patchedDnsNames('grafana-tls')).not.toEqual(appDnsNames);
+    const apply = cmdCalls.findIndex(isObservabilityApply);
+    const deleteCert = indexOfCall(retiredGrafanaDelete('certificate'));
+    const deleteSecret = indexOfCall(retiredGrafanaDelete('secret'));
+    expect(apply).toBeGreaterThan(-1);
+    expect(deleteCert).toBeGreaterThan(apply);
+    expect(deleteSecret).toBeGreaterThan(deleteCert);
+    expect(cmdCalls.some((a) => a.includes('patch') && a.includes('grafana-tls'))).toBe(false);
+    expect(certificateAtBaseApply?.spec?.dnsNames).toEqual([
+      'app.example.test',
+      '*.app.example.test',
+    ]);
   });
 
   it('single-ACME-issuer policy: a pilot-standby cert references the self-signed issuer, the promote annotation carries the real one', async () => {

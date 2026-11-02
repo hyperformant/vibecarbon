@@ -5,14 +5,15 @@
  * (primary-only ones write to the primary database; with-app-tier ones follow
  * the zeroed app tier), by `kubectl scale`, never a patch that would roll pods.
  * The zero lands straight after the app's own zero patch, so the window between
- * `apply -k` and the zero is the app's. The observability step only re-points
- * grafana-tls now; the scaling comes from the declaration.
+ * `apply -k` and the zero is the app's. The observability step only clears
+ * the retired grafana-tls Certificate now; the scaling comes from the
+ * declaration.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  repointObservabilityCertOnStandby,
+  settleObservabilityOnStandby,
   zeroWorkloadsOnStandby,
 } from '../../../src/lib/deploy/k8s/k3s.js';
 import { k8sStandbyZeroedWorkloads } from '../../../src/lib/services/standby-policy.js';
@@ -83,38 +84,42 @@ describe('zeroWorkloadsOnStandby', () => {
   });
 });
 
-describe('repointObservabilityCertOnStandby', () => {
+describe('settleObservabilityOnStandby', () => {
   it('without the observability namespace it is a no-op', async () => {
     const { calls, kubectl } = fakeKubectl([]);
-    expect(await repointObservabilityCertOnStandby({ env: {}, issuerName: 'le', kubectl })).toBe(
-      false,
-    );
+    expect(await settleObservabilityOnStandby({ env: {}, kubectl })).toBe(false);
     expect(calls.every((a) => a.includes('get'))).toBe(true);
   });
 
-  it('re-points grafana-tls at the standby issuer and scales nothing', async () => {
-    const { calls, kubectl } = fakeKubectl(['vibecarbon-observability', 'grafana-tls']);
-    expect(await repointObservabilityCertOnStandby({ env: {}, issuerName: 'le', kubectl })).toBe(
-      true,
-    );
+  it('deletes the retired grafana-tls Certificate and Secret, patches and scales nothing', async () => {
+    const { calls, kubectl } = fakeKubectl(['vibecarbon-observability']);
+    expect(await settleObservabilityOnStandby({ env: {}, kubectl })).toBe(true);
     expect(calls.some((a) => a.includes('scale'))).toBe(false);
-    const patch = calls.find((a) => a.includes('patch')) as string[];
-    expect(patch.slice(0, 5)).toEqual([
+    expect(calls.some((a) => a.includes('patch'))).toBe(false);
+    expect(calls).toContainEqual([
       '-n',
       'vibecarbon-observability',
-      'patch',
+      'delete',
       'certificate',
       'grafana-tls',
+      '--ignore-not-found',
+    ]);
+    expect(calls).toContainEqual([
+      '-n',
+      'vibecarbon-observability',
+      'delete',
+      'secret',
+      'grafana-tls',
+      '--ignore-not-found',
     ]);
   });
 });
 
-describe('repointObservabilityCertOnStandby with a leftover stack', () => {
+describe('settleObservabilityOnStandby with a leftover stack', () => {
   it('zeroes the leftover Deployments once the namespace is found', async () => {
     const { calls, kubectl } = fakeKubectl(['vibecarbon-observability', 'grafana', 'loki']);
-    await repointObservabilityCertOnStandby({
+    await settleObservabilityOnStandby({
       env: {},
-      issuerName: 'le',
       leftoverWorkloads: k8sStandbyZeroedWorkloads(['observability']),
       kubectl,
     });
@@ -124,9 +129,8 @@ describe('repointObservabilityCertOnStandby with a leftover stack', () => {
 
   it('without the namespace nothing is read for the leftovers', async () => {
     const { calls, kubectl } = fakeKubectl([]);
-    await repointObservabilityCertOnStandby({
+    await settleObservabilityOnStandby({
       env: {},
-      issuerName: 'le',
       leftoverWorkloads: k8sStandbyZeroedWorkloads(['observability']),
       kubectl,
     });
@@ -150,8 +154,9 @@ describe('applyK3sManifests pilot-standby block (source order)', () => {
     );
   });
 
-  it('the observability branch only re-points the cert; nothing scales a whole namespace', () => {
-    expect(body).toMatch(/await repointObservabilityCertOnStandby\(\{\s*env,\s*issuerName,/);
+  it('the observability branch only settles the namespace; nothing scales a whole namespace', () => {
+    expect(body).toMatch(/await settleObservabilityOnStandby\(\{\s*env,[^}]*leftoverWorkloads:/);
+    expect(K3S_SRC).not.toContain('repointObservabilityCertOnStandby');
     expect(K3S_SRC).not.toContain('demoteObservabilityOnStandby');
     expect(K3S_SRC).not.toMatch(/'scale',\s*'deployment',\s*'--all'/);
   });

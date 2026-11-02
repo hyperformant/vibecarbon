@@ -681,10 +681,10 @@ async function captureFailureDiagnostics(
           `kubectl --kubeconfig ${kc} -n vibecarbon get events --sort-by=.lastTimestamp 2>&1 | tail -${eventTail}`,
         ]),
       ]);
-      // All namespaces: the observability add-on issues its own grafana-tls
-      // Certificate in vibecarbon-observability against the SAME
-      // ClusterIssuer, so a vibecarbon-only dump cannot tell a lone failed
-      // order apart from two Certificates racing one shared ACME order.
+      // All namespaces: a vibecarbon-only dump cannot tell a lone failed
+      // order apart from a Certificate elsewhere (a leftover grafana-tls from
+      // before one certificate per name, or a user's own) racing one shared
+      // ACME order.
       // The 2026-08-11 e3 restore failure (403 orderNotReady "Order was
       // already processing") was diagnosed without that half of the picture.
       sections.push([

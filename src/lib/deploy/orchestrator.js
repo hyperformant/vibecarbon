@@ -2374,12 +2374,10 @@ export async function executeDeployment(args, gatheredConfig) {
           };
           const dig = await safeRun('dig', ['+short', domain, '@1.1.1.1']);
           const kcExists = existsSync(kubeconfig);
-          // ALL namespaces, not just `vibecarbon`: the observability add-on
-          // issues its own grafana-tls Certificate in
-          // vibecarbon-observability against the same ClusterIssuer, and a
-          // vibecarbon-only dump cannot show whether two Certificates were
-          // racing the same ACME order — exactly the ambiguity that made
-          // the 2026-08-11 e3 post-mortem harder than it needed to be.
+          // ALL namespaces, not just `vibecarbon`: a vibecarbon-only dump
+          // cannot show a Certificate elsewhere (a leftover or a user's own)
+          // racing ours for the same ACME order, exactly the ambiguity that
+          // made the 2026-08-11 e3 post-mortem harder than it needed to be.
           const certs = kcExists
             ? await safeRun('kubectl', [
                 '--kubeconfig',

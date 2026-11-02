@@ -493,8 +493,7 @@ export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {})
  * making the promoted cluster the environment's sole ACME solver.
  *
  * TLS certificate reuse (`snapshot`): vibecarbon-tls serves the primary's
- * certificate instead of a new one (promoteTlsFromSnapshot). grafana-tls
- * always takes the patch.
+ * certificate instead of a new one (promoteTlsFromSnapshot).
  *
  * Best-effort BY CONTRACT: this runs after the point of no return (standby
  * promoted, DNS about to flip), and a promoted site serving on the

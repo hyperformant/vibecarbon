@@ -112,7 +112,7 @@ import {
   k8sWalgAuditArgv,
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from '../walg-audit.js';
-import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
+import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
@@ -121,6 +121,10 @@ import {
   standbyImageRef,
 } from './image-delivery.js';
 import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
+import {
+  removeRetiredObservabilityCertificate,
+  staleObservabilityTlsProblem,
+} from './one-certificate.js';
 import {
   awaitAppAdminReady,
   awaitCertManagerAdmission,
@@ -1093,51 +1097,6 @@ export function k8sTlsIdentity({ projectDir, dnsProvider, domain }) {
     dnsNames: certificateDnsNames(domain, issuerName),
     ca: caSlug(issuerName),
   };
-}
-
-/**
- * Build the `dnsNames` list for the observability add-on's `grafana-tls`
- * Certificate — apex only, ALWAYS, never the wildcard.
- *
- * Grafana is routed by `PathPrefix('/admin/grafana')` with no `Host()` clause
- * (services/observability/k8s/ingressroute.yaml), so it is only ever served
- * on the apex domain and the wildcard SAN buys it nothing.
- *
- * It costs plenty, though. This Certificate lives in
- * vibecarbon-observability because Traefik cannot read a TLS Secret across
- * namespaces, so the cluster necessarily holds TWO Certificates for the same
- * site against the SAME ClusterIssuer — i.e. the same ACME account. When
- * both ask for the IDENTICAL identifier set, Boulder hands them the SAME
- * ACME order, because it "may return a previously created Order when a given
- * Account submits a new Order that is identical to a previously submitted
- * Order that is in the 'pending' or 'ready' state"
- * (letsencrypt/boulder docs/acme-implementation_details.md). Both Order
- * controllers then validate and both call finalize; the loser gets
- *   403 orderNotReady :: Order was already processing
- * and cert-manager marks that Order Errored — terminally, because
- * finalizeOrder only recovers from a 403 when the re-fetched ACME order is
- * "valid", not "processing" (cert-manager#8960, PR#8968, unfixed as of the
- * v1.20.2 we pin). That is what took down the 2026-08-11 e2e hetzner/k8s
- * restore: challenges valid, order errored, cert never issued.
- *
- * Requesting `[domain]` here while the app cert requests
- * `[domain, *.domain]` keeps the two identifier sets DISTINCT, so Boulder
- * issues two independent orders and the shared-order race cannot arise.
- * It also stops the two certs from sharing one Let's Encrypt
- * duplicate-certificate bucket (5 identical FQDN sets per week), which two
- * identical requests per deploy would otherwise exhaust in three deploys.
- *
- * NOTE the residue: under a `manual` (HTTP-01) issuer the app cert is also
- * apex-only, so both sets are `[domain]` again and the race is still
- * reachable. HTTP-01 cannot validate a SAN that does not already resolve, so
- * there is no identifier we could add to separate them. That path is covered
- * at runtime by the watchdog in ./acme-order-recovery.js.
- *
- * @param {string} domain - The apex deploy domain, e.g. `e1.carbonstack.dev`
- * @returns {string[]}
- */
-export function observabilityCertificateDnsNames(domain) {
-  return [domain];
 }
 
 /**
@@ -2975,22 +2934,21 @@ export async function zeroWorkloadsOnStandby({ env, workloads, kubectl = runKube
 }
 
 /**
- * Pilot-light standby: point the grafana-tls Certificate an observability
- * stack left from this cluster's primary life at the standby's self-signed
- * issuer (the real issuer rides the promote annotation, as on vibecarbon-tls).
- * The stack's Deployments are zeroed by zeroWorkloadsOnStandby from the
- * declaration when the add-on is in the project tree; `leftoverWorkloads`
- * are the namespace's declared Deployments that list did not cover (the
- * add-on left the tree but its stack is still on the cluster), zeroed here
- * once the namespace is found. No-op when the namespace is absent, which is
- * every freshly deployed standby.
+ * Pilot-light standby: settle an observability stack left from this
+ * cluster's primary life. The stack's Deployments are zeroed by
+ * zeroWorkloadsOnStandby from the declaration when the add-on is in the
+ * project tree; `leftoverWorkloads` are the namespace's declared Deployments
+ * that list did not cover (the add-on left the tree but its stack is still on
+ * the cluster), zeroed here once the namespace is found. The retired
+ * grafana-tls Certificate and Secret go too (one certificate per name, see
+ * ./one-certificate.js). No-op when the namespace is absent, which is every
+ * freshly deployed standby.
  *
- * @param {{ env: Record<string, string|undefined>, issuerName: string, leftoverWorkloads?: Array<{kind: string, name: string, namespace: string}>, kubectl?: typeof runKubectlWithRetry }} args
+ * @param {{ env: Record<string, string|undefined>, leftoverWorkloads?: Array<{kind: string, name: string, namespace: string}>, kubectl?: typeof runKubectlWithRetry }} args
  * @returns {Promise<boolean>} true when a leftover stack's namespace was found
  */
-export async function repointObservabilityCertOnStandby({
+export async function settleObservabilityOnStandby({
   env,
-  issuerName,
   leftoverWorkloads = [],
   kubectl = runKubectlWithRetry,
 }) {
@@ -3006,46 +2964,7 @@ export async function repointObservabilityCertOnStandby({
   ).trim();
   if (!ns) return false;
   await zeroWorkloadsOnStandby({ env, workloads: leftoverWorkloads, kubectl });
-  const cert = String(
-    (await kubectl(
-      [
-        '-n',
-        OBSERVABILITY_NAMESPACE,
-        'get',
-        'certificate',
-        'grafana-tls',
-        '--ignore-not-found',
-        '-o',
-        'name',
-      ],
-      {
-        env,
-        captureStdout: true,
-        description: 'applyK3sManifests: look for grafana-tls (pilot standby)',
-      },
-    )) ?? '',
-  ).trim();
-  if (cert) {
-    await kubectl(
-      [
-        '-n',
-        OBSERVABILITY_NAMESPACE,
-        'patch',
-        'certificate',
-        'grafana-tls',
-        '--type=merge',
-        '-p',
-        JSON.stringify({
-          metadata: { annotations: { [PROMOTE_ISSUER_ANNOTATION]: issuerName } },
-          spec: { issuerRef: { name: STANDBY_SELFSIGNED_ISSUER, kind: 'ClusterIssuer' } },
-        }),
-      ],
-      {
-        env,
-        description: 'applyK3sManifests: grafana-tls -> standby self-signed issuer (pilot standby)',
-      },
-    );
-  }
+  await removeRetiredObservabilityCertificate({ env, kubectl });
   return true;
 }
 
@@ -4451,14 +4370,11 @@ export async function applyK3sManifests({
     // and still runs the stack it was given then. zeroWorkloadsOnStandby
     // above already scaled its Deployments to zero from the declaration (no
     // scrape or Grafana spend, no second Prometheus watching a zeroed app
-    // tier; scale, not delete, so the PVCs keep their history). What is left
-    // is the ACME issuer behind grafana-tls (single-ACME-issuer policy, see
-    // the vibecarbon-tls patch above); the apply restores `replicas: 1` and
-    // the issuer the day this cluster is promoted again. A fresh standby has
-    // no such namespace and this is a no-op.
-    await repointObservabilityCertOnStandby({
+    // tier; scale, not delete, so the PVCs keep their history); the apply
+    // restores `replicas: 1` the day this cluster is promoted again. A fresh
+    // standby has no such namespace and this is a no-op.
+    await settleObservabilityOnStandby({
       env,
-      issuerName,
       // A stack left on the cluster after its add-on left the project tree:
       // nothing above zeroed it, so the namespace check does.
       leftoverWorkloads: k8sStandbyZeroedWorkloads(declaredAddonNames()).filter(
@@ -4495,35 +4411,12 @@ export async function applyK3sManifests({
       // not leak a temp dir per run (T4 review).
       rmSync(renderedObservabilityDir, { recursive: true, force: true });
     }
-    // Patch the LOCAL grafana-tls Certificate (issuer + dnsNames) in the
-    // observability namespace. Same issuer as vibecarbon-tls, but apex-only
-    // dnsNames — deliberately NOT the same list. Two Certificates asking one
-    // ACME account for an identical identifier set get handed one shared
-    // Boulder order and race its finalize; see
-    // observabilityCertificateDnsNames for the full account.
-    await runKubectlWithRetry(
-      [
-        '-n',
-        'vibecarbon-observability',
-        'patch',
-        'certificate',
-        'grafana-tls',
-        '--type=merge',
-        '-p',
-        JSON.stringify({
-          // Primary-only path (a pilot-standby skips observability entirely),
-          // so the issuerRef stays ACME; the promote annotation still rides
-          // along so promoteAcmeIssuer treats every deploy-owned Certificate
-          // uniformly.
-          metadata: { annotations: { [PROMOTE_ISSUER_ANNOTATION]: issuerName } },
-          spec: {
-            dnsNames: observabilityCertificateDnsNames(domain),
-            issuerRef: { name: issuerName, kind: 'ClusterIssuer' },
-          },
-        }),
-      ],
-      { env, description: 'applyK3sManifests: kubectl patch certificate/grafana-tls' },
-    );
+    // One certificate per name: Grafana's IngressRoute takes vibecarbon-tls
+    // from Traefik's global store (`tls: {}`). An env deployed before that
+    // still holds the grafana-tls Certificate and Secret, which the apply
+    // above no longer manages; remove them, after the apply so the Grafana
+    // route never names a Secret that is gone.
+    await removeRetiredObservabilityCertificate({ env, kubectl: runKubectlWithRetry });
   }
   // (Considered: setting HCLOUD_NETWORK on the Hetzner CCM so it populates
   // each Node's InternalIP from the Hetzner private network. Reverted —
@@ -5115,6 +5008,11 @@ async function deployK3sSteps(options, inFlight) {
   // A `deploy -restore` point arrives resolved (C5); refuse a partial one
   // before anything is provisioned or applied.
   assertDeployRestorePoint({ restore: options.restore });
+  // An observability add-on copied before one-certificate-per-name still
+  // issues grafana-tls; refuse it with the edit, before anything is
+  // provisioned (./one-certificate.js).
+  const staleObservabilityTls = staleObservabilityTlsProblem(process.cwd());
+  if (staleObservabilityTls) throw new Error(staleObservabilityTls);
   const { state } = options;
   // When a tracker is supplied (the orchestrator + HA fan-out always pass one),
   // use its spinner factory (timing + per-step log file). Otherwise fall back to
