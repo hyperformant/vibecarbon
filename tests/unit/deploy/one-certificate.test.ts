@@ -113,7 +113,7 @@ const routeList = (routes: { name: string; secretName?: string }[]) =>
   });
 
 /** A kubectl stand-in: the namespace exists when `namespace` is set; routes answer the list. */
-function fakeKubectl({ namespace = true, routes = '' } = {}) {
+function fakeKubectl({ namespace = true, routes = '{"items":[]}' } = {}) {
   const calls: string[][] = [];
   const kubectl = async (argv: string[]) => {
     calls.push(argv);
@@ -142,14 +142,22 @@ describe('removeRetiredObservabilityCertificate', () => {
     ]);
   });
 
-  it('an empty or unreadable route list deletes no route, still the Certificate and Secret', async () => {
-    for (const routes of ['', 'not json', routeList([])]) {
+  it('an empty route list deletes no route, still the Certificate and Secret', async () => {
+    const { calls, kubectl } = fakeKubectl({ routes: routeList([]) });
+    await removeRetiredObservabilityCertificate({ env: {}, kubectl });
+    expect(calls.filter((a) => a.includes('delete')).map((a) => a[3])).toEqual([
+      'certificate',
+      'secret',
+    ]);
+  });
+
+  it('an unparseable route list throws and deletes nothing (never read as "no routes")', async () => {
+    for (const routes of ['', 'not json', '{"kind":"Status"}']) {
       const { calls, kubectl } = fakeKubectl({ routes });
-      await removeRetiredObservabilityCertificate({ env: {}, kubectl });
-      expect(calls.filter((a) => a.includes('delete')).map((a) => a[3])).toEqual([
-        'certificate',
-        'secret',
-      ]);
+      await expect(removeRetiredObservabilityCertificate({ env: {}, kubectl })).rejects.toThrow(
+        /IngressRoute/,
+      );
+      expect(calls.some((a) => a.includes('delete'))).toBe(false);
     }
   });
 });

@@ -204,7 +204,7 @@ let leftoverObservability = false;
 // Set by the observability `apply -k`: the namespace exists from then on.
 let observabilityApplied = false;
 // What `get ingressroute -o json` answers in the observability namespace.
-let observabilityRoutesOut = '';
+let observabilityRoutesOut = '{"items":[]}';
 
 const APP_POD = 'app-6f7d9c-abcde';
 const APP_RS_JSON = JSON.stringify({
@@ -555,7 +555,7 @@ function findAppliedSecretConfigJson(secretName: string) {
 // so every describe gets it (an outer beforeEach runs before each inner one).
 beforeEach(() => {
   observabilityApplied = false;
-  observabilityRoutesOut = '';
+  observabilityRoutesOut = '{"items":[]}';
   deliverImage.mockReset();
   deliverImage.mockImplementation(async (opts: { pushAfter?: Promise<unknown> }) => {
     cmdCalls.push(['deliverImage']);

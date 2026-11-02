@@ -25,6 +25,8 @@ function fakeKubectl(existing: string[]) {
   const calls: string[][] = [];
   const kubectl = async (argv: string[]) => {
     calls.push(argv);
+    // The observability IngressRoute list: none name grafana-tls.
+    if (argv.includes('ingressroute') && argv.includes('get')) return '{"items":[]}';
     const at = argv.indexOf('get');
     if (at !== -1) {
       const name = argv[at + 2];

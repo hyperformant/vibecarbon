@@ -66,13 +66,23 @@ export function staleObservabilityTlsProblem(projectDir) {
   return 'Your observability add-on files are out of date. Run `vibecarbon upgrade`, then deploy again.';
 }
 
-/** The IngressRoutes in `items` (a `get ingressroute -o json`) that name the retired secret. */
+/**
+ * The IngressRoutes in a `get ingressroute -o json` that name the retired
+ * secret. Throws when the output is not a list: an unread list is no proof
+ * that no route names it, and deleting the Secret under such a route would
+ * leave it naming nothing.
+ */
 function routesNamingRetiredSecret(listJson) {
-  let items = [];
+  let items;
   try {
-    items = JSON.parse(listJson)?.items ?? [];
+    items = JSON.parse(listJson)?.items;
   } catch {
-    return [];
+    items = undefined;
+  }
+  if (!Array.isArray(items)) {
+    throw new Error(
+      `could not read the IngressRoutes in ${RETIRED_OBSERVABILITY_CERTIFICATE.namespace}, so the retired ${RETIRED_OBSERVABILITY_CERTIFICATE.name} was left in place`,
+    );
   }
   return items
     .filter((r) => r?.spec?.tls?.secretName === RETIRED_OBSERVABILITY_CERTIFICATE.name)
