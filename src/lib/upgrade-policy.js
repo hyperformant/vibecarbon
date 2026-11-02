@@ -50,10 +50,8 @@ const SAFE_PATTERNS = [
   // Docker would mount an empty directory there and the local S3 would not
   // start.
   'volumes/s3/**',
-  // The add-ons' scripts their compose files mount (n8n's hook and setup,
-  // Metabase's setup).
+  // The n8n addon's hook and setup scripts docker-compose.n8n.yml mounts.
   'volumes/n8n/**',
-  'volumes/metabase/**',
   'AGENTS.md',
   'CLAUDE.md',
   'PRODUCTION.md',
@@ -78,15 +76,14 @@ const SAFE_PATTERNS = [
 // - wal-archive.sh is the archive_command: an old copy reads the
 //   WALG_S3_PREFIX the merged docker-compose.yml no longer sets
 //   (WALG_S3_PREFIX_BASE now) and archives nothing.
-// - metabase-init.sh / n8n-init.sh / observability-init.sh are the add-ons'
-//   initdb scripts their (safe) compose files mount.
+// - metabase-init.sh / n8n-init.sh are the addons' initdb scripts their
+//   (safe) compose files mount.
 const SAFE_DESPITE_NEVER = [
   'volumes/db/db-guard.sh',
   'volumes/db/walg-env.sh',
   'volumes/db/wal-archive.sh',
   'volumes/db/metabase-init.sh',
   'volumes/db/n8n-init.sh',
-  'volumes/db/observability-init.sh',
 ];
 
 // Files that always require user review
@@ -163,6 +160,30 @@ export function getFilePolicy(relativePath) {
   if (matchesAny(relativePath, SAFE_PATTERNS)) return 'safe';
   // Default: files not explicitly classified are never touched
   return 'never';
+}
+
+// The project's own code, data and secrets: never touched by an add-on file
+// either. NEVER_PATTERNS without volumes/db/**, which only shields the
+// template's database files from a template upgrade.
+const ADDON_NEVER_PATTERNS = NEVER_PATTERNS.filter((p) => p !== 'volumes/db/**');
+
+/**
+ * Classify a file an add-on ships (src/lib/addon-upgrade-files.js). An
+ * add-on's files follow one rule wherever they land: its integration doc
+ * (manifest source under `docs/`) is the operator's to keep, the project's
+ * own code, data and secrets stay never, a merge path stays merge, and
+ * everything else the add-on ships (compose, k8s, mounted volumes, init
+ * scripts) is safe, whether or not a template pattern happens to name it.
+ *
+ * @param {string} relativePath - Path relative to project root
+ * @param {string} src - The file's path inside services/<name>/
+ * @returns {'safe' | 'merge' | 'never'}
+ */
+export function getAddonFilePolicy(relativePath, src) {
+  if (String(src).startsWith('docs/')) return 'never';
+  if (matchesAny(relativePath, ADDON_NEVER_PATTERNS)) return 'never';
+  if (matchesAny(relativePath, MERGE_PATTERNS)) return 'merge';
+  return 'safe';
 }
 
 /**

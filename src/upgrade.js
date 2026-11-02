@@ -56,9 +56,10 @@ import {
   setEnvVar,
 } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+import { symlinkedComponent } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
 import { templatePathFor } from './lib/template-paths.js';
-import { getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
+import { getAddonFilePolicy, getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
 import { VERSION } from './lib/version.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -542,20 +543,38 @@ async function main(cliArgs) {
       servicesDir: SERVICES_DIR,
       projectRoot: cwd,
       onReject: (why) => p.log.warn(`Add-on file skipped: ${why}.`),
-    }),
+    }).map((entry) => ({
+      ...entry,
+      addon: true,
+      policy: getAddonFilePolicy(entry.relPath, entry.src),
+    })),
   ]
     // Containment before any policy: a path with a `..` segment, or an
     // absolute one, is never read or written, whatever its policy says.
     .filter(({ relPath }) => isContainedRelPath(relPath))
-    .filter(({ relPath }) => getFilePolicy(relPath) !== 'never');
+    .map((entry) => ({ ...entry, policy: entry.policy ?? getFilePolicy(entry.relPath) }))
+    .filter(({ policy }) => policy !== 'never')
+    // A symlink on the way would send the write wherever it points.
+    .filter(({ relPath }) => {
+      const link = symlinkedComponent(cwd, relPath);
+      if (link) {
+        p.log.warn(
+          `Skipped ${relPath}: ${link} is a symlink, and upgrade never writes through one.`,
+        );
+      }
+      return !link;
+    });
+  // Paths this run wrote, and the incoming content's hash per path: what the
+  // checksum record at the end is built from (see there).
+  const written = new Set();
+  const incomingHash = new Map();
 
   // Classify each file
   const autoUpdated = []; // { path, reason: 'updated' | 'added' }
   const unchanged = []; // files with no diff
   const needsReview = []; // { path, oldContent, newContent }
 
-  for (const { relPath, sourcePath: templateFilePath } of upgradeEntries) {
-    const policy = getFilePolicy(relPath);
+  for (const { relPath, sourcePath: templateFilePath, addon, policy } of upgradeEntries) {
     const projectFilePath = join(cwd, relPath);
     const fileExists = existsSync(projectFilePath);
 
@@ -563,6 +582,7 @@ async function main(cliArgs) {
     if (isBinaryFile(relPath)) {
       if (policy === 'safe' && !fileExists) {
         autoUpdated.push({ path: relPath, reason: 'added' });
+        written.add(relPath);
         if (!args.dryRun) {
           mkdirSync(dirname(projectFilePath), { recursive: true });
           copyFileSync(templateFilePath, projectFilePath);
@@ -648,11 +668,13 @@ async function main(cliArgs) {
     }
 
     const newHash = hashContent(newContent);
+    incomingHash.set(relPath, newHash);
 
     if (!fileExists) {
       // New file in template — add it
       if (policy === 'safe') {
         autoUpdated.push({ path: relPath, reason: 'added' });
+        written.add(relPath);
         if (!args.dryRun) {
           mkdirSync(dirname(projectFilePath), { recursive: true });
           writeFileSync(projectFilePath, newContent);
@@ -698,6 +720,7 @@ async function main(cliArgs) {
         }
       }
       autoUpdated.push({ path: relPath, reason: 'updated' });
+      written.add(relPath);
       if (!args.dryRun) {
         writeFileSync(projectFilePath, newContent);
         if (relPath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
@@ -709,7 +732,21 @@ async function main(cliArgs) {
       if (!userModified) {
         // Not modified by user — safe to auto-replace
         autoUpdated.push({ path: relPath, reason: 'updated' });
+        written.add(relPath);
         if (!args.dryRun) {
+          writeFileSync(projectFilePath, newContent);
+          if (relPath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
+        }
+      } else if (addon && !storedHash) {
+        // An add-on file with no recorded checksum: `vibecarbon add` did not
+        // record one before, so this is every add-on file of an existing
+        // project, and leaving it would leave the add-on as old as the day
+        // it was added (the observability add-on kept issuing grafana-tls).
+        // Replaced as -force does, the previous content kept beside it.
+        autoUpdated.push({ path: relPath, reason: 'updated (previous kept as .upgrade-backup)' });
+        written.add(relPath);
+        if (!args.dryRun) {
+          writeFileSync(`${projectFilePath}.upgrade-backup`, currentContent);
           writeFileSync(projectFilePath, newContent);
           if (relPath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
         }
@@ -842,6 +879,7 @@ async function main(cliArgs) {
             if (oldContent) writeFileSync(`${projectFilePath}.upgrade-backup`, oldContent);
             mkdirSync(dirname(projectFilePath), { recursive: true });
             writeFileSync(projectFilePath, newContent);
+            written.add(filePath);
             if (filePath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
             if (filePath === 'package.json') packageJsonUpdated = true;
             reviewedCount++;
@@ -856,6 +894,7 @@ async function main(cliArgs) {
           if (oldContent) writeFileSync(`${projectFilePath}.upgrade-backup`, oldContent);
           mkdirSync(dirname(projectFilePath), { recursive: true });
           writeFileSync(projectFilePath, newContent);
+          written.add(filePath);
           if (filePath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
           if (filePath === 'package.json') packageJsonUpdated = true;
           reviewedCount++;
@@ -977,18 +1016,29 @@ async function main(cliArgs) {
 
   // Update manifest with new checksums and template version (unless dry run)
   if (!args.dryRun) {
-    const newChecksums = {};
-
-    // Recompute checksums for all upgradeable files that now exist
+    // A stored checksum means "the content upgrade last put here". It may
+    // only move to what is on disk when upgrade wrote the file this run
+    // (its hash after any package-manager adaptation) or the file already
+    // matches the incoming content. A file left as it was (skipped, or its
+    // new version saved as .upgrade-new) keeps its previous checksum:
+    // recording the user's own content there would make the next upgrade
+    // read the file as unmodified and replace it with no backup. Paths this
+    // run does not manage (an add-on's integration doc `add` recorded) keep
+    // theirs.
+    const newChecksums = { ...storedChecksums };
     for (const { relPath } of upgradeEntries) {
       if (isBinaryFile(relPath)) continue;
       const projectFilePath = join(cwd, relPath);
-      if (existsSync(projectFilePath)) {
-        try {
-          newChecksums[relPath] = hashFile(projectFilePath);
-        } catch {
-          // Skip files that can't be read
-        }
+      let onDisk = null;
+      try {
+        onDisk = existsSync(projectFilePath) ? hashFile(projectFilePath) : null;
+      } catch {
+        onDisk = null;
+      }
+      if (onDisk && (written.has(relPath) || onDisk === incomingHash.get(relPath))) {
+        newChecksums[relPath] = onDisk;
+      } else if (!storedChecksums[relPath]) {
+        delete newChecksums[relPath];
       }
     }
 

@@ -2,7 +2,17 @@
  * vibecarbon upgrade — file-mutation tests against a real project.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { hashContent } from '../../../../src/lib/checksum.js';
@@ -284,7 +294,10 @@ describe('vibecarbon upgrade', () => {
     );
   });
 
-  it('an add-on file with no recorded checksum is offered for review, never overwritten by -y', () => {
+  it('an add-on file with no recorded checksum is replaced by -y, with a backup', () => {
+    // `vibecarbon add` recorded no checksums before, so every existing
+    // project's add-on files have none. One `upgrade -y` must still clear
+    // the deploy refusal; the previous content survives as .upgrade-backup.
     const SVC = installStaleObservability(project, { recordChecksums: false });
     const ingress = join(project, 'k8s', 'base', 'observability', 'ingressroute.yaml');
     const before = readFileSync(ingress, 'utf-8');
@@ -293,9 +306,83 @@ describe('vibecarbon upgrade', () => {
     if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
     assertSuccess(r);
 
-    expect(readFileSync(ingress, 'utf-8')).toBe(before);
+    expect(readFileSync(ingress, 'utf-8')).toBe(
+      readFileSync(join(SVC, 'k8s', 'ingressroute.yaml'), 'utf-8'),
+    );
+    expect(readFileSync(`${ingress}.upgrade-backup`, 'utf-8')).toBe(before);
+    expect(existsSync(`${ingress}.upgrade-new`)).toBe(false);
+    expect(staleObservabilityTlsProblem(project)).toBeNull();
+  });
+
+  it('two consecutive -y runs never lose a customised file', () => {
+    // A customised add-on file whose template moved: the first -y leaves it
+    // and writes .upgrade-new. The checksum it records must not be the
+    // customised content, or the second -y reads the file as unmodified and
+    // replaces it with no backup.
+    const SVC = installStaleObservability(project, { recordChecksums: true });
+    const ingress = join(project, 'k8s', 'base', 'observability', 'ingressroute.yaml');
+    const custom = `${readFileSync(ingress, 'utf-8')}# site-specific\n`;
+    writeFileSync(ingress, custom);
+
+    for (const run of [1, 2]) {
+      const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+      if (r.exitCode === null) throw new Error(`upgrade ${run} timed out:\n${r.stderr}`);
+      assertSuccess(r);
+      const now = readFileSync(ingress, 'utf-8');
+      const kept = now === custom;
+      const backedUp =
+        existsSync(`${ingress}.upgrade-backup`) &&
+        readFileSync(`${ingress}.upgrade-backup`, 'utf-8') === custom;
+      expect(kept || backedUp, `run ${run} lost the customised file`).toBe(true);
+    }
+    expect(readFileSync(ingress, 'utf-8')).toBe(custom);
     expect(readFileSync(`${ingress}.upgrade-new`, 'utf-8')).toBe(
       readFileSync(join(SVC, 'k8s', 'ingressroute.yaml'), 'utf-8'),
     );
+  });
+
+  it('two consecutive -y runs never lose a customised template file either', () => {
+    // The same trap on a carbon/ file: a customised file with a stored hash
+    // that no longer matches the template is left with .upgrade-new; the
+    // recompute must keep the old stored hash, not record the customisation.
+    const rel = 'docker-compose.prod.yml';
+    const target = join(project, rel);
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const olderTemplate = `${readFileSync(target, 'utf-8')}# older template\n`;
+    config.fileChecksums = { ...(config.fileChecksums ?? {}), [rel]: hashContent(olderTemplate) };
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    const custom = `${olderTemplate}# site-specific\n`;
+    writeFileSync(target, custom);
+
+    for (const run of [1, 2]) {
+      const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+      if (r.exitCode === null) throw new Error(`upgrade ${run} timed out:\n${r.stderr}`);
+      assertSuccess(r);
+      expect(readFileSync(target, 'utf-8'), `run ${run}`).toBe(custom);
+    }
+  });
+
+  it('never writes through a symlinked path inside the project', () => {
+    installStaleObservability(project, { recordChecksums: true });
+    // The add-on's k8s dir is replaced by a symlink to a directory outside
+    // the project: upgrade must not write there.
+    const outside = mkdtempSync(join(tmpdir(), 'vc-upgrade-outside-'));
+    const obs = join(project, 'k8s', 'base', 'observability');
+    for (const f of ['kustomization.yaml', 'ingressroute.yaml']) {
+      writeFileSync(join(outside, f), 'outside\n');
+    }
+    rmSync(obs, { recursive: true, force: true });
+    symlinkSync(outside, obs);
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    expect(readdirSync(outside).sort()).toEqual(['ingressroute.yaml', 'kustomization.yaml']);
+    for (const f of ['kustomization.yaml', 'ingressroute.yaml']) {
+      expect(readFileSync(join(outside, f), 'utf-8')).toBe('outside\n');
+    }
+    expect(r.stdout + r.stderr).toMatch(/symlink/i);
   });
 });

@@ -17,7 +17,7 @@ import {
   installedAddonNames,
   isContainedRelPath,
 } from '../../../src/lib/addon-upgrade-files.js';
-import { getFilePolicy } from '../../../src/lib/upgrade-policy.js';
+import { getAddonFilePolicy, getFilePolicy } from '../../../src/lib/upgrade-policy.js';
 
 const SERVICES = join(process.cwd(), 'services');
 const ROOT = '/srv/project';
@@ -115,8 +115,8 @@ describe('every add-on file upgrade can reach has a live policy', () => {
       servicesDir: SERVICES,
       projectRoot: ROOT,
     })
-      .map((e) => e.relPath)
-      .filter((p) => getFilePolicy(p) === 'never');
+      .filter((e) => getAddonFilePolicy(e.relPath, e.src) === 'never')
+      .map((e) => e.relPath);
     expect(never.sort()).toEqual([
       'metabase-integration.md',
       'n8n-integration.md',
@@ -221,11 +221,38 @@ describe('upgrade.js refuses an uncontained path before its policy check', () =>
     const loop = src.indexOf('of upgradeEntries) {', start);
     const build = src.slice(start, loop);
     const contain = build.indexOf('.filter(({ relPath }) => isContainedRelPath(relPath))');
-    const policy = build.indexOf(".filter(({ relPath }) => getFilePolicy(relPath) !== 'never')");
+    const policy = build.indexOf(".filter(({ policy }) => policy !== 'never')");
     expect(start).toBeGreaterThan(-1);
     expect(contain).toBeGreaterThan(-1);
     expect(policy).toBeGreaterThan(contain);
     // Applied to the whole list (template and add-on entries), not one half.
     expect(build.lastIndexOf(']', contain)).toBeGreaterThan(build.indexOf('addonUpgradeEntries('));
+  });
+});
+
+describe('getAddonFilePolicy', () => {
+  // An add-on's files follow one rule wherever they land: its own
+  // infrastructure is safe (or merge where the template says so), its
+  // integration doc is the operator's, and the project's own code and
+  // secrets stay never even if a manifest pointed there.
+  it('an add-on volume or init script is safe even where a template path would be never', () => {
+    expect(getFilePolicy('volumes/newaddon/conf.yml')).toBe('never');
+    expect(getAddonFilePolicy('volumes/newaddon/conf.yml', 'volumes/newaddon/conf.yml')).toBe(
+      'safe',
+    );
+    expect(getAddonFilePolicy('volumes/db/newaddon-init.sh', 'db/init.sh')).toBe('safe');
+    expect(getAddonFilePolicy('volumes/metabase/scripts/setup.sh', 'scripts/setup.sh')).toBe(
+      'safe',
+    );
+  });
+
+  it('the integration doc is never; the project code and secrets stay never', () => {
+    expect(getAddonFilePolicy('demo-integration.md', 'docs/integration.md')).toBe('never');
+    expect(getAddonFilePolicy('src/server/x.ts', 'x.ts')).toBe('never');
+    expect(getAddonFilePolicy('.env.local', 'env')).toBe('never');
+  });
+
+  it('a merge path stays merge', () => {
+    expect(getAddonFilePolicy('docker-compose.yml', 'compose/x.yml')).toBe('merge');
   });
 });

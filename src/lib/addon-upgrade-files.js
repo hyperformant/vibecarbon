@@ -19,8 +19,9 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, posix, resolve, sep, win32 } from 'node:path';
 
 /**
- * @typedef {{ relPath: string, sourcePath: string }} AddonUpgradeEntry
- *   `relPath` is the path in the project; `sourcePath` the bundled file.
+ * @typedef {{ relPath: string, sourcePath: string, src: string }} AddonUpgradeEntry
+ *   `relPath` is the path in the project; `sourcePath` the bundled file;
+ *   `src` its path inside services/<name>/ (what getAddonFilePolicy reads).
  */
 
 /** The add-on directories of the bundled services/ dir, by name. */
@@ -113,12 +114,12 @@ function addonEntries(name, servicesDir, projectRoot, onReject) {
   const addonDir = join(servicesDir, name);
   const files = readManifest(servicesDir, name)?.files ?? {};
   const out = [];
-  const accept = (relPath, sourcePath) => {
+  const accept = (relPath, sourcePath, fileSrc) => {
     if (!isContainedRelPath(relPath) || !resolvesInside(projectRoot, relPath)) {
       onReject(`${name}: destination ${relPath} is outside the project`);
       return;
     }
-    out.push({ relPath, sourcePath });
+    out.push({ relPath, sourcePath, src: fileSrc });
   };
   for (const [src, dest] of Object.entries(files)) {
     if (typeof src !== 'string' || typeof dest !== 'string' || !resolvesInside(addonDir, src)) {
@@ -128,10 +129,10 @@ function addonEntries(name, servicesDir, projectRoot, onReject) {
     const sourcePath = resolve(addonDir, src);
     if (src.endsWith('/')) {
       for (const rel of filesUnder(sourcePath)) {
-        accept(posix.join(dest, rel), join(sourcePath, rel));
+        accept(posix.join(dest, rel), join(sourcePath, rel), posix.join(src, rel));
       }
     } else if (existsSync(sourcePath)) {
-      accept(dest, sourcePath);
+      accept(dest, sourcePath, src);
     }
   }
   return out;
