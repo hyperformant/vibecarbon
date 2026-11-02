@@ -270,18 +270,78 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
     expect(users).toEqual([]);
   });
 
-  it('every remote `rollout status statefulset/<db>` in src runs inside watchDbAttach', () => {
+  // Both spellings of a db rollout wait: one remote command string, or an
+  // argv array ('rollout', 'status', `statefulset/${DB_STATEFULSET}`), with
+  // any quote style and whitespace between the tokens.
+  const Q = `['"\`]`;
+  const DB = String.raw`statefulset/\$\{(?:dbSts|DB_STATEFULSET)\}`;
+  const DB_ROLLOUT_WAIT = new RegExp(
+    String.raw`rollout\s+status\s+${DB}|${Q}rollout${Q}\s*,\s*${Q}status${Q}\s*,\s*${Q}${DB}${Q}`,
+    'g',
+  );
+
+  // Explicit exceptions, by file and enclosing function. Each must say why.
+  const ALLOWED = new Map<string, string>([
+    // The argv builder itself; the census above keeps it spent only inside
+    // k8sDbRolloutWait, which runs it under watchDbAttach.
+    ['walg-role.js#k8sDbRolloutStatusArgv', 'builder for k8sDbRolloutWait'],
+    // The failover/restore re-seed keeps its own signature-gated repair
+    // (docs/mitigations.yml do-csi-stale-volumeattachment): on the
+    // signature it clears the stale attachments and waits once more,
+    // which the diagnosis-only watch must not pre-empt.
+    ['replication.js#reseedStandbyFromPrimary', 'keeps its own stale-attachment repair'],
+  ]);
+
+  /** File + enclosing named function of `index` in `src`. */
+  const siteOf = (file: string, src: string, index: number) => {
+    const fns = [
+      ...src.slice(0, index).matchAll(/(?:^|\n)(?:export\s+)?(?:async\s+)?function\s+(\w+)/g),
+    ];
+    return `${file.split('/').pop()}#${fns.at(-1)?.[1] ?? '(top level)'}`;
+  };
+
+  /** Every db rollout wait in `src` that is neither inside watchDbAttach nor allowlisted. */
+  const unwatched = (file: string, src: string) => {
+    const out: string[] = [];
+    for (const m of src.matchAll(DB_ROLLOUT_WAIT)) {
+      const index = m.index ?? 0;
+      const site = siteOf(file, src, index);
+      if (ALLOWED.has(site)) continue;
+      const before = src.slice(Math.max(0, index - 600), index);
+      if (!/watchDbAttach\(/.test(before)) out.push(site);
+    }
+    return out;
+  };
+
+  it('the matcher sees both spellings (it cannot go blind to an argv-form wait)', () => {
+    // Source text under test: the `$` + `{` split keeps the placeholder literal.
+    const stringForm =
+      'function a() { run(`kubectl rollout status statefulset/$' +
+      '{DB_STATEFULSET} -n vibecarbon`); }';
+    const argvForm = `async function b() {
+      await sshKubectl(ip, key, [
+        "rollout",
+        'status',
+        \`statefulset/\${dbSts}\`,
+      ]);
+    }`;
+    expect(unwatched('src/x.js', stringForm)).toEqual(['x.js#a']);
+    expect(unwatched('src/y.js', argvForm)).toEqual(['y.js#b']);
+    const watched = `function c() { return watchDbAttach((signal) => k(['rollout', 'status', \`statefulset/\${DB_STATEFULSET}\`])); }`;
+    expect(unwatched('src/z.js', watched)).toEqual([]);
+  });
+
+  it('every db rollout wait in src runs inside watchDbAttach (or is an explained exception)', () => {
     let seen = 0;
+    const offenders: string[] = [];
     for (const f of walk(join(ROOT, 'src'))) {
       const src = readFileSync(f, 'utf-8');
-      const re = /rollout status statefulset\/\$\{(dbSts|DB_STATEFULSET)\}/g;
-      for (const m of src.matchAll(re)) {
-        const before = src.slice(Math.max(0, (m.index ?? 0) - 600), m.index);
-        expect(before, `${f}: a db rollout wait outside watchDbAttach`).toMatch(/watchDbAttach\(/);
-        seen += 1;
-      }
+      seen += [...src.matchAll(DB_ROLLOUT_WAIT)].length;
+      offenders.push(...unwatched(f, src));
     }
-    // Positive control: the deploy-side reseed's standby boot is one.
-    expect(seen).toBeGreaterThanOrEqual(1);
+    expect(offenders, 'db rollout wait(s) outside watchDbAttach').toEqual([]);
+    // Positive control: awaitDbRollout, the reseed standby boot, the builder,
+    // the re-seed repair and restore are all spelled one of the two ways.
+    expect(seen).toBeGreaterThanOrEqual(5);
   });
 });
