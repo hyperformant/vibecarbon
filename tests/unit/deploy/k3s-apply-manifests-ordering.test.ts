@@ -217,6 +217,18 @@ const APP_PODS_JSON = JSON.stringify({
   items: [{ metadata: { name: APP_POD, creationTimestamp: '2026-10-16T05:00:00Z' } }],
 });
 
+// `kubectl get pod db-0 -o json`: the db container mounts the wal-g role dir.
+const DB_POD_WITH_ROLE_MOUNT = JSON.stringify({
+  spec: {
+    containers: [
+      {
+        name: 'db',
+        volumeMounts: [{ name: 'data', mountPath: '/var/lib/vibecarbon/role' }],
+      },
+    ],
+  },
+});
+
 function installSpawnMock() {
   vi.mocked(spawn).mockImplementation(((
     cmd: string,
@@ -385,6 +397,27 @@ function installSpawnMock() {
       return fakeChild({ gate: new Promise<void>(() => {}), argv: full }) as unknown as ReturnType<
         typeof spawn
       >;
+    }
+    // The deploy's live wal-g role write (writeDeployWalgRole): the db pod
+    // mounts the role dir, and the write reads back the role it wrote.
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('get') &&
+      argv.includes('pod') &&
+      argv.includes('db-0')
+    ) {
+      return fakeChild({ stdout: DB_POD_WITH_ROLE_MOUNT, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    if (cmd === 'kubectl' && argv.includes('exec') && argv.includes('db-0')) {
+      const role = /printf '%s\\n' (primary|standby) > walg-role\.tmp/.exec(argv.join(' '))?.[1];
+      if (role) {
+        return fakeChild({
+          stdout: `WALG_ROLE_FILE=${role}\n`,
+          argv: full,
+        }) as unknown as ReturnType<typeof spawn>;
+      }
     }
     // RLS audit after the app migrated (auditRls, -tAc). Empty stdout = clean
     // schema (no public tables without RLS) so the audit passes — a non-empty
@@ -2093,5 +2126,44 @@ describe('a changed app Secret rolls deployment/app', () => {
       /resourceVersion of Secret\/vibecarbon-app-secrets/,
     );
     expect(appPatches()).toHaveLength(0);
+  });
+});
+
+describe('applyK3sManifests records the wal-g role intent before the db exists', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    deliverGate = null;
+    deliverError = null;
+    installSpawnMock();
+  });
+
+  /** applyK3sManifests under `role`; every kubectl call with its piped stdin, in order. */
+  async function runApply({ role }: { role: 'primary' | 'standby' }) {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests({ ...baseArgs(makeProjectDir()), role });
+    return cmdCalls.map((argv, seq) => ({
+      argv,
+      input: stdinCalls.find((c) => c.seq === seq)?.data,
+    }));
+  }
+
+  it('applies the db role ConfigMap, with the deploy role, BEFORE apply -k base', async () => {
+    const calls = await runApply({ role: 'standby' });
+    const cm = calls.findIndex((c) => c.input?.includes('name: vibecarbon-db-role'));
+    const base = calls.findIndex(
+      (c) => c.argv.includes('-k') && c.argv.some((a: string) => /k8s-base|\/base$/.test(a)),
+    );
+    expect(cm).toBeGreaterThanOrEqual(0);
+    expect(cm).toBeLessThan(base);
+    expect(calls[cm].input).toContain('VC_WALG_ROLE_INTENT: standby');
+  });
+
+  it('a single-cluster deploy (no role) records primary', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const cm = stdinCalls.find((c) => c.data.includes('name: vibecarbon-db-role'));
+    expect(cm?.data).toContain('VC_WALG_ROLE_INTENT: primary');
   });
 });

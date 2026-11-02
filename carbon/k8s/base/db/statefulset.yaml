@@ -368,6 +368,13 @@ spec:
         - name: db
           image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
           imagePullPolicy: IfNotPresent
+          # db-guard.sh wraps the image's entrypoint, exactly like compose
+          # (carbon/docker-compose.yml): it refuses to boot over an
+          # interrupted restore and applies the wal-g role intent below to the
+          # role file, then execs db-entrypoint.sh with these args. Mounted
+          # from the vibecarbon-wal-archive ConfigMap and run through sh, so
+          # it needs no exec bit.
+          command: ["sh", "/usr/local/bin/db-guard.sh"]
           # The same flags as compose's db `command:` (carbon/docker-compose.yml),
           # where each one's reasoning lives. The image's entrypoint keeps
           # archiving off on its init-time temporary server
@@ -451,6 +458,18 @@ spec:
               value: "true"
             - name: WALG_ROLE
               value: "{{WALG_ROLE}}"
+            # The durable wal-g role intent, held in the CLI-owned ConfigMap
+            # vibecarbon-db-role (never in this base, so Flux never sees it;
+            # src/lib/deploy/walg-role.js). db-guard.sh writes it to the role
+            # file on every container start. Optional: a cluster before its
+            # first deploy, or with the ConfigMap gone, starts with the file
+            # as it was.
+            - name: VC_WALG_ROLE_INTENT
+              valueFrom:
+                configMapKeyRef:
+                  name: vibecarbon-db-role
+                  key: VC_WALG_ROLE_INTENT
+                  optional: true
             - name: WALG_COMPRESSION_METHOD
               value: lz4
             # The nightly base backup runs inside this container's cgroup, so
@@ -503,6 +522,17 @@ spec:
               mountPath: /etc/postgresql/walg-env.sh
               subPath: walg-env.sh
               readOnly: true
+            - name: wal-archive-script
+              mountPath: /usr/local/bin/db-guard.sh
+              subPath: db-guard.sh
+              readOnly: true
+            # The wal-g role file (walg-role: primary or standby), a sibling
+            # of postgres-data on the same volume and never inside PGDATA, so
+            # pg_basebackup never copies it. Writable: db-guard.sh and the
+            # CLI's live role write (setK8sWalgRole) write it in place.
+            - name: data
+              mountPath: /var/lib/vibecarbon/role
+              subPath: vibecarbon-role
             - name: walg-s3-creds
               mountPath: /etc/walg
               readOnly: true

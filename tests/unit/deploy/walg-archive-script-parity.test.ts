@@ -99,6 +99,13 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
     expect(k8sWalgEnvBody).toBe(walgEnvBody);
   });
 
+  it('the ConfigMap carries db-guard.sh byte-identical, and it parses under sh', () => {
+    expect(configMap.data['db-guard.sh']).toBe(
+      readFileSync(`${repoRoot}carbon/volumes/db/db-guard.sh`, 'utf-8'),
+    );
+    expect(spawnSync('sh', ['-n', `${repoRoot}carbon/volumes/db/db-guard.sh`]).status).toBe(0);
+  });
+
   it('both tiers source walg-env.sh before anything reads the prefix', () => {
     for (const body of [composeBody, k8sBody]) {
       // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder

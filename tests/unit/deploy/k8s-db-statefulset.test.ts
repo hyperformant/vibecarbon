@@ -121,6 +121,35 @@ describe('k8s/base renders the db StatefulSet', () => {
     for (const init of pod.initContainers) expect(init.image).toBe('{{DB_IMAGE}}:{{DB_IMAGE_TAG}}');
   });
 
+  it('runs db-guard.sh from the ConfigMap, exactly like compose', () => {
+    expect(container.command).toEqual(['sh', '/usr/local/bin/db-guard.sh']);
+    expect(container.args[0]).toBe('postgres');
+    expect(container.volumeMounts).toContainEqual({
+      name: 'wal-archive-script',
+      mountPath: '/usr/local/bin/db-guard.sh',
+      subPath: 'db-guard.sh',
+      readOnly: true,
+    });
+  });
+
+  it('mounts the wal-g role dir as a sibling subPath of PGDATA, writable', () => {
+    const m = container.volumeMounts.find((v: Doc) => v.mountPath === '/var/lib/vibecarbon/role');
+    expect(m).toMatchObject({ name: 'data', subPath: 'vibecarbon-role' });
+    expect(m.readOnly).toBeFalsy();
+  });
+
+  it('carries the role intent from the CLI-owned ConfigMap, optional', () => {
+    const intent = container.env.find((e: Doc) => e.name === 'VC_WALG_ROLE_INTENT');
+    expect(intent.valueFrom.configMapKeyRef).toEqual({
+      name: 'vibecarbon-db-role',
+      key: 'VC_WALG_ROLE_INTENT',
+      optional: true,
+    });
+    expect(
+      docs.find((d: Doc) => d.kind === 'ConfigMap' && d.metadata.name === 'vibecarbon-db-role'),
+    ).toBeUndefined();
+  });
+
   it('keeps PGDATA one level below the volume root', () => {
     const pgdata = container.volumeMounts.find(
       (m: Doc) => m.mountPath === '/var/lib/postgresql/data',
@@ -183,6 +212,9 @@ describe('k8s/base renders the db StatefulSet', () => {
         '"key":"RESTORE_LINEAGE"',
         '"key":"REPL_PASSWORD"',
         '"key":"S3_CREDENTIALS_INI"',
+        // Not a Secret key: the wal-g role intent, from the CLI-owned
+        // ConfigMap vibecarbon-db-role (pinned in its own case above).
+        '"key":"VC_WALG_ROLE_INTENT"',
       ]).toContain(k);
     }
     expect(JSON.stringify(pod)).not.toContain('JWT_SECRET');

@@ -339,6 +339,15 @@ const APP_PODS = JSON.stringify({
   items: [{ metadata: { name: 'app-abc-1', creationTimestamp: '2026-10-20T00:00:00Z' } }],
 });
 
+// `kubectl get pod db-0 -o json`: the db container mounts the wal-g role dir.
+const DB_POD_WITH_ROLE_MOUNT = JSON.stringify({
+  spec: {
+    containers: [
+      { name: 'db', volumeMounts: [{ name: 'data', mountPath: '/var/lib/vibecarbon/role' }] },
+    ],
+  },
+});
+
 function installSpawn() {
   vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
     calls.push([cmd, ...args]);
@@ -377,6 +386,15 @@ function installSpawn() {
     if (cmd === 'kubectl' && has('exec') && /pg_is_in_recovery/.test(sql)) return child(0, 'f\n');
     if (cmd === 'kubectl' && has('exec') && /default_transaction_read_only/.test(sql)) {
       return child(fence === 'unreadable' ? 1 : 0, `${fence}\n`);
+    }
+    // The deploy's live wal-g role write (writeDeployWalgRole): the db pod
+    // mounts the role dir, and the write reads back the role it wrote.
+    if (cmd === 'kubectl' && has('get') && has('pod') && has('db-0')) {
+      return child(0, DB_POD_WITH_ROLE_MOUNT);
+    }
+    const walgRoleWrite = /printf '%s\\n' (primary|standby) > walg-role\.tmp/.exec(args.join(' '));
+    if (cmd === 'kubectl' && has('exec') && walgRoleWrite) {
+      return child(0, `WALG_ROLE_FILE=${walgRoleWrite[1]}\n`);
     }
     if (cmd === 'kubectl' && has('get') && has('replicasets')) return child(0, APP_RS);
     if (cmd === 'kubectl' && has('get') && has('pods')) return child(0, APP_PODS);
