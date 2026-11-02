@@ -702,6 +702,12 @@ const TLS_REUSE_HANDLELESS: Record<
     () => tlsReuse.checkServedIsSecret('04A1B2', null, { readSecretSerial: () => '04A1B2' }),
     () => tlsReuse.checkServedIsSecret('04A1B2', '/kc', { readSecretSerial: () => null }),
   ],
+  checkOneCertificatePerName: [
+    () => tlsReuse.checkOneCertificatePerName({ domain: D, certificates: null, secrets: [] }),
+    () => tlsReuse.checkOneCertificatePerName({ domain: D, certificates: [], secrets: null }),
+    // Read, but empty: the base Secret's absence is no proof of one certificate.
+    () => tlsReuse.checkOneCertificatePerName({ domain: D, certificates: [], secrets: [] }),
+  ],
 };
 
 describe('TLS REUSE: every check fails without its baseline', () => {

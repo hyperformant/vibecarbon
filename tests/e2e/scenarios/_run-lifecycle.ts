@@ -86,9 +86,11 @@ import {
 import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
 import {
   checkNoNewCertificateRequest,
+  checkOneCertificatePerName,
   checkServedIsSecret,
   checkTlsReused,
   listCertificateRequestUids,
+  readClusterTlsInventory,
 } from '../checks/tls-reuse.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
@@ -2081,16 +2083,25 @@ export async function runLifecycle(
           // store would otherwise surface only later, as tls_reused failing
           // after a correct restore.
           if (isK8sMode) {
-            const servedIsSecret = checkServedIsSecret(
-              tlsServedSerial,
+            const primaryKubeconfig =
               config.mode === 'k8s-ha'
                 ? haRoleKubeconfig(config.projectDir, config.envPrefix, 'primary')
-                : join(config.projectDir, '.vibecarbon', `kubeconfig-${config.envPrefix}`),
-            );
-            console.log(
-              `${tag} [${stepName}] tls_served_is_secret: ${servedIsSecret.status}${servedIsSecret.errorMessage ? ` (${servedIsSecret.errorMessage})` : ''}`,
-            );
-            allResults.push(servedIsSecret);
+                : join(config.projectDir, '.vibecarbon', `kubeconfig-${config.envPrefix}`);
+            // The served serial is one sample; the inventory is the
+            // deterministic half: nothing but vibecarbon-tls may cover the
+            // domain, whichever certificate Traefik happens to serve now.
+            for (const result of [
+              checkServedIsSecret(tlsServedSerial, primaryKubeconfig),
+              checkOneCertificatePerName({
+                domain: config.domain,
+                ...readClusterTlsInventory(primaryKubeconfig),
+              }),
+            ]) {
+              console.log(
+                `${tag} [${stepName}] ${result.checkName}: ${result.status}${result.errorMessage ? ` (${result.errorMessage})` : ''}`,
+              );
+              allResults.push(result);
+            }
           }
         } else if (stepName === 'verify-restore' || isPostFailoverVerify(stepName)) {
           allResults.push(await recordTlsReused(stepName));

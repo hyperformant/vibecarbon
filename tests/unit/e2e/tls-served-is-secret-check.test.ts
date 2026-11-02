@@ -11,7 +11,14 @@
  * kubeconfig, or an unread Secret fails.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { checkServedIsSecret, parseSecretCertificateSerial } from '../../e2e/checks/tls-reuse.js';
+import {
+  checkOneCertificatePerName,
+  checkServedIsSecret,
+  coversDomain,
+  parseCertificateInventory,
+  parseSecretCertificateSerial,
+  parseTlsSecretInventory,
+} from '../../e2e/checks/tls-reuse.js';
 import { k8sSecretJson } from '../deploy/_tls-fixtures.ts';
 
 const KC = '/proj/.vibecarbon/kubeconfig-e1';
@@ -64,5 +71,106 @@ describe('checkServedIsSecret', () => {
     const r = checkServedIsSecret('0FFFFF', KC, { readSecretSerial: () => null });
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toContain('vibecarbon-tls');
+  });
+});
+
+/**
+ * The deterministic half. The served serial is one sample: with two
+ * certificates for the name, Traefik can happen to serve the right one at
+ * verify-deploy and the other after a restart. So the primary's whole
+ * inventory is read too: no cert-manager Certificate and no
+ * `kubernetes.io/tls` Secret other than vibecarbon/vibecarbon-tls may cover
+ * the domain, in any namespace.
+ */
+describe('coversDomain', () => {
+  it('an exact name or a one-label wildcard covers the domain', () => {
+    expect(coversDomain(['app.example.com'], 'app.example.com')).toBe(true);
+    expect(coversDomain(['*.example.com'], 'app.example.com')).toBe(true);
+    expect(coversDomain(['*.app.example.com'], 'app.example.com')).toBe(false);
+    expect(coversDomain(['*.com'], 'app.example.com')).toBe(false);
+    expect(coversDomain(['other.example.com'], 'app.example.com')).toBe(false);
+    expect(coversDomain(['APP.example.com'], 'app.EXAMPLE.com')).toBe(true);
+  });
+});
+
+describe('parseCertificateInventory / parseTlsSecretInventory', () => {
+  it('reads namespace, name and dnsNames from a Certificate list', () => {
+    const json = JSON.stringify({
+      items: [
+        {
+          metadata: { namespace: 'vibecarbon', name: 'vibecarbon-tls' },
+          spec: { dnsNames: ['app.example.com', '*.app.example.com'] },
+        },
+      ],
+    });
+    expect(parseCertificateInventory(json)).toEqual([
+      {
+        namespace: 'vibecarbon',
+        name: 'vibecarbon-tls',
+        dnsNames: ['app.example.com', '*.app.example.com'],
+      },
+    ]);
+    expect(parseCertificateInventory('not json')).toBeNull();
+    expect(parseCertificateInventory('{}')).toBeNull();
+  });
+
+  it('reads the SAN names of each tls.crt, one Secret per line', () => {
+    const lines = [`vibecarbon\tvibecarbon-tls\t${CRT_B64}`, 'other\tempty\t', ''].join('\n');
+    expect(parseTlsSecretInventory(lines)).toEqual([
+      {
+        namespace: 'vibecarbon',
+        name: 'vibecarbon-tls',
+        dnsNames: ['app.example.com', '*.app.example.com'],
+      },
+      { namespace: 'other', name: 'empty', dnsNames: [] },
+    ]);
+  });
+});
+
+describe('checkOneCertificatePerName', () => {
+  const D = 'app.example.com';
+  const base = { namespace: 'vibecarbon', name: 'vibecarbon-tls', dnsNames: [D, `*.${D}`] };
+
+  it('passes when only vibecarbon/vibecarbon-tls covers the domain', () => {
+    const r = checkOneCertificatePerName({
+      domain: D,
+      certificates: [base, { namespace: 'x', name: 'other', dnsNames: ['other.org'] }],
+      secrets: [base],
+    });
+    expect(r.checkName).toBe('tls_one_certificate_per_name');
+    expect(r.status).toBe('pass');
+  });
+
+  it('fails naming a second Certificate that covers the domain, in any namespace', () => {
+    const r = checkOneCertificatePerName({
+      domain: D,
+      certificates: [
+        base,
+        { namespace: 'vibecarbon-observability', name: 'grafana-tls', dnsNames: [D] },
+      ],
+      secrets: [base],
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toContain('Certificate vibecarbon-observability/grafana-tls');
+  });
+
+  it('fails naming a second TLS Secret (a wildcard covers it too)', () => {
+    const r = checkOneCertificatePerName({
+      domain: D,
+      certificates: [base],
+      secrets: [base, { namespace: 'vibecarbon', name: 'leftover', dnsNames: ['*.example.com'] }],
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toContain('Secret vibecarbon/leftover');
+  });
+
+  it('fails without a read inventory or without the base Secret (never a hollow pass)', () => {
+    for (const args of [
+      { certificates: null, secrets: [base] },
+      { certificates: [base], secrets: null },
+      { certificates: [base], secrets: [] },
+    ]) {
+      expect(checkOneCertificatePerName({ domain: D, ...args }).status).toBe('fail');
+    }
   });
 });
