@@ -17,7 +17,8 @@
  *     secondaryRegion, serverType, services, domain, dnsProvider, apiToken,
  *     dnsZoneId, dnsToken, backupConfig,
  *     backupS3Config, imageRef, bundlePath, s3Config, dockerHubCreds,
- *     ghcrPullCreds, allowDegraded, isLocalOnlyImage, sshKeyPath, onProgress,
+ *     ghcrPullCreds, allowDegraded, isComposeLocal, isDirectDeploy,
+ *     composeLocalBuildPromise, sshKeyPath, onProgress,
  *     reconverge (planComposeHaReconverge: { promoted, retired } on a pair a
  *       failover swapped, else null)
  *   Filled in by the effects:
@@ -518,39 +519,84 @@ async function haWaitDockerReady(ctx) {
 }
 
 /**
- * Build the app image natively on BOTH servers in parallel (over
- * DOCKER_HOST=ssh://) when the image tag is local-only — a cross-region
- * `docker save` pipe hung past the deploy timeout. Gated by
- * `when: ctx.isLocalOnlyImage`.
+ * Put the app image on BOTH servers, WITHOUT awaiting: it
+ * overlaps setupServerFiles, mergeWalgRole, pullImages, DNS and restore-tls,
+ * and haStartComposeStack is the barrier (ctx.imageTransferPromise).
+ *
+ * Local mode: the ONE local build the orchestrator started beside provisioning
+ * (amd64, compose/app-image.js) goes to each server by layer delta, the same
+ * path single compose uses. Each server pulls the runtime base itself, so only
+ * the app's own layers leave this machine, and both nodes get the identical
+ * image under the tag their compose resolves (ctx.imageRef, the APP_IMAGE
+ * haServiceOpts stamps). compose-ha used to build natively on each server as
+ * well, after the local build had already made the image (DO e2e 2026-11-02:
+ * a 117 s two-server build fan, 51 s of it blocking compose up). That build
+ * dated from before the delta, when a cross-region whole-image `docker save`
+ * pipe hung past the deploy timeout, and from ARM servers building for their
+ * own architecture; vibecarbon is amd64 only since 2026-07-30 (platform.js).
+ *
+ * Direct mode (no local docker, or -direct): there is no local image, so each
+ * server builds it over DOCKER_HOST=ssh://. Push mode never reaches this step
+ * (its when-gate): the servers pull from GHCR.
  */
-async function haRemoteBuild(ctx) {
+async function haTransferImage(ctx) {
   const projectName = ctx.projectConfig.projectName;
-  const { primary, standby, sshKeyPath, imageRef, domain } = ctx;
-  const { buildRemote } = await import('../remote-build.js');
-  const { collectComposeBuildArgs } = await import('../compose/build-args.js');
-  const haBuildArgs = collectComposeBuildArgs(process.cwd(), { projectName, domain });
-  ctx.onProgress(
-    'Building image natively on primary + standby (parallel; overlapping file upload + image pull)...',
-  );
-  // F1: start the two-node build fan WITHOUT awaiting so it overlaps the
-  // subsequent setupServerFiles → mergeWalgRole → pullImages steps (the build
-  // uses the local build context over DOCKER_HOST=ssh and shares no dependency
-  // with them). The barrier lives in haStartComposeStack, which awaits
-  // ctx.remoteBuildPromise before `docker compose up` — compose references the
-  // freshly built app image, so BOTH builds MUST complete by reconcile time
-  // (LOAD-BEARING barrier; do not remove).
-  ctx.remoteBuildPromise = perfAsync('deploy.ha.compose.remoteBuild.fan', async () => {
-    const [primaryOk, standbyOk] = await Promise.all([
-      buildRemote(primary.ip, sshKeyPath, imageRef, process.cwd(), haBuildArgs),
-      buildRemote(standby.ip, sshKeyPath, imageRef, process.cwd(), haBuildArgs),
-    ]);
-    if (!primaryOk) throw new Error('Remote build on primary failed');
-    if (!standbyOk) throw new Error('Remote build on standby failed');
-  });
-  // No-op rejection handler so an in-flight build failure doesn't surface as an
+  const { primary, standby, sshKeyPath, imageRef, domain, isComposeLocal, isDirectDeploy } = ctx;
+  const nodes = [
+    ['primary', primary],
+    ['standby', standby],
+  ];
+  // A server-side failure names the node it happened on; each one is loud at
+  // the barrier.
+  const onNode = (role, ip, promise) =>
+    promise.catch((err) => {
+      throw new Error(`${role} ${ip}: ${err?.message ?? err}`, { cause: err });
+    });
+  if (isComposeLocal) {
+    const { deliverComposeAppImage } = await import('../compose/app-image.js');
+    ctx.onProgress('Sending the app image to primary + standby (layer delta)...');
+    ctx.imageTransferMarker = 'deploy.ha.compose.imageTransfer';
+    ctx.imageTransferPromise = perfAsync(`${ctx.imageTransferMarker}.fan`, () =>
+      Promise.all(
+        // The one local build is awaited inside each arm; its failure is
+        // this machine's and stays unprefixed. A node's base pull or delta
+        // failure names the node (label).
+        nodes.map(([role, node]) =>
+          deliverComposeAppImage({
+            ip: node.ip,
+            sshKeyPath,
+            tag: imageRef,
+            built: ctx.composeLocalBuildPromise,
+            label: `${role} ${node.ip}`,
+          }),
+        ),
+      ),
+    );
+  } else if (isDirectDeploy) {
+    const { buildRemote } = await import('../remote-build.js');
+    const { collectComposeBuildArgs } = await import('../compose/build-args.js');
+    const haBuildArgs = collectComposeBuildArgs(process.cwd(), { projectName, domain });
+    ctx.onProgress('Building the app image on primary + standby (no local docker)...');
+    // Direct mode keeps the remoteBuild markers, for the fan and the await.
+    ctx.imageTransferMarker = 'deploy.ha.compose.remoteBuild';
+    ctx.imageTransferPromise = perfAsync(`${ctx.imageTransferMarker}.fan`, () =>
+      Promise.all(
+        nodes.map(([role, node]) =>
+          onNode(
+            role,
+            node.ip,
+            buildRemote(node.ip, sshKeyPath, imageRef, process.cwd(), haBuildArgs).then((ok) => {
+              if (!ok) throw new Error('remote build failed');
+            }),
+          ),
+        ),
+      ),
+    );
+  }
+  // No-op rejection handler so an in-flight failure doesn't surface as an
   // unhandledRejection before haStartComposeStack attaches its await; the real
   // throw still happens at the barrier (awaiting a rejected promise rethrows).
-  ctx.remoteBuildPromise.catch(() => {});
+  ctx.imageTransferPromise?.catch(() => {});
 }
 
 /**
@@ -790,13 +836,16 @@ async function haStartComposeStack(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { primary, standby, sshKeyPath } = ctx;
   const serviceOpts = haServiceOpts(ctx);
-  // F1 barrier: await the (non-blocking) remote-build fan started in
-  // haRemoteBuild so the freshly built app image exists on BOTH nodes before
-  // `docker compose up`. LOAD-BEARING — never remove. (undefined when the image
-  // is a registry ref: haRemoteBuild's when-gate skipped it and pull fetched it.)
-  if (ctx.remoteBuildPromise) {
-    ctx.onProgress('Waiting for the native image build to finish...');
-    await perfAsync('deploy.ha.compose.remoteBuild.await', () => ctx.remoteBuildPromise);
+  // F1 barrier: await the (non-blocking) image fan started in haTransferImage
+  // so the app image exists on BOTH nodes before `docker compose up`.
+  // LOAD-BEARING — never remove. (undefined when the image is a registry ref:
+  // transfer-image's when-gate skipped it and the stack pull fetches it.)
+  if (ctx.imageTransferPromise) {
+    ctx.onProgress('Waiting for the app image on both servers...');
+    await perfAsync(
+      `${ctx.imageTransferMarker ?? 'deploy.ha.compose.imageTransfer'}.await`,
+      () => ctx.imageTransferPromise,
+    );
   }
   ctx.onProgress('Starting services on both servers...');
   await perfAsync('deploy.ha.compose.composeUp.both', () =>
@@ -1366,7 +1415,7 @@ export const COMPOSE_HA_EFFECTS = {
   haSetupServers,
   haWaitDockerReady,
   haCheckDbLedger,
-  haRemoteBuild,
+  haTransferImage,
   haSetupServerFiles,
   haMergeWalgRole,
   haPullImages,

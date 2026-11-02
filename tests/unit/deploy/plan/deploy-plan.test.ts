@@ -326,7 +326,7 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'setup-servers',
   'wait-docker-ready',
   'check-db-ledger',
-  'remote-build',
+  'transfer-image',
   'setup-server-files',
   'merge-walg-role',
   'pull-images',
@@ -392,14 +392,17 @@ describe('planDeploy(compose-ha)', () => {
     }
   });
 
-  it('gates remote-build on a local-only image tag; provisioning is unconditional', () => {
+  it('gates transfer-image on a local or direct build; provisioning is unconditional', () => {
     const byName = Object.fromEntries(planDeploy('compose-ha', {}).map((s) => [s.name, s]));
     // deployComposeHA always reconciled both Pulumi stacks (idempotent) — no
     // warm-skip gate, unlike single compose's provision-server.
     expect(byName['provision-servers'].when).toBeUndefined();
-    // Remote build only fires when the image is local-only (isLocalOnlyImageTag).
-    expect(byName['remote-build'].when({ isLocalOnlyImage: true })).toBe(true);
-    expect(byName['remote-build'].when({ isLocalOnlyImage: false })).toBe(false);
+    // The same gate as single compose: push mode pulls from GHCR instead.
+    expect(byName['transfer-image'].when({ isComposeLocal: true })).toBe(true);
+    expect(byName['transfer-image'].when({ isDirectDeploy: true })).toBe(true);
+    expect(byName['transfer-image'].when({})).toBe(false);
+    // The per-server remote build is not a step of its own any more.
+    expect(byName['remote-build']).toBeUndefined();
   });
 
   it('references only effects that exist in the registry', async () => {

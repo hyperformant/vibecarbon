@@ -61,7 +61,7 @@ describe('compose-ha: both servers are read before either is touched', () => {
   it('after docker is ready on both, before the build, the bundle upload and the swap', () => {
     runsBefore(plan, 'wait-docker-ready', 'check-db-ledger');
     for (const later of [
-      'remote-build',
+      'transfer-image',
       'setup-server-files',
       'pull-images',
       'start-compose-stack',
