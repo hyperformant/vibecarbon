@@ -116,6 +116,7 @@ import {
   dbRoleConfigMapManifest,
   k8sWalgRoleIntentApplyArgv,
   setK8sWalgRole,
+  WALG_ROLE_DIR,
 } from '../walg-role.js';
 import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import {
@@ -2587,12 +2588,15 @@ export async function auditRls({ kubeconfig }) {
 
 /**
  * The deploy's live wal-g role write: the intent (vibecarbon-db-role) and the
- * role file in the running db container, through setK8sWalgRole with
- * requireLive. deployK3s runs it on every deploy, outside the k3s-apply skip
- * gate and once postgres accepts, so a redeploy that did not restart the db
+ * role file in the running db container, through setK8sWalgRole. deployK3s
+ * runs it on every deploy, outside the k3s-apply skip gate and once postgres
+ * accepts, so a redeploy that did not restart the db
  * (or skipped the apply altogether) still converges the file. Throws when the
  * file does not read back the role, which fails the deploy: a db whose role
- * file is wrong would hold or drop WAL behind a green deploy.
+ * file is wrong would hold or drop WAL behind a green deploy. The errors are
+ * the deploy's own: a missing role mount after the rollout is a template that
+ * did not land, never a hint to run a deploy; the other reasons keep
+ * setK8sWalgRole's detail.
  *
  * @param {object} o
  * @param {(ip: string, argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>} o.kubectl
@@ -2601,7 +2605,21 @@ export async function auditRls({ kubeconfig }) {
  * @returns {Promise<{intent: true, live: boolean}>}
  */
 export async function writeDeployWalgRole({ kubectl, role, envName }) {
-  return setK8sWalgRole({ ip: undefined, kubectl, role, requireLive: true, envName });
+  const result = await setK8sWalgRole({ ip: undefined, kubectl, role, envName });
+  if (result.live) return result;
+  // setK8sWalgRole's own no-role-mount hint says to run a deploy; this IS the
+  // deploy, after a rollout of the template that carries the mount, so the
+  // missing mount means the rollout did not land on db-0.
+  if (result.reason === 'no-role-mount') {
+    throw new Error(
+      `the db rollout did not give ${DB_POD} the wal-g role mount (${WALG_ROLE_DIR}); ` +
+        `check the db StatefulSet template and \`kubectl -n vibecarbon get pod ${DB_POD} -o yaml\``,
+    );
+  }
+  const detail = result.error ? `: ${result.error.message}` : '';
+  throw new Error(
+    `could not set the wal-g role to ${role} on ${DB_POD} (${result.reason})${detail}`,
+  );
 }
 
 /**

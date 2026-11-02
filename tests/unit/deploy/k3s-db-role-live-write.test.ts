@@ -33,7 +33,7 @@ function podWithRoleMount() {
 }
 
 describe('writeDeployWalgRole', () => {
-  it('writes the live role with requireLive after the rollout, through setK8sWalgRole', async () => {
+  it('writes the intent and the live role through setK8sWalgRole', async () => {
     const calls: string[] = [];
     const kubectl = vi.fn(async (_ip: string, argv: string[]) => {
       calls.push(argv.join(' '));
@@ -55,13 +55,44 @@ describe('writeDeployWalgRole', () => {
     await expect(writeDeployWalgRole({ kubectl, role: 'primary' })).rejects.toThrow();
   });
 
-  it('a pod without the role mount fails the deploy and names the env', async () => {
+  it('a pod without the role mount fails the deploy with a deploy-specific error', async () => {
     const kubectl = vi.fn(async (_ip: string, argv: string[]) =>
       argv.includes('get') ? JSON.stringify({ spec: { containers: [{ name: 'db' }] } }) : '',
     );
-    await expect(
-      writeDeployWalgRole({ kubectl, role: 'standby', envName: 'prod' }),
-    ).rejects.toThrow(/vibecarbon deploy prod/);
+    const err = await writeDeployWalgRole({ kubectl, role: 'standby', envName: 'prod' }).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toBe(
+      'the db rollout did not give db-0 the wal-g role mount (/var/lib/vibecarbon/role); ' +
+        'check the db StatefulSet template and `kubectl -n vibecarbon get pod db-0 -o yaml`',
+    );
+    // This IS the deploy: telling the operator to run one would be circular.
+    expect(err.message).not.toContain('vibecarbon deploy');
+  });
+
+  it('the other reasons keep their detail', async () => {
+    const kubectl = vi.fn(async (_ip: string, argv: string[]) => {
+      if (argv.includes('get')) return podWithRoleMount();
+      if (argv.includes('exec')) {
+        throw Object.assign(new Error('exec failed: disk full'), {
+          stderr: '[walg-role] could not write the wal-g role in /var/lib/vibecarbon/role\n',
+        });
+      }
+      return '';
+    });
+    await expect(writeDeployWalgRole({ kubectl, role: 'primary' })).rejects.toThrow(
+      /could not set the wal-g role to primary on db-0 \(write-failed\): exec failed: disk full/,
+    );
+  });
+
+  it('an unreadable read-back names read-back-mismatch', async () => {
+    const kubectl = vi.fn(async (_ip: string, argv: string[]) =>
+      argv.includes('get') ? podWithRoleMount() : argv.includes('exec') ? 'WALG_ROLE_FILE=' : '',
+    );
+    await expect(writeDeployWalgRole({ kubectl, role: 'primary' })).rejects.toThrow(
+      /\(read-back-mismatch\)/,
+    );
   });
 
   it('deployK3s runs it on EVERY deploy: outside the k3s-apply skip gate, before the wal-g audit', () => {
