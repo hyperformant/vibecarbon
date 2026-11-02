@@ -233,7 +233,13 @@ const censusKubectl: KubectlSeam = async (ip, argv) => {
 
 async function runK8s(
   primaryReachable: boolean,
-  over: { kubectl?: KubectlSeam; promote?: () => unknown } = {},
+  over: {
+    kubectl?: KubectlSeam;
+    promote?: () => unknown;
+    /** An earlier run's failover journal, present at entry. */
+    journal?: boolean;
+    writeJournal?: () => Promise<unknown>;
+  } = {},
 ) {
   const servers = {
     primary: { ip: PRIMARY_IP, floatingIp: PRIMARY_IP, region: 'nbg1' },
@@ -249,6 +255,9 @@ async function runK8s(
       primary: { masterIp: PRIMARY_IP },
       standby: { masterIp: STANDBY_IP },
       systemIdentifier: SYSID,
+      ...(over.journal && {
+        failoverInFlight: { target: 'standby', systemIdentifier: SYSID, primaryLsn: null },
+      }),
     },
   };
   const deps = {
@@ -279,7 +288,7 @@ async function runK8s(
       order.push('marker');
     },
     clearMarker: () => {},
-    writeJournal: async () => 'journal-id',
+    writeJournal: over.writeJournal ?? (async () => 'journal-id'),
     clearJournal: async () => {},
     promote:
       over.promote ??
@@ -507,6 +516,56 @@ describe('k8s-ha: the wal-g role moves before the promote, with no db restart (D
       'standby',
     ]);
     // The planned run lifts the fence it put on the primary.
+    expect(at('fence')).toBeLessThan(at('unfence'));
+  });
+
+  /** A kubectl seam recording each role intent applied, whose primary live write reads back wrong. */
+  const failingArm =
+    (inputs: string[]): KubectlSeam =>
+    async (_ip, argv, o) => {
+      if (o?.input) inputs.push(/VC_WALG_ROLE_INTENT: (\w+)/.exec(o.input)?.[1] ?? '?');
+      if (argv.includes('exec') && argv.join(' ').includes("'%s\\n' primary")) {
+        return 'WALG_ROLE_FILE=\n';
+      }
+      return k8sReply(argv);
+    };
+
+  it('k8s: a failed arm on a rerun with a journal leaves the standby armed: an earlier promote may still land', async () => {
+    const inputs: string[] = [];
+    const promote = vi.fn();
+    const err = await runK8s(false, {
+      journal: true,
+      kubectl: failingArm(inputs),
+      promote,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/may still land/);
+    expect(err.message).not.toMatch(/Nothing was promoted/);
+    expect(err.message).toMatch(/vibecarbon failover prod/);
+    expect(promote).not.toHaveBeenCalled();
+    // No disarm: `standby` on a node whose promote is landing would drop its
+    // .history and .partial files.
+    expect(inputs).toEqual(['primary']);
+  });
+
+  it('k8s: a failed journal write after a clean arm disarms the standby (no journal at entry)', async () => {
+    const inputs: string[] = [];
+    const promote = vi.fn();
+    const err = await runK8s(true, {
+      kubectl: async (_ip, argv, o) => {
+        if (o?.input) inputs.push(/VC_WALG_ROLE_INTENT: (\w+)/.exec(o.input)?.[1] ?? '?');
+        return k8sReply(argv);
+      },
+      writeJournal: async () => {
+        throw new Error('could not save .vibecarbon.json: EACCES');
+      },
+      promote,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/EACCES/);
+    expect(err.message).toMatch(/disarmed/);
+    expect(promote).not.toHaveBeenCalled();
+    expect(inputs).toEqual(['primary', 'standby']);
     expect(at('fence')).toBeLessThan(at('unfence'));
   });
 

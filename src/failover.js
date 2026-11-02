@@ -39,6 +39,7 @@ import {
   dnsDidNotMessage,
   FailoverDnsError,
   FailoverRefusedError,
+  failoverInFlightNextStep,
   flipAndVerifyDns,
   liveStandbyImageGap,
   promotionNotIssuedMessage,
@@ -2371,28 +2372,49 @@ export async function failoverHA(
    * non-zero, and the rerun resumes from the journal. With a journal from an
    * earlier run, 'not-issued' proves nothing: that run's promote may be landing.
    */
+  /**
+   * Put the standby's wal-g role back to standby after an abort that armed it
+   * and promoted nothing (best-effort; the intent is what a restart applies).
+   * Returns the sentence that says how far it got.
+   */
+  async function disarmStandby() {
+    try {
+      const r = await setK8sWalgRole({ ip: servers.standby.ip, kubectl, role: 'standby' });
+      return r.live
+        ? 'The standby was disarmed (wal-g role standby).'
+        : `The standby's wal-g intent was set back to standby; its live role file was not ` +
+            `(${r.reason}).`;
+    } catch (disarmErr) {
+      return (
+        `The standby could NOT be disarmed (${firstErrorLine(disarmErr)}): run ` +
+        `\`vibecarbon deploy ${envName}\` before it can push a backup.`
+      );
+    }
+  }
+
+  /**
+   * With a journal from an earlier run, that run's promote may still be
+   * landing on the standby: it is never disarmed then. `primary` is inert
+   * while it is in recovery (archive_command never runs, and the backup
+   * CronJob checks pg_is_in_recovery), and `standby` on a node that is
+   * promoting would drop its .history and .partial files.
+   */
+  const keptArmedLine = () =>
+    'An earlier run of this failover journaled a promote that may still land, so the ' +
+    `standby keeps the primary wal-g role; ${failoverInFlightNextStep(envName)}.`;
+
   async function armBeforePromote() {
     try {
       await armWalgRole({ standbyIp: servers.standby.ip, kubectl, envName });
     } catch (err) {
-      // Never leave a half-armed standby: put its intent and live file back
-      // to standby (best-effort; the intent is what a restart applies).
-      let disarm;
-      try {
-        const r = await setK8sWalgRole({ ip: servers.standby.ip, kubectl, role: 'standby' });
-        disarm = r.live
-          ? 'The standby was disarmed (wal-g role standby).'
-          : `The standby's wal-g intent was set back to standby; its live role file was not ` +
-            `(${r.reason}).`;
-      } catch (disarmErr) {
-        disarm =
-          `The standby could NOT be disarmed (${firstErrorLine(disarmErr)}): run ` +
-          `\`vibecarbon deploy ${envName}\` before it can push a backup.`;
+      const cause = `the wal-g role could not be armed on the standby (${firstErrorLine(err)})`;
+      if (journalAtEntry) {
+        throw new Error(`Failover aborted before this run's promote: ${cause}. ${keptArmedLine()}`);
       }
+      // Never leave a half-armed standby.
       throw new Error(
-        `Failover aborted before promotion: the wal-g role could not be armed on the standby ` +
-          `(${firstErrorLine(err)}). ${disarm} Nothing was promoted; fix it and rerun ` +
-          `vibecarbon failover ${envName}`,
+        `Failover aborted before promotion: ${cause}. ${await disarmStandby()} Nothing was ` +
+          `promoted; fix it and rerun vibecarbon failover ${envName}`,
       );
     }
   }
@@ -2452,15 +2474,23 @@ export async function failoverHA(
       // failed arm aborts here, before promotion, and disarms the standby.
       await armBeforePromote();
       // R2: the journal goes down immediately before the promote call.
-      await writeJournal(
-        { environment: envName },
-        {
-          target: 'standby',
-          primaryLsn: primaryLsn ?? null,
-          systemIdentifier: seededSysid ?? standbyState.systemIdentifier,
-          ...(unproven && { override: 'force-unproven' }),
-        },
-      );
+      try {
+        await writeJournal(
+          { environment: envName },
+          {
+            target: 'standby',
+            primaryLsn: primaryLsn ?? null,
+            systemIdentifier: seededSysid ?? standbyState.systemIdentifier,
+            ...(unproven && { override: 'force-unproven' }),
+          },
+        );
+      } catch (err) {
+        // The arm landed and nothing will promote: disarm it, unless an
+        // earlier run's journaled promote may still land.
+        throw new Error(
+          `${firstErrorLine(err)}. ${journalAtEntry ? keptArmedLine() : await disarmStandby()}`,
+        );
+      }
     } catch (err) {
       // An aborted failover must not leave the site down. The error already
       // states the world (standby NOT promoted, DNS NOT flipped) and the retry
