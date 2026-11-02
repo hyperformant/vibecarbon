@@ -366,8 +366,13 @@ export async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
     appNsItems: items,
     opts,
   });
+  // A db pod without the role mount (a cluster that predates it) reads an
+  // empty role here, so on every status, failover or deploy until a deploy
+  // adds the mount the step below runs again: it drops the inactive slots and
+  // re-applies the intent, and the part stays reported missing.
   let walgStandby = false;
-  if (configMap(DB_ROLE_CONFIGMAP)?.data?.[DB_ROLE_INTENT_KEY] === 'standby') {
+  const walgIntentStandby = configMap(DB_ROLE_CONFIGMAP)?.data?.[DB_ROLE_INTENT_KEY] === 'standby';
+  if (walgIntentStandby) {
     try {
       const out = await kubectl(ip, k8sDbMarkerExec(walgRoleReadShell(WALG_ROLE_DIR)), opts);
       walgStandby = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim() === 'standby';
@@ -408,6 +413,7 @@ export async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
     workloadsZero: workloadsToZero.length === 0,
     workloadsToZero,
     walgStandby,
+    walgIntentStandby,
   };
 }
 
@@ -522,6 +528,11 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads, warn }) {
       {
         key: 'walgStandby',
         what: 'the standby wal-g role',
+        // A standby intent on a db pod that does not answer is as durable as
+        // the apply below on one: its next start applies it.
+        done: (state) =>
+          state.walgStandby === true ||
+          (state.walgStandby === 'unknown' && state.walgIntentStandby === true),
         // demoteK8sWalgRole drops the retired side's inactive replication
         // slots first (nobody streams from them), then writes the intent and
         // the live file. A db pod that cannot be reached applies the intent
@@ -744,7 +755,7 @@ export async function fenceRetiredNode({
     }
   }
   const missing = backend.steps
-    .filter((s) => state[s.key] !== true)
+    .filter((s) => !(s.done ? s.done(state) : state[s.key] === true))
     .map((s) => (state[s.key] === 'unknown' ? `${s.what} (its db or API did not answer)` : s.what));
   return {
     reachable: true,

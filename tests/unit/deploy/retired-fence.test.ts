@@ -146,6 +146,8 @@ function fakeCluster(
     walg: init.walg ?? 'primary',
     intent: init.intent === undefined ? (init.walg ?? 'primary') : init.intent,
     roleMount: init.roleMount ?? true,
+    /** The db settle times out: the pod stays down. */
+    dbStaysDown: false,
     dbMarker: false,
     reachable: true,
     flux: init.flux,
@@ -217,6 +219,7 @@ function fakeCluster(
       return '';
     }
     if (argv.includes('rollout')) {
+      if (state.dbStaysDown) throw new Error('timed out waiting for the condition');
       // The db container's start: db-guard.sh applies the intent to the file.
       db.up = true;
       if (state.intent === 'primary' || state.intent === 'standby') state.walg = state.intent;
@@ -639,6 +642,26 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     expect(cluster.argvs.some((a) => a.includes('rollout'))).toBe(true);
     expect(cluster.writes).not.toContain('intent=standby');
     expect(cluster.state.walg).toBe('standby');
+  });
+
+  it('an unreachable db pod is done for the wal-g role either way the intent got to standby', async () => {
+    const missingAfter = async (intent: string) => {
+      const cluster = fakeCluster({ walg: 'primary', intent });
+      cluster.db.up = false;
+      cluster.state.dbStaysDown = true;
+      const warned: string[] = [];
+      await reconcileRetiredFence(argsFor(cluster, { warn: (l: string) => warned.push(l) }));
+      return { warned: warned.join('\n'), writes: cluster.writes };
+    };
+    // Already standby: nothing to write, and the db's next start applies it.
+    const already = await missingAfter('standby');
+    expect(already.warned).toMatch(/partly fenced/);
+    expect(already.warned).not.toMatch(/wal-g role/);
+    expect(already.writes).not.toContain('intent=standby');
+    // Written now: the same durable state, reported the same way.
+    const written = await missingAfter('primary');
+    expect(written.writes).toContain('intent=standby');
+    expect(written.warned).not.toMatch(/wal-g role/);
   });
 
   it('a live write that cannot land on a pod without the role mount leaves the role missing', async () => {
