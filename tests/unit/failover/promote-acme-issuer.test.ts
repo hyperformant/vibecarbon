@@ -23,7 +23,7 @@ import {
   promoteAcmeIssuer,
   promoteTlsKubectl,
 } from '../../../src/failover.js';
-import { tlsSnapshotKey } from '../../../src/lib/deploy/tls-snapshot.js';
+import { k8sSecretSerial, tlsSnapshotKey } from '../../../src/lib/deploy/tls-snapshot.js';
 import { expectNoKeyLeak } from '../deploy/_no-key-leak.ts';
 import { k8sSecretJson, k8sSecretJsonWithCa } from '../deploy/_tls-fixtures.ts';
 
@@ -238,7 +238,12 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     const { result } = await expectNoKeyLeak(SNAP, () => run(c, { read }));
 
     expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
-    expect(result.tls).toEqual({ restored: true, reason: 'restored from the last snapshot' });
+    // The serial it restored (public) rides the result into the failover's line.
+    expect(result.tls).toEqual({
+      restored: true,
+      reason: 'restored from the last snapshot',
+      serial: k8sSecretSerial(SNAP),
+    });
 
     // The snapshot key of this env and CA, read once with the DR client options.
     expect(read).toHaveBeenCalledTimes(1);

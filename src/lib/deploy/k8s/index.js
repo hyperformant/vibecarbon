@@ -38,7 +38,7 @@ export { awaitPostgresAccepting } from './readiness.js';
 // can derive the pilot-light scale-up list without reaching into
 // ./standby-config.js directly — see paid-boundary guard.
 export { deriveScaleUpList, failoverAddonManifests } from './standby-config.js';
-export { quietKubectl, snapshotK8sTlsSecret } from './tls-restore.js';
+export { liveK8sTlsSecretSerial, quietKubectl, snapshotK8sTlsSecret } from './tls-restore.js';
 
 /**
  * Destroy a K8s deployment.
