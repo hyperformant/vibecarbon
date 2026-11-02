@@ -385,8 +385,9 @@ describe('F1 — compose-ha: one local build, a layer delta to both servers, haS
     const ctx = composeHaCtx({ composeLocalBuildPromise: build.promise });
     await COMPOSE_HA_EFFECTS.haTransferImage(ctx);
     build.reject(new Error('docker build failed for p-app:local'));
+    // The build is this machine's, not a node's: no node prefix on it.
     await expect(COMPOSE_HA_EFFECTS.haStartComposeStack(ctx)).rejects.toThrow(
-      /docker build failed for p-app:local/,
+      /^docker build failed for p-app:local$/,
     );
     expect(H.state.order).not.toContain('deliver-start');
     expect(H.state.order).not.toContain('reconcile.run');

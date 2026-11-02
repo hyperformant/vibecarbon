@@ -546,7 +546,8 @@ async function haTransferImage(ctx) {
     ['primary', primary],
     ['standby', standby],
   ];
-  // A failure names the node it happened on; each one is loud at the barrier.
+  // A server-side failure names the node it happened on; each one is loud at
+  // the barrier.
   const onNode = (role, ip, promise) =>
     promise.catch((err) => {
       throw new Error(`${role} ${ip}: ${err?.message ?? err}`, { cause: err });
@@ -556,17 +557,17 @@ async function haTransferImage(ctx) {
     ctx.onProgress('Sending the app image to primary + standby (layer delta, in parallel)...');
     ctx.imageTransferPromise = perfAsync('deploy.ha.compose.imageTransfer.fan', () =>
       Promise.all(
+        // The one local build is awaited inside each arm; its failure is
+        // this machine's and stays unprefixed. A node's base pull or delta
+        // failure names the node (label).
         nodes.map(([role, node]) =>
-          onNode(
-            role,
-            node.ip,
-            deliverComposeAppImage({
-              ip: node.ip,
-              sshKeyPath,
-              tag: imageRef,
-              built: ctx.composeLocalBuildPromise,
-            }),
-          ),
+          deliverComposeAppImage({
+            ip: node.ip,
+            sshKeyPath,
+            tag: imageRef,
+            built: ctx.composeLocalBuildPromise,
+            label: `${role} ${node.ip}`,
+          }),
         ),
       ),
     );

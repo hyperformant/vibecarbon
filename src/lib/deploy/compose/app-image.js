@@ -70,10 +70,14 @@ export async function buildComposeAppImage({ tag, projectName, domain, cwd = pro
  * delta. Returns the in-flight delivery; the caller awaits it at its barrier
  * (compose references the image, so it must be present before compose up).
  *
- * @param {{ ip: string, sshKeyPath: string, tag: string, built?: Promise<unknown> | null, cwd?: string }} args
+ * `label` (compose-ha: 'primary <ip>') prefixes a failure of the base pull or
+ * the delta, which happen on that node. A failed local build is this
+ * machine's, so it passes through unprefixed.
+ *
+ * @param {{ ip: string, sshKeyPath: string, tag: string, built?: Promise<unknown> | null, cwd?: string, label?: string }} args
  * @returns {Promise<void>}
  */
-export function deliverComposeAppImage({ ip, sshKeyPath, tag, built, cwd = process.cwd() }) {
+export function deliverComposeAppImage({ ip, sshKeyPath, tag, built, cwd = process.cwd(), label }) {
   // The ref the image was built FROM, and exactly the ref the delta looks up.
   // A Dockerfile without the ARG gets no base pull and a delta of every layer.
   const baseRef = readRuntimeBaseRef(cwd);
@@ -96,15 +100,20 @@ export function deliverComposeAppImage({ ip, sshKeyPath, tag, built, cwd = proce
   basePull?.catch(() => {});
   return (async () => {
     await built;
-    await perfAsync('deploy.image.transfer', () =>
-      deliverImage({
-        tag,
-        sshTarget: `root@${ip}`,
-        sshKey: sshKeyPath,
-        runtime: 'docker',
-        basePull,
-        baseRef: baseRef ?? '',
-      }),
-    );
+    try {
+      await perfAsync('deploy.image.transfer', () =>
+        deliverImage({
+          tag,
+          sshTarget: `root@${ip}`,
+          sshKey: sshKeyPath,
+          runtime: 'docker',
+          basePull,
+          baseRef: baseRef ?? '',
+        }),
+      );
+    } catch (err) {
+      if (!label) throw err;
+      throw new Error(`${label}: ${err?.message ?? err}`, { cause: err });
+    }
   })();
 }
