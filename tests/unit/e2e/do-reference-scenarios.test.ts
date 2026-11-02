@@ -73,10 +73,10 @@ describe('providers.digitalocean (DO opt-in reference scenarios)', () => {
 describe('capacityPreferences.digitalocean', () => {
   it('scales each default Basic droplet one size up (d1–d4 deploy the picker default)', () => {
     expect(testConfig.e2e.capacityPreferences.digitalocean.scaleTo).toEqual({
-      's-2vcpu-4gb': 's-4vcpu-8gb',
+      's-2vcpu-4gb': ['s-4vcpu-8gb', 's-4vcpu-8gb-intel'],
       's-1vcpu-2gb': 's-2vcpu-4gb',
       's-1vcpu-2gb-amd': 's-2vcpu-4gb-amd',
-      's-2vcpu-4gb-amd': 's-4vcpu-8gb-amd',
+      's-2vcpu-4gb-amd': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb-intel'],
       's-2vcpu-4gb-intel': 's-4vcpu-8gb-intel',
     });
   });

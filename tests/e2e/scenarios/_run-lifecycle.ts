@@ -3729,6 +3729,7 @@ EOF`;
             readEnvConfig(config.projectDir, config.envPrefix),
             config.mode,
             config.scaleTo,
+            config.scaleTarget,
           );
           // Snapshot server types BEFORE scale so verify-scale can assert
           // they actually changed. Without this, a silent no-op scale (CLI

@@ -219,16 +219,19 @@ export const testConfig = {
       // (object storage) — keeps backup/S3 traffic in-region. The ladder
       // covers the Basic line and the `-amd` / `-intel` variants the picker
       // falls to where a region does not sell the plain size (nyc2 and sfo3
-      // sold only the variants on 2026-10-22). Each variant scales to its own
-      // 8 GB sibling, the size sold where the variant is; the plain
-      // s-4vcpu-8gb is not sold in nyc2 or sfo3.
+      // sold only the variants on 2026-10-22). An entry may be an ordered list
+      // of candidates: the resolver takes the first sold on both sides of an HA
+      // pair, bigger than each side's own type. A variant prefers its own 8 GB
+      // sibling; the plain `-intel` 8 GB is the fallback because a mixed pair
+      // (sfo3 `-amd` with tor1 plain, 2026-11-02 stock) has no other common
+      // size: tor1 sells plain and `-intel`, sfo3 sells `-amd` and `-intel`.
       digitalocean: {
         regions: ['nyc3', 'sfo3', 'ams3', 'fra1'] as const,
         scaleTo: {
-          's-2vcpu-4gb': 's-4vcpu-8gb',
+          's-2vcpu-4gb': ['s-4vcpu-8gb', 's-4vcpu-8gb-intel'],
           's-1vcpu-2gb': 's-2vcpu-4gb',
           's-1vcpu-2gb-amd': 's-2vcpu-4gb-amd',
-          's-2vcpu-4gb-amd': 's-4vcpu-8gb-amd',
+          's-2vcpu-4gb-amd': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb-intel'],
           's-2vcpu-4gb-intel': 's-4vcpu-8gb-intel',
         },
       },

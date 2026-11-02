@@ -24,7 +24,11 @@ import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import { testConfig } from '../../config.js';
-import { resolveCapacity, resolveCapacityPair } from '../../e2e/utils/region-resolver.js';
+import {
+  resolveCapacity,
+  resolveCapacityPair,
+  scaleCandidates,
+} from '../../e2e/utils/region-resolver.js';
 import { seedCatalog } from '../helpers/catalog-fixtures.js';
 
 const EU_LOCATIONS = ['nbg1', 'hel1', 'fsn1'] as const;
@@ -47,8 +51,9 @@ describe('capacityPreferences.hetzner (cost guard)', () => {
         const d = HetznerProvider.getRegionDefaults(location);
         for (const type of [d.composeType, d.masterType, d.dbType, d.workerType]) {
           expect(type, `${location} default`).not.toMatch(/^cpx\d1$/);
-          const target = (scaleTo as Record<string, string>)[type as string];
-          expect(target, `${type} -> ${target} in ${location}`).not.toMatch(/^cpx\d1$/);
+          for (const target of scaleCandidates(scaleTo[type as keyof typeof scaleTo])) {
+            expect(target, `${type} -> ${target} in ${location}`).not.toMatch(/^cpx\d1$/);
+          }
         }
       }
     } finally {

@@ -23,6 +23,7 @@ import {
   type CapacityProvider,
   resolveCapacity,
   resolveCapacityPair,
+  scaleCandidates,
 } from '../../e2e/utils/region-resolver.js';
 import { seedCatalog } from '../helpers/catalog-fixtures.js';
 
@@ -79,7 +80,9 @@ describe.each(PROVIDER_IDS)('capacityPreferences.%s.scaleTo (scale ladder census
   const Provider = getProviderClass(id);
 
   it('every ladder entry is amd64 and in the fallback catalog', () => {
-    const entries = Object.entries(PREFS[id].scaleTo);
+    const entries = Object.entries(PREFS[id].scaleTo).flatMap(([from, to]) =>
+      scaleCandidates(to).map((c) => [from, c] as const),
+    );
     expect(entries.length).toBeGreaterThan(0);
     // The fixture as the provider's own parser reads it: parseCatalog drops
     // ARM types, so a type absent here is either ARM or not sold at all.
@@ -102,14 +105,16 @@ describe.each(PROVIDER_IDS)('capacityPreferences.%s.scaleTo (scale ladder census
   });
 
   it('every ladder target is a bigger server than the type it scales from', () => {
-    for (const [from, to] of Object.entries(PREFS[id].scaleTo)) {
-      const a = Provider.FALLBACK_SERVER_TYPES[from];
-      const b = Provider.FALLBACK_SERVER_TYPES[to];
-      expect(b.ram, `${from} -> ${to}`).toBeGreaterThan(a.ram);
+    for (const [from, entry] of Object.entries(PREFS[id].scaleTo)) {
+      for (const to of scaleCandidates(entry)) {
+        const a = Provider.FALLBACK_SERVER_TYPES[from];
+        const b = Provider.FALLBACK_SERVER_TYPES[to];
+        expect(b.ram, `${from} -> ${to}`).toBeGreaterThan(a.ram);
+      }
     }
   });
 
-  it('every compose and master default has its scale target sold where it is the default', () => {
+  it('every compose and master default has a scale target candidate sold where it is the default', () => {
     // deployedScaleTarget keys on the compose or master type, so its target
     // must be orderable wherever that type is the picker's default: otherwise
     // the location is unusable as a primary and nothing says so.
@@ -119,9 +124,9 @@ describe.each(PROVIDER_IDS)('capacityPreferences.%s.scaleTo (scale ladder census
       const d = P.getRegionDefaults(location);
       for (const type of new Set([d.composeType, d.masterType])) {
         if (!type) continue;
-        const target = PREFS[id].scaleTo[type];
-        if (target && !P._locationTypes[location].has(target)) {
-          unsellable.push(`${type} -> ${target} in ${location}`);
+        const candidates = scaleCandidates(PREFS[id].scaleTo[type]);
+        if (candidates.length > 0 && !candidates.some((c) => P._locationTypes[location].has(c))) {
+          unsellable.push(`${type} -> [${candidates.join(', ')}] in ${location}`);
         }
       }
     }

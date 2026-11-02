@@ -39,6 +39,7 @@ describe('resolveCapacity', () => {
       serverType: undefined,
       types: { compose: 'cpx22' },
       datacenter: 'nbg1',
+      scaleTarget: 'cpx32',
     });
   });
 
@@ -150,15 +151,13 @@ describe('resolveCapacityPair', () => {
     expect(Object.keys(standby.types)).toEqual(['master', 'db']);
   });
 
-  it('fails preflight when the scale target is not bigger than a standby type', async () => {
+  it('fails preflight when the scale target is not bigger than the type it scales', async () => {
     seedHetzner();
-    // A ladder whose target is the type itself: the standby would not grow.
+    // A ladder whose target is the type itself: nothing would grow.
     const flat: CapacityPreferences = { regions: ['nbg1'], scaleTo: { cpx22: 'cpx22' } };
     await expect(
       resolveCapacityPair(flat, 't', { mode: 'compose-ha', loadCatalog: seeded }),
-    ).rejects.toThrow(
-      /region-resolver: Hetzner Cloud scale target cpx22 \(4 GB\) is not bigger than the compose standby type cpx22 \(4 GB\) in \w+/,
-    );
+    ).rejects.toThrow(/no Hetzner Cloud region can place the default compose-ha sizes/);
   });
 
   it('fails preflight naming provider, location and type when the standby cannot sell the scale target', async () => {
@@ -171,13 +170,81 @@ describe('resolveCapacityPair', () => {
     await expect(
       resolveCapacityPair(HETZNER, 't', { mode: 'compose-ha', loadCatalog: seeded }),
     ).rejects.toThrow(
-      `region-resolver: Hetzner Cloud default standby location ${standbyRegion} does not sell the scale target cpx32`,
+      `default standby location ${standbyRegion} does not sell the scale target cpx32`,
     );
+  });
+});
+
+describe('scale target candidates', () => {
+  // 2026-11-02 DO stock: sfo3 sells -amd and -intel, tor1 sells plain and
+  // -intel, so a mixed pair's only common 8 GB size is the -intel one.
+  const DO_LADDER = {
+    's-2vcpu-4gb': ['s-4vcpu-8gb', 's-4vcpu-8gb-intel'],
+    's-2vcpu-4gb-amd': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb-intel'],
+  };
+  const sfo3: CapacityPreferences = { regions: ['sfo3'], scaleTo: DO_LADDER };
+  const doOpts = { provider: 'digitalocean', mode: 'compose-ha', loadCatalog: seeded } as const;
+
+  it('resolves a mixed -amd / plain HA pair to the -intel target both sides sell', async () => {
+    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const { primary, standby } = await resolveCapacityPair(sfo3, 't', doOpts);
+    expect(primary.region).toBe('sfo3');
+    expect(standby.region).toBe('tor1');
+    expect(primary.types.compose).toBe('s-2vcpu-4gb-amd');
+    expect(standby.types.compose).toBe('s-2vcpu-4gb');
+    expect(primary.scaleTarget).toBe('s-4vcpu-8gb-intel');
+    expect(standby.scaleTarget).toBe('s-4vcpu-8gb-intel');
+  });
+
+  it('refuses a pair with no common candidate, naming every candidate and why', async () => {
+    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const only: CapacityPreferences = {
+      regions: ['sfo3'],
+      scaleTo: { ...DO_LADDER, 's-2vcpu-4gb-amd': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb'] },
+    };
+    const err = await resolveCapacityPair(only, 't', doOpts).then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    expect(err).toContain('[s-4vcpu-8gb-amd, s-4vcpu-8gb]');
+    expect(err).toContain('s-4vcpu-8gb-amd: default standby location tor1 does not sell');
+    expect(err).toContain('s-4vcpu-8gb: primary location sfo3 does not sell');
+    expect(err).toContain('sfo3');
+    expect(err).toContain('tor1');
+  });
+
+  it('skips a candidate that is not bigger than the type it scales', async () => {
+    seedHetzner();
+    const ladder: CapacityPreferences = {
+      regions: ['nbg1'],
+      scaleTo: { cpx22: ['cpx22', 'cpx32'] },
+    };
+    const r = await resolveCapacity(ladder, 't', { mode: 'compose', loadCatalog: seeded });
+    expect(r.scaleTarget).toBe('cpx32');
+  });
+
+  it('single cluster takes the first candidate the location sells', async () => {
+    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const r = await resolveCapacity(sfo3, 't', { ...doOpts, mode: 'compose' });
+    expect(r.types.compose).toBe('s-2vcpu-4gb-amd');
+    expect(r.scaleTarget).toBe('s-4vcpu-8gb-amd');
   });
 });
 
 describe('deployedScaleTarget', () => {
   const ladder = { cpx22: 'cpx32', cpx12: 'cpx22' };
+  const multi = { 's-2vcpu-4gb-amd': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb-intel'] };
+
+  it('uses the resolved target when it is one of the entry candidates', () => {
+    const env = { serverType: 's-2vcpu-4gb-amd' };
+    expect(deployedScaleTarget(env, 'compose-ha', multi, 's-4vcpu-8gb-intel')).toBe(
+      's-4vcpu-8gb-intel',
+    );
+    expect(deployedScaleTarget(env, 'compose-ha', multi)).toBe('s-4vcpu-8gb-amd');
+    expect(() => deployedScaleTarget(env, 'compose-ha', multi, 's-4vcpu-8gb')).toThrow(
+      /not a ladder candidate/,
+    );
+  });
 
   it('scales compose from the serverType the deploy recorded', () => {
     expect(deployedScaleTarget({ serverType: 'cpx22' }, 'compose-ha', ladder)).toBe('cpx32');
