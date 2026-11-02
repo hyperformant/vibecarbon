@@ -406,8 +406,8 @@ describe('planted fixtures', () => {
  * servers after the local build had already made the image (DO e2e
  * 2026-11-02: 17 s local build, then a 117 s two-server build fan, 51 s of it
  * blocking compose up). Every call site must sit in the consequent of an `if`
- * whose test names the site's no-local-docker gate, so a local-mode deploy can
- * never reach it.
+ * whose test is exactly the site's no-local-docker gate (ALLOWED_GATES), so a
+ * local-mode deploy can never reach it.
  */
 const REMOTE_BUILD_SITES: Record<string, { gate: string; why: string }> = {
   'lib/deploy/effects/index.js:transferImage': {
@@ -419,10 +419,21 @@ const REMOTE_BUILD_SITES: Record<string, { gate: string; why: string }> = {
     why: 'compose-ha, direct mode only; a local build ships to both servers by delta',
   },
   'scale.js:prepareReplacementServer': {
-    gate: 'imagePlan',
-    why: "a compose scale replacement on a machine with no docker (replacementImagePlan 'remote-build'); with docker it is built here and sent by delta",
+    gate: "imagePlan === 'remote-build'",
+    why: 'a compose scale replacement built on the new server: scale -direct, a deploy recorded as direct, or no docker here (replacementImagePlan)',
   },
 };
+
+/** The only `if` tests that may hold a buildRemote( call, exactly as spelled. */
+const ALLOWED_GATES = new Set([
+  'isDirectDeploy',
+  'ctx.isDirectDeploy',
+  "imagePlan === 'remote-build'",
+]);
+
+/** A site passes when an `if` it sits in the consequent of has exactly its gate as the test. */
+const passesGate = (gate: string | undefined, gates: string[]) =>
+  !!gate && ALLOWED_GATES.has(gate) && gates.includes(gate);
 
 /** Every buildRemote( call: its site key and whether a gating `if` holds it. */
 function findRemoteBuilds(path: string, text: string): { key: string; gates: string[] }[] {
@@ -430,15 +441,15 @@ function findRemoteBuilds(path: string, text: string): { key: string; gates: str
   walk(parseAst(text), (n, ancestors) => {
     if (n.type !== 'CallExpression' || calleeName(n) !== 'buildRemote') return;
     const gates: string[] = [];
-    // Each `if` this call sits in the consequent of: the identifiers its test names.
+    // Each `if` this call sits in the consequent of: its test, as spelled
+    // (whitespace collapsed), so `!isDirectDeploy` or `isDirectDeploy || x`
+    // never reads as the bare gate.
     for (let i = ancestors.length - 1; i >= 0; i--) {
       const a = ancestors[i];
       if (a.type !== 'IfStatement') continue;
       const inConsequent = (ancestors[i + 1] ?? n) === a.consequent;
       if (!inConsequent) continue;
-      walk(a.test, (t) => {
-        if (t.type === 'Identifier') gates.push(t.name);
-      });
+      gates.push(text.slice(a.test.start, a.test.end).replace(/\s+/g, ' '));
     }
     out.push({ key: `${path}:${enclosingFnNames(ancestors)[0]}`, gates });
   });
@@ -470,10 +481,13 @@ describe('the server-side build runs only without local docker', () => {
     }
   });
 
-  it('each call sits under an if that names its no-local-docker gate', () => {
+  it('each call sits in the consequent of an if whose test is exactly its gate', () => {
     for (const { key, gates } of sites()) {
       const gate = REMOTE_BUILD_SITES[key]?.gate;
-      expect(gates, `${key} must be reached only when ${gate} says so`).toContain(gate);
+      expect(
+        passesGate(gate, gates),
+        `${key} must be reached only under \`if (${gate})\`, found ${JSON.stringify(gates)}`,
+      ).toBe(true);
     }
   });
 
@@ -488,5 +502,23 @@ describe('the server-side build runs only without local docker', () => {
       { key: 'f.js:b', gates: [] },
       { key: 'f.js:c', gates: ['isDirectDeploy'] },
     ]);
+  });
+
+  it('planted: a negated test, a wrong literal and a widened test all fail the gate', () => {
+    const text = [
+      'async function neg(isDirectDeploy) { if (!isDirectDeploy) { await buildRemote(1); } }',
+      "async function lit(imagePlan) { if (imagePlan === 'delta') { await buildRemote(1); } }",
+      'async function wide(isDirectDeploy, x) { if (isDirectDeploy || x) { await buildRemote(1); } }',
+      'async function ok(ctx) { if (ctx.isDirectDeploy) { await buildRemote(1); } }',
+      "async function plan(imagePlan) { if (imagePlan === 'remote-build') { await buildRemote(1); } }",
+    ].join('\n');
+    const found = Object.fromEntries(findRemoteBuilds('f.js', text).map((f) => [f.key, f.gates]));
+    expect(passesGate('isDirectDeploy', found['f.js:neg'])).toBe(false);
+    expect(passesGate("imagePlan === 'remote-build'", found['f.js:lit'])).toBe(false);
+    expect(passesGate('isDirectDeploy', found['f.js:wide'])).toBe(false);
+    expect(passesGate('ctx.isDirectDeploy', found['f.js:ok'])).toBe(true);
+    expect(passesGate("imagePlan === 'remote-build'", found['f.js:plan'])).toBe(true);
+    // A gate outside the allowed set never passes, even when spelled exactly.
+    expect(passesGate('x', ['x'])).toBe(false);
   });
 });
