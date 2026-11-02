@@ -37,6 +37,7 @@ if [ -n "${VC_WALG_ROLE_INTENT:-}" ] && [ -d "$VC_ROLE_DIR" ] && [ ! -L "$VC_ROL
       rm -f "$VC_ROLE_DIR/walg-role.tmp"
       printf '%s\n' "$VC_WALG_ROLE_INTENT" > "$VC_ROLE_DIR/walg-role.tmp"
       chmod 0644 "$VC_ROLE_DIR/walg-role.tmp"
+      sync
       mv -f "$VC_ROLE_DIR/walg-role.tmp" "$VC_ROLE_DIR/walg-role"
       sync
       ;;

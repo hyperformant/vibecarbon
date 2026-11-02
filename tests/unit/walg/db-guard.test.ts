@@ -102,6 +102,12 @@ describe('db-guard.sh applies the k8s role intent', () => {
     );
   });
 
+  it('syncs the tmp before the rename, so the rename never exposes unsynced bytes', () => {
+    expect(readFileSync(GUARD, 'utf-8')).toMatch(
+      /chmod 0644 "\$VC_ROLE_DIR\/walg-role\.tmp"\n\s*sync\n\s*mv -f "\$VC_ROLE_DIR\/walg-role\.tmp"/,
+    );
+  });
+
   it('an interrupted restore still refuses first, before any role write', () => {
     writeFileSync(join(pgdata, '.vc-restore-in-progress'), 'in\n');
     expect(runGuard({ VC_WALG_ROLE_INTENT: 'standby', VC_WALG_ROLE_DIR: roleDir }).status).toBe(1);
