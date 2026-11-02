@@ -56,6 +56,7 @@ import {
   reseedStandbyFromPrimary as realReseedStandbyFromPrimary,
   restoreRolloutTimeoutS,
   verifyStreaming,
+  watchDbAttach,
 } from './lib/deploy/replication.js';
 import { wgIpOf } from './lib/deploy/wireguard.js';
 import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
@@ -1037,6 +1038,8 @@ export async function runK8sRestore({
   // Pacing for the post-reseed streaming verify — injectable so tests don't wait
   // on real timers. Production uses the default setTimeout-backed sleep.
   verifySleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  // watchDbAttach's poll interval on the db bounce (test seam).
+  attachWatchPollMs,
 }) {
   assertResolvedBase(base, lineage);
   // Also here, for every caller: see run().
@@ -1084,18 +1087,27 @@ export async function runK8sRestore({
         '-n',
         'vibecarbon',
       ]);
-      await sshKubectl(
-        serverIp,
-        sshKeyPath,
-        [
-          'rollout',
-          'status',
-          `statefulset/${DB_STATEFULSET}`,
-          '-n',
-          'vibecarbon',
-          `--timeout=${rolloutTimeoutS}s`,
-        ],
-        { timeout: (rolloutTimeoutS + 30) * 1000 },
+      // The bounce re-attaches the db volume on the same node: a stale
+      // attachment stops the wait early, by name (watchDbAttach).
+      await watchDbAttach(
+        (signal) =>
+          sshKubectl(
+            serverIp,
+            sshKeyPath,
+            [
+              'rollout',
+              'status',
+              `statefulset/${DB_STATEFULSET}`,
+              '-n',
+              'vibecarbon',
+              `--timeout=${rolloutTimeoutS}s`,
+            ],
+            { timeout: (rolloutTimeoutS + 30) * 1000, signal },
+          ),
+        {
+          kubectl: (argv, opts) => sshKubectl(serverIp, sshKeyPath, argv, opts),
+          pollMs: attachWatchPollMs,
+        },
       );
     });
   } catch (err) {

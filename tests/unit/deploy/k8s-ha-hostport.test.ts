@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDbHostPortPatch } from '../../../src/lib/deploy/k8s/ha/index.js';
+import { buildDbHostPortPatch } from '../../../src/lib/deploy/k8s/k3s.js';
 import { REPL_PORT } from '../../../src/lib/deploy/replication.js';
 
 describe('buildDbHostPortPatch', () => {

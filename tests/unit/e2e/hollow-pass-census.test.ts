@@ -494,6 +494,24 @@ const HA_HANDLELESS: Record<
         after: await haIntegrity.readDbIncarnation({ ...sshless, ip: null, sshKeyPath: KEY }),
       }),
   ],
+  checkPrimaryDbCreatedOnce: [
+    async () =>
+      haIntegrity.checkPrimaryDbCreatedOnce({
+        ...sshless,
+        ip: NODE,
+        sshKeyPath: null,
+        atDeploy: await haIntegrity.readDbIncarnation({ ...sshless, ip: NODE, sshKeyPath: null }),
+        atVerify: await haIntegrity.readDbIncarnation({ ...sshless, ip: NODE, sshKeyPath: null }),
+      }),
+    async () =>
+      haIntegrity.checkPrimaryDbCreatedOnce({
+        ...sshless,
+        ip: null,
+        sshKeyPath: KEY,
+        atDeploy: await haIntegrity.readDbIncarnation({ ...sshless, ip: null, sshKeyPath: KEY }),
+        atVerify: await haIntegrity.readDbIncarnation({ ...sshless, ip: null, sshKeyPath: KEY }),
+      }),
+  ],
   checkSlotCapped: [
     () => haIntegrity.checkSlotCapped({ ...sshless, primaryIp: NODE, sshKeyPath: null }),
     () => haIntegrity.checkSlotCapped({ ...sshless, primaryIp: null, sshKeyPath: KEY }),

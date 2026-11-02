@@ -19,13 +19,13 @@
 
 import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
-import { DB_PVC, DB_STATEFULSET } from './db-workload.js';
+import { DB_POD, DB_PVC, DB_STATEFULSET } from './db-workload.js';
 import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
 import { REPL_GATEWAY_PORT } from './wireguard.js';
 
 /**
  * Shared budget for every db-StatefulSet boot/rollout wait (the deploy-side
- * reseed standbyBoot + dbHostPort recreate in k8s/ha/index.js, and the
+ * reseed standbyBoot in k8s/ha/index.js, and the
  * failover/restore-side reseed wait below). 600s, raised from 300s
  * 2026-08-29: DigitalOcean CSI detach/attach settle pushed a HEALTHY
  * standby boot past 300s (run 33252884427 — the rollout wait timed out and
@@ -712,6 +712,177 @@ export async function swapPgdataViaHelperPod(
  */
 export const STALE_ATTACH_EVENT_PATTERN =
   /MountVolume\.MountDevice failed[\s\S]*?(does not exist and no size was specified|formatting disk failed)/;
+
+/**
+ * How long the stale-attachment signature must have held before a db rollout
+ * wait gives up on it. kubelet retries MountDevice with an exponential
+ * backoff (0.5s doubling, capped near 2 minutes), so a device that is merely
+ * slow to appear clears within the first few retries; two minutes of
+ * `mkfs` on a device that still does not exist is the stale state itself.
+ */
+export const STALE_ATTACH_PERSIST_MS = 120_000;
+
+/**
+ * The missing-device half of the signature. STALE_ATTACH_EVENT_PATTERN also
+ * admits any "formatting disk failed" (the reseed repair's wider net); the
+ * wait diagnosis names only the state it can name: mkfs against a device
+ * path that does not exist.
+ */
+const MISSING_DEVICE_PATTERN = /does not exist and no size was specified/;
+
+/**
+ * Read `kubectl get events -o json` for ONE db pod (the caller scopes the
+ * read to the pod's uid) and decide whether it is in the stale-attachment
+ * state: STALE_ATTACH_EVENT_PATTERN with a device that does not exist, held
+ * for at least `minPersistMs`. Pure. Both timestamps come from the cluster;
+ * this machine's clock is never compared with them. Unreadable input is no
+ * evidence. Reads the core/v1 shape (firstTimestamp/lastTimestamp/count) and
+ * the events.k8s.io one (eventTime + series).
+ *
+ * @param {string} eventsJson
+ * @param {{minPersistMs?: number}} [opts]
+ * @returns {{volume: string, count: number, persistedS: number}|null}
+ */
+export function persistentStaleAttach(eventsJson, { minPersistMs = STALE_ATTACH_PERSIST_MS } = {}) {
+  let items;
+  try {
+    items = JSON.parse(String(eventsJson))?.items;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(items)) return null;
+  for (const ev of items) {
+    const message = String(ev?.message ?? '');
+    if (!STALE_ATTACH_EVENT_PATTERN.test(message) || !MISSING_DEVICE_PATTERN.test(message)) {
+      continue;
+    }
+    const first = Date.parse(ev.firstTimestamp ?? ev.eventTime ?? '');
+    const last = Date.parse(ev.series?.lastObservedTime ?? ev.lastTimestamp ?? ev.eventTime ?? '');
+    if (!Number.isFinite(first) || !Number.isFinite(last) || last - first < minPersistMs) continue;
+    return {
+      volume: message.match(/for volume "([^"]+)"/)?.[1] ?? 'the db volume',
+      count: Number(ev.series?.count ?? ev.count ?? 1),
+      persistedS: Math.round((last - first) / 1000),
+    };
+  }
+  return null;
+}
+
+/**
+ * A db rollout wait stopped because the db volume is in the stale-attachment
+ * state. Its message says what that is and how to recover.
+ */
+export class StaleVolumeAttachmentError extends Error {
+  /** @param {{volume: string, count: number, persistedS: number}} stale */
+  constructor(stale) {
+    super(
+      `The db volume ${stale.volume} reads attached, but its device never appeared on the ` +
+        `database node: kubelet has tried to format a disk that does not exist for ` +
+        `${stale.persistedS}s (${stale.count} times). This is a stale volume attachment at ` +
+        'the provider, and waiting does not clear it. To recover, run ' +
+        `\`kubectl scale statefulset ${DB_STATEFULSET} --replicas=0 -n vibecarbon\` on that ` +
+        `cluster, delete the VolumeAttachment for ${stale.volume} ` +
+        '(`kubectl get volumeattachment`), wait a minute, then scale it back to 1 or re-run ' +
+        'the command that failed.',
+    );
+    this.name = 'StaleVolumeAttachmentError';
+    this.volume = stale.volume;
+    this.count = stale.count;
+    this.persistedS = stale.persistedS;
+  }
+}
+
+/** Every watcher read is bounded: kubectl's own request timeout, then the process. */
+const ATTACH_WATCH_REQUEST_TIMEOUT = '--request-timeout=20s';
+const ATTACH_WATCH_READ_TIMEOUT_MS = 30_000;
+
+/**
+ * Run a db rollout wait while watching the db pod for the stale-attachment
+ * state, and stop the wait early, with StaleVolumeAttachmentError, once it
+ * has held (persistentStaleAttach). Every db rollout wait that (re)attaches
+ * the db volume goes through here: the cold and redeploy rollout
+ * (awaitDbRollout), the deploy-side reseed's standby boot, and the failover
+ * WALG_ROLE rolls (k8sDbRolloutWait). A volume in that state never mounts by
+ * itself (DO e2e 2026-11-01: 600s of the same event; docs/mitigations.yml
+ * do-csi-stale-volumeattachment), so the rest of the budget would only delay
+ * the same failure.
+ *
+ * A diagnosis, not a recovery: nothing is retried or repaired, and a wait
+ * that fails without the signature rethrows its own error untouched.
+ *
+ * Each poll reads the CURRENT db-0's uid, then only that pod's events
+ * (`involvedObject.uid`), so the events an earlier, replaced db-0 left behind
+ * (a recovery redeploy) never count. Every read carries the stop signal and a
+ * bounded timeout, and is raced against the stop, so a hung read can neither
+ * hang the wait nor outlive it.
+ *
+ * @template T
+ * @param {(signal: AbortSignal) => Promise<T>} waitRollout - the rollout wait; must honor the signal
+ * @param {object} o
+ * @param {(argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>} o.kubectl - runs `kubectl <argv>` against the cluster (locally, or over ssh) and returns stdout
+ * @param {number} [o.pollMs]
+ * @returns {Promise<T>}
+ */
+export async function watchDbAttach(waitRollout, { kubectl, pollMs = 15_000 }) {
+  const rollout = new AbortController();
+  const stop = new AbortController();
+  const stopped = new Promise((resolve) => stop.signal.addEventListener('abort', resolve));
+  let stale = null;
+  const read = (argv) =>
+    Promise.race([
+      kubectl([...argv, ATTACH_WATCH_REQUEST_TIMEOUT], {
+        signal: stop.signal,
+        timeout: ATTACH_WATCH_READ_TIMEOUT_MS,
+      }),
+      stopped.then(() => null),
+    ]);
+  const pause = (ms) =>
+    new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      stop.signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  const watch = (async () => {
+    while (!stop.signal.aborted) {
+      await pause(pollMs);
+      if (stop.signal.aborted) return;
+      try {
+        const pod = await read(['get', 'pod', DB_POD, '-n', 'vibecarbon', '-o', 'json']);
+        const uid = pod && JSON.parse(String(pod))?.metadata?.uid;
+        if (!uid || stop.signal.aborted) continue;
+        const events = await read([
+          'get',
+          'events',
+          '-n',
+          'vibecarbon',
+          '--field-selector',
+          `involvedObject.uid=${uid}`,
+          '-o',
+          'json',
+        ]);
+        if (events == null) continue;
+        stale = persistentStaleAttach(events);
+      } catch {
+        continue; // an unreadable pod or listing is no evidence
+      }
+      if (stale) {
+        rollout.abort();
+        return;
+      }
+    }
+  })();
+  try {
+    return await waitRollout(rollout.signal);
+  } catch (err) {
+    if (stale) throw new StaleVolumeAttachmentError(stale);
+    throw err;
+  } finally {
+    stop.abort();
+    await watch;
+  }
+}
 
 /**
  * PersistentVolume names bound to the db StatefulSet's claim (DB_PVC,

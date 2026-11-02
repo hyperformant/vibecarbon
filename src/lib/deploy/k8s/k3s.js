@@ -97,7 +97,13 @@ import { collectComposeBuildArgs } from '../compose/build-args.js';
 import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
-import { READ_WRITE_PGOPTIONS, restoreRolloutTimeoutS } from '../replication.js';
+import {
+  READ_WRITE_PGOPTIONS,
+  REPL_PORT,
+  restoreRolloutTimeoutS,
+  StaleVolumeAttachmentError,
+  watchDbAttach,
+} from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
 import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
 import { caSlug, tlsSnapshotS3Prefix } from '../tls-snapshot.js';
@@ -370,7 +376,7 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * are an input, so a rerun that restores another base re-applies.
  *
  * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string, backupConfig?: {schedule?: string, retentionDays?: number} }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -393,6 +399,9 @@ export function buildK3sApplyInputs({
     restore: restore ? `${restore.backup} ${restore.target}` : '',
     storageClass: storageClass ?? '',
     role: role === 'standby' ? 'standby' : 'primary',
+    // An HA cluster's db is rendered with the replication hostPort, a single
+    // cluster's is not (renderK8sBase): a different db, so a different gate.
+    replicationHostPort: rendersReplicationHostPort(role),
     appStorageKeyDigest: appStorageAccessKey ? fingerprintSecret(appStorageAccessKey) : '',
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
@@ -2247,7 +2256,7 @@ async function describeDbPods(env) {
  *
  * Deliberately longer than DB_STS_BOOT_TIMEOUT_S (600s, src/lib/deploy/
  * replication.js), the shared budget for re-booting an EXISTING db pod (the
- * HA hostPort recreate, the reseed standby boot): those waits pay a CSI
+ * reseed standby boot): that wait pays a CSI
  * re-attach, this one also pays the first provision, the image pull and
  * initdb. Must never drop below that floor:
  * tests/unit/deploy/db-sts-boot-timeout-census.test.ts pins it.
@@ -2361,23 +2370,45 @@ export async function assertNoRetiredChartDb({
  * last many minutes, and in HA the standby cluster's deploy runs in parallel
  * with the primary's.
  *
- * @param {{env: NodeJS.ProcessEnv, timeoutS?: number}} args
+ * Fails EARLY on a stale volume attachment (watchDbAttach): the wait runs
+ * while the current db pod's events are read every `staleAttachPollMs`, and
+ * once the mkfs-on-a-missing-device signature has held it stops and names
+ * that state. It repairs nothing and retries nothing.
+ *
+ * @param {{env: NodeJS.ProcessEnv, timeoutS?: number, staleAttachPollMs?: number, waitRollout?: typeof runKubectlWithRetry, kubectl?: (argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>}} args
  */
-export async function awaitDbRollout({ env, timeoutS = DB_ROLLOUT_TIMEOUT_S }) {
+export async function awaitDbRollout({
+  env,
+  timeoutS = DB_ROLLOUT_TIMEOUT_S,
+  staleAttachPollMs = 15_000,
+  waitRollout = runKubectlWithRetry,
+  kubectl = localKubectlReader(env),
+}) {
   const started = Date.now();
   try {
-    await runKubectlWithRetry(
-      [
-        '-n',
-        'vibecarbon',
-        'rollout',
-        'status',
-        `statefulset/${DB_STATEFULSET}`,
-        `--timeout=${timeoutS}s`,
-      ],
-      { env, description: `awaitDbRollout: rollout status statefulset/${DB_STATEFULSET}` },
+    await watchDbAttach(
+      (signal) =>
+        waitRollout(
+          [
+            '-n',
+            'vibecarbon',
+            'rollout',
+            'status',
+            `statefulset/${DB_STATEFULSET}`,
+            `--timeout=${timeoutS}s`,
+          ],
+          {
+            env,
+            description: `awaitDbRollout: rollout status statefulset/${DB_STATEFULSET}`,
+            signal,
+          },
+        ),
+      { kubectl, pollMs: staleAttachPollMs },
     );
   } catch (err) {
+    if (err instanceof StaleVolumeAttachmentError) {
+      throw new Error(`awaitDbRollout: ${err.message} ${await describeDbPods(env)}`);
+    }
     throw new Error(
       `awaitDbRollout: statefulset/${DB_STATEFULSET} did not become Ready within ${timeoutS}s ` +
         `(${(err?.message || String(err)).slice(0, 300)}). ${await describeDbPods(env)}`,
@@ -2386,6 +2417,17 @@ export async function awaitDbRollout({ env, timeoutS = DB_ROLLOUT_TIMEOUT_S }) {
   console.error(
     `[db] statefulset/${DB_STATEFULSET} Ready after ${Math.round((Date.now() - started) / 1000)}s`,
   );
+}
+
+/**
+ * `kubectl <argv>` against the deploy's own kubeconfig, returning stdout: the
+ * reader watchDbAttach polls the db pod's events with during awaitDbRollout.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {(argv: string[], opts?: {signal?: AbortSignal, timeout?: number}) => Promise<string>}
+ */
+function localKubectlReader(env) {
+  return (argv, opts) => runCommandAsync(['kubectl', ...argv], { env, silent: true, ...opts });
 }
 
 /**
@@ -2643,6 +2685,116 @@ const REGISTRY_MANIFEST = 'registry/local-registry.yaml';
 const CERTIFICATE_MANIFEST = 'traefik/certificate.yaml';
 
 /**
+ * Strategic-merge patch that binds a k8s-ha cluster's postgres to
+ * `127.0.0.1:REPL_PORT` (hostPort + hostIP) -> containerPort 5432 on its
+ * database node. The primary repl-gateway (hostNetwork socat) relays tunnel
+ * traffic to `127.0.0.1:REPL_PORT`; this hostPort IS that local listener, and
+ * its only consumer. `hostIP: '127.0.0.1'` is what makes "localhost-only"
+ * true: a hostPort with no hostIP is published on EVERY node address (public
+ * and private), leaving the cloud firewall (which admits only WG udp/51821)
+ * as the sole barrier. One db pod per node (StatefulSet), so the node's
+ * :REPL_PORT is uncontended. Enforced by
+ * tests/unit/deploy/hostport-binding-census.test.ts.
+ *
+ * Kept out of k8s/base/db/statefulset.yaml itself: only an HA cluster needs
+ * the node port, and a single cluster's db stays cluster-internal. Keyed by
+ * container `name` + port `containerPort`/`protocol`, so it updates the
+ * existing port entry in place (adds hostPort + hostIP) rather than appending
+ * a duplicate.
+ * @returns {object}
+ */
+export function buildDbHostPortPatch() {
+  return {
+    spec: {
+      template: {
+        spec: {
+          containers: [
+            {
+              name: DB_CONTAINER,
+              // `protocol` is part of kustomize's merge key for ports: a
+              // patch entry without it matches nothing and is DROPPED
+              // silently (kubectl kustomize v5.7), so the db would render
+              // with no hostPort at all.
+              ports: [
+                { containerPort: 5432, protocol: 'TCP', hostPort: REPL_PORT, hostIP: '127.0.0.1' },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+/**
+ * Whether this cluster's db StatefulSet is rendered with the replication
+ * hostPort: every k8s-ha cluster, primary AND standby; never a single
+ * cluster (role undefined).
+ *
+ * WHY at render time, on both roles (DO e2e 2026-11-01, d4): the hostPort
+ * used to be `kubectl patch`ed into the primary's running StatefulSet by
+ * configurePrimaryForReplication, about a minute after the db's first volume
+ * attach. The patch recreated db-0, so the volume detached and re-attached on
+ * the same node within seconds, which is the churn that trips the DO CSI
+ * stale-attachment state (docs/mitigations.yml
+ * `do-csi-stale-volumeattachment`): kubelet looped mkfs on a device that never
+ * appeared and the primary db never came back. Rendered here, the
+ * StatefulSet is created once with it. The standby gets it too, so a
+ * failover's promoted cluster is already a complete primary and no redeploy
+ * ever restarts a serving database to add it. On the standby it is unused
+ * and binds only the node's loopback.
+ *
+ * @param {'primary'|'standby'|undefined} role
+ * @returns {boolean}
+ */
+export function rendersReplicationHostPort(role) {
+  return role === 'primary' || role === 'standby';
+}
+
+/** The rendered db/ kustomize patch file carrying buildDbHostPortPatch. */
+const DB_HOSTPORT_PATCH_FILE = 'replication-hostport.patch.json';
+
+/**
+ * Add buildDbHostPortPatch to a RENDERED k8s/base copy as a kustomize patch
+ * of `db/`, so `kubectl apply -k` creates the StatefulSet with it. Refuses a
+ * db/kustomization.yaml that already declares patches rather than guess how
+ * to merge into an operator's own list.
+ *
+ * @param {string} rendered - renderK8sPlaceholders' temp copy of k8s/base
+ */
+function addDbReplicationHostPort(rendered) {
+  const kustomization = join(rendered, 'db', 'kustomization.yaml');
+  if (!existsSync(kustomization)) {
+    throw new Error(
+      'renderK8sBase: k8s/base/db/kustomization.yaml is missing, so the k8s-ha replication ' +
+        'hostPort cannot be added to the db StatefulSet. Run `vibecarbon upgrade` to restore it.',
+    );
+  }
+  const text = readFileSync(kustomization, 'utf-8');
+  if (/^(patches|patchesStrategicMerge|patchesJson6902):/m.test(text)) {
+    throw new Error(
+      'renderK8sBase: k8s/base/db/kustomization.yaml already declares patches, so the ' +
+        'k8s-ha replication hostPort cannot be added to the db StatefulSet. Move those ' +
+        'patches elsewhere, or run `vibecarbon upgrade` to restore the shipped file.',
+    );
+  }
+  const patch = {
+    apiVersion: 'apps/v1',
+    kind: 'StatefulSet',
+    metadata: { name: DB_STATEFULSET },
+    ...buildDbHostPortPatch(),
+  };
+  writeFileSync(
+    join(rendered, 'db', DB_HOSTPORT_PATCH_FILE),
+    `${JSON.stringify(patch, null, 2)}\n`,
+  );
+  writeFileSync(
+    kustomization,
+    `${text.replace(/\n*$/, '\n')}\n# k8s-ha: the replication hostPort, added at render time (renderK8sBase).\npatches:\n  - path: ${DB_HOSTPORT_PATCH_FILE}\n`,
+  );
+}
+
+/**
  * Render `k8s/base` for apply: every db StatefulSet placeholder
  * (buildDbManifestValues) plus `{{K8S_STORAGE_CLASS}}`, which the db's
  * volumeClaimTemplate and the add-on PVCs `add redis` / `add n8n` copy into
@@ -2665,13 +2817,25 @@ const CERTIFICATE_MANIFEST = 'traefik/certificate.yaml';
  * so cert-manager never sees the `app.example.com` placeholder: a rendered
  * Certificate that still names it is refused, and a missing `tls` throws.
  *
+ * On a k8s-ha cluster (`replicationHostPort`), the db StatefulSet also gets
+ * its replication hostPort (buildDbHostPortPatch) as a kustomize patch in the
+ * rendered `db/`, so the StatefulSet is CREATED with it and never has to be
+ * restarted to gain it (see rendersReplicationHostPort).
+ *
  * @param {string} dir - the project's `k8s/base`
  * @param {Record<string, string>} values - buildDbManifestValues' output
  * @param {{schedule?: string, retentionDays?: number}} [backupConfig]
  * @param {{ dnsNames: string[], issuerName: string, effectiveIssuer: string }} tls
+ * @param {{ replicationHostPort?: boolean }} [opts]
  * @returns {string} the rendered temp copy to pass to `kubectl apply -k`
  */
-export function renderK8sBase(dir, values, backupConfig, tls) {
+export function renderK8sBase(
+  dir,
+  values,
+  backupConfig,
+  tls,
+  { replicationHostPort = false } = {},
+) {
   if (!tls?.dnsNames?.length || !tls.issuerName || !tls.effectiveIssuer) {
     throw new Error(
       'renderK8sBase: no TLS certificate to render (dnsNames, issuerName, effectiveIssuer)',
@@ -2705,6 +2869,14 @@ export function renderK8sBase(dir, values, backupConfig, tls) {
       cronjob,
       renderBackupCronJob(readFileSync(cronjob, 'utf-8'), resolveBackupSettings(backupConfig)),
     );
+  }
+  if (replicationHostPort) {
+    try {
+      addDbReplicationHostPort(rendered);
+    } catch (err) {
+      rmSync(rendered, { recursive: true, force: true });
+      throw err;
+    }
   }
   // The TLS Certificate is deploy-owned (Flux does not build it): rendered
   // with this deploy's names and issuer, so cert-manager never sees the
@@ -4078,6 +4250,9 @@ export async function applyK3sManifests({
     },
     backupConfig,
     { dnsNames, issuerName, effectiveIssuer },
+    // k8s-ha: the db StatefulSet is created with its replication hostPort,
+    // never patched (and so restarted) to gain it later.
+    { replicationHostPort: rendersReplicationHostPort(role) },
   );
   try {
     // The last issued certificate goes back into Secret/vibecarbon-tls before

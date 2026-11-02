@@ -61,7 +61,6 @@ import {
 } from './lib/deploy/k8s/tls-restore.js';
 import {
   assertStandbyNotWriteFenced,
-  DB_STS_BOOT_TIMEOUT_S,
   fenceDatabaseWrites,
   getReplPasswordFromSecret,
   isStandbyStreaming,
@@ -81,7 +80,7 @@ import {
 } from './lib/deploy/walg-audit.js';
 import {
   demoteK8sWalgRole,
-  k8sDbRolloutStatusArgv,
+  k8sDbRolloutWait,
   k8sSetWalgRoleArgv,
   walgRoleDegradedMessage,
 } from './lib/deploy/walg-role.js';
@@ -1872,9 +1871,7 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
       if (role === 'primary') return true;
       return quietly(async () => {
         await kubectl(primary.ip, k8sSetWalgRoleArgv('primary'), { timeout: 60_000 });
-        await kubectl(primary.ip, k8sDbRolloutStatusArgv(DB_STS_BOOT_TIMEOUT_S), {
-          timeout: (DB_STS_BOOT_TIMEOUT_S + 30) * 1000,
-        });
+        await k8sDbRolloutWait({ kubectl, ip: primary.ip, pollMs: deps.attachWatchPollMs });
       });
     },
     startPrimaryWriters: async () => {
@@ -1927,12 +1924,10 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
   const health = { promoted: { ok: false }, demoted: { ok: false } };
   try {
     await kubectl(promotedIp, k8sSetWalgRoleArgv('primary'));
-    // Blocks on the pod actually rolling. Budget sits just above the kubectl
-    // --timeout so the remote command reports the rollout failure rather than
-    // the SSH layer reporting a timeout with no detail.
-    await kubectl(promotedIp, k8sDbRolloutStatusArgv(DB_STS_BOOT_TIMEOUT_S), {
-      timeout: (DB_STS_BOOT_TIMEOUT_S + 30) * 1000,
-    });
+    // Blocks on the pod actually rolling (k8sDbRolloutWait: the ssh budget
+    // sits just above the kubectl --timeout, and a stale volume attachment
+    // on the re-attach stops the wait early, by name).
+    await k8sDbRolloutWait({ kubectl, ip: promotedIp, pollMs: deps.attachWatchPollMs });
     // requirePrimary: the ONLY reason this audit is here is to catch a promoted
     // node still reading `standby`, which the deploy-time probe treats as a
     // legitimate skip.

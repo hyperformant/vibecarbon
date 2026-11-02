@@ -47,9 +47,11 @@ import {
   checkAppEndpointsReady,
   checkDnsFlipVerified,
   checkOldPrimaryDisarmed,
+  checkPrimaryDbCreatedOnce,
   checkPrimaryNotRestarted,
   checkSecondFailoverRefused,
   checkSlotCapped,
+  type IncarnationRead,
   providerApiAReader,
   readDbIncarnation,
   readServingIp,
@@ -1401,6 +1403,9 @@ export async function runLifecycle(
   // end of verify-deploy, so the first (uncalibrated) real runs still reach
   // every downstream correctness check.
   let deployBudgetMiss: DeployBudgetResult | null = null;
+  // k8s-ha: the primary db-0 as the cold deploy left it, compared at
+  // verify-deploy (primary_db_created_once). Null until a cold deploy passes.
+  let primaryDbAtDeploy: IncarnationRead | null = null;
 
   // The SSH-unreachability memo is process-wide; a parallel/kept-rig run must
   // not inherit a previous scenario's dead hosts (IPs get recycled).
@@ -2439,9 +2444,28 @@ export async function runLifecycle(
               replResults.push(
                 ...(await assertPilotLightStandby(standbyIp, { sshKeyPath, label: 'standby' })),
               );
-              // The first deploy's hostPort patch recreates db-0 and nothing
-              // rollout-restarts the app any more: it must reconnect on its own.
+              // Nothing rollout-restarts the app after the db is up (the db's
+              // replication hostPort is rendered before its first apply, so
+              // the replication setup never recreates db-0): the app's
+              // endpoints must be Ready on their own.
               replResults.push(await checkAppEndpointsReady({ primaryIp, sshKeyPath }));
+              if (primaryDbAtDeploy) {
+                replResults.push(
+                  await checkPrimaryDbCreatedOnce({
+                    mode: config.mode,
+                    projectName: config.projectName,
+                    ip: primaryIp,
+                    sshKeyPath,
+                    atDeploy: primaryDbAtDeploy,
+                    atVerify: await readDbIncarnation({
+                      mode: config.mode,
+                      projectName: config.projectName,
+                      ip: primaryIp,
+                      sshKeyPath,
+                    }),
+                  }),
+                );
+              }
             }
             if (stepName === 'verify-deploy') {
               replResults.push(
@@ -3357,6 +3381,19 @@ EOF`;
               );
             }
 
+            // The primary db-0 a cold k8s-ha deploy ended with. verify-deploy
+            // proves it is still the same pod and was never rolled
+            // (primary_db_created_once): the 2026-11-01 DO failure was a
+            // replication-time patch recreating it right after its first attach.
+            if (cold && config.mode === 'k8s-ha') {
+              primaryDbAtDeploy = await readDbIncarnation({
+                mode: config.mode,
+                projectName: config.projectName,
+                ip: resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp,
+                sshKeyPath,
+              });
+            }
+
             // Per-mode cold-deploy budgets (deploy-budget.ts): the deploy's
             // own [perf] and [state] lines against D1's two columns, the cold
             // image bytes and the HA lock invariants. The numbers land in
@@ -3436,7 +3473,8 @@ EOF`;
             };
             // HA: a warm deploy must not bounce the serving primary (the
             // replication settings are on the db argv, and on k8s the
-            // dbHostPort patch is a no-op once applied).
+            // replication hostPort is rendered into the db StatefulSet, so a
+            // re-apply leaves its pod template unchanged).
             if (config.mode === 'compose-ha' || config.mode === 'k8s-ha') {
               await assertPrimaryNotRestartedAcross(stepId, deploy);
             } else {

@@ -443,11 +443,12 @@ async function haK8sProvisionClusters(ctx) {
   });
 
   // With the transport up, make the PRIMARY replication-ready the moment its
-  // whole deploy completes, never earlier: the hostPort patch recreates the
-  // primary db pod, which must not overlap the primary's own migrations,
-  // audits and backup verification (ruling R6). It overlaps the standby arm
-  // whenever the primary finishes first. Same opportunistic contract: false
-  // leaves it to setupReplication's serial path.
+  // whole deploy completes, never earlier: it execs into the primary db, which
+  // must not overlap the primary's own migrations, audits and backup
+  // verification (ruling R6). It no longer restarts that db (the hostPort is
+  // rendered before the db's first apply; DO e2e 2026-11-01). It overlaps the
+  // standby arm whenever the primary finishes first. Same opportunistic
+  // contract: false leaves it to setupReplication's serial path.
   const primaryConfig = transportPrep
     .then(async (prepared) => {
       if (!prepared) return false;

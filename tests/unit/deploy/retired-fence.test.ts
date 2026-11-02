@@ -41,6 +41,7 @@ import {
   RETIRED_ROLE_KEY,
   reconcileRetiredFence,
   retiredSides,
+  settleK8sDb,
 } from '../../../src/lib/deploy/retired-fence.js';
 import { liftStrandedWriteFence } from '../../../src/lib/deploy/write-fence.js';
 
@@ -983,5 +984,62 @@ describe('the k8s backup CronJob refuses on a retired cluster', () => {
       expect(r.status).toBe(0);
       expect(r.calls).toContain('kubectl exec');
     }
+  });
+});
+
+describe('the k8s db settle names a stale volume attachment', () => {
+  const vol = 'pvc-retired-1';
+  const staleCluster = (rollout: 'hang' | 'ok' | 'fail') =>
+    (async (_ip: string, argv: string[], opts: { signal?: AbortSignal } = {}) => {
+      const cmd = argv.join(' ');
+      if (cmd.includes('rollout status statefulset/db')) {
+        if (rollout === 'ok') return '';
+        if (rollout === 'fail') throw new Error('timed out waiting for the condition');
+        return new Promise((_r, reject) =>
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted'))),
+        );
+      }
+      if (cmd.startsWith('get pod db-0')) {
+        return JSON.stringify({ metadata: { name: 'db-0', uid: 'retired-uid' } });
+      }
+      if (cmd.includes('involvedObject.uid=retired-uid')) {
+        return JSON.stringify({
+          items: [
+            {
+              reason: 'FailedMount',
+              message:
+                `MountVolume.MountDevice failed for volume "${vol}" : formatting disk failed: ` +
+                `mkfs.ext4 /dev/disk/by-id/scsi-0DO_Volume_${vol} does not exist and no size was specified`,
+              count: 7,
+              firstTimestamp: '2026-11-02T10:00:00Z',
+              lastTimestamp: '2026-11-02T10:02:30Z',
+            },
+          ],
+        });
+      }
+      return '';
+    }) as never;
+
+  it('reports the stale attachment once, by name, and settles as not done', async () => {
+    const warned: string[] = [];
+    const ok = await settleK8sDb({
+      kubectl: staleCluster('hang'),
+      ip: RETIRED_IP,
+      warn: (l: string) => warned.push(l),
+      pollMs: 1,
+    });
+    expect(ok).toBe(false);
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain(RETIRED_IP);
+    expect(warned[0]).toContain(vol);
+    expect(warned[0]).toMatch(/stale volume attachment/i);
+  });
+
+  it('a plain rollout failure stays a quiet false, a rollout that lands is true', async () => {
+    const warned: string[] = [];
+    const warn = (l: string) => warned.push(l);
+    expect(await settleK8sDb({ kubectl: staleCluster('fail'), ip: RETIRED_IP, warn })).toBe(false);
+    expect(await settleK8sDb({ kubectl: staleCluster('ok'), ip: RETIRED_IP, warn })).toBe(true);
+    expect(warned).toEqual([]);
   });
 });

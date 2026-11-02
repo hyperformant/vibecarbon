@@ -675,3 +675,75 @@ describe('Flux never applies the unrendered db StatefulSet', () => {
     expect(docs.some((d) => d.kind === 'Deployment' && d.metadata.name === 'app')).toBe(true);
   }, 60_000);
 });
+
+// ---------------------------------------------------------------------------
+// The db rollout wait fails fast on a stale volume attachment (watchDbAttach;
+// the watcher itself is db-attach-watch.test.ts's subject)
+// ---------------------------------------------------------------------------
+
+// The kubelet event the DO e2e of 2026-11-01 looped on for 600s (d4 primary).
+const MKFS_MISSING =
+  'MountVolume.MountDevice failed for volume "pvc-a769b72d-05d6-451d-adbe-c05698766f80" : ' +
+  'rpc error: code = Internal desc = formatting disk failed: exit status 1 cmd: ' +
+  "'mkfs.ext4 -F /dev/disk/by-id/scsi-0DO_Volume_pvc-a769b72d-05d6-451d-adbe-c05698766f80' " +
+  'output: "mke2fs 1.46.6 (1-Feb-2023)\\nThe file /dev/disk/by-id/scsi-0DO_Volume_pvc-a769b72d-' +
+  '05d6-451d-adbe-c05698766f80 does not exist and no size was specified.\\n"';
+
+/** A cluster whose db-0 is `uid` and whose event store holds `events` (any pod). */
+const clusterReader =
+  (uid: string, events: Doc[]) =>
+  async (argv: string[]): Promise<string> => {
+    if (argv.includes('pod')) return JSON.stringify({ metadata: { name: 'db-0', uid } });
+    const sel = String(argv[argv.indexOf('--field-selector') + 1] ?? '');
+    const want = sel.replace('involvedObject.uid=', '');
+    return JSON.stringify({ items: events.filter((e) => e.involvedObject?.uid === want) });
+  };
+const staleEvent = (uid: string) => ({
+  involvedObject: { kind: 'Pod', name: 'db-0', uid },
+  reason: 'FailedMount',
+  message: MKFS_MISSING,
+  count: 12,
+  firstTimestamp: '2026-11-01T16:07:07Z',
+  lastTimestamp: '2026-11-01T16:15:22Z',
+});
+
+describe('awaitDbRollout: a stale volume attachment fails the wait early, by name', () => {
+  // A rollout that never finishes on its own: it ends only when aborted.
+  const hangingRollout = (_args: string[], { signal }: { signal: AbortSignal }) =>
+    new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+
+  it('stops waiting on the current db-0 in the stale state, and says what to do', async () => {
+    const err = (await awaitDbRollout({
+      env,
+      staleAttachPollMs: 1,
+      waitRollout: hangingRollout,
+      kubectl: clusterReader('uid-now', [staleEvent('uid-now')]),
+    }).catch((e: Error) => e)) as Error;
+    expect(err.message).toMatch(/^awaitDbRollout: /);
+    expect(err.message).toContain('pvc-a769b72d-05d6-451d-adbe-c05698766f80');
+    expect(err.message).toMatch(/stale volume attachment/i);
+    expect(err.message).toMatch(/volumeattachment/i);
+  });
+
+  it('the recovery redeploy does not trip on the replaced db-0 events', async () => {
+    let polls = 0;
+    let finish: () => void = () => {};
+    const read = clusterReader('uid-now', [staleEvent('uid-before')]);
+    const done = awaitDbRollout({
+      env,
+      staleAttachPollMs: 1,
+      waitRollout: () =>
+        new Promise<string>((resolve) => {
+          finish = () => resolve('');
+        }),
+      kubectl: async (argv: string[]) => {
+        if (argv.includes('events') && ++polls >= 3) finish();
+        return read(argv);
+      },
+    });
+    await expect(done).resolves.toBeUndefined();
+    expect(polls).toBeGreaterThanOrEqual(3);
+  });
+});

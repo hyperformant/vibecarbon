@@ -306,6 +306,63 @@ export function checkPrimaryNotRestarted(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// primary_db_created_once
+// ---------------------------------------------------------------------------
+
+/**
+ * primary_db_created_once: a cold k8s-ha deploy creates the primary db-0 once
+ * and attaches its volume once. The DO e2e of 2026-11-01 failed because a
+ * replication-time patch recreated db-0 seconds after its first attach, and
+ * the same-node re-attach went stale (docs/mitigations.yml
+ * do-csi-stale-volumeattachment). Two reads prove it did not happen again:
+ * the StatefulSet is still at generation 1 (its template never changed after
+ * creation, so nothing rolled the pod), and db-0 is still the pod the deploy
+ * ended with (uid read right after the deploy, compared at verify).
+ */
+export async function checkPrimaryDbCreatedOnce(
+  opts: SshArgs & {
+    ip: string | null;
+    atDeploy: IncarnationRead;
+    atVerify: IncarnationRead;
+  },
+): Promise<VerificationResult> {
+  const checkName = 'primary_db_created_once';
+  const { mode, projectName, ip, sshKeyPath, atDeploy, atVerify } = opts;
+  const readError = (r: IncarnationRead) => (r as { error: string }).error;
+  if (!atDeploy.ok)
+    return fail(checkName, `could not read db-0 after the deploy: ${readError(atDeploy)}`);
+  if (!atVerify.ok) return fail(checkName, `could not read db-0 at verify: ${readError(atVerify)}`);
+  const missing = missingHandle(ip, sshKeyPath, 'primary');
+  if (missing) return fail(checkName, `cannot reach the primary: ${missing}`);
+  const before = (atDeploy as { incarnation: DbIncarnation }).incarnation;
+  const after = (atVerify as { incarnation: DbIncarnation }).incarnation;
+  const run = opts.run ?? defaultRun(mode, projectName, sshKeyPath, 'primary');
+  const res = await run(
+    ip,
+    `${KUBECTL} get statefulset ${DB_STATEFULSET} -o jsonpath='{.metadata.generation}'`,
+  );
+  if (!res.ok) return fail(checkName, `could not read the db StatefulSet generation: ${res.error}`);
+  const generation = res.output.trim();
+  const details = { ip, atDeploy: before, atVerify: after, generation };
+  if (generation !== '1') {
+    return fail(
+      checkName,
+      `the primary db StatefulSet on ${ip} is at generation ${generation || '(empty)'}: its pod ` +
+        'template changed after creation, so db-0 was rolled and its volume re-attached',
+      details,
+    );
+  }
+  if (before.id !== after.id) {
+    return fail(
+      checkName,
+      `the primary db-0 on ${ip} was recreated after the deploy (${before.id} -> ${after.id})`,
+      details,
+    );
+  }
+  return { checkName, status: 'pass', details };
+}
+
+// ---------------------------------------------------------------------------
 // slot_capped
 // ---------------------------------------------------------------------------
 

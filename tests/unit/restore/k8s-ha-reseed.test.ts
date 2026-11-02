@@ -494,3 +494,56 @@ describe('runK8sRestore: the first base on the restored timeline (H2b)', () => {
     expect(markStandbyUnproven).toHaveBeenCalled();
   });
 });
+
+describe('runK8sRestore: the db bounce runs under the stale-attachment watch', () => {
+  it('a restore whose db re-attach goes stale fails early, naming the volume', async () => {
+    // `rollout restart statefulset/db` re-attaches the db volume on the same
+    // node (docs/mitigations.yml do-csi-stale-volumeattachment). The wait must
+    // stop on the signature instead of sitting out the whole restore budget.
+    const vol = 'pvc-restore-1';
+    vi.mocked(ssh.sshKubectl).mockImplementation((async (
+      _ip: string,
+      _key: string,
+      argv: string[],
+      opts: { signal?: AbortSignal } = {},
+    ) => {
+      const cmd = argv.join(' ');
+      if (cmd.includes('rollout status statefulset/db')) {
+        return new Promise((_r, reject) =>
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted'))),
+        );
+      }
+      if (cmd.startsWith('get pod db-0') && cmd.includes('--request-timeout=20s')) {
+        return JSON.stringify({ metadata: { name: 'db-0', uid: 'restored-uid' } });
+      }
+      if (cmd.includes('involvedObject.uid=restored-uid')) {
+        return JSON.stringify({
+          items: [
+            {
+              reason: 'FailedMount',
+              message:
+                `MountVolume.MountDevice failed for volume "${vol}" : formatting disk failed: ` +
+                `mkfs.ext4 -F /dev/disk/by-id/scsi-0DO_Volume_${vol} does not exist and no size was specified`,
+              count: 8,
+              firstTimestamp: '2026-11-02T10:00:00Z',
+              lastTimestamp: '2026-11-02T10:03:10Z',
+            },
+          ],
+        });
+      }
+      return promotedKubectl(_ip, _key, argv);
+    }) as never);
+    await expect(
+      runK8sRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: haEnvConfig,
+        ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+        reseedStandbyFromPrimary: vi.fn().mockResolvedValue('reseeded'),
+        readReplicationState: vi.fn().mockResolvedValue('streaming'),
+        attachWatchPollMs: 1,
+      }),
+    ).rejects.toThrow(/pvc-restore-1[\s\S]*stale volume attachment/);
+    vi.mocked(ssh.sshKubectl).mockImplementation(promotedKubectl as never);
+  });
+});

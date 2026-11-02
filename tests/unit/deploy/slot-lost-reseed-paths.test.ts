@@ -26,6 +26,18 @@ vi.mock('../../../src/lib/command.js', async (orig) => ({
     calls.push({ cmd, input: opts.input });
     // The lost slot: nothing streams from the primary.
     if (cmd.includes('pg_stat_replication')) return '';
+    // The primary db StatefulSet, created with its replication hostPort.
+    if (cmd.includes('get statefulset db -n vibecarbon -o json')) {
+      return JSON.stringify({
+        spec: {
+          template: {
+            spec: {
+              containers: [{ name: 'db', ports: [{ containerPort: 5432, hostPort: 5433 }] }],
+            },
+          },
+        },
+      });
+    }
     if (cmd.includes(`get pod db-0 -n vibecarbon -o json`)) {
       return JSON.stringify({
         status: { phase: 'Running' },

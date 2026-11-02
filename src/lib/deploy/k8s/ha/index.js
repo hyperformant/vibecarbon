@@ -8,8 +8,6 @@
  * cross-cluster WireGuard replication transport:
  * - buildReplGatewaySocatArgs / renderReplGatewayManifest — the repl-gateway
  *   DaemonSet that relays the WG tunnel to each node's postgres port
- * - buildDbHostPortPatch — hostPort patch so the standby's basebackup/streaming
- *   probe can reach the primary's postgres pod directly
  * - setupReplication — orchestrates the above into a working primary/standby
  *   streaming pair
  */
@@ -40,6 +38,7 @@ import {
   SYSTEM_IDENTIFIER_SQL,
   swapPgdataViaHelperPod,
   verifyStreaming,
+  watchDbAttach,
 } from '../../replication.js';
 import { readReplPassword } from '../../utils.js';
 import {
@@ -243,42 +242,23 @@ export async function withRegistryRelay(
 }
 
 /**
- * Strategic-merge patch that binds the primary's postgres to
- * `127.0.0.1:REPL_PORT` (hostPort + hostIP) → containerPort 5432 on the node.
- * The primary repl-gateway (hostNetwork socat) relays tunnel traffic to
- * `127.0.0.1:REPL_PORT`; this hostPort IS that local listener, and its only
- * consumer. `hostIP: '127.0.0.1'` is what makes "localhost-only" true: a
- * hostPort with no hostIP is published on EVERY node address (public and
- * private), leaving the cloud firewall (which admits only WG udp/51821) as the
- * sole barrier. Without this hostPort the db is reachable only inside the
- * cluster and the gateway's local relay target would have nothing to connect
- * to. One db pod per node (StatefulSet), so the node's :REPL_PORT is
- * uncontended. Enforced by tests/unit/deploy/hostport-binding-census.test.ts.
+ * The db container's 5432 hostPort in a `kubectl get statefulset -o json`
+ * read, or null. Pure. Parsed here rather than by a jsonpath filter: its
+ * `?()` would have to survive the joined-argv ssh transport's remote shell.
  *
- * Patched in here rather than written into k8s/base/db/statefulset.yaml: only
- * an HA cluster needs the node port, and a single cluster's db stays
- * cluster-internal. A strategic-merge patch keyed by container `name` + port
- * `containerPort` updates the existing port entry in place (adds hostPort + hostIP)
- * rather than appending a duplicate, and a later `kubectl apply` of k8s/base
- * leaves it alone (the three-way merge only removes fields the previous apply
- * set).
- * @returns {object}
+ * @param {string} stsJson
+ * @returns {number|null}
  */
-export function buildDbHostPortPatch() {
-  return {
-    spec: {
-      template: {
-        spec: {
-          containers: [
-            {
-              name: DB_CONTAINER,
-              ports: [{ containerPort: 5432, hostPort: REPL_PORT, hostIP: '127.0.0.1' }],
-            },
-          ],
-        },
-      },
-    },
-  };
+export function dbReplicationHostPort(stsJson) {
+  try {
+    const containers = JSON.parse(String(stsJson))?.spec?.template?.spec?.containers ?? [];
+    const port = (containers.find((c) => c?.name === DB_CONTAINER)?.ports ?? []).find(
+      (p) => p?.containerPort === 5432,
+    );
+    return port?.hostPort ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -570,35 +550,33 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
     }
   });
 
-  // 1b. Bind the primary's postgres to a node hostPort on loopback
-  // (127.0.0.1:REPL_PORT → containerPort 5432) so the primary repl-gateway's
-  // socat can relay tunnel traffic to it. Localhost-only on the node by its
-  // hostIP, not only by the firewall (the gateway is hostNetwork, so it shares
-  // the node netns). Without the
-  // hostPort the db is cluster-internal only and the gateway relay target has
-  // nothing to connect to. The strategic-merge patch travels via stdin
-  // (--patch-file /dev/stdin) so the JSON never hits argv / the remote shell's
-  // /proc/cmdline. The patch triggers a pod recreate; wait for the StatefulSet
-  // rollout before opening replication.
+  // 1b. The primary's postgres hostPort (127.0.0.1:REPL_PORT -> 5432), the
+  // primary repl-gateway's relay target. It is rendered into the db
+  // StatefulSet before its first apply (rendersReplicationHostPort in
+  // k8s/k3s.js), so this only READS it. It used to be patched in here, which
+  // recreated the freshly attached primary db pod; on DigitalOcean that quick
+  // detach/re-attach left a stale volume attachment and the primary db never
+  // came back (DO e2e 2026-11-01, docs/mitigations.yml
+  // do-csi-stale-volumeattachment). A cluster without it (a db applied by an
+  // older CLI and never re-applied since) fails here, loudly, rather than
+  // being restarted behind the operator's back.
   await perfAsync('deploy.ha.replication.dbHostPort', async () => {
-    await runCommandAsync(
+    const stsJson = await runCommandAsync(
       [
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        `kubectl patch statefulset ${DB_STATEFULSET} -n vibecarbon --type strategic --patch-file /dev/stdin`,
-      ],
-      { silent: true, input: JSON.stringify(buildDbHostPortPatch()) },
-    );
-    await runCommandAsync(
-      [
-        'ssh',
-        ...sshOpts,
-        `root@${primaryIp}`,
-        `kubectl rollout status statefulset/${DB_STATEFULSET} -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
+        `kubectl get statefulset ${DB_STATEFULSET} -n vibecarbon -o json`,
       ],
       { silent: true },
     );
+    if (dbReplicationHostPort(stsJson) !== REPL_PORT) {
+      throw new Error(
+        `The primary's db StatefulSet has no replication hostPort (127.0.0.1:${REPL_PORT}), ` +
+          'so the standby has nothing to replicate from. Its manifests predate this CLI ' +
+          'version. Run `vibecarbon deploy` again: the apply adds it (restarting the db once).',
+      );
+    }
   });
 
   // 2. Admit replication in pg_hba — from the WireGuard tunnel subnet AND the
@@ -672,7 +650,8 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
  * @param {string} [options.primaryDbPrivateIp] - Primary database node private IP (gateway bind + egress netpol)
  * @param {string} [options.standbyDbPrivateIp] - Standby database node private IP (gateway bind + egress netpol)
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
- * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort patch, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
+ * @param {number} [options.attachWatchPollMs] - test seam: watchDbAttach's poll interval on the standby boot wait
+ * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort check, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
  * @returns {Promise<{streaming: boolean, lastState: string, systemIdentifier: string|null}>} Replication status;
  *   systemIdentifier is the standby's, set only when streaming was verified
  */
@@ -916,8 +895,8 @@ export async function setupReplication(options) {
   // never argv.
   const stagingDir = '/var/lib/postgresql/data/.reseed_staging';
   // Probe retry budget (RCA 2026-07-06 e4 rig): the in-pod pg_isready wait can
-  // pass before the hostPort→relay path is reachable (the hostPort patch above
-  // recreates the pod on a first deploy) — a single-shot probe then skips the
+  // pass before the hostPort→relay path is reachable (the relay comes up with
+  // the tunnel and the repl-gateway pods) — a single-shot probe then skips the
   // entire reseed silently. 12 × 10s ≈ 2 min, each attempt logged in-script.
   const PROBE_ATTEMPTS = 12;
   const PROBE_DELAY_S = 10;
@@ -1046,16 +1025,32 @@ export async function setupReplication(options) {
   // slice separate from the swap itself. Budget is the shared
   // DB_STS_BOOT_TIMEOUT_S: at the old 300s, DigitalOcean's CSI
   // detach/attach settle failed a HEALTHY boot here (run 33252884427 — the
-  // wait timed out, the pod was Ready a minute later).
+  // wait timed out, the pod was Ready a minute later). The boot re-attaches
+  // the volume the swap pod just released, so the wait runs under
+  // watchDbAttach: a stale attachment stops it early, by name.
   await perfAsync('deploy.ha.replication.reseed.standbyBoot', () =>
-    runCommandAsync(
-      [
-        'ssh',
-        ...sshOpts,
-        `root@${standbyIp}`,
-        `kubectl rollout status statefulset/${dbSts} -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
-      ],
-      { silent: true },
+    watchDbAttach(
+      (signal) =>
+        runCommandAsync(
+          [
+            'ssh',
+            ...sshOpts,
+            `root@${standbyIp}`,
+            `kubectl rollout status statefulset/${dbSts} -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
+          ],
+          { silent: true, signal },
+        ),
+      {
+        kubectl: (argv, opts) =>
+          runCommandAsync(
+            ['ssh', ...sshOpts, `root@${standbyIp}`, ['kubectl', ...argv].join(' ')],
+            {
+              silent: true,
+              ...opts,
+            },
+          ),
+        pollMs: options.attachWatchPollMs,
+      },
     ),
   );
 

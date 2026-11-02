@@ -108,6 +108,8 @@ let certManagerWaitExit = 0;
 // The rendered registry manifest as `kubectl apply -k <rendered base>` saw it
 // (the rendered copy is removed right after the apply).
 let registryAtBaseApply: string | null = null;
+// The rendered db/ (kustomization + any patch file) as `apply -k base` saw it.
+let dbAtBaseApply: { kustomization: string; hostPortPatch: string | null } | null = null;
 // The rendered vibecarbon-tls Certificate as `kubectl apply -k <rendered
 // base>` saw it, parsed.
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
@@ -229,6 +231,14 @@ function installSpawnMock() {
       const registry = join(target, 'registry', 'local-registry.yaml');
       if (/k8s-base/.test(target) && existsSync(registry)) {
         registryAtBaseApply = readFileSync(registry, 'utf-8');
+      }
+      const dbKustomization = join(target, 'db', 'kustomization.yaml');
+      if (/k8s-base/.test(target) && existsSync(dbKustomization)) {
+        const patch = join(target, 'db', 'replication-hostport.patch.json');
+        dbAtBaseApply = {
+          kustomization: readFileSync(dbKustomization, 'utf-8'),
+          hostPortPatch: existsSync(patch) ? readFileSync(patch, 'utf-8') : null,
+        };
       }
       const certificate = join(target, 'traefik', 'certificate.yaml');
       if (/k8s-base/.test(target) && existsSync(certificate)) {
@@ -399,6 +409,11 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
   writeFileSync(
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
     readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
+  );
+  // A k8s-ha role renders its replication hostPort into db/ as a kustomize patch.
+  writeFileSync(
+    join(dir, 'k8s', 'base', 'db', 'kustomization.yaml'),
+    readFileSync(join(__dirname, '../../../carbon/k8s/base/db/kustomization.yaml'), 'utf-8'),
   );
   if (withRegistry) {
     mkdirSync(join(dir, 'k8s', 'base', 'registry'), { recursive: true });
@@ -629,6 +644,47 @@ describe("applyK3sManifests binds the registry hostPort to the deploy's master p
       applyK3sManifests(baseArgs(makeProjectDir({ withRegistry: true }))),
     ).rejects.toThrow(/MASTER_PRIVATE_IP/);
     expect(registryAtBaseApply).toBeNull();
+  });
+});
+
+describe('applyK3sManifests creates an HA db with its replication hostPort (never patched in later)', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    deliverGate = null;
+    deliverError = null;
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    dbAtBaseApply = null;
+    installSpawnMock();
+  });
+
+  for (const role of ['primary', 'standby'] as const) {
+    it(`${role}: the applied db/ carries the 127.0.0.1:5433 patch`, async () => {
+      const { applyK3sManifests } = await k3sPromise;
+      await applyK3sManifests({ ...baseArgs(makeProjectDir()), role });
+      expect(dbAtBaseApply?.kustomization).toMatch(
+        /patches:\n {2}- path: replication-hostport\.patch\.json/,
+      );
+      const patch = JSON.parse(String(dbAtBaseApply?.hostPortPatch));
+      expect(patch.kind).toBe('StatefulSet');
+      expect(patch.metadata.name).toBe('db');
+      expect(patch.spec.template.spec.containers[0].ports[0]).toEqual({
+        containerPort: 5432,
+        protocol: 'TCP',
+        hostPort: 5433,
+        hostIP: '127.0.0.1',
+      });
+    });
+  }
+
+  it('single cluster: the applied db/ has no patch at all', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(dbAtBaseApply).not.toBeNull();
+    expect(dbAtBaseApply?.kustomization).not.toMatch(/patches/);
+    expect(dbAtBaseApply?.hostPortPatch).toBeNull();
   });
 });
 

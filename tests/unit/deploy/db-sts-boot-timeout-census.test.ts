@@ -14,7 +14,6 @@
  *
  * Family (enumerated 2026-08-29, both modules that boot the db sts):
  *   - deploy-side reseed standbyBoot   (src/lib/deploy/k8s/ha/index.js)
- *   - deploy-side dbHostPort recreate  (src/lib/deploy/k8s/ha/index.js)
  *   - failover/restore-side reseed boot (src/lib/deploy/replication.js,
  *     whose SSH client timeout must stay ABOVE the kubectl budget —
  *     tests/unit/failover/reseed-standby.test.ts pins that invariant with the numbers)
@@ -138,9 +137,11 @@ describe('db StatefulSet boot/rollout budgets (the CSI-settle class)', () => {
     });
   }
 
-  it('both db-sts boot sites in the ha module use the shared constant, not a re-derived number', () => {
+  it('the db-sts boot site in the ha module uses the shared constant, not a re-derived number', () => {
     const source = readFileSync('src/lib/deploy/k8s/ha/index.js', 'utf8');
     const uses = source.match(/\$\{DB_STS_BOOT_TIMEOUT_S\}s/g) ?? [];
-    expect(uses.length, 'expected the standbyBoot AND dbHostPort waits to interpolate it').toBe(2);
+    // The reseed standbyBoot wait. The dbHostPort recreate wait is gone: the
+    // hostPort is rendered before the db's first apply (DO e2e 2026-11-01).
+    expect(uses.length, 'expected the standbyBoot wait to interpolate it').toBe(1);
   });
 });
