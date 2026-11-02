@@ -156,14 +156,7 @@ describe('the HA db StatefulSet carries its replication hostPort from its first 
     expect(rendersReplicationHostPort('standby')).toBe(true);
     expect(rendersReplicationHostPort(undefined)).toBe(false);
   });
-
-  it('applyK3sManifests hands the role decision to the base render', () => {
-    const src = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
-    const fn = src.slice(src.indexOf('export async function applyK3sManifests'));
-    expect(fn.slice(0, fn.indexOf('renderK8sBase(') + 1200)).toMatch(
-      /replicationHostPort:\s*rendersReplicationHostPort\(role\)/,
-    );
-  });
+  // applyK3sManifests driving it per role: k3s-apply-manifests-ordering.test.ts.
 });
 
 describe('configurePrimaryForReplication never restarts the primary db', () => {

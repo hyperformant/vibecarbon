@@ -376,7 +376,7 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * are an input, so a rerun that restores another base re-applies.
  *
  * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string, backupConfig?: {schedule?: string, retentionDays?: number} }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -399,6 +399,9 @@ export function buildK3sApplyInputs({
     restore: restore ? `${restore.backup} ${restore.target}` : '',
     storageClass: storageClass ?? '',
     role: role === 'standby' ? 'standby' : 'primary',
+    // An HA cluster's db is rendered with the replication hostPort, a single
+    // cluster's is not (renderK8sBase): a different db, so a different gate.
+    replicationHostPort: rendersReplicationHostPort(role),
     appStorageKeyDigest: appStorageAccessKey ? fingerprintSecret(appStorageAccessKey) : '',
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
@@ -2814,9 +2817,6 @@ function addDbReplicationHostPort(rendered) {
  * so cert-manager never sees the `app.example.com` placeholder: a rendered
  * Certificate that still names it is refused, and a missing `tls` throws.
  *
- * @param {string} dir - the project's `k8s/base`
- * @param {Record<string, string>} values - buildDbManifestValues' output
- * @param {{schedule?: string, retentionDays?: number}} [backupConfig]
  * On a k8s-ha cluster (`replicationHostPort`), the db StatefulSet also gets
  * its replication hostPort (buildDbHostPortPatch) as a kustomize patch in the
  * rendered `db/`, so the StatefulSet is CREATED with it and never has to be

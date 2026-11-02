@@ -120,7 +120,7 @@ describe('buildK3sApplyInputs — bundled manifest tree is part of the gate', ()
     ).toBe(false);
   });
 
-  it('a same-role redeploy still skips, and single-cluster hashes as primary', () => {
+  it('a same-role redeploy still skips', () => {
     const t1 = new StateTracker('proj', 'e4-standby');
     t1.startStep('k3s-apply', buildK3sApplyInputs({ ...baseArgs(), role: 'standby' }));
     t1.completeStep('k3s-apply');
@@ -130,9 +130,22 @@ describe('buildK3sApplyInputs — bundled manifest tree is part of the gate', ()
         buildK3sApplyInputs({ ...baseArgs(), role: 'standby' }),
       ),
     ).toBe(true);
-    expect(buildK3sApplyInputs(baseArgs())).toEqual(
-      buildK3sApplyInputs({ ...baseArgs(), role: 'primary' }),
-    );
+  });
+
+  it('an HA cluster and a single cluster render different dbs, so they never share a skip', () => {
+    // The HA db StatefulSet carries the replication hostPort from its first
+    // apply (rendersReplicationHostPort); a single cluster's does not. A gate
+    // blind to that would skip the apply that adds it, and the replication
+    // setup would then find no hostPort to relay to.
+    const single = buildK3sApplyInputs(baseArgs());
+    const haPrimary = buildK3sApplyInputs({ ...baseArgs(), role: 'primary' });
+    expect(single.replicationHostPort).toBe(false);
+    expect(haPrimary.replicationHostPort).toBe(true);
+    expect(buildK3sApplyInputs({ ...baseArgs(), role: 'standby' }).replicationHostPort).toBe(true);
+    const t = new StateTracker('proj', 'e4-gate-ha');
+    t.startStep('k3s-apply', single);
+    t.completeStep('k3s-apply');
+    expect(new StateTracker('proj', 'e4-gate-ha').shouldSkip('k3s-apply', haPrimary)).toBe(false);
   });
 });
 
