@@ -14,6 +14,7 @@ import {
   checkAppEndpointsReady,
   checkDnsFlipVerified,
   checkOldPrimaryDisarmed,
+  checkPrimaryDbCreatedOnce,
   checkPrimaryNotRestarted,
   checkSecondFailoverRefused,
   checkSlotCapped,
@@ -246,6 +247,80 @@ describe('checkPrimaryNotRestarted', () => {
       run: runner('abc 2026-10-21T01:00:00Z'),
     });
     expect(r).toEqual({ ok: true, incarnation: { id: 'abc', startedAt: '2026-10-21T01:00:00Z' } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// primary_db_created_once
+// ---------------------------------------------------------------------------
+
+describe('checkPrimaryDbCreatedOnce', () => {
+  // The DO e2e of 2026-11-01: a replication-time patch recreated the primary
+  // db-0 seconds after its first volume attach, and the re-attach went stale.
+  // A cold deploy now creates the primary db once; this guards it.
+  const at = (id: string) => ({
+    ok: true as const,
+    incarnation: { id, startedAt: '2026-11-01T16:05:58Z' },
+  });
+  const genRunner = (generation: string) => runner(generation);
+
+  it('passes when db-0 is the pod the deploy ended with and its StatefulSet was never changed', async () => {
+    const run = genRunner('1');
+    const r = await checkPrimaryDbCreatedOnce({
+      mode: 'k8s-ha',
+      projectName: 'demo',
+      ip: IP,
+      sshKeyPath: KEY,
+      atDeploy: at('uid-1'),
+      atVerify: at('uid-1'),
+      run,
+    });
+    expect(r.checkName).toBe('primary_db_created_once');
+    expect(r.status, r.errorMessage).toBe('pass');
+    expect(run.calls[0]).toContain('get statefulset db');
+    expect(run.calls[0]).toContain('.metadata.generation');
+  });
+
+  it('fails when the StatefulSet template changed after its creation (a patch rolled db-0)', async () => {
+    const r = await checkPrimaryDbCreatedOnce({
+      mode: 'k8s-ha',
+      projectName: 'demo',
+      ip: IP,
+      sshKeyPath: KEY,
+      atDeploy: at('uid-1'),
+      atVerify: at('uid-1'),
+      run: genRunner('2'),
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(/generation 2/);
+  });
+
+  it('fails when db-0 was recreated after the deploy', async () => {
+    const r = await checkPrimaryDbCreatedOnce({
+      mode: 'k8s-ha',
+      projectName: 'demo',
+      ip: IP,
+      sshKeyPath: KEY,
+      atDeploy: at('uid-1'),
+      atVerify: at('uid-2'),
+      run: genRunner('1'),
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(/uid-1 -> uid-2/);
+  });
+
+  it('an unread pod proves nothing', async () => {
+    const r = await checkPrimaryDbCreatedOnce({
+      mode: 'k8s-ha',
+      projectName: 'demo',
+      ip: IP,
+      sshKeyPath: KEY,
+      atDeploy: { ok: false, error: 'db is not running' },
+      atVerify: at('uid-1'),
+      run: genRunner('1'),
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(/db is not running/);
   });
 });
 

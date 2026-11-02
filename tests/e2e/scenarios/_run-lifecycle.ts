@@ -47,9 +47,11 @@ import {
   checkAppEndpointsReady,
   checkDnsFlipVerified,
   checkOldPrimaryDisarmed,
+  checkPrimaryDbCreatedOnce,
   checkPrimaryNotRestarted,
   checkSecondFailoverRefused,
   checkSlotCapped,
+  type IncarnationRead,
   providerApiAReader,
   readDbIncarnation,
   readServingIp,
@@ -1401,6 +1403,9 @@ export async function runLifecycle(
   // end of verify-deploy, so the first (uncalibrated) real runs still reach
   // every downstream correctness check.
   let deployBudgetMiss: DeployBudgetResult | null = null;
+  // k8s-ha: the primary db-0 as the cold deploy left it, compared at
+  // verify-deploy (primary_db_created_once). Null until a cold deploy passes.
+  let primaryDbAtDeploy: IncarnationRead | null = null;
 
   // The SSH-unreachability memo is process-wide; a parallel/kept-rig run must
   // not inherit a previous scenario's dead hosts (IPs get recycled).
@@ -2444,6 +2449,23 @@ export async function runLifecycle(
               // the replication setup never recreates db-0): the app's
               // endpoints must be Ready on their own.
               replResults.push(await checkAppEndpointsReady({ primaryIp, sshKeyPath }));
+              if (primaryDbAtDeploy) {
+                replResults.push(
+                  await checkPrimaryDbCreatedOnce({
+                    mode: config.mode,
+                    projectName: config.projectName,
+                    ip: primaryIp,
+                    sshKeyPath,
+                    atDeploy: primaryDbAtDeploy,
+                    atVerify: await readDbIncarnation({
+                      mode: config.mode,
+                      projectName: config.projectName,
+                      ip: primaryIp,
+                      sshKeyPath,
+                    }),
+                  }),
+                );
+              }
             }
             if (stepName === 'verify-deploy') {
               replResults.push(
@@ -3357,6 +3379,19 @@ EOF`;
               throw new Error(
                 'Deploy exited successfully but no server IPs found in .vibecarbon.json — deployment likely failed silently',
               );
+            }
+
+            // The primary db-0 a cold k8s-ha deploy ended with. verify-deploy
+            // proves it is still the same pod and was never rolled
+            // (primary_db_created_once): the 2026-11-01 DO failure was a
+            // replication-time patch recreating it right after its first attach.
+            if (cold && config.mode === 'k8s-ha') {
+              primaryDbAtDeploy = await readDbIncarnation({
+                mode: config.mode,
+                projectName: config.projectName,
+                ip: resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp,
+                sshKeyPath,
+              });
             }
 
             // Per-mode cold-deploy budgets (deploy-budget.ts): the deploy's
