@@ -146,6 +146,12 @@ const SPEC = {
     { name: 'y', boolean: true, description: 'Skip confirmations (required with -type)' },
     { name: 'env', value: '<name>', description: 'Environment seed (alternative to positional)' },
     {
+      name: 'direct',
+      boolean: true,
+      description:
+        "Compose: build the app image on the new server instead of on this machine. A deploy run with -direct already does this; use it when this machine's docker cannot build amd64",
+    },
+    {
       name: 'type',
       value: '<id>',
       description:
@@ -499,6 +505,8 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
     apiToken,
     services,
     serverStateOptions,
+    // `scale -direct`: the new server builds the app image (replacementImagePlan).
+    forceDirectBuild: !!options.direct,
     // This scale's attempt id (services/addon-start.js), for the new
     // server's reconcile-time add-on job only. That job is stopped before the
     // restore, so this id is never saved: the cutover relaunches the job
@@ -1083,16 +1091,19 @@ async function createReplacementServer(ctx, server, s) {
 /**
  * How a compose scale replacement gets the app image the old server ran:
  * 'delta' (built on this machine and sent by layer delta, as a deploy does),
- * 'remote-build' (this machine has no docker, so the new server builds it),
- * or 'pull' (a registry image: compose pulls it).
+ * 'remote-build' (the new server builds it: `-direct`, a deploy recorded in
+ * direct mode, or no docker here), or 'pull' (a registry image: compose
+ * pulls it). A local build that fails stops the scale; it never falls back.
  *
  * @param {string} appImage - the old server's APP_IMAGE
- * @param {boolean} localDocker - this machine has docker
+ * @param {{ localDocker: boolean, recorded?: string, forceDirect?: boolean }} how
+ *   recorded: the deploy's envConfig.imageBuild; forceDirect: `scale -direct`
  * @returns {'delta' | 'remote-build' | 'pull'}
  */
-export function replacementImagePlan(appImage, localDocker) {
+export function replacementImagePlan(appImage, { localDocker, recorded, forceDirect = false }) {
   if (!appImage || !isLocalOnlyImageTag(appImage)) return 'pull';
-  return localDocker ? 'delta' : 'remote-build';
+  if (forceDirect || recorded === 'direct' || !localDocker) return 'remote-build';
+  return 'delta';
 }
 
 /**
@@ -1210,11 +1221,15 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
   const oldAppImage = oldEnv.APP_IMAGE || '';
   // A local-only app image (a local or direct deploy built it, nothing pushed
-  // it) is built here and sent by layer delta, exactly as a deploy does, when
-  // this machine has docker. It starts now, so the build, the new server's
+  // it) is built here and sent by layer delta, exactly as a deploy does, unless
+  // the operator chose the server-side build (-direct, or a direct deploy). It starts now, so the build, the new server's
   // base pull and the send overlap the bundle upload and the logins; 4c waits
   // for it. With no docker here, 4c builds it on the new server instead.
-  const imagePlan = replacementImagePlan(oldAppImage, checkDependency('docker'));
+  const imagePlan = replacementImagePlan(oldAppImage, {
+    localDocker: checkDependency('docker'),
+    recorded: ctx.envConfig?.imageBuild,
+    forceDirect: !!ctx.forceDirectBuild,
+  });
   const imageDelivery =
     imagePlan === 'delta'
       ? perfAsync('scale.imageDelivery', () =>
@@ -2146,6 +2161,7 @@ export async function run(args) {
     env: envSeed,
     type: /** @type {string|null} */ (values.type),
     yes: !!values.y,
+    direct: !!values.direct,
     minWorkers: null,
     maxWorkers: null,
   };

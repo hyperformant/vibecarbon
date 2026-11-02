@@ -753,6 +753,7 @@ vibecarbon scale prod
 |------|-------------|
 | `-y` | Skip confirmations (required with -type) |
 | `-env <name>` | Environment seed (alternative to positional) |
+| `-direct` | Compose: build the app image on the new server instead of on this machine. A deploy run with -direct already does this; use it when this machine's docker cannot build amd64 |
 | `-type <id>` | Server type to scale to, from the environment's own provider catalog (e.g. cx33 on Hetzner, s-4vcpu-8gb on DigitalOcean). Compose: resizes the VPS. K8s: resizes all roles. |
 {/* END GENERATED: flags scale */}
 

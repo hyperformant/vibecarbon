@@ -58,6 +58,7 @@ import {
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
+import { imageBuildRecord } from './compose/app-image.js';
 import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compose/ha-role-swap.js';
 import { workingTreeDirty } from './delta.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
@@ -2730,6 +2731,8 @@ export async function executeDeployment(args, gatheredConfig) {
       ...persistedEnvConfig,
       status: 'deployed',
       deployMode,
+      // How the app image was made, so a compose scale makes it the same way.
+      ...imageBuildRecord(tier, buildMode),
       // Persist the region each side ACTUALLY deployed to (from the fan-out's
       // per-side result), not the options-level `region`/`secondaryRegion`.
       // After a failover swap, a redeploy passing the ORIGINAL flags deploys

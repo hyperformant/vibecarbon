@@ -21,6 +21,21 @@ import { buildArgFlags, collectComposeBuildArgs } from './build-args.js';
 import { sshRunAsync } from './index.js';
 
 /**
+ * The deploy's build mode ('local' | 'direct' | 'push'), recorded on a compose
+ * env as `imageBuild` so a later scale makes the image the same way: a direct
+ * deploy (say, an operator whose docker cannot build amd64) keeps building on
+ * the server. k8s tiers always build locally and record nothing.
+ *
+ * @param {string} tier
+ * @param {string} buildMode
+ * @returns {{ imageBuild?: string }}
+ */
+export function imageBuildRecord(tier, buildMode) {
+  if (tier !== 'compose' && tier !== 'compose-ha') return {};
+  return { imageBuild: buildMode };
+}
+
+/**
  * Build the app image on this machine, tagged `tag`. Pinned to amd64: without
  * the pin the image inherits the operator's architecture (an Apple Silicon
  * operator shipped arm64 to an amd64 VPS). The VITE_* build args are the same

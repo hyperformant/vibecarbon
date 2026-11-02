@@ -27,6 +27,7 @@ const h = vi.hoisted(() => {
     localDocker: true,
     deltaFails: false,
     buildArgv: [] as string[],
+    buildFails: false,
   };
   return { events, state };
 });
@@ -241,6 +242,7 @@ vi.mock('../../../src/lib/command.js', async (orig) => {
       if (argv[0] === 'docker' && argv[1] === 'build') {
         h.events.push(`localBuild:${argv[argv.indexOf('-t') + 1]}`);
         h.state.buildArgv = argv;
+        if (h.state.buildFails) throw Object.assign(new Error('exit 1'), { stderr: 'boom' });
         return '';
       }
       return (actual.runCommandAsync as (a: string[], o: unknown) => Promise<unknown>)(argv, opts);
@@ -322,6 +324,7 @@ function reset({ localDocker = true, deltaFails = false } = {}) {
   h.state.localDocker = localDocker;
   h.state.deltaFails = deltaFails;
   h.state.buildArgv = [];
+  h.state.buildFails = false;
 }
 
 describe('compose scale: the replacement gets the app image by layer delta', () => {
@@ -366,5 +369,35 @@ describe('compose scale: the replacement gets the app image by layer delta', () 
     await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }));
     expect(h.events).toContain('remoteBuild:9.9.9.9:myapp-app:local');
     expect(h.events.some((e) => e.startsWith('localBuild:') || e.startsWith('delta:'))).toBe(false);
+  });
+});
+
+describe('compose scale: an operator can keep the server-side build', () => {
+  it('a deploy recorded in direct mode keeps building on the server, even with docker here', async () => {
+    reset();
+    const ctx = makeCtx({ dnsChallenge: true });
+    (ctx.envConfig as Record<string, unknown>).imageBuild = 'direct';
+    await SCALE_EFFECTS.scaleServers(ctx);
+    expect(h.events).toContain('remoteBuild:9.9.9.9:myapp-app:local');
+    expect(h.events.some((e) => e.startsWith('localBuild:') || e.startsWith('delta:'))).toBe(false);
+  });
+
+  it('-direct forces the server-side build', async () => {
+    reset();
+    const ctx = makeCtx({ dnsChallenge: true });
+    ctx.forceDirectBuild = true;
+    await SCALE_EFFECTS.scaleServers(ctx);
+    expect(h.events).toContain('remoteBuild:9.9.9.9:myapp-app:local');
+    expect(h.events.some((e) => e.startsWith('localBuild:'))).toBe(false);
+  });
+
+  it('a failed local build stops the scale; it never falls back to a server-side build', async () => {
+    reset();
+    h.state.buildFails = true;
+    await expect(SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }))).rejects.toThrow(
+      /docker build failed for myapp-app:local/,
+    );
+    expect(h.events.some((e) => e.startsWith('remoteBuild:'))).toBe(false);
+    expect(h.events).not.toContain('up:9.9.9.9');
   });
 });
