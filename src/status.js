@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
+import { writeJson } from './lib/cli/json-mode.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { c, link } from './lib/colors.js';
@@ -1589,7 +1590,7 @@ async function showGlobalStatus(args) {
       const envNames = config?.environments ? Object.keys(config.environments) : [];
       return { ...entry, environments: envNames };
     });
-    console.log(JSON.stringify({ mode: 'global', projects: enriched }, null, 2));
+    writeJson({ mode: 'global', projects: enriched });
     return;
   }
 
@@ -1649,7 +1650,7 @@ async function main(argv = []) {
     cwd = process.cwd();
   } catch {
     if (args.json) {
-      console.log(JSON.stringify({ error: 'Current working directory does not exist' }));
+      writeJson({ error: 'Current working directory does not exist' });
     } else {
       console.error(`\n${c.error('Error:')} Current working directory does not exist.`);
     }
@@ -1670,7 +1671,7 @@ async function main(argv = []) {
     const filtered = envEntries.filter(([name]) => name === args.env);
     if (filtered.length === 0) {
       if (args.json) {
-        console.log(JSON.stringify({ error: `Environment '${args.env}' not found` }));
+        writeJson({ error: `Environment '${args.env}' not found` });
       } else {
         introCommand('status');
         p.log.error(`Environment '${args.env}' not found`);
@@ -1832,7 +1833,7 @@ async function main(argv = []) {
 
   // Output
   if (args.json) {
-    console.log(JSON.stringify(allData, null, 2));
+    writeJson(allData);
     process.exit(0);
   }
 
