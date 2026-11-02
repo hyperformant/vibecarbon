@@ -40,20 +40,34 @@ type Doc = {
 // Template placeholders ({{PROJECT_NAME}}) are not valid unquoted YAML.
 const readYamlText = (path: string) => readFileSync(path, 'utf8').replace(/\{\{[^}]*\}\}/g, 'x');
 
-/** Every document a kustomization directory applies, with the file it came from. */
-function renderKustomization(dir: string): { doc: Doc; file: string }[] {
+type Rendered = { doc: Doc; file: string; namespace: string };
+
+/**
+ * Every document a kustomization directory applies, with the file it came
+ * from and the namespace it lands in: a parent kustomization's `namespace:`
+ * overrides a child's, which overrides the object's own metadata.namespace
+ * (kustomize's namespace transformer); `default` when none is set.
+ */
+function renderKustomization(dir: string, parentNamespace?: string): Rendered[] {
   const kustPath = join(dir, 'kustomization.yaml');
-  const kust = load(readYamlText(kustPath)) as { resources?: string[] };
-  const out: { doc: Doc; file: string }[] = [];
+  const kust = load(readYamlText(kustPath)) as { resources?: string[]; namespace?: string };
+  const namespace = parentNamespace ?? kust.namespace;
+  const out: Rendered[] = [];
   for (const res of kust.resources ?? []) {
     const path = join(dir, res);
     if (!existsSync(path)) throw new Error(`${kustPath} lists ${res}, which does not exist`);
     if (statSync(path).isDirectory()) {
-      out.push(...renderKustomization(path));
+      out.push(...renderKustomization(path, namespace));
       continue;
     }
     for (const doc of loadAll(readYamlText(path)) as Doc[]) {
-      if (doc && typeof doc === 'object') out.push({ doc, file: path.slice(ROOT.length + 1) });
+      if (doc && typeof doc === 'object') {
+        out.push({
+          doc,
+          file: path.slice(ROOT.length + 1),
+          namespace: namespace ?? doc.metadata?.namespace ?? 'default',
+        });
+      }
     }
   }
   return out;
@@ -66,7 +80,9 @@ const roots = [
     .map((e) => join(ROOT, 'services', e.name, 'k8s'))
     .filter((dir) => existsSync(join(dir, 'kustomization.yaml'))),
 ];
-const rendered = roots.flatMap(renderKustomization);
+const rendered = roots.flatMap((dir) => renderKustomization(dir));
+const BASE_NAMESPACE = 'vibecarbon';
+const isRouter = (doc: Doc) => /^(IngressRoute|IngressRouteTCP|Ingress)$/.test(String(doc.kind));
 
 const certificates = rendered.filter(
   ({ doc }) => doc.kind === 'Certificate' && String(doc.apiVersion).startsWith('cert-manager.io/'),
@@ -93,9 +109,7 @@ describe('one certificate per name (k8s)', () => {
   });
 
   it(`no IngressRoute or Ingress names a TLS secret other than ${BASE_CERTIFICATE}`, () => {
-    const routers = rendered.filter(({ doc }) =>
-      /^(IngressRoute|IngressRouteTCP|Ingress)$/.test(String(doc.kind)),
-    );
+    const routers = rendered.filter(({ doc }) => isRouter(doc));
     expect(routers.length).toBeGreaterThan(0);
     const offenders = routers.flatMap(({ doc, file }) =>
       tlsSecretNames(doc)
@@ -105,14 +119,22 @@ describe('one certificate per name (k8s)', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('a router outside the base namespace takes the certificate by SNI (tls: {})', () => {
-    // Traefik reads tls.secretName from the router's own namespace only, so a
-    // router in another namespace that named vibecarbon-tls would get no
-    // certificate. The global store serves it by SNI instead.
-    const grafana = rendered.find(
-      ({ doc }) => doc.kind === 'IngressRoute' && doc.metadata?.name === 'vibecarbon-grafana',
+  it(`no router outside the ${BASE_NAMESPACE} namespace names a TLS secret`, () => {
+    // Traefik reads tls.secretName from the router's own namespace only, and
+    // vibecarbon-tls lives in ${BASE_NAMESPACE}: a router elsewhere that named
+    // a secret would name either nothing or a second certificate. It takes
+    // vibecarbon-tls from Traefik's global store by SNI (`tls: {}`) instead.
+    const outside = rendered.filter(
+      ({ doc, namespace }) => isRouter(doc) && namespace !== BASE_NAMESPACE,
     );
-    expect(grafana?.doc.spec?.tls).toEqual({});
+    // Not vacuous: the observability add-on routes from its own namespace.
+    expect(outside.length).toBeGreaterThan(0);
+    const offenders = outside
+      .filter(({ doc }) => tlsSecretNames(doc).length > 0)
+      .map(
+        ({ doc, file, namespace }) => `${doc.kind}/${doc.metadata?.name} (${namespace}, ${file})`,
+      );
+    expect(offenders).toEqual([]);
   });
 
   it('no two Certificates share a DNS name', () => {
