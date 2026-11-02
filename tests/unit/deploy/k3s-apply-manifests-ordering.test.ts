@@ -201,6 +201,10 @@ let retiredChartReleaseOut = '';
 // from a life as primary — the demoted-standby reconverge case.
 // Default: absent, as on every freshly deployed cluster.
 let leftoverObservability = false;
+// Set by the observability `apply -k`: the namespace exists from then on.
+let observabilityApplied = false;
+// What `get ingressroute -o json` answers in the observability namespace.
+let observabilityRoutesOut = '';
 
 const APP_POD = 'app-6f7d9c-abcde';
 const APP_RS_JSON = JSON.stringify({
@@ -228,6 +232,7 @@ function installSpawnMock() {
     const full = [cmd, ...argv];
     if (cmd === 'kubectl' && argv.includes('apply') && argv.includes('-k')) {
       const target = String(argv[argv.indexOf('-k') + 1]);
+      if (target.includes('observability')) observabilityApplied = true;
       const registry = join(target, 'registry', 'local-registry.yaml');
       if (/k8s-base/.test(target) && existsSync(registry)) {
         registryAtBaseApply = readFileSync(registry, 'utf-8');
@@ -278,7 +283,17 @@ function installSpawnMock() {
       }) as unknown as ReturnType<typeof spawn>;
     }
     if (
-      leftoverObservability &&
+      cmd === 'kubectl' &&
+      argv.includes('get') &&
+      argv.includes('ingressroute') &&
+      argv.includes('vibecarbon-observability')
+    ) {
+      return fakeChild({ stdout: observabilityRoutesOut, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    if (
+      (leftoverObservability || (observabilityApplied && argv.includes('namespace'))) &&
       cmd === 'kubectl' &&
       argv.includes('get') &&
       argv.includes('--ignore-not-found') &&
@@ -539,6 +554,8 @@ function findAppliedSecretConfigJson(secretName: string) {
 // The delivery succeeds unless a test sets deliverGate / deliverError. File-level
 // so every describe gets it (an outer beforeEach runs before each inner one).
 beforeEach(() => {
+  observabilityApplied = false;
+  observabilityRoutesOut = '';
   deliverImage.mockReset();
   deliverImage.mockImplementation(async (opts: { pushAfter?: Promise<unknown> }) => {
     cmdCalls.push(['deliverImage']);
@@ -1309,6 +1326,47 @@ describe('applyK3sManifests pilot-standby role', () => {
       'app.example.test',
       '*.app.example.test',
     ]);
+  });
+
+  it('one certificate per name: a primary whose project removed observability still clears grafana-tls and its old route', async () => {
+    // The add-on left the project tree, so nothing applies the stack, but
+    // the cluster still runs it, with the old IngressRoute naming
+    // grafana-tls. The cleanup is gated on the namespace, not the files.
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir();
+    leftoverObservability = true;
+    observabilityRoutesOut = JSON.stringify({
+      items: [
+        { metadata: { name: 'vibecarbon-grafana' }, spec: { tls: { secretName: 'grafana-tls' } } },
+      ],
+    });
+    try {
+      await applyK3sManifests({ ...baseArgs(projectDir), role: 'primary' });
+    } finally {
+      leftoverObservability = false;
+    }
+    expect(cmdCalls.some(isObservabilityApply)).toBe(false);
+    const route = indexOfCall([
+      'kubectl',
+      '-n',
+      'vibecarbon-observability',
+      'delete',
+      'ingressroute',
+      'vibecarbon-grafana',
+      '--ignore-not-found',
+    ]);
+    expect(route).toBeGreaterThan(-1);
+    expect(indexOfCall(retiredGrafanaDelete('certificate'))).toBeGreaterThan(route);
+    expect(indexOfCall(retiredGrafanaDelete('secret'))).toBeGreaterThan(-1);
+  });
+
+  it('a primary without the observability namespace deletes nothing there', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir();
+    await applyK3sManifests({ ...baseArgs(projectDir), role: 'primary' });
+    expect(
+      cmdCalls.some((a) => a.includes('vibecarbon-observability') && a.includes('delete')),
+    ).toBe(false);
   });
 
   it('single-ACME-issuer policy: a pilot-standby cert references the self-signed issuer, the promote annotation carries the real one', async () => {

@@ -121,7 +121,10 @@ import {
   standbyImageRef,
 } from './image-delivery.js';
 import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
-import { removeRetiredObservabilityCertificate } from './one-certificate.js';
+import {
+  removeRetiredObservabilityCertificate,
+  retireObservabilityCertificateIfPresent,
+} from './one-certificate.js';
 import {
   awaitAppAdminReady,
   awaitCertManagerAdmission,
@@ -4408,12 +4411,17 @@ export async function applyK3sManifests({
       // not leak a temp dir per run (T4 review).
       rmSync(renderedObservabilityDir, { recursive: true, force: true });
     }
-    // One certificate per name: Grafana's IngressRoute takes vibecarbon-tls
-    // from Traefik's global store (`tls: {}`). An env deployed before that
-    // still holds the grafana-tls Certificate and Secret, which the apply
-    // above no longer manages; remove them, after the apply so the Grafana
-    // route never names a Secret that is gone.
-    await removeRetiredObservabilityCertificate({ env, kubectl: runKubectlWithRetry });
+  }
+  // One certificate per name: Grafana's IngressRoute takes vibecarbon-tls
+  // from Traefik's global store (`tls: {}`). An env deployed before that
+  // still holds the grafana-tls Certificate and Secret (and, where the
+  // add-on has since left the project tree, the old route naming them),
+  // which no apply manages any more. Removed wherever the observability
+  // namespace exists, whatever the project tree holds, and after the apply
+  // above so the Grafana route never names a Secret that is gone. A pilot
+  // standby does it in settleObservabilityOnStandby.
+  if (!pilotStandby) {
+    await retireObservabilityCertificateIfPresent({ env, kubectl: runKubectlWithRetry });
   }
   // (Considered: setting HCLOUD_NETWORK on the Hetzner CCM so it populates
   // each Node's InternalIP from the Hetzner private network. Reverted —

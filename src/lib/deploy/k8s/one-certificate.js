@@ -66,21 +66,77 @@ export function staleObservabilityTlsProblem(projectDir) {
   return 'Your observability add-on files are out of date. Run `vibecarbon upgrade`, then deploy again.';
 }
 
+/** The IngressRoutes in `items` (a `get ingressroute -o json`) that name the retired secret. */
+function routesNamingRetiredSecret(listJson) {
+  let items = [];
+  try {
+    items = JSON.parse(listJson)?.items ?? [];
+  } catch {
+    return [];
+  }
+  return items
+    .filter((r) => r?.spec?.tls?.secretName === RETIRED_OBSERVABILITY_CERTIFICATE.name)
+    .map((r) => r?.metadata?.name)
+    .filter(Boolean);
+}
+
 /**
- * Delete the retired grafana-tls Certificate and its Secret (cert-manager
- * leaves a Secret behind when its Certificate goes). Idempotent: both deletes
- * pass `--ignore-not-found`, so an env that never had them is unaffected.
- * The Certificate goes first, so cert-manager cannot re-create the Secret.
+ * Delete what the retired grafana-tls left in the observability namespace:
+ * any IngressRoute that still names its secret (a stack whose add-on left
+ * the project tree keeps the old route), the Certificate, and its Secret
+ * (cert-manager leaves a Secret behind when its Certificate goes).
+ * Idempotent: every delete passes `--ignore-not-found`. The Certificate goes
+ * before its Secret, so cert-manager cannot re-create the Secret. The caller
+ * has found the namespace.
  *
  * @param {{ env: Record<string, string|undefined>,
  *   kubectl: (argv: string[], opts?: object) => Promise<unknown> }} args
  */
 export async function removeRetiredObservabilityCertificate({ env, kubectl }) {
   const { namespace, name } = RETIRED_OBSERVABILITY_CERTIFICATE;
+  const routes = routesNamingRetiredSecret(
+    String(
+      (await kubectl(['-n', namespace, 'get', 'ingressroute', '-o', 'json'], {
+        env,
+        captureStdout: true,
+        description: 'applyK3sManifests: list the observability IngressRoutes',
+      })) ?? '',
+    ),
+  );
+  for (const route of routes) {
+    await kubectl(['-n', namespace, 'delete', 'ingressroute', route, '--ignore-not-found'], {
+      env,
+      description: `applyK3sManifests: remove ingressroute/${route}, which names ${name}`,
+    });
+  }
   for (const kind of ['certificate', 'secret']) {
     await kubectl(['-n', namespace, 'delete', kind, name, '--ignore-not-found'], {
       env,
       description: `applyK3sManifests: remove the retired ${kind}/${name}`,
     });
   }
+}
+
+/**
+ * removeRetiredObservabilityCertificate wherever the observability namespace
+ * exists, whatever the project tree holds: a primary whose project removed
+ * the add-on, or an ex-standby promoted, still carries the stack. No-op
+ * without the namespace.
+ *
+ * @param {{ env: Record<string, string|undefined>,
+ *   kubectl: (argv: string[], opts?: object) => Promise<unknown> }} args
+ * @returns {Promise<boolean>} true when the namespace was found
+ */
+export async function retireObservabilityCertificateIfPresent({ env, kubectl }) {
+  const { namespace } = RETIRED_OBSERVABILITY_CERTIFICATE;
+  const found = String(
+    (await kubectl(['get', 'namespace', namespace, '--ignore-not-found', '-o', 'name'], {
+      env,
+      captureStdout: true,
+      description: 'applyK3sManifests: look for the observability namespace',
+    })) ?? '',
+  ).trim();
+  if (!found) return false;
+  await removeRetiredObservabilityCertificate({ env, kubectl });
+  return true;
 }

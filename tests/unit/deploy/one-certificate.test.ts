@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest';
 import {
   RETIRED_OBSERVABILITY_CERTIFICATE,
   removeRetiredObservabilityCertificate,
+  retireObservabilityCertificateIfPresent,
   staleObservabilityTlsProblem,
 } from '../../../src/lib/deploy/k8s/one-certificate.js';
 
@@ -102,26 +103,72 @@ describe('staleObservabilityTlsProblem', () => {
   });
 });
 
+const NS = 'vibecarbon-observability';
+const routeList = (routes: { name: string; secretName?: string }[]) =>
+  JSON.stringify({
+    items: routes.map((r) => ({
+      metadata: { name: r.name },
+      spec: { tls: r.secretName ? { secretName: r.secretName } : {} },
+    })),
+  });
+
+/** A kubectl stand-in: the namespace exists when `namespace` is set; routes answer the list. */
+function fakeKubectl({ namespace = true, routes = '' } = {}) {
+  const calls: string[][] = [];
+  const kubectl = async (argv: string[]) => {
+    calls.push(argv);
+    if (argv.includes('namespace')) return namespace ? `namespace/${NS}\n` : '';
+    if (argv.includes('ingressroute') && argv.includes('get')) return routes;
+    return '';
+  };
+  return { calls, kubectl };
+}
+
 describe('removeRetiredObservabilityCertificate', () => {
-  it('deletes the Certificate, then its Secret, idempotently', async () => {
-    const calls: string[][] = [];
-    await removeRetiredObservabilityCertificate({
-      env: {},
-      kubectl: async (argv: string[]) => {
-        calls.push(argv);
-        return '';
-      },
+  it('deletes any IngressRoute naming grafana-tls, then the Certificate, then its Secret', async () => {
+    const { calls, kubectl } = fakeKubectl({
+      routes: routeList([
+        { name: 'vibecarbon-grafana', secretName: 'grafana-tls' },
+        { name: 'other', secretName: 'vibecarbon-tls' },
+        { name: 'sni' },
+      ]),
     });
+    await removeRetiredObservabilityCertificate({ env: {}, kubectl });
     expect(calls).toEqual([
-      [
-        '-n',
-        'vibecarbon-observability',
-        'delete',
+      ['-n', NS, 'get', 'ingressroute', '-o', 'json'],
+      ['-n', NS, 'delete', 'ingressroute', 'vibecarbon-grafana', '--ignore-not-found'],
+      ['-n', NS, 'delete', 'certificate', 'grafana-tls', '--ignore-not-found'],
+      ['-n', NS, 'delete', 'secret', 'grafana-tls', '--ignore-not-found'],
+    ]);
+  });
+
+  it('an empty or unreadable route list deletes no route, still the Certificate and Secret', async () => {
+    for (const routes of ['', 'not json', routeList([])]) {
+      const { calls, kubectl } = fakeKubectl({ routes });
+      await removeRetiredObservabilityCertificate({ env: {}, kubectl });
+      expect(calls.filter((a) => a.includes('delete')).map((a) => a[3])).toEqual([
         'certificate',
-        'grafana-tls',
-        '--ignore-not-found',
-      ],
-      ['-n', 'vibecarbon-observability', 'delete', 'secret', 'grafana-tls', '--ignore-not-found'],
+        'secret',
+      ]);
+    }
+  });
+});
+
+describe('retireObservabilityCertificateIfPresent', () => {
+  it('gated on the observability namespace, not on the project files', async () => {
+    const absent = fakeKubectl({ namespace: false });
+    expect(
+      await retireObservabilityCertificateIfPresent({ env: {}, kubectl: absent.kubectl }),
+    ).toBe(false);
+    expect(absent.calls).toEqual([['get', 'namespace', NS, '--ignore-not-found', '-o', 'name']]);
+
+    const present = fakeKubectl({ namespace: true });
+    expect(
+      await retireObservabilityCertificateIfPresent({ env: {}, kubectl: present.kubectl }),
+    ).toBe(true);
+    expect(present.calls.filter((a) => a.includes('delete')).map((a) => a[3])).toEqual([
+      'certificate',
+      'secret',
     ]);
   });
 });
