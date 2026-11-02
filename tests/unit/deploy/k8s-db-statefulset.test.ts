@@ -51,7 +51,6 @@ const {
   summarizeNotReadyNodes,
 } = await import('../../../src/lib/deploy/k8s/k3s.js');
 const workload = await import('../../../src/lib/deploy/db-workload.js');
-const { persistentStaleAttach } = await import('../../../src/lib/deploy/replication.js');
 
 const ROOT = join(__dirname, '../../..');
 const BASE = join(ROOT, 'carbon/k8s/base');
@@ -678,7 +677,8 @@ describe('Flux never applies the unrendered db StatefulSet', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The db rollout wait fails fast on a stale volume attachment
+// The db rollout wait fails fast on a stale volume attachment (watchDbAttach;
+// the watcher itself is db-attach-watch.test.ts's subject)
 // ---------------------------------------------------------------------------
 
 // The kubelet event the DO e2e of 2026-11-01 looped on for 600s (d4 primary).
@@ -689,130 +689,61 @@ const MKFS_MISSING =
   'output: "mke2fs 1.46.6 (1-Feb-2023)\\nThe file /dev/disk/by-id/scsi-0DO_Volume_pvc-a769b72d-' +
   '05d6-451d-adbe-c05698766f80 does not exist and no size was specified.\\n"';
 
-const NOW = Date.parse('2026-11-01T16:17:00Z');
-const eventsJson = (items: Doc[]) => JSON.stringify({ items });
-const failedMount = (first: string, last: string, count: number, message = MKFS_MISSING) => ({
+/** A cluster whose db-0 is `uid` and whose event store holds `events` (any pod). */
+const clusterReader =
+  (uid: string, events: Doc[]) =>
+  async (argv: string[]): Promise<string> => {
+    if (argv.includes('pod')) return JSON.stringify({ metadata: { name: 'db-0', uid } });
+    const sel = String(argv[argv.indexOf('--field-selector') + 1] ?? '');
+    const want = sel.replace('involvedObject.uid=', '');
+    return JSON.stringify({ items: events.filter((e) => e.involvedObject?.uid === want) });
+  };
+const staleEvent = (uid: string) => ({
+  involvedObject: { kind: 'Pod', name: 'db-0', uid },
   reason: 'FailedMount',
-  message,
-  count,
-  firstTimestamp: first,
-  lastTimestamp: last,
-});
-
-describe('persistentStaleAttach: the stale-attachment signature, held long enough to be sure', () => {
-  it('names the volume when kubelet has looped mkfs on a missing device for minutes', () => {
-    const hit = persistentStaleAttach(
-      eventsJson([failedMount('2026-11-01T16:07:07Z', '2026-11-01T16:15:22Z', 12)]),
-      { now: NOW },
-    );
-    expect(hit).toEqual({
-      volume: 'pvc-a769b72d-05d6-451d-adbe-c05698766f80',
-      count: 12,
-      persistedS: 495,
-    });
-  });
-
-  it('ignores a first, short-lived miss (a device that is still appearing)', () => {
-    expect(
-      persistentStaleAttach(
-        eventsJson([failedMount('2026-11-01T16:16:00Z', '2026-11-01T16:16:08Z', 4)]),
-        { now: NOW },
-      ),
-    ).toBeNull();
-  });
-
-  it('ignores other mount failures', () => {
-    const other = 'MountVolume.SetUp failed for volume "walg-s3-creds" : secret not found';
-    expect(
-      persistentStaleAttach(
-        eventsJson([failedMount('2026-11-01T16:05:00Z', '2026-11-01T16:16:00Z', 9, other)]),
-        { now: NOW },
-      ),
-    ).toBeNull();
-  });
-
-  it('ignores a signature that stopped recurring (an earlier db-0 that healed)', () => {
-    expect(
-      persistentStaleAttach(
-        eventsJson([failedMount('2026-11-01T15:30:00Z', '2026-11-01T15:40:00Z', 10)]),
-        { now: NOW },
-      ),
-    ).toBeNull();
-  });
-
-  it('reads the events.k8s.io shape too (eventTime + series)', () => {
-    const hit = persistentStaleAttach(
-      eventsJson([
-        {
-          reason: 'FailedMount',
-          message: MKFS_MISSING,
-          eventTime: '2026-11-01T16:10:00.000000Z',
-          series: { count: 7, lastObservedTime: '2026-11-01T16:16:30.000000Z' },
-        },
-      ]),
-      { now: NOW },
-    );
-    expect(hit?.count).toBe(7);
-    expect(hit?.persistedS).toBe(390);
-  });
-
-  it('treats unreadable output as no evidence', () => {
-    expect(persistentStaleAttach('not json', { now: NOW })).toBeNull();
-  });
+  message: MKFS_MISSING,
+  count: 12,
+  firstTimestamp: '2026-11-01T16:07:07Z',
+  lastTimestamp: '2026-11-01T16:15:22Z',
 });
 
 describe('awaitDbRollout: a stale volume attachment fails the wait early, by name', () => {
   // A rollout that never finishes on its own: it ends only when aborted.
-  const hangingRollout = () => {
-    let aborted = false;
-    const wait = (_args: string[], { signal }: { signal: AbortSignal }) =>
-      new Promise<never>((_resolve, reject) => {
-        signal.addEventListener('abort', () => {
-          aborted = true;
-          reject(new Error('aborted'));
-        });
-      });
-    return { wait, wasAborted: () => aborted };
-  };
+  const hangingRollout = (_args: string[], { signal }: { signal: AbortSignal }) =>
+    new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
 
-  it('stops waiting once the signature has held, and says what to do', async () => {
-    const rollout = hangingRollout();
+  it('stops waiting on the current db-0 in the stale state, and says what to do', async () => {
     const err = (await awaitDbRollout({
       env,
       staleAttachPollMs: 1,
-      waitRollout: rollout.wait,
-      readDbEvents: async () =>
-        eventsJson([failedMount('2026-11-01T16:07:07Z', '2026-11-01T16:15:22Z', 12)]),
-      now: () => NOW,
+      waitRollout: hangingRollout,
+      kubectl: clusterReader('uid-now', [staleEvent('uid-now')]),
     }).catch((e: Error) => e)) as Error;
-    expect(rollout.wasAborted()).toBe(true);
+    expect(err.message).toMatch(/^awaitDbRollout: /);
     expect(err.message).toContain('pvc-a769b72d-05d6-451d-adbe-c05698766f80');
     expect(err.message).toMatch(/stale volume attachment/i);
     expect(err.message).toMatch(/volumeattachment/i);
-    expect(err.message).toContain('vibecarbon deploy');
-    expect(err.message).not.toContain('—');
   });
 
-  it('keeps waiting through unreadable events and a short first miss', async () => {
-    let reads = 0;
+  it('the recovery redeploy does not trip on the replaced db-0 events', async () => {
+    let polls = 0;
     let finish: () => void = () => {};
-    const waitRollout = () =>
-      new Promise<string>((resolve) => {
-        finish = () => resolve('');
-      });
+    const read = clusterReader('uid-now', [staleEvent('uid-before')]);
     const done = awaitDbRollout({
       env,
       staleAttachPollMs: 1,
-      waitRollout,
-      readDbEvents: async () => {
-        reads += 1;
-        if (reads === 1) throw new Error('apiserver hiccup');
-        if (reads >= 3) finish();
-        return eventsJson([failedMount('2026-11-01T16:16:50Z', '2026-11-01T16:16:55Z', 3)]);
+      waitRollout: () =>
+        new Promise<string>((resolve) => {
+          finish = () => resolve('');
+        }),
+      kubectl: async (argv: string[]) => {
+        if (argv.includes('events') && ++polls >= 3) finish();
+        return read(argv);
       },
-      now: () => NOW,
     });
     await expect(done).resolves.toBeUndefined();
-    expect(reads).toBeGreaterThanOrEqual(3);
+    expect(polls).toBeGreaterThanOrEqual(3);
   });
 });

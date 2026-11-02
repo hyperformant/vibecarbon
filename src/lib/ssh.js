@@ -366,12 +366,22 @@ export async function sshRun(ip, sshKeyPath, argv, options = {}) {
     silent = true,
     input,
     transportRetry = true,
+    signal,
   } = options;
   if (!Array.isArray(argv) || argv.length === 0) {
     throw new Error('sshRun requires a non-empty argv array');
   }
   const cmd = sshArgv(ip, sshKeyPath, argv, { env, firstConnect });
-  const run = () => runCommandAsync(cmd, { silent, timeout, returnOutput: true, input });
+  // `signal` aborts the ssh child (runCommandAsync kills it), so a caller can
+  // stop a remote command it no longer needs.
+  const run = () =>
+    runCommandAsync(cmd, {
+      silent,
+      timeout,
+      returnOutput: true,
+      input,
+      ...(signal && { signal }),
+    });
   const out = await (transportRetry ? runWithTransportRetry(run) : run());
   return typeof out === 'string' ? out.trim() : '';
 }

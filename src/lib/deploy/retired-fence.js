@@ -58,7 +58,7 @@ import { sshRun as composeSshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
 import { swappedSinceLastDeploy } from './failover-guard.js';
 import { fenceDatabaseWrites, k8sPsqlRunner, WRITE_FENCE_SETTING } from './replication.js';
-import { demoteK8sWalgRole, k8sDbRolloutStatusArgv } from './walg-role.js';
+import { demoteK8sWalgRole, k8sDbRolloutWait } from './walg-role.js';
 
 /** The vibecarbon-config key the k8s backup CronJob reads. */
 export const RETIRED_ROLE_KEY = 'VIBECARBON_ROLE';
@@ -469,12 +469,7 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads }) {
       },
     ],
     // The db pod was down or mid-roll: wait for it (bounded) before the second pass.
-    settle: (ip) =>
-      attempt(() =>
-        kubectl(ip, k8sDbRolloutStatusArgv(DB_SETTLE_TIMEOUT_S), {
-          timeout: (DB_SETTLE_TIMEOUT_S + 30) * 1000,
-        }),
-      ),
+    settle: (ip) => attempt(() => k8sDbRolloutWait({ kubectl, ip, timeoutS: DB_SETTLE_TIMEOUT_S })),
   };
 }
 

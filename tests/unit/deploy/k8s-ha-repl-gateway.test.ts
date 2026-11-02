@@ -667,4 +667,47 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       vi.useRealTimers();
     }
   }, 20000);
+
+  it('the standby boot after the swap stops early on a stale volume attachment, by name', async () => {
+    // The boot re-attaches the volume the swap pod released (DO e2e
+    // 2026-11-01 class): the rollout never ends, the current db-0's events
+    // carry the missing-device signature, and the wait must stop with it.
+    vi.mocked(runCommandAsync).mockClear();
+    const happy = happyExec();
+    const vol = 'pvc-1234';
+    const staleEvents = JSON.stringify({
+      items: [
+        {
+          involvedObject: { name: 'db-0', uid: 'standby-db-uid' },
+          reason: 'FailedMount',
+          message:
+            `MountVolume.MountDevice failed for volume "${vol}" : formatting disk failed: ` +
+            `mkfs.ext4 -F /dev/disk/by-id/scsi-0DO_Volume_${vol} does not exist and no size was specified`,
+          count: 9,
+          firstTimestamp: '2026-11-01T16:00:00Z',
+          lastTimestamp: '2026-11-01T16:04:30Z',
+        },
+      ],
+    });
+    let swapped = false;
+    vi.mocked(runCommandAsync).mockImplementation(
+      async (argv: string[], o: { signal?: AbortSignal } = {}) => {
+        const cmd = Array.isArray(argv) ? argv.join(' ') : String(argv);
+        if (cmd.includes('--replicas=1')) swapped = true;
+        if (swapped && cmd.includes('rollout status statefulset/db')) {
+          return new Promise((_r, reject) =>
+            o.signal?.addEventListener('abort', () => reject(new Error('aborted'))),
+          );
+        }
+        if (swapped && cmd.includes('get pod db-0 -n vibecarbon -o json --request-timeout=20s')) {
+          return JSON.stringify({ metadata: { name: 'db-0', uid: 'standby-db-uid' } });
+        }
+        if (cmd.includes('involvedObject.uid=standby-db-uid')) return staleEvents;
+        return happy(argv);
+      },
+    );
+    await expect(setupReplication({ ...opts, attachWatchPollMs: 1 })).rejects.toThrow(
+      /pvc-1234[\s\S]*stale volume attachment/,
+    );
+  }, 20000);
 });

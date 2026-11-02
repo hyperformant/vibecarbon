@@ -98,10 +98,11 @@ import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '.
 import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
 import {
-  persistentStaleAttach,
   READ_WRITE_PGOPTIONS,
   REPL_PORT,
   restoreRolloutTimeoutS,
+  StaleVolumeAttachmentError,
+  watchDbAttach,
 } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
 import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
@@ -2366,88 +2367,49 @@ export async function assertNoRetiredChartDb({
  * last many minutes, and in HA the standby cluster's deploy runs in parallel
  * with the primary's.
  *
- * Fails EARLY on a stale volume attachment: while it waits, it reads the db
- * pod's events every `staleAttachPollMs`, and once the mkfs-on-a-missing-
- * device signature has held for minutes (persistentStaleAttach) it stops the
- * wait and names that state. A volume in it never mounts by itself (DO e2e
- * 2026-11-01: 600s of the same event; docs/mitigations.yml
- * do-csi-stale-volumeattachment), so the rest of the budget would only delay
- * the same failure. It repairs nothing and retries nothing.
+ * Fails EARLY on a stale volume attachment (watchDbAttach): the wait runs
+ * while the current db pod's events are read every `staleAttachPollMs`, and
+ * once the mkfs-on-a-missing-device signature has held it stops and names
+ * that state. It repairs nothing and retries nothing.
  *
- * @param {{env: NodeJS.ProcessEnv, timeoutS?: number, staleAttachPollMs?: number, waitRollout?: (args: string[], opts: {env: NodeJS.ProcessEnv, description: string, signal: AbortSignal}) => Promise<unknown>, readDbEvents?: (env: NodeJS.ProcessEnv) => Promise<string>, now?: () => number}} args
+ * @param {{env: NodeJS.ProcessEnv, timeoutS?: number, staleAttachPollMs?: number, waitRollout?: typeof runKubectlWithRetry, kubectl?: (argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>}} args
  */
 export async function awaitDbRollout({
   env,
   timeoutS = DB_ROLLOUT_TIMEOUT_S,
   staleAttachPollMs = 15_000,
   waitRollout = runKubectlWithRetry,
-  readDbEvents = readDbPodEvents,
-  now = Date.now,
+  kubectl = localKubectlReader(env),
 }) {
   const started = Date.now();
-  const rollout = new AbortController();
-  const stopWatch = new AbortController();
-  let stale = null;
-  const pause = (ms) =>
-    new Promise((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      stopWatch.signal.addEventListener('abort', () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  const watch = (async () => {
-    while (!stopWatch.signal.aborted) {
-      await pause(staleAttachPollMs);
-      if (stopWatch.signal.aborted) return;
-      let events;
-      try {
-        events = await readDbEvents(env);
-      } catch {
-        continue; // an unreadable listing is no evidence
-      }
-      stale = persistentStaleAttach(events, { now: now() });
-      if (stale) {
-        rollout.abort();
-        return;
-      }
-    }
-  })();
   try {
-    await waitRollout(
-      [
-        '-n',
-        'vibecarbon',
-        'rollout',
-        'status',
-        `statefulset/${DB_STATEFULSET}`,
-        `--timeout=${timeoutS}s`,
-      ],
-      {
-        env,
-        description: `awaitDbRollout: rollout status statefulset/${DB_STATEFULSET}`,
-        signal: rollout.signal,
-      },
+    await watchDbAttach(
+      (signal) =>
+        waitRollout(
+          [
+            '-n',
+            'vibecarbon',
+            'rollout',
+            'status',
+            `statefulset/${DB_STATEFULSET}`,
+            `--timeout=${timeoutS}s`,
+          ],
+          {
+            env,
+            description: `awaitDbRollout: rollout status statefulset/${DB_STATEFULSET}`,
+            signal,
+          },
+        ),
+      { kubectl, pollMs: staleAttachPollMs },
     );
   } catch (err) {
-    if (stale) {
-      throw new Error(
-        `awaitDbRollout: the db volume ${stale.volume} reads attached, but its device never ` +
-          `appeared on the database node: kubelet has tried to format a disk that does not ` +
-          `exist for ${stale.persistedS}s (${stale.count} times). This is a stale volume ` +
-          'attachment at the provider, and waiting does not clear it. To recover, run ' +
-          `\`kubectl scale statefulset ${DB_STATEFULSET} --replicas=0 -n vibecarbon\`, delete ` +
-          `the VolumeAttachment for ${stale.volume} (\`kubectl get volumeattachment\`), wait a ` +
-          `minute, then run \`vibecarbon deploy\` again. ${await describeDbPods(env)}`,
-      );
+    if (err instanceof StaleVolumeAttachmentError) {
+      throw new Error(`awaitDbRollout: ${err.message} ${await describeDbPods(env)}`);
     }
     throw new Error(
       `awaitDbRollout: statefulset/${DB_STATEFULSET} did not become Ready within ${timeoutS}s ` +
         `(${(err?.message || String(err)).slice(0, 300)}). ${await describeDbPods(env)}`,
     );
-  } finally {
-    stopWatch.abort();
-    await watch;
   }
   console.error(
     `[db] statefulset/${DB_STATEFULSET} Ready after ${Math.round((Date.now() - started) / 1000)}s`,
@@ -2455,27 +2417,14 @@ export async function awaitDbRollout({
 }
 
 /**
- * The db pod's events as `kubectl get events -o json`, for awaitDbRollout's
- * stale-attachment check.
+ * `kubectl <argv>` against the deploy's own kubeconfig, returning stdout: the
+ * reader watchDbAttach polls the db pod's events with during awaitDbRollout.
  *
  * @param {NodeJS.ProcessEnv} env
- * @returns {Promise<string>}
+ * @returns {(argv: string[], opts?: {signal?: AbortSignal, timeout?: number}) => Promise<string>}
  */
-function readDbPodEvents(env) {
-  return runCommandAsync(
-    [
-      'kubectl',
-      '-n',
-      'vibecarbon',
-      'get',
-      'events',
-      '--field-selector',
-      `involvedObject.name=${DB_POD}`,
-      '-o',
-      'json',
-    ],
-    { env, silent: true },
-  );
+function localKubectlReader(env) {
+  return (argv, opts) => runCommandAsync(['kubectl', ...argv], { env, silent: true, ...opts });
 }
 
 /**

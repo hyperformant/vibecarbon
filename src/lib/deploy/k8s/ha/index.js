@@ -38,6 +38,7 @@ import {
   SYSTEM_IDENTIFIER_SQL,
   swapPgdataViaHelperPod,
   verifyStreaming,
+  watchDbAttach,
 } from '../../replication.js';
 import { readReplPassword } from '../../utils.js';
 import {
@@ -649,6 +650,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
  * @param {string} [options.primaryDbPrivateIp] - Primary database node private IP (gateway bind + egress netpol)
  * @param {string} [options.standbyDbPrivateIp] - Standby database node private IP (gateway bind + egress netpol)
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
+ * @param {number} [options.attachWatchPollMs] - test seam: watchDbAttach's poll interval on the standby boot wait
  * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort check, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
  * @returns {Promise<{streaming: boolean, lastState: string, systemIdentifier: string|null}>} Replication status;
  *   systemIdentifier is the standby's, set only when streaming was verified
@@ -1023,16 +1025,32 @@ export async function setupReplication(options) {
   // slice separate from the swap itself. Budget is the shared
   // DB_STS_BOOT_TIMEOUT_S: at the old 300s, DigitalOcean's CSI
   // detach/attach settle failed a HEALTHY boot here (run 33252884427 — the
-  // wait timed out, the pod was Ready a minute later).
+  // wait timed out, the pod was Ready a minute later). The boot re-attaches
+  // the volume the swap pod just released, so the wait runs under
+  // watchDbAttach: a stale attachment stops it early, by name.
   await perfAsync('deploy.ha.replication.reseed.standbyBoot', () =>
-    runCommandAsync(
-      [
-        'ssh',
-        ...sshOpts,
-        `root@${standbyIp}`,
-        `kubectl rollout status statefulset/${dbSts} -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
-      ],
-      { silent: true },
+    watchDbAttach(
+      (signal) =>
+        runCommandAsync(
+          [
+            'ssh',
+            ...sshOpts,
+            `root@${standbyIp}`,
+            `kubectl rollout status statefulset/${dbSts} -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
+          ],
+          { silent: true, signal },
+        ),
+      {
+        kubectl: (argv, opts) =>
+          runCommandAsync(
+            ['ssh', ...sshOpts, `root@${standbyIp}`, ['kubectl', ...argv].join(' ')],
+            {
+              silent: true,
+              ...opts,
+            },
+          ),
+        pollMs: options.attachWatchPollMs,
+      },
     ),
   );
 
