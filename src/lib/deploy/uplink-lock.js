@@ -10,7 +10,7 @@
  * machine's uplink; its natural scope is the operator HOST, so the lock is a
  * lock DIRECTORY (atomic `mkdir` — the one primitive that is atomic on every
  * filesystem we run on) under ~/.vibecarbon/locks/, holding a holder.json
- * `{pid, startedAt, label}`.
+ * `{pid, startedAt, label, nonce}`.
  *
  * Reaping, because a SIGKILLed deploy never runs its release:
  *   - DEAD HOLDER: `process.kill(pid, 0)` throws ESRCH — reap immediately.
@@ -30,6 +30,7 @@
  * this lock absorbs.
  */
 
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -137,9 +138,13 @@ async function acquireHostLock({
   for (;;) {
     try {
       mkdirSync(lockDir); // atomic: exactly one process wins
+      // The nonce names THIS acquisition: a release compares it, not the pid,
+      // so a stale release in the same process (this lock reaped as over-age
+      // and re-taken by a later acquisition here) never frees the new holder.
+      const nonce = randomUUID();
       writeFileSync(
         holderPath(lockDir),
-        JSON.stringify({ pid: process.pid, startedAt: Date.now(), label }),
+        JSON.stringify({ pid: process.pid, startedAt: Date.now(), label, nonce }),
       );
       if (waitedLogged) {
         progressLog(
@@ -150,10 +155,10 @@ async function acquireHostLock({
       return () => {
         if (released) return;
         released = true;
-        // Only remove OUR lock: if a reaper raced us out and someone else now
-        // holds it, their holder.json names a different pid.
+        // Only remove OUR acquisition: if a reaper raced us out and someone
+        // else now holds it, their holder.json carries a different nonce.
         const holder = readHolder(lockDir);
-        if (holder && holder.pid !== process.pid) return;
+        if (holder && holder.nonce !== nonce) return;
         rmSync(lockDir, { recursive: true, force: true });
       };
     } catch (err) {

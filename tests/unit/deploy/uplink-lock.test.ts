@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -108,6 +108,21 @@ describe('acquireUplinkLock', () => {
     expect(lines.filter((l) => l.includes(`another process (pid ${process.ppid})`))).toHaveLength(
       1,
     );
+  });
+
+  it('release removes only its own acquisition, by nonce, not by pid', async () => {
+    const lockDir = join(makeDir(), 'uplink-push.lock');
+    const release = await acquireUplinkLock({ lockDir, label: 'x', sleep: fastSleep });
+    const mine = JSON.parse(readFileSync(join(lockDir, 'holder.json'), 'utf-8'));
+    expect(typeof mine.nonce).toBe('string');
+    // Reaped as over-age and re-taken by a later acquisition in this same
+    // process: same pid, different nonce. The stale release must not free it.
+    writeFileSync(
+      join(lockDir, 'holder.json'),
+      JSON.stringify({ ...mine, nonce: 'a-later-acquisition' }),
+    );
+    release();
+    expect(existsSync(join(lockDir, 'holder.json'))).toBe(true);
   });
 
   it('reaps a stale holder whose process is dead', async () => {
