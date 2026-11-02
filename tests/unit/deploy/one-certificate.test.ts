@@ -131,21 +131,23 @@ describe('removeRetiredObservabilityCertificate', () => {
   });
 });
 
-describe('deployK3s refuses a stale add-on copy before anything is provisioned', () => {
-  const src = readFileSync(join(ROOT, 'src', 'lib', 'deploy', 'k8s', 'k3s.js'), 'utf8');
-  const steps = src.slice(src.indexOf('async function deployK3sSteps('));
+describe('a k8s deploy refuses a stale add-on copy before anything is provisioned', () => {
+  const k3s = readFileSync(join(ROOT, 'src', 'lib', 'deploy', 'k8s', 'k3s.js'), 'utf8');
+  const orch = readFileSync(join(ROOT, 'src', 'lib', 'deploy', 'orchestrator.js'), 'utf8');
 
-  it('checks the project first, next to the restore-point refusal', () => {
-    const check = steps.indexOf('staleObservabilityTlsProblem(process.cwd())');
-    const restorePoint = steps.indexOf('assertDeployRestorePoint(');
-    const firstSpinner = steps.indexOf('const s = spin();');
-    expect(check).toBeGreaterThan(restorePoint);
-    expect(check).toBeLessThan(firstSpinner);
-    expect(steps.slice(check, firstSpinner)).toMatch(/throw new Error\(staleObservabilityTls\)/);
+  it('checks the project in the preflight, k8s tiers only, before the operator-IP step', () => {
+    const tierGate = orch.indexOf('assertTierSupported(providerFor(config), tier);');
+    const check = orch.indexOf('staleObservabilityTlsProblem(process.cwd())');
+    const operatorIp = orch.indexOf('// Operator-IP access:');
+    expect(tierGate).toBeGreaterThan(-1);
+    expect(check).toBeGreaterThan(tierGate);
+    expect(check).toBeLessThan(operatorIp);
+    expect(orch.slice(tierGate, check)).toContain('if (isK8sTier(tier)) {');
+    expect(orch.slice(check, operatorIp)).toMatch(/throw new Error\(staleObservabilityTls\)/);
   });
 
   it('no longer patches or issues grafana-tls anywhere in the deploy', () => {
-    expect(src).not.toMatch(/'patch',\s*'certificate',\s*'grafana-tls'/);
-    expect(src).not.toContain('observabilityCertificateDnsNames');
+    expect(k3s).not.toMatch(/'patch',\s*'certificate',\s*'grafana-tls'/);
+    expect(k3s).not.toContain('observabilityCertificateDnsNames');
   });
 });

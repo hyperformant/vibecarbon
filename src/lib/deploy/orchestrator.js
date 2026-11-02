@@ -72,6 +72,7 @@ import {
   liveK8sTlsSecretSerial,
   quietKubectl,
   snapshotK8sTlsSecret,
+  staleObservabilityTlsProblem,
 } from './k8s/index.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { makePublicDnsLookup } from './public-dns-lookup.js';
@@ -1119,6 +1120,14 @@ export async function executeDeployment(args, gatheredConfig) {
     env: operatorCheckEnvs(process.cwd()),
   });
   assertTierSupported(providerFor(config), tier);
+  // One certificate per name: an observability add-on copied into the
+  // project before the change still issues grafana-tls for the app domain,
+  // and `vibecarbon upgrade` does not refresh add-on files. Refused here, the
+  // last stop before anything is provisioned (k8s/one-certificate.js).
+  if (isK8sTier(tier)) {
+    const staleObservabilityTls = staleObservabilityTlsProblem(process.cwd());
+    if (staleObservabilityTls) throw new Error(staleObservabilityTls);
+  }
 
   // Operator-IP access: detect + persist + (when env already deployed) patch
   // the live Hetzner firewall. On a fresh first deploy this just appends to

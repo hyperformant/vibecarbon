@@ -121,10 +121,7 @@ import {
   standbyImageRef,
 } from './image-delivery.js';
 import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
-import {
-  removeRetiredObservabilityCertificate,
-  staleObservabilityTlsProblem,
-} from './one-certificate.js';
+import { removeRetiredObservabilityCertificate } from './one-certificate.js';
 import {
   awaitAppAdminReady,
   awaitCertManagerAdmission,
@@ -5008,11 +5005,6 @@ async function deployK3sSteps(options, inFlight) {
   // A `deploy -restore` point arrives resolved (C5); refuse a partial one
   // before anything is provisioned or applied.
   assertDeployRestorePoint({ restore: options.restore });
-  // An observability add-on copied before one-certificate-per-name still
-  // issues grafana-tls; refuse it with the edit, before anything is
-  // provisioned (./one-certificate.js).
-  const staleObservabilityTls = staleObservabilityTlsProblem(process.cwd());
-  if (staleObservabilityTls) throw new Error(staleObservabilityTls);
   const { state } = options;
   // When a tracker is supplied (the orchestrator + HA fan-out always pass one),
   // use its spinner factory (timing + per-step log file). Otherwise fall back to
