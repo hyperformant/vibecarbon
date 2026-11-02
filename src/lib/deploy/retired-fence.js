@@ -57,7 +57,12 @@ import { getSSHKeyPath, sshKubectl } from '../ssh.js';
 import { sshRun as composeSshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
 import { swappedSinceLastDeploy } from './failover-guard.js';
-import { fenceDatabaseWrites, k8sPsqlRunner, WRITE_FENCE_SETTING } from './replication.js';
+import {
+  fenceDatabaseWrites,
+  k8sPsqlRunner,
+  StaleVolumeAttachmentError,
+  WRITE_FENCE_SETTING,
+} from './replication.js';
 import { demoteK8sWalgRole, k8sDbRolloutWait } from './walg-role.js';
 
 /** The vibecarbon-config key the k8s backup CronJob reads. */
@@ -379,7 +384,34 @@ async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
   };
 }
 
-function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads }) {
+/**
+ * The k8s db settle: wait (bounded) for the retired side's db StatefulSet to
+ * roll, under watchDbAttach (k8sDbRolloutWait). True when it rolled. A plain
+ * failure is a quiet false, like every other fence step (the caller reports
+ * the part as missing). A stale volume attachment is a false too, but its
+ * name and recovery reach the operator once: otherwise the fence would only
+ * say the db "did not answer", hiding the one state waiting cannot clear.
+ *
+ * @param {object} o
+ * @param {(ip: string, argv: string[], opts?: object) => Promise<string>} o.kubectl
+ * @param {string} o.ip
+ * @param {(line: string) => void} o.warn
+ * @param {number} [o.pollMs] - watchDbAttach's poll interval (test seam)
+ * @returns {Promise<boolean>}
+ */
+export async function settleK8sDb({ kubectl, ip, warn, pollMs }) {
+  try {
+    await k8sDbRolloutWait({ kubectl, ip, timeoutS: DB_SETTLE_TIMEOUT_S, pollMs });
+    return true;
+  } catch (err) {
+    if (err instanceof StaleVolumeAttachmentError) {
+      warn(`retired side ${ip}: its db did not come back. ${err.message}`);
+    }
+    return false;
+  }
+}
+
+function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads, warn }) {
   return {
     probe: (ip) => probeK8s(ip, { kubectl, psqlFor, workloads }),
     // Ordered so backups are refused first, the database stops taking writes
@@ -469,7 +501,7 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads }) {
       },
     ],
     // The db pod was down or mid-roll: wait for it (bounded) before the second pass.
-    settle: (ip) => attempt(() => k8sDbRolloutWait({ kubectl, ip, timeoutS: DB_SETTLE_TIMEOUT_S })),
+    settle: (ip) => settleK8sDb({ kubectl, ip, warn }),
   };
 }
 
@@ -590,6 +622,7 @@ async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
       psqlFor: deps.psql ?? ((ip) => k8sPsqlRunner(ip, sshKeyPath)),
       zeroWorkloads: deps.zeroWorkloads,
       workloads: k8sFencedWorkloads(),
+      warn: deps.warn ?? ((line) => p.log.warn(line)),
     });
   }
   if (tier === 'compose-ha') {
