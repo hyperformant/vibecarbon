@@ -14,16 +14,41 @@
  * compose `-f` reconstruction against the ONE list `composeFileFlags` is built
  * from, so a newly added overlay cannot reach deploy and miss failover.
  */
-import { describe, expect, it } from 'vitest';
-import { REPL_COMPOSE_FLAGS } from '../../../src/lib/deploy/compose/ha.js';
-import { DB_POD, DB_STATEFULSET } from '../../../src/lib/deploy/db-workload.js';
+import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { load } from 'js-yaml';
+import { describe, expect, it, vi } from 'vitest';
+import { REPL_COMPOSE_FLAGS } from '../../../src/lib/deploy/compose/ha.js';
+import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from '../../../src/lib/deploy/db-workload.js';
+import {
+  COMPOSE_WALG_ROLE_HOST_DIR,
   composeDbRecreateShell,
+  composeWalgRoleWriteShell,
+  DB_ROLE_CONFIGMAP,
+  DB_ROLE_INTENT_KEY,
+  dbRoleConfigMapManifest,
   k8sDbRolloutStatusArgv,
   k8sSetWalgRoleArgv,
+  k8sWalgRoleExecArgv,
+  k8sWalgRoleIntentApplyArgv,
+  podMountsWalgRoleDir,
+  setK8sWalgRole,
+  WALG_ROLE_DIR,
   WALG_ROLE_ENV,
   walgRoleDegradedMessage,
+  walgRoleReadShell,
+  walgRoleWriteShell,
 } from '../../../src/lib/deploy/walg-role.js';
+import { shEscape } from '../../../src/lib/shell.js';
 
 const shell = composeDbRecreateShell('/opt/myapp');
 
@@ -225,5 +250,180 @@ describe('walgRoleDegradedMessage', () => {
       detail: 'x',
     });
     expect(k8s).toContain(`kubectl -n vibecarbon exec ${DB_POD}`);
+  });
+});
+
+const podJson = (mounted: boolean) =>
+  JSON.stringify({
+    metadata: { uid: 'u1' },
+    spec: {
+      containers: [
+        {
+          name: 'db',
+          volumeMounts: [
+            { name: 'data', mountPath: '/var/lib/postgresql/data', subPath: 'postgres-data' },
+            ...(mounted
+              ? [{ name: 'data', mountPath: WALG_ROLE_DIR, subPath: 'vibecarbon-role' }]
+              : []),
+          ],
+        },
+      ],
+    },
+  });
+
+describe('walg role primitives', () => {
+  it('refuses an unknown role', () => {
+    expect(() => walgRoleWriteShell(WALG_ROLE_DIR, 'leader' as never)).toThrow(
+      /unknown wal-g role/,
+    );
+    expect(() => dbRoleConfigMapManifest(undefined as never)).toThrow(/unknown wal-g role/);
+  });
+  it('the write is atomic and reads itself back through the one parser, run for real', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-role-'));
+    const r = spawnSync('sh', ['-c', walgRoleWriteShell(dir, 'primary')], { encoding: 'utf-8' });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe('WALG_ROLE_FILE=primary');
+    expect(readFileSync(join(dir, 'walg-role'), 'utf-8')).toBe('primary\n');
+    expect(existsSync(join(dir, 'walg-role.tmp'))).toBe(false);
+    expect(statSync(join(dir, 'walg-role')).mode & 0o777).toBe(0o644);
+    expect(walgRoleWriteShell(dir, 'primary')).toMatch(
+      /mv -f [^\n]*walg-role\.tmp [^\n]*walg-role && sync/,
+    );
+  });
+  it('never follows a symlink planted at the tmp name', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-role-'));
+    writeFileSync(join(dir, 'victim'), 'x');
+    symlinkSync(join(dir, 'victim'), join(dir, 'walg-role.tmp'));
+    spawnSync('sh', ['-c', walgRoleWriteShell(dir, 'standby')]);
+    expect(readFileSync(join(dir, 'victim'), 'utf-8')).toBe('x');
+  });
+  it('the manifest is the CLI-owned ConfigMap with the one key', () => {
+    const doc = load(dbRoleConfigMapManifest('standby')) as {
+      kind: string;
+      metadata: { name: string; namespace: string };
+      data: Record<string, string>;
+    };
+    expect(doc).toMatchObject({
+      kind: 'ConfigMap',
+      metadata: { name: DB_ROLE_CONFIGMAP, namespace: 'vibecarbon' },
+      data: { [DB_ROLE_INTENT_KEY]: 'standby' },
+    });
+  });
+  it('setK8sWalgRole: apply (never patch) the intent, then the live write on a mounted pod', async () => {
+    const calls: Array<{ argv: string; input?: string }> = [];
+    const kubectl = vi.fn(async (_ip: string, argv: string[], o?: { input?: string }) => {
+      calls.push({ argv: argv.join(' '), input: o?.input });
+      if (argv.includes('get')) return podJson(true);
+      if (argv.includes('exec')) return 'WALG_ROLE_FILE=primary';
+      return '';
+    });
+    await expect(setK8sWalgRole({ ip: '1.1.1.1', kubectl, role: 'primary' })).resolves.toEqual({
+      intent: true,
+      live: true,
+    });
+    expect(calls[0].argv).toContain('apply -f -');
+    expect(calls[0].input).toContain(`${DB_ROLE_INTENT_KEY}: primary`);
+    expect(calls.some((c) => c.argv.includes('patch'))).toBe(false);
+  });
+  it('a pre-release pod without the role mount: intent applied, NO exec, and requireLive throws with the deploy hint (C18)', async () => {
+    const kubectl = vi.fn(async (_ip: string, argv: string[]) =>
+      argv.includes('get') ? podJson(false) : '',
+    );
+    await expect(setK8sWalgRole({ ip: '1.1.1.1', kubectl, role: 'standby' })).resolves.toEqual({
+      intent: true,
+      live: false,
+      reason: 'no-role-mount',
+    });
+    expect(kubectl.mock.calls.some(([, a]) => a.includes('exec'))).toBe(false);
+    await expect(
+      setK8sWalgRole({ ip: '1.1.1.1', kubectl, role: 'primary', requireLive: true }),
+    ).rejects.toThrow(/predates[\s\S]*vibecarbon deploy/);
+  });
+  it('a dead pod still records the intent (its next start applies it)', async () => {
+    const kubectl = vi.fn(async (_ip: string, argv: string[]) => {
+      if (argv.includes('get')) throw new Error('pods "db-0" not found');
+      return '';
+    });
+    await expect(
+      setK8sWalgRole({ ip: '1.1.1.1', kubectl, role: 'standby' }),
+    ).resolves.toMatchObject({
+      intent: true,
+      live: false,
+      reason: 'pod-unreachable',
+    });
+  });
+  it('a read-back that disagrees is not live', async () => {
+    const kubectl = vi.fn(async (_ip: string, argv: string[]) =>
+      argv.includes('get') ? podJson(true) : argv.includes('exec') ? 'WALG_ROLE_FILE=' : '',
+    );
+    await expect(
+      setK8sWalgRole({ ip: '1.1.1.1', kubectl, role: 'primary' }),
+    ).resolves.toMatchObject({
+      live: false,
+      reason: 'read-back-mismatch',
+    });
+  });
+  it('compose writes on the host, in the project dir', () => {
+    expect(composeWalgRoleWriteShell('acme', 'standby')).toMatch(/^cd \/opt\/acme && /);
+    expect(composeWalgRoleWriteShell('acme', 'standby')).toContain('.vibecarbon-role');
+  });
+
+  // Beyond the brief's cases: the pieces the later tasks lean on.
+  it('the intent apply argv is a plain apply from stdin in the vibecarbon namespace', () => {
+    expect(k8sWalgRoleIntentApplyArgv()).toEqual(['-n', 'vibecarbon', 'apply', '-f', '-']);
+  });
+  it('the exec argv survives the ssh argv join and runs the write script unchanged', () => {
+    const argv = k8sWalgRoleExecArgv('primary');
+    expect(argv.slice(0, 8)).toEqual([
+      '-n',
+      'vibecarbon',
+      'exec',
+      DB_POD,
+      '-c',
+      DB_CONTAINER,
+      '--',
+      'sh',
+    ]);
+    // The exact remote string sshKubectl sends (sshArgv's per-token shEscape
+    // join), parsed by a real shell: every token comes back intact.
+    const remote = ['kubectl', ...argv].map(shEscape).join(' ');
+    const r = spawnSync('sh', ['-c', `set -- ${remote}; printf '%s\\0' "$@"`], {
+      encoding: 'utf-8',
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout.split('\0').slice(0, -1)).toEqual(['kubectl', ...argv]);
+    expect(argv.at(-1)).toBe(walgRoleWriteShell(WALG_ROLE_DIR, 'primary'));
+  });
+  it('podMountsWalgRoleDir reads only the db container, and never throws on junk', () => {
+    expect(podMountsWalgRoleDir(podJson(true))).toBe(true);
+    expect(podMountsWalgRoleDir(podJson(false))).toBe(false);
+    expect(podMountsWalgRoleDir('not json')).toBe(false);
+    const sidecar = JSON.stringify({
+      spec: {
+        containers: [
+          { name: 'db', volumeMounts: [] },
+          { name: 'other', volumeMounts: [{ name: 'data', mountPath: WALG_ROLE_DIR }] },
+        ],
+      },
+    });
+    expect(podMountsWalgRoleDir(sidecar)).toBe(false);
+  });
+  it('the read shell never fails and reports an empty role for a missing file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-role-'));
+    const r = spawnSync('sh', ['-c', walgRoleReadShell(dir)], { encoding: 'utf-8' });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('WALG_ROLE_FILE=\n');
+  });
+  it('a write into a missing directory fails loudly and prints no role line', () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'vc-role-')), 'absent');
+    const r = spawnSync('sh', ['-c', walgRoleWriteShell(dir, 'primary')], { encoding: 'utf-8' });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain('WALG_ROLE_FILE=');
+  });
+  it('compose refuses a project name that is not a safe path segment', () => {
+    expect(() => composeWalgRoleWriteShell('../etc', 'primary')).toThrow();
+    expect(composeWalgRoleWriteShell('acme', 'primary')).toContain(
+      `/opt/acme/${COMPOSE_WALG_ROLE_HOST_DIR}`,
+    );
   });
 });

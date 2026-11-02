@@ -49,6 +49,7 @@
  */
 
 import { shEscape } from '../shell.js';
+import { validateProjectName } from '../validators.js';
 import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
 import { DB_STS_BOOT_TIMEOUT_S, watchDbAttach } from './replication.js';
@@ -81,6 +82,221 @@ export const WALG_ROLE_PARSE_SH = [
  */
 export function walgRoleReadFragment(path) {
   return `vc_walg_role_file=${shEscape(path)}\n${WALG_ROLE_PARSE_SH}\nunset vc_walg_role_file`;
+}
+
+/** The compose role directory on the host, relative to `/opt/<project>`. */
+export const COMPOSE_WALG_ROLE_HOST_DIR = '.vibecarbon-role';
+
+/** k8s: the CLI-owned ConfigMap holding the durable role intent. */
+export const DB_ROLE_CONFIGMAP = 'vibecarbon-db-role';
+
+/** Its one key, injected into the db container as an env var of the same name. */
+export const DB_ROLE_INTENT_KEY = 'VC_WALG_ROLE_INTENT';
+
+/**
+ * The one role check every writer goes through: only the two literal words.
+ *
+ * @param {unknown} role
+ * @returns {'primary'|'standby'}
+ */
+export function assertWalgRole(role) {
+  if (role !== 'primary' && role !== 'standby') {
+    throw new Error(`unknown wal-g role ${JSON.stringify(role) ?? String(role)}`);
+  }
+  return role;
+}
+
+/**
+ * POSIX sh that prints `WALG_ROLE_FILE=<role>` for `<dir>/walg-role`, read
+ * through the one parser. `<role>` is empty for a missing or unparseable file.
+ * Never fails.
+ *
+ * @param {string} dir
+ * @returns {string}
+ */
+export function walgRoleReadShell(dir) {
+  return `${walgRoleReadFragment(`${dir}/walg-role`)}\nprintf 'WALG_ROLE_FILE=%s\\n' "$VC_WALG_ROLE"`;
+}
+
+/**
+ * POSIX sh that writes the role to `<dir>/walg-role` atomically, then prints
+ * it read back through the one parser (walgRoleReadShell).
+ *
+ * The write happens inside `<dir>`, so the rename never crosses a filesystem:
+ * remove any stale tmp (a planted symlink is removed, never followed), create
+ * the tmp under noclobber (a name that reappears in between fails the write
+ * instead of being followed), chmod 0644, `mv -f` over the role file, sync.
+ * A reader sees the old word or the new one, never a partial file. Any step
+ * failing exits 1 before the read-back, so no role line is printed.
+ *
+ * @param {string} dir the role directory (must exist)
+ * @param {'primary'|'standby'} role
+ * @returns {string}
+ */
+export function walgRoleWriteShell(dir, role) {
+  assertWalgRole(role);
+  return [
+    `( cd ${shEscape(dir)} && rm -f walg-role.tmp && (set -C && printf '%s\\n' ${role} > walg-role.tmp) && chmod 0644 walg-role.tmp && mv -f walg-role.tmp walg-role && sync ) || { echo ${shEscape(`[walg-role] could not write the wal-g role in ${dir}`)} >&2; exit 1; }`,
+    walgRoleReadShell(dir),
+  ].join('\n');
+}
+
+/**
+ * The k8s role intent ConfigMap. Applied with `kubectl apply -f -`, so a
+ * cluster that predates it gets it created rather than a failed patch. Not in
+ * k8s/base: Flux never sees it.
+ *
+ * @param {'primary'|'standby'} role
+ * @returns {string} YAML
+ */
+export function dbRoleConfigMapManifest(role) {
+  assertWalgRole(role);
+  return [
+    'apiVersion: v1',
+    'kind: ConfigMap',
+    'metadata:',
+    `  name: ${DB_ROLE_CONFIGMAP}`,
+    '  namespace: vibecarbon',
+    'data:',
+    `  ${DB_ROLE_INTENT_KEY}: ${role}`,
+    '',
+  ].join('\n');
+}
+
+/**
+ * kubectl argv (no leading `kubectl`) that applies dbRoleConfigMapManifest,
+ * passed as the call's `input`.
+ *
+ * @returns {string[]}
+ */
+export function k8sWalgRoleIntentApplyArgv() {
+  return ['-n', 'vibecarbon', 'apply', '-f', '-'];
+}
+
+/**
+ * kubectl argv that writes the live role file in the db container. Every
+ * token survives sshKubectl's per-token shEscape join, the script included.
+ *
+ * @param {'primary'|'standby'} role
+ * @returns {string[]}
+ */
+export function k8sWalgRoleExecArgv(role) {
+  return [
+    '-n',
+    'vibecarbon',
+    'exec',
+    DB_POD,
+    '-c',
+    DB_CONTAINER,
+    '--',
+    'sh',
+    '-c',
+    walgRoleWriteShell(WALG_ROLE_DIR, role),
+  ];
+}
+
+/**
+ * Does this db pod's db container mount WALG_ROLE_DIR? A pod from before the
+ * role mount would take an exec write into its container overlay and read it
+ * back as a false success, so the live write is gated on this.
+ *
+ * @param {string|object} podJson `kubectl get pod -o json` output, or its parse
+ * @returns {boolean} false for anything unparseable
+ */
+export function podMountsWalgRoleDir(podJson) {
+  let pod;
+  try {
+    pod = typeof podJson === 'string' ? JSON.parse(podJson) : podJson;
+  } catch {
+    return false;
+  }
+  const containers = pod?.spec?.containers;
+  if (!Array.isArray(containers)) return false;
+  const db = containers.find((c) => c?.name === DB_CONTAINER);
+  const mounts = db?.volumeMounts;
+  return Array.isArray(mounts) && mounts.some((m) => m?.mountPath === WALG_ROLE_DIR);
+}
+
+/**
+ * Set the k8s wal-g role: the durable intent first (created if missing), then
+ * the live file, but only on a pod whose spec mounts WALG_ROLE_DIR.
+ *
+ * A failed intent apply throws: without it a db start that the CLI could not
+ * reach would come back with the wrong role. The live write never throws
+ * unless `requireLive` is set; the result says why it did not land.
+ *
+ * @param {object} o
+ * @param {string} o.ip
+ * @param {(ip: string, argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>} o.kubectl
+ * @param {'primary'|'standby'} o.role
+ * @param {boolean} [o.requireLive] throw unless the live file now reads `role`
+ * @returns {Promise<{intent: boolean, live: boolean, reason?: 'no-role-mount'|'pod-unreachable'|'read-back-mismatch', error?: Error}>}
+ */
+export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false }) {
+  assertWalgRole(role);
+  await kubectl(ip, k8sWalgRoleIntentApplyArgv(), {
+    input: dbRoleConfigMapManifest(role),
+    timeout: 60_000,
+  });
+
+  /** @param {{intent: boolean, live: boolean, reason?: string, error?: Error}} result */
+  const settle = (result) => {
+    if (!requireLive || result.live) return result;
+    if (result.reason === 'no-role-mount') {
+      throw new Error(
+        `this cluster's db predates the live wal-g role (no ${WALG_ROLE_DIR} mount on ${DB_POD}); ` +
+          'run `vibecarbon deploy <env>` once (one db restart), then retry',
+      );
+    }
+    const detail = result.error ? `: ${result.error.message}` : '';
+    throw new Error(
+      `could not set the wal-g role to ${role} on ${DB_POD} (${result.reason})${detail}`,
+    );
+  };
+
+  let pod;
+  try {
+    pod = await kubectl(ip, ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'], {
+      timeout: 30_000,
+    });
+  } catch (error) {
+    return settle({ intent: true, live: false, reason: 'pod-unreachable', error });
+  }
+  if (!podMountsWalgRoleDir(pod)) {
+    return settle({ intent: true, live: false, reason: 'no-role-mount' });
+  }
+
+  let out;
+  try {
+    out = await kubectl(ip, k8sWalgRoleExecArgv(role), { timeout: 30_000 });
+  } catch (error) {
+    return settle({ intent: true, live: false, reason: 'pod-unreachable', error });
+  }
+  const readBack = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim();
+  if (readBack !== role) {
+    return settle({ intent: true, live: false, reason: 'read-back-mismatch' });
+  }
+  return { intent: true, live: true };
+}
+
+/**
+ * One SSH command for a compose host: write the role into
+ * `/opt/<project>/.vibecarbon-role/walg-role` (bound read-only into the db
+ * container). Runs on the host, so it works with db stopped.
+ *
+ * @param {string} projectName
+ * @param {'primary'|'standby'} role
+ * @returns {string}
+ */
+export function composeWalgRoleWriteShell(projectName, role) {
+  const invalid = validateProjectName(projectName);
+  if (invalid) throw new Error(`composeWalgRoleWriteShell: ${invalid}`);
+  assertWalgRole(role);
+  const projectDir = `/opt/${projectName}`;
+  return [
+    `cd ${projectDir} && mkdir -p ${COMPOSE_WALG_ROLE_HOST_DIR} && chmod 0755 ${COMPOSE_WALG_ROLE_HOST_DIR} || exit 1`,
+    walgRoleWriteShell(`${projectDir}/${COMPOSE_WALG_ROLE_HOST_DIR}`, role),
+  ].join('\n');
 }
 
 /** The env var both tiers read as the wal-g write-guard. */
