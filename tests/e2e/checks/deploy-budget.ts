@@ -53,6 +53,9 @@ export const STANDBY_AWAIT_DB_MAX_MS = 60_000;
 /** Modes whose app image reaches the server by layer delta (deliverImage). */
 const DELTA_MODES: ReadonlySet<DeployMode> = new Set(['compose', 'compose-ha', 'k8s', 'k8s-ha']);
 
+/** compose-ha sends one delta to each of its two servers; every other mode sends one. */
+const DELTA_MARKERS: Partial<Record<DeployMode, number>> = { 'compose-ha': 2 };
+
 /**
  * Markers that are not serial work of their own, kept out of the "slowest"
  * list a failure names:
@@ -134,9 +137,14 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     .filter((b): b is string => b !== undefined)
     .map(Number);
   if (DELTA_MODES.has(mode)) {
+    const expected = DELTA_MARKERS[mode] ?? 1;
     if (deltaBytes.length === 0) {
       failures.push(
         'no [perf] deploy.image.delta bytes= marker, so the cold image bytes are unread',
+      );
+    } else if (deltaBytes.length < expected) {
+      failures.push(
+        `${deltaBytes.length} [perf] deploy.image.delta marker, expected ${expected} (one per server)`,
       );
     }
     for (const bytes of deltaBytes) {

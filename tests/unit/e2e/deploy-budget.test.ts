@@ -209,6 +209,16 @@ describe('checkDeployBudget: time budgets', () => {
 });
 
 describe('checkDeployBudget: cold image bytes', () => {
+  it('fails compose-ha with a delta marker for only one of its two servers', () => {
+    const log = fixture('compose-ha').replace(/^\[perf\] deploy\.image\.delta .*\n/m, '');
+    expect(log.match(/deploy\.image\.delta /g)).toHaveLength(1);
+    const r = checkDeployBudget(log, 'compose-ha');
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(
+      /1 \[perf\] deploy\.image\.delta marker, expected 2 \(one per server\)/,
+    );
+  });
+
   it.each(['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const)(
     'fails %s with a delta over 10 MB',
     (mode) => {
