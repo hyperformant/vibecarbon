@@ -1,7 +1,7 @@
 /**
  * vibecarbon remove — comprehensive matrix against a real project.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -60,6 +60,39 @@ describe('vibecarbon remove', () => {
         expect(readManifest(project).services?.[feature]).toBeUndefined();
       },
     );
+  });
+
+  describe('remove drops what add wrote, and only that', () => {
+    it('drops the checksums of the files it removes', () => {
+      assertSuccess(runCli('add', ['observability', '-y'], { cwd: project, timeoutMs: 30_000 }));
+      assertSuccess(runCli('remove', ['observability', '-y'], { cwd: project, timeoutMs: 30_000 }));
+      const sums = Object.keys(
+        (readManifest(project) as { fileChecksums?: Record<string, string> }).fileChecksums ?? {},
+      );
+      expect(
+        sums.filter(
+          (k) =>
+            k.startsWith('k8s/base/observability/') ||
+            k.startsWith('docker-compose.observability') ||
+            k.startsWith('volumes/prometheus/') ||
+            k === 'observability-integration.md',
+        ),
+      ).toEqual([]);
+      // The template's own checksums stay.
+      expect(sums).toContain('docker-compose.prod.yml');
+    });
+
+    it("keeps the project's own files under a directory the add-on shares", () => {
+      // The observability manifest maps `volumes/` to `volumes/`; removing
+      // the add-on must not take the template's volumes (traefik, db) with it.
+      const shared = ['volumes/traefik/middlewares.yml', 'volumes/db/db-guard.sh'];
+      for (const rel of shared) expect(existsSync(join(project, rel)), rel).toBe(true);
+      assertSuccess(runCli('add', ['observability', '-y'], { cwd: project, timeoutMs: 30_000 }));
+      assertSuccess(runCli('remove', ['observability', '-y'], { cwd: project, timeoutMs: 30_000 }));
+      for (const rel of shared) expect(existsSync(join(project, rel)), rel).toBe(true);
+      expect(existsSync(join(project, 'volumes/prometheus/prometheus.yml'))).toBe(false);
+      expect(existsSync(join(project, 'k8s/base/observability'))).toBe(false);
+    });
   });
 
   describe('parked features can still be removed (add blocks, remove allows)', () => {

@@ -10,10 +10,12 @@
  * memory:feedback_cli_single_dash_flags.
  */
 
-import { existsSync, rmSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, rmdirSync, rmSync, unlinkSync } from 'node:fs';
+import { dirname, join, posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
 import { fetchServiceManifest, loadManifest, removeFromBaseKustomization } from './add.js';
+import { addonUpgradeEntries, isContainedRelPath } from './lib/addon-upgrade-files.js';
 import { exitCancelled } from './lib/cli/exit-guard.js';
 import { formatCommandNote } from './lib/cli/help.js';
 import { introCommand } from './lib/cli/intro.js';
@@ -24,6 +26,10 @@ import { c } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+
+const CLI_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const SERVICES_DIR = join(CLI_ROOT, 'services');
+const TEMPLATE_DIR = join(CLI_ROOT, 'carbon');
 
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
@@ -73,6 +79,24 @@ function removeFile(filePath) {
     }
   }
   return false;
+}
+
+/**
+ * Remove `relDir` and each parent up to (not including) the shared `prefix`
+ * while they are empty.
+ */
+function pruneEmptyDirs(root, relDir, prefix) {
+  let dir = relDir;
+  while (`${dir}/`.startsWith(prefix) && `${dir}/` !== prefix) {
+    const full = join(root, dir);
+    try {
+      if (readdirSync(full).length > 0) return;
+      rmdirSync(full);
+    } catch {
+      return;
+    }
+    dir = posix.dirname(dir);
+  }
 }
 
 function removeDirectory(dirPath) {
@@ -151,16 +175,38 @@ async function removeService(serviceName, options) {
     );
   }
 
-  // Remove files based on manifest mappings
+  // Remove files based on manifest mappings. A directory the add-on owns
+  // alone (k8s/base/<name>/) goes whole. A directory it shares with the
+  // template (observability maps `volumes/` onto the project's `volumes/`,
+  // which holds the db and traefik files) loses only the files the add-on
+  // ships, then any directory that leaves empty. The checksums `add`
+  // recorded for what is removed go with it.
+  const cwd = process.cwd();
+  const shipped = addonUpgradeEntries({
+    installed: [serviceName],
+    servicesDir: SERVICES_DIR,
+    projectRoot: cwd,
+  }).map((e) => e.relPath);
+  const droppedChecksums = [];
   for (const [src, dest] of Object.entries(serviceManifest.files || {})) {
-    const fullPath = join(process.cwd(), dest);
-    if (src.endsWith('/')) {
-      // Directory
-      removeDirectory(fullPath);
-    } else {
-      // File
+    if (!isContainedRelPath(dest)) continue;
+    const fullPath = join(cwd, dest);
+    if (!src.endsWith('/')) {
       removeFile(fullPath);
+      droppedChecksums.push((key) => key === posix.normalize(dest));
+      continue;
     }
+    const prefix = `${posix.normalize(dest).replace(/\/$/, '')}/`;
+    if (!existsSync(join(TEMPLATE_DIR, dest))) {
+      removeDirectory(fullPath);
+      droppedChecksums.push((key) => key.startsWith(prefix));
+      continue;
+    }
+    const mine = shipped.filter((rel) => rel.startsWith(prefix));
+    for (const rel of mine) removeFile(join(cwd, rel));
+    for (const rel of mine) pruneEmptyDirs(cwd, posix.dirname(rel), prefix);
+    const set = new Set(mine);
+    droppedChecksums.push((key) => set.has(key));
   }
 
   // Remove from kustomization.yaml
@@ -172,6 +218,11 @@ async function removeService(serviceName, options) {
   delete projectManifest.services[serviceName];
   updateProjectConfig((config) => {
     if (config.services) delete config.services[serviceName];
+    if (config.fileChecksums) {
+      for (const key of Object.keys(config.fileChecksums)) {
+        if (droppedChecksums.some((drop) => drop(key))) delete config.fileChecksums[key];
+      }
+    }
   });
 
   s.stop(`${serviceManifest.name} removed successfully`);
