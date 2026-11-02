@@ -86,6 +86,7 @@ import {
 import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
 import {
   checkNoNewCertificateRequest,
+  checkServedIsSecret,
   checkTlsReused,
   listCertificateRequestUids,
 } from '../checks/tls-reuse.js';
@@ -2074,6 +2075,23 @@ export async function runLifecycle(
           console.log(
             `${tag} [${stepName}] recorded certificate serial ${tlsServedSerial || '(none: ssl_valid did not pass)'}`,
           );
+          // One certificate per name: the served certificate is the one
+          // Secret/vibecarbon-tls holds, the one every snapshot and restore
+          // covers. A second certificate for the domain in Traefik's global
+          // store would otherwise surface only later, as tls_reused failing
+          // after a correct restore.
+          if (isK8sMode) {
+            const servedIsSecret = checkServedIsSecret(
+              tlsServedSerial,
+              config.mode === 'k8s-ha'
+                ? haRoleKubeconfig(config.projectDir, config.envPrefix, 'primary')
+                : join(config.projectDir, '.vibecarbon', `kubeconfig-${config.envPrefix}`),
+            );
+            console.log(
+              `${tag} [${stepName}] tls_served_is_secret: ${servedIsSecret.status}${servedIsSecret.errorMessage ? ` (${servedIsSecret.errorMessage})` : ''}`,
+            );
+            allResults.push(servedIsSecret);
+          }
         } else if (stepName === 'verify-restore' || isPostFailoverVerify(stepName)) {
           allResults.push(await recordTlsReused(stepName));
         }

@@ -14,6 +14,11 @@
  *   creates no cert-manager CertificateRequest, the object every issuance
  *   starts from. Compared by uid, so a request garbage-collected with a
  *   deleted Certificate does not hide a new one.
+ * - `tls_served_is_secret` (k8s tiers, verify-deploy): the domain serves the
+ *   certificate Secret/vibecarbon-tls holds, the one every snapshot and
+ *   restore covers. A second certificate for the same name in Traefik's
+ *   global store (the observability add-on's old grafana-tls) let the domain
+ *   serve either, and a correct restore then failed `tls_reused`.
  *
  * Never a hollow pass: no recorded serial, an unread served certificate or
  * an unread CertificateRequest listing fails (tests/unit/e2e/
@@ -22,6 +27,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import tls from 'node:tls';
+import { certificateSerial, normalizeSerial } from '../../../src/lib/deploy/tls-snapshot.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import type { VerificationResult } from '../scenarios/types.js';
 import { resolveCheckIp } from './health.js';
@@ -188,4 +194,90 @@ export function checkNoNewCertificateRequest({
     };
   }
   return { checkName, status: 'pass', details: { before: before.length, after: after.length } };
+}
+
+/**
+ * The serial of the certificate in a Secret's base64 `tls.crt` (the leaf), in
+ * the CLI's one spelling (normalizeSerial), or null when there is none.
+ */
+export function parseSecretCertificateSerial(tlsCrtBase64: string): string | null {
+  const b64 = tlsCrtBase64.trim();
+  if (!b64) return null;
+  return certificateSerial(Buffer.from(b64, 'base64').toString('utf8')) || null;
+}
+
+/**
+ * The serial of the certificate Secret/vibecarbon-tls holds, or null when
+ * unread. Asks kubectl for tls.crt alone: the key never leaves the cluster.
+ */
+export function readSecretCertificateSerial(kubeconfig: string): string | null {
+  const r = spawnSync(
+    'kubectl',
+    [
+      '--kubeconfig',
+      kubeconfig,
+      '-n',
+      'vibecarbon',
+      'get',
+      'secret',
+      'vibecarbon-tls',
+      '-o',
+      'jsonpath={.data.tls\\.crt}',
+    ],
+    { encoding: 'utf-8', timeout: 30_000, env: gitScrubbedEnv() },
+  );
+  if (r.status !== 0) return null;
+  return parseSecretCertificateSerial(r.stdout || '');
+}
+
+/**
+ * `tls_served_is_secret`: the serial the domain serves (ssl_valid's, at
+ * verify-deploy) is the serial of Secret/vibecarbon-tls on the primary.
+ */
+export function checkServedIsSecret(
+  servedSerial: string,
+  kubeconfig: string | null,
+  deps: { readSecretSerial?: (kubeconfig: string) => string | null } = {},
+): VerificationResult {
+  const checkName = 'tls_served_is_secret';
+  const served = normalizeSerial(servedSerial);
+  if (!served) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage:
+        'no served certificate serial (ssl_valid did not pass), so the served certificate ' +
+        'cannot be matched to Secret/vibecarbon-tls',
+    };
+  }
+  if (!kubeconfig) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage: 'no kubeconfig for the primary cluster, so Secret/vibecarbon-tls was not read',
+      details: { servedSerial: served },
+    };
+  }
+  const secret = (deps.readSecretSerial ?? readSecretCertificateSerial)(kubeconfig);
+  if (!secret) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage: `could not read the certificate of Secret/vibecarbon-tls through ${kubeconfig}`,
+      details: { servedSerial: served },
+    };
+  }
+  const details = { servedSerial: served, secretSerial: secret };
+  if (served !== secret) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage:
+        `the domain serves certificate serial ${served}, but Secret/vibecarbon-tls holds ` +
+        `${secret}: Traefik holds another certificate for the same name, so a restore of ` +
+        'vibecarbon-tls would not change what is served',
+      details,
+    };
+  }
+  return { checkName, status: 'pass', details };
 }
