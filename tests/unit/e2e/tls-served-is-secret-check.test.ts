@@ -111,6 +111,19 @@ describe('parseCertificateInventory / parseTlsSecretInventory', () => {
       },
     ]);
     expect(parseCertificateInventory('not json')).toBeNull();
+    // A Certificate's commonName is a name it covers too.
+    expect(
+      parseCertificateInventory(
+        JSON.stringify({
+          items: [
+            {
+              metadata: { namespace: 'x', name: 'cn-only' },
+              spec: { commonName: 'app.example.com' },
+            },
+          ],
+        }),
+      ),
+    ).toEqual([{ namespace: 'x', name: 'cn-only', dnsNames: ['app.example.com'] }]);
     expect(parseCertificateInventory('{}')).toBeNull();
   });
 

@@ -316,14 +316,20 @@ export function parseCertificateInventory(json: string): TlsObject[] | null {
     const parsed = JSON.parse(json) as {
       items?: Array<{
         metadata?: { namespace?: string; name?: string };
-        spec?: { dnsNames?: string[] };
+        spec?: { dnsNames?: string[]; commonName?: string };
       }>;
     };
     if (!Array.isArray(parsed.items)) return null;
+    // commonName is a name the Certificate covers too.
     return parsed.items.map((i) => ({
       namespace: i.metadata?.namespace ?? '',
       name: i.metadata?.name ?? '',
-      dnsNames: i.spec?.dnsNames ?? [],
+      dnsNames: [
+        ...new Set([
+          ...(i.spec?.dnsNames ?? []),
+          ...(i.spec?.commonName ? [i.spec.commonName] : []),
+        ]),
+      ],
     }));
   } catch {
     return null;
