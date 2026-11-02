@@ -736,6 +736,31 @@ describe('compose-ha: the wal-g role moves before the promote, with no db recrea
     expect(roles).toEqual(['primary', 'standby']);
     expect(at('fence')).toBeLessThan(at('unfence'));
   });
+
+  it('compose: a failed journal write on a rerun with a journal keeps the arm: an earlier promote may still land', async () => {
+    const roles: string[] = [];
+    const promote = vi.fn();
+    const err = await runCompose(false, {
+      journal: true,
+      run: async (_ip, _k, cmd) => {
+        const role = composeRoleWriteOf(cmd);
+        if (role) roles.push(role);
+        return composeReply(cmd);
+      },
+      writeJournal: async () => {
+        throw new Error('could not save .vibecarbon.json: EACCES');
+      },
+      promote,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/EACCES/);
+    expect(err.message).toMatch(/may still land/);
+    expect(err.message).not.toMatch(/disarmed/);
+    expect(promote).not.toHaveBeenCalled();
+    // No disarm: `standby` on a node whose earlier promote is landing would
+    // drop its .history and .partial files.
+    expect(roles).toEqual(['primary']);
+  });
 });
 
 describe('failover step order: k8s-ha (failoverHA)', () => {
