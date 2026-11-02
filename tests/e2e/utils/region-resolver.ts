@@ -30,8 +30,20 @@ import type { DeployMode } from '../scenarios/types.js';
 export interface CapacityPreferences {
   /** Locations (Scaleway: zones) in operator-preferred order, best first. */
   regions: readonly string[];
-  /** Scale ladder: the type a deploy recorded -> the type the scale step moves it to. */
-  scaleTo: Readonly<Record<string, string>>;
+  /**
+   * Scale ladder: the type a deploy recorded -> the type the scale step moves
+   * it to. An entry is one type, or an ordered list of candidates: the
+   * resolver picks the first that every side of the deploy sells and that is
+   * bigger than each side's own type (a mixed-type HA pair, such as DO sfo3
+   * `-amd` with tor1 plain, needs a target both sell, e.g. the `-intel` one).
+   */
+  scaleTo: Readonly<Record<string, string | readonly string[]>>;
+}
+
+/** The ladder entry as an ordered candidate list. */
+export function scaleCandidates(entry: string | readonly string[] | undefined): string[] {
+  if (entry === undefined) return [];
+  return typeof entry === 'string' ? [entry] : [...entry];
 }
 
 export interface ResolvedCapacity {
@@ -45,6 +57,12 @@ export interface ResolvedCapacity {
   types: Record<string, string>;
   /** Where the capacity was found, for diagnostics (the region itself). */
   datacenter: string;
+  /**
+   * The scale step's target: the first ladder candidate sold on every side
+   * of the deploy and bigger than each side's own type. The scale step uses
+   * this, never `scaleTo[type]` directly.
+   */
+  scaleTarget: string;
 }
 
 /** Provider a scenario provisions against. */
@@ -114,9 +132,59 @@ async function loadProvider(
   return Provider;
 }
 
+interface ScaleSide {
+  /** Human label for refusals, e.g. `primary` or `default standby`. */
+  label: string;
+  location: string;
+  /** The side's own resolved types: the target must be bigger than each. */
+  types: Array<{ role: string; type: string }>;
+}
+
+/** Why `candidate` cannot be the scale target for `side`, or null when it can. */
+function candidateFailure(Provider: ProviderClass, candidate: string, side: ScaleSide) {
+  if (!Provider._locationTypes?.[side.location]?.has(candidate)) {
+    return `${side.label} location ${side.location} does not sell the scale target ${candidate}`;
+  }
+  const ramOf = (type: string): number | undefined => Provider.SERVER_TYPES?.[type]?.ram;
+  for (const { role, type } of side.types) {
+    const targetRam = ramOf(candidate);
+    const ownRam = ramOf(type);
+    if (targetRam === undefined || ownRam === undefined || targetRam <= ownRam) {
+      return (
+        `scale target ${candidate} (${targetRam ?? '?'} GB) is not bigger than the ${role} ` +
+        `${side.label} type ${type} (${ownRam ?? '?'} GB) in ${side.location}`
+      );
+    }
+  }
+  return null;
+}
+
 /**
- * The picker's set for `roles` in `region`, or null when a role has nothing
- * orderable there or the scale target of the ladder role is not sold there.
+ * The first candidate sold on every side and bigger than each side's types,
+ * or the per-candidate failure reasons when none qualifies.
+ */
+function pickScaleTarget(
+  Provider: ProviderClass,
+  candidates: string[],
+  sides: ScaleSide[],
+): { target: string } | { failures: string[] } {
+  const failures: string[] = [];
+  for (const candidate of candidates) {
+    let failure: string | null = null;
+    for (const side of sides) {
+      failure = candidateFailure(Provider, candidate, side);
+      if (failure) break;
+    }
+    if (!failure) return { target: candidate };
+    failures.push(`${candidate}: ${failure}`);
+  }
+  return { failures };
+}
+
+/**
+ * The picker's set for `roles` in `region` with the scale target chosen for
+ * it, or null when a role has nothing orderable there or no ladder candidate
+ * of the key role's type is sold there (and bigger than it).
  */
 function placeableSet(
   Provider: ProviderClass,
@@ -124,18 +192,28 @@ function placeableSet(
   region: string,
   roles: string[],
   keyRole: string,
-): Record<string, string> | null {
+): { types: Record<string, string>; scaleTarget: string } | null {
   const set = cheapestRoleSet(Provider, region, roles);
   if (!set) return null;
   const key = set.types[keyRole];
-  const target = prefs.scaleTo[key];
-  if (!target) throw noScaleTarget(key);
-  if (!Provider._locationTypes?.[region]?.has(target)) return null;
-  return set.types;
+  const candidates = scaleCandidates(prefs.scaleTo[key]);
+  if (candidates.length === 0) throw noScaleTarget(key);
+  const side: ScaleSide = {
+    label: 'primary',
+    location: region,
+    types: [{ role: keyRole, type: key }],
+  };
+  const picked = pickScaleTarget(Provider, candidates, [side]);
+  if ('failures' in picked) return null;
+  return { types: set.types, scaleTarget: picked.target };
 }
 
-function resolved(region: string, types: Record<string, string>): ResolvedCapacity {
-  return { region, serverType: undefined, types, datacenter: region };
+function resolved(
+  region: string,
+  types: Record<string, string>,
+  scaleTarget: string,
+): ResolvedCapacity {
+  return { region, serverType: undefined, types, datacenter: region, scaleTarget };
 }
 
 /**
@@ -157,8 +235,8 @@ export async function resolveCapacity(
 
   for (const region of prefs.regions) {
     if (excluded.has(region)) continue;
-    const types = placeableSet(Provider, prefs, region, roles, scaleKeyRole(mode));
-    if (types) return resolved(region, types);
+    const placed = placeableSet(Provider, prefs, region, roles, scaleKeyRole(mode));
+    if (placed) return resolved(region, placed.types, placed.scaleTarget);
   }
 
   const tried = prefs.regions.filter((r) => !excluded.has(r));
@@ -214,42 +292,55 @@ export async function resolveCapacityPair(
     types[role] = type;
   }
 
-  const target = prefs.scaleTo[primary.types[scaleKeyRole(mode)]];
-  if (!Provider._locationTypes?.[region]?.has(target)) {
+  // `scale -type` resizes both sides, so the target must be sold on both and
+  // bigger than each side's own type (verify-scale needs every node to change,
+  // and scale must never shrink one). The standby's types can differ from the
+  // primary's (a stand-in of at least the same RAM), so the primary's own pick
+  // is re-decided across both sides here.
+  const keyRole = scaleKeyRole(mode);
+  const candidates = scaleCandidates(prefs.scaleTo[primary.types[keyRole]]);
+  if (candidates.length === 0) throw noScaleTarget(primary.types[keyRole]);
+  const picked = pickScaleTarget(Provider, candidates, [
+    {
+      label: 'primary',
+      location: primary.region,
+      types: [{ role: keyRole, type: primary.types[keyRole] }],
+    },
+    {
+      label: 'default standby',
+      location: region,
+      types: roles.map((role) => ({ role, type: types[role] })),
+    },
+  ]);
+  if ('failures' in picked) {
     throw new Error(
-      `region-resolver: ${name} default standby location ${region} does not sell the scale ` +
-        `target ${target}, so the ${mode} scale step would fail there.`,
+      `region-resolver: ${name} no scale target candidate [${candidates.join(', ')}] can run ` +
+        `on both the ${primary.region} primary and the ${region} standby, so the ${mode} ` +
+        `scale step would fail. ${picked.failures.join('; ')}.`,
     );
   }
-  // The standby's own types can differ from the primary's (a stand-in of at
-  // least the same RAM), so the target must grow each of them too: verify-
-  // scale needs every node to change, and scale must never shrink one.
-  const ramOf = (type: string): number | undefined => Provider.SERVER_TYPES?.[type]?.ram;
-  for (const role of roles) {
-    const own = types[role];
-    const targetRam = ramOf(target);
-    const ownRam = ramOf(own);
-    if (targetRam === undefined || ownRam === undefined || targetRam <= ownRam) {
-      throw new Error(
-        `region-resolver: ${name} scale target ${target} (${targetRam ?? '?'} GB) is not bigger ` +
-          `than the ${role} standby type ${own} (${ownRam ?? '?'} GB) in ${region}.`,
-      );
-    }
-  }
 
-  return { primary, standby: resolved(region, types) };
+  return {
+    primary: { ...primary, scaleTarget: picked.target },
+    standby: resolved(region, types, picked.target),
+  };
 }
 
 /**
- * The scale step's target: the ladder entry for the type the deploy recorded
- * in `.vibecarbon.json` (compose: `serverType`; k8s: `masterServerType`,
- * since `scale -type` resizes every role). Throws when the deploy recorded no
- * type, or when the ladder has no entry for it.
+ * The scale step's target. The deploy records its type in `.vibecarbon.json`
+ * (compose: `serverType`; k8s: `masterServerType`, since `scale -type` resizes
+ * every role); that type must have a ladder entry. `resolvedTarget` is the
+ * preflight resolver's pick (`ResolvedCapacity.scaleTarget`) and wins when it
+ * is one of that entry's candidates; one that is not means the deploy recorded
+ * a different type than preflight placed, so it throws rather than scale to a
+ * type nobody checked. Without `resolvedTarget` the entry's first candidate is
+ * used. Throws when the deploy recorded no type or the ladder has no entry.
  */
 export function deployedScaleTarget(
   envConfig: { serverType?: string; masterServerType?: string },
   mode: CapacityMode,
-  scaleTo: Readonly<Record<string, string>>,
+  scaleTo: Readonly<Record<string, string | readonly string[]>>,
+  resolvedTarget?: string,
 ): string {
   const field = mode.startsWith('k8s') ? 'masterServerType' : 'serverType';
   const type = envConfig[field];
@@ -258,9 +349,16 @@ export function deployedScaleTarget(
       `the deploy recorded no ${field} in .vibecarbon.json, so the scale target is unknown`,
     );
   }
-  const target = scaleTo[type];
-  if (!target) throw noScaleTarget(type);
-  return target;
+  const candidates = scaleCandidates(scaleTo[type]);
+  if (candidates.length === 0) throw noScaleTarget(type);
+  if (resolvedTarget === undefined) return candidates[0];
+  if (!candidates.includes(resolvedTarget)) {
+    throw new Error(
+      `the resolved scale target ${resolvedTarget} is not a ladder candidate for the deployed ` +
+        `${type} [${candidates.join(', ')}]: the deploy recorded a different type than preflight placed`,
+    );
+  }
+  return resolvedTarget;
 }
 
 /**
