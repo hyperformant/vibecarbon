@@ -370,6 +370,8 @@ describe('the wal-g role parser (one text, carried by walg-env.sh)', () => {
     ['', 'R=[]'],
     ['Primary\n', 'R=[]'],
     ['primary\nstandby\n', 'R=[]'],
+    ['primary\r\n', 'R=[]'],
+    [' primary', 'R=[]'],
   ])('%j reads as %s, through walg-env.sh and through the fragment alike', (content, want) => {
     const f = put(content);
     expect(viaEnv(f)).toBe(want);
