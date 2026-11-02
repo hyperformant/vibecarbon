@@ -188,6 +188,17 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
     const header = configMapRaw.slice(0, configMapRaw.indexOf('apiVersion:'));
     expect(header).toContain('walg-archive-script-parity');
   });
+
+  it('the ConfigMap header names both ways a segment is given up: disk pressure and an overwrite refusal', () => {
+    const header = configMapRaw
+      .slice(0, configMapRaw.indexOf('apiVersion:'))
+      .replace(/\n# ?/g, ' ');
+    expect(header).not.toMatch(/Only disk pressure drops a segment/);
+    expect(header).toMatch(/disk pressure[^.]*durable gap record/);
+    expect(header).toMatch(/overwrite refusal/);
+    // The script gives the overwrite refusal up with exit 0, as the header says.
+    expect(composeBody).toMatch(/already archived, contents differ[\s\S]*?exit 0/);
+  });
 });
 
 // Restoring parity in the ConfigMap achieves NOTHING on an existing cluster by
@@ -597,7 +608,14 @@ describe('wal-archive.sh role guard', () => {
       base = 's3://bucket/backups/acme',
       retired = false,
       pressure = true,
-    }: { base?: string; retired?: boolean; pressure?: boolean } = {},
+      env = {},
+    }: {
+      base?: string;
+      retired?: boolean;
+      pressure?: boolean;
+      /** Extra env the script inherits (its parent's). */
+      env?: Record<string, string>;
+    } = {},
   ) => {
     n += 1;
     const bin = controldataBin(`guard-${n}`);
@@ -639,6 +657,7 @@ describe('wal-archive.sh role guard', () => {
         ...(pressure
           ? { VC_WAL_GUARD_TOTAL_BYTES: String(100 * GiB), VC_WAL_GUARD_FREE_BYTES: String(GiB) }
           : {}),
+        ...env,
       },
       timeout: 10_000,
     });
@@ -661,6 +680,16 @@ describe('wal-archive.sh role guard', () => {
     expect(r.stderr).toContain('WAL_ARCHIVE_ROLE_UNKNOWN');
     expect(r.stderr).not.toContain('WAL_ARCHIVE_FAILED');
     expect(r.walg).toBe('');
+  });
+
+  it('a VC_WALG_ROLE=primary inherited from the env, with no role file, still holds (exit 1), never reaching wal-g', () => {
+    // Only the role file arms archiving: the parser resets VC_WALG_ROLE before
+    // it reads, so a value leaking in from the parent never stands in for it.
+    const r = archive(null, { pressure: false, env: { VC_WALG_ROLE: 'primary' } });
+    expect(r.status, r.stderr).toBe(1);
+    expect(r.stderr).toContain('WAL_ARCHIVE_ROLE_UNKNOWN');
+    expect(r.walg).toBe('');
+    expect(r.gap).toBeNull();
   });
 
   it('an unknown role under disk pressure still never drops a segment (D8)', () => {

@@ -34,8 +34,10 @@
 # Same exit semantics as the compose copy: only a node whose role file says
 # primary archives; standby skips (exit 0); a missing or unknown role, a retired
 # node, a fenced prefix and a failed push hold the segment (exit 1: postgres
-# keeps it and retries). Only disk pressure drops a segment, with a durable gap
-# record, and never while the role is unknown.
+# keeps it and retries). A segment is given up (exit 0) two ways only: disk
+# pressure, with a durable gap record, and never while the role is unknown; and
+# an overwrite refusal, where the archive already holds that segment name with
+# other bytes and no retry can change it.
 apiVersion: v1
 kind: ConfigMap
 metadata:
