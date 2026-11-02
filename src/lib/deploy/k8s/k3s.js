@@ -1938,6 +1938,10 @@ export async function applyVibecarbonSecrets({
       description: `applyVibecarbonSecrets: kubectl apply Secret/${name}`,
     });
   }
+  // The intent must exist before `apply -k base` creates the db pod, which
+  // reads it at container start. deployK3s applies it again on every deploy
+  // (writeDeployWalgRole, through setK8sWalgRole), including one whose apply
+  // is skipped; this first apply is what a brand-new pod starts with.
   await runKubectlWithRetry(k8sWalgRoleIntentApplyArgv(), {
     env,
     input: dbRoleConfigMapManifest(walgRole),
@@ -2584,10 +2588,11 @@ export async function auditRls({ kubeconfig }) {
 /**
  * The deploy's live wal-g role write: the intent (vibecarbon-db-role) and the
  * role file in the running db container, through setK8sWalgRole with
- * requireLive. Run once postgres accepts (applyK3sManifests' awaitDb), so a
- * warm redeploy that did not restart the db still converges the file. Throws
- * when the file does not read back the role, which fails the deploy: a db
- * whose role file is wrong would hold or drop WAL behind a green deploy.
+ * requireLive. deployK3s runs it on every deploy, outside the k3s-apply skip
+ * gate and once postgres accepts, so a redeploy that did not restart the db
+ * (or skipped the apply altogether) still converges the file. Throws when the
+ * file does not read back the role, which fails the deploy: a db whose role
+ * file is wrong would hold or drop WAL behind a green deploy.
  *
  * @param {object} o
  * @param {(ip: string, argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>} o.kubectl
@@ -2597,6 +2602,27 @@ export async function auditRls({ kubeconfig }) {
  */
 export async function writeDeployWalgRole({ kubectl, role, envName }) {
   return setK8sWalgRole({ ip: undefined, kubectl, role, requireLive: true, envName });
+}
+
+/**
+ * writeDeployWalgRole's kubectl seam for the operator's own kubectl: the
+ * `(ip, argv, {input, timeout})` shape setK8sWalgRole takes, over
+ * runKubectlWithRetry with stdout captured. The ip is unused (the kubeconfig
+ * names the cluster); the timeout bounds the call through an abort signal.
+ *
+ * @param {string} kubeconfig
+ * @returns {(ip: string, argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>}
+ */
+function localWalgRoleKubectl(kubeconfig) {
+  const env = { ...process.env, KUBECONFIG: kubeconfig };
+  return (_ip, argv, { input, timeout } = {}) =>
+    runKubectlWithRetry(argv, {
+      env,
+      input,
+      captureStdout: true,
+      description: `deploy: kubectl ${argv.slice(2, 5).join(' ')} (wal-g role)`,
+      ...(timeout && { signal: AbortSignal.timeout(timeout) }),
+    });
 }
 
 /**
@@ -4603,25 +4629,13 @@ export async function applyK3sManifests({
   const dbRolloutTimeoutS = restore
     ? Math.max(DB_ROLLOUT_TIMEOUT_S, restoreRolloutTimeoutS(restore.sizeBytes))
     : DB_ROLLOUT_TIMEOUT_S;
-  // Once postgres accepts, the live wal-g role file is set to this deploy's
-  // role (writeDeployWalgRole): db-guard.sh applied the intent at container
-  // start, but a db this deploy did not restart still holds whatever it held.
-  // Before the wal-g audit (verifyWalgBackups, deployK3s), so the audit reads
-  // the role this deploy set.
-  const localKubectl = (_ip, argv, { input, timeout } = {}) =>
-    runKubectlWithRetry(argv, {
-      env,
-      input,
-      captureStdout: true,
-      description: `applyK3sManifests: kubectl ${argv.slice(2, 5).join(' ')} (wal-g role)`,
-      ...(timeout && { signal: AbortSignal.timeout(timeout) }),
-    });
+  // The live wal-g role file is not written here: deployK3s writes it on
+  // every deploy, outside the k3s-apply skip gate (writeDeployWalgRole).
   const awaitDb = async () => {
     await perfAsync(`deploy.${perfPrefix}.awaitDb`, () =>
       awaitDbRollout({ env, timeoutS: dbRolloutTimeoutS }),
     );
     await awaitPostgresAccepting({ env, dbPod: DB_POD });
-    await writeDeployWalgRole({ kubectl: localKubectl, role: walgRole, envName: operatorEnv });
   };
   // 5b. `deploy -restore`: the restored database must have promoted and
   //     proved writable BEFORE the app rolls. The app pods' migrate init
@@ -5614,6 +5628,28 @@ async function deployK3sSteps(options, inFlight) {
     // Skipped apply: a prior one created the namespace.
     signalNamespaceReady();
   }
+
+  // 8a. The live wal-g role, on EVERY deploy — outside the `k3s-apply` gate
+  //     for the same reason as the audit below: db-guard.sh applies the intent
+  //     only at container start, so a db this deploy did not restart (or a
+  //     deploy whose apply was skipped) keeps whatever role file it had. The
+  //     intent and the file are set to this deploy's role and read back
+  //     before the audit, so the audit reads the role this deploy set. A
+  //     skipped apply waited for no db, so postgres has to accept first: the
+  //     write never races a starting pod.
+  if (skipApply) {
+    await awaitPostgresAccepting({
+      env: { ...process.env, KUBECONFIG: kubeconfig },
+      dbPod: DB_POD,
+    });
+  }
+  await perfAsync(`deploy.${perfPrefix}.walgRole`, () =>
+    writeDeployWalgRole({
+      kubectl: localWalgRoleKubectl(kubeconfig),
+      role: options.role === 'standby' ? 'standby' : 'primary',
+      envName: options.operatorEnv ?? options.environment,
+    }),
+  );
 
   // 8b. Ground-truth BACKUP audit — OUTSIDE the `k3s-apply` gate on purpose.
   //     Every other post-apply check verifies something this deploy just did,

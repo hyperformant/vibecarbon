@@ -3,10 +3,10 @@
  *
  * db-guard.sh applies the intent ConfigMap (vibecarbon-db-role) on every db
  * container start, but a warm redeploy that does not restart the db would
- * leave the file as it was. So applyK3sManifests' db wait (awaitDb) ends with
- * writeDeployWalgRole: setK8sWalgRole with requireLive, through a
- * local-kubectl adapter, after postgres accepts and before the wal-g audit
- * (verifyWalgBackups in deployK3s), so the audit reads the role this deploy set.
+ * leave the file as it was. So deployK3s runs writeDeployWalgRole on every
+ * deploy, outside the k3s-apply skip gate (a skipped apply first waits for
+ * postgres to accept), through a local-kubectl adapter and before the wal-g
+ * audit (verifyWalgBackups), so the audit reads the role this deploy set.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -64,16 +64,23 @@ describe('writeDeployWalgRole', () => {
     ).rejects.toThrow(/vibecarbon deploy prod/);
   });
 
-  it('awaitDb runs it after the rollout and postgres readiness, before the wal-g audit', () => {
+  it('deployK3s runs it on EVERY deploy: outside the k3s-apply skip gate, before the wal-g audit', () => {
     const src = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const deploy = src.slice(src.indexOf('async function deployK3sSteps('));
+    const gate = deploy.indexOf('if (!skipApply) {');
+    // The gate's else branch closes it; the call sits after the whole if/else.
+    const gateEnd = deploy.indexOf('\n  }\n', deploy.indexOf('} else {', gate));
+    const call = deploy.indexOf('writeDeployWalgRole(');
+    const audit = deploy.indexOf('verifyWalgBackups({');
+    expect(gate).toBeGreaterThan(-1);
+    expect(gateEnd).toBeGreaterThan(gate);
+    expect(call).toBeGreaterThan(gateEnd);
+    expect(call).toBeLessThan(audit);
+    // A skipped apply waited for no db: postgres must accept before the write.
+    const between = deploy.slice(gateEnd, call);
+    expect(between).toMatch(/if \(skipApply\)[\s\S]*awaitPostgresAccepting\(/);
+    // And applyK3sManifests' awaitDb no longer writes it (one write per deploy).
     const awaitDb = src.slice(src.indexOf('const awaitDb = async () => {'));
-    const body = awaitDb.slice(0, awaitDb.indexOf('\n  };'));
-    expect(body.indexOf('awaitPostgresAccepting(')).toBeGreaterThan(-1);
-    expect(body.indexOf('awaitPostgresAccepting(')).toBeLessThan(
-      body.indexOf('writeDeployWalgRole('),
-    );
-    expect(src.indexOf('writeDeployWalgRole(', src.indexOf('const awaitDb'))).toBeLessThan(
-      src.indexOf('verifyWalgBackups({', src.indexOf('const awaitDb')),
-    );
+    expect(awaitDb.slice(0, awaitDb.indexOf('\n  };'))).not.toContain('writeDeployWalgRole(');
   });
 });
