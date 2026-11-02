@@ -26,7 +26,6 @@ import {
   haK8sUpdateDnsStep,
   haK8sUploadSshKeyStep,
   haK8sVerifyStreamingStep,
-  haMergeWalgRoleStep,
   haPersistPendingConfigStep,
   haProvisionServersStep,
   haPullImagesStep,
@@ -43,6 +42,7 @@ import {
   haWaitDockerReadyStep,
   haWaitForSshStep,
   haWaitPrimaryPostgresStep,
+  haWriteNodeRolesStep,
   haWriteReplicationOverlayStep,
   k8sDeployClusterStep,
   persistProvisionedServerStep,
@@ -59,6 +59,7 @@ import {
   verifyHealthStep,
   verifyTlsReadyStep,
   waitAdminReadyStep,
+  writeNodeRolesStep,
 } from './steps.js';
 
 /**
@@ -82,6 +83,8 @@ export function planDeploy(tier, _config) {
       setupServerFilesStep(),
       updateDnsStep(),
       restoreTlsStep(),
+      // The db reads its wal-g role from this file on its first start.
+      writeNodeRolesStep(),
       startComposeStackStep(),
       waitAdminReadyStep(),
       auditDatabaseStep(),
@@ -109,7 +112,7 @@ export function planDeploy(tier, _config) {
       haCheckDbLedgerStep(),
       haRemoteBuildStep(),
       haSetupServerFilesStep(),
-      haMergeWalgRoleStep(),
+      haWriteNodeRolesStep(),
       haPullImagesStep(),
       haUpdateDnsStep(),
       // Shared with single compose: restores on the primary only.

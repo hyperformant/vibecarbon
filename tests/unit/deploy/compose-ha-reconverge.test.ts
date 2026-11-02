@@ -185,6 +185,29 @@ vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
   };
 });
 
+// The role-file write goes through ssh.js's argv sshRun (walg-role.js):
+// recorded with the same ip/command shape, answered with the read-back.
+vi.mock('../../../src/lib/ssh.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
+  return {
+    ...actual,
+    sshRun: vi.fn(async (ip: string, _k: string, argv: unknown) => {
+      assertSshRunArgv(argv);
+      const command = argv.join(' ');
+      h.calls.push({ ip, command });
+      const role = /\.vibecarbon-role/.test(command)
+        ? /printf '%s\\n' (primary|standby) > walg-role\.tmp/.exec(command)?.[1]
+        : undefined;
+      if (role) {
+        h.events.push(`role:${ip}:${role}`);
+        return `WALG_ROLE_FILE=${role}`;
+      }
+      return '';
+    }),
+  };
+});
+
 vi.mock('../../../src/lib/deploy/wireguard.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -328,7 +351,7 @@ function baseCtx(extra: Record<string, unknown> = {}) {
 async function runReconverge(ctx: Record<string, unknown>) {
   const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
   await E.haPersistPendingConfig(ctx);
-  await E.haMergeWalgRole(ctx);
+  await E.haWriteNodeRoles(ctx);
   await E.haStartComposeStack(ctx);
   await E.haWriteReplicationOverlay(ctx);
   await E.haConfigureReplication(ctx);
@@ -661,7 +684,7 @@ describe('reconverge effects', () => {
     const ctx = baseCtx();
     const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
     await E.haPersistPendingConfig(ctx);
-    await E.haMergeWalgRole(ctx);
+    await E.haWriteNodeRoles(ctx);
     await E.haStartComposeStack(ctx);
     await E.haWriteReplicationOverlay(ctx);
     await E.haConfigureReplication(ctx);
@@ -805,13 +828,33 @@ describe('the deploy wires the managed-DNS repoint into the reconverge check (I3
  * must land before either path that starts the retired node's stack.
  */
 describe('the standby role is on the node before its stack starts (add-ons held at zero)', () => {
-  it('merge-walg-role precedes start-compose-stack and configure-replication in the compose-ha plan', async () => {
+  it('write-node-roles precedes start-compose-stack and configure-replication in the compose-ha plan', async () => {
     const { planDeploy } = await import('../../../src/lib/deploy/plan/deploy-plan.js');
     const names = (planDeploy('compose-ha', {}) as Array<{ name: string }>).map((s) => s.name);
-    const merge = names.indexOf('merge-walg-role');
-    expect(merge).toBeGreaterThanOrEqual(0);
-    expect(merge).toBeLessThan(names.indexOf('start-compose-stack'));
-    expect(merge).toBeLessThan(names.indexOf('configure-replication'));
+    const write = names.indexOf('write-node-roles');
+    expect(write).toBeGreaterThanOrEqual(0);
+    expect(write).toBeLessThan(names.indexOf('start-compose-stack'));
+    expect(write).toBeLessThan(names.indexOf('configure-replication'));
+  });
+
+  it('write-node-roles writes the role FILE on both nodes, primary and standby', async () => {
+    const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
+    await E.haWriteNodeRoles(baseCtx());
+    const { composeWalgRoleWriteShell } = await import('../../../src/lib/deploy/walg-role.js');
+    const roleWrites = h.calls.filter((c) => c.command.includes('.vibecarbon-role'));
+    // After a failover the promoted node holds the primary role.
+    expect(roleWrites).toEqual([
+      { ip: PROMOTED_IP, command: `sh -c ${composeWalgRoleWriteShell('myapp', 'primary')}` },
+      { ip: RETIRED_IP, command: `sh -c ${composeWalgRoleWriteShell('myapp', 'standby')}` },
+    ]);
+  });
+
+  it('a role file that does not read back stops the step before any stack starts', async () => {
+    const ssh = await import('../../../src/lib/ssh.js');
+    vi.mocked(ssh.sshRun).mockImplementationOnce(async () => 'WALG_ROLE_FILE=');
+    const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
+    await expect(E.haWriteNodeRoles(baseCtx())).rejects.toThrow(/wal-g role/);
+    expect(h.started).toEqual([]);
   });
 
   it('both standby start paths go through startComposeStack, which runs reconcile.sh', async () => {

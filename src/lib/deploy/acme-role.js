@@ -18,7 +18,7 @@
  * THE POLICY: only the node currently in the PRIMARY role holds an armed
  * ACME issuer.
  *
- *   - Deploy half: haMergeWalgRole writes `ACME_DISARMED_CA_SERVER` into
+ *   - Deploy half: haWriteNodeRoles writes `ACME_DISARMED_CA_SERVER` into
  *     the standby's `.env` (and explicitly empty into the primary's)
  *     BEFORE the stacks start. Both Traefik `caserver` flags interpolate
  *     `${ACME_DISARMED_CA_SERVER:-${ACME_CA_SERVER:-<prod LE>}}`, so the

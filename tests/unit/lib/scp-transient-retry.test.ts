@@ -1,7 +1,8 @@
 /**
  * scp transport retry (2026-08-11 compose-ha warm-deploy failure).
  *
- * A hetzner/compose-ha warm deploy died at step merge-walg-role because
+ * A hetzner/compose-ha warm deploy died at step merge-walg-role (since
+ * renamed write-node-roles) because
  * `mergeRemoteDotenv`'s single scp attempt hit a transport blip:
  *
  *   ssh: connect to host 78.46.123.112 port 22: Connection timed out during

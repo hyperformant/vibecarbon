@@ -78,7 +78,7 @@ import {
 import { clearRetiredFence, fenceRetiredNode } from '../retired-fence.js';
 import { envS3Record } from '../s3-record.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
-import { composeRoleEnv } from '../walg-role.js';
+import { composeRoleEnv, writeComposeWalgRole } from '../walg-role.js';
 import { exchangeAndBringUpTunnel, wgIpOf } from '../wireguard.js';
 
 /** Shared service-opts object rebuilt from ctx (identical to the inline const). */
@@ -627,14 +627,22 @@ async function haSetupServerFiles(ctx) {
 }
 
 /**
- * wal-g WRITE-GUARD: write WALG_ROLE into each node's .env. Same canonical S3
- * prefix on both nodes (so the standby can READ the primary's base backups);
- * WALG_ROLE=standby makes wal-archive.sh + compose-backup.sh no-op on the
- * standby so it never WRITES into the shared prefix (split-brain guard).
+ * wal-g WRITE-GUARD: write the role FILE on each node (walg-role.js), then
+ * the per-node .env merge. Same canonical S3 prefix on both nodes (so the
+ * standby can READ the primary's base backups); `standby` makes
+ * wal-archive.sh + compose-backup.sh no-op on the standby so it never WRITES
+ * into the shared prefix (split-brain guard). Both files land before
+ * start-compose-stack, so each db's first start reads its role.
  */
-async function haMergeWalgRole(ctx) {
+async function haWriteNodeRoles(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { primary, standby, sshKeyPath } = ctx;
+  await perfAsync('deploy.ha.compose.writeNodeRoles', () =>
+    Promise.all([
+      writeComposeWalgRole({ ip: primary.ip, sshKeyPath, projectName, role: 'primary' }),
+      writeComposeWalgRole({ ip: standby.ip, sshKeyPath, projectName, role: 'standby' }),
+    ]),
+  );
   const haSshOpts = pinnedSshOptsString(sshKeyPath);
   const haRemoteDir = `/opt/${projectName}`;
   // ACME_DISARM_ENV rides the same per-node merge (single-active-issuer
@@ -645,6 +653,7 @@ async function haMergeWalgRole(ctx) {
   // re-deploy over a node that once held the standby role converges it.
   // This runs before start-compose-stack, so the first `up` already
   // interpolates the right caserver — no recreate needed at deploy time.
+  // The .env WALG_ROLE stays until its last reader moves to the role file.
   await Promise.all([
     mergeRemoteDotenv(primary.ip, haSshOpts, haRemoteDir, {
       ...composeRoleEnv('primary'),
@@ -1368,7 +1377,7 @@ export const COMPOSE_HA_EFFECTS = {
   haCheckDbLedger,
   haRemoteBuild,
   haSetupServerFiles,
-  haMergeWalgRole,
+  haWriteNodeRoles,
   haPullImages,
   haStartDnsUpdate,
   haUpdateDns,

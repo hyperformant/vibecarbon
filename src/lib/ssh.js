@@ -425,7 +425,8 @@ const SCP_RETRY_DELAY_MS = 5000;
  * Why this exists: scp call sites used to hand a bare scp argv to
  * runCommandAsync while the `ssh` calls interleaved between them retried
  * transport blips via sshRunAsync. On 2026-08-11 a compose-ha warm deploy died
- * at merge-walg-role on a single `Connection timed out during banner exchange` —
+ * at merge-walg-role (since renamed write-node-roles) on a single
+ * `Connection timed out during banner exchange` —
  * SSH to the same host worked seconds before and after, so one retry would
  * have saved the run.
  *

@@ -94,6 +94,10 @@ export const updateDnsStep = () =>
     when: (ctx) => !!(ctx.domain && hasAutomatedDns(ctx.dnsProvider)),
   });
 
+/** The wal-g role file (`primary`) on the one server, before its stack starts. */
+export const writeNodeRolesStep = () =>
+  defineStep({ name: 'write-node-roles', effect: 'writeNodeRoles' });
+
 /** Reconcile the Docker Compose stack (`docker compose pull` + `up -d`). */
 export const startComposeStackStep = () =>
   defineStep({ name: 'start-compose-stack', effect: 'startComposeStack' });
@@ -235,9 +239,13 @@ export const haRemoteBuildStep = () =>
 export const haSetupServerFilesStep = () =>
   defineStep({ name: 'setup-server-files', effect: 'haSetupServerFiles' });
 
-/** Write WALG_ROLE (primary/standby) into each node's .env (write-guard). */
-export const haMergeWalgRoleStep = () =>
-  defineStep({ name: 'merge-walg-role', effect: 'haMergeWalgRole' });
+/**
+ * The wal-g role FILE on each node (primary / standby, walg-role.js) before
+ * either stack starts, plus the per-node .env merge (ACME_DISARM_ENV and,
+ * until its readers move to the file, WALG_ROLE).
+ */
+export const haWriteNodeRolesStep = () =>
+  defineStep({ name: 'write-node-roles', effect: 'haWriteNodeRoles' });
 
 /** Pull app + base images on both servers (parallel). */
 export const haPullImagesStep = () => defineStep({ name: 'pull-images', effect: 'haPullImages' });

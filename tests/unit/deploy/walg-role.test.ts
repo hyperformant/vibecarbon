@@ -47,6 +47,7 @@ import {
   walgRoleDegradedMessage,
   walgRoleReadShell,
   walgRoleWriteShell,
+  writeComposeWalgRole,
 } from '../../../src/lib/deploy/walg-role.js';
 import { shEscape } from '../../../src/lib/shell.js';
 
@@ -489,5 +490,51 @@ describe('walg role primitives', () => {
     expect(composeWalgRoleWriteShell('acme', 'primary')).toContain(
       `/opt/acme/${COMPOSE_WALG_ROLE_HOST_DIR}`,
     );
+  });
+});
+
+describe('writeComposeWalgRole: one SSH write, proven by its read-back', () => {
+  const args = { ip: '203.0.113.5', sshKeyPath: '/k', projectName: 'acme' };
+
+  it('sends the compose write script as one `sh -c` token, which survives the ssh join', async () => {
+    const run = vi.fn(async (_ip: string, _k: string, _argv: string[]) => 'WALG_ROLE_FILE=standby');
+    await writeComposeWalgRole({ ...args, role: 'standby', run });
+    const argv = run.mock.calls[0][2];
+    expect(argv).toEqual(['sh', '-c', composeWalgRoleWriteShell('acme', 'standby')]);
+    const remote = argv.map(shEscape).join(' ');
+    const r = spawnSync('sh', ['-c', `set -- ${remote}; printf '%s\\0' "$@"`], {
+      encoding: 'utf-8',
+    });
+    expect(r.stdout.split('\0').slice(0, -1)).toEqual(argv);
+  });
+
+  it('throws when the role does not read back', async () => {
+    const run = vi.fn(async () => 'WALG_ROLE_FILE=');
+    await expect(writeComposeWalgRole({ ...args, role: 'primary', run })).rejects.toThrow(
+      /read back as "" after writing primary/,
+    );
+  });
+
+  it('a failed write names the role directory, never the script', async () => {
+    const run = vi.fn(async () => {
+      throw Object.assign(new Error(`Command failed: ssh ... ${'x'.repeat(200)}`), {
+        stderr: '[walg-role] could not write the wal-g role in /opt/acme/.vibecarbon-role\n',
+      });
+    });
+    const err = await writeComposeWalgRole({ ...args, role: 'primary', run }).catch((e) => e);
+    expect(err.message).toBe(
+      'could not write the wal-g role primary on 203.0.113.5: the write failed in /opt/acme/.vibecarbon-role',
+    );
+  });
+
+  it('an unknown role or unsafe project throws before any ssh', async () => {
+    const run = vi.fn();
+    await expect(
+      writeComposeWalgRole({ ...args, role: 'replica' as 'primary', run }),
+    ).rejects.toThrow();
+    await expect(
+      writeComposeWalgRole({ ...args, projectName: '../etc', role: 'primary', run }),
+    ).rejects.toThrow();
+    expect(run).not.toHaveBeenCalled();
   });
 });

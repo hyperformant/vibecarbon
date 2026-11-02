@@ -59,7 +59,7 @@ describe('WALG_ROLE is exposed to the db container as the write-guard signal', (
 
   it('compose-HA writes WALG_ROLE=primary / standby onto each node (.env merge)', () => {
     // The .env merge moved out of the deployComposeHA orchestration into the
-    // compose-ha deploy effect (haMergeWalgRole) when the tier was converted to
+    // compose-ha deploy effect (haWriteNodeRoles) when the tier was converted to
     // the step-plan; the write-guard behavior is unchanged. The literal key is
     // now spelled ONLY in composeRoleEnv (walg-role.js), which validates the
     // role — compose-role-env-census.test.ts bans the literal shape here, so

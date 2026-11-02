@@ -5,7 +5,7 @@
  * ---------------
  * `WALG_ROLE` is the wal-g write-guard: `primary` archives, `standby` no-ops.
  * It is rendered ONCE, at DEPLOY time, from the deploy's notion of which node is
- * which — compose writes it into each node's `.env` (haMergeWalgRoleStep, before
+ * which — compose writes it into each node's `.env` (haWriteNodeRolesStep, before
  * the stack starts) and k8s renders it into the db container env
  * (`{{WALG_ROLE}}` in k8s/base/db/statefulset.yaml).
  *
@@ -49,6 +49,7 @@
  */
 
 import { shEscape } from '../shell.js';
+import { sshRun } from '../ssh.js';
 import { validateProjectName } from '../validators.js';
 import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
@@ -321,6 +322,42 @@ export function composeWalgRoleWriteShell(projectName, role) {
   ].join('\n');
 }
 
+/**
+ * Write a compose node's role file over SSH (composeWalgRoleWriteShell) and
+ * prove it: the write's own read-back, through the one parser, must name the
+ * role. Throws otherwise, so a deploy or scale never starts a stack whose db
+ * would read a missing or stale role. The script runs as `sh -c <script>`,
+ * one argv token, so the remote shell never word-splits it.
+ *
+ * @param {object} args
+ * @param {string} args.ip
+ * @param {string} args.sshKeyPath
+ * @param {string} args.projectName
+ * @param {'primary'|'standby'} args.role
+ * @param {typeof sshRun} [args.run] ssh.js's sshRun (argv), injectable for tests
+ * @returns {Promise<void>}
+ */
+export async function writeComposeWalgRole({ ip, sshKeyPath, projectName, role, run = sshRun }) {
+  const script = composeWalgRoleWriteShell(projectName, role);
+  let out;
+  try {
+    out = await run(ip, sshKeyPath, ['sh', '-c', script], { timeout: 30_000 });
+  } catch (error) {
+    // The message carries the whole command; quote stderr's last line only.
+    const stderr = String(error?.stderr ?? '').trim();
+    const detail = stderr.includes(WALG_ROLE_WRITE_FAILED)
+      ? `the write failed in /opt/${projectName}/${COMPOSE_WALG_ROLE_HOST_DIR}`
+      : stderr.split('\n').at(-1) || 'the ssh command failed';
+    throw new Error(`could not write the wal-g role ${role} on ${ip}: ${detail}`);
+  }
+  const readBack = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim();
+  if (readBack !== role) {
+    throw new Error(
+      `the wal-g role on ${ip} read back as ${JSON.stringify(readBack ?? '')} after writing ${role}`,
+    );
+  }
+}
+
 /** The env var both tiers read as the wal-g write-guard. */
 export const WALG_ROLE_ENV = 'WALG_ROLE';
 
@@ -328,7 +365,7 @@ export const WALG_ROLE_ENV = 'WALG_ROLE';
  * The compose node-role env, written wherever a compose node's role is.
  *
  * `WALG_ROLE` is the wal-g write-guard (see the module docblock). Every
- * compose-side role write (deploy's haMergeWalgRole, failover's
+ * compose-side role write (deploy's haWriteNodeRoles, failover's
  * restoreComposeWalgRole / demoteComposeWalgRole) goes through here, so the
  * role is validated in one place: an unknown role throws instead of silently
  * arming (or disarming) archiving. compose-role-env-census.test.ts enforces it.

@@ -22,6 +22,7 @@ const EXPECTED_COMPOSE_SEQUENCE = [
   'setup-server-files',
   'update-dns',
   'restore-tls',
+  'write-node-roles',
   'start-compose-stack',
   'wait-admin-ready',
   'audit-database',
@@ -328,7 +329,7 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'check-db-ledger',
   'remote-build',
   'setup-server-files',
-  'merge-walg-role',
+  'write-node-roles',
   'pull-images',
   'update-dns',
   'restore-tls',
@@ -344,6 +345,30 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'setup-backup-cron',
   'finalize-config',
 ];
+
+describe('the wal-g role file is written before any compose stack starts', () => {
+  it('every compose tier writes the node roles before the stack starts', () => {
+    for (const tier of ['compose', 'compose-ha'] as const) {
+      const names = planStepNames(planDeploy(tier, {}));
+      const write = names.indexOf('write-node-roles');
+      expect(write, tier).toBeGreaterThanOrEqual(0);
+      expect(write, tier).toBeLessThan(names.indexOf('start-compose-stack'));
+      expect(names).not.toContain('merge-walg-role');
+    }
+  });
+
+  it('single compose writes after the bundle lands (the project dir exists)', () => {
+    const names = planStepNames(planDeploy('compose', {}));
+    expect(names.indexOf('write-node-roles')).toBeGreaterThan(names.indexOf('setup-server-files'));
+  });
+
+  it('each tier runs its own effect', () => {
+    const effectOf = (tier: 'compose' | 'compose-ha') =>
+      planDeploy(tier, {}).find((s) => s.name === 'write-node-roles')?.effect;
+    expect(effectOf('compose')).toBe('writeNodeRoles');
+    expect(effectOf('compose-ha')).toBe('haWriteNodeRoles');
+  });
+});
 
 describe('planDeploy(compose-ha)', () => {
   it('produces the compose-ha deploy step sequence (pure — no config needed)', () => {

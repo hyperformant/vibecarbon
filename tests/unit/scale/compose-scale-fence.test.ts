@@ -153,7 +153,9 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     setupServer: async () => {},
     setupServerFiles: async () => {},
     pullComposeImages: async () => {},
-    startComposeStack: async () => {},
+    startComposeStack: async (ip: string) => {
+      h.events.push(`up:${ip}`);
+    },
     restoreCompose: async (ip: string, _k: string, _p: string, r: { backup: string }) => {
       h.events.push(`restore:${ip}:${r.backup}`);
       fail('restore');
@@ -272,13 +274,15 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
   // string-accepting fake let fix round 3 ship a scale that threw before its
   // restore.
   const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
+  const { roleWriteOf } = await import('../helpers/scale-cutover-stub.js');
   const sshRun = async (ip: string, _k: string, argv: unknown) => {
     assertSshRunArgv(argv);
-    h.events.push(`ssh:${ip}:${argv.join(' ')}`);
+    const role = roleWriteOf(argv);
+    h.events.push(role ? `role:${ip}:${role}` : `ssh:${ip}:${argv.join(' ')}`);
     if (h.state.sshFail && argv.join(' ').includes(h.state.sshFail)) {
       throw new Error(`ssh: ${h.state.sshFail} failed`);
     }
-    return '';
+    return role ? `WALG_ROLE_FILE=${role}` : '';
   };
   const sshRunScript = async (ip: string, _k: string, script: unknown) => {
     if (typeof script !== 'string') throw new Error('sshRunScript requires a script');
@@ -611,6 +615,31 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     expect(h.events).not.toContain('unfence');
     expect(h.events).not.toContain('rearm:1.1.1.1');
     expect(provider.deleteServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('scaleServers: the replacement reads its wal-g role from the first up', () => {
+  it('scale writes primary on the replacement before its first up', async () => {
+    reset();
+    const { ctx } = makeCtx();
+    await SCALE_EFFECTS.scaleServers(ctx);
+    const seq = h.events;
+    expect(seq.indexOf('role:9.9.9.9:primary')).toBeGreaterThanOrEqual(0);
+    expect(seq.indexOf('role:9.9.9.9:primary')).toBeLessThan(seq.indexOf('up:9.9.9.9'));
+    // The old server's role is never rewritten by the scale.
+    expect(seq.filter((e) => e.startsWith('role:'))).toEqual(['role:9.9.9.9:primary']);
+  });
+
+  it('a role write that fails stops the scale before the first up, and the new server is deleted', async () => {
+    reset();
+    h.state.sshFail = '.vibecarbon-role';
+    const { ctx } = makeCtx();
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+      /wal-g role primary on 9\.9\.9\.9/,
+    );
+    expect(h.events).not.toContain('up:9.9.9.9');
+    expect(h.events).toContain('delete:new-id');
+    expect(h.events).not.toContain('delete:old-id');
   });
 });
 

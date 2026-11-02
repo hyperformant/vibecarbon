@@ -542,6 +542,24 @@ async function checkDbLedger(ctx) {
   );
 }
 
+/**
+ * The wal-g role file on the one server: `primary` (walg-role.js). Before
+ * start-compose-stack, so the db's first start reads it; after
+ * setup-server-files, which made /opt/<project>.
+ */
+async function writeNodeRoles(ctx) {
+  const { serverIp, sshKeyPath, projectConfig } = ctx;
+  const { writeComposeWalgRole } = await import('../walg-role.js');
+  await perfAsync('deploy.compose.writeNodeRoles', () =>
+    writeComposeWalgRole({
+      ip: serverIp,
+      sshKeyPath,
+      projectName: projectConfig.projectName,
+      role: 'primary',
+    }),
+  );
+}
+
 /** Reconcile the Compose stack (`docker compose pull` + `up -d`) on the VPS. */
 async function startComposeStack(ctx) {
   const { serverIp, sshKeyPath, projectConfig, services } = ctx;
@@ -816,6 +834,7 @@ export const EFFECTS = {
   startDnsUpdate,
   updateDns,
   checkDbLedger,
+  writeNodeRoles,
   startComposeStack,
   waitAdminReady,
   auditDatabase,

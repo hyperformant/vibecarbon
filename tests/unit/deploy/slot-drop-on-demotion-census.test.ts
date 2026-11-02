@@ -163,7 +163,7 @@ const K8S_DEMOTERS = ['src/lib/deploy/walg-role.js:demoteK8sWalgRole'];
 const COMPOSE_DEMOTERS = [
   // deploy-time role merge: the standby is in recovery or is about to be
   // reseeded, which replaces PGDATA and every slot in it.
-  'src/lib/deploy/effects/compose-ha.js:haMergeWalgRole',
+  'src/lib/deploy/effects/compose-ha.js:haWriteNodeRoles',
   'src/lib/deploy/compose/ha.js:demoteComposeWalgRole',
   // failover -abort: writes the standby's .env only once its db is stopped and
   // proven down; the next start is a deploy that reseeds it (PGDATA and slots).

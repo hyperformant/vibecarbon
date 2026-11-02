@@ -75,6 +75,7 @@ import { isRetiredSide } from './lib/deploy/retired-fence.js';
 import { haStacksFrom } from './lib/deploy/standby-types.js';
 import { isHATier, resolveTier } from './lib/deploy/tier-registry.js';
 import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from './lib/deploy/utils.js';
+import { writeComposeWalgRole } from './lib/deploy/walg-role.js';
 import {
   clearScaleCutoverJournal,
   clearWriteFenceMarker,
@@ -1326,6 +1327,15 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
 
   // 5b. The saved certificate, before Traefik's first start (primary only).
   if (backupS3) await restoreReplacementTls(ctx, newIp, backupS3, s);
+
+  // 5c. The wal-g role file, before the db's first start reads it: the
+  //     replacement takes the role of the server it replaces (C10: a
+  //     compose-ha standby replacement must never start as an archiving
+  //     primary). Single compose has one server, the primary.
+  const walgRole = isHATier(tier) ? server.role : 'primary';
+  await perfAsync('scale.writeNodeRole', () =>
+    writeComposeWalgRole({ ip: newIp, sshKeyPath, projectName, role: walgRole }),
+  );
 
   // 6. Start compose stack on new server
   s.start('Starting services on new server...');

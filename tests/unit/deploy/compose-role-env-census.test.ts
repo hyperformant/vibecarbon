@@ -2,7 +2,7 @@
  * Census: every compose-side node-role write goes through `composeRoleEnv`.
  *
  * `WALG_ROLE` is written into `/opt/<project>/.env` at deploy
- * (haMergeWalgRole) and re-written at failover (restoreComposeWalgRole /
+ * (haWriteNodeRoles) and re-written at failover (restoreComposeWalgRole /
  * demoteComposeWalgRole). `composeRoleEnv` in walg-role.js is the one place
  * that key is spelled, and it refuses a role it does not know, so a caller
  * cannot arm wal-g archiving on a node whose role it guessed. This census

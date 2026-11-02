@@ -57,6 +57,29 @@ describe('upgrade ships every file a shipped file depends on', () => {
     expect(mounts.some((m) => m.source === 'volumes/db/walg-env.sh')).toBe(true);
   });
 
+  it('every core bind-mount source exists in the template, or is a runtime dir the CLI writes', () => {
+    // Runtime directories: no template file backs them; the CLI creates them
+    // on the server before the stack starts. Each entry says who.
+    const RUNTIME_DIRS: Record<string, string> = {
+      // The wal-g role (D7): composeWalgRoleWriteShell (walg-role.js) makes
+      // /opt/<project>/.vibecarbon-role and writes walg-role in it before
+      // every compose `up` (deploy's write-node-roles, scale's replacement).
+      '.vibecarbon-role': 'composeWalgRoleWriteShell',
+    };
+    expect(mounts.some((m) => m.source in RUNTIME_DIRS)).toBe(true);
+    // The core files only: an add-on's compose file mounts directories its
+    // service module scaffolds, outside this template.
+    const core = mounts.filter((m) => /^docker-compose(\.prod)?\.yml$/.test(m.from));
+    const missing = core
+      .filter((m) => !(m.source in RUNTIME_DIRS) && !existsSync(join(CARBON, m.source)))
+      .map((m) => `${m.from} mounts ./${m.source}, which the template does not ship`);
+    expect(missing).toEqual([]);
+    // A runtime dir never collides with a template path upgrade would ship.
+    for (const dir of Object.keys(RUNTIME_DIRS)) {
+      expect(existsSync(join(CARBON, dir)), dir).toBe(false);
+    }
+  });
+
   it('every bind-mount source of a shipped compose file is shipped too', () => {
     const stranded = mounts.flatMap((m) =>
       filesUnder(m.source)
