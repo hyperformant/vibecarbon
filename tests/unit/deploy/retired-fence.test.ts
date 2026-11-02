@@ -313,7 +313,7 @@ function fakeNode(init: { walg?: string; running?: string[] } = {}) {
     if (command.includes('PROBE_DONE')) {
       return [
         `HOST_MARKER=${state.hostMarker ? 1 : 0}`,
-        `WALG_ROLE=${state.walg}`,
+        `WALG_ROLE_FILE=${state.walg}`,
         `DB_MARKER=${db.up ? (state.dbMarker ? 'present' : 'absent') : 'unknown'}`,
         ...state.running.map((c) => `RUNNING ${c}`),
         'PROBE_DONE',
@@ -711,7 +711,7 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     },
   });
 
-  it('fences a returning old primary: markers, db read-only, writers down before the db recreate; then idempotent', async () => {
+  it('fences a returning old primary: markers, db read-only, writers down, then the standby role; then idempotent', async () => {
     const node = fakeNode({ walg: 'primary', running: ['myapp-app', 'myapp-n8n'] });
     const first = await reconcileRetiredFence(argsFor(node));
     expect(first.fenced).toEqual([RETIRED_IP]);
@@ -728,6 +728,25 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     const second = await reconcileRetiredFence(argsFor(node));
     expect(second.fenced).toEqual([RETIRED_IP]);
     expect(node.writes).toEqual([]);
+  });
+
+  it('the probe reads the host role file through the one parser, never the db container env', async () => {
+    const { walgRoleReadShell } = await import('../../../src/lib/deploy/walg-role.js');
+    const node = fakeNode({ walg: 'standby' });
+    await reconcileRetiredFence(argsFor(node));
+    const probe = node.commands.find((c) => c.includes('PROBE_DONE')) ?? '';
+    expect(probe).toContain(walgRoleReadShell('/opt/myapp/.vibecarbon-role'));
+    expect(probe).not.toMatch(/docker inspect[^\n]*Config\.Env/);
+    // A role file that reads standby is the fenced state: no demote.
+    expect(node.writes).not.toContain('walg=standby');
+  });
+
+  it('a role file that reads anything but standby (missing, primary) is demoted', async () => {
+    for (const walg of ['', 'primary']) {
+      const node = fakeNode({ walg });
+      await reconcileRetiredFence(argsFor(node));
+      expect(node.writes, JSON.stringify(walg)).toContain('walg=standby');
+    }
   });
 
   it('the probe watches every writer the planned fence stops (the app and the enabled primary-only add-ons)', async () => {

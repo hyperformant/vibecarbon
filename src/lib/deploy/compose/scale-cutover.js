@@ -24,9 +24,11 @@
  *
  * Any failure before the DNS flip rolls the old server back (C19): its
  * database is unfenced, its writers start again and its backup cron returns.
- * Its WALG_ROLE is demoted only after the flip (a demoted node drops every WAL
- * segment it completes, so a rollback after a demote could leave a gap), so
- * the rollback never has to re-arm it. After the flip there is no rollback.
+ * Its wal-g role is demoted only after the flip, by one host write of its role
+ * file with no db restart: the demote is instant and could be reversed, but a
+ * demoted node drops every WAL segment it completes, so a rollback after a
+ * demote could leave a gap in the archive. Demoting after the flip means the
+ * rollback never has to re-arm it. After the flip there is no rollback.
  *
  * compose-ha: a replaced standby is never restored from the bucket (a restored
  * copy is an independent primary, silent split-brain). rejoinComposeStandby
@@ -268,7 +270,7 @@ export async function removeComposeBackupCron(ip, sshKeyPath, { run = sshRunAsyn
 /**
  * Roll the old primary back after a cutover failed before the DNS flip (C19):
  * lift the database fence, start its writers and put its backup cron back.
- * Its WALG_ROLE was never demoted (that waits for the flip). Deleting the new
+ * Its wal-g role was never demoted (that waits for the flip). Deleting the new
  * server is the caller's. Never throws.
  *
  * @param {object} args

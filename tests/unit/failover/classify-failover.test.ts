@@ -11,6 +11,7 @@
  * `-force-unplanned`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { composeRoleReply } from '../helpers/compose-role-ssh.js';
 import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
@@ -103,7 +104,7 @@ describe('-force-unplanned is a single-dash failover flag', () => {
 });
 
 /** The first mutating step of either flow: reaching it means the classification let it through. */
-const MUTATION = /^(provision|stopWriters|journal|reseed)$/;
+const MUTATION = /^(provision|stopWriters|arm|journal|reseed)$/;
 
 /** Stop the flow at the first mutation, recording that it was reached. */
 class Reached extends Error {
@@ -198,6 +199,11 @@ async function runCompose({
     isPrimaryReachable: async () => false,
     readState: async () => standbyState,
     psql: () => async () => '',
+    // The wal-g role arm before the promote (D2): a host write, a mutation.
+    roleRun: async (_ip: string, _k: string, argv: string[]) => {
+      order.push('arm');
+      return composeRoleReply(argv.join(' ')) ?? '';
+    },
     stopWriters: async () => {
       order.push('stopWriters');
       throw new Reached('stopWriters');

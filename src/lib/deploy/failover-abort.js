@@ -12,7 +12,7 @@
  *   1. fence the standby: stop its database and PROVE it down, so nothing can
  *      promote it or serve from it next to the old primary. Not proven, nothing
  *      else is touched and the abort refuses;
- *   2. stop the standby's writers and set its WALG_ROLE=standby (best effort:
+ *   2. stop the standby's writers and set its wal-g role to standby (best effort:
  *      its database is already down);
  *   3. point DNS back at the old primary when the provider is managed;
  *   4. lift the old primary's database write fence, give it back its wal-g
@@ -36,12 +36,12 @@ import { FailoverRefusedError } from './failover-guard.js';
  * @property {() => Promise<{ ok: boolean, reason?: string }>} stopStandbyDb
  *   stop the standby's database and prove it is not running
  * @property {() => Promise<boolean>} disarmStandby
- *   stop its writers and set WALG_ROLE=standby; best effort
+ *   stop its writers and set its wal-g role to standby; best effort
  * @property {(() => Promise<{ ok: boolean, reason?: string }>)|null} repointDns
  *   managed DNS: point the A records back at the old primary; null for manual
  * @property {() => Promise<boolean>} primaryReachable
  * @property {() => Promise<boolean>} unfencePrimary - proven lift of the db write fence
- * @property {() => Promise<boolean>} armPrimary - WALG_ROLE=primary and the ACME issuer
+ * @property {() => Promise<boolean>} armPrimary - the primary wal-g role and the ACME issuer
  * @property {() => Promise<boolean>} startPrimaryWriters
  * @property {() => Promise<{ ok: boolean, reason?: string }>} writeBackupFence
  *   name the old primary in the backup-prefix fence (backup-fence.js): a
@@ -129,7 +129,7 @@ export async function abortFailover({
   // 2. Belt and braces on the standby: a reboot must not bring it back archiving.
   if (!(await backend.disarmStandby())) {
     note(
-      `could not stop the standby's writers or set its WALG_ROLE=standby (${standby}); its ` +
+      `could not stop the standby's writers or set its wal-g role to standby (${standby}); its ` +
         'database is down, and vibecarbon deploy rebuilds it as the standby',
     );
   }

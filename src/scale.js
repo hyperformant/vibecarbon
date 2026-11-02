@@ -678,8 +678,8 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
   };
 
   // 12. Demote the old server's wal-g write-guard so it never archives next
-  //     to the new primary (demoteComposeWalgRole recreates its db with
-  //     WALG_ROLE=standby).
+  //     to the new primary (demoteComposeWalgRole writes standby into its
+  //     role file: one host write, no db restart).
   await step('demote', async () => {
     s.start(`Demoting ${label} (wal-g write-guard)...`);
     const demoted = await demoteComposeWalgRole({
@@ -1426,7 +1426,7 @@ async function deleteUnusedReplacement(provider, newServerId, newIp, oldStillRun
  * names) moves the database with writes fenced (scale-cutover.js):
  *   provision and start the new server; fence the old one (writers stopped,
  *   database read-only, WAL archived through the fence); push the final base;
- *   restore THAT base on the new server; demote the old server's WALG_ROLE and
+ *   restore THAT base on the new server; demote the old server's wal-g role and
  *   drop its backup cron; flip DNS; recreate services; push the first base on
  *   the new timeline (C8: after the flip, before the old server goes); install
  *   the backup cron; destroy the old server.

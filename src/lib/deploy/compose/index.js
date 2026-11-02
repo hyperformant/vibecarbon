@@ -222,7 +222,7 @@ export {
  * FIRST failure's classification: if it's DNS-not-settled AND the caller
  * hasn't opted out of retries entirely (`retries > 1`), switches to
  * DNS_NOT_SETTLED_RETRY_DELAYS_MS for the rest of this call's retries. A
- * `retries: 1` caller (e.g. compose/ha.js's restoreComposeWalgRole /
+ * `retries: 1` caller (e.g. compose/ha.js's auditComposeWalgRole /
  * demoteComposeWalgRole DR fast-fail path) targets an ALREADY-established
  * server, not a freshly-provisioned one, so the DNS-not-settled window
  * doesn't apply there and the opt-out is respected as-is.

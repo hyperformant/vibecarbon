@@ -202,7 +202,7 @@ export function isDnsNotSettledSshCommandError(err) {
  * still surface fast — see sshRunAsync for how the ladder is sized and
  * widened for class 3, and scpWithRetry for why the scp ladder stays
  * transport-only. The DR path's `retries: 1` opt-out (compose/ha.js's
- * restoreComposeWalgRole / demoteComposeWalgRole) caps ATTEMPTS, not
+ * auditComposeWalgRole / demoteComposeWalgRole) caps ATTEMPTS, not
  * classification.
  *
  * Contrast with isNeverStartedSshTransportFailure above, which additionally

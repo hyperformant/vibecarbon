@@ -78,7 +78,7 @@ import {
 import { clearRetiredFence, fenceRetiredNode } from '../retired-fence.js';
 import { envS3Record } from '../s3-record.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
-import { composeRoleEnv, writeComposeWalgRole } from '../walg-role.js';
+import { writeComposeWalgRole } from '../walg-role.js';
 import { exchangeAndBringUpTunnel, wgIpOf } from '../wireguard.js';
 
 /** Shared service-opts object rebuilt from ctx (identical to the inline const). */
@@ -628,11 +628,12 @@ async function haSetupServerFiles(ctx) {
 
 /**
  * wal-g WRITE-GUARD: write the role FILE on each node (walg-role.js), then
- * the per-node .env merge. Same canonical S3 prefix on both nodes (so the
- * standby can READ the primary's base backups); `standby` makes
+ * the per-node ACME issuer merge into .env. Same canonical S3 prefix on both
+ * nodes (so the standby can READ the primary's base backups); `standby` makes
  * wal-archive.sh + compose-backup.sh no-op on the standby so it never WRITES
- * into the shared prefix (split-brain guard). Both files land before
- * start-compose-stack, so each db's first start reads its role.
+ * into the shared prefix (split-brain guard). Both land before
+ * start-compose-stack, so each db's first start reads its role. The role is
+ * never in .env (compose-role-not-in-dotenv-census.test.ts).
  */
 async function haWriteNodeRoles(ctx) {
   const projectName = ctx.projectConfig.projectName;
@@ -653,15 +654,9 @@ async function haWriteNodeRoles(ctx) {
   // re-deploy over a node that once held the standby role converges it.
   // This runs before start-compose-stack, so the first `up` already
   // interpolates the right caserver — no recreate needed at deploy time.
-  // No guard reads the .env WALG_ROLE any more (they read the role file); it
-  // stays until the compose role movers stop comparing it.
   await Promise.all([
-    mergeRemoteDotenv(primary.ip, haSshOpts, haRemoteDir, {
-      ...composeRoleEnv('primary'),
-      [ACME_DISARM_ENV]: '',
-    }),
+    mergeRemoteDotenv(primary.ip, haSshOpts, haRemoteDir, { [ACME_DISARM_ENV]: '' }),
     mergeRemoteDotenv(standby.ip, haSshOpts, haRemoteDir, {
-      ...composeRoleEnv('standby'),
       [ACME_DISARM_ENV]: ACME_DISARMED_CA_SERVER,
     }),
   ]);
@@ -827,7 +822,7 @@ async function haStartComposeStack(ctx) {
  * app-migrate would write into it (or fail on the failover's write fence), and
  * its archiver and backup cron would push into the promoted node's prefix. So
  * the retirement fence is armed on it here (retired-fence.js: markers, every
- * writer stopped, WALG_ROLE=standby), in case the deploy's entry could not
+ * writer stopped, the standby wal-g role), in case the deploy's entry could not
  * reach it. It stays armed through the reseed; reconvergeReplication brings the
  * stack up as a normal standby once the reseed makes it a replica, and only
  * haFinalizeConfig, after verified streaming, takes the fence off (one deploy
@@ -1143,7 +1138,7 @@ async function reconvergeReplication(ctx) {
 
 /**
  * Bring the rebuilt node's stack up as a normal standby (current image, the
- * standby role env merged earlier: WALG_ROLE=standby, ACME disarmed), once it
+ * standby role written earlier: the standby wal-g role file, ACME disarmed), once it
  * reads as a replica, so its app-migrate exits on the read-only database. Its
  * success is part of a complete reconverge (haFinalizeConfig); a failure is a
  * warning here, and the env stays degraded for the rerun.

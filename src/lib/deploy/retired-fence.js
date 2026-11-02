@@ -32,7 +32,7 @@
  * never a patch that would roll pods, after suspending any Flux Kustomization
  * that would scale them back; compose: the app and the primary-only add-ons)
  * and the standby wal-g role (k8s: the intent ConfigMap and the live role
- * file; compose: WALG_ROLE=standby).
+ * file; compose: the host role file).
  *
  * `vibecarbon status`, `failover` and `deploy` call reconcileRetiredFence
  * first, and failover again once its role swap is saved, so an old primary
@@ -66,6 +66,7 @@ import {
   WRITE_FENCE_SETTING,
 } from './replication.js';
 import {
+  COMPOSE_WALG_ROLE_HOST_DIR,
   DB_ROLE_CONFIGMAP,
   DB_ROLE_INTENT_KEY,
   demoteK8sWalgRole,
@@ -565,9 +566,9 @@ async function probeCompose(ip, { run, projectName, writerContainers, psqlFor })
     [
       `cd /opt/${projectName} || exit 1`,
       `if [ -f ${RETIRED_HOST_MARKER} ]; then echo HOST_MARKER=1; else echo HOST_MARKER=0; fi`,
-      // The RUNNING container's env, not .env: a merged .env does nothing until
-      // the db container is recreated.
-      `echo "WALG_ROLE=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ${dbCt} 2>/dev/null | sed -n 's/^WALG_ROLE=//p' | head -n1)"`,
+      // The host role file, bound read-only into db: what every wal-g caller
+      // in the container reads, through the one parser.
+      walgRoleReadShell(`/opt/${projectName}/${COMPOSE_WALG_ROLE_HOST_DIR}`),
       `if ${running(dbCt)}; then if docker exec ${dbCt} sh -c '[ -f ${DB_MARKER_PATH} ]'; then echo DB_MARKER=present; else echo DB_MARKER=absent; fi; else echo DB_MARKER=unknown; fi`,
       `for c in ${writerContainers.join(' ')}; do if ${running('"$c"')}; then echo "RUNNING $c"; fi; done`,
       'echo PROBE_DONE',
@@ -587,7 +588,7 @@ async function probeCompose(ip, { run, projectName, writerContainers, psqlFor })
     dbReadOnly: dbState.readOnly,
     walBytes: dbState.walBytes,
     workloadsZero: !lines.some((l) => l.startsWith('RUNNING ')),
-    walgStandby: value('WALG_ROLE') === 'standby',
+    walgStandby: value('WALG_ROLE_FILE') === 'standby',
   };
 }
 
@@ -615,9 +616,9 @@ function composeBackend({
       });
     },
     // Marker first (it refuses the nightly backup), then the PGDATA marker (it
-    // refuses WAL archiving at once), the database read-only, the writers
-    // before the db recreate the role change needs (ALTER SYSTEM persists in
-    // postgresql.auto.conf across it).
+    // refuses WAL archiving at once), the database read-only, the writers,
+    // then the standby wal-g role (one host write of the role file, no db
+    // restart).
     steps: [
       {
         key: 'marker',
@@ -642,7 +643,7 @@ function composeBackend({
       },
       {
         key: 'walgStandby',
-        what: 'WALG_ROLE=standby',
+        what: 'the standby wal-g role',
         apply: async (ip) => {
           if (demoteWalgRole) return demoteWalgRole(ip);
           const { demoteComposeWalgRole } = await import('./compose/ha.js');
@@ -655,7 +656,7 @@ function composeBackend({
         },
       },
     ],
-    // demoteComposeWalgRole's recreate already waits for the db to accept connections.
+    // Nothing to wait for: the role is a host file, so its write needs no db.
     settle: async () => true,
   };
 }

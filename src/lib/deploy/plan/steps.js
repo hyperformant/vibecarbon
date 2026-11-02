@@ -241,8 +241,8 @@ export const haSetupServerFilesStep = () =>
 
 /**
  * The wal-g role FILE on each node (primary / standby, walg-role.js) before
- * either stack starts, plus the per-node .env merge (ACME_DISARM_ENV and,
- * until the compose role movers stop comparing it, WALG_ROLE).
+ * either stack starts, plus the per-node .env merge of ACME_DISARM_ENV. The
+ * wal-g role is never in .env.
  */
 export const haWriteNodeRolesStep = () =>
   defineStep({ name: 'write-node-roles', effect: 'haWriteNodeRoles' });

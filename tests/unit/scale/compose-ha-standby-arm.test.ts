@@ -110,7 +110,6 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
       h.events.push(`demote:${oldPrimaryIp}`);
       return true;
     },
-    restoreComposeWalgRole: async () => ({ ok: true }),
     openWireguardPortUfw: async () => {},
     openWireguardPortHetznerFirewall: async () => {},
     ensurePrimaryReplicationAccess: async (ip: string) => {

@@ -151,7 +151,6 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
       return '';
     },
     demoteComposeWalgRole: async () => true,
-    restoreComposeWalgRole: async () => ({ ok: true }),
   };
 });
 

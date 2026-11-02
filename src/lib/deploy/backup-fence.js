@@ -4,7 +4,7 @@
  * The retirement fence (retired-fence.js) only works on a node the CLI can
  * reach: it places markers the node's own scripts check. An old primary that
  * stays unreachable through the failover and then reboots on its own still
- * reads WALG_ROLE=primary, out of recovery, and its archive_command and backup
+ * reads the primary wal-g role, out of recovery, and its archive_command and backup
  * cron push WAL, base backups and a `delete before` into the shared prefix,
  * where LATEST can become its stale timeline.
  *

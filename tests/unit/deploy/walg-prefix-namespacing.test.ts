@@ -13,7 +13,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { composeRoleEnv } from '../../../src/lib/deploy/walg-role.js';
 
 const ROOT = join(__dirname, '../../..');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
@@ -55,18 +54,13 @@ describe('the write-guard signal is the role file, never a WALG_ROLE env', () =>
     expect(k3s).not.toMatch(/environment\?\.endsWith\('-standby'\)/);
   });
 
-  it('compose-HA writes WALG_ROLE=primary / standby onto each node (.env merge)', () => {
-    // The .env merge moved out of the deployComposeHA orchestration into the
-    // compose-ha deploy effect (haWriteNodeRoles) when the tier was converted to
-    // the step-plan; the write-guard behavior is unchanged. The literal key is
-    // now spelled ONLY in composeRoleEnv (walg-role.js), which validates the
-    // role — compose-role-env-census.test.ts bans the literal shape here, so
-    // assert the helper call and what it emits instead.
+  it('compose-HA writes the role FILE onto each node (writeComposeWalgRole), never a .env key', () => {
+    // The .env WALG_ROLE is retired (D4): the role lives in
+    // /opt/<project>/.vibecarbon-role/walg-role, bound read-only into db.
+    // compose-role-not-in-dotenv-census.test.ts keeps it out of .env.
     const eff = read('src/lib/deploy/effects/compose-ha.js');
-    expect(eff).toMatch(/composeRoleEnv\('primary'\)/);
-    expect(eff).toMatch(/composeRoleEnv\('standby'\)/);
-    expect(composeRoleEnv('primary').WALG_ROLE).toBe('primary');
-    expect(composeRoleEnv('standby').WALG_ROLE).toBe('standby');
+    expect(eff).toMatch(/writeComposeWalgRole\(\{[^)]*role: 'primary'/);
+    expect(eff).toMatch(/writeComposeWalgRole\(\{[^)]*role: 'standby'/);
   });
 });
 

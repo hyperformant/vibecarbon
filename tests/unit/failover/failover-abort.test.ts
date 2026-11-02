@@ -15,6 +15,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { argvOver, composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
 import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
@@ -223,7 +224,7 @@ describe('compose-ha abort backend', () => {
     envConfig: Record<string, unknown> = journalEnv(),
   ) => {
     const commands: Array<{ ip: string; command: string }> = [];
-    const rearm = vi.fn(async () => ({ ok: true }));
+    const rearm = vi.fn(async () => {});
     const backend = composeFailoverAbortBackend({
       envName: 'prod',
       envConfig,
@@ -237,7 +238,11 @@ describe('compose-ha abort backend', () => {
           }
           return '';
         },
-        mergeEnv: vi.fn(async () => {}),
+        roleRun: async (ip: string, _k: string, argv: string[]) => {
+          const command = argv.join(' ');
+          commands.push({ ip, command });
+          return composeRoleReply(command) ?? '';
+        },
         rearmWalg: rearm,
         armAcme: vi.fn(async () => true),
         disarmAcme: vi.fn(async () => true),
@@ -312,14 +317,65 @@ describe('compose-ha abort backend', () => {
     }
   });
 
-  it('re-arms WALG_ROLE on the old primary only when its running db lost it', async () => {
-    const kept = make({ 'docker inspect': 'WALG_ROLE=primary' });
+  it('re-arms the wal-g role FILE on the old primary only when it lost it', async () => {
+    const kept = make({ WALG_ROLE_FILE: 'WALG_ROLE_FILE=primary' });
     await expect(kept.backend.armPrimary()).resolves.toBe(true);
     expect(kept.rearm).not.toHaveBeenCalled();
+    expect(kept.commands[0]).toMatchObject({ ip: '10.0.0.1' });
+    expect(kept.commands[0].command).toContain('/opt/myapp/.vibecarbon-role/walg-role');
 
-    const lost = make({ 'docker inspect': 'WALG_ROLE=standby' });
+    const lost = make({ WALG_ROLE_FILE: 'WALG_ROLE_FILE=standby' });
     await expect(lost.backend.armPrimary()).resolves.toBe(true);
     expect(lost.rearm).toHaveBeenCalledWith(expect.objectContaining({ promotedIp: '10.0.0.1' }));
+
+    const failed = make(
+      { WALG_ROLE_FILE: 'WALG_ROLE_FILE=' },
+      { rearmWalg: vi.fn(async () => Promise.reject(new Error('read back as ""'))) },
+    );
+    await expect(failed.backend.armPrimary()).resolves.toBe(false);
+  });
+
+  it('compose abort: disarmStandby writes the standby role FILE, armPrimary reads it (C4)', async () => {
+    const cmds: string[] = [];
+    const run = async (_ip: string, _k: string, cmd: string) => {
+      cmds.push(cmd);
+      return cmd.includes('WALG_ROLE_FILE') ? 'WALG_ROLE_FILE=standby' : 'WRITERS_DONE';
+    };
+    const backend = composeFailoverAbortBackend({
+      envName: 'prod',
+      envConfig: journalEnv(),
+      projectName: 'acme',
+      sshKeyPath: '/k',
+      deps: {
+        run,
+        // The real writer (writeComposeWalgRole) over the same recording seam.
+        roleRun: argvOver(run),
+        armAcme: vi.fn(async () => true),
+        disarmAcme: vi.fn(async () => true),
+      },
+    });
+    await backend.disarmStandby();
+    expect(
+      cmds.some((c) => c.includes('.vibecarbon-role') && composeRoleWriteOf(c) === 'standby'),
+    ).toBe(true);
+    await backend.armPrimary();
+    expect(
+      cmds.some((c) => c.includes('.vibecarbon-role') && composeRoleWriteOf(c) === 'primary'),
+    ).toBe(true);
+    expect(cmds.some((c) => c.includes('up -d --no-deps db'))).toBe(false);
+  });
+
+  it('disarmStandby: a role file that does not read back standby is not disarmed', async () => {
+    const { backend } = make(
+      { WRITERS_DONE: 'WRITERS_DONE' },
+      { roleRun: async () => 'WALG_ROLE_FILE=primary' },
+    );
+    await expect(backend.disarmStandby()).resolves.toBe(false);
+    const ok = make({ WRITERS_DONE: 'WRITERS_DONE' });
+    await expect(ok.backend.disarmStandby()).resolves.toBe(true);
+    expect(ok.commands.find((c) => composeRoleWriteOf(c.command))).toMatchObject({
+      ip: '10.0.0.2',
+    });
   });
 
   it('starts the declared writers on the old primary: the app plus the enabled primary-only add-ons', async () => {

@@ -8,7 +8,7 @@
  *
  * Now, in order: stop the writers, fence the database, switch WAL, wait for
  * that file to be archived, push the final base, restore THAT name on the new
- * server, demote the old one (WALG_ROLE) and drop its backup cron, flip DNS,
+ * server, demote the old one (its wal-g role file) and drop its backup cron, flip DNS,
  * push the first base on the new timeline, destroy the old server. Any failure
  * before the flip rolls the old server back and deletes the new one; after the
  * flip there is no rollback.
@@ -199,13 +199,17 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
       }
       return '';
     },
-    demoteComposeWalgRole: async ({ oldPrimaryIp }: { oldPrimaryIp: string }) => {
-      h.events.push(`demote:${oldPrimaryIp}`);
-      return true;
+    // The real demote, recorded: its role write reaches the ssh.js fake below
+    // (role:<ip>:standby), its slot drop the compose sshRunAsync fake above.
+    demoteComposeWalgRole: async (a: { oldPrimaryIp: string } & Record<string, unknown>) => {
+      h.events.push(`demote:${a.oldPrimaryIp}`);
+      return (actual.demoteComposeWalgRole as (x: unknown) => Promise<boolean>)({
+        ...a,
+        deps: { log: () => {}, warn: () => {} },
+      });
     },
-    restoreComposeWalgRole: async ({ promotedIp }: { promotedIp: string }) => {
+    armComposeWalgRole: async ({ promotedIp }: { promotedIp: string }) => {
       h.events.push(`rearm:${promotedIp}`);
-      return { ok: true };
     },
   };
 });
@@ -626,8 +630,21 @@ describe('scaleServers: the replacement reads its wal-g role from the first up',
     const seq = h.events;
     expect(seq.indexOf('role:9.9.9.9:primary')).toBeGreaterThanOrEqual(0);
     expect(seq.indexOf('role:9.9.9.9:primary')).toBeLessThan(seq.indexOf('up:9.9.9.9'));
-    // The old server's role is never rewritten by the scale.
-    expect(seq.filter((e) => e.startsWith('role:'))).toEqual(['role:9.9.9.9:primary']);
+    // The old server's role is rewritten only by its demote, after the flip.
+    expect(seq.filter((e) => e.startsWith('role:'))).toEqual([
+      'role:9.9.9.9:primary',
+      'role:1.1.1.1:standby',
+    ]);
+  });
+
+  it('the old server is demoted to standby only after the flip, by a host write, with no recreate', async () => {
+    reset();
+    const { ctx } = makeCtx();
+    await SCALE_EFFECTS.scaleServers(ctx);
+    const seq = h.events;
+    expect(seq.indexOf('role:1.1.1.1:standby')).toBeGreaterThan(seq.indexOf('dns:9.9.9.9'));
+    expect(seq.indexOf('dns:9.9.9.9')).toBeGreaterThan(-1);
+    expect(seq.some((e) => e.startsWith('ssh:1.1.1.1:') && e.includes('up -d'))).toBe(false);
   });
 
   it('a role write that fails stops the scale before the first up, and the new server is deleted', async () => {
