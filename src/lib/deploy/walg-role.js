@@ -119,13 +119,23 @@ export function walgRoleReadShell(dir) {
 }
 
 /**
+ * The stderr line a failed role write prints. setK8sWalgRole matches it on
+ * the error's stderr only: the thrown message carries the whole command,
+ * script and this text included.
+ */
+const WALG_ROLE_WRITE_FAILED = '[walg-role] could not write the wal-g role in';
+
+/**
  * POSIX sh that writes the role to `<dir>/walg-role` atomically, then prints
  * it read back through the one parser (walgRoleReadShell).
  *
  * The write happens inside `<dir>`, so the rename never crosses a filesystem:
  * remove any stale tmp (a planted symlink is removed, never followed), create
  * the tmp under noclobber (a name that reappears in between fails the write
- * instead of being followed), chmod 0644, `mv -f` over the role file, sync.
+ * instead of being followed), chmod 0644, sync (the tmp's bytes are durable
+ * before the rename can expose them), `mv -f` over the role file, sync (the
+ * rename itself is durable). Plain `sync`: busybox's older builds take no
+ * file arguments.
  * A reader sees the old word or the new one, never a partial file. Any step
  * failing exits 1 before the read-back, so no role line is printed.
  *
@@ -136,7 +146,7 @@ export function walgRoleReadShell(dir) {
 export function walgRoleWriteShell(dir, role) {
   assertWalgRole(role);
   return [
-    `( cd ${shEscape(dir)} && rm -f walg-role.tmp && (set -C && printf '%s\\n' ${role} > walg-role.tmp) && chmod 0644 walg-role.tmp && mv -f walg-role.tmp walg-role && sync ) || { echo ${shEscape(`[walg-role] could not write the wal-g role in ${dir}`)} >&2; exit 1; }`,
+    `( cd ${shEscape(dir)} && rm -f walg-role.tmp && (set -C && printf '%s\\n' ${role} > walg-role.tmp) && chmod 0644 walg-role.tmp && sync && mv -f walg-role.tmp walg-role && sync ) || { echo ${shEscape(`${WALG_ROLE_WRITE_FAILED} ${dir}`)} >&2; exit 1; }`,
     walgRoleReadShell(dir),
   ].join('\n');
 }
@@ -222,30 +232,36 @@ export function podMountsWalgRoleDir(podJson) {
  * the live file, but only on a pod whose spec mounts WALG_ROLE_DIR.
  *
  * A failed intent apply throws: without it a db start that the CLI could not
- * reach would come back with the wrong role. The live write never throws
- * unless `requireLive` is set; the result says why it did not land.
+ * reach would come back with the wrong role. So a returned result always has
+ * `intent: true`; the field stays so callers can log the whole result. The
+ * live write never throws unless `requireLive` is set; the result says why it
+ * did not land: `no-role-mount` (a pod from before the role mount),
+ * `pod-unreachable` (get or exec could not reach the container),
+ * `write-failed` (the write ran and failed: a read-only mount, a full disk),
+ * `read-back-mismatch` (it ran but the parser does not read `role` back).
  *
  * @param {object} o
  * @param {string} o.ip
  * @param {(ip: string, argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>} o.kubectl
  * @param {'primary'|'standby'} o.role
  * @param {boolean} [o.requireLive] throw unless the live file now reads `role`
- * @returns {Promise<{intent: boolean, live: boolean, reason?: 'no-role-mount'|'pod-unreachable'|'read-back-mismatch', error?: Error}>}
+ * @param {string} [o.envName] named in the no-role-mount hint; `<env>` when absent
+ * @returns {Promise<{intent: true, live: boolean, reason?: 'no-role-mount'|'pod-unreachable'|'write-failed'|'read-back-mismatch', error?: Error}>}
  */
-export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false }) {
+export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false, envName }) {
   assertWalgRole(role);
   await kubectl(ip, k8sWalgRoleIntentApplyArgv(), {
     input: dbRoleConfigMapManifest(role),
     timeout: 60_000,
   });
 
-  /** @param {{intent: boolean, live: boolean, reason?: string, error?: Error}} result */
+  /** @param {{intent: true, live: boolean, reason?: string, error?: Error}} result */
   const settle = (result) => {
     if (!requireLive || result.live) return result;
     if (result.reason === 'no-role-mount') {
       throw new Error(
         `this cluster's db predates the live wal-g role (no ${WALG_ROLE_DIR} mount on ${DB_POD}); ` +
-          'run `vibecarbon deploy <env>` once (one db restart), then retry',
+          `run \`vibecarbon deploy ${envName || '<env>'}\` once (one db restart), then retry`,
       );
     }
     const detail = result.error ? `: ${result.error.message}` : '';
@@ -270,7 +286,13 @@ export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false })
   try {
     out = await kubectl(ip, k8sWalgRoleExecArgv(role), { timeout: 30_000 });
   } catch (error) {
-    return settle({ intent: true, live: false, reason: 'pod-unreachable', error });
+    const wrote = String(error?.stderr ?? '').includes(WALG_ROLE_WRITE_FAILED);
+    return settle({
+      intent: true,
+      live: false,
+      reason: wrote ? 'write-failed' : 'pod-unreachable',
+      error,
+    });
   }
   const readBack = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim();
   if (readBack !== role) {

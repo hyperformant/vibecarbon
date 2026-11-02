@@ -294,8 +294,11 @@ describe('walg role primitives', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vc-role-'));
     writeFileSync(join(dir, 'victim'), 'x');
     symlinkSync(join(dir, 'victim'), join(dir, 'walg-role.tmp'));
-    spawnSync('sh', ['-c', walgRoleWriteShell(dir, 'standby')]);
+    const r = spawnSync('sh', ['-c', walgRoleWriteShell(dir, 'standby')], { encoding: 'utf-8' });
     expect(readFileSync(join(dir, 'victim'), 'utf-8')).toBe('x');
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe('WALG_ROLE_FILE=standby');
+    expect(readFileSync(join(dir, 'walg-role'), 'utf-8')).toBe('standby\n');
   });
   it('the manifest is the CLI-owned ConfigMap with the one key', () => {
     const doc = load(dbRoleConfigMapManifest('standby')) as {
@@ -338,6 +341,67 @@ describe('walg role primitives', () => {
     await expect(
       setK8sWalgRole({ ip: '1.1.1.1', kubectl, role: 'primary', requireLive: true }),
     ).rejects.toThrow(/predates[\s\S]*vibecarbon deploy/);
+  });
+  it('the requireLive deploy hint names the env when given, and <env> otherwise', async () => {
+    const kubectl = vi.fn(async (_ip: string, argv: string[]) =>
+      argv.includes('get') ? podJson(false) : '',
+    );
+    await expect(
+      setK8sWalgRole({
+        ip: '1.1.1.1',
+        kubectl,
+        role: 'primary',
+        requireLive: true,
+        envName: 'prod',
+      }),
+    ).rejects.toThrow('`vibecarbon deploy prod`');
+    await expect(
+      setK8sWalgRole({ ip: '1.1.1.1', kubectl, role: 'primary', requireLive: true }),
+    ).rejects.toThrow('`vibecarbon deploy <env>`');
+  });
+  it('a write that runs but exits non-zero is write-failed, not pod-unreachable', async () => {
+    // The thrown message carries the whole command (the script, marker text
+    // included), so only stderr may decide this.
+    const writeErr = Object.assign(
+      new Error(`Command failed: ${walgRoleWriteShell(WALG_ROLE_DIR, 'primary')}`),
+      {
+        stderr: `[walg-role] could not write the wal-g role in ${WALG_ROLE_DIR}\ncommand terminated with exit code 1\n`,
+        status: 1,
+      },
+    );
+    const kubectl = vi.fn(async (_ip: string, argv: string[]) => {
+      if (argv.includes('get')) return podJson(true);
+      if (argv.includes('exec')) throw writeErr;
+      return '';
+    });
+    await expect(setK8sWalgRole({ ip: '1.1.1.1', kubectl, role: 'primary' })).resolves.toEqual({
+      intent: true,
+      live: false,
+      reason: 'write-failed',
+      error: writeErr,
+    });
+    const goneErr = Object.assign(
+      new Error(`Command failed: ${walgRoleWriteShell(WALG_ROLE_DIR, 'primary')}`),
+      {
+        stderr: 'error: unable to upgrade connection: container not found ("db")\n',
+        status: 1,
+      },
+    );
+    kubectl.mockImplementation(async (_ip: string, argv: string[]) => {
+      if (argv.includes('get')) return podJson(true);
+      if (argv.includes('exec')) throw goneErr;
+      return '';
+    });
+    await expect(
+      setK8sWalgRole({ ip: '1.1.1.1', kubectl, role: 'primary' }),
+    ).resolves.toMatchObject({
+      reason: 'pod-unreachable',
+    });
+  });
+  it('the write syncs the tmp file before the rename, and the rename after', () => {
+    expect(walgRoleWriteShell(WALG_ROLE_DIR, 'primary')).toMatch(
+      /chmod 0644 walg-role\.tmp && sync && mv -f walg-role\.tmp walg-role && sync /,
+    );
   });
   it('a dead pod still records the intent (its next start applies it)', async () => {
     const kubectl = vi.fn(async (_ip: string, argv: string[]) => {
