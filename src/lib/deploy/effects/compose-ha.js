@@ -555,7 +555,8 @@ async function haTransferImage(ctx) {
   if (isComposeLocal) {
     const { deliverComposeAppImage } = await import('../compose/app-image.js');
     ctx.onProgress('Sending the app image to primary + standby (layer delta, in parallel)...');
-    ctx.imageTransferPromise = perfAsync('deploy.ha.compose.imageTransfer.fan', () =>
+    ctx.imageTransferMarker = 'deploy.ha.compose.imageTransfer';
+    ctx.imageTransferPromise = perfAsync(`${ctx.imageTransferMarker}.fan`, () =>
       Promise.all(
         // The one local build is awaited inside each arm; its failure is
         // this machine's and stays unprefixed. A node's base pull or delta
@@ -576,7 +577,9 @@ async function haTransferImage(ctx) {
     const { collectComposeBuildArgs } = await import('../compose/build-args.js');
     const haBuildArgs = collectComposeBuildArgs(process.cwd(), { projectName, domain });
     ctx.onProgress('Building the app image on primary + standby (no local docker)...');
-    ctx.imageTransferPromise = perfAsync('deploy.ha.compose.remoteBuild.fan', () =>
+    // Direct mode keeps the remoteBuild markers, for the fan and the await.
+    ctx.imageTransferMarker = 'deploy.ha.compose.remoteBuild';
+    ctx.imageTransferPromise = perfAsync(`${ctx.imageTransferMarker}.fan`, () =>
       Promise.all(
         nodes.map(([role, node]) =>
           onNode(
@@ -839,7 +842,10 @@ async function haStartComposeStack(ctx) {
   // transfer-image's when-gate skipped it and the stack pull fetches it.)
   if (ctx.imageTransferPromise) {
     ctx.onProgress('Waiting for the app image on both servers...');
-    await perfAsync('deploy.ha.compose.imageTransfer.await', () => ctx.imageTransferPromise);
+    await perfAsync(
+      `${ctx.imageTransferMarker ?? 'deploy.ha.compose.imageTransfer'}.await`,
+      () => ctx.imageTransferPromise,
+    );
   }
   ctx.onProgress('Starting services on both servers...');
   await perfAsync('deploy.ha.compose.composeUp.both', () =>

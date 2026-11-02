@@ -47,6 +47,7 @@ const H = vi.hoisted(() => ({
     sshCommands: [] as string[],
     deliverArgs: [] as Record<string, unknown>[],
     deliverByTarget: {} as Record<string, Deferred>,
+    perf: [] as string[],
   },
 }));
 
@@ -67,6 +68,17 @@ vi.mock('../../../src/lib/deploy/layer-delta.js', () => ({
     return (H.state.deliverByTarget[String(args.sshTarget)] ?? H.state.deliver)?.promise;
   }),
 }));
+
+vi.mock('../../../src/lib/perf.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    perfAsync: (name: string, fn: () => unknown) => {
+      H.state.perf.push(name);
+      return (actual.perfAsync as (n: string, f: () => unknown) => Promise<unknown>)(name, fn);
+    },
+  };
+});
 
 vi.mock('../../../src/lib/deploy/image.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -141,6 +153,7 @@ beforeEach(() => {
   H.state.sshCommands = [];
   H.state.deliverArgs = [];
   H.state.deliverByTarget = {};
+  H.state.perf = [];
   H.state.baseRef = 'ghcr.io/o/node-runtime:1';
   H.state.deliver = deferred();
   H.state.basePull = deferred();
@@ -430,5 +443,19 @@ describe('F1 — compose-ha: one local build, a layer delta to both servers, haS
     H.state.build?.resolve(true);
     await barrier;
     expect(H.state.order).toContain('reconcile.run');
+    // Direct mode's markers are remoteBuild's, for the fan and the await alike.
+    expect(H.state.perf).toContain('deploy.ha.compose.remoteBuild.fan');
+    expect(H.state.perf).toContain('deploy.ha.compose.remoteBuild.await');
+    expect(H.state.perf.some((n) => n.includes('imageTransfer'))).toBe(false);
+  });
+
+  it('local mode marks the fan and the await as imageTransfer', async () => {
+    const ctx = composeHaCtx();
+    await COMPOSE_HA_EFFECTS.haTransferImage(ctx);
+    H.state.deliver?.resolve({});
+    await COMPOSE_HA_EFFECTS.haStartComposeStack(ctx);
+    expect(H.state.perf).toContain('deploy.ha.compose.imageTransfer.fan');
+    expect(H.state.perf).toContain('deploy.ha.compose.imageTransfer.await');
+    expect(H.state.perf.some((n) => n.includes('remoteBuild'))).toBe(false);
   });
 });
