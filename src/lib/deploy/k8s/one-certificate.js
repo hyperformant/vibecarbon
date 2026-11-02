@@ -46,13 +46,11 @@ function readOrEmpty(path) {
 
 /**
  * Why this project's observability files cannot be deployed by this CLI, or
- * null when they can. `vibecarbon add` copied the add-on's k8s files into
- * the project, and `vibecarbon upgrade` does not refresh add-on files, so a
- * project that added observability before the change still asks for
- * grafana-tls. Deployed as-is it would issue that certificate again, now
- * with no deploy-time patch to give it real names. Positive evidence only:
- * the kustomization lists the Certificate's file, or the IngressRoute names
- * its secret.
+ * null when they can: the project's copy of the add-on (k8s/base/
+ * observability, written by `vibecarbon add`) still issues grafana-tls, and
+ * `vibecarbon upgrade` refreshes add-on files from the CLI's bundled copy.
+ * Positive evidence only: the kustomization lists the Certificate's file,
+ * or the IngressRoute names its secret.
  *
  * @param {string} projectDir
  * @returns {string|null}
@@ -65,23 +63,7 @@ export function staleObservabilityTlsProblem(projectDir) {
   const listsCertificate = /^\s*-\s*grafana-tls-certificate\.yaml\s*$/m.test(kustomization);
   const namesSecret = /^\s*secretName:\s*["']?grafana-tls["']?\s*$/m.test(ingressRoute);
   if (!listsCertificate && !namesSecret) return null;
-  const edits = [];
-  if (listsCertificate) {
-    edits.push(
-      `delete ${OBSERVABILITY_DIR}/grafana-tls-certificate.yaml and its line in ${OBSERVABILITY_DIR}/kustomization.yaml`,
-    );
-  }
-  if (namesSecret) {
-    edits.push(
-      `in ${OBSERVABILITY_DIR}/ingressroute.yaml, replace the \`tls:\` block with \`tls: {}\``,
-    );
-  }
-  return (
-    'Your observability add-on still issues its own grafana-tls certificate for the app domain. ' +
-    'A second certificate for the same name lets Traefik serve either one, so a restored certificate may not be the one your domain serves. ' +
-    `Grafana now uses the app's certificate. To update the add-on files: ${edits.join('; then ')}. ` +
-    'Then deploy again, and the deploy removes the old certificate from the cluster. Nothing was provisioned.'
-  );
+  return 'Your observability add-on files are out of date. Run `vibecarbon upgrade`, then deploy again.';
 }
 
 /**

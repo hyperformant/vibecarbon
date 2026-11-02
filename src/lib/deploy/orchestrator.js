@@ -1121,9 +1121,9 @@ export async function executeDeployment(args, gatheredConfig) {
   });
   assertTierSupported(providerFor(config), tier);
   // One certificate per name: an observability add-on copied into the
-  // project before the change still issues grafana-tls for the app domain,
-  // and `vibecarbon upgrade` does not refresh add-on files. Refused here, the
-  // last stop before anything is provisioned (k8s/one-certificate.js).
+  // project before the change still issues grafana-tls for the app domain
+  // until `vibecarbon upgrade` refreshes it. Refused here, the last stop
+  // before anything is provisioned (k8s/one-certificate.js).
   if (isK8sTier(tier)) {
     const staleObservabilityTls = staleObservabilityTlsProblem(process.cwd());
     if (staleObservabilityTls) throw new Error(staleObservabilityTls);

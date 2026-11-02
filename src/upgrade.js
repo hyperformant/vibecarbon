@@ -21,6 +21,11 @@ import {
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
+import {
+  addonOwnedPaths,
+  addonUpgradeEntries,
+  installedAddonNames,
+} from './lib/addon-upgrade-files.js';
 import { runDependencyAudit } from './lib/audit-advisories.js';
 import { isBinaryFile } from './lib/binary-files.js';
 import { hashContent, hashFile } from './lib/checksum.js';
@@ -58,6 +63,7 @@ import { VERSION } from './lib/version.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const TEMPLATE_DIR = join(__dirname, '..', 'carbon');
+const SERVICES_DIR = join(__dirname, '..', 'services');
 
 // Template variable placeholders (same as create.js)
 const PLACEHOLDERS = {
@@ -79,10 +85,6 @@ const SECRET_PLACEHOLDERS = new Set(['DB_PASSWORD', 'ADMIN_PASSWORD']);
 // (not vibecarbon template variables). Must be copied raw without replacement.
 const RAW_COPY_FILES = new Set(['scripts/generate-dev-configs.sh']);
 
-// Optional-feature file prefixes — only upgrade these if they already exist in the project.
-// These are added by `vibecarbon add` or `vibecarbon deploy`, not during `create`.
-const OPTIONAL_FILE_PREFIXES = ['docker-compose.n8n.', 'docker-compose.metabase.'];
-
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
 // ============================================================================
@@ -100,6 +102,8 @@ const SPEC = {
     "  Safe    Auto-replaced if you haven't modified them",
     '  Merge   Always shown for review (docker-compose.yml, package.json, etc.)',
     '  Never   Your code, never touched (src/**, db/migrations/**, .env, etc.)',
+    '',
+    'Installed add-ons are upgraded too, from the add-on files this CLI ships.',
   ].join('\n'),
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },
@@ -200,10 +204,7 @@ export function ensureAppDbPassword(cwd, { dryRun = false } = {}) {
  *   what was (or, under -dry, would be) written; a generated key carries its
  *   manifest `upgradeNote` when it declares one
  */
-export function ensureAddonSecrets(
-  cwd,
-  { dryRun = false, servicesDir = join(__dirname, '..', 'services') } = {},
-) {
+export function ensureAddonSecrets(cwd, { dryRun = false, servicesDir = SERVICES_DIR } = {}) {
   const services = Object.keys(loadManifest(cwd).services ?? {});
   if (services.length === 0) return [];
   const local = loadEnvVariables(cwd);
@@ -384,14 +385,13 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
 // ============================================================================
 
 /**
- * Read a template file and apply placeholder replacement
+ * Read a template or add-on source file and apply placeholder replacement
  *
- * @param {string} templateRelPath - Relative path within TEMPLATE_DIR
+ * @param {string} fullPath - The source file (carbon/ or services/<name>/)
  * @param {object} variables - Template variables
  * @returns {string} - Resolved content
  */
-function resolveTemplate(templateRelPath, variables) {
-  const fullPath = join(TEMPLATE_DIR, templatePathFor(templateRelPath));
+function resolveTemplate(fullPath, variables) {
   let content = readFileSync(fullPath, 'utf-8');
 
   for (const [key, placeholder] of Object.entries(PLACEHOLDERS)) {
@@ -523,24 +523,34 @@ async function main(cliArgs) {
   s.start('Scanning infrastructure files');
 
   const variables = reconstructVariables(cwd, { dryRun: args.dryRun });
-  const upgradeableFiles = getUpgradeableFiles(TEMPLATE_DIR);
+  // What upgrade ships: the template's files, plus the files of every add-on
+  // the project installed, read from the bundled services/<name>/ through
+  // the add-on's manifest (the map `vibecarbon add` copied by). A path an
+  // add-on maps is the add-on's: the template's copy of it (the dev stack's
+  // carbon/docker-compose.n8n.yml and the like) is never its source.
+  const ownedByAddons = addonOwnedPaths(SERVICES_DIR);
+  const upgradeEntries = [
+    ...getUpgradeableFiles(TEMPLATE_DIR)
+      .filter((relPath) => !ownedByAddons.has(relPath))
+      .map((relPath) => ({
+        relPath,
+        sourcePath: join(TEMPLATE_DIR, templatePathFor(relPath)),
+      })),
+    ...addonUpgradeEntries({
+      installed: installedAddonNames(manifest, SERVICES_DIR),
+      servicesDir: SERVICES_DIR,
+    }).filter(({ relPath }) => getFilePolicy(relPath) !== 'never'),
+  ];
 
   // Classify each file
   const autoUpdated = []; // { path, reason: 'updated' | 'added' }
   const unchanged = []; // files with no diff
   const needsReview = []; // { path, oldContent, newContent }
 
-  for (const relPath of upgradeableFiles) {
+  for (const { relPath, sourcePath: templateFilePath } of upgradeEntries) {
     const policy = getFilePolicy(relPath);
     const projectFilePath = join(cwd, relPath);
-    const templateFilePath = join(TEMPLATE_DIR, templatePathFor(relPath));
     const fileExists = existsSync(projectFilePath);
-
-    // Skip optional-feature files that don't exist in the project yet.
-    // These are added by `vibecarbon add` or `vibecarbon deploy`, not during upgrade.
-    if (!fileExists && OPTIONAL_FILE_PREFIXES.some((prefix) => relPath.startsWith(prefix))) {
-      continue;
-    }
 
     // Handle binary files
     if (isBinaryFile(relPath)) {
@@ -558,9 +568,9 @@ async function main(cliArgs) {
     let newContent;
     try {
       if (RAW_COPY_FILES.has(relPath)) {
-        newContent = readFileSync(join(TEMPLATE_DIR, templatePathFor(relPath)), 'utf-8');
+        newContent = readFileSync(templateFilePath, 'utf-8');
       } else {
-        newContent = resolveTemplate(relPath, variables);
+        newContent = resolveTemplate(templateFilePath, variables);
       }
     } catch {
       // Template file can't be read — skip
@@ -963,7 +973,7 @@ async function main(cliArgs) {
     const newChecksums = {};
 
     // Recompute checksums for all upgradeable files that now exist
-    for (const relPath of upgradeableFiles) {
+    for (const { relPath } of upgradeEntries) {
       if (isBinaryFile(relPath)) continue;
       const projectFilePath = join(cwd, relPath);
       if (existsSync(projectFilePath)) {

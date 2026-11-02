@@ -7,10 +7,10 @@
  * - the cluster: a redeploy deletes the Certificate and its Secret,
  *   idempotently (removeRetiredObservabilityCertificate);
  * - the project tree: `vibecarbon add` copied the add-on's k8s files into
- *   k8s/base/observability, and `vibecarbon upgrade` does not refresh add-on
- *   files. A deploy of a project whose copy still issues grafana-tls is
- *   refused before anything is provisioned, with the exact edit that fixes
- *   it (staleObservabilityTlsProblem).
+ *   k8s/base/observability, and `vibecarbon upgrade` refreshes them. A
+ *   deploy of a project whose copy still issues grafana-tls is refused
+ *   before anything is provisioned, naming `vibecarbon upgrade`
+ *   (staleObservabilityTlsProblem).
  */
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -74,20 +74,15 @@ describe('staleObservabilityTlsProblem', () => {
     expect(staleObservabilityTlsProblem(dir)).toBeNull();
   });
 
-  it('refuses a copy that still lists grafana-tls-certificate.yaml, naming every edit', () => {
+  it('refuses a copy that still lists grafana-tls-certificate.yaml: one line, run upgrade', () => {
     const dir = projectWith({
       'kustomization.yaml': STALE_KUSTOMIZATION,
       'ingressroute.yaml': STALE_INGRESSROUTE,
       'grafana-tls-certificate.yaml': 'kind: Certificate\n',
     });
-    const msg = staleObservabilityTlsProblem(dir) ?? '';
-    expect(msg).toContain('grafana-tls');
-    expect(msg).toContain('k8s/base/observability/grafana-tls-certificate.yaml');
-    expect(msg).toContain('k8s/base/observability/kustomization.yaml');
-    expect(msg).toContain('k8s/base/observability/ingressroute.yaml');
-    expect(msg).toContain('tls: {}');
-    expect(msg).toContain('Nothing was provisioned');
-    expect(msg).not.toMatch(/—/);
+    expect(staleObservabilityTlsProblem(dir)).toBe(
+      'Your observability add-on files are out of date. Run `vibecarbon upgrade`, then deploy again.',
+    );
   });
 
   it('refuses an IngressRoute that still names the grafana-tls secret on its own', () => {
@@ -95,7 +90,7 @@ describe('staleObservabilityTlsProblem', () => {
       'kustomization.yaml': shipped('kustomization.yaml'),
       'ingressroute.yaml': STALE_INGRESSROUTE,
     });
-    expect(staleObservabilityTlsProblem(dir)).toContain('ingressroute.yaml');
+    expect(staleObservabilityTlsProblem(dir)).toContain('`vibecarbon upgrade`');
   });
 
   it('ignores the name in a comment', () => {

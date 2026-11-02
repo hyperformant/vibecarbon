@@ -12,14 +12,14 @@ const SAFE_PATTERNS = [
   'docker-entrypoint.sh',
   '.dockerignore',
   'docker-compose.prod.yml',
-  'docker-compose.observability.yml',
-  'docker-compose.observability.prod.yml',
-  'docker-compose.observability.override.yml',
-  'docker-compose.metabase.yml',
-  'docker-compose.metabase.override.yml',
-  'docker-compose.n8n.yml',
-  'docker-compose.n8n.override.yml',
-  'docker-compose.dev-init.yml',
+  // Every other compose file: the add-ons' (docker-compose.<name>[.prod|
+  // .override].yml, refreshed from services/<name>/ through the add-on's
+  // manifest, src/lib/addon-upgrade-files.js), docker-compose.dev-init.yml
+  // and docker-compose.dns01.prod.yml (live on every managed-DNS compose
+  // deploy: acme.js exports it as DNS01_OVERRIDE_FILE). docker-compose.yml
+  // and docker-compose.override.yml are user-blended: MERGE_PATTERNS is
+  // checked first and keeps them there.
+  'docker-compose.*.yml',
   'k8s/base/**',
   'k8s/infra/**',
   'k8s/flux/**',
@@ -29,15 +29,6 @@ const SAFE_PATTERNS = [
   // HelmRelease carries a chart-version pin that must move in lockstep with
   // the CLI (DNS01_PROVIDERS.hetzner.webhook.version).
   'k8s/gitops/**',
-  // Live on every managed-DNS compose deploy (acme.js exports it as
-  // DNS01_OVERRIDE_FILE; scale.js adds it to the -f set) but absent from this
-  // list, so ACME/Traefik fixes reached new projects only.
-  'docker-compose.dns01.prod.yml',
-  // Siblings of the metabase/n8n entries below; their .prod.yml variants were
-  // omitted while .yml and .override.yml were listed — an oversight, not a
-  // decision. Parked addons today, so no live impact.
-  'docker-compose.metabase.prod.yml',
-  'docker-compose.n8n.prod.yml',
   'cloud-init/**',
   '.github/workflows/**',
   // Node line for the project. Safe to replace: it's a version pin we own,
@@ -59,8 +50,10 @@ const SAFE_PATTERNS = [
   // Docker would mount an empty directory there and the local S3 would not
   // start.
   'volumes/s3/**',
-  // The n8n addon's hook and setup scripts docker-compose.n8n.yml mounts.
+  // The add-ons' scripts their compose files mount (n8n's hook and setup,
+  // Metabase's setup).
   'volumes/n8n/**',
+  'volumes/metabase/**',
   'AGENTS.md',
   'CLAUDE.md',
   'PRODUCTION.md',
@@ -85,14 +78,15 @@ const SAFE_PATTERNS = [
 // - wal-archive.sh is the archive_command: an old copy reads the
 //   WALG_S3_PREFIX the merged docker-compose.yml no longer sets
 //   (WALG_S3_PREFIX_BASE now) and archives nothing.
-// - metabase-init.sh / n8n-init.sh are the addons' initdb scripts their
-//   (safe) compose files mount.
+// - metabase-init.sh / n8n-init.sh / observability-init.sh are the add-ons'
+//   initdb scripts their (safe) compose files mount.
 const SAFE_DESPITE_NEVER = [
   'volumes/db/db-guard.sh',
   'volumes/db/walg-env.sh',
   'volumes/db/wal-archive.sh',
   'volumes/db/metabase-init.sh',
   'volumes/db/n8n-init.sh',
+  'volumes/db/observability-init.sh',
 ];
 
 // Files that always require user review

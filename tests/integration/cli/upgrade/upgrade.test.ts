@@ -2,9 +2,11 @@
  * vibecarbon upgrade — file-mutation tests against a real project.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { hashContent } from '../../../../src/lib/checksum.js';
+import { staleObservabilityTlsProblem } from '../../../../src/lib/deploy/k8s/one-certificate.js';
 import { gitScrubbedEnv } from '../../../_shared/git-env.js';
 import {
   assertExitWith,
@@ -211,5 +213,89 @@ describe('vibecarbon upgrade', () => {
     const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 60_000 });
     if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
     assertSuccess(r);
+  });
+
+  // The observability add-on as `vibecarbon add` wrote it before one
+  // certificate per name: k8s files that issue grafana-tls for the app
+  // domain, and a compose router that orders its own certificate. Upgrade
+  // walked carbon/ only, so these never moved with the CLI.
+  function installStaleObservability(
+    dir: string,
+    { recordChecksums }: { recordChecksums: boolean },
+  ) {
+    const SVC = join(process.cwd(), 'services', 'observability');
+    const obs = join(dir, 'k8s', 'base', 'observability');
+    mkdirSync(obs, { recursive: true });
+    const stale: Record<string, string> = {
+      'k8s/base/observability/kustomization.yaml': readFileSync(
+        join(SVC, 'k8s', 'kustomization.yaml'),
+        'utf-8',
+      ).replace('  - ingressroute.yaml', '  - grafana-tls-certificate.yaml\n  - ingressroute.yaml'),
+      'k8s/base/observability/ingressroute.yaml': readFileSync(
+        join(SVC, 'k8s', 'ingressroute.yaml'),
+        'utf-8',
+      ).replace('  tls: {}', '  tls:\n    secretName: grafana-tls'),
+      'k8s/base/observability/grafana-tls-certificate.yaml':
+        'apiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: grafana-tls\n',
+      'docker-compose.observability.prod.yml': readFileSync(
+        join(SVC, 'compose', 'docker-compose.prod.yml'),
+        'utf-8',
+      ).replace(
+        '"traefik.http.routers.grafana.tls=true"',
+        '"traefik.http.routers.grafana.tls.certresolver=letsencrypt"',
+      ),
+    };
+    for (const [rel, text] of Object.entries(stale)) writeFileSync(join(dir, rel), text);
+    const configPath = join(dir, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    config.services = { ...(config.services ?? {}), observability: { version: '1.0.0' } };
+    if (recordChecksums) {
+      config.fileChecksums = {
+        ...(config.fileChecksums ?? {}),
+        ...Object.fromEntries(Object.entries(stale).map(([rel, t]) => [rel, hashContent(t)])),
+      };
+    }
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    return SVC;
+  }
+
+  it("refreshes an installed add-on's k8s and compose files from the bundled add-on", () => {
+    const SVC = installStaleObservability(project, { recordChecksums: true });
+    expect(staleObservabilityTlsProblem(project)).not.toBeNull();
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    for (const [rel, src] of [
+      ['k8s/base/observability/kustomization.yaml', 'k8s/kustomization.yaml'],
+      ['k8s/base/observability/ingressroute.yaml', 'k8s/ingressroute.yaml'],
+      ['docker-compose.observability.prod.yml', 'compose/docker-compose.prod.yml'],
+    ]) {
+      expect(readFileSync(join(project, rel), 'utf-8'), rel).toBe(
+        readFileSync(join(SVC, src), 'utf-8'),
+      );
+    }
+    expect(staleObservabilityTlsProblem(project)).toBeNull();
+    // Recorded, so the next upgrade can tell an unmodified add-on file.
+    const after = JSON.parse(readFileSync(join(project, '.vibecarbon.json'), 'utf-8'));
+    expect(after.fileChecksums['k8s/base/observability/ingressroute.yaml']).toBe(
+      hashContent(readFileSync(join(SVC, 'k8s', 'ingressroute.yaml'), 'utf-8')),
+    );
+  });
+
+  it('an add-on file with no recorded checksum is offered for review, never overwritten by -y', () => {
+    const SVC = installStaleObservability(project, { recordChecksums: false });
+    const ingress = join(project, 'k8s', 'base', 'observability', 'ingressroute.yaml');
+    const before = readFileSync(ingress, 'utf-8');
+
+    const r = runCli('upgrade', ['-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    expect(readFileSync(ingress, 'utf-8')).toBe(before);
+    expect(readFileSync(`${ingress}.upgrade-new`, 'utf-8')).toBe(
+      readFileSync(join(SVC, 'k8s', 'ingressroute.yaml'), 'utf-8'),
+    );
   });
 });
