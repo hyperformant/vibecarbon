@@ -100,6 +100,47 @@ describe('deltaWorkRoot: a private per-user directory', () => {
   });
 });
 
+describe('deltaWorkRoot: every refusal says what to do', () => {
+  const remedy = (root: string) =>
+    `remove ${root}, or set TMPDIR to a private directory, then run the command again`;
+
+  it('wrong mode, a symlink, or a foreign owner each name the remedy, with no em dash', () => {
+    const cases: Array<() => void> = [];
+    {
+      const { base, root } = makeRoot();
+      chmodSync(root, 0o755);
+      cases.push(() => {
+        try {
+          deltaWorkRoot({ base });
+        } catch (err) {
+          expect((err as Error).message).toContain(remedy(root));
+          expect((err as Error).message).not.toContain('\u2014');
+          return;
+        }
+        throw new Error('not refused');
+      });
+    }
+    {
+      const base = mkdtempSync(join(tmpdir(), 'delta-sweep-'));
+      bases.push(base);
+      const elsewhere = join(base, 'elsewhere');
+      mkdirSync(elsewhere, { mode: 0o700 });
+      const root = join(base, `vibecarbon-${UID}`);
+      symlinkSync(elsewhere, root);
+      cases.push(() => expect(() => deltaWorkRoot({ base })).toThrow(remedy(root)));
+    }
+    {
+      const { base, root } = makeRoot();
+      const lstat = (p: string) => {
+        const st = lstatSync(p);
+        return p === root ? Object.assign(Object.create(st), { uid: UID + 1 }) : st;
+      };
+      cases.push(() => expect(() => deltaWorkRoot({ base, lstat })).toThrow(remedy(root)));
+    }
+    for (const c of cases) c();
+  });
+});
+
 describe('sweepStaleDeltaDirs', () => {
   it('removes a dir whose owner process is dead, however young', () => {
     const { base, root } = makeRoot();

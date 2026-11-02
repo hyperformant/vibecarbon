@@ -376,15 +376,20 @@ export function deltaWorkRoot({ base = tmpdir(), lstat = lstatSync } = {}) {
   const root = join(base, `vibecarbon-${uid ?? 'user'}`);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const st = lstat(root);
+  // Never repaired in place: someone else may have made it. The operator
+  // removes it (it is recreated private) or points TMPDIR elsewhere.
+  const remedy = `remove ${root}, or set TMPDIR to a private directory, then run the command again`;
   if (!st.isDirectory() || st.isSymbolicLink()) {
-    throw new Error(`${root} is not a real directory, so it is not used for image work dirs`);
+    throw new Error(
+      `${root} is not a real directory, so image work dirs cannot go there. ${remedy}`,
+    );
   }
   if (uid !== null && st.uid !== uid) {
-    throw new Error(`${root} is owned by uid ${st.uid}, not ${uid}, so it is not used`);
+    throw new Error(`${root} is owned by uid ${st.uid}, not ${uid}, so it is not used. ${remedy}`);
   }
   if ((st.mode & 0o077) !== 0) {
     throw new Error(
-      `${root} has mode ${(st.mode & 0o777).toString(8)}; it must be 0700. Fix it with: chmod 700 ${root}`,
+      `${root} has mode ${(st.mode & 0o777).toString(8)}, not 0700, so it is not used. ${remedy}`,
     );
   }
   return root;
