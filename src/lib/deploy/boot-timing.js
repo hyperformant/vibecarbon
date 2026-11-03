@@ -343,6 +343,26 @@ export async function collectBootTiming({
   }
 }
 
+/**
+ * Collect several freshly provisioned nodes' boot timing in parallel. Callers
+ * start it right after the nodes' ready wait and do not await it: the db and
+ * worker nodes may still be finishing cloud-init when the master turns ready,
+ * and the remote script waits (bounded) for that off the critical path.
+ * Nodes without an address are skipped. Never rejects.
+ *
+ * @param {{ ip?: string|null, prefix: string }[]} nodes
+ * @param {string} sshKeyPath
+ * @param {Partial<Parameters<typeof collectBootTiming>[0]>} [deps]  test seams
+ * @returns {Promise<void>}
+ */
+export async function startBootTiming(nodes, sshKeyPath, deps = {}) {
+  await Promise.all(
+    nodes
+      .filter((n) => n.ip)
+      .map((n) => collectBootTiming({ ...deps, ip: String(n.ip), sshKeyPath, prefix: n.prefix })),
+  );
+}
+
 /** Seconds (float) -> whole ms. */
 function toMs(seconds) {
   return Math.round(seconds * 1000);

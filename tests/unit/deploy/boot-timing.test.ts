@@ -23,6 +23,7 @@ import {
   parseBootMarkers,
   parseBootReport,
   parseSystemdAnalyze,
+  startBootTiming,
   summarizeBootTiming,
 } from '../../../src/lib/deploy/boot-timing.js';
 
@@ -451,5 +452,31 @@ describe('collectBootTiming', () => {
       warn,
     });
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('startBootTiming', () => {
+  it('collects every node with an address in parallel and never rejects', async () => {
+    const seen: string[] = [];
+    const run = vi.fn(async (ip: string) => {
+      seen.push(ip);
+      if (ip === '10.0.0.2') throw new Error('unreachable');
+      return '==> skip <==\nalready-reported';
+    });
+    const warn = vi.fn();
+    await expect(
+      startBootTiming(
+        [
+          { ip: '10.0.0.1', prefix: 'k3s.master' },
+          { ip: '10.0.0.2', prefix: 'k3s.db' },
+          { ip: undefined, prefix: 'k3s.worker1' },
+        ],
+        '/k',
+        { enabled: true, run, warn },
+      ),
+    ).resolves.toBeUndefined();
+    expect(seen.sort()).toEqual(['10.0.0.1', '10.0.0.2']);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('k3s.db');
   });
 });

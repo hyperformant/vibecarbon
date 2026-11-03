@@ -41,6 +41,7 @@ import { providerFor, providerIdFor } from '../../providers/index.js';
 import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
+import { startBootTiming } from '../boot-timing.js';
 import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
@@ -500,6 +501,16 @@ async function haSetupServers(ctx) {
       setupServer(primary.ip, sshKeyPath, timeoutMs),
       setupServer(standby.ip, sshKeyPath, timeoutMs),
     ]),
+  );
+  // First-boot timing (`[perf] deploy.ha.compose.<role>.boot.*`,
+  // VIBECARBON_PERF only): what the wait above spent inside each server's
+  // cloud-init. Not awaited and never fails the deploy.
+  void startBootTiming(
+    [
+      { ip: primary.ip, prefix: 'ha.compose.primary' },
+      { ip: standby.ip, prefix: 'ha.compose.standby' },
+    ],
+    sshKeyPath,
   );
 }
 
