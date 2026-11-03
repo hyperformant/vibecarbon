@@ -657,16 +657,17 @@ export function standbyKubectlCommand(argv) {
  *   - A db pod without the in-place wrapper after this deploy's apply is a
  *     rollout problem, not "redeploy" (the deploy is what just ran; R12).
  *   - Unless the swap ran, the standby keeps its old data directory. When the
- *     guard did not see it in recovery it ran as its own primary: a retired
- *     old primary whose inactive replication slots the retired fence could
- *     not drop (it was unreachable) keeps them, retaining WAL, until a reseed
- *     wipes that directory. Say so.
+ *     guard counted replication slots in it (a retired old primary whose
+ *     inactive slots the retired fence could not drop, because it was
+ *     unreachable), they keep retaining WAL until a reseed wipes that
+ *     directory. Say so; a standby with no slots (a fresh cluster) gets no
+ *     such note.
  *
  * @param {unknown} error
- * @param {{guardInRecovery: string|null}} o the guard's in_recovery reading (null: no guard verdict)
+ * @param {{slotCount: number|null}} o the guard's slot count (null: no guard verdict, or unread)
  * @returns {Error}
  */
-export function coldReseedError(error, { guardInRecovery }) {
+export function coldReseedError(error, { slotCount }) {
   if (error?.reseedSwapped) return error;
   let message = String(error?.message ?? error);
   if (error instanceof DbGuardMissingError) {
@@ -674,13 +675,72 @@ export function coldReseedError(error, { guardInRecovery }) {
       "the standby db pod is not running the db-guard wrapper after this deploy's apply; " +
       `check the db rollout (${error.reason ?? message})`;
   }
-  if (guardInRecovery !== 't') {
+  if (Number.isInteger(slotCount) && slotCount > 0) {
     message +=
-      ' The standby kept its old data directory. It was not proven in recovery, so if it is a ' +
-      'retired old primary it may still hold replication slots that retain WAL on its disk: they go ' +
-      'only when a reseed wipes that directory. Fix the cause above, then rerun `vibecarbon deploy`.';
+      ' The standby kept its old data directory, so it may still hold replication slots that ' +
+      `retain WAL on its disk (it held ${slotCount}, as a retired old primary does): they go only ` +
+      'when a reseed wipes that directory. Fix the cause above, then rerun `vibecarbon deploy`.';
   }
   return new Error(message, { cause: error });
+}
+
+/** The standby looks promoted outside vibecarbon: the cold reseed would overwrite a live primary. */
+export class StandbyPromotedOutsideError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'StandbyPromotedOutsideError';
+  }
+}
+
+/**
+ * Pure. The cold reseed wipes the standby's data directory, which is right
+ * for a fresh cluster (its own initdb: another system identifier) and for a
+ * retired old primary (the same identifier on a LOWER timeline than the
+ * primary, which was promoted past it). It is wrong for a standby promoted
+ * outside the CLI whose intent still says standby: the same identifier on a
+ * HIGHER timeline than the configured primary, serving writes the primary
+ * never saw. Refuse that, before anything is staged or stopped.
+ *
+ * A target in recovery is a standby, whatever its timeline. A target outside
+ * recovery whose lineage cannot be read is not reseeded blind.
+ *
+ * @param {object} o
+ * @param {{inRecovery?: string, systemIdentifier?: string|null, timeline?: number|null}} o.target the guard's readings
+ * @param {{systemIdentifier?: string|null, timeline?: number|null}} o.source prepareReseedSource's readings
+ * @param {string} o.standbyIp
+ * @param {string} o.primaryIp
+ * @param {string} [o.envName]
+ */
+export function assertStandbyNotPromotedOutside({ target, source, standbyIp, primaryIp, envName }) {
+  if (target?.inRecovery === 't') return;
+  const env = envName || '<env>';
+  if (!target?.systemIdentifier || !Number.isInteger(target?.timeline)) {
+    throw new StandbyPromotedOutsideError(
+      `reseed refused: the standby ${standbyIp} is not in recovery and its system identifier and ` +
+        'timeline could not be read, so it cannot be told apart from a primary promoted outside ' +
+        'vibecarbon. Nothing was staged or stopped. Check that its db answers ' +
+        `(kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -c 'SELECT 1'), ` +
+        `then rerun \`vibecarbon deploy ${env}\`.`,
+    );
+  }
+  if (!source?.systemIdentifier || !Number.isInteger(source?.timeline)) {
+    throw new StandbyPromotedOutsideError(
+      `reseed refused: the primary ${primaryIp}'s system identifier and timeline could not be read, ` +
+        `so the standby ${standbyIp} (not in recovery) cannot be proven safe to overwrite. Nothing was ` +
+        `staged or stopped. Rerun \`vibecarbon deploy ${env}\` once the primary's db answers.`,
+    );
+  }
+  if (target.systemIdentifier !== source.systemIdentifier) return; // a fresh initdb
+  if (target.timeline <= source.timeline) return; // a retired old primary
+  throw new StandbyPromotedOutsideError(
+    `reseed refused: the standby ${standbyIp} looks promoted outside vibecarbon. It is not in ` +
+      `recovery and runs timeline ${target.timeline} of the same database (system identifier ` +
+      `${target.systemIdentifier}) as the configured primary ${primaryIp}, which is on timeline ` +
+      `${source.timeline}: it has taken writes the primary never saw, and reseeding it would ` +
+      'overwrite them. Nothing was staged or stopped. If it should be the primary, adopt it with ' +
+      `\`vibecarbon failover ${env}\`; otherwise decide by hand which copy to keep (back it up ` +
+      `first), then rerun \`vibecarbon deploy ${env}\`.`,
+  );
 }
 
 /** The db pod's uid and its db container's restartCount, for the reseed log line. */
@@ -928,11 +988,11 @@ export async function setupReplication(options) {
   // entire reseed. 12 × 10s ≈ 2 min, each attempt logged in-script.
   const PROBE_ATTEMPTS = 12;
   const PROBE_DELAY_S = 10;
-  // What the guard saw: a standby not proven in recovery ran as its own
-  // primary (a fresh cluster's initdb, or a retired old primary the deploy's
-  // retired fence could not reach, whose inactive replication slots were
-  // never dropped). Only the swap's wipe of its data directory clears those.
-  let guardInRecovery = null;
+  // What the guard read on the standby: its recovery state, its replication
+  // slots (a retired old primary the deploy's retired fence could not reach
+  // keeps its inactive slots; only the swap's wipe of its data directory
+  // clears them) and its lineage (system identifier, timeline).
+  let guard = null;
   let result;
   try {
     result = await perfAsync('deploy.ha.replication.reseed.inPlace', () =>
@@ -941,10 +1001,22 @@ export async function setupReplication(options) {
         envName: options.envName,
         // This standby runs as its own primary until the swap, by design.
         requireRecovery: false,
-        onGuard: (guard) => {
-          guardInRecovery = guard.inRecovery;
+        onGuard: (verdict) => {
+          guard = verdict;
         },
-        beforeStage: () => prepareReseedSource(primaryKubectl, { envName: options.envName }),
+        // The source's checks, then the lineage comparison, before the stage:
+        // a standby promoted outside the CLI is never overwritten.
+        beforeStage: async () => {
+          const source = await prepareReseedSource(primaryKubectl, { envName: options.envName });
+          assertStandbyNotPromotedOutside({
+            target: guard,
+            source,
+            standbyIp,
+            primaryIp,
+            envName: options.envName,
+          });
+          return source;
+        },
         stageProbeS: inPlaceProbeBudgetS(PROBE_ATTEMPTS, PROBE_DELAY_S),
         stageScript: (attempt, { basebackupDeadlineS }) =>
           buildInPlaceReseedStageScript({
@@ -960,7 +1032,7 @@ export async function setupReplication(options) {
       }),
     );
   } catch (error) {
-    throw coldReseedError(error, { guardInRecovery });
+    throw coldReseedError(error, { slotCount: guard?.slotCount ?? null });
   }
 
   // RESEED_SKIPPED is LOUD here: the deploy hard-gates on streaming, so a
@@ -977,7 +1049,7 @@ export async function setupReplication(options) {
           `standby keeps its independent postgres. Check the repl-gateway pods and the ` +
           `WireGuard tunnel (wg show) on both database nodes.`,
       ),
-      { guardInRecovery },
+      { slotCount: guard?.slotCount ?? null },
     );
   }
 

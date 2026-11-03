@@ -56,6 +56,14 @@ const INTENT_ENV = {
 };
 /** DB_GUARD_MARKER_GREP's output on a guarded standby: the count, then recovery. */
 const OUT = '1\nin_recovery=t';
+/** A passed guard's readings beyond the pod: nothing read but recovery. */
+const READ = (inRecovery: string) => ({
+  ...GUARD,
+  inRecovery,
+  slotCount: null,
+  systemIdentifier: null,
+  timeline: null,
+});
 
 const pod = (
   o: Partial<{
@@ -113,7 +121,7 @@ describe('the wrapper the guard looks for is the one the template ships', () => 
 
 describe('evaluateDbGuardSupport', () => {
   it('ok only with the wrapper command, the protocol marker in the mounted file, and a standby intent', () => {
-    expect(evaluateDbGuardSupport(pod(), OUT, 'standby')).toEqual({ ...GUARD, inRecovery: 't' });
+    expect(evaluateDbGuardSupport(pod(), OUT, 'standby')).toEqual(READ('t'));
     expect(evaluateDbGuardSupport(pod({ command: null }), OUT, 'standby')).toMatchObject({
       ok: false,
       reason: expect.stringMatching(/command/),
@@ -177,10 +185,9 @@ describe('evaluateDbGuardSupport', () => {
       ['1', ''],
       ['1\nin_recovery=t', 't'],
     ]) {
-      expect(evaluateDbGuardSupport(pod(), out, 'standby', { requireRecovery: false })).toEqual({
-        ...GUARD,
-        inRecovery,
-      });
+      expect(evaluateDbGuardSupport(pod(), out, 'standby', { requireRecovery: false })).toEqual(
+        READ(inRecovery),
+      );
     }
     // Everything else still refuses: the marker, the intent, the mounts.
     expect(
@@ -194,6 +201,28 @@ describe('evaluateDbGuardSupport', () => {
         requireRecovery: false,
       }),
     ).toMatchObject({ ok: false, missing: true });
+  });
+
+  it('reads the slot count and the lineage the guard exec prints (the cold deploy compares them)', () => {
+    const out = '1\nin_recovery=f\nslots=2\nident=7412345678901234567|0000000A';
+    expect(evaluateDbGuardSupport(pod(), out, 'standby', { requireRecovery: false })).toEqual({
+      ...GUARD,
+      inRecovery: 'f',
+      slotCount: 2,
+      systemIdentifier: '7412345678901234567',
+      timeline: 10,
+    });
+    // In recovery there is no current WAL file: the timeline is unread.
+    expect(
+      evaluateDbGuardSupport(
+        pod(),
+        '1\nin_recovery=t\nslots=0\nident=7412345678901234567|',
+        'standby',
+      ),
+    ).toEqual({ ...READ('t'), slotCount: 0, systemIdentifier: '7412345678901234567' });
+    expect(DB_GUARD_MARKER_GREP[2]).toContain('SELECT count(*) FROM pg_replication_slots');
+    expect(DB_GUARD_MARKER_GREP[2]).toContain('pg_walfile_name(pg_current_wal_lsn())');
+    expect(DB_GUARD_MARKER_GREP[2]).toContain('FROM pg_control_system()');
   });
 
   it('an unanswered recovery read says it could not confirm recovery, never "not in recovery"', () => {
@@ -242,10 +271,9 @@ describe('assertLiveDbGuardSupportsReseed', () => {
 
   it('reads the running pod, the intent ConfigMap, then greps the mounted wrapper; returns the guard', async () => {
     const { kubectl, argvs } = stub();
-    await expect(assertLiveDbGuardSupportsReseed(kubectl, { envName: 'prod' })).resolves.toEqual({
-      ...GUARD,
-      inRecovery: 't',
-    });
+    await expect(assertLiveDbGuardSupportsReseed(kubectl, { envName: 'prod' })).resolves.toEqual(
+      READ('t'),
+    );
     expect(argvs).toEqual([
       ['-n', 'vibecarbon', 'get', 'pod', 'db-0', '-o', 'json'],
       [
@@ -675,13 +703,41 @@ describe('the guard and stop scripts, executed under sh', () => {
     );
   });
 
+  it('the guard exec, run under sh, prints the slot count and the lineage each psql query returns', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-guard-'));
+    const guardFile = join(dir, 'db-guard.sh');
+    writeFileSync(guardFile, `#!/bin/sh\n${DB_GUARD_PROTOCOL_MARKER}\n`);
+    // psql answers by the query it was given ($4 after -U postgres -tAc).
+    writeFileSync(
+      join(dir, 'psql'),
+      '#!/bin/sh\ncase "$4" in\n  *pg_replication_slots*) echo 3 ;;\n' +
+        '  *pg_control_system*) echo "7412345678901234567|00000002" ;;\n  *) echo f ;;\nesac\n',
+    );
+    chmodSync(join(dir, 'psql'), 0o755);
+    const r = spawnSync(
+      'sh',
+      ['-c', DB_GUARD_MARKER_GREP[2].replaceAll('/usr/local/bin/db-guard.sh', guardFile)],
+      {
+        encoding: 'utf-8',
+        env: { PATH: `${dir}:${process.env.PATH}` },
+      },
+    );
+    expect(r.stdout).toBe('1\nin_recovery=f\nslots=3\nident=7412345678901234567|00000002\n');
+    expect(evaluateDbGuardSupport(pod(), r.stdout, 'standby', { requireRecovery: false })).toEqual({
+      ...GUARD,
+      inRecovery: 'f',
+      slotCount: 3,
+      systemIdentifier: '7412345678901234567',
+      timeline: 2,
+    });
+  });
+
   it("the guard probe's real output is what evaluateDbGuardSupport accepts or refuses", () => {
     const out = (o: { marker: boolean | null; recovery: string }) =>
       run(DB_GUARD_MARKER_GREP[2], o).stdout;
-    expect(evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 't' }), 'standby')).toEqual({
-      ...GUARD,
-      inRecovery: 't',
-    });
+    expect(evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 't' }), 'standby')).toEqual(
+      READ('t'),
+    );
     expect(
       evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 'f' }), 'standby'),
     ).toMatchObject({ ok: false, reason: expect.stringMatching(/not in recovery/) });

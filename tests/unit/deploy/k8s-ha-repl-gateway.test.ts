@@ -92,8 +92,23 @@ const STS_JSON = JSON.stringify({
 const flat = (argv: string[]) =>
   (Array.isArray(argv) ? argv.join(' ') : String(argv)).replace(/'\\''/g, "'").replace(/'/g, '');
 
+/** The source primary's database: one lineage, promoted once (timeline 2). */
+const SOURCE_SYSID = '7412345678901234567';
+const SOURCE_ROW = `1048576|${SOURCE_SYSID}|00000002`;
+/** What the guard exec prints on the standby (DB_GUARD_MARKER_GREP). */
+const guardOut = (o: { recovery: string; slots: number; ident: string }) =>
+  `1\nin_recovery=${o.recovery}\nslots=${o.slots}\nident=${o.ident}`;
+/** A fresh standby cluster: its own initdb (another system identifier), no slots. */
+const FRESH = guardOut({ recovery: 'f', slots: 0, ident: '7000000000000000001|00000001' });
+/** A retired old primary: the same database on an older timeline, with its slots. */
+const RETIRED = guardOut({ recovery: 'f', slots: 2, ident: `${SOURCE_SYSID}|00000001` });
+/** A standby promoted outside vibecarbon: the same database on a NEWER timeline. */
+const PROMOTED_OUTSIDE = guardOut({ recovery: 'f', slots: 0, ident: `${SOURCE_SYSID}|00000003` });
+
 type InPlaceOverrides = {
-  /** The guard's marker grep: the count line, then in_recovery=<t|f|>. */
+  /** The source primary's size and lineage row (`<bytes>|<sysid>|<timeline>`). */
+  sourceRow?: string;
+  /** The guard's exec output: the marker count, in_recovery, slots, ident. */
   markerGrep?: string;
   /** The standby cluster's intent ConfigMap. */
   intent?: string;
@@ -130,7 +145,7 @@ function inPlaceExec(o: InPlaceOverrides = {}) {
       return target === 'root@1.1.1.1' ? (o.primaryIntent ?? 'primary') : (o.intent ?? 'standby');
     }
     if (cmd.includes('vc-reseed-protocol') && cmd.includes('grep -c')) {
-      return o.markerGrep ?? '1\nin_recovery=f';
+      return o.markerGrep ?? FRESH;
     }
     if (cmd.includes('get pod db-0') && cmd.includes('-o json')) {
       if (!reseeded) return guardPod({ rc: 0, cid: 'c1' });
@@ -138,7 +153,7 @@ function inPlaceExec(o: InPlaceOverrides = {}) {
       return guardPod({ rc: 1, cid: 'c2' });
     }
     if (cmd.includes('.vc-discard') && cmd.includes('VC_DISCARD_GONE')) return 'VC_DISCARD_GONE';
-    if (cmd.includes('pg_database_size')) return '1048576';
+    if (cmd.includes('pg_database_size')) return o.sourceRow ?? SOURCE_ROW;
     if (opts?.input?.includes('.vc-reseed-ready')) {
       attempt = /RESEED_STAGED (\S+)"/.exec(opts.input)?.[1] ?? '';
       if (o.stageError) throw o.stageError;
@@ -610,6 +625,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     );
     // Not the failover/restore hint: this IS the deploy.
     expect(String(err?.message)).not.toMatch(/predates in-place reseeds/);
+    expect(String(err?.message)).not.toMatch(/replication slots/);
     const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
     expect(flatCalls.some((c) => c.includes('kill -INT 1'))).toBe(false);
     expect(flatCalls.some((c) => c.includes('pg_basebackup'))).toBe(false);
@@ -621,7 +637,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     // deploy reseeds it like a fresh standby: the swap replaces its whole
     // data directory (pg_replslot included) and the old tree is removed.
     vi.mocked(runCommandAsync).mockClear();
-    vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ markerGrep: '1\nin_recovery=f' }));
+    vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ markerGrep: RETIRED }));
     const res = await runWithFakeTimers(() => setupReplication(opts));
     expect(res.streaming).toBe(true);
     const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
@@ -638,11 +654,11 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(discard).toBeGreaterThan(proof);
   }, 20000);
 
-  it('a failed reseed of a standby not in recovery says it may still hold replication slots that retain WAL', async () => {
+  it('a failed reseed of a standby holding replication slots says they may still retain WAL', async () => {
     vi.mocked(runCommandAsync).mockClear();
     vi.mocked(runCommandAsync).mockImplementation(
       inPlaceExec({
-        markerGrep: '1\nin_recovery=f',
+        markerGrep: RETIRED,
         stageError: Object.assign(new Error('Command failed: ssh ... exec -i db-0'), {
           stdout: 'pg_basebackup: error: connection refused\n',
           status: 1,
@@ -652,10 +668,75 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     const err = await runWithFakeTimers(() => setupReplication(opts)).catch((e) => e);
     expect(String(err?.message)).toMatch(/Command failed/);
     expect(String(err?.message)).toMatch(
-      /may still hold replication slots that retain WAL[\s\S]*rerun `vibecarbon deploy`/,
+      /may still hold replication slots that retain WAL on its disk \(it held 2[\s\S]*rerun `vibecarbon deploy`/,
     );
     const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
     expect(flatCalls.some((c) => c.includes('kill -INT 1'))).toBe(false);
+  }, 20000);
+
+  it('a failed reseed of a fresh standby (no slots) makes no slot claim', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(
+      inPlaceExec({
+        stageError: Object.assign(new Error('Command failed: ssh ... exec -i db-0'), {
+          stdout: 'pg_basebackup: error: connection refused\n',
+          status: 1,
+        }),
+      }),
+    );
+    const err = await runWithFakeTimers(() => setupReplication(opts)).catch((e) => e);
+    expect(String(err?.message)).toMatch(/Command failed/);
+    expect(String(err?.message)).not.toMatch(/replication slots/);
+  }, 20000);
+
+  it('the lineage check: a fresh initdb (another system identifier) is reseeded', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ markerGrep: FRESH }));
+    expect((await runWithFakeTimers(() => setupReplication(opts))).streaming).toBe(true);
+    const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
+    // The lineage rides the existing reads: the guard exec and the source's size read.
+    const guard = flatCalls.find((c) => c.includes('vc-reseed-protocol') && c.includes('grep -c'));
+    expect(guard).toContain('pg_replication_slots');
+    expect(guard).toContain('pg_control_system()');
+    const sourceRead = flatCalls.find((c) => c.includes('pg_database_size')) ?? '';
+    expect(sourceRead).toContain('root@1.1.1.1');
+    expect(sourceRead).toContain('pg_walfile_name(pg_current_wal_lsn())');
+    expect(flatCalls.filter((c) => c.includes('kill -INT 1'))).toHaveLength(1);
+  }, 20000);
+
+  it('the lineage check: a retired old primary (same database, older timeline) is reseeded', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ markerGrep: RETIRED }));
+    expect((await runWithFakeTimers(() => setupReplication(opts))).streaming).toBe(true);
+    const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
+    expect(flatCalls.filter((c) => c.includes('kill -INT 1'))).toHaveLength(1);
+  }, 20000);
+
+  it('the lineage check: a standby promoted outside vibecarbon (same database, newer timeline) is refused before anything is staged or stopped', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ markerGrep: PROMOTED_OUTSIDE }));
+    const err = await runWithFakeTimers(() => setupReplication(opts)).catch((e) => e);
+    expect(String(err?.message)).toMatch(
+      /standby 2\.2\.2\.2 looks promoted outside vibecarbon[\s\S]*timeline 3[\s\S]*timeline 2[\s\S]*Nothing was staged or stopped[\s\S]*`vibecarbon failover /,
+    );
+    const calls = vi.mocked(runCommandAsync).mock.calls;
+    expect(calls.some(([, o]) => (o as { input?: string })?.input?.includes('pg_basebackup'))).toBe(
+      false,
+    );
+    expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+  }, 20000);
+
+  it('the lineage check: a standby outside recovery whose lineage cannot be read is not reseeded blind', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(
+      inPlaceExec({ markerGrep: guardOut({ recovery: 'f', slots: 0, ident: '' }) }),
+    );
+    const err = await runWithFakeTimers(() => setupReplication(opts)).catch((e) => e);
+    expect(String(err?.message)).toMatch(/system identifier and timeline could not be read/);
+    const calls = vi.mocked(runCommandAsync).mock.calls;
+    expect(calls.some(([, o]) => (o as { input?: string })?.input?.includes('pg_basebackup'))).toBe(
+      false,
+    );
   }, 20000);
 
   it('a failed reseed of a standby proven in recovery makes no slot claim', async () => {

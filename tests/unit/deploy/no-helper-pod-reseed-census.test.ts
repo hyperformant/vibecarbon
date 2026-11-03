@@ -47,10 +47,13 @@ const HELPER_POD_NAMES =
   /vibecarbon-pgdata-swap|PGDATA_SWAP_POD|PGDATA_SWAP_MOUNT_ROOT|swapPgdataViaHelperPod|buildPgdataSwapPodManifest|parsePgdataClaimFromPodJson|waitForPvDetach|deleteStaleDbVolumeAttachments/;
 
 /**
- * A Pod built in JS that mounts a PVC: `kind: 'Pod'` (any quote) with a
- * `persistentVolumeClaim` within the same object literal's reach.
+ * A Pod that mounts a PVC, in any of the three spellings the tree uses: a JS
+ * object (`kind: 'Pod'`), YAML (`kind: Pod`) or JSON (`"kind": "Pod"`), with a
+ * `persistentVolumeClaim` within the same manifest's reach. `Pod` must end the
+ * word, so a PodDisruptionBudget never matches.
  */
-const POD_WITH_PVC = /kind:\s*['"`]Pod['"`][\s\S]{0,1500}?persistentVolumeClaim/;
+const POD_WITH_PVC =
+  /(?:\bkind|["']kind["'])\s*:\s*['"`]?Pod(?![A-Za-z])['"`]?[\s\S]{0,1500}?persistentVolumeClaim/;
 
 /** The unquoted remote kubectl join the reseed closure used to build (C13). */
 const BARE_KUBECTL_JOIN = /\[\s*['"`]kubectl['"`]\s*,\s*\.\.\.\w+\s*\]\.join\(/;
@@ -67,6 +70,25 @@ describe('the helper-pod reseed path stays deleted', () => {
       ),
     ).toBe(true);
     expect(POD_WITH_PVC.test("{ kind: 'StatefulSet', persistentVolumeClaim: {} }")).toBe(false);
+    // YAML, unquoted.
+    expect(
+      POD_WITH_PVC.test(
+        'apiVersion: v1\nkind: Pod\nspec:\n  volumes:\n    - name: p\n      persistentVolumeClaim:\n        claimName: data-db-0\n',
+      ),
+    ).toBe(true);
+    // JSON, quoted keys and values.
+    expect(
+      POD_WITH_PVC.test(
+        '{"apiVersion":"v1","kind": "Pod","spec":{"volumes":[{"name":"p","persistentVolumeClaim":{"claimName":"x"}}]}}',
+      ),
+    ).toBe(true);
+    // Not a Pod: a PodDisruptionBudget, or a StatefulSet's claim template.
+    expect(
+      POD_WITH_PVC.test('kind: PodDisruptionBudget\nspec:\n  persistentVolumeClaim: {}\n'),
+    ).toBe(false);
+    expect(POD_WITH_PVC.test('kind: StatefulSet\nspec:\n  persistentVolumeClaim: {}\n')).toBe(
+      false,
+    );
     expect(BARE_KUBECTL_JOIN.test("['kubectl', ...argv].join(' ')")).toBe(true);
     expect(BARE_KUBECTL_JOIN.test("shJoin(['kubectl', ...argv])")).toBe(false);
   });
@@ -77,8 +99,8 @@ describe('the helper-pod reseed path stays deleted', () => {
     expect(hits, 'helper-pod reseed names in shipped files').toEqual([]);
   });
 
-  it('no code in src builds a Pod that mounts a PersistentVolumeClaim', () => {
-    const hits = walk(join(ROOT, 'src'), ['.js', '.mjs'])
+  it('no shipped code or manifest builds a Pod that mounts a PersistentVolumeClaim', () => {
+    const hits = [...SHIPPED, ...walk(join(ROOT, 'carbon'), ['.json'])]
       .filter((f) => POD_WITH_PVC.test(readFileSync(f, 'utf-8')))
       .map(rel);
     expect(hits, 'a CLI-built Pod mounting a PVC').toEqual([]);

@@ -75,9 +75,10 @@ vi.mock('../../../src/lib/command.js', async (orig) => ({
     if (cmd.includes('configmap vibecarbon-db-role')) {
       return target === 'root@10.1.0.1' ? 'primary' : 'standby';
     }
-    if (cmd.includes('vc-reseed-protocol') && cmd.includes('grep -c')) return '1\nin_recovery=f';
+    if (cmd.includes('vc-reseed-protocol') && cmd.includes('grep -c'))
+      return '1\nin_recovery=f\nslots=0\nident=7000000000000000001|00000001';
     if (cmd.includes('VC_DISCARD_GONE')) return 'VC_DISCARD_GONE';
-    if (cmd.includes('pg_database_size')) return '1048576';
+    if (cmd.includes('pg_database_size')) return '1048576|7412345678901234567|00000001';
     // Stop the run once the basebackup stage has been sent.
     if (opts.input?.includes('pg_basebackup')) throw new Error('stop after stage (test)');
     return '';

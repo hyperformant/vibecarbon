@@ -1348,27 +1348,36 @@ export async function prepareReseedSource(primaryKubectl, { envName } = {}) {
     );
   }
   // What the basebackup will move: it bounds the stage (reseedStageBoundsS).
-  let size = '';
+  // The same read carries the primary's lineage (system identifier, timeline)
+  // for a caller that compares it with the target's (the cold deploy).
+  let row = '';
   try {
-    size = String(
-      await primaryKubectl(dbExecArgv(['psql', '-U', 'postgres', '-tAc', DB_SIZE_SQL]), {
+    row = String(
+      await primaryKubectl(dbExecArgv(['psql', '-U', 'postgres', '-tAc', DB_SOURCE_SQL]), {
         timeout: 30_000,
       }),
     ).trim();
   } catch (error) {
-    size = `unreadable: ${error?.message ?? error}`;
+    row = `unreadable: ${error?.message ?? error}`;
   }
+  const [size, ...identity] = row.split('|');
   if (!/^\d+$/.test(size)) {
     throw new Error(
-      `reseed refused: could not read the primary's database size (${size.slice(0, 120) || 'empty'}), ` +
+      `reseed refused: could not read the primary's database size (${row.slice(0, 120) || 'empty'}), ` +
         'so the stage cannot be bounded. Nothing was staged',
     );
   }
-  return { sizeBytes: Number(size) };
+  return { sizeBytes: Number(size), ...parseDbIdentity(identity.join('|')) };
 }
 
-/** Every database's size on the primary: what pg_basebackup moves, about. */
-const DB_SIZE_SQL = 'SELECT sum(pg_database_size(datname)) FROM pg_database';
+/**
+ * Every database's size on the primary (what pg_basebackup moves, about),
+ * then its lineage (DB_IDENTITY_SQL's columns): `<bytes>|<sysid>|<timeline>`.
+ */
+const DB_SOURCE_SQL =
+  'SELECT (SELECT sum(pg_database_size(datname)) FROM pg_database), system_identifier, ' +
+  'CASE WHEN pg_is_in_recovery() THEN NULL ELSE substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8) END ' +
+  'FROM pg_control_system()';
 
 /** Bytes as MiB or GiB, for messages. */
 function formatBytes(n) {
@@ -1671,6 +1680,37 @@ export class DbGuardMissingError extends Error {
   }
 }
 
+/** The replication slots a db holds (a retired old primary's keep WAL). */
+const REPLICATION_SLOT_COUNT_SQL = 'SELECT count(*) FROM pg_replication_slots';
+
+/**
+ * A db's lineage: `<system identifier>|<timeline, 8 hex>` from psql -tA. The
+ * timeline is the current WAL file's, read only outside recovery (a server in
+ * recovery has no current WAL LSN; it prints `<sysid>|`). No quotes, so it
+ * sits inside a single-quoted shell word.
+ */
+const DB_IDENTITY_SQL =
+  'SELECT system_identifier, CASE WHEN pg_is_in_recovery() THEN NULL ELSE ' +
+  'substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8) END FROM pg_control_system()';
+
+/**
+ * Pure. `<sysid>|<timeline hex>` (DB_IDENTITY_SQL's columns) as
+ * {systemIdentifier, timeline}; a part that does not parse is null.
+ *
+ * @param {string} text
+ * @returns {{systemIdentifier: string|null, timeline: number|null}}
+ */
+export function parseDbIdentity(text) {
+  const [sysid = '', tli = ''] = String(text ?? '')
+    .trim()
+    .split('|')
+    .map((x) => x.trim());
+  return {
+    systemIdentifier: /^\d+$/.test(sysid) ? sysid : null,
+    timeline: /^[0-9A-Fa-f]{8}$/.test(tli) ? Number.parseInt(tli, 16) : null,
+  };
+}
+
 /** `pg_is_in_recovery()` read inside the db container ('' when psql fails). */
 const IN_RECOVERY_SH = `"$(psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>/dev/null)"`;
 
@@ -1684,7 +1724,9 @@ const IN_RECOVERY_SH = `"$(psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>
 export const DB_GUARD_MARKER_GREP = Object.freeze([
   'sh',
   '-c',
-  `grep -c '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || true; printf 'in_recovery=%s\\n' ${IN_RECOVERY_SH}`,
+  `grep -c '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || true; printf 'in_recovery=%s\\n' ${IN_RECOVERY_SH}; ` +
+    `printf 'slots=%s\\n' "$(psql -U postgres -tAc '${REPLICATION_SLOT_COUNT_SQL}' 2>/dev/null)"; ` +
+    `printf 'ident=%s\\n' "$(psql -U postgres -tAc '${DB_IDENTITY_SQL}' 2>/dev/null)"`,
 ]);
 
 /** What the stop prints (stdout, exit STOP_REFUSED_STATUS) when it refuses to signal. */
@@ -1860,7 +1902,13 @@ export function evaluateDbGuardSupport(
     return { ok: false, reason: `the role intent is ${word || '<none>'}, not standby` };
   }
   const recovery = /^in_recovery=(.*)$/m.exec(out)?.[1]?.trim() ?? '';
-  if (!requireRecovery) return { ...verdict, inRecovery: recovery };
+  const slots = /^slots=(.*)$/m.exec(out)?.[1]?.trim() ?? '';
+  const readings = {
+    inRecovery: recovery,
+    slotCount: /^\d+$/.test(slots) ? Number(slots) : null,
+    ...parseDbIdentity(/^ident=(.*)$/m.exec(out)?.[1] ?? ''),
+  };
+  if (!requireRecovery) return { ...verdict, ...readings };
   if (!recovery) {
     // psql did not answer (postgres down or still starting): no verdict.
     return {
@@ -1874,7 +1922,7 @@ export function evaluateDbGuardSupport(
       reason: `postgres in ${DB_POD} is not in recovery (pg_is_in_recovery: ${recovery}); a standby intent over a primary`,
     };
   }
-  return { ...verdict, inRecovery: recovery };
+  return { ...verdict, ...readings };
 }
 
 /**

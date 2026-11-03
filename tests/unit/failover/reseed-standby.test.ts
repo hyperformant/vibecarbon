@@ -528,7 +528,9 @@ describe('reseedStandbyFromPrimary (in place)', () => {
     await expect(
       runReseed(
         async (ip, k, argv, opts) =>
-          argv.join(' ').includes('pg_control_system') ? 'ERROR: x' : base(ip, k, argv, opts),
+          argv.join(' ').includes('SELECT system_identifier FROM pg_control_system')
+            ? 'ERROR: x'
+            : base(ip, k, argv, opts),
         { onSeeded },
       ),
     ).rejects.toThrow(/system identifier could not be read/);
@@ -542,7 +544,7 @@ describe('reseedStandbyFromPrimary (in place)', () => {
       runReseed(
         async (ip, k, argv, opts) => {
           const cmd = argv.join(' ');
-          if (cmd.includes('pg_is_in_recovery') && !cmd.includes('db-guard.sh')) {
+          if (cmd.includes('SELECT pg_is_in_recovery()') && !cmd.includes('db-guard.sh')) {
             throw new Error(
               'Command failed: psql — FATAL: the database system is not accepting ' +
                 'connections\nDETAIL: Hot standby mode is disabled.',
@@ -562,7 +564,8 @@ describe('reseedStandbyFromPrimary (in place)', () => {
       runReseed(
         async (ip, k, argv, opts) => {
           const cmd = argv.join(' ');
-          if (cmd.includes('pg_is_in_recovery') && !cmd.includes('db-guard.sh')) return 'f';
+          if (cmd.includes('SELECT pg_is_in_recovery()') && !cmd.includes('db-guard.sh'))
+            return 'f';
           return base(ip, k, argv, opts);
         },
         { now: () => (t += 60_000) },
