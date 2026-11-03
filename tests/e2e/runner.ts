@@ -997,6 +997,12 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     const isHa = mode.endsWith('-ha');
     let result: ScenarioResult;
 
+    // The scenario's OWN compute provider's token (throws on an unregistered
+    // provider). runLifecycle takes this provider-neutral value, never a
+    // Hetzner token: a DO scenario handed the Hetzner token to the DO DNS API
+    // (401 on dns_flip_verified) before this.
+    const { token: computeToken } = capacityWiringFor(provider);
+
     // Per-scenario live log file. cli-runner reads logPath/echo out of this
     // AsyncLocalStorage context so every subprocess's stdout/stderr is
     // tee'd to ${tempDir}/${provider}-${mode}-${dnsProvider}.log as it
@@ -1016,17 +1022,13 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
 
     try {
       result = await scenarioContext.run(scenarioCtx, () =>
-        runLifecycle(scenarioConfig, scenarioId, db, collector, hetznerToken, {
+        runLifecycle(scenarioConfig, scenarioId, db, collector, computeToken, {
           includeFailover: isHa,
           // Phase 9: only k8s/k8s-ha modes have a verify-autoscale body; the
           // lifecycle gates internally on mode + expanded.
           expanded: isExpanded,
           onStepComplete: isBatch ? undefined : onStepComplete,
           skipSteps: overrides?.skipSteps ?? skipSteps,
-          digitaloceanToken,
-          linodeToken,
-          vultrToken,
-          scalewayToken,
         }),
       );
     } catch (err) {

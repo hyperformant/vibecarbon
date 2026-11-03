@@ -45,17 +45,15 @@ import { runRedisChecks } from '../checks/feature-redis.js';
 import { runFrontendSmokeChecks } from '../checks/frontend-smoke.js';
 import {
   checkAppEndpointsReady,
-  checkDnsFlipVerified,
   checkOldPrimaryDisarmed,
   checkPrimaryDbCreatedOnce,
   checkPrimaryNotRestarted,
   checkSecondFailoverRefused,
   checkSlotCapped,
   type IncarnationRead,
-  providerApiAReader,
   readDbIncarnation,
-  readServingIp,
   readSwappedSinceLastDeploy,
+  verifyDnsFlip,
 } from '../checks/ha-integrity.js';
 import {
   dnsSafeFetch,
@@ -114,6 +112,7 @@ import {
   buildClusterScopedDiagnostics,
   isClusterScopedStep,
 } from '../utils/cluster-diagnostics.js';
+import { hcloudChildEnv } from '../utils/compute-token.js';
 import { type ResolutionPin, withResolutionPin } from '../utils/dns-pin.js';
 import { getE2ELicenseStub } from '../utils/e2e-env.js';
 import { extractDeployFailureDetail } from '../utils/extract-failure-detail.js';
@@ -173,7 +172,8 @@ export interface MetricsCollector {
     domain: string;
     serverIps: string[];
     sshKeyPath: string | null;
-    hetznerToken: string;
+    computeToken: string;
+    provider?: string;
   }): Promise<void>;
   recordVerifications(stepId: string, results: VerificationResult[]): void;
   recordTiming(stepId: string, durationMs: number): void;
@@ -476,39 +476,6 @@ export interface LifecycleOptions {
    * live in the `finally` block, not the step list).
    */
   skipSteps?: Set<string>;
-  /**
-   * DigitalOcean API token, passed as `DIGITALOCEAN_TOKEN` (the env var
-   * `@pulumi/digitalocean` reads — never rename) into the deploy step's
-   * child env alongside `HCLOUD_TOKEN`, but only when `config.provider ===
-   * 'digitalocean'`. Undefined for every release scenario (they never set
-   * `config.provider`), so their deploy env is byte-identical to before.
-   */
-  digitaloceanToken?: string;
-  /**
-   * Linode API token — used by the lifecycle's own API operations
-   * (providerTokenFor: verify-scale type snapshots, firewall ops, the
-   * teardown sweep) when `config.provider === 'linode'`. Deliberately NOT
-   * injected into deploy children (B8-3 contract: buildEnv synthesizes the
-   * provider CLI token env from the project's .env.local, so provider runs
-   * prove the customer path).
-   */
-  linodeToken?: string;
-  /**
-   * Vultr API token — used by the lifecycle's own API operations
-   * (providerTokenFor: verify-scale type snapshots, firewall ops, the
-   * teardown sweep) when `config.provider === 'vultr'`. Same B8-3 contract
-   * as `linodeToken` above: deliberately NOT injected into deploy children.
-   */
-  vultrToken?: string;
-  /**
-   * Scaleway secret key (SCALEWAY_SECRET_KEY) — used by the lifecycle's own API
-   * operations (providerTokenFor: verify-scale type snapshots, firewall
-   * ops, the teardown sweep) when `config.provider === 'scaleway'`. Same
-   * B8-3 contract as its siblings: deliberately NOT injected into deploy
-   * children (buildIacEnv synthesizes the full SCW_* triple from the
-   * project's .env.local, so provider runs prove the customer path).
-   */
-  scalewayToken?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1373,7 +1340,7 @@ export async function runLifecycle(
   scenarioId: string,
   db: E2EDb,
   collector: MetricsCollector,
-  hetznerToken: string,
+  computeToken: string,
   options: LifecycleOptions,
 ): Promise<ScenarioResult> {
   const tag = `[${config.mode}]`;
@@ -1471,21 +1438,14 @@ export async function runLifecycle(
   // borrowing the Hetzner token (the pre-2026-08-07 default-else shape of
   // the two ternaries this replaced).
   const providerTokenFor = (providerId: string): string | undefined => {
-    switch (providerId) {
-      case 'hetzner':
-        return hetznerToken;
-      case 'digitalocean':
-        return options.digitaloceanToken;
-      case 'linode':
-        return options.linodeToken;
-      case 'vultr':
-        return options.vultrToken;
-      case 'scaleway':
-        return options.scalewayToken;
-      default:
-        throw new Error(`no e2e token wiring for provider '${providerId}'`);
+    if (providerId !== (config.provider ?? 'hetzner')) {
+      throw new Error(
+        `no e2e token for provider '${providerId}': a scenario only holds its own compute provider's token ('${config.provider ?? 'hetzner'}')`,
+      );
     }
+    return computeToken;
   };
+  const hcloudEnv = hcloudChildEnv(config.provider ?? 'hetzner', computeToken);
   const typeSnapshotProvider = config.provider ?? 'hetzner';
   const typeSnapshotToken = providerTokenFor(typeSnapshotProvider);
 
@@ -1631,16 +1591,12 @@ export async function runLifecycle(
 
   /** dns_flip_verified against the env's current serving IP, through the DNS provider API. */
   async function runDnsFlipVerified(): Promise<VerificationResult> {
-    const reader = await providerApiAReader(config.projectDir, config.envPrefix, {
-      computeProviderId: config.provider ?? 'hetzner',
-      computeToken: hetznerToken,
-    });
-    return checkDnsFlipVerified({
+    return verifyDnsFlip({
+      projectDir: config.projectDir,
+      envPrefix: config.envPrefix,
       domain: config.domain,
-      expectedIp: readServingIp(config.projectDir, config.envPrefix),
-      readA: reader.readA,
-      readerError: reader.error,
-      skipReason: reader.skipReason,
+      provider: config.provider ?? 'hetzner',
+      computeToken,
     });
   }
 
@@ -2334,7 +2290,8 @@ export async function runLifecycle(
             domain: config.domain,
             serverIps,
             sshKeyPath,
-            hetznerToken,
+            computeToken,
+            provider: config.provider ?? 'hetzner',
           });
         } catch (metricsErr) {
           // Metric collection failure should not fail the verification step
@@ -3325,10 +3282,8 @@ EOF`;
               region: config.region,
               secondaryRegion: config.secondaryRegion,
               provider: config.provider,
-              env: {
-                HCLOUD_TOKEN: hetznerToken,
-                // buildEnv synthesizes the provider CLI token env from the resolved provider (see final review B8-3); deploy children must NOT receive DIGITALOCEAN_TOKEN so DO runs prove the customer path.
-              },
+              // buildEnv synthesizes the provider CLI token env from the resolved provider (see final review B8-3); deploy children must NOT receive DIGITALOCEAN_TOKEN so DO runs prove the customer path.
+              env: hcloudEnv,
               ...expandedDeployBounds,
             });
             if (result.exitCode !== 0) {
@@ -3489,7 +3444,7 @@ EOF`;
                 region: config.region,
                 secondaryRegion: config.secondaryRegion,
                 provider: config.provider,
-                env: { HCLOUD_TOKEN: hetznerToken },
+                env: hcloudEnv,
                 ...expandedDeployBounds,
               });
               if (result.exitCode !== 0) {
@@ -3575,7 +3530,7 @@ EOF`;
               region: config.region,
               secondaryRegion: config.secondaryRegion,
               provider: config.provider,
-              env: { HCLOUD_TOKEN: hetznerToken },
+              env: hcloudEnv,
               ...expandedDeployBounds,
             });
             if (result.exitCode !== 0) {
@@ -3815,7 +3770,7 @@ EOF`;
           const result = await runScale(config.envPrefix, {
             cwd: config.projectDir,
             timeout: TIMEOUTS.scale,
-            env: { HCLOUD_TOKEN: hetznerToken },
+            env: hcloudEnv,
             scaleToType,
           });
           // Stash the scale CLI's output for verify-scale's grep-based fallback.
@@ -4100,7 +4055,7 @@ EOF`;
           const result = await runBackup(config.envPrefix, {
             cwd: config.projectDir,
             timeout: TIMEOUTS.backup,
-            env: { HCLOUD_TOKEN: hetznerToken },
+            env: hcloudEnv,
           });
           if (result.exitCode !== 0) {
             throw new Error(
@@ -4135,7 +4090,7 @@ EOF`;
           const result = await runDestroy(config.envPrefix, {
             cwd: config.projectDir,
             timeout: TIMEOUTS.destroy,
-            env: { HCLOUD_TOKEN: hetznerToken },
+            env: hcloudEnv,
           });
           // Exit 2 = the teardown COMPLETED but leaked (or could not verify a
           // class). That is a real defect and this step fails on it — but the
@@ -4180,7 +4135,7 @@ EOF`;
               secondaryRegion: config.secondaryRegion,
               provider: config.provider,
               restore: 'latest',
-              env: { HCLOUD_TOKEN: hetznerToken },
+              env: hcloudEnv,
               ...expandedDeployBounds,
             });
             if (deployResult.exitCode !== 0) {
@@ -4239,7 +4194,7 @@ EOF`;
             region: config.region,
             secondaryRegion: config.secondaryRegion,
             provider: config.provider,
-            env: { HCLOUD_TOKEN: hetznerToken },
+            env: hcloudEnv,
             ...expandedDeployBounds,
           });
           if (deployResult.exitCode !== 0) {
@@ -4273,7 +4228,7 @@ EOF`;
           const restoreResult = await runRestore(config.envPrefix, pushedBackupName ?? 'latest', {
             cwd: config.projectDir,
             timeout: TIMEOUTS.restore,
-            env: { HCLOUD_TOKEN: hetznerToken },
+            env: hcloudEnv,
           });
           if (restoreResult.exitCode !== 0) {
             const readable = (restoreResult.stdout || '')
@@ -4414,7 +4369,7 @@ EOF`;
             const result = await runFailover(config.envPrefix, {
               cwd: config.projectDir,
               timeout: TIMEOUTS[name],
-              env: { HCLOUD_TOKEN: hetznerToken },
+              env: hcloudEnv,
             });
             if (result.exitCode !== 0) {
               throw new Error(
@@ -4524,7 +4479,7 @@ EOF`;
             const result = await runFailover(config.envPrefix, {
               cwd: config.projectDir,
               timeout: TIMEOUTS['second-failover'],
-              env: { HCLOUD_TOKEN: hetznerToken },
+              env: hcloudEnv,
             });
             const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
             // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
@@ -4657,7 +4612,7 @@ EOF`;
                 region: config.region,
                 secondaryRegion: config.secondaryRegion,
                 provider: config.provider,
-                env: { HCLOUD_TOKEN: hetznerToken },
+                env: hcloudEnv,
                 ...expandedDeployBounds,
               });
               if (result.exitCode !== 0) {
@@ -5065,7 +5020,7 @@ EOF`;
             const result = await runFinalDestroy(config.envPrefix, {
               cwd: config.projectDir,
               timeout: TIMEOUTS['final-destroy'],
-              env: { HCLOUD_TOKEN: hetznerToken },
+              env: hcloudEnv,
             });
             if (result.exitCode === 0) return;
 
@@ -5161,18 +5116,18 @@ EOF`;
       switch (sweepProviderId) {
         case 'hetzner':
           ({ counts: sweepCounts, enumFailed: sweepEnumFailed } =
-            await sweepOrphanedHetznerResources(tag, config.projectName, hetznerToken));
+            await sweepOrphanedHetznerResources(tag, config.projectName, computeToken));
           break;
         case 'digitalocean':
           ({ counts: sweepCounts, enumFailed: sweepEnumFailed } =
             await sweepOrphanedDigitalOceanResources(tag, config.projectName, {
-              token: options.digitaloceanToken ?? process.env.DIGITALOCEAN_API_TOKEN,
+              token: computeToken,
             }));
           break;
         case 'linode':
           ({ counts: sweepCounts, enumFailed: sweepEnumFailed } =
             await sweepOrphanedLinodeResources(tag, config.projectName, {
-              token: options.linodeToken ?? process.env.LINODE_API_TOKEN,
+              token: computeToken,
             }));
           break;
         case 'vultr':
@@ -5184,7 +5139,7 @@ EOF`;
             tag,
             config.projectName,
             {
-              token: options.vultrToken ?? process.env.VULTR_API_TOKEN,
+              token: computeToken,
               storageRegion: process.env.VULTR_STORAGE_REGION,
             },
           ));
@@ -5196,7 +5151,7 @@ EOF`;
           // Project the deploy targets.
           ({ counts: sweepCounts, enumFailed: sweepEnumFailed } =
             await sweepOrphanedScalewayResources(tag, config.projectName, {
-              token: options.scalewayToken ?? process.env.SCALEWAY_SECRET_KEY,
+              token: computeToken,
               storageKey: process.env.SCALEWAY_ACCESS_KEY,
               projectId: process.env.SCALEWAY_DEFAULT_PROJECT_ID,
             }));

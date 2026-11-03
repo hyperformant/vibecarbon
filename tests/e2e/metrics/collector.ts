@@ -185,9 +185,20 @@ export class MetricsCollector {
   async recordCost(
     stepId: string,
     serverIps: string[],
-    hetznerToken: string,
+    computeToken: string,
+    provider = 'hetzner',
   ): Promise<CostSnapshot | null> {
     if (serverIps.length === 0) return null;
+    // The pricing table below is Hetzner's, and the IP -> type lookup would
+    // send computeToken to the provider's own API. Pricing another provider's
+    // servers from a Hetzner table is wrong, so skip with a visible line
+    // rather than query (or mis-price) a cloud we have no price list for.
+    if (provider !== 'hetzner') {
+      console.log(
+        `[metrics-collector] cost snapshot skipped: no pricing table for provider '${provider}'`,
+      );
+      return null;
+    }
 
     try {
       // Resolve IP → server-type via the shared, PAGINATED snapshot helper
@@ -210,7 +221,7 @@ export class MetricsCollector {
       const { fetchServerTypes } = await import('../utils/server-types.js');
       const ipToType = new Map(
         Object.entries(
-          await fetchServerTypes(serverIps, hetznerToken, { tag: '[metrics-collector]' }),
+          await fetchServerTypes(serverIps, computeToken, { provider, tag: '[metrics-collector]' }),
         ),
       );
 
@@ -329,7 +340,10 @@ export class MetricsCollector {
     domain: string;
     serverIps: string[];
     sshKeyPath: string;
-    hetznerToken: string;
+    /** The scenario's own compute provider's token (never another provider's). */
+    computeToken: string;
+    /** The scenario's compute provider; cost is only priced for Hetzner today. */
+    provider?: string;
   }): Promise<void> {
     // Timing is synchronous — record it immediately
     this.recordTiming(params.stepId, params.durationMs);
@@ -338,7 +352,7 @@ export class MetricsCollector {
     await Promise.allSettled([
       this.recordHealthLatencies(params.stepId, params.domain),
       this.recordResourceUtilization(params.stepId, params.serverIps, params.sshKeyPath),
-      this.recordCost(params.stepId, params.serverIps, params.hetznerToken),
+      this.recordCost(params.stepId, params.serverIps, params.computeToken, params.provider),
     ]);
   }
 }
