@@ -17,6 +17,9 @@ export const CODE = 1;
 export const STRING = 2;
 export const COMMENT = 0;
 
+const OPEN: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
+const CLOSE = new Set([')', ']', '}']);
+
 const REGEX_PREV = new Set('(,=:[!&|?{};+-*%<>~^'.split(''));
 const REGEX_KEYWORDS = /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|void|yield|await)$/;
 
@@ -25,6 +28,20 @@ const REGEX_KEYWORDS = /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|void|yie
  * delimiters included) or COMMENT. Template `${...}` bodies are CODE.
  */
 export function lexMask(text: string): Uint8Array {
+  return lex(text).mask;
+}
+
+/** 1-based line of an offset. */
+const lineOf = (text: string, at: number) => text.slice(0, at).split('\n').length;
+
+/**
+ * lexMask plus what went wrong: a string or regex that runs into a newline, a
+ * comment or template that runs into the end, and code brackets that do not
+ * balance. A source that lexes with errors cannot be scanned soundly: a
+ * misread regex can hide a call inside "regex text" or unbalance a bracket.
+ */
+export function lex(text: string): { mask: Uint8Array; errors: string[] } {
+  const errors: string[] = [];
   const mask = new Uint8Array(text.length).fill(CODE);
   // Each frame is a template literal waiting for its closing backtick; `depth`
   // counts the braces opened inside its current `${...}` interpolation.
@@ -68,16 +85,19 @@ export function lexMask(text: string): Uint8Array {
     }
     if (c === '/' && text[i + 1] === '*') {
       const end = text.indexOf('*/', i + 2);
+      if (end === -1) errors.push(`unterminated comment at line ${lineOf(text, i)}`);
       const stop = end === -1 ? n : end + 2;
       while (i < stop) mask[i++] = COMMENT;
       continue;
     }
     if (c === "'" || c === '"') {
+      const from = i;
       mask[i++] = STRING;
       while (i < n && text[i] !== c && text[i] !== '\n') {
         if (text[i] === '\\') mask[i++] = STRING;
         if (i < n) mask[i++] = STRING;
       }
+      if (i >= n || text[i] !== c) errors.push(`unterminated string at line ${lineOf(text, from)}`);
       if (i < n) mask[i++] = STRING;
       lastSignificant = c;
       continue;
@@ -94,8 +114,10 @@ export function lexMask(text: string): Uint8Array {
         REGEX_PREV.has(lastSignificant) ||
         REGEX_KEYWORDS.test(lastWordEnd))
     ) {
+      const from = i;
       mask[i++] = STRING;
       let inClass = false;
+      let closed = false;
       while (i < n && text[i] !== '\n') {
         const r = text[i];
         mask[i++] = STRING;
@@ -105,10 +127,16 @@ export function lexMask(text: string): Uint8Array {
         }
         if (r === '[') inClass = true;
         else if (r === ']') inClass = false;
-        else if (r === '/' && !inClass) break;
+        else if (r === '/' && !inClass) {
+          closed = true;
+          break;
+        }
       }
+      if (!closed) errors.push(`unterminated regex at line ${lineOf(text, from)}`);
       while (i < n && /[a-z]/.test(text[i])) mask[i++] = STRING;
-      lastSignificant = '/';
+      // a regex literal is a value: a `/` after it divides
+      lastSignificant = ')';
+      lastWordEnd = '';
       continue;
     }
     if (templates.length > 0 && !inTemplateText) {
@@ -130,11 +158,27 @@ export function lexMask(text: string): Uint8Array {
     }
     i += 1;
   }
-  return mask;
+  if (templates.length > 0) errors.push('unterminated template literal at end of file');
+  const stack: number[] = [];
+  for (let j = 0; j < n; j++) {
+    if (mask[j] !== CODE) continue;
+    const ch = text[j];
+    if (ch === '(' || ch === '[' || ch === '{') stack.push(j);
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      const open = stack.pop();
+      if (open === undefined || OPEN[text[open]] !== ch) {
+        errors.push(`unbalanced ${ch} at line ${lineOf(text, j)}`);
+        break;
+      }
+    }
+  }
+  if (errors.length === 0 && stack.length > 0) {
+    errors.push(
+      `unclosed ${text[stack[stack.length - 1]]} at line ${lineOf(text, stack[stack.length - 1])}`,
+    );
+  }
+  return { mask, errors };
 }
-
-const OPEN: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
-const CLOSE = new Set([')', ']', '}']);
 
 /** Index of the bracket that closes the one at `open` (code characters only), or -1. */
 export function matchBracket(text: string, mask: Uint8Array, open: number): number {
@@ -240,9 +284,13 @@ export interface CallSite {
 /**
  * Every call of one of `names` in code (not in a comment or string text; a
  * `${...}` interpolation is code). A declaration `function name(` is not a call.
+ * Throws when the source does not lex cleanly or a call never closes: a census
+ * must fail loudly, never drop a call it could not read.
  */
 export function findCalls(text: string, names: readonly string[]): CallSite[] {
-  const mask = lexMask(text);
+  const { mask, errors } = lex(text);
+  // Fail closed: a source the lexer misreads could hide a call.
+  if (errors.length > 0) throw new Error(`js-call-scan: cannot scan soundly: ${errors[0]}`);
   const ranges = functionRanges(text, mask);
   const re = new RegExp(`(?<![\\w$.])(${names.join('|')})\\s*\\(`, 'g');
   const out: CallSite[] = [];
@@ -252,7 +300,9 @@ export function findCalls(text: string, names: readonly string[]): CallSite[] {
     if (/\bfunction\s*\*?\s*$/.test(text.slice(Math.max(0, at - 20), at))) continue;
     const paren = at + m[0].length - 1;
     const close = matchBracket(text, mask, paren);
-    if (close === -1) continue;
+    if (close === -1) {
+      throw new Error(`js-call-scan: ${m[1]}( at line ${lineOf(text, at)} has no closing paren`);
+    }
     out.push({
       name: m[1],
       at,

@@ -34,7 +34,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
-import { COMMENT, enclosingBracket, lexMask } from '../helpers/js-call-scan.js';
+import { COMMENT, enclosingBracket, lex } from '../helpers/js-call-scan.js';
 
 const REPO = join(__dirname, '../../..');
 const ROOTS = [
@@ -62,17 +62,28 @@ function walk(root: string, roots: string[]): string[] {
   return roots.flatMap(visit);
 }
 
+/** Script sources the census reads as JavaScript. */
+const JS_FILE = /\.(m|c)?[jt]s$/;
+
 /** THE parser, matched verbatim under any uniform indent (a YAML block scalar indents it). */
 const PARSER_INDENTED = new RegExp(
   `^( *)${WALG_ROLE_PARSE_SH.split('\n')
     .map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('\n\\1')}$`,
-  'm',
+  'gm',
 );
+
+/** [start, end) of every copy of THE parser in a text, flush or uniformly indented. */
+function parserRanges(text: string): Array<[number, number]> {
+  return [...text.matchAll(PARSER_INDENTED)].map((m) => [
+    m.index ?? 0,
+    (m.index ?? 0) + m[0].length,
+  ]);
+}
 
 /** The census's view of one tree. */
 function tree(root: string) {
-  const files = walk(root, ROOTS).filter((f) => /\.(js|ts|sh|ya?ml)$/.test(f));
+  const files = walk(root, ROOTS).filter((f) => JS_FILE.test(f) || /\.(sh|ya?ml)$/.test(f));
   const text = (f: string) => readFileSync(join(root, f), 'utf-8');
   const code = (f: string) =>
     text(f)
@@ -83,7 +94,8 @@ function tree(root: string) {
    * script, so a ConfigMap carries it verbatim under one uniform indent.
    */
   const carriesParser = (f: string) =>
-    text(f).includes(WALG_ROLE_PARSE_SH) || (/\.ya?ml$/.test(f) && PARSER_INDENTED.test(text(f)));
+    text(f).includes(WALG_ROLE_PARSE_SH) ||
+    (/\.ya?ml$/.test(f) && parserRanges(text(f)).length > 0);
   return { files, text, code, carriesParser };
 }
 
@@ -186,8 +198,10 @@ function rawRoleAccess(root: string): string[] {
     const lines = src.split('\n');
     const report = (n: number) => out.push(`${f}:${n + 1}: ${lines[n].trim()}`);
 
-    if (/\.(js|ts)$/.test(f)) {
-      const mask = lexMask(src);
+    if (JS_FILE.test(f)) {
+      const { mask, errors } = lex(src);
+      // Fail closed: a source the lexer misreads could hide a raw access.
+      if (errors.length > 0) throw new Error(`${f}: cannot scan soundly: ${errors[0]}`);
       const imports = [...src.matchAll(/^import\s[^;]*?\sfrom\s*['"][^'"]+['"];?/gm)].map((m) => [
         m.index ?? 0,
         (m.index ?? 0) + m[0].length,
@@ -235,6 +249,27 @@ function rawRoleAccess(root: string): string[] {
     });
   }
   return out.sort();
+}
+
+/**
+ * `file:line: text` for every shell or YAML assignment `VC_WALG_ROLE=` that is
+ * not inside a copy of THE parser: the parser is the only text that sets it.
+ */
+function roleAssignmentsOutsideParser(root: string): string[] {
+  const { files, text } = tree(root);
+  return files
+    .filter((f) => /\.(sh|ya?ml)$/.test(f))
+    .flatMap((f) => {
+      const src = text(f);
+      const ranges = parserRanges(src);
+      const lines = src.split('\n');
+      return [...src.matchAll(/(?<![\w$])VC_WALG_ROLE=/g)]
+        .map((m) => m.index ?? 0)
+        .filter((at) => !ranges.some(([a, b]) => a <= at && at < b))
+        .map((at) => src.slice(0, at).split('\n').length - 1)
+        .filter((n) => !/^\s*#/.test(lines[n]))
+        .map((n) => `${f}:${n + 1}: ${lines[n].trim()}`);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +322,21 @@ describe('census: the wal-g role has one file, one parser, one writer module', (
   it('no raw role parse or write outside the parser and the named writers', () => {
     expect(rawRoleAccess(REPO)).toEqual([]);
   });
+
+  it('only THE parser assigns VC_WALG_ROLE in shell and YAML', () => {
+    expect(roleAssignmentsOutsideParser(REPO)).toEqual([]);
+    // the census sees the three parser copies it lets through
+    const { files, text } = tree(REPO);
+    expect(
+      files.filter((f) => /\.(sh|ya?ml)$/.test(f) && parserRanges(text(f)).length > 0).sort(),
+    ).toEqual(
+      [
+        'carbon/backup/tls-snapshot.sh',
+        'carbon/k8s/base/backup/configmap-walg.yaml',
+        'carbon/volumes/db/walg-env.sh',
+      ].sort(),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -330,6 +380,41 @@ describe('census bites', () => {
     expect(unrenderedReaders(dir)).toEqual([]);
     expect(dbEnvRolls(dir)).toEqual([]);
     expect(rawRoleAccess(dir)).toEqual([]);
+    expect(roleAssignmentsOutsideParser(dir)).toEqual([]);
+  });
+
+  it('a ConfigMap whose indented parser differs by one character is a reader without THE parser', () => {
+    const yaml = readFileSync(join(REPO, DB_GUARD_COPY), 'utf-8');
+    const changed = yaml.replace(
+      'primary) VC_WALG_ROLE=primary ;;',
+      'primary) VC_WALG_ROLE=primarY ;;',
+    );
+    expect(changed).not.toBe(yaml);
+    const dir = fixture({ [DB_GUARD_COPY]: changed });
+    expect(roleFileReaders(dir).withoutParser).toEqual([DB_GUARD_COPY]);
+    expect(roleAssignmentsOutsideParser(dir)).toEqual([
+      expect.stringMatching(
+        /^carbon\/k8s\/base\/backup\/configmap-walg\.yaml:\d+: VC_WALG_ROLE=""$/,
+      ),
+      expect.stringMatching(/: primary\) VC_WALG_ROLE=primarY ;;$/),
+      expect.stringMatching(/: standby\) VC_WALG_ROLE=standby ;;$/),
+    ]);
+  });
+
+  it('a VC_WALG_ROLE assignment outside the parser is caught, in shell and in YAML', () => {
+    const dir = fixture({
+      'carbon/backup/stray.sh': 'VC_WALG_ROLE=primary\n',
+      'carbon/k8s/base/stray.yaml': 'data:\n  s: |\n    export VC_WALG_ROLE=standby\n',
+    });
+    expect(roleAssignmentsOutsideParser(dir)).toEqual([
+      'carbon/backup/stray.sh:1: VC_WALG_ROLE=primary',
+      'carbon/k8s/base/stray.yaml:3: export VC_WALG_ROLE=standby',
+    ]);
+  });
+
+  it('a JS source the lexer misreads fails the raw-access census loudly', () => {
+    const dir = fixture({ 'src/misread.cjs': 'if (x) /\\(/.test(WALG_ROLE_FILE);\n' });
+    expect(() => rawRoleAccess(dir)).toThrow(/src\/misread\.cjs: cannot scan soundly/);
   });
 
   it('a WALG_ROLE env read is caught', () => {

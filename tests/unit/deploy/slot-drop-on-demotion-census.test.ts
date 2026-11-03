@@ -16,9 +16,8 @@
  * postgres:17.11-walg3.0.9-r2 with default_transaction_read_only=on.
  *
  * Census: every write that can set a node's wal-g role to standby, through
- * any writer (setK8sWalgRole, writeComposeWalgRole, composeWalgRoleWriteShell,
- * walgRoleWriteShell, dbRoleConfigMapManifest, k8sWalgRoleExecArgv, or a shell
- * write of the role file), is a known site. A demotion drops the inactive
+ * any writer (every walg-role.js export that takes a role, or a shell write
+ * of the role file), is a known site, counted per function. A demotion drops the inactive
  * slots in the same function; every other site is a write on a node that holds
  * no slot a failover leaves behind, with its reason. A writer call whose role
  * is a variable counts: it can be standby. The calls are found by a bracket-
@@ -41,7 +40,14 @@ import { demoteComposeWalgRole } from '../../../src/lib/deploy/compose/ha.js';
 import { DROP_INACTIVE_SLOTS_SQL } from '../../../src/lib/deploy/replication-slot.js';
 import { demoteK8sWalgRole } from '../../../src/lib/deploy/walg-role.js';
 import { composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
-import { type CallSite, findCalls, functionRanges, lexMask } from '../helpers/js-call-scan.js';
+import {
+  type CallSite,
+  findCalls,
+  functionRanges,
+  lex,
+  lexMask,
+  matchBracket,
+} from '../helpers/js-call-scan.js';
 
 const ROOT = join(__dirname, '../../..');
 
@@ -181,15 +187,31 @@ const walk = (root: string, dir: string): string[] =>
     return statSync(join(root, p)).isDirectory() ? walk(root, p) : [p];
   });
 
-/** Every role writer, by the name a caller spells. */
-const WRITERS = [
-  'setK8sWalgRole',
-  'writeComposeWalgRole',
-  'composeWalgRoleWriteShell',
-  'walgRoleWriteShell',
-  'dbRoleConfigMapManifest',
-  'k8sWalgRoleExecArgv',
-] as const;
+const ROLE_MODULE = 'src/lib/deploy/walg-role.js';
+
+/**
+ * The role writers, read from walg-role.js's exports by one rule: an exported
+ * function that takes a `role` (positional or destructured) writes it, except
+ * the `assert*` validators, which only check it. A new writer is censused the
+ * day it is exported; the rule itself is pinned below.
+ */
+function writersOf(source: string): { writers: string[]; validators: string[] } {
+  const { mask } = lex(source);
+  const writers: string[] = [];
+  const validators: string[] = [];
+  for (const m of source.matchAll(/^export\s+(?:async\s+)?function\s+(\w+)\s*\(/gm)) {
+    const paren = (m.index ?? 0) + m[0].length - 1;
+    const params = source.slice(paren, matchBracket(source, mask, paren) + 1);
+    if (!/(?<![\w$.])role(?![\w$])/.test(params)) continue;
+    (/^assert/.test(m[1]) ? validators : writers).push(m[1]);
+  }
+  return { writers: writers.sort(), validators: validators.sort() };
+}
+
+const WRITERS = writersOf(readFileSync(join(ROOT, ROLE_MODULE), 'utf-8')).writers;
+
+/** Source files the call scanner reads. */
+const JS_FILE = /\.(m|c)?[jt]s$/;
 
 /** The role a writer call writes: a literal word, or `variable` (could be standby). */
 function roleOf(call: CallSite): 'primary' | 'standby' | 'variable' {
@@ -207,37 +229,50 @@ function roleOf(call: CallSite): 'primary' | 'standby' | 'variable' {
   return word === 'primary' || word === 'standby' ? word : 'variable';
 }
 
+const JS_ROOTS = ['src', 'tests/e2e'];
+
 /**
- * `file:function` of every write that can set a node to standby: a writer
- * call whose role is not the literal `primary` (a variable role can be
- * standby), and every shell write of the role file. A writer composing
- * another writer inside walg-role.js passes its caller's role through and is
- * censused at that caller.
+ * `file:function`, once per write, of every write that can set a node to
+ * standby: a writer call whose role is not the literal `primary` (a variable
+ * role can be standby), and every shell line that writes the role file. A
+ * writer composing another writer inside walg-role.js passes its caller's role
+ * through and is censused at that caller. Throws (via findCalls) on a source
+ * the scanner cannot read soundly.
  */
 function standbyWriteSites(root: string): string[] {
-  const js = ['src', 'tests/e2e'].flatMap((d) => walk(root, d)).filter((f) => /\.(js|ts)$/.test(f));
+  const js = JS_ROOTS.flatMap((d) => walk(root, d)).filter((f) => JS_FILE.test(f));
   const fromCalls = js.flatMap((f) =>
     findCalls(readFileSync(join(root, f), 'utf-8'), WRITERS)
       .filter((c) => roleOf(c) !== 'primary')
-      .filter(
-        (c) =>
-          !(f === 'src/lib/deploy/walg-role.js' && (WRITERS as readonly string[]).includes(c.fn)),
-      )
+      .filter((c) => !(f === ROLE_MODULE && WRITERS.includes(c.fn)))
       .map((c) => `${f}:${c.fn}`),
   );
   const shell = walk(root, 'carbon')
     .filter((f) => /\.(sh|ya?ml)$/.test(f))
-    .filter((f) =>
+    .flatMap((f) =>
       readFileSync(join(root, f), 'utf-8')
         .split('\n')
-        .some(
+        .filter(
           (l) =>
             !/^\s*#/.test(l) &&
             /(?<![>&\d])>{1,2}(?!&)\s*\S*walg-role\b|\bmv\b[^\n]*\bwalg-role\b/.test(l),
-        ),
-    )
-    .map((f) => `${f}:shell`);
-  return [...new Set([...fromCalls, ...shell])].sort();
+        )
+        .map(() => `${f}:shell`),
+    );
+  return [...fromCalls, ...shell].sort();
+}
+
+/** The site list an allowlist expects: each site once per write. */
+const expectedSites = (writes: Record<string, StandbyWrite>): string[] =>
+  Object.entries(writes)
+    .flatMap(([site, w]) => Array.from({ length: w.calls }, () => site))
+    .sort();
+
+/** Every walked JS/TS source the scanner cannot read soundly, with the reason. */
+function unscannable(root: string): string[] {
+  return JS_ROOTS.flatMap((d) => walk(root, d))
+    .filter((f) => JS_FILE.test(f))
+    .flatMap((f) => lex(readFileSync(join(root, f), 'utf-8')).errors.map((e) => `${f}: ${e}`));
 }
 
 /** The function body text of `name` in a file. */
@@ -249,10 +284,16 @@ function functionText(root: string, file: string, name: string): string {
 
 const DROPS_SLOTS = 'drops-slots';
 
+/** One allowlisted site: how many standby writes it holds, and why each is safe. */
+interface StandbyWrite {
+  calls: number;
+  why: string;
+}
+
 /** The drops-slots sites whose function does not drop the inactive slots. */
-function unpairedDemoters(root: string, writes: Record<string, string>): string[] {
+function unpairedDemoters(root: string, writes: Record<string, StandbyWrite>): string[] {
   return Object.entries(writes)
-    .filter(([, why]) => why === DROPS_SLOTS)
+    .filter(([, w]) => w.why === DROPS_SLOTS)
     .map(([site]) => site)
     .filter((site) => {
       const [file, fn] = site.split(':');
@@ -261,46 +302,113 @@ function unpairedDemoters(root: string, writes: Record<string, string>): string[
 }
 
 /**
- * Every standby role write. `drops-slots`: a demotion, which drops the node's
- * inactive replication slots in the same function. Anything else is a write on
- * a node that holds no slot a failover leaves behind, with the reason.
+ * Why a deploy-time standby write never lands on a node holding a failover's
+ * stale slot. An unplanned failover cannot reach the old primary, so its
+ * demotion (and slot drop) may never have run. What makes the deploy safe:
+ *
+ *   1. the HA deploy refuses while a failover journal exists
+ *      (assertNoFailoverInFlight, src/lib/deploy/orchestrator.js), so it never
+ *      runs on a half-swapped config;
+ *   2. swapHaRoles (src/failover.js) swaps the roles and clears the journal in
+ *      one save, so once the deploy runs, the config names the old primary as
+ *      a retired side;
+ *   3. the deploy's retired-fence pass (reconcileRetiredFence, orchestrator.js,
+ *      first thing once SSH is let in) demotes that side through
+ *      demoteK8sWalgRole / demoteComposeWalgRole (retired-fence.js), which
+ *      drop its inactive slots, before any role write below.
+ *
+ * Known gap: when the retired side is unreachable, the fence only warns. Its
+ * slots are then cleared by the reseed that rebuilds it as the standby
+ * (PGDATA is wiped and replaced), not by a drop.
  */
-const STANDBY_WRITES: Record<string, string> = {
-  'src/lib/deploy/walg-role.js:demoteK8sWalgRole': DROPS_SLOTS,
-  'src/lib/deploy/compose/ha.js:demoteComposeWalgRole': DROPS_SLOTS,
-  'src/failover.js:disarmStandby':
-    "failover's disarm after a failed arm or journal write (no journal at entry): the " +
-    'standby is still in recovery and was never promoted, so it holds no slot a failover ' +
-    'leaves behind',
-  'src/lib/deploy/compose/ha.js:disarmComposeStandby':
-    "failover's disarm after a failed arm or journal write (no journal at entry): the " +
-    'standby is still in recovery and was never promoted',
-  'src/lib/deploy/compose/ha.js:disarmStandby':
-    'composeFailoverAbortBackend (failover -abort): writes the standby role file only once its writers are stopped and ' +
-    'its db is proven down; the next start is a deploy that reseeds it (PGDATA and slots)',
-  'src/lib/deploy/effects/compose-ha.js:haWriteNodeRoles':
-    'deploy-time role write: the standby is in recovery or about to be reseeded, which ' +
-    'replaces PGDATA and every slot in it; a former primary was demoted (slots dropped) by ' +
-    'the failover that swapped the config',
-  'src/lib/deploy/k8s/k3s.js:applyVibecarbonSecrets':
-    "deploy-time intent (the configured role of this cluster's db, created before its pod): " +
-    'the standby cluster is in recovery or about to be reseeded; a former primary was ' +
-    'demoted by the failover that swapped the config',
-  'src/lib/deploy/k8s/k3s.js:writeDeployWalgRole':
-    'deploy-time live role write, same reason as the intent above',
-  'src/scale.js:prepareReplacementServer':
-    'a replacement server takes the role of the one it replaces before its db first starts: ' +
-    'a new standby has an empty PGDATA, reseeded from the primary, so no slot',
-  'carbon/volumes/db/db-guard.sh:shell':
-    'db-guard.sh applies the k8s intent on container start, before postgres runs; the CLI ' +
-    'write that set a standby intent is itself one of the sites above',
-  'carbon/k8s/base/backup/configmap-walg.yaml:shell':
-    "db-guard.sh's ConfigMap copy (byte-identical, walg-archive-script-parity.test.ts)",
+const DEPLOY_GUARANTEE =
+  'a deploy runs only with no failover journal (orchestrator.js assertNoFailoverInFlight); ' +
+  'swapHaRoles swaps the roles and clears the journal in one save; the retired-fence pass ' +
+  'demotes a retired old primary through demoteK8sWalgRole / demoteComposeWalgRole, which ' +
+  'drop its slots, before this write (unreachable: the fence warns, and the reseed that ' +
+  'rebuilds it as the standby wipes PGDATA and its slots)';
+
+/**
+ * Every standby role write, with its count per function. `drops-slots`: a
+ * demotion, which drops the node's inactive replication slots in the same
+ * function. Anything else is a write on a node that holds no slot a failover
+ * leaves behind, with the reason.
+ */
+const STANDBY_WRITES: Record<string, StandbyWrite> = {
+  'src/lib/deploy/walg-role.js:demoteK8sWalgRole': { calls: 1, why: DROPS_SLOTS },
+  'src/lib/deploy/compose/ha.js:demoteComposeWalgRole': { calls: 1, why: DROPS_SLOTS },
+  'src/failover.js:disarmStandby': {
+    calls: 1,
+    why:
+      "failover's disarm after a failed arm or journal write (no journal at entry): the " +
+      'standby is still in recovery and was never promoted, so it holds no slot a failover ' +
+      'leaves behind',
+  },
+  'src/lib/deploy/compose/ha.js:disarmComposeStandby': {
+    calls: 1,
+    why:
+      "failover's disarm after a failed arm or journal write (no journal at entry): the " +
+      'standby is still in recovery and was never promoted',
+  },
+  'src/lib/deploy/compose/ha.js:disarmStandby': {
+    calls: 1,
+    why:
+      'composeFailoverAbortBackend (failover -abort): the standby it writes was never ' +
+      'promoted (the abort runs only before a proven promote), its writers are stopped and ' +
+      'its db is proven down; the next start is a deploy that reseeds it (PGDATA and slots)',
+  },
+  'src/lib/deploy/effects/compose-ha.js:haWriteNodeRoles': {
+    calls: 1,
+    why: `compose-ha deploy role write: ${DEPLOY_GUARANTEE}`,
+  },
+  'src/lib/deploy/k8s/k3s.js:applyVibecarbonSecrets': {
+    calls: 1,
+    why: `k8s deploy intent, applied before the db pod exists: ${DEPLOY_GUARANTEE}`,
+  },
+  'src/lib/deploy/k8s/k3s.js:writeDeployWalgRole': {
+    calls: 1,
+    why: `k8s deploy live role write: ${DEPLOY_GUARANTEE}`,
+  },
+  'src/scale.js:prepareReplacementServer': {
+    calls: 1,
+    why:
+      'a replacement server takes the role of the one it replaces before its db first ' +
+      'starts: a new standby has an empty PGDATA, reseeded from the primary, so no slot',
+  },
+  'carbon/volumes/db/db-guard.sh:shell': {
+    calls: 2,
+    why:
+      'db-guard.sh applies the k8s intent on container start, before postgres runs (the tmp ' +
+      'write and the rename); the CLI write that set a standby intent is one of the sites above',
+  },
+  'carbon/k8s/base/backup/configmap-walg.yaml:shell': {
+    calls: 2,
+    why: "db-guard.sh's ConfigMap copy (byte-identical, walg-archive-script-parity.test.ts)",
+  },
 };
 
 describe('census: every standby role write is a demotion that drops slots', () => {
-  it('every standby-capable role write is a known site', () => {
-    expect(standbyWriteSites(ROOT)).toEqual(Object.keys(STANDBY_WRITES).sort());
+  it('the writers are walg-role.js exports that take a role; only assert* validators are not', () => {
+    const { writers, validators } = writersOf(readFileSync(join(ROOT, ROLE_MODULE), 'utf-8'));
+    expect(writers).toEqual(
+      [
+        'composeWalgRoleWriteShell',
+        'dbRoleConfigMapManifest',
+        'k8sWalgRoleExecArgv',
+        'setK8sWalgRole',
+        'walgRoleWriteShell',
+        'writeComposeWalgRole',
+      ].sort(),
+    );
+    expect(validators).toEqual(['assertWalgRole']);
+  });
+
+  it('every walked source lexes cleanly, so no call can hide from the scanner', () => {
+    expect(unscannable(ROOT)).toEqual([]);
+  });
+
+  it('every standby-capable role write is a known site, counted per function', () => {
+    expect(standbyWriteSites(ROOT)).toEqual(expectedSites(STANDBY_WRITES));
   });
 
   it('every drops-slots site drops the inactive slots in the same function', () => {
@@ -359,12 +467,14 @@ describe('census bites', () => {
       'src/c.js': "function c() { return setK8sWalgRole({ ip, kubectl, role: 'primary' }); }\n",
       'tests/e2e/d.ts': "function d() { dbRoleConfigMapManifest('standby'); }\n",
       'carbon/x.sh': 'printf \'standby\\n\' > "$DIR/walg-role.tmp"\n',
+      'src/e.mjs': "export function e() { return setK8sWalgRole({ role: 'standby' }); }\n",
     });
     try {
       expect(standbyWriteSites(dir)).toEqual([
         'carbon/x.sh:shell',
         'src/a.js:a',
         'src/b.js:b',
+        'src/e.mjs:e',
         'tests/e2e/d.ts:d',
       ]);
     } finally {
@@ -379,9 +489,9 @@ describe('census bites', () => {
     });
     try {
       expect(standbyWriteSites(dir)).toEqual(['src/demote.js:demote']);
-      expect(unpairedDemoters(dir, { 'src/demote.js:demote': DROPS_SLOTS })).toEqual([
-        'src/demote.js:demote',
-      ]);
+      expect(
+        unpairedDemoters(dir, { 'src/demote.js:demote': { calls: 1, why: DROPS_SLOTS } }),
+      ).toEqual(['src/demote.js:demote']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -397,5 +507,59 @@ describe('census bites', () => {
     ].join('\n');
     const calls = findCalls(text, WRITERS);
     expect(calls.map((c) => [c.name, roleOf(c)])).toEqual([['walgRoleWriteShell', 'standby']]);
+  });
+
+  it('a second standby write in an allowlisted function is caught by its count', () => {
+    const dir = fixture({
+      'src/demote.js': [
+        'export async function demote(ip) {',
+        '  await dropInactiveReplicationSlots(run);',
+        "  await setK8sWalgRole({ ip, kubectl, role: 'standby' });",
+        "  await writeComposeWalgRole({ ip, role: 'standby' });",
+        '}',
+        '',
+      ].join('\n'),
+    });
+    try {
+      const allow = { 'src/demote.js:demote': { calls: 1, why: DROPS_SLOTS } };
+      expect(standbyWriteSites(dir)).not.toEqual(expectedSites(allow));
+      expect(standbyWriteSites(dir)).toEqual(['src/demote.js:demote', 'src/demote.js:demote']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a new exported writer that takes a role is censused without a list edit', () => {
+    const { writers, validators } = writersOf(
+      [
+        'export function assertWalgRole(role) {}',
+        'export async function moveRole({ ip, role }) {}',
+        'export function roleless(ip) {}',
+        '',
+      ].join('\n'),
+    );
+    expect(writers).toEqual(['moveRole']);
+    expect(validators).toEqual(['assertWalgRole']);
+  });
+
+  it('a source the lexer misreads fails loudly instead of dropping a call', () => {
+    const misread = "if (x) /\\(/.test(y); setK8sWalgRole({ role: 'standby' });\n";
+    expect(lex(misread).errors).not.toEqual([]);
+    expect(() => findCalls(misread, WRITERS)).toThrow(/cannot scan soundly/);
+    const dir = fixture({ 'src/misread.js': misread });
+    try {
+      expect(unscannable(dir)).toEqual([
+        expect.stringMatching(/^src\/misread\.js: unterminated regex/),
+      ]);
+      expect(() => standbyWriteSites(dir)).toThrow(/cannot scan soundly/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a call that never closes fails loudly', () => {
+    expect(() => findCalls("setK8sWalgRole({ role: 'standby' }\n", WRITERS)).toThrow(
+      /cannot scan soundly|no closing paren/,
+    );
   });
 });
