@@ -1680,6 +1680,14 @@ export class DbGuardMissingError extends Error {
   }
 }
 
+/**
+ * How long the guard exec waits for postgres to accept connections before it
+ * reads recovery, slots and lineage (pg_isready, once a second). The exec's
+ * client bound (DB_GUARD_EXEC_TIMEOUT_MS) sits above it.
+ */
+export const DB_GUARD_READY_WAIT_S = 60;
+const DB_GUARD_EXEC_TIMEOUT_MS = (DB_GUARD_READY_WAIT_S + 60) * 1000;
+
 /** The replication slots a db holds (a retired old primary's keep WAL). */
 const REPLICATION_SLOT_COUNT_SQL = 'SELECT count(*) FROM pg_replication_slots';
 
@@ -1724,7 +1732,15 @@ const IN_RECOVERY_SH = `"$(psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>
 export const DB_GUARD_MARKER_GREP = Object.freeze([
   'sh',
   '-c',
-  `grep -c '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || true; printf 'in_recovery=%s\\n' ${IN_RECOVERY_SH}; ` +
+  `grep -c '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || true; ` +
+    // One bounded wait for postgres to accept connections (a db the deploy's
+    // self-heal just started may still be starting up), so the reads below
+    // are not empty for lack of a moment. Over TCP (-h): a first-boot db's
+    // temporary init server is socket-only, so only the real server passes.
+    // A condition poll with a deadline, never a retry of anything else; a
+    // running db passes at once.
+    `vc_ready=0; vc_i=0; while [ "$vc_i" -lt ${DB_GUARD_READY_WAIT_S} ]; do if pg_isready -q -h 127.0.0.1 -U postgres; then vc_ready=1; break; fi; vc_i=$((vc_i + 1)); sleep 1; done; printf 'ready=%s\\n' "$vc_ready"; ` +
+    `printf 'in_recovery=%s\\n' ${IN_RECOVERY_SH}; ` +
     `printf 'slots=%s\\n' "$(psql -U postgres -tAc '${REPLICATION_SLOT_COUNT_SQL}' 2>/dev/null)"; ` +
     `printf 'ident=%s\\n' "$(psql -U postgres -tAc '${DB_IDENTITY_SQL}' 2>/dev/null)"`,
 ]);
@@ -1903,7 +1919,9 @@ export function evaluateDbGuardSupport(
   }
   const recovery = /^in_recovery=(.*)$/m.exec(out)?.[1]?.trim() ?? '';
   const slots = /^slots=(.*)$/m.exec(out)?.[1]?.trim() ?? '';
+  const ready = /^ready=(.*)$/m.exec(out)?.[1]?.trim();
   const readings = {
+    dbReady: ready === '1' ? true : ready === '0' ? false : null,
     inRecovery: recovery,
     slotCount: /^\d+$/.test(slots) ? Number(slots) : null,
     ...parseDbIdentity(/^ident=(.*)$/m.exec(out)?.[1] ?? ''),
@@ -1961,7 +1979,9 @@ export async function assertLiveDbGuardSupportsReseed(
     throw new Error(`reseed refused: role intent is ${intent || '<none>'}`);
   }
 
-  const marker = await kubectl(dbExecArgv(DB_GUARD_MARKER_GREP), { timeout: 30_000 });
+  const marker = await kubectl(dbExecArgv(DB_GUARD_MARKER_GREP), {
+    timeout: DB_GUARD_EXEC_TIMEOUT_MS,
+  });
   const verdict = evaluateDbGuardSupport(podJson, marker, intent, { requireRecovery });
   if (!verdict.ok) throw refuse(verdict);
   return verdict;

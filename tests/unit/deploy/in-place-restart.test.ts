@@ -22,6 +22,7 @@ import {
   DB_GUARD_COMMAND,
   DB_GUARD_MARKER_GREP,
   DB_GUARD_PROTOCOL_MARKER,
+  DB_GUARD_READY_WAIT_S,
   DB_IN_PLACE_STOP,
   DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S,
   DB_IN_PLACE_STOP_UNSEEDED,
@@ -59,6 +60,7 @@ const OUT = '1\nin_recovery=t';
 /** A passed guard's readings beyond the pod: nothing read but recovery. */
 const READ = (inRecovery: string) => ({
   ...GUARD,
+  dbReady: null,
   inRecovery,
   slotCount: null,
   systemIdentifier: null,
@@ -204,9 +206,10 @@ describe('evaluateDbGuardSupport', () => {
   });
 
   it('reads the slot count and the lineage the guard exec prints (the cold deploy compares them)', () => {
-    const out = '1\nin_recovery=f\nslots=2\nident=7412345678901234567|0000000A';
+    const out = '1\nready=1\nin_recovery=f\nslots=2\nident=7412345678901234567|0000000A';
     expect(evaluateDbGuardSupport(pod(), out, 'standby', { requireRecovery: false })).toEqual({
       ...GUARD,
+      dbReady: true,
       inRecovery: 'f',
       slotCount: 2,
       systemIdentifier: '7412345678901234567',
@@ -651,6 +654,8 @@ describe('the guard and stop scripts, executed under sh', () => {
     }
     writeFileSync(join(dir, 'psql'), `#!/bin/sh\nprintf '%s\\n' '${o.recovery}'\n`);
     chmodSync(join(dir, 'psql'), 0o755);
+    writeFileSync(join(dir, 'pg_isready'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(dir, 'pg_isready'), 0o755);
     const body = script.replaceAll('/usr/local/bin/db-guard.sh', guard);
     expect(body).not.toBe(script);
     return spawnSync('sh', ['-c', `kill() { echo "KILLED $*"; }; ${body}`], {
@@ -703,28 +708,51 @@ describe('the guard and stop scripts, executed under sh', () => {
     );
   });
 
-  it('the guard exec, run under sh, prints the slot count and the lineage each psql query returns', () => {
+  /**
+   * The guard exec under sh, against a db that starts accepting connections
+   * on pg_isready's `readyOn`-th call (0: never). psql answers by query once
+   * the db is up and fails before; `sleep` is a function that only counts the
+   * waits, so the bounded wait runs at full length instantly.
+   */
+  const runGuardExec = (readyOn: number) => {
     const dir = mkdtempSync(join(tmpdir(), 'vc-guard-'));
     const guardFile = join(dir, 'db-guard.sh');
     writeFileSync(guardFile, `#!/bin/sh\n${DB_GUARD_PROTOCOL_MARKER}\n`);
+    const calls = join(dir, 'isready-calls');
+    writeFileSync(
+      join(dir, 'pg_isready'),
+      `#!/bin/sh\nn=$(($(cat ${calls} 2>/dev/null || echo 0) + 1)); echo $n > ${calls}\n` +
+        `if [ ${readyOn} -gt 0 ] && [ $n -ge ${readyOn} ]; then touch ${dir}/up; fi\n[ -e ${dir}/up ]\n`,
+    );
     // psql answers by the query it was given ($4 after -U postgres -tAc).
     writeFileSync(
       join(dir, 'psql'),
-      '#!/bin/sh\ncase "$4" in\n  *pg_replication_slots*) echo 3 ;;\n' +
+      `#!/bin/sh\n[ -e ${dir}/up ] || exit 2\ncase "$4" in\n  *pg_replication_slots*) echo 3 ;;\n` +
         '  *pg_control_system*) echo "7412345678901234567|00000002" ;;\n  *) echo f ;;\nesac\n',
     );
+    chmodSync(join(dir, 'pg_isready'), 0o755);
     chmodSync(join(dir, 'psql'), 0o755);
-    const r = spawnSync(
-      'sh',
-      ['-c', DB_GUARD_MARKER_GREP[2].replaceAll('/usr/local/bin/db-guard.sh', guardFile)],
-      {
-        encoding: 'utf-8',
-        env: { PATH: `${dir}:${process.env.PATH}` },
-      },
-    );
-    expect(r.stdout).toBe('1\nin_recovery=f\nslots=3\nident=7412345678901234567|00000002\n');
-    expect(evaluateDbGuardSupport(pod(), r.stdout, 'standby', { requireRecovery: false })).toEqual({
+    const script = DB_GUARD_MARKER_GREP[2].replaceAll('/usr/local/bin/db-guard.sh', guardFile);
+    const r = spawnSync('sh', ['-c', `sleep() { echo x >> ${dir}/sleeps; }; ${script}`], {
+      encoding: 'utf-8',
+      env: { PATH: `${dir}:${process.env.PATH}` },
+    });
+    let sleeps = 0;
+    try {
+      sleeps = readFileSync(join(dir, 'sleeps'), 'utf-8').split('\n').filter(Boolean).length;
+    } catch {
+      sleeps = 0;
+    }
+    return { stdout: r.stdout, sleeps };
+  };
+
+  it('the guard exec waits (bounded) for a db that is still starting, then reads slots and lineage', () => {
+    const { stdout, sleeps } = runGuardExec(4);
+    expect(sleeps).toBe(3);
+    expect(stdout).toBe('1\nready=1\nin_recovery=f\nslots=3\nident=7412345678901234567|00000002\n');
+    expect(evaluateDbGuardSupport(pod(), stdout, 'standby', { requireRecovery: false })).toEqual({
       ...GUARD,
+      dbReady: true,
       inRecovery: 'f',
       slotCount: 3,
       systemIdentifier: '7412345678901234567',
@@ -732,12 +760,23 @@ describe('the guard and stop scripts, executed under sh', () => {
     });
   });
 
+  it('the guard exec gives a db that never accepts connections exactly DB_GUARD_READY_WAIT_S, then reports it', () => {
+    const { stdout, sleeps } = runGuardExec(0);
+    expect(sleeps).toBe(DB_GUARD_READY_WAIT_S);
+    expect(stdout).toBe('1\nready=0\nin_recovery=\nslots=\nident=\n');
+    expect(evaluateDbGuardSupport(pod(), stdout, 'standby', { requireRecovery: false })).toEqual({
+      ...READ(''),
+      dbReady: false,
+    });
+  });
+
   it("the guard probe's real output is what evaluateDbGuardSupport accepts or refuses", () => {
     const out = (o: { marker: boolean | null; recovery: string }) =>
       run(DB_GUARD_MARKER_GREP[2], o).stdout;
-    expect(evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 't' }), 'standby')).toEqual(
-      READ('t'),
-    );
+    expect(evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 't' }), 'standby')).toEqual({
+      ...READ('t'),
+      dbReady: true,
+    });
     expect(
       evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 'f' }), 'standby'),
     ).toMatchObject({ ok: false, reason: expect.stringMatching(/not in recovery/) });

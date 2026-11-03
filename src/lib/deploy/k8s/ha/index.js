@@ -31,6 +31,7 @@ import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from '../../db-workload.js';
 import {
   buildInPlaceReseedStageScript,
   buildReplicationHbaLines,
+  DB_GUARD_READY_WAIT_S,
   DbGuardMissingError,
   inPlaceProbeBudgetS,
   prepareReseedSource,
@@ -715,10 +716,13 @@ export function assertStandbyNotPromotedOutside({ target, source, standbyIp, pri
   if (target?.inRecovery === 't') return;
   const env = envName || '<env>';
   if (!target?.systemIdentifier || !Number.isInteger(target?.timeline)) {
+    const why =
+      target?.dbReady === false
+        ? `its db did not accept connections within the guard's ${DB_GUARD_READY_WAIT_S}s readiness wait (pg_isready -h 127.0.0.1 -U postgres)`
+        : `its system identifier and timeline could not be read after the guard's ${DB_GUARD_READY_WAIT_S}s readiness wait (pg_isready -h 127.0.0.1 -U postgres)`;
     throw new StandbyPromotedOutsideError(
-      `reseed refused: the standby ${standbyIp} is not in recovery and its system identifier and ` +
-        'timeline could not be read, so it cannot be told apart from a primary promoted outside ' +
-        'vibecarbon. Nothing was staged or stopped. Check that its db answers ' +
+      `reseed refused: the standby ${standbyIp} is not in recovery and ${why}, so it cannot be told ` +
+        'apart from a primary promoted outside vibecarbon. Nothing was staged or stopped. Check that its db answers ' +
         `(kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -c 'SELECT 1'), ` +
         `then rerun \`vibecarbon deploy ${env}\`.`,
     );

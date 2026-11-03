@@ -96,8 +96,8 @@ const flat = (argv: string[]) =>
 const SOURCE_SYSID = '7412345678901234567';
 const SOURCE_ROW = `1048576|${SOURCE_SYSID}|00000002`;
 /** What the guard exec prints on the standby (DB_GUARD_MARKER_GREP). */
-const guardOut = (o: { recovery: string; slots: number; ident: string }) =>
-  `1\nin_recovery=${o.recovery}\nslots=${o.slots}\nident=${o.ident}`;
+const guardOut = (o: { recovery: string; slots: number | ''; ident: string; ready?: 0 | 1 }) =>
+  `1\nready=${o.ready ?? 1}\nin_recovery=${o.recovery}\nslots=${o.slots}\nident=${o.ident}`;
 /** A fresh standby cluster: its own initdb (another system identifier), no slots. */
 const FRESH = guardOut({ recovery: 'f', slots: 0, ident: '7000000000000000001|00000001' });
 /** A retired old primary: the same database on an older timeline, with its slots. */
@@ -726,13 +726,47 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
   }, 20000);
 
-  it('the lineage check: a standby outside recovery whose lineage cannot be read is not reseeded blind', async () => {
+  it('a standby db still starting is waited for inside the guard exec (bounded), then reseeded', async () => {
+    // The guard exec's pg_isready wait outlasted the start-up (ready=1): its
+    // reads are whole, the lineage passes, the reseed proceeds. The exec's
+    // client bound covers the wait.
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ markerGrep: FRESH }));
+    expect((await runWithFakeTimers(() => setupReplication(opts))).streaming).toBe(true);
+    const calls = vi.mocked(runCommandAsync).mock.calls;
+    const guardCall = calls.find(([a]) => flat(a as string[]).includes('grep -c'));
+    expect(flat(guardCall?.[0] as string[])).toMatch(
+      /while \[ "\$vc_i" -lt 60 \]; do if pg_isready -q -h 127\.0\.0\.1 -U postgres; then vc_ready=1; break; fi/,
+    );
+    expect((guardCall?.[1] as { timeout?: number } | undefined)?.timeout).toBeGreaterThan(60_000);
+    expect(calls.filter(([a]) => flat(a as string[]).includes('kill -INT 1'))).toHaveLength(1);
+  }, 20000);
+
+  it('a standby db that never accepts connections within the wait is refused, naming the wait', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(
+      inPlaceExec({ markerGrep: guardOut({ recovery: '', slots: '', ident: '', ready: 0 }) }),
+    );
+    const err = await runWithFakeTimers(() => setupReplication(opts)).catch((e) => e);
+    expect(String(err?.message)).toMatch(
+      /its db did not accept connections within the guard's 60s readiness wait \(pg_isready -h 127\.0\.0\.1 -U postgres\)[\s\S]*Nothing was staged or stopped/,
+    );
+    const calls = vi.mocked(runCommandAsync).mock.calls;
+    expect(calls.some(([, o]) => (o as { input?: string })?.input?.includes('pg_basebackup'))).toBe(
+      false,
+    );
+    expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+  }, 20000);
+
+  it('a standby that answered the wait but whose lineage still cannot be read is not reseeded blind', async () => {
     vi.mocked(runCommandAsync).mockClear();
     vi.mocked(runCommandAsync).mockImplementation(
       inPlaceExec({ markerGrep: guardOut({ recovery: 'f', slots: 0, ident: '' }) }),
     );
     const err = await runWithFakeTimers(() => setupReplication(opts)).catch((e) => e);
-    expect(String(err?.message)).toMatch(/system identifier and timeline could not be read/);
+    expect(String(err?.message)).toMatch(
+      /system identifier and timeline could not be read after the guard's 60s readiness wait \(pg_isready -h 127\.0\.0\.1 -U postgres\)/,
+    );
     const calls = vi.mocked(runCommandAsync).mock.calls;
     expect(calls.some(([, o]) => (o as { input?: string })?.input?.includes('pg_basebackup'))).toBe(
       false,
