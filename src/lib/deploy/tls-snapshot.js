@@ -429,9 +429,20 @@ export function inspectK8sTlsSecret(secretJsonText, { dnsNames, now = new Date()
  * SecretsManager.setValues writes for this Certificate (cert-manager v1.20.2
  * pkg/controller/certificates/issuing/internal/secret.go): the certificate
  * details (certificateDetailsAnnotations), the certificate name, the issuer
- * reference and CERT_MANAGER_CONTROLLER_LABEL. cert-manager then has no label
- * to add, so the Secret never moves between its informer caches (see
- * CERT_MANAGER_CONTROLLER_LABEL), which is what made it re-issue. The
+ * reference and CERT_MANAGER_CONTROLLER_LABEL.
+ *
+ * cert-manager still re-applies these once: its post-issuance check
+ * (SecretManagedLabelsAndAnnotationsManagedFieldsMismatch,
+ * internal/controller/certificates/policies/checks.go) judges managedFields
+ * ownership, and kubectl, not cert-manager's field manager, owns them here.
+ * So a "Secret is missing these Managed Labels" line after a restore is
+ * expected, not a regression. What the fix needs is that the label's value
+ * never changes in that apply: the Secret is in the typed cache from its first
+ * write and stays there, so the lister never answers NotFound (see
+ * CERT_MANAGER_CONTROLLER_LABEL), which is what made it re-issue. One edge
+ * remains: an invalid, unlabelled live Secret left by a CLI from before this
+ * fix gains the label in our `replace`, and that one write moves it between
+ * the caches once. The
  * Certificate has no secretTemplate (carbon/k8s/base/traefik/certificate.yaml,
  * carbon/scripts/render-tls-certificate.mjs), so no template labels apply.
  * Every writer of this Secret goes through here

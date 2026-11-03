@@ -16,20 +16,31 @@
  * re-issue back.
  *
  * Rules, over every text file under src/, carbon/, scripts/ and services/:
- *   1. A Secret manifest (`kind: Secret` in YAML or a JS object) named
- *      vibecarbon-tls, literally or through a constant holding that name,
+ *   1. A Secret manifest (`kind: Secret` in YAML, `"kind": "Secret"` in JSON,
+ *      a JS object literal on one line or many) named vibecarbon-tls,
+ *      literally or through a constant of the same file holding that name,
  *      appears only in tls-snapshot.js.
- *   2. No imperative kubectl write names a vibecarbon-tls Secret
- *      (`create secret tls`, `create secret generic vibecarbon-tls`,
- *      `patch|label|annotate|replace|edit|apply ... secret ... vibecarbon-tls`):
- *      each of those would write or rewrite its labels around the builder.
+ *   2. No imperative kubectl write names the Secret: `create secret tls`, or
+ *      `create|patch|label|annotate|replace|edit|apply` then `secret` then
+ *      vibecarbon-tls (or such a constant, or `secret/<name>`), on one shell
+ *      line or spread over a multi-line argv array. Each would write or
+ *      rewrite its labels around the builder.
  *   3. buildRestoredTlsSecret is called only by restoreK8sTlsSecret
  *      (tls-restore.js), whose create/replace sends that manifest; and
  *      restoreK8sTlsSecret is called only by the deploy (k3s.js) and the
  *      failover promotion (failover.js).
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -40,8 +51,16 @@ const TEXT_EXT = /\.(js|mjs|cjs|ts|tsx|sh|ya?ml|json|tpl)$/;
 const BUILDER_FILE = 'src/lib/deploy/tls-snapshot.js';
 const SECRET = 'vibecarbon-tls';
 
+type SourceFile = { path: string; text: string };
+
 function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
     if (SKIP_DIRS.has(name)) continue;
     const full = join(dir, name);
     if (statSync(full).isDirectory()) walk(full, out);
@@ -50,10 +69,12 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-const FILES = ROOTS.flatMap((r) => walk(join(REPO, r))).map((full) => ({
-  path: relative(REPO, full),
-  text: readFileSync(full, 'utf8'),
-}));
+function readTree(root: string): SourceFile[] {
+  return ROOTS.flatMap((r) => walk(join(root, r))).map((full) => ({
+    path: relative(root, full),
+    text: readFileSync(full, 'utf8'),
+  }));
+}
 
 /** Identifiers a file binds to the literal 'vibecarbon-tls'. */
 function secretNameConstants(text: string): string[] {
@@ -61,45 +82,82 @@ function secretNameConstants(text: string): string[] {
   return [...text.matchAll(re)].map((m) => m[1]);
 }
 
-const KIND_SECRET = /\bkind:\s*['"]?Secret['"]?\s*[,'"]?\s*$/;
+/** True when `value` names the Secret: the literal, or one of `consts` as a whole token. */
+function namesSecret(value: string, consts: string[]): boolean {
+  return [SECRET, ...consts].some((n) =>
+    new RegExp(`(^|[^\\w$-])${n.replace(/[$]/g, '\\$')}([^\\w$-]|$)`).test(value),
+  );
+}
+
+/** `kind: Secret`, `"kind": "Secret"`, `kind: 'Secret'`, never `kind: SecretStore`. */
+const KIND_SECRET = /["']?\bkind["']?\s*:\s*["'`]?Secret(?![\w-])/g;
 
 /** `file:line` of every Secret manifest whose name is vibecarbon-tls. */
 function tlsSecretManifests(path: string, text: string): string[] {
-  const lines = text.split('\n');
   const consts = secretNameConstants(text);
-  const names = [SECRET, ...consts];
   const hits: string[] = [];
-  lines.forEach((line, i) => {
-    if (!KIND_SECRET.test(line)) return;
-    // The name sits in the next few lines of the manifest (metadata.name).
-    const window = lines.slice(i + 1, i + 9).join('\n');
-    const m = window.match(/\bname['"]?\s*:\s*(.+)/);
-    if (!m) return;
-    const value = m[1];
-    if (
-      names.some((n) =>
-        new RegExp(`(^|[^\\w$-])${n.replace(/[$]/g, '\\$')}([^\\w$-]|$)`).test(value),
-      )
-    ) {
-      hits.push(`${path}:${i + 1}`);
+  for (const m of text.matchAll(KIND_SECRET)) {
+    const at = m.index ?? 0;
+    // The manifest around the marker: the rest of its line before it (a
+    // one-line object literal may name it first), and what follows, up to
+    // the next manifest.
+    const lineStart = text.lastIndexOf('\n', at) + 1;
+    let after = text.slice(at + m[0].length, at + m[0].length + 400);
+    const next = after.search(/\bkind["']?\s*:|\n---/);
+    if (next >= 0) after = after.slice(0, next);
+    const around = `${text.slice(lineStart, at)}\n${after}`;
+    const name = around.match(/["']?\bname["']?\s*:\s*([^\n,}]+)/);
+    if (name && namesSecret(name[1], consts)) {
+      hits.push(`${path}:${text.slice(0, at).split('\n').length}`);
     }
-  });
+  }
   return hits;
 }
 
-const IMPERATIVE_WRITES = [
-  /create\s+secret\s+tls\b/,
-  /create\s+secret\s+generic\s+['"]?vibecarbon-tls\b/,
-  /\b(patch|label|annotate|replace|edit|apply)\b[^\n]{0,80}\bsecrets?\b[^\n]{0,40}vibecarbon-tls\b/,
-  /\b(patch|label|annotate|replace|edit)\b[^\n]{0,40}secret\/vibecarbon-tls\b/,
-];
+const WRITE_VERB = /(?<![\w$-])(create|patch|label|annotate|replace|edit|apply)(?![\w$-])/g;
 
-function imperativeWrite(line: string): boolean {
-  return IMPERATIVE_WRITES.some((re) => re.test(line));
+/**
+ * `file:line` of every kubectl write of the Secret: a write verb, then a
+ * `secret` resource, then the name (the literal, a constant holding it, or
+ * `secret/<name>`), within one command. A command ends at `]`, `;`, `&&`,
+ * `||`, `|` or a newline that is not a shell continuation or inside an argv
+ * array, so a multi-line argv counts as one command.
+ */
+function imperativeWrites(path: string, text: string): string[] {
+  const consts = secretNameConstants(text);
+  const names = new Set([SECRET, ...consts]);
+  const hits: string[] = [];
+  for (const m of text.matchAll(WRITE_VERB)) {
+    const at = m.index ?? 0;
+    let cmd = text.slice(at, at + 240);
+    const end = cmd.search(/\]|;|&&|\|\||\||[^\\,[\s]\s*\n(?!\s*['"`\]])/);
+    if (end >= 0) cmd = cmd.slice(0, end + 1);
+    const tokens = cmd.split(/[^\w$./-]+/).filter(Boolean);
+    const secretAt = tokens.findIndex((t) => t === 'secret' || t === 'secrets');
+    const slashName = tokens.some(
+      (t) => /^secrets?\//.test(t) && names.has(t.replace(/^secrets?\//, '')),
+    );
+    const createTls = m[1] === 'create' && secretAt >= 0 && tokens[secretAt + 1] === 'tls';
+    const named = secretAt >= 0 && tokens.slice(secretAt + 1).some((t) => names.has(t));
+    if (slashName || createTls || named) {
+      hits.push(`${path}:${text.slice(0, at).split('\n').length}`);
+    }
+  }
+  return hits;
 }
 
+/** Every violation of rules 1 and 2 in the tree at `root`. */
+function censusViolations(root: string): string[] {
+  return readTree(root).flatMap((f) => [
+    ...(f.path === BUILDER_FILE ? [] : tlsSecretManifests(f.path, f.text)),
+    ...imperativeWrites(f.path, f.text),
+  ]);
+}
+
+const FILES = readTree(REPO);
+
 describe('the census matchers', () => {
-  it('see a YAML or JS Secret manifest named vibecarbon-tls, directly or by constant', () => {
+  it('see a YAML, JSON or JS Secret manifest named vibecarbon-tls, directly or by constant', () => {
     const yaml = ['apiVersion: v1', 'kind: Secret', 'metadata:', '  name: vibecarbon-tls'].join(
       '\n',
     );
@@ -114,14 +172,45 @@ describe('the census matchers', () => {
       '];',
     ].join('\n');
     expect(tlsSecretManifests('b.js', js)).toEqual(['b.js:3']);
+    const json =
+      '{\n  "apiVersion": "v1",\n  "kind": "Secret",\n  "metadata": { "name": "vibecarbon-tls" }\n}';
+    expect(tlsSecretManifests('c.json', json)).toEqual(['c.json:3']);
+    const oneLine = [
+      "const N = 'vibecarbon-tls';",
+      "const s = { metadata: { name: N }, kind: 'Secret', data: {} };",
+      "const t = { kind: 'Secret', metadata: { name: N } };",
+    ].join('\n');
+    expect(tlsSecretManifests('d.js', oneLine)).toEqual(['d.js:2', 'd.js:3']);
     const other = ['kind: Secret', 'metadata:', '  name: vibecarbon-app-secrets'].join('\n');
-    expect(tlsSecretManifests('c.yaml', other)).toEqual([]);
+    expect(tlsSecretManifests('e.yaml', other)).toEqual([]);
+    expect(
+      tlsSecretManifests('f.yaml', 'kind: SecretStore\nmetadata:\n  name: vibecarbon-tls'),
+    ).toEqual([]);
   });
-  it('see imperative kubectl writes of the Secret', () => {
-    expect(imperativeWrite('kubectl create secret tls vibecarbon-tls --cert=a --key=b')).toBe(true);
-    expect(imperativeWrite('kubectl -n vibecarbon label secret vibecarbon-tls a=b')).toBe(true);
-    expect(imperativeWrite("['patch', 'secret', 'vibecarbon-tls', '-n', 'vibecarbon']")).toBe(true);
-    expect(imperativeWrite('kubectl get secret vibecarbon-tls -n vibecarbon -o json')).toBe(false);
+
+  it('see imperative kubectl writes of the Secret, on one line or across an argv array', () => {
+    const w = (t: string) => imperativeWrites('x', t).length > 0;
+    expect(w('kubectl create secret tls vibecarbon-tls --cert=a --key=b')).toBe(true);
+    expect(w('kubectl create secret tls other --cert=a --key=b')).toBe(true);
+    expect(w('kubectl -n vibecarbon label secret vibecarbon-tls a=b')).toBe(true);
+    expect(w('kubectl annotate secret/vibecarbon-tls a=b')).toBe(true);
+    expect(w("['patch', 'secret', 'vibecarbon-tls', '-n', 'vibecarbon']")).toBe(true);
+    expect(w("const NAME = 'vibecarbon-tls';\nrun(['label', 'secret', NAME, 'a=b']);")).toBe(true);
+    expect(
+      w(
+        "const NAME = 'vibecarbon-tls';\nawait runKubectl([\n  'patch',\n  'secret',\n  NAME,\n  '-n',\n  'vibecarbon',\n]);",
+      ),
+    ).toBe(true);
+    expect(w('kubectl create secret generic vibecarbon-tls \\\n  --from-file=tls.crt=a')).toBe(
+      true,
+    );
+    expect(w('kubectl get secret vibecarbon-tls -n vibecarbon -o json')).toBe(false);
+    expect(w('kubectl create secret generic vibecarbon-app-secrets --from-literal=a=b')).toBe(
+      false,
+    );
+    expect(
+      w("const NAME = 'vibecarbon-tls';\nrun(['apply', '-f', '-']);\nget(['secret', NAME]);"),
+    ).toBe(false);
   });
 });
 
@@ -136,22 +225,47 @@ describe('Secret/vibecarbon-tls writer census', () => {
     expect(builder && tlsSecretManifests(builder.path, builder.text)).toHaveLength(1);
   });
 
-  it('builds a vibecarbon-tls Secret manifest only in buildRestoredTlsSecret', () => {
-    const outside = FILES.filter((f) => f.path !== BUILDER_FILE).flatMap((f) =>
-      tlsSecretManifests(f.path, f.text),
-    );
-    expect(outside).toEqual([]);
+  it('finds no writer of the Secret outside buildRestoredTlsSecret (rules 1 and 2)', () => {
+    expect(censusViolations(REPO)).toEqual([]);
   });
 
-  it('never writes the vibecarbon-tls Secret with an imperative kubectl command', () => {
-    const hits = FILES.flatMap((f) =>
-      f.text
-        .split('\n')
-        .map((line, i) => ({ line, at: `${f.path}:${i + 1}` }))
-        .filter(({ line }) => imperativeWrite(line))
-        .map(({ at }) => at),
-    );
-    expect(hits).toEqual([]);
+  it('bites: a planted writer in a scanned tree fails the census', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tls-writer-census-'));
+    const plant = (path: string, text: string) => {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), text);
+    };
+    try {
+      plant(
+        BUILDER_FILE,
+        "const K = 'vibecarbon-tls';\nexport const m = { kind: 'Secret', metadata: { name: K } };\n",
+      );
+      plant('src/clean.js', "run(['get', 'secret', 'vibecarbon-tls']);\n");
+      expect(censusViolations(root)).toEqual([]);
+      plant(
+        'src/lib/rogue.js',
+        "const NAME = 'vibecarbon-tls';\nawait kubectl([\n  'label',\n  'secret',\n  NAME,\n  'a=b',\n]);\n",
+      );
+      plant(
+        'carbon/k8s/rogue.json',
+        '{ "kind": "Secret", "metadata": { "name": "vibecarbon-tls" } }\n',
+      );
+      plant('scripts/rogue.sh', 'kubectl create secret tls vibecarbon-tls --cert=c --key=k\n');
+      plant(
+        'services/x/rogue.yaml',
+        'apiVersion: v1\nkind: Secret\nmetadata:\n  name: vibecarbon-tls\n',
+      );
+      expect(censusViolations(root).sort()).toEqual(
+        [
+          'carbon/k8s/rogue.json:1',
+          'scripts/rogue.sh:1',
+          'services/x/rogue.yaml:2',
+          'src/lib/rogue.js:3',
+        ].sort(),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('calls buildRestoredTlsSecret only from restoreK8sTlsSecret, which sends its manifest', () => {
