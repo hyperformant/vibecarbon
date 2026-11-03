@@ -30,7 +30,7 @@ write_files:
       #!/bin/sh
       out=/var/lib/vibecarbon/boot-pull
       mkdir -p "$out"
-      echo "bootPull.begin $(date +%s.%N)" >> /var/log/vibecarbon-boot.log || true
+      echo "b.begin $(date +%s.%N)">>/var/log/vcboot||true
       echo running > "$out/status"
       : > "$out/log"
       pids=""
@@ -47,7 +47,7 @@ write_files:
       else
         echo "failed: $failed image(s), $(tail -n 1 "$out/log")" > "$out/status"
       fi
-      echo "bootPull.end $(date +%s.%N)" >> /var/log/vibecarbon-boot.log || true
+      echo "b.end $(date +%s.%N)">>/var/log/vcboot||true
 
   - path: /etc/apt/apt.conf.d/20auto-upgrades
     permissions: '0644'
@@ -98,12 +98,12 @@ runcmd:
   # restart is cheap here - no containers exist yet at boot. Nothing below
   # restarts Docker again, so the boot pull started next never races a restart.
   #
-  # Boot timing: one `<phase> <epoch seconds>` line per major phase (and a
+  # Boot timing: one `<id> <epoch seconds>` line per major phase (and a
   # begin/end pair around the background boot pull), read back by the deploy
   # after its ready wait (src/lib/deploy/boot-timing.js). Timing only: nothing
   # here depends on these lines. Anything spliced above this mark (a provider's
   # docker install) is timed as the part of the user script before it.
-  - [sh, -c, 'echo "docker $(date +%s.%N)" >> /var/log/vibecarbon-boot.log || true']
+  - [sh, -c, 'echo "d $(date +%s.%N)">>/var/log/vcboot||true']
   - [systemctl, enable, --now, docker]
   - [systemctl, restart, docker]
   # The boot image pull, detached so it overlaps the rest of boot and never
@@ -117,9 +117,9 @@ runcmd:
   # UFW and unattended-upgrades, now that Docker and the pull are going.
   # Lock timeout, not bare apt-get: unattended-upgrades may hold dpkg's lock
   # on first boot (src/lib/deploy/apt.js).
-  - [sh, -c, 'echo "apt $(date +%s.%N)" >> /var/log/vibecarbon-boot.log || true']
+  - [sh, -c, 'echo "a $(date +%s.%N)">>/var/log/vcboot||true']
   - [sh, -c, 'apt-get -o DPkg::Lock::Timeout=300 install -y ufw unattended-upgrades']
-  - [sh, -c, 'echo "ufw $(date +%s.%N)" >> /var/log/vibecarbon-boot.log || true']
+  - [sh, -c, 'echo "u $(date +%s.%N)">>/var/log/vcboot||true']
   # UFW defaults + the three ports Traefik needs. Ordering matters: we enable
   # last so the allow rules are in place before the first policy flip.
   - [ufw, default, deny, incoming]
@@ -140,6 +140,6 @@ runcmd:
   # not exist yet on a first boot; mkdir -p is safe either way.
   - [mkdir, -p, /var/lib/vibecarbon]
   - [sh, -c, 'printf "%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /var/lib/vibecarbon/ready']
-  - [sh, -c, 'echo "done $(date +%s.%N)" >> /var/log/vibecarbon-boot.log || true']
+  - [sh, -c, 'echo "e $(date +%s.%N)">>/var/log/vcboot||true']
 
 final_message: "vibecarbon cloud-init complete after $UPTIME seconds"

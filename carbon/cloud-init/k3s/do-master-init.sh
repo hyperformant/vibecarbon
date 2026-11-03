@@ -1,11 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# Boot timing: one `<phase> <epoch seconds>` line per major phase, read back
-# by the deploy after its ready wait (src/lib/deploy/boot-timing.js). Timing
-# only: a failed write is ignored and nothing below reads them.
-vc_mark() { echo "$1 $(date +%s.%N)" >> /var/log/vibecarbon-boot.log || true; }
-vc_mark preamble
+# Boot timing marks, read by src/lib/deploy/boot-timing.js
+_m(){ echo "$1 $(date +%s.%N)">>/var/log/vcboot||true;}
+_m p
 
 # Note: This script runs AS PART of cloud-init (user_data), so we cannot wait for
 # cloud-init to complete (that would cause a deadlock). The script starts immediately.
@@ -14,13 +12,7 @@ vc_mark preamble
 # and unattended-upgrades holds dpkg's lock right through first boot --
 # which is exactly when cloud-init runs this. `-o DPkg::Lock::Timeout`
 # makes apt block on the lock instead. See src/lib/deploy/apt.js for the
-# RCA and the live verification.
-#
-# This replaced a `fuser` poll loop that was broken two ways: it polled
-# /var/lib/dpkg/lock, lists/lock and archives/lock but never
-# /var/lib/dpkg/lock-frontend -- the lock that actually fails the install
-# -- and being a pre-check it was TOCTOU, since unattended-upgrades could
-# take the lock in the gap between the loop passing and apt-get starting.
+# RCA, the live verification and the fuser poll loop this replaced.
 
 # Update apt lists + install the packages we need. `apt-get upgrade` was
 # removed from the critical path -- unattended-upgrades handles security
@@ -34,10 +26,10 @@ mkdir -p /etc/ssh/sshd_config.d
 printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
 systemctl reload ssh || systemctl reload sshd || true
 
-vc_mark apt
+_m a
 apt-get -o DPkg::Lock::Timeout=300 update -qq
 apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq docker.io docker-buildx
-vc_mark network
+_m n
 
 # Validate k3s version is set
 K3S_TARGET_VERSION="${k3s_version}"
@@ -160,7 +152,7 @@ REGEOF
 # validates this in practice.
 # --system-default-registry: k3s system images come only from our ghcr mirror
 # (registries.yaml above; K3S_SYSTEM_IMAGE_MIRRORS). Agents inherit it.
-vc_mark k3s.install
+_m k
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" sh -s - server \
@@ -192,7 +184,7 @@ if [ "$K3S_INSTALL_OK" != "true" ]; then
 fi
 
 # Wait for k3s to be ready (max 3 minutes -- if it hasn't started by then, something is wrong)
-vc_mark k3s.ready
+_m r
 K3S_READY=false
 for i in $(seq 1 36); do
   if kubectl get nodes 2>/dev/null | grep -q "Ready"; then
@@ -210,7 +202,7 @@ if [ "$K3S_READY" != "true" ]; then
   exit 1
 fi
 
-vc_mark addons
+_m x
 
 # Marker for vibecarbon's deployK3s waiter -- set AFTER the digitalocean
 # Secret + CCM/CSI install below complete (see end of script). Keeps the
@@ -345,5 +337,5 @@ echo "k3s master installation complete!"
 # marker only fires after k3s + the digitalocean secret + CCM + CSI are
 # all in place -- i.e., the cluster is ready for real workloads, not just
 # "k3s daemon is up."
-vc_mark done
+_m e
 touch /tmp/k3s-ready

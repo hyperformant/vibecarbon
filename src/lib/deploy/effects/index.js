@@ -19,7 +19,7 @@ import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
-import { startBootTiming } from '../boot-timing.js';
+import { queueBootTiming } from '../boot-timing.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { buildRemote } from '../remote-build.js';
 import { fingerprintSecret } from '../secret-fingerprint.js';
@@ -196,10 +196,9 @@ async function setupServer(ctx) {
         await setupServerRemote(serverIp, sshKeyPath, timeoutMs);
       }
     });
-    // First-boot timing (`[perf] deploy.compose.boot.*`, VIBECARBON_PERF
-    // only): what the wait above spent inside cloud-init. Not awaited and
-    // never fails the deploy.
-    void startBootTiming([{ ip: serverIp, prefix: 'compose' }], sshKeyPath);
+    // First-boot timing (`[perf] deploy.compose.boot.*`, VIBECARBON_PERF only):
+    // queued now, read once the command is over (lib/deploy/boot-timing.js).
+    queueBootTiming([{ ip: serverIp, prefix: 'deploy.compose' }], sshKeyPath);
     state.completeStep('compose-setup-server', { serverIp });
   }
 }

@@ -34,9 +34,10 @@
  * lines (checked at capture against the pre-change fixture).
  *
  * RE-CAPTURED 2026-11-02 (first-boot timing): each init script gained the
- * `vc_mark` helper and one `vc_mark <phase>` line per major phase
- * (src/lib/deploy/boot-timing.js reads them back). The diff is confined to
- * those added lines; no existing line changed.
+ * one-line `_m` helper and one `_m <id>` line per major phase
+ * (src/lib/deploy/boot-timing.js reads them back), and the apt comment's
+ * fuser-loop history paragraph became a pointer to src/lib/deploy/apt.js,
+ * which holds it, to keep master-init under 27 KiB. No command changed.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -2,76 +2,89 @@
  * First-boot timing for freshly provisioned nodes.
  *
  * A node's ready wait (`deploy.<prefix>.waitForReady`,
- * `deploy.compose.cloudInitReady`, ...) is one opaque number covering the
- * whole of cloud-init. This module opens it up: once the wait has finished,
- * it reads the node's own record of that boot over ssh and emits one
- * `[perf] deploy.<prefix>.boot.<stage> <ms>ms` line per stage, so the timings
- * reach the perf summary and the e2e `perf_substep` capture through the same
- * stderr parser as every other `[perf]` line.
+ * `deploy.compose.cloudInitReady`, `scale.cloudInitReady`) is one opaque
+ * number covering the whole of cloud-init. This module opens it up: it reads
+ * each node's own record of that boot over ssh and emits one
+ * `[perf] <prefix>.boot.<stage> <ms>ms` line per stage, so the timings reach
+ * the perf summary and the e2e `perf_substep` capture through the same stderr
+ * parser as every other `[perf]` line.
  *
- * Three sources, all read in one ssh round trip (BOOT_TIMING_SCRIPT):
+ * When: a ready wait only QUEUES its nodes (`queueBootTiming`, no I/O).
+ * cli.js drains the queue (`flushBootTiming`) once the command is over,
+ * after `cli.<command>.total` is recorded, under one bounded budget. So the
+ * collection never competes with the boot or deploy it measures, never
+ * counts toward `deploy.total` / `cli.deploy.total` or the deploy budget,
+ * and its lines always print before the process exits. Nothing is lost by
+ * reading late: the marks are absolute timestamps and cloud-init keeps its
+ * own log.
+ *
+ * Sources, all read in one ssh round trip per node (BOOT_TIMING_SCRIPT):
  *
  *   - `cloud-init analyze show`: total cloud-init time and each stage
  *     (init-local, init-network, modules-config, modules-final).
  *   - `cloud-init analyze blame`: the slowest modules.
- *   - BOOT_MARK_LOG: one `<phase> <epoch seconds>` line per major phase,
- *     written by the cloud-init scripts in carbon/cloud-init/. A plain mark
- *     starts a sequential phase that runs until the next plain mark (the last
- *     one, `done`, only closes the chain). `<name>.begin` / `<name>.end`
- *     bracket a background span (the compose boot image pull) that overlaps
- *     the chain.
- *   - `systemd-analyze`: kernel and userspace boot time, when systemd says
- *     boot has finished.
+ *   - BOOT_MARK_LOG: one `<id> <epoch seconds>` line per major phase, written
+ *     by the cloud-init scripts in carbon/cloud-init/ with one-letter ids
+ *     (PHASE_IDS; Hetzner caps user data at 32 KiB). A plain mark starts a
+ *     sequential phase that runs until the next plain mark (the last one, `e`,
+ *     only closes the chain). `<id>.begin` / `<id>.end` bracket a background
+ *     span (the compose boot image pull) that overlaps the chain.
+ *   - `systemd-analyze`: kernel and userspace boot time.
  *
  * Once per node, cold provisions only: the script reports nothing on a node
  * without the marker log (provisioned before the marks existed, so its boot
- * is not a fresh one) and leaves a sentinel beside the log, so a later deploy
+ * is not a fresh one) and leaves a sentinel beside the log, so a later run
  * that re-runs the ready wait reports nothing again.
  *
- * Never fails a deploy: `collectBootTiming` resolves in every case, prints at
- * most one warning, and is meant to be started without being awaited. It only
- * runs when perf tracing is on (VIBECARBON_PERF=1).
+ * Never fails a command: collection only runs when perf tracing is on
+ * (VIBECARBON_PERF=1), every path resolves, and a node that cannot be read
+ * prints one warning.
  */
 
 import { perfEnabled, perfRecord } from '../perf.js';
 import { sshRun } from '../ssh.js';
 
 /** Where the cloud-init scripts append their phase marks. */
-export const BOOT_MARK_LOG = '/var/log/vibecarbon-boot.log';
+export const BOOT_MARK_LOG = '/var/log/vcboot';
 
 /** Written beside the log once a node's boot has been reported. */
-export const BOOT_REPORTED_SENTINEL = '/var/log/vibecarbon-boot.reported';
+export const BOOT_REPORTED_SENTINEL = '/var/log/vcboot.done';
 
 /**
- * How long the remote script waits for cloud-init to finish. A master's ready
- * flag lands seconds before cloud-init's final modules finish, and a db or
- * worker node may still be joining when the master turns ready.
+ * The one-letter phase ids the cloud-init scripts write, and the stage names
+ * they are reported under. An id not listed here is reported as written.
  */
-const CLOUD_INIT_WAIT_SEC = 180;
+export const PHASE_IDS = Object.freeze({
+  p: 'preamble',
+  a: 'apt',
+  n: 'network',
+  w: 'master.wait',
+  k: 'k3s.install',
+  r: 'k3s.ready',
+  x: 'addons',
+  d: 'docker',
+  u: 'ufw',
+  b: 'bootPull',
+  e: 'done',
+});
 
-/** How long the remote script waits for the detached compose boot pull. */
-const BOOT_PULL_WAIT_SEC = 90;
-
-/** The ssh call's own bound: both waits plus the analysis itself. */
-const COLLECT_TIMEOUT_MS = (CLOUD_INIT_WAIT_SEC + BOOT_PULL_WAIT_SEC + 30) * 1000;
+/** The whole collection's bound, all nodes in parallel. */
+export const BOOT_TIMING_BUDGET_MS = 45_000;
 
 /** How many of the slowest cloud-init modules to report. */
 const TOP_MODULES = 5;
 
 /**
  * The remote half, fed to `sh -s` on stdin. Prints one `==> <section> <==`
- * header per source, or `==> skip <==` and a reason.
+ * header per source, or `==> skip <==` and a reason. By the time it runs the
+ * command is over, so cloud-init has long finished; the short wait only
+ * covers a node that is somehow still in it.
  */
 export const BOOT_TIMING_SCRIPT = `log=${BOOT_MARK_LOG}
 sentinel=${BOOT_REPORTED_SENTINEL}
 if [ ! -f "$log" ]; then echo '==> skip <=='; echo no-marker-log; exit 0; fi
 if [ -f "$sentinel" ]; then echo '==> skip <=='; echo already-reported; exit 0; fi
-timeout ${CLOUD_INIT_WAIT_SEC} cloud-init status --wait >/dev/null 2>&1 || true
-i=0
-while [ "$(cat /var/lib/vibecarbon/boot-pull/status 2>/dev/null)" = running ] && [ "$i" -lt ${BOOT_PULL_WAIT_SEC} ]; do
-  sleep 1
-  i=$((i + 1))
-done
+timeout 10 cloud-init status --wait >/dev/null 2>&1 || true
 echo '==> markers <=='
 cat "$log"
 echo '==> show <=='
@@ -107,14 +120,14 @@ export function parseBootMarkers(text) {
     const [, name, raw] = m;
     const t = Number(raw);
     if (name.endsWith('.begin')) {
-      begins.set(name.slice(0, -'.begin'.length), t);
+      begins.set(phaseName(name.slice(0, -'.begin'.length)), t);
     } else if (name.endsWith('.end')) {
-      const base = name.slice(0, -'.end'.length);
+      const base = phaseName(name.slice(0, -'.end'.length));
       const start = begins.get(base);
       if (start !== undefined && t >= start) spans.push({ name: base, ms: toMs(t - start) });
       begins.delete(base);
     } else {
-      chain.push({ name, t });
+      chain.push({ name: phaseName(name), t });
     }
   }
   /** @type {Timing[]} */
@@ -283,21 +296,28 @@ export function summarizeBootTiming(report) {
 }
 
 /**
- * @param {string} prefix  e.g. `k3s.standby.master`, `compose`
+ * @param {string} prefix  e.g. `deploy.k3s.standby.master`, `scale.server`
  * @param {string} stage   e.g. `script.apt`
  */
 export function bootTimingPerfName(prefix, stage) {
-  return `deploy.${prefix}.boot.${stage}`;
+  return `${prefix}.boot.${stage}`;
+}
+
+/** The one-letter id a mark is written with -> its stage name. */
+function phaseName(id) {
+  return Object.hasOwn(PHASE_IDS, id) ? PHASE_IDS[id] : id;
 }
 
 /**
  * Read one node's first-boot timing and emit it as `[perf]` lines. Resolves
- * in every case (never rejects), so callers start it without awaiting.
+ * in every case (never rejects).
  *
  * @param {object} args
  * @param {string} args.ip
  * @param {string} args.sshKeyPath
- * @param {string} args.prefix  perf name prefix, without `deploy.` / `.boot`
+ * @param {string} args.prefix  perf name prefix, e.g. `deploy.compose`
+ * @param {number} [args.timeoutMs]  the ssh call's bound
+ * @param {AbortSignal} [args.signal]  stops the call when the budget runs out
  * @param {boolean} [args.enabled]  defaults to perfEnabled()
  * @param {typeof sshRun} [args.run]
  * @param {(name: string, ms: number) => void} [args.emit]
@@ -308,6 +328,8 @@ export async function collectBootTiming({
   ip,
   sshKeyPath,
   prefix,
+  timeoutMs = BOOT_TIMING_BUDGET_MS,
+  signal,
   enabled = perfEnabled(),
   run = sshRun,
   emit = perfRecord,
@@ -318,15 +340,31 @@ export async function collectBootTiming({
     try {
       warn(`[boot-timing] ${prefix}: boot timing not collected (${reason})`);
     } catch {
-      // a warning must never fail the deploy either
+      // a warning must never fail the command either
     }
   };
   try {
-    const raw = await run(ip, sshKeyPath, ['sh', '-s'], {
-      input: BOOT_TIMING_SCRIPT,
-      timeout: COLLECT_TIMEOUT_MS,
-      transportRetry: false,
-    });
+    if (signal?.aborted) throw new Error('out of time');
+    const call = Promise.resolve().then(() =>
+      run(ip, sshKeyPath, ['sh', '-s'], {
+        input: BOOT_TIMING_SCRIPT,
+        timeout: timeoutMs,
+        transportRetry: false,
+        ...(signal && { signal }),
+      }),
+    );
+    // The budget ends this node's wait even if the call ignores the signal.
+    const raw = signal
+      ? await Promise.race([
+          call,
+          new Promise((_, reject) =>
+            signal.addEventListener('abort', () => reject(new Error('out of time')), {
+              once: true,
+            }),
+          ),
+        ])
+      : await call;
+    call.catch(() => {});
     const report = parseBootReport(raw);
     if (report.skipped) return { stages: [], skipped: report.skipped };
     const stages = summarizeBootTiming(report);
@@ -343,24 +381,65 @@ export async function collectBootTiming({
   }
 }
 
+/** @type {{ ip: string, sshKeyPath: string, prefix: string }[]} */
+const queue = [];
+
 /**
- * Collect several freshly provisioned nodes' boot timing in parallel. Callers
- * start it right after the nodes' ready wait and do not await it: the db and
- * worker nodes may still be finishing cloud-init when the master turns ready,
- * and the remote script waits (bounded) for that off the critical path.
- * Nodes without an address are skipped. Never rejects.
+ * Note nodes whose ready wait just finished on a fresh provision. No I/O: the
+ * reading happens in flushBootTiming once the command is over. A no-op when
+ * perf tracing is off. Nodes without an address, and an address already
+ * queued, are skipped.
  *
  * @param {{ ip?: string|null, prefix: string }[]} nodes
  * @param {string} sshKeyPath
- * @param {Partial<Parameters<typeof collectBootTiming>[0]>} [deps]  test seams
+ * @param {{ enabled?: boolean }} [opts]
+ */
+export function queueBootTiming(nodes, sshKeyPath, { enabled = perfEnabled() } = {}) {
+  if (!enabled) return;
+  for (const n of nodes) {
+    if (!n.ip || queue.some((q) => q.ip === String(n.ip))) continue;
+    queue.push({ ip: String(n.ip), sshKeyPath, prefix: n.prefix });
+  }
+}
+
+/** What is queued (tests). */
+export function pendingBootTiming() {
+  return queue.map((q) => ({ ...q }));
+}
+
+/**
+ * Read every queued node's boot timing, in parallel, within one budget, and
+ * empty the queue. cli.js calls this after the command's own total is
+ * recorded. Resolves in every case, and by the budget at the latest.
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.budgetMs]
+ * @param {boolean} [opts.enabled]
+ * @param {typeof sshRun} [opts.run]
+ * @param {(name: string, ms: number) => void} [opts.emit]
+ * @param {(message: string) => void} [opts.warn]
  * @returns {Promise<void>}
  */
-export async function startBootTiming(nodes, sshKeyPath, deps = {}) {
-  await Promise.all(
-    nodes
-      .filter((n) => n.ip)
-      .map((n) => collectBootTiming({ ...deps, ip: String(n.ip), sshKeyPath, prefix: n.prefix })),
-  );
+export async function flushBootTiming({ budgetMs = BOOT_TIMING_BUDGET_MS, ...deps } = {}) {
+  const nodes = queue.splice(0);
+  if (nodes.length === 0) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), budgetMs);
+  timer.unref?.();
+  try {
+    await Promise.all(
+      nodes.map((n) =>
+        collectBootTiming({
+          ...deps,
+          ...n,
+          timeoutMs: budgetMs,
+          signal: controller.signal,
+        }),
+      ),
+    );
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Seconds (float) -> whole ms. */

@@ -1,8 +1,9 @@
 /**
- * Every deploy mode's node ready wait is followed by the same first-boot
- * timing collection (src/lib/deploy/boot-timing.js), started without being
- * awaited so it never sits on the critical path, and only on the branch that
- * actually waited (a warm redeploy that skips the wait collects nothing).
+ * Every node ready wait (deploy in each mode, and scale's replacement server)
+ * queues the same first-boot timing collection (src/lib/deploy/boot-timing.js)
+ * on the branch that actually waited, and cli.js reads the queue only after
+ * the command's own total is recorded, so the collection never competes with
+ * the work it measures and never counts toward `cli.<command>.total`.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,30 +24,43 @@ function between(text: string, from: string, to: string): string {
 }
 
 describe('first-boot timing call sites', () => {
-  it('nothing awaits the collection', () => {
+  it('ready waits only queue: nothing collects inline', () => {
     for (const file of [
       'lib/deploy/k8s/k3s.js',
       'lib/deploy/effects/index.js',
       'lib/deploy/effects/compose-ha.js',
+      'scale.js',
     ]) {
       const text = src(file);
-      expect(text, file).toContain('void startBootTiming(');
-      expect(text, file).not.toMatch(/await\s+startBootTiming\(/);
+      expect(text, file).toContain('queueBootTiming(');
+      expect(text, file).not.toMatch(/collectBootTiming|flushBootTiming/);
     }
+  });
+
+  it('cli.js reads the queue after the command total, in the finally', () => {
+    const text = src('cli.js');
+    const fin = between(text, '  } finally {', '\n}\n');
+    const total = fin.indexOf('commandTimer.end();');
+    const flush = fin.indexOf('await flushBootTiming()');
+    expect(total).toBeGreaterThan(-1);
+    expect(flush).toBeGreaterThan(total);
+    // Off the startup path: loaded only when perf tracing is on.
+    expect(fin).toContain('if (perfEnabled())');
+    expect(text).not.toMatch(/^import .*boot-timing/m);
   });
 
   it('k3s: master, db and every static worker, after the ready wait and the host-key seed', () => {
     const text = src('lib/deploy/k8s/k3s.js');
     const wait = text.indexOf(tpl('deploy.#{perfPrefix}.waitForReady'));
     const seed = text.indexOf('await seedKnownHosts(khPath, seedIp)', wait);
-    const call = text.indexOf('void startBootTiming(', wait);
+    const call = text.indexOf('queueBootTiming(', wait);
     expect(wait).toBeGreaterThan(-1);
     expect(seed).toBeGreaterThan(wait);
     expect(call).toBeGreaterThan(seed);
-    const site = text.slice(call, text.indexOf(');', call));
-    expect(site).toContain(tpl('`#{perfPrefix}.master`'));
-    expect(site).toContain(tpl('`#{perfPrefix}.db`'));
-    expect(site).toContain(tpl('`#{perfPrefix}.worker#{i + 1}`'));
+    const site = text.slice(call, text.indexOf('privateKeyPath,', call));
+    expect(site).toContain(tpl('`deploy.#{perfPrefix}.master`'));
+    expect(site).toContain(tpl('`deploy.#{perfPrefix}.db`'));
+    expect(site).toContain(tpl('`deploy.#{perfPrefix}.worker#{i + 1}`'));
     // Only when this run waited for the master, i.e. a fresh (re)provision.
     const block = between(
       text,
@@ -54,30 +68,42 @@ describe('first-boot timing call sites', () => {
       "state.completeStep('k3s-ready')",
     );
     expect(block).toContain('bootTimingDue = true');
+    expect(text.slice(call - 40, call)).toContain('if (bootTimingDue)');
   });
 
   it('compose: the server, inside the state-gated cloud-init wait', () => {
-    const text = src('lib/deploy/effects/index.js');
     const block = between(
-      text,
+      src('lib/deploy/effects/index.js'),
       "if (!state.shouldSkip('compose-setup-server'",
       "state.completeStep('compose-setup-server'",
     );
     const wait = block.indexOf("'deploy.compose.cloudInitReady'");
-    const call = block.indexOf('void startBootTiming(');
+    const call = block.indexOf('queueBootTiming(');
     expect(wait).toBeGreaterThan(-1);
     expect(call).toBeGreaterThan(wait);
-    expect(block.slice(call)).toContain("prefix: 'compose'");
+    expect(block.slice(call)).toContain("prefix: 'deploy.compose'");
   });
 
   it('compose-ha: both servers, after the paired cloud-init wait', () => {
-    const text = src('lib/deploy/effects/compose-ha.js');
-    const fn = between(text, 'async function haSetupServers(', '\n}\n');
+    const fn = between(
+      src('lib/deploy/effects/compose-ha.js'),
+      'async function haSetupServers(',
+      '\n}\n',
+    );
     const wait = fn.indexOf("'deploy.ha.compose.cloudInitReady.both'");
-    const call = fn.indexOf('void startBootTiming(');
+    const call = fn.indexOf('queueBootTiming(');
     expect(wait).toBeGreaterThan(-1);
     expect(call).toBeGreaterThan(wait);
-    expect(fn.slice(call)).toContain("prefix: 'ha.compose.primary'");
-    expect(fn.slice(call)).toContain("prefix: 'ha.compose.standby'");
+    expect(fn.slice(call)).toContain("prefix: 'deploy.ha.compose.primary'");
+    expect(fn.slice(call)).toContain("prefix: 'deploy.ha.compose.standby'");
+  });
+
+  it('scale: the replacement server, after its cloud-init wait', () => {
+    const text = src('scale.js');
+    const wait = text.indexOf("perfAsync('scale.cloudInitReady'");
+    const call = text.indexOf('queueBootTiming(', wait);
+    expect(wait).toBeGreaterThan(-1);
+    expect(call).toBeGreaterThan(wait);
+    expect(text.slice(call, call + 120)).toContain("prefix: 'scale.server'");
   });
 });

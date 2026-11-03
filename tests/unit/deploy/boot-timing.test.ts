@@ -12,18 +12,22 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BOOT_MARK_LOG,
+  BOOT_TIMING_BUDGET_MS,
   BOOT_TIMING_SCRIPT,
   bootTimingPerfName,
   collectBootTiming,
+  flushBootTiming,
+  PHASE_IDS,
   parseAnalyzeBlame,
   parseAnalyzeShow,
   parseBootMarkers,
   parseBootReport,
   parseSystemdAnalyze,
-  startBootTiming,
+  pendingBootTiming,
+  queueBootTiming,
   summarizeBootTiming,
 } from '../../../src/lib/deploy/boot-timing.js';
 
@@ -89,8 +93,8 @@ describe('parseBootMarkers', () => {
   it('returns nothing for an empty log, and never a negative duration', () => {
     expect(parseBootMarkers('')).toEqual({ phases: [], spans: [], totalMs: null });
     // A clock step backwards between marks must not become a negative timing.
-    const { phases } = parseBootMarkers('a 200.0\nb 150.0\nc 160.0\n');
-    expect(phases).toEqual([{ name: 'b', ms: 10000 }]);
+    const { phases } = parseBootMarkers('one 200.0\ntwo 150.0\nthree 160.0\n');
+    expect(phases).toEqual([{ name: 'two', ms: 10000 }]);
   });
 });
 
@@ -252,7 +256,7 @@ describe('summarizeBootTiming', () => {
 
 describe('bootTimingPerfName', () => {
   it('is the deploy.<prefix>.boot.<stage> name the perf parser ingests', () => {
-    expect(bootTimingPerfName('k3s.standby.master', 'script.apt')).toBe(
+    expect(bootTimingPerfName('deploy.k3s.standby.master', 'script.apt')).toBe(
       'deploy.k3s.standby.master.boot.script.apt',
     );
   });
@@ -271,7 +275,12 @@ describe('BOOT_TIMING_SCRIPT', () => {
 
 describe('cloud-init phase marks', () => {
   const k3sDir = join(__dirname, '../../../carbon/cloud-init/k3s');
-  const marksIn = (text: string) => [...text.matchAll(/^vc_mark (\S+)$/gm)].map((m) => m[1]);
+  const name = (id: string) => {
+    // Every id a script writes must be one the parser names.
+    expect(Object.keys(PHASE_IDS), `unknown phase id ${id}`).toContain(id);
+    return PHASE_IDS[id as keyof typeof PHASE_IDS];
+  };
+  const marksIn = (text: string) => [...text.matchAll(/^_m (\S+)$/gm)].map((m) => name(m[1]));
 
   it.each([
     [
@@ -291,13 +300,13 @@ describe('cloud-init phase marks', () => {
     expect(marksIn(text)).toEqual(phases);
     // The helper is defined before its first use and can never fail the script
     // (these run under `set -euo pipefail`).
-    const def = text.indexOf('vc_mark() {');
+    const def = text.indexOf('_m(){');
     expect(def).toBeGreaterThan(-1);
-    expect(def).toBeLessThan(text.indexOf('vc_mark preamble'));
-    expect(text).toContain(`>> ${BOOT_MARK_LOG} || true; }`);
+    expect(def).toBeLessThan(text.indexOf('_m p\n'));
+    expect(text).toContain(`>>${BOOT_MARK_LOG}||true;}`);
     // The master's ready flag is written after its last mark.
     if (file.includes('master')) {
-      expect(text.indexOf('vc_mark done')).toBeLessThan(text.indexOf('touch /tmp/k3s-ready'));
+      expect(text.indexOf('_m e\n')).toBeLessThan(text.indexOf('touch /tmp/k3s-ready'));
     }
   });
 
@@ -307,16 +316,15 @@ describe('cloud-init phase marks', () => {
       'utf-8',
     );
     const runcmdMarks = [
-      ...text.matchAll(
-        /^ {2}- \[sh, -c, 'echo "(\S+) \$\(date \+%s\.%N\)" >> (\S+) \|\| true'\]$/gm,
-      ),
+      ...text.matchAll(/^ {2}- \[sh, -c, 'echo "(\S+) \$\(date \+%s\.%N\)">>(\S+)\|\|true'\]$/gm),
     ];
-    expect(runcmdMarks.map((m) => m[1])).toEqual(['docker', 'apt', 'ufw', 'done']);
+    expect(runcmdMarks.map((m) => name(m[1]))).toEqual(['docker', 'apt', 'ufw', 'done']);
     for (const m of runcmdMarks) expect(m[2]).toBe(BOOT_MARK_LOG);
-    expect(text).toContain(`echo "bootPull.begin $(date +%s.%N)" >> ${BOOT_MARK_LOG} || true`);
-    expect(text).toContain(`echo "bootPull.end $(date +%s.%N)" >> ${BOOT_MARK_LOG} || true`);
+    expect(PHASE_IDS.b).toBe('bootPull');
+    expect(text).toContain(`echo "b.begin $(date +%s.%N)">>${BOOT_MARK_LOG}||true`);
+    expect(text).toContain(`echo "b.end $(date +%s.%N)">>${BOOT_MARK_LOG}||true`);
     // The ready marker the deploy waits on still comes before the last mark.
-    expect(text.indexOf('/var/lib/vibecarbon/ready')).toBeLessThan(text.indexOf('"done $(date'));
+    expect(text.indexOf('/var/lib/vibecarbon/ready')).toBeLessThan(text.indexOf('"e $(date'));
   });
 });
 
@@ -334,7 +342,7 @@ describe('collectBootTiming', () => {
     const result = await collectBootTiming({
       ip: '203.0.113.7',
       sshKeyPath: '/k',
-      prefix: 'k3s.master',
+      prefix: 'deploy.k3s.master',
       enabled: true,
       run,
       emit,
@@ -350,7 +358,7 @@ describe('collectBootTiming', () => {
     expect([ip, key, argv]).toEqual(['203.0.113.7', '/k', ['sh', '-s']]);
     expect(opts.input).toBe(BOOT_TIMING_SCRIPT);
     expect(opts.timeout).toBeGreaterThan(0);
-    expect(opts.timeout).toBeLessThanOrEqual(300_000);
+    expect(opts.timeout).toBeLessThanOrEqual(BOOT_TIMING_BUDGET_MS);
     expect(opts.transportRetry).toBe(false);
     expect(emit).toHaveBeenCalledWith('deploy.k3s.master.boot.cloudInit.total', 144025);
     expect(emit).toHaveBeenCalledWith('deploy.k3s.master.boot.script.k3s.install', 32346);
@@ -455,8 +463,38 @@ describe('collectBootTiming', () => {
   });
 });
 
-describe('startBootTiming', () => {
-  it('collects every node with an address in parallel and never rejects', async () => {
+describe('queueBootTiming + flushBootTiming', () => {
+  afterEach(async () => {
+    // Leave the module queue empty for the next test.
+    await flushBootTiming({ enabled: false });
+  });
+
+  it('queueing does no I/O, skips nodes without an address and duplicates, and is off without perf', () => {
+    queueBootTiming([{ ip: '10.0.0.1', prefix: 'deploy.k3s.master' }], '/k', { enabled: false });
+    expect(pendingBootTiming()).toEqual([]);
+    queueBootTiming(
+      [
+        { ip: '10.0.0.1', prefix: 'deploy.k3s.master' },
+        { ip: undefined, prefix: 'deploy.k3s.worker1' },
+        { ip: '10.0.0.1', prefix: 'deploy.k3s.db' },
+      ],
+      '/k',
+      { enabled: true },
+    );
+    expect(pendingBootTiming()).toEqual([
+      { ip: '10.0.0.1', sshKeyPath: '/k', prefix: 'deploy.k3s.master' },
+    ]);
+  });
+
+  it('reads every queued node in parallel, empties the queue, and never rejects', async () => {
+    queueBootTiming(
+      [
+        { ip: '10.0.0.1', prefix: 'deploy.k3s.master' },
+        { ip: '10.0.0.2', prefix: 'deploy.k3s.db' },
+      ],
+      '/k',
+      { enabled: true },
+    );
     const seen: string[] = [];
     const run = vi.fn(async (ip: string) => {
       seen.push(ip);
@@ -464,19 +502,43 @@ describe('startBootTiming', () => {
       return '==> skip <==\nalready-reported';
     });
     const warn = vi.fn();
-    await expect(
-      startBootTiming(
-        [
-          { ip: '10.0.0.1', prefix: 'k3s.master' },
-          { ip: '10.0.0.2', prefix: 'k3s.db' },
-          { ip: undefined, prefix: 'k3s.worker1' },
-        ],
-        '/k',
-        { enabled: true, run, warn },
-      ),
-    ).resolves.toBeUndefined();
+    await expect(flushBootTiming({ enabled: true, run, warn })).resolves.toBeUndefined();
     expect(seen.sort()).toEqual(['10.0.0.1', '10.0.0.2']);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toContain('k3s.db');
+    expect(String(warn.mock.calls[0][0])).toContain('deploy.k3s.db');
+    expect(pendingBootTiming()).toEqual([]);
+    // A second flush has nothing to do.
+    await flushBootTiming({ enabled: true, run, warn });
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('ends at the budget even when a node never answers, with one warning for it', async () => {
+    queueBootTiming(
+      [
+        { ip: '10.0.0.1', prefix: 'deploy.compose' },
+        { ip: '10.0.0.2', prefix: 'scale.server' },
+      ],
+      '/k',
+      { enabled: true },
+    );
+    const emit = vi.fn();
+    const warn = vi.fn();
+    const signals: AbortSignal[] = [];
+    const run = vi.fn((ip: string, _k: string, _a: string[], opts: { signal: AbortSignal }) => {
+      signals.push(opts.signal);
+      // 10.0.0.2 hangs and ignores its signal; the budget still ends it.
+      return ip === '10.0.0.1'
+        ? Promise.resolve(
+            report({ markers: fx('compose-markers.log'), show: fx('compose-show.txt') }),
+          )
+        : new Promise<string>(() => {});
+    });
+    const started = Date.now();
+    await flushBootTiming({ budgetMs: 50, enabled: true, run, emit, warn });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(signals.every((sig) => sig.aborted)).toBe(true);
+    expect(emit).toHaveBeenCalledWith('deploy.compose.boot.cloudInit.total', 59167);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('scale.server');
   });
 });

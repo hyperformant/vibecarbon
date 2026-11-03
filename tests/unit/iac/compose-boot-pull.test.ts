@@ -96,7 +96,7 @@ function runBootPull(failRef = '') {
   dirs.push(dir);
   const script = bootPullScript()
     .replace('out=/var/lib/vibecarbon/boot-pull', `out=${dir}/out`)
-    .replaceAll('/var/log/vibecarbon-boot.log', `${dir}/boot.log`);
+    .replaceAll('/var/log/vcboot', `${dir}/boot.log`);
   writeFileSync(join(dir, 'boot-pull.sh'), script);
   writeFileSync(
     join(dir, 'docker'),
@@ -120,7 +120,7 @@ describe('boot-pull.sh', () => {
     const { r, status, calls, marks } = runBootPull();
     expect(r.status).toBe(0);
     // The boot-timing span around the pull (src/lib/deploy/boot-timing.js).
-    expect(marks).toMatch(/^bootPull\.begin \d+\S*\nbootPull\.end \d+\S*\n$/);
+    expect(marks).toMatch(/^b\.begin \d+\S*\nb\.end \d+\S*\n$/);
     expect(status).toBe('ok');
     expect(calls).toEqual(
       bootPullImages()
