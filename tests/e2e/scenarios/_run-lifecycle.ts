@@ -86,8 +86,11 @@ import {
 import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
 import {
   checkNoNewCertificateRequest,
+  checkOneCertificatePerName,
+  checkServedIsSecret,
   checkTlsReused,
   listCertificateRequestUids,
+  readClusterTlsInventory,
 } from '../checks/tls-reuse.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
@@ -681,10 +684,10 @@ async function captureFailureDiagnostics(
           `kubectl --kubeconfig ${kc} -n vibecarbon get events --sort-by=.lastTimestamp 2>&1 | tail -${eventTail}`,
         ]),
       ]);
-      // All namespaces: the observability add-on issues its own grafana-tls
-      // Certificate in vibecarbon-observability against the SAME
-      // ClusterIssuer, so a vibecarbon-only dump cannot tell a lone failed
-      // order apart from two Certificates racing one shared ACME order.
+      // All namespaces: a vibecarbon-only dump cannot tell a lone failed
+      // order apart from a Certificate elsewhere (a leftover grafana-tls from
+      // before one certificate per name, or a user's own) racing one shared
+      // ACME order.
       // The 2026-08-11 e3 restore failure (403 orderNotReady "Order was
       // already processing") was diagnosed without that half of the picture.
       sections.push([
@@ -2074,6 +2077,32 @@ export async function runLifecycle(
           console.log(
             `${tag} [${stepName}] recorded certificate serial ${tlsServedSerial || '(none: ssl_valid did not pass)'}`,
           );
+          // One certificate per name: the served certificate is the one
+          // Secret/vibecarbon-tls holds, the one every snapshot and restore
+          // covers. A second certificate for the domain in Traefik's global
+          // store would otherwise surface only later, as tls_reused failing
+          // after a correct restore.
+          if (isK8sMode) {
+            const primaryKubeconfig =
+              config.mode === 'k8s-ha'
+                ? haRoleKubeconfig(config.projectDir, config.envPrefix, 'primary')
+                : join(config.projectDir, '.vibecarbon', `kubeconfig-${config.envPrefix}`);
+            // The served serial is one sample; the inventory is the
+            // deterministic half: nothing but vibecarbon-tls may cover the
+            // domain, whichever certificate Traefik happens to serve now.
+            for (const result of [
+              checkServedIsSecret(tlsServedSerial, primaryKubeconfig),
+              checkOneCertificatePerName({
+                domain: config.domain,
+                ...readClusterTlsInventory(primaryKubeconfig),
+              }),
+            ]) {
+              console.log(
+                `${tag} [${stepName}] ${result.checkName}: ${result.status}${result.errorMessage ? ` (${result.errorMessage})` : ''}`,
+              );
+              allResults.push(result);
+            }
+          }
         } else if (stepName === 'verify-restore' || isPostFailoverVerify(stepName)) {
           allResults.push(await recordTlsReused(stepName));
         }

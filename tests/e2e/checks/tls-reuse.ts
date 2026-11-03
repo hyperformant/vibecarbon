@@ -14,6 +14,16 @@
  *   creates no cert-manager CertificateRequest, the object every issuance
  *   starts from. Compared by uid, so a request garbage-collected with a
  *   deleted Certificate does not hide a new one.
+ * - `tls_served_is_secret` (k8s tiers, verify-deploy): the domain serves the
+ *   certificate Secret/vibecarbon-tls holds, the one every snapshot and
+ *   restore covers. A second certificate for the same name in Traefik's
+ *   global store (the observability add-on's old grafana-tls) let the domain
+ *   serve either, and a correct restore then failed `tls_reused`.
+ * - `tls_one_certificate_per_name` (k8s tiers, verify-deploy): the
+ *   deterministic half of the above. The served serial is one sample, which
+ *   a second certificate can pass by luck; the primary's inventory cannot.
+ *   No cert-manager Certificate and no `kubernetes.io/tls` Secret other than
+ *   vibecarbon/vibecarbon-tls may cover the domain, in any namespace.
  *
  * Never a hollow pass: no recorded serial, an unread served certificate or
  * an unread CertificateRequest listing fails (tests/unit/e2e/
@@ -22,6 +32,11 @@
  */
 import { spawnSync } from 'node:child_process';
 import tls from 'node:tls';
+import {
+  certificateSerial,
+  normalizeSerial,
+  pemCertificates,
+} from '../../../src/lib/deploy/tls-snapshot.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import type { VerificationResult } from '../scenarios/types.js';
 import { resolveCheckIp } from './health.js';
@@ -188,4 +203,244 @@ export function checkNoNewCertificateRequest({
     };
   }
   return { checkName, status: 'pass', details: { before: before.length, after: after.length } };
+}
+
+/**
+ * The serial of the certificate in a Secret's base64 `tls.crt` (the leaf), in
+ * the CLI's one spelling (normalizeSerial), or null when there is none.
+ */
+export function parseSecretCertificateSerial(tlsCrtBase64: string): string | null {
+  const b64 = tlsCrtBase64.trim();
+  if (!b64) return null;
+  return certificateSerial(Buffer.from(b64, 'base64').toString('utf8')) || null;
+}
+
+/**
+ * The serial of the certificate Secret/vibecarbon-tls holds, or null when
+ * unread. Asks kubectl for tls.crt alone: the key never leaves the cluster.
+ */
+export function readSecretCertificateSerial(kubeconfig: string): string | null {
+  const r = spawnSync(
+    'kubectl',
+    [
+      '--kubeconfig',
+      kubeconfig,
+      '-n',
+      'vibecarbon',
+      'get',
+      'secret',
+      'vibecarbon-tls',
+      '-o',
+      'jsonpath={.data.tls\\.crt}',
+    ],
+    { encoding: 'utf-8', timeout: 30_000, env: gitScrubbedEnv() },
+  );
+  if (r.status !== 0) return null;
+  return parseSecretCertificateSerial(r.stdout || '');
+}
+
+/**
+ * `tls_served_is_secret`: the serial the domain serves (ssl_valid's, at
+ * verify-deploy) is the serial of Secret/vibecarbon-tls on the primary.
+ */
+export function checkServedIsSecret(
+  servedSerial: string,
+  kubeconfig: string | null,
+  deps: { readSecretSerial?: (kubeconfig: string) => string | null } = {},
+): VerificationResult {
+  const checkName = 'tls_served_is_secret';
+  const served = normalizeSerial(servedSerial);
+  if (!served) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage:
+        'no served certificate serial (ssl_valid did not pass), so the served certificate ' +
+        'cannot be matched to Secret/vibecarbon-tls',
+    };
+  }
+  if (!kubeconfig) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage: 'no kubeconfig for the primary cluster, so Secret/vibecarbon-tls was not read',
+      details: { servedSerial: served },
+    };
+  }
+  const secret = (deps.readSecretSerial ?? readSecretCertificateSerial)(kubeconfig);
+  if (!secret) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage: `could not read the certificate of Secret/vibecarbon-tls through ${kubeconfig}`,
+      details: { servedSerial: served },
+    };
+  }
+  const details = { servedSerial: served, secretSerial: secret };
+  if (served !== secret) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage:
+        `the domain serves certificate serial ${served}, but Secret/vibecarbon-tls holds ` +
+        `${secret}: Traefik holds another certificate for the same name, so a restore of ` +
+        'vibecarbon-tls would not change what is served',
+      details,
+    };
+  }
+  return { checkName, status: 'pass', details };
+}
+
+/** A Certificate or TLS Secret and the DNS names it covers. */
+export interface TlsObject {
+  namespace: string;
+  name: string;
+  dnsNames: string[];
+}
+
+const BASE_TLS = { namespace: 'vibecarbon', name: 'vibecarbon-tls' };
+
+/** `domain` matches one of `dnsNames` exactly or through a one-label wildcard. */
+export function coversDomain(dnsNames: string[], domain: string): boolean {
+  const d = domain.toLowerCase();
+  const parent = d.slice(d.indexOf('.') + 1);
+  return dnsNames.some((raw) => {
+    const n = raw.toLowerCase();
+    return n === d || (d.includes('.') && parent.includes('.') && n === `*.${parent}`);
+  });
+}
+
+/** The Certificates of a `kubectl get certificate -A -o json`, or null when not a list. */
+export function parseCertificateInventory(json: string): TlsObject[] | null {
+  try {
+    const parsed = JSON.parse(json) as {
+      items?: Array<{
+        metadata?: { namespace?: string; name?: string };
+        spec?: { dnsNames?: string[]; commonName?: string };
+      }>;
+    };
+    if (!Array.isArray(parsed.items)) return null;
+    // commonName is a name the Certificate covers too.
+    return parsed.items.map((i) => ({
+      namespace: i.metadata?.namespace ?? '',
+      name: i.metadata?.name ?? '',
+      dnsNames: [
+        ...new Set([
+          ...(i.spec?.dnsNames ?? []),
+          ...(i.spec?.commonName ? [i.spec.commonName] : []),
+        ]),
+      ],
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The TLS Secrets of a `namespace<TAB>name<TAB>base64 tls.crt` listing (one
+ * per line, the jsonpath readClusterTlsInventory asks for), with the SAN DNS
+ * names of each leaf certificate. Only the certificate is ever read.
+ */
+export function parseTlsSecretInventory(text: string): TlsObject[] {
+  return text
+    .split('\n')
+    .filter((line) => line.trim())
+    .map((line) => {
+      const [namespace = '', name = '', b64 = ''] = line.split('\t');
+      const [leaf] = b64.trim()
+        ? pemCertificates(Buffer.from(b64.trim(), 'base64').toString('utf8'))
+        : [];
+      const dnsNames = String(leaf?.subjectAltName ?? '')
+        .split(',')
+        .map((s: string) => s.trim())
+        .filter((s: string) => s.startsWith('DNS:'))
+        .map((s: string) => s.slice(4));
+      return { namespace, name, dnsNames };
+    });
+}
+
+/**
+ * Every Certificate and every `kubernetes.io/tls` Secret on the cluster, in
+ * all namespaces; null for a list that could not be read. The Secrets are
+ * read through a jsonpath for namespace, name and tls.crt: no key is ever
+ * fetched.
+ */
+export function readClusterTlsInventory(kubeconfig: string): {
+  certificates: TlsObject[] | null;
+  secrets: TlsObject[] | null;
+} {
+  const run = (args: string[]) =>
+    spawnSync('kubectl', ['--kubeconfig', kubeconfig, ...args], {
+      encoding: 'utf-8',
+      timeout: 30_000,
+      env: gitScrubbedEnv(),
+    });
+  const certs = run(['get', 'certificate', '--all-namespaces', '-o', 'json']);
+  const secrets = run([
+    'get',
+    'secret',
+    '--all-namespaces',
+    '--field-selector',
+    'type=kubernetes.io/tls',
+    '-o',
+    'jsonpath={range .items[*]}{.metadata.namespace}{"\\t"}{.metadata.name}{"\\t"}{.data.tls\\.crt}{"\\n"}{end}',
+  ]);
+  return {
+    certificates: certs.status === 0 ? parseCertificateInventory(certs.stdout || '') : null,
+    secrets: secrets.status === 0 ? parseTlsSecretInventory(secrets.stdout || '') : null,
+  };
+}
+
+/**
+ * `tls_one_certificate_per_name`: on the primary, only
+ * vibecarbon/vibecarbon-tls covers `domain`, as a Certificate and as a TLS
+ * Secret, and that Secret is there.
+ */
+export function checkOneCertificatePerName({
+  domain,
+  certificates,
+  secrets,
+}: {
+  domain: string;
+  certificates: TlsObject[] | null;
+  secrets: TlsObject[] | null;
+}): VerificationResult {
+  const checkName = 'tls_one_certificate_per_name';
+  if (!certificates || !secrets) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage:
+        `could not list the ${!certificates ? 'Certificates' : 'TLS Secrets'} in all namespaces, ` +
+        'so a second certificate for the domain cannot be ruled out',
+    };
+  }
+  const isBase = (o: TlsObject) => o.namespace === BASE_TLS.namespace && o.name === BASE_TLS.name;
+  const covering = (kind: string, list: TlsObject[]) =>
+    list
+      .filter((o) => !isBase(o) && coversDomain(o.dnsNames, domain))
+      .map((o) => `${kind} ${o.namespace}/${o.name}`);
+  const others = [...covering('Certificate', certificates), ...covering('Secret', secrets)];
+  if (others.length > 0) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage:
+        `${others.join(', ')} also cover ${domain}: Traefik can serve either certificate, ` +
+        'and only vibecarbon/vibecarbon-tls is snapshotted and restored',
+      details: { others },
+    };
+  }
+  if (!secrets.some((o) => isBase(o) && coversDomain(o.dnsNames, domain))) {
+    return {
+      checkName,
+      status: 'fail',
+      errorMessage: `no Secret vibecarbon/vibecarbon-tls covering ${domain} was found`,
+    };
+  }
+  return {
+    checkName,
+    status: 'pass',
+    details: { certificates: certificates.length, secrets: secrets.length },
+  };
 }

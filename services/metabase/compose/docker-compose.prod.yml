@@ -19,8 +19,10 @@ services:
       # HTTPS router with super_admin auth + security headers
       - "traefik.http.routers.metabase.rule=Host(`metabase.${DOMAIN}`)"
       - "traefik.http.routers.metabase.entrypoints=websecure"
+      # No certresolver: the default store certificate (tls-default.yml,
+      # rendered by the deploy) already covers metabase.${DOMAIN}. A resolver
+      # here would order a second certificate for the same name.
       - "traefik.http.routers.metabase.tls=true"
-      - "traefik.http.routers.metabase.tls.certresolver=letsencrypt"
       - "traefik.http.routers.metabase.middlewares=super-admin-auth@file,security-headers@file"
       - "traefik.http.services.metabase.loadbalancer.server.port=3000"
       # HTTP to HTTPS redirect

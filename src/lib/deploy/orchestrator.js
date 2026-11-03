@@ -69,8 +69,10 @@ import {
   deriveScaleUpList,
   failoverAddonManifests,
   k8sTlsIdentity,
+  liveK8sTlsSecretSerial,
   quietKubectl,
   snapshotK8sTlsSecret,
+  staleObservabilityTlsProblem,
 } from './k8s/index.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { makePublicDnsLookup } from './public-dns-lookup.js';
@@ -81,8 +83,8 @@ import { stagingProbeCa } from './staging-ca.js';
 import { haStacksFrom } from './standby-types.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
-import { TLS_FIRST_LOOK_BUDGET_MS } from './tls-ready.js';
-import { caSlug, tlsSnapshotS3Prefix } from './tls-snapshot.js';
+import { probeTlsTrustOnce, TLS_FIRST_LOOK_BUDGET_MS } from './tls-ready.js';
+import { caSlug, normalizeSerial, tlsSnapshotS3Prefix } from './tls-snapshot.js';
 import {
   assertNoScaleCutoverInFlight,
   assertRolePrimaryWritable,
@@ -656,7 +658,11 @@ function probeFailureReason(probeResult) {
  * one warning, and the deploy still succeeds, while cert-manager keeps
  * retrying in the background (its minimum backoff is CERT_MANAGER_MIN_BACKOFF).
  * A hit is trusted, and the primary cluster's Secret is saved as the env's
- * snapshot now instead of at the next scheduled backup. Never throws.
+ * snapshot now instead of at the next scheduled backup (its public serial is
+ * logged). One certificate per name: a trusted domain must serve the very
+ * certificate Secret/vibecarbon-tls holds, since that is the one the snapshot
+ * and every restore cover; a different served serial is one warning (another
+ * certificate for the same name is loaded in Traefik). Never throws.
  *
  * @param {{ domain: string, environment: string, projectName: string,
  *   dnsProvider?: string|null, kubeconfig: string, s3Config?: object,
@@ -692,6 +698,9 @@ export async function verifyK8sTls({
         log: (msg) => progressLog(msg),
       }));
   const snapshot = deps.snapshot ?? snapshotK8sTlsSecret;
+  const servedSerial =
+    deps.servedSerial ?? (async (d) => (await probeTlsTrustOnce(d)).serialNumber ?? null);
+  const secretSerial = deps.secretSerial ?? liveK8sTlsSecretSerial;
   const { dnsNames, ca } = identity({ projectDir: process.cwd(), dnsProvider, domain });
   const haveKubeconfig = kubeconfigExists(kubeconfig);
   const s = (deps.spinner ?? spinner)({ indicator: 'timer' });
@@ -733,9 +742,41 @@ export async function verifyK8sTls({
       p.log.warn(
         `TLS certificate snapshot not saved (${saved?.reason ?? 'unknown'}). The deploy still succeeded, and the next scheduled backup saves it.`,
       );
+    } else if (saved.serial) {
+      p.log.info(`TLS certificate snapshot saved (serial ${saved.serial}).`);
     }
+    await warnOnServedSerialMismatch({
+      domain,
+      environment,
+      readServed: () => servedSerial(domain),
+      readSecret: () => secretSerial(kubectlFor(kubeconfig)),
+    });
   }
   return { state: 'trusted', checkedAt, ca };
+}
+
+/**
+ * Warn when `domain` serves another certificate than Secret/vibecarbon-tls
+ * holds. Both serials are public. Silent when either cannot be read: an
+ * unread serial proves nothing either way. Never throws.
+ *
+ * @param {{ domain: string, environment: string,
+ *   readServed: () => Promise<string|null>, readSecret: () => Promise<string|null> }} args
+ */
+async function warnOnServedSerialMismatch({ domain, environment, readServed, readSecret }) {
+  let served = '';
+  let secret = '';
+  try {
+    [served, secret] = (await Promise.all([readServed(), readSecret()])).map(normalizeSerial);
+  } catch {
+    return;
+  }
+  if (!served || !secret || served === secret) return;
+  p.log.warn(
+    `${domain} serves certificate serial ${served}, but Secret vibecarbon-tls holds serial ${secret}. ` +
+      'Traefik has a second certificate for this name, so a restored certificate may not be the one your domain serves. ' +
+      `Run \`vibecarbon diagnose ${environment}\` and look for another Certificate or TLS Secret that covers ${domain}.`,
+  );
 }
 
 /**
@@ -1079,6 +1120,14 @@ export async function executeDeployment(args, gatheredConfig) {
     env: operatorCheckEnvs(process.cwd()),
   });
   assertTierSupported(providerFor(config), tier);
+  // One certificate per name: an observability add-on copied into the
+  // project before the change still issues grafana-tls for the app domain
+  // until `vibecarbon upgrade` refreshes it. Refused here, the last stop
+  // before anything is provisioned (k8s/one-certificate.js).
+  if (isK8sTier(tier)) {
+    const staleObservabilityTls = staleObservabilityTlsProblem(process.cwd());
+    if (staleObservabilityTls) throw new Error(staleObservabilityTls);
+  }
 
   // Operator-IP access: detect + persist + (when env already deployed) patch
   // the live Hetzner firewall. On a fresh first deploy this just appends to
@@ -2374,12 +2423,10 @@ export async function executeDeployment(args, gatheredConfig) {
           };
           const dig = await safeRun('dig', ['+short', domain, '@1.1.1.1']);
           const kcExists = existsSync(kubeconfig);
-          // ALL namespaces, not just `vibecarbon`: the observability add-on
-          // issues its own grafana-tls Certificate in
-          // vibecarbon-observability against the same ClusterIssuer, and a
-          // vibecarbon-only dump cannot show whether two Certificates were
-          // racing the same ACME order — exactly the ambiguity that made
-          // the 2026-08-11 e3 post-mortem harder than it needed to be.
+          // ALL namespaces, not just `vibecarbon`: a vibecarbon-only dump
+          // cannot show a Certificate elsewhere (a leftover or a user's own)
+          // racing ours for the same ACME order, exactly the ambiguity that
+          // made the 2026-08-11 e3 post-mortem harder than it needed to be.
           const certs = kcExists
             ? await safeRun('kubectl', [
                 '--kubeconfig',

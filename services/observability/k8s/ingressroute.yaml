@@ -6,8 +6,8 @@ metadata:
   # in vibecarbon-observability. It MUST be co-located with the grafana Service
   # (same namespace) — Traefik watches all namespaces but has no
   # allowCrossNamespace, so an IngressRoute in `vibecarbon` could not target a
-  # Service in vibecarbon-observability. The referenced middlewares + TLS secret
-  # below are likewise local to this namespace for the same reason.
+  # Service in vibecarbon-observability. The referenced middlewares below are
+  # likewise local to this namespace for the same reason.
 spec:
   entryPoints:
     - websecure
@@ -25,8 +25,10 @@ spec:
         # refs resolve to this IngressRoute's namespace.
         - name: admin-auth
         - name: security-headers
-  tls:
-    # Local cert (grafana-tls, issued by grafana-tls-certificate.yaml). The base
-    # vibecarbon-tls secret lives in the vibecarbon namespace and is not visible
-    # here.
-    secretName: grafana-tls
+  # One certificate per name. `tls: {}` names no secret: Traefik's certificate
+  # store is global across namespaces and picks the certificate by SNI alone,
+  # so this route is served vibecarbon-tls, which the app's IngressRoute (in
+  # the vibecarbon namespace) loads into the store. A second Certificate here
+  # for the same domain would let Traefik serve either one (see
+  # src/lib/deploy/k8s/one-certificate.js).
+  tls: {}

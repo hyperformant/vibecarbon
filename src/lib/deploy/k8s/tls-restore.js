@@ -37,8 +37,10 @@ import { sshKubectlArgv } from '../../ssh.js';
 import {
   buildRestoredTlsSecret,
   caSlug,
+  certificateSerial,
   chainReachesTrustedRoot,
   inspectK8sTlsSecret,
+  k8sSecretSerial,
   pemCertificates,
   readTlsSnapshot,
   tlsSnapshotKey,
@@ -261,7 +263,8 @@ export async function readRestorableK8sTlsSnapshot({
  *   ca: 'prod'|'staging'|null, issuerName: string, dnsNames: string[],
  *   runKubectl: (argv: string[], opts?: object) => Promise<string>,
  *   deps?: { read?: Function, trustRoots?: readonly string[] } }} args
- * @returns {Promise<{ restored: boolean, reason: string }>}
+ * @returns {Promise<{ restored: boolean, reason: string, serial?: string }>} `serial`
+ *   (public) names the certificate restored, or the valid one left in place
  */
 export async function restoreK8sTlsSecret({
   s3Config,
@@ -286,7 +289,9 @@ export async function restoreK8sTlsSecret({
     let liveVersion = null;
     if (live) {
       const verdict = inspectK8sTlsSecret(live, { dnsNames });
-      if (verdict.ok && verdict.issuerName === issuerName) return skip(LIVE_SECRET_VALID);
+      if (verdict.ok && verdict.issuerName === issuerName) {
+        return { restored: false, reason: LIVE_SECRET_VALID, serial: k8sSecretSerial(live) };
+      }
       liveVersion = liveResourceVersion(live);
       if (!liveVersion) return skip('could not read the live Secret');
     }
@@ -312,7 +317,11 @@ export async function restoreK8sTlsSecret({
       if (err?.reason === 'Conflict') return skip('the Secret changed meanwhile, kept');
       return skip('could not write the Secret');
     }
-    return { restored: true, reason: 'restored from the last snapshot' };
+    return {
+      restored: true,
+      reason: 'restored from the last snapshot',
+      serial: k8sSecretSerial(text),
+    };
   } catch {
     return skip('restore errored');
   }
@@ -374,7 +383,8 @@ export async function liveK8sTlsIdentity(runKubectl) {
  *   ca: 'prod'|'staging'|null, dnsNames: string[],
  *   runKubectl: (argv: string[], opts?: object) => Promise<string>,
  *   deps?: { write?: Function } }} args
- * @returns {Promise<{ ok: boolean, reason?: string }>}
+ * @returns {Promise<{ ok: boolean, reason?: string, serial?: string }>} `serial`
+ *   (public) names the certificate saved
  */
 export async function snapshotK8sTlsSecret({
   s3Config,
@@ -399,23 +409,59 @@ export async function snapshotK8sTlsSecret({
     if (caSlug(verdict.issuerName) !== ca) return refuse(`live Secret is not from the ${ca} CA`);
     const key = tlsSnapshotKey({ projectName, envName, ca, format: 'k8s-secret' });
     const res = await write(s3Config, key, live);
-    return res?.ok ? { ok: true } : refuse(res?.reason ?? 'S3 error');
+    return res?.ok
+      ? { ok: true, serial: k8sSecretSerial(live) }
+      : refuse(res?.reason ?? 'S3 error');
   } catch {
     return refuse('snapshot errored');
   }
 }
 
 /**
- * The one line a caller prints for a restore result. A reason is one of
- * restoreK8sTlsSecret's fixed phrases, never command output.
+ * The serial of the live Secret/vibecarbon-tls certificate, or null when it
+ * is absent or unreadable. Asks kubectl for tls.crt alone, so the private key
+ * never leaves the cluster. Never throws, never logs.
  *
- * @param {{ restored: boolean, reason: string }} result
+ * @param {(argv: string[], opts?: object) => Promise<string>} runKubectl
+ * @returns {Promise<string|null>}
+ */
+export async function liveK8sTlsSecretSerial(runKubectl) {
+  try {
+    const b64 = String(
+      (await runKubectl(
+        [
+          'get',
+          'secret',
+          NAME,
+          '-n',
+          NAMESPACE,
+          '-o',
+          'jsonpath={.data.tls\\.crt}',
+          '--ignore-not-found',
+        ],
+        { captureStdout: true, description: 'read the certificate of Secret/vibecarbon-tls' },
+      )) ?? '',
+    ).trim();
+    if (!b64) return null;
+    return certificateSerial(Buffer.from(b64, 'base64').toString('utf8')) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The one line a caller prints for a restore result. A reason is one of
+ * restoreK8sTlsSecret's fixed phrases, never command output; the serial is
+ * the certificate's public serial number.
+ *
+ * @param {{ restored: boolean, reason: string, serial?: string }} result
  * @returns {string}
  */
 export function k8sTlsRestoreLine(result) {
-  if (result.restored) return 'TLS certificate restored from its last snapshot.';
+  const serial = result.serial ? ` (serial ${result.serial})` : '';
+  if (result.restored) return `TLS certificate restored from its last snapshot${serial}.`;
   if (result.reason === LIVE_SECRET_VALID) {
-    return 'TLS certificate already in the cluster; nothing to restore.';
+    return `TLS certificate already in the cluster${serial}; nothing to restore.`;
   }
   return `TLS certificate not restored (${result.reason}). cert-manager requests a new one.`;
 }

@@ -4,11 +4,14 @@ import { STANDBY_SELFSIGNED_ISSUER } from '../../../src/lib/deploy/k8s/acme-issu
 import {
   buildRestoredTlsSecret,
   caSlug,
+  certificateSerial,
   chainReachesTrustedRoot,
   inspectComposeAcme,
   inspectK8sTlsSecret,
   isSnapshotBetter,
+  k8sSecretSerial,
   MIN_REMAINING_VALIDITY_MS,
+  normalizeSerial,
   readTlsSnapshot,
   tlsSnapshotKey,
   tlsSnapshotS3Prefix,
@@ -485,5 +488,26 @@ describe('writeTlsSnapshot', () => {
       ok: false,
       reason: 'S3 AccessDenied',
     });
+  });
+});
+
+describe('certificate serials (public, never key material)', () => {
+  it('normalizes the spellings openssl, node and Traefik use', () => {
+    expect(normalizeSerial('0A:B0:1C')).toBe('AB01C');
+    expect(normalizeSerial('00ab01')).toBe('AB01');
+    expect(normalizeSerial(' ab01 ')).toBe('AB01');
+    expect(normalizeSerial('0')).toBe('0');
+    expect(normalizeSerial(undefined)).toBe('');
+  });
+
+  it("reads the leaf's serial from a PEM bundle, and '' from anything else", () => {
+    const live = k8sSecretJson({ dnsNames: ['app.example.com'] });
+    const crt = Buffer.from(JSON.parse(live).data['tls.crt'], 'base64').toString('utf8');
+    const serial = certificateSerial(crt);
+    expect(serial).toMatch(/^[0-9A-F]+$/);
+    expect(certificateSerial('not a pem')).toBe('');
+    expect(k8sSecretSerial(live)).toBe(serial);
+    expect(k8sSecretSerial('{')).toBe('');
+    expect(k8sSecretSerial(JSON.stringify({ data: {} }))).toBe('');
   });
 });
