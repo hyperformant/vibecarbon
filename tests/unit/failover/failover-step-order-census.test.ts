@@ -396,6 +396,8 @@ async function runCompose(
     /** An earlier run's failover journal, present at entry. */
     journal?: boolean;
     writeJournal?: () => Promise<unknown>;
+    /** The db containers' role-directory bind, per ip (default: bound). */
+    probeRoleBind?: (a: { ip: string }) => Promise<boolean | null>;
   } = {},
 ) {
   const run = over.run ?? censusComposeRun;
@@ -426,7 +428,7 @@ async function runCompose(
     // The real role writer (writeComposeWalgRole) over the census's ssh seam.
     roleRun: argvOver(run),
     // The db containers bind the role directory (compose-ha-failover-role-bind).
-    probeRoleBind: async () => true,
+    probeRoleBind: over.probeRoleBind ?? (async () => true),
     readState: async (ip: string) =>
       ip === PRIMARY_IP
         ? primaryState()
@@ -637,6 +639,30 @@ describe('k8s-ha: the wal-g role moves before the promote, with no db restart (D
     expect(promote).not.toHaveBeenCalled();
     expect(calls.some((c) => /scale |apply -f -|exec .*walg-role/.test(c))).toBe(false);
     expect(order).not.toContain('stopWriters');
+  });
+});
+
+describe('both tiers word the role-mount refusal alike', () => {
+  it('the k8s db-0 mount refusal and the compose bind refusal, as thrown, share their claim and their fix', async () => {
+    const { FAILOVER_NOT_STARTED } = await import('../../../src/lib/deploy/walg-role.js');
+    const { FailoverRefusedError } = await import('../../../src/lib/deploy/failover-guard.js');
+    const k8s = await runFailoverK8s({
+      kubectl: async (_ip, argv) => k8sReply(argv, { roleMount: false }),
+      promote: vi.fn(),
+    }).catch((e) => e);
+    const compose = await runCompose(true, {
+      probeRoleBind: async ({ ip }) => ip !== STANDBY_IP,
+    }).catch((e) => e);
+    const tail = `predates the live wal-g role (no /var/lib/vibecarbon/role `;
+    const fix = ` (one db restart), then retry. ${FAILOVER_NOT_STARTED}`;
+    for (const err of [k8s, compose]) {
+      expect(err).toBeInstanceOf(FailoverRefusedError);
+      expect(err.message).toMatch(/^Failover refused: the standby/);
+      expect(err.message).toContain(tail);
+      expect(err.message.endsWith(fix)).toBe(true);
+      expect(err.message).not.toMatch(/Nothing was changed/);
+    }
+    expect(FAILOVER_NOT_STARTED).not.toMatch(/Nothing was changed/);
   });
 });
 

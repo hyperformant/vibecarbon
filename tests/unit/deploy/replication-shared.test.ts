@@ -640,6 +640,7 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
         `if [ "\${BB_PARTIAL:-}" = 1 ]; then cp -a "${primary}/base" "$D/"; exit 1; fi`,
         // pg_basebackup -Xs: a forked WAL streamer that keeps writing into the
         // staging after its parent is gone; its pid goes to $BB_FORK.
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: shell expansion text
         'if [ -n "${BB_FORK:-}" ]; then',
         '  ( n=0; while :; do [ -d "$D/pg_wal" ] || mkdir -p "$D/pg_wal"; : > "$D/pg_wal/seg$n"; n=$((n + 1)); sleep 0.02; done ) &',
         '  echo $! > "$BB_FORK"',
