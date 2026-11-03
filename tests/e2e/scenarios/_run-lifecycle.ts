@@ -148,6 +148,7 @@ import {
   runPostReconvergeObservability,
 } from './observability-step-plan.js';
 import { expandSkippedSteps } from './step-dependencies.js';
+import { runStepLoop } from './step-loop.js';
 import type {
   ScenarioConfig,
   ScenarioResult,
@@ -2561,7 +2562,9 @@ export async function runLifecycle(
         }
 
         // The cold deploy's budget miss (recorded at the deploy step) fails
-        // the scenario here, once verify-deploy's own checks have run.
+        // the scenario here, once verify-deploy's own checks have run. The step
+        // is recorded FAILED but does not abort the lifecycle (step-loop.ts):
+        // the later steps still run and the scenario ends FAIL.
         if (stepName === 'verify-deploy' && deployBudgetMiss) {
           throw new Error(`deploy: deploy_budget: ${deployBudgetMiss.message}`);
         }
@@ -4890,30 +4893,14 @@ EOF`;
   // -------------------------------------------------------------------------
 
   try {
-    for (const stepDef of filteredStepDefs) {
-      if (failed) {
-        steps.push(skipStep(stepDef.name, `(skipped)`));
-        continue;
-      }
-
-      const result = await stepDef.run();
-      steps.push(result);
-
-      if (result.status === 'fail' || result.status === 'error') {
-        failed = true;
-        scenarioError = result.errorMessage;
-      }
-
-      // Give the caller a chance to react (interactive mode, Claude Code, etc.)
-      if (options.onStepComplete) {
-        const action = await options.onStepComplete(result);
-        if (action === 'skip' || action === 'abort') {
-          console.log(`${tag} Operator requested ${action} — skipping remaining steps`);
-          failed = true;
-          scenarioError = scenarioError ?? `Operator requested ${action}`;
-        }
-      }
-    }
+    const outcome = await runStepLoop(filteredStepDefs, {
+      skipStep: (name) => skipStep(name, `(skipped)`),
+      onStepComplete: options.onStepComplete,
+      log: (line) => console.log(`${tag} ${line}`),
+    });
+    steps.push(...outcome.steps);
+    failed = outcome.aborted;
+    scenarioError = outcome.scenarioError;
   } finally {
     // VC_KEEP_ON_FAILURE=1 — operator escape hatch for debugging. Keeps
     // the cluster + GitHub repo + orphan resources alive past the test
