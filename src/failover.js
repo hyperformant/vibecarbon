@@ -62,12 +62,15 @@ import {
 } from './lib/deploy/k8s/tls-restore.js';
 import { assertScaffoldSupportsRoleFile } from './lib/deploy/preflight.js';
 import {
+  assertLiveDbGuardSupportsReseed,
   assertStandbyNotWriteFenced,
+  DbGuardMissingError,
   fenceDatabaseWrites,
   getReplPasswordFromSecret,
   isStandbyStreaming,
   k8sPsqlRunner,
   promoteStandby,
+  ReseedStageBusyError,
   reseedStandbyFromPrimary,
   UNFENCE_SQL_HINT,
   unfenceDatabaseWrites,
@@ -338,7 +341,12 @@ async function promoteStandbyDatabase(standbyIp, sshKeyPath) {
  * @param {{ start: Function, stop: Function }} s
  * @param {{ onSeeded?: (systemIdentifier: string) => void }} [opts]
  */
-async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded, mustReseed = false } = {}) {
+async function reseedStandbyOrAbort(
+  servers,
+  sshKeyPath,
+  s,
+  { onSeeded, mustReseed = false, envName } = {},
+) {
   // Skip the re-seed when the standby is already verifiably streaming. A
   // streaming standby is in-parity with the primary (that is exactly what
   // streaming replication guarantees), so a pre-promotion pg_basebackup is
@@ -362,21 +370,29 @@ async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded, mustRese
     p.log.warn('Primary unreachable, skipping re-seed, promoting standby with current state');
     return;
   }
-  s.start('Re-seeding standby from primary (pg_basebackup)');
+  s.start('Re-seeding standby from primary in place (pg_basebackup)');
   let result;
   try {
-    // standby.dbIp: the node the standby db pod is pinned to; the re-seed's
-    // node-side PGDATA swap ssh's there (roles are not yet swapped; the
-    // re-seed runs BEFORE promotion, so the deploy-time gateway relay
-    // directions still hold and the re-seed dials the standby's LOCAL
-    // WireGuard relay: no primary IP needed, no gateway re-render).
+    // The re-seed runs BEFORE promotion, so the deploy-time gateway relay
+    // directions still hold and it dials the standby's LOCAL WireGuard relay
+    // (no gateway re-render). It reads envName's config afresh to confirm the
+    // standby and primary it was handed are still the configured ones.
     result = await reseedStandbyFromPrimary(servers.standby.ip, sshKeyPath, {
       standbyDbIp: servers.standby.dbIp,
       standbyDbPrivateIp: servers.standby.dbPrivateIp,
+      primaryIp: servers.primary.ip,
+      envName,
       onSeeded,
     });
   } catch (err) {
     s.stop('Re-seed failed, aborting failover');
+    if (err instanceof ReseedStageBusyError) {
+      // Terminal: an earlier stage still runs on the standby. Never retried.
+      throw new Error(
+        `Failover aborted before promotion: ${err.message}\n` +
+          'The standby was NOT promoted and the old primary is untouched.',
+      );
+    }
     throw new Error(
       `Failover aborted before promotion: ${err.message}\n` +
         `The standby was NOT promoted and the old primary is untouched: no ` +
@@ -2101,6 +2117,8 @@ export async function failoverHA(
         isStreaming: () => isStreaming(srv.standby.ip, key),
       }),
     reseed = reseedStandbyOrAbort,
+    // STEP 1's D1 check: the live-pod guard on the standby db.
+    assertReseedCapable: assertReseedCapableDep,
     writeJournal = writeFailoverJournal,
     clearJournal = clearFailoverJournal,
     promote = (srv, key) => promoteStandbyDatabase(srv.standby.ip, key),
@@ -2143,6 +2161,12 @@ export async function failoverHA(
     process.exit(1);
   }
   const kubectl = kubectlDep ?? ((ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts));
+  const assertReseedCapable =
+    assertReseedCapableDep ??
+    ((srv, env) =>
+      assertLiveDbGuardSupportsReseed((argv, opts) => kubectl(srv.standby.ip, argv, opts), {
+        envName: env,
+      }));
 
   const auth = strategy.getAuth ? await strategy.getAuth(envConfig) : null;
   const domain = envConfig.domain || envConfig.dns?.domain;
@@ -2225,6 +2249,20 @@ export async function failoverHA(
           `${WALG_ROLE_DIR} mount on ${DB_POD}); run \`vibecarbon deploy ${envName}\` once ` +
           `(one db restart), then retry. ${FAILOVER_NOT_STARTED}`,
       );
+    }
+    // D1: a reseed here is in place, behind db-guard.sh in the RUNNING
+    // standby db pod. A pod from before it refuses now, before the replica
+    // proof, provisioning or quiesce, even when the standby streams (the
+    // reseed would be skipped, but D2's arm needs the same template). Only
+    // the pre-release refusal stops here: an unreadable pod or a guard that
+    // fails for another reason is left to the replica proof and to the
+    // reseed's own guard.
+    try {
+      await assertReseedCapable(servers, envName);
+    } catch (err) {
+      if (err instanceof DbGuardMissingError) {
+        throw new FailoverRefusedError(`Failover refused: ${err.message}. ${FAILOVER_NOT_STARTED}`);
+      }
     }
   }
 
@@ -2451,6 +2489,7 @@ export async function failoverHA(
       let seededSysid = null;
       let reseeded = false;
       await reseed(servers, sshKeyPath, s, {
+        envName,
         // A standby the gate found not streaming has no catch-up proof, so a
         // later streaming read must not skip its reseed.
         mustReseed: planned && caughtUp === false,

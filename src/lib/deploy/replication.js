@@ -17,10 +17,12 @@
  * hardcoding either transport.
  */
 
+import { randomBytes } from 'node:crypto';
+import { loadProjectConfig } from '../config.js';
 import { hasSentinelLine, refusalFromError, sentinelLinePayload } from '../remote-sentinel.js';
 import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
-import { DB_CONTAINER, DB_POD, DB_PVC, DB_STATEFULSET } from './db-workload.js';
+import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
 import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
 import {
   DB_ROLE_CONFIGMAP,
@@ -32,16 +34,16 @@ import { REPL_GATEWAY_PORT } from './wireguard.js';
 
 /**
  * Shared budget for every db-StatefulSet boot/rollout wait (the deploy-side
- * reseed standbyBoot in k8s/ha/index.js, and the
- * failover/restore-side reseed wait below). 600s, raised from 300s
+ * reseed standbyBoot in k8s/ha/index.js, and the failover/restore-side
+ * in-place reseed: its restart wait and recovery wait below). 600s, raised from 300s
  * 2026-08-29: DigitalOcean CSI detach/attach settle pushed a HEALTHY
  * standby boot past 300s (run 33252884427 — the rollout wait timed out and
  * the failure diagnostics a minute later showed the pod Ready); Hetzner
  * CSI reattach was already documented as "minutes" beside those waits. Any
  * SSH client timeout wrapping a wait on this budget must exceed it, or the
  * transport kills kubectl before kubectl can name the stuck sts
- * (tests/unit/failover/reseed-standby.test.ts pins that; db-sts-boot-timeout-census.test.ts
- * drafts new waits into this budget).
+ * (k8sDbRolloutWait keeps its ssh budget 30s above it;
+ * db-sts-boot-timeout-census.test.ts drafts new waits into this budget).
  */
 export const DB_STS_BOOT_TIMEOUT_S = 600;
 
@@ -60,9 +62,8 @@ export function restoreRolloutTimeoutS(sizeBytes) {
   );
 }
 
-// Staging subdir INSIDE PGDATA for the swap:false re-seed — on the PVC
-// filesystem so the node-side promotion is an atomic same-fs rename.
-const RESEED_STAGING_DIR = '/var/lib/postgresql/data/.reseed_staging';
+/** The db container's PGDATA (both tiers mount the data volume here). */
+const PGDATA_DIR = '/var/lib/postgresql/data';
 
 /**
  * Where the in-place standby reseed stages its tree: inside the live PGDATA,
@@ -581,28 +582,6 @@ export function parsePgdataClaimFromPodJson(podJson) {
 }
 
 /**
- * Resolve the swap-pod inputs from the standby's live db pod (k8s sshKubectl
- * transport). Thin fetch-then-parse wrapper over parsePgdataClaimFromPodJson.
- *
- * @param {string} ip - the cluster's master IP (kubectl target)
- * @param {string} sshKeyPath
- * @param {string} pod - the db pod name
- * @returns {Promise<{claimName:string, subPath:string, image:string}>}
- */
-async function resolvePgdataClaim(ip, sshKeyPath, pod) {
-  const podRaw = await sshKubectl(ip, sshKeyPath, [
-    'get',
-    'pod',
-    pod,
-    '-n',
-    'vibecarbon',
-    '-o',
-    'json',
-  ]);
-  return parsePgdataClaimFromPodJson(podRaw);
-}
-
-/**
  * Build the helper-pod manifest (JSON — kubectl apply -f - accepts it, and it
  * sidesteps YAML-escaping the bash swap script). The pod mounts the WHOLE PVC
  * (no subPath) at `mountRoot` so PGDATA (`<mountRoot>/<subPath>`) is a regular
@@ -1044,157 +1023,6 @@ export function k8sDbRolloutStatusArgv(timeoutSeconds = DB_STS_BOOT_TIMEOUT_S) {
 }
 
 /**
- * PersistentVolume names bound to the db StatefulSet's claim (DB_PVC,
- * `data-db-0`: the StatefulSet's only volumeClaimTemplate). Matched exactly,
- * not by suffix, so an add-on StatefulSet whose name happens to end in `db`
- * is never mistaken for the database. Fail-open: unreadable/unparseable output
- * → empty list, so every caller degrades to "nothing to wait for / repair"
- * rather than failing a reseed over a diagnostic read.
- *
- * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
- * @returns {Promise<string[]>}
- */
-export async function listDbPvNames(kubectl) {
-  try {
-    const raw = await kubectl(['get', 'pvc', '-n', 'vibecarbon', '-o', 'json']);
-    const items = JSON.parse(String(raw))?.items ?? [];
-    return items
-      .filter((c) => c?.metadata?.name === DB_PVC)
-      .map((c) => c?.spec?.volumeName)
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Wait until no VolumeAttachment references the given PVs.
- *
- * WHY (d4 run 6 RCA): the k8s re-seed puts the SAME volume through four
- * attach/detach transitions in ~2 minutes (db scale-to-zero → helper-pod
- * attach → helper delete → db scale-up). On DigitalOcean's CSI an attach
- * issued while the previous detach is still settling can be recorded as
- * attached without ever holding at the provider — the stale-attachment state
- * documented on STALE_ATTACH_EVENT_PATTERN. Waiting for the attachment
- * objects to actually clear between transitions removes the overlap the race
- * needs. Hetzner's CSI tolerates the overlap; the wait is a no-op cost there
- * (attachments clear in seconds).
- *
- * Best-effort BY CONTRACT: budget lapse or unreadable listings resolve
- * `{detached: false}` with a log line, never throw — the recovery branch in
- * reseedStandbyFromPrimary backstops the residual, and a reseed must not die
- * on a diagnostic read. Local-path clusters have no attachments at all and
- * resolve on the first poll.
- *
- * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
- * @param {object} opts
- * @param {string[]} opts.pvNames
- * @param {number} [opts.budgetMs]
- * @param {(ms: number) => Promise<void>} [opts.sleep]
- * @param {(msg: string) => void} [opts.log]
- * @returns {Promise<{detached: boolean}>}
- */
-export async function waitForPvDetach(
-  kubectl,
-  {
-    pvNames,
-    budgetMs = 120_000,
-    // Provider read-after-write settle, applied ONLY when this wait actually
-    // observed an attachment clear (no churn = nothing to settle). d4 run 8,
-    // csi-do-controller transcript: controller_unpublish completed at
-    // :36, controller_publish called the SAME second, and the driver's
-    // stale state read answered "volume is already attached" — publish
-    // returned success WITHOUT issuing an attach while DO's API showed the
-    // volume attached to nothing. VolumeAttachment-object-gone is therefore
-    // NOT provider-state-settled; a publish issued inside DO's volume-state
-    // read-after-write window recreates the stale attachment every time
-    // (the run-8 repair loop reproduced it back-to-back). The condition is
-    // not observable through kubectl — this floor is the honest stand-in,
-    // and the signature-gated repair backstops the residual.
-    settleMs = 25_000,
-    // Callers that KNOW churn just happened (the repair deletes attachments
-    // itself before waiting) set this so the settle applies even when the
-    // first poll already reads clear.
-    forceSettle = false,
-    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-    log,
-  } = {},
-) {
-  if (!pvNames?.length) return { detached: true };
-  const emit = log ?? ((m) => console.error(m));
-  const started = Date.now();
-  const wanted = new Set(pvNames);
-  let sawAttachment = forceSettle;
-  while (Date.now() - started < budgetMs) {
-    let held = [];
-    try {
-      const raw = await kubectl(['get', 'volumeattachment', '-o', 'json']);
-      const items = JSON.parse(String(raw))?.items ?? [];
-      held = items.filter((a) => wanted.has(a?.spec?.source?.persistentVolumeName));
-    } catch {
-      // Unreadable listing — treat as clear (fail-open; see contract above).
-      return { detached: true };
-    }
-    if (held.length === 0) {
-      if (sawAttachment && settleMs > 0) {
-        emit(
-          `[reseed] attachments cleared; settling ${Math.round(settleMs / 1000)}s for the ` +
-            `provider's volume-state read-after-write window before the next attach.`,
-        );
-        await sleep(settleMs);
-      }
-      return { detached: true };
-    }
-    sawAttachment = true;
-    await sleep(3000);
-  }
-  emit(
-    `[reseed] volume attachments for ${pvNames.join(', ')} did not clear within ` +
-      `${Math.round(budgetMs / 1000)}s — continuing; the stale-attachment recovery ` +
-      `backstops a wedged reattach.`,
-  );
-  return { detached: false };
-}
-
-/**
- * One-shot repair for the stale-VolumeAttachment state: delete every
- * attachment referencing the db PVs so the attach/detach controller re-issues
- * a REAL provider attach. Returns the names it deleted (possibly empty).
- * Fail-open like the reads above.
- *
- * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
- * @param {{log?: (msg: string) => void}} [opts]
- * @returns {Promise<string[]>}
- */
-export async function deleteStaleDbVolumeAttachments(kubectl, { log } = {}) {
-  const emit = log ?? ((m) => console.error(m));
-  const pvNames = await listDbPvNames(kubectl);
-  if (pvNames.length === 0) return [];
-  let stale = [];
-  try {
-    const raw = await kubectl(['get', 'volumeattachment', '-o', 'json']);
-    const items = JSON.parse(String(raw))?.items ?? [];
-    stale = items
-      .filter((a) => pvNames.includes(a?.spec?.source?.persistentVolumeName))
-      .map((a) => a?.metadata?.name)
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-  const deleted = [];
-  for (const name of stale) {
-    try {
-      await kubectl(['delete', 'volumeattachment', name, '--ignore-not-found']);
-      deleted.push(name);
-      emit(`[reseed] deleted stale VolumeAttachment ${name} to force a real provider attach`);
-    } catch {
-      // Best-effort — the retried rollout wait is the verdict either way.
-    }
-  }
-  return deleted;
-}
-
-/**
  * Poll a "read the standby's replication state on the primary" closure until it
  * reports `streaming`, or the attempt budget lapses. Injected `readState`
  * (returns pg_stat_replication.state, or '' when no replica is connected) keeps
@@ -1407,89 +1235,73 @@ export async function ensureReplicationSlot(primaryIp, sshKeyPath, slotName = RE
 }
 
 /**
- * Re-seed the standby Postgres from the primary via pg_basebackup (k8s transport).
+ * Re-seed the k8s standby Postgres from the primary, in place (Task A4).
  * Closes the drift window that opens when streaming silently falls behind or the
  * standby pod restarted and missed WAL. Used by BOTH failover (before promotion)
  * and restore (post-restore standby resync).
  *
- * Sequence (2026-07-06 fix — the previous in-pod `pg_ctl stop` KILLED the pod:
- * the postmaster is the container's PID 1, so stopping it terminated the
- * container, kubelet restarted it as a fresh independent primary, and the swap
- * ran against the wrong process — the same RCA as the deploy-time seed):
- *   1. Stage a verified pg_basebackup into a subdir of PGDATA while the standby
- *      postgres is still running (buildStagedBasebackupScript swap:false — the
- *      staging lands on the PVC filesystem for an atomic rename;
- *      pg_basebackup -R writes standby.signal + primary_conninfo into staging).
- *   2. Resolve the PVC claim name + subPath + db image (resolvePgdataClaim —
- *      while the pod exists), scale the StatefulSet to 0 and wait for the pod to
- *      be fully gone (kubelet-sanctioned quiesce; the RWO PVC releases).
- *   3. Atomic PGDATA swap in a short-lived HELPER POD that mounts the released
- *      PVC (swapPgdataViaHelperPod → buildNodePgdataSwapScript, same script as
- *      the deploy-time seed). A helper pod (not a node-side ssh) is used so the
- *      swap works uniformly for local-path AND csi.hetzner.cloud PVCs — a CSI
- *      PV has no node hostPath and detaches on scale-to-zero (RCA 2026-07-07).
- *   4. Scale back to 1, wait rollout, and confirm the standby ENTERED RECOVERY
- *      (fail loudly if not — a reseeded standby that boots as a primary is the
- *      exact regression this fix closes).
+ * The db volume never detaches: no scale to zero, no helper pod, no detach
+ * wait (the do-csi-stale-volumeattachment trigger is gone from this path).
+ *   0. Target: the standby the FRESH env config names (.vibecarbon.json read
+ *      now, not the snapshot the command started with), with the primary it
+ *      names as the source. Any disagreement refuses before a remote call.
+ *   1. reseedStandbyInPlace: the live-pod guard, the source primary's checks
+ *      (it reports the primary intent; its .vc-discard is gone so
+ *      pg_basebackup never ships it), the stage over stdin, one in-pod stop,
+ *      the swap proof (.vc-reseeded-from), the recovery wait, then the
+ *      standby's .vc-discard goes (D9).
+ *   2. The seeded system identifier is read and handed to onSeeded.
  *
- * Safety contract (unchanged):
- *   - REPL_PASSWORD is read from the `vibecarbon-infra-secrets` Secret. If it is not
- *     found we CANNOT safely re-seed → throw a HARD ERROR so the caller aborts
- *     rather than acting on a stale standby. Distinct from "primary unreachable".
- *   - Reachability is probed from inside the standby pod BEFORE any destructive
- *     work. If the primary is not reachable we return 'skipped' WITHOUT touching
- *     PGDATA.
- *   - The basebackup stages + verifies (PG_VERSION) BEFORE the standby is ever
- *     taken down — a failed backup throws while the standby is still serving,
- *     and the helper-pod swap refuses to promote an unverified staging.
- *   - On any failure after scale-to-zero the StatefulSet is scaled back to 1
- *     (best-effort) so the standby is never left down; its original PGDATA is
- *     untouched until the atomic swap succeeds.
+ * Safety contract:
+ *   - REPL_PASSWORD is read from the `vibecarbon-infra-secrets` Secret. If it is
+ *     not found we CANNOT safely re-seed: a HARD ERROR, distinct from "primary
+ *     unreachable".
+ *   - Reachability is probed from inside the standby db by the stage itself
+ *     (probeFirst): an unreachable primary prints RESEED_SKIPPED, nothing is
+ *     staged and nothing stops ('skipped').
+ *   - A stage another stage still runs over (RESEED_REFUSED busy) is a
+ *     terminal ReseedStageBusyError: wait, then rerun. Never retried.
  *
  * Transport: the standby dials its OWN database node's private IP on the
- * repl-gateway relay port (REPL_GATEWAY_PORT) — the standby gateway relays
- * through the WireGuard tunnel to the primary gateway, which forwards to the
- * primary postgres hostPort. This is the EXACT path the deploy-time seed uses;
- * the old direct `primaryDbIp:5432` dial is dead post-WireGuard (the
- * firewall admits only UDP 51821, and the primary db's hostPort 5433 is
- * localhost-relayed). The gateway relay directions were configured at deploy
- * for the CURRENT roles, and this re-seed always runs while those roles still
- * hold (failover re-seeds BEFORE promotion; restore never swaps roles), so no
- * gateway re-render is needed here. The post-failover REVERSE re-seed is
- * `vibecarbon deploy`'s job — it re-renders the gateways + tunnel with swapped
- * endpoints (all idempotent).
+ * repl-gateway relay port (REPL_GATEWAY_PORT), the path the deploy-time seed
+ * uses. This re-seed always runs while the deploy-time roles still hold
+ * (failover re-seeds BEFORE promotion; restore never swaps roles).
  *
  * @param {string} standbyIp - standby cluster master IP (kubectl target)
  * @param {string} sshKeyPath
  * @param {object} opts
- * @param {string} opts.standbyDbIp - standby DATABASE node public IP.
- *   No longer a swap target (the swap runs in a cluster-side helper pod), but
- *   still REQUIRED as a precondition that the standby HA cluster is fully
- *   identified — a re-seed must not run against a half-identified env.
- * @param {string} opts.standbyDbPrivateIp - the standby database
- *   node's PRIVATE IP: the local repl-gateway relay endpoint the basebackup +
- *   primary_conninfo dial. REQUIRED — a real IaC output on every provider
- *   (Hetzner pins it statically; DO exports the Pulumi-assigned VPC address),
- *   persisted under envConfig.ha.*.dbPrivateIp at deploy time. A
- *   Hetzner-shaped fallback here would make the re-seed's reachability probe
- *   fail closed into 'skipped' on other providers — promotion without
- *   re-seed.
- * @param {(systemIdentifier: string) => (void|Promise<void>)} [opts.onSeeded] - called
- *   with the reseeded standby's system identifier; callers record it as
- *   envConfig.ha.systemIdentifier (failover-guard recordSystemIdentifier).
- * @returns {Promise<'reseeded'|'skipped'>} 'reseeded' on success, 'skipped' when
- *   the primary is unreachable. Throws on password-missing or a real failure —
- *   NEVER silently returns as if skipped.
+ * @param {string} opts.standbyDbIp - standby DATABASE node public IP: REQUIRED as
+ *   a precondition that the standby HA cluster is fully identified.
+ * @param {string} opts.standbyDbPrivateIp - the standby database node's PRIVATE
+ *   IP: the local repl-gateway relay endpoint the basebackup + primary_conninfo
+ *   dial. REQUIRED (no provider-shaped fallback).
+ * @param {string} opts.primaryIp - the primary cluster master IP (the source)
+ * @param {string} opts.envName - the environment; its fresh config picks the target
+ * @param {() => object|undefined} [opts.readEnvConfig] - the env's config read now
+ * @param {(systemIdentifier: string) => (void|Promise<void>)} [opts.onSeeded]
+ * @param {number} [opts.attachWatchPollMs]
+ * @param {(ms: number) => Promise<void>} [opts.sleep]
+ * @param {() => number} [opts.now]
+ * @returns {Promise<'reseeded'|'skipped'>}
  */
 export async function reseedStandbyFromPrimary(
   standbyIp,
   sshKeyPath,
-  { standbyDbIp, standbyDbPrivateIp, detachSettleMs = 25_000, onSeeded } = {},
+  {
+    standbyDbIp,
+    standbyDbPrivateIp,
+    primaryIp,
+    envName,
+    onSeeded,
+    readEnvConfig = () => loadProjectConfig()?.environments?.[envName],
+    attachWatchPollMs,
+    sleep,
+    now,
+  } = {},
 ) {
   if (!standbyDbPrivateIp) {
-    // Same precondition class as the standbyDbIp check below: a
-    // missing private IP signals a half-identified HA env (or a pre-M3
-    // persisted config). Never assume an address — redeploy to persist it.
+    // A missing private IP signals a half-identified HA env (or a pre-M3
+    // persisted config). Never assume an address: redeploy to persist it.
     throw new Error(
       're-seed aborted: standbyDbPrivateIp is required — the standby database ' +
         "node's private IP is a deploy output persisted in the environment config; " +
@@ -1497,16 +1309,13 @@ export async function reseedStandbyFromPrimary(
     );
   }
   if (!standbyDbIp) {
-    // Precondition: a fully-identified HA standby cluster. The PGDATA swap runs
-    // in a cluster-side helper pod now (not a node-side ssh), so this IP is no
-    // longer a swap target — but a missing database node still signals a
-    // half-identified env we must NOT run a destructive re-seed against.
     throw new Error(
       're-seed aborted: standby database node IP is unknown; the standby HA ' +
         'cluster is not fully identified. Cannot safely re-seed; redeploy to ' +
         'persist the standby database IP.',
     );
   }
+  assertReseedTarget({ envName, standbyIp, primaryIp, envConfig: readEnvConfig() });
 
   const replPassword = await getReplPasswordFromSecret(standbyIp, sshKeyPath);
   if (!replPassword) {
@@ -1517,346 +1326,50 @@ export async function reseedStandbyFromPrimary(
     );
   }
 
-  const pod = await getPostgresPod(standbyIp, sshKeyPath);
-
-  // Connectivity pre-check FROM THE STANDBY POD, before any destructive work —
-  // through the SAME relay path the basebackup uses (local gateway → WireGuard
-  // tunnel → primary gateway → primary postgres), so a green probe means the
-  // whole chain is up, not just a firewall accident. pg_isready exits non-zero
-  // when the primary is not accepting connections; sshKubectl throws on
-  // non-zero → treat as "unreachable" and skip cleanly.
-  let reachable = false;
-  try {
-    await sshKubectl(standbyIp, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'pg_isready',
-      '-h',
-      standbyDbPrivateIp,
-      '-p',
-      String(REPL_GATEWAY_PORT),
-      '-t',
-      '5',
-      '-U',
-      'replicator',
-      '-d',
-      'postgres',
-    ]);
-    reachable = true;
-  } catch {
-    reachable = false;
-  }
-  if (!reachable) {
-    return 'skipped';
-  }
-
-  // Resolve the swap-pod inputs (PVC claim name, subPath, db image) while the
-  // pod still exists — the pod → PVC chain is unreadable after scale-to-zero.
-  // The swap runs in a helper pod that mounts this PVC, so it works uniformly
-  // for local-path AND csi.hetzner.cloud volumes (a CSI PV has no node hostPath
-  // and detaches on scale-to-zero, making a node-filesystem swap impossible).
-  let claimName;
-  let subPath;
-  let image;
-  try {
-    ({ claimName, subPath, image } = await resolvePgdataClaim(standbyIp, sshKeyPath, pod));
-  } catch (err) {
-    throw new Error(
-      `re-seed aborted before any destructive work: could not resolve the standby ` +
-        `PGDATA PVC/image (needed for the scale-to-zero + helper-pod swap): ${err.message}`,
-    );
-  }
-
-  // Stage a verified basebackup into a subdir of PGDATA while the standby
-  // postgres is STILL RUNNING (basebackup only needs the primary reachable).
-  // swap:false — no in-pod pg_ctl stop / in-place swap: the postmaster is the
-  // container's PID 1, so stopping it in-pod kills the pod. The script is piped
-  // over stdin (PGPASSWORD embedded), never argv. A failure here throws while
-  // the standby is still serving — nothing has been taken down yet.
-  // Dial the LOCAL relay (standby node private IP : gateway port) and pin the
-  // explicit streaming conninfo into the staging — byte-identical to the
-  // deploy-time seed's buildPrimaryConninfo output, so the reseeded standby
-  // streams through the same path it was seeded through. Plaintext
-  // (sslmode=disable) — WireGuard encrypts the wire.
-  const script = buildStagedBasebackupScript({
-    replPassword,
-    primaryHost: standbyDbPrivateIp,
-    primaryPort: String(REPL_GATEWAY_PORT),
-    probeFirst: false,
-    swap: false,
-    stagingDir: RESEED_STAGING_DIR,
-    primaryConninfo: buildPrimaryConninfo({
-      primaryHost: standbyDbPrivateIp,
+  const kubectl = (argv, opts) => sshKubectl(standbyIp, sshKeyPath, argv, opts);
+  const primaryKubectl = (argv, opts) => sshKubectl(primaryIp, sshKeyPath, argv, opts);
+  // Stage a verified basebackup into $PGDATA/.vc-reseed while the standby
+  // postgres runs. The script is piped over stdin (PGPASSWORD embedded), never
+  // argv. It dials the LOCAL relay and pins the explicit streaming conninfo,
+  // byte-identical to the deploy-time seed's buildPrimaryConninfo output.
+  const stageScript = (attempt) =>
+    buildStagedBasebackupScript({
       replPassword,
-      port: REPL_GATEWAY_PORT,
-    }),
-    label: 'reseed',
-  });
-  await sshKubectl(standbyIp, sshKeyPath, ['exec', '-i', '-n', 'vibecarbon', pod, '--', 'bash'], {
-    input: script,
-  });
-
-  // Quiesce via the StatefulSet controller (kubelet-sanctioned; RWO PVC
-  // releases), swap via a helper pod that mounts the released PVC, then scale
-  // back up. The finally-scale-up keeps the standby from being left down on any
-  // failure — its original PGDATA is intact until the atomic swap succeeds.
-  let swapped = false;
-  try {
-    await sshKubectl(standbyIp, sshKeyPath, [
-      'scale',
-      'statefulset',
-      DB_STATEFULSET,
-      '-n',
-      'vibecarbon',
-      '--replicas=0',
-    ]);
-    let podGone = false;
-    for (let i = 0; i < 60; i++) {
-      let out;
-      try {
-        out = await sshKubectl(standbyIp, sshKeyPath, [
-          'get',
-          'pod',
-          pod,
-          '-n',
-          'vibecarbon',
-          '--ignore-not-found',
-          '-o',
-          'name',
-        ]);
-      } catch {
-        out = 'unreadable'; // transient kubectl/ssh failure — keep polling
-      }
-      if (!out?.trim()) {
-        podGone = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, i < 5 ? 1000 : 2000));
-    }
-    if (!podGone) {
-      throw new Error(
-        'standby db pod did not terminate within budget after scale-to-zero, ' +
-          'refusing the helper-pod PGDATA swap while the pod may still hold the PVC.',
-      );
-    }
-
-    // Atomic swap in a helper pod mounting the released PVC (uniform for
-    // local-path AND CSI). No secrets in the swap script (the conninfo password
-    // is already inside the staged postgresql.auto.conf, written in-pod).
-    const kubectl = (argv, opts) => sshKubectl(standbyIp, sshKeyPath, argv, opts);
-    // Let the scaled-to-zero db pod's volume DETACH actually finish before the
-    // helper pod re-attaches the claim — an attach overlapping the previous
-    // detach is the DO-CSI stale-attachment trigger (d4 run 6; see
-    // waitForPvDetach). Pod-gone (above) is not detach-done.
-    await waitForPvDetach(kubectl, {
-      pvNames: await listDbPvNames(kubectl),
-      settleMs: detachSettleMs,
+      primaryHost: standbyDbPrivateIp,
+      primaryPort: String(REPL_GATEWAY_PORT),
+      // One probe, like the single-shot pre-check this replaces: failover
+      // already found the primary ready, and restore just restored it.
+      probeFirst: true,
+      probeAttempts: 1,
+      swap: false,
+      stagingDir: IN_PLACE_RESEED_DIR,
+      primaryConninfo: buildPrimaryConninfo({
+        primaryHost: standbyDbPrivateIp,
+        replPassword,
+        port: REPL_GATEWAY_PORT,
+      }),
+      label: 'reseed',
+      inPlaceAttempt: attempt,
     });
-    const swapOut = await swapPgdataViaHelperPod(kubectl, { claimName, subPath, image });
-    swapped = hasSentinelLine(swapOut, 'RESEED_SWAPPED');
-    if (!swapped) {
-      // The stage step above verified the staging (PG_VERSION) and threw on
-      // failure, so a SKIPPED here means the staging vanished between steps —
-      // a real failure, not a benign probe-skip.
-      throw new Error(
-        'helper-pod PGDATA swap found no verified staging to promote: the staged ' +
-          'basebackup disappeared between staging and swap. The standby keeps its ' +
-          'previous PGDATA.',
-      );
-    }
-  } finally {
-    // Let the helper pod's volume DETACH settle before the StatefulSet
-    // re-attaches the same claim — the second half of the churn window the
-    // DO-CSI stale-attachment race needs (d4 run 6). Best-effort like
-    // everything else in this finally.
-    await (async () => {
-      const kubectl = (argv, opts) => sshKubectl(standbyIp, sshKeyPath, argv, opts);
-      await waitForPvDetach(kubectl, { pvNames: await listDbPvNames(kubectl) });
-    })().catch(() => {});
-    // Always bring the StatefulSet back (even on failure — the old PGDATA is
-    // intact and boots the previous standby state). Best-effort: the throw in
-    // flight is the actionable signal.
-    await sshKubectl(standbyIp, sshKeyPath, [
-      'scale',
-      'statefulset',
-      DB_STATEFULSET,
-      '-n',
-      'vibecarbon',
-      '--replicas=1',
-    ]).catch(() => {});
-  }
+  const result = await reseedStandbyInPlace({
+    kubectl,
+    stageScript,
+    envName,
+    attachWatchPollMs,
+    sleep,
+    now,
+    beforeStage: () => prepareReseedSource(primaryKubectl, { envName }),
+  });
+  if (result !== 'reseeded') return result;
 
-  // 300s server-side inside a 310s client cap, matching the deploy path's
-  // post-swap boot budget (setupReplication's reseed.standbyBoot). The prior
-  // 120s was survivorship bias — "all green runs fit" only until one didn't:
-  // perf slice data (run 29378289779, 2026-07-15) measured the identical
-  // post-swap boot at 165.8s on a healthy rig (CSI volume reattach + init
-  // containers; ~5 min observed live 2026-07-07), so 120s intermittently
-  // fails healthy reseeds. The explicit client cap keeps kubectl's own
-  // timeout error (naming the stuck sts) as the surfaced failure.
-  //
-  // ONE stale-attachment repair on timeout (d4 run 6, mitigations.yml
-  // `do-csi-stale-volumeattachment`): when the wait dies AND the db pod's
-  // events carry the mkfs-on-missing-device signature, the attachment record
-  // is provably stale (provider shows the volume attached to nothing; a pod
-  // bounce does NOT heal it) — delete the attachments to force a real
-  // provider attach and run the SAME wait once more. A timeout WITHOUT the
-  // signature rethrows untouched: this is a targeted repair for one
-  // evidenced state, not a blind retry.
-  const rolloutWait = () =>
-    sshKubectl(
-      standbyIp,
-      sshKeyPath,
-      [
-        'rollout',
-        'status',
-        `statefulset/${DB_STATEFULSET}`,
-        '-n',
-        'vibecarbon',
-        `--timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
-      ],
-      { timeout: (DB_STS_BOOT_TIMEOUT_S + 10) * 1000 },
-    );
-  try {
-    await rolloutWait();
-  } catch (rolloutErr) {
-    const kubectl = (argv, opts) => sshKubectl(standbyIp, sshKeyPath, argv, opts);
-    let events = '';
-    try {
-      events = String(
-        await kubectl([
-          'get',
-          'events',
-          '-n',
-          'vibecarbon',
-          '--field-selector',
-          `involvedObject.name=${pod}`,
-          '-o',
-          'json',
-        ]),
-      );
-    } catch {
-      // Unreadable events — no evidence, no repair.
-    }
-    if (!STALE_ATTACH_EVENT_PATTERN.test(events)) throw rolloutErr;
-    console.error(
-      '[reseed] db rollout timed out with the stale-VolumeAttachment signature ' +
-        '(MountDevice mkfs on a missing device) — scaling to zero, deleting the ' +
-        'stale attachments, settling past the provider read-after-write window, ' +
-        'and waiting once more.',
-    );
-    // ORDER MATTERS (run 8: the naive delete-VA-and-rewait repair reproduced
-    // the race back-to-back — the controller processed unpublish and publish
-    // in the SAME second and the driver's stale state read answered "already
-    // attached" without attaching). Scale to zero FIRST so no pod wants the
-    // volume and no publish can fire inside the detach's read-after-write
-    // window; then clear the attachments, settle, and only then let the
-    // StatefulSet re-attach.
-    await kubectl([
-      'scale',
-      'statefulset',
-      DB_STATEFULSET,
-      '-n',
-      'vibecarbon',
-      '--replicas=0',
-    ]).catch(() => {});
-    const deleted = await deleteStaleDbVolumeAttachments(kubectl);
-    if (deleted.length === 0) {
-      // No stale attachment to clear after all — restore replicas and
-      // surface the original timeout untouched.
-      await kubectl([
-        'scale',
-        'statefulset',
-        DB_STATEFULSET,
-        '-n',
-        'vibecarbon',
-        '--replicas=1',
-      ]).catch(() => {});
-      throw rolloutErr;
-    }
-    await waitForPvDetach(kubectl, {
-      pvNames: await listDbPvNames(kubectl),
-      forceSettle: true,
-      settleMs: detachSettleMs,
-    });
-    await kubectl(['scale', 'statefulset', DB_STATEFULSET, '-n', 'vibecarbon', '--replicas=1']);
-    await rolloutWait();
-  }
-
-  // The swap went in — the standby MUST boot into recovery (standby.signal +
-  // primary_conninfo were verified in staging). If it never does, fail loudly
-  // NOW: a reseeded standby serving as its own primary is the exact regression
-  // the scale-to-zero flow closes. Callers depend on this state (failover
-  // promotes it out of recovery next; restore verifies streaming next).
-  // Budget: ~10 min — on csi.hetzner.cloud PVCs the scale-up costs minutes
-  // (volume reattach + init containers + backup recovery; ~5 min observed
-  // live 2026-07-07) before the read-only probe can succeed.
-  let inRecovery = false;
-  let lastRecoveryErr = '';
-  for (let i = 0; i < 150; i++) {
-    try {
-      const r = await sshKubectl(standbyIp, sshKeyPath, [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        'SELECT pg_is_in_recovery()',
-      ]);
-      if (r.trim() === 't') {
-        inRecovery = true;
-        break;
-      }
-    } catch (err) {
-      // Pod still booting / applying initial WAL — retry. Record the failure
-      // text (runCommandAsync folds psql's FATAL detail into the error message)
-      // so the budget-exhausted throw can classify config errors distinctly.
-      lastRecoveryErr = err?.message || String(err);
-    }
-    await new Promise((r) => setTimeout(r, i < 5 ? 500 : 4000));
-  }
-  if (!inRecovery) {
-    // "Hot standby mode is disabled" is a CONFIG error (hot_standby=off won
-    // because the staged auto.conf override did not take), NOT a timing issue:
-    // waiting longer can never fix it.
-    if (lastRecoveryErr.includes('Hot standby mode is disabled')) {
-      throw new Error(
-        'standby re-seed: the standby is streaming but refusing read-only connections ' +
-          '("Hot standby mode is disabled") — hot_standby is OFF in its effective config ' +
-          '(the staged postgresql.auto.conf must pin hot_standby = on, and it did not take). ' +
-          'Config error, not a timing issue.',
-      );
-    }
-    throw new Error(
-      'standby re-seed swapped in a fresh basebackup but the standby never entered ' +
-        'recovery mode within the budget; the reseeded PGDATA is not replaying from ' +
-        'the primary (check the standby db logs).',
-    );
-  }
   // Record what was seeded: failover's replica proof (R1) compares the
   // standby's system identifier against this value. Read on the standby, which
   // pg_basebackup just gave the primary's identity.
   if (onSeeded) {
-    const sysid = (
-      await sshKubectl(standbyIp, sshKeyPath, [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        'psql',
-        '-U',
-        'postgres',
-        '-tAc',
-        SYSTEM_IDENTIFIER_SQL,
-      ])
+    const sysid = String(
+      await kubectl(dbExecArgv(['psql', '-U', 'postgres', '-tAc', SYSTEM_IDENTIFIER_SQL]), {
+        timeout: 30_000,
+      }),
     ).trim();
     if (!/^\d+$/.test(sysid)) {
       throw new Error(
@@ -1867,6 +1380,240 @@ export async function reseedStandbyFromPrimary(
     await onSeeded(sysid);
   }
   return 'reseeded';
+}
+
+/**
+ * Pure. The reseed wipes the cluster at `standbyIp` and copies the one at
+ * `primaryIp`: both must be what the environment's config names right now.
+ * The live-pod guard only reads the target pod's own intent and mounts, so a
+ * stale snapshot (a failover that swapped the roles since) would otherwise aim
+ * the reseed at the wrong cluster.
+ *
+ * @param {{envName?: string, standbyIp: string, primaryIp?: string, envConfig?: object}} o
+ */
+export function assertReseedTarget({ envName, standbyIp, primaryIp, envConfig }) {
+  if (!envName) {
+    throw new Error('reseed refused: no envName; the reseed reads its target from the env config');
+  }
+  const configured = {
+    standby: envConfig?.ha?.standby?.masterIp,
+    primary: envConfig?.ha?.primary?.masterIp,
+  };
+  if (!configured.standby || !configured.primary) {
+    throw new Error(
+      `reseed refused: .vibecarbon.json names no k8s-ha primary and standby for ${envName}; nothing was touched`,
+    );
+  }
+  if (standbyIp !== configured.standby || primaryIp !== configured.primary) {
+    throw new Error(
+      `reseed refused: the target (standby ${standbyIp}, primary ${primaryIp ?? '<none>'}) is not what ` +
+        `${envName}'s config names now (standby ${configured.standby}, primary ${configured.primary}); ` +
+        'nothing was touched. Rerun the command so it reads the current roles',
+    );
+  }
+  if (configured.standby === configured.primary) {
+    throw new Error(
+      `reseed refused: ${envName}'s config names ${configured.standby} as both primary and standby; nothing was touched`,
+    );
+  }
+}
+
+/** `kubectl` argv reading the vibecarbon-db-role intent ('' when absent). */
+const DB_ROLE_INTENT_READ = Object.freeze([
+  '-n',
+  'vibecarbon',
+  'get',
+  'configmap',
+  DB_ROLE_CONFIGMAP,
+  '--ignore-not-found',
+  '-o',
+  `jsonpath={.data.${DB_ROLE_INTENT_KEY}}`,
+]);
+
+/**
+ * Drops the source primary's `.vc-discard` (garbage by D9 and by restore:
+ * a reseed's or a proven restore's old cluster) so pg_basebackup never ships
+ * it. Prints VC_DISCARD_GONE once it is gone; one sh -c token.
+ */
+export const SOURCE_DISCARD_DROP = Object.freeze([
+  'sh',
+  '-c',
+  `rm -rf ${PGDATA_DIR}/.vc-discard; if [ -e ${PGDATA_DIR}/.vc-discard ] || [ -L ${PGDATA_DIR}/.vc-discard ]; then echo VC_DISCARD_LEFT; exit 1; fi; echo VC_DISCARD_GONE`,
+]);
+
+/**
+ * The source primary, right before the stage: its cluster must report the
+ * primary intent (the config and the clusters agree on who is who), and its
+ * `.vc-discard` must be gone. A refusal stages nothing and stops nothing.
+ *
+ * @param {(argv: string[], opts?: object) => Promise<string>} primaryKubectl
+ * @param {{envName?: string}} o
+ */
+async function prepareReseedSource(primaryKubectl, { envName } = {}) {
+  const intent = String(
+    (await primaryKubectl([...DB_ROLE_INTENT_READ], { timeout: 30_000 })) ?? '',
+  ).trim();
+  if (intent !== 'primary') {
+    throw new Error(
+      `reseed refused: the configured primary's cluster reports the ${intent || '<none>'} intent, ` +
+        `not primary; the clusters disagree with ${envName || 'the'} config. Nothing was staged`,
+    );
+  }
+  let out = '';
+  try {
+    out = await primaryKubectl(dbExecArgv(SOURCE_DISCARD_DROP), { timeout: 300_000 });
+  } catch (error) {
+    out = error?.stdout ?? '';
+  }
+  if (!hasSentinelLine(out, 'VC_DISCARD_GONE')) {
+    throw new Error(
+      `reseed refused: could not remove ${PGDATA_DIR}/.vc-discard on the primary (pg_basebackup would ` +
+        'copy it into the standby). Nothing was staged',
+    );
+  }
+}
+
+/** A fresh in-place reseed attempt id (IN_PLACE_ATTEMPT_RE). */
+function newReseedAttempt() {
+  return `r${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
+}
+
+/**
+ * Guard → stage (in the running standby db) → restart in place → prove the
+ * swap (.vc-reseeded-from === attempt) → recovery wait → remove .vc-discard.
+ * Zero attach transitions on the happy path.
+ *
+ * Order is load-bearing: the guard first (a refusal moves nothing and runs no
+ * basebackup), then `beforeStage`, then the stage over stdin (password never
+ * in argv), then the one stop.
+ *
+ * @param {object} o
+ * @param {(argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>} o.kubectl  standby cluster
+ * @param {(attempt: string) => string} o.stageScript  buildStagedBasebackupScript({... inPlaceAttempt: attempt})
+ * @param {string} o.envName
+ * @param {() => Promise<void>} [o.beforeStage] runs after the guard, before the stage
+ * @param {number} [o.attachWatchPollMs]
+ * @param {(ms: number) => Promise<void>} [o.sleep]
+ * @param {() => number} [o.now]
+ * @returns {Promise<'reseeded'|'skipped'>}  'skipped' only when the stage printed RESEED_SKIPPED
+ */
+export async function reseedStandbyInPlace({
+  kubectl,
+  stageScript,
+  envName,
+  beforeStage,
+  attachWatchPollMs,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = Date.now,
+}) {
+  const guard = await assertLiveDbGuardSupportsReseed(kubectl, { envName });
+  if (beforeStage) await beforeStage();
+
+  const attempt = newReseedAttempt();
+  const script = stageScript(attempt);
+  // runInPlaceStage reads the stage's stdout (an exec error carries it):
+  // busy is terminal, never retried here or by a caller.
+  const stage = await runInPlaceStage(
+    () =>
+      kubectl(['-n', 'vibecarbon', 'exec', '-i', DB_POD, '-c', DB_CONTAINER, '--', 'sh'], {
+        input: script,
+      }),
+    { attempt },
+  );
+  if ('skipped' in stage) return 'skipped';
+
+  await restartDbContainerInPlace(kubectl, {
+    guard,
+    recreatedWait: () =>
+      k8sDbRolloutWait({
+        kubectl: (_ip, argv, opts) => kubectl(argv, opts),
+        ip: '',
+        pollMs: attachWatchPollMs,
+      }),
+    sleep,
+    now,
+  });
+
+  const from = String(await kubectl(dbExecArgv(RESEEDED_FROM_READ), { timeout: 30_000 })).trim();
+  if (from !== attempt) {
+    throw new Error(
+      `the swap did not run; the standby booted its previous data directory ` +
+        `(${PGDATA_DIR}/.vc-reseeded-from is ${from || 'absent'}, staged attempt ${attempt}). ` +
+        `See why: kubectl -n vibecarbon logs ${DB_POD} -c ${DB_CONTAINER} --previous`,
+    );
+  }
+
+  await waitForStandbyRecovery({
+    exec: () =>
+      kubectl(dbExecArgv(['psql', '-U', 'postgres', '-tAc', 'SELECT pg_is_in_recovery()']), {
+        timeout: 30_000,
+      }),
+    sleep,
+    now,
+  });
+
+  // The old tree (D9): garbage once the standby is proven in recovery. Best
+  // effort; any later swap or restore removes it first.
+  await kubectl(dbExecArgv(['rm', '-rf', `${PGDATA_DIR}/.vc-discard`]), {
+    timeout: 300_000,
+  }).catch(() => {});
+  return 'reseeded';
+}
+
+/** Reads the swap record db-guard.sh leaves ('' when there is none). */
+const RESEEDED_FROM_READ = Object.freeze([
+  'sh',
+  '-c',
+  `cat ${PGDATA_DIR}/.vc-reseeded-from 2>/dev/null || true`,
+]);
+
+/**
+ * Wait (deadline-bounded) for a reseeded standby to answer
+ * pg_is_in_recovery() = t. A standby that never does is serving as its own
+ * primary: fail loudly. "Hot standby mode is disabled" is a CONFIG error, not
+ * timing, and fails at once.
+ *
+ * @param {object} o
+ * @param {() => Promise<string>} o.exec runs `SELECT pg_is_in_recovery()`
+ * @param {number} [o.deadlineMs]
+ * @param {number} [o.pollMs]
+ * @param {(ms: number) => Promise<void>} [o.sleep]
+ * @param {() => number} [o.now]
+ */
+export async function waitForStandbyRecovery({
+  exec,
+  deadlineMs = DB_STS_BOOT_TIMEOUT_S * 1000,
+  pollMs = 4000,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now = Date.now,
+}) {
+  const deadline = now() + deadlineMs;
+  let lastErr = '';
+  for (;;) {
+    try {
+      if (String(await exec()).trim() === 't') return;
+    } catch (err) {
+      // Booting / applying initial WAL. The failure text carries psql's FATAL
+      // detail (runCommandAsync folds it into the message).
+      lastErr = err?.message || String(err);
+      if (lastErr.includes('Hot standby mode is disabled')) {
+        throw new Error(
+          'standby re-seed: the standby is streaming but refusing read-only connections ' +
+            '("Hot standby mode is disabled") — hot_standby is OFF in its effective config ' +
+            '(the staged postgresql.auto.conf must pin hot_standby = on, and it did not take). ' +
+            'Config error, not a timing issue.',
+        );
+      }
+    }
+    if (now() >= deadline) {
+      throw new Error(
+        'standby re-seed swapped in a fresh basebackup but the standby never entered ' +
+          'recovery mode within the budget; the reseeded PGDATA is not replaying from ' +
+          `the primary (check the standby db logs)${lastErr ? `; last error: ${lastErr.slice(0, 200)}` : ''}.`,
+      );
+    }
+    await sleep(pollMs);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1929,7 +1676,8 @@ export const DB_IN_PLACE_STOP = Object.freeze([
   'sh',
   '-c',
   `grep -q '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || { echo '${STOP_REFUSED} the mounted db-guard.sh does not speak the reseed protocol'; exit ${STOP_REFUSED_STATUS}; }; ` +
-    `r=${IN_RECOVERY_SH}; [ "$r" = t ] || { echo "${STOP_REFUSED} postgres is not in recovery (pg_is_in_recovery: $r)"; exit ${STOP_REFUSED_STATUS}; }; ` +
+    `r=${IN_RECOVERY_SH}; [ -n "$r" ] || { echo '${STOP_REFUSED} could not confirm the db is in recovery (psql did not answer)'; exit ${STOP_REFUSED_STATUS}; }; ` +
+    `[ "$r" = t ] || { echo "${STOP_REFUSED} postgres is not in recovery (pg_is_in_recovery: $r)"; exit ${STOP_REFUSED_STATUS}; }; ` +
     'kill -INT 1',
 ]);
 
@@ -2063,10 +1811,17 @@ export function evaluateDbGuardSupport(podJson, markerGrepOut, intent) {
     return { ok: false, reason: `the role intent is ${word || '<none>'}, not standby` };
   }
   const recovery = /^in_recovery=(.*)$/m.exec(out)?.[1]?.trim();
+  if (!recovery) {
+    // psql did not answer (postgres down or still starting): no verdict.
+    return {
+      ok: false,
+      reason: `could not confirm the db is in recovery: psql in ${DB_POD} did not answer pg_is_in_recovery()`,
+    };
+  }
   if (recovery !== 't') {
     return {
       ok: false,
-      reason: `postgres in ${DB_POD} is not in recovery (pg_is_in_recovery: ${recovery || '<unreadable>'}); a standby intent over a primary`,
+      reason: `postgres in ${DB_POD} is not in recovery (pg_is_in_recovery: ${recovery}); a standby intent over a primary`,
     };
   }
   return verdict;
@@ -2097,19 +1852,7 @@ export async function assertLiveDbGuardSupportsReseed(kubectl, { envName } = {})
   if (!podVerdict.ok) throw refuse(podVerdict);
 
   const intent = String(
-    (await kubectl(
-      [
-        '-n',
-        'vibecarbon',
-        'get',
-        'configmap',
-        DB_ROLE_CONFIGMAP,
-        '--ignore-not-found',
-        '-o',
-        `jsonpath={.data.${DB_ROLE_INTENT_KEY}}`,
-      ],
-      { timeout: 30_000 },
-    )) ?? '',
+    (await kubectl([...DB_ROLE_INTENT_READ], { timeout: 30_000 })) ?? '',
   ).trim();
   if (intent !== 'standby') {
     throw new Error(`reseed refused: role intent is ${intent || '<none>'}`);
@@ -2135,11 +1878,12 @@ export class ReseedStageBusyError extends Error {
  * .vc-restore.lock) is terminal: a ReseedStageBusyError telling the operator
  * to wait and rerun. Never retried here, never by a caller. Any other failure
  * is rethrown as is; success must name this attempt (`RESEED_STAGED <id>`).
+ * `RESEED_SKIPPED` (the probe never reached the primary) resolves `{skipped: true}`.
  *
  * @param {() => Promise<string>} exec runs the stage once, resolves its stdout,
  *   rejects with an error carrying `stdout` on a non-zero exit
  * @param {{attempt: string}} o
- * @returns {Promise<{staged: string}>}
+ * @returns {Promise<{staged: string} | {skipped: true}>}
  */
 export async function runInPlaceStage(exec, { attempt }) {
   let out;
@@ -2156,6 +1900,8 @@ export async function runInPlaceStage(exec, { attempt }) {
     }
     throw error;
   }
+  // The probe never reached the primary: nothing was staged, nothing to swap.
+  if (hasSentinelLine(out, 'RESEED_SKIPPED')) return { skipped: true };
   const staged = sentinelLinePayload(out, 'RESEED_STAGED');
   if (staged !== attempt) {
     throw new Error(

@@ -495,7 +495,8 @@ async function runCompose(
 }
 
 /** A kubectl reply for runFailoverK8s: the role surface, '' for the rest. */
-const k8sReply = (argv: string[], o: { roleMount?: boolean } = {}) => k8sRoleReply(argv, o) ?? '';
+const k8sReply = (argv: string[], o: { roleMount?: boolean; markerGrep?: string } = {}) =>
+  k8sRoleReply(argv, o) ?? '';
 
 /** The real failoverHA (planned), with the census's seams and the given kubectl and promote. */
 const runFailoverK8s = (stubs: { kubectl: KubectlSeam; promote: () => unknown }) =>
@@ -636,6 +637,44 @@ describe('k8s-ha: the wal-g role moves before the promote, with no db restart (D
     expect(promote).not.toHaveBeenCalled();
     expect(calls.some((c) => /scale |apply -f -|exec .*walg-role/.test(c))).toBe(false);
     expect(order).not.toContain('stopWriters');
+  });
+});
+
+describe('k8s-ha: D1, the in-place reseed guard at STEP 1', () => {
+  it('k8s: the in-place guard runs at STEP 1, before the replica proof, provisioning or quiesce', async () => {
+    const log: string[] = [];
+    const promote = vi.fn();
+    await expect(
+      runFailoverK8s({
+        kubectl: async (_ip, argv) => {
+          log.push(argv.join(' '));
+          return k8sReply(argv, { markerGrep: '0' });
+        },
+        promote,
+      }),
+    ).rejects.toThrow(/predates in-place reseeds[\s\S]*vibecarbon deploy prod/);
+    // The guard's own exec greps the mounted wrapper (and reads recovery in
+    // the same exec); nothing else ran.
+    const rest = log.filter((l) => !l.includes('db-guard.sh'));
+    expect(rest.some((l) => /scale |pg_stat_wal_receiver|exec .*psql|apply -f -/.test(l))).toBe(
+      false,
+    );
+    expect(order).toEqual([]);
+    expect(promote).not.toHaveBeenCalled();
+  });
+
+  it('k8s: a guard that fails for another reason (unreadable, not D1) is left to the replica proof', async () => {
+    await runFailoverK8s({
+      kubectl: async (_ip, argv) => {
+        if (argv.includes('configmap')) throw new Error('ssh: connection reset');
+        return k8sReply(argv);
+      },
+      promote: async () => {
+        order.push('promote');
+        return 'promoted';
+      },
+    }).catch(() => {});
+    expect(order).toContain('stopWriters');
   });
 });
 

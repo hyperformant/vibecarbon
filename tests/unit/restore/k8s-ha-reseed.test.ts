@@ -45,6 +45,7 @@ vi.mock('../../../src/lib/ssh.js', async () => {
 });
 
 const { runK8sRestore, RestoredDatabaseError } = await import('../../../src/restore.js');
+const { DbGuardMissingError } = await import('../../../src/lib/deploy/replication.js');
 const ssh = await import('../../../src/lib/ssh.js');
 
 function makeSpinner() {
@@ -177,6 +178,9 @@ describe('runK8sRestore — k8s-HA standby re-seed', () => {
     expect(reseedStandbyFromPrimary).toHaveBeenCalledWith('10.0.2.1', '/tmp/key', {
       standbyDbIp: '10.0.2.9',
       standbyDbPrivateIp: '10.0.1.2',
+      // The source primary and the env whose fresh config must still name both.
+      primaryIp: '10.0.1.1',
+      envName: 'prod',
       // The restored primary's lineage is what the standby now holds: record it.
       onSeeded: expect.any(Function),
     });
@@ -545,5 +549,115 @@ describe('runK8sRestore: the db bounce runs under the stale-attachment watch', (
       }),
     ).rejects.toThrow(/pvc-restore-1[\s\S]*stale volume attachment/);
     vi.mocked(ssh.sshKubectl).mockImplementation(promotedKubectl as never);
+  });
+});
+
+describe('runK8sRestore: the live db checks run before the primary is touched (D1, C11)', () => {
+  const haRestoreArgs = () => ({
+    ...baseArgs,
+    s: makeSpinner(),
+    envConfig: haEnvConfig,
+    ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+    reseedStandbyFromPrimary: vi.fn().mockResolvedValue('reseeded'),
+    readReplicationState: vi.fn().mockResolvedValue('streaming'),
+  });
+
+  it('D1/C11: a standby without in-place support is refused BEFORE the primary is touched', async () => {
+    const setMarker = vi.fn();
+    await expect(
+      runK8sRestore({
+        ...haRestoreArgs(),
+        assertStandbyReseedCapable: async () => {
+          throw new DbGuardMissingError('run `vibecarbon deploy prod` once');
+        },
+        setRestoreMarker: setMarker,
+      }),
+    ).rejects.toThrow(/vibecarbon deploy prod/);
+    expect(setMarker).not.toHaveBeenCalled();
+    // Reads only: no scale, no bounce, no patch.
+    const argvs = (ssh.sshKubectl as ReturnType<typeof vi.fn>).mock.calls.map(([, , a]) =>
+      (a as string[]).join(' '),
+    );
+    expect(argvs.every((a) => / get pod db-0 -o json$/.test(a))).toBe(true);
+  });
+
+  it('the check runs after the free-space check and targets the standby the config names', async () => {
+    const steps: string[] = [];
+    await runK8sRestore({
+      ...haRestoreArgs(),
+      readFreeBytes: async () => {
+        steps.push('fits');
+        return 100 * 1024 ** 3;
+      },
+      assertStandbyReseedCapable: async () => {
+        steps.push('guard');
+      },
+      setRestoreMarker: async () => {
+        steps.push('marker');
+      },
+    });
+    expect(steps).toEqual(['fits', 'guard', 'marker']);
+  });
+
+  it('a standby guard that fails for another reason (unreachable) does not stop the primary restore', async () => {
+    const setMarker = vi.fn();
+    const reseed = vi.fn().mockResolvedValue('reseeded');
+    await runK8sRestore({
+      ...haRestoreArgs(),
+      reseedStandbyFromPrimary: reseed,
+      assertStandbyReseedCapable: async () => {
+        throw new Error('ssh: connect to host 10.0.2.1 port 22: Connection refused');
+      },
+      setRestoreMarker: setMarker,
+    });
+    expect(setMarker).toHaveBeenCalledOnce();
+  });
+
+  it('a primary db pod without the wal-g role mount is refused before the marker (the compose twin probes the bind)', async () => {
+    const setMarker = vi.fn();
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_ip: string, _k: string, argv: string[]) =>
+        argv.join(' ').includes('get pod db-0')
+          ? JSON.stringify({
+              spec: { containers: [{ name: 'db', volumeMounts: [{ mountPath: '/x' }] }] },
+            })
+          : '',
+    );
+    await expect(
+      runK8sRestore({
+        ...haRestoreArgs(),
+        assertStandbyReseedCapable: async () => {},
+        setRestoreMarker: setMarker,
+      }),
+    ).rejects.toThrow(/predates the live wal-g role[\s\S]*vibecarbon deploy prod/);
+    expect(setMarker).not.toHaveBeenCalled();
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(promotedKubectl);
+  });
+
+  it('a single-region k8s env never runs the standby guard', async () => {
+    const guard = vi.fn();
+    await runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: { deployMode: 'kubernetes' },
+      assertStandbyReseedCapable: guard,
+      setRestoreMarker: vi.fn(),
+    });
+    expect(guard).not.toHaveBeenCalled();
+  });
+
+  it('the reseed gets the env name and the restored primary, so it re-reads its target from fresh config', async () => {
+    const reseed = vi.fn().mockResolvedValue('reseeded');
+    await runK8sRestore({
+      ...haRestoreArgs(),
+      reseedStandbyFromPrimary: reseed,
+      assertStandbyReseedCapable: async () => {},
+      setRestoreMarker: vi.fn(),
+    });
+    expect(reseed).toHaveBeenCalledWith(
+      '10.0.2.1',
+      '/tmp/key',
+      expect.objectContaining({ envName: 'prod', primaryIp: '10.0.1.1' }),
+    );
   });
 });

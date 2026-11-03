@@ -161,9 +161,19 @@ describe('evaluateDbGuardSupport', () => {
   });
 
   it('refuses a standby intent over postgres that is not in recovery (same exec as the marker)', () => {
-    for (const out of ['1\nin_recovery=f', '1\nin_recovery=', '1']) {
+    const v = evaluateDbGuardSupport(pod(), '1\nin_recovery=f', 'standby');
+    expect(v).toMatchObject({ ok: false, reason: expect.stringMatching(/is not in recovery/) });
+    expect(v).not.toHaveProperty('missing');
+  });
+
+  it('an unanswered recovery read says it could not confirm recovery, never "not in recovery"', () => {
+    for (const out of ['1\nin_recovery=', '1']) {
       const v = evaluateDbGuardSupport(pod(), out, 'standby');
-      expect(v).toMatchObject({ ok: false, reason: expect.stringMatching(/not in recovery/) });
+      expect(v).toMatchObject({
+        ok: false,
+        reason: expect.stringMatching(/could not confirm the db is in recovery/),
+      });
+      expect(v).toMatchObject({ reason: expect.not.stringMatching(/not in recovery/) });
       expect(v).not.toHaveProperty('missing');
     }
     expect(evaluateDbGuardSupport(pod(), 'in_recovery=t', 'standby')).toMatchObject({
@@ -561,6 +571,18 @@ describe('the guard and stop scripts, executed under sh', () => {
     }
   });
 
+  it('the stop says it could not confirm recovery when psql answers nothing, and "not in recovery" only on f', () => {
+    const silent = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: '' });
+    expect(silent.status).toBe(3);
+    expect(silent.stdout).toBe(
+      'RESEED_STOP_REFUSED could not confirm the db is in recovery (psql did not answer)\n',
+    );
+    const primary = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: 'f' });
+    expect(primary.stdout).toBe(
+      'RESEED_STOP_REFUSED postgres is not in recovery (pg_is_in_recovery: f)\n',
+    );
+  });
+
   it("the guard probe's real output is what evaluateDbGuardSupport accepts or refuses", () => {
     const out = (o: { marker: boolean | null; recovery: string }) =>
       run(DB_GUARD_MARKER_GREP[2], o).stdout;
@@ -732,6 +754,12 @@ describe('runInPlaceStage: a busy stage is a terminal refusal', () => {
     await expect(
       runInPlaceStage(async () => 'RESEED_STAGED att-0', { attempt: 'att-1' }),
     ).rejects.toThrow(/att-1/);
+  });
+
+  it('RESEED_SKIPPED (the probe never reached the primary) is a skip, not a failure', async () => {
+    await expect(
+      runInPlaceStage(async () => 'RESEED_SKIPPED\n', { attempt: 'att-1' }),
+    ).resolves.toEqual({ skipped: true });
   });
 
   it('any other failure is rethrown as is, after one call', async () => {

@@ -291,11 +291,6 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
     // The argv builder itself; the census above keeps it spent only inside
     // k8sDbRolloutWait, which runs it under watchDbAttach.
     ['replication.js#k8sDbRolloutStatusArgv', 'builder for k8sDbRolloutWait'],
-    // The failover/restore re-seed keeps its own signature-gated repair
-    // (docs/mitigations.yml do-csi-stale-volumeattachment): on the
-    // signature it clears the stale attachments and waits once more,
-    // which the diagnosis-only watch must not pre-empt.
-    ['replication.js#reseedStandbyFromPrimary', 'keeps its own stale-attachment repair'],
   ]);
 
   /** File + enclosing named function of `index` in `src`. */
@@ -365,10 +360,12 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
       offenders.push(...unwatched(f, src));
     }
     expect(offenders, 'db rollout wait(s) outside watchDbAttach').toEqual([]);
-    // Positive control, six sites: k3s.js awaitDbRollout (its argv and its
+    // Positive control, five sites: k3s.js awaitDbRollout (its argv and its
     // description), the ha module's reseed standby boot, replication.js's
-    // k8sDbRolloutStatusArgv builder and reseedStandbyFromPrimary repair, and
-    // restore.js's db rollout. No WALG_ROLE roll is left to wait on.
-    expect(seen).toBeGreaterThanOrEqual(6);
+    // k8sDbRolloutStatusArgv builder, and restore.js's db rollout. The
+    // failover/restore reseed restarts the db in place and waits through
+    // k8sDbRolloutWait only when the pod was recreated. No WALG_ROLE roll is
+    // left to wait on.
+    expect(seen).toBeGreaterThanOrEqual(5);
   });
 });

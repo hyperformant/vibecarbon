@@ -59,6 +59,12 @@ vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => ({
     ],
   }),
 }));
+// The live wal-g role bind probe (its refusal has its own tests in
+// compose-ha-reseed.test.ts): every db container binds the role directory.
+vi.mock('../../../src/lib/deploy/walg-role.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/deploy/walg-role.js')>()),
+  composeDbMountsWalgRoleDir: async () => true,
+}));
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => ({
   ...(await orig<typeof import('../../../src/lib/deploy/compose/index.js')>()),
   restoreCompose: vi.fn(async () => {}),

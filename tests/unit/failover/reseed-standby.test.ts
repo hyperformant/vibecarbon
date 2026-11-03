@@ -4,17 +4,18 @@
  *   - read REPL_PASSWORD from the `vibecarbon-infra-secrets` k8s Secret (NOT a
  *     compose-style `.env.local`, which k8s nodes never have),
  *   - HARD-ERROR when the password is missing (abort — never silently skip),
- *   - SKIP (no destructive work) when the primary is unreachable,
- *   - NEVER run an in-pod `pg_ctl stop` (the postmaster is the container's
- *     PID 1 — stopping it kills the pod and kubelet reboots it as a fresh
- *     independent primary). Instead: stage the basebackup while postgres runs,
- *     scale the StatefulSet to zero, swap PGDATA in a short-lived HELPER POD
- *     that mounts the released PVC (uniform for local-path AND CSI volumes),
- *     scale back up, and confirm recovery,
+ *   - target the standby the FRESH config names, and refuse when the clusters
+ *     disagree with it (the configured primary reporting the standby intent),
+ *   - reseed IN PLACE (Task A4): guard the running pod first, drop the source
+ *     primary's .vc-discard, stage into $PGDATA/.vc-reseed while postgres
+ *     runs, stop postgres once (`kill -INT 1`, the kubelet restarts the
+ *     container in the same pod and db-guard.sh swaps the tree in), prove the
+ *     swap through .vc-reseeded-from, wait for recovery. Zero attach
+ *     transitions: no scale, no helper pod, no detach wait,
+ *   - report `skipped` only when the stage printed RESEED_SKIPPED, and treat a
+ *     busy stage as a terminal refusal,
  *   - dial the standby's LOCAL WireGuard relay (own database-node private IP :
- *     repl-gateway port 15433) for the probe, basebackup, AND primary_conninfo
- *     — the deploy-time transport. The old direct `primary:5432` dial is dead
- *     post-WireGuard (firewall admits only UDP 51821).
+ *     repl-gateway port 15433) for the probe, basebackup, AND primary_conninfo.
  *
  * ssh.js is mocked so the logic is exercised without a real cluster.
  */
@@ -36,79 +37,121 @@ const ssh = await import('../../../src/lib/ssh.js');
 const { getReplPasswordFromSecret, reseedStandbyOrAbort, reseedStandbyFromPrimary } = await import(
   '../../../src/failover.js'
 );
-const { ensureReplicationSlot, isStandbyStreaming } = await import(
+const { ensureReplicationSlot, isStandbyStreaming, ReseedStageBusyError } = await import(
   '../../../src/lib/deploy/replication.js'
 );
 
 const b64 = (s: string) => Buffer.from(s, 'utf-8').toString('base64');
 
-// The standby's node addresses: public (ssh target for the node-side swap) and
-// private (the local repl-gateway relay endpoint the basebackup dials).
+// The standby's node addresses: public (ssh target) and private (the local
+// repl-gateway relay endpoint the basebackup dials).
 const STANDBY_OPTS = { standbyDbIp: '10.0.0.8', standbyDbPrivateIp: '10.0.1.2' };
+const PRIMARY_IP = '10.0.0.1';
+const STANDBY_IP = '10.0.0.2';
+const SYSID = '7412345678901234567';
 
-// The swap-pod inputs come from the db pod spec: PVC claimName, the subPath the
-// chart mounts the volume at (postgres-data), and the db container image (reused
-// for the swap pod). No PV node-path walk — the swap runs in a helper pod that
-// mounts the PVC, so local-path AND csi.hetzner.cloud volumes work identically.
-const DB_IMAGE = 'postgres:17';
-const POD_JSON = JSON.stringify({
-  spec: {
-    containers: [
-      {
-        name: 'db',
-        image: DB_IMAGE,
-        volumeMounts: [
-          {
-            name: 'postgres-volume',
-            mountPath: '/var/lib/postgresql/data',
-            subPath: 'postgres-data',
-          },
-        ],
-      },
-    ],
-    volumes: [
-      {
-        name: 'postgres-volume',
-        persistentVolumeClaim: { claimName: 'data-db-0' },
-      },
-    ],
+/** The env config as .vibecarbon.json holds it now (read fresh by the reseed). */
+const ENV = {
+  ha: {
+    enabled: true,
+    primary: { masterIp: PRIMARY_IP },
+    standby: { masterIp: STANDBY_IP, dbIp: '10.0.0.8', dbPrivateIp: '10.0.1.2' },
   },
-});
-// In the swap pod the whole PVC is mounted (no subPath) at /pgdata-vol, so PGDATA
-// is <mount-root>/<subPath>.
-const PGDATA_IN_POD = '/pgdata-vol/postgres-data';
+};
 
-/** Happy-path sshKubectl behavior for the full reseed sequence. */
-function happyKubectl(
-  overrides: {
-    recovery?: string;
-    swapLog?: string;
-    swapPhase?: string;
-    swapConditions?: Array<{ type: string; reason?: string; message?: string }>;
-  } = {},
-) {
-  return async (_ip: string, _k: string, argv: string[]) => {
-    const cmd = argv.join(' ');
-    if (cmd.includes('get secret')) return b64('pw');
-    if (cmd.includes('pg_isready')) return 'accepting connections';
-    // helper-pod swap lifecycle (must precede the generic db-pod matchers).
-    // The status poll is shell-safe `get pod ... -o json` (JS-parsed) — the old
-    // jsonpath's |/?() metachars were a remote bash syntax error through the
-    // joined-argv ssh transport.
-    if (cmd.includes('get pod vibecarbon-pgdata-swap') && cmd.includes('-o json'))
-      return JSON.stringify({
-        status: {
-          phase: overrides.swapPhase ?? 'Succeeded',
-          conditions: overrides.swapConditions ?? [],
+const GUARD_POD = (o: { rc: number; cid: string }) =>
+  JSON.stringify({
+    metadata: { uid: 'u1' },
+    spec: {
+      containers: [
+        {
+          name: 'db',
+          command: ['sh', '/usr/local/bin/db-guard.sh'],
+          volumeMounts: [
+            { name: 'w', mountPath: '/usr/local/bin/db-guard.sh', subPath: 'db-guard.sh' },
+            { name: 'data', mountPath: '/var/lib/vibecarbon/role', subPath: 'vibecarbon-role' },
+          ],
+          env: [
+            {
+              name: 'VC_WALG_ROLE_INTENT',
+              valueFrom: {
+                configMapKeyRef: { name: 'vibecarbon-db-role', key: 'VC_WALG_ROLE_INTENT' },
+              },
+            },
+          ],
         },
-      });
-    if (cmd.includes('logs vibecarbon-pgdata-swap')) return overrides.swapLog ?? 'RESEED_SWAPPED';
-    if (cmd.includes('get pod') && cmd.includes('-o json')) return POD_JSON;
-    if (cmd.includes('--ignore-not-found')) return ''; // db pod gone / swap-pod delete
-    if (cmd.includes('pg_is_in_recovery')) return overrides.recovery ?? 't';
-    if (cmd.includes('pg_control_system')) return '7412345678901234567';
+      ],
+    },
+    status: {
+      containerStatuses: [
+        { name: 'db', restartCount: o.rc, containerID: o.cid, ready: true, state: { running: {} } },
+      ],
+    },
+  });
+
+type InPlaceOverrides = {
+  markerGrep?: string;
+  intent?: string;
+  primaryIntent?: string;
+  stageOut?: string;
+  stageError?: Error;
+  reseededFrom?: string;
+  recovery?: string;
+  primaryDiscard?: string;
+  onCall?: (c: string) => void;
+};
+
+/**
+ * sshKubectl answering an in-place reseed: the guard reads (pod uid u1,
+ * restartCount 0, then 1 after the stop), the stage (RESEED_STAGED with the
+ * attempt read from the stage script), .vc-reseeded-from, recovery and the
+ * system identifier. Every call is recorded as `<ip> <argv> <stdin>`.
+ */
+function inPlaceSsh(o: InPlaceOverrides = {}) {
+  let stopped = false;
+  let attempt = '';
+  return async (ip: string, _k: string, argv: string[], opts: { input?: string } = {}) => {
+    const cmd = argv.join(' ');
+    o.onCall?.(`${ip} ${cmd} ${opts?.input ?? ''}`);
+    if (cmd.includes('get secret')) return b64('pw');
+    if (cmd.includes('configmap vibecarbon-db-role')) {
+      return ip === PRIMARY_IP ? (o.primaryIntent ?? 'primary') : (o.intent ?? 'standby');
+    }
+    if (cmd.includes('get pod db-0')) {
+      return GUARD_POD(stopped ? { rc: 1, cid: 'c2' } : { rc: 0, cid: 'c1' });
+    }
+    if (cmd.includes('db-guard.sh') && cmd.includes('grep -c'))
+      return o.markerGrep ?? '1\nin_recovery=t';
+    if (cmd.includes('kill -INT 1')) {
+      stopped = true;
+      return '';
+    }
+    if (ip === PRIMARY_IP && cmd.includes('.vc-discard'))
+      return o.primaryDiscard ?? 'VC_DISCARD_GONE';
+    if (argv.includes('exec') && opts?.input?.includes('pg_basebackup')) {
+      attempt = /RESEED_STAGED (\S+)"/.exec(opts.input)?.[1] ?? '';
+      if (o.stageError) throw o.stageError;
+      return o.stageOut ?? `RESEED_STAGED ${attempt}`;
+    }
+    if (cmd.includes('.vc-reseeded-from')) return o.reseededFrom ?? attempt;
+    if (cmd.includes('pg_is_in_recovery')) return o.recovery ?? 't';
+    if (cmd.includes('pg_control_system')) return SYSID;
     return '';
   };
+}
+
+/** The real reseedStandbyFromPrimary over a mocked sshKubectl; resolves its result. */
+async function runReseed(impl: ReturnType<typeof inPlaceSsh>, opts: Record<string, unknown> = {}) {
+  (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(impl);
+  return reseedStandbyFromPrimary(STANDBY_IP, '/k', {
+    ...STANDBY_OPTS,
+    primaryIp: PRIMARY_IP,
+    envName: 'prod',
+    readEnvConfig: () => ENV,
+    sleep: async () => {},
+    attachWatchPollMs: 60_000,
+    ...opts,
+  });
 }
 
 beforeEach(() => {
@@ -159,303 +202,245 @@ describe('ensureReplicationSlot', () => {
   });
 });
 
-describe('reseedStandbyFromPrimary', () => {
-  it('HARD-ERRORS (does not silently skip) when the password is missing', async () => {
-    // First sshKubectl call = get secret → empty.
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockResolvedValueOnce('');
-    await expect(reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS)).rejects.toThrow(
-      /REPL_PASSWORD not found/,
-    );
+describe('reseedStandbyFromPrimary (in place)', () => {
+  it('never scales, never applies a helper pod, never waits for a detach', async () => {
+    const calls: string[] = [];
+    await expect(runReseed(inPlaceSsh({ onCall: (c) => calls.push(c) }))).resolves.toBe('reseeded');
+    const all = calls.join('\n');
+    expect(all).not.toMatch(/scale|vibecarbon-pgdata-swap|volumeattachment|delete pod/);
+    expect(all).toMatch(/kill -INT 1/);
   });
 
-  it('HARD-ERRORS when the standby database node IP is unknown (node-side swap target)', async () => {
+  it('guards BEFORE staging: an old pod refuses with the deploy hint, no pg_basebackup, no stop', async () => {
+    const calls: string[] = [];
     await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbyDbIp: undefined,
-        standbyDbPrivateIp: '10.0.1.2',
-      }),
-    ).rejects.toThrow(/standby database node IP is unknown/);
+      runReseed(inPlaceSsh({ markerGrep: '0', onCall: (c) => calls.push(c) })),
+    ).rejects.toThrow(/vibecarbon deploy prod/);
+    expect(calls.some((c) => c.includes('pg_basebackup'))).toBe(false);
+    expect(calls.some((c) => c.includes('kill -INT'))).toBe(false);
+    // Nothing touched the primary either.
+    expect(calls.some((c) => c.startsWith(PRIMARY_IP))).toBe(false);
   });
 
-  it('returns "skipped" WITHOUT any destructive work when the primary is unreachable', async () => {
-    const calls: string[][] = [];
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (_ip: string, _k: string, argv: string[]) => {
-        calls.push(argv);
-        if (argv.includes('get')) return b64('pw'); // secret read
-        if (argv.join(' ').includes('pg_isready')) throw new Error('no response'); // unreachable
-        return '';
-      },
+  it('a swap that did not happen fails loud, never reports reseeded', async () => {
+    await expect(runReseed(inPlaceSsh({ reseededFrom: 'other' }))).rejects.toThrow(
+      /swap did not run/,
     );
-    await expect(reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS)).resolves.toBe('skipped');
-    // No `bash`-piped basebackup exec, no scale-to-zero, no node-side swap.
-    expect(calls.some((a) => a.includes('bash'))).toBe(false);
-    expect(calls.some((a) => a.includes('--replicas=0'))).toBe(false);
-    expect(ssh.sshRun).not.toHaveBeenCalled();
+    await expect(runReseed(inPlaceSsh({ reseededFrom: '' }))).rejects.toThrow(/swap did not run/);
   });
 
-  it('probes the LOCAL WireGuard relay, not the primary public IP', async () => {
-    const calls: string[][] = [];
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (ip: string, k: string, argv: string[]) => {
-        calls.push(argv);
-        return happyKubectl()(ip, k, argv);
-      },
-    );
-    await reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS);
-
-    const probe = calls.find((a) => a.includes('pg_isready'));
-    expect(probe).toBeTruthy();
-    // -h <standby node private IP> -p 15433 (relay), NOT a public IP : 5432.
-    expect(probe).toEqual(expect.arrayContaining(['-h', '10.0.1.2', '-p', '15433']));
-    expect(probe?.join(' ')).not.toContain('5432');
+  it('still reports skipped when the stage never reached the primary (no restart)', async () => {
+    const calls: string[] = [];
+    await expect(
+      runReseed(inPlaceSsh({ stageOut: 'RESEED_SKIPPED', onCall: (c) => calls.push(c) })),
+    ).resolves.toBe('skipped');
+    expect(calls.some((c) => c.includes('kill -INT'))).toBe(false);
   });
 
-  it('bounds the post-swap db rollout-status inside the SSH client timeout (600s < 610s)', async () => {
-    // Reconciliation invariant (see readiness-gate.test.ts): kubectl's
-    // --timeout must sit inside the SSH client timeout so kubectl's own
-    // error surfaces instead of a generic SSH kill. (An earlier 300s was
-    // silently capped by sshRun's 120s default; the pinned 120s that
-    // replaced it then flaked on healthy post-swap boots — perf slices
-    // measured 165.8s on a green rig, run 29378289779 — so the budget went
-    // back to 300s WITH the matching explicit client cap. Raised to 600s
-    // 2026-08-29: DigitalOcean CSI detach/attach settle pushed a healthy
-    // standby boot past 300s on the deploy-side reseed — run 33252884427
-    // timed out at 300s with the pod Ready ~1 min later — and this
-    // failover-side wait boots the same db StatefulSet through the same
-    // CSI path, so both budgets live in DB_STS_BOOT_TIMEOUT_S.)
-    const calls: Array<{ argv: string[]; opts?: { timeout?: number } }> = [];
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (ip: string, k: string, argv: string[], opts: { timeout?: number } = {}) => {
-        calls.push({ argv, opts });
-        return happyKubectl()(ip, k, argv);
-      },
-    );
-    await reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS);
-
-    const status = calls.find(
-      (c) => c.argv.includes('status') && c.argv.join(' ').includes('statefulset/'),
-    );
-    expect(status).toBeTruthy();
-    const timeoutArg = status?.argv.find((a) => a.startsWith('--timeout='));
-    expect(timeoutArg).toBe('--timeout=600s');
-    const clientTimeout = status?.opts?.timeout ?? 0;
-    expect(clientTimeout).toBe(610_000);
-    // The invariant itself, independent of the concrete numbers.
-    expect(clientTimeout).toBeGreaterThan(600 * 1000);
-  });
-
-  it("records the reseeded standby's system identifier through onSeeded", async () => {
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(happyKubectl());
+  it('records the seeded system identifier exactly as before', async () => {
     const onSeeded = vi.fn();
+    await runReseed(inPlaceSsh(), { onSeeded });
+    expect(onSeeded).toHaveBeenCalledWith(SYSID);
+  });
+
+  it('runs in order: guard, primary discard, stage, stop, swap proof, recovery, standby discard', async () => {
+    const calls: string[] = [];
+    await runReseed(inPlaceSsh({ onCall: (c) => calls.push(c) }));
+    const at = (re: RegExp) => calls.findIndex((c) => re.test(c));
+    const guard = at(/grep -c.*db-guard\.sh/);
+    const primaryDiscard = at(new RegExp(`^${PRIMARY_IP} .*\\.vc-discard`));
+    const stage = at(/pg_basebackup/);
+    const stop = at(/kill -INT 1/);
+    const proof = at(/\.vc-reseeded-from/);
+    const recovery = calls.findIndex((c, i) => i > proof && /pg_is_in_recovery/.test(c));
+    const standbyDiscard = at(
+      new RegExp(`^${STANDBY_IP} .*rm -rf /var/lib/postgresql/data/\\.vc-discard`),
+    );
+    expect(guard).toBeGreaterThanOrEqual(0);
+    expect(primaryDiscard).toBeGreaterThan(guard);
+    expect(stage).toBeGreaterThan(primaryDiscard);
+    expect(stop).toBeGreaterThan(stage);
+    expect(proof).toBeGreaterThan(stop);
+    expect(recovery).toBeGreaterThan(proof);
+    expect(standbyDiscard).toBeGreaterThan(recovery);
+  });
+
+  it('stages in the running db over stdin: in-place mode, the relay, the password never in argv', async () => {
+    const calls: Array<{ argv: string[]; input?: string }> = [];
+    const cluster = inPlaceSsh();
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(async (ip, k, argv, opts) => {
+      calls.push({ argv, input: opts?.input });
+      return cluster(ip, k, argv, opts);
+    });
+    await reseedStandbyFromPrimary(STANDBY_IP, '/k', {
+      ...STANDBY_OPTS,
+      primaryIp: PRIMARY_IP,
+      envName: 'prod',
+      readEnvConfig: () => ENV,
+      sleep: async () => {},
+    });
+    const stage = calls.find((c) => c.input?.includes('pg_basebackup'));
+    expect(stage?.argv).toEqual(['-n', 'vibecarbon', 'exec', '-i', 'db-0', '-c', 'db', '--', 'sh']);
+    const script = stage?.input ?? '';
+    expect(script).toContain('/var/lib/postgresql/data/.vc-reseed');
+    expect(script).not.toContain('.reseed_staging');
+    expect(script).toMatch(/RESEED_STAGED \S+/);
+    expect(script).toContain('-h 10.0.1.2 -p 15433');
+    expect(script).toContain(
+      "primary_conninfo = 'host=10.0.1.2 port=15433 user=replicator password=pw " +
+        "sslmode=disable application_name=standby'",
+    );
+    expect(script).not.toMatch(/-S \S/);
+    expect(script).toContain("PGPASSWORD='pw'");
+    // One reachability probe from inside the standby db, as the single-shot
+    // pre-check it replaces: an unreachable primary skips at once.
+    expect(script).toContain('for probe_i in $(seq 1 1); do');
+    expect(calls.every((c) => !c.argv.join(' ').includes('pw'))).toBe(true);
+  });
+
+  it('a busy stage is a terminal refusal: one stage, no stop, never retried', async () => {
+    const calls: string[] = [];
+    const busy = Object.assign(new Error('Command failed: ssh ... RESEED_REFUSED busy'), {
+      stdout: 'RESEED_REFUSED busy\n',
+      status: 1,
+    });
+    const err = await runReseed(
+      inPlaceSsh({ stageError: busy, onCall: (c) => calls.push(c) }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(ReseedStageBusyError);
+    expect(err.message).toMatch(/earlier reseed stage is still running/);
+    expect(err.message).toMatch(/Wait for it to finish, then rerun/);
+    expect(calls.filter((c) => c.includes('pg_basebackup'))).toHaveLength(1);
+    expect(calls.some((c) => c.includes('kill -INT'))).toBe(false);
+  });
+
+  it('the source primary drops its .vc-discard before the stage; one it cannot drop refuses the stage', async () => {
+    const calls: string[] = [];
+    await runReseed(inPlaceSsh({ onCall: (c) => calls.push(c) }));
+    const drop = calls.find((c) => c.startsWith(`${PRIMARY_IP} `) && c.includes('.vc-discard'));
+    expect(drop).toMatch(
+      /exec db-0 -c db -- sh -c rm -rf \/var\/lib\/postgresql\/data\/\.vc-discard/,
+    );
+
+    const refused: string[] = [];
     await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', { ...STANDBY_OPTS, onSeeded }),
+      runReseed(inPlaceSsh({ primaryDiscard: 'VC_DISCARD_LEFT', onCall: (c) => refused.push(c) })),
+    ).rejects.toThrow(/\.vc-discard/);
+    expect(refused.some((c) => c.includes('pg_basebackup'))).toBe(false);
+    expect(refused.some((c) => c.includes('kill -INT'))).toBe(false);
+  });
+
+  it('targets the configured standby from FRESH config: a mismatch refuses before any remote call', async () => {
+    for (const env of [
+      { ha: { ...ENV.ha, standby: { ...ENV.ha.standby, masterIp: '10.0.0.77' } } },
+      { ha: { ...ENV.ha, primary: { masterIp: '10.0.0.66' } } },
+      undefined,
+    ]) {
+      const calls: string[] = [];
+      await expect(
+        runReseed(inPlaceSsh({ onCall: (c) => calls.push(c) }), { readEnvConfig: () => env }),
+      ).rejects.toThrow(/reseed refused/);
+      expect(calls).toEqual([]);
+    }
+    await expect(runReseed(inPlaceSsh(), { envName: undefined })).rejects.toThrow(/envName/);
+  });
+
+  it('refuses when the clusters disagree with the config: the configured primary reports the standby intent', async () => {
+    const calls: string[] = [];
+    await expect(
+      runReseed(inPlaceSsh({ primaryIntent: 'standby', onCall: (c) => calls.push(c) })),
+    ).rejects.toThrow(/configured primary.*standby/);
+    expect(calls.some((c) => c.includes('pg_basebackup'))).toBe(false);
+    expect(calls.some((c) => c.includes('.vc-discard'))).toBe(false);
+  });
+
+  it('refuses when the configured standby reports a non-standby intent (the guard), before any stage', async () => {
+    const calls: string[] = [];
+    await expect(
+      runReseed(inPlaceSsh({ intent: 'primary', onCall: (c) => calls.push(c) })),
+    ).rejects.toThrow(/role intent is primary/);
+    expect(calls.some((c) => c.includes('pg_basebackup'))).toBe(false);
+  });
+
+  it('HARD-ERRORS (does not silently skip) when the password is missing', async () => {
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockResolvedValue('');
+    await expect(
+      reseedStandbyFromPrimary(STANDBY_IP, '/k', {
+        ...STANDBY_OPTS,
+        primaryIp: PRIMARY_IP,
+        envName: 'prod',
+        readEnvConfig: () => ENV,
+      }),
+    ).rejects.toThrow(/REPL_PASSWORD not found/);
+  });
+
+  it('HARD-ERRORS when the standby database node IP is unknown', async () => {
+    await expect(runReseed(inPlaceSsh(), { standbyDbIp: undefined })).rejects.toThrow(
+      /standby database node IP is unknown/,
+    );
+  });
+
+  it('HARD-ERRORS when the private IP is not persisted (no 10.0.1.2 fallback)', async () => {
+    await expect(runReseed(inPlaceSsh(), { standbyDbPrivateIp: undefined })).rejects.toThrow(
+      /standbyDbPrivateIp is required/,
+    );
+  });
+
+  it('dials the PERSISTED relay host (threaded, never assumed)', async () => {
+    const calls: string[] = [];
+    await expect(
+      runReseed(inPlaceSsh({ onCall: (c) => calls.push(c) }), { standbyDbPrivateIp: '10.10.0.7' }),
     ).resolves.toBe('reseeded');
-    expect(onSeeded).toHaveBeenCalledWith('7412345678901234567');
+    expect(calls.find((c) => c.includes('pg_basebackup'))).toContain('-h 10.10.0.7 -p 15433');
   });
 
   it('a reseed whose system identifier is unreadable fails rather than recording nothing', async () => {
-    const base = happyKubectl();
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (ip: string, k: string, argv: string[]) =>
-        argv.join(' ').includes('pg_control_system') ? 'ERROR: x' : base(ip, k, argv),
-    );
+    const base = inPlaceSsh();
     const onSeeded = vi.fn();
     await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', { ...STANDBY_OPTS, onSeeded }),
+      runReseed(
+        async (ip, k, argv, opts) =>
+          argv.join(' ').includes('pg_control_system') ? 'ERROR: x' : base(ip, k, argv, opts),
+        { onSeeded },
+      ),
     ).rejects.toThrow(/system identifier could not be read/);
     expect(onSeeded).not.toHaveBeenCalled();
   });
 
-  it('reseeds via stage → scale-0 → helper-pod swap → scale-1 → recovery confirm', async () => {
-    const kubectlCalls: { cmd: string; input?: string }[] = [];
-    let stagedScript = '';
-    let swapManifest = '';
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (ip: string, k: string, argv: string[], opts: { input?: string } = {}) => {
-        kubectlCalls.push({ cmd: argv.join(' '), input: opts?.input });
-        if (argv.includes('bash') && argv.includes('exec') && opts?.input)
-          stagedScript = opts.input;
-        if (argv.join(' ').includes('apply -f -') && opts?.input) swapManifest = opts.input;
-        return happyKubectl()(ip, k, argv);
-      },
-    );
-
-    await expect(reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS)).resolves.toBe(
-      'reseeded',
-    );
-
-    const joined = kubectlCalls.map((c) => c.cmd).join('\n');
-    // The RCA'd killer is gone: NO in-pod pg_ctl stop (and no pg_ctl start —
-    // the StatefulSet controller owns the lifecycle now).
-    expect(joined).not.toMatch(/pg_ctl stop/);
-    expect(joined).not.toMatch(/pg_ctl start/);
-    // No node-path walk — the swap is a helper pod, so CSI volumes work too.
-    expect(joined).not.toMatch(/get pv /);
-
-    // Staged basebackup: hardened, into the PGDATA-resident staging subdir,
-    // WITHOUT the destructive in-place swap (the helper pod does that).
-    expect(stagedScript).toMatch(/set -e -o pipefail/);
-    expect(stagedScript).toContain('/var/lib/postgresql/data/.reseed_staging');
-    expect(stagedScript).toMatch(/pg_basebackup/);
-    expect(stagedScript).not.toMatch(/find \/var\/lib\/postgresql\/data -mindepth 1 -delete/);
-    // The reseed basebackup uses a TEMPORARY slot (no -S): the standby's own
-    // walreceiver may still hold the persistent slot, and -S against an active
-    // slot errors "slot is active for PID" (live RCA compose-ha 2026-07-07).
-    expect(stagedScript).not.toMatch(/-S \S/);
-    // The persistent slot is still wired for POST-SWAP streaming.
-    expect(stagedScript).toContain("primary_slot_name = 'vibecarbon_standby_slot'");
-    // Password is delivered via stdin (PGPASSWORD in the script), never argv.
-    expect(stagedScript).toContain("PGPASSWORD='pw'");
-
-    // WireGuard relay transport — same as the deploy-time seed: basebackup dials
-    // the standby's OWN node private IP on the repl-gateway port, and the pinned
-    // primary_conninfo matches buildPrimaryConninfo byte-for-byte.
-    expect(stagedScript).toContain('-h 10.0.1.2 -p 15433');
-    expect(stagedScript).toContain(
-      "primary_conninfo = 'host=10.0.1.2 port=15433 user=replicator password=pw " +
-        "sslmode=disable application_name=standby'",
-    );
-    expect(stagedScript).not.toContain('-p 5432');
-
-    // Scale to 0 before the swap, back to 1 after.
-    const cmds = kubectlCalls.map((c) => c.cmd);
-    const scale0 = cmds.findIndex((c) => c.includes('--replicas=0'));
-    const scale1 = cmds.findIndex((c) => c.includes('--replicas=1'));
-    expect(scale0).toBeGreaterThanOrEqual(0);
-    expect(scale1).toBeGreaterThan(scale0);
-
-    // The swap runs in a helper pod (NOT a node-side ssh — sshRun is unused).
-    expect(ssh.sshRun).not.toHaveBeenCalled();
-    // Its manifest mounts the SAME PVC (claimName), reuses the db image, and its
-    // command runs the swap script against PGDATA=<mount-root>/<subPath>.
-    expect(swapManifest).toContain('data-db-0');
-    expect(swapManifest).toContain(DB_IMAGE);
-    expect(swapManifest).toContain('/pgdata-vol');
-    expect(swapManifest).toContain(`PGDATA='${PGDATA_IN_POD}'`);
-    // The swap-pod apply happens after scale-0 and before scale-1.
-    const swapIdx = cmds.findIndex((c) => c.includes('apply -f -'));
-    expect(swapIdx).toBeGreaterThan(scale0);
-    expect(swapIdx).toBeLessThan(scale1);
-    // The one-shot swap pod is cleaned up.
-    expect(cmds.some((c) => c.includes('delete pod vibecarbon-pgdata-swap'))).toBe(true);
-
-    // Recovery was confirmed on the reseeded standby.
-    expect(cmds.some((c) => c.includes('pg_is_in_recovery'))).toBe(true);
-  });
-
-  it('HARD-ERRORS when the private IP is not persisted (no 10.0.1.2 fallback)', async () => {
-    // The IaC value is only deterministic on Hetzner — DO assigns VPC
-    // addresses dynamically, so a Hetzner-shaped fallback makes the
-    // reachability probe fail closed into 'skipped' (promotion without
-    // re-seed). A missing persisted value must abort, not assume.
-    await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', { standbyDbIp: '10.0.0.8' }),
-    ).rejects.toThrow(/standbyDbPrivateIp is required/);
-  });
-
-  it('dials the PERSISTED relay host (threaded, never assumed)', async () => {
-    let stagedScript = '';
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (ip: string, k: string, argv: string[], opts: { input?: string } = {}) => {
-        if (argv.includes('bash') && opts?.input) stagedScript = opts.input;
-        return happyKubectl()(ip, k, argv);
-      },
-    );
-    await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbyDbIp: '10.0.0.8',
-        standbyDbPrivateIp: '10.10.0.7',
-        detachSettleMs: 0,
-      }),
-    ).resolves.toBe('reseeded');
-    expect(stagedScript).toContain('-h 10.10.0.7 -p 15433');
-  });
-
-  it('scales back up and throws when the pod-gone staging vanished (swap reports SKIPPED)', async () => {
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      happyKubectl({ swapLog: 'RESEED_SKIPPED' }),
-    );
-
-    await expect(reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS)).rejects.toThrow(
-      /no verified staging/,
-    );
-
-    // The StatefulSet was still scaled back to 1 (standby never left down).
-    const calls = (ssh.sshKubectl as ReturnType<typeof vi.fn>).mock.calls.map(
-      ([, , argv]: [string, string, string[]]) => argv.join(' '),
-    );
-    expect(calls.some((c) => c.includes('--replicas=1'))).toBe(true);
-  });
-
-  it('fails FAST with the scheduler message when the swap pod is Unschedulable, and scales back up', async () => {
-    const schedMsg =
-      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: db}, ' +
-      '2 node(s) had volume node affinity conflict.';
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      happyKubectl({
-        swapPhase: 'Pending',
-        swapConditions: [{ type: 'PodScheduled', reason: 'Unschedulable', message: schedMsg }],
-      }),
-    );
-
-    // Terminal on the FIRST poll (a taint/affinity conflict never self-heals):
-    // no budget wait, and the error names the exact scheduler conflict.
-    await expect(reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS)).rejects.toThrow(
-      /could not be scheduled[\s\S]*untolerated taint \{dedicated: db\}/,
-    );
-
-    const calls = (ssh.sshKubectl as ReturnType<typeof vi.fn>).mock.calls.map(
-      ([, , argv]: [string, string, string[]]) => argv.join(' '),
-    );
-    // finally-scale-1: the standby is never left down.
-    expect(calls.some((c) => c.includes('--replicas=1'))).toBe(true);
-    // The one-shot swap pod is still cleaned up.
-    expect(calls.some((c) => c.includes('delete pod vibecarbon-pgdata-swap'))).toBe(true);
-  });
-
   it('classifies "Hot standby mode is disabled" as a CONFIG error (not timing)', async () => {
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      async (ip: string, k: string, argv: string[]) => {
-        if (argv.join(' ').includes('pg_is_in_recovery')) {
-          // sshKubectl throws on psql non-zero exit; the FATAL detail rides
-          // the error message.
-          throw new Error(
-            'Command failed: psql — FATAL: the database system is not accepting ' +
-              'connections\nDETAIL: Hot standby mode is disabled.',
-          );
-        }
-        return happyKubectl()(ip, k, argv);
-      },
-    );
-
-    vi.useFakeTimers();
-    try {
-      const promise = reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS);
-      const assertion = expect(promise).rejects.toThrow(/hot_standby is OFF/);
-      await vi.runAllTimersAsync();
-      await assertion;
-    } finally {
-      vi.useRealTimers();
-    }
-  }, 20000);
+    const base = inPlaceSsh();
+    let t = 0;
+    await expect(
+      runReseed(
+        async (ip, k, argv, opts) => {
+          const cmd = argv.join(' ');
+          if (cmd.includes('pg_is_in_recovery') && !cmd.includes('db-guard.sh')) {
+            throw new Error(
+              'Command failed: psql — FATAL: the database system is not accepting ' +
+                'connections\nDETAIL: Hot standby mode is disabled.',
+            );
+          }
+          return base(ip, k, argv, opts);
+        },
+        { now: () => (t += 60_000) },
+      ),
+    ).rejects.toThrow(/hot_standby is OFF/);
+  });
 
   it('fails loudly when the swapped standby never enters recovery', async () => {
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
-      happyKubectl({ recovery: 'f' }),
-    );
-
-    // Drive the recovery poll's sleeps with fake timers (real budget ≈ 2 min).
-    vi.useFakeTimers();
-    try {
-      const promise = reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS);
-      const assertion = expect(promise).rejects.toThrow(/never entered\s+recovery/i);
-      await vi.runAllTimersAsync();
-      await assertion;
-    } finally {
-      vi.useRealTimers();
-    }
-  }, 20000);
+    let t = 0;
+    const base = inPlaceSsh();
+    await expect(
+      runReseed(
+        async (ip, k, argv, opts) => {
+          const cmd = argv.join(' ');
+          if (cmd.includes('pg_is_in_recovery') && !cmd.includes('db-guard.sh')) return 'f';
+          return base(ip, k, argv, opts);
+        },
+        { now: () => (t += 60_000) },
+      ),
+    ).rejects.toThrow(/never entered\s+recovery/i);
+  });
 });
 
 describe('isStandbyStreaming (k8s standby-side wal-receiver signal)', () => {
@@ -503,124 +488,5 @@ describe('reseedStandbyOrAbort: skip re-seed when standby already streaming', ()
     expect(calls.some((a) => a.join(' ').includes('pg_isready'))).toBe(false);
     // Promotion is failoverHA's step, behind the replica proof and the journal.
     expect(calls.some((a) => a.join(' ').includes('pg_ctl promote'))).toBe(false);
-  });
-});
-
-describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 6)', () => {
-  const STALE_EVENT = JSON.stringify({
-    items: [
-      {
-        reason: 'FailedMount',
-        message:
-          'MountVolume.MountDevice failed for volume "pvc-x" : rpc error: formatting disk ' +
-          'failed: exit status 1 cmd: mkfs.ext4 -F /dev/disk/by-id/x output: "The file ' +
-          '/dev/disk/by-id/x does not exist and no size was specified."',
-      },
-    ],
-  });
-  const PVC_LIST = JSON.stringify({
-    items: [{ metadata: { name: 'data-db-0' }, spec: { volumeName: 'pvc-x' } }],
-  });
-  const VA_LIST = JSON.stringify({
-    items: [
-      { metadata: { name: 'csi-stale-1' }, spec: { source: { persistentVolumeName: 'pvc-x' } } },
-    ],
-  });
-
-  function kubectlWith(opts: { staleEvents: boolean; rolloutFailsTimes: number }) {
-    let rolloutCalls = 0;
-    let rolloutFailed = false;
-    let vaDeleted = false;
-    const deleted: string[] = [];
-    const fn = vi.fn(async (ip: string, k: string, argv: string[]) => {
-      const cmd = argv.join(' ');
-      if (cmd.includes('rollout status')) {
-        rolloutCalls += 1;
-        if (rolloutCalls <= opts.rolloutFailsTimes) {
-          rolloutFailed = true;
-          throw new Error('error: timed out waiting for the condition');
-        }
-        return '';
-      }
-      if (cmd.includes('get events')) return opts.staleEvents ? STALE_EVENT : '{"items":[]}';
-      if (cmd.includes('get pvc')) return PVC_LIST;
-      // The stale attachment materializes only in the wedged window (after
-      // the rollout timeout, before the repair) — the PREVENTION waits during
-      // the swap see a clear listing, mirroring a run where detach settles.
-      if (cmd.includes('get volumeattachment'))
-        return rolloutFailed && !vaDeleted ? VA_LIST : '{"items":[]}';
-      if (cmd.includes('delete volumeattachment')) {
-        vaDeleted = true;
-        deleted.push(argv[2]);
-        return '';
-      }
-      return happyKubectl()(ip, k, argv);
-    });
-    return { fn, deleted, rolloutCalls: () => rolloutCalls };
-  }
-
-  it('repairs ONCE and re-waits when the timeout carries the mkfs-on-missing-device signature', async () => {
-    const { fn, deleted, rolloutCalls } = kubectlWith({ staleEvents: true, rolloutFailsTimes: 1 });
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
-    await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbyDbIp: '10.0.0.8',
-        standbyDbPrivateIp: '10.10.0.7',
-        detachSettleMs: 0,
-      }),
-    ).resolves.toBe('reseeded');
-    expect(deleted).toEqual(['csi-stale-1']);
-    expect(rolloutCalls()).toBe(2);
-  });
-
-  it('a timeout WITHOUT the signature rethrows untouched — no blind retry', async () => {
-    const { fn, deleted } = kubectlWith({ staleEvents: false, rolloutFailsTimes: 99 });
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
-    await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbyDbIp: '10.0.0.8',
-        standbyDbPrivateIp: '10.10.0.7',
-        detachSettleMs: 0,
-      }),
-    ).rejects.toThrow(/timed out waiting/);
-    expect(deleted).toEqual([]);
-  });
-
-  it('repair is one-shot: a second timeout after the repair is the final verdict', async () => {
-    const { fn, rolloutCalls } = kubectlWith({ staleEvents: true, rolloutFailsTimes: 99 });
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
-    await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbyDbIp: '10.0.0.8',
-        standbyDbPrivateIp: '10.10.0.7',
-        detachSettleMs: 0,
-      }),
-    ).rejects.toThrow(/timed out waiting/);
-    expect(rolloutCalls()).toBe(2);
-  });
-
-  it('the detach-settle wait runs BEFORE the helper-pod swap and before the scale-up', async () => {
-    const sequence: string[] = [];
-    const fn = vi.fn(async (ip: string, k: string, argv: string[]) => {
-      const cmd = argv.join(' ');
-      if (cmd.includes('get volumeattachment')) {
-        sequence.push('detach-wait');
-        return '{"items":[]}';
-      }
-      if (cmd.includes('get pvc')) return PVC_LIST;
-      if (cmd.includes('apply') || cmd.includes('get pod vibecarbon-pgdata-swap'))
-        sequence.push('swap');
-      if (cmd.includes('--replicas=1')) sequence.push('scale-up');
-      return happyKubectl()(ip, k, argv);
-    });
-    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
-    await reseedStandbyFromPrimary('10.0.0.2', '/k', {
-      standbyDbIp: '10.0.0.8',
-      standbyDbPrivateIp: '10.10.0.7',
-      detachSettleMs: 0,
-    });
-    expect(sequence.indexOf('detach-wait')).toBeGreaterThan(-1);
-    expect(sequence.indexOf('detach-wait')).toBeLessThan(sequence.indexOf('swap'));
-    expect(sequence.lastIndexOf('detach-wait')).toBeLessThan(sequence.indexOf('scale-up'));
   });
 });
