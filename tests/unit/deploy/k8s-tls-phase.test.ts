@@ -19,9 +19,8 @@ import { expectNoKeyLeak } from './_no-key-leak.ts';
 import { k8sSecretJson } from './_tls-fixtures.ts';
 
 const p = await import('@clack/prompts');
-const { probeConnectOptions, verifyK8sTls } = await import(
-  '../../../src/lib/deploy/orchestrator.js'
-);
+const { verifyK8sTls } = await import('../../../src/lib/deploy/orchestrator.js');
+const { publicProbeConnect } = await import('../../../src/lib/deploy/public-domain-probe.js');
 const { TLS_FIRST_LOOK_BUDGET_MS } = await import('../../../src/lib/deploy/tls-ready.js');
 const { caSlug } = await import('../../../src/lib/deploy/tls-snapshot.js');
 
@@ -83,14 +82,14 @@ afterEach(() => {
 
 describe('app phase', () => {
   it('turns TLS verification off, pins SNI to the domain, keeps public DNS', () => {
-    const off = probeConnectOptions(DOMAIN, { verifyTls: false });
+    const off = publicProbeConnect(DOMAIN, { verifyTls: false });
     expect(off.rejectUnauthorized).toBe(false);
     expect(off.servername).toBe(DOMAIN);
     expect(typeof off.lookup).toBe('function');
   });
 
   it('verification stays on by default', () => {
-    const on = probeConnectOptions(DOMAIN, {});
+    const on = publicProbeConnect(DOMAIN, {});
     expect(on.rejectUnauthorized).toBeUndefined();
     expect(on.servername).toBe(DOMAIN);
     expect(typeof on.lookup).toBe('function');
@@ -114,10 +113,16 @@ describe('app phase', () => {
     expect(k8s).toMatch(/resolveKubeconfigPath\(environment, envConfig\)/);
   });
 
-  it('the only verification opt-out in the orchestrator is the verifyTls: false branch', () => {
-    const hits = SRC.match(/rejectUnauthorized/g) ?? [];
-    expect(hits).toHaveLength(1);
-    expect(SRC).toMatch(/if \(verifyTls === false\) \{[^}]*rejectUnauthorized = false/);
+  it('the only verification opt-out of the public probe is the verifyTls: false branch', () => {
+    // The probe's socket options live in public-domain-probe.js now, the one
+    // path every probe of the app's domain takes; the orchestrator has none.
+    expect(SRC.match(/rejectUnauthorized/g) ?? []).toHaveLength(0);
+    const probeSrc = readFileSync(
+      join(__dirname, '../../../src/lib/deploy/public-domain-probe.js'),
+      'utf8',
+    );
+    expect(probeSrc.match(/rejectUnauthorized/g) ?? []).toHaveLength(1);
+    expect(probeSrc).toMatch(/if \(verifyTls === false\) \{[^}]*rejectUnauthorized = false/);
   });
 });
 

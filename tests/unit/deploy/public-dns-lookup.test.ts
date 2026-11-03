@@ -84,16 +84,16 @@ describe('makePublicDnsLookup', () => {
 describe('probePublicHealth wiring', () => {
   // The no-op regression this module replaces: dns.setServers() only
   // redirects dns.resolve*(), never fetch's dns.lookup()/getaddrinfo path.
-  // Pin that the probe's source wires the custom lookup into the undici
-  // Agent connect options (and no longer carries the setServers call).
-  it('orchestrator builds its probe Agent with the public-DNS lookup, not dns.setServers', async () => {
+  // The probe fetches through public-domain-probe.js, which puts this
+  // lookup on the socket (public-domain-probe-census.test.ts covers every
+  // other probe of the domain).
+  it('orchestrator probes through fetchPublicDomain, not dns.setServers', async () => {
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(
       new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url),
       'utf8',
     );
-    expect(src).toContain('makePublicDnsLookup');
-    expect(src).toMatch(/connect:\s*connectOpts/);
+    expect(src).toContain('fetchPublicDomain(');
     expect(src).not.toMatch(/dns\.setServers\(/);
   });
 });
