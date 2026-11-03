@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   connectPublicTls,
   fetchPublicDomain,
+  PUBLIC_PROBE_MAX_BODY_BYTES,
   publicCurlResolveArgs,
   publicProbeConnect,
 } from '../../../src/lib/deploy/public-domain-probe.js';
@@ -29,6 +30,13 @@ beforeAll(async () => {
   const fixture = makeCert([DOMAIN]);
   ca = fixture.ca as string;
   server = https.createServer({ cert: fixture.cert, key: fixture.key }, (req, res) => {
+    if (req.url?.startsWith('/bytes/')) {
+      // Chunked, no content-length: the cap must hold while streaming.
+      const n = Number(req.url.slice('/bytes/'.length));
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(Buffer.alloc(n, 0x61));
+      return;
+    }
     if (req.url === '/empty') {
       res.writeHead(204);
       res.end();
@@ -96,6 +104,23 @@ describe('fetchPublicDomain', () => {
     );
     expect(res.status).toBe(204);
     expect(res.ok).toBe(true);
+  });
+
+  it('caps the buffered body: a health-sized answer is fine, past the cap it errors', async () => {
+    expect(PUBLIC_PROBE_MAX_BODY_BYTES).toBe(1024 * 1024);
+    const at = await fetchPublicDomain(
+      `https://${DOMAIN}:${port}/bytes/${PUBLIC_PROBE_MAX_BODY_BYTES}`,
+      {},
+      { lookup: toLocal, ca: [ca] },
+    );
+    expect((await at.arrayBuffer()).byteLength).toBe(PUBLIC_PROBE_MAX_BODY_BYTES);
+    await expect(
+      fetchPublicDomain(
+        `https://${DOMAIN}:${port}/bytes/${PUBLIC_PROBE_MAX_BODY_BYTES + 1}`,
+        {},
+        { lookup: toLocal, ca: [ca] },
+      ),
+    ).rejects.toThrow(/over 1 MB/);
   });
 
   it('verification stays on: an unknown chain fails', async () => {

@@ -64,12 +64,51 @@ export function publicProbeConnect(domain, { verifyTls = true, lookup, ca } = {}
 const NULL_BODY_STATUS = new Set([204, 205, 304]);
 
 /**
+ * The most a probe buffers. Probes read health endpoints (a few hundred
+ * bytes); a domain answering more than this is not one, and the probe errors
+ * instead of holding it in memory.
+ */
+export const PUBLIC_PROBE_MAX_BODY_BYTES = 1024 * 1024;
+
+/**
+ * Read a response body into one buffer, refusing past the cap.
+ *
+ * @param {ReadableStream<Uint8Array>|null} body
+ * @param {string} url
+ * @returns {Promise<Uint8Array>}
+ */
+async function readCapped(body, url) {
+  const chunks = [];
+  let total = 0;
+  if (body) {
+    const reader = body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > PUBLIC_PROBE_MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`${url} answered over 1 MB; public probes read health endpoints only`);
+      }
+      chunks.push(value);
+    }
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.byteLength;
+  }
+  return out;
+}
+
+/**
  * `fetch` an `https://<domain>/...` URL through public DNS. Each call gets its
  * own dispatcher (a fresh lookup, no pooled socket to a stale address), the
  * body is read in full, and the dispatcher is closed before returning, so a
  * short-lived command never waits on an idle keep-alive socket. The response
- * is a standard Response over the buffered body. The app's health endpoints
- * answer a few hundred bytes.
+ * is a standard Response over the buffered body. For health endpoints only:
+ * the body is capped at PUBLIC_PROBE_MAX_BODY_BYTES and a larger one errors.
  *
  * undici's Agent and undici's fetch are always paired: Node's bundled fetch
  * rejects the npm package's Agent (`invalid onRequestStart method`).
@@ -87,7 +126,7 @@ export async function fetchPublicDomain(url, init = {}, { port, ...opts } = {}) 
   const dispatcher = new Agent({ connect: publicProbeConnect(target.hostname, opts) });
   try {
     const res = await undiciFetch(target, { ...init, dispatcher });
-    const body = NULL_BODY_STATUS.has(res.status) ? null : await res.arrayBuffer();
+    const body = NULL_BODY_STATUS.has(res.status) ? null : await readCapped(res.body, url);
     return new Response(body, {
       status: res.status,
       statusText: res.statusText,
