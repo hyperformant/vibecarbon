@@ -451,9 +451,9 @@ export const PUBLISHED_PORTS_TEMPLATE =
   '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{$p}}->{{.HostPort}} {{end}}{{end}}';
 
 /**
- * Demote a k8s cluster's db: drop its inactive replication slots, then set the
- * standby wal-g role through setK8sWalgRole (the intent ConfigMap, then the
- * live role file). The one k8s standby role write
+ * Demote a k8s cluster's db: set the standby wal-g role through setK8sWalgRole
+ * (the intent ConfigMap, then the live role file), then drop its inactive
+ * replication slots. The one k8s standby role write
  * (tests/unit/deploy/slot-drop-on-demotion-census.test.ts), shared by
  * failover's old-primary demotion, its abort and the retired fence.
  *
@@ -472,6 +472,14 @@ export const PUBLISHED_PORTS_TEMPLATE =
  * @returns {Promise<{slotsDropped: boolean, intent: true, live: boolean, reason?: string, error?: Error}>}
  */
 export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
+  // DEMOTION_ORDER (both tiers; demoteComposeWalgRole matches): the role
+  // first, then the slots. The role is the write-guard: until it reads
+  // standby, this node may still push WAL into the prefix the new primary
+  // owns, so it goes first and nothing waits in front of it. The slot drop
+  // only frees this node's own disk (a slot pins WAL up to the slot cap), so
+  // it can come second; a role write that throws skips it, and the reseed
+  // that rebuilds the node as the standby wipes its slots anyway.
+  const role = await setK8sWalgRole({ ip, kubectl, role: 'standby' });
   const slots = await dropInactiveReplicationSlots((sql) =>
     kubectl(
       ip,
@@ -496,7 +504,6 @@ export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
       { timeout: 30_000 },
     ),
   );
-  const role = await setK8sWalgRole({ ip, kubectl, role: 'standby' });
   if (!slots.ok) warn(slotDropWarning(ip, slots.error));
   return { slotsDropped: slots.ok, ...role };
 }

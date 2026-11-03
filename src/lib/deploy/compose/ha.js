@@ -1435,6 +1435,9 @@ export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectN
   } = deps;
   const remoteDir = `/opt/${projectName}`;
   const ip = oldPrimaryIp;
+  // DEMOTION_ORDER, as demoteK8sWalgRole (walg-role.js): the role first (the
+  // write-guard that stops this node archiving into the new primary's prefix),
+  // then the slot drop (only this node's disk). A failed role write skips it.
   try {
     await writeComposeWalgRole({ ip, sshKeyPath, projectName, role: 'standby', run: roleRun });
     log(`[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`);

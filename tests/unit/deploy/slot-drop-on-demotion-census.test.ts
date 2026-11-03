@@ -48,6 +48,7 @@ import {
   lexMask,
   matchBracket,
 } from '../helpers/js-call-scan.js';
+import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
 const ROOT = join(__dirname, '../../..');
 
@@ -62,19 +63,21 @@ describe('DROP_INACTIVE_SLOTS_SQL', () => {
 describe('demoteK8sWalgRole', () => {
   const quiet = { warn: () => {} };
 
-  it('drops inactive slots before the standby role write', async () => {
+  it('writes the standby role first (intent, then live file), then drops inactive slots: the compose order', async () => {
     const calls: Array<{ argv: string[]; input?: string }> = [];
     const kubectl = vi.fn(async (_ip: string, argv: string[], opts?: { input?: string }) => {
       calls.push({ argv, input: opts?.input });
-      return '';
+      return k8sRoleReply(argv) ?? '';
     });
     const out = await demoteK8sWalgRole({ ip: '10.0.0.1', kubectl, ...quiet });
     const drop = calls.findIndex((c) => c.argv.includes(DROP_INACTIVE_SLOTS_SQL));
     const role = calls.findIndex((c) => String(c.input).includes('VC_WALG_ROLE_INTENT: standby'));
-    expect(drop).toBeGreaterThan(-1);
-    expect(role).toBeGreaterThan(drop);
+    const live = calls.findIndex((c) => c.argv.join(' ').includes('walg-role.tmp'));
+    expect(role).toBeGreaterThan(-1);
+    expect(live).toBeGreaterThan(role);
+    expect(drop).toBeGreaterThan(live);
     expect(calls[drop].argv).toEqual(expect.arrayContaining(['exec', 'db-0', 'psql']));
-    expect(out).toMatchObject({ slotsDropped: true, intent: true });
+    expect(out).toMatchObject({ slotsDropped: true, intent: true, live: true });
   });
 
   it('a failed drop still demotes, and warns once with the cause', async () => {
@@ -96,7 +99,7 @@ describe('demoteK8sWalgRole', () => {
     expect(warn.mock.calls[0][0]).toContain('pod db-0 is not running');
   });
 
-  it('a failed role write throws, and does not also warn about the slot', async () => {
+  it('a failed role write throws before any slot drop, and does not also warn about the slot', async () => {
     const warn = vi.fn();
     const kubectl = vi.fn(async () => {
       throw new Error('ssh: connect to host 10.0.0.1 port 22: Connection refused');
@@ -105,6 +108,11 @@ describe('demoteK8sWalgRole', () => {
       /Connection refused/,
     );
     expect(warn).not.toHaveBeenCalled();
+    expect(
+      kubectl.mock.calls.some(([, argv]) =>
+        (argv as unknown as string[]).includes(DROP_INACTIVE_SLOTS_SQL),
+      ),
+    ).toBe(false);
   });
 });
 

@@ -421,11 +421,11 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
       'dbMarker',
       'readOnly',
       'scale app 0',
-      // demoteK8sWalgRole: nobody streams from the retired side's slot.
-      'dropInactiveSlots',
-      // The durable intent, then the live file: no db restart.
+      // demoteK8sWalgRole, DEMOTION_ORDER: the durable intent, then the live
+      // file (no db restart), then the slots nobody streams from.
       'intent=standby',
       'walg=standby',
+      'dropInactiveSlots',
     ]);
     expect(cluster.argvs.some((a) => a.includes('set') || a.includes('rollout'))).toBe(false);
     expect(cluster.db.readOnly).toBe(true);
@@ -468,9 +468,10 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
       'readOnly',
       'flux suspend vibecarbon-base',
       'scale app 0',
-      'dropInactiveSlots',
+      // DEMOTION_ORDER: the role first, then the slots.
       'intent=standby',
       'walg=standby',
+      'dropInactiveSlots',
     ]);
     cluster.writes.length = 0;
     await reconcileRetiredFence(argsFor(cluster));
