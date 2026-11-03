@@ -65,6 +65,7 @@ import { resolveDockerHubCreds } from './docker-hub.js';
 import { DEGRADED_CAUSE, preserveSafetyFields } from './env-safety-fields.js';
 import { assertNoFailoverInFlight, haSeedRecord, readReplicaState } from './failover-guard.js';
 import {
+  checkReissueAfterRestore,
   createAcmeIssuanceWatchdog,
   deriveScaleUpList,
   failoverAddonManifests,
@@ -620,11 +621,16 @@ function probeFailureReason(probeResult) {
  * logged). One certificate per name: a trusted domain must serve the very
  * certificate Secret/vibecarbon-tls holds, since that is the one the snapshot
  * and every restore cover; a different served serial is one warning (another
- * certificate for the same name is loaded in Traefik). Never throws.
+ * certificate for the same name is loaded in Traefik). On a deploy whose
+ * restore wrote Secret/vibecarbon-tls (`tlsRestoredAt`), a trusted domain
+ * also gets the one-shot re-issue check (tls-reissue-watch.js): a
+ * CertificateRequest created after the restore is one warning with
+ * cert-manager's reason. Never throws.
  *
  * @param {{ domain: string, environment: string, projectName: string,
  *   dnsProvider?: string|null, kubeconfig: string, s3Config?: object,
- *   backupS3Config?: { bucket?: string }, deps?: object }} args
+ *   backupS3Config?: { bucket?: string }, tlsRestoredAt?: string|null,
+ *   deps?: object }} args
  * @returns {Promise<{ state: 'trusted'|'pending', checkedAt: string, reason?: string, ca: string }>}
  */
 export async function verifyK8sTls({
@@ -635,9 +641,11 @@ export async function verifyK8sTls({
   kubeconfig,
   s3Config,
   backupS3Config,
+  tlsRestoredAt = null,
   deps = {},
 }) {
   const probe = deps.probe ?? probePublicHealth;
+  const reissueCheck = deps.reissueCheck ?? checkReissueAfterRestore;
   const identity = deps.identity ?? k8sTlsIdentity;
   const kubeconfigExists = deps.kubeconfigExists ?? existsSync;
   const kubectlFor =
@@ -709,6 +717,15 @@ export async function verifyK8sTls({
       readServed: () => servedSerial(domain),
       readSecret: () => secretSerial(kubectlFor(kubeconfig)),
     });
+    if (tlsRestoredAt) {
+      await reissueCheck({
+        restoredAt: tlsRestoredAt,
+        domain,
+        environment,
+        runKubectl: kubectlFor(kubeconfig),
+        warn: (message) => p.log.warn(message),
+      });
+    }
   }
   return { state: 'trusted', checkedAt, ca };
 }
@@ -2335,6 +2352,10 @@ export async function executeDeployment(args, gatheredConfig) {
           kubeconfig: probeKubeconfig,
           s3Config,
           backupS3Config,
+          // k8s: deployK3s's own result; k8s-ha: the primary's (the issuing
+          // cluster, whose kubeconfig this phase reads).
+          tlsRestoredAt:
+            deployResult?.tlsRestoredAt ?? deployResult?.primary?.tlsRestoredAt ?? null,
         });
       } else {
         // Build a concise one-line failure summary as the spinner stop text
