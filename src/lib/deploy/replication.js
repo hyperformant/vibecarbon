@@ -419,19 +419,36 @@ chown postgres:postgres ${stagingDir}
 
 # The remote deadline (reseedStageBoundsS): past it the transfer is killed,
 # so the stage, and the lock it holds, never outlive the client waiting on
-# it. A kill leaves only a staging dir with no id and no ready marker:
-# cleared here, and nothing db-guard.sh would swap.
+# it. The kill takes pg_basebackup's whole process tree: -Xs forks a WAL
+# streamer that keeps writing into the staging (and holds this lock's fd)
+# when only its parent dies, and busybox timeout kills only the parent. A
+# frozen (SIGSTOP) process forks nothing new while its children go first.
+# The watchdog keeps no fd of the stage: not the lock, not the exec's output.
+vc_kill_tree() {
+  kill -STOP "$1" 2>/dev/null || return 0
+  for vc_child in $(pgrep -P "$1" 2>/dev/null); do vc_kill_tree "$vc_child"; done
+  kill -KILL "$1" 2>/dev/null || true
+}
 vc_bb_start=$(date +%s)
 vc_bb_rc=0
-PGPASSWORD='${replPassword}' timeout -s KILL ${deadline} pg_basebackup \\
+PGPASSWORD='${replPassword}' pg_basebackup \\
   -h ${primaryHost} -p ${primaryPort} \\
   -U replicator -D ${stagingDir} \\
-  -Fp -Xs -R -c fast${basebackupSlotFlag} || vc_bb_rc=$?
+  -Fp -Xs -R -c fast${basebackupSlotFlag} &
+vc_bb_pid=$!
+( sleep ${deadline}; vc_kill_tree "$vc_bb_pid" ) >/dev/null 2>&1 9>&- &
+vc_wd_pid=$!
+wait "$vc_bb_pid" || vc_bb_rc=$?
+vc_kill_tree "$vc_wd_pid"
 if [ "$vc_bb_rc" != 0 ]; then
-  rm -rf ${stagingDir}
+  # The verdict first: the cleanup below may not finish, the sentinel must.
   if [ $(( $(date +%s) - vc_bb_start )) -ge ${deadline} ]; then
     echo "[${label}] pg_basebackup did not finish within ${deadline}s and was stopped; nothing staged" >&2
     echo "RESEED_TIMEOUT ${deadline}"
+  fi
+  rm -rf ${stagingDir} 2>/dev/null || true
+  if [ -e ${stagingDir} ]; then
+    echo "[${label}] ${stagingDir} was not fully removed; it has no ready marker, so nothing swaps it in, and the next stage clears it" >&2
   fi
   exit 1
 fi
@@ -1706,10 +1723,31 @@ export async function reseedStandbyInPlace({
       now,
     });
   } catch (error) {
-    // The tree is staged and marked ready: without a disarm, the next
-    // container start (any restart, any time) would swap it in.
+    const said = String(error?.message ?? error);
+    // The restart can fail AFTER the swap (the db did not come back Ready,
+    // the recreated pod's rollout failed): then the standby holds the new
+    // tree and there is nothing to disarm.
+    let swappedFrom = null;
+    try {
+      swappedFrom = String(
+        await kubectl(dbExecArgv(RESEEDED_FROM_READ), { timeout: 30_000 }),
+      ).trim();
+    } catch {
+      swappedFrom = null; // unreadable: the disarm below decides
+    }
+    if (swappedFrom === attempt) {
+      throw new Error(
+        `${said}. The swap ran (${PGDATA_DIR}/.vc-reseeded-from is ${attempt}): the standby holds the ` +
+          'reseeded data directory, but its db did not come back. See why: ' +
+          `kubectl -n vibecarbon logs ${DB_POD} -c ${DB_CONTAINER}`,
+        { cause: error },
+      );
+    }
+    // Not swapped: the tree is staged and marked ready, and without a disarm
+    // the next container start (any restart, any time) would swap it in.
     const outcome = await disarmStagedReseed(kubectl, attempt);
-    throw new Error(`${error?.message ?? error}. ${outcome}`, { cause: error });
+    const unread = swappedFrom === null ? ' (whether the swap already ran could not be read)' : '';
+    throw new Error(`${said}. ${outcome}${unread}`, { cause: error });
   }
 
   const from = String(await kubectl(dbExecArgv(RESEEDED_FROM_READ), { timeout: 30_000 })).trim();

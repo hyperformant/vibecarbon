@@ -723,7 +723,8 @@ describe('buildStagedBasebackupScript in-place mode', () => {
   });
   it('bounds pg_basebackup with a remote deadline, only in in-place mode', () => {
     const d = buildStagedBasebackupScript({ ...base, basebackupDeadlineS: 777 });
-    expect(d).toContain('timeout -s KILL 777 pg_basebackup');
+    expect(d).toContain('( sleep 777; vc_kill_tree "$vc_bb_pid" ) >/dev/null 2>&1 9>&- &');
+    expect(d).not.toMatch(/\btimeout -s/);
     expect(d).toContain('echo "RESEED_TIMEOUT 777"');
     expect(() =>
       buildStagedBasebackupScript({
@@ -845,6 +846,17 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
       stub(name, `${counted(name)}\nexec ${real} "$@"`);
     }
     stub('chown', `${counted('chown')}\nexit 0`);
+    // busybox timeout (the db image is Alpine): signal ONLY the program it
+    // execs, never its children. A deadline built on it leaves pg_basebackup's
+    // forked WAL streamer writing.
+    stub(
+      'timeout',
+      [
+        'sig=TERM; if [ "$1" = -s ]; then sig=$2; shift 2; fi; n=$1; shift',
+        '( sleep "$n"; kill -"$sig" $$ ) >/dev/null 2>&1 &',
+        'exec "$@"',
+      ].join('\n'),
+    );
     // biome-ignore lint/suspicious/noTemplateCurlyInString: shell expansion text
     stub('pg_isready', '[ "${STUB_ISREADY:-0}" = 0 ]');
     stub(
@@ -856,6 +868,13 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
         'D=""; while [ $# -gt 0 ]; do [ "$1" = -D ] && D="$2"; shift; done',
         // A transfer cut off half way: part of the tree, then a failure.
         `if [ "\${BB_PARTIAL:-}" = 1 ]; then cp -a "${primary}/base" "$D/"; exit 1; fi`,
+        // pg_basebackup -Xs: a forked WAL streamer that keeps writing into the
+        // staging after its parent is gone; its pid goes to $BB_FORK.
+        'if [ -n "${BB_FORK:-}" ]; then',
+        '  ( n=0; while :; do [ -d "$D/pg_wal" ] || mkdir -p "$D/pg_wal"; : > "$D/pg_wal/seg$n"; n=$((n + 1)); sleep 0.02; done ) &',
+        '  echo $! > "$BB_FORK"',
+        '  while :; do sleep 0.05; done',
+        'fi',
         // A slow transfer: say it started, then wait (bounded) to be let go.
         'if [ -n "$BB_GATE" ]; then',
         '  : > "$BB_GATE.started"',
@@ -1033,6 +1052,23 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
     const next = stage({}, { inPlaceAttempt: 'att-2' });
     expect(next.status, next.stderr).toBe(0);
     expect(next.stdout.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-2');
+  });
+
+  it("a timed-out transfer's forked WAL streamer dies with it: RESEED_TIMEOUT, nothing armed, nothing left writing", () => {
+    const pidFile = join(dir, 'streamer.pid');
+    const r = stage({ BB_FORK: pidFile }, { basebackupDeadlineS: 1 });
+    expect(r.status).toBe(1);
+    expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_TIMEOUT 1');
+    expect(r.stderr).toMatch(/did not finish within 1s/);
+    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+    const pid = Number(readFileSync(pidFile, 'utf-8').trim());
+    expect(pid).toBeGreaterThan(0);
+    // The streamer is gone, not reparented and still writing.
+    expect(spawnSync('kill', ['-0', String(pid)]).status).not.toBe(0);
+    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+    const g = guard();
+    expect(g.stderr).not.toContain('RESEED_SWAPPED');
+    expect(read('base/marker')).toBe('live\n');
   });
 
   it('a transfer that fails fast is a plain failure, never a timeout', () => {

@@ -67,7 +67,7 @@ const ENV = {
   },
 };
 
-const GUARD_POD = (o: { rc: number; cid: string }) =>
+const GUARD_POD = (o: { rc: number; cid: string; ready?: boolean }) =>
   JSON.stringify({
     metadata: { uid: 'u1' },
     spec: {
@@ -92,7 +92,13 @@ const GUARD_POD = (o: { rc: number; cid: string }) =>
     },
     status: {
       containerStatuses: [
-        { name: 'db', restartCount: o.rc, containerID: o.cid, ready: true, state: { running: {} } },
+        {
+          name: 'db',
+          restartCount: o.rc,
+          containerID: o.cid,
+          ready: o.ready ?? true,
+          state: { running: {} },
+        },
       ],
     },
   });
@@ -109,6 +115,8 @@ type InPlaceOverrides = {
   dbSize?: string;
   stopError?: Error;
   disarmOut?: string;
+  /** After the stop: the restarted container never turns Ready. */
+  neverReady?: boolean;
   onCall?: (c: string) => void;
   onStage?: (o: { timeout?: number; input: string }) => void;
 };
@@ -130,7 +138,7 @@ function inPlaceSsh(o: InPlaceOverrides = {}) {
       return ip === PRIMARY_IP ? (o.primaryIntent ?? 'primary') : (o.intent ?? 'standby');
     }
     if (cmd.includes('get pod db-0')) {
-      return GUARD_POD(stopped ? { rc: 1, cid: 'c2' } : { rc: 0, cid: 'c1' });
+      return GUARD_POD(stopped ? { rc: 1, cid: 'c2', ready: !o.neverReady } : { rc: 0, cid: 'c1' });
     }
     if (cmd.includes('db-guard.sh') && cmd.includes('grep -c'))
       return o.markerGrep ?? '1\nin_recovery=t';
@@ -153,7 +161,8 @@ function inPlaceSsh(o: InPlaceOverrides = {}) {
       if (o.stageError) throw o.stageError;
       return o.stageOut ?? `RESEED_STAGED ${attempt}`;
     }
-    if (cmd.includes('.vc-reseeded-from')) return o.reseededFrom ?? attempt;
+    // db-guard.sh records the swap only on the container start the stop causes.
+    if (cmd.includes('.vc-reseeded-from')) return o.reseededFrom ?? (stopped ? attempt : '');
     if (cmd.includes('pg_is_in_recovery')) return o.recovery ?? 't';
     if (cmd.includes('pg_control_system')) return SYSID;
     return '';
@@ -387,7 +396,7 @@ describe('reseedStandbyFromPrimary (in place)', () => {
     await runReseed(inPlaceSsh({ dbSize: '1048576', onStage: (x) => stages.push(x) }));
     expect(stages).toHaveLength(1);
     expect(stages[0].timeout).toBe(2 * DB_STS_BOOT_TIMEOUT_S * 1000);
-    expect(stages[0].input).toContain(`timeout -s KILL ${DB_STS_BOOT_TIMEOUT_S} pg_basebackup`);
+    expect(stages[0].input).toContain(`( sleep ${DB_STS_BOOT_TIMEOUT_S}; vc_kill_tree`);
   });
 
   it('a large db scales both bounds, the remote deadline strictly below the client one', async () => {
@@ -396,7 +405,7 @@ describe('reseedStandbyFromPrimary (in place)', () => {
     expect(remoteS).toBeGreaterThan(DB_STS_BOOT_TIMEOUT_S);
     const stages: Array<{ timeout?: number; input: string }> = [];
     await runReseed(inPlaceSsh({ dbSize: String(size), onStage: (x) => stages.push(x) }));
-    expect(stages[0].input).toContain(`timeout -s KILL ${remoteS} pg_basebackup`);
+    expect(stages[0].input).toContain(`( sleep ${remoteS}; vc_kill_tree`);
     expect(stages[0].timeout).toBe(2 * remoteS * 1000);
     expect(remoteS * 1000).toBeLessThan(stages[0].timeout ?? 0);
   });
@@ -454,6 +463,31 @@ describe('reseedStandbyFromPrimary (in place)', () => {
     await expect(
       runReseed(inPlaceSsh({ stopError: refused, disarmOut: 'RESEED_DISARM_REFUSED busy\n' })),
     ).rejects.toThrow(/still armed[\s\S]*next restart/);
+  });
+
+  it('a db that does not come back AFTER the swap ran says so, and disarms nothing', async () => {
+    const calls: string[] = [];
+    let t = 0;
+    const err = await runReseed(inPlaceSsh({ neverReady: true, onCall: (c) => calls.push(c) }), {
+      now: () => (t += 60_000),
+    }).catch((e) => e);
+    expect(err.message).toMatch(/did not come back Ready/);
+    expect(err.message).toMatch(/The swap ran/);
+    expect(err.message).toMatch(/holds the reseeded data directory/);
+    expect(err.message).not.toMatch(/keeps its data directory/);
+    expect(calls.some((c) => c.includes('RESEED_DISARMED'))).toBe(false);
+  });
+
+  it('a db that does not come back with the swap NOT run is disarmed, and keeps its data directory', async () => {
+    const calls: string[] = [];
+    let t = 0;
+    const err = await runReseed(
+      inPlaceSsh({ neverReady: true, reseededFrom: '', onCall: (c) => calls.push(c) }),
+      { now: () => (t += 60_000) },
+    ).catch((e) => e);
+    expect(err.message).toMatch(/did not come back Ready/);
+    expect(err.message).toMatch(/staged tree was disarmed; the standby keeps its data directory/);
+    expect(calls.some((c) => c.includes('RESEED_DISARMED'))).toBe(true);
   });
 
   it('HARD-ERRORS (does not silently skip) when the password is missing', async () => {
