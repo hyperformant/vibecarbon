@@ -151,6 +151,24 @@ function unrenderedReaders(root: string): string[] {
   );
 }
 
+/**
+ * JS files, outside walg-role.js, whose code reads a walgRoleReadShell answer
+ * by hand: they spell its `WALG_ROLE_FILE=` line instead of calling
+ * parseWalgRoleReadBack, the one read-back.
+ */
+function readBackParsers(root: string): string[] {
+  const { files, text } = tree(root);
+  return files
+    .filter((f) => JS_FILE.test(f) && f !== ROLE_MODULE)
+    .filter((f) => {
+      const src = text(f);
+      const { mask, errors } = lex(src);
+      if (errors.length > 0) throw new Error(`${f}: cannot scan soundly: ${errors[0]}`);
+      return [...src.matchAll(/WALG_ROLE_FILE=/g)].some((m) => mask[m.index ?? 0] !== COMMENT);
+    })
+    .sort();
+}
+
 /** src/ lines that roll the db to change its env. */
 function dbEnvRolls(root: string): string[] {
   const { files, code } = tree(root);
@@ -315,6 +333,10 @@ describe('census: the wal-g role has one file, one parser, one writer module', (
     expect(unrenderedReaders(REPO)).toEqual([]);
   });
 
+  it('one read-back: every WALG_ROLE_FILE= answer is read through parseWalgRoleReadBack', () => {
+    expect(readBackParsers(REPO)).toEqual([]);
+  });
+
   it('no code path rolls the db to change its role', () => {
     expect(dbEnvRolls(REPO)).toEqual([]);
   });
@@ -379,6 +401,7 @@ describe('census bites', () => {
     expect(roleFileReaders(dir).withoutParser).toEqual([]);
     expect(unrenderedReaders(dir)).toEqual([]);
     expect(dbEnvRolls(dir)).toEqual([]);
+    expect(readBackParsers(dir)).toEqual([]);
     expect(rawRoleAccess(dir)).toEqual([]);
     expect(roleAssignmentsOutsideParser(dir)).toEqual([]);
   });
@@ -442,6 +465,16 @@ describe('census bites', () => {
       'src/lib/deploy/bundle.js': 'export const s = `cat .vibecarbon-role/walg-role`;\n',
     });
     expect(unrenderedReaders(dir)).toEqual(['src/lib/deploy/bundle.js']);
+  });
+
+  it('a sixth hand-written WALG_ROLE_FILE= read-back is caught', () => {
+    const dir = fixture({
+      'src/stray.js':
+        '// prints WALG_ROLE_FILE=<role>, a comment is fine\n' +
+        'export const r = (out) => /^WALG_ROLE_FILE=(.*)$/m.exec(String(out))?.[1];\n',
+      'tests/e2e/stray.ts': "export const s = (out: string) => out.split('WALG_ROLE_FILE=')[1];\n",
+    });
+    expect(readBackParsers(dir)).toEqual(['src/stray.js', 'tests/e2e/stray.ts']);
   });
 
   it('a db roll to change the role is caught', () => {

@@ -88,6 +88,7 @@ import {
   COMPOSE_WALG_ROLE_HOST_DIR,
   composeDbMountsWalgRoleDir,
   FAILOVER_NOT_STARTED,
+  parseWalgRoleReadBack,
   WALG_ROLE_DIR,
   walgRoleDegradedMessage,
   walgRoleReadShell,
@@ -1398,7 +1399,7 @@ export function composeDbRoleProbeShell(projectName) {
  * @returns {string|undefined}
  */
 function roleFileValue(out) {
-  return /^WALG_ROLE_FILE=(.*)$/m.exec(String(out === false ? '' : (out ?? '')))?.[1]?.trim();
+  return parseWalgRoleReadBack(out);
 }
 
 /**

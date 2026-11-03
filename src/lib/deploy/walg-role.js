@@ -124,6 +124,22 @@ export function walgRoleReadShell(dir) {
 }
 
 /**
+ * The one read-back of a walgRoleReadShell answer: the role its
+ * `WALG_ROLE_FILE=<role>` line names (`primary`, `standby`, or '' for a
+ * missing or unparseable file), or undefined when no such line came back (the
+ * node did not answer). `false` (sshRun's failure value) reads as no answer.
+ * Every caller reads the answer through this (census:
+ * tests/unit/deploy/walg-role-source-census.test.ts).
+ *
+ * @param {unknown} out
+ * @returns {string|undefined}
+ */
+export function parseWalgRoleReadBack(out) {
+  const text = out === false || out == null ? '' : String(out);
+  return /^WALG_ROLE_FILE=(.*)$/m.exec(text)?.[1]?.trim();
+}
+
+/**
  * The stderr line a failed role write prints. setK8sWalgRole matches it on
  * the error's stderr only: the thrown message carries the whole command,
  * script and this text included.
@@ -299,7 +315,7 @@ export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false, e
       error,
     });
   }
-  const readBack = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim();
+  const readBack = parseWalgRoleReadBack(out);
   if (readBack !== role) {
     return settle({ intent: true, live: false, reason: 'read-back-mismatch' });
   }
@@ -354,7 +370,7 @@ export async function writeComposeWalgRole({ ip, sshKeyPath, projectName, role, 
       : stderr.split('\n').at(-1) || 'the ssh command failed';
     throw new Error(`could not write the wal-g role ${role} on ${ip}: ${detail}`);
   }
-  const readBack = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim();
+  const readBack = parseWalgRoleReadBack(out);
   if (readBack !== role) {
     throw new Error(
       `the wal-g role on ${ip} read back as ${JSON.stringify(readBack ?? '')} after writing ${role}`,

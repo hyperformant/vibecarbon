@@ -71,6 +71,7 @@ import {
   DB_ROLE_CONFIGMAP,
   DB_ROLE_INTENT_KEY,
   demoteK8sWalgRole,
+  parseWalgRoleReadBack,
   WALG_ROLE_DIR,
   walgRoleReadShell,
 } from './walg-role.js';
@@ -377,7 +378,7 @@ export async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
   if (walgIntentStandby) {
     try {
       const out = await kubectl(ip, k8sDbMarkerExec(walgRoleReadShell(WALG_ROLE_DIR)), opts);
-      walgStandby = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim() === 'standby';
+      walgStandby = parseWalgRoleReadBack(out) === 'standby';
     } catch {
       // db pod not running: the second pass, after the db settles, retries.
       walgStandby = 'unknown';

@@ -88,6 +88,7 @@ import {
   DB_ROLE_INTENT_KEY,
   demoteK8sWalgRole,
   FAILOVER_NOT_STARTED,
+  parseWalgRoleReadBack,
   podMountsWalgRoleDir,
   setK8sWalgRole,
   WALG_ROLE_DIR,
@@ -1911,7 +1912,7 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
           '-c',
           walgRoleReadShell(WALG_ROLE_DIR),
         ]);
-        live = /^WALG_ROLE_FILE=(.*)$/m.exec(String(out ?? ''))?.[1]?.trim();
+        live = parseWalgRoleReadBack(out);
       } catch {
         // the db does not answer: the write below says so
       }

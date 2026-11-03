@@ -36,6 +36,7 @@ import {
   dbRoleConfigMapManifest,
   k8sWalgRoleExecArgv,
   k8sWalgRoleIntentApplyArgv,
+  parseWalgRoleReadBack,
   podMountsWalgRoleDir,
   setK8sWalgRole,
   WALG_ROLE_DIR,
@@ -328,6 +329,18 @@ describe('walg role primitives', () => {
     const r = spawnSync('sh', ['-c', walgRoleReadShell(dir)], { encoding: 'utf-8' });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe('WALG_ROLE_FILE=\n');
+  });
+  it('the one read-back reads the role line, an empty role, or no answer', () => {
+    for (const role of ['primary', 'standby']) {
+      const dir = mkdtempSync(join(tmpdir(), 'vc-role-'));
+      writeFileSync(join(dir, 'walg-role'), `${role}\n`);
+      const r = spawnSync('sh', ['-c', walgRoleReadShell(dir)], { encoding: 'utf-8' });
+      expect(parseWalgRoleReadBack(r.stdout)).toBe(role);
+    }
+    expect(parseWalgRoleReadBack('noise\nWALG_ROLE_FILE=\n')).toBe('');
+    expect(parseWalgRoleReadBack('')).toBeUndefined();
+    expect(parseWalgRoleReadBack(false)).toBeUndefined();
+    expect(parseWalgRoleReadBack(undefined)).toBeUndefined();
   });
   it('a write into a missing directory fails loudly and prints no role line', () => {
     const dir = join(mkdtempSync(join(tmpdir(), 'vc-role-')), 'absent');
