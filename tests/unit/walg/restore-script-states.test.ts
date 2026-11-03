@@ -64,7 +64,9 @@ let pgdata: string;
 let bin: string;
 
 /** A stub wal-g: `backup-fetch <dir> <name>` writes a fake cluster, or fails. */
-function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap' | 'ok-with-links') {
+function stubWalg(
+  mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap' | 'ok-with-links' | 'ok-with-reseed',
+) {
   const body =
     mode === 'fail'
       ? 'echo "ERROR: Backup $3 does not exist" >&2; exit 1'
@@ -83,6 +85,19 @@ function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap' | 'ok-with-
             ? [
                 'mkdir -p "$2/.vc-prev/base" "$2/.vc-restore" "$2/.vc-discard"',
                 'echo in > "$2/.vc-restore-in-progress"',
+              ]
+            : []),
+          // A base pushed from a node that was once an in-place reseeded
+          // standby, or mid-stage: every .vc-* it carries, by glob.
+          ...(mode === 'ok-with-reseed'
+            ? [
+                'mkdir -p "$2/.vc-reseed/base"',
+                'echo att > "$2/.vc-reseed/.vc-reseed-id"',
+                'echo att > "$2/.vc-reseed-ready"',
+                'echo att > "$2/.vc-reseed-ready.tmp"',
+                'echo "in att" > "$2/.vc-reseed-in-progress"',
+                'echo att > "$2/.vc-reseeded-from"',
+                'echo future > "$2/.vc-some-later-marker"',
               ]
             : []),
           // A base pushed while the source database had dropped WAL under
@@ -303,6 +318,24 @@ for (const [tier, build] of TIERS) {
         '.vc-reseed-ready.tmp',
         '.vc-reseed-in-progress',
         '.vc-reseed-in-progress.tmp',
+      ]) {
+        expect(existsSync(join(pgdata, f)), f).toBe(false);
+      }
+    });
+
+    it('a base carrying .vc-reseed* (or any .vc-*) has them dropped from the staged tree', () => {
+      seedLive();
+      stubWalg('ok-with-reseed');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(read('base/marker')).toBe('restored');
+      for (const f of [
+        '.vc-reseed',
+        '.vc-reseed-ready',
+        '.vc-reseed-ready.tmp',
+        '.vc-reseed-in-progress',
+        '.vc-reseeded-from',
+        '.vc-some-later-marker',
       ]) {
         expect(existsSync(join(pgdata, f)), f).toBe(false);
       }

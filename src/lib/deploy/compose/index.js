@@ -1620,20 +1620,8 @@ function restorePreludeLines() {
 
 /** Steps 3 and 4 of both restore scripts, shared text. */
 function restoreStagedAndSwapLines() {
-  const { staging, previous, discard, inProgress, lock, restoredFrom } = RESTORE_LAYOUT;
-  const stagedVc = [
-    staging,
-    previous,
-    discard,
-    inProgress,
-    `${inProgress}.tmp`,
-    lock,
-    restoredFrom,
-    `${restoredFrom}.tmp`,
-    ...WAL_GAP_RECORDS,
-  ]
-    .map((name) => `"$PGDATA/${staging}/${name}"`)
-    .join(' ');
+  const { staging, previous, discard, restoredFrom } = RESTORE_LAYOUT;
+  const stagedGap = WAL_GAP_RECORDS.map((name) => `"$PGDATA/${staging}/${name}"`).join(' ');
   return [
     '# --- staged ---',
     `if [ ! -f "$PGDATA/${staging}/PG_VERSION" ]; then`,
@@ -1641,10 +1629,12 @@ function restoreStagedAndSwapLines() {
     '  echo "restore: $RESTORE_BACKUP fetched no PG_VERSION; nothing was moved" >&2',
     '  exit 1',
     'fi',
-    '# 3. A base pushed while a restore left its dirs in PGDATA carries them:',
-    '#    drop them from the staged tree so they cannot wedge the swap. The',
-    "#    source database's WAL gap record goes too: the restored one has its own.",
-    `rm -rf ${stagedVc}`,
+    '# 3. A base pushed while a restore or a reseed left its .vc-* entries in',
+    '#    PGDATA carries them: drop every one from the staged tree, by glob, so',
+    "#    none can wedge the swap. The source database's WAL gap record goes",
+    '#    too: the restored one has its own.',
+    `find "$PGDATA/${staging}" -mindepth 1 -maxdepth 1 -name '.vc-*' -exec rm -rf {} +`,
+    `rm -rf ${stagedGap}`,
     '# Recovery config into staging: strip the settings it rewrites, append the',
     '# new ones (rendered by the CLI, the same text on both tiers).',
     `VC_AUTO_CONF="$PGDATA/${staging}/postgresql.auto.conf"`,

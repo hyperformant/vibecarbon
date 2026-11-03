@@ -58,6 +58,16 @@ export function restoreRolloutTimeoutS(sizeBytes) {
 const RESEED_STAGING_DIR = '/var/lib/postgresql/data/.reseed_staging';
 
 /**
+ * Where the in-place standby reseed stages its tree: inside the live PGDATA,
+ * on the same filesystem, the exact path db-guard.sh swaps from
+ * (carbon/volumes/db/db-guard.sh, `R_STAGE`).
+ */
+export const IN_PLACE_RESEED_DIR = '/var/lib/postgresql/data/.vc-reseed';
+
+/** An in-place reseed attempt id: one shell word, safe unquoted in any marker. */
+const IN_PLACE_ATTEMPT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
  * The planned-failover write fence: a server-wide default set with ALTER
  * SYSTEM (postgresql.auto.conf). Never ALTER ROLE / ALTER DATABASE SET: those
  * are catalog writes, so they replicate to the standby and survive its promote.
@@ -211,6 +221,14 @@ export function buildReplicationHbaLines(cidrs) {
  *   (used by swap:false so the conninfo is in place before the node-side swap;
  *   the password is embedded here and MUST be delivered over stdin, never argv).
  * @param {string} [opts.label='reseed'] - tag for the script's stderr breadcrumbs
+ * @param {string|null} [opts.inPlaceAttempt=null] - in-place reseed mode: the
+ *   attempt id. Requires `swap: false` and `stagingDir` = `<pgdataDir>/.vc-reseed`
+ *   (IN_PLACE_RESEED_DIR). The script then runs only under the standby intent,
+ *   clears any earlier ready marker and staging, stages, strips every `.vc-*`
+ *   the source carried, stamps `.vc-reseed-id`, and writes
+ *   `<pgdataDir>/.vc-reseed-ready` LAST (tmp, sync, rename, sync) for
+ *   db-guard.sh to swap on the next container start. Prints
+ *   `RESEED_STAGED <id>`, or `RESEED_SKIPPED` when the probe gives up.
  * @returns {string}
  */
 export function buildStagedBasebackupScript({
@@ -227,7 +245,35 @@ export function buildStagedBasebackupScript({
   pgdataDir = '/var/lib/postgresql/data',
   primaryConninfo = '',
   label = 'reseed',
+  inPlaceAttempt = null,
 }) {
+  const inPlace = inPlaceAttempt !== null && inPlaceAttempt !== undefined;
+  const readyMarker = `${pgdataDir}/.vc-reseed-ready`;
+  if (inPlace) {
+    if (typeof inPlaceAttempt !== 'string' || !IN_PLACE_ATTEMPT_RE.test(inPlaceAttempt)) {
+      throw new Error(
+        `buildStagedBasebackupScript: ${JSON.stringify(inPlaceAttempt)} is not an in-place reseed attempt id`,
+      );
+    }
+    if (swap) {
+      throw new Error(
+        'buildStagedBasebackupScript: an in-place reseed never swaps in-pod (swap: false)',
+      );
+    }
+    if (stagingDir !== `${pgdataDir}/.vc-reseed`) {
+      throw new Error(
+        `buildStagedBasebackupScript: an in-place reseed stages at ${pgdataDir}/.vc-reseed, where db-guard.sh swaps from, not ${stagingDir}`,
+      );
+    }
+  }
+  // In-place mode words the probe so that nothing before the skip names the
+  // base backup tool: the skip provably comes first.
+  const probeUnreachable = inPlace
+    ? `  echo "[${label}] primary postgres at ${primaryHost}:${primaryPort} not reachable from standby after ${probeAttempts} attempts; nothing staged, the standby keeps its data directory." >&2
+echo RESEED_SKIPPED
+exit 0`
+    : `  echo "[${label}] primary postgres at ${primaryHost}:${primaryPort} not reachable from standby after ${probeAttempts} attempts, skipping pg_basebackup. Standby keeps its independent postgres; failover serves the app but data does not sync from primary." >&2
+  exit 0`;
   const probeBlock = probeFirst
     ? `
 # Probe primary's postgres from inside the standby container, WITH a retry
@@ -241,7 +287,7 @@ export function buildStagedBasebackupScript({
 # NOTE: pg_isready does NOT authenticate — it only checks that the server
 # answers the startup packet, so it sails straight through pg_hba. A green
 # probe therefore proves the RELAY PATH is up, not that replication auth will
-# succeed (live RCA 2026-07-06: probe OK, then pg_basebackup FATAL
+# succeed (live RCA 2026-07-06: probe OK, then ${inPlace ? 'the base backup' : 'pg_basebackup'} FATAL
 # "no pg_hba.conf entry" — the post-NAT source CIDR was missing from pg_hba).
 probe_ok=0
 for probe_i in $(seq 1 ${probeAttempts}); do
@@ -255,8 +301,7 @@ for probe_i in $(seq 1 ${probeAttempts}); do
   fi
 done
 if [ "\${probe_ok}" != "1" ]; then
-  echo "[${label}] primary postgres at ${primaryHost}:${primaryPort} not reachable from standby after ${probeAttempts} attempts, skipping pg_basebackup. Standby keeps its independent postgres; failover serves the app but data does not sync from primary." >&2
-  exit 0
+${probeUnreachable}
 fi
 `
     : '';
@@ -279,14 +324,27 @@ REPL_CONNINFO_EOF
   // basebackup in. The staged copy is already verified good (PG_VERSION check
   // above) before this destructive clear, so a known-good replacement exists
   // before we touch the live dir.
-  const swapBlock = swap
+  const swapBlock = inPlace
     ? `
+# In-place reseed: the staged tree is complete and every edit is in. The
+# ready marker goes in last, by rename between two syncs, so it is never on
+# disk ahead of the tree it names. db-guard.sh swaps the tree in on the db
+# container's next start, and only under the standby intent.
+sync
+printf '%s' '${inPlaceAttempt}' > ${readyMarker}.tmp
+sync
+mv -f ${readyMarker}.tmp ${readyMarker}
+sync
+echo "RESEED_STAGED ${inPlaceAttempt}"
+`
+    : swap
+      ? `
 find ${pgdataDir} -mindepth 1 -delete
 find ${stagingDir} -mindepth 1 -maxdepth 1 -exec mv -t ${pgdataDir}/ {} +
 rmdir ${stagingDir}
 chown -R postgres:postgres ${pgdataDir}
 `
-    : `
+      : `
 # swap=false: leave the verified basebackup in ${stagingDir}. The caller scales
 # the pod to zero and performs the atomic PGDATA swap node-side (in-pod pg_ctl
 # stop would kill the container — the postmaster is PID 1).
@@ -317,9 +375,43 @@ if [ ! -f ${stagingDir}/PG_VERSION ]; then
   exit 1
 fi`;
 
+  // In-place mode: the gate and the clean slate come before anything else.
+  // The intent gate is the very comparison db-guard.sh swaps under, so a
+  // stage never builds a tree the swap would refuse. A swap under way is
+  // never disturbed. The old ready marker goes first (and durably), so it can
+  // never name the tree staged next; then any staging it leaves is cleared.
+  const inPlaceHead = inPlace
+    ? `
+if [ "\${VC_WALG_ROLE_INTENT:-}" != standby ]; then
+  echo "[${label}] RESEED_REFUSED: the db intent (VC_WALG_ROLE_INTENT) is not standby; nothing staged" >&2
+  exit 1
+fi
+if [ -e ${pgdataDir}/.vc-reseed-in-progress ] || [ -L ${pgdataDir}/.vc-reseed-in-progress ]; then
+  echo "[${label}] RESEED_REFUSED: a reseed swap is in progress (${pgdataDir}/.vc-reseed-in-progress); nothing staged" >&2
+  exit 1
+fi
+rm -f ${readyMarker} ${readyMarker}.tmp
+sync
+rm -rf ${stagingDir}
+`
+    : '';
+
+  // In-place mode: a source that was once a standby (a failed-back primary)
+  // carries its .vc-* entries, and db-guard.sh refuses a staging holding any
+  // but the attempt id. Strip them all, then stamp this attempt.
+  const inPlaceStamp = inPlace
+    ? `
+find ${stagingDir} -mindepth 1 -maxdepth 1 -name '.vc-*' -exec rm -rf {} +
+printf '%s' '${inPlaceAttempt}' > ${stagingDir}/.vc-reseed-id`
+    : '';
+
+  // In-place mode runs under the db image's sh, POSIX: nothing here pipes, so
+  // pipefail is not needed (and dash has none).
+  const setLine = inPlace ? 'set -eu' : 'set -e -o pipefail';
+
   return `
-set -e -o pipefail
-${probeBlock}${basebackupBlock}
+${setLine}
+${inPlaceHead}${probeBlock}${basebackupBlock}${inPlaceStamp}
 # -R should already have created standby.signal; touch belt-and-suspenders.
 touch ${stagingDir}/standby.signal
 echo "primary_slot_name = '${slotName}'" >> ${stagingDir}/postgresql.auto.conf

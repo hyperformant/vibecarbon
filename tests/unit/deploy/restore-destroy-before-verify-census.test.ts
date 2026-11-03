@@ -63,7 +63,11 @@ const PGDATA_REF = /\$\{?PGDATA(?::\?)?\}?/;
 // Inside the staging dir, also the source database's WAL gap record (a
 // restored database does not share its gap): still never the live cluster.
 const ALLOWED_RM_TARGET =
-  /^"\$\{?PGDATA(?::\?)?\}?\/(\.vc-restore|\.vc-prev|\.vc-discard|\.vc-restore-in-progress|\.vc-reseed|\.vc-reseed-ready(?:\.tmp)?|\.vc-reseed-in-progress(?:\.tmp)?|\.vc-restore\/\.vc-[a-z.-]+|\.vc-restore\/vibecarbon-wal-gap(?:\.clearing)?)"$/;
+  /^"\$\{?PGDATA(?::\?)?\}?\/(\.vc-restore|\.vc-prev|\.vc-discard|\.vc-restore-in-progress|\.vc-reseed|\.vc-reseed-ready(?:\.tmp)?|\.vc-reseed-in-progress(?:\.tmp)?|\.vc-restore\/vibecarbon-wal-gap(?:\.clearing)?)"$/;
+// The staged tree's .vc-* entries go by glob, inside staging only: a list
+// misses the next marker a later release adds (C1: .vc-reseed*).
+const STAGED_VC_DROP =
+  'find "$PGDATA/.vc-restore" -mindepth 1 -maxdepth 1 -name \'.vc-*\' -exec rm -rf {} +';
 
 function codeLines(script: string): string[] {
   return script
@@ -90,7 +94,7 @@ for (const [label, build] of SCRIPTS) {
 
     it('every rm -rf on PGDATA targets staging, the previous cluster or the marker', () => {
       for (const l of lines) {
-        if (!/\brm\s+-[a-z]*r/.test(l) || !PGDATA_REF.test(l)) continue;
+        if (!/\brm\s+-[a-z]*r/.test(l) || !PGDATA_REF.test(l) || l === STAGED_VC_DROP) continue;
         const targets = l
           .replace(/.*?\brm\s+-[a-z]+\s+/, '')
           .replace(/\s*(;|&&|\|\||2>).*$/, '')
@@ -150,6 +154,17 @@ for (const [label, build] of SCRIPTS) {
       expect(discardIdx, 'no discard clear after the fetch').toBeGreaterThan(fetchIdx);
       expect(lines[discardIdx + 1]).toBe(
         'rm -rf "$PGDATA/.vc-reseed" "$PGDATA/.vc-reseed-ready" "$PGDATA/.vc-reseed-ready.tmp" "$PGDATA/.vc-reseed-in-progress" "$PGDATA/.vc-reseed-in-progress.tmp"',
+      );
+    });
+
+    it("drops the staged tree's .vc-* by glob, after the fetch, never by a list", () => {
+      const drop = lines.indexOf(STAGED_VC_DROP);
+      expect(drop, 'no glob drop of the staged .vc-*').toBeGreaterThan(fetchIdx);
+      for (const l of lines) {
+        expect(l, l).not.toMatch(/"\$PGDATA\/\.vc-restore\/\.vc-/);
+      }
+      expect(lines[drop + 1]).toBe(
+        'rm -rf "$PGDATA/.vc-restore/vibecarbon-wal-gap" "$PGDATA/.vc-restore/vibecarbon-wal-gap.clearing"',
       );
     });
 

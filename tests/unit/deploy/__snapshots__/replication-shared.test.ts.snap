@@ -1,0 +1,161 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buildStagedBasebackupScript in-place mode > callers without inPlaceAttempt are byte-identical to before 1`] = `
+"set -e -o pipefail
+
+# Stage into a tmp dir; atomic swap only after basebackup verifies good.
+rm -rf /var/lib/postgresql/data.staging
+mkdir -p /var/lib/postgresql/data.staging
+chown postgres:postgres /var/lib/postgresql/data.staging
+
+PGPASSWORD='p' pg_basebackup \\
+  -h h -p 5433 \\
+  -U replicator -D /var/lib/postgresql/data.staging \\
+  -Fp -Xs -R -c fast
+
+# A successful pg_basebackup always writes PG_VERSION (and standby.signal via -R).
+if [ ! -f /var/lib/postgresql/data.staging/PG_VERSION ]; then
+  echo "[reseed] pg_basebackup produced no PG_VERSION, refusing to swap" >&2
+  rm -rf /var/lib/postgresql/data.staging
+  exit 1
+fi
+# -R should already have created standby.signal; touch belt-and-suspenders.
+touch /var/lib/postgresql/data.staging/standby.signal
+echo "primary_slot_name = 'vibecarbon_standby_slot'" >> /var/lib/postgresql/data.staging/postgresql.auto.conf
+# hot_standby MUST be on: with it off, the reseeded standby streams fine but
+# REFUSES read-only connections ("FATAL: the database system is not accepting
+# connections / DETAIL: Hot standby mode is disabled"), failing every
+# pg_is_in_recovery() check. The previous image shipped a config include with
+# 'hot_standby = off' (live RCA 2026-07-06 e4 rig); postgresql.auto.conf is read
+# LAST, so pinning it here wins over any image config on both staging paths
+# (k8s + compose). Harmless after promotion (ignored outside recovery).
+echo "hot_standby = on" >> /var/lib/postgresql/data.staging/postgresql.auto.conf
+# A planned failover fences the primary with ALTER SYSTEM SET
+# default_transaction_read_only, which lives in postgresql.auto.conf, and
+# pg_basebackup copies that file: a standby seeded from a fenced primary would
+# come up read-only once promoted. The staged copy never keeps it.
+sed -i '/^[[:space:]]*default_transaction_read_only[[:space:]]*=/d' /var/lib/postgresql/data.staging/postgresql.auto.conf
+chown -R postgres:postgres /var/lib/postgresql/data.staging
+
+find /var/lib/postgresql/data -mindepth 1 -delete
+find /var/lib/postgresql/data.staging -mindepth 1 -maxdepth 1 -exec mv -t /var/lib/postgresql/data/ {} +
+rmdir /var/lib/postgresql/data.staging
+chown -R postgres:postgres /var/lib/postgresql/data"
+`;
+
+exports[`buildStagedBasebackupScript in-place mode > callers without inPlaceAttempt are byte-identical to before 2`] = `
+"set -e -o pipefail
+
+# Stage into a tmp dir; atomic swap only after basebackup verifies good.
+rm -rf /var/lib/postgresql/data/.reseed_staging
+mkdir -p /var/lib/postgresql/data/.reseed_staging
+chown postgres:postgres /var/lib/postgresql/data/.reseed_staging
+
+PGPASSWORD='p' pg_basebackup \\
+  -h h -p 5433 \\
+  -U replicator -D /var/lib/postgresql/data/.reseed_staging \\
+  -Fp -Xs -R -c fast
+
+# A successful pg_basebackup always writes PG_VERSION (and standby.signal via -R).
+if [ ! -f /var/lib/postgresql/data/.reseed_staging/PG_VERSION ]; then
+  echo "[reseed] pg_basebackup produced no PG_VERSION, refusing to swap" >&2
+  rm -rf /var/lib/postgresql/data/.reseed_staging
+  exit 1
+fi
+# -R should already have created standby.signal; touch belt-and-suspenders.
+touch /var/lib/postgresql/data/.reseed_staging/standby.signal
+echo "primary_slot_name = 'vibecarbon_standby_slot'" >> /var/lib/postgresql/data/.reseed_staging/postgresql.auto.conf
+# hot_standby MUST be on: with it off, the reseeded standby streams fine but
+# REFUSES read-only connections ("FATAL: the database system is not accepting
+# connections / DETAIL: Hot standby mode is disabled"), failing every
+# pg_is_in_recovery() check. The previous image shipped a config include with
+# 'hot_standby = off' (live RCA 2026-07-06 e4 rig); postgresql.auto.conf is read
+# LAST, so pinning it here wins over any image config on both staging paths
+# (k8s + compose). Harmless after promotion (ignored outside recovery).
+echo "hot_standby = on" >> /var/lib/postgresql/data/.reseed_staging/postgresql.auto.conf
+# A planned failover fences the primary with ALTER SYSTEM SET
+# default_transaction_read_only, which lives in postgresql.auto.conf, and
+# pg_basebackup copies that file: a standby seeded from a fenced primary would
+# come up read-only once promoted. The staged copy never keeps it.
+sed -i '/^[[:space:]]*default_transaction_read_only[[:space:]]*=/d' /var/lib/postgresql/data/.reseed_staging/postgresql.auto.conf
+chown -R postgres:postgres /var/lib/postgresql/data/.reseed_staging
+
+# swap=false: leave the verified basebackup in /var/lib/postgresql/data/.reseed_staging. The caller scales
+# the pod to zero and performs the atomic PGDATA swap node-side (in-pod pg_ctl
+# stop would kill the container — the postmaster is PID 1)."
+`;
+
+exports[`buildStagedBasebackupScript in-place mode > callers without inPlaceAttempt are byte-identical to before 3`] = `
+"set -e -o pipefail
+
+# Probe primary's postgres from inside the standby container, WITH a retry
+# budget: the transport (relay/tunnel or a just-restarted primary pod) can lag
+# a single-shot probe by tens of seconds (RCA 2026-07-06: the k8s deploy
+# deletes the primary db pod moments before this seed runs). Only after the
+# whole budget lapses do we conclude "unreachable" and abort cleanly, so the
+# standby keeps its self-bootstrapped postgres rather than entering a
+# permanent CrashLoopBackOff via half-wiped PGDATA.
+#
+# NOTE: pg_isready does NOT authenticate — it only checks that the server
+# answers the startup packet, so it sails straight through pg_hba. A green
+# probe therefore proves the RELAY PATH is up, not that replication auth will
+# succeed (live RCA 2026-07-06: probe OK, then pg_basebackup FATAL
+# "no pg_hba.conf entry" — the post-NAT source CIDR was missing from pg_hba).
+probe_ok=0
+for probe_i in $(seq 1 12); do
+  if pg_isready -h h -p 5433 -t 5 -U replicator -d postgres > /dev/null 2>&1; then
+    probe_ok=1
+    break
+  fi
+  echo "[reseed] probe attempt \${probe_i}/12: primary postgres at h:5433 not reachable yet" >&2
+  if [ "\${probe_i}" -lt 12 ]; then
+    sleep 10
+  fi
+done
+if [ "\${probe_ok}" != "1" ]; then
+  echo "[reseed] primary postgres at h:5433 not reachable from standby after 12 attempts, skipping pg_basebackup. Standby keeps its independent postgres; failover serves the app but data does not sync from primary." >&2
+  exit 0
+fi
+
+# Stage into a tmp dir; atomic swap only after basebackup verifies good.
+rm -rf /var/lib/postgresql/data/.reseed_staging
+mkdir -p /var/lib/postgresql/data/.reseed_staging
+chown postgres:postgres /var/lib/postgresql/data/.reseed_staging
+
+PGPASSWORD='p' pg_basebackup \\
+  -h h -p 5433 \\
+  -U replicator -D /var/lib/postgresql/data/.reseed_staging \\
+  -Fp -Xs -R -c fast
+
+# A successful pg_basebackup always writes PG_VERSION (and standby.signal via -R).
+if [ ! -f /var/lib/postgresql/data/.reseed_staging/PG_VERSION ]; then
+  echo "[reseed] pg_basebackup produced no PG_VERSION, refusing to swap" >&2
+  rm -rf /var/lib/postgresql/data/.reseed_staging
+  exit 1
+fi
+# -R should already have created standby.signal; touch belt-and-suspenders.
+touch /var/lib/postgresql/data/.reseed_staging/standby.signal
+echo "primary_slot_name = 'vibecarbon_standby_slot'" >> /var/lib/postgresql/data/.reseed_staging/postgresql.auto.conf
+# hot_standby MUST be on: with it off, the reseeded standby streams fine but
+# REFUSES read-only connections ("FATAL: the database system is not accepting
+# connections / DETAIL: Hot standby mode is disabled"), failing every
+# pg_is_in_recovery() check. The previous image shipped a config include with
+# 'hot_standby = off' (live RCA 2026-07-06 e4 rig); postgresql.auto.conf is read
+# LAST, so pinning it here wins over any image config on both staging paths
+# (k8s + compose). Harmless after promotion (ignored outside recovery).
+echo "hot_standby = on" >> /var/lib/postgresql/data/.reseed_staging/postgresql.auto.conf
+# A planned failover fences the primary with ALTER SYSTEM SET
+# default_transaction_read_only, which lives in postgresql.auto.conf, and
+# pg_basebackup copies that file: a standby seeded from a fenced primary would
+# come up read-only once promoted. The staged copy never keeps it.
+sed -i '/^[[:space:]]*default_transaction_read_only[[:space:]]*=/d' /var/lib/postgresql/data/.reseed_staging/postgresql.auto.conf
+
+cat >> /var/lib/postgresql/data/.reseed_staging/postgresql.auto.conf <<'REPL_CONNINFO_EOF'
+primary_conninfo = 'host=h'
+REPL_CONNINFO_EOF
+chown -R postgres:postgres /var/lib/postgresql/data/.reseed_staging
+
+# swap=false: leave the verified basebackup in /var/lib/postgresql/data/.reseed_staging. The caller scales
+# the pod to zero and performs the atomic PGDATA swap node-side (in-pod pg_ctl
+# stop would kill the container — the postmaster is PID 1)."
+`;
