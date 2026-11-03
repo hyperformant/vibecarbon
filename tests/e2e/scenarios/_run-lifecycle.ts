@@ -49,10 +49,13 @@ import {
   checkOldPrimaryDisarmed,
   checkPrimaryDbCreatedOnce,
   checkPrimaryNotRestarted,
+  checkPromotedDbNotRecreated,
+  checkPromotionHistoryArchived,
   checkSecondFailoverRefused,
   checkSlotCapped,
   type IncarnationRead,
   providerApiAReader,
+  readDbGeneration,
   readDbIncarnation,
   readServingIp,
   readSwappedSinceLastDeploy,
@@ -79,7 +82,6 @@ import {
 import {
   checkN8nKeyShared,
   checkPromotedAddonsReady,
-  checkPromotedDbNotRecreated,
   checkPromotedPrimaryOnlyRunning,
   checkStandbyPrimaryOnlyAbsent,
 } from '../checks/standby-addons.js';
@@ -1432,9 +1434,11 @@ export async function runLifecycle(
   // Kept so verify-failover can prove it is not simply re-reading the marker
   // off its own origin node — see the false-green guard below.
   let failoverMarkerOriginIp: string | null = null;
-  // compose-ha: the promotion target's db container read just before the
-  // failover/failback, compared after it (promoted_db_not_recreated).
+  // The promotion target's db (compose: container; k8s: db-0) read just
+  // before the failover/failback, compared after it (promoted_db_not_recreated).
   let preFailoverStandbyDb: Awaited<ReturnType<typeof readDbIncarnation>> | null = null;
+  // k8s-ha: the promotion target's db StatefulSet generation at the same moment.
+  let preFailoverStandbyGeneration: string | null = null;
   // The primary before the first failover: compose-ha's failback must hand
   // the primary role back to it.
   let originalPrimaryIp: string | null = null;
@@ -2383,20 +2387,6 @@ export async function runLifecycle(
                   features: config.features,
                   primaryIp,
                 }),
-                checkPromotedDbNotRecreated({
-                  features: config.features,
-                  ip: primaryIp,
-                  before: preFailoverStandbyDb ?? {
-                    ok: false,
-                    error: 'the pre-failover db read was never taken',
-                  },
-                  after: await readDbIncarnation({
-                    mode: config.mode,
-                    projectName: config.projectName,
-                    ip: primaryIp,
-                    sshKeyPath,
-                  }),
-                }),
               );
             } else {
               replResults.push(
@@ -2409,6 +2399,37 @@ export async function runLifecycle(
                 }),
               );
             }
+            // The promotion moved the wal-g role with one write (no db
+            // recreate, no StatefulSet roll), and armed the promoted node
+            // before pg_promote, so its new timeline's history is archived.
+            replResults.push(
+              await checkPromotedDbNotRecreated({
+                mode: config.mode,
+                projectName: config.projectName,
+                ip: primaryIp,
+                sshKeyPath,
+                before: preFailoverStandbyDb ?? {
+                  ok: false,
+                  error: 'the pre-failover db read was never taken',
+                },
+                after: await readDbIncarnation({
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  ip: primaryIp,
+                  sshKeyPath,
+                }),
+                generationBefore: preFailoverStandbyGeneration,
+              }),
+              await checkPromotionHistoryArchived({
+                mode: config.mode,
+                projectName: config.projectName,
+                ip: primaryIp,
+                sshKeyPath,
+                projectDir: config.projectDir,
+                envPrefix: config.envPrefix,
+                provider: config.provider,
+              }),
+            );
             // The retired side (role standby now) must archive nothing and
             // refuse its backups until a deploy rebuilds it.
             replResults.push(
@@ -4360,15 +4381,26 @@ EOF`;
               );
             }
 
-            preFailoverStandbyDb =
-              config.mode === 'compose-ha'
-                ? await readDbIncarnation({
-                    mode: config.mode,
-                    projectName: config.projectName,
-                    ip: preFailover.standbyIp,
-                    sshKeyPath: sshKeyPath ?? getSshKeyPath(config.projectDir, config.envPrefix),
-                  })
-                : null;
+            // The promotion moves the wal-g role with one file write: the
+            // target's db must come out of it the same container (k8s: the
+            // same pod, at the same StatefulSet generation).
+            const promotionTarget = {
+              mode: config.mode,
+              projectName: config.projectName,
+              ip: preFailover.standbyIp,
+              sshKeyPath: sshKeyPath ?? getSshKeyPath(config.projectDir, config.envPrefix),
+            };
+            preFailoverStandbyDb = await readDbIncarnation(promotionTarget);
+            preFailoverStandbyGeneration = null;
+            if (config.mode === 'k8s-ha') {
+              const generation = await readDbGeneration(promotionTarget);
+              if ('error' in generation) {
+                console.warn(
+                  `${tag} [${name}] could not read the promotion target's db generation ` +
+                    `(${generation.error}); promoted_db_not_recreated will fail`,
+                );
+              } else preFailoverStandbyGeneration = generation.generation;
+            }
 
             // k8s-ha: the promotion restores the primary's certificate onto
             // the promoted cluster (src/failover.js) instead of ordering a

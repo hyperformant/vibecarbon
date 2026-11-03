@@ -512,6 +512,62 @@ const HA_HANDLELESS: Record<
         atVerify: await haIntegrity.readDbIncarnation({ ...sshless, ip: null, sshKeyPath: KEY }),
       }),
   ],
+  checkPromotedDbNotRecreated: [
+    async () =>
+      haIntegrity.checkPromotedDbNotRecreated({
+        ...sshless,
+        mode: 'k8s-ha',
+        ip: NODE,
+        sshKeyPath: null,
+        before: await haIntegrity.readDbIncarnation({ ...sshless, ip: NODE, sshKeyPath: null }),
+        after: await haIntegrity.readDbIncarnation({ ...sshless, ip: NODE, sshKeyPath: null }),
+        generationBefore: '1',
+      }),
+    async () =>
+      haIntegrity.checkPromotedDbNotRecreated({
+        ...sshless,
+        ip: null,
+        sshKeyPath: KEY,
+        before: await haIntegrity.readDbIncarnation({ ...sshless, ip: null, sshKeyPath: KEY }),
+        after: await haIntegrity.readDbIncarnation({ ...sshless, ip: null, sshKeyPath: KEY }),
+        generationBefore: null,
+      }),
+    // Reads that succeeded but a k8s handle lost before the generation read.
+    () =>
+      haIntegrity.checkPromotedDbNotRecreated({
+        ...sshless,
+        mode: 'k8s-ha',
+        ip: NODE,
+        sshKeyPath: null,
+        before: { ok: true, incarnation: { id: 'u1', startedAt: 't' } },
+        after: { ok: true, incarnation: { id: 'u1', startedAt: 't' } },
+        generationBefore: '1',
+      }),
+  ],
+  checkPromotionHistoryArchived: [
+    () =>
+      haIntegrity.checkPromotionHistoryArchived({
+        ...sshless,
+        ip: NODE,
+        sshKeyPath: null,
+        projectDir: '/nonexistent',
+        envPrefix: 'prod',
+        listKeys: async () => {
+          throw new Error('the check listed the archive without a handle');
+        },
+      }),
+    () =>
+      haIntegrity.checkPromotionHistoryArchived({
+        ...sshless,
+        ip: null,
+        sshKeyPath: KEY,
+        projectDir: '/nonexistent',
+        envPrefix: 'prod',
+        listKeys: async () => {
+          throw new Error('the check listed the archive without a handle');
+        },
+      }),
+  ],
   checkSlotCapped: [
     () => haIntegrity.checkSlotCapped({ ...sshless, primaryIp: NODE, sshKeyPath: null }),
     () => haIntegrity.checkSlotCapped({ ...sshless, primaryIp: null, sshKeyPath: KEY }),
@@ -572,7 +628,6 @@ describe('HA INTEGRITY: every check fails without its handle', () => {
 
 const ADDON_FEATURES = ['n8n', 'metabase'];
 const addonBase = { ...sshless, features: ADDON_FEATURES };
-const unread = { ok: false as const, error: 'unread' };
 
 const ADDON_HANDLELESS: Record<
   string,
@@ -604,15 +659,6 @@ const ADDON_HANDLELESS: Record<
         ...addonBase,
         primaryIp: null,
         sshKeyPath: KEY,
-      }),
-  ],
-  checkPromotedDbNotRecreated: [
-    () =>
-      standbyAddons.checkPromotedDbNotRecreated({
-        features: ADDON_FEATURES,
-        ip: NODE,
-        before: unread,
-        after: unread,
       }),
   ],
   checkN8nKeyShared: [
