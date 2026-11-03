@@ -26,16 +26,25 @@ import {
   checkPrimaryNotRestarted,
   checkPromotedDbNotRecreated,
   checkPromotionHistoryArchived,
+  checkReseedInPlace,
   checkSecondFailoverRefused,
   checkSlotCapped,
+  checkStandbyDbCreatedOnce,
+  evaluateReseedInPlace,
+  evaluateStandbyCreatedOnce,
+  FAILOVER_RESEED_SKIP_LINES,
+  failoverReseedSkipped,
   historyArchived,
+  parseDbAttachState,
   parseDbIncarnation,
   parseDisarmProbe,
   parseReadyEndpointCount,
   type RemoteRun,
+  readDbAttachState,
   readDbGeneration,
   readDbIncarnation,
   readServingIp,
+  reseededFromProbe,
   SLOT_WAL_CAP,
 } from '../../e2e/checks/ha-integrity.js';
 import { expandSkippedSteps } from '../../e2e/scenarios/step-dependencies.js';
@@ -414,6 +423,275 @@ describe('checkPrimaryDbCreatedOnce', () => {
     });
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toMatch(/db is not running/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// standby_db_created_once, reseed_in_place: zero attach transitions, read from
+// objects and files (pod uid, VolumeAttachment, .vc-reseeded-from), never Events
+// ---------------------------------------------------------------------------
+
+describe('zero-transition reseed checks', () => {
+  const st = (
+    o: Partial<{
+      uid: string;
+      podAt: string;
+      vaName: string;
+      vaAt: string;
+      reseededAt: number | null;
+      reseededFrom: string | null;
+      generation: string;
+    }>,
+  ) => ({
+    uid: 'u1',
+    podAt: '2026-11-02T10:00:00Z',
+    vaName: 'csi-abc',
+    vaAt: '2026-11-02T10:00:20Z',
+    reseededAt: Date.parse('2026-11-02T10:05:00Z') / 1000,
+    reseededFrom: 'att-1',
+    generation: '1',
+    ...o,
+  });
+  it('standby_db_created_once passes on an in-place reseed', () => {
+    expect(evaluateStandbyCreatedOnce(st({})).status).toBe('pass');
+  });
+  it.each([
+    ['no swap ran', { reseededFrom: null, reseededAt: null }],
+    ['the pod was created after the swap (recreated)', { podAt: '2026-11-02T10:06:00Z' }],
+    ['a later re-attach', { vaAt: '2026-11-02T10:04:00Z' }],
+    ['the template rolled', { generation: '2' }],
+  ])('standby_db_created_once fails when %s', (_n, o) => {
+    expect(evaluateStandbyCreatedOnce(st(o)).status).toBe('fail');
+  });
+  it('reseed_in_place: same uid and attachment across the step, new swap id', () => {
+    expect(evaluateReseedInPlace(st({}), st({ reseededFrom: 'att-2' })).status).toBe('pass');
+    expect(evaluateReseedInPlace(st({}), st({ uid: 'u2', reseededFrom: 'att-2' })).status).toBe(
+      'fail',
+    );
+    expect(
+      evaluateReseedInPlace(st({}), st({ vaName: 'csi-def', reseededFrom: 'att-2' })).status,
+    ).toBe('fail');
+    expect(
+      evaluateReseedInPlace(st({}), st({ vaAt: '2026-11-02T11:00:00Z', reseededFrom: 'att-2' }))
+        .status,
+    ).toBe('fail');
+  });
+
+  it('standby_db_created_once and reseed_in_place carry their check names', () => {
+    expect(evaluateStandbyCreatedOnce(st({})).checkName).toBe('standby_db_created_once');
+    expect(evaluateReseedInPlace(st({}), st({ reseededFrom: 'att-2' })).checkName).toBe(
+      'reseed_in_place',
+    );
+  });
+
+  it('reseed_in_place fails when no new swap ran across the step', () => {
+    const same = evaluateReseedInPlace(st({}), st({}));
+    expect(same.status).toBe('fail');
+    expect(same.errorMessage).toMatch(/att-1/);
+    expect(evaluateReseedInPlace(st({}), st({ reseededFrom: null })).status).toBe('fail');
+    // A first swap on a pod that had none before is a new swap.
+    expect(evaluateReseedInPlace(st({ reseededFrom: null, reseededAt: null }), st({})).status).toBe(
+      'pass',
+    );
+  });
+
+  it('reseed_in_place compares the claim, the volume and the restart count when read', () => {
+    const full = (o: Record<string, unknown>) => ({
+      ...st({}),
+      restartCount: 1,
+      containerId: 'containerd://c1',
+      pvcUid: 'pvc-u1',
+      pvName: 'pvc-123',
+      ...o,
+    });
+    const swapped = (o: Record<string, unknown>) =>
+      full({ reseededFrom: 'att-2', restartCount: 2, containerId: 'containerd://c2', ...o });
+    expect(evaluateReseedInPlace(full({}), swapped({})).status).toBe('pass');
+    expect(evaluateReseedInPlace(full({}), swapped({ pvcUid: 'pvc-u2' })).status).toBe('fail');
+    expect(evaluateReseedInPlace(full({}), swapped({ pvName: 'pvc-456' })).status).toBe('fail');
+    // The swap restarts the db container inside the pod: its count must rise.
+    expect(evaluateReseedInPlace(full({}), swapped({ restartCount: 1 })).status).toBe('fail');
+  });
+
+  // The one remote read, sections in order.
+  const pod = (o: { uid?: string; restartCount?: number } = {}) =>
+    JSON.stringify({
+      metadata: { uid: o.uid ?? 'u1', creationTimestamp: '2026-11-02T10:00:00Z' },
+      status: {
+        containerStatuses: [
+          { name: 'walg-sidecar', restartCount: 9, containerID: 'containerd://x' },
+          { name: 'db', restartCount: o.restartCount ?? 1, containerID: 'containerd://c1' },
+        ],
+      },
+    });
+  const pvc = JSON.stringify({ metadata: { uid: 'pvc-u1' }, spec: { volumeName: 'pvc-123' } });
+  const va = (name: string, pv: string, at = '2026-11-02T10:00:20Z') => ({
+    metadata: { name, creationTimestamp: at },
+    spec: { source: { persistentVolumeName: pv } },
+  });
+  const vas = (...items: unknown[]) => JSON.stringify({ items });
+  const out = (o: { pod?: string; gen?: string; pvc?: string; vas?: string; reseeded?: string }) =>
+    [
+      '@@pod',
+      o.pod ?? pod(),
+      '@@sts',
+      o.gen ?? '1',
+      '@@pvc',
+      o.pvc ?? pvc,
+      '@@va',
+      o.vas ?? vas(va('csi-other', 'pvc-999'), va('csi-abc', 'pvc-123')),
+      '@@reseeded',
+      o.reseeded ?? `mtime=${Date.parse('2026-11-02T10:05:00Z') / 1000}\nfrom=att-1`,
+    ].join('\n');
+
+  it('parseDbAttachState reads the pod, claim, attachment and swap record', () => {
+    const r = parseDbAttachState(out({}));
+    expect(r).toEqual({
+      ok: true,
+      state: {
+        uid: 'u1',
+        podAt: '2026-11-02T10:00:00Z',
+        restartCount: 1,
+        containerId: 'containerd://c1',
+        generation: '1',
+        pvcUid: 'pvc-u1',
+        pvName: 'pvc-123',
+        vaName: 'csi-abc',
+        vaAt: '2026-11-02T10:00:20Z',
+        reseededAt: Date.parse('2026-11-02T10:05:00Z') / 1000,
+        reseededFrom: 'att-1',
+      },
+    });
+    expect(evaluateStandbyCreatedOnce((r as { state: never }).state).status).toBe('pass');
+  });
+
+  it('parseDbAttachState reads an explicit absent swap record as null', () => {
+    const r = parseDbAttachState(out({ reseeded: 'absent' }));
+    expect(r.ok).toBe(true);
+    expect((r as { state: { reseededFrom: unknown } }).state.reseededFrom).toBeNull();
+  });
+
+  it.each([
+    ['an unreadable pod', { pod: '' }, /pod/],
+    [
+      'no db container status',
+      { pod: JSON.stringify({ metadata: { uid: 'u1', creationTimestamp: 't' } }) },
+      /db container/,
+    ],
+    ['no generation', { gen: '' }, /generation/],
+    [
+      'an unbound claim',
+      { pvc: JSON.stringify({ metadata: { uid: 'pvc-u1' }, spec: {} }) },
+      /claim/,
+    ],
+    [
+      'no attachment of the volume',
+      { vas: vas(va('csi-other', 'pvc-999')) },
+      /no VolumeAttachment/,
+    ],
+    [
+      'two attachments of the volume',
+      { vas: vas(va('csi-abc', 'pvc-123'), va('csi-def', 'pvc-123')) },
+      /2 VolumeAttachments/,
+    ],
+    // A failed exec prints nothing: never read as "no swap record".
+    ['a swap record read that printed nothing', { reseeded: '' }, /reseeded-from/],
+    ['a swap record with no mtime', { reseeded: 'mtime=\nfrom=att-1' }, /reseeded-from/],
+  ])('parseDbAttachState refuses %s', (_n, o, msg) => {
+    const r = parseDbAttachState(out(o));
+    expect(r.ok).toBe(false);
+    expect((r as { error: string }).error).toMatch(msg);
+  });
+
+  it('readDbAttachState reads db-0, its claim, the VolumeAttachments and the swap record in one remote', async () => {
+    const run = runner(out({}));
+    const r = await readDbAttachState({
+      mode: 'k8s-ha',
+      projectName: 'demo',
+      ip: IP,
+      sshKeyPath: KEY,
+      run,
+    });
+    expect(r.ok).toBe(true);
+    expect(run.calls).toHaveLength(1);
+    const cmd = run.calls[0];
+    expect(cmd).toContain('get pod db-0 -o json');
+    expect(cmd).toContain('get pvc data-db-0 -o json');
+    expect(cmd).toContain('kubectl get volumeattachments -o json');
+    expect(cmd).toContain('exec db-0 -c db --');
+    expect(cmd).toContain('/var/lib/postgresql/data/.vc-reseeded-from');
+    expect(cmd).not.toMatch(/\bevents?\b/);
+  });
+
+  it('the in-pod swap record read prints absent, or its mtime and content', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-a7-'));
+    try {
+      const script = reseededFromProbe(dir);
+      const absent = spawnSync('sh', ['-c', script], { encoding: 'utf8' });
+      expect(absent.stdout.trim()).toBe('absent');
+      writeFileSync(join(dir, '.vc-reseeded-from'), 'att-7\n');
+      const present = spawnSync('sh', ['-c', script], { encoding: 'utf8' });
+      expect(present.stdout).toMatch(/^mtime=\d+\nfrom=att-7\n$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('readDbAttachState never runs without a handle, and reports a failed remote', async () => {
+    const run = runner(out({}));
+    const none = await readDbAttachState({
+      mode: 'k8s-ha',
+      projectName: 'demo',
+      ip: IP,
+      sshKeyPath: null,
+      run,
+    });
+    expect(none.ok).toBe(false);
+    expect(run.calls).toHaveLength(0);
+    const failed = await readDbAttachState({
+      mode: 'k8s-ha',
+      projectName: 'demo',
+      ip: IP,
+      sshKeyPath: KEY,
+      run: runner('', false),
+    });
+    expect(failed).toEqual({ ok: false, error: '[psql] boom' });
+  });
+
+  it('the checks fail on an unread state, never pass or skip', () => {
+    const unread = { ok: false as const, error: 'db is not running' };
+    const read = { ok: true as const, state: st({}) };
+    const created = checkStandbyDbCreatedOnce({ ip: IP, state: unread });
+    expect(created.status).toBe('fail');
+    expect(created.errorMessage).toMatch(/db is not running/);
+    expect(checkStandbyDbCreatedOnce({ ip: IP, state: null }).status).toBe('fail');
+    expect(checkStandbyDbCreatedOnce({ ip: IP, state: read }).status).toBe('pass');
+    const after = { ok: true as const, state: st({ reseededFrom: 'att-2' }) };
+    expect(checkReseedInPlace({ ip: IP, step: 'restore', before: read, after }).status).toBe(
+      'pass',
+    );
+    for (const [before, aft] of [
+      [null, after],
+      [read, null],
+      [unread, after],
+      [read, unread],
+    ] as const) {
+      const r = checkReseedInPlace({ ip: IP, step: 'restore', before, after: aft });
+      expect(r.status).toBe('fail');
+      expect(r.checkName).toBe('reseed_in_place');
+    }
+  });
+
+  it('the failover reseed skip lines are the ones src/failover.js prints', () => {
+    const src = readFileSync(join(process.cwd(), 'src/failover.js'), 'utf8');
+    expect(FAILOVER_RESEED_SKIP_LINES.length).toBeGreaterThanOrEqual(3);
+    for (const line of FAILOVER_RESEED_SKIP_LINES) expect(src).toContain(line);
+    expect(
+      failoverReseedSkipped('│  Standby already streaming, skipping re-seed (parity...)'),
+    ).toBe(true);
+    expect(failoverReseedSkipped('◇  Standby re-seeded with primary state')).toBe(false);
+    // A run whose output was lost decides nothing: the check runs and fails closed.
+    expect(failoverReseedSkipped('')).toBe(false);
   });
 });
 
@@ -994,6 +1272,32 @@ describe('_run-lifecycle.ts wires the HA integrity steps', async () => {
     // Read right before the promotion on both modes, never only on compose-ha.
     expect(src).not.toMatch(/preFailoverStandbyDb\s*=\s*config\.mode === 'compose-ha'/);
     expect(src).toContain('preFailoverStandbyGeneration =');
+  });
+
+  it('the standby db is read right before and after each reseeding step, never from Events', () => {
+    // Cold deploy: read once the deploy returns, judged at verify-deploy.
+    const deployRead = at('standbyAttachAtDeploy = await readDbAttachState(');
+    expect(src.slice(deployRead - 800, deployRead)).toContain(
+      "if (cold && config.mode === 'k8s-ha') {",
+    );
+    expect(src).toContain('checkStandbyDbCreatedOnce({');
+    // Restore: after the re-deploy, right before and right after `vibecarbon restore`.
+    const restore = at('const restoreResult = await runRestore(');
+    const preRestore = at('preRestoreStandbyAttach = await readDbAttachState(');
+    const postRestore = at('postRestoreStandbyAttach = await readDbAttachState(');
+    expect(preRestore).toBeLessThan(restore);
+    expect(restore - preRestore).toBeLessThan(800);
+    expect(postRestore).toBeGreaterThan(restore);
+    expect(postRestore - restore).toBeLessThan(1500);
+    // Failover: the promotion target, right before and right after the promotion.
+    const failover = at('const result = await runFailover(');
+    const preFailover = at('preFailoverStandbyAttach = await readDbAttachState(');
+    const postFailover = at('postFailoverStandbyAttach = await readDbAttachState(');
+    expect(preFailover).toBeLessThan(failover);
+    expect(postFailover).toBeGreaterThan(failover);
+    expect(postFailover - failover).toBeLessThan(1500);
+    expect(src.match(/checkReseedInPlace\(\{/g) ?? []).toHaveLength(2);
+    expect(src).toContain('failoverReseedSkipped(');
   });
 
   it('--skip-steps drops dependents through expandSkippedSteps', () => {

@@ -15,6 +15,13 @@
  *   - primary_not_restarted   the serving primary's db container (compose) or
  *                             pod (k8s) has the same identity and start time
  *                             before and after a warm or reconverge deploy.
+ *   - standby_db_created_once a cold k8s-ha deploy seeded its standby in place:
+ *                             db-0 created once, its volume attached once,
+ *                             `.vc-reseeded-from` written inside that pod.
+ *   - reseed_in_place         a k8s-ha failover or restore reseed swapped a new
+ *                             tree in with the same db-0, claim, volume and
+ *                             VolumeAttachment. Both read objects and files,
+ *                             never Events (they age out).
  *   - slot_capped             SHOW max_slot_wal_keep_size on the primary is 4GB.
  *   - app_endpoints_ready     the k8s app Service has a Ready endpoint after
  *                             the first deploy's db-0 recreate (no rollout
@@ -33,7 +40,12 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from '../../../src/lib/deploy/db-workload.js';
+import {
+  DB_CONTAINER,
+  DB_POD,
+  DB_PVC,
+  DB_STATEFULSET,
+} from '../../../src/lib/deploy/db-workload.js';
 import { swappedSinceLastDeploy } from '../../../src/lib/deploy/failover-guard.js';
 import {
   RETIRED_HOST_MARKER,
@@ -386,6 +398,376 @@ export async function checkPrimaryDbCreatedOnce(
     );
   }
   return { checkName, status: 'pass', details };
+}
+
+// ---------------------------------------------------------------------------
+// standby_db_created_once, reseed_in_place
+// ---------------------------------------------------------------------------
+
+/**
+ * The k8s standby db's attach state, read from objects and files only. Events
+ * age out (one hour), so a "no transition" verdict built on them goes green
+ * by itself. These do not:
+ *
+ *   - db-0's uid and creationTimestamp: a recreate changes both.
+ *   - the db container's restartCount and containerID: an in-place restart
+ *     raises the one and changes the other, inside the same pod.
+ *   - the claim's uid and its volume: a re-provision changes them.
+ *   - the volume's VolumeAttachment, name and creationTimestamp: a detach
+ *     deletes it and a re-attach creates a new one.
+ *   - `$PGDATA/.vc-reseeded-from`, its mtime and content: db-guard.sh writes
+ *     the attempt id there when it swaps a staged reseed in.
+ *
+ * The extra identities are optional in the type so a comparison can be
+ * stated on the fields it needs; parseDbAttachState always fills every one.
+ */
+export interface DbAttachState {
+  uid: string;
+  podAt: string;
+  vaName: string;
+  vaAt: string;
+  /** `.vc-reseeded-from`'s mtime, epoch seconds; null when there is no swap record. */
+  reseededAt: number | null;
+  /** `.vc-reseeded-from`'s content (the swapped attempt id); null when absent. */
+  reseededFrom: string | null;
+  /** The db StatefulSet's metadata.generation. */
+  generation: string;
+  restartCount?: number;
+  containerId?: string;
+  pvcUid?: string;
+  pvName?: string;
+}
+
+export type AttachStateRead = { ok: true; state: DbAttachState } | { ok: false; error: string };
+
+/** The db pod's PGDATA (replication.js PGDATA_DIR), where db-guard.sh leaves its swap record. */
+const PGDATA = '/var/lib/postgresql/data';
+
+/**
+ * The in-pod read of the swap record: `absent`, or its mtime and content. A
+ * failed exec prints neither, so an unreadable record is never taken for
+ * "no swap ran".
+ */
+export function reseededFromProbe(pgdata = PGDATA): string {
+  const f = `${pgdata}/.vc-reseeded-from`;
+  return (
+    `f=${shEscape(f)}; if [ -f "$f" ]; then ` +
+    'echo "mtime=$(stat -c %Y "$f")"; echo "from=$(cat "$f")"; else echo absent; fi'
+  );
+}
+
+/** One remote: db-0, the StatefulSet generation, the claim, every VolumeAttachment, the swap record. */
+export function buildDbAttachStateCommand(): string {
+  return [
+    "echo '@@pod'",
+    `${KUBECTL} get pod ${DB_POD} -o json`,
+    "echo '@@sts'",
+    `${KUBECTL} get statefulset ${DB_STATEFULSET} -o jsonpath='{.metadata.generation}'`,
+    'echo',
+    "echo '@@pvc'",
+    `${KUBECTL} get pvc ${DB_PVC} -o json`,
+    "echo '@@va'",
+    // Cluster-scoped: no namespace.
+    'KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl get volumeattachments -o json',
+    "echo '@@reseeded'",
+    `${KUBECTL} exec ${DB_POD} -c ${DB_CONTAINER} -- sh -c ${shEscape(reseededFromProbe())}`,
+  ].join('; ');
+}
+
+function sections(output: string): Map<string, string> {
+  const out = new Map<string, string>();
+  let name: string | null = null;
+  let body: string[] = [];
+  for (const line of String(output ?? '').split('\n')) {
+    const m = line.match(/^@@(\w+)\s*$/);
+    if (m) {
+      if (name) out.set(name, body.join('\n').trim());
+      name = m[1];
+      body = [];
+    } else if (name) body.push(line);
+  }
+  if (name) out.set(name, body.join('\n').trim());
+  return out;
+}
+
+function parseJson<T>(text: string | undefined): T | null {
+  try {
+    return text ? (JSON.parse(text) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Parse buildDbAttachStateCommand's output. Every field is required: a gap is an error. */
+export function parseDbAttachState(output: string | null | undefined): AttachStateRead {
+  const s = sections(String(output ?? ''));
+  const err = (error: string): AttachStateRead => ({ ok: false, error });
+
+  const pod = parseJson<{
+    metadata?: { uid?: string; creationTimestamp?: string };
+    status?: {
+      containerStatuses?: Array<{ name?: string; restartCount?: number; containerID?: string }>;
+    };
+  }>(s.get('pod'));
+  const uid = pod?.metadata?.uid;
+  const podAt = pod?.metadata?.creationTimestamp;
+  if (!uid || !podAt) return err(`could not read pod ${DB_POD} (uid, creationTimestamp)`);
+  const db = (pod.status?.containerStatuses ?? []).find((c) => c.name === DB_CONTAINER);
+  if (!db || typeof db.restartCount !== 'number' || !db.containerID) {
+    return err(`pod ${DB_POD} has no ${DB_CONTAINER} container status (restartCount, containerID)`);
+  }
+
+  const generation = s.get('sts') ?? '';
+  if (!/^\d+$/.test(generation)) {
+    return err(
+      `could not read the ${DB_STATEFULSET} StatefulSet generation (${generation || 'empty'})`,
+    );
+  }
+
+  const pvc = parseJson<{ metadata?: { uid?: string }; spec?: { volumeName?: string } }>(
+    s.get('pvc'),
+  );
+  const pvcUid = pvc?.metadata?.uid;
+  const pvName = pvc?.spec?.volumeName;
+  if (!pvcUid || !pvName) return err(`the claim ${DB_PVC} is unreadable or not bound to a volume`);
+
+  const list = parseJson<{
+    items?: Array<{
+      metadata?: { name?: string; creationTimestamp?: string };
+      spec?: { source?: { persistentVolumeName?: string } };
+    }>;
+  }>(s.get('va'));
+  if (!list?.items) return err('could not list the VolumeAttachments');
+  const attachments = list.items.filter((v) => v.spec?.source?.persistentVolumeName === pvName);
+  if (attachments.length === 0) return err(`no VolumeAttachment for ${pvName} (${DB_PVC})`);
+  if (attachments.length > 1) {
+    const names = attachments.map((v) => v.metadata?.name).join(', ');
+    return err(
+      `${attachments.length} VolumeAttachments for ${pvName} (${names}): it is mid re-attach`,
+    );
+  }
+  const vaName = attachments[0].metadata?.name;
+  const vaAt = attachments[0].metadata?.creationTimestamp;
+  if (!vaName || !vaAt)
+    return err(`the VolumeAttachment for ${pvName} has no name or creationTimestamp`);
+
+  const rec = s.get('reseeded') ?? '';
+  let reseededAt: number | null = null;
+  let reseededFrom: string | null = null;
+  if (rec !== 'absent') {
+    const mtime = rec.match(/^mtime=(\d+)$/m)?.[1];
+    const from = rec.match(/^from=(.+)$/m)?.[1]?.trim();
+    if (!mtime || !from) {
+      return err(`could not read ${PGDATA}/.vc-reseeded-from in ${DB_POD} (${rec || 'no output'})`);
+    }
+    reseededAt = Number(mtime);
+    reseededFrom = from;
+  }
+
+  return {
+    ok: true,
+    state: {
+      uid,
+      podAt,
+      restartCount: db.restartCount,
+      containerId: db.containerID,
+      generation,
+      pvcUid,
+      pvName,
+      vaName,
+      vaAt,
+      reseededAt,
+      reseededFrom,
+    },
+  };
+}
+
+/** Read a k8s cluster's db attach state (the standby, in practice). Never throws. */
+export async function readDbAttachState(
+  opts: SshArgs & { ip: string | null },
+): Promise<AttachStateRead> {
+  const { mode, projectName, ip, sshKeyPath } = opts;
+  const missing = missingHandle(ip, sshKeyPath, 'standby');
+  if (missing) return { ok: false, error: missing };
+  const run = opts.run ?? defaultRun(mode, projectName, sshKeyPath, 'standby');
+  const res = await run(ip, buildDbAttachStateCommand());
+  if (!res.ok) return { ok: false, error: res.error ?? 'remote read failed' };
+  return parseDbAttachState(res.output);
+}
+
+/** How long after db-0's creation its volume's first attach may land. */
+export const FIRST_ATTACH_WINDOW_S = 120;
+
+/**
+ * standby_db_created_once, the verdict: the cold deploy created the standby
+ * db-0 once, attached its volume once, and seeded it in place.
+ *
+ *   - generation 1: the pod template never changed, so nothing rolled db-0.
+ *   - `.vc-reseeded-from` exists: the in-place swap ran.
+ *   - db-0 was created before that file's mtime: the swap ran in a pod that
+ *     already existed, so it was not recreated for it.
+ *   - the VolumeAttachment is no later than db-0's creation plus 120 s: one
+ *     attach, at pod creation.
+ */
+export function evaluateStandbyCreatedOnce(state: DbAttachState): VerificationResult {
+  const checkName = 'standby_db_created_once';
+  const details = { state };
+  if (state.generation !== '1') {
+    return fail(
+      checkName,
+      `the standby db StatefulSet is at generation ${state.generation}: its pod template ` +
+        'changed after creation, so db-0 was rolled and its volume re-attached',
+      details,
+    );
+  }
+  if (!state.reseededFrom || state.reseededAt === null) {
+    return fail(
+      checkName,
+      `the standby db-0 has no ${PGDATA}/.vc-reseeded-from: the cold deploy's in-place seed never swapped`,
+      details,
+    );
+  }
+  const podS = Date.parse(state.podAt) / 1000;
+  const vaS = Date.parse(state.vaAt) / 1000;
+  if (!Number.isFinite(podS) || !Number.isFinite(vaS)) {
+    return fail(
+      checkName,
+      `unparseable timestamps (pod ${state.podAt}, attachment ${state.vaAt})`,
+      details,
+    );
+  }
+  if (!(podS < state.reseededAt)) {
+    return fail(
+      checkName,
+      `the standby db-0 was created at ${state.podAt}, after its swap ` +
+        `(${new Date(state.reseededAt * 1000).toISOString()}): the pod was recreated, not restarted in place`,
+      details,
+    );
+  }
+  if (vaS > podS + FIRST_ATTACH_WINDOW_S) {
+    return fail(
+      checkName,
+      `the standby volume's VolumeAttachment ${state.vaName} was created at ${state.vaAt}, more than ` +
+        `${FIRST_ATTACH_WINDOW_S}s after db-0 (${state.podAt}): it detached and re-attached`,
+      details,
+    );
+  }
+  return { checkName, status: 'pass', details };
+}
+
+/**
+ * reseed_in_place, the verdict: a reseed across one step (failover, restore)
+ * swapped a new tree in while db-0, its claim, its volume and its
+ * VolumeAttachment stayed the same objects, and the db container restarted
+ * inside the pod.
+ */
+export function evaluateReseedInPlace(
+  before: DbAttachState,
+  after: DbAttachState,
+): VerificationResult {
+  const checkName = 'reseed_in_place';
+  const details = { before, after };
+  const same = (k: keyof DbAttachState, what: string): VerificationResult | null => {
+    if (before[k] === undefined || after[k] === undefined || before[k] === after[k]) return null;
+    return fail(
+      checkName,
+      `${what} changed across the reseed (${before[k]} -> ${after[k]})`,
+      details,
+    );
+  };
+  const changed =
+    same('uid', 'the standby db-0 was recreated: its uid') ??
+    same('pvcUid', `the claim ${DB_PVC} was replaced: its uid`) ??
+    same('pvName', `the claim ${DB_PVC} moved volumes: its volume`) ??
+    same('vaName', 'the standby volume detached and re-attached: its VolumeAttachment') ??
+    same('vaAt', 'the standby volume re-attached: its VolumeAttachment creationTimestamp');
+  if (changed) return changed;
+  if (!after.reseededFrom || after.reseededFrom === before.reseededFrom) {
+    return fail(
+      checkName,
+      `no new swap ran: ${PGDATA}/.vc-reseeded-from is ${after.reseededFrom ?? 'absent'} ` +
+        `(before the step: ${before.reseededFrom ?? 'absent'})`,
+      details,
+    );
+  }
+  if (
+    typeof before.restartCount === 'number' &&
+    typeof after.restartCount === 'number' &&
+    after.restartCount <= before.restartCount
+  ) {
+    return fail(
+      checkName,
+      `the db container's restartCount did not rise (${before.restartCount} -> ${after.restartCount}), ` +
+        'yet a new swap is recorded: the swap did not come from an in-place restart',
+      details,
+    );
+  }
+  return { checkName, status: 'pass', details };
+}
+
+const readError = (r: AttachStateRead) => (r as { error: string }).error;
+
+/** standby_db_created_once over a read taken right after the cold deploy. */
+export function checkStandbyDbCreatedOnce(opts: {
+  ip: string | null;
+  state: AttachStateRead | null;
+}): VerificationResult {
+  const checkName = 'standby_db_created_once';
+  const { ip, state } = opts;
+  if (!state) return fail(checkName, 'the standby db was never read after the cold deploy');
+  if (!state.ok) {
+    return fail(
+      checkName,
+      `could not read the standby db on ${ip ?? '(no IP)'}: ${readError(state)}`,
+    );
+  }
+  return evaluateStandbyCreatedOnce((state as { state: DbAttachState }).state);
+}
+
+/** reseed_in_place over the reads taken right before and right after `step`. */
+export function checkReseedInPlace(opts: {
+  ip: string | null;
+  step: 'failover' | 'failback' | 'restore';
+  before: AttachStateRead | null;
+  after: AttachStateRead | null;
+}): VerificationResult {
+  const checkName = 'reseed_in_place';
+  const { ip, step, before, after } = opts;
+  const where = ip ?? '(no IP)';
+  if (!before) return fail(checkName, `the standby db was never read before the ${step}`);
+  if (!after) return fail(checkName, `the standby db was never read after the ${step}`);
+  if (!before.ok) {
+    return fail(
+      checkName,
+      `could not read the standby db on ${where} before the ${step}: ${readError(before)}`,
+    );
+  }
+  if (!after.ok) {
+    return fail(
+      checkName,
+      `could not read the standby db on ${where} after the ${step}: ${readError(after)}`,
+    );
+  }
+  return evaluateReseedInPlace(
+    (before as { state: DbAttachState }).state,
+    (after as { state: DbAttachState }).state,
+  );
+}
+
+/**
+ * The lines src/failover.js prints when it promotes WITHOUT a reseed (a
+ * unit test pins each one to that file). Any other output means a reseed
+ * ran, so reseed_in_place runs and fails closed on a missing swap.
+ */
+export const FAILOVER_RESEED_SKIP_LINES = Object.freeze([
+  'Standby already streaming, skipping re-seed',
+  'Primary unreachable, skipping re-seed',
+  'Primary unreachable mid-probe, promoting standby with current state',
+]);
+
+/** Whether a failover's output says it promoted without a reseed. */
+export function failoverReseedSkipped(output: string): boolean {
+  return FAILOVER_RESEED_SKIP_LINES.some((line) => String(output ?? '').includes(line));
 }
 
 // ---------------------------------------------------------------------------

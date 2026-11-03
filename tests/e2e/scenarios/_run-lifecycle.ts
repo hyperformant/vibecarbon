@@ -44,6 +44,7 @@ import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
 import { runFrontendSmokeChecks } from '../checks/frontend-smoke.js';
 import {
+  type AttachStateRead,
   checkAppEndpointsReady,
   checkDnsFlipVerified,
   checkOldPrimaryDisarmed,
@@ -51,10 +52,14 @@ import {
   checkPrimaryNotRestarted,
   checkPromotedDbNotRecreated,
   checkPromotionHistoryArchived,
+  checkReseedInPlace,
   checkSecondFailoverRefused,
   checkSlotCapped,
+  checkStandbyDbCreatedOnce,
+  failoverReseedSkipped,
   type IncarnationRead,
   providerApiAReader,
+  readDbAttachState,
   readDbGeneration,
   readDbIncarnation,
   readServingIp,
@@ -1408,6 +1413,20 @@ export async function runLifecycle(
   // k8s-ha: the primary db-0 as the cold deploy left it, compared at
   // verify-deploy (primary_db_created_once). Null until a cold deploy passes.
   let primaryDbAtDeploy: IncarnationRead | null = null;
+  // k8s-ha: the standby db's attach state (db-0, its claim, its
+  // VolumeAttachment, its .vc-reseeded-from) as the cold deploy left it,
+  // judged at verify-deploy (standby_db_created_once). Objects and files, never
+  // Events: Events age out, so "no transition" read from them passes by itself.
+  let standbyAttachAtDeploy: AttachStateRead | null = null;
+  // k8s-ha: the same state read right before and right after `vibecarbon
+  // restore` (verify-restore) and the failover (verify-failover), whose
+  // standby reseeds run in place (reseed_in_place).
+  let preRestoreStandbyAttach: AttachStateRead | null = null;
+  let postRestoreStandbyAttach: AttachStateRead | null = null;
+  let preFailoverStandbyAttach: AttachStateRead | null = null;
+  let postFailoverStandbyAttach: AttachStateRead | null = null;
+  // Whether the failover printed one of its no-reseed lines (null until it ran).
+  let failoverReseedWasSkipped: boolean | null = null;
 
   // The SSH-unreachability memo is process-wide; a parallel/kept-rig run must
   // not inherit a previous scenario's dead hosts (IPs get recycled).
@@ -2430,6 +2449,25 @@ export async function runLifecycle(
                 provider: config.provider,
               }),
             );
+            // k8s-ha: a reseed before the promotion ran in place on the
+            // promoted db. A failover that printed its no-reseed line skips
+            // this; any other output runs it, and a missing swap fails.
+            if (config.mode === 'k8s-ha') {
+              if (failoverReseedWasSkipped) {
+                console.log(
+                  `${tag} [${stepName}] reseed_in_place not run: the failover promoted without a reseed`,
+                );
+              } else {
+                replResults.push(
+                  checkReseedInPlace({
+                    ip: primaryIp,
+                    step: 'failover',
+                    before: preFailoverStandbyAttach,
+                    after: postFailoverStandbyAttach,
+                  }),
+                );
+              }
+            }
             // The retired side (role standby now) must archive nothing and
             // refuse its backups until a deploy rebuilds it.
             replResults.push(
@@ -2485,8 +2523,21 @@ export async function runLifecycle(
                       sshKeyPath,
                     }),
                   }),
+                  // A cold deploy read the standby too: a null read fails.
+                  checkStandbyDbCreatedOnce({ ip: standbyIp, state: standbyAttachAtDeploy }),
                 );
               }
+            }
+            // k8s-ha: `vibecarbon restore` reseeds the standby, in place.
+            if (config.mode === 'k8s-ha' && stepName === 'verify-restore') {
+              replResults.push(
+                checkReseedInPlace({
+                  ip: standbyIp,
+                  step: 'restore',
+                  before: preRestoreStandbyAttach,
+                  after: postRestoreStandbyAttach,
+                }),
+              );
             }
             if (stepName === 'verify-deploy') {
               replResults.push(
@@ -3413,6 +3464,14 @@ EOF`;
                 ip: resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp,
                 sshKeyPath,
               });
+              // The standby was seeded in place: verify-deploy proves db-0
+              // was created once and its volume attached once.
+              standbyAttachAtDeploy = await readDbAttachState({
+                mode: config.mode,
+                projectName: config.projectName,
+                ip: resolveHaDbIps(config.projectDir, config.envPrefix).standbyIp,
+                sshKeyPath,
+              });
             }
 
             // Per-mode cold-deploy budgets (deploy-budget.ts): the deploy's
@@ -4261,6 +4320,19 @@ EOF`;
 
           console.log(`${tag} Re-deployed. Server IPs: [${serverIps.join(', ')}]`);
 
+          // k8s-ha: the standby db right before the restore reseeds it.
+          preRestoreStandbyAttach = null;
+          postRestoreStandbyAttach = null;
+          const restoreStandby = {
+            mode: config.mode,
+            projectName: config.projectName,
+            ip: resolveHaDbIps(config.projectDir, config.envPrefix).standbyIp,
+            sshKeyPath,
+          };
+          if (config.mode === 'k8s-ha') {
+            preRestoreStandbyAttach = await readDbAttachState(restoreStandby);
+          }
+
           // Now restore the database backup
           const restoreResult = await runRestore(config.envPrefix, pushedBackupName ?? 'latest', {
             cwd: config.projectDir,
@@ -4277,6 +4349,9 @@ EOF`;
             throw new Error(
               `Restore failed (exit ${restoreResult.exitCode}): ${readable.slice(-500) || '(no output)'}`,
             );
+          }
+          if (config.mode === 'k8s-ha') {
+            postRestoreStandbyAttach = await readDbAttachState(restoreStandby);
           }
 
           // Refresh server info after restore
@@ -4401,6 +4476,14 @@ EOF`;
                 );
               } else preFailoverStandbyGeneration = generation.generation;
             }
+            // k8s-ha: a reseed before the promotion runs in place on this
+            // same db (reseed_in_place, when one ran).
+            preFailoverStandbyAttach = null;
+            postFailoverStandbyAttach = null;
+            failoverReseedWasSkipped = null;
+            if (config.mode === 'k8s-ha') {
+              preFailoverStandbyAttach = await readDbAttachState(promotionTarget);
+            }
 
             // k8s-ha: the promotion restores the primary's certificate onto
             // the promoted cluster (src/failover.js) instead of ordering a
@@ -4424,6 +4507,12 @@ EOF`;
                 `${name === 'failback' ? 'Failback' : 'Failover'} exited with code ${result.exitCode}.\n` +
                   `STDERR: ${(result.stderr || '').slice(-1000) || '(empty)'}\n` +
                   `STDOUT tail: ${(result.stdout || '').slice(-2000) || '(empty)'}`,
+              );
+            }
+            if (config.mode === 'k8s-ha') {
+              postFailoverStandbyAttach = await readDbAttachState(promotionTarget);
+              failoverReseedWasSkipped = failoverReseedSkipped(
+                `${result.stdout || ''}\n${result.stderr || ''}`,
               );
             }
 

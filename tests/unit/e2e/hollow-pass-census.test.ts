@@ -568,6 +568,54 @@ const HA_HANDLELESS: Record<
         },
       }),
   ],
+  checkStandbyDbCreatedOnce: [
+    async () =>
+      haIntegrity.checkStandbyDbCreatedOnce({
+        ip: NODE,
+        state: await haIntegrity.readDbAttachState({
+          ...sshless,
+          mode: 'k8s-ha',
+          ip: NODE,
+          sshKeyPath: null,
+        }),
+      }),
+    async () =>
+      haIntegrity.checkStandbyDbCreatedOnce({
+        ip: null,
+        state: await haIntegrity.readDbAttachState({
+          ...sshless,
+          mode: 'k8s-ha',
+          ip: null,
+          sshKeyPath: KEY,
+        }),
+      }),
+    // The read was never taken (the cold deploy step lost it).
+    () => haIntegrity.checkStandbyDbCreatedOnce({ ip: NODE, state: null }),
+  ],
+  checkReseedInPlace: [
+    async () => {
+      const read = () =>
+        haIntegrity.readDbAttachState({ ...sshless, mode: 'k8s-ha', ip: NODE, sshKeyPath: null });
+      return haIntegrity.checkReseedInPlace({
+        ip: NODE,
+        step: 'restore',
+        before: await read(),
+        after: await read(),
+      });
+    },
+    async () => {
+      const read = () =>
+        haIntegrity.readDbAttachState({ ...sshless, mode: 'k8s-ha', ip: null, sshKeyPath: KEY });
+      return haIntegrity.checkReseedInPlace({
+        ip: null,
+        step: 'failover',
+        before: await read(),
+        after: await read(),
+      });
+    },
+    // Neither read was taken around the step.
+    () => haIntegrity.checkReseedInPlace({ ip: NODE, step: 'failover', before: null, after: null }),
+  ],
   checkSlotCapped: [
     () => haIntegrity.checkSlotCapped({ ...sshless, primaryIp: NODE, sshKeyPath: null }),
     () => haIntegrity.checkSlotCapped({ ...sshless, primaryIp: null, sshKeyPath: KEY }),
