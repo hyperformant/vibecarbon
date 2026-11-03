@@ -22,6 +22,12 @@ const toLocal = vi.fn((_h: string, opts: unknown, cb: (...a: unknown[]) => void)
   else cb(null, '127.0.0.1', 4);
 });
 
+// Fixed routes to constant sizes: no request value ever reaches an allocation.
+const BYTE_ROUTES: Record<string, number> = {
+  '/bytes/at-cap': PUBLIC_PROBE_MAX_BODY_BYTES,
+  '/bytes/over-cap': PUBLIC_PROBE_MAX_BODY_BYTES + 1,
+};
+
 let server: https.Server;
 let port: number;
 let ca: string;
@@ -30,12 +36,11 @@ beforeAll(async () => {
   const fixture = makeCert([DOMAIN]);
   ca = fixture.ca as string;
   server = https.createServer({ cert: fixture.cert, key: fixture.key }, (req, res) => {
-    if (req.url?.startsWith('/bytes/')) {
+    const size = BYTE_ROUTES[req.url ?? ''];
+    if (size !== undefined) {
       // Chunked, no content-length: the cap must hold while streaming.
-      // Bounded: the tests ask for at most a little over the 1 MB cap.
-      const n = Math.min(Number(req.url.slice('/bytes/'.length)) || 0, 2 * 1024 * 1024);
       res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end(Buffer.alloc(n, 0x61));
+      res.end(Buffer.alloc(size, 0x61));
       return;
     }
     if (req.url === '/empty') {
@@ -110,14 +115,14 @@ describe('fetchPublicDomain', () => {
   it('caps the buffered body: a health-sized answer is fine, past the cap it errors', async () => {
     expect(PUBLIC_PROBE_MAX_BODY_BYTES).toBe(1024 * 1024);
     const at = await fetchPublicDomain(
-      `https://${DOMAIN}:${port}/bytes/${PUBLIC_PROBE_MAX_BODY_BYTES}`,
+      `https://${DOMAIN}:${port}/bytes/at-cap`,
       {},
       { lookup: toLocal, ca: [ca] },
     );
     expect((await at.arrayBuffer()).byteLength).toBe(PUBLIC_PROBE_MAX_BODY_BYTES);
     await expect(
       fetchPublicDomain(
-        `https://${DOMAIN}:${port}/bytes/${PUBLIC_PROBE_MAX_BODY_BYTES + 1}`,
+        `https://${DOMAIN}:${port}/bytes/over-cap`,
         {},
         { lookup: toLocal, ca: [ca] },
       ),

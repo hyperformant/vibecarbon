@@ -134,7 +134,8 @@ describe('a link inside a 40-column p.note', () => {
     const { out, text } = fakeTty(40);
     p.note(`Generate a token: ${c.boldCyanUnderline(URL_)} now`, 'DigitalOcean', { output: out });
     const lines = text().replace(SGR, '').split('\n');
-    expect(lines.some((l) => l.includes(URL_))).toBe(false);
+    // No box line carries the whole URL as a token (exact match, not a substring check).
+    expect(lines.some((l) => l.split(/\s+/).includes(URL_))).toBe(false);
   });
 
   it('keeps each linked URL whole in one OSC 8 span', () => {
