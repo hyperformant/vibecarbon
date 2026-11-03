@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+# Boot timing: one `<phase> <epoch seconds>` line per major phase, read back
+# by the deploy after its ready wait (src/lib/deploy/boot-timing.js). Timing
+# only: a failed write is ignored and nothing below reads them.
+vc_mark() { echo "$1 $(date +%s.%N)" >> /var/log/vibecarbon-boot.log || true; }
+vc_mark preamble
+
 # Note: This script runs AS PART of cloud-init (user_data), so we cannot wait for
 # cloud-init to complete (that would cause a deadlock). The script starts immediately.
 
@@ -28,8 +34,10 @@ mkdir -p /etc/ssh/sshd_config.d
 printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
 systemctl reload ssh || systemctl reload sshd || true
 
+vc_mark apt
 apt-get -o DPkg::Lock::Timeout=300 update -qq
 apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq docker.io docker-buildx
+vc_mark network
 
 # Validate k3s version is set
 K3S_TARGET_VERSION="v1.31.5+k3s1"
@@ -481,6 +489,7 @@ echo "Private-NIC address guard installed (iface $PRIVATE_IFACE, ip $PRIVATE_IP)
 # so a transient CDN hiccup doesn't kill a fresh provision.
 # --system-default-registry: k3s system images come only from our ghcr mirror
 # (registries.yaml above; K3S_SYSTEM_IMAGE_MIRRORS). Agents inherit it.
+vc_mark k3s.install
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="v1.31.5+k3s1" sh -s - server \
@@ -513,6 +522,7 @@ if [ "$K3S_INSTALL_OK" != "true" ]; then
 fi
 
 # Wait for k3s to be ready (max 3 minutes - if it hasn't started by then, something is wrong)
+vc_mark k3s.ready
 K3S_READY=false
 for i in $(seq 1 36); do
   if kubectl get nodes 2>/dev/null | grep -q "Ready"; then
@@ -529,6 +539,8 @@ if [ "$K3S_READY" != "true" ]; then
   journalctl -u k3s --no-pager -n 20 2>&1 || true
   exit 1
 fi
+
+vc_mark addons
 
 # Marker for vibecarbon's deployK3s waiter - set AFTER hcloud Secret + CCM/CSI
 # install below complete (see end of script). Keeps the early-readiness signal
@@ -599,4 +611,5 @@ echo "k3s master installation complete!"
 # kubeconfig + applying app manifests. Written here so the marker only fires
 # after k3s + hcloud secrets + CCM + CSI are all in place - i.e., the cluster
 # is ready for real workloads, not just "k3s daemon is up."
+vc_mark done
 touch /tmp/k3s-ready

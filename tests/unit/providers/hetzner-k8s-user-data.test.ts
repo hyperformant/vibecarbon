@@ -32,6 +32,11 @@
  * server gained --system-default-registry; every role's k3s install gained
  * --disable-default-registry-endpoint. The diff is confined to those
  * lines (checked at capture against the pre-change fixture).
+ *
+ * RE-CAPTURED 2026-11-02 (first-boot timing): each init script gained the
+ * `vc_mark` helper and one `vc_mark <phase>` line per major phase
+ * (src/lib/deploy/boot-timing.js reads them back). The diff is confined to
+ * those added lines; no existing line changed.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

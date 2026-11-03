@@ -268,6 +268,57 @@ describe('BOOT_TIMING_SCRIPT', () => {
   });
 });
 
+describe('cloud-init phase marks', () => {
+  const k3sDir = join(__dirname, '../../../carbon/cloud-init/k3s');
+  const marksIn = (text: string) => [...text.matchAll(/^vc_mark (\S+)$/gm)].map((m) => m[1]);
+
+  it.each([
+    [
+      'master-init.sh',
+      ['preamble', 'apt', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done'],
+    ],
+    [
+      'do-master-init.sh',
+      ['preamble', 'apt', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done'],
+    ],
+    ['db-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['do-db-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['worker-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['do-worker-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
+  ])('%s marks its phases in order, into the log the collector reads', (file, phases) => {
+    const text = readFileSync(join(k3sDir, file), 'utf-8');
+    expect(marksIn(text)).toEqual(phases);
+    // The helper is defined before its first use and can never fail the script
+    // (these run under `set -euo pipefail`).
+    const def = text.indexOf('vc_mark() {');
+    expect(def).toBeGreaterThan(-1);
+    expect(def).toBeLessThan(text.indexOf('vc_mark preamble'));
+    expect(text).toContain(`>> ${BOOT_MARK_LOG} || true; }`);
+    // The master's ready flag is written after its last mark.
+    if (file.includes('master')) {
+      expect(text.indexOf('vc_mark done')).toBeLessThan(text.indexOf('touch /tmp/k3s-ready'));
+    }
+  });
+
+  it('the compose cloud-config marks its runcmd phases and brackets the boot pull', () => {
+    const text = readFileSync(
+      join(__dirname, '../../../carbon/cloud-init/docker-ce-setup.yaml'),
+      'utf-8',
+    );
+    const runcmdMarks = [
+      ...text.matchAll(
+        /^ {2}- \[sh, -c, 'echo "(\S+) \$\(date \+%s\.%N\)" >> (\S+) \|\| true'\]$/gm,
+      ),
+    ];
+    expect(runcmdMarks.map((m) => m[1])).toEqual(['docker', 'apt', 'ufw', 'done']);
+    for (const m of runcmdMarks) expect(m[2]).toBe(BOOT_MARK_LOG);
+    expect(text).toContain(`echo "bootPull.begin $(date +%s.%N)" >> ${BOOT_MARK_LOG} || true`);
+    expect(text).toContain(`echo "bootPull.end $(date +%s.%N)" >> ${BOOT_MARK_LOG} || true`);
+    // The ready marker the deploy waits on still comes before the last mark.
+    expect(text.indexOf('/var/lib/vibecarbon/ready')).toBeLessThan(text.indexOf('"done $(date'));
+  });
+});
+
 describe('collectBootTiming', () => {
   const goodReport = report({
     markers: fx('k3s-master-markers.log'),

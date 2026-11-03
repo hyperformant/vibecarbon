@@ -94,7 +94,9 @@ afterEach(() => {
 function runBootPull(failRef = '') {
   const dir = mkdtempSync(join(tmpdir(), 'vc-boot-pull-'));
   dirs.push(dir);
-  const script = bootPullScript().replace('out=/var/lib/vibecarbon/boot-pull', `out=${dir}/out`);
+  const script = bootPullScript()
+    .replace('out=/var/lib/vibecarbon/boot-pull', `out=${dir}/out`)
+    .replaceAll('/var/log/vibecarbon-boot.log', `${dir}/boot.log`);
   writeFileSync(join(dir, 'boot-pull.sh'), script);
   writeFileSync(
     join(dir, 'docker'),
@@ -109,13 +111,16 @@ function runBootPull(failRef = '') {
     r,
     status: readFileSync(join(dir, 'out', 'status'), 'utf8').trim(),
     calls: readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').sort(),
+    marks: readFileSync(join(dir, 'boot.log'), 'utf8'),
   };
 }
 
 describe('boot-pull.sh', () => {
   it('pulls each core image once and records ok', () => {
-    const { r, status, calls } = runBootPull();
+    const { r, status, calls, marks } = runBootPull();
     expect(r.status).toBe(0);
+    // The boot-timing span around the pull (src/lib/deploy/boot-timing.js).
+    expect(marks).toMatch(/^bootPull\.begin \d+\S*\nbootPull\.end \d+\S*\n$/);
     expect(status).toBe('ok');
     expect(calls).toEqual(
       bootPullImages()
