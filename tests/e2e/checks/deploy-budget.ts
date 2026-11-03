@@ -67,10 +67,12 @@ const DELTA_MARKERS: Partial<Record<DeployMode, number>> = { 'compose-ha': 2 };
  *   its own `.await` marker or overlaps a later step: the base pulls, the
  *   compose stack pull (stackPull.await), the compose image transfer
  *   (transfer.await, and compose-ha's imageTransfer.await) and k8s-ha's early
- *   replication transport.
+ *   replication transport;
+ * - the first-boot breakdown (`deploy.<prefix>.boot.*`, read back from each
+ *   node after its ready wait): it splits time the ready wait already holds.
  */
 const NOT_SERIAL =
-  /^deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|Fan$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$/;
+  /^deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|Fan$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$|\.boot\./;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
 const ANSI = /\x1b\[[0-9;]*m/g;
