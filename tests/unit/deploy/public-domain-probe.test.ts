@@ -32,7 +32,8 @@ beforeAll(async () => {
   server = https.createServer({ cert: fixture.cert, key: fixture.key }, (req, res) => {
     if (req.url?.startsWith('/bytes/')) {
       // Chunked, no content-length: the cap must hold while streaming.
-      const n = Number(req.url.slice('/bytes/'.length));
+      // Bounded: the tests ask for at most a little over the 1 MB cap.
+      const n = Math.min(Number(req.url.slice('/bytes/'.length)) || 0, 2 * 1024 * 1024);
       res.writeHead(200, { 'content-type': 'text/plain' });
       res.end(Buffer.alloc(n, 0x61));
       return;
