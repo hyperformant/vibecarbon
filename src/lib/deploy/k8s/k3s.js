@@ -69,6 +69,7 @@ import {
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { hasSentinelLine } from '../../remote-sentinel.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
 import {
   declaredAddonNames,
@@ -3220,7 +3221,7 @@ async function readRestoreSwapState(env, marker) {
   const lines = String(out ?? '')
     .split('\n')
     .map((l) => l.trim());
-  if (!lines.includes('VC_OK')) return { state: 'unknown', previous: false };
+  if (!hasSentinelLine(out, 'VC_OK')) return { state: 'unknown', previous: false };
   const previous = lines.includes('prev');
   const recorded =
     Boolean(marker.attempt) && lines.includes(`record ${marker.backup} ${marker.attempt}`);

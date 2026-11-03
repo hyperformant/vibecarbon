@@ -44,6 +44,7 @@
  * over it would be absurd.
  */
 
+import { outputLines } from '../remote-sentinel.js';
 import { shEscape } from '../shell.js';
 import { sshRun } from '../ssh.js';
 import { validateProjectName } from '../validators.js';
@@ -290,7 +291,7 @@ export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false, e
   try {
     out = await kubectl(ip, k8sWalgRoleExecArgv(role), { timeout: 30_000 });
   } catch (error) {
-    const wrote = String(error?.stderr ?? '').includes(WALG_ROLE_WRITE_FAILED);
+    const wrote = outputLines(error?.stderr).some((l) => l.startsWith(WALG_ROLE_WRITE_FAILED));
     return settle({
       intent: true,
       live: false,
@@ -348,7 +349,7 @@ export async function writeComposeWalgRole({ ip, sshKeyPath, projectName, role, 
   } catch (error) {
     // The message carries the whole command; quote stderr's last line only.
     const stderr = String(error?.stderr ?? '').trim();
-    const detail = stderr.includes(WALG_ROLE_WRITE_FAILED)
+    const detail = outputLines(stderr).some((l) => l.startsWith(WALG_ROLE_WRITE_FAILED))
       ? `the write failed in /opt/${projectName}/${COMPOSE_WALG_ROLE_HOST_DIR}`
       : stderr.split('\n').at(-1) || 'the ssh command failed';
     throw new Error(`could not write the wal-g role ${role} on ${ip}: ${detail}`);

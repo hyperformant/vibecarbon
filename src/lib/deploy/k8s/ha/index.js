@@ -25,6 +25,7 @@ import {
   seedKnownHosts,
 } from '../../../host-keys.js';
 import { perfAsync } from '../../../perf.js';
+import { hasSentinelLine } from '../../../remote-sentinel.js';
 import { scpWithRetry, sshRun } from '../../../ssh.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from '../../db-workload.js';
 import {
@@ -986,7 +987,7 @@ export async function setupReplication(options) {
           subPath: claimSubPath,
           image: dbImage,
         })) || '';
-      if (swapText.includes('RESEED_SKIPPED')) {
+      if (hasSentinelLine(swapText, 'RESEED_SKIPPED')) {
         throw new Error(
           `standby reseed skipped: the in-pod probe could not reach the primary via the ` +
             `local relay ${primaryHost}:${primaryPort} after ${PROBE_ATTEMPTS} attempts ` +
@@ -995,7 +996,7 @@ export async function setupReplication(options) {
             `WireGuard tunnel (wg show) on both database nodes.`,
         );
       }
-      if (!swapText.includes('RESEED_SWAPPED')) {
+      if (!hasSentinelLine(swapText, 'RESEED_SWAPPED')) {
         throw new Error(
           `standby reseed: helper-pod PGDATA swap did not complete, ` +
             `the standby keeps its previous PGDATA.\n--- swap pod logs ---\n` +

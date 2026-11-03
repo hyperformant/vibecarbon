@@ -579,6 +579,137 @@ describe('the guard and stop scripts, executed under sh', () => {
   });
 });
 
+describe('a failed exec whose message quotes the script is never read as its refusal', () => {
+  // runCommandAsync (src/lib/command.js) rejects with
+  // `Command failed: <argv>\n<stderr>`; over ssh the argv's last token is the
+  // whole remote command, so the stop script, and with it the literal
+  // `echo 'RESEED_STOP_REFUSED ...'`, sits in every failed stop's message.
+  const sshFailure = (
+    remote: string[],
+    { stderr, status, stdout = '' }: { stderr: string; status: number; stdout?: string },
+  ) =>
+    Object.assign(
+      new Error(
+        `Command failed: ssh -i /k -o BatchMode=yes -- root@10.0.0.2 ${shJoin(['env', 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml', 'kubectl', ...remote])}\n${stderr}`,
+      ),
+      { stdout, stderr: `${stderr}\n`, status, timedOut: false },
+    );
+  const stopArgv = ['-n', 'vibecarbon', 'exec', 'db-0', '-c', 'db', '--', ...DB_IN_PLACE_STOP];
+
+  it('the realistic message does carry the sentinel text (the trap this guards)', () => {
+    expect(sshFailure(stopArgv, { stderr: 'x', status: 255 }).message).toContain(
+      'RESEED_STOP_REFUSED',
+    );
+  });
+
+  it.each([
+    ['an ssh drop', { stderr: 'Connection to 10.0.0.2 closed by remote host.', status: 255 }],
+    [
+      'an exec killed with its container',
+      { stderr: 'command terminated with exit code 137', status: 137 },
+    ],
+    [
+      'a refusal line on stdout under another status',
+      {
+        stderr: '',
+        status: 255,
+        stdout: 'RESEED_STOP_REFUSED postgres is not in recovery (pg_is_in_recovery: f)\n',
+      },
+    ],
+    [
+      'a refusal line only in stderr, status 3',
+      { stderr: 'RESEED_STOP_REFUSED postgres is not in recovery', status: 3 },
+    ],
+  ])('%s falls through to the state poll', async (_label, failure) => {
+    let reads = 0;
+    const kubectl = vi.fn(async (argv: string[]) => {
+      if (argv.includes('exec')) throw sshFailure(stopArgv, failure);
+      return reads++ === 0 ? pod() : pod({ rc: 1, cid: 'c2' });
+    });
+    const log = vi.fn();
+    await expect(
+      restartDbContainerInPlace(kubectl, {
+        guard: GUARD,
+        recreatedWait: vi.fn(),
+        pollMs: 1,
+        sleep: async () => {},
+        log,
+      }),
+    ).resolves.toEqual({ inPlace: true, uid: 'u1' });
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/the container state decides/));
+  });
+
+  it('only a status-3 stdout refusal line is the stop refusing', async () => {
+    const kubectl = vi.fn(async (argv: string[]) => {
+      if (argv.includes('exec')) {
+        throw sshFailure(stopArgv, {
+          stderr: '',
+          status: 3,
+          stdout: 'RESEED_STOP_REFUSED postgres is not in recovery (pg_is_in_recovery: f)\n',
+        });
+      }
+      return pod();
+    });
+    await expect(
+      restartDbContainerInPlace(kubectl, {
+        guard: GUARD,
+        recreatedWait: vi.fn(),
+        pollMs: 1,
+        sleep: async () => {},
+        log: () => {},
+      }),
+    ).rejects.toThrow(
+      'reseed refused in db-0: postgres is not in recovery (pg_is_in_recovery: f); nothing was stopped',
+    );
+  });
+
+  it('a stage failure whose message or stderr holds RESEED_REFUSED busy, with empty stdout, is not busy', async () => {
+    for (const failure of [
+      { stderr: 'RESEED_REFUSED busy', status: 1 },
+      { stderr: 'Connection reset by peer', status: 255, stdout: 'RESEED_REFUSED busy\n' },
+    ]) {
+      const err = sshFailure(
+        [
+          '-n',
+          'vibecarbon',
+          'exec',
+          '-i',
+          'db-0',
+          '--',
+          'sh',
+          '-c',
+          'echo "RESEED_REFUSED busy"\nRESEED_REFUSED busy',
+        ],
+        failure,
+      );
+      const caught = await runInPlaceStage(
+        async () => {
+          throw err;
+        },
+        { attempt: 'att-1' },
+      ).catch((e) => e);
+      expect(caught).toBe(err);
+      expect(caught).not.toBeInstanceOf(ReseedStageBusyError);
+    }
+  });
+
+  it('a status-1 stdout busy line is busy', async () => {
+    const err = sshFailure(['-n', 'vibecarbon', 'exec', 'db-0', '--', 'sh'], {
+      stderr: 'a restore or another reseed stage holds the lock',
+      status: 1,
+      stdout: 'RESEED_REFUSED busy\n',
+    });
+    await expect(
+      runInPlaceStage(
+        async () => {
+          throw err;
+        },
+        { attempt: 'att-1' },
+      ),
+    ).rejects.toBeInstanceOf(ReseedStageBusyError);
+  });
+});
+
 describe('runInPlaceStage: a busy stage is a terminal refusal', () => {
   const busyErr = () =>
     Object.assign(new Error('command failed: exit 1'), { stdout: 'RESEED_REFUSED busy\n' });

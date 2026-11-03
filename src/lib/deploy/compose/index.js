@@ -20,6 +20,7 @@ import { bootPullImages, loadComposeCloudInit } from '../../iac/compose-cloud-in
 import { K8S_MIRROR_ORG, mirroredPackageNames, resolveDbImage } from '../../images.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
+import { hasSentinelLine } from '../../remote-sentinel.js';
 import { pollUntil } from '../../retry.js';
 import {
   ADDON_SERVICES_SCRIPT,
@@ -464,7 +465,7 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
       { timeout: 10_000, ignoreError: true, retries: 1 },
     );
     if (result != null) everConnected = true; // any output means SSH connected
-    if (result?.trim()?.endsWith('READY') && !result.includes('NOT_READY')) {
+    if (hasSentinelLine(result, 'READY')) {
       s.stop(`Server ${ip} ready (cloud-init complete)`);
       // Not awaited: the deploy never waits on the boot pull.
       noteBootPull(ip, sshKeyPath);
@@ -1898,8 +1899,8 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
         `elif [ -e ${PGDATA_PATH}/recovery.signal ]; then echo VC_SWAPPED_EMPTY; else echo VC_MARKER_ABSENT; fi'`,
       { ignoreError: true, retries: 1 },
     );
-    const state = String(probe ?? '');
-    if (state.includes('VC_MARKER_ABSENT')) {
+    const state = probe;
+    if (hasSentinelLine(state, 'VC_MARKER_ABSENT')) {
       // No swap began: the database from before the restore is untouched.
       await sshRunAsync(
         ip,
@@ -1912,7 +1913,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
           `from before it was started again: ${cause}`,
       );
     }
-    if (state.includes('VC_MARKER_PRESENT')) {
+    if (hasSentinelLine(state, 'VC_MARKER_PRESENT')) {
       throw new Error(
         [
           `restoreCompose: the restore of ${backup} was interrupted mid-swap (${cause}). The db stays down ` +
@@ -1922,7 +1923,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
         ].join('\n'),
       );
     }
-    if (state.includes('VC_SWAPPED_PREV')) {
+    if (hasSentinelLine(state, 'VC_SWAPPED_PREV')) {
       throw new Error(
         [
           `restoreCompose: the restore of ${backup} swapped in but was not proven (${cause}). The db stays ` +
@@ -1932,7 +1933,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
         ].join('\n'),
       );
     }
-    if (state.includes('VC_SWAPPED_EMPTY')) {
+    if (hasSentinelLine(state, 'VC_SWAPPED_EMPTY')) {
       // The volume held no database before (a fresh server): no .vc-prev.
       throw new Error(
         [

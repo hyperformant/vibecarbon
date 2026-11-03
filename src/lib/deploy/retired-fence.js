@@ -48,6 +48,7 @@
  */
 
 import * as p from '@clack/prompts';
+import { hasSentinelLine } from '../remote-sentinel.js';
 import {
   composeWriterServices,
   declaredAddonNames,
@@ -578,7 +579,7 @@ async function probeCompose(ip, { run, projectName, writerContainers, psqlFor })
   const lines = String(out === false ? '' : (out ?? ''))
     .split('\n')
     .map((l) => l.trim());
-  if (!lines.includes('PROBE_DONE')) return null;
+  if (!hasSentinelLine(out, 'PROBE_DONE')) return null;
   const value = (key) => lines.find((l) => l.startsWith(`${key}=`))?.slice(key.length + 1) ?? '';
   const dbMarker = value('DB_MARKER');
   const dbState = await probeDb(psqlFor(ip));

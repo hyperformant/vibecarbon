@@ -39,6 +39,7 @@
 
 import * as p from '@clack/prompts';
 import { updateProjectConfig } from '../../config.js';
+import { hasSentinelLine } from '../../remote-sentinel.js';
 import { composeWriterServices } from '../../services/standby-policy.js';
 import {
   markStandbyUnproven,
@@ -262,7 +263,7 @@ export async function removeComposeBackupCron(ip, sshKeyPath, { run = sshRunAsyn
       'crontab "$TMP_CRON"; rm -f "$TMP_CRON"; echo VC_CRON_REMOVED',
     { timeout: 30_000, retries: 1 },
   );
-  if (!String(out === false ? '' : (out ?? '')).includes('VC_CRON_REMOVED')) {
+  if (!hasSentinelLine(out, 'VC_CRON_REMOVED')) {
     throw new Error(`could not remove the backup cron on ${ip}`);
   }
 }

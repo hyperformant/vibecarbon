@@ -17,6 +17,7 @@
  * hardcoding either transport.
  */
 
+import { hasSentinelLine, refusalFromError, sentinelLinePayload } from '../remote-sentinel.js';
 import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
 import { DB_CONTAINER, DB_POD, DB_PVC, DB_STATEFULSET } from './db-workload.js';
@@ -1655,7 +1656,7 @@ export async function reseedStandbyFromPrimary(
       settleMs: detachSettleMs,
     });
     const swapOut = await swapPgdataViaHelperPod(kubectl, { claimName, subPath, image });
-    swapped = swapOut.includes('RESEED_SWAPPED');
+    swapped = hasSentinelLine(swapOut, 'RESEED_SWAPPED');
     if (!swapped) {
       // The stage step above verified the staging (PG_VERSION) and threw on
       // failure, so a SKIPPED here means the staging vanished between steps —
@@ -1914,8 +1915,9 @@ export const DB_GUARD_MARKER_GREP = Object.freeze([
   `grep -c '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || true; printf 'in_recovery=%s\\n' ${IN_RECOVERY_SH}`,
 ]);
 
-/** What the stop prints (stdout, exit 3) when it refuses to signal. */
+/** What the stop prints (stdout, exit STOP_REFUSED_STATUS) when it refuses to signal. */
 const STOP_REFUSED = 'RESEED_STOP_REFUSED';
+const STOP_REFUSED_STATUS = 3;
 
 /**
  * The sanctioned in-pod stop; one `sh -c` token, no newlines. Self-guarding:
@@ -1926,8 +1928,8 @@ const STOP_REFUSED = 'RESEED_STOP_REFUSED';
 export const DB_IN_PLACE_STOP = Object.freeze([
   'sh',
   '-c',
-  `grep -q '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || { echo '${STOP_REFUSED} the mounted db-guard.sh does not speak the reseed protocol'; exit 3; }; ` +
-    `r=${IN_RECOVERY_SH}; [ "$r" = t ] || { echo "${STOP_REFUSED} postgres is not in recovery (pg_is_in_recovery: $r)"; exit 3; }; ` +
+  `grep -q '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || { echo '${STOP_REFUSED} the mounted db-guard.sh does not speak the reseed protocol'; exit ${STOP_REFUSED_STATUS}; }; ` +
+    `r=${IN_RECOVERY_SH}; [ "$r" = t ] || { echo "${STOP_REFUSED} postgres is not in recovery (pg_is_in_recovery: $r)"; exit ${STOP_REFUSED_STATUS}; }; ` +
     'kill -INT 1',
 ]);
 
@@ -2144,7 +2146,9 @@ export async function runInPlaceStage(exec, { attempt }) {
   try {
     out = await exec();
   } catch (error) {
-    if (/^RESEED_REFUSED busy$/m.test(String(error?.stdout ?? ''))) {
+    // The stage's own refusal only: a stdout line under its exit 1, never the
+    // message (it can quote the script) and never stderr.
+    if (refusalFromError(error, 'RESEED_REFUSED', { status: 1 }) === 'busy') {
       throw new ReseedStageBusyError(
         'reseed refused: an earlier reseed stage is still running on the standby (it holds ' +
           'the data directory lock). Nothing was staged. Wait for it to finish, then rerun.',
@@ -2152,10 +2156,10 @@ export async function runInPlaceStage(exec, { attempt }) {
     }
     throw error;
   }
-  const staged = /^RESEED_STAGED (\S+)$/m.exec(String(out ?? ''))?.[1];
+  const staged = sentinelLinePayload(out, 'RESEED_STAGED');
   if (staged !== attempt) {
     throw new Error(
-      `reseed stage finished without staging attempt ${attempt} (saw ${staged ?? 'no RESEED_STAGED line'}); nothing will be swapped`,
+      `reseed stage finished without staging attempt ${attempt} (saw ${staged === null ? 'no RESEED_STAGED line' : `RESEED_STAGED ${staged}`}); nothing will be swapped`,
     );
   }
   return { staged };
@@ -2234,9 +2238,10 @@ export async function restartDbContainerInPlace(
   try {
     await kubectl(dbExecArgv(DB_IN_PLACE_STOP), { timeout: 30_000 });
   } catch (error) {
-    const said = `${error?.stdout ?? ''}\n${error?.message ?? ''}`;
-    const refused = new RegExp(`^.*${STOP_REFUSED} (.*)$`, 'm').exec(said)?.[1];
-    if (refused) {
+    // Only the script's own refusal: its stdout line under exit 3. The
+    // message quotes the script (sentinel included), so it is never read.
+    const refused = refusalFromError(error, STOP_REFUSED, { status: STOP_REFUSED_STATUS });
+    if (refused !== null) {
       throw new Error(`reseed refused in ${DB_POD}: ${refused}; nothing was stopped`);
     }
     log(

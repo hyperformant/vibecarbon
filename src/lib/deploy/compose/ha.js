@@ -28,6 +28,7 @@ import {
 } from '../../dns-provider.js';
 import { socatImageRef } from '../../images.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { hasSentinelLine, sentinelLinePayload } from '../../remote-sentinel.js';
 import { addonJobStartCmd, mintAttemptId } from '../../services/addon-start.js';
 import {
   composePromotionServices,
@@ -621,7 +622,7 @@ echo COMPOSE_RESEED_STAGED
         `services on both nodes.`,
     );
   }
-  if (!stageText.includes('COMPOSE_RESEED_STAGED')) {
+  if (!hasSentinelLine(stageText, 'COMPOSE_RESEED_STAGED')) {
     throw new Error(
       `configureStandbyReplication: staging the basebackup on ${standbyIp} failed. The ` +
         `standby db is still running on its previous PGDATA (nothing was stopped or ` +
@@ -679,7 +680,7 @@ echo COMPOSE_RESEED_STAGED
       input: buildNodePgdataSwapScript({ pgdataDir: pgdataHostPath }),
     });
     const swapText = typeof swapOut === 'string' ? swapOut : '';
-    if (!swapText.includes('RESEED_SWAPPED')) {
+    if (!hasSentinelLine(swapText, 'RESEED_SWAPPED')) {
       // The stage step verified the staging above, so SKIPPED (or any failure)
       // here means it vanished/corrupted between steps — a real failure. The
       // old PGDATA is untouched (the swap is ordered rename-last).
@@ -1632,7 +1633,7 @@ export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName, service
     lines.filter((l) => l.startsWith(`${tag} `)).map((l) => l.slice(tag.length + 1));
   const stopped = named('STOPPED');
   // FENCE_DONE proves the loop ran to its end over a live ssh session.
-  const reached = lines.includes('FENCE_DONE');
+  const reached = hasSentinelLine(out, 'FENCE_DONE');
   const ok = reached && named('FAILED').length === 0;
   return { ok, stopped, reached };
 }
@@ -1906,7 +1907,7 @@ export function composeFailoverAbortBackend({
           'done; echo START_DONE',
         { timeout: 120_000 },
       );
-      return ok(out, 'START_DONE') && !String(out ?? '').includes('FAILED ');
+      return ok(out, 'START_DONE') && sentinelLinePayload(out, 'FAILED') === null;
     },
   };
 }

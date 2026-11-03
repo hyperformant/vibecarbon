@@ -44,6 +44,7 @@
 
 import * as p from '@clack/prompts';
 import { updateProjectConfig } from '../config.js';
+import { hasSentinelLine } from '../remote-sentinel.js';
 import { sshKubectl } from '../ssh.js';
 import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
 import { sshRun } from './compose/index.js';
@@ -177,8 +178,8 @@ export async function writeBackupFence({ exec, runInDb, primaryNode, now = () =>
   } catch (err) {
     return { ok: false, reason: String(err?.message ?? err).split('\n')[0] };
   }
-  if (out.includes('FENCE_SKIPPED')) return { ok: true, skipped: true };
-  if (!out.includes('FENCE_WRITTEN')) {
+  if (hasSentinelLine(out, 'FENCE_SKIPPED')) return { ok: true, skipped: true };
+  if (!hasSentinelLine(out, 'FENCE_WRITTEN')) {
     return { ok: false, reason: 'wal-g st put did not confirm the write' };
   }
   return { ok: true, fence };
