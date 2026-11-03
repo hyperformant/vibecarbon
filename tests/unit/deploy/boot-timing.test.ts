@@ -50,7 +50,7 @@ function report(parts: { markers?: string; show?: string; blame?: string; system
 
 describe('parseBootMarkers', () => {
   it('times each sequential phase up to the next mark, and the whole script', () => {
-    const { phases, spans, totalMs } = parseBootMarkers(fx('k3s-master-markers.log'));
+    const { phases, spans, totalMs } = parseBootMarkers(fx('k3s-master-markers.txt'));
     expect(phases).toEqual([
       { name: 'preamble', ms: 282 },
       { name: 'apt', ms: 37516 },
@@ -64,7 +64,7 @@ describe('parseBootMarkers', () => {
   });
 
   it('keeps a background span (begin/end) out of the sequential chain', () => {
-    const { phases, spans, totalMs } = parseBootMarkers(fx('compose-markers.log'));
+    const { phases, spans, totalMs } = parseBootMarkers(fx('compose-markers.txt'));
     expect(phases).toEqual([
       { name: 'docker', ms: 2800 },
       { name: 'apt', ms: 21600 },
@@ -200,7 +200,7 @@ describe('summarizeBootTiming', () => {
     const stages = summarizeBootTiming(
       parseBootReport(
         report({
-          markers: fx('k3s-master-markers.log'),
+          markers: fx('k3s-master-markers.txt'),
           show: fx('k3s-show.txt'),
           blame: fx('k3s-blame.txt'),
           systemd: fx('systemd-analyze.txt'),
@@ -236,7 +236,7 @@ describe('summarizeBootTiming', () => {
     const stages = summarizeBootTiming(
       parseBootReport(
         report({
-          markers: fx('compose-markers.log'),
+          markers: fx('compose-markers.txt'),
           show: fx('compose-show.txt'),
           blame: fx('compose-blame.txt'),
         }),
@@ -330,7 +330,7 @@ describe('cloud-init phase marks', () => {
 
 describe('collectBootTiming', () => {
   const goodReport = report({
-    markers: fx('k3s-master-markers.log'),
+    markers: fx('k3s-master-markers.txt'),
     show: fx('k3s-show.txt'),
     blame: fx('k3s-blame.txt'),
   });
@@ -529,7 +529,7 @@ describe('queueBootTiming + flushBootTiming', () => {
       // 10.0.0.2 hangs and ignores its signal; the budget still ends it.
       return ip === '10.0.0.1'
         ? Promise.resolve(
-            report({ markers: fx('compose-markers.log'), show: fx('compose-show.txt') }),
+            report({ markers: fx('compose-markers.txt'), show: fx('compose-show.txt') }),
           )
         : new Promise<string>(() => {});
     });
