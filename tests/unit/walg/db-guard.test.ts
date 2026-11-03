@@ -426,6 +426,18 @@ describe('db-guard.sh reseed swap', () => {
     expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(true);
   });
 
+  it('a stage cut between its marker write and rename: the stray .tmp goes, the old tree boots', () => {
+    live();
+    stage();
+    renameSync(join(pgdata, '.vc-reseed-ready'), join(pgdata, '.vc-reseed-ready.tmp'));
+    const r = runGuard(SB());
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).not.toContain('RESEED_SWAPPED');
+    expect(existsSync(join(pgdata, '.vc-reseed-ready.tmp'))).toBe(false);
+    expect(readFileSync(join(pgdata, 'base', 'OLD'), 'utf-8')).toBe('old');
+    expect(r.stdout).toContain('STUB-ENTRYPOINT');
+  });
+
   it('refuses symlinked reseed markers (it runs as root)', () => {
     live();
     stage();

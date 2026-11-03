@@ -270,8 +270,8 @@ export function buildStagedBasebackupScript({
   // base backup tool: the skip provably comes first.
   const probeUnreachable = inPlace
     ? `  echo "[${label}] primary postgres at ${primaryHost}:${primaryPort} not reachable from standby after ${probeAttempts} attempts; nothing staged, the standby keeps its data directory." >&2
-echo RESEED_SKIPPED
-exit 0`
+  echo RESEED_SKIPPED
+  exit 0`
     : `  echo "[${label}] primary postgres at ${primaryHost}:${primaryPort} not reachable from standby after ${probeAttempts} attempts, skipping pg_basebackup. Standby keeps its independent postgres; failover serves the app but data does not sync from primary." >&2
   exit 0`;
   const probeBlock = probeFirst
@@ -375,17 +375,34 @@ if [ ! -f ${stagingDir}/PG_VERSION ]; then
   exit 1
 fi`;
 
-  // In-place mode: the gate and the clean slate come before anything else.
-  // The intent gate is the very comparison db-guard.sh swaps under, so a
-  // stage never builds a tree the swap would refuse. A swap under way is
-  // never disturbed. The old ready marker goes first (and durably), so it can
-  // never name the tree staged next; then any staging it leaves is cleared.
+  // In-place mode: the gate, the lock and the clean slate come before
+  // anything else. The intent gate is the very comparison db-guard.sh swaps
+  // under, so a stage never builds a tree the swap would refuse. The lock is
+  // the one restore and db-guard.sh take: a kubectl exec whose client dropped
+  // keeps running, and a second stage over it would mix two base backups into
+  // a tree that passes every proof. The loser prints RESEED_REFUSED busy and
+  // exits 1: a refusal to report, never one to retry. The old ready marker
+  // goes first (and durably), so it can never name the tree staged next;
+  // then any staging it leaves is cleared.
+  const lockFile = `${pgdataDir}/.vc-restore.lock`;
   const inPlaceHead = inPlace
     ? `
 if [ "\${VC_WALG_ROLE_INTENT:-}" != standby ]; then
   echo "[${label}] RESEED_REFUSED: the db intent (VC_WALG_ROLE_INTENT) is not standby; nothing staged" >&2
   exit 1
 fi
+if [ -L ${lockFile} ]; then
+  echo "[${label}] RESEED_REFUSED: ${lockFile} is a symlink; nothing staged" >&2
+  exit 1
+fi
+exec 9>${lockFile}
+if ! flock -n 9; then
+  echo "[${label}] a restore or another reseed stage holds ${lockFile}; nothing staged" >&2
+  echo "RESEED_REFUSED busy"
+  exit 1
+fi
+# Defensive: db-guard.sh settles a swap before postgres starts, so a running
+# standby never holds this marker. If one is here anyway, leave it alone.
 if [ -e ${pgdataDir}/.vc-reseed-in-progress ] || [ -L ${pgdataDir}/.vc-reseed-in-progress ]; then
   echo "[${label}] RESEED_REFUSED: a reseed swap is in progress (${pgdataDir}/.vc-reseed-in-progress); nothing staged" >&2
   exit 1

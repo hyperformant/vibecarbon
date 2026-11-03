@@ -139,6 +139,10 @@ if [ -e "$R_MARK" ] || [ -e "$R_READY" ] || [ -L "$R_MARK" ] || [ -L "$R_READY" 
       ;;
   esac
   exec 9>&-
+else
+  # A stage cut between its marker write and the rename leaves only the
+  # temp file: no marker, so nothing to swap. It goes as garbage.
+  rm -f "$R_READY.tmp"
 fi
 
 exec db-entrypoint.sh "$@"

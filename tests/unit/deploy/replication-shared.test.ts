@@ -8,7 +8,7 @@
  *   - verifyStreaming — the pg_stat_replication streaming poller.
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -17,6 +17,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -699,6 +700,13 @@ describe('buildStagedBasebackupScript in-place mode', () => {
       '[ "${VC_WALG_ROLE_INTENT:-}" = standby ]',
     );
   });
+  it('holds the shared PGDATA lock (restore, db-guard) before it clears anything', () => {
+    const lock = s.indexOf('exec 9>/var/lib/postgresql/data/.vc-restore.lock');
+    expect(lock).toBeGreaterThan(s.indexOf('if [ -L /var/lib/postgresql/data/.vc-restore.lock ]'));
+    expect(s).toContain('if ! flock -n 9; then');
+    expect(lock).toBeLessThan(s.indexOf('rm -f /var/lib/postgresql/data/.vc-reseed-ready'));
+    expect(lock).toBeLessThan(s.indexOf('.vc-reseed-in-progress'));
+  });
   it('never stops postgres and never swaps in-pod', () => {
     expect(s).not.toMatch(/pg_ctl|kill |-mindepth 1 -delete/);
   });
@@ -709,7 +717,7 @@ describe('buildStagedBasebackupScript in-place mode', () => {
       probeAttempts: 1,
       probeDelayS: 0,
     });
-    expect(p).toMatch(/echo RESEED_SKIPPED\nexit 0/);
+    expect(p).toMatch(/\n {2}echo RESEED_SKIPPED\n {2}exit 0\nfi/);
     expect(p.indexOf('RESEED_SKIPPED')).toBeLessThan(p.indexOf('pg_basebackup'));
   });
   it('refuses an attempt id the shell would read as more than a word', () => {
@@ -830,6 +838,11 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
         'D=""; while [ $# -gt 0 ]; do [ "$1" = -D ] && D="$2"; shift; done',
         // A transfer cut off half way: part of the tree, then a failure.
         `if [ "\${BB_PARTIAL:-}" = 1 ]; then cp -a "${primary}/base" "$D/"; exit 1; fi`,
+        // A slow transfer: say it started, then wait (bounded) to be let go.
+        'if [ -n "$BB_GATE" ]; then',
+        '  : > "$BB_GATE.started"',
+        '  i=0; while [ ! -e "$BB_GATE.go" ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i + 1)); done',
+        'fi',
         `cp -a "${primary}/." "$D/"`,
         'touch "$D/standby.signal"',
         `printf "primary_conninfo = 'host=10.0.0.5'\\n" >> "$D/postgresql.auto.conf"`,
@@ -856,17 +869,18 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
       ...extra,
     }).replaceAll('/var/lib/postgresql/data', pgdata);
 
+  const stageEnv = (env: Record<string, string>) => ({
+    PATH: `${bin}:${process.env.PATH}`,
+    CALLS: calls,
+    VC_WALG_ROLE_INTENT: 'standby',
+    ...env,
+  });
   function stage(env: Record<string, string> = {}, extra: Record<string, unknown> = {}) {
-    writeFileSync(join(dir, 'stage.sh'), script(extra));
-    return spawnSync('sh', [join(dir, 'stage.sh')], {
-      encoding: 'utf-8',
-      env: {
-        PATH: `${bin}:${process.env.PATH}`,
-        CALLS: calls,
-        VC_WALG_ROLE_INTENT: 'standby',
-        ...env,
-      },
-    });
+    // One file per attempt: sh reads a script as it runs, so a second stage
+    // must never rewrite the file a first one is still executing.
+    const file = join(dir, `stage-${String(extra.inPlaceAttempt ?? 'att-1')}.sh`);
+    writeFileSync(file, script(extra));
+    return spawnSync('sh', [file], { encoding: 'utf-8', env: stageEnv(env) });
   }
   function guard(intent = 'standby') {
     return spawnSync('sh', [GUARD, 'postgres'], {
@@ -950,6 +964,46 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
     expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
     expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
     expect(cluster()).toEqual(LIVE);
+  });
+
+  it('two stages at once: exactly one stages, the other refuses busy and touches nothing', async () => {
+    const gate = join(dir, 'gate');
+    const fileA = join(dir, 'stage-A.sh');
+    writeFileSync(fileA, script());
+    const a = spawn('sh', [fileA], { env: stageEnv({ BB_GATE: gate }) });
+    let outA = '';
+    a.stdout.on('data', (d) => {
+      outA += d;
+    });
+    const exitA = new Promise<number | null>((res) => a.on('close', res));
+    try {
+      // Bounded wait for A to be inside its transfer, holding the lock.
+      for (let i = 0; i < 200 && !existsSync(`${gate}.started`); i++) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(existsSync(`${gate}.started`), 'stage A never reached its transfer').toBe(true);
+      const b = stage({}, { inPlaceAttempt: 'att-2' });
+      expect(b.status).toBe(1);
+      expect(b.stdout.trim()).toBe('RESEED_REFUSED busy');
+      expect(existsSync(join(pgdata, '.vc-reseed', '.vc-reseed-id'))).toBe(false);
+      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+    } finally {
+      writeFileSync(`${gate}.go`, '');
+    }
+    expect(await exitA).toBe(0);
+    expect(outA.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-1');
+    expect(read('.vc-reseed-ready')).toBe('att-1');
+    expect(read('.vc-reseed/.vc-reseed-id')).toBe('att-1');
+  });
+
+  it('a symlinked lock is refused, nothing touched', () => {
+    writeFileSync(join(pgdata, '.vc-reseed-ready'), 'old');
+    symlinkSync(join(dir, 'elsewhere'), join(pgdata, '.vc-restore.lock'));
+    const r = stage();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/symlink/);
+    expect(existsSync(join(dir, 'elsewhere'))).toBe(false);
+    expect(read('.vc-reseed-ready')).toBe('old');
   });
 
   it('a stale ready marker never pairs with a new, cut-off transfer', () => {
