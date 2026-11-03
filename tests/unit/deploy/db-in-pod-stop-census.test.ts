@@ -350,15 +350,32 @@ function quoterProblems(files: Src[]): string[] {
 
 const planted = (text: string, file = 'src/planted.js'): Src[] => [{ file, text }];
 
-/** Every array element (an argv token or a remote command) that scales to zero. */
+/** A literal replica count that is not zero ('1', 2): anything else can be zero. */
+const nonZeroCount = (n: Node) =>
+  n?.type === 'Literal' && /^\d+$/.test(String(n.value)) && Number(n.value) !== 0;
+
+/** A template literal that interpolates the count right after `--replicas=` or `--replicas `. */
+const computedCount = (n: Node) =>
+  n?.type === 'TemplateLiteral' &&
+  n.expressions.length > 0 &&
+  n.quasis.slice(0, -1).some((q: Node) => /--replicas[= ]$/.test(String(q.value.raw)));
+
+/**
+ * Every array element (an argv token or a remote command) that scales to zero,
+ * or to a count the census cannot read: `--replicas=0` or `--replicas 0` in one
+ * token, the split pair `'--replicas', '0'` (or a non-literal after the flag),
+ * and an interpolated `--replicas=${n}`.
+ */
 function scaleToZeroArgv(files: Src[]): string[] {
   const out: string[] = [];
   for (const s of files) {
     visit(s.text, (n) => {
       if (n.type !== 'ArrayExpression') return;
-      for (const e of n.elements) {
-        if (/--replicas[= ]0\b/.test(stringText(e))) out.push(at(s, e));
-      }
+      n.elements.forEach((e: Node, i: number) => {
+        const text = stringText(e);
+        const split = text === '--replicas' && !nonZeroCount(n.elements[i + 1]);
+        if (/--replicas[= ]0\b/.test(text) || split || computedCount(e)) out.push(at(s, e));
+      });
     });
   }
   return out;
@@ -529,6 +546,41 @@ describe('the reseed repair is gone', () => {
     expect(
       scaleToZeroArgv(planted("throw new Error('run `kubectl scale sts db --replicas=0`');")),
     ).toEqual([]);
+  });
+
+  it('bite: a split --replicas 0 pair or a computed replica count is caught too', () => {
+    expect(
+      scaleToZeroArgv(planted("await k(['scale', 'statefulset', 'db', '--replicas', '0']);")),
+    ).toEqual(['src/planted.js:1']);
+    expect(
+      scaleToZeroArgv(planted("await k(['scale', 'statefulset', 'db', '--replicas', 0]);")),
+    ).toEqual(['src/planted.js:1']);
+    // A count the census cannot read can be zero: a variable after the flag,
+    // or interpolated into it.
+    expect(
+      scaleToZeroArgv(planted("await k(['scale', 'statefulset', 'db', '--replicas', n]);")),
+    ).toEqual(['src/planted.js:1']);
+    expect(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: planted source text, not a template
+      scaleToZeroArgv(planted('await k([`scale`, `statefulset`, `db`, `--replicas=${n}`]);')),
+    ).toEqual(['src/planted.js:1']);
+    expect(
+      scaleToZeroArgv(
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: planted source text, not a template
+        planted("run(['ssh', h, `kubectl scale sts db --replicas ${n} -n vibecarbon`]);"),
+      ),
+    ).toEqual(['src/planted.js:1']);
+    // A literal non-zero count stays legal, split or joined.
+    expect(
+      scaleToZeroArgv(
+        planted(
+          "await k(['scale', 'sts', 'db', '--replicas=1']); await k(['scale', 'sts', 'db', '--replicas', '1']);",
+        ),
+      ),
+    ).toEqual([]);
+    // A message naming a computed count is words, not an argv.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: planted source text, not a template
+    expect(scaleToZeroArgv(planted('throw new Error(`scale with --replicas=${n}`);'))).toEqual([]);
   });
 
   it('the stale-attachment repair site left docs/mitigations.yml with its code', () => {
