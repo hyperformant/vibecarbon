@@ -420,6 +420,7 @@ export async function checkPrimaryDbCreatedOnce(
  *
  * The extra identities are optional in the type so a comparison can be
  * stated on the fields it needs; parseDbAttachState always fills every one.
+ * Both verdicts fail on an unread restartCount, never skip it.
  */
 export interface DbAttachState {
   uid: string;
@@ -604,6 +605,8 @@ export const FIRST_ATTACH_WINDOW_S = 120;
  *
  *   - generation 1: the pod template never changed, so nothing rolled db-0.
  *   - `.vc-reseeded-from` exists: the in-place swap ran.
+ *   - the db container's restartCount is at least 1: the swap came from a
+ *     restart inside this pod (a recreated pod starts at 0). One clock.
  *   - db-0 was created before that file's mtime: the swap ran in a pod that
  *     already existed, so it was not recreated for it.
  *   - the VolumeAttachment is no later than db-0's creation plus 120 s: one
@@ -624,6 +627,23 @@ export function evaluateStandbyCreatedOnce(state: DbAttachState): VerificationRe
     return fail(
       checkName,
       `the standby db-0 has no ${PGDATA}/.vc-reseeded-from: the cold deploy's in-place seed never swapped`,
+      details,
+    );
+  }
+  // The single-clock proof: the swap needs one container restart inside the
+  // pod, and a recreated pod starts at 0. The timestamps below corroborate.
+  if (typeof state.restartCount !== 'number') {
+    return fail(
+      checkName,
+      "the standby db container's restartCount was not read, so an in-place restart cannot be shown",
+      details,
+    );
+  }
+  if (state.restartCount < 1) {
+    return fail(
+      checkName,
+      `the standby db container's restartCount is ${state.restartCount}: the swap record did not ` +
+        'come from an in-place restart of this pod (a recreated pod starts at 0)',
       details,
     );
   }
@@ -690,11 +710,15 @@ export function evaluateReseedInPlace(
       details,
     );
   }
-  if (
-    typeof before.restartCount === 'number' &&
-    typeof after.restartCount === 'number' &&
-    after.restartCount <= before.restartCount
-  ) {
+  if (typeof before.restartCount !== 'number' || typeof after.restartCount !== 'number') {
+    return fail(
+      checkName,
+      `the db container's restartCount was not read (before: ${before.restartCount}, after: ` +
+        `${after.restartCount}), so an in-place restart cannot be shown`,
+      details,
+    );
+  }
+  if (after.restartCount <= before.restartCount) {
     return fail(
       checkName,
       `the db container's restartCount did not rise (${before.restartCount} -> ${after.restartCount}), ` +

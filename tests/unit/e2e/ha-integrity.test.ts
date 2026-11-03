@@ -441,6 +441,7 @@ describe('zero-transition reseed checks', () => {
       reseededAt: number | null;
       reseededFrom: string | null;
       generation: string;
+      restartCount: number | undefined;
     }>,
   ) => ({
     uid: 'u1',
@@ -450,8 +451,13 @@ describe('zero-transition reseed checks', () => {
     reseededAt: Date.parse('2026-11-02T10:05:00Z') / 1000,
     reseededFrom: 'att-1',
     generation: '1',
+    // The swap restarted the db container once inside the pod.
+    restartCount: 1,
     ...o,
   });
+  // The same pod after one more in-place restart, with a new swap id.
+  const next = (o: Parameters<typeof st>[0] = {}) =>
+    st({ reseededFrom: 'att-2', restartCount: 2, ...o });
   it('standby_db_created_once passes on an in-place reseed', () => {
     expect(evaluateStandbyCreatedOnce(st({})).status).toBe('pass');
   });
@@ -460,11 +466,15 @@ describe('zero-transition reseed checks', () => {
     ['the pod was created after the swap (recreated)', { podAt: '2026-11-02T10:06:00Z' }],
     ['a later re-attach', { vaAt: '2026-11-02T10:04:00Z' }],
     ['the template rolled', { generation: '2' }],
+    // A recreated pod starts at 0: the swap record came with the volume, not
+    // from a restart in this pod. One clock, no skew.
+    ['the db container never restarted in the pod', { restartCount: 0 }],
+    ['the restart count is unread', { restartCount: undefined }],
   ])('standby_db_created_once fails when %s', (_n, o) => {
     expect(evaluateStandbyCreatedOnce(st(o)).status).toBe('fail');
   });
   it('reseed_in_place: same uid and attachment across the step, new swap id', () => {
-    expect(evaluateReseedInPlace(st({}), st({ reseededFrom: 'att-2' })).status).toBe('pass');
+    expect(evaluateReseedInPlace(st({}), next()).status).toBe('pass');
     expect(evaluateReseedInPlace(st({}), st({ uid: 'u2', reseededFrom: 'att-2' })).status).toBe(
       'fail',
     );
@@ -479,9 +489,7 @@ describe('zero-transition reseed checks', () => {
 
   it('standby_db_created_once and reseed_in_place carry their check names', () => {
     expect(evaluateStandbyCreatedOnce(st({})).checkName).toBe('standby_db_created_once');
-    expect(evaluateReseedInPlace(st({}), st({ reseededFrom: 'att-2' })).checkName).toBe(
-      'reseed_in_place',
-    );
+    expect(evaluateReseedInPlace(st({}), next()).checkName).toBe('reseed_in_place');
   });
 
   it('reseed_in_place fails when no new swap ran across the step', () => {
@@ -490,9 +498,17 @@ describe('zero-transition reseed checks', () => {
     expect(same.errorMessage).toMatch(/att-1/);
     expect(evaluateReseedInPlace(st({}), st({ reseededFrom: null })).status).toBe('fail');
     // A first swap on a pod that had none before is a new swap.
-    expect(evaluateReseedInPlace(st({ reseededFrom: null, reseededAt: null }), st({})).status).toBe(
-      'pass',
-    );
+    expect(
+      evaluateReseedInPlace(st({ reseededFrom: null, reseededAt: null }), st({ restartCount: 2 }))
+        .status,
+    ).toBe('pass');
+  });
+
+  it('reseed_in_place fails closed when either restart count is unread', () => {
+    const before = evaluateReseedInPlace(st({ restartCount: undefined }), next());
+    expect(before.status).toBe('fail');
+    expect(before.errorMessage).toMatch(/restartCount/);
+    expect(evaluateReseedInPlace(st({}), next({ restartCount: undefined })).status).toBe('fail');
   });
 
   it('reseed_in_place compares the claim, the volume and the restart count when read', () => {
@@ -666,7 +682,7 @@ describe('zero-transition reseed checks', () => {
     expect(created.errorMessage).toMatch(/db is not running/);
     expect(checkStandbyDbCreatedOnce({ ip: IP, state: null }).status).toBe('fail');
     expect(checkStandbyDbCreatedOnce({ ip: IP, state: read }).status).toBe('pass');
-    const after = { ok: true as const, state: st({ reseededFrom: 'att-2' }) };
+    const after = { ok: true as const, state: next() };
     expect(checkReseedInPlace({ ip: IP, step: 'restore', before: read, after }).status).toBe(
       'pass',
     );
