@@ -934,9 +934,12 @@ describe('checkPromotionHistoryArchived', () => {
     expect(r.errorMessage).toMatch(/backupS3/);
   });
 
-  it('the probe runs in the db (compose and k8s) and carries no single quote', () => {
+  it("the history probe has no single quote: it is wrapped in bash -c '...' unescaped", () => {
+    expect(buildHistoryProbe()).not.toContain("'");
+  });
+
+  it('the probe runs in the db (compose and k8s)', () => {
     const p = buildHistoryProbe();
-    expect(p).not.toContain("'");
     expect(p).toContain('pg_walfile_name(pg_current_wal_lsn())');
     expect(buildHistoryRemoteCommand('compose-ha', 'acme')).toContain(
       'cd /opt/acme && docker compose exec -T db bash -c',

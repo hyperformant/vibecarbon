@@ -414,11 +414,15 @@ export async function readDbGeneration(
 
 /**
  * promoted_db_not_recreated: the promotion moved the wal-g role with one file
- * write and never recreated the promoted db (both HA modes). The db read on
- * the promotion target right before the failover (compose: container id; k8s:
- * db-0's pod uid) equals the one after it. On k8s the db StatefulSet is also
- * still at the generation it had before: the old role move (`kubectl set env`
- * on the db) changed the pod template, which bumps it and rolls db-0.
+ * write and never recreated the promoted db (both HA modes).
+ *
+ *   - compose: compares the db container id only, read on the promotion
+ *     target right before the failover and after it (a changed start time
+ *     alone is not a recreate). `generationBefore` is ignored.
+ *   - k8s: compares db-0's pod uid the same way, AND the db StatefulSet's
+ *     generation now against `generationBefore`: the old role move
+ *     (`kubectl set env` on the db) changed the pod template, which bumps the
+ *     generation and rolls db-0.
  */
 export async function checkPromotedDbNotRecreated(
   opts: SshArgs & {
@@ -532,7 +536,17 @@ export function buildHistoryRemoteCommand(mode: DeployMode, projectName: string)
 /** Keys under a prefix in the env's backup bucket. Injected in unit tests. */
 export type ListKeys = (prefix: string) => Promise<string[]>;
 
-/** The product's S3 client over the env's backup bucket, or why there is none. */
+/** The one public method of the product's S3 provider this check uses. */
+interface PrefixProbeCapableS3 {
+  hasObjectsWithPrefix(bucketName: string, prefix: string): Promise<boolean>;
+}
+
+/**
+ * The product's S3 client over the env's backup bucket, or why there is none.
+ * The history file is one key prefix (`<timeline prefix>.history`, compressed
+ * suffix after it), so a prefix probe through the public hasObjectsWithPrefix
+ * is the whole listing: the history key when it is there, nothing otherwise.
+ */
 async function defaultListKeys(
   projectDir: string,
   envPrefix: string,
@@ -542,20 +556,15 @@ async function defaultListKeys(
   if (!target) return `no backupS3 in ${envPrefix}'s .vibecarbon.json`;
   const creds = resolveObjectStorageCreds(provider);
   if ('missing' in creds) return `${creds.missing.join(' and ')} not set for ${provider}`;
-  const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
   const s3 = (await getObjectStorageProvider(
     provider,
     creds.accessKey,
     creds.secretKey,
     target.region,
-  )) as {
-    _send(cmd: unknown): Promise<{ Contents?: Array<{ Key?: string }> }>;
-  };
+  )) as PrefixProbeCapableS3;
   return async (prefix) => {
-    const res = await s3._send(
-      new ListObjectsV2Command({ Bucket: target.bucket, Prefix: prefix, MaxKeys: 1000 }),
-    );
-    return (res.Contents ?? []).map((c) => c.Key ?? '').filter(Boolean);
+    const historyKey = `${prefix}.history`;
+    return (await s3.hasObjectsWithPrefix(target.bucket, historyKey)) ? [historyKey] : [];
   };
 }
 
