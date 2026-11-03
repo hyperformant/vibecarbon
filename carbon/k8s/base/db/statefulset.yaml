@@ -263,21 +263,23 @@ spec:
               #    .vc-discard is only ever an unproven copy or a proven restore's old
               #    cluster the CLI was removing: garbage.
               rm -rf "$PGDATA/.vc-discard"
-              # A stale in-place reseed (db-guard.sh) must not survive onto the restored
-              # cluster: a later start would otherwise swap an old staged tree over it.
-              rm -rf "$PGDATA/.vc-reseed" "$PGDATA/.vc-reseed-ready" "$PGDATA/.vc-reseed-ready.tmp" "$PGDATA/.vc-reseed-in-progress" "$PGDATA/.vc-reseed-in-progress.tmp"
               if [ -f "$VC_MARKER" ] && [ "$(cat "$VC_MARKER")" = in ]; then
                 vc_root=unproven
               elif [ -f "$VC_MARKER" ]; then
                 vc_root=half-out
               elif [ -d "$PGDATA/.vc-prev" ]; then
                 vc_root=unproven
+              elif [ -e "$PGDATA/.vc-reseed-in-progress" ] || [ -L "$PGDATA/.vc-reseed-in-progress" ]; then
+                # An in-place reseed stopped mid-swap (db-guard.sh): PGDATA holds part
+                # of a tree, and the reseed's old one was garbage (D9). No fallback.
+                vc_root=unproven
               else
                 vc_root=live
               fi
               case "$vc_root" in
                 unproven)
-                  # .vc-prev holds the database from before; PGDATA an unproven copy.
+                  # .vc-prev (if any) holds the database from before; PGDATA an unproven
+                  # copy or a reseed's partial tree.
                   vc_mark in
                   mkdir -p "$PGDATA/.vc-discard"
                   vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-discard/"; done
@@ -296,6 +298,11 @@ spec:
                   vc_mark in
                   ;;
               esac
+              # A stale in-place reseed (db-guard.sh) must not survive onto the restored
+              # cluster: a later start would otherwise swap an old staged tree over it.
+              # Cleared only now, under this swap's marker, so a crash before it still
+              # finds the reseed state that rules PGDATA out as a fallback.
+              rm -rf "$PGDATA/.vc-reseed" "$PGDATA/.vc-reseed-ready" "$PGDATA/.vc-reseed-ready.tmp" "$PGDATA/.vc-reseed-in-progress" "$PGDATA/.vc-reseed-in-progress.tmp"
               find "$PGDATA/.vc-restore" -mindepth 1 -maxdepth 1 | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/"; done
               rmdir "$PGDATA/.vc-restore"
               # The slow removal goes before the marker: once the marker is gone, the

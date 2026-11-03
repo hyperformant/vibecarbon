@@ -147,14 +147,25 @@ for (const [label, build] of SCRIPTS) {
       expect(after, after.join('\n')).toEqual([]);
     });
 
-    it('clears a stale in-place reseed state right after the discard, before the swap (C16)', () => {
+    it('clears a stale in-place reseed state under the swap marker, before the swap moves in (C16)', () => {
       const discardIdx = lines.findIndex(
         (l, i) => i > fetchIdx && l === 'rm -rf "$PGDATA/.vc-discard"',
       );
       expect(discardIdx, 'no discard clear after the fetch').toBeGreaterThan(fetchIdx);
-      expect(lines[discardIdx + 1]).toBe(
+      const clear = lines.indexOf(
         'rm -rf "$PGDATA/.vc-reseed" "$PGDATA/.vc-reseed-ready" "$PGDATA/.vc-reseed-ready.tmp" "$PGDATA/.vc-reseed-in-progress" "$PGDATA/.vc-reseed-in-progress.tmp"',
       );
+      // After the root is settled (a reseed stopped mid-swap rules PGDATA out
+      // as a fallback, so its marker must outlive that decision), and before
+      // the staged tree moves in.
+      const decide = lines.findIndex(
+        (l, i) => i > discardIdx && /^elif \[ -e "\$PGDATA\/\.vc-reseed-in-progress" \]/.test(l),
+      );
+      const esac = lines.findIndex((l, i) => i > decide && l === 'esac');
+      const moveIn = lines.findIndex((l, i) => i > esac && /^find "\$PGDATA\/\.vc-restore/.test(l));
+      expect(decide, 'no reseed-in-progress root rule').toBeGreaterThan(discardIdx);
+      expect(clear).toBeGreaterThan(esac);
+      expect(clear).toBeLessThan(moveIn);
     });
 
     it("drops the staged tree's .vc-* by glob, after the fetch, never by a list", () => {
