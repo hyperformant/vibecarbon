@@ -52,6 +52,7 @@ const {
   walArchiveConfigSha,
 } = await import('../../../src/lib/deploy/k8s/k3s.js');
 const workload = await import('../../../src/lib/deploy/db-workload.js');
+const { standbyDbRebuildHint } = workload;
 
 const ROOT = join(__dirname, '../../..');
 const BASE = join(ROOT, 'carbon/k8s/base');
@@ -562,6 +563,22 @@ describe('awaitDbRollout — the failure says what is actually there', () => {
     const podGet = cmdCalls.find((a) => a.includes('pods'));
     expect(podGet).toEqual(dbPodListArgs());
     expect(podGet).toContain('app=vibecarbon-db');
+  });
+
+  it('a k8s-ha standby deploy names the manual rebuild when its db never becomes Ready (final review I2)', async () => {
+    scripted = [
+      { match: 'rollout status', exitCode: 1, stderr: 'error: timed out' },
+      { match: 'get pods', stdout: 'db-0   CrashLoopBackOff   <none>\n' },
+    ];
+    const hint = standbyDbRebuildHint('prod');
+    const withHint = String(
+      ((await awaitDbRollout({ env, timeoutS: 5, hint }).catch((e) => e)) as Error).message,
+    );
+    expect(withHint.endsWith(` ${hint}`)).toBe(true);
+    const without = String(
+      ((await awaitDbRollout({ env, timeoutS: 5 }).catch((e) => e)) as Error).message,
+    );
+    expect(without).not.toContain('Rebuilding a k8s-ha standby');
   });
 
   it('survives kubectl failing to list pods without inventing a pod state', async () => {

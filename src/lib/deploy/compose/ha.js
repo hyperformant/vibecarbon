@@ -35,6 +35,7 @@ import {
   composeWriterServices,
   enabledAddonNames,
 } from '../../services/standby-policy.js';
+import { shEscape } from '../../shell.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import { backupFenceWarning, recordBackupFence, writeComposeBackupFence } from '../backup-fence.js';
@@ -77,6 +78,7 @@ import {
   slotDropWarning,
 } from '../replication-slot.js';
 import { reconcileRetiredFence } from '../retired-fence.js';
+import { DB_LINEAGE_SQL, parseDbLineage, standbyLineageVerdict } from '../standby-lineage.js';
 import { TLS_FIRST_LOOK_BUDGET_MS, waitForTrustedTls } from '../tls-ready.js';
 import { readReplPassword } from '../utils.js';
 import {
@@ -464,6 +466,105 @@ ${ensureReplicationSlotSql()}
         `connections would be rejected with "no pg_hba.conf entry".`,
     );
   }
+}
+
+/** How long the compose lineage read waits for a just-recreated db to accept connections. */
+export const COMPOSE_LINEAGE_READY_WAIT_S = 60;
+
+/**
+ * One compose node's db lineage (standby-lineage.js DB_LINEAGE_SQL), read in
+ * its db container after one bounded wait for postgres to accept TCP
+ * connections (a db the deploy just recreated may still be starting; a
+ * first-boot temporary init server is socket-only, so only the real server
+ * passes). A condition poll with a deadline, never a retry. Unread parts are
+ * null; it never throws.
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string} projectName
+ * @param {{ run?: typeof sshRun }} [deps]
+ * @returns {Promise<ReturnType<typeof parseDbLineage> & { dbReady: boolean|null }>}
+ */
+export async function readComposeDbLineage(ip, sshKeyPath, projectName, { run = sshRun } = {}) {
+  const inner =
+    `vc_ready=0; vc_i=0; while [ "$vc_i" -lt ${COMPOSE_LINEAGE_READY_WAIT_S} ]; do ` +
+    'if pg_isready -q -h 127.0.0.1 -U postgres; then vc_ready=1; break; fi; ' +
+    'vc_i=$((vc_i + 1)); sleep 1; done; ' +
+    `printf 'ready=%s\\n' "$vc_ready"; ` +
+    `printf 'lineage=%s\\n' "$(psql -U postgres -d postgres -tAc '${DB_LINEAGE_SQL}' 2>/dev/null)"`;
+  const out = await run(
+    ip,
+    sshKeyPath,
+    `cd /opt/${projectName} && docker compose exec -T db sh -c ${shEscape(inner)}`,
+    { timeout: (COMPOSE_LINEAGE_READY_WAIT_S + 60) * 1000 },
+  );
+  const text = typeof out === 'string' ? out : '';
+  const ready = /^ready=(.*)$/m.exec(text)?.[1]?.trim();
+  return {
+    dbReady: ready === '1' ? true : ready === '0' ? false : null,
+    ...parseDbLineage(/^lineage=(.*)$/m.exec(text)?.[1] ?? ''),
+  };
+}
+
+/**
+ * The compose twin of the k8s cold reseed's lineage check
+ * (assertStandbyNotPromotedOutside, k8s/ha/index.js), over the same verdict
+ * (standby-lineage.js): a standby promoted outside the CLI is never
+ * overwritten, unless it is exactly the copy `failover -abort` recorded as
+ * discardable. Throws before anything is staged or stopped.
+ *
+ * @param {object} o
+ * @param {ReturnType<typeof parseDbLineage> & { dbReady?: boolean|null }} o.target the standby's lineage
+ * @param {ReturnType<typeof parseDbLineage>} o.source the primary's lineage
+ * @param {string} o.standbyIp
+ * @param {string} o.primaryIp
+ * @param {string} o.projectName
+ * @param {string} [o.envName]
+ * @param {object|null} [o.discardable] the env's ha.discardableStandby
+ * @returns {'standby'|'fresh'|'retired'|'discardable'}
+ */
+export function assertComposeStandbyNotPromotedOutside({
+  target,
+  source,
+  standbyIp,
+  primaryIp,
+  projectName,
+  envName,
+  discardable = null,
+}) {
+  const verdict = standbyLineageVerdict({ target, source, standbyIp, discardable });
+  const env = envName || '<env>';
+  if (verdict === 'target-unread') {
+    const why =
+      target?.dbReady === false
+        ? `its db did not accept connections within ${COMPOSE_LINEAGE_READY_WAIT_S}s`
+        : `its recovery state, system identifier and timeline could not be read`;
+    throw new Error(
+      `reseed refused: the standby ${standbyIp} is not proven in recovery and ${why}, so it ` +
+        'cannot be told apart from a primary promoted outside vibecarbon. Nothing was staged or ' +
+        `stopped. Check that its db answers (ssh root@${standbyIp} 'cd /opt/${projectName} && ` +
+        `docker compose exec -T db psql -U postgres -c "SELECT 1"'), then rerun \`vibecarbon deploy ${env}\`.`,
+    );
+  }
+  if (verdict === 'source-unread') {
+    throw new Error(
+      `reseed refused: the primary ${primaryIp}'s system identifier and timeline could not be read, ` +
+        `so the standby ${standbyIp} (not in recovery) cannot be proven safe to overwrite. Nothing was ` +
+        `staged or stopped. Rerun \`vibecarbon deploy ${env}\` once the primary's db answers.`,
+    );
+  }
+  if (verdict === 'promoted') {
+    throw new Error(
+      `reseed refused: the standby ${standbyIp} looks promoted outside vibecarbon. It is not in ` +
+        `recovery and runs timeline ${target.timeline} of the same database (system identifier ` +
+        `${target.systemIdentifier}) as the configured primary ${primaryIp}, which is on timeline ` +
+        `${source.timeline}: it has taken writes the primary never saw, and reseeding it would ` +
+        'overwrite them. Nothing was staged or stopped. If it should be the primary, adopt it with ' +
+        `\`vibecarbon failover ${env}\`; otherwise decide by hand which copy to keep (back it up ` +
+        `first), then rerun \`vibecarbon deploy ${env}\`.`,
+    );
+  }
+  return verdict;
 }
 
 /**
@@ -1809,6 +1910,13 @@ export function composeFailoverAbortBackend({
   return {
     ips: { primary: primaryServer.ip, standby: standbyServer.ip },
     stopDbHint: `ssh root@${standbyServer.ip} 'docker stop ${dbCt}'`,
+    readStandbyLineage: async () => {
+      try {
+        return parseDbLineage(await psql(standbyServer.ip, sshKeyPath, remoteDir)(DB_LINEAGE_SQL));
+      } catch {
+        return null;
+      }
+    },
     unfenceHint: `ssh root@${primaryServer.ip} 'cd ${remoteDir} && docker compose exec -T db ${UNFENCE_SQL_HINT}'`,
     stopStandbyDb: async () => {
       const out = await run(

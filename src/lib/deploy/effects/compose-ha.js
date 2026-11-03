@@ -43,6 +43,7 @@ import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '
 import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
+  assertComposeStandbyNotPromotedOutside,
   buildReplicationOverlay,
   composePsqlRunner,
   configurePrimaryReplication,
@@ -50,6 +51,7 @@ import {
   ensurePrimaryReplicationAccess,
   openWireguardPortHetznerFirewall,
   openWireguardPortUfw,
+  readComposeDbLineage,
 } from '../compose/ha.js';
 import { assertReseedTargetNotServing, composeHaStackOf } from '../compose/ha-role-swap.js';
 import {
@@ -77,6 +79,11 @@ import {
 } from '../replication.js';
 import { clearRetiredFence, fenceRetiredNode } from '../retired-fence.js';
 import { envS3Record } from '../s3-record.js';
+import {
+  clearDiscardableStandby,
+  discardableReseedLine,
+  readDiscardableStandby,
+} from '../standby-lineage.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
 import { writeComposeWalgRole } from '../walg-role.js';
 import { exchangeAndBringUpTunnel, wgIpOf } from '../wireguard.js';
@@ -1033,6 +1040,30 @@ async function haConfigureReplication(ctx) {
       p.log.info('Standby already streaming from the primary, skipping the reseed');
       return;
     }
+    // The lineage check, before anything is staged or stopped: a standby
+    // promoted outside vibecarbon is never overwritten, unless it is exactly
+    // the copy a `failover -abort` recorded as discardable (the k8s cold
+    // reseed's check, standby-lineage.js). A refusal fails the deploy here,
+    // never a warning: the reseed must not run.
+    const discardable = readDiscardableStandby(ctx.environment, loadProjectConfig);
+    const [target, source] = await Promise.all([
+      readComposeDbLineage(standby.ip, sshKeyPath, projectName),
+      readComposeDbLineage(primary.ip, sshKeyPath, projectName),
+    ]);
+    const verdict = assertComposeStandbyNotPromotedOutside({
+      target,
+      source,
+      standbyIp: standby.ip,
+      primaryIp: primary.ip,
+      projectName,
+      envName: ctx.environment,
+      discardable,
+    });
+    if (verdict === 'discardable') {
+      p.log.info(
+        discardableReseedLine({ standbyIp: standby.ip, target, envName: ctx.environment }),
+      );
+    }
     ctx.onProgress('Configuring standby as hot replica...');
     let replicationOk = false;
     try {
@@ -1048,6 +1079,10 @@ async function haConfigureReplication(ctx) {
     }
     if (!replicationOk) {
       p.log.warn('Replication setup may not have completed: verify manually');
+    } else if (discardable) {
+      // The reseed replaced the standby's data directory: the copy the abort
+      // gave up is gone, and so is the record that let it be overwritten.
+      clearDiscardableStandby(ctx.environment);
     }
   });
 }

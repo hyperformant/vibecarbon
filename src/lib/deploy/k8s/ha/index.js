@@ -27,7 +27,7 @@ import {
 import { perfAsync } from '../../../perf.js';
 import { shJoin } from '../../../shell.js';
 import { scpWithRetry, sshRun } from '../../../ssh.js';
-import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from '../../db-workload.js';
+import { DB_CONTAINER, DB_POD, DB_STATEFULSET, standbyDbRebuildHint } from '../../db-workload.js';
 import {
   buildInPlaceReseedStageScript,
   buildReplicationHbaLines,
@@ -41,6 +41,7 @@ import {
   SYSTEM_IDENTIFIER_SQL,
   verifyStreaming,
 } from '../../replication.js';
+import { discardableReseedLine, standbyLineageVerdict } from '../../standby-lineage.js';
 import { readReplPassword } from '../../utils.js';
 import {
   exchangeAndBringUpTunnel,
@@ -664,13 +665,18 @@ export function standbyKubectlCommand(argv) {
  *     directory. Say so; a standby with no slots (a fresh cluster) gets no
  *     such note.
  *
+ *   - A standby db that does not run (the guard's not-running refusal, or a
+ *     db that never accepted connections) has no reseed path of its own:
+ *     name the manual rebuild (standbyDbRebuildHint).
+ *
  * @param {unknown} error
- * @param {{slotCount: number|null}} o the guard's slot count (null: no guard verdict, or unread)
+ * @param {{slotCount: number|null, envName?: string}} o the guard's slot count (null: no guard verdict, or unread)
  * @returns {Error}
  */
-export function coldReseedError(error, { slotCount }) {
+export function coldReseedError(error, { slotCount, envName }) {
   if (error?.reseedSwapped) return error;
   let message = String(error?.message ?? error);
+  if (error?.dbNotRunning === true) message += ` ${standbyDbRebuildHint(envName)}`;
   if (error instanceof DbGuardMissingError) {
     message =
       "the standby db pod is not running the db-guard wrapper after this deploy's apply; " +
@@ -703,7 +709,9 @@ export class StandbyPromotedOutsideError extends Error {
  * never saw. Refuse that, before anything is staged or stopped.
  *
  * A target in recovery is a standby, whatever its timeline. A target outside
- * recovery whose lineage cannot be read is not reseeded blind.
+ * recovery whose lineage cannot be read is not reseeded blind. The one
+ * promotion it lets through is the copy `failover -abort` recorded as
+ * discardable (standby-lineage.js): same address, identifier and timeline.
  *
  * @param {object} o
  * @param {{inRecovery?: string, systemIdentifier?: string|null, timeline?: number|null}} o.target the guard's readings
@@ -711,31 +719,44 @@ export class StandbyPromotedOutsideError extends Error {
  * @param {string} o.standbyIp
  * @param {string} o.primaryIp
  * @param {string} [o.envName]
+ * @param {object|null} [o.discardable] the env's ha.discardableStandby
+ * @returns {'standby'|'fresh'|'retired'|'discardable'} why the reseed may proceed
  */
-export function assertStandbyNotPromotedOutside({ target, source, standbyIp, primaryIp, envName }) {
-  if (target?.inRecovery === 't') return;
+export function assertStandbyNotPromotedOutside({
+  target,
+  source,
+  standbyIp,
+  primaryIp,
+  envName,
+  discardable = null,
+}) {
+  const verdict = standbyLineageVerdict({ target, source, standbyIp, discardable });
+  if (verdict !== 'target-unread' && verdict !== 'source-unread' && verdict !== 'promoted') {
+    return verdict;
+  }
   const env = envName || '<env>';
-  if (!target?.systemIdentifier || !Number.isInteger(target?.timeline)) {
+  if (verdict === 'target-unread') {
     const why =
       target?.dbReady === false
         ? `its db did not accept connections within the guard's ${DB_GUARD_READY_WAIT_S}s readiness wait (pg_isready -h 127.0.0.1 -U postgres)`
         : `its system identifier and timeline could not be read after the guard's ${DB_GUARD_READY_WAIT_S}s readiness wait (pg_isready -h 127.0.0.1 -U postgres)`;
-    throw new StandbyPromotedOutsideError(
+    const error = new StandbyPromotedOutsideError(
       `reseed refused: the standby ${standbyIp} is not in recovery and ${why}, so it cannot be told ` +
         'apart from a primary promoted outside vibecarbon. Nothing was staged or stopped. Check that its db answers ' +
         `(kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -c 'SELECT 1'), ` +
         `then rerun \`vibecarbon deploy ${env}\`.`,
     );
+    // A db that never accepted connections may be one that cannot start.
+    error.dbNotRunning = target?.dbReady === false;
+    throw error;
   }
-  if (!source?.systemIdentifier || !Number.isInteger(source?.timeline)) {
+  if (verdict === 'source-unread') {
     throw new StandbyPromotedOutsideError(
       `reseed refused: the primary ${primaryIp}'s system identifier and timeline could not be read, ` +
         `so the standby ${standbyIp} (not in recovery) cannot be proven safe to overwrite. Nothing was ` +
         `staged or stopped. Rerun \`vibecarbon deploy ${env}\` once the primary's db answers.`,
     );
   }
-  if (target.systemIdentifier !== source.systemIdentifier) return; // a fresh initdb
-  if (target.timeline <= source.timeline) return; // a retired old primary
   throw new StandbyPromotedOutsideError(
     `reseed refused: the standby ${standbyIp} looks promoted outside vibecarbon. It is not in ` +
       `recovery and runs timeline ${target.timeline} of the same database (system identifier ` +
@@ -771,9 +792,12 @@ function parsePodIdentity(podJson) {
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
  * @param {string} [options.envName] - the environment (named in the reseed's refusals)
  * @param {number} [options.attachWatchPollMs] - test seam: watchDbAttach's poll interval when the reseed's restart recreated the pod
+ * @param {object|null} [options.discardableStandby] the env's ha.discardableStandby: the
+ *   standby copy a `failover -abort` gave up, which the lineage check lets the reseed overwrite
  * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort check, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
- * @returns {Promise<{streaming: boolean, lastState: string, systemIdentifier: string|null}>} Replication status;
- *   systemIdentifier is the standby's, set only when streaming was verified
+ * @returns {Promise<{streaming: boolean, lastState: string, systemIdentifier: string|null, reseeded?: true}>} Replication status;
+ *   systemIdentifier is the standby's, set only when streaming was verified;
+ *   reseeded once the in-place swap replaced the standby's data directory
  */
 export async function setupReplication(options) {
   const { primaryIp, standbyIp, sshKeyPath } = options;
@@ -979,7 +1003,8 @@ export async function setupReplication(options) {
       if (i === 59) {
         throw new Error(
           `standby db pod ${DB_POD} is not Running (sts may have been scaled down by a prior ` +
-            `failed deploy and did not come back), cannot reseed the standby.`,
+            `failed deploy and did not come back), cannot reseed the standby. ` +
+            standbyDbRebuildHint(options.envName),
         );
       }
       await new Promise((r) => setTimeout(r, i < 5 ? 1000 : 5000));
@@ -1012,13 +1037,19 @@ export async function setupReplication(options) {
         // a standby promoted outside the CLI is never overwritten.
         beforeStage: async () => {
           const source = await prepareReseedSource(primaryKubectl, { envName: options.envName });
-          assertStandbyNotPromotedOutside({
+          const verdict = assertStandbyNotPromotedOutside({
             target: guard,
             source,
             standbyIp,
             primaryIp,
             envName: options.envName,
+            discardable: options.discardableStandby ?? null,
           });
+          if (verdict === 'discardable') {
+            p.log.info(
+              discardableReseedLine({ standbyIp, target: guard, envName: options.envName }),
+            );
+          }
           return source;
         },
         stageProbeS: inPlaceProbeBudgetS(PROBE_ATTEMPTS, PROBE_DELAY_S),
@@ -1036,7 +1067,7 @@ export async function setupReplication(options) {
       }),
     );
   } catch (error) {
-    throw coldReseedError(error, { slotCount: guard?.slotCount ?? null });
+    throw coldReseedError(error, { slotCount: guard?.slotCount ?? null, envName: options.envName });
   }
 
   // RESEED_SKIPPED is LOUD here: the deploy hard-gates on streaming, so a
@@ -1112,5 +1143,6 @@ export async function setupReplication(options) {
     streaming,
     lastState,
     systemIdentifier: streaming ? await readStandbySystemIdentifier() : null,
+    reseeded: true,
   };
 }

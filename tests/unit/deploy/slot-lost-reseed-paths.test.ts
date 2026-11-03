@@ -104,6 +104,9 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     composeCalls.push({ command: c, input: options?.input });
     // The lost slot: the primary sees no streaming standby.
     if (c.includes('pg_stat_replication') && c.includes('ORDER BY')) return '';
+    // The cold reseed's lineage read (readComposeDbLineage): a standby that
+    // lost its slot is still in recovery.
+    if (c.includes('pg_control_system')) return 'ready=1\nlineage=t|7412345678901234567|\n';
     if (c.includes('pg_is_in_recovery')) return 't';
     if (c.includes('SHOW hba_file')) return '/var/lib/postgresql/data/pg_hba.conf';
     if (c.includes('pg_isready')) return 'accepting connections';

@@ -62,6 +62,12 @@ const fakeBackend = (over: Record<string, unknown> = {}) => {
       ips: { primary: '10.0.0.1', standby: '10.0.0.2' },
       stopDbHint: "ssh root@10.0.0.2 'docker stop myapp-db'",
       unfenceHint: 'psql -c reset',
+      // The failover never promoted: the standby is still in recovery.
+      readStandbyLineage: step('readStandbyLineage', {
+        inRecovery: true,
+        systemIdentifier: JOURNAL.systemIdentifier,
+        timeline: null,
+      }),
       stopStandbyDb: step('stopStandbyDb', { ok: true }),
       disarmStandby: step('disarmStandby', true),
       repointDns: step('repointDns', { ok: true }),
@@ -110,7 +116,7 @@ describe('abortFailover: order and refusals', () => {
     await expect(result).rejects.toThrow(
       /could not prove the standby's database \(10\.0\.0\.2\) stopped \(the node did not answer\).*docker stop myapp-db.*rerun vibecarbon failover prod -abort/,
     );
-    expect(calls).toEqual(['stopStandbyDb']);
+    expect(calls).toEqual(['readStandbyLineage', 'stopStandbyDb']);
     expect(record).not.toHaveBeenCalled();
   });
 
@@ -119,6 +125,7 @@ describe('abortFailover: order and refusals', () => {
     const { result, record, warnings } = run(journalEnv(), backend);
     await expect(result).resolves.toEqual({ fenceLifted: true, warnings: [] });
     expect(calls).toEqual([
+      'readStandbyLineage',
       'stopStandbyDb',
       'disarmStandby',
       'repointDns',
@@ -130,7 +137,11 @@ describe('abortFailover: order and refusals', () => {
     ]);
     expect(record).toHaveBeenCalledWith(
       { environment: 'prod' },
-      { fenceLifted: true, backupFence: { written: true, at: expect.any(String) } },
+      {
+        fenceLifted: true,
+        backupFence: { written: true, at: expect.any(String) },
+        discardableStandby: null,
+      },
     );
     expect(warnings).toEqual([]);
   });
@@ -142,7 +153,7 @@ describe('abortFailover: order and refusals', () => {
     expect(calls).not.toContain('unfencePrimary');
     expect(record).toHaveBeenCalledWith(
       { environment: 'prod' },
-      { fenceLifted: false, backupFence: null },
+      { fenceLifted: false, backupFence: null, discardableStandby: null },
     );
     expect(warnings.join('\n')).toMatch(/does not answer.*next vibecarbon deploy prod/);
   });
@@ -153,7 +164,11 @@ describe('abortFailover: order and refusals', () => {
     await expect(result).resolves.toMatchObject({ fenceLifted: false });
     expect(record).toHaveBeenCalledWith(
       { environment: 'prod' },
-      { fenceLifted: false, backupFence: { written: true, at: expect.any(String) } },
+      {
+        fenceLifted: false,
+        backupFence: { written: true, at: expect.any(String) },
+        discardableStandby: null,
+      },
     );
     expect(warnings.join('\n')).toMatch(/could not lift the database write fence.*psql -c reset/);
   });
@@ -170,6 +185,61 @@ describe('abortFailover: order and refusals', () => {
       /token unset.*A records \(apex and wildcard\) to 10\.0\.0\.1/,
     );
   });
+});
+
+describe('abortFailover: the standby copy it gives up (final review I1)', () => {
+  const PROMOTED = { inRecovery: false, systemIdentifier: JOURNAL.systemIdentifier, timeline: 3 };
+
+  it('a standby the promote reached is read BEFORE it is stopped and recorded as discardable', async () => {
+    const { calls, backend } = fakeBackend({
+      readStandbyLineage: async () => {
+        calls.push('readStandbyLineage');
+        return PROMOTED;
+      },
+    });
+    const { result, record, lines, warnings } = run(journalEnv(), backend);
+    await result;
+    expect(calls.slice(0, 2)).toEqual(['readStandbyLineage', 'stopStandbyDb']);
+    expect(record.mock.calls[0][1].discardableStandby).toEqual({
+      ip: '10.0.0.2',
+      systemIdentifier: JOURNAL.systemIdentifier,
+      timeline: 3,
+      at: expect.any(String),
+    });
+    expect(lines.join('\n')).toMatch(
+      /standby 10\.0\.0\.2 was out of recovery on timeline 3[\s\S]*next vibecarbon deploy prod reseeds over it/,
+    );
+    expect(warnings).toEqual([]);
+  });
+
+  it('a standby still in recovery needs no record and gets no warning', async () => {
+    const { backend } = fakeBackend();
+    const { result, record, warnings } = run(journalEnv(), backend);
+    await result;
+    expect(record.mock.calls[0][1].discardableStandby).toBeNull();
+    expect(warnings).toEqual([]);
+  });
+
+  it.each([
+    ['answers nothing', async () => null],
+    [
+      'throws',
+      async () => {
+        throw new Error('ssh: connect refused');
+      },
+    ],
+  ])(
+    'a standby whose lineage read %s: no record, and a warning naming the deploy refusal and the doc',
+    async (_n, read) => {
+      const { backend } = fakeBackend({ readStandbyLineage: read });
+      const { result, record, warnings } = run(journalEnv(), backend);
+      await expect(result).resolves.toMatchObject({ fenceLifted: true });
+      expect(record.mock.calls[0][1].discardableStandby).toBeNull();
+      expect(warnings.join('\n')).toMatch(
+        /could not read the standby's lineage \(10\.0\.0\.2\)[\s\S]*the next deploy refuses to reseed it[\s\S]*docs\/technical\.md[\s\S]*vibecarbon deploy prod$/,
+      );
+    },
+  );
 });
 
 describe('recordFailoverAbort: the one save', () => {
@@ -203,6 +273,20 @@ describe('recordFailoverAbort: the one save', () => {
     expect(after.replication).toBe('degraded');
     expect(after.degraded).toBe(true);
     expect(after.servers).toHaveLength(2);
+  });
+
+  it('records the discardable standby, and an abort that read none drops an older record', () => {
+    const rec = {
+      ip: '10.0.0.2',
+      systemIdentifier: JOURNAL.systemIdentifier,
+      timeline: 3,
+      at: 'x',
+    };
+    seed(journalEnv() as Record<string, unknown>);
+    recordFailoverAbort({ environment: 'prod' }, { fenceLifted: true, discardableStandby: rec });
+    expect(readEnv().ha.discardableStandby).toEqual(rec);
+    recordFailoverAbort({ environment: 'prod' }, { fenceLifted: true });
+    expect(readEnv().ha).not.toHaveProperty('discardableStandby');
   });
 
   it('keeps the write-fence marker when the lift was not proven', () => {
@@ -389,6 +473,38 @@ describe('compose-ha abort backend', () => {
   });
 });
 
+describe('compose-ha abort backend: the lineage read', () => {
+  it("reads the standby's lineage in its db container, and an error reads as none", async () => {
+    const seen: string[] = [];
+    const backendWith = (answer: () => Promise<string>) =>
+      composeFailoverAbortBackend({
+        envName: 'prod',
+        envConfig: journalEnv(),
+        projectName: 'myapp',
+        sshKeyPath: '/k',
+        deps: {
+          psql: (ip: string, _k: string, dir: string) => async (sql: string) => {
+            seen.push(`${ip} ${dir} ${sql}`);
+            return answer();
+          },
+        },
+      });
+    await expect(
+      backendWith(async () => `f|${JOURNAL.systemIdentifier}|00000003`).readStandbyLineage(),
+    ).resolves.toEqual({
+      inRecovery: false,
+      systemIdentifier: JOURNAL.systemIdentifier,
+      timeline: 3,
+    });
+    expect(seen[0]).toMatch(/^10\.0\.0\.2 \/opt\/myapp SELECT pg_is_in_recovery\(\)/);
+    await expect(
+      backendWith(async () => {
+        throw new Error('ssh failed');
+      }).readStandbyLineage(),
+    ).resolves.toBeNull();
+  });
+});
+
 describe('k8s-ha abort backend', () => {
   const envConfig = {
     deployMode: 'kubernetes',
@@ -418,6 +534,38 @@ describe('k8s-ha abort backend', () => {
     });
     return { backend, calls, scale };
   };
+
+  it("reads the standby's lineage through psql on the standby cluster, and an error reads as none", async () => {
+    const sqls: Array<{ ip: string; sql: string }> = [];
+    const backendWith = (answer: () => Promise<string>) =>
+      k8sFailoverAbortBackend({
+        envName: 'prod',
+        envConfig,
+        strategy: {},
+        deps: {
+          sshKeyPath: '/k',
+          kubectl: async () => '',
+          psql: (ip: string) => async (sql: string) => {
+            sqls.push({ ip, sql });
+            return answer();
+          },
+        },
+      });
+    await expect(
+      backendWith(async () => `f|${JOURNAL.systemIdentifier}|00000003\n`).readStandbyLineage(),
+    ).resolves.toEqual({
+      inRecovery: false,
+      systemIdentifier: JOURNAL.systemIdentifier,
+      timeline: 3,
+    });
+    expect(sqls[0].ip).toBe('10.2.0.1');
+    expect(sqls[0].sql).toContain('pg_control_system()');
+    await expect(
+      backendWith(async () => {
+        throw new Error('pod db-0 not found');
+      }).readStandbyLineage(),
+    ).resolves.toBeNull();
+  });
 
   it('scales the standby db StatefulSet to zero and proves its pod gone', async () => {
     const { backend, calls } = make(() => '');

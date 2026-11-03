@@ -44,6 +44,11 @@ const ALLOWED: Record<string, string> = {
   // The retirement fence: 'f' (out of recovery) means the retired db can take
   // writes, so it is made read-only. It fences; it never promotes.
   'src/lib/deploy/retired-fence.js': 'decides to fence a writable retired db, never to promote',
+  // The cold reseed's lineage read (parseDbLineage): 'f' only sends the
+  // standby on to the system identifier and timeline comparison, which is
+  // what tells a promotion apart. It never promotes and never infers one.
+  'src/lib/deploy/standby-lineage.js':
+    'parses the lineage row; the timeline comparison, not recovery, decides',
 };
 
 /** A comparison against the literal 'f' (either side, any quote, == or ===). */

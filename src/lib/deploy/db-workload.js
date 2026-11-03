@@ -43,3 +43,32 @@ export const DB_GUARD_PROTOCOL_MARKER = '# vc-reseed-protocol: 1';
 
 /** The db container's command when it runs the wrapper (statefulset.yaml). */
 export const DB_GUARD_COMMAND = Object.freeze(['sh', '/usr/local/bin/db-guard.sh']);
+
+/** The docs/technical.md section that walks the rebuild below. */
+export const STANDBY_DB_REBUILD_DOC =
+  'docs/technical.md, "Rebuilding a k8s-ha standby whose db cannot start"';
+
+/**
+ * What a cold deploy says when the k8s-ha STANDBY's db cannot run: the one
+ * manual way back (a CLI command for it is a tracked follow-up). On the
+ * standby cluster, its db pod and volume go, the StatefulSet makes a fresh
+ * volume (initdb, its own system identifier), and the next deploy's cold
+ * reseed seeds it in place from the primary, the same path a brand-new
+ * standby cluster takes. Never for the primary: its volume is the data.
+ *
+ * @param {string} [envName]
+ * @returns {string}
+ */
+export function standbyDbRebuildHint(envName) {
+  const env = envName || '<env>';
+  const k = (args) => `\`kubectl ${args} -n vibecarbon\``;
+  return (
+    "If the standby's postgres cannot start at all (a crash loop, a damaged data directory), " +
+    'rebuild its db on the STANDBY cluster (never the primary) with ' +
+    `${k(`scale statefulset/${DB_STATEFULSET} --replicas=0`)} then ` +
+    `${k(`wait --for=delete pod/${DB_POD} --timeout=600s`)} then ` +
+    `${k(`delete pvc ${DB_PVC}`)} then ` +
+    `${k(`scale statefulset/${DB_STATEFULSET} --replicas=1`)} and then ` +
+    `\`vibecarbon deploy ${env}\` seeds it from the primary (${STANDBY_DB_REBUILD_DOC})`
+  );
+}

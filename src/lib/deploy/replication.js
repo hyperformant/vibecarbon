@@ -1883,6 +1883,7 @@ function evaluateDbGuardPod(podJson) {
   ) {
     return {
       ok: false,
+      notRunning: true,
       reason: `the db container is not running (${describeContainerState(status)})`,
     };
   }
@@ -1970,7 +1971,11 @@ export async function assertLiveDbGuardSupportsReseed(
         { reason: verdict.reason },
       );
     }
-    return new Error(`reseed refused: ${verdict.reason}`);
+    // A db that is not running is named as such, so the cold deploy can add
+    // the rebuild procedure (coldReseedError); failover and restore cannot.
+    return Object.assign(new Error(`reseed refused: ${verdict.reason}`), {
+      dbNotRunning: verdict.notRunning === true,
+    });
   };
   const podJson = await kubectl(DB_POD_GET_ARGV, { timeout: 30_000 });
   const podVerdict = evaluateDbGuardPod(podJson);

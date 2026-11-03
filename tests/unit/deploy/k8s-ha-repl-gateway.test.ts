@@ -726,6 +726,54 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
   }, 20000);
 
+  it('abort then deploy: the promoted copy `failover -abort` recorded as discardable is reseeded (final review I1)', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ markerGrep: PROMOTED_OUTSIDE }));
+    const res = await runWithFakeTimers(() =>
+      setupReplication({
+        ...opts,
+        envName: 'prod',
+        discardableStandby: { ip: '2.2.2.2', systemIdentifier: SOURCE_SYSID, timeline: 3, at: 'x' },
+      }),
+    );
+    expect(res).toMatchObject({ streaming: true, reseeded: true });
+    const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
+    expect(flatCalls.filter((c) => c.includes('kill -INT 1'))).toHaveLength(1);
+  }, 20000);
+
+  it.each([
+    ['another system identifier', { systemIdentifier: '7000000000000000009', timeline: 3 }],
+    ['another timeline', { systemIdentifier: SOURCE_SYSID, timeline: 4 }],
+    ['another standby address', { ip: '9.9.9.9', systemIdentifier: SOURCE_SYSID, timeline: 3 }],
+  ])(
+    'a discardable record for %s does not unlock the promoted standby',
+    async (_n, rec) => {
+      vi.mocked(runCommandAsync).mockClear();
+      vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ markerGrep: PROMOTED_OUTSIDE }));
+      const err = await runWithFakeTimers(() =>
+        setupReplication({ ...opts, discardableStandby: { ip: '2.2.2.2', at: 'x', ...rec } }),
+      ).catch((e) => e);
+      expect(String(err?.message)).toMatch(/standby 2\.2\.2\.2 looks promoted outside vibecarbon/);
+      const calls = vi.mocked(runCommandAsync).mock.calls;
+      expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+    },
+    20000,
+  );
+
+  it('a standby already streaming is no reseed: the result does not claim one', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(async (argv: string[]) => {
+      const cmd = flat(argv);
+      if (cmd.includes('pg_stat_replication')) return 'streaming';
+      if (cmd.includes('pg_control_system')) return SOURCE_SYSID;
+      if (cmd.includes('get statefulset db') && cmd.includes('-o json')) return STS_JSON;
+      return '';
+    });
+    const res = await runWithFakeTimers(() => setupReplication(opts));
+    expect(res.streaming).toBe(true);
+    expect(res).not.toHaveProperty('reseeded');
+  }, 20000);
+
   it('a standby db still starting is waited for inside the guard exec (bounded), then reseeded', async () => {
     // The guard exec's pg_isready wait outlasted the start-up (ready=1): its
     // reads are whole, the lineage passes, the reseed proceeds. The exec's
@@ -751,11 +799,48 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(String(err?.message)).toMatch(
       /its db did not accept connections within the guard's 60s readiness wait \(pg_isready -h 127\.0\.0\.1 -U postgres\)[\s\S]*Nothing was staged or stopped/,
     );
+    // A db that never answers may be one that cannot start: the deploy names
+    // the manual rebuild (final review I2).
+    expect(String(err?.message)).toMatch(
+      /delete pvc data-db-0[\s\S]*`vibecarbon deploy <env>` seeds it from the primary/,
+    );
     const calls = vi.mocked(runCommandAsync).mock.calls;
     expect(calls.some(([, o]) => (o as { input?: string })?.input?.includes('pg_basebackup'))).toBe(
       false,
     );
     expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+  }, 20000);
+
+  it('a standby db container that is not running is refused with the manual rebuild (final review I2)', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    const base = inPlaceExec();
+    vi.mocked(runCommandAsync).mockImplementation(
+      async (argv: string[], o2?: { input?: string }) => {
+        const cmd = flat(argv);
+        if (cmd.includes('get pod db-0') && cmd.includes('-o json')) {
+          const pod = JSON.parse(guardPod({ rc: 7, cid: 'c1' }));
+          pod.status.containerStatuses[0].state = { waiting: { reason: 'CrashLoopBackOff' } };
+          return JSON.stringify(pod);
+        }
+        return base(argv, o2);
+      },
+    );
+    const err = await runWithFakeTimers(() => setupReplication({ ...opts, envName: 'prod' })).catch(
+      (e) => e,
+    );
+    expect(String(err?.message)).toMatch(
+      /reseed refused: the db container is not running \(CrashLoopBackOff, restartCount 7[\s\S]*rebuild its db on the STANDBY cluster[\s\S]*delete pvc data-db-0[\s\S]*`vibecarbon deploy prod`/,
+    );
+    const calls = vi.mocked(runCommandAsync).mock.calls;
+    expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+  }, 20000);
+
+  it('a reseed refusal for any other reason names no rebuild', async () => {
+    vi.mocked(runCommandAsync).mockClear();
+    vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ intent: 'primary' }));
+    const err = await runWithFakeTimers(() => setupReplication(opts)).catch((e) => e);
+    expect(String(err?.message)).toMatch(/reseed refused/);
+    expect(String(err?.message)).not.toMatch(/delete pvc/);
   }, 20000);
 
   it('a standby that answered the wait but whose lineage still cannot be read is not reseeded blind', async () => {

@@ -95,7 +95,14 @@ import {
 import { assertRestoredPrimaryWritable } from '../../walg/restore-marker.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
-import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
+import {
+  DB_CONTAINER,
+  DB_POD,
+  DB_POD_SELECTOR,
+  DB_PVC,
+  DB_STATEFULSET,
+  standbyDbRebuildHint,
+} from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
 import {
@@ -2403,10 +2410,15 @@ export async function assertNoRetiredChartDb({
  * once the mkfs-on-a-missing-device signature has held it stops and names
  * that state. It repairs nothing and retries nothing.
  *
- * @param {{env: NodeJS.ProcessEnv, timeoutS?: number, staleAttachPollMs?: number, waitRollout?: typeof runKubectlWithRetry, kubectl?: (argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>}} args
+ * A k8s-ha standby's deploy passes `hint` (standbyDbRebuildHint): its db
+ * holds only a replica, so a db that never becomes Ready there has a manual
+ * way back, which a timeout names.
+ *
+ * @param {{env: NodeJS.ProcessEnv, timeoutS?: number, staleAttachPollMs?: number, waitRollout?: typeof runKubectlWithRetry, kubectl?: (argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>, hint?: string}} args
  */
 export async function awaitDbRollout({
   env,
+  hint = '',
   timeoutS = DB_ROLLOUT_TIMEOUT_S,
   staleAttachPollMs = 15_000,
   waitRollout = runKubectlWithRetry,
@@ -2439,7 +2451,8 @@ export async function awaitDbRollout({
     }
     throw new Error(
       `awaitDbRollout: statefulset/${DB_STATEFULSET} did not become Ready within ${timeoutS}s ` +
-        `(${(err?.message || String(err)).slice(0, 300)}). ${await describeDbPods(env)}`,
+        `(${(err?.message || String(err)).slice(0, 300)}). ${await describeDbPods(env)}` +
+        (hint ? ` ${hint}` : ''),
     );
   }
   console.error(
@@ -4649,7 +4662,12 @@ export async function applyK3sManifests({
   // every deploy, outside the k3s-apply skip gate (writeDeployWalgRole).
   const awaitDb = async () => {
     await perfAsync(`deploy.${perfPrefix}.awaitDb`, () =>
-      awaitDbRollout({ env, timeoutS: dbRolloutTimeoutS }),
+      awaitDbRollout({
+        env,
+        timeoutS: dbRolloutTimeoutS,
+        // A pilot standby's db holds only a replica: name the rebuild.
+        hint: role === 'standby' ? standbyDbRebuildHint(operatorEnv ?? environment) : '',
+      }),
     );
     await awaitPostgresAccepting({ env, dbPod: DB_POD });
   };

@@ -77,6 +77,7 @@ import {
   waitForStandbyCaughtUp,
 } from './lib/deploy/replication.js';
 import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
+import { DB_LINEAGE_SQL, parseDbLineage } from './lib/deploy/standby-lineage.js';
 import { DR_S3_CLIENT_OPTIONS } from './lib/deploy/tls-snapshot.js';
 import {
   assertWalgBackupsWorking,
@@ -1812,6 +1813,13 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
   return {
     ips: { primary: primary.floatingIp || primary.ip, standby: standby.ip },
     stopDbHint: `ssh root@${standby.ip} 'kubectl scale statefulset/${DB_STATEFULSET} -n vibecarbon --replicas=0'`,
+    readStandbyLineage: async () => {
+      try {
+        return parseDbLineage(await psql(standby.ip)(DB_LINEAGE_SQL));
+      } catch {
+        return null;
+      }
+    },
     unfenceHint: `ssh root@${primary.ip} 'kubectl -n vibecarbon exec ${DB_POD} -- ${UNFENCE_SQL_HINT}'`,
     stopStandbyDb: async () => {
       try {

@@ -684,6 +684,76 @@ never reported as a clean success.
 - **Promotion failure:** The existing abort-before-anything-moves check stands. If promotion is not confirmed, the failover stops before any other resource moves.
 - Every failure path reports what state the world is in and what the operator's next command should be.
 
+#### Deploy after `failover -abort`
+
+`vibecarbon failover <env> -abort` keeps the OLD primary. The failover it
+calls off may already have promoted the standby, so the standby can be running
+a newer timeline of the same database. A cold deploy refuses such a standby as
+"promoted outside vibecarbon", because reseeding it would overwrite writes the
+primary never saw. The abort resolves that for its own standby:
+
+- Before it stops the standby, the abort reads the standby's lineage (recovery
+  state, system identifier, timeline). If the standby is out of recovery, the
+  abort records that exact copy as discardable in `.vibecarbon.json`
+  (`ha.discardableStandby`: address, system identifier, timeline). The
+  operator chose the old primary, so that copy's writes are given up.
+- The next `vibecarbon deploy <env>` reseeds over that copy, and only that
+  copy: the same address, system identifier and timeline. A promotion the
+  abort did not record (another timeline, another identifier, another
+  standby) still refuses. Both tiers apply the same check (k8s-ha in
+  `setupReplication`, compose-ha before `configureStandbyReplication`).
+- The record is cleared once the reseed replaced the standby's data
+  directory. A reseed that failed keeps it for the rerun.
+- A standby still in recovery at abort time never promoted and gets no record.
+  If the abort could not read the standby at all, it records nothing and
+  warns: if that standby had promoted, the next deploy refuses it. Then decide
+  by hand which copy to keep. To give up the standby's copy, back it up if in
+  doubt, then rebuild the standby's db as in the next section (k8s-ha) or
+  remove its db volume (compose-ha), and deploy.
+
+#### Rebuilding a k8s-ha standby whose db cannot start
+
+The cold reseed works inside the RUNNING standby db pod: it stages a copy of
+the primary next to the standby's data, then restarts postgres in the same
+pod. A standby whose postgres cannot start at all (a crash loop, a damaged
+data directory) has no running pod to stage into, so the deploy refuses (the
+db rollout wait, the self-heal wait or the reseed guard) and names this
+procedure. A CLI command for it is a tracked follow-up.
+
+Run it on the **standby** cluster only (`vibecarbon status <env>` names which
+cluster is the standby). Its volume holds only a replica of the primary;
+never do this on the primary.
+
+```bash
+ssh root@<standby master ip>
+kubectl scale statefulset/db --replicas=0 -n vibecarbon
+kubectl wait --for=delete pod/db-0 --timeout=600s -n vibecarbon
+kubectl delete pvc data-db-0 -n vibecarbon
+kubectl scale statefulset/db --replicas=1 -n vibecarbon
+exit
+vibecarbon deploy <env>
+```
+
+Why each step, checked against the code:
+
+- The StatefulSet (`carbon/k8s/base/db/statefulset.yaml`, `replicas: 1`) is
+  applied by the CLI only, never by Flux, so nothing scales it back behind
+  you. Scaling to 0 first releases the claim; deleting `data-db-0` under a
+  running pod would leave it Terminating.
+- Scaling back to 1 makes the StatefulSet create a fresh `data-db-0` from its
+  volumeClaimTemplate. The pod's `db-guard.sh` applies the `standby` role
+  intent to the new volume's empty role directory, and the image entrypoint
+  runs `initdb`: a new database with its own system identifier. This is the
+  state of a brand-new standby cluster.
+- Scale back up yourself rather than leaving it to the deploy: a deploy whose
+  manifests did not change skips the apply and goes straight to waiting for
+  postgres in `db-0`, which would not exist at 0 replicas.
+- `vibecarbon deploy <env>` then takes the cold path a new standby takes: the
+  standby is not streaming, the reseed guard finds the wrapper and the
+  `standby` intent, the lineage check reads another system identifier (a
+  fresh initdb, never refused), and the in-place reseed seeds it from the
+  primary and verifies streaming. The volume is attached once, at creation.
+
 ---
 
 ## External Resources

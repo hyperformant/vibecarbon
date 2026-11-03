@@ -39,7 +39,7 @@ import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { spinner } from '../../cli/progress.js';
 import { c, link } from '../../colors.js';
-import { updateProjectConfig } from '../../config.js';
+import { loadProjectConfig, updateProjectConfig } from '../../config.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { summarizePulumiError } from '../../iac/index.js';
 import { perfAsync } from '../../perf.js';
@@ -54,6 +54,7 @@ import {
 } from '../k8s/ha/index.js';
 import { deployK3s } from '../k8s/k3s.js';
 import { assertReplicationStreamingOrDegraded } from '../replication.js';
+import { clearDiscardableStandby, readDiscardableStandby } from '../standby-lineage.js';
 import { k8sStandbyTypes } from '../standby-types.js';
 import { StateTracker } from '../state.js';
 import { generateSSHKeyPair } from '../utils.js';
@@ -686,6 +687,9 @@ async function haK8sConfigureReplication(ctx) {
   let replStreaming = false;
   let replLastState = '';
   let replError = null;
+  // The standby copy a `failover -abort` gave up, as it is on disk now: the
+  // reseed's lineage check overwrites exactly that copy (standby-lineage.js).
+  const discardableStandby = readDiscardableStandby(options.environment, loadProjectConfig);
   try {
     const replResult = await setupReplication({
       primaryIp: primaryResult.masterIp,
@@ -698,7 +702,11 @@ async function haK8sConfigureReplication(ctx) {
       transportPrepared: ctx.transportPrepared === true,
       primaryConfigured: ctx.primaryReplicationConfigured === true,
       envName: options.environment,
+      discardableStandby,
     });
+    // The swap replaced the standby's data directory: the copy the abort gave
+    // up is gone, and so is the record that let the reseed overwrite it.
+    if (replResult.reseeded && discardableStandby) clearDiscardableStandby(options.environment);
     replStreaming = replResult.streaming;
     replLastState = replResult.lastState || '';
     // Set only on verified streaming; the deploy persists it as
