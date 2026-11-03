@@ -24,6 +24,7 @@ import {
   DB_GUARD_PROTOCOL_MARKER,
   DB_IN_PLACE_STOP,
   DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S,
+  DB_IN_PLACE_STOP_UNSEEDED,
   DB_STS_BOOT_TIMEOUT_S,
   DbGuardMissingError,
   evaluateDbGuardSupport,
@@ -112,7 +113,7 @@ describe('the wrapper the guard looks for is the one the template ships', () => 
 
 describe('evaluateDbGuardSupport', () => {
   it('ok only with the wrapper command, the protocol marker in the mounted file, and a standby intent', () => {
-    expect(evaluateDbGuardSupport(pod(), OUT, 'standby')).toEqual(GUARD);
+    expect(evaluateDbGuardSupport(pod(), OUT, 'standby')).toEqual({ ...GUARD, inRecovery: 't' });
     expect(evaluateDbGuardSupport(pod({ command: null }), OUT, 'standby')).toMatchObject({
       ok: false,
       reason: expect.stringMatching(/command/),
@@ -169,6 +170,32 @@ describe('evaluateDbGuardSupport', () => {
     expect(v).not.toHaveProperty('missing');
   });
 
+  it('requireRecovery: false (the cold deploy seed) passes a standby that runs as its own primary, and reports what it read', () => {
+    for (const [out, inRecovery] of [
+      ['1\nin_recovery=f', 'f'],
+      ['1\nin_recovery=', ''],
+      ['1', ''],
+      ['1\nin_recovery=t', 't'],
+    ]) {
+      expect(evaluateDbGuardSupport(pod(), out, 'standby', { requireRecovery: false })).toEqual({
+        ...GUARD,
+        inRecovery,
+      });
+    }
+    // Everything else still refuses: the marker, the intent, the mounts.
+    expect(
+      evaluateDbGuardSupport(pod(), '0\nin_recovery=f', 'standby', { requireRecovery: false }),
+    ).toMatchObject({ ok: false, missing: true });
+    expect(
+      evaluateDbGuardSupport(pod(), '1\nin_recovery=f', 'primary', { requireRecovery: false }),
+    ).toMatchObject({ ok: false, reason: expect.stringMatching(/intent/) });
+    expect(
+      evaluateDbGuardSupport(pod({ mounts: [GUARD_MOUNT] }), '1\nin_recovery=f', 'standby', {
+        requireRecovery: false,
+      }),
+    ).toMatchObject({ ok: false, missing: true });
+  });
+
   it('an unanswered recovery read says it could not confirm recovery, never "not in recovery"', () => {
     for (const out of ['1\nin_recovery=', '1']) {
       const v = evaluateDbGuardSupport(pod(), out, 'standby');
@@ -215,9 +242,10 @@ describe('assertLiveDbGuardSupportsReseed', () => {
 
   it('reads the running pod, the intent ConfigMap, then greps the mounted wrapper; returns the guard', async () => {
     const { kubectl, argvs } = stub();
-    await expect(assertLiveDbGuardSupportsReseed(kubectl, { envName: 'prod' })).resolves.toEqual(
-      GUARD,
-    );
+    await expect(assertLiveDbGuardSupportsReseed(kubectl, { envName: 'prod' })).resolves.toEqual({
+      ...GUARD,
+      inRecovery: 't',
+    });
     expect(argvs).toEqual([
       ['-n', 'vibecarbon', 'get', 'pod', 'db-0', '-o', 'json'],
       [
@@ -325,6 +353,52 @@ describe('restartDbContainerInPlace', () => {
     ).toEqual({ inPlace: false, uid: 'u2' });
     expect(recreatedWait).toHaveBeenCalledOnce();
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/recreated.*u1.*u2/));
+  });
+  it("a recreated pod's failed rollout wait is the verdict: thrown once, never waited again", async () => {
+    // A stale volume attachment stops the attach-watched wait by name; the
+    // restart must surface it, not poll the pod and start a second wait.
+    const recreatedWait = vi.fn(async () => {
+      throw new Error('The db volume pvc-1 reads attached: a stale volume attachment');
+    });
+    let reads = 0;
+    const kubectl = vi.fn(async (argv: string[]) =>
+      argv.includes('exec') ? '' : reads++ === 0 ? pod() : pod({ uid: 'u2' }),
+    );
+    await expect(
+      restartDbContainerInPlace(kubectl, {
+        guard: GUARD,
+        recreatedWait,
+        pollMs: 1,
+        sleep: async () => {},
+        now: Date.now,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/stale volume attachment/);
+    expect(recreatedWait).toHaveBeenCalledOnce();
+  });
+  it('requireRecovery: false sends the unseeded stop: the wrapper proof, no recovery proof', async () => {
+    const argvs: string[][] = [];
+    let reads = 0;
+    const kubectl = vi.fn(async (argv: string[]) => {
+      argvs.push(argv);
+      if (argv.includes('exec')) return '';
+      return reads++ === 0 ? pod() : pod({ rc: 1, cid: 'c2' });
+    });
+    await restartDbContainerInPlace(kubectl, {
+      guard: GUARD,
+      recreatedWait: vi.fn(),
+      requireRecovery: false,
+      pollMs: 1,
+      sleep: async () => {},
+      now: Date.now,
+      log: () => {},
+    });
+    const stops = argvs.filter((a) => a.includes('exec'));
+    expect(stops).toHaveLength(1);
+    expect(stops[0].slice(-3)).toEqual(DB_IN_PLACE_STOP_UNSEEDED);
+    expect(DB_IN_PLACE_STOP_UNSEEDED[2]).toContain('vc-reseed-protocol');
+    expect(DB_IN_PLACE_STOP_UNSEEDED[2]).not.toContain('pg_is_in_recovery');
+    expect(DB_IN_PLACE_STOP_UNSEEDED[2]).toMatch(/kill -INT 1$/);
   });
   it('a deadline names the container state, one stop, no retry', async () => {
     let t = 0;
@@ -574,6 +648,21 @@ describe('the guard and stop scripts, executed under sh', () => {
     }
   });
 
+  it('the unseeded stop (the cold deploy seed) signals PID 1 on the protocol marker alone, whatever the recovery state', () => {
+    for (const recovery of ['t', 'f', '']) {
+      const ok = run(DB_IN_PLACE_STOP_UNSEEDED[2], { marker: true, recovery });
+      expect(ok.status).toBe(0);
+      expect(ok.stdout).toBe('KILLED -INT 1\n');
+    }
+    for (const marker of [false, null]) {
+      const r = run(DB_IN_PLACE_STOP_UNSEEDED[2], { marker, recovery: 'f' });
+      expect(r.status).toBe(3);
+      expect(r.stdout).toBe(
+        'RESEED_STOP_REFUSED the mounted db-guard.sh does not speak the reseed protocol\n',
+      );
+    }
+  });
+
   it('the stop says it could not confirm recovery when psql answers nothing, and "not in recovery" only on f', () => {
     const silent = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: '' });
     expect(silent.status).toBe(3);
@@ -589,9 +678,10 @@ describe('the guard and stop scripts, executed under sh', () => {
   it("the guard probe's real output is what evaluateDbGuardSupport accepts or refuses", () => {
     const out = (o: { marker: boolean | null; recovery: string }) =>
       run(DB_GUARD_MARKER_GREP[2], o).stdout;
-    expect(evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 't' }), 'standby')).toEqual(
-      GUARD,
-    );
+    expect(evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 't' }), 'standby')).toEqual({
+      ...GUARD,
+      inRecovery: 't',
+    });
     expect(
       evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 'f' }), 'standby'),
     ).toMatchObject({ ok: false, reason: expect.stringMatching(/not in recovery/) });

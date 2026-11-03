@@ -7,7 +7,7 @@
  * (`deploy.ha.k8s.*`), same console diagnostics, same warn/throw/gate
  * semantics. Effects read from and mutate a shared multi-cluster `ctx`.
  *
- * The heavily-hardened WireGuard replication transport + scale-to-zero reseed
+ * The heavily-hardened WireGuard replication transport + in-place reseed
  * live in `setupReplication` (../k8s/ha/index.js) and the k3s single-cluster
  * pipeline lives in `deployK3s` (../k8s/k3s.js) — BOTH are called here as
  * BLACK BOXES (unchanged). This file only expresses deployK8sHA's phase
@@ -661,7 +661,7 @@ async function haK8sOpenReplicationFirewall(ctx) {
 /**
  * Configure PostgreSQL replication (must run after both clusters finish —
  * replication restarts postgres pods). Calls setupReplication (the hardened WG
- * transport + scale-to-zero reseed) as a black box and records its verdict +
+ * transport + the in-place reseed) as a black box and records its verdict +
  * a folded last-state hint for the shared hard-gate in verify-streaming.
  */
 async function haK8sConfigureReplication(ctx) {
@@ -697,6 +697,7 @@ async function haK8sConfigureReplication(ctx) {
       sshKeyPath: sharedSshKeyPath,
       transportPrepared: ctx.transportPrepared === true,
       primaryConfigured: ctx.primaryReplicationConfigured === true,
+      envName: options.environment,
     });
     replStreaming = replResult.streaming;
     replLastState = replResult.lastState || '';

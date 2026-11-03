@@ -652,7 +652,7 @@ echo COMPOSE_RESEED_STAGED
   }
 
   try {
-    // Host-side, kubelet-free equivalent of the k8s scale-to-zero: compose owns
+    // Host-side stop of the db container: compose owns
     // the container lifecycle (never an in-container pg_ctl stop — postgres is
     // the container's PID 1, so that kills the container out from under us).
     // Include the replication overlay flags so the compose file set matches

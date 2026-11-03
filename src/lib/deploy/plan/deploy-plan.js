@@ -146,7 +146,7 @@ export function planDeploy(tier, _config) {
   if (tier === 'k8s-ha') {
     // Faithful decomposition of the (now removed) inlined deployK8sHA: every
     // top-level phase it ran, in order. The per-cluster deploy (deployK3s ×2)
-    // and the hardened WireGuard replication transport + scale-to-zero reseed
+    // and the hardened WireGuard replication transport + in-place reseed
     // (setupReplication) are invoked by the effects as BLACK BOXES; the
     // conditionals deployK8sHA ran inline (firewall on apiToken, managed-DNS on
     // domain/provider, the degraded warn/hard-gate) live inside the effects,

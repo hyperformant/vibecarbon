@@ -327,7 +327,7 @@ export const k8sDeployClusterStep = () =>
 // labels) because they operate on TWO k3s clusters — a behavior-identity
 // requirement that rules out reusing the compose-ha effects.
 //
-// The heavily-hardened WireGuard replication transport + scale-to-zero reseed
+// The heavily-hardened WireGuard replication transport + in-place reseed
 // (setupReplication) and the k3s per-cluster pipeline (deployK3s) are called by
 // these effects as BLACK BOXES — this plan only expresses their sequence.
 //

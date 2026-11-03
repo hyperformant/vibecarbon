@@ -80,9 +80,9 @@ echo "hot_standby = on" >> /var/lib/postgresql/data/.reseed_staging/postgresql.a
 sed -i '/^[[:space:]]*default_transaction_read_only[[:space:]]*=/d' /var/lib/postgresql/data/.reseed_staging/postgresql.auto.conf
 chown -R postgres:postgres /var/lib/postgresql/data/.reseed_staging
 
-# swap=false: leave the verified basebackup in /var/lib/postgresql/data/.reseed_staging. The caller scales
-# the pod to zero and performs the atomic PGDATA swap node-side (in-pod pg_ctl
-# stop would kill the container — the postmaster is PID 1)."
+# swap=false: leave the verified basebackup in /var/lib/postgresql/data/.reseed_staging. The caller stops
+# the db container and performs the atomic PGDATA swap on the host (stopping
+# postgres from inside would kill the container: the postmaster is PID 1)."
 `;
 
 exports[`buildStagedBasebackupScript in-place mode > callers without inPlaceAttempt are byte-identical to before 3`] = `
@@ -155,7 +155,7 @@ primary_conninfo = 'host=h'
 REPL_CONNINFO_EOF
 chown -R postgres:postgres /var/lib/postgresql/data/.reseed_staging
 
-# swap=false: leave the verified basebackup in /var/lib/postgresql/data/.reseed_staging. The caller scales
-# the pod to zero and performs the atomic PGDATA swap node-side (in-pod pg_ctl
-# stop would kill the container — the postmaster is PID 1)."
+# swap=false: leave the verified basebackup in /var/lib/postgresql/data/.reseed_staging. The caller stops
+# the db container and performs the atomic PGDATA swap on the host (stopping
+# postgres from inside would kill the container: the postmaster is PID 1)."
 `;

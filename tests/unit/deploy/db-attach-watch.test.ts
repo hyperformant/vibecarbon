@@ -360,12 +360,11 @@ describe('db-rollout-wait census: no db roll waited on outside the watch', () =>
       offenders.push(...unwatched(f, src));
     }
     expect(offenders, 'db rollout wait(s) outside watchDbAttach').toEqual([]);
-    // Positive control, five sites: k3s.js awaitDbRollout (its argv and its
-    // description), the ha module's reseed standby boot, replication.js's
-    // k8sDbRolloutStatusArgv builder, and restore.js's db rollout. The
-    // failover/restore reseed restarts the db in place and waits through
-    // k8sDbRolloutWait only when the pod was recreated. No WALG_ROLE roll is
-    // left to wait on.
-    expect(seen).toBeGreaterThanOrEqual(5);
+    // Positive control, four sites: k3s.js awaitDbRollout (its argv and its
+    // description), replication.js's k8sDbRolloutStatusArgv builder, and
+    // restore.js's db rollout. Every k8s reseed (the cold deploy, failover,
+    // restore) restarts the db in place and waits through k8sDbRolloutWait
+    // only when the pod was recreated. No WALG_ROLE roll is left to wait on.
+    expect(seen).toBeGreaterThanOrEqual(4);
   });
 });

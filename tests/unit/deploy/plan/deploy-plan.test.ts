@@ -160,7 +160,7 @@ describe('planDeploy(k8s)', () => {
 // generate + upload the shared SSH key, provision BOTH clusters in parallel
 // (deployK3s ×2 — the k8s per-cluster block, reused ×2), open the WireGuard
 // replication firewall on both, configure replication (setupReplication — the
-// hardened WG transport + scale-to-zero reseed, called as a black box),
+// hardened WG transport + in-place reseed, called as a black box),
 // hard-gate on streaming (verify-streaming), set up managed-DNS HA (update-dns),
 // and print the finalize summary. Replication step NAMES (configure-replication,
 // verify-streaming) mirror compose-ha's for cross-tier read symmetry; the

@@ -20,7 +20,6 @@
 import { randomBytes } from 'node:crypto';
 import { loadProjectConfig } from '../config.js';
 import { hasSentinelLine, refusalFromError, sentinelLinePayload } from '../remote-sentinel.js';
-import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
 import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
@@ -398,9 +397,9 @@ rmdir ${stagingDir}
 chown -R postgres:postgres ${pgdataDir}
 `
       : `
-# swap=false: leave the verified basebackup in ${stagingDir}. The caller scales
-# the pod to zero and performs the atomic PGDATA swap node-side (in-pod pg_ctl
-# stop would kill the container — the postmaster is PID 1).
+# swap=false: leave the verified basebackup in ${stagingDir}. The caller stops
+# the db container and performs the atomic PGDATA swap on the host (stopping
+# postgres from inside would kill the container: the postmaster is PID 1).
 `;
 
   // pg_basebackup slot policy: default (basebackupSlot=null) omits `-S`, so the
@@ -552,20 +551,14 @@ ${swapBlock}`.trim();
 }
 
 /**
- * Build the atomic PGDATA swap script for the HA standby re-seeds.
+ * Build the atomic PGDATA swap script for the compose-ha standby re-seed.
  *
  * Runs AFTER the db has been stopped from outside (never inside the db
- * container, whose PID 1 is the postmaster), against the PVC/volume filesystem —
- * NOT the db container's namespace:
- *   - k8s: inside a short-lived HELPER POD that mounts the same PVC (no subPath)
- *     at a plain path, so `pgdataDir` is `<mountRoot>/<subPath>`. A helper pod is
- *     used (not a node-side ssh) because the swap must work uniformly for BOTH
- *     local-path AND csi.hetzner.cloud PVCs — a CSI volume has no node hostPath
- *     and DETACHES from the node on scale-to-zero, so a node-filesystem swap is
- *     structurally impossible (live RCA 2026-07-07 e4 rig). See
- *     swapPgdataViaHelperPod.
- *   - compose: on the HOST via ssh (`pgdataDir` is the db volume's host
- *     Mountpoint) after `docker compose stop db`.
+ * container, whose PID 1 is the postmaster), on the HOST via ssh
+ * (`pgdataDir` is the db volume's host Mountpoint) after
+ * `docker compose stop db`. k8s never uses it: a k8s standby reseeds in
+ * place (reseedStandbyInPlace, db-guard.sh swaps the tree on the db
+ * container's next start), so its volume never detaches.
  * `buildStagedBasebackupScript({swap:false})` has already staged a verified
  * basebackup into `<pgdataDir>/<stagingName>` (a subdir of PGDATA, hence on the
  * same filesystem), with standby.signal + primary_conninfo written in. This
@@ -624,268 +617,6 @@ mv "$PGDATA" "$PGDATA.old"
 mv "$PGDATA.new" "$PGDATA"
 echo RESEED_SWAPPED
 `.trim();
-}
-
-// The short-lived helper pod that mounts the standby's PVC and runs the atomic
-// PGDATA swap. One name (deleted+recreated per reseed) and one mount root shared
-// by the deploy-time seed and the failover/restore reseed.
-export const PGDATA_SWAP_POD = 'vibecarbon-pgdata-swap';
-const PGDATA_SWAP_MOUNT_ROOT = '/pgdata-vol';
-
-/**
- * Parse the db pod JSON into everything the helper-pod swap needs:
- *   - claimName: the PVC to mount into the swap pod (same volume the db uses),
- *   - subPath:   the db's volumeMount subPath (the StatefulSet mounts the PVC at
- *     /var/lib/postgresql/data via subPath `postgres-data`), so PGDATA on the
- *     raw volume is `<volume-root>/<subPath>`,
- *   - image:     the db container's image — reused for the swap pod so it is
- *     ALREADY pulled on the node (no pull latency/failure) and ships bash +
- *     coreutils.
- *
- * Pure so both k8s reseed transports (raw-ssh deploy seed, sshKubectl
- * failover/restore) can fetch the pod JSON with their own exec backend and share
- * one parser. MUST be called while the pod still exists (the volume→PVC chain is
- * unreadable after scale-to-zero).
- *
- * @param {string|object} podJson
- * @returns {{claimName:string, subPath:string, image:string}}
- */
-export function parsePgdataClaimFromPodJson(podJson) {
-  const pod = typeof podJson === 'string' ? JSON.parse(podJson) : podJson;
-  let volName;
-  let subPath = '';
-  let image;
-  for (const c of pod?.spec?.containers ?? []) {
-    const m = (c.volumeMounts ?? []).find((v) => v.mountPath === '/var/lib/postgresql/data');
-    if (m) {
-      volName = m.name;
-      subPath = m.subPath ?? '';
-      image = c.image;
-      break;
-    }
-  }
-  const vol = (pod?.spec?.volumes ?? []).find((v) => v.name === volName);
-  const claimName = vol?.persistentVolumeClaim?.claimName;
-  if (!claimName) {
-    throw new Error('no persistentVolumeClaim mounted at /var/lib/postgresql/data');
-  }
-  if (!image) {
-    throw new Error('could not resolve the db container image for the swap pod');
-  }
-  return { claimName, subPath, image };
-}
-
-/**
- * Build the helper-pod manifest (JSON — kubectl apply -f - accepts it, and it
- * sidesteps YAML-escaping the bash swap script). The pod mounts the WHOLE PVC
- * (no subPath) at `mountRoot` so PGDATA (`<mountRoot>/<subPath>`) is a regular
- * subdir whose SIBLINGS are writable — the atomic swap renames PGDATA aside,
- * which is impossible when the subPath itself is the (bind) mountpoint. Runs as
- * root so the same-filesystem renames succeed regardless of the volume root's
- * ownership; buildNodePgdataSwapScript preserves the staged tree's numeric
- * ownership (no chown), so the reseeded PGDATA keeps the in-container postgres
- * uid. restartPolicy Never — a one-shot job. Pinned to the dedicated database
- * node (same nodeSelector as the db StatefulSet): a detached csi.hetzner.cloud
- * volume carries only ZONAL topology, so without the pin the scheduler is free
- * to place the pod on a worker that never ran the db — which then pulls the
- * multi-GB wal-g postgres image cold and blows the 180s swap budget while the
- * pod sits in ContainerCreating (RCA 2026-07-16, gate run 29504041478). The
- * pin also keeps the CSI re-attach node-local (the volume just detached from
- * that node) and guarantees the image is cached (the db ran there minutes
- * earlier). local-path PVs force the same node via PV node-affinity anyway.
- *
- * @param {object} o
- * @param {string} o.claimName
- * @param {string} o.image
- * @param {string} o.swapScript - buildNodePgdataSwapScript output
- * @param {string} [o.podName=PGDATA_SWAP_POD]
- * @param {string} [o.mountRoot=PGDATA_SWAP_MOUNT_ROOT]
- * @returns {string} JSON manifest
- */
-export function buildPgdataSwapPodManifest({
-  claimName,
-  image,
-  swapScript,
-  podName = PGDATA_SWAP_POD,
-  mountRoot = PGDATA_SWAP_MOUNT_ROOT,
-}) {
-  return JSON.stringify({
-    apiVersion: 'v1',
-    kind: 'Pod',
-    metadata: { name: podName, namespace: 'vibecarbon' },
-    spec: {
-      restartPolicy: 'Never',
-      securityContext: { runAsUser: 0, runAsGroup: 0, fsGroup: 0 },
-      // Same placement contract as the db StatefulSet (k8s/base/db/statefulset.yaml):
-      // the selector ATTRACTS the pod to the dedicated database node (see the
-      // doc comment — CSI zonal topology does not), and the toleration lets it
-      // pass the node's dedicated=db:NoSchedule taint (live-hit
-      // 2026-07-07: without it the pod sat Unschedulable forever).
-      nodeSelector: { dedicated: 'db' },
-      tolerations: [{ key: 'dedicated', operator: 'Equal', value: 'db', effect: 'NoSchedule' }],
-      containers: [
-        {
-          name: 'swap',
-          image,
-          command: ['bash', '-c', swapScript],
-          volumeMounts: [{ name: 'pgdata', mountPath: mountRoot }],
-        },
-      ],
-      volumes: [{ name: 'pgdata', persistentVolumeClaim: { claimName } }],
-    },
-  });
-}
-
-/**
- * Run the atomic PGDATA swap in a short-lived helper pod (k8s), uniform for
- * local-path AND CSI PVCs. The db StatefulSet MUST already be scaled to zero
- * (pod gone → RWO PVC released) before calling this. Sequence:
- *   1. delete any stale swap pod (prior failed reseed reuses the name),
- *   2. apply the helper pod mounting the same PVC (no subPath) at mountRoot,
- *   3. poll until it reaches Succeeded/Failed (budget 300s — CSI detach from
- *      the db pod + re-attach here ran the poll to within seconds of the old
- *      180s budget on the restore path of gate run 29514516887; the swap
- *      itself is mv-only, so the budget is all scheduling + attach slack),
- *   4. capture its logs (RESEED_SWAPPED / RESEED_SKIPPED sentinel, or the
- *      failure detail) — folded into the thrown error on a non-Succeeded phase,
- *   5. ALWAYS delete the pod (finally).
- *
- * Returns the pod's logs so the caller classifies the sentinel exactly as the
- * old node-side `sshRun` swap output was classified (SWAPPED = promoted,
- * SKIPPED = staging vanished/absent). `kubectl` is an injected exec closure
- * `(argv, opts?) => Promise<string>` so both reseed transports share this.
- *
- * @param {(argv:string[], opts?:{input?:string}) => Promise<string>} kubectl
- * @param {object} o
- * @param {string} o.claimName
- * @param {string} o.subPath
- * @param {string} o.image
- * @param {string} [o.mountRoot=PGDATA_SWAP_MOUNT_ROOT]
- * @param {string} [o.podName=PGDATA_SWAP_POD]
- * @param {number} [o.budgetMs=300000]
- * @returns {Promise<string>} the swap pod's logs
- */
-export async function swapPgdataViaHelperPod(
-  kubectl,
-  {
-    claimName,
-    subPath,
-    image,
-    mountRoot = PGDATA_SWAP_MOUNT_ROOT,
-    podName = PGDATA_SWAP_POD,
-    budgetMs = 300_000,
-  },
-) {
-  const pgdataDir = subPath ? `${mountRoot.replace(/\/+$/, '')}/${subPath}` : mountRoot;
-  const swapScript = buildNodePgdataSwapScript({ pgdataDir });
-  const manifest = buildPgdataSwapPodManifest({ claimName, image, swapScript, podName, mountRoot });
-
-  // Clear any stale swap pod from a prior failed reseed (same name), then apply.
-  await kubectl([
-    'delete',
-    'pod',
-    podName,
-    '-n',
-    'vibecarbon',
-    '--ignore-not-found',
-    '--wait=true',
-  ]).catch(() => {});
-  await kubectl(['apply', '-f', '-'], { input: manifest });
-
-  try {
-    let phase;
-    try {
-      phase = await pollUntil(
-        async () => {
-          // -o json + JS parsing, NOT a jsonpath with |/?() — the k8s transport
-          // joins argv into a remote shell string, and unquoted jsonpath
-          // metacharacters are a bash syntax error (live-hit 2026-07-07: every
-          // poll died on `syntax error near unexpected token` until the budget
-          // lapsed).
-          const out = (
-            await kubectl(['get', 'pod', podName, '-n', 'vibecarbon', '-o', 'json'])
-          ).trim();
-          const status = JSON.parse(out).status || {};
-          const p = status.phase;
-          const sched = (status.conditions || []).find((c) => c.type === 'PodScheduled') || {};
-          const schedReason = sched.reason;
-          const schedMessage = sched.message;
-          // Unschedulable is terminal for our purposes: waiting out the budget
-          // can't fix a taint/affinity mismatch, and the scheduler message names
-          // the exact conflict — return it as a (truthy) terminal result so the
-          // poll exits immediately (pollUntil retries on throw, so we must NOT
-          // throw from inside the probe).
-          if (p === 'Pending' && schedReason === 'Unschedulable') {
-            return `Unschedulable: ${schedMessage || '(no scheduler message)'}`;
-          }
-          return p === 'Succeeded' || p === 'Failed' ? p : null;
-        },
-        {
-          budgetMs,
-          initialDelayMs: 2000,
-          maxDelayMs: 10_000,
-          description: `pgdata swap pod ${podName} to finish`,
-        },
-      );
-    } catch (pollErr) {
-      // Budget lapsed without a terminal phase. Capture the pod's actual
-      // state and events BEFORE the finally-delete destroys the evidence —
-      // a bare "Timed out after 180000ms" cannot distinguish a cold image
-      // pull from a stuck attach from a pod that never existed (RCA
-      // 2026-07-16, gate run 29504041478: zero forensic state survived).
-      const podRaw = await kubectl(['get', 'pod', podName, '-n', 'vibecarbon', '-o', 'json']).catch(
-        (e) => `(get pod failed: ${e?.message || e})`,
-      );
-      let podSummary = typeof podRaw === 'string' ? podRaw.trim() : '';
-      try {
-        const pod = JSON.parse(podRaw);
-        const waiting = (pod.status?.containerStatuses || [])
-          .map(
-            (c) =>
-              c.state?.waiting && `${c.state.waiting.reason}: ${c.state.waiting.message || ''}`,
-          )
-          .filter(Boolean)
-          .join('; ');
-        podSummary =
-          `phase=${pod.status?.phase || '?'} node=${pod.spec?.nodeName || '(unscheduled)'}` +
-          (waiting ? ` waiting=[${waiting}]` : '');
-      } catch {
-        // keep the raw kubectl output (already in podSummary)
-      }
-      const events =
-        (await kubectl([
-          'get',
-          'events',
-          '-n',
-          'vibecarbon',
-          '--field-selector',
-          `involvedObject.name=${podName}`,
-          '--sort-by=.lastTimestamp',
-        ]).catch((e) => `(get events failed: ${e?.message || e})`)) || '';
-      pollErr.message +=
-        `\n--- swap pod state at timeout ---\n${podSummary || '(empty)'}` +
-        `\n--- swap pod events ---\n${events.trim() || '(none)'}`;
-      throw pollErr;
-    }
-    if (phase.startsWith('Unschedulable:')) {
-      throw new Error(
-        `pgdata swap pod ${podName} could not be scheduled; the standby keeps its previous ` +
-          `PGDATA. Scheduler said: ${phase.slice('Unschedulable:'.length).trim()}`,
-      );
-    }
-    const logs = (await kubectl(['logs', podName, '-n', 'vibecarbon']).catch(() => '')) || '';
-    if (phase !== 'Succeeded') {
-      throw new Error(
-        `pgdata swap pod ${podName} did not succeed (phase=${phase}); the standby keeps its ` +
-          `previous PGDATA.\n--- swap pod logs ---\n${logs.trim() || '(no logs)'}`,
-      );
-    }
-    return logs;
-  } finally {
-    await kubectl(['delete', 'pod', podName, '-n', 'vibecarbon', '--ignore-not-found']).catch(
-      () => {},
-    );
-  }
 }
 
 /**
@@ -1427,23 +1158,14 @@ export async function reseedStandbyFromPrimary(
   // argv. It dials the LOCAL relay and pins the explicit streaming conninfo,
   // byte-identical to the deploy-time seed's buildPrimaryConninfo output.
   const stageScript = (attempt, { basebackupDeadlineS }) =>
-    buildStagedBasebackupScript({
+    buildInPlaceReseedStageScript({
       replPassword,
-      primaryHost: standbyDbPrivateIp,
-      primaryPort: String(REPL_GATEWAY_PORT),
+      relayHost: standbyDbPrivateIp,
       // One probe, like the single-shot pre-check this replaces: failover
       // already found the primary ready, and restore just restored it.
-      probeFirst: true,
       probeAttempts: 1,
-      swap: false,
-      stagingDir: IN_PLACE_RESEED_DIR,
-      primaryConninfo: buildPrimaryConninfo({
-        primaryHost: standbyDbPrivateIp,
-        replPassword,
-        port: REPL_GATEWAY_PORT,
-      }),
       label: 'reseed',
-      inPlaceAttempt: attempt,
+      attempt,
       basebackupDeadlineS,
     });
   const result = await reseedStandbyInPlace({
@@ -1475,6 +1197,65 @@ export async function reseedStandbyFromPrimary(
     await onSeeded(sysid);
   }
   return 'reseeded';
+}
+
+/**
+ * The in-place stage every k8s standby reseed runs (the cold deploy, failover
+ * and restore alike): probe the primary through the standby's LOCAL
+ * repl-gateway relay (its own database node's private IP), stage a verified
+ * pg_basebackup into IN_PLACE_RESEED_DIR with the explicit streaming conninfo
+ * written in, and arm it for db-guard.sh. Piped over stdin (the password is
+ * in it), never argv.
+ *
+ * @param {object} o
+ * @param {string} o.replPassword
+ * @param {string} o.relayHost the standby database node's private IP
+ * @param {string} o.attempt the in-place attempt id
+ * @param {number} o.basebackupDeadlineS reseedStageBoundsS().remoteS
+ * @param {number} o.probeAttempts
+ * @param {number} [o.probeDelayS=10]
+ * @param {string} o.label
+ * @returns {string}
+ */
+export function buildInPlaceReseedStageScript({
+  replPassword,
+  relayHost,
+  attempt,
+  basebackupDeadlineS,
+  probeAttempts,
+  probeDelayS = 10,
+  label,
+}) {
+  return buildStagedBasebackupScript({
+    replPassword,
+    primaryHost: relayHost,
+    primaryPort: String(REPL_GATEWAY_PORT),
+    probeFirst: true,
+    probeAttempts,
+    probeDelayS,
+    swap: false,
+    stagingDir: IN_PLACE_RESEED_DIR,
+    primaryConninfo: buildPrimaryConninfo({
+      primaryHost: relayHost,
+      replPassword,
+      port: REPL_GATEWAY_PORT,
+    }),
+    label,
+    inPlaceAttempt: attempt,
+    basebackupDeadlineS,
+  });
+}
+
+/**
+ * The longest the stage's probe can run before its transfer starts: every
+ * attempt's pg_isready (-t 5) plus the delays between them.
+ *
+ * @param {number} probeAttempts
+ * @param {number} probeDelayS
+ * @returns {number}
+ */
+export function inPlaceProbeBudgetS(probeAttempts, probeDelayS) {
+  return probeAttempts * 5 + Math.max(0, probeAttempts - 1) * probeDelayS;
 }
 
 /**
@@ -1544,7 +1325,7 @@ export const SOURCE_DISCARD_DROP = Object.freeze([
  * @param {(argv: string[], opts?: object) => Promise<string>} primaryKubectl
  * @param {{envName?: string}} o
  */
-async function prepareReseedSource(primaryKubectl, { envName } = {}) {
+export async function prepareReseedSource(primaryKubectl, { envName } = {}) {
   const intent = String(
     (await primaryKubectl([...DB_ROLE_INTENT_READ], { timeout: 30_000 })) ?? '',
   ).trim();
@@ -1662,6 +1443,12 @@ function newReseedAttempt() {
  * @param {(attempt: string, bounds: {basebackupDeadlineS: number}) => string} o.stageScript  buildStagedBasebackupScript({... inPlaceAttempt: attempt, basebackupDeadlineS})
  * @param {string} o.envName
  * @param {() => Promise<{sizeBytes?: number}|void>} [o.beforeStage] runs after the guard, before the stage; the size it returns bounds the stage
+ * @param {boolean} [o.requireRecovery=true] false only for the cold deploy's
+ *   seed: its standby runs as its own primary until the swap (the guard and
+ *   the stop then skip the recovery proof; DB_IN_PLACE_STOP_UNSEEDED)
+ * @param {(guard: {inRecovery: string}) => void} [o.onGuard] sees the passed guard's verdict
+ * @param {number} [o.stageProbeS=0] the stage's own probe budget before the
+ *   transfer starts; added to the client bound so it never cuts a stage short
  * @param {number} [o.attachWatchPollMs]
  * @param {(ms: number) => Promise<void>} [o.sleep]
  * @param {() => number} [o.now]
@@ -1672,14 +1459,20 @@ export async function reseedStandbyInPlace({
   stageScript,
   envName,
   beforeStage,
+  requireRecovery = true,
+  onGuard,
+  stageProbeS = 0,
   attachWatchPollMs,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   now = Date.now,
 }) {
-  const guard = await assertLiveDbGuardSupportsReseed(kubectl, { envName });
+  const guard = await assertLiveDbGuardSupportsReseed(kubectl, { envName, requireRecovery });
+  onGuard?.(guard);
   const source = beforeStage ? await beforeStage() : undefined;
   const sizeBytes = Number(source?.sizeBytes) || 0;
-  const { remoteS, clientS } = reseedStageBoundsS(sizeBytes);
+  const bounds = reseedStageBoundsS(sizeBytes);
+  const remoteS = bounds.remoteS;
+  const clientS = bounds.clientS + Math.max(0, Math.ceil(Number(stageProbeS) || 0));
 
   const attempt = newReseedAttempt();
   const script = stageScript(attempt, { basebackupDeadlineS: remoteS });
@@ -1713,6 +1506,7 @@ export async function reseedStandbyInPlace({
   try {
     await restartDbContainerInPlace(kubectl, {
       guard,
+      requireRecovery,
       recreatedWait: () =>
         k8sDbRolloutWait({
           kubectl: (_ip, argv, opts) => kubectl(argv, opts),
@@ -1736,11 +1530,11 @@ export async function reseedStandbyInPlace({
       swappedFrom = null; // unreadable: the disarm below decides
     }
     if (swappedFrom === attempt) {
-      throw new Error(
+      throw swappedError(
         `${said}. The swap ran (${PGDATA_DIR}/.vc-reseeded-from is ${attempt}): the standby holds the ` +
           'reseeded data directory, but its db did not come back. See why: ' +
           `kubectl -n vibecarbon logs ${DB_POD} -c ${DB_CONTAINER}`,
-        { cause: error },
+        error,
       );
     }
     // Not swapped: the tree is staged and marked ready, and without a disarm
@@ -1759,14 +1553,18 @@ export async function reseedStandbyInPlace({
     );
   }
 
-  await waitForStandbyRecovery({
-    exec: () =>
-      kubectl(dbExecArgv(['psql', '-U', 'postgres', '-tAc', 'SELECT pg_is_in_recovery()']), {
-        timeout: 30_000,
-      }),
-    sleep,
-    now,
-  });
+  try {
+    await waitForStandbyRecovery({
+      exec: () =>
+        kubectl(dbExecArgv(['psql', '-U', 'postgres', '-tAc', 'SELECT pg_is_in_recovery()']), {
+          timeout: 30_000,
+        }),
+      sleep,
+      now,
+    });
+  } catch (error) {
+    throw swappedError(String(error?.message ?? error), error);
+  }
 
   // The old tree (D9): garbage once the standby is proven in recovery. Best
   // effort; any later swap or restore removes it first.
@@ -1774,6 +1572,15 @@ export async function reseedStandbyInPlace({
     timeout: 300_000,
   }).catch(() => {});
   return 'reseeded';
+}
+
+/**
+ * An error raised after the swap ran: the standby's old data directory is
+ * gone (moved to .vc-discard), so whatever it held, replication slots
+ * included, went with it. `reseedSwapped` lets a caller tell it apart.
+ */
+function swappedError(message, cause) {
+  return Object.assign(new Error(message, { cause }), { reseedSwapped: true });
 }
 
 /** Reads the swap record db-guard.sh leaves ('' when there is none). */
@@ -1856,9 +1663,11 @@ const DB_GUARD_PATH = '/usr/local/bin/db-guard.sh';
 
 /** The live pod lacks the wrapper, its mounts, or its protocol: redeploy first (D1). */
 export class DbGuardMissingError extends Error {
-  constructor(message) {
+  /** @param {string} message @param {{reason?: string}} [o] the guard's verdict, unworded */
+  constructor(message, { reason } = {}) {
     super(message);
     this.name = 'DbGuardMissingError';
+    this.reason = reason;
   }
 }
 
@@ -1894,6 +1703,23 @@ export const DB_IN_PLACE_STOP = Object.freeze([
   `grep -q '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || { echo '${STOP_REFUSED} the mounted db-guard.sh does not speak the reseed protocol'; exit ${STOP_REFUSED_STATUS}; }; ` +
     `r=${IN_RECOVERY_SH}; [ -n "$r" ] || { echo '${STOP_REFUSED} could not confirm the db is in recovery (psql did not answer)'; exit ${STOP_REFUSED_STATUS}; }; ` +
     `[ "$r" = t ] || { echo "${STOP_REFUSED} postgres is not in recovery (pg_is_in_recovery: $r)"; exit ${STOP_REFUSED_STATUS}; }; ` +
+    'kill -INT 1',
+]);
+
+/**
+ * The cold deploy's in-pod stop (requireRecovery: false); one `sh -c` token.
+ * The deploy seeds a standby that runs as its own independent primary (a
+ * fresh cluster's initdb, or a retired old primary), so recovery is no
+ * precondition there: the container still proves its mounted wrapper speaks
+ * the reseed protocol before PID 1 gets SIGINT. The deploy's own preflight
+ * stands in for the recovery proof: both clusters report the intent the
+ * config gives them (the guard's standby intent, prepareReseedSource's
+ * primary one).
+ */
+export const DB_IN_PLACE_STOP_UNSEEDED = Object.freeze([
+  'sh',
+  '-c',
+  `grep -q '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || { echo '${STOP_REFUSED} the mounted db-guard.sh does not speak the reseed protocol'; exit ${STOP_REFUSED_STATUS}; }; ` +
     'kill -INT 1',
 ]);
 
@@ -2008,9 +1834,16 @@ function evaluateDbGuardPod(podJson) {
  * @param {string|object} podJson `kubectl get pod db-0 -o json`
  * @param {string} markerGrepOut DB_GUARD_MARKER_GREP's stdout: the count line, then `in_recovery=<t|f|>`
  * @param {string} intent the vibecarbon-db-role ConfigMap's VC_WALG_ROLE_INTENT ('' when absent)
- * @returns {{ok: true, uid: string, restartCount: number, containerID: string} | {ok: false, reason: string, missing?: true}}
+ * @param {{requireRecovery?: boolean}} [o] false only for the cold deploy's
+ *   seed, whose standby runs as its own primary until the swap
+ * @returns {{ok: true, uid: string, restartCount: number, containerID: string, inRecovery: string} | {ok: false, reason: string, missing?: true}}
  */
-export function evaluateDbGuardSupport(podJson, markerGrepOut, intent) {
+export function evaluateDbGuardSupport(
+  podJson,
+  markerGrepOut,
+  intent,
+  { requireRecovery = true } = {},
+) {
   const verdict = evaluateDbGuardPod(podJson);
   if (!verdict.ok) return verdict;
   const out = String(markerGrepOut ?? '');
@@ -2026,7 +1859,8 @@ export function evaluateDbGuardSupport(podJson, markerGrepOut, intent) {
   if (word !== 'standby') {
     return { ok: false, reason: `the role intent is ${word || '<none>'}, not standby` };
   }
-  const recovery = /^in_recovery=(.*)$/m.exec(out)?.[1]?.trim();
+  const recovery = /^in_recovery=(.*)$/m.exec(out)?.[1]?.trim() ?? '';
+  if (!requireRecovery) return { ...verdict, inRecovery: recovery };
   if (!recovery) {
     // psql did not answer (postgres down or still starting): no verdict.
     return {
@@ -2040,7 +1874,7 @@ export function evaluateDbGuardSupport(podJson, markerGrepOut, intent) {
       reason: `postgres in ${DB_POD} is not in recovery (pg_is_in_recovery: ${recovery}); a standby intent over a primary`,
     };
   }
-  return verdict;
+  return { ...verdict, inRecovery: recovery };
 }
 
 /**
@@ -2051,14 +1885,19 @@ export function evaluateDbGuardSupport(podJson, markerGrepOut, intent) {
  * any refusal issues no further call.
  *
  * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
- * @param {{envName?: string}} o
- * @returns {Promise<{ok: true, uid: string, restartCount: number, containerID: string}>}
+ * @param {{envName?: string, requireRecovery?: boolean}} o requireRecovery
+ *   false only for the cold deploy's seed (DB_IN_PLACE_STOP_UNSEEDED)
+ * @returns {Promise<{ok: true, uid: string, restartCount: number, containerID: string, inRecovery: string}>}
  */
-export async function assertLiveDbGuardSupportsReseed(kubectl, { envName } = {}) {
+export async function assertLiveDbGuardSupportsReseed(
+  kubectl,
+  { envName, requireRecovery = true } = {},
+) {
   const refuse = (verdict) => {
     if (verdict.missing) {
       return new DbGuardMissingError(
         `this cluster's db predates in-place reseeds; run \`vibecarbon deploy ${envName || '<env>'}\` once (one db restart), then retry (${verdict.reason})`,
+        { reason: verdict.reason },
       );
     }
     return new Error(`reseed refused: ${verdict.reason}`);
@@ -2075,7 +1914,7 @@ export async function assertLiveDbGuardSupportsReseed(kubectl, { envName } = {})
   }
 
   const marker = await kubectl(dbExecArgv(DB_GUARD_MARKER_GREP), { timeout: 30_000 });
-  const verdict = evaluateDbGuardSupport(podJson, marker, intent);
+  const verdict = evaluateDbGuardSupport(podJson, marker, intent, { requireRecovery });
   if (!verdict.ok) throw refuse(verdict);
   return verdict;
 }
@@ -2168,6 +2007,7 @@ export async function runInPlaceStage(exec, { attempt }) {
  * @param {object} o
  * @param {{ok: true, uid: string, restartCount: number, containerID: string}} o.guard assertLiveDbGuardSupportsReseed's result
  * @param {() => Promise<unknown>} o.recreatedWait the attach-watched rollout wait (k8sDbRolloutWait)
+ * @param {boolean} [o.requireRecovery=true] false sends DB_IN_PLACE_STOP_UNSEEDED (the cold deploy's seed, whose guard ran with requireRecovery: false)
  * @param {number} [o.timeoutS]
  * @param {number} [o.pollMs]
  * @param {(ms: number) => Promise<void>} [o.sleep]
@@ -2180,6 +2020,7 @@ export async function restartDbContainerInPlace(
   {
     guard,
     recreatedWait,
+    requireRecovery = true,
     timeoutS = DB_STS_BOOT_TIMEOUT_S,
     pollMs = 3000,
     sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -2215,7 +2056,9 @@ export async function restartDbContainerInPlace(
   const deadline = started + timeoutS * 1000;
   const beginDeadline = started + Math.min(timeoutS, DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S) * 1000;
   try {
-    await kubectl(dbExecArgv(DB_IN_PLACE_STOP), { timeout: 30_000 });
+    await kubectl(dbExecArgv(requireRecovery ? DB_IN_PLACE_STOP : DB_IN_PLACE_STOP_UNSEEDED), {
+      timeout: 30_000,
+    });
   } catch (error) {
     // Only the script's own refusal: its stdout line under exit 3. The
     // message quotes the script (sentinel included), so it is never read.
@@ -2230,38 +2073,46 @@ export async function restartDbContainerInPlace(
   let began = false;
   let last = 'no db pod read yet';
   for (;;) {
+    let recreatedUid = null;
     try {
       const pod = JSON.parse(String(await kubectl(DB_POD_GET_ARGV, { timeout: 30_000 })));
       const uid = pod?.metadata?.uid;
       if (typeof uid === 'string' && uid && uid !== baseline.uid) {
-        log(
-          `[reseed] ${DB_POD} was recreated (uid ${baseline.uid} -> ${uid}), not restarted in place; ` +
-            'waiting on its rollout under the attach watch',
-        );
-        await recreatedWait();
-        return { inPlace: false, uid };
-      }
-      const { status } = dbContainerOf(pod);
-      last = describeContainerState(status);
-      const restarted =
-        Number.isInteger(status?.restartCount) &&
-        status.restartCount > baseline.restartCount &&
-        typeof status.containerID === 'string' &&
-        status.containerID &&
-        status.containerID !== baseline.containerID;
-      if (uid === baseline.uid && restarted && status.ready === true) {
-        return { inPlace: true, uid };
-      }
-      if (
-        restarted ||
-        status?.ready !== true ||
-        !status?.state?.running ||
-        status?.containerID !== baseline.containerID
-      ) {
-        began = true;
+        recreatedUid = uid;
+      } else {
+        const { status } = dbContainerOf(pod);
+        last = describeContainerState(status);
+        const restarted =
+          Number.isInteger(status?.restartCount) &&
+          status.restartCount > baseline.restartCount &&
+          typeof status.containerID === 'string' &&
+          status.containerID &&
+          status.containerID !== baseline.containerID;
+        if (uid === baseline.uid && restarted && status.ready === true) {
+          return { inPlace: true, uid };
+        }
+        if (
+          restarted ||
+          status?.ready !== true ||
+          !status?.state?.running ||
+          status?.containerID !== baseline.containerID
+        ) {
+          began = true;
+        }
       }
     } catch (error) {
       last = `unreadable: ${error?.message ?? error}`;
+    }
+    // Outside the read's catch: the recreated pod's rollout wait runs once,
+    // and its failure (a stale volume attachment, a timeout) is the verdict,
+    // never a reason to poll and wait again.
+    if (recreatedUid !== null) {
+      log(
+        `[reseed] ${DB_POD} was recreated (uid ${baseline.uid} -> ${recreatedUid}), not restarted in place; ` +
+          'waiting on its rollout under the attach watch',
+      );
+      await recreatedWait();
+      return { inPlace: false, uid: recreatedUid };
     }
     if (!began && now() >= beginDeadline) {
       throw new Error(
