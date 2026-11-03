@@ -393,6 +393,21 @@ async function main(values, positional) {
   // 1. Gather configuration
   const gatheredConfig = await gatherDeploymentConfig(args);
 
+  // 1a. Template lockstep (wal-g role file). This CLI moves the wal-g role
+  // through a file the template's scripts parse; a scaffold from before that
+  // change reads an env var this CLI no longer sets. Needs the resolved tier,
+  // so it runs right after gathering, before anything is provisioned.
+  {
+    const { assertScaffoldSupportsRoleFile } = await import('./lib/deploy/preflight.js');
+    const { resolveTier } = await import('./lib/deploy/tier-registry.js');
+    try {
+      assertScaffoldSupportsRoleFile(process.cwd(), resolveTier(gatheredConfig));
+    } catch (err) {
+      p.log.error(err.message);
+      process.exit(1);
+    }
+  }
+
   // 1b. Guarantee the lockfile the Dockerfile is about to COPY.
   //
   // The generated Dockerfile does `COPY package.json <lockfile> ./` followed by
