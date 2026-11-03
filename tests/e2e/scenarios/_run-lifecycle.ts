@@ -1475,6 +1475,7 @@ export async function runLifecycle(
       const parentCtx = scenarioContext.getStore() ?? {};
       const stepCtx = {
         ...parentCtx,
+        provider: config.provider ?? 'hetzner',
         recordPerfSubsteps: (timings: Array<{ name: string; ms: number; note?: string }>) =>
           collector.recordPerfSubsteps(stepId, timings),
       };

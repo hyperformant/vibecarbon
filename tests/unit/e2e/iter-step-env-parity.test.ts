@@ -46,17 +46,35 @@ describe('e2eCliEnv', () => {
 
   it('mirrors the runner by aliasing HETZNER_API_TOKEN to the provider CLI var', () => {
     // _run-lifecycle.ts passes HCLOUD_TOKEN explicitly to every step it runs.
-    const env = e2eCliEnv({}, { HETZNER_API_TOKEN: 'tok' } as NodeJS.ProcessEnv);
+    const env = e2eCliEnv({}, { HETZNER_API_TOKEN: 'tok' } as NodeJS.ProcessEnv, 'hetzner');
     expect(env.HCLOUD_TOKEN).toBe('tok');
   });
 
   it('never overwrites an explicit HCLOUD_TOKEN, and never invents one', () => {
-    const explicit = e2eCliEnv({}, {
-      HETZNER_API_TOKEN: 'tok',
-      HCLOUD_TOKEN: 'other',
-    } as NodeJS.ProcessEnv);
+    const explicit = e2eCliEnv(
+      {},
+      {
+        HETZNER_API_TOKEN: 'tok',
+        HCLOUD_TOKEN: 'other',
+      } as NodeJS.ProcessEnv,
+      'hetzner',
+    );
     expect(explicit.HCLOUD_TOKEN).toBe('other');
-    expect(e2eCliEnv({}, {}).HCLOUD_TOKEN).toBeUndefined();
+    expect(e2eCliEnv({}, {}, 'hetzner').HCLOUD_TOKEN).toBeUndefined();
+  });
+
+  it('a DigitalOcean child gets no HCLOUD_TOKEN, and an inherited one is stripped', () => {
+    const base = {
+      HETZNER_API_TOKEN: 'hz',
+      HCLOUD_TOKEN: 'hz',
+      DIGITALOCEAN_API_TOKEN: 'do',
+    } as NodeJS.ProcessEnv;
+    for (const provider of ['digitalocean', 'linode', 'vultr', 'scaleway', undefined]) {
+      const env = e2eCliEnv({}, base, provider);
+      expect(env.HCLOUD_TOKEN).toBeUndefined();
+      expect(Object.values(env)).not.toContain(undefined);
+    }
+    expect(e2eCliEnv({}, base, 'digitalocean').DIGITALOCEAN_API_TOKEN).toBe('do');
   });
 
   it('drops undefined values (spawn rejects them on some platforms)', () => {

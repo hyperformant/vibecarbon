@@ -1018,6 +1018,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     const scenarioCtx = {
       logPath: scenarioLogPath,
       echo: true,
+      provider,
     };
 
     try {

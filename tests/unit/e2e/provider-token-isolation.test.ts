@@ -106,4 +106,21 @@ describe('census: no Hetzner-named token on provider-neutral paths', () => {
   it('no deploy child env is built from a Hetzner-named token', () => {
     expect(lifecycle).not.toMatch(/HCLOUD_TOKEN:\s*hetznerToken/);
   });
+
+  it('every e2eCliEnv call site passes the scenario provider', () => {
+    const cliRunner = readFileSync(join(root, 'utils/cli-runner.ts'), 'utf-8');
+    const iterStep = readFileSync(join(root, '../../scripts/iter-step.js'), 'utf-8');
+    expect(cliRunner).toMatch(/e2eCliEnv\(options\.env, process\.env, [^)]*provider/);
+    expect(iterStep).toMatch(/e2eCliEnv\(\{ REAL_INFRA: 'true' \}, process\.env, provider\)/);
+  });
+
+  it('e2e-env.js never synthesizes HCLOUD_TOKEN outside the hetzner branch', () => {
+    const envSrc = readFileSync(join(root, 'utils/e2e-env.js'), 'utf-8');
+    const assigns = envSrc.match(/env\.HCLOUD_TOKEN\s*=[^=]/g) ?? [];
+    expect(assigns).toHaveLength(1);
+    expect(envSrc.indexOf('env.HCLOUD_TOKEN =')).toBeGreaterThan(
+      envSrc.indexOf("provider === 'hetzner'"),
+    );
+    expect(envSrc).toContain('delete env.HCLOUD_TOKEN');
+  });
 });
