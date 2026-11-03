@@ -117,6 +117,7 @@ import { hcloudChildEnv } from '../utils/compute-token.js';
 import { type ResolutionPin, withResolutionPin } from '../utils/dns-pin.js';
 import { getE2ELicenseStub, resolveE2EAcmeCa } from '../utils/e2e-env.js';
 import { extractDeployFailureDetail } from '../utils/extract-failure-detail.js';
+import { collectHostDiagnostics, findClusterHosts } from '../utils/host-diagnostics.js';
 import { sharedStateBucketName } from '../utils/namespace.js';
 import { deployedScaleTarget } from '../utils/region-resolver.js';
 import { fetchServerTypes } from '../utils/server-types.js';
@@ -701,6 +702,23 @@ async function captureFailureDiagnostics(
       for (const c of buildTlsReissueDiagnostics(kc, label)) {
         sections.push([c.label, safeRun(c.cmd, c.argv, c.timeoutMs, c.maxChars)]);
       }
+    }
+  }
+
+  // 3b. k8s host state over ssh: k3s unit status + journal, kernel OOM
+  //     lines, memory/disk/uptime and the top processes, for each cluster's
+  //     master and db node. Bought by a DO k8s-ha deploy whose standby k3s API
+  //     refused :6443 for 5+ minutes during the pgdata swap: every kubectl
+  //     section above said only "connection refused". Nothing here goes
+  //     through the API, so it answers exactly when the API cannot. Bounded
+  //     and redacted in tests/e2e/utils/host-diagnostics.ts.
+  if (config.mode === 'k8s' || config.mode === 'k8s-ha') {
+    const { getSshKeyPath } = await import('../utils/ssh.js');
+    for (const [label, text] of await collectHostDiagnostics({
+      hosts: findClusterHosts(config.projectDir, config.envPrefix),
+      sshKeyPath: getSshKeyPath(config.projectDir, config.envPrefix),
+    })) {
+      sections.push([label, text]);
     }
   }
 
