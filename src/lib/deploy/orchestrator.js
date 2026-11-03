@@ -75,11 +75,10 @@ import {
   staleObservabilityTlsProblem,
 } from './k8s/index.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
-import { makePublicDnsLookup } from './public-dns-lookup.js';
+import { fetchPublicDomain, publicCurlResolveArgs } from './public-domain-probe.js';
 import { k8sPsqlRunner } from './replication.js';
 import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retired-fence.js';
 import { envS3Record } from './s3-record.js';
-import { stagingProbeCa } from './staging-ca.js';
 import { haStacksFrom } from './standby-types.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
@@ -90,31 +89,6 @@ import {
   assertRolePrimaryWritable,
   liftStrandedWriteFence,
 } from './write-fence.js';
-
-/**
- * The socket options of the public health probe: resolution pinned to public
- * DNS (makePublicDnsLookup, see probePublicHealth), SNI pinned to the domain.
- *
- * Staging runs get FULL verification against system roots + the vendored
- * LE staging roots (src/lib/deploy/staging-ca.js), never a verification
- * opt-out, which would also wave through self-signed/expired/wrong-host
- * chains, the exact misconfigurations this probe exists to catch. The one
- * opt-out is `verifyTls: false`, for the k8s app phase only: its trust
- * verdict is the TLS phase's, recorded as pending on a miss, never passed.
- *
- * @param {string} domain
- * @param {{ verifyTls?: boolean }} opts
- * @returns {Record<string, unknown>} undici `connect` options
- */
-export function probeConnectOptions(domain, { verifyTls = true } = {}) {
-  const connectOpts = { lookup: makePublicDnsLookup(), servername: domain };
-  if (verifyTls === false) {
-    connectOpts.rejectUnauthorized = false;
-  } else if ((readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')) {
-    connectOpts.ca = stagingProbeCa();
-  }
-  return connectOpts;
-}
 
 /**
  * Probe the public /api/health endpoint to verify the app is reachable
@@ -142,7 +116,7 @@ export function probeConnectOptions(domain, { verifyTls = true } = {}) {
  * the public internet, while the trust verdict is the TLS phase's
  * (verifyK8sTls), which probes with full verification and records a miss as
  * TLS pending. A chain is never silently passed. Everything else (SNI,
- * public DNS) is the same in both phases (probeConnectOptions).
+ * public DNS) is the same in both phases (publicProbeConnect).
  *
  * Returns `{ ok: true, status }` on first 2xx, or a structured failure
  * descriptor on timeout — never null. Capturing last-status and last-error
@@ -172,32 +146,16 @@ async function probePublicHealth(
   let lastErrorMessage = null;
   let lastErrorCause = null;
   // The probe runs IMMEDIATELY after we (re)write the DNS record, so the
-  // system resolver may hold a stale entry for the name — worst of all a
+  // system resolver may hold a stale entry for the name, worst of all a
   // NEGATIVE one: any query made while the record didn't exist (a prior
   // teardown window, a failure diagnostic's curl) is cached as NXDOMAIN for
   // the zone's SOA minimum TTL (an hour on Hetzner DNS) by systemd-resolved
   // and most home routers, and the probe then ENOTFOUNDs for its whole
   // budget against a healthy deploy (e4 2026-08-28: 118 attempts while
-  // 1.1.1.1 served the record the entire time). `dns.setServers` CANNOT fix
-  // this — it only redirects `dns.resolve*()`, while fetch resolves via
-  // `dns.lookup()`/getaddrinfo (the probe carried exactly that no-op "fix"
-  // from matrix #3 until 2026-08-28). The real seam is the socket
-  // connector's `lookup` option: pin the probe's resolution to public DNS,
-  // with a system-resolver fallback for egress-filtered networks.
-  //
-  // CRITICAL: when we use undici's Agent we MUST also use undici's `fetch`,
-  // not Node 24's `globalThis.fetch`. Node 24 ships its own bundled undici;
-  // its built-in fetch's dispatcher protocol is incompatible with the npm
-  // undici package's Agent (different `onRequestStart` signature). Mixing
-  // them produces `InvalidArgumentError: invalid onRequestStart method` on
-  // every probe call, with the misleading wrapper "TypeError: fetch failed"
-  // — which is what dominated every k8s + k8s-ha matrix failure for weeks.
-  // Always pair Agent + fetch from the same undici instance.
-  //
-  const undici = await import('undici');
-  const connectOpts = probeConnectOptions(domain, { verifyTls });
-  const dispatcher = new undici.Agent({ connect: connectOpts });
-  const fetchFn = undici.fetch;
+  // 1.1.1.1 served the record the entire time). fetchPublicDomain resolves
+  // through public DNS on every attempt (public-domain-probe.js, the one
+  // path every probe of the app's domain takes), with SNI pinned to the
+  // domain and the shared trust policy.
   // Periodic progress logging: every 5 attempts, write a one-line summary
   // of the most recent failure class + lastStatus to stderr. Without this,
   // the only signal we get from a 5-min probe is the FINAL outcome — which
@@ -227,11 +185,11 @@ async function probePublicHealth(
     firstAttempt = false;
     attempts++;
     try {
-      const res = await fetchFn(url, {
-        method: 'GET',
-        signal: AbortSignal.timeout(8_000),
-        ...(dispatcher && { dispatcher }),
-      });
+      const res = await fetchPublicDomain(
+        url,
+        { method: 'GET', signal: AbortSignal.timeout(8_000) },
+        { verifyTls },
+      );
       lastStatus = res.status;
       if (res.ok) return { ok: true, status: String(res.status), attempts };
     } catch (err) {
@@ -2455,11 +2413,16 @@ export async function executeDeployment(args, gatheredConfig) {
           // public side (cert-manager not yet issued, traefik not routing,
           // app 503, etc.). curl exits non-zero on connect/TLS errors so we
           // route through safeRun. -k skips cert validation — we want the
-          // body even if origin's cert is staging or self-signed.
+          // body even if origin's cert is staging or self-signed. Pinned to
+          // the public answer (--resolve), like every probe of the domain:
+          // an unpinned curl asks the system resolver, which may hold a stale
+          // NXDOMAIN, and caches one more if the record is not there yet.
+          const curlPin = await publicCurlResolveArgs(domain);
           const curlVerbose = await safeRun('curl', [
             '-skvI',
             '--max-time',
             '10',
+            ...curlPin,
             `https://${domain}/api/health`,
           ]);
           const curlPodIp = await safeRun('curl', [
@@ -2467,6 +2430,7 @@ export async function executeDeployment(args, gatheredConfig) {
             '--max-time',
             '10',
             '--http1.1',
+            ...curlPin,
             `https://${domain}/api/health`,
           ]);
           // Pods + endpoints + app logs. When traefik returns a 19-byte

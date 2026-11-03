@@ -36,13 +36,15 @@ describe('stagingProbeCa', () => {
     expect(stagingRootsPem()).toBe(e2eCopy);
   });
 
-  it('orchestrator has one TLS-verification opt-out: the k8s app phase, never staging', () => {
+  it('the public probe has one TLS-verification opt-out: the k8s app phase, never staging', () => {
     // Extends the e2e-side drift guard (staging-ca-trust.test.ts) to src/:
     // staging must never regress to rejectUnauthorized: false. The one
     // exception is the k8s app-phase probe (verifyTls: false), whose trust
-    // verdict is the TLS phase's (k8s-tls-phase.test.ts).
+    // verdict is the TLS phase's (k8s-tls-phase.test.ts). The probe's socket
+    // options live in public-domain-probe.js, shared by every probe of the
+    // app's domain.
     const src = readFileSync(
-      join(__dirname, '..', '..', '..', 'src', 'lib', 'deploy', 'orchestrator.js'),
+      join(__dirname, '..', '..', '..', 'src', 'lib', 'deploy', 'public-domain-probe.js'),
       'utf8',
     );
     expect(src.match(/rejectUnauthorized/g) ?? []).toHaveLength(1);

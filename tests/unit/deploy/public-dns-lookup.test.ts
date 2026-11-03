@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — JS module without types
 import {
   makePublicDnsLookup,
+  PUBLIC_DNS_BUDGET_MS,
   PUBLIC_DNS_SERVERS,
+  resolvePublicA,
 } from '../../../src/lib/deploy/public-dns-lookup.js';
 
 // The deploy's public health probe must not trust the operator's system
@@ -84,16 +86,116 @@ describe('makePublicDnsLookup', () => {
 describe('probePublicHealth wiring', () => {
   // The no-op regression this module replaces: dns.setServers() only
   // redirects dns.resolve*(), never fetch's dns.lookup()/getaddrinfo path.
-  // Pin that the probe's source wires the custom lookup into the undici
-  // Agent connect options (and no longer carries the setServers call).
-  it('orchestrator builds its probe Agent with the public-DNS lookup, not dns.setServers', async () => {
+  // The probe fetches through public-domain-probe.js, which puts this
+  // lookup on the socket (public-domain-probe-census.test.ts covers every
+  // other probe of the domain).
+  it('orchestrator probes through fetchPublicDomain, not dns.setServers', async () => {
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(
       new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url),
       'utf8',
     );
-    expect(src).toContain('makePublicDnsLookup');
-    expect(src).toMatch(/connect:\s*connectOpts/);
+    expect(src).toContain('fetchPublicDomain(');
     expect(src).not.toMatch(/dns\.setServers\(/);
+  });
+});
+
+// Egress filters that silently DROP UDP to 1.1.1.1/8.8.8.8 never answer, they
+// just time out. The public lookup must give up inside a short total budget
+// and take the system answer, well inside the smallest caller timeout
+// (status readiness aborts at 5s, deploy's probe at 8s, the TLS probe at 10s).
+describe('public DNS budget: a resolver that never answers', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const silent = () => ({ resolve4: vi.fn(), cancel: vi.fn() });
+  const systemAnswer = () =>
+    vi.fn((_h: string, opts: { all?: boolean }, cb: (...a: unknown[]) => void) =>
+      opts?.all ? cb(null, [{ address: '10.0.0.3', family: 4 }]) : cb(null, '10.0.0.3', 4),
+    );
+
+  it('fits well inside the smallest caller timeout', () => {
+    expect(PUBLIC_DNS_BUDGET_MS).toBeLessThanOrEqual(1_500);
+  });
+
+  it('lookup falls back to the system resolver at the budget, not before', async () => {
+    vi.useFakeTimers();
+    const resolver = silent();
+    const fallback = systemAnswer();
+    const lookup = makePublicDnsLookup({ resolver, fallback });
+    const cb = vi.fn();
+    lookup('e4.example.dev', {}, cb);
+    await vi.advanceTimersByTimeAsync(PUBLIC_DNS_BUDGET_MS - 1);
+    expect(cb).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fallback).toHaveBeenCalledOnce();
+    expect(cb).toHaveBeenCalledExactlyOnceWith(null, '10.0.0.3', 4);
+    expect(resolver.cancel).toHaveBeenCalled();
+  });
+
+  it('a public answer that arrives after the budget is ignored (one callback)', async () => {
+    vi.useFakeTimers();
+    let late: ((e: null, a: string[]) => void) | undefined;
+    const resolver = {
+      resolve4: vi.fn((_h: string, cb: (e: null, a: string[]) => void) => {
+        late = cb;
+      }),
+    };
+    const lookup = makePublicDnsLookup({ resolver, fallback: systemAnswer() });
+    const cb = vi.fn();
+    lookup('e4.example.dev', {}, cb);
+    await vi.advanceTimersByTimeAsync(PUBLIC_DNS_BUDGET_MS);
+    late?.(null, ['1.2.3.4']);
+    expect(cb).toHaveBeenCalledExactlyOnceWith(null, '10.0.0.3', 4);
+  });
+
+  it('one lookup timing out never cancels a concurrent one (a Resolver per call)', async () => {
+    // Status runs its readiness and TLS probes together. With one shared
+    // Resolver, the first lookup's budget expiry cancelled every in-flight
+    // query, forcing the other onto the system resolver: the stale-NXDOMAIN
+    // path this lookup exists to avoid.
+    vi.useFakeTimers();
+    /** A Resolver stub whose cancel() fails ITS pending queries, like c-ares. */
+    const stub = (answerAfterMs: number | null) => {
+      const pending: Array<(e: Error | null, a?: string[]) => void> = [];
+      return {
+        resolve4: vi.fn((_h: string, cb: (e: Error | null, a?: string[]) => void) => {
+          pending.push(cb);
+          if (answerAfterMs !== null) setTimeout(() => cb(null, ['1.2.3.4']), answerAfterMs);
+        }),
+        cancel: vi.fn(() => {
+          for (const cb of pending.splice(0))
+            cb(Object.assign(new Error('cancelled'), { code: 'ECANCELLED' }));
+        }),
+      };
+    };
+    const silentResolver = stub(null);
+    const answeringResolver = stub(600);
+    const made = [silentResolver, answeringResolver];
+    const fallback = systemAnswer();
+    const lookup = makePublicDnsLookup({ makeResolver: () => made.shift(), fallback });
+
+    const first = vi.fn();
+    const second = vi.fn();
+    lookup('e4.example.dev', {}, first);
+    await vi.advanceTimersByTimeAsync(1_000);
+    lookup('e4.example.dev', {}, second);
+    // t=1500: the first lookup's budget expires and cancels its own query.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(first).toHaveBeenCalledExactlyOnceWith(null, '10.0.0.3', 4);
+    expect(silentResolver.cancel).toHaveBeenCalled();
+    expect(answeringResolver.cancel).not.toHaveBeenCalled();
+    // t=1600: the second's public answer, 600ms into its own budget.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(second).toHaveBeenCalledExactlyOnceWith(null, '1.2.3.4', 4);
+    expect(fallback).toHaveBeenCalledOnce();
+  });
+
+  it('resolvePublicA falls back at the budget too', async () => {
+    vi.useFakeTimers();
+    const p = resolvePublicA('e4.example.dev', { resolver: silent(), fallback: systemAnswer() });
+    await vi.advanceTimersByTimeAsync(PUBLIC_DNS_BUDGET_MS);
+    expect(await p).toEqual(['10.0.0.3']);
   });
 });

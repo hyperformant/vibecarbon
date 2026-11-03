@@ -93,7 +93,9 @@ function readRetryOnPrimary(envName, envConfig, projectName) {
 /**
  * @param {string} domain
  * @param {{ envName: string, envConfig: object, projectName: string }} env
- * @param {{ probe?: typeof probeTlsTrustOnce, readRetry?: () => Promise<string> }} [deps] test seams
+ * @param {{ probe?: typeof probeTlsTrustOnce, readRetry?: () => Promise<string>,
+ *   lookup?: Function, port?: number, ca?: string[] }} [deps] test seams; `lookup`,
+ *   `port` and `ca` reach the real probe (a public-DNS answer, a local server, its CA)
  * @returns {Promise<
  *   { state: 'trusted', expires: string|null, validTo: string|null, serialNumber: string|null } |
  *   { state: 'pending'|'untrusted', reason: string, deployReason?: string,
@@ -106,7 +108,7 @@ export async function checkTls(domain, { envName, envConfig, projectName }, deps
   const probe = deps.probe ?? probeTlsTrustOnce;
   let live;
   try {
-    live = await probe(domain);
+    live = await probe(domain, { lookup: deps.lookup, port: deps.port, ca: deps.ca });
   } catch (err) {
     live = { trusted: false, reason: err instanceof Error ? err.message : String(err) };
   }
