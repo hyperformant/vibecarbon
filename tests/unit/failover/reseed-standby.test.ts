@@ -20,6 +20,9 @@
  * ssh.js is mocked so the logic is exercised without a real cluster.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/ssh.js', async () => {
@@ -37,9 +40,14 @@ const ssh = await import('../../../src/lib/ssh.js');
 const { getReplPasswordFromSecret, reseedStandbyOrAbort, reseedStandbyFromPrimary } = await import(
   '../../../src/failover.js'
 );
-const { ensureReplicationSlot, isStandbyStreaming, ReseedStageBusyError } = await import(
-  '../../../src/lib/deploy/replication.js'
-);
+const {
+  DB_STS_BOOT_TIMEOUT_S,
+  ensureReplicationSlot,
+  isStandbyStreaming,
+  RESEED_BASEBACKUP_FLOOR_BYTES_PER_S,
+  ReseedStageBusyError,
+  ReseedStageTimeoutError,
+} = await import('../../../src/lib/deploy/replication.js');
 
 const b64 = (s: string) => Buffer.from(s, 'utf-8').toString('base64');
 
@@ -98,7 +106,11 @@ type InPlaceOverrides = {
   reseededFrom?: string;
   recovery?: string;
   primaryDiscard?: string;
+  dbSize?: string;
+  stopError?: Error;
+  disarmOut?: string;
   onCall?: (c: string) => void;
+  onStage?: (o: { timeout?: number; input: string }) => void;
 };
 
 /**
@@ -123,12 +135,20 @@ function inPlaceSsh(o: InPlaceOverrides = {}) {
     if (cmd.includes('db-guard.sh') && cmd.includes('grep -c'))
       return o.markerGrep ?? '1\nin_recovery=t';
     if (cmd.includes('kill -INT 1')) {
+      if (o.stopError) throw o.stopError;
       stopped = true;
       return '';
     }
+    if (cmd.includes('RESEED_DISARMED')) {
+      if (o.disarmOut === undefined) return 'RESEED_DISARMED';
+      throw Object.assign(new Error('exit 1'), { stdout: o.disarmOut, status: 1 });
+    }
     if (ip === PRIMARY_IP && cmd.includes('.vc-discard'))
       return o.primaryDiscard ?? 'VC_DISCARD_GONE';
+    if (ip === PRIMARY_IP && cmd.includes('pg_database_size')) return o.dbSize ?? '1048576';
+    if (cmd.includes('pg_isready')) return 'accepting connections';
     if (argv.includes('exec') && opts?.input?.includes('pg_basebackup')) {
+      o.onStage?.({ timeout: (opts as { timeout?: number }).timeout, input: opts.input });
       attempt = /RESEED_STAGED (\S+)"/.exec(opts.input)?.[1] ?? '';
       if (o.stageError) throw o.stageError;
       return o.stageOut ?? `RESEED_STAGED ${attempt}`;
@@ -362,6 +382,80 @@ describe('reseedStandbyFromPrimary (in place)', () => {
     expect(calls.some((c) => c.includes('pg_basebackup'))).toBe(false);
   });
 
+  it('bounds the stage by the primary database size: the floor for a small db', async () => {
+    const stages: Array<{ timeout?: number; input: string }> = [];
+    await runReseed(inPlaceSsh({ dbSize: '1048576', onStage: (x) => stages.push(x) }));
+    expect(stages).toHaveLength(1);
+    expect(stages[0].timeout).toBe(2 * DB_STS_BOOT_TIMEOUT_S * 1000);
+    expect(stages[0].input).toContain(`timeout -s KILL ${DB_STS_BOOT_TIMEOUT_S} pg_basebackup`);
+  });
+
+  it('a large db scales both bounds, the remote deadline strictly below the client one', async () => {
+    const size = 50 * 1024 ** 3;
+    const remoteS = Math.ceil(size / RESEED_BASEBACKUP_FLOOR_BYTES_PER_S);
+    expect(remoteS).toBeGreaterThan(DB_STS_BOOT_TIMEOUT_S);
+    const stages: Array<{ timeout?: number; input: string }> = [];
+    await runReseed(inPlaceSsh({ dbSize: String(size), onStage: (x) => stages.push(x) }));
+    expect(stages[0].input).toContain(`timeout -s KILL ${remoteS} pg_basebackup`);
+    expect(stages[0].timeout).toBe(2 * remoteS * 1000);
+    expect(remoteS * 1000).toBeLessThan(stages[0].timeout ?? 0);
+  });
+
+  it('a primary whose size cannot be read refuses before the stage', async () => {
+    const calls: string[] = [];
+    await expect(
+      runReseed(inPlaceSsh({ dbSize: 'ERROR: x', onCall: (c) => calls.push(c) })),
+    ).rejects.toThrow(/database size/);
+    expect(calls.some((c) => c.includes('pg_basebackup'))).toBe(false);
+  });
+
+  it('a stage past its remote deadline is a clean timeout naming the size and bounds, with no stop', async () => {
+    const calls: string[] = [];
+    const timedOut = Object.assign(new Error('Command failed: ssh ... RESEED_TIMEOUT 600'), {
+      stdout: 'RESEED_TIMEOUT 600\n',
+      status: 1,
+    });
+    const err = await runReseed(
+      inPlaceSsh({ stageError: timedOut, dbSize: '1048576', onCall: (c) => calls.push(c) }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(ReseedStageTimeoutError);
+    expect(err.message).toMatch(/did not finish within 600s/);
+    expect(err.message).toMatch(/1\.0 MiB/);
+    expect(err.message).toMatch(/client bound 1200s/);
+    expect(err.message).toMatch(/nothing was staged/i);
+    expect(calls.filter((c) => c.includes('pg_basebackup'))).toHaveLength(1);
+    expect(calls.some((c) => c.includes('kill -INT'))).toBe(false);
+  });
+
+  it('a stop the container refuses disarms the staged tree under the lock, and says so', async () => {
+    const calls: string[] = [];
+    const refused = Object.assign(new Error('exit 3'), {
+      stdout: 'RESEED_STOP_REFUSED postgres is not in recovery (pg_is_in_recovery: f)\n',
+      status: 3,
+    });
+    const err = await runReseed(
+      inPlaceSsh({ stopError: refused, onCall: (c) => calls.push(c) }),
+    ).catch((e) => e);
+    expect(err.message).toMatch(/nothing was stopped/);
+    expect(err.message).toMatch(/staged tree was disarmed/);
+    const stage = calls.findIndex((c) => c.includes('pg_basebackup'));
+    const disarm = calls.findIndex((c) => c.includes('RESEED_DISARMED'));
+    expect(disarm).toBeGreaterThan(stage);
+    const attempt = /RESEED_STAGED (\S+)"/.exec(calls[stage])?.[1];
+    expect(calls[disarm]).toContain('flock -n 9');
+    expect(calls[disarm]).toContain(`" != ${attempt} ]`);
+  });
+
+  it('a disarm that cannot run says the staged tree is still armed and swaps on the next restart', async () => {
+    const refused = Object.assign(new Error('exit 3'), {
+      stdout: 'RESEED_STOP_REFUSED could not confirm the db is in recovery (psql did not answer)\n',
+      status: 3,
+    });
+    await expect(
+      runReseed(inPlaceSsh({ stopError: refused, disarmOut: 'RESEED_DISARM_REFUSED busy\n' })),
+    ).rejects.toThrow(/still armed[\s\S]*next restart/);
+  });
+
   it('HARD-ERRORS (does not silently skip) when the password is missing', async () => {
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockResolvedValue('');
     await expect(
@@ -488,5 +582,44 @@ describe('reseedStandbyOrAbort: skip re-seed when standby already streaming', ()
     expect(calls.some((a) => a.join(' ').includes('pg_isready'))).toBe(false);
     // Promotion is failoverHA's step, behind the replica proof and the journal.
     expect(calls.some((a) => a.join(' ').includes('pg_ctl promote'))).toBe(false);
+  });
+});
+
+describe('reseedStandbyOrAbort: a busy stage aborts before promotion, naming the rerun', () => {
+  it('says the earlier stage still runs and names `vibecarbon failover <env>` to rerun once it finishes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-reseed-busy-'));
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({ projectName: 'p', environments: { prod: ENV } }),
+    );
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    const busy = Object.assign(new Error('Command failed'), {
+      stdout: 'RESEED_REFUSED busy\n',
+      status: 1,
+    });
+    const cluster = inPlaceSsh({ stageError: busy });
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(async (ip, k, argv, opts) =>
+      argv.join(' ').includes('pg_stat_wal_receiver') ? '' : cluster(ip, k, argv, opts),
+    );
+    const servers = {
+      primary: { ip: PRIMARY_IP },
+      standby: { ip: STANDBY_IP, dbIp: '10.0.0.8', dbPrivateIp: '10.0.1.2' },
+    };
+    try {
+      const err = await reseedStandbyOrAbort(
+        servers,
+        '/k',
+        { start: vi.fn(), stop: vi.fn() },
+        { envName: 'prod' },
+      ).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/^Failover aborted before promotion: /);
+      expect(err.message).toMatch(/earlier reseed stage is still running/);
+      expect(err.message).toContain('rerun `vibecarbon failover prod`');
+      expect(err.message).not.toMatch(/redeploy/);
+    } finally {
+      cwd.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

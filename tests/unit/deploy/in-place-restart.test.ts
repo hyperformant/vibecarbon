@@ -27,7 +27,10 @@ import {
   DB_STS_BOOT_TIMEOUT_S,
   DbGuardMissingError,
   evaluateDbGuardSupport,
+  RESEED_BASEBACKUP_FLOOR_BYTES_PER_S,
   ReseedStageBusyError,
+  ReseedStageTimeoutError,
+  reseedStageBoundsS,
   restartDbContainerInPlace,
   runInPlaceStage,
 } from '../../../src/lib/deploy/replication.js';
@@ -762,6 +765,16 @@ describe('runInPlaceStage: a busy stage is a terminal refusal', () => {
     ).resolves.toEqual({ skipped: true });
   });
 
+  it('RESEED_TIMEOUT under exit 1 is a ReseedStageTimeoutError naming the deadline, after one call', async () => {
+    const exec = vi.fn(async () => {
+      throw Object.assign(new Error('exit 1'), { stdout: 'RESEED_TIMEOUT 900\n', status: 1 });
+    });
+    const err = await runInPlaceStage(exec, { attempt: 'att-1' }).catch((e) => e);
+    expect(err).toBeInstanceOf(ReseedStageTimeoutError);
+    expect(err.deadlineS).toBe(900);
+    expect(exec).toHaveBeenCalledOnce();
+  });
+
   it('any other failure is rethrown as is, after one call', async () => {
     const boom = new Error('pg_basebackup failed');
     const exec = vi.fn(async () => {
@@ -799,5 +812,23 @@ describe('shJoin: remote commands survive the remote shell (C13)', () => {
         encoding: 'utf-8',
       }).stdout.trim(),
     ).not.toBe('4');
+  });
+});
+
+describe('reseedStageBoundsS: the stage bound comes from the primary size', () => {
+  it('a small or unknown db gets the floor; the client bound is twice the remote deadline', () => {
+    for (const size of [0, 1, 1024 ** 2, Number.NaN]) {
+      expect(reseedStageBoundsS(size)).toEqual({
+        remoteS: DB_STS_BOOT_TIMEOUT_S,
+        clientS: 2 * DB_STS_BOOT_TIMEOUT_S,
+      });
+    }
+  });
+  it('a large db scales at the floor rate, the remote deadline strictly below the client bound', () => {
+    const size = 100 * 1024 ** 3;
+    const b = reseedStageBoundsS(size);
+    expect(b.remoteS).toBe(Math.ceil(size / RESEED_BASEBACKUP_FLOOR_BYTES_PER_S));
+    expect(b.clientS).toBe(2 * b.remoteS);
+    expect(b.remoteS).toBeLessThan(b.clientS);
   });
 });

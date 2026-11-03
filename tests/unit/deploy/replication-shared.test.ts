@@ -36,6 +36,7 @@ import {
   IN_PLACE_RESEED_DIR,
   PGDATA_SWAP_POD,
   parsePgdataClaimFromPodJson,
+  reseedDisarmArgv,
   swapPgdataViaHelperPod,
   verifyStreaming,
 } from '../../../src/lib/deploy/replication.js';
@@ -720,6 +721,23 @@ describe('buildStagedBasebackupScript in-place mode', () => {
     expect(p).toMatch(/\n {2}echo RESEED_SKIPPED\n {2}exit 0\nfi/);
     expect(p.indexOf('RESEED_SKIPPED')).toBeLessThan(p.indexOf('pg_basebackup'));
   });
+  it('bounds pg_basebackup with a remote deadline, only in in-place mode', () => {
+    const d = buildStagedBasebackupScript({ ...base, basebackupDeadlineS: 777 });
+    expect(d).toContain('timeout -s KILL 777 pg_basebackup');
+    expect(d).toContain('echo "RESEED_TIMEOUT 777"');
+    expect(() =>
+      buildStagedBasebackupScript({
+        replPassword: 'p',
+        primaryHost: 'h',
+        swap: true,
+        basebackupDeadlineS: 777,
+      }),
+    ).toThrow(/in-place/);
+    expect(() => buildStagedBasebackupScript({ ...base, basebackupDeadlineS: 0 })).toThrow(
+      /deadline/,
+    );
+  });
+
   it('refuses an attempt id the shell would read as more than a word', () => {
     expect(() => buildStagedBasebackupScript({ ...base, inPlaceAttempt: "a'; rm -rf /" })).toThrow(
       /attempt/,
@@ -866,6 +884,8 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
       stagingDir: IN_PLACE_RESEED_DIR,
       primaryConninfo: 'host=10.0.0.5 port=15433',
       inPlaceAttempt: 'att-1',
+      // The production shape: reseedStandbyInPlace always bounds the transfer.
+      basebackupDeadlineS: 600,
       ...extra,
     }).replaceAll('/var/lib/postgresql/data', pgdata);
 
@@ -994,6 +1014,84 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
     expect(outA.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-1');
     expect(read('.vc-reseed-ready')).toBe('att-1');
     expect(read('.vc-reseed/.vc-reseed-id')).toBe('att-1');
+  });
+
+  it('a transfer past its remote deadline is killed: RESEED_TIMEOUT, nothing armed, the lock free', () => {
+    // A gate never opened: the stub transfer waits until it is killed.
+    const r = stage({ BB_GATE: join(dir, 'never') }, { basebackupDeadlineS: 1 });
+    expect(r.status).toBe(1);
+    expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_TIMEOUT 1');
+    expect(r.stderr).toMatch(/did not finish within 1s/);
+    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+    expect(cluster()).toEqual(LIVE);
+    const g = guard();
+    expect(g.status, g.stderr).toBe(0);
+    expect(g.stderr).not.toContain('RESEED_SWAPPED');
+    // The lock went with the killed transfer: the next stage is not busy.
+    rmSync(calls);
+    const next = stage({}, { inPlaceAttempt: 'att-2' });
+    expect(next.status, next.stderr).toBe(0);
+    expect(next.stdout.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-2');
+  });
+
+  it('a transfer that fails fast is a plain failure, never a timeout', () => {
+    const r = stage({ BB_PARTIAL: '1' });
+    expect(r.status).toBe(1);
+    expect(r.stdout).not.toContain('RESEED_TIMEOUT');
+    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+  });
+
+  const disarm = (attempt: string, env: Record<string, string> = {}) =>
+    spawnSync(
+      'sh',
+      ['-c', reseedDisarmArgv(attempt)[2].replaceAll('/var/lib/postgresql/data', pgdata)],
+      {
+        encoding: 'utf-8',
+        env: stageEnv(env),
+      },
+    );
+
+  it("the disarm clears this attempt's armed tree under the lock; the swap then takes nothing", () => {
+    expect(stage().status).toBe(0);
+    const d = disarm('att-1');
+    expect(d.status, d.stderr).toBe(0);
+    expect(d.stdout.trim()).toBe('RESEED_DISARMED');
+    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+    const g = guard();
+    expect(g.stderr).not.toContain('RESEED_SWAPPED');
+    expect(read('base/marker')).toBe('live\n');
+  });
+
+  it("the disarm leaves another attempt's tree, and a swap under way, alone", () => {
+    expect(stage().status).toBe(0);
+    const other = disarm('att-9');
+    expect(other.status).toBe(1);
+    expect(other.stdout).toMatch(/^RESEED_DISARM_REFUSED /);
+    expect(read('.vc-reseed-ready')).toBe('att-1');
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), 'out att-1');
+    const midSwap = disarm('att-1');
+    expect(midSwap.status).toBe(1);
+    expect(midSwap.stdout).toMatch(/^RESEED_DISARM_REFUSED .*in progress/);
+    expect(read('.vc-reseed-ready')).toBe('att-1');
+  });
+
+  it('the disarm refuses while another holds the lock, touching nothing', async () => {
+    expect(stage().status).toBe(0);
+    const holder = spawn('sh', [
+      '-c',
+      `exec 9>"${pgdata}/.vc-restore.lock"; flock 9; echo held; sleep 5`,
+    ]);
+    try {
+      await new Promise<void>((res) => holder.stdout.once('data', () => res()));
+      const d = disarm('att-1');
+      expect(d.status).toBe(1);
+      expect(d.stdout.trim()).toBe('RESEED_DISARM_REFUSED busy');
+      expect(read('.vc-reseed-ready')).toBe('att-1');
+    } finally {
+      holder.kill('SIGKILL');
+    }
   });
 
   it('a symlinked lock is refused, nothing touched', () => {

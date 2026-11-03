@@ -62,6 +62,39 @@ export function restoreRolloutTimeoutS(sizeBytes) {
   );
 }
 
+/**
+ * The slowest an in-place reseed's pg_basebackup is expected to move the
+ * primary's databases: 10 MiB/s. Half the restore fetch floor
+ * (RESTORE_FETCH_FLOOR_BYTES_PER_S, parallel S3 GETs inside one region),
+ * because the basebackup is ONE TCP stream from the primary cluster in
+ * another region, through the socat relays and the WireGuard tunnel, and
+ * the primary keeps serving while it reads.
+ */
+export const RESEED_BASEBACKUP_FLOOR_BYTES_PER_S = 10 * 1024 ** 2;
+
+/**
+ * The in-place stage's two bounds for a primary of `sizeBytes`, the way
+ * restoreRolloutTimeoutS sizes a restore:
+ *   - remoteS: the deadline the stage puts on pg_basebackup itself (killed
+ *     past it): the boot floor, or the transfer at the floor rate, whichever
+ *     is longer;
+ *   - clientS: twice that, the ssh client's bound on the whole exec. The
+ *     second half covers the stage's pass over the tree it fetched (the
+ *     PG_VERSION check, the .vc-* strip, chown -R, the syncs), so the client
+ *     never gives up on a stage that is still running and holds the lock.
+ * An unknown size gets the floor.
+ *
+ * @param {number} sizeBytes
+ * @returns {{remoteS: number, clientS: number}}
+ */
+export function reseedStageBoundsS(sizeBytes) {
+  const remoteS = Math.max(
+    DB_STS_BOOT_TIMEOUT_S,
+    Math.ceil((Number(sizeBytes) || 0) / RESEED_BASEBACKUP_FLOOR_BYTES_PER_S),
+  );
+  return { remoteS, clientS: 2 * remoteS };
+}
+
 /** The db container's PGDATA (both tiers mount the data volume here). */
 const PGDATA_DIR = '/var/lib/postgresql/data';
 
@@ -254,8 +287,20 @@ export function buildStagedBasebackupScript({
   primaryConninfo = '',
   label = 'reseed',
   inPlaceAttempt = null,
+  basebackupDeadlineS = null,
 }) {
   const inPlace = inPlaceAttempt !== null && inPlaceAttempt !== undefined;
+  if (basebackupDeadlineS !== null && basebackupDeadlineS !== undefined) {
+    if (!inPlace) {
+      throw new Error('buildStagedBasebackupScript: basebackupDeadlineS is for an in-place stage');
+    }
+    if (!Number.isInteger(basebackupDeadlineS) || basebackupDeadlineS < 1) {
+      throw new Error(
+        `buildStagedBasebackupScript: ${JSON.stringify(basebackupDeadlineS)} is not a deadline in whole seconds`,
+      );
+    }
+  }
+  const deadline = inPlace && basebackupDeadlineS ? basebackupDeadlineS : null;
   const readyMarker = `${pgdataDir}/.vc-reseed-ready`;
   if (inPlace) {
     if (typeof inPlaceAttempt !== 'string' || !IN_PLACE_ATTEMPT_RE.test(inPlaceAttempt)) {
@@ -365,7 +410,39 @@ chown -R postgres:postgres ${pgdataDir}
   // with an already-streaming standby's live walreceiver ("slot is active").
   const basebackupSlotFlag = basebackupSlot ? ` -S ${basebackupSlot}` : '';
 
-  const basebackupBlock = `
+  const basebackupBlock = deadline
+    ? `
+# Stage into a tmp dir; atomic swap only after basebackup verifies good.
+rm -rf ${stagingDir}
+mkdir -p ${stagingDir}
+chown postgres:postgres ${stagingDir}
+
+# The remote deadline (reseedStageBoundsS): past it the transfer is killed,
+# so the stage, and the lock it holds, never outlive the client waiting on
+# it. A kill leaves only a staging dir with no id and no ready marker:
+# cleared here, and nothing db-guard.sh would swap.
+vc_bb_start=$(date +%s)
+vc_bb_rc=0
+PGPASSWORD='${replPassword}' timeout -s KILL ${deadline} pg_basebackup \\
+  -h ${primaryHost} -p ${primaryPort} \\
+  -U replicator -D ${stagingDir} \\
+  -Fp -Xs -R -c fast${basebackupSlotFlag} || vc_bb_rc=$?
+if [ "$vc_bb_rc" != 0 ]; then
+  rm -rf ${stagingDir}
+  if [ $(( $(date +%s) - vc_bb_start )) -ge ${deadline} ]; then
+    echo "[${label}] pg_basebackup did not finish within ${deadline}s and was stopped; nothing staged" >&2
+    echo "RESEED_TIMEOUT ${deadline}"
+  fi
+  exit 1
+fi
+
+# A successful pg_basebackup always writes PG_VERSION (and standby.signal via -R).
+if [ ! -f ${stagingDir}/PG_VERSION ]; then
+  echo "[${label}] pg_basebackup produced no PG_VERSION, refusing to swap" >&2
+  rm -rf ${stagingDir}
+  exit 1
+fi`
+    : `
 # Stage into a tmp dir; atomic swap only after basebackup verifies good.
 rm -rf ${stagingDir}
 mkdir -p ${stagingDir}
@@ -1332,7 +1409,7 @@ export async function reseedStandbyFromPrimary(
   // postgres runs. The script is piped over stdin (PGPASSWORD embedded), never
   // argv. It dials the LOCAL relay and pins the explicit streaming conninfo,
   // byte-identical to the deploy-time seed's buildPrimaryConninfo output.
-  const stageScript = (attempt) =>
+  const stageScript = (attempt, { basebackupDeadlineS }) =>
     buildStagedBasebackupScript({
       replPassword,
       primaryHost: standbyDbPrivateIp,
@@ -1350,6 +1427,7 @@ export async function reseedStandbyFromPrimary(
       }),
       label: 'reseed',
       inPlaceAttempt: attempt,
+      basebackupDeadlineS,
     });
   const result = await reseedStandbyInPlace({
     kubectl,
@@ -1471,6 +1549,81 @@ async function prepareReseedSource(primaryKubectl, { envName } = {}) {
         'copy it into the standby). Nothing was staged',
     );
   }
+  // What the basebackup will move: it bounds the stage (reseedStageBoundsS).
+  let size = '';
+  try {
+    size = String(
+      await primaryKubectl(dbExecArgv(['psql', '-U', 'postgres', '-tAc', DB_SIZE_SQL]), {
+        timeout: 30_000,
+      }),
+    ).trim();
+  } catch (error) {
+    size = `unreadable: ${error?.message ?? error}`;
+  }
+  if (!/^\d+$/.test(size)) {
+    throw new Error(
+      `reseed refused: could not read the primary's database size (${size.slice(0, 120) || 'empty'}), ` +
+        'so the stage cannot be bounded. Nothing was staged',
+    );
+  }
+  return { sizeBytes: Number(size) };
+}
+
+/** Every database's size on the primary: what pg_basebackup moves, about. */
+const DB_SIZE_SQL = 'SELECT sum(pg_database_size(datname)) FROM pg_database';
+
+/** Bytes as MiB or GiB, for messages. */
+function formatBytes(n) {
+  return n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GiB` : `${(n / 1024 ** 2).toFixed(1)} MiB`;
+}
+
+/**
+ * Disarms this attempt's staged tree: under the PGDATA lock (the stage's,
+ * restore's and db-guard.sh's), and only while no swap is under way and the
+ * ready marker names `attempt`, the marker goes first (durably), then the
+ * tree. Prints RESEED_DISARMED, or `RESEED_DISARM_REFUSED <why>` with exit 1.
+ * One sh -c token.
+ *
+ * @param {string} attempt
+ * @returns {readonly string[]}
+ */
+export function reseedDisarmArgv(attempt) {
+  if (typeof attempt !== 'string' || !IN_PLACE_ATTEMPT_RE.test(attempt)) {
+    throw new Error(
+      `reseedDisarmArgv: ${JSON.stringify(attempt)} is not an in-place reseed attempt id`,
+    );
+  }
+  const d = PGDATA_DIR;
+  return Object.freeze([
+    'sh',
+    '-c',
+    `if [ -L ${d}/.vc-restore.lock ]; then echo 'RESEED_DISARM_REFUSED the lock is a symlink'; exit 1; fi; ` +
+      `exec 9>${d}/.vc-restore.lock; flock -n 9 || { echo 'RESEED_DISARM_REFUSED busy'; exit 1; }; ` +
+      `if [ -e ${d}/.vc-reseed-in-progress ] || [ -L ${d}/.vc-reseed-in-progress ]; then echo 'RESEED_DISARM_REFUSED a swap is in progress'; exit 1; fi; ` +
+      `if [ -e ${d}/.vc-reseed-ready ] && [ "$(cat ${d}/.vc-reseed-ready)" != ${attempt} ]; then echo 'RESEED_DISARM_REFUSED the armed tree is another attempt'; exit 1; fi; ` +
+      `rm -f ${d}/.vc-reseed-ready ${d}/.vc-reseed-ready.tmp; sync; rm -rf ${d}/.vc-reseed; echo RESEED_DISARMED`,
+  ]);
+}
+
+/**
+ * After a failed restart: disarm this attempt's tree so no later container
+ * start swaps it in. Returns the sentence the error ends with.
+ */
+async function disarmStagedReseed(kubectl, attempt) {
+  let out = '';
+  try {
+    out = await kubectl(dbExecArgv(reseedDisarmArgv(attempt)), { timeout: 300_000 });
+  } catch (error) {
+    out = error?.stdout ?? '';
+  }
+  if (hasSentinelLine(out, 'RESEED_DISARMED')) {
+    return 'The staged tree was disarmed; the standby keeps its data directory';
+  }
+  const why = sentinelLinePayload(out, 'RESEED_DISARM_REFUSED') ?? 'the disarm did not run';
+  return (
+    `A staged tree (attempt ${attempt}) is still armed in ${IN_PLACE_RESEED_DIR} and will swap in on ` +
+    `the db container's next restart (${why}); to drop it, remove ${PGDATA_DIR}/.vc-reseed-ready in ${DB_POD}`
+  );
 }
 
 /** A fresh in-place reseed attempt id (IN_PLACE_ATTEMPT_RE). */
@@ -1489,9 +1642,9 @@ function newReseedAttempt() {
  *
  * @param {object} o
  * @param {(argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>} o.kubectl  standby cluster
- * @param {(attempt: string) => string} o.stageScript  buildStagedBasebackupScript({... inPlaceAttempt: attempt})
+ * @param {(attempt: string, bounds: {basebackupDeadlineS: number}) => string} o.stageScript  buildStagedBasebackupScript({... inPlaceAttempt: attempt, basebackupDeadlineS})
  * @param {string} o.envName
- * @param {() => Promise<void>} [o.beforeStage] runs after the guard, before the stage
+ * @param {() => Promise<{sizeBytes?: number}|void>} [o.beforeStage] runs after the guard, before the stage; the size it returns bounds the stage
  * @param {number} [o.attachWatchPollMs]
  * @param {(ms: number) => Promise<void>} [o.sleep]
  * @param {() => number} [o.now]
@@ -1507,32 +1660,57 @@ export async function reseedStandbyInPlace({
   now = Date.now,
 }) {
   const guard = await assertLiveDbGuardSupportsReseed(kubectl, { envName });
-  if (beforeStage) await beforeStage();
+  const source = beforeStage ? await beforeStage() : undefined;
+  const sizeBytes = Number(source?.sizeBytes) || 0;
+  const { remoteS, clientS } = reseedStageBoundsS(sizeBytes);
 
   const attempt = newReseedAttempt();
-  const script = stageScript(attempt);
+  const script = stageScript(attempt, { basebackupDeadlineS: remoteS });
   // runInPlaceStage reads the stage's stdout (an exec error carries it):
-  // busy is terminal, never retried here or by a caller.
-  const stage = await runInPlaceStage(
-    () =>
-      kubectl(['-n', 'vibecarbon', 'exec', '-i', DB_POD, '-c', DB_CONTAINER, '--', 'sh'], {
-        input: script,
-      }),
-    { attempt },
-  );
+  // busy is terminal, never retried here or by a caller. The client bound
+  // sits above the stage's own deadline, so it never abandons a live stage.
+  let stage;
+  try {
+    stage = await runInPlaceStage(
+      () =>
+        kubectl(['-n', 'vibecarbon', 'exec', '-i', DB_POD, '-c', DB_CONTAINER, '--', 'sh'], {
+          input: script,
+          timeout: clientS * 1000,
+        }),
+      { attempt },
+    );
+  } catch (error) {
+    if (error instanceof ReseedStageTimeoutError) {
+      throw new ReseedStageTimeoutError(
+        `reseed stage timed out: pg_basebackup of the primary's ${formatBytes(sizeBytes)} did not finish ` +
+          `within ${remoteS}s (sized at ${formatBytes(RESEED_BASEBACKUP_FLOOR_BYTES_PER_S)}/s; client bound ${clientS}s) ` +
+          'and was stopped. Nothing was staged and nothing stopped; the standby keeps its data directory. ' +
+          'Check the replication link between the clusters, then rerun',
+        { deadlineS: remoteS },
+      );
+    }
+    throw error;
+  }
   if ('skipped' in stage) return 'skipped';
 
-  await restartDbContainerInPlace(kubectl, {
-    guard,
-    recreatedWait: () =>
-      k8sDbRolloutWait({
-        kubectl: (_ip, argv, opts) => kubectl(argv, opts),
-        ip: '',
-        pollMs: attachWatchPollMs,
-      }),
-    sleep,
-    now,
-  });
+  try {
+    await restartDbContainerInPlace(kubectl, {
+      guard,
+      recreatedWait: () =>
+        k8sDbRolloutWait({
+          kubectl: (_ip, argv, opts) => kubectl(argv, opts),
+          ip: '',
+          pollMs: attachWatchPollMs,
+        }),
+      sleep,
+      now,
+    });
+  } catch (error) {
+    // The tree is staged and marked ready: without a disarm, the next
+    // container start (any restart, any time) would swap it in.
+    const outcome = await disarmStagedReseed(kubectl, attempt);
+    throw new Error(`${error?.message ?? error}. ${outcome}`, { cause: error });
+  }
 
   const from = String(await kubectl(dbExecArgv(RESEEDED_FROM_READ), { timeout: 30_000 })).trim();
   if (from !== attempt) {
@@ -1872,6 +2050,16 @@ export class ReseedStageBusyError extends Error {
   }
 }
 
+/** The stage's transfer ran past its remote deadline and was stopped: nothing staged. */
+export class ReseedStageTimeoutError extends Error {
+  /** @param {string} message @param {{deadlineS: number}} o */
+  constructor(message, { deadlineS }) {
+    super(message);
+    this.name = 'ReseedStageTimeoutError';
+    this.deadlineS = deadlineS;
+  }
+}
+
 /**
  * Run the in-place stage script once and read its verdict. `RESEED_REFUSED
  * busy` (an earlier stage, maybe one whose client dropped, still holds
@@ -1892,10 +2080,17 @@ export async function runInPlaceStage(exec, { attempt }) {
   } catch (error) {
     // The stage's own refusal only: a stdout line under its exit 1, never the
     // message (it can quote the script) and never stderr.
+    const timedOut = refusalFromError(error, 'RESEED_TIMEOUT', { status: 1 });
+    if (timedOut !== null && /^\d+$/.test(timedOut)) {
+      throw new ReseedStageTimeoutError(
+        `reseed stage timed out: pg_basebackup did not finish within ${timedOut}s and was stopped; nothing was staged`,
+        { deadlineS: Number(timedOut) },
+      );
+    }
     if (refusalFromError(error, 'RESEED_REFUSED', { status: 1 }) === 'busy') {
       throw new ReseedStageBusyError(
         'reseed refused: an earlier reseed stage is still running on the standby (it holds ' +
-          'the data directory lock). Nothing was staged. Wait for it to finish, then rerun.',
+          'the data directory lock). Nothing was staged. Wait for it to finish, then rerun the reseed.',
       );
     }
     throw error;

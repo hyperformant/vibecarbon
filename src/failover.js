@@ -390,7 +390,8 @@ async function reseedStandbyOrAbort(
       // Terminal: an earlier stage still runs on the standby. Never retried.
       throw new Error(
         `Failover aborted before promotion: ${err.message}\n` +
-          'The standby was NOT promoted and the old primary is untouched.',
+          'The standby was NOT promoted and the old primary is untouched. Once that stage ' +
+          `has finished, rerun \`vibecarbon failover ${envName}\`.`,
       );
     }
     throw new Error(
@@ -2263,6 +2264,10 @@ export async function failoverHA(
       if (err instanceof DbGuardMissingError) {
         throw new FailoverRefusedError(`Failover refused: ${err.message}. ${FAILOVER_NOT_STARTED}`);
       }
+      p.log.warn(
+        `Could not confirm the standby takes an in-place reseed (${err instanceof Error ? err.message : String(err)}); ` +
+          'the replica proof decides next, and a reseed checks again before it acts.',
+      );
     }
   }
 
