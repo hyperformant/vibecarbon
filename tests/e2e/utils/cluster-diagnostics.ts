@@ -89,6 +89,8 @@ export interface DiagnosticCommand {
   cmd: string;
   argv: string[];
   timeoutMs: number;
+  /** Output kept for this section; the bundle's default (4000) when unset. */
+  maxChars?: number;
 }
 
 /**
@@ -200,4 +202,124 @@ export function buildClusterScopedDiagnostics(
   }
 
   return cmds;
+}
+
+/** Lines of the cert-manager controller log kept by the issuing-reason grep. */
+export const CERT_MANAGER_LOG_GREP_MAX_LINES = 120;
+
+/** Output kept per TLS re-issue section: a log line runs ~300 chars. */
+export const TLS_REISSUE_SECTION_MAX_CHARS = 16_000;
+
+/** Per-kubectl wall-clock cap inside the TLS re-issue scripts, seconds. */
+const TLS_KUBECTL_TIMEOUT_S = 20;
+
+/** CertificateRequests the events section walks, at most. */
+const TLS_MAX_REQUESTS = 8;
+
+const CONTROLLER_SELECTOR =
+  'app.kubernetes.io/name=cert-manager,app.kubernetes.io/component=controller';
+
+/**
+ * Why did cert-manager issue a certificate the deploy had just restored?
+ *
+ * On DO k8s-ha e2e runs (LE staging, DNS-01, cert-manager v1.20.2) the deploy
+ * restored Secret/vibecarbon-tls from its snapshot before `apply -k` created
+ * the Certificate, the restored serial was served trusted, and minutes later
+ * CertificateRequest vibecarbon-tls-1 had issued a new one (2 of 2 runs). The
+ * "Issuing ... because ..." event had already fallen out of the 100-event
+ * namespace window, so the bundle could not say why. These sections keep the
+ * answer whatever the namespace's event volume:
+ *
+ *  (a) the controller's own log lines naming why it issues (`--since=2h`
+ *      covers the deploy, `head` keeps the earliest reasons);
+ *  (b) the events of the Certificate and each of its requests, selected by
+ *      name, plus a timeline of creation times and revisions;
+ *  (c) the Secret's metadata (annotations, labels, managedFields managers,
+ *      resourceVersion, creationTimestamp) and its tls.crt serial. Only
+ *      tls.crt is ever read: the key never leaves the cluster;
+ *  (d) the controller pods' start times, the leader Lease (cert-manager's
+ *      controller lease is kube-system/cert-manager-controller by default;
+ *      every lease naming cert-manager is listed in case a flag moved it)
+ *      and the controller ReplicaSets, which date each restart the
+ *      controller-flags patch causes.
+ *
+ * Pure command assembly, like buildClusterScopedDiagnostics. See
+ * tests/unit/e2e/tls-reissue-diagnostics.test.ts.
+ */
+export function buildTlsReissueDiagnostics(kubeconfig: string, label: string): DiagnosticCommand[] {
+  const k = `timeout ${TLS_KUBECTL_TIMEOUT_S} kubectl --kubeconfig ${kubeconfig}`;
+  const section = (name: string, script: string, timeoutMs: number): DiagnosticCommand => ({
+    label: `${label}: ${name}`,
+    cmd: 'bash',
+    argv: ['-c', script],
+    timeoutMs,
+    maxChars: TLS_REISSUE_SECTION_MAX_CHARS,
+  });
+  // Single-quoted in the script, so the filter's quotes and the escaped dot
+  // reach kubectl as written.
+  const crTimeline =
+    "'custom-columns=NAME:.metadata.name,CREATED:.metadata.creationTimestamp," +
+    'REVISION:.metadata.annotations.cert-manager\\.io/certificate-revision,' +
+    'READY:.status.conditions[?(@.type=="Ready")].status,' +
+    'REASON:.status.conditions[?(@.type=="Ready")].reason' +
+    "'";
+  return [
+    section(
+      'cert-manager issuing log (grep, earliest first)',
+      `${k} -n cert-manager logs deploy/cert-manager --since=2h 2>&1 | ` +
+        `grep -E "must be re-issued|re-issu|Issuing|acquired lease|leader" | ` +
+        `head -${CERT_MANAGER_LOG_GREP_MAX_LINES} || true`,
+      30_000,
+    ),
+    section(
+      'certificate timeline (Certificate + CertificateRequests, vibecarbon ns)',
+      `${k} -n vibecarbon get certificate vibecarbon-tls -o jsonpath=` +
+        `'created={.metadata.creationTimestamp} revision={.status.revision} ` +
+        `notBefore={.status.notBefore}{"\\n"}{range .status.conditions[*]}` +
+        `{.type}={.status} {.reason} {.lastTransitionTime}: {.message}{"\\n"}{end}' 2>&1 || true; ` +
+        `${k} -n vibecarbon get certificaterequests -o ${crTimeline} 2>&1 || true`,
+      45_000,
+    ),
+    section(
+      'events of Certificate/vibecarbon-tls and its CertificateRequests',
+      `echo "=== vibecarbon-tls ==="; ` +
+        `${k} -n vibecarbon get events --field-selector involvedObject.name=vibecarbon-tls ` +
+        `--sort-by=.lastTimestamp 2>&1 || true; ` +
+        `for r in $(${k} -n vibecarbon get certificaterequests ` +
+        `-o jsonpath='{range .items[*]}{.metadata.name}{"\\n"}{end}' 2>/dev/null | ` +
+        `grep -E "^vibecarbon-tls-[0-9]+$" | head -${TLS_MAX_REQUESTS}); do ` +
+        `echo "=== $r ==="; ` +
+        `${k} -n vibecarbon get events --field-selector "involvedObject.name=$r" ` +
+        `--sort-by=.lastTimestamp 2>&1 || true; done`,
+      60_000,
+    ),
+    section(
+      'Secret/vibecarbon-tls metadata and serial (no key material)',
+      `${k} -n vibecarbon get secret vibecarbon-tls -o jsonpath=` +
+        `'created={.metadata.creationTimestamp} resourceVersion={.metadata.resourceVersion}{"\\n"}` +
+        `annotations={.metadata.annotations}{"\\n"}labels={.metadata.labels}{"\\n"}` +
+        `{range .metadata.managedFields[*]}manager={.manager} op={.operation} time={.time}{"\\n"}{end}' ` +
+        `2>&1 || true; ` +
+        `crt=$(${k} -n vibecarbon get secret vibecarbon-tls -o jsonpath='{.data.tls\\.crt}' 2>/dev/null); ` +
+        `if [ -z "$crt" ]; then echo '(no tls.crt)'; else ` +
+        `printf '%s' "$crt" | base64 -d 2>/dev/null | ` +
+        `openssl x509 -noout -serial -dates -subject 2>&1 || echo '(tls.crt unparsable)'; fi`,
+      45_000,
+    ),
+    section(
+      'cert-manager controller and leader lease',
+      `${k} -n cert-manager get pods -l ${CONTROLLER_SELECTOR} -o custom-columns=` +
+        `NAME:.metadata.name,CREATED:.metadata.creationTimestamp,STARTED:.status.startTime,` +
+        `PHASE:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount,` +
+        `DELETING:.metadata.deletionTimestamp 2>&1 || true; ` +
+        `${k} get leases -A -o custom-columns=` +
+        `NAMESPACE:.metadata.namespace,NAME:.metadata.name,HOLDER:.spec.holderIdentity,` +
+        `ACQUIRED:.spec.acquireTime,RENEWED:.spec.renewTime,TRANSITIONS:.spec.leaseTransitions 2>&1 | ` +
+        `grep -E "NAMESPACE|cert-manager" || true; ` +
+        `${k} -n cert-manager get replicasets -o 'custom-columns=` +
+        `NAME:.metadata.name,CREATED:.metadata.creationTimestamp,DESIRED:.spec.replicas,` +
+        `READY:.status.readyReplicas,REVISION:.metadata.annotations.deployment\\.kubernetes\\.io/revision' 2>&1 || true`,
+      60_000,
+    ),
+  ];
 }
