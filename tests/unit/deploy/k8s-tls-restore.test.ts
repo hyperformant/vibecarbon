@@ -132,6 +132,9 @@ describe('restoreK8sTlsSecret', () => {
     // it with the Certificate's issuerRef).
     const manifest = JSON.parse(String(create.opts.input));
     expect(manifest.metadata.annotations['cert-manager.io/issuer-name']).toBe(ISSUER);
+    // Written already labelled as cert-manager's own, so cert-manager has no
+    // label to add and never loses sight of it (CERT_MANAGER_CONTROLLER_LABEL).
+    expect(manifest.metadata.labels).toEqual({ 'controller.cert-manager.io/fao': 'true' });
     expect(manifest.metadata.resourceVersion).toBeUndefined();
     for (const c of k.calls) {
       const argv = c.argv.join(' ');

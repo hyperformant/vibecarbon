@@ -10,6 +10,10 @@ interface CertOpts {
   days?: number;
   /** Self-signed leaf (no CA): what a standby or a failed issuance serves. */
   selfSigned?: boolean;
+  /** The leaf's `-subj` (default `/CN=<first name>`). */
+  subject?: string;
+  /** Extra SAN entries in openssl syntax (`IP:10.0.0.1`, `URI:...`, `email:...`). */
+  extraSans?: string[];
 }
 
 function openssl(args: string[]) {
@@ -21,10 +25,15 @@ export function makeCert(
   dnsNames: string[],
   opts: CertOpts | number = {},
 ): { cert: string; key: string; ca?: string } {
-  const { days = 60, selfSigned = false } = typeof opts === 'number' ? { days: opts } : opts;
+  const {
+    days = 60,
+    selfSigned = false,
+    subject = `/CN=${dnsNames[0]}`,
+    extraSans = [],
+  } = typeof opts === 'number' ? { days: opts } : opts;
   const dir = mkdtempSync(join(tmpdir(), 'tls-fixture-'));
   const p = (f: string) => join(dir, f);
-  const san = `subjectAltName=${dnsNames.map((n) => `DNS:${n}`).join(',')}`;
+  const san = `subjectAltName=${[...dnsNames.map((n) => `DNS:${n}`), ...extraSans].join(',')}`;
   const ec = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes'];
   try {
     if (selfSigned) {
@@ -39,7 +48,7 @@ export function makeCert(
         '-days',
         String(days),
         '-subj',
-        `/CN=${dnsNames[0]}`,
+        subject,
         '-addext',
         san,
       ]);
@@ -57,17 +66,7 @@ export function makeCert(
         '-subj',
         '/CN=fixture-ca',
       ]);
-      openssl([
-        'req',
-        '-new',
-        ...ec,
-        '-keyout',
-        p('k.pem'),
-        '-out',
-        p('c.csr'),
-        '-subj',
-        `/CN=${dnsNames[0]}`,
-      ]);
+      openssl(['req', '-new', ...ec, '-keyout', p('k.pem'), '-out', p('c.csr'), '-subj', subject]);
       writeFileSync(p('ext.cnf'), `${san}\n`);
       openssl([
         'x509',
