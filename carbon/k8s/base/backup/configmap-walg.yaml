@@ -432,12 +432,16 @@ data:
         state="$(cat "$R_MARK")"
         case "$state" in
           "out "?*|"in "?*) ;;
-          *) echo "db-guard: $R_MARK holds an unknown reseed state '$state'; refusing to boot (no tree is moved)" >&2; exit 1 ;;
+          *) echo "db-guard: $R_MARK holds an unknown reseed state '$state'; refusing to boot (no tree is moved). The old cluster is in $PGDATA or $R_DISC: run vibecarbon restore, or move $R_DISC's entries back into $PGDATA and remove $R_MARK, $R_READY and $R_STAGE" >&2; exit 1 ;;
         esac
       fi
       if [ -z "$state" ]; then
         id="$(cat "$R_READY" 2>/dev/null || true)"
-        if [ "${VC_WALG_ROLE_INTENT:-}" = standby ] && [ -n "$id" ] \
+        # A staged tree carries no .vc-* but its own id: pg_basebackup copies them
+        # from a source that was once a standby, and one moved in would clobber a
+        # marker or wedge the move. A find that fails counts as carrying one.
+        vc_extra="$(find "$R_STAGE" -mindepth 1 -maxdepth 1 -name '.vc-*' ! -name '.vc-reseed-id' 2>&1)" || vc_extra="unreadable"
+        if [ "${VC_WALG_ROLE_INTENT:-}" = standby ] && [ -n "$id" ] && [ -z "$vc_extra" ] \
           && [ "$(cat "$R_STAGE/.vc-reseed-id" 2>/dev/null || true)" = "$id" ] \
           && [ -f "$R_STAGE/PG_VERSION" ] && [ -f "$R_STAGE/standby.signal" ] \
           && grep -q '^[[:space:]]*primary_conninfo' "$R_STAGE/postgresql.auto.conf" 2>/dev/null; then
@@ -458,6 +462,7 @@ data:
               if [ -n "$left" ]; then echo "db-guard: $R_DISC still holds entries after the roll back; refusing" >&2; exit 1; fi
               rmdir "$R_DISC"
             fi
+            sync
             rm -rf "$R_STAGE"; rm -f "$R_READY" "$R_MARK"
             echo "db-guard: RESEED_ROLLED_BACK $id: staging incomplete, the previous data directory is back" >&2
             state=""
@@ -480,7 +485,7 @@ data:
             rm -rf "$R_STAGE"
           fi
           if [ ! -f "$PGDATA/PG_VERSION" ]; then
-            echo "db-guard: reseed $id moved in no PG_VERSION; refusing to boot (the old tree is in $R_DISC)" >&2
+            echo "db-guard: reseed $id moved in no PG_VERSION; refusing to boot. The old cluster is in $R_DISC: run vibecarbon restore, or replace what the reseed moved into $PGDATA with $R_DISC's entries and remove $R_MARK and $R_READY" >&2
             exit 1
           fi
           vc_put "$R_DONE" "$id"

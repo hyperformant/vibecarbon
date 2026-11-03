@@ -490,3 +490,60 @@ describe('db-guard.sh reseed markers are durable', () => {
     );
   });
 });
+
+describe('db-guard.sh reseed swap: fix round 1', () => {
+  it.each([
+    ['.vc-discard', 'dir'],
+    ['.vc-reseed-in-progress', 'file'],
+    ['.vc-reseeded-from', 'file'],
+    ['.vc-prev', 'dir'],
+    ['.vc-restore-in-progress', 'file'],
+    ['.vc-reseed-ready', 'file'],
+  ])(
+    'I1: a staging that carries %s (a failed-back primary) is refused before anything moves',
+    (name, kind) => {
+      live();
+      stage();
+      const p = join(pgdata, '.vc-reseed', name);
+      if (kind === 'dir') {
+        mkdirSync(p);
+        writeFileSync(join(p, 'x'), 'x');
+      } else {
+        writeFileSync(p, name === '.vc-reseed-in-progress' ? `in ${ID}` : ID);
+      }
+      const r = runGuard(SB());
+      expect(r.stderr).toContain('RESEED_REFUSED');
+      expectOldTreeBoots(r);
+      expectNoReseedState();
+      expect(existsSync(join(pgdata, '.vc-discard'))).toBe(false);
+      // A second start is a plain boot: nothing is wedged.
+      const r2 = runGuard(SB());
+      expect(r2.stderr).not.toContain('RESEED');
+      expectOldTreeBoots(r2);
+    },
+  );
+
+  it('M1: the roll back syncs the moves back before the markers go', () => {
+    expect(readFileSync(GUARD, 'utf-8')).toMatch(
+      /rmdir "\$R_DISC"\n\s*fi\n\s*sync\n\s*rm -rf "\$R_STAGE"; rm -f "\$R_READY" "\$R_MARK"/,
+    );
+  });
+
+  it('M2: an unknown in-progress state names the way out', () => {
+    live();
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), 'sideways');
+    const r = runGuard(SB());
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('run vibecarbon restore');
+    expect(r.stderr).toContain('remove');
+  });
+
+  it('M2: "in" with no PG_VERSION names the way out', () => {
+    mkdirSync(join(pgdata, '.vc-discard', 'base'), { recursive: true });
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), `in ${ID}`);
+    const r = runGuard(SB());
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('run vibecarbon restore');
+    expect(r.stderr).toContain('.vc-discard');
+  });
+});
