@@ -33,3 +33,13 @@ export const DB_APP_LABEL = 'vibecarbon-db';
 
 /** `kubectl -l` selector for the db pod. */
 export const DB_POD_SELECTOR = `app=${DB_APP_LABEL}`;
+
+/**
+ * Line 2 of db-guard.sh (both copies): the reseed protocol it speaks. The
+ * live-pod guard greps it in the mounted wrapper (replication.js), and the
+ * scaffold lockstep preflight requires it in the template's ConfigMap key.
+ */
+export const DB_GUARD_PROTOCOL_MARKER = '# vc-reseed-protocol: 1';
+
+/** The db container's command when it runs the wrapper (statefulset.yaml). */
+export const DB_GUARD_COMMAND = Object.freeze(['sh', '/usr/local/bin/db-guard.sh']);

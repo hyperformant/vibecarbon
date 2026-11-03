@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { checkDependency, runCommand } from '../command.js';
 import { checkOperatorConfig } from '../operator-env.js';
 import { readProjectEnvFiles } from '../project.js';
+import { DB_GUARD_COMMAND, DB_GUARD_PROTOCOL_MARKER } from './db-workload.js';
 import { isComposeTier, isK8sTier } from './tier-registry.js';
 import { COMPOSE_WALG_ROLE_HOST_DIR, WALG_ROLE_PARSE_SH } from './walg-role.js';
 
@@ -397,6 +398,45 @@ function configMapBlock(yaml, key) {
 }
 
 /**
+ * The tokens of the `db` container's `command` in a StatefulSet manifest,
+ * joined by spaces ('' when absent). Text only, like configMapBlock: the
+ * container is the `- name: db` item under `containers:`, and its command is
+ * a flow list on the `command:` line or a block list under it.
+ *
+ * @param {string} yaml
+ * @returns {string}
+ */
+function dbContainerCommand(yaml) {
+  const lines = yaml.split('\n');
+  const indentOf = (l) => l.length - l.trimStart().length;
+  const containers = lines.findIndex((l) => l.trim() === 'containers:');
+  if (containers === -1) return '';
+  const base = indentOf(lines[containers]);
+  let i = lines.findIndex(
+    (l, n) => n > containers && /^\s*- name: db\s*$/.test(l) && indentOf(l) > base,
+  );
+  if (i === -1) return '';
+  const item = indentOf(lines[i]);
+  const tokens = [];
+  for (i += 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.trim() === '' || l.trim().startsWith('#')) continue;
+    if (indentOf(l) <= item) break; // the next container, or the end of the list
+    const m = /^\s*command:\s*(.*)$/.exec(l);
+    if (!m || indentOf(l) !== item + 2) continue;
+    if (m[1].startsWith('[')) {
+      tokens.push(...m[1].replace(/^\[|\]$/g, '').split(','));
+    } else {
+      for (let j = i + 1; j < lines.length && /^\s*- /.test(lines[j]); j++) {
+        tokens.push(lines[j].trim().slice(2));
+      }
+    }
+    break;
+  }
+  return tokens.map((t) => t.trim().replace(/^["']|["']$/g, '')).join(' ');
+}
+
+/**
  * Template lockstep: refuse a project whose scaffold predates the wal-g role
  * file (k8s-ha churn redesign, B9).
  *
@@ -409,9 +449,13 @@ function configMapBlock(yaml, key) {
  * version string:
  *   - every tier: volumes/db/walg-env.sh carries WALG_ROLE_PARSE_SH;
  *   - compose tiers: docker-compose.prod.yml binds `.vibecarbon-role`;
- *   - k8s tiers: configmap-walg.yaml's walg-env.sh key carries the parser and
- *     the ConfigMap has the `db-guard.sh` key (the db container's entrypoint,
- *     which applies the role intent).
+ *   - k8s tiers: configmap-walg.yaml's walg-env.sh key carries the parser,
+ *     its `db-guard.sh` key (the db container's entrypoint, which applies the
+ *     role intent and swaps an in-place reseed) carries the reseed protocol
+ *     marker line (DB_GUARD_PROTOCOL_MARKER), and db/statefulset.yaml's db
+ *     container command runs that wrapper (DB_GUARD_COMMAND). A wrapper key
+ *     from before the protocol, or a db container that never runs it, would
+ *     leave the live-pod guard refusing every reseed after the deploy.
  * Fail-closed: a missing or unreadable file is a refusal, not a pass.
  *
  * @param {string} projectDir
@@ -435,8 +479,17 @@ export function assertScaffoldSupportsRoleFile(projectDir, tier, { read = readFi
       ? has('docker-compose.prod.yml', (s) => s.includes(COMPOSE_WALG_ROLE_HOST_DIR))
       : has('k8s/base/backup/configmap-walg.yaml', (s) => {
           const parses = configMapBlock(s, 'walg-env.sh')?.includes(WALG_ROLE_PARSE_SH);
-          return parses === true && configMapBlock(s, 'db-guard.sh') !== null;
-        }));
+          const guard = configMapBlock(s, 'db-guard.sh');
+          return (
+            parses === true &&
+            guard !== null &&
+            guard.split('\n').includes(DB_GUARD_PROTOCOL_MARKER)
+          );
+        }) &&
+        has(
+          'k8s/base/db/statefulset.yaml',
+          (s) => dbContainerCommand(s) === DB_GUARD_COMMAND.join(' '),
+        ));
   if (!ok) throw new Error(SCAFFOLD_ROLE_FILE_REFUSAL);
 }
 

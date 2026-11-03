@@ -21,7 +21,13 @@ import { randomBytes } from 'node:crypto';
 import { loadProjectConfig } from '../config.js';
 import { hasSentinelLine, refusalFromError, sentinelLinePayload } from '../remote-sentinel.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
-import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
+import {
+  DB_CONTAINER,
+  DB_GUARD_COMMAND,
+  DB_GUARD_PROTOCOL_MARKER,
+  DB_POD,
+  DB_STATEFULSET,
+} from './db-workload.js';
 import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
 import {
   DB_ROLE_CONFIGMAP,
@@ -1661,11 +1667,9 @@ export async function waitForStandbyRecovery({
 // false positive during a pending roll).
 // ---------------------------------------------------------------------------
 
-/** Line 2 of db-guard.sh (both copies): the reseed protocol it speaks. */
-export const DB_GUARD_PROTOCOL_MARKER = '# vc-reseed-protocol: 1';
-
-/** The db container's command when it runs the wrapper (statefulset.yaml). */
-export const DB_GUARD_COMMAND = Object.freeze(['sh', '/usr/local/bin/db-guard.sh']);
+// The protocol marker and the wrapper command live in db-workload.js (a leaf
+// the scaffold preflight imports too); re-exported for the reseed's callers.
+export { DB_GUARD_COMMAND, DB_GUARD_PROTOCOL_MARKER };
 
 /** Where the wrapper is mounted (subPath of the vibecarbon-wal-archive ConfigMap). */
 const DB_GUARD_PATH = '/usr/local/bin/db-guard.sh';

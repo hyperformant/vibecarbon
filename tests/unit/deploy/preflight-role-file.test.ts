@@ -12,6 +12,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { DB_GUARD_PROTOCOL_MARKER } from '../../../src/lib/deploy/db-workload.js';
 import { assertScaffoldSupportsRoleFile } from '../../../src/lib/deploy/preflight.js';
 import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
 
@@ -36,6 +37,9 @@ function edit(path: string, fn: (s: string) => string) {
 }
 
 const CM = 'k8s/base/backup/configmap-walg.yaml';
+const STS = 'k8s/base/db/statefulset.yaml';
+/** The db container's command line in the shipped StatefulSet. */
+const DB_COMMAND_LINE = '          command: ["sh", "/usr/local/bin/db-guard.sh"]';
 const indent4 = (s: string) =>
   s
     .split('\n')
@@ -53,6 +57,61 @@ describe('assertScaffoldSupportsRoleFile', () => {
       expect(() => assertScaffoldSupportsRoleFile(dir, tier)).toThrow(/vibecarbon upgrade/);
     },
   );
+
+  it.each(['k8s', 'k8s-ha'] as const)(
+    '%s: a db-guard.sh key without the reseed protocol marker line refuses',
+    (tier) => {
+      const dir = scaffold();
+      edit(join(dir, CM), (s) =>
+        s.replace(`    ${DB_GUARD_PROTOCOL_MARKER}\n`, '    # vc-reseed-protocol: 0\n'),
+      );
+      expect(() => assertScaffoldSupportsRoleFile(dir, tier)).toThrow(/vibecarbon upgrade/);
+    },
+  );
+
+  it('k8s: the marker only inside another line, or only in walg-env.sh, does not count', () => {
+    const dir = scaffold();
+    edit(join(dir, CM), (s) =>
+      s
+        .replace(`    ${DB_GUARD_PROTOCOL_MARKER}\n`, `    echo '${DB_GUARD_PROTOCOL_MARKER}'\n`)
+        .replace('  walg-env.sh: |\n', `  walg-env.sh: |\n    ${DB_GUARD_PROTOCOL_MARKER}\n`),
+    );
+    expect(() => assertScaffoldSupportsRoleFile(dir, 'k8s-ha')).toThrow(/vibecarbon upgrade/);
+  });
+
+  it.each([
+    [
+      'the image entrypoint',
+      (s: string) => s.replace(DB_COMMAND_LINE, '          command: ["docker-entrypoint.sh"]'),
+    ],
+    ['no command at all', (s: string) => s.replace(`${DB_COMMAND_LINE}\n`, '')],
+    [
+      'db-guard.sh only on another container',
+      (s: string) =>
+        s
+          .replace(`${DB_COMMAND_LINE}\n`, '')
+          .replace(
+            '        - name: walg-restore\n',
+            `        - name: walg-restore\n${DB_COMMAND_LINE}\n`,
+          ),
+    ],
+  ])('k8s-ha: a db container whose command is %s refuses', (_name, fn) => {
+    const dir = scaffold();
+    edit(join(dir, STS), fn);
+    expect(() => assertScaffoldSupportsRoleFile(dir, 'k8s-ha')).toThrow(/vibecarbon upgrade/);
+    expect(() => assertScaffoldSupportsRoleFile(dir, 'compose-ha')).not.toThrow();
+  });
+
+  it('k8s: the db command as a block list passes like the flow list', () => {
+    const dir = scaffold();
+    edit(join(dir, STS), (s) =>
+      s.replace(
+        DB_COMMAND_LINE,
+        '          command:\n            - sh\n            - "/usr/local/bin/db-guard.sh"',
+      ),
+    );
+    expect(() => assertScaffoldSupportsRoleFile(dir, 'k8s')).not.toThrow();
+  });
 
   it('k8s: a ConfigMap without db-guard.sh refuses', () => {
     const dir = scaffold();
