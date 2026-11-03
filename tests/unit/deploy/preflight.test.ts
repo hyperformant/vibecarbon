@@ -3,18 +3,22 @@ import { checkDeployPrerequisites } from '../../../src/lib/deploy/preflight.js';
 
 // A stub PATH-lookup: present unless listed in `absent`.
 const has = (absent: string[]) => (bin: string) => !absent.includes(bin);
+// k8s tiers read the Pulumi version; never shell out from a unit test.
+const pulumiVersion = () => '3.273.0';
 
 describe('checkDeployPrerequisites', () => {
   for (const tier of ['compose', 'compose-ha', 'k8s', 'k8s-ha']) {
     it(`throws a pulumi-install hint when pulumi is missing (${tier})`, () => {
-      expect(() => checkDeployPrerequisites(tier, { has: has(['pulumi']) })).toThrow(/pulumi/);
-      expect(() => checkDeployPrerequisites(tier, { has: has(['pulumi']) })).toThrow(
+      expect(() => checkDeployPrerequisites(tier, { has: has(['pulumi']), pulumiVersion })).toThrow(
+        /pulumi/,
+      );
+      expect(() => checkDeployPrerequisites(tier, { has: has(['pulumi']), pulumiVersion })).toThrow(
         /get\.pulumi\.com/,
       );
     });
 
     it(`does not throw when pulumi + ssh are present (${tier})`, () => {
-      expect(() => checkDeployPrerequisites(tier, { has: has([]) })).not.toThrow();
+      expect(() => checkDeployPrerequisites(tier, { has: has([]), pulumiVersion })).not.toThrow();
     });
   }
 
@@ -25,7 +29,7 @@ describe('checkDeployPrerequisites', () => {
   it('lists every missing tool at once', () => {
     let message = '';
     try {
-      checkDeployPrerequisites('k8s', { has: has(['pulumi', 'ssh']) });
+      checkDeployPrerequisites('k8s', { has: has(['pulumi', 'ssh']), pulumiVersion });
     } catch (err) {
       message = (err as Error).message;
     }

@@ -118,6 +118,14 @@ export function serverResourceOptions(type, extra = {}) {
  * and the token in state is a secret. Pulumi compares a trigger only between
  * two defined values, so adding it to an existing worker replaces nothing.
  *
+ * So a worker-init.sh change reaches NEW workers only (a fresh deploy, a
+ * scale-up, an autoscaler-spawned node), exactly like master-init.sh,
+ * db-init.sh and the compose cloud-config on their servers. To put it on an
+ * existing static worker, re-provision that worker; a redeploy alone will
+ * not. The trigger needs Pulumi v3.226.0 or newer (an older CLI drops it
+ * silently), which the k8s deploy preflight enforces
+ * (PULUMI_MIN_VERSION_FOR_WORKER_JOIN_TRIGGER, src/lib/deploy/preflight.js).
+ *
  * @param {keyof typeof SERVER_RESOURCE_TYPES} type
  * @param {object} extra
  * @param {{ masterId: unknown, masterPrivateIp: unknown, k3sVersion: unknown }} extra.joinTarget

@@ -173,8 +173,17 @@ describe('server-class create timeouts (census)', () => {
       if (file.endsWith('-k8s.js'))
         expect(workers.length, `${file} has no worker`).toBeGreaterThan(0);
       for (const w of workers) {
-        const opts = (w.opts ?? {}) as { replacementTrigger?: unknown };
+        const opts = (w.opts ?? {}) as {
+          replacementTrigger?: { apply: (f: (v: string) => void) => unknown };
+        };
         expect(opts.replacementTrigger, `${file}: worker "${w.name}"`).toBeTruthy();
+        // The trigger is built from the master's id (the recorder prints a
+        // resource output as `<name>.<property>`) and the k3s version.
+        const trigger = await new Promise<string>((resolve) => {
+          opts.replacementTrigger?.apply((v) => resolve(String(v)));
+        });
+        expect(trigger, `${file}: worker "${w.name}" trigger`).toContain('master=master.id@');
+        expect(trigger, `${file}: worker "${w.name}" trigger`).toContain(`k3s=${k8s.k3sVersion}`);
       }
     },
   );
