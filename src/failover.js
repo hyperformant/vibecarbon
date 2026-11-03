@@ -60,6 +60,7 @@ import {
   readRestorableK8sTlsSnapshot,
   restoreK8sTlsSecret,
 } from './lib/deploy/k8s/tls-restore.js';
+import { assertScaffoldSupportsRoleFile } from './lib/deploy/preflight.js';
 import {
   assertStandbyNotWriteFenced,
   fenceDatabaseWrites,
@@ -3132,6 +3133,23 @@ export async function run(args) {
   } catch (err) {
     p.log.error(err.message);
     process.exit(1);
+  }
+
+  // Template lockstep: this CLI moves the wal-g role through a file the
+  // project's scripts parse, and a failover arms it. A scaffold from before
+  // that file reads a role env this CLI no longer sets. Checked before the
+  // firewall refresh, the first remote change. A resumed failover already
+  // promoted, so it is let finish; non-HA environments have nothing to move.
+  {
+    const haTier = haTierOf(envConfig);
+    if (haTier && !envConfig?.ha?.failoverInFlight) {
+      try {
+        assertScaffoldSupportsRoleFile(process.cwd(), haTier);
+      } catch (err) {
+        p.log.error(err.message);
+        process.exit(1);
+      }
+    }
   }
 
   // Failover hits the active and standby clusters via SSH + kubectl, so the

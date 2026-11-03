@@ -49,6 +49,7 @@ import {
   recordSystemIdentifier as realRecordSystemIdentifier,
   swappedSinceLastDeploy,
 } from './lib/deploy/failover-guard.js';
+import { assertScaffoldSupportsRoleFile } from './lib/deploy/preflight.js';
 import {
   k8sPsqlRunner,
   ensureReplicationSlot as realEnsureReplicationSlot,
@@ -58,6 +59,7 @@ import {
   verifyStreaming,
   watchDbAttach,
 } from './lib/deploy/replication.js';
+import { resolveTier } from './lib/deploy/tier-registry.js';
 import { wgIpOf } from './lib/deploy/wireguard.js';
 import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
@@ -366,6 +368,10 @@ export async function run(args, deps = {}) {
       // A compose scale stopped mid-cutover: the config may name the server
       // the database is moving away from.
       assertNoScaleCutoverInFlight({ environment: envName, envConfig, action: 'restore' });
+      // Template lockstep: the restore reseeds through the project's db
+      // scripts and the wal-g role file; a scaffold from before that file
+      // reads a role env this CLI no longer sets.
+      assertScaffoldSupportsRoleFile(process.cwd(), resolveTier(envConfig));
     } catch (err) {
       p.log.error(err.message);
       process.exit(1);

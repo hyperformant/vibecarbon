@@ -70,6 +70,7 @@ import { preserveSafetyFields } from './lib/deploy/env-safety-fields.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import { planScale } from './lib/deploy/plan/scale-plan.js';
+import { assertScaffoldSupportsRoleFile } from './lib/deploy/preflight.js';
 import { buildRemote } from './lib/deploy/remote-build.js';
 import { isRetiredSide } from './lib/deploy/retired-fence.js';
 import { haStacksFrom } from './lib/deploy/standby-types.js';
@@ -2185,6 +2186,10 @@ export async function run(args) {
   // on every run, provisioning and redeploy alike (see
   // src/lib/licensing/gate.js).
   const tier = resolveTier(envConfig);
+  // Template lockstep: this CLI moves the wal-g role through a file the
+  // project's scripts parse. A scaffold from before that reads a role env this
+  // CLI no longer sets, and scale ships those scripts to new servers.
+  refuseOrContinue(() => assertScaffoldSupportsRoleFile(process.cwd(), tier));
   if (isHATier(tier)) {
     // A failover in flight may be mid-swap: a resize would act on roles that
     // are about to change (or reboot the standby mid-promote).
