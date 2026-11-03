@@ -45,7 +45,9 @@ vi.mock('../../../src/lib/ssh.js', async () => {
 });
 
 const { runK8sRestore, RestoredDatabaseError } = await import('../../../src/restore.js');
-const { DbGuardMissingError } = await import('../../../src/lib/deploy/replication.js');
+const { DbGuardMissingError, ReseedStageBusyError } = await import(
+  '../../../src/lib/deploy/replication.js'
+);
 const ssh = await import('../../../src/lib/ssh.js');
 
 function makeSpinner() {
@@ -659,5 +661,34 @@ describe('runK8sRestore: the live db checks run before the primary is touched (D
       '/tmp/key',
       expect.objectContaining({ envName: 'prod', primaryIp: '10.0.1.1' }),
     );
+  });
+});
+
+describe('runK8sRestore: a busy reseed stage names the reseed command, never a re-restore', () => {
+  it('says an earlier stage still runs, nothing on the standby moved, and to run `vibecarbon deploy <env>` once it finishes', async () => {
+    const markUnproven = vi.fn();
+    const err = await runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnvConfig,
+      ensureReplicationSlot: vi.fn().mockResolvedValue(undefined),
+      reseedStandbyFromPrimary: vi
+        .fn()
+        .mockRejectedValue(
+          new ReseedStageBusyError(
+            'reseed refused: an earlier reseed stage is still running on the standby. Nothing was staged.',
+          ),
+        ),
+      readReplicationState: vi.fn(),
+      markStandbyUnproven: markUnproven,
+      assertStandbyReseedCapable: async () => {},
+      setRestoreMarker: vi.fn(),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/earlier reseed stage is still running/);
+    expect(err.message).toContain('`vibecarbon deploy prod`');
+    expect(err.message).toMatch(/do not rerun the restore/i);
+    expect(err.message).not.toMatch(/DIVERGED/);
+    expect(markUnproven).toHaveBeenCalled();
   });
 });
