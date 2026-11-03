@@ -320,6 +320,14 @@ jobs:
             deployment/cert-manager-cainjector \
             --timeout=5m
 
+      # The controller SETTLED before the Certificate lands: its rollout
+      # complete and its leader lease on a pod of the current ReplicaSet. A
+      # handoff while the Certificate lands can miss the Secret it should
+      # reuse and issue a new certificate. The same wait the CLI deploy and a
+      # failover promotion run; bounded, then one error line.
+      - name: Wait for a settled cert-manager leader
+        run: bash scripts/await-cert-manager-leader.sh
+
       # The vibecarbon-tls Certificate is DEPLOY-owned: its names and issuer
       # are per environment, while the committed k8s/base is shared by every
       # environment on the branch, so Flux drops it from its build

@@ -43,7 +43,7 @@ Database backups are written to the S3-compatible object storage of the same pro
 - (Optional) **Stripe API keys** for billing.
 
 **Additional for `-mode k8s` / `-mode k8s-ha`:**
-- **kubectl** applies manifests + waits for the app rollout.
+- **kubectl** 1.27 or newer applies manifests + waits for the app rollout. Deploy refuses an older one: its built-in kustomize must be v5 to install cert-manager.
 - **docker** + **ssh**: the image is built locally and sideloaded to each k3s node via `docker save | ssh node 'k3s ctr images import -'`. No registry round-trip on the deploy path.
 
 **Optional:**

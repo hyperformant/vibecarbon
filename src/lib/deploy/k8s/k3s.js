@@ -54,7 +54,10 @@ import {
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../../carbon/scripts/render-backup-settings.mjs';
-import { writeCertManagerKustomization } from '../../../../carbon/scripts/render-cert-manager.mjs';
+import {
+  kubectlFloorProblem,
+  writeCertManagerKustomization,
+} from '../../../../carbon/scripts/render-cert-manager.mjs';
 import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
@@ -5040,6 +5043,13 @@ async function deployK3sSteps(options, inFlight) {
       throw new Error(`Required tool '${tool}' not found on PATH`);
     }
   }
+  // The cert-manager install is a kustomization over the release manifest's
+  // URL (render-cert-manager.mjs), which needs kubectl's built-in kustomize v5.
+  const kubectlVersion = await runCommandAsync(['kubectl', 'version', '--client', '-o', 'json'], {
+    silent: true,
+  }).catch(() => '');
+  const kubectlTooOld = kubectlFloorProblem(String(kubectlVersion ?? ''));
+  if (kubectlTooOld) throw new Error(kubectlTooOld);
   s.stop('Preflight OK');
 
   // 1b. The app image build, started now so it runs while Pulumi provisions
