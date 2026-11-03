@@ -257,6 +257,9 @@ async function run(opts: RunOpts = {}) {
   let reseeded = false;
   const deps = {
     isPrimaryReachable: async () => primaryReachable,
+    // The db containers bind the role directory (compose-ha-failover-role-bind
+    // owns the refusal when they do not).
+    probeRoleBind: async () => true,
     readState: async (ip: string) => {
       if (ip === PRIMARY_IP) {
         order.push('readPrimary');

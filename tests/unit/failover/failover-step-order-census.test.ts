@@ -425,6 +425,8 @@ async function runCompose(
     isPrimaryReachable: async () => primaryReachable,
     // The real role writer (writeComposeWalgRole) over the census's ssh seam.
     roleRun: argvOver(run),
+    // The db containers bind the role directory (compose-ha-failover-role-bind).
+    probeRoleBind: async () => true,
     readState: async (ip: string) =>
       ip === PRIMARY_IP
         ? primaryState()

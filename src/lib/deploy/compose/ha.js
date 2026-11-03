@@ -85,6 +85,8 @@ import {
 } from '../walg-audit.js';
 import {
   COMPOSE_WALG_ROLE_HOST_DIR,
+  composeDbMountsWalgRoleDir,
+  WALG_ROLE_DIR,
   walgRoleDegradedMessage,
   walgRoleReadShell,
   writeComposeWalgRole,
@@ -1979,6 +1981,7 @@ export async function failoverComposeHA(
     armWalgRole = armComposeWalgRole,
     // ssh.js's argv sshRun, for the role-file writes (writeComposeWalgRole).
     roleRun,
+    probeRoleBind = composeDbMountsWalgRoleDir,
     restoreWalgRole = auditComposeWalgRole,
     pushBaseBackup = pushBaseBackupAfterPromote,
     reconcileRetired = () =>
@@ -2053,6 +2056,30 @@ export async function failoverComposeHA(
   // that fixes it; `resume` means a previous run of THIS failover (its journal)
   // already promoted the standby.
   const planned = await primaryReachable(primaryServer.ip, sshKeyPath, remoteDir);
+
+  // The arm writes the promoted node's wal-g role into the host directory its
+  // db container binds at WALG_ROLE_DIR (D2), and the demote writes the old
+  // primary's. A db container from before that bind keeps reading the old role
+  // env, so the write never reaches it. Refuse such a node here, before
+  // anything changes (the compose twin of the k8s role-mount refusal, C18).
+  // A container that cannot be inspected is left to the replica proof below;
+  // an unreachable primary is not probed. A resumed failover already promoted,
+  // so it is let finish: its audit reports the role.
+  if (!envConfig?.ha?.failoverInFlight) {
+    const nodes = [['standby', standbyServer.ip]];
+    if (planned) nodes.push(['primary', primaryServer.ip]);
+    for (const [side, ip] of nodes) {
+      const bound = await probeRoleBind({ ip, sshKeyPath, projectName });
+      if (bound === false) {
+        throw new FailoverRefusedError(
+          `Failover refused: the ${side}'s db predates the live wal-g role (no ` +
+            `${WALG_ROLE_DIR} bind on ${projectName}-db at ${ip}); run ` +
+            `\`vibecarbon deploy ${envName}\` once (one db restart), then retry. Nothing was changed.`,
+        );
+      }
+    }
+  }
+
   const primaryPsql = psql(primaryServer.ip, sshKeyPath, remoteDir);
   const standbyPsql = psql(standbyServer.ip, sshKeyPath, remoteDir);
   // A planned run that died between its database fence and its journal left

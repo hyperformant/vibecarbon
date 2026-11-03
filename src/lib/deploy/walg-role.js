@@ -353,6 +353,51 @@ export async function writeComposeWalgRole({ ip, sshKeyPath, projectName, role, 
 }
 
 /**
+ * One SSH command for a compose host: does the RUNNING db container
+ * (`<project>-db`) bind WALG_ROLE_DIR? Prints `VC_ROLE_BIND=present` or
+ * `VC_ROLE_BIND=absent`, or nothing when the container cannot be inspected.
+ * The compose twin of podMountsWalgRoleDir: a container created before the
+ * role bind keeps reading the old role env, so a host write never reaches it.
+ *
+ * @param {string} projectName
+ * @returns {string}
+ */
+export function composeRoleBindProbeShell(projectName) {
+  const invalid = validateProjectName(projectName);
+  if (invalid) throw new Error(`composeRoleBindProbeShell: ${invalid}`);
+  const format = shEscape('{{range .Mounts}}{{println .Destination}}{{end}}');
+  return [
+    `if m=$(docker inspect -f ${format} ${shEscape(`${projectName}-db`)} 2>/dev/null); then`,
+    `    if printf '%s\\n' "$m" | grep -qxF ${shEscape(WALG_ROLE_DIR)}; then echo VC_ROLE_BIND=present; else echo VC_ROLE_BIND=absent; fi`,
+    'fi',
+  ].join('\n');
+}
+
+/**
+ * Run composeRoleBindProbeShell over SSH. true or false is what the running
+ * container says; null is unknown (no container, ssh failed), which callers
+ * leave to their own later checks rather than refuse on.
+ *
+ * @param {object} args
+ * @param {string} args.ip
+ * @param {string} args.sshKeyPath
+ * @param {string} args.projectName
+ * @param {typeof sshRun} [args.run] ssh.js's sshRun (argv), injectable for tests
+ * @returns {Promise<boolean | null>}
+ */
+export async function composeDbMountsWalgRoleDir({ ip, sshKeyPath, projectName, run = sshRun }) {
+  const script = composeRoleBindProbeShell(projectName);
+  let out;
+  try {
+    out = await run(ip, sshKeyPath, ['sh', '-c', script], { timeout: 30_000 });
+  } catch {
+    return null;
+  }
+  const verdict = /^VC_ROLE_BIND=(present|absent)$/m.exec(String(out ?? ''))?.[1];
+  return verdict === undefined ? null : verdict === 'present';
+}
+
+/**
  * The compose label that records the `-f` set a container was CREATED with.
  * Set by Compose v2+ on every container it creates, as comma-separated absolute
  * paths. Verified against Docker Compose v5.3.1. acme-role.js's traefik

@@ -197,6 +197,8 @@ async function runCompose({
   const deps = {
     keyExists: () => true,
     isPrimaryReachable: async () => false,
+    // The standby's db binds the role directory (compose-ha-failover-role-bind).
+    probeRoleBind: async () => true,
     readState: async () => standbyState,
     psql: () => async () => '',
     // The wal-g role arm before the promote (D2): a host write, a mutation.
