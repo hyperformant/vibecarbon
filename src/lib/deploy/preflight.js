@@ -425,7 +425,9 @@ export function assertScaffoldSupportsRoleFile(projectDir, tier, { read = readFi
   }
   const has = (rel, check) => {
     const text = read(join(projectDir, rel));
-    return text !== null && check(text);
+    // A CRLF checkout (git autocrlf) is the same scaffold: `vibecarbon
+    // upgrade` cannot change line endings, so it must not be a refusal.
+    return text !== null && check(text.replace(/\r\n/g, '\n'));
   };
   const ok =
     has('volumes/db/walg-env.sh', (s) => s.includes(WALG_ROLE_PARSE_SH)) &&

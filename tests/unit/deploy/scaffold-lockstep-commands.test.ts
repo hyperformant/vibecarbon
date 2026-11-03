@@ -124,12 +124,16 @@ beforeEach(async () => {
   for (const fn of Object.values(remote)) fn.mockClear();
   const dir = await staleProject();
   vi.spyOn(process, 'cwd').mockReturnValue(dir);
+  // A provider token is on hand, so each command WOULD refresh the operator-IP
+  // firewall (its first remote change) if the refusal did not come first.
+  vi.stubEnv('HETZNER_API_TOKEN', 'a'.repeat(64));
   vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
     throw new Exit(code);
   }) as never);
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 async function expectRefusedBeforeRemote(run: () => Promise<unknown>) {
@@ -188,9 +192,7 @@ describe('a scaffold that predates the wal-g role file', () => {
     projectConfig = { projectName: 'proj', environments: { prod: env } };
     const { run } = await import('../../../src/failover.js');
     // HETZNER_API_TOKEN set, so the first remote step is the firewall refresh.
-    vi.stubEnv('HETZNER_API_TOKEN', 'tok');
     const err = await run(['prod', '-y']).catch((e) => e);
-    vi.unstubAllEnvs();
     expect(errors).not.toContain(REFUSAL);
     expect(err).toBeInstanceOf(Exit); // the stubbed firewall refresh failed it
     expect(remote.operatorIp).toHaveBeenCalled();

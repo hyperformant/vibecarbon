@@ -57,7 +57,11 @@ vi.mock('../../../src/lib/deploy/delta.js', () => ({
   collectDeployDelta: () => ({}),
   formatDeployDeltaLines: () => [],
 }));
-vi.mock('../../../src/lib/deploy/preflight.js', () => ({ assertOperatorConfig: vi.fn() }));
+// The scaffold is current (preflight-role-file owns the stale-scaffold refusal).
+vi.mock('../../../src/lib/deploy/preflight.js', () => ({
+  assertOperatorConfig: vi.fn(),
+  assertScaffoldSupportsRoleFile: vi.fn(),
+}));
 vi.mock('../../../src/lib/ci-setup.js', () => ({ ciAvailable: () => false }));
 vi.mock('../../../src/lib/colors.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),

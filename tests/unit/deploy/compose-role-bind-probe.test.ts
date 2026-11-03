@@ -17,24 +17,42 @@ import {
   WALG_ROLE_DIR,
 } from '../../../src/lib/deploy/walg-role.js';
 import { shEscape } from '../../../src/lib/shell.js';
+import { sshArgv } from '../../../src/lib/ssh.js';
 
 const work = mkdtempSync(join(tmpdir(), 'vc-role-bind-'));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 
-/** A PATH dir whose `docker inspect` prints `mounts` for acme-db, or fails. */
+const FORMAT = '{{range .Mounts}}{{println .Destination}}{{end}}';
+
+/**
+ * A PATH dir whose `docker` answers `inspect --type container -f <format>
+ * acme-db` like the real one: it renders FORMAT (one Destination per line) and
+ * refuses any other format, type or object, or fails like a missing container.
+ */
 function fakeDocker(name: string, mounts: string[] | null) {
   const bin = join(work, name);
   mkdirSync(bin, { recursive: true });
   const body =
     mounts === null
-      ? 'echo "Error: No such object" >&2; exit 1'
-      : `[ "$1" = inspect ] || exit 9\nfor a; do last="$a"; done\n[ "$last" = acme-db ] || exit 8\nprintf '%s\\n' ${mounts.map(shEscape).join(' ')}`;
+      ? 'echo "Error: No such container: acme-db" >&2; exit 1'
+      : [
+          '[ "$1" = inspect ] || exit 9',
+          '[ "$2" = --type ] && [ "$3" = container ] || exit 8',
+          '[ "$4" = -f ] || exit 7',
+          `[ "$5" = ${shEscape(FORMAT)} ] || { echo "unexpected format: $5" >&2; exit 6; }`,
+          '[ "$6" = acme-db ] && [ $# -eq 6 ] || exit 5',
+          `printf '%s\\n' ${mounts.map(shEscape).join(' ')}`,
+        ].join('\n');
   writeFileSync(join(bin, 'docker'), `#!/bin/sh\n${body}\n`);
   chmodSync(join(bin, 'docker'), 0o755);
   return bin;
 }
+/** Run the probe as the remote shell would: the joined sshArgv remote string. */
 function probe(bin: string) {
-  return spawnSync('sh', ['-c', composeRoleBindProbeShell('acme')], {
+  const remote = sshArgv('203.0.113.5', '/k', ['sh', '-c', composeRoleBindProbeShell('acme')]).at(
+    -1,
+  ) as string;
+  return spawnSync('sh', ['-c', remote], {
     encoding: 'utf-8',
     env: { PATH: `${bin}:/usr/bin:/bin` },
   });

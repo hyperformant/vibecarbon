@@ -1564,10 +1564,14 @@ export async function runConfigureCicd(envName) {
   // before that file reads a role env this CLI no longer sets. Checked before
   // Stage 1, which installs the workflow that applies them.
   {
-    const mode = String(envConfig.deployMode ?? '');
-    if (mode === 'kubernetes' || mode === 'kubernetes-ha' || mode === 'k8s' || mode === 'k8s-ha') {
+    const { isK8sTier, resolveTier } = await import('./lib/deploy/tier-registry.js');
+    // An unknown deployMode is not a k8s env; the mode check below speaks for it.
+    let tier = null;
+    try {
+      tier = resolveTier(envConfig);
+    } catch {}
+    if (tier && isK8sTier(tier)) {
       const { assertScaffoldSupportsRoleFile } = await import('./lib/deploy/preflight.js');
-      const tier = envConfig.ha?.enabled || mode.endsWith('-ha') ? 'k8s-ha' : 'k8s';
       try {
         assertScaffoldSupportsRoleFile(cwd, tier);
       } catch (err) {

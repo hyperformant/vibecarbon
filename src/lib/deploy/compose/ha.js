@@ -86,6 +86,7 @@ import {
 import {
   COMPOSE_WALG_ROLE_HOST_DIR,
   composeDbMountsWalgRoleDir,
+  FAILOVER_NOT_STARTED,
   WALG_ROLE_DIR,
   walgRoleDegradedMessage,
   walgRoleReadShell,
@@ -2074,7 +2075,7 @@ export async function failoverComposeHA(
         throw new FailoverRefusedError(
           `Failover refused: the ${side}'s db predates the live wal-g role (no ` +
             `${WALG_ROLE_DIR} bind on ${projectName}-db at ${ip}); run ` +
-            `\`vibecarbon deploy ${envName}\` once (one db restart), then retry. Nothing was changed.`,
+            `\`vibecarbon deploy ${envName}\` once (one db restart), then retry. ${FAILOVER_NOT_STARTED}`,
         );
       }
     }

@@ -52,7 +52,7 @@ import { VERSION } from '../version.js';
 import { walgPrefixFor } from '../walg/restore-base.js';
 import { composeHaStackOf } from './compose/ha-role-swap.js';
 import { collectDeployDelta, formatDeployDeltaLines } from './delta.js';
-import { assertOperatorConfig } from './preflight.js';
+import { assertOperatorConfig, assertScaffoldSupportsRoleFile } from './preflight.js';
 import { haStacksFrom, k8sStandbyTypes } from './standby-types.js';
 import { resolveTier } from './tier-registry.js';
 import {
@@ -801,6 +801,17 @@ export async function gatherDeploymentConfig(args) {
   // subscription (live, or the cached verdict); Compose returns at once.
   const deployTier = resolveTier({ deployMode, ha });
   await requireDeployEntitlement({ deployTier, projectConfig });
+
+  // Template lockstep (wal-g role file), on the tier just resolved and before
+  // any region, DNS, server-type or credential prompt: this CLI moves the
+  // wal-g role through a file the project's scripts parse, and a scaffold from
+  // before that file reads a role env this CLI no longer sets.
+  try {
+    assertScaffoldSupportsRoleFile(process.cwd(), deployTier);
+  } catch (err) {
+    p.log.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
 
   const isComposeDeploy = deployMode === 'compose' || deployMode === 'compose-ha';
   const config = {

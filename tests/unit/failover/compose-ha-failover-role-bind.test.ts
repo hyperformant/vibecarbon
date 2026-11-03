@@ -107,7 +107,8 @@ describe('compose-HA failover: the db container must bind the role directory', (
     expect(err.message).toBe(
       "Failover refused: the standby's db predates the live wal-g role (no " +
         '/var/lib/vibecarbon/role bind on myapp-db at 2.2.2.2); run `vibecarbon deploy prod` ' +
-        'once (one db restart), then retry. Nothing was changed.',
+        'once (one db restart), then retry. The failover did not start: the databases, their ' +
+        'wal-g roles and DNS are unchanged.',
     );
     expect(probeRoleBind).toHaveBeenCalledWith(
       expect.objectContaining({ ip: STANDBY, projectName: 'myapp' }),
@@ -153,5 +154,20 @@ describe('compose-HA failover: the db container must bind the role directory', (
     const { deps, probeRoleBind } = seams({ [STANDBY]: false }, true);
     await failoverComposeHA('prod', baseEnv(), projectConfig, { dryRun: true }, tracker, deps);
     expect(probeRoleBind).not.toHaveBeenCalled();
+  });
+});
+
+describe('both tiers word the role-mount refusal alike', () => {
+  it('the k8s db-0 mount refusal and the compose bind refusal end with the same true claim', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { FAILOVER_NOT_STARTED } = await import('../../../src/lib/deploy/walg-role.js');
+    expect(FAILOVER_NOT_STARTED).not.toMatch(/Nothing was changed/);
+    for (const file of ['src/failover.js', 'src/lib/deploy/compose/ha.js']) {
+      const src = readFileSync(file, 'utf-8');
+      const at = src.indexOf('predates the live wal-g role');
+      expect(at, file).toBeGreaterThan(-1);
+      expect(src.slice(at, at + 400), file).toContain('then retry. ${FAILOVER_NOT_STARTED}');
+      expect(src.slice(at, at + 400), file).not.toContain('Nothing was changed');
+    }
   });
 });

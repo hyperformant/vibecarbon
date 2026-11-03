@@ -127,19 +127,18 @@ describe('assertScaffoldSupportsRoleFile', () => {
     expect(msg).not.toMatch(/—/);
   });
 
+  it.each(['compose-ha', 'k8s-ha'] as const)(
+    '%s: a CRLF checkout of the current scaffold passes (upgrade cannot fix line endings)',
+    (tier) => {
+      const dir = scaffold();
+      for (const rel of ['volumes/db/walg-env.sh', 'docker-compose.prod.yml', CM]) {
+        edit(join(dir, rel), (s) => s.replace(/\n/g, '\r\n'));
+      }
+      expect(() => assertScaffoldSupportsRoleFile(dir, tier)).not.toThrow();
+    },
+  );
+
   it('an unknown tier throws rather than passing', () => {
     expect(() => assertScaffoldSupportsRoleFile(scaffold(), 'kubernetes' as never)).toThrow(/tier/);
-  });
-});
-
-describe('deploy wiring', () => {
-  const main = readFileSync(join(ROOT, 'src/deploy.js'), 'utf-8');
-  it('deploy runs the check on the resolved tier, after gathering and before executeDeployment', () => {
-    const gather = main.indexOf('await gatherDeploymentConfig(args)');
-    const check = main.indexOf('assertScaffoldSupportsRoleFile(');
-    const exec = main.indexOf('executeDeployment(', gather);
-    expect(gather).toBeGreaterThan(-1);
-    expect(check).toBeGreaterThan(gather);
-    expect(exec).toBeGreaterThan(check);
   });
 });

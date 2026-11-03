@@ -79,6 +79,15 @@ export function walgRoleReadFragment(path) {
   return `vc_walg_role_file=${shEscape(path)}\n${WALG_ROLE_PARSE_SH}\nunset vc_walg_role_file`;
 }
 
+/**
+ * The tail of both failover role-mount refusals (k8s db-0 mount, compose db
+ * bind). They run after the operator-IP firewall refresh (their probe needs
+ * ssh) and the retirement-fence reconcile, so they cannot claim nothing
+ * changed: they claim what is true, that no failover step ran.
+ */
+export const FAILOVER_NOT_STARTED =
+  'The failover did not start: the databases, their wal-g roles and DNS are unchanged.';
+
 /** The compose role directory on the host, relative to `/opt/<project>`. */
 export const COMPOSE_WALG_ROLE_HOST_DIR = '.vibecarbon-role';
 
@@ -367,7 +376,7 @@ export function composeRoleBindProbeShell(projectName) {
   if (invalid) throw new Error(`composeRoleBindProbeShell: ${invalid}`);
   const format = shEscape('{{range .Mounts}}{{println .Destination}}{{end}}');
   return [
-    `if m=$(docker inspect -f ${format} ${shEscape(`${projectName}-db`)} 2>/dev/null); then`,
+    `if m=$(docker inspect --type container -f ${format} ${shEscape(`${projectName}-db`)} 2>/dev/null); then`,
     `    if printf '%s\\n' "$m" | grep -qxF ${shEscape(WALG_ROLE_DIR)}; then echo VC_ROLE_BIND=present; else echo VC_ROLE_BIND=absent; fi`,
     'fi',
   ].join('\n');

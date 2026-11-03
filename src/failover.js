@@ -84,6 +84,7 @@ import {
   DB_ROLE_CONFIGMAP,
   DB_ROLE_INTENT_KEY,
   demoteK8sWalgRole,
+  FAILOVER_NOT_STARTED,
   podMountsWalgRoleDir,
   setK8sWalgRole,
   WALG_ROLE_DIR,
@@ -2222,7 +2223,7 @@ export async function failoverHA(
       throw new FailoverRefusedError(
         `Failover refused: the standby cluster's db predates the live wal-g role (no ` +
           `${WALG_ROLE_DIR} mount on ${DB_POD}); run \`vibecarbon deploy ${envName}\` once ` +
-          '(one db restart), then retry. Nothing was changed.',
+          `(one db restart), then retry. ${FAILOVER_NOT_STARTED}`,
       );
     }
   }
