@@ -34,7 +34,13 @@ export const PUBLIC_DNS_SERVERS = ['1.1.1.1', '8.8.8.8'];
  */
 export const PUBLIC_DNS_BUDGET_MS = 1_500;
 
-/** A Resolver pinned to `servers`, its own retries already inside the budget. */
+/**
+ * A Resolver pinned to `servers`, its own retries already inside the budget.
+ * One per lookup call: `cancel()` fails EVERY query outstanding on a Resolver,
+ * so a shared one let a lookup whose budget expired cancel a concurrent
+ * lookup's in-flight query (status probes readiness and TLS together) and
+ * push it onto the system resolver too. A Resolver is cheap to create.
+ */
 function publicResolver(servers) {
   const r = new dnsCallback.Resolver({ timeout: 1_000, tries: 1 });
   r.setServers(servers);
@@ -72,21 +78,23 @@ function resolve4WithinBudget(r, hostname, done) {
  *
  * @param {object} [opts]
  * @param {string[]} [opts.servers] - resolvers to pin (default public pair)
- * @param {{resolve4: Function, cancel?: Function}} [opts.resolver] - injectable Resolver (tests)
+ * @param {{resolve4: Function, cancel?: Function}} [opts.resolver] - one Resolver for every call (tests)
+ * @param {() => {resolve4: Function, cancel?: Function}} [opts.makeResolver] - a fresh
+ *   Resolver per call (the default; injectable for tests)
  * @param {Function} [opts.fallback] - injectable system lookup (tests)
  */
 export function makePublicDnsLookup({
   servers = PUBLIC_DNS_SERVERS,
   resolver,
+  makeResolver = () => publicResolver(servers),
   fallback = dnsCallback.lookup,
 } = {}) {
-  const r = resolver ?? publicResolver(servers);
   return function publicDnsLookup(hostname, options, callback) {
     if (typeof options === 'function') {
       callback = options;
       options = {};
     }
-    resolve4WithinBudget(r, hostname, (addresses) => {
+    resolve4WithinBudget(resolver ?? makeResolver(), hostname, (addresses) => {
       if (!addresses || addresses.length === 0) {
         // Public DNS unreachable, silent past the budget, or empty: the
         // system resolver is still better than no answer at all.

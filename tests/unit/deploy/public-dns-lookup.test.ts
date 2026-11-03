@@ -150,6 +150,48 @@ describe('public DNS budget: a resolver that never answers', () => {
     expect(cb).toHaveBeenCalledExactlyOnceWith(null, '10.0.0.3', 4);
   });
 
+  it('one lookup timing out never cancels a concurrent one (a Resolver per call)', async () => {
+    // Status runs its readiness and TLS probes together. With one shared
+    // Resolver, the first lookup's budget expiry cancelled every in-flight
+    // query, forcing the other onto the system resolver: the stale-NXDOMAIN
+    // path this lookup exists to avoid.
+    vi.useFakeTimers();
+    /** A Resolver stub whose cancel() fails ITS pending queries, like c-ares. */
+    const stub = (answerAfterMs: number | null) => {
+      const pending: Array<(e: Error | null, a?: string[]) => void> = [];
+      return {
+        resolve4: vi.fn((_h: string, cb: (e: Error | null, a?: string[]) => void) => {
+          pending.push(cb);
+          if (answerAfterMs !== null) setTimeout(() => cb(null, ['1.2.3.4']), answerAfterMs);
+        }),
+        cancel: vi.fn(() => {
+          for (const cb of pending.splice(0))
+            cb(Object.assign(new Error('cancelled'), { code: 'ECANCELLED' }));
+        }),
+      };
+    };
+    const silentResolver = stub(null);
+    const answeringResolver = stub(600);
+    const made = [silentResolver, answeringResolver];
+    const fallback = systemAnswer();
+    const lookup = makePublicDnsLookup({ makeResolver: () => made.shift(), fallback });
+
+    const first = vi.fn();
+    const second = vi.fn();
+    lookup('e4.example.dev', {}, first);
+    await vi.advanceTimersByTimeAsync(1_000);
+    lookup('e4.example.dev', {}, second);
+    // t=1500: the first lookup's budget expires and cancels its own query.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(first).toHaveBeenCalledExactlyOnceWith(null, '10.0.0.3', 4);
+    expect(silentResolver.cancel).toHaveBeenCalled();
+    expect(answeringResolver.cancel).not.toHaveBeenCalled();
+    // t=1600: the second's public answer, 600ms into its own budget.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(second).toHaveBeenCalledExactlyOnceWith(null, '1.2.3.4', 4);
+    expect(fallback).toHaveBeenCalledOnce();
+  });
+
   it('resolvePublicA falls back at the budget too', async () => {
     vi.useFakeTimers();
     const p = resolvePublicA('e4.example.dev', { resolver: silent(), fallback: systemAnswer() });
