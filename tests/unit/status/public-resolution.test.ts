@@ -18,8 +18,11 @@
  */
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { makePublicDnsLookup } from '../../../src/lib/deploy/public-dns-lookup.js';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  makePublicDnsLookup,
+  PUBLIC_DNS_BUDGET_MS,
+} from '../../../src/lib/deploy/public-dns-lookup.js';
 import { checkTls } from '../../../src/lib/status/tls-row.js';
 import { checkRemoteHealth } from '../../../src/status.js';
 import { makeCert } from '../deploy/_tls-fixtures.js';
@@ -78,6 +81,27 @@ describe('status readiness probe', () => {
     expect(out.ok).toBe(true);
     expect(out.status).toBe(200);
     expect(out.data.services.database).toBe('connected');
+  });
+
+  it('public DNS silently dropped: falls back to the system answer inside the 5s abort', async () => {
+    // Only the lookup's own timer is faked; the probe's 5s abort stays real,
+    // so a lookup that outlived it would fail this test.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const lookup = makePublicDnsLookup({
+        resolver: { resolve4: () => {} },
+        fallback: (_h: string, opts: { all?: boolean }, cb: (...a: unknown[]) => void) =>
+          opts?.all ? cb(null, [{ address: '127.0.0.1', family: 4 }]) : cb(null, '127.0.0.1', 4),
+      });
+      const pending = checkRemoteHealth(DOMAIN, { lookup, port, ca: [ca] });
+      await vi.advanceTimersByTimeAsync(PUBLIC_DNS_BUDGET_MS);
+      vi.useRealTimers();
+      const out = await pending;
+      expect(out.error).toBeUndefined();
+      expect(out.ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('only the system resolver left: fails ENOTFOUND (the control)', async () => {

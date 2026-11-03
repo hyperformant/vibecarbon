@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — JS module without types
 import {
   makePublicDnsLookup,
+  PUBLIC_DNS_BUDGET_MS,
   PUBLIC_DNS_SERVERS,
+  resolvePublicA,
 } from '../../../src/lib/deploy/public-dns-lookup.js';
 
 // The deploy's public health probe must not trust the operator's system
@@ -95,5 +97,63 @@ describe('probePublicHealth wiring', () => {
     );
     expect(src).toContain('fetchPublicDomain(');
     expect(src).not.toMatch(/dns\.setServers\(/);
+  });
+});
+
+// Egress filters that silently DROP UDP to 1.1.1.1/8.8.8.8 never answer, they
+// just time out. The public lookup must give up inside a short total budget
+// and take the system answer, well inside the smallest caller timeout
+// (status readiness aborts at 5s, deploy's probe at 8s, the TLS probe at 10s).
+describe('public DNS budget: a resolver that never answers', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const silent = () => ({ resolve4: vi.fn(), cancel: vi.fn() });
+  const systemAnswer = () =>
+    vi.fn((_h: string, opts: { all?: boolean }, cb: (...a: unknown[]) => void) =>
+      opts?.all ? cb(null, [{ address: '10.0.0.3', family: 4 }]) : cb(null, '10.0.0.3', 4),
+    );
+
+  it('fits well inside the smallest caller timeout', () => {
+    expect(PUBLIC_DNS_BUDGET_MS).toBeLessThanOrEqual(1_500);
+  });
+
+  it('lookup falls back to the system resolver at the budget, not before', async () => {
+    vi.useFakeTimers();
+    const resolver = silent();
+    const fallback = systemAnswer();
+    const lookup = makePublicDnsLookup({ resolver, fallback });
+    const cb = vi.fn();
+    lookup('e4.example.dev', {}, cb);
+    await vi.advanceTimersByTimeAsync(PUBLIC_DNS_BUDGET_MS - 1);
+    expect(cb).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fallback).toHaveBeenCalledOnce();
+    expect(cb).toHaveBeenCalledExactlyOnceWith(null, '10.0.0.3', 4);
+    expect(resolver.cancel).toHaveBeenCalled();
+  });
+
+  it('a public answer that arrives after the budget is ignored (one callback)', async () => {
+    vi.useFakeTimers();
+    let late: ((e: null, a: string[]) => void) | undefined;
+    const resolver = {
+      resolve4: vi.fn((_h: string, cb: (e: null, a: string[]) => void) => {
+        late = cb;
+      }),
+    };
+    const lookup = makePublicDnsLookup({ resolver, fallback: systemAnswer() });
+    const cb = vi.fn();
+    lookup('e4.example.dev', {}, cb);
+    await vi.advanceTimersByTimeAsync(PUBLIC_DNS_BUDGET_MS);
+    late?.(null, ['1.2.3.4']);
+    expect(cb).toHaveBeenCalledExactlyOnceWith(null, '10.0.0.3', 4);
+  });
+
+  it('resolvePublicA falls back at the budget too', async () => {
+    vi.useFakeTimers();
+    const p = resolvePublicA('e4.example.dev', { resolver: silent(), fallback: systemAnswer() });
+    await vi.advanceTimersByTimeAsync(PUBLIC_DNS_BUDGET_MS);
+    expect(await p).toEqual(['10.0.0.3']);
   });
 });
