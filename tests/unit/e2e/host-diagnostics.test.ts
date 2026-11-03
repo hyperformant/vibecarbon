@@ -280,3 +280,65 @@ describe('collectHostDiagnostics', () => {
     expect(run).not.toHaveBeenCalled();
   });
 });
+
+describe('redact before truncate (a cut must never split a token past the redactor)', () => {
+  const TOKEN = `K10${'a1'.repeat(32)}::server:${'f0'.repeat(16)}`;
+  const journalCap = HOST_DIAG_SECTIONS.find((s) => s.name === '{unit} journal')?.maxChars ?? 0;
+  const pieces = (t: string) => [
+    t.slice(0, 12),
+    t.slice(20, 40),
+    t.slice(-24),
+    'f0f0f0f0',
+    'a1a1a1a1',
+  ];
+
+  it('a journal whose token straddles the cut point leaks no part of it', async () => {
+    // Every offset of the token across the cut: the kept tail starts inside it.
+    for (let into = 1; into < TOKEN.length; into += 7) {
+      const tokenLine = `Nov 01 k3s[812]: join with ${TOKEN} ok`;
+      const tokenEnd = tokenLine.indexOf(TOKEN) + TOKEN.length;
+      // Filler after the token line so the cut lands `into` chars before the
+      // token's end.
+      const after = journalCap - (tokenLine.length - tokenEnd) - into;
+      const fillerLines = Array.from(
+        { length: Math.ceil(after / 20) + 1 },
+        (_, i) => `l${String(i).padStart(18, '0')}`,
+      ).join('\n');
+      const tail = `\n${fillerLines}`.slice(0, after);
+      const journal = `${'x'.repeat(100)}\n${tokenLine}${tail}`;
+      const run = vi.fn(async () => `@@vc-section k3s journal\n${journal}`);
+      const sections = await collectHostDiagnostics({
+        hosts: [{ label: 'm', ip: '2.2.2.1', unit: 'k3s' }],
+        sshKeyPath: '/k',
+        run,
+      });
+      const text = sections.map(([, t]) => t).join('\n');
+      for (const piece of pieces(TOKEN)) expect(text).not.toContain(piece);
+    }
+  });
+
+  it('a capped section starts on a line boundary', () => {
+    const lines = Array.from({ length: 4000 }, (_, i) => `line-${i}-${'z'.repeat(i % 13)}`);
+    const [[, text]] = splitHostDiagnosticOutput(`@@vc-section k3s journal\n${lines.join('\n')}`);
+    const [header, first] = text.split('\n');
+    expect(header).toMatch(/^\(truncated/);
+    expect(lines).toContain(first);
+  });
+
+  it('the catch path redacts the whole error output before it is cut', async () => {
+    const stdout = `${'y'.repeat(5000)}\njoin ${TOKEN}\n${'w'.repeat(1990)}`;
+    const run = vi.fn(async () => {
+      throw Object.assign(new Error(`Command failed: ssh root@2.2.2.1 ${TOKEN}`), { stdout });
+    });
+    const sections = await collectHostDiagnostics({
+      hosts: [{ label: 'm', ip: '2.2.2.1', unit: 'k3s' }],
+      sshKeyPath: '/k',
+      run,
+    });
+    expect(sections).toHaveLength(1);
+    const [, text] = sections[0];
+    expect(text).toMatch(/^\(ssh failed: /);
+    for (const piece of pieces(TOKEN)) expect(text).not.toContain(piece);
+    expect(text.length).toBeLessThan(2600);
+  });
+});

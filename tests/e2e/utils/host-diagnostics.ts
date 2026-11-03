@@ -105,10 +105,20 @@ export function hostDiagnosticArgv(unit: K3sUnit): string[] {
   return ['bash', '-c', buildHostDiagnosticScript(unit)];
 }
 
-/** Cap at maxChars, keeping the tail (the newest lines). */
+/**
+ * Cap at maxChars, keeping the tail (the newest lines) from a line boundary:
+ * the partial line the cut leaves first is dropped. Callers pass redacted
+ * text only: a cut made before redaction can split a token so that its
+ * surviving half no longer matches any pattern.
+ */
 function capTail(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
-  return `(truncated to the last ${maxChars} chars)\n${text.slice(-maxChars)}`;
+  const cut = text.length - maxChars;
+  const kept = text.slice(cut);
+  const onBoundary = text[cut - 1] === '\n';
+  const nl = kept.indexOf('\n');
+  const body = onBoundary ? kept : nl === -1 ? '' : kept.slice(nl + 1);
+  return `(truncated to the last ${maxChars} chars, from a line boundary)\n${body}`;
 }
 
 const capFor = (name: string): number =>
@@ -116,8 +126,12 @@ const capFor = (name: string): number =>
     (s) => sectionName(s.name, 'k3s') === name || sectionName(s.name, 'k3s-agent') === name,
   )?.maxChars ?? 4000;
 
-/** Split a node's output at the section markers; each section capped. */
+/**
+ * Split a node's output at the section markers; each section capped. The
+ * whole output is redacted first, before anything is split or cut.
+ */
 export function splitHostDiagnosticOutput(out: string): Array<[string, string]> {
+  const redacted = redactHostDiagnostics(String(out ?? ''));
   const sections: Array<[string, string]> = [];
   let current: { name: string; lines: string[] } | null = null;
   const flush = () => {
@@ -125,7 +139,7 @@ export function splitHostDiagnosticOutput(out: string): Array<[string, string]> 
       sections.push([current.name, capTail(current.lines.join('\n').trim(), capFor(current.name))]);
     }
   };
-  for (const line of String(out ?? '').split('\n')) {
+  for (const line of redacted.split('\n')) {
     if (line.startsWith(`${MARK} `)) {
       flush();
       current = { name: line.slice(MARK.length + 1).trim(), lines: [] };
@@ -285,21 +299,20 @@ export async function collectHostDiagnostics({
           timeout: HOST_DIAG_SSH_TIMEOUT_MS,
           transportRetry: false,
         });
-        return splitHostDiagnosticOutput(out).map(([name, text]) => [
-          `${prefix}: ${name}`,
-          redactHostDiagnostics(text),
-        ]);
+        // splitHostDiagnosticOutput redacts the whole output before it cuts.
+        return splitHostDiagnosticOutput(out).map(([name, text]) => [`${prefix}: ${name}`, text]);
       } catch (err) {
         const e = err as { message?: string; stdout?: unknown; stderr?: unknown };
-        const first = String(e?.message ?? err).split('\n')[0];
-        const tail = [e?.stdout, e?.stderr]
-          .map((v) => String(v ?? '').trim())
-          .filter(Boolean)
-          .join('\n')
-          .slice(-2000);
-        return [
-          [prefix, redactHostDiagnostics(`(ssh failed: ${first})${tail ? `\n${tail}` : ''}`)],
-        ];
+        // Redact everything first, then cut: never the other way round.
+        const first = redactHostDiagnostics(String(e?.message ?? err).split('\n')[0]);
+        const output = redactHostDiagnostics(
+          [e?.stdout, e?.stderr]
+            .map((v) => String(v ?? '').trim())
+            .filter(Boolean)
+            .join('\n'),
+        );
+        const tail = output ? `\n${capTail(output, 2000)}` : '';
+        return [[prefix, `(ssh failed: ${first.slice(0, 300)})${tail}`]];
       }
     }),
   );
