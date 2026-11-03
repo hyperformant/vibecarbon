@@ -6,6 +6,7 @@ import { load } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-order-recovery.js';
 import { namesHost } from '../../_shared/hosts.js';
+import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
 
 /**
  * Integration-style unit tests for applyK3sManifests deploy-time behavior:
@@ -217,6 +218,10 @@ const APP_PODS_JSON = JSON.stringify({
   items: [{ metadata: { name: APP_POD, creationTimestamp: '2026-10-16T05:00:00Z' } }],
 });
 
+// The cert-manager kustomization as `kubectl apply -k <dir>` saw it (the
+// rendered dir is removed right after the apply).
+let certManagerKustomizationAtApply: string | null = null;
+
 function installSpawnMock() {
   vi.mocked(spawn).mockImplementation(((
     cmd: string,
@@ -239,6 +244,9 @@ function installSpawnMock() {
           kustomization: readFileSync(dbKustomization, 'utf-8'),
           hostPortPatch: existsSync(patch) ? readFileSync(patch, 'utf-8') : null,
         };
+      }
+      if (/vibecarbon-cert-manager-/.test(target)) {
+        certManagerKustomizationAtApply = readFileSync(join(target, 'kustomization.yaml'), 'utf-8');
       }
       const certificate = join(target, 'traefik', 'certificate.yaml');
       if (/k8s-base/.test(target) && existsSync(certificate)) {
@@ -356,6 +364,10 @@ function installSpawnMock() {
         stdout: secretVersionOut[name] ?? '1',
         argv: full,
       }) as unknown as ReturnType<typeof spawn>;
+    }
+    const leaderStdout = certManagerLeaderStdout(cmd, argv);
+    if (leaderStdout !== null) {
+      return fakeChild({ stdout: leaderStdout, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
     if (cmd === 'kubectl' && argv.includes('get') && argv.includes('replicasets')) {
       return fakeChild({ stdout: APP_RS_JSON, argv: full }) as unknown as ReturnType<typeof spawn>;
@@ -721,7 +733,7 @@ describe('applyK3sManifests deploy-time optimizations', () => {
 
   const isRegistryPush = (a: string[]) => a[0] === 'registryPush';
   const isCertManagerInstall = (a: string[]) =>
-    a[0] === 'kubectl' && a.includes('apply') && a.some((x) => /cert-manager.*\.yaml$/.test(x));
+    a[0] === 'kubectl' && a.includes('apply') && a.some((x) => /vibecarbon-cert-manager-/.test(x));
 
   // The layer delta into the master's containerd needs only ssh and the base
   // pull, so it starts with the apply, before cert-manager; only its push
@@ -1161,13 +1173,16 @@ describe('applyK3sManifests pilot-standby role', () => {
     // though the observability dir exists, the role gate skips its apply.
     expect(cmdCalls.some(isObservabilityApply)).toBe(false);
 
-    // cert-manager control-plane pin applies on EVERY role (see the primary
-    // test for the ordering assertion).
-    for (const d of ['cert-manager', 'cert-manager-cainjector', 'cert-manager-webhook']) {
-      expect(
-        cmdCalls.some((a) => a.includes('patch') && a.includes(d) && a.includes('cert-manager')),
-      ).toBe(true);
-    }
+    // cert-manager (its control-plane pin rendered in) installs on EVERY
+    // role, the same one apply as the primary's.
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('apply') &&
+          a.some((x) => /vibecarbon-cert-manager-/.test(String(x))),
+      ),
+    ).toBe(true);
   });
 
   // Reverse of the post-failover reconverge: the old primary is redeployed as
@@ -1390,48 +1405,44 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(deployKeys).toHaveLength(DEPLOY_OWNED_CERTIFICATES.length);
   });
 
-  it('pins all three cert-manager deployments to the control-plane BEFORE the readiness wait', async () => {
-    // RCA 2026-07-17 e4 rig: the in-cluster apiserver endpoint advertises the
-    // master's PUBLIC IP and the firewall admits public :6443 from operator
-    // CIDRs only — cert-manager pods scheduled onto a worker are locked out
-    // of the apiserver (cainjector CrashLoop, webhook readiness 500). The pin
-    // removes the scheduling coin-flip; same idiom as the CA manifest.
+  it('installs cert-manager in ONE rendered apply, and never patches its Deployments after it', async () => {
+    // The controller flags and the control-plane pin are rendered into the
+    // upstream manifest (carbon/scripts/render-cert-manager.mjs). A post-apply
+    // patch rolled the controller on every deploy: the client-side re-apply
+    // replaced the args list, and the patch put the flags back.
     const { applyK3sManifests } = await k3sPromise;
+    const { renderCertManagerKustomization } = await import(
+      '../../../carbon/scripts/render-cert-manager.mjs'
+    );
+    certManagerKustomizationAtApply = null;
     const projectDir = makeProjectDir({});
 
     await applyK3sManifests({ ...baseArgs(projectDir), role: 'primary' });
 
-    const pinIdx = (name: string) =>
-      cmdCalls.findIndex(
-        (a) =>
-          a[0] === 'kubectl' &&
-          a.includes('patch') &&
-          a.includes(name) &&
-          a.some((s) => s.includes('node-role.kubernetes.io/control-plane')),
-      );
     const applyIdx = cmdCalls.findIndex(
-      (a) => a.includes('apply') && a.some((s) => String(s).includes('cert-manager.yaml')),
+      (a) =>
+        a[0] === 'kubectl' &&
+        a.includes('apply') &&
+        a.includes('-k') &&
+        a.some((s) => /vibecarbon-cert-manager-/.test(String(s))),
     );
     const waitIdx = cmdCalls.findIndex(
       (a) => a.includes('wait') && a.includes('deploy/cert-manager-webhook'),
     );
-    for (const d of ['cert-manager', 'cert-manager-cainjector', 'cert-manager-webhook']) {
-      const idx = pinIdx(d);
-      expect(idx).toBeGreaterThan(applyIdx);
-      if (waitIdx !== -1) expect(idx).toBeLessThan(waitIdx);
-      // toleration must ride along or the master's control-plane taint (when
-      // present on other distros) would strand the pinned pods
-      expect(cmdCalls[idx].some((s) => s.includes('NoSchedule'))).toBe(true);
-    }
+    expect(applyIdx).toBeGreaterThan(-1);
+    expect(waitIdx).toBeGreaterThan(applyIdx);
+    expect(certManagerKustomizationAtApply).toBe(renderCertManagerKustomization());
+    expect(
+      cmdCalls.filter(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('patch') &&
+          a.some((s) => /^cert-manager(-cainjector|-webhook)?$/.test(String(s))),
+      ),
+    ).toEqual([]);
   });
 });
 
-/**
- * The TLS Secret restore runs after the namespace exists and before
- * `apply -k base` creates the Certificate, on the cluster that issues (single
- * cluster or the k8s-ha primary). A pilot standby never restores: it serves
- * its local self-signed certificate until a failover promotes it.
- */
 describe('applyK3sManifests restores the TLS Secret before applying the base', () => {
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
@@ -1478,6 +1489,24 @@ describe('applyK3sManifests restores the TLS Secret before applying the base', (
       expect(base).toBeGreaterThan(read);
       expect(read).toBeGreaterThan(namespace);
       expect(namespace).toBeGreaterThan(-1);
+    });
+  }
+
+  for (const role of [undefined, 'primary', 'standby'] as const) {
+    it(`${role ?? 'single cluster'}: waits for a settled cert-manager leader before the restore and apply -k base`, async () => {
+      const { applyK3sManifests } = await k3sPromise;
+      await applyK3sManifests({ ...withBackups(makeProjectDir()), ...(role && { role }) });
+      const lease = cmdCalls.findIndex(
+        (a) => a[0] === 'kubectl' && a.includes('lease') && a.includes('cert-manager-controller'),
+      );
+      const install = cmdCalls.findIndex(
+        (a) => a.includes('apply') && a.some((s) => /vibecarbon-cert-manager-/.test(String(s))),
+      );
+      const read = cmdCalls.findIndex(isLiveTlsRead);
+      const base = cmdCalls.findIndex(isBaseApply);
+      expect(lease).toBeGreaterThan(install);
+      expect(base).toBeGreaterThan(lease);
+      if (role !== 'standby') expect(read).toBeGreaterThan(lease);
     });
   }
 

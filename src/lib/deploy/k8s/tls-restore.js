@@ -46,13 +46,11 @@ import {
 } from '../tls-snapshot.js';
 
 /**
- * cert-manager's minimum backoff after a failed CertificateRequest (the
- * controller's `--certificate-request-minimum-backoff-duration`; its own
- * default is 1h). A first issuance that misses the deploy's first look is
- * retried within minutes, while the deploy has already finished with TLS
- * pending.
+ * cert-manager's minimum backoff after a failed CertificateRequest, rendered
+ * into the controller's args with the rest of its install
+ * (carbon/scripts/render-cert-manager.mjs).
  */
-export const CERT_MANAGER_MIN_BACKOFF = '5m';
+export { CERT_MANAGER_MIN_BACKOFF } from '../../../../carbon/scripts/render-cert-manager.mjs';
 
 /** The reason a restore leaves a valid live Secret alone. */
 export const LIVE_SECRET_VALID = 'live Secret valid';
