@@ -49,6 +49,7 @@ const {
   renderK8sBase,
   summarizeDbPods,
   summarizeNotReadyNodes,
+  walArchiveConfigSha,
 } = await import('../../../src/lib/deploy/k8s/k3s.js');
 const workload = await import('../../../src/lib/deploy/db-workload.js');
 
@@ -240,6 +241,73 @@ describe('k8s/base renders the db StatefulSet', () => {
     // No liveness probe: a long WAL replay after a restore must not be killed.
     expect(container.livenessProbe).toBeUndefined();
   });
+
+  it('pins the db pod template this release ships: command, mounts and env, in order', () => {
+    // One release, one roll: against main the db container's template changes
+    // by exactly the command, the role + db-guard mounts, the WALG_ROLE ->
+    // VC_WALG_ROLE_INTENT env swap and the ConfigMap sha. Any later edit to
+    // these lists is a second roll of the primary, so it must be deliberate.
+    expect(container.command).toEqual(['sh', '/usr/local/bin/db-guard.sh']);
+    expect(container.volumeMounts.map((m: Doc) => m.mountPath)).toEqual([
+      '/var/lib/postgresql/data',
+      '/etc/postgresql/wal-archive.sh',
+      '/etc/postgresql/walg-env.sh',
+      '/usr/local/bin/db-guard.sh',
+      '/var/lib/vibecarbon/role',
+      '/etc/walg',
+    ]);
+    expect(container.env.map((e: Doc) => e.name)).toEqual([
+      'POSTGRES_USER',
+      'POSTGRES_PASSWORD',
+      'PGPASSWORD',
+      'POSTGRES_DB',
+      'PGDATABASE',
+      'POSTGRES_HOST',
+      'PGPORT',
+      'POSTGRES_PORT',
+      'WALG_S3_PREFIX_BASE',
+      'WALG_PREVENT_WAL_OVERWRITE',
+      'VC_WALG_ROLE_INTENT',
+      'WALG_COMPRESSION_METHOD',
+      'WALG_UPLOAD_CONCURRENCY',
+      'AWS_ENDPOINT',
+      'AWS_REGION',
+      'AWS_SHARED_CREDENTIALS_FILE',
+    ]);
+  });
+
+  it('a warm redeploy renders an identical db pod template (the sha moves only with the ConfigMap)', () => {
+    const renderTemplate = (sha: string) => {
+      const rendered = renderK8sBase(
+        BASE,
+        { ...values({ walArchiveSha: sha }), MASTER_PRIVATE_IP: '10.0.1.1' },
+        undefined,
+        TEST_TLS,
+      );
+      try {
+        const doc = kustomize(rendered).find(
+          (d) => d.kind === 'StatefulSet' && d.metadata.name === 'db',
+        );
+        return JSON.stringify(doc.spec.template);
+      } finally {
+        rmSync(rendered, { recursive: true, force: true });
+      }
+    };
+    // The sha is a hash of the walg ConfigMap file alone, so two deploys of
+    // the same tree carry the same one.
+    const projectDir = mkdtempSync(join(tmpdir(), 'vc-sha-'));
+    try {
+      cpSync(join(ROOT, 'carbon/k8s'), join(projectDir, 'k8s'), { recursive: true });
+      const sha = walArchiveConfigSha(projectDir);
+      expect(sha).toMatch(/^[0-9a-f]{16}$/);
+      expect(walArchiveConfigSha(projectDir)).toBe(sha);
+      expect(renderTemplate(sha)).toBe(renderTemplate(sha));
+      writeFileSync(join(projectDir, 'k8s/base/backup/configmap-walg.yaml'), 'changed\n');
+      expect(walArchiveConfigSha(projectDir)).not.toBe(sha);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it('records the wal-archive ConfigMap sha in the pod template', () => {
     expect(sts.spec.template.metadata.annotations['vibecarbon.dev/wal-archive-sha']).toBe(
