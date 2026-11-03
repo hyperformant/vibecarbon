@@ -27,7 +27,7 @@ import { runCommandAsync } from './command.js';
 import { DB_POD_SELECTOR } from './deploy/db-workload.js';
 import { buildHostKeyOpts, knownHostsPath, SSH_CONNECTION_OPTS } from './host-keys.js';
 import { runWithRetry } from './retry.js';
-import { shEscape } from './shell.js';
+import { shJoin } from './shell.js';
 
 // k3s writes its kubeconfig here; kubectl doesn't find it by default in SSH sessions.
 const K3S_KUBECONFIG = '/etc/rancher/k3s/k3s.yaml';
@@ -291,7 +291,7 @@ export function sshArgv(ip, sshKeyPath, argv, { env, firstConnect = false } = {}
     ...sshHostKeyOpts(env, { firstConnect, sshKeyPath }),
     '--',
     `root@${ip}`,
-    argv.map(shEscape).join(' '),
+    shJoin(argv),
   ];
 }
 

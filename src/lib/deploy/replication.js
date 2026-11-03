@@ -19,8 +19,14 @@
 
 import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
-import { DB_POD, DB_PVC, DB_STATEFULSET } from './db-workload.js';
+import { DB_CONTAINER, DB_POD, DB_PVC, DB_STATEFULSET } from './db-workload.js';
 import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
+import {
+  DB_ROLE_CONFIGMAP,
+  DB_ROLE_INTENT_KEY,
+  podMountsWalgRoleDir,
+  WALG_ROLE_DIR,
+} from './walg-role.js';
 import { REPL_GATEWAY_PORT } from './wireguard.js';
 
 /**
@@ -1860,6 +1866,345 @@ export async function reseedStandbyFromPrimary(
     await onSeeded(sysid);
   }
   return 'reseeded';
+}
+
+// ---------------------------------------------------------------------------
+// In-place reseed: the live-pod guard, the stage verdict, and the one
+// sanctioned in-pod postmaster stop.
+//
+// The reseed never detaches the db volume: the stage script builds a verified
+// tree in $PGDATA/.vc-reseed inside the running standby, postgres stops, the
+// kubelet restarts the container in the same pod, and db-guard.sh swaps the
+// tree in before postgres starts. Stopping postgres in a pod that does NOT run
+// that wrapper would boot the old data directory, so the stop sits behind a
+// guard that reads the RUNNING pod (never the StatefulSet template, which is a
+// false positive during a pending roll).
+// ---------------------------------------------------------------------------
+
+/** Line 2 of db-guard.sh (both copies): the reseed protocol it speaks. */
+export const DB_GUARD_PROTOCOL_MARKER = '# vc-reseed-protocol: 1';
+
+/** The db container's command when it runs the wrapper (statefulset.yaml). */
+export const DB_GUARD_COMMAND = Object.freeze(['sh', '/usr/local/bin/db-guard.sh']);
+
+/** Where the wrapper is mounted (subPath of the vibecarbon-wal-archive ConfigMap). */
+const DB_GUARD_PATH = '/usr/local/bin/db-guard.sh';
+
+/** The live pod lacks the wrapper, its mounts, or its protocol: redeploy first (D1). */
+export class DbGuardMissingError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'DbGuardMissingError';
+  }
+}
+
+/**
+ * The exec that greps the MOUNTED wrapper; one `sh -c` token. A subPath
+ * ConfigMap mount never changes for the life of the pod, so this is the exact
+ * file the next container start runs. A missing file prints nothing.
+ */
+export const DB_GUARD_MARKER_GREP = Object.freeze([
+  'sh',
+  '-c',
+  `grep -c '^# vc-reseed-protocol: 1$' /usr/local/bin/db-guard.sh || true`,
+]);
+
+/** The sanctioned in-pod stop; one `sh -c` token. */
+export const DB_IN_PLACE_STOP = Object.freeze(['sh', '-c', 'kill -INT 1']);
+
+const DB_POD_GET_ARGV = ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'];
+const dbExecArgv = (argv) => [
+  '-n',
+  'vibecarbon',
+  'exec',
+  DB_POD,
+  '-c',
+  DB_CONTAINER,
+  '--',
+  ...argv,
+];
+
+/** The db container's spec and status from a parsed pod, or nulls. */
+function dbContainerOf(pod) {
+  const containers = pod?.spec?.containers;
+  const statuses = pod?.status?.containerStatuses;
+  return {
+    spec: Array.isArray(containers) ? containers.find((c) => c?.name === DB_CONTAINER) : null,
+    status: Array.isArray(statuses) ? statuses.find((c) => c?.name === DB_CONTAINER) : null,
+  };
+}
+
+/** A short description of a container status's state, for refusals and deadlines. */
+function describeContainerState(status) {
+  if (!status) return 'no db container status';
+  const state = status.state ?? {};
+  const name = Object.keys(state)[0] ?? 'unknown';
+  const reason = state[name]?.reason;
+  return `${reason ?? name}, restartCount ${status.restartCount ?? '?'}, ready ${status.ready === true}`;
+}
+
+/**
+ * The pod half of the guard: the wrapper command, its mount, the role mount,
+ * and a running db container to restart.
+ *
+ * @returns {{ok: true, uid: string, restartCount: number, containerID: string} | {ok: false, reason: string, missing?: true}}
+ */
+function evaluateDbGuardPod(podJson) {
+  let pod;
+  try {
+    pod = typeof podJson === 'string' ? JSON.parse(podJson) : podJson;
+  } catch {
+    return { ok: false, reason: 'the db pod JSON is unreadable' };
+  }
+  const { spec, status } = dbContainerOf(pod);
+  const uid = pod?.metadata?.uid;
+  if (!spec || typeof uid !== 'string' || !uid) {
+    return { ok: false, reason: `no ${DB_CONTAINER} container in ${DB_POD}` };
+  }
+  const command = Array.isArray(spec.command) ? spec.command : [];
+  if (
+    command.length !== DB_GUARD_COMMAND.length ||
+    command.some((token, i) => token !== DB_GUARD_COMMAND[i])
+  ) {
+    return {
+      ok: false,
+      missing: true,
+      reason: `the running db container's command is ${JSON.stringify(spec.command ?? null)}, not ${JSON.stringify(DB_GUARD_COMMAND)}`,
+    };
+  }
+  const mounts = Array.isArray(spec.volumeMounts) ? spec.volumeMounts : [];
+  if (!mounts.some((m) => m?.mountPath === DB_GUARD_PATH)) {
+    return {
+      ok: false,
+      missing: true,
+      reason: `the running db container does not mount ${DB_GUARD_PATH}`,
+    };
+  }
+  if (!podMountsWalgRoleDir(pod)) {
+    return {
+      ok: false,
+      missing: true,
+      reason: `the running db container has no wal-g role mount (${WALG_ROLE_DIR})`,
+    };
+  }
+  if (
+    !status?.state?.running ||
+    typeof status.containerID !== 'string' ||
+    !status.containerID ||
+    !Number.isInteger(status.restartCount)
+  ) {
+    return {
+      ok: false,
+      reason: `the db container is not running (${describeContainerState(status)})`,
+    };
+  }
+  return { ok: true, uid, restartCount: status.restartCount, containerID: status.containerID };
+}
+
+/**
+ * Pure. From the RUNNING pod JSON, the marker grep output and the intent read.
+ * `missing: true` marks a pod that predates the in-place reseed (redeploy).
+ *
+ * @param {string|object} podJson `kubectl get pod db-0 -o json`
+ * @param {string} markerGrepOut DB_GUARD_MARKER_GREP's stdout
+ * @param {string} intent the vibecarbon-db-role ConfigMap's VC_WALG_ROLE_INTENT ('' when absent)
+ * @returns {{ok: true, uid: string, restartCount: number, containerID: string} | {ok: false, reason: string, missing?: true}}
+ */
+export function evaluateDbGuardSupport(podJson, markerGrepOut, intent) {
+  const verdict = evaluateDbGuardPod(podJson);
+  if (!verdict.ok) return verdict;
+  if (!/^[1-9]\d*$/.test(String(markerGrepOut ?? '').trim())) {
+    return {
+      ok: false,
+      missing: true,
+      reason: `the mounted ${DB_GUARD_PATH} does not speak the reseed protocol (${DB_GUARD_PROTOCOL_MARKER})`,
+    };
+  }
+  const word = String(intent ?? '').trim();
+  if (word !== 'standby') {
+    return { ok: false, reason: `the role intent is ${word || '<none>'}, not standby` };
+  }
+  return verdict;
+}
+
+/**
+ * Refuse unless the RUNNING db pod will swap a staged tree on its next
+ * container start: the wrapper command and mounts, the role mount, the
+ * protocol marker in the mounted wrapper, and a `standby` intent (a
+ * non-standby intent makes the wrapper refuse the swap). Reads in that order;
+ * any refusal issues no further call.
+ *
+ * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
+ * @param {{envName?: string}} o
+ * @returns {Promise<{ok: true, uid: string, restartCount: number, containerID: string}>}
+ */
+export async function assertLiveDbGuardSupportsReseed(kubectl, { envName } = {}) {
+  const refuse = (verdict) => {
+    if (verdict.missing) {
+      return new DbGuardMissingError(
+        `this cluster's db predates in-place reseeds; run \`vibecarbon deploy ${envName || '<env>'}\` once (one db restart), then retry (${verdict.reason})`,
+      );
+    }
+    return new Error(`reseed refused: ${verdict.reason}`);
+  };
+  const podJson = await kubectl(DB_POD_GET_ARGV, { timeout: 30_000 });
+  const podVerdict = evaluateDbGuardPod(podJson);
+  if (!podVerdict.ok) throw refuse(podVerdict);
+
+  const intent = String(
+    (await kubectl(
+      [
+        '-n',
+        'vibecarbon',
+        'get',
+        'configmap',
+        DB_ROLE_CONFIGMAP,
+        '--ignore-not-found',
+        '-o',
+        `jsonpath={.data.${DB_ROLE_INTENT_KEY}}`,
+      ],
+      { timeout: 30_000 },
+    )) ?? '',
+  ).trim();
+  if (intent !== 'standby') {
+    throw new Error(`reseed refused: role intent is ${intent || '<none>'}`);
+  }
+
+  const marker = await kubectl(dbExecArgv(DB_GUARD_MARKER_GREP), { timeout: 30_000 });
+  const verdict = evaluateDbGuardSupport(podJson, marker, intent);
+  if (!verdict.ok) throw refuse(verdict);
+  return verdict;
+}
+
+/** An earlier in-place stage still holds the PGDATA lock: report, never retry. */
+export class ReseedStageBusyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ReseedStageBusyError';
+  }
+}
+
+/**
+ * Run the in-place stage script once and read its verdict. `RESEED_REFUSED
+ * busy` (an earlier stage, maybe one whose client dropped, still holds
+ * .vc-restore.lock) is terminal: a ReseedStageBusyError telling the operator
+ * to wait and rerun. Never retried here, never by a caller. Any other failure
+ * is rethrown as is; success must name this attempt (`RESEED_STAGED <id>`).
+ *
+ * @param {() => Promise<string>} exec runs the stage once, resolves its stdout,
+ *   rejects with an error carrying `stdout` on a non-zero exit
+ * @param {{attempt: string}} o
+ * @returns {Promise<{staged: string}>}
+ */
+export async function runInPlaceStage(exec, { attempt }) {
+  let out;
+  try {
+    out = await exec();
+  } catch (error) {
+    if (/^RESEED_REFUSED busy$/m.test(String(error?.stdout ?? ''))) {
+      throw new ReseedStageBusyError(
+        'reseed refused: an earlier reseed stage is still running on the standby (it holds ' +
+          'the data directory lock). Nothing was staged. Wait for it to finish, then rerun.',
+      );
+    }
+    throw error;
+  }
+  const staged = /^RESEED_STAGED (\S+)$/m.exec(String(out ?? ''))?.[1];
+  if (staged !== attempt) {
+    throw new Error(
+      `reseed stage finished without staging attempt ${attempt} (saw ${staged ?? 'no RESEED_STAGED line'}); nothing will be swapped`,
+    );
+  }
+  return { staged };
+}
+
+/**
+ * The ONE sanctioned in-pod postmaster stop: DB_IN_PLACE_STOP, then a bounded
+ * wait (DB_STS_BOOT_TIMEOUT_S, covers kubelet's 300s max backoff) for the SAME
+ * pod uid with restartCount > before, a new containerID and Ready. A changed uid
+ * is reported and handed to `recreatedWait`, never retried.
+ *
+ * The exec's own result is no evidence: SIGINT to PID 1 stops the container
+ * the exec runs in, so the exec can die with it. The container's state decides.
+ * A pod read that fails (the pod mid-recreate) is no evidence either; the
+ * deadline bounds the wait.
+ *
+ * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
+ * @param {object} o
+ * @param {{ok: true, uid: string, restartCount: number, containerID: string}} o.guard assertLiveDbGuardSupportsReseed's result
+ * @param {() => Promise<unknown>} o.recreatedWait the attach-watched rollout wait (k8sDbRolloutWait)
+ * @param {number} [o.timeoutS]
+ * @param {number} [o.pollMs]
+ * @param {(ms: number) => Promise<void>} [o.sleep]
+ * @param {() => number} [o.now]
+ * @param {(msg: string) => void} [o.log]
+ * @returns {Promise<{inPlace: boolean, uid: string}>}
+ */
+export async function restartDbContainerInPlace(
+  kubectl,
+  {
+    guard,
+    recreatedWait,
+    timeoutS = DB_STS_BOOT_TIMEOUT_S,
+    pollMs = 3000,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    now = Date.now,
+    log = (m) => console.error(m),
+  } = {},
+) {
+  if (guard?.ok !== true || typeof guard.uid !== 'string' || !guard.uid) {
+    throw new Error(
+      'restartDbContainerInPlace: no live-pod guard; assertLiveDbGuardSupportsReseed must pass first',
+    );
+  }
+  if (typeof recreatedWait !== 'function') {
+    throw new Error('restartDbContainerInPlace: recreatedWait is required');
+  }
+  const deadline = now() + timeoutS * 1000;
+  try {
+    await kubectl(dbExecArgv(DB_IN_PLACE_STOP), { timeout: 30_000 });
+  } catch (error) {
+    log(
+      `[reseed] the stop exec ended with: ${error?.message ?? error} (the container state decides)`,
+    );
+  }
+  let last = 'no db pod read yet';
+  for (;;) {
+    try {
+      const pod = JSON.parse(String(await kubectl(DB_POD_GET_ARGV, { timeout: 30_000 })));
+      const uid = pod?.metadata?.uid;
+      if (typeof uid === 'string' && uid && uid !== guard.uid) {
+        log(
+          `[reseed] ${DB_POD} was recreated (uid ${guard.uid} -> ${uid}), not restarted in place; ` +
+            'waiting on its rollout under the attach watch',
+        );
+        await recreatedWait();
+        return { inPlace: false, uid };
+      }
+      const { status } = dbContainerOf(pod);
+      last = describeContainerState(status);
+      if (
+        uid === guard.uid &&
+        Number.isInteger(status?.restartCount) &&
+        status.restartCount > guard.restartCount &&
+        typeof status.containerID === 'string' &&
+        status.containerID &&
+        status.containerID !== guard.containerID &&
+        status.ready === true
+      ) {
+        return { inPlace: true, uid };
+      }
+    } catch (error) {
+      last = `unreadable: ${error?.message ?? error}`;
+    }
+    if (now() >= deadline) {
+      throw new Error(
+        `${DB_POD}'s db container did not come back Ready in place within ${timeoutS}s ` +
+          `after the stop (last state: ${last}); no second stop was sent`,
+      );
+    }
+    await sleep(pollMs);
+  }
 }
 
 /**

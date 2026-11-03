@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { escapeSql, escapeYaml, shEscape } from '../../../src/lib/shell.js';
+import { escapeSql, escapeYaml, shEscape, shJoin } from '../../../src/lib/shell.js';
+import { sshArgv } from '../../../src/lib/ssh.js';
 
 // Dotenv reading/writing left this module on 2026-09-20 (src/lib/dotenv.js;
 // tests/unit/lib/dotenv.test.ts). shEscape is for shell command lines only.
@@ -28,6 +29,18 @@ describe('shEscape', () => {
 
   it('coerces non-string values via String(value)', () => {
     expect(shEscape(42 as unknown as string)).toBe("'42'");
+  });
+});
+
+describe('shJoin', () => {
+  it('shEscapes every token and joins with one space', () => {
+    expect(shJoin(['sh', '-c', 'kill -INT 1'])).toBe("'sh' '-c' 'kill -INT 1'");
+    expect(shJoin(["it's", ''])).toBe("'it'\\''s' ''");
+  });
+
+  it('is the remote command sshArgv hands ssh', () => {
+    const argv = ['sh', '-c', "grep -c '^x$' f || true"];
+    expect(sshArgv('10.0.0.1', '/k', argv).at(-1)).toBe(shJoin(argv));
   });
 });
 
