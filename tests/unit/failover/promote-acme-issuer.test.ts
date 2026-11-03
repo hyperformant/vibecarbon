@@ -23,7 +23,7 @@ import {
   promoteAcmeIssuer,
   promoteTlsKubectl,
 } from '../../../src/failover.js';
-import { tlsSnapshotKey } from '../../../src/lib/deploy/tls-snapshot.js';
+import { k8sSecretSerial, tlsSnapshotKey } from '../../../src/lib/deploy/tls-snapshot.js';
 import { expectNoKeyLeak } from '../deploy/_no-key-leak.ts';
 import { k8sSecretJson, k8sSecretJsonWithCa } from '../deploy/_tls-fixtures.ts';
 
@@ -38,10 +38,6 @@ describe('promoteAcmeIssuer', () => {
     const calls: string[][] = [];
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
       calls.push(argv);
-      // grafana-tls does not exist on a promoted ex-standby (observability is
-      // skipped on the pilot path) — the real cluster answers NotFound.
-      if (argv.includes('grafana-tls'))
-        throw new Error('Error from server (NotFound): certificates.cert-manager.io not found');
       if (argv.includes('get'))
         return CERT_JSON('vibecarbon-standby-selfsigned', 'letsencrypt-staging-digitalocean');
       return '';
@@ -119,7 +115,7 @@ describe('promoteAcmeIssuer', () => {
 // re-pointed by a patch (cert-manager would then see a self-signed Secret and
 // issue): its Certificate is deleted, the snapshot goes into the Secret, and
 // the Certificate comes back on the ACME issuer, finding a Secret that
-// matches it. grafana-tls always takes the patch path.
+// matches it. vibecarbon-tls is the only Certificate a deploy owns.
 // ============================================================================
 
 const TARGET = 'letsencrypt-staging-digitalocean';
@@ -149,7 +145,7 @@ const LIVE_CERT = (name: string) =>
     spec: {
       secretName: name,
       issuerRef: { name: 'vibecarbon-standby-selfsigned', kind: 'ClusterIssuer' },
-      dnsNames: name === 'grafana-tls' ? ['app.example.com'] : DNS,
+      dnsNames: DNS,
     },
   });
 
@@ -242,7 +238,12 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     const { result } = await expectNoKeyLeak(SNAP, () => run(c, { read }));
 
     expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
-    expect(result.tls).toEqual({ restored: true, reason: 'restored from the last snapshot' });
+    // The serial it restored (public) rides the result into the failover's line.
+    expect(result.tls).toEqual({
+      restored: true,
+      reason: 'restored from the last snapshot',
+      serial: k8sSecretSerial(SNAP),
+    });
 
     // The snapshot key of this env and CA, read once with the DR client options.
     expect(read).toHaveBeenCalledTimes(1);
@@ -373,18 +374,13 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     expect(argvs(c.calls)).toEqual(await patchPathArgv());
   });
 
-  it('grafana-tls always takes the patch path', async () => {
+  it('touches only vibecarbon-tls, even with a retired grafana-tls on the cluster', async () => {
+    // One certificate per name: grafana-tls is no longer deploy-owned. A
+    // leftover one is removed by the reconverge redeploy, never re-pointed.
     const c = cluster({ grafana: true });
     const result = await run(c);
-    expect(result.patched).toEqual([
-      'vibecarbon/vibecarbon-tls',
-      'vibecarbon-observability/grafana-tls',
-    ]);
-    const grafana = c.calls.filter((x) => x.argv.includes('grafana-tls'));
-    expect(grafana.map((x) => x.argv[0])).toEqual(['get', 'patch']);
-    expect(c.calls.some((x) => x.argv[0] === 'delete' && x.argv.includes('grafana-tls'))).toBe(
-      false,
-    );
+    expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    expect(c.calls.some((x) => x.argv.includes('grafana-tls'))).toBe(false);
   });
 
   it.each([

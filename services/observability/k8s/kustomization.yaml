@@ -35,7 +35,8 @@ resources:
   - loki-service.yaml
   # Network policies
   - network-policy.yaml
-  # Traefik middlewares (local copies — see middleware.yaml) + IngressRoute + TLS
+  # Traefik middlewares (local copies, see middleware.yaml) + IngressRoute.
+  # No Certificate: Grafana is served the app's vibecarbon-tls by SNI
+  # (ingressroute.yaml).
   - middleware.yaml
-  - grafana-tls-certificate.yaml
   - ingressroute.yaml

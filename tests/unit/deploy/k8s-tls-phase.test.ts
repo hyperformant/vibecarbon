@@ -38,7 +38,11 @@ const quietSpinner = () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() })
 
 function harness(probeResult: Record<string, unknown>) {
   const probe = vi.fn(async () => probeResult);
-  const snapshot = vi.fn(async () => ({ ok: true }));
+  const snapshot = vi.fn(async () => ({ ok: true, serial: 'AB01' }));
+  // What the domain serves and what Secret/vibecarbon-tls holds: the same
+  // certificate unless a test says otherwise.
+  const servedSerial = vi.fn(async (): Promise<string | null> => 'AB01');
+  const secretSerial = vi.fn(async (): Promise<string | null> => 'AB01');
   const watchdog = vi.fn(async () => ({ action: 'none' }));
   const kubectlFor = vi.fn((kubeconfig: string) => {
     const run = vi.fn(async () => '');
@@ -53,8 +57,10 @@ function harness(probeResult: Record<string, unknown>) {
     makeWatchdog: vi.fn(() => watchdog),
     kubeconfigExists: vi.fn(() => true),
     spinner: quietSpinner,
+    servedSerial,
+    secretSerial,
   };
-  return { deps, probe, snapshot, watchdog, kubectlFor };
+  return { deps, probe, snapshot, watchdog, kubectlFor, servedSerial, secretSerial };
 }
 
 const ARGS = {
@@ -68,15 +74,18 @@ const ARGS = {
 };
 
 let warn: ReturnType<typeof vi.spyOn>;
+let info: ReturnType<typeof vi.spyOn>;
 let exit: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+  info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
   exit = vi.spyOn(process, 'exit').mockImplementation((() => {
     throw new Error('process.exit called');
   }) as never);
 });
 afterEach(() => {
   warn.mockRestore();
+  info.mockRestore();
   exit.mockRestore();
 });
 
@@ -166,6 +175,59 @@ describe('TLS phase (verifyK8sTls)', () => {
       ARGS.kubeconfig,
     );
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('a saved snapshot names the serial it saved', async () => {
+    const h = harness({ ok: true, status: '200', attempts: 1 });
+    await verifyK8sTls({ ...ARGS, deps: h.deps });
+    expect(info.mock.calls.map((c) => String(c[0]))).toContain(
+      'TLS certificate snapshot saved (serial AB01).',
+    );
+  });
+
+  it('one certificate per name: a served serial other than the live Secret is one warning', async () => {
+    const h = harness({ ok: true, status: '200', attempts: 1 });
+    h.servedSerial.mockResolvedValue('CD02');
+    const tls = await verifyK8sTls({ ...ARGS, deps: h.deps });
+    expect(tls.state).toBe('trusted');
+    expect(h.servedSerial).toHaveBeenCalledWith(DOMAIN);
+    expect(
+      (h.secretSerial.mock.calls[0] as unknown as [{ kubeconfig: string }])[0].kubeconfig,
+    ).toBe(ARGS.kubeconfig);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0][0]);
+    expect(line).toContain('app.example.com serves certificate serial CD02');
+    expect(line).toContain('Secret vibecarbon-tls holds serial AB01');
+    expect(line).toContain('`vibecarbon diagnose prod`');
+    expect(line).not.toContain('\u2014');
+  });
+
+  it('serials compare by value, whatever their spelling', async () => {
+    const h = harness({ ok: true, status: '200', attempts: 1 });
+    h.servedSerial.mockResolvedValue('00:ab:01');
+    await verifyK8sTls({ ...ARGS, deps: h.deps });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('an unread serial on either side is no warning (it proves nothing)', async () => {
+    for (const side of ['servedSerial', 'secretSerial'] as const) {
+      warn.mockClear();
+      const h = harness({ ok: true, status: '200', attempts: 1 });
+      h[side].mockResolvedValue(null);
+      await verifyK8sTls({ ...ARGS, deps: h.deps });
+      expect(warn).not.toHaveBeenCalled();
+    }
+    const h = harness({ ok: true, status: '200', attempts: 1 });
+    h.servedSerial.mockRejectedValue(new Error('ECONNRESET'));
+    await verifyK8sTls({ ...ARGS, deps: h.deps });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('a pending TLS reads no serial', async () => {
+    const h = harness({ ok: false, attempts: 3 });
+    await verifyK8sTls({ ...ARGS, deps: h.deps });
+    expect(h.servedSerial).not.toHaveBeenCalled();
+    expect(h.secretSerial).not.toHaveBeenCalled();
   });
 
   it('a failed snapshot is one warning; the verdict stays trusted', async () => {

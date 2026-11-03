@@ -21,6 +21,12 @@ import {
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
+import {
+  addonOwnedPaths,
+  addonUpgradeEntries,
+  installedAddonNames,
+  isContainedRelPath,
+} from './lib/addon-upgrade-files.js';
 import { runDependencyAudit } from './lib/audit-advisories.js';
 import { isBinaryFile } from './lib/binary-files.js';
 import { hashContent, hashFile } from './lib/checksum.js';
@@ -50,14 +56,16 @@ import {
   setEnvVar,
 } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+import { sidecarBlocked, symlinkedComponent, writeSidecar } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
 import { templatePathFor } from './lib/template-paths.js';
-import { getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
+import { getAddonFilePolicy, getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
 import { VERSION } from './lib/version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const TEMPLATE_DIR = join(__dirname, '..', 'carbon');
+const SERVICES_DIR = join(__dirname, '..', 'services');
 
 // Template variable placeholders (same as create.js)
 const PLACEHOLDERS = {
@@ -79,10 +87,6 @@ const SECRET_PLACEHOLDERS = new Set(['DB_PASSWORD', 'ADMIN_PASSWORD']);
 // (not vibecarbon template variables). Must be copied raw without replacement.
 const RAW_COPY_FILES = new Set(['scripts/generate-dev-configs.sh']);
 
-// Optional-feature file prefixes — only upgrade these if they already exist in the project.
-// These are added by `vibecarbon add` or `vibecarbon deploy`, not during `create`.
-const OPTIONAL_FILE_PREFIXES = ['docker-compose.n8n.', 'docker-compose.metabase.'];
-
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
 // ============================================================================
@@ -100,6 +104,8 @@ const SPEC = {
     "  Safe    Auto-replaced if you haven't modified them",
     '  Merge   Always shown for review (docker-compose.yml, package.json, etc.)',
     '  Never   Your code, never touched (src/**, db/migrations/**, .env, etc.)',
+    '',
+    'Installed add-ons are upgraded too, from the add-on files this CLI ships.',
   ].join('\n'),
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },
@@ -200,10 +206,7 @@ export function ensureAppDbPassword(cwd, { dryRun = false } = {}) {
  *   what was (or, under -dry, would be) written; a generated key carries its
  *   manifest `upgradeNote` when it declares one
  */
-export function ensureAddonSecrets(
-  cwd,
-  { dryRun = false, servicesDir = join(__dirname, '..', 'services') } = {},
-) {
+export function ensureAddonSecrets(cwd, { dryRun = false, servicesDir = SERVICES_DIR } = {}) {
   const services = Object.keys(loadManifest(cwd).services ?? {});
   if (services.length === 0) return [];
   const local = loadEnvVariables(cwd);
@@ -384,14 +387,23 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
 // ============================================================================
 
 /**
- * Read a template file and apply placeholder replacement
+ * Read a template or add-on source file and apply placeholder replacement
  *
- * @param {string} templateRelPath - Relative path within TEMPLATE_DIR
+ * @param {string} fullPath - The source file (carbon/ or services/<name>/)
  * @param {object} variables - Template variables
  * @returns {string} - Resolved content
  */
-function resolveTemplate(templateRelPath, variables) {
-  const fullPath = join(TEMPLATE_DIR, templatePathFor(templateRelPath));
+/**
+ * The one line for a file upgrade leaves alone because a path on its way is
+ * a symlink, or a sidecar path holds something other than a plain file.
+ */
+function warnSymlinkSkip(relPath, link) {
+  p.log.warn(
+    `Skipped ${relPath}: ${link} is a symlink or not a plain file, and upgrade never writes through one.`,
+  );
+}
+
+function resolveTemplate(fullPath, variables) {
   let content = readFileSync(fullPath, 'utf-8');
 
   for (const [key, placeholder] of Object.entries(PLACEHOLDERS)) {
@@ -523,29 +535,69 @@ async function main(cliArgs) {
   s.start('Scanning infrastructure files');
 
   const variables = reconstructVariables(cwd, { dryRun: args.dryRun });
-  const upgradeableFiles = getUpgradeableFiles(TEMPLATE_DIR);
+  // What upgrade ships: the template's files, plus the files of every add-on
+  // the project installed, read from the bundled services/<name>/ through
+  // the add-on's manifest (the map `vibecarbon add` copied by). A path an
+  // add-on maps is the add-on's: the template's copy of it (the dev stack's
+  // carbon/docker-compose.n8n.yml and the like) is never its source.
+  const ownedByAddons = addonOwnedPaths(SERVICES_DIR);
+  const shippedEntries = [
+    ...getUpgradeableFiles(TEMPLATE_DIR)
+      .filter((relPath) => !ownedByAddons.has(relPath))
+      .map((relPath) => ({
+        relPath,
+        sourcePath: join(TEMPLATE_DIR, templatePathFor(relPath)),
+      })),
+    ...addonUpgradeEntries({
+      installed: installedAddonNames(manifest, SERVICES_DIR),
+      servicesDir: SERVICES_DIR,
+      projectRoot: cwd,
+      onReject: (why) => p.log.warn(`Add-on file skipped: ${why}.`),
+    }).map((entry) => ({
+      ...entry,
+      addon: true,
+      policy: getAddonFilePolicy(entry.relPath, entry.src),
+    })),
+  ];
+  // Every path this CLI still ships to this project, whatever this run does
+  // with it: the checksums of anything else are dropped at the end.
+  const shippedPaths = new Set(shippedEntries.map(({ relPath }) => relPath));
+  const upgradeEntries = shippedEntries
+    // Containment before any policy: a path with a `..` segment, or an
+    // absolute one, is never read or written, whatever its policy says.
+    .filter(({ relPath }) => isContainedRelPath(relPath))
+    .map((entry) => ({ ...entry, policy: entry.policy ?? getFilePolicy(entry.relPath) }))
+    .filter(({ policy }) => policy !== 'never')
+    // A symlink on the way would send the write wherever it points.
+    .filter(({ relPath }) => {
+      const link =
+        symlinkedComponent(cwd, relPath) ??
+        ['.upgrade-backup', '.upgrade-new']
+          .map((suffix) => `${relPath}${suffix}`)
+          .find((sidecar) => sidecarBlocked(join(cwd, sidecar))) ??
+        null;
+      if (link) warnSymlinkSkip(relPath, link);
+      return !link;
+    });
+  // Paths this run wrote, and the incoming content's hash per path: what the
+  // checksum record at the end is built from (see there).
+  const written = new Set();
+  const incomingHash = new Map();
 
   // Classify each file
   const autoUpdated = []; // { path, reason: 'updated' | 'added' }
   const unchanged = []; // files with no diff
   const needsReview = []; // { path, oldContent, newContent }
 
-  for (const relPath of upgradeableFiles) {
-    const policy = getFilePolicy(relPath);
+  for (const { relPath, sourcePath: templateFilePath, addon, policy } of upgradeEntries) {
     const projectFilePath = join(cwd, relPath);
-    const templateFilePath = join(TEMPLATE_DIR, templatePathFor(relPath));
     const fileExists = existsSync(projectFilePath);
-
-    // Skip optional-feature files that don't exist in the project yet.
-    // These are added by `vibecarbon add` or `vibecarbon deploy`, not during upgrade.
-    if (!fileExists && OPTIONAL_FILE_PREFIXES.some((prefix) => relPath.startsWith(prefix))) {
-      continue;
-    }
 
     // Handle binary files
     if (isBinaryFile(relPath)) {
       if (policy === 'safe' && !fileExists) {
         autoUpdated.push({ path: relPath, reason: 'added' });
+        written.add(relPath);
         if (!args.dryRun) {
           mkdirSync(dirname(projectFilePath), { recursive: true });
           copyFileSync(templateFilePath, projectFilePath);
@@ -558,9 +610,9 @@ async function main(cliArgs) {
     let newContent;
     try {
       if (RAW_COPY_FILES.has(relPath)) {
-        newContent = readFileSync(join(TEMPLATE_DIR, templatePathFor(relPath)), 'utf-8');
+        newContent = readFileSync(templateFilePath, 'utf-8');
       } else {
-        newContent = resolveTemplate(relPath, variables);
+        newContent = resolveTemplate(templateFilePath, variables);
       }
     } catch {
       // Template file can't be read — skip
@@ -631,11 +683,13 @@ async function main(cliArgs) {
     }
 
     const newHash = hashContent(newContent);
+    incomingHash.set(relPath, newHash);
 
     if (!fileExists) {
       // New file in template — add it
       if (policy === 'safe') {
         autoUpdated.push({ path: relPath, reason: 'added' });
+        written.add(relPath);
         if (!args.dryRun) {
           mkdirSync(dirname(projectFilePath), { recursive: true });
           writeFileSync(projectFilePath, newContent);
@@ -674,13 +728,18 @@ async function main(cliArgs) {
     const userModified = storedHash ? currentHash !== storedHash : true;
 
     if (args.force) {
-      // Force mode: replace everything, backup modified files
-      if (userModified) {
-        if (!args.dryRun) {
-          writeFileSync(`${projectFilePath}.upgrade-backup`, currentContent);
-        }
+      // Force mode: replace everything, backup modified files. No backup,
+      // no replace: a backup refused (a symlink at its path) leaves the file.
+      if (
+        userModified &&
+        !args.dryRun &&
+        !writeSidecar(`${projectFilePath}.upgrade-backup`, currentContent)
+      ) {
+        warnSymlinkSkip(relPath, `${relPath}.upgrade-backup`);
+        continue;
       }
       autoUpdated.push({ path: relPath, reason: 'updated' });
+      written.add(relPath);
       if (!args.dryRun) {
         writeFileSync(projectFilePath, newContent);
         if (relPath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
@@ -692,6 +751,23 @@ async function main(cliArgs) {
       if (!userModified) {
         // Not modified by user — safe to auto-replace
         autoUpdated.push({ path: relPath, reason: 'updated' });
+        written.add(relPath);
+        if (!args.dryRun) {
+          writeFileSync(projectFilePath, newContent);
+          if (relPath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
+        }
+      } else if (addon && !storedHash) {
+        // An add-on file with no recorded checksum: `vibecarbon add` did not
+        // record one before, so this is every add-on file of an existing
+        // project, and leaving it would leave the add-on as old as the day
+        // it was added (the observability add-on kept issuing grafana-tls).
+        // Replaced as -force does, the previous content kept beside it.
+        if (!args.dryRun && !writeSidecar(`${projectFilePath}.upgrade-backup`, currentContent)) {
+          warnSymlinkSkip(relPath, `${relPath}.upgrade-backup`);
+          continue;
+        }
+        autoUpdated.push({ path: relPath, reason: 'updated (previous kept as .upgrade-backup)' });
+        written.add(relPath);
         if (!args.dryRun) {
           writeFileSync(projectFilePath, newContent);
           if (relPath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
@@ -752,7 +828,9 @@ async function main(cliArgs) {
       for (const { path: filePath, newContent } of needsReview) {
         const projectFilePath = join(cwd, filePath);
         mkdirSync(dirname(projectFilePath), { recursive: true });
-        writeFileSync(`${projectFilePath}.upgrade-new`, newContent);
+        if (!writeSidecar(`${projectFilePath}.upgrade-new`, newContent)) {
+          warnSymlinkSkip(filePath, `${filePath}.upgrade-new`);
+        }
       }
       p.log.info(
         `New versions saved as ${c.info('.upgrade-new')} files. Review and apply manually.`,
@@ -821,30 +899,48 @@ async function main(cliArgs) {
             exitCancelled();
           }
 
-          if (action2 === 'replace') {
-            if (oldContent) writeFileSync(`${projectFilePath}.upgrade-backup`, oldContent);
+          if (
+            action2 === 'replace' &&
+            oldContent &&
+            !writeSidecar(`${projectFilePath}.upgrade-backup`, oldContent)
+          ) {
+            warnSymlinkSkip(filePath, `${filePath}.upgrade-backup`);
+            skippedReviewCount++;
+          } else if (action2 === 'replace') {
             mkdirSync(dirname(projectFilePath), { recursive: true });
             writeFileSync(projectFilePath, newContent);
+            written.add(filePath);
             if (filePath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
             if (filePath === 'package.json') packageJsonUpdated = true;
             reviewedCount++;
           } else if (action2 === 'new') {
             mkdirSync(dirname(projectFilePath), { recursive: true });
-            writeFileSync(`${projectFilePath}.upgrade-new`, newContent);
+            if (!writeSidecar(`${projectFilePath}.upgrade-new`, newContent)) {
+              warnSymlinkSkip(filePath, `${filePath}.upgrade-new`);
+            }
             skippedReviewCount++;
           } else {
             skippedReviewCount++;
           }
+        } else if (
+          action === 'replace' &&
+          oldContent &&
+          !writeSidecar(`${projectFilePath}.upgrade-backup`, oldContent)
+        ) {
+          warnSymlinkSkip(filePath, `${filePath}.upgrade-backup`);
+          skippedReviewCount++;
         } else if (action === 'replace') {
-          if (oldContent) writeFileSync(`${projectFilePath}.upgrade-backup`, oldContent);
           mkdirSync(dirname(projectFilePath), { recursive: true });
           writeFileSync(projectFilePath, newContent);
+          written.add(filePath);
           if (filePath.endsWith('.sh')) chmodSync(projectFilePath, 0o755);
           if (filePath === 'package.json') packageJsonUpdated = true;
           reviewedCount++;
         } else if (action === 'new') {
           mkdirSync(dirname(projectFilePath), { recursive: true });
-          writeFileSync(`${projectFilePath}.upgrade-new`, newContent);
+          if (!writeSidecar(`${projectFilePath}.upgrade-new`, newContent)) {
+            warnSymlinkSkip(filePath, `${filePath}.upgrade-new`);
+          }
           skippedReviewCount++;
         } else {
           skippedReviewCount++;
@@ -960,18 +1056,30 @@ async function main(cliArgs) {
 
   // Update manifest with new checksums and template version (unless dry run)
   if (!args.dryRun) {
-    const newChecksums = {};
-
-    // Recompute checksums for all upgradeable files that now exist
-    for (const relPath of upgradeableFiles) {
+    // A stored checksum means "the content upgrade last put here". It may
+    // only move to what is on disk when upgrade wrote the file this run
+    // (its hash after any package-manager adaptation) or the file already
+    // matches the incoming content. A file left as it was (skipped, or its
+    // new version saved as .upgrade-new) keeps its previous checksum:
+    // recording the user's own content there would make the next upgrade
+    // read the file as unmodified and replace it with no backup. A path still
+    // shipped but not upgraded here (an add-on's integration doc, a file
+    // skipped for a symlink) keeps its checksum; a path neither the template
+    // nor an installed add-on ships any more loses it.
+    const newChecksums = Object.fromEntries(
+      Object.entries(storedChecksums).filter(([relPath]) => shippedPaths.has(relPath)),
+    );
+    for (const { relPath } of upgradeEntries) {
       if (isBinaryFile(relPath)) continue;
       const projectFilePath = join(cwd, relPath);
-      if (existsSync(projectFilePath)) {
-        try {
-          newChecksums[relPath] = hashFile(projectFilePath);
-        } catch {
-          // Skip files that can't be read
-        }
+      let onDisk = null;
+      try {
+        onDisk = existsSync(projectFilePath) ? hashFile(projectFilePath) : null;
+      } catch {
+        onDisk = null;
+      }
+      if (onDisk && (written.has(relPath) || onDisk === incomingHash.get(relPath))) {
+        newChecksums[relPath] = onDisk;
       }
     }
 

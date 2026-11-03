@@ -10,10 +10,12 @@
  * memory:feedback_cli_single_dash_flags.
  */
 
-import { existsSync, rmSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, rmdirSync, rmSync, unlinkSync } from 'node:fs';
+import { dirname, join, posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
 import { fetchServiceManifest, loadManifest, removeFromBaseKustomization } from './add.js';
+import { addonUpgradeEntries, isContainedRelPath } from './lib/addon-upgrade-files.js';
 import { exitCancelled } from './lib/cli/exit-guard.js';
 import { formatCommandNote } from './lib/cli/help.js';
 import { introCommand } from './lib/cli/intro.js';
@@ -24,6 +26,12 @@ import { c } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+import { symlinkedComponent } from './lib/project-write-guard.js';
+import { templatePathFor } from './lib/template-paths.js';
+
+const CLI_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const SERVICES_DIR = join(CLI_ROOT, 'services');
+const TEMPLATE_DIR = join(CLI_ROOT, 'carbon');
 
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
@@ -73,6 +81,24 @@ function removeFile(filePath) {
     }
   }
   return false;
+}
+
+/**
+ * Remove `relDir` and each parent up to (not including) the shared `prefix`
+ * while they are empty.
+ */
+function pruneEmptyDirs(root, relDir, prefix) {
+  let dir = relDir;
+  while (`${dir}/`.startsWith(prefix) && `${dir}/` !== prefix) {
+    const full = join(root, dir);
+    try {
+      if (readdirSync(full).length > 0) return;
+      rmdirSync(full);
+    } catch {
+      return;
+    }
+    dir = posix.dirname(dir);
+  }
 }
 
 function removeDirectory(dirPath) {
@@ -151,16 +177,53 @@ async function removeService(serviceName, options) {
     );
   }
 
-  // Remove files based on manifest mappings
+  // Remove files based on manifest mappings. A directory the add-on owns
+  // alone (k8s/base/<name>/) goes whole. A directory it shares with the
+  // template (observability maps `volumes/` onto the project's `volumes/`,
+  // which holds the db and traefik files) loses only the files the add-on
+  // ships, then any directory that leaves empty. The checksums `add`
+  // recorded for what is removed go with it.
+  const cwd = process.cwd();
+  const shipped = addonUpgradeEntries({
+    installed: [serviceName],
+    servicesDir: SERVICES_DIR,
+    projectRoot: cwd,
+  }).map((e) => e.relPath);
+  const droppedChecksums = [];
+  const skipped = [];
+  // A path through a symlink is never deleted (the delete would land where
+  // the link points), and a file the template itself ships stays (the
+  // template's copy of volumes/db/n8n-init.sh, say): both are left, the
+  // symlinked ones with a warning.
+  const throughLink = (rel) => {
+    const link = symlinkedComponent(cwd, rel.replace(/\/$/, ''));
+    if (link) skipped.push(`${rel}: ${link} is a symlink, and remove never deletes through one`);
+    return Boolean(link);
+  };
+  const templateShips = (rel) => existsSync(join(TEMPLATE_DIR, templatePathFor(rel)));
+  const removeOne = (rel) => {
+    if (templateShips(rel) || throughLink(rel)) return false;
+    removeFile(join(cwd, rel));
+    return true;
+  };
   for (const [src, dest] of Object.entries(serviceManifest.files || {})) {
-    const fullPath = join(process.cwd(), dest);
-    if (src.endsWith('/')) {
-      // Directory
-      removeDirectory(fullPath);
-    } else {
-      // File
-      removeFile(fullPath);
+    if (!isContainedRelPath(dest)) continue;
+    if (!src.endsWith('/')) {
+      const rel = posix.normalize(dest);
+      if (removeOne(rel)) droppedChecksums.push((key) => key === rel);
+      continue;
     }
+    const prefix = `${posix.normalize(dest).replace(/\/$/, '')}/`;
+    if (!existsSync(join(TEMPLATE_DIR, dest))) {
+      if (throughLink(prefix)) continue;
+      removeDirectory(join(cwd, dest));
+      droppedChecksums.push((key) => key.startsWith(prefix));
+      continue;
+    }
+    const removed = shipped.filter((rel) => rel.startsWith(prefix)).filter(removeOne);
+    for (const rel of removed) pruneEmptyDirs(cwd, posix.dirname(rel), prefix);
+    const set = new Set(removed);
+    droppedChecksums.push((key) => set.has(key));
   }
 
   // Remove from kustomization.yaml
@@ -172,9 +235,15 @@ async function removeService(serviceName, options) {
   delete projectManifest.services[serviceName];
   updateProjectConfig((config) => {
     if (config.services) delete config.services[serviceName];
+    if (config.fileChecksums) {
+      for (const key of Object.keys(config.fileChecksums)) {
+        if (droppedChecksums.some((drop) => drop(key))) delete config.fileChecksums[key];
+      }
+    }
   });
 
   s.stop(`${serviceManifest.name} removed successfully`);
+  for (const why of skipped) p.log.warn(`Skipped ${why}.`);
 
   p.note(
     [

@@ -46,14 +46,11 @@ export const PROMOTE_ISSUER_ANNOTATION = 'vibecarbon.dev/promote-issuer';
 
 /**
  * The deploy-owned Certificates the promote half may touch, as
- * `{namespace, name}` — the same blast-radius doctrine as the ACME
+ * `{namespace, name}`: the same blast-radius doctrine as the ACME
  * watchdog's DEPLOY_OWNED_CERTIFICATES (a user's own cert-manager resources
- * are none of our business). grafana-tls is listed for completeness: a
- * pilot-standby skips the observability apply entirely, so on the promoted
- * cluster it usually does not exist until the reconverge redeploy installs
- * it — the promote half must skip not-found quietly.
+ * are none of our business). One, since one certificate per name
+ * (./one-certificate.js); the promote half still skips not-found quietly.
  */
 export const PROMOTABLE_CERTIFICATES = Object.freeze([
   { namespace: 'vibecarbon', name: 'vibecarbon-tls' },
-  { namespace: 'vibecarbon-observability', name: 'grafana-tls' },
 ]);

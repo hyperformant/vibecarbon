@@ -83,6 +83,36 @@ export function pemCertificates(pem) {
   }
 }
 
+/**
+ * A certificate serial in one spelling: uppercase hex, no colons, no leading
+ * zeros (openssl prints `serial=0AB0...`, node and Traefik `AB0...`, some
+ * tools `0a:b0:...`). '' when there is none. Serials are public: logging one
+ * is how a reader tells two certificates for the same name apart.
+ *
+ * @param {unknown} serial
+ * @returns {string}
+ */
+export function normalizeSerial(serial) {
+  return String(serial ?? '')
+    .replace(/[:\s]/g, '')
+    .toUpperCase()
+    .replace(/^0+(?=.)/, '');
+}
+
+/** The serial of the first (leaf) certificate in a PEM bundle; '' when unreadable. */
+export function certificateSerial(pem) {
+  const [leaf] = pemCertificates(pem);
+  return leaf ? normalizeSerial(leaf.serialNumber) : '';
+}
+
+/**
+ * The serial of the certificate a `kubectl get secret -o json` holds in
+ * tls.crt; '' when unreadable. Reads only the certificate, never the key.
+ */
+export function k8sSecretSerial(secretJsonText) {
+  return certificateSerial(decodeSecretField(parseJson(secretJsonText), 'tls.crt'));
+}
+
 /** `issuer` issued `cert`: the names match and the signature verifies. */
 function issuedBy(cert, issuer) {
   try {

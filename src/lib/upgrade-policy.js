@@ -12,14 +12,14 @@ const SAFE_PATTERNS = [
   'docker-entrypoint.sh',
   '.dockerignore',
   'docker-compose.prod.yml',
-  'docker-compose.observability.yml',
-  'docker-compose.observability.prod.yml',
-  'docker-compose.observability.override.yml',
-  'docker-compose.metabase.yml',
-  'docker-compose.metabase.override.yml',
-  'docker-compose.n8n.yml',
-  'docker-compose.n8n.override.yml',
-  'docker-compose.dev-init.yml',
+  // Every other compose file: the add-ons' (docker-compose.<name>[.prod|
+  // .override].yml, refreshed from services/<name>/ through the add-on's
+  // manifest, src/lib/addon-upgrade-files.js), docker-compose.dev-init.yml
+  // and docker-compose.dns01.prod.yml (live on every managed-DNS compose
+  // deploy: acme.js exports it as DNS01_OVERRIDE_FILE). docker-compose.yml
+  // and docker-compose.override.yml are user-blended: MERGE_PATTERNS is
+  // checked first and keeps them there.
+  'docker-compose.*.yml',
   'k8s/base/**',
   'k8s/infra/**',
   'k8s/flux/**',
@@ -29,15 +29,6 @@ const SAFE_PATTERNS = [
   // HelmRelease carries a chart-version pin that must move in lockstep with
   // the CLI (DNS01_PROVIDERS.hetzner.webhook.version).
   'k8s/gitops/**',
-  // Live on every managed-DNS compose deploy (acme.js exports it as
-  // DNS01_OVERRIDE_FILE; scale.js adds it to the -f set) but absent from this
-  // list, so ACME/Traefik fixes reached new projects only.
-  'docker-compose.dns01.prod.yml',
-  // Siblings of the metabase/n8n entries below; their .prod.yml variants were
-  // omitted while .yml and .override.yml were listed — an oversight, not a
-  // decision. Parked addons today, so no live impact.
-  'docker-compose.metabase.prod.yml',
-  'docker-compose.n8n.prod.yml',
   'cloud-init/**',
   '.github/workflows/**',
   // Node line for the project. Safe to replace: it's a version pin we own,
@@ -169,6 +160,30 @@ export function getFilePolicy(relativePath) {
   if (matchesAny(relativePath, SAFE_PATTERNS)) return 'safe';
   // Default: files not explicitly classified are never touched
   return 'never';
+}
+
+// The project's own code, data and secrets: never touched by an add-on file
+// either. NEVER_PATTERNS without volumes/db/**, which only shields the
+// template's database files from a template upgrade.
+const ADDON_NEVER_PATTERNS = NEVER_PATTERNS.filter((p) => p !== 'volumes/db/**');
+
+/**
+ * Classify a file an add-on ships (src/lib/addon-upgrade-files.js). An
+ * add-on's files follow one rule wherever they land: its integration doc
+ * (manifest source under `docs/`) is the operator's to keep, the project's
+ * own code, data and secrets stay never, a merge path stays merge, and
+ * everything else the add-on ships (compose, k8s, mounted volumes, init
+ * scripts) is safe, whether or not a template pattern happens to name it.
+ *
+ * @param {string} relativePath - Path relative to project root
+ * @param {string} src - The file's path inside services/<name>/
+ * @returns {'safe' | 'merge' | 'never'}
+ */
+export function getAddonFilePolicy(relativePath, src) {
+  if (String(src).startsWith('docs/')) return 'never';
+  if (matchesAny(relativePath, ADDON_NEVER_PATTERNS)) return 'never';
+  if (matchesAny(relativePath, MERGE_PATTERNS)) return 'merge';
+  return 'safe';
 }
 
 /**
