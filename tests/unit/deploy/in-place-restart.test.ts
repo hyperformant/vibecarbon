@@ -23,6 +23,7 @@ import {
   DB_GUARD_MARKER_GREP,
   DB_GUARD_PROTOCOL_MARKER,
   DB_IN_PLACE_STOP,
+  DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S,
   DB_STS_BOOT_TIMEOUT_S,
   DbGuardMissingError,
   evaluateDbGuardSupport,
@@ -43,6 +44,15 @@ const GUARD_MOUNT = {
   subPath: 'db-guard.sh',
 };
 
+const INTENT_ENV = {
+  name: 'VC_WALG_ROLE_INTENT',
+  valueFrom: {
+    configMapKeyRef: { name: 'vibecarbon-db-role', key: 'VC_WALG_ROLE_INTENT', optional: true },
+  },
+};
+/** DB_GUARD_MARKER_GREP's output on a guarded standby: the count, then recovery. */
+const OUT = '1\nin_recovery=t';
+
 const pod = (
   o: Partial<{
     uid: string;
@@ -52,6 +62,7 @@ const pod = (
     ready: boolean;
     waiting: string;
     mounts: object[];
+    env: object[];
   }> = {},
 ) =>
   JSON.stringify({
@@ -64,6 +75,7 @@ const pod = (
             ? {}
             : { command: o.command ?? ['sh', '/usr/local/bin/db-guard.sh'] }),
           volumeMounts: o.mounts ?? [GUARD_MOUNT, ROLE_MOUNT],
+          env: o.env ?? [INTENT_ENV],
         },
       ],
     },
@@ -97,47 +109,79 @@ describe('the wrapper the guard looks for is the one the template ships', () => 
 
 describe('evaluateDbGuardSupport', () => {
   it('ok only with the wrapper command, the protocol marker in the mounted file, and a standby intent', () => {
-    expect(evaluateDbGuardSupport(pod(), '1', 'standby')).toEqual(GUARD);
-    expect(evaluateDbGuardSupport(pod({ command: null }), '1', 'standby')).toMatchObject({
+    expect(evaluateDbGuardSupport(pod(), OUT, 'standby')).toEqual(GUARD);
+    expect(evaluateDbGuardSupport(pod({ command: null }), OUT, 'standby')).toMatchObject({
       ok: false,
       reason: expect.stringMatching(/command/),
     });
     expect(
-      evaluateDbGuardSupport(pod({ command: ['sh', '/usr/local/bin/other.sh'] }), '1', 'standby'),
+      evaluateDbGuardSupport(pod({ command: ['sh', '/usr/local/bin/other.sh'] }), OUT, 'standby'),
     ).toMatchObject({ ok: false, reason: expect.stringMatching(/command/) });
     expect(evaluateDbGuardSupport(pod(), '0', 'standby')).toMatchObject({
       ok: false,
       reason: expect.stringMatching(/protocol/),
     });
     expect(evaluateDbGuardSupport(pod(), '', 'standby')).toMatchObject({ ok: false });
-    expect(evaluateDbGuardSupport(pod(), '1', 'primary')).toMatchObject({
+    expect(evaluateDbGuardSupport(pod(), OUT, 'primary')).toMatchObject({
       ok: false,
       reason: expect.stringMatching(/intent/),
     });
   });
 
   it('refuses a pod without the role mount or the db-guard.sh mount', () => {
-    expect(evaluateDbGuardSupport(pod({ mounts: [GUARD_MOUNT] }), '1', 'standby')).toMatchObject({
+    expect(evaluateDbGuardSupport(pod({ mounts: [GUARD_MOUNT] }), OUT, 'standby')).toMatchObject({
       ok: false,
       missing: true,
       reason: expect.stringMatching(/role/),
     });
-    expect(evaluateDbGuardSupport(pod({ mounts: [ROLE_MOUNT] }), '1', 'standby')).toMatchObject({
+    expect(evaluateDbGuardSupport(pod({ mounts: [ROLE_MOUNT] }), OUT, 'standby')).toMatchObject({
       ok: false,
       missing: true,
       reason: expect.stringMatching(/db-guard\.sh/),
     });
   });
 
+  it('refuses a pod whose db container does not take its intent from vibecarbon-db-role', () => {
+    for (const env of [
+      [],
+      [{ name: 'VC_WALG_ROLE_INTENT', value: 'standby' }],
+      [
+        {
+          ...INTENT_ENV,
+          valueFrom: { configMapKeyRef: { name: 'other', key: 'VC_WALG_ROLE_INTENT' } },
+        },
+      ],
+    ]) {
+      expect(evaluateDbGuardSupport(pod({ env }), OUT, 'standby')).toMatchObject({
+        ok: false,
+        missing: true,
+        reason: expect.stringMatching(/VC_WALG_ROLE_INTENT.*vibecarbon-db-role/),
+      });
+    }
+  });
+
+  it('refuses a standby intent over postgres that is not in recovery (same exec as the marker)', () => {
+    for (const out of ['1\nin_recovery=f', '1\nin_recovery=', '1']) {
+      const v = evaluateDbGuardSupport(pod(), out, 'standby');
+      expect(v).toMatchObject({ ok: false, reason: expect.stringMatching(/not in recovery/) });
+      expect(v).not.toHaveProperty('missing');
+    }
+    expect(evaluateDbGuardSupport(pod(), 'in_recovery=t', 'standby')).toMatchObject({
+      ok: false,
+      missing: true,
+      reason: expect.stringMatching(/protocol/),
+    });
+  });
+
   it('refuses a db container that is not running, and anything unparseable', () => {
     expect(
-      evaluateDbGuardSupport(pod({ waiting: 'CrashLoopBackOff' }), '1', 'standby'),
+      evaluateDbGuardSupport(pod({ waiting: 'CrashLoopBackOff' }), OUT, 'standby'),
     ).toMatchObject({
       ok: false,
       reason: expect.stringMatching(/CrashLoopBackOff/),
     });
-    expect(evaluateDbGuardSupport('not json', '1', 'standby')).toMatchObject({ ok: false });
-    expect(evaluateDbGuardSupport(pod(), '1', '')).toMatchObject({
+    expect(evaluateDbGuardSupport('not json', OUT, 'standby')).toMatchObject({ ok: false });
+    expect(evaluateDbGuardSupport(pod(), OUT, '')).toMatchObject({
       ok: false,
       reason: expect.stringMatching(/intent/),
     });
@@ -149,7 +193,7 @@ describe('assertLiveDbGuardSupportsReseed', () => {
     const argvs: string[][] = [];
     const kubectl = vi.fn(async (argv: string[]) => {
       argvs.push(argv);
-      if (argv.includes('exec')) return o.marker ?? '1';
+      if (argv.includes('exec')) return o.marker ?? OUT;
       if (argv.includes('configmap')) return o.intent ?? 'standby';
       return o.pod ?? pod();
     });
@@ -207,8 +251,15 @@ describe('assertLiveDbGuardSupportsReseed', () => {
     ).rejects.toThrow(/reseed refused: role intent is/);
   });
 
+  it('a primary in the pod (not in recovery) refuses, not as a missing wrapper', async () => {
+    const { kubectl } = stub({ marker: '1\nin_recovery=f' });
+    const err = await assertLiveDbGuardSupportsReseed(kubectl, { envName: 'prod' }).catch((e) => e);
+    expect(err).not.toBeInstanceOf(DbGuardMissingError);
+    expect(err.message).toMatch(/reseed refused: .*not in recovery/);
+  });
+
   it('a mounted wrapper without the protocol marker is a missing wrapper', async () => {
-    const { kubectl } = stub({ marker: '0' });
+    const { kubectl } = stub({ marker: '0\nin_recovery=t' });
     await expect(
       assertLiveDbGuardSupportsReseed(kubectl, { envName: 'prod' }),
     ).rejects.toBeInstanceOf(DbGuardMissingError);
@@ -218,7 +269,11 @@ describe('assertLiveDbGuardSupportsReseed', () => {
 
 describe('restartDbContainerInPlace', () => {
   it('sends SIGINT to PID 1 only, then waits for the same pod restarted and Ready', async () => {
-    const seq = [pod({ rc: 1, cid: 'c2', ready: false }), pod({ rc: 1, cid: 'c2', ready: true })];
+    const seq = [
+      pod(),
+      pod({ rc: 1, cid: 'c2', ready: false }),
+      pod({ rc: 1, cid: 'c2', ready: true }),
+    ];
     const argvs: string[][] = [];
     const kubectl = vi.fn(async (argv: string[]) => {
       argvs.push(argv);
@@ -241,8 +296,9 @@ describe('restartDbContainerInPlace', () => {
   it('a recreated pod (new uid) is reported and handed to the attach-watched rollout wait', async () => {
     const recreatedWait = vi.fn(async () => {});
     const log = vi.fn();
+    let reads = 0;
     const kubectl = vi.fn(async (argv: string[]) =>
-      argv.includes('exec') ? '' : pod({ uid: 'u2' }),
+      argv.includes('exec') ? '' : reads++ === 0 ? pod() : pod({ uid: 'u2' }),
     );
     expect(
       await restartDbContainerInPlace(kubectl, {
@@ -259,10 +315,13 @@ describe('restartDbContainerInPlace', () => {
   });
   it('a deadline names the container state, one stop, no retry', async () => {
     let t = 0;
+    let reads = 0;
     const kubectl = vi.fn(async (argv: string[]) =>
       argv.includes('exec')
         ? ''
-        : pod({ rc: 1, cid: 'c2', ready: false, waiting: 'CrashLoopBackOff' }),
+        : reads++ === 0
+          ? pod()
+          : pod({ rc: 1, cid: 'c2', ready: false, waiting: 'CrashLoopBackOff' }),
     );
     await expect(
       restartDbContainerInPlace(kubectl, {
@@ -280,9 +339,10 @@ describe('restartDbContainerInPlace', () => {
     expect(kubectl.mock.calls.filter(([a]) => a.includes('exec'))).toHaveLength(1);
   });
   it('an exec that dies because the container stopped under it is not a failure (state decides)', async () => {
+    let reads = 0;
     const kubectl = vi.fn(async (argv: string[]) => {
       if (argv.includes('exec')) throw new Error('command terminated with exit code 137');
-      return pod({ rc: 1, cid: 'c2' });
+      return reads++ === 0 ? pod() : pod({ rc: 1, cid: 'c2' });
     });
     await expect(
       restartDbContainerInPlace(kubectl, {
@@ -296,12 +356,15 @@ describe('restartDbContainerInPlace', () => {
     ).resolves.toMatchObject({ inPlace: true });
   });
 
-  it('the stop is the exact exec on db-0, and the default budget is DB_STS_BOOT_TIMEOUT_S', async () => {
+  it('reads the pod, sends the exact stop on db-0, and the default budget is DB_STS_BOOT_TIMEOUT_S', async () => {
     const argvs: string[][] = [];
     let t = 0;
     const kubectl = vi.fn(async (argv: string[]) => {
       argvs.push(argv);
-      return argv.includes('exec') ? '' : pod();
+      if (argv.includes('exec')) return '';
+      return argvs.length === 1
+        ? pod()
+        : pod({ rc: 1, cid: 'c2', ready: false, waiting: 'CrashLoopBackOff' });
     });
     await expect(
       restartDbContainerInPlace(kubectl, {
@@ -315,7 +378,8 @@ describe('restartDbContainerInPlace', () => {
         log: () => {},
       }),
     ).rejects.toThrow(`${DB_STS_BOOT_TIMEOUT_S}s`);
-    expect(argvs[0]).toEqual([
+    expect(argvs[0]).toEqual(['-n', 'vibecarbon', 'get', 'pod', 'db-0', '-o', 'json']);
+    expect(argvs[1]).toEqual([
       '-n',
       'vibecarbon',
       'exec',
@@ -325,9 +389,125 @@ describe('restartDbContainerInPlace', () => {
       '--',
       ...DB_IN_PLACE_STOP,
     ]);
-    expect(argvs.slice(1).every((a) => a.join(' ') === '-n vibecarbon get pod db-0 -o json')).toBe(
+    expect(argvs.slice(2).every((a) => a.join(' ') === '-n vibecarbon get pod db-0 -o json')).toBe(
       true,
     );
+  });
+
+  // The guard is minutes old at the stop (a base backup ran in between).
+  const refusesBeforeStop = async (preRead: string | Error, re: RegExp) => {
+    const argvs: string[][] = [];
+    const kubectl = vi.fn(async (argv: string[]) => {
+      argvs.push(argv);
+      if (argv.includes('exec')) return '';
+      if (preRead instanceof Error) throw preRead;
+      return preRead;
+    });
+    await expect(
+      restartDbContainerInPlace(kubectl, {
+        guard: GUARD,
+        recreatedWait: vi.fn(),
+        pollMs: 1,
+        sleep: async () => {},
+        log: () => {},
+      }),
+    ).rejects.toThrow(re);
+    expect(argvs).toEqual([['-n', 'vibecarbon', 'get', 'pod', 'db-0', '-o', 'json']]);
+  };
+  it('a container restart between the guard and the stop refuses with no stop sent', async () => {
+    await refusesBeforeStop(
+      pod({ rc: 1, cid: 'c2' }),
+      /changed since the guard.*restartCount 0 -> 1/,
+    );
+    await refusesBeforeStop(pod({ cid: 'c9' }), /changed since the guard.*c1 -> c9/);
+  });
+  it('a recreated pod between the guard and the stop refuses with no stop sent', async () => {
+    await refusesBeforeStop(pod({ uid: 'u2' }), /changed since the guard.*uid u1 -> u2/);
+  });
+  it('a pod that is not running, or cannot be read, at the stop refuses with no stop sent', async () => {
+    await refusesBeforeStop(pod({ ready: false, waiting: 'CrashLoopBackOff' }), /not running/);
+    await refusesBeforeStop(new Error('pods "db-0" not found'), /not found/);
+  });
+  it('a stop the container refuses (not in recovery, no protocol) is reported, with no wait', async () => {
+    for (const said of [
+      'RESEED_STOP_REFUSED postgres is not in recovery (pg_is_in_recovery: f)',
+      'RESEED_STOP_REFUSED the mounted db-guard.sh does not speak the reseed protocol',
+    ]) {
+      const argvs: string[][] = [];
+      const recreatedWait = vi.fn();
+      const kubectl = vi.fn(async (argv: string[]) => {
+        argvs.push(argv);
+        if (argv.includes('exec'))
+          throw Object.assign(new Error('exit status 3'), { stdout: `${said}\n` });
+        return pod();
+      });
+      await expect(
+        restartDbContainerInPlace(kubectl, {
+          guard: GUARD,
+          recreatedWait,
+          pollMs: 1,
+          sleep: async () => {},
+          log: () => {},
+        }),
+      ).rejects.toThrow(
+        new RegExp(
+          `reseed refused in db-0: ${said.slice('RESEED_STOP_REFUSED '.length).replace(/[()]/g, '.')}; nothing was stopped`,
+        ),
+      );
+      expect(argvs).toHaveLength(2);
+      expect(argvs[1].slice(-3)).toEqual(DB_IN_PLACE_STOP);
+      expect(recreatedWait).not.toHaveBeenCalled();
+    }
+  });
+  it('a second call with the same guard refuses and sends no second stop', async () => {
+    let restarted = false;
+    const kubectl = vi.fn(async (argv: string[]) => {
+      if (argv.includes('exec')) {
+        restarted = true;
+        return '';
+      }
+      return restarted ? pod({ rc: 1, cid: 'c2' }) : pod();
+    });
+    const opts = {
+      guard: GUARD,
+      recreatedWait: vi.fn(),
+      pollMs: 1,
+      sleep: async () => {},
+      log: () => {},
+    };
+    await expect(restartDbContainerInPlace(kubectl, opts)).resolves.toEqual({
+      inPlace: true,
+      uid: 'u1',
+    });
+    await expect(restartDbContainerInPlace(kubectl, opts)).rejects.toThrow(
+      /changed since the guard/,
+    );
+    expect(kubectl.mock.calls.filter(([a]) => a.includes('exec'))).toHaveLength(1);
+  });
+  it('a stop that never takes fails fast, after DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S, not the whole budget', async () => {
+    let t = 0;
+    const kubectl = vi.fn(async (argv: string[]) => {
+      if (argv.includes('exec'))
+        throw new Error('ssh: connect to host 10.0.0.1 port 22: Connection refused');
+      return pod();
+    });
+    await expect(
+      restartDbContainerInPlace(kubectl, {
+        guard: GUARD,
+        recreatedWait: vi.fn(),
+        pollMs: 1,
+        sleep: async () => {
+          t += 10_000;
+        },
+        now: () => t,
+        log: () => {},
+      }),
+    ).rejects.toThrow(
+      `the stop did not take: db-0's db container is still running unchanged ${DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S}s after it`,
+    );
+    expect(t).toBeLessThan(DB_STS_BOOT_TIMEOUT_S * 1000);
+    expect(t).toBeGreaterThanOrEqual(DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S * 1000);
+    expect(kubectl.mock.calls.filter(([a]) => a.includes('exec'))).toHaveLength(1);
   });
 
   it('without a passed guard it stops nothing', async () => {
@@ -338,6 +518,64 @@ describe('restartDbContainerInPlace', () => {
       ).rejects.toThrow(/guard/);
     }
     expect(kubectl).not.toHaveBeenCalled();
+  });
+});
+
+describe('the guard and stop scripts, executed under sh', () => {
+  // The real script text, with only the wrapper's absolute path pointed at a
+  // temp file; psql is a PATH stub printing the recovery answer, and kill a
+  // shell function (functions shadow the regular builtin) that records it.
+  const run = (script: string, o: { marker: boolean | null; recovery: string }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-stop-'));
+    const guard = join(dir, 'db-guard.sh');
+    if (o.marker !== null) {
+      writeFileSync(
+        guard,
+        `#!/bin/sh\n${o.marker ? DB_GUARD_PROTOCOL_MARKER : '# something else'}\nexec true\n`,
+      );
+    }
+    writeFileSync(join(dir, 'psql'), `#!/bin/sh\nprintf '%s\\n' '${o.recovery}'\n`);
+    chmodSync(join(dir, 'psql'), 0o755);
+    const body = script.replaceAll('/usr/local/bin/db-guard.sh', guard);
+    expect(body).not.toBe(script);
+    return spawnSync('sh', ['-c', `kill() { echo "KILLED $*"; }; ${body}`], {
+      encoding: 'utf-8',
+      env: { PATH: `${dir}:${process.env.PATH}` },
+    });
+  };
+
+  it('the stop signals PID 1 only with the protocol marker AND recovery = t', () => {
+    const ok = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: 't' });
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toBe('KILLED -INT 1\n');
+    for (const o of [
+      { marker: true, recovery: 'f' },
+      { marker: true, recovery: '' },
+      { marker: false, recovery: 't' },
+      { marker: null, recovery: 't' },
+    ]) {
+      const r = run(DB_IN_PLACE_STOP[2], o);
+      expect(r.status).toBe(3);
+      expect(r.stdout).toMatch(/^RESEED_STOP_REFUSED /);
+      expect(r.stdout).not.toContain('KILLED');
+    }
+  });
+
+  it("the guard probe's real output is what evaluateDbGuardSupport accepts or refuses", () => {
+    const out = (o: { marker: boolean | null; recovery: string }) =>
+      run(DB_GUARD_MARKER_GREP[2], o).stdout;
+    expect(evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 't' }), 'standby')).toEqual(
+      GUARD,
+    );
+    expect(
+      evaluateDbGuardSupport(pod(), out({ marker: true, recovery: 'f' }), 'standby'),
+    ).toMatchObject({ ok: false, reason: expect.stringMatching(/not in recovery/) });
+    expect(
+      evaluateDbGuardSupport(pod(), out({ marker: false, recovery: 't' }), 'standby'),
+    ).toMatchObject({ ok: false, missing: true });
+    expect(
+      evaluateDbGuardSupport(pod(), out({ marker: null, recovery: 't' }), 'standby'),
+    ).toMatchObject({ ok: false, missing: true });
   });
 });
 

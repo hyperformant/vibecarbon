@@ -1898,19 +1898,44 @@ export class DbGuardMissingError extends Error {
   }
 }
 
+/** `pg_is_in_recovery()` read inside the db container ('' when psql fails). */
+const IN_RECOVERY_SH = `"$(psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>/dev/null)"`;
+
 /**
- * The exec that greps the MOUNTED wrapper; one `sh -c` token. A subPath
- * ConfigMap mount never changes for the life of the pod, so this is the exact
- * file the next container start runs. A missing file prints nothing.
+ * The guard's exec; one `sh -c` token, no newlines. It greps the MOUNTED
+ * wrapper (a subPath ConfigMap mount never changes for the life of the pod, so
+ * this is the exact file the next container start runs; a missing file prints
+ * no count), then prints `in_recovery=<t|f|>` from the same container, so a
+ * ConfigMap that says standby over a real primary still refuses.
  */
 export const DB_GUARD_MARKER_GREP = Object.freeze([
   'sh',
   '-c',
-  `grep -c '^# vc-reseed-protocol: 1$' /usr/local/bin/db-guard.sh || true`,
+  `grep -c '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || true; printf 'in_recovery=%s\\n' ${IN_RECOVERY_SH}`,
 ]);
 
-/** The sanctioned in-pod stop; one `sh -c` token. */
-export const DB_IN_PLACE_STOP = Object.freeze(['sh', '-c', 'kill -INT 1']);
+/** What the stop prints (stdout, exit 3) when it refuses to signal. */
+const STOP_REFUSED = 'RESEED_STOP_REFUSED';
+
+/**
+ * The sanctioned in-pod stop; one `sh -c` token, no newlines. Self-guarding:
+ * the container that receives the signal proves, in the same exec, that its
+ * mounted wrapper speaks the reseed protocol and that postgres is in recovery,
+ * and only then sends SIGINT to PID 1 (the postmaster: fast shutdown).
+ */
+export const DB_IN_PLACE_STOP = Object.freeze([
+  'sh',
+  '-c',
+  `grep -q '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || { echo '${STOP_REFUSED} the mounted db-guard.sh does not speak the reseed protocol'; exit 3; }; ` +
+    `r=${IN_RECOVERY_SH}; [ "$r" = t ] || { echo "${STOP_REFUSED} postgres is not in recovery (pg_is_in_recovery: $r)"; exit 3; }; ` +
+    'kill -INT 1',
+]);
+
+/**
+ * Fail fast: a stop that takes shows within this (the readiness probe fails
+ * within about 15s of the postmaster refusing connections).
+ */
+export const DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S = 120;
 
 const DB_POD_GET_ARGV = ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'];
 const dbExecArgv = (argv) => [
@@ -1987,6 +2012,15 @@ function evaluateDbGuardPod(podJson) {
       reason: `the running db container has no wal-g role mount (${WALG_ROLE_DIR})`,
     };
   }
+  const env = Array.isArray(spec.env) ? spec.env : [];
+  const intentRef = env.find((e) => e?.name === DB_ROLE_INTENT_KEY)?.valueFrom?.configMapKeyRef;
+  if (intentRef?.name !== DB_ROLE_CONFIGMAP || intentRef?.key !== DB_ROLE_INTENT_KEY) {
+    return {
+      ok: false,
+      missing: true,
+      reason: `the running db container does not take ${DB_ROLE_INTENT_KEY} from ConfigMap ${DB_ROLE_CONFIGMAP}`,
+    };
+  }
   if (
     !status?.state?.running ||
     typeof status.containerID !== 'string' ||
@@ -2006,14 +2040,16 @@ function evaluateDbGuardPod(podJson) {
  * `missing: true` marks a pod that predates the in-place reseed (redeploy).
  *
  * @param {string|object} podJson `kubectl get pod db-0 -o json`
- * @param {string} markerGrepOut DB_GUARD_MARKER_GREP's stdout
+ * @param {string} markerGrepOut DB_GUARD_MARKER_GREP's stdout: the count line, then `in_recovery=<t|f|>`
  * @param {string} intent the vibecarbon-db-role ConfigMap's VC_WALG_ROLE_INTENT ('' when absent)
  * @returns {{ok: true, uid: string, restartCount: number, containerID: string} | {ok: false, reason: string, missing?: true}}
  */
 export function evaluateDbGuardSupport(podJson, markerGrepOut, intent) {
   const verdict = evaluateDbGuardPod(podJson);
   if (!verdict.ok) return verdict;
-  if (!/^[1-9]\d*$/.test(String(markerGrepOut ?? '').trim())) {
+  const out = String(markerGrepOut ?? '');
+  const count = /^(\d+)$/m.exec(out)?.[1];
+  if (!count || !/^[1-9]\d*$/.test(count)) {
     return {
       ok: false,
       missing: true,
@@ -2023,6 +2059,13 @@ export function evaluateDbGuardSupport(podJson, markerGrepOut, intent) {
   const word = String(intent ?? '').trim();
   if (word !== 'standby') {
     return { ok: false, reason: `the role intent is ${word || '<none>'}, not standby` };
+  }
+  const recovery = /^in_recovery=(.*)$/m.exec(out)?.[1]?.trim();
+  if (recovery !== 't') {
+    return {
+      ok: false,
+      reason: `postgres in ${DB_POD} is not in recovery (pg_is_in_recovery: ${recovery || '<unreadable>'}); a standby intent over a primary`,
+    };
   }
   return verdict;
 }
@@ -2124,10 +2167,19 @@ export async function runInPlaceStage(exec, { attempt }) {
  * pod uid with restartCount > before, a new containerID and Ready. A changed uid
  * is reported and handed to `recreatedWait`, never retried.
  *
- * The exec's own result is no evidence: SIGINT to PID 1 stops the container
- * the exec runs in, so the exec can die with it. The container's state decides.
- * A pod read that fails (the pod mid-recreate) is no evidence either; the
- * deadline bounds the wait.
+ * The guard is minutes old by now (a base backup ran in between), so the pod
+ * is read again right before the stop: the same uid, the same running
+ * container (restartCount and containerID) the guard saw, or no stop is sent.
+ * That read is the baseline. A guard reused after its restart refuses here
+ * too. The stop itself re-proves the wrapper and recovery in the container it
+ * signals, and a refusal there is reported, never waited on.
+ *
+ * Otherwise the exec's own result is no evidence: SIGINT to PID 1 stops the
+ * container the exec runs in, so the exec can die with it. The container's
+ * state decides. A pod read that fails (the pod mid-recreate) is no evidence
+ * either; the deadlines bound the wait. A stop that never takes (the
+ * container still running and Ready, unchanged) fails after
+ * DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S rather than the whole budget.
  *
  * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
  * @param {object} o
@@ -2160,22 +2212,46 @@ export async function restartDbContainerInPlace(
   if (typeof recreatedWait !== 'function') {
     throw new Error('restartDbContainerInPlace: recreatedWait is required');
   }
-  const deadline = now() + timeoutS * 1000;
+  const pre = evaluateDbGuardPod(await kubectl(DB_POD_GET_ARGV, { timeout: 30_000 }));
+  if (!pre.ok) {
+    throw new Error(`reseed refused: ${pre.reason}; nothing was stopped`);
+  }
+  if (
+    pre.uid !== guard.uid ||
+    pre.restartCount !== guard.restartCount ||
+    pre.containerID !== guard.containerID
+  ) {
+    throw new Error(
+      `reseed refused: ${DB_POD} changed since the guard (uid ${guard.uid} -> ${pre.uid}, ` +
+        `restartCount ${guard.restartCount} -> ${pre.restartCount}, container ${guard.containerID} -> ${pre.containerID}); ` +
+        'nothing was stopped. Rerun the reseed',
+    );
+  }
+  const baseline = pre;
+  const started = now();
+  const deadline = started + timeoutS * 1000;
+  const beginDeadline = started + Math.min(timeoutS, DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S) * 1000;
   try {
     await kubectl(dbExecArgv(DB_IN_PLACE_STOP), { timeout: 30_000 });
   } catch (error) {
+    const said = `${error?.stdout ?? ''}\n${error?.message ?? ''}`;
+    const refused = new RegExp(`^.*${STOP_REFUSED} (.*)$`, 'm').exec(said)?.[1];
+    if (refused) {
+      throw new Error(`reseed refused in ${DB_POD}: ${refused}; nothing was stopped`);
+    }
     log(
       `[reseed] the stop exec ended with: ${error?.message ?? error} (the container state decides)`,
     );
   }
+  let began = false;
   let last = 'no db pod read yet';
   for (;;) {
     try {
       const pod = JSON.parse(String(await kubectl(DB_POD_GET_ARGV, { timeout: 30_000 })));
       const uid = pod?.metadata?.uid;
-      if (typeof uid === 'string' && uid && uid !== guard.uid) {
+      if (typeof uid === 'string' && uid && uid !== baseline.uid) {
         log(
-          `[reseed] ${DB_POD} was recreated (uid ${guard.uid} -> ${uid}), not restarted in place; ` +
+          `[reseed] ${DB_POD} was recreated (uid ${baseline.uid} -> ${uid}), not restarted in place; ` +
             'waiting on its rollout under the attach watch',
         );
         await recreatedWait();
@@ -2183,19 +2259,32 @@ export async function restartDbContainerInPlace(
       }
       const { status } = dbContainerOf(pod);
       last = describeContainerState(status);
-      if (
-        uid === guard.uid &&
+      const restarted =
         Number.isInteger(status?.restartCount) &&
-        status.restartCount > guard.restartCount &&
+        status.restartCount > baseline.restartCount &&
         typeof status.containerID === 'string' &&
         status.containerID &&
-        status.containerID !== guard.containerID &&
-        status.ready === true
-      ) {
+        status.containerID !== baseline.containerID;
+      if (uid === baseline.uid && restarted && status.ready === true) {
         return { inPlace: true, uid };
+      }
+      if (
+        restarted ||
+        status?.ready !== true ||
+        !status?.state?.running ||
+        status?.containerID !== baseline.containerID
+      ) {
+        began = true;
       }
     } catch (error) {
       last = `unreadable: ${error?.message ?? error}`;
+    }
+    if (!began && now() >= beginDeadline) {
+      throw new Error(
+        `the stop did not take: ${DB_POD}'s db container is still running unchanged ` +
+          `${Math.min(timeoutS, DB_IN_PLACE_STOP_BEGIN_TIMEOUT_S)}s after it (last state: ${last}); ` +
+          'no second stop was sent',
+      );
     }
     if (now() >= deadline) {
       throw new Error(
