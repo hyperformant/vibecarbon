@@ -30,6 +30,16 @@
 # Names other code relies on (src/lib/deploy/k8s/db-workload.js): StatefulSet
 # `db`, pod `db-0`, container `db`, PVC `data-db-0`, pod label
 # `app: vibecarbon-db` (also read by the admin Infrastructure page).
+#
+# The db volume stays attached for the life of the pod. A k8s-ha standby
+# reseed (cold deploy, failover, restore) never scales this StatefulSet to
+# zero and never mounts data-db-0 in another pod: reseedStandbyInPlace
+# (src/lib/deploy/replication.js) stages a pg_basebackup into
+# $PGDATA/.vc-reseed in the running container, stops postgres there, and the
+# kubelet restarts the container in the same pod, where db-guard.sh (the db
+# container's command below) swaps the staged tree in before postgres starts.
+# The wal-g role is a file on this volume (subPath vibecarbon-role), never
+# env, so a role move is one write with no restart either.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -113,7 +123,12 @@ spec:
         # (composeRestoreScript, src/lib/deploy/compose/index.js); the census
         # in tests/unit/deploy/restore-destroy-before-verify-census.test.ts
         # holds both. Runs before postgres, so the app's migrations always
-        # see the restored database.
+        # see the restored database. A PGDATA left mid-way by an in-place
+        # reseed swap (db-guard.sh) is an unproven copy: it moves to
+        # .vc-discard, never to the .vc-prev fallback. Under its own marker
+        # the restore swap removes every in-place reseed staging dir and
+        # marker ($PGDATA/.vc-reseed*), so a reseed left pending can never
+        # swap over the restored cluster on a later start.
         - name: walg-restore
           image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
           imagePullPolicy: IfNotPresent
@@ -380,10 +395,14 @@ spec:
           imagePullPolicy: IfNotPresent
           # db-guard.sh wraps the image's entrypoint, exactly like compose
           # (carbon/docker-compose.yml): it refuses to boot over an
-          # interrupted restore and applies the wal-g role intent below to the
-          # role file, then execs db-entrypoint.sh with these args. Mounted
-          # from the vibecarbon-wal-archive ConfigMap and run through sh, so
-          # it needs no exec bit.
+          # interrupted restore, applies the wal-g role intent below to the
+          # role file, finishes a pending in-place standby reseed (only when
+          # the intent is standby and the staged tree's attempt id matches the
+          # ready marker), then execs db-entrypoint.sh with these args.
+          # Mounted from the vibecarbon-wal-archive ConfigMap and run through
+          # sh, so it needs no exec bit. The CLI stops postgres in place
+          # (SIGINT to PID 1) only after it has read this command and the
+          # mounted file's reseed protocol marker in the RUNNING pod.
           command: ["sh", "/usr/local/bin/db-guard.sh"]
           # The same flags as compose's db `command:` (carbon/docker-compose.yml),
           # where each one's reasoning lives. The image's entrypoint keeps

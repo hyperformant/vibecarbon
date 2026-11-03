@@ -648,19 +648,29 @@ The command:
 
 **One archive folder per database lineage.** The environment's backup prefix (`WALG_S3_PREFIX_BASE`, `backups/<project>/<env>/walg`) holds one folder per database, named by its system identifier. Every wal-g caller in the db container sources `walg-env.sh` (`carbon/volumes/db/walg-env.sh`, copied into the `vibecarbon-wal-archive` ConfigMap on k8s), which exports `WALG_S3_PREFIX=<base>/<system identifier>`, or `<base>/$RESTORE_LINEAGE` during a restore's fetch. A destroyed and redeployed environment is a new database, so it archives beside the old one and never takes over its newest base; `WALG_PREVENT_WAL_OVERWRITE=true` refuses a segment name already archived with other bytes. Each deploy records the database's system identifier as `backup.lineage` in `.vibecarbon.json` (a changed one moves the old value to `backup.priorLineages`), and the record survives a destroy. `vibecarbon restore` reads one lineage: `-lineage <id>`, or the recorded one when it covers the restore point and no other lineage holds a newer base. Otherwise it refuses and lists each lineage with its newest base.
 
-**The wal-g write-guard moves with the role (both HA modes).** `WALG_ROLE` is
-the backup write-guard: `standby` makes WAL archiving and base backups no-op so
-only one node ever writes the environment's archive. It is rendered
-at deploy time, so failover re-renders it directly (`primary` onto the promoted
-node and, best-effort, `standby` onto the demoted one) and then recreates the
-database container, because container environment is fixed at container-create
-time (writing `.env` or patching a StatefulSet alone changes nothing in the
-running process). The failover then re-runs the deploy-time backup audit against
-the promoted node in `requirePrimary` mode, where a lingering
-`WALG_ROLE=standby` is a failure rather than the legitimate skip it is at deploy
-time. If that cannot be proven, the failover still completes (promotion, DNS and
-the persisted role swap all stand: an aborted post-promotion failover would be
-worse) but the command exits non-zero with the remediation, so dead backups are
+**The wal-g write-guard moves with the role (both HA modes).** The wal-g role
+is the backup write-guard: `standby` makes WAL archiving and base backups no-op
+so only one node ever writes the environment's archive. It is a one-word file
+outside PGDATA, `/var/lib/vibecarbon/role/walg-role` in the db container, read
+on every run by every wal-g caller through one parser (`WALG_ROLE_PARSE_SH` in
+`src/lib/deploy/walg-role.js`, carried verbatim by `walg-env.sh`). A missing or
+unreadable file never archives and never drops a segment: archiving exits 1 and
+postgres keeps the segment. On compose the file lives in the host directory
+`/opt/<project>/.vibecarbon-role`, bound read-only into the db container. On k8s
+it lives on the db volume (a `vibecarbon-role` subPath beside `postgres-data`),
+and the CLI also keeps a durable intent in the `vibecarbon-db-role` ConfigMap,
+which `db-guard.sh` applies on every container start, so a db the CLI could not
+reach comes back with the right role. Nothing about the role is in `.env` or the
+StatefulSet env any more. Failover therefore moves it with one write and no
+restart: `primary` onto the promoted node before `pg_promote` (while it is still
+in recovery, where the write is inert; if the write fails the failover stops
+before promotion) and, best-effort, `standby` onto the demoted one. The failover
+then re-runs the deploy-time backup audit against the promoted node in
+`requirePrimary` mode, where a role still reading `standby` is a failure rather
+than the legitimate skip it is at deploy time. If that cannot be proven, the
+failover still completes (promotion, DNS and the persisted role swap all stand:
+an aborted post-promotion failover would be worse) but the command exits
+non-zero with the remediation, so dead backups are
 never reported as a clean success.
 
 **Fail-back semantics:**

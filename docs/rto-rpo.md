@@ -101,7 +101,9 @@ primary is alive behind a partition, so failover refuses unless you pass
 - every backup script refuses on it (`retired node: backups refused`, exit 1);
 - its database is read-only;
 - its writers are at zero (on k8s, after its Flux Kustomizations are suspended);
-- it runs with `WALG_ROLE=standby`.
+- its wal-g role file reads `standby` (`/opt/<project>/.vibecarbon-role/walg-role`
+  on compose; on k8s, `/var/lib/vibecarbon/role/walg-role` in the db container,
+  backed by the `vibecarbon-db-role` intent ConfigMap).
 
 The fence is applied whenever the CLI reaches the node: by the failover itself
 if the node answers, otherwise by the next `vibecarbon status`, `failover` or
@@ -240,10 +242,12 @@ What the environment's DR posture actually is while it sits in that state:
   **retired** node, so take on-demand backups against the promoted node until
   that path is role-aware. Do not assume a `backup create` against the retired
   node is harmless: demoting its write-guard is best-effort (failover warns and
-  continues if the demote fails), and a retired node still carrying
-  `WALG_ROLE=primary` would push a **stale base backup** into the shared prefix.
-  Check `WALG_ROLE` in `/opt/<project>/.env` on the retired node before running
-  any manual backup there.
+  continues if the demote fails), and a retired node whose wal-g role file still
+  reads `primary` would push a **stale base backup** into the shared prefix.
+  Check the role file on the retired node before running any manual backup
+  there: `cat /opt/<project>/.vibecarbon-role/walg-role` on compose, or
+  `kubectl -n vibecarbon exec db-0 -c db -- cat /var/lib/vibecarbon/role/walg-role`
+  on k8s. It must print `standby`.
 
 The k8s-HA equivalent reconverges on its own model: `swapHaRoles` swaps
 `ha.primary` / `ha.standby` wholesale (each carries its own `.stack`), the
