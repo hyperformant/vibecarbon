@@ -63,7 +63,7 @@ const PGDATA_REF = /\$\{?PGDATA(?::\?)?\}?/;
 // Inside the staging dir, also the source database's WAL gap record (a
 // restored database does not share its gap): still never the live cluster.
 const ALLOWED_RM_TARGET =
-  /^"\$\{?PGDATA(?::\?)?\}?\/(\.vc-restore|\.vc-prev|\.vc-discard|\.vc-restore-in-progress|\.vc-restore\/\.vc-[a-z.-]+|\.vc-restore\/vibecarbon-wal-gap(?:\.clearing)?)"$/;
+  /^"\$\{?PGDATA(?::\?)?\}?\/(\.vc-restore|\.vc-prev|\.vc-discard|\.vc-restore-in-progress|\.vc-reseed|\.vc-reseed-ready(?:\.tmp)?|\.vc-reseed-in-progress(?:\.tmp)?|\.vc-restore\/\.vc-[a-z.-]+|\.vc-restore\/vibecarbon-wal-gap(?:\.clearing)?)"$/;
 
 function codeLines(script: string): string[] {
   return script
@@ -141,6 +141,16 @@ for (const [label, build] of SCRIPTS) {
       expect(markerOff).toBeGreaterThan(lastDiscardRm);
       const after = lines.slice(markerOff + 1).filter((l) => /\b(rm|mv|find)\b/.test(l));
       expect(after, after.join('\n')).toEqual([]);
+    });
+
+    it('clears a stale in-place reseed state right after the discard, before the swap (C16)', () => {
+      const discardIdx = lines.findIndex(
+        (l, i) => i > fetchIdx && l === 'rm -rf "$PGDATA/.vc-discard"',
+      );
+      expect(discardIdx, 'no discard clear after the fetch').toBeGreaterThan(fetchIdx);
+      expect(lines[discardIdx + 1]).toBe(
+        'rm -rf "$PGDATA/.vc-reseed" "$PGDATA/.vc-reseed-ready" "$PGDATA/.vc-reseed-ready.tmp" "$PGDATA/.vc-reseed-in-progress" "$PGDATA/.vc-reseed-in-progress.tmp"',
+      );
     });
 
     it('never find -deletes inside PGDATA', () => {

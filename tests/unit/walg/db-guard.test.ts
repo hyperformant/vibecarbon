@@ -1,11 +1,14 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -112,5 +115,378 @@ describe('db-guard.sh applies the k8s role intent', () => {
     writeFileSync(join(pgdata, '.vc-restore-in-progress'), 'in\n');
     expect(runGuard({ VC_WALG_ROLE_INTENT: 'standby', VC_WALG_ROLE_DIR: roleDir }).status).toBe(1);
     expect(existsSync(join(roleDir, 'walg-role'))).toBe(false);
+  });
+});
+
+const ID = 'att-7f3c';
+const SB = () => ({ VC_WALG_ROLE_INTENT: 'standby', VC_WALG_ROLE_DIR: roleDir });
+function stage(id = ID, { conninfo = true, signal = true } = {}) {
+  const s = join(pgdata, '.vc-reseed');
+  mkdirSync(join(s, 'base'), { recursive: true });
+  writeFileSync(join(s, 'PG_VERSION'), '17\n');
+  if (signal) writeFileSync(join(s, 'standby.signal'), '');
+  writeFileSync(join(s, 'postgresql.auto.conf'), conninfo ? "primary_conninfo = 'host=x'\n" : '');
+  writeFileSync(join(s, '.vc-reseed-id'), id);
+  writeFileSync(join(pgdata, '.vc-reseed-ready'), id);
+}
+function live() {
+  writeFileSync(join(pgdata, 'PG_VERSION'), '17\n');
+  mkdirSync(join(pgdata, 'base'));
+  writeFileSync(join(pgdata, 'base', 'OLD'), 'old');
+}
+/**
+ * A `mv` on PATH that fails (like a crash at that step) for one source
+ * basename moving to a destination matching `dest`; every other move is real.
+ */
+function failMv(name: string, dest: string) {
+  const real = spawnSync('sh', ['-c', 'command -v mv'], { encoding: 'utf-8' }).stdout.trim();
+  const stub = join(bin, 'mv');
+  writeFileSync(
+    stub,
+    `#!/bin/sh\nlast=""; for a; do last="$a"; done\nfor a; do case "$a" in */${name}) case "$last" in ${dest}) echo "stub mv: refusing $a" >&2; exit 1;; esac;; esac; done\nexec ${real} "$@"\n`,
+  );
+  chmodSync(stub, 0o755);
+}
+const unfailMv = () => rmSync(join(bin, 'mv'), { force: true });
+/** Every reseed bookkeeping entry is gone from PGDATA. */
+function expectNoReseedState() {
+  for (const f of ['.vc-reseed', '.vc-reseed-ready', '.vc-reseed-in-progress', '.vc-reseed-id']) {
+    expect(existsSync(join(pgdata, f)), f).toBe(false);
+  }
+}
+/** The old cluster is the one PGDATA boots, untouched. */
+function expectOldTreeBoots(r: ReturnType<typeof runGuard>) {
+  expect(r.status, r.stderr).toBe(0);
+  expect(readFileSync(join(pgdata, 'base', 'OLD'), 'utf-8')).toBe('old');
+  expect(existsSync(join(pgdata, 'standby.signal'))).toBe(false);
+  expect(existsSync(join(pgdata, '.vc-reseeded-from'))).toBe(false);
+  expect(r.stdout).toContain('STUB-ENTRYPOINT postgres');
+}
+/** The staged tree is what PGDATA boots, complete. */
+function expectNewTreeBoots(r: ReturnType<typeof runGuard>) {
+  expect(r.status, r.stderr).toBe(0);
+  expect(r.stderr).toContain(`RESEED_SWAPPED ${ID}`);
+  expect(readFileSync(join(pgdata, 'PG_VERSION'), 'utf-8')).toBe('17\n');
+  expect(existsSync(join(pgdata, 'standby.signal'))).toBe(true);
+  expect(readFileSync(join(pgdata, 'postgresql.auto.conf'), 'utf-8')).toContain('primary_conninfo');
+  expect(existsSync(join(pgdata, 'base'))).toBe(true);
+  expect(existsSync(join(pgdata, 'base', 'OLD'))).toBe(false);
+  expect(readFileSync(join(pgdata, '.vc-reseeded-from'), 'utf-8')).toBe(ID);
+  expectNoReseedState();
+  expect(r.stdout).toContain('STUB-ENTRYPOINT postgres');
+}
+
+describe('db-guard.sh reseed swap', () => {
+  it('the protocol marker is line 2 (the live-pod guard greps it)', () => {
+    expect(readFileSync(GUARD, 'utf-8').split('\n')[1]).toBe('# vc-reseed-protocol: 1');
+  });
+
+  it('a standby swaps a verified staging in, keeps the old tree in .vc-discard, records the attempt, then execs postgres', () => {
+    live();
+    stage();
+    const r = runGuard(SB());
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain(`RESEED_SWAPPED ${ID}`);
+    expect(existsSync(join(pgdata, 'standby.signal'))).toBe(true);
+    expect(existsSync(join(pgdata, 'base', 'OLD'))).toBe(false);
+    expect(existsSync(join(pgdata, '.vc-discard', 'base', 'OLD'))).toBe(true);
+    expect(readFileSync(join(pgdata, '.vc-reseeded-from'), 'utf-8')).toBe(ID);
+    for (const f of ['.vc-reseed', '.vc-reseed-ready', '.vc-reseed-in-progress', '.vc-reseed-id'])
+      expect(existsSync(join(pgdata, f))).toBe(false);
+    expect(r.stdout).toContain('STUB-ENTRYPOINT postgres');
+    expectNewTreeBoots(r);
+  });
+
+  it('C16: a stale ready marker on a PRIMARY (survived a promotion) is refused and cleared; the live tree boots', () => {
+    live();
+    stage();
+    const r = runGuard({ VC_WALG_ROLE_INTENT: 'primary', VC_WALG_ROLE_DIR: roleDir });
+    expect(r.stderr).toContain('RESEED_REFUSED');
+    expect(existsSync(join(pgdata, 'base', 'OLD'))).toBe(true);
+    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+    expect(r.stdout).toContain('STUB-ENTRYPOINT');
+    expectOldTreeBoots(r);
+  });
+
+  it('C16: no intent at all (compose, or no ConfigMap) never swaps', () => {
+    live();
+    stage();
+    const r = runGuard();
+    expect(r.stderr).toContain('RESEED_REFUSED');
+    expect(existsSync(join(pgdata, 'base', 'OLD'))).toBe(true);
+    expectOldTreeBoots(r);
+    expectNoReseedState();
+  });
+
+  it.each([
+    ['an unknown intent', 'leader'],
+    ['an empty intent', ''],
+    ['a cased intent', 'Standby'],
+    ['a padded intent', 'standby '],
+  ])('%s never swaps', (_n, intent) => {
+    live();
+    stage();
+    const r = runGuard({ VC_WALG_ROLE_INTENT: intent, VC_WALG_ROLE_DIR: roleDir });
+    expect(r.stderr).toContain('RESEED_REFUSED');
+    expectOldTreeBoots(r);
+    expectNoReseedState();
+  });
+
+  it('a staging whose id does not match the ready marker is refused and cleared', () => {
+    live();
+    stage();
+    writeFileSync(join(pgdata, '.vc-reseed', '.vc-reseed-id'), 'other');
+    const r = runGuard(SB());
+    expect(r.stderr).toContain('RESEED_REFUSED');
+    expect(existsSync(join(pgdata, 'base', 'OLD'))).toBe(true);
+    expectOldTreeBoots(r);
+    expectNoReseedState();
+  });
+
+  it('an empty ready marker is refused, even when the staging id is empty too', () => {
+    live();
+    stage('');
+    const r = runGuard(SB());
+    expect(r.stderr).toContain('RESEED_REFUSED');
+    expectOldTreeBoots(r);
+  });
+
+  it.each([
+    ['no standby.signal', { signal: false }],
+    ['no primary_conninfo', { conninfo: false }],
+  ])('refuses a staging with %s', (_n, opts) => {
+    live();
+    stage(ID, opts);
+    const r = runGuard(SB());
+    expect(r.stderr).toContain('RESEED_REFUSED');
+    expect(existsSync(join(pgdata, 'base', 'OLD'))).toBe(true);
+    expectOldTreeBoots(r);
+  });
+
+  it('refuses a staging with no PG_VERSION', () => {
+    live();
+    stage();
+    rmSync(join(pgdata, '.vc-reseed', 'PG_VERSION'));
+    const r = runGuard(SB());
+    expect(r.stderr).toContain('RESEED_REFUSED');
+    expectOldTreeBoots(r);
+  });
+
+  it('a ready marker with no staging at all is refused and cleared', () => {
+    live();
+    writeFileSync(join(pgdata, '.vc-reseed-ready'), ID);
+    const r = runGuard(SB());
+    expect(r.stderr).toContain('RESEED_REFUSED');
+    expectOldTreeBoots(r);
+    expectNoReseedState();
+  });
+
+  it('clears a leftover .vc-discard before it starts a swap (D9: garbage)', () => {
+    live();
+    stage();
+    mkdirSync(join(pgdata, '.vc-discard', 'base'), { recursive: true });
+    writeFileSync(join(pgdata, '.vc-discard', 'base', 'ANCIENT'), 'x');
+    const r = runGuard(SB());
+    expectNewTreeBoots(r);
+    expect(existsSync(join(pgdata, '.vc-discard', 'base', 'ANCIENT'))).toBe(false);
+    expect(existsSync(join(pgdata, '.vc-discard', 'base', 'OLD'))).toBe(true);
+  });
+
+  it('resumes a crash right after the "out" mark, before any move (whatever the intent)', () => {
+    live();
+    stage();
+    mkdirSync(join(pgdata, '.vc-discard'));
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), `out ${ID}`);
+    const r = runGuard({ VC_WALG_ROLE_INTENT: 'primary', VC_WALG_ROLE_DIR: roleDir });
+    expectNewTreeBoots(r);
+    expect(existsSync(join(pgdata, '.vc-discard', 'base', 'OLD'))).toBe(true);
+  });
+
+  it('resumes a crash mid "out" (whatever the intent): finishes moving the cluster aside, then swaps', () => {
+    live();
+    stage();
+    mkdirSync(join(pgdata, '.vc-discard'));
+    renameSync(join(pgdata, 'base'), join(pgdata, '.vc-discard', 'base'));
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), `out ${ID}`);
+    const r = runGuard({ VC_WALG_ROLE_DIR: roleDir });
+    expect(r.stderr).toContain(`RESEED_SWAPPED ${ID}`);
+    expect(existsSync(join(pgdata, '.vc-discard', 'PG_VERSION'))).toBe(true);
+    expect(existsSync(join(pgdata, 'standby.signal'))).toBe(true);
+    expectNewTreeBoots(r);
+  });
+
+  it('a failed move while moving the cluster out never marks "in": it stops, then the next start finishes', () => {
+    live();
+    stage();
+    failMv('base', '*/.vc-discard/');
+    const r1 = runGuard(SB());
+    expect(r1.status).not.toBe(0);
+    expect(r1.stdout).not.toContain('STUB-ENTRYPOINT');
+    expect(readFileSync(join(pgdata, '.vc-reseed-in-progress'), 'utf-8')).toBe(`out ${ID}`);
+    // Nothing from staging moved: the old cluster is whole across PGDATA and .vc-discard.
+    expect(readFileSync(join(pgdata, 'base', 'OLD'), 'utf-8')).toBe('old');
+    expect(existsSync(join(pgdata, '.vc-reseed', 'PG_VERSION'))).toBe(true);
+    unfailMv();
+    expectNewTreeBoots(runGuard(SB()));
+  });
+
+  it('resumes a crash mid "in": moves the rest of staging in', () => {
+    stage();
+    mkdirSync(join(pgdata, '.vc-discard'));
+    renameSync(join(pgdata, '.vc-reseed', 'PG_VERSION'), join(pgdata, 'PG_VERSION'));
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), `in ${ID}`);
+    const r = runGuard(SB());
+    expect(r.stderr).toContain(`RESEED_SWAPPED ${ID}`);
+    expect(existsSync(join(pgdata, 'standby.signal'))).toBe(true);
+    expect(existsSync(join(pgdata, 'base'))).toBe(true);
+    expectNewTreeBoots(r);
+  });
+
+  it('a failed move while moving staging in stops before cleanup; the next start (any intent) finishes', () => {
+    live();
+    stage();
+    failMv('base', `${pgdata}/`);
+    const r1 = runGuard(SB());
+    expect(r1.status).not.toBe(0);
+    expect(r1.stdout).not.toContain('STUB-ENTRYPOINT');
+    expect(readFileSync(join(pgdata, '.vc-reseed-in-progress'), 'utf-8')).toBe(`in ${ID}`);
+    expect(existsSync(join(pgdata, '.vc-reseed', 'base'))).toBe(true);
+    expect(existsSync(join(pgdata, '.vc-reseeded-from'))).toBe(false);
+    unfailMv();
+    expectNewTreeBoots(runGuard({ VC_WALG_ROLE_DIR: roleDir }));
+  });
+
+  it('resumes "in" when staging is already gone (crash after the moves, before cleanup)', () => {
+    writeFileSync(join(pgdata, 'PG_VERSION'), '17\n');
+    writeFileSync(join(pgdata, 'standby.signal'), '');
+    writeFileSync(join(pgdata, '.vc-reseed-ready'), ID);
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), `in ${ID}`);
+    const r = runGuard(SB());
+    expect(r.stderr).toContain(`RESEED_SWAPPED ${ID}`);
+    expect(existsSync(join(pgdata, '.vc-reseed-in-progress'))).toBe(false);
+    expect(readFileSync(join(pgdata, '.vc-reseeded-from'), 'utf-8')).toBe(ID);
+    expectNoReseedState();
+  });
+
+  it('resumes after the record was written but before the markers went', () => {
+    writeFileSync(join(pgdata, 'PG_VERSION'), '17\n');
+    writeFileSync(join(pgdata, 'standby.signal'), '');
+    writeFileSync(join(pgdata, '.vc-reseeded-from'), ID);
+    writeFileSync(join(pgdata, '.vc-reseed-ready'), ID);
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), `in ${ID}`);
+    const r = runGuard(SB());
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(join(pgdata, '.vc-reseeded-from'), 'utf-8')).toBe(ID);
+    expectNoReseedState();
+  });
+
+  it('"in" that ends with no PG_VERSION in PGDATA refuses to boot (never initdb over a lost tree)', () => {
+    mkdirSync(join(pgdata, '.vc-discard', 'base'), { recursive: true });
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), `in ${ID}`);
+    const r = runGuard(SB());
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain('STUB-ENTRYPOINT');
+    expect(existsSync(join(pgdata, '.vc-reseed-in-progress'))).toBe(true);
+    expect(existsSync(join(pgdata, '.vc-discard', 'base'))).toBe(true);
+  });
+
+  it('"out" with a staging that lost PG_VERSION rolls the cluster BACK and boots it', () => {
+    live();
+    stage();
+    rmSync(join(pgdata, '.vc-reseed', 'PG_VERSION'));
+    mkdirSync(join(pgdata, '.vc-discard'));
+    renameSync(join(pgdata, 'base'), join(pgdata, '.vc-discard', 'base'));
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), `out ${ID}`);
+    const r = runGuard(SB());
+    expect(r.stderr).toContain('RESEED_ROLLED_BACK');
+    expect(existsSync(join(pgdata, 'base', 'OLD'))).toBe(true);
+    expect(existsSync(join(pgdata, '.vc-reseed-in-progress'))).toBe(false);
+    expectOldTreeBoots(r);
+    expectNoReseedState();
+    expect(existsSync(join(pgdata, '.vc-discard'))).toBe(false);
+  });
+
+  it('an unknown in-progress state refuses to boot and moves nothing', () => {
+    live();
+    stage();
+    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), 'sideways');
+    const r = runGuard(SB());
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain('STUB-ENTRYPOINT');
+    expect(readFileSync(join(pgdata, 'base', 'OLD'), 'utf-8')).toBe('old');
+    expect(existsSync(join(pgdata, '.vc-reseed', 'PG_VERSION'))).toBe(true);
+  });
+
+  it('an interrupted RESTORE still wins: refuse before touching any reseed state', () => {
+    live();
+    stage();
+    writeFileSync(join(pgdata, '.vc-restore-in-progress'), 'in');
+    expect(runGuard(SB()).status).toBe(1);
+    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(true);
+  });
+
+  it('refuses symlinked reseed markers (it runs as root)', () => {
+    live();
+    stage();
+    rmSync(join(pgdata, '.vc-reseed-ready'));
+    symlinkSync('/etc/passwd', join(pgdata, '.vc-reseed-ready'));
+    expect(runGuard(SB()).status).toBe(1);
+  });
+
+  it.each([
+    ['.vc-reseed-in-progress', 'file'],
+    ['.vc-reseed', 'dir'],
+    ['.vc-discard', 'dir'],
+    ['.vc-restore.lock', 'file'],
+  ])('refuses a symlinked %s, moving nothing', (name) => {
+    live();
+    stage();
+    const target = join(dir, 'elsewhere');
+    mkdirSync(target);
+    if (name === '.vc-reseed') {
+      renameSync(join(pgdata, '.vc-reseed'), join(target, 'staged'));
+      symlinkSync(join(target, 'staged'), join(pgdata, name));
+    } else {
+      symlinkSync(target, join(pgdata, name));
+    }
+    const r = runGuard(SB());
+    expect(r.status).toBe(1);
+    expect(r.stdout).not.toContain('STUB-ENTRYPOINT');
+    expect(readFileSync(join(pgdata, 'base', 'OLD'), 'utf-8')).toBe('old');
+    expect(readdirSync(target).filter((f) => f !== 'staged')).toEqual([]);
+  });
+
+  it('refuses while a restore holds the lock, moving nothing', async () => {
+    live();
+    stage();
+    const lock = join(pgdata, '.vc-restore.lock');
+    writeFileSync(lock, '');
+    const holder = spawn('flock', [lock, 'sleep', '5']);
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      const r = runGuard(SB());
+      expect(r.status).toBe(75);
+      expect(r.stdout).not.toContain('STUB-ENTRYPOINT');
+      expect(readFileSync(join(pgdata, 'base', 'OLD'), 'utf-8')).toBe('old');
+      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(true);
+    } finally {
+      holder.kill();
+    }
+  });
+
+  it('a normal boot with no reseed state is unchanged', () => {
+    live();
+    const r = runGuard(SB());
+    expect(r.stdout).toContain('STUB-ENTRYPOINT postgres -c config_file=/x');
+    expect(existsSync(join(pgdata, '.vc-restore.lock'))).toBe(false);
+  });
+});
+
+describe('db-guard.sh reseed markers are durable', () => {
+  it('every reseed marker is written tmp, sync, rename, sync', () => {
+    expect(readFileSync(GUARD, 'utf-8')).toContain(
+      `vc_put() { rm -f "$1.tmp"; printf '%s' "$2" > "$1.tmp"; sync; mv -f "$1.tmp" "$1"; sync; }`,
+    );
   });
 });

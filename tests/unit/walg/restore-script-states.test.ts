@@ -285,6 +285,39 @@ for (const [tier, build] of TIERS) {
       expect(ls()).not.toContain('vibecarbon-wal-gap.clearing');
     });
 
+    it('a stale reseed state does not survive a restore (C16)', () => {
+      seedLive();
+      mkdirSync(join(pgdata, '.vc-reseed', 'base'), { recursive: true });
+      writeFileSync(join(pgdata, '.vc-reseed', '.vc-reseed-id'), 'old');
+      writeFileSync(join(pgdata, '.vc-reseed-ready'), 'old');
+      writeFileSync(join(pgdata, '.vc-reseed-ready.tmp'), 'old');
+      writeFileSync(join(pgdata, '.vc-reseed-in-progress'), 'out old');
+      writeFileSync(join(pgdata, '.vc-reseed-in-progress.tmp'), 'in old');
+      stubWalg('ok');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(read('base/marker')).toBe('restored');
+      for (const f of [
+        '.vc-reseed',
+        '.vc-reseed-ready',
+        '.vc-reseed-ready.tmp',
+        '.vc-reseed-in-progress',
+        '.vc-reseed-in-progress.tmp',
+      ]) {
+        expect(existsSync(join(pgdata, f)), f).toBe(false);
+      }
+    });
+
+    it('a failed fetch leaves a reseed state alone (nothing moved, nothing cleared)', () => {
+      seedLive();
+      mkdirSync(join(pgdata, '.vc-reseed', 'base'), { recursive: true });
+      writeFileSync(join(pgdata, '.vc-reseed-ready'), 'old');
+      stubWalg('fail');
+      const r = run(build());
+      expect(r.status).not.toBe(0);
+      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(true);
+    });
+
     it('a swap interrupted half way in (marker "in") is settled by the rerun', () => {
       // .vc-prev holds the whole original; PGDATA a part of the staged copy.
       mkdirSync(join(pgdata, '.vc-prev', 'base'), { recursive: true });

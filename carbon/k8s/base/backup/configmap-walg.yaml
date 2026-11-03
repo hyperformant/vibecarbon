@@ -16,9 +16,10 @@
 #
 # A third key, db-guard.sh, is the db container's entrypoint (the StatefulSet's
 # `command`, mounted at /usr/local/bin/db-guard.sh), exactly as compose runs
-# it: it refuses to boot over an interrupted restore and applies the wal-g
-# role intent (ConfigMap vibecarbon-db-role) to the role file before handing
-# over to the image's db-entrypoint.sh.
+# it: it refuses to boot over an interrupted restore, applies the wal-g role
+# intent (ConfigMap vibecarbon-db-role) to the role file, and finishes a
+# pending in-place standby reseed before handing over to the image's
+# db-entrypoint.sh.
 #
 # All three script bodies below are BYTE-IDENTICAL copies of
 # carbon/volumes/db/wal-archive.sh, carbon/volumes/db/walg-env.sh and
@@ -353,9 +354,14 @@ data:
     unset vc_walg_base vc_walg_pgdata vc_walg_sysid
   db-guard.sh: |
     #!/bin/sh
+    # vc-reseed-protocol: 1
     # Entrypoint of the db container on both tiers: refuse to boot over an
-    # interrupted restore, apply the k8s wal-g role intent, then hand over to the
-    # image's own entrypoint (db-entrypoint.sh) unchanged.
+    # interrupted restore, apply the k8s wal-g role intent, finish a pending
+    # in-place standby reseed, then hand over to the image's own entrypoint
+    # (db-entrypoint.sh) unchanged.
+    #
+    # Line 2 is the reseed protocol marker: the CLI greps it in the RUNNING pod's
+    # mounted copy before it stops postgres for an in-place reseed.
     #
     # `vibecarbon restore` fetches the backup into a staging dir inside PGDATA and
     # only then swaps it in, with .vc-restore-in-progress in PGDATA for the length
@@ -400,6 +406,89 @@ data:
           rm -f "$VC_ROLE_DIR/walg-role"
           ;;
       esac
+    fi
+
+    # Pending in-place reseed (src/lib/deploy/replication.js reseedStandbyInPlace).
+    # A swap STARTS only on a standby (VC_WALG_ROLE_INTENT=standby) whose staged
+    # tree proves itself and carries the ready marker's attempt id. One already
+    # under way always finishes or rolls back: half way is no bootable tree.
+    # Every move fails the script (never skipped), and each phase checks it left
+    # nothing behind before the marker moves on, so a crash or a failed move at
+    # any point leaves the old tree or the whole new one, never a mix.
+    R_STAGE="$PGDATA/.vc-reseed"; R_READY="$PGDATA/.vc-reseed-ready"
+    R_MARK="$PGDATA/.vc-reseed-in-progress"; R_DONE="$PGDATA/.vc-reseeded-from"; R_DISC="$PGDATA/.vc-discard"
+    # A marker is replaced by rename between two syncs: every move before it is on
+    # disk before it, and it is on disk before the next move.
+    vc_put() { rm -f "$1.tmp"; printf '%s' "$2" > "$1.tmp"; sync; mv -f "$1.tmp" "$1"; sync; }
+    vc_cluster() { find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name '.vc-*'; }
+    if [ -e "$R_MARK" ] || [ -e "$R_READY" ] || [ -L "$R_MARK" ] || [ -L "$R_READY" ]; then
+      for f in "$R_MARK" "$R_READY" "$R_STAGE" "$R_DISC" "$PGDATA/.vc-restore.lock"; do
+        if [ -L "$f" ]; then echo "db-guard: $f is a symlink; refusing" >&2; exit 1; fi
+      done
+      exec 9>"$PGDATA/.vc-restore.lock"
+      flock -n 9 || { echo "db-guard: a restore holds $PGDATA/.vc-restore.lock; refusing" >&2; exit 75; }
+      state=""
+      if [ -e "$R_MARK" ]; then
+        state="$(cat "$R_MARK")"
+        case "$state" in
+          "out "?*|"in "?*) ;;
+          *) echo "db-guard: $R_MARK holds an unknown reseed state '$state'; refusing to boot (no tree is moved)" >&2; exit 1 ;;
+        esac
+      fi
+      if [ -z "$state" ]; then
+        id="$(cat "$R_READY" 2>/dev/null || true)"
+        if [ "${VC_WALG_ROLE_INTENT:-}" = standby ] && [ -n "$id" ] \
+          && [ "$(cat "$R_STAGE/.vc-reseed-id" 2>/dev/null || true)" = "$id" ] \
+          && [ -f "$R_STAGE/PG_VERSION" ] && [ -f "$R_STAGE/standby.signal" ] \
+          && grep -q '^[[:space:]]*primary_conninfo' "$R_STAGE/postgresql.auto.conf" 2>/dev/null; then
+          rm -rf "$R_DISC"
+          vc_put "$R_MARK" "out $id"; state="out $id"
+        else
+          echo "db-guard: RESEED_REFUSED: no standby intent, or the staged tree does not prove itself (attempt '${id}'); booting the existing data directory" >&2
+          rm -rf "$R_STAGE"; rm -f "$R_READY" "$R_READY.tmp"
+        fi
+      fi
+      case "$state" in
+        "out "*)
+          id="${state#out }"
+          if [ ! -f "$R_STAGE/PG_VERSION" ]; then
+            if [ -d "$R_DISC" ]; then
+              find "$R_DISC" -mindepth 1 -maxdepth 1 | while IFS= read -r e; do mv "$e" "$PGDATA/" || exit 1; done
+              left="$(find "$R_DISC" -mindepth 1 -maxdepth 1)"
+              if [ -n "$left" ]; then echo "db-guard: $R_DISC still holds entries after the roll back; refusing" >&2; exit 1; fi
+              rmdir "$R_DISC"
+            fi
+            rm -rf "$R_STAGE"; rm -f "$R_READY" "$R_MARK"
+            echo "db-guard: RESEED_ROLLED_BACK $id: staging incomplete, the previous data directory is back" >&2
+            state=""
+          else
+            mkdir -p "$R_DISC"
+            vc_cluster | while IFS= read -r e; do mv "$e" "$R_DISC/" || exit 1; done
+            left="$(vc_cluster)"
+            if [ -n "$left" ]; then echo "db-guard: the old cluster did not fully move to $R_DISC; refusing" >&2; exit 1; fi
+            vc_put "$R_MARK" "in $id"; state="in $id"
+          fi
+          ;;
+      esac
+      case "$state" in
+        "in "*)
+          id="${state#in }"
+          if [ -d "$R_STAGE" ]; then
+            find "$R_STAGE" -mindepth 1 -maxdepth 1 ! -name '.vc-reseed-id' | while IFS= read -r e; do mv "$e" "$PGDATA/" || exit 1; done
+            left="$(find "$R_STAGE" -mindepth 1 -maxdepth 1 ! -name '.vc-reseed-id')"
+            if [ -n "$left" ]; then echo "db-guard: $R_STAGE did not fully move in; refusing" >&2; exit 1; fi
+            rm -rf "$R_STAGE"
+          fi
+          if [ ! -f "$PGDATA/PG_VERSION" ]; then
+            echo "db-guard: reseed $id moved in no PG_VERSION; refusing to boot (the old tree is in $R_DISC)" >&2
+            exit 1
+          fi
+          vc_put "$R_DONE" "$id"
+          rm -f "$R_READY" "$R_MARK"
+          echo "db-guard: RESEED_SWAPPED $id" >&2
+          ;;
+      esac
+      exec 9>&-
     fi
 
     exec db-entrypoint.sh "$@"
