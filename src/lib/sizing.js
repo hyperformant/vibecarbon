@@ -193,6 +193,255 @@ export function standbyStandIn(Provider, type, region, role) {
 }
 
 /**
+ * Does the HA common-class rule apply? Only for a provider that declares
+ * more than one CPU class, and only over a live catalog: offline there is no
+ * per-location stock to intersect, so the single-region picks stand.
+ */
+function classRuleApplies(Provider) {
+  return (Provider.CPU_CLASSES?.length ?? 0) > 1 && Boolean(Provider._locationTypes);
+}
+
+/**
+ * The cheapest `role` candidate of CPU class `cpuClass` in `location`, with at
+ * least `minRamGb` (pickRoleType over the candidates of that class), limited
+ * to `onlyIn` when given (types orderable in the other location too).
+ */
+function pickInClass(Provider, location, role, cpuClass, minRamGb, onlyIn) {
+  const { catalog, orderable, priceFor } = catalogFor(Provider, location);
+  return pickRoleType({
+    candidates: (Provider.ROLE_CANDIDATES?.[role] ?? []).filter(
+      (t) => Provider.cpuClassOf(t) === cpuClass && (!onlyIn || onlyIn.has(t)),
+    ),
+    catalog,
+    orderable,
+    location,
+    priceFor,
+    isArm: (type) => Provider.isArmServerType(type),
+    minRamGb,
+  });
+}
+
+/**
+ * The best-ranked class (CPU_CLASSES order, `first` ahead of the rest) that
+ * has a fitting `role` candidate in `location`, and that candidate.
+ */
+function bestClassPick(Provider, location, role, minRamGb, first) {
+  const order = Provider.CPU_CLASSES.includes(first)
+    ? [first, ...Provider.CPU_CLASSES.filter((c) => c !== first)]
+    : Provider.CPU_CLASSES;
+  for (const cpuClass of order) {
+    const type = pickInClass(Provider, location, role, cpuClass, minRamGb);
+    if (type) return type;
+  }
+  return null;
+}
+
+/**
+ * The default types for both sides of an HA deploy: one CPU class for both,
+ * the best one (`Provider.CPU_CLASSES` order) that has a fitting candidate
+ * for every role in both locations, at the RAM tier the single-region
+ * defaults pick (ROLE_MIN_RAM_GB). Within that class each role takes the
+ * cheapest type sold in both locations, so the two sides normally run the
+ * very same type.
+ *
+ * When no class is common to both locations for every role, each side falls
+ * back on its own: the primary takes its location's best class, and the
+ * standby `haStandbyType` of it (the same class where sold, else its own best
+ * class). `shared` is false then, and the caller warns.
+ *
+ * A provider with one class, or no live catalog, keeps today's picks: the
+ * primary's single-region default per role and its standby resolution.
+ *
+ * Example (2026-10-22 stock): sfo3 sells -amd and -intel, tor1 -intel and
+ * regular, so an sfo3 + tor1 pair runs -intel on both sides.
+ *
+ * @param {object} Provider - a provider class
+ * @param {string} primaryRegion
+ * @param {string} standbyRegion
+ * @param {string[]} roles - e.g. ['compose'] or ['master', 'db', 'worker']
+ * @returns {{primary: Record<string, string|null>, standby: Record<string, string|null>,
+ *   cpuClass: string|null, shared: boolean}} a null type means nothing fits
+ *   that role there (the caller refuses by name, as for the single-region picks)
+ */
+export function haRoleSets(Provider, primaryRegion, standbyRegion, roles) {
+  const fallback = () => {
+    const primary = {};
+    const standby = {};
+    for (const role of roles) {
+      primary[role] = classRuleApplies(Provider)
+        ? bestClassPick(Provider, primaryRegion, role, ROLE_MIN_RAM_GB[role])
+        : (cheapestRoleSet(Provider, primaryRegion, [role])?.types[role] ?? null);
+      standby[role] = primary[role]
+        ? haStandbyType(Provider, primary[role], standbyRegion, role)
+        : null;
+    }
+    const classes = new Set(
+      [...Object.values(primary), ...Object.values(standby)].map(
+        (t) => t && Provider.cpuClassOf(t),
+      ),
+    );
+    const [only] = classes;
+    const shared = classes.size === 1;
+    return { primary, standby, cpuClass: shared ? (only ?? null) : null, shared };
+  };
+  if (!classRuleApplies(Provider)) return fallback();
+
+  const standbyOrderable = Provider._locationTypes[standbyRegion] ?? new Set();
+  for (const cpuClass of Provider.CPU_CLASSES) {
+    const primary = {};
+    const standby = {};
+    let placed = true;
+    for (const role of roles) {
+      const min = ROLE_MIN_RAM_GB[role];
+      // The same type on both sides when one is sold in both locations.
+      const both = pickInClass(Provider, primaryRegion, role, cpuClass, min, standbyOrderable);
+      primary[role] = both ?? pickInClass(Provider, primaryRegion, role, cpuClass, min);
+      standby[role] = both ?? pickInClass(Provider, standbyRegion, role, cpuClass, min);
+      if (!primary[role] || !standby[role]) {
+        placed = false;
+        break;
+      }
+    }
+    if (placed) return { primary, standby, cpuClass, shared: true };
+  }
+  return { ...fallback(), shared: false, cpuClass: null };
+}
+
+/**
+ * The standby's type for `role` in `standbyRegion` when the primary's type is
+ * already fixed (on record, given with `-server-type`, or picked by
+ * `haRoleSets`): the primary's type where the standby location sells it,
+ * else the role's cheapest candidate there of at least its RAM, in the
+ * primary's CPU class when one is sold, else in the best class that is. So a
+ * premium primary is never paired with a slower class while a premium one is
+ * orderable (an sfo3 -amd primary's tor1 standby is -intel, not regular).
+ *
+ * A provider with one class, no live catalog, or an ARM type keeps
+ * `Provider.resolveServerTypeForRegion` (its price-only stand-in, and the
+ * ARM->x86 rescue).
+ *
+ * @param {object} Provider - a provider class
+ * @param {string} primaryType
+ * @param {string} standbyRegion
+ * @param {string} [role] - compose, master, db or worker
+ * @returns {string|null} null when nothing fits, for the caller to refuse
+ */
+export function haStandbyType(Provider, primaryType, standbyRegion, role) {
+  if (!classRuleApplies(Provider) || Provider.isArmServerType(primaryType)) {
+    return Provider.resolveServerTypeForRegion(primaryType, standbyRegion, role);
+  }
+  if (Provider._locationTypes[standbyRegion]?.has(primaryType)) return primaryType;
+  const ram = Provider.SERVER_TYPES[primaryType]?.ram;
+  let pickRole = role ?? (typeof ram === 'number' && ram <= ROLE_MIN_RAM_GB.db ? 'db' : 'compose');
+  if (!Provider.ROLE_CANDIDATES?.[pickRole]) pickRole = 'compose';
+  const minRam = Math.max(ROLE_MIN_RAM_GB[pickRole], typeof ram === 'number' ? ram : 0);
+  return bestClassPick(Provider, standbyRegion, pickRole, minRam, Provider.cpuClassOf(primaryType));
+}
+
+/**
+ * A CPU class as the CLI names it (`Provider.CPU_CLASS_LABELS`, else its id).
+ * @param {object} Provider - a provider class
+ * @param {string} cpuClass
+ * @returns {string}
+ */
+export function haClassLabel(Provider, cpuClass) {
+  return Provider.CPU_CLASS_LABELS?.[cpuClass] ?? cpuClass;
+}
+
+/**
+ * The line an HA deploy prints about its sides' CPU classes: which class
+ * both run and why, or, when they differ, a warning naming each side's class,
+ * what that costs (a failover onto slower servers) and the way out. null for
+ * a provider with one class, or with no live catalog. The line starts in
+ * lower case, to follow a `Standby server types adjusted ...; ` lead-in;
+ * `haClassMessage` composes the two.
+ *
+ * @param {object} Provider - a provider class
+ * @param {object} args
+ * @param {string} args.primaryRegion
+ * @param {string} args.standbyRegion
+ * @param {Record<string, string|null|undefined>} args.primary - types by role
+ * @param {Record<string, string|null|undefined>} args.standby - types by role
+ * @returns {{level: 'info'|'warn', line: string}|null}
+ */
+export function haClassNote(Provider, { primaryRegion, standbyRegion, primary, standby }) {
+  if (!classRuleApplies(Provider)) return null;
+  const classesOf = (types) =>
+    [
+      ...new Set(
+        Object.values(types)
+          .filter(Boolean)
+          .map((t) => Provider.cpuClassOf(t)),
+      ),
+    ].filter(Boolean);
+  const ofPrimary = classesOf(primary);
+  const ofStandby = classesOf(standby);
+  const list = (types) =>
+    Object.entries(types)
+      .filter(([, t]) => t)
+      .map(([role, t]) => `${role}=${t}`)
+      .join(', ');
+  const roles = Object.keys(standby).filter((r) => standby[r]);
+  const best = haRoleSets(Provider, primaryRegion, standbyRegion, roles);
+  if (ofPrimary.length === 1 && ofStandby.length === 1 && ofPrimary[0] === ofStandby[0]) {
+    const label = haClassLabel(Provider, ofPrimary[0]);
+    const why =
+      best.shared && best.cpuClass === ofPrimary[0]
+        ? `the best CPU class ${primaryRegion} and ${standbyRegion} both sell`
+        : 'one CPU class on both sides';
+    return {
+      level: 'info',
+      line:
+        `primary (${primaryRegion}) and standby (${standbyRegion}) both run ${label} servers, ` +
+        `${why}, so a failover lands on servers as fast as the primary's`,
+    };
+  }
+  const names = (classes) => classes.map((c) => haClassLabel(Provider, c)).join(' and ');
+  const remedy = best.shared
+    ? `Both locations sell ${haClassLabel(Provider, best.cpuClass)} servers: ` +
+      `deploy -server-type ${Object.values(best.primary)[0]} puts both sides on that class`
+    : `No CPU class is sold in both ${primaryRegion} and ${standbyRegion} at these sizes; ` +
+      'pick a standby location that sells the primary class with -standby-region';
+  return {
+    level: 'warn',
+    line:
+      `the standby in ${standbyRegion} runs ${names(ofStandby)} servers (${list(standby)}) ` +
+      `and the primary in ${primaryRegion} runs ${names(ofPrimary)}, so a failover may run ` +
+      `slower than the primary. ${remedy}`,
+  };
+}
+
+/**
+ * The one message an HA effect prints about its standby's sizes: when the
+ * standby's types differ from the primary's, `Standby server types adjusted
+ * for <region>: <role>=<type>, ...` followed by the class note (which class
+ * both sides share and why, or a warning that they differ); otherwise the
+ * class note alone. null when there is nothing to say.
+ *
+ * @param {object} Provider - a provider class
+ * @param {Parameters<typeof haClassNote>[1]} sides
+ * @returns {{level: 'info'|'warn', line: string}|null}
+ */
+export function haClassMessage(Provider, sides) {
+  const note = haClassNote(Provider, sides);
+  const adjusted = Object.keys(sides.standby).some(
+    (role) => sides.standby[role] && sides.standby[role] !== sides.primary[role],
+  );
+  if (adjusted) {
+    const types = Object.entries(sides.standby)
+      .filter(([, t]) => t)
+      .map(([role, t]) => `${role}=${t}`)
+      .join(', ');
+    const lead = `Standby server types adjusted for ${sides.standbyRegion}: ${types}`;
+    return note
+      ? { level: note.level, line: `${lead}; ${note.line}` }
+      : { level: 'info', line: lead };
+  }
+  if (!note) return null;
+  return { level: note.level, line: `${note.line[0].toUpperCase()}${note.line.slice(1)}` };
+}
+
+/**
  * A provider's `getDefaultStandbyRegion(primaryRegion, roles, primaryTypes)`:
  * the cheapest same-continent partner of `primaryRegion` (never the primary
  * itself) where every role in `roles` can be placed, priced as
@@ -242,9 +491,10 @@ export function rankLocationsByPrice(Provider, locations, roles) {
 
 /**
  * `rankLocationsByPrice` for a standby: each role is what the standby would
- * place at the location, `Provider.resolveServerTypeForRegion(primaryType,
- * location, role)` (the primary's type where stocked, else the role's pick of
- * at least its RAM), or the role's plain pick when no primary type is given.
+ * place at the location, `haStandbyType(Provider, primaryType, location,
+ * role)` (the primary's type where stocked, else the role's pick of at least
+ * its RAM, in the primary's CPU class where sold), or the role's plain pick
+ * when no primary type is given.
  * Locations where any role resolves to nothing are left out, so a primary
  * bigger than every candidate only ranks locations that stock its type.
  *
@@ -263,7 +513,7 @@ export function rankStandbyLocations(Provider, locations, roles, primaryTypes = 
     for (const role of roles) {
       const primary = primaryTypes[role];
       const type = primary
-        ? Provider.resolveServerTypeForRegion(primary, location, role)
+        ? haStandbyType(Provider, primary, location, role)
         : (cheapestRoleSet(Provider, location, [role])?.types[role] ?? null);
       if (!type) return null;
       types[role] = type;

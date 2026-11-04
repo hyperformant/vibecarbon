@@ -24,7 +24,7 @@
  * not get.
  */
 import { getProviderClass } from '../../../src/lib/providers/index.js';
-import { cheapestRoleSet } from '../../../src/lib/sizing.js';
+import { cheapestRoleSet, haRoleSets } from '../../../src/lib/sizing.js';
 import type { DeployMode } from '../scenarios/types.js';
 
 export interface CapacityPreferences {
@@ -252,10 +252,9 @@ export async function resolveCapacity(
  * HA: the primary is the first preferred region the picker can place (as
  * `resolveCapacity`); the standby is where a customer's deploy puts it,
  * `Provider.getDefaultStandbyRegion(primary, roles, primaryTypes)` on the
- * same catalog, whatever the e2e region list says. Its types are what the
- * deploy's standby resolves, `Provider.resolveServerTypeForRegion` per role
- * (the primary's type where stocked, else the role's pick of at least its
- * RAM). `scale -type` resizes both sides, so the standby must sell the scale
+ * same catalog, whatever the e2e region list says. Both sides' types are
+ * what the deploy wizard picks for that pair, `haRoleSets` (one CPU class for
+ * both, the best both locations sell, at the default RAM tiers). `scale -type` resizes both sides, so the standby must sell the scale
  * target too, and the target must have more RAM than each standby type; when
  * either fails, preflight fails with a line naming the provider, the location
  * and the types, and no other location is tried.
@@ -280,9 +279,13 @@ export async function resolveCapacityPair(
     );
   }
 
+  // Both sides' types as the deploy wizard re-picks them for this pair: one
+  // CPU class for both, the best both locations sell (haRoleSets), at the
+  // default RAM tiers. The primary's own pick above chose the location only.
+  const pair = haRoleSets(Provider, primary.region, region, primaryRoles(mode));
   const types: Record<string, string> = {};
   for (const role of roles) {
-    const type = Provider.resolveServerTypeForRegion(primaryTypes[role], region, role);
+    const type = pair.standby[role];
     if (!type) {
       throw new Error(
         `region-resolver: ${name} default standby location ${region} cannot place the ` +
@@ -291,12 +294,11 @@ export async function resolveCapacityPair(
     }
     types[role] = type;
   }
+  for (const role of primaryRoles(mode)) {
+    const type = pair.primary[role];
+    if (type) primary.types[role] = type;
+  }
 
-  // `scale -type` resizes both sides, so the target must be sold on both and
-  // bigger than each side's own type (verify-scale needs every node to change,
-  // and scale must never shrink one). The standby's types can differ from the
-  // primary's (a stand-in of at least the same RAM), so the primary's own pick
-  // is re-decided across both sides here.
   const keyRole = scaleKeyRole(mode);
   const candidates = scaleCandidates(prefs.scaleTo[primary.types[keyRole]]);
   if (candidates.length === 0) throw noScaleTarget(primary.types[keyRole]);

@@ -8,6 +8,8 @@
  * both resolve through `k8sStandbyTypes`, so the two always agree.
  */
 
+import { haStandbyType } from '../sizing.js';
+
 /**
  * The per-side record a k8s-ha deploy follows, from the env as it stood
  * before this deploy: each side's stack identity and region (only when both
@@ -43,9 +45,10 @@ export function haStacksFrom(envConfig) {
  * The standby's master, db and worker types at `standbyRegion`.
  *
  * Each role: the recorded type (unless `requested`), else
- * `Provider.resolveServerTypeForRegion(primaryType, standbyRegion, role)`:
+ * `haStandbyType(Provider, primaryType, standbyRegion, role)` (src/lib/sizing.js):
  * the primary's type where stocked, else the role's cheapest stocked pick of
- * at least its RAM, else null. Master and db null means the standby cannot be
+ * at least its RAM in the primary's CPU class where sold (else the best class
+ * that is), else null. Master and db null means the standby cannot be
  * placed (the caller refuses). A null worker (the pilot-light standby only
  * records it, for failover to bring up) is reported as `workerUnstocked` and
  * left out, for the caller to fall back and say so. A role with no primary
@@ -63,7 +66,7 @@ export function haStacksFrom(envConfig) {
 export function k8sStandbyTypes({ Provider, standbyRegion, primary, recorded = {}, requested }) {
   const record = requested ? {} : (recorded ?? {});
   const pick = (role, primaryType, recordedType) =>
-    recordedType || Provider.resolveServerTypeForRegion(primaryType, standbyRegion, role);
+    recordedType || haStandbyType(Provider, primaryType, standbyRegion, role);
   const worker = pick('worker', primary.worker, record.workerServerType);
   return {
     masterServerType: pick('master', primary.master, record.masterServerType),

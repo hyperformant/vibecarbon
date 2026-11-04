@@ -961,6 +961,36 @@ export class BaseProvider {
   static ROLE_CANDIDATES = {};
 
   /**
+   * The x86 CPU classes this provider sells (a line of servers on one kind of
+   * hardware, such as DigitalOcean's regular, premium Intel and premium AMD
+   * droplets), best first. An HA deploy places both sides on the best class
+   * both locations sell (src/lib/sizing.js haRoleSets), because a standby on
+   * a slower class than its primary was measured at about twice the install
+   * time on the deploy's critical path (DigitalOcean k8s-ha, 2026-11). Empty
+   * for a provider with one class: the rule then has nothing to choose.
+   * Every ROLE_CANDIDATES entry must belong to one of them.
+   * @type {string[]}
+   */
+  static CPU_CLASSES = [];
+
+  /**
+   * How the CLI names each class in its messages, by CPU_CLASSES id. A class
+   * with no label prints as its id.
+   * @type {Record<string, string>}
+   */
+  static CPU_CLASS_LABELS = {};
+
+  /**
+   * The CPU class of `type` (one of CPU_CLASSES), or null when it has none
+   * the provider declares (an ARM type, or a provider with one class).
+   * @param {string} _type
+   * @returns {string|null}
+   */
+  static cpuClassOf(_type) {
+    return null;
+  }
+
+  /**
    * Billed public IPv4 per server per month, in the account's billing
    * currency (0 when the server price includes it). Each provider states it
    * with a dated source. null here: an unknown IPv4 price makes a priced

@@ -253,6 +253,28 @@ export class DigitalOceanProvider extends BaseProvider {
     worker: ['s-2vcpu-4gb', 's-2vcpu-4gb-amd', 's-2vcpu-4gb-intel'],
   };
 
+  // CPU classes, best first (see BaseProvider.CPU_CLASSES): premium AMD,
+  // premium Intel, then the regular basic droplets. Owner decision
+  // 2026-11-03, from a k8s-ha run where the tor1 standby on regular droplets
+  // took about twice as long for apt and the k3s install as the sfo3
+  // primary on `-amd`. The class is the slug's suffix.
+  static CPU_CLASSES = ['amd', 'intel', 'regular'];
+
+  static CPU_CLASS_LABELS = { amd: 'premium AMD', intel: 'premium Intel', regular: 'regular' };
+
+  /**
+   * The CPU class of a basic droplet slug: `-amd`, `-intel`, else regular.
+   * Other families (c-, g-, m-, ...) are not candidates and have no class.
+   * @param {string} type
+   * @returns {string|null}
+   */
+  static cpuClassOf(type) {
+    if (typeof type !== 'string' || !type.startsWith('s-')) return null;
+    if (type.endsWith('-amd')) return 'amd';
+    if (type.endsWith('-intel')) return 'intel';
+    return 'regular';
+  }
+
   // Every droplet's public IPv4 is included in its price
   // (digitalocean.com/pricing/droplets, read 2026-10-22).
   static IPV4_MONTHLY = 0;

@@ -366,6 +366,21 @@ export class ScalewayProvider extends BaseProvider {
     compose: ['BASIC3-X2C-4G', 'DEV1-M', 'PLAY2-NANO'],
   };
 
+  // x86 CPU classes (see BaseProvider.CPU_CLASSES): the instance families,
+  // ranked by price (DEV1-M €14.74, PLAY2-NANO €20.10, BASIC3-X2C-4G €28.80
+  // on 2026-10-22). No run has measured a speed gap between them, so an HA
+  // pair keeps the cheapest family both zones sell, on both sides.
+  static CPU_CLASSES = ['DEV1', 'PLAY2', 'BASIC3'];
+
+  /**
+   * @param {string} type
+   * @returns {string|null}
+   */
+  static cpuClassOf(type) {
+    const family = typeof type === 'string' ? type.split('-')[0] : '';
+    return ScalewayProvider.CPU_CLASSES.includes(family) ? family : null;
+  }
+
   // Billed flexible IPv4 per server per month, EUR: zonal flexible IPv4 at
   // €0.005/h x 730 h (scaleway.com/en/pricing, read 2026-10-22).
   static IPV4_MONTHLY = 3.65;

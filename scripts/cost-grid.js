@@ -17,7 +17,8 @@
  *
  * Every location comes from the functions the deploy wizard uses
  * (cheapestDefaultRegion for the primary, getDefaultStandbyRegion for an HA
- * standby), so the grid always shows what a new customer is offered.
+ * standby), and an HA pair's sizes from its common-class picker (haRoleSets),
+ * so the grid always shows what a new customer is offered.
  * Refresh it with --write before a release that changes default sizes.
  */
 
@@ -29,8 +30,8 @@ import {
   cheapestDefaultRegion,
   cheapestRoleSet,
   formatMonthly,
+  haRoleSets,
   ipv4MonthlyAt,
-  rankStandbyLocations,
 } from '../src/lib/sizing.js';
 
 /** Deploy modes, in grid column order. */
@@ -236,27 +237,37 @@ export function computeEnvMonthly(Provider, mode, extras = extrasFor(Provider)) 
   const set = cheapestRoleSet(Provider, primary, roles);
   if (!set) throw new Error(`cost-grid: ${Provider.NAME} ${mode} is not orderable in ${primary}`);
   const cluster = (location) => (k8s ? extras.perCluster(location) : 0);
-  let monthly =
-    setMonthly(Provider, primary, set.types, mode) +
-    cluster(primary) +
-    roles.length * extras.perServer;
-  const locations = [primary];
-
-  if (mode.endsWith('-ha')) {
-    // The k8s-ha pilot-light standby places a master and a db, no worker.
-    const standbyRoles = k8s ? ['master', 'db'] : ['compose'];
-    const primaryTypes = Object.fromEntries(standbyRoles.map((r) => [r, set.types[r]]));
-    const standby = Provider.getDefaultStandbyRegion(primary, standbyRoles, primaryTypes);
-    const placed = rankStandbyLocations(Provider, [standby], standbyRoles, primaryTypes)[0];
-    if (!placed) {
-      throw new Error(`cost-grid: ${Provider.NAME} ${mode} standby is not orderable in ${standby}`);
-    }
-    monthly +=
-      setMonthly(Provider, standby, placed.types, mode) +
-      cluster(standby) +
-      standbyRoles.length * extras.perServer;
-    locations.push(standby);
+  if (!mode.endsWith('-ha')) {
+    const monthly =
+      setMonthly(Provider, primary, set.types, mode) +
+      cluster(primary) +
+      roles.length * extras.perServer;
+    return { monthly: Math.round(monthly * 100) / 100, locations: [primary] };
   }
+
+  // HA: the standby location as the wizard defaults it, then both sides'
+  // types as the wizard re-picks them for that pair: one CPU class for both,
+  // the best both locations sell (haRoleSets). The k8s-ha pilot-light
+  // standby places a master and a db, no worker.
+  const standbyRoles = k8s ? ['master', 'db'] : ['compose'];
+  const primaryTypes = Object.fromEntries(standbyRoles.map((r) => [r, set.types[r]]));
+  const standby = Provider.getDefaultStandbyRegion(primary, standbyRoles, primaryTypes);
+  const pair = haRoleSets(Provider, primary, standby, roles);
+  if (roles.some((r) => !pair.primary[r])) {
+    throw new Error(`cost-grid: ${Provider.NAME} ${mode} is not orderable in ${primary}`);
+  }
+  const placed = Object.fromEntries(standbyRoles.map((r) => [r, pair.standby[r]]));
+  if (standbyRoles.some((r) => !placed[r])) {
+    throw new Error(`cost-grid: ${Provider.NAME} ${mode} standby is not orderable in ${standby}`);
+  }
+  const monthly =
+    setMonthly(Provider, primary, pair.primary, mode) +
+    cluster(primary) +
+    roles.length * extras.perServer +
+    setMonthly(Provider, standby, placed, mode) +
+    cluster(standby) +
+    standbyRoles.length * extras.perServer;
+  const locations = [primary, standby];
   return { monthly: Math.round(monthly * 100) / 100, locations };
 }
 
@@ -335,7 +346,7 @@ export function renderCostGrid({ providers, date, storage }) {
     `Prices and availability from each provider's API on ${date}, excluding VAT.`,
     'Each server has at least twice its measured peak RAM, and compose servers never go below 4 GB.',
     "Totals include billed public IPv4 (Hetzner, Scaleway), the k8s ingress IP and database volume, and Scaleway's 40 GB root volume.",
-    "The region in a cell is where a new project deploys by default, the cheapest location on the provider's home continent; HA standbys sit in a second location on the same continent.",
+    "The region in a cell is where a new project deploys by default, the cheapest location on the provider's home continent; HA standbys sit in a second location on the same continent, and both sides of an HA pair run the same class of server whenever both locations sell one.",
     'Peak RAM was measured 20 October 2026 on Hetzner with the observability add-on running, so a default install uses less.',
   ];
   if (hetzner) {

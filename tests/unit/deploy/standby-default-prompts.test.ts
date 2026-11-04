@@ -196,11 +196,55 @@ describe('deploy wizard HA standby', () => {
     expect(providerWrites).toEqual([]);
   });
 
-  it('a stocked standby location passes, with the standby re-picked there', async () => {
+  it('a stocked standby location passes, both sides on the best CPU class the pair shares', async () => {
     seed(DigitalOceanProvider, '2026-10-22/digitalocean');
     const out = await runPrompts({ args: { yes: true, region: 'nyc3', secondaryRegion: 'sfo3' } });
     expect(out.secondaryRegion).toBe('sfo3');
-    expect(out.serverType).toBe('s-2vcpu-4gb');
+    // nyc3 sells plain and -amd, sfo3 -amd and -intel: -amd is common to both.
+    expect(out.serverType).toBe('s-2vcpu-4gb-amd');
+    expect(out.standbyServerTypes).toEqual({ serverType: 's-2vcpu-4gb-amd' });
+  });
+
+  it('k8s-ha sfo3 + tor1: every role on -intel on both sides, and the wizard says why', async () => {
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const out = await runPrompts({
+      mode: 'k8s',
+      args: { yes: true, region: 'sfo3', secondaryRegion: 'tor1' },
+    });
+    expect(out).toMatchObject({
+      masterServerType: 's-2vcpu-4gb-intel',
+      dbServerType: 's-1vcpu-2gb-intel',
+      workerServerType: 's-2vcpu-4gb-intel',
+    });
+    expect(out.standbyServerTypes).toEqual({
+      masterServerType: 's-2vcpu-4gb-intel',
+      dbServerType: 's-1vcpu-2gb-intel',
+      workerServerType: 's-2vcpu-4gb-intel',
+    });
+    const said = clackMock.log.info.mock.calls.map(([m]) => String(m));
+    expect(said).toContain(
+      'sfo3 and tor1 both sell premium Intel servers, the best CPU class the two have in ' +
+        'common, so both sides use it: master=s-2vcpu-4gb-intel, db=s-1vcpu-2gb-intel, ' +
+        'worker=s-2vcpu-4gb-intel',
+    );
+  });
+
+  it('k8s-ha: types on record are never re-picked for the class rule', async () => {
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const out = await runPrompts({
+      mode: 'k8s',
+      args: { yes: true, region: 'sfo3', secondaryRegion: 'tor1' },
+      envConfig: {
+        deployMode: 'kubernetes',
+        ha: { enabled: true },
+        masterServerType: 's-2vcpu-4gb-amd',
+        dbServerType: 's-1vcpu-2gb-amd',
+        workerServerType: 's-2vcpu-4gb-amd',
+      },
+    });
+    expect(out.masterServerType).toBe('s-2vcpu-4gb-amd');
+    // The standby takes the closest class tor1 sells.
+    expect(out.standbyServerTypes?.masterServerType).toBe('s-2vcpu-4gb-intel');
   });
 
   it('a compose-ha standby already on record is not re-checked', async () => {

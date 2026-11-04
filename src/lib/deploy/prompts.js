@@ -42,6 +42,9 @@ import {
   cheapestDefaultRegion,
   cheapestRoleSet,
   formatMonthly,
+  haClassLabel,
+  haRoleSets,
+  haStandbyType,
   ROLE_MIN_RAM_GB,
   rankLocationsByPrice,
   rankStandbyLocations,
@@ -902,17 +905,20 @@ export async function gatherDeploymentConfig(args) {
 
   // Server Type Selection (Streamlined)
   let serverType, masterServerType, workerServerType, dbServerType;
+  // The roles whose type is the region default rather than a flag or a
+  // record: only these are re-picked for an HA pair's common CPU class once
+  // the standby location is known (below). A recorded type is never moved,
+  // so a live server is never resized by this.
+  const defaultedRoles = [];
 
   if (isComposeDeploy) {
     // Compose = the whole stack on one host: the compose role's default (the
     // cheapest orderable 4 GB+ type in the region, src/lib/sizing.js). Never
     // the k8s db default, which is a 2 GB role. An env deployed before the
     // top-level record keeps its size on the server entry.
-    serverType =
-      args.serverType ||
-      envConfig.serverType ||
-      primaryEntryServerType(envConfig) ||
-      regionDefaults.composeType;
+    const chosen = args.serverType || envConfig.serverType || primaryEntryServerType(envConfig);
+    if (!chosen) defaultedRoles.push('compose');
+    serverType = chosen || regionDefaults.composeType;
     masterServerType = workerServerType = dbServerType = serverType;
   } else {
     // `args.serverType` acts as a blanket fallback for all three node roles
@@ -922,11 +928,15 @@ export async function gatherDeploymentConfig(args) {
     // programmatic caller; the per-role values from `.vibecarbon.json` / the
     // interactive prompt. `scale` is the command that takes `-type`.)
     const blanket = args.serverType || envConfig.serverType;
-    masterServerType =
-      args.masterServerType || envConfig.masterServerType || blanket || regionDefaults.masterType;
-    dbServerType = args.dbServerType || envConfig.dbServerType || blanket || regionDefaults.dbType;
-    workerServerType =
-      args.workerServerType || envConfig.workerServerType || blanket || regionDefaults.workerType;
+    const chosen = {
+      master: args.masterServerType || envConfig.masterServerType || blanket,
+      db: args.dbServerType || envConfig.dbServerType || blanket,
+      worker: args.workerServerType || envConfig.workerServerType || blanket,
+    };
+    for (const [role, type] of Object.entries(chosen)) if (!type) defaultedRoles.push(role);
+    masterServerType = chosen.master || regionDefaults.masterType;
+    dbServerType = chosen.db || regionDefaults.dbType;
+    workerServerType = chosen.worker || regionDefaults.workerType;
     serverType = workerServerType;
   }
 
@@ -1022,6 +1032,46 @@ export async function gatherDeploymentConfig(args) {
       }
     }
 
+    // One CPU class for both sides (owner decision 2026-11-03): each role
+    // whose type is the region default is re-picked as the best class both
+    // locations sell, at the same RAM tier (src/lib/sizing.js haRoleSets), so
+    // the standby below resolves to the very same type. A DigitalOcean sfo3
+    // primary with a tor1 standby runs -intel on both sides rather than an
+    // -amd primary beside a regular standby, which measured about twice as
+    // slow to install on the deploy's critical path. Flags and recorded types
+    // stay as they are.
+    if (defaultedRoles.length > 0) {
+      const sets = haRoleSets(Provider, region, secondaryRegion, defaultedRoles);
+      const before = {
+        compose: serverType,
+        master: masterServerType,
+        db: dbServerType,
+        worker: workerServerType,
+      };
+      const picked = Object.fromEntries(
+        defaultedRoles
+          .filter((role) => sets.primary[role])
+          .map((role) => [role, sets.primary[role]]),
+      );
+      if (isComposeDeploy) {
+        if (picked.compose)
+          serverType = masterServerType = workerServerType = dbServerType = picked.compose;
+      } else {
+        masterServerType = picked.master ?? masterServerType;
+        dbServerType = picked.db ?? dbServerType;
+        workerServerType = picked.worker ?? workerServerType;
+        serverType = workerServerType;
+      }
+      const moved = Object.entries(picked).filter(([role, type]) => before[role] !== type);
+      if (moved.length > 0 && sets.shared && sets.cpuClass) {
+        p.log.info(
+          `${region} and ${secondaryRegion} both sell ${haClassLabel(Provider, sets.cpuClass)} ` +
+            'servers, the best CPU class the two have in common, so both sides use it: ' +
+            `${moved.map(([role, type]) => `${role}=${type}`).join(', ')}`,
+        );
+      }
+    }
+
     // The standby's own sizes, resolved as the HA effects resolve them: a
     // type on record for the standby is kept (a redeploy never resizes or
     // refuses an existing env; deploy -server-type re-sizes both, and then
@@ -1048,7 +1098,7 @@ export async function gatherDeploymentConfig(args) {
       resolved = {
         compose: standbyOnRecord
           ? undefined
-          : Provider.resolveServerTypeForRegion(serverType, secondaryRegion, 'compose'),
+          : haStandbyType(Provider, serverType, secondaryRegion, 'compose'),
       };
       if (resolved.compose) standbyServerTypes = { serverType: resolved.compose };
     } else {

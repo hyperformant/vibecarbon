@@ -1,13 +1,16 @@
 /**
  * k8s-ha across a failover when the two sides run different types.
  *
- * On the DigitalOcean 2026-10-22 catalog, sfo3 sells only the -amd Basic
- * droplets and tor1 only the plain ones. A primary in sfo3 on
- * s-2vcpu-4gb-amd / s-1vcpu-2gb-amd therefore gets a tor1 standby on
- * s-2vcpu-4gb / s-1vcpu-2gb. After a failover the roles swap, and the
- * reconverge deploy must build each side on the types it already runs:
- * the new primary (tor1) never on the top-level -amd types, and the new
- * standby (sfo3) never on the old standby's plain worker.
+ * On the DigitalOcean 2026-10-22 catalog, sfo3 sells the -amd and -intel
+ * Basic droplets and tor1 the plain and -intel ones, with no -amd. A new
+ * deploy puts both sides on -intel (src/lib/sizing.js haRoleSets), but an
+ * env whose primary is already on s-2vcpu-4gb-amd / s-1vcpu-2gb-amd (on
+ * record from before that rule, or given with -server-type) gets a tor1
+ * standby on the closest class tor1 sells, s-2vcpu-4gb-intel /
+ * s-1vcpu-2gb-intel. After a failover the roles swap, and the reconverge
+ * deploy must build each side on the types it already runs: the new primary
+ * (tor1) never on the top-level -amd types, and the new standby (sfo3) never
+ * on the old standby's -intel worker.
  *
  * Drives the real chain: the fan-out (haK8sProvisionClusters, with deployK3s
  * stubbed), the success save's per-side record (haSidesRecord), the failover
@@ -65,6 +68,11 @@ const { envIdentityOf } = await import('../../../src/lib/env-identity.js');
 
 const AMD = { master: 's-2vcpu-4gb-amd', db: 's-1vcpu-2gb-amd', worker: 's-2vcpu-4gb-amd' };
 const PLAIN = { master: 's-2vcpu-4gb', db: 's-1vcpu-2gb', worker: 's-2vcpu-4gb' };
+const INTEL = {
+  master: 's-2vcpu-4gb-intel',
+  db: 's-1vcpu-2gb-intel',
+  worker: 's-2vcpu-4gb-intel',
+};
 
 type Side = { masterServerType: string; dbServerType: string; workerServerType: string };
 
@@ -163,7 +171,7 @@ describe('k8s-ha failover with mixed standby types (DigitalOcean sfo3 + tor1)', 
   it('first deploy: each side on types its own location sells', async () => {
     const first = await fanOut(store.current?.state.disk.environments.prod);
     expect(first.primary).toEqual({ region: 'sfo3', ...typesOf(AMD) });
-    expect(first.standby).toEqual({ region: 'tor1', ...typesOf(PLAIN) });
+    expect(first.standby).toEqual({ region: 'tor1', ...typesOf(INTEL) });
   });
 
   it('after swapHaRoles the reconverge deploy changes no type on either side', async () => {
@@ -173,7 +181,7 @@ describe('k8s-ha failover with mixed standby types (DigitalOcean sfo3 + tor1)', 
 
     const env = store.current?.state.disk.environments.prod;
     // The worker records moved with the roles.
-    expect(env.ha.primary.workerServerType).toBe(PLAIN.worker);
+    expect(env.ha.primary.workerServerType).toBe(INTEL.worker);
     expect(env.ha.standbyWorkerSpec.serverType).toBe(AMD.worker);
 
     const second = await fanOut(env);
@@ -208,16 +216,18 @@ describe('k8s-ha failover with mixed standby types (DigitalOcean sfo3 + tor1)', 
     const env = store.current?.state.disk.environments.prod;
     expect(env).toMatchObject({
       region: 'tor1',
-      masterServerType: PLAIN.master,
-      dbServerType: PLAIN.db,
-      workerServerType: PLAIN.worker,
+      masterServerType: INTEL.master,
+      dbServerType: INTEL.db,
+      workerServerType: INTEL.worker,
     });
     // destroy keeps the identity only (no ha record); the redeploy starts from it.
     const identity = envIdentityOf(env);
     expect(identity).not.toHaveProperty('ha');
     const rebuilt = await fanOut(identity);
     expect(rebuilt.primary).toEqual({ ...first.standby });
-    expect(rebuilt.standby).toEqual({ ...first.primary });
+    // The rebuilt sfo3 standby follows the tor1 primary's class (-intel, sold
+    // in both), not the -amd it ran before the failover.
+    expect(rebuilt.standby).toEqual({ region: 'sfo3', ...typesOf(INTEL) });
     expectSoldWhereBuilt(rebuilt.primary);
     expectSoldWhereBuilt(rebuilt.standby);
   });
