@@ -141,6 +141,22 @@ export function isNeverStartedSshTransportFailure(err) {
 }
 
 /**
+ * What a failed command SAID, for the classifiers below. runCommandAsync
+ * builds err.message as `Command failed: <argv>\n<stderr>` and keeps the
+ * stderr apart on err.stderr; classifying the message also classified the
+ * argv, and every scp and ssh carries `-o ConnectTimeout=10`, which the
+ * timeout wording matched, so every failed copy read as transient (a
+ * missing file retried three times, 2026-11-04). An error that did not come
+ * from runCommandAsync (no stderr property) is judged on its message.
+ *
+ * @param {Error & {stderr?: unknown}} err
+ * @returns {string}
+ */
+function failureText(err) {
+  return typeof err?.stderr === 'string' ? err.stderr : err?.message || '';
+}
+
+/**
  * Is a failed SSH-run command's output an in-container DNS-not-settled
  * failure on a freshly-provisioned server, as opposed to an SSH transport
  * drop or a wrapper timeout? Split out from isTransientSshCommandError
@@ -168,7 +184,7 @@ export function isNeverStartedSshTransportFailure(err) {
  * @returns {boolean}
  */
 export function isDnsNotSettledSshCommandError(err) {
-  const msg = err?.message || '';
+  const msg = failureText(err);
   return /dns: transient error|temporary failure resolving|temporary failure in name resolution|eai_again/i.test(
     msg,
   );
@@ -218,7 +234,7 @@ export function isDnsNotSettledSshCommandError(err) {
  * @returns {boolean}
  */
 export function isTransientSshCommandError(err) {
-  const msg = err?.message || '';
+  const msg = failureText(err);
   const isConnectionError =
     msg.includes('Connection reset') ||
     msg.includes('Connection refused') ||

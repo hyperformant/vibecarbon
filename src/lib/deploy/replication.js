@@ -2307,7 +2307,9 @@ export const WRITE_FENCE_DEADLINE_MS = 15_000;
  * the planner from evaluating pg_terminate_backend before the filter.
  */
 export const TERMINATE_CLIENT_BACKENDS_SQL =
-  "SELECT coalesce(string_agg(pid::text || '=' || ok::text, ','), '') FROM (" +
+  // `t`/`f` spelled out: a boolean cast to text is `true`/`false`, never the
+  // `t`/`f` psql prints for a bare boolean, and the parser below reads t/f.
+  "SELECT coalesce(string_agg(pid::text || '=' || CASE WHEN ok THEN 't' ELSE 'f' END, ','), '') FROM (" +
   'SELECT pid, pg_terminate_backend(pid, 5000) AS ok FROM (' +
   'SELECT pid FROM pg_stat_activity WHERE pid <> pg_backend_pid() ' +
   "AND backend_type IN ('client backend', 'pg_cron', 'pg_cron worker') OFFSET 0) c) t";
