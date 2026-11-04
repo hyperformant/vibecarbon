@@ -225,8 +225,8 @@ export async function runFrontendSmokeChecks(domain: string): Promise<Verificati
   const consoleErrors: string[] = [];
   try {
     // ignoreHTTPSErrors is scoped to THIS context (not a global browser flag):
-    // the matrix serves Let's Encrypt *staging* certs (ACME_CA_SERVER=staging,
-    // to dodge prod rate limits) whose CA isn't trusted, so every navigation
+    // the matrix serves Let's Encrypt *staging* certs by default (E2E_ACME_CA,
+    // to dodge prod rate limits) whose CA isn't trusted by the browser, so every navigation
     // would otherwise land on the cert interstitial and read as 0 chars.
     const context = await browser.newContext({ ignoreHTTPSErrors: true });
     const page = await context.newPage();
