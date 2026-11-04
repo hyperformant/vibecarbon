@@ -22,7 +22,6 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => ({
 
 const propagation = vi.hoisted(() => ({
   waitForDNSPropagation: vi.fn(async (..._args: unknown[]) => true),
-  waitForZoneServed: vi.fn(async () => ({ served: true, detail: 'ok', waitedMs: 1 })),
 }));
 vi.mock('../../../src/lib/dns-propagation.js', () => ({
   ...propagation,
@@ -100,7 +99,6 @@ beforeEach(() => {
   calls = [];
   propagation.waitForDNSPropagation.mockReset();
   propagation.waitForDNSPropagation.mockImplementation(async () => true);
-  propagation.waitForZoneServed.mockClear();
   setupSimple.mockReset();
   setupSimple.mockImplementation(async () => {
     calls.push('dns:setupSimple');
@@ -179,7 +177,7 @@ describe('compose: the A record is written while cloud-init runs', () => {
     expect(setupSimple).toHaveBeenCalledTimes(1);
   });
 
-  it('digitalocean: waits for the A record to propagate before Traefik starts, and never for the zone', async () => {
+  it('digitalocean: waits for the A record to propagate before Traefik starts', async () => {
     propagation.waitForDNSPropagation.mockImplementation(async () => {
       calls.push('dns:waitForPropagation');
       return true;
@@ -198,7 +196,6 @@ describe('compose: the A record is written while cloud-init runs', () => {
     expect(calls.indexOf('dns:waitForPropagation')).toBeLessThan(
       calls.indexOf('startComposeStack'),
     );
-    expect(propagation.waitForZoneServed).not.toHaveBeenCalled();
   });
 });
 

@@ -54,4 +54,13 @@ describe('compose solves HTTP-01 only', () => {
     const text = readFileSync(join(REPO, 'src/lib/deploy/compose/index.js'), 'utf8');
     expect(text).toMatch(/tar [^"]*-xzf - -C \$4 && rm -f \$4\/docker-compose\.dns01\.prod\.yml/);
   });
+
+  it('the pending-TLS fix hint points at HTTP-01 (A record, port 80), never at a DNS-01 solver', () => {
+    const text = readFileSync(join(REPO, 'src/lib/deploy/effects/index.js'), 'utf8');
+    const hint = text.match(/fixHint: `([^`]*)`/)?.[1] ?? '';
+    expect(hint).toContain('HTTP-01');
+    expect(hint).toContain('port 80');
+    expect(text).not.toMatch(/DNS-01 solver/);
+    expect(hint).not.toContain('\u2014');
+  });
 });

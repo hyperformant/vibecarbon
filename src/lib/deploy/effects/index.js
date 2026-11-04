@@ -645,7 +645,7 @@ async function verifyTlsReady(ctx) {
     reason: result.reason,
     served: result.served,
     traefikLogTail,
-    fixHint: `Check the ACME DNS-01 solver for ${dnsProvider} (token validity, zone ownership) in the log tail below.`,
+    fixHint: `Check that ${domain} resolves to this server and that port 80 is reachable from the internet, because Let's Encrypt validates the certificate over HTTP-01 on port 80. The Traefik log tail below shows the failure.`,
   });
   ctx.tlsState = { state: 'pending', checkedAt, reason: verdict.reason, ca };
   // Manual DNS ("deploy first, point DNS after"): the server waits until the
