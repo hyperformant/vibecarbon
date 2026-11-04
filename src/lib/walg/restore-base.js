@@ -35,6 +35,7 @@ import { formatBytes } from '../backup-s3.js';
 import { c } from '../colors.js';
 import { loadBackupS3Config, loadS3Config } from '../config.js';
 import { providerFor } from '../providers/index.js';
+import { S3_HTTP_TIMEOUTS } from '../s3-timeouts.js';
 import { buildRecoveryConfig, RESTORE_PITR_RE, renderRecoveryConf } from './recovery-config.js';
 import { BACKUP_NAME_RE, LINEAGE_RE } from './restore-layout.js';
 
@@ -101,6 +102,9 @@ export async function createS3Client(s3Config, clientOptions = {}) {
     endpoint: s3Config.endpoint,
     forcePathStyle: true,
     credentials: { accessKeyId: s3Config.accessKey, secretAccessKey: s3Config.secretKey },
+    // Bounded by default (S3_HTTP_TIMEOUTS); a caller's own requestHandler,
+    // like the failover read's tighter one, replaces it.
+    requestHandler: { ...S3_HTTP_TIMEOUTS },
     ...clientOptions,
   });
 }
