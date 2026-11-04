@@ -44,6 +44,7 @@ const BARE_ALLOWED: { file: string; fragment: string; why: string }[] = [
     file: 'src/lib/deploy/compose/db-ledger-preflight.js',
     fragment: 'docker compose up -d db',
     why:
+      'the fallback half of `[ -f vc-compose ] && sh vc-compose up -d db || docker compose up -d db`, ' +
       'a hint for a server that may still hold a RETIRED stack (the preflight refuses before the ' +
       'bundle upload); that stack predates vc-compose, so its own compose files are all there is',
   },
@@ -76,12 +77,33 @@ const SRC = read(walk(join(ROOT, 'src'), (f) => /\.(m?js)$/.test(f)));
 const SERVER_SCRIPTS = read(walk(join(ROOT, 'carbon', 'backup'), (f) => f.endsWith('.sh')));
 
 /** JS comment lines, and shell comment lines (also inside rendered scripts). */
-const isComment = (line: string) => /^\s*(\/\/|\*|\/\*|#)/.test(line);
-const codeLines = (text: string) =>
-  text
-    .split('\n')
-    .map((line, i) => ({ line, n: i + 1 }))
-    .filter(({ line }) => !isComment(line));
+const isComment = (line: string) => /^\s*(\/\/|\*(\s|\/|$)|\/\*|#)/.test(line);
+
+/**
+ * Physical lines joined across a trailing `+` string continuation
+ * (`docker ` + newline + `compose run`), so a command split over two string
+ * literals reads as one line. The joined line keeps the first line's number.
+ */
+function logicalLines(text: string): { line: string; n: number }[] {
+  const physical = text.split('\n');
+  const out: { line: string; n: number }[] = [];
+  for (let i = 0; i < physical.length; i++) {
+    let line = physical[i];
+    const n = i + 1;
+    while (
+      i + 1 < physical.length &&
+      /['"`]\s*\+\s*$/.test(line) &&
+      !isComment(line) &&
+      !isComment(physical[i + 1])
+    ) {
+      line = line.replace(/['"`]\s*\+\s*$/, '') + physical[i + 1].replace(/^\s*['"`]/, '');
+      i++;
+    }
+    out.push({ line, n });
+  }
+  return out;
+}
+const codeLines = (text: string) => logicalLines(text).filter(({ line }) => !isComment(line));
 
 // ---------------------------------------------------------------------------
 // Detectors
@@ -89,7 +111,7 @@ const codeLines = (text: string) =>
 
 /** (a) A Compose invocation spelled out: `docker compose` or the v1 `docker-compose` binary. */
 const BARE =
-  /\bdocker compose\b|\bdocker-compose\s+(-f|-p|up|down|exec|run|ps|logs|stop|start|restart|pull|config)\b/;
+  /\bdocker\s+compose\b|\bdocker-compose\s+(-f|-p|up|down|exec|run|ps|logs|stop|start|restart|pull|config)\b/;
 function bareCompose(file: string, text: string): string[] {
   if (file === SINGLE_SOURCE) return [];
   return codeLines(text)
@@ -106,6 +128,8 @@ function bareCompose(file: string, text: string): string[] {
  * config_files label.
  */
 const OWN_LIST = [
+  // vc-compose already carries the full list: any -f/--file after it doubles a file or names a missing one.
+  /(?:\bvc-compose|\bVC_COMPOSE\}?)\s+(?:-f|--file)\b/,
   /(?<!\[\s{0,3}|\btest\s{0,3})(?:^|[\s'"`(=])(?:-f|--file)[\s=]+['"]?docker-compose[\w.-]*\.ya?ml/,
   /\bCOMPOSE_BASE_FILES\b|\bCOMPOSE_OPTIONAL_FILES\b|\bcomposeFileFlags\s*\(/,
   /sed -n [^|]*reconcile\.sh|RECONCILE_FLAGS_SED/,
@@ -244,6 +268,12 @@ describe('the detectors bite', () => {
       "const cmd = 'docker compose stop db';",
       tpl('`cd /opt/#{projectName} && docker-compose -f docker-compose.yml up -d`'),
       'traefik="$(docker compose ps -q traefik 2>/dev/null)"',
+      // docker and compose split over a `+` string continuation
+      tpl('`cd #{remoteDir} && docker ` +\n  `compose run --rm app-migrate`'),
+      // a bare call inside a rendered shell case arm (starts with `*)`, not a comment)
+      '    *) docker compose up -d ;;',
+      // two spaces between the words
+      'docker  compose up -d db',
     ]) {
       expect(bareCompose('src/x.js', bad), bad).toHaveLength(1);
     }
@@ -253,6 +283,9 @@ describe('the detectors bite', () => {
       '# docker compose restart traefik, by hand',
       tpl('`cd #{remoteDir} && #{VC_COMPOSE} exec -T db psql`'),
       'traefik="$(sh vc-compose ps -q traefik 2>/dev/null)"',
+      'sh vc-compose up -d db',
+      ' * docker compose run, in a JSDoc comment',
+      ' */',
     ]) {
       expect(bareCompose('src/x.js', fine), fine).toEqual([]);
     }
@@ -263,6 +296,9 @@ describe('the detectors bite', () => {
     for (const bad of [
       "const FLAGS = '-f docker-compose.yml -f docker-compose.prod.yml';",
       tpl('`#{VC_COMPOSE} -f docker-compose.replication.yml up -d db`'),
+      tpl('`cd #{remoteDir} && #{VC_COMPOSE} -f #{COMPOSE_REPLICATION_OVERLAY} up -d db`'),
+      tpl('`cd #{remoteDir} && #{VC_COMPOSE} -f #{DNS01_OVERRIDE_FILE} up -d db`'),
+      'sh vc-compose --file extra.yml up -d db',
       tpl('const base = COMPOSE_BASE_FILES.map((f) => `-f #{f}`);'),
       'const flags = composeFileFlags(options);',
       "`FLAGS=$(sed -n '...' reconcile.sh | tail -1)`",
@@ -274,6 +310,7 @@ describe('the detectors bite', () => {
       'if [ -f docker-compose.replication.yml ]; then',
       'test -f docker-compose.replication.yml && echo overlay',
       "`cat > /opt/#{projectName}/docker-compose.replication.yml << 'REPL'`",
+      'sh vc-compose up -d db',
       'docker rm -f "$container_id"',
       'docker inspect -f \'{{.State.Running}}\' "$c"',
     ]) {

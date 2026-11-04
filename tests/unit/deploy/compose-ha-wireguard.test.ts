@@ -108,6 +108,10 @@ describe('buildReplicationOverlay', () => {
     expect(y).toContain('TCP:127.0.0.1:5433');
   });
 
+  it('has no top-level version key (Compose v2 warns that it is obsolete on every command)', () => {
+    expect(buildReplicationOverlay(WG_PRIMARY_IP)).not.toMatch(/^version:/m);
+  });
+
   it('bakes the per-node self tunnel IP (never hardcoded to primary)', () => {
     expect(buildReplicationOverlay('10.99.0.2')).toContain('bind=10.99.0.2');
   });

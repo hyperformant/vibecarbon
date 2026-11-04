@@ -162,7 +162,7 @@ describe('assertDbMadeByThisStack', () => {
     );
     expect(err).toBeInstanceOf(Error);
     const msg = String(err.message);
-    expect(msg).toContain('docker compose up -d db');
+    expect(msg).toContain('[ -f vc-compose ] && sh vc-compose up -d db || docker compose up -d db');
     expect(msg).toContain('deploy again');
     expect(msg).not.toMatch(/—/);
   });

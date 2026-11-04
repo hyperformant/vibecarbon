@@ -282,8 +282,7 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
 export const SOCAT_IMAGE = socatImageRef();
 
 export function buildReplicationOverlay(selfWgIp) {
-  return `version: "3.8"
-services:
+  return `services:
   db:
     ports:
       - "${REPL_PORT}:5432"
