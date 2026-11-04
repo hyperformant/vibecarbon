@@ -206,7 +206,9 @@ describe('primary-only add-ons on the promoted node', () => {
     const start = body.indexOf('composeStartPrimaryOnlyCmd(');
     expect(start).toBeGreaterThan(-1);
     expect(body.indexOf('composeStartPrimaryOnlyCmd(', start + 1)).toBe(-1);
-    expect(body.indexOf('restoreComposeWalgRole(')).toBeLessThan(start);
+    const audit = body.indexOf('await restoreWalgRole(');
+    expect(audit).toBeGreaterThan(-1);
+    expect(audit).toBeLessThan(start);
     expect(body.indexOf('armComposeAcme(')).toBeLessThan(start);
     expect(body.indexOf('waitForNewPrimaryApi(')).toBeLessThan(start);
     const step2Stop = body.indexOf("s.start('Stopping old primary services')");

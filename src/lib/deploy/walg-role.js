@@ -1,94 +1,449 @@
 /**
- * Post-failover wal-g WRITE-GUARD role reconciliation.
+ * The wal-g WRITE-GUARD role: `primary` archives, `standby` no-ops.
  *
  * WHY THIS EXISTS
  * ---------------
- * `WALG_ROLE` is the wal-g write-guard: `primary` archives, `standby` no-ops.
- * It is rendered ONCE, at DEPLOY time, from the deploy's notion of which node is
- * which — compose writes it into each node's `.env` (haMergeWalgRoleStep, before
- * the stack starts) and k8s renders it into the db container env
- * (`{{WALG_ROLE}}` in k8s/base/db/statefulset.yaml).
+ * The role is set ONCE, at DEPLOY time, from the deploy's notion of which node
+ * is which. Failover moves it WITHOUT redeploying: it promotes the standby,
+ * flips DNS, and persists the swap in the project config. Before the role
+ * moved with it, the promoted node kept the value it was DEPLOYED with,
+ * `standby`, which short-circuits wal-archive.sh (no WAL archived) and the
+ * base-backup path on both tiers. Total backup outage on the node now holding
+ * the only live copy of the data, until the next deploy happened to rewrite
+ * the roles, in the worst possible window: right after a failover, with one
+ * node down and no second copy.
  *
- * Failover moves the role WITHOUT redeploying. It promotes the standby, flips
- * DNS, and persists the swap in the project config — but nothing re-rendered
- * `WALG_ROLE`, so the promoted node kept the value it was DEPLOYED with:
+ * ONE FILE, ONE PARSER, NO RESTART
+ * --------------------------------
+ * The role is a one-word file outside PGDATA, WALG_ROLE_FILE in the db
+ * container, which every wal-g caller reads through the one parser
+ * (WALG_ROLE_PARSE_SH) on each run. So a move is one write, with no pod or
+ * container restart:
  *
- *   - compose: the new primary carried `WALG_ROLE=standby`, which short-circuits
- *     BOTH wal-archive.sh (no WAL archived) and compose-backup.sh (no base
- *     backups). Total backup outage on the node now holding the only live copy
- *     of the data, until the next deploy happened to rewrite the roles.
- *   - k8s: the backup CronJob `kubectl exec`s into the db pod and inherits its
- *     env, so base backups were skipped for the same reason. (WAL archiving
- *     survived only because the k8s copy of wal-archive.sh had drifted and lost
- *     the guard entirely — which is its own bug, fixed in the same change.)
+ *   - k8s: the role subPath of the db volume, plus a durable intent ConfigMap
+ *     that db-guard.sh applies on every container start. setK8sWalgRole
+ *     applies the intent, then writes the live file and reads it back.
+ *   - compose: the host directory `/opt/<project>/.vibecarbon-role`, bound
+ *     read-only into the db container. writeComposeWalgRole writes it over
+ *     SSH and reads it back. Nothing about the role is in `.env` any more.
  *
- * Either way the window is the worst possible one: right after a failover, with
- * one node down and no second copy.
- *
- * THE MOVE HAS TO REACH THE RUNNING PROCESS
- * -----------------------------------------
- * `WALG_ROLE` is CONTAINER ENVIRONMENT on both tiers, and container environment
- * is fixed at container-create time. Writing `.env` does nothing on its own —
- * `docker compose restart` re-runs the SAME container with the SAME env — and
- * neither does patching a StatefulSet without letting the pod roll. So both
- * paths here end in a recreate, and both then PROVE the new value took by
- * running the deploy-time backup audit in `requirePrimary` mode against the
- * promoted node (src/lib/deploy/walg-audit.js): if the env did not actually
- * change, the probe still reports `WALG_ROLE=standby` and the audit fails.
- * A config file updated but never read is not a fix.
+ * Failover arms the promoted side BEFORE pg_promote (D2), while it is still
+ * in recovery (archive_command never runs there, so the write is inert until
+ * the promote makes it true), and then PROVES it took by running the
+ * deploy-time backup audit in `requirePrimary` mode against the promoted node
+ * (src/lib/deploy/walg-audit.js).
  *
  * BOTH DIRECTIONS OF THE SWAP
  * ---------------------------
- * The old primary is demoted too, best-effort. After a failover its database is
- * still running, still out of recovery, and still `WALG_ROLE=primary`, so with
- * the write-guard in place on both tiers it would keep pushing WAL into the same
- * canonical prefix the NEW primary now writes — two writers in one backup
- * stream. Demoting it is what makes the swap symmetric. It is best-effort
- * because an unreachable old primary is the most common reason to fail over at
- * all, and refusing to finish a failover over it would be absurd.
+ * The old primary is demoted too, best-effort. After a failover its database
+ * is still running, still out of recovery, and still reading `primary`, so it
+ * would keep pushing WAL into the same canonical prefix the NEW primary now
+ * writes: two writers in one backup stream. Demoting it is what makes the
+ * swap symmetric. It is best-effort because an unreachable old primary is the
+ * most common reason to fail over at all, and refusing to finish a failover
+ * over it would be absurd.
  */
 
-import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
-import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
-import { DB_STS_BOOT_TIMEOUT_S, watchDbAttach } from './replication.js';
+import { outputLines } from '../remote-sentinel.js';
+import { shEscape } from '../shell.js';
+import { sshRun } from '../ssh.js';
+import { validateProjectName } from '../validators.js';
+import { DB_CONTAINER, DB_POD } from './db-workload.js';
 import { dropInactiveReplicationSlots, slotDropWarning } from './replication-slot.js';
 
-/** The env var both tiers read as the wal-g write-guard. */
-export const WALG_ROLE_ENV = 'WALG_ROLE';
+/** In-container path, both tiers. */
+export const WALG_ROLE_DIR = '/var/lib/vibecarbon/role';
+export const WALG_ROLE_FILE = `${WALG_ROLE_DIR}/walg-role`;
 
 /**
- * The compose node-role env, written wherever a compose node's role is.
+ * THE role parser (POSIX sh). Reads "$vc_walg_role_file"; sets VC_WALG_ROLE to
+ * primary, standby or "". Never exits. Carried verbatim by walg-env.sh (both
+ * copies) and tls-snapshot.sh; rendered by walgRoleReadFragment everywhere else.
+ */
+export const WALG_ROLE_PARSE_SH = [
+  'VC_WALG_ROLE=""',
+  'if [ -f "$vc_walg_role_file" ] && [ ! -L "$vc_walg_role_file" ]; then',
+  '    case "$(cat "$vc_walg_role_file" 2>/dev/null)" in',
+  '        primary) VC_WALG_ROLE=primary ;;',
+  '        standby) VC_WALG_ROLE=standby ;;',
+  '    esac',
+  'fi',
+].join('\n');
+
+/**
+ * `vc_walg_role_file=<path>` + the parser + `unset vc_walg_role_file`.
  *
- * `WALG_ROLE` is the wal-g write-guard (see the module docblock). Every
- * compose-side role write (deploy's haMergeWalgRole, failover's
- * restoreComposeWalgRole / demoteComposeWalgRole) goes through here, so the
- * role is validated in one place: an unknown role throws instead of silently
- * arming (or disarming) archiving. compose-role-env-census.test.ts enforces it.
+ * @param {string} path the role file to read
+ * @returns {string} POSIX sh that leaves VC_WALG_ROLE set (not exported)
+ */
+export function walgRoleReadFragment(path) {
+  return `vc_walg_role_file=${shEscape(path)}\n${WALG_ROLE_PARSE_SH}\nunset vc_walg_role_file`;
+}
+
+/**
+ * The tail of both failover role-mount refusals (k8s db-0 mount, compose db
+ * bind). They run after the operator-IP firewall refresh (their probe needs
+ * ssh) and the retirement-fence reconcile, so they cannot claim nothing
+ * changed: they claim what is true, that no failover step ran.
+ */
+export const FAILOVER_NOT_STARTED =
+  'The failover did not start: the databases, their wal-g roles and DNS are unchanged.';
+
+/** The compose role directory on the host, relative to `/opt/<project>`. */
+export const COMPOSE_WALG_ROLE_HOST_DIR = '.vibecarbon-role';
+
+/** k8s: the CLI-owned ConfigMap holding the durable role intent. */
+export const DB_ROLE_CONFIGMAP = 'vibecarbon-db-role';
+
+/** Its one key, injected into the db container as an env var of the same name. */
+export const DB_ROLE_INTENT_KEY = 'VC_WALG_ROLE_INTENT';
+
+/**
+ * The one role check every writer goes through: only the two literal words.
  *
- * Values are strings because the destination is a dotenv file.
+ * @param {unknown} role
+ * @returns {'primary'|'standby'}
+ */
+export function assertWalgRole(role) {
+  if (role !== 'primary' && role !== 'standby') {
+    throw new Error(`unknown wal-g role ${JSON.stringify(role) ?? String(role)}`);
+  }
+  return role;
+}
+
+/**
+ * POSIX sh that prints `WALG_ROLE_FILE=<role>` for `<dir>/walg-role`, read
+ * through the one parser. `<role>` is empty for a missing or unparseable file.
+ * Never fails.
+ *
+ * @param {string} dir
+ * @returns {string}
+ */
+export function walgRoleReadShell(dir) {
+  return `${walgRoleReadFragment(`${dir}/walg-role`)}\nprintf 'WALG_ROLE_FILE=%s\\n' "$VC_WALG_ROLE"`;
+}
+
+/**
+ * The one read-back of a walgRoleReadShell answer: the role its
+ * `WALG_ROLE_FILE=<role>` line names (`primary`, `standby`, or '' for a
+ * missing or unparseable file), or undefined when no such line came back (the
+ * node did not answer). `false` (sshRun's failure value) reads as no answer.
+ * Every caller reads the answer through this (census:
+ * tests/unit/deploy/walg-role-source-census.test.ts).
+ *
+ * @param {unknown} out
+ * @returns {string|undefined}
+ */
+export function parseWalgRoleReadBack(out) {
+  const text = out === false || out == null ? '' : String(out);
+  return /^WALG_ROLE_FILE=(.*)$/m.exec(text)?.[1]?.trim();
+}
+
+/**
+ * The stderr line a failed role write prints. setK8sWalgRole matches it on
+ * the error's stderr only: the thrown message carries the whole command,
+ * script and this text included.
+ */
+const WALG_ROLE_WRITE_FAILED = '[walg-role] could not write the wal-g role in';
+
+/**
+ * POSIX sh that writes the role to `<dir>/walg-role` atomically, then prints
+ * it read back through the one parser (walgRoleReadShell).
+ *
+ * The write happens inside `<dir>`, so the rename never crosses a filesystem:
+ * remove any stale tmp (a planted symlink is removed, never followed), create
+ * the tmp under noclobber (a name that reappears in between fails the write
+ * instead of being followed), chmod 0644, sync (the tmp's bytes are durable
+ * before the rename can expose them), `mv -f` over the role file, sync (the
+ * rename itself is durable). Plain `sync`: busybox's older builds take no
+ * file arguments.
+ * A reader sees the old word or the new one, never a partial file. Any step
+ * failing exits 1 before the read-back, so no role line is printed.
+ *
+ * @param {string} dir the role directory (must exist)
+ * @param {'primary'|'standby'} role
+ * @returns {string}
+ */
+export function walgRoleWriteShell(dir, role) {
+  assertWalgRole(role);
+  return [
+    `( cd ${shEscape(dir)} && rm -f walg-role.tmp && (set -C && printf '%s\\n' ${role} > walg-role.tmp) && chmod 0644 walg-role.tmp && sync && mv -f walg-role.tmp walg-role && sync ) || { echo ${shEscape(`${WALG_ROLE_WRITE_FAILED} ${dir}`)} >&2; exit 1; }`,
+    walgRoleReadShell(dir),
+  ].join('\n');
+}
+
+/**
+ * The k8s role intent ConfigMap. Applied with `kubectl apply -f -`, so a
+ * cluster that predates it gets it created rather than a failed patch. Not in
+ * k8s/base: Flux never sees it.
  *
  * @param {'primary'|'standby'} role
- * @returns {Record<string, string>}
+ * @returns {string} YAML
  */
-export function composeRoleEnv(role) {
-  if (role !== 'primary' && role !== 'standby') {
-    throw new Error(`composeRoleEnv: unknown role ${role}`);
+export function dbRoleConfigMapManifest(role) {
+  assertWalgRole(role);
+  return [
+    'apiVersion: v1',
+    'kind: ConfigMap',
+    'metadata:',
+    `  name: ${DB_ROLE_CONFIGMAP}`,
+    '  namespace: vibecarbon',
+    'data:',
+    `  ${DB_ROLE_INTENT_KEY}: ${role}`,
+    '',
+  ].join('\n');
+}
+
+/**
+ * kubectl argv (no leading `kubectl`) that applies dbRoleConfigMapManifest,
+ * passed as the call's `input`.
+ *
+ * @returns {string[]}
+ */
+export function k8sWalgRoleIntentApplyArgv() {
+  return ['-n', 'vibecarbon', 'apply', '-f', '-'];
+}
+
+/**
+ * kubectl argv that writes the live role file in the db container. Every
+ * token survives sshKubectl's per-token shEscape join, the script included.
+ *
+ * @param {'primary'|'standby'} role
+ * @returns {string[]}
+ */
+export function k8sWalgRoleExecArgv(role) {
+  return [
+    '-n',
+    'vibecarbon',
+    'exec',
+    DB_POD,
+    '-c',
+    DB_CONTAINER,
+    '--',
+    'sh',
+    '-c',
+    walgRoleWriteShell(WALG_ROLE_DIR, role),
+  ];
+}
+
+/**
+ * Does this db pod's db container mount WALG_ROLE_DIR? A pod from before the
+ * role mount would take an exec write into its container overlay and read it
+ * back as a false success, so the live write is gated on this.
+ *
+ * @param {string|object} podJson `kubectl get pod -o json` output, or its parse
+ * @returns {boolean} false for anything unparseable
+ */
+export function podMountsWalgRoleDir(podJson) {
+  let pod;
+  try {
+    pod = typeof podJson === 'string' ? JSON.parse(podJson) : podJson;
+  } catch {
+    return false;
   }
-  return { [WALG_ROLE_ENV]: role };
+  const containers = pod?.spec?.containers;
+  if (!Array.isArray(containers)) return false;
+  const db = containers.find((c) => c?.name === DB_CONTAINER);
+  const mounts = db?.volumeMounts;
+  return Array.isArray(mounts) && mounts.some((m) => m?.mountPath === WALG_ROLE_DIR);
+}
+
+/**
+ * Set the k8s wal-g role: the durable intent first (created if missing), then
+ * the live file, but only on a pod whose spec mounts WALG_ROLE_DIR.
+ *
+ * A failed intent apply throws: without it a db start that the CLI could not
+ * reach would come back with the wrong role. So a returned result always has
+ * `intent: true`; the field stays so callers can log the whole result. The
+ * live write never throws unless `requireLive` is set; the result says why it
+ * did not land: `no-role-mount` (a pod from before the role mount),
+ * `pod-unreachable` (get or exec could not reach the container),
+ * `write-failed` (the write ran and failed: a read-only mount, a full disk),
+ * `read-back-mismatch` (it ran but the parser does not read `role` back).
+ *
+ * @param {object} o
+ * @param {string} o.ip
+ * @param {(ip: string, argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>} o.kubectl
+ * @param {'primary'|'standby'} o.role
+ * @param {boolean} [o.requireLive] throw unless the live file now reads `role`
+ * @param {string} [o.envName] named in the no-role-mount hint; `<env>` when absent
+ * @returns {Promise<{intent: true, live: boolean, reason?: 'no-role-mount'|'pod-unreachable'|'write-failed'|'read-back-mismatch', error?: Error}>}
+ */
+export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false, envName }) {
+  assertWalgRole(role);
+  await kubectl(ip, k8sWalgRoleIntentApplyArgv(), {
+    input: dbRoleConfigMapManifest(role),
+    timeout: 60_000,
+  });
+
+  /** @param {{intent: true, live: boolean, reason?: string, error?: Error}} result */
+  const settle = (result) => {
+    if (!requireLive || result.live) return result;
+    if (result.reason === 'no-role-mount') {
+      throw new Error(
+        `this cluster's db predates the live wal-g role (no ${WALG_ROLE_DIR} mount on ${DB_POD}); ` +
+          `run \`vibecarbon deploy ${envName || '<env>'}\` once (one db restart), then retry`,
+      );
+    }
+    const detail = result.error ? `: ${result.error.message}` : '';
+    throw new Error(
+      `could not set the wal-g role to ${role} on ${DB_POD} (${result.reason})${detail}`,
+    );
+  };
+
+  let pod;
+  try {
+    pod = await kubectl(ip, ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'], {
+      timeout: 30_000,
+    });
+  } catch (error) {
+    return settle({ intent: true, live: false, reason: 'pod-unreachable', error });
+  }
+  if (!podMountsWalgRoleDir(pod)) {
+    return settle({ intent: true, live: false, reason: 'no-role-mount' });
+  }
+
+  let out;
+  try {
+    out = await kubectl(ip, k8sWalgRoleExecArgv(role), { timeout: 30_000 });
+  } catch (error) {
+    const wrote = outputLines(error?.stderr).some((l) => l.startsWith(WALG_ROLE_WRITE_FAILED));
+    return settle({
+      intent: true,
+      live: false,
+      reason: wrote ? 'write-failed' : 'pod-unreachable',
+      error,
+    });
+  }
+  const readBack = parseWalgRoleReadBack(out);
+  if (readBack !== role) {
+    return settle({ intent: true, live: false, reason: 'read-back-mismatch' });
+  }
+  return { intent: true, live: true };
+}
+
+/**
+ * One SSH command for a compose host: write the role into
+ * `/opt/<project>/.vibecarbon-role/walg-role` (bound read-only into the db
+ * container). Runs on the host, so it works with db stopped.
+ *
+ * @param {string} projectName
+ * @param {'primary'|'standby'} role
+ * @returns {string}
+ */
+export function composeWalgRoleWriteShell(projectName, role) {
+  const invalid = validateProjectName(projectName);
+  if (invalid) throw new Error(`composeWalgRoleWriteShell: ${invalid}`);
+  assertWalgRole(role);
+  const projectDir = `/opt/${projectName}`;
+  return [
+    `cd ${projectDir} && mkdir -p ${COMPOSE_WALG_ROLE_HOST_DIR} && chmod 0755 ${COMPOSE_WALG_ROLE_HOST_DIR} || exit 1`,
+    walgRoleWriteShell(`${projectDir}/${COMPOSE_WALG_ROLE_HOST_DIR}`, role),
+  ].join('\n');
+}
+
+/**
+ * Write a compose node's role file over SSH (composeWalgRoleWriteShell) and
+ * prove it: the write's own read-back, through the one parser, must name the
+ * role. Throws otherwise, so a deploy or scale never starts a stack whose db
+ * would read a missing or stale role. The script runs as `sh -c <script>`,
+ * one argv token, so the remote shell never word-splits it.
+ *
+ * @param {object} args
+ * @param {string} args.ip
+ * @param {string} args.sshKeyPath
+ * @param {string} args.projectName
+ * @param {'primary'|'standby'} args.role
+ * @param {typeof sshRun} [args.run] ssh.js's sshRun (argv), injectable for tests
+ * @returns {Promise<void>}
+ */
+export async function writeComposeWalgRole({ ip, sshKeyPath, projectName, role, run = sshRun }) {
+  const script = composeWalgRoleWriteShell(projectName, role);
+  let out;
+  try {
+    out = await run(ip, sshKeyPath, ['sh', '-c', script], { timeout: 30_000 });
+  } catch (error) {
+    // The message carries the whole command; quote stderr's last line only.
+    const stderr = String(error?.stderr ?? '').trim();
+    const detail = outputLines(stderr).some((l) => l.startsWith(WALG_ROLE_WRITE_FAILED))
+      ? `the write failed in /opt/${projectName}/${COMPOSE_WALG_ROLE_HOST_DIR}`
+      : stderr.split('\n').at(-1) || 'the ssh command failed';
+    throw new Error(`could not write the wal-g role ${role} on ${ip}: ${detail}`);
+  }
+  const readBack = parseWalgRoleReadBack(out);
+  if (readBack !== role) {
+    throw new Error(
+      `the wal-g role on ${ip} read back as ${JSON.stringify(readBack ?? '')} after writing ${role}`,
+    );
+  }
+}
+
+/**
+ * One SSH command for a compose host: does the RUNNING db container
+ * (`<project>-db`) bind WALG_ROLE_DIR? Prints `VC_ROLE_BIND=present` or
+ * `VC_ROLE_BIND=absent`, or nothing when the container cannot be inspected.
+ * The compose twin of podMountsWalgRoleDir: a container created before the
+ * role bind keeps reading the old role env, so a host write never reaches it.
+ *
+ * @param {string} projectName
+ * @returns {string}
+ */
+export function composeRoleBindProbeShell(projectName) {
+  const invalid = validateProjectName(projectName);
+  if (invalid) throw new Error(`composeRoleBindProbeShell: ${invalid}`);
+  const format = shEscape('{{range .Mounts}}{{println .Destination}}{{end}}');
+  return [
+    `if m=$(docker inspect --type container -f ${format} ${shEscape(`${projectName}-db`)} 2>/dev/null); then`,
+    `    if printf '%s\\n' "$m" | grep -qxF ${shEscape(WALG_ROLE_DIR)}; then echo VC_ROLE_BIND=present; else echo VC_ROLE_BIND=absent; fi`,
+    'fi',
+  ].join('\n');
+}
+
+/**
+ * Run composeRoleBindProbeShell over SSH. true or false is what the running
+ * container says; null is unknown (no container, ssh failed), which callers
+ * leave to their own later checks rather than refuse on.
+ *
+ * @param {object} args
+ * @param {string} args.ip
+ * @param {string} args.sshKeyPath
+ * @param {string} args.projectName
+ * @param {typeof sshRun} [args.run] ssh.js's sshRun (argv), injectable for tests
+ * @returns {Promise<boolean | null>}
+ */
+export async function composeDbMountsWalgRoleDir({ ip, sshKeyPath, projectName, run = sshRun }) {
+  const script = composeRoleBindProbeShell(projectName);
+  let out;
+  try {
+    out = await run(ip, sshKeyPath, ['sh', '-c', script], { timeout: 30_000 });
+  } catch {
+    return null;
+  }
+  const verdict = /^VC_ROLE_BIND=(present|absent)$/m.exec(String(out ?? ''))?.[1];
+  return verdict === undefined ? null : verdict === 'present';
 }
 
 /**
  * The compose label that records the `-f` set a container was CREATED with.
  * Set by Compose v2+ on every container it creates, as comma-separated absolute
- * paths. Verified against Docker Compose v5.3.1. Exported for acme-role.js's
- * traefik recreate, which derives its `-f` set the same way.
+ * paths. Verified against Docker Compose v5.3.1. acme-role.js's traefik
+ * recreate derives its `-f` set from it.
+ *
+ * WHY THE `-f` SET IS THE WHOLE PROBLEM: a bare `docker compose up -d
+ * --no-deps <svc>` resolves ONLY `docker-compose.yml`. It recreates the
+ * service with the DEV config (no `docker-compose.prod.yml`, no overlays), and
+ * on a compose-ha node a db recreated that way DROPPED the replication
+ * overlay's `5433:5432` publish (measured: `Container … Started`, and
+ * `.NetworkSettings.Ports` was `{}`). So a recreate reads this label off the
+ * RUNNING container first, falls back to a constrained file list, and then
+ * checks the published ports (PUBLISHED_PORTS_TEMPLATE) survived.
  */
 export const COMPOSE_CONFIG_FILES_LABEL = 'com.docker.compose.project.config_files';
 
 /**
  * Go template emitting one `<container-port>-><host-port>` token per PUBLISHED
  * port. Exposed-but-unpublished ports have a null mapping and `range` over nil
- * yields nothing, so only real publishes are compared — which is the property
+ * yields nothing, so only real publishes are compared, which is the property
  * that matters. Single-quoted at the use site so the remote shell does not
  * expand `$p` / `$c` as its own variables.
  */
@@ -96,183 +451,37 @@ export const PUBLISHED_PORTS_TEMPLATE =
   '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{$p}}->{{.HostPort}} {{end}}{{end}}';
 
 /**
- * Bash that RECREATES the compose `db` service so it picks up the `WALG_ROLE`
- * just merged into `.env`, verifies the recreate did not silently lose anything,
- * then waits for postgres to accept connections again.
- *
- * WHY THE `-f` SET IS THE WHOLE PROBLEM
- * ------------------------------------
- * A bare `docker compose up -d --no-deps db` resolves ONLY `docker-compose.yml`.
- * It recreates the database with the DEV config — no `docker-compose.prod.yml` —
- * and on a compose-ha node it DROPS the replication overlay's `5433:5432`
- * publish that the repl-gateway socat relay dials. Measured, not theorised:
- * against a three-file project, a bare `up -d --no-deps db` reported
- * `Container … Started` and left `.NetworkSettings.Ports` as `{}`. Everything
- * looks healthy and replication transport is gone — the same shape as the
- * subnet-pin incident, where a recreate with the wrong file set wedged
- * production for two days.
- *
- * Failover does not have the deploy's feature options, so the set is recovered
- * from the node, two ways, in order of authority:
- *
- *   1. GROUND TRUTH — the `com.docker.compose.project.config_files` label on the
- *      RUNNING db container, which is literally the `-f` set that container was
- *      created with. Read BEFORE the recreate (the recreate overwrites it).
- *   2. FALLBACK — base + prod + the replication overlay when present. This is
- *      deliberately NOT "every overlay on the node": it mirrors, file for file,
- *      the ONLY other place that recreates `db` on a compose-ha node —
- *      `haWriteReplicationOverlay`'s `REPL_COMPOSE_FLAGS`
- *      (src/lib/deploy/compose/ha.js). Merging in an overlay the deploy never
- *      applied to `db` would be its own wrong-`-f` bug in the other direction,
- *      and the port assertion below could not catch it because it only detects
- *      REMOVALS: `docker-compose.n8n.yml` and `docker-compose.metabase.yml` both
- *      define a `db:` key. A unit test pins this list to REPL_COMPOSE_FLAGS.
- *
- * AND THEN IT CHECKS, rather than trusting either. The set of published ports is
- * captured before and compared after: anything that disappeared fails the step
- * loudly. A DR event is the worst possible place to discover that a recreate
- * quietly un-published the replication port, and this is the assertion that
- * makes both derivations above safe rather than merely careful. Note its limit —
- * it detects removals only, which is exactly why the fallback set above is
- * constrained rather than generous.
- *
- * `--no-deps` keeps this to the one service — nothing else on the node is
- * touched, and in particular the app tier is not restarted out from under the
- * caller (compose failover restarts it itself, right after this, so it reconnects
- * to the recreated database).
- *
- * @param {string} remoteDir e.g. `/opt/<project>`
- * @returns {string} a bash script, run as one SSH command
- */
-export function composeDbRecreateShell(remoteDir) {
-  const baseFlags = COMPOSE_BASE_FILES.map((f) => `-f ${f}`).join(' ');
-  return [
-    'set -e',
-    `cd ${remoteDir}`,
-    // `head -n1`: db is never scaled, but a stray second id would corrupt every
-    // inspect below.
-    'CID="$(docker compose ps -q db | head -n1)"',
-    'if [ -z "$CID" ]; then',
-    `  echo "[walg-role] no db container is running in ${remoteDir}, refusing to recreate blind" >&2`,
-    '  exit 1',
-    'fi',
-    `FILES="$(docker inspect -f '{{ index .Config.Labels "${COMPOSE_CONFIG_FILES_LABEL}" }}' "$CID" 2>/dev/null || true)"`,
-    `PORTS_BEFORE="$(docker inspect -f '${PUBLISHED_PORTS_TEMPLATE}' "$CID" 2>/dev/null || true)"`,
-    'FLAGS=""',
-    'if [ -n "$FILES" ]; then',
-    '  OLD_IFS="$IFS"; IFS=,',
-    // Skip empty fields — a trailing comma or an all-whitespace label would
-    // otherwise contribute a bare `-f` with no argument.
-    '  for f in $FILES; do',
-    '    case "$f" in *[!\\ ]*) FLAGS="$FLAGS -f $f" ;; esac',
-    '  done',
-    '  IFS="$OLD_IFS"',
-    'fi',
-    // The label path is preferred but NEVER trusted to have produced something
-    // usable. An empty -f set is the exact bug this whole function exists to
-    // prevent (a bare `up` resolves docker-compose.yml alone), so anything that
-    // does not look like a real file list degrades to the probe reconstruction
-    // rather than to nothing. Covers: no label at all (a container created
-    // before this change, or an older Compose), an empty label, and a label
-    // that parsed to junk.
-    'case "$FLAGS" in',
-    '  *.yml*|*.yaml*)',
-    '    echo "[walg-role] using the -f set the running db was created with" ;;',
-    '  *)',
-    `    FLAGS="${baseFlags}"`,
-    // Exactly REPL_COMPOSE_FLAGS' set — base + prod + the replication overlay
-    // when the node has one. NOT every overlay present: see the docblock.
-    // `if` rather than `[ … ] && …` so a missing file cannot leave the branch
-    // non-zero and, under `set -e`, abort the script before the up.
-    `    if [ -f ${COMPOSE_REPLICATION_OVERLAY} ]; then FLAGS="$FLAGS -f ${COMPOSE_REPLICATION_OVERLAY}"; fi`,
-    '    echo "[walg-role] no usable compose config_files label, rebuilt the -f set from the replication file set" ;;',
-    'esac',
-    'echo "[walg-role] recreating db: docker compose $FLAGS up -d --no-deps db"',
-    // $FLAGS is deliberately UNQUOTED — it must word-split into separate `-f
-    // <file>` arguments. Every element is a compose file path that docker itself
-    // recorded or a literal filename from the list above; none is user input.
-    'docker compose $FLAGS up -d --no-deps db',
-    // Verify the recreate kept everything the deployed container had. Ports are
-    // the signal that matters here (5433 → replication transport) and the one a
-    // wrong -f set destroys silently.
-    'CID_NEW="$(docker compose ps -q db | head -n1)"',
-    `PORTS_AFTER="$(docker inspect -f '${PUBLISHED_PORTS_TEMPLATE}' "$CID_NEW" 2>/dev/null || true)"`,
-    'MISSING=""',
-    'for p in $PORTS_BEFORE; do',
-    '  case " $PORTS_AFTER " in',
-    '    *" $p "*) ;;',
-    '    *) MISSING="$MISSING $p" ;;',
-    '  esac',
-    'done',
-    'if [ -n "$MISSING" ]; then',
-    // Loud, and honest about the state it is leaving behind. The db is UP (the
-    // recreate succeeded, it just resolved the wrong file set), so the failover
-    // can and does carry on — this exit only marks the step failed, which the
-    // caller turns into the terminal non-zero exit. `vibecarbon deploy` re-ups
-    // the whole stack from reconcile.sh's baked -f set, which restores the
-    // publish; that is the same remediation the degraded-failover message gives.
-    '  echo "[walg-role] db recreate DROPPED published port(s):$MISSING" >&2',
-    '  echo "[walg-role] the database is RUNNING but was recreated from the wrong compose file set; on a compose-ha node that port is the replication transport. Nothing is lost — re-run \\`vibecarbon deploy <env>\\` to reconcile the node from its full file set. Refusing to report this step as success." >&2',
-    '  exit 1',
-    'fi',
-    // The recreate returns as soon as the container is CREATED. Everything after
-    // this (the audit, the app-tier restart) needs a database that answers.
-    'for i in $(seq 1 45); do',
-    '  if docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then',
-    `    echo "[walg-role] db accepting connections; ${WALG_ROLE_ENV}=$(docker compose exec -T db printenv ${WALG_ROLE_ENV} 2>/dev/null | tr -d "[:space:]"); published:$PORTS_AFTER"`,
-    '    exit 0',
-    '  fi',
-    '  sleep 2',
-    'done',
-    'echo "[walg-role] db did not accept connections within 90s of the recreate" >&2',
-    'exit 1',
-  ].join('\n');
-}
-
-/**
- * `kubectl` argv (no leading `kubectl`) that sets `WALG_ROLE` on the db
- * StatefulSet. The template change is what rolls the pod, which is what makes
- * the new value visible to postgres' `archive_command` and to the backup
- * CronJob's `kubectl exec` (it inherits the db container's env — the CronJob has
- * no `WALG_ROLE` of its own).
- *
- * No `--containers` selector: the default `*` covers the db pod's single app
- * container and stays correct if the chart renames it. `kubectl set env` does
- * not touch initContainers, and none of them reads WALG_ROLE.
- *
- * @param {'primary'|'standby'} role
- * @returns {string[]}
- */
-export function k8sSetWalgRoleArgv(role) {
-  return [
-    '-n',
-    'vibecarbon',
-    'set',
-    'env',
-    `statefulset/${DB_STATEFULSET}`,
-    `${WALG_ROLE_ENV}=${role}`,
-  ];
-}
-
-/**
- * Demote a k8s cluster's db: drop its inactive replication slots, then set
- * `WALG_ROLE=standby` on the db StatefulSet. The one k8s standby role write
+ * Demote a k8s cluster's db: set the standby wal-g role through setK8sWalgRole
+ * (the intent ConfigMap, then the live role file), then drop its inactive
+ * replication slots. The one k8s standby role write
  * (tests/unit/deploy/slot-drop-on-demotion-census.test.ts), shared by
- * failover's old-primary demotion and the retired fence.
+ * failover's old-primary demotion, its abort and the retired fence.
  *
- * The drop goes first because the role write rolls the db pod and nothing
- * here waits for the roll. Nobody streams from the old primary's slot after a
- * failover, so it would only pin WAL on that node up to the slot cap. A failed
- * drop still demotes and warns once, unless the role write fails too, which
- * throws and is the caller's one report.
+ * Nothing restarts. A db pod that is down or unreachable still gets the
+ * intent, which db-guard.sh applies on its next container start, so the
+ * result says whether the live file landed (`live`, and `reason` when not)
+ * and the caller decides what that is worth. Nobody streams from the old
+ * primary's slot after a failover, so it would only pin WAL on that node up
+ * to the slot cap. A failed drop still demotes and warns once, unless the
+ * intent apply fails too, which throws and is the caller's one report.
  *
  * @param {object} args
  * @param {string} args.ip - the cluster's master (kubectl target)
- * @param {(ip: string, argv: string[], opts?: object) => Promise<unknown>} args.kubectl
+ * @param {(ip: string, argv: string[], opts?: object) => Promise<string>} args.kubectl
  * @param {(msg: string) => void} args.warn
- * @returns {Promise<{slotsDropped: boolean}>}
+ * @returns {Promise<{slotsDropped: boolean, intent: true, live: boolean, reason?: string, error?: Error}>}
  */
 export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
+  // DEMOTION_ORDER (both tiers; demoteComposeWalgRole matches): the role
+  // first, then the slots. The role is the write-guard: until it reads
+  // standby, this node may still push WAL into the prefix the new primary
+  // owns, so it goes first and nothing waits in front of it. The slot drop
+  // only frees this node's own disk (a slot pins WAL up to the slot cap), so
+  // it can come second; a role write that throws skips it, and the reseed
+  // that rebuilds the node as the standby wipes its slots anyway.
+  // A throw here skips the drop: the caller's one report says the slots
+  // remain (slotDropSkippedNote, as failover's demotion warning does).
+  const role = await setK8sWalgRole({ ip, kubectl, role: 'standby' });
   const slots = await dropInactiveReplicationSlots((sql) =>
     kubectl(
       ip,
@@ -297,54 +506,8 @@ export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
       { timeout: 30_000 },
     ),
   );
-  await kubectl(ip, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 });
   if (!slots.ok) warn(slotDropWarning(ip, slots.error));
-  return { slotsDropped: slots.ok };
-}
-
-/**
- * `kubectl` argv that blocks until the db StatefulSet has finished rolling the
- * pod that `k8sSetWalgRoleArgv` triggered. Load-bearing on the PROMOTED node:
- * the audit that follows reads the env of the RUNNING pod, so auditing before
- * the roll would read the old container and pass on a lie.
- *
- * @param {number} [timeoutSeconds]
- * @returns {string[]}
- */
-export function k8sDbRolloutStatusArgv(timeoutSeconds = DB_STS_BOOT_TIMEOUT_S) {
-  return [
-    '-n',
-    'vibecarbon',
-    'rollout',
-    'status',
-    `statefulset/${DB_STATEFULSET}`,
-    `--timeout=${timeoutSeconds}s`,
-  ];
-}
-
-/**
- * Wait for the db StatefulSet to roll on a remote cluster, under
- * watchDbAttach: every WALG_ROLE roll recreates db-0 on the same node, which
- * detaches and re-attaches its volume (the do-csi-stale-volumeattachment
- * trigger), so a stale attachment stops the wait early with
- * StaleVolumeAttachmentError instead of burning the budget. The ssh budget
- * sits 30s above the kubectl --timeout so kubectl reports a rollout failure
- * itself. The one way the failover paths wait on a db roll
- * (db-rollout-wait-census in tests/unit/deploy/db-attach-watch.test.ts).
- *
- * @param {object} o
- * @param {(ip: string, argv: string[], opts?: object) => Promise<string>} o.kubectl - sshKubectl-shaped
- * @param {string} o.ip
- * @param {number} [o.timeoutS]
- * @param {number} [o.pollMs] - watchDbAttach's poll interval (test seam)
- * @returns {Promise<string>}
- */
-export function k8sDbRolloutWait({ kubectl, ip, timeoutS = DB_STS_BOOT_TIMEOUT_S, pollMs }) {
-  return watchDbAttach(
-    (signal) =>
-      kubectl(ip, k8sDbRolloutStatusArgv(timeoutS), { timeout: (timeoutS + 30) * 1000, signal }),
-    { kubectl: (argv, opts) => kubectl(ip, argv, opts), pollMs },
-  );
+  return { slotsDropped: slots.ok, ...role };
 }
 
 /**
@@ -362,27 +525,27 @@ export function k8sDbRolloutWait({ kubectl, ip, timeoutS = DB_STS_BOOT_TIMEOUT_S
  * @param {string} args.promotedIp
  * @param {string} args.detail underlying failure text
  * @param {string[]} [args.heldAtZero] compose: the primary-only add-ons the next
- *   reconcile scales back to 0, when the failover never wrote WALG_ROLE=primary
- *   into the promoted node's .env (it still reads standby)
+ *   reconcile scales back to 0, when the promoted node's wal-g role file does
+ *   not read primary (standby-scale.sh reads the same file)
  * @returns {string}
  */
 export function walgRoleDegradedMessage({ path, envName, promotedIp, detail, heldAtZero = [] }) {
   const verify =
     path === 'compose'
-      ? `ssh root@${promotedIp} 'cd /opt/<project> && docker compose exec -T db printenv WALG_ROLE'`
-      : `ssh root@${promotedIp} 'kubectl -n vibecarbon exec ${DB_POD} -- printenv WALG_ROLE'`;
+      ? `ssh root@${promotedIp} 'cat /opt/<project>/${COMPOSE_WALG_ROLE_HOST_DIR}/walg-role'`
+      : `ssh root@${promotedIp} 'kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- cat ${WALG_ROLE_FILE}'`;
   return (
     `FAILOVER COMPLETED, BACKUPS DID NOT. The promoted node (${promotedIp}) is serving, DNS ` +
     `is flipped and the role swap is persisted; but this failover could not prove that ` +
     `wal-g is archiving from it. ${detail} Until this is fixed the new primary holds the ` +
     `ONLY live copy of your data and is accumulating no recoverable backups. Check the ` +
     `write-guard with \`${verify}\` (it must print \`primary\`), then re-run ` +
-    `\`vibecarbon deploy ${envName}\`; a deploy re-renders WALG_ROLE from the now-swapped ` +
+    `\`vibecarbon deploy ${envName}\`; a deploy writes the wal-g role from the now-swapped ` +
     `config and re-runs the same backup audit. There is also no base backup on the new ` +
     `timeline (a node reading standby skips the push): once the write-guard reads primary, ` +
     `run \`vibecarbon backup ${envName}\`.` +
     (heldAtZero.length > 0
-      ? ` Until WALG_ROLE=primary is in the new primary's .env, its next reconcile scales ` +
+      ? ` Until the new primary's wal-g role file reads primary, its next reconcile scales ` +
         `${heldAtZero.join(', ')} back to 0; that deploy writes it.`
       : '')
   );

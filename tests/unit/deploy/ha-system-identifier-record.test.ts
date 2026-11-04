@@ -8,10 +8,11 @@
  * deployResult; and the final save spreads `haSeedRecord(deployResult)` into
  * the persisted `ha` block.
  */
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../src/lib/deploy/compose/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/deploy/compose/index.js')>()),
@@ -97,6 +98,77 @@ describe('k8s-ha replication effect', () => {
     await K8S_HA_EFFECTS.haK8sConfigureReplication(c2);
     expect(c2.systemIdentifier ?? null).toBeNull();
     errSpy.mockRestore();
+  });
+});
+
+describe("k8s-ha replication effect: the abort's discardable standby (final review I1)", () => {
+  const RECORD = { ip: '2.2.2.1', systemIdentifier: SYSID, timeline: 3, at: 'x' };
+  let dir: string;
+  const seed = () => {
+    dir = mkdtempSync(join(tmpdir(), 'vc-discard-'));
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'myapp',
+        environments: { prod: { ha: { enabled: true, discardableStandby: RECORD } } },
+      }),
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+  };
+  const haOnDisk = () =>
+    JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments.prod.ha;
+  const ctx = () =>
+    ({
+      s: { start: vi.fn(), stop: vi.fn() },
+      options: { environment: 'prod' },
+      primaryResult: { masterIp: '1.1.1.1', dbIp: '1.1.1.2', dbPrivateIp: '10.0.1.2' },
+      standbyResult: { masterIp: '2.2.2.1', dbIp: '2.2.2.2', dbPrivateIp: '10.0.1.3' },
+      sharedSshKeyPath: '/k',
+    }) as Record<string, unknown>;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('hands the record on disk to the reseed, and clears it once the reseed swapped', async () => {
+    seed();
+    vi.mocked(setupReplication).mockResolvedValueOnce({
+      streaming: true,
+      lastState: 'streaming',
+      systemIdentifier: SYSID,
+      reseeded: true,
+    });
+    await K8S_HA_EFFECTS.haK8sConfigureReplication(ctx());
+    expect(vi.mocked(setupReplication).mock.lastCall?.[0]).toMatchObject({
+      discardableStandby: RECORD,
+    });
+    expect(haOnDisk()).toEqual({ enabled: true });
+  });
+
+  it('clears it when the standby is verified streaming without a reseed: it names nothing any more', async () => {
+    seed();
+    vi.mocked(setupReplication).mockResolvedValueOnce({
+      streaming: true,
+      lastState: 'streaming',
+      systemIdentifier: SYSID,
+    });
+    await K8S_HA_EFFECTS.haK8sConfigureReplication(ctx());
+    expect(haOnDisk()).toEqual({ enabled: true });
+  });
+
+  it('keeps it when the reseed failed or replication did not stream', async () => {
+    seed();
+    vi.mocked(setupReplication).mockRejectedValueOnce(new Error('reseed refused'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await K8S_HA_EFFECTS.haK8sConfigureReplication(ctx());
+    expect(haOnDisk().discardableStandby).toEqual(RECORD);
+    vi.mocked(setupReplication).mockResolvedValueOnce({
+      streaming: false,
+      lastState: '',
+      systemIdentifier: null,
+    });
+    await K8S_HA_EFFECTS.haK8sConfigureReplication(ctx());
+    expect(haOnDisk().discardableStandby).toEqual(RECORD);
   });
 });
 

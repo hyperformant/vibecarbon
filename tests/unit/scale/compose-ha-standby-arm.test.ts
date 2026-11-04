@@ -110,7 +110,6 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
       h.events.push(`demote:${oldPrimaryIp}`);
       return true;
     },
-    restoreComposeWalgRole: async () => ({ ok: true }),
     openWireguardPortUfw: async () => {},
     openWireguardPortHetznerFirewall: async () => {},
     ensurePrimaryReplicationAccess: async (ip: string) => {
@@ -210,7 +209,12 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   // The real argv contract (tests/_shared/ssh-contract.ts).
   const { contractSshRun } = await import('../../_shared/ssh-contract.js');
-  return { ...actual, sshRun: contractSshRun(), sshRunScript: async () => '' };
+  const { answerRoleWrite } = await import('../helpers/scale-cutover-stub.js');
+  return {
+    ...actual,
+    sshRun: contractSshRun(answerRoleWrite((ip, role) => h.events.push(`role:${ip}:${role}`))),
+    sshRunScript: async () => '',
+  };
 });
 
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
@@ -395,6 +399,42 @@ describe('compose-ha scale: the standby arm reseeds, never restores', () => {
     // Nothing was reseeded and no tunnel moved.
     expect(h.reseeds).toEqual([]);
     expect(h.tunnels).toEqual([]);
+  });
+});
+
+describe('compose-ha scale: each replacement gets its wal-g role file before its first up', () => {
+  it('scale writes primary on the replacement before its first up', async () => {
+    reset();
+    const { ctx } = makeCtx('primary');
+    await SCALE_EFFECTS.scaleServers(ctx);
+    const seq = h.events;
+    expect(seq.indexOf(`role:${NEW_PRIMARY}:primary`)).toBeGreaterThanOrEqual(0);
+    expect(seq.indexOf(`role:${NEW_PRIMARY}:primary`)).toBeLessThan(
+      seq.indexOf(`up:${NEW_PRIMARY}`),
+    );
+    expect(seq.filter((e) => e.startsWith('role:'))).toEqual([`role:${NEW_PRIMARY}:primary`]);
+  });
+
+  it('a replaced compose-ha standby gets standby before its first up (C10)', async () => {
+    reset();
+    const { ctx } = makeCtx('standby');
+    await SCALE_EFFECTS.scaleServers(ctx);
+    const seq = h.events;
+    expect(seq.indexOf(`role:${NEW_STANDBY}:standby`)).toBeGreaterThanOrEqual(0);
+    expect(seq.indexOf(`role:${NEW_STANDBY}:standby`)).toBeLessThan(
+      seq.indexOf(`up:${NEW_STANDBY}`),
+    );
+    expect(seq.filter((e) => e.startsWith('role:'))).toEqual([`role:${NEW_STANDBY}:standby`]);
+  });
+
+  it('with both arms, each new node gets its own role', async () => {
+    reset();
+    const { ctx } = makeCtx('both');
+    await SCALE_EFFECTS.scaleServers(ctx);
+    expect(h.events.filter((e) => e.startsWith('role:')).sort()).toEqual([
+      `role:${NEW_PRIMARY}:primary`,
+      `role:${NEW_STANDBY}:standby`,
+    ]);
   });
 });
 

@@ -7,11 +7,11 @@
  * `db` differently on each node and recreate it (n8n's and metabase's overlays
  * both carry a `db:` key). Role-specific behaviour is only a runtime
  * `--scale <svc>=0` fragment, printed by `standby-scale.sh` from the node's own
- * `.env` (WALG_ROLE=standby), and appended to every whole-stack `up` the bundle
+ * wal-g role file (`.vibecarbon-role/walg-role` says standby), and appended to every whole-stack `up` the bundle
  * renders: reconcile.sh, the systemd ExecStart and the post-restore recreate.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -24,8 +24,7 @@ import {
   STANDBY_SCALE_FLAG_SYSTEMD,
   STANDBY_SCALE_SCRIPT,
 } from '../../../src/lib/deploy/bundle.js';
-import { composeRoleEnv } from '../../../src/lib/deploy/walg-role.js';
-import { formatDotenvLine } from '../../../src/lib/dotenv.js';
+import { WALG_ROLE_PARSE_SH, walgRoleWriteShell } from '../../../src/lib/deploy/walg-role.js';
 import { composeStandbyScaledServices } from '../../../src/lib/services/standby-policy.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
@@ -42,10 +41,18 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-/** Run the rendered script the way reconcile.sh does: `sh standby-scale.sh` in the project dir. */
-function runScript(services: string[], env: string | null): string {
+/**
+ * Run the rendered script the way reconcile.sh does: `sh standby-scale.sh` in
+ * the project dir. `role` is the role file's content (null: no file); `env`
+ * is a `.env` beside it, which the script must ignore.
+ */
+function runScript(services: string[], role: string | null, env: string | null = null): string {
   const dir = tempDir();
   writeFileSync(join(dir, STANDBY_SCALE_SCRIPT), renderStandbyScaleScript(services));
+  if (role !== null) {
+    mkdirSync(join(dir, '.vibecarbon-role'));
+    writeFileSync(join(dir, '.vibecarbon-role/walg-role'), role);
+  }
   if (env !== null) writeFileSync(join(dir, '.env'), env);
   return execFileSync('sh', [STANDBY_SCALE_SCRIPT], { cwd: dir, encoding: 'utf-8' });
 }
@@ -55,56 +62,42 @@ describe('standby-scale.sh', () => {
     expect(N8N_SCALED).toEqual(['n8n', 'n8n-setup']);
   });
 
-  it('WALG_ROLE=standby prints one --scale <svc>=0 per service', () => {
-    expect(runScript(N8N_SCALED, 'FOO=1\nWALG_ROLE=standby\n').trim()).toBe(
-      '--scale n8n=0 --scale n8n-setup=0',
-    );
+  it('a standby role prints one --scale <svc>=0 per service', () => {
+    expect(runScript(N8N_SCALED, 'standby\n').trim()).toBe('--scale n8n=0 --scale n8n-setup=0');
   });
 
-  it('accepts a double-quoted value', () => {
-    expect(runScript(N8N_SCALED, 'WALG_ROLE="standby"\n').trim()).toBe(
-      '--scale n8n=0 --scale n8n-setup=0',
-    );
+  it('a primary role prints nothing', () => {
+    expect(runScript(N8N_SCALED, 'primary\n')).toBe('');
   });
 
-  it('accepts a single-quoted value', () => {
-    expect(runScript(N8N_SCALED, "WALG_ROLE='standby'\n").trim()).toBe(
-      '--scale n8n=0 --scale n8n-setup=0',
-    );
-  });
-
-  it('the last WALG_ROLE line wins', () => {
-    expect(runScript(N8N_SCALED, 'WALG_ROLE=standby\nWALG_ROLE=primary\n')).toBe('');
-    expect(runScript(N8N_SCALED, 'WALG_ROLE=primary\nWALG_ROLE=standby\n').trim()).toBe(
-      '--scale n8n=0 --scale n8n-setup=0',
-    );
-  });
-
-  it('WALG_ROLE=primary prints nothing', () => {
-    expect(runScript(N8N_SCALED, 'WALG_ROLE=primary\n')).toBe('');
-  });
-
-  it('a .env without the key prints nothing', () => {
-    expect(runScript(N8N_SCALED, 'FOO=standby\nNOT_WALG_ROLE=standby\n')).toBe('');
-  });
-
-  it('no .env prints nothing and exits 0', () => {
+  it('no role file, or an unknown word, prints nothing and exits 0', () => {
     expect(runScript(N8N_SCALED, null)).toBe('');
+    expect(runScript(N8N_SCALED, 'Standby\n')).toBe('');
+  });
+
+  it('reads the role file through the shared fragment, never .env', () => {
+    const script = renderStandbyScaleScript(['n8n']);
+    expect(script).toContain(WALG_ROLE_PARSE_SH);
+    expect(script).not.toContain('.env');
+    expect(runScript(['n8n'], 'primary\n', 'WALG_ROLE=standby\n')).toBe('');
+    expect(runScript(['n8n'], 'standby\n', 'WALG_ROLE=primary\n').trim()).toBe('--scale n8n=0');
+    expect(runScript(['n8n'], null, 'WALG_ROLE=standby\n')).toBe('');
   });
 
   it('an empty service list prints nothing, even on a standby', () => {
-    expect(runScript([], 'WALG_ROLE=standby\n')).toBe('');
+    expect(runScript([], 'standby\n')).toBe('');
   });
 
-  it('reads the role the deploy writes (composeRoleEnv through formatDotenvLine)', () => {
-    const envOf = (role: 'primary' | 'standby') =>
-      Object.entries(composeRoleEnv(role))
-        .map(([k, v]) => formatDotenvLine(k, v))
-        .join('\n');
-    expect(runScript(N8N_SCALED, `${envOf('standby')}\n`).trim()).toBe(
-      '--scale n8n=0 --scale n8n-setup=0',
-    );
-    expect(runScript(N8N_SCALED, `${envOf('primary')}\n`)).toBe('');
+  it('reads the role the deploy writes (walgRoleWriteShell)', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, STANDBY_SCALE_SCRIPT), renderStandbyScaleScript(N8N_SCALED));
+    mkdirSync(join(dir, '.vibecarbon-role'));
+    const roleDir = join(dir, '.vibecarbon-role');
+    const scale = () => execFileSync('sh', [STANDBY_SCALE_SCRIPT], { cwd: dir, encoding: 'utf-8' });
+    execFileSync('sh', ['-c', walgRoleWriteShell(roleDir, 'standby')]);
+    expect(scale().trim()).toBe('--scale n8n=0 --scale n8n-setup=0');
+    execFileSync('sh', ['-c', walgRoleWriteShell(roleDir, 'primary')]);
+    expect(scale()).toBe('');
   });
 });
 
@@ -185,7 +178,8 @@ describe('renderBundle stages standby-scale.sh from the current options', () => 
       renderStandbyScaleScript(composeStandbyScaledServices(['n8n', 'metabase'])),
     );
     expect(statSync(path).mode & 0o777).toBe(0o755);
-    writeFileSync(join(dir, '.env'), 'WALG_ROLE=standby\n');
+    mkdirSync(join(dir, '.vibecarbon-role'));
+    writeFileSync(join(dir, '.vibecarbon-role/walg-role'), 'standby\n');
     const out = execFileSync('sh', [STANDBY_SCALE_SCRIPT], { cwd: dir, encoding: 'utf-8' });
     expect(
       out

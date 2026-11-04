@@ -77,6 +77,7 @@ import {
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { hasSentinelLine } from '../../remote-sentinel.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
 import {
   declaredAddonNames,
@@ -103,7 +104,14 @@ import { assertRestoredPrimaryWritable } from '../../walg/restore-marker.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
 import { queueBootTiming } from '../boot-timing.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
-import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
+import {
+  DB_CONTAINER,
+  DB_POD,
+  DB_POD_SELECTOR,
+  DB_PVC,
+  DB_STATEFULSET,
+  standbyDbRebuildHint,
+} from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
 import {
@@ -121,6 +129,12 @@ import {
   k8sWalgAuditArgv,
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from '../walg-audit.js';
+import {
+  dbRoleConfigMapManifest,
+  k8sWalgRoleIntentApplyArgv,
+  setK8sWalgRole,
+  WALG_ROLE_DIR,
+} from '../walg-role.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import {
   MANIFEST_DIGEST_SH,
@@ -372,7 +386,7 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * `role` (the k8s-ha pilot-light role) is an input because applyK3sManifests
  * renders a DIFFERENT cluster for each role: the standby zeroes the app tier and
  * the cluster-autoscaler, skips observability, points its Certificates at the
- * self-signed issuer and renders WALG_ROLE=standby into the db StatefulSet.
+ * self-signed issuer and records the standby wal-g role intent for the db.
  * Each cluster keeps its own deploy-state file keyed by its STACK name, and a
  * failover swaps which stack holds which role without touching either file. So
  * without this key the post-failover reconverge redeploy found byte-identical
@@ -617,8 +631,13 @@ export async function runKubectlWithRetry(
       },
     );
   } catch (err) {
-    throw new Error(
-      `${desc} failed with exit ${err.status ?? '?'}: ${(err.stderr ?? '').toString().trim().slice(-500)}`,
+    // status and stderr ride along so a caller can tell a remote script's own
+    // failure line from an unreachable pod (setK8sWalgRole's write-failed).
+    throw Object.assign(
+      new Error(
+        `${desc} failed with exit ${err.status ?? '?'}: ${(err.stderr ?? '').toString().trim().slice(-500)}`,
+      ),
+      { status: err.status, stderr: err.stderr },
     );
   }
 }
@@ -1756,7 +1775,13 @@ function secretManifest(name, stringData) {
  * `restore` (a resolved `deploy -restore` point) writes the restore marker
  * into the infra Secret, see buildInfraSecretData.
  *
- * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: {backup: string, target: string, recoveryConf: string}|null}} args
+ * `walgRole` is recorded after the Secrets as the db's wal-g role intent, the
+ * CLI-owned ConfigMap vibecarbon-db-role (src/lib/deploy/walg-role.js). The db
+ * container reads it as VC_WALG_ROLE_INTENT and db-guard.sh writes it to the
+ * role file on every start, so it has to exist before base/ creates the pod.
+ * `kubectl apply`, so a cluster that predates it gets it created.
+ *
+ * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: {backup: string, target: string, recoveryConf: string}|null, walgRole: 'primary'|'standby'}} args
  */
 export async function applyVibecarbonSecrets({
   kubeconfig,
@@ -1764,6 +1789,7 @@ export async function applyVibecarbonSecrets({
   s3Config,
   backupBucketName,
   restore,
+  walgRole,
 }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   // Ensure the namespace exists before we try to land a Secret in it.
@@ -1796,6 +1822,15 @@ export async function applyVibecarbonSecrets({
       description: `applyVibecarbonSecrets: kubectl apply Secret/${name}`,
     });
   }
+  // The intent must exist before `apply -k base` creates the db pod, which
+  // reads it at container start. deployK3s applies it again on every deploy
+  // (writeDeployWalgRole, through setK8sWalgRole), including one whose apply
+  // is skipped; this first apply is what a brand-new pod starts with.
+  await runKubectlWithRetry(k8sWalgRoleIntentApplyArgv(), {
+    env,
+    input: dbRoleConfigMapManifest(walgRole),
+    description: 'applyVibecarbonSecrets: kubectl apply ConfigMap/vibecarbon-db-role',
+  });
 }
 
 /**
@@ -2250,10 +2285,15 @@ export async function assertNoRetiredChartDb({
  * once the mkfs-on-a-missing-device signature has held it stops and names
  * that state. It repairs nothing and retries nothing.
  *
- * @param {{env: NodeJS.ProcessEnv, timeoutS?: number, staleAttachPollMs?: number, waitRollout?: typeof runKubectlWithRetry, kubectl?: (argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>}} args
+ * A k8s-ha standby's deploy passes `hint` (standbyDbRebuildHint): its db
+ * holds only a replica, so a db that never becomes Ready there has a manual
+ * way back, which a timeout names.
+ *
+ * @param {{env: NodeJS.ProcessEnv, timeoutS?: number, staleAttachPollMs?: number, waitRollout?: typeof runKubectlWithRetry, kubectl?: (argv: string[], opts: {signal: AbortSignal, timeout: number}) => Promise<string>, hint?: string}} args
  */
 export async function awaitDbRollout({
   env,
+  hint = '',
   timeoutS = DB_ROLLOUT_TIMEOUT_S,
   staleAttachPollMs = 15_000,
   waitRollout = runKubectlWithRetry,
@@ -2286,7 +2326,8 @@ export async function awaitDbRollout({
     }
     throw new Error(
       `awaitDbRollout: statefulset/${DB_STATEFULSET} did not become Ready within ${timeoutS}s ` +
-        `(${(err?.message || String(err)).slice(0, 300)}). ${await describeDbPods(env)}`,
+        `(${(err?.message || String(err)).slice(0, 300)}). ${await describeDbPods(env)}` +
+        (hint ? ` ${hint}` : ''),
     );
   }
   console.error(
@@ -2313,7 +2354,6 @@ function localKubectlReader(env) {
  * @param {string} o.dbImageTag - full db image ref, `<repo>:<tag>`
  * @param {{bucket?: string, walgPrefix?: string, endpoint?: string, region?: string}} [o.s3Config]
  * @param {string|null} [o.backupBucketName]
- * @param {'primary'|'standby'} [o.walgRole]
  * @param {string} o.storageClass - `ProviderClass.K8S_STORAGE_CLASS`
  * @param {string} o.walArchiveSha - sha of k8s/base/backup/configmap-walg.yaml
  * @returns {Record<string, string>}
@@ -2322,7 +2362,6 @@ export function buildDbManifestValues({
   dbImageTag,
   s3Config,
   backupBucketName,
-  walgRole = 'primary',
   storageClass,
   walArchiveSha,
 }) {
@@ -2350,8 +2389,9 @@ export function buildDbManifestValues({
   // role-segmented prefix made the standby read an empty `…/walg/standby` and
   // fail restore/reseed with "No backups found" (caught by compose-ha scale
   // e2e). Anti-collision (a standby / bring-up-phase independent primary must
-  // never WRITE here) is enforced by the WALG_ROLE WRITE-GUARD: wal-archive.sh
-  // and the backup CronJob both no-op when WALG_ROLE=standby.
+  // never WRITE here) is enforced by the wal-g role WRITE-GUARD: the role file
+  // (walg-role.js), which wal-archive.sh and the backup CronJob read through
+  // walg-env.sh. Neither archives unless it says primary.
   const walgBucket = backupBucketName || s3Config?.bucket || '';
   // The path inside the bucket is resolveEnvStorage's per-environment
   // `backups/<project>/<env>/walg`. Without it two environments would archive
@@ -2366,7 +2406,6 @@ export function buildDbManifestValues({
     DB_IMAGE: dbImageTag.slice(0, lastColon),
     DB_IMAGE_TAG: dbImageTag.slice(lastColon + 1),
     WALG_S3_PREFIX_BASE: walgBucket ? `s3://${walgBucket}/${walgPrefix}` : '',
-    WALG_ROLE: walgRole,
     S3_ENDPOINT: s3Config?.endpoint ?? '',
     S3_REGION: s3Config?.region ?? '',
     K8S_STORAGE_CLASS: storageClass,
@@ -2432,6 +2471,63 @@ export async function auditRls({ kubeconfig }) {
   if (unprotected) {
     throw new Error(`auditRls: ${rlsAuditFailureMessage(unprotected)}`);
   }
+}
+
+/**
+ * The deploy's live wal-g role write: the intent (vibecarbon-db-role) and the
+ * role file in the running db container, through setK8sWalgRole. deployK3s
+ * runs it on every deploy, outside the k3s-apply skip gate and once postgres
+ * accepts, so a redeploy that did not restart the db
+ * (or skipped the apply altogether) still converges the file. Throws when the
+ * file does not read back the role, which fails the deploy: a db whose role
+ * file is wrong would hold or drop WAL behind a green deploy. The errors are
+ * the deploy's own: a missing role mount after the rollout is a template that
+ * did not land, never a hint to run a deploy; the other reasons keep
+ * setK8sWalgRole's detail.
+ *
+ * @param {object} o
+ * @param {(ip: string, argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>} o.kubectl
+ * @param {'primary'|'standby'} o.role
+ * @param {string} [o.envName] the environment as the operator names it
+ * @returns {Promise<{intent: true, live: boolean}>}
+ */
+export async function writeDeployWalgRole({ kubectl, role, envName }) {
+  const result = await setK8sWalgRole({ ip: undefined, kubectl, role, envName });
+  if (result.live) return result;
+  // setK8sWalgRole's own no-role-mount hint says to run a deploy; this IS the
+  // deploy, after a rollout of the template that carries the mount, so the
+  // missing mount means the rollout did not land on db-0.
+  if (result.reason === 'no-role-mount') {
+    throw new Error(
+      `the db rollout did not give ${DB_POD} the wal-g role mount (${WALG_ROLE_DIR}); ` +
+        `check the db StatefulSet template and \`kubectl -n vibecarbon get pod ${DB_POD} -o yaml\``,
+    );
+  }
+  const detail = result.error ? `: ${result.error.message}` : '';
+  throw new Error(
+    `could not set the wal-g role to ${role} on ${DB_POD} (${result.reason})${detail}`,
+  );
+}
+
+/**
+ * writeDeployWalgRole's kubectl seam for the operator's own kubectl: the
+ * `(ip, argv, {input, timeout})` shape setK8sWalgRole takes, over
+ * runKubectlWithRetry with stdout captured. The ip is unused (the kubeconfig
+ * names the cluster); the timeout bounds the call through an abort signal.
+ *
+ * @param {string} kubeconfig
+ * @returns {(ip: string, argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>}
+ */
+function localWalgRoleKubectl(kubeconfig) {
+  const env = { ...process.env, KUBECONFIG: kubeconfig };
+  return (_ip, argv, { input, timeout } = {}) =>
+    runKubectlWithRetry(argv, {
+      env,
+      input,
+      captureStdout: true,
+      description: `deploy: kubectl ${argv.slice(2, 5).join(' ')} (wal-g role)`,
+      ...(timeout && { signal: AbortSignal.timeout(timeout) }),
+    });
 }
 
 /**
@@ -2973,7 +3069,7 @@ async function readRestoreSwapState(env, marker) {
   const lines = String(out ?? '')
     .split('\n')
     .map((l) => l.trim());
-  if (!lines.includes('VC_OK')) return { state: 'unknown', previous: false };
+  if (!hasSentinelLine(out, 'VC_OK')) return { state: 'unknown', previous: false };
   const previous = lines.includes('prev');
   const recorded =
     Boolean(marker.attempt) && lines.includes(`record ${marker.backup} ${marker.attempt}`);
@@ -3273,8 +3369,8 @@ export async function applyK3sManifests({
   // HetznerProvider.getS3EgressExtraCidrs ignores its argument entirely.
   vpcCidr,
   // Pilot-light: 'primary' | 'standby' | undefined (single-cluster ==
-  // primary behavior). Drives walgRole below (rendered into the db
-  // StatefulSet) and zeroes the app tier on a standby.
+  // primary behavior). Drives walgRole below (the db's wal-g role intent)
+  // and zeroes the app tier on a standby.
   role,
   // `deploy -restore`: { backup, target, recoveryConf, sizeBytes }, or null.
   restore = null,
@@ -3778,26 +3874,29 @@ export async function applyK3sManifests({
   //    creation with `secret "vibecarbon-app-secrets" not found`.
   //    With `deploy -restore` the infra Secret also carries the restore
   //    marker, so the db pod's first boot restores that backup.
+  //    The db's wal-g role intent (vibecarbon-db-role) lands here too, so
+  //    the db pod base/ creates starts with it.
+  //
+  // Derive the wal-g WRITE-GUARD role (NOT a path segment) from the explicit
+  // `role` option — the k8s-ha fan-out passes role: 'primary' / 'standby';
+  // single-cluster deploys leave role undefined → 'primary'. Recorded as the
+  // db's role intent (vibecarbon-db-role), which db-guard.sh writes to the
+  // role file wal-archive.sh + the backup CronJob read, so both no-op on the
+  // standby. The S3 prefix itself stays canonical.
+  const walgRole = role === 'standby' ? 'standby' : 'primary';
   await perfAsync(`deploy.${perfPrefix}.secrets`, () =>
-    applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore }),
+    applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore, walgRole }),
   );
   onNamespaceReady?.();
   // 5. Apply base (namespace, network-policies, db, app, backup, traefik,
   //    config), always from a rendered temp copy (renderK8sBase): the db
-  //    StatefulSet carries deploy-time placeholders (image, wal-g prefix and
-  //    role, S3 endpoint, StorageClass), and so do the PVCs
+  //    StatefulSet carries deploy-time placeholders (image, wal-g prefix,
+  //    S3 endpoint, StorageClass), and so do the PVCs
   //    `add redis` / `add n8n` copy into k8s/base/<addon>/. kubectl accepts a
   //    literal storageClassName and the PVC sits Pending forever, and neither
   //    a PVC's class nor a StatefulSet's volumeClaimTemplates can be changed
   //    once the object exists, so the substitution has to happen before this
   //    apply.
-  //
-  // Derive the wal-g WRITE-GUARD role (NOT a path segment) from the explicit
-  // `role` option — the k8s-ha fan-out passes role: 'primary' / 'standby';
-  // single-cluster deploys leave role undefined → 'primary'. Rendered into the
-  // db container env as WALG_ROLE so wal-archive.sh + the backup CronJob
-  // no-op on the standby. The S3 prefix itself stays canonical.
-  const walgRole = role === 'standby' ? 'standby' : 'primary';
   const storageClass = ProviderClass?.K8S_STORAGE_CLASS;
   // A chart-era cluster keeps its database on the chart's StatefulSet; a new
   // one beside it would be empty. Refuse before anything is created.
@@ -3844,7 +3943,6 @@ export async function applyK3sManifests({
         dbImageTag,
         s3Config,
         backupBucketName,
-        walgRole,
         storageClass,
         walArchiveSha: walArchiveConfigSha(projectDir),
       }),
@@ -4160,9 +4258,16 @@ export async function applyK3sManifests({
   const dbRolloutTimeoutS = restore
     ? Math.max(DB_ROLLOUT_TIMEOUT_S, restoreRolloutTimeoutS(restore.sizeBytes))
     : DB_ROLLOUT_TIMEOUT_S;
+  // The live wal-g role file is not written here: deployK3s writes it on
+  // every deploy, outside the k3s-apply skip gate (writeDeployWalgRole).
   const awaitDb = async () => {
     await perfAsync(`deploy.${perfPrefix}.awaitDb`, () =>
-      awaitDbRollout({ env, timeoutS: dbRolloutTimeoutS }),
+      awaitDbRollout({
+        env,
+        timeoutS: dbRolloutTimeoutS,
+        // A pilot standby's db holds only a replica: name the rebuild.
+        hint: role === 'standby' ? standbyDbRebuildHint(operatorEnv ?? environment) : '',
+      }),
     );
     await awaitPostgresAccepting({ env, dbPod: DB_POD });
   };
@@ -5208,6 +5313,28 @@ async function deployK3sSteps(options, inFlight) {
     signalNamespaceReady();
   }
 
+  // 8a. The live wal-g role, on EVERY deploy — outside the `k3s-apply` gate
+  //     for the same reason as the audit below: db-guard.sh applies the intent
+  //     only at container start, so a db this deploy did not restart (or a
+  //     deploy whose apply was skipped) keeps whatever role file it had. The
+  //     intent and the file are set to this deploy's role and read back
+  //     before the audit, so the audit reads the role this deploy set. A
+  //     skipped apply waited for no db, so postgres has to accept first: the
+  //     write never races a starting pod.
+  if (skipApply) {
+    await awaitPostgresAccepting({
+      env: { ...process.env, KUBECONFIG: kubeconfig },
+      dbPod: DB_POD,
+    });
+  }
+  await perfAsync(`deploy.${perfPrefix}.walgRole`, () =>
+    writeDeployWalgRole({
+      kubectl: localWalgRoleKubectl(kubeconfig),
+      role: options.role === 'standby' ? 'standby' : 'primary',
+      envName: options.operatorEnv ?? options.environment,
+    }),
+  );
+
   // 8b. Ground-truth BACKUP audit — OUTSIDE the `k3s-apply` gate on purpose.
   //     Every other post-apply check verifies something this deploy just did,
   //     so gating them on "did anything change" is sound. Backups are the
@@ -5222,7 +5349,7 @@ async function deployK3sSteps(options, inFlight) {
   //     with it. Cost is one S3 LIST.
   //     Gated only on S3 being configured at all (mirrors the archiving-enable
   //     block); the probe independently re-checks that from inside the
-  //     container and self-skips a WALG_ROLE=standby node.
+  //     container and self-skips a node whose role file says standby.
   //     THROWS on failure — see src/lib/deploy/walg-audit.js.
   if (options.s3Config?.accessKey) {
     await perfAsync(`deploy.${perfPrefix}.verifyWalgBackups`, () =>

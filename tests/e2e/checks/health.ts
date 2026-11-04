@@ -5,17 +5,15 @@
  * restore, and failover steps by probing key service endpoints.
  */
 
-import dns from 'node:dns';
 import https from 'node:https';
+import { resolvePublicA } from '../../../src/lib/deploy/public-dns-lookup.js';
 import type { HealthLatencies, VerificationResult } from '../scenarios/types.js';
 import { pinnedIpFor } from '../utils/dns-pin.js';
 import { resolveE2EAcmeCa } from '../utils/e2e-env.js';
 
-// Use Cloudflare + Google DNS to bypass stale negative cache entries from prior test runs.
-// The system resolver caches NXDOMAIN responses for domains that were destroyed
-// and recreated between test scenarios, causing health checks to fail indefinitely.
-const resolver = new dns.promises.Resolver();
-resolver.setServers(['1.1.1.1', '8.8.8.8']);
+// Public DNS, never the system resolver: the system resolver caches NXDOMAIN
+// for domains destroyed and recreated between steps, failing health checks
+// for the zone's SOA minimum TTL.
 
 /**
  * Resolve a domain using our custom resolver (bypasses system DNS cache).
@@ -31,13 +29,15 @@ resolver.setServers(['1.1.1.1', '8.8.8.8']);
  * Observed run #7 compose db_insert (PR 1Y).
  */
 export async function resolvePublicIp(domain: string): Promise<string | null> {
-  try {
-    const addresses = await resolver.resolve4(domain);
-    const real = addresses.find((ip) => ip && ip !== '0.0.0.0');
-    return real ?? null;
-  } catch {
-    return null;
-  }
+  // The CLI's own public lookup (one approach): each public resolver is asked
+  // on its own and any live answer wins, so one resolver's cached NXDOMAIN
+  // (a destroy and restore on the same name, 2026-11-04) or stale 0.0.0.0
+  // warm-up placeholder no longer hides a published record. The system
+  // resolver never answers here: an empty result makes the caller retry.
+  const addresses: string[] = await resolvePublicA(domain, {
+    fallback: (_h: string, _o: object, cb: (err: null, a: never[]) => void) => cb(null, []),
+  });
+  return addresses[0] ?? null;
 }
 
 /**

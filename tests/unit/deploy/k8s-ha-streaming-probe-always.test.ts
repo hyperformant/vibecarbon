@@ -38,7 +38,7 @@ describe('the k8s-ha streaming probe always runs', () => {
       "const probe = await perfAsync('deploy.ha.replication.streamingProbe', () =>",
     );
     expect(probe).toBeGreaterThan(-1);
-    expect(body.indexOf('deploy.ha.replication.reseed.resolvePvc')).toBeGreaterThan(probe);
+    expect(body.indexOf('deploy.ha.replication.reseed.selfHeal')).toBeGreaterThan(probe);
     // No branch in front of it: the line before the probe's comment block is
     // not an `if (` and nothing in setupReplication reads a skip option.
     expect(body.slice(0, probe)).not.toMatch(/\bif \(options\.standby\w*/);

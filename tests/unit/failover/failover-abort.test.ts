@@ -15,6 +15,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { argvOver, composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
+import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -60,6 +62,12 @@ const fakeBackend = (over: Record<string, unknown> = {}) => {
       ips: { primary: '10.0.0.1', standby: '10.0.0.2' },
       stopDbHint: "ssh root@10.0.0.2 'docker stop myapp-db'",
       unfenceHint: 'psql -c reset',
+      // The failover never promoted: the standby is still in recovery.
+      readStandbyLineage: step('readStandbyLineage', {
+        inRecovery: true,
+        systemIdentifier: JOURNAL.systemIdentifier,
+        timeline: null,
+      }),
       stopStandbyDb: step('stopStandbyDb', { ok: true }),
       disarmStandby: step('disarmStandby', true),
       repointDns: step('repointDns', { ok: true }),
@@ -108,7 +116,7 @@ describe('abortFailover: order and refusals', () => {
     await expect(result).rejects.toThrow(
       /could not prove the standby's database \(10\.0\.0\.2\) stopped \(the node did not answer\).*docker stop myapp-db.*rerun vibecarbon failover prod -abort/,
     );
-    expect(calls).toEqual(['stopStandbyDb']);
+    expect(calls).toEqual(['readStandbyLineage', 'stopStandbyDb']);
     expect(record).not.toHaveBeenCalled();
   });
 
@@ -117,6 +125,7 @@ describe('abortFailover: order and refusals', () => {
     const { result, record, warnings } = run(journalEnv(), backend);
     await expect(result).resolves.toEqual({ fenceLifted: true, warnings: [] });
     expect(calls).toEqual([
+      'readStandbyLineage',
       'stopStandbyDb',
       'disarmStandby',
       'repointDns',
@@ -128,7 +137,11 @@ describe('abortFailover: order and refusals', () => {
     ]);
     expect(record).toHaveBeenCalledWith(
       { environment: 'prod' },
-      { fenceLifted: true, backupFence: { written: true, at: expect.any(String) } },
+      {
+        fenceLifted: true,
+        backupFence: { written: true, at: expect.any(String) },
+        discardableStandby: null,
+      },
     );
     expect(warnings).toEqual([]);
   });
@@ -140,7 +153,7 @@ describe('abortFailover: order and refusals', () => {
     expect(calls).not.toContain('unfencePrimary');
     expect(record).toHaveBeenCalledWith(
       { environment: 'prod' },
-      { fenceLifted: false, backupFence: null },
+      { fenceLifted: false, backupFence: null, discardableStandby: null },
     );
     expect(warnings.join('\n')).toMatch(/does not answer.*next vibecarbon deploy prod/);
   });
@@ -151,7 +164,11 @@ describe('abortFailover: order and refusals', () => {
     await expect(result).resolves.toMatchObject({ fenceLifted: false });
     expect(record).toHaveBeenCalledWith(
       { environment: 'prod' },
-      { fenceLifted: false, backupFence: { written: true, at: expect.any(String) } },
+      {
+        fenceLifted: false,
+        backupFence: { written: true, at: expect.any(String) },
+        discardableStandby: null,
+      },
     );
     expect(warnings.join('\n')).toMatch(/could not lift the database write fence.*psql -c reset/);
   });
@@ -168,6 +185,61 @@ describe('abortFailover: order and refusals', () => {
       /token unset.*A records \(apex and wildcard\) to 10\.0\.0\.1/,
     );
   });
+});
+
+describe('abortFailover: the standby copy it gives up (final review I1)', () => {
+  const PROMOTED = { inRecovery: false, systemIdentifier: JOURNAL.systemIdentifier, timeline: 3 };
+
+  it('a standby the promote reached is read BEFORE it is stopped and recorded as discardable', async () => {
+    const { calls, backend } = fakeBackend({
+      readStandbyLineage: async () => {
+        calls.push('readStandbyLineage');
+        return PROMOTED;
+      },
+    });
+    const { result, record, lines, warnings } = run(journalEnv(), backend);
+    await result;
+    expect(calls.slice(0, 2)).toEqual(['readStandbyLineage', 'stopStandbyDb']);
+    expect(record.mock.calls[0][1].discardableStandby).toEqual({
+      ip: '10.0.0.2',
+      systemIdentifier: JOURNAL.systemIdentifier,
+      timeline: 3,
+      at: expect.any(String),
+    });
+    expect(lines.join('\n')).toMatch(
+      /standby 10\.0\.0\.2 was out of recovery on timeline 3[\s\S]*next vibecarbon deploy prod reseeds over it/,
+    );
+    expect(warnings).toEqual([]);
+  });
+
+  it('a standby still in recovery needs no record and gets no warning', async () => {
+    const { backend } = fakeBackend();
+    const { result, record, warnings } = run(journalEnv(), backend);
+    await result;
+    expect(record.mock.calls[0][1].discardableStandby).toBeNull();
+    expect(warnings).toEqual([]);
+  });
+
+  it.each([
+    ['answers nothing', async () => null],
+    [
+      'throws',
+      async () => {
+        throw new Error('ssh: connect refused');
+      },
+    ],
+  ])(
+    'a standby whose lineage read %s: no record, and a warning naming the deploy refusal and the doc',
+    async (_n, read) => {
+      const { backend } = fakeBackend({ readStandbyLineage: read });
+      const { result, record, warnings } = run(journalEnv(), backend);
+      await expect(result).resolves.toMatchObject({ fenceLifted: true });
+      expect(record.mock.calls[0][1].discardableStandby).toBeNull();
+      expect(warnings.join('\n')).toMatch(
+        /could not read the standby's lineage \(10\.0\.0\.2\)[\s\S]*the next deploy refuses to reseed it[\s\S]*docs\/technical\.md[\s\S]*vibecarbon deploy prod$/,
+      );
+    },
+  );
 });
 
 describe('recordFailoverAbort: the one save', () => {
@@ -203,6 +275,20 @@ describe('recordFailoverAbort: the one save', () => {
     expect(after.servers).toHaveLength(2);
   });
 
+  it('records the discardable standby, and an abort that read none drops an older record', () => {
+    const rec = {
+      ip: '10.0.0.2',
+      systemIdentifier: JOURNAL.systemIdentifier,
+      timeline: 3,
+      at: 'x',
+    };
+    seed(journalEnv() as Record<string, unknown>);
+    recordFailoverAbort({ environment: 'prod' }, { fenceLifted: true, discardableStandby: rec });
+    expect(readEnv().ha.discardableStandby).toEqual(rec);
+    recordFailoverAbort({ environment: 'prod' }, { fenceLifted: true });
+    expect(readEnv().ha).not.toHaveProperty('discardableStandby');
+  });
+
   it('keeps the write-fence marker when the lift was not proven', () => {
     const env = journalEnv() as Record<string, unknown> & { ha: Record<string, unknown> };
     env.ha.writeFence = { node: 'myapp-prod-primary', ip: '10.0.0.1', at: 'x' };
@@ -222,7 +308,7 @@ describe('compose-ha abort backend', () => {
     envConfig: Record<string, unknown> = journalEnv(),
   ) => {
     const commands: Array<{ ip: string; command: string }> = [];
-    const rearm = vi.fn(async () => ({ ok: true }));
+    const rearm = vi.fn(async () => {});
     const backend = composeFailoverAbortBackend({
       envName: 'prod',
       envConfig,
@@ -236,7 +322,11 @@ describe('compose-ha abort backend', () => {
           }
           return '';
         },
-        mergeEnv: vi.fn(async () => {}),
+        roleRun: async (ip: string, _k: string, argv: string[]) => {
+          const command = argv.join(' ');
+          commands.push({ ip, command });
+          return composeRoleReply(command) ?? '';
+        },
         rearmWalg: rearm,
         armAcme: vi.fn(async () => true),
         disarmAcme: vi.fn(async () => true),
@@ -311,14 +401,65 @@ describe('compose-ha abort backend', () => {
     }
   });
 
-  it('re-arms WALG_ROLE on the old primary only when its running db lost it', async () => {
-    const kept = make({ 'docker inspect': 'WALG_ROLE=primary' });
+  it('re-arms the wal-g role FILE on the old primary only when it lost it', async () => {
+    const kept = make({ WALG_ROLE_FILE: 'WALG_ROLE_FILE=primary' });
     await expect(kept.backend.armPrimary()).resolves.toBe(true);
     expect(kept.rearm).not.toHaveBeenCalled();
+    expect(kept.commands[0]).toMatchObject({ ip: '10.0.0.1' });
+    expect(kept.commands[0].command).toContain('/opt/myapp/.vibecarbon-role/walg-role');
 
-    const lost = make({ 'docker inspect': 'WALG_ROLE=standby' });
+    const lost = make({ WALG_ROLE_FILE: 'WALG_ROLE_FILE=standby' });
     await expect(lost.backend.armPrimary()).resolves.toBe(true);
     expect(lost.rearm).toHaveBeenCalledWith(expect.objectContaining({ promotedIp: '10.0.0.1' }));
+
+    const failed = make(
+      { WALG_ROLE_FILE: 'WALG_ROLE_FILE=' },
+      { rearmWalg: vi.fn(async () => Promise.reject(new Error('read back as ""'))) },
+    );
+    await expect(failed.backend.armPrimary()).resolves.toBe(false);
+  });
+
+  it('compose abort: disarmStandby writes the standby role FILE, armPrimary reads it (C4)', async () => {
+    const cmds: string[] = [];
+    const run = async (_ip: string, _k: string, cmd: string) => {
+      cmds.push(cmd);
+      return cmd.includes('WALG_ROLE_FILE') ? 'WALG_ROLE_FILE=standby' : 'WRITERS_DONE';
+    };
+    const backend = composeFailoverAbortBackend({
+      envName: 'prod',
+      envConfig: journalEnv(),
+      projectName: 'acme',
+      sshKeyPath: '/k',
+      deps: {
+        run,
+        // The real writer (writeComposeWalgRole) over the same recording seam.
+        roleRun: argvOver(run),
+        armAcme: vi.fn(async () => true),
+        disarmAcme: vi.fn(async () => true),
+      },
+    });
+    await backend.disarmStandby();
+    expect(
+      cmds.some((c) => c.includes('.vibecarbon-role') && composeRoleWriteOf(c) === 'standby'),
+    ).toBe(true);
+    await backend.armPrimary();
+    expect(
+      cmds.some((c) => c.includes('.vibecarbon-role') && composeRoleWriteOf(c) === 'primary'),
+    ).toBe(true);
+    expect(cmds.some((c) => c.includes('up -d --no-deps db'))).toBe(false);
+  });
+
+  it('disarmStandby: a role file that does not read back standby is not disarmed', async () => {
+    const { backend } = make(
+      { WRITERS_DONE: 'WRITERS_DONE' },
+      { roleRun: async () => 'WALG_ROLE_FILE=primary' },
+    );
+    await expect(backend.disarmStandby()).resolves.toBe(false);
+    const ok = make({ WRITERS_DONE: 'WRITERS_DONE' });
+    await expect(ok.backend.disarmStandby()).resolves.toBe(true);
+    expect(ok.commands.find((c) => composeRoleWriteOf(c.command))).toMatchObject({
+      ip: '10.0.0.2',
+    });
   });
 
   it('starts the declared writers on the old primary: the app plus the enabled primary-only add-ons', async () => {
@@ -329,6 +470,38 @@ describe('compose-ha abort backend', () => {
     const bare = make({ START_DONE: 'START_DONE' });
     await bare.backend.startPrimaryWriters();
     expect(bare.commands[0].command).toMatch(/in myapp-app;/);
+  });
+});
+
+describe('compose-ha abort backend: the lineage read', () => {
+  it("reads the standby's lineage in its db container, and an error reads as none", async () => {
+    const seen: string[] = [];
+    const backendWith = (answer: () => Promise<string>) =>
+      composeFailoverAbortBackend({
+        envName: 'prod',
+        envConfig: journalEnv(),
+        projectName: 'myapp',
+        sshKeyPath: '/k',
+        deps: {
+          psql: (ip: string, _k: string, dir: string) => async (sql: string) => {
+            seen.push(`${ip} ${dir} ${sql}`);
+            return answer();
+          },
+        },
+      });
+    await expect(
+      backendWith(async () => `f|${JOURNAL.systemIdentifier}|00000003`).readStandbyLineage(),
+    ).resolves.toEqual({
+      inRecovery: false,
+      systemIdentifier: JOURNAL.systemIdentifier,
+      timeline: 3,
+    });
+    expect(seen[0]).toMatch(/^10\.0\.0\.2 \/opt\/myapp SELECT pg_is_in_recovery\(\)/);
+    await expect(
+      backendWith(async () => {
+        throw new Error('ssh failed');
+      }).readStandbyLineage(),
+    ).resolves.toBeNull();
   });
 });
 
@@ -362,6 +535,38 @@ describe('k8s-ha abort backend', () => {
     return { backend, calls, scale };
   };
 
+  it("reads the standby's lineage through psql on the standby cluster, and an error reads as none", async () => {
+    const sqls: Array<{ ip: string; sql: string }> = [];
+    const backendWith = (answer: () => Promise<string>) =>
+      k8sFailoverAbortBackend({
+        envName: 'prod',
+        envConfig,
+        strategy: {},
+        deps: {
+          sshKeyPath: '/k',
+          kubectl: async () => '',
+          psql: (ip: string) => async (sql: string) => {
+            sqls.push({ ip, sql });
+            return answer();
+          },
+        },
+      });
+    await expect(
+      backendWith(async () => `f|${JOURNAL.systemIdentifier}|00000003\n`).readStandbyLineage(),
+    ).resolves.toEqual({
+      inRecovery: false,
+      systemIdentifier: JOURNAL.systemIdentifier,
+      timeline: 3,
+    });
+    expect(sqls[0].ip).toBe('10.2.0.1');
+    expect(sqls[0].sql).toContain('pg_control_system()');
+    await expect(
+      backendWith(async () => {
+        throw new Error('pod db-0 not found');
+      }).readStandbyLineage(),
+    ).resolves.toBeNull();
+  });
+
   it('scales the standby db StatefulSet to zero and proves its pod gone', async () => {
     const { backend, calls } = make(() => '');
     await expect(backend.stopStandbyDb()).resolves.toEqual({ ok: true });
@@ -380,22 +585,50 @@ describe('k8s-ha abort backend', () => {
     });
   });
 
-  it('re-arms WALG_ROLE=primary on the old primary only when the StatefulSet lost it', async () => {
-    const sts = (role: string) =>
-      JSON.stringify({
-        spec: {
-          template: {
-            spec: { containers: [{ name: 'db', env: [{ name: 'WALG_ROLE', value: role }] }] },
-          },
-        },
-      });
-    const kept = make((argv) => (argv.includes('get') ? sts('primary') : ''));
-    await expect(kept.backend.armPrimary()).resolves.toBe(true);
-    expect(kept.calls.some((c) => c.argv.includes('set'))).toBe(false);
+  it('re-arms the wal-g role on the old primary only when its intent or live file lost it, with no db restart', async () => {
+    // intent: the vibecarbon-db-role ConfigMap; file: the live role file read back.
+    const cluster = (intent: string | null, file: string) => (argv: string[]) => {
+      if (argv.includes('configmap/vibecarbon-db-role')) {
+        return intent ? JSON.stringify({ data: { VC_WALG_ROLE_INTENT: intent } }) : '';
+      }
+      const reply = k8sRoleReply(argv);
+      if (
+        reply !== undefined &&
+        argv.includes('exec') &&
+        !argv.join(' ').includes('walg-role.tmp')
+      ) {
+        return `WALG_ROLE_FILE=${file}\n`;
+      }
+      return reply ?? '';
+    };
+    const writes = (calls: Array<{ argv: string[] }>) =>
+      calls.filter((c) => c.argv.includes('apply') || c.argv.join(' ').includes('walg-role.tmp'));
 
-    const lost = make((argv) => (argv.includes('get') ? sts('standby') : ''));
-    await expect(lost.backend.armPrimary()).resolves.toBe(true);
-    expect(lost.calls.find((c) => c.argv.includes('set'))?.argv).toContain('WALG_ROLE=primary');
+    const kept = make(cluster('primary', 'primary'));
+    await expect(kept.backend.armPrimary()).resolves.toBe(true);
+    expect(writes(kept.calls)).toEqual([]);
+
+    for (const [intent, file] of [
+      ['standby', 'standby'],
+      ['primary', 'standby'],
+      [null, 'primary'],
+    ] as const) {
+      const lost = make(cluster(intent, file));
+      await expect(lost.backend.armPrimary()).resolves.toBe(true);
+      expect(writes(lost.calls).map((c) => c.argv.includes('apply'))).toEqual([true, false]);
+      expect(lost.calls.every((c) => c.ip === '10.1.0.1')).toBe(true);
+      expect(lost.calls.some((c) => c.argv.includes('set') || c.argv.includes('rollout'))).toBe(
+        false,
+      );
+    }
+
+    // A primary db pod from before the role mount cannot be armed: a false, not a throw.
+    const old = make((argv) =>
+      argv.includes('configmap/vibecarbon-db-role')
+        ? ''
+        : (k8sRoleReply(argv, { roleMount: false }) ?? ''),
+    );
+    await expect(old.backend.armPrimary()).resolves.toBe(false);
   });
 
   it('scales the old primary app tier back up from the persisted list', async () => {

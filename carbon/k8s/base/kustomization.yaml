@@ -16,8 +16,11 @@ resources:
   # Note: hetzner-ccm and hetzner-csi are installed via cloud-init (master-init.sh)
   # Note: cert-manager is installed separately via infra/ kustomization
   # `db/` is the Postgres StatefulSet. It carries deploy-time placeholders
-  # (image, wal-g prefix and role, StorageClass), so the deploy applies a
-  # rendered copy of this tree (renderK8sBase in src/lib/deploy/k8s/k3s.js).
+  # (image, wal-g prefix, S3 endpoint and region, StorageClass, the
+  # wal-archive ConfigMap sha), so the deploy applies a rendered copy of this
+  # tree (renderK8sBase in src/lib/deploy/k8s/k3s.js). The wal-g role is not
+  # one of them: it is a file on the db volume, set from the CLI-owned
+  # vibecarbon-db-role ConfigMap.
   - db/
   - app/
   - backup/

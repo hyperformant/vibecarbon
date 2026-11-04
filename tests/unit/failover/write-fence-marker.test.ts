@@ -112,6 +112,44 @@ describe('marker persistence', () => {
     swapHaRoles('prod');
     expect(readEnv().ha.writeFence).toBeUndefined();
   });
+
+  // An abort's discardable-standby record names the OLD standby, which a
+  // failover makes the primary: it must never outlive the role change.
+  const DISCARD = {
+    ip: '10.0.0.9',
+    systemIdentifier: JOURNAL.systemIdentifier,
+    timeline: 3,
+    at: 'x',
+  };
+
+  it("the k8s role-swap save drops an abort's discardable-standby record", () => {
+    seed({
+      region: 'nbg1',
+      secondaryRegion: 'ash',
+      ha: {
+        enabled: true,
+        primary: { masterIp: '10.0.0.1', region: 'nbg1' },
+        standby: { masterIp: '10.0.0.9', region: 'ash' },
+        discardableStandby: DISCARD,
+      },
+    });
+    swapHaRoles('prod');
+    expect(readEnv().ha).not.toHaveProperty('discardableStandby');
+    expect(readEnv().ha.primary.masterIp).toBe('10.0.0.9');
+  });
+
+  it('the compose role-swap save drops it too', () => {
+    seed({
+      deployMode: 'compose-ha',
+      servers: [
+        { name: 'myapp-prod-primary', role: 'primary', ip: '10.0.0.1', region: 'nbg1' },
+        { name: 'myapp-prod-standby', role: 'standby', ip: '10.0.0.2', region: 'ash' },
+      ],
+      ha: { enabled: true, discardableStandby: { ...DISCARD, ip: '10.0.0.2' } },
+    });
+    swapComposeHaRoles('prod');
+    expect(readEnv().ha).not.toHaveProperty('discardableStandby');
+  });
 });
 
 describe('liftStrandedWriteFence (failover rerun and deploy entry)', () => {

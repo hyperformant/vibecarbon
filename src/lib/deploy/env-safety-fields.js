@@ -25,6 +25,10 @@ export const ENV_SAFETY_FIELDS = Object.freeze([
   'ha.failoverInFlight',
   'ha.systemIdentifier',
   'ha.backupFence',
+  // An abort's record of the standby copy it gave up (standby-lineage.js):
+  // the cold reseed honours it, and only the reseed that replaced that copy
+  // clears it.
+  'ha.discardableStandby',
   'pendingServerState',
   'replication',
   'degraded',

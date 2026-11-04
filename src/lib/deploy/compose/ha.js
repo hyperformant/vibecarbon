@@ -27,12 +27,14 @@ import {
 } from '../../dns-provider.js';
 import { socatImageRef } from '../../images.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { hasSentinelLine, sentinelLinePayload } from '../../remote-sentinel.js';
 import { addonJobStartCmd, mintAttemptId } from '../../services/addon-start.js';
 import {
   composePromotionServices,
   composeWriterServices,
   enabledAddonNames,
 } from '../../services/standby-policy.js';
+import { shEscape } from '../../shell.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import { backupFenceWarning, recordBackupFence, writeComposeBackupFence } from '../backup-fence.js';
@@ -46,6 +48,7 @@ import {
   dnsDidNotMessage,
   FailoverDnsError,
   FailoverRefusedError,
+  failoverInFlightNextStep,
   flipAndVerifyDns,
   promotionNotIssuedMessage,
   promotionUnknownMessage,
@@ -71,17 +74,28 @@ import {
 import {
   dropInactiveReplicationSlots,
   ensureReplicationSlotSql,
+  slotDropSkippedNote,
   slotDropWarning,
 } from '../replication-slot.js';
 import { reconcileRetiredFence } from '../retired-fence.js';
+import { DB_LINEAGE_SQL, parseDbLineage, standbyLineageVerdict } from '../standby-lineage.js';
 import { TLS_FIRST_LOOK_BUDGET_MS, waitForTrustedTls } from '../tls-ready.js';
-import { mergeRemoteDotenv, pinnedSshOptsString, readReplPassword } from '../utils.js';
+import { readReplPassword } from '../utils.js';
 import {
   assertWalgBackupsWorking,
   composeWalgAuditShell,
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from '../walg-audit.js';
-import { composeDbRecreateShell, composeRoleEnv, walgRoleDegradedMessage } from '../walg-role.js';
+import {
+  COMPOSE_WALG_ROLE_HOST_DIR,
+  composeDbMountsWalgRoleDir,
+  FAILOVER_NOT_STARTED,
+  parseWalgRoleReadBack,
+  WALG_ROLE_DIR,
+  walgRoleDegradedMessage,
+  walgRoleReadShell,
+  writeComposeWalgRole,
+} from '../walg-role.js';
 import {
   exchangeAndBringUpTunnel,
   REPL_GATEWAY_PORT,
@@ -455,6 +469,130 @@ ${ensureReplicationSlotSql()}
 }
 
 /**
+ * What a compose-ha cold deploy says when the STANDBY's db cannot be read:
+ * the manual rebuild (docs/technical.md, "Rebuilding a compose-ha standby
+ * whose db cannot start"). On the standby server only, the db container and
+ * its volume go; the deploy's compose up creates a fresh volume (initdb, its
+ * own system identifier) and the cold reseed seeds it from the primary, the
+ * path a new standby server takes. The container is `<project>-db`
+ * (container_name) and the volume `<project>_db_data` (the compose project is
+ * the /opt/<project> directory, volume db_data).
+ *
+ * @param {string} projectName
+ * @param {string} [envName]
+ * @returns {string}
+ */
+export function composeStandbyDbRebuildHint(projectName, envName) {
+  return (
+    "If the standby's postgres cannot start at all (a crash loop, a damaged data directory), " +
+    'rebuild its db on the STANDBY server (never the primary) with ' +
+    `\`docker rm -f ${projectName}-db\` then \`docker volume rm ${projectName}_db_data\` and then ` +
+    `\`vibecarbon deploy ${envName || '<env>'}\` seeds it from the primary (docs/technical.md, ` +
+    '"Rebuilding a compose-ha standby whose db cannot start")'
+  );
+}
+
+/** How long the compose lineage read waits for a just-recreated db to accept connections. */
+export const COMPOSE_LINEAGE_READY_WAIT_S = 60;
+
+/**
+ * One compose node's db lineage (standby-lineage.js DB_LINEAGE_SQL), read in
+ * its db container after one bounded wait for postgres to accept TCP
+ * connections (a db the deploy just recreated may still be starting; a
+ * first-boot temporary init server is socket-only, so only the real server
+ * passes). A condition poll with a deadline, never a retry. Unread parts are
+ * null; it never throws.
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string} projectName
+ * @param {{ run?: typeof sshRun }} [deps]
+ * @returns {Promise<ReturnType<typeof parseDbLineage> & { dbReady: boolean|null }>}
+ */
+export async function readComposeDbLineage(ip, sshKeyPath, projectName, { run = sshRun } = {}) {
+  const inner =
+    `vc_ready=0; vc_i=0; while [ "$vc_i" -lt ${COMPOSE_LINEAGE_READY_WAIT_S} ]; do ` +
+    'if pg_isready -q -h 127.0.0.1 -U postgres; then vc_ready=1; break; fi; ' +
+    'vc_i=$((vc_i + 1)); sleep 1; done; ' +
+    `printf 'ready=%s\\n' "$vc_ready"; ` +
+    `printf 'lineage=%s\\n' "$(psql -U postgres -d postgres -tAc '${DB_LINEAGE_SQL}' 2>/dev/null)"`;
+  const out = await run(
+    ip,
+    sshKeyPath,
+    `cd /opt/${projectName} && docker compose exec -T db sh -c ${shEscape(inner)}`,
+    { timeout: (COMPOSE_LINEAGE_READY_WAIT_S + 60) * 1000 },
+  );
+  const text = typeof out === 'string' ? out : '';
+  const ready = /^ready=(.*)$/m.exec(text)?.[1]?.trim();
+  return {
+    dbReady: ready === '1' ? true : ready === '0' ? false : null,
+    ...parseDbLineage(/^lineage=(.*)$/m.exec(text)?.[1] ?? ''),
+  };
+}
+
+/**
+ * The compose twin of the k8s cold reseed's lineage check
+ * (assertStandbyNotPromotedOutside, k8s/ha/index.js), over the same verdict
+ * (standby-lineage.js): a standby promoted outside the CLI is never
+ * overwritten, unless it is exactly the copy `failover -abort` recorded as
+ * discardable. Throws before anything is staged or stopped.
+ *
+ * @param {object} o
+ * @param {ReturnType<typeof parseDbLineage> & { dbReady?: boolean|null }} o.target the standby's lineage
+ * @param {ReturnType<typeof parseDbLineage>} o.source the primary's lineage
+ * @param {string} o.standbyIp
+ * @param {string} o.primaryIp
+ * @param {string} o.projectName
+ * @param {string} [o.envName]
+ * @param {object|null} [o.discardable] the env's ha.discardableStandby
+ * @returns {'standby'|'fresh'|'retired'|'discardable'}
+ */
+export function assertComposeStandbyNotPromotedOutside({
+  target,
+  source,
+  standbyIp,
+  primaryIp,
+  projectName,
+  envName,
+  discardable = null,
+}) {
+  const verdict = standbyLineageVerdict({ target, source, standbyIp, discardable });
+  const env = envName || '<env>';
+  if (verdict === 'target-unread') {
+    const why =
+      target?.dbReady === false
+        ? `its db did not accept connections within ${COMPOSE_LINEAGE_READY_WAIT_S}s`
+        : `its recovery state, system identifier and timeline could not be read`;
+    throw new Error(
+      `reseed refused: the standby ${standbyIp} is not proven in recovery and ${why}, so it ` +
+        'cannot be told apart from a primary promoted outside vibecarbon. Nothing was staged or ' +
+        `stopped. Check that its db answers (ssh root@${standbyIp} 'cd /opt/${projectName} && ` +
+        `docker compose exec -T db psql -U postgres -c "SELECT 1"'), then rerun \`vibecarbon deploy ${env}\`. ` +
+        composeStandbyDbRebuildHint(projectName, envName),
+    );
+  }
+  if (verdict === 'source-unread') {
+    throw new Error(
+      `reseed refused: the primary ${primaryIp}'s system identifier and timeline could not be read, ` +
+        `so the standby ${standbyIp} (not in recovery) cannot be proven safe to overwrite. Nothing was ` +
+        `staged or stopped. Rerun \`vibecarbon deploy ${env}\` once the primary's db answers.`,
+    );
+  }
+  if (verdict === 'promoted') {
+    throw new Error(
+      `reseed refused: the standby ${standbyIp} looks promoted outside vibecarbon. It is not in ` +
+        `recovery and runs timeline ${target.timeline} of the same database (system identifier ` +
+        `${target.systemIdentifier}) as the configured primary ${primaryIp}, which is on timeline ` +
+        `${source.timeline}: it has taken writes the primary never saw, and reseeding it would ` +
+        'overwrite them. Nothing was staged or stopped. If it should be the primary, adopt it with ' +
+        `\`vibecarbon failover ${env}\`; otherwise decide by hand which copy to keep (back it up ` +
+        `first), then rerun \`vibecarbon deploy ${env}\`.`,
+    );
+  }
+  return verdict;
+}
+
+/**
  * Configure the standby PostgreSQL server as a hot standby replica.
  *
  * 1. Stage pg_basebackup (with standby.signal + primary_conninfo) into a
@@ -611,7 +749,7 @@ echo COMPOSE_RESEED_STAGED
         `services on both nodes.`,
     );
   }
-  if (!stageText.includes('COMPOSE_RESEED_STAGED')) {
+  if (!hasSentinelLine(stageText, 'COMPOSE_RESEED_STAGED')) {
     throw new Error(
       `configureStandbyReplication: staging the basebackup on ${standbyIp} failed. The ` +
         `standby db is still running on its previous PGDATA (nothing was stopped or ` +
@@ -641,7 +779,7 @@ echo COMPOSE_RESEED_STAGED
   }
 
   try {
-    // Host-side, kubelet-free equivalent of the k8s scale-to-zero: compose owns
+    // Host-side stop of the db container: compose owns
     // the container lifecycle (never an in-container pg_ctl stop — postgres is
     // the container's PID 1, so that kills the container out from under us).
     // Include the replication overlay flags so the compose file set matches
@@ -669,7 +807,7 @@ echo COMPOSE_RESEED_STAGED
       input: buildNodePgdataSwapScript({ pgdataDir: pgdataHostPath }),
     });
     const swapText = typeof swapOut === 'string' ? swapOut : '';
-    if (!swapText.includes('RESEED_SWAPPED')) {
+    if (!hasSentinelLine(swapText, 'RESEED_SWAPPED')) {
       // The stage step verified the staging above, so SKIPPED (or any failure)
       // here means it vanished/corrupted between steps — a real failure. The
       // old PGDATA is untouched (the swap is ordered rename-last).
@@ -1253,14 +1391,40 @@ export async function waitForNewPrimaryApi(ip, sshKeyPath, domain, opts = {}) {
 }
 
 /**
- * Move the wal-g WRITE-GUARD onto the node this failover just promoted, and
- * PROVE it took — see src/lib/deploy/walg-role.js for why nothing else does.
+ * Arm the wal-g write-guard on the standby this failover is about to promote:
+ * write `primary` into its role file (`/opt/<project>/.vibecarbon-role`, on
+ * the host, bound read-only into the db container) and read it back through
+ * the one parser (writeComposeWalgRole). Called before the promote, while the
+ * standby is still in recovery, where archive_command never runs, so the write
+ * is inert until the promote makes it true (D2): the promotion's own .history
+ * and .partial files are archived. Nothing restarts.
  *
- * On compose, `WALG_ROLE` reaches the db container from `/opt/<project>/.env`
- * (`WALG_ROLE: ${WALG_ROLE:-primary}` in docker-compose.yml). Merging the file
- * is therefore only half of it: container environment is fixed at create time,
- * so the db service is RECREATED (`up -d --no-deps db`, with the node's real
- * `-f` set — composeDbRecreateShell) before anything reads the new value.
+ * Throws when the role file does not read back `primary`, so the failover
+ * aborts before promotion.
+ *
+ * @param {object} args
+ * @param {string} args.promotedIp    the standby about to be promoted
+ * @param {string} args.sshKeyPath
+ * @param {string} args.projectName
+ * @param {{roleRun?: Function}} [args.deps] roleRun: ssh.js's argv sshRun, for tests
+ * @returns {Promise<void>}
+ */
+export async function armComposeWalgRole({ promotedIp, sshKeyPath, projectName, deps = {} }) {
+  await writeComposeWalgRole({
+    ip: promotedIp,
+    sshKeyPath,
+    projectName,
+    role: 'primary',
+    run: deps.roleRun,
+  });
+}
+
+/**
+ * PROVE the wal-g write-guard is on the node this failover just promoted. The
+ * arm wrote `primary` before the promote (armComposeWalgRole); this reads the
+ * role file back and runs the deploy-time backup audit in `requirePrimary`
+ * mode, so a promoted node still reading `standby` fails instead of passing
+ * as a legitimate skip. It writes nothing and restarts nothing.
  *
  * Returns rather than throws. By the time this runs the standby is already
  * promoted, so there is no half-failover left to prevent: aborting here would
@@ -1268,64 +1432,39 @@ export async function waitForNewPrimaryApi(ip, sshKeyPath, domain, opts = {}) {
  * finishing the failover and reporting loudly that its backups are dead. The
  * caller carries the verdict to the end of the flow and fails the command there.
  *
- * The old primary is demoted separately (demoteComposeWalgRole) — it is still
- * serving traffic at this point, because compose-HA does not stop it until
- * after the promoted node is confirmed serving.
+ * `rolePrimary` says whether the role file read `primary`: until it does,
+ * the node's reconcile (standby-scale.sh, the same file) holds the
+ * primary-only add-ons at zero.
  *
  * @param {object} args
  * @param {string} args.promotedIp    the new primary (the old standby)
  * @param {string} args.sshKeyPath
  * @param {string} args.projectName
  * @param {object} [args.deps] injected seams for unit tests
- * @returns {Promise<{ok: boolean, error?: Error}>}
+ * @returns {Promise<{ok: boolean, error?: Error, rolePrimary?: boolean}>}
  */
-export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectName, deps = {} }) {
+export async function auditComposeWalgRole({ promotedIp, sshKeyPath, projectName, deps = {} }) {
   const {
     run = sshRunAsync,
-    mergeEnv = mergeRemoteDotenv,
     audit = assertWalgBackupsWorking,
     log = (msg) => p.log.info(msg),
   } = deps;
   const remoteDir = `/opt/${projectName}`;
-  // Whether .env on the promoted node says WALG_ROLE=primary. Until it does,
-  // its reconcile (standby-scale.sh) holds the primary-only add-ons at zero.
-  let roleWritten = false;
-
+  let rolePrimary;
   try {
-    // A resumed failover may have moved the role already: the RUNNING db
-    // container reads it (env is fixed at create), and then the recreate,
-    // a needless restart of the new primary, is skipped. The audit still runs.
-    const running = await run(promotedIp, sshKeyPath, composeDbRoleProbeShell(projectName), {
+    // One attempt: the DR path must not stretch over a node that does not answer.
+    const out = await run(promotedIp, sshKeyPath, composeDbRoleProbeShell(projectName), {
       timeout: 20_000,
       retries: 1,
     });
-    const alreadyPrimary = String(running === false ? '' : (running ?? ''))
-      .split('\n')
-      .some((l) => l.trim() === 'WALG_ROLE=primary');
-    if (alreadyPrimary) {
-      roleWritten = true;
-      log(`[walg-role] ${promotedIp} already runs WALG_ROLE=primary; no db recreate needed.`);
-    } else {
-      // composeRoleEnv: the only sanctioned compose-side role write.
-      await mergeEnv(
-        promotedIp,
-        pinnedSshOptsString(sshKeyPath),
-        remoteDir,
-        composeRoleEnv('primary'),
+    const role = roleFileValue(out);
+    rolePrimary = role === 'primary';
+    if (!rolePrimary) {
+      throw new Error(
+        role === undefined
+          ? `the wal-g role file on ${promotedIp} could not be read`
+          : `the wal-g role file on ${promotedIp} reads ${JSON.stringify(role)}, not primary`,
       );
-      roleWritten = true;
-      // 300s: a db container recreate plus the script's own 90s readiness wait,
-      // with room for a slow image start on a node that is mid-incident.
-      //
-      // `retries: 1` is load-bearing on the DR path. sshRunAsync defaults to 3
-      // attempts and classes a TIMEOUT as transient, so a wedged recreate would
-      // burn 3 × 300s — up to ~15 minutes of RTO before the DNS flip, while the
-      // site is down. One attempt, then report. (A script exit-1 is already
-      // non-transient and never retried.)
-      await run(promotedIp, sshKeyPath, composeDbRecreateShell(remoteDir), {
-        timeout: 300_000,
-        retries: 1,
-      });
     }
     // requirePrimary: the ONLY reason this audit is here is to catch a promoted
     // node still reading `standby`, which the deploy-time probe treats as a
@@ -1343,38 +1482,52 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
         return typeof out === 'string' ? out : '';
       },
     });
-    log(`[walg-role] new primary ${promotedIp} is archiving (WALG_ROLE=primary, audit passed).`);
+    log(`[walg-role] new primary ${promotedIp} is archiving (wal-g role primary, audit passed).`);
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err : new Error(String(err)), roleWritten };
+    return {
+      ok: false,
+      error: err instanceof Error ? err : new Error(String(err)),
+      ...(rolePrimary !== undefined && { rolePrimary }),
+    };
   }
 }
 
 /**
- * Print the RUNNING db container's WALG_ROLE as `WALG_ROLE=<role>` (empty when
- * the container is missing). The container env, not .env: a merged .env does
- * nothing until the container is recreated.
+ * POSIX sh that prints `WALG_ROLE_FILE=<role>` for a compose node's role file
+ * (`/opt/<project>/.vibecarbon-role/walg-role`), read on the host through the
+ * one parser. `<role>` is empty for a missing or unparseable file.
  *
  * @param {string} projectName
  * @returns {string}
  */
 export function composeDbRoleProbeShell(projectName) {
-  return (
-    `echo "WALG_ROLE=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ` +
-    `${projectName}-db 2>/dev/null | sed -n 's/^WALG_ROLE=//p' | head -n1)"`
-  );
+  return walgRoleReadShell(`/opt/${projectName}/${COMPOSE_WALG_ROLE_HOST_DIR}`);
+}
+
+/**
+ * The role a composeDbRoleProbeShell answer names: `primary`, `standby`, ''
+ * (missing or unparseable), or undefined when the node did not answer.
+ *
+ * @param {string|false|undefined} out
+ * @returns {string|undefined}
+ */
+function roleFileValue(out) {
+  return parseWalgRoleReadBack(out);
 }
 
 /**
  * Demote the old primary's wal-g write-guard so the two nodes never write the
  * same canonical WAL prefix at once. Its database keeps running after a
- * failover — out of recovery and still `WALG_ROLE=primary` — so without this it
- * carries on pushing WAL into the stream the NEW primary now owns.
+ * failover, out of recovery and still reading `primary`, so without this it
+ * carries on pushing WAL into the stream the NEW primary now owns. One host
+ * write of `standby` into its role file, read back; nothing restarts.
  *
- * Best-effort by design (an unreachable old primary is the usual reason to fail
- * over) and NEVER called before the old primary's app tier is stopped: this
- * recreates its db container, and compose-HA keeps the old primary serving
- * until the promoted node is confirmed.
+ * Best-effort by design (an unreachable old primary is the usual reason to
+ * fail over) and NEVER called before the old primary's writers are stopped:
+ * compose-HA keeps the old primary serving until the promoted node is
+ * confirmed, and a node reading `standby` drops every WAL segment it
+ * completes.
  *
  * Then it drops the old primary's inactive replication slots: the standby
  * that streamed through them is the new primary, so they would only pin WAL
@@ -1384,43 +1537,36 @@ export function composeDbRoleProbeShell(projectName) {
  * @param {string} args.oldPrimaryIp
  * @param {string} args.sshKeyPath
  * @param {string} args.projectName
- * @param {object} [args.deps] injected seams for unit tests
+ * @param {object} [args.deps] injected seams for unit tests (roleRun: ssh.js's argv sshRun)
  * @returns {Promise<boolean>} whether the demote landed
  */
 export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectName, deps = {} }) {
   const {
     run = sshRunAsync,
-    mergeEnv = mergeRemoteDotenv,
+    roleRun,
     log = (msg) => p.log.info(msg),
     warn = (msg) => p.log.warn(msg),
   } = deps;
   const remoteDir = `/opt/${projectName}`;
+  const ip = oldPrimaryIp;
+  // DEMOTION_ORDER, as demoteK8sWalgRole (walg-role.js): the role first (the
+  // write-guard that stops this node archiving into the new primary's prefix),
+  // then the slot drop (only this node's disk). A failed role write skips it.
   try {
-    // composeRoleEnv: the only sanctioned compose-side role write.
-    await mergeEnv(
-      oldPrimaryIp,
-      pinnedSshOptsString(sshKeyPath),
-      remoteDir,
-      composeRoleEnv('standby'),
-    );
-    // Same single-attempt budget as the promote side — this is best-effort and
-    // must never stretch the DR path (see restoreComposeWalgRole).
-    await run(oldPrimaryIp, sshKeyPath, composeDbRecreateShell(remoteDir), {
-      timeout: 300_000,
-      retries: 1,
-    });
+    await writeComposeWalgRole({ ip, sshKeyPath, projectName, role: 'standby', run: roleRun });
     log(`[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`);
   } catch (err) {
     warn(
       `Could not demote the old primary's wal-g write-guard (${oldPrimaryIp}): ${err.message}. ` +
         `If it comes back up it may archive into the same backup prefix as the new primary, ` +
-        `\`vibecarbon deploy\` fixes this when it converges the ex-primary to standby.`,
+        `\`vibecarbon deploy\` fixes this when it converges the ex-primary to standby. ` +
+        slotDropSkippedNote(oldPrimaryIp),
     );
     return false;
   }
   // Nobody streams from the old primary's slot now, and it would pin WAL there
-  // up to the slot cap. After the recreate, whose script waited for the db to
-  // accept connections. A failed drop leaves the demotion verdict alone.
+  // up to the slot cap. A db that is down fails the drop: it warns and leaves
+  // the demotion verdict alone.
   const slots = await dropInactiveReplicationSlots((sql) =>
     run(oldPrimaryIp, sshKeyPath, `cd ${remoteDir} && ${composeDbPsqlShell(sql)}`, {
       timeout: 30_000,
@@ -1606,7 +1752,7 @@ export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName, service
     lines.filter((l) => l.startsWith(`${tag} `)).map((l) => l.slice(tag.length + 1));
   const stopped = named('STOPPED');
   // FENCE_DONE proves the loop ran to its end over a live ssh session.
-  const reached = lines.includes('FENCE_DONE');
+  const reached = hasSentinelLine(out, 'FENCE_DONE');
   const ok = reached && named('FAILED').length === 0;
   return { ok, stopped, reached };
 }
@@ -1657,6 +1803,9 @@ export function swapComposeHaRoles(envName, { override, attemptId } = {}) {
     // The retired node's read-only state now belongs to the retired-node
     // handling, not to the interrupted-fence marker.
     delete envConfig.ha.writeFence;
+    // An abort's discardable-standby record names the old standby, now the
+    // primary: it must never outlive the role change (standby-lineage.js).
+    delete envConfig.ha.discardableStandby;
     // Honest DR posture, as k8s swapHaRoles: the retired node replicates nothing.
     envConfig.replication = 'degraded';
     envConfig.degraded = true;
@@ -1722,7 +1871,7 @@ export async function flipComposeDnsWith({ dnsProvider, token, zoneId, domain, i
  * compose file resolution is involved. The standby's db is stopped: its
  * `unless-stopped` policy keeps a stopped container down through a daemon
  * restart. A host reboot runs the bundle's `compose up` unit, which would
- * start it again, so its .env also gets WALG_ROLE=standby (it can archive
+ * start it again, so its wal-g role file also reads standby (it can archive
  * nothing) until the next deploy reseeds it.
  *
  * @param {object} args
@@ -1742,11 +1891,12 @@ export function composeFailoverAbortBackend({
 }) {
   const {
     run = sshRun,
-    mergeEnv = mergeRemoteDotenv,
+    // ssh.js's argv sshRun, for the role-file writes (writeComposeWalgRole).
+    roleRun,
     reachable = isPrimaryReachable,
     psql = composePsqlRunner,
     unfenceWrites = (exec) => unfenceDatabaseWrites({ exec }),
-    rearmWalg = restoreComposeWalgRole,
+    rearmWalg = armComposeWalgRole,
     armAcme = armComposeAcme,
     disarmAcme = disarmComposeAcme,
     flipDns = flipComposeDns,
@@ -1777,6 +1927,13 @@ export function composeFailoverAbortBackend({
   return {
     ips: { primary: primaryServer.ip, standby: standbyServer.ip },
     stopDbHint: `ssh root@${standbyServer.ip} 'docker stop ${dbCt}'`,
+    readStandbyLineage: async () => {
+      try {
+        return parseDbLineage(await psql(standbyServer.ip, sshKeyPath, remoteDir)(DB_LINEAGE_SQL));
+      } catch {
+        return null;
+      }
+    },
     unfenceHint: `ssh root@${primaryServer.ip} 'cd ${remoteDir} && docker compose exec -T db ${UNFENCE_SQL_HINT}'`,
     stopStandbyDb: async () => {
       const out = await run(
@@ -1811,14 +1968,11 @@ export function composeFailoverAbortBackend({
         `docker stop ${writers.join(' ')} >/dev/null 2>&1; echo WRITERS_DONE`,
         { timeout: 120_000 },
       );
+      // The role file, read back; its db is stopped, so nothing restarts.
+      const ip = standbyServer.ip;
       let roleSet = true;
       try {
-        await mergeEnv(
-          standbyServer.ip,
-          pinnedSshOptsString(sshKeyPath),
-          remoteDir,
-          composeRoleEnv('standby'),
-        );
+        await writeComposeWalgRole({ ip, sshKeyPath, projectName, role: 'standby', run: roleRun });
       } catch {
         roleSet = false;
       }
@@ -1844,21 +1998,24 @@ export function composeFailoverAbortBackend({
         primaryNode: primaryServer.name ?? primaryServer.ip,
       }),
     armPrimary: async () => {
-      // The db recreate only when the running container lost the role: a
-      // failover that got past its demote step left it on standby.
+      // Write primary only when the role file lost it: a failover that got
+      // past its demote step left it on standby. One host write, no restart.
       const out = await run(primaryServer.ip, sshKeyPath, composeDbRoleProbeShell(projectName), {
         timeout: 20_000,
       });
-      const role = String(out === false ? '' : (out ?? ''))
-        .split('\n')
-        .map((l) => l.trim())
-        .find((l) => l.startsWith('WALG_ROLE='))
-        ?.slice('WALG_ROLE='.length);
-      let walg = role === 'primary';
+      let walg = roleFileValue(out) === 'primary';
       if (!walg) {
-        walg = (
-          await rearmWalg({ promotedIp: primaryServer.ip, sshKeyPath, projectName, deps: quiet })
-        ).ok;
+        try {
+          await rearmWalg({
+            promotedIp: primaryServer.ip,
+            sshKeyPath,
+            projectName,
+            deps: { roleRun },
+          });
+          walg = true;
+        } catch {
+          // a role file that does not read back primary: armed stays false
+        }
       }
       const acme = await armAcme({
         promotedIp: primaryServer.ip,
@@ -1879,7 +2036,7 @@ export function composeFailoverAbortBackend({
           'done; echo START_DONE',
         { timeout: 120_000 },
       );
-      return ok(out, 'START_DONE') && !String(out ?? '').includes('FAILED ');
+      return ok(out, 'START_DONE') && sentinelLinePayload(out, 'FAILED') === null;
     },
   };
 }
@@ -1889,11 +2046,11 @@ export function composeFailoverAbortBackend({
  * failover guard); when the primary answers (planned), stop its writers and
  * fence its database read-only so no write can land after the promote,
  * capture its WAL position and wait for the standby to replay it (or reseed a
- * standby that is not streaming, proven free of the fence); journal, promote,
- * then move the write-guard and issuer, restart the app, flip DNS and persist
- * the swap. The order is fence < terminate < capture LSN < catch-up < promote <
- * DNS, as on
- * k8s (failover-step-order-census.test.ts).
+ * standby that is not streaming, proven free of the fence); arm the promoted
+ * side's wal-g role (D2), journal, promote, then prove the write-guard, arm
+ * the issuer, restart the app, flip DNS and persist the swap. The order is
+ * fence < terminate < capture LSN < catch-up < arm < promote < DNS, as on k8s
+ * (failover-step-order-census.test.ts).
  *
  * Refuses a role-swapped environment before any ssh call (R4), and decides
  * promote, resume or refuse from the guard before any write (R1). Once the
@@ -1952,7 +2109,11 @@ export async function failoverComposeHA(
     flipDns = flipComposeDns,
     writeFence = writeComposeBackupFence,
     recordFence = recordBackupFence,
-    restoreWalgRole = restoreComposeWalgRole,
+    armWalgRole = armComposeWalgRole,
+    // ssh.js's argv sshRun, for the role-file writes (writeComposeWalgRole).
+    roleRun,
+    probeRoleBind = composeDbMountsWalgRoleDir,
+    restoreWalgRole = auditComposeWalgRole,
     pushBaseBackup = pushBaseBackupAfterPromote,
     reconcileRetired = () =>
       reconcileRetiredFence({
@@ -2026,6 +2187,30 @@ export async function failoverComposeHA(
   // that fixes it; `resume` means a previous run of THIS failover (its journal)
   // already promoted the standby.
   const planned = await primaryReachable(primaryServer.ip, sshKeyPath, remoteDir);
+
+  // The arm writes the promoted node's wal-g role into the host directory its
+  // db container binds at WALG_ROLE_DIR (D2), and the demote writes the old
+  // primary's. A db container from before that bind keeps reading the old role
+  // env, so the write never reaches it. Refuse such a node here, before
+  // anything changes (the compose twin of the k8s role-mount refusal, C18).
+  // A container that cannot be inspected is left to the replica proof below;
+  // an unreachable primary is not probed. A resumed failover already promoted,
+  // so it is let finish: its audit reports the role.
+  if (!envConfig?.ha?.failoverInFlight) {
+    const nodes = [['standby', standbyServer.ip]];
+    if (planned) nodes.push(['primary', primaryServer.ip]);
+    for (const [side, ip] of nodes) {
+      const bound = await probeRoleBind({ ip, sshKeyPath, projectName });
+      if (bound === false) {
+        throw new FailoverRefusedError(
+          `Failover refused: the ${side}'s db predates the live wal-g role (no ` +
+            `${WALG_ROLE_DIR} bind on ${projectName}-db at ${ip}); run ` +
+            `\`vibecarbon deploy ${envName}\` once (one db restart), then retry. ${FAILOVER_NOT_STARTED}`,
+        );
+      }
+    }
+  }
+
   const primaryPsql = psql(primaryServer.ip, sshKeyPath, remoteDir);
   const standbyPsql = psql(standbyServer.ip, sshKeyPath, remoteDir);
   // A planned run that died between its database fence and its journal left
@@ -2120,6 +2305,61 @@ export async function failoverComposeHA(
       p.log.warn(`Could not lift the fence on the old primary: ${firstLine(err)}`);
     }
   };
+
+  /**
+   * Put the standby's wal-g role back to standby after an abort that armed it
+   * and promoted nothing (best-effort). Returns the sentence that says how far
+   * it got.
+   */
+  async function disarmComposeStandby() {
+    const ip = standbyServer.ip;
+    try {
+      await writeComposeWalgRole({ ip, sshKeyPath, projectName, role: 'standby', run: roleRun });
+      return 'The standby was disarmed (wal-g role standby).';
+    } catch (err) {
+      return (
+        `The standby could NOT be disarmed (${firstLine(err)}): run ` +
+        `\`vibecarbon deploy ${envName}\` before it can push a backup.`
+      );
+    }
+  }
+
+  /**
+   * With a journal from an earlier run, that run's promote may still be
+   * landing on the standby: it is never disarmed then. `primary` is inert
+   * while it is in recovery (archive_command never runs), and `standby` on a
+   * node that is promoting would drop its .history and .partial files.
+   */
+  const keptArmedLine = () =>
+    'An earlier run of this failover journaled a promote that may still land, so the ' +
+    `standby keeps the primary wal-g role; ${failoverInFlightNextStep(envName)}.`;
+
+  /**
+   * D2: arm the promoted side's wal-g role before the promote, while the
+   * standby is still in recovery, so the promotion's own .history and .partial
+   * files are archived. A failed arm aborts before promotion and disarms the
+   * standby (never a half-armed node), unless an earlier run's journal says
+   * its promote may still land.
+   */
+  async function armBeforePromote() {
+    try {
+      await armWalgRole({
+        promotedIp: standbyServer.ip,
+        sshKeyPath,
+        projectName,
+        deps: { roleRun },
+      });
+    } catch (err) {
+      const cause = `the wal-g role could not be armed on the standby (${firstLine(err)})`;
+      if (journalAtEntry) {
+        throw new Error(`Failover aborted before this run's promote: ${cause}. ${keptArmedLine()}`);
+      }
+      throw new Error(
+        `Failover aborted before promotion: ${cause}. ${await disarmComposeStandby()} Nothing ` +
+          `was promoted; fix it and rerun vibecarbon failover ${envName}`,
+      );
+    }
+  }
 
   if (planned) {
     s.start('Fencing writes on the old primary (write outage begins)');
@@ -2245,18 +2485,31 @@ export async function failoverComposeHA(
         );
       }
 
+      // Step 0d (D2): arm the promoted side's wal-g role (one host write, no
+      // db restart) while the standby is still in recovery. A failed arm
+      // aborts here, before promotion.
+      await armBeforePromote();
+
       // Step 1: journal, then promote (R2, R3). The journal goes down right
       // before the promote; from here on only a never-sent promote on a run
       // that started without a journal leaves the old primary untouched.
-      await writeJournal(
-        { environment: envName },
-        {
-          target: 'standby',
-          primaryLsn,
-          systemIdentifier,
-          ...(unproven && { override: 'force-unproven' }),
-        },
-      );
+      try {
+        await writeJournal(
+          { environment: envName },
+          {
+            target: 'standby',
+            primaryLsn,
+            systemIdentifier,
+            ...(unproven && { override: 'force-unproven' }),
+          },
+        );
+      } catch (err) {
+        // The arm landed and nothing will promote: disarm it, unless an
+        // earlier run's journaled promote may still land.
+        throw new Error(
+          `${firstLine(err)}. ${journalAtEntry ? keptArmedLine() : await disarmComposeStandby()}`,
+        );
+      }
     } catch (err) {
       // Nothing is promoted before the journal: un-fence (on a first run) and
       // rethrow; the error names the cause and that nothing was promoted.
@@ -2318,15 +2571,13 @@ export async function failoverComposeHA(
   }
   recordFence({ environment: envName }, fenceWrite);
 
-  // Step 1a2: Move the wal-g WRITE-GUARD with the promotion. The promoted node
-  // was deployed as the standby, so its db container still reads
-  // WALG_ROLE=standby — which silently disables BOTH WAL archiving and base
-  // backups on the node that now holds the only live copy of the data. Runs
-  // BEFORE the app-tier restart on purpose: it recreates the db container, and
-  // restarting the app tier afterwards is exactly what re-pools it against the
-  // recreated database. Never throws — the verdict is carried to the end of the
-  // failover (see restoreComposeWalgRole).
-  s.start('Moving the wal-g write-guard to the new primary');
+  // Step 1a2: PROVE the wal-g WRITE-GUARD on the promoted node (armed before
+  // the promote, D2): a node still reading standby would skip every WAL
+  // segment and base backup on the node that now holds the only live copy of
+  // the data. Reads the role file and runs the requirePrimary audit; nothing
+  // is written or restarted. Never throws: the verdict is carried to the end
+  // of the failover (see auditComposeWalgRole).
+  s.start('Checking the wal-g write-guard on the new primary');
   const backupHealth = await restoreWalgRole({
     promotedIp: standbyServer.ip,
     sshKeyPath,
@@ -2380,7 +2631,7 @@ export async function failoverComposeHA(
         envName,
         promotedIp: standbyServer.ip,
         detail: backupHealth.error?.message ?? 'unknown failure',
-        heldAtZero: backupHealth.roleWritten === false ? promotionServices : [],
+        heldAtZero: backupHealth.rolePrimary === false ? promotionServices : [],
       }),
     );
   }
@@ -2475,8 +2726,8 @@ export async function failoverComposeHA(
   // (step 2; a planned run stopped them before the promote, and an
   // unreachable old primary was tried and skipped). Started earlier, a
   // reachable old primary and the promoted node would both run n8n and fire
-  // the same cron and webhooks. The database is read-write and .env says
-  // primary, so later reconciles keep them up. `--no-deps` never touches db;
+  // the same cron and webhooks. The database is read-write and its role file
+  // says primary, so later reconciles keep them up. `--no-deps` never touches db;
   // the one-shot setup jobs and app-migrate never run (the replicated
   // database already holds their work). Best-effort and loud: a failed start
   // must not abort a DR flip, it names the exact command to run by hand.
@@ -2523,14 +2774,17 @@ export async function failoverComposeHA(
   }
 
   // Step 2b: Demote the old primary's wal-g write-guard, so it stops pushing
-  // WAL into the prefix the new primary now owns. Deliberately AFTER step 2:
-  // this recreates its db container, and until the step above the old primary
-  // was still serving traffic (DNS has not flipped yet either). Best-effort.
+  // WAL into the prefix the new primary now owns: one host write of its role
+  // file, no db restart. Deliberately AFTER step 2: until the step above the
+  // old primary was still serving traffic (DNS has not flipped yet either),
+  // and a node reading standby drops every WAL segment it completes.
+  // Best-effort.
   s.start("Demoting the old primary's wal-g write-guard");
   const demoted = await demoteComposeWalgRole({
     oldPrimaryIp: primaryServer.ip,
     sshKeyPath,
     projectName,
+    deps: { roleRun },
   });
   // Step 2c: Disarm the retired node's ACME issuer — the swapped pair must
   // never run two armed solvers against one challenge name (the
@@ -2587,7 +2841,7 @@ export async function failoverComposeHA(
     attemptId,
   });
   // The old primary is now the retired side: fence it if it answers (marker,
-  // every writer stopped, not just the app, WALG_ROLE=standby). One that does
+  // every writer stopped, not just the app, the standby wal-g role). One that does
   // not is fenced by the next status, failover or deploy that reaches it,
   // before it can push a backup.
   // Never fails the failover: it has completed, and the terminal checks below
@@ -2633,7 +2887,7 @@ export async function failoverComposeHA(
   }
 
   // The first base backup on the new timeline (post-promote-backup.js): after
-  // the DNS flip, the add-ons, the WALG_ROLE move and the swap save, so it never
+  // the DNS flip, the add-ons, the wal-g role check and the swap save, so it never
   // holds the outage open. Not attempted while the promoted node still reads
   // standby (it would skip), nor after a DNS flip that was not confirmed (the
   // site is down, and minutes of upload would only delay the error that says
@@ -2699,7 +2953,7 @@ export async function failoverComposeHA(
         envName,
         promotedIp: standbyServer.ip,
         detail: backupHealth.error?.message ?? 'unknown failure',
-        heldAtZero: backupHealth.roleWritten === false ? promotionServices : [],
+        heldAtZero: backupHealth.rolePrimary === false ? promotionServices : [],
       }),
     );
   }

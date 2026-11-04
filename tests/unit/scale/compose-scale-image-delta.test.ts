@@ -210,6 +210,12 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
       // The real argv contract (tests/_shared/ssh-contract.ts).
       const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
       assertSshRunArgv(argv);
+      // The replacement's wal-g role write (scale's prepareReplacementServer,
+      // before the db's first start) reads back the role it wrote, as in
+      // compose-scale-tls-restore.test.ts.
+      const { roleWriteOf } = await import('../helpers/scale-cutover-stub.js');
+      const role = roleWriteOf(argv as string[]);
+      if (role) return `WALG_ROLE_FILE=${role}`;
       if (argv[0] === 'cat' && String(argv[1]).endsWith('/.env')) {
         return 'APP_IMAGE=myapp-app:local\n';
       }

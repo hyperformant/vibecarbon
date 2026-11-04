@@ -50,8 +50,9 @@ spec:
   # CLI-applied cluster-autoscaler.
   timeout: 10m
   # The db StatefulSet stays with the vibecarbon CLI's deploy, which renders
-  # its per-cluster values (image, StorageClass, S3 endpoint, wal-g role,
-  # relay address; see k8s/base/db/statefulset.yaml). Flux would apply the
+  # its per-cluster values (image, StorageClass, S3 endpoint and region,
+  # wal-g prefix, the wal-archive ConfigMap sha; see
+  # k8s/base/db/statefulset.yaml). Flux would apply the
   # unrendered placeholders, so it drops the object from its build here and
   # only health-checks the live one. Its Services and NetworkPolicy carry no
   # placeholders and stay in Flux's hands.

@@ -251,6 +251,12 @@ services:
       # database password before anything is created (findMissingRequiredEnv
       # in src/lib/project.js reads these markers).
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing — vibecarbon create writes it to .env.local}
+    # The wal-g role (primary or standby), written by the CLI on the host
+    # before every start and on a failover. Bound as a DIRECTORY: the CLI
+    # replaces the file atomically (a new inode), which a single-file bind
+    # would never show the container. Read-only: only the host writes it.
+    volumes:
+      - ./.vibecarbon-role:/var/lib/vibecarbon/role:ro,Z
 
 volumes:
   letsencrypt_data:

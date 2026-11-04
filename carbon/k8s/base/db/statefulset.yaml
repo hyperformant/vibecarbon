@@ -23,8 +23,6 @@
 #                             identifier: walg-env.sh (vibecarbon-wal-archive
 #                             ConfigMap) exports WALG_S3_PREFIX from it, and
 #                             every wal-g caller sources that file first
-#   WALG_ROLE                 primary | standby: the wal-g WRITE-GUARD that
-#                             wal-archive.sh and the backup CronJob read
 #   S3_ENDPOINT / S3_REGION   the backup bucket's endpoint
 #   K8S_STORAGE_CLASS         the provider's CSI class (never the cluster
 #                             default, which can be k3s' node-local local-path)
@@ -32,6 +30,16 @@
 # Names other code relies on (src/lib/deploy/k8s/db-workload.js): StatefulSet
 # `db`, pod `db-0`, container `db`, PVC `data-db-0`, pod label
 # `app: vibecarbon-db` (also read by the admin Infrastructure page).
+#
+# The db volume stays attached for the life of the pod. A k8s-ha standby
+# reseed (cold deploy, failover, restore) never scales this StatefulSet to
+# zero and never mounts data-db-0 in another pod: reseedStandbyInPlace
+# (src/lib/deploy/replication.js) stages a pg_basebackup into
+# $PGDATA/.vc-reseed in the running container, stops postgres there, and the
+# kubelet restarts the container in the same pod, where db-guard.sh (the db
+# container's command below) swaps the staged tree in before postgres starts.
+# The wal-g role is a file on this volume (subPath vibecarbon-role), never
+# env, so a role move is one write with no restart either.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -115,7 +123,12 @@ spec:
         # (composeRestoreScript, src/lib/deploy/compose/index.js); the census
         # in tests/unit/deploy/restore-destroy-before-verify-census.test.ts
         # holds both. Runs before postgres, so the app's migrations always
-        # see the restored database.
+        # see the restored database. A PGDATA left mid-way by an in-place
+        # reseed swap (db-guard.sh) is an unproven copy: it moves to
+        # .vc-discard, never to the .vc-prev fallback. Under its own marker
+        # the restore swap removes every in-place reseed staging dir and
+        # marker ($PGDATA/.vc-reseed*), so a reseed left pending can never
+        # swap over the restored cluster on a later start.
         - name: walg-restore
           image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
           imagePullPolicy: IfNotPresent
@@ -237,10 +250,12 @@ spec:
                 echo "restore: $RESTORE_BACKUP fetched no PG_VERSION; nothing was moved" >&2
                 exit 1
               fi
-              # 3. A base pushed while a restore left its dirs in PGDATA carries them:
-              #    drop them from the staged tree so they cannot wedge the swap. The
-              #    source database's WAL gap record goes too: the restored one has its own.
-              rm -rf "$PGDATA/.vc-restore/.vc-restore" "$PGDATA/.vc-restore/.vc-prev" "$PGDATA/.vc-restore/.vc-discard" "$PGDATA/.vc-restore/.vc-restore-in-progress" "$PGDATA/.vc-restore/.vc-restore-in-progress.tmp" "$PGDATA/.vc-restore/.vc-restore.lock" "$PGDATA/.vc-restore/.vc-restored-from" "$PGDATA/.vc-restore/.vc-restored-from.tmp" "$PGDATA/.vc-restore/vibecarbon-wal-gap" "$PGDATA/.vc-restore/vibecarbon-wal-gap.clearing"
+              # 3. A base pushed while a restore or a reseed left its .vc-* entries in
+              #    PGDATA carries them: drop every one from the staged tree, by glob, so
+              #    none can wedge the swap. The source database's WAL gap record goes
+              #    too: the restored one has its own.
+              find "$PGDATA/.vc-restore" -mindepth 1 -maxdepth 1 -name '.vc-*' -exec rm -rf {} +
+              rm -rf "$PGDATA/.vc-restore/vibecarbon-wal-gap" "$PGDATA/.vc-restore/vibecarbon-wal-gap.clearing"
               # Recovery config into staging: strip the settings it rewrites, append the
               # new ones (rendered by the CLI, the same text on both tiers).
               VC_AUTO_CONF="$PGDATA/.vc-restore/postgresql.auto.conf"
@@ -269,12 +284,17 @@ spec:
                 vc_root=half-out
               elif [ -d "$PGDATA/.vc-prev" ]; then
                 vc_root=unproven
+              elif [ -e "$PGDATA/.vc-reseed-in-progress" ] || [ -L "$PGDATA/.vc-reseed-in-progress" ]; then
+                # An in-place reseed stopped mid-swap (db-guard.sh): PGDATA holds part
+                # of a tree, and the reseed's old one was garbage (D9). No fallback.
+                vc_root=unproven
               else
                 vc_root=live
               fi
               case "$vc_root" in
                 unproven)
-                  # .vc-prev holds the database from before; PGDATA an unproven copy.
+                  # .vc-prev (if any) holds the database from before; PGDATA an unproven
+                  # copy or a reseed's partial tree.
                   vc_mark in
                   mkdir -p "$PGDATA/.vc-discard"
                   vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-discard/"; done
@@ -293,6 +313,11 @@ spec:
                   vc_mark in
                   ;;
               esac
+              # A stale in-place reseed (db-guard.sh) must not survive onto the restored
+              # cluster: a later start would otherwise swap an old staged tree over it.
+              # Cleared only now, under this swap's marker, so a crash before it still
+              # finds the reseed state that rules PGDATA out as a fallback.
+              rm -rf "$PGDATA/.vc-reseed" "$PGDATA/.vc-reseed-ready" "$PGDATA/.vc-reseed-ready.tmp" "$PGDATA/.vc-reseed-in-progress" "$PGDATA/.vc-reseed-in-progress.tmp"
               find "$PGDATA/.vc-restore" -mindepth 1 -maxdepth 1 | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/"; done
               rmdir "$PGDATA/.vc-restore"
               # The slow removal goes before the marker: once the marker is gone, the
@@ -368,6 +393,17 @@ spec:
         - name: db
           image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
           imagePullPolicy: IfNotPresent
+          # db-guard.sh wraps the image's entrypoint, exactly like compose
+          # (carbon/docker-compose.yml): it refuses to boot over an
+          # interrupted restore, applies the wal-g role intent below to the
+          # role file, finishes a pending in-place standby reseed (only when
+          # the intent is standby and the staged tree's attempt id matches the
+          # ready marker), then execs db-entrypoint.sh with these args.
+          # Mounted from the vibecarbon-wal-archive ConfigMap and run through
+          # sh, so it needs no exec bit. The CLI stops postgres in place
+          # (SIGINT to PID 1) only after it has read this command and the
+          # mounted file's reseed protocol marker in the RUNNING pod.
+          command: ["sh", "/usr/local/bin/db-guard.sh"]
           # The same flags as compose's db `command:` (carbon/docker-compose.yml),
           # where each one's reasoning lives. The image's entrypoint keeps
           # archiving off on its init-time temporary server
@@ -449,8 +485,18 @@ spec:
               value: "{{WALG_S3_PREFIX_BASE}}"
             - name: WALG_PREVENT_WAL_OVERWRITE
               value: "true"
-            - name: WALG_ROLE
-              value: "{{WALG_ROLE}}"
+            # The durable wal-g role intent, held in the CLI-owned ConfigMap
+            # vibecarbon-db-role (never in this base, so Flux never sees it;
+            # src/lib/deploy/walg-role.js). db-guard.sh writes it to the role
+            # file on every container start. Optional: a cluster before its
+            # first deploy, or with the ConfigMap gone, starts with the file
+            # as it was.
+            - name: VC_WALG_ROLE_INTENT
+              valueFrom:
+                configMapKeyRef:
+                  name: vibecarbon-db-role
+                  key: VC_WALG_ROLE_INTENT
+                  optional: true
             - name: WALG_COMPRESSION_METHOD
               value: lz4
             # The nightly base backup runs inside this container's cgroup, so
@@ -503,6 +549,17 @@ spec:
               mountPath: /etc/postgresql/walg-env.sh
               subPath: walg-env.sh
               readOnly: true
+            - name: wal-archive-script
+              mountPath: /usr/local/bin/db-guard.sh
+              subPath: db-guard.sh
+              readOnly: true
+            # The wal-g role file (walg-role: primary or standby), a sibling
+            # of postgres-data on the same volume and never inside PGDATA, so
+            # pg_basebackup never copies it. Writable: db-guard.sh and the
+            # CLI's live role write (setK8sWalgRole) write it in place.
+            - name: data
+              mountPath: /var/lib/vibecarbon/role
+              subPath: vibecarbon-role
             - name: walg-s3-creds
               mountPath: /etc/walg
               readOnly: true

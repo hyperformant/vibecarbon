@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
 // The first base backup on the new timeline has its own tests
 // (tests/unit/walg/post-promote-backup-census.test.ts, the step-order census);
@@ -623,6 +624,8 @@ async function runFailoverHA(opts: RunOpts) {
       order.push('promote');
       return promoteUnknown ? ('unknown' as const) : ('promoted' as const);
     },
+    // The standby db pod mounts the wal-g role directory; the arm's write lands.
+    kubectl: k8sRoleKubectl(),
     restoreWalgRole: async (a: { promotedIp: string; oldPrimaryIp: string }) => {
       captured.walgRoleArgs = a;
       order.push('walgRole');

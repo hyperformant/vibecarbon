@@ -21,15 +21,26 @@
  * Unplanned (the primary does not answer): promote < dns, and nothing is fenced
  * or read on the unreachable side before the promote.
  *
+ * Both tiers arm the promoted side BEFORE pg_promote (D2), while the standby
+ * is still in recovery (where archive_command never runs), and nothing
+ * restarts the db: k8s applies the vibecarbon-db-role intent, then writes the
+ * live role file; compose writes the host role file
+ * (/opt/<project>/.vibecarbon-role) over ssh and reads it back. A failed arm
+ * aborts before the promote and disarms the standby, unless an earlier run's
+ * journaled promote may still land; a k8s standby db pod without the role
+ * mount is refused at STEP 1, before anything changes.
+ *
  * Both modes, both tiers: the first base backup on the new timeline
- * (pushBaseBackupAfterPromote, H2b) comes after the WALG_ROLE move
- * (restore*WalgRole) and after the role-swap save that clears
+ * (pushBaseBackupAfterPromote, H2b) comes after the wal-g role move
+ * (restorePromotedWalgRole / auditComposeWalgRole) and after the role-swap save that clears
  * ha.failoverInFlight (swapHaRoles / swapComposeHaRoles), and after the DNS
  * flip. It is anchored on those calls, not on the config save underneath.
- * A WALG_ROLE move that failed skips it (one error names both), and a failed
+ * A wal-g role move that failed skips it (one error names both), and a failed
  * push fails the command once the roles are saved.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { argvOver, composeRoleReply, composeRoleWriteOf } from '../helpers/compose-role-ssh.js';
+import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -99,7 +110,7 @@ vi.mock('node:fs', async (orig) => {
 
 const ssh = await import('../../../src/lib/ssh.js');
 const { failoverHA } = await import('../../../src/failover.js');
-const { failoverComposeHA, restoreComposeWalgRole } = await import(
+const { failoverComposeHA, auditComposeWalgRole } = await import(
   '../../../src/lib/deploy/compose/ha.js'
 );
 
@@ -123,14 +134,23 @@ const primaryState = () =>
  * A psql seam that records the two catch-up queries by meaning: the primary's
  * pg_current_wal_lsn() is captureLsn, the standby's replay-lag read is catchUp.
  */
+const fenced = new Set<string>();
 const recordingPsql = (ip: string) => async (sql: string) => {
   const side = ip === PRIMARY_IP ? '' : '@standby';
   if (/^ALTER SYSTEM SET default_transaction_read_only = on$/.test(sql)) {
     order.push(`fence${side}`);
+    fenced.add(ip);
+    return '';
+  }
+  if (/^ALTER SYSTEM RESET default_transaction_read_only$/.test(sql)) {
+    order.push(`unfence${side}`);
+    fenced.delete(ip);
     return '';
   }
   if (sql === 'SELECT pg_reload_conf()') return 't\n';
-  if (/current_setting\('default_transaction_read_only'\)/.test(sql)) return 'on\n';
+  if (/current_setting\('default_transaction_read_only'\)/.test(sql)) {
+    return fenced.has(ip) ? 'on\n' : 'off\n';
+  }
   if (/pg_terminate_backend/.test(sql)) {
     order.push(`terminate${side}`);
     return '4242=t\n';
@@ -196,6 +216,7 @@ function expectUnplannedOrder() {
 
 afterEach(() => {
   order.length = 0;
+  fenced.clear();
   pushArgs.length = 0;
   walgArmed = true;
   dnsFails = false;
@@ -203,7 +224,27 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-async function runK8s(primaryReachable: boolean) {
+type KubectlSeam = (ip: string, argv: string[], o?: { input?: string }) => Promise<string>;
+
+/** The census's k8s cluster: the role surface, recording the arm's live write. */
+const censusKubectl: KubectlSeam = async (ip, argv) => {
+  const reply = k8sRoleReply(argv);
+  if (argv.includes('exec') && reply?.includes('WALG_ROLE_FILE=primary')) {
+    order.push(ip === STANDBY_IP ? 'arm' : 'arm@primary');
+  }
+  return reply ?? '';
+};
+
+async function runK8s(
+  primaryReachable: boolean,
+  over: {
+    kubectl?: KubectlSeam;
+    promote?: () => unknown;
+    /** An earlier run's failover journal, present at entry. */
+    journal?: boolean;
+    writeJournal?: () => Promise<unknown>;
+  } = {},
+) {
   const servers = {
     primary: { ip: PRIMARY_IP, floatingIp: PRIMARY_IP, region: 'nbg1' },
     standby: { ip: STANDBY_IP, floatingIp: '10.0.0.99', region: 'ash' },
@@ -218,6 +259,9 @@ async function runK8s(primaryReachable: boolean) {
       primary: { masterIp: PRIMARY_IP },
       standby: { masterIp: STANDBY_IP },
       systemIdentifier: SYSID,
+      ...(over.journal && {
+        failoverInFlight: { target: 'standby', systemIdentifier: SYSID, primaryLsn: null },
+      }),
     },
   };
   const deps = {
@@ -248,12 +292,15 @@ async function runK8s(primaryReachable: boolean) {
       order.push('marker');
     },
     clearMarker: () => {},
-    writeJournal: async () => 'journal-id',
+    writeJournal: over.writeJournal ?? (async () => 'journal-id'),
     clearJournal: async () => {},
-    promote: async () => {
-      order.push('promote');
-      return 'promoted';
-    },
+    promote:
+      over.promote ??
+      (async () => {
+        order.push('promote');
+        return 'promoted';
+      }),
+    kubectl: over.kubectl ?? censusKubectl,
     restoreWalgRole: async () => {
       order.push('walgRole');
       return {
@@ -316,7 +363,44 @@ async function runK8s(primaryReachable: boolean) {
   }
 }
 
-async function runCompose(primaryReachable: boolean) {
+type ComposeRun = (ip: string, k: string, command: string) => Promise<string | false>;
+
+/** A passing wal-g audit payload: storage reachable, one base backup visible. */
+const COMPOSE_AUDIT_PASS = [
+  'WALG_AUDIT=probed',
+  'WALG_AUDIT_PREFIX=s3://bucket/backups/myapp/walg',
+  'WALG_AUDIT_RC=0',
+  'WALG_AUDIT_ARCHIVER=3|0|000000010000000000000003||2026-07-30 12:00:00+00||f',
+  'WALG_AUDIT_LIST_BEGIN',
+  '[{"backup_name":"base_000000010000000000000002","time":"2026-07-30T12:00:00Z"}]',
+  'WALG_AUDIT_LIST_END',
+].join('\n');
+
+/** A compose node over ssh: the role-file surface and the audit; '' for the rest. */
+const composeReply = (cmd: string) =>
+  composeRoleReply(cmd) ?? (cmd.includes('WALG_AUDIT') ? COMPOSE_AUDIT_PASS : '');
+
+/** The census's compose ssh seam: records the arm (the primary role written on the standby). */
+const censusComposeRun: ComposeRun = async (ip, _k, cmd) => {
+  if (composeRoleWriteOf(cmd) === 'primary') {
+    order.push(ip === STANDBY_IP ? 'arm' : 'arm@primary');
+  }
+  return composeReply(cmd);
+};
+
+async function runCompose(
+  primaryReachable: boolean,
+  over: {
+    run?: ComposeRun;
+    promote?: () => unknown;
+    /** An earlier run's failover journal, present at entry. */
+    journal?: boolean;
+    writeJournal?: () => Promise<unknown>;
+    /** The db containers' role-directory bind, per ip (default: bound). */
+    probeRoleBind?: (a: { ip: string }) => Promise<boolean | null>;
+  } = {},
+) {
+  const run = over.run ?? censusComposeRun;
   const envConfig = {
     deployMode: 'compose-ha',
     domain: 'app.example.com',
@@ -329,11 +413,22 @@ async function runCompose(primaryReachable: boolean) {
       { name: 'myapp-prod-primary', role: 'primary', ip: PRIMARY_IP, region: 'nbg1' },
       { name: 'myapp-prod-standby', role: 'standby', ip: STANDBY_IP, region: 'ash' },
     ],
-    ha: { enabled: true, failoverRegion: 'ash', systemIdentifier: SYSID },
+    ha: {
+      enabled: true,
+      failoverRegion: 'ash',
+      systemIdentifier: SYSID,
+      ...(over.journal && {
+        failoverInFlight: { target: 'standby', systemIdentifier: SYSID, primaryLsn: null },
+      }),
+    },
     backup: { retentionDays: 14 },
   };
   const deps = {
     isPrimaryReachable: async () => primaryReachable,
+    // The real role writer (writeComposeWalgRole) over the census's ssh seam.
+    roleRun: argvOver(run),
+    // The db containers bind the role directory (compose-ha-failover-role-bind).
+    probeRoleBind: over.probeRoleBind ?? (async () => true),
     readState: async (ip: string) =>
       ip === PRIMARY_IP
         ? primaryState()
@@ -349,12 +444,14 @@ async function runCompose(primaryReachable: boolean) {
       order.push('marker');
     },
     clearMarker: () => {},
-    writeJournal: async () => 'journal-id',
+    writeJournal: over.writeJournal ?? (async () => 'journal-id'),
     clearJournal: async () => {},
-    promote: async () => {
-      order.push('promote');
-      return 'promoted';
-    },
+    promote:
+      over.promote ??
+      (async () => {
+        order.push('promote');
+        return 'promoted';
+      }),
     stopWriters: async (ip: string) => {
       order.push(ip === PRIMARY_IP ? 'stopWriters' : 'stopWriters@standby');
       return { ok: true, stopped: ['myapp-app'] };
@@ -368,9 +465,9 @@ async function runCompose(primaryReachable: boolean) {
       return { ok: true, reached: true };
     },
     confirmUnproven: async () => {},
-    restoreWalgRole: async (a: Parameters<typeof restoreComposeWalgRole>[0]) => {
+    restoreWalgRole: async (a: Parameters<typeof auditComposeWalgRole>[0]) => {
       const health = walgArmed
-        ? await restoreComposeWalgRole(a)
+        ? await auditComposeWalgRole({ ...a, deps: { run, log: () => {} } })
         : { ok: false, error: new Error('no') };
       order.push('walgRole');
       return health;
@@ -399,10 +496,348 @@ async function runCompose(primaryReachable: boolean) {
   );
 }
 
+/** A kubectl reply for runFailoverK8s: the role surface, '' for the rest. */
+const k8sReply = (argv: string[], o: { roleMount?: boolean; markerGrep?: string } = {}) =>
+  k8sRoleReply(argv, o) ?? '';
+
+/** The real failoverHA (planned), with the census's seams and the given kubectl and promote. */
+const runFailoverK8s = (stubs: { kubectl: KubectlSeam; promote: () => unknown }) =>
+  runK8s(true, stubs);
+
+describe('k8s-ha: the wal-g role moves before the promote, with no db restart (D2)', () => {
+  it('k8s: the promoted side is armed BEFORE pg_promote, by apply + live write, and nothing rolls the db', async () => {
+    const log: string[] = [];
+    await runFailoverK8s({
+      kubectl: async (_ip, argv, o) => {
+        log.push(`${argv.join(' ')} ${o?.input ?? ''}`);
+        return k8sReply(argv);
+      },
+      promote: async () => {
+        log.push('PROMOTE');
+        return 'promoted';
+      },
+    });
+    const intent = log.findIndex(
+      (l) => l.includes('apply -f -') && l.includes('VC_WALG_ROLE_INTENT: primary'),
+    );
+    const live = log.findIndex(
+      (l) => l.includes('exec') && l.includes('/var/lib/vibecarbon/role') && l.includes('primary'),
+    );
+    const promote = log.indexOf('PROMOTE');
+    expect(intent).toBeGreaterThanOrEqual(0);
+    expect(live).toBeGreaterThan(intent);
+    expect(promote).toBeGreaterThan(live);
+    expect(log.some((l) => /set env statefulset\/db|rollout status statefulset\/db/.test(l))).toBe(
+      false,
+    );
+  });
+
+  it('k8s: a failed live role write aborts BEFORE promotion', async () => {
+    const promote = vi.fn();
+    await expect(
+      runFailoverK8s({
+        kubectl: async (_ip, argv) => {
+          if (argv.includes('exec') && argv.join(' ').includes('walg-role'))
+            throw new Error('exec failed');
+          return k8sReply(argv);
+        },
+        promote,
+      }),
+    ).rejects.toThrow(/before promotion/i);
+    expect(promote).not.toHaveBeenCalled();
+  });
+
+  it('k8s: a failed arm disarms the standby before the abort (never a half-armed node)', async () => {
+    const inputs: string[] = [];
+    const promote = vi.fn();
+    const err = await runFailoverK8s({
+      kubectl: async (_ip, argv, o) => {
+        if (o?.input) inputs.push(o.input);
+        // The primary write lands but reads back wrong; the standby write lands.
+        if (argv.includes('exec') && argv.join(' ').includes("'%s\\n' primary")) {
+          return 'WALG_ROLE_FILE=\n';
+        }
+        return k8sReply(argv);
+      },
+      promote,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/before promotion/i);
+    expect(err.message).toMatch(/read-back-mismatch/);
+    expect(err.message).toMatch(/disarmed/);
+    expect(promote).not.toHaveBeenCalled();
+    expect(inputs.map((i) => /VC_WALG_ROLE_INTENT: (\w+)/.exec(i)?.[1])).toEqual([
+      'primary',
+      'standby',
+    ]);
+    // The planned run lifts the fence it put on the primary.
+    expect(at('fence')).toBeLessThan(at('unfence'));
+  });
+
+  /** A kubectl seam recording each role intent applied, whose primary live write reads back wrong. */
+  const failingArm =
+    (inputs: string[]): KubectlSeam =>
+    async (_ip, argv, o) => {
+      if (o?.input) inputs.push(/VC_WALG_ROLE_INTENT: (\w+)/.exec(o.input)?.[1] ?? '?');
+      if (argv.includes('exec') && argv.join(' ').includes("'%s\\n' primary")) {
+        return 'WALG_ROLE_FILE=\n';
+      }
+      return k8sReply(argv);
+    };
+
+  it('k8s: a failed arm on a rerun with a journal leaves the standby armed: an earlier promote may still land', async () => {
+    const inputs: string[] = [];
+    const promote = vi.fn();
+    const err = await runK8s(false, {
+      journal: true,
+      kubectl: failingArm(inputs),
+      promote,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/may still land/);
+    expect(err.message).not.toMatch(/Nothing was promoted/);
+    expect(err.message).toMatch(/vibecarbon failover prod/);
+    expect(promote).not.toHaveBeenCalled();
+    // No disarm: `standby` on a node whose promote is landing would drop its
+    // .history and .partial files.
+    expect(inputs).toEqual(['primary']);
+  });
+
+  it('k8s: a failed journal write after a clean arm disarms the standby (no journal at entry)', async () => {
+    const inputs: string[] = [];
+    const promote = vi.fn();
+    const err = await runK8s(true, {
+      kubectl: async (_ip, argv, o) => {
+        if (o?.input) inputs.push(/VC_WALG_ROLE_INTENT: (\w+)/.exec(o.input)?.[1] ?? '?');
+        return k8sReply(argv);
+      },
+      writeJournal: async () => {
+        throw new Error('could not save .vibecarbon.json: EACCES');
+      },
+      promote,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/EACCES/);
+    expect(err.message).toMatch(/disarmed/);
+    expect(promote).not.toHaveBeenCalled();
+    expect(inputs).toEqual(['primary', 'standby']);
+    expect(at('fence')).toBeLessThan(at('unfence'));
+  });
+
+  it('k8s: a standby db pod without the role mount (a pre-release cluster) is refused at STEP 1, before anything changes (C18)', async () => {
+    const calls: string[] = [];
+    const promote = vi.fn();
+    await expect(
+      runFailoverK8s({
+        kubectl: async (_ip, argv) => {
+          calls.push(argv.join(' '));
+          return k8sReply(argv, { roleMount: false });
+        },
+        promote,
+      }),
+    ).rejects.toThrow(/predates[\s\S]*vibecarbon deploy/);
+    expect(promote).not.toHaveBeenCalled();
+    expect(calls.some((c) => /scale |apply -f -|exec .*walg-role/.test(c))).toBe(false);
+    expect(order).not.toContain('stopWriters');
+  });
+});
+
+describe('both tiers word the role-mount refusal alike', () => {
+  it('the k8s db-0 mount refusal and the compose bind refusal, as thrown, share their claim and their fix', async () => {
+    const { FAILOVER_NOT_STARTED } = await import('../../../src/lib/deploy/walg-role.js');
+    const { FailoverRefusedError } = await import('../../../src/lib/deploy/failover-guard.js');
+    const k8s = await runFailoverK8s({
+      kubectl: async (_ip, argv) => k8sReply(argv, { roleMount: false }),
+      promote: vi.fn(),
+    }).catch((e) => e);
+    const compose = await runCompose(true, {
+      probeRoleBind: async ({ ip }) => ip !== STANDBY_IP,
+    }).catch((e) => e);
+    const tail = `predates the live wal-g role (no /var/lib/vibecarbon/role `;
+    const fix = ` (one db restart), then retry. ${FAILOVER_NOT_STARTED}`;
+    for (const err of [k8s, compose]) {
+      expect(err).toBeInstanceOf(FailoverRefusedError);
+      expect(err.message).toMatch(/^Failover refused: the standby/);
+      expect(err.message).toContain(tail);
+      expect(err.message.endsWith(fix)).toBe(true);
+      expect(err.message).not.toMatch(/Nothing was changed/);
+    }
+    expect(FAILOVER_NOT_STARTED).not.toMatch(/Nothing was changed/);
+  });
+});
+
+describe('k8s-ha: D1, the in-place reseed guard at STEP 1', () => {
+  it('k8s: the in-place guard runs at STEP 1, before the replica proof, provisioning or quiesce', async () => {
+    const log: string[] = [];
+    const promote = vi.fn();
+    await expect(
+      runFailoverK8s({
+        kubectl: async (_ip, argv) => {
+          log.push(argv.join(' '));
+          return k8sReply(argv, { markerGrep: '0' });
+        },
+        promote,
+      }),
+    ).rejects.toThrow(/predates in-place reseeds[\s\S]*vibecarbon deploy prod/);
+    // The guard's own exec greps the mounted wrapper (and reads recovery in
+    // the same exec); nothing else ran.
+    const rest = log.filter((l) => !l.includes('db-guard.sh'));
+    expect(rest.some((l) => /scale |pg_stat_wal_receiver|exec .*psql|apply -f -/.test(l))).toBe(
+      false,
+    );
+    expect(order).toEqual([]);
+    expect(promote).not.toHaveBeenCalled();
+  });
+
+  it('k8s: a guard that fails for another reason (unreadable, not D1) is left to the replica proof', async () => {
+    await runFailoverK8s({
+      kubectl: async (_ip, argv) => {
+        if (argv.includes('configmap')) throw new Error('ssh: connection reset');
+        return k8sReply(argv);
+      },
+      promote: async () => {
+        order.push('promote');
+        return 'promoted';
+      },
+    }).catch(() => {});
+    expect(order).toContain('stopWriters');
+  });
+});
+
+/** The real failoverComposeHA (planned), with the census's seams and the given ssh run and promote. */
+const runFailoverCompose = (stubs: { run: ComposeRun; promote: () => unknown }) =>
+  runCompose(true, stubs);
+
+describe('compose-ha: the wal-g role moves before the promote, with no db recreate (D2)', () => {
+  it('compose: the promoted host role file is written BEFORE pg_promote; no db recreate', async () => {
+    const cmds: string[] = [];
+    await runFailoverCompose({
+      run: async (_ip, _k, cmd) => {
+        cmds.push(cmd);
+        return composeReply(cmd);
+      },
+      promote: async () => {
+        cmds.push('PROMOTE');
+        return 'promoted';
+      },
+    });
+    const write = cmds.findIndex(
+      (c) => c.includes('.vibecarbon-role') && c.includes("'%s\\n' primary"),
+    );
+    expect(write).toBeGreaterThanOrEqual(0);
+    expect(write).toBeLessThan(cmds.indexOf('PROMOTE'));
+    expect(cmds.some((c) => c.includes('up -d --no-deps db'))).toBe(false);
+  });
+
+  it('compose: a role file that does not read back primary aborts BEFORE promotion', async () => {
+    const promote = vi.fn();
+    await expect(
+      runFailoverCompose({
+        run: async (_ip, _k, cmd) =>
+          composeRoleWriteOf(cmd) === 'primary' ? 'WALG_ROLE_FILE=\n' : composeReply(cmd),
+        promote,
+      }),
+    ).rejects.toThrow(/before promotion/i);
+    expect(promote).not.toHaveBeenCalled();
+  });
+
+  /** A compose ssh seam recording each role written, whose primary write reads back wrong. */
+  const failingComposeArm =
+    (roles: string[]): ComposeRun =>
+    async (_ip, _k, cmd) => {
+      const role = composeRoleWriteOf(cmd);
+      if (role) roles.push(role);
+      return role === 'primary' ? 'WALG_ROLE_FILE=\n' : composeReply(cmd);
+    };
+
+  it('compose: a failed arm disarms the standby before the abort (never a half-armed node)', async () => {
+    const roles: string[] = [];
+    const promote = vi.fn();
+    const err = await runFailoverCompose({ run: failingComposeArm(roles), promote }).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/before promotion/i);
+    expect(err.message).toMatch(/disarmed/);
+    expect(err.message).toMatch(/Nothing was promoted/);
+    expect(promote).not.toHaveBeenCalled();
+    expect(roles).toEqual(['primary', 'standby']);
+    // The planned run lifts the fence it put on the primary.
+    expect(at('fence')).toBeLessThan(at('unfence'));
+  });
+
+  it('compose: a failed arm on a rerun with a journal leaves the standby armed: an earlier promote may still land', async () => {
+    const roles: string[] = [];
+    const promote = vi.fn();
+    const err = await runCompose(false, {
+      journal: true,
+      run: failingComposeArm(roles),
+      promote,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/may still land/);
+    expect(err.message).not.toMatch(/Nothing was promoted/);
+    expect(err.message).toMatch(/vibecarbon failover prod/);
+    expect(promote).not.toHaveBeenCalled();
+    expect(roles).toEqual(['primary']);
+  });
+
+  it('compose: a failed journal write after a clean arm disarms the standby (no journal at entry)', async () => {
+    const roles: string[] = [];
+    const promote = vi.fn();
+    const err = await runCompose(true, {
+      run: async (_ip, _k, cmd) => {
+        const role = composeRoleWriteOf(cmd);
+        if (role) roles.push(role);
+        return composeReply(cmd);
+      },
+      writeJournal: async () => {
+        throw new Error('could not save .vibecarbon.json: EACCES');
+      },
+      promote,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/EACCES/);
+    expect(err.message).toMatch(/disarmed/);
+    expect(promote).not.toHaveBeenCalled();
+    expect(roles).toEqual(['primary', 'standby']);
+    expect(at('fence')).toBeLessThan(at('unfence'));
+  });
+
+  it('compose: a failed journal write on a rerun with a journal keeps the arm: an earlier promote may still land', async () => {
+    const roles: string[] = [];
+    const promote = vi.fn();
+    const err = await runCompose(false, {
+      journal: true,
+      run: async (_ip, _k, cmd) => {
+        const role = composeRoleWriteOf(cmd);
+        if (role) roles.push(role);
+        return composeReply(cmd);
+      },
+      writeJournal: async () => {
+        throw new Error('could not save .vibecarbon.json: EACCES');
+      },
+      promote,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/EACCES/);
+    expect(err.message).toMatch(/may still land/);
+    expect(err.message).not.toMatch(/disarmed/);
+    expect(promote).not.toHaveBeenCalled();
+    // No disarm: `standby` on a node whose earlier promote is landing would
+    // drop its .history and .partial files.
+    expect(roles).toEqual(['primary']);
+  });
+});
+
 describe('failover step order: k8s-ha (failoverHA)', () => {
-  it('planned: stopWriters < writersGone < fence < terminate < captureLsn < catchUp < promote < dns', async () => {
+  it('planned: stopWriters < writersGone < fence < terminate < captureLsn < catchUp < arm < promote < dns', async () => {
     await runK8s(true);
     expectPlannedOrder();
+    expect(at('catchUp')).toBeLessThan(at('arm'));
+    expect(at('arm'), 'the promoted side is armed before the promote (D2)').toBeLessThan(
+      at('promote'),
+    );
     expect(order, 'an unconfirmed scale is not the fence').toContain('writersGone');
     expect(at('stopWriters')).toBeLessThan(at('writersGone'));
     expect(at('writersGone')).toBeLessThan(at('fence'));
@@ -411,13 +846,20 @@ describe('failover step order: k8s-ha (failoverHA)', () => {
   it('unplanned: promote < dns, nothing fenced or read on the unreachable primary first', async () => {
     await runK8s(false);
     expectUnplannedOrder();
+    expect(at('arm')).toBeGreaterThan(-1);
+    expect(at('arm')).toBeLessThan(at('promote'));
+    expect(order).not.toContain('arm@primary');
   });
 });
 
 describe('failover step order: compose-ha (failoverComposeHA)', () => {
-  it('planned: stopWriters < fence < terminate < captureLsn < catchUp < promote < dns', async () => {
+  it('planned: stopWriters < fence < terminate < captureLsn < catchUp < arm < promote < dns', async () => {
     await runCompose(true);
     expectPlannedOrder();
+    expect(at('catchUp')).toBeLessThan(at('arm'));
+    expect(at('arm'), 'the promoted side is armed before the promote (D2)').toBeLessThan(
+      at('promote'),
+    );
     // A streaming, caught-up standby needs no reseed, and a proven promote
     // never un-fences the old primary.
     expect(order).not.toContain('reseed');
@@ -427,6 +869,9 @@ describe('failover step order: compose-ha (failoverComposeHA)', () => {
   it('unplanned: promote < dns, nothing fenced or read on the unreachable primary first', async () => {
     await runCompose(false);
     expectUnplannedOrder();
+    expect(at('arm')).toBeGreaterThan(-1);
+    expect(at('arm')).toBeLessThan(at('promote'));
+    expect(order).not.toContain('arm@primary');
   });
 });
 
@@ -435,7 +880,9 @@ function expectBasePushLast() {
     expect(order, `failover never reached ${step}`).toContain(step);
   }
   expect(at('promote')).toBeLessThan(at('walgRole'));
-  expect(at('walgRole'), 'the base is pushed once WALG_ROLE=primary').toBeLessThan(at('basePush'));
+  expect(at('walgRole'), 'the base is pushed once the wal-g role reads primary').toBeLessThan(
+    at('basePush'),
+  );
   expect(at('swap'), 'the base is pushed after the swap save').toBeLessThan(at('basePush'));
   expect(at('dns'), 'the base push stays out of the RTO path').toBeLessThan(at('basePush'));
   expect(order.filter((x) => x === 'basePush')).toHaveLength(1);
@@ -469,7 +916,7 @@ describe.each([
     expect(order).not.toContain('basePush');
   });
 
-  it('a failed WALG_ROLE move skips the push; the one error names the missing base', async () => {
+  it('a failed wal-g role move skips the push; the one error names the missing base', async () => {
     walgArmed = false;
     const err = await run(true).catch((e) => e);
     expect(err).toBeInstanceOf(Error);

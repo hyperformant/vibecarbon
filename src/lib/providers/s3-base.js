@@ -44,6 +44,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { S3_HTTP_TIMEOUTS } from '../s3-timeouts.js';
 
 // Transient S3 error classifier. Matches AWS SDK error names ("TimeoutError",
 // "UnknownError"), socket-level Node errors ("ECONNRESET", "EAI_AGAIN"), and
@@ -69,11 +70,6 @@ function isTransientS3Error(error) {
   if (status && TRANSIENT_HTTP_STATUSES.has(status)) return true;
   return false;
 }
-
-// Connection and socket-idle bounds for every S3 client this module builds.
-// The SDK's Node handler has none by default, so an endpoint that accepts the
-// TCP connection and then goes quiet would hold a call forever.
-const S3_HTTP_TIMEOUTS = { connectionTimeout: 10_000, requestTimeout: 60_000 };
 
 // S3 error codes that mean "these keys are wrong or not allowed", translated
 // to plain words. Keyed by the code S3 puts in the error name. The code

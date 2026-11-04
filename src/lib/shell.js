@@ -19,6 +19,19 @@ export function shEscape(value) {
 }
 
 /**
+ * One command line from an argv: every token shEscaped, joined by one space.
+ * A remote shell (ssh) word-splits it back into exactly `argv`; a bare
+ * `argv.join(' ')` would split any token holding a space, `sh -c` scripts
+ * included. sshArgv builds its remote command with this.
+ *
+ * @param {string[]} argv
+ * @returns {string}
+ */
+export function shJoin(argv) {
+  return argv.map(shEscape).join(' ');
+}
+
+/**
  * Postgres SQL single-quote escape. Returns a complete SQL string literal
  * (including outer single quotes), ready to paste anywhere a SQL string
  * literal is expected.

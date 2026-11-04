@@ -64,7 +64,9 @@ let pgdata: string;
 let bin: string;
 
 /** A stub wal-g: `backup-fetch <dir> <name>` writes a fake cluster, or fails. */
-function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap' | 'ok-with-links') {
+function stubWalg(
+  mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap' | 'ok-with-links' | 'ok-with-reseed',
+) {
   const body =
     mode === 'fail'
       ? 'echo "ERROR: Backup $3 does not exist" >&2; exit 1'
@@ -83,6 +85,19 @@ function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap' | 'ok-with-
             ? [
                 'mkdir -p "$2/.vc-prev/base" "$2/.vc-restore" "$2/.vc-discard"',
                 'echo in > "$2/.vc-restore-in-progress"',
+              ]
+            : []),
+          // A base pushed from a node that was once an in-place reseeded
+          // standby, or mid-stage: every .vc-* it carries, by glob.
+          ...(mode === 'ok-with-reseed'
+            ? [
+                'mkdir -p "$2/.vc-reseed/base"',
+                'echo att > "$2/.vc-reseed/.vc-reseed-id"',
+                'echo att > "$2/.vc-reseed-ready"',
+                'echo att > "$2/.vc-reseed-ready.tmp"',
+                'echo "in att" > "$2/.vc-reseed-in-progress"',
+                'echo att > "$2/.vc-reseeded-from"',
+                'echo future > "$2/.vc-some-later-marker"',
               ]
             : []),
           // A base pushed while the source database had dropped WAL under
@@ -283,6 +298,107 @@ for (const [tier, build] of TIERS) {
       expect(read('base/marker')).toBe('restored');
       expect(ls()).not.toContain('vibecarbon-wal-gap');
       expect(ls()).not.toContain('vibecarbon-wal-gap.clearing');
+    });
+
+    it('a stale reseed state does not survive a restore (C16)', () => {
+      seedLive();
+      mkdirSync(join(pgdata, '.vc-reseed', 'base'), { recursive: true });
+      writeFileSync(join(pgdata, '.vc-reseed', '.vc-reseed-id'), 'old');
+      writeFileSync(join(pgdata, '.vc-reseed-ready'), 'old');
+      writeFileSync(join(pgdata, '.vc-reseed-ready.tmp'), 'old');
+      writeFileSync(join(pgdata, '.vc-reseed-in-progress'), 'out old');
+      writeFileSync(join(pgdata, '.vc-reseed-in-progress.tmp'), 'in old');
+      stubWalg('ok');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(read('base/marker')).toBe('restored');
+      for (const f of [
+        '.vc-reseed',
+        '.vc-reseed-ready',
+        '.vc-reseed-ready.tmp',
+        '.vc-reseed-in-progress',
+        '.vc-reseed-in-progress.tmp',
+      ]) {
+        expect(existsSync(join(pgdata, f)), f).toBe(false);
+      }
+    });
+
+    it('a base carrying .vc-reseed* (or any .vc-*) has them dropped from the staged tree', () => {
+      seedLive();
+      stubWalg('ok-with-reseed');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(read('base/marker')).toBe('restored');
+      for (const f of [
+        '.vc-reseed',
+        '.vc-reseed-ready',
+        '.vc-reseed-ready.tmp',
+        '.vc-reseed-in-progress',
+        '.vc-reseeded-from',
+        '.vc-some-later-marker',
+      ]) {
+        expect(existsSync(join(pgdata, f)), f).toBe(false);
+      }
+    });
+
+    // A reseed stopped mid-swap (db-guard.sh's .vc-reseed-in-progress): PGDATA
+    // holds part of a tree, never a whole one. The reseed's old tree in
+    // .vc-discard is garbage (D9). Neither may become the .vc-prev fallback.
+    for (const [phase, body] of [
+      ['in', 'staged'],
+      ['out', 'old-half'],
+    ] as const) {
+      it(`a reseed stopped mid-"${phase}" leaves no .vc-prev: its partial tree is discarded, never a fallback`, () => {
+        mkdirSync(join(pgdata, 'base'), { recursive: true });
+        writeFileSync(join(pgdata, 'base', 'marker'), `${body}\n`);
+        mkdirSync(join(pgdata, '.vc-discard', 'global'), { recursive: true });
+        writeFileSync(join(pgdata, '.vc-discard', 'PG_VERSION'), '17\n');
+        mkdirSync(join(pgdata, '.vc-reseed'), { recursive: true });
+        writeFileSync(join(pgdata, '.vc-reseed', 'PG_VERSION'), '17\n');
+        writeFileSync(join(pgdata, '.vc-reseed-ready'), 'r1');
+        writeFileSync(join(pgdata, '.vc-reseed-in-progress'), `${phase} r1`);
+        stubWalg('ok');
+        const r = run(build());
+        expect(r.status, r.stderr).toBe(0);
+        expect(read('base/marker')).toBe('restored');
+        expect(ls()).not.toContain('.vc-prev');
+        expect(ls()).not.toContain('.vc-discard');
+        expect(ls()).not.toContain('.vc-reseed-in-progress');
+        expect(ls()).not.toContain('.vc-reseed');
+      });
+    }
+
+    it('a reseed stopped mid-swap, then a restore interrupted after its marker: the rerun still makes no .vc-prev', () => {
+      // The restore set its own "in" marker (the partial tree went to
+      // .vc-discard) and died; the reseed markers may or may not be gone.
+      mkdirSync(join(pgdata, '.vc-discard', 'base'), { recursive: true });
+      writeFileSync(join(pgdata, '.vc-discard', 'base', 'marker'), 'staged\n');
+      writeFileSync(join(pgdata, '.vc-restore-in-progress'), 'in');
+      stubWalg('ok');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(read('base/marker')).toBe('restored');
+      expect(ls()).not.toContain('.vc-prev');
+    });
+
+    it('a pending reseed that never started its swap (ready marker only) keeps the live tree as .vc-prev', () => {
+      seedLive();
+      mkdirSync(join(pgdata, '.vc-reseed'), { recursive: true });
+      writeFileSync(join(pgdata, '.vc-reseed-ready'), 'r1');
+      stubWalg('ok');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(read('.vc-prev/base/marker')).toBe('live');
+    });
+
+    it('a failed fetch leaves a reseed state alone (nothing moved, nothing cleared)', () => {
+      seedLive();
+      mkdirSync(join(pgdata, '.vc-reseed', 'base'), { recursive: true });
+      writeFileSync(join(pgdata, '.vc-reseed-ready'), 'old');
+      stubWalg('fail');
+      const r = run(build());
+      expect(r.status).not.toBe(0);
+      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(true);
     });
 
     it('a swap interrupted half way in (marker "in") is settled by the rerun', () => {

@@ -107,7 +107,9 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   // The real argv contract (tests/_shared/ssh-contract.ts).
   const { contractSshRun } = await import('../../_shared/ssh-contract.js');
-  return { ...actual, sshRun: contractSshRun(), sshRunScript: async () => '' };
+  // The replacement's wal-g role write reads back the role it wrote.
+  const { answerRoleWrite } = await import('../helpers/scale-cutover-stub.js');
+  return { ...actual, sshRun: contractSshRun(answerRoleWrite()), sshRunScript: async () => '' };
 });
 
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');

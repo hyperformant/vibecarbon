@@ -94,6 +94,10 @@ export const updateDnsStep = () =>
     when: (ctx) => !!(ctx.domain && hasAutomatedDns(ctx.dnsProvider)),
   });
 
+/** The wal-g role file (`primary`) on the one server, before its stack starts. */
+export const writeNodeRolesStep = () =>
+  defineStep({ name: 'write-node-roles', effect: 'writeNodeRoles' });
+
 /** Reconcile the Docker Compose stack (`docker compose pull` + `up -d`). */
 export const startComposeStackStep = () =>
   defineStep({ name: 'start-compose-stack', effect: 'startComposeStack' });
@@ -239,9 +243,13 @@ export const haTransferImageStep = () =>
 export const haSetupServerFilesStep = () =>
   defineStep({ name: 'setup-server-files', effect: 'haSetupServerFiles' });
 
-/** Write WALG_ROLE (primary/standby) into each node's .env (write-guard). */
-export const haMergeWalgRoleStep = () =>
-  defineStep({ name: 'merge-walg-role', effect: 'haMergeWalgRole' });
+/**
+ * The wal-g role FILE on each node (primary / standby, walg-role.js) before
+ * either stack starts, plus the per-node .env merge of ACME_DISARM_ENV. The
+ * wal-g role is never in .env.
+ */
+export const haWriteNodeRolesStep = () =>
+  defineStep({ name: 'write-node-roles', effect: 'haWriteNodeRoles' });
 
 /** Pull app + base images on both servers (parallel). */
 export const haPullImagesStep = () => defineStep({ name: 'pull-images', effect: 'haPullImages' });
@@ -323,7 +331,7 @@ export const k8sDeployClusterStep = () =>
 // labels) because they operate on TWO k3s clusters — a behavior-identity
 // requirement that rules out reusing the compose-ha effects.
 //
-// The heavily-hardened WireGuard replication transport + scale-to-zero reseed
+// The heavily-hardened WireGuard replication transport + in-place reseed
 // (setupReplication) and the k3s per-cluster pipeline (deployK3s) are called by
 // these effects as BLACK BOXES — this plan only expresses their sequence.
 //

@@ -68,6 +68,8 @@ const baseArgs = {
   recordSystemIdentifier: () => {},
   assertWritable: async () => 'writable',
   pushBaseBackup: vi.fn(async () => ({ name: 'base_000000020000000000000004' })),
+  // Every db container binds the live wal-g role directory.
+  probeRoleBind: async () => true,
 };
 
 // The restore target (serverIp) is derived in run() as the role==='primary'
@@ -533,5 +535,71 @@ describe('runComposeRestore: the first base on the restored timeline (H2b)', () 
       }),
     ).rejects.toThrow('fetch failed');
     expect(pushBaseBackup).not.toHaveBeenCalled();
+  });
+});
+
+describe('runComposeRestore: a db that predates the live wal-g role is refused before anything changes', () => {
+  const haEnv = {
+    deployMode: 'compose-ha',
+    servers: [
+      { ip: '10.0.0.1', role: 'primary' },
+      { ip: '10.0.0.2', role: 'standby' },
+    ],
+  };
+
+  it('probes the primary and the standby bind; a missing one refuses before restoreCompose', async () => {
+    for (const missing of ['10.0.0.1', '10.0.0.2']) {
+      const probed: string[] = [];
+      const restoreCompose = vi.fn();
+      const configureStandbyReplication = vi.fn();
+      await expect(
+        runComposeRestore({
+          ...baseArgs,
+          s: makeSpinner(),
+          envConfig: haEnv,
+          restoreCompose,
+          configureStandbyReplication,
+          probeRoleBind: async ({ ip }: { ip: string }) => {
+            probed.push(ip);
+            return ip !== missing;
+          },
+        }),
+      ).rejects.toThrow(
+        new RegExp(
+          `on ${missing.replaceAll('.', '\\.')} predates the live wal-g role[\\s\\S]*vibecarbon deploy prod`,
+        ),
+      );
+      expect(restoreCompose).not.toHaveBeenCalled();
+      expect(configureStandbyReplication).not.toHaveBeenCalled();
+      expect(probed[0]).toBe('10.0.0.1');
+    }
+  });
+
+  it('a container that cannot be inspected (null) is not refused', async () => {
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnv,
+      restoreCompose,
+      configureStandbyReplication: vi.fn().mockResolvedValue(true),
+      probeRoleBind: async () => null,
+    });
+    expect(restoreCompose).toHaveBeenCalledOnce();
+  });
+
+  it('single-region compose probes its one node', async () => {
+    const probed: string[] = [];
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: { deployMode: 'compose', servers: [{ ip: '10.0.0.1' }] },
+      restoreCompose: vi.fn().mockResolvedValue(undefined),
+      probeRoleBind: async ({ ip, projectName }: { ip: string; projectName: string }) => {
+        probed.push(`${ip} ${projectName}`);
+        return true;
+      },
+    });
+    expect(probed).toEqual(['10.0.0.1 myapp']);
   });
 });

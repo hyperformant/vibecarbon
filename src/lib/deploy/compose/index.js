@@ -20,6 +20,7 @@ import { bootPullImages, loadComposeCloudInit } from '../../iac/compose-cloud-in
 import { K8S_MIRROR_ORG, mirroredPackageNames, resolveDbImage } from '../../images.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
+import { hasSentinelLine } from '../../remote-sentinel.js';
 import { pollUntil } from '../../retry.js';
 import {
   ADDON_SERVICES_SCRIPT,
@@ -222,7 +223,7 @@ export {
  * FIRST failure's classification: if it's DNS-not-settled AND the caller
  * hasn't opted out of retries entirely (`retries > 1`), switches to
  * DNS_NOT_SETTLED_RETRY_DELAYS_MS for the rest of this call's retries. A
- * `retries: 1` caller (e.g. compose/ha.js's restoreComposeWalgRole /
+ * `retries: 1` caller (e.g. compose/ha.js's auditComposeWalgRole /
  * demoteComposeWalgRole DR fast-fail path) targets an ALREADY-established
  * server, not a freshly-provisioned one, so the DNS-not-settled window
  * doesn't apply there and the opt-out is respected as-is.
@@ -464,7 +465,7 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
       { timeout: 10_000, ignoreError: true, retries: 1 },
     );
     if (result != null) everConnected = true; // any output means SSH connected
-    if (result?.trim()?.endsWith('READY') && !result.includes('NOT_READY')) {
+    if (hasSentinelLine(result, 'READY')) {
       s.stop(`Server ${ip} ready (cloud-init complete)`);
       // Not awaited: the deploy never waits on the boot pull.
       noteBootPull(ip, sshKeyPath);
@@ -1620,20 +1621,8 @@ function restorePreludeLines() {
 
 /** Steps 3 and 4 of both restore scripts, shared text. */
 function restoreStagedAndSwapLines() {
-  const { staging, previous, discard, inProgress, lock, restoredFrom } = RESTORE_LAYOUT;
-  const stagedVc = [
-    staging,
-    previous,
-    discard,
-    inProgress,
-    `${inProgress}.tmp`,
-    lock,
-    restoredFrom,
-    `${restoredFrom}.tmp`,
-    ...WAL_GAP_RECORDS,
-  ]
-    .map((name) => `"$PGDATA/${staging}/${name}"`)
-    .join(' ');
+  const { staging, previous, discard, restoredFrom } = RESTORE_LAYOUT;
+  const stagedGap = WAL_GAP_RECORDS.map((name) => `"$PGDATA/${staging}/${name}"`).join(' ');
   return [
     '# --- staged ---',
     `if [ ! -f "$PGDATA/${staging}/PG_VERSION" ]; then`,
@@ -1641,10 +1630,12 @@ function restoreStagedAndSwapLines() {
     '  echo "restore: $RESTORE_BACKUP fetched no PG_VERSION; nothing was moved" >&2',
     '  exit 1',
     'fi',
-    '# 3. A base pushed while a restore left its dirs in PGDATA carries them:',
-    '#    drop them from the staged tree so they cannot wedge the swap. The',
-    "#    source database's WAL gap record goes too: the restored one has its own.",
-    `rm -rf ${stagedVc}`,
+    '# 3. A base pushed while a restore or a reseed left its .vc-* entries in',
+    '#    PGDATA carries them: drop every one from the staged tree, by glob, so',
+    "#    none can wedge the swap. The source database's WAL gap record goes",
+    '#    too: the restored one has its own.',
+    `find "$PGDATA/${staging}" -mindepth 1 -maxdepth 1 -name '.vc-*' -exec rm -rf {} +`,
+    `rm -rf ${stagedGap}`,
     '# Recovery config into staging: strip the settings it rewrites, append the',
     '# new ones (rendered by the CLI, the same text on both tiers).',
     `VC_AUTO_CONF="$PGDATA/${staging}/postgresql.auto.conf"`,
@@ -1674,12 +1665,17 @@ function restoreStagedAndSwapLines() {
     '  vc_root=half-out',
     `elif [ -d "$PGDATA/${previous}" ]; then`,
     '  vc_root=unproven',
+    'elif [ -e "$PGDATA/.vc-reseed-in-progress" ] || [ -L "$PGDATA/.vc-reseed-in-progress" ]; then',
+    '  # An in-place reseed stopped mid-swap (db-guard.sh): PGDATA holds part',
+    "  # of a tree, and the reseed's old one was garbage (D9). No fallback.",
+    '  vc_root=unproven',
     'else',
     '  vc_root=live',
     'fi',
     'case "$vc_root" in',
     '  unproven)',
-    `    # .vc-prev holds the database from before; PGDATA an unproven copy.`,
+    '    # .vc-prev (if any) holds the database from before; PGDATA an unproven',
+    "    # copy or a reseed's partial tree.",
     '    vc_mark in',
     `    mkdir -p "$PGDATA/${discard}"`,
     `    vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${discard}/"; done`,
@@ -1698,6 +1694,11 @@ function restoreStagedAndSwapLines() {
     '    vc_mark in',
     '    ;;',
     'esac',
+    '# A stale in-place reseed (db-guard.sh) must not survive onto the restored',
+    '# cluster: a later start would otherwise swap an old staged tree over it.',
+    "# Cleared only now, under this swap's marker, so a crash before it still",
+    '# finds the reseed state that rules PGDATA out as a fallback.',
+    'rm -rf "$PGDATA/.vc-reseed" "$PGDATA/.vc-reseed-ready" "$PGDATA/.vc-reseed-ready.tmp" "$PGDATA/.vc-reseed-in-progress" "$PGDATA/.vc-reseed-in-progress.tmp"',
     `find "$PGDATA/${staging}" -mindepth 1 -maxdepth 1 | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/"; done`,
     `rmdir "$PGDATA/${staging}"`,
     '# The slow removal goes before the marker: once the marker is gone, the',
@@ -1905,8 +1906,8 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
         `elif [ -e ${PGDATA_PATH}/recovery.signal ]; then echo VC_SWAPPED_EMPTY; else echo VC_MARKER_ABSENT; fi'`,
       { ignoreError: true, retries: 1 },
     );
-    const state = String(probe ?? '');
-    if (state.includes('VC_MARKER_ABSENT')) {
+    const state = probe;
+    if (hasSentinelLine(state, 'VC_MARKER_ABSENT')) {
       // No swap began: the database from before the restore is untouched.
       await sshRunAsync(
         ip,
@@ -1919,7 +1920,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
           `from before it was started again: ${cause}`,
       );
     }
-    if (state.includes('VC_MARKER_PRESENT')) {
+    if (hasSentinelLine(state, 'VC_MARKER_PRESENT')) {
       throw new Error(
         [
           `restoreCompose: the restore of ${backup} was interrupted mid-swap (${cause}). The db stays down ` +
@@ -1929,7 +1930,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
         ].join('\n'),
       );
     }
-    if (state.includes('VC_SWAPPED_PREV')) {
+    if (hasSentinelLine(state, 'VC_SWAPPED_PREV')) {
       throw new Error(
         [
           `restoreCompose: the restore of ${backup} swapped in but was not proven (${cause}). The db stays ` +
@@ -1939,7 +1940,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
         ].join('\n'),
       );
     }
-    if (state.includes('VC_SWAPPED_EMPTY')) {
+    if (hasSentinelLine(state, 'VC_SWAPPED_EMPTY')) {
       // The volume held no database before (a fresh server): no .vc-prev.
       throw new Error(
         [

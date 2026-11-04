@@ -170,9 +170,13 @@ describe('public DNS budget: a resolver that never answers', () => {
         }),
       };
     };
+    // One Resolver per server per lookup: the first lookup's two are silent,
+    // the second's two answer 600ms into its own budget.
     const silentResolver = stub(null);
+    const silentResolver2 = stub(null);
     const answeringResolver = stub(600);
-    const made = [silentResolver, answeringResolver];
+    const answeringResolver2 = stub(600);
+    const made = [silentResolver, silentResolver2, answeringResolver, answeringResolver2];
     const fallback = systemAnswer();
     const lookup = makePublicDnsLookup({ makeResolver: () => made.shift(), fallback });
 
@@ -185,7 +189,10 @@ describe('public DNS budget: a resolver that never answers', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(first).toHaveBeenCalledExactlyOnceWith(null, '10.0.0.3', 4);
     expect(silentResolver.cancel).toHaveBeenCalled();
+    expect(silentResolver2.cancel).toHaveBeenCalled();
+    // The first lookup's expiry never touched the second lookup's resolvers.
     expect(answeringResolver.cancel).not.toHaveBeenCalled();
+    expect(answeringResolver2.cancel).not.toHaveBeenCalled();
     // t=1600: the second's public answer, 600ms into its own budget.
     await vi.advanceTimersByTimeAsync(100);
     expect(second).toHaveBeenCalledExactlyOnceWith(null, '1.2.3.4', 4);
@@ -197,5 +204,106 @@ describe('public DNS budget: a resolver that never answers', () => {
     const p = resolvePublicA('e4.example.dev', { resolver: silent(), fallback: systemAnswer() });
     await vi.advanceTimersByTimeAsync(PUBLIC_DNS_BUDGET_MS);
     expect(await p).toEqual(['10.0.0.3']);
+  });
+});
+
+describe('each public resolver answers on its own', () => {
+  // A stale NXDOMAIN on one public resolver is a final answer from that
+  // server: asked as one server list, c-ares never tries the next. Live on
+  // 2026-11-04 after an e2e destroy and restore on the same name: 1.1.1.1
+  // said NXDOMAIN, 8.8.8.8 and the authoritative servers had the record.
+  const nxdomain = () =>
+    Object.assign(new Error('queryA ENOTFOUND rd3d4.example.dev'), { code: 'ENOTFOUND' });
+  const perServer = (answers: Record<string, string[] | Error>) => (server: string) => ({
+    resolve4: vi.fn((_h: string, cb: (err: Error | null, addrs?: string[]) => void) => {
+      const a = answers[server];
+      if (a instanceof Error) cb(a);
+      else cb(null, a);
+    }),
+    cancel: vi.fn(),
+  });
+
+  it('a positive answer from any resolver wins over another one cached NXDOMAIN', async () => {
+    const fallback = vi.fn();
+    const lookup = makePublicDnsLookup({
+      makeResolver: perServer({ '1.1.1.1': nxdomain(), '8.8.8.8': ['209.38.8.152'] }),
+      fallback,
+    });
+    const result = await new Promise((resolve) => {
+      lookup('rd3d4.example.dev', {}, (...args: unknown[]) => resolve(args));
+    });
+    expect(result).toEqual([null, '209.38.8.152', 4]);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it('resolvePublicA does the same', async () => {
+    const fallback = vi.fn();
+    await expect(
+      resolvePublicA('rd3d4.example.dev', {
+        makeResolver: perServer({ '1.1.1.1': nxdomain(), '8.8.8.8': ['209.38.8.152'] }),
+        fallback,
+      }),
+    ).resolves.toEqual(['209.38.8.152']);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it('every resolver empty: the system resolver answers, as before', async () => {
+    const fallback = vi.fn((_h: string, _o: object, cb: (e: null, a: string, f: number) => void) =>
+      cb(null, '10.0.0.1', 4),
+    );
+    const lookup = makePublicDnsLookup({
+      makeResolver: perServer({ '1.1.1.1': nxdomain(), '8.8.8.8': nxdomain() }),
+      fallback,
+    });
+    const result = await new Promise((resolve) => {
+      lookup('gone.example.dev', {}, (...args: unknown[]) => resolve(args));
+    });
+    expect(result).toEqual([null, '10.0.0.1', 4]);
+  });
+
+  it('asks every server in PUBLIC_DNS_SERVERS, one resolver each', async () => {
+    const seen: string[] = [];
+    const lookup = makePublicDnsLookup({
+      makeResolver: (server: string) => {
+        seen.push(server);
+        return perServer({ [server]: ['1.2.3.4'] })(server);
+      },
+      fallback: vi.fn(),
+    });
+    await new Promise((resolve) => lookup('x.example.dev', {}, resolve));
+    expect(seen.sort()).toEqual([...PUBLIC_DNS_SERVERS].sort());
+  });
+});
+
+describe('the 0.0.0.0 warm-up placeholder is not an answer', () => {
+  // The deploy plants 0.0.0.0 while it provisions; one resolver can still
+  // serve it after the real IP lands on another.
+  const answers = (byServer: Record<string, string[]>) => (server: string) => ({
+    resolve4: vi.fn((_h: string, cb: (err: Error | null, addrs?: string[]) => void) =>
+      cb(null, byServer[server]),
+    ),
+    cancel: vi.fn(),
+  });
+
+  it('a resolver still serving 0.0.0.0 loses to one with the real IP', async () => {
+    await expect(
+      resolvePublicA('d4.example.dev', {
+        makeResolver: answers({ '1.1.1.1': ['0.0.0.0'], '8.8.8.8': ['203.0.113.9'] }),
+        fallback: vi.fn(),
+      }),
+    ).resolves.toEqual(['203.0.113.9']);
+  });
+
+  it('only the placeholder anywhere: nothing resolved yet, the fallback answers', async () => {
+    const fallback = vi.fn((_h: string, _o: object, cb: (e: null, a: object[]) => void) =>
+      cb(null, []),
+    );
+    await expect(
+      resolvePublicA('d4.example.dev', {
+        makeResolver: answers({ '1.1.1.1': ['0.0.0.0'], '8.8.8.8': ['0.0.0.0'] }),
+        fallback,
+      }),
+    ).resolves.toEqual([]);
+    expect(fallback).toHaveBeenCalledOnce();
   });
 });

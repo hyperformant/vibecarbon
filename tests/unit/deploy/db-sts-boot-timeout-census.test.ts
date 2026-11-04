@@ -13,7 +13,8 @@
  * "minutes" in the same code's comments.
  *
  * Family (enumerated 2026-08-29, both modules that boot the db sts):
- *   - deploy-side reseed standbyBoot   (src/lib/deploy/k8s/ha/index.js)
+ *   - deploy-side reseed standbyBoot   (src/lib/deploy/k8s/ha/index.js;
+ *     gone since the in-place reseed, Task A5: it seeds through replication.js)
  *   - failover/restore-side reseed boot (src/lib/deploy/replication.js,
  *     whose SSH client timeout must stay ABOVE the kubectl budget —
  *     tests/unit/failover/reseed-standby.test.ts pins that invariant with the numbers)
@@ -112,7 +113,6 @@ describe('db StatefulSet boot/rollout budgets (the CSI-settle class)', () => {
       expect.arrayContaining([
         'src/failover.js',
         'src/restore.js',
-        'src/lib/deploy/walg-role.js',
         'src/lib/deploy/replication.js',
         'src/lib/deploy/k8s/ha/index.js',
       ]),
@@ -137,11 +137,15 @@ describe('db StatefulSet boot/rollout budgets (the CSI-settle class)', () => {
     });
   }
 
-  it('the db-sts boot site in the ha module uses the shared constant, not a re-derived number', () => {
+  it('the ha module boots no db sts of its own: the cold-deploy seed restarts in place through the shared wait', () => {
     const source = readFileSync('src/lib/deploy/k8s/ha/index.js', 'utf8');
-    const uses = source.match(/\$\{DB_STS_BOOT_TIMEOUT_S\}s/g) ?? [];
-    // The reseed standbyBoot wait. The dbHostPort recreate wait is gone: the
-    // hostPort is rendered before the db's first apply (DO e2e 2026-11-01).
-    expect(uses.length, 'expected the standbyBoot wait to interpolate it').toBe(1);
+    // The reseed standbyBoot wait is gone with the helper-pod swap (Task A5):
+    // the cold deploy reseeds through reseedStandbyInPlace, whose only db
+    // rollout wait (a pod recreated instead of restarted) is k8sDbRolloutWait
+    // on the shared DB_STS_BOOT_TIMEOUT_S default. The dbHostPort recreate
+    // wait is gone too: the hostPort is rendered before the db's first apply
+    // (DO e2e 2026-11-01).
+    expect(source).not.toMatch(/rollout\s+status|DB_STS_BOOT_TIMEOUT_S/);
+    expect(source).toMatch(/reseedStandbyInPlace\(/);
   });
 });

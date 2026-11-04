@@ -22,7 +22,9 @@ const calls: Array<{ cmd: string; input?: string; file?: string }> = [];
 vi.mock('../../../src/lib/command.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   runCommandAsync: vi.fn(async (argv: string[], opts: { input?: string } = {}) => {
-    const cmd = argv[argv.length - 1];
+    // The reseed's remote kubectl is shEscaped token by token: match it unquoted.
+    const cmd = argv[argv.length - 1].replace(/'\\''/g, "'").replace(/'/g, '');
+    const target = argv.find((a) => a.startsWith('root@')) ?? '';
     calls.push({ cmd, input: opts.input });
     // The lost slot: nothing streams from the primary.
     if (cmd.includes('pg_stat_replication')) return '';
@@ -38,23 +40,47 @@ vi.mock('../../../src/lib/command.js', async (orig) => ({
         },
       });
     }
-    if (cmd.includes(`get pod db-0 -n vibecarbon -o json`)) {
+    // The standby db pod, running the in-place reseed wrapper (db-guard.sh).
+    if (cmd.includes('get pod db-0') && cmd.includes('-o json')) {
       return JSON.stringify({
-        status: { phase: 'Running' },
+        metadata: { uid: 'u1' },
+        status: {
+          phase: 'Running',
+          containerStatuses: [
+            { name: 'db', restartCount: 0, containerID: 'c1', ready: true, state: { running: {} } },
+          ],
+        },
         spec: {
           containers: [
             {
               name: 'db',
-              image: 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r2',
-              volumeMounts: [{ name: 'data', mountPath: '/var/lib/postgresql/data' }],
+              command: ['sh', '/usr/local/bin/db-guard.sh'],
+              volumeMounts: [
+                { name: 'w', mountPath: '/usr/local/bin/db-guard.sh', subPath: 'db-guard.sh' },
+                { name: 'data', mountPath: '/var/lib/vibecarbon/role', subPath: 'vibecarbon-role' },
+              ],
+              env: [
+                {
+                  name: 'VC_WALG_ROLE_INTENT',
+                  valueFrom: {
+                    configMapKeyRef: { name: 'vibecarbon-db-role', key: 'VC_WALG_ROLE_INTENT' },
+                  },
+                },
+              ],
             },
           ],
-          volumes: [{ name: 'data', persistentVolumeClaim: { claimName: 'data-db-0' } }],
         },
-      }).replace('"phase":"Running"', '"phase": "Running"');
+      });
     }
-    // Stop the run right after the basebackup was staged.
-    if (cmd.includes('--replicas=0')) throw new Error('stop after stage (test)');
+    if (cmd.includes('configmap vibecarbon-db-role')) {
+      return target === 'root@10.1.0.1' ? 'primary' : 'standby';
+    }
+    if (cmd.includes('vc-reseed-protocol') && cmd.includes('grep -c'))
+      return '1\nin_recovery=f\nslots=0\nident=7000000000000000001|00000001';
+    if (cmd.includes('VC_DISCARD_GONE')) return 'VC_DISCARD_GONE';
+    if (cmd.includes('pg_database_size')) return '1048576|7412345678901234567|00000001';
+    // Stop the run once the basebackup stage has been sent.
+    if (opts.input?.includes('pg_basebackup')) throw new Error('stop after stage (test)');
     return '';
   }),
 }));
@@ -78,6 +104,9 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     composeCalls.push({ command: c, input: options?.input });
     // The lost slot: the primary sees no streaming standby.
     if (c.includes('pg_stat_replication') && c.includes('ORDER BY')) return '';
+    // The cold reseed's lineage read (readComposeDbLineage): a standby that
+    // lost its slot is still in recovery.
+    if (c.includes('pg_control_system')) return 'ready=1\nlineage=t|7412345678901234567|\n';
     if (c.includes('pg_is_in_recovery')) return 't';
     if (c.includes('SHOW hba_file')) return '/var/lib/postgresql/data/pg_hba.conf';
     if (c.includes('pg_isready')) return 'accepting connections';
@@ -133,7 +162,7 @@ describe('k8s-ha: a lost slot reseeds through the probe', () => {
     expect(init).toBeGreaterThan(-1);
     expect(probe).toBeGreaterThan(init);
     expect(stage).toBeGreaterThan(probe);
-    expect(calls[stage].cmd).toContain('kubectl exec -i -n vibecarbon db-0 -- bash');
+    expect(calls[stage].cmd).toContain('kubectl -n vibecarbon exec -i db-0 -c db -- sh');
   });
 });
 

@@ -22,6 +22,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
 // The real config writers (journal, proof, fence marker) run in these tests
 // against no project: point them at an empty dir, never the repo root, where
@@ -277,6 +278,8 @@ async function run(opts: RunOpts = {}) {
       if (promoteThrows) throw new Error('kubectl exec failed');
       return promoteVerdict;
     },
+    // The standby db pod mounts the wal-g role directory; the arm's write lands.
+    kubectl: k8sRoleKubectl(),
     restoreWalgRole: async () => {
       order.push('walgRole');
       return { promoted: { ok: true as const }, demoted: { ok: true as const } };

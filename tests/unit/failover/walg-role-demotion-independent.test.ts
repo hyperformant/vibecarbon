@@ -2,8 +2,8 @@
  * k8s old-primary wal-g demotion is independent of the promoted side (H3).
  *
  * restorePromotedWalgRole used to `return { ok: false }` the moment the
- * promoted cluster's 300 s rollout or its backup audit failed, and that return
- * sat BEFORE the old primary's `WALG_ROLE=standby` demotion. So a failed arm
+ * promoted cluster's rollout or its backup audit failed, and that return
+ * sat BEFORE the old primary's standby demotion. So a failed arm
  * also skipped the disarm: the stale ex-primary kept its primary write-guard,
  * and if it came back its nightly base backups could become LATEST in the
  * shared prefix. The demotion now runs in a `finally`, and the two verdicts
@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { k8sRoleReply } from '../helpers/k8s-role-kubectl.js';
 
 // The first base backup on the new timeline has its own tests
 // (tests/unit/walg/post-promote-backup-census.test.ts, the step-order census);
@@ -42,30 +43,33 @@ const PRIMARY_IP = '10.0.0.1';
 const STANDBY_IP = '10.0.0.9';
 const SYSID = '7412345678901234567';
 
-type Call = { ip: string; argv: string[] };
+type Call = { ip: string; argv: string[]; input?: string };
 
 /**
- * A kubectl seam that records every call and rejects the ones `fail` names.
- * `rollout` rejects the promoted side's rollout wait (the 300 s budget
- * expiring), `demote` rejects the old primary's `set env`.
+ * A kubectl seam that records every call, answers the db pod's role surface,
+ * and rejects the old primary's standby intent apply when `demote` is set.
  */
-function fakeKubectl(fail: { rollout?: boolean; demote?: boolean }) {
+function fakeKubectl(fail: { demote?: boolean }) {
   const calls: Call[] = [];
-  const kubectl = async (ip: string, argv: string[]) => {
-    calls.push({ ip, argv });
-    if (fail.rollout && argv.includes('rollout')) {
-      throw new Error('error: timed out waiting for the condition');
-    }
-    if (fail.demote && ip === PRIMARY_IP && argv.includes('set')) {
+  const kubectl = async (ip: string, argv: string[], opts?: { input?: string }) => {
+    calls.push({ ip, argv, input: opts?.input });
+    if (fail.demote && ip === PRIMARY_IP && argv.includes('apply')) {
       throw new Error('ssh: connect to host 10.0.0.1 port 22: Connection refused');
     }
-    return '';
+    return k8sRoleReply(argv) ?? '';
   };
   return { calls, kubectl };
 }
 
+/** The promoted side's requirePrimary audit, failing when asked. */
+const auditThat = (fails: boolean) => async () => {
+  if (fails) throw new Error('wal-g audit: the promoted db reads the standby role');
+};
+
 const isDemotion = (c: Call) =>
-  c.ip === PRIMARY_IP && c.argv.includes('set') && c.argv.includes('WALG_ROLE=standby');
+  c.ip === PRIMARY_IP &&
+  c.argv.includes('apply') &&
+  String(c.input).includes('VC_WALG_ROLE_INTENT: standby');
 
 const quiet = { log: () => {}, warn: () => {} };
 
@@ -73,9 +77,34 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe('demoteK8sWalgRole', () => {
+  it('a dead old-primary pod still gets the standby intent (its next start applies it)', async () => {
+    const { demoteK8sWalgRole } = await import('../../../src/lib/deploy/walg-role.js');
+    const kubectl = vi.fn(
+      async (_ip: string, argv: string[], _o?: { input?: string; timeout?: number }) => {
+        if (argv.includes('get') && argv.includes('pod')) throw new Error('pods "db-0" not found');
+        return '';
+      },
+    );
+    const r = await demoteK8sWalgRole({ ip: '9.9.9.9', kubectl, warn: () => {} });
+    expect(
+      kubectl.mock.calls.some(
+        ([, a, o]) =>
+          a.join(' ').includes('apply -f -') &&
+          String(o?.input).includes('VC_WALG_ROLE_INTENT: standby'),
+      ),
+    ).toBe(true);
+    expect(r).toMatchObject({ intent: true, live: false });
+    // Nothing restarts the db for the role.
+    expect(kubectl.mock.calls.some(([, a]) => a.includes('set') || a.includes('rollout'))).toBe(
+      false,
+    );
+  });
+});
+
 describe('restorePromotedWalgRole: two independent verdicts', () => {
-  it('demotes the old primary even when the promoted rollout fails', async () => {
-    const { calls, kubectl } = fakeKubectl({ rollout: true });
+  it('touches nothing on the promoted side but the audit: no set env, no rollout (armed before the promote)', async () => {
+    const { calls, kubectl } = fakeKubectl({});
     const audit = vi.fn(async () => {});
     const health = await restorePromotedWalgRole({
       promotedIp: STANDBY_IP,
@@ -83,11 +112,10 @@ describe('restorePromotedWalgRole: two independent verdicts', () => {
       sshKeyPath: '/fake/key',
       deps: { kubectl, audit, ...quiet },
     });
-    expect(calls.some(isDemotion), 'the old primary must still be disarmed').toBe(true);
-    expect(audit).not.toHaveBeenCalled();
-    expect(health.promoted.ok).toBe(false);
-    expect(health.promoted.error?.message).toMatch(/timed out waiting for the condition/);
-    expect(health.demoted).toEqual({ ok: true });
+    expect(audit).toHaveBeenCalledOnce();
+    expect(calls.filter((c) => c.ip === STANDBY_IP)).toEqual([]);
+    expect(calls.some((c) => c.argv.includes('set') || c.argv.includes('rollout'))).toBe(false);
+    expect(health).toEqual({ promoted: { ok: true }, demoted: { ok: true } });
   });
 
   it('demotes the old primary even when the promoted audit fails', async () => {
@@ -137,7 +165,7 @@ describe('restorePromotedWalgRole: two independent verdicts', () => {
 });
 
 describe('failoverHA (k8s): a failed arm still disarms, and the exit names both verdicts', () => {
-  async function runFailover(fail: { rollout?: boolean; demote?: boolean }) {
+  async function runFailover(fail: { audit?: boolean; demote?: boolean }) {
     const { calls, kubectl } = fakeKubectl(fail);
     const servers = {
       primary: { ip: PRIMARY_IP, floatingIp: PRIMARY_IP, region: 'nbg1' },
@@ -187,9 +215,13 @@ describe('failoverHA (k8s): a failed arm still disarms, and the exit names both 
       writeJournal: async () => 'journal-id',
       clearJournal: async () => {},
       promote: async () => 'promoted' as const,
-      // The REAL restorePromotedWalgRole, with only its kubectl seam faked.
+      kubectl,
+      // The REAL restorePromotedWalgRole, with only its kubectl and audit seams faked.
       restoreWalgRole: (a: { promotedIp: string; oldPrimaryIp: string; sshKeyPath: string }) =>
-        restorePromotedWalgRole({ ...a, deps: { kubectl, audit: async () => {}, ...quiet } }),
+        restorePromotedWalgRole({
+          ...a,
+          deps: { kubectl, audit: auditThat(!!fail.audit), ...quiet },
+        }),
       gate: async () => {},
       promoteIssuer: async () => ({ patched: [] }),
       swapRoles: () => {},
@@ -229,9 +261,9 @@ describe('failoverHA (k8s): a failed arm still disarms, and the exit names both 
     return { calls, thrown };
   }
 
-  it('the promoted rollout failing still demotes the old primary, and the command fails naming both', async () => {
-    const { calls, thrown } = await runFailover({ rollout: true });
-    expect(calls.some(isDemotion), 'old primary WALG_ROLE=standby must still be set').toBe(true);
+  it('the promoted audit failing still demotes the old primary, and the command fails naming both', async () => {
+    const { calls, thrown } = await runFailover({ audit: true });
+    expect(calls.some(isDemotion), 'the old primary standby intent must still be set').toBe(true);
     expect(
       thrown,
       'a failover whose new primary archives nothing must exit non-zero',
@@ -239,12 +271,12 @@ describe('failoverHA (k8s): a failed arm still disarms, and the exit names both 
     const msg = (thrown as Error).message;
     expect(msg).toMatch(/FAILOVER COMPLETED, BACKUPS DID NOT/);
     expect(msg).toMatch(/promoted cluster: write-guard not confirmed/);
-    expect(msg).toMatch(/timed out waiting for the condition/);
-    expect(msg).toMatch(/old primary: demoted to WALG_ROLE=standby/);
+    expect(msg).toMatch(/reads the standby role/);
+    expect(msg).toMatch(/old primary: demoted to the standby wal-g role/);
   });
 
   it('both arms failing: the exit names both failures', async () => {
-    const { thrown } = await runFailover({ rollout: true, demote: true });
+    const { thrown } = await runFailover({ audit: true, demote: true });
     const msg = (thrown as Error).message;
     expect(msg).toMatch(/promoted cluster: write-guard not confirmed/);
     expect(msg).toMatch(/old primary: NOT demoted/);
