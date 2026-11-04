@@ -75,9 +75,23 @@ describe('waitForDevTree', () => {
 
   it('forwards SIGTERM to the child (the tty only delivers Ctrl+C) and waits for it', async () => {
     const exit = vi.fn();
-    child = node("process.on('SIGTERM', () => process.exit(7)); setInterval(() => {}, 1000)");
+    // The child says `ready` once its handler is installed. A fixed sleep here
+    // flaked under load: node took longer than the sleep to start, the SIGTERM
+    // landed before the handler, and the child died with no exit code (0).
+    child = spawn(
+      process.execPath,
+      [
+        '-e',
+        "process.on('SIGTERM', () => process.exit(7)); process.stdout.write('ready\\n'); setInterval(() => {}, 1000)",
+      ],
+      { stdio: ['ignore', 'pipe', 'ignore'] },
+    );
     waitForDevTree(child, { exit });
-    await tick(300); // let the child install its handler
+    await new Promise<void>((resolve) => {
+      child?.stdout?.on('data', (chunk) => {
+        if (String(chunk).includes('ready')) resolve();
+      });
+    });
 
     process.emit('SIGTERM');
     await new Promise((r) => child?.once('close', r));
