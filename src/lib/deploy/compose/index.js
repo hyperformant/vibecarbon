@@ -70,6 +70,7 @@ import {
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from '../walg-audit.js';
 import { withWalgStaleStorageRetry } from '../walg-staleness.js';
+import { VC_COMPOSE } from './command.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -735,27 +736,6 @@ export async function waitForDockerReady(ip, sshKeyPath, maxAttempts = 12) {
 }
 
 /**
- * Build the compose files flags string for a given set of service options.
- */
-function composeFileFlags(options = {}) {
-  const files = ['-f', 'docker-compose.yml', '-f', 'docker-compose.prod.yml'];
-  if (options.observability) {
-    files.push('-f', 'docker-compose.observability.yml');
-    files.push('-f', 'docker-compose.observability.prod.yml');
-  }
-  if (options.n8n) {
-    files.push('-f', 'docker-compose.n8n.yml', '-f', 'docker-compose.n8n.prod.yml');
-  }
-  if (options.metabase) {
-    files.push('-f', 'docker-compose.metabase.yml', '-f', 'docker-compose.metabase.prod.yml');
-  }
-  if (options.redis) {
-    files.push('-f', 'docker-compose.redis.yml', '-f', 'docker-compose.redis.prod.yml');
-  }
-  return files.join(' ');
-}
-
-/**
  * Start the Docker Compose stack on the remote server
  */
 /**
@@ -773,7 +753,7 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
   // `console.log('[reconcile] Running...')` + silence + `Reconcile
   // complete.` pair.
   const reconcileSpinner = spinner();
-  reconcileSpinner.start(`Reconciling stack on ${ip} (docker compose up)`);
+  reconcileSpinner.start(`Reconciling stack on ${ip} (compose up)`);
   try {
     // reconcile.sh combines `docker compose pull` + `docker compose up -d`
     // on the server. The orchestrator-level `deploy.reconcile.run` wraps the
@@ -811,7 +791,7 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
       const dbLogs = await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose logs db --tail=60 2>&1 || true`,
+        `cd ${remoteDir} && ${VC_COMPOSE} logs db --tail=60 2>&1 || true`,
         { timeout: 30_000 },
       );
       if (typeof dbLogs === 'string' && dbLogs.trim()) {
@@ -826,7 +806,7 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
       const migrateLogs = await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose logs app-migrate --tail=30 2>&1 || true`,
+        `cd ${remoteDir} && ${VC_COMPOSE} logs app-migrate --tail=30 2>&1 || true`,
         { timeout: 30_000 },
       );
       if (typeof migrateLogs === 'string' && migrateLogs.trim()) {
@@ -861,7 +841,7 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
 export function servicesHealthCommand(remoteDir) {
   return (
     `cd ${remoteDir} && { if [ -f ${ADDON_SERVICES_SCRIPT} ]; then sh ${ADDON_SERVICES_SCRIPT}; fi; } | ` +
-    `sed 's/^/DEFERRED /'; docker compose ps --format '{{.Service}} {{.Health}}' 2>&1`
+    `sed 's/^/DEFERRED /'; ${VC_COMPOSE} ps --format '{{.Service}} {{.Health}}' 2>&1`
   );
 }
 
@@ -981,7 +961,7 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
   // sees a deterministic token on stdout regardless of node's exit code.
   const nodeScript = `const r=require('http').request({host:'localhost',port:3000,path:${JSON.stringify(path)},method:'GET',timeout:4000},res=>{process.exit(res.statusCode<300?0:1)});r.on('error',()=>process.exit(2));r.on('timeout',()=>process.exit(3));r.end();`;
   const nodeScriptB64 = Buffer.from(nodeScript).toString('base64');
-  const probeCmd = `cd ${remoteDir} && (echo ${nodeScriptB64} | base64 -d | docker compose exec -T app node - && echo 2xx || echo fail) 2>&1`;
+  const probeCmd = `cd ${remoteDir} && (echo ${nodeScriptB64} | base64 -d | ${VC_COMPOSE} exec -T app node - && echo 2xx || echo fail) 2>&1`;
 
   let lastStatus = 'none';
   for (let i = 0; i < attempts; i++) {
@@ -1017,7 +997,7 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
       (await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose ps -a --format '{{.Name}}\\t{{.State}}\\t{{.Status}}' 2>&1 | head -20`,
+        `cd ${remoteDir} && ${VC_COMPOSE} ps -a --format '{{.Name}}\\t{{.State}}\\t{{.Status}}' 2>&1 | head -20`,
         { timeout: 15_000, ignoreError: true },
       )) || '';
   } catch {
@@ -1029,7 +1009,7 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
         ip,
         sshKeyPath,
         // app-migrate too: a failed migration stops the app from starting.
-        `cd ${remoteDir} && docker compose logs --tail=40 app-migrate app 2>&1 | tail -60`,
+        `cd ${remoteDir} && ${VC_COMPOSE} logs --tail=40 app-migrate app 2>&1 | tail -60`,
         { timeout: 15_000, ignoreError: true },
       )) || '';
   } catch {
@@ -1037,7 +1017,7 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
   }
   const details =
     `Health probe failed after ${attempts} attempts (last status: ${lastStatus})\n` +
-    `--- docker compose ps ---\n${ps.trim()}\n` +
+    `--- ${VC_COMPOSE} ps ---\n${ps.trim()}\n` +
     `--- app-migrate and app log tail ---\n${logs.trim()}`;
   return { healthy: false, status: lastStatus, details };
 }
@@ -1082,7 +1062,7 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
   // `echo exit=$?` so the probe's own exit code reaches us as text whatever
   // docker compose exec does with it; 2>&1 keeps docker's own stderr (an
   // exec that never reached node) for the error below.
-  const probeCmd = `cd ${remoteDir} && echo ${scriptB64} | base64 -d | docker compose exec -T app node - 2>&1; echo "exit=$?"`;
+  const probeCmd = `cd ${remoteDir} && echo ${scriptB64} | base64 -d | ${VC_COMPOSE} exec -T app node - 2>&1; echo "exit=$?"`;
 
   let lastCode = null;
   let lastOutput = '';
@@ -1116,7 +1096,7 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
       (await sshRun(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose logs --tail=40 app 2>&1 | tail -40`,
+        `cd ${remoteDir} && ${VC_COMPOSE} logs --tail=40 app 2>&1 | tail -40`,
         { timeout: 15_000, ignoreError: true },
       )) || '';
   } catch {
@@ -1133,7 +1113,7 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
     `${headline}\n` +
       // docker compose exec's own failure (no app container, daemon error).
       (!known && lastOutput ? `--- probe output ---\n${lastOutput.slice(-1000)}\n` : '') +
-      `${adminNotReadyHint(`ssh in, then: cd ${remoteDir} && docker compose logs app`)}\n` +
+      `${adminNotReadyHint(`ssh in, then: cd ${remoteDir} && ${VC_COMPOSE} logs app`)}\n` +
       `--- app container log tail ---\n${logs.trim()}`,
   );
 }
@@ -1175,25 +1155,26 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
  * The add-ons the background job starts (addon-services.sh, see
  * services/addon-start.js) are skipped too: the job pulls their images after
  * the core stack is up, off the deploy's critical path.
+ * It runs after the bundle upload, through the vc-compose that upload wrote,
+ * so it pulls for exactly the stack reconcile.sh brings up.
  * Exported for tests/unit/deploy/pull-images-loud.test.ts, which runs it.
  */
-export function stackPullCommand(remoteDir, flags) {
+export function stackPullCommand(remoteDir) {
   return (
     `cd ${remoteDir} && { ` +
-    `pullable=$(${nonAppImageServicesShell(`docker compose ${flags}`)}) && ` +
+    `pullable=$(${nonAppImageServicesShell(VC_COMPOSE)}) && ` +
     `deferred=$(if [ -f ${ADDON_SERVICES_SCRIPT} ]; then sh ${ADDON_SERVICES_SCRIPT}; fi) && ` +
     `printf '%s\\n' "$pullable" | while read -r svc; do ` +
     `[ -n "$svc" ] || continue; ` +
     `printf '%s\\n' "$deferred" | grep -qxF "$svc" && continue; echo "$svc"; done | ` +
-    `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable; } 2>&1`
+    `xargs -r ${VC_COMPOSE} pull --policy missing --ignore-buildable; } 2>&1`
   );
 }
 
-export async function pullComposeImages(ip, sshKeyPath, projectName, options = {}) {
+export async function pullComposeImages(ip, sshKeyPath, projectName) {
   const remoteDir = `/opt/${projectName}`;
-  const flags = composeFileFlags(options);
   await perfAsync('deploy.compose.imagesPull', () =>
-    sshRunAsync(ip, sshKeyPath, stackPullCommand(remoteDir, flags), { timeout: 600_000 }),
+    sshRunAsync(ip, sshKeyPath, stackPullCommand(remoteDir), { timeout: 600_000 }),
   ).catch((err) => {
     throw stackPullError(ip, err);
   });
@@ -1280,7 +1261,7 @@ export async function destroyCompose(ip, sshKeyPath, projectName) {
   await sshRun(
     ip,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose down -v --remove-orphans 2>/dev/null; rm -rf ${remoteDir}`,
+    `cd ${remoteDir} && ${VC_COMPOSE} down -v --remove-orphans 2>/dev/null; rm -rf ${remoteDir}`,
     {
       timeout: 120_000,
     },
@@ -1842,16 +1823,16 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
     await sshRunAsync(
       ip,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose stop app 2>/dev/null || true`,
+      `cd ${remoteDir} && ${VC_COMPOSE} stop app 2>/dev/null || true`,
     );
-    await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose stop db`);
+    await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && ${VC_COMPOSE} stop db`);
   } catch (err) {
     await sshRunAsync(ip, sshKeyPath, `rm -f ${scriptPath}`, { ignoreError: true });
     throw new Error(
       `restoreCompose: stopping the app and db for the restore of ${backup} failed, so nothing was ` +
         `restored, and the app may be stopped (${err instanceof Error ? err.message : String(err)}). ` +
         `Check them on ${ip}:\n` +
-        `  ssh root@${ip} 'cd ${remoteDir} && docker compose ps'`,
+        `  ssh root@${ip} 'cd ${remoteDir} && ${VC_COMPOSE} ps'`,
     );
   }
 
@@ -1877,7 +1858,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
           sshRunAsync(
             ip,
             sshKeyPath,
-            `cd ${remoteDir} && docker compose run --rm --name ${runContainer} -e RESTORE_BACKUP=${backup} -v ${scriptPath}:/restore.sh:ro db bash /restore.sh`,
+            `cd ${remoteDir} && ${VC_COMPOSE} run --rm --name ${runContainer} -e RESTORE_BACKUP=${backup} -v ${scriptPath}:/restore.sh:ro db bash /restore.sh`,
             { timeout: fetchTimeoutS * 1000, retries: 1 },
           ),
         'backup-fetch (restore)',
@@ -1900,7 +1881,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
     const probe = await sshRunAsync(
       ip,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose run --rm --no-deps --entrypoint sh db -c ` +
+      `cd ${remoteDir} && ${VC_COMPOSE} run --rm --no-deps --entrypoint sh db -c ` +
         `'if [ -e ${PGDATA_PATH}/${RESTORE_LAYOUT.inProgress} ]; then echo VC_MARKER_PRESENT; ` +
         `elif [ -e ${PGDATA_PATH}/recovery.signal ] && [ -d ${PREVIOUS_PGDATA_PATH} ]; then echo VC_SWAPPED_PREV; ` +
         `elif [ -e ${PGDATA_PATH}/recovery.signal ]; then echo VC_SWAPPED_EMPTY; else echo VC_MARKER_ABSENT; fi'`,
@@ -1912,7 +1893,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
       await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose start db && docker compose start app`,
+        `cd ${remoteDir} && ${VC_COMPOSE} start db && ${VC_COMPOSE} start app`,
         { ignoreError: true },
       );
       throw new Error(
@@ -1955,7 +1936,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
       [
         `restoreCompose: the restore of ${backup} did not complete (${cause}), and whether a swap began could ` +
           `not be read. The db and app are left stopped. Check the db log on ${ip}:`,
-        `  ssh root@${ip} 'cd ${remoteDir} && docker compose logs db'`,
+        `  ssh root@${ip} 'cd ${remoteDir} && ${VC_COMPOSE} logs db'`,
         'Then rerun:',
         `  ${rerun}`,
       ].join('\n'),
@@ -1963,7 +1944,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
   }
 
   // 4. Start the DB — postgres enters archive recovery, replays WAL, promotes
-  await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose start db`);
+  await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && ${VC_COMPOSE} start db`);
 
   // 5. Poll until postgres has promoted (pg_isready + pg_is_in_recovery() = f).
   //    WAL replay can take 1-2 minutes; deadline is 300s. Poll early-exits the
@@ -1976,14 +1957,14 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
       await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres`,
+        `cd ${remoteDir} && ${VC_COMPOSE} exec -T db pg_isready -h 127.0.0.1 -U postgres`,
         { timeout: 10_000 },
       );
       // Second check: promoted (no longer in recovery)
       const recovering = await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -At -c 'SELECT pg_is_in_recovery()'`,
+        `cd ${remoteDir} && ${VC_COMPOSE} exec -T db psql -U postgres -At -c 'SELECT pg_is_in_recovery()'`,
         { timeout: 10_000 },
       );
       if (String(recovering).trim() === 'f') {
@@ -2013,12 +1994,12 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
         `restoreCompose: could not prove the restored database writable (write fence ${proof ?? 'unread'}), ` +
           `so it kept the database from before the restore in ${PREVIOUS_PGDATA_PATH} and left the app ` +
           'stopped. Check it by hand (expect off):',
-        `  ssh root@${ip} 'cd ${remoteDir} && docker compose exec -T db psql -U postgres -At -c "SHOW default_transaction_read_only"'`,
+        `  ssh root@${ip} 'cd ${remoteDir} && ${VC_COMPOSE} exec -T db psql -U postgres -At -c "SHOW default_transaction_read_only"'`,
         'Then finish what the restore owed:',
-        `  ssh root@${ip} 'cd ${remoteDir} && docker compose exec -T db sh -c "${RETIRE_PREVIOUS_SH}" ` +
-          `&& docker compose exec -T db sh -c "${REMOVE_DISCARD_SH}" ` +
-          '&& docker compose run --rm --no-deps app-migrate ' +
-          "&& docker compose exec -T db psql -U postgres -q -c ANALYZE && docker compose start app'",
+        `  ssh root@${ip} 'cd ${remoteDir} && ${VC_COMPOSE} exec -T db sh -c "${RETIRE_PREVIOUS_SH}" ` +
+          `&& ${VC_COMPOSE} exec -T db sh -c "${REMOVE_DISCARD_SH}" ` +
+          `&& ${VC_COMPOSE} run --rm --no-deps app-migrate ` +
+          `&& ${VC_COMPOSE} exec -T db psql -U postgres -q -c ANALYZE && ${VC_COMPOSE} start app'`,
       ].join('\n'),
     );
   }
@@ -2028,13 +2009,13 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
   await sshRunAsync(
     ip,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db sh -c '${RETIRE_PREVIOUS_SH}'`,
+    `cd ${remoteDir} && ${VC_COMPOSE} exec -T db sh -c '${RETIRE_PREVIOUS_SH}'`,
     { timeout: 60_000 },
   );
   await sshRunAsync(
     ip,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db ${REMOVE_DISCARD_SH}`,
+    `cd ${remoteDir} && ${VC_COMPOSE} exec -T db ${REMOVE_DISCARD_SH}`,
     { timeout: 300_000 },
   );
 
@@ -2049,7 +2030,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
     await sshRunAsync(
       ip,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db psql -U postgres -q -c 'ANALYZE'`,
+      `cd ${remoteDir} && ${VC_COMPOSE} exec -T db psql -U postgres -q -c 'ANALYZE'`,
       { timeout: 300_000 },
     );
   } catch (err) {
@@ -2068,7 +2049,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
     await sshRunAsync(
       ip,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose run --rm --no-deps app-migrate`,
+      `cd ${remoteDir} && ${VC_COMPOSE} run --rm --no-deps app-migrate`,
       // One attempt: a timed-out migration is never relaunched blind.
       { timeout: 600_000, retries: 1 },
     );
@@ -2079,5 +2060,5 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
   }
 
   // 9. Bring the app back up
-  await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose start app`);
+  await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && ${VC_COMPOSE} start app`);
 }

@@ -21,20 +21,14 @@ import {
 import { composeStandbyScaledServices, enabledAddonNames } from '../services/standby-policy.js';
 import { DNS01_OVERRIDE_FILE, dnsChallengeEnv } from './acme.js';
 import { appStorageCredential, buildAppRuntimeEnv } from './app-runtime-env.js';
+import { renderComposeCommand, VC_COMPOSE, VC_COMPOSE_SCRIPT } from './compose/command.js';
 import { COMPOSE_WALG_ROLE_HOST_DIR, walgRoleReadFragment } from './walg-role.js';
 
 /**
  * The two compose files EVERY deployed server carries, in `-f` order.
- * `docker-compose.prod.yml` must follow the base file — it overrides it.
+ * `docker-compose.prod.yml` must follow the base file: it overrides it.
  */
-export const COMPOSE_BASE_FILES = ['docker-compose.yml', 'docker-compose.prod.yml'];
-
-/**
- * The replication overlay. Written only onto compose-ha nodes and appended
- * LAST, at runtime, by whoever composes a `-f` set (reconcile.sh, the systemd
- * unit, the failover db-recreate) — see `renderReconcileScript`.
- */
-export const COMPOSE_REPLICATION_OVERLAY = 'docker-compose.replication.yml';
+const COMPOSE_BASE_FILES = ['docker-compose.yml', 'docker-compose.prod.yml'];
 
 /**
  * The node-side script that prints the compose `--scale <svc>=0` flags holding
@@ -58,16 +52,6 @@ export const STANDBY_SCALE_FLAG = `$([ -f ${STANDBY_SCALE_SCRIPT} ] && sh ${STAN
 
 /** The same for a systemd unit: `$$` passes a literal `$` through systemd's expansion. */
 export const STANDBY_SCALE_FLAG_SYSTEMD = `$${STANDBY_SCALE_FLAG}`;
-
-/**
- * The sed program that extracts reconcile.sh's baked `-f` set: the text before
- * the runtime replication-overlay conditional on its `up -d --remove-orphans`
- * line, which may carry trailing arguments (the standby-scale fragment). Every
- * recreator that must render the stack the way reconcile does (compose-ha's
- * overlay-write db up, scale.js's post-restore recreate) runs it on the node as
- * `sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1`.
- */
-export const RECONCILE_FLAGS_SED = String.raw`s/^docker compose \(.*\) \$(\[ -f docker-compose.replication.yml.*up -d --remove-orphans\( .*\)\{0,1\}$/\1/p`;
 
 /**
  * Render standby-scale.sh for the given compose services. It reads the node's
@@ -94,10 +78,9 @@ ${print}exit 0
  * server only when its option is on (see rootFiles below), so the two stay in
  * step by construction rather than by convention.
  *
- * NOTE this is not the only compose-flag list in the tree — `compose/index.js`
- * and `scale.js` carry their own for other purposes. This one is specifically
- * the DEPLOY-time `-f` set that `composeFileFlags` renders into reconcile.sh and
- * the systemd unit.
+ * This is the only compose file list in the tree: `composeFileFlags` renders
+ * it into vc-compose (compose/command.js), and every Compose call on a server
+ * runs that script.
  */
 const COMPOSE_OPTIONAL_FILES = [
   { file: DNS01_OVERRIDE_FILE, when: (o) => o.dnsChallenge },
@@ -112,16 +95,11 @@ const COMPOSE_OPTIONAL_FILES = [
 ];
 
 /**
- * Render the reconcile.sh script
+ * Render the reconcile.sh script. Every Compose call in it runs vc-compose,
+ * which carries the deploy's `-f` set and adds the compose-ha replication
+ * overlay (5433 publish for streaming replication) when the node has it.
  */
-export function renderReconcileScript(projectName, composeFlags, isFast = false) {
-  // On compose-ha servers the replication overlay (docker-compose.replication.yml)
-  // publishes port 5433 → db:5432 for pg_basebackup / streaming replication.
-  // reconcile.sh is baked with static composeFlags at deploy time, so we embed a
-  // shell conditional here that appends the overlay at runtime when present.
-  // On single-server compose the file never exists, so this is a safe no-op.
-  const replOverlayFlag = `$([ -f ${COMPOSE_REPLICATION_OVERLAY} ] && echo '-f ${COMPOSE_REPLICATION_OVERLAY}')`;
-
+export function renderReconcileScript(projectName, isFast = false) {
   // The core stack only: the add-ons ${ADDON_SERVICES_SCRIPT} names are left to
   // the background job (services/addon-start.js), which pulls their images.
   const pullStep = isFast
@@ -129,7 +107,7 @@ export function renderReconcileScript(projectName, composeFlags, isFast = false)
     : `
 # 2. Pull latest images if needed
 echo "Pulling images..."
-docker compose ${composeFlags} ${replOverlayFlag} pull --quiet --policy missing --ignore-buildable $up_services || true
+${VC_COMPOSE} pull --quiet --policy missing --ignore-buildable $up_services || true
 `;
 
   return `#!/bin/bash
@@ -188,7 +166,7 @@ done
 deferred="$(if [ -f ${ADDON_SERVICES_SCRIPT} ]; then sh ${ADDON_SERVICES_SCRIPT}; fi)"
 up_services=""
 if [ -n "$deferred" ]; then
-  up_services="$(docker compose ${composeFlags} ${replOverlayFlag} config --services | grep -vxF -e "$deferred" | tr '\\n' ' ')"
+  up_services="$(${VC_COMPOSE} config --services | grep -vxF -e "$deferred" | tr '\\n' ' ')"
 fi
 ${pullStep}
 # 3. Re-create containers if state differs
@@ -200,9 +178,9 @@ ${pullStep}
 # .vc-render-last.yaml\` on the server names the drifting keys directly.
 # Rendered values are no more sensitive than .env in this same root-only dir.
 echo "Updating containers..."
-docker compose ${composeFlags} ${replOverlayFlag} config > .vc-render-last.yaml 2>/dev/null || true
+${VC_COMPOSE} config > .vc-render-last.yaml 2>/dev/null || true
 [ -f .vc-render-first.yaml ] || cp .vc-render-last.yaml .vc-render-first.yaml 2>/dev/null || true
-docker compose ${composeFlags} ${replOverlayFlag} up -d --remove-orphans ${STANDBY_SCALE_FLAG} $up_services
+${VC_COMPOSE} up -d --remove-orphans ${STANDBY_SCALE_FLAG} $up_services
 
 # 3b. The add-ons, detached so this ssh session (the deploy) does not wait for
 # them; progress and the result go to ${ADDON_STATUS_FILE}.
@@ -227,17 +205,16 @@ echo "Reconciliation complete."
 }
 
 /**
- * Render the systemd service unit
+ * Render the systemd service unit. Its up and down run vc-compose, like
+ * reconcile.sh: compose-ha nodes carry docker-compose.replication.yml (5433
+ * publish + repl-gateway), and a unit up without it would recreate db minus
+ * the replication port and --remove-orphans would delete repl-gateway, so a
+ * node reboot would silently break replication transport. The standby-scale
+ * fragment needs command substitution, which systemd has not, so the command
+ * runs through bash; `$$` passes a literal `$` through systemd's expansion
+ * (verified on systemd 255).
  */
-export function renderSystemdUnit(projectName, composeFlags, _isFast = false) {
-  // Same runtime replication-overlay conditional as reconcile.sh: compose-ha
-  // nodes carry docker-compose.replication.yml (5433 publish + repl-gateway),
-  // and a unit up/down without it recreates db minus the replication port and
-  // --remove-orphans deletes repl-gateway (defined only in the overlay) — a
-  // node reboot would silently break replication transport. systemd has no
-  // command substitution, so the command runs through bash; `$$` passes a
-  // literal `$` through systemd's expansion (verified on systemd 255).
-  const replOverlayFlag = `$$([ -f ${COMPOSE_REPLICATION_OVERLAY} ] && echo "-f ${COMPOSE_REPLICATION_OVERLAY}")`;
+export function renderSystemdUnit(projectName) {
   return `[Unit]
 Description=Vibecarbon Project: ${projectName}
 After=docker.service
@@ -247,8 +224,8 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/${projectName}
-ExecStart=/bin/bash -c 'docker compose ${composeFlags} ${replOverlayFlag} up -d --remove-orphans ${STANDBY_SCALE_FLAG_SYSTEMD}'
-ExecStop=/bin/bash -c 'docker compose ${composeFlags} ${replOverlayFlag} down'
+ExecStart=/bin/bash -c '${VC_COMPOSE} up -d --remove-orphans ${STANDBY_SCALE_FLAG_SYSTEMD}'
+ExecStop=/bin/bash -c '${VC_COMPOSE} down'
 Restart=on-failure
 
 [Install]
@@ -257,7 +234,7 @@ WantedBy=multi-user.target
 }
 
 /**
- * Build the compose files flags string
+ * The deploy's compose `-f` set, rendered into vc-compose and nowhere else.
  */
 export function composeFileFlags(options = {}) {
   // Base first, then each enabled optional overlay in COMPOSE_OPTIONAL_FILES
@@ -502,8 +479,16 @@ export function renderBundle(projectName, options = {}) {
   );
 
   const isFast = Boolean(options.image?.endsWith(':local'));
-  const flags = composeFileFlags(options);
-  writeFileSync(join(stageDir, 'reconcile.sh'), renderReconcileScript(projectName, flags, isFast), {
+  // The one Compose command on the server (compose/command.js): the scripts
+  // below and every remote command the CLI sends run it.
+  writeFileSync(
+    join(stageDir, VC_COMPOSE_SCRIPT),
+    renderComposeCommand(composeFileFlags(options)),
+    {
+      mode: 0o755,
+    },
+  );
+  writeFileSync(join(stageDir, 'reconcile.sh'), renderReconcileScript(projectName, isFast), {
     mode: 0o755,
   });
   // The add-ons started after the core stack (services/addon-start.js).
@@ -513,22 +498,15 @@ export function renderBundle(projectName, options = {}) {
     renderAddonServicesScript(addons.flatMap((a) => [...a.services, ...a.setup])),
     { mode: 0o755 },
   );
-  writeFileSync(
-    join(stageDir, ADDON_JOB_SCRIPT),
-    renderAddonJobScript(projectName, flags, addons),
-    {
-      mode: 0o755,
-    },
-  );
+  writeFileSync(join(stageDir, ADDON_JOB_SCRIPT), renderAddonJobScript(projectName, addons), {
+    mode: 0o755,
+  });
   writeFileSync(
     join(stageDir, STANDBY_SCALE_SCRIPT),
     renderStandbyScaleScript(composeStandbyScaledServices(enabledAddonNames(options))),
     { mode: 0o755 },
   );
-  writeFileSync(
-    join(stageDir, `${projectName}.service`),
-    renderSystemdUnit(projectName, flags, isFast),
-  );
+  writeFileSync(join(stageDir, `${projectName}.service`), renderSystemdUnit(projectName));
 
   const copyDirIfExist = (srcDir, destDir) => {
     const src = join(cwd, srcDir);

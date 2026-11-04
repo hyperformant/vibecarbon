@@ -15,7 +15,7 @@ describe('the post-probe health wait covers core services only', () => {
   it('the remote command reads the deferred list from the node', () => {
     const cmd = servicesHealthCommand('/opt/demo');
     expect(cmd).toContain(`sh ${ADDON_SERVICES_SCRIPT}`);
-    expect(cmd).toContain("docker compose ps --format '{{.Service}} {{.Health}}'");
+    expect(cmd).toContain("sh vc-compose ps --format '{{.Service}} {{.Health}}'");
   });
 
   it('ignores a deferred add-on still starting; waits on a core one', () => {

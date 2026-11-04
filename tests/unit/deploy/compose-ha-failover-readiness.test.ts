@@ -179,14 +179,11 @@ describe('the restart list names only containers the stack runs', () => {
 });
 
 describe('primary-only add-ons on the promoted node', () => {
-  it('composeStartPrimaryOnlyCmd starts the declared services with --no-deps and the replication overlay', () => {
+  it('composeStartPrimaryOnlyCmd starts the declared services with --no-deps through vc-compose', () => {
     const cmd = composeStartPrimaryOnlyCmd('p', ['n8n', 'metabase']) as string;
-    expect(cmd).toContain('cd /opt/p');
-    expect(cmd).toContain('up -d --no-deps n8n metabase');
-    expect(cmd).toContain('reconcile.sh');
-    expect(cmd).toContain('-f docker-compose.replication.yml');
-    // No guessed fallback flag set: it would recreate db.
-    expect(cmd).not.toContain('-f docker-compose.yml');
+    // vc-compose is the node's own -f set and adds the replication overlay;
+    // no guessed set of its own (one would recreate db).
+    expect(cmd).toBe('cd /opt/p && sh vc-compose up -d --no-deps n8n metabase');
   });
 
   it('composeStartPrimaryOnlyCmd is null with nothing to start', () => {

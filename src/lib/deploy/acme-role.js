@@ -34,11 +34,10 @@
  */
 
 import * as p from '@clack/prompts';
-import { DNS01_OVERRIDE_FILE } from './acme.js';
-import { COMPOSE_BASE_FILES } from './bundle.js';
+import { VC_COMPOSE } from './compose/command.js';
 import { sshRunAsync } from './compose/index.js';
 import { mergeRemoteDotenv, pinnedSshOptsString } from './utils.js';
-import { COMPOSE_CONFIG_FILES_LABEL, PUBLISHED_PORTS_TEMPLATE } from './walg-role.js';
+import { PUBLISHED_PORTS_TEMPLATE } from './walg-role.js';
 
 /** The `.env` key both Traefik `caserver` flags consult first. */
 export const ACME_DISARM_ENV = 'ACME_DISARMED_CA_SERVER';
@@ -54,47 +53,28 @@ export const ACME_DISARMED_CA_SERVER = 'https://acme-disarmed.invalid/directory'
  * Bash that RECREATES the compose `traefik` service so it picks up the
  * `ACME_DISARMED_CA_SERVER` value just merged into `.env` (the value lives
  * in the container COMMAND via compose interpolation, fixed at create
- * time). The wrong-`-f` hazard (COMPOSE_CONFIG_FILES_LABEL): a bare `up`
+ * time). The wrong-`-f` hazard: a bare `up`
  * resolves docker-compose.yml alone and would recreate Traefik WITHOUT the
- * dns01 override's command — silently reverting the node to HTTP-01. So
- * the `-f` set comes from the running container's config_files label,
- * falling back to base + the dns01 override when the file is present, and
- * the published-ports assertion catches a recreate that dropped 80/443.
+ * dns01 override's command, silently reverting the node to HTTP-01. So it
+ * runs vc-compose, the server's own `-f` set (compose/command.js), and the
+ * published-ports assertion still catches a recreate that dropped 80/443.
  *
  * @param {string} remoteDir e.g. `/opt/<project>`
  * @returns {string} a bash script, run as one SSH command
  */
 export function composeTraefikRecreateShell(remoteDir) {
-  const baseFlags = COMPOSE_BASE_FILES.map((f) => `-f ${f}`).join(' ');
   return [
     'set -e',
     `cd ${remoteDir}`,
-    'CID="$(docker compose ps -q traefik | head -n1)"',
+    `CID="$(${VC_COMPOSE} ps -q traefik | head -n1)"`,
     'if [ -z "$CID" ]; then',
     `  echo "[acme-role] no traefik container is running in ${remoteDir}, refusing to recreate blind" >&2`,
     '  exit 1',
     'fi',
-    `FILES="$(docker inspect -f '{{ index .Config.Labels "${COMPOSE_CONFIG_FILES_LABEL}" }}' "$CID" 2>/dev/null || true)"`,
     `PORTS_BEFORE="$(docker inspect -f '${PUBLISHED_PORTS_TEMPLATE}' "$CID" 2>/dev/null || true)"`,
-    'FLAGS=""',
-    'if [ -n "$FILES" ]; then',
-    '  OLD_IFS="$IFS"; IFS=,',
-    '  for f in $FILES; do',
-    '    case "$f" in *[!\\ ]*) FLAGS="$FLAGS -f $f" ;; esac',
-    '  done',
-    '  IFS="$OLD_IFS"',
-    'fi',
-    'case "$FLAGS" in',
-    '  *.yml*|*.yaml*)',
-    '    echo "[acme-role] using the -f set the running traefik was created with" ;;',
-    '  *)',
-    `    FLAGS="${baseFlags}"`,
-    `    if [ -f ${DNS01_OVERRIDE_FILE} ]; then FLAGS="$FLAGS -f ${DNS01_OVERRIDE_FILE}"; fi`,
-    '    echo "[acme-role] no usable compose config_files label, rebuilt the -f set from base + dns01 override" ;;',
-    'esac',
-    'echo "[acme-role] recreating traefik: docker compose $FLAGS up -d --no-deps traefik"',
-    'docker compose $FLAGS up -d --no-deps traefik',
-    'CID_NEW="$(docker compose ps -q traefik | head -n1)"',
+    `echo "[acme-role] recreating traefik: ${VC_COMPOSE} up -d --no-deps traefik"`,
+    `${VC_COMPOSE} up -d --no-deps traefik`,
+    `CID_NEW="$(${VC_COMPOSE} ps -q traefik | head -n1)"`,
     `PORTS_AFTER="$(docker inspect -f '${PUBLISHED_PORTS_TEMPLATE}' "$CID_NEW" 2>/dev/null || true)"`,
     'MISSING=""',
     'for pp in $PORTS_BEFORE; do',
@@ -104,7 +84,7 @@ export function composeTraefikRecreateShell(remoteDir) {
     '  esac',
     'done',
     'if [ -n "$MISSING" ]; then',
-    '  echo "[acme-role] traefik recreate DROPPED published port(s):$MISSING — the node was recreated from the wrong compose file set; re-run \\`vibecarbon deploy <env>\\` to reconcile." >&2',
+    '  echo "[acme-role] traefik recreate DROPPED published port(s):$MISSING. Re-run \\`vibecarbon deploy <env>\\` to reconcile the node." >&2',
     '  exit 1',
     'fi',
     'echo "[acme-role] traefik recreated; published:$PORTS_AFTER"',
@@ -162,9 +142,9 @@ export async function armComposeAcme({ promotedIp, sshKeyPath, projectName, deps
   } catch (err) {
     warn(
       `Could not re-arm the promoted node's ACME issuer (${promotedIp}): ${err.message}. ` +
-        `The site serves, but the domain presents an untrusted certificate until this lands — ` +
-        `re-run the failover, or fix connectivity and \`docker compose up -d traefik\` after ` +
-        `emptying ${ACME_DISARM_ENV} in /opt/${projectName}/.env.`,
+        `The site serves, but the domain presents an untrusted certificate until this lands. ` +
+        `Re-run the failover, or fix connectivity and run \`cd /opt/${projectName} && ` +
+        `${VC_COMPOSE} up -d --no-deps traefik\` after emptying ${ACME_DISARM_ENV} in its .env.`,
     );
     return false;
   }

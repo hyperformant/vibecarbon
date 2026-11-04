@@ -39,6 +39,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig } from './lib/config.js';
+import { VC_COMPOSE } from './lib/deploy/compose/command.js';
 import { isComposeTier, resolveTier } from './lib/deploy/tier-registry.js';
 import { DIAG_BUSYBOX_IMAGE, DIAG_NETSHOOT_IMAGE } from './lib/images.js';
 import { localKubeconfigPath } from './lib/kubeconfig.js';
@@ -730,7 +731,7 @@ export async function diagnoseCompose(ctx) {
       'compose ps -a',
       ip,
       sshKeyPath,
-      composeSh('docker compose ps -a'),
+      composeSh(`${VC_COMPOSE} ps -a`),
       sshOpts,
     );
 
@@ -741,7 +742,7 @@ export async function diagnoseCompose(ctx) {
       'compose logs (tail 60)',
       ip,
       sshKeyPath,
-      composeSh('docker compose logs --no-color --timestamps --tail=60'),
+      composeSh(`${VC_COMPOSE} logs --no-color --timestamps --tail=60`),
       sshOpts,
     );
 
@@ -756,7 +757,7 @@ export async function diagnoseCompose(ctx) {
       ip,
       sshKeyPath,
       composeSh(
-        'docker compose exec -T traefik stat /letsencrypt/acme.json 2>&1 || echo "traefik/acme.json unavailable"',
+        `${VC_COMPOSE} exec -T traefik stat /letsencrypt/acme.json 2>&1 || echo "traefik/acme.json unavailable"`,
       ),
       sshOpts,
     );
@@ -765,7 +766,7 @@ export async function diagnoseCompose(ctx) {
       'traefik logs (tail 80)',
       ip,
       sshKeyPath,
-      composeSh('docker compose logs --no-color --timestamps --tail=80 traefik'),
+      composeSh(`${VC_COMPOSE} logs --no-color --timestamps --tail=80 traefik`),
       sshOpts,
     );
 

@@ -11,12 +11,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { RECONCILE_FLAGS_SED, renderReconcileScript } from '../../../src/lib/deploy/bundle.js';
+import { renderReconcileScript } from '../../../src/lib/deploy/bundle.js';
 import {
   ADDON_JOB_SCRIPT,
   ADDON_SERVICES_SCRIPT,
   renderAddonServicesScript,
 } from '../../../src/lib/services/addon-start.js';
+import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 /**
  * reconcile.sh brings up the core stack only and hands the add-ons to the
@@ -44,7 +45,8 @@ function reconcile({
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'vc-reconcile-addons-'));
   dirs.push(dir);
-  writeFileSync(join(dir, 'reconcile.sh'), renderReconcileScript('demo', '-f a.yml', isFast));
+  writeFileSync(join(dir, 'reconcile.sh'), renderReconcileScript('demo', isFast));
+  writeVcCompose(dir, '-f a.yml');
   writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(deferred));
   writeFileSync(
     join(dir, ADDON_JOB_SCRIPT),
@@ -150,7 +152,7 @@ describe('reconcile.sh: core first, add-ons in the background', () => {
   // Minor 4: the stop comes before ANY container change, the removed-network
   // sweep's `docker rm -f` included.
   it('stops the add-on job before the removed-network sweep', () => {
-    const script = renderReconcileScript('demo', '-f a.yml', true);
+    const script = renderReconcileScript('demo', true);
     const stop = script.indexOf('sh addons-start.sh stop');
     expect(stop).toBeGreaterThan(-1);
     expect(stop).toBeLessThan(script.indexOf('docker rm -f'));
@@ -170,9 +172,11 @@ describe('reconcile.sh: core first, add-ons in the background', () => {
     expect(existsSync(join(dir, '.vc-addons', 'status'))).toBe(false);
   });
 
-  it('the up line still yields the baked -f set to RECONCILE_FLAGS_SED', () => {
-    const script = renderReconcileScript('demo', '-f a.yml -f b.yml', true);
-    const r = spawnSync('sed', ['-n', RECONCILE_FLAGS_SED], { input: script, encoding: 'utf-8' });
-    expect(r.stdout.trim().split('\n').pop()).toBe('-f a.yml -f b.yml');
+  it('every Compose call goes through vc-compose with its -f set', async () => {
+    const { calls, dir } = reconcile({ deferred: ['grafana'], isFast: false });
+    await jobStarted(dir); // the detached job settles before the dir is removed
+    const composeCalls = calls.split('\n').filter((l) => l.startsWith('compose '));
+    expect(composeCalls.length).toBeGreaterThanOrEqual(2); // the pull and the up
+    for (const l of composeCalls) expect(l, l).toMatch(/^compose -f a\.yml /);
   });
 });

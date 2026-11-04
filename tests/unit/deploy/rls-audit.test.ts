@@ -28,8 +28,8 @@ describe('rlsAuditFailureMessage', () => {
 describe('composeRlsAuditShell', () => {
   const shell = composeRlsAuditShell();
 
-  it('runs the audit SQL via docker compose exec and exits 1 on any finding', () => {
-    expect(shell).toContain('docker compose exec -T db psql');
+  it('runs the audit SQL via sh vc-compose exec and exits 1 on any finding', () => {
+    expect(shell).toContain('sh vc-compose exec -T db psql');
     expect(shell).toContain(RLS_AUDIT_SQL);
     expect(shell).toMatch(/if \[ -n "\$UNPROTECTED" \]; then[\s\S]*exit 1; fi/);
   });

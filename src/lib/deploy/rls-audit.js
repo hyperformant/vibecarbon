@@ -16,6 +16,8 @@
  * healthy deploy returns an empty list.
  */
 
+import { VC_COMPOSE } from './compose/command.js';
+
 /**
  * SQL returning a comma-separated list of `public` tables with RLS DISABLED
  * (empty string when all are protected). Written for `psql -tAc` (tuples-only,
@@ -47,7 +49,7 @@ export function rlsAuditFailureMessage(tableList) {
 }
 
 /**
- * Single-line shell snippet that runs the audit via `docker compose exec db`
+ * Single-line shell snippet that runs the audit via vc-compose `exec db`
  * and exits 1 (with a loud stderr message) when any public table lacks RLS.
  * Embedded into the compose migration step's SSH command.
  * @returns {string}
@@ -55,7 +57,7 @@ export function rlsAuditFailureMessage(tableList) {
 export function composeRlsAuditShell() {
   // -tAc: tuples-only, unaligned, single command → stdout is the list or empty.
   return (
-    `UNPROTECTED=$(docker compose exec -T db psql -U postgres -d postgres -tAc ` +
+    `UNPROTECTED=$(${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc ` +
     `"${RLS_AUDIT_SQL}" 2>/dev/null | tr -d '[:space:]'); ` +
     `if [ -n "$UNPROTECTED" ]; then ` +
     `echo "[migrate] SECURITY: public tables without RLS: $UNPROTECTED, refusing to deploy an exposed schema" >&2; ` +

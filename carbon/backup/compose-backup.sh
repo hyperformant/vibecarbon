@@ -105,7 +105,7 @@ echo "Retain: ${RETAIN} days of base backups"
 # the container is robust: it tests the actual env wal-g sees (source of truth),
 # covers both the cron and on-demand paths, and needs no deploy-time S3 plumbing.
 rc=0
-docker compose exec -T db bash -c '
+sh vc-compose exec -T db bash -c '
   export PGUSER=postgres PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
   # This database lineage folder (walg-env.sh). A system identifier it cannot
   # read exits 1 with no marker: a refusal, never a push into a guessed folder.

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { renderReconcileScript } from '../../../src/lib/deploy/bundle.js';
+import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 // ---------------------------------------------------------------------------
 // Stale-network self-heal sweep in reconcile.sh
@@ -22,8 +23,6 @@ import { renderReconcileScript } from '../../../src/lib/deploy/bundle.js';
 // definition, so removal is always safe — `up -d` recreates them against the
 // current network.
 // ---------------------------------------------------------------------------
-
-const FLAGS = '-f docker-compose.yml -f docker-compose.prod.yml';
 
 const LIVE_NET = 'b1fddfdeae76339607d4b285063498c297f1834b35126dd496e960c9c43e3203';
 const DEAD_NET = 'e8a0c60781406d1325b492be65c08094a8e0033df956e6ee3c08a74377295bd1';
@@ -79,6 +78,7 @@ function runRendered(script: string): { dir: string; stdout: string } {
   // verbatim.
   const projectDir = join(dir, 'project');
   mkdirSync(projectDir);
+  writeVcCompose(projectDir);
   const patched = script.replace(/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${projectDir}"`);
   const scriptPath = join(dir, 'reconcile.sh');
   writeFileSync(scriptPath, patched);
@@ -91,7 +91,7 @@ function runRendered(script: string): { dir: string; stdout: string } {
 
 describe('renderReconcileScript — stale network reference sweep', () => {
   it('sweeps before `up` and scopes to the compose project label', () => {
-    const script = renderReconcileScript('myapp', FLAGS);
+    const script = renderReconcileScript('myapp');
     expect(script).toContain('label=com.docker.compose.project=myapp');
     // The sweep must run before the up command — a stale container removed
     // after `up` has already failed is no fix at all.
@@ -104,12 +104,12 @@ describe('renderReconcileScript — stale network reference sweep', () => {
   });
 
   it('is present in fast mode too (fast skips pull, not self-heal)', () => {
-    const script = renderReconcileScript('myapp', FLAGS, true);
+    const script = renderReconcileScript('myapp', true);
     expect(script).toContain('label=com.docker.compose.project=myapp');
   });
 
   it('removes exactly the container whose network no longer exists', () => {
-    const { dir } = runRendered(renderReconcileScript('myapp', FLAGS));
+    const { dir } = runRendered(renderReconcileScript('myapp'));
     const rmLog = readFileSync(join(dir, 'rm.log'), 'utf8');
     expect(rmLog).toContain(STALE_ID);
     expect(rmLog).not.toContain(HEALTHY_ID);
@@ -119,13 +119,13 @@ describe('renderReconcileScript — stale network reference sweep', () => {
   });
 
   it('names the removed container and the dead network in the log output', () => {
-    const { stdout } = runRendered(renderReconcileScript('myapp', FLAGS));
+    const { stdout } = runRendered(renderReconcileScript('myapp'));
     expect(stdout).toContain('myapp-db');
     expect(stdout).toContain(DEAD_NET.slice(0, 12));
   });
 
   it('still reaches the up step when nothing is stale (sweep is a no-op pass-through)', () => {
-    const { dir, stdout } = runRendered(renderReconcileScript('myapp', FLAGS, true));
+    const { dir, stdout } = runRendered(renderReconcileScript('myapp', true));
     expect(stdout).toContain('Reconciliation complete.');
     const argv = readFileSync(join(dir, 'argv.log'), 'utf8');
     expect(argv).toMatch(/compose .*up -d --remove-orphans/);

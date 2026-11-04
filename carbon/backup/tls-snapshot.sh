@@ -53,17 +53,17 @@ if [ -f .vibecarbon-retired ]; then
   skip "retired node"
 fi
 
-prefix="$(docker compose exec -T traefik printenv TLS_SNAPSHOT_S3_PREFIX 2>/dev/null)" || prefix=""
+prefix="$(sh vc-compose exec -T traefik printenv TLS_SNAPSHOT_S3_PREFIX 2>/dev/null)" || prefix=""
 if ! [[ "$prefix" =~ ^s3://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$ ]]; then
   skip "no valid TLS_SNAPSHOT_S3_PREFIX on the traefik service"
 fi
 
-domain="$(docker compose exec -T traefik printenv TLS_SNAPSHOT_DOMAIN 2>/dev/null)" || domain=""
+domain="$(sh vc-compose exec -T traefik printenv TLS_SNAPSHOT_DOMAIN 2>/dev/null)" || domain=""
 if ! [[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
   skip "no valid TLS_SNAPSHOT_DOMAIN on the traefik service"
 fi
 
-traefik="$(docker compose ps -q traefik 2>/dev/null)" || traefik=""
+traefik="$(sh vc-compose ps -q traefik 2>/dev/null)" || traefik=""
 if [ -z "$traefik" ]; then
   skip "traefik is not running"
 fi
@@ -89,7 +89,7 @@ unset vc_walg_role_file
 [ "$VC_WALG_ROLE" = "primary" ] || skip "wal-g role is ${VC_WALG_ROLE:-unknown}, not primary (only the primary writes snapshots)"
 
 apex_re="$(printf '%s' "$domain" | sed 's/[.]/\\./g')"
-if ! docker compose exec -T traefik grep -Eq "\"main\": ?\"${apex_re}\"" /letsencrypt/acme.json; then
+if ! sh vc-compose exec -T traefik grep -Eq "\"main\": ?\"${apex_re}\"" /letsencrypt/acme.json; then
   skip "acme.json holds no certificate for ${domain}"
 fi
 
@@ -97,8 +97,8 @@ dest="${prefix}/compose-acme.json"
 # Bounded, so a hung exec never holds the backup lock compose-backup.sh took.
 # The upload's bound is the shorter one: if the read hangs, the upload is
 # killed first and never completes an object from a short stream.
-if timeout "$((UPLOAD_TIMEOUT_S + 10))" docker compose exec -T traefik cat /letsencrypt/acme.json |
-  timeout "$UPLOAD_TIMEOUT_S" docker compose exec -T -e "WALG_S3_PREFIX=${prefix}" db wal-g st put -s -f --no-compress --no-encrypt compose-acme.json >&2; then
+if timeout "$((UPLOAD_TIMEOUT_S + 10))" sh vc-compose exec -T traefik cat /letsencrypt/acme.json |
+  timeout "$UPLOAD_TIMEOUT_S" sh vc-compose exec -T -e "WALG_S3_PREFIX=${prefix}" db wal-g st put -s -f --no-compress --no-encrypt compose-acme.json >&2; then
   echo "tls snapshot saved to ${dest}" >&2
 else
   up_rc=$?

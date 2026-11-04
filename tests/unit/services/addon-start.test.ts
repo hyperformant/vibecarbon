@@ -13,6 +13,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  renderComposeCommand,
+  VC_COMPOSE_SCRIPT,
+} from '../../../src/lib/deploy/compose/command.js';
 import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
 import {
   ADDON_JOB_SCRIPT,
@@ -211,14 +215,17 @@ exit 0
   chmodSync(join(dir, 'docker'), 0o755);
 }
 
+/** The job script, and the server's vc-compose with this -f set, in dir. */
+function stageJob(dir: string, flags: string, addons: Parameters<typeof renderAddonJobScript>[1]) {
+  writeFileSync(join(dir, VC_COMPOSE_SCRIPT), renderComposeCommand(flags));
+  writeFileSync(join(dir, ADDON_JOB_SCRIPT), renderAddonJobScript('demo', addons));
+}
+
 function runJob(dir: string, env: Record<string, string> = {}) {
-  writeFileSync(
-    join(dir, ADDON_JOB_SCRIPT),
-    renderAddonJobScript('demo', '-f docker-compose.yml', [
-      { name: 'observability', services: ['grafana', 'loki'], setup: [] },
-      { name: 'n8n', services: ['n8n'], setup: ['n8n-setup'] },
-    ]),
-  );
+  stageJob(dir, '-f docker-compose.yml', [
+    { name: 'observability', services: ['grafana', 'loki'], setup: [] },
+    { name: 'n8n', services: ['n8n'], setup: ['n8n-setup'] },
+  ]);
   stubDocker(dir);
   return spawnSync('sh', [ADDON_JOB_SCRIPT], {
     cwd: dir,
@@ -261,12 +268,7 @@ describe('addons-start.sh', () => {
   // the app image and depends on db, as the deploy's does.
   it('never pulls the app image', () => {
     const dir = tempDir();
-    writeFileSync(
-      join(dir, ADDON_JOB_SCRIPT),
-      renderAddonJobScript('demo', '-f a.yml', [
-        { name: 'x', services: ['app-migrate', 'grafana'], setup: [] },
-      ]),
-    );
+    stageJob(dir, '-f a.yml', [{ name: 'x', services: ['app-migrate', 'grafana'], setup: [] }]);
     stubDocker(dir);
     spawnSync('sh', [ADDON_JOB_SCRIPT], {
       cwd: dir,
@@ -319,10 +321,7 @@ describe('addons-start.sh', () => {
 
   it('a second run supersedes a first one still going (no duplicate jobs)', async () => {
     const dir = tempDir();
-    writeFileSync(
-      join(dir, ADDON_JOB_SCRIPT),
-      renderAddonJobScript('demo', '-f a.yml', [{ name: 'x', services: ['grafana'], setup: [] }]),
-    );
+    stageJob(dir, '-f a.yml', [{ name: 'x', services: ['grafana'], setup: [] }]);
     stubDocker(dir);
     const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, VC_PROJECT_DIR: dir };
     // The first job hangs inside `up`; detached so it leads its own group, as
@@ -355,7 +354,7 @@ describe('addons-start.sh', () => {
  */
 describe('addons-start.sh never touches the core stack', () => {
   it('every `up` it runs carries --no-deps', () => {
-    const script = renderAddonJobScript('demo', '-f a.yml', [
+    const script = renderAddonJobScript('demo', [
       { name: 'n8n', services: ['n8n'], setup: ['n8n-setup'] },
     ]);
     const ups = script.split('\n').filter((l) => /\bdc up\b/.test(l));
@@ -365,12 +364,7 @@ describe('addons-start.sh never touches the core stack', () => {
 
   it('resolves the replication overlay at each call, not once at job start', () => {
     const dir = tempDir();
-    writeFileSync(
-      join(dir, ADDON_JOB_SCRIPT),
-      renderAddonJobScript('demo', '-f docker-compose.yml', [
-        { name: 'n8n', services: ['n8n'], setup: [] },
-      ]),
-    );
+    stageJob(dir, '-f docker-compose.yml', [{ name: 'n8n', services: ['n8n'], setup: [] }]);
     stubDocker(dir);
     // The overlay appears mid-job (compose-ha writes it after the core up).
     writeFileSync(
@@ -401,10 +395,7 @@ describe('addons-start.sh never touches the core stack', () => {
 describe('addons-start.sh stop', () => {
   const jobDir = () => {
     const dir = tempDir();
-    writeFileSync(
-      join(dir, ADDON_JOB_SCRIPT),
-      renderAddonJobScript('demo', '-f a.yml', [{ name: 'x', services: ['grafana'], setup: [] }]),
-    );
+    stageJob(dir, '-f a.yml', [{ name: 'x', services: ['grafana'], setup: [] }]);
     stubDocker(dir);
     return dir;
   };
@@ -514,12 +505,9 @@ describe('addons-start.sh stop', () => {
 describe('addons-start.sh promoted', () => {
   it('starts the add-ons, records them, and runs no setup', () => {
     const dir = tempDir();
-    writeFileSync(
-      join(dir, ADDON_JOB_SCRIPT),
-      renderAddonJobScript('demo', '-f docker-compose.yml', [
-        { name: 'n8n', services: ['n8n'], setup: ['n8n-setup'] },
-      ]),
-    );
+    stageJob(dir, '-f docker-compose.yml', [
+      { name: 'n8n', services: ['n8n'], setup: ['n8n-setup'] },
+    ]);
     stubDocker(dir);
     spawnSync('sh', [ADDON_JOB_SCRIPT, 'promoted'], {
       cwd: dir,

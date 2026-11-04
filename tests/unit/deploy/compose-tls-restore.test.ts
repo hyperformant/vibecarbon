@@ -11,6 +11,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 import { expectNoKeyLeak, forbiddenStrings } from './_no-key-leak.ts';
 import { acmeJson, acmeJsonWithCas } from './_tls-fixtures.ts';
 
@@ -38,7 +39,6 @@ vi.mock('../../../src/lib/deploy/tls-snapshot.js', async (orig) => {
 });
 
 const p = await import('@clack/prompts');
-const { RECONCILE_FLAGS_SED } = await import('../../../src/lib/deploy/bundle.js');
 const { restoreComposeTls, snapshotComposeTlsNow, tlsRestoreLine } = await import(
   '../../../src/lib/deploy/compose/tls-restore.js'
 );
@@ -146,10 +146,8 @@ describe('restoreComposeTls: the live certificate wins', () => {
     const script = calls[0].argv[2];
     expect(calls[0].argv.slice(0, 2)).toEqual(['bash', '-c']);
     expect(script).toContain('cd /opt/myapp');
-    expect(script).toContain(`FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1)`);
-    expect(script).toContain(
-      'docker compose $FLAGS run --rm --no-deps -T --entrypoint sh traefik -c',
-    );
+    expect(script).toContain('[ -f vc-compose ] || exit 20');
+    expect(script).toContain('sh vc-compose run --rm --no-deps -T --entrypoint sh traefik -c');
     expect(script).toContain('grep -Eq "$1" /letsencrypt/acme.json');
     expect(script).toContain(APEX_RE_ARG);
   });
@@ -168,12 +166,12 @@ describe('restoreComposeTls: the live certificate wins', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('a server whose reconcile.sh has no -f set refuses instead of guessing', async () => {
+  it('a server without vc-compose refuses instead of guessing a -f set', async () => {
     const { ssh } = fakeSsh({ live: statusError(20) });
     const r = await restoreComposeTls({ ...args(), deps: { ssh, read: readValid } });
     expect(r).toEqual({
       restored: false,
-      reason: 'reconcile.sh on the server has no compose files',
+      reason: 'the server has no vc-compose yet, a deploy writes it',
     });
   });
 });
@@ -198,10 +196,8 @@ describe('restoreComposeTls: a valid snapshot fills an empty acme.json', () => {
     }
     const script = write.argv[2];
     expect(script).toContain('umask 077');
-    expect(script).toContain(`FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1)`);
-    expect(script).toContain(
-      'docker compose $FLAGS run --rm --no-deps -T --entrypoint sh traefik -c',
-    );
+    expect(script).toContain('[ -f vc-compose ] || exit 20');
+    expect(script).toContain('sh vc-compose run --rm --no-deps -T --entrypoint sh traefik -c');
     expect(script).toContain('cat > "$t"');
     expect(script).toContain('chmod 600 "$t"; mv -f "$t" "$f"');
     expect(script).toContain('f=/letsencrypt/acme.json');
@@ -217,8 +213,8 @@ describe('restoreComposeTls: a valid snapshot fills an empty acme.json', () => {
     await restoreComposeTls({ ...args(), deps: { ssh, read: async () => ({ text: VALID }) } });
     const script = calls[1].argv[2];
     expect(script).toContain(
-      'if [ -n "$(docker compose $FLAGS ps -q traefik 2>/dev/null)" ]; then\n' +
-        '  docker compose $FLAGS restart traefik',
+      'if [ -n "$(sh vc-compose ps -q traefik 2>/dev/null)" ]; then\n' +
+        '  sh vc-compose restart traefik',
     );
     expect(script.indexOf('restart traefik')).toBeGreaterThan(script.indexOf('mv -f'));
   });
@@ -366,8 +362,6 @@ inner="\${inner///letsencrypt/$LE_DIR}"
 if [ -n "\${FAKE_TRUNCATE:-}" ]; then head -c 100 | sh -c "$inner" "\${rest[@]}"; exit $?; fi
 exec sh -c "$inner" "\${rest[@]}"
 `;
-  const RECONCILE =
-    "docker compose -f docker-compose.yml -f docker-compose.prod.yml $([ -f docker-compose.replication.yml ] && echo '-f docker-compose.replication.yml') up -d --remove-orphans\n";
 
   /** Render both scripts through restoreComposeTls, the way a deploy sends them. */
   async function renderScripts() {
@@ -384,7 +378,7 @@ exec sh -c "$inner" "\${rest[@]}"
     for (const d of [bin, project, le]) spawnSync('mkdir', ['-p', d]);
     writeFileSync(join(bin, 'docker'), SHIM);
     chmodSync(join(bin, 'docker'), 0o755);
-    writeFileSync(join(project, 'reconcile.sh'), RECONCILE);
+    writeVcCompose(project);
     const run = (script: string, input: string, env: Record<string, string> = {}) => {
       const r = spawnSync('bash', ['-c', script.replace('cd /opt/myapp', `cd ${project}`)], {
         input,
@@ -440,9 +434,9 @@ exec sh -c "$inner" "\${rest[@]}"
     expect(readFileSync(join(r.le, 'acme.json'), 'utf8')).toBe(VALID);
   });
 
-  it('exit 20: a reconcile.sh with no -f set refuses', async () => {
+  it('exit 20: a server without vc-compose refuses', async () => {
     const { write } = await renderScripts();
-    writeFileSync(join(r.root, 'project', 'reconcile.sh'), '#!/bin/sh\n');
+    rmSync(join(r.root, 'project', 'vc-compose'));
     expect(r.run(write, VALID).code).toBe(20);
   });
 

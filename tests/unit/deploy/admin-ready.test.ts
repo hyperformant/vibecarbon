@@ -190,7 +190,7 @@ describe('waitForAdminReady (compose, compose-ha)', () => {
     expect(sshRun).toHaveBeenCalledTimes(3);
     const cmd = sshRun.mock.calls[0][2] as string;
     expect(cmd).toContain('cd /opt/proj');
-    expect(cmd).toContain('docker compose exec -T app node -');
+    expect(cmd).toContain('sh vc-compose exec -T app node -');
     // No tunnel, no published port.
     expect(cmd).not.toMatch(/ssh -L|localhost:8000/);
   });
