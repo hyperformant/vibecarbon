@@ -55,7 +55,7 @@ async function runDecision(opts: {
 }
 
 describe('compose-ha standby server type', () => {
-  it('routes the standby type through resolveServerTypeForRegion for the STANDBY region', async () => {
+  it('routes the standby type through the provider resolver for the STANDBY region', async () => {
     // The bug was that this was never called at all — the primary's type went
     // to both stacks. Pin the call AND its arguments.
     const spy = vi.spyOn(HetznerProvider, 'resolveServerTypeForRegion');
@@ -104,12 +104,30 @@ describe('compose-ha standby server type', () => {
       vi.restoreAllMocks();
     });
 
-    it('Review Focus 4: a cx23 primary in hel1 gets the fsn1 compose pick, and says so', async () => {
+    it('Review Focus 4: a cx23 primary in hel1 gets the fsn1 compose pick, and warns the classes differ', async () => {
       restores.push(seedCatalog(HetznerProvider, 'flux-hetzner-cx23-hel1'));
-      const info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
+      const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
       const ctx = await runDecision({ serverType: 'cx23', region: 'hel1', secondary: 'fsn1' });
       expect(ctx.standbyServerType).toBe('cpx22');
-      expect(info).toHaveBeenCalledWith('Standby server type adjusted for fsn1: cx23 -> cpx22');
+      expect(warn).toHaveBeenCalledWith(
+        'Standby server types adjusted for fsn1: compose=cpx22; your standby runs a different ' +
+          'CPU class from your primary (compose: regular AMD (cpx) in fsn1, cost-optimized (cx) ' +
+          'in hel1). Both locations sell regular AMD (cpx) servers this size or larger: once ' +
+          'this deploy finishes, run vibecarbon scale production and pick a regular AMD (cpx) ' +
+          'size to put both sides on one class',
+      );
+    });
+
+    it('a primary type the standby sells: one line naming the shared class', async () => {
+      restores.push(seedCatalog(HetznerProvider, '2026-10-22/hetzner'));
+      const info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
+      const ctx = await runDecision({ serverType: 'cpx22', region: 'nbg1', secondary: 'fsn1' });
+      expect(ctx.standbyServerType).toBe('cpx22');
+      expect(info).toHaveBeenCalledWith(
+        'Your primary (nbg1) and standby (fsn1) both run regular AMD (cpx) servers, the ' +
+          'lowest-priced CPU class nbg1 and fsn1 both sell, so a failover lands on servers as ' +
+          "fast as your primary's",
+      );
     });
 
     it('a recorded standby type is kept as is', async () => {
