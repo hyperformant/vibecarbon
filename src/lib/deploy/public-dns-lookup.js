@@ -48,28 +48,50 @@ function publicResolver(servers) {
 }
 
 /**
- * resolve4 through `r`, settled exactly once: the public answer (empty on
- * error), or null when the budget runs out first. A late answer is dropped
- * and the outstanding query cancelled.
+ * resolve4 through every resolver at once, settled exactly once: the first
+ * answer with a live address (the 0.0.0.0 warm-up placeholder is not one),
+ * empty when every resolver answered without one or with an error, or null
+ * when the budget runs out first. Each resolver is asked on
+ * its own because a stale NXDOMAIN cached on one public resolver is a final
+ * answer from that server: asked as one server list, c-ares never tries the
+ * next, so 1.1.1.1's negative cache hid a record 8.8.8.8 and the
+ * authoritative servers served (e2e destroy then restore on one name,
+ * 2026-11-04). A late answer is dropped and every outstanding query cancelled.
  *
- * @param {{resolve4: Function, cancel?: Function}} r
+ * @param {Array<{resolve4: Function, cancel?: Function}>} resolvers
  * @param {string} hostname
  * @param {(addresses: string[]|null) => void} done
  */
-function resolve4WithinBudget(r, hostname, done) {
+function resolve4AnyWithinBudget(resolvers, hostname, done) {
   let settled = false;
-  const timer = setTimeout(() => {
-    if (settled) return;
-    settled = true;
-    r.cancel?.();
-    done(null);
-  }, PUBLIC_DNS_BUDGET_MS);
-  r.resolve4(hostname, (err, addresses) => {
+  let pending = resolvers.length;
+  const finish = (value) => {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
-    done(!err && Array.isArray(addresses) ? addresses : []);
-  });
+    for (const r of resolvers) r.cancel?.();
+    done(value);
+  };
+  const timer = setTimeout(() => finish(null), PUBLIC_DNS_BUDGET_MS);
+  for (const r of resolvers) {
+    r.resolve4(hostname, (err, addresses) => {
+      if (settled) return;
+      // 0.0.0.0 is the deploy's warm-up placeholder ("not live yet"), which
+      // one resolver can still serve after the real IP landed on another.
+      const live = !err && Array.isArray(addresses) ? addresses.filter((a) => a !== '0.0.0.0') : [];
+      if (live.length > 0) {
+        finish(live);
+        return;
+      }
+      pending -= 1;
+      if (pending === 0) finish([]);
+    });
+  }
+}
+
+/** One resolver per server, or the injected one for every server (tests). */
+function resolversFor(servers, resolver, makeResolver) {
+  return servers.map((server) => resolver ?? makeResolver(server));
 }
 
 /**
@@ -79,14 +101,14 @@ function resolve4WithinBudget(r, hostname, done) {
  * @param {object} [opts]
  * @param {string[]} [opts.servers] - resolvers to pin (default public pair)
  * @param {{resolve4: Function, cancel?: Function}} [opts.resolver] - one Resolver for every call (tests)
- * @param {() => {resolve4: Function, cancel?: Function}} [opts.makeResolver] - a fresh
- *   Resolver per call (the default; injectable for tests)
+ * @param {(server: string) => {resolve4: Function, cancel?: Function}} [opts.makeResolver] - a
+ *   fresh Resolver per server per call (the default; injectable for tests)
  * @param {Function} [opts.fallback] - injectable system lookup (tests)
  */
 export function makePublicDnsLookup({
   servers = PUBLIC_DNS_SERVERS,
   resolver,
-  makeResolver = () => publicResolver(servers),
+  makeResolver = (server) => publicResolver([server]),
   fallback = dnsCallback.lookup,
 } = {}) {
   return function publicDnsLookup(hostname, options, callback) {
@@ -94,22 +116,26 @@ export function makePublicDnsLookup({
       callback = options;
       options = {};
     }
-    resolve4WithinBudget(resolver ?? makeResolver(), hostname, (addresses) => {
-      if (!addresses || addresses.length === 0) {
-        // Public DNS unreachable, silent past the budget, or empty: the
-        // system resolver is still better than no answer at all.
-        fallback(hostname, options, callback);
-        return;
-      }
-      if (options?.all) {
-        callback(
-          null,
-          addresses.map((address) => ({ address, family: 4 })),
-        );
-      } else {
-        callback(null, addresses[0], 4);
-      }
-    });
+    resolve4AnyWithinBudget(
+      resolversFor(servers, resolver, makeResolver),
+      hostname,
+      (addresses) => {
+        if (!addresses || addresses.length === 0) {
+          // Public DNS unreachable, silent past the budget, or empty: the
+          // system resolver is still better than no answer at all.
+          fallback(hostname, options, callback);
+          return;
+        }
+        if (options?.all) {
+          callback(
+            null,
+            addresses.map((address) => ({ address, family: 4 })),
+          );
+        } else {
+          callback(null, addresses[0], 4);
+        }
+      },
+    );
   };
 }
 
@@ -124,16 +150,23 @@ export function makePublicDnsLookup({
  * @param {object} [opts]
  * @param {string[]} [opts.servers]
  * @param {{resolve4: Function, cancel?: Function}} [opts.resolver] - injectable Resolver (tests)
+ * @param {(server: string) => {resolve4: Function, cancel?: Function}} [opts.makeResolver] - injectable (tests)
  * @param {Function} [opts.fallback] - injectable system lookup (tests)
  * @returns {Promise<string[]>} empty when nothing resolves
  */
 export async function resolvePublicA(
   hostname,
-  { servers = PUBLIC_DNS_SERVERS, resolver, fallback = dnsCallback.lookup } = {},
+  {
+    servers = PUBLIC_DNS_SERVERS,
+    resolver,
+    makeResolver = (server) => publicResolver([server]),
+    fallback = dnsCallback.lookup,
+  } = {},
 ) {
-  const r = resolver ?? publicResolver(servers);
   const publicAnswer = await new Promise((resolve) => {
-    resolve4WithinBudget(r, hostname, (addresses) => resolve(addresses ?? []));
+    resolve4AnyWithinBudget(resolversFor(servers, resolver, makeResolver), hostname, (addresses) =>
+      resolve(addresses ?? []),
+    );
   });
   if (publicAnswer.length > 0) return publicAnswer;
   return new Promise((resolve) => {
