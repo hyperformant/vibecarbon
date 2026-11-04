@@ -3,19 +3,31 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { STANDBY_SELFSIGNED_ISSUER } from '../../../src/lib/deploy/k8s/acme-issuer-policy.js';
 import {
   buildRestoredTlsSecret,
+  CERT_MANAGER_CONTROLLER_LABEL,
   caSlug,
+  certificateDetailsAnnotations,
+  certificateSerial,
   chainReachesTrustedRoot,
   inspectComposeAcme,
   inspectK8sTlsSecret,
   isSnapshotBetter,
+  k8sSecretSerial,
   MIN_REMAINING_VALIDITY_MS,
+  normalizeSerial,
   readTlsSnapshot,
   tlsSnapshotKey,
   tlsSnapshotS3Prefix,
   writeTlsSnapshot,
 } from '../../../src/lib/deploy/tls-snapshot.js';
 import { envBackupPrefix, walgPrefixFor } from '../../../src/lib/walg/restore-base.js';
-import { acmeJson, acmeJsonWithCas, DAY_MS, k8sSecretJson, makeChain } from './_tls-fixtures.ts';
+import {
+  acmeJson,
+  acmeJsonWithCas,
+  DAY_MS,
+  k8sSecretJson,
+  makeCert,
+  makeChain,
+} from './_tls-fixtures.ts';
 
 const s3Config = {
   region: 'r',
@@ -342,13 +354,32 @@ describe('buildRestoredTlsSecret', () => {
     expect(out.metadata.name).toBe('vibecarbon-tls');
     expect(out.metadata.namespace).toBe('vibecarbon');
   });
-  it('carries the cert-manager annotations', () => {
-    expect(out.metadata.annotations).toMatchObject({
+  // cert-manager v1.20.2 keeps Secrets labelled controller.cert-manager.io/fao
+  // in a typed cache and the rest in a metadata cache. A restored Secret
+  // without the label is moved between the two when cert-manager adds it, and
+  // in that moment its lister says NotFound: the trigger controller then
+  // re-issued ("Issuing certificate as Secret does not exist"). The restore
+  // writes exactly what cert-manager's SecretsManager.setValues would, so
+  // nothing is left for cert-manager to add.
+  it("carries the label that keeps it in cert-manager's typed Secret cache", () => {
+    expect(CERT_MANAGER_CONTROLLER_LABEL).toBe('controller.cert-manager.io/fao');
+    expect(out.metadata.labels).toEqual({ 'controller.cert-manager.io/fao': 'true' });
+  });
+  it('carries every annotation cert-manager writes for this certificate, and no other', () => {
+    expect(out.metadata.annotations).toEqual({
       'cert-manager.io/issuer-name': 'letsencrypt-prod-hetzner',
       'cert-manager.io/issuer-kind': 'ClusterIssuer',
       'cert-manager.io/issuer-group': 'cert-manager.io',
       'cert-manager.io/certificate-name': 'vibecarbon-tls',
+      'cert-manager.io/common-name': 'app.example.com',
+      'cert-manager.io/alt-names': 'app.example.com,*.app.example.com',
+      'cert-manager.io/ip-sans': '',
+      'cert-manager.io/uri-sans': '',
     });
+  });
+  it('is still judged a valid issued Secret, as one cert-manager wrote is', () => {
+    const verdict = inspectK8sTlsSecret(JSON.stringify(out), { dnsNames: names });
+    expect(verdict).toMatchObject({ ok: true, issuerName: 'letsencrypt-prod-hetzner' });
   });
   it('drops server-owned metadata', () => {
     for (const f of [
@@ -360,6 +391,55 @@ describe('buildRestoredTlsSecret', () => {
     ]) {
       expect(out.metadata).not.toHaveProperty(f);
     }
+  });
+});
+
+// cert-manager v1.20.2 internal/controller/certificates/secrets.go,
+// AnnotationsForCertificate: the values it derives from the leaf.
+describe('certificateDetailsAnnotations', () => {
+  const pem = (o: Parameters<typeof makeCert>[1]) =>
+    makeCert(['app.example.com', '*.app.example.com'], o).cert;
+
+  it('keeps common-name, alt-names, ip-sans and uri-sans when empty, drops the rest', () => {
+    expect(certificateDetailsAnnotations(pem({ subject: '/O=Acme' }))).toEqual({
+      'cert-manager.io/common-name': '',
+      'cert-manager.io/subject-organizations': 'Acme',
+      'cert-manager.io/alt-names': 'app.example.com,*.app.example.com',
+      'cert-manager.io/ip-sans': '',
+      'cert-manager.io/uri-sans': '',
+    });
+  });
+
+  it('writes every subject and SAN field, CSV-joined as Go encoding/csv does', () => {
+    const cert = pem({
+      subject: '/C=US/ST=CA/L=SF/O=Acme, Inc/OU=Ops/OU=Web/CN=app.example.com/serialNumber=42',
+      extraSans: [
+        'IP:10.0.0.1',
+        'IP:2001:db8:0:0:0:0:0:1',
+        'URI:spiffe://example.org/x',
+        'email:ops@example.com',
+      ],
+    });
+    expect(certificateDetailsAnnotations(cert)).toEqual({
+      'cert-manager.io/common-name': 'app.example.com',
+      'cert-manager.io/subject-serialnumber': '42',
+      'cert-manager.io/subject-organizations': '"Acme, Inc"',
+      'cert-manager.io/subject-organizationalunits': 'Ops,Web',
+      'cert-manager.io/subject-countries': 'US',
+      'cert-manager.io/subject-provinces': 'CA',
+      'cert-manager.io/subject-localities': 'SF',
+      'cert-manager.io/email-sans': 'ops@example.com',
+      'cert-manager.io/alt-names': 'app.example.com,*.app.example.com',
+      'cert-manager.io/ip-sans': '10.0.0.1,2001:db8::1',
+      'cert-manager.io/uri-sans': 'spiffe://example.org/x',
+    });
+  });
+
+  it('reads only the leaf of a bundle', () => {
+    const { leaf, intermediate } = makeChain();
+    expect(certificateDetailsAnnotations(`${leaf}${intermediate}`)).toEqual(
+      certificateDetailsAnnotations(leaf),
+    );
   });
 });
 
@@ -485,5 +565,26 @@ describe('writeTlsSnapshot', () => {
       ok: false,
       reason: 'S3 AccessDenied',
     });
+  });
+});
+
+describe('certificate serials (public, never key material)', () => {
+  it('normalizes the spellings openssl, node and Traefik use', () => {
+    expect(normalizeSerial('0A:B0:1C')).toBe('AB01C');
+    expect(normalizeSerial('00ab01')).toBe('AB01');
+    expect(normalizeSerial(' ab01 ')).toBe('AB01');
+    expect(normalizeSerial('0')).toBe('0');
+    expect(normalizeSerial(undefined)).toBe('');
+  });
+
+  it("reads the leaf's serial from a PEM bundle, and '' from anything else", () => {
+    const live = k8sSecretJson({ dnsNames: ['app.example.com'] });
+    const crt = Buffer.from(JSON.parse(live).data['tls.crt'], 'base64').toString('utf8');
+    const serial = certificateSerial(crt);
+    expect(serial).toMatch(/^[0-9A-F]+$/);
+    expect(certificateSerial('not a pem')).toBe('');
+    expect(k8sSecretSerial(live)).toBe(serial);
+    expect(k8sSecretSerial('{')).toBe('');
+    expect(k8sSecretSerial(JSON.stringify({ data: {} }))).toBe('');
   });
 });

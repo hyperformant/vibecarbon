@@ -23,9 +23,10 @@ import {
   promoteAcmeIssuer,
   promoteTlsKubectl,
 } from '../../../src/failover.js';
-import { tlsSnapshotKey } from '../../../src/lib/deploy/tls-snapshot.js';
+import { k8sSecretSerial, tlsSnapshotKey } from '../../../src/lib/deploy/tls-snapshot.js';
 import { expectNoKeyLeak } from '../deploy/_no-key-leak.ts';
 import { k8sSecretJson, k8sSecretJsonWithCa } from '../deploy/_tls-fixtures.ts';
+import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
 
 const CERT_JSON = (issuer: string, annotation?: string) =>
   JSON.stringify({
@@ -38,10 +39,6 @@ describe('promoteAcmeIssuer', () => {
     const calls: string[][] = [];
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
       calls.push(argv);
-      // grafana-tls does not exist on a promoted ex-standby (observability is
-      // skipped on the pilot path) — the real cluster answers NotFound.
-      if (argv.includes('grafana-tls'))
-        throw new Error('Error from server (NotFound): certificates.cert-manager.io not found');
       if (argv.includes('get'))
         return CERT_JSON('vibecarbon-standby-selfsigned', 'letsencrypt-staging-digitalocean');
       return '';
@@ -119,7 +116,7 @@ describe('promoteAcmeIssuer', () => {
 // re-pointed by a patch (cert-manager would then see a self-signed Secret and
 // issue): its Certificate is deleted, the snapshot goes into the Secret, and
 // the Certificate comes back on the ACME issuer, finding a Secret that
-// matches it. grafana-tls always takes the patch path.
+// matches it. vibecarbon-tls is the only Certificate a deploy owns.
 // ============================================================================
 
 const TARGET = 'letsencrypt-staging-digitalocean';
@@ -149,7 +146,7 @@ const LIVE_CERT = (name: string) =>
     spec: {
       secretName: name,
       issuerRef: { name: 'vibecarbon-standby-selfsigned', kind: 'ClusterIssuer' },
-      dnsNames: name === 'grafana-tls' ? ['app.example.com'] : DNS,
+      dnsNames: DNS,
     },
   });
 
@@ -185,6 +182,9 @@ function cluster({
       return LIVE_CERT(argv[2]);
     }
     if (argv[0] === 'get' && argv[1] === 'secret') return liveSecret;
+    // The settled cert-manager leader (awaitCertManagerLeader's reads).
+    const leader = certManagerLeaderStdout('kubectl', argv);
+    if (leader !== null) return leader;
     return '';
   };
   const kubectl = vi.fn(
@@ -197,7 +197,10 @@ function cluster({
   return { calls, kubectl, quietKubectl };
 }
 
-const mutations = (calls: Call[]) => calls.filter((c) => c.argv[0] !== 'get');
+const mutations = (calls: Call[]) => calls.filter((c) => !c.argv.includes('get'));
+/** Index of the cert-manager leader lease read. */
+const leaseRead = (calls: Call[]) =>
+  calls.findIndex((c) => c.argv.includes('lease') && c.argv.includes('cert-manager-controller'));
 const argvs = (calls: Call[]) => calls.map((c) => c.argv);
 
 function run(
@@ -207,11 +210,13 @@ function run(
     read = vi.fn(async () => ({ text: SNAP })),
     warn,
     message,
+    awaitLeader,
   }: {
     snapshot?: typeof SNAPSHOT_INPUTS | null;
     read?: ReturnType<typeof vi.fn>;
     warn?: (m: string) => void;
     message?: (m: string) => void;
+    awaitLeader?: () => Promise<void>;
   } = {},
 ) {
   return promoteAcmeIssuer({
@@ -224,6 +229,7 @@ function run(
       readSnapshot: read,
       ...(warn ? { warn } : {}),
       ...(message ? { message } : {}),
+      ...(awaitLeader ? { awaitLeader } : {}),
     },
   });
 }
@@ -242,7 +248,12 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     const { result } = await expectNoKeyLeak(SNAP, () => run(c, { read }));
 
     expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
-    expect(result.tls).toEqual({ restored: true, reason: 'restored from the last snapshot' });
+    // The serial it restored (public) rides the result into the failover's line.
+    expect(result.tls).toEqual({
+      restored: true,
+      reason: 'restored from the last snapshot',
+      serial: k8sSecretSerial(SNAP),
+    });
 
     // The snapshot key of this env and CA, read once with the DR client options.
     expect(read).toHaveBeenCalledTimes(1);
@@ -373,18 +384,13 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     expect(argvs(c.calls)).toEqual(await patchPathArgv());
   });
 
-  it('grafana-tls always takes the patch path', async () => {
+  it('touches only vibecarbon-tls, even with a retired grafana-tls on the cluster', async () => {
+    // One certificate per name: grafana-tls is no longer deploy-owned. A
+    // leftover one is removed by the reconverge redeploy, never re-pointed.
     const c = cluster({ grafana: true });
     const result = await run(c);
-    expect(result.patched).toEqual([
-      'vibecarbon/vibecarbon-tls',
-      'vibecarbon-observability/grafana-tls',
-    ]);
-    const grafana = c.calls.filter((x) => x.argv.includes('grafana-tls'));
-    expect(grafana.map((x) => x.argv[0])).toEqual(['get', 'patch']);
-    expect(c.calls.some((x) => x.argv[0] === 'delete' && x.argv.includes('grafana-tls'))).toBe(
-      false,
-    );
+    expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    expect(c.calls.some((x) => x.argv.includes('grafana-tls'))).toBe(false);
   });
 
   it.each([
@@ -566,6 +572,73 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     });
     expect(result.patched).toEqual([]);
     expect(read).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The promotion writes the restored Secret and the Certificate only once the
+ * promoted cluster's cert-manager controller is settled (rollout complete,
+ * lease on a current-ReplicaSet pod): the same wait the deploy runs
+ * (readiness.js awaitCertManagerLeader), over the promotion's ssh kubectl.
+ */
+describe('promoteAcmeIssuer waits for a settled cert-manager leader', () => {
+  it('restore path: the lease is read before the delete, the Secret write and the Certificate apply', async () => {
+    const c = cluster();
+    await run(c);
+    const lease = leaseRead(c.calls);
+    const firstMutation = c.calls.findIndex((x) => x.argv[0] === 'delete');
+    expect(lease).toBeGreaterThan(-1);
+    expect(firstMutation).toBeGreaterThan(lease);
+    // Over the promotion's own ssh kubectl, without the leading token.
+    expect(c.calls[lease].via).toBe('kubectl');
+    expect(c.calls[lease].argv[0]).toBe('-n');
+  });
+
+  it('resume path: the lease is read before the Certificate is re-created', async () => {
+    const c = cluster({
+      certMissing: true,
+      liveSecret: k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: TARGET }),
+    });
+    await run(c);
+    const lease = leaseRead(c.calls);
+    const apply = c.calls.findIndex((x) => x.argv[0] === 'apply');
+    expect(lease).toBeGreaterThan(-1);
+    expect(apply).toBeGreaterThan(lease);
+  });
+
+  it('a leader that never settles stops the restore before anything is deleted', async () => {
+    const c = cluster();
+    const warns: string[] = [];
+    const result = await run(c, {
+      warn: (m) => warns.push(m),
+      awaitLeader: async () => {
+        throw new Error('The cert-manager controller did not settle as leader within 180s');
+      },
+    });
+    expect(c.calls.some((x) => x.argv[0] === 'delete')).toBe(false);
+    expect(c.calls.some((x) => x.argv[0] === 'create' || x.argv[0] === 'replace')).toBe(false);
+    expect(warns.join('\n')).toMatch(/did not settle as leader/);
+    expect(result.tls?.restored).toBe(false);
+  });
+
+  it('resume path: a leader that never settles leaves the Certificate missing and says how to fix it', async () => {
+    const c = cluster({
+      certMissing: true,
+      liveSecret: k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: TARGET }),
+    });
+    const warns: string[] = [];
+    const msgs: string[] = [];
+    const result = await run(c, {
+      warn: (m) => warns.push(m),
+      message: (m) => msgs.push(m),
+      awaitLeader: async () => {
+        throw new Error('The cert-manager controller did not settle as leader within 180s');
+      },
+    });
+    expect(c.calls.some((x) => x.argv[0] === 'apply')).toBe(false);
+    expect(warns.join('\n')).toMatch(/did not settle as leader/);
+    expect(msgs).toEqual(['vibecarbon deploy prod']);
+    expect(result.patched).toEqual([]);
   });
 });
 

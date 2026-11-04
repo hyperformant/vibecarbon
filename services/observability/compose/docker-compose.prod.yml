@@ -18,7 +18,10 @@ services:
       # HTTPS router
       - "traefik.http.routers.grafana.rule=Host(`grafana.${DOMAIN}`)"
       - "traefik.http.routers.grafana.entrypoints=websecure"
-      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+      # No certresolver: the default store certificate (tls-default.yml,
+      # rendered by the deploy) already covers grafana.${DOMAIN}. A resolver
+      # here would order a second certificate for the same name.
+      - "traefik.http.routers.grafana.tls=true"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
       # Security headers
       - "traefik.http.routers.grafana.middlewares=super-admin-auth@file,security-headers@file"

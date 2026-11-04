@@ -29,13 +29,13 @@ import {
   haPersistPendingConfigStep,
   haProvisionServersStep,
   haPullImagesStep,
-  haRemoteBuildStep,
   haSeedKnownHostsStep,
   haSetupBackupCronStep,
   haSetupServerFilesStep,
   haSetupServersStep,
   haStartComposeStackStep,
   haStartDnsUpdateStep,
+  haTransferImageStep,
   haUpdateDnsStep,
   haVerifyStreamingStep,
   haWaitAdminReadyStep,
@@ -97,7 +97,7 @@ export function planDeploy(tier, _config) {
   if (tier === 'compose-ha') {
     // Faithful decomposition of the (now removed) inlined deployComposeHA:
     // every operation it ran over the primary+standby pair, in order. The
-    // conditionals it ran inline (local-only remote build; managed vs manual
+    // conditionals it ran inline (the image delivery mode; managed vs manual
     // DNS; the replication warn/hard-gate) live in the steps' when-gates and
     // inside the effects, exactly as the single-compose plan defers them.
     return [
@@ -110,7 +110,7 @@ export function planDeploy(tier, _config) {
       haSetupServersStep(),
       haWaitDockerReadyStep(),
       haCheckDbLedgerStep(),
-      haRemoteBuildStep(),
+      haTransferImageStep(),
       haSetupServerFilesStep(),
       haWriteNodeRolesStep(),
       haPullImagesStep(),

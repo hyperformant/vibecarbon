@@ -23,6 +23,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
 
 vi.mock('node:child_process', async () => {
   const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
@@ -387,6 +388,8 @@ function installSpawn() {
     if (cmd === 'kubectl' && has('exec') && /default_transaction_read_only/.test(sql)) {
       return child(fence === 'unreadable' ? 1 : 0, `${fence}\n`);
     }
+    const leaderStdout = certManagerLeaderStdout(cmd, args);
+    if (leaderStdout !== null) return child(0, leaderStdout);
     // The deploy's live wal-g role write (writeDeployWalgRole): the db pod
     // mounts the role dir, and the write reads back the role it wrote.
     if (cmd === 'kubectl' && has('get') && has('pod') && has('db-0')) {

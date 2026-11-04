@@ -412,9 +412,12 @@ export function setupE2EEnv(opts = {}) {
  *
  * @param {Record<string, string | undefined>} [extra] Per-call overrides.
  * @param {NodeJS.ProcessEnv} [base] Env to inherit (default `process.env`).
+ * @param {string} [provider] The scenario's compute provider. Only 'hetzner'
+ *   gets `HCLOUD_TOKEN`; for any other value (or none) an inherited
+ *   `HCLOUD_TOKEN` is stripped so one cloud's token never rides into another's run.
  * @returns {Record<string, string>}
  */
-export function e2eCliEnv(extra = {}, base = process.env) {
+export function e2eCliEnv(extra = {}, base = process.env, provider = undefined) {
   const env = {
     // VIBECARBON_PERF=1 turns on the [perf] stderr lines emitted by every
     // deploy sub-step (setupServer, buildImageOnServer, pullComposeImages,
@@ -461,14 +464,21 @@ export function e2eCliEnv(extra = {}, base = process.env) {
     ...extra,
   };
 
-  // Provider CLI token alias. `_run-lifecycle.ts` passes HCLOUD_TOKEN
-  // explicitly to every step it runs; mirroring it here means an iterated
-  // step gets the same child env. Only filled when absent — never overrides
-  // an explicit value, and never synthesised for DigitalOcean (deploy
-  // children must NOT receive DIGITALOCEAN_TOKEN so DO runs prove the
-  // customer path — see _run-lifecycle.ts B8-3).
-  if (!env.HCLOUD_TOKEN && env.HETZNER_API_TOKEN) {
-    env.HCLOUD_TOKEN = env.HETZNER_API_TOKEN;
+  // Provider CLI token alias, per provider. `HCLOUD_TOKEN` is the Hetzner
+  // CLI/SDK variable: a Hetzner scenario gets it (aliased from
+  // HETZNER_API_TOKEN when absent, never overriding an explicit value) so an
+  // iterated step sees the same child env as a lifecycle step. Every other
+  // provider (or an unknown one) gets NONE: any inherited HCLOUD_TOKEN is
+  // stripped, so a shell holding both clouds' tokens never hands Hetzner's to
+  // a DigitalOcean child, and DO deploy children also receive no
+  // DIGITALOCEAN_TOKEN so DO runs prove the customer path (B8-3, see
+  // _run-lifecycle.ts).
+  if (provider === 'hetzner') {
+    if (!env.HCLOUD_TOKEN && env.HETZNER_API_TOKEN) {
+      env.HCLOUD_TOKEN = env.HETZNER_API_TOKEN;
+    }
+  } else {
+    delete env.HCLOUD_TOKEN;
   }
 
   // Drop undefined values — spawn() rejects them on some platforms.

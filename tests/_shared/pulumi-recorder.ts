@@ -1,14 +1,16 @@
 /**
  * A stand-in for a Pulumi provider SDK in unit tests: every resource class
  * records its constructor args into `created`, and every output property is
- * an inert value whose `.apply()` returns another one. Namespaced SDKs
+ * an inert value whose `.apply()` returns another one, and which prints as
+ * `<resource name>.<property>` so a value derived from it (a resource option
+ * built with pulumi.all) can be checked for what it was built from. Namespaced SDKs
  * (`scaleway.instance.Server`) resolve through nested namespaces. The
  * resource options (third constructor argument) are recorded as `opts`.
  */
 export type Created = Array<{ type: string; name: string; args: unknown; opts?: unknown }>;
 
-type Output = { apply: () => Output };
-const output = (): Output => ({ apply: () => output() });
+type Output = { apply: () => Output; toString: () => string };
+const output = (ref = 'output'): Output => ({ apply: () => output(ref), toString: () => ref });
 
 function resourceClass(type: string, created: Created) {
   return class {
@@ -16,7 +18,7 @@ function resourceClass(type: string, created: Created) {
       created.push({ type, name, args, opts });
       // biome-ignore lint/correctness/noConstructorReturn: the inert resource stands in for Pulumi's
       return new Proxy(this, {
-        get: (_target, prop) => (prop === 'then' ? undefined : output()),
+        get: (_target, prop) => (prop === 'then' ? undefined : output(`${name}.${String(prop)}`)),
       });
     }
   };

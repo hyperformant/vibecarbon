@@ -167,27 +167,25 @@ describe('findTerminalAcmeFailures', () => {
   });
 
   it('does not cross namespaces when matching owners', () => {
-    // Same resource names in two namespaces — the observability add-on's
-    // grafana-tls chain uses the same naming scheme as the app's.
+    // Same resource names in two namespaces: a foreign chain can use the
+    // same naming scheme as the app's.
     const findings = findTerminalAcmeFailures([
-      certificate('grafana-tls', { namespace: 'vibecarbon-observability' }),
-      certificateRequest('grafana-tls-1', 'grafana-tls', { namespace: 'vibecarbon' }),
+      certificate('other-tls', { namespace: 'other' }),
+      certificateRequest('other-tls-1', 'other-tls', { namespace: 'vibecarbon' }),
     ]);
     expect(findings).toEqual([]);
   });
 
-  it('reports both namespaces when the app and the add-on cert both fail', () => {
+  it('reports both namespaces when the app cert and a foreign cert both fail', () => {
     const findings = findTerminalAcmeFailures([
       ...e3Fixture(),
-      certificate('grafana-tls', { namespace: 'vibecarbon-observability' }),
-      certificateRequest('grafana-tls-1', 'grafana-tls', {
-        namespace: 'vibecarbon-observability',
-      }),
-      order('grafana-tls-1-999', 'grafana-tls-1', { namespace: 'vibecarbon-observability' }),
+      certificate('other-tls', { namespace: 'other' }),
+      certificateRequest('other-tls-1', 'other-tls', { namespace: 'other' }),
+      order('other-tls-1-999', 'other-tls-1', { namespace: 'other' }),
     ]);
     expect(findings.map((f) => `${f.namespace}/${f.certificate}`)).toEqual([
       'vibecarbon/vibecarbon-tls',
-      'vibecarbon-observability/grafana-tls',
+      'other/other-tls',
     ]);
   });
 
@@ -424,28 +422,6 @@ describe('createAcmeIssuanceWatchdog', () => {
     expect(logged.filter((m) => m.includes('ingress-nginx/wildcard-tls'))).toHaveLength(1);
   });
 
-  it('ABORT SCOPE: an exhausted grafana-tls never stops the probe', async () => {
-    // Only the add-on cert is failing. It gets repaired up to the budget and
-    // then left alone — /admin/grafana is not what the probe is asking about,
-    // and the apex may still be converging.
-    const runKubectl = kubectlReturning([
-      certificate('grafana-tls', { namespace: 'vibecarbon-observability' }),
-      certificateRequest('grafana-tls-1', 'grafana-tls', {
-        namespace: 'vibecarbon-observability',
-      }),
-      order('grafana-tls-1-999', 'grafana-tls-1', { namespace: 'vibecarbon-observability' }),
-    ]);
-    const poll = createAcmeIssuanceWatchdog({ runKubectl, maxRecoveries: 2 });
-
-    expect((await poll()).action).toBe('recovered');
-    expect((await poll()).action).toBe('recovered');
-    // Budget spent. An unscoped watchdog would abort here.
-    for (let i = 0; i < 4; i++) expect((await poll()).action).toBe('none');
-
-    const deletes = runKubectl.mock.calls.filter(([argv]) => argv.includes('delete'));
-    expect(deletes).toHaveLength(2);
-  });
-
   it('ABORT SCOPE: only the apex Certificate stops the probe', async () => {
     const runKubectl = kubectlReturning(e3Fixture());
     const poll = createAcmeIssuanceWatchdog({ runKubectl, maxRecoveries: 1 });
@@ -456,33 +432,8 @@ describe('createAcmeIssuanceWatchdog', () => {
     expect(verdict.reason).toContain(PROBED_APEX_CERTIFICATE);
   });
 
-  it('ABORT SCOPE: an exhausted grafana-tls alongside a live apex still just repairs', async () => {
-    const runKubectl = kubectlReturning([
-      ...e3Fixture(),
-      certificate('grafana-tls', { namespace: 'vibecarbon-observability' }),
-      certificateRequest('grafana-tls-1', 'grafana-tls', {
-        namespace: 'vibecarbon-observability',
-      }),
-      order('grafana-tls-1-999', 'grafana-tls-1', { namespace: 'vibecarbon-observability' }),
-    ]);
-    const poll = createAcmeIssuanceWatchdog({ runKubectl, maxRecoveries: 3 });
-
-    // Both get repaired together; neither is exhausted, so no abort.
-    expect((await poll()).action).toBe('recovered');
-    expect((await poll()).action).toBe('recovered');
-    expect((await poll()).action).toBe('recovered');
-    // Now BOTH are exhausted — the apex is what triggers the abort.
-    const verdict = await poll();
-    expect(verdict.action).toBe('abort');
-    expect(verdict.reason).toContain('vibecarbon/vibecarbon-tls');
-    expect(verdict.reason).not.toContain('grafana');
-  });
-
-  it('the allowlist is exactly the two Certificates this deploy creates', () => {
-    expect([...DEPLOY_OWNED_CERTIFICATES]).toEqual([
-      'vibecarbon/vibecarbon-tls',
-      'vibecarbon-observability/grafana-tls',
-    ]);
+  it('the allowlist is exactly the one Certificate this deploy creates', () => {
+    expect([...DEPLOY_OWNED_CERTIFICATES]).toEqual(['vibecarbon/vibecarbon-tls']);
     expect(DEPLOY_OWNED_CERTIFICATES).toContain(PROBED_APEX_CERTIFICATE);
   });
 

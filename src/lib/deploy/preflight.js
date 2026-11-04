@@ -94,6 +94,41 @@ export function assertPulumiSupportsBackendOptions(ProviderClass, installed) {
 }
 
 /**
+ * The oldest Pulumi CLI a k8s deploy may run on: static k8s workers ignore
+ * their user data and are rebuilt by a `replacementTrigger` holding their
+ * join target (src/lib/iac/create-timeout.js workerResourceOptions). The
+ * resource option arrived in Pulumi v3.208.0, and v3.226.0 fixed it firing on
+ * dependency changes. An older CLI drops the option without a word, so a
+ * replaced master would leave the static workers joining one that is gone.
+ */
+export const PULUMI_MIN_VERSION_FOR_WORKER_JOIN_TRIGGER = '3.226.0';
+
+/**
+ * Refuse a k8s or k8s-ha deploy on a Pulumi CLI too old to honor the workers'
+ * `replacementTrigger`. Compose tiers have no workers and are not gated. An
+ * unreadable version is let through, like the backend guard above: better
+ * Pulumi's own behavior than a block on a probe that could not run.
+ *
+ * @param {string} tier
+ * @param {string|null} installed - `major.minor.patch`, or null if unknown
+ * @throws when the tier has workers and the CLI predates the trigger
+ */
+export function assertPulumiSupportsWorkerJoinTrigger(tier, installed) {
+  if (tier !== 'k8s' && tier !== 'k8s-ha') return;
+  if (!installed) return;
+  if (compareVersions(installed, PULUMI_MIN_VERSION_FOR_WORKER_JOIN_TRIGGER) >= 0) return;
+  throw new Error(
+    `Pulumi ${installed} is too old for a Kubernetes deploy.\n\n` +
+      `  Kubernetes workers rejoin a replaced master through a Pulumi option that\n` +
+      `  works from v${PULUMI_MIN_VERSION_FOR_WORKER_JOIN_TRIGGER}. On ${installed} Pulumi skips it without a\n` +
+      '  warning, and a replaced master would leave your workers joining one that\n' +
+      '  is gone.\n\n' +
+      '  Upgrade:  curl -fsSL https://get.pulumi.com | sh\n' +
+      '  Then reopen your shell and re-run.',
+  );
+}
+
+/**
  * The one escape hatch out of the shape gate. A tight registry regex is a
  * bet that the vendor's documented format stays the only accepted one; if a
  * provider changes its token format between CLI releases, an operator must
@@ -287,7 +322,7 @@ export function assertOperatorConfig(
  *   or an in-scope operator config value is malformed or missing.
  */
 export function checkDeployPrerequisites(
-  _tier,
+  tier,
   {
     has = checkDependency,
     ProviderClass = null,
@@ -315,8 +350,13 @@ export function checkDeployPrerequisites(
   // time out in CI, where pulumi is not on the unit job's PATH (CI l2, PR #284
   // — green locally because pulumi IS on a dev PATH, which is exactly how a
   // probe like this hides). Do not hoist it back out.
-  if (ProviderClass?.STATE_BACKEND_CHECKSUM_CALCULATION) {
-    assertPulumiSupportsBackendOptions(ProviderClass, pulumiVersion());
+  // Same laziness, one probe at most: only a k8s tier or a provider that
+  // pins a checksum mode reads the version.
+  const k8sTier = tier === 'k8s' || tier === 'k8s-ha';
+  if (k8sTier || ProviderClass?.STATE_BACKEND_CHECKSUM_CALCULATION) {
+    const installed = pulumiVersion();
+    assertPulumiSupportsWorkerJoinTrigger(tier, installed);
+    assertPulumiSupportsBackendOptions(ProviderClass, installed);
   }
 
   // Operator config gate — AFTER host tools (a missing `pulumi`/`ssh` is a

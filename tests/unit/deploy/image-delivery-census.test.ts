@@ -55,9 +55,9 @@ const SITES: Record<string, { calls: string[]; why: string; gated?: boolean }> =
     gated: true,
     why: 'primary only: planImageDelivery deliver is false for role standby',
   },
-  'lib/deploy/effects/index.js:transferImage': {
+  'lib/deploy/compose/app-image.js:deliverComposeAppImage': {
     calls: ['deliverImage'],
-    why: 'compose tier, not k8s; single compose only (compose-ha builds natively on both servers); one layer delta per deploy',
+    why: 'compose tiers, not k8s: the one local build, one layer delta per server (single compose, both compose-ha servers, a scale replacement). A compose-ha standby is a full stack that runs the app, so it receives the image like the primary',
   },
   'lib/deploy/effects/k8s-ha.js:startStandbyImageCopy': {
     calls: ['copyAppImageToStandby'],
@@ -194,9 +194,10 @@ describe('image-delivery call-site census', () => {
   });
 
   it('each gated site calls planImageDelivery( in the same function', () => {
+    const sites = allSites();
     for (const [key, entry] of Object.entries(SITES)) {
       if (!entry.gated) continue;
-      const site = allSites().find((s) => s.key === key);
+      const site = sites.find((s) => s.key === key);
       expect(site?.fnNode, `${key} not found`).toBeTruthy();
       let gated = false;
       walk(site?.fnNode, (n) => {
@@ -396,5 +397,128 @@ describe('planted fixtures', () => {
       'lib/deploy/k8s/k3s.js:runOnce: docker save x',
       'lib/deploy/k8s/k3s.js:other: docker load',
     ]);
+  });
+});
+
+/**
+ * The server-side build (buildRemote, DOCKER_HOST=ssh://) is only for an
+ * operator machine with no docker: direct mode. compose-ha once ran it on BOTH
+ * servers after the local build had already made the image (DO e2e
+ * 2026-11-02: 17 s local build, then a 117 s two-server build fan, 51 s of it
+ * blocking compose up). Every call site must sit in the consequent of an `if`
+ * whose test is exactly the site's no-local-docker gate (ALLOWED_GATES), so a
+ * local-mode deploy can never reach it.
+ */
+const REMOTE_BUILD_SITES: Record<string, { gate: string; why: string }> = {
+  'lib/deploy/effects/index.js:transferImage': {
+    gate: 'isDirectDeploy',
+    why: 'single compose, direct mode (no local docker, or -direct)',
+  },
+  'lib/deploy/effects/compose-ha.js:haTransferImage': {
+    gate: 'isDirectDeploy',
+    why: 'compose-ha, direct mode only; a local build ships to both servers by delta',
+  },
+  'scale.js:prepareReplacementServer': {
+    gate: "imagePlan === 'remote-build'",
+    why: 'a compose scale replacement built on the new server: scale -direct, a deploy recorded as direct, or no docker here (replacementImagePlan)',
+  },
+};
+
+/** The only `if` tests that may hold a buildRemote( call, exactly as spelled. */
+const ALLOWED_GATES = new Set([
+  'isDirectDeploy',
+  'ctx.isDirectDeploy',
+  "imagePlan === 'remote-build'",
+]);
+
+/** A site passes when an `if` it sits in the consequent of has exactly its gate as the test. */
+const passesGate = (gate: string | undefined, gates: string[]) =>
+  !!gate && ALLOWED_GATES.has(gate) && gates.includes(gate);
+
+/** Every buildRemote( call: its site key and whether a gating `if` holds it. */
+function findRemoteBuilds(path: string, text: string): { key: string; gates: string[] }[] {
+  const out: { key: string; gates: string[] }[] = [];
+  walk(parseAst(text), (n, ancestors) => {
+    if (n.type !== 'CallExpression' || calleeName(n) !== 'buildRemote') return;
+    const gates: string[] = [];
+    // Each `if` this call sits in the consequent of: its test, as spelled
+    // (whitespace collapsed), so `!isDirectDeploy` or `isDirectDeploy || x`
+    // never reads as the bare gate.
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const a = ancestors[i];
+      if (a.type !== 'IfStatement') continue;
+      const inConsequent = (ancestors[i + 1] ?? n) === a.consequent;
+      if (!inConsequent) continue;
+      gates.push(text.slice(a.test.start, a.test.end).replace(/\s+/g, ' '));
+    }
+    out.push({ key: `${path}:${enclosingFnNames(ancestors)[0]}`, gates });
+  });
+  return out;
+}
+
+describe('the server-side build runs only without local docker', () => {
+  let found: { key: string; gates: string[] }[] | null = null;
+  const sites = () => {
+    found ??= jsFiles(SRC).flatMap((abs) =>
+      findRemoteBuilds(relative(SRC, abs), readFileSync(abs, 'utf-8')),
+    );
+    return found;
+  };
+
+  it('every buildRemote( call is classified, and every classified site still exists', () => {
+    const found = sites();
+    for (const { key } of found) {
+      expect(
+        key in REMOTE_BUILD_SITES,
+        `unclassified buildRemote call ${key}: a local build ships by deliverImage instead`,
+      ).toBe(true);
+    }
+    for (const key of Object.keys(REMOTE_BUILD_SITES)) {
+      expect(
+        found.some((f) => f.key === key),
+        `${key} no longer calls buildRemote: drop it`,
+      ).toBe(true);
+    }
+  });
+
+  it('each call sits in the consequent of an if whose test is exactly its gate', () => {
+    for (const { key, gates } of sites()) {
+      const gate = REMOTE_BUILD_SITES[key]?.gate;
+      expect(
+        passesGate(gate, gates),
+        `${key} must be reached only under \`if (${gate})\`, found ${JSON.stringify(gates)}`,
+      ).toBe(true);
+    }
+  });
+
+  it('planted: an ungated call, and one in the else branch, carry no gate', () => {
+    const text = [
+      'async function a(x) { await buildRemote(x); }',
+      'async function b(isDirectDeploy) { if (isDirectDeploy) { return 1; } else { await buildRemote(1); } }',
+      'async function c(isDirectDeploy) { if (isDirectDeploy) { await buildRemote(1); } }',
+    ].join('\n');
+    expect(findRemoteBuilds('f.js', text)).toEqual([
+      { key: 'f.js:a', gates: [] },
+      { key: 'f.js:b', gates: [] },
+      { key: 'f.js:c', gates: ['isDirectDeploy'] },
+    ]);
+  });
+
+  it('planted: a negated test, a wrong literal and a widened test all fail the gate', () => {
+    const text = [
+      'async function neg(isDirectDeploy) { if (!isDirectDeploy) { await buildRemote(1); } }',
+      "async function lit(imagePlan) { if (imagePlan === 'delta') { await buildRemote(1); } }",
+      'async function wide(isDirectDeploy, x) { if (isDirectDeploy || x) { await buildRemote(1); } }',
+      'async function ok(ctx) { if (ctx.isDirectDeploy) { await buildRemote(1); } }',
+      "async function plan(imagePlan) { if (imagePlan === 'remote-build') { await buildRemote(1); } }",
+    ].join('\n');
+    const found = Object.fromEntries(findRemoteBuilds('f.js', text).map((f) => [f.key, f.gates]));
+    expect(passesGate('isDirectDeploy', found['f.js:neg'])).toBe(false);
+    expect(passesGate("imagePlan === 'remote-build'", found['f.js:lit'])).toBe(false);
+    expect(passesGate('isDirectDeploy', found['f.js:wide'])).toBe(false);
+    expect(passesGate('ctx.isDirectDeploy', found['f.js:ok'])).toBe(true);
+    expect(passesGate("imagePlan === 'remote-build'", found['f.js:plan'])).toBe(true);
+    // A gate outside the allowed set never passes, even when spelled exactly.
+    expect(passesGate('x', ['x'])).toBe(false);
   });
 });

@@ -58,6 +58,7 @@ import {
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
+import { imageBuildRecord } from './compose/app-image.js';
 import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compose/ha-role-swap.js';
 import { workingTreeDirty } from './delta.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
@@ -68,51 +69,26 @@ import {
   deriveScaleUpList,
   failoverAddonManifests,
   k8sTlsIdentity,
+  liveK8sTlsSecretSerial,
   quietKubectl,
   snapshotK8sTlsSecret,
+  staleObservabilityTlsProblem,
 } from './k8s/index.js';
-import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
-import { makePublicDnsLookup } from './public-dns-lookup.js';
+import { fetchPublicDomain, publicCurlResolveArgs } from './public-domain-probe.js';
 import { k8sPsqlRunner } from './replication.js';
 import { clearRetiredFence, reconcileRetiredFence, retiredSides } from './retired-fence.js';
 import { envS3Record } from './s3-record.js';
-import { stagingProbeCa } from './staging-ca.js';
 import { haStacksFrom } from './standby-types.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
-import { TLS_FIRST_LOOK_BUDGET_MS } from './tls-ready.js';
-import { caSlug, tlsSnapshotS3Prefix } from './tls-snapshot.js';
+import { probeTlsTrustOnce, TLS_FIRST_LOOK_BUDGET_MS } from './tls-ready.js';
+import { caSlug, normalizeSerial, tlsSnapshotS3Prefix } from './tls-snapshot.js';
 import {
   assertNoScaleCutoverInFlight,
   assertRolePrimaryWritable,
   liftStrandedWriteFence,
 } from './write-fence.js';
-
-/**
- * The socket options of the public health probe: resolution pinned to public
- * DNS (makePublicDnsLookup, see probePublicHealth), SNI pinned to the domain.
- *
- * Staging runs get FULL verification against system roots + the vendored
- * LE staging roots (src/lib/deploy/staging-ca.js), never a verification
- * opt-out, which would also wave through self-signed/expired/wrong-host
- * chains, the exact misconfigurations this probe exists to catch. The one
- * opt-out is `verifyTls: false`, for the k8s app phase only: its trust
- * verdict is the TLS phase's, recorded as pending on a miss, never passed.
- *
- * @param {string} domain
- * @param {{ verifyTls?: boolean }} opts
- * @returns {Record<string, unknown>} undici `connect` options
- */
-export function probeConnectOptions(domain, { verifyTls = true } = {}) {
-  const connectOpts = { lookup: makePublicDnsLookup(), servername: domain };
-  if (verifyTls === false) {
-    connectOpts.rejectUnauthorized = false;
-  } else if ((readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')) {
-    connectOpts.ca = stagingProbeCa();
-  }
-  return connectOpts;
-}
 
 /**
  * Probe the public /api/health endpoint to verify the app is reachable
@@ -140,7 +116,7 @@ export function probeConnectOptions(domain, { verifyTls = true } = {}) {
  * the public internet, while the trust verdict is the TLS phase's
  * (verifyK8sTls), which probes with full verification and records a miss as
  * TLS pending. A chain is never silently passed. Everything else (SNI,
- * public DNS) is the same in both phases (probeConnectOptions).
+ * public DNS) is the same in both phases (publicProbeConnect).
  *
  * Returns `{ ok: true, status }` on first 2xx, or a structured failure
  * descriptor on timeout — never null. Capturing last-status and last-error
@@ -170,32 +146,16 @@ async function probePublicHealth(
   let lastErrorMessage = null;
   let lastErrorCause = null;
   // The probe runs IMMEDIATELY after we (re)write the DNS record, so the
-  // system resolver may hold a stale entry for the name — worst of all a
+  // system resolver may hold a stale entry for the name, worst of all a
   // NEGATIVE one: any query made while the record didn't exist (a prior
   // teardown window, a failure diagnostic's curl) is cached as NXDOMAIN for
   // the zone's SOA minimum TTL (an hour on Hetzner DNS) by systemd-resolved
   // and most home routers, and the probe then ENOTFOUNDs for its whole
   // budget against a healthy deploy (e4 2026-08-28: 118 attempts while
-  // 1.1.1.1 served the record the entire time). `dns.setServers` CANNOT fix
-  // this — it only redirects `dns.resolve*()`, while fetch resolves via
-  // `dns.lookup()`/getaddrinfo (the probe carried exactly that no-op "fix"
-  // from matrix #3 until 2026-08-28). The real seam is the socket
-  // connector's `lookup` option: pin the probe's resolution to public DNS,
-  // with a system-resolver fallback for egress-filtered networks.
-  //
-  // CRITICAL: when we use undici's Agent we MUST also use undici's `fetch`,
-  // not Node 24's `globalThis.fetch`. Node 24 ships its own bundled undici;
-  // its built-in fetch's dispatcher protocol is incompatible with the npm
-  // undici package's Agent (different `onRequestStart` signature). Mixing
-  // them produces `InvalidArgumentError: invalid onRequestStart method` on
-  // every probe call, with the misleading wrapper "TypeError: fetch failed"
-  // — which is what dominated every k8s + k8s-ha matrix failure for weeks.
-  // Always pair Agent + fetch from the same undici instance.
-  //
-  const undici = await import('undici');
-  const connectOpts = probeConnectOptions(domain, { verifyTls });
-  const dispatcher = new undici.Agent({ connect: connectOpts });
-  const fetchFn = undici.fetch;
+  // 1.1.1.1 served the record the entire time). fetchPublicDomain resolves
+  // through public DNS on every attempt (public-domain-probe.js, the one
+  // path every probe of the app's domain takes), with SNI pinned to the
+  // domain and the shared trust policy.
   // Periodic progress logging: every 5 attempts, write a one-line summary
   // of the most recent failure class + lastStatus to stderr. Without this,
   // the only signal we get from a 5-min probe is the FINAL outcome — which
@@ -225,11 +185,11 @@ async function probePublicHealth(
     firstAttempt = false;
     attempts++;
     try {
-      const res = await fetchFn(url, {
-        method: 'GET',
-        signal: AbortSignal.timeout(8_000),
-        ...(dispatcher && { dispatcher }),
-      });
+      const res = await fetchPublicDomain(
+        url,
+        { method: 'GET', signal: AbortSignal.timeout(8_000) },
+        { verifyTls },
+      );
       lastStatus = res.status;
       if (res.ok) return { ok: true, status: String(res.status), attempts };
     } catch (err) {
@@ -656,7 +616,11 @@ function probeFailureReason(probeResult) {
  * one warning, and the deploy still succeeds, while cert-manager keeps
  * retrying in the background (its minimum backoff is CERT_MANAGER_MIN_BACKOFF).
  * A hit is trusted, and the primary cluster's Secret is saved as the env's
- * snapshot now instead of at the next scheduled backup. Never throws.
+ * snapshot now instead of at the next scheduled backup (its public serial is
+ * logged). One certificate per name: a trusted domain must serve the very
+ * certificate Secret/vibecarbon-tls holds, since that is the one the snapshot
+ * and every restore cover; a different served serial is one warning (another
+ * certificate for the same name is loaded in Traefik). Never throws.
  *
  * @param {{ domain: string, environment: string, projectName: string,
  *   dnsProvider?: string|null, kubeconfig: string, s3Config?: object,
@@ -692,6 +656,9 @@ export async function verifyK8sTls({
         log: (msg) => progressLog(msg),
       }));
   const snapshot = deps.snapshot ?? snapshotK8sTlsSecret;
+  const servedSerial =
+    deps.servedSerial ?? (async (d) => (await probeTlsTrustOnce(d)).serialNumber ?? null);
+  const secretSerial = deps.secretSerial ?? liveK8sTlsSecretSerial;
   const { dnsNames, ca } = identity({ projectDir: process.cwd(), dnsProvider, domain });
   const haveKubeconfig = kubeconfigExists(kubeconfig);
   const s = (deps.spinner ?? spinner)({ indicator: 'timer' });
@@ -733,9 +700,41 @@ export async function verifyK8sTls({
       p.log.warn(
         `TLS certificate snapshot not saved (${saved?.reason ?? 'unknown'}). The deploy still succeeded, and the next scheduled backup saves it.`,
       );
+    } else if (saved.serial) {
+      p.log.info(`TLS certificate snapshot saved (serial ${saved.serial}).`);
     }
+    await warnOnServedSerialMismatch({
+      domain,
+      environment,
+      readServed: () => servedSerial(domain),
+      readSecret: () => secretSerial(kubectlFor(kubeconfig)),
+    });
   }
   return { state: 'trusted', checkedAt, ca };
+}
+
+/**
+ * Warn when `domain` serves another certificate than Secret/vibecarbon-tls
+ * holds. Both serials are public. Silent when either cannot be read: an
+ * unread serial proves nothing either way. Never throws.
+ *
+ * @param {{ domain: string, environment: string,
+ *   readServed: () => Promise<string|null>, readSecret: () => Promise<string|null> }} args
+ */
+async function warnOnServedSerialMismatch({ domain, environment, readServed, readSecret }) {
+  let served = '';
+  let secret = '';
+  try {
+    [served, secret] = (await Promise.all([readServed(), readSecret()])).map(normalizeSerial);
+  } catch {
+    return;
+  }
+  if (!served || !secret || served === secret) return;
+  p.log.warn(
+    `${domain} serves certificate serial ${served}, but Secret vibecarbon-tls holds serial ${secret}. ` +
+      'Traefik has a second certificate for this name, so a restored certificate may not be the one your domain serves. ' +
+      `Run \`vibecarbon diagnose ${environment}\` and look for another Certificate or TLS Secret that covers ${domain}.`,
+  );
 }
 
 /**
@@ -1079,6 +1078,14 @@ export async function executeDeployment(args, gatheredConfig) {
     env: operatorCheckEnvs(process.cwd()),
   });
   assertTierSupported(providerFor(config), tier);
+  // One certificate per name: an observability add-on copied into the
+  // project before the change still issues grafana-tls for the app domain
+  // until `vibecarbon upgrade` refreshes it. Refused here, the last stop
+  // before anything is provisioned (k8s/one-certificate.js).
+  if (isK8sTier(tier)) {
+    const staleObservabilityTls = staleObservabilityTlsProblem(process.cwd());
+    if (staleObservabilityTls) throw new Error(staleObservabilityTls);
+  }
 
   // Operator-IP access: detect + persist + (when env already deployed) patch
   // the live Hetzner firewall. On a fresh first deploy this just appends to
@@ -1692,6 +1699,11 @@ export async function executeDeployment(args, gatheredConfig) {
     region,
   });
 
+  // A killed earlier run leaves its host-side delta work dir (a full image
+  // save) in the temp dir: clear those before this run makes its own.
+  const { sweepStaleDeltaDirs } = await import('./layer-delta.js');
+  sweepStaleDeltaDirs();
+
   // --- STEP 2: Image Resolve ---
   // resolveBuildMode (ci-setup.js) returns one of — see also transferImage
   // in effects/index.js, which must stay in sync with these descriptions:
@@ -1734,52 +1746,19 @@ export async function executeDeployment(args, gatheredConfig) {
     // critical path. State-tracker stepId 'compose-localbuild' is distinct
     // from 'compose-upstack' so concurrent state writes don't collide
     // (state.js uses last-writer-wins per stepId).
-    // silent: true so BuildKit progress doesn't interleave with the
-    // spinner output from upStack (which is running concurrently). On
-    // failure runCommandAsync includes captured stdout/stderr in the
-    // thrown error — operator still sees what went wrong.
-    // Plumb VITE_* build args through to docker build so the browser bundle
-    // ships with real client config (VITE_PUBLIC_URL etc.). Without these the
-    // Dockerfile's ARG VITE_* defaults to empty strings and Vite inlines
-    // empty values into the bundle. Mirrors what docker-compose.yml's build.args block does
-    // for local-dev `docker compose up --build`. See
-    // src/lib/deploy/compose/build-args.js for the rationale.
-    const { collectComposeBuildArgs, buildArgFlags } = await import('./compose/build-args.js');
-    const localBuildArgs = collectComposeBuildArgs(process.cwd(), {
-      projectName: projectConfig.projectName,
-      domain,
-    });
-    // PLATFORM_BUILD_FLAG: this build runs on the OPERATOR's machine, so
-    // without it the image inherits the operator's architecture (an Apple
-    // Silicon operator shipped arm64 to an amd64 VPS). vibecarbon is x86-64
-    // only — see platform.js. The pin can turn a previously-"succeeding"
-    // (wrong-arch) build into a hard failure on a host with no amd64
-    // emulation, which is the intended trade; the catch below makes that
-    // failure legible instead of a bare BuildKit "exec format error".
-    composeLocalBuildPromise = perfAsync('deploy.image.localBuild', async () => {
-      try {
-        return await runCommandAsync(
-          [
-            'docker',
-            'build',
-            PLATFORM_BUILD_FLAG,
-            ...buildArgFlags(localBuildArgs),
-            '-t',
-            localImageTag,
-            process.cwd(),
-          ],
-          { silent: true },
-        );
-      } catch (err) {
-        const detail = `${err.stderr || ''}${err.stdout || ''}`.trim();
-        const wrapped = new Error(
-          `docker build failed for ${localImageTag}. ${AMD64_BUILD_HINT}` +
-            (detail ? `\n${detail.split('\n').slice(-40).join('\n')}` : ''),
-        );
-        wrapped.cause = err;
-        throw wrapped;
-      }
-    });
+    // The build (compose/app-image.js) is silent so BuildKit progress doesn't
+    // interleave with the upStack spinner; a failure carries docker's last
+    // lines. It passes the VITE_* build args (Vite inlines them into the
+    // browser bundle) and pins amd64 (an Apple Silicon operator once shipped
+    // arm64 to an amd64 VPS; vibecarbon is x86-64 only, see platform.js).
+    // compose delivers it to its server, compose-ha to both, by layer delta.
+    const { buildComposeAppImage } = await import('./compose/app-image.js');
+    composeLocalBuildPromise = perfAsync('deploy.image.localBuild', () =>
+      buildComposeAppImage({ tag: localImageTag, projectName: projectConfig.projectName, domain }),
+    );
+    // Awaited by the image transfer; this keeps a build that fails while
+    // provisioning still runs from being an unhandled rejection first.
+    composeLocalBuildPromise.catch(() => {});
     imageReadyPromise = Promise.resolve({
       imageTag: localImageTag,
       githubOwner: 'noop',
@@ -2128,7 +2107,6 @@ export async function executeDeployment(args, gatheredConfig) {
     // deployComposeHA ran over the primary+standby pair; ctx threads the
     // mutable two-node identity the effects fill in (primary/standby/degraded)
     // and the orchestrator reads back into the HA deployResult shape below.
-    const { isLocalOnlyImageTag } = await import('./compose/index.js');
     const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
     const s = tracker.spinner();
     s.start('Starting HA deployment...');
@@ -2156,8 +2134,6 @@ export async function executeDeployment(args, gatheredConfig) {
       // Finding #1: hard-gate replication unless the operator opts into a
       // warm/degraded standby via `deploy -allow-degraded`.
       allowDegraded: !!args.allowDegraded,
-      // Pure gate for the remote-build step (local-only image ⇒ build on-node).
-      isLocalOnlyImage: isLocalOnlyImageTag(imageRef),
       // Role mapping on a failed-over pair (null otherwise): the effects resolve
       // ctx.primary / ctx.standby by role and keep each node's stack.
       reconverge: composeHaReconverge,
@@ -2405,12 +2381,10 @@ export async function executeDeployment(args, gatheredConfig) {
           };
           const dig = await safeRun('dig', ['+short', domain, '@1.1.1.1']);
           const kcExists = existsSync(kubeconfig);
-          // ALL namespaces, not just `vibecarbon`: the observability add-on
-          // issues its own grafana-tls Certificate in
-          // vibecarbon-observability against the same ClusterIssuer, and a
-          // vibecarbon-only dump cannot show whether two Certificates were
-          // racing the same ACME order — exactly the ambiguity that made
-          // the 2026-08-11 e3 post-mortem harder than it needed to be.
+          // ALL namespaces, not just `vibecarbon`: a vibecarbon-only dump
+          // cannot show a Certificate elsewhere (a leftover or a user's own)
+          // racing ours for the same ACME order, exactly the ambiguity that
+          // made the 2026-08-11 e3 post-mortem harder than it needed to be.
           const certs = kcExists
             ? await safeRun('kubectl', [
                 '--kubeconfig',
@@ -2439,11 +2413,16 @@ export async function executeDeployment(args, gatheredConfig) {
           // public side (cert-manager not yet issued, traefik not routing,
           // app 503, etc.). curl exits non-zero on connect/TLS errors so we
           // route through safeRun. -k skips cert validation — we want the
-          // body even if origin's cert is staging or self-signed.
+          // body even if origin's cert is staging or self-signed. Pinned to
+          // the public answer (--resolve), like every probe of the domain:
+          // an unpinned curl asks the system resolver, which may hold a stale
+          // NXDOMAIN, and caches one more if the record is not there yet.
+          const curlPin = await publicCurlResolveArgs(domain);
           const curlVerbose = await safeRun('curl', [
             '-skvI',
             '--max-time',
             '10',
+            ...curlPin,
             `https://${domain}/api/health`,
           ]);
           const curlPodIp = await safeRun('curl', [
@@ -2451,6 +2430,7 @@ export async function executeDeployment(args, gatheredConfig) {
             '--max-time',
             '10',
             '--http1.1',
+            ...curlPin,
             `https://${domain}/api/health`,
           ]);
           // Pods + endpoints + app logs. When traefik returns a 19-byte
@@ -2767,6 +2747,8 @@ export async function executeDeployment(args, gatheredConfig) {
       ...persistedEnvConfig,
       status: 'deployed',
       deployMode,
+      // How the app image was made, so a compose scale makes it the same way.
+      ...imageBuildRecord(tier, buildMode),
       // Persist the region each side ACTUALLY deployed to (from the fan-out's
       // per-side result), not the options-level `region`/`secondaryRegion`.
       // After a failover swap, a redeploy passing the ORIGINAL flags deploys

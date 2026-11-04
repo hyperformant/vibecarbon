@@ -18,13 +18,14 @@ vi.mock('../../../src/lib/deploy/tls-snapshot.js', async (orig) => {
   return { ...actual, readTlsSnapshot: H.read, writeTlsSnapshot: H.write };
 });
 
-const { buildRestoredTlsSecret, tlsSnapshotKey } = await import(
+const { buildRestoredTlsSecret, k8sSecretSerial, tlsSnapshotKey } = await import(
   '../../../src/lib/deploy/tls-snapshot.js'
 );
 const {
   CERT_MANAGER_MIN_BACKOFF,
   LIVE_SECRET_VALID,
   k8sTlsRestoreLine,
+  liveK8sTlsSecretSerial,
   quietKubectl,
   quietSshKubectl,
   readRestorableK8sTlsSnapshot,
@@ -75,7 +76,11 @@ describe('restoreK8sTlsSecret', () => {
     H.read.mockReset();
     const k = fakeKubectl({ live: LIVE_VALID });
     const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
-    expect(r).toEqual({ restored: false, reason: LIVE_SECRET_VALID });
+    expect(r).toEqual({
+      restored: false,
+      reason: LIVE_SECRET_VALID,
+      serial: k8sSecretSerial(LIVE_VALID),
+    });
     expect(H.read).not.toHaveBeenCalled();
     expect(writes(k.calls)).toHaveLength(0);
   });
@@ -96,6 +101,9 @@ describe('restoreK8sTlsSecret', () => {
     const k = fakeKubectl({ live: '' });
     const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
     expect(r.restored).toBe(true);
+    // The serial it restored (public), for the one line the caller prints.
+    expect(r.serial).toBe(k8sSecretSerial(SNAP));
+    expect(r.serial).toMatch(/^[0-9A-F]+$/);
     // The live read: the one Secret, as JSON, captured (never streamed).
     const get = k.calls.find((c) => c.argv.includes('get'));
     expect(get?.argv).toEqual([
@@ -124,6 +132,9 @@ describe('restoreK8sTlsSecret', () => {
     // it with the Certificate's issuerRef).
     const manifest = JSON.parse(String(create.opts.input));
     expect(manifest.metadata.annotations['cert-manager.io/issuer-name']).toBe(ISSUER);
+    // Written already labelled as cert-manager's own, so cert-manager has no
+    // label to add and never loses sight of it (CERT_MANAGER_CONTROLLER_LABEL).
+    expect(manifest.metadata.labels).toEqual({ 'controller.cert-manager.io/fao': 'true' });
     expect(manifest.metadata.resourceVersion).toBeUndefined();
     for (const c of k.calls) {
       const argv = c.argv.join(' ');
@@ -336,12 +347,20 @@ describe('restoreK8sTlsSecret', () => {
 });
 
 describe('k8sTlsRestoreLine', () => {
-  it('names the outcome in one line', () => {
+  it('names the outcome in one line, with the serial it restored or kept', () => {
+    expect(
+      k8sTlsRestoreLine({
+        restored: true,
+        reason: 'restored from the last snapshot',
+        serial: '4A1B',
+      }),
+    ).toBe('TLS certificate restored from its last snapshot (serial 4A1B).');
+    expect(k8sTlsRestoreLine({ restored: false, reason: LIVE_SECRET_VALID, serial: '4A1B' })).toBe(
+      'TLS certificate already in the cluster (serial 4A1B); nothing to restore.',
+    );
+    // A serial that could not be read is left out, never printed as empty.
     expect(k8sTlsRestoreLine({ restored: true, reason: 'restored from the last snapshot' })).toBe(
       'TLS certificate restored from its last snapshot.',
-    );
-    expect(k8sTlsRestoreLine({ restored: false, reason: LIVE_SECRET_VALID })).toBe(
-      'TLS certificate already in the cluster; nothing to restore.',
     );
     expect(k8sTlsRestoreLine({ restored: false, reason: 'no snapshot' })).toBe(
       'TLS certificate not restored (no snapshot). cert-manager requests a new one.',
@@ -363,7 +382,8 @@ describe('snapshotK8sTlsSecret', () => {
     H.write.mockResolvedValue({ ok: true });
     const k = fakeKubectl({ live: LIVE_VALID });
     const r = await snapshotK8sTlsSecret({ ...SNAP_ARGS, runKubectl: k.run });
-    expect(r).toEqual({ ok: true });
+    // The serial it saved (public) rides the result for the caller's line.
+    expect(r).toEqual({ ok: true, serial: k8sSecretSerial(LIVE_VALID) });
     expect(k.calls[0].opts.captureStdout).toBe(true);
     expect(H.write).toHaveBeenCalledTimes(1);
     const [s3, key, body] = H.write.mock.calls[0];
@@ -428,6 +448,40 @@ describe('snapshotK8sTlsSecret', () => {
     await expectNoKeyLeak(LIVE_VALID, () =>
       snapshotK8sTlsSecret({ ...SNAP_ARGS, runKubectl: k.run }),
     );
+  });
+});
+
+describe('liveK8sTlsSecretSerial', () => {
+  it('reads only tls.crt of Secret/vibecarbon-tls, never the whole Secret', async () => {
+    const crt = JSON.parse(LIVE_VALID).data['tls.crt'] as string;
+    const calls: string[][] = [];
+    const serial = await liveK8sTlsSecretSerial(async (argv: string[]) => {
+      calls.push(argv);
+      return crt;
+    });
+    expect(serial).toBe(k8sSecretSerial(LIVE_VALID));
+    expect(calls).toEqual([
+      [
+        'get',
+        'secret',
+        'vibecarbon-tls',
+        '-n',
+        'vibecarbon',
+        '-o',
+        'jsonpath={.data.tls\\.crt}',
+        '--ignore-not-found',
+      ],
+    ]);
+  });
+
+  it('null when the Secret is absent, unreadable or not a certificate', async () => {
+    expect(await liveK8sTlsSecretSerial(async () => '')).toBeNull();
+    expect(await liveK8sTlsSecretSerial(async () => 'bm90IGEgY2VydA==')).toBeNull();
+    expect(
+      await liveK8sTlsSecretSerial(async () => {
+        throw new Error('kubectl failed');
+      }),
+    ).toBeNull();
   });
 });
 

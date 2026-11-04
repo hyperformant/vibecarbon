@@ -10,7 +10,7 @@
  * machine's uplink; its natural scope is the operator HOST, so the lock is a
  * lock DIRECTORY (atomic `mkdir` — the one primitive that is atomic on every
  * filesystem we run on) under ~/.vibecarbon/locks/, holding a holder.json
- * `{pid, startedAt, label}`.
+ * `{pid, startedAt, label, nonce}`.
  *
  * Reaping, because a SIGKILLed deploy never runs its release:
  *   - DEAD HOLDER: `process.kill(pid, 0)` throws ESRCH — reap immediately.
@@ -21,12 +21,16 @@
  *   - CORRUPT holder.json: counts as stale — a parse error must degrade to
  *     "reap and proceed", never to a permanent block.
  *
- * Waiting is logged (an operator watching a silent deploy would otherwise
+ * Within one process (compose-ha's two deltas) acquirers queue on a promise in
+ * front of the directory lock: no poll and no log for a wait on ourselves.
+ *
+ * Waiting on another process is logged (an operator watching a silent deploy would otherwise
  * read the queue as a hang), and acquisition after a wait emits an `[uplink]`
  * line mirroring the `[state]` telemetry so matrix logs show the contention
  * this lock absorbs.
  */
 
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -79,14 +83,60 @@ function holderIsStale(holder, staleMs, now) {
  * @param {string} [params.label] - short tag for the wait/acquire log lines
  * @param {number} [params.staleMs]
  * @param {(ms: number) => Promise<void>} [params.sleep] - test seam
+ * @param {(opts: object) => Promise<() => void>} [params.acquireHost] - test seam
  * @returns {Promise<() => void>}
  */
-export async function acquireUplinkLock({
-  lockDir = UPLINK_LOCK_DIR,
+export async function acquireUplinkLock(opts = {}) {
+  const lockDir = opts.lockDir ?? UPLINK_LOCK_DIR;
+  // In-process queue in front of the host lock: compose-ha sends one delta
+  // per server from one deploy, and the second send must wait for the first
+  // without polling the lock directory or logging a wait on itself. Only the
+  // head of this queue touches the host lock.
+  const previous = inProcessTail.get(lockDir) ?? Promise.resolve();
+  let leave;
+  const slot = new Promise((resolve) => {
+    leave = resolve;
+  });
+  const tail = previous.then(() => slot);
+  inProcessTail.set(lockDir, tail);
+  // Leaving the queue lets the next member in; the last one out empties the
+  // map entry, so it never holds a settled promise per lock directory.
+  const leaveQueue = () => {
+    leave();
+    if (inProcessTail.get(lockDir) === tail) inProcessTail.delete(lockDir);
+  };
+  await previous;
+  let releaseHost;
+  try {
+    // acquireHost: a test seam for the host-wide half.
+    releaseHost = await (opts.acquireHost ?? acquireHostLock)({ ...opts, lockDir });
+  } catch (err) {
+    leaveQueue();
+    throw err;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    // A host release that throws must not strand the in-process queue.
+    try {
+      releaseHost();
+    } finally {
+      leaveQueue();
+    }
+  };
+}
+
+/** lockDir -> the promise the next in-process acquirer waits on. */
+const inProcessTail = new Map();
+
+/** The host-wide half: one holder per operator machine, across processes. */
+async function acquireHostLock({
+  lockDir,
   label = 'push',
   staleMs = DEFAULT_STALE_MS,
   sleep = defaultSleep,
-} = {}) {
+}) {
   mkdirSync(dirname(lockDir), { recursive: true, mode: 0o700 });
   const queuedAt = Date.now();
   let waitedLogged = false;
@@ -94,9 +144,13 @@ export async function acquireUplinkLock({
   for (;;) {
     try {
       mkdirSync(lockDir); // atomic: exactly one process wins
+      // The nonce names THIS acquisition: a release compares it, not the pid,
+      // so a stale release in the same process (this lock reaped as over-age
+      // and re-taken by a later acquisition here) never frees the new holder.
+      const nonce = randomUUID();
       writeFileSync(
         holderPath(lockDir),
-        JSON.stringify({ pid: process.pid, startedAt: Date.now(), label }),
+        JSON.stringify({ pid: process.pid, startedAt: Date.now(), label, nonce }),
       );
       if (waitedLogged) {
         progressLog(
@@ -107,10 +161,10 @@ export async function acquireUplinkLock({
       return () => {
         if (released) return;
         released = true;
-        // Only remove OUR lock: if a reaper raced us out and someone else now
-        // holds it, their holder.json names a different pid.
+        // Only remove OUR acquisition: if a reaper raced us out and someone
+        // else now holds it, their holder.json carries a different nonce.
         const holder = readHolder(lockDir);
-        if (holder && holder.pid !== process.pid) return;
+        if (holder && holder.nonce !== nonce) return;
         rmSync(lockDir, { recursive: true, force: true });
       };
     } catch (err) {

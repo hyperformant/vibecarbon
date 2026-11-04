@@ -54,6 +54,10 @@ import {
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../../carbon/scripts/render-backup-settings.mjs';
+import {
+  kubectlFloorProblem,
+  writeCertManagerKustomization,
+} from '../../../../carbon/scripts/render-cert-manager.mjs';
 import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
@@ -94,6 +98,7 @@ import {
 } from '../../walg/restore-layout.js';
 import { assertRestoredPrimaryWritable } from '../../walg/restore-marker.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
+import { queueBootTiming } from '../boot-timing.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import {
   DB_CONTAINER,
@@ -126,7 +131,7 @@ import {
   setK8sWalgRole,
   WALG_ROLE_DIR,
 } from '../walg-role.js';
-import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
+import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
@@ -136,19 +141,19 @@ import {
 } from './image-delivery.js';
 import { MIRROR_PULL_EVENTS_ARGV, mirrorPullFailureHint } from './mirror-pull-diagnosis.js';
 import {
+  removeRetiredObservabilityCertificate,
+  retireObservabilityCertificateIfPresent,
+} from './one-certificate.js';
+import {
   awaitAppAdminReady,
   awaitCertManagerAdmission,
+  awaitCertManagerLeader,
   awaitControlPlaneServing,
   awaitPostgresAccepting,
   awaitPostgresPromoted,
   watchAppMigrationFailure,
 } from './readiness.js';
-import {
-  CERT_MANAGER_MIN_BACKOFF,
-  k8sTlsRestoreLine,
-  quietKubectl,
-  restoreK8sTlsSecret,
-} from './tls-restore.js';
+import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-restore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1115,51 +1120,6 @@ export function k8sTlsIdentity({ projectDir, dnsProvider, domain }) {
 }
 
 /**
- * Build the `dnsNames` list for the observability add-on's `grafana-tls`
- * Certificate — apex only, ALWAYS, never the wildcard.
- *
- * Grafana is routed by `PathPrefix('/admin/grafana')` with no `Host()` clause
- * (services/observability/k8s/ingressroute.yaml), so it is only ever served
- * on the apex domain and the wildcard SAN buys it nothing.
- *
- * It costs plenty, though. This Certificate lives in
- * vibecarbon-observability because Traefik cannot read a TLS Secret across
- * namespaces, so the cluster necessarily holds TWO Certificates for the same
- * site against the SAME ClusterIssuer — i.e. the same ACME account. When
- * both ask for the IDENTICAL identifier set, Boulder hands them the SAME
- * ACME order, because it "may return a previously created Order when a given
- * Account submits a new Order that is identical to a previously submitted
- * Order that is in the 'pending' or 'ready' state"
- * (letsencrypt/boulder docs/acme-implementation_details.md). Both Order
- * controllers then validate and both call finalize; the loser gets
- *   403 orderNotReady :: Order was already processing
- * and cert-manager marks that Order Errored — terminally, because
- * finalizeOrder only recovers from a 403 when the re-fetched ACME order is
- * "valid", not "processing" (cert-manager#8960, PR#8968, unfixed as of the
- * v1.20.2 we pin). That is what took down the 2026-08-11 e2e hetzner/k8s
- * restore: challenges valid, order errored, cert never issued.
- *
- * Requesting `[domain]` here while the app cert requests
- * `[domain, *.domain]` keeps the two identifier sets DISTINCT, so Boulder
- * issues two independent orders and the shared-order race cannot arise.
- * It also stops the two certs from sharing one Let's Encrypt
- * duplicate-certificate bucket (5 identical FQDN sets per week), which two
- * identical requests per deploy would otherwise exhaust in three deploys.
- *
- * NOTE the residue: under a `manual` (HTTP-01) issuer the app cert is also
- * apex-only, so both sets are `[domain]` again and the race is still
- * reachable. HTTP-01 cannot validate a SAN that does not already resolve, so
- * there is no identifier we could add to separate them. That path is covered
- * at runtime by the watchdog in ./acme-order-recovery.js.
- *
- * @param {string} domain - The apex deploy domain, e.g. `e1.carbonstack.dev`
- * @returns {string[]}
- */
-export function observabilityCertificateDnsNames(domain) {
-  return [domain];
-}
-
-/**
  * Render the per-DNS-provider Secret YAML that cert-manager's DNS-01
  * solvers read for API auth, or null when the provider doesn't need a
  * Secret (`manual` uses HTTP-01).
@@ -1400,8 +1360,6 @@ export async function fetchKubeconfig(masterIp, sshKeyPath, khPath, projectDir, 
   return localPath;
 }
 
-const CERT_MANAGER_VERSION = 'v1.20.2';
-const CERT_MANAGER_URL = `https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml`;
 /**
  * The two images of the `cluster-autoscaler` pod (upstream CA + our
  * carbon-autoscaler sidecar), pre-pulled FIRST on every node.
@@ -3071,22 +3029,21 @@ export async function zeroWorkloadsOnStandby({ env, workloads, kubectl = runKube
 }
 
 /**
- * Pilot-light standby: point the grafana-tls Certificate an observability
- * stack left from this cluster's primary life at the standby's self-signed
- * issuer (the real issuer rides the promote annotation, as on vibecarbon-tls).
- * The stack's Deployments are zeroed by zeroWorkloadsOnStandby from the
- * declaration when the add-on is in the project tree; `leftoverWorkloads`
- * are the namespace's declared Deployments that list did not cover (the
- * add-on left the tree but its stack is still on the cluster), zeroed here
- * once the namespace is found. No-op when the namespace is absent, which is
- * every freshly deployed standby.
+ * Pilot-light standby: settle an observability stack left from this
+ * cluster's primary life. The stack's Deployments are zeroed by
+ * zeroWorkloadsOnStandby from the declaration when the add-on is in the
+ * project tree; `leftoverWorkloads` are the namespace's declared Deployments
+ * that list did not cover (the add-on left the tree but its stack is still on
+ * the cluster), zeroed here once the namespace is found. The retired
+ * grafana-tls Certificate and Secret go too (one certificate per name, see
+ * ./one-certificate.js). No-op when the namespace is absent, which is every
+ * freshly deployed standby.
  *
- * @param {{ env: Record<string, string|undefined>, issuerName: string, leftoverWorkloads?: Array<{kind: string, name: string, namespace: string}>, kubectl?: typeof runKubectlWithRetry }} args
+ * @param {{ env: Record<string, string|undefined>, leftoverWorkloads?: Array<{kind: string, name: string, namespace: string}>, kubectl?: typeof runKubectlWithRetry }} args
  * @returns {Promise<boolean>} true when a leftover stack's namespace was found
  */
-export async function repointObservabilityCertOnStandby({
+export async function settleObservabilityOnStandby({
   env,
-  issuerName,
   leftoverWorkloads = [],
   kubectl = runKubectlWithRetry,
 }) {
@@ -3102,46 +3059,7 @@ export async function repointObservabilityCertOnStandby({
   ).trim();
   if (!ns) return false;
   await zeroWorkloadsOnStandby({ env, workloads: leftoverWorkloads, kubectl });
-  const cert = String(
-    (await kubectl(
-      [
-        '-n',
-        OBSERVABILITY_NAMESPACE,
-        'get',
-        'certificate',
-        'grafana-tls',
-        '--ignore-not-found',
-        '-o',
-        'name',
-      ],
-      {
-        env,
-        captureStdout: true,
-        description: 'applyK3sManifests: look for grafana-tls (pilot standby)',
-      },
-    )) ?? '',
-  ).trim();
-  if (cert) {
-    await kubectl(
-      [
-        '-n',
-        OBSERVABILITY_NAMESPACE,
-        'patch',
-        'certificate',
-        'grafana-tls',
-        '--type=merge',
-        '-p',
-        JSON.stringify({
-          metadata: { annotations: { [PROMOTE_ISSUER_ANNOTATION]: issuerName } },
-          spec: { issuerRef: { name: STANDBY_SELFSIGNED_ISSUER, kind: 'ClusterIssuer' } },
-        }),
-      ],
-      {
-        env,
-        description: 'applyK3sManifests: grafana-tls -> standby self-signed issuer (pilot standby)',
-      },
-    );
-  }
+  await removeRetiredObservabilityCertificate({ env, kubectl });
   return true;
 }
 
@@ -3445,83 +3363,6 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
   }
   await execInDb(REMOVE_DISCARD_SH, 'finishDeployRestore: remove the discarded cluster');
   progressLog(`[db] restored ${restore.backup}: promoted, writable, restore marker cleared`);
-}
-
-/**
- * The flags the cert-manager controller runs with, appended when absent:
- *
- * - The DNS-01 SELF-CHECK goes to public recursive resolvers instead of the
- *   zone's authoritative servers. cert-manager's default self-check dials
- *   the authoritative NS directly from the pod; both Hetzner DNS and
- *   DigitalOcean DNS are served through ANYCAST fleets, and the POP a given
- *   region's egress lands on can lag a freshly-written record by many
- *   minutes (d4 run 3, 2026-08-28: the TXT was visible from every external
- *   vantage and via the cluster's own CoreDNS, while the sfo3 pod's direct
- *   query to the same anycast IP returned empty, and the issuance sat "not
- *   yet propagated" indefinitely). Let's Encrypt validates from ITS OWN
- *   vantage, not ours, so gating issuance on the one stale POP we happen to
- *   egress through is strictly worse than gating on a public recursive answer.
- * - The minimum backoff after a failed CertificateRequest is
- *   CERT_MANAGER_MIN_BACKOFF instead of cert-manager's 1 hour. A first
- *   issuance that misses the deploy's first look is retried within minutes
- *   while the deploy has already finished with TLS pending.
- */
-export const CERT_MANAGER_CONTROLLER_FLAGS = Object.freeze([
-  '--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53',
-  '--dns01-recursive-nameservers-only',
-  `--certificate-request-minimum-backoff-duration=${CERT_MANAGER_MIN_BACKOFF}`,
-]);
-
-/**
- * Idempotent test-and-set of CERT_MANAGER_CONTROLLER_FLAGS on the
- * cert-manager controller: one read, and one json patch appending only the
- * flags that are absent, so warm re-deploys never duplicate.
- *
- * @param {{ env: NodeJS.ProcessEnv, kubectl?: typeof runKubectlWithRetry }} args
- */
-export async function ensureCertManagerControllerFlags({ env, kubectl = runKubectlWithRetry }) {
-  const raw = await kubectl(
-    ['-n', 'cert-manager', 'get', 'deployment', 'cert-manager', '-o', 'json'],
-    { env, captureStdout: true, description: 'applyK3sManifests: read cert-manager args' },
-  );
-  let dep;
-  try {
-    dep = JSON.parse(raw?.toString() ?? '{}');
-  } catch {
-    // Unreadable deployment JSON: skip the patch rather than fail the
-    // deploy. Without the flags cert-manager falls back to its defaults
-    // (authoritative-direct self-check, 1h backoff), which is the pre-fix
-    // behavior, not an outage. The next deploy sets them.
-    progressLog('[k3s] cert-manager args unreadable, skipping the controller flags patch.');
-    return;
-  }
-  const containers = dep?.spec?.template?.spec?.containers ?? [];
-  const idx = containers.findIndex((c) => c?.name === 'cert-manager-controller');
-  const controllerIdx = idx >= 0 ? idx : 0;
-  const existing = containers[controllerIdx]?.args ?? [];
-  const missing = CERT_MANAGER_CONTROLLER_FLAGS.filter((f) => !existing.includes(f));
-  if (missing.length === 0) {
-    progressLog('[k3s] cert-manager controller flags already present.');
-    return;
-  }
-  const ops = missing.map((value) => ({
-    op: 'add',
-    path: `/spec/template/spec/containers/${controllerIdx}/args/-`,
-    value,
-  }));
-  await kubectl(
-    [
-      '-n',
-      'cert-manager',
-      'patch',
-      'deployment',
-      'cert-manager',
-      '--type=json',
-      '-p',
-      JSON.stringify(ops),
-    ],
-    { env, description: 'applyK3sManifests: cert-manager controller flags' },
-  );
 }
 
 /**
@@ -3982,66 +3823,38 @@ export async function applyK3sManifests({
     caStop.abort();
     await clusterAutoscalerReady.catch(() => {});
   };
-  // 1. Install cert-manager (raw YAML; not a kustomize base).
-  await perfAsync(`deploy.${perfPrefix}.certManager.install`, () =>
-    runKubectlWithRetry(['apply', '-f', CERT_MANAGER_URL], {
-      env,
-      description: 'applyK3sManifests: kubectl apply cert-manager',
-    }),
-  );
-  // 1b. Pin all three cert-manager Deployments to the control-plane node —
-  //     the same idiom the cluster-autoscaler manifest uses. The in-cluster
-  //     `kubernetes` Endpoints advertises the master's PUBLIC IP (k3s
-  //     installs with --node-ip=<public>, see the CCM note near the
-  //     traefik restart), and the Hetzner firewall admits public :6443
-  //     from operator CIDRs only — so an apiserver-dependent pod scheduled
-  //     onto any OTHER node times out on 10.43.0.1 forever. RCA 2026-07-17
-  //     e4 rig: whenever the scheduler picked a worker, cainjector went
-  //     CrashLoopBackOff ("dial tcp 10.43.0.1:443: i/o timeout") and the
-  //     webhook's readiness probe returned 500 until the 8-min budget
-  //     died; on the (worker-less) pilot-light standby the same pods
-  //     landed on the master and were Ready in seconds. The 2026-06-01
-  //     "cold image pulls push cainjector past the envelope" observation
-  //     below was this same lockout wearing a latency costume — the pin
-  //     removes the scheduling coin-flip on every cluster shape.
-  const certManagerPin = JSON.stringify({
-    spec: {
-      template: {
-        spec: {
-          nodeSelector: { 'node-role.kubernetes.io/control-plane': 'true' },
-          tolerations: [
-            {
-              key: 'node-role.kubernetes.io/control-plane',
-              operator: 'Exists',
-              effect: 'NoSchedule',
-            },
-          ],
-        },
-      },
-    },
-  });
-  for (const certDeploy of ['cert-manager', 'cert-manager-cainjector', 'cert-manager-webhook']) {
-    await runKubectlWithRetry(
-      [
-        '-n',
-        'cert-manager',
-        'patch',
-        'deployment',
-        certDeploy,
-        '--type=strategic',
-        '-p',
-        certManagerPin,
-      ],
-      { env, description: `applyK3sManifests: pin ${certDeploy} to control-plane` },
+  // 1. Install cert-manager: ONE apply of the upstream manifest with our
+  //    settings rendered in as kustomize patches
+  //    (carbon/scripts/render-cert-manager.mjs, shared with the GitOps
+  //    workflow): the controller flags (DNS-01 self-check through public
+  //    recursive resolvers, a 5 minute minimum backoff) and the control-plane
+  //    pin of all three Deployments.
+  //
+  //    Nothing patches a cert-manager Deployment after this apply
+  //    (tests/unit/deploy/cert-manager-no-post-apply-patch-census.test.ts).
+  //    The upstream args are a plain list, so this client-side apply used to
+  //    replace them and a json patch then appended the flags again: the
+  //    controller rolled twice on every deploy, warm redeploys included, and
+  //    a controller handoff can miss the restored Secret/vibecarbon-tls and
+  //    issue a new certificate. Rendered in, a warm re-apply is a no-op.
+  //
+  //    The pin: the in-cluster `kubernetes` Endpoints advertises the master's
+  //    PUBLIC IP (k3s installs with --node-ip=<public>), and the firewall
+  //    admits public :6443 from operator CIDRs only, so an apiserver-dependent
+  //    pod scheduled onto any other node times out on 10.43.0.1 forever (RCA
+  //    2026-07-17 e4 rig: cainjector CrashLoopBackOff, webhook readiness 500).
+  const certManagerDir = mkdtempSync(join(tmpdir(), 'vibecarbon-cert-manager-'));
+  try {
+    writeCertManagerKustomization(certManagerDir);
+    await perfAsync(`deploy.${perfPrefix}.certManager.install`, () =>
+      runKubectlWithRetry(['apply', '-k', certManagerDir], {
+        env,
+        description: 'applyK3sManifests: kubectl apply -k cert-manager',
+      }),
     );
+  } finally {
+    rmSync(certManagerDir, { recursive: true, force: true });
   }
-  // 1c. cert-manager controller flags (ensureCertManagerControllerFlags):
-  //     the DNS-01 self-check through public recursive resolvers, and a
-  //     5 minute minimum backoff after a failed issuance. One read, at most
-  //     one patch, before the readiness wait so the rollout carries them.
-  await perfAsync(`deploy.${perfPrefix}.certManager.recursiveNameservers`, () =>
-    ensureCertManagerControllerFlags({ env }),
-  );
   // 2. Wait for cert-manager to be ready before applying ClusterIssuers.
   // Fan out the three deploys in parallel: kubectl wait blocks per-arg
   // sequentially, and the cainjector + webhook usually become Available
@@ -4359,6 +4172,13 @@ export async function applyK3sManifests({
     // never patched (and so restarted) to gain it later.
     { replicationHostPort: rendersReplicationHostPort(role) },
   );
+  // The cert-manager controller is SETTLED before the restored Secret and the
+  // Certificate land: its rollout complete and the leader lease held by a pod
+  // of the current ReplicaSet. A handoff in that window can miss the Secret in
+  // the new leader's cache and issue a new certificate. On a warm deploy the
+  // controller did not roll (step 1), so this returns on its first read; on a
+  // cold one it waits out the first leader election. One bounded wait.
+  await perfAsync(`deploy.${perfPrefix}.certManager.leader`, () => awaitCertManagerLeader({ env }));
   try {
     // The last issued certificate goes back into Secret/vibecarbon-tls before
     // this apply creates the Certificate, so cert-manager finds a Secret that
@@ -4556,14 +4376,11 @@ export async function applyK3sManifests({
     // and still runs the stack it was given then. zeroWorkloadsOnStandby
     // above already scaled its Deployments to zero from the declaration (no
     // scrape or Grafana spend, no second Prometheus watching a zeroed app
-    // tier; scale, not delete, so the PVCs keep their history). What is left
-    // is the ACME issuer behind grafana-tls (single-ACME-issuer policy, see
-    // the vibecarbon-tls patch above); the apply restores `replicas: 1` and
-    // the issuer the day this cluster is promoted again. A fresh standby has
-    // no such namespace and this is a no-op.
-    await repointObservabilityCertOnStandby({
+    // tier; scale, not delete, so the PVCs keep their history); the apply
+    // restores `replicas: 1` the day this cluster is promoted again. A fresh
+    // standby has no such namespace and this is a no-op.
+    await settleObservabilityOnStandby({
       env,
-      issuerName,
       // A stack left on the cluster after its add-on left the project tree:
       // nothing above zeroed it, so the namespace check does.
       leftoverWorkloads: k8sStandbyZeroedWorkloads(declaredAddonNames()).filter(
@@ -4600,35 +4417,17 @@ export async function applyK3sManifests({
       // not leak a temp dir per run (T4 review).
       rmSync(renderedObservabilityDir, { recursive: true, force: true });
     }
-    // Patch the LOCAL grafana-tls Certificate (issuer + dnsNames) in the
-    // observability namespace. Same issuer as vibecarbon-tls, but apex-only
-    // dnsNames — deliberately NOT the same list. Two Certificates asking one
-    // ACME account for an identical identifier set get handed one shared
-    // Boulder order and race its finalize; see
-    // observabilityCertificateDnsNames for the full account.
-    await runKubectlWithRetry(
-      [
-        '-n',
-        'vibecarbon-observability',
-        'patch',
-        'certificate',
-        'grafana-tls',
-        '--type=merge',
-        '-p',
-        JSON.stringify({
-          // Primary-only path (a pilot-standby skips observability entirely),
-          // so the issuerRef stays ACME; the promote annotation still rides
-          // along so promoteAcmeIssuer treats every deploy-owned Certificate
-          // uniformly.
-          metadata: { annotations: { [PROMOTE_ISSUER_ANNOTATION]: issuerName } },
-          spec: {
-            dnsNames: observabilityCertificateDnsNames(domain),
-            issuerRef: { name: issuerName, kind: 'ClusterIssuer' },
-          },
-        }),
-      ],
-      { env, description: 'applyK3sManifests: kubectl patch certificate/grafana-tls' },
-    );
+  }
+  // One certificate per name: Grafana's IngressRoute takes vibecarbon-tls
+  // from Traefik's global store (`tls: {}`). An env deployed before that
+  // still holds the grafana-tls Certificate and Secret (and, where the
+  // add-on has since left the project tree, the old route naming them),
+  // which no apply manages any more. Removed wherever the observability
+  // namespace exists, whatever the project tree holds, and after the apply
+  // above so the Grafana route never names a Secret that is gone. A pilot
+  // standby does it in settleObservabilityOnStandby.
+  if (!pilotStandby) {
+    await retireObservabilityCertificateIfPresent({ env, kubectl: runKubectlWithRetry });
   }
   // (Considered: setting HCLOUD_NETWORK on the Hetzner CCM so it populates
   // each Node's InternalIP from the Hetzner private network. Reverted —
@@ -5255,6 +5054,13 @@ async function deployK3sSteps(options, inFlight) {
       throw new Error(`Required tool '${tool}' not found on PATH`);
     }
   }
+  // The cert-manager install is a kustomization over the release manifest's
+  // URL (render-cert-manager.mjs), which needs kubectl's built-in kustomize v5.
+  const kubectlVersion = await runCommandAsync(['kubectl', 'version', '--client', '-o', 'json'], {
+    silent: true,
+  }).catch(() => '');
+  const kubectlTooOld = kubectlFloorProblem(String(kubectlVersion ?? ''));
+  if (kubectlTooOld) throw new Error(kubectlTooOld);
   s.stop('Preflight OK');
 
   // 1b. The app image build, started now so it runs while Pulumi provisions
@@ -5412,6 +5218,9 @@ async function deployK3sSteps(options, inFlight) {
   }
 
   // 4. Wait for cloud-init to finish + k3s to be Ready
+  // Set when this run waited for the master, i.e. on a fresh (re)provision:
+  // the nodes' first-boot timing is read back once the host keys are pinned.
+  let bootTimingDue = false;
   if (!state.shouldSkip('k3s-ready', { masterIp })) {
     state.startStep('k3s-ready', { masterIp });
     s.start('Waiting for k3s on master (cloud-init + Ready)');
@@ -5425,6 +5234,7 @@ async function deployK3sSteps(options, inFlight) {
     await perfAsync(`deploy.${perfPrefix}.waitForReady`, () =>
       waitForK3sReady(masterIp, privateKeyPath, khPath, 1200),
     );
+    bootTimingDue = true;
     state.completeStep('k3s-ready');
     s.stop('k3s reachable');
   }
@@ -5439,6 +5249,22 @@ async function deployK3sSteps(options, inFlight) {
   // rationale (why only provisioning re-seeds).
   for (const seedIp of [masterIp, dbIp, ...(workerIps ?? [])].filter(Boolean)) {
     await seedKnownHosts(khPath, seedIp);
+  }
+
+  // First-boot timing (`[perf] deploy.<perfPrefix>.<node>.boot.*`, VIBECARBON_PERF only):
+  // queued now, read once the command is over (lib/deploy/boot-timing.js).
+  if (bootTimingDue) {
+    queueBootTiming(
+      [
+        { ip: masterIp, prefix: `deploy.${perfPrefix}.master` },
+        { ip: dbIp, prefix: `deploy.${perfPrefix}.db` },
+        ...(workerIps ?? []).map((ip, i) => ({
+          ip,
+          prefix: `deploy.${perfPrefix}.worker${i + 1}`,
+        })),
+      ],
+      privateKeyPath,
+    );
   }
 
   // HA fan-out hook: surface this cluster's infra identity the moment the

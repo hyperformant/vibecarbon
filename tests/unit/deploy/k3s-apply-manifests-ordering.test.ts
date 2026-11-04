@@ -6,6 +6,7 @@ import { load } from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-order-recovery.js';
 import { namesHost } from '../../_shared/hosts.js';
+import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.js';
 
 /**
  * Integration-style unit tests for applyK3sManifests deploy-time behavior:
@@ -197,10 +198,14 @@ let getNodesOut = '';
 let retiredChartStsOut = '';
 // The chart's Helm release record (a Secret), which outlives a deleted StatefulSet.
 let retiredChartReleaseOut = '';
-// Whether the cluster still carries the observability stack (namespace +
-// grafana-tls) from a life as primary — the demoted-standby reconverge case.
+// Whether the cluster still carries the observability stack (its namespace)
+// from a life as primary — the demoted-standby reconverge case.
 // Default: absent, as on every freshly deployed cluster.
 let leftoverObservability = false;
+// Set by the observability `apply -k`: the namespace exists from then on.
+let observabilityApplied = false;
+// What `get ingressroute -o json` answers in the observability namespace.
+let observabilityRoutesOut = '{"items":[]}';
 
 const APP_POD = 'app-6f7d9c-abcde';
 const APP_RS_JSON = JSON.stringify({
@@ -229,6 +234,10 @@ const DB_POD_WITH_ROLE_MOUNT = JSON.stringify({
   },
 });
 
+// The cert-manager kustomization as `kubectl apply -k <dir>` saw it (the
+// rendered dir is removed right after the apply).
+let certManagerKustomizationAtApply: string | null = null;
+
 function installSpawnMock() {
   vi.mocked(spawn).mockImplementation(((
     cmd: string,
@@ -240,6 +249,7 @@ function installSpawnMock() {
     const full = [cmd, ...argv];
     if (cmd === 'kubectl' && argv.includes('apply') && argv.includes('-k')) {
       const target = String(argv[argv.indexOf('-k') + 1]);
+      if (target.includes('observability')) observabilityApplied = true;
       const registry = join(target, 'registry', 'local-registry.yaml');
       if (/k8s-base/.test(target) && existsSync(registry)) {
         registryAtBaseApply = readFileSync(registry, 'utf-8');
@@ -251,6 +261,9 @@ function installSpawnMock() {
           kustomization: readFileSync(dbKustomization, 'utf-8'),
           hostPortPatch: existsSync(patch) ? readFileSync(patch, 'utf-8') : null,
         };
+      }
+      if (/vibecarbon-cert-manager-/.test(target)) {
+        certManagerKustomizationAtApply = readFileSync(join(target, 'kustomization.yaml'), 'utf-8');
       }
       const certificate = join(target, 'traefik', 'certificate.yaml');
       if (/k8s-base/.test(target) && existsSync(certificate)) {
@@ -290,15 +303,23 @@ function installSpawnMock() {
       }) as unknown as ReturnType<typeof spawn>;
     }
     if (
-      leftoverObservability &&
+      cmd === 'kubectl' &&
+      argv.includes('get') &&
+      argv.includes('ingressroute') &&
+      argv.includes('vibecarbon-observability')
+    ) {
+      return fakeChild({ stdout: observabilityRoutesOut, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    if (
+      (leftoverObservability || (observabilityApplied && argv.includes('namespace'))) &&
       cmd === 'kubectl' &&
       argv.includes('get') &&
       argv.includes('--ignore-not-found') &&
-      (argv.includes('vibecarbon-observability') || argv.includes('grafana-tls'))
+      argv.includes('vibecarbon-observability')
     ) {
-      const stdout = argv.includes('grafana-tls')
-        ? 'certificate.cert-manager.io/grafana-tls\n'
-        : 'namespace/vibecarbon-observability\n';
+      const stdout = 'namespace/vibecarbon-observability\n';
       return fakeChild({ stdout, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
     if (
@@ -368,6 +389,10 @@ function installSpawnMock() {
         stdout: secretVersionOut[name] ?? '1',
         argv: full,
       }) as unknown as ReturnType<typeof spawn>;
+    }
+    const leaderStdout = certManagerLeaderStdout(cmd, argv);
+    if (leaderStdout !== null) {
+      return fakeChild({ stdout: leaderStdout, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
     if (cmd === 'kubectl' && argv.includes('get') && argv.includes('replicasets')) {
       return fakeChild({ stdout: APP_RS_JSON, argv: full }) as unknown as ReturnType<typeof spawn>;
@@ -539,6 +564,17 @@ const isObservabilityApply = (a: string[]) =>
   a.includes('apply') &&
   a.includes('-k') &&
   a.some((s) => typeof s === 'string' && s.includes('observability'));
+const retiredGrafanaDelete = (kind: 'certificate' | 'secret') => [
+  'kubectl',
+  '-n',
+  'vibecarbon-observability',
+  'delete',
+  kind,
+  'grafana-tls',
+  '--ignore-not-found',
+];
+const indexOfCall = (want: string[]) =>
+  cmdCalls.findIndex((a) => a.length === want.length && a.every((x, i) => x === want[i]));
 const caCalls = (pred: (a: string[]) => boolean) =>
   cmdCalls.filter((a) => a[0] === 'kubectl' && a.includes('deploy/cluster-autoscaler') && pred(a));
 // `apply -f -` calls carry their payload over stdin, not argv — this finds
@@ -563,6 +599,8 @@ function findAppliedSecretConfigJson(secretName: string) {
 // The delivery succeeds unless a test sets deliverGate / deliverError. File-level
 // so every describe gets it (an outer beforeEach runs before each inner one).
 beforeEach(() => {
+  observabilityApplied = false;
+  observabilityRoutesOut = '{"items":[]}';
   deliverImage.mockReset();
   deliverImage.mockImplementation(async (opts: { pushAfter?: Promise<unknown> }) => {
     cmdCalls.push(['deliverImage']);
@@ -754,7 +792,7 @@ describe('applyK3sManifests deploy-time optimizations', () => {
 
   const isRegistryPush = (a: string[]) => a[0] === 'registryPush';
   const isCertManagerInstall = (a: string[]) =>
-    a[0] === 'kubectl' && a.includes('apply') && a.some((x) => /cert-manager.*\.yaml$/.test(x));
+    a[0] === 'kubectl' && a.includes('apply') && a.some((x) => /vibecarbon-cert-manager-/.test(x));
 
   // The layer delta into the master's containerd needs only ssh and the base
   // pull, so it starts with the apply, before cert-manager; only its push
@@ -1194,19 +1232,22 @@ describe('applyK3sManifests pilot-standby role', () => {
     // though the observability dir exists, the role gate skips its apply.
     expect(cmdCalls.some(isObservabilityApply)).toBe(false);
 
-    // cert-manager control-plane pin applies on EVERY role (see the primary
-    // test for the ordering assertion).
-    for (const d of ['cert-manager', 'cert-manager-cainjector', 'cert-manager-webhook']) {
-      expect(
-        cmdCalls.some((a) => a.includes('patch') && a.includes(d) && a.includes('cert-manager')),
-      ).toBe(true);
-    }
+    // cert-manager (its control-plane pin rendered in) installs on EVERY
+    // role, the same one apply as the primary's.
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('apply') &&
+          a.some((x) => /vibecarbon-cert-manager-/.test(String(x))),
+      ),
+    ).toBe(true);
   });
 
   // Reverse of the post-failover reconverge: the old primary is redeployed as
   // the pilot standby and still runs the observability stack it got as
   // primary. A fresh standby has none, so the demoted one must end up with
-  // its pods at zero and grafana-tls off the ACME issuer.
+  // its pods at zero and no grafana-tls Certificate left.
   it('a standby demoted from primary scales its leftover observability to zero', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir({ withObservability: true });
@@ -1230,14 +1271,11 @@ describe('applyK3sManifests pilot-standby role', () => {
       ]);
     }
     expect(cmdCalls.some((a) => a.includes('scale') && a.includes('--all'))).toBe(false);
-    const grafanaPatch =
-      cmdCalls.find(
-        (a) => a.includes('patch') && a.includes('grafana-tls') && a.includes('certificate'),
-      ) ?? [];
-    expect(grafanaPatch.length, 'grafana-tls must leave the ACME issuer').toBeGreaterThan(0);
-    const body = JSON.parse(grafanaPatch[grafanaPatch.indexOf('-p') + 1]);
-    expect(body.spec.issuerRef.name).toBe('vibecarbon-standby-selfsigned');
-    expect(Object.values(body.metadata.annotations)[0]).toMatch(/^letsencrypt/);
+    // One certificate per name: the grafana-tls Certificate its primary life
+    // left is deleted with its Secret, never re-pointed.
+    expect(cmdCalls).toContainEqual(retiredGrafanaDelete('certificate'));
+    expect(cmdCalls).toContainEqual(retiredGrafanaDelete('secret'));
+    expect(cmdCalls.some((a) => a.includes('patch') && a.includes('grafana-tls'))).toBe(false);
   });
 
   it('a leftover observability stack whose add-on left the project tree is zeroed too', async () => {
@@ -1308,16 +1346,13 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(cmdCalls.some(isObservabilityApply)).toBe(true);
   });
 
-  it('gives grafana-tls a DIFFERENT identifier set than vibecarbon-tls on a DNS-01 issuer', async () => {
-    // Both Certificates target the same ClusterIssuer, hence the same ACME
-    // account. Boulder returns ONE shared order to two new-order requests
-    // with an identical identifier set, both Order controllers finalize it,
-    // and the loser is marked terminally Errored with
-    //   403 orderNotReady :: Order was already processing
-    // (cert-manager#8960, unfixed in the v1.20.2 we pin). That is the
-    // 2026-08-11 e2e hetzner/k8s restore failure. This asserts the WIRING,
-    // not just the helper: the bug was the grafana patch reusing the app
-    // cert's `dnsNames` variable, which no helper-level test can catch.
+  it('one certificate per name: a primary deploy deletes the retired grafana-tls after the observability apply', async () => {
+    // The observability add-on used to issue grafana-tls for the bare app
+    // domain. Traefik's store is global, so the domain was served whichever
+    // of the two certificates Traefik picked at start, and a restore of
+    // vibecarbon-tls could still serve the other serial. A redeploy of such
+    // an env removes the Certificate and its Secret (cert-manager keeps a
+    // Secret its Certificate no longer owns), and patches no Certificate.
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir({ withObservability: true });
 
@@ -1328,19 +1363,58 @@ describe('applyK3sManifests pilot-standby role', () => {
       role: 'primary',
     });
 
-    const patchedDnsNames = (certName: string) => {
-      const argv = cmdCalls.find(
-        (a) => a.includes('patch') && a.includes('certificate') && a.includes(certName),
-      );
-      if (!argv) throw new Error(`no patch found for certificate/${certName}`);
-      return JSON.parse(argv[argv.length - 1]).spec.dnsNames;
-    };
-    // vibecarbon-tls is rendered into the base before the apply, not patched.
-    const appDnsNames = certificateAtBaseApply?.spec?.dnsNames;
+    const apply = cmdCalls.findIndex(isObservabilityApply);
+    const deleteCert = indexOfCall(retiredGrafanaDelete('certificate'));
+    const deleteSecret = indexOfCall(retiredGrafanaDelete('secret'));
+    expect(apply).toBeGreaterThan(-1);
+    expect(deleteCert).toBeGreaterThan(apply);
+    expect(deleteSecret).toBeGreaterThan(deleteCert);
+    expect(cmdCalls.some((a) => a.includes('patch') && a.includes('grafana-tls'))).toBe(false);
+    expect(certificateAtBaseApply?.spec?.dnsNames).toEqual([
+      'app.example.test',
+      '*.app.example.test',
+    ]);
+  });
 
-    expect(appDnsNames).toEqual(['app.example.test', '*.app.example.test']);
-    expect(patchedDnsNames('grafana-tls')).toEqual(['app.example.test']);
-    expect(patchedDnsNames('grafana-tls')).not.toEqual(appDnsNames);
+  it('one certificate per name: a primary whose project removed observability still clears grafana-tls and its old route', async () => {
+    // The add-on left the project tree, so nothing applies the stack, but
+    // the cluster still runs it, with the old IngressRoute naming
+    // grafana-tls. The cleanup is gated on the namespace, not the files.
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir();
+    leftoverObservability = true;
+    observabilityRoutesOut = JSON.stringify({
+      items: [
+        { metadata: { name: 'vibecarbon-grafana' }, spec: { tls: { secretName: 'grafana-tls' } } },
+      ],
+    });
+    try {
+      await applyK3sManifests({ ...baseArgs(projectDir), role: 'primary' });
+    } finally {
+      leftoverObservability = false;
+    }
+    expect(cmdCalls.some(isObservabilityApply)).toBe(false);
+    const route = indexOfCall([
+      'kubectl',
+      '-n',
+      'vibecarbon-observability',
+      'delete',
+      'ingressroute',
+      'vibecarbon-grafana',
+      '--ignore-not-found',
+    ]);
+    expect(route).toBeGreaterThan(-1);
+    expect(indexOfCall(retiredGrafanaDelete('certificate'))).toBeGreaterThan(route);
+    expect(indexOfCall(retiredGrafanaDelete('secret'))).toBeGreaterThan(-1);
+  });
+
+  it('a primary without the observability namespace deletes nothing there', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir();
+    await applyK3sManifests({ ...baseArgs(projectDir), role: 'primary' });
+    expect(
+      cmdCalls.some((a) => a.includes('vibecarbon-observability') && a.includes('delete')),
+    ).toBe(false);
   });
 
   it('single-ACME-issuer policy: a pilot-standby cert references the self-signed issuer, the promote annotation carries the real one', async () => {
@@ -1423,48 +1497,44 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(deployKeys).toHaveLength(DEPLOY_OWNED_CERTIFICATES.length);
   });
 
-  it('pins all three cert-manager deployments to the control-plane BEFORE the readiness wait', async () => {
-    // RCA 2026-07-17 e4 rig: the in-cluster apiserver endpoint advertises the
-    // master's PUBLIC IP and the firewall admits public :6443 from operator
-    // CIDRs only — cert-manager pods scheduled onto a worker are locked out
-    // of the apiserver (cainjector CrashLoop, webhook readiness 500). The pin
-    // removes the scheduling coin-flip; same idiom as the CA manifest.
+  it('installs cert-manager in ONE rendered apply, and never patches its Deployments after it', async () => {
+    // The controller flags and the control-plane pin are rendered into the
+    // upstream manifest (carbon/scripts/render-cert-manager.mjs). A post-apply
+    // patch rolled the controller on every deploy: the client-side re-apply
+    // replaced the args list, and the patch put the flags back.
     const { applyK3sManifests } = await k3sPromise;
+    const { renderCertManagerKustomization } = await import(
+      '../../../carbon/scripts/render-cert-manager.mjs'
+    );
+    certManagerKustomizationAtApply = null;
     const projectDir = makeProjectDir({});
 
     await applyK3sManifests({ ...baseArgs(projectDir), role: 'primary' });
 
-    const pinIdx = (name: string) =>
-      cmdCalls.findIndex(
-        (a) =>
-          a[0] === 'kubectl' &&
-          a.includes('patch') &&
-          a.includes(name) &&
-          a.some((s) => s.includes('node-role.kubernetes.io/control-plane')),
-      );
     const applyIdx = cmdCalls.findIndex(
-      (a) => a.includes('apply') && a.some((s) => String(s).includes('cert-manager.yaml')),
+      (a) =>
+        a[0] === 'kubectl' &&
+        a.includes('apply') &&
+        a.includes('-k') &&
+        a.some((s) => /vibecarbon-cert-manager-/.test(String(s))),
     );
     const waitIdx = cmdCalls.findIndex(
       (a) => a.includes('wait') && a.includes('deploy/cert-manager-webhook'),
     );
-    for (const d of ['cert-manager', 'cert-manager-cainjector', 'cert-manager-webhook']) {
-      const idx = pinIdx(d);
-      expect(idx).toBeGreaterThan(applyIdx);
-      if (waitIdx !== -1) expect(idx).toBeLessThan(waitIdx);
-      // toleration must ride along or the master's control-plane taint (when
-      // present on other distros) would strand the pinned pods
-      expect(cmdCalls[idx].some((s) => s.includes('NoSchedule'))).toBe(true);
-    }
+    expect(applyIdx).toBeGreaterThan(-1);
+    expect(waitIdx).toBeGreaterThan(applyIdx);
+    expect(certManagerKustomizationAtApply).toBe(renderCertManagerKustomization());
+    expect(
+      cmdCalls.filter(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('patch') &&
+          a.some((s) => /^cert-manager(-cainjector|-webhook)?$/.test(String(s))),
+      ),
+    ).toEqual([]);
   });
 });
 
-/**
- * The TLS Secret restore runs after the namespace exists and before
- * `apply -k base` creates the Certificate, on the cluster that issues (single
- * cluster or the k8s-ha primary). A pilot standby never restores: it serves
- * its local self-signed certificate until a failover promotes it.
- */
 describe('applyK3sManifests restores the TLS Secret before applying the base', () => {
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
@@ -1511,6 +1581,24 @@ describe('applyK3sManifests restores the TLS Secret before applying the base', (
       expect(base).toBeGreaterThan(read);
       expect(read).toBeGreaterThan(namespace);
       expect(namespace).toBeGreaterThan(-1);
+    });
+  }
+
+  for (const role of [undefined, 'primary', 'standby'] as const) {
+    it(`${role ?? 'single cluster'}: waits for a settled cert-manager leader before the restore and apply -k base`, async () => {
+      const { applyK3sManifests } = await k3sPromise;
+      await applyK3sManifests({ ...withBackups(makeProjectDir()), ...(role && { role }) });
+      const lease = cmdCalls.findIndex(
+        (a) => a[0] === 'kubectl' && a.includes('lease') && a.includes('cert-manager-controller'),
+      );
+      const install = cmdCalls.findIndex(
+        (a) => a.includes('apply') && a.some((s) => /vibecarbon-cert-manager-/.test(String(s))),
+      );
+      const read = cmdCalls.findIndex(isLiveTlsRead);
+      const base = cmdCalls.findIndex(isBaseApply);
+      expect(lease).toBeGreaterThan(install);
+      expect(base).toBeGreaterThan(lease);
+      if (role !== 'standby') expect(read).toBeGreaterThan(lease);
     });
   }
 

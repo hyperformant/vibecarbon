@@ -183,7 +183,7 @@ export const setupBackupCronStep = () =>
 //   ctx.loadedProjectConfig           // on-disk config loaded once, reused by finalize
 //   ctx.pendingEnvConfig              // mid-flight env entry (status:'deploying')
 //   ctx.replActive / ctx.degraded     // replication verdict (verify-streaming)
-//   ctx.isLocalOnlyImage              // precomputed remote-build gate (pure)
+//   ctx.isComposeLocal / isDirectDeploy  // image delivery gate (pure)
 // ============================================================================
 
 /** Provision BOTH VPS (primary + standby) via two parallel Pulumi stacks. */
@@ -227,12 +227,16 @@ export const haWaitDockerReadyStep = () =>
 export const haCheckDbLedgerStep = () =>
   defineStep({ name: 'check-db-ledger', effect: 'haCheckDbLedger' });
 
-/** Build the app image natively on both servers — only for a local-only tag. */
-export const haRemoteBuildStep = () =>
+/**
+ * The app image on both servers: the one local build by layer delta, or (no
+ * local docker) a build on each server. Same gate as single compose's
+ * transfer-image: push mode pulls from GHCR instead.
+ */
+export const haTransferImageStep = () =>
   defineStep({
-    name: 'remote-build',
-    effect: 'haRemoteBuild',
-    when: (ctx) => !!ctx.isLocalOnlyImage,
+    name: 'transfer-image',
+    effect: 'haTransferImage',
+    when: (ctx) => !!(ctx.isComposeLocal || ctx.isDirectDeploy),
   });
 
 /** Fan-out setup: bundle upload + WG firewall (UFW + Cloud) + registry logins. */

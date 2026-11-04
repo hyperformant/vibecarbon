@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
+import { writeJson } from './lib/cli/json-mode.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { c, link } from './lib/colors.js';
@@ -27,6 +28,7 @@ import { settleWindowFor, storageSettleStatus } from './lib/deploy/bucket-settle
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { DEGRADED_CAUSE } from './lib/deploy/env-safety-fields.js';
 import { operatorCheckEnvs } from './lib/deploy/preflight.js';
+import { fetchPublicDomain } from './lib/deploy/public-domain-probe.js';
 import {
   buildPrimaryLagQuery,
   buildStandbyReplayQuery,
@@ -286,9 +288,24 @@ async function checkLocalDev(projectName) {
   };
 }
 
+/**
+ * The live readiness row: GET https://<domain>/api/health/ready, resolved
+ * through public DNS like every probe of the app's domain
+ * (public-domain-probe.js). The system resolver can hold an NXDOMAIN from a
+ * destroy minutes ago, and status must not call a healthy domain unreachable.
+ *
+ * @param {string} domain
+ * @param {{ fetch?: typeof fetch, lookup?: Function, port?: number, ca?: string[] }} [deps]
+ *   test seams: a whole fetch, or the public-DNS answer, a local server's port
+ *   and its CA for the real probe
+ */
 export async function checkRemoteHealth(domain, deps = {}) {
   const url = `https://${domain}/api/health/ready`;
-  const result = await checkHttpEndpoint(url, 5000, deps.fetch || fetch);
+  const probeFetch =
+    deps.fetch ||
+    ((target, init) =>
+      fetchPublicDomain(target, init, { lookup: deps.lookup, port: deps.port, ca: deps.ca }));
+  const result = await checkHttpEndpoint(url, 5000, probeFetch);
   return {
     url,
     ok: result.ok,
@@ -1589,7 +1606,7 @@ async function showGlobalStatus(args) {
       const envNames = config?.environments ? Object.keys(config.environments) : [];
       return { ...entry, environments: envNames };
     });
-    console.log(JSON.stringify({ mode: 'global', projects: enriched }, null, 2));
+    writeJson({ mode: 'global', projects: enriched });
     return;
   }
 
@@ -1649,7 +1666,7 @@ async function main(argv = []) {
     cwd = process.cwd();
   } catch {
     if (args.json) {
-      console.log(JSON.stringify({ error: 'Current working directory does not exist' }));
+      writeJson({ error: 'Current working directory does not exist' });
     } else {
       console.error(`\n${c.error('Error:')} Current working directory does not exist.`);
     }
@@ -1670,7 +1687,7 @@ async function main(argv = []) {
     const filtered = envEntries.filter(([name]) => name === args.env);
     if (filtered.length === 0) {
       if (args.json) {
-        console.log(JSON.stringify({ error: `Environment '${args.env}' not found` }));
+        writeJson({ error: `Environment '${args.env}' not found` });
       } else {
         introCommand('status');
         p.log.error(`Environment '${args.env}' not found`);
@@ -1832,7 +1849,7 @@ async function main(argv = []) {
 
   // Output
   if (args.json) {
-    console.log(JSON.stringify(allData, null, 2));
+    writeJson(allData);
     process.exit(0);
   }
 

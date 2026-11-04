@@ -23,9 +23,7 @@
  * they do (the documented "deploy first, point DNS after" flow).
  */
 
-import tls from 'node:tls';
-import { readOperatorVar } from '../operator-env.js';
-import { stagingProbeCa } from './staging-ca.js';
+import { connectPublicTls, probeTrustStore } from './public-domain-probe.js';
 
 /**
  * First-look budget for the apex to serve a trusted chain on managed DNS.
@@ -54,8 +52,8 @@ export const TLS_PROBE_TIMEOUT_MS = 10_000;
 /**
  * One real TLS probe of `domain`:443 with full verification (SNI +
  * hostname + chain against the platform store, plus the LE staging roots
- * when ACME_CA_SERVER points at staging — same policy as
- * probePublicHealth). On an untrusted chain, retries once WITHOUT
+ * when ACME_CA_SERVER points at staging), resolved through public DNS: the
+ * shared policy of public-domain-probe.js. On an untrusted chain, retries once WITHOUT
  * verification purely to NAME the served cert for the error message — that
  * insecure attempt can never produce trusted:true.
  *
@@ -64,23 +62,24 @@ export const TLS_PROBE_TIMEOUT_MS = 10_000;
  * Never the key or the certificate body.
  *
  * @param {string} domain
- * @param {{ timeoutMs?: number, port?: number, ca?: string[] }} [opts] `port`
- *   and `ca` are test seams (a local server and its throwaway CA).
+ * @param {{ timeoutMs?: number, port?: number, ca?: string[], lookup?: Function }} [opts]
+ *   `port`, `ca` and `lookup` are test seams (a local server, its throwaway
+ *   CA, and the public-DNS answer that points at it).
  * @returns {Promise<{trusted: true, validTo: string|null, serialNumber: string|null} |
  *   {trusted: false, reason: string, served: {subject: string, issuer: string}|null}>}
  */
 export async function probeTlsTrustOnce(
   domain,
-  {
-    timeoutMs = TLS_PROBE_TIMEOUT_MS,
-    port = 443,
-    ca = (readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')
-      ? stagingProbeCa()
-      : undefined,
-  } = {},
+  { timeoutMs = TLS_PROBE_TIMEOUT_MS, port = 443, ca = probeTrustStore(), lookup } = {},
 ) {
   try {
-    const peer = await tlsHandshake(domain, { ca, port, rejectUnauthorized: true, timeoutMs });
+    const peer = await tlsHandshake(domain, {
+      ca,
+      port,
+      rejectUnauthorized: true,
+      timeoutMs,
+      lookup,
+    });
     return {
       trusted: true,
       validTo: peer?.validTo ?? null,
@@ -90,7 +89,13 @@ export async function probeTlsTrustOnce(
     const reason = err instanceof Error ? err.message : String(err);
     let served = null;
     try {
-      const peer = await tlsHandshake(domain, { ca, port, rejectUnauthorized: false, timeoutMs });
+      const peer = await tlsHandshake(domain, {
+        ca,
+        port,
+        rejectUnauthorized: false,
+        timeoutMs,
+        lookup,
+      });
       served = peer ? { subject: peer.subject, issuer: peer.issuer } : null;
     } catch {
       // Connection-level failure (refused, reset, no DNS) — nothing served.
@@ -101,14 +106,15 @@ export async function probeTlsTrustOnce(
 
 /**
  * @param {string} domain
- * @param {{ ca?: string[], port: number, rejectUnauthorized: boolean, timeoutMs: number }} opts
+ * @param {{ ca?: string[], port: number, rejectUnauthorized: boolean, timeoutMs: number,
+ *   lookup?: Function }} opts
  * @returns {Promise<{subject: string, issuer: string, validTo: string|null, serialNumber: string|null}|null>}
  *   the peer certificate's identity, expiry and serial, or null when none
  *   was presented; resolves only on a completed handshake, rejects otherwise.
  */
-function tlsHandshake(domain, { ca, port, rejectUnauthorized, timeoutMs }) {
+function tlsHandshake(domain, { ca, port, rejectUnauthorized, timeoutMs, lookup }) {
   return new Promise((resolve, reject) => {
-    const socket = tls.connect(
+    const socket = connectPublicTls(
       { host: domain, port, servername: domain, ca, rejectUnauthorized },
       () => {
         const peer = socket.getPeerCertificate();
@@ -125,6 +131,7 @@ function tlsHandshake(domain, { ca, port, rejectUnauthorized, timeoutMs }) {
             : null,
         );
       },
+      { lookup },
     );
     socket.setTimeout(timeoutMs, () => {
       socket.destroy();

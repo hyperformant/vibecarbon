@@ -19,7 +19,7 @@ import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
-import { shEscape } from '../../shell.js';
+import { queueBootTiming } from '../boot-timing.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { buildRemote } from '../remote-build.js';
 import { fingerprintSecret } from '../secret-fingerprint.js';
@@ -196,6 +196,9 @@ async function setupServer(ctx) {
         await setupServerRemote(serverIp, sshKeyPath, timeoutMs);
       }
     });
+    // First-boot timing (`[perf] deploy.compose.boot.*`, VIBECARBON_PERF only):
+    // queued now, read once the command is over (lib/deploy/boot-timing.js).
+    queueBootTiming([{ ip: serverIp, prefix: 'deploy.compose' }], sshKeyPath);
     state.completeStep('compose-setup-server', { serverIp });
   }
 }
@@ -226,50 +229,19 @@ async function transferImage(ctx) {
   // before `docker compose up` — compose references the app image, so it MUST be
   // present by reconcile time (LOAD-BEARING barrier; do not remove).
   if (isComposeLocal) {
-    const { readRuntimeBaseRef } = await import('../image.js');
-    const { sshRunAsync } = await import('../compose/index.js');
-    const { deliverImage } = await import('../layer-delta.js');
-    // The base pull runs on the server at datacenter speed, alongside the local
-    // build and the host-side save. It starts here, before the build is
-    // awaited, so a cold server holds the base by the time the delta asks what
-    // it has (ruling R3). The ref is the one the image was built FROM, and the
-    // delta looks up exactly that ref.
-    const baseRef = readRuntimeBaseRef(process.cwd());
-    const basePull = baseRef
-      ? perfAsync('deploy.image.basePull', () =>
-          // Inspect first: the ref is immutable (tag pinned, digest once
-          // published), so a server that already holds it, which is every warm
-          // redeploy, asks no registry and a GHCR blip cannot fail it.
-          sshRunAsync(
-            serverIp,
-            sshKeyPath,
-            `docker image inspect ${shEscape(baseRef)} >/dev/null 2>&1 || docker pull ${shEscape(baseRef)}`,
-            { timeout: 600_000 },
-          ),
-        )
-      : undefined;
-    // deliverImage owns the pull's failure (with its own hint); this only keeps
-    // a pull that fails while the build is still running from surfacing as an
-    // unhandled rejection before deliverImage attaches its await.
-    basePull?.catch(() => {});
-    ctx.transferImagePromise = (async () => {
-      // The local build was kicked off in the orchestrator in parallel with
-      // provisioning; it is usually already done by now.
-      await composeLocalBuildPromise;
-      await perfAsync('deploy.image.transfer', () =>
-        deliverImage({
-          tag: localImageTag,
-          sshTarget: `root@${serverIp}`,
-          sshKey: sshKeyPath,
-          runtime: 'docker',
-          basePull,
-          baseRef: baseRef ?? '',
-        }),
-      );
-      // Completion is announced by the barrier spinner in startComposeStack, not
-      // here — this promise resolves mid-flight (concurrent with the bundle
-      // upload) so logging from inside it would land at an unpredictable spot.
-    })();
+    // The base pull starts inside, before the build is awaited, so a cold
+    // server holds the base by the time the delta asks what it has (ruling
+    // R3). The local build was kicked off in the orchestrator in parallel with
+    // provisioning; it is usually already done by now. Completion is announced
+    // by the barrier spinner in startComposeStack, not here: this promise
+    // resolves mid-flight (concurrent with the bundle upload).
+    const { deliverComposeAppImage } = await import('../compose/app-image.js');
+    ctx.transferImagePromise = deliverComposeAppImage({
+      ip: serverIp,
+      sshKeyPath,
+      tag: localImageTag,
+      built: composeLocalBuildPromise,
+    });
   } else if (isDirectDeploy) {
     ctx.transferImagePromise = (async () => {
       const { collectComposeBuildArgs } = await import('../compose/build-args.js');

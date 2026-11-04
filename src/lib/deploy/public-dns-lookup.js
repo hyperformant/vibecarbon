@@ -25,33 +25,79 @@ import dnsCallback from 'node:dns';
 export const PUBLIC_DNS_SERVERS = ['1.1.1.1', '8.8.8.8'];
 
 /**
+ * Total time the public resolvers get before the system resolver answers
+ * instead. Egress filters that silently drop UDP to 1.1.1.1/8.8.8.8 never
+ * answer at all, and c-ares's own retry schedule (timeout x tries x servers)
+ * would spend 6 to 12 seconds finding that out: longer than status's 5s
+ * readiness abort and deploy's 8s probe. 1.5s is well inside the smallest
+ * caller timeout and far above a healthy public answer (tens of ms).
+ */
+export const PUBLIC_DNS_BUDGET_MS = 1_500;
+
+/**
+ * A Resolver pinned to `servers`, its own retries already inside the budget.
+ * One per lookup call: `cancel()` fails EVERY query outstanding on a Resolver,
+ * so a shared one let a lookup whose budget expired cancel a concurrent
+ * lookup's in-flight query (status probes readiness and TLS together) and
+ * push it onto the system resolver too. A Resolver is cheap to create.
+ */
+function publicResolver(servers) {
+  const r = new dnsCallback.Resolver({ timeout: 1_000, tries: 1 });
+  r.setServers(servers);
+  return r;
+}
+
+/**
+ * resolve4 through `r`, settled exactly once: the public answer (empty on
+ * error), or null when the budget runs out first. A late answer is dropped
+ * and the outstanding query cancelled.
+ *
+ * @param {{resolve4: Function, cancel?: Function}} r
+ * @param {string} hostname
+ * @param {(addresses: string[]|null) => void} done
+ */
+function resolve4WithinBudget(r, hostname, done) {
+  let settled = false;
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    r.cancel?.();
+    done(null);
+  }, PUBLIC_DNS_BUDGET_MS);
+  r.resolve4(hostname, (err, addresses) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    done(!err && Array.isArray(addresses) ? addresses : []);
+  });
+}
+
+/**
  * Build a `lookup(hostname, options, callback)` compatible with
  * `net.connect` / undici's `connect.lookup`.
  *
  * @param {object} [opts]
  * @param {string[]} [opts.servers] - resolvers to pin (default public pair)
- * @param {{resolve4: Function}} [opts.resolver] - injectable Resolver (tests)
+ * @param {{resolve4: Function, cancel?: Function}} [opts.resolver] - one Resolver for every call (tests)
+ * @param {() => {resolve4: Function, cancel?: Function}} [opts.makeResolver] - a fresh
+ *   Resolver per call (the default; injectable for tests)
  * @param {Function} [opts.fallback] - injectable system lookup (tests)
  */
 export function makePublicDnsLookup({
   servers = PUBLIC_DNS_SERVERS,
   resolver,
+  makeResolver = () => publicResolver(servers),
   fallback = dnsCallback.lookup,
 } = {}) {
-  let r = resolver;
-  if (!r) {
-    r = new dnsCallback.Resolver({ timeout: 3_000, tries: 2 });
-    r.setServers(servers);
-  }
   return function publicDnsLookup(hostname, options, callback) {
     if (typeof options === 'function') {
       callback = options;
       options = {};
     }
-    r.resolve4(hostname, (err, addresses) => {
-      if (err || !Array.isArray(addresses) || addresses.length === 0) {
-        // Public DNS unreachable or empty — the system resolver is still
-        // better than no answer at all.
+    resolve4WithinBudget(resolver ?? makeResolver(), hostname, (addresses) => {
+      if (!addresses || addresses.length === 0) {
+        // Public DNS unreachable, silent past the budget, or empty: the
+        // system resolver is still better than no answer at all.
         fallback(hostname, options, callback);
         return;
       }
@@ -70,13 +116,14 @@ export function makePublicDnsLookup({
 /**
  * The A records a hostname resolves to, through the public resolvers first (a
  * fresh view, no local negative cache) and the system resolver when public DNS
- * is unreachable. Used by the compose-HA reconverge to check DNS already points
- * at the promoted primary before it rebuilds the retired node.
+ * is unreachable or silent past PUBLIC_DNS_BUDGET_MS. Used by the compose-HA
+ * reconverge to check DNS already points at the promoted primary before it
+ * rebuilds the retired node, and by publicCurlResolveArgs.
  *
  * @param {string} hostname
  * @param {object} [opts]
  * @param {string[]} [opts.servers]
- * @param {{resolve4: Function}} [opts.resolver] - injectable Resolver (tests)
+ * @param {{resolve4: Function, cancel?: Function}} [opts.resolver] - injectable Resolver (tests)
  * @param {Function} [opts.fallback] - injectable system lookup (tests)
  * @returns {Promise<string[]>} empty when nothing resolves
  */
@@ -84,15 +131,9 @@ export async function resolvePublicA(
   hostname,
   { servers = PUBLIC_DNS_SERVERS, resolver, fallback = dnsCallback.lookup } = {},
 ) {
-  let r = resolver;
-  if (!r) {
-    r = new dnsCallback.Resolver({ timeout: 3_000, tries: 2 });
-    r.setServers(servers);
-  }
+  const r = resolver ?? publicResolver(servers);
   const publicAnswer = await new Promise((resolve) => {
-    r.resolve4(hostname, (err, addresses) =>
-      resolve(!err && Array.isArray(addresses) ? addresses : []),
-    );
+    resolve4WithinBudget(r, hostname, (addresses) => resolve(addresses ?? []));
   });
   if (publicAnswer.length > 0) return publicAnswer;
   return new Promise((resolve) => {

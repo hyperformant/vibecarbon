@@ -305,9 +305,10 @@ export async function recoverTerminalAcmeFailure({ finding, runKubectl }) {
 
 /**
  * `<namespace>/<name>` of every Certificate this deploy creates and therefore
- * owns. The watchdog READS the whole cluster — a foreign Certificate racing
- * ours for the same ACME order is exactly the kind of thing we want in the
- * log — but it only ever WRITES to these two.
+ * owns: one, since one certificate per name (./one-certificate.js). The
+ * watchdog READS the whole cluster (a foreign Certificate racing ours for the
+ * same ACME order is exactly the kind of thing we want in the log), but it
+ * only ever WRITES to these.
  *
  * The write is destructive (it deletes a CertificateRequest), so the blast
  * radius has to be a list we can point at, not "whatever the finder returned".
@@ -315,19 +316,14 @@ export async function recoverTerminalAcmeFailure({ finding, runKubectl }) {
  * cluster and are none of our business: repairing one would delete a resource
  * we did not create, on a schedule the user never asked for.
  */
-export const DEPLOY_OWNED_CERTIFICATES = Object.freeze([
-  'vibecarbon/vibecarbon-tls',
-  'vibecarbon-observability/grafana-tls',
-]);
+export const DEPLOY_OWNED_CERTIFICATES = Object.freeze(['vibecarbon/vibecarbon-tls']);
 
 /**
  * The one Certificate whose Secret terminates TLS for the apex the health
  * probe fetches (`carbon/k8s/base/traefik/`). Only this one may stop the
  * probe: it is the only Certificate whose failure PROVES the probed URL can
- * never serve. `grafana-tls` failing is a real problem and gets repaired and
- * logged, but /admin/grafana is not what the probe is asking about, and
- * aborting the deploy over it would turn an add-on's cert into a deploy-wide
- * outage.
+ * never serve. Any other owned Certificate would be repaired and logged, but
+ * never abort the deploy.
  */
 export const PROBED_APEX_CERTIFICATE = 'vibecarbon/vibecarbon-tls';
 
@@ -476,7 +472,7 @@ export function createAcmeIssuanceWatchdog({
       const key = keyOf(f);
       const used = attempts.get(key) ?? 0;
       if (used >= maxRecoveries) {
-        // Budget spent on a non-apex cert (grafana-tls). Nothing more to do
+        // Budget spent on a non-apex cert. Nothing more to do
         // for it, and it must not stop the probe — the apex may still land.
         continue;
       }

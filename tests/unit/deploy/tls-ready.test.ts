@@ -182,6 +182,10 @@ describe('budget constants', () => {
 });
 
 describe('probeTlsTrustOnce', () => {
+  /** The public-DNS answer, pinned to the local server (no network in a unit test). */
+  const loopback = (_h: string, opts: { all?: boolean }, cb: (...a: unknown[]) => void) =>
+    opts?.all ? cb(null, [{ address: '127.0.0.1', family: 4 }]) : cb(null, '127.0.0.1', 4);
+
   /** A local TLS server presenting `cert`; resolves its port. */
   async function serve(cert: string, key: string) {
     const server = tls.createServer({ cert, key }, (s) => s.end());
@@ -193,7 +197,11 @@ describe('probeTlsTrustOnce', () => {
     const { cert, key, ca } = makeCert(['localhost'], 30);
     const { server, port } = await serve(cert, key);
     try {
-      const result = await probeTlsTrustOnce('localhost', { port, ca: [ca as string] });
+      const result = await probeTlsTrustOnce('localhost', {
+        port,
+        ca: [ca as string],
+        lookup: loopback,
+      });
       const x509 = new X509Certificate(cert);
       expect(result).toEqual({
         trusted: true,
@@ -210,7 +218,11 @@ describe('probeTlsTrustOnce', () => {
     const other = makeCert(['localhost']);
     const { server, port } = await serve(cert, key);
     try {
-      const result = await probeTlsTrustOnce('localhost', { port, ca: [other.ca as string] });
+      const result = await probeTlsTrustOnce('localhost', {
+        port,
+        ca: [other.ca as string],
+        lookup: loopback,
+      });
       expect(result.trusted).toBe(false);
       expect(result).toMatchObject({ served: { subject: 'localhost', issuer: 'localhost' } });
       expect(result).not.toHaveProperty('serialNumber');

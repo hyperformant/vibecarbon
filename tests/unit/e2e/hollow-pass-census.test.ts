@@ -30,9 +30,10 @@
  *    remote. Every exported `check*` there is drafted into this audit.
  *
  * 4. TLS REUSE. tests/e2e/checks/tls-reuse.ts compares what is served now
- *    with what an earlier step recorded. Its hollow shape is a missing
- *    baseline (no serial recorded, no CertificateRequest listing read): that
- *    must FAIL, never pass because there was nothing to compare.
+ *    with what an earlier step recorded, or with what the Secret holds. Its
+ *    hollow shape is a missing baseline (no serial recorded, no
+ *    CertificateRequest listing read, no Secret read): that must FAIL, never
+ *    pass because there was nothing to compare.
  *
  * 5. DEPLOY BUDGET. tests/e2e/checks/deploy-budget.ts judges a cold deploy
  *    from its own [perf] and [state] lines. Its hollow shape is a log without
@@ -784,6 +785,22 @@ const TLS_REUSE_HANDLELESS: Record<
   checkNoNewCertificateRequest: [
     () => tlsReuse.checkNoNewCertificateRequest({ before: null, after: [], where: 'e3' }),
     () => tlsReuse.checkNoNewCertificateRequest({ before: [], after: null, where: 'e3' }),
+  ],
+  checkServedIsSecret: [
+    () =>
+      tlsReuse.checkServedIsSecret('', '/kc', {
+        readSecretSerial: () => {
+          throw new Error('the check read the Secret without a served serial');
+        },
+      }),
+    () => tlsReuse.checkServedIsSecret('04A1B2', null, { readSecretSerial: () => '04A1B2' }),
+    () => tlsReuse.checkServedIsSecret('04A1B2', '/kc', { readSecretSerial: () => null }),
+  ],
+  checkOneCertificatePerName: [
+    () => tlsReuse.checkOneCertificatePerName({ domain: D, certificates: null, secrets: [] }),
+    () => tlsReuse.checkOneCertificatePerName({ domain: D, certificates: [], secrets: null }),
+    // Read, but empty: the base Secret's absence is no proof of one certificate.
+    () => tlsReuse.checkOneCertificatePerName({ domain: D, certificates: [], secrets: [] }),
   ],
 };
 
