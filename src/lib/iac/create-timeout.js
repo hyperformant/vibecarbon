@@ -65,6 +65,10 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
     noun: 'droplet',
     locationInput: 'region',
     userDataInput: 'userData',
+    // Create-only inputs: set on a fresh droplet, ignored on a live one so a
+    // later `pulumi up` never replaces it. `dropletAgent: false` skips DO's
+    // Droplet Console agent, which cost 44-68s of first boot per node.
+    createOnlyInputs: ['dropletAgent'],
   },
   'vultr:index/instance:Instance': {
     noun: 'instance',
@@ -101,7 +105,11 @@ export function serverResourceOptions(type, extra = {}) {
   return {
     ...extra,
     customTimeouts: SERVER_CUSTOM_TIMEOUTS,
-    ignoreChanges: [...(extra.ignoreChanges ?? []), serverClass.userDataInput],
+    ignoreChanges: [
+      ...(extra.ignoreChanges ?? []),
+      serverClass.userDataInput,
+      ...(serverClass.createOnlyInputs ?? []),
+    ],
   };
 }
 
@@ -118,7 +126,14 @@ export function workerResourceOptions(type, extra = {}) {
   if (!SERVER_RESOURCE_TYPES[type]) {
     throw new Error(`workerResourceOptions: unknown server type ${type}`);
   }
-  return { ...extra, customTimeouts: SERVER_CUSTOM_TIMEOUTS };
+  const createOnly = SERVER_RESOURCE_TYPES[type].createOnlyInputs ?? [];
+  return {
+    ...extra,
+    customTimeouts: SERVER_CUSTOM_TIMEOUTS,
+    ...(createOnly.length > 0
+      ? { ignoreChanges: [...(extra.ignoreChanges ?? []), ...createOnly] }
+      : {}),
+  };
 }
 
 /** Provider display names and status pages, keyed by Pulumi package. */
