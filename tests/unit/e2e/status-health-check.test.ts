@@ -77,28 +77,49 @@ describe('assessStatusJson', () => {
     );
     expect(assessStatusJson(j, 'prod')).toMatchObject({ ok: false, retryable: true });
   });
-  it('fails on platform shortfall, node shortfall, ssh error, probe failure, missing env', () => {
+  it('fails on platform shortfall, node shortfall, probe failure, missing env', () => {
     const j1 = structuredClone(green);
     j1.environments.prod.checks.containers.p.platform['flux-system'].healthy = 3;
     const j2 = structuredClone(green);
     j2.environments.prod.checks.containers.p.nodes.ready = 2;
-    const j3 = structuredClone(green);
-    // biome-ignore lint/suspicious/noExplicitAny: deliberately shaping an error-only container entry
-    (j3.environments.prod.checks.containers as any).p = {
-      kind: 'k8s',
-      ip: '',
-      rows: [],
-      error: 'ssh timeout',
-    };
     const j4 = structuredClone(green);
     j4.environments.prod.checks.remoteHealth.ok = false;
-    for (const j of [j1, j2, j3, j4]) expect(assessStatusJson(j, 'prod').ok).toBe(false);
+    for (const j of [j1, j2, j4]) expect(assessStatusJson(j, 'prod').ok).toBe(false);
     expect(assessStatusJson(green, 'nope')).toMatchObject({ ok: false, retryable: false });
     expect(assessStatusJson({ environments: { prod: { checks: {} } } }, 'prod')).toMatchObject({
       ok: false,
       retryable: false,
       problems: ['no containers data for prod'],
     });
+  });
+  // A server status could not read is no verdict: not passed, but retried
+  // within the window like a starting row, never failed on first sight.
+  it('an unreadable server is not a pass, and is retryable', () => {
+    const j = structuredClone(green);
+    // biome-ignore lint/suspicious/noExplicitAny: deliberately shaping an error-only container entry
+    (j.environments.prod.checks.containers as any).p = {
+      kind: 'k8s',
+      ip: '',
+      rows: [],
+      error: 'cluster snapshot failed: ssh timeout',
+    };
+    expect(assessStatusJson(j, 'prod')).toEqual({
+      ok: false,
+      retryable: true,
+      problems: ['p: unreadable (cluster snapshot failed: ssh timeout)'],
+    });
+  });
+  it('an unreadable server beside an unhealthy one still fails at once', () => {
+    const j = structuredClone(green);
+    // biome-ignore lint/suspicious/noExplicitAny: deliberately shaping an error-only container entry
+    (j.environments.prod.checks.containers as any).s = {
+      kind: 'k8s',
+      ip: '',
+      rows: [],
+      error: 'ssh timeout',
+    };
+    j.environments.prod.checks.containers.p.rows.push(row('app', 'unhealthy', 'CrashLoopBackOff'));
+    expect(assessStatusJson(j, 'prod')).toMatchObject({ ok: false, retryable: false });
   });
   it('names the rejected env check when containers are absent because the env errored', () => {
     // status.js allSettled fallback: { checks: {}, error: <reason> }
@@ -193,7 +214,7 @@ describe('assessStatusJson with a retired compose-ha node', () => {
       problems: ['letsgo-prod-primary: app unhealthy'],
     });
   });
-  it('the retired node still fails on an ssh error', () => {
+  it('the retired node is not excused a read that failed', () => {
     const j = composeHa();
     // biome-ignore lint/suspicious/noExplicitAny: deliberately shaping an error-only container entry
     (j.environments.prod.checks.containers as any)['letsgo-prod-primary'] = {
@@ -204,8 +225,8 @@ describe('assessStatusJson with a retired compose-ha node', () => {
     };
     expect(assessStatusJson(j, 'prod', { retired })).toMatchObject({
       ok: false,
-      retryable: false,
-      problems: ['letsgo-prod-primary: ssh timeout'],
+      retryable: true,
+      problems: ['letsgo-prod-primary: unreadable (ssh timeout)'],
     });
   });
   it('a non-retired server with an app container exited fails as before', () => {
@@ -260,6 +281,52 @@ describe('checkStatusHealth', () => {
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toContain('traefik exited Exited (1)');
     expect(runCli).toHaveBeenCalledTimes(1);
+  });
+  const unreadable = () => {
+    const j = structuredClone(green);
+    // biome-ignore lint/suspicious/noExplicitAny: deliberately shaping an error-only container entry
+    (j.environments.prod.checks.containers as any).p = {
+      kind: 'k8s',
+      ip: '1.1.1.1',
+      rows: [],
+      error: 'cluster snapshot failed: ssh timeout',
+    };
+    return j;
+  };
+  it('keeps observing past a read that failed, and passes once the server reads healthy', async () => {
+    let n = 0;
+    const runCli = vi.fn(async () => {
+      n += 1;
+      return { exitCode: 0, stdout: JSON.stringify(n === 1 ? unreadable() : green), stderr: '' };
+    });
+    const r = await checkStatusHealth({
+      projectDir: '/tmp/x',
+      envName: 'prod',
+      timeoutMs: 1000,
+      pollMs: 1,
+      runCli: runCli as never,
+    });
+    expect(r.status).toBe('pass');
+    expect(runCli).toHaveBeenCalledTimes(2);
+  });
+  it('fails, naming the reason, only when the server is still unreadable at the deadline', async () => {
+    const runCli = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify(unreadable()),
+      stderr: '',
+    }));
+    const started = Date.now();
+    const r = await checkStatusHealth({
+      projectDir: '/tmp/x',
+      envName: 'prod',
+      timeoutMs: 60,
+      pollMs: 10,
+      runCli: runCli as never,
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toBe('p: unreadable (cluster snapshot failed: ssh timeout)');
+    expect(runCli.mock.calls.length).toBeGreaterThan(1);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(40);
   });
   it('fails when the CLI exits non-zero or emits invalid JSON', async () => {
     const bad = vi.fn(async () => ({ exitCode: 1, stdout: '', stderr: 'boom' }));

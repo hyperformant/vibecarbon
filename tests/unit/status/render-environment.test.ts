@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  formatEnvironmentsSummary,
   formatHealthLines,
+  formatReplicationLine,
   formatServerLines,
   isEnvironmentUnhealthy,
+  isEnvironmentUnreadable,
   storageSettleLine,
 } from '../../../src/status.js';
 
@@ -90,14 +93,22 @@ describe('formatServerLines', () => {
     ]);
   });
 
-  it('an ssh failure renders as unreachable in red', () => {
+  // A read that failed is no verdict: yellow "unreadable" with its reason,
+  // never red. The reason says what failed (a timeout, a refused connection).
+  it('a failed read renders as unreadable in yellow, not as a red verdict', () => {
     const lines = formatServerLines([servers[0]], {
       containers: {
-        'prod-primary': { kind: 'compose', ip: '1.1.1.1', rows: [], error: 'ssh timeout' },
+        'prod-primary': {
+          kind: 'k8s',
+          ip: '1.1.1.1',
+          rows: [],
+          error: 'cluster snapshot failed: ssh timeout',
+        },
       },
     });
-    expect(strip(lines[1])).toBe('    containers ● unreachable  ssh timeout');
-    expect(lines[1]).toContain('\x1b[31m');
+    expect(strip(lines[1])).toBe('    pods ● unreadable  cluster snapshot failed: ssh timeout');
+    expect(lines[1]).toContain('\x1b[33m');
+    expect(lines[1]).not.toContain('\x1b[31m');
   });
 
   it('without containers data the server line stands alone (unchanged behaviour)', () => {
@@ -196,7 +207,7 @@ describe('isEnvironmentUnhealthy', () => {
       }),
     ).toBe(true);
   });
-  it('is true on a non-healthy row, a platform shortfall, a node shortfall, or an ssh error', () => {
+  it('is true on a non-healthy row, a platform shortfall or a node shortfall', () => {
     const with_ = (server: object) => ({
       ...healthyEntry,
       checks: { ...healthyEntry.checks, containers: { p: server } },
@@ -220,15 +231,74 @@ describe('isEnvironmentUnhealthy', () => {
         with_({ kind: 'k8s', ip: '', rows: [], platform: {}, nodes: { ready: 0, total: 1 } }),
       ),
     ).toBe(true);
-    expect(
-      isEnvironmentUnhealthy(with_({ kind: 'compose', ip: '', rows: [], error: 'ssh timeout' })),
-    ).toBe(true);
+  });
+  it('a server that could not be read is unreadable, never unhealthy', () => {
+    const unread = {
+      ...healthyEntry,
+      checks: {
+        ...healthyEntry.checks,
+        containers: {
+          ...healthyEntry.checks.containers,
+          s: { kind: 'k8s', ip: '', rows: [], error: 'cluster snapshot failed: ssh timeout' },
+        },
+      },
+    };
+    expect(isEnvironmentUnhealthy(unread)).toBe(false);
+    expect(isEnvironmentUnreadable(unread)).toBe(true);
+    expect(isEnvironmentUnreadable(healthyEntry)).toBe(false);
   });
   it('is false with no containers data and an ok probe (pre-existing behaviour)', () => {
     expect(isEnvironmentUnhealthy({ config: {}, checks: { remoteHealth: { ok: true } } })).toBe(
       false,
     );
     expect(isEnvironmentUnhealthy({ config: {}, checks: {} })).toBe(false);
+  });
+});
+
+describe('formatEnvironmentsSummary', () => {
+  const ok = { checks: { remoteHealth: { ok: true }, containers: {} } };
+  const bad = { checks: { remoteHealth: { ok: false } } };
+  const unread = {
+    checks: {
+      remoteHealth: { ok: true },
+      containers: { p: { kind: 'k8s', ip: '', rows: [], error: 'cluster snapshot failed: x' } },
+    },
+  };
+  it('counts unhealthy environments', () => {
+    expect(strip(formatEnvironmentsSummary({ a: ok, b: bad }))).toBe(
+      'Environments   2 deployed, 1 unhealthy',
+    );
+  });
+  it('an environment it could not read is counted apart, never as healthy or unhealthy', () => {
+    const line = formatEnvironmentsSummary({ a: ok, b: unread });
+    expect(strip(line)).toBe('Environments   2 deployed, 0 unhealthy, 1 unreadable');
+    expect(line).toContain('\x1b[33m1 unreadable');
+  });
+  it('none deployed', () => {
+    expect(strip(formatEnvironmentsSummary({}))).toBe('Environments   none deployed');
+  });
+});
+
+describe('formatReplicationLine', () => {
+  it('streaming with its lag', () => {
+    expect(
+      strip(formatReplicationLine({ streaming: true, state: 'streaming', lagBytes: 2048 })),
+    ).toBe('streaming (lag: 2 KiB)');
+  });
+  it('a standby that is not streaming is red: DR not guaranteed', () => {
+    const line = formatReplicationLine({ streaming: false, state: 'no standby connected' });
+    expect(strip(line)).toBe('no standby connected: DR not guaranteed');
+    expect(line).toContain('\x1b[31m');
+  });
+  it('a probe that could not read says unreadable and why, in yellow', () => {
+    const line = formatReplicationLine({
+      streaming: false,
+      state: 'unknown',
+      error: 'cluster snapshot failed: ssh timeout',
+    });
+    expect(strip(line)).toBe('unreadable (cluster snapshot failed: ssh timeout)');
+    expect(line).toContain('\x1b[33m');
+    expect(line).not.toContain('\x1b[31m');
   });
 });
 
