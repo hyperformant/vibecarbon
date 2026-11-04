@@ -163,6 +163,32 @@ describe('server-class create timeouts (census)', () => {
     },
   );
 
+  // Same guard for the base image. Hetzner compose moved from the `docker-ce`
+  // app image to plain Ubuntu (2026-11-04); an image change replaces a server,
+  // and a compose server's database lives on its disk.
+  it.each(Object.keys(PROGRAMS))(
+    '%s: every server-class resource ignores changes to its base image',
+    async (file) => {
+      const resources = await runProgram(file);
+      const servers = resources.filter((r) => r.token in SERVER_RESOURCE_TYPES);
+      expect(servers.length).toBeGreaterThan(0);
+      for (const server of servers) {
+        const input =
+          SERVER_RESOURCE_TYPES[server.token as keyof typeof SERVER_RESOURCE_TYPES].imageInput;
+        // Non-vacuous: the input really is where this server's image goes.
+        expect(
+          Object.keys((server.args ?? {}) as object),
+          `${file}: ${server.type} "${server.name}" carries no ${input}`,
+        ).toContain(input);
+        const opts = (server.opts ?? {}) as { ignoreChanges?: string[] };
+        expect(
+          opts.ignoreChanges ?? [],
+          `${file}: ${server.type} "${server.name}" would be replaced by an image change`,
+        ).toContain(input);
+      }
+    },
+  );
+
   // Speed: DO's vendor cloud-init installs the Droplet Console agent, costing
   // 44-68s of first boot on every node. `dropletAgent: false` skips it. The
   // provider treats the field as create-only, so it is ignored on existing

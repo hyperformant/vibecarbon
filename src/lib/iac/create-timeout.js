@@ -56,17 +56,25 @@ export const SERVER_CUSTOM_TIMEOUTS = Object.freeze({ create: SERVER_CREATE_TIME
 /**
  * Server-class Pulumi type tokens, with the noun the message uses and the
  * input that holds the resource's location.
+ *
+ * `imageInput` is the server's base image. Every provider replaces a server
+ * whose image changes, and a compose server's database lives on its disk, so a
+ * new base image reaches new servers only, like user data. Hetzner moved its
+ * compose servers from the `docker-ce` app image to plain Ubuntu (2026-11-04):
+ * without this, the next deploy would have replaced each live server.
  */
 export const SERVER_RESOURCE_TYPES = Object.freeze({
   'hcloud:index/server:Server': {
     noun: 'server',
     locationInput: 'location',
     userDataInput: 'userData',
+    imageInput: 'image',
   },
   'digitalocean:index/droplet:Droplet': {
     noun: 'droplet',
     locationInput: 'region',
     userDataInput: 'userData',
+    imageInput: 'image',
     // Create-only inputs: set on a fresh droplet, ignored on a live one so a
     // later `pulumi up` never replaces it. `dropletAgent: false` skips DO's
     // Droplet Console agent, which cost 44-68s of first boot per node.
@@ -76,26 +84,29 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
     noun: 'instance',
     locationInput: 'region',
     userDataInput: 'userData',
+    imageInput: 'osId',
   },
   'linode:index/instance:Instance': {
     noun: 'instance',
     locationInput: 'region',
     userDataInput: 'metadatas',
+    imageInput: 'image',
   },
   'scaleway:instance/server:Server': {
     noun: 'server',
     locationInput: 'zone',
     userDataInput: 'userData',
+    imageInput: 'image',
   },
 });
 
 /**
  * The resource options every server-class resource is created with: the
- * bounded create (SERVER_CUSTOM_TIMEOUTS) and `ignoreChanges` on its
- * user-data input. Every provider replaces a server whose user data changes,
- * and a compose server's database (a k8s db node's too) lives on its disk, so
- * an edit to a cloud-init file must reach new servers only, never replace an
- * existing one. tests/unit/iac/server-create-timeouts-census.test.ts runs
+ * bounded create (SERVER_CUSTOM_TIMEOUTS) and `ignoreChanges` on its user-data
+ * and image inputs. Every provider replaces a server when either changes, and
+ * a compose server's database (a k8s db node's too) lives on its disk, so an
+ * edit to a cloud-init file or a new base image must reach new servers only,
+ * never replace an existing one. tests/unit/iac/server-create-timeouts-census.test.ts runs
  * every program and fails on a server built without these.
  *
  * @param {keyof typeof SERVER_RESOURCE_TYPES} type the server's Pulumi type token
@@ -110,6 +121,7 @@ export function serverResourceOptions(type, extra = {}) {
     ignoreChanges: [
       ...(extra.ignoreChanges ?? []),
       serverClass.userDataInput,
+      serverClass.imageInput,
       ...(serverClass.createOnlyInputs ?? []),
     ],
   };
@@ -147,7 +159,12 @@ export function workerResourceOptions(type, { joinTarget, ...extra } = {}) {
   return {
     ...extra,
     customTimeouts: SERVER_CUSTOM_TIMEOUTS,
-    ignoreChanges: [...(extra.ignoreChanges ?? []), serverClass.userDataInput, ...createOnly],
+    ignoreChanges: [
+      ...(extra.ignoreChanges ?? []),
+      serverClass.userDataInput,
+      serverClass.imageInput,
+      ...createOnly,
+    ],
     replacementTrigger: pulumi
       .all([joinTarget.masterId, joinTarget.masterPrivateIp, joinTarget.k3sVersion])
       .apply(([id, ip, version]) => `master=${id}@${ip} k3s=${version}`),
