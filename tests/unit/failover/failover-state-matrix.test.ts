@@ -123,8 +123,6 @@ interface RunOpts {
   fenceThrows?: boolean;
   /** The reseeded standby still carries the fence. */
   standbyFenced?: boolean;
-  /** The certificate restore re-created vibecarbon-tls on its ACME issuer. */
-  tlsRestored?: boolean;
   /** The provider write throws. */
   dnsUpdateThrows?: boolean;
   /** What the provider reads back after the write (default: the flipped IP). */
@@ -158,7 +156,6 @@ async function run(opts: RunOpts = {}) {
     quiesceUnconfirmed = false,
     fenceThrows = false,
     standbyFenced = false,
-    tlsRestored = false,
     dnsUpdateThrows = false,
     dnsReadsBack,
     wildcardReadsBack,
@@ -293,7 +290,7 @@ async function run(opts: RunOpts = {}) {
     },
     restoreTls: async () => {
       order.push('restoreTls');
-      return { restored: tlsRestored ? ['vibecarbon/vibecarbon-tls'] : [] };
+      return { restored: [] };
     },
     promoteIssuer: async () => {
       order.push('promoteIssuer');
@@ -1111,22 +1108,17 @@ describe('failoverHA promotes the ACME issuer only where DNS points (HTTP-01)', 
   it.each([
     ['a rejected DNS update', { dnsUpdateThrows: true }],
     ['a read-back at the old primary', { dnsReadsBack: ['10.0.0.1'] }],
-  ])('%s never promotes the issuer, and names the deploy that does', async (_l, over) => {
+  ])('%s still promotes the issuer, after the flip step', async (_l, over) => {
+    // cert-manager self-checks the challenge before it asks Let's Encrypt to
+    // validate, so while DNS points elsewhere the order waits and spends no
+    // failed validation; never promoting leaves the site untrusted until a deploy.
     const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
     const { order, thrown } = await run(over);
     expect(thrown?.name).toBe('FailoverDnsError');
     expect(order.indexOf('restoreTls')).toBeLessThan(order.indexOf('dns'));
-    expect(order).not.toContain('promoteIssuer');
-    const said = warn.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(said).toMatch(/ACME issuer/);
-    expect(said).toContain('vibecarbon deploy e4');
-  });
-
-  it('a restored certificate already on its ACME issuer: an unconfirmed flip has nothing left to promote, and says nothing about it', async () => {
-    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
-    const { order, thrown } = await run({ dnsUpdateThrows: true, tlsRestored: true });
-    expect(thrown?.name).toBe('FailoverDnsError');
-    expect(order).not.toContain('promoteIssuer');
+    expect(order.filter((s) => s === 'promoteIssuer')).toHaveLength(1);
+    expect(order.indexOf('promoteIssuer')).toBeGreaterThan(order.indexOf('dns'));
+    expect(order.indexOf('promoteIssuer')).toBeLessThan(order.indexOf('saveConfig'));
     expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).not.toMatch(/stand-in/);
   });
 

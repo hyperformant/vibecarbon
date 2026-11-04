@@ -232,6 +232,8 @@ interface RunOpts {
   clearJournalThrows?: boolean;
   /** What the managed-DNS flip reports (default: flipped and verified). */
   dnsFlip?: { ok: true } | { ok: false; reason: string };
+  /** Whether public resolvers show the promoted node before the arm (default: yes). */
+  dnsPropagates?: boolean;
   /** Pass no seams at all (the real ssh-backed defaults run). */
   noSeams?: boolean;
   /** Drop the fenceOldPrimary seam so the real default (ssh-backed) fence runs. */
@@ -260,6 +262,7 @@ async function run(opts: RunOpts = {}) {
     journalThrows = false,
     clearJournalThrows = false,
     dnsFlip = { ok: true as const },
+    dnsPropagates = true,
     noSeams = false,
     realFence = false,
   } = opts;
@@ -389,6 +392,11 @@ async function run(opts: RunOpts = {}) {
     swapRoles: (_env: string, o?: { override?: string }) => {
       order.push('swap');
       captured.swapOverride = o?.override;
+    },
+    waitForDns: async (domain: string, ip: string, timeoutMs: number) => {
+      order.push('dnsWait');
+      captured.dnsWait = [domain, ip, timeoutMs];
+      return dnsPropagates;
     },
     // The backup-prefix fence write (backup-fence.test.ts pins its place).
     writeFence: async () => ({ ok: true }),
@@ -1457,7 +1465,28 @@ describe('failoverComposeHA arms ACME only where DNS points (HTTP-01)', () => {
     });
   }
 
-  it('a DNS flip that was not confirmed never arms the promoted node, and names the deploy that does', async () => {
+  it('a confirmed managed flip: public resolvers are waited for after the flip, before the arm', async () => {
+    const { order, captured, thrown } = await run({ envConfig: managedDns() });
+    expect(thrown).toBeUndefined();
+    // flipAndVerifyDns reads back through the provider's API only; Traefik's
+    // first HTTP-01 attempt needs the public answer (as the deploy waits).
+    expect(order.indexOf('dns')).toBeLessThan(order.indexOf('dnsWait'));
+    expect(order.indexOf('dnsWait')).toBeLessThan(order.indexOf('armAcme@standby'));
+    expect(order.filter((s) => s === 'dnsWait')).toHaveLength(1);
+    expect(captured.dnsWait).toEqual(['app.example.com', STANDBY_IP, 120_000]);
+  });
+
+  it('public resolvers that never show the promoted node: the arm still runs', async () => {
+    const { order, thrown } = await run({ envConfig: managedDns(), dnsPropagates: false });
+    expect(thrown).toBeUndefined();
+    expect(order.indexOf('dnsWait')).toBeLessThan(order.indexOf('armAcme@standby'));
+    expect(arms(order)).toEqual(['armAcme@standby']);
+  });
+
+  it('a DNS flip that was not confirmed still arms the promoted node after it, without the wait', async () => {
+    // A disarmed primary never renews, even a restored certificate; an early
+    // attempt costs at most one failed validation, and tls-retry waits for
+    // the apex to resolve to the node before it restarts Traefik.
     const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
     try {
       const { order, thrown } = await run({
@@ -1467,10 +1496,12 @@ describe('failoverComposeHA arms ACME only where DNS points (HTTP-01)', () => {
       expect(thrown?.name).toBe('FailoverDnsError');
       expect(order.indexOf('disarmAcme@primary')).toBeLessThan(order.indexOf('dns'));
       expect(order.indexOf('tlsRestore')).toBeLessThan(order.indexOf('dns'));
-      expect(arms(order)).toEqual([]);
+      expect(arms(order)).toEqual(['armAcme@standby']);
+      expect(order.indexOf('armAcme@standby')).toBeGreaterThan(order.indexOf('dns'));
+      expect(order.indexOf('armAcme@standby')).toBeLessThan(order.indexOf('swap'));
+      expect(order).not.toContain('dnsWait');
       const said = warn.mock.calls.map((c) => String(c[0])).join('\n');
-      expect(said).toMatch(/ACME issuer/);
-      expect(said).toContain('vibecarbon deploy prod');
+      expect(said).not.toMatch(/ACME issuer stays off/);
     } finally {
       warn.mockRestore();
     }
@@ -1480,6 +1511,7 @@ describe('failoverComposeHA arms ACME only where DNS points (HTTP-01)', () => {
     const { order, thrown } = await run({ envConfig: managedDns(), promoteVerdict: 'unknown' });
     expect(thrown).toBeDefined();
     expect(order).not.toContain('dns');
+    expect(order).not.toContain('dnsWait');
     expect(arms(order)).toEqual([]);
     expect(order).not.toContain('tlsRestore');
   });
@@ -1501,6 +1533,7 @@ describe('failoverComposeHA arms ACME only where DNS points (HTTP-01)', () => {
     });
     expect(thrown).toBeUndefined();
     expect(order).not.toContain('dns');
+    expect(order).not.toContain('dnsWait');
     expect(arms(order)).toEqual(['armAcme@standby']);
     expect(order.indexOf('disarmAcme@primary')).toBeLessThan(order.indexOf('armAcme@standby'));
     expect(order.indexOf('tlsRestore')).toBeLessThan(order.indexOf('armAcme@standby'));

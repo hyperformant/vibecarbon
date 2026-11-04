@@ -169,6 +169,13 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
   };
 });
 
+// The public-DNS wait before the ACME arm (compose-failover-state-matrix pins
+// its place): public resolvers already show the promoted node, no network.
+vi.mock('../../../src/lib/dns-propagation.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  waitForDNSPropagation: vi.fn(async () => true),
+}));
+
 vi.mock('../../../src/lib/deploy/tls-ready.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {

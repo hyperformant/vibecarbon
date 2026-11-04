@@ -635,11 +635,11 @@ export async function restorePromotedTls({ promotedIp, sshKeyPath, snapshot, dep
  * `vibecarbon.dev/promote-issuer` annotation (stamped by the deploy) and,
  * when the live issuerRef differs, patch it to the annotated ACME issuer —
  * making the promoted cluster the environment's sole ACME solver. The
- * failover runs it only AFTER the DNS flip: Let's Encrypt fetches an HTTP-01
- * challenge from the address the domain resolves to, so an order placed
- * before the flip reaches the old primary and fails, and cert-manager backs
- * off for an hour. A Certificate the restore already re-created on its ACME
- * issuer (restorePromotedTls) is left alone.
+ * failover runs it only once it reaches the DNS flip step: Let's Encrypt
+ * fetches an HTTP-01 challenge from the address the domain resolves to, and
+ * while DNS still points elsewhere cert-manager's own self-check holds the
+ * order without asking Let's Encrypt to validate. A Certificate the restore
+ * already re-created on its ACME issuer (restorePromotedTls) is left alone.
  *
  * Best-effort BY CONTRACT: this runs after the point of no return (standby
  * promoted, DNS flipped), and a promoted site serving on the self-signed
@@ -2168,7 +2168,7 @@ export function walgVerdictsDetail(health) {
  *   6. readiness gate (rollout-status each + public API probe)
  *  6b. scale down old primary                          (unplanned only, best-effort)
  *   7. DNS flip
- *  7b. promote the ACME issuer                         (only once DNS points here)
+ *  7b. promote the ACME issuer                         (after the flip, confirmed or not)
  *   8. TERMINAL persist of the role swap
  *
  * All step seams default to the real implementations and are overridable via
@@ -2933,34 +2933,24 @@ export async function failoverHA(
   // pilot-standby deploy pointed this cluster's Certificate at the local
   // self-signed issuer, since a cluster DNS does not point at can never pass
   // HTTP-01. Patch issuerRef back to the ACME issuer stamped in the promote
-  // annotation only now that DNS points here: Let's Encrypt fetches the
-  // challenge from the address the domain resolves to, so an order placed
-  // before the flip reaches the old primary, fails, and cert-manager backs off
-  // for an hour. Manual DNS promotes here too, as a deploy does: cert-manager
-  // retries on its backoff once the records point here. A flip that was not
-  // confirmed does not promote; the deploy the DNS error names does. Before
-  // the swap save, so a run that dies here keeps its journal and the rerun
-  // promotes. Best-effort inside (a promoted site serving on the self-signed
-  // cert is strictly better than an aborted failover, and the reconverge
-  // redeploy repairs issuer ownership).
-  if (dnsFlip.ok) {
-    s.start('Promoting ACME issuer on the promoted cluster');
-    const promoted = await promoteIssuer({ promotedIp: servers.standby.ip, sshKeyPath });
-    s.stop(
-      promoted.patched.length > 0
-        ? `ACME issuer promoted (${promoted.patched.join(', ')})`
-        : 'ACME issuer already in place',
-    );
-  } else if (restored.restored.length === 0) {
-    // A restored certificate already sits on its ACME issuer: nothing is left
-    // to promote.
-    p.log.warn(
-      'The promoted cluster keeps its stand-in certificate until DNS points at it: ' +
-        "Let's Encrypt validates at the address the domain resolves to, and the flip was not " +
-        'confirmed. This points the records at this cluster and switches it to its ACME ' +
-        `issuer: vibecarbon deploy ${envName}`,
-    );
-  }
+  // annotation only now that the failover has reached its DNS step: Let's
+  // Encrypt fetches the challenge from the address the domain resolves to, so
+  // an order placed before the flip would race it. Confirmed or not, and on
+  // manual DNS too: cert-manager self-checks the challenge before it asks
+  // Let's Encrypt to validate, so while DNS still points elsewhere the order
+  // waits for propagation and spends no failed validation. Never promoting
+  // would be worse: the cluster would never get a trusted certificate until a
+  // deploy. Before the swap save, so a run that dies here keeps its journal
+  // and the rerun promotes. Best-effort inside (a promoted site serving on the
+  // self-signed cert is strictly better than an aborted failover, and the
+  // reconverge redeploy repairs issuer ownership).
+  s.start('Promoting ACME issuer on the promoted cluster');
+  const promoted = await promoteIssuer({ promotedIp: servers.standby.ip, sshKeyPath });
+  s.stop(
+    promoted.patched.length > 0
+      ? `ACME issuer promoted (${promoted.patched.join(', ')})`
+      : 'ACME issuer already in place',
+  );
 
   // TERMINAL WRITE: persist the role swap LAST, after the DNS flip. A rerun
   // BEFORE this point keeps the ORIGINAL direction (identifyServers reads the

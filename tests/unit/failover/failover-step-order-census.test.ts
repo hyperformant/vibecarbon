@@ -485,6 +485,8 @@ async function runCompose(
     reconcileRetired: async () => ({ fenced: [], unreachable: [] }),
     writeFence: async () => ({ ok: true }),
     recordFence: () => {},
+    // Public resolvers already show the promoted node (no network here).
+    waitForDns: async () => true,
   };
   await failoverComposeHA(
     'prod',

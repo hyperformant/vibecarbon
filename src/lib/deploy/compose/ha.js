@@ -18,6 +18,7 @@ import { resolvePrimary } from '../../cli/resolve-primary.js';
 import { c } from '../../colors.js';
 import { loadProjectConfig, updateProjectConfig } from '../../config.js';
 import { environmentServerNames } from '../../destroy/server-naming.js';
+import { waitForDNSPropagation } from '../../dns-propagation.js';
 import {
   DNS_PROVIDERS,
   findZoneForDomain,
@@ -2117,6 +2118,7 @@ export async function failoverComposeHA(
     probeRoleBind = composeDbMountsWalgRoleDir,
     restoreWalgRole = auditComposeWalgRole,
     pushBaseBackup = pushBaseBackupAfterPromote,
+    waitForDns = waitForDNSPropagation,
     reconcileRetired = () =>
       reconcileRetiredFence({
         environment: envName,
@@ -2814,44 +2816,51 @@ export async function failoverComposeHA(
     p.log.message(`  ${c.dim('New IP'.padEnd(14))} ${c.bold(standbyServer.ip)} (promoted standby)`);
   }
 
-  // Step 3a: Arm the promoted node's ACME issuer, only now that DNS points at
-  // it. Let's Encrypt fetches an HTTP-01 challenge from the address the domain
-  // resolves to: armed before the flip, the first attempt reaches the old
-  // primary and fails, Traefik does not retry it until a restart, and each
-  // failure counts against the hostname's 5 failed validations per hour.
-  // Manual DNS arms here too, as a first deploy does: the tls-retry cron
-  // restarts Traefik once the records point at this node. A flip that was not
-  // confirmed does not arm; the deploy the DNS error names arms it. Before the
-  // swap save, so a run that dies here keeps its journal and the rerun arms.
-  // Best-effort: a failed arm degrades TLS and never aborts a DR flip
-  // (armComposeAcme warns with the manual fix). A restored certificate is
-  // served as is; with none, issuance starts here.
-  if (dnsFlip.ok) {
-    s.start("Arming the promoted node's ACME issuer");
-    const acmeArmed = await armComposeAcme({
-      promotedIp: standbyServer.ip,
-      sshKeyPath,
-      projectName,
-    });
+  // Step 3a: Arm the promoted node's ACME issuer, only now that the failover
+  // has reached its DNS step. Let's Encrypt fetches an HTTP-01 challenge from
+  // the address the domain resolves to: armed before the flip, the first
+  // attempt reaches the old primary and fails, Traefik does not retry it until
+  // a restart, and each failure counts against the hostname's 5 failed
+  // validations per hour. A confirmed managed flip is read back through the
+  // provider's API only, so public resolvers may still answer the old address:
+  // wait for them first, as the deploy does before compose-up (a timeout is a
+  // note, not a stop). Manual DNS and a flip that was not confirmed arm
+  // without the wait: an early attempt costs at most one failed validation
+  // per hostname, and the tls-retry cron restarts Traefik once the apex
+  // resolves to this node. Never arming would be worse: a disarmed primary
+  // never renews, even a restored certificate. Before the swap save, so a run
+  // that dies here keeps its journal and the rerun arms. Best-effort: a failed
+  // arm degrades TLS and never aborts a DR flip (armComposeAcme warns with the
+  // manual fix). A restored certificate is served as is; with none, issuance
+  // starts here.
+  if (dnsAutomated && dnsFlip.ok && envConfig.domain) {
+    s.start(`Waiting for ${envConfig.domain} to resolve to ${standbyServer.ip}`);
+    const propagated = await waitForDns(envConfig.domain, standbyServer.ip, 120_000);
     s.stop(
-      acmeArmed
-        ? tlsRestore.restored
-          ? 'Promoted node ACME issuer armed (serving the restored certificate)'
-          : 'Promoted node ACME issuer armed (certificate issuance underway)'
-        : 'Promoted node ACME issuer NOT armed, the domain serves an untrusted certificate (see warning)',
-    );
-  } else {
-    p.log.warn(
-      `The promoted node's ACME issuer stays off until DNS points at it: Let's Encrypt ` +
-        'validates at the address the domain resolves to, and the flip was not confirmed. ' +
-        `This points the records at this node and arms it: vibecarbon deploy ${envName}`,
+      propagated
+        ? `DNS resolves: ${envConfig.domain} → ${standbyServer.ip}`
+        : 'Public resolvers do not show the promoted node yet; arming anyway (tls-retry retries issuance)',
     );
   }
+  s.start("Arming the promoted node's ACME issuer");
+  const acmeArmed = await armComposeAcme({
+    promotedIp: standbyServer.ip,
+    sshKeyPath,
+    projectName,
+  });
+  s.stop(
+    acmeArmed
+      ? tlsRestore.restored
+        ? 'Promoted node ACME issuer armed (serving the restored certificate)'
+        : 'Promoted node ACME issuer armed (certificate issuance underway)'
+      : 'Promoted node ACME issuer NOT armed, the domain serves an untrusted certificate (see warning)',
+  );
 
   // Persist the swap; the same save clears the failover journal (R2). Right
-  // after the DNS verdict and the arm, before the TLS wait: the journal must
-  // not stay set through minutes of certificate issuance (a crash there would
-  // leave a finished failover looking mid-flight).
+  // after the DNS verdict and the arm (its DNS wait is bounded at 2 minutes),
+  // before the TLS wait: the journal must not stay set through minutes of
+  // certificate issuance (a crash there would leave a finished failover
+  // looking mid-flight).
   // On resume the override was recorded by the run that skipped the proof.
   swapRoles(envName, {
     override: unproven
