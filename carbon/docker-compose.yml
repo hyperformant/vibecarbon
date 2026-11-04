@@ -204,8 +204,6 @@ services:
       - -c
       - config_file=/etc/postgresql/postgresql.conf
       - -c
-      - log_min_messages=fatal
-      - -c
       - wal_level=replica
       - -c
       - archive_mode=on
