@@ -357,7 +357,7 @@ describe('deployK3s wires the content-aware gate end to end', () => {
     expect(deliverBody.indexOf('d.buildK3sBuildInputs(')).toBeGreaterThan(
       deliverBody.indexOf('plan.awaitPeerImage'),
     );
-    const deliverCall = deployBody.slice(deployBody.indexOf('await deliverAppImage({'));
+    const deliverCall = deployBody.slice(deployBody.indexOf('deliverAppImage({'));
     const deliverArgs = deliverCall.slice(0, deliverCall.indexOf('});'));
     expect(deliverArgs).toContain('projectDir,');
     expect(deliverBody).toContain("state.shouldSkip('k3s-build', buildInputs)");
@@ -370,7 +370,10 @@ describe('deployK3s wires the content-aware gate end to end', () => {
     expect(chain).toContain("({ tag: imageTag } = state.getStepResult('k3s-build'))");
     // No per-node sideload gate any more: the one delivery is inside k3s-apply.
     expect(K3S_SRC).not.toContain("'k3s-sideload'");
-    expect(deployBody).toContain('const imageTag = await deliverAppImage({');
+    // The call sits inside its `image.ready` perf span (k3s-deploy-markers.test.ts).
+    expect(deployBody).toMatch(
+      /const imageTag = await perfAsync\(`deploy\.\$\{perfPrefix\}\.image\.ready`, \(\) =>\s+deliverAppImage\(\{/,
+    );
     const applyCall = deployBody.slice(deployBody.indexOf('buildK3sApplyInputs({'));
     expect(applyCall.slice(0, applyCall.indexOf('});'))).toContain('imageTag,');
   });

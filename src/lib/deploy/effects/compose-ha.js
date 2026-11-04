@@ -482,8 +482,7 @@ async function haWaitForSsh(ctx) {
 async function haSeedKnownHosts(ctx) {
   const { primary, standby, sshKeyPath } = ctx;
   const haKnownHostsPath = knownHostsPathForKey(sshKeyPath);
-  await seedKnownHosts(haKnownHostsPath, primary.ip);
-  await seedKnownHosts(haKnownHostsPath, standby.ip);
+  await Promise.all([primary.ip, standby.ip].map((ip) => seedKnownHosts(haKnownHostsPath, ip)));
 }
 
 /** cloud-init + firewall + auto-updates on both servers (parallel). */

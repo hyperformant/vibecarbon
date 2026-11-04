@@ -52,7 +52,7 @@ describe('first-boot timing call sites', () => {
   it('k3s: master, db and every static worker, after the ready wait and the host-key seed', () => {
     const text = src('lib/deploy/k8s/k3s.js');
     const wait = text.indexOf(tpl('deploy.#{perfPrefix}.waitForReady'));
-    const seed = text.indexOf('await seedKnownHosts(khPath, seedIp)', wait);
+    const seed = text.indexOf('seedKnownHosts(khPath, ip)', wait);
     const call = text.indexOf('queueBootTiming(', wait);
     expect(wait).toBeGreaterThan(-1);
     expect(seed).toBeGreaterThan(wait);

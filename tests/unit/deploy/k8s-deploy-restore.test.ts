@@ -702,9 +702,10 @@ describe('applyK3sManifests with a restore point', () => {
       expect(i, needle).toBeGreaterThan(-1);
       return i;
     };
-    const check = at('await assertRestoreMarkerState({');
+    // Each call sits inside its perf span (k3s-deploy-markers.test.ts).
+    const check = at('assertRestoreMarkerState({');
     expect(check).toBeGreaterThan(at("state.completeStep('k3s-kubeconfig'"));
-    expect(check).toBeLessThan(at('await deliverAppImage({'));
+    expect(check).toBeLessThan(at('deliverAppImage({'));
     expect(check).toBeLessThan(at('await shouldSkipK3sApply({'));
     // Outside every step gate: a skipped apply must not skip the check.
     const before = body.slice(at("state.getStepResult('k3s-kubeconfig')"), check);

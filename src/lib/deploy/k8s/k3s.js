@@ -3404,17 +3404,16 @@ export async function applyK3sManifests({
   //    surfaces at deploy-start, not 20 min in when an Order pins Pending.
   //    Throws on missing token for any DNS01_PROVIDERS row; manual returns null.
   const dnsSecret = buildDnsProviderSecret({ dnsProvider, dnsToken });
-  // Gate everything below on the control plane actually SERVING — /readyz plus
-  // a server-side dry-run apply, both in one passing iteration — instead of
-  // racing a cold apiserver and absorbing the fallout in per-call retry
-  // ladders (mitigation-audit cluster 4: "we race cold clusters by
-  // construction"). Runs AFTER the DNS-01 prerequisite validation above so a
-  // missing token still aborts before we touch (or wait on) the cluster; the
-  // per-call ladders stay as tripwires and should no longer fire on a
-  // proven-serving control plane.
-  await perfAsync(`deploy.${perfPrefix}.controlPlane.serving`, () =>
-    awaitControlPlaneServing({ env }),
-  );
+  // PRECONDITION: the control plane SERVES (/readyz plus a server-side
+  // dry-run apply, both in one passing iteration). deployK3s, the only
+  // caller, proves it with awaitControlPlaneServing right before this, at its
+  // `controlPlane.gate`, and nothing in between touches k3s. This apply used
+  // to probe again here, the gate it carried before deployK3s grew its own
+  // for the restore marker (#237): two more kubectl round trips per cluster
+  // (0.6 s on the primary, 26 s on the DO tor1 standby on an evening path)
+  // proving what was proven seconds earlier. The probe exists so nothing
+  // races a cold apiserver (mitigation-audit cluster 4); the per-call
+  // ladders stay as tripwires.
   // 0a. Move the provider's CSI sidecars off registry.k8s.io and onto our ghcr
   //     mirrors, BEFORE anything that needs a PersistentVolume.
   //
@@ -3447,12 +3446,14 @@ export async function applyK3sManifests({
   //     has to re-register on every node before a PVC can bind anywhere. That
   //     wants to overlap with the minutes of cert-manager + traefik + registry
   //     work below, not queue behind it. Unknown provider ⇒ empty plan ⇒ no-op.
-  for (const { workload, setImageArgs } of csiSidecarSetImagePlan(providerId)) {
-    await runKubectlWithRetry(['-n', 'kube-system', 'set', 'image', workload, ...setImageArgs], {
-      env,
-      description: `applyK3sManifests: kubectl set image ${workload} (CSI sidecars → ghcr mirrors)`,
-    });
-  }
+  await perfAsync(`deploy.${perfPrefix}.csiSidecars`, async () => {
+    for (const { workload, setImageArgs } of csiSidecarSetImagePlan(providerId)) {
+      await runKubectlWithRetry(['-n', 'kube-system', 'set', 'image', workload, ...setImageArgs], {
+        env,
+        description: `applyK3sManifests: kubectl set image ${workload} (CSI sidecars → ghcr mirrors)`,
+      });
+    }
+  });
   // 0b. Deliver the app image, once, into the master's registry: a layer
   //     delta into the master's containerd (only the layers the base pull
   //     did not already put there), checked against the image's diffIDs,
@@ -3534,134 +3535,140 @@ export async function applyK3sManifests({
   // after the deploy's own failure and no kubectl outlives it.
   const caStop = new AbortController();
   const rollOutClusterAutoscaler = async () => {
-    // 4b. Create the kube-system/carbon-autoscaler-config Secret the
-    //     carbon-autoscaler sidecar reads on startup (and on every
-    //     mtime-changed Refresh — see ConfigWatcher). Two keys:
-    //     - `token`: the provider API token, exposed to the sidecar via
-    //       secretKeyRef→PROVIDER_API_TOKEN in deployment.yaml.
-    //     - `config.json`: the rendered node-group config from
-    //       renderCarbonAutoscalerConfig, PLAIN JSON — no base64
-    //       pre-encoding. That hack only existed for the old hcloud
-    //       cloudprovider's secretKeyRef→env path (Kubernetes auto-decodes
-    //       Secret data to plaintext once, and that binary wanted a SECOND,
-    //       still-encoded layer on top). The sidecar mounts this Secret as a
-    //       FILE (`CARBON_AUTOSCALER_CONFIG=/config-ca/config.json`), which
-    //       only ever goes through the one automatic decode — plain JSON is
-    //       exactly what it expects.
-    //     Stdin pipe keeps the token + JSON off argv (mirrors the dnsSecret
-    //     pattern at step 2b).
-    const clusterName = `${projectName}-${environment}`;
-    const carbonAutoscalerConfigJson = await renderCarbonAutoscalerConfig({
-      k3sVersion: K3S_VERSION,
-      k3sToken,
-      // M3 Task 2: output-driven master private IP (Hetzner's own default
-      // stays '10.0.1.1' when this is undefined — see renderCarbonAutoscalerConfig).
-      masterPrivateIp,
-      clusterName,
-      environment,
-      providerId,
-      ProviderClass,
-      region,
-      workerServerType,
-      minWorkers,
-      maxWorkers,
-      caBoundsMin,
-    });
-    {
-      const caSecretYaml = [
-        'apiVersion: v1',
-        'kind: Secret',
-        'metadata:',
-        '  name: carbon-autoscaler-config',
-        '  namespace: kube-system',
-        'type: Opaque',
-        'stringData:',
-        `  token: ${JSON.stringify(apiToken)}`,
-        `  config.json: ${JSON.stringify(carbonAutoscalerConfigJson)}`,
-        '',
-      ].join('\n');
-      await runKubectlWithRetry(['apply', '-f', '-'], {
-        env,
-        signal: caStop.signal,
-        input: caSecretYaml,
-        description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
+    // One span for the Secret, the apply, the image pin and (pilot standby)
+    // the zero; the rollout wait has its own. The whole chain runs alongside
+    // the cert-manager chain, so this span is off the critical path unless
+    // it outlasts that chain.
+    await perfAsync(`deploy.${perfPrefix}.clusterAutoscaler.apply`, async () => {
+      // 4b. Create the kube-system/carbon-autoscaler-config Secret the
+      //     carbon-autoscaler sidecar reads on startup (and on every
+      //     mtime-changed Refresh — see ConfigWatcher). Two keys:
+      //     - `token`: the provider API token, exposed to the sidecar via
+      //       secretKeyRef→PROVIDER_API_TOKEN in deployment.yaml.
+      //     - `config.json`: the rendered node-group config from
+      //       renderCarbonAutoscalerConfig, PLAIN JSON — no base64
+      //       pre-encoding. That hack only existed for the old hcloud
+      //       cloudprovider's secretKeyRef→env path (Kubernetes auto-decodes
+      //       Secret data to plaintext once, and that binary wanted a SECOND,
+      //       still-encoded layer on top). The sidecar mounts this Secret as a
+      //       FILE (`CARBON_AUTOSCALER_CONFIG=/config-ca/config.json`), which
+      //       only ever goes through the one automatic decode — plain JSON is
+      //       exactly what it expects.
+      //     Stdin pipe keeps the token + JSON off argv (mirrors the dnsSecret
+      //     pattern at step 2b).
+      const clusterName = `${projectName}-${environment}`;
+      const carbonAutoscalerConfigJson = await renderCarbonAutoscalerConfig({
+        k3sVersion: K3S_VERSION,
+        k3sToken,
+        // M3 Task 2: output-driven master private IP (Hetzner's own default
+        // stays '10.0.1.1' when this is undefined — see renderCarbonAutoscalerConfig).
+        masterPrivateIp,
+        clusterName,
+        environment,
+        providerId,
+        ProviderClass,
+        region,
+        workerServerType,
+        minWorkers,
+        maxWorkers,
+        caBoundsMin,
       });
-    }
-    // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
-    //      kube-system but base/'s parent kustomization sets
-    //      `namespace: vibecarbon`, whose namespace transformer would
-    //      override our kube-system metadata. Mirrors the CCM/CSI
-    //      separate-install pattern (those are commented in
-    //      base/kustomization.yaml and applied via cloud-init). The
-    //      child kustomization at carbon/k8s/base/cluster-autoscaler/
-    //      sets `namespace: kube-system` explicitly, which only takes
-    //      effect when applied standalone like this.
-    await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/base/cluster-autoscaler')], {
-      env,
-      signal: caStop.signal,
-      description: 'applyK3sManifests: kubectl apply -k cluster-autoscaler',
-    });
-    // 5a''. Patch BOTH container images in one call.
-    //
-    //       `carbon-autoscaler`: deployment.yaml ships the
-    //       `{{CARBON_AUTOSCALER_IMAGE}}` placeholder (kustomize has no
-    //       built-in var-substitution for a container image string), so
-    //       resolve it here the same way the domain/SITE_URL placeholders
-    //       below are patched at deploy time.
-    //
-    //       `cluster-autoscaler`: the manifest already carries the mirrored
-    //       ghcr ref as a literal, so this is belt-and-braces — but load-bearing
-    //       belt-and-braces. `apply -k` above reads the PROJECT's checked-in
-    //       copy of this manifest, and a project generated before the mirror
-    //       landed still pins registry.k8s.io there, i.e. still walks into the
-    //       403 that cost a deploy on 2026-07-31 (src/lib/images.js). Re-pinning
-    //       here makes images.js authoritative at deploy time no matter how old
-    //       the project's k8s/ tree is.
-    //
-    //       Both refs come from src/lib/images.js, the single source of truth.
-    await runKubectlWithRetry(
-      [
-        '-n',
-        'kube-system',
-        'set',
-        'image',
-        'deployment/cluster-autoscaler',
-        `carbon-autoscaler=${carbonAutoscalerImageRef()}`,
-        `cluster-autoscaler=${clusterAutoscalerImageRef()}`,
-      ],
       {
+        const caSecretYaml = [
+          'apiVersion: v1',
+          'kind: Secret',
+          'metadata:',
+          '  name: carbon-autoscaler-config',
+          '  namespace: kube-system',
+          'type: Opaque',
+          'stringData:',
+          `  token: ${JSON.stringify(apiToken)}`,
+          `  config.json: ${JSON.stringify(carbonAutoscalerConfigJson)}`,
+          '',
+        ].join('\n');
+        await runKubectlWithRetry(['apply', '-f', '-'], {
+          env,
+          signal: caStop.signal,
+          input: caSecretYaml,
+          description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
+        });
+      }
+      // 5a'. Apply cluster-autoscaler manifests SEPARATELY. CA lives in
+      //      kube-system but base/'s parent kustomization sets
+      //      `namespace: vibecarbon`, whose namespace transformer would
+      //      override our kube-system metadata. Mirrors the CCM/CSI
+      //      separate-install pattern (those are commented in
+      //      base/kustomization.yaml and applied via cloud-init). The
+      //      child kustomization at carbon/k8s/base/cluster-autoscaler/
+      //      sets `namespace: kube-system` explicitly, which only takes
+      //      effect when applied standalone like this.
+      await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/base/cluster-autoscaler')], {
         env,
         signal: caStop.signal,
-        description:
-          'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
-      },
-    );
-    if (pilotStandby) {
-      // Pilot-light: CA has nothing to scale for until a failover promotes
-      // this cluster, so zero it the same way as the app Deployment (step 5).
-      // Its node-group bounds are already pre-rendered into the
-      // carbon-autoscaler-config Secret (step 4b) using the PRIMARY's
-      // caBoundsMin/maxWorkers — the standby's maxSize reflects the same
-      // headroom the primary would scale into — so a failover only has to
-      // flip replicas 0→1, never re-render the config.
+        description: 'applyK3sManifests: kubectl apply -k cluster-autoscaler',
+      });
+      // 5a''. Patch BOTH container images in one call.
+      //
+      //       `carbon-autoscaler`: deployment.yaml ships the
+      //       `{{CARBON_AUTOSCALER_IMAGE}}` placeholder (kustomize has no
+      //       built-in var-substitution for a container image string), so
+      //       resolve it here the same way the domain/SITE_URL placeholders
+      //       below are patched at deploy time.
+      //
+      //       `cluster-autoscaler`: the manifest already carries the mirrored
+      //       ghcr ref as a literal, so this is belt-and-braces — but load-bearing
+      //       belt-and-braces. `apply -k` above reads the PROJECT's checked-in
+      //       copy of this manifest, and a project generated before the mirror
+      //       landed still pins registry.k8s.io there, i.e. still walks into the
+      //       403 that cost a deploy on 2026-07-31 (src/lib/images.js). Re-pinning
+      //       here makes images.js authoritative at deploy time no matter how old
+      //       the project's k8s/ tree is.
+      //
+      //       Both refs come from src/lib/images.js, the single source of truth.
       await runKubectlWithRetry(
         [
           '-n',
           'kube-system',
-          'patch',
-          'deployment',
-          'cluster-autoscaler',
-          '--type=merge',
-          '-p',
-          JSON.stringify({ spec: { replicas: 0 } }),
+          'set',
+          'image',
+          'deployment/cluster-autoscaler',
+          `carbon-autoscaler=${carbonAutoscalerImageRef()}`,
+          `cluster-autoscaler=${clusterAutoscalerImageRef()}`,
         ],
         {
           env,
           signal: caStop.signal,
-          description: 'applyK3sManifests: zero cluster-autoscaler deployment (pilot standby)',
+          description:
+            'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
         },
       );
-    }
+      if (pilotStandby) {
+        // Pilot-light: CA has nothing to scale for until a failover promotes
+        // this cluster, so zero it the same way as the app Deployment (step 5).
+        // Its node-group bounds are already pre-rendered into the
+        // carbon-autoscaler-config Secret (step 4b) using the PRIMARY's
+        // caBoundsMin/maxWorkers — the standby's maxSize reflects the same
+        // headroom the primary would scale into — so a failover only has to
+        // flip replicas 0→1, never re-render the config.
+        await runKubectlWithRetry(
+          [
+            '-n',
+            'kube-system',
+            'patch',
+            'deployment',
+            'cluster-autoscaler',
+            '--type=merge',
+            '-p',
+            JSON.stringify({ spec: { replicas: 0 } }),
+          ],
+          {
+            env,
+            signal: caStop.signal,
+            description: 'applyK3sManifests: zero cluster-autoscaler deployment (pilot standby)',
+          },
+        );
+      }
+    });
     // 5e. Wait for the rollout the `apply -k cluster-autoscaler` + `set image`
     //     steps above triggered (on `strategy: Recreate`, either one changing
     //     the pod template rolls the pod). The status-wait is the clean
@@ -3853,11 +3860,13 @@ export async function applyK3sManifests({
   //     ClusterIssuer is created the controller can immediately resolve
   //     `apiTokenSecretRef`. Stdin pipe keeps the token out of argv.
   if (dnsSecret) {
-    await runKubectlWithRetry(['apply', '-f', '-'], {
-      env,
-      input: dnsSecret.yaml,
-      description: `applyK3sManifests: kubectl apply Secret/${dnsSecret.name}`,
-    });
+    await perfAsync(`deploy.${perfPrefix}.dnsSecret`, () =>
+      runKubectlWithRetry(['apply', '-f', '-'], {
+        env,
+        input: dnsSecret.yaml,
+        description: `applyK3sManifests: kubectl apply Secret/${dnsSecret.name}`,
+      }),
+    );
   }
   // 2c. Some DNS-01 providers (currently: hetzner) need a third-party
   //     cert-manager webhook deployment because cert-manager core has no
@@ -3872,108 +3881,110 @@ export async function applyK3sManifests({
   //     `dnsProvider === 'hetzner'` gate did.
   const dns01Row = DNS01_PROVIDERS[dnsProvider];
   if (dns01Row?.webhook) {
-    const { repoName, repoUrl, chart, version, releaseName } = dns01Row.webhook;
-    // helm repo add fails if the repo already exists; `helm repo update`
-    // below refreshes either way, hence ignoreError.
-    await runCommandAsync(['helm', 'repo', 'add', repoName, repoUrl], {
-      silent: true,
-      ignoreError: true,
-      env,
-    });
-    await runCommandAsync(['helm', 'repo', 'update', repoName], {
-      silent: true,
-      env,
-    });
-    try {
-      // Chart 0.7.0 reads zero Helm values that bind the issuer's
-      // `hetzner` Secret — that linkage lives entirely in the
-      // ClusterIssuer's `config.tokenSecretKeyRef` (name `hetzner`,
-      // key `token`; created above by buildDnsProviderSecret). The
-      // chart's `groupName` default `acme.hetzner.com` matches the
-      // ClusterIssuer's groupName, so we don't override it either.
-      // Async helm + kubectl wait — both can block for minutes; sync would
-      // block Node's event loop and inflate parallel-branch perf timings.
-      // (RCA iter-validate6: a blocking wait on the primary made the standby's
-      // certManager.wait report 21min when the actual was seconds).
-      //
-      // The webhook warm-up retry that used to wrap this install is GONE
-      // (band-aid removal, 2026-08-16): the third-party chart's own Issuer +
-      // Certificate traverse cert-manager's admission pipeline, and
-      // awaitCertManagerAdmission has already proven that pipeline serves —
-      // including the caBundle window this helper's ladder absorbed
-      // (2026-08-10 e3). A webhook failure here is a regression: fail loudly.
+    await perfAsync(`deploy.${perfPrefix}.certManager.webhook`, async () => {
+      const { repoName, repoUrl, chart, version, releaseName } = dns01Row.webhook;
+      // helm repo add fails if the repo already exists; `helm repo update`
+      // below refreshes either way, hence ignoreError.
+      await runCommandAsync(['helm', 'repo', 'add', repoName, repoUrl], {
+        silent: true,
+        ignoreError: true,
+        env,
+      });
+      await runCommandAsync(['helm', 'repo', 'update', repoName], {
+        silent: true,
+        env,
+      });
       try {
-        await runCommandAsync(
+        // Chart 0.7.0 reads zero Helm values that bind the issuer's
+        // `hetzner` Secret — that linkage lives entirely in the
+        // ClusterIssuer's `config.tokenSecretKeyRef` (name `hetzner`,
+        // key `token`; created above by buildDnsProviderSecret). The
+        // chart's `groupName` default `acme.hetzner.com` matches the
+        // ClusterIssuer's groupName, so we don't override it either.
+        // Async helm + kubectl wait — both can block for minutes; sync would
+        // block Node's event loop and inflate parallel-branch perf timings.
+        // (RCA iter-validate6: a blocking wait on the primary made the standby's
+        // certManager.wait report 21min when the actual was seconds).
+        //
+        // The webhook warm-up retry that used to wrap this install is GONE
+        // (band-aid removal, 2026-08-16): the third-party chart's own Issuer +
+        // Certificate traverse cert-manager's admission pipeline, and
+        // awaitCertManagerAdmission has already proven that pipeline serves —
+        // including the caBundle window this helper's ladder absorbed
+        // (2026-08-10 e3). A webhook failure here is a regression: fail loudly.
+        try {
+          await runCommandAsync(
+            [
+              'helm',
+              'upgrade',
+              '--install',
+              releaseName,
+              chart,
+              '--namespace',
+              'cert-manager',
+              '--version',
+              version,
+              // Same control-plane pin as the core cert-manager deploys above —
+              // this webhook is the APIService backend cert-manager dials for
+              // dns01.webhook() and needs the apiserver itself; off-master it
+              // hits the same public-6443 firewall lockout. Standard chart
+              // values; if a future chart version drops them they are ignored
+              // harmlessly and the helm --wait below still gates readiness.
+              '--set-json',
+              'nodeSelector={"node-role.kubernetes.io/control-plane":"true"}',
+              '--set-json',
+              'tolerations=[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"}]',
+              '--wait',
+              '--timeout',
+              '5m',
+            ],
+            {
+              env,
+              silent: true,
+              description:
+                `cert-manager webhook: helm upgrade --install ${chart} --version ${version} ` +
+                `(release ${releaseName}), DNS-01 certificate issuance cannot work without it`,
+            },
+          );
+        } catch (err) {
+          // Keep the actionable framing the old helper's terminal throw carried:
+          // name the component and the consequence, then the raw helm error.
+          throw new Error(
+            `cert-manager webhook: helm upgrade --install ${chart} --version ${version} ` +
+              `(release ${releaseName}) failed — DNS-01 certificate issuance cannot work ` +
+              `without it. ${err.message}`,
+          );
+        }
+        const waitOk = await runCommandAsync(
           [
-            'helm',
-            'upgrade',
-            '--install',
-            releaseName,
-            chart,
-            '--namespace',
+            'kubectl',
+            '-n',
             'cert-manager',
-            '--version',
-            version,
-            // Same control-plane pin as the core cert-manager deploys above —
-            // this webhook is the APIService backend cert-manager dials for
-            // dns01.webhook() and needs the apiserver itself; off-master it
-            // hits the same public-6443 firewall lockout. Standard chart
-            // values; if a future chart version drops them they are ignored
-            // harmlessly and the helm --wait below still gates readiness.
-            '--set-json',
-            'nodeSelector={"node-role.kubernetes.io/control-plane":"true"}',
-            '--set-json',
-            'tolerations=[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"}]',
-            '--wait',
-            '--timeout',
-            '5m',
+            'wait',
+            '--for=condition=Available',
+            '--timeout=180s',
+            `deploy/${releaseName}`,
           ],
-          {
-            env,
-            silent: true,
-            description:
-              `cert-manager webhook: helm upgrade --install ${chart} --version ${version} ` +
-              `(release ${releaseName}), DNS-01 certificate issuance cannot work without it`,
-          },
+          { silent: false, env },
         );
+        if (waitOk !== true) {
+          throw new Error(
+            `cert-manager webhook: deploy/${releaseName} never became Available ` +
+              `(180s). DNS-01 certificate issuance cannot work without it.`,
+          );
+        }
       } catch (err) {
-        // Keep the actionable framing the old helper's terminal throw carried:
-        // name the component and the consequence, then the raw helm error.
-        throw new Error(
-          `cert-manager webhook: helm upgrade --install ${chart} --version ${version} ` +
-            `(release ${releaseName}) failed — DNS-01 certificate issuance cannot work ` +
-            `without it. ${err.message}`,
+        // Surface webhook pod logs on failure — chart install rarely
+        // tells the operator anything useful when the actual cause is
+        // a CrashLoopBackOff or a missing dependency. Best-effort but LOUD,
+        // and captured (not inherited) so it reaches the deploy log file.
+        await runDeployDiagnostic(
+          ['kubectl', '-n', 'cert-manager', 'logs', `deploy/${releaseName}`, '--tail=200'],
+          { env, label: `cert-manager: logs deploy/${releaseName}`, tailLines: 200 },
         );
+        throw err;
       }
-      const waitOk = await runCommandAsync(
-        [
-          'kubectl',
-          '-n',
-          'cert-manager',
-          'wait',
-          '--for=condition=Available',
-          '--timeout=180s',
-          `deploy/${releaseName}`,
-        ],
-        { silent: false, env },
-      );
-      if (waitOk !== true) {
-        throw new Error(
-          `cert-manager webhook: deploy/${releaseName} never became Available ` +
-            `(180s). DNS-01 certificate issuance cannot work without it.`,
-        );
-      }
-    } catch (err) {
-      // Surface webhook pod logs on failure — chart install rarely
-      // tells the operator anything useful when the actual cause is
-      // a CrashLoopBackOff or a missing dependency. Best-effort but LOUD,
-      // and captured (not inherited) so it reaches the deploy log file.
-      await runDeployDiagnostic(
-        ['kubectl', '-n', 'cert-manager', 'logs', `deploy/${releaseName}`, '--tail=200'],
-        { env, label: `cert-manager: logs deploy/${releaseName}`, tailLines: 200 },
-      );
-      throw err;
-    }
+    });
   }
   // 3. Apply infra (cert-manager-resources/cluster-issuers + traefik-crds).
   // ClusterIssuers traverse cert-manager's validating webhook. The webhook
@@ -3981,20 +3992,26 @@ export async function applyK3sManifests({
   // 2026-08-16): awaitCertManagerAdmission above has already PROVEN the
   // admission pipeline round-trips, so a webhook failure here is a real
   // regression and must fail the deploy loudly, not be absorbed.
-  await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/infra/cert-manager-resources')], {
-    env,
-    description: 'applyK3sManifests: kubectl apply -k cert-manager-resources',
-  });
-  await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/infra/traefik-crds')], {
-    env,
-    description: 'applyK3sManifests: kubectl apply -k traefik-crds',
-  });
+  await perfAsync(`deploy.${perfPrefix}.certManager.resources`, () =>
+    runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/infra/cert-manager-resources')], {
+      env,
+      description: 'applyK3sManifests: kubectl apply -k cert-manager-resources',
+    }),
+  );
+  await perfAsync(`deploy.${perfPrefix}.traefikCrds`, () =>
+    runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/infra/traefik-crds')], {
+      env,
+      description: 'applyK3sManifests: kubectl apply -k traefik-crds',
+    }),
+  );
   // 4. Create the app and infra Secrets BEFORE base/ — base/'s Deployment
   //    and StatefulSet reference them; without them kubelet fails container
   //    creation with `secret "vibecarbon-app-secrets" not found`.
   //    With `deploy -restore` the infra Secret also carries the restore
   //    marker, so the db pod's first boot restores that backup.
-  await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore });
+  await perfAsync(`deploy.${perfPrefix}.secrets`, () =>
+    applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, restore }),
+  );
   onNamespaceReady?.();
   // 5. Apply base (namespace, network-policies, db, app, backup, traefik,
   //    config), always from a rendered temp copy (renderK8sBase): the db
@@ -4015,8 +4032,10 @@ export async function applyK3sManifests({
   const storageClass = ProviderClass?.K8S_STORAGE_CLASS;
   // A chart-era cluster keeps its database on the chart's StatefulSet; a new
   // one beside it would be empty. Refuse before anything is created.
-  await assertNoRetiredChartDb({ env });
-  await assertDbStorageClass({ storageClass, env });
+  await perfAsync(`deploy.${perfPrefix}.db.preflight`, async () => {
+    await assertNoRetiredChartDb({ env });
+    await assertDbStorageClass({ storageClass, env });
+  });
   // Issuer choice (k8sIssuerName): ACME_CA_SERVER from .env.local or the
   // operator's environment picks staging or prod; the provider suffix
   // (cloudflare/hetzner/manual) determines which solver, DNS-01 or HTTP-01,
@@ -5159,10 +5178,17 @@ async function deployK3sSteps(options, inFlight) {
   // re-pins a Hetzner-recycled IP cleanly (seedKnownHosts drops the stale
   // per-IP line). Best-effort: if ssh-keyscan can't reach a node we fall back
   // to accept-new TOFU. See host-keys.js seedKnownHosts for the full security
-  // rationale (why only provisioning re-seeds).
-  for (const seedIp of [masterIp, dbIp, ...(workerIps ?? [])].filter(Boolean)) {
-    await seedKnownHosts(khPath, seedIp);
-  }
+  // rationale (why only provisioning re-seeds). Every node is scanned at once,
+  // so the cluster pays for its slowest node rather than the sum (13 s for the
+  // two DO tor1 standby nodes on an evening path); concurrent seeds of one
+  // file are safe, each merge runs after its own scan with no await inside.
+  await perfAsync(`deploy.${perfPrefix}.hostKeys`, () =>
+    Promise.all(
+      [masterIp, dbIp, ...(workerIps ?? [])]
+        .filter(Boolean)
+        .map((ip) => seedKnownHosts(khPath, ip)),
+    ),
+  );
 
   // First-boot timing (`[perf] deploy.<perfPrefix>.<node>.boot.*`, VIBECARBON_PERF only):
   // queued now, read once the command is over (lib/deploy/boot-timing.js).
@@ -5253,12 +5279,8 @@ async function deployK3sSteps(options, inFlight) {
   if (!state.shouldSkip('k3s-kubeconfig', { masterIp })) {
     state.startStep('k3s-kubeconfig', { masterIp });
     s.start('Retrieving kubeconfig');
-    kubeconfig = await fetchKubeconfig(
-      masterIp,
-      privateKeyPath,
-      khPath,
-      projectDir,
-      options.environment,
+    kubeconfig = await perfAsync(`deploy.${perfPrefix}.kubeconfig`, () =>
+      fetchKubeconfig(masterIp, privateKeyPath, khPath, projectDir, options.environment),
     );
     state.completeStep('k3s-kubeconfig', { kubeconfig });
     s.stop('Kubeconfig saved');
@@ -5273,32 +5295,45 @@ async function deployK3sSteps(options, inFlight) {
   //     `deploy -restore`). Outside every step gate on purpose: a skipped
   //     k3s-apply must not skip it. Before the image is recorded or
   //     delivered, so a refusal changes nothing on the cluster.
+  //     The control-plane gate is the deploy's only one: it proves the
+  //     apiserver serves (discovery and admission) for the marker read and
+  //     for everything applyK3sManifests does next, since nothing between
+  //     here and that apply touches k3s (the image wait is local or over the
+  //     peer; the apply gate's registry probe is ssh).
   {
     const kubeEnv = { ...process.env, KUBECONFIG: kubeconfig };
-    await awaitControlPlaneServing({ env: kubeEnv });
-    await assertRestoreMarkerState({
-      env: kubeEnv,
-      restore: options.restore ?? null,
-      operatorEnv: options.operatorEnv ?? options.environment,
-    });
+    await perfAsync(`deploy.${perfPrefix}.controlPlane.gate`, () =>
+      awaitControlPlaneServing({ env: kubeEnv }),
+    );
+    await perfAsync(`deploy.${perfPrefix}.restoreMarker`, () =>
+      assertRestoreMarkerState({
+        env: kubeEnv,
+        restore: options.restore ?? null,
+        operatorEnv: options.operatorEnv ?? options.environment,
+      }),
+    );
   }
 
   // 6-7. The app image: finish the build started before provisioning (or
   // build it now), or, on a k8s-ha standby, take the primary's ref
   // (deliverAppImage). applyK3sManifests delivers a built one to the master's
   // registry.
-  const imageTag = await deliverAppImage({
-    early,
-    role: options.role,
-    peerImageRef: options.peerImageRef,
-    onImageBuilt: options.onImageBuilt,
-    state,
-    projectDir,
-    projectName: options.projectName,
-    domain: options.domain,
-    masterPrivateIp,
-    spinner: s,
-  });
+  // The span is the wait for it: the early build's own time is
+  // `image.localBuild`.
+  const imageTag = await perfAsync(`deploy.${perfPrefix}.image.ready`, () =>
+    deliverAppImage({
+      early,
+      role: options.role,
+      peerImageRef: options.peerImageRef,
+      onImageBuilt: options.onImageBuilt,
+      state,
+      projectDir,
+      projectName: options.projectName,
+      domain: options.domain,
+      masterPrivateIp,
+      spinner: s,
+    }),
+  );
 
   // 8. Apply manifests (the db StatefulSet included) + roll out the app.
   // The gate folds the CONTENT of BOTH applied manifest trees (the project
