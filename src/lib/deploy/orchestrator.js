@@ -16,6 +16,7 @@ import { writeLogDetail } from '../deploy-logger.js';
 import { getDnsProvider, hasAutomatedDns, operatorConfigForDns } from '../dns-provider.js';
 import { clearDestroyedRecord } from '../env-identity.js';
 import { emitStateScopeYoung } from '../iac/state-telemetry.js';
+import { localKubeconfigPath } from '../kubeconfig.js';
 import { readOperatorVar } from '../operator-env.js';
 import { ensureOperatorIpAccess } from '../operator-ip.js';
 import { perfAsync, perfTimer } from '../perf.js';
@@ -574,9 +575,9 @@ export async function liftStrandedFenceAtEntry({
 export function resolveKubeconfigPath(environment, envConfig) {
   const roleStack = envConfig?.ha?.primary?.stack;
   const candidates = [
-    ...(roleStack ? [join(process.cwd(), '.vibecarbon', `kubeconfig-${roleStack}`)] : []),
-    join(process.cwd(), '.vibecarbon', `kubeconfig-${environment}-primary`),
-    join(process.cwd(), '.vibecarbon', `kubeconfig-${environment}`),
+    ...(roleStack ? [localKubeconfigPath(process.cwd(), roleStack)] : []),
+    localKubeconfigPath(process.cwd(), `${environment}-primary`),
+    localKubeconfigPath(process.cwd(), environment),
   ];
   return {
     path: candidates.find((c) => existsSync(c)) ?? candidates[candidates.length - 1],
@@ -2267,7 +2268,7 @@ export async function executeDeployment(args, gatheredConfig) {
 
   if (isK8sTier(tier)) {
     {
-      const kubeconfigPath = join(process.cwd(), '.vibecarbon', `kubeconfig-${environment}`);
+      const kubeconfigPath = localKubeconfigPath(process.cwd(), environment);
       const masterIp = deployResult.primary?.masterIp || deployResult.masterIp;
       p.log.success('Local-first deploy complete. App is delivered + running on the cluster.');
       p.note(

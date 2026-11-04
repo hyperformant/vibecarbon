@@ -26,6 +26,7 @@
 
 import { runCommandAsync } from './command.js';
 import { DNS_PROVIDERS } from './dns-provider.js';
+import { withCompressionDisabled } from './kubeconfig.js';
 
 /**
  * Get the current repo's `owner/name` from the gh CLI. Relies on a git
@@ -203,11 +204,13 @@ export async function seedEnvironmentSecrets(envName, secrets, vars = {}, { time
  * Upload the cluster kubeconfig as a base64-encoded env secret. The deploy
  * workflow base64-decodes it with `printf ... | base64 -d` into a file and
  * points `$KUBECONFIG` at it. Base64 is used (rather than raw YAML) because
- * the downstream shell interpolation needs a single-line value.
+ * the downstream shell interpolation needs a single-line value. Response
+ * compression is turned off in the uploaded copy (src/lib/kubeconfig.js says
+ * why), in memory: the local file is only read, never rewritten.
  */
 export async function uploadKubeconfig(envName, kubeconfigPath) {
   const { readFileSync } = await import('node:fs');
-  const raw = readFileSync(kubeconfigPath, 'utf-8');
+  const raw = withCompressionDisabled(readFileSync(kubeconfigPath, 'utf-8'));
   const b64 = Buffer.from(raw, 'utf-8').toString('base64');
   await ensureEnvironment(envName);
   await setSecretFromBodyFile('KUBECONFIG_B64', b64, envName);

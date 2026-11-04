@@ -61,6 +61,7 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { envIdentityOf } from './lib/env-identity.js';
+import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit, requiresProdTypeToConfirm } from './lib/prod-confirm.js';
@@ -543,9 +544,9 @@ function cleanupLocalEnvFiles(cwd, envName) {
     join(cwd, '.vibecarbon', `known_hosts_${envName}`),
     join(cwd, '.vibecarbon', `known_hosts_${envName}-primary`),
     join(cwd, '.vibecarbon', `known_hosts_${envName}-standby`),
-    join(cwd, '.vibecarbon', `kubeconfig-${envName}`),
-    join(cwd, '.vibecarbon', `kubeconfig-${envName}-primary`),
-    join(cwd, '.vibecarbon', `kubeconfig-${envName}-standby`),
+    localKubeconfigPath(cwd, envName),
+    localKubeconfigPath(cwd, `${envName}-primary`),
+    localKubeconfigPath(cwd, `${envName}-standby`),
     // k8s-HA uses per-cluster StateTrackers, so the deploy-state file
     // splits across `<env>`, `<env>-primary`, `<env>-standby`. All three
     // must be cleaned to prevent the next deploy's shouldSkip from matching
@@ -2742,7 +2743,7 @@ async function destroyK8sTier({
     console.log(`Capturing CSI volume identities from ${stackEnvs.length} cluster(s)...`);
     const captures = [];
     for (const stackEnv of stackEnvs) {
-      const kubeconfigPath = join(cwd, '.vibecarbon', `kubeconfig-${stackEnv}`);
+      const kubeconfigPath = localKubeconfigPath(cwd, stackEnv);
       const dirLabel = isHAK8s ? ` (${stackEnv})` : '';
       const capture = captureClusterCsiVolumes(kubeconfigPath, { timeoutSeconds: 20 });
       if (capture.ok) {
@@ -2923,7 +2924,7 @@ async function destroyK8sTier({
     );
     await Promise.allSettled(
       stackEnvs.map(async (stackEnv) => {
-        const kubeconfigPath = join(cwd, '.vibecarbon', `kubeconfig-${stackEnv}`);
+        const kubeconfigPath = localKubeconfigPath(cwd, stackEnv);
         const dirLabel = isHAK8s ? ` (${stackEnv})` : '';
         try {
           await cleanupClusterPVCs(kubeconfigPath);

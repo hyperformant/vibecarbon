@@ -69,7 +69,7 @@ const ALLOW: { why: string; sites: string[] }[] = [
       'src/lib/ci-setup.js url https://ghcr.io/v2/{*}/{*}/manifests/{*}',
       'src/lib/providers/linode-objectstorage.js mintAppKey https://{*}',
       'src/add.js GITHUB_RAW_BASE https://raw.githubusercontent.com/{*}/{*}',
-      'src/lib/deploy/k8s/k3s.js patched https://{*}:6443',
+      'src/lib/kubeconfig.js operatorKubeconfigText https://{*}:6443',
       'src/lib/deploy/compose/index.js registryHost https://index.docker.io/v1/',
     ],
   },
