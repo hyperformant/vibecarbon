@@ -80,6 +80,14 @@ describe('the shared Certificate renderer', () => {
     [{ effectiveIssuer: 'letsencrypt-prod; rm' }, /issuer/],
     [{ dnsNames: ['app.example.test\n- evil'] }, /DNS name/],
     [{ dnsNames: ['app example.test'] }, /DNS name/],
+    [{ dnsNames: ['*.a.dev'] }, /DNS name/],
+    [
+      {
+        issuerName: 'letsencrypt-prod-digitalocean',
+        effectiveIssuer: 'letsencrypt-prod-digitalocean',
+      },
+      /issuer/,
+    ],
     [{ dnsNames: [] }, /dnsNames/],
   ])('refuses an unvalidated value (%j)', (over, pattern) => {
     expect(() => renderTlsCertificateManifest({ ...TLS, ...over })).toThrow(pattern);

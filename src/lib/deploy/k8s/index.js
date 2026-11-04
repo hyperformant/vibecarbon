@@ -32,7 +32,7 @@ export { reestablishReplicationTransport } from './ha/index.js';
 export { K3S_VERSION, k8sTlsIdentity } from './k3s.js';
 // Re-exported so the orchestrator's preflight (outside src/lib/deploy/k8s/)
 // refuses a project whose observability files still issue grafana-tls.
-export { staleObservabilityTlsProblem } from './one-certificate.js';
+export { staleClusterIssuersProblem, staleObservabilityTlsProblem } from './one-certificate.js';
 // Re-exported so src/backup.js can gate the manual backup Job on the
 // exec+pg condition (RCA 2026-08-16, run 31927810430) without reaching into
 // ./readiness.js directly — see paid-boundary guard.

@@ -133,6 +133,19 @@ describe('armComposeAcme / disarmComposeAcme', () => {
     });
   });
 
+  it('a failed arm warns that the recreate ran on the live node: how to check it and how to repair', async () => {
+    const warn = vi.fn();
+    await armComposeAcme({
+      ...baseArgs,
+      promotedIp: '10.0.0.2',
+      deps: { mergeEnv: vi.fn().mockRejectedValue(new Error('ssh: reset')), run: vi.fn(), warn },
+    });
+    const said = String(warn.mock.calls[0][0]);
+    expect(said).toContain('ran on the live node and may have left Traefik stopped');
+    expect(said).toContain("ssh root@10.0.0.2 'cd /opt/demo && docker compose ps traefik'");
+    expect(said).toContain('`vibecarbon deploy <env>`');
+  });
+
   it('both are best-effort: failures warn and return false, never throw (DR path)', async () => {
     const boom = vi.fn().mockRejectedValue(new Error('ssh: unreachable'));
     const warn = vi.fn();

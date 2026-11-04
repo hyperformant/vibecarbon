@@ -3625,7 +3625,7 @@ function finishThenReport(stepLabel, effect) {
         resourceClass: 'destroy-step',
         resource: stepLabel,
         reason: `step threw: ${error.message}, anything it had not yet deleted is unaccounted for`,
-        hint: `Re-run \`vibecarbon destroy ${ctx.environment}\` once the cause is addressed; the remaining teardown steps still ran.`,
+        hint: `Re-run \`vibecarbon destroy ${ctx.environment}\` once the cause is addressed; the remaining teardown steps still ran. A step that stopped early can leave the environment's compute and its DNS records in place, and the re-run removes both.`,
       });
     }
   };

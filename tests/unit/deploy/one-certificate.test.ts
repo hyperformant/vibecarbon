@@ -20,6 +20,7 @@ import {
   RETIRED_OBSERVABILITY_CERTIFICATE,
   removeRetiredObservabilityCertificate,
   retireObservabilityCertificateIfPresent,
+  staleClusterIssuersProblem,
   staleObservabilityTlsProblem,
 } from '../../../src/lib/deploy/k8s/one-certificate.js';
 
@@ -100,6 +101,77 @@ describe('staleObservabilityTlsProblem', () => {
       'ingressroute.yaml': `${shipped('ingressroute.yaml')}\n# secretName: grafana-tls\n`,
     });
     expect(staleObservabilityTlsProblem(dir)).toBeNull();
+  });
+});
+
+const TEMPLATE_ISSUERS = join(ROOT, 'carbon', 'k8s', 'infra', 'cert-manager-resources');
+const ISSUERS_REFUSAL =
+  "This project's cluster issuers predate HTTP-01 certificates. Run `vibecarbon upgrade`, then deploy again. Nothing was provisioned.";
+
+function projectWithIssuers(files: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), 'vc-issuers-'));
+  const d = join(dir, 'k8s', 'infra', 'cert-manager-resources');
+  mkdirSync(d, { recursive: true });
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(d, name), text);
+  return dir;
+}
+
+const OLD_ISSUERS_KUSTOMIZATION = `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cluster-issuers-manual.yaml
+  - cluster-issuers-cloudflare.yaml
+  - cluster-issuers-hetzner.yaml
+  - cluster-issuers-digitalocean.yaml
+`;
+
+describe('staleClusterIssuersProblem', () => {
+  it('refuses a project from before HTTP-01 certificates: only provider-suffixed issuer files listed', () => {
+    const dir = projectWithIssuers({
+      'kustomization.yaml': OLD_ISSUERS_KUSTOMIZATION,
+      'cluster-issuers-manual.yaml': 'metadata:\n  name: letsencrypt-prod-manual\n',
+      'cluster-issuers-digitalocean.yaml': 'metadata:\n  name: letsencrypt-prod-digitalocean\n',
+    });
+    expect(staleClusterIssuersProblem(dir)).toBe(ISSUERS_REFUSAL);
+  });
+
+  it('refuses a kustomization that lists cluster-issuers.yaml when the file defines no letsencrypt-prod', () => {
+    const dir = projectWithIssuers({
+      'kustomization.yaml': readFileSync(join(TEMPLATE_ISSUERS, 'kustomization.yaml'), 'utf8'),
+      'cluster-issuers.yaml': 'metadata:\n  name: letsencrypt-prod-manual\n',
+    });
+    expect(staleClusterIssuersProblem(dir)).toBe(ISSUERS_REFUSAL);
+  });
+
+  it('ignores the file name in a comment', () => {
+    const dir = projectWithIssuers({
+      'kustomization.yaml': `${OLD_ISSUERS_KUSTOMIZATION}\n# - cluster-issuers.yaml\n`,
+      'cluster-issuers.yaml': readFileSync(join(TEMPLATE_ISSUERS, 'cluster-issuers.yaml'), 'utf8'),
+    });
+    expect(staleClusterIssuersProblem(dir)).toBe(ISSUERS_REFUSAL);
+  });
+
+  it('passes the files the template ships today', () => {
+    const dir = projectWithIssuers({
+      'kustomization.yaml': readFileSync(join(TEMPLATE_ISSUERS, 'kustomization.yaml'), 'utf8'),
+      'cluster-issuers.yaml': readFileSync(join(TEMPLATE_ISSUERS, 'cluster-issuers.yaml'), 'utf8'),
+    });
+    expect(staleClusterIssuersProblem(dir)).toBeNull();
+  });
+
+  it('never judges a project with no k8s issuer scaffold (a compose project)', () => {
+    expect(staleClusterIssuersProblem(mkdtempSync(join(tmpdir(), 'vc-issuers-')))).toBeNull();
+  });
+
+  it('is called in the k8s-only branch of the deploy preflight, before the operator-IP step', () => {
+    const orch = readFileSync(join(ROOT, 'src', 'lib', 'deploy', 'orchestrator.js'), 'utf8');
+    const tierGate = orch.indexOf('assertTierSupported(providerFor(config), tier);');
+    const call = orch.indexOf('staleClusterIssuersProblem(process.cwd())');
+    const operatorIp = orch.indexOf('// Operator-IP access:');
+    expect(call).toBeGreaterThan(tierGate);
+    expect(call).toBeLessThan(operatorIp);
+    expect(orch.slice(tierGate, call)).toContain('if (isK8sTier(tier)) {');
+    expect(orch.slice(call, operatorIp)).toMatch(/throw new Error\(staleClusterIssuers\)/);
   });
 });
 

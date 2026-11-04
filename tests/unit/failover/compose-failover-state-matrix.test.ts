@@ -105,6 +105,8 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
 // The ACME arm and disarm (acme-role.js) write ACME_DISARMED_CA_SERVER into a
 // node's .env: recorded here by node and value (empty arms, the URL disarms).
 let onMergeEnv: ((ip: string, values: Record<string, string>) => void) | undefined;
+// The arm's .env write fails (the node is reachable only until the recreate).
+let armMergeFails = false;
 vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -112,6 +114,8 @@ vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
     mergeRemoteDotenv: vi.fn(
       async (ip: string, _ssh: string, _dir: string, values: Record<string, string>) => {
         onMergeEnv?.(ip, values);
+        if (armMergeFails && values[ACME_DISARM_ENV] === '')
+          throw new Error('ssh: connection reset');
       },
     ),
   };
@@ -122,6 +126,10 @@ vi.mock('node:fs', async (orig) => {
   return { ...actual, existsSync: () => true };
 });
 
+// What the trusted-TLS gate and the certificate restore answer (per row).
+const tlsGate = { trusted: true };
+const restoreAnswer = { restored: false };
+
 // Managed-DNS rows: the token resolves unless a row says otherwise, and the
 // trusted-TLS gate never touches the network.
 let dnsToken = 'dns-token';
@@ -131,7 +139,10 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
 });
 vi.mock('../../../src/lib/deploy/tls-ready.js', () => ({
   TLS_FIRST_LOOK_BUDGET_MS: 180_000,
-  waitForTrustedTls: async () => ({ trusted: true, elapsedMs: 0 }),
+  waitForTrustedTls: async () =>
+    tlsGate.trusted
+      ? { trusted: true, elapsedMs: 0 }
+      : { trusted: false, elapsedMs: 0, reason: 'no certificate yet' },
 }));
 
 // The saved-certificate restore on the promoted node (tls-restore tests own
@@ -141,11 +152,13 @@ vi.mock('../../../src/lib/deploy/compose/tls-restore.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   restoreFailoverTls: vi.fn(async () => {
     onTlsRestore?.();
-    return {
-      restored: false,
-      reason: 'no recorded CA',
-      line: 'TLS certificate not restored (no recorded CA).',
-    };
+    return restoreAnswer.restored
+      ? { restored: true, reason: 'restored', line: 'TLS certificate restored.' }
+      : {
+          restored: false,
+          reason: 'no recorded CA',
+          line: 'TLS certificate not restored (no recorded CA).',
+        };
   }),
 }));
 
@@ -234,6 +247,12 @@ interface RunOpts {
   dnsFlip?: { ok: true } | { ok: false; reason: string };
   /** Whether public resolvers show the promoted node before the arm (default: yes). */
   dnsPropagates?: boolean;
+  /** The arm's .env write fails, so the arm reports a failure. */
+  armFails?: boolean;
+  /** A saved certificate was restored before the flip. */
+  tlsRestored?: boolean;
+  /** The trusted-TLS gate sees a trusted certificate (default: yes). */
+  tlsTrusted?: boolean;
   /** Pass no seams at all (the real ssh-backed defaults run). */
   noSeams?: boolean;
   /** Drop the fenceOldPrimary seam so the real default (ssh-backed) fence runs. */
@@ -265,7 +284,14 @@ async function run(opts: RunOpts = {}) {
     dnsPropagates = true,
     noSeams = false,
     realFence = false,
+    armFails = false,
+    tlsRestored = false,
+    tlsTrusted = true,
   } = opts;
+  armMergeFails = armFails;
+  restoreAnswer.restored = tlsRestored;
+  tlsGate.trusted = tlsTrusted;
+  const stops: string[] = [];
   const order: string[] = [];
   onTlsRestore = () => order.push('tlsRestore');
   onMergeEnv = (ip, values) => {
@@ -408,7 +434,15 @@ async function run(opts: RunOpts = {}) {
   };
   const projectConfig = { projectName: 'myapp', environments: { prod: envConfig } };
   const parsed = { yes: true, dryRun: false, ...flags };
-  const tracker = { spinner: () => ({ start() {}, stop() {}, message() {} }) };
+  const tracker = {
+    spinner: () => ({
+      start() {},
+      stop(m?: string) {
+        if (m) stops.push(m);
+      },
+      message() {},
+    }),
+  };
   let thrown: Error | undefined;
   try {
     await failoverComposeHA(
@@ -423,7 +457,7 @@ async function run(opts: RunOpts = {}) {
   } catch (err) {
     thrown = err as Error;
   }
-  return { order, captured, thrown };
+  return { order, captured, thrown, stops };
 }
 
 /** Steps a refusal must never reach. */
@@ -450,7 +484,12 @@ beforeEach(() => {
   addonStartResult = '';
   roleFiles.clear();
 });
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  armMergeFails = false;
+  restoreAnswer.restored = false;
+  tlsGate.trusted = true;
+});
 
 describe('failoverComposeHA state matrix', () => {
   it('a proven replica promotes: the journal goes down immediately before the promote, the swap clears it', async () => {
@@ -1538,5 +1577,49 @@ describe('failoverComposeHA arms ACME only where DNS points (HTTP-01)', () => {
     expect(order.indexOf('disarmAcme@primary')).toBeLessThan(order.indexOf('armAcme@standby'));
     expect(order.indexOf('tlsRestore')).toBeLessThan(order.indexOf('armAcme@standby'));
     expect(order.indexOf('armAcme@standby')).toBeLessThan(order.indexOf('swap'));
+  });
+  describe('what the operator reads when the arm after the flip fails', () => {
+    let warn: ReturnType<typeof vi.spyOn>;
+    const warnings = () => warn.mock.calls.map((c) => String(c[0]));
+    beforeEach(() => {
+      warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => warn.mockRestore());
+
+    it('armed with a restored certificate: the spinner says it serves the restored certificate', async () => {
+      const { stops } = await run({ envConfig: managedDns(), tlsRestored: true });
+      expect(stops).toContain('Promoted node ACME issuer armed (serving the restored certificate)');
+    });
+
+    it('not armed, a certificate was restored: the domain serves the restored certificate until renewal is armed', async () => {
+      const { stops, thrown } = await run({
+        envConfig: managedDns(),
+        tlsRestored: true,
+        armFails: true,
+      });
+      expect(thrown).toBeUndefined();
+      const said = stops.find((m) => m.includes('NOT armed')) ?? '';
+      expect(said).toContain('serves the restored certificate until renewal is armed');
+      expect(said).not.toContain('untrusted');
+    });
+
+    it('not armed, nothing restored: the domain serves an untrusted certificate', async () => {
+      const { stops } = await run({ envConfig: managedDns(), armFails: true });
+      expect(stops.find((m) => m.includes('NOT armed'))).toContain('untrusted certificate');
+    });
+
+    it('not armed and not trusted: the TLS gate never claims the site is serving', async () => {
+      await run({ envConfig: managedDns(), armFails: true, tlsTrusted: false });
+      const said = warnings().join('\n');
+      expect(said).toContain('ACME issuer is not armed');
+      expect(said).toContain('Traefik may be stopped');
+      expect(said).toContain('vibecarbon deploy prod');
+      expect(said).not.toContain('the site is serving');
+    });
+
+    it('armed but not trusted: the gate keeps its wording', async () => {
+      await run({ envConfig: managedDns(), tlsTrusted: false });
+      expect(warnings().join('\n')).toContain('the site is serving');
+    });
   });
 });

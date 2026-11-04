@@ -143,7 +143,10 @@ export async function armComposeAcme({ promotedIp, sshKeyPath, projectName, deps
     warn(
       `Could not arm the promoted node's ACME issuer (${promotedIp}): ${err.message}. ` +
         'It cannot issue or renew a certificate until it is armed, so the domain shows an ' +
-        'untrusted certificate unless a saved one was restored. `vibecarbon deploy` arms it.',
+        'untrusted certificate unless a saved one was restored. The Traefik recreate ran on ' +
+        'the live node and may have left Traefik stopped, so the site may be down. Check it ' +
+        `with: ssh root@${promotedIp} 'cd ${remoteDir} && docker compose ps traefik'. ` +
+        'Repair with: `vibecarbon deploy <env>`, which re-arms it and recreates Traefik.',
     );
     return false;
   }

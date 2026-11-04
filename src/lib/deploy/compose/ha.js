@@ -2832,7 +2832,11 @@ export async function failoverComposeHA(
   // that dies here keeps its journal and the rerun arms. Best-effort: a failed
   // arm degrades TLS and never aborts a DR flip (armComposeAcme warns with the
   // manual fix). A restored certificate is served as is; with none, issuance
-  // starts here.
+  // starts here. The arm is a Traefik recreate (its caserver is a static flag),
+  // and it now runs on the node DNS points at, so the few seconds of refused
+  // connections it causes land right after the flip. That is inherent to
+  // arming after the flip, which is what keeps the first HTTP-01 challenge
+  // from reaching the old primary.
   if (dnsAutomated && dnsFlip.ok && envConfig.domain) {
     s.start(`Waiting for ${envConfig.domain} to resolve to ${standbyServer.ip}`);
     const propagated = await waitForDns(envConfig.domain, standbyServer.ip, 120_000);
@@ -2853,7 +2857,9 @@ export async function failoverComposeHA(
       ? tlsRestore.restored
         ? 'Promoted node ACME issuer armed (serving the restored certificate)'
         : 'Promoted node ACME issuer armed (certificate issuance underway)'
-      : 'Promoted node ACME issuer NOT armed, the domain serves an untrusted certificate (see warning)',
+      : tlsRestore.restored
+        ? 'Promoted node ACME issuer NOT armed, the domain serves the restored certificate until renewal is armed (see warning)'
+        : 'Promoted node ACME issuer NOT armed, the domain serves an untrusted certificate (see warning)',
   );
 
   // Persist the swap; the same save clears the failover journal (R2). Right
@@ -2908,10 +2914,15 @@ export async function failoverComposeHA(
     } else {
       s.stop('Domain not yet serving a trusted TLS certificate', 1);
       p.log.warn(
-        `The failover is complete and the site is serving, but ${envConfig.domain} still ` +
-          `presents an untrusted certificate (${tls.reason}). The tls-retry cron on the ` +
-          `promoted node restarts Traefik to retry issuance every 30 minutes. If this ` +
-          `persists, check the ACME error in \`docker compose logs traefik\` on that node.`,
+        acmeArmed
+          ? `The failover is complete and the site is serving, but ${envConfig.domain} still ` +
+              `presents an untrusted certificate (${tls.reason}). The tls-retry cron on the ` +
+              `promoted node restarts Traefik to retry issuance every 30 minutes. If this ` +
+              `persists, check the ACME error in \`docker compose logs traefik\` on that node.`
+          : `The failover is complete, but the promoted node's ACME issuer is not armed and ` +
+              `${envConfig.domain} does not present a trusted certificate (${tls.reason}). ` +
+              `Traefik may be stopped on that node, so the site may not be serving. Check it ` +
+              `with the command in the warning above, then run \`vibecarbon deploy ${envName}\`.`,
       );
     }
   }

@@ -73,6 +73,7 @@ import {
   liveK8sTlsSecretSerial,
   quietKubectl,
   snapshotK8sTlsSecret,
+  staleClusterIssuersProblem,
   staleObservabilityTlsProblem,
 } from './k8s/index.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
@@ -1101,6 +1102,10 @@ export async function executeDeployment(args, gatheredConfig) {
   if (isK8sTier(tier)) {
     const staleObservabilityTls = staleObservabilityTlsProblem(process.cwd());
     if (staleObservabilityTls) throw new Error(staleObservabilityTls);
+    // The same refusal for the ClusterIssuers: a project copied before
+    // HTTP-01 certificates has no `letsencrypt-prod` for the Certificate.
+    const staleClusterIssuers = staleClusterIssuersProblem(process.cwd());
+    if (staleClusterIssuers) throw new Error(staleClusterIssuers);
   }
 
   // Operator-IP access: detect + persist + (when env already deployed) patch

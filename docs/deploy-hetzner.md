@@ -191,7 +191,7 @@ Let's Encrypt checks each name over HTTP-01, so port 80 must reach your server, 
 
 Your certificate is issued once and then reused. Right after a deploy finds it trusted, and on every scheduled backup after that, it is saved (with its key) to the environment's backup bucket. A restore, a scale onto new servers, or a failover puts that copy back instead of asking Let's Encrypt for a new one, so the new side serves your certificate as soon as it takes over and you stay clear of Let's Encrypt's rate limits. A plain `vibecarbon destroy` keeps the saved copy; `destroy -purge` removes it with the rest of the backups.
 
-A deploy doesn't wait out a slow certificate authority. It looks for a trusted certificate for about three minutes (one minute with manual DNS), then finishes with TLS **pending** if there isn't one yet. Your app is deployed either way.
+A deploy doesn't wait out a slow certificate authority. It looks for a trusted certificate for about two minutes (one minute with manual DNS), then finishes with TLS **pending** if there isn't one yet. Your app is deployed either way.
 
 On compose and compose-ha a small cron on the server retries issuance every 30 minutes: it waits while your domain doesn't point at the server yet, then retries for 24 hours.
 

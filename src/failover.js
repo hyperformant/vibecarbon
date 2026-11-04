@@ -588,7 +588,15 @@ export async function restorePromotedTls({ promotedIp, sshKeyPath, snapshot, dep
       name: TLS_CERTIFICATE,
     });
   } catch (err) {
-    if (!isNotFound(err)) return { restored: [] };
+    if (!isNotFound(err)) {
+      // Not "no snapshot": the cluster could not be read, so nothing was
+      // restored and the operator should not read the silence as a clean run.
+      warn(
+        `promote-issuer: could not read ${key} on the promoted cluster (${firstErrorLine(err)}), ` +
+          'so no saved certificate was restored. cert-manager issues a certificate after the flip instead.',
+      );
+      return { restored: [] };
+    }
     const recreated = await recreateMissingTlsCertificate({
       promotedIp,
       sshKeyPath,

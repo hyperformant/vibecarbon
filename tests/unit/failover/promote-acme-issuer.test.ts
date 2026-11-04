@@ -328,6 +328,27 @@ describe('restorePromotedTls (before the DNS flip)', () => {
     }
   });
 
+  it('a read error that is not NotFound warns with its first line and says cert-manager issues after the flip', async () => {
+    const c = cluster();
+    const kubectl = vi.fn(async () => {
+      throw new Error('ssh: connect to host 203.0.113.9 port 22: Connection refused\nsecond line');
+    });
+    const warn = vi.fn();
+    const result = await restorePromotedTls({
+      promotedIp: '203.0.113.9',
+      sshKeyPath: '/k',
+      snapshot: SNAPSHOT_INPUTS,
+      deps: { kubectl, quietKubectl: c.quietKubectl, readSnapshot: vi.fn(), warn },
+    });
+    expect(result).toEqual({ restored: [] });
+    expect(warn).toHaveBeenCalledTimes(1);
+    const said = String(warn.mock.calls[0][0]);
+    expect(said).toContain('Connection refused');
+    expect(said).not.toContain('second line');
+    expect(said).toContain('cert-manager issues a certificate after the flip');
+    expect(c.calls).toEqual([]);
+  });
+
   it('an absent live Secret is filled with create, never replace', async () => {
     const c = cluster({ liveSecret: '' });
     const result = await run(c);
