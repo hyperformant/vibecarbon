@@ -580,6 +580,32 @@ export async function checkDnsFlipVerified(opts: {
   return { checkName, status: 'pass', details: { expectedIp, seen } };
 }
 
+/**
+ * dns_flip_verified for one scenario: read the env's serving IP and its A
+ * records through the DNS provider API and check them. `computeToken` is the
+ * scenario's OWN compute provider's token, so a compute-backed DNS row
+ * (same-token rule in resolveDnsToken) authenticates with the right cloud.
+ */
+export async function verifyDnsFlip(opts: {
+  projectDir: string;
+  envPrefix: string;
+  domain: string;
+  provider: string;
+  computeToken: string;
+}): Promise<VerificationResult> {
+  const reader = await providerApiAReader(opts.projectDir, opts.envPrefix, {
+    computeProviderId: opts.provider,
+    computeToken: opts.computeToken,
+  });
+  return checkDnsFlipVerified({
+    domain: opts.domain,
+    expectedIp: readServingIp(opts.projectDir, opts.envPrefix),
+    readA: reader.readA,
+    readerError: reader.error,
+    skipReason: reader.skipReason,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // second_failover_refused
 // ---------------------------------------------------------------------------
