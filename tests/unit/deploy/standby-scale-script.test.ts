@@ -30,7 +30,6 @@ import { composeStandbyScaledServices } from '../../../src/lib/services/standby-
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
 const N8N_SCALED = composeStandbyScaledServices(['n8n']);
-const FLAGS = '-f docker-compose.yml -f docker-compose.prod.yml';
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -116,15 +115,15 @@ describe('the fragment rides every whole-stack up', () => {
   });
 
   it('reconcile.sh: the up line ends with the fragment; config and pull do not carry it', () => {
-    const script = renderReconcileScript('myproj', FLAGS, false);
+    const script = renderReconcileScript('myproj', false);
     const lines = script.split('\n');
-    const up = lines.filter((l) => /^docker compose .* up -d/.test(l));
+    const up = lines.filter((l) => /^sh vc-compose up -d/.test(l));
     expect(up).toHaveLength(1);
     // Then the core service list (empty without background add-ons, and on a
     // standby): reconcile-addons-background.test.ts.
     expect(up[0].endsWith(`up -d --remove-orphans ${STANDBY_SCALE_FLAG} $up_services`)).toBe(true);
-    const config = lines.find((l) => /^docker compose .* config /.test(l));
-    const pull = lines.find((l) => /^docker compose .* pull /.test(l));
+    const config = lines.find((l) => /^sh vc-compose config /.test(l));
+    const pull = lines.find((l) => /^sh vc-compose pull /.test(l));
     expect(config).toBeDefined();
     expect(pull).toBeDefined();
     expect(config).not.toContain(STANDBY_SCALE_SCRIPT);
@@ -132,24 +131,22 @@ describe('the fragment rides every whole-stack up', () => {
   });
 
   it('systemd: ExecStart carries the $$ fragment, ExecStop does not', () => {
-    const unit = renderSystemdUnit('myproj', FLAGS);
+    const unit = renderSystemdUnit('myproj');
     const start = unit.split('\n').find((l) => l.startsWith('ExecStart='));
     const stop = unit.split('\n').find((l) => l.startsWith('ExecStop='));
     expect(start).toContain(`up -d --remove-orphans ${STANDBY_SCALE_FLAG_SYSTEMD}'`);
     expect(stop).not.toContain(STANDBY_SCALE_SCRIPT);
   });
 
-  // Census: any `docker compose ... up -d` a whole-stack renderer emits must
-  // carry the fragment, or that path brings n8n back up on a standby.
+  // Census: any vc-compose `up -d` a whole-stack renderer emits must carry
+  // the fragment, or that path brings n8n back up on a standby.
   it('every compose up -d in bundle.js and scale.js carries the fragment', () => {
     const offenders: string[] = [];
     for (const file of ['src/lib/deploy/bundle.js', 'src/scale.js']) {
       const lines = readFileSync(join(REPO, file), 'utf-8').split('\n');
       lines.forEach((line, i) => {
         if (/^\s*(\/\/|\*|\/\*|#)/.test(line)) return;
-        if (!/docker compose .*\bup -d\b/.test(line)) return;
-        // The extraction sed program quotes the up line; it is not an invocation.
-        if (line.includes('s/^docker compose')) return;
+        if (!/\$\{VC_COMPOSE\} .*\bup -d\b/.test(line)) return;
         if (!/STANDBY_SCALE_FLAG/.test(line)) offenders.push(`${file}:${i + 1}: ${line.trim()}`);
       });
     }
@@ -158,7 +155,7 @@ describe('the fragment rides every whole-stack up', () => {
 
   it('the census sees the invocations it guards (positive control)', () => {
     const scaleSrc = readFileSync(join(REPO, 'src/scale.js'), 'utf-8');
-    expect(scaleSrc).toMatch(/docker compose .*up -d --force-recreate/);
+    expect(scaleSrc).toMatch(/\$\{VC_COMPOSE\} up -d --force-recreate/);
   });
 });
 

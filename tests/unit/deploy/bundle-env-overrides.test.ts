@@ -191,7 +191,7 @@ describe('renderBundle DNS-01 challenge', () => {
     }
   });
 
-  it('adds the DNS-01 override to reconcile.sh + cloudflare token to .env', () => {
+  it('adds the DNS-01 override to vc-compose + cloudflare token to .env', () => {
     projectDir = makeProjectDir('FOO=local');
     process.chdir(projectDir);
 
@@ -202,11 +202,11 @@ describe('renderBundle DNS-01 challenge', () => {
     });
 
     try {
-      const reconcile = readFileSync(join(stage, 'reconcile.sh'), 'utf-8');
-      expect(reconcile).toContain('-f docker-compose.dns01.prod.yml');
+      const composeCommand = readFileSync(join(stage, 'vc-compose'), 'utf-8');
+      expect(composeCommand).toContain('-f docker-compose.dns01.prod.yml');
       // Override must come after prod.yml so it replaces the Traefik command.
-      expect(reconcile.indexOf('docker-compose.dns01.prod.yml')).toBeGreaterThan(
-        reconcile.indexOf('docker-compose.prod.yml'),
+      expect(composeCommand.indexOf('docker-compose.dns01.prod.yml')).toBeGreaterThan(
+        composeCommand.indexOf('docker-compose.prod.yml'),
       );
 
       const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
@@ -272,8 +272,8 @@ describe('renderBundle DNS-01 challenge', () => {
     const stage = renderBundle('myproj', {});
 
     try {
-      const reconcile = readFileSync(join(stage, 'reconcile.sh'), 'utf-8');
-      expect(reconcile).not.toContain('docker-compose.dns01.prod.yml');
+      const composeCommand = readFileSync(join(stage, 'vc-compose'), 'utf-8');
+      expect(composeCommand).not.toContain('docker-compose.dns01.prod.yml');
 
       const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
       expect(env.ACME_DNS_PROVIDER).toBeUndefined();

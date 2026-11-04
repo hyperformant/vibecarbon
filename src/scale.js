@@ -28,9 +28,10 @@ import { checkDependency, runCommand } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
 import { useDnsChallenge } from './lib/deploy/acme.js';
 import { queueBootTiming } from './lib/deploy/boot-timing.js';
-import { RECONCILE_FLAGS_SED, STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
+import { STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
 import { buildComposeAppImage, deliverComposeAppImage } from './lib/deploy/compose/app-image.js';
 import { collectComposeBuildArgs } from './lib/deploy/compose/build-args.js';
+import { VC_COMPOSE } from './lib/deploy/compose/command.js';
 import { composePsqlRunner, demoteComposeWalgRole } from './lib/deploy/compose/ha.js';
 import { composeHaStackOf } from './lib/deploy/compose/ha-role-swap.js';
 import {
@@ -737,7 +738,7 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
       await sshRunScript(
         newIp,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T traefik sh -c 'echo "{}" > /letsencrypt/acme.json && chmod 600 /letsencrypt/acme.json'`,
+        `cd ${remoteDir} && ${VC_COMPOSE} exec -T traefik sh -c 'echo "{}" > /letsencrypt/acme.json && chmod 600 /letsencrypt/acme.json'`,
         { timeout: 30_000 },
       );
     } else if (live?.state === 'present') {
@@ -751,21 +752,14 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
     // when feature containers on separate compose files are still holding the
     // network open. depends_on ordering is still respected.
     //
-    // THE -f SET IS EXTRACTED FROM reconcile.sh ON THE SERVER, not rebuilt in JS.
-    // This was the last surviving JS-side rebuild of the flag set, and it had
-    // drifted: it carried docker-compose.redis.yml WITHOUT its .prod.yml half, so
-    // with redis installed a force-recreate rendered every service against a set no
-    // reconcile ever computes — the next warm deploy / systemd ExecStart / reboot
-    // recomputed the hashes and recreated the whole stack again (identical class to
-    // the compose-HA overlay-write db bug, d78402e). The extraction keeps this
-    // invocation byte-identical to future reconciles by construction; the fallback
-    // is bounded (base + prod = at worst one extra recreate churn, never a failure).
-    // The replication overlay is appended when present, same runtime conditional as
-    // reconcile.sh itself — on single-server compose the file never exists.
+    // THE -f SET IS THE SERVER'S OWN: vc-compose, the script reconcile.sh and
+    // the systemd unit run (compose/command.js). A JS-side rebuild of the set
+    // drifted here once (docker-compose.redis.yml WITHOUT its .prod.yml half, so
+    // the next warm deploy, systemd start or reboot recreated the whole stack
+    // again), and reading the set back out of reconcile.sh was its stopgap.
+    // vc-compose adds the replication overlay when the node has it.
     // STANDBY_SCALE_FLAG keeps primary-only add-ons at zero when the node's
     // .env says WALG_ROLE=standby, the same fragment reconcile.sh's up runs.
-    const replOverlayFlag =
-      "$([ -f docker-compose.replication.yml ] && echo '-f docker-compose.replication.yml')";
     s.start('Recreating all services after restore...');
     await sshRunScript(
       newIp,
@@ -774,9 +768,7 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
         // An add-on job (reconcile.sh started it) must not be mid compose
         // operation while the whole stack is recreated: stop it first.
         `if [ -f ${ADDON_JOB_SCRIPT} ]; then sh ${ADDON_JOB_SCRIPT} stop; fi; ` +
-        `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1); ` +
-        `[ -n "$FLAGS" ] || FLAGS='-f docker-compose.yml -f docker-compose.prod.yml'; ` +
-        `docker compose $FLAGS ${replOverlayFlag} up -d --force-recreate ${STANDBY_SCALE_FLAG} 2>&1`,
+        `${VC_COMPOSE} up -d --force-recreate ${STANDBY_SCALE_FLAG} 2>&1`,
       { timeout: 600_000 },
     );
     s.stop('All services running');
@@ -1392,9 +1384,7 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   // 5. Pull app + base images from ghcr.io / Docker Hub
   // No local build — image was built by CI (see Lever 1).
   s.start('Pulling images on server...');
-  await perfAsync('scale.pullImages', () =>
-    pullComposeImages(newIp, sshKeyPath, projectName, services),
-  );
+  await perfAsync('scale.pullImages', () => pullComposeImages(newIp, sshKeyPath, projectName));
   s.stop('Docker images ready');
 
   // 5b. The saved certificate, before Traefik's first start (primary only).

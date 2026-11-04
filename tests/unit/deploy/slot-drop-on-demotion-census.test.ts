@@ -99,7 +99,7 @@ describe('demoteComposeWalgRole drops inactive slots', () => {
     const drop = commands.findIndex((c) => c.includes(DROP_INACTIVE_SLOTS_SQL));
     expect(recreate).toBeGreaterThan(-1);
     expect(drop).toBeGreaterThan(recreate);
-    expect(commands[drop]).toContain('docker compose exec -T db psql');
+    expect(commands[drop]).toContain('sh vc-compose exec -T db psql');
   });
 
   it('a failed drop keeps the demotion verdict and warns once', async () => {

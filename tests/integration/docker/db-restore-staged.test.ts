@@ -14,6 +14,7 @@ import {
   resolveRestoreBase,
 } from '../../../src/lib/walg/restore-base.js';
 import { REMOVE_DISCARD_SH, RETIRE_PREVIOUS_SH } from '../../../src/lib/walg/restore-layout.js';
+import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 /**
  * The staged compose restore against a real db image and a real S3 (H2a, H3).
@@ -255,9 +256,9 @@ function runRestoreScript(dir: string, backup: string, lineage: string, vol = VO
 
 /**
  * Run carbon/backup/compose-backup.sh the way the cron and `vibecarbon backup`
- * do (`cd <project> && RETAIN=n bash backup/compose-backup.sh`), with a
- * `docker` shim that routes its `docker compose exec -T db …` into this
- * test's db container. PGPASSWORD mirrors the compose db service env.
+ * do (`cd <project> && RETAIN=n bash backup/compose-backup.sh`), through the
+ * real vc-compose, with a `docker` shim that routes its `compose exec -T db …`
+ * into this test's db container. PGPASSWORD mirrors the compose db service env.
  */
 function runComposeBackupScript(dir: string, ct = DB_CT) {
   const project = join(dir, 'project');
@@ -268,10 +269,11 @@ function runComposeBackupScript(dir: string, ct = DB_CT) {
     join(project, 'backup/compose-backup.sh'),
     readFileSync(join(ROOT, 'carbon/backup/compose-backup.sh')),
   );
+  writeVcCompose(project);
   const realDocker = execFileSync('sh', ['-c', 'command -v docker'], { encoding: 'utf-8' }).trim();
   writeFileSync(
     join(bin, 'docker'),
-    `#!/bin/bash\n# docker compose exec -T db <cmd...>\nshift 4\nexec ${realDocker} exec -i -e PGPASSWORD=restore-staged-test ${ct} "$@"\n`,
+    `#!/bin/bash\n# compose exec -T db <cmd...>, vc-compose's -f pairs dropped\n${DROP_COMPOSE_FILES_SH}shift 4\nexec ${realDocker} exec -i -e PGPASSWORD=restore-staged-test ${ct} "$@"\n`,
   );
   chmodSync(join(bin, 'docker'), 0o755);
   return spawnSync('bash', ['backup/compose-backup.sh'], {

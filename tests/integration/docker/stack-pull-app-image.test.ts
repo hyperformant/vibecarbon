@@ -24,6 +24,11 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  renderComposeCommand,
+  VC_COMPOSE,
+  VC_COMPOSE_SCRIPT,
+} from '../../../src/lib/deploy/compose/command.js';
 import { stackPullCommand } from '../../../src/lib/deploy/compose/index.js';
 import {
   ADDON_SERVICES_SCRIPT,
@@ -79,6 +84,8 @@ describeDocker('the stack pull against real compose skips the app image', () => 
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), 'vctest-stackpull-'));
     writeFileSync(join(dir, 'docker-compose.yml'), COMPOSE);
+    // The server's Compose command, as the bundle renders it for this -f set.
+    writeFileSync(join(dir, VC_COMPOSE_SCRIPT), renderComposeCommand('-f docker-compose.yml'));
     writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(['grafana', 'n8n']));
     // A shim in front of the real docker that records each call: real
     // compose answers and pulls, the test reads which services were named.
@@ -116,9 +123,7 @@ describeDocker('the stack pull against real compose skips the app image', () => 
   });
 
   it('nonAppImageServicesShell prints every service not on the app image', () => {
-    const r = run(
-      `cd ${dir} && ${nonAppImageServicesShell('docker compose -f docker-compose.yml')}`,
-    );
+    const r = run(`cd ${dir} && ${nonAppImageServicesShell(VC_COMPOSE)}`);
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout.trim().split('\n').sort()).toEqual(['db', 'grafana', 'n8n', 'traefik']);
   });
@@ -126,7 +131,7 @@ describeDocker('the stack pull against real compose skips the app image', () => 
   it('pulls db and traefik only: never the app image, never a deferred add-on', () => {
     const calls = join(dir, 'calls');
     rmSync(calls, { force: true });
-    const r = run(stackPullCommand(dir, '-f docker-compose.yml'));
+    const r = run(stackPullCommand(dir));
     expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
     expect(`${r.stdout}${r.stderr}`).not.toMatch(/pull access denied/);
     const pulls = (existsSync(calls) ? readFileSync(calls, 'utf-8') : '')

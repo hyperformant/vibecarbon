@@ -30,7 +30,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { ACME_DISARMED_CA_SERVER } from '../../../src/lib/deploy/acme-role.js';
+import { VC_COMPOSE_SCRIPT } from '../../../src/lib/deploy/compose/command.js';
 import { tlsSnapshotS3Prefix } from '../../../src/lib/deploy/tls-snapshot.js';
+import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const SCRIPT = fileURLToPath(new URL('../../../carbon/backup/tls-snapshot.sh', import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), 'tls-snapshot-'));
@@ -105,6 +107,7 @@ function run(f: Fixture = {}) {
   const bin = join(root, 'bin');
   const fx = join(root, 'fx');
   for (const d of [dir, bin, fx]) mkdirSync(d);
+  writeVcCompose(dir);
   const log = join(root, 'calls.log');
   writeFileSync(log, '');
   writeFileSync(join(fx, 'acme.json'), acmeJson(acmeMain));
@@ -126,7 +129,7 @@ function run(f: Fixture = {}) {
   writeFileSync(
     join(bin, 'docker'),
     `#!/bin/bash
-printf '%s\\n' "docker $*" >> "${log}"
+${DROP_COMPOSE_FILES_SH}printf '%s\\n' "docker $*" >> "${log}"
 answer() { [ -f "${fx}/$1" ] || exit 1; cat "${fx}/$1"; }
 case "$*" in
   "compose ps -q traefik") ${traefikRunning ? 'echo traefikcid' : ':'} ;;
@@ -169,7 +172,8 @@ esac
     calls: readFileSync(log, 'utf-8').split('\n').filter(Boolean),
     uploaded: existsSync(uploadedPath) ? readFileSync(uploadedPath, 'utf-8') : null,
     acme: readFileSync(join(fx, 'acme.json'), 'utf-8'),
-    projectFiles: readdirSync(dir),
+    // What the script left in the project dir (vc-compose is the stand-in server's own).
+    projectFiles: readdirSync(dir).filter((f) => f !== VC_COMPOSE_SCRIPT),
   };
 }
 

@@ -409,7 +409,7 @@ describe('walgAuditFailureMessage', () => {
     // Through walg-env.sh: the db container has only the base prefix, and the
     // lineage folder is the one the deploy's pushes use.
     expect(msg).toContain(
-      "docker compose exec -T db sh -c '. /etc/postgresql/walg-env.sh && wal-g backup-list'",
+      "sh vc-compose exec -T db sh -c '. /etc/postgresql/walg-env.sh && wal-g backup-list'",
     );
     expect(walgAuditFailureMessage({ failures: [] }, 'k8s')).toContain(
       "kubectl -n vibecarbon exec db-0 -- sh -c '. /etc/postgresql/walg-env.sh && wal-g backup-list'",
@@ -493,9 +493,9 @@ describe('assertWalgBackupsWorking (exec seam mocked)', () => {
 });
 
 describe('exec seams', () => {
-  it('compose runs the probe through docker compose exec on the db service', () => {
+  it('compose runs the probe through sh vc-compose exec on the db service', () => {
     const shell = composeWalgAuditShell();
-    expect(shell.startsWith("docker compose exec -T db bash -c '")).toBe(true);
+    expect(shell.startsWith("sh vc-compose exec -T db bash -c '")).toBe(true);
     expect(shell.endsWith("'")).toBe(true);
     expect(shell).toContain(WALG_AUDIT_PROBE);
     // Exactly two single quotes: the pair wrapping the probe.
@@ -672,7 +672,7 @@ describe('compose deploy path calls the audit', () => {
     const auditCmd = remoteCmds.find((c) => c.includes('WALG_AUDIT'));
     expect(auditCmd, 'runDatabaseAudits must run the wal-g audit').toBeDefined();
     expect(auditCmd).toContain('cd /opt/proj &&');
-    expect(auditCmd).toContain('docker compose exec -T db bash -c');
+    expect(auditCmd).toContain('sh vc-compose exec -T db bash -c');
     // The RLS audit still runs, and the backup audit follows it.
     expect(remoteCmds.findIndex((c) => c.includes('relrowsecurity'))).toBeLessThan(
       remoteCmds.findIndex((c) => c.includes('WALG_AUDIT')),

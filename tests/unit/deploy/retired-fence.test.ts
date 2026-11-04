@@ -44,6 +44,7 @@ import {
   settleK8sDb,
 } from '../../../src/lib/deploy/retired-fence.js';
 import { liftStrandedWriteFence } from '../../../src/lib/deploy/write-fence.js';
+import { SERVER_BASE_FLAGS, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
@@ -897,6 +898,7 @@ describe('compose-backup.sh refuses on a retired node', () => {
   const runBackup = (marker: boolean) => {
     const base = mkdtempSync(join(scratch, 'cb-'));
     if (marker) writeFileSync(join(base, RETIRED_HOST_MARKER), '');
+    writeVcCompose(base);
     const calls = stubBin(join(base, 'bin'), ['docker', 'wal-g']);
     const r = spawnSync('bash', [script], {
       cwd: base,
@@ -914,10 +916,10 @@ describe('compose-backup.sh refuses on a retired node', () => {
     expect(r.calls).toBe('');
   });
 
-  it('without it the backup reaches docker compose exec (control)', () => {
+  it('without it the backup reaches compose exec through vc-compose (control)', () => {
     const r = runBackup(false);
     expect(r.status).toBe(0);
-    expect(r.calls).toContain('docker compose exec');
+    expect(r.calls).toContain(`docker compose ${SERVER_BASE_FLAGS} exec -T db`);
   });
 });
 

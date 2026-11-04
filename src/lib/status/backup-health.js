@@ -24,6 +24,7 @@
 import { existsSync } from 'node:fs';
 import { DEFAULT_BACKUP_SCHEDULE } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { resolvePrimary } from '../cli/resolve-primary.js';
+import { VC_COMPOSE } from '../deploy/compose/command.js';
 import { redactCredentials } from '../redact-credentials.js';
 import { getSSHKeyPath, sshKubectl, sshRun } from '../ssh.js';
 import { hasBackupResult, pushedBackupNames } from '../walg/backup-result.js';
@@ -458,7 +459,7 @@ function primaryProbes(envName, envConfig, projectName, deps = {}) {
           [
             'bash',
             '-lc',
-            `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tA`,
+            `cd ${remoteDir} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tA`,
           ],
           { ...opts, input: sql },
         );
@@ -489,9 +490,9 @@ function primaryProbes(envName, envConfig, projectName, deps = {}) {
       if (isCompose) {
         const out = await bash(
           ip,
-          `cd ${remoteDir} && cid="$(docker compose ps -q db)" && ` +
+          `cd ${remoteDir} && cid="$(${VC_COMPOSE} ps -q db)" && ` +
             'echo "STARTED=$(docker inspect -f \'{{.State.StartedAt}}\' "$cid")" && ' +
-            `(docker compose logs --no-color -t --since 24h db 2>&1 | grep -E '${DROP_GREP}' || true)`,
+            `(${VC_COMPOSE} logs --no-color -t --since 24h db 2>&1 | grep -E '${DROP_GREP}' || true)`,
         );
         return parseWalFailureLog(out);
       }
@@ -525,7 +526,7 @@ function primaryProbes(envName, envConfig, projectName, deps = {}) {
     readWalGap: async (ip) => {
       if (isCompose) {
         return parseWalGapRecord(
-          await bash(ip, `cd ${remoteDir} && docker compose exec -T db sh -c '${WAL_GAP_READ_SH}'`),
+          await bash(ip, `cd ${remoteDir} && ${VC_COMPOSE} exec -T db sh -c '${WAL_GAP_READ_SH}'`),
         );
       }
       const pod = (await podOn(ip)).metadata.name;

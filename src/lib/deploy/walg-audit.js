@@ -95,6 +95,7 @@
 import { progressLog } from '../cli/progress.js';
 import { runWithRetry } from '../retry.js';
 import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
+import { VC_COMPOSE } from './compose/command.js';
 import { DB_POD } from './db-workload.js';
 
 /**
@@ -223,7 +224,7 @@ export const WALG_AUDIT_PROBE_TIMEOUT_MS = 120_000;
  * `path` a caller passes; unknown keys fall back to naming both.
  */
 export const VERIFY_HINTS = {
-  compose: `docker compose exec -T db sh -c '${WALG_ENV_SOURCE} && wal-g backup-list'`,
+  compose: `${VC_COMPOSE} exec -T db sh -c '${WALG_ENV_SOURCE} && wal-g backup-list'`,
   k8s: `kubectl -n vibecarbon exec ${DB_POD} -- sh -c '${WALG_ENV_SOURCE} && wal-g backup-list'`,
 };
 
@@ -653,7 +654,7 @@ export async function assertWalgBackupsWorking({ probe, path, context = 'deploy'
  * @returns {string}
  */
 export function composeWalgAuditShell(opts = {}) {
-  return `docker compose exec -T db bash -c '${buildWalgAuditProbe(opts)}'`;
+  return `${VC_COMPOSE} exec -T db bash -c '${buildWalgAuditProbe(opts)}'`;
 }
 
 /**

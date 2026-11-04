@@ -20,7 +20,9 @@
  * live `docker compose config`: set → disarmed URL; empty/unset → the
  * ACME_CA_SERVER value or the prod default.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -31,10 +33,12 @@ import {
   composeTraefikRecreateShell,
   disarmComposeAcme,
 } from '../../../src/lib/deploy/acme-role.js';
+import { composeFileFlags } from '../../../src/lib/deploy/bundle.js';
 import {
   restoreComposeTls,
   restoreFailoverTls,
 } from '../../../src/lib/deploy/compose/tls-restore.js';
+import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 import { acmeJson } from './_tls-fixtures.ts';
 
 describe('policy constants', () => {
@@ -84,17 +88,40 @@ describe('every Traefik caserver line honors the disarm var (census over carbon 
 describe('composeTraefikRecreateShell', () => {
   const shell = composeTraefikRecreateShell('/opt/demo');
 
-  it('recreates traefik with the -f set the running container was created with', () => {
-    expect(shell).toContain('com.docker.compose.project.config_files');
-    expect(shell).toContain('docker compose $FLAGS up -d --no-deps traefik');
+  it('recreates traefik through vc-compose, never a bare up', () => {
+    expect(shell).toContain('sh vc-compose up -d --no-deps traefik');
+    expect(shell).not.toMatch(/\bdocker compose\b/);
   });
 
-  it('falls back to base files plus the dns01 override when present — never a bare up', () => {
+  it('a DNS-01 deploy keeps its dns01 override on the recreate (the node never reverts to HTTP-01)', () => {
     // A bare `up` resolves docker-compose.yml alone and would recreate
-    // Traefik WITHOUT the dns01 override's command — silently reverting the
-    // node to HTTP-01. Same class as the db recreate's wrong-`-f` hazard.
-    expect(shell).toContain('-f docker-compose.yml -f docker-compose.prod.yml');
-    expect(shell).toContain('if [ -f docker-compose.dns01.prod.yml ]');
+    // Traefik WITHOUT the dns01 override's command, silently reverting the
+    // node to HTTP-01. vc-compose carries the deploy's own set.
+    const dir = mkdtempSync(join(tmpdir(), 'vc-acme-role-'));
+    try {
+      writeVcCompose(
+        dir,
+        composeFileFlags({ dnsChallenge: true, dnsProvider: 'cloudflare', dnsToken: 't' }),
+      );
+      writeFileSync(
+        join(dir, 'docker'),
+        `#!/bin/sh\necho "$*" >> "${dir}/calls"\ncase "$*" in *" ps -q traefik") echo cid ;; esac\nexit 0\n`,
+      );
+      chmodSync(join(dir, 'docker'), 0o755);
+      const r = spawnSync('bash', ['-c', composeTraefikRecreateShell(dir)], {
+        encoding: 'utf-8',
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const up = readFileSync(join(dir, 'calls'), 'utf-8')
+        .split('\n')
+        .find((l) => l.endsWith(' up -d --no-deps traefik'));
+      expect(up).toBe(
+        'compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.dns01.prod.yml up -d --no-deps traefik',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('refuses to recreate blind when no traefik container is running', () => {

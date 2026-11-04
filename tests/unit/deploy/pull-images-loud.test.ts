@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { ComposeConfigFixture } from '../../_shared/compose-config-stub.js';
+import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 vi.mock('../../../src/lib/command.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -88,6 +89,7 @@ describe('the stack pull never asks a registry for the app image', () => {
   // one image and so never matched (DO e2e, 2026-11-01).
   function runPull(fixture: ComposeConfigFixture, deferred: string[] = []) {
     const dir = mkdtempSync(join(tmpdir(), 'vc-stack-pull-'));
+    writeVcCompose(dir, '-f a.yml -f b.yml');
     if (deferred.length) {
       writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(deferred));
     }
@@ -106,7 +108,7 @@ fi
 `,
     );
     chmodSync(join(dir, 'docker'), 0o755);
-    const cmd = stackPullCommand(dir, '-f a.yml -f b.yml');
+    const cmd = stackPullCommand(dir);
     const r = spawnSync('sh', ['-c', cmd], {
       encoding: 'utf-8',
       env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },

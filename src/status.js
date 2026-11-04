@@ -25,6 +25,7 @@ import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib
 import { storageAccessLine, unfencedBucketsLine } from './lib/deploy/app-storage-credential.js';
 import { backupFenceRow } from './lib/deploy/backup-fence.js';
 import { settleWindowFor, storageSettleStatus } from './lib/deploy/bucket-settle.js';
+import { VC_COMPOSE } from './lib/deploy/compose/command.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { DEGRADED_CAUSE } from './lib/deploy/env-safety-fields.js';
 import { operatorCheckEnvs } from './lib/deploy/preflight.js';
@@ -638,7 +639,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
             [
               'bash',
               '-lc',
-              `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${targetSql}"`,
+              `cd /opt/${projectName} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc "${targetSql}"`,
             ],
             { timeout: timeoutMs },
           )
@@ -737,7 +738,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
             [
               'bash',
               '-lc',
-              `cd /opt/${projectName} && echo ${slotSql} | base64 -d | docker compose exec -T db psql -U postgres -d postgres -tA`,
+              `cd /opt/${projectName} && echo ${slotSql} | base64 -d | ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tA`,
             ],
             { timeout: timeoutMs },
           )

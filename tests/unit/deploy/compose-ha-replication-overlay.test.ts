@@ -1,84 +1,85 @@
-import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { renderReconcileScript } from '../../../src/lib/deploy/bundle.js';
+import { COMPOSE_REPLICATION_OVERLAY } from '../../../src/lib/deploy/compose/command.js';
+import { SERVER_BASE_FLAGS, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 // ---------------------------------------------------------------------------
 // compose-ha replication overlay (5433) preservation in reconcile.sh
 //
-// reconcile.sh is baked at bundle time with static composeFlags. On a
-// compose-ha server, docker-compose.replication.yml maps db:5432 → host:5433
-// so pg_basebackup and streaming replication can reach raw postgres. Any
-// `docker compose up -d` that omits the overlay recreates the db container
+// On a compose-ha server, docker-compose.replication.yml maps db:5432 →
+// host:5433 so pg_basebackup and streaming replication can reach raw
+// postgres. Any `up -d` that omits the overlay recreates the db container
 // WITHOUT the 5433 mapping, silently dropping the replication listener.
 //
-// Fix: embed a shell conditional that appends the overlay at runtime when the
-// file is present. On single-server compose the file never exists — no-op.
+// reconcile.sh runs every Compose call through vc-compose, which appends the
+// overlay at runtime when the file is present (compose-ha writes it after the
+// bundle lands). On single-server compose the file never exists: a no-op.
+// Run here against the real vc-compose and a stub `docker`.
 // ---------------------------------------------------------------------------
 
-const REPL_GUARD = '[ -f docker-compose.replication.yml ]';
-const REPL_FLAG = '-f docker-compose.replication.yml';
+const dirs: string[] = [];
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
-describe('renderReconcileScript — replication overlay guard', () => {
-  it('includes the [ -f docker-compose.replication.yml ] guard in the up command', () => {
-    const script = renderReconcileScript(
-      'myapp',
-      '-f docker-compose.yml -f docker-compose.prod.yml',
-    );
-    // The guard must be present so the overlay is conditionally appended at runtime
-    expect(script).toContain(REPL_GUARD);
-    // The flag value that the conditional echoes
-    expect(script).toContain(REPL_FLAG);
+function reconcile({ overlay, isFast }: { overlay: boolean; isFast: boolean }): string[] {
+  const dir = mkdtempSync(join(tmpdir(), 'vc-reconcile-repl-'));
+  dirs.push(dir);
+  writeFileSync(join(dir, 'reconcile.sh'), renderReconcileScript('myapp', isFast));
+  writeVcCompose(dir);
+  if (overlay) writeFileSync(join(dir, COMPOSE_REPLICATION_OVERLAY), 'services: {}\n');
+  writeFileSync(
+    join(dir, 'docker'),
+    `#!/bin/sh
+case "$1" in compose) echo "$*" >> "${dir}/calls" ;; esac
+exit 0
+`,
+  );
+  chmodSync(join(dir, 'docker'), 0o755);
+  const r = spawnSync('bash', ['reconcile.sh'], {
+    cwd: dir,
+    encoding: 'utf-8',
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, VC_PROJECT_DIR: dir },
+  });
+  expect(r.status, r.stderr).toBe(0);
+  return readFileSync(join(dir, 'calls'), 'utf-8').split('\n').filter(Boolean);
+}
+
+const WITH_OVERLAY = `compose ${SERVER_BASE_FLAGS} -f ${COMPOSE_REPLICATION_OVERLAY} `;
+
+describe('reconcile.sh keeps the replication overlay on a compose-ha node', () => {
+  it('the up carries the overlay, after the static flags', () => {
+    const calls = reconcile({ overlay: true, isFast: true });
+    const up = calls.find((c) => c.includes(' up -d '));
+    expect(up?.startsWith(WITH_OVERLAY), up).toBe(true);
   });
 
-  it('includes the replication guard in the pull step (non-fast mode)', () => {
-    const script = renderReconcileScript(
-      'myapp',
-      '-f docker-compose.yml -f docker-compose.prod.yml',
-      false,
-    );
-    // Both pull and up commands must include the guard so an HA server keeps
-    // the overlay across both phases of reconcile.
-    const guardCount = (
-      script.match(new RegExp(REPL_GUARD.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? []
-    ).length;
-    expect(guardCount).toBeGreaterThanOrEqual(2);
+  it('the pull (non-fast mode), the config read and the up all carry it', () => {
+    const calls = reconcile({ overlay: true, isFast: false });
+    expect(calls.some((c) => c.includes(' pull '))).toBe(true);
+    expect(calls.some((c) => c.includes(' config'))).toBe(true);
+    for (const c of calls) expect(c.startsWith(WITH_OVERLAY), c).toBe(true);
   });
 
-  it('omits the pull step in fast mode but still guards the up command', () => {
-    const script = renderReconcileScript(
-      'myapp',
-      '-f docker-compose.yml -f docker-compose.prod.yml',
-      true,
-    );
-    // Fast mode skips the pull step — but the up command must still carry the guard
-    expect(script).toContain(REPL_GUARD);
-    expect(script).not.toContain('pull --quiet');
+  it('fast mode skips the pull, but the up still carries the overlay', () => {
+    const calls = reconcile({ overlay: true, isFast: true });
+    expect(calls.some((c) => c.includes(' pull '))).toBe(false);
+    expect(calls.every((c) => c.startsWith(WITH_OVERLAY))).toBe(true);
   });
 
-  it('places the replication flag AFTER the static compose flags (order matters for overlay merging)', () => {
-    const staticFlags = '-f docker-compose.yml -f docker-compose.prod.yml';
-    const script = renderReconcileScript('myapp', staticFlags);
-    // Static flags should appear before the shell conditional in the command
-    const upLine = script.split('\n').find((l) => l.includes('up -d'));
-    expect(upLine).toBeDefined();
-    expect(upLine?.indexOf(staticFlags)).toBeLessThan(upLine?.indexOf(REPL_GUARD) ?? -1);
+  it('a single compose server (no overlay file) runs the static set alone', () => {
+    const calls = reconcile({ overlay: false, isFast: false });
+    for (const c of calls) expect(c, c).not.toContain(COMPOSE_REPLICATION_OVERLAY);
   });
 
   it('still runs set -e and the standard reconcile steps', () => {
-    const script = renderReconcileScript(
-      'myapp',
-      '-f docker-compose.yml -f docker-compose.prod.yml',
-    );
+    const script = renderReconcileScript('myapp');
     expect(script).toContain('set -e');
     expect(script).toContain('up -d --remove-orphans');
     expect(script).toContain('Reconciliation complete.');
-  });
-
-  it('uses a $(...) subshell form so the guard is evaluated by the shell, not by JS', () => {
-    const script = renderReconcileScript(
-      'myapp',
-      '-f docker-compose.yml -f docker-compose.prod.yml',
-    );
-    // Must be a shell command substitution, not a hardcoded flag string
-    expect(script).toContain(`$([ -f docker-compose.replication.yml ] && echo '${REPL_FLAG}')`);
   });
 });

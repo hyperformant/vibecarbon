@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { composeBackupCmd } from '../../../src/lib/deploy/compose/index.js';
+import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const SCRIPT = fileURLToPath(new URL('../../../carbon/backup/compose-backup.sh', import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), 'backup-lock-wait-'));
@@ -37,16 +38,17 @@ afterEach(() => {
   holder = null;
 });
 
-/** A project dir whose `docker compose exec` stub prints a pushed marker. */
+/** A project dir (with its vc-compose) whose `compose exec` stub prints a pushed marker. */
 function project() {
   const dir = mkdtempSync(join(scratch, 'p-'));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
+  writeVcCompose(dir);
   const log = join(dir, 'calls.log');
   writeFileSync(log, '');
   writeFileSync(
     join(bin, 'docker'),
-    `#!/bin/sh\necho "docker $*" >> "${log}"\necho BACKUP_RESULT=pushed:base_000000020000000000000005\n`,
+    `#!/bin/sh\n${DROP_COMPOSE_FILES_SH}echo "docker $*" >> "${log}"\necho BACKUP_RESULT=pushed:base_000000020000000000000005\n`,
   );
   chmodSync(join(bin, 'docker'), 0o755);
   return { dir, bin, lock: join(dir, 'backup.lock'), calls: () => readFileSync(log, 'utf-8') };

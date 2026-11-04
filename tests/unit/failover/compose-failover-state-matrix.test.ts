@@ -55,7 +55,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     if (c.includes('WALG_AUDIT')) return WALG_AUDIT_PASS;
     if (c.includes('%{http_code}')) return 'app=200';
     if (c.includes('FENCE_DONE')) return 'STOPPED fake\nFENCE_DONE';
-    if (c.includes('replication.yml up -d --no-deps n8n')) return addonStartResult;
+    if (c.includes('&& sh vc-compose up -d --no-deps n8n')) return addonStartResult;
     return '';
   };
   const recChecked = async (ip: string, k: string, command: unknown) => rec(ip, k, command);
@@ -318,7 +318,7 @@ async function run(opts: RunOpts = {}) {
       order.push('fence');
       captured.fencedIp = ip;
       captured.addonStartedBeforeFence = sshCalls.some((c) =>
-        c.command.includes('replication.yml up -d --no-deps'),
+        c.command.includes('&& sh vc-compose up -d --no-deps'),
       );
       return realFence
         ? stopOldPrimaryApp(ip, key, project, services)
@@ -431,7 +431,7 @@ describe('failoverComposeHA state matrix', () => {
   it('starts the enabled primary-only add-ons on the promoted node, no-deps, never the setup jobs', async () => {
     const { thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
     expect(thrown).toBeUndefined();
-    const starts = sshCalls.filter((c) => c.command.includes('replication.yml up -d --no-deps'));
+    const starts = sshCalls.filter((c) => c.command.includes('&& sh vc-compose up -d --no-deps'));
     expect(starts).toHaveLength(1);
     expect(starts[0].ip).toBe(STANDBY_IP);
     expect(starts[0].command).toContain('up -d --no-deps n8n');
@@ -451,7 +451,7 @@ describe('failoverComposeHA state matrix', () => {
     expect(job).toBeGreaterThan(-1);
     expect(sshCalls[job].ip).toBe(STANDBY_IP);
     expect(job).toBeGreaterThan(
-      sshCalls.findIndex((c) => c.command.includes('replication.yml up -d --no-deps n8n')),
+      sshCalls.findIndex((c) => c.command.includes('&& sh vc-compose up -d --no-deps n8n')),
     );
   });
 
@@ -480,7 +480,7 @@ describe('failoverComposeHA state matrix', () => {
     const { order, thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
     expect(thrown).toBeUndefined();
     expect(order).toContain('swap');
-    const start = sshCalls.find((c) => c.command.includes('replication.yml up -d --no-deps n8n'));
+    const start = sshCalls.find((c) => c.command.includes('&& sh vc-compose up -d --no-deps n8n'));
     const warned = warn.mock.calls.map((c) => String(c[0]));
     expect(
       warned.some(
@@ -527,7 +527,7 @@ describe('failoverComposeHA state matrix', () => {
     expect(thrown).toBeUndefined();
     expect(order).toContain('fence');
     expect(captured.addonStartedBeforeFence).toBe(false);
-    expect(sshCalls.some((c) => c.command.includes('replication.yml up -d --no-deps n8n'))).toBe(
+    expect(sshCalls.some((c) => c.command.includes('&& sh vc-compose up -d --no-deps n8n'))).toBe(
       true,
     );
   });
@@ -540,7 +540,7 @@ describe('failoverComposeHA state matrix', () => {
     expect(thrown).toBeUndefined();
     expect(order.indexOf('stopWriters')).toBeLessThan(order.indexOf('promote'));
     const restart = sshCalls.findIndex((c) => c.command === 'docker restart myapp-app');
-    const start = sshCalls.findIndex((c) => c.command.includes('replication.yml up -d --no-deps'));
+    const start = sshCalls.findIndex((c) => c.command.includes('&& sh vc-compose up -d --no-deps'));
     expect(restart).toBeGreaterThan(-1);
     expect(start).toBeGreaterThan(restart);
   });
@@ -579,7 +579,9 @@ describe('failoverComposeHA state matrix', () => {
         : undefined;
     const { thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }), realFence: true });
     expect(thrown).toBeUndefined();
-    expect(sshCalls.some((c) => c.command.includes('replication.yml up -d --no-deps'))).toBe(false);
+    expect(sshCalls.some((c) => c.command.includes('&& sh vc-compose up -d --no-deps'))).toBe(
+      false,
+    );
     const warned = warn.mock.calls.map((c) => String(c[0]));
     const hint = warned.find((w) => /Not starting the primary-only add-ons/.test(w));
     expect(hint).toBeDefined();
@@ -597,7 +599,7 @@ describe('failoverComposeHA state matrix', () => {
     expect(thrown).toBeUndefined();
     expect(
       sshCalls.some(
-        (c) => c.ip === STANDBY_IP && c.command.includes('replication.yml up -d --no-deps n8n'),
+        (c) => c.ip === STANDBY_IP && c.command.includes('&& sh vc-compose up -d --no-deps n8n'),
       ),
     ).toBe(true);
     expect(warn.mock.calls.some((c) => /Not starting the primary-only/.test(String(c[0])))).toBe(
@@ -608,7 +610,9 @@ describe('failoverComposeHA state matrix', () => {
 
   it('a run with no add-ons issues no add-on start', async () => {
     await run();
-    expect(sshCalls.some((c) => c.command.includes('replication.yml up -d --no-deps'))).toBe(false);
+    expect(sshCalls.some((c) => c.command.includes('&& sh vc-compose up -d --no-deps'))).toBe(
+      false,
+    );
   });
 
   it('never re-runs app-migrate on the promoted standby (it replicated an already-migrated primary)', async () => {

@@ -41,14 +41,14 @@ let fetchOpts: Array<Record<string, unknown>>;
 
 function label(cmd: string): string | null {
   if (cmd.includes('df -Pk')) return 'df';
-  if (cmd.includes('docker compose stop db')) return 'stopDb';
+  if (cmd.includes('sh vc-compose stop db')) return 'stopDb';
   if (cmd.includes('bash /restore.sh')) return 'fetch';
   if (cmd.includes('docker ps -aq') && cmd.includes('proj-db-restore')) return 'orphanCheck';
   if (cmd.includes('docker rm -f proj-db-restore')) return 'rmRunContainer';
   if (/rm -f \/opt\/proj\/restore-walg\.[0-9a-f]+\.sh/.test(cmd)) return 'rmScript';
   if (cmd.includes('.vc-restore-in-progress')) return 'probeMarker';
-  if (cmd.includes('docker compose start db && docker compose start app')) return 'restartOld';
-  if (cmd.includes('docker compose start db')) return 'startDb';
+  if (cmd.includes('sh vc-compose start db && sh vc-compose start app')) return 'restartOld';
+  if (cmd.includes('sh vc-compose start db')) return 'startDb';
   if (cmd.includes('pg_is_in_recovery')) return 'promoted';
   if (
     cmd.includes('mv /var/lib/postgresql/data/.vc-prev /var/lib/postgresql/data/.vc-discard/prev.')
@@ -56,7 +56,7 @@ function label(cmd: string): string | null {
     return 'retirePrev';
   if (cmd.includes('rm -rf /var/lib/postgresql/data/.vc-discard')) return 'rmDiscard';
   if (/psql\b.*\bANALYZE\b/.test(cmd)) return 'analyze';
-  if (cmd.includes('docker compose start app')) return 'startApp';
+  if (cmd.includes('sh vc-compose start app')) return 'startApp';
   return null;
 }
 
@@ -145,9 +145,9 @@ describe('restoreCompose around the staged fetch', () => {
     const check = msg.indexOf('SHOW default_transaction_read_only');
     const retire = msg.indexOf('mkdir -p /var/lib/postgresql/data/.vc-discard');
     const remove = msg.indexOf('rm -rf /var/lib/postgresql/data/.vc-discard');
-    const migrate = msg.indexOf('docker compose run --rm --no-deps app-migrate');
+    const migrate = msg.indexOf('sh vc-compose run --rm --no-deps app-migrate');
     const analyze = msg.indexOf('ANALYZE');
-    const start = msg.indexOf('docker compose start app');
+    const start = msg.indexOf('sh vc-compose start app');
     expect(check).toBeGreaterThan(-1);
     expect(retire).toBeGreaterThan(check);
     expect(remove).toBeGreaterThan(retire);
@@ -257,7 +257,7 @@ describe('restoreCompose around the staged fetch', () => {
     const err = await restore().catch((e) => e);
     expect(err.message).toMatch(/stopping the app and db .* failed, so nothing was restored/);
     expect(err.message.split('\n').at(-1)).toBe(
-      "  ssh root@1.2.3.4 'cd /opt/proj && docker compose ps'",
+      "  ssh root@1.2.3.4 'cd /opt/proj && sh vc-compose ps'",
     );
     expect(events).toEqual(['orphanCheck', 'stopDb', 'rmScript']);
   });

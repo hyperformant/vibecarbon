@@ -3,19 +3,23 @@
  *
  * `WALG_ROLE` is rendered once, at deploy time, from the deploy's notion of
  * which node is which. Failover moves the role WITHOUT redeploying, so before
- * this the promoted node kept the value it was DEPLOYED with — `standby` — and
+ * this the promoted node kept the value it was DEPLOYED with (`standby`) and
  * silently stopped taking base backups (both tiers) and archiving WAL (compose,
  * and k8s too once its archive wrapper regained the write-guard).
  *
  * The subtle half is that `WALG_ROLE` is CONTAINER ENVIRONMENT, fixed at
  * container-create time. Writing `.env` or patching a StatefulSet is not the
  * fix on its own; the container has to be recreated. These tests pin the two
- * builders that make that happen, and — the part most likely to rot — pin the
- * compose `-f` reconstruction against the ONE list `composeFileFlags` is built
- * from, so a newly added overlay cannot reach deploy and miss failover.
+ * builders that make that happen. The compose recreate runs vc-compose, the
+ * node's own `-f` set (tests/unit/deploy/vc-compose.test.ts), so it is run
+ * here against the real script and a stub `docker`.
  */
-import { describe, expect, it } from 'vitest';
-import { REPL_COMPOSE_FLAGS } from '../../../src/lib/deploy/compose/ha.js';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { COMPOSE_REPLICATION_OVERLAY } from '../../../src/lib/deploy/compose/command.js';
 import { DB_POD, DB_STATEFULSET } from '../../../src/lib/deploy/db-workload.js';
 import {
   composeDbRecreateShell,
@@ -24,8 +28,61 @@ import {
   WALG_ROLE_ENV,
   walgRoleDegradedMessage,
 } from '../../../src/lib/deploy/walg-role.js';
+import {
+  DROP_COMPOSE_FILES_SH,
+  SERVER_BASE_FLAGS,
+  writeVcCompose,
+} from '../../_shared/vc-compose-stub.js';
 
 const shell = composeDbRecreateShell('/opt/myapp');
+
+const dirs: string[] = [];
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+/**
+ * Run the recreate in a stand-in compose-ha node: the real vc-compose (and the
+ * replication overlay unless `overlay: false`), and a `docker` that answers
+ * ps/inspect/up/exec. `portsAfter` is what the recreated container publishes.
+ */
+function recreate({
+  overlay = true,
+  dbRunning = true,
+  portsAfter = '5432/tcp->5433 ',
+}: {
+  overlay?: boolean;
+  dbRunning?: boolean;
+  portsAfter?: string;
+} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'vc-walg-role-'));
+  dirs.push(dir);
+  writeVcCompose(dir);
+  if (overlay) writeFileSync(join(dir, COMPOSE_REPLICATION_OVERLAY), 'services: {}\n');
+  writeFileSync(
+    join(dir, 'docker'),
+    `#!/bin/bash
+echo "RAW $*" >> "${dir}/calls"
+${DROP_COMPOSE_FILES_SH}case "$*" in
+  "compose ps -q db") ${dbRunning ? 'echo dbcid' : ':'} ;;
+  "inspect -f "*)
+    if [ -f "${dir}/inspected" ]; then printf '%s' '${portsAfter}'; else touch "${dir}/inspected"; printf '%s' '5432/tcp->5433 '; fi ;;
+  "compose exec -T db printenv ${WALG_ROLE_ENV}") echo primary ;;
+esac
+exit 0
+`,
+  );
+  chmodSync(join(dir, 'docker'), 0o755);
+  const r = spawnSync('bash', ['-c', composeDbRecreateShell(dir)], {
+    encoding: 'utf-8',
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+  });
+  const calls = readFileSync(join(dir, 'calls'), 'utf-8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => l.replace(/^RAW /, ''));
+  return { ...r, calls };
+}
 
 describe('composeDbRecreateShell', () => {
   it('recreates ONLY the db service, in the project directory', () => {
@@ -38,94 +95,62 @@ describe('composeDbRecreateShell', () => {
     expect(shell).not.toContain('--remove-orphans');
   });
 
-  it('never bare-`up`s: prod.yml would be dropped and the db recreated with dev config', () => {
-    expect(shell).toContain('FLAGS="-f docker-compose.yml -f docker-compose.prod.yml"');
-    expect(shell).toContain('docker compose $FLAGS up -d --no-deps db');
+  it('never bare-`up`s: it runs vc-compose, so prod.yml is never dropped', () => {
+    expect(shell).toContain('sh vc-compose up -d --no-deps db');
+    expect(shell).not.toMatch(/\bdocker compose\b/);
   });
 
-  // GROUND TRUTH over inference: the label is literally the -f set the running
-  // container was created with, so it beats reconstructing that set by probing.
-  it('prefers the compose config_files label, read BEFORE the recreate overwrites it', () => {
-    expect(shell).toContain('com.docker.compose.project.config_files');
-    const labelIdx = shell.indexOf('com.docker.compose.project.config_files');
-    const upIdx = shell.indexOf('up -d --no-deps db');
-    expect(labelIdx).toBeLessThan(upIdx);
-  });
-
-  // The failure mode this whole function guards against IS the empty -f set (a
-  // bare `up` resolves docker-compose.yml alone). So a missing/garbage label
-  // must degrade to the probe reconstruction, never to nothing.
-  it('degrades a missing or unusable label to the PROBE set, never to an empty -f set', () => {
-    // The label branch only wins when it produced something file-shaped…
-    expect(shell).toMatch(/case "\$FLAGS" in\n\s*\*\.yml\*\|\*\.yaml\*\)/);
-    // …and the fallback arm always seeds the base pair before probing.
-    const caseStart = shell.indexOf('case "$FLAGS" in');
-    const fallbackArm = shell.slice(caseStart, shell.indexOf('esac', caseStart));
-    expect(fallbackArm).toContain('FLAGS="-f docker-compose.yml -f docker-compose.prod.yml"');
-    expect(fallbackArm).toContain('rebuilt the -f set from the replication file set');
-    // An all-whitespace / empty label field never contributes a bare `-f`.
-    expect(shell).toContain('case "$f" in *[!\\ ]*) FLAGS="$FLAGS -f $f" ;; esac');
+  it('on a compose-ha node, recreates db from the node set WITH the replication overlay', () => {
+    const r = recreate();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.calls).toContain(
+      `compose ${SERVER_BASE_FLAGS} -f ${COMPOSE_REPLICATION_OVERLAY} up -d --no-deps db`,
+    );
+    // Every compose call it made went through the same set.
+    for (const c of r.calls.filter((l) => l.startsWith('compose '))) {
+      expect(c, c).toContain(`${SERVER_BASE_FLAGS} -f ${COMPOSE_REPLICATION_OVERLAY} `);
+    }
   });
 
   // Measured, not theorised: against a real 3-file project a bare
   // `up -d --no-deps db` reported `Container … Started` and left
-  // .NetworkSettings.Ports as {} — the 5433 publish vanished silently.
+  // .NetworkSettings.Ports as {}: the 5433 publish vanished silently.
   it('asserts the published-port set SURVIVES the recreate, and fails loudly if not', () => {
-    expect(shell).toContain('PORTS_BEFORE=');
-    expect(shell).toContain('PORTS_AFTER=');
+    const r = recreate({ portsAfter: '' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('DROPPED published port(s): 5432/tcp->5433');
     // Captured before, compared after.
     expect(shell.indexOf('PORTS_BEFORE=')).toBeLessThan(shell.indexOf('up -d --no-deps db'));
     expect(shell.indexOf('up -d --no-deps db')).toBeLessThan(shell.indexOf('PORTS_AFTER='));
-    expect(shell).toContain('DROPPED published port(s)');
-    // Only PUBLISHED ports are compared — exposed-but-unpublished ports have a
+    // Only PUBLISHED ports are compared: exposed-but-unpublished ports have a
     // null mapping, so `range` over them yields nothing and cannot false-fail.
     expect(shell).toContain('{{range $p, $c := .NetworkSettings.Ports}}');
   });
 
   it('the drop message states the node is recoverable and names the remedy', () => {
-    // Read mid-incident: the db IS up (the recreate worked, it just resolved the
-    // wrong file set), so say so before saying what is wrong, and give the one
-    // command that reconciles it — same remedy as walgRoleDegradedMessage.
-    expect(shell).toContain('the database is RUNNING');
-    expect(shell).toContain('Nothing is lost');
-    expect(shell).toContain('vibecarbon deploy <env>');
+    // Read mid-incident: the db IS up (the recreate worked, it just lost a
+    // publish), so say so before saying what is wrong, and give the one command
+    // that reconciles it: same remedy as walgRoleDegradedMessage.
+    const r = recreate({ portsAfter: '' });
+    expect(r.stderr).toContain('the database is RUNNING');
+    expect(r.stderr).toContain('Nothing is lost');
+    expect(r.stderr).toContain('vibecarbon deploy <env>');
   });
 
   it('refuses to recreate when no db container is running, rather than guessing', () => {
-    // Without a running container there is no label and no port baseline, so
-    // the assertion below would be vacuous and the -f set unverifiable.
-    expect(shell).toContain('refusing to recreate blind');
+    const r = recreate({ dbRunning: false });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('refusing to recreate blind');
+    expect(r.calls.some((c) => c.includes(' up '))).toBe(false);
   });
 
-  it('appends the replication overlay LAST, exactly as reconcile.sh does', () => {
-    // Dropping it recreates db without the 5433 publish the repl-gateway socat
-    // relay dials — replication transport silently dies.
-    expect(shell).toContain('docker-compose.replication.yml');
-    const files = [...shell.matchAll(/docker-compose[\w.]*\.yml/g)].map((m) => m[0]);
-    expect(files.at(-1)).toBe('docker-compose.replication.yml');
+  it('a node without the overlay (single compose) recreates from the base set alone', () => {
+    const r = recreate({ overlay: false });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.calls).toContain(`compose ${SERVER_BASE_FLAGS} up -d --no-deps db`);
   });
 
-  // DRIFT GUARD — the fallback set must equal the set the DEPLOY itself uses
-  // when it recreates db on a compose-ha node (`haWriteReplicationOverlay` →
-  // REPL_COMPOSE_FLAGS). Not "every overlay present on the node": n8n and
-  // metabase both define a `db:` key, so a generous fallback would merge config
-  // the deploy never applied — and the port assertion could not catch it,
-  // because it only detects REMOVALS.
-  it('falls back to exactly REPL_COMPOSE_FLAGS — never to every overlay present', () => {
-    const replFiles = REPL_COMPOSE_FLAGS.split(' ').filter((t) => t !== '-f');
-    const caseStart = shell.indexOf('case "$FLAGS" in');
-    const fallbackArm = shell.slice(caseStart, shell.indexOf('esac', caseStart));
-    const referenced = [...fallbackArm.matchAll(/docker-compose[\w.]*\.yml/g)].map((m) => m[0]);
-    expect([...new Set(referenced)]).toEqual(replFiles);
-    // And nothing anywhere in the script reaches for an add-on overlay.
-    for (const f of ['n8n', 'metabase', 'redis', 'observability', 'dns01']) {
-      expect(shell, `fallback must not pull in docker-compose.${f}.yml`).not.toContain(
-        `docker-compose.${f}`,
-      );
-    }
-  });
-
-  it('waits for postgres to answer again — `up -d` returns on CREATE, not on ready', () => {
+  it('waits for postgres to answer again: `up -d` returns on CREATE, not on ready', () => {
     expect(shell).toContain('pg_isready');
     // Everything downstream (the audit, the app-tier restart) needs a database
     // that answers, so a db that never comes back has to be a hard failure.
@@ -135,15 +160,7 @@ describe('composeDbRecreateShell', () => {
 
   it('reports the resulting WALG_ROLE, so the log shows what the container actually got', () => {
     expect(shell).toContain(`printenv ${WALG_ROLE_ENV}`);
-  });
-
-  it('never lets a file test short-circuit the recreate under `set -e`', () => {
-    // `[ -f x ] && FLAGS=…` evaluates to non-zero when the file is ABSENT —
-    // which, as the last statement of the branch under `set -e`, aborts the
-    // script before the `up` ever runs. A single-server node legitimately has
-    // no replication overlay, so that is the common case, not the rare one.
-    expect(shell).toMatch(/if \[ -f docker-compose\.replication\.yml \]; then/);
-    expect(shell).not.toMatch(/\[ -f [^\]]+\] &&/);
+    expect(recreate().stdout).toContain(`${WALG_ROLE_ENV}=primary`);
   });
 });
 

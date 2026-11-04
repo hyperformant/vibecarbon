@@ -205,7 +205,7 @@ describe('failoverComposeHA — standby already streaming', () => {
   // Container names (container_name: ${PROJECT_NAME}-<svc>, stamped on every
   // service) bypass compose file resolution entirely — the
   // hand-rolled-compose-invocation-drifts family (see
-  // compose-invocation-service-names census).
+  // server-compose-command-census: a bare `docker compose` is banned).
   it('restarts the new-primary app tier by CONTAINER name, never bare compose service names', async () => {
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
@@ -217,7 +217,9 @@ describe('failoverComposeHA — standby already streaming', () => {
     // non-zero for the whole list.
     expect(restart?.command).toBe('docker restart myapp-app');
     // The 3/3-failing shape must never come back.
-    expect(sshCalls.some((c) => /docker compose restart(?! db)/.test(c.command))).toBe(false);
+    expect(
+      sshCalls.some((c) => /(?:docker compose|sh vc-compose) restart(?! db)/.test(c.command)),
+    ).toBe(false);
   });
 
   // The bug this guards: failover swapped the roles in config but never
@@ -305,7 +307,9 @@ describe('failoverComposeHA — standby already streaming', () => {
     // plain `docker stop` exit non-zero, which reads as the split-brain warning.
     expect(sshCalls[stopIdx].command).toContain('docker container inspect');
     expect(sshCalls[stopIdx].command).toContain('docker stop "$c"');
-    expect(sshCalls.some((c) => /docker compose stop app/.test(c.command))).toBe(false);
+    expect(sshCalls.some((c) => /(?:docker compose|sh vc-compose) stop app/.test(c.command))).toBe(
+      false,
+    );
   });
 
   it('recreates the promoted db container so the new WALG_ROLE is actually in its env', async () => {
@@ -318,10 +322,10 @@ describe('failoverComposeHA — standby already streaming', () => {
       (c) => c.ip === '2.2.2.2' && c.command.includes('up -d --no-deps db'),
     );
     expect(recreate).toBeDefined();
-    // …with the node's real -f set, not a bare `docker compose up` (which would
-    // resolve docker-compose.yml only and drop prod.yml + the replication overlay).
-    expect(recreate?.command).toContain('-f docker-compose.yml -f docker-compose.prod.yml');
-    expect(recreate?.command).toContain('docker-compose.replication.yml');
+    // …through vc-compose, the node's real -f set (prod.yml + the replication
+    // overlay), never a bare `docker compose up` (docker-compose.yml only).
+    expect(recreate?.command).toContain('sh vc-compose up -d --no-deps db');
+    expect(recreate?.command).not.toMatch(/\bdocker compose\b/);
   });
 
   it('audits the promoted node in requirePrimary mode (a stale standby role must FAIL, not skip)', async () => {

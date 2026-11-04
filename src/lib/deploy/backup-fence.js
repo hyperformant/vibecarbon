@@ -46,6 +46,7 @@ import * as p from '@clack/prompts';
 import { updateProjectConfig } from '../config.js';
 import { sshKubectl } from '../ssh.js';
 import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
+import { VC_COMPOSE } from './compose/command.js';
 import { sshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD } from './db-workload.js';
 import { k8sPsqlRunner } from './replication.js';
@@ -275,13 +276,13 @@ export function writeComposeBackupFence({ ip, sshKeyPath, projectName, primaryNo
       const out = await run(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc '${sql}'`,
+        `cd ${remoteDir} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc '${sql}'`,
         { silent: true, timeout: 20_000 },
       );
       return typeof out === 'string' ? out : '';
     },
     runInDb: (script) =>
-      run(ip, sshKeyPath, `cd ${remoteDir} && docker compose exec -T db sh -c '${script}'`, {
+      run(ip, sshKeyPath, `cd ${remoteDir} && ${VC_COMPOSE} exec -T db sh -c '${script}'`, {
         silent: true,
         timeout: 60_000,
       }),

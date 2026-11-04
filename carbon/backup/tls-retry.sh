@@ -41,7 +41,7 @@ set -u
 #      abandons an in-flight DNS-01 order, and a second order on the same
 #      _acme-challenge name meets cached DNS answers (the DNS-01 settle
 #      doctrine). The settle floor itself is not touched here.
-#   9. Otherwise count the restart and run `docker compose restart traefik`.
+#   9. Otherwise count the restart and run `sh vc-compose restart traefik`.
 #
 # Rate limit: each restart places the apex and wildcard orders. Two restarts
 # an hour on their own stay at 4 failed validations per hostname per hour,
@@ -91,7 +91,7 @@ if ! [[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
   exit 0
 fi
 
-traefik="$(docker compose ps -q traefik 2>/dev/null)" || traefik=""
+traefik="$(sh vc-compose ps -q traefik 2>/dev/null)" || traefik=""
 if [ -z "$traefik" ]; then
   note no-traefik "traefik is not running, nothing to retry"
   exit 0
@@ -110,7 +110,7 @@ case "$cmd" in
 esac
 
 apex_re="$(printf '%s' "$domain" | sed 's/[.]/\\./g')"
-if docker compose exec -T traefik grep -Eq "\"main\": ?\"${apex_re}\"" /letsencrypt/acme.json; then
+if sh vc-compose exec -T traefik grep -Eq "\"main\": ?\"${apex_re}\"" /letsencrypt/acme.json; then
   rm -f "$COUNT_FILE"
   if note present "certificate for ${domain} is present"; then
     # First tick that sees it: save the snapshot now, so a certificate this
@@ -159,7 +159,7 @@ if [ -f "$COUNT_FILE" ]; then
 fi
 [[ "$count" =~ ^[0-9]+$ ]] || count=0
 if [ "$count" -ge "$MAX_RESTARTS" ]; then
-  note gave-up "no certificate for ${domain} after ${count} restarts, giving up (run vibecarbon deploy once the ACME error in docker compose logs traefik is fixed)"
+  note gave-up "no certificate for ${domain} after ${count} restarts, giving up (run vibecarbon deploy once the ACME error in the Traefik log, sh vc-compose logs traefik, is fixed)"
   exit 0
 fi
 
@@ -188,7 +188,7 @@ mkdir -p backups
 printf '%s\n' "$count" > "$COUNT_FILE"
 printf '%s\n' restart > "$STATE_FILE"
 log "no certificate for ${domain} yet, restarting traefik to retry issuance (${count} of ${MAX_RESTARTS})"
-if ! docker compose restart traefik; then
+if ! sh vc-compose restart traefik; then
   log "traefik restart failed"
   exit 1
 fi
