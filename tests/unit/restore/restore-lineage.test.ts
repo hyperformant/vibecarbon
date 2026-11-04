@@ -96,11 +96,12 @@ describe('listLineages', () => {
     const s3 = fakeS3(destroyedAndRedeployed);
     const lineages = await listLineages({ s3, bucket: 'myapp-backups', base: BASE });
     expect(lineages).toEqual([
-      { lineage: NEW, oldestFinish: null, newestFinish: null },
+      { lineage: NEW, oldestFinish: null, newestFinish: null, bases: [] },
       {
         lineage: OLD,
         oldestFinish: at('2026-10-18T02:00:00Z'),
         newestFinish: at('2026-10-19T02:00:00Z'),
+        bases: ['base_000000010000000000000004', 'base_000000010000000000000008'],
       },
     ]);
     expect(s3.calls[0]).toEqual({
@@ -119,10 +120,80 @@ describe('listLineages', () => {
   });
 });
 
-const L = (lineage: string, oldest: string | null, newest: string | null) => ({
+const L = (lineage: string, oldest: string | null, newest: string | null, bases?: string[]) => ({
   lineage,
   oldestFinish: oldest ? at(oldest) : null,
   newestFinish: newest ? at(newest) : null,
+  ...(bases && { bases }),
+});
+
+describe('resolveRestoreLineage (a named base backup)', () => {
+  const NAMED = 'base_00000002000000000000000D';
+  const OTHER = 'base_000000010000000000000004';
+  // The e2e shape: back up, destroy, cold redeploy (a new lineage with no base yet).
+  const marked = { backup: { lineage: NEW, unrestoredPrior: OLD } };
+  const redeployed = [
+    L(NEW, null, null, []),
+    L(OLD, '2026-11-04T10:30:25Z', '2026-11-04T10:32:02Z', [OTHER, NAMED]),
+  ];
+
+  it('a base only the old lineage holds picks it, even with unrestoredPrior set', () => {
+    expect(resolveRestoreLineage({ envConfig: marked, lineages: redeployed, base: NAMED })).toBe(
+      OLD,
+    );
+  });
+
+  it('a base in two lineages is ambiguous, listing only the two holders', () => {
+    const THIRD = '7700000000000000003';
+    const lineages = [
+      ...redeployed,
+      L(THIRD, '2026-11-01T00:00:00Z', '2026-11-02T00:00:00Z', [OTHER]),
+    ];
+    lineages[0] = L(NEW, '2026-11-04T12:00:00Z', '2026-11-04T12:00:00Z', [NAMED]);
+    let err: unknown;
+    try {
+      resolveRestoreLineage({ envConfig: marked, lineages, base: NAMED });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AmbiguousLineageError);
+    const e = err as AmbiguousLineageError;
+    expect(e.lineages.map((l) => l.lineage).sort()).toEqual([NEW, OLD].sort());
+    expect(e.message).toContain(`${NAMED} exists in more than one lineage`);
+    expect(e.message).not.toContain(THIRD);
+  });
+
+  it('a base in no lineage is a NoRestorePointError naming the base and the lineages with bases', () => {
+    const missing = 'base_0000000100000000000000FF';
+    const run = () =>
+      resolveRestoreLineage({ envConfig: marked, lineages: redeployed, base: missing });
+    expect(run).toThrow(NoRestorePointError);
+    expect(run).toThrow(new RegExp(`${missing}[\\s\\S]*${OLD}`));
+  });
+
+  it('-lineage wins over the base name', () => {
+    expect(
+      resolveRestoreLineage({ envConfig: marked, lineages: redeployed, flag: OLD, base: OTHER }),
+    ).toBe(OLD);
+    // The flag decides even when the named base lives elsewhere (pickRestoreBase reports that).
+    const two = [L(NEW, '2026-11-04T12:00:00Z', '2026-11-04T12:00:00Z', [NAMED]), redeployed[1]];
+    expect(
+      resolveRestoreLineage({ envConfig: marked, lineages: two, flag: OLD, base: NAMED }),
+    ).toBe(OLD);
+  });
+
+  it('no base name: unrestoredPrior still refuses (Decision 2)', () => {
+    expect(() => resolveRestoreLineage({ envConfig: marked, lineages: redeployed })).toThrow(
+      AmbiguousLineageError,
+    );
+    expect(() =>
+      resolveRestoreLineage({
+        envConfig: marked,
+        lineages: redeployed,
+        target: at('2026-11-04T10:31:00Z'),
+      }),
+    ).toThrow(AmbiguousLineageError);
+  });
 });
 
 describe('resolveRestoreLineage (no -lineage)', () => {
@@ -260,6 +331,21 @@ describe('readEnvBaseBackups reads one lineage folder', () => {
         makeClient: () => fakeS3(destroyedAndRedeployed),
       }),
     ).rejects.toThrow(AmbiguousLineageError);
+  });
+
+  it('a named base reads the one lineage that holds it, past unrestoredPrior', async () => {
+    const listing = await readEnvBaseBackups({
+      envName: 'prod',
+      envConfig: {
+        deployMode: 'compose',
+        backup: { lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD },
+      },
+      projectName: 'myapp',
+      s3Config: S3,
+      base: 'base_000000010000000000000008',
+      makeClient: () => fakeS3(destroyedAndRedeployed),
+    });
+    expect(listing.lineage).toBe(OLD);
   });
 
   it('-lineage reads that folder and names it in the location', async () => {
@@ -813,5 +899,83 @@ describe('callers of the live database read the recorded lineage, never resolve'
       .stdout.split('\n')
       .filter(Boolean);
     expect(direct).toEqual(['src/lib/walg/restore-base.js']);
+  });
+});
+
+describe('census: a restore source reaches lineage resolution with its base name', () => {
+  // Calls that have no restore source: a list or a live read. Each says why.
+  const ALLOWED: Record<string, string> = {
+    'src/backup.js': 'backup -l lists every base; there is no source to name one',
+    'src/scale.js': 'live: true reads the recorded lineage and never resolves',
+    'src/failover.js': 'live: true reads the recorded lineage and never resolves',
+  };
+
+  /** The argument text of every `name(` call in a source text, up to its matching paren. */
+  function callArgs(text: string, name: string): string[] {
+    const out: string[] = [];
+    let i = text.indexOf(`${name}(`);
+    while (i !== -1) {
+      let depth = 0;
+      let j = i + name.length;
+      for (; j < text.length; j++) {
+        if (text[j] === '(') depth++;
+        else if (text[j] === ')' && --depth === 0) break;
+      }
+      out.push(text.slice(i + name.length + 1, j));
+      i = text.indexOf(`${name}(`, j);
+    }
+    return out;
+  }
+
+  /** Every offending call site in `files`: no `base` passed and not allowlisted. */
+  function offenders(files: Record<string, string>): string[] {
+    const bad: string[] = [];
+    for (const [file, text] of Object.entries(files)) {
+      if (file in ALLOWED) continue;
+      for (const name of ['readEnvBaseBackups', 'resolveRestoreLineage']) {
+        for (const args of callArgs(text, name)) {
+          if (!/\bbase\b\s*[:,}]/.test(args)) bad.push(`${file}: ${name}(${args.slice(0, 40)}...)`);
+        }
+      }
+    }
+    return bad;
+  }
+
+  function srcFiles(): Record<string, string> {
+    const listed = spawnSync(
+      'git',
+      ['grep', '-lE', '(readEnvBaseBackups|resolveRestoreLineage)\\(', '--', 'src'],
+      {
+        encoding: 'utf-8',
+      },
+    )
+      .stdout.split('\n')
+      .filter((f) => f && f !== 'src/lib/walg/restore-base.js');
+    return Object.fromEntries(listed.map((f) => [f, readFileSync(f, 'utf-8')]));
+  }
+
+  it('every caller passes base, or is allowlisted with a reason', () => {
+    const files = srcFiles();
+    expect(Object.keys(files).length).toBeGreaterThan(0);
+    expect(offenders(files)).toEqual([]);
+  });
+
+  it('the allowlist holds only files that still call them', () => {
+    for (const f of Object.keys(ALLOWED)) expect(Object.keys(srcFiles())).toContain(f);
+  });
+
+  it('fails on a caller that drops the base', () => {
+    const broken = {
+      'src/new-path.js': 'await readEnvBaseBackups({ envName, lineage: values.lineage });',
+      'src/other.js': 'resolveRestoreLineage({ envConfig, lineages, flag, base: chosen.base });',
+    };
+    expect(offenders(broken)).toHaveLength(1);
+    expect(offenders(broken)[0]).toContain('src/new-path.js');
+  });
+
+  it('resolveDeployRestorePoint passes the chosen base and keeps latest as the target', () => {
+    const text = readFileSync('src/lib/walg/restore-base.js', 'utf-8');
+    const args = callArgs(text, 'resolveRestoreLineage').find((a) => a.includes('chosen')) ?? '';
+    expect(args).toMatch(/base: chosen\.base/);
   });
 });

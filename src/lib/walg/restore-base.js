@@ -56,7 +56,7 @@ export class NoRestorePointError extends Error {
 export class AmbiguousLineageError extends Error {
   /**
    * @param {string} message
-   * @param {Array<{ lineage: string, oldestFinish: Date|null, newestFinish: Date|null }>} lineages
+   * @param {Array<{ lineage: string, oldestFinish: Date|null, newestFinish: Date|null, bases?: string[] }>} lineages
    */
   constructor(message, lineages) {
     super(message);
@@ -218,11 +218,12 @@ export async function listBaseBackups({ s3, bucket, prefix }) {
  * The database lineages archived under an environment's prefix: one folder
  * per system identifier (ListObjectsV2 with Delimiter '/'), each with the
  * finish times of its oldest and newest complete base backup (null when it
- * holds none). Folders that are not a system identifier are not lineages.
+ * holds none) and the names of its base backups (`bases`, oldest first, read
+ * from the same listing, so no extra S3 call). Folders that are not a system identifier are not lineages.
  * Oldest lineage first, by its newest base (lineages with none first).
  *
  * @param {{ s3: { send: (cmd: unknown) => Promise<any> }, bucket: string, base: string }} args
- * @returns {Promise<Array<{ lineage: string, oldestFinish: Date|null, newestFinish: Date|null }>>}
+ * @returns {Promise<Array<{ lineage: string, oldestFinish: Date|null, newestFinish: Date|null, bases: string[] }>>}
  */
 export async function listLineages({ s3, bucket, base }) {
   const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
@@ -260,6 +261,7 @@ export async function listLineages({ s3, bucket, base }) {
       lineage,
       oldestFinish: backups[0]?.finishTime ?? null,
       newestFinish: backups.at(-1)?.finishTime ?? null,
+      bases: backups.map((b) => b.name),
     });
   }
   const at = (l) => l.newestFinish?.getTime() ?? -1;
@@ -281,12 +283,23 @@ function instant(d) {
  * new database has no base yet beside the old one's backups must never restore
  * the empty one, or the old one, without the operator saying which.
  *
- * @param {{ envConfig?: object, lineages: Array<{ lineage: string, oldestFinish: Date|null, newestFinish: Date|null }>, flag?: string|null, target?: 'latest' | Date }} args
+ * A base backup NAME (`base`, from `-source base_...`) is not a guess: with no
+ * `-lineage`, the lineages that hold that base decide. Exactly one is the pick,
+ * even past `unrestoredPrior`; none is a NoRestorePointError; more than one is
+ * ambiguous, listing only those holders.
+ *
+ * @param {{ envConfig?: object, lineages: Array<{ lineage: string, oldestFinish: Date|null, newestFinish: Date|null, bases?: string[] }>, flag?: string|null, target?: 'latest' | Date, base?: string|null }} args
  * @returns {string|null}
  * @throws {AmbiguousLineageError}
- * @throws {NoRestorePointError} when `flag` names no lineage with base backups
+ * @throws {NoRestorePointError} when `flag` names no lineage with base backups, or `base` is in none
  */
-export function resolveRestoreLineage({ envConfig, lineages, flag = null, target = 'latest' }) {
+export function resolveRestoreLineage({
+  envConfig,
+  lineages,
+  flag = null,
+  target = 'latest',
+  base = null,
+}) {
   const withBases = lineages.filter((l) => l.newestFinish);
   if (flag !== null && flag !== undefined && flag !== '') {
     const named = String(flag);
@@ -304,6 +317,21 @@ export function resolveRestoreLineage({ envConfig, lineages, flag = null, target
     return named;
   }
   const current = envConfig?.backup?.lineage ? String(envConfig.backup.lineage) : null;
+  if (base) {
+    const holders = withBases.filter((l) => l.bases?.includes(base));
+    if (holders.length === 1) return holders[0].lineage;
+    if (holders.length === 0) {
+      const known = withBases.map((l) => l.lineage).join(', ') || 'none';
+      throw new NoRestorePointError(
+        `no base backup named ${base} in any lineage (lineages with base backups: ${known})`,
+      );
+    }
+    throw ambiguousLineage(
+      `the base backup ${base} exists in more than one lineage, and restore will not guess which one you mean:`,
+      holders,
+      holders.some((l) => l.lineage === current) ? current : null,
+    );
+  }
   // A deploy replaced an archived database (unrestoredPrior): the new one's
   // own bases, however new, never make the pick while the old one holds bases.
   const unrestored = envConfig?.backup?.unrestoredPrior
@@ -415,7 +443,9 @@ export function restoredLineageRecord(backup, lineage) {
  *
  * Reads one lineage's folder: `lineage` (the -lineage flag) or the one
  * resolveRestoreLineage picks for `target`. `lineage` comes back null when
- * no lineage is recorded and none holds a base (an empty listing).
+ * no lineage is recorded and none holds a base (an empty listing). `base`
+ * (a base backup name from `-source`) lets the one lineage that holds it
+ * decide, with no `-lineage`.
  *
  * `live: true` is for callers that work on the LIVE database (scale's
  * restore onto the new server, the single-server failover guide): they read
@@ -426,7 +456,7 @@ export function restoredLineageRecord(backup, lineage) {
  * `s3Config` is null when there is no backup bucket on record or no
  * credentials for it; callers name the variables (backupCredentialVars).
  *
- * @param {{ envName: string, envConfig: object, projectName: string, skipPrompts?: boolean, s3Config?: object, lineage?: string|null, target?: 'latest' | Date, live?: boolean, resolveS3?: typeof resolveS3Config, makeClient?: (cfg: object) => any }} args
+ * @param {{ envName: string, envConfig: object, projectName: string, skipPrompts?: boolean, s3Config?: object, lineage?: string|null, target?: 'latest' | Date, base?: string|null, live?: boolean, resolveS3?: typeof resolveS3Config, makeClient?: (cfg: object) => any }} args
  * @returns {Promise<{ s3Config: object | null, location: string | null, lineage: string | null, lineages?: Awaited<ReturnType<typeof listLineages>>, backups: Awaited<ReturnType<typeof listBaseBackups>> }>}
  * @throws {AmbiguousLineageError}
  */
@@ -438,6 +468,7 @@ export async function readEnvBaseBackups({
   s3Config: given,
   lineage: flag = null,
   target = 'latest',
+  base: baseName = null,
   live = false,
   resolveS3 = resolveS3Config,
   makeClient = createS3Client,
@@ -460,7 +491,7 @@ export async function readEnvBaseBackups({
     return { s3Config, location: `s3://${s3Config.bucket}/${prefix}`, lineage: recorded, backups };
   }
   const lineages = await listLineages({ s3, bucket: s3Config.bucket, base });
-  const lineage = resolveRestoreLineage({ envConfig, lineages, flag, target });
+  const lineage = resolveRestoreLineage({ envConfig, lineages, flag, target, base: baseName });
   const prefix = lineage ? `${base}/${lineage}` : base;
   const location = `s3://${s3Config.bucket}/${prefix}`;
   const backups = lineage ? await listBaseBackups({ s3, bucket: s3Config.bucket, prefix }) : [];
@@ -631,7 +662,9 @@ export async function resolveDeployRestorePoint({
     envConfig,
     lineages,
     flag,
+    // A base name parses to name 'latest': the target is never a Date of it.
     target: chosen.name === 'latest' ? 'latest' : new Date(chosen.name),
+    base: chosen.base ?? null,
   });
   if (!lineage) {
     throw new NoRestorePointError(`no base backups found in s3://${bucket}/${prefix}`);

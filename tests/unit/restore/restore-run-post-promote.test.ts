@@ -42,22 +42,26 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => ({
   ...(await orig<typeof import('../../../src/lib/ssh.js')>()),
   getSSHKeyPath: () => keyPath,
 }));
+const readBases = vi.fn();
 vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => ({
   ...(await orig<typeof import('../../../src/lib/walg/restore-base.js')>()),
-  readEnvBaseBackups: async () => ({
-    s3Config: { bucket: 'myapp-backups' },
-    location: `s3://myapp-backups/backups/myapp/prod/walg/${LINEAGE}`,
-    lineage: LINEAGE,
-    backups: [
-      {
-        name: 'base_000000010000000000000002',
-        timeline: 1,
-        finishTime: new Date('2026-10-20T01:00:00Z'),
-        sizeBytes: 1024,
-        uncompressedBytes: 4096,
-      },
-    ],
-  }),
+  readEnvBaseBackups: async (...a: unknown[]) => (
+    readBases(...a),
+    {
+      s3Config: { bucket: 'myapp-backups' },
+      location: `s3://myapp-backups/backups/myapp/prod/walg/${LINEAGE}`,
+      lineage: LINEAGE,
+      backups: [
+        {
+          name: 'base_000000010000000000000002',
+          timeline: 1,
+          finishTime: new Date('2026-10-20T01:00:00Z'),
+          sizeBytes: 1024,
+          uncompressedBytes: 4096,
+        },
+      ],
+    }
+  ),
 }));
 // The live wal-g role bind probe (its refusal has its own tests in
 // compose-ha-reseed.test.ts): every db container binds the role directory.
@@ -169,6 +173,21 @@ describe('restore run(): the restore succeeded, its first base did not', () => {
     expect(stops).not.toContain('Restore failed');
     const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8'));
     expect(saved.environments.prod.backup.lineage).toBe(LINEAGE);
+  });
+});
+
+describe('restore run(): -source <base name>', () => {
+  it('hands the base name to the lineage resolution, with a latest target', async () => {
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    readBases.mockClear();
+    await run(['prod', '-y', '-source', 'base_00000002000000000000000D', '-confirm', 'prod']).catch(
+      () => {},
+    );
+    expect(readBases).toHaveBeenCalledWith(
+      expect.objectContaining({ base: 'base_00000002000000000000000D', target: 'latest' }),
+    );
   });
 });
 
