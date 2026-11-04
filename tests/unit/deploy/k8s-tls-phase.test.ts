@@ -406,6 +406,7 @@ describe('deploy timing records (k3s.js)', () => {
   it('the restore time travels out of applyK3sManifests and deployK3s', () => {
     expect(K3S).toMatch(/return \{ tlsRestoredAt \};\n\}/);
     expect(K3S).toMatch(/tlsRestoredAt = applied\?\.tlsRestoredAt \?\? null;/);
-    expect(K3S).toMatch(/imageTag,\n {4}tlsRestoredAt,\n {2}\};/);
+    // deployK3s's result: tlsRestoredAt beside imageTag (freshCluster follows).
+    expect(K3S).toMatch(/imageTag,\n {4}tlsRestoredAt,\n/);
   });
 });

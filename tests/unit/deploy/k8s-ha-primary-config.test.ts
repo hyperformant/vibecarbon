@@ -69,12 +69,16 @@ describe('fan-out chaining + streaming fast-path', () => {
     expect(effects).toMatch(/primaryConfigured:\s*ctx\.primaryReplicationConfigured === true/);
   });
 
-  it('setupReplication probes streaming unconditionally before the reseed block', () => {
+  it('setupReplication probes streaming before the reseed block, skipping only for a standby this deploy created', () => {
     const idx = src.indexOf('export async function setupReplication');
     const body = src.slice(idx);
     const probeIdx = body.indexOf('deploy.ha.replication.streamingProbe');
     const reseedIdx = body.indexOf('deploy.ha.replication.reseed.resolvePvc');
     expect(probeIdx).toBeGreaterThan(-1);
     expect(reseedIdx).toBeGreaterThan(probeIdx); // probe comes first
+    // Not gated on the opportunistic flags: the only skip is a fresh standby
+    // (k8s-ha-fresh-standby-probe.test.ts).
+    const gate = body.slice(0, probeIdx);
+    expect(gate).toContain('if (options.standbyFresh === true) {');
   });
 });

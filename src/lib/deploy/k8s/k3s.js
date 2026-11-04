@@ -4937,7 +4937,7 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
  * `vibecarbon` namespace exists, so the HA fan-out can start on signals.
  *
  * @param {K3sDeployOptions} options
- * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, masterPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string, imageTag: string}>}
+ * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, masterPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string, imageTag: string, tlsRestoredAt: string|null, freshCluster: boolean}>}
  */
 export async function deployK3s(options) {
   // What deployK3sSteps started in the background and must not outlive a
@@ -5042,6 +5042,10 @@ async function deployK3sSteps(options, inFlight) {
     maxWorkers,
     k3sVersion: K3S_VERSION,
   };
+  // Whether this run's provisioning minted the cluster's k3s token (returned as
+  // `freshCluster`): false whenever provisioning is skipped or replays the
+  // stack's token.
+  let freshCluster = false;
   if (!state.shouldSkip('k3s-infra', infraInputs)) {
     state.startStep('k3s-infra', infraInputs);
     const { upStack } = await import('../../iac/index.js');
@@ -5113,6 +5117,10 @@ async function deployK3sSteps(options, inFlight) {
       throw new Error('Pulumi outputs missing masterIp or floatingIp');
     }
     state.completeStep('k3s-infra', outputs);
+    // A minted token is in every node's user data, and a user-data change
+    // replaces the server, so every node of this cluster is new: its k3s
+    // datastore, and every volume claimed from it, came from this run.
+    freshCluster = !priorK3sToken;
     s.stop(`Cluster provisioned: master=${outputs.masterIp} floating=${outputs.floatingIp}`);
   }
   const infraOutputs = state.getStepResult('k3s-infra');
@@ -5503,5 +5511,9 @@ async function deployK3sSteps(options, inFlight) {
     sshKeyPath: privateKeyPath,
     imageTag,
     tlsRestoredAt,
+    // Every node was created by this run (see where it is set), so the db
+    // StatefulSet's volume and the database on it are new: a k8s-ha standby
+    // cannot be streaming yet, and setupReplication skips its probe.
+    freshCluster,
   };
 }
