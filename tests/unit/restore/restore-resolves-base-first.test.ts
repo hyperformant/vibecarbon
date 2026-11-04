@@ -20,6 +20,12 @@ writeFileSync(keyPath, 'not-a-key');
 
 let envConfig: Record<string, unknown> = {};
 
+// The project scaffold is current; the stale-scaffold refusal has its own
+// tests (preflight-role-file, scaffold-lockstep-commands).
+vi.mock('../../../src/lib/deploy/preflight.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  assertScaffoldSupportsRoleFile: () => {},
+}));
 vi.mock('../../../src/lib/project-guard.js', () => ({
   assertInProjectDir: () => ({ projectName: 'myapp', environments: { prod: envConfig } }),
 }));

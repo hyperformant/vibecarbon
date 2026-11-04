@@ -59,10 +59,11 @@
  * FAILS: prefix and credentials come from the same S3 config, so that shape is
  * a missing/misnamed secret, not an opt-out.
  *
- * PRIMARY ONLY. The probe skips a node whose `WALG_ROLE` is `standby`, and that
- * is correct rather than merely convenient: the standby is write-guarded by
- * design (WALG_ROLE=standby short-circuits both wal-archive.sh and the base
- * backup), so every archiver assertion there is vacuous; its wal-g CONFIG is
+ * PRIMARY ONLY. The probe skips a node whose wal-g role file says `standby`
+ * (read through walg-env.sh into VC_WALG_ROLE, src/lib/deploy/walg-role.js),
+ * and that is correct rather than merely convenient: the standby is
+ * write-guarded by design (a standby role short-circuits both wal-archive.sh
+ * and the base backup), so every archiver assertion there is vacuous; its wal-g CONFIG is
  * not independent (both nodes render WALG_S3_PREFIX from the same project
  * config and receive the same credential material, so the primary's audit
  * already proves it); and its DR seed/reseed path is pg_basebackup over the
@@ -70,10 +71,15 @@
  * later in the same plan. Probing a standby db that is still converging would
  * trade a vacuous signal for real deploy flake.
  *
+ * NO ROLE IS A FAILURE, NEVER A SKIP. A missing, empty or unknown role file
+ * means wal-archive.sh holds every segment and the base backup refuses, so the
+ * probe reports `fail:no-role`, in both modes. Every deploy writes the role
+ * before the stack starts, so on a deployed node it is a real fault.
+ *
  * `requirePrimary`: WHEN THE SKIP IS ITSELF THE BUG
  * ------------------------------------------------
  * That skip is right at DEPLOY time and exactly wrong at FAILOVER time. After a
- * promotion the node IS the primary, so a `WALG_ROLE=standby` it is still
+ * promotion the node IS the primary, so a standby role it is still
  * carrying is not a write-guard doing its job — it is stale config silently
  * disabling archiving on the only node that has the data (see
  * src/lib/deploy/walg-role.js). Callers that KNOW the node must be a primary
@@ -83,7 +89,7 @@
  * in recovery and should not have been audited as a primary at all.
  *
  * It is OPT-IN, not the default, and that is deliberate. A k8s-ha standby
- * legitimately sits `WALG_ROLE=standby` and NOT in recovery during bring-up:
+ * legitimately sits on a standby role and NOT in recovery during bring-up:
  * if the first-boot seed init exits UNSEEDED, its database boots as an
  * independent primary and the serial reseed converts it later — AFTER
  * `deployK3s` has already run this audit against that cluster. Failing on that
@@ -138,11 +144,13 @@ export const WALG_ARCHIVER_SQL =
  *      tried in a subshell first, so the probe still exits 0 and reports.
  *   1. No prefix at all (empty, or the `s3:///…` empty-bucket form both paths
  *      render when no bucket is set) → backups are deliberately OFF → skip.
- *   2. WALG_ROLE=standby → normally write-guarded by design → skip, before the
- *      credential check, so a standby never fails on it either. Under
- *      `requirePrimary` the caller has asserted this node IS the primary, so
- *      the same reading is a FAILURE instead (see the module docblock) and
- *      `pg_is_in_recovery()` is read to say which shape it is.
+ *   2. The role (VC_WALG_ROLE, from walg-env.sh): `primary` goes on; `standby`
+ *      is normally write-guarded by design → skip, before the credential
+ *      check, so a standby never fails on it either. Under `requirePrimary`
+ *      the caller has asserted this node IS the primary, so the same reading
+ *      is a FAILURE instead (see the module docblock) and
+ *      `pg_is_in_recovery()` is read to say which shape it is. Anything else
+ *      (no role file, an unknown word) FAILS (`no-role`) in both modes.
  *   3. A real prefix but NO credentials → the deploy INTENDED backups and they
  *      cannot possibly work → FAIL. The prefix and the credentials come from
  *      the same S3 config, so this is a missing/misnamed secret, never an
@@ -161,11 +169,11 @@ export function buildWalgAuditProbe({ requirePrimary = false } = {}) {
         // write-guard (the post-failover rot state); `t` = a node that is still
         // a replica and should never have been audited as a primary; empty =
         // psql could not answer, which changes neither.
-        `  REC="$(psql -U postgres -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"`,
-        '  echo "WALG_AUDIT=fail:stale-standby-role"; echo "WALG_AUDIT_PREFIX=$PFX"',
-        '  echo "WALG_AUDIT_RECOVERY=$REC"; exit 0',
+        `    REC="$(psql -U postgres -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"`,
+        '    echo "WALG_AUDIT=fail:stale-standby-role"; echo "WALG_AUDIT_PREFIX=$PFX"',
+        '    echo "WALG_AUDIT_RECOVERY=$REC"; exit 0',
       ]
-    : ['  echo "WALG_AUDIT=skip:standby-write-guard"; exit 0'];
+    : ['    echo "WALG_AUDIT=skip:standby-write-guard"; exit 0'];
   return [
     'set -u',
     `if ! ( ${WALG_ENV_SOURCE} ) >/dev/null 2>&1; then echo "WALG_AUDIT=fail:no-lineage"; exit 0; fi`,
@@ -174,9 +182,15 @@ export function buildWalgAuditProbe({ requirePrimary = false } = {}) {
     'PFX="${WALG_S3_PREFIX:-}"',
     'case "$PFX" in "" | s3:///*) echo "WALG_AUDIT=skip:no-backup-target"; exit 0 ;; esac',
     // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion inside a shell script string, not a JS template placeholder
-    'if [ "${WALG_ROLE:-primary}" = "standby" ]; then',
+    'case "${VC_WALG_ROLE:-}" in',
+    '  primary) ;;',
+    '  standby)',
     ...standbyBranch,
-    'fi',
+    '    ;;',
+    '  *)',
+    '    echo "WALG_AUDIT=fail:no-role"; echo "WALG_AUDIT_PREFIX=$PFX"; exit 0',
+    '    ;;',
+    'esac',
     // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion inside a shell script string, not a JS template placeholder
     'if [ -z "${AWS_ACCESS_KEY_ID:-}" ] && [ ! -s "${AWS_SHARED_CREDENTIALS_FILE:-/nonexistent}" ]; then',
     '  echo "WALG_AUDIT=fail:no-credentials"; echo "WALG_AUDIT_PREFIX=$PFX"; exit 0',
@@ -366,6 +380,16 @@ function preflightFailureDetail(parsed) {
       'Check that /etc/postgresql/walg-env.sh is mounted in the db container'
     );
   }
+  if (parsed.reason === 'no-role') {
+    return (
+      `the db container has no wal-g role: its role file ` +
+      `(/var/lib/vibecarbon/role/walg-role) is missing or does not say primary or ` +
+      `standby. With no wal-g role, wal-archive.sh keeps every WAL segment (postgres ` +
+      `retries it, so pg_wal grows) and the base backup refuses, so nothing reaches ` +
+      `${parsed.prefix || 'the configured prefix'}. Run \`vibecarbon deploy <env>\`, which ` +
+      `writes the role before the stack starts`
+    );
+  }
   if (parsed.reason === 'stale-standby-role') {
     // Only reachable under `requirePrimary`, i.e. from a failover that has
     // already promoted this node. Name the mechanism, because the symptom
@@ -379,12 +403,12 @@ function preflightFailureDetail(parsed) {
             `running with the standby write-guard still latched`
           : `and pg_is_in_recovery() could not be read, so the promotion state is unconfirmed`;
     return (
-      `the db container still has WALG_ROLE=standby ${shape}. WALG_ROLE is the wal-g ` +
-      `WRITE-GUARD: while it reads standby, wal-archive.sh drops every WAL segment and the ` +
+      `the db container's wal-g role file still says standby ${shape}. The role is the wal-g ` +
+      `WRITE-GUARD: while it reads standby, wal-archive.sh skips every WAL segment and the ` +
       `base-backup path no-ops, so this node archives NOTHING into ` +
-      `${parsed.prefix || 'the configured prefix'} — the exact post-failover rot this audit ` +
-      `exists to catch. Either the role re-render did not run, or it wrote the value without ` +
-      `the container being recreated (env is fixed at container-create time)`
+      `${parsed.prefix || 'the configured prefix'}, the exact post-failover rot this audit ` +
+      `exists to catch. The failover's role write to /var/lib/vibecarbon/role/walg-role did ` +
+      `not land`
     );
   }
   return (
@@ -494,9 +518,9 @@ export function evaluateWalgAudit(raw) {
 /**
  * Failure codes whose `detail` already names the cause AND the fix, so appending
  * the generic storage-credential differential would only bury it. `stale-standby-role`
- * is the case: it is not a storage problem at all.
+ * and `no-role` are the cases: neither is a storage problem at all.
  */
-const SELF_EXPLANATORY_CODES = new Set(['stale-standby-role']);
+const SELF_EXPLANATORY_CODES = new Set(['stale-standby-role', 'no-role']);
 
 /**
  * Build the operator-facing failure message. Mirrors rlsAuditFailureMessage:
@@ -540,9 +564,15 @@ export function walgAuditFailureMessage(result, path, { context = 'deploy' } = {
  * the 20s budget on them only delays a certain failure.
  *
  * `stale-standby-role` belongs here for the same reason and one more: it is
- * raised mid-failover, where 20s of pointless backoff is 20s of RTO.
+ * raised mid-failover, where 20s of pointless backoff is 20s of RTO. `no-role`
+ * too: only a CLI role write changes the file, never the passing of time.
  */
-const NON_RETRYABLE_CODES = new Set(['no-credentials', 'stale-standby-role', 'no-lineage']);
+const NON_RETRYABLE_CODES = new Set([
+  'no-credentials',
+  'stale-standby-role',
+  'no-lineage',
+  'no-role',
+]);
 
 /** Success/skip one-liner, so a passing audit is visible rather than silent. */
 function successLine(result) {

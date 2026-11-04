@@ -207,12 +207,24 @@ esac
   return { bin, walg: () => readFileSync(log, 'utf-8') };
 }
 
+/** A role directory holding `walg-role` with `content` (null: no file); returns the file. */
+const roleFile = (name: string, content: string | null) => {
+  const d = join(work, `role-${name}`);
+  mkdirSync(d, { recursive: true });
+  if (content !== null) writeFileSync(join(d, 'walg-role'), content);
+  return join(d, 'walg-role');
+};
+/** Every run that is meant to reach the push is a primary. */
+const PRIMARY_ROLE_FILE = roleFile('primary', 'primary\n');
+const STANDBY_ROLE_FILE = roleFile('standby', 'standby\n');
+
 const baseEnv = (bin: string): Record<string, string> => ({
   PATH: `${bin}:${process.env.PATH}`,
   // walg-env.sh (the real file) turns the base into the lineage folder, with
   // pg_controldata stubbed below.
   WALG_S3_PREFIX_BASE: 's3://bkt/backups/p/e/walg',
   WALG_ENV_SH: join(ROOT, 'carbon/volumes/db/walg-env.sh'),
+  VC_WALG_ROLE_FILE: PRIMARY_ROLE_FILE,
   AWS_ACCESS_KEY_ID: 'k',
   AWS_SECRET_ACCESS_KEY: 's',
   PGDATA: join(work, 'pgdata-none'),
@@ -264,7 +276,7 @@ describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
     ['no S3 target', {}, { WALG_S3_PREFIX_BASE: 's3:///backups/p/e/walg' }, 'no-s3-target'],
     ['empty S3 target', {}, { WALG_S3_PREFIX_BASE: '' }, 'no-s3-target'],
     ['no S3 credentials', {}, { AWS_SECRET_ACCESS_KEY: '' }, 'no-s3-credentials'],
-    ['standby role', {}, { WALG_ROLE: 'standby' }, 'standby-role'],
+    ['standby role', {}, { VC_WALG_ROLE_FILE: STANDBY_ROLE_FILE }, 'standby-role'],
     ['in recovery', { recovery: 't' as const }, {}, 'in-recovery'],
   ])('%s: exit 0, skipped, no push', (_label, opts, env, reason) => {
     const r = runCompose(reason + String(Object.keys(env).length), opts, env);
@@ -346,9 +358,61 @@ describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
   });
 });
 
+describe('the base-backup role guard (compose and the k8s CronJob)', () => {
+  it.each([
+    ['compose', runCompose],
+    ['cron', runCron],
+  ] as const)('%s: no role file exits 1 with no BACKUP_RESULT line and no push', (name, run) => {
+    const r = run(`no-role-${name}`, {}, { VC_WALG_ROLE_FILE: roleFile(`none-${name}`, null) });
+    expect(r.status).toBe(1);
+    expect(markers(r.stdout)).toEqual([]);
+    expect(r.stdout + r.stderr).toContain('backup refused: no wal-g role');
+    expect(r.walg).not.toContain('backup-push');
+  });
+  it.each([
+    ['compose', runCompose],
+    ['cron', runCron],
+  ] as const)('%s: a garbage or symlinked role refuses the same way', (name, run) => {
+    const garbage = run(
+      `garbage-role-${name}`,
+      {},
+      {
+        VC_WALG_ROLE_FILE: roleFile(`garbage-${name}`, 'leader\n'),
+      },
+    );
+    expect(garbage.status).toBe(1);
+    expect(markers(garbage.stdout)).toEqual([]);
+    expect(garbage.walg).not.toContain('backup-push');
+    const dir = join(work, `role-link-${name}`);
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(PRIMARY_ROLE_FILE, join(dir, 'walg-role'));
+    const linked = run(`link-role-${name}`, {}, { VC_WALG_ROLE_FILE: join(dir, 'walg-role') });
+    expect(linked.status).toBe(1);
+    expect(markers(linked.stdout)).toEqual([]);
+    expect(linked.walg).not.toContain('backup-push');
+  });
+  it.each([
+    ['compose', runCompose],
+    ['cron', runCron],
+  ] as const)('%s: standby skips with the standby-role marker', (name, run) => {
+    const r = run(
+      `standby-${name}`,
+      {},
+      { VC_WALG_ROLE_FILE: roleFile(`sb-${name}`, 'standby\n') },
+    );
+    expect(r.status).toBe(0);
+    expect(markers(r.stdout)).toEqual(['BACKUP_RESULT=skipped:standby-role']);
+  });
+  it('neither script reads the WALG_ROLE env', () => {
+    for (const body of [readFileSync(COMPOSE_BACKUP, 'utf-8'), readFileSync(CRONJOB, 'utf-8')]) {
+      expect(body).not.toMatch(/\$\{?WALG_ROLE\b/);
+    }
+  });
+});
+
 describe('the backup CronJob prints the same markers', () => {
   it('standby role and in-recovery skip with their reasons', () => {
-    const a = runCron('standby', {}, { WALG_ROLE: 'standby' });
+    const a = runCron('standby', {}, { VC_WALG_ROLE_FILE: STANDBY_ROLE_FILE });
     expect(a.status, a.stderr).toBe(0);
     expect(markers(a.stdout)).toEqual(['BACKUP_RESULT=skipped:standby-role']);
     const b = runCron('recovery', { recovery: 't' });

@@ -103,9 +103,21 @@ export async function dropInactiveReplicationSlots(exec) {
  */
 export function slotDropWarning(ip, error) {
   const cause = String(error?.message ?? error).split('\n')[0];
-  return (
-    `Could not drop the old primary's inactive replication slot (${ip}): ${cause}. ` +
-    `It holds WAL on that node up to max_slot_wal_keep_size ` +
-    `(${SLOT_WAL_SETTINGS.max_slot_wal_keep_size}) until \`vibecarbon deploy\` rebuilds it as the standby.`
-  );
+  return `Could not drop the old primary's inactive replication slot (${ip}): ${cause}. It ${SLOT_RETAINS_WAL}`;
+}
+
+/** What an undropped slot does, in slotDropWarning's words (both messages share it). */
+const SLOT_RETAINS_WAL =
+  `holds WAL on that node up to max_slot_wal_keep_size ` +
+  `(${SLOT_WAL_SETTINGS.max_slot_wal_keep_size}) until \`vibecarbon deploy\` rebuilds it as the standby.`;
+
+/**
+ * The note a demotion adds when its role write failed and so it skipped the
+ * slot drop (DEMOTION_ORDER): the slots remain, in slotDropWarning's words.
+ *
+ * @param {string} ip
+ * @returns {string}
+ */
+export function slotDropSkippedNote(ip) {
+  return `The old primary's inactive replication slot (${ip}) was not dropped either: it ${SLOT_RETAINS_WAL}`;
 }

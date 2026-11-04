@@ -86,6 +86,14 @@ describe('buildWalSwitchProbe', () => {
     expect(probe).toContain('WAL_SWITCH=fail:in-recovery');
   });
 
+  it('reads the role file (VC_WALG_ROLE from walg-env.sh), never the WALG_ROLE env; no role fails', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the probe text, not a JS placeholder
+    expect(probe).toContain('case "${VC_WALG_ROLE:-}" in');
+    expect(probe).not.toMatch(/\$\{WALG_ROLE/);
+    expect(probe).toMatch(/\*\)\n[^\n]*WAL_SWITCH=fail:no-role/);
+    expect(probe).not.toContain("'");
+  });
+
   it('forces an XID before switching so an idle cluster cannot no-op the switch', () => {
     const txidIdx = probe.indexOf('txid_current()');
     const switchIdx = probe.indexOf('pg_switch_wal()');
@@ -149,6 +157,7 @@ describe('parseWalSwitchOutput', () => {
     'fail:in-recovery',
     'fail:switch-returned-nothing',
     'fail:no-lineage',
+    'fail:no-role',
   ])('parses the %s verdict', (status) => {
     expect(parseWalSwitchOutput(`WAL_SWITCH=${status}`).status).toBe(status);
   });

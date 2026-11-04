@@ -17,7 +17,7 @@
  *     every writer covered), unless it is in recovery;
  *   - its writers at zero (k8s: `kubectl scale`, never a patch that rolls pods,
  *     after suspending any Flux Kustomization that would scale it back);
- *   - WALG_ROLE=standby.
+ *   - the standby wal-g role (k8s: the intent ConfigMap and the live role file).
  * The reconciler reads first and writes only what is missing, so a fenced side
  * costs no writes.
  */
@@ -33,6 +33,7 @@ import {
   clearRetiredFence,
   FLUX_SUSPENDED_BY,
   isRetiredSide,
+  probeK8s,
   RETIRED_DB_MARKER,
   RETIRED_DB_STATE_SQL,
   RETIRED_HOST_MARKER,
@@ -126,7 +127,12 @@ type Kustomization = { name: string; suspend?: boolean; annotations?: Record<str
 function fakeCluster(
   init: {
     replicas?: number;
+    /** The live role file in the db container. */
     walg?: string;
+    /** The vibecarbon-db-role intent; null = no ConfigMap. Defaults to `walg`. */
+    intent?: string | null;
+    /** Does the running db pod mount the role directory? */
+    roleMount?: boolean;
     role?: string;
     flux?: Kustomization[];
     /** Add-on Deployments installed on the cluster: name -> replicas (namespace vibecarbon). */
@@ -139,6 +145,10 @@ function fakeCluster(
     addons: { ...(init.addons ?? {}) } as Record<string, number>,
     addonNsReadFails: false,
     walg: init.walg ?? 'primary',
+    intent: init.intent === undefined ? (init.walg ?? 'primary') : init.intent,
+    roleMount: init.roleMount ?? true,
+    /** The db settle times out: the pod stays down. */
+    dbStaysDown: false,
     dbMarker: false,
     reachable: true,
     flux: init.flux,
@@ -146,11 +156,41 @@ function fakeCluster(
   const db: Db = { up: true, inRecovery: false, readOnly: false, fileSetting: false };
   const writes: string[] = [];
   const argvs: string[][] = [];
-  const kubectl = async (ip: string, argv: string[]) => {
+  const kubectl = async (ip: string, argv: string[], opts: { input?: string } = {}) => {
     expect(ip).toBe(RETIRED_IP);
     if (!state.reachable) throw new Error('ssh: connect to host 10.0.0.1 port 22: timed out');
     argvs.push(argv);
     const a = argv.join(' ');
+    if (argv.includes('apply')) {
+      state.intent = String(opts.input).match(/VC_WALG_ROLE_INTENT: (\w+)/)?.[1] ?? state.intent;
+      writes.push(`intent=${state.intent}`);
+      return 'configmap/vibecarbon-db-role configured';
+    }
+    if (argv.includes('get') && argv.includes('pod') && argv.includes('db-0')) {
+      if (!db.up) throw new Error('Error from server (NotFound): pods "db-0" not found');
+      return JSON.stringify({
+        metadata: { name: 'db-0', uid: 'u' },
+        spec: {
+          containers: [
+            {
+              name: 'db',
+              volumeMounts: state.roleMount
+                ? [{ name: 'data', mountPath: '/var/lib/vibecarbon/role' }]
+                : [],
+            },
+          ],
+        },
+      });
+    }
+    if (argv.includes('exec') && a.includes('/var/lib/vibecarbon/role')) {
+      if (!db.up) throw new Error('pod db-0 is not running');
+      const wrote = a.match(/printf '%s\\n' (primary|standby) > walg-role\.tmp/)?.[1];
+      if (wrote) {
+        state.walg = wrote;
+        writes.push(`walg=${wrote}`);
+      }
+      return `WALG_ROLE_FILE=${state.walg}\n`;
+    }
     if (argv.some((arg) => arg === 'kustomizations.kustomize.toolkit.fluxcd.io')) {
       if (!state.flux) {
         throw new Error('error: the server doesn\'t have a resource type "kustomizations"');
@@ -180,7 +220,10 @@ function fakeCluster(
       return '';
     }
     if (argv.includes('rollout')) {
+      if (state.dbStaysDown) throw new Error('timed out waiting for the condition');
+      // The db container's start: db-guard.sh applies the intent to the file.
       db.up = true;
+      if (state.intent === 'primary' || state.intent === 'standby') state.walg = state.intent;
       return 'statefulset rolling update complete';
     }
     if (argv.includes('get')) {
@@ -195,6 +238,15 @@ function fakeCluster(
               ...(state.role ? { [RETIRED_ROLE_KEY]: state.role } : {}),
             },
           },
+          ...(state.intent && argv.includes('configmap/vibecarbon-db-role')
+            ? [
+                {
+                  kind: 'ConfigMap',
+                  metadata: { name: 'vibecarbon-db-role' },
+                  data: { VC_WALG_ROLE_INTENT: state.intent },
+                },
+              ]
+            : []),
           { kind: 'Deployment', metadata: { name: 'app' }, spec: { replicas: state.replicas } },
           ...Object.entries(state.addons)
             .filter(([name]) => argv.includes(`deployment/${name}`))
@@ -203,17 +255,6 @@ function fakeCluster(
               metadata: { name },
               spec: { replicas },
             })),
-          {
-            kind: 'StatefulSet',
-            metadata: { name: 'db' },
-            spec: {
-              template: {
-                spec: {
-                  containers: [{ name: 'db', env: [{ name: 'WALG_ROLE', value: state.walg }] }],
-                },
-              },
-            },
-          },
         ],
       });
     }
@@ -249,11 +290,6 @@ function fakeCluster(
       writes.push(`scale ${name} ${replicas}`);
       return '';
     }
-    if (argv.includes('set') && argv.includes('env')) {
-      state.walg = a.match(/WALG_ROLE=(\w+)/)?.[1] ?? state.walg;
-      writes.push(`walg=${state.walg}`);
-      return '';
-    }
     throw new Error(`unexpected kubectl ${a}`);
   };
   return { state, db, writes, argvs, kubectl, psql: fakeDb(db, writes) };
@@ -278,7 +314,7 @@ function fakeNode(init: { walg?: string; running?: string[] } = {}) {
     if (command.includes('PROBE_DONE')) {
       return [
         `HOST_MARKER=${state.hostMarker ? 1 : 0}`,
-        `WALG_ROLE=${state.walg}`,
+        `WALG_ROLE_FILE=${state.walg}`,
         `DB_MARKER=${db.up ? (state.dbMarker ? 'present' : 'absent') : 'unknown'}`,
         ...state.running.map((c) => `RUNNING ${c}`),
         'PROBE_DONE',
@@ -374,7 +410,7 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     expect(cluster.argvs).toEqual([]);
   });
 
-  it('fences a reachable retired cluster (app 2, WALG_ROLE=primary, writable db); a second run writes nothing', async () => {
+  it('fences a reachable retired cluster (app 2, wal-g role primary, writable db); a second run writes nothing', async () => {
     const cluster = fakeCluster({ replicas: 2, walg: 'primary' });
     const first = await reconcileRetiredFence(argsFor(cluster));
     expect(first.fenced).toEqual([RETIRED_IP]);
@@ -386,10 +422,13 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
       'dbMarker',
       'readOnly',
       'scale app 0',
-      // demoteK8sWalgRole: nobody streams from the retired side's slot.
-      'dropInactiveSlots',
+      // demoteK8sWalgRole, DEMOTION_ORDER: the durable intent, then the live
+      // file (no db restart), then the slots nobody streams from.
+      'intent=standby',
       'walg=standby',
+      'dropInactiveSlots',
     ]);
+    expect(cluster.argvs.some((a) => a.includes('set') || a.includes('rollout'))).toBe(false);
     expect(cluster.db.readOnly).toBe(true);
     // The app is zeroed with `kubectl scale`, never a patch or set image that
     // would roll its pods.
@@ -430,8 +469,10 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
       'readOnly',
       'flux suspend vibecarbon-base',
       'scale app 0',
-      'dropInactiveSlots',
+      // DEMOTION_ORDER: the role first, then the slots.
+      'intent=standby',
       'walg=standby',
+      'dropInactiveSlots',
     ]);
     cluster.writes.length = 0;
     await reconcileRetiredFence(argsFor(cluster));
@@ -462,14 +503,16 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     cluster.db.up = false;
     const result = await reconcileRetiredFence(argsFor(cluster));
     expect(result.fenced).toEqual([RETIRED_IP]);
-    // The db is down, so the slot drop fails (best-effort); the role still lands.
+    // The db is down, so the slot drop and the live write fail (best-effort);
+    // the intent lands, and the db's next start applies it.
     expect(cluster.writes).toEqual([
       `marker=${RETIRED_ROLE}`,
       'scale app 0',
-      'walg=standby',
+      'intent=standby',
       'dbMarker',
       'readOnly',
     ]);
+    expect(cluster.state.walg).toBe('standby');
     const rollout = cluster.argvs.findIndex((a) => a.includes('rollout'));
     const touch = cluster.argvs.findIndex((a) => a.join(' ').includes('touch'));
     expect(rollout).toBeGreaterThan(-1);
@@ -563,6 +606,77 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     );
   });
 
+  // The real probe, behind a fake cluster whose intent, live file and db pod are set.
+  const probeK8sWith = async ({
+    intent,
+    file,
+    podDown = false,
+  }: {
+    intent: string | null;
+    file: string | null;
+    podDown?: boolean;
+  }) => {
+    const cluster = fakeCluster({ walg: file ?? '', intent });
+    cluster.db.up = !podDown;
+    const state = await probeK8s(RETIRED_IP, {
+      kubectl: cluster.kubectl,
+      psqlFor: () => cluster.psql,
+      workloads: [{ namespace: 'vibecarbon', kind: 'Deployment', name: 'app' }],
+    });
+    return state as { walgStandby: boolean | 'unknown' };
+  };
+
+  it('k8s walgStandby needs the standby intent; the live file is checked when the pod answers', async () => {
+    expect((await probeK8sWith({ intent: 'standby', file: 'primary' })).walgStandby).toBe(false);
+    expect((await probeK8sWith({ intent: 'standby', file: null, podDown: true })).walgStandby).toBe(
+      'unknown',
+    );
+    expect((await probeK8sWith({ intent: 'standby', file: 'standby' })).walgStandby).toBe(true);
+    expect((await probeK8sWith({ intent: null, file: 'standby' })).walgStandby).toBe(false);
+  });
+
+  it('a standby intent with the db pod down settles, then reads the live file in the same run', async () => {
+    const cluster = fakeCluster({ walg: 'primary', intent: 'standby' });
+    cluster.db.up = false;
+    const result = await reconcileRetiredFence(argsFor(cluster));
+    expect(result.fenced).toEqual([RETIRED_IP]);
+    // The settle brought the db back; its start applied the standby intent.
+    expect(cluster.argvs.some((a) => a.includes('rollout'))).toBe(true);
+    expect(cluster.writes).not.toContain('intent=standby');
+    expect(cluster.state.walg).toBe('standby');
+  });
+
+  it('an unreachable db pod is done for the wal-g role either way the intent got to standby', async () => {
+    const missingAfter = async (intent: string) => {
+      const cluster = fakeCluster({ walg: 'primary', intent });
+      cluster.db.up = false;
+      cluster.state.dbStaysDown = true;
+      const warned: string[] = [];
+      await reconcileRetiredFence(argsFor(cluster, { warn: (l: string) => warned.push(l) }));
+      return { warned: warned.join('\n'), writes: cluster.writes };
+    };
+    // Already standby: nothing to write, and the db's next start applies it.
+    const already = await missingAfter('standby');
+    expect(already.warned).toMatch(/partly fenced/);
+    expect(already.warned).not.toMatch(/wal-g role/);
+    expect(already.writes).not.toContain('intent=standby');
+    // Written now: the same durable state, reported the same way.
+    const written = await missingAfter('primary');
+    expect(written.writes).toContain('intent=standby');
+    expect(written.warned).not.toMatch(/wal-g role/);
+  });
+
+  it('a live write that cannot land on a pod without the role mount leaves the role missing', async () => {
+    const cluster = fakeCluster({ walg: 'primary', roleMount: false });
+    const warned: string[] = [];
+    const result = await reconcileRetiredFence(
+      argsFor(cluster, { warn: (l: string) => warned.push(l) }),
+    );
+    expect(result.fenced).toEqual([]);
+    expect(warned.join('\n')).toMatch(/partly fenced \(missing: the standby wal-g role/);
+    expect(cluster.writes).toContain('intent=standby');
+  });
+
   it('clearRetiredFence removes the markers and the read-only setting, and throws when it cannot', async () => {
     const cluster = fakeCluster({ role: RETIRED_ROLE });
     cluster.state.dbMarker = true;
@@ -599,7 +713,7 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     },
   });
 
-  it('fences a returning old primary: markers, db read-only, writers down before the db recreate; then idempotent', async () => {
+  it('fences a returning old primary: markers, db read-only, writers down, then the standby role; then idempotent', async () => {
     const node = fakeNode({ walg: 'primary', running: ['myapp-app', 'myapp-n8n'] });
     const first = await reconcileRetiredFence(argsFor(node));
     expect(first.fenced).toEqual([RETIRED_IP]);
@@ -616,6 +730,25 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     const second = await reconcileRetiredFence(argsFor(node));
     expect(second.fenced).toEqual([RETIRED_IP]);
     expect(node.writes).toEqual([]);
+  });
+
+  it('the probe reads the host role file through the one parser, never the db container env', async () => {
+    const { walgRoleReadShell } = await import('../../../src/lib/deploy/walg-role.js');
+    const node = fakeNode({ walg: 'standby' });
+    await reconcileRetiredFence(argsFor(node));
+    const probe = node.commands.find((c) => c.includes('PROBE_DONE')) ?? '';
+    expect(probe).toContain(walgRoleReadShell('/opt/myapp/.vibecarbon-role'));
+    expect(probe).not.toMatch(/docker inspect[^\n]*Config\.Env/);
+    // A role file that reads standby is the fenced state: no demote.
+    expect(node.writes).not.toContain('walg=standby');
+  });
+
+  it('a role file that reads anything but standby (missing, primary) is demoted', async () => {
+    for (const walg of ['', 'primary']) {
+      const node = fakeNode({ walg });
+      await reconcileRetiredFence(argsFor(node));
+      expect(node.writes, JSON.stringify(walg)).toContain('walg=standby');
+    }
   });
 
   it('the probe watches every writer the planned fence stops (the app and the enabled primary-only add-ons)', async () => {
@@ -859,6 +992,8 @@ describe('wal-archive.sh refuses on a retired node', () => {
       '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',
     );
     chmodSync(join(base, 'bin', 'pg_controldata'), 0o755);
+    // A primary: the role file walg-env.sh reads (the retired refusal comes first).
+    writeFileSync(join(base, 'walg-role'), 'primary\n');
     const r = spawnSync('bash', [script, 'pg_wal/000000010000000000000001'], {
       encoding: 'utf-8',
       env: {
@@ -868,7 +1003,7 @@ describe('wal-archive.sh refuses on a retired node', () => {
         // appends the lineage folder.
         WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
         WALG_ENV_SH: join(repoRoot, 'carbon/volumes/db/walg-env.sh'),
-        WALG_ROLE: 'primary',
+        VC_WALG_ROLE_FILE: join(base, 'walg-role'),
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',
       },

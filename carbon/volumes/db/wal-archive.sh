@@ -17,6 +17,10 @@
 #   4. Refuses (exit 1) on a node a failover retired: its PGDATA carries the
 #      vibecarbon-retired marker, or the backup prefix's fence object names
 #      its database on a newer timeline.
+#   5. Archives only on a node whose wal-g role file (walg-env.sh reads it
+#      into VC_WALG_ROLE) says primary. standby skips (exit 0); a missing,
+#      empty or unknown role holds the segment (exit 1), even under disk
+#      pressure: the role guard sits before every push and every drop.
 #
 # THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR BOTH DEPLOY TIERS. compose mounts
 # it directly; k8s ships a byte-identical copy in the vibecarbon-wal-archive
@@ -53,18 +57,6 @@ if [ -f "${PGDATA_DIR}/vibecarbon-retired" ]; then
     exit 1
 fi
 
-# WRITE-GUARD (finding #3): a standby node must NEVER push WAL into the single
-# canonical WALG_S3_PREFIX. WALG_ROLE=standby is set on the standby's db env
-# (compose .env / k8s db/statefulset.yaml). This closes the bring-up window
-# that the pg_is_in_recovery() gate below can't: a freshly-provisioned standby
-# db can briefly be an INDEPENDENT primary (not yet in recovery) before it is
-# reseeded — WALG_ROLE=standby stops it archiving into the primary's stream even
-# then. Exit 0 (not error) so PG recycles the segment instead of pinning WAL.
-if [ "${WALG_ROLE:-primary}" = "standby" ]; then
-    echo "wal-archive: WALG_ROLE=standby — skipping archive of '${WAL_PATH}' (only the primary writes to the canonical prefix)." >&2
-    exit 0
-fi
-
 # THIS DATABASE'S ARCHIVE FOLDER: walg-env.sh turns WALG_S3_PREFIX_BASE into
 # WALG_S3_PREFIX, the folder of this database's lineage (its system
 # identifier), so a recreated database never archives into, or fences, the
@@ -87,6 +79,23 @@ case "${WALG_S3_PREFIX:-}" in
     ""|s3:///*)
         echo "wal-archive: no backup target (WALG_S3_PREFIX='${WALG_S3_PREFIX:-}'), not archiving '${WAL_PATH}'." >&2
         exit 0
+        ;;
+esac
+
+# WRITE-GUARD (src/lib/deploy/walg-role.js): only a node whose role file says
+# primary archives. standby is an explicit skip (exit 0: a standby's segments
+# belong to no backup). No role, or one that is not a word we know, HOLDS the
+# segment (exit 1): postgres keeps it and retries, pg_stat_archiver turns
+# status red, and nothing is lost while the CLI writes the role.
+case "${VC_WALG_ROLE:-}" in
+    primary) ;;
+    standby)
+        echo "wal-archive: wal-g role standby, skipping archive of '${WAL_PATH}' (only the primary writes the lineage prefix)." >&2
+        exit 0
+        ;;
+    *)
+        echo "WAL_ARCHIVE_ROLE_UNKNOWN: no wal-g role in ${VC_WALG_ROLE_FILE:-/var/lib/vibecarbon/role/walg-role}; keeping '${WAL_PATH}', postgres retries it (vibecarbon deploy writes the role)." >&2
+        exit 1
         ;;
 esac
 

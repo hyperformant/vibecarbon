@@ -39,8 +39,9 @@ describe('k8s app and infra Secrets', () => {
     const k3s = src('src/lib/deploy/k8s/k3s.js');
     expect(k3s).toMatch(
       // `restore` is the deploy -restore marker (a backup name and recovery
-      // settings), not an environment.
-      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupBucketName,\s*restore,?\s*\}\)/,
+      // settings), not an environment; nor is `walgRole` (the db's wal-g role
+      // intent, primary or standby).
+      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupBucketName,\s*restore,\s*walgRole,?\s*\}\)/,
     );
     expect(k3s).not.toMatch(/VC_ENV\s*=/);
   });

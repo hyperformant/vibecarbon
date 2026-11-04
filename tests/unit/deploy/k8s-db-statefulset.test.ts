@@ -49,8 +49,10 @@ const {
   renderK8sBase,
   summarizeDbPods,
   summarizeNotReadyNodes,
+  walArchiveConfigSha,
 } = await import('../../../src/lib/deploy/k8s/k3s.js');
 const workload = await import('../../../src/lib/deploy/db-workload.js');
+const { standbyDbRebuildHint } = workload;
 
 const ROOT = join(__dirname, '../../..');
 const BASE = join(ROOT, 'carbon/k8s/base');
@@ -75,7 +77,6 @@ const values = (overrides: Record<string, unknown> = {}) =>
       region: 'nbg1',
     },
     backupBucketName: 'proj-backups',
-    walgRole: 'primary',
     storageClass: 'hcloud-volumes',
     walArchiveSha: '0123456789abcdef',
     ...overrides,
@@ -92,6 +93,14 @@ describe('k8s/base renders the db StatefulSet', () => {
     pod = sts?.spec.template.spec;
     container = pod?.containers.find((c: Doc) => c.name === 'db');
   }, 60_000);
+
+  it('no WALG_ROLE env and no WALG_ROLE render value', () => {
+    expect(container.env.find((e: Doc) => e.name === 'WALG_ROLE')).toBeUndefined();
+    expect(values()).not.toHaveProperty('WALG_ROLE');
+    expect(readFileSync(join(ROOT, 'carbon/docker-compose.yml'), 'utf-8')).not.toMatch(
+      /^\s*WALG_ROLE:/m,
+    );
+  });
 
   it('uses the names every kubectl call relies on', () => {
     expect(sts, 'statefulset/db is in k8s/base').toBeTruthy();
@@ -119,6 +128,35 @@ describe('k8s/base renders the db StatefulSet', () => {
     expect(container.image).toBe('{{DB_IMAGE}}:{{DB_IMAGE_TAG}}');
     expect(pod.initContainers.map((c: Doc) => c.name)).toEqual(['walg-restore']);
     for (const init of pod.initContainers) expect(init.image).toBe('{{DB_IMAGE}}:{{DB_IMAGE_TAG}}');
+  });
+
+  it('runs db-guard.sh from the ConfigMap, exactly like compose', () => {
+    expect(container.command).toEqual(['sh', '/usr/local/bin/db-guard.sh']);
+    expect(container.args[0]).toBe('postgres');
+    expect(container.volumeMounts).toContainEqual({
+      name: 'wal-archive-script',
+      mountPath: '/usr/local/bin/db-guard.sh',
+      subPath: 'db-guard.sh',
+      readOnly: true,
+    });
+  });
+
+  it('mounts the wal-g role dir as a sibling subPath of PGDATA, writable', () => {
+    const m = container.volumeMounts.find((v: Doc) => v.mountPath === '/var/lib/vibecarbon/role');
+    expect(m).toMatchObject({ name: 'data', subPath: 'vibecarbon-role' });
+    expect(m.readOnly).toBeFalsy();
+  });
+
+  it('carries the role intent from the CLI-owned ConfigMap, optional', () => {
+    const intent = container.env.find((e: Doc) => e.name === 'VC_WALG_ROLE_INTENT');
+    expect(intent.valueFrom.configMapKeyRef).toEqual({
+      name: 'vibecarbon-db-role',
+      key: 'VC_WALG_ROLE_INTENT',
+      optional: true,
+    });
+    expect(
+      docs.find((d: Doc) => d.kind === 'ConfigMap' && d.metadata.name === 'vibecarbon-db-role'),
+    ).toBeUndefined();
   });
 
   it('keeps PGDATA one level below the volume root', () => {
@@ -183,6 +221,9 @@ describe('k8s/base renders the db StatefulSet', () => {
         '"key":"RESTORE_LINEAGE"',
         '"key":"REPL_PASSWORD"',
         '"key":"S3_CREDENTIALS_INI"',
+        // Not a Secret key: the wal-g role intent, from the CLI-owned
+        // ConfigMap vibecarbon-db-role (pinned in its own case above).
+        '"key":"VC_WALG_ROLE_INTENT"',
       ]).toContain(k);
     }
     expect(JSON.stringify(pod)).not.toContain('JWT_SECRET');
@@ -201,6 +242,73 @@ describe('k8s/base renders the db StatefulSet', () => {
     // No liveness probe: a long WAL replay after a restore must not be killed.
     expect(container.livenessProbe).toBeUndefined();
   });
+
+  it('pins the db pod template this release ships: command, mounts and env, in order', () => {
+    // One release, one roll: against main the db container's template changes
+    // by exactly the command, the role + db-guard mounts, the WALG_ROLE ->
+    // VC_WALG_ROLE_INTENT env swap and the ConfigMap sha. Any later edit to
+    // these lists is a second roll of the primary, so it must be deliberate.
+    expect(container.command).toEqual(['sh', '/usr/local/bin/db-guard.sh']);
+    expect(container.volumeMounts.map((m: Doc) => m.mountPath)).toEqual([
+      '/var/lib/postgresql/data',
+      '/etc/postgresql/wal-archive.sh',
+      '/etc/postgresql/walg-env.sh',
+      '/usr/local/bin/db-guard.sh',
+      '/var/lib/vibecarbon/role',
+      '/etc/walg',
+    ]);
+    expect(container.env.map((e: Doc) => e.name)).toEqual([
+      'POSTGRES_USER',
+      'POSTGRES_PASSWORD',
+      'PGPASSWORD',
+      'POSTGRES_DB',
+      'PGDATABASE',
+      'POSTGRES_HOST',
+      'PGPORT',
+      'POSTGRES_PORT',
+      'WALG_S3_PREFIX_BASE',
+      'WALG_PREVENT_WAL_OVERWRITE',
+      'VC_WALG_ROLE_INTENT',
+      'WALG_COMPRESSION_METHOD',
+      'WALG_UPLOAD_CONCURRENCY',
+      'AWS_ENDPOINT',
+      'AWS_REGION',
+      'AWS_SHARED_CREDENTIALS_FILE',
+    ]);
+  });
+
+  it('a warm redeploy renders an identical db pod template (the sha moves only with the ConfigMap)', () => {
+    const renderTemplate = (sha: string) => {
+      const rendered = renderK8sBase(
+        BASE,
+        { ...values({ walArchiveSha: sha }), MASTER_PRIVATE_IP: '10.0.1.1' },
+        undefined,
+        TEST_TLS,
+      );
+      try {
+        const doc = kustomize(rendered).find(
+          (d) => d.kind === 'StatefulSet' && d.metadata.name === 'db',
+        );
+        return JSON.stringify(doc.spec.template);
+      } finally {
+        rmSync(rendered, { recursive: true, force: true });
+      }
+    };
+    // The sha is a hash of the walg ConfigMap file alone, so two deploys of
+    // the same tree carry the same one.
+    const projectDir = mkdtempSync(join(tmpdir(), 'vc-sha-'));
+    try {
+      cpSync(join(ROOT, 'carbon/k8s'), join(projectDir, 'k8s'), { recursive: true });
+      const sha = walArchiveConfigSha(projectDir);
+      expect(sha).toMatch(/^[0-9a-f]{16}$/);
+      expect(walArchiveConfigSha(projectDir)).toBe(sha);
+      expect(renderTemplate(sha)).toBe(renderTemplate(sha));
+      writeFileSync(join(projectDir, 'k8s/base/backup/configmap-walg.yaml'), 'changed\n');
+      expect(walArchiveConfigSha(projectDir)).not.toBe(sha);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it('records the wal-archive ConfigMap sha in the pod template', () => {
     expect(sts.spec.template.metadata.annotations['vibecarbon.dev/wal-archive-sha']).toBe(
@@ -264,9 +372,8 @@ describe('buildDbManifestValues', () => {
     ).toBe('s3://proj-backups/backups/proj/staging/walg');
     // A bucket with no resolved prefix would write into a shared path: refuse.
     expect(() => values({ s3Config: { bucket: 'proj-storage' } })).toThrow(/walgPrefix/);
-    // The role is a write-guard, never a path segment.
-    expect(values({ walgRole: 'standby' }).WALG_S3_PREFIX_BASE).not.toMatch(/standby/);
-    expect(values({ walgRole: 'standby' }).WALG_ROLE).toBe('standby');
+    // The role is a write-guard in its own file, never a path segment or a value.
+    expect(Object.values(values()).join(' ')).not.toMatch(/standby|primary/);
   });
 
   it('refuses to render without an image or a StorageClass', () => {
@@ -296,7 +403,7 @@ describe('renderK8sBase on the shipped base', () => {
       expect(env.WALG_S3_PREFIX_BASE).toBe('s3://proj-backups/backups/proj/prod/walg');
       expect(env.WALG_PREVENT_WAL_OVERWRITE).toBe('true');
       expect(env).not.toHaveProperty('WALG_S3_PREFIX');
-      expect(env.WALG_ROLE).toBe('primary');
+      expect(env).not.toHaveProperty('WALG_ROLE');
       expect(env.AWS_ENDPOINT).toBe('https://nbg1.example');
       // The source tree is untouched.
       expect(readFileSync(join(BASE, 'db', 'statefulset.yaml'), 'utf-8')).toContain(
@@ -456,6 +563,22 @@ describe('awaitDbRollout — the failure says what is actually there', () => {
     const podGet = cmdCalls.find((a) => a.includes('pods'));
     expect(podGet).toEqual(dbPodListArgs());
     expect(podGet).toContain('app=vibecarbon-db');
+  });
+
+  it('a k8s-ha standby deploy names the manual rebuild when its db never becomes Ready (final review I2)', async () => {
+    scripted = [
+      { match: 'rollout status', exitCode: 1, stderr: 'error: timed out' },
+      { match: 'get pods', stdout: 'db-0   CrashLoopBackOff   <none>\n' },
+    ];
+    const hint = standbyDbRebuildHint('prod');
+    const withHint = String(
+      ((await awaitDbRollout({ env, timeoutS: 5, hint }).catch((e) => e)) as Error).message,
+    );
+    expect(withHint.endsWith(` ${hint}`)).toBe(true);
+    const without = String(
+      ((await awaitDbRollout({ env, timeoutS: 5 }).catch((e) => e)) as Error).message,
+    );
+    expect(without).not.toContain('Rebuilding a k8s-ha standby');
   });
 
   it('survives kubectl failing to list pods without inventing a pod state', async () => {

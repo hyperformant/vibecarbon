@@ -26,7 +26,6 @@ import {
   haK8sUpdateDnsStep,
   haK8sUploadSshKeyStep,
   haK8sVerifyStreamingStep,
-  haMergeWalgRoleStep,
   haPersistPendingConfigStep,
   haProvisionServersStep,
   haPullImagesStep,
@@ -43,6 +42,7 @@ import {
   haWaitDockerReadyStep,
   haWaitForSshStep,
   haWaitPrimaryPostgresStep,
+  haWriteNodeRolesStep,
   haWriteReplicationOverlayStep,
   k8sDeployClusterStep,
   persistProvisionedServerStep,
@@ -59,6 +59,7 @@ import {
   verifyHealthStep,
   verifyTlsReadyStep,
   waitAdminReadyStep,
+  writeNodeRolesStep,
 } from './steps.js';
 
 /**
@@ -82,6 +83,8 @@ export function planDeploy(tier, _config) {
       setupServerFilesStep(),
       updateDnsStep(),
       restoreTlsStep(),
+      // The db reads its wal-g role from this file on its first start.
+      writeNodeRolesStep(),
       startComposeStackStep(),
       waitAdminReadyStep(),
       auditDatabaseStep(),
@@ -109,7 +112,7 @@ export function planDeploy(tier, _config) {
       haCheckDbLedgerStep(),
       haTransferImageStep(),
       haSetupServerFilesStep(),
-      haMergeWalgRoleStep(),
+      haWriteNodeRolesStep(),
       haPullImagesStep(),
       haUpdateDnsStep(),
       // Shared with single compose: restores on the primary only.
@@ -143,7 +146,7 @@ export function planDeploy(tier, _config) {
   if (tier === 'k8s-ha') {
     // Faithful decomposition of the (now removed) inlined deployK8sHA: every
     // top-level phase it ran, in order. The per-cluster deploy (deployK3s ×2)
-    // and the hardened WireGuard replication transport + scale-to-zero reseed
+    // and the hardened WireGuard replication transport + in-place reseed
     // (setupReplication) are invoked by the effects as BLACK BOXES; the
     // conditionals deployK8sHA ran inline (firewall on apiToken, managed-DNS on
     // domain/provider, the degraded warn/hard-gate) live inside the effects,

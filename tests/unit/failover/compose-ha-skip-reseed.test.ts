@@ -36,6 +36,23 @@ const WALG_AUDIT_PASS = [
   'WALG_AUDIT_LIST_END',
 ].join('\n');
 
+/** Each node's wal-g role file, written and read through the real role shells. */
+const roleFiles = new Map<string, string>();
+
+/** The role-file surface: a write sets the node's file, a read answers it. */
+async function roleSurface(ip: string, command: string): Promise<string | undefined> {
+  const { composeRoleWriteOf } = await import('../helpers/compose-role-ssh.js');
+  const wrote = composeRoleWriteOf(command);
+  if (wrote) {
+    roleFiles.set(ip, wrote);
+    return `WALG_ROLE_FILE=${wrote}\n`;
+  }
+  if (command.includes('.vibecarbon-role') && command.includes('WALG_ROLE_FILE')) {
+    return `WALG_ROLE_FILE=${roleFiles.get(ip) ?? ''}\n`;
+  }
+  return undefined;
+}
+
 /** What the audit probe reports this run; a test may swap in a failing shape. */
 let auditPayload = WALG_AUDIT_PASS;
 /** Flipped by the mocked pg_promote, so later replica-state reads see a primary. */
@@ -44,9 +61,11 @@ const SYSID = '7412345678901234567';
 
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  const rec = (ip: string, _k: string, command: unknown, options?: { input?: string }) => {
+  const rec = async (ip: string, _k: string, command: unknown, options?: { input?: string }) => {
     const c = String(command);
     sshCalls.push({ ip, command: c, input: options?.input });
+    const role = await roleSurface(ip, c);
+    if (role !== undefined) return role;
     // The failover guard's replica-state read: the standby streams in recovery
     // until pg_promote lands, then reads out of recovery.
     if (c.includes('pg_control_system')) {
@@ -82,7 +101,23 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   };
 });
 
-// mergeRemoteDotenv scp's the remote .env — record the WALG_ROLE writes instead.
+// The role-file writes go through ssh.js's argv sshRun (writeComposeWalgRole):
+// recorded in the same call log, as the joined argv.
+vi.mock('../../../src/lib/ssh.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
+  return {
+    ...actual,
+    sshRun: vi.fn(async (ip: string, _k: string, argv: unknown) => {
+      assertSshRunArgv(argv);
+      const command = argv.join(' ');
+      sshCalls.push({ ip, command });
+      return (await roleSurface(ip, command)) ?? '';
+    }),
+  };
+});
+
+// mergeRemoteDotenv scp's the remote .env: record the merges instead.
 const envMerges: Array<{ ip: string; updates: Record<string, string> }> = [];
 vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -172,6 +207,10 @@ const tracker = { spinner: () => ({ start() {}, stop() {} }) };
 
 beforeEach(() => {
   sshCalls.length = 0;
+  // As deployed: the -primary stack primary, the -standby stack standby.
+  roleFiles.clear();
+  roleFiles.set('1.1.1.1', 'primary');
+  roleFiles.set('2.2.2.2', 'standby');
   envMerges.length = 0;
   auditPayload = WALG_AUDIT_PASS;
   promoted = false;
@@ -222,41 +261,41 @@ describe('failoverComposeHA — standby already streaming', () => {
     ).toBe(false);
   });
 
-  // The bug this guards: failover swapped the roles in config but never
-  // re-rendered WALG_ROLE, so the PROMOTED node kept the standby write-guard —
+  // The bug this guards: failover swapped the roles in config but never moved
+  // the wal-g role, so the PROMOTED node kept the standby write-guard:
   // wal-archive.sh and compose-backup.sh both no-op'd and the new primary
   // archived nothing until some later deploy happened to rewrite the roles.
-  it('moves the wal-g write-guard AND the active ACME issuer onto the promoted node, demoting both on the old primary', async () => {
+  it('moves the wal-g role FILE and the active ACME issuer onto the promoted node, demoting both on the old primary', async () => {
     // The ACME merges are the compose-ha single-active-issuer policy
     // (acme-role.js): the promoted node's disarm key is EMPTIED (falls
     // through to the real CA) and the retired node's is set to the
     // reserved-.invalid sentinel, so the swapped pair never runs two armed
     // solvers against one `_acme-challenge` TXT name (runs
-    // 33273372657/33276113128).
+    // 33273372657/33276113128). The wal-g role is no longer in .env at all.
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
     expect(envMerges).toEqual([
-      { ip: '2.2.2.2', updates: { WALG_ROLE: 'primary' } },
       { ip: '2.2.2.2', updates: { ACME_DISARMED_CA_SERVER: '' } },
-      { ip: '1.1.1.1', updates: { WALG_ROLE: 'standby' } },
       {
         ip: '1.1.1.1',
         updates: { ACME_DISARMED_CA_SERVER: 'https://acme-disarmed.invalid/directory' },
       },
     ]);
+    expect(roleFiles.get('2.2.2.2')).toBe('primary');
+    expect(roleFiles.get('1.1.1.1')).toBe('standby');
   });
 
   // The role-gated container reconcile is gone with the service it held off
-  // the standby: no `up -d --no-deps <svc>` other than the db and traefik
-  // recreates may run on either node during a failover.
-  it('recreates nothing but db and traefik during the role swap', async () => {
+  // the standby, and the wal-g role moves with a host write: no `up -d
+  // --no-deps <svc>` other than the traefik recreates may run on either node.
+  it('recreates nothing but traefik during the role swap (never the db)', async () => {
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
     const recreated = sshCalls
       .map((c) => /up -d --no-deps ([\w-]+)/.exec(c.command)?.[1])
       .filter((svc): svc is string => Boolean(svc));
     expect(recreated.length).toBeGreaterThan(0);
-    expect(new Set(recreated)).toEqual(new Set(['db', 'traefik']));
+    expect(new Set(recreated)).toEqual(new Set(['traefik']));
   });
 
   it('gates failover completion on the domain serving trusted TLS (post-DNS-flip)', async () => {
@@ -287,19 +326,20 @@ describe('failoverComposeHA — standby already streaming', () => {
   it('demotes the old primary only AFTER its app tier is stopped', async () => {
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
-    // The demote recreates the old primary's db container. compose-HA keeps the
-    // old primary SERVING until the promoted node is confirmed (DNS has not
-    // flipped yet either), so demoting before the stop would bounce the
-    // database out from under live traffic.
+    // compose-HA keeps the old primary SERVING until the promoted node is
+    // confirmed (DNS has not flipped yet either), and a node whose role file
+    // reads standby drops every WAL segment it completes, so the demote
+    // waits for the stop.
     // CONTAINER names, same RCA as the restart test above: the old shape
     // (`docker compose stop app …`) could not resolve an overlay-only service
     // and exited ~2s having stopped NOTHING — the old primary kept serving
     // writes behind the SPLIT-BRAIN warning.
+    const { composeRoleWriteOf } = await import('../helpers/compose-role-ssh.js');
     const stopIdx = sshCalls.findIndex(
       (c) => c.ip === '1.1.1.1' && c.command.includes('for c in myapp-app;'),
     );
     const demoteIdx = sshCalls.findIndex(
-      (c) => c.ip === '1.1.1.1' && c.command.includes('up -d --no-deps db'),
+      (c) => c.ip === '1.1.1.1' && composeRoleWriteOf(c.command) === 'standby',
     );
     expect(stopIdx).toBeGreaterThanOrEqual(0);
     expect(demoteIdx).toBeGreaterThan(stopIdx);
@@ -312,20 +352,20 @@ describe('failoverComposeHA — standby already streaming', () => {
     );
   });
 
-  it('recreates the promoted db container so the new WALG_ROLE is actually in its env', async () => {
+  it('arms the promoted node by a host role-file write BEFORE pg_promote, with no db recreate', async () => {
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
-    // Writing .env is not enough: container env is fixed at create time, and
-    // `docker compose restart` re-runs the SAME container. Only a recreate
-    // (`up -d --no-deps db`) re-reads it.
-    const recreate = sshCalls.find(
-      (c) => c.ip === '2.2.2.2' && c.command.includes('up -d --no-deps db'),
+    const { composeRoleWriteOf } = await import('../helpers/compose-role-ssh.js');
+    const arm = sshCalls.findIndex(
+      (c) => c.ip === '2.2.2.2' && composeRoleWriteOf(c.command) === 'primary',
     );
-    expect(recreate).toBeDefined();
-    // …through vc-compose, the node's real -f set (prod.yml + the replication
-    // overlay), never a bare `docker compose up` (docker-compose.yml only).
-    expect(recreate?.command).toContain('sh vc-compose up -d --no-deps db');
-    expect(recreate?.command).not.toMatch(/\bdocker compose\b/);
+    const promote = sshCalls.findIndex((c) => c.command.includes('pg_promote'));
+    expect(arm).toBeGreaterThanOrEqual(0);
+    expect(arm).toBeLessThan(promote);
+    // On the host, through the one writer: /opt/<project>/.vibecarbon-role.
+    expect(sshCalls[arm].command).toContain('/opt/myapp/.vibecarbon-role');
+    // No db recreate, whatever spelling: the old one ran through compose's `up`.
+    expect(sshCalls.some((c) => c.command.includes('up -d --no-deps db'))).toBe(false);
   });
 
   it('audits the promoted node in requirePrimary mode (a stale standby role must FAIL, not skip)', async () => {
@@ -335,11 +375,11 @@ describe('failoverComposeHA — standby already streaming', () => {
     expect(audit?.ip).toBe('2.2.2.2');
     expect(audit?.command).toContain('WALG_AUDIT=fail:stale-standby-role');
     expect(audit?.command).not.toContain('WALG_AUDIT=skip:standby-write-guard');
-    // The recreate has to precede the audit or the audit reads the OLD container.
-    const recreateIdx = sshCalls.findIndex((c) => c.command.includes('up -d --no-deps db'));
+    // The audit runs after the promote, on the role the arm wrote before it.
+    const promoteIdx = sshCalls.findIndex((c) => c.command.includes('pg_promote'));
     const auditIdx = sshCalls.findIndex((c) => c.command.includes('WALG_AUDIT'));
-    expect(recreateIdx).toBeGreaterThanOrEqual(0);
-    expect(recreateIdx).toBeLessThan(auditIdx);
+    expect(promoteIdx).toBeGreaterThanOrEqual(0);
+    expect(promoteIdx).toBeLessThan(auditIdx);
   });
 
   it('fails the command when the promoted node cannot be proven to archive', async () => {

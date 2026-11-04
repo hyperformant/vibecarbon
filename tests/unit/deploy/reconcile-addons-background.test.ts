@@ -1,5 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -25,12 +33,13 @@ afterEach(() => {
 
 function reconcile({
   deferred,
-  env,
+  role,
   isFast = true,
   status,
 }: {
   deferred: string[];
-  env?: string;
+  /** The node's wal-g role file (.vibecarbon-role/walg-role); none when unset. */
+  role?: string;
   isFast?: boolean;
   status?: string;
 }) {
@@ -47,7 +56,10 @@ function reconcile({
     spawnSync('mkdir', ['-p', join(dir, '.vc-addons')]);
     writeFileSync(join(dir, '.vc-addons', 'status'), status);
   }
-  if (env) writeFileSync(join(dir, '.env'), env);
+  if (role) {
+    mkdirSync(join(dir, '.vibecarbon-role'));
+    writeFileSync(join(dir, '.vibecarbon-role', 'walg-role'), role);
+  }
   writeFileSync(
     join(dir, 'docker'),
     `#!/bin/sh
@@ -118,7 +130,7 @@ describe('reconcile.sh: core first, add-ons in the background', () => {
   });
 
   it('a compose-ha standby keeps its whole-stack up (primary-only add-ons held by standby-scale.sh)', async () => {
-    const { calls, dir } = reconcile({ deferred: ['grafana', 'n8n'], env: 'WALG_ROLE=standby\n' });
+    const { calls, dir } = reconcile({ deferred: ['grafana', 'n8n'], role: 'standby\n' });
     const up = calls.split('\n').find((l) => l.includes(' up -d')) ?? '';
     expect(up).toMatch(/up -d --remove-orphans\s*$/);
     await new Promise((res) => setTimeout(res, 50));
@@ -154,7 +166,7 @@ describe('reconcile.sh: core first, add-ons in the background', () => {
   it('a node that starts no job removes any old add-on status file', () => {
     const { dir } = reconcile({
       deferred: ['grafana'],
-      env: 'WALG_ROLE=standby\n',
+      role: 'standby\n',
       status: '#attempt a1b2c3d4e5f6\nobservability\trunning\t\n',
     });
     expect(existsSync(join(dir, '.vc-addons', 'status'))).toBe(false);

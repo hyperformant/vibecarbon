@@ -4,7 +4,7 @@
  * The retirement fence (retired-fence.js) only works on a node the CLI can
  * reach: it places markers the node's own scripts check. An old primary that
  * stays unreachable through the failover and then reboots on its own still
- * reads WALG_ROLE=primary, out of recovery, and its archive_command and backup
+ * reads the primary wal-g role, out of recovery, and its archive_command and backup
  * cron push WAL, base backups and a `delete before` into the shared prefix,
  * where LATEST can become its stale timeline.
  *
@@ -44,6 +44,7 @@
 
 import * as p from '@clack/prompts';
 import { updateProjectConfig } from '../config.js';
+import { hasSentinelLine } from '../remote-sentinel.js';
 import { sshKubectl } from '../ssh.js';
 import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
 import { VC_COMPOSE } from './compose/command.js';
@@ -178,8 +179,8 @@ export async function writeBackupFence({ exec, runInDb, primaryNode, now = () =>
   } catch (err) {
     return { ok: false, reason: String(err?.message ?? err).split('\n')[0] };
   }
-  if (out.includes('FENCE_SKIPPED')) return { ok: true, skipped: true };
-  if (!out.includes('FENCE_WRITTEN')) {
+  if (hasSentinelLine(out, 'FENCE_SKIPPED')) return { ok: true, skipped: true };
+  if (!hasSentinelLine(out, 'FENCE_WRITTEN')) {
     return { ok: false, reason: 'wal-g st put did not confirm the write' };
   }
   return { ok: true, fence };

@@ -46,6 +46,7 @@ import { queueBootTiming } from '../boot-timing.js';
 import { VC_COMPOSE } from '../compose/command.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
+  assertComposeStandbyNotPromotedOutside,
   buildReplicationOverlay,
   composePsqlRunner,
   configurePrimaryReplication,
@@ -53,6 +54,7 @@ import {
   ensurePrimaryReplicationAccess,
   openWireguardPortHetznerFirewall,
   openWireguardPortUfw,
+  readComposeDbLineage,
 } from '../compose/ha.js';
 import { assertReseedTargetNotServing, composeHaStackOf } from '../compose/ha-role-swap.js';
 import {
@@ -80,8 +82,13 @@ import {
 } from '../replication.js';
 import { clearRetiredFence, fenceRetiredNode } from '../retired-fence.js';
 import { envS3Record } from '../s3-record.js';
+import {
+  clearDiscardableStandby,
+  discardableReseedLine,
+  readDiscardableStandby,
+} from '../standby-lineage.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
-import { composeRoleEnv } from '../walg-role.js';
+import { writeComposeWalgRole } from '../walg-role.js';
 import { exchangeAndBringUpTunnel, wgIpOf } from '../wireguard.js';
 
 /** Shared service-opts object rebuilt from ctx (identical to the inline const). */
@@ -697,14 +704,23 @@ async function haSetupServerFiles(ctx) {
 }
 
 /**
- * wal-g WRITE-GUARD: write WALG_ROLE into each node's .env. Same canonical S3
- * prefix on both nodes (so the standby can READ the primary's base backups);
- * WALG_ROLE=standby makes wal-archive.sh + compose-backup.sh no-op on the
- * standby so it never WRITES into the shared prefix (split-brain guard).
+ * wal-g WRITE-GUARD: write the role FILE on each node (walg-role.js), then
+ * the per-node ACME issuer merge into .env. Same canonical S3 prefix on both
+ * nodes (so the standby can READ the primary's base backups); `standby` makes
+ * wal-archive.sh + compose-backup.sh no-op on the standby so it never WRITES
+ * into the shared prefix (split-brain guard). Both land before
+ * start-compose-stack, so each db's first start reads its role. The role is
+ * never in .env (compose-role-not-in-dotenv-census.test.ts).
  */
-async function haMergeWalgRole(ctx) {
+async function haWriteNodeRoles(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { primary, standby, sshKeyPath } = ctx;
+  await perfAsync('deploy.ha.compose.writeNodeRoles', () =>
+    Promise.all([
+      writeComposeWalgRole({ ip: primary.ip, sshKeyPath, projectName, role: 'primary' }),
+      writeComposeWalgRole({ ip: standby.ip, sshKeyPath, projectName, role: 'standby' }),
+    ]),
+  );
   const haSshOpts = pinnedSshOptsString(sshKeyPath);
   const haRemoteDir = `/opt/${projectName}`;
   // ACME_DISARM_ENV rides the same per-node merge (single-active-issuer
@@ -716,12 +732,8 @@ async function haMergeWalgRole(ctx) {
   // This runs before start-compose-stack, so the first `up` already
   // interpolates the right caserver — no recreate needed at deploy time.
   await Promise.all([
-    mergeRemoteDotenv(primary.ip, haSshOpts, haRemoteDir, {
-      ...composeRoleEnv('primary'),
-      [ACME_DISARM_ENV]: '',
-    }),
+    mergeRemoteDotenv(primary.ip, haSshOpts, haRemoteDir, { [ACME_DISARM_ENV]: '' }),
     mergeRemoteDotenv(standby.ip, haSshOpts, haRemoteDir, {
-      ...composeRoleEnv('standby'),
       [ACME_DISARM_ENV]: ACME_DISARMED_CA_SERVER,
     }),
   ]);
@@ -889,7 +901,7 @@ async function haStartComposeStack(ctx) {
  * app-migrate would write into it (or fail on the failover's write fence), and
  * its archiver and backup cron would push into the promoted node's prefix. So
  * the retirement fence is armed on it here (retired-fence.js: markers, every
- * writer stopped, WALG_ROLE=standby), in case the deploy's entry could not
+ * writer stopped, the standby wal-g role), in case the deploy's entry could not
  * reach it. It stays armed through the reseed; reconvergeReplication brings the
  * stack up as a normal standby once the reseed makes it a replica, and only
  * haFinalizeConfig, after verified streaming, takes the fence off (one deploy
@@ -1082,7 +1094,36 @@ async function haConfigureReplication(ctx) {
     });
     if (probe.streaming) {
       p.log.info('Standby already streaming from the primary, skipping the reseed');
+      // A streaming standby is a replica of this primary: an abort's record
+      // of a discarded copy no longer names anything (standby-lineage.js).
+      if (readDiscardableStandby(ctx.environment, loadProjectConfig)) {
+        clearDiscardableStandby(ctx.environment);
+      }
       return;
+    }
+    // The lineage check, before anything is staged or stopped: a standby
+    // promoted outside vibecarbon is never overwritten, unless it is exactly
+    // the copy a `failover -abort` recorded as discardable (the k8s cold
+    // reseed's check, standby-lineage.js). A refusal fails the deploy here,
+    // never a warning: the reseed must not run.
+    const discardable = readDiscardableStandby(ctx.environment, loadProjectConfig);
+    const [target, source] = await Promise.all([
+      readComposeDbLineage(standby.ip, sshKeyPath, projectName),
+      readComposeDbLineage(primary.ip, sshKeyPath, projectName),
+    ]);
+    const verdict = assertComposeStandbyNotPromotedOutside({
+      target,
+      source,
+      standbyIp: standby.ip,
+      primaryIp: primary.ip,
+      projectName,
+      envName: ctx.environment,
+      discardable,
+    });
+    if (verdict === 'discardable') {
+      p.log.info(
+        discardableReseedLine({ standbyIp: standby.ip, target, envName: ctx.environment }),
+      );
     }
     ctx.onProgress('Configuring standby as hot replica...');
     let replicationOk = false;
@@ -1099,6 +1140,10 @@ async function haConfigureReplication(ctx) {
     }
     if (!replicationOk) {
       p.log.warn('Replication setup may not have completed: verify manually');
+    } else if (discardable) {
+      // The reseed replaced the standby's data directory: the copy the abort
+      // gave up is gone, and so is the record that let it be overwritten.
+      clearDiscardableStandby(ctx.environment);
     }
   });
 }
@@ -1189,7 +1234,7 @@ async function reconvergeReplication(ctx) {
 
 /**
  * Bring the rebuilt node's stack up as a normal standby (current image, the
- * standby role env merged earlier: WALG_ROLE=standby, ACME disarmed), once it
+ * standby role written earlier: the standby wal-g role file, ACME disarmed), once it
  * reads as a replica, so its app-migrate exits on the read-only database. Its
  * success is part of a complete reconverge (haFinalizeConfig); a failure is a
  * warning here, and the env stays degraded for the rerun.
@@ -1424,7 +1469,7 @@ export const COMPOSE_HA_EFFECTS = {
   haCheckDbLedger,
   haTransferImage,
   haSetupServerFiles,
-  haMergeWalgRole,
+  haWriteNodeRoles,
   haPullImages,
   haStartDnsUpdate,
   haUpdateDns,

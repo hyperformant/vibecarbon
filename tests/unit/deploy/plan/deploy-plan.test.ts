@@ -22,6 +22,7 @@ const EXPECTED_COMPOSE_SEQUENCE = [
   'setup-server-files',
   'update-dns',
   'restore-tls',
+  'write-node-roles',
   'start-compose-stack',
   'wait-admin-ready',
   'audit-database',
@@ -159,7 +160,7 @@ describe('planDeploy(k8s)', () => {
 // generate + upload the shared SSH key, provision BOTH clusters in parallel
 // (deployK3s ×2 — the k8s per-cluster block, reused ×2), open the WireGuard
 // replication firewall on both, configure replication (setupReplication — the
-// hardened WG transport + scale-to-zero reseed, called as a black box),
+// hardened WG transport + in-place reseed, called as a black box),
 // hard-gate on streaming (verify-streaming), set up managed-DNS HA (update-dns),
 // and print the finalize summary. Replication step NAMES (configure-replication,
 // verify-streaming) mirror compose-ha's for cross-tier read symmetry; the
@@ -328,7 +329,7 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'check-db-ledger',
   'transfer-image',
   'setup-server-files',
-  'merge-walg-role',
+  'write-node-roles',
   'pull-images',
   'update-dns',
   'restore-tls',
@@ -344,6 +345,30 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'setup-backup-cron',
   'finalize-config',
 ];
+
+describe('the wal-g role file is written before any compose stack starts', () => {
+  it('every compose tier writes the node roles before the stack starts', () => {
+    for (const tier of ['compose', 'compose-ha'] as const) {
+      const names = planStepNames(planDeploy(tier, {}));
+      const write = names.indexOf('write-node-roles');
+      expect(write, tier).toBeGreaterThanOrEqual(0);
+      expect(write, tier).toBeLessThan(names.indexOf('start-compose-stack'));
+      expect(names).not.toContain('merge-walg-role');
+    }
+  });
+
+  it('single compose writes after the bundle lands (the project dir exists)', () => {
+    const names = planStepNames(planDeploy('compose', {}));
+    expect(names.indexOf('write-node-roles')).toBeGreaterThan(names.indexOf('setup-server-files'));
+  });
+
+  it('each tier runs its own effect', () => {
+    const effectOf = (tier: 'compose' | 'compose-ha') =>
+      planDeploy(tier, {}).find((s) => s.name === 'write-node-roles')?.effect;
+    expect(effectOf('compose')).toBe('writeNodeRoles');
+    expect(effectOf('compose-ha')).toBe('haWriteNodeRoles');
+  });
+});
 
 describe('planDeploy(compose-ha)', () => {
   it('produces the compose-ha deploy step sequence (pure — no config needed)', () => {

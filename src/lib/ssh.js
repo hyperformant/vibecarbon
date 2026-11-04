@@ -27,7 +27,7 @@ import { runCommandAsync } from './command.js';
 import { DB_POD_SELECTOR } from './deploy/db-workload.js';
 import { buildHostKeyOpts, knownHostsPath, SSH_CONNECTION_OPTS } from './host-keys.js';
 import { runWithRetry } from './retry.js';
-import { shEscape } from './shell.js';
+import { shJoin } from './shell.js';
 
 // k3s writes its kubeconfig here; kubectl doesn't find it by default in SSH sessions.
 const K3S_KUBECONFIG = '/etc/rancher/k3s/k3s.yaml';
@@ -218,7 +218,7 @@ export function isDnsNotSettledSshCommandError(err) {
  * still surface fast — see sshRunAsync for how the ladder is sized and
  * widened for class 3, and scpWithRetry for why the scp ladder stays
  * transport-only. The DR path's `retries: 1` opt-out (compose/ha.js's
- * restoreComposeWalgRole / demoteComposeWalgRole) caps ATTEMPTS, not
+ * auditComposeWalgRole / demoteComposeWalgRole) caps ATTEMPTS, not
  * classification.
  *
  * Contrast with isNeverStartedSshTransportFailure above, which additionally
@@ -307,7 +307,7 @@ export function sshArgv(ip, sshKeyPath, argv, { env, firstConnect = false } = {}
     ...sshHostKeyOpts(env, { firstConnect, sshKeyPath }),
     '--',
     `root@${ip}`,
-    argv.map(shEscape).join(' '),
+    shJoin(argv),
   ];
 }
 
@@ -441,7 +441,8 @@ const SCP_RETRY_DELAY_MS = 5000;
  * Why this exists: scp call sites used to hand a bare scp argv to
  * runCommandAsync while the `ssh` calls interleaved between them retried
  * transport blips via sshRunAsync. On 2026-08-11 a compose-ha warm deploy died
- * at merge-walg-role on a single `Connection timed out during banner exchange` —
+ * at merge-walg-role (since renamed write-node-roles) on a single
+ * `Connection timed out during banner exchange` —
  * SSH to the same host worked seconds before and after, so one retry would
  * have saved the run.
  *

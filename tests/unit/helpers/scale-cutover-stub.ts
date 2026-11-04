@@ -69,3 +69,28 @@ export function stubServerStateSync<T extends Record<string, unknown>>(
     },
   };
 }
+
+/**
+ * The role a compose wal-g role-file write sets (writeComposeWalgRole sends
+ * `sh -c <composeWalgRoleWriteShell>` through ssh.js's sshRun), or null for
+ * any other argv.
+ */
+export function roleWriteOf(argv: string[]): 'primary' | 'standby' | null {
+  const script = argv[0] === 'sh' && argv[1] === '-c' ? (argv[2] ?? '') : '';
+  if (!script.includes('.vibecarbon-role')) return null;
+  const m = /printf '%s\\n' (primary|standby) > walg-role\.tmp/.exec(script);
+  return (m?.[1] as 'primary' | 'standby' | undefined) ?? null;
+}
+
+/**
+ * An ssh.js sshRun answer: a role-file write reads back the role it wrote
+ * (and is reported through `onRole`); anything else answers ''.
+ */
+export function answerRoleWrite(onRole: (ip: string, role: string) => void = () => {}) {
+  return (ip: string, argv: string[]) => {
+    const role = roleWriteOf(argv);
+    if (!role) return '';
+    onRole(ip, role);
+    return `WALG_ROLE_FILE=${role}`;
+  };
+}

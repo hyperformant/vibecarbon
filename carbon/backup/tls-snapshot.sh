@@ -29,7 +29,8 @@ umask 077
 #      .env by compose; this script never parses .env;
 #   3. never from a disarmed issuer (compose-ha standby,
 #      src/lib/deploy/acme-role.js), read from the RUNNING traefik command;
-#   4. never from a standby-role db (WALG_ROLE=standby);
+#   4. only from a primary: the host role file .vibecarbon-role/walg-role says
+#      primary (a standby, a missing file or an unknown word skips);
 #   5. only when acme.json holds a certificate whose "main" is the apex.
 #      Traefik writes only certificates the CA issued there, and the reader
 #      checks the chain, the names and the time left before it restores one.
@@ -72,10 +73,20 @@ case "$cmd" in
   *acme-disarmed.invalid*) skip "issuer disarmed on this node (compose-ha standby)" ;;
 esac
 
-role="$(sh vc-compose exec -T db printenv WALG_ROLE 2>/dev/null)" || role=""
-if [ "$role" = "standby" ]; then
-  skip "WALG_ROLE=standby (only the primary writes snapshots)"
+# The node's wal-g role, read from the host role directory the db binds
+# (src/lib/deploy/walg-role.js WALG_ROLE_PARSE_SH, carried verbatim). Only a
+# node whose role file says primary writes snapshots; a standby, a missing
+# file or an unknown word skips.
+vc_walg_role_file=.vibecarbon-role/walg-role
+VC_WALG_ROLE=""
+if [ -f "$vc_walg_role_file" ] && [ ! -L "$vc_walg_role_file" ]; then
+    case "$(cat "$vc_walg_role_file" 2>/dev/null)" in
+        primary) VC_WALG_ROLE=primary ;;
+        standby) VC_WALG_ROLE=standby ;;
+    esac
 fi
+unset vc_walg_role_file
+[ "$VC_WALG_ROLE" = "primary" ] || skip "wal-g role is ${VC_WALG_ROLE:-unknown}, not primary (only the primary writes snapshots)"
 
 apex_re="$(printf '%s' "$domain" | sed 's/[.]/\\./g')"
 if ! sh vc-compose exec -T traefik grep -Eq "\"main\": ?\"${apex_re}\"" /letsencrypt/acme.json; then

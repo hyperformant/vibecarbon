@@ -74,11 +74,13 @@ import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
 import { sweepStaleDeltaDirs } from './lib/deploy/layer-delta.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import { planScale } from './lib/deploy/plan/scale-plan.js';
+import { assertScaffoldSupportsRoleFile } from './lib/deploy/preflight.js';
 import { buildRemote } from './lib/deploy/remote-build.js';
 import { isRetiredSide } from './lib/deploy/retired-fence.js';
 import { haStacksFrom } from './lib/deploy/standby-types.js';
 import { isHATier, resolveTier } from './lib/deploy/tier-registry.js';
 import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from './lib/deploy/utils.js';
+import { writeComposeWalgRole } from './lib/deploy/walg-role.js';
 import {
   clearScaleCutoverJournal,
   clearWriteFenceMarker,
@@ -690,8 +692,8 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
   };
 
   // 12. Demote the old server's wal-g write-guard so it never archives next
-  //     to the new primary (demoteComposeWalgRole recreates its db with
-  //     WALG_ROLE=standby).
+  //     to the new primary (demoteComposeWalgRole writes standby into its
+  //     role file: one host write, no db restart).
   await step('demote', async () => {
     s.start(`Demoting ${label} (wal-g write-guard)...`);
     const demoted = await demoteComposeWalgRole({
@@ -759,7 +761,7 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
     // again), and reading the set back out of reconcile.sh was its stopgap.
     // vc-compose adds the replication overlay when the node has it.
     // STANDBY_SCALE_FLAG keeps primary-only add-ons at zero when the node's
-    // .env says WALG_ROLE=standby, the same fragment reconcile.sh's up runs.
+    // wal-g role file says standby, the same fragment reconcile.sh's up runs.
     s.start('Recreating all services after restore...');
     await sshRunScript(
       newIp,
@@ -1390,6 +1392,15 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   // 5b. The saved certificate, before Traefik's first start (primary only).
   if (backupS3) await restoreReplacementTls(ctx, newIp, backupS3, s);
 
+  // 5c. The wal-g role file, before the db's first start reads it: the
+  //     replacement takes the role of the server it replaces (C10: a
+  //     compose-ha standby replacement must never start as an archiving
+  //     primary). Single compose has one server, the primary.
+  const walgRole = isHATier(tier) ? server.role : 'primary';
+  await perfAsync('scale.writeNodeRole', () =>
+    writeComposeWalgRole({ ip: newIp, sshKeyPath, projectName, role: walgRole }),
+  );
+
   // 6. Start compose stack on new server
   s.start('Starting services on new server...');
   await perfAsync('scale.composeUp', () =>
@@ -1479,7 +1490,7 @@ async function deleteUnusedReplacement(provider, newServerId, newIp, oldStillRun
  * names) moves the database with writes fenced (scale-cutover.js):
  *   provision and start the new server; fence the old one (writers stopped,
  *   database read-only, WAL archived through the fence); push the final base;
- *   restore THAT base on the new server; demote the old server's WALG_ROLE and
+ *   restore THAT base on the new server; demote the old server's wal-g role and
  *   drop its backup cron; flip DNS; recreate services; push the first base on
  *   the new timeline (C8: after the flip, before the old server goes); install
  *   the backup cron; destroy the old server.
@@ -1838,7 +1849,7 @@ async function scaleServers(ctx) {
         ? await primaryReady.promise
         : { ip: primaryEntry.ip, entry: primaryEntry };
       if (envConfig.backup) {
-        // compose-backup.sh skips on a standby (WALG_ROLE); the cron is there
+        // compose-backup.sh skips on a standby (its role file); the cron is there
         // for when a failover promotes this node.
         await setupComposeBackupCron(newIp, sshKeyPath, projectName, envConfig.backup, {
           domain: envConfig.domain,
@@ -2243,6 +2254,10 @@ export async function run(args) {
   // on every run, provisioning and redeploy alike (see
   // src/lib/licensing/gate.js).
   const tier = resolveTier(envConfig);
+  // Template lockstep: this CLI moves the wal-g role through a file the
+  // project's scripts parse. A scaffold from before that reads a role env this
+  // CLI no longer sets, and scale ships those scripts to new servers.
+  refuseOrContinue(() => assertScaffoldSupportsRoleFile(process.cwd(), tier));
   if (isHATier(tier)) {
     // A failover in flight may be mid-swap: a resize would act on roles that
     // are about to change (or reboot the standby mid-promote).

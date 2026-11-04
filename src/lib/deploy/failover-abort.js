@@ -9,18 +9,23 @@
  * waits. Without a way out the site stays down until someone hand-edits
  * .vibecarbon.json. `-abort` is that way out, and it keeps the OLD primary:
  *
+ *   0. read the standby's lineage (best effort, before anything changes): a
+ *      standby that may have promoted is recorded as discardable, so the next
+ *      deploy reseeds over that exact copy instead of refusing it as a
+ *      promotion made outside vibecarbon (standby-lineage.js);
  *   1. fence the standby: stop its database and PROVE it down, so nothing can
  *      promote it or serve from it next to the old primary. Not proven, nothing
  *      else is touched and the abort refuses;
- *   2. stop the standby's writers and set its WALG_ROLE=standby (best effort:
+ *   2. stop the standby's writers and set its wal-g role to standby (best effort:
  *      its database is already down);
  *   3. point DNS back at the old primary when the provider is managed;
  *   4. lift the old primary's database write fence, give it back its wal-g
  *      write-guard and ACME issuer, name it in the backup-prefix fence (a
  *      failover may have named the standby there), and start its writers;
  *   5. clear the journal (and the write-fence marker, when the lift is
- *      proven), drop the recorded system identifier and mark replication
- *      degraded, so the next `vibecarbon deploy` reseeds the standby.
+ *      proven), drop the recorded system identifier, record the discardable
+ *      standby (or drop an older record) and mark replication degraded, so
+ *      the next `vibecarbon deploy` reseeds the standby.
  *
  * The tier backends (compose-ha in compose/ha.js, k8s-ha in failover.js) do the
  * I/O; this module owns the order, the refusal and the single save.
@@ -29,19 +34,23 @@
 import { updateProjectConfig } from '../config.js';
 import { backupFenceRecord, backupFenceWarning } from './backup-fence.js';
 import { FailoverRefusedError } from './failover-guard.js';
+import { discardableStandbyRecord } from './standby-lineage.js';
 
 /**
  * @typedef {object} AbortBackend
  * @property {{ primary: string, standby: string }} ips
+ * @property {() => Promise<{ inRecovery: boolean|null, systemIdentifier: string|null, timeline: number|null }|null>} readStandbyLineage
+ *   the standby's db lineage (standby-lineage.js parseDbLineage), read before
+ *   it is stopped; null when it does not answer. Never throws.
  * @property {() => Promise<{ ok: boolean, reason?: string }>} stopStandbyDb
  *   stop the standby's database and prove it is not running
  * @property {() => Promise<boolean>} disarmStandby
- *   stop its writers and set WALG_ROLE=standby; best effort
+ *   stop its writers and set its wal-g role to standby; best effort
  * @property {(() => Promise<{ ok: boolean, reason?: string }>)|null} repointDns
  *   managed DNS: point the A records back at the old primary; null for manual
  * @property {() => Promise<boolean>} primaryReachable
  * @property {() => Promise<boolean>} unfencePrimary - proven lift of the db write fence
- * @property {() => Promise<boolean>} armPrimary - WALG_ROLE=primary and the ACME issuer
+ * @property {() => Promise<boolean>} armPrimary - the primary wal-g role and the ACME issuer
  * @property {() => Promise<boolean>} startPrimaryWriters
  * @property {() => Promise<{ ok: boolean, reason?: string }>} writeBackupFence
  *   name the old primary in the backup-prefix fence (backup-fence.js): a
@@ -55,10 +64,15 @@ import { FailoverRefusedError } from './failover-guard.js';
  * not proven, so the next deploy or failover that reaches the primary lifts it.
  *
  * @param {{ environment: string }} ctx
- * @param {{ fenceLifted: boolean, backupFence?: object|null }} opts - backupFence:
- *   the backup-prefix fence write's record (backup-fence.js), when one was tried
+ * @param {{ fenceLifted: boolean, backupFence?: object|null, discardableStandby?: object|null }} opts -
+ *   backupFence: the backup-prefix fence write's record (backup-fence.js), when
+ *   one was tried; discardableStandby: the standby copy this abort gave up
+ *   (standby-lineage.js), null when it read none, which drops an older record
  */
-export function recordFailoverAbort(ctx, { fenceLifted, backupFence = null }) {
+export function recordFailoverAbort(
+  ctx,
+  { fenceLifted, backupFence = null, discardableStandby = null },
+) {
   updateProjectConfig((config) => {
     const envConfig = config.environments?.[ctx.environment];
     if (!envConfig) {
@@ -71,6 +85,9 @@ export function recordFailoverAbort(ctx, { fenceLifted, backupFence = null }) {
     delete ha.systemIdentifier;
     if (fenceLifted) delete ha.writeFence;
     if (backupFence) ha.backupFence = backupFence;
+    // This abort's knowledge of the standby replaces any earlier abort's.
+    if (discardableStandby) ha.discardableStandby = discardableStandby;
+    else delete ha.discardableStandby;
     envConfig.ha = ha;
     envConfig.replication = 'degraded';
     envConfig.degraded = true;
@@ -113,6 +130,19 @@ export async function abortFailover({
     warn(line);
   };
 
+  // 0. Read-only and best effort: the standby's lineage while it still runs.
+  // If the failover's promote landed, the standby now runs a newer timeline of
+  // the same database, and the next deploy would refuse it as promoted outside
+  // vibecarbon. This abort keeps the old primary, so that exact copy is given
+  // up: record it, and the deploy reseeds over it (and only over it).
+  let reading = null;
+  try {
+    reading = (await backend.readStandbyLineage?.()) ?? null;
+  } catch {
+    reading = null;
+  }
+  const discardable = discardableStandbyRecord({ ip: standby, reading });
+
   // 1. The one step that must hold: a standby that might still promote must be
   // down before the old primary takes writes again.
   const stopped = await backend.stopStandbyDb();
@@ -129,7 +159,7 @@ export async function abortFailover({
   // 2. Belt and braces on the standby: a reboot must not bring it back archiving.
   if (!(await backend.disarmStandby())) {
     note(
-      `could not stop the standby's writers or set its WALG_ROLE=standby (${standby}); its ` +
+      `could not stop the standby's writers or set its wal-g role to standby (${standby}); its ` +
         'database is down, and vibecarbon deploy rebuilds it as the standby',
     );
   }
@@ -179,7 +209,24 @@ export async function abortFailover({
     );
   }
 
-  record({ environment }, { fenceLifted, backupFence: fenceRecord });
+  if (discardable) {
+    log(
+      `the standby ${standby} was out of recovery on timeline ${discardable.timeline} (the ` +
+        "failover's promote landed): its copy is recorded as discardable, so the next " +
+        `vibecarbon deploy ${environment} reseeds over it`,
+    );
+  } else if (reading?.inRecovery !== true) {
+    note(
+      `could not read the standby's lineage (${standby}) before stopping it, so nothing records ` +
+        "its copy as discardable. If the failover's promote landed, the next deploy refuses to " +
+        `reseed it, and "Deploy after failover -abort" in docs/technical.md says what to do ` +
+        `before you run vibecarbon deploy ${environment}`,
+    );
+  }
+  record(
+    { environment },
+    { fenceLifted, backupFence: fenceRecord, discardableStandby: discardable },
+  );
   log(
     `failover called off: ${primary} stays the primary. replication is marked degraded; run ` +
       `vibecarbon deploy ${environment} to reseed the standby ${standby} from it`,

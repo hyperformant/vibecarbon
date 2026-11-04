@@ -8,8 +8,9 @@
  *     container id unchanged (no recreate of the dependency: on a node that is
  *     `db`, the serving primary's or the replica's);
  *   - the same through the rendered standby-scale.sh and STANDBY_SCALE_FLAG,
- *     the way reconcile.sh runs them, on a WALG_ROLE=standby .env, and a
- *     WALG_ROLE=primary .env brings `b` back without recreating `a`.
+ *     the way reconcile.sh runs them, on a standby role file
+ *     (.vibecarbon-role/walg-role), and a primary role file brings `b` back
+ *     without recreating `a`.
  *
  * Observed on Docker Compose v5.6.0 (2026-10-21).
  *
@@ -18,7 +19,7 @@
  * and network are removed after.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -98,7 +99,7 @@ describeDocker(
       expect(idOf(A)).toBe(aId);
     });
 
-    it('reconcile.sh shape: the fragment on a standby .env holds b at zero, a primary .env brings it back', () => {
+    it('reconcile.sh shape: the fragment on a standby role file holds b at zero, a primary one brings it back', () => {
       const up = () =>
         execFileSync(
           'bash',
@@ -110,11 +111,12 @@ describeDocker(
         );
       compose('up', '-d');
       const aId = idOf(A);
-      writeFileSync(join(dir, '.env'), 'WALG_ROLE=standby\n');
+      mkdirSync(join(dir, '.vibecarbon-role'), { recursive: true });
+      writeFileSync(join(dir, '.vibecarbon-role', 'walg-role'), 'standby\n');
       up();
       expect(idOf(B)).toBe('');
       expect(idOf(A)).toBe(aId);
-      writeFileSync(join(dir, '.env'), 'WALG_ROLE=primary\n');
+      writeFileSync(join(dir, '.vibecarbon-role', 'walg-role'), 'primary\n');
       up();
       expect(idOf(B)).not.toBe('');
       expect(idOf(A)).toBe(aId);

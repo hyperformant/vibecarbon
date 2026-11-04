@@ -108,7 +108,7 @@ function respond(ip: string, command: string, input?: string): string | false {
   if (command.includes('PROBE_DONE')) {
     return [
       `HOST_MARKER=${fence.host ? 1 : 0}`,
-      'WALG_ROLE=primary',
+      'WALG_ROLE_FILE=primary',
       `DB_MARKER=${fence.db ? 'present' : 'absent'}`,
       ...(fence.running ? ['RUNNING myapp-app'] : []),
       'PROBE_DONE',
@@ -179,9 +179,31 @@ vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
     mergeRemoteDotenv: vi.fn(
       async (ip: string, _o: string, _d: string, vars: Record<string, string>) => {
         h.envMerges.push({ ip, vars });
-        if (vars.WALG_ROLE) h.events.push(`walg:${ip}:${vars.WALG_ROLE}`);
       },
     ),
+  };
+});
+
+// The role-file write goes through ssh.js's argv sshRun (walg-role.js):
+// recorded with the same ip/command shape, answered with the read-back.
+vi.mock('../../../src/lib/ssh.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
+  return {
+    ...actual,
+    sshRun: vi.fn(async (ip: string, _k: string, argv: unknown) => {
+      assertSshRunArgv(argv);
+      const command = argv.join(' ');
+      h.calls.push({ ip, command });
+      const role = /\.vibecarbon-role/.test(command)
+        ? /printf '%s\\n' (primary|standby) > walg-role\.tmp/.exec(command)?.[1]
+        : undefined;
+      if (role) {
+        h.events.push(`role:${ip}:${role}`);
+        return `WALG_ROLE_FILE=${role}`;
+      }
+      return '';
+    }),
   };
 });
 
@@ -328,7 +350,7 @@ function baseCtx(extra: Record<string, unknown> = {}) {
 async function runReconverge(ctx: Record<string, unknown>) {
   const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
   await E.haPersistPendingConfig(ctx);
-  await E.haMergeWalgRole(ctx);
+  await E.haWriteNodeRoles(ctx);
   await E.haStartComposeStack(ctx);
   await E.haWriteReplicationOverlay(ctx);
   await E.haConfigureReplication(ctx);
@@ -632,10 +654,9 @@ describe('reconverge effects', () => {
     expect(ev.indexOf(`basebackup:${RETIRED_IP}`)).toBeGreaterThanOrEqual(0);
     expect(retiredStart).toBeLessThan(ev.indexOf('save:deployed'));
     expect(h.started).toEqual([PROMOTED_IP, RETIRED_IP]);
-    // WALG_ROLE follows the roles, not the stacks.
-    const role = (ip: string) => h.envMerges.find((m) => m.ip === ip)?.vars.WALG_ROLE;
-    expect(role(PROMOTED_IP)).toBe('primary');
-    expect(role(RETIRED_IP)).toBe('standby');
+    // The wal-g role file follows the roles, not the stacks.
+    expect(ev).toContain(`role:${PROMOTED_IP}:primary`);
+    expect(ev).toContain(`role:${RETIRED_IP}:standby`);
   });
 
   it('(f) clears lastFailover and degraded only after verified streaming and a recorded identifier', async () => {
@@ -661,7 +682,7 @@ describe('reconverge effects', () => {
     const ctx = baseCtx();
     const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
     await E.haPersistPendingConfig(ctx);
-    await E.haMergeWalgRole(ctx);
+    await E.haWriteNodeRoles(ctx);
     await E.haStartComposeStack(ctx);
     await E.haWriteReplicationOverlay(ctx);
     await E.haConfigureReplication(ctx);
@@ -801,17 +822,49 @@ describe('the deploy wires the managed-DNS repoint into the reconverge check (I3
  * Primary-only add-ons stay at zero on the rebuilt standby (primary-only
  * add-ons plan, Task 3). The standby's stack starts through startComposeStack,
  * which runs reconcile.sh, whose `up` carries the standby-scale fragment; that
- * fragment reads WALG_ROLE from the node's .env. So the WALG_ROLE=standby merge
- * must land before either path that starts the retired node's stack.
+ * fragment reads the node's wal-g role file. So the standby role write must
+ * land before either path that starts the retired node's stack.
  */
 describe('the standby role is on the node before its stack starts (add-ons held at zero)', () => {
-  it('merge-walg-role precedes start-compose-stack and configure-replication in the compose-ha plan', async () => {
+  it('write-node-roles precedes start-compose-stack and configure-replication in the compose-ha plan', async () => {
     const { planDeploy } = await import('../../../src/lib/deploy/plan/deploy-plan.js');
     const names = (planDeploy('compose-ha', {}) as Array<{ name: string }>).map((s) => s.name);
-    const merge = names.indexOf('merge-walg-role');
-    expect(merge).toBeGreaterThanOrEqual(0);
-    expect(merge).toBeLessThan(names.indexOf('start-compose-stack'));
-    expect(merge).toBeLessThan(names.indexOf('configure-replication'));
+    const write = names.indexOf('write-node-roles');
+    expect(write).toBeGreaterThanOrEqual(0);
+    expect(write).toBeLessThan(names.indexOf('start-compose-stack'));
+    expect(write).toBeLessThan(names.indexOf('configure-replication'));
+  });
+
+  it('write-node-roles writes the role FILE on both nodes, primary and standby', async () => {
+    const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
+    await E.haWriteNodeRoles(baseCtx());
+    const { composeWalgRoleWriteShell } = await import('../../../src/lib/deploy/walg-role.js');
+    const roleWrites = h.calls.filter((c) => c.command.includes('.vibecarbon-role'));
+    // After a failover the promoted node holds the primary role.
+    expect(roleWrites).toEqual([
+      { ip: PROMOTED_IP, command: `sh -c ${composeWalgRoleWriteShell('myapp', 'primary')}` },
+      { ip: RETIRED_IP, command: `sh -c ${composeWalgRoleWriteShell('myapp', 'standby')}` },
+    ]);
+  });
+
+  it('write-node-roles merges no wal-g role into either .env, only the ACME issuer key', async () => {
+    const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
+    await E.haWriteNodeRoles(baseCtx());
+    expect(h.envMerges).toEqual([
+      { ip: PROMOTED_IP, vars: { ACME_DISARMED_CA_SERVER: '' } },
+      {
+        ip: RETIRED_IP,
+        vars: { ACME_DISARMED_CA_SERVER: 'https://acme-disarmed.invalid/directory' },
+      },
+    ]);
+  });
+
+  it('a role file that does not read back stops the step before any stack starts', async () => {
+    const ssh = await import('../../../src/lib/ssh.js');
+    vi.mocked(ssh.sshRun).mockImplementationOnce(async () => 'WALG_ROLE_FILE=');
+    const E = COMPOSE_HA_EFFECTS as Record<string, (c: Record<string, unknown>) => Promise<void>>;
+    await expect(E.haWriteNodeRoles(baseCtx())).rejects.toThrow(/wal-g role/);
+    expect(h.started).toEqual([]);
   });
 
   it('both standby start paths go through startComposeStack, which runs reconcile.sh', async () => {
@@ -837,9 +890,9 @@ describe('the standby role is on the node before its stack starts (add-ons held 
     expect(cmd.slice(0, 300)).toContain('/reconcile.sh');
   });
 
-  it('a reconverge merges WALG_ROLE=standby onto the retired node before starting it', async () => {
+  it('a reconverge writes the standby role file on the retired node before starting it', async () => {
     await runReconverge(baseCtx());
-    const merged = h.events.indexOf(`walg:${RETIRED_IP}:standby`);
+    const merged = h.events.indexOf(`role:${RETIRED_IP}:standby`);
     const started = h.events.indexOf(`start:${RETIRED_IP}`);
     expect(merged).toBeGreaterThanOrEqual(0);
     expect(started).toBeGreaterThan(merged);

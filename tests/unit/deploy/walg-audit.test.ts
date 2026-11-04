@@ -11,11 +11,15 @@
  * than useless: false-failing a brand-new environment that legitimately has no
  * backups and no archived WAL yet, and false-passing a genuinely broken one.
  */
+
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // vi.useFakeTimers() does not fake `node:timers/promises` (sinon limitation),
 // so route runWithRetry's sleep through the faked global setTimeout — mirrors
@@ -116,11 +120,11 @@ describe('WALG_AUDIT_PROBE (the in-container script)', () => {
   });
 
   it('skips a standby — its wal-g writes are guarded off by design', () => {
-    expect(WALG_AUDIT_PROBE).toMatch(/WALG_ROLE:-primary[\s\S]*standby[\s\S]*exit 0/);
+    expect(WALG_AUDIT_PROBE).toMatch(/standby\)\n[^\n]*skip:standby-write-guard[^\n]*exit 0/);
   });
 
   it('checks the standby guard BEFORE credentials, so a standby never fails on them', () => {
-    expect(WALG_AUDIT_PROBE.indexOf('WALG_ROLE')).toBeLessThan(
+    expect(WALG_AUDIT_PROBE.indexOf('VC_WALG_ROLE')).toBeLessThan(
       WALG_AUDIT_PROBE.indexOf('AWS_ACCESS_KEY_ID'),
     );
   });
@@ -177,9 +181,9 @@ describe('buildWalgAuditProbe({ requirePrimary })', () => {
       expect(probe.trimEnd().endsWith('exit 0')).toBe(true);
       // The no-backup-target skip still precedes the role branch, so a
       // backups-disabled node skips in BOTH modes rather than failing.
-      expect(probe.indexOf('skip:no-backup-target')).toBeLessThan(probe.indexOf('WALG_ROLE'));
+      expect(probe.indexOf('skip:no-backup-target')).toBeLessThan(probe.indexOf('VC_WALG_ROLE'));
       // The role branch still precedes the credential check.
-      expect(probe.indexOf('WALG_ROLE')).toBeLessThan(probe.indexOf('AWS_ACCESS_KEY_ID'));
+      expect(probe.indexOf('VC_WALG_ROLE')).toBeLessThan(probe.indexOf('AWS_ACCESS_KEY_ID'));
     }
   });
 
@@ -206,10 +210,10 @@ describe('evaluateWalgAudit — stale standby role (the post-failover rot state)
     expect(r.ok).toBe(false);
     expect(r.skipped).toBe(false);
     expect(r.failures[0].code).toBe('stale-standby-role');
-    expect(r.failures[0].detail).toContain('WALG_ROLE=standby');
+    expect(r.failures[0].detail).toContain('role file still says standby');
     expect(r.failures[0].detail).toContain('archives NOTHING');
-    // The fix, not just the symptom: env is fixed at container-create time.
-    expect(r.failures[0].detail).toContain('container being recreated');
+    // The fix, not just the symptom: the role write did not land.
+    expect(r.failures[0].detail).toContain('/var/lib/vibecarbon/role/walg-role');
   });
 
   it('distinguishes a promoted node from one that never left recovery', () => {
@@ -220,7 +224,7 @@ describe('evaluateWalgAudit — stale standby role (the post-failover rot state)
 
   it('the message drops the storage-credential differential — this is not a storage fault', () => {
     const msg = walgAuditFailureMessage(stale('f'), 'compose', { context: 'failover' });
-    expect(msg).toContain('WALG_ROLE=standby');
+    expect(msg).toContain('role file still says standby');
     expect(msg).not.toContain('S3_ACCESS_KEY');
     expect(msg).not.toContain('Refusing to finish a deploy');
     expect(msg).toContain('Failing the failover command');
@@ -231,6 +235,121 @@ describe('evaluateWalgAudit — stale standby role (the post-failover rot state)
     expect(r.ok).toBe(true);
     expect(r.skipped).toBe(true);
     expect(r.failures).toEqual([]);
+  });
+});
+
+// The role is the file (walg-env.sh reads it into VC_WALG_ROLE), never the
+// WALG_ROLE env. No role is a failure in both modes: wal-archive.sh holds every
+// segment and the base backup refuses, so a skip would hide a dead archive.
+describe('the audit reads the role file', () => {
+  it('the probe reads VC_WALG_ROLE, never the WALG_ROLE env, and has no single quote', () => {
+    for (const requirePrimary of [false, true]) {
+      const probe = buildWalgAuditProbe({ requirePrimary });
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the probe text, not a JS placeholder
+      expect(probe).toContain('case "${VC_WALG_ROLE:-}" in');
+      expect(probe).not.toMatch(/\$\{WALG_ROLE/);
+      expect(probe).not.toContain("'");
+    }
+  });
+
+  it('no role is a failure, never a skip, and the message names vibecarbon deploy', () => {
+    const r = evaluateWalgAudit('WALG_AUDIT=fail:no-role\nWALG_AUDIT_PREFIX=s3://b/p/1');
+    expect(r.ok).toBe(false);
+    expect(r.skipped).toBe(false);
+    expect(r.reason).toBe('no-role');
+    expect(walgAuditFailureMessage(r, 'k8s')).toMatch(/no wal-g role[\s\S]*vibecarbon deploy/i);
+    // Not a storage fault: no credential differential buries it.
+    expect(walgAuditFailureMessage(r, 'k8s')).not.toContain('S3_ACCESS_KEY');
+  });
+
+  it('assertWalgBackupsWorking throws on it at once (no retry can write the role)', async () => {
+    const probe = vi.fn(async () => 'WALG_AUDIT=fail:no-role\nWALG_AUDIT_PREFIX=s3://b/p/1');
+    await expect(assertWalgBackupsWorking({ path: 'compose', probe })).rejects.toThrow(
+      /no wal-g role/i,
+    );
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('requirePrimary still turns standby into fail:stale-standby-role', () => {
+    expect(buildWalgAuditProbe({ requirePrimary: true })).toContain('fail:stale-standby-role');
+  });
+
+  // The probe, run for real with bash against the real walg-env.sh, a stub
+  // pg_controldata and a role file in each state.
+  describe('run for real', () => {
+    const repo = fileURLToPath(new URL('../../../', import.meta.url));
+    const work = mkdtempSync(join(tmpdir(), 'vc-walg-audit-'));
+    afterAll(() => rmSync(work, { recursive: true, force: true }));
+    writeFileSync(
+      join(work, 'pg_controldata'),
+      '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',
+    );
+    writeFileSync(join(work, 'wal-g'), '#!/bin/sh\necho "[]"\n');
+    writeFileSync(join(work, 'psql'), '#!/bin/sh\necho f\n');
+    for (const f of ['pg_controldata', 'wal-g', 'psql']) chmodSync(join(work, f), 0o755);
+    let n = 0;
+    const run = (role: string | null, requirePrimary = false) => {
+      n += 1;
+      const file = join(work, `role-${n}`);
+      if (role !== null) writeFileSync(file, role);
+      const probe = buildWalgAuditProbe({ requirePrimary }).replaceAll(
+        '/etc/postgresql/walg-env.sh',
+        join(repo, 'carbon/volumes/db/walg-env.sh'),
+      );
+      const r = spawnSync('bash', ['-c', probe], {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${work}:${process.env.PATH}`,
+          WALG_S3_PREFIX_BASE: 's3://b/backups/p/prod/walg',
+          AWS_ACCESS_KEY_ID: 'k',
+          VC_WALG_ROLE_FILE: file,
+          PGDATA: '/x',
+        },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      return evaluateWalgAudit(r.stdout);
+    };
+
+    it.each([
+      ['no role file', null],
+      ['a garbage role', 'leader\n'],
+    ])('%s fails no-role in both modes', (_l, role) => {
+      for (const strict of [false, true]) {
+        const r = run(role, strict);
+        expect(r.ok).toBe(false);
+        expect(r.failures[0].code).toBe('no-role');
+      }
+    });
+
+    it('standby skips by default and fails stale-standby-role under requirePrimary', () => {
+      expect(run('standby\n')).toMatchObject({ ok: true, skipped: true });
+      expect(run('standby\n', true).failures[0].code).toBe('stale-standby-role');
+    });
+
+    it('primary goes on to the probe', () => {
+      expect(run('primary\n')).toMatchObject({ ok: true, skipped: false });
+      expect(run('primary\n', true)).toMatchObject({ ok: true, skipped: false });
+    });
+
+    it('a WALG_ROLE=primary env with no role file is still no role', () => {
+      n += 1;
+      const probe = buildWalgAuditProbe().replaceAll(
+        '/etc/postgresql/walg-env.sh',
+        join(repo, 'carbon/volumes/db/walg-env.sh'),
+      );
+      const r = spawnSync('bash', ['-c', probe], {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${work}:${process.env.PATH}`,
+          WALG_S3_PREFIX_BASE: 's3://b/backups/p/prod/walg',
+          AWS_ACCESS_KEY_ID: 'k',
+          VC_WALG_ROLE_FILE: join(work, 'absent'),
+          WALG_ROLE: 'primary',
+          PGDATA: '/x',
+        },
+      });
+      expect(evaluateWalgAudit(r.stdout).failures[0]?.code).toBe('no-role');
+    });
   });
 });
 

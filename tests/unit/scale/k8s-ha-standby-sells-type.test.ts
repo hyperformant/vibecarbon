@@ -10,6 +10,12 @@ import { seedCatalog } from '../helpers/catalog-fixtures.js';
 
 const errors: string[] = [];
 const infos: string[] = [];
+// The project scaffold is current; the stale-scaffold refusal has its own
+// tests (preflight-role-file, scaffold-lockstep-commands).
+vi.mock('../../../src/lib/deploy/preflight.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  assertScaffoldSupportsRoleFile: () => {},
+}));
 vi.mock('@clack/prompts', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {

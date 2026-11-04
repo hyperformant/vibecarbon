@@ -226,6 +226,9 @@ describe('the fence record', () => {
 
 const work = mkdtempSync(join(tmpdir(), 'vc-bfence-'));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
+/** Every push path here runs on a primary: the role file walg-env.sh reads says so. */
+const PRIMARY_ROLE_FILE = join(work, 'walg-role');
+writeFileSync(PRIMARY_ROLE_FILE, 'primary\n');
 
 /**
  * A bin dir with stub wal-g / psql. wal-g `st cat` prints FENCE (or fails "not
@@ -314,6 +317,7 @@ const env = (bin: string) => ({
   PATH: `${bin}:${process.env.PATH}`,
   WALG_S3_PREFIX_BASE: BASE_PREFIX,
   WALG_ENV_SH: WALG_ENV,
+  VC_WALG_ROLE_FILE: PRIMARY_ROLE_FILE,
   AWS_ACCESS_KEY_ID: 'k',
   AWS_SECRET_ACCESS_KEY: 's',
   WAL_ARCHIVE_WALG: join(bin, 'wal-g'),

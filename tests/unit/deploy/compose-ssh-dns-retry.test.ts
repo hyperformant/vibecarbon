@@ -159,7 +159,7 @@ describe('sshRunAsync retry-ladder behavior', () => {
   });
 
   it('does NOT widen the ladder when the caller opted out of retries (retries: 1) even on a DNS-classified failure', async () => {
-    // compose/ha.js's restoreComposeWalgRole / demoteComposeWalgRole DR
+    // compose/ha.js's auditComposeWalgRole / demoteComposeWalgRole DR
     // fast-fail path: targets an ALREADY-established server (not
     // freshly-provisioned), so the DNS-not-settled window correctly does
     // not apply — the opt-out must be respected as-is.

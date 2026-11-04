@@ -123,15 +123,23 @@ sh vc-compose exec -T db bash -c '
     echo "BACKUP_RESULT=skipped:no-s3-credentials"
     exit 0
   fi
-  # WRITE-GUARD (finding #3): a standby must never base-backup into the single
-  # canonical prefix. WALG_ROLE=standby is set on the standby db env. This closes
-  # the bring-up window the pg_is_in_recovery() check below cannot (an
-  # independent primary not yet in recovery).
-  if [ "${WALG_ROLE:-primary}" = "standby" ]; then
-    echo "WALG_ROLE=standby, skipping base backup (only the primary writes to the canonical prefix)."
-    echo "BACKUP_RESULT=skipped:standby-role"
-    exit 0
-  fi
+  # WRITE-GUARD (src/lib/deploy/walg-role.js): only a node whose wal-g role
+  # file says primary base-backs-up into the lineage prefix (walg-env.sh reads
+  # it into VC_WALG_ROLE). This closes the bring-up window the
+  # pg_is_in_recovery() check below cannot (an independent primary not yet in
+  # recovery). No role, or an unknown one, refuses with no marker.
+  case "${VC_WALG_ROLE:-}" in
+    primary) ;;
+    standby)
+      echo "wal-g role standby, skipping base backup (only the primary writes the lineage prefix)."
+      echo "BACKUP_RESULT=skipped:standby-role"
+      exit 0
+      ;;
+    *)
+      echo "backup refused: no wal-g role in ${VC_WALG_ROLE_FILE:-/var/lib/vibecarbon/role/walg-role} (vibecarbon deploy writes it)." >&2
+      exit 1
+      ;;
+  esac
   if [ "$(psql -U postgres -d postgres -tAc "SELECT pg_is_in_recovery()")" != "f" ]; then
     echo "db is in recovery (standby), skipping base backup."
     echo "BACKUP_RESULT=skipped:in-recovery"

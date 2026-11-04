@@ -83,7 +83,9 @@ const PRIMITIVES = [
   'finishDeployRestore',
   'RETIRE_PREVIOUS_SH',
   'restorePromotedWalgRole',
-  'restoreComposeWalgRole',
+  // compose: the promoted side's role write (before pg_promote) and its audit.
+  'armComposeWalgRole',
+  'auditComposeWalgRole',
 ];
 
 /**

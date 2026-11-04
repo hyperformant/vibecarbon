@@ -11,6 +11,8 @@
  * `-force-unplanned`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { composeRoleReply } from '../helpers/compose-role-ssh.js';
+import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
 vi.mock('../../../src/lib/ssh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/ssh.js')>()),
@@ -102,7 +104,7 @@ describe('-force-unplanned is a single-dash failover flag', () => {
 });
 
 /** The first mutating step of either flow: reaching it means the classification let it through. */
-const MUTATION = /^(provision|stopWriters|journal|reseed)$/;
+const MUTATION = /^(provision|stopWriters|arm|journal|reseed)$/;
 
 /** Stop the flow at the first mutation, recording that it was reached. */
 class Reached extends Error {
@@ -141,6 +143,8 @@ async function runK8s({
     readStandbyState: async () => standbyState,
     readPrimaryState: async () => null,
     psql: () => async () => '',
+    // The standby db pod mounts the wal-g role directory.
+    kubectl: k8sRoleKubectl(),
     confirmUnproven: async () => {},
   };
   const envConfig = {
@@ -193,8 +197,15 @@ async function runCompose({
   const deps = {
     keyExists: () => true,
     isPrimaryReachable: async () => false,
+    // The standby's db binds the role directory (compose-ha-failover-role-bind).
+    probeRoleBind: async () => true,
     readState: async () => standbyState,
     psql: () => async () => '',
+    // The wal-g role arm before the promote (D2): a host write, a mutation.
+    roleRun: async (_ip: string, _k: string, argv: string[]) => {
+      order.push('arm');
+      return composeRoleReply(argv.join(' ')) ?? '';
+    },
     stopWriters: async () => {
       order.push('stopWriters');
       throw new Reached('stopWriters');

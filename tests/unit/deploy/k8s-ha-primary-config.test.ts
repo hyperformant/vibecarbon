@@ -73,7 +73,7 @@ describe('fan-out chaining + streaming fast-path', () => {
     const idx = src.indexOf('export async function setupReplication');
     const body = src.slice(idx);
     const probeIdx = body.indexOf('deploy.ha.replication.streamingProbe');
-    const reseedIdx = body.indexOf('deploy.ha.replication.reseed.resolvePvc');
+    const reseedIdx = body.indexOf('deploy.ha.replication.reseed.selfHeal');
     expect(probeIdx).toBeGreaterThan(-1);
     expect(reseedIdx).toBeGreaterThan(probeIdx); // probe comes first
   });
