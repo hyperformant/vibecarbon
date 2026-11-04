@@ -1026,15 +1026,17 @@ export async function gatherDeploymentConfig(args) {
     // The default must fit the primary's fixed types (a flag or a record)
     // without shrinking them. A role still on its region default is left
     // open: it is re-picked for the pair below, so each location is ranked
-    // by the pair it would make, one CPU class on both sides first.
+    // by the pair it would make, one CPU class on both sides first. k8s-ha
+    // ranks with the worker too: the standby only records it, but failover
+    // brings it up, so it counts toward the match.
+    const rankRoles = isComposeDeploy ? ['compose'] : ['master', 'db', 'worker'];
+    const rankTypes = isComposeDeploy
+      ? { compose: serverType }
+      : { master: masterServerType, db: dbServerType, worker: workerServerType };
     const fixedPrimaryTypes = Object.fromEntries(
-      Object.entries(primaryTypesNow()).filter(([role]) => !defaultedRoles.includes(role)),
+      Object.entries(rankTypes).filter(([role]) => !defaultedRoles.includes(role)),
     );
-    const standbyDefault = Provider.getDefaultStandbyRegion(
-      region,
-      standbyRoles,
-      fixedPrimaryTypes,
-    );
+    const standbyDefault = Provider.getDefaultStandbyRegion(region, rankRoles, fixedPrimaryTypes);
     secondaryRegion = args.secondaryRegion || envConfig.secondaryRegion || standbyDefault;
     if (!args.secondaryRegion && !envConfig.secondaryRegion && !args.yes) {
       const standbyOptions = Object.entries(providerConfig.regions)

@@ -1090,7 +1090,8 @@ export class BaseProvider {
    * same-continent partner where every role in `roles` is orderable (see
    * src/lib/sizing.js cheapestStandbyRegion), else the static pair.
    * @param {string} primaryRegion
-   * @param {string[]} [roles] - ['compose'], or ['master', 'db'] for k8s-ha
+   * @param {string[]} [roles] - ['compose'], or ['master', 'db', 'worker'] for k8s-ha
+   *   (the worker weighed in the class match only, never placed or priced)
    * @param {Record<string, string|undefined>} [primaryTypes] - the primary's
    *   type by role, which the standby must fit without shrinking
    * @returns {string}

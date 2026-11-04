@@ -232,6 +232,32 @@ describe('standby location ranking: a matching pair first', () => {
     expect(ranked[0]).toMatchObject({ location: 'nyc3', shared: true });
   });
 
+  it('k8s-ha weighs the worker too: a location that cannot match it ranks below one that can', () => {
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+    // A tor1 primary recorded on -amd, its worker scaled to 8 GB. nyc3 and
+    // sfo3 both sell the -amd master and db at the same price; nyc3 no
+    // longer sells the 8 GB -amd worker, so failover would bring the worker
+    // up on another class (or not at all) there.
+    (DigitalOceanProvider._locationTypes.nyc3 as Set<string>).delete('s-4vcpu-8gb-amd');
+    const fixed = { master: AMD.master, db: AMD.db, worker: 's-4vcpu-8gb-amd' };
+    const withWorker = rankStandbyLocations(DigitalOceanProvider, ['nyc3', 'sfo3'], K8S, fixed);
+    expect(withWorker.map((r) => [r.location, r.shared, r.monthly])).toEqual([
+      ['sfo3', true, 42],
+      ['nyc3', false, 42],
+    ]);
+    // The worker is weighed, never placed or priced.
+    expect(withWorker[0].types).toEqual({ master: AMD.master, db: AMD.db });
+    // Without it the two tie as matching pairs and nyc3 keeps its place.
+    const without = rankStandbyLocations(
+      DigitalOceanProvider,
+      ['nyc3', 'sfo3'],
+      ['master', 'db'],
+      fixed,
+    );
+    expect(without.map((r) => r.location)).toEqual(['nyc3', 'sfo3']);
+    expect(DigitalOceanProvider.getDefaultStandbyRegion('tor1', K8S, fixed)).toBe('sfo3');
+  });
+
   it('haDefaultPair prices the pair the deploy creates', () => {
     seed(DigitalOceanProvider, '2026-10-22/digitalocean');
     dropClass('nyc3', '');

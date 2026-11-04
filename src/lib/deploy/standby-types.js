@@ -46,13 +46,15 @@ export function haStacksFrom(envConfig) {
  *
  * Each role: the recorded type (unless `requested`), else
  * `haStandbyType(Provider, primaryType, standbyRegion, role)` (src/lib/sizing.js):
- * the primary's type where stocked, else the role's cheapest stocked pick of
- * at least its RAM in the primary's CPU class where sold (else the best class
- * that is), else null. Master and db null means the standby cannot be
- * placed (the caller refuses). A null worker (the pilot-light standby only
- * records it, for failover to bring up) is reported as `workerUnstocked` and
- * left out, for the caller to fall back and say so. A role with no primary
- * type at all stays undefined (the caller's last-resort default covers it).
+ * the primary's type where stocked, else the role's cheapest stocked pick
+ * with at least its vCPUs and RAM, in the primary's CPU class where sold
+ * (else the best class that is); when no candidate has the vCPUs, at least
+ * its RAM alone (the old stand-in rule), else null. Master and db null means
+ * the standby cannot be placed (the caller refuses). A null worker (the
+ * pilot-light standby only records it, for failover to bring up) is reported
+ * as `workerUnstocked` and left out, for the caller to fall back and say so.
+ * A role with no primary type at all stays undefined (the caller's
+ * last-resort default covers it).
  * `newlySized` is true when the master or the db was resolved here rather
  * than taken from the record: the deploy says which CPU class the two sides
  * run only then, never on a redeploy that keeps the standby it has.

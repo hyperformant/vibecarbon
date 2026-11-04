@@ -173,10 +173,13 @@ async function haProvisionServers(ctx) {
   //
   // A type the standby region does not stock is re-picked there for the
   // compose role (src/lib/sizing.js haStandbyType): the cheapest stocked
-  // candidate never smaller than the primary's type, in the primary's CPU
-  // class where the standby location sells it, so the two sides run the same
-  // class of hardware whenever they can (a slower standby was the critical
-  // path of a measured HA deploy).
+  // candidate with at least the primary type's vCPUs and RAM, in the
+  // primary's CPU class where the standby location sells it, so the two
+  // sides run the same class of hardware whenever they can (a slower standby
+  // was the critical path of a measured HA deploy). When no candidate there
+  // has the vCPUs, the RAM alone decides (the old stand-in rule), so a
+  // standby can then have fewer vCPUs than its primary, and the deploy's
+  // class warning says so.
   //
   // haStandbyType keeps the provider's ARM->x86 rescue
   // (resolveServerTypeForRegion; vibecarbon is amd64-only, see

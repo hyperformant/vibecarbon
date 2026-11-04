@@ -15,9 +15,11 @@
  *
  * Rule: no file in `src/`, `scripts/` or `tests/e2e/` other than
  * src/lib/sizing.js and src/lib/providers/ uses either one: a call, a
- * member read (`P.resolveServerTypeForRegion`, `P['resolveServerTypeForRegion']`),
- * a destructure, an import of `standbyStandIn`, or a value handed on under
- * another name (followed through aliases and seam defaults). And each HA path
+ * member read (`P.resolveServerTypeForRegion`, `P['resolveServerTypeForRegion']`,
+ * `S.standbyStandIn` off a namespace import), a destructure (off an object
+ * or a dynamic import), an import or re-export of `standbyStandIn` (and a
+ * wildcard re-export of sizing.js), or a value handed on under another name
+ * (followed through aliases and seam defaults). And each HA path
  * calls its picker: both deploy effects, the standby resolution they share,
  * the deploy wizard, the cost grid and the e2e capacity resolver.
  *
@@ -116,11 +118,29 @@ function isDeclarationPosition(parent: Node | null, key: string | null): boolean
   }
 }
 
-/** Is `n` a read of the resolver off an object: `X.resolve…` or `X['resolve…']`? */
-function isResolverMember(n: Node): boolean {
+/** Both price-only resolvers, by the name they are read under. */
+const PRICE_ONLY = new Set([RESOLVER, STAND_IN]);
+
+/** The name an identifier-or-string node carries (`foo`, or `'foo'` in an export). */
+const nameOf = (n: Node): string | undefined => n?.name ?? n?.value;
+
+/**
+ * Is `n` a read of a price-only resolver off an object: `P.resolve…`,
+ * `P['resolve…']`, or the stand-in off a namespace import or a dynamic
+ * import's module (`S.standbyStandIn`)?
+ */
+function isPriceOnlyMember(n: Node): boolean {
   if (n.type !== 'MemberExpression') return false;
-  if (!n.computed) return n.property?.type === 'Identifier' && n.property.name === RESOLVER;
-  return n.property?.type === 'Literal' && n.property.value === RESOLVER;
+  if (!n.computed) return n.property?.type === 'Identifier' && PRICE_ONLY.has(n.property.name);
+  return n.property?.type === 'Literal' && PRICE_ONLY.has(n.property.value);
+}
+
+/** Is `n` a re-export that hands the stand-in on: `export { standbyStandIn } from`, `export * from '…/sizing.js'`? */
+function isPriceOnlyReexport(n: Node): boolean {
+  if (n.type === 'ExportNamedDeclaration' && n.source) {
+    return n.specifiers.some((sp: Node) => nameOf(sp.local) === STAND_IN);
+  }
+  return n.type === 'ExportAllDeclaration' && /(^|\/)sizing(\.js)?$/.test(n.source?.value ?? '');
 }
 
 /** Uses of a price-only resolver in `text`, as sorted unique `path:line`. */
@@ -136,18 +156,20 @@ function findPriceOnlyUses(path: string, text: string): string[] {
       names.add(n.local.name);
       hits.add(lineOf(n.start));
     }
-    // A read of the provider resolver; a binding takes its alias along.
-    if (isResolverMember(n)) {
+    // A re-export hands it on to files the census would then miss.
+    if (isPriceOnlyReexport(n)) hits.add(lineOf(n.start));
+    // A read off an object or a namespace; a binding takes its alias along.
+    if (isPriceOnlyMember(n)) {
       hits.add(lineOf(n.start));
       const bound = boundNameOf(parent, key);
       if (bound) names.add(bound);
     }
-    // `{ resolveServerTypeForRegion }` or `{ resolveServerTypeForRegion: r }` off an object.
+    // `{ resolveServerTypeForRegion }`, `{ standbyStandIn: s }` off an object or a module.
     if (
       n.type === 'Property' &&
       parent?.type === 'ObjectPattern' &&
       !n.computed &&
-      n.key?.name === RESOLVER
+      PRICE_ONLY.has(n.key?.name)
     ) {
       hits.add(lineOf(n.start));
       const target = n.value?.type === 'AssignmentPattern' ? n.value.left : n.value;
@@ -279,6 +301,35 @@ describe('HA sizes census: no price-only standby resolution outside the pickers'
         'export function f(P, { place = standIn } = {}) {\n' +
         "  return place(P, 't', 'r');\n}";
       expect(findPriceOnlyUses('x.js', src)).toEqual(['x.js:1', 'x.js:2', 'x.js:3']);
+    });
+
+    it('flags the stand-in read off a namespace import', () => {
+      const src =
+        "import * as S from '../sizing.js';\n" +
+        'export function f(P, t, r) {\n' +
+        "  return S.standbyStandIn(P, t, r, 'compose');\n}";
+      expect(findPriceOnlyUses('x.js', src)).toEqual(['x.js:3']);
+    });
+
+    it('flags the stand-in destructured off a dynamic import, and its call', () => {
+      const src =
+        "const { standbyStandIn: s } = await import('./sizing.js');\n" +
+        'export const f = () =>\n  s(P, t, r);';
+      expect(findPriceOnlyUses('x.js', src)).toEqual(['x.js:1', 'x.js:3']);
+    });
+
+    it('flags a re-export of the stand-in, plain or renamed', () => {
+      expect(findPriceOnlyUses('x.js', "export { standbyStandIn } from './sizing.js';")).toEqual([
+        'x.js:1',
+      ]);
+      expect(
+        findPriceOnlyUses('x.js', "\nexport { standbyStandIn as pick } from '../sizing.js';"),
+      ).toEqual(['x.js:2']);
+    });
+
+    it('flags a wildcard re-export of sizing.js, and passes one of another module', () => {
+      expect(findPriceOnlyUses('x.js', "export * from '../lib/sizing.js';")).toEqual(['x.js:1']);
+      expect(findPriceOnlyUses('x.js', "export * from './colors.js';")).toEqual([]);
     });
 
     it('reads TypeScript', () => {

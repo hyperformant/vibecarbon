@@ -273,8 +273,9 @@ export async function resolveCapacityPair(
   const roles = standbyRoles(mode);
   const primaryTypes = Object.fromEntries(roles.map((role) => [role, primary.types[role]]));
   // As the wizard ranks it for a deploy with no sizes given: every role open
-  // to the class rule, a location where both sides match first.
-  const region: string = Provider.getDefaultStandbyRegion(primary.region, roles, {});
+  // to the class rule (the k8s-ha worker too), a location where both sides
+  // match first.
+  const region: string = Provider.getDefaultStandbyRegion(primary.region, primaryRoles(mode), {});
   if (!region || region === primary.region) {
     throw new Error(
       `region-resolver: ${name} has no default standby location for a ${mode} primary in ${primary.region}.`,

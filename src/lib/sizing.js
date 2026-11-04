@@ -565,8 +565,9 @@ export function haClassMessage(Provider, sides) {
  *
  * @param {object} Provider - a provider class
  * @param {string} primaryRegion
- * @param {string[]} roles - ['compose'], or ['master', 'db'] for a k8s-ha
- *   pilot-light standby (it has no worker)
+ * @param {string[]} roles - ['compose'], or ['master', 'db', 'worker'] for
+ *   k8s-ha: the pilot-light standby places a master and a db, and the worker
+ *   is weighed in the class match only (rankStandbyLocations)
  * @param {string} conventional - the static pair for `primaryRegion`
  * @param {Record<string, string|undefined>} [primaryTypes] - by role
  * @returns {string}
@@ -612,16 +613,24 @@ export function rankLocationsByPrice(Provider, locations, roles) {
  * type given is one the deploy wizard re-picks for the pair: with
  * `primaryRegion`, the standby side of `haRoleSets(Provider, primaryRegion,
  * location, roles)`; without, the role's plain pick at the location.
- * Locations where any role resolves to nothing are left out, so a primary
- * bigger than every candidate only ranks locations that stock its type.
+ * Locations where any role the standby places resolves to nothing are left
+ * out, so a primary bigger than every candidate only ranks locations that
+ * stock its type.
  *
  * Locations where both sides would match (`haSidesMatch`: one CPU class per
  * role) rank first, then by the standby's monthly price, so a default
  * standby never takes a mixed pair while a matching one is orderable.
  *
+ * A k8s-ha set (`roles` with a worker) also weighs the worker: the
+ * pilot-light standby does not run one (`haStandbyRoles`), so it is neither
+ * priced nor required, but failover brings it up from the record, so a
+ * location where it would differ in class from the primary's, or has none,
+ * does not count as matching.
+ *
  * @param {object} Provider - a provider class
  * @param {string[]} locations
- * @param {string[]} roles
+ * @param {string[]} roles - ['compose'], or ['master', 'db', 'worker'] for
+ *   k8s-ha (['master', 'db'] ranks without the worker)
  * @param {Record<string, string|undefined>} [primaryTypes] - by role
  * @param {string} [primaryRegion] - for the roles with no primary type
  * @returns {Array<{location: string, monthly: number|null, types: Record<string, string>,
@@ -633,8 +642,11 @@ export function rankStandbyLocations(Provider, locations, roles, primaryTypes = 
     const open = roles.filter((role) => !primaryTypes[role]);
     const pair =
       open.length > 0 && primaryRegion ? haRoleSets(Provider, primaryRegion, location, open) : null;
+    const placed = haStandbyRoles(roles);
     const types = {};
+    const recorded = {};
     const primaries = {};
+    let unplaced = false;
     const ipv4 = ipv4MonthlyAt(Provider, location);
     let monthly = ipv4 === null ? null : 0;
     for (const role of roles) {
@@ -648,6 +660,12 @@ export function rankStandbyLocations(Provider, locations, roles, primaryTypes = 
       } else {
         type = cheapestRoleSet(Provider, location, [role])?.types[role] ?? null;
       }
+      if (!placed.includes(role)) {
+        // Recorded for failover only: weighed in the match, never priced.
+        if (type) recorded[role] = type;
+        else unplaced = true;
+        continue;
+      }
       if (!type) return null;
       types[role] = type;
       const price = priceFor(type, location);
@@ -656,7 +674,7 @@ export function rankStandbyLocations(Provider, locations, roles, primaryTypes = 
     return {
       types,
       monthly: monthly === null ? null : Math.round(monthly * 100) / 100,
-      shared: haSidesMatch(Provider, primaries, types),
+      shared: !unplaced && haSidesMatch(Provider, primaries, { ...types, ...recorded }),
     };
   });
 }
@@ -688,7 +706,8 @@ export function haStandbyRoles(roles) {
  */
 export function haDefaultPair(Provider, primaryRegion, roles) {
   const standbyRoles = haStandbyRoles(roles);
-  const standbyRegion = Provider.getDefaultStandbyRegion(primaryRegion, standbyRoles, {});
+  // Ranked with every role (the k8s-ha worker included, for the match).
+  const standbyRegion = Provider.getDefaultStandbyRegion(primaryRegion, roles, {});
   if (!standbyRegion || standbyRegion === primaryRegion) return null;
   const sets = haRoleSets(Provider, primaryRegion, standbyRegion, roles);
   const standby = Object.fromEntries(standbyRoles.map((r) => [r, sets.standby[r]]));
