@@ -65,6 +65,19 @@ vi.mock('../../../src/lib/deploy/tls-snapshot.js', async (orig) => {
   };
 });
 
+// Every perf span applyK3sManifests opens, in order: the markers test reads it.
+const perfNames = vi.hoisted(() => [] as string[]);
+vi.mock('../../../src/lib/perf.js', async (orig) => {
+  const actual = (await orig()) as typeof import('../../../src/lib/perf.js');
+  return {
+    ...actual,
+    perfAsync: (name: string, fn: () => Promise<unknown>) => {
+      perfNames.push(name);
+      return actual.perfAsync(name, fn);
+    },
+  };
+});
+
 const k3sPromise = import('../../../src/lib/deploy/k8s/k3s.js');
 const { RETIRED_CHART_DB_STATEFULSET, RETIRED_CHART_RELEASE } = await k3sPromise;
 
@@ -1773,23 +1786,17 @@ describe('readiness probes are wired in (mitigation-audit clusters 1+4 root fix)
   // timer-vs-condition inversion fully in place — that is the vacuous-guard
   // failure mode, and it is exactly what unwiring either call reproduces.
 
-  it('proves the control plane serves (readyz + server dry-run) before any real kubectl work', async () => {
+  it('does not probe the control plane again: deployK3s proved it serving just before', async () => {
+    // deployK3s's 5b gate (controlPlane.gate) runs the same probe with the same
+    // kubeconfig moments before this apply, and nothing between the two
+    // touches k3s (k3s-deploy-markers.test.ts pins that order). A second probe
+    // cost two kubectl calls per cluster: 0.6 s on the primary, 26 s on the DO
+    // tor1 standby on an evening path.
     const { applyK3sManifests } = await k3sPromise;
     await applyK3sManifests(baseArgs(makeProjectDir()));
 
-    const readyzIdx = cmdCalls.findIndex((a) => a[0] === 'kubectl' && a.includes('/readyz'));
-    const controlPlaneDryRunIdx = stdinCalls.findIndex((c) =>
-      c.data.includes('vibecarbon-readiness-probe'),
-    );
-    expect(readyzIdx, 'the /readyz probe must run').toBeGreaterThan(-1);
-    expect(controlPlaneDryRunIdx, 'the admission dry-run must run').toBeGreaterThan(-1);
-
-    // Strictly before the first cluster-mutating kubectl apply.
-    const firstRealApply = cmdCalls.findIndex(
-      (a, i) =>
-        a[0] === 'kubectl' && a.includes('apply') && !a.includes('--dry-run=server') && i > -1,
-    );
-    expect(firstRealApply).toBeGreaterThan(readyzIdx);
+    expect(cmdCalls.some((a) => a[0] === 'kubectl' && a.includes('/readyz'))).toBe(false);
+    expect(stdinCalls.some((c) => c.data.includes('vibecarbon-readiness-probe'))).toBe(false);
   });
 
   it('proves cert-manager admission round-trips AFTER the Available wait and BEFORE the issuers', async () => {
@@ -2174,5 +2181,64 @@ describe('a changed app Secret rolls deployment/app', () => {
       /resourceVersion of Secret\/vibecarbon-app-secrets/,
     );
     expect(appPatches()).toHaveLength(0);
+  });
+});
+
+describe('perf markers attribute every step of the apply', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    deliverGate = null;
+    deliverError = null;
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    perfNames.length = 0;
+    installSpawnMock();
+  });
+
+  const at = (name: string) => perfNames.indexOf(`deploy.k3s.${name}`);
+
+  it('the CSI, autoscaler, CRD, secret and db-preflight steps each open one span, in order', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+
+    for (const name of [
+      'csiSidecars',
+      'clusterAutoscaler.apply',
+      'certManager.resources',
+      'traefikCrds',
+      'secrets',
+      'db.preflight',
+    ]) {
+      expect(
+        perfNames.filter((n) => n === `deploy.k3s.${name}`),
+        name,
+      ).toHaveLength(1);
+    }
+    // The CSI re-pin starts the apply, before the cert-manager chain.
+    expect(at('csiSidecars')).toBeLessThan(at('certManager.install'));
+    // ClusterIssuers, then the Traefik CRDs, then the Secrets, then the db
+    // preflight, all before the base apply.
+    expect(at('certManager.admission')).toBeLessThan(at('certManager.resources'));
+    expect(at('certManager.resources')).toBeLessThan(at('traefikCrds'));
+    expect(at('traefikCrds')).toBeLessThan(at('secrets'));
+    expect(at('secrets')).toBeLessThan(at('db.preflight'));
+    expect(at('db.preflight')).toBeLessThan(at('applyBase'));
+    // The probe deployK3s already ran is gone from here.
+    expect(at('controlPlane.serving')).toBe(-1);
+  });
+
+  it('a DNS-01 provider adds its Secret and webhook spans before the ClusterIssuers', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests({
+      ...baseArgs(makeProjectDir()),
+      dnsProvider: 'hetzner',
+      dnsToken: 'hetzner-dns-token',
+    });
+
+    expect(at('dnsSecret')).toBeGreaterThan(at('certManager.admission'));
+    expect(at('certManager.webhook')).toBeGreaterThan(at('dnsSecret'));
+    expect(at('certManager.resources')).toBeGreaterThan(at('certManager.webhook'));
   });
 });
