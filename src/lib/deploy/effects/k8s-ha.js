@@ -704,9 +704,6 @@ async function haK8sConfigureReplication(ctx) {
       sshKeyPath: sharedSshKeyPath,
       transportPrepared: ctx.transportPrepared === true,
       primaryConfigured: ctx.primaryReplicationConfigured === true,
-      // This run created every standby node, so its database cannot be
-      // streaming yet: setupReplication goes straight to the reseed.
-      standbyFresh: standbyResult.freshCluster === true,
     });
     replStreaming = replResult.streaming;
     replLastState = replResult.lastState || '';

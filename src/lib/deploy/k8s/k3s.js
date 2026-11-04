@@ -4892,9 +4892,11 @@ export async function shouldSkipK3sApply({ state, applyInputs, role, imageInRegi
  * fresh/unreadable — the program then mints one exactly as before (cold
  * deploy path). Errors never propagate: an unreachable backend degrades to
  * cold behavior on a stack that, being unreachable, upStack will fail on
- * anyway with its own clearer error. See the call-site comment in
- * deployK3s's k3s-infra block for why replay is load-bearing (userData
- * immutability → full-cluster replace).
+ * anyway with its own clearer error. So undefined does NOT mean the cluster
+ * is new: a live stack whose read fails or whose outputs lack the token gets
+ * a minted one too. See the call-site comment in deployK3s's k3s-infra block
+ * for why replay is load-bearing (a minted token on a live stack leaves new
+ * nodes unable to join).
  *
  * @param {any} Provider  provider class (getK8sProgram static)
  * @param {Record<string, unknown>} programConfig  same config the real program uses
@@ -4937,7 +4939,7 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
  * `vibecarbon` namespace exists, so the HA fan-out can start on signals.
  *
  * @param {K3sDeployOptions} options
- * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, masterPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string, imageTag: string, tlsRestoredAt: string|null, freshCluster: boolean}>}
+ * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, masterPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string, imageTag: string}>}
  */
 export async function deployK3s(options) {
   // What deployK3sSteps started in the background and must not outlive a
@@ -5042,10 +5044,6 @@ async function deployK3sSteps(options, inFlight) {
     maxWorkers,
     k3sVersion: K3S_VERSION,
   };
-  // Whether this run's provisioning minted the cluster's k3s token (returned as
-  // `freshCluster`): false whenever provisioning is skipped or replays the
-  // stack's token.
-  let freshCluster = false;
   if (!state.shouldSkip('k3s-infra', infraInputs)) {
     state.startStep('k3s-infra', infraInputs);
     const { upStack } = await import('../../iac/index.js');
@@ -5074,16 +5072,20 @@ async function deployK3sSteps(options, inFlight) {
       allowedK8sApiIps: allowedCidrs,
     };
     // Replay the stack's existing k3s token before building the real
-    // program. The token is interpolated into every node's cloud-init
-    // userData, and a userData change makes Pulumi REPLACE the server —
-    // master included, which is etcd + PVC data loss on a live cluster.
+    // program. The token is interpolated into every node's cloud-init user
+    // data, which every server ignores once it exists (serverResourceOptions /
+    // workerResourceOptions, lib/iac/create-timeout.js): a live master keeps
+    // the token it booted with whatever the program says. A freshly minted
+    // token would reach only what is created from now on (a new static
+    // worker, every autoscaler-spawned worker through the carbon-autoscaler
+    // config, the stack's k3sToken output), and none of those could join.
     // The role reconciler makes re-running this block on an EXISTING stack
     // routine (primary↔standby shapes hash differently after a failover
     // swap), so the token must come from the stack; only a genuinely fresh
-    // stack mints one. RCA 2026-07-17 e4 rig: the post-failover reconverge
-    // deploy replaced ALL servers of BOTH clusters because this path
-    // generated fresh tokens. Same probe-and-replay contract as scale's
-    // converge seam.
+    // stack mints one. History: before servers ignored their user data, a
+    // fresh token REPLACED every server (RCA 2026-07-17 e4 rig: the
+    // post-failover reconverge deploy replaced all servers of both clusters).
+    // Same probe-and-replay contract as scale's converge seam.
     const priorK3sToken = await resolveStackK3sToken(Provider, programConfig, {
       provider: providerIdFor(options),
       providerToken: options.apiToken,
@@ -5117,10 +5119,6 @@ async function deployK3sSteps(options, inFlight) {
       throw new Error('Pulumi outputs missing masterIp or floatingIp');
     }
     state.completeStep('k3s-infra', outputs);
-    // A minted token is in every node's user data, and a user-data change
-    // replaces the server, so every node of this cluster is new: its k3s
-    // datastore, and every volume claimed from it, came from this run.
-    freshCluster = !priorK3sToken;
     s.stop(`Cluster provisioned: master=${outputs.masterIp} floating=${outputs.floatingIp}`);
   }
   const infraOutputs = state.getStepResult('k3s-infra');
@@ -5511,9 +5509,5 @@ async function deployK3sSteps(options, inFlight) {
     sshKeyPath: privateKeyPath,
     imageTag,
     tlsRestoredAt,
-    // Every node was created by this run (see where it is set), so the db
-    // StatefulSet's volume and the database on it are new: a k8s-ha standby
-    // cannot be streaming yet, and setupReplication skips its probe.
-    freshCluster,
   };
 }

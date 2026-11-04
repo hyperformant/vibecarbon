@@ -650,7 +650,6 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
  * @param {number} [options.attachWatchPollMs] - test seam: watchDbAttach's poll interval on the standby boot wait
  * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort check, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
- * @param {boolean} [options.standbyFresh] - This deploy created every node of the standby cluster (deployK3s `freshCluster`), so its database cannot be streaming yet; skips the streaming probe
  * @returns {Promise<{streaming: boolean, lastState: string, systemIdentifier: string|null}>} Replication status;
  *   systemIdentifier is the standby's, set only when streaming was verified
  */
@@ -745,38 +744,25 @@ export async function setupReplication(options) {
     await configurePrimaryForReplication({ primaryIp, sshKeyPath });
   }
 
-  // Fast path (spec: the streaming probe is NOT gated on the opportunistic
-  // flags above, so a lost flag can never trigger a pointless re-swap of a
-  // healthy replica). If the standby is already streaming (a redeploy of a
-  // healthy pair), the entire resolvePvc/stage/swap/standbyBoot/recoveryWait
-  // block is unnecessary.
-  //
-  // The one skip is a standby this deploy created (standbyFresh, deployK3s's
-  // `freshCluster`): its provisioning minted the k3s token, every node is
-  // new, and so is the database on its volume. That database ran initdb as a
-  // primary and has no primary_conninfo, so it cannot stream until the
-  // reseed below seeds it. Asking anyway cost 5.2 s on every cold deploy (3
-  // reads, 2 s apart). The skip runs only on a literal true, so a lost or
-  // stale signal falls back to the probe.
-  let probe = { streaming: false, lastState: '' };
-  if (options.standbyFresh === true) {
-    p.log.info('The standby cluster is new in this deploy, so it is seeded without probing');
-  } else {
-    probe = await perfAsync('deploy.ha.replication.streamingProbe', () =>
-      probeStreaming({
-        exec: (sql) =>
-          runCommandAsync(
-            [
-              'ssh',
-              ...sshOpts,
-              `root@${primaryIp}`,
-              `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "${sql}"`,
-            ],
-            { silent: true, ignoreError: true },
-          ),
-      }),
-    );
-  }
+  // UNCONDITIONAL fast-path (spec: streaming probe is NOT gated on the
+  // opportunistic flags — a lost flag must never trigger a pointless
+  // re-swap of a healthy replica). If the standby is already streaming (a
+  // redeploy of a healthy pair), the entire
+  // resolvePvc/stage/swap/standbyBoot/recoveryWait block is unnecessary.
+  const probe = await perfAsync('deploy.ha.replication.streamingProbe', () =>
+    probeStreaming({
+      exec: (sql) =>
+        runCommandAsync(
+          [
+            'ssh',
+            ...sshOpts,
+            `root@${primaryIp}`,
+            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "${sql}"`,
+          ],
+          { silent: true, ignoreError: true },
+        ),
+    }),
+  );
   // The verified-streaming result carries the standby's system identifier: the
   // deploy persists it as envConfig.ha.systemIdentifier, the value failover's
   // replica proof (R1) compares against. Read on the standby, the side failover
