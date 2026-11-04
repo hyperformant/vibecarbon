@@ -7,8 +7,13 @@
  * uses, so "exited", "CrashLoopBackOff" and "starting" read the same
  * everywhere. Collection is over SSH (the deployed app's internal services
  * endpoint needs a super_admin browser session the CLI does not have),
- * best-effort and hard-bounded per server: a dead server yields a row that
- * says so, never a thrown check.
+ * best-effort and hard-bounded per server: a server that cannot be read
+ * yields a row that says why (`error`, no rows), never a thrown check and
+ * never an unhealthy verdict.
+ *
+ * One read per server: compose is one `docker ps -a`; a k8s cluster is the
+ * run's one cluster snapshot (cluster-snapshot.js), shared with the backup
+ * and replication rows.
  */
 
 import { existsSync as fsExistsSync } from 'node:fs';
@@ -24,6 +29,7 @@ import {
   sshKubectl as defaultKubectl,
   sshRun as defaultSsh,
 } from '../ssh.js';
+import { createClusterSnapshots, describeSshError, withTimeout } from './cluster-snapshot.js';
 import { classifyContainer, rowsFromDockerPs, SERVICE_DISPLAY_NAMES } from './container-rows.js';
 
 export const APP_NAMESPACE = 'vibecarbon';
@@ -157,7 +163,7 @@ export function podDisplayName(pod) {
 }
 
 /**
- * Split a `kubectl get pods -A -o json` list into app rows (vibecarbon
+ * Split the cluster's pods (every namespace) into app rows (vibecarbon
  * namespace) and per-namespace rollups for everything else.
  *
  * @param {{items?: object[]}} podsJson
@@ -187,7 +193,7 @@ export function rowsFromPods(podsJson) {
 }
 
 /**
- * @param {{items?: object[]}} nodesJson `kubectl get nodes -o json`
+ * @param {{items?: object[]}} nodesJson the cluster's nodes
  * @returns {{ready: number, total: number}}
  */
 export function nodeReadiness(nodesJson) {
@@ -211,38 +217,6 @@ function dockerPsArgv(projectName) {
     '--format',
     '{{.Names}}\t{{.State}}\t{{.Status}}',
   ];
-}
-
-function withTimeout(promise, ms) {
-  let timer;
-  const timeout = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error('ssh timeout')), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-// runCommandAsync builds a failure's `message` as `Command failed: <full
-// argv>\n<stderr>` — reading message's first line would echo the ssh
-// invocation (including the local key path) instead of the actual reason.
-// Prefer err.stderr (what the remote/ssh actually said); err.timedOut is the
-// wrapper-timeout sentinel (see isTransientSshCommandError's docs in
-// ssh.js) and has no stderr of its own.
-//
-// ssh's own chatter comes first on stderr — the "Warning: Permanently added"
-// known-hosts line and the `@@@…@@@` host-key banner — so skip those before
-// taking the first line, or "Connection refused" reads as a warning.
-const SSH_NOISE_LINE = /^(Warning:|@+$)/;
-
-function describeSshError(err) {
-  if (err?.timedOut) return 'ssh timeout';
-  const stderr = typeof err?.stderr === 'string' ? err.stderr : '';
-  const reason = stderr
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line && !SSH_NOISE_LINE.test(line));
-  if (reason) return reason;
-  const msg = err instanceof Error ? err.message : String(err);
-  return msg.split('\n')[0].trim();
 }
 
 /**
@@ -310,42 +284,29 @@ async function collectCompose(
   return { kind: 'compose', ip: target.ip, rows };
 }
 
-async function collectK8s(target, keyPath, deps) {
-  const run = (argv) =>
-    withTimeout(
-      deps.sshKubectl(target.ip, keyPath, argv, {
-        silent: true,
-        timeout: deps.timeoutMs,
-        transportRetry: false,
-      }),
-      deps.timeoutMs,
-    );
-  const [podsRaw, nodesRaw] = await Promise.all([
-    run(['get', 'pods', '-A', '-o', 'json']),
-    run(['get', 'nodes', '-o', 'json']),
-  ]);
-  let pods;
-  let nodes;
-  try {
-    pods = JSON.parse(podsRaw);
-    nodes = JSON.parse(nodesRaw);
-  } catch {
-    throw new Error('kubectl output unparseable');
-  }
-  const { app, platform } = rowsFromPods(pods);
-  return { kind: 'k8s', ip: target.ip, rows: app, platform, nodes: nodeReadiness(nodes) };
+async function collectK8s(target, deps) {
+  const snapshot = await deps.snapshots.get(target.ip);
+  const { app, platform } = rowsFromPods({ items: snapshot.pods });
+  return {
+    kind: 'k8s',
+    ip: target.ip,
+    rows: app,
+    platform,
+    nodes: nodeReadiness({ items: snapshot.nodes }),
+  };
 }
 
 /**
  * Per-server container/pod tables for one environment. Best-effort and
  * bounded: every server resolves to a `ServerContainers`, with `error` set
- * instead of rows when it could not be read. Null when there is nothing to
- * query (no servers, no project name).
+ * instead of rows when it could not be read (unreadable, not unhealthy).
+ * Null when there is nothing to query (no servers, no project name).
  *
  * @param {string} envName
  * @param {object} envConfig
  * @param {string|undefined} projectName
- * @param {{sshRun?: typeof defaultSsh, sshKubectl?: typeof defaultKubectl, getSSHKeyPath?: typeof defaultGetKey, existsSync?: typeof fsExistsSync, timeoutMs?: number}} [deps]
+ * @param {{sshRun?: typeof defaultSsh, sshKubectl?: typeof defaultKubectl, getSSHKeyPath?: typeof defaultGetKey, existsSync?: typeof fsExistsSync, timeoutMs?: number, snapshots?: ReturnType<typeof createClusterSnapshots>}} [deps]
+ *   `snapshots`: the run's cluster snapshots, shared with the other rows; one of its own otherwise
  * @returns {Promise<Record<string, {kind: 'compose'|'k8s', ip: string, rows: object[], platform?: object, nodes?: object, error?: string}>|null>}
  */
 export async function checkRemoteContainers(envName, envConfig, projectName, deps = {}) {
@@ -356,6 +317,7 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
     existsSync: deps.existsSync || fsExistsSync,
     timeoutMs: deps.timeoutMs ?? 10_000,
   };
+  d.snapshots = deps.snapshots ?? createClusterSnapshots(envName, d);
   if (!projectName) return null;
   const targets = planContainerTargets(envConfig, { env: envName });
   if (targets.length === 0) return null;
@@ -379,7 +341,7 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
       try {
         const value =
           t.kind === 'k8s'
-            ? await collectK8s(t, keyPath, d)
+            ? await collectK8s(t, d)
             : await collectCompose(
                 t,
                 projectName,

@@ -13,6 +13,7 @@ import {
   parseReplicationSlotRow,
   replicationSlotRow,
 } from '../../../src/status.js';
+import { dbPodSnapshots } from '../../_shared/cluster-snapshot.js';
 import { withSshContract } from '../../_shared/ssh-contract.js';
 
 const MiB = 1024 ** 2;
@@ -81,7 +82,7 @@ describe('checkReplication reads the slot on the primary', () => {
       },
       'myproj',
       {
-        getPostgresPod: vi.fn(async () => 'db-0'),
+        snapshots: dbPodSnapshots(() => 'db-0'),
         sshKubectl,
         sshRun: withSshContract(vi.fn()),
         getSSHKeyPath: vi.fn(() => fileURLToPath(import.meta.url)),
@@ -121,7 +122,7 @@ describe('the slot query names the standby slot and travels quoting-safe', () =>
       },
       'myproj',
       {
-        getPostgresPod: vi.fn(),
+        snapshots: { get: vi.fn() },
         sshKubectl: vi.fn(),
         sshRun: withSshContract(sshRun),
         getSSHKeyPath: vi.fn(() => fileURLToPath(import.meta.url)),
