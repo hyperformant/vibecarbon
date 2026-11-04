@@ -1,12 +1,24 @@
 /**
  * verify-status: `vibecarbon status -json` must report every server of the
- * environment fully healthy — the public readiness probe ok, the TLS row
+ * environment fully healthy: the public readiness probe ok, the TLS row
  * trusted, every container/pod healthy (or a finished one-shot), every k8s
  * platform namespace full, every node Ready. `starting` rows and a TLS row not
  * yet trusted are retried until timeoutMs (a pod may still be rolling, a
- * certificate still landing, right after verify-deploy); anything else fails
- * on first sight. Non-perf step: excluded from the
- * reporter's totals (NON_PERF_STEPS) and never a PERF_TABLE_ROWS entry.
+ * certificate still landing, right after verify-deploy); anything else that
+ * is a verdict fails on first sight.
+ *
+ * A server status could not read (its entry carries `error` and no rows) is
+ * no verdict. The check keeps observing within the same timeoutMs window, and
+ * fails only if that server is still unreadable at the deadline. This is the
+ * existing bounded observation window, not a retry ladder: no backoff, no
+ * extra budget, and a real verdict anywhere in the same run (an unhealthy
+ * row, a failed probe) still fails at once. Why: one slow moment on a 2-vCPU
+ * master read as a final "ssh timeout" for a live primary (DO k8s-ha) while
+ * other execs to the same host succeeded; the root fix (one cluster snapshot
+ * per run, src/lib/status/cluster-snapshot.js) removed most of the load that
+ * caused it, and this keeps the residual from failing a healthy environment.
+ * Non-perf step: excluded from the reporter's totals (NON_PERF_STEPS) and
+ * never a PERF_TABLE_ROWS entry.
  */
 import type { VerificationResult } from '../scenarios/types.js';
 import { runCli as defaultRunCli } from '../utils/cli-runner.js';
@@ -90,9 +102,9 @@ export function assessStatusJson(
     problems.push(`tls ${state}${typeof tls.reason === 'string' ? `: ${tls.reason}` : ''}`);
   }
   for (const [server, sc] of Object.entries(containers)) {
+    // Could not read: not a pass, not a verdict. Observed again until the deadline.
     if (sc.error) {
-      problems.push(`${server}: ${sc.error}`);
-      retryable = false;
+      problems.push(`${server}: unreadable (${sc.error})`);
       continue;
     }
     const excused = isRetired(server, sc, opts.retired) ? opts.retired.allowedExited : [];
