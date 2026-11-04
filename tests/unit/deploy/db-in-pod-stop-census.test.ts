@@ -5,7 +5,7 @@
  * The RCA rule: an in-pod `pg_ctl stop` in a k8s db pod kills PID 1, the
  * kubelet restarts the container, and a standby whose wrapper does not swap
  * comes back as an independent primary. The one sanctioned in-pod stop is
- * `kill -INT 1`, spelled only in DB_IN_PLACE_STOP and DB_IN_PLACE_STOP_UNSEEDED
+ * `kill -QUIT 1`, spelled only in DB_IN_PLACE_STOP and DB_IN_PLACE_STOP_UNSEEDED
  * (src/lib/deploy/replication.js), sent only by restartDbContainerInPlace,
  * which only reseedStandbyInPlace calls, with the guard it got from
  * assertLiveDbGuardSupportsReseed. The unseeded stop (no recovery proof) is
@@ -409,12 +409,12 @@ describe('the db is stopped in-pod only behind the wrapper guard', () => {
       'src/planted.js:1 (s)',
     ]);
     expect(
-      pid1Kills(planted("export const DB_IN_PLACE_STOP = ['sh', '-c', 'kill -INT 1'];")),
+      pid1Kills(planted("export const DB_IN_PLACE_STOP = ['sh', '-c', 'kill -QUIT 1'];")),
     ).toEqual(['src/planted.js:1 (DB_IN_PLACE_STOP)']);
     expect(
       pid1Kills(
         planted(
-          "const OTHER = ['sh', '-c', `kill -9 1`];\nexport const DB_IN_PLACE_STOP = ['kill -INT 1'];",
+          "const OTHER = ['sh', '-c', `kill -9 1`];\nexport const DB_IN_PLACE_STOP = ['kill -QUIT 1'];",
           'src/lib/deploy/replication.js',
         ),
       ),

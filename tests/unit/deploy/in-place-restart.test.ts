@@ -6,7 +6,7 @@
  *   - the guard reads the RUNNING pod (its command, the db-guard.sh and role
  *     mounts), the protocol marker in the MOUNTED wrapper and the cluster's
  *     role intent; any miss refuses and issues no further call;
- *   - the stop is `kill -INT 1` exactly once, never retried; the container's
+ *   - the stop is `kill -QUIT 1` exactly once, never retried; the container's
  *     state decides the outcome, and a recreated pod goes to the attach-watched
  *     rollout wait;
  *   - a busy stage (RESEED_REFUSED busy) is a terminal refusal: one call;
@@ -455,7 +455,7 @@ describe('restartDbContainerInPlace', () => {
     expect(stops[0].slice(-3)).toEqual(DB_IN_PLACE_STOP_UNSEEDED);
     expect(DB_IN_PLACE_STOP_UNSEEDED[2]).toContain('vc-reseed-protocol');
     expect(DB_IN_PLACE_STOP_UNSEEDED[2]).not.toContain('pg_is_in_recovery');
-    expect(DB_IN_PLACE_STOP_UNSEEDED[2]).toMatch(/kill -INT 1$/);
+    expect(DB_IN_PLACE_STOP_UNSEEDED[2]).toMatch(/kill -QUIT 1$/);
   });
   it('a deadline names the container state, one stop, no retry', async () => {
     let t = 0;
@@ -699,7 +699,7 @@ describe('the guard and stop scripts, executed under sh', () => {
   it('the stop signals PID 1 only with the protocol marker AND recovery = t', () => {
     const ok = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: 't' });
     expect(ok.status).toBe(0);
-    expect(ok.stdout).toBe('KILLED -INT 1\n');
+    expect(ok.stdout).toBe('KILLED -QUIT 1\n');
     for (const o of [
       { marker: true, recovery: 'f' },
       { marker: true, recovery: '' },
@@ -717,7 +717,7 @@ describe('the guard and stop scripts, executed under sh', () => {
     for (const recovery of ['t', 'f', '']) {
       const ok = run(DB_IN_PLACE_STOP_UNSEEDED[2], { marker: true, recovery });
       expect(ok.status).toBe(0);
-      expect(ok.stdout).toBe('KILLED -INT 1\n');
+      expect(ok.stdout).toBe('KILLED -QUIT 1\n');
     }
     for (const marker of [false, null]) {
       const r = run(DB_IN_PLACE_STOP_UNSEEDED[2], { marker, recovery: 'f' });
@@ -747,7 +747,7 @@ describe('the guard and stop scripts, executed under sh', () => {
     // directory still says what it is: standby.signal, which a primary never has.
     const down = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: '', standbySignal: true });
     expect(down.status).toBe(0);
-    expect(down.stdout).toBe('KILLED -INT 1\n');
+    expect(down.stdout).toBe('KILLED -QUIT 1\n');
     // A live answer always wins: a db that says f is a primary, whatever the file says.
     const primary = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: 'f', standbySignal: true });
     expect(primary.status).toBe(3);

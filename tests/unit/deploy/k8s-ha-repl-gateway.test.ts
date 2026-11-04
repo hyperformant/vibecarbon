@@ -125,7 +125,7 @@ type InPlaceOverrides = {
 
 /**
  * The happy in-place exec: the streaming probe reads "not streaming" until
- * the stop (`kill -INT 1`) has been sent, the standby pod restarts in place
+ * the stop (`kill -QUIT 1`) has been sent, the standby pod restarts in place
  * (uid u1, restartCount 0 → 1, a new containerID), db-guard.sh records the
  * staged attempt in .vc-reseeded-from, and the standby is in recovery. The
  * guard's default reading is a fresh standby: its own primary until the swap
@@ -137,7 +137,7 @@ function inPlaceExec(o: InPlaceOverrides = {}) {
   return async (argv: string[], opts: { input?: string } = {}) => {
     const cmd = flat(argv);
     const target = Array.isArray(argv) ? (argv.find((a) => a.startsWith('root@')) ?? '') : '';
-    if (cmd.includes('kill -INT 1')) {
+    if (cmd.includes('kill -QUIT 1')) {
       reseeded = true;
       return '';
     }
@@ -466,7 +466,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     const stage = calls.findIndex(([, o]) =>
       (o as { input?: string })?.input?.includes('.vc-reseed-ready'),
     );
-    const stop = joined.findIndex((c) => c.includes('kill -INT 1'));
+    const stop = joined.findIndex((c) => c.includes('kill -QUIT 1'));
     expect(guard).toBeGreaterThanOrEqual(0);
     expect(stage).toBeGreaterThan(guard);
     expect(stop).toBeGreaterThan(stage);
@@ -531,7 +531,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
 
     // After the stop: the swap proof, then the recovery wait, then the old
     // tree (.vc-discard) goes. Never a second stop.
-    const stop = flatCalls.findIndex((c) => c.includes('kill -INT 1'));
+    const stop = flatCalls.findIndex((c) => c.includes('kill -QUIT 1'));
     const proof = flatCalls.findIndex((c) => c.includes('.vc-reseeded-from'));
     const discard = flatCalls.findIndex(
       (c) =>
@@ -540,7 +540,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     );
     expect(proof).toBeGreaterThan(stop);
     expect(discard).toBeGreaterThan(proof);
-    expect(flatCalls.filter((c) => c.includes('kill -INT 1'))).toHaveLength(1);
+    expect(flatCalls.filter((c) => c.includes('kill -QUIT 1'))).toHaveLength(1);
   }, 20000);
 
   it('the remote kubectl string keeps `sh -c <script>` as one argument (C13)', () => {
@@ -554,7 +554,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       '--',
       'sh',
       '-c',
-      'kill -INT 1',
+      'kill -QUIT 1',
     ]);
     const bin = mkdtempSync(join(tmpdir(), 'vc-kubectl-'));
     try {
@@ -569,7 +569,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       })
         .stdout.split('\n')
         .slice(0, -1);
-      expect(seen.slice(-3)).toEqual(['sh', '-c', 'kill -INT 1']);
+      expect(seen.slice(-3)).toEqual(['sh', '-c', 'kill -QUIT 1']);
     } finally {
       rmSync(bin, { recursive: true, force: true });
     }
@@ -582,7 +582,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     const stopCall = vi
       .mocked(runCommandAsync)
       .mock.calls.map(([a]) => a as string[])
-      .find((a) => a.join(' ').includes('kill -INT 1'));
+      .find((a) => a.join(' ').includes('kill -QUIT 1'));
     const remote = stopCall?.at(-1) ?? '';
     const bin = mkdtempSync(join(tmpdir(), 'vc-kubectl-'));
     try {
@@ -609,7 +609,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
         '-c',
       ]);
       expect(seen).toHaveLength(10);
-      expect(seen[9]).toMatch(/kill -INT 1$/);
+      expect(seen[9]).toMatch(/kill -QUIT 1$/);
       expect(seen[9]).toContain('vc-reseed-protocol');
     } finally {
       rmSync(bin, { recursive: true, force: true });
@@ -627,7 +627,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(String(err?.message)).not.toMatch(/predates in-place reseeds/);
     expect(String(err?.message)).not.toMatch(/replication slots/);
     const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
-    expect(flatCalls.some((c) => c.includes('kill -INT 1'))).toBe(false);
+    expect(flatCalls.some((c) => c.includes('kill -QUIT 1'))).toBe(false);
     expect(flatCalls.some((c) => c.includes('pg_basebackup'))).toBe(false);
   }, 20000);
 
@@ -641,7 +641,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     const res = await runWithFakeTimers(() => setupReplication(opts));
     expect(res.streaming).toBe(true);
     const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
-    const stop = flatCalls.find((c) => c.includes('kill -INT 1')) ?? '';
+    const stop = flatCalls.find((c) => c.includes('kill -QUIT 1')) ?? '';
     expect(stop).toContain('vc-reseed-protocol');
     expect(stop).not.toContain('pg_is_in_recovery');
     const proof = flatCalls.findIndex((c) => c.includes('.vc-reseeded-from'));
@@ -671,7 +671,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       /may still hold replication slots that retain WAL on its disk \(it held 2[\s\S]*rerun `vibecarbon deploy`/,
     );
     const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
-    expect(flatCalls.some((c) => c.includes('kill -INT 1'))).toBe(false);
+    expect(flatCalls.some((c) => c.includes('kill -QUIT 1'))).toBe(false);
   }, 20000);
 
   it('a failed reseed of a fresh standby (no slots) makes no slot claim', async () => {
@@ -701,7 +701,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     const sourceRead = flatCalls.find((c) => c.includes('pg_database_size')) ?? '';
     expect(sourceRead).toContain('root@1.1.1.1');
     expect(sourceRead).toContain('pg_walfile_name(pg_current_wal_lsn())');
-    expect(flatCalls.filter((c) => c.includes('kill -INT 1'))).toHaveLength(1);
+    expect(flatCalls.filter((c) => c.includes('kill -QUIT 1'))).toHaveLength(1);
   }, 20000);
 
   it('the lineage check: a retired old primary (same database, older timeline) is reseeded', async () => {
@@ -709,7 +709,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     vi.mocked(runCommandAsync).mockImplementation(inPlaceExec({ markerGrep: RETIRED }));
     expect((await runWithFakeTimers(() => setupReplication(opts))).streaming).toBe(true);
     const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
-    expect(flatCalls.filter((c) => c.includes('kill -INT 1'))).toHaveLength(1);
+    expect(flatCalls.filter((c) => c.includes('kill -QUIT 1'))).toHaveLength(1);
   }, 20000);
 
   it('the lineage check: a standby promoted outside vibecarbon (same database, newer timeline) is refused before anything is staged or stopped', async () => {
@@ -723,7 +723,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(calls.some(([, o]) => (o as { input?: string })?.input?.includes('pg_basebackup'))).toBe(
       false,
     );
-    expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+    expect(calls.some(([a]) => flat(a as string[]).includes('kill -QUIT 1'))).toBe(false);
   }, 20000);
 
   it('abort then deploy: the promoted copy `failover -abort` recorded as discardable is reseeded (final review I1)', async () => {
@@ -738,7 +738,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     );
     expect(res).toMatchObject({ streaming: true, reseeded: true });
     const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
-    expect(flatCalls.filter((c) => c.includes('kill -INT 1'))).toHaveLength(1);
+    expect(flatCalls.filter((c) => c.includes('kill -QUIT 1'))).toHaveLength(1);
   }, 20000);
 
   it.each([
@@ -755,7 +755,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       ).catch((e) => e);
       expect(String(err?.message)).toMatch(/standby 2\.2\.2\.2 looks promoted outside vibecarbon/);
       const calls = vi.mocked(runCommandAsync).mock.calls;
-      expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+      expect(calls.some(([a]) => flat(a as string[]).includes('kill -QUIT 1'))).toBe(false);
     },
     20000,
   );
@@ -787,7 +787,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       /while \[ "\$vc_i" -lt 60 \]; do if pg_isready -q -h 127\.0\.0\.1 -U postgres; then vc_ready=1; break; fi/,
     );
     expect((guardCall?.[1] as { timeout?: number } | undefined)?.timeout).toBeGreaterThan(60_000);
-    expect(calls.filter(([a]) => flat(a as string[]).includes('kill -INT 1'))).toHaveLength(1);
+    expect(calls.filter(([a]) => flat(a as string[]).includes('kill -QUIT 1'))).toHaveLength(1);
   }, 20000);
 
   it('a standby db that never accepts connections within the wait is refused, naming the wait', async () => {
@@ -808,7 +808,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(calls.some(([, o]) => (o as { input?: string })?.input?.includes('pg_basebackup'))).toBe(
       false,
     );
-    expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+    expect(calls.some(([a]) => flat(a as string[]).includes('kill -QUIT 1'))).toBe(false);
   }, 20000);
 
   it('a standby db container that is not running is refused with the manual rebuild (final review I2)', async () => {
@@ -832,7 +832,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       /reseed refused: the db container is not running \(CrashLoopBackOff, restartCount 7[\s\S]*rebuild its db on the STANDBY cluster[\s\S]*delete pvc data-db-0[\s\S]*`vibecarbon deploy prod`/,
     );
     const calls = vi.mocked(runCommandAsync).mock.calls;
-    expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+    expect(calls.some(([a]) => flat(a as string[]).includes('kill -QUIT 1'))).toBe(false);
   }, 20000);
 
   it('a reseed refusal for any other reason names no rebuild', async () => {
@@ -884,7 +884,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(calls.some(([, o]) => (o as { input?: string })?.input?.includes('pg_basebackup'))).toBe(
       false,
     );
-    expect(calls.some(([a]) => flat(a as string[]).includes('kill -INT 1'))).toBe(false);
+    expect(calls.some(([a]) => flat(a as string[]).includes('kill -QUIT 1'))).toBe(false);
   }, 20000);
 
   it('fails loud when a swapped reseed never enters recovery', async () => {
@@ -924,7 +924,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
       /could not reach the primary via the local relay 10\.0\.1\.2:15433 after 12 attempts/,
     );
     const flatCalls = vi.mocked(runCommandAsync).mock.calls.map(([a]) => flat(a as string[]));
-    expect(flatCalls.some((c) => c.includes('kill -INT 1'))).toBe(false);
+    expect(flatCalls.some((c) => c.includes('kill -QUIT 1'))).toBe(false);
     expect(flatCalls.some((c) => c.includes('--replicas=0'))).toBe(false);
   }, 20000);
 
@@ -945,7 +945,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     const happy = inPlaceExec();
     vi.mocked(runCommandAsync).mockImplementation(async (argv: string[], o?: object) => {
       const cmd = flat(argv);
-      if (cmd.includes('kill -INT 1')) reseeded = true;
+      if (cmd.includes('kill -QUIT 1')) reseeded = true;
       if (cmd.includes('pg_stat_replication')) {
         statReads += 1;
         if (!reseeded) return ''; // probe reads: never streaming pre-reseed

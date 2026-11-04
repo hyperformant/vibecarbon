@@ -944,7 +944,7 @@ export async function setupReplication(options) {
   // (reseedStandbyInPlace, the mechanism failover and restore use too): the
   // live-pod guard, the source primary's checks, a verified pg_basebackup
   // staged into $PGDATA/.vc-reseed while the standby's postgres runs, ONE
-  // in-pod stop (SIGINT to PID 1; the kubelet restarts the container in the
+  // in-pod stop (SIGQUIT to PID 1; the kubelet restarts the container in the
   // same pod and db-guard.sh swaps the staged tree in before postgres
   // starts), the swap proof (.vc-reseeded-from), the recovery wait. The db
   // volume never detaches: no scale to zero, no helper pod (the cold-deploy

@@ -8,7 +8,7 @@
  *     disagree with it (the configured primary reporting the standby intent),
  *   - reseed IN PLACE (Task A4): guard the running pod first, drop the source
  *     primary's .vc-discard, stage into $PGDATA/.vc-reseed while postgres
- *     runs, stop postgres once (`kill -INT 1`, the kubelet restarts the
+ *     runs, stop postgres once (`kill -QUIT 1`, the kubelet restarts the
  *     container in the same pod and db-guard.sh swaps the tree in), prove the
  *     swap through .vc-reseeded-from, wait for recovery. Zero attach
  *     transitions: no scale, no helper pod, no detach wait,
@@ -142,7 +142,7 @@ function inPlaceSsh(o: InPlaceOverrides = {}) {
     }
     if (cmd.includes('db-guard.sh') && cmd.includes('grep -c'))
       return o.markerGrep ?? '1\nin_recovery=t';
-    if (cmd.includes('kill -INT 1')) {
+    if (cmd.includes('kill -QUIT 1')) {
       if (o.stopError) throw o.stopError;
       stopped = true;
       return '';
@@ -237,7 +237,7 @@ describe('reseedStandbyFromPrimary (in place)', () => {
     await expect(runReseed(inPlaceSsh({ onCall: (c) => calls.push(c) }))).resolves.toBe('reseeded');
     const all = calls.join('\n');
     expect(all).not.toMatch(/scale|vibecarbon-pgdata-swap|volumeattachment|delete pod/);
-    expect(all).toMatch(/kill -INT 1/);
+    expect(all).toMatch(/kill -QUIT 1/);
   });
 
   it('guards BEFORE staging: an old pod refuses with the deploy hint, no pg_basebackup, no stop', async () => {
@@ -279,7 +279,7 @@ describe('reseedStandbyFromPrimary (in place)', () => {
     const guard = at(/grep -c.*db-guard\.sh/);
     const primaryDiscard = at(new RegExp(`^${PRIMARY_IP} .*\\.vc-discard`));
     const stage = at(/pg_basebackup/);
-    const stop = at(/kill -INT 1/);
+    const stop = at(/kill -QUIT 1/);
     const proof = at(/\.vc-reseeded-from/);
     const recovery = calls.findIndex((c, i) => i > proof && /pg_is_in_recovery/.test(c));
     const standbyDiscard = at(

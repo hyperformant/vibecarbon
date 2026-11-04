@@ -1773,7 +1773,17 @@ const STOP_REFUSED_STATUS = 3;
  * The sanctioned in-pod stop; one `sh -c` token, no newlines. Self-guarding:
  * the container that receives the signal proves, in the same exec, that its
  * mounted wrapper speaks the reseed protocol and that postgres is in recovery,
- * and only then sends SIGINT to PID 1 (the postmaster: fast shutdown).
+ * and only then sends SIGQUIT to PID 1 (the postmaster: immediate shutdown).
+ *
+ * Immediate, not fast: the stop exists only to restart the container so
+ * db-guard.sh swaps the staged tree in, and the data directory it stops is
+ * the one being replaced. A fast shutdown (SIGINT) waits for the checkpointer,
+ * and a standby whose restored primary moved to a new timeline can sit in
+ * that wait forever: postmaster.pid "stopping", only the checkpointer left
+ * (DO k8s-ha restore, 2026-11-04, 13 minutes until the deploy gave up). An
+ * immediate shutdown ends the children and force-kills any still there after
+ * 5 s; the same stuck postmaster restarted in 2 s on SIGQUIT. If no swap
+ * follows, postgres recovers from it exactly as from a crash.
  */
 export const DB_IN_PLACE_STOP = Object.freeze([
   'sh',
@@ -1787,7 +1797,7 @@ export const DB_IN_PLACE_STOP = Object.freeze([
     `r=${IN_RECOVERY_SH}; ` +
     `if [ -z "$r" ]; then [ -f "\${PGDATA:-/var/lib/postgresql/data}/standby.signal" ] && r=t || { echo '${STOP_REFUSED} could not confirm the db is in recovery (psql did not answer and PGDATA has no standby.signal)'; exit ${STOP_REFUSED_STATUS}; }; fi; ` +
     `[ "$r" = t ] || { echo "${STOP_REFUSED} postgres is not in recovery (pg_is_in_recovery: $r)"; exit ${STOP_REFUSED_STATUS}; }; ` +
-    'kill -INT 1',
+    'kill -QUIT 1',
 ]);
 
 /**
@@ -1795,7 +1805,8 @@ export const DB_IN_PLACE_STOP = Object.freeze([
  * The deploy seeds a standby that runs as its own independent primary (a
  * fresh cluster's initdb, or a retired old primary), so recovery is no
  * precondition there: the container still proves its mounted wrapper speaks
- * the reseed protocol before PID 1 gets SIGINT. The deploy's own preflight
+ * the reseed protocol before PID 1 gets SIGQUIT (immediate shutdown, for the
+ * reason DB_IN_PLACE_STOP gives). The deploy's own preflight
  * stands in for the recovery proof: both clusters report the intent the
  * config gives them (the guard's standby intent, prepareReseedSource's
  * primary one).
@@ -1804,7 +1815,7 @@ export const DB_IN_PLACE_STOP_UNSEEDED = Object.freeze([
   'sh',
   '-c',
   `grep -q '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || { echo '${STOP_REFUSED} the mounted db-guard.sh does not speak the reseed protocol'; exit ${STOP_REFUSED_STATUS}; }; ` +
-    'kill -INT 1',
+    'kill -QUIT 1',
 ]);
 
 /**
@@ -2104,7 +2115,7 @@ export async function runInPlaceStage(exec, { attempt }) {
  * too. The stop itself re-proves the wrapper and recovery in the container it
  * signals, and a refusal there is reported, never waited on.
  *
- * Otherwise the exec's own result is no evidence: SIGINT to PID 1 stops the
+ * Otherwise the exec's own result is no evidence: SIGQUIT to PID 1 stops the
  * container the exec runs in, so the exec can die with it. The container's
  * state decides. A pod read that fails (the pod mid-recreate) is no evidence
  * either; the deadlines bound the wait. A stop that never takes (the
