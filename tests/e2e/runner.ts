@@ -101,7 +101,7 @@ import { resolveSelection, type SelectedScenario, SelectionError } from './selec
 import { scenarioContext } from './utils/cli-runner.js';
 import { E2EDbImageError, selectE2EDbImage } from './utils/db-image-select.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
-import { setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
+import { resolveE2EAcmeCa, setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
 import { logPreflight, runPreflight } from './utils/preflight.js';
 import type { CapacityPreferences } from './utils/region-resolver.js';
@@ -687,6 +687,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     token: process.env[DNS_PROVIDERS[id].tokenEnv] || '',
     baseDomain: resolveBaseDomain(config.domains, id, process.env.E2E_DOMAIN),
   }));
+  const acme = resolveE2EAcmeCa();
   if (process.env.E2E_PREFLIGHT !== 'skip') {
     const preflight = await runPreflight({
       hetznerToken,
@@ -702,6 +703,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       scalewayToken,
       needsScaleway,
       dnsChecks,
+      acmeDirectory: { url: acme.directory, label: acme.label },
     });
     const proceed = logPreflight(preflight);
     if (!proceed) {

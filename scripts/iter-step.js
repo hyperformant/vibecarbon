@@ -43,6 +43,7 @@ import { getLicense } from '../src/lib/licensing/index.js';
 import {
   e2eCliEnv,
   REPO_ROOT,
+  resolveE2EAcmeCa,
   setupE2EEnv,
   startE2ELicenseStub,
 } from '../tests/e2e/utils/e2e-env.js';
@@ -269,7 +270,8 @@ console.log(`[iter] scenario=${provider}/${mode} step=${step} env=${envPrefix}`)
 console.log(`[iter] projectDir=${projectDir}`);
 console.log(`[iter] log=${logPath}`);
 console.log(
-  `[iter] env: ACME=staging, ${tlsSetup.rootCount} LE staging roots trusted` +
+  `[iter] env: ACME=${resolveE2EAcmeCa().ca}` +
+    `${tlsSetup ? `, ${tlsSetup.rootCount} LE staging roots trusted` : ''}` +
     `${envFileKeys.length ? `, ${envFileKeys.length} key(s) from tests/.env.e2e` : ''}`,
 );
 console.log(`[iter] cmd=vibecarbon ${cliArgs.join(' ')}`);

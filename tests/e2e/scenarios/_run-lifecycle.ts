@@ -114,7 +114,7 @@ import {
 } from '../utils/cluster-diagnostics.js';
 import { hcloudChildEnv } from '../utils/compute-token.js';
 import { type ResolutionPin, withResolutionPin } from '../utils/dns-pin.js';
-import { getE2ELicenseStub } from '../utils/e2e-env.js';
+import { getE2ELicenseStub, resolveE2EAcmeCa } from '../utils/e2e-env.js';
 import { extractDeployFailureDetail } from '../utils/extract-failure-detail.js';
 import { sharedStateBucketName } from '../utils/namespace.js';
 import { deployedScaleTarget } from '../utils/region-resolver.js';
@@ -3245,16 +3245,16 @@ EOF`;
               );
             }
 
-            // Use Let's Encrypt staging CA to avoid rate limiting across test runs.
-            // The staging CA has much higher limits (30k certs/week vs 50) and the
-            // tests already skip strict cert validation (rejectUnauthorized: false).
+            // The CA the run chose (E2E_ACME_CA, default staging: much higher
+            // rate limits than production). One helper, no URL here.
             if (config.mode.startsWith('compose')) {
+              const acme = resolveE2EAcmeCa();
               const envPath = join(config.projectDir, '.env');
               appendFileSync(
                 envPath,
-                "\n# Use Let's Encrypt staging CA for e2e tests (avoids rate limiting)\nACME_CA_SERVER=https://acme-staging-v02.api.letsencrypt.org/directory\n",
+                `\n# ACME CA for e2e tests (E2E_ACME_CA=${acme.ca})\nACME_CA_SERVER=${acme.directory}\n`,
               );
-              console.log(`${tag} Configured ACME staging CA in .env`);
+              console.log(`${tag} Configured ACME ${acme.ca} CA in .env`);
             }
           },
         ),
