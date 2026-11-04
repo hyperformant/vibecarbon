@@ -49,9 +49,8 @@
  *   `e2e.providers[provider].requiredEnv`) — a missing var aborts loudly,
  *   naming exactly the var and pointing at tests/.env.e2e. As of the two
  *   registered providers:
- *   HETZNER_API_TOKEN           Required for Hetzner scenarios (also used for
- *                                Hetzner DNS-01 since the DNS Console was
- *                                retired in May 2026)
+ *   HETZNER_API_TOKEN           Required for Hetzner scenarios (compute and
+ *                                Hetzner DNS records)
  *   CLOUDFLARE_API_TOKEN        Required for Cloudflare-DNS scenarios
  *   DIGITALOCEAN_API_TOKEN      Required for DigitalOcean scenarios
  *                                (--provider digitalocean, opt-in only)

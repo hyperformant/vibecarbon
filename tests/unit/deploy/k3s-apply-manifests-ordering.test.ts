@@ -1397,9 +1397,9 @@ describe('applyK3sManifests pilot-standby role', () => {
   });
 
   it('single-ACME-issuer policy: a pilot-standby cert references the self-signed issuer, the promote annotation carries the real one', async () => {
-    // d4 runs 3/5 RCA (2026-08-28): two clusters solving DNS-01 for the same
-    // names live-lock on cert-manager's name-keyed DO solver. The standby
-    // must not be an active ACME issuer; the annotation is what the failover
+    // d4 runs 3/5 RCA (2026-08-28): two clusters ordering certificates for
+    // the same names contend, and only the cluster DNS points at can pass
+    // HTTP-01. The standby must not be an active ACME issuer; the annotation is what the failover
     // promote (and every reconverge under the swapped role) re-points from.
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();

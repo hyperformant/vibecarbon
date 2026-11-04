@@ -191,7 +191,11 @@ Let's Encrypt checks each name over HTTP-01, so port 80 must reach your server, 
 
 Your certificate is issued once and then reused. Right after a deploy finds it trusted, and on every scheduled backup after that, it is saved (with its key) to the environment's backup bucket. A restore, a scale onto new servers, or a failover puts that copy back instead of asking Let's Encrypt for a new one, so the new side serves your certificate as soon as it takes over and you stay clear of Let's Encrypt's rate limits. A plain `vibecarbon destroy` keeps the saved copy; `destroy -purge` removes it with the rest of the backups.
 
-A deploy doesn't wait out a slow certificate authority. It looks for a trusted certificate for about three minutes (one minute with manual DNS), then finishes with TLS **pending** if there isn't one yet. Your app is deployed either way. On compose and compose-ha a small cron on the server retries issuance every 30 minutes: it waits while your domain doesn't point at the server yet, then retries for 24 hours. On Kubernetes, cert-manager keeps retrying on its own.
+A deploy doesn't wait out a slow certificate authority. It looks for a trusted certificate for about three minutes (one minute with manual DNS), then finishes with TLS **pending** if there isn't one yet. Your app is deployed either way.
+
+On compose and compose-ha a small cron on the server retries issuance every 30 minutes: it waits while your domain doesn't point at the server yet, then retries for 24 hours.
+
+On Kubernetes, cert-manager keeps retrying on its own.
 
 `vibecarbon status <env>` has a TLS row that checks the live certificate, so it is right even when the last deploy saw something else: `trusted` with its expiry date, `pending` with the reason the deploy recorded, or `untrusted` with what is wrong now. On compose it also shows what the retries are doing (`retrying 3/48`, `waiting for DNS`). If they gave up, it prints the command that starts them again, once the ACME error in the Traefik log is fixed:
 

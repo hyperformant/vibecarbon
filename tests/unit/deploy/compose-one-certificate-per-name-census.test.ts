@@ -7,8 +7,8 @@
  * is a router with its own `tls.certresolver`: Traefik's ACME resolver then
  * orders a certificate for that router's Host() on top of the default store
  * certificate (renderTraefikDefaultCert in src/lib/deploy/bundle.js), which
- * already covers every subdomain (`*.${DOMAIN}` on DNS-01, the enabled
- * add-on subdomains on HTTP-01). Two certificates for grafana.${DOMAIN}, and
+ * already covers every enabled add-on subdomain (its names are explicit, so
+ * HTTP-01 can validate each). Two certificates for grafana.${DOMAIN}, and
  * a second ACME order per add-on on every fresh server.
  *
  * The rule: the app's apex router is the only router with a resolver (the

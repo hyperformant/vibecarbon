@@ -1711,9 +1711,9 @@ async function scaleServers(ctx) {
       journaled = true;
       // The flip must happen BEFORE recreating services: Traefik asks for its
       // certificates on startup, and HTTP-01 validates over the A record, so a
-      // stale record fails every challenge with a 30+ min retry. Gated to ONE writer:
-      // the standby's replacement never touches apex (see shouldUpdateApexDns
-      // — the two-writer upsert race, run 31970876667).
+      // stale record fails every challenge with a 30+ min retry. Gated to ONE
+      // writer: the standby's replacement never touches apex (see
+      // shouldUpdateApexDns — the two-writer upsert race, run 31970876667).
       if (domain && shouldUpdateApexDns(server)) {
         s.start('Updating DNS to new server...');
         try {

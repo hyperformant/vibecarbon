@@ -171,7 +171,7 @@ const SPAWNERS: Record<string, Spawner> = {
     resolves: true,
     kubeconfig:
       "KUBECONFIG is the kubeconfig fetchKubeconfig wrote, or a resumed run's stored path " +
-      'through upgradeKubeconfig; helm (the DNS-01 webhook) runs with the same env; ' +
+      'through upgradeKubeconfig; helm runs with the same env; ' +
       '`kubectl version --client` contacts no cluster',
   },
   'src/lib/deploy/orchestrator.js': {
