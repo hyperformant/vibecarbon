@@ -368,7 +368,14 @@ export function buildHetznerK8sProgram(config) {
             ],
             userData: workerUserData,
           },
-          workerResourceOptions('hcloud:index/server:Server', { dependsOn: [subnet] }),
+          workerResourceOptions('hcloud:index/server:Server', {
+            dependsOn: [subnet],
+            joinTarget: {
+              masterId: master.id,
+              masterPrivateIp: '10.0.1.1',
+              k3sVersion: config.k3sVersion,
+            },
+          }),
         ),
       );
     }

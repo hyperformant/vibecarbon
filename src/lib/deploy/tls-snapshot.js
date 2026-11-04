@@ -23,6 +23,23 @@ export const MIN_REMAINING_VALIDITY_MS = 7 * 24 * 60 * 60 * 1000;
 const K8S_SECRET_NAME = 'vibecarbon-tls';
 
 /**
+ * The label cert-manager puts on every Secret it manages
+ * (`cmapi.PartOfCertManagerControllerLabelKey`, cert-manager v1.20.2
+ * pkg/apis/certmanager/v1/types.go; set in
+ * pkg/controller/certificates/issuing/internal/secret.go, setValues).
+ *
+ * cert-manager's filtered Secret informer
+ * (internal/informers/core_filteredsecrets.go) keeps Secrets with this label
+ * in a typed cache and all others in a metadata-only cache. A Secret that
+ * gains the label moves between the two, and for that moment the lister's Get
+ * answers NotFound. A restored Secret without it was labelled by
+ * cert-manager's SecretsManager right after the Certificate was applied, and
+ * 0.6 s later the trigger controller re-issued ("Issuing certificate as
+ * Secret does not exist"). buildRestoredTlsSecret therefore writes it.
+ */
+export const CERT_MANAGER_CONTROLLER_LABEL = 'controller.cert-manager.io/fao';
+
+/**
  * The S3 client options of a snapshot read on a failover path, where waiting
  * is outage: one attempt, 10s to connect and 10s for the request.
  */
@@ -62,12 +79,121 @@ function parseCert(pem) {
   }
 }
 
+/**
+ * The entries of node's `subjectAltName` string, in certificate order, as
+ * `{ type, value }` (`DNS`, `IP Address`, `URI`, `email`, ...). Node quotes a
+ * value holding a delimiter as a JSON string; that quoting is undone here.
+ */
+function subjectAltNames(cert) {
+  const text = String(cert.subjectAltName ?? '');
+  const entries = [];
+  const re = /\s*([^:,]+):("(?:[^"\\]|\\.)*"|[^,]*)(?:,|$)/y;
+  let m = re.exec(text);
+  while (m !== null && m[0] !== '') {
+    let value = m[2];
+    if (value.startsWith('"')) {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        // Left as written: an unparsable quote is not a name we compare.
+      }
+    }
+    entries.push({ type: m[1], value });
+    m = re.exec(text);
+  }
+  return entries;
+}
+
+function sanValues(cert, type) {
+  return subjectAltNames(cert)
+    .filter((e) => e.type === type)
+    .map((e) => e.value);
+}
+
 function sanDnsNames(cert) {
-  return String(cert.subjectAltName ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.startsWith('DNS:'))
-    .map((s) => s.slice(4));
+  return sanValues(cert, 'DNS');
+}
+
+/**
+ * An IP address as Go's net.IP.String() prints it: IPv4 dotted, an
+ * IPv4-mapped IPv6 address as its IPv4, other IPv6 in RFC 5952 form. Node
+ * prints IPv6 SANs uncompressed and uppercase.
+ */
+function goIpString(ip) {
+  if (!ip.includes(':')) return ip;
+  let host;
+  try {
+    host = new URL(`http://[${ip}]/`).hostname.slice(1, -1);
+  } catch {
+    return ip;
+  }
+  const mapped = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!mapped) return host;
+  const [hi, lo] = [parseInt(mapped[1], 16), parseInt(mapped[2], 16)];
+  return [hi >> 8, hi & 255, lo >> 8, lo & 255].join('.');
+}
+
+/**
+ * One CSV record as Go's encoding/csv Writer writes it, without the trailing
+ * newline (cert-manager's util.JoinWithEscapeCSV): a field is quoted when it
+ * holds a comma, quote, CR or LF, starts with white space, or is `\.`,
+ * and a quote inside is doubled.
+ */
+function joinCsvLikeGo(values) {
+  return values
+    .map((v) =>
+      v === '\\.' || /[,"\r\n]/.test(v) || /^\s/.test(v) ? `"${v.replace(/"/g, '""')}"` : v,
+    )
+    .join(',');
+}
+
+/** One subject attribute of node's legacy object as a list, in order. */
+function subjectList(subject, key) {
+  const v = subject?.[key];
+  if (v === undefined || v === null) return [];
+  return (Array.isArray(v) ? v : [v]).map(String);
+}
+
+/**
+ * The annotations cert-manager derives from a certificate and writes on its
+ * Secret, with the same keys, values and formatting: cert-manager v1.20.2
+ * internal/controller/certificates/secrets.go, AnnotationsForCertificate
+ * (keys from pkg/apis/certmanager/v1/types.go). common-name, alt-names,
+ * ip-sans and uri-sans are kept when empty, every other one only when it has
+ * a value. Reads the first (leaf) certificate of `certPem`; {} when there is
+ * none, as cert-manager returns for a nil certificate.
+ *
+ * @param {string} certPem
+ * @returns {Record<string, string>}
+ */
+export function certificateDetailsAnnotations(certPem) {
+  const [cert] = pemCertificates(certPem);
+  if (!cert) return {};
+  const subject = cert.toLegacyObject().subject ?? {};
+  const annotations = {};
+  const put = (keepEmpty, key, value) => {
+    if (value === '' && !keepEmpty) return;
+    annotations[`cert-manager.io/${key}`] = value;
+  };
+  const putList = (keepEmpty, key, values) => {
+    if (values.length === 0 && !keepEmpty) return;
+    annotations[`cert-manager.io/${key}`] = joinCsvLikeGo(values);
+  };
+  // pkix.Name keeps the last value of a repeated single-valued attribute.
+  put(true, 'common-name', subjectList(subject, 'CN').at(-1) ?? '');
+  put(false, 'subject-serialnumber', subjectList(subject, 'serialNumber').at(-1) ?? '');
+  putList(false, 'subject-organizations', subjectList(subject, 'O'));
+  putList(false, 'subject-organizationalunits', subjectList(subject, 'OU'));
+  putList(false, 'subject-countries', subjectList(subject, 'C'));
+  putList(false, 'subject-provinces', subjectList(subject, 'ST'));
+  putList(false, 'subject-localities', subjectList(subject, 'L'));
+  putList(false, 'subject-postalcodes', subjectList(subject, 'postalCode'));
+  putList(false, 'subject-streetaddresses', subjectList(subject, 'street'));
+  putList(false, 'email-sans', sanValues(cert, 'email'));
+  putList(true, 'alt-names', sanDnsNames(cert));
+  putList(true, 'ip-sans', sanValues(cert, 'IP Address').map(goIpString));
+  putList(true, 'uri-sans', sanValues(cert, 'URI'));
+  return annotations;
 }
 
 /** Every certificate in a PEM bundle, in order; [] when any block is unparsable. */
@@ -297,7 +423,31 @@ export function inspectK8sTlsSecret(secretJsonText, { dnsNames, now = new Date()
   return verdict.ok ? { ...verdict, issuerName } : verdict;
 }
 
-/** A clean vibecarbon-tls manifest from a snapshot, ready for `kubectl apply -f -`. */
+/**
+ * A clean vibecarbon-tls manifest from a snapshot, for `kubectl create` or
+ * `replace -f -`. Its labels and annotations are exactly those cert-manager's
+ * SecretsManager.setValues writes for this Certificate (cert-manager v1.20.2
+ * pkg/controller/certificates/issuing/internal/secret.go): the certificate
+ * details (certificateDetailsAnnotations), the certificate name, the issuer
+ * reference and CERT_MANAGER_CONTROLLER_LABEL.
+ *
+ * cert-manager still re-applies these once: its post-issuance check
+ * (SecretManagedLabelsAndAnnotationsManagedFieldsMismatch,
+ * internal/controller/certificates/policies/checks.go) judges managedFields
+ * ownership, and kubectl, not cert-manager's field manager, owns them here.
+ * So a "Secret is missing these Managed Labels" line after a restore is
+ * expected, not a regression. What the fix needs is that the label's value
+ * never changes in that apply: the Secret is in the typed cache from its first
+ * write and stays there, so the lister never answers NotFound (see
+ * CERT_MANAGER_CONTROLLER_LABEL), which is what made it re-issue. One edge
+ * remains: an invalid, unlabelled live Secret left by a CLI from before this
+ * fix gains the label in our `replace`, and that one write moves it between
+ * the caches once. The
+ * Certificate has no secretTemplate (carbon/k8s/base/traefik/certificate.yaml,
+ * carbon/scripts/render-tls-certificate.mjs), so no template labels apply.
+ * Every writer of this Secret goes through here
+ * (tests/unit/deploy/tls-secret-writer-census.test.ts).
+ */
 export function buildRestoredTlsSecret(secretJsonText, { namespace, issuerName }) {
   const secret = parseJson(secretJsonText);
   if (!secret?.data?.['tls.crt'] || !secret.data['tls.key']) {
@@ -310,11 +460,13 @@ export function buildRestoredTlsSecret(secretJsonText, { namespace, issuerName }
     metadata: {
       name: K8S_SECRET_NAME,
       namespace,
+      labels: { [CERT_MANAGER_CONTROLLER_LABEL]: 'true' },
       annotations: {
+        ...certificateDetailsAnnotations(decodeSecretField(secret, 'tls.crt')),
+        'cert-manager.io/certificate-name': K8S_SECRET_NAME,
         'cert-manager.io/issuer-name': issuerName,
         'cert-manager.io/issuer-kind': 'ClusterIssuer',
         'cert-manager.io/issuer-group': 'cert-manager.io',
-        'cert-manager.io/certificate-name': K8S_SECRET_NAME,
       },
     },
     data: { 'tls.crt': secret.data['tls.crt'], 'tls.key': secret.data['tls.key'] },

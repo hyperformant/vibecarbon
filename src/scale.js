@@ -27,6 +27,7 @@ import { c, link } from './lib/colors.js';
 import { checkDependency, runCommand } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
 import { useDnsChallenge } from './lib/deploy/acme.js';
+import { queueBootTiming } from './lib/deploy/boot-timing.js';
 import { RECONCILE_FLAGS_SED, STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
 import { buildComposeAppImage, deliverComposeAppImage } from './lib/deploy/compose/app-image.js';
 import { collectComposeBuildArgs } from './lib/deploy/compose/build-args.js';
@@ -1182,6 +1183,9 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   await perfAsync('scale.cloudInitReady', () =>
     setupServer(newIp, sshKeyPath, Provider.CLOUD_INIT_READY_TIMEOUT_MS),
   );
+  // First-boot timing (`[perf] scale.server.boot.*`, VIBECARBON_PERF only):
+  // queued now, read once the command is over (lib/deploy/boot-timing.js).
+  queueBootTiming([{ ip: newIp, prefix: 'scale.server' }], sshKeyPath);
   s.stop('Docker installed');
 
   // Pull the OLD server's full /opt/<project>/.env so every variable the

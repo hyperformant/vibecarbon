@@ -77,7 +77,7 @@ const PROBE_INTERVAL_MS = 2000;
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const defaultExec = (argv, opts) => runCommandAsync(argv, opts);
 
-async function pollCondition({ name, attempt, budgetMs, sleep, nowFn, isFinal }) {
+async function pollCondition({ name, attempt, budgetMs, sleep, nowFn, isFinal, describeTimeout }) {
   const now = nowFn ?? Date.now;
   const deadline = now() + budgetMs;
   const startedAt = now();
@@ -108,6 +108,7 @@ async function pollCondition({ name, attempt, budgetMs, sleep, nowFn, isFinal })
   // The last real error, not a synthetic timeout: a genuinely broken component
   // must fail the deploy with its own message.
   const seconds = Math.round(budgetMs / 1000);
+  if (describeTimeout) throw new Error(describeTimeout(seconds, lastErr));
   throw new Error(
     `${name} did not become serving within ${seconds}s. Last error: ${lastErr?.message ?? '(none recorded)'}`,
   );
@@ -174,6 +175,154 @@ export async function awaitCertManagerAdmission({
         silent: true,
         input: CERT_MANAGER_ADMISSION_PROBE_MANIFEST,
       }),
+  });
+}
+
+/**
+ * The controller's leader lease: cert-manager v1.20's default
+ * `--leader-election-namespace=kube-system` and lock name.
+ */
+export const CERT_MANAGER_LEADER_LEASE = Object.freeze({
+  namespace: 'kube-system',
+  name: 'cert-manager-controller',
+});
+
+const REVISION = 'deployment.kubernetes.io/revision';
+
+/**
+ * Is the cert-manager controller SETTLED: its Deployment finished rolling
+ * (the new generation observed, every replica updated and available, no old
+ * pod left) and the leader lease held by a pod of the current ReplicaSet?
+ * The current ReplicaSet is the one the Deployment owns at its own revision;
+ * its pods are named `<replicaset>-<suffix>`, and cert-manager's lease
+ * identity starts with the pod's hostname, which is the pod name.
+ *
+ * @param {{ deployment: any, replicaSets: any[], lease: any }} state - kubectl JSON
+ * @returns {{ ready: boolean, reason: string }}
+ */
+export function judgeCertManagerLeader({ deployment, replicaSets, lease }) {
+  const leaseRef = `${CERT_MANAGER_LEADER_LEASE.namespace}/${CERT_MANAGER_LEADER_LEASE.name}`;
+  const generation = deployment?.metadata?.generation;
+  const status = deployment?.status ?? {};
+  const want = deployment?.spec?.replicas ?? 1;
+  if (generation === undefined || (status.observedGeneration ?? 0) < generation) {
+    return {
+      ready: false,
+      reason: `the cert-manager Deployment has not observed its latest spec yet (generation ${generation ?? '?'}, observed ${status.observedGeneration ?? 0})`,
+    };
+  }
+  const updated = status.updatedReplicas ?? 0;
+  const total = status.replicas ?? 0;
+  const available = status.availableReplicas ?? 0;
+  if (updated < want || total > updated || available < want) {
+    return {
+      ready: false,
+      reason: `the cert-manager rollout is in progress (${updated} of ${want} updated, ${total} running, ${available} available)`,
+    };
+  }
+  const revision = deployment?.metadata?.annotations?.[REVISION];
+  const uid = deployment?.metadata?.uid;
+  const current = (replicaSets ?? []).find(
+    (rs) =>
+      revision !== undefined &&
+      rs?.metadata?.annotations?.[REVISION] === revision &&
+      (rs?.metadata?.ownerReferences ?? []).some((o) => o?.uid === uid),
+  );
+  if (!current?.metadata?.name) {
+    return {
+      ready: false,
+      reason: `no ReplicaSet of the cert-manager Deployment carries its revision ${revision ?? '?'} yet`,
+    };
+  }
+  const rsName = current.metadata.name;
+  const holder = lease?.spec?.holderIdentity ?? '';
+  if (!holder) {
+    return { ready: false, reason: `the lease ${leaseRef} has no holder yet` };
+  }
+  if (!holder.startsWith(`${rsName}-`)) {
+    return {
+      ready: false,
+      reason: `the lease ${leaseRef} is held by ${holder}, not by a pod of the current ReplicaSet ${rsName}`,
+    };
+  }
+  return { ready: true, reason: `the lease ${leaseRef} is held by ${holder}` };
+}
+
+/**
+ * Wait until the cert-manager controller is settled (judgeCertManagerLeader)
+ * before the deploy writes the restored TLS Secret and applies the
+ * Certificate. A controller handoff in that window can miss the Secret in the
+ * new leader's cache and issue a new certificate ("Issuing certificate as
+ * Secret does not exist"). On a cold deploy the first install legitimately
+ * starts the controller, so this wait covers that too. One bounded wait: an
+ * unreadable object counts as not settled, and at the budget the deploy fails
+ * with the last reason and where to look.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
+ * @param {number} [params.budgetMs]
+ * @param {Function} [params.exec] - test seam, defaults to runCommandAsync
+ * @param {Function} [params.sleep] - test seam
+ * @param {Function} [params.nowFn] - test seam
+ */
+export async function awaitCertManagerLeader({
+  env,
+  budgetMs = 180_000,
+  exec = defaultExec,
+  sleep = defaultSleep,
+  nowFn,
+}) {
+  const { namespace, name } = CERT_MANAGER_LEADER_LEASE;
+  const read = async (what, argv) => {
+    let text;
+    try {
+      text = String((await exec(['kubectl', ...argv, '-o', 'json'], { env, silent: true })) ?? '');
+      return JSON.parse(text);
+    } catch (err) {
+      const detail = String(err instanceof Error ? err.message : err).split('\n')[0];
+      throw new Error(`could not read ${what} (${detail})`);
+    }
+  };
+  await pollCondition({
+    name: 'cert-manager leader',
+    budgetMs,
+    sleep,
+    nowFn,
+    attempt: async () => {
+      const deployment = await read('deployment cert-manager/cert-manager', [
+        '-n',
+        'cert-manager',
+        'get',
+        'deployment',
+        'cert-manager',
+      ]);
+      const replicaSets =
+        (
+          await read('the cert-manager ReplicaSets', [
+            '-n',
+            'cert-manager',
+            'get',
+            'replicasets',
+            '-l',
+            'app.kubernetes.io/instance=cert-manager,app.kubernetes.io/component=controller',
+          ])
+        )?.items ?? [];
+      const lease = await read(`lease ${namespace}/${name}`, [
+        '-n',
+        namespace,
+        'get',
+        'lease',
+        name,
+      ]);
+      const verdict = judgeCertManagerLeader({ deployment, replicaSets, lease });
+      if (!verdict.ready) throw new Error(verdict.reason);
+    },
+    describeTimeout: (seconds, lastErr) =>
+      `The cert-manager controller did not settle as leader within ${seconds}s: ` +
+      `${lastErr?.message ?? 'no reading recorded'}. The deploy stops before the TLS ` +
+      'Certificate is applied, so cert-manager cannot issue a certificate it does not need. ' +
+      `Look at \`kubectl -n cert-manager get pods\` and \`kubectl -n ${namespace} get lease ${name} -o yaml\`, ` +
+      'then run the deploy again.',
   });
 }
 

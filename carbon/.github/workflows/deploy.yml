@@ -304,17 +304,29 @@ jobs:
       # left this step out — e2e run 2026-04-22 18:29 UTC showed
       # vibecarbon-base timing out after 10m on exactly this.
       #
-      # cert-manager v1.20.2 matches k8s/infra/kustomization.yaml +
-      # CERT_MANAGER_VERSION in src/lib/deploy/k8s/k3s.js; bump in lockstep.
+      # cert-manager is the same ONE rendered apply the CLI deploy makes
+      # (scripts/render-cert-manager.mjs holds the version, the controller
+      # flags and the control-plane pin). Applying the bare upstream manifest
+      # here would strip the flags and the pin the CLI rendered in, and roll
+      # the controller on every run; the rendered one re-applies as a no-op.
       - name: Install cert-manager + Traefik CRDs
         run: |
-          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml
+          node scripts/render-cert-manager.mjs "$RUNNER_TEMP/cert-manager"
+          kubectl apply -k "$RUNNER_TEMP/cert-manager"
           kubectl apply -k k8s/infra/traefik-crds/
           kubectl -n cert-manager wait --for=condition=available \
             deployment/cert-manager \
             deployment/cert-manager-webhook \
             deployment/cert-manager-cainjector \
             --timeout=5m
+
+      # The controller SETTLED before the Certificate lands: its rollout
+      # complete and its leader lease on a pod of the current ReplicaSet. A
+      # handoff while the Certificate lands can miss the Secret it should
+      # reuse and issue a new certificate. The same wait the CLI deploy and a
+      # failover promotion run; bounded, then one error line.
+      - name: Wait for a settled cert-manager leader
+        run: bash scripts/await-cert-manager-leader.sh
 
       # The vibecarbon-tls Certificate is DEPLOY-owned: its names and issuer
       # are per environment, while the committed k8s/base is shared by every

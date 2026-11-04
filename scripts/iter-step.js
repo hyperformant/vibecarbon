@@ -284,7 +284,7 @@ const cliBin = join(repoRoot, 'src', 'cli.js');
 // an already-live rig is by definition a real-infra operation.
 const child = spawn('node', [cliBin, ...cliArgs], {
   cwd: projectDir,
-  env: e2eCliEnv({ REAL_INFRA: 'true' }),
+  env: e2eCliEnv({ REAL_INFRA: 'true' }, process.env, provider),
   stdio: ['inherit', 'pipe', 'pipe'],
 });
 

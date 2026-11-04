@@ -464,6 +464,11 @@ export function buildDigitalOceanK8sProgram(config) {
           // comment.
           workerResourceOptions('digitalocean:index/droplet:Droplet', {
             dependsOn: [master, firewall],
+            joinTarget: {
+              masterId: master.id,
+              masterPrivateIp: master.ipv4AddressPrivate,
+              k3sVersion: config.k3sVersion,
+            },
           }),
         ),
       );

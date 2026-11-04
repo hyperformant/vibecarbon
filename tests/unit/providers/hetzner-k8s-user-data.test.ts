@@ -32,6 +32,12 @@
  * server gained --system-default-registry; every role's k3s install gained
  * --disable-default-registry-endpoint. The diff is confined to those
  * lines (checked at capture against the pre-change fixture).
+ *
+ * RE-CAPTURED 2026-11-02 (first-boot timing): each init script gained the
+ * one-line `_m` helper and one `_m <id>` line per major phase
+ * (src/lib/deploy/boot-timing.js reads them back), and the apt comment's
+ * fuser-loop history paragraph became a pointer to src/lib/deploy/apt.js,
+ * which holds it, to keep master-init under 27 KiB. No command changed.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

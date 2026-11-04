@@ -35,6 +35,8 @@ import { e2eCliEnv } from './e2e-env.js';
 export const scenarioContext = new AsyncLocalStorage<{
   logPath?: string;
   echo?: boolean;
+  /** The scenario's compute provider; decides which provider CLI token env the child gets. */
+  provider?: string;
   recordPerfSubsteps?: (timings: Array<{ name: string; ms: number; note?: string }>) => void;
 }>();
 
@@ -63,6 +65,8 @@ export interface RunOptions {
    * scenarios opt in per-scenario so interleaved output stays readable.
    */
   echo?: boolean;
+  /** Compute provider for the child env (default: the scenario context's). */
+  provider?: string;
 }
 
 /**
@@ -95,7 +99,7 @@ export async function runCli(args: string, options: RunOptions): Promise<CliResu
   // `scripts/iter-step.js` spawns the CLI with the identical environment —
   // iterating one step against a kept rig must not behave differently from
   // that step inside a full run.
-  const env = e2eCliEnv(options.env);
+  const env = e2eCliEnv(options.env, process.env, options.provider ?? ctx?.provider);
 
   // Argv form = no local shell, no injection surface.
   const splitArgs = args.split(/\s+/).filter(Boolean);
