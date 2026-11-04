@@ -667,7 +667,7 @@ are rebuilt (`ANALYZE`) once the restored cluster promotes.
 | `-l` | List available backups (read-only; does not restore) |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-source <latest\|base-name\|ISO-timestamp>` | Restore point: `latest` (newest base backup + all WAL), a base backup name (that base + all WAL), or an ISO-8601 timestamp (PITR) |
-| `-lineage <system-identifier>` | The database lineage to restore from. Each database archives in its own folder, so a destroyed and redeployed environment leaves its old backups beside the new database's. Needed only when more than one lineage holds backups; the refusal names them. |
+| `-lineage <system-identifier>` | The database lineage to restore from. Each database archives in its own folder, so a destroyed and redeployed environment leaves its old backups beside the new database's. Needed only when more than one lineage holds backups and -source does not name a base backup that only one of them has; the refusal names them. |
 | `-confirm <value>` | Production only: supply the type-to-confirm value on the command line (scripts / no TTY) |
 {/* END GENERATED: flags restore */}
 
