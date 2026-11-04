@@ -293,10 +293,16 @@ export function resetStagingTrustCacheForTests() {
  * Scenarios destroy and recreate infrastructure constantly; the system
  * resolver caches NXDOMAIN for domains that no longer exist, which fails ALL
  * subsequent health checks and verification requests for the cache TTL.
+ *
+ * IPv4 first, like src/cli.js. On a machine with no IPv6 route, a dual-stack
+ * host (Hetzner object storage) fails a share of parallel connections with
+ * ETIMEDOUT under Node's default order: 15 of 60 preflights on 2026-11-04,
+ * against 0 of 60 with ipv4first. The bucket settle gate needs fully clean
+ * rounds, so that alone failed a healthy Hetzner bucket after 25 minutes.
  */
 export function pinPublicDns() {
   try {
-    dns.setDefaultResultOrder('verbatim');
+    dns.setDefaultResultOrder('ipv4first');
     dns.setServers(['1.1.1.1', '8.8.8.8']);
   } catch {
     // setServers throws on an empty/invalid list — both are caller errors,
