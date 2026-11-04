@@ -45,8 +45,9 @@ import { formatOrphanNotice } from './lib/orphan-stack-notice.js';
 import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
-import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
+import { getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
 import { checkBackupHealth } from './lib/status/backup-health.js';
+import { createClusterSnapshots, dbPod, describeSshError } from './lib/status/cluster-snapshot.js';
 import {
   CORE_SERVICE_ORDER,
   classifyContainer,
@@ -559,8 +560,8 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
   const {
     sshRun: _sshRun = sshRun,
     sshKubectl: _sshKubectl = sshKubectl,
-    getPostgresPod: _getPod = getPostgresPod,
     getSSHKeyPath: _getKey = getSSHKeyPath,
+    existsSync: _exists = existsSync,
     timeoutMs = 10_000,
   } = deps;
 
@@ -571,7 +572,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
   if (!primary?.ip) return null;
 
   const sshKeyPath = _getKey(envName);
-  if (!existsSync(sshKeyPath)) return null;
+  if (!_exists(sshKeyPath)) return null;
 
   const isCompose = envConfig.deployMode === 'compose' || envConfig.deployMode === 'compose-ha';
   // No string literals in the SQL → no shell/psql quoting hazards. `-tA` uses
@@ -579,13 +580,56 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
   const sql =
     'SELECT state, pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) FROM pg_stat_replication';
 
+  // No answer. With `error` (a read that failed) the row is unreadable, and
+  // says why: no verdict either way.
+  const unavailable = (error) => ({
+    streaming: false,
+    state: 'unknown',
+    lagBytes: null,
+    primaryRow: null,
+    standbyRow: null,
+    lagLine: formatReplicationLagLine({}),
+    ...(error && { error }),
+  });
+  const messageOf = (err) => (err instanceof Error ? err.message : String(err));
+
+  // On k8s the db pods come from the run's cluster snapshots (one read per
+  // cluster, shared with the containers and backup rows), never a lookup of
+  // their own. The snapshot carries its own bound, so it is awaited before
+  // the psql envelope below starts; a failed one is the row's one reason.
+  const snapshots =
+    deps.snapshots ??
+    createClusterSnapshots(envName, {
+      sshKubectl: _sshKubectl,
+      getSSHKeyPath: _getKey,
+      existsSync: _exists,
+    });
+  const standbyIp = envConfig.ha?.standby?.masterIp;
+  const standbyPod =
+    !isCompose && standbyIp
+      ? snapshots.get(standbyIp).then((snap) => dbPod(snap).metadata.name)
+      : null;
+  standbyPod?.catch(() => {});
+  let primaryPod = null;
+  if (!isCompose) {
+    let snapshot;
+    try {
+      snapshot = await snapshots.get(primary.ip);
+    } catch (err) {
+      return unavailable(messageOf(err));
+    }
+    try {
+      primaryPod = dbPod(snapshot).metadata.name;
+    } catch (err) {
+      // Read, and there is no database to replicate from: a verdict.
+      return { ...unavailable(), state: messageOf(err) };
+    }
+  }
+
   const probe = (async () => {
     // Run one psql -tAc query against the PRIMARY over whichever transport
-    // this env uses — shared by the pre-existing byte-lag query and the new
-    // time-based buildPrimaryLagQuery() so a k8s primary pod lookup only
-    // happens once. Resolved INSIDE the probe (not above it) so the pod
-    // lookup itself stays inside the Promise.race timeout envelope below.
-    const primaryPod = !isCompose ? await _getPod(primary.ip, sshKeyPath) : null;
+    // this env uses, shared by the byte-lag query and the time-based
+    // buildPrimaryLagQuery().
     const runPrimaryPsql = (targetSql) =>
       isCompose
         ? _sshRun(
@@ -652,10 +696,8 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
     // disconnected standby is invisible to pg_stat_replication, but can
     // still report its own recovery state + last-replay age.
     let standbyRow = null;
-    const standbyIp = envConfig.ha?.standby?.masterIp;
-    if (!isCompose && standbyIp) {
+    if (standbyPod) {
       try {
-        const standbyPod = await _getPod(standbyIp, sshKeyPath);
         const standbyOut = await _sshKubectl(
           standbyIp,
           sshKeyPath,
@@ -663,7 +705,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
             'exec',
             '-n',
             'vibecarbon',
-            standbyPod,
+            await standbyPod,
             '--',
             'psql',
             '-U',
@@ -725,28 +767,47 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
     };
   })();
 
-  const unavailable = () => ({
-    streaming: false,
-    state: 'unknown',
-    lagBytes: null,
-    primaryRow: null,
-    standbyRow: null,
-    lagLine: formatReplicationLagLine({}),
-  });
-
+  const envelopeMs = timeoutMs + 2_000;
   try {
     return await Promise.race([
       probe,
       new Promise((resolve) => {
         // .unref() so a fast probe win doesn't leave this timer holding the
         // event loop open and delaying `status` exit by the timeout window.
-        const t = setTimeout(() => resolve(unavailable()), timeoutMs + 2_000);
+        const t = setTimeout(
+          () => resolve(unavailable(`no answer within ${envelopeMs / 1000} s`)),
+          envelopeMs,
+        );
         if (typeof t?.unref === 'function') t.unref();
       }),
     ]);
-  } catch {
-    return unavailable();
+  } catch (err) {
+    // What the remote said, never the ssh argv (it names the local key path).
+    return unavailable(describeSshError(err));
   }
+}
+
+/**
+ * The remote reads of one environment: replication, per-server containers or
+ * pods, and backups, run together. They share one snapshot per k8s cluster
+ * (cluster-snapshot.js), so each cluster gets a single listing call per run
+ * however many rows read it. allSettled, so a throw in one check can never
+ * take another's result with it.
+ *
+ * @param {string} envName
+ * @param {object} envConfig
+ * @param {string} projectName
+ * @param {object} [deps] the ssh seams (sshRun, sshKubectl, getSSHKeyPath, existsSync) and checkBackupHealth's
+ * @returns {Promise<{ replication: PromiseSettledResult<any>, containers: PromiseSettledResult<any>, backups: PromiseSettledResult<any> }>}
+ */
+export async function checkEnvironmentRemote(envName, envConfig, projectName, deps = {}) {
+  const shared = { ...deps, snapshots: deps.snapshots ?? createClusterSnapshots(envName, deps) };
+  const [replication, containers, backups] = await Promise.allSettled([
+    checkReplication(envName, envConfig, projectName, shared),
+    checkRemoteContainers(envName, envConfig, projectName, shared),
+    checkBackupHealth(envName, envConfig, projectName, shared),
+  ]);
+  return { replication, containers, backups };
 }
 
 function checkGitSync(envName, envConfig) {
@@ -1228,8 +1289,9 @@ function formatServerLines(servers, checks) {
     const sc = checks.containers?.[server.name || server.ip];
     if (!sc) continue;
     const noun = sc.kind === 'k8s' ? 'pods' : 'containers';
+    // A read that failed is no verdict: unreadable, with its reason.
     if (sc.error) {
-      lines.push(`    ${c.dim(noun)} ${c.error('● unreachable')}  ${c.dim(sc.error)}`);
+      lines.push(`    ${c.dim(noun)} ${c.warning('● unreadable')}  ${c.dim(sc.error)}`);
       continue;
     }
     const counted = sc.rows.filter((r) => r.health !== 'done');
@@ -1326,15 +1388,58 @@ function formatHealthLines(remoteHealth) {
 
 /**
  * Summary-block verdict for one environment: the public probe failed, or
- * any server's containers are not fully healthy.
+ * any server's containers are not fully healthy. A server that could not be
+ * read (`error`) is no verdict either way: isEnvironmentUnreadable counts it.
  * @param {{checks?: {remoteHealth?: {ok?: boolean}, containers?: object}}} entry
  */
 function isEnvironmentUnhealthy(entry) {
   const checks = entry?.checks || {};
   if (checks.remoteHealth && !checks.remoteHealth.ok) return true;
   for (const sc of Object.values(checks.containers || {}))
-    if (!serverContainersHealthy(sc)) return true;
+    if (!sc?.error && !serverContainersHealthy(sc)) return true;
   return false;
+}
+
+/**
+ * Whether any server of an environment could not be read this run.
+ * @param {{checks?: {containers?: object}}} entry
+ */
+export function isEnvironmentUnreadable(entry) {
+  return Object.values(entry?.checks?.containers || {}).some((sc) => !!sc?.error);
+}
+
+/**
+ * The summary's Environments line: how many are deployed, how many are
+ * unhealthy, and how many could not be read (never counted as either).
+ * @param {Record<string, {checks?: object}>} environments
+ * @returns {string}
+ */
+export function formatEnvironmentsSummary(environments) {
+  const entries = Object.values(environments || {});
+  if (entries.length === 0) return `${c.dim('Environments')}   ${c.dim('none deployed')}`;
+  const unhealthy = entries.filter(isEnvironmentUnhealthy).length;
+  const unreadable = entries.filter(
+    (e) => !isEnvironmentUnhealthy(e) && isEnvironmentUnreadable(e),
+  ).length;
+  const unhealthyStr =
+    unhealthy > 0 ? `, ${c.error(`${unhealthy} unhealthy`)}` : `, ${c.success('0 unhealthy')}`;
+  const unreadableStr = unreadable > 0 ? `, ${c.warning(`${unreadable} unreadable`)}` : '';
+  return `${c.dim('Environments')}   ${entries.length} deployed${unhealthyStr}${unreadableStr}`;
+}
+
+/**
+ * The Replication row: streaming with its lag, red when the standby is not
+ * streaming (DR not guaranteed), yellow when the probe could not read.
+ * @param {{streaming?: boolean, state?: string, lagBytes?: number|null, error?: string}} r
+ * @returns {string}
+ */
+export function formatReplicationLine(r) {
+  if (r.error) return `${c.warning('unreadable')} ${c.dim(`(${r.error})`)}`;
+  if (r.streaming) {
+    const lag = r.lagBytes != null ? c.dim(` (lag: ${(r.lagBytes / 1024).toFixed(0)} KiB)`) : '';
+    return `${c.success('streaming')}${lag}`;
+  }
+  return `${c.error(r.state || 'not streaming')}${c.dim(': DR not guaranteed')}`;
 }
 
 /**
@@ -1424,21 +1529,13 @@ function renderEnvironment(envName, envConfig, checks) {
     // Real replication state (finding #4) — never a hardcoded "streaming".
     if (checks.replication) {
       const r = checks.replication;
-      let replDisplay;
-      if (r.streaming) {
-        const lag =
-          r.lagBytes != null ? c.dim(` (lag: ${(r.lagBytes / 1024).toFixed(0)} KiB)`) : '';
-        replDisplay = `${c.success('streaming')}${lag}`;
-      } else {
-        replDisplay = `${c.error(r.state || 'not streaming')}${c.dim(': DR not guaranteed')}`;
-      }
-      lines.push(`${c.dim('Replication')}    ${replDisplay}`);
+      lines.push(`${c.dim('Replication')}    ${formatReplicationLine(r)}`);
 
       // Task 12 (pilot-light spec) — time-based lag line, additive to the
       // byte-based streaming/DR line above. Colorized red when the standby
       // itself reports it left recovery: DR is not guaranteed regardless of
       // what the primary's pg_stat_replication still shows.
-      if (r.lagLine) {
+      if (r.lagLine && !r.error) {
         const lagDisplay = r.lagLine.includes('DR NOT GUARANTEED')
           ? c.error(r.lagLine)
           : c.dim(r.lagLine);
@@ -1547,21 +1644,7 @@ function renderSummary(allData) {
   const lines = [];
 
   // Environments
-  const envCount = Object.keys(allData.environments || {}).length;
-  const unhealthyCount = Object.values(allData.environments || {}).filter(
-    isEnvironmentUnhealthy,
-  ).length;
-
-  if (envCount > 0) {
-    const envStr = `${envCount} deployed`;
-    const unhealthyStr =
-      unhealthyCount > 0
-        ? `, ${c.error(`${unhealthyCount} unhealthy`)}`
-        : `, ${c.success('0 unhealthy')}`;
-    lines.push(`${c.dim('Environments')}   ${envStr}${unhealthyStr}`);
-  } else {
-    lines.push(`${c.dim('Environments')}   ${c.dim('none deployed')}`);
-  }
+  lines.push(formatEnvironmentsSummary(allData.environments));
 
   // Local dev
   if (allData.localDev) {
@@ -1781,17 +1864,16 @@ async function main(argv = []) {
       const unfenced = unfencedBucketsLine(envConfig);
       if (unfenced) checks.storageUnfenced = unfenced;
 
-      // Real replication state for HA envs (best-effort, hard-bounded) and
-      // per-server container/pod health (spec: remote-container-health) run
-      // concurrently — each is bounded at its own timeout, and stacking them
-      // serially would double an HA environment's worst case. Independent of
-      // noLocal — that flag is about THIS machine's dev stack.
-      // allSettled so a throw in one check can never take the other's result with it.
-      const [replicationResult, containersResult, backupsResult] = await Promise.allSettled([
-        checkReplication(envName, envConfig, projectConfig.projectName),
-        checkRemoteContainers(envName, envConfig, projectConfig.projectName),
-        checkBackupHealth(envName, envConfig, projectConfig.projectName),
-      ]);
+      // Real replication state for HA envs (best-effort, hard-bounded),
+      // per-server container/pod health (spec: remote-container-health) and
+      // backups run concurrently, each bounded, over one cluster snapshot per
+      // k8s cluster. Independent of noLocal: that flag is about THIS
+      // machine's dev stack.
+      const {
+        replication: replicationResult,
+        containers: containersResult,
+        backups: backupsResult,
+      } = await checkEnvironmentRemote(envName, envConfig, projectConfig.projectName);
       checks.replication =
         replicationResult.status === 'fulfilled' ? replicationResult.value : null;
       const containers = containersResult.status === 'fulfilled' ? containersResult.value : null;

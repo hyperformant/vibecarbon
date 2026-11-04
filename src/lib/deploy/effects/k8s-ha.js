@@ -44,6 +44,7 @@ import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provid
 import { summarizePulumiError } from '../../iac/index.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor } from '../../providers/index.js';
+import { haClassMessage } from '../../sizing.js';
 import { createPrefixedTracker } from '../../tracker.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { copyAppImageToStandby } from '../k8s/ha/image-copy.js';
@@ -190,15 +191,21 @@ async function haK8sProvisionClusters(ctx) {
     );
   }
 
-  if (
-    standbyMasterType !== primaryMasterType ||
-    standbyDbType !== primaryDbType ||
-    standbyWorkerType !== primaryWorkerType
-  ) {
-    p.log.info(
-      `Standby server types adjusted for ${standbyRegion}: ` +
-        `master=${standbyMasterType}, db=${standbyDbType}, worker=${standbyWorkerType}`,
-    );
+  // Only when this deploy sizes the standby (not a redeploy that keeps the
+  // one on record), as compose-ha: `Standby server types adjusted for
+  // <region>: ...` when the standby's sizes differ from the primary's, and
+  // which CPU class the two sides run and why, one class for both whenever
+  // the two locations share one (src/lib/sizing.js haClassMessage), else a
+  // warning naming the difference and what can fix it.
+  if (standby.newlySized) {
+    const classMessage = haClassMessage(Provider, {
+      primaryRegion,
+      standbyRegion,
+      primary: { master: primaryMasterType, db: primaryDbType, worker: primaryWorkerType },
+      standby: { master: standbyMasterType, db: standbyDbType, worker: standbyWorkerType },
+      environment: options.environment,
+    });
+    if (classMessage) p.log[classMessage.level](classMessage.line);
   }
 
   // Diagnostic: confirm image tag and services config reach BOTH clusters.

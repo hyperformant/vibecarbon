@@ -306,3 +306,106 @@ describe('TLS phase (verifyK8sTls)', () => {
     await expectNoKeyLeak(live, () => verifyK8sTls({ ...ARGS, deps: h.deps }));
   });
 });
+
+describe('TLS phase: re-issue of a restored certificate (tls-reissue-watch.js)', () => {
+  const RESTORED_AT = '2026-11-01T10:00:05.400Z';
+
+  it('a trusted deploy that restored a snapshot runs the one-shot check on the primary', async () => {
+    const h = harness({ ok: true, status: '200', attempts: 1 });
+    const reissueCheck = vi.fn(async () => {});
+    await verifyK8sTls({ ...ARGS, tlsRestoredAt: RESTORED_AT, deps: { ...h.deps, reissueCheck } });
+    expect(reissueCheck).toHaveBeenCalledTimes(1);
+    const [args] = reissueCheck.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(args).toMatchObject({ restoredAt: RESTORED_AT, domain: DOMAIN, environment: 'prod' });
+    expect((args.runKubectl as unknown as { kubeconfig: string }).kubeconfig).toBe(ARGS.kubeconfig);
+    (args.warn as (m: string) => void)('re-issued');
+    expect(warn).toHaveBeenCalledWith('re-issued');
+  });
+
+  it('the check warns end to end when a request follows the restore', async () => {
+    const h = harness({ ok: true, status: '200', attempts: 1 });
+    const cert = JSON.stringify({
+      metadata: { name: 'vibecarbon-tls', creationTimestamp: '2026-11-01T10:00:07Z' },
+      status: { revision: 1, conditions: [] },
+    });
+    const requests = JSON.stringify({
+      items: [
+        {
+          metadata: {
+            name: 'vibecarbon-tls-1',
+            creationTimestamp: '2026-11-01T10:00:07Z',
+            annotations: { 'cert-manager.io/certificate-name': 'vibecarbon-tls' },
+          },
+        },
+      ],
+    });
+    const events = JSON.stringify({
+      items: [
+        {
+          reason: 'Issuing',
+          message: 'Issuing certificate as Secret does not exist',
+          lastTimestamp: '2026-11-01T10:00:07Z',
+        },
+      ],
+    });
+    h.deps.kubectlFor = vi.fn(() =>
+      vi.fn(async (argv: string[]) => {
+        const a = argv.join(' ');
+        if (a.includes('get certificaterequests')) return requests;
+        if (a.includes('get certificate ')) return cert;
+        if (a.includes('get events')) return events;
+        return '';
+      }),
+    ) as never;
+    await verifyK8sTls({ ...ARGS, tlsRestoredAt: RESTORED_AT, deps: h.deps });
+    const lines = warn.mock.calls.map((c) => String(c[0]));
+    const line = lines.find((l) => l.includes('CertificateRequest vibecarbon-tls-1'));
+    expect(line).toContain('Issuing certificate as Secret does not exist');
+    expect(line).toContain('`vibecarbon diagnose prod`');
+  });
+
+  it('no restore, a pending TLS, or no kubeconfig: no check', async () => {
+    const reissueCheck = vi.fn(async () => {});
+    const h1 = harness({ ok: true, status: '200', attempts: 1 });
+    await verifyK8sTls({ ...ARGS, deps: { ...h1.deps, reissueCheck } });
+    const h2 = harness({ ok: false, attempts: 3 });
+    await verifyK8sTls({ ...ARGS, tlsRestoredAt: RESTORED_AT, deps: { ...h2.deps, reissueCheck } });
+    const h3 = harness({ ok: true, status: '200', attempts: 1 });
+    h3.deps.kubeconfigExists = vi.fn(() => false);
+    await verifyK8sTls({ ...ARGS, tlsRestoredAt: RESTORED_AT, deps: { ...h3.deps, reissueCheck } });
+    expect(reissueCheck).not.toHaveBeenCalled();
+  });
+
+  it('the deploy hands the TLS phase the restore time of the single cluster or the HA primary', () => {
+    const k8s = SRC.slice(SRC.indexOf('// --- Verifiable success gate for k8s ---'));
+    const call = k8s.slice(k8s.indexOf('verifyK8sTls('), k8s.indexOf('verifyK8sTls(') + 600);
+    expect(call).toMatch(
+      /tlsRestoredAt:\s+deployResult\?\.tlsRestoredAt \?\? deployResult\?\.primary\?\.tlsRestoredAt \?\? null/,
+    );
+  });
+});
+
+describe('deploy timing records (k3s.js)', () => {
+  const K3S = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf8');
+
+  it('the restore records its write, and the apply records the Certificate and the controller', () => {
+    const restore = K3S.indexOf('restoreK8sTlsSecret({');
+    const wrote = K3S.indexOf('tlsRestoreTimingLine(timingKubectl, tlsRestoredAt)');
+    const apply = K3S.indexOf("runKubectlWithRetry(['apply', '-k', baseDir]");
+    const after = K3S.indexOf('tlsApplyTimingLines(timingKubectl)');
+    expect(restore).toBeGreaterThan(-1);
+    expect(wrote).toBeGreaterThan(restore);
+    expect(apply).toBeGreaterThan(wrote);
+    expect(after).toBeGreaterThan(apply);
+    // Stamped only when the restore wrote the Secret.
+    expect(K3S.slice(restore, wrote)).toMatch(
+      /if \(tlsRestore\.restored\) \{\s*tlsRestoredAt = new Date\(\)\.toISOString\(\);/,
+    );
+  });
+
+  it('the restore time travels out of applyK3sManifests and deployK3s', () => {
+    expect(K3S).toMatch(/return \{ tlsRestoredAt \};\n\}/);
+    expect(K3S).toMatch(/tlsRestoredAt = applied\?\.tlsRestoredAt \?\? null;/);
+    expect(K3S).toMatch(/imageTag,\n {4}tlsRestoredAt,\n {2}\};/);
+  });
+});

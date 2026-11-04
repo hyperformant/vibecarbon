@@ -308,6 +308,29 @@ export class HetznerProvider extends BaseProvider {
     worker: ['cpx22', 'cx23', 'cpx21'],
   };
 
+  // x86 CPU classes (see BaseProvider.CPU_CLASSES): cost-optimized `cx`,
+  // regular shared AMD `cpx`, dedicated `ccx`. Ranked by price, not speed:
+  // no Hetzner run has measured a gap between cx and cpx, and cx23 costs
+  // about a quarter of cpx22, so an HA pair takes cx23 on both sides when
+  // both locations stock it and cpx on both when either does not (never a
+  // cx23 primary beside a cpx22 standby). `cax` is ARM and has no class.
+  static CPU_CLASSES = ['cx', 'cpx', 'ccx'];
+
+  static CPU_CLASS_LABELS = {
+    cx: 'cost-optimized (cx)',
+    cpx: 'regular AMD (cpx)',
+    ccx: 'dedicated (ccx)',
+  };
+
+  /**
+   * @param {string} type
+   * @returns {string|null}
+   */
+  static cpuClassOf(type) {
+    const family = typeof type === 'string' ? /^(ccx|cpx|cx)\d/.exec(type)?.[1] : undefined;
+    return family ?? null;
+  }
+
   // Billed primary IPv4 per server per month, USD: GET /v1/pricing
   // `primary_ips` (type ipv4, price_monthly.net 0.60 in every location),
   // read 2026-10-22.

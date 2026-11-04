@@ -18,8 +18,8 @@
  * view), and both views unavailable.
  *
  * checkReplication (src/status.js) threads both rows through its existing
- * deps-injection pattern — sshKubectl/getPostgresPod/getSSHKeyPath/sshRun —
- * so this stubs those instead of mocking the ssh.js module wholesale.
+ * deps-injection pattern (sshKubectl, the cluster snapshots that name the db
+ * pods, getSSHKeyPath, sshRun), so this stubs those instead of mocking the ssh.js module wholesale.
  */
 
 import { fileURLToPath } from 'node:url';
@@ -30,6 +30,7 @@ import {
   formatReplicationLagLine,
 } from '../../../src/lib/deploy/replication.js';
 import { checkReplication } from '../../../src/status.js';
+import { dbPodSnapshots } from '../../_shared/cluster-snapshot.js';
 import { withSshContract } from '../../_shared/ssh-contract.js';
 
 describe('buildPrimaryLagQuery', () => {
@@ -114,7 +115,7 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
   });
 
   function makeDeps({ primaryLagOut, standbyOut, byteLagOut = 'streaming|1024' }) {
-    const getPostgresPod = vi.fn(async (ip) => (ip === PRIMARY_IP ? 'primary-pod' : 'standby-pod'));
+    const snapshots = dbPodSnapshots((ip) => (ip === PRIMARY_IP ? 'primary-pod' : 'standby-pod'));
     const sshKubectl = vi.fn(async (ip, _key, argv) => {
       const sql = argv[argv.length - 1];
       if (ip === PRIMARY_IP) {
@@ -124,7 +125,7 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
       throw new Error(`unexpected sshKubectl call: ip=${ip} sql=${sql}`);
     });
     return {
-      getPostgresPod,
+      snapshots,
       sshKubectl,
       sshRun: withSshContract(vi.fn()),
       getSSHKeyPath: vi.fn(() => FAKE_KEY_PATH),
@@ -176,6 +177,40 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
     );
   });
 
+  // The snapshot read fine and holds no db pod: that is a finding (no
+  // database to replicate from), not a read that failed.
+  it('a primary cluster with no db pod is not streaming, a verdict rather than unreadable', async () => {
+    const deps = {
+      ...makeDeps({ primaryLagOut: '', standbyOut: '' }),
+      snapshots: { get: vi.fn(async () => ({ nodes: [], pods: [], jobs: [] })) },
+    };
+    const result = await checkReplication('prod', k8sHaEnvConfig(), 'myproj', deps);
+    expect(result).toMatchObject({
+      streaming: false,
+      state: 'no app=vibecarbon-db pod in namespace vibecarbon',
+    });
+    expect(result).not.toHaveProperty('error');
+    expect(deps.sshKubectl).not.toHaveBeenCalled();
+  });
+
+  it('a failed snapshot leaves the row unreadable, with the reason', async () => {
+    const deps = {
+      ...makeDeps({ primaryLagOut: '', standbyOut: '' }),
+      snapshots: {
+        get: vi.fn(async () => {
+          throw new Error('cluster snapshot failed: ssh timeout');
+        }),
+      },
+    };
+    const result = await checkReplication('prod', k8sHaEnvConfig(), 'myproj', deps);
+    expect(result).toMatchObject({
+      streaming: false,
+      state: 'unknown',
+      error: 'cluster snapshot failed: ssh timeout',
+    });
+    expect(deps.sshKubectl).not.toHaveBeenCalled();
+  });
+
   it('compose-ha stays out of scope: never attempts a standby-side query', async () => {
     const envConfig = {
       deployMode: 'compose-ha',
@@ -192,7 +227,7 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
     const deps = {
       sshRun: withSshContract(sshRun),
       sshKubectl,
-      getPostgresPod: vi.fn(),
+      snapshots: { get: vi.fn() },
       getSSHKeyPath: vi.fn(() => FAKE_KEY_PATH),
       timeoutMs: 5000,
     };

@@ -153,7 +153,13 @@ import {
   awaitPostgresPromoted,
   watchAppMigrationFailure,
 } from './readiness.js';
-import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-restore.js';
+import { tlsApplyTimingLines, tlsRestoreTimingLine } from './tls-reissue-watch.js';
+import {
+  CERT_MANAGER_MIN_BACKOFF,
+  k8sTlsRestoreLine,
+  quietKubectl,
+  restoreK8sTlsSecret,
+} from './tls-restore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -3383,6 +3389,9 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
  *   writable (finishDeployRestore) before the marker is cleared and the app
  *   rolls. The app's migrate init container then applies what the backup
  *   lacks.
+ * @returns {Promise<{ tlsRestoredAt: string|null }>} when this apply's TLS
+ *   restore wrote Secret/vibecarbon-tls (null when it wrote nothing), for the
+ *   TLS phase's re-issue check (tls-reissue-watch.js)
  */
 export async function applyK3sManifests({
   kubeconfig,
@@ -4179,6 +4188,11 @@ export async function applyK3sManifests({
   // controller did not roll (step 1), so this returns on its first read; on a
   // cold one it waits out the first leader election. One bounded wait.
   await perfAsync(`deploy.${perfPrefix}.certManager.leader`, () => awaitCertManagerLeader({ env }));
+  // When this deploy's restore wrote Secret/vibecarbon-tls (operator clock),
+  // returned so the TLS phase can tell a re-issue after it.
+  let tlsRestoredAt = null;
+  // Its reads are records, never gates: a short bound each.
+  const timingKubectl = quietKubectl(env, { timeoutMs: 10_000 });
   try {
     // The last issued certificate goes back into Secret/vibecarbon-tls before
     // this apply creates the Certificate, so cert-manager finds a Secret that
@@ -4198,6 +4212,13 @@ export async function applyK3sManifests({
         }),
       );
       progressLog(`[k3s] ${k8sTlsRestoreLine(tlsRestore)}`);
+      // Timing records for a re-issue of a restored certificate
+      // (tls-reissue-watch.js): when the write landed, then when the
+      // Certificate was created and which controller held the lease.
+      if (tlsRestore.restored) {
+        tlsRestoredAt = new Date().toISOString();
+        progressLog(`[k3s] ${await tlsRestoreTimingLine(timingKubectl, tlsRestoredAt)}`);
+      }
     }
     await perfAsync(`deploy.${perfPrefix}.applyBase`, () =>
       runKubectlWithRetry(['apply', '-k', baseDir], {
@@ -4205,6 +4226,11 @@ export async function applyK3sManifests({
         description: 'applyK3sManifests: kubectl apply -k k8s/base',
       }),
     );
+    if (!pilotStandby) {
+      for (const line of await tlsApplyTimingLines(timingKubectl)) {
+        progressLog(`[k3s] ${line}`);
+      }
+    }
   } finally {
     // The rendered copy carries the bucket + endpoint wiring; it served its
     // one apply.
@@ -4724,6 +4750,7 @@ export async function applyK3sManifests({
   } catch (err) {
     progressLog(`[k3s] traefik post-apply restart warning: ${err.message?.split('\n')[0] || err}`);
   }
+  return { tlsRestoredAt };
 }
 
 /**
@@ -5412,11 +5439,14 @@ async function deployK3sSteps(options, inFlight) {
     imageInRegistry: () =>
       primaryRegistryHasImage({ masterIp, sshKeyPath: privateKeyPath, imageTag }),
   });
+  // When the apply's restore wrote Secret/vibecarbon-tls; null when it did
+  // not (or the apply was skipped). The TLS phase reads it.
+  let tlsRestoredAt = null;
   if (!skipApply) {
     state.startStep('k3s-apply', applyInputs);
     s.start('Applying k8s manifests + starting the database + rolling out app');
     const envLocal = loadEnvLocal(join(projectDir, '.env.local'));
-    await perfAsync(`deploy.${perfPrefix}.applyManifests`, () =>
+    const applied = await perfAsync(`deploy.${perfPrefix}.applyManifests`, () =>
       applyK3sManifests({
         inFlight,
         perfPrefix,
@@ -5482,6 +5512,7 @@ async function deployK3sSteps(options, inFlight) {
         vpcCidr,
       }),
     );
+    tlsRestoredAt = applied?.tlsRestoredAt ?? null;
     state.completeStep('k3s-apply');
     s.stop('App rolled out');
   } else {
@@ -5570,5 +5601,6 @@ async function deployK3sSteps(options, inFlight) {
     kubeconfig,
     sshKeyPath: privateKeyPath,
     imageTag,
+    tlsRestoredAt,
   };
 }

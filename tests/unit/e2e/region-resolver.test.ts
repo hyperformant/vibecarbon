@@ -181,26 +181,35 @@ describe('scale target candidates', () => {
   const DO_LADDER = {
     's-2vcpu-4gb': ['s-4vcpu-8gb', 's-4vcpu-8gb-intel'],
     's-2vcpu-4gb-amd': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb-intel'],
+    's-2vcpu-4gb-intel': 's-4vcpu-8gb-intel',
   };
   const sfo3: CapacityPreferences = { regions: ['sfo3'], scaleTo: DO_LADDER };
+  const NYC3_EMPTY = {
+    nyc3: [
+      ...['s-1vcpu-2gb', 's-2vcpu-4gb', 's-4vcpu-8gb'],
+      ...['s-1vcpu-2gb-amd', 's-2vcpu-4gb-amd', 's-4vcpu-8gb-amd'],
+    ],
+  };
   const doOpts = { provider: 'digitalocean', mode: 'compose-ha', loadCatalog: seeded } as const;
 
-  it('resolves a mixed -amd / plain HA pair to the -intel target both sides sell', async () => {
-    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
+  it('puts an sfo3 + tor1 pair on -intel on both sides, as the deploy wizard does', async () => {
+    // nyc3 listed no sizes on 2026-11-02, which leaves tor1 as sfo3's partner.
+    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean', { drop: NYC3_EMPTY });
     const { primary, standby } = await resolveCapacityPair(sfo3, 't', doOpts);
     expect(primary.region).toBe('sfo3');
     expect(standby.region).toBe('tor1');
-    expect(primary.types.compose).toBe('s-2vcpu-4gb-amd');
-    expect(standby.types.compose).toBe('s-2vcpu-4gb');
+    // Alone, sfo3 would take -amd; tor1 sells no -amd, so both run -intel.
+    expect(primary.types.compose).toBe('s-2vcpu-4gb-intel');
+    expect(standby.types.compose).toBe('s-2vcpu-4gb-intel');
     expect(primary.scaleTarget).toBe('s-4vcpu-8gb-intel');
     expect(standby.scaleTarget).toBe('s-4vcpu-8gb-intel');
   });
 
   it('refuses a pair with no common candidate, naming every candidate and why', async () => {
-    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean');
+    restore = seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean', { drop: NYC3_EMPTY });
     const only: CapacityPreferences = {
       regions: ['sfo3'],
-      scaleTo: { ...DO_LADDER, 's-2vcpu-4gb-amd': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb'] },
+      scaleTo: { ...DO_LADDER, 's-2vcpu-4gb-intel': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb'] },
     };
     const err = await resolveCapacityPair(only, 't', doOpts).then(
       () => null,

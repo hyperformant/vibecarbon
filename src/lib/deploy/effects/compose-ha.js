@@ -38,6 +38,7 @@ import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provid
 import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { haClassMessage, haStandbyType } from '../../sizing.js';
 import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
@@ -179,12 +180,19 @@ async function haProvisionServers(ctx) {
   // chose (getDefaultStandbyRegion picked it).
   //
   // A type the standby region does not stock is re-picked there for the
-  // compose role (src/lib/sizing.js standbyStandIn): the cheapest stocked
-  // candidate, never smaller than the primary's type.
+  // compose role (src/lib/sizing.js haStandbyType): the cheapest stocked
+  // candidate with at least the primary type's vCPUs and RAM, in the
+  // primary's CPU class where the standby location sells it, so the two
+  // sides run the same class of hardware whenever they can (a slower standby
+  // was the critical path of a measured HA deploy). When no candidate there
+  // has the vCPUs, the RAM alone decides (the old stand-in rule), so a
+  // standby can then have fewer vCPUs than its primary, and the deploy's
+  // class warning says so.
   //
-  // resolveServerTypeForRegion also carries the ARM->x86 rescue (vibecarbon is
-  // amd64-only, see deploy/platform.js), so an environment predating that
-  // standardization converges here too.
+  // haStandbyType keeps the provider's ARM->x86 rescue
+  // (resolveServerTypeForRegion; vibecarbon is amd64-only, see
+  // deploy/platform.js), so an environment predating that standardization
+  // converges here too.
   //
   // A compose scale replaces a server outside the programs and records its new
   // type on that server's servers[] entry (a primary-only scale leaves the
@@ -210,8 +218,7 @@ async function haProvisionServers(ctx) {
   const primaryStackServerType = recordedType('primary') ?? serverType;
   ctx.primaryStackServerType = primaryStackServerType;
   const standbyServerType =
-    recordedType('standby') ??
-    Provider.resolveServerTypeForRegion(serverType, standbyRegion, 'compose');
+    recordedType('standby') ?? haStandbyType(Provider, serverType, standbyRegion, 'compose');
   if (!standbyServerType) {
     // The deploy wizard refuses this before anything is created; a direct
     // caller gets the same cause rather than a null type at the provider.
@@ -220,10 +227,18 @@ async function haProvisionServers(ctx) {
     );
   }
   ctx.standbyServerType = standbyServerType;
-  if (!recordedType('standby') && standbyServerType !== serverType) {
-    p.log.info(
-      `Standby server type adjusted for ${standbyRegion}: ${serverType} -> ${standbyServerType}`,
-    );
+  // Which CPU class each side runs and why, led by the adjusted sizes when
+  // the standby's differs (one class for both whenever the two locations
+  // share one, src/lib/sizing.js haClassMessage).
+  if (!recordedType('standby')) {
+    const message = haClassMessage(Provider, {
+      primaryRegion: primaryStackRegion,
+      standbyRegion,
+      primary: { compose: primaryStackServerType },
+      standby: { compose: standbyServerType },
+      environment,
+    });
+    if (message) p.log[message.level](message.line);
   }
 
   // Generate SSH key pair
