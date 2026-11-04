@@ -54,6 +54,10 @@ import {
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../../carbon/scripts/render-backup-settings.mjs';
+import {
+  kubectlFloorProblem,
+  writeCertManagerKustomization,
+} from '../../../../carbon/scripts/render-cert-manager.mjs';
 import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
@@ -128,17 +132,13 @@ import {
 import {
   awaitAppAdminReady,
   awaitCertManagerAdmission,
+  awaitCertManagerLeader,
   awaitControlPlaneServing,
   awaitPostgresAccepting,
   awaitPostgresPromoted,
   watchAppMigrationFailure,
 } from './readiness.js';
-import {
-  CERT_MANAGER_MIN_BACKOFF,
-  k8sTlsRestoreLine,
-  quietKubectl,
-  restoreK8sTlsSecret,
-} from './tls-restore.js';
+import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-restore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1340,8 +1340,6 @@ export async function fetchKubeconfig(masterIp, sshKeyPath, khPath, projectDir, 
   return localPath;
 }
 
-const CERT_MANAGER_VERSION = 'v1.20.2';
-const CERT_MANAGER_URL = `https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml`;
 /**
  * The two images of the `cluster-autoscaler` pod (upstream CA + our
  * carbon-autoscaler sidecar), pre-pulled FIRST on every node.
@@ -3271,83 +3269,6 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
 }
 
 /**
- * The flags the cert-manager controller runs with, appended when absent:
- *
- * - The DNS-01 SELF-CHECK goes to public recursive resolvers instead of the
- *   zone's authoritative servers. cert-manager's default self-check dials
- *   the authoritative NS directly from the pod; both Hetzner DNS and
- *   DigitalOcean DNS are served through ANYCAST fleets, and the POP a given
- *   region's egress lands on can lag a freshly-written record by many
- *   minutes (d4 run 3, 2026-08-28: the TXT was visible from every external
- *   vantage and via the cluster's own CoreDNS, while the sfo3 pod's direct
- *   query to the same anycast IP returned empty, and the issuance sat "not
- *   yet propagated" indefinitely). Let's Encrypt validates from ITS OWN
- *   vantage, not ours, so gating issuance on the one stale POP we happen to
- *   egress through is strictly worse than gating on a public recursive answer.
- * - The minimum backoff after a failed CertificateRequest is
- *   CERT_MANAGER_MIN_BACKOFF instead of cert-manager's 1 hour. A first
- *   issuance that misses the deploy's first look is retried within minutes
- *   while the deploy has already finished with TLS pending.
- */
-export const CERT_MANAGER_CONTROLLER_FLAGS = Object.freeze([
-  '--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53',
-  '--dns01-recursive-nameservers-only',
-  `--certificate-request-minimum-backoff-duration=${CERT_MANAGER_MIN_BACKOFF}`,
-]);
-
-/**
- * Idempotent test-and-set of CERT_MANAGER_CONTROLLER_FLAGS on the
- * cert-manager controller: one read, and one json patch appending only the
- * flags that are absent, so warm re-deploys never duplicate.
- *
- * @param {{ env: NodeJS.ProcessEnv, kubectl?: typeof runKubectlWithRetry }} args
- */
-export async function ensureCertManagerControllerFlags({ env, kubectl = runKubectlWithRetry }) {
-  const raw = await kubectl(
-    ['-n', 'cert-manager', 'get', 'deployment', 'cert-manager', '-o', 'json'],
-    { env, captureStdout: true, description: 'applyK3sManifests: read cert-manager args' },
-  );
-  let dep;
-  try {
-    dep = JSON.parse(raw?.toString() ?? '{}');
-  } catch {
-    // Unreadable deployment JSON: skip the patch rather than fail the
-    // deploy. Without the flags cert-manager falls back to its defaults
-    // (authoritative-direct self-check, 1h backoff), which is the pre-fix
-    // behavior, not an outage. The next deploy sets them.
-    progressLog('[k3s] cert-manager args unreadable, skipping the controller flags patch.');
-    return;
-  }
-  const containers = dep?.spec?.template?.spec?.containers ?? [];
-  const idx = containers.findIndex((c) => c?.name === 'cert-manager-controller');
-  const controllerIdx = idx >= 0 ? idx : 0;
-  const existing = containers[controllerIdx]?.args ?? [];
-  const missing = CERT_MANAGER_CONTROLLER_FLAGS.filter((f) => !existing.includes(f));
-  if (missing.length === 0) {
-    progressLog('[k3s] cert-manager controller flags already present.');
-    return;
-  }
-  const ops = missing.map((value) => ({
-    op: 'add',
-    path: `/spec/template/spec/containers/${controllerIdx}/args/-`,
-    value,
-  }));
-  await kubectl(
-    [
-      '-n',
-      'cert-manager',
-      'patch',
-      'deployment',
-      'cert-manager',
-      '--type=json',
-      '-p',
-      JSON.stringify(ops),
-    ],
-    { env, description: 'applyK3sManifests: cert-manager controller flags' },
-  );
-}
-
-/**
  * Apply cert-manager + the app and infra Secrets + the project's k8s/infra +
  * k8s/base kustomizations (the db StatefulSet included, rendered), wait for
  * the db, deliver the app image into the master's registry (primary only),
@@ -3805,66 +3726,38 @@ export async function applyK3sManifests({
     caStop.abort();
     await clusterAutoscalerReady.catch(() => {});
   };
-  // 1. Install cert-manager (raw YAML; not a kustomize base).
-  await perfAsync(`deploy.${perfPrefix}.certManager.install`, () =>
-    runKubectlWithRetry(['apply', '-f', CERT_MANAGER_URL], {
-      env,
-      description: 'applyK3sManifests: kubectl apply cert-manager',
-    }),
-  );
-  // 1b. Pin all three cert-manager Deployments to the control-plane node —
-  //     the same idiom the cluster-autoscaler manifest uses. The in-cluster
-  //     `kubernetes` Endpoints advertises the master's PUBLIC IP (k3s
-  //     installs with --node-ip=<public>, see the CCM note near the
-  //     traefik restart), and the Hetzner firewall admits public :6443
-  //     from operator CIDRs only — so an apiserver-dependent pod scheduled
-  //     onto any OTHER node times out on 10.43.0.1 forever. RCA 2026-07-17
-  //     e4 rig: whenever the scheduler picked a worker, cainjector went
-  //     CrashLoopBackOff ("dial tcp 10.43.0.1:443: i/o timeout") and the
-  //     webhook's readiness probe returned 500 until the 8-min budget
-  //     died; on the (worker-less) pilot-light standby the same pods
-  //     landed on the master and were Ready in seconds. The 2026-06-01
-  //     "cold image pulls push cainjector past the envelope" observation
-  //     below was this same lockout wearing a latency costume — the pin
-  //     removes the scheduling coin-flip on every cluster shape.
-  const certManagerPin = JSON.stringify({
-    spec: {
-      template: {
-        spec: {
-          nodeSelector: { 'node-role.kubernetes.io/control-plane': 'true' },
-          tolerations: [
-            {
-              key: 'node-role.kubernetes.io/control-plane',
-              operator: 'Exists',
-              effect: 'NoSchedule',
-            },
-          ],
-        },
-      },
-    },
-  });
-  for (const certDeploy of ['cert-manager', 'cert-manager-cainjector', 'cert-manager-webhook']) {
-    await runKubectlWithRetry(
-      [
-        '-n',
-        'cert-manager',
-        'patch',
-        'deployment',
-        certDeploy,
-        '--type=strategic',
-        '-p',
-        certManagerPin,
-      ],
-      { env, description: `applyK3sManifests: pin ${certDeploy} to control-plane` },
+  // 1. Install cert-manager: ONE apply of the upstream manifest with our
+  //    settings rendered in as kustomize patches
+  //    (carbon/scripts/render-cert-manager.mjs, shared with the GitOps
+  //    workflow): the controller flags (DNS-01 self-check through public
+  //    recursive resolvers, a 5 minute minimum backoff) and the control-plane
+  //    pin of all three Deployments.
+  //
+  //    Nothing patches a cert-manager Deployment after this apply
+  //    (tests/unit/deploy/cert-manager-no-post-apply-patch-census.test.ts).
+  //    The upstream args are a plain list, so this client-side apply used to
+  //    replace them and a json patch then appended the flags again: the
+  //    controller rolled twice on every deploy, warm redeploys included, and
+  //    a controller handoff can miss the restored Secret/vibecarbon-tls and
+  //    issue a new certificate. Rendered in, a warm re-apply is a no-op.
+  //
+  //    The pin: the in-cluster `kubernetes` Endpoints advertises the master's
+  //    PUBLIC IP (k3s installs with --node-ip=<public>), and the firewall
+  //    admits public :6443 from operator CIDRs only, so an apiserver-dependent
+  //    pod scheduled onto any other node times out on 10.43.0.1 forever (RCA
+  //    2026-07-17 e4 rig: cainjector CrashLoopBackOff, webhook readiness 500).
+  const certManagerDir = mkdtempSync(join(tmpdir(), 'vibecarbon-cert-manager-'));
+  try {
+    writeCertManagerKustomization(certManagerDir);
+    await perfAsync(`deploy.${perfPrefix}.certManager.install`, () =>
+      runKubectlWithRetry(['apply', '-k', certManagerDir], {
+        env,
+        description: 'applyK3sManifests: kubectl apply -k cert-manager',
+      }),
     );
+  } finally {
+    rmSync(certManagerDir, { recursive: true, force: true });
   }
-  // 1c. cert-manager controller flags (ensureCertManagerControllerFlags):
-  //     the DNS-01 self-check through public recursive resolvers, and a
-  //     5 minute minimum backoff after a failed issuance. One read, at most
-  //     one patch, before the readiness wait so the rollout carries them.
-  await perfAsync(`deploy.${perfPrefix}.certManager.recursiveNameservers`, () =>
-    ensureCertManagerControllerFlags({ env }),
-  );
   // 2. Wait for cert-manager to be ready before applying ClusterIssuers.
   // Fan out the three deploys in parallel: kubectl wait blocks per-arg
   // sequentially, and the cainjector + webhook usually become Available
@@ -4173,6 +4066,13 @@ export async function applyK3sManifests({
     // never patched (and so restarted) to gain it later.
     { replicationHostPort: rendersReplicationHostPort(role) },
   );
+  // The cert-manager controller is SETTLED before the restored Secret and the
+  // Certificate land: its rollout complete and the leader lease held by a pod
+  // of the current ReplicaSet. A handoff in that window can miss the Secret in
+  // the new leader's cache and issue a new certificate. On a warm deploy the
+  // controller did not roll (step 1), so this returns on its first read; on a
+  // cold one it waits out the first leader election. One bounded wait.
+  await perfAsync(`deploy.${perfPrefix}.certManager.leader`, () => awaitCertManagerLeader({ env }));
   try {
     // The last issued certificate goes back into Secret/vibecarbon-tls before
     // this apply creates the Certificate, so cert-manager finds a Secret that
@@ -5041,6 +4941,13 @@ async function deployK3sSteps(options, inFlight) {
       throw new Error(`Required tool '${tool}' not found on PATH`);
     }
   }
+  // The cert-manager install is a kustomization over the release manifest's
+  // URL (render-cert-manager.mjs), which needs kubectl's built-in kustomize v5.
+  const kubectlVersion = await runCommandAsync(['kubectl', 'version', '--client', '-o', 'json'], {
+    silent: true,
+  }).catch(() => '');
+  const kubectlTooOld = kubectlFloorProblem(String(kubectlVersion ?? ''));
+  if (kubectlTooOld) throw new Error(kubectlTooOld);
   s.stop('Preflight OK');
 
   // 1b. The app image build, started now so it runs while Pulumi provisions
