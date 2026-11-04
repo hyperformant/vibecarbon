@@ -1,0 +1,90 @@
+-- Boot Record 01 --
+The total time elapsed since completing an event is printed after the "@" character.
+The time the event takes is printed after the "+" character.
+
+Starting stage: init-local
+|`->running check-cache with frequency once-per-instance @00.00000s +00.00200s
+|`->running search-Hetzner with frequency once-per-instance @00.00200s +01.28400s
+Finished stage: (init-local) 01.29600 seconds
+
+Starting stage: init-network
+|`->running check-cache with frequency once-per-instance @02.39600s +00.00100s
+|`->running setup-datasource with frequency once-per-instance @02.39700s +00.00000s
+|`->running consume-user-data with frequency once-per-instance @02.39700s +00.01200s
+|`->running consume-vendor-data with frequency once-per-instance @02.40900s +00.00000s
+|`->running consume-vendor-data2 with frequency once-per-instance @02.40900s +00.00000s
+|`->running activate-datasource with frequency once-per-instance @02.40900s +00.00100s
+|`->config-seed_random ran successfully and took 0.001 seconds @02.41000s +00.00100s
+|`->config-bootcmd ran successfully and took 0.000 seconds @02.41100s +00.00000s
+|`->config-write_files ran successfully and took 0.004 seconds @02.41100s +00.00400s
+|`->config-growpart ran successfully and took 0.412 seconds @02.41500s +00.41200s
+|`->config-resizefs ran successfully and took 0.083 seconds @02.82700s +00.08300s
+|`->config-mounts ran successfully and took 0.002 seconds @02.91000s +00.00200s
+|`->config-set_hostname ran successfully and took 0.011 seconds @02.91200s +00.01100s
+|`->config-update_hostname ran successfully and took 0.001 seconds @02.92300s +00.00100s
+|`->config-update_etc_hosts ran successfully and took 0.001 seconds @02.92400s +00.00100s
+|`->config-users_groups ran successfully and took 0.087 seconds @02.92500s +00.08700s
+|`->config-ssh ran successfully and took 0.611 seconds @03.01200s +00.61100s
+Finished stage: (init-network) 01.23700 seconds
+
+Starting stage: modules-config
+|`->config-wireguard ran successfully and took 0.000 seconds @04.03300s +00.00000s
+|`->config-snap ran successfully and took 0.001 seconds @04.03300s +00.00100s
+|`->config-ubuntu_autoinstall ran successfully and took 0.000 seconds @04.03400s +00.00000s
+|`->config-apt_configure ran successfully and took 0.203 seconds @04.03400s +00.20300s
+|`->config-ntp ran successfully and took 0.000 seconds @04.23700s +00.00000s
+|`->config-timezone ran successfully and took 0.001 seconds @04.23700s +00.00100s
+|`->config-runcmd ran successfully and took 0.002 seconds @04.23800s +00.00200s
+|`->config-byobu ran successfully and took 0.000 seconds @04.24000s +00.00000s
+Finished stage: (modules-config) 00.21700 seconds
+
+Starting stage: modules-final
+|`->config-package_update_upgrade_install ran successfully and took 0.000 seconds @04.55000s +00.00000s
+|`->config-write_files_deferred ran successfully and took 0.000 seconds @04.55000s +00.00000s
+|`->config-reset_rmc ran successfully and took 0.000 seconds @04.55000s +00.00000s
+|`->config-scripts_vendor ran successfully and took 0.001 seconds @04.55000s +00.00100s
+|`->config-scripts_per_once ran successfully and took 0.000 seconds @04.55100s +00.00000s
+|`->config-scripts_per_boot ran successfully and took 0.000 seconds @04.55100s +00.00000s
+|`->config-scripts_per_instance ran successfully and took 0.000 seconds @04.55100s +00.00000s
+|`->config-scripts_user ran successfully and took 141.207 seconds @04.55100s +141.20700s
+|`->config-ssh_authkey_fingerprints ran successfully and took 0.021 seconds @145.75800s +00.02100s
+|`->config-keys_to_console ran successfully and took 0.034 seconds @145.77900s +00.03400s
+|`->config-install_hotplug ran successfully and took 0.000 seconds @145.81300s +00.00000s
+|`->config-final_message ran successfully and took 0.002 seconds @145.81300s +00.00200s
+|`->config-power_state_change ran successfully and took 0.000 seconds @145.81500s +00.00000s
+Finished stage: (modules-final) 141.27500 seconds
+
+Total Time: 144.02500 seconds
+
+-- Boot Record 02 --
+The total time elapsed since completing an event is printed after the "@" character.
+The time the event takes is printed after the "+" character.
+
+Starting stage: init-local
+|`->running check-cache with frequency once-per-instance @00.00000s +00.00200s
+|`->running search-Hetzner with frequency once-per-instance @00.00200s +01.28400s
+Finished stage: (init-local) 01.29600 seconds
+
+Starting stage: init-network
+|`->running check-cache with frequency once-per-instance @02.29600s +00.00100s
+|`->running setup-datasource with frequency once-per-instance @02.29700s +00.00000s
+|`->running consume-user-data with frequency once-per-instance @02.29700s +00.01200s
+|`->running consume-vendor-data with frequency once-per-instance @02.30900s +00.00000s
+|`->running consume-vendor-data2 with frequency once-per-instance @02.30900s +00.00000s
+|`->running activate-datasource with frequency once-per-instance @02.30900s +00.00100s
+Finished stage: (init-network) 00.02400 seconds
+
+Starting stage: modules-config
+|`->config-wireguard ran successfully and took 0.000 seconds @02.52000s +00.00000s
+|`->config-snap ran successfully and took 0.001 seconds @02.52000s +00.00100s
+Finished stage: (modules-config) 00.01100 seconds
+
+Starting stage: modules-final
+|`->config-package_update_upgrade_install ran successfully and took 0.000 seconds @02.63100s +00.00000s
+|`->config-write_files_deferred ran successfully and took 0.000 seconds @02.63100s +00.00000s
+|`->config-reset_rmc ran successfully and took 0.000 seconds @02.63100s +00.00000s
+Finished stage: (modules-final) 00.01000 seconds
+
+Total Time: 1.34100 seconds
+
+2 boot records analyzed

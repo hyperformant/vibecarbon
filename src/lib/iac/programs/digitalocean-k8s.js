@@ -314,6 +314,7 @@ export function buildDigitalOceanK8sProgram(config) {
         sshKeys: [sshKeyIdForDroplet],
         tags: encodeLabels({ ...labels, role: 'master', cluster: clusterName }),
         userData: transliterateToAscii(masterUserDataRaw),
+        dropletAgent: false, // skip DO's Droplet Console agent (saves 44-68s of first boot)
       },
       // dependsOn firewall (M3 Task 5b): DO firewalls attach by tag, not by
       // droplet-id list — a droplet created before the firewall resource
@@ -410,6 +411,7 @@ export function buildDigitalOceanK8sProgram(config) {
           cluster: clusterName,
         }),
         userData: dbUserData,
+        dropletAgent: false, // skip DO's Droplet Console agent (saves 44-68s of first boot)
       },
       // dependsOn firewall explicitly (M3 Task 5b), not just transitively
       // through master — see master's own dependsOn comment.
@@ -455,12 +457,18 @@ export function buildDigitalOceanK8sProgram(config) {
               cluster: clusterName,
             }),
             userData: workerUserData,
+            dropletAgent: false, // skip DO's Droplet Console agent (saves 44-68s of first boot)
           },
           // dependsOn firewall explicitly (M3 Task 5b), not just
           // transitively through master — see master's own dependsOn
           // comment.
           workerResourceOptions('digitalocean:index/droplet:Droplet', {
             dependsOn: [master, firewall],
+            joinTarget: {
+              masterId: master.id,
+              masterPrivateIp: master.ipv4AddressPrivate,
+              k3sVersion: config.k3sVersion,
+            },
           }),
         ),
       );

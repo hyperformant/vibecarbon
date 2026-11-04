@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   awaitCertManagerAdmission,
+  awaitCertManagerLeader,
   awaitControlPlaneServing,
   awaitPostgresAccepting,
   CERT_MANAGER_ADMISSION_PROBE_MANIFEST,
+  judgeCertManagerLeader,
   // @ts-expect-error — JS module without types
 } from '../../../src/lib/deploy/k8s/readiness.js';
 
@@ -139,6 +141,215 @@ describe('awaitCertManagerAdmission', () => {
     expect(CERT_MANAGER_ADMISSION_PROBE_MANIFEST).toContain('namespace: cert-manager');
     expect(CERT_MANAGER_ADMISSION_PROBE_MANIFEST).toContain('vibecarbon-admission-probe');
     expect(CERT_MANAGER_ADMISSION_PROBE_MANIFEST).not.toContain('ClusterIssuer');
+  });
+});
+
+/**
+ * Before the deploy applies the Certificate, the cert-manager controller has
+ * finished rolling AND its leader lease (kube-system/cert-manager-controller)
+ * is held by a pod of the CURRENT ReplicaSet. A controller handoff in the
+ * window where the restored Secret/vibecarbon-tls lands can miss it in the
+ * new leader's cache and issue a new certificate (DO k8s-ha e2e 2026-11,
+ * "Issuing certificate as Secret does not exist"). One bounded wait, then a
+ * clear error.
+ */
+describe('cert-manager controller leader', () => {
+  const DEP_UID = 'dep-uid-1';
+  const dep = (over: Record<string, unknown> = {}) => ({
+    metadata: {
+      name: 'cert-manager',
+      uid: DEP_UID,
+      generation: 4,
+      annotations: { 'deployment.kubernetes.io/revision': '3' },
+    },
+    spec: { replicas: 1 },
+    status: { observedGeneration: 4, replicas: 1, updatedReplicas: 1, availableReplicas: 1 },
+    ...over,
+  });
+  const rs = (name: string, revision: string) => ({
+    metadata: {
+      name,
+      annotations: { 'deployment.kubernetes.io/revision': revision },
+      ownerReferences: [{ kind: 'Deployment', name: 'cert-manager', uid: DEP_UID }],
+    },
+  });
+  const OLD_RS = rs('cert-manager-7c9f8d6b5', '2');
+  const NEW_RS = rs('cert-manager-5d4b8c7f9', '3');
+  const lease = (holder: string | null) => ({ spec: holder ? { holderIdentity: holder } : {} });
+  const NEW_HOLDER = 'cert-manager-5d4b8c7f9-x7k2p-external-cert-manager-controller';
+  const OLD_HOLDER = 'cert-manager-7c9f8d6b5-q9w8e-external-cert-manager-controller';
+
+  describe('judgeCertManagerLeader', () => {
+    const judge = (over: Record<string, unknown>) =>
+      judgeCertManagerLeader({
+        deployment: dep(),
+        replicaSets: [OLD_RS, NEW_RS],
+        lease: lease(NEW_HOLDER),
+        ...over,
+      });
+
+    it('proceeds when the rollout is complete and a current-ReplicaSet pod holds the lease', () => {
+      expect(judge({}).ready).toBe(true);
+    });
+
+    it('refuses while an old-ReplicaSet pod holds the lease', () => {
+      const v = judge({ lease: lease(OLD_HOLDER) });
+      expect(v.ready).toBe(false);
+      expect(v.reason).toContain(OLD_HOLDER);
+      expect(v.reason).toContain('cert-manager-5d4b8c7f9');
+    });
+
+    it('refuses while the lease has no holder', () => {
+      expect(judge({ lease: lease(null) }).ready).toBe(false);
+    });
+
+    it('refuses while the rollout is in progress (old pods still running)', () => {
+      const v = judge({
+        deployment: dep({
+          status: { observedGeneration: 4, replicas: 2, updatedReplicas: 1, availableReplicas: 1 },
+        }),
+      });
+      expect(v.ready).toBe(false);
+      expect(v.reason).toMatch(/rollout/);
+    });
+
+    it('refuses before the controller observed the new generation', () => {
+      const v = judge({
+        deployment: dep({
+          status: { observedGeneration: 3, replicas: 1, updatedReplicas: 1, availableReplicas: 1 },
+        }),
+      });
+      expect(v.ready).toBe(false);
+    });
+
+    it('refuses when no ReplicaSet carries the Deployment revision', () => {
+      expect(judge({ replicaSets: [OLD_RS] }).ready).toBe(false);
+    });
+
+    it('ignores a ReplicaSet of the same revision owned by another Deployment', () => {
+      const foreign = {
+        metadata: { ...NEW_RS.metadata, ownerReferences: [{ uid: 'someone-else' }] },
+      };
+      expect(judge({ replicaSets: [OLD_RS, foreign] }).ready).toBe(false);
+    });
+  });
+
+  describe('awaitCertManagerLeader', () => {
+    /** exec answering the three reads from mutable state. */
+    function cluster(state: { deployment: unknown; replicaSets: unknown[]; lease: unknown }) {
+      const calls: string[][] = [];
+      const exec = vi.fn(async (argv: string[]) => {
+        calls.push(argv);
+        if (argv.includes('lease')) {
+          if (state.lease instanceof Error) throw state.lease;
+          return JSON.stringify(state.lease);
+        }
+        if (argv.includes('replicasets')) return JSON.stringify({ items: state.replicaSets });
+        if (argv.includes('deployment')) return JSON.stringify(state.deployment);
+        throw new Error(`unexpected ${argv.join(' ')}`);
+      });
+      return { exec, calls };
+    }
+
+    it('reads the v1.20 default lease, the controller Deployment and its ReplicaSets', async () => {
+      const { exec, calls } = cluster({
+        deployment: dep(),
+        replicaSets: [OLD_RS, NEW_RS],
+        lease: lease(NEW_HOLDER),
+      });
+      await awaitCertManagerLeader({ env: {}, exec, sleep: noSleep });
+      expect(calls).toContainEqual(
+        expect.arrayContaining([
+          'kubectl',
+          '-n',
+          'kube-system',
+          'get',
+          'lease',
+          'cert-manager-controller',
+        ]),
+      );
+      expect(calls).toContainEqual(
+        expect.arrayContaining(['-n', 'cert-manager', 'get', 'deployment', 'cert-manager']),
+      );
+    });
+
+    it('waits through a handoff: old holder, then the new pod takes the lease', async () => {
+      const state = { deployment: dep(), replicaSets: [OLD_RS, NEW_RS], lease: lease(OLD_HOLDER) };
+      const { exec } = cluster(state);
+      let sleeps = 0;
+      await awaitCertManagerLeader({
+        env: {},
+        exec,
+        sleep: async () => {
+          sleeps += 1;
+          if (sleeps === 2) state.lease = lease(NEW_HOLDER);
+        },
+      });
+      expect(sleeps).toBe(2);
+    });
+
+    it('a lease still held by the old ReplicaSet at the budget fails with that reason', async () => {
+      const { exec } = cluster({
+        deployment: dep(),
+        replicaSets: [OLD_RS, NEW_RS],
+        lease: lease(OLD_HOLDER),
+      });
+      let now = 0;
+      await expect(
+        awaitCertManagerLeader({
+          env: {},
+          exec,
+          budgetMs: 60_000,
+          nowFn: () => now,
+          sleep: async () => {
+            now += 20_000;
+          },
+        }),
+      ).rejects.toThrow(new RegExp(OLD_HOLDER));
+    });
+
+    it('an unreadable lease is bounded, then a clear error naming the lease and the next step', async () => {
+      const { exec } = cluster({
+        deployment: dep(),
+        replicaSets: [OLD_RS, NEW_RS],
+        lease: new Error('Error from server (Forbidden): leases.coordination.k8s.io is forbidden'),
+      });
+      let now = 0;
+      const err = await awaitCertManagerLeader({
+        env: {},
+        exec,
+        budgetMs: 60_000,
+        nowFn: () => now,
+        sleep: async () => {
+          now += 20_000;
+        },
+      }).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/within 60s/);
+      expect(err.message).toContain('kube-system/cert-manager-controller');
+      expect(err.message).toMatch(/Forbidden/);
+      expect(err.message).toContain('kubectl -n kube-system get lease cert-manager-controller');
+      // Bounded: one probe per sleep, never more than the budget allows.
+      expect(exec.mock.calls.filter(([argv]) => argv.includes('lease')).length).toBeLessThanOrEqual(
+        4,
+      );
+    });
+
+    it('unparseable output counts as unreadable, not as a pass', async () => {
+      const exec = vi.fn(async () => 'not json');
+      let now = 0;
+      await expect(
+        awaitCertManagerLeader({
+          env: {},
+          exec,
+          budgetMs: 10_000,
+          nowFn: () => now,
+          sleep: async () => {
+            now += 10_000;
+          },
+        }),
+      ).rejects.toThrow(/could not read/);
+    });
   });
 });
 

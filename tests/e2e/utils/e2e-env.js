@@ -62,6 +62,37 @@ export const STAGING_CA_BUNDLE = join(
  */
 export const ACME_STAGING_DIRECTORY = 'https://acme-staging-v02.api.letsencrypt.org/directory';
 
+/** Let's Encrypt production directory: opt-in via E2E_ACME_CA=production. */
+export const ACME_PRODUCTION_DIRECTORY = 'https://acme-v02.api.letsencrypt.org/directory';
+
+/**
+ * THE one place the e2e harness chooses its CA. `E2E_ACME_CA` is `staging`
+ * (default) or `production`; production exists for days when LE staging is
+ * down (planned maintenance resets its directory connections) and is subject
+ * to LE rate limits: 50 certificates per registered domain per week, 5
+ * duplicates. Every consumer (compose `.env`, the k8s issuer choice the CLI
+ * derives from ACME_CA_SERVER, trust-store wiring, preflight, check messages)
+ * reads this, so none of them hard-codes a URL.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {{ ca: 'staging'|'production', staging: boolean, directory: string, label: string }}
+ */
+export function resolveE2EAcmeCa(env = process.env) {
+  const raw = String(env.E2E_ACME_CA ?? '').trim().toLowerCase();
+  if (raw === '' || raw === 'staging') {
+    return { ca: 'staging', staging: true, directory: ACME_STAGING_DIRECTORY, label: "Let's Encrypt staging" };
+  }
+  if (raw === 'production') {
+    return {
+      ca: 'production',
+      staging: false,
+      directory: ACME_PRODUCTION_DIRECTORY,
+      label: "Let's Encrypt production",
+    };
+  }
+  throw new Error(`E2E_ACME_CA must be "staging" (default) or "production", got "${env.E2E_ACME_CA}".`);
+}
+
 const PEM_BLOCK = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
 
 /**
@@ -358,7 +389,7 @@ export function getE2ELicenseStub() {
  * @param {NodeJS.ProcessEnv} [opts.env]
  * @param {boolean} [opts.applyInProcess]
  * @param {(msg: string) => void} [opts.warn]
- * @returns {{ envFileKeys: string[], tls: ReturnType<typeof trustLetsEncryptStagingRoots> }}
+ * @returns {{ envFileKeys: string[], tls: ReturnType<typeof trustLetsEncryptStagingRoots> | null }}
  */
 export function setupE2EEnv(opts = {}) {
   const { env = process.env, applyInProcess = true, warn = (msg) => console.warn(msg) } = opts;
@@ -377,7 +408,8 @@ export function setupE2EEnv(opts = {}) {
 
   pinPublicDns();
   disableSshAskpass(env);
-  env.ACME_CA_SERVER = ACME_STAGING_DIRECTORY;
+  const acme = resolveE2EAcmeCa(env);
+  env.ACME_CA_SERVER = acme.directory;
 
   if (env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
     // Inherited from the operator's shell, not from us. Say so loudly: with
@@ -391,7 +423,8 @@ export function setupE2EEnv(opts = {}) {
     );
   }
 
-  const tlsInfo = trustLetsEncryptStagingRoots({ env, warn, applyInProcess });
+  // Production chains validate against the system store: no extra roots.
+  const tlsInfo = acme.staging ? trustLetsEncryptStagingRoots({ env, warn, applyInProcess }) : null;
 
   return { envFileKeys, tls: tlsInfo };
 }
@@ -412,9 +445,12 @@ export function setupE2EEnv(opts = {}) {
  *
  * @param {Record<string, string | undefined>} [extra] Per-call overrides.
  * @param {NodeJS.ProcessEnv} [base] Env to inherit (default `process.env`).
+ * @param {string} [provider] The scenario's compute provider. Only 'hetzner'
+ *   gets `HCLOUD_TOKEN`; for any other value (or none) an inherited
+ *   `HCLOUD_TOKEN` is stripped so one cloud's token never rides into another's run.
  * @returns {Record<string, string>}
  */
-export function e2eCliEnv(extra = {}, base = process.env) {
+export function e2eCliEnv(extra = {}, base = process.env, provider = undefined) {
   const env = {
     // VIBECARBON_PERF=1 turns on the [perf] stderr lines emitted by every
     // deploy sub-step (setupServer, buildImageOnServer, pullComposeImages,
@@ -461,14 +497,21 @@ export function e2eCliEnv(extra = {}, base = process.env) {
     ...extra,
   };
 
-  // Provider CLI token alias. `_run-lifecycle.ts` passes HCLOUD_TOKEN
-  // explicitly to every step it runs; mirroring it here means an iterated
-  // step gets the same child env. Only filled when absent — never overrides
-  // an explicit value, and never synthesised for DigitalOcean (deploy
-  // children must NOT receive DIGITALOCEAN_TOKEN so DO runs prove the
-  // customer path — see _run-lifecycle.ts B8-3).
-  if (!env.HCLOUD_TOKEN && env.HETZNER_API_TOKEN) {
-    env.HCLOUD_TOKEN = env.HETZNER_API_TOKEN;
+  // Provider CLI token alias, per provider. `HCLOUD_TOKEN` is the Hetzner
+  // CLI/SDK variable: a Hetzner scenario gets it (aliased from
+  // HETZNER_API_TOKEN when absent, never overriding an explicit value) so an
+  // iterated step sees the same child env as a lifecycle step. Every other
+  // provider (or an unknown one) gets NONE: any inherited HCLOUD_TOKEN is
+  // stripped, so a shell holding both clouds' tokens never hands Hetzner's to
+  // a DigitalOcean child, and DO deploy children also receive no
+  // DIGITALOCEAN_TOKEN so DO runs prove the customer path (B8-3, see
+  // _run-lifecycle.ts).
+  if (provider === 'hetzner') {
+    if (!env.HCLOUD_TOKEN && env.HETZNER_API_TOKEN) {
+      env.HCLOUD_TOKEN = env.HETZNER_API_TOKEN;
+    }
+  } else {
+    delete env.HCLOUD_TOKEN;
   }
 
   // Drop undefined values — spawn() rejects them on some platforms.

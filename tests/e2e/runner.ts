@@ -101,7 +101,7 @@ import { resolveSelection, type SelectedScenario, SelectionError } from './selec
 import { scenarioContext } from './utils/cli-runner.js';
 import { E2EDbImageError, selectE2EDbImage } from './utils/db-image-select.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
-import { setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
+import { resolveE2EAcmeCa, setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
 import { logPreflight, runPreflight } from './utils/preflight.js';
 import type { CapacityPreferences } from './utils/region-resolver.js';
@@ -687,6 +687,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     token: process.env[DNS_PROVIDERS[id].tokenEnv] || '',
     baseDomain: resolveBaseDomain(config.domains, id, process.env.E2E_DOMAIN),
   }));
+  const acme = resolveE2EAcmeCa();
   if (process.env.E2E_PREFLIGHT !== 'skip') {
     const preflight = await runPreflight({
       hetznerToken,
@@ -702,6 +703,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       scalewayToken,
       needsScaleway,
       dnsChecks,
+      acmeDirectory: { url: acme.directory, label: acme.label },
     });
     const proceed = logPreflight(preflight);
     if (!proceed) {
@@ -997,6 +999,12 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     const isHa = mode.endsWith('-ha');
     let result: ScenarioResult;
 
+    // The scenario's OWN compute provider's token (throws on an unregistered
+    // provider). runLifecycle takes this provider-neutral value, never a
+    // Hetzner token: a DO scenario handed the Hetzner token to the DO DNS API
+    // (401 on dns_flip_verified) before this.
+    const { token: computeToken } = capacityWiringFor(provider);
+
     // Per-scenario live log file. cli-runner reads logPath/echo out of this
     // AsyncLocalStorage context so every subprocess's stdout/stderr is
     // tee'd to ${tempDir}/${provider}-${mode}-${dnsProvider}.log as it
@@ -1012,21 +1020,18 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     const scenarioCtx = {
       logPath: scenarioLogPath,
       echo: true,
+      provider,
     };
 
     try {
       result = await scenarioContext.run(scenarioCtx, () =>
-        runLifecycle(scenarioConfig, scenarioId, db, collector, hetznerToken, {
+        runLifecycle(scenarioConfig, scenarioId, db, collector, computeToken, {
           includeFailover: isHa,
           // Phase 9: only k8s/k8s-ha modes have a verify-autoscale body; the
           // lifecycle gates internally on mode + expanded.
           expanded: isExpanded,
           onStepComplete: isBatch ? undefined : onStepComplete,
           skipSteps: overrides?.skipSteps ?? skipSteps,
-          digitaloceanToken,
-          linodeToken,
-          vultrToken,
-          scalewayToken,
         }),
       );
     } catch (err) {

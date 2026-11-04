@@ -24,7 +24,7 @@ import { enterJsonMode, wantsJson } from './lib/cli/json-mode.js';
 import { c, link } from './lib/colors.js';
 import { dbImageOverrideProblem, setDbImageWarningSink } from './lib/images.js';
 import { shouldGate } from './lib/licensing/gate.js';
-import { perfTimer } from './lib/perf.js';
+import { perfEnabled, perfTimer } from './lib/perf.js';
 import { bootstrapOperatorEnv } from './lib/project.js';
 import { recordCommandStart, reportCrash, settlePendingTelemetry } from './lib/telemetry/index.js';
 import { printUpdateNotice, refreshUpdateCache } from './lib/telemetry/update-check.js';
@@ -479,6 +479,13 @@ async function main() {
     printUpdateNotice({ leadingBlank: true });
     await settlePendingTelemetry();
     commandTimer.end();
+    // After the total, so it never counts toward it: read back the first-boot
+    // timing of any node this command provisioned (VIBECARBON_PERF only, one
+    // bounded budget, never throws; a no-op when nothing was queued).
+    if (perfEnabled()) {
+      const { flushBootTiming } = await import('./lib/deploy/boot-timing.js');
+      await flushBootTiming();
+    }
   }
 }
 

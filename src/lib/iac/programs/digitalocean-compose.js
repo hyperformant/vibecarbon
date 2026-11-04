@@ -201,6 +201,8 @@ export function buildDigitalOceanComposeProgram(config) {
         sshKeys: [sshKeyIdForDroplet],
         tags: encodeLabels({ ...labels, role: 'compose' }),
         userData,
+        // Skip DO's Droplet Console agent (44-68s of vendor cloud-init per boot).
+        dropletAgent: false,
       },
       // Bounded create: a provider host that never finishes the create fails the
       // deploy at 15 minutes instead of holding it forever (see create-timeout.js).

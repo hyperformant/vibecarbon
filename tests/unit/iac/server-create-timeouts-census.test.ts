@@ -132,41 +132,19 @@ describe('server-class create timeouts (census)', () => {
     },
   );
 
-  // Safety: a cloud-init edit must never replace an existing server that
-  // holds data. Every provider's user-data input forces a replacement on
-  // change, and a compose server's (or a k8s master's or db node's) data lives
-  // on its disk. k8s WORKERS are the exception, the other way round: they are
-  // stateless, and their user data carries the join target (k3s token, master
-  // private IP), so a worker must still be rebuilt when that changes.
+  // Safety: a cloud-init edit must never replace a live node. Every
+  // provider's user-data input forces a replacement on change, and a compose
+  // server's (or a k8s master's or db node's) data lives on its disk. k8s
+  // WORKERS hold no data, but replacing every static worker because a
+  // comment or a timing mark moved in worker-init.sh is churn: they ignore
+  // their user data too, and are rebuilt instead through a replacementTrigger
+  // carrying only their join target (the master they join, by id and
+  // address, and the k3s version), which is what must still rebuild them.
   it.each(Object.keys(PROGRAMS))(
-    '%s: k8s workers follow their user data, with the create bound',
+    '%s: every server-class resource ignores changes to its user data',
     async (file) => {
       const resources = await runProgram(file);
-      const workers = resources.filter(
-        (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
-      );
-      if (file.endsWith('-k8s.js'))
-        expect(workers.length, `${file} has no worker`).toBeGreaterThan(0);
-      for (const w of workers) {
-        const input =
-          SERVER_RESOURCE_TYPES[w.token as keyof typeof SERVER_RESOURCE_TYPES].userDataInput;
-        const opts = (w.opts ?? {}) as { ignoreChanges?: string[]; customTimeouts?: object };
-        expect(opts.ignoreChanges ?? [], `${file}: worker "${w.name}"`).not.toContain(input);
-        expect(
-          opts.customTimeouts,
-          `${file}: worker "${w.name}" keeps the create bound`,
-        ).toBeTruthy();
-      }
-    },
-  );
-
-  it.each(Object.keys(PROGRAMS))(
-    '%s: every non-worker server-class resource ignores changes to its user data',
-    async (file) => {
-      const resources = await runProgram(file);
-      const servers = resources.filter(
-        (r) => r.token in SERVER_RESOURCE_TYPES && !/^worker-/.test(r.name),
-      );
+      const servers = resources.filter((r) => r.token in SERVER_RESOURCE_TYPES);
       expect(servers.length).toBeGreaterThan(0);
       for (const server of servers) {
         const input =
@@ -181,6 +159,53 @@ describe('server-class create timeouts (census)', () => {
           opts.ignoreChanges ?? [],
           `${file}: ${server.type} "${server.name}" would be replaced by a user-data change`,
         ).toContain(input);
+      }
+    },
+  );
+
+  // Speed: DO's vendor cloud-init installs the Droplet Console agent, costing
+  // 44-68s of first boot on every node. `dropletAgent: false` skips it. The
+  // provider treats the field as create-only, so it is ignored on existing
+  // droplets: a live droplet is never replaced to apply it.
+  it.each(Object.keys(PROGRAMS).filter((f) => f.startsWith('digitalocean-')))(
+    '%s: every droplet skips the DO agent and never replaces a live one for it',
+    async (file) => {
+      const resources = await runProgram(file);
+      const droplets = resources.filter((r) => r.token === 'digitalocean:index/droplet:Droplet');
+      expect(droplets.length).toBeGreaterThan(0);
+      for (const d of droplets) {
+        expect((d.args as { dropletAgent?: boolean }).dropletAgent, `${file}: ${d.name}`).toBe(
+          false,
+        );
+        const opts = (d.opts ?? {}) as { ignoreChanges?: string[] };
+        expect(opts.ignoreChanges ?? [], `${file}: ${d.name} would be replaced`).toContain(
+          'dropletAgent',
+        );
+      }
+    },
+  );
+
+  it.each(Object.keys(PROGRAMS))(
+    '%s: k8s workers are rebuilt by their join target, not their user data',
+    async (file) => {
+      const resources = await runProgram(file);
+      const workers = resources.filter(
+        (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
+      );
+      if (file.endsWith('-k8s.js'))
+        expect(workers.length, `${file} has no worker`).toBeGreaterThan(0);
+      for (const w of workers) {
+        const opts = (w.opts ?? {}) as {
+          replacementTrigger?: { apply: (f: (v: string) => void) => unknown };
+        };
+        expect(opts.replacementTrigger, `${file}: worker "${w.name}"`).toBeTruthy();
+        // The trigger is built from the master's id (the recorder prints a
+        // resource output as `<name>.<property>`) and the k3s version.
+        const trigger = await new Promise<string>((resolve) => {
+          opts.replacementTrigger?.apply((v) => resolve(String(v)));
+        });
+        expect(trigger, `${file}: worker "${w.name}" trigger`).toContain('master=master.id@');
+        expect(trigger, `${file}: worker "${w.name}" trigger`).toContain(`k3s=${k8s.k3sVersion}`);
       }
     },
   );

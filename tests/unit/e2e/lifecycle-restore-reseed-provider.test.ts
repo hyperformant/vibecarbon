@@ -43,7 +43,7 @@ describe('_run-lifecycle.ts: every runDeploy() re-seed carries the scenario prov
     expect(starts.length).toBeGreaterThan(0);
 
     for (const start of starts) {
-      const envTokenIdx = src.indexOf('env: { HCLOUD_TOKEN: hetznerToken }', start);
+      const envTokenIdx = src.indexOf('env: hcloudEnv', start);
       const providerIdx = src.indexOf('provider: config.provider,', start);
       expect(envTokenIdx).toBeGreaterThan(start);
       expect(providerIdx).toBeGreaterThan(start);

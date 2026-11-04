@@ -9,6 +9,7 @@ import dns from 'node:dns';
 import https from 'node:https';
 import type { HealthLatencies, VerificationResult } from '../scenarios/types.js';
 import { pinnedIpFor } from '../utils/dns-pin.js';
+import { resolveE2EAcmeCa } from '../utils/e2e-env.js';
 
 // Use Cloudflare + Google DNS to bypass stale negative cache entries from prior test runs.
 // The system resolver caches NXDOMAIN responses for domains that were destroyed
@@ -720,7 +721,7 @@ export async function checkSslValid(
           errorMessage:
             `certificate not trusted after ${Math.round((MAX_SSL_RETRIES * SSL_RETRY_DELAY_MS) / 1000)}s ` +
             `of trusted retries${deps.tlsPending ? ' (the deploy recorded TLS pending)' : ''} ` +
-            `(staging roots ARE in the trust store, so this is a real ` +
+            `(${resolveE2EAcmeCa().staging ? 'staging roots ARE' : 'production roots are'} in the trust store, so this is a real ` +
             `defect — Traefik default or standby self-signed cert). ` +
             `Served: subject=${lastServed?.subject ?? 'unknown'} issuer=${lastServed?.issuer ?? 'unknown'}. ` +
             `Underlying: ${result.errorMessage ?? 'unknown'}`,

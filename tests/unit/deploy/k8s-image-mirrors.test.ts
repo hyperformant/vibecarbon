@@ -555,7 +555,7 @@ describe('applyK3sManifests re-pins the CSI sidecars before the db StatefulSet i
     // with the ~minutes of cert-manager + traefik work that follow, not queue
     // behind it.
     const repinAt = k3s.indexOf('csiSidecarSetImagePlan(providerId)');
-    const certManagerAt = k3s.indexOf("runKubectlWithRetry(['apply', '-f', CERT_MANAGER_URL]");
+    const certManagerAt = k3s.indexOf("runKubectlWithRetry(['apply', '-k', certManagerDir]");
     expect(certManagerAt).toBeGreaterThan(-1);
     expect(repinAt).toBeLessThan(certManagerAt);
   });

@@ -53,6 +53,14 @@ export function perfTimer(name) {
 }
 
 /**
+ * Emit a duration measured somewhere else (e.g. read back from a server's
+ * own boot record) as the same `[perf] <name> <ms>ms` line a timer emits.
+ */
+export function perfRecord(name, ms) {
+  if (enabled) process.stderr.write(`[perf] ${name} ${Math.round(ms)}ms\n`);
+}
+
+/**
  * Wrap a promise-returning function in a perf timer. The returned
  * promise resolves/rejects identically to the original; timing is
  * captured on both paths (success notes nothing, failure notes

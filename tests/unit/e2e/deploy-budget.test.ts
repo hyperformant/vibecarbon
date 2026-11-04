@@ -196,6 +196,13 @@ describe('checkDeployBudget: time budgets', () => {
     expect(cha.message).toMatch(/slowest: deploy\.ha\.compose\.iac\.upStack\.standby 100s/);
   });
 
+  it('leaves the first-boot breakdown out of the slowest list (it splits a ready wait)', () => {
+    const log = `${fixture('compose', { total: 400_000 })}\n[perf] deploy.compose.boot.cloudInit.total 900000ms\n`;
+    const r = checkDeployBudget(log, 'compose');
+    expect(r.message).not.toMatch(/\.boot\./);
+    expect(r.message).toMatch(/slowest: deploy\.tls\.ready 90s, deploy\.iac\.upStack 70s/);
+  });
+
   it('fails a log with no deploy.total marker (the check cannot run)', () => {
     const log = fixture('compose').replace(/^\[perf\] deploy\.total .*$/m, '');
     const r = checkDeployBudget(log, 'compose');

@@ -52,6 +52,7 @@ import {
   PROMOTABLE_CERTIFICATES,
   PROMOTE_ISSUER_ANNOTATION,
 } from './lib/deploy/k8s/acme-issuer-policy.js';
+import { awaitCertManagerLeader } from './lib/deploy/k8s/readiness.js';
 import {
   k8sTlsRestoreLine,
   liveK8sTlsIdentity,
@@ -511,7 +512,9 @@ export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {})
  *   (envConfig.tls.ca), `domain` the env's apex
  * @param {{kubectl?: Function, quietKubectl?: Function, readSnapshot?: Function,
  *   trustRoots?: readonly string[], warn?: (msg: string) => void,
- *   message?: (msg: string) => void}} [args.deps] - `message` prints a command on its own line
+ *   message?: (msg: string) => void, awaitLeader?: () => Promise<void>}} [args.deps] -
+ *   `message` prints a command on its own line; `awaitLeader` is the settled
+ *   cert-manager wait run before any Secret restore or Certificate apply
  * @returns {Promise<{patched: string[], tls?: {restored: boolean, reason: string}}>}
  *   `ns/name` keys actually re-pointed, and the TLS restore outcome when a
  *   snapshot was asked for
@@ -652,6 +655,27 @@ const PROMOTE_TLS_KUBECTL_TIMEOUT_MS = 30_000;
 const PROMOTE_TLS_WRITE_TIMEOUT_MS = 60_000;
 
 /**
+ * Wait until the promoted cluster's cert-manager controller is settled
+ * (readiness.js awaitCertManagerLeader: rollout complete, leader lease on a
+ * pod of the current ReplicaSet) before a Secret restore or a Certificate
+ * apply, the same wait the deploy runs. A controller handoff in that window
+ * can miss the restored Secret in the new leader's cache and issue a new
+ * certificate. Reads over the promotion's ssh kubectl, each bounded; the
+ * wait itself is bounded and throws a message that names what to look at.
+ *
+ * @param {{ promotedIp: string, sshKeyPath: string, kubectl: typeof sshKubectl }} args
+ * @returns {Promise<void>}
+ */
+function awaitPromotedCertManagerLeader({ promotedIp, sshKeyPath, kubectl }) {
+  return awaitCertManagerLeader({
+    // No env: the reads run on the promoted master over ssh, with its own KUBECONFIG.
+    // awaitCertManagerLeader's argv carries the leading `kubectl`; sshKubectl adds its own.
+    exec: (argv) =>
+      kubectl(promotedIp, sshKeyPath, argv.slice(1), { timeout: PROMOTE_TLS_KUBECTL_TIMEOUT_MS }),
+  });
+}
+
+/**
  * The quiet runner of the promotion's key-bearing calls: a read (`get`) is
  * bounded at 30s, a write at 60s. Both print nothing (quietSshKubectl).
  *
@@ -684,6 +708,7 @@ async function recreateMissingTlsCertificate({ promotedIp, sshKeyPath, snapshot,
   const {
     kubectl = sshKubectl,
     quietKubectl = promoteTlsKubectl(promotedIp, sshKeyPath),
+    awaitLeader = () => awaitPromotedCertManagerLeader({ promotedIp, sshKeyPath, kubectl }),
     warn = (m) => p.log.warn(m),
     message = (m) => p.log.message(m),
   } = deps;
@@ -706,6 +731,7 @@ async function recreateMissingTlsCertificate({ promotedIp, sshKeyPath, snapshot,
           issuerName: live.issuerName,
           effectiveIssuer: live.issuerName,
         });
+        await awaitLeader();
         await kubectl(promotedIp, sshKeyPath, ['apply', '-f', '-'], {
           timeout: PROMOTE_TLS_KUBECTL_TIMEOUT_MS,
           input: certificate,
@@ -767,6 +793,7 @@ async function promoteTlsFromSnapshot({
   const {
     kubectl = sshKubectl,
     quietKubectl = promoteTlsKubectl(promotedIp, sshKeyPath),
+    awaitLeader = () => awaitPromotedCertManagerLeader({ promotedIp, sshKeyPath, kubectl }),
     readSnapshot,
     trustRoots,
   } = deps;
@@ -793,6 +820,10 @@ async function promoteTlsFromSnapshot({
       effectiveIssuer: target,
     });
     const bounded = { timeout: PROMOTE_TLS_KUBECTL_TIMEOUT_MS };
+    // Nothing is touched until the controller is settled: a leader that
+    // never settles stops here, before the delete, and the caller re-points
+    // the Certificate as it would without a snapshot.
+    await awaitLeader();
     // Precondition: cert-manager runs WITHOUT --enable-certificate-owner-ref
     // (its default; cert-manager-owner-ref-census.test.ts pins that nothing
     // here turns it on), so deleting the Certificate keeps its Secret. With

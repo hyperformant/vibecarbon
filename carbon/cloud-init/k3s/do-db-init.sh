@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Boot timing marks, read by src/lib/deploy/boot-timing.js
+_m(){ echo "$1 $(date +%s.%N)">>/var/log/vcboot||true;}
+_m p
+
 # Note: This script runs AS PART of cloud-init (user_data), so we cannot wait for
 # cloud-init to complete (that would cause a deadlock). The script starts immediately.
 
@@ -8,13 +12,7 @@ set -euo pipefail
 # and unattended-upgrades holds dpkg's lock right through first boot --
 # which is exactly when cloud-init runs this. `-o DPkg::Lock::Timeout`
 # makes apt block on the lock instead. See src/lib/deploy/apt.js for the
-# RCA and the live verification.
-#
-# This replaced a `fuser` poll loop that was broken two ways: it polled
-# /var/lib/dpkg/lock, lists/lock and archives/lock but never
-# /var/lib/dpkg/lock-frontend -- the lock that actually fails the install
-# -- and being a pre-check it was TOCTOU, since unattended-upgrades could
-# take the lock in the gap between the loop passing and apt-get starting.
+# RCA, the live verification and the fuser poll loop this replaced.
 
 # Update apt lists + install the packages we need. `apt-get upgrade` was
 # removed from the critical path -- unattended-upgrades handles security
@@ -28,8 +26,10 @@ mkdir -p /etc/ssh/sshd_config.d
 printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
 systemctl reload ssh || systemctl reload sshd || true
 
+_m a
 apt-get -o DPkg::Lock::Timeout=300 update -qq
 apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq
+_m n
 
 # Validate k3s version is set
 K3S_TARGET_VERSION="${k3s_version}"
@@ -97,6 +97,7 @@ mirrors:
 # @include _k3s-system-image-mirror.yaml
 REGEOF
 
+_m w
 # Wait for master k3s API to be ready before joining (private IP -- see
 # do-master-init.sh's install comment for why --node-ip there is the
 # private IP; the API is reachable over the VPC with no public-vs-private
@@ -133,6 +134,7 @@ fi
 # BOOT-TIME k3s agent flags here rather than a post-join `kubectl label`/
 # `kubectl taint` step, so the node is never briefly schedulable for
 # general workloads between join and label (M3 Task 5 review adjudication).
+_m k
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
   if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" K3S_URL="https://${master_ip}:6443" K3S_TOKEN="${k3s_token}" sh -s - agent \
@@ -157,3 +159,4 @@ if [ "$K3S_INSTALL_OK" != "true" ]; then
 fi
 
 echo "k3s database node installation complete!"
+_m e
