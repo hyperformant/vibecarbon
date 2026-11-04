@@ -14,6 +14,10 @@
  * - on k8s, the newest finished backup Job (exit 3 = base pushed, retention
  *   failed).
  *
+ * On k8s the db pod and the backup Job come from the run's one cluster
+ * snapshot (cluster-snapshot.js); only the reads that must run inside the pod
+ * (psql, its logs, the gap record) are their own exec, against that pod.
+ *
  * Read-only. Without backup credentials the row is "unknown", naming the
  * variables (never values): status is a health read, not a gate.
  */
@@ -21,10 +25,11 @@ import { existsSync } from 'node:fs';
 import { DEFAULT_BACKUP_SCHEDULE } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { resolvePrimary } from '../cli/resolve-primary.js';
 import { redactCredentials } from '../redact-credentials.js';
-import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from '../ssh.js';
+import { getSSHKeyPath, sshKubectl, sshRun } from '../ssh.js';
 import { hasBackupResult, pushedBackupNames } from '../walg/backup-result.js';
 import { backupCredentialVars, readEnvBaseBackups } from '../walg/restore-base.js';
 import { PGDATA_PATH, WAL_GAP_RECORDS } from '../walg/restore-layout.js';
+import { createClusterSnapshots, dbContainerStartedAt, dbPod } from './cluster-snapshot.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -386,22 +391,68 @@ export function parseArchiverRow(out) {
   };
 }
 
-/** Read-only probes against the role primary, over this env's transport. */
-function primaryProbes(envName, envConfig, projectName) {
+/**
+ * The newest finished scheduled backup Job in the vibecarbon namespace, from
+ * the cluster snapshot's Jobs. Null when none has finished.
+ *
+ * @param {object[]} jobs
+ */
+function newestBackupJob(jobs) {
+  const finished = jobs
+    .filter((j) => j.metadata?.namespace === NAMESPACE)
+    .filter((j) => String(j.metadata?.name).startsWith('backup'))
+    .map((j) => {
+      const done = (j.status?.conditions ?? []).find(
+        (c) => (c.type === 'Failed' || c.type === 'Complete') && c.status === 'True',
+      );
+      return { j, done };
+    })
+    .filter((x) => x.done)
+    .sort((a, b) =>
+      String(b.j.metadata.creationTimestamp).localeCompare(String(a.j.metadata.creationTimestamp)),
+    );
+  const newest = finished[0];
+  if (!newest) return null;
+  return {
+    name: newest.j.metadata.name,
+    failed: newest.done.type === 'Failed',
+    // podFailurePolicy fails the Job at once on exit 3 (base pushed, retention failed).
+    retentionFailed: newest.done.reason === 'PodFailurePolicy',
+  };
+}
+
+/**
+ * Read-only probes against the role primary, over this env's transport.
+ *
+ * @param {string} envName
+ * @param {object} envConfig
+ * @param {string} projectName
+ * @param {{ sshRun?: typeof sshRun, sshKubectl?: typeof sshKubectl, getSSHKeyPath?: typeof getSSHKeyPath, existsSync?: typeof existsSync, snapshots?: ReturnType<typeof createClusterSnapshots> }} [deps]
+ *   `snapshots`: the run's cluster snapshots, shared with the other rows; one of its own otherwise
+ */
+function primaryProbes(envName, envConfig, projectName, deps = {}) {
   const isCompose = envConfig.deployMode === 'compose' || envConfig.deployMode === 'compose-ha';
   const remoteDir = `/opt/${projectName}`;
+  const t = {
+    sshRun: deps.sshRun ?? sshRun,
+    sshKubectl: deps.sshKubectl ?? sshKubectl,
+    getSSHKeyPath: deps.getSSHKeyPath ?? getSSHKeyPath,
+    existsSync: deps.existsSync ?? existsSync,
+  };
+  const snapshots = deps.snapshots ?? createClusterSnapshots(envName, t);
   const key = () => {
-    const path = getSSHKeyPath(envName);
-    if (!existsSync(path)) throw new Error('no ssh key for this environment');
+    const path = t.getSSHKeyPath(envName);
+    if (!t.existsSync(path)) throw new Error('no ssh key for this environment');
     return path;
   };
   const opts = { timeout: PROBE_TIMEOUT_MS, transportRetry: false };
-  const bash = (ip, script) => sshRun(ip, key(), ['bash', '-lc', script], opts);
+  const bash = (ip, script) => t.sshRun(ip, key(), ['bash', '-lc', script], opts);
+  const podOn = async (ip) => dbPod(await snapshots.get(ip));
   return {
     // The SQL goes in on stdin: no quoting layer between it and psql.
     runOnPrimary: async (ip, sql) => {
       if (isCompose) {
-        return sshRun(
+        return t.sshRun(
           ip,
           key(),
           [
@@ -412,8 +463,8 @@ function primaryProbes(envName, envConfig, projectName) {
           { ...opts, input: sql },
         );
       }
-      const pod = await getPostgresPod(ip, key());
-      return sshKubectl(
+      const pod = (await podOn(ip)).metadata.name;
+      return t.sshKubectl(
         ip,
         key(),
         [
@@ -444,8 +495,9 @@ function primaryProbes(envName, envConfig, projectName) {
         );
         return parseWalFailureLog(out);
       }
-      const pod = await getPostgresPod(ip, key());
-      const kube = (argv) => sshKubectl(ip, key(), argv, { timeout: PROBE_TIMEOUT_MS });
+      const dbp = await podOn(ip);
+      const pod = dbp.metadata.name;
+      const kube = (argv) => t.sshKubectl(ip, key(), argv, { timeout: PROBE_TIMEOUT_MS });
       const current = await kube(['logs', '-n', NAMESPACE, pod, '--timestamps', '--since=24h']);
       let previous = '';
       let previousRead = false;
@@ -465,15 +517,8 @@ function primaryProbes(envName, envConfig, projectName) {
         if (!/previous terminated container|not found/i.test(String(err?.message ?? err)))
           throw err;
       }
-      const started = await kube([
-        'get',
-        'pod',
-        '-n',
-        NAMESPACE,
-        pod,
-        '-o',
-        'jsonpath=STARTED={.status.containerStatuses[0].state.running.startedAt}',
-      ]);
+      // The container's start, from the snapshot: it bounds what the log covers.
+      const started = `STARTED=${dbContainerStartedAt(dbp)}`;
       return parseWalFailureLog(`${started}\n${previous}\n${current}`, { previousRead });
     },
     // Segments dropped under disk pressure (wal-archive.sh), in PGDATA.
@@ -483,9 +528,9 @@ function primaryProbes(envName, envConfig, projectName) {
           await bash(ip, `cd ${remoteDir} && docker compose exec -T db sh -c '${WAL_GAP_READ_SH}'`),
         );
       }
-      const pod = await getPostgresPod(ip, key());
+      const pod = (await podOn(ip)).metadata.name;
       return parseWalGapRecord(
-        await sshKubectl(
+        await t.sshKubectl(
           ip,
           key(),
           ['exec', '-n', NAMESPACE, pod, '--', 'sh', '-c', WAL_GAP_READ_SH],
@@ -505,31 +550,7 @@ function primaryProbes(envName, envConfig, projectName) {
         );
         return parseComposeBackupLog(out);
       }
-      const out = await sshKubectl(ip, key(), ['get', 'jobs', '-n', NAMESPACE, '-o', 'json'], {
-        timeout: PROBE_TIMEOUT_MS,
-      });
-      const jobs = (JSON.parse(out || '{"items":[]}').items ?? [])
-        .filter((j) => String(j.metadata?.name).startsWith('backup'))
-        .map((j) => {
-          const done = (j.status?.conditions ?? []).find(
-            (c) => (c.type === 'Failed' || c.type === 'Complete') && c.status === 'True',
-          );
-          return { j, done };
-        })
-        .filter((x) => x.done)
-        .sort((a, b) =>
-          String(b.j.metadata.creationTimestamp).localeCompare(
-            String(a.j.metadata.creationTimestamp),
-          ),
-        );
-      const newest = jobs[0];
-      if (!newest) return null;
-      return {
-        name: newest.j.metadata.name,
-        failed: newest.done.type === 'Failed',
-        // podFailurePolicy fails the Job at once on exit 3 (base pushed, retention failed).
-        retentionFailed: newest.done.reason === 'PodFailurePolicy',
-      };
+      return newestBackupJob((await snapshots.get(ip)).jobs);
     },
   };
 }
@@ -549,13 +570,30 @@ export function readPrimaryWalGap(envName, envConfig, projectName, ip) {
 }
 
 /**
+ * `<what> unknown (<why>)` entries, one per distinct reason: "a, b and c
+ * unknown (why)" when several reads failed the same way.
+ *
+ * @param {Array<[string, string]>} unread `[what, why]` pairs, in row order
+ * @returns {string[]}
+ */
+function unknownEntries(unread) {
+  const byReason = new Map();
+  for (const [what, why] of unread) byReason.set(why, [...(byReason.get(why) ?? []), what]);
+  return [...byReason].map(([why, whats]) => {
+    const list =
+      whats.length === 1 ? whats[0] : `${whats.slice(0, -1).join(', ')} and ${whats.at(-1)}`;
+    return `${list} unknown (${why})`;
+  });
+}
+
+/**
  * The Backups row for one environment: `{ level, text, ...facts }` or null
  * when nothing is deployed. Never throws on a failed probe; the row says so.
  *
  * @param {string} envName
  * @param {object} envConfig
  * @param {string} projectName
- * @param {object} [deps] test seams
+ * @param {object} [deps] test seams, plus `snapshots` (the run's shared cluster snapshots)
  */
 export async function checkBackupHealth(envName, envConfig, projectName, deps = {}) {
   const primary = resolvePrimary(envConfig, { env: envName });
@@ -582,7 +620,7 @@ export async function checkBackupHealth(envName, envConfig, projectName, deps = 
     };
   }
 
-  const probes = deps.runOnPrimary ? deps : primaryProbes(envName, envConfig, projectName);
+  const probes = deps.runOnPrimary ? deps : primaryProbes(envName, envConfig, projectName, deps);
   const [archiver, walFailures, walGap, job] = await Promise.allSettled([
     probes.runOnPrimary(primary.ip, ARCHIVER_SQL),
     probes.countWalFailures(primary.ip),
@@ -590,23 +628,19 @@ export async function checkBackupHealth(envName, envConfig, projectName, deps = 
     probes.lastJob(primary.ip),
   ]);
 
-  const unknown = [];
+  // What could not be read, and why. Probes that failed for the same reason
+  // (a cluster snapshot that did not answer fails all four) share one entry.
+  const unread = [];
+  const reasonOf = (r) => r.reason?.message ?? String(r.reason);
   let archiverFacts = null;
   if (archiver.status === 'fulfilled') {
     archiverFacts = parseArchiverRow(archiver.value);
-    if (!archiverFacts) unknown.push('WAL archiving unknown (pg_stat_archiver gave no answer)');
-  } else unknown.push(`WAL archiving unknown (${archiver.reason?.message ?? archiver.reason})`);
-  if (walFailures.status === 'rejected') {
-    unknown.push(
-      `dropped WAL count unknown (${walFailures.reason?.message ?? walFailures.reason})`,
-    );
-  }
-  if (walGap.status === 'rejected') {
-    unknown.push(`WAL gap record unknown (${walGap.reason?.message ?? walGap.reason})`);
-  }
-  if (job.status === 'rejected') {
-    unknown.push(`backup job status unknown (${job.reason?.message ?? job.reason})`);
-  }
+    if (!archiverFacts) unread.push(['WAL archiving', 'pg_stat_archiver gave no answer']);
+  } else unread.push(['WAL archiving', reasonOf(archiver)]);
+  if (walFailures.status === 'rejected') unread.push(['dropped WAL count', reasonOf(walFailures)]);
+  if (walGap.status === 'rejected') unread.push(['WAL gap record', reasonOf(walGap)]);
+  if (job.status === 'rejected') unread.push(['backup job status', reasonOf(job)]);
+  const unknown = unknownEntries(unread);
 
   const facts = {
     lineage: listing.lineage,

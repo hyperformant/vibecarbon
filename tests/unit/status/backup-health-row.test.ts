@@ -14,7 +14,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ARCHIVER_SQL,
   backupHealthRow,
@@ -28,6 +28,7 @@ import {
   parseWalName,
 } from '../../../src/lib/status/backup-health.js';
 import { attachBackups } from '../../../src/status.js';
+import { withSshContract } from '../../_shared/ssh-contract.js';
 
 const NOW = Date.parse('2026-10-21T12:00:00.000Z');
 const HOUR = 3_600_000;
@@ -368,6 +369,99 @@ describe('checkBackupHealth', () => {
     expect(
       await checkBackupHealth('prod', { deployMode: 'compose', servers: [] }, 'proj', d),
     ).toBeNull();
+  });
+});
+
+// The k8s probes take the db pod and the backup Job from the run's one
+// cluster snapshot (cluster-snapshot.js): only the execs that must run inside
+// the pod (psql, log reads, the gap record) go over ssh, against that pod.
+describe('checkBackupHealth on k8s reads the cluster snapshot', () => {
+  const k8s = () => ({
+    deployMode: 'kubernetes',
+    provider: 'hetzner',
+    backup: { lineage: SYSID, schedule: '0 3 * * *' },
+    servers: [{ ip: '10.0.0.1', name: 'm', role: 'master' }],
+  });
+  const startedAt = new Date(Date.now() - 3 * HOUR).toISOString();
+  const droppedAt = new Date(Date.now() - HOUR).toISOString();
+  const job = (name: string, created: string, cond: Record<string, string>, ns = 'vibecarbon') => ({
+    kind: 'Job',
+    metadata: { name, namespace: ns, creationTimestamp: created },
+    status: { conditions: [{ status: 'True', ...cond }] },
+  });
+  const snapshot = {
+    nodes: [],
+    pods: [
+      {
+        kind: 'Pod',
+        metadata: { name: 'db-7', namespace: 'vibecarbon', labels: { app: 'vibecarbon-db' } },
+        status: {
+          phase: 'Running',
+          containerStatuses: [{ name: 'db', state: { running: { startedAt } } }],
+        },
+      },
+    ],
+    jobs: [
+      job('backup-a', '2026-10-21T03:00:00Z', { type: 'Complete' }),
+      job('backup-b', '2026-10-21T04:00:00Z', { type: 'Failed', reason: 'PodFailurePolicy' }),
+      job('backup-c', '2026-10-21T05:00:00Z', { type: 'Failed' }, 'other'),
+    ],
+  };
+  const seams = (snapshots: { get: (ip: string) => Promise<unknown> }) => {
+    const argvs: string[][] = [];
+    const sshKubectl = vi.fn(async (_ip: string, _k: string, argv: string[]) => {
+      argvs.push(argv);
+      if (argv.includes('psql')) return `60|${WAL(10)}|${WAL(10)}|f`;
+      if (argv.includes('--previous'))
+        throw new Error('previous terminated container "db" not found');
+      if (argv[0] === 'logs') return `${droppedAt} WAL_ARCHIVE_DROPPED: x`;
+      if (argv.includes('sh')) return 'VC_OK';
+      throw new Error(`unexpected kubectl ${argv.join(' ')}`);
+    });
+    return {
+      argvs,
+      sshKubectl,
+      deps: {
+        now: NOW,
+        readBases: async () => ({ s3Config: { bucket: 'b' }, lineage: SYSID, backups: [base(1)] }),
+        credentialVars: () => 'X',
+        snapshots,
+        sshKubectl,
+        sshRun: withSshContract(vi.fn()),
+        getSSHKeyPath: () => '/k',
+        existsSync: () => true,
+      },
+    };
+  };
+
+  it('execs target the snapshot db pod, the start time and the Job come from it, nothing is listed', async () => {
+    const snapshots = { get: vi.fn(async () => snapshot) };
+    const { argvs, deps: d } = seams(snapshots);
+    const r = await checkBackupHealth('prod', k8s(), 'proj', d);
+    expect(snapshots.get.mock.calls.every(([ip]) => ip === '10.0.0.1')).toBe(true);
+    expect(argvs.length).toBeGreaterThan(0);
+    expect(argvs.some((a) => a[0] === 'get')).toBe(false);
+    for (const a of argvs) expect(a).toContain('db-7');
+    // The vibecarbon namespace's newest finished backup Job (exit 3 policy).
+    expect(r?.lastJob).toEqual({ name: 'backup-b', failed: true, retentionFailed: true });
+    // The drop counts from the snapshot's container start, not a 24 h window.
+    expect(r?.text).toContain(`1 WAL segments dropped since ${startedAt.slice(0, 16)}Z`);
+  });
+
+  it('a failed snapshot leaves the row unknown with its one reason, never red, and runs no exec', async () => {
+    const reason = 'cluster snapshot failed: ssh timeout';
+    const snapshots = {
+      get: vi.fn(async () => {
+        throw new Error(reason);
+      }),
+    };
+    const { sshKubectl, deps: d } = seams(snapshots);
+    const r = await checkBackupHealth('prod', k8s(), 'proj', d);
+    expect(sshKubectl).not.toHaveBeenCalled();
+    expect(r?.level).toBe('warn');
+    expect(r?.text).toBe(
+      `backups: WAL archiving, dropped WAL count, WAL gap record and backup job status unknown (${reason}), newest base 1h old`,
+    );
   });
 });
 

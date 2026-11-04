@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { SNAPSHOT_ARGV, SNAPSHOT_TIMEOUT_MS } from '../../../src/lib/status/cluster-snapshot.js';
 import {
   checkRemoteContainers,
   classifyPod,
@@ -734,33 +735,32 @@ describe('checkRemoteContainers', () => {
     expect(out?.p.error).toBe('ssh timeout');
   });
 
-  it('k8s: pods + nodes on the master, app rows and platform rollups', async () => {
-    const pods = {
-      items: [
-        {
-          metadata: {
-            name: 'app-bcd12-x',
-            namespace: 'vibecarbon',
-            ownerReferences: [{ kind: 'ReplicaSet', name: 'app-bcd12' }],
-          },
-          status: {
-            phase: 'Running',
-            containerStatuses: [{ ready: true, restartCount: 0, state: { running: {} } }],
-          },
+  it('k8s: one snapshot of the master, app rows and platform rollups', async () => {
+    const items = [
+      {
+        kind: 'Pod',
+        metadata: {
+          name: 'app-bcd12-x',
+          namespace: 'vibecarbon',
+          ownerReferences: [{ kind: 'ReplicaSet', name: 'app-bcd12' }],
         },
-        {
-          metadata: { name: 'source-controller-x', namespace: 'flux-system' },
-          status: {
-            phase: 'Running',
-            containerStatuses: [{ ready: true, restartCount: 0, state: { running: {} } }],
-          },
+        status: {
+          phase: 'Running',
+          containerStatuses: [{ ready: true, restartCount: 0, state: { running: {} } }],
         },
-      ],
-    };
-    const nodes = { items: [{ status: { conditions: [{ type: 'Ready', status: 'True' }] } }] };
-    const sshKubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) =>
-      argv[1] === 'pods' ? JSON.stringify(pods) : JSON.stringify(nodes),
-    );
+      },
+      {
+        kind: 'Pod',
+        metadata: { name: 'source-controller-x', namespace: 'flux-system' },
+        status: {
+          phase: 'Running',
+          containerStatuses: [{ ready: true, restartCount: 0, state: { running: {} } }],
+        },
+      },
+      { kind: 'Node', status: { conditions: [{ type: 'Ready', status: 'True' }] } },
+      { kind: 'Job', metadata: { name: 'backup-1', namespace: 'vibecarbon' } },
+    ];
+    const sshKubectl = vi.fn(async () => JSON.stringify({ kind: 'List', items }));
     const out = await checkWithContract(
       'prod',
       { deployMode: 'kubernetes', servers: [{ name: 'm', ip: '1.1.1.1', role: 'master' }] },
@@ -771,11 +771,11 @@ describe('checkRemoteContainers', () => {
         sshRun: vi.fn(),
       },
     );
-    expect(sshKubectl.mock.calls.map((c) => c[2])).toEqual([
-      ['get', 'pods', '-A', '-o', 'json'],
-      ['get', 'nodes', '-o', 'json'],
-    ]);
-    expect(sshKubectl.mock.calls[0][3]).toMatchObject({ transportRetry: false });
+    expect(sshKubectl.mock.calls.map((c) => c[2])).toEqual([SNAPSHOT_ARGV]);
+    expect(sshKubectl.mock.calls[0][3]).toMatchObject({
+      timeout: SNAPSHOT_TIMEOUT_MS,
+      transportRetry: false,
+    });
     expect(out).not.toBeNull();
     expect(out?.m).toEqual({
       kind: 'k8s',
@@ -795,6 +795,46 @@ describe('checkRemoteContainers', () => {
     });
   });
 
+  it('k8s: rows read a snapshot shared with the rest of the run, never their own', async () => {
+    const sshKubectl = vi.fn();
+    const snapshot = {
+      nodes: [{ status: { conditions: [{ type: 'Ready', status: 'False' }] } }],
+      pods: [],
+      jobs: [],
+    };
+    const snapshots = { get: vi.fn(async () => snapshot) };
+    const out = await checkWithContract(
+      'prod',
+      { deployMode: 'kubernetes', servers: [{ name: 'm', ip: '1.1.1.1', role: 'master' }] },
+      'letsgo',
+      { ...base(), sshKubectl, sshRun: vi.fn(), snapshots },
+    );
+    expect(snapshots.get).toHaveBeenCalledWith('1.1.1.1');
+    expect(sshKubectl).not.toHaveBeenCalled();
+    expect(out?.m).toMatchObject({ rows: [], platform: {}, nodes: { ready: 0, total: 1 } });
+  });
+
+  it('k8s: a failed snapshot is an unreadable row with its one reason', async () => {
+    const out = await checkWithContract(
+      'prod',
+      { deployMode: 'kubernetes', servers: [{ name: 'm', ip: '1.1.1.1', role: 'master' }] },
+      'letsgo',
+      {
+        ...base(),
+        sshKubectl: vi.fn(async () => {
+          throw Object.assign(new Error('Command failed: ssh'), { timedOut: true, stderr: '' });
+        }),
+        sshRun: vi.fn(),
+      },
+    );
+    expect(out?.m).toEqual({
+      kind: 'k8s',
+      ip: '1.1.1.1',
+      rows: [],
+      error: 'cluster snapshot failed: ssh timeout',
+    });
+  });
+
   it('k8s: unparseable kubectl output is an error row', async () => {
     const out = await checkWithContract(
       'prod',
@@ -811,7 +851,7 @@ describe('checkRemoteContainers', () => {
       kind: 'k8s',
       ip: '1.1.1.1',
       rows: [],
-      error: 'kubectl output unparseable',
+      error: 'cluster snapshot failed: kubectl output unparseable',
     });
   });
 });

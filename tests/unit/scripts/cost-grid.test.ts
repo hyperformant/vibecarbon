@@ -154,6 +154,26 @@ describe('on the 2026-10-22 catalogs', () => {
     ],
   ] as const;
 
+  it('an HA cell prices the pair the wizard creates, one CPU class on both sides', () => {
+    // nyc3 listed no sizes on 2026-11-02. Alone, tor1 is the cheapest
+    // location ($24 regular), and its sfo3 standby could only be -amd or
+    // -intel: priced side by side that was $24 + $28 = $52 with mixed
+    // classes. The deploy puts both sides on -intel, the best class sfo3 and
+    // tor1 share, so the cell is $56, from sfo3 (first on the tie).
+    const nyc3 = readCatalogFixture('2026-10-22/digitalocean')
+      .sizes.filter((size: { regions: string[] }) => size.regions.includes('nyc3'))
+      .map((size: { slug: string }) => size.slug);
+    restores.push(seedCatalog(DigitalOceanProvider, '2026-10-22/digitalocean', { drop: { nyc3 } }));
+    expect(computeEnvMonthly(DigitalOceanProvider, 'compose')).toEqual({
+      monthly: 24,
+      locations: ['tor1'],
+    });
+    expect(computeEnvMonthly(DigitalOceanProvider, 'compose-ha')).toEqual({
+      monthly: 56,
+      locations: ['sfo3', 'tor1'],
+    });
+  });
+
   it('computeEnvMonthly gives the brief grid for every provider and supported mode', () => {
     for (const [Provider, id] of EXPECTED) restores.push(seedCatalog(Provider, `2026-10-22/${id}`));
     expect(computeEnvMonthly(HetznerProvider, 'compose')).toEqual({

@@ -207,6 +207,23 @@ export class VultrProvider extends BaseProvider {
     compose: ['vc2-2c-4gb', 'vhf-2c-4gb'],
   };
 
+  // x86 CPU classes (see BaseProvider.CPU_CLASSES): regular `vc2`, then
+  // high-frequency `vhf`. Ranked by price: no run has measured a gap that
+  // would justify the vhf surcharge, so an HA pair stays on vc2 and moves
+  // both sides to vhf only when one location lacks vc2.
+  static CPU_CLASSES = ['vc2', 'vhf'];
+
+  static CPU_CLASS_LABELS = { vc2: 'regular (vc2)', vhf: 'high-frequency (vhf)' };
+
+  /**
+   * @param {string} type
+   * @returns {string|null}
+   */
+  static cpuClassOf(type) {
+    const family = typeof type === 'string' ? type.split('-')[0] : '';
+    return VultrProvider.CPU_CLASSES.includes(family) ? family : null;
+  }
+
   // Every instance's public IPv4 is included in its plan price
   // (vultr.com/pricing, read 2026-10-22).
   static IPV4_MONTHLY = 0;

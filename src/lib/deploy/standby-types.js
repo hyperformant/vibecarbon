@@ -8,6 +8,8 @@
  * both resolve through `k8sStandbyTypes`, so the two always agree.
  */
 
+import { haStandbyType } from '../sizing.js';
+
 /**
  * The per-side record a k8s-ha deploy follows, from the env as it stood
  * before this deploy: each side's stack identity and region (only when both
@@ -43,13 +45,19 @@ export function haStacksFrom(envConfig) {
  * The standby's master, db and worker types at `standbyRegion`.
  *
  * Each role: the recorded type (unless `requested`), else
- * `Provider.resolveServerTypeForRegion(primaryType, standbyRegion, role)`:
- * the primary's type where stocked, else the role's cheapest stocked pick of
- * at least its RAM, else null. Master and db null means the standby cannot be
- * placed (the caller refuses). A null worker (the pilot-light standby only
- * records it, for failover to bring up) is reported as `workerUnstocked` and
- * left out, for the caller to fall back and say so. A role with no primary
- * type at all stays undefined (the caller's last-resort default covers it).
+ * `haStandbyType(Provider, primaryType, standbyRegion, role)` (src/lib/sizing.js):
+ * the primary's type where stocked, else the role's cheapest stocked pick
+ * with at least its vCPUs and RAM, in the primary's CPU class where sold
+ * (else the best class that is); when no candidate has the vCPUs, at least
+ * its RAM alone (the old stand-in rule), else null. Master and db null means
+ * the standby cannot be placed (the caller refuses). A null worker (the
+ * pilot-light standby only records it, for failover to bring up) is reported
+ * as `workerUnstocked` and left out, for the caller to fall back and say so.
+ * A role with no primary type at all stays undefined (the caller's
+ * last-resort default covers it).
+ * `newlySized` is true when the master or the db was resolved here rather
+ * than taken from the record: the deploy says which CPU class the two sides
+ * run only then, never on a redeploy that keeps the standby it has.
  *
  * @param {object} args
  * @param {object} args.Provider - a provider class
@@ -58,17 +66,18 @@ export function haStacksFrom(envConfig) {
  * @param {{masterServerType?: string, dbServerType?: string, workerServerType?: string}} [args.recorded]
  * @param {boolean} [args.requested] - `deploy -server-type` given: ignore the record
  * @returns {{masterServerType: string|null|undefined, dbServerType: string|null|undefined,
- *   workerServerType: string|undefined, workerUnstocked: boolean}}
+ *   workerServerType: string|undefined, workerUnstocked: boolean, newlySized: boolean}}
  */
 export function k8sStandbyTypes({ Provider, standbyRegion, primary, recorded = {}, requested }) {
   const record = requested ? {} : (recorded ?? {});
   const pick = (role, primaryType, recordedType) =>
-    recordedType || Provider.resolveServerTypeForRegion(primaryType, standbyRegion, role);
+    recordedType || haStandbyType(Provider, primaryType, standbyRegion, role);
   const worker = pick('worker', primary.worker, record.workerServerType);
   return {
     masterServerType: pick('master', primary.master, record.masterServerType),
     dbServerType: pick('db', primary.db, record.dbServerType),
     workerServerType: worker ?? undefined,
     workerUnstocked: worker === null,
+    newlySized: !(record.masterServerType && record.dbServerType),
   };
 }

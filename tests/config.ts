@@ -187,8 +187,9 @@ export const testConfig = {
     // The scale step keys on the compose or master type only
     // (deployedScaleTarget), and `scale -type` resizes the db with every
     // other role. The db-role rows (cpx12, cpx11, s-1vcpu-2gb,
-    // s-1vcpu-2gb-amd) exist only so the census's "every default has an
-    // entry" rule holds; no scale step reads them.
+    // s-1vcpu-2gb-amd, s-1vcpu-2gb-intel) exist only so the census's "every
+    // default has an entry" rule holds (an HA pair on -intel defaults its db
+    // to s-1vcpu-2gb-intel); no scale step reads them.
     capacityPreferences: {
       hetzner: {
         // EU only. Hetzner's 2026-06-15 repricing raised CPX ~3x in the US
@@ -231,6 +232,7 @@ export const testConfig = {
           's-2vcpu-4gb': ['s-4vcpu-8gb', 's-4vcpu-8gb-intel'],
           's-1vcpu-2gb': 's-2vcpu-4gb',
           's-1vcpu-2gb-amd': 's-2vcpu-4gb-amd',
+          's-1vcpu-2gb-intel': 's-2vcpu-4gb-intel',
           's-2vcpu-4gb-amd': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb-intel'],
           's-2vcpu-4gb-intel': 's-4vcpu-8gb-intel',
         },
