@@ -57,7 +57,7 @@ describe('(a) no compose program or provider spells its own Docker install', () 
   ].map((f) => relative(ROOT, f));
 
   const spellsInstall = (text: string) =>
-    text.includes('download.docker.com') ||
+    /\bdownload\.docker\.com\b/.test(text) ||
     /apt-get\b[^\n]*\binstall\b[^\n]*\bdocker-ce\b/.test(text);
 
   it('only the shared module contains download.docker.com or `apt-get ... install ... docker-ce`', () => {
