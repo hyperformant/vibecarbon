@@ -1,8 +1,8 @@
 /**
- * Census: every kubectl and helm the operator runs reads a kubeconfig that
- * carries `disable-compression: true` (src/lib/kubeconfig.js says
- * why: gzip on the API's large responses cost the tor1 standby tens of
- * seconds per deploy).
+ * Census: every kubeconfig vibecarbon writes carries `disable-compression:
+ * true` (src/lib/kubeconfig.js says why: gzip on the API's large responses
+ * cost the tor1 standby tens of seconds per deploy), and only the deploy
+ * writes one.
  *
  * ONE mechanism, the kubeconfig field, never a `--disable-compression` flag:
  * the field reaches every client that reads the file (kubectl, helm, the
@@ -11,20 +11,28 @@
  *
  * Why the arms below prove it for every spawn, present and future:
  *   (a) the cluster's credentials leave the master in exactly one place,
- *       fetchKubeconfig, which stores them through storeOperatorKubeconfig
- *       (the field is written there);
- *   (b) the file they land in is named only by kubeconfig.js, whose
- *       localKubeconfigPath upgrades a kubeconfig an older CLI wrote before
- *       returning its path; a resumed deploy's stored path goes through
- *       upgradeKubeconfig; nothing reads an ambient KUBECONFIG;
- *   so an operator-side kubectl has no kubeconfig to read but one that
- *   carries the field. (c) is the inventory: every file that spawns kubectl or
+ *       fetchKubeconfig, which installs them through installOperatorKubeconfig
+ *       (the field is written there, into a temp file renamed into place);
+ *   (b) the file they land in is named only by kubeconfig.js; a resumed
+ *       deploy's stored copy goes through upgradeKubeconfig; nothing reads an
+ *       ambient KUBECONFIG;
+ *   so an operator-side kubectl has no kubeconfig to read but the one the
+ *   deploy wrote, which carries the field once a deploy of this CLI ran.
+ *   (e) Readers never write: the two writers are called only by the deploy,
+ *       and no other file writes a kubeconfig. A reader that rewrote the file
+ *       would race the deploy writing it: read the old copy, lose the race to
+ *       the deploy's rename, then rename its stale copy over the new one (the
+ *       old cluster's CA and address after a re-provision), or save a partial
+ *       copy for good. A file an older CLI wrote just misses the speedup until
+ *       the next deploy fetches it again.
+ *   (c) is the inventory: every file that spawns kubectl or
  *   helm is listed with the side it runs on and where its kubeconfig comes
  *   from, so a new spawner is reviewed against the rule the day it appears.
  *   Master-side kubectl (ssh, the master's own loopback k3s.yaml) never
  *   crosses the operator's network path, so it needs nothing.
  *   (d) the GitOps workflow sets the field on the kubeconfig every job
- *   decodes, which also covers a secret an older CLI uploaded.
+ *   decodes, which also covers a secret an older CLI uploaded; configure
+ *   cicd adds it in memory to what it uploads.
  * Each detector is bitten by a synthetic source below.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -124,6 +132,33 @@ function workflowGaps(text: string): string[] {
     .map((b) => b.trim().split('\n')[0]);
 }
 
+/** (e) Calls of the two kubeconfig writers, as `file:function` call sites. */
+const WRITERS = /\b(upgradeKubeconfig|installOperatorKubeconfig)\(/;
+function writerCalls(file: string, text: string): string[] {
+  if (file === MODULE) return [];
+  const out: string[] = [];
+  let fn = '';
+  for (const { line, n } of codeLines(text)) {
+    const decl = /^(?:export )?(?:async )?function (\w+)\(/.exec(line);
+    if (decl) fn = decl[1];
+    if (WRITERS.test(line) && !/^import|^\s+\w+,$|^\} from/.test(line)) {
+      out.push(`${file}:${fn}:${line.match(WRITERS)?.[1]}`);
+    }
+    void n;
+  }
+  return out;
+}
+
+/** (e) An fs write whose arguments name a kubeconfig (a rename's target is its second), outside kubeconfig.js. */
+const KUBE_WRITE =
+  /\b(writeFileSync|appendFileSync|renameSync|copyFileSync|chmodSync|writeFile|rename|copyFile)\([^)]*kube/i;
+function kubeconfigWrites(file: string, text: string): string[] {
+  if (file === MODULE) return [];
+  return codeLines(text)
+    .filter(({ line }) => KUBE_WRITE.test(line))
+    .map(({ line, n }) => `${file}:${n}: ${line.trim()}`);
+}
+
 // ---------------------------------------------------------------------------
 // (c) The inventory
 // ---------------------------------------------------------------------------
@@ -191,8 +226,8 @@ describe('kubectl/helm read a kubeconfig with compression off', () => {
     const k3s = SRC.find((s) => s.file === K3S)?.text ?? '';
     const body = fnBody(k3s, 'fetchKubeconfig');
     expect(body).toContain(`root@\${masterIp}:${K3S_YAML}`);
-    expect(body).toContain('storeOperatorKubeconfig(localPath, masterIp)');
-    expect(body).not.toMatch(/writeFileSync\(/);
+    expect(body).toContain('installOperatorKubeconfig(localPath, masterIp, (tmp) =>');
+    expect(body).not.toMatch(/writeFileSync\(|renameSync\(/);
   });
 
   it('(b) only kubeconfig.js names the kubeconfig file; stored paths are upgraded; no ambient KUBECONFIG', () => {
@@ -201,8 +236,9 @@ describe('kubectl/helm read a kubeconfig with compression off', () => {
     const reads = SRC.flatMap(({ file, text }) => unUpgradedReads(file, text));
     expect(reads, 'a stored kubeconfig path goes through upgradeKubeconfig').toEqual([]);
     const mod = SRC.find((s) => s.file === MODULE)?.text ?? '';
+    // The readers' resolver is a path, nothing more (arm e).
     expect(mod).toMatch(
-      /export function localKubeconfigPath\([^)]*\) \{\n\s*return upgradeKubeconfig\(join\(/,
+      /export function localKubeconfigPath\(projectDir, stack\) \{\n {2}return join\(projectDir, '\.vibecarbon', `kubeconfig-\$\{stack\}`\);\n\}/,
     );
   });
 
@@ -224,6 +260,32 @@ describe('kubectl/helm read a kubeconfig with compression off', () => {
       expect(text, file).toMatch(
         /import \{[^}]*\b(localKubeconfigPath|upgradeKubeconfig)\b[^}]*\} from '[./a-z0-9-]*kubeconfig\.js'/,
       );
+    }
+  });
+
+  it('(e) only the deploy writes a kubeconfig: fetchKubeconfig installs it, a resumed deploy upgrades its own copy', () => {
+    const calls = SRC.flatMap(({ file, text }) => writerCalls(file, text)).sort();
+    expect(
+      calls,
+      'readers use the kubeconfig as it is; only fetchKubeconfig and the deploy resume path write it',
+    ).toEqual([
+      `${K3S}:deployK3sSteps:upgradeKubeconfig`,
+      `${K3S}:fetchKubeconfig:installOperatorKubeconfig`,
+    ]);
+    const writes = SRC.flatMap(({ file, text }) => kubeconfigWrites(file, text));
+    expect(writes, 'write a kubeconfig only through src/lib/kubeconfig.js').toEqual([]);
+  });
+
+  it('(e) the writers replace the file atomically and never leave a temp behind', () => {
+    const mod = SRC.find((s) => s.file === MODULE)?.text ?? '';
+    const replace = mod.slice(mod.indexOf('async function replaceAtomically('));
+    const body = replace.slice(0, replace.indexOf('\n}\n'));
+    expect(body).toMatch(/flag: 'wx'/);
+    expect(body).toMatch(/renameSync\(tmp, path\)/);
+    expect(body).toMatch(/\} finally \{\n\s*rmSync\(tmp, \{ force: true \}\);/);
+    for (const writer of ['installOperatorKubeconfig', 'upgradeKubeconfig']) {
+      const w = mod.slice(mod.indexOf(`export async function ${writer}(`));
+      expect(w.slice(0, w.indexOf('\n}\n')), writer).toContain('replaceAtomically(');
     }
   });
 
@@ -276,6 +338,20 @@ describe('the census detectors bite', () => {
     }
     expect(spawnsKubeClient('// kubectl apply in a comment')).toBe(false);
     expect(spawnsKubeClient('const hint = `kubectl -n vibecarbon get pods`;')).toBe(false);
+  });
+
+  it('(e) flags a reader that calls a writer or writes a kubeconfig itself', () => {
+    const reader = [
+      'export async function run(args) {',
+      '  const kc = upgradeKubeconfig(localKubeconfigPath(cwd, env));',
+      '  writeFileSync(kubeconfigPath, text);',
+      '  renameSync(tmp, kubeconfig);',
+      '  writeFileSync(sshKey, key);',
+      '}',
+    ].join('\n');
+    expect(writerCalls('src/shell.js', reader)).toEqual(['src/shell.js:run:upgradeKubeconfig']);
+    expect(kubeconfigWrites('src/shell.js', reader)).toHaveLength(2);
+    expect(kubeconfigWrites(MODULE, reader)).toEqual([]);
   });
 
   it('(d) flags a job that decodes the kubeconfig and leaves compression on', () => {

@@ -1,12 +1,12 @@
 /**
  * The operator's kubeconfig: one per cluster, `<project>/.vibecarbon/kubeconfig-<stack>`.
  *
- * fetchKubeconfig (src/lib/deploy/k8s/k3s.js) is its only writer: it copies the master's
- * /etc/rancher/k3s/k3s.yaml and stores it through operatorKubeconfigText.
- * Every reader resolves it through localKubeconfigPath (or, for a path a
- * resumed deploy kept in its state file, upgradeKubeconfig), so a kubeconfig
- * an older CLI wrote is brought up to date before kubectl or helm reads it.
- * tests/unit/deploy/kubectl-no-compression-census.test.ts holds both rules.
+ * Only the deploy writes it: fetchKubeconfig (src/lib/deploy/k8s/k3s.js)
+ * copies the master's /etc/rancher/k3s/k3s.yaml and installs it through
+ * installOperatorKubeconfig, and a resumed deploy brings its stored copy up to
+ * date through upgradeKubeconfig; both replace the file atomically. Every
+ * reader resolves the path through localKubeconfigPath and uses the file as it
+ * is. tests/unit/deploy/kubectl-no-compression-census.test.ts holds the rules.
  *
  * Every cluster entry carries `disable-compression: true`. Measured against
  * live DO clusters (2026-11-03), `kubectl get --raw /openapi/v2` took 2.25 s
@@ -23,8 +23,9 @@
  * The deploy preflight already refuses kubectl older than 1.27
  * (KUBECTL_MIN_VERSION), and an older client ignores the unknown field.
  */
-import { chmodSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 
 const FIELD = 'disable-compression';
 
@@ -92,16 +93,76 @@ export function operatorKubeconfigText(k3sYaml, masterIp) {
 }
 
 /**
- * Bring a kubeconfig on disk up to date in place: one an older CLI wrote has
- * no `disable-compression`. A missing file is left missing, and a current one
- * is not rewritten. The rewrite goes through a temp file and a rename, so a
- * concurrent reader never sees a partial file, and keeps the file 0600 (it
- * holds a cluster-admin client key).
+ * The path of a cluster's operator kubeconfig. The one place the file is
+ * named, and nothing more: every reader (shell, diagnose, scale, destroy,
+ * configure, the post-deploy checks) uses the file exactly as it is. A
+ * reader that rewrote it would race the deploy writing it: read the old copy,
+ * lose the race to the deploy's rename, then rename its stale copy over the
+ * new one (the old cluster's CA and address after a re-provision), or save a
+ * partial copy for good. A kubeconfig an older CLI wrote just misses the
+ * speedup until the next deploy fetches it again.
+ *
+ * @param {string} projectDir
+ * @param {string} stack - the environment, or its HA stack (`<env>-primary`, `<env>-standby`)
+ * @returns {string}
+ */
+export function localKubeconfigPath(projectDir, stack) {
+  return join(projectDir, '.vibecarbon', `kubeconfig-${stack}`);
+}
+
+/**
+ * Replace `path` with what `fill(tmp)` leaves in a temp file beside it, by a
+ * rename, so a reader sees the old file or the new one, never a partial one.
+ * The temp is created 0600 before anything is written into it (the content
+ * is a cluster-admin client key) and is removed on every way out: a failed
+ * fill leaves the old file as it was and nothing else behind.
  *
  * @param {string} path
- * @returns {string} the same path
+ * @param {(tmp: string) => unknown | Promise<unknown>} fill
  */
-export function upgradeKubeconfig(path) {
+async function replaceAtomically(path, fill) {
+  const tmp = join(
+    dirname(path),
+    `.${basename(path)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`,
+  );
+  try {
+    writeFileSync(tmp, '', { mode: 0o600, flag: 'wx' });
+    await fill(tmp);
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * Install the master's k3s.yaml as the operator's kubeconfig at `path`
+ * (operatorKubeconfigText: the master's address, compression off), 0600.
+ * `copyTo(tmp)` copies the master's file into a temp beside `path`; only a
+ * complete copy is renamed into place. fetchKubeconfig is its only caller.
+ *
+ * @param {string} path
+ * @param {string} masterIp
+ * @param {(tmp: string) => Promise<unknown>} copyTo
+ */
+export async function installOperatorKubeconfig(path, masterIp, copyTo) {
+  await replaceAtomically(path, async (tmp) => {
+    await copyTo(tmp);
+    writeFileSync(tmp, operatorKubeconfigText(readFileSync(tmp, 'utf-8'), masterIp));
+  });
+}
+
+/**
+ * A resumed deploy's own kubeconfig, brought up to date: the copy its last run
+ * fetched (state's `k3s-kubeconfig` result), which an older CLI may have
+ * written without `disable-compression`. Only the deploy calls it, since the
+ * deploy is the file's writer; readers never do (localKubeconfigPath). A
+ * missing file is left missing, and a current one is not rewritten.
+ *
+ * @param {string} path
+ * @returns {Promise<string>} the same path
+ */
+export async function upgradeKubeconfig(path) {
   if (!path) return path;
   let text;
   try {
@@ -113,36 +174,6 @@ export function upgradeKubeconfig(path) {
   }
   const next = withCompressionDisabled(text);
   if (next === text) return path;
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, next, { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
+  await replaceAtomically(path, (tmp) => writeFileSync(tmp, next));
   return path;
-}
-
-/**
- * The path of a cluster's operator kubeconfig, upgraded in place when an older
- * CLI wrote it (upgradeKubeconfig). The one place the file is named.
- *
- * @param {string} projectDir
- * @param {string} stack - the environment, or its HA stack (`<env>-primary`, `<env>-standby`)
- * @returns {string}
- */
-export function localKubeconfigPath(projectDir, stack) {
-  return upgradeKubeconfig(join(projectDir, '.vibecarbon', `kubeconfig-${stack}`));
-}
-
-/**
- * Store the master's k3s.yaml, already copied to `path`, as the operator's
- * kubeconfig (operatorKubeconfigText), 0600: it embeds a cluster-admin client
- * cert and key, and scp leaves the operator's umask (0644 makes helm and
- * kubectl warn "Kubernetes configuration file is world-readable" on every
- * invocation).
- *
- * @param {string} path
- * @param {string} masterIp
- */
-export function storeOperatorKubeconfig(path, masterIp) {
-  writeFileSync(path, operatorKubeconfigText(readFileSync(path, 'utf-8'), masterIp));
-  chmodSync(path, 0o600);
 }

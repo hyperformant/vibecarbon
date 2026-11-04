@@ -10,15 +10,22 @@
  * 1.26 (the deploy preflight already refuses kubectl older than 1.27).
  *
  * Covered here: the pure text transform (k3s.yaml shape, idempotence, an
- * explicit `false`, a kubeconfig with more than one cluster), the upgrade of a
- * kubeconfig an older CLI wrote (in place, 0600, no write when nothing
- * changes), and fetchKubeconfig writing the field into a fresh copy.
+ * explicit `false`, a kubeconfig with more than one cluster); readers leave
+ * the file exactly as it is; and the two writers, both owned by the deploy,
+ * replace the file atomically: fetchKubeconfig (scp into a 0600 temp beside
+ * it, the field, then a rename) and upgradeKubeconfig (a resumed deploy's
+ * stored copy). A failed write leaves the old file and no temp behind.
+ *
+ * Why readers never write: a reader that rewrites the file races the deploy
+ * writing it. It can read the old copy, lose the race to the deploy's rename,
+ * then rename its stale copy over the new one (the old cluster's CA and
+ * address after a re-provision), or save a partial scp for good.
  */
-import { spawn } from 'node:child_process';
 import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   statSync,
   utimesSync,
@@ -29,10 +36,12 @@ import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('node:child_process', async () => {
-  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
-  return { ...actual, spawn: vi.fn() };
-});
+// The copy off the master: each test says what lands at the destination.
+let scpImpl: (args: string[]) => Promise<unknown> = async () => {};
+vi.mock('../../../src/lib/ssh.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  scpWithRetry: vi.fn((args: string[]) => scpImpl(args)),
+}));
 
 const { localKubeconfigPath, operatorKubeconfigText, upgradeKubeconfig, withCompressionDisabled } =
   await import('../../../src/lib/kubeconfig.js');
@@ -139,30 +148,32 @@ describe('operatorKubeconfigText', () => {
   });
 });
 
-describe('upgradeKubeconfig / localKubeconfigPath (a kubeconfig an older CLI wrote)', () => {
-  it('adds the field in place and keeps the file 0600', () => {
-    const dir = tempProject();
-    const path = join(dir, '.vibecarbon', 'kubeconfig-prod');
-    writeFileSync(path, K3S_YAML, { mode: 0o644 });
-    chmodSync(path, 0o644);
+const OLD = new Date('2026-01-01T00:00:00Z');
 
+/** A kubeconfig an older CLI wrote: no field, 0644, an old mtime. */
+function oldKubeconfig(dir: string, stack: string) {
+  const path = join(dir, '.vibecarbon', `kubeconfig-${stack}`);
+  writeFileSync(path, K3S_YAML, { mode: 0o644 });
+  chmodSync(path, 0o644);
+  utimesSync(path, OLD, OLD);
+  return path;
+}
+
+/** Nothing but the kubeconfig itself in .vibecarbon: no temp file left behind. */
+const leftovers = (dir: string) =>
+  readdirSync(join(dir, '.vibecarbon')).filter((f) => !/^kubeconfig-[\w-]+$/.test(f));
+
+describe('localKubeconfigPath (every reader)', () => {
+  it('resolves the path and leaves an old kubeconfig exactly as it is', () => {
+    const dir = tempProject();
+    const path = oldKubeconfig(dir, 'prod');
     expect(localKubeconfigPath(dir, 'prod')).toBe(path);
-    const cfg = parse(readFileSync(path, 'utf-8'));
-    expect(cfg.clusters[0].cluster['disable-compression']).toBe(true);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path, 'utf-8')).toBe(K3S_YAML);
+    expect(statSync(path).mtimeMs).toBe(OLD.getTime());
+    expect(statSync(path).mode & 0o777).toBe(0o644);
   });
 
-  it('does not rewrite a kubeconfig that already carries the field', () => {
-    const dir = tempProject();
-    const path = join(dir, '.vibecarbon', 'kubeconfig-prod');
-    writeFileSync(path, withCompressionDisabled(K3S_YAML), { mode: 0o600 });
-    const old = new Date('2026-01-01T00:00:00Z');
-    utimesSync(path, old, old);
-    upgradeKubeconfig(path);
-    expect(statSync(path).mtimeMs).toBe(old.getTime());
-  });
-
-  it('a missing kubeconfig is left missing: the path still resolves', () => {
+  it('a missing kubeconfig stays missing', () => {
     const dir = tempProject();
     expect(localKubeconfigPath(dir, 'staging-standby')).toBe(
       join(dir, '.vibecarbon', 'kubeconfig-staging-standby'),
@@ -171,36 +182,77 @@ describe('upgradeKubeconfig / localKubeconfigPath (a kubeconfig an older CLI wro
   });
 });
 
-describe('fetchKubeconfig', () => {
-  it('writes the copied k3s.yaml with the master address and the field, 0600', async () => {
+describe('upgradeKubeconfig (a resumed deploy, the writer, on its own stored copy)', () => {
+  it('replaces an old kubeconfig with one carrying the field, 0600, no temp left', async () => {
     const dir = tempProject();
-    const path = join(dir, '.vibecarbon', 'kubeconfig-prod-standby');
-    // The scp lands the master's k3s.yaml at the destination path.
-    vi.mocked(spawn).mockImplementationOnce(((_cmd: string, args: string[]) => {
-      writeFileSync(args[args.length - 1], K3S_YAML, { mode: 0o644 });
-      const child = {
-        stdout: { on: vi.fn() },
-        stderr: { on: vi.fn() },
-        on(event: string, cb: (code: number) => void) {
-          if (event === 'close') Promise.resolve().then(() => cb(0));
-          return child;
-        },
-      };
-      return child;
-    }) as unknown as typeof spawn);
-
-    const out = await fetchKubeconfig(
-      '203.0.113.9',
-      '/tmp/key',
-      join(dir, '.vibecarbon', 'known_hosts_prod-standby'),
-      dir,
-      'prod-standby',
+    const path = oldKubeconfig(dir, 'prod');
+    expect(await upgradeKubeconfig(path)).toBe(path);
+    expect(parse(readFileSync(path, 'utf-8')).clusters[0].cluster['disable-compression']).toBe(
+      true,
     );
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(leftovers(dir)).toEqual([]);
+  });
 
-    expect(out).toBe(path);
+  it('does not rewrite a kubeconfig that already carries the field', async () => {
+    const dir = tempProject();
+    const path = join(dir, '.vibecarbon', 'kubeconfig-prod');
+    writeFileSync(path, withCompressionDisabled(K3S_YAML), { mode: 0o600 });
+    utimesSync(path, OLD, OLD);
+    await upgradeKubeconfig(path);
+    expect(statSync(path).mtimeMs).toBe(OLD.getTime());
+  });
+});
+
+const fetchInto = (dir: string, stack: string) =>
+  fetchKubeconfig(
+    '203.0.113.9',
+    '/tmp/key',
+    join(dir, '.vibecarbon', `known_hosts_${stack}`),
+    dir,
+    stack,
+  );
+
+describe('fetchKubeconfig (the deploy, the writer)', () => {
+  it('copies into a 0600 temp beside the kubeconfig, then renames it in with the field', async () => {
+    const dir = tempProject();
+    const path = oldKubeconfig(dir, 'prod-standby');
+    let dest = '';
+    let modeAtCopy = 0;
+    scpImpl = async (args) => {
+      dest = args[args.length - 1];
+      modeAtCopy = statSync(dest).mode & 0o777;
+      // Mid-copy, a reader still sees the old kubeconfig, whole.
+      expect(readFileSync(path, 'utf-8')).toBe(K3S_YAML);
+      writeFileSync(dest, K3S_YAML);
+    };
+
+    expect(await fetchInto(dir, 'prod-standby')).toBe(path);
+
+    expect(dest).not.toBe(path);
+    expect(dest.startsWith(join(dir, '.vibecarbon'))).toBe(true);
+    // The admin key never sits in a file anyone else can read.
+    expect(modeAtCopy).toBe(0o600);
     const cfg = parse(readFileSync(path, 'utf-8'));
     expect(cfg.clusters[0].cluster.server).toBe('https://203.0.113.9:6443');
     expect(cfg.clusters[0].cluster['disable-compression']).toBe(true);
     expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(leftovers(dir)).toEqual([]);
+  });
+
+  it('a failed copy leaves the old kubeconfig untouched and no temp behind', async () => {
+    const dir = tempProject();
+    const path = oldKubeconfig(dir, 'prod');
+    // A partial copy, then the transfer dies.
+    scpImpl = async (args) => {
+      writeFileSync(args[args.length - 1], K3S_YAML.slice(0, 40));
+      throw new Error('scp: lost connection');
+    };
+
+    await expect(fetchInto(dir, 'prod')).rejects.toThrow('scp: lost connection');
+
+    expect(readFileSync(path, 'utf-8')).toBe(K3S_YAML);
+    expect(statSync(path).mtimeMs).toBe(OLD.getTime());
+    expect(leftovers(dir)).toEqual([]);
   });
 });

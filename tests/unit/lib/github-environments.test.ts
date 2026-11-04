@@ -4,6 +4,9 @@
  * made; verifies the correct argv is passed and that secret values flow
  * through stdin (not --body on argv) for secret-set operations.
  */
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const runCommandAsyncMock = vi.fn();
@@ -179,6 +182,39 @@ describe('github-environments', () => {
         expect(opts.timeout).toBe(7000);
       }
       expect(runCommandAsyncMock.mock.calls.length).toBeGreaterThanOrEqual(4);
+    });
+  });
+
+  describe('uploadKubeconfig', () => {
+    it('uploads the kubeconfig with response compression off, leaving the local file as it is', async () => {
+      // An older CLI's kubeconfig has no disable-compression. The GitOps
+      // runner gets the field anyway (the workflow sets it too), and the
+      // local file is never rewritten: configure cicd only reads it.
+      const old = [
+        'apiVersion: v1',
+        'clusters:',
+        '- cluster:',
+        '    server: https://203.0.113.4:6443',
+        '  name: default',
+        'kind: Config',
+        '',
+      ].join('\n');
+      const dir = mkdtempSync(join(tmpdir(), 'vc-upload-kc-'));
+      const path = join(dir, 'kubeconfig-prod');
+      writeFileSync(path, old);
+      const { uploadKubeconfig } = await freshImport();
+
+      await uploadKubeconfig('prod', path);
+
+      const call = runCommandAsyncMock.mock.calls.find(
+        ([argv]) => argv[1] === 'secret' && argv[3] === 'KUBECONFIG_B64',
+      );
+      expect(call?.[0]).toEqual(['gh', 'secret', 'set', 'KUBECONFIG_B64', '--env', 'prod']);
+      const uploaded = Buffer.from(call?.[1].input, 'base64').toString('utf-8');
+      expect(uploaded).toContain(
+        '    disable-compression: true\n    server: https://203.0.113.4:6443',
+      );
+      expect(readFileSync(path, 'utf-8')).toBe(old);
     });
   });
 

@@ -71,8 +71,8 @@ import {
   resolveDbImage,
 } from '../../images.js';
 import {
+  installOperatorKubeconfig,
   localKubeconfigPath,
-  storeOperatorKubeconfig,
   upgradeKubeconfig,
 } from '../../kubeconfig.js';
 import { readOperatorVar } from '../../operator-env.js';
@@ -1318,12 +1318,15 @@ export async function waitForK3sReady(masterIp, sshKeyPath, khPath, maxWaitSec =
 }
 
 /**
- * scp the master's kubeconfig and store it as the operator's
- * (storeOperatorKubeconfig, kubeconfig.js): its server URL points at the
+ * scp the master's kubeconfig and install it as the operator's
+ * (installOperatorKubeconfig, kubeconfig.js): its server URL points at the
  * public master IP (cloud-init writes `127.0.0.1:6443`, useless from the
  * operator's laptop) and every cluster entry carries
- * `disable-compression: true`. The only place the cluster's credentials leave
- * the master (kubectl-no-compression-census.test.ts).
+ * `disable-compression: true`. The copy lands in a 0600 temp beside the
+ * kubeconfig and is renamed into place only once complete, so a reader never
+ * sees a partial file and a failed copy leaves the old one as it was. The only
+ * place the cluster's credentials leave the master
+ * (kubectl-no-compression-census.test.ts).
  *
  * @param {string} masterIp
  * @param {string} sshKeyPath
@@ -1334,14 +1337,15 @@ export async function waitForK3sReady(masterIp, sshKeyPath, khPath, maxWaitSec =
  */
 export async function fetchKubeconfig(masterIp, sshKeyPath, khPath, projectDir, environment) {
   const localPath = localKubeconfigPath(projectDir, environment);
-  await scpWithRetry([
-    '-i',
-    sshKeyPath,
-    ...sshHostKeyOpts(khPath),
-    `root@${masterIp}:/etc/rancher/k3s/k3s.yaml`,
-    localPath,
-  ]);
-  storeOperatorKubeconfig(localPath, masterIp);
+  await installOperatorKubeconfig(localPath, masterIp, (tmp) =>
+    scpWithRetry([
+      '-i',
+      sshKeyPath,
+      ...sshHostKeyOpts(khPath),
+      `root@${masterIp}:/etc/rancher/k3s/k3s.yaml`,
+      tmp,
+    ]),
+  );
   return localPath;
 }
 
@@ -5292,8 +5296,9 @@ async function deployK3sSteps(options, inFlight) {
     s.stop('Kubeconfig saved');
   } else {
     // A resumed deploy reuses the kubeconfig its last run fetched, which an
-    // older CLI may have written without disable-compression.
-    kubeconfig = upgradeKubeconfig(state.getStepResult('k3s-kubeconfig').kubeconfig);
+    // older CLI may have written without disable-compression. The deploy is
+    // that file's writer, so it may bring it up to date; readers never do.
+    kubeconfig = await upgradeKubeconfig(state.getStepResult('k3s-kubeconfig').kubeconfig);
   }
 
   // 5b. The cluster's restore marker decides what this deploy may do (a
