@@ -38,6 +38,8 @@
  * quarter of an hour instead of never.
  */
 
+import * as pulumi from '@pulumi/pulumi';
+
 /** Minutes a server-class create may take before the provider gives up on it. */
 export const SERVER_CREATE_TIMEOUT_MINUTES = 15;
 
@@ -106,19 +108,41 @@ export function serverResourceOptions(type, extra = {}) {
 }
 
 /**
- * The options for a k8s WORKER: the bounded create, but no `ignoreChanges` on
- * its user data. A worker holds no data, and its user data carries its join
- * target (the k3s token, the master's private IP), so it must be rebuilt when
- * that changes rather than keep joining a master that is gone.
+ * The options for a k8s WORKER. Like every server it ignores its user data, so
+ * an edit to worker-init.sh (a comment, a timing mark) never replaces a live
+ * worker. What must still rebuild one is its join target: the master it
+ * joins (its resource id and private address) and the k3s version. A worker
+ * whose master was replaced would keep joining one that is gone, so those go
+ * into a `replacementTrigger`. The k3s token is deliberately not in it: the
+ * master ignores its own user data too, so it keeps the token it booted with,
+ * and the token in state is a secret. Pulumi compares a trigger only between
+ * two defined values, so adding it to an existing worker replaces nothing.
+ *
+ * So a worker-init.sh change reaches NEW workers only (a fresh deploy, a
+ * scale-up, an autoscaler-spawned node), exactly like master-init.sh,
+ * db-init.sh and the compose cloud-config on their servers. To put it on an
+ * existing static worker, re-provision that worker; a redeploy alone will
+ * not. The trigger needs Pulumi v3.226.0 or newer (an older CLI drops it
+ * silently), which the k8s deploy preflight enforces
+ * (PULUMI_MIN_VERSION_FOR_WORKER_JOIN_TRIGGER, src/lib/deploy/preflight.js).
  *
  * @param {keyof typeof SERVER_RESOURCE_TYPES} type
- * @param {object} [extra]
+ * @param {object} extra
+ * @param {{ masterId: unknown, masterPrivateIp: unknown, k3sVersion: unknown }} extra.joinTarget
+ *   plain values or Pulumi outputs
  */
-export function workerResourceOptions(type, extra = {}) {
-  if (!SERVER_RESOURCE_TYPES[type]) {
-    throw new Error(`workerResourceOptions: unknown server type ${type}`);
-  }
-  return { ...extra, customTimeouts: SERVER_CUSTOM_TIMEOUTS };
+export function workerResourceOptions(type, { joinTarget, ...extra } = {}) {
+  const serverClass = SERVER_RESOURCE_TYPES[type];
+  if (!serverClass) throw new Error(`workerResourceOptions: unknown server type ${type}`);
+  if (!joinTarget) throw new Error('workerResourceOptions: joinTarget is required');
+  return {
+    ...extra,
+    customTimeouts: SERVER_CUSTOM_TIMEOUTS,
+    ignoreChanges: [...(extra.ignoreChanges ?? []), serverClass.userDataInput],
+    replacementTrigger: pulumi
+      .all([joinTarget.masterId, joinTarget.masterPrivateIp, joinTarget.k3sVersion])
+      .apply(([id, ip, version]) => `master=${id}@${ip} k3s=${version}`),
+  };
 }
 
 /** Provider display names and status pages, keyed by Pulumi package. */

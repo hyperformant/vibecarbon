@@ -97,6 +97,7 @@ import {
 } from '../../walg/restore-layout.js';
 import { assertRestoredPrimaryWritable } from '../../walg/restore-marker.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
+import { queueBootTiming } from '../boot-timing.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
@@ -5105,6 +5106,9 @@ async function deployK3sSteps(options, inFlight) {
   }
 
   // 4. Wait for cloud-init to finish + k3s to be Ready
+  // Set when this run waited for the master, i.e. on a fresh (re)provision:
+  // the nodes' first-boot timing is read back once the host keys are pinned.
+  let bootTimingDue = false;
   if (!state.shouldSkip('k3s-ready', { masterIp })) {
     state.startStep('k3s-ready', { masterIp });
     s.start('Waiting for k3s on master (cloud-init + Ready)');
@@ -5118,6 +5122,7 @@ async function deployK3sSteps(options, inFlight) {
     await perfAsync(`deploy.${perfPrefix}.waitForReady`, () =>
       waitForK3sReady(masterIp, privateKeyPath, khPath, 1200),
     );
+    bootTimingDue = true;
     state.completeStep('k3s-ready');
     s.stop('k3s reachable');
   }
@@ -5132,6 +5137,22 @@ async function deployK3sSteps(options, inFlight) {
   // rationale (why only provisioning re-seeds).
   for (const seedIp of [masterIp, dbIp, ...(workerIps ?? [])].filter(Boolean)) {
     await seedKnownHosts(khPath, seedIp);
+  }
+
+  // First-boot timing (`[perf] deploy.<perfPrefix>.<node>.boot.*`, VIBECARBON_PERF only):
+  // queued now, read once the command is over (lib/deploy/boot-timing.js).
+  if (bootTimingDue) {
+    queueBootTiming(
+      [
+        { ip: masterIp, prefix: `deploy.${perfPrefix}.master` },
+        { ip: dbIp, prefix: `deploy.${perfPrefix}.db` },
+        ...(workerIps ?? []).map((ip, i) => ({
+          ip,
+          prefix: `deploy.${perfPrefix}.worker${i + 1}`,
+        })),
+      ],
+      privateKeyPath,
+    );
   }
 
   // HA fan-out hook: surface this cluster's infra identity the moment the
