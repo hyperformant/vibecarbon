@@ -3,7 +3,14 @@ import { join } from 'node:path';
 import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 
-const ROOT = join(__dirname, '..', '..', '..', 'carbon', 'k8s');
+const REPO = join(__dirname, '..', '..', '..');
+const ROOT = join(REPO, 'carbon', 'k8s');
+const SCANNED = [
+  join(REPO, 'src'),
+  join(REPO, 'carbon', 'k8s'),
+  join(REPO, 'carbon', '.github'),
+  join(REPO, 'carbon', 'scripts'),
+];
 
 function yamlFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -27,9 +34,42 @@ function docs(): Array<{ file: string; doc: any }> {
   });
 }
 
+function textFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    if (name === 'node_modules') return [];
+    if (statSync(path).isDirectory()) return textFiles(path);
+    return /\.(js|mjs|ya?ml|sh|md)$/.test(name) ? [path] : [];
+  });
+}
+
 describe('k8s manifests are HTTP-01 only', () => {
   const issuers = docs().filter((d) => d.doc.kind === 'ClusterIssuer');
   const acme = issuers.filter((d) => d.doc.spec?.acme);
+
+  it('actually read the expected inputs, so the absence checks cannot pass on empty input', () => {
+    expect(issuers.length).toBeGreaterThanOrEqual(2);
+    expect(docs().some((d) => d.file.endsWith('certificate.yaml'))).toBe(true);
+    expect(SCANNED.flatMap(textFiles).length).toBeGreaterThan(20);
+  });
+
+  it('no DNS-01 machinery survives in src, carbon/k8s, carbon/.github or carbon/scripts', () => {
+    const banned: Array<[string, RegExp]> = [
+      ['dns01-recursive-nameservers', /dns01-recursive-nameservers/],
+      ['cert-manager-webhook-hetzner', /cert-manager-webhook-hetzner/],
+      ['findStalledAcmeChallenges', /findStalledAcmeChallenges/],
+      [
+        'DNS provider Secret',
+        /name:\s*['"]?(digitalocean-dns|cloudflare-api-token|hetzner)['"]?\s*$/m,
+      ],
+    ];
+    const hits: string[] = [];
+    for (const file of SCANNED.flatMap(textFiles)) {
+      const text = readFileSync(file, 'utf8');
+      for (const [label, re] of banned) if (re.test(text)) hits.push(`${file}: ${label}`);
+    }
+    expect(hits).toEqual([]);
+  });
 
   it('no ClusterIssuer has a dns01 solver', () => {
     for (const { doc } of issuers) {

@@ -171,7 +171,6 @@ describe('Routing: the app is the only public data path', () => {
         // walk never matched, until HA-correctness Task 7 made it a Deployment.
         'Deployment/repl-gateway',
         'Deployment/traefik',
-        'HelmRelease/cert-manager-webhook-hetzner',
         'StatefulSet/db',
       ].sort()
     );

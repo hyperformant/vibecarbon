@@ -196,10 +196,9 @@ function commitAndPushManifests(cwd, message) {
  * @param {string} args.projectName
  * @param {string} args.kubeconfigPath - path to kubeconfig fetched from the cluster
  * @param {string} args.networkId - Hetzner private network ID (Pulumi output)
- * @param {string} args.dnsProvider - "cloudflare" | "hetzner" | "manual"
  * @param {object} args.providerCreds - operator-secret values read from
  *   process.env by the caller (see config-registry.js's operator-secret
- *   class): { hetznerApiToken, dnsTokens }
+ *   class): { hetznerApiToken }
  * @param {{ accessKey: string, secretKey: string }} args.appStorage - the env
  *   app's own storage pair (storedAppStoragePair), seeded per environment
  * @param {{schedule?: string, retentionDays?: number}} [args.backupConfig] - envConfig.backup:
@@ -226,7 +225,6 @@ export async function deployK8sGitOps(args) {
     projectName,
     kubeconfigPath,
     networkId,
-    dnsProvider,
     providerCreds,
     appStorage,
     imageTag,
@@ -299,7 +297,6 @@ export async function deployK8sGitOps(args) {
   const perEnvSecrets = buildPerEnvSecrets(envLocal, { appStorage });
   const perEnvVars = {
     SITE_URL: domain ? `https://${domain}` : '',
-    DNS_PROVIDER: dnsProvider || '',
     HCLOUD_NETWORK_ID: networkId || '',
     // Per environment, never in the committed k8s/base every environment
     // shares: deploy.yml renders the backup CronJob and its settings from

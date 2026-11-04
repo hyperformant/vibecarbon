@@ -23,12 +23,6 @@ const SAFE_PATTERNS = [
   'k8s/base/**',
   'k8s/infra/**',
   'k8s/flux/**',
-  // k8s/gitops/** was in NO bucket, and getFilePolicy defaults an unmatched
-  // path to 'never' — so it was silently stranded on every existing project.
-  // It is among the WORST files to strand: the cert-manager webhook
-  // HelmRelease carries a chart-version pin that must move in lockstep with
-  // the CLI (DNS01_PROVIDERS.hetzner.webhook.version).
-  'k8s/gitops/**',
   'cloud-init/**',
   '.github/workflows/**',
   // Node line for the project. Safe to replace: it's a version pin we own,

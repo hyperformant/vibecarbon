@@ -767,7 +767,6 @@ async function bootstrap(cliArgs) {
     'k8s/overlays/production',
     'k8s/flux/clusters/primary',
     'k8s/flux/clusters/standby',
-    'k8s/gitops/cert-manager-webhook-hetzner',
   ];
   for (const dir of dirs) {
     mkdirSync(join(projectDir, dir), { recursive: true });

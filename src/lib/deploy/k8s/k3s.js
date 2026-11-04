@@ -5,7 +5,7 @@
  * `carbon/cloud-init/k3s/{master,db,worker}-init.sh`.
  *
  * End-to-end flow on a cold deploy:
- *   1. Preflight: docker, ssh, kubectl, helm on PATH; server-type architecture.
+ *   1. Preflight: docker, ssh, kubectl on PATH; server-type architecture.
  *   2. Start the app image build locally, in the background, before anything
  *      is provisioned (startAppImageBuild: `vibecarbon-local/<project>:<sha>
  *      [-dirty]-<ts>`, its k3s-build gate inputs read first).
@@ -61,7 +61,6 @@ import {
 import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
-import { DNS01_PROVIDERS } from '../../dns-provider.js';
 import { parseDotenv } from '../../dotenv.js';
 import { buildHostKeyOptsForPath, knownHostsPath, seedKnownHosts } from '../../host-keys.js';
 import {
@@ -1077,56 +1076,6 @@ export function k8sTlsIdentity({ projectDir, domain }) {
 }
 
 /**
- * Render the per-DNS-provider Secret YAML that cert-manager's DNS-01
- * solvers read for API auth, or null when the provider doesn't need a
- * Secret (`manual` uses HTTP-01).
- *
- * - cloudflare: `cloudflare-api-token` / key `api-token` — referenced by
- *   `letsencrypt-{prod,staging}-cloudflare`.
- * - hetzner: `hetzner` / key `token` — referenced by
- *   `letsencrypt-{prod,staging}-hetzner` AND by the official
- *   `cert-manager-webhook-hetzner` chart (matches the chart's expected
- *   `tokenSecretKeyRef` shape). The token here is the SAME Cloud API
- *   token used elsewhere — Hetzner shut down the separate DNS Console
- *   API in May 2026 and folded zone management into the main Cloud
- *   Console + api.hetzner.cloud/v1/zones.
- * - digitalocean: `digitalocean-dns` / key `access-token` — the shape
- *   cert-manager's own docs specify for its native
- *   `dns01.digitalocean.tokenSecretRef` solver; referenced by
- *   `letsencrypt-{prod,staging}-digitalocean`.
- *
- * `dnsToken` is the single credential for whichever provider is selected —
- * the caller resolves it, this function only decides where it lands.
- *
- * Throws when a token is required but missing — the early throw makes
- * "Order pinned Pending forever" failures show up at deploy-start with
- * an actionable error message instead.
- *
- * @param {{dnsProvider?: string|null, dnsToken?: string|null}} args
- * @returns {{name: string, yaml: string}|null}
- */
-export function buildDnsProviderSecret({ dnsProvider, dnsToken }) {
-  const row = DNS01_PROVIDERS[dnsProvider];
-  if (!row) return null;
-  if (!dnsToken) {
-    throw new Error(row.missingTokenError);
-  }
-  return {
-    name: row.secretName,
-    yaml: [
-      'apiVersion: v1',
-      'kind: Secret',
-      'metadata:',
-      `  name: ${row.secretName}`,
-      '  namespace: cert-manager',
-      'type: Opaque',
-      'stringData:',
-      `  ${row.secretKey}: ${JSON.stringify(dnsToken)}`,
-    ].join('\n'),
-  };
-}
-
-/**
  * @typedef {Object} K3sDeployOptions
  * @property {string} projectName
  * @property {string} environment
@@ -1407,11 +1356,6 @@ export async function prePullImages({ nodeIps, sshKeyPath, khPath, extraImages =
   );
   return { images: images.length, nodes: targets.length };
 }
-
-// cert-manager-webhook-hetzner (third-party chart for the Hetzner DNS-01
-// solver): repo/chart/version/release-name now live on
-// DNS01_PROVIDERS.hetzner.webhook in src/lib/dns-provider.js — see that
-// row's comment for the pinning rationale.
 
 /**
  * Read a `.env.local` file into a plain object — the deploy path's hard
@@ -3251,7 +3195,7 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
  * Local-first by default — no Flux on the deploy path; Flux is opt-in
  * via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, basePull?: Promise<unknown>, onNamespaceReady?: () => void, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, basePull?: Promise<unknown>, onNamespaceReady?: () => void, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
  *   `restore` is the resolved `deploy -restore` point (resolveDeployRestorePoint,
  *   src/lib/walg/restore-base.js). With it the restore marker goes into the
  *   infra Secret before the db StatefulSet applies, so the db pod's
@@ -3275,17 +3219,8 @@ export async function applyK3sManifests({
   s3Config,
   backupBucketName,
   backupConfig,
-  dnsProvider,
-  // The ONE DNS-01 credential, already resolved for whichever `dnsProvider`
-  // is selected (see DNS01_PROVIDERS). Never five per-provider token args:
-  // the deploy drives exactly one DNS API.
-  dnsToken,
   // Phase 5: cluster-autoscaler wiring. `apiToken` is the compute provider's
-  // API token (CCM/CSI/CA), distinct from `dnsToken` which only names the
-  // cert-manager DNS-01 token. On Hetzner-compute + Hetzner-DNS the two
-  // carry the same VALUE (Hetzner consolidated APIs in May 2026), but they
-  // stay separate args so the wiring is explicit and cross-provider deploys
-  // (e.g. DO compute + Cloudflare DNS) need no special case.
+  // API token (CCM/CSI/CA).
   apiToken,
   // Task 8: the compute provider id string + class, threaded from the SAME
   // source deployK3s already resolves (`providerIdFor(options)` /
@@ -3369,10 +3304,6 @@ export async function applyK3sManifests({
   const standbyAddonWorkloads = pilotStandby
     ? k8sStandbyZeroedWorkloads(enabledK8sAddonNames(projectDir))
     : [];
-  // 0. Validate DNS-01 prerequisites BEFORE any apply so the failure
-  //    surfaces at deploy-start, not 20 min in when an Order pins Pending.
-  //    Throws on missing token for any DNS01_PROVIDERS row; manual returns null.
-  const dnsSecret = buildDnsProviderSecret({ dnsProvider, dnsToken });
   // PRECONDITION: the control plane SERVES (/readyz plus a server-side
   // dry-run apply, both in one passing iteration). deployK3s, the only
   // caller, proves it with awaitControlPlaneServing right before this, at its
@@ -3824,137 +3755,6 @@ export async function applyK3sManifests({
   await perfAsync(`deploy.${perfPrefix}.certManager.admission`, () =>
     awaitCertManagerAdmission({ env }),
   );
-  // 2b. Land the per-DNS-provider Secret in the cert-manager namespace
-  //     BEFORE the kustomization that defines the issuers, so when the
-  //     ClusterIssuer is created the controller can immediately resolve
-  //     `apiTokenSecretRef`. Stdin pipe keeps the token out of argv.
-  if (dnsSecret) {
-    await perfAsync(`deploy.${perfPrefix}.dnsSecret`, () =>
-      runKubectlWithRetry(['apply', '-f', '-'], {
-        env,
-        input: dnsSecret.yaml,
-        description: `applyK3sManifests: kubectl apply Secret/${dnsSecret.name}`,
-      }),
-    );
-  }
-  // 2c. Some DNS-01 providers (currently: hetzner) need a third-party
-  //     cert-manager webhook deployment because cert-manager core has no
-  //     native solver for them — the webhook registers an APIService that
-  //     cert-manager calls into for dns01.webhook(groupName=...). It must be
-  //     Available BEFORE any Certificate referencing the issuer is
-  //     reconciled, otherwise Orders fail with "no provider for solver".
-  //     `row.webhook` is null for
-  //     providers whose solver ships in cert-manager core (e.g. cloudflare)
-  //     and DNS01_PROVIDERS has no entry at all for manual/unknown
-  //     providers, so both skip this block exactly as the old
-  //     `dnsProvider === 'hetzner'` gate did.
-  const dns01Row = DNS01_PROVIDERS[dnsProvider];
-  if (dns01Row?.webhook) {
-    await perfAsync(`deploy.${perfPrefix}.certManager.webhook`, async () => {
-      const { repoName, repoUrl, chart, version, releaseName } = dns01Row.webhook;
-      // helm repo add fails if the repo already exists; `helm repo update`
-      // below refreshes either way, hence ignoreError.
-      await runCommandAsync(['helm', 'repo', 'add', repoName, repoUrl], {
-        silent: true,
-        ignoreError: true,
-        env,
-      });
-      await runCommandAsync(['helm', 'repo', 'update', repoName], {
-        silent: true,
-        env,
-      });
-      try {
-        // Chart 0.7.0 reads zero Helm values that bind the issuer's
-        // `hetzner` Secret — that linkage lives entirely in the
-        // ClusterIssuer's `config.tokenSecretKeyRef` (name `hetzner`,
-        // key `token`; created above by buildDnsProviderSecret). The
-        // chart's `groupName` default `acme.hetzner.com` matches the
-        // ClusterIssuer's groupName, so we don't override it either.
-        // Async helm + kubectl wait — both can block for minutes; sync would
-        // block Node's event loop and inflate parallel-branch perf timings.
-        // (RCA iter-validate6: a blocking wait on the primary made the standby's
-        // certManager.wait report 21min when the actual was seconds).
-        //
-        // The webhook warm-up retry that used to wrap this install is GONE
-        // (band-aid removal, 2026-08-16): the third-party chart's own Issuer +
-        // Certificate traverse cert-manager's admission pipeline, and
-        // awaitCertManagerAdmission has already proven that pipeline serves —
-        // including the caBundle window this helper's ladder absorbed
-        // (2026-08-10 e3). A webhook failure here is a regression: fail loudly.
-        try {
-          await runCommandAsync(
-            [
-              'helm',
-              'upgrade',
-              '--install',
-              releaseName,
-              chart,
-              '--namespace',
-              'cert-manager',
-              '--version',
-              version,
-              // Same control-plane pin as the core cert-manager deploys above —
-              // this webhook is the APIService backend cert-manager dials for
-              // dns01.webhook() and needs the apiserver itself; off-master it
-              // hits the same public-6443 firewall lockout. Standard chart
-              // values; if a future chart version drops them they are ignored
-              // harmlessly and the helm --wait below still gates readiness.
-              '--set-json',
-              'nodeSelector={"node-role.kubernetes.io/control-plane":"true"}',
-              '--set-json',
-              'tolerations=[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"}]',
-              '--wait',
-              '--timeout',
-              '5m',
-            ],
-            {
-              env,
-              silent: true,
-              description:
-                `cert-manager webhook: helm upgrade --install ${chart} --version ${version} ` +
-                `(release ${releaseName}), DNS-01 certificate issuance cannot work without it`,
-            },
-          );
-        } catch (err) {
-          // Keep the actionable framing the old helper's terminal throw carried:
-          // name the component and the consequence, then the raw helm error.
-          throw new Error(
-            `cert-manager webhook: helm upgrade --install ${chart} --version ${version} ` +
-              `(release ${releaseName}) failed — DNS-01 certificate issuance cannot work ` +
-              `without it. ${err.message}`,
-          );
-        }
-        const waitOk = await runCommandAsync(
-          [
-            'kubectl',
-            '-n',
-            'cert-manager',
-            'wait',
-            '--for=condition=Available',
-            '--timeout=180s',
-            `deploy/${releaseName}`,
-          ],
-          { silent: false, env },
-        );
-        if (waitOk !== true) {
-          throw new Error(
-            `cert-manager webhook: deploy/${releaseName} never became Available ` +
-              `(180s). DNS-01 certificate issuance cannot work without it.`,
-          );
-        }
-      } catch (err) {
-        // Surface webhook pod logs on failure — chart install rarely
-        // tells the operator anything useful when the actual cause is
-        // a CrashLoopBackOff or a missing dependency. Best-effort but LOUD,
-        // and captured (not inherited) so it reaches the deploy log file.
-        await runDeployDiagnostic(
-          ['kubectl', '-n', 'cert-manager', 'logs', `deploy/${releaseName}`, '--tail=200'],
-          { env, label: `cert-manager: logs deploy/${releaseName}`, tailLines: 200 },
-        );
-        throw err;
-      }
-    });
-  }
   // 3. Apply infra (cert-manager-resources/cluster-issuers + traefik-crds).
   // ClusterIssuers traverse cert-manager's validating webhook. The webhook
   // warm-up retry that used to guard this apply is GONE (band-aid removal,
@@ -4944,8 +4744,8 @@ async function deployK3sSteps(options, inFlight) {
   const Provider = providerFor(options);
 
   // 1. Preflight
-  s.start('Preflight (docker + ssh + kubectl + helm)');
-  for (const tool of ['docker', 'ssh', 'kubectl', 'helm']) {
+  s.start('Preflight (docker + ssh + kubectl)');
+  for (const tool of ['docker', 'ssh', 'kubectl']) {
     // checkDependency does a pure in-process PATH lookup (no child process),
     // so there's nothing to make async here — matches the same preflight
     // idiom used in deploy.js / github.js / ci-setup.js.
@@ -5357,13 +5157,6 @@ async function deployK3sSteps(options, inFlight) {
         backupConfig: options.backupConfig,
         restore: options.restore,
         operatorEnv: options.operatorEnv ?? options.environment,
-        dnsProvider: options.dnsProvider,
-        // Resolved upstream (deploy effects) for whichever DNS provider is
-        // selected — the DNS credential is independent of the compute one,
-        // except on Hetzner-compute + Hetzner-DNS where they are the same
-        // Cloud API token (the separate dns.hetzner.com console + token were
-        // retired May 2026, zone management folded into the Cloud Console).
-        dnsToken: options.dnsToken,
         // Phase 5: cluster-autoscaler wiring. apiToken (the Hetzner Cloud
         // token CCM/CSI/Pulumi already use) flows in here under its own
         // name to make the CA Secret apply unambiguous; the k3sToken

@@ -36,15 +36,11 @@ import { readOperatorVar } from './operator-env.js';
  *   reads for this provider's DNS-01 token (acme.js `dnsChallengeEnv`).
  *   Verified per-provider against go-acme.github.io/lego/dns/&lt;id&gt;/.
  * @property {string} secretName - cert-manager Secret name the provider's
- *   ClusterIssuer's DNS-01 solver reads (k3s.js `buildDnsProviderSecret`).
+ *   ClusterIssuer's DNS-01 solver reads.
  * @property {string} secretKey - `stringData` key inside that Secret.
  * @property {string} missingTokenError - Verbatim error thrown by
- *   `buildDnsProviderSecret` when the token is absent — worded so the
+ *   the deploy when the token is absent — worded so the
  *   failure is actionable at deploy-start.
- * @property {{repoName: string, repoUrl: string, chart: string, version: string, releaseName: string}|null} webhook -
- *   Third-party cert-manager webhook chart this provider's DNS-01 solver
- *   needs (k3s.js `applyK3sManifests` install block), or `null` when the
- *   solver ships in cert-manager core (no extra chart to install).
  * @property {Record<string, string>} [legoTuningEnv] - Extra lego env vars
  *   this provider's DNS-01 solver needs beyond the token (e.g. a longer
  *   propagation window for slow authoritative anycast). Merged verbatim by
@@ -77,9 +73,6 @@ export const DNS01_PROVIDERS = {
       'Cloudflare DNS-01 requires a Cloudflare API token. ' +
       "Set CLOUDFLARE_API_TOKEN in your shell or the project's .env.local. " +
       'The token must have Zone:Zone:Read on all zones + Zone:DNS:Edit on the target zone.',
-    // Cloudflare's DNS-01 solver ships in cert-manager core — no extra
-    // webhook chart to install.
-    webhook: null,
   },
   hetzner: {
     tokenEnvVar: 'HETZNER_API_TOKEN',
@@ -88,19 +81,6 @@ export const DNS01_PROVIDERS = {
     missingTokenError:
       'Hetzner DNS-01 requires a Cloud API token with read+write on the zones API. ' +
       "Set HETZNER_API_TOKEN in your shell or the project's .env.local.",
-    // cert-manager core has no native Hetzner solver — the third-party
-    // cert-manager-webhook-hetzner chart registers the APIService cert-manager
-    // dispatches dns01.webhook(groupName=acme.hetzner.com) calls to. Pinned
-    // explicitly (not `latest`) so `helm repo update` can't silently drift
-    // the API surface; bump in lockstep with CERT_MANAGER_VERSION, canary is
-    // the k8s-hetzner-dns e2e scenario.
-    webhook: {
-      repoName: 'hetzner-cloud',
-      repoUrl: 'https://charts.hetzner.cloud',
-      chart: 'hetzner-cloud/cert-manager-webhook-hetzner',
-      version: '0.7.0',
-      releaseName: 'cert-manager-webhook-hetzner',
-    },
     // 300s window + 90s settle floor — the same pair as digitalocean, for
     // the same mechanism (LE-vantage propagation divergence).
     //
@@ -141,9 +121,6 @@ export const DNS01_PROVIDERS = {
       'DigitalOcean DNS-01 requires a DigitalOcean API token with write scope. ' +
       "Set DIGITALOCEAN_TOKEN in your shell or the project's .env.local. " +
       'The token needs read+write on the Domains API for the target domain.',
-    // DigitalOcean's DNS-01 solver ships in cert-manager core
-    // (dns01.digitalocean.tokenSecretRef) — no extra webhook chart.
-    webhook: null,
     // lego's per-attempt propagation wait defaults to 60s
     // (DO_PROPAGATION_TIMEOUT, go-acme.github.io/lego/dns/digitalocean/) —
     // and DO's OWN authoritative anycast nameservers routinely take longer
@@ -165,11 +142,8 @@ export const DNS01_PROVIDERS = {
   // linode, vultr and scaleway are compose-only tiers: there is no k8s deploy
   // mode for any of them, so cert-manager never sees them and none ships a
   // cluster-issuers-<id>.yaml. Only the lego half of these rows is live —
-  // Traefik solves DNS-01 on the single compose host. `webhook: null` here
-  // therefore means "no k8s tier at all", not "solver is in cert-manager
-  // core" as it does for cloudflare/digitalocean. secretName/secretKey follow
-  // cert-manager's <provider>-dns naming so that wiring a webhook solver
-  // later only needs the issuer YAML, but nothing reads them today.
+  // Traefik solves DNS-01 on the single compose host. secretName/secretKey
+  // follow cert-manager's <provider>-dns naming; nothing reads them today.
   linode: {
     tokenEnvVar: 'LINODE_TOKEN',
     secretName: 'linode-dns',
@@ -177,7 +151,6 @@ export const DNS01_PROVIDERS = {
     missingTokenError:
       'Linode DNS-01 requires a Linode API token with read/write on Domains. ' +
       "Set LINODE_TOKEN in your shell or the project's .env.local.",
-    webhook: null,
   },
   vultr: {
     tokenEnvVar: 'VULTR_API_KEY',
@@ -186,7 +159,6 @@ export const DNS01_PROVIDERS = {
     missingTokenError:
       'Vultr DNS-01 requires a Vultr API key with DNS write access. ' +
       "Set VULTR_API_KEY in your shell or the project's .env.local.",
-    webhook: null,
     // Vultr's authoritative frontends NEGATIVELY CACHE a name that was
     // queried before its record landed (proven 2026-08-30 by direct probes
     // on threvidence.com: an unqueried TXT record serves in <=5s; the same
@@ -222,9 +194,6 @@ export const DNS01_PROVIDERS = {
     missingTokenError:
       'Scaleway DNS-01 requires a Scaleway secret key whose IAM policy allows DNS write. ' +
       "Set SCALEWAY_SECRET_KEY in your shell or the project's .env.local.",
-    // Compose-only tier, like linode/vultr above — no cert-manager, so there
-    // is no webhook chart and no cluster-issuers-scaleway.yaml.
-    webhook: null,
   },
 };
 

@@ -21,7 +21,6 @@ kind: Kustomization
 # with `kubectl apply -k` by the CLI deploy and by the GitOps workflow alike.
 #
 # To upgrade cert-manager: update CERT_MANAGER_VERSION in scripts/render-cert-manager.mjs
-# (and bump cert-manager-webhook-hetzner in lockstep — see HETZNER_WEBHOOK_CHART_VERSION).
 #
 # IMPORTANT: ClusterIssuers are applied separately AFTER cert-manager is ready
 # See: k8s/infra/cert-manager-resources/ for ClusterIssuers

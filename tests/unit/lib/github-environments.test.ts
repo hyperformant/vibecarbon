@@ -60,14 +60,13 @@ describe('github-environments', () => {
       const { seedOrgSecrets } = await freshImport();
       const applied = await seedOrgSecrets({
         hetznerApiToken: 'hcloud-abc',
-        dnsTokens: { CLOUDFLARE_API_TOKEN: 'cf-abc', DESEC_TOKEN: '' /* empty → skipped */ },
       });
-      expect(applied).toEqual(['HETZNER_API_TOKEN', 'CLOUDFLARE_API_TOKEN']);
+      expect(applied).toEqual(['HETZNER_API_TOKEN']);
 
       const secretSetCalls = runCommandAsyncMock.mock.calls.filter(
         (c) => c[0][0] === 'gh' && c[0][1] === 'secret' && c[0][2] === 'set',
       );
-      expect(secretSetCalls).toHaveLength(2);
+      expect(secretSetCalls).toHaveLength(1);
 
       // Every secret-set call: value on stdin (options.input), never on argv.
       for (const [argv, opts] of secretSetCalls) {
@@ -106,7 +105,7 @@ describe('github-environments', () => {
       const result = await seedEnvironmentSecrets(
         'dev',
         { DB_PASSWORD: 'pw', JWT_SECRET: '' /* skipped */ },
-        { SITE_URL: 'https://dev.example.com', DNS_PROVIDER: '' /* skipped */ },
+        { SITE_URL: 'https://dev.example.com', HCLOUD_NETWORK_ID: '' /* skipped */ },
       );
       expect(result.secrets).toEqual(['DB_PASSWORD']);
       expect(result.vars).toEqual(['SITE_URL']);

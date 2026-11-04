@@ -3,9 +3,8 @@
  * repo. Used by Phase 4.3b of the GitOps refactor — the deploy workflow
  * (.github/workflows/deploy.yml) reads per-environment `${{ secrets.X }}`
  * + `${{ vars.Y }}` to apply the vibecarbon-app-secrets and
- * vibecarbon-infra-secrets Secrets, the cert-manager
- * `hetzner` Secret (DNS-01 webhook token), and the kube-system/hcloud Secret
- * into the cluster.
+ * vibecarbon-infra-secrets Secrets and the kube-system/hcloud Secret into the
+ * cluster.
  *
  * All calls go through the `gh` CLI (argv form, no shell interpolation) so
  * secret values never leak through ps/logs/shell history. Secret upload
@@ -14,18 +13,17 @@
  *
  * Decision: secret scope (1=org/repo-level, 2=per-environment) matches
  * the session 2026-04-20 discussion:
- *   Org-level:       HETZNER_API_TOKEN, CLOUDFLARE_API_TOKEN
+ *   Org-level:       HETZNER_API_TOKEN
  *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, APP_DB_PASSWORD, BETTER_AUTH_SECRET,
  *                    S3_ACCESS_KEY / S3_SECRET_KEY (the env app's own storage
  *                    key, from appStorageCredential's resolution; never the
  *                    infra pair on a provider that scopes keys),
  *                    ADMIN_EMAIL, ADMIN_PASSWORD, SMTP_*, and the add-ons'
  *                    METABASE_DB_PASSWORD / N8N_DB_PASSWORD / N8N_ENCRYPTION_KEY when installed
- *   Per-env vars:    HCLOUD_NETWORK_ID, SITE_URL, DNS_PROVIDER
+ *   Per-env vars:    HCLOUD_NETWORK_ID, SITE_URL
  */
 
 import { runCommandAsync } from './command.js';
-import { DNS_PROVIDERS } from './dns-provider.js';
 import { withCompressionDisabled } from './kubeconfig.js';
 
 /**
@@ -120,10 +118,6 @@ async function setVariable(key, value, env, { timeout } = {}) {
  *   from process.env by the caller (configure.js) — see config-registry.js's
  *   operator-secret class.
  * @param {string} [providerCreds.hetznerApiToken]
- * @param {Record<string, string>} [providerCreds.dnsTokens] - DNS token
- *   candidates keyed by env-var name, registry-derived from DNS_PROVIDERS
- *   (empty values are skipped; native rows share the compute token's env
- *   var, so seeding stays deduped).
  *
  * No object-storage pair here: the app's S3 pair is per environment (the
  * env's own key where the provider scopes one, security plan R2), so
@@ -134,14 +128,6 @@ export async function seedOrgSecrets(providerCreds = {}) {
   const applied = [];
   if (await setSecretFromBodyFile('HETZNER_API_TOKEN', providerCreds.hetznerApiToken ?? ''))
     applied.push('HETZNER_API_TOKEN');
-  // DNS tokens, one candidate per DNS_PROVIDERS row — the pre-convergence
-  // hand-list seeded CLOUDFLARE_API_TOKEN only, so any other DNS backend's
-  // CI/CD deploy couldn't authenticate its solver (seam-audit hazard H18).
-  for (const row of Object.values(DNS_PROVIDERS)) {
-    if (applied.includes(row.tokenEnv)) continue;
-    if (await setSecretFromBodyFile(row.tokenEnv, providerCreds.dnsTokens?.[row.tokenEnv] ?? ''))
-      applied.push(row.tokenEnv);
-  }
   return applied;
 }
 

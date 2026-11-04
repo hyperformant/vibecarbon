@@ -27,10 +27,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * The cert-manager release. Bump cert-manager-webhook-hetzner in lockstep
- * (src/lib/dns-provider.js), and re-cut the fixture
+ * The cert-manager release. Re-cut the fixture
  * tests/fixtures/cert-manager-<version>-deployments.upstream.txt from the new
- * manifest so the render test proves the patches still land.
+ * manifest when bumping, so the render test proves the patches still land.
  */
 export const CERT_MANAGER_VERSION = 'v1.20.2';
 
@@ -84,19 +83,8 @@ export const CERT_MANAGER_MIN_BACKOFF = '5m';
 
 /**
  * The flags the cert-manager controller runs with, appended to upstream's
- * args in this order:
+ * args:
  *
- * - The DNS-01 SELF-CHECK goes to public recursive resolvers instead of the
- *   zone's authoritative servers. cert-manager's default self-check dials
- *   the authoritative NS directly from the pod; both Hetzner DNS and
- *   DigitalOcean DNS are served through ANYCAST fleets, and the POP a given
- *   region's egress lands on can lag a freshly-written record by many
- *   minutes (d4 run 3, 2026-08-28: the TXT was visible from every external
- *   vantage and via the cluster's own CoreDNS, while the sfo3 pod's direct
- *   query to the same anycast IP returned empty, and the issuance sat "not
- *   yet propagated" indefinitely). Let's Encrypt validates from ITS OWN
- *   vantage, not ours, so gating issuance on the one stale POP we happen to
- *   egress through is strictly worse than gating on a public recursive answer.
  * - The minimum backoff after a failed CertificateRequest is
  *   CERT_MANAGER_MIN_BACKOFF instead of cert-manager's 1 hour.
  *
@@ -105,8 +93,6 @@ export const CERT_MANAGER_MIN_BACKOFF = '5m';
  * does not roll.
  */
 export const CERT_MANAGER_CONTROLLER_FLAGS = Object.freeze([
-  '--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53',
-  '--dns01-recursive-nameservers-only',
   `--certificate-request-minimum-backoff-duration=${CERT_MANAGER_MIN_BACKOFF}`,
 ]);
 

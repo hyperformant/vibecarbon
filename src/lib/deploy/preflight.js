@@ -264,7 +264,7 @@ export function assertOperatorConfig(
  * the package ships the `@pulumi/*` SDK, not the CLI binary — so `engines`/npm
  * cannot catch its absence and a fresh user otherwise hits a raw `ENOENT`
  * mid-deploy. `ssh` reaches every server in every mode. The k8s path checks
- * docker/kubectl/helm in its own preflight (deploy/k8s/k3s.js); compose's local
+ * docker/kubectl in its own preflight (deploy/k8s/k3s.js); compose's local
  * docker is intentionally optional (it falls back to build-on-server), so it is
  * deliberately not required here.
  *
