@@ -1038,6 +1038,11 @@ async function haConfigureReplication(ctx) {
     });
     if (probe.streaming) {
       p.log.info('Standby already streaming from the primary, skipping the reseed');
+      // A streaming standby is a replica of this primary: an abort's record
+      // of a discarded copy no longer names anything (standby-lineage.js).
+      if (readDiscardableStandby(ctx.environment, loadProjectConfig)) {
+        clearDiscardableStandby(ctx.environment);
+      }
       return;
     }
     // The lineage check, before anything is staged or stopped: a standby

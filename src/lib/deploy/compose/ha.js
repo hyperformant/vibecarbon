@@ -75,6 +75,7 @@ import {
 import {
   dropInactiveReplicationSlots,
   ensureReplicationSlotSql,
+  slotDropSkippedNote,
   slotDropWarning,
 } from '../replication-slot.js';
 import { reconcileRetiredFence } from '../retired-fence.js';
@@ -468,6 +469,30 @@ ${ensureReplicationSlotSql()}
   }
 }
 
+/**
+ * What a compose-ha cold deploy says when the STANDBY's db cannot be read:
+ * the manual rebuild (docs/technical.md, "Rebuilding a compose-ha standby
+ * whose db cannot start"). On the standby server only, the db container and
+ * its volume go; the deploy's compose up creates a fresh volume (initdb, its
+ * own system identifier) and the cold reseed seeds it from the primary, the
+ * path a new standby server takes. The container is `<project>-db`
+ * (container_name) and the volume `<project>_db_data` (the compose project is
+ * the /opt/<project> directory, volume db_data).
+ *
+ * @param {string} projectName
+ * @param {string} [envName]
+ * @returns {string}
+ */
+export function composeStandbyDbRebuildHint(projectName, envName) {
+  return (
+    "If the standby's postgres cannot start at all (a crash loop, a damaged data directory), " +
+    'rebuild its db on the STANDBY server (never the primary) with ' +
+    `\`docker rm -f ${projectName}-db\` then \`docker volume rm ${projectName}_db_data\` and then ` +
+    `\`vibecarbon deploy ${envName || '<env>'}\` seeds it from the primary (docs/technical.md, ` +
+    '"Rebuilding a compose-ha standby whose db cannot start")'
+  );
+}
+
 /** How long the compose lineage read waits for a just-recreated db to accept connections. */
 export const COMPOSE_LINEAGE_READY_WAIT_S = 60;
 
@@ -543,7 +568,8 @@ export function assertComposeStandbyNotPromotedOutside({
       `reseed refused: the standby ${standbyIp} is not proven in recovery and ${why}, so it ` +
         'cannot be told apart from a primary promoted outside vibecarbon. Nothing was staged or ' +
         `stopped. Check that its db answers (ssh root@${standbyIp} 'cd /opt/${projectName} && ` +
-        `docker compose exec -T db psql -U postgres -c "SELECT 1"'), then rerun \`vibecarbon deploy ${env}\`.`,
+        `docker compose exec -T db psql -U postgres -c "SELECT 1"'), then rerun \`vibecarbon deploy ${env}\`. ` +
+        composeStandbyDbRebuildHint(projectName, envName),
     );
   }
   if (verdict === 'source-unread') {
@@ -1546,7 +1572,8 @@ export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectN
     warn(
       `Could not demote the old primary's wal-g write-guard (${oldPrimaryIp}): ${err.message}. ` +
         `If it comes back up it may archive into the same backup prefix as the new primary, ` +
-        `\`vibecarbon deploy\` fixes this when it converges the ex-primary to standby.`,
+        `\`vibecarbon deploy\` fixes this when it converges the ex-primary to standby. ` +
+        slotDropSkippedNote(oldPrimaryIp),
     );
     return false;
   }
@@ -1789,6 +1816,9 @@ export function swapComposeHaRoles(envName, { override, attemptId } = {}) {
     // The retired node's read-only state now belongs to the retired-node
     // handling, not to the interrupted-fence marker.
     delete envConfig.ha.writeFence;
+    // An abort's discardable-standby record names the old standby, now the
+    // primary: it must never outlive the role change (standby-lineage.js).
+    delete envConfig.ha.discardableStandby;
     // Honest DR posture, as k8s swapHaRoles: the retired node replicates nothing.
     envConfig.replication = 'degraded';
     envConfig.degraded = true;

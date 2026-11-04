@@ -704,9 +704,12 @@ async function haK8sConfigureReplication(ctx) {
       envName: options.environment,
       discardableStandby,
     });
-    // The swap replaced the standby's data directory: the copy the abort gave
-    // up is gone, and so is the record that let the reseed overwrite it.
-    if (replResult.reseeded && discardableStandby) clearDiscardableStandby(options.environment);
+    // The swap replaced the standby's data directory, or the standby streams
+    // from the primary (verified, with or without a reseed): either way the
+    // copy the abort gave up is gone, and so is the record that named it.
+    if (discardableStandby && (replResult.reseeded || replResult.streaming)) {
+      clearDiscardableStandby(options.environment);
+    }
     replStreaming = replResult.streaming;
     replLastState = replResult.lastState || '';
     // Set only on verified streaming; the deploy persists it as

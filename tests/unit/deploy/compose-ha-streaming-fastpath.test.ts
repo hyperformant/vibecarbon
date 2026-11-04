@@ -153,6 +153,16 @@ describe('compose-HA deploy: the lineage check before the reseed (final review I
     expect(haOnDisk()).toEqual({ enabled: true });
   });
 
+  it('a standby whose db cannot be read names the compose rebuild', async () => {
+    seed({ enabled: true });
+    h.lineage['203.0.113.20'] = 'ready=0\nlineage=\n';
+    const err = await run().catch((e) => e);
+    expect(String(err?.message)).toMatch(
+      /rebuild its db on the STANDBY server \(never the primary\) with `docker rm -f myapp-db` then `docker volume rm myapp_db_data` and then `vibecarbon deploy prod` seeds it from the primary \(docs\/technical\.md, "Rebuilding a compose-ha standby whose db cannot start"\)/,
+    );
+    expect(h.reseed).not.toHaveBeenCalled();
+  });
+
   it('an unrecorded promotion still refuses, before the reseed', async () => {
     seed({ enabled: true });
     await expect(run()).rejects.toThrow(
@@ -169,6 +179,14 @@ describe('compose-HA deploy: the lineage check before the reseed (final review I
     await expect(run()).rejects.toThrow(/looks promoted outside vibecarbon/);
     expect(h.reseed).not.toHaveBeenCalled();
     expect(haOnDisk().discardableStandby).toBeTruthy();
+  });
+
+  it('a standby verified streaming without a reseed clears the record: it names nothing any more', async () => {
+    seed({ enabled: true, discardableStandby: RECORD });
+    h.state = 'streaming';
+    await run();
+    expect(h.reseed).not.toHaveBeenCalled();
+    expect(haOnDisk()).toEqual({ enabled: true });
   });
 
   it('a failed reseed keeps the record for the rerun', async () => {

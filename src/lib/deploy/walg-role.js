@@ -479,6 +479,8 @@ export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
   // only frees this node's own disk (a slot pins WAL up to the slot cap), so
   // it can come second; a role write that throws skips it, and the reseed
   // that rebuilds the node as the standby wipes its slots anyway.
+  // A throw here skips the drop: the caller's one report says the slots
+  // remain (slotDropSkippedNote, as failover's demotion warning does).
   const role = await setK8sWalgRole({ ip, kubectl, role: 'standby' });
   const slots = await dropInactiveReplicationSlots((sql) =>
     kubectl(

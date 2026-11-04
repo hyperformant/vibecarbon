@@ -76,6 +76,7 @@ import {
   unfenceDatabaseWrites,
   waitForStandbyCaughtUp,
 } from './lib/deploy/replication.js';
+import { slotDropSkippedNote } from './lib/deploy/replication-slot.js';
 import { haTierOf, reconcileRetiredFence } from './lib/deploy/retired-fence.js';
 import { DB_LINEAGE_SQL, parseDbLineage } from './lib/deploy/standby-lineage.js';
 import { DR_S3_CLIENT_OPTIONS } from './lib/deploy/tls-snapshot.js';
@@ -1756,6 +1757,9 @@ export function swapHaRoles(envName, { override, workerServerType } = {}) {
     // The retired side's read-only state now belongs to the retired-node
     // handling, not to the interrupted-fence marker.
     delete ha.writeFence;
+    // An abort's discardable-standby record names the OLD standby, which is
+    // now the primary: it must never outlive the role change (standby-lineage.js).
+    delete ha.discardableStandby;
   });
   if (!swapped) {
     // The promotion + DNS flip already happened, so warn rather than throw — a
@@ -2042,7 +2046,8 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
       warn(
         `Could not demote the old primary's wal-g write-guard (${oldPrimaryIp}): ${error.message}. ` +
           `If it comes back up it may archive into the same backup prefix as the new primary, ` +
-          `\`vibecarbon deploy\` fixes this when it converges the ex-primary to pilot-light.`,
+          `\`vibecarbon deploy\` fixes this when it converges the ex-primary to pilot-light. ` +
+          slotDropSkippedNote(oldPrimaryIp),
       );
       health.demoted = { ok: false, error };
     }

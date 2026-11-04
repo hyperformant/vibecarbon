@@ -116,6 +116,73 @@ describe('demoteK8sWalgRole', () => {
   });
 });
 
+describe('a failed role write skips the slot drop and says the slots remain', () => {
+  it("slotDropSkippedNote uses slotDropWarning's words for what the slot does", async () => {
+    const { slotDropSkippedNote, slotDropWarning } = await import(
+      '../../../src/lib/deploy/replication-slot.js'
+    );
+    const tail = slotDropWarning('10.0.0.1', new Error('x')).split('. It ')[1];
+    expect(tail).toMatch(/^holds WAL on that node up to max_slot_wal_keep_size/);
+    expect(slotDropSkippedNote('10.0.0.1')).toBe(
+      `The old primary's inactive replication slot (10.0.0.1) was not dropped either: it ${tail}`,
+    );
+  });
+
+  it('compose: the demotion warning names the slots that remain, and no drop runs', async () => {
+    const { slotDropSkippedNote } = await import('../../../src/lib/deploy/replication-slot.js');
+    const warn = vi.fn();
+    const run = vi.fn(async () => '');
+    const ok = await demoteComposeWalgRole({
+      oldPrimaryIp: '10.0.0.1',
+      sshKeyPath: '/k',
+      projectName: 'myapp',
+      deps: {
+        run,
+        roleRun: vi.fn(async () => {
+          throw Object.assign(new Error('ssh failed'), { stderr: 'Connection refused' });
+        }),
+        log: () => {},
+        warn,
+      },
+    });
+    expect(ok).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toContain(slotDropSkippedNote('10.0.0.1'));
+    expect(run.mock.calls.some(([, , c]) => String(c).includes(DROP_INACTIVE_SLOTS_SQL))).toBe(
+      false,
+    );
+  });
+
+  it("k8s: failover's demotion warning names the slots that remain, and no drop runs", async () => {
+    const { slotDropSkippedNote } = await import('../../../src/lib/deploy/replication-slot.js');
+    const { restorePromotedWalgRole } = await import('../../../src/failover.js');
+    const warn = vi.fn();
+    const oldPrimaryArgv: string[][] = [];
+    await restorePromotedWalgRole({
+      promotedIp: '10.0.0.9',
+      oldPrimaryIp: '10.0.0.1',
+      sshKeyPath: '/k',
+      deps: {
+        kubectl: async (ip: string, argv: string[]) => {
+          if (ip === '10.0.0.1') {
+            oldPrimaryArgv.push(argv);
+            throw new Error('ssh: connect to host 10.0.0.1 port 22: Connection refused');
+          }
+          return k8sRoleReply(argv, { intent: 'primary' }) ?? '';
+        },
+        audit: async () => {},
+        log: () => {},
+        warn,
+      },
+    }).catch(() => {});
+    const demote = warn.mock.calls
+      .map(([m]) => String(m))
+      .find((m) => m.startsWith("Could not demote the old primary's wal-g write-guard"));
+    expect(demote).toContain(slotDropSkippedNote('10.0.0.1'));
+    expect(oldPrimaryArgv.some((a) => a.includes(DROP_INACTIVE_SLOTS_SQL))).toBe(false);
+  });
+});
+
 describe('demoteComposeWalgRole drops inactive slots', () => {
   /** A compose old primary: its role-file writes (argv) and psql (string) in one log. */
   const node = (over: { drop?: () => never; roleBack?: string } = {}) => {

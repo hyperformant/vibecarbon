@@ -696,20 +696,23 @@ primary never saw. The abort resolves that for its own standby:
   state, system identifier, timeline). If the standby is out of recovery, the
   abort records that exact copy as discardable in `.vibecarbon.json`
   (`ha.discardableStandby`: address, system identifier, timeline). The
-  operator chose the old primary, so that copy's writes are given up.
+  operator chose the old primary, so that copy's writes are given up,
+  including any writes it takes after the abort.
 - The next `vibecarbon deploy <env>` reseeds over that copy, and only that
   copy: the same address, system identifier and timeline. A promotion the
   abort did not record (another timeline, another identifier, another
   standby) still refuses. Both tiers apply the same check (k8s-ha in
   `setupReplication`, compose-ha before `configureStandbyReplication`).
 - The record is cleared once the reseed replaced the standby's data
-  directory. A reseed that failed keeps it for the rerun.
+  directory, once a deploy verifies the standby streaming from the primary
+  (with or without a reseed), and by any failover's role swap: it never
+  outlives a role change. A reseed that failed keeps it for the rerun.
 - A standby still in recovery at abort time never promoted and gets no record.
   If the abort could not read the standby at all, it records nothing and
   warns: if that standby had promoted, the next deploy refuses it. Then decide
   by hand which copy to keep. To give up the standby's copy, back it up if in
-  doubt, then rebuild the standby's db as in the next section (k8s-ha) or
-  remove its db volume (compose-ha), and deploy.
+  doubt, then rebuild the standby's db as in the next sections (k8s-ha or
+  compose-ha), and deploy.
 
 #### Rebuilding a k8s-ha standby whose db cannot start
 
@@ -753,6 +756,49 @@ Why each step, checked against the code:
   `standby` intent, the lineage check reads another system identifier (a
   fresh initdb, never refused), and the in-place reseed seeds it from the
   primary and verifies streaming. The volume is attached once, at creation.
+
+#### Rebuilding a compose-ha standby whose db cannot start
+
+The compose-ha cold reseed stages inside the running standby db container,
+and before that it reads the standby's lineage (after one 60 s wait for the
+db to accept connections). A standby whose postgres cannot start fails that
+read, so the deploy refuses and names this procedure.
+
+Run it on the **standby** server only (`vibecarbon status <env>` names it).
+Its volume holds only a replica of the primary; never do this on the primary.
+
+```bash
+ssh root@<standby ip>
+docker rm -f <project>-db
+docker volume rm <project>_db_data
+exit
+vibecarbon deploy <env>
+```
+
+Why each step, checked against the code and the compose files:
+
+- `<project>-db` is the db service's `container_name`
+  (`carbon/docker-compose.yml`). `docker rm -f` stops and removes it whatever
+  state its crash loop left it in, which releases the volume.
+- The volume is the `db_data` named volume of the compose project. The
+  project is the `/opt/<project>` directory, so docker names it
+  `<project>_db_data` (`docker volume ls --filter label=com.docker.compose.volume=db_data`
+  shows it). The wal-g role file is not on it: it lives in the host
+  directory `/opt/<project>/.vibecarbon-role`, which the deploy rewrites.
+- The deploy's database-ledger preflight then reads "no db container and no
+  db volume", which is a first deploy on that server: nothing to refuse.
+- The deploy starts db on the standby (its replication overlay step runs
+  `docker compose ... up -d --no-build db` on every deploy), which creates a
+  fresh `<project>_db_data`, and the image entrypoint runs `initdb`: a new
+  database with its own system identifier, the state of a brand-new standby
+  server.
+- The cold reseed then finds the standby not streaming, and the lineage
+  check reads another system identifier (a fresh initdb, never refused).
+  `configureStandbyReplication` stages a copy of the primary into the
+  running container and swaps it in, and the deploy verifies streaming.
+- Run the deploy right after: anything that runs `docker compose up` on the
+  server before it would also create a fresh empty volume, which the deploy
+  treats the same way.
 
 ---
 

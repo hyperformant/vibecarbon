@@ -145,7 +145,7 @@ describe("k8s-ha replication effect: the abort's discardable standby (final revi
     expect(haOnDisk()).toEqual({ enabled: true });
   });
 
-  it('keeps it when no reseed ran (already streaming) or the reseed failed', async () => {
+  it('clears it when the standby is verified streaming without a reseed: it names nothing any more', async () => {
     seed();
     vi.mocked(setupReplication).mockResolvedValueOnce({
       streaming: true,
@@ -153,9 +153,20 @@ describe("k8s-ha replication effect: the abort's discardable standby (final revi
       systemIdentifier: SYSID,
     });
     await K8S_HA_EFFECTS.haK8sConfigureReplication(ctx());
-    expect(haOnDisk().discardableStandby).toEqual(RECORD);
+    expect(haOnDisk()).toEqual({ enabled: true });
+  });
+
+  it('keeps it when the reseed failed or replication did not stream', async () => {
+    seed();
     vi.mocked(setupReplication).mockRejectedValueOnce(new Error('reseed refused'));
     vi.spyOn(console, 'error').mockImplementation(() => {});
+    await K8S_HA_EFFECTS.haK8sConfigureReplication(ctx());
+    expect(haOnDisk().discardableStandby).toEqual(RECORD);
+    vi.mocked(setupReplication).mockResolvedValueOnce({
+      streaming: false,
+      lastState: '',
+      systemIdentifier: null,
+    });
     await K8S_HA_EFFECTS.haK8sConfigureReplication(ctx());
     expect(haOnDisk().discardableStandby).toEqual(RECORD);
   });

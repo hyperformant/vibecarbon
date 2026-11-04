@@ -42,13 +42,13 @@ No v1.0 yet, so no breaking-change marker. These are the behaviour changes an ex
 - The abort keeps the old primary. The failover it calls off may already have promoted the standby.
 - Before it stops the standby, the abort reads its lineage. A standby out of recovery is recorded as discardable in `.vibecarbon.json` (`ha.discardableStandby`: address, system identifier, timeline).
 - The next `vibecarbon deploy <env>` reseeds over that exact copy. Before this change that deploy refused the standby as promoted outside vibecarbon, so abort then deploy was blocked.
-- A promotion the abort did not record still refuses, and so does a record for another lineage. The record is cleared once a reseed replaced the standby's data directory. An abort that could not read the standby records nothing and warns. `docs/technical.md`, "Deploy after `failover -abort`", says what to do then.
+- A promotion the abort did not record still refuses, and so does a record for another lineage. The discard covers that copy's writes, including any it takes after the abort. The record is cleared once a reseed replaced the standby's data directory, once a deploy verifies the standby streaming, and by any failover's role swap, so it never outlives a role change. An abort that could not read the standby records nothing and warns. `docs/technical.md`, "Deploy after `failover -abort`", says what to do then.
 
 **compose-ha cold deploys run the same lineage check as k8s-ha.**
 
 - Before the reseed, the deploy reads both databases' lineage, after one bounded 60 s wait for the standby's db to accept connections.
 - It refuses a standby promoted outside vibecarbon (same system identifier, higher timeline than the primary), unless the abort recorded that copy.
-- It refuses a standby whose recovery state and lineage cannot be read. Before this change compose reseeded without either check.
+- It refuses a standby whose recovery state and lineage cannot be read, and names the compose rebuild: on the standby server only, `docker rm -f <project>-db`, `docker volume rm <project>_db_data`, then `vibecarbon deploy <env>` (`docs/technical.md`, "Rebuilding a compose-ha standby whose db cannot start"). Before this change compose reseeded without either check.
 
 **A k8s-ha standby whose postgres cannot start.**
 
