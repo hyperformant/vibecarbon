@@ -13,12 +13,19 @@
  * resolved resource inputs rather than re-deriving them by hand.
  */
 import * as pulumi from '@pulumi/pulumi';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   buildDigitalOceanK8sProgram,
   vpcCidrForCluster,
 } from '../../../src/lib/iac/programs/digitalocean-k8s.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
+
+// The ReservedIpAssignment waits for the master's `create` action to finish
+// (waitForDropletIdle). Stand in for the DO API: every droplet is idle.
+vi.stubGlobal(
+  'fetch',
+  vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ actions: [] }) })),
+);
 
 type CapturedResource = { type: string; name: string; inputs: Record<string, unknown> };
 
