@@ -1026,7 +1026,7 @@ export async function destroyComposeHA(options) {
     }
   });
 
-  // Delete SSH key + DNS resources in parallel
+  // Delete the SSH key, then DNS (in that order; see below)
   onProgress('Cleaning up resources...');
   await Promise.allSettled([
     // SSH key deletion. The compose-ha deploy creates a SHARED ssh key named
@@ -1053,61 +1053,68 @@ export async function destroyComposeHA(options) {
         // created OUTSIDE Pulumi, so nothing else will ever reap it.
         noteLeak('ssh-key', sshKeyName, `delete failed: ${error.message}`);
       }
-    })(),
-    // DNS resource deletion (ownership-filtered — only records pointing at
-    // this env's server IPs are removed; shared zones keep their other
-    // tenants' records intact). Registry-driven: every DNS_PROVIDERS backend
-    // exposes deleteApexAndWildcard (root + wildcard — M3 Task 9i: deploy
-    // creates both records, so destroy must delete both, or the wildcard
-    // orphans at a released IP). Token resolution is env-first under the
-    // same-token rule; a missing token is a LEAK entry, never a silent skip.
-    (async () => {
-      const ownedIps = (envConfig.servers || []).map((srv) => srv.ip).filter(Boolean);
-      // Nested persisted block first, else the pre-deploy flat binding — a
-      // compose-ha deploy that died before its mid-deploy persist leaves
-      // only the flat key (same class destroy.js's cleanupDnsRecords covers;
-      // observed live 2026-08-08 on the compose-single path).
-      const dnsProvider = envConfig.dns?.provider ?? envConfig.dnsProvider;
-      if (!hasAutomatedDns(dnsProvider) || !envConfig.domain) return;
-      const row = DNS_PROVIDERS[dnsProvider];
-      const token = resolveDnsToken(dnsProvider, {
-        computeProviderId: providerIdFor(envConfig),
-        computeToken: providerToken,
-      });
-      if (!token) {
-        noteLeak(
-          'dns-record',
-          `${envConfig.domain} (${row.name})`,
-          `no ${row.tokenEnv} available for DNS cleanup`,
-        );
-        return;
-      }
-      let zoneId = envConfig.dns?.zoneId ?? null;
-      try {
-        const dns = await getDnsProvider(dnsProvider);
-        if (!zoneId) {
-          const zone = findZoneForDomain(await dns.getZones(token), envConfig.domain);
-          zoneId = zone ? String(zone.id) : null;
-          if (!zoneId) return;
+    })().then(() =>
+      // DNS goes only after the shared key (the last compute resource) is gone:
+      // never delete a record while anything that could still validate or serve
+      // it is alive.
+      // DNS resource deletion (ownership-filtered — only records pointing at
+      // this env's server IPs are removed; shared zones keep their other
+      // tenants' records intact). Registry-driven: every DNS_PROVIDERS backend
+      // exposes deleteApexAndWildcard (root + wildcard — M3 Task 9i: deploy
+      // creates both records, so destroy must delete both, or the wildcard
+      // orphans at a released IP). Token resolution is env-first under the
+      // same-token rule; a missing token is a LEAK entry, never a silent skip.
+      (async () => {
+        const ownedIps = (envConfig.servers || []).map((srv) => srv.ip).filter(Boolean);
+        // Nested persisted block first, else the pre-deploy flat binding — a
+        // compose-ha deploy that died before its mid-deploy persist leaves
+        // only the flat key (same class destroy.js's cleanupDnsRecords covers;
+        // observed live 2026-08-08 on the compose-single path).
+        const dnsProvider = envConfig.dns?.provider ?? envConfig.dnsProvider;
+        if (!hasAutomatedDns(dnsProvider) || !envConfig.domain) return;
+        const row = DNS_PROVIDERS[dnsProvider];
+        const token = resolveDnsToken(dnsProvider, {
+          computeProviderId: providerIdFor(envConfig),
+          computeToken: providerToken,
+        });
+        if (!token) {
+          noteLeak(
+            'dns-record',
+            `${envConfig.domain} (${row.name})`,
+            `no ${row.tokenEnv} available for DNS cleanup`,
+          );
+          return;
         }
-        // The 0.0.0.0 warm-up sentinel is always ours to reap — a deploy
-        // that died pre-provision leaves records no server ever "owned".
-        await dns.deleteApexAndWildcard(token, zoneId, envConfig.domain, [...ownedIps, '0.0.0.0']);
-        if (typeof dns.deleteHealthCheck === 'function') {
-          await Promise.allSettled(
-            (envConfig.servers || []).map((server) =>
-              dns.deleteHealthCheck(token, zoneId, `${server.name}-health`),
-            ),
+        let zoneId = envConfig.dns?.zoneId ?? null;
+        try {
+          const dns = await getDnsProvider(dnsProvider);
+          if (!zoneId) {
+            const zone = findZoneForDomain(await dns.getZones(token), envConfig.domain);
+            zoneId = zone ? String(zone.id) : null;
+            if (!zoneId) return;
+          }
+          // The 0.0.0.0 warm-up sentinel is always ours to reap — a deploy
+          // that died pre-provision leaves records no server ever "owned".
+          await dns.deleteApexAndWildcard(token, zoneId, envConfig.domain, [
+            ...ownedIps,
+            '0.0.0.0',
+          ]);
+          if (typeof dns.deleteHealthCheck === 'function') {
+            await Promise.allSettled(
+              (envConfig.servers || []).map((server) =>
+                dns.deleteHealthCheck(token, zoneId, `${server.name}-health`),
+              ),
+            );
+          }
+        } catch (error) {
+          noteLeak(
+            'dns-record',
+            `${envConfig.domain} (${row.name} zone ${zoneId})`,
+            `delete failed: ${error.message}`,
           );
         }
-      } catch (error) {
-        noteLeak(
-          'dns-record',
-          `${envConfig.domain} (${row.name} zone ${zoneId})`,
-          `delete failed: ${error.message}`,
-        );
-      }
-    })(),
+      })(),
+    ),
   ]);
 
   // Clean up local SSH key files
