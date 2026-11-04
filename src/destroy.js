@@ -2642,10 +2642,10 @@ export function planDoK8sBackstopTargets({ plan, envConfig, projectConfig }) {
 }
 
 /**
- * k8s / k8s-ha: Cloudflare + Hetzner DNS, then Pulumi-managed infra teardown
- * (volume pre-scan, CCM LB cleanup, CSI release, CA-worker sweep, `pulumi
- * destroy` per stack, orphan sweep, HA shared-key delete), then orphaned CSI
- * volume cleanup. plan.stackEnvs already differs for k8s vs k8s-ha, so a single
+ * k8s / k8s-ha: Pulumi-managed infra teardown (volume pre-scan, CCM LB
+ * cleanup, CSI release, CA-worker sweep, `pulumi destroy` per stack, orphan
+ * sweep, HA shared-key delete), then DNS records (last, once nothing can still
+ * validate them), then orphaned CSI volume cleanup. plan.stackEnvs already differs for k8s vs k8s-ha, so a single
  * function serves both.
  */
 async function destroyK8sTier({
@@ -2693,11 +2693,10 @@ async function destroyK8sTier({
   const clusterServerIds = [];
   const prescanVolumeIds = [];
 
-  // 1. Delete DNS resources first (while servers still exist for reference) —
-  // registry-driven, ownership-filtered, incl. provider health checks.
-  await cleanupDnsRecords({ envConfig, ownedIps, providerToken, s, results });
-
-  // 2. Delete Pulumi-managed cloud resources
+  // 1. Delete Pulumi-managed cloud resources. DNS is deleted LAST (step 2):
+  // while any cluster is alive its cert-manager may still be validating, and a
+  // lookup in the gap after the records vanish caches the name as NXDOMAIN for
+  // the next deploy on it (2026-11-04).
   if (hasPulumiStack) {
     // Pulumi owns the servers, firewalls, SSH keys, and networks — `pulumi
     // destroy` tears them all down in one pass.
@@ -3295,6 +3294,11 @@ async function destroyK8sTier({
       }
     }
   }
+
+  // 2. Delete DNS resources now that nothing that could validate or serve them
+  // is alive. Registry-driven, ownership-filtered, incl. provider health
+  // checks. A failure here reports through the leak list (no retry).
+  await cleanupDnsRecords({ envConfig, ownedIps, providerToken, s, results });
 
   // Clean up Kubernetes-managed resources (created by CCM/CSI at runtime,
   // not by the Pulumi program). These aren't in any stack's resource graph.
