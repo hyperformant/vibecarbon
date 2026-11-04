@@ -139,48 +139,6 @@ describe('classifyFailure', () => {
     expect(result.category).toBe('infra');
   });
 
-  it('flags an LE-validation TXT mismatch (with acme urn context) as infra — DO anycast lag', () => {
-    // Run 33283466928: SINGLE armed solver (issuer policy in place), lego's
-    // own authoritative check passed, and LE validation still saw no record
-    // — DO anycast POP divergence between lego's vantage and LE's. With the
-    // single-issuer policy shipped, this wording class is provider-side
-    // propagation, not our race. The urn context is required: a bare
-    // "No TXT record" sentence without it stays unknown.
-    const result = classifyFailure({
-      errorMessage:
-        'Deploy exited with code 1: Error: [step:verify-tls] Deploy aborted ... | ' +
-        'urn:ietf:params:acme:error:unauthorized :: No TXT record found at _acme-challenge.cid2.do.appcarbon.dev',
-    });
-    expect(result.category).toBe('infra');
-    expect(result.reason).toMatch(/DNS-01 propagation/i);
-    expect(
-      classifyFailure({ errorMessage: 'expected No TXT record found in mock zone fixture' })
-        .category,
-    ).toBe('unknown');
-  });
-
-  it("flags the 'During secondary validation:' infix spelling as the same infra class", () => {
-    // Run 33435737752 (hetzner compose, 2026-08-31): LE prepends
-    // "During secondary validation: " when only its REMOTE perspectives
-    // fail — the primary validator saw the record, distant vantages saw a
-    // missing/stale one. Exactly the vantage-divergence mechanism this
-    // class attributes, but the infix escaped the pattern and the run
-    // hard-failed [unknown] instead of retrying. Fourth member of the
-    // "classifier missed the backend's actual wording" family.
-    const result = classifyFailure({
-      errorMessage:
-        'Deploy exited with code 1: Error: [step:verify-tls] Deploy aborted ... | ' +
-        'urn:ietf:params:acme:error:unauthorized :: During secondary validation: Incorrect TXT record',
-    });
-    expect(result.category).toBe('infra');
-    expect(result.reason).toMatch(/DNS-01 propagation/i);
-    // The urn anchor still gates: infix wording without the urn stays unknown.
-    expect(
-      classifyFailure({ errorMessage: 'During secondary validation: Incorrect TXT record' })
-        .category,
-    ).toBe('unknown');
-  });
-
   it('flags a db-rollout pod stuck on a NotReady NODE as infra — host died', () => {
     // RCA 2026-09-01 (PG17 cert, k8s-ha standby): worker went dark
     // mid-deploy (kubelet 502, SSH timeout, provider API "running"), db
@@ -410,33 +368,6 @@ describe('5xx patterns require a real status code, not any three digits', () => 
     ]) {
       expect(classifyFailure({ errorMessage: msg }).reason, msg).toMatch(/S3 transient/i);
     }
-  });
-
-  it("flags lego's vultr authoritative-check timeout as infra — negative-cache poisoning", () => {
-    // Run 33287840597 (vultr compose-ha) + scripts/acme-iso probes: Vultr's
-    // authoritative frontends negatively cache a name queried before its
-    // record lands, so lego's own propagation check starves against its own
-    // poisoned entry — wrong sibling token, or plain NXDOMAIN. The tuning
-    // row (VULTR_PROPAGATION_TIMEOUT/delay floor) is the mitigation;
-    // residual stragglers on churned names are retryable weather. The
-    // pattern is pinned to vultr's NS names so DO's equivalent wording
-    // stays with its own anycast class.
-    for (const msg of [
-      'propagation: time limit exceeded: last error: authoritative nameservers: NS ns1.vultr.com.:53 did not return the expected TXT record [fqdn: _acme-challenge.civ2.threvidence.com., value: 0ksJ…]: GXNfi0w4…',
-      'authoritative nameservers: NS ns1.vultr.com.:53 returned NXDOMAIN for _acme-challenge.isov1050.threvidence.com.',
-    ]) {
-      const result = classifyFailure({ errorMessage: msg });
-      expect(result.category, msg).toBe('infra');
-      expect(result.reason, msg).toMatch(/DNS-01 propagation/i);
-    }
-    // The same lego wording against another provider's NS stays unknown here
-    // (DO's own class matches on the acme urn context instead).
-    expect(
-      classifyFailure({
-        errorMessage:
-          'NS ns1.digitalocean.com.:53 did not return the expected TXT record [fqdn: x]',
-      }).category,
-    ).toBe('unknown');
   });
 
   it('classifies object-storage staleness 404s as S3 transient (2026-08-30 backup RCA)', () => {

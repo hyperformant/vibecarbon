@@ -133,10 +133,10 @@ export const testConfig = {
 
   e2e: {
     // Base domain per DNS backend. Each is a zone actually delegated to that
-    // provider's nameservers — a scenario's FQDN is `<envPrefix>.<domain>`,
-    // and the DNS-01 solver drives the named provider's API against it, so a
-    // key here that isn't really delegated fails at cert issuance, not at
-    // preflight.
+    // provider's nameservers — a scenario's FQDN is
+    // `<envPrefix>-<runTag>.<domain>` (a fresh name per run), and the deploy writes
+    // its A records through the named provider's API, so a key here that isn't
+    // really delegated fails at cert issuance, not at preflight.
     //
     // `digitalocean`/`linode` are 3-label subdomain zones delegated out of
     // appcarbon.dev. `vultr` is a SEPARATE APEX and has to be: Vultr's DNS
@@ -328,7 +328,7 @@ export const testConfig = {
         // costs no extra credential — the DO DNS backend authenticates with
         // the same DIGITALOCEAN_API_TOKEN as DO compute, already in
         // requiredEnv above — and it means `--provider digitalocean` exercises
-        // the DO DNS-01 path end to end instead of proving Cloudflare works
+        // the DO DNS path end to end instead of proving Cloudflare works
         // for the fourth time.
         scenarios: [
           { mode: 'compose' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd1' },
@@ -368,7 +368,7 @@ export const testConfig = {
         ],
         // Native Linode DNS (linode.appcarbon.dev), same reasoning as the DO
         // block above: LINODE_API_TOKEN already covers it, so l1 needs no
-        // Cloudflare credential and the Linode DNS-01 path gets real coverage.
+        // Cloudflare credential and the Linode DNS path gets real coverage.
         scenarios: [
           { mode: 'compose' as const, dnsProvider: 'linode' as const, envPrefix: 'l1' },
           // l2 uses Linode DNS so the compose-ha failover flip exercises the
@@ -403,7 +403,7 @@ export const testConfig = {
         // DigitalOcean and Linode it could not reuse a 3-label delegation
         // out of appcarbon.dev and needed a separate registrable domain.
         // Verified live 2026-08-12: zone served by ns1/ns2.vultr.com, and a
-        // TXT written through the API resolved authoritatively.
+        // record written through the API resolved authoritatively.
         scenarios: [
           { mode: 'compose' as const, dnsProvider: 'vultr' as const, envPrefix: 'v1' },
           // v2 uses Vultr DNS so the compose-ha failover flip exercises the
@@ -429,7 +429,7 @@ export const testConfig = {
       // reasoning as the DO/Linode/Vultr blocks above: the same SCALEWAY_*
       // triple already in requiredEnv signs the Domains & DNS API
       // (scaleway-dns.js), so s1 needs no separate Cloudflare credential and
-      // exercises the Scaleway DNS-01 path end to end.
+      // exercises the Scaleway DNS path end to end.
       // NOTE for CI namespacing: remapEnvPrefix strips only a LEADING `e`,
       // so `s1` under E2E_NAMESPACE=ci becomes `cis1` (pinned in
       // namespace.test.ts).

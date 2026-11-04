@@ -222,7 +222,7 @@ const CONTROLLER_SELECTOR =
 /**
  * Why did cert-manager issue a certificate the deploy had just restored?
  *
- * On DO k8s-ha e2e runs (LE staging, DNS-01, cert-manager v1.20.2) the deploy
+ * On DO k8s-ha e2e runs (LE staging, HTTP-01, cert-manager v1.20.2) the deploy
  * restored Secret/vibecarbon-tls from its snapshot before `apply -k` created
  * the Certificate, the restored serial was served trusted, and minutes later
  * CertificateRequest vibecarbon-tls-1 had issued a new one (2 of 2 runs). The

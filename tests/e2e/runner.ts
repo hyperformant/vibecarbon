@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+
 /**
  * E2E Test Runner — interactive by default, batch with --batch.
  *
@@ -66,7 +67,6 @@ import { cpus, hostname, tmpdir, totalmem } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-
 import { testConfig } from '../config.js';
 import { haScenarioFeatures } from './checks/standby-addons.js';
 import { MetricsCollector } from './metrics/collector.js';
@@ -102,6 +102,7 @@ import { scenarioContext } from './utils/cli-runner.js';
 import { E2EDbImageError, selectE2EDbImage } from './utils/db-image-select.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
 import { resolveE2EAcmeCa, setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
+import { runTagFor, scenarioDomain } from './utils/fresh-dns-names.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
 import { logPreflight, runPreflight } from './utils/preflight.js';
 import type { CapacityPreferences } from './utils/region-resolver.js';
@@ -849,6 +850,8 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
 
   // Initialize DB and metrics
   const runId = randomUUID();
+  // Fresh DNS names for this run only (see utils/fresh-dns-names.ts); envPrefix is untouched.
+  const runTag = runTagFor(runId);
   const db = new E2EDb();
   const collector = new MetricsCollector(db);
   const git = getGitInfo();
@@ -920,7 +923,11 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     const { mode, dnsProvider, envPrefix, serverType, region, scaleTo, scaleTarget } = scenario;
     const secondaryRegion = scenario.secondaryRegion;
     const provider = scenario.provider;
-    const domain = `${envPrefix}.${resolveBaseDomain(config.domains, dnsProvider, process.env.E2E_DOMAIN)}`;
+    const domain = scenarioDomain(
+      envPrefix,
+      runTag,
+      resolveBaseDomain(config.domains, dnsProvider, process.env.E2E_DOMAIN),
+    );
     // Unique per scenario — Date.now() collisions are rare, but the random
     // suffix is cheap insurance. Retries get a fresh timestamp + suffix so
     // the project dir / Hetzner names don't collide with the first attempt's
