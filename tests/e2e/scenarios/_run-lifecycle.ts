@@ -656,6 +656,26 @@ async function captureFailureDiagnostics(
           `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
         ]),
       ]);
+      // The db container's postgres log itself, Go stack traces dropped: a
+      // wal-g process that postgres SIGQUITs on a crash restart dumps ~200
+      // lines of goroutines, which filled the 50-line tails above and hid the
+      // postgres line that said what crashed (DO k8s-ha restore, 2026-11-04).
+      sections.push([
+        `${label}: db container postgres log (last 400 lines, Go traces filtered)`,
+        safeRun('bash', [
+          '-c',
+          `timeout 15 kubectl --kubeconfig ${kc} -n vibecarbon logs ${DB_POD} -c ${DB_CONTAINER} --tail=3000 2>&1 | grep -vE '^[[:space:]]|^(goroutine |created by |r[a-z0-9]{1,3} +0x|rip |rflags |cs |fs |gs |runtime\\.|net/|io\\.|os/|sync\\.|main\\.|github\\.com/|internal/)' | tail -400 || true`,
+        ]),
+      ]);
+      // Kernel OOM kills of a non-PID-1 process restart nothing, so they never
+      // show as OOMKilled; the kubelet records them as SystemOOM node events.
+      sections.push([
+        `${label}: node SystemOOM events`,
+        safeRun('bash', [
+          '-c',
+          `kubectl --kubeconfig ${kc} get events -A --field-selector reason=SystemOOM --sort-by=.lastTimestamp 2>&1 | tail -20 || true`,
+        ]),
+      ]);
       // 100 events for k8s-ha (applyManifests on standby can emit 50+ in
       // its 130s window before failing); 30 elsewhere stays terse.
       const eventTail = config.mode === 'k8s-ha' ? 100 : 30;
