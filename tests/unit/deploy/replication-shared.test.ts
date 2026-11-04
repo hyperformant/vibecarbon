@@ -566,418 +566,429 @@ const hasFlock = spawnSync('sh', ['-c', 'command -v flock']).status === 0;
 const GUARD = fileURLToPath(new URL('../../../carbon/volumes/db/db-guard.sh', import.meta.url));
 const WRAPPED = ['rm', 'mkdir', 'touch', 'sed', 'find', 'sync', 'mv', 'cat'];
 
-describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard.sh swap', () => {
-  let dir: string;
-  let pgdata: string;
-  let bin: string;
-  let guardBin: string;
-  let primary: string;
-  let calls: string;
-  const dirs: string[] = [];
+// Real processes: every test spawns sh with wrapped coreutils, the stage and
+// db-guard.sh. Locally the slowest takes ~2 s; on a shared CI runner one took
+// 5.1 s against the 5 s unit default (2026-11-04). A budget for real process
+// work, not a retry.
+describe.skipIf(!hasFlock)(
+  'the in-place stage, executed, then the real db-guard.sh swap',
+  { timeout: 30_000 },
+  () => {
+    let dir: string;
+    let pgdata: string;
+    let bin: string;
+    let guardBin: string;
+    let primary: string;
+    let calls: string;
+    const dirs: string[] = [];
 
-  function setup() {
-    dir = mkdtempSync(join(tmpdir(), 'vc-inplace-stage-'));
-    dirs.push(dir);
-    pgdata = join(dir, 'data');
-    bin = join(dir, 'bin');
-    guardBin = join(dir, 'guard-bin');
-    primary = join(dir, 'primary');
-    calls = join(dir, 'calls');
-    for (const d of [pgdata, bin, guardBin, primary]) mkdirSync(d);
-    // The live standby cluster.
-    mkdirSync(join(pgdata, 'base'));
-    writeFileSync(join(pgdata, 'PG_VERSION'), '17\n');
-    writeFileSync(join(pgdata, 'base', 'marker'), 'live\n');
-    writeFileSync(join(pgdata, 'standby.signal'), '');
-    // A failed-back primary: its .vc-* entries from its standby time, and a
-    // planned-failover write fence in its auto.conf.
-    mkdirSync(join(primary, 'base'));
-    writeFileSync(join(primary, 'PG_VERSION'), '17\n');
-    writeFileSync(join(primary, 'base', 'marker'), 'primary\n');
-    writeFileSync(
-      join(primary, 'postgresql.auto.conf'),
-      'port = 5432\ndefault_transaction_read_only = on\n',
-    );
-    writeFileSync(join(primary, '.vc-reseeded-from'), 'old-attempt');
-    writeFileSync(join(primary, '.vc-reseed-ready'), 'old-attempt');
-    writeFileSync(join(primary, '.vc-reseed-in-progress'), 'in old-attempt');
-    mkdirSync(join(primary, '.vc-discard', 'base'), { recursive: true });
-    writeFileSync(join(primary, '.vc-discard', 'PG_VERSION'), '17\n');
+    function setup() {
+      dir = mkdtempSync(join(tmpdir(), 'vc-inplace-stage-'));
+      dirs.push(dir);
+      pgdata = join(dir, 'data');
+      bin = join(dir, 'bin');
+      guardBin = join(dir, 'guard-bin');
+      primary = join(dir, 'primary');
+      calls = join(dir, 'calls');
+      for (const d of [pgdata, bin, guardBin, primary]) mkdirSync(d);
+      // The live standby cluster.
+      mkdirSync(join(pgdata, 'base'));
+      writeFileSync(join(pgdata, 'PG_VERSION'), '17\n');
+      writeFileSync(join(pgdata, 'base', 'marker'), 'live\n');
+      writeFileSync(join(pgdata, 'standby.signal'), '');
+      // A failed-back primary: its .vc-* entries from its standby time, and a
+      // planned-failover write fence in its auto.conf.
+      mkdirSync(join(primary, 'base'));
+      writeFileSync(join(primary, 'PG_VERSION'), '17\n');
+      writeFileSync(join(primary, 'base', 'marker'), 'primary\n');
+      writeFileSync(
+        join(primary, 'postgresql.auto.conf'),
+        'port = 5432\ndefault_transaction_read_only = on\n',
+      );
+      writeFileSync(join(primary, '.vc-reseeded-from'), 'old-attempt');
+      writeFileSync(join(primary, '.vc-reseed-ready'), 'old-attempt');
+      writeFileSync(join(primary, '.vc-reseed-in-progress'), 'in old-attempt');
+      mkdirSync(join(primary, '.vc-discard', 'base'), { recursive: true });
+      writeFileSync(join(primary, '.vc-discard', 'PG_VERSION'), '17\n');
 
-    const stub = (name: string, body: string) => {
-      writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
-      chmodSync(join(bin, name), 0o755);
-    };
-    const counted = (name: string) =>
-      [
-        `n=$(grep -cx ${name} "$CALLS" 2>/dev/null || true)`,
-        `echo ${name} >> "$CALLS"`,
-        `if [ "\${FAIL_AT:-}" = "${name}:$((\${n:-0} + 1))" ]; then echo "injected failure ${name}:$((\${n:-0} + 1))" >&2; exit 1; fi`,
-      ].join('\n');
-    for (const name of WRAPPED) {
-      const real = spawnSync('sh', ['-c', `command -v ${name}`], {
-        encoding: 'utf-8',
-      }).stdout.trim();
-      stub(name, `${counted(name)}\nexec ${real} "$@"`);
-    }
-    stub('chown', `${counted('chown')}\nexit 0`);
-    // busybox timeout (the db image is Alpine): signal ONLY the program it
-    // execs, never its children. A deadline built on it leaves pg_basebackup's
-    // forked WAL streamer writing.
-    stub(
-      'timeout',
-      [
-        'sig=TERM; if [ "$1" = -s ]; then sig=$2; shift 2; fi; n=$1; shift',
-        '( sleep "$n"; kill -"$sig" $$ ) >/dev/null 2>&1 &',
-        'exec "$@"',
-      ].join('\n'),
-    );
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: shell expansion text
-    stub('pg_isready', '[ "${STUB_ISREADY:-0}" = 0 ]');
-    stub(
-      'pg_basebackup',
-      [
-        counted('pg_basebackup'),
-        // The stub's own commands are not the stage's: no wrappers.
-        `PATH='${process.env.PATH}'`,
-        'D=""; while [ $# -gt 0 ]; do [ "$1" = -D ] && D="$2"; shift; done',
-        // A transfer cut off half way: part of the tree, then a failure.
-        `if [ "\${BB_PARTIAL:-}" = 1 ]; then cp -a "${primary}/base" "$D/"; exit 1; fi`,
-        // pg_basebackup -Xs: a forked WAL streamer that keeps writing into the
-        // staging after its parent is gone; its pid goes to $BB_FORK.
-        // biome-ignore lint/suspicious/noTemplateCurlyInString: shell expansion text
-        'if [ -n "${BB_FORK:-}" ]; then',
-        '  ( n=0; while :; do [ -d "$D/pg_wal" ] || mkdir -p "$D/pg_wal"; : > "$D/pg_wal/seg$n"; n=$((n + 1)); sleep 0.02; done ) &',
-        '  echo $! > "$BB_FORK"',
-        '  while :; do sleep 0.05; done',
-        'fi',
-        // A slow transfer: say it started, then wait (bounded) to be let go.
-        'if [ -n "$BB_GATE" ]; then',
-        '  : > "$BB_GATE.started"',
-        '  i=0; while [ ! -e "$BB_GATE.go" ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i + 1)); done',
-        'fi',
-        `cp -a "${primary}/." "$D/"`,
-        'touch "$D/standby.signal"',
-        `printf "primary_conninfo = 'host=10.0.0.5'\\n" >> "$D/postgresql.auto.conf"`,
-      ].join('\n'),
-    );
-    writeFileSync(join(guardBin, 'db-entrypoint.sh'), '#!/bin/sh\necho "STUB-ENTRYPOINT $*"\n');
-    chmodSync(join(guardBin, 'db-entrypoint.sh'), 0o755);
-  }
-
-  beforeEach(setup);
-  afterEach(() => {
-    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
-  });
-
-  const script = (extra: Record<string, unknown> = {}) =>
-    buildStagedBasebackupScript({
-      replPassword: 'p',
-      primaryHost: '10.0.0.5',
-      primaryPort: '15433',
-      swap: false,
-      stagingDir: IN_PLACE_RESEED_DIR,
-      primaryConninfo: 'host=10.0.0.5 port=15433',
-      inPlaceAttempt: 'att-1',
-      intent: 'standby',
-      // The production shape: reseedStandbyInPlace always bounds the transfer.
-      basebackupDeadlineS: 600,
-      ...extra,
-    }).replaceAll('/var/lib/postgresql/data', pgdata);
-
-  const stageEnv = (env: Record<string, string>) => ({
-    PATH: `${bin}:${process.env.PATH}`,
-    CALLS: calls,
-    VC_WALG_ROLE_INTENT: 'standby',
-    ...env,
-  });
-  function stage(env: Record<string, string> = {}, extra: Record<string, unknown> = {}) {
-    // One file per attempt: sh reads a script as it runs, so a second stage
-    // must never rewrite the file a first one is still executing.
-    const file = join(dir, `stage-${String(extra.inPlaceAttempt ?? 'att-1')}.sh`);
-    writeFileSync(file, script(extra));
-    return spawnSync('sh', [file], { encoding: 'utf-8', env: stageEnv(env) });
-  }
-  function guard(intent = 'standby') {
-    return spawnSync('sh', [GUARD, 'postgres'], {
-      encoding: 'utf-8',
-      env: {
-        PATH: `${guardBin}:${process.env.PATH}`,
-        PGDATA: pgdata,
-        VC_WALG_ROLE_INTENT: intent,
-        VC_WALG_ROLE_DIR: join(dir, 'no-role-dir'),
-      },
-    });
-  }
-  const read = (rel: string) => readFileSync(join(pgdata, rel), 'utf-8');
-  const cluster = () =>
-    readdirSync(pgdata)
-      .filter((e) => !e.startsWith('.vc-'))
-      .sort();
-  const LIVE = ['PG_VERSION', 'base', 'standby.signal'];
-
-  it('stages a tree with no .vc-* but its id, marks it ready, and the real swap takes it', () => {
-    const r = stage();
-    expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-1');
-    // The live cluster is untouched.
-    expect(cluster()).toEqual(LIVE);
-    expect(read('base/marker')).toBe('live\n');
-    const staged = join(pgdata, '.vc-reseed');
-    expect(readdirSync(staged).filter((e) => e.startsWith('.vc-'))).toEqual(['.vc-reseed-id']);
-    expect(read('.vc-reseed/.vc-reseed-id')).toBe('att-1');
-    expect(read('.vc-reseed-ready')).toBe('att-1');
-    expect(existsSync(join(pgdata, '.vc-reseed-ready.tmp'))).toBe(false);
-    const auto = read('.vc-reseed/postgresql.auto.conf');
-    expect(auto).toContain("primary_conninfo = 'host=10.0.0.5 port=15433'");
-    expect(auto).not.toContain('default_transaction_read_only');
-    expect(existsSync(join(staged, 'standby.signal'))).toBe(true);
-
-    const g = guard();
-    expect(g.status, g.stderr).toBe(0);
-    expect(g.stderr).toContain('RESEED_SWAPPED att-1');
-    expect(g.stdout).toContain('STUB-ENTRYPOINT postgres');
-    expect(read('base/marker')).toBe('primary\n');
-    expect(read('.vc-reseeded-from')).toBe('att-1');
-    expect(readFileSync(join(pgdata, '.vc-discard', 'base', 'marker'), 'utf-8')).toBe('live\n');
-    for (const f of ['.vc-reseed', '.vc-reseed-ready', '.vc-reseed-in-progress']) {
-      expect(existsSync(join(pgdata, f)), f).toBe(false);
-    }
-  });
-
-  it('reconverge: the old primary container still says primary in its env, the stage runs and the swap takes it', () => {
-    // A failover swapped the roles: the ConfigMap now says standby, the
-    // running container (started as the primary) still has primary in env.
-    const r = stage({ VC_WALG_ROLE_INTENT: 'primary' });
-    expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-1');
-    // The restarted container resolves the ConfigMap again: standby.
-    const g = guard('standby');
-    expect(g.status, g.stderr).toBe(0);
-    expect(g.stderr).toContain('RESEED_SWAPPED att-1');
-  });
-
-  it('a restarted container whose intent is still not standby never swaps the staged tree', () => {
-    expect(stage().status).toBe(0);
-    const g = guard('primary');
-    expect(g.stderr).not.toContain('RESEED_SWAPPED');
-    expect(read('base/marker')).toBe('live\n');
-  });
-
-  it('a swap under way (.vc-reseed-in-progress): refuses, nothing touched', () => {
-    mkdirSync(join(pgdata, '.vc-reseed'));
-    writeFileSync(join(pgdata, '.vc-reseed', 'PG_VERSION'), '17\n');
-    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), 'out x');
-    writeFileSync(join(pgdata, '.vc-reseed-ready'), 'x');
-    const r = stage();
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toMatch(/in progress/);
-    expect(read('.vc-reseed/PG_VERSION')).toBe('17\n');
-    expect(read('.vc-reseed-ready')).toBe('x');
-  });
-
-  it('a stray .vc-reseed with no marker is cleared, even when the probe skips', () => {
-    mkdirSync(join(pgdata, '.vc-reseed', 'base'), { recursive: true });
-    writeFileSync(join(pgdata, '.vc-reseed', 'PG_VERSION'), '17\n');
-    const r = stage({ STUB_ISREADY: '1' }, { probeFirst: true, probeAttempts: 1, probeDelayS: 0 });
-    expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout.trim()).toBe('RESEED_SKIPPED');
-    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
-    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
-    expect(cluster()).toEqual(LIVE);
-  });
-
-  it('two stages at once: exactly one stages, the other refuses busy and touches nothing', async () => {
-    const gate = join(dir, 'gate');
-    const fileA = join(dir, 'stage-A.sh');
-    writeFileSync(fileA, script());
-    const a = spawn('sh', [fileA], { env: stageEnv({ BB_GATE: gate }) });
-    let outA = '';
-    a.stdout.on('data', (d) => {
-      outA += d;
-    });
-    const exitA = new Promise<number | null>((res) => a.on('close', res));
-    try {
-      // Bounded wait for A to be inside its transfer, holding the lock.
-      for (let i = 0; i < 200 && !existsSync(`${gate}.started`); i++) {
-        await new Promise((r) => setTimeout(r, 25));
+      const stub = (name: string, body: string) => {
+        writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
+        chmodSync(join(bin, name), 0o755);
+      };
+      const counted = (name: string) =>
+        [
+          `n=$(grep -cx ${name} "$CALLS" 2>/dev/null || true)`,
+          `echo ${name} >> "$CALLS"`,
+          `if [ "\${FAIL_AT:-}" = "${name}:$((\${n:-0} + 1))" ]; then echo "injected failure ${name}:$((\${n:-0} + 1))" >&2; exit 1; fi`,
+        ].join('\n');
+      for (const name of WRAPPED) {
+        const real = spawnSync('sh', ['-c', `command -v ${name}`], {
+          encoding: 'utf-8',
+        }).stdout.trim();
+        stub(name, `${counted(name)}\nexec ${real} "$@"`);
       }
-      expect(existsSync(`${gate}.started`), 'stage A never reached its transfer').toBe(true);
-      const b = stage({}, { inPlaceAttempt: 'att-2' });
-      expect(b.status).toBe(1);
-      expect(b.stdout.trim()).toBe('RESEED_REFUSED busy');
-      expect(existsSync(join(pgdata, '.vc-reseed', '.vc-reseed-id'))).toBe(false);
-      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
-    } finally {
-      writeFileSync(`${gate}.go`, '');
+      stub('chown', `${counted('chown')}\nexit 0`);
+      // busybox timeout (the db image is Alpine): signal ONLY the program it
+      // execs, never its children. A deadline built on it leaves pg_basebackup's
+      // forked WAL streamer writing.
+      stub(
+        'timeout',
+        [
+          'sig=TERM; if [ "$1" = -s ]; then sig=$2; shift 2; fi; n=$1; shift',
+          '( sleep "$n"; kill -"$sig" $$ ) >/dev/null 2>&1 &',
+          'exec "$@"',
+        ].join('\n'),
+      );
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell expansion text
+      stub('pg_isready', '[ "${STUB_ISREADY:-0}" = 0 ]');
+      stub(
+        'pg_basebackup',
+        [
+          counted('pg_basebackup'),
+          // The stub's own commands are not the stage's: no wrappers.
+          `PATH='${process.env.PATH}'`,
+          'D=""; while [ $# -gt 0 ]; do [ "$1" = -D ] && D="$2"; shift; done',
+          // A transfer cut off half way: part of the tree, then a failure.
+          `if [ "\${BB_PARTIAL:-}" = 1 ]; then cp -a "${primary}/base" "$D/"; exit 1; fi`,
+          // pg_basebackup -Xs: a forked WAL streamer that keeps writing into the
+          // staging after its parent is gone; its pid goes to $BB_FORK.
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: shell expansion text
+          'if [ -n "${BB_FORK:-}" ]; then',
+          '  ( n=0; while :; do [ -d "$D/pg_wal" ] || mkdir -p "$D/pg_wal"; : > "$D/pg_wal/seg$n"; n=$((n + 1)); sleep 0.02; done ) &',
+          '  echo $! > "$BB_FORK"',
+          '  while :; do sleep 0.05; done',
+          'fi',
+          // A slow transfer: say it started, then wait (bounded) to be let go.
+          'if [ -n "$BB_GATE" ]; then',
+          '  : > "$BB_GATE.started"',
+          '  i=0; while [ ! -e "$BB_GATE.go" ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i + 1)); done',
+          'fi',
+          `cp -a "${primary}/." "$D/"`,
+          'touch "$D/standby.signal"',
+          `printf "primary_conninfo = 'host=10.0.0.5'\\n" >> "$D/postgresql.auto.conf"`,
+        ].join('\n'),
+      );
+      writeFileSync(join(guardBin, 'db-entrypoint.sh'), '#!/bin/sh\necho "STUB-ENTRYPOINT $*"\n');
+      chmodSync(join(guardBin, 'db-entrypoint.sh'), 0o755);
     }
-    expect(await exitA).toBe(0);
-    expect(outA.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-1');
-    expect(read('.vc-reseed-ready')).toBe('att-1');
-    expect(read('.vc-reseed/.vc-reseed-id')).toBe('att-1');
-  });
 
-  it('a transfer past its remote deadline is killed: RESEED_TIMEOUT, nothing armed, the lock free', () => {
-    // A gate never opened: the stub transfer waits until it is killed.
-    const r = stage({ BB_GATE: join(dir, 'never') }, { basebackupDeadlineS: 1 });
-    expect(r.status).toBe(1);
-    expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_TIMEOUT 1');
-    expect(r.stderr).toMatch(/did not finish within 1s/);
-    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
-    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
-    expect(cluster()).toEqual(LIVE);
-    const g = guard();
-    expect(g.status, g.stderr).toBe(0);
-    expect(g.stderr).not.toContain('RESEED_SWAPPED');
-    // The lock went with the killed transfer: the next stage is not busy.
-    rmSync(calls);
-    const next = stage({}, { inPlaceAttempt: 'att-2' });
-    expect(next.status, next.stderr).toBe(0);
-    expect(next.stdout.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-2');
-  });
-
-  it("a timed-out transfer's forked WAL streamer dies with it: RESEED_TIMEOUT, nothing armed, nothing left writing", () => {
-    const pidFile = join(dir, 'streamer.pid');
-    const r = stage({ BB_FORK: pidFile }, { basebackupDeadlineS: 1 });
-    expect(r.status).toBe(1);
-    expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_TIMEOUT 1');
-    expect(r.stderr).toMatch(/did not finish within 1s/);
-    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
-    const pid = Number(readFileSync(pidFile, 'utf-8').trim());
-    expect(pid).toBeGreaterThan(0);
-    // The streamer is gone, not reparented and still writing.
-    expect(spawnSync('kill', ['-0', String(pid)]).status).not.toBe(0);
-    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
-    const g = guard();
-    expect(g.stderr).not.toContain('RESEED_SWAPPED');
-    expect(read('base/marker')).toBe('live\n');
-  });
-
-  it('a transfer that fails fast is a plain failure, never a timeout', () => {
-    const r = stage({ BB_PARTIAL: '1' });
-    expect(r.status).toBe(1);
-    expect(r.stdout).not.toContain('RESEED_TIMEOUT');
-    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
-  });
-
-  const disarm = (attempt: string, env: Record<string, string> = {}) =>
-    spawnSync(
-      'sh',
-      ['-c', reseedDisarmArgv(attempt)[2].replaceAll('/var/lib/postgresql/data', pgdata)],
-      {
-        encoding: 'utf-8',
-        env: stageEnv(env),
-      },
-    );
-
-  it("the disarm clears this attempt's armed tree under the lock; the swap then takes nothing", () => {
-    expect(stage().status).toBe(0);
-    const d = disarm('att-1');
-    expect(d.status, d.stderr).toBe(0);
-    expect(d.stdout.trim()).toBe('RESEED_DISARMED');
-    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
-    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
-    const g = guard();
-    expect(g.stderr).not.toContain('RESEED_SWAPPED');
-    expect(read('base/marker')).toBe('live\n');
-  });
-
-  it("the disarm leaves another attempt's tree, and a swap under way, alone", () => {
-    expect(stage().status).toBe(0);
-    const other = disarm('att-9');
-    expect(other.status).toBe(1);
-    expect(other.stdout).toMatch(/^RESEED_DISARM_REFUSED /);
-    expect(read('.vc-reseed-ready')).toBe('att-1');
-    writeFileSync(join(pgdata, '.vc-reseed-in-progress'), 'out att-1');
-    const midSwap = disarm('att-1');
-    expect(midSwap.status).toBe(1);
-    expect(midSwap.stdout).toMatch(/^RESEED_DISARM_REFUSED .*in progress/);
-    expect(read('.vc-reseed-ready')).toBe('att-1');
-  });
-
-  it('the disarm refuses while another holds the lock, touching nothing', async () => {
-    expect(stage().status).toBe(0);
-    const holder = spawn('sh', [
-      '-c',
-      `exec 9>"${pgdata}/.vc-restore.lock"; flock 9; echo held; sleep 5`,
-    ]);
-    try {
-      await new Promise<void>((res) => holder.stdout.once('data', () => res()));
-      const d = disarm('att-1');
-      expect(d.status).toBe(1);
-      expect(d.stdout.trim()).toBe('RESEED_DISARM_REFUSED busy');
-      expect(read('.vc-reseed-ready')).toBe('att-1');
-    } finally {
-      holder.kill('SIGKILL');
-    }
-  });
-
-  it('a symlinked lock is refused, nothing touched', () => {
-    writeFileSync(join(pgdata, '.vc-reseed-ready'), 'old');
-    symlinkSync(join(dir, 'elsewhere'), join(pgdata, '.vc-restore.lock'));
-    const r = stage();
-    expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/symlink/);
-    expect(existsSync(join(dir, 'elsewhere'))).toBe(false);
-    expect(read('.vc-reseed-ready')).toBe('old');
-  });
-
-  it('a stale ready marker never pairs with a new, cut-off transfer', () => {
-    // A previous attempt that staged fully and was never swapped.
-    expect(stage({}, { inPlaceAttempt: 'att-0' }).status).toBe(0);
-    rmSync(calls);
-    const r = stage({ BB_PARTIAL: '1' });
-    expect(r.status).not.toBe(0);
-    expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
-    const g = guard();
-    expect(g.status, g.stderr).toBe(0);
-    expect(g.stderr).not.toContain('RESEED_SWAPPED');
-    expect(read('base/marker')).toBe('live\n');
-  });
-
-  it('a stage cut short at ANY command leaves nothing the swap accepts, or the whole tree', () => {
-    expect(stage().status).toBe(0);
-    const seq = readFileSync(calls, 'utf-8').trim().split('\n');
-    const seen: Record<string, number> = {};
-    const points = seq.map((name) => {
-      seen[name] = (seen[name] ?? 0) + 1;
-      return `${name}:${seen[name]}`;
+    beforeEach(setup);
+    afterEach(() => {
+      for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
     });
-    // Every external command the stage runs is a crash point.
-    expect([...new Set(seq)].sort()).toEqual([
-      'cat',
-      'chown',
-      'find',
-      'mkdir',
-      'mv',
-      'pg_basebackup',
-      'rm',
-      'sed',
-      'sync',
-      'touch',
-    ]);
-    const lastSync = `sync:${seen.sync}`;
-    expect(points.at(-1)).toBe(lastSync);
-    for (const at of points) {
-      setup();
-      const r = stage({ FAIL_AT: at });
-      expect(r.status, `${at} did not fail the stage`).not.toBe(0);
-      expect(r.stderr, at).toContain(`injected failure ${at}`);
-      // The stage never touches the live cluster.
-      expect(cluster(), at).toEqual(LIVE);
-      expect(read('base/marker'), at).toBe('live\n');
+
+    const script = (extra: Record<string, unknown> = {}) =>
+      buildStagedBasebackupScript({
+        replPassword: 'p',
+        primaryHost: '10.0.0.5',
+        primaryPort: '15433',
+        swap: false,
+        stagingDir: IN_PLACE_RESEED_DIR,
+        primaryConninfo: 'host=10.0.0.5 port=15433',
+        inPlaceAttempt: 'att-1',
+        intent: 'standby',
+        // The production shape: reseedStandbyInPlace always bounds the transfer.
+        basebackupDeadlineS: 600,
+        ...extra,
+      }).replaceAll('/var/lib/postgresql/data', pgdata);
+
+    const stageEnv = (env: Record<string, string>) => ({
+      PATH: `${bin}:${process.env.PATH}`,
+      CALLS: calls,
+      VC_WALG_ROLE_INTENT: 'standby',
+      ...env,
+    });
+    function stage(env: Record<string, string> = {}, extra: Record<string, unknown> = {}) {
+      // One file per attempt: sh reads a script as it runs, so a second stage
+      // must never rewrite the file a first one is still executing.
+      const file = join(dir, `stage-${String(extra.inPlaceAttempt ?? 'att-1')}.sh`);
+      writeFileSync(file, script(extra));
+      return spawnSync('sh', [file], { encoding: 'utf-8', env: stageEnv(env) });
+    }
+    function guard(intent = 'standby') {
+      return spawnSync('sh', [GUARD, 'postgres'], {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${guardBin}:${process.env.PATH}`,
+          PGDATA: pgdata,
+          VC_WALG_ROLE_INTENT: intent,
+          VC_WALG_ROLE_DIR: join(dir, 'no-role-dir'),
+        },
+      });
+    }
+    const read = (rel: string) => readFileSync(join(pgdata, rel), 'utf-8');
+    const cluster = () =>
+      readdirSync(pgdata)
+        .filter((e) => !e.startsWith('.vc-'))
+        .sort();
+    const LIVE = ['PG_VERSION', 'base', 'standby.signal'];
+
+    it('stages a tree with no .vc-* but its id, marks it ready, and the real swap takes it', () => {
+      const r = stage();
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-1');
+      // The live cluster is untouched.
+      expect(cluster()).toEqual(LIVE);
+      expect(read('base/marker')).toBe('live\n');
+      const staged = join(pgdata, '.vc-reseed');
+      expect(readdirSync(staged).filter((e) => e.startsWith('.vc-'))).toEqual(['.vc-reseed-id']);
+      expect(read('.vc-reseed/.vc-reseed-id')).toBe('att-1');
+      expect(read('.vc-reseed-ready')).toBe('att-1');
+      expect(existsSync(join(pgdata, '.vc-reseed-ready.tmp'))).toBe(false);
+      const auto = read('.vc-reseed/postgresql.auto.conf');
+      expect(auto).toContain("primary_conninfo = 'host=10.0.0.5 port=15433'");
+      expect(auto).not.toContain('default_transaction_read_only');
+      expect(existsSync(join(staged, 'standby.signal'))).toBe(true);
+
       const g = guard();
-      expect(g.status, `${at}: ${g.stderr}`).toBe(0);
-      if (at === lastSync) {
-        // The marker is renamed in; only its own durability sync was lost.
-        expect(g.stderr, at).toContain('RESEED_SWAPPED att-1');
-        expect(read('base/marker'), at).toBe('primary\n');
-      } else {
-        expect(g.stderr, at).not.toContain('RESEED_SWAPPED');
+      expect(g.status, g.stderr).toBe(0);
+      expect(g.stderr).toContain('RESEED_SWAPPED att-1');
+      expect(g.stdout).toContain('STUB-ENTRYPOINT postgres');
+      expect(read('base/marker')).toBe('primary\n');
+      expect(read('.vc-reseeded-from')).toBe('att-1');
+      expect(readFileSync(join(pgdata, '.vc-discard', 'base', 'marker'), 'utf-8')).toBe('live\n');
+      for (const f of ['.vc-reseed', '.vc-reseed-ready', '.vc-reseed-in-progress']) {
+        expect(existsSync(join(pgdata, f)), f).toBe(false);
+      }
+    });
+
+    it('reconverge: the old primary container still says primary in its env, the stage runs and the swap takes it', () => {
+      // A failover swapped the roles: the ConfigMap now says standby, the
+      // running container (started as the primary) still has primary in env.
+      const r = stage({ VC_WALG_ROLE_INTENT: 'primary' });
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-1');
+      // The restarted container resolves the ConfigMap again: standby.
+      const g = guard('standby');
+      expect(g.status, g.stderr).toBe(0);
+      expect(g.stderr).toContain('RESEED_SWAPPED att-1');
+    });
+
+    it('a restarted container whose intent is still not standby never swaps the staged tree', () => {
+      expect(stage().status).toBe(0);
+      const g = guard('primary');
+      expect(g.stderr).not.toContain('RESEED_SWAPPED');
+      expect(read('base/marker')).toBe('live\n');
+    });
+
+    it('a swap under way (.vc-reseed-in-progress): refuses, nothing touched', () => {
+      mkdirSync(join(pgdata, '.vc-reseed'));
+      writeFileSync(join(pgdata, '.vc-reseed', 'PG_VERSION'), '17\n');
+      writeFileSync(join(pgdata, '.vc-reseed-in-progress'), 'out x');
+      writeFileSync(join(pgdata, '.vc-reseed-ready'), 'x');
+      const r = stage();
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toMatch(/in progress/);
+      expect(read('.vc-reseed/PG_VERSION')).toBe('17\n');
+      expect(read('.vc-reseed-ready')).toBe('x');
+    });
+
+    it('a stray .vc-reseed with no marker is cleared, even when the probe skips', () => {
+      mkdirSync(join(pgdata, '.vc-reseed', 'base'), { recursive: true });
+      writeFileSync(join(pgdata, '.vc-reseed', 'PG_VERSION'), '17\n');
+      const r = stage(
+        { STUB_ISREADY: '1' },
+        { probeFirst: true, probeAttempts: 1, probeDelayS: 0 },
+      );
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.trim()).toBe('RESEED_SKIPPED');
+      expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+      expect(cluster()).toEqual(LIVE);
+    });
+
+    it('two stages at once: exactly one stages, the other refuses busy and touches nothing', async () => {
+      const gate = join(dir, 'gate');
+      const fileA = join(dir, 'stage-A.sh');
+      writeFileSync(fileA, script());
+      const a = spawn('sh', [fileA], { env: stageEnv({ BB_GATE: gate }) });
+      let outA = '';
+      a.stdout.on('data', (d) => {
+        outA += d;
+      });
+      const exitA = new Promise<number | null>((res) => a.on('close', res));
+      try {
+        // Bounded wait for A to be inside its transfer, holding the lock.
+        for (let i = 0; i < 200 && !existsSync(`${gate}.started`); i++) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        expect(existsSync(`${gate}.started`), 'stage A never reached its transfer').toBe(true);
+        const b = stage({}, { inPlaceAttempt: 'att-2' });
+        expect(b.status).toBe(1);
+        expect(b.stdout.trim()).toBe('RESEED_REFUSED busy');
+        expect(existsSync(join(pgdata, '.vc-reseed', '.vc-reseed-id'))).toBe(false);
+        expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+      } finally {
+        writeFileSync(`${gate}.go`, '');
+      }
+      expect(await exitA).toBe(0);
+      expect(outA.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-1');
+      expect(read('.vc-reseed-ready')).toBe('att-1');
+      expect(read('.vc-reseed/.vc-reseed-id')).toBe('att-1');
+    });
+
+    it('a transfer past its remote deadline is killed: RESEED_TIMEOUT, nothing armed, the lock free', () => {
+      // A gate never opened: the stub transfer waits until it is killed.
+      const r = stage({ BB_GATE: join(dir, 'never') }, { basebackupDeadlineS: 1 });
+      expect(r.status).toBe(1);
+      expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_TIMEOUT 1');
+      expect(r.stderr).toMatch(/did not finish within 1s/);
+      expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+      expect(cluster()).toEqual(LIVE);
+      const g = guard();
+      expect(g.status, g.stderr).toBe(0);
+      expect(g.stderr).not.toContain('RESEED_SWAPPED');
+      // The lock went with the killed transfer: the next stage is not busy.
+      rmSync(calls);
+      const next = stage({}, { inPlaceAttempt: 'att-2' });
+      expect(next.status, next.stderr).toBe(0);
+      expect(next.stdout.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-2');
+    });
+
+    it("a timed-out transfer's forked WAL streamer dies with it: RESEED_TIMEOUT, nothing armed, nothing left writing", () => {
+      const pidFile = join(dir, 'streamer.pid');
+      const r = stage({ BB_FORK: pidFile }, { basebackupDeadlineS: 1 });
+      expect(r.status).toBe(1);
+      expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_TIMEOUT 1');
+      expect(r.stderr).toMatch(/did not finish within 1s/);
+      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+      const pid = Number(readFileSync(pidFile, 'utf-8').trim());
+      expect(pid).toBeGreaterThan(0);
+      // The streamer is gone, not reparented and still writing.
+      expect(spawnSync('kill', ['-0', String(pid)]).status).not.toBe(0);
+      expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+      const g = guard();
+      expect(g.stderr).not.toContain('RESEED_SWAPPED');
+      expect(read('base/marker')).toBe('live\n');
+    });
+
+    it('a transfer that fails fast is a plain failure, never a timeout', () => {
+      const r = stage({ BB_PARTIAL: '1' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).not.toContain('RESEED_TIMEOUT');
+      expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+    });
+
+    const disarm = (attempt: string, env: Record<string, string> = {}) =>
+      spawnSync(
+        'sh',
+        ['-c', reseedDisarmArgv(attempt)[2].replaceAll('/var/lib/postgresql/data', pgdata)],
+        {
+          encoding: 'utf-8',
+          env: stageEnv(env),
+        },
+      );
+
+    it("the disarm clears this attempt's armed tree under the lock; the swap then takes nothing", () => {
+      expect(stage().status).toBe(0);
+      const d = disarm('att-1');
+      expect(d.status, d.stderr).toBe(0);
+      expect(d.stdout.trim()).toBe('RESEED_DISARMED');
+      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+      expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
+      const g = guard();
+      expect(g.stderr).not.toContain('RESEED_SWAPPED');
+      expect(read('base/marker')).toBe('live\n');
+    });
+
+    it("the disarm leaves another attempt's tree, and a swap under way, alone", () => {
+      expect(stage().status).toBe(0);
+      const other = disarm('att-9');
+      expect(other.status).toBe(1);
+      expect(other.stdout).toMatch(/^RESEED_DISARM_REFUSED /);
+      expect(read('.vc-reseed-ready')).toBe('att-1');
+      writeFileSync(join(pgdata, '.vc-reseed-in-progress'), 'out att-1');
+      const midSwap = disarm('att-1');
+      expect(midSwap.status).toBe(1);
+      expect(midSwap.stdout).toMatch(/^RESEED_DISARM_REFUSED .*in progress/);
+      expect(read('.vc-reseed-ready')).toBe('att-1');
+    });
+
+    it('the disarm refuses while another holds the lock, touching nothing', async () => {
+      expect(stage().status).toBe(0);
+      const holder = spawn('sh', [
+        '-c',
+        `exec 9>"${pgdata}/.vc-restore.lock"; flock 9; echo held; sleep 5`,
+      ]);
+      try {
+        await new Promise<void>((res) => holder.stdout.once('data', () => res()));
+        const d = disarm('att-1');
+        expect(d.status).toBe(1);
+        expect(d.stdout.trim()).toBe('RESEED_DISARM_REFUSED busy');
+        expect(read('.vc-reseed-ready')).toBe('att-1');
+      } finally {
+        holder.kill('SIGKILL');
+      }
+    });
+
+    it('a symlinked lock is refused, nothing touched', () => {
+      writeFileSync(join(pgdata, '.vc-reseed-ready'), 'old');
+      symlinkSync(join(dir, 'elsewhere'), join(pgdata, '.vc-restore.lock'));
+      const r = stage();
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/symlink/);
+      expect(existsSync(join(dir, 'elsewhere'))).toBe(false);
+      expect(read('.vc-reseed-ready')).toBe('old');
+    });
+
+    it('a stale ready marker never pairs with a new, cut-off transfer', () => {
+      // A previous attempt that staged fully and was never swapped.
+      expect(stage({}, { inPlaceAttempt: 'att-0' }).status).toBe(0);
+      rmSync(calls);
+      const r = stage({ BB_PARTIAL: '1' });
+      expect(r.status).not.toBe(0);
+      expect(existsSync(join(pgdata, '.vc-reseed-ready'))).toBe(false);
+      const g = guard();
+      expect(g.status, g.stderr).toBe(0);
+      expect(g.stderr).not.toContain('RESEED_SWAPPED');
+      expect(read('base/marker')).toBe('live\n');
+    });
+
+    it('a stage cut short at ANY command leaves nothing the swap accepts, or the whole tree', () => {
+      expect(stage().status).toBe(0);
+      const seq = readFileSync(calls, 'utf-8').trim().split('\n');
+      const seen: Record<string, number> = {};
+      const points = seq.map((name) => {
+        seen[name] = (seen[name] ?? 0) + 1;
+        return `${name}:${seen[name]}`;
+      });
+      // Every external command the stage runs is a crash point.
+      expect([...new Set(seq)].sort()).toEqual([
+        'cat',
+        'chown',
+        'find',
+        'mkdir',
+        'mv',
+        'pg_basebackup',
+        'rm',
+        'sed',
+        'sync',
+        'touch',
+      ]);
+      const lastSync = `sync:${seen.sync}`;
+      expect(points.at(-1)).toBe(lastSync);
+      for (const at of points) {
+        setup();
+        const r = stage({ FAIL_AT: at });
+        expect(r.status, `${at} did not fail the stage`).not.toBe(0);
+        expect(r.stderr, at).toContain(`injected failure ${at}`);
+        // The stage never touches the live cluster.
         expect(cluster(), at).toEqual(LIVE);
         expect(read('base/marker'), at).toBe('live\n');
-        expect(existsSync(join(pgdata, '.vc-discard')), at).toBe(false);
+        const g = guard();
+        expect(g.status, `${at}: ${g.stderr}`).toBe(0);
+        if (at === lastSync) {
+          // The marker is renamed in; only its own durability sync was lost.
+          expect(g.stderr, at).toContain('RESEED_SWAPPED att-1');
+          expect(read('base/marker'), at).toBe('primary\n');
+        } else {
+          expect(g.stderr, at).not.toContain('RESEED_SWAPPED');
+          expect(cluster(), at).toEqual(LIVE);
+          expect(read('base/marker'), at).toBe('live\n');
+          expect(existsSync(join(pgdata, '.vc-discard')), at).toBe(false);
+        }
       }
-    }
-  });
-});
+    });
+  },
+);
