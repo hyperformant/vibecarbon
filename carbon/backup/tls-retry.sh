@@ -37,13 +37,12 @@ set -u
 #      up, exit 0. A permanently broken setup stops costing Let's Encrypt
 #      orders; `vibecarbon status` shows it, and the next deploy clears the
 #      counter.
-#   8. A Traefik younger than 15 minutes: leave it alone, exit 0. A restart
-#      abandons an in-flight DNS-01 order, and a second order on the same
-#      _acme-challenge name meets cached DNS answers (the DNS-01 settle
-#      doctrine). The settle floor itself is not touched here.
+#   8. A Traefik younger than 5 minutes: leave it alone, exit 0. A restart
+#      abandons an in-flight order, and a fresh Traefik is still inside its
+#      first issuance.
 #   9. Otherwise count the restart and run `docker compose restart traefik`.
 #
-# Rate limit: each restart places the apex and wildcard orders. Two restarts
+# Rate limit: each restart places the apex and default-certificate orders. Two restarts
 # an hour on their own stay at 4 failed validations per hostname per hour,
 # under the Let's Encrypt limit of 5, but in the first hour the deploy's own
 # orders come on top and can pass it. Let's Encrypt then refuses new orders
@@ -56,7 +55,7 @@ set -u
 # ============================================================================
 
 MAX_RESTARTS=48
-MIN_TRAEFIK_AGE_SECONDS=900
+MIN_TRAEFIK_AGE_SECONDS=300
 COUNT_FILE=backups/tls-retry.count
 STATE_FILE=backups/tls-retry.state
 

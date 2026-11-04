@@ -39,7 +39,6 @@ import {
   resolveDeployRestorePoint,
   walgPrefixFor,
 } from '../walg/restore-base.js';
-import { useDnsChallenge } from './acme.js';
 import {
   finishAppKeyRotation,
   localAppStorageSecrets,
@@ -1842,13 +1841,6 @@ export async function executeDeployment(args, gatheredConfig) {
   // gutter and print flush-left, breaking the visual flow. Bundle content
   // is reproducible from the project tree; debug it by re-running with
   // VIBECARBON_PERF=1 + VIBECARBON_BUNDLE_VERBOSE=1 if needed.
-  // Managed-DNS compose deploys (cloudflare/hetzner) solve ACME via DNS-01 —
-  // Traefik writes a TXT record through the provider API, so there is no
-  // HTTP-01 race against A-record propagation and no need for the
-  // DNS-propagation poll or the Traefik cert self-heal below. `manual` keeps
-  // HTTP-01. Scoped to compose: k8s issues certs via cert-manager and ignores
-  // this Traefik override entirely.
-  const dnsChallenge = isComposeTier(tier) && useDnsChallenge(dnsProvider);
   const bundlePath = renderBundle(projectConfig.projectName, {
     domain,
     environment,
@@ -1870,9 +1862,6 @@ export async function executeDeployment(args, gatheredConfig) {
           ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
         })
       : '',
-    dnsChallenge,
-    dnsProvider,
-    dnsToken,
     verbose: process.env.VIBECARBON_BUNDLE_VERBOSE === '1',
   });
   bundleRenderTimer.end();
@@ -2014,7 +2003,6 @@ export async function executeDeployment(args, gatheredConfig) {
     ciReady,
     s3Config,
     state,
-    dnsChallenge,
     dnsWarmupPromise,
     isDirectDeploy,
     isComposeLocal,

@@ -277,7 +277,7 @@ vi.mock('../../../src/lib/deploy/remote-build.js', async (orig) => {
 
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
 
-function makeCtx({ tier = 'compose', dnsChallenge = false, ca = 'staging' as string | null } = {}) {
+function makeCtx({ tier = 'compose', ca = 'staging' as string | null } = {}) {
   const provider = {
     createServer: vi.fn(async () => ({ id: 'new-id' })),
     waitForServer: vi.fn(async () => ({ public_net: { ipv4: { ip: '9.9.9.9' } } })),
@@ -308,7 +308,6 @@ function makeCtx({ tier = 'compose', dnsChallenge = false, ca = 'staging' as str
     sshKeyPath: '/key',
     domain: 'app.example.com',
     services: {},
-    dnsChallenge,
     dnsProvider: 'hetzner',
     apiToken: 'tok',
     servers,
@@ -330,7 +329,7 @@ function reset({ localDocker = true, deltaFails = false } = {}) {
 describe('compose scale: the replacement gets the app image by layer delta', () => {
   it('builds here once, sends the delta, and never builds on the new server', async () => {
     reset();
-    await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }));
+    await SCALE_EFFECTS.scaleServers(makeCtx());
     expect(h.events).toContain('localBuild:myapp-app:local');
     expect(h.events).toContain('delta:root@9.9.9.9:myapp-app:local');
     expect(h.events).toContain('basePull:9.9.9.9');
@@ -341,7 +340,7 @@ describe('compose scale: the replacement gets the app image by layer delta', () 
 
   it('starts before the bundle upload and lands before the stack pull and compose up', async () => {
     reset();
-    await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }));
+    await SCALE_EFFECTS.scaleServers(makeCtx());
     const at = (e: string) => h.events.indexOf(e);
     for (const e of [
       'localBuild:myapp-app:local',
@@ -358,7 +357,7 @@ describe('compose scale: the replacement gets the app image by layer delta', () 
 
   it('a failed delta stops the scale before the new server starts its stack', async () => {
     reset({ deltaFails: true });
-    await expect(SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }))).rejects.toThrow(
+    await expect(SCALE_EFFECTS.scaleServers(makeCtx())).rejects.toThrow(
       /image delivery failed: the target exited 1/,
     );
     expect(h.events).not.toContain('up:9.9.9.9');
@@ -366,7 +365,7 @@ describe('compose scale: the replacement gets the app image by layer delta', () 
 
   it('with no docker on this machine, the new server builds it (the only remote build left)', async () => {
     reset({ localDocker: false });
-    await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }));
+    await SCALE_EFFECTS.scaleServers(makeCtx());
     expect(h.events).toContain('remoteBuild:9.9.9.9:myapp-app:local');
     expect(h.events.some((e) => e.startsWith('localBuild:') || e.startsWith('delta:'))).toBe(false);
   });
@@ -375,7 +374,7 @@ describe('compose scale: the replacement gets the app image by layer delta', () 
 describe('compose scale: an operator can keep the server-side build', () => {
   it('a deploy recorded in direct mode keeps building on the server, even with docker here', async () => {
     reset();
-    const ctx = makeCtx({ dnsChallenge: true });
+    const ctx = makeCtx();
     (ctx.envConfig as Record<string, unknown>).imageBuild = 'direct';
     await SCALE_EFFECTS.scaleServers(ctx);
     expect(h.events).toContain('remoteBuild:9.9.9.9:myapp-app:local');
@@ -384,7 +383,7 @@ describe('compose scale: an operator can keep the server-side build', () => {
 
   it('-direct forces the server-side build', async () => {
     reset();
-    const ctx = makeCtx({ dnsChallenge: true });
+    const ctx = makeCtx();
     ctx.forceDirectBuild = true;
     await SCALE_EFFECTS.scaleServers(ctx);
     expect(h.events).toContain('remoteBuild:9.9.9.9:myapp-app:local');
@@ -394,7 +393,7 @@ describe('compose scale: an operator can keep the server-side build', () => {
   it('a failed local build stops the scale; it never falls back to a server-side build', async () => {
     reset();
     h.state.buildFails = true;
-    await expect(SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }))).rejects.toThrow(
+    await expect(SCALE_EFFECTS.scaleServers(makeCtx())).rejects.toThrow(
       /docker build failed for myapp-app:local/,
     );
     expect(h.events.some((e) => e.startsWith('remoteBuild:'))).toBe(false);
@@ -405,7 +404,7 @@ describe('compose scale: an operator can keep the server-side build', () => {
 describe('compose-ha scale of both nodes', () => {
   it('builds the app image once for the run and sends it to each replacement', async () => {
     reset();
-    const ctx = makeCtx({ tier: 'compose-ha', dnsChallenge: true });
+    const ctx = makeCtx({ tier: 'compose-ha' });
     // Whatever the arms prove afterwards, both replacements got their image first.
     await SCALE_EFFECTS.scaleServers(ctx).catch(() => {});
     expect(h.events.filter((e) => e.startsWith('localBuild:'))).toHaveLength(1);

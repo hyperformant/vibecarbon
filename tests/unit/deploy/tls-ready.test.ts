@@ -130,7 +130,7 @@ describe('tlsVerdict', () => {
       reason: 'self-signed certificate',
       served: { subject: 'TRAEFIK DEFAULT CERT', issuer: 'TRAEFIK DEFAULT CERT' },
       traefikLogTail: 'time="..." level=error msg="unable to obtain ACME certificate"',
-      fixHint: 'Check the DNS-01 token for digitalocean.',
+      fixHint: 'Check that DNS points at this server.',
     });
 
     expect(verdict.state).toBe('pending');
@@ -138,7 +138,7 @@ describe('tlsVerdict', () => {
     const detail = verdict.detail ?? '';
     expect(detail).toContain('TRAEFIK DEFAULT CERT');
     expect(detail).toContain('unable to obtain ACME certificate');
-    expect(detail).toContain('Check the DNS-01 token for digitalocean.');
+    expect(detail).toContain('Check that DNS points at this server.');
   });
 
   it('is pending on manual DNS too: the customer may not have pointed DNS yet', () => {
@@ -155,11 +155,11 @@ describe('tlsVerdict', () => {
 
 describe('budget constants', () => {
   it('pins the first-look budget and poll interval', () => {
-    // 180s: the DNS-01 settle floor puts healthy issuance at about 120s
-    // (2026-10-20 trials: wildcard 119s, apex 124s). A slower CA no longer
-    // holds the deploy open: it finishes with TLS pending and the server's
-    // tls-retry cron takes over. 5s polling matches the house TLS cadence.
-    expect(TLS_FIRST_LOOK_BUDGET_MS).toBe(180_000);
+    // 120s: HTTP-01 issues in seconds once the A record is visible. A slower
+    // CA no longer holds the deploy open: it finishes with TLS pending and the
+    // server's tls-retry cron takes over. 5s polling matches the house TLS
+    // cadence.
+    expect(TLS_FIRST_LOOK_BUDGET_MS).toBe(120_000);
     expect(TLS_READY_POLL_MS).toBe(5_000);
     // Manual DNS: one short courtesy window, then pending.
     expect(TLS_READY_MANUAL_BUDGET_MS).toBe(60_000);
@@ -175,9 +175,9 @@ describe('budget constants', () => {
     });
 
     expect(result.trusted).toBe(false);
-    // The fake clock steps 60s per read (the start read included), so 180s
-    // allows 3 probes; the old 480s default would have allowed 8.
-    expect(probe).toHaveBeenCalledTimes(3);
+    // The fake clock steps 60s per read (the start read included), so 120s
+    // allows 2 probes; the old 480s default would have allowed 8.
+    expect(probe).toHaveBeenCalledTimes(2);
   });
 });
 

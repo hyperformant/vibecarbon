@@ -427,13 +427,12 @@ async function startDnsUpdate(ctx) {
 
 /**
  * The DNS barrier before compose-up: the A record written (by startDnsUpdate's
- * background write, or now when nothing started it) and, HTTP-01 only, visible
- * to public resolvers, so Traefik's first ACME challenge sees real DNS. DNS-01
- * (managed providers) waits for the zone to be served instead — lego validates
- * via a TXT record. `when` gates on a domain + a non-manual provider.
+ * background write, or now when nothing started it) and visible to public
+ * resolvers, so Traefik's first ACME challenge sees real DNS. `when` gates on
+ * a domain + a non-manual provider.
  */
 async function updateDns(ctx) {
-  const { serverIp, domain, dnsChallenge } = ctx;
+  const { serverIp, domain } = ctx;
   const dnsSpinner = spinner();
   dnsSpinner.start(`Pointing ${domain} → ${serverIp}...`);
   let written;
@@ -449,55 +448,24 @@ async function updateDns(ctx) {
       ? `DNS A record set: ${domain} → ${serverIp}`
       : `DNS A record already points ${domain} → ${serverIp}`,
   );
-  // Both challenge types gate on DNS here, but on DIFFERENT facts, because
-  // they fail differently.
-  //
-  // HTTP-01 needs the A record VISIBLE to public resolvers — Let's Encrypt
-  // rejects the challenge with "no valid A records found" if its resolver sees
-  // stale or absent records.
-  //
-  // DNS-01 does not care about the A record at all; it needs the zone's own
-  // nameservers to ANSWER. Linode publishes a zone to ns1-5.linode.com only
-  // once the account holds an active Linode, so a freshly created zone returns
-  // REFUSED from every nameserver while its API record reads
-  // `"status": "active"`. Starting DNS-01 in that state burns ~20 minutes
-  // before ACME gives up. Preflight cannot cover it — preflight runs before the
-  // instance exists, which IS the REFUSED state.
-  //
-  // Both are fail-open: they return false on timeout and the deploy proceeds,
-  // since either client still retries on its own and a false abort of a healthy
-  // deploy is strictly worse than the wait these avoid.
-  if (!dnsChallenge) {
-    const { waitForDNSPropagation } = await import('../../dns-propagation.js');
-    // Kept on p.spinner (not the progress.js wrapper): the wrapper's spinner()
-    // forwards no args, so it would drop `{ indicator: 'timer' }`. See report —
-    // making progress.js forward options would let this register as active too.
-    const dnsSpinner = spinner({ indicator: 'timer' });
-    dnsSpinner.start(`Waiting for ${domain} to resolve to ${serverIp}`);
-    const dnsPropagated = await perfAsync('deploy.dns.waitForPropagation', () =>
-      waitForDNSPropagation(domain, serverIp, 120_000),
-    );
-    dnsSpinner.stop(
-      dnsPropagated
-        ? `DNS resolves: ${domain} → ${serverIp}`
-        : `DNS propagation timed out, proceeding anyway`,
-    );
-  } else {
-    const { waitForZoneServed } = await import('../../dns-propagation.js');
-    const zoneSpinner = spinner({ indicator: 'timer' });
-    zoneSpinner.start(`Waiting for ${domain}'s nameservers to serve the zone`);
-    const zone = await perfAsync('deploy.dns.waitForZoneServed', () =>
-      waitForZoneServed(domain, {
-        timeoutMs: 180_000,
-        onProgress: (detail) => zoneSpinner.message(detail),
-      }),
-    );
-    zoneSpinner.stop(
-      zone.served
-        ? `Nameservers serving ${domain} (${zone.detail})`
-        : `Zone not served after ${Math.round(zone.waitedMs / 1000)}s (${zone.detail}), proceeding anyway`,
-    );
-  }
+  // Let's Encrypt rejects the HTTP-01 challenge with "no valid A records
+  // found" if its resolver sees stale or absent records, so wait for the A
+  // record to be VISIBLE to public resolvers before Traefik starts. Fail-open:
+  // it returns false on timeout and the deploy proceeds, since Traefik retries
+  // on its own and a false abort of a healthy deploy is worse than this wait.
+  // Kept on p.spinner (not the progress.js wrapper): the wrapper's spinner()
+  // forwards no args, so it would drop `{ indicator: 'timer' }`.
+  const { waitForDNSPropagation } = await import('../../dns-propagation.js');
+  const waitSpinner = spinner({ indicator: 'timer' });
+  waitSpinner.start(`Waiting for ${domain} to resolve to ${serverIp}`);
+  const dnsPropagated = await perfAsync('deploy.dns.waitForPropagation', () =>
+    waitForDNSPropagation(domain, serverIp, 120_000),
+  );
+  waitSpinner.stop(
+    dnsPropagated
+      ? `DNS resolves: ${domain} → ${serverIp}`
+      : `DNS propagation timed out, proceeding anyway`,
+  );
 }
 
 /**

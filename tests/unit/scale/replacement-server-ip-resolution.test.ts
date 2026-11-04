@@ -134,7 +134,6 @@ function makeCtx(
     sshKeyPath: '/key',
     domain: null,
     services: {},
-    dnsChallenge: true,
     dnsProvider: null,
     apiToken: 'tok',
     projectConfig: { projectName: 'myapp', environments: {} },

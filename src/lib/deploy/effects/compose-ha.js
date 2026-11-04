@@ -39,7 +39,6 @@ import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { haClassMessage, haStandbyType } from '../../sizing.js';
-import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
 import { queueBootTiming } from '../boot-timing.js';
@@ -830,10 +829,10 @@ async function haUpdateDns(ctx) {
     p.log.message(`  Standby server: ${c.bold(standby.ip)} (for manual failover)`);
   }
 
-  // HTTP-01 only: block compose-up until public resolvers see the apex domain.
-  // Managed-DNS HA issues certs via DNS-01, which doesn't gate on A-record
-  // propagation. `manual` isn't reached here (excluded by the guard above).
-  if (domain && dnsProvider && dnsProvider !== 'manual' && !useDnsChallenge(dnsProvider)) {
+  // Block compose-up until public resolvers see the apex domain, so Traefik's
+  // first HTTP-01 challenge sees real DNS. `manual` isn't reached here
+  // (excluded by the guard above).
+  if (domain && dnsProvider && dnsProvider !== 'manual') {
     ctx.onProgress(`Waiting for ${domain} to propagate to ${primary.ip}...`);
     const { waitForDNSPropagation } = await import('../../dns-propagation.js');
     await perfAsync('deploy.ha.compose.dns.waitForPropagation', () =>

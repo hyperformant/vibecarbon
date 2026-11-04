@@ -135,7 +135,6 @@ function makeCtx(Provider: typeof HetznerProvider | typeof DigitalOceanProvider)
     sshKeyPath: '/key',
     domain: null,
     services: {},
-    dnsChallenge: true,
     dnsProvider: null,
     apiToken: 'tok',
     projectConfig: { projectName: 'myapp', environments: {} },

@@ -317,13 +317,11 @@ describe('compose bundle: app.env', () => {
       domain: 'example.com',
       environment: 'prod',
       s3,
-      dnsChallenge: true,
       dnsProvider: 'hetzner',
-      dnsToken: 'SENTINEL_HETZNER_API_TOKEN',
     });
     const serverEnv = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
-    // The substitution source still has the token (Traefik's DNS-01 reads it).
-    expect(serverEnv.HETZNER_API_TOKEN).toBe('SENTINEL_HETZNER_API_TOKEN');
+    // No server holds a DNS token: every certificate validates over HTTP-01.
+    expect(serverEnv.HETZNER_API_TOKEN).toBeUndefined();
     const appEnvText = readFileSync(join(stage, 'app.env'), 'utf-8');
     const appEnv = parseDotenv(appEnvText);
     expect(appEnv.BETTER_AUTH_SECRET).toBe('SENTINEL_BETTER_AUTH_SECRET');

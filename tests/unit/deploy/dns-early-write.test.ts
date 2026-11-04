@@ -20,9 +20,12 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => ({
   getDnsProvider: async () => ({ setupSimple, setupHA }),
 }));
 
-vi.mock('../../../src/lib/dns-propagation.js', () => ({
-  waitForDNSPropagation: vi.fn(async () => true),
+const propagation = vi.hoisted(() => ({
+  waitForDNSPropagation: vi.fn(async (..._args: unknown[]) => true),
   waitForZoneServed: vi.fn(async () => ({ served: true, detail: 'ok', waitedMs: 1 })),
+}));
+vi.mock('../../../src/lib/dns-propagation.js', () => ({
+  ...propagation,
   resolveNameservers: vi.fn(),
 }));
 
@@ -95,6 +98,9 @@ const state = () => {
 
 beforeEach(() => {
   calls = [];
+  propagation.waitForDNSPropagation.mockReset();
+  propagation.waitForDNSPropagation.mockImplementation(async () => true);
+  propagation.waitForZoneServed.mockClear();
   setupSimple.mockReset();
   setupSimple.mockImplementation(async () => {
     calls.push('dns:setupSimple');
@@ -114,7 +120,6 @@ describe('compose: the A record is written while cloud-init runs', () => {
     dnsProvider: 'cloudflare',
     dnsZoneId: 'zone-1',
     dnsToken: 'tok',
-    dnsChallenge: true,
     dnsWarmupPromise: Promise.resolve(),
     state: state(),
   });
@@ -172,6 +177,28 @@ describe('compose: the A record is written while cloud-init runs', () => {
   it('writes the record exactly once', async () => {
     await runPlan(planDeploy('compose', {}), composeCtx(), effects(REAL));
     expect(setupSimple).toHaveBeenCalledTimes(1);
+  });
+
+  it('digitalocean: waits for the A record to propagate before Traefik starts, and never for the zone', async () => {
+    propagation.waitForDNSPropagation.mockImplementation(async () => {
+      calls.push('dns:waitForPropagation');
+      return true;
+    });
+    await runPlan(
+      planDeploy('compose', {}),
+      { ...composeCtx(), dnsProvider: 'digitalocean' },
+      effects(REAL),
+    );
+    expect(propagation.waitForDNSPropagation).toHaveBeenCalledWith(
+      'e1.example.com',
+      '203.0.113.10',
+      120_000,
+    );
+    expect(calls.indexOf('dns:waitForPropagation')).toBeGreaterThan(-1);
+    expect(calls.indexOf('dns:waitForPropagation')).toBeLessThan(
+      calls.indexOf('startComposeStack'),
+    );
+    expect(propagation.waitForZoneServed).not.toHaveBeenCalled();
   });
 });
 
@@ -259,7 +286,6 @@ describe('compose: the provisioned server is on disk before the early write', ()
     dnsProvider: 'digitalocean',
     dnsZoneId: 'zone-1',
     dnsToken: 'tok',
-    dnsChallenge: true,
     dnsWarmupPromise: Promise.resolve(),
     state: state(),
   });

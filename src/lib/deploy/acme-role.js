@@ -35,7 +35,6 @@
  */
 
 import * as p from '@clack/prompts';
-import { DNS01_OVERRIDE_FILE } from './acme.js';
 import { COMPOSE_BASE_FILES } from './bundle.js';
 import { sshRunAsync } from './compose/index.js';
 import { mergeRemoteDotenv, pinnedSshOptsString } from './utils.js';
@@ -57,10 +56,9 @@ export const ACME_DISARMED_CA_SERVER = 'https://acme-disarmed.invalid/directory'
  * in the container COMMAND via compose interpolation, fixed at create
  * time). Same wrong-`-f` hazard as composeDbRecreateShell: a bare `up`
  * resolves docker-compose.yml alone and would recreate Traefik WITHOUT the
- * dns01 override's command — silently reverting the node to HTTP-01. So
- * the `-f` set comes from the running container's config_files label,
- * falling back to base + the dns01 override when the file is present, and
- * the published-ports assertion catches a recreate that dropped 80/443.
+ * overlays the node runs. So the `-f` set comes from the running
+ * container's config_files label, falling back to the base files, and the
+ * published-ports assertion catches a recreate that dropped 80/443.
  *
  * @param {string} remoteDir e.g. `/opt/<project>`
  * @returns {string} a bash script, run as one SSH command
@@ -90,8 +88,7 @@ export function composeTraefikRecreateShell(remoteDir) {
     '    echo "[acme-role] using the -f set the running traefik was created with" ;;',
     '  *)',
     `    FLAGS="${baseFlags}"`,
-    `    if [ -f ${DNS01_OVERRIDE_FILE} ]; then FLAGS="$FLAGS -f ${DNS01_OVERRIDE_FILE}"; fi`,
-    '    echo "[acme-role] no usable compose config_files label, rebuilt the -f set from base + dns01 override" ;;',
+    '    echo "[acme-role] no usable compose config_files label, rebuilt the -f set from the base files" ;;',
     'esac',
     'echo "[acme-role] recreating traefik: docker compose $FLAGS up -d --no-deps traefik"',
     'docker compose $FLAGS up -d --no-deps traefik',

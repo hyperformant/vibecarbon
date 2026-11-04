@@ -55,14 +55,11 @@ describe('every Traefik caserver line honors the disarm var (census over carbon 
   const carbonDir = join(process.cwd(), 'carbon');
   const composeFiles = readdirSync(carbonDir).filter((f) => /^docker-compose.*\.ya?ml$/.test(f));
 
-  it('finds the two known caserver sites (base + dns01 override)', () => {
+  it('finds the one caserver site (the base prod file)', () => {
     const withCaserver = composeFiles.filter((f) =>
       readFileSync(join(carbonDir, f), 'utf8').includes('acme.caserver='),
     );
-    expect(withCaserver.sort()).toEqual([
-      'docker-compose.dns01.prod.yml',
-      'docker-compose.prod.yml',
-    ]);
+    expect(withCaserver).toEqual(['docker-compose.prod.yml']);
   });
 
   for (const file of composeFiles) {
@@ -89,12 +86,11 @@ describe('composeTraefikRecreateShell', () => {
     expect(shell).toContain('docker compose $FLAGS up -d --no-deps traefik');
   });
 
-  it('falls back to base files plus the dns01 override when present — never a bare up', () => {
-    // A bare `up` resolves docker-compose.yml alone and would recreate
-    // Traefik WITHOUT the dns01 override's command — silently reverting the
-    // node to HTTP-01. Same class as the db recreate's wrong-`-f` hazard.
+  it('falls back to the base files alone, with no DNS-01 override — never a bare up', () => {
+    // A bare `up` resolves docker-compose.yml alone; the fallback is the
+    // base + prod pair. Same class as the db recreate's wrong-`-f` hazard.
     expect(shell).toContain('-f docker-compose.yml -f docker-compose.prod.yml');
-    expect(shell).toContain('if [ -f docker-compose.dns01.prod.yml ]');
+    expect(shell).not.toContain('dns01');
   });
 
   it('refuses to recreate blind when no traefik container is running', () => {

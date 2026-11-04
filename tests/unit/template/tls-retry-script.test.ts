@@ -9,9 +9,9 @@
  *   - a retired node, or a disarmed issuer (compose-ha standby): never issue;
  *   - an apex that does not resolve to this host ("deploy first, point DNS
  *     after"): wait for DNS, neither restarting nor counting;
- *   - a Traefik younger than 15 minutes: never restart it. A restart abandons
- *     an in-flight DNS-01 order, and a second order on the same
- *     _acme-challenge name meets cached answers (DNS-01 settle doctrine);
+ *   - a Traefik younger than 5 minutes: never restart it. A restart abandons
+ *     an in-flight order, and a fresh Traefik is still inside its first
+ *     issuance;
  *   - 48 restarts (24 h): give up, so a permanently broken DNS setup stops
  *     costing Let's Encrypt orders; `vibecarbon status` shows it.
  * It logs a state only when it changes, so a healthy env does not grow the
@@ -168,8 +168,8 @@ const restarts = (r: ReturnType<typeof run>) =>
   r.calls.filter((c) => c.includes('restart traefik'));
 
 describe('tls-retry.sh', () => {
-  it('never restarts a traefik younger than 15 minutes', () => {
-    const run = runRetry({ acmeHasApex: false, traefikStartedSecondsAgo: 600 });
+  it('never restarts a traefik younger than 5 minutes', () => {
+    const run = runRetry({ acmeHasApex: false, traefikStartedSecondsAgo: 240 });
     expect(run.calls.filter((c) => c.includes('restart traefik'))).toHaveLength(0);
     expect(run.code).toBe(0);
   });
@@ -181,8 +181,8 @@ describe('tls-retry.sh', () => {
     expect(r.count).toBeNull();
   });
 
-  it('no apex certificate and a Traefik older than 15 minutes: exactly one restart, counted', () => {
-    const r = runRetry({ acmeHasApex: false, traefikStartedSecondsAgo: 16 * 60, countText: '2\n' });
+  it('no apex certificate and a Traefik older than 5 minutes: exactly one restart, counted', () => {
+    const r = runRetry({ acmeHasApex: false, traefikStartedSecondsAgo: 6 * 60, countText: '2\n' });
     expect(r.code, r.stderr).toBe(0);
     expect(r.calls.filter((c) => c === 'docker compose restart traefik')).toHaveLength(1);
     expect(r.count).toBe('3');

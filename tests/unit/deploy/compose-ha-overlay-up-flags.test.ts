@@ -52,7 +52,7 @@ function extract(script: string): string {
 
 describe('haWriteReplicationOverlay flag extraction', () => {
   const FULL_FLAGS =
-    '-f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.dns01.prod.yml ' +
+    '-f docker-compose.yml -f docker-compose.prod.yml ' +
     '-f docker-compose.observability.yml -f docker-compose.observability.prod.yml';
 
   it('RECONCILE_FLAGS_SED extracts the exact flag string from a real reconcile.sh rendering', () => {

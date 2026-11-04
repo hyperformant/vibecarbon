@@ -19,7 +19,6 @@ import {
   renderAddonServicesScript,
 } from '../services/addon-start.js';
 import { composeStandbyScaledServices, enabledAddonNames } from '../services/standby-policy.js';
-import { DNS01_OVERRIDE_FILE, dnsChallengeEnv } from './acme.js';
 import { appStorageCredential, buildAppRuntimeEnv } from './app-runtime-env.js';
 
 /**
@@ -97,7 +96,6 @@ ${print}exit 0
  * the systemd unit.
  */
 const COMPOSE_OPTIONAL_FILES = [
-  { file: DNS01_OVERRIDE_FILE, when: (o) => o.dnsChallenge },
   { file: 'docker-compose.observability.yml', when: (o) => o.observability },
   { file: 'docker-compose.observability.prod.yml', when: (o) => o.observability },
   { file: 'docker-compose.n8n.yml', when: (o) => o.n8n },
@@ -258,8 +256,7 @@ WantedBy=multi-user.target
  */
 export function composeFileFlags(options = {}) {
   // Base first, then each enabled optional overlay in COMPOSE_OPTIONAL_FILES
-  // order — the DNS-01 override must follow prod.yml so it replaces the Traefik
-  // command, and every `.prod.yml` must follow its own base overlay.
+  // order; every `.prod.yml` must follow its own base overlay.
   const files = [
     ...COMPOSE_BASE_FILES,
     ...COMPOSE_OPTIONAL_FILES.filter((e) => e.when(options)).map((e) => e.file),
@@ -269,61 +266,34 @@ export function composeFileFlags(options = {}) {
 
 /**
  * Render the Traefik dynamic-config file that instructs Traefik to obtain and
- * serve ONE cert for the entire deploy as the TLS default store entry.
+ * serve ONE cert for the deploy as the TLS default store entry.
  *
  * With `defaultGeneratedCert`, Traefik proactively requests a single cert via
  * the named resolver at startup and serves it by default for every TLS router
- * that does NOT carry an explicit `tls.certresolver` label. All our production
- * routers use `tls=true` without a resolver — they all get this cert via SNI.
+ * that does NOT carry an explicit `tls.certresolver` label. Every certificate
+ * validates over HTTP-01, which cannot issue wildcards, so the names are
+ * explicit: `main` is `traefik.${domain}` (the dashboard router, always
+ * present) and `sans` lists the enabled feature hosts in the order grafana,
+ * n8n, metabase.
  *
- * Challenge-type differences:
- *   - DNS-01 (managed DNS — cloudflare/hetzner): `sans: ["*.${domain}"]`.
- *     One wildcard cert covers all subdomains, no per-subdomain ACME orders.
- *   - HTTP-01 (manual DNS): wildcards require DNS-01 (LE policy), so we list
- *     the explicit subdomains that are active for this deploy instead.
- *     `main` is `dashboard.${domain}` (always present); `sans` lists the
- *     enabled feature subdomains (grafana/prometheus, n8n, metabase).
+ * The apex (app + Hono API) is deliberately NOT in this cert: it gets its own
+ * single-domain cert through the app router's `tls.certresolver` label.
  *
  * The file is written into `volumes/traefik/` which is already bind-mounted
  * as `/etc/traefik/dynamic:ro`. Traefik hot-reloads files from that dir.
  * Multiple files in the dir coexist fine; this file adds only a top-level
  * `tls:` key that has no overlap with the `http:` keys in middlewares.yml.
  *
- * @param {{domain: string, dnsChallenge: boolean, features?: {observability?: boolean, n8n?: boolean, metabase?: boolean}}} opts
+ * @param {{domain: string, features?: {observability?: boolean, n8n?: boolean, metabase?: boolean}}} opts
  * @returns {string} YAML string suitable for writing to `volumes/traefik/tls-default.yml`
  */
-export function renderTraefikDefaultCert({ domain, dnsChallenge, features = {} }) {
-  // The default store cert covers the SUBDOMAINS only. The app at the bare apex
-  // (`${domain}`) gets its OWN single-domain cert via the app router's
-  // `tls.certresolver` label — it is deliberately NOT in this cert.
-  //
-  // Why split apex off the wildcard: a cert for [`${domain}`, `*.${domain}`] has
-  // TWO ACME authorizations that BOTH validate via the SAME TXT record
-  // `_acme-challenge.${domain}`, so both challenge values must be present there
-  // simultaneously. The Hetzner lego DNS provider REPLACES the TXT rrset instead
-  // of holding both values, so one authorization always fails with
-  // "403 unauthorized :: Incorrect TXT record". (Cloudflare holds both and
-  // worked — RCA 2026-06-01, compose e2e wildcard verify-deploy.) As two
-  // SEPARATE single-authz certs (apex via the app router, `*.${domain}` here),
-  // Traefik obtains them serially, so `_acme-challenge.${domain}` only ever
-  // needs one value at a time — robust on Hetzner AND Cloudflare.
-  let main;
-  let sans;
-  if (dnsChallenge) {
-    // DNS-01: one wildcard covers every subdomain (most general level).
-    main = `*.${domain}`;
-    sans = [];
-  } else {
-    // HTTP-01: wildcards require DNS-01 (LE policy), so enumerate the active
-    // subdomains. `dashboard` always exists; the rest are feature-gated. The
-    // apex (app + Hono API) is covered by its own router cert, not here.
-    const subs = [];
-    if (features.observability) subs.push('grafana', 'prometheus');
-    if (features.n8n) subs.push('n8n');
-    if (features.metabase) subs.push('metabase');
-    main = `dashboard.${domain}`;
-    sans = subs.map((s) => `${s}.${domain}`);
-  }
+export function renderTraefikDefaultCert({ domain, features = {} }) {
+  const subs = [];
+  if (features.observability) subs.push('grafana');
+  if (features.n8n) subs.push('n8n');
+  if (features.metabase) subs.push('metabase');
+  const main = `traefik.${domain}`;
+  const sans = subs.map((s) => `${s}.${domain}`);
 
   const lines = [
     'tls:',
@@ -342,11 +312,9 @@ export function renderTraefikDefaultCert({ domain, dnsChallenge, features = {} }
   return `# Traefik default TLS certificate — generated by Vibecarbon at deploy time.
 #
 # Serves as the default cert for ALL TLS routers carrying \`tls=true\` without an
-# explicit certresolver (SNI fallback). Covers the SUBDOMAINS; the apex app gets
-# its own cert via the app router's \`tls.certresolver\`.
-#
-# DNS-01 (cloudflare/hetzner): one wildcard cert covering every subdomain.
-# HTTP-01 (manual DNS): explicit subdomain SANs (LE policy forbids wildcards).
+# explicit certresolver (SNI fallback). Covers traefik.<domain> plus the enabled
+# feature hosts, all validated over HTTP-01; the apex app gets its own cert via
+# the app router's \`tls.certresolver\`.
 ${lines.join('\n')}
 `;
 }
@@ -378,7 +346,6 @@ export function renderBundle(projectName, options = {}) {
     rootFiles.push('docker-compose.metabase.yml', 'docker-compose.metabase.prod.yml');
   }
   if (options.redis) rootFiles.push('docker-compose.redis.yml', 'docker-compose.redis.prod.yml');
-  if (options.dnsChallenge) rootFiles.push(DNS01_OVERRIDE_FILE);
 
   for (const file of rootFiles) {
     const src = join(cwd, file);
@@ -448,13 +415,6 @@ export function renderBundle(projectName, options = {}) {
   if (projectName) {
     envOverrides.PROJECT_NAME = projectName;
   }
-  // DNS-01: lego reads ACME_DNS_PROVIDER + the matching provider token from the
-  // server .env (consumed by docker-compose.dns01.prod.yml's Traefik env).
-  if (options.dnsChallenge) {
-    // null for a non-DNS-01 provider; Object.assign ignores it.
-    Object.assign(envOverrides, dnsChallengeEnv(options.dnsProvider, options.dnsToken));
-  }
-
   // Merge overrides into local copy. Deliberately NOT parseDotenv: this is
   // an in-place REWRITER, not a reader — every line envOverrides does not
   // touch (comments, blanks, key order) ships verbatim, which a
@@ -554,14 +514,12 @@ export function renderBundle(projectName, options = {}) {
 
   // Render tls-default.yml only when a domain is known (production deploys).
   // This instructs Traefik to proactively obtain ONE cert for the deploy and
-  // serve it as the default for all TLS routers via SNI. DNS-01 deploys get
-  // a wildcard SAN (*.${domain}); HTTP-01 deploys get explicit subdomain SANs.
+  // serve it as the default for all TLS routers via SNI, with explicit names.
   // The file coexists with middlewares.yml — both live under the same `tls:`
   // / `http:` top-level keys respectively; Traefik merges all files in the dir.
   if (options.domain) {
     const tlsDefaultYaml = renderTraefikDefaultCert({
       domain: options.domain,
-      dnsChallenge: Boolean(options.dnsChallenge),
       features: {
         observability: options.observability,
         n8n: options.n8n,
