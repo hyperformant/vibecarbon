@@ -1,43 +1,14 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as digitalocean from '@pulumi/digitalocean';
-import { APT_LOCK_OPT } from '../../deploy/apt.js';
 import { encodeLabels } from '../../providers/digitalocean.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
 import { serverResourceOptions } from '../create-timeout.js';
+import { spliceDockerInstall } from '../docker-install.js';
 
-// Official Docker apt-repo install, spliced into the shared cloud-init's
-// `runcmd:` list (see renderDoUserData). Idempotent / safe to re-run:
-// `install -m` re-applies the same mode, the curl step overwrites the
-// keyring file with identical bytes, and `apt-get install -y` on
-// already-installed packages is a no-op — matching the "runcmd-safe"
-// idempotency the shared file's own `mkdir -p` step already relies on.
-//
-// Why install Docker rather than start from a prebuilt image: a DigitalOcean
-// Docker 1-Click marketplace app DOES exist (slug `docker-20-04`, listed as
-// current in DO's catalog docs, re-verified 2026-07-30) — an earlier comment
-// here asserted the opposite and told the next engineer not to look, which was
-// wrong. The reason we don't use it is that despite the slug it is built on
-// Ubuntu 22.04, while this program pins `ubuntu-24-04-x64` (line ~204) to stay
-// on the same OS as the Hetzner path. Adopting the 1-Click image would mean an
-// OS downgrade plus cross-provider divergence, which costs more than this
-// install block does.
-//
-// What would change the decision: DigitalOcean publishing a 24.04-based Docker
-// image. At that point prefer it — it removes an apt fetch + install from every
-// droplet's first boot, which is the least stable moment to depend on network.
-const DOCKER_INSTALL_RUNCMD = [
-  "  - [sh, -c, 'install -m 0755 -d /etc/apt/keyrings']",
-  "  - [sh, -c, 'curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc']",
-  "  - [sh, -c, 'chmod a+r /etc/apt/keyrings/docker.asc']",
-  '  - [sh, -c, \'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null\']',
-  // Lock timeout, not bare apt-get: runcmd runs while unattended-upgrades
-  // is still holding dpkg's lock-frontend on first boot, and apt's default
-  // is to fail on contention rather than wait. See src/lib/deploy/apt.js.
-  // ASCII-only by construction, so the DO/Scaleway cloud-init asserts hold.
-  `  - [sh, -c, 'apt-get ${APT_LOCK_OPT} update -y']`,
-  `  - [sh, -c, 'apt-get ${APT_LOCK_OPT} install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin']`,
-].join('\n');
+// The Docker install spliced into the user data is the one shared by every
+// compose provider: see ../docker-install.js (pinned versions, why no prebuilt
+// Docker image).
 
 // DO's user-data delivery pipeline double-encodes non-ASCII (RCA
 // 2026-07-25, droplet evidence: a rendered em-dash — UTF-8 `E2 80 94` —
@@ -104,17 +75,7 @@ export function transliterateToAscii(input) {
  * @returns {string}
  */
 export function renderDoUserData(sharedYaml) {
-  const anchor = '\nruncmd:\n';
-  const idx = sharedYaml.indexOf(anchor);
-  if (idx === -1) {
-    throw new Error(
-      'renderDoUserData: `runcmd:` block not found in shared cloud-init ' +
-        '(carbon/cloud-init/docker-ce-setup.yaml), file shape changed, update the splice anchor',
-    );
-  }
-  const insertAt = idx + anchor.length;
-  const spliced = `${sharedYaml.slice(0, insertAt)}${DOCKER_INSTALL_RUNCMD}\n${sharedYaml.slice(insertAt)}`;
-  return transliterateToAscii(spliced);
+  return transliterateToAscii(spliceDockerInstall(sharedYaml, 'renderDoUserData'));
 }
 
 /**

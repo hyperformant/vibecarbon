@@ -1,26 +1,13 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as vultr from '@ediri/vultr';
-import { APT_LOCK_OPT } from '../../deploy/apt.js';
 import { cidrToVultrRuleFields, encodeLabels } from '../../providers/vultr.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
 import { serverResourceOptions } from '../create-timeout.js';
+import { spliceDockerInstall } from '../docker-install.js';
 
-// Official Docker apt-repo install — LOCKSTEP with the digitalocean-compose
-// and linode-compose copies (see digitalocean-compose.js for the
-// marketplace-image decision record, unchanged here).
-const DOCKER_INSTALL_RUNCMD = [
-  "  - [sh, -c, 'install -m 0755 -d /etc/apt/keyrings']",
-  "  - [sh, -c, 'curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc']",
-  "  - [sh, -c, 'chmod a+r /etc/apt/keyrings/docker.asc']",
-  '  - [sh, -c, \'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null\']',
-  // Lock timeout, not bare apt-get: runcmd runs while unattended-upgrades
-  // is still holding dpkg's lock-frontend on first boot, and apt's default
-  // is to fail on contention rather than wait. See src/lib/deploy/apt.js.
-  // ASCII-only by construction, so the DO/Scaleway cloud-init asserts hold.
-  `  - [sh, -c, 'apt-get ${APT_LOCK_OPT} update -y']`,
-  `  - [sh, -c, 'apt-get ${APT_LOCK_OPT} install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin']`,
-].join('\n');
+// The Docker install spliced into the user data is the one shared by every
+// compose provider: see ../docker-install.js.
 
 /**
  * Splice the Docker-CE install block into the shared compose cloud-init's
@@ -29,16 +16,7 @@ const DOCKER_INSTALL_RUNCMD = [
  * @returns {string}
  */
 export function renderVultrUserData(sharedYaml) {
-  const anchor = '\nruncmd:\n';
-  const idx = sharedYaml.indexOf(anchor);
-  if (idx === -1) {
-    throw new Error(
-      'renderVultrUserData: `runcmd:` block not found in shared cloud-init ' +
-        '(carbon/cloud-init/docker-ce-setup.yaml), file shape changed, update the splice anchor',
-    );
-  }
-  const insertAt = idx + anchor.length;
-  return `${sharedYaml.slice(0, insertAt)}${DOCKER_INSTALL_RUNCMD}\n${sharedYaml.slice(insertAt)}`;
+  return spliceDockerInstall(sharedYaml, 'renderVultrUserData');
 }
 
 /**

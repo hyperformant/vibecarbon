@@ -396,23 +396,28 @@ export class HetznerProvider extends BaseProvider {
 
   /**
    * Matches hetzner-compose.js's buildHetznerComposeProgram `image:
-   * 'docker-ce'` literal (lib/iac/programs/hetzner-compose.js:115) exactly.
+   * 'ubuntu-24.04'` literal exactly. Plain Ubuntu, like every provider: the
+   * pinned Docker comes from the cloud-init install (iac/docker-install.js),
+   * never from a prebuilt Docker image.
    * @type {string}
    */
-  static COMPOSE_IMAGE = 'docker-ce';
+  static COMPOSE_IMAGE = 'ubuntu-24.04';
+
+  // Cloud-init installs the pinned Docker from Docker's apt repo at first
+  // boot, so Hetzner gets the same 600s ready budget as DigitalOcean, Linode,
+  // Vultr and Scaleway (BaseProvider's 180s assumed a preinstalled Docker).
+  static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
 
   /**
-   * Returns the same raw shared cloud-init file hetzner-compose.js's Pulumi
-   * program reads (both point at the identical
-   * carbon/cloud-init/docker-ce-setup.yaml via their own CLOUD_INIT_PATH).
-   * Delegates to deploy/compose/index.js's `loadCloudInitScript` (dynamic
-   * import — keeps the deploy layer out of this class's static-load graph
-   * until actually called) rather than re-declaring the path a third time.
+   * Returns the same user data hetzner-compose.js's Pulumi program hands its
+   * server: the shared compose cloud-init with the pinned Docker install
+   * spliced in. Delegates to that module's `loadHetznerComposeUserData`
+   * (dynamic import, like the other providers).
    * @returns {Promise<string>}
    */
   static async getComposeUserData() {
-    const { loadCloudInitScript } = await import('../deploy/compose/index.js');
-    return loadCloudInitScript();
+    const { loadHetznerComposeUserData } = await import('../iac/programs/hetzner-compose.js');
+    return loadHetznerComposeUserData();
   }
 
   // ── K8s asset identity — pure string data (C7c) ──────────────────────
@@ -950,7 +955,7 @@ export class HetznerProvider extends BaseProvider {
       name,
       server_type: serverType,
       location: region,
-      image: image || 'docker-ce',
+      image: image || 'ubuntu-24.04',
       ssh_keys: sshKeys || (sshKeyId ? [sshKeyId] : []),
       public_net: {
         enable_ipv4: true,

@@ -538,14 +538,12 @@ export async function dockerLoginOnServer(ip, sshKeyPath, creds) {
   const authB64 = Buffer.from(`${username}:${token}`).toString('base64');
 
   // Merge into any existing config.json via jq (preserves other registries'
-  // auth when we log in to multiple). jq is guaranteed on Hetzner docker-ce
-  // images; if not present we fall back to writing a minimal file.
-  // Bash here-doc writes a minimal config.json directly. No jq dependency:
-  // bare Hetzner images don't ship with it, and installing via apt-get races
+  // auth when we log in to multiple). Bash here-doc writes a minimal config.json directly. No jq dependency:
+  // plain Ubuntu images don't ship with it, and installing via apt-get races
   // cloud-init's unattended-upgrades apt lock (observed 04:08 UTC —
   // "Could not get lock /var/lib/apt/lists/lock").
   //
-  // Python3 is preinstalled on Ubuntu's docker-ce cloud image, so we use
+  // Python3 is preinstalled on Ubuntu's cloud images, so we use
   // it to merge cleanly into any existing config.json (preserves other
   // registries' auth when logging into Docker Hub + GHCR sequentially).
   // Falls back to overwriting config.json if python3 is absent.
@@ -716,8 +714,7 @@ export function isLocalOnlyImageTag(imageRef) {
 /**
  * Wait for Docker daemon to be ready on a remote server.
  *
- * On Hetzner docker-ce VPSes Docker is already running once cloud-init
- * releases the dpkg lock, so the first check usually succeeds immediately.
+ * Docker is already running once cloud-init releases the dpkg lock, so the first check usually succeeds immediately.
  * Short initial interval keeps the latency tight on the rare miss.
  */
 export async function waitForDockerReady(ip, sshKeyPath, maxAttempts = 12) {

@@ -145,7 +145,7 @@ function makeCtx(Provider: typeof HetznerProvider | typeof DigitalOceanProvider)
 }
 
 describe('scaleServers — provider-owned cloud-init readiness budget', () => {
-  it('passes HetznerProvider.CLOUD_INIT_READY_TIMEOUT_MS (180s) for a Hetzner ctx', async () => {
+  it('passes HetznerProvider.CLOUD_INIT_READY_TIMEOUT_MS (600s) for a Hetzner ctx', async () => {
     H.setupServerCalls.length = 0;
     // getPublicIP dispatches off the server shape; stub it out for this class
     // rather than relying on the real Hetzner-shaped extractor.
@@ -156,7 +156,7 @@ describe('scaleServers — provider-owned cloud-init readiness budget', () => {
       spy.mockRestore();
     }
     expect(H.setupServerCalls).toHaveLength(1);
-    expect(H.setupServerCalls[0].timeoutMs).toBe(180_000);
+    expect(H.setupServerCalls[0].timeoutMs).toBe(600_000);
     expect(H.setupServerCalls[0].timeoutMs).toBe(HetznerProvider.CLOUD_INIT_READY_TIMEOUT_MS);
   });
 

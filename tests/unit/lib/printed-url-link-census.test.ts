@@ -94,10 +94,7 @@ const ALLOW: { why: string; sites: string[] }[] = [
   {
     why: 'cloud-init or README text written to a file, never a terminal',
     sites: [
-      'src/lib/iac/programs/digitalocean-compose.js DOCKER_INSTALL_RUNCMD https://download.docker.com/linux/ubuntu',
-      'src/lib/iac/programs/linode-compose.js DOCKER_INSTALL_RUNCMD https://download.docker.com/linux/ubuntu',
-      'src/lib/iac/programs/scaleway-compose.js DOCKER_INSTALL_RUNCMD https://download.docker.com/linux/ubuntu',
-      'src/lib/iac/programs/vultr-compose.js DOCKER_INSTALL_RUNCMD https://download.docker.com/linux/ubuntu',
+      'src/lib/iac/docker-install.js DOCKER_INSTALL_RUNCMD https://download.docker.com/linux/ubuntu',
       'src/create.js generateReadme https://www.postgresql.org/docs/',
       'src/create.js generateReadme https://hono.dev',
       'src/create.js generateReadme https://vitejs.dev',

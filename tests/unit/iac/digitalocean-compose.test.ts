@@ -12,11 +12,10 @@ import { namesHost } from '../../_shared/hosts.js';
 const CLOUD_INIT_PATH = join(process.cwd(), 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
 const sharedCloudInit = readFileSync(CLOUD_INIT_PATH, 'utf-8');
 
-// Step 1 (blocking) parity check: Hetzner's `docker-ce` image ships Docker
-// preinstalled, so the shared cloud-init's `systemctl enable --now docker`
-// runcmd step assumes docker.service already exists. DigitalOcean's
-// `ubuntu-24-04-x64` image does not ship Docker, so renderDoUserData()
-// must splice an official-Docker-apt-repo install block into `runcmd:`
+// Step 1 (blocking) parity check: the shared cloud-init's `systemctl enable
+// --now docker` runcmd step assumes docker.service already exists, but
+// DigitalOcean's `ubuntu-24-04-x64` image does not ship Docker, so
+// renderDoUserData() must splice an official-Docker-apt-repo install block into `runcmd:`
 // BEFORE that step, or the droplet would boot with no `docker` command and
 // the first `docker compose up` would fail.
 describe('renderDoUserData (cloud-init parity splice)', () => {

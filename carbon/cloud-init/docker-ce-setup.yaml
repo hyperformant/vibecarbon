@@ -1,9 +1,10 @@
 #cloud-config
 # Vibecarbon compose-deploy bootstrap.
 #
-# This user-data runs at VPS boot time in parallel with Hetzner's default
-# docker-ce app (Ubuntu 24.04 with Docker + compose-plugin pre-installed).
-# By finishing UFW + unattended-upgrades before SSH is even reachable, the
+# This user-data runs at VPS boot time on plain Ubuntu 24.04 on every
+# provider. Each provider's renderer splices the one pinned Docker install
+# (src/lib/iac/docker-install.js) at the top of runcmd, so every server runs
+# the same Docker. By finishing UFW + unattended-upgrades before SSH is even reachable, the
 # CLI's post-SSH setupServer becomes a ~2-second marker-file probe instead
 # of a ~90-second serial apt-get chain.
 #
@@ -60,7 +61,7 @@ write_files:
   # Without this, a chatty container grows /var/lib/docker/containers/*/*.log
   # without limit until the single-VPS root disk fills and the whole stack
   # wedges (slow disk-fill outage). 10m x 3 files = 30MB/container ceiling.
-  # A fresh Ubuntu + docker-ce app ships no daemon.json, so this is a create,
+  # A fresh Ubuntu + Docker install ships no daemon.json, so this is a create,
   # not a merge; if that ever changes, fold these keys into the existing file.
   - path: /etc/docker/daemon.json
     permissions: '0644'
@@ -93,8 +94,8 @@ runcmd:
   # Docker first (a provider that installs it splices that install above this
   # line). Ensure it is running and restart it so it picks up
   # /etc/docker/daemon.json written above: write_files runs before runcmd, but
-  # the docker-ce app has usually already started the daemon with the OLD
-  # config, so `enable --now` alone would leave the log cap unapplied. The
+  # the install above has already started the daemon with the OLD
+  # config (the package starts it on install), so `enable --now` alone would leave the log cap unapplied. The
   # restart is cheap here - no containers exist yet at boot. Nothing below
   # restarts Docker again, so the boot pull started next never races a restart.
   #

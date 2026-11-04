@@ -293,11 +293,10 @@ export class DigitalOceanProvider extends BaseProvider {
   static DEFAULT_K8S_NODE_TYPE = 's-2vcpu-4gb';
 
   // Overrides BaseProvider's 180s default: `ubuntu-24-04-x64` has no
-  // preinstalled Docker, so cloud-init installs docker-ce from Docker's apt
-  // repo INSIDE the boot script (see digitalocean-compose.js
-  // renderDoUserData) — realistically 3-5 minutes on small droplets, vs
-  // Hetzner's docker-ce image where cloud-init only runs ufw +
-  // unattended-upgrades. RCA'd from a real d1 e2e failure: cloud-init never
+  // preinstalled Docker, so cloud-init installs the pinned docker-ce from
+  // Docker's apt repo INSIDE the boot script (iac/docker-install.js, the same
+  // install every compose provider runs) — realistically 3-5 minutes on
+  // small droplets. RCA'd from a real d1 e2e failure: cloud-init never
   // reached the ready marker within the 180s Hetzner-calibrated budget.
   static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
 

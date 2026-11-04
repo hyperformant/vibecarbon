@@ -93,7 +93,7 @@ export class BaseProvider {
   // provisioned, instead of relying on an implicit provider-specific
   // default (RCA 2026-07-24: a DO compose scale sent NO `image` field at
   // all, because scale.js's createServer call omitted `image` counting on
-  // HetznerProvider.createServer's own `image || 'docker-ce'` fallback — a
+  // HetznerProvider.createServer's own `image` fallback — a
   // fallback DigitalOceanProvider.createServer has no equivalent of, so DO
   // rejected the droplet create with "invalid image for Droplet creation").
 
@@ -127,13 +127,11 @@ export class BaseProvider {
    *
    * The budget covers image-boot-to-ready-marker, and that varies by
    * provider because of what each provider's base image already has
-   * installed: Hetzner's `docker-ce` image ships Docker preinstalled, so
-   * cloud-init only runs ufw + unattended-upgrades — typically done in
-   * 20-40s, so 180s is a generous ceiling. A provider whose base image does
-   * NOT have Docker preinstalled (e.g. DigitalOcean's `ubuntu-24-04-x64`,
-   * which installs docker-ce from Docker's apt repo INSIDE cloud-init — see
-   * digitalocean-compose.js renderDoUserData) needs a materially larger
-   * budget and must override this static.
+   * installed. No compose provider's image has Docker preinstalled: all
+   * five install the same pinned docker-ce from Docker's apt repo INSIDE
+   * cloud-init (iac/docker-install.js), which takes 3-5 minutes, so every
+   * compose provider overrides this static with 600s. The 180s here is only
+   * the ceiling for a provider whose image would ship Docker already.
    * @type {number}
    */
   static CLOUD_INIT_READY_TIMEOUT_MS = 180_000;

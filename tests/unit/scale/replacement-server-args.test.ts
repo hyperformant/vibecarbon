@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 // d1 regression: the compose scale/replacement path's createServer() call
 // omitted `image` entirely and reused a raw loadCloudInitScript() userData
 // unconditionally, counting on HetznerProvider.createServer's own
-// `image || 'docker-ce'` fallback. DigitalOceanProvider.createServer has no
+// `image` fallback. DigitalOceanProvider.createServer has no
 // such fallback, so a DO scale sent NO image field at all and DO rejected
 // the droplet create with "invalid image for Droplet creation". Fix: image
 // + user-data are resolved from the Provider class's own COMPOSE_IMAGE /
@@ -71,16 +71,15 @@ const baseArgs = {
 describe('buildReplacementServerArgs — image + user-data are provider-owned', () => {
   it('resolves HetznerProvider.COMPOSE_IMAGE and getComposeUserData() for a Hetzner replacement server', async () => {
     const args = await buildReplacementServerArgs(HetznerProvider, baseArgs);
-    expect(args.image).toBe('docker-ce');
+    expect(args.image).toBe('ubuntu-24.04');
     expect(args.image).toBe(HetznerProvider.COMPOSE_IMAGE);
-    expect(args.userData).toBe(loadCloudInitScript());
+    expect(args.userData).toBe(await HetznerProvider.getComposeUserData());
   });
 
   it('resolves DigitalOceanProvider.COMPOSE_IMAGE and getComposeUserData() for a DO replacement server — never the Hetzner image/user-data', async () => {
     const args = await buildReplacementServerArgs(DigitalOceanProvider, baseArgs);
     expect(args.image).toBe('ubuntu-24-04-x64');
     expect(args.image).toBe(DigitalOceanProvider.COMPOSE_IMAGE);
-    expect(args.image).not.toBe('docker-ce');
     expect(args.userData).toBe(loadDoComposeUserData());
     expect(args.userData).not.toBe(loadCloudInitScript());
   });

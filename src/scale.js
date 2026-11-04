@@ -533,7 +533,7 @@ async function scaleRegisterSshKey(ctx) {
  * `getComposeUserData()` (see base.js's "Compose-tier replacement-server
  * identity" doc block) rather than an implicit, Hetzner-shaped default —
  * omitting `image` here previously relied on HetznerProvider.createServer's
- * own `image || 'docker-ce'` fallback, which sent DigitalOcean's droplet
+ * own `image` fallback, which sent DigitalOcean's droplet
  * create with NO image field at all (d1 regression: "invalid image for
  * Droplet creation").
  * @param {typeof import('./lib/providers/base.js').BaseProvider} Provider

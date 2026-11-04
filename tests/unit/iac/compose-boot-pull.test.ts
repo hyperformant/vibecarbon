@@ -3,12 +3,9 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  BOOT_PULL_PLACEHOLDER,
-  bootPullImages,
-  loadComposeCloudInit,
-} from '../../../src/lib/iac/compose-cloud-init.js';
+import { BOOT_PULL_PLACEHOLDER, bootPullImages } from '../../../src/lib/iac/compose-cloud-init.js';
 import { loadDoComposeUserData } from '../../../src/lib/iac/programs/digitalocean-compose.js';
+import { loadHetznerComposeUserData } from '../../../src/lib/iac/programs/hetzner-compose.js';
 import { loadLinodeComposeUserData } from '../../../src/lib/iac/programs/linode-compose.js';
 import { loadScalewayComposeUserData } from '../../../src/lib/iac/programs/scaleway-compose.js';
 import { loadVultrComposeUserData } from '../../../src/lib/iac/programs/vultr-compose.js';
@@ -24,7 +21,7 @@ import { dbImageRef } from '../../../src/lib/images.js';
 const REPO = join(import.meta.dirname, '..', '..', '..');
 
 const RENDERED: Record<string, string> = {
-  hetzner: loadComposeCloudInit(),
+  hetzner: loadHetznerComposeUserData(),
   digitalocean: loadDoComposeUserData(),
   linode: loadLinodeComposeUserData(),
   vultr: loadVultrComposeUserData(),
@@ -67,9 +64,8 @@ describe.each(Object.entries(RENDERED))('%s compose cloud-init', (_provider, tex
     expect(runcmd.slice(pull)).not.toMatch(/restart,? docker|docker restart|stop,? docker/);
   });
 
-  it('a provider-installed Docker comes before the restart', () => {
-    const install = runcmd.indexOf('install -y docker-ce');
-    if (install > -1) expect(install).toBeLessThan(at('[systemctl, restart, docker]'));
+  it('the Docker install comes before the restart', () => {
+    expect(at('install -y docker-ce')).toBeLessThan(at('[systemctl, restart, docker]'));
   });
 });
 

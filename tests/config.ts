@@ -23,8 +23,8 @@ export const testConfig = {
       // Secondary region for HA standby server
       secondaryRegion: 'nbg1', // Nuremberg, Germany
 
-      // Docker image to use for servers
-      image: 'docker-ce',
+      // Base image for servers (plain Ubuntu; cloud-init installs the pinned Docker)
+      image: 'ubuntu-24.04',
 
       // Labels applied to all test resources
       labels: {
