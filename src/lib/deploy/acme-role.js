@@ -18,7 +18,7 @@
  * THE POLICY: only the node currently in the PRIMARY role holds an armed
  * ACME issuer.
  *
- *   - Deploy half: haMergeWalgRole writes `ACME_DISARMED_CA_SERVER` into
+ *   - Deploy half: haWriteNodeRoles writes `ACME_DISARMED_CA_SERVER` into
  *     the standby's `.env` (and explicitly empty into the primary's)
  *     BEFORE the stacks start. Both Traefik `caserver` flags interpolate
  *     `${ACME_DISARMED_CA_SERVER:-${ACME_CA_SERVER:-<prod LE>}}`, so the
@@ -27,11 +27,10 @@
  *     Traefik default cert (accepted design; nothing probes the standby's
  *     TLS directly, and the DOMAIN always points at the active primary).
  *   - Failover half: armComposeAcme empties the key on the promoted node
- *     and recreates traefik (container command is fixed at create time —
- *     the same reason the WALG_ROLE swap recreates db); disarmComposeAcme
- *     sets it on the retired node, best-effort. Both mirror
- *     restoreComposeWalgRole/demoteComposeWalgRole's mechanics and
- *     failure semantics: a DR path never throws over cert re-arming.
+ *     and recreates traefik (its container command is fixed at create
+ *     time); disarmComposeAcme sets it on the retired node, best-effort.
+ *     Both follow demoteComposeWalgRole's failure semantics: a DR path
+ *     never throws over cert re-arming.
  */
 
 import * as p from '@clack/prompts';
@@ -55,7 +54,7 @@ export const ACME_DISARMED_CA_SERVER = 'https://acme-disarmed.invalid/directory'
  * Bash that RECREATES the compose `traefik` service so it picks up the
  * `ACME_DISARMED_CA_SERVER` value just merged into `.env` (the value lives
  * in the container COMMAND via compose interpolation, fixed at create
- * time). Same wrong-`-f` hazard as composeDbRecreateShell: a bare `up`
+ * time). The wrong-`-f` hazard (COMPOSE_CONFIG_FILES_LABEL): a bare `up`
  * resolves docker-compose.yml alone and would recreate Traefik WITHOUT the
  * dns01 override's command — silently reverting the node to HTTP-01. So
  * the `-f` set comes from the running container's config_files label,
@@ -148,7 +147,8 @@ export async function armComposeAcme({ promotedIp, sshKeyPath, projectName, deps
         // restoreFailoverTls never throws; any other restore degrades to issuance.
       }
     }
-    // Single attempt on the DR path — same reasoning as restoreComposeWalgRole.
+    // Single attempt on the DR path: sshRunAsync's default 3 attempts would let a
+    // wedged recreate burn minutes of RTO before the DNS flip.
     await run(promotedIp, sshKeyPath, composeTraefikRecreateShell(remoteDir), {
       timeout: 120_000,
       retries: 1,

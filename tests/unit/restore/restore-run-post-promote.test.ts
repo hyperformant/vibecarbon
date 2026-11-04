@@ -21,6 +21,12 @@ const keyPath = join(dir, 'id_ed25519');
 writeFileSync(keyPath, 'not-a-key');
 const envConfig = { deployMode: 'compose', provider: 'hetzner', servers: [{ ip: '10.0.0.1' }] };
 
+// The project scaffold is current; the stale-scaffold refusal has its own
+// tests (preflight-role-file, scaffold-lockstep-commands).
+vi.mock('../../../src/lib/deploy/preflight.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  assertScaffoldSupportsRoleFile: () => {},
+}));
 vi.mock('../../../src/lib/project-guard.js', () => ({
   assertInProjectDir: () => ({ projectName: 'myapp', environments: { prod: envConfig } }),
 }));
@@ -52,6 +58,13 @@ vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => ({
       },
     ],
   }),
+}));
+// The live wal-g role bind probe (its refusal has its own tests in
+// compose-ha-reseed.test.ts): every db container binds the role directory.
+const roleBind = vi.fn(async () => true as boolean | null);
+vi.mock('../../../src/lib/deploy/walg-role.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/deploy/walg-role.js')>()),
+  composeDbMountsWalgRoleDir: (...a: unknown[]) => roleBind(...a),
 }));
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => ({
   ...(await orig<typeof import('../../../src/lib/deploy/compose/index.js')>()),
@@ -97,6 +110,8 @@ beforeEach(() => {
   push.mockReset();
   walGap.mockReset();
   walGap.mockResolvedValue(null);
+  roleBind.mockReset();
+  roleBind.mockResolvedValue(true);
   writeFileSync(
     join(dir, '.vibecarbon.json'),
     JSON.stringify({ projectName: 'myapp', environments: { prod: envConfig } }),
@@ -219,5 +234,23 @@ describe('restore run(): a live WAL gap record on the primary', () => {
       () => {},
     );
     expect(walGap).not.toHaveBeenCalled();
+  });
+});
+
+describe('restore run(): a db that predates the live wal-g role is refused before any confirmation', () => {
+  it('refuses before the confirm and the prod type-to-confirm, naming the deploy', async () => {
+    roleBind.mockResolvedValue(false);
+    confirmFn.mockReset();
+    const errors: string[] = [];
+    vi.spyOn(p.log, 'error').mockImplementation((m: string) => {
+      errors.push(String(m));
+    });
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    await expect(run(['prod', '-source', 'latest'])).rejects.toThrow('process.exit(1)');
+    expect(confirmFn).not.toHaveBeenCalled();
+    expect(errors.join('\n')).toMatch(/predates the live wal-g role[\s\S]*vibecarbon deploy prod/);
+    expect(roleBind).toHaveBeenCalledTimes(1);
   });
 });

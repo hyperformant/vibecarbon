@@ -44,14 +44,48 @@ const WALG_AUDIT_PASS = [
   'WALG_AUDIT_LIST_END',
 ].join('\n');
 
+/** Each node's wal-g role file, written and read through the real role shells. */
+const roleFiles = new Map<string, string>();
+
+/** The role-file surface: a write sets the node's file, a read answers it. */
+async function roleSurface(ip: string, command: string): Promise<string | undefined> {
+  const { composeRoleWriteOf } = await import('../helpers/compose-role-ssh.js');
+  const wrote = composeRoleWriteOf(command);
+  if (wrote) {
+    roleFiles.set(ip, wrote);
+    return `WALG_ROLE_FILE=${wrote}\n`;
+  }
+  if (command.includes('.vibecarbon-role') && command.includes('WALG_ROLE_FILE')) {
+    return `WALG_ROLE_FILE=${roleFiles.get(ip) ?? ''}\n`;
+  }
+  return undefined;
+}
+
+// The role-file writes go through ssh.js's argv sshRun (writeComposeWalgRole).
+vi.mock('../../../src/lib/ssh.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
+  return {
+    ...actual,
+    sshRun: vi.fn(async (ip: string, _k: string, argv: unknown) => {
+      assertSshRunArgv(argv);
+      const command = argv.join(' ');
+      sshCalls.push({ ip, command });
+      return (await roleSurface(ip, command)) ?? '';
+    }),
+  };
+});
+
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  const rec = (ip: string, _k: string, command: unknown) => {
+  const rec = async (ip: string, _k: string, command: unknown) => {
     const c = String(command);
     sshCalls.push({ ip, command: c });
     const over = sshOverride?.(c);
     if (over instanceof Error) throw over;
     if (over !== undefined) return over;
+    const role = await roleSurface(ip, c);
+    if (role !== undefined) return role;
     if (c.includes('WALG_AUDIT')) return WALG_AUDIT_PASS;
     if (c.includes('%{http_code}')) return 'app=200';
     if (c.includes('FENCE_DONE')) return 'STOPPED fake\nFENCE_DONE';
@@ -223,6 +257,9 @@ async function run(opts: RunOpts = {}) {
   let reseeded = false;
   const deps = {
     isPrimaryReachable: async () => primaryReachable,
+    // The db containers bind the role directory (compose-ha-failover-role-bind
+    // owns the refusal when they do not).
+    probeRoleBind: async () => true,
     readState: async (ip: string) => {
       if (ip === PRIMARY_IP) {
         order.push('readPrimary');
@@ -386,6 +423,7 @@ beforeEach(() => {
   sshCalls.length = 0;
   sshOverride = undefined;
   addonStartResult = '';
+  roleFiles.clear();
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -545,13 +583,17 @@ describe('failoverComposeHA state matrix', () => {
     expect(start).toBeGreaterThan(restart);
   });
 
-  it('a wal-g role write that never landed says the next reconcile holds the add-ons at zero', async () => {
+  it('a promoted node whose role file does not read primary says the next reconcile holds the add-ons at zero', async () => {
     const p = await import('@clack/prompts');
     const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
-    const utils = await import('../../../src/lib/deploy/utils.js');
-    vi.mocked(utils.mergeRemoteDotenv).mockRejectedValueOnce(new Error('ssh: connection reset'));
+    // The arm's own read-back landed; the post-promote read finds standby.
+    sshOverride = (c) =>
+      c.includes('.vibecarbon-role') && !c.includes('walg-role.tmp')
+        ? 'WALG_ROLE_FILE=standby'
+        : undefined;
     const { thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
     expect(thrown?.message).toMatch(/FAILOVER COMPLETED, BACKUPS DID NOT/);
+    expect(thrown?.message).toMatch(/reads "standby", not primary/);
     expect(thrown?.message).toMatch(/next reconcile scales n8n back to 0/);
     expect(
       error.mock.calls.some((c) => /next reconcile scales n8n back to 0/.test(String(c[0]))),
@@ -559,11 +601,13 @@ describe('failoverComposeHA state matrix', () => {
     error.mockRestore();
   });
 
-  it('a db recreate failure after the role was written does not claim the add-ons go to zero', async () => {
+  it('an audit failure on a role file that reads primary does not claim the add-ons go to zero', async () => {
     const p = await import('@clack/prompts');
     const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
     sshOverride = (c) =>
-      c.includes('refusing to recreate blind') ? new Error('db recreate failed') : undefined;
+      c.includes('WALG_AUDIT')
+        ? ['WALG_AUDIT=fail:stale-standby-role', 'WALG_AUDIT_RECOVERY=f'].join('\n')
+        : undefined;
     const { thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
     expect(thrown?.message).toMatch(/FAILOVER COMPLETED, BACKUPS DID NOT/);
     expect(thrown?.message).not.toMatch(/next reconcile/);
@@ -617,6 +661,8 @@ describe('failoverComposeHA state matrix', () => {
   });
 
   it('resume: out of recovery with a journal naming the standby skips reseed and promote, then finishes', async () => {
+    // The run that journaled armed the standby before it (D2).
+    roleFiles.set(STANDBY_IP, 'primary');
     const { order, thrown } = await run({
       standbyState: replica({ inRecovery: false, receiverStatus: null }),
       envConfig: baseEnvConfig({
@@ -743,6 +789,8 @@ describe('failoverComposeHA state matrix', () => {
   });
 
   it('resume keeps the override the proof-skipping run recorded', async () => {
+    // The run that journaled armed the standby before it (D2).
+    roleFiles.set(STANDBY_IP, 'primary');
     const { captured, thrown } = await run({
       standbyState: replica({ inRecovery: false, receiverStatus: null }),
       envConfig: baseEnvConfig({

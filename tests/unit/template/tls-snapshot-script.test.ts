@@ -8,7 +8,7 @@
  * holds the bucket credentials): no copy on the host, nothing on argv, and
  * nothing printed. A snapshot is only ever written from a node that issues
  * the certificate (never a retired node, a disarmed compose-ha standby or a
- * standby-role db) and only when acme.json holds the apex certificate, so a
+ * node whose host role file does not say primary) and only when acme.json holds the apex certificate, so a
  * worse file never replaces a good snapshot.
  *
  * Runs the real script under bash with a `docker` PATH shim that records its
@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { ACME_DISARMED_CA_SERVER } from '../../../src/lib/deploy/acme-role.js';
 import { tlsSnapshotS3Prefix } from '../../../src/lib/deploy/tls-snapshot.js';
+import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
 
 const SCRIPT = fileURLToPath(new URL('../../../carbon/backup/tls-snapshot.sh', import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), 'tls-snapshot-'));
@@ -74,8 +75,8 @@ type Fixture = {
   /** The `main` of the one certificate in acme.json. */
   acmeMain?: string;
   caServer?: string;
-  /** WALG_ROLE in the db container; null = unset. */
-  walgRole?: string | null;
+  /** The host role file .vibecarbon-role/walg-role; null = no file. */
+  hostRole?: string | null;
   retired?: boolean;
   traefikRunning?: boolean;
   uploadFails?: boolean;
@@ -92,7 +93,7 @@ function run(f: Fixture = {}) {
     domain = 'app.example.com',
     acmeMain = 'app.example.com',
     caServer = PROD_CA,
-    walgRole = 'primary',
+    hostRole = 'primary\n',
     retired = false,
     traefikRunning = true,
     uploadFails = false,
@@ -121,7 +122,10 @@ function run(f: Fixture = {}) {
   };
   answer('prefix', prefix);
   answer('domain', domain);
-  answer('role', walgRole);
+  if (hostRole !== null) {
+    mkdirSync(join(dir, '.vibecarbon-role'));
+    writeFileSync(join(dir, '.vibecarbon-role', 'walg-role'), hostRole);
+  }
   if (retired) writeFileSync(join(dir, '.vibecarbon-retired'), '');
   writeFileSync(
     join(bin, 'docker'),
@@ -133,7 +137,6 @@ case "$*" in
   "inspect -f {{json .Config.Cmd}} traefikcid") cat "${fx}/cmd" ;;
   "compose exec -T traefik printenv TLS_SNAPSHOT_S3_PREFIX") answer prefix ;;
   "compose exec -T traefik printenv TLS_SNAPSHOT_DOMAIN") answer domain ;;
-  "compose exec -T db printenv WALG_ROLE") answer role ;;
   "compose exec -T traefik grep "*)
     shift 5
     set -- "\${@:1:$(($# - 1))}" "${fx}/acme.json"
@@ -169,7 +172,7 @@ esac
     calls: readFileSync(log, 'utf-8').split('\n').filter(Boolean),
     uploaded: existsSync(uploadedPath) ? readFileSync(uploadedPath, 'utf-8') : null,
     acme: readFileSync(join(fx, 'acme.json'), 'utf-8'),
-    projectFiles: readdirSync(dir),
+    projectFiles: readdirSync(dir).filter((f) => f !== '.vibecarbon-role'),
   };
 }
 
@@ -188,16 +191,28 @@ describe('tls-snapshot.sh', () => {
     expect(r.stderr).toContain(`${PREFIX}/compose-acme.json`);
   });
 
-  it('a standby-role db (compose-ha standby): no st put, exit 0', () => {
-    const r = run({ walgRole: 'standby' });
+  it('a standby role (compose-ha standby): no st put, exit 0', () => {
+    const r = run({ hostRole: 'standby\n' });
     expect(r.code, r.stderr).toBe(0);
     expect(uploads(r)).toHaveLength(0);
     expect(r.stdout).toBe('');
   });
 
-  it('an unset WALG_ROLE reads as the primary', () => {
-    const r = run({ walgRole: null });
-    expect(uploads(r)).toEqual([UPLOAD]);
+  it('snapshots only when the host role file says primary, through the one parser', () => {
+    expect(run({ hostRole: 'primary\n' }).stderr).not.toContain('tls snapshot skipped: wal-g role');
+    for (const hostRole of ['standby\n', null, 'x']) {
+      const r = run({ hostRole });
+      expect(r.code, r.stderr).toBe(0);
+      expect(r.stderr).toContain('tls snapshot skipped: wal-g role');
+      expect(uploads(r)).toHaveLength(0);
+    }
+    const body = readFileSync(SCRIPT, 'utf-8');
+    expect(body).toContain(WALG_ROLE_PARSE_SH);
+    expect(body).not.toContain('printenv WALG_ROLE');
+  });
+
+  it('never asks the db container for its role', () => {
+    expect(run().calls.some((c) => c.includes('WALG_ROLE'))).toBe(false);
   });
 
   it('a retired node: nothing runs, exit 0', () => {

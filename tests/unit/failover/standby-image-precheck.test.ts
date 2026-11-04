@@ -19,6 +19,7 @@ import {
   buildStandbyImageCheckScript,
 } from '../../../src/lib/deploy/k8s/ha/image-copy.js';
 import { MANIFEST_DIGEST_SH } from '../../../src/lib/deploy/k8s/image-delivery.js';
+import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
 describe('assertStandbyHasAppImage', () => {
   it('returns the digest of a local-registry image', async () => {
@@ -251,6 +252,8 @@ async function runFailover({
     scale: async (_ip: string, _key: string, _list: unknown, _n: unknown, label: string) => {
       order.push(`scale:${label}`);
     },
+    // The standby db pod mounts the wal-g role directory; the arm's write lands.
+    kubectl: k8sRoleKubectl(),
     restoreWalgRole: async () => ({ promoted: { ok: true }, demoted: { ok: true } }),
     gate: async () => {},
     promoteIssuer: async () => ({ patched: [] }),

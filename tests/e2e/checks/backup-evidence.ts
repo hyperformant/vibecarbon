@@ -197,7 +197,8 @@ export function resolveObjectStorageCreds(
  *   1. No prefix (or the `s3:///…` empty-bucket form both paths render when no
  *      bucket is configured) → backups are deliberately OFF → skip.
  *   2. A standby must never be provoked — its writes are guarded off by
- *      design. Callers only ever run this against the node they have already
+ *      design. The role is the role file (VC_WALG_ROLE, from walg-env.sh);
+ *      no role, or an unknown word, is a failure too (`fail:no-role`). Callers only ever run this against the node they have already
  *      resolved as the PRIMARY, so a standby answer here is the stale-role rot
  *      #218 fixed, and is reported as a failure rather than a skip.
  *   3. `txid_current()` before the switch: on an idle cluster `pg_switch_wal()`
@@ -215,10 +216,17 @@ export function buildWalSwitchProbe(): string {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion, not a JS placeholder
     'PFX="${WALG_S3_PREFIX:-}"',
     'case "$PFX" in "" | s3:///*) echo "WAL_SWITCH=skip:no-backup-target"; exit 0 ;; esac',
+    // The role file (walg-env.sh reads it into VC_WALG_ROLE).
     // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion, not a JS placeholder
-    'if [ "${WALG_ROLE:-primary}" = "standby" ]; then',
-    '  echo "WAL_SWITCH=fail:standby-role"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
-    'fi',
+    'case "${VC_WALG_ROLE:-}" in',
+    '  primary) ;;',
+    '  standby)',
+    '    echo "WAL_SWITCH=fail:standby-role"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
+    '    ;;',
+    '  *)',
+    '    echo "WAL_SWITCH=fail:no-role"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
+    '    ;;',
+    'esac',
     'REC="$(psql -U postgres -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"',
     'if [ "$REC" = "t" ]; then',
     '  echo "WAL_SWITCH=fail:in-recovery"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
@@ -247,6 +255,7 @@ export type WalSwitchStatus =
   | 'fail:in-recovery'
   | 'fail:switch-returned-nothing'
   | 'fail:no-lineage'
+  | 'fail:no-role'
   | 'unparsed';
 
 export interface WalSwitchResult {
@@ -263,6 +272,7 @@ const KNOWN_STATUSES: WalSwitchStatus[] = [
   'fail:in-recovery',
   'fail:switch-returned-nothing',
   'fail:no-lineage',
+  'fail:no-role',
 ];
 
 /**
@@ -460,14 +470,16 @@ export async function runBackupEvidenceChecks(
   if (probe.status !== 'switched' || !probe.segment || !probe.lineage) {
     const why =
       probe.status === 'fail:standby-role'
-        ? 'the node resolved as PRIMARY still carries WALG_ROLE=standby — its archive path is write-guarded off, so nothing is being backed up (the rot #218 fixed)'
+        ? 'the node resolved as PRIMARY has a wal-g role file that says standby: its archive path is write-guarded off, so nothing is being backed up (the rot #218 fixed)'
         : probe.status === 'fail:in-recovery'
           ? 'the node resolved as PRIMARY is still in recovery — it cannot archive WAL'
           : probe.status === 'fail:switch-returned-nothing'
             ? 'pg_switch_wal() returned no segment name (psql unreachable inside the container?)'
             : probe.status === 'fail:no-lineage'
               ? 'walg-env.sh could not read the database system identifier, so the node cannot name its archive folder'
-              : `unrecognized probe output: ${probeRaw.slice(0, 300)}`;
+              : probe.status === 'fail:no-role'
+                ? 'the node resolved as PRIMARY has no wal-g role file (or an unknown word in it): wal-archive.sh holds every segment, so nothing is being archived'
+                : `unrecognized probe output: ${probeRaw.slice(0, 300)}`;
     return [
       fail('backup_walg_wal_archived', `WAL-switch probe did not close a segment — ${why}`, {
         probeStatus: probe.status,

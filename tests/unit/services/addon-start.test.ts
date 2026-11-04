@@ -2,6 +2,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -12,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { afterEach, describe, expect, it } from 'vitest';
+import { WALG_ROLE_PARSE_SH } from '../../../src/lib/deploy/walg-role.js';
 import {
   ADDON_JOB_SCRIPT,
   ADDON_SERVICES_SCRIPT,
@@ -149,18 +151,30 @@ function tempDir() {
 }
 
 describe('addon-services.sh', () => {
-  const run = (env: string | null) => {
+  /** `role`: the node's role file content (null: no file); `env`: a `.env` it must ignore. */
+  const run = (role: string | null, env: string | null = null) => {
     const dir = tempDir();
     writeFileSync(join(dir, ADDON_SERVICES_SCRIPT), renderAddonServicesScript(['grafana', 'n8n']));
+    if (role !== null) {
+      mkdirSync(join(dir, '.vibecarbon-role'));
+      writeFileSync(join(dir, '.vibecarbon-role', 'walg-role'), role);
+    }
     if (env !== null) writeFileSync(join(dir, '.env'), env);
     return execFileSync('sh', [ADDON_SERVICES_SCRIPT], { cwd: dir, encoding: 'utf-8' });
   };
   it('lists the deferred services on a primary or single server', () => {
     expect(run(null)).toBe('grafana\nn8n\n');
-    expect(run('WALG_ROLE=primary\n')).toBe('grafana\nn8n\n');
+    expect(run('primary\n')).toBe('grafana\nn8n\n');
   });
   it('lists nothing on a compose-ha standby (whole-stack up, as today)', () => {
-    expect(run('WALG_ROLE="standby"\n')).toBe('');
+    expect(run('standby\n')).toBe('');
+  });
+  it('reads the role file through the shared fragment, never .env', () => {
+    const script = renderAddonServicesScript(['n8n']);
+    expect(script).toContain(WALG_ROLE_PARSE_SH);
+    expect(script).not.toContain('.env');
+    expect(run('primary\n', 'WALG_ROLE=standby\n')).toBe('grafana\nn8n\n');
+    expect(run('standby\n', 'WALG_ROLE=primary\n')).toBe('');
   });
 });
 

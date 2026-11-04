@@ -73,6 +73,8 @@ describe('dbPrivateIp is required (no 10.0.1.2 fallback)', () => {
     await expect(
       reseedStandbyFromPrimary('203.0.113.20', '/tmp/nonexistent-test-key', {
         standbyDbIp: '203.0.113.21',
+        primaryIp: '203.0.113.10',
+        envName: 'prod',
       }),
     ).rejects.toThrow(/standbyDbPrivateIp.*required/i);
   });

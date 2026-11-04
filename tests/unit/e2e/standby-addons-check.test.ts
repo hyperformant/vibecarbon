@@ -4,12 +4,11 @@
  * add-ons on; no SSH is involved, the remote is injected).
  */
 import { describe, expect, it } from 'vitest';
-import type { IncarnationRead, RemoteRun } from '../../e2e/checks/ha-integrity.js';
+import type { RemoteRun } from '../../e2e/checks/ha-integrity.js';
 import {
   buildN8nKeyFingerprintCommand,
   checkN8nKeyShared,
   checkPromotedAddonsReady,
-  checkPromotedDbNotRecreated,
   checkPromotedPrimaryOnlyRunning,
   checkStandbyPrimaryOnlyAbsent,
   enabledAddons,
@@ -168,36 +167,6 @@ describe('promoted_primary_only_running', () => {
     expect((await checkPromotedPrimaryOnlyRunning({ ...base, primaryIp: null })).status).toBe(
       'fail',
     );
-  });
-});
-
-describe('promoted_db_not_recreated', () => {
-  const read = (id: string, startedAt = 't0'): IncarnationRead => ({
-    ok: true,
-    incarnation: { id, startedAt },
-  });
-  const bad: IncarnationRead = { ok: false, error: 'db is not running' };
-  const opts = { features: FEATURES, ip: IP };
-  it('passes on the same container id (a changed start time alone is not a recreate)', () => {
-    expect(
-      checkPromotedDbNotRecreated({ ...opts, before: read('a'), after: read('a', 't1') }).status,
-    ).toBe('pass');
-  });
-  it('fails on a different id and on an unread side', () => {
-    const r = checkPromotedDbNotRecreated({ ...opts, before: read('a'), after: read('b') });
-    expect(r.status).toBe('fail');
-    expect(r.errorMessage).toContain('a -> b');
-    expect(checkPromotedDbNotRecreated({ ...opts, before: bad, after: read('a') }).status).toBe(
-      'fail',
-    );
-    expect(checkPromotedDbNotRecreated({ ...opts, before: read('a'), after: bad }).status).toBe(
-      'fail',
-    );
-  });
-  it('skips with no primary-only add-on enabled', () => {
-    expect(
-      checkPromotedDbNotRecreated({ features: [], ip: IP, before: bad, after: bad }).status,
-    ).toBe('skip');
   });
 });
 

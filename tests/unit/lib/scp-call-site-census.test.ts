@@ -2,6 +2,7 @@
  * Census of the "scp outside the transient-retry wrapper" class (2026-08-11).
  *
  * The failure: a hetzner/compose-ha warm deploy died at step merge-walg-role
+ * (since renamed write-node-roles)
  * because `mergeRemoteDotenv`'s scp hit `Connection timed out during banner
  * exchange` exactly once. SSH to the same host worked seconds before and
  * after. The `ssh` calls on either side of that copy were already retrying

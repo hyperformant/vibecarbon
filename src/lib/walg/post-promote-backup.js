@@ -10,7 +10,7 @@
  * (census: tests/unit/walg/post-promote-backup-census.test.ts).
  *
  * Where it runs, on every site: after the RTO-critical steps (DNS flip,
- * health, add-on starts), after the WALG_ROLE move (a node still reading
+ * health, add-on starts), after the wal-g role move (a node still reading
  * standby skips the push) and after the save that clears
  * ha.failoverInFlight. On a restore, after the CLI retired `.vc-prev`
  * (RETIRE_PREVIOUS_SH + REMOVE_DISCARD_SH): wal-g cannot exclude a path from

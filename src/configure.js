@@ -1559,6 +1559,29 @@ export async function runConfigureCicd(envName) {
     process.exit(1);
   }
 
+  // Template lockstep, k8s only: the GitOps workflow and Flux apply the
+  // project's k8s manifests to the cluster as they are, and this CLI moves the
+  // wal-g role through a file those manifests' scripts parse. A scaffold from
+  // before that file reads a role env this CLI no longer sets. Checked before
+  // Stage 1, which installs the workflow that applies them.
+  {
+    const { isK8sTier, resolveTier } = await import('./lib/deploy/tier-registry.js');
+    // An unknown deployMode is not a k8s env; the mode check below speaks for it.
+    let tier = null;
+    try {
+      tier = resolveTier(envConfig);
+    } catch {}
+    if (tier && isK8sTier(tier)) {
+      const { assertScaffoldSupportsRoleFile } = await import('./lib/deploy/preflight.js');
+      try {
+        assertScaffoldSupportsRoleFile(cwd, tier);
+      } catch (err) {
+        p.log.error(err.message);
+        process.exit(1);
+      }
+    }
+  }
+
   // Stage 1 runs before the mode is consulted, because it is worth doing in
   // every mode. Deciding on Flux first is what used to turn a Compose user's
   // reasonable command into a hard failure for a feature they already had.

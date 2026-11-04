@@ -9,9 +9,6 @@
  *   - promoted_primary_only_running compose-ha after a promotion: the promoted
  *                                    node runs every promotion service (State
  *                                    running; a restarting one does not pass).
- *   - promoted_db_not_recreated     compose-ha after a promotion: the db
- *                                    container id read on the standby before
- *                                    the failover equals the one after.
  *   - n8n_key_shared                HA, n8n enabled: both nodes/clusters hand n8n the
  *                                    same N8N_ENCRYPTION_KEY (SHA-256 fingerprints
  *                                    computed remotely; the value never leaves).
@@ -38,13 +35,7 @@ import {
   k8sFailoverAddonWorkloads,
 } from '../../../src/lib/services/standby-policy.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
-import {
-  defaultRun,
-  fail,
-  type IncarnationRead,
-  missingHandle,
-  type RemoteRun,
-} from './ha-integrity.js';
+import { defaultRun, fail, missingHandle, type RemoteRun } from './ha-integrity.js';
 
 const KUBECTL = 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n vibecarbon';
 const PROBE_DONE = 'PROBE_DONE';
@@ -186,37 +177,6 @@ export async function checkPromotedPrimaryOnlyRunning(
     );
   }
   return { checkName, status: 'pass', details: { primaryIp: opts.primaryIp, services } };
-}
-
-/** promoted_db_not_recreated: promotion kept the standby's db container (same id). */
-export function checkPromotedDbNotRecreated(opts: {
-  features: readonly string[];
-  ip: string | null;
-  /** The standby's db read before the failover. */
-  before: IncarnationRead;
-  /** The same node's db read after the failover. */
-  after: IncarnationRead;
-}): VerificationResult {
-  const checkName = 'promoted_db_not_recreated';
-  if (composePromotionServices(enabledAddons(opts.features)).length === 0) {
-    return skip(checkName, NO_PRIMARY_ONLY);
-  }
-  const { ip, before, after } = opts;
-  if ('error' in before) {
-    return fail(checkName, `could not read the db container before the failover: ${before.error}`);
-  }
-  if ('error' in after) {
-    return fail(checkName, `could not read the db container after the failover: ${after.error}`);
-  }
-  const details = { ip, before: before.incarnation, after: after.incarnation };
-  if (before.incarnation.id !== after.incarnation.id) {
-    return fail(
-      checkName,
-      `promotion recreated the db container on ${ip} (${before.incarnation.id} -> ${after.incarnation.id})`,
-      details,
-    );
-  }
-  return { checkName, status: 'pass', details };
 }
 
 /** Deployment names with readyReplicas >= 1 from `kubectl get deployments -o json`; null if unparseable. */

@@ -151,7 +151,6 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
       return '';
     },
     demoteComposeWalgRole: async () => true,
-    restoreComposeWalgRole: async () => ({ ok: true }),
   };
 });
 
@@ -210,6 +209,10 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
       // The real argv contract (tests/_shared/ssh-contract.ts).
       const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
       assertSshRunArgv(argv);
+      // The replacement's wal-g role write reads back the role it wrote.
+      const { roleWriteOf } = await import('../helpers/scale-cutover-stub.js');
+      const role = roleWriteOf(argv);
+      if (role) return `WALG_ROLE_FILE=${role}`;
       const script = argv[2] ?? '';
       if (script.includes('echo present')) {
         h.events.push(`tls:check:${ip}`);

@@ -49,8 +49,12 @@ import {
   recordSystemIdentifier as realRecordSystemIdentifier,
   swappedSinceLastDeploy,
 } from './lib/deploy/failover-guard.js';
+import { assertScaffoldSupportsRoleFile } from './lib/deploy/preflight.js';
 import {
+  assertLiveDbGuardSupportsReseed,
+  DbGuardMissingError,
   k8sPsqlRunner,
+  ReseedStageBusyError,
   ensureReplicationSlot as realEnsureReplicationSlot,
   readK8sReplicationState as realReadK8sReplicationState,
   reseedStandbyFromPrimary as realReseedStandbyFromPrimary,
@@ -58,6 +62,12 @@ import {
   verifyStreaming,
   watchDbAttach,
 } from './lib/deploy/replication.js';
+import { resolveTier } from './lib/deploy/tier-registry.js';
+import {
+  composeDbMountsWalgRoleDir,
+  podMountsWalgRoleDir,
+  WALG_ROLE_DIR,
+} from './lib/deploy/walg-role.js';
 import { wgIpOf } from './lib/deploy/wireguard.js';
 import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
@@ -100,7 +110,7 @@ import {
 import {
   assertRestoredPrimaryWritable,
   clearRestoreMarker,
-  setRestoreMarker,
+  setRestoreMarker as realSetRestoreMarker,
 } from './lib/walg/restore-marker.js';
 
 // Moved to src/lib/walg/restore-marker.js (shared with deploy -restore);
@@ -366,6 +376,10 @@ export async function run(args, deps = {}) {
       // A compose scale stopped mid-cutover: the config may name the server
       // the database is moving away from.
       assertNoScaleCutoverInFlight({ environment: envName, envConfig, action: 'restore' });
+      // Template lockstep: the restore reseeds through the project's db
+      // scripts and the wal-g role file; a scaffold from before that file
+      // reads a role env this CLI no longer sets.
+      assertScaffoldSupportsRoleFile(process.cwd(), resolveTier(envConfig));
     } catch (err) {
       p.log.error(err.message);
       process.exit(1);
@@ -534,6 +548,21 @@ export async function run(args, deps = {}) {
     process.exit(1);
   }
 
+  // The live db checks, before any confirmation: a db that predates the live
+  // wal-g role (or, on k8s-ha, a standby without in-place reseeds) is refused
+  // here, so nobody types a prod confirmation for a restore that cannot run.
+  // Reads only; the runners skip them (liveChecked).
+  try {
+    if (isCompose) {
+      await assertComposeRestoreTargets({ envName, envConfig, serverIp, sshKeyPath, projectName });
+    } else {
+      await assertK8sRestoreTargets({ envName, envConfig, serverIp, sshKeyPath });
+    }
+  } catch (err) {
+    p.log.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+
   // Confirmation gates
   p.log.warn('This will overwrite the current database!');
   p.log.message(`  ${c.dim('Environment'.padEnd(14))} ${c.bold(envName)}`);
@@ -602,6 +631,7 @@ export async function run(args, deps = {}) {
         serverIp,
         sshKeyPath,
         envConfig,
+        liveChecked: true,
       });
     } else {
       await runK8sRestore({
@@ -613,6 +643,7 @@ export async function run(args, deps = {}) {
         serverIp,
         sshKeyPath,
         envConfig,
+        liveChecked: true,
       });
     }
   } catch (error) {
@@ -745,6 +776,101 @@ function assertResolvedBase(base, lineage) {
   }
 }
 
+/**
+ * compose: refuse, before anything changes, a db container that predates the
+ * live wal-g role. The restored primary archives (and the re-seeded standby
+ * skips) by the role file its db container binds at WALG_ROLE_DIR; one from
+ * before that bind never sees it. The same probe compose failover runs, on
+ * the restore target and, on compose-ha, the standby. A container that
+ * cannot be inspected (null) is left alone. Reads only; run() calls it before
+ * its confirmation, runComposeRestore for any other caller.
+ */
+export async function assertComposeRestoreTargets({
+  envName,
+  envConfig = {},
+  serverIp,
+  sshKeyPath,
+  projectName,
+  probeRoleBind = composeDbMountsWalgRoleDir,
+}) {
+  const probeNodes = [serverIp];
+  if (envConfig.deployMode === 'compose-ha') {
+    const standbyIp = envConfig.servers?.find((sv) => sv.role === 'standby')?.ip;
+    if (standbyIp && standbyIp !== serverIp) probeNodes.push(standbyIp);
+  }
+  for (const ip of probeNodes) {
+    if ((await probeRoleBind({ ip, sshKeyPath, projectName })) === false) {
+      throw new Error(
+        `Restore refused: the db on ${ip} predates the live wal-g role (no ${WALG_ROLE_DIR} bind ` +
+          `on ${projectName}-db); run \`vibecarbon deploy ${envName}\` once (one db restart), ` +
+          'then retry. Nothing was changed.',
+      );
+    }
+  }
+}
+
+/**
+ * k8s: refuse, before anything changes, live db pods that cannot take the
+ * restore and what follows it. Reads only; run() calls it before its
+ * confirmation, runK8sRestore for any other caller.
+ *   - The restored primary archives by the wal-g role file, which only a pod
+ *     that mounts WALG_ROLE_DIR reads (the compose restore probes the bind).
+ *     A pod that cannot be read is left alone.
+ *   - k8s-HA: the standby is reseeded in place after the restore, behind
+ *     db-guard.sh in its RUNNING db pod (D1). A standby from before that
+ *     refuses here, before the primary is touched (C11). A guard that fails
+ *     for another reason (the standby unreachable, its intent) does not hold
+ *     the primary's restore back: the reseed's own guard refuses it later,
+ *     before anything on the standby moves, and the standby is marked
+ *     unproven.
+ */
+export async function assertK8sRestoreTargets({
+  envName,
+  envConfig = {},
+  serverIp,
+  sshKeyPath,
+  readPrimaryDbPod = () =>
+    sshKubectl(serverIp, sshKeyPath, ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'], {
+      timeout: 30_000,
+    }),
+  assertStandbyReseedCapable = () => {
+    const standbyIp = identifyServers(envName, envConfig, {})?.standby?.ip;
+    if (!standbyIp) return undefined; // the reseed step names a missing standby
+    return assertLiveDbGuardSupportsReseed(
+      (argv, opts) => sshKubectl(standbyIp, sshKeyPath, argv, opts),
+      { envName },
+    );
+  },
+}) {
+  let primaryPod = null;
+  try {
+    primaryPod = JSON.parse(String(await readPrimaryDbPod()));
+  } catch {
+    primaryPod = null;
+  }
+  if (primaryPod && !podMountsWalgRoleDir(primaryPod)) {
+    throw new Error(
+      `Restore refused: the db on ${serverIp} predates the live wal-g role (no ${WALG_ROLE_DIR} ` +
+        `mount on ${DB_POD}); run \`vibecarbon deploy ${envName}\` once (one db restart), then retry. ` +
+        'Nothing was changed.',
+    );
+  }
+  const isK8sHA = !!(envConfig.ha?.enabled || envConfig.ha === true || envConfig.secondaryRegion);
+  if (isK8sHA) {
+    try {
+      await assertStandbyReseedCapable();
+    } catch (err) {
+      if (err instanceof DbGuardMissingError) {
+        throw new Error(`Restore refused: ${err.message}. Nothing was changed.`);
+      }
+      p.log.warn(
+        `Could not confirm the standby takes an in-place reseed (${err instanceof Error ? err.message : String(err)}); ` +
+          'restoring the primary, the standby reseed checks again.',
+      );
+    }
+  }
+}
+
 // compose restore is wal-g-based (S3 pull, no file transfer). Mirrors
 // runK8sRestore's structure: reject local-file sources and a missing base,
 // call restoreCompose with the resolved base (it stages, swaps, waits for
@@ -787,6 +913,10 @@ export async function runComposeRestore({
       envConfig,
       exec: composePsqlRunner(serverIp, sshKeyPath, `/opt/${projectName}`),
     }),
+  // The live wal-g role bind on a db container (compose/ha.js failover's probe).
+  probeRoleBind = composeDbMountsWalgRoleDir,
+  // run() already ran assertComposeRestoreTargets, before its confirmation.
+  liveChecked = false,
 }) {
   assertResolvedBase(base, lineage);
   // Also here, for every caller: see run().
@@ -799,6 +929,17 @@ export async function runComposeRestore({
   }
 
   const { target, recoveryConf } = restorePointOf(chosenSource, lineage);
+
+  if (!liveChecked) {
+    await assertComposeRestoreTargets({
+      envName,
+      envConfig,
+      serverIp,
+      sshKeyPath,
+      projectName,
+      probeRoleBind,
+    });
+  }
 
   s.start(`Restoring ${base.name} via wal-g (app will be temporarily unavailable)`);
   // restoreCompose proves the restored database writable (assertWritable)
@@ -1040,6 +1181,13 @@ export async function runK8sRestore({
   verifySleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   // watchDbAttach's poll interval on the db bounce (test seam).
   attachWatchPollMs,
+  setRestoreMarker = realSetRestoreMarker,
+  // The live checks (assertK8sRestoreTargets); their defaults read the
+  // clusters the config names.
+  assertStandbyReseedCapable,
+  readPrimaryDbPod,
+  // run() already ran assertK8sRestoreTargets, before its confirmation.
+  liveChecked = false,
 }) {
   assertResolvedBase(base, lineage);
   // Also here, for every caller: see run().
@@ -1059,6 +1207,20 @@ export async function runK8sRestore({
     where: `${DB_POD}'s data volume`,
     warn: (msg) => p.log.warn(msg),
   });
+
+  // 0b. Before anything changes, the live db pods must take what follows
+  //     (assertK8sRestoreTargets; run() ran it before its confirmation).
+  if (!liveChecked) {
+    await assertK8sRestoreTargets({
+      envName,
+      envConfig,
+      serverIp,
+      sshKeyPath,
+      readPrimaryDbPod,
+      assertStandbyReseedCapable,
+    });
+  }
+  const isK8sHA = !!(envConfig.ha?.enabled || envConfig.ha === true || envConfig.secondaryRegion);
 
   const rolloutTimeoutS = restoreRolloutTimeoutS(base.sizeBytes);
   s.start(`Restoring ${base.name} via wal-g (app will be temporarily unavailable)`);
@@ -1218,7 +1380,6 @@ export async function runK8sRestore({
   // primitive (the same hardened staged-basebackup+atomic-swap the failover path
   // uses), then confirm streaming from the restored primary. Fail loudly if it
   // can't complete — never silently leave a diverged standby.
-  const isK8sHA = !!(envConfig.ha?.enabled || envConfig.ha === true || envConfig.secondaryRegion);
   if (isK8sHA) {
     // Every throw below leaves a standby that was not reseeded and verified:
     // mark it unproven first (replication degraded, identifier dropped), so the
@@ -1267,6 +1428,9 @@ export async function runK8sRestore({
       try {
         reseedResult = await reseedStandbyFromPrimary(standbyIp, sshKeyPath, {
           standbyDbIp,
+          // The source and the env whose fresh config must still name both.
+          primaryIp: servers?.primary?.ip,
+          envName,
           // The re-seed dials the standby's LOCAL WireGuard relay (private IP :
           // gateway port) — the deploy-time transport, unchanged by a restore.
           standbyDbPrivateIp: servers?.standby?.dbPrivateIp,
@@ -1276,6 +1440,16 @@ export async function runK8sRestore({
         });
       } catch (err) {
         s.stop('Standby re-seed failed');
+        if (err instanceof ReseedStageBusyError) {
+          // Terminal, never retried. The reseed is what reruns, through
+          // deploy; a rerun of restore would restore the primary again.
+          throw new Error(
+            `HA restore: the primary was restored and is serving, but the standby re-seed was ` +
+              `refused: ${err.message}\nNothing on the standby moved. Once that earlier stage has ` +
+              `finished, re-seed the standby with \`vibecarbon deploy ${envName}\` (do not rerun the ` +
+              'restore: it would restore the primary again).',
+          );
+        }
         throw new Error(
           `HA restore: the primary was restored and is serving, but re-seeding the standby ` +
             `FAILED: ${err.message}\nThe standby has a DIVERGED timeline and is NOT replicating, ` +

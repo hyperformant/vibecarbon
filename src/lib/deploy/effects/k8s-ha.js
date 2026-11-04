@@ -7,7 +7,7 @@
  * (`deploy.ha.k8s.*`), same console diagnostics, same warn/throw/gate
  * semantics. Effects read from and mutate a shared multi-cluster `ctx`.
  *
- * The heavily-hardened WireGuard replication transport + scale-to-zero reseed
+ * The heavily-hardened WireGuard replication transport + in-place reseed
  * live in `setupReplication` (../k8s/ha/index.js) and the k3s single-cluster
  * pipeline lives in `deployK3s` (../k8s/k3s.js) — BOTH are called here as
  * BLACK BOXES (unchanged). This file only expresses deployK8sHA's phase
@@ -39,7 +39,7 @@ import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { spinner } from '../../cli/progress.js';
 import { c, link } from '../../colors.js';
-import { updateProjectConfig } from '../../config.js';
+import { loadProjectConfig, updateProjectConfig } from '../../config.js';
 import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../../dns-provider.js';
 import { summarizePulumiError } from '../../iac/index.js';
 import { perfAsync } from '../../perf.js';
@@ -55,6 +55,7 @@ import {
 } from '../k8s/ha/index.js';
 import { deployK3s } from '../k8s/k3s.js';
 import { assertReplicationStreamingOrDegraded } from '../replication.js';
+import { clearDiscardableStandby, readDiscardableStandby } from '../standby-lineage.js';
 import { k8sStandbyTypes } from '../standby-types.js';
 import { StateTracker } from '../state.js';
 import { generateSSHKeyPair } from '../utils.js';
@@ -668,7 +669,7 @@ async function haK8sOpenReplicationFirewall(ctx) {
 /**
  * Configure PostgreSQL replication (must run after both clusters finish —
  * replication restarts postgres pods). Calls setupReplication (the hardened WG
- * transport + scale-to-zero reseed) as a black box and records its verdict +
+ * transport + the in-place reseed) as a black box and records its verdict +
  * a folded last-state hint for the shared hard-gate in verify-streaming.
  */
 async function haK8sConfigureReplication(ctx) {
@@ -693,6 +694,9 @@ async function haK8sConfigureReplication(ctx) {
   let replStreaming = false;
   let replLastState = '';
   let replError = null;
+  // The standby copy a `failover -abort` gave up, as it is on disk now: the
+  // reseed's lineage check overwrites exactly that copy (standby-lineage.js).
+  const discardableStandby = readDiscardableStandby(options.environment, loadProjectConfig);
   try {
     const replResult = await setupReplication({
       primaryIp: primaryResult.masterIp,
@@ -704,7 +708,15 @@ async function haK8sConfigureReplication(ctx) {
       sshKeyPath: sharedSshKeyPath,
       transportPrepared: ctx.transportPrepared === true,
       primaryConfigured: ctx.primaryReplicationConfigured === true,
+      envName: options.environment,
+      discardableStandby,
     });
+    // The swap replaced the standby's data directory, or the standby streams
+    // from the primary (verified, with or without a reseed): either way the
+    // copy the abort gave up is gone, and so is the record that named it.
+    if (discardableStandby && (replResult.reseeded || replResult.streaming)) {
+      clearDiscardableStandby(options.environment);
+    }
     replStreaming = replResult.streaming;
     replLastState = replResult.lastState || '';
     // Set only on verified streaming; the deploy persists it as

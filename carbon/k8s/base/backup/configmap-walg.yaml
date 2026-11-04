@@ -1,8 +1,9 @@
 # Fault-tolerant WAL-archive wrapper mounted into the db container at
 # /etc/postgresql/wal-archive.sh (see k8s/base/db/statefulset.yaml). Postgres'
 # archive_command invokes it as `bash /etc/postgresql/wal-archive.sh %p` (a
-# startup flag on the StatefulSet). wal-g reads AWS_* / WALG_ROLE from the db
-# container's env and WALG_S3_PREFIX from walg-env.sh. The StatefulSet's pod
+# startup flag on the StatefulSet). wal-g reads AWS_* from the db container's
+# env, and WALG_S3_PREFIX and the wal-g role (VC_WALG_ROLE, from the role file
+# /var/lib/vibecarbon/role/walg-role) from walg-env.sh. The StatefulSet's pod
 # template carries this file's sha, so a changed script rolls the db pod on the
 # next deploy.
 #
@@ -13,20 +14,31 @@
 # folder. Mounted at /etc/postgresql/walg-env.sh in the db container and the
 # walg-restore init.
 #
-# Both script bodies below are BYTE-IDENTICAL copies of
-# carbon/volumes/db/wal-archive.sh and carbon/volumes/db/walg-env.sh (the
-# compose mounts), indented 4 spaces into the block scalars. That is not a
+# A third key, db-guard.sh, is the db container's entrypoint (the StatefulSet's
+# `command`, mounted at /usr/local/bin/db-guard.sh), exactly as compose runs
+# it: it refuses to boot over an interrupted restore, applies the wal-g role
+# intent (ConfigMap vibecarbon-db-role) to the role file, and finishes a
+# pending in-place standby reseed before handing over to the image's
+# db-entrypoint.sh.
+#
+# All three script bodies below are BYTE-IDENTICAL copies of
+# carbon/volumes/db/wal-archive.sh, carbon/volumes/db/walg-env.sh and
+# carbon/volumes/db/db-guard.sh (the compose mounts), indented 4 spaces into
+# the block scalars. That is not a
 # convention any more — tests/unit/deploy/walg-archive-script-parity.test.ts
 # dedents this block and compares it to the file, and fails the build on any
 # divergence. It used to be only a comment, and the two drifted: this copy lost
-# BOTH the WALG_ROLE write-guard and the pg_is_in_recovery() gate, so on k8s a
+# BOTH the wal-g write-guard and the pg_is_in_recovery() gate, so on k8s a
 # standby (or a not-yet-reseeded standby that is briefly its own primary) pushed
 # WAL straight into the primary's canonical prefix.
 #
-# Same retry + exit-0 semantics as the compose copy: a persistent S3 outage
-# degrades PITR for the failed segment but keeps the DB up instead of pinning
-# pg_wal and filling the disk (RCA prod-1 2026-05-26). Every guard below exits
-# 0 for the same reason — a non-zero archive_command is what fills the disk.
+# Same exit semantics as the compose copy: only a node whose role file says
+# primary archives; standby skips (exit 0); a missing or unknown role, a retired
+# node, a fenced prefix and a failed push hold the segment (exit 1: postgres
+# keeps it and retries). A segment is given up (exit 0) two ways only: disk
+# pressure, with a durable gap record, and never while the role is unknown; and
+# an overwrite refusal, where the archive already holds that segment name with
+# other bytes and no retry can change it.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -56,6 +68,10 @@ data:
     #   4. Refuses (exit 1) on a node a failover retired: its PGDATA carries the
     #      vibecarbon-retired marker, or the backup prefix's fence object names
     #      its database on a newer timeline.
+    #   5. Archives only on a node whose wal-g role file (walg-env.sh reads it
+    #      into VC_WALG_ROLE) says primary. standby skips (exit 0); a missing,
+    #      empty or unknown role holds the segment (exit 1), even under disk
+    #      pressure: the role guard sits before every push and every drop.
     #
     # THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR BOTH DEPLOY TIERS. compose mounts
     # it directly; k8s ships a byte-identical copy in the vibecarbon-wal-archive
@@ -92,18 +108,6 @@ data:
         exit 1
     fi
 
-    # WRITE-GUARD (finding #3): a standby node must NEVER push WAL into the single
-    # canonical WALG_S3_PREFIX. WALG_ROLE=standby is set on the standby's db env
-    # (compose .env / k8s db/statefulset.yaml). This closes the bring-up window
-    # that the pg_is_in_recovery() gate below can't: a freshly-provisioned standby
-    # db can briefly be an INDEPENDENT primary (not yet in recovery) before it is
-    # reseeded — WALG_ROLE=standby stops it archiving into the primary's stream even
-    # then. Exit 0 (not error) so PG recycles the segment instead of pinning WAL.
-    if [ "${WALG_ROLE:-primary}" = "standby" ]; then
-        echo "wal-archive: WALG_ROLE=standby — skipping archive of '${WAL_PATH}' (only the primary writes to the canonical prefix)." >&2
-        exit 0
-    fi
-
     # THIS DATABASE'S ARCHIVE FOLDER: walg-env.sh turns WALG_S3_PREFIX_BASE into
     # WALG_S3_PREFIX, the folder of this database's lineage (its system
     # identifier), so a recreated database never archives into, or fences, the
@@ -126,6 +130,23 @@ data:
         ""|s3:///*)
             echo "wal-archive: no backup target (WALG_S3_PREFIX='${WALG_S3_PREFIX:-}'), not archiving '${WAL_PATH}'." >&2
             exit 0
+            ;;
+    esac
+
+    # WRITE-GUARD (src/lib/deploy/walg-role.js): only a node whose role file says
+    # primary archives. standby is an explicit skip (exit 0: a standby's segments
+    # belong to no backup). No role, or one that is not a word we know, HOLDS the
+    # segment (exit 1): postgres keeps it and retries, pg_stat_archiver turns
+    # status red, and nothing is lost while the CLI writes the role.
+    case "${VC_WALG_ROLE:-}" in
+        primary) ;;
+        standby)
+            echo "wal-archive: wal-g role standby, skipping archive of '${WAL_PATH}' (only the primary writes the lineage prefix)." >&2
+            exit 0
+            ;;
+        *)
+            echo "WAL_ARCHIVE_ROLE_UNKNOWN: no wal-g role in ${VC_WALG_ROLE_FILE:-/var/lib/vibecarbon/role/walg-role}; keeping '${WAL_PATH}', postgres retries it (vibecarbon deploy writes the role)." >&2
+            exit 1
             ;;
     esac
 
@@ -285,6 +306,24 @@ data:
     # it at /etc/postgresql/walg-env.sh; k8s ships a byte-identical copy in the
     # vibecarbon-wal-archive ConfigMap (carbon/k8s/base/backup/configmap-walg.yaml),
     # pinned by tests/unit/deploy/walg-archive-script-parity.test.ts.
+    # The wal-g WRITE-GUARD role (src/lib/deploy/walg-role.js WALG_ROLE_PARSE_SH,
+    # carried verbatim): one word in a file OUTSIDE PGDATA (k8s: a sibling subPath
+    # of the db volume; compose: a host directory bound read-only), so
+    # pg_basebackup never copies it into a standby. Exactly "primary" or
+    # "standby"; anything else, a missing file or a symlink is no role, which
+    # every writer of WAL or base backups treats as "do not write".
+    # Test seams, for the script tests only: VC_WALG_ROLE_FILE here (the file),
+    # VC_WALG_ROLE_DIR in db-guard.sh (its directory).
+    vc_walg_role_file="${VC_WALG_ROLE_FILE:-/var/lib/vibecarbon/role/walg-role}"
+    VC_WALG_ROLE=""
+    if [ -f "$vc_walg_role_file" ] && [ ! -L "$vc_walg_role_file" ]; then
+        case "$(cat "$vc_walg_role_file" 2>/dev/null)" in
+            primary) VC_WALG_ROLE=primary ;;
+            standby) VC_WALG_ROLE=standby ;;
+        esac
+    fi
+    export VC_WALG_ROLE
+    unset vc_walg_role_file
     vc_walg_base="${WALG_S3_PREFIX_BASE:-}"
     if [ -z "$vc_walg_base" ]; then
         WALG_S3_PREFIX=""
@@ -313,3 +352,152 @@ data:
     fi
     export WALG_S3_PREFIX
     unset vc_walg_base vc_walg_pgdata vc_walg_sysid
+  db-guard.sh: |
+    #!/bin/sh
+    # vc-reseed-protocol: 1
+    # Entrypoint of the db container on both tiers: refuse to boot over an
+    # interrupted restore, apply the k8s wal-g role intent, finish a pending
+    # in-place standby reseed, then hand over to the image's own entrypoint
+    # (db-entrypoint.sh) unchanged.
+    #
+    # Line 2 is the reseed protocol marker: the CLI greps it in the RUNNING pod's
+    # mounted copy before it stops postgres for an in-place reseed.
+    #
+    # `vibecarbon restore` fetches the backup into a staging dir inside PGDATA and
+    # only then swaps it in, with .vc-restore-in-progress in PGDATA for the length
+    # of the swap. A boot that finds the marker would start postgres on a half
+    # moved data directory, or initdb an empty one over it. So it stops and says
+    # what to do; rerunning the restore settles the swap. The restore's own
+    # container sets RESTORE_BACKUP and passes through.
+    #
+    # Invoked as `sh /usr/local/bin/db-guard.sh` (carbon/docker-compose.yml, and
+    # the db StatefulSet's `command`, k8s/base/db/statefulset.yaml), so the file
+    # mode of the scaffold copy or the ConfigMap mount does not matter. The k8s
+    # copy is the `db-guard.sh` key of the vibecarbon-wal-archive ConfigMap
+    # (k8s/base/backup/configmap-walg.yaml), byte-identical to this file
+    # (tests/unit/deploy/walg-archive-script-parity.test.ts).
+    set -eu
+
+    PGDATA="${PGDATA:-/var/lib/postgresql/data}"
+
+    if [ -z "${RESTORE_BACKUP:-}" ] && [ -e "$PGDATA/.vc-restore-in-progress" ]; then
+      echo "restore interrupted; rerun vibecarbon restore" >&2
+      exit 1
+    fi
+
+    # k8s wal-g role intent (ConfigMap vibecarbon-db-role, src/lib/deploy/walg-role.js).
+    # Compose never sets it. Applied on every container start, so a db pod the CLI
+    # could not reach comes back with the role the CLI last recorded.
+    VC_ROLE_DIR="${VC_WALG_ROLE_DIR:-/var/lib/vibecarbon/role}"
+    if [ -n "${VC_WALG_ROLE_INTENT:-}" ] && [ -d "$VC_ROLE_DIR" ] && [ ! -L "$VC_ROLE_DIR" ]; then
+      chown 0:0 "$VC_ROLE_DIR" 2>/dev/null || true
+      chmod 0755 "$VC_ROLE_DIR"
+      case "$VC_WALG_ROLE_INTENT" in
+        primary|standby)
+          rm -f "$VC_ROLE_DIR/walg-role.tmp"
+          printf '%s\n' "$VC_WALG_ROLE_INTENT" > "$VC_ROLE_DIR/walg-role.tmp"
+          chmod 0644 "$VC_ROLE_DIR/walg-role.tmp"
+          sync
+          mv -f "$VC_ROLE_DIR/walg-role.tmp" "$VC_ROLE_DIR/walg-role"
+          sync
+          ;;
+        *)
+          echo "db-guard: VC_WALG_ROLE_INTENT is not primary or standby; removing the role file (no role: WAL is held)" >&2
+          rm -f "$VC_ROLE_DIR/walg-role"
+          ;;
+      esac
+    fi
+
+    # Pending in-place reseed (src/lib/deploy/replication.js reseedStandbyInPlace).
+    # A swap STARTS only on a standby (VC_WALG_ROLE_INTENT=standby) whose staged
+    # tree proves itself and carries the ready marker's attempt id. One already
+    # under way always finishes or rolls back: half way is no bootable tree.
+    # Every move fails the script (never skipped), and each phase checks it left
+    # nothing behind before the marker moves on, so a crash or a failed move at
+    # any point leaves the old tree or the whole new one, never a mix.
+    R_STAGE="$PGDATA/.vc-reseed"; R_READY="$PGDATA/.vc-reseed-ready"
+    R_MARK="$PGDATA/.vc-reseed-in-progress"; R_DONE="$PGDATA/.vc-reseeded-from"; R_DISC="$PGDATA/.vc-discard"
+    # A marker is replaced by rename between two syncs: every move before it is on
+    # disk before it, and it is on disk before the next move.
+    vc_put() { rm -f "$1.tmp"; printf '%s' "$2" > "$1.tmp"; sync; mv -f "$1.tmp" "$1"; sync; }
+    vc_cluster() { find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name '.vc-*'; }
+    if [ -e "$R_MARK" ] || [ -e "$R_READY" ] || [ -L "$R_MARK" ] || [ -L "$R_READY" ]; then
+      for f in "$R_MARK" "$R_READY" "$R_STAGE" "$R_DISC" "$PGDATA/.vc-restore.lock"; do
+        if [ -L "$f" ]; then echo "db-guard: $f is a symlink; refusing" >&2; exit 1; fi
+      done
+      exec 9>"$PGDATA/.vc-restore.lock"
+      flock -n 9 || { echo "db-guard: a restore holds $PGDATA/.vc-restore.lock; refusing" >&2; exit 75; }
+      state=""
+      if [ -e "$R_MARK" ]; then
+        state="$(cat "$R_MARK")"
+        case "$state" in
+          "out "?*|"in "?*) ;;
+          *) echo "db-guard: $R_MARK holds an unknown reseed state '$state'; refusing to boot (no tree is moved). The old cluster is in $PGDATA or $R_DISC: run vibecarbon restore, or move $R_DISC's entries back into $PGDATA and remove $R_MARK, $R_READY and $R_STAGE" >&2; exit 1 ;;
+        esac
+      fi
+      if [ -z "$state" ]; then
+        id="$(cat "$R_READY" 2>/dev/null || true)"
+        # A staged tree carries no .vc-* but its own id: pg_basebackup copies them
+        # from a source that was once a standby, and one moved in would clobber a
+        # marker or wedge the move. A find that fails counts as carrying one.
+        vc_extra="$(find "$R_STAGE" -mindepth 1 -maxdepth 1 -name '.vc-*' ! -name '.vc-reseed-id' 2>&1)" || vc_extra="unreadable"
+        if [ "${VC_WALG_ROLE_INTENT:-}" = standby ] && [ -n "$id" ] && [ -z "$vc_extra" ] \
+          && [ "$(cat "$R_STAGE/.vc-reseed-id" 2>/dev/null || true)" = "$id" ] \
+          && [ -f "$R_STAGE/PG_VERSION" ] && [ -f "$R_STAGE/standby.signal" ] \
+          && grep -q '^[[:space:]]*primary_conninfo' "$R_STAGE/postgresql.auto.conf" 2>/dev/null; then
+          rm -rf "$R_DISC"
+          vc_put "$R_MARK" "out $id"; state="out $id"
+        else
+          echo "db-guard: RESEED_REFUSED: no standby intent, or the staged tree does not prove itself (attempt '${id}'); booting the existing data directory" >&2
+          rm -rf "$R_STAGE"; rm -f "$R_READY" "$R_READY.tmp"
+        fi
+      fi
+      case "$state" in
+        "out "*)
+          id="${state#out }"
+          if [ ! -f "$R_STAGE/PG_VERSION" ]; then
+            if [ -d "$R_DISC" ]; then
+              find "$R_DISC" -mindepth 1 -maxdepth 1 | while IFS= read -r e; do mv "$e" "$PGDATA/" || exit 1; done
+              left="$(find "$R_DISC" -mindepth 1 -maxdepth 1)"
+              if [ -n "$left" ]; then echo "db-guard: $R_DISC still holds entries after the roll back; refusing" >&2; exit 1; fi
+              rmdir "$R_DISC"
+            fi
+            sync
+            rm -rf "$R_STAGE"; rm -f "$R_READY" "$R_MARK"
+            echo "db-guard: RESEED_ROLLED_BACK $id: staging incomplete, the previous data directory is back" >&2
+            state=""
+          else
+            mkdir -p "$R_DISC"
+            vc_cluster | while IFS= read -r e; do mv "$e" "$R_DISC/" || exit 1; done
+            left="$(vc_cluster)"
+            if [ -n "$left" ]; then echo "db-guard: the old cluster did not fully move to $R_DISC; refusing" >&2; exit 1; fi
+            vc_put "$R_MARK" "in $id"; state="in $id"
+          fi
+          ;;
+      esac
+      case "$state" in
+        "in "*)
+          id="${state#in }"
+          if [ -d "$R_STAGE" ]; then
+            find "$R_STAGE" -mindepth 1 -maxdepth 1 ! -name '.vc-reseed-id' | while IFS= read -r e; do mv "$e" "$PGDATA/" || exit 1; done
+            left="$(find "$R_STAGE" -mindepth 1 -maxdepth 1 ! -name '.vc-reseed-id')"
+            if [ -n "$left" ]; then echo "db-guard: $R_STAGE did not fully move in; refusing" >&2; exit 1; fi
+            rm -rf "$R_STAGE"
+          fi
+          if [ ! -f "$PGDATA/PG_VERSION" ]; then
+            echo "db-guard: reseed $id moved in no PG_VERSION; refusing to boot. The old cluster is in $R_DISC: run vibecarbon restore, or replace what the reseed moved into $PGDATA with $R_DISC's entries and remove $R_MARK and $R_READY" >&2
+            exit 1
+          fi
+          vc_put "$R_DONE" "$id"
+          rm -f "$R_READY" "$R_MARK"
+          echo "db-guard: RESEED_SWAPPED $id" >&2
+          ;;
+      esac
+      exec 9>&-
+    else
+      # A stage cut between its marker write and the rename leaves only the
+      # temp file: no marker, so nothing to swap. It goes as garbage.
+      rm -f "$R_READY.tmp"
+    fi
+
+    exec db-entrypoint.sh "$@"

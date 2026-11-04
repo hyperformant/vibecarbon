@@ -299,10 +299,18 @@ classes:
       live on the kept rig: a pod bounce did NOT heal it (fresh attach reused
       the stale record, both PVCs then wedged); deleting the VolumeAttachments
       forced a real ControllerPublishVolume and the pod went Ready in 150s.
-      Trigger amplitude is ours (the re-seed's four attach/detach transitions
-      on one volume in ~2 min) and is separately narrowed at the root by the
-      detach-settle waits (waitForPvDetach) at both churn points; the
-      recovery below covers the provider-side residual only. Recurred on a
+      Trigger amplitude was ours (the re-seed's four attach/detach
+      transitions on one volume in ~2 min). Root fix: every k8s-ha standby
+      re-seed (cold deploy, failover, restore) now runs in place through
+      reseedStandbyInPlace (src/lib/deploy/replication.js): postgres stops,
+      the kubelet restarts the container in the same pod, and db-guard.sh
+      swaps the staged tree in, so the db volume never detaches. The
+      helper-pod swap, its detach-settle waits and the VolumeAttachment
+      repair are deleted (census
+      tests/unit/deploy/no-helper-pod-reseed-census.test.ts). What stays is
+      watchDbAttach, a diagnosis and not a recovery: a db rollout wait that
+      sees the stale-attachment signature held for two minutes fails early
+      and by name, and nothing is repaired automatically. Recurred on a
       COLD k8s-ha deploy (DO e2e 2026-11-01, d4, main a159ff7): the primary
       db-0's first attach held, then configurePrimaryForReplication's
       hostPort `kubectl patch` recreated db-0 about a minute later, the
@@ -313,15 +321,7 @@ classes:
       into the db StatefulSet before its first apply on both HA roles
       (rendersReplicationHostPort, src/lib/deploy/k8s/k3s.js), so a cold
       deploy attaches the primary db volume exactly once.
-    sites:
-      - site: "src/lib/deploy/replication.js :: reseedStandbyFromPrimary rollout-wait stale-attachment repair"
-        detectable: false
-        notes: >-
-          one-shot signature-gated repair, not a retry ladder (the census
-          detector has no pattern for it): fires only when the rollout
-          timeout coincides with the mkfs-on-missing-device event signature
-          (STALE_ATTACH_EVENT_PATTERN); a timeout without the signature
-          rethrows untouched
+    sites: []
 
   - class: provider-provisioning-slowness
     attribution: external-asserted

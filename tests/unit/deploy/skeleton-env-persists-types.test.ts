@@ -54,6 +54,8 @@ vi.mock('../../../src/lib/deploy/delta.js', async (orig) => ({
 }));
 vi.mock('../../../src/lib/deploy/preflight.js', () => ({
   assertOperatorConfig: vi.fn(),
+  // The scaffold is current (preflight-role-file owns the stale-scaffold refusal).
+  assertScaffoldSupportsRoleFile: vi.fn(),
   checkDeployPrerequisites: vi.fn(),
   operatorCheckEnvs: () => [],
 }));

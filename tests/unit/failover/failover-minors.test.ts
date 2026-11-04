@@ -4,9 +4,10 @@
  * M1 compose: the role swap (which clears the journal) is saved right after
  *    the DNS verdict, before the TLS wait, so a crash during minutes of
  *    certificate issuance never leaves a finished failover looking mid-flight.
- * M2 compose: a resumed failover whose promoted db already RUNS
- *    WALG_ROLE=primary skips the db recreate (a needless restart of the new
- *    primary); the audit still runs.
+ * M2 compose: after the promote the wal-g role is only checked, never moved:
+ *    the arm wrote the role file before pg_promote (D2). The post-promote
+ *    step reads the role file and runs the audit; it writes nothing and
+ *    recreates nothing.
  * M3 k8s: a config without ha.primary / ha.standby is refused in preflight,
  *    before anything is written, instead of reaching the end of a promote
  *    where swapHaRoles could only warn and leave the journal set.
@@ -14,7 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { restoreComposeWalgRole } from '../../../src/lib/deploy/compose/ha.js';
+import { auditComposeWalgRole } from '../../../src/lib/deploy/compose/ha.js';
 
 const ROOT = join(__dirname, '../../..');
 
@@ -31,43 +32,44 @@ describe('M1: compose saves the swap before the TLS wait', () => {
   });
 });
 
-describe('M2: restoreComposeWalgRole skips the recreate when the db already runs primary', () => {
+describe('M2: auditComposeWalgRole reads the role file and audits; it moves nothing', () => {
   const make = (role: string) => {
     const commands: string[] = [];
-    const mergeEnv = vi.fn(async () => {});
     const audit = vi.fn(async () => {});
     const run = vi.fn(async (_ip: string, _k: string, command: string) => {
       commands.push(command);
-      if (command.includes('docker inspect')) return `WALG_ROLE=${role}\n`;
+      if (command.includes('WALG_ROLE_FILE')) return `WALG_ROLE_FILE=${role}\n`;
       return '';
     });
     return {
       commands,
-      mergeEnv,
       audit,
       go: () =>
-        restoreComposeWalgRole({
+        auditComposeWalgRole({
           promotedIp: '10.0.0.2',
           sshKeyPath: '/k',
           projectName: 'myapp',
-          deps: { run, mergeEnv, audit, log: () => {} },
+          deps: { run, audit, log: () => {} },
         }),
     };
   };
 
-  it('already primary: no .env merge, no recreate, the audit still proves it', async () => {
+  it('primary: the audit proves it; no role write, no recreate', async () => {
     const m = make('primary');
     await expect(m.go()).resolves.toEqual({ ok: true });
-    expect(m.mergeEnv).not.toHaveBeenCalled();
-    expect(m.commands.some((c) => c.includes('up -d'))).toBe(false);
     expect(m.audit).toHaveBeenCalledOnce();
+    expect(m.commands[0]).toContain('/opt/myapp/.vibecarbon-role/walg-role');
+    expect(m.commands.some((c) => c.includes('walg-role.tmp'))).toBe(false);
+    expect(m.commands.some((c) => c.includes('up -d'))).toBe(false);
   });
 
-  it('still standby: merges the role and recreates the db', async () => {
+  it('standby: not ok, names what it read, marks the role not primary; no write, no audit', async () => {
     const m = make('standby');
-    await expect(m.go()).resolves.toEqual({ ok: true });
-    expect(m.mergeEnv).toHaveBeenCalledOnce();
-    expect(m.commands.some((c) => c.includes('up -d'))).toBe(true);
+    const health = await m.go();
+    expect(health).toMatchObject({ ok: false, rolePrimary: false });
+    expect(health.error?.message).toMatch(/reads "standby"/);
+    expect(m.audit).not.toHaveBeenCalled();
+    expect(m.commands.some((c) => c.includes('walg-role.tmp'))).toBe(false);
   });
 });
 

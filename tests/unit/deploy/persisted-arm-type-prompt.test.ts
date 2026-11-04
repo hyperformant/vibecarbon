@@ -34,7 +34,11 @@ vi.mock('../../../src/lib/colors.js', async (orig) => ({
   printBanner() {},
 }));
 vi.mock('../../../src/lib/telemetry/update-check.js', () => ({ printUpdateNotice() {} }));
-vi.mock('../../../src/lib/deploy/preflight.js', () => ({ assertOperatorConfig() {} }));
+// The scaffold is current (preflight-role-file owns the stale-scaffold refusal).
+vi.mock('../../../src/lib/deploy/preflight.js', () => ({
+  assertOperatorConfig() {},
+  assertScaffoldSupportsRoleFile() {},
+}));
 
 let projectConfig: Record<string, unknown> = {};
 vi.mock('../../../src/lib/config.js', async (orig) => ({

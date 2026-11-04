@@ -44,13 +44,21 @@ import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
 import { runFrontendSmokeChecks } from '../checks/frontend-smoke.js';
 import {
+  type AttachStateRead,
   checkAppEndpointsReady,
   checkOldPrimaryDisarmed,
   checkPrimaryDbCreatedOnce,
   checkPrimaryNotRestarted,
+  checkPromotedDbNotRecreated,
+  checkPromotionHistoryArchived,
+  checkReseedInPlace,
   checkSecondFailoverRefused,
   checkSlotCapped,
+  checkStandbyDbCreatedOnce,
+  failoverReseedSkipped,
   type IncarnationRead,
+  readDbAttachState,
+  readDbGeneration,
   readDbIncarnation,
   readSwappedSinceLastDeploy,
   verifyDnsFlip,
@@ -77,7 +85,6 @@ import {
 import {
   checkN8nKeyShared,
   checkPromotedAddonsReady,
-  checkPromotedDbNotRecreated,
   checkPromotedPrimaryOnlyRunning,
   checkStandbyPrimaryOnlyAbsent,
 } from '../checks/standby-addons.js';
@@ -647,6 +654,26 @@ async function captureFailureDiagnostics(
         safeRun('bash', [
           '-c',
           `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
+        ]),
+      ]);
+      // The db container's postgres log itself, Go stack traces dropped: a
+      // wal-g process that postgres SIGQUITs on a crash restart dumps ~200
+      // lines of goroutines, which filled the 50-line tails above and hid the
+      // postgres line that said what crashed (DO k8s-ha restore, 2026-11-04).
+      sections.push([
+        `${label}: db container postgres log (last 400 lines, Go traces filtered)`,
+        safeRun('bash', [
+          '-c',
+          `timeout 15 kubectl --kubeconfig ${kc} -n vibecarbon logs ${DB_POD} -c ${DB_CONTAINER} --tail=3000 2>&1 | grep -vE '^[[:space:]]|^(goroutine |created by |r[a-z0-9]{1,3} +0x|rip |rflags |cs |fs |gs |runtime\\.|net/|io\\.|os/|sync\\.|main\\.|github\\.com/|internal/)' | tail -400 || true`,
+        ]),
+      ]);
+      // Kernel OOM kills of a non-PID-1 process restart nothing, so they never
+      // show as OOMKilled; the kubelet records them as SystemOOM node events.
+      sections.push([
+        `${label}: node SystemOOM events`,
+        safeRun('bash', [
+          '-c',
+          `kubectl --kubeconfig ${kc} get events -A --field-selector reason=SystemOOM --sort-by=.lastTimestamp 2>&1 | tail -20 || true`,
         ]),
       ]);
       // 100 events for k8s-ha (applyManifests on standby can emit 50+ in
@@ -1409,6 +1436,20 @@ export async function runLifecycle(
   // k8s-ha: the primary db-0 as the cold deploy left it, compared at
   // verify-deploy (primary_db_created_once). Null until a cold deploy passes.
   let primaryDbAtDeploy: IncarnationRead | null = null;
+  // k8s-ha: the standby db's attach state (db-0, its claim, its
+  // VolumeAttachment, its .vc-reseeded-from) as the cold deploy left it,
+  // judged at verify-deploy (standby_db_created_once). Objects and files, never
+  // Events: Events age out, so "no transition" read from them passes by itself.
+  let standbyAttachAtDeploy: AttachStateRead | null = null;
+  // k8s-ha: the same state read right before and right after `vibecarbon
+  // restore` (verify-restore) and the failover (verify-failover), whose
+  // standby reseeds run in place (reseed_in_place).
+  let preRestoreStandbyAttach: AttachStateRead | null = null;
+  let postRestoreStandbyAttach: AttachStateRead | null = null;
+  let preFailoverStandbyAttach: AttachStateRead | null = null;
+  let postFailoverStandbyAttach: AttachStateRead | null = null;
+  // Whether the failover printed one of its no-reseed lines (null until it ran).
+  let failoverReseedWasSkipped: boolean | null = null;
 
   // The SSH-unreachability memo is process-wide; a parallel/kept-rig run must
   // not inherit a previous scenario's dead hosts (IPs get recycled).
@@ -1435,9 +1476,11 @@ export async function runLifecycle(
   // Kept so verify-failover can prove it is not simply re-reading the marker
   // off its own origin node — see the false-green guard below.
   let failoverMarkerOriginIp: string | null = null;
-  // compose-ha: the promotion target's db container read just before the
-  // failover/failback, compared after it (promoted_db_not_recreated).
+  // The promotion target's db (compose: container; k8s: db-0) read just
+  // before the failover/failback, compared after it (promoted_db_not_recreated).
   let preFailoverStandbyDb: Awaited<ReturnType<typeof readDbIncarnation>> | null = null;
+  // k8s-ha: the promotion target's db StatefulSet generation at the same moment.
+  let preFailoverStandbyGeneration: string | null = null;
   // The primary before the first failover: compose-ha's failback must hand
   // the primary role back to it.
   let originalPrimaryIp: string | null = null;
@@ -2403,20 +2446,6 @@ export async function runLifecycle(
                   features: config.features,
                   primaryIp,
                 }),
-                checkPromotedDbNotRecreated({
-                  features: config.features,
-                  ip: primaryIp,
-                  before: preFailoverStandbyDb ?? {
-                    ok: false,
-                    error: 'the pre-failover db read was never taken',
-                  },
-                  after: await readDbIncarnation({
-                    mode: config.mode,
-                    projectName: config.projectName,
-                    ip: primaryIp,
-                    sshKeyPath,
-                  }),
-                }),
               );
             } else {
               replResults.push(
@@ -2428,6 +2457,56 @@ export async function runLifecycle(
                   primaryIp,
                 }),
               );
+            }
+            // The promotion moved the wal-g role with one write (no db
+            // recreate, no StatefulSet roll), and armed the promoted node
+            // before pg_promote, so its new timeline's history is archived.
+            replResults.push(
+              await checkPromotedDbNotRecreated({
+                mode: config.mode,
+                projectName: config.projectName,
+                ip: primaryIp,
+                sshKeyPath,
+                before: preFailoverStandbyDb ?? {
+                  ok: false,
+                  error: 'the pre-failover db read was never taken',
+                },
+                after: await readDbIncarnation({
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  ip: primaryIp,
+                  sshKeyPath,
+                }),
+                generationBefore: preFailoverStandbyGeneration,
+              }),
+              await checkPromotionHistoryArchived({
+                mode: config.mode,
+                projectName: config.projectName,
+                ip: primaryIp,
+                sshKeyPath,
+                projectDir: config.projectDir,
+                envPrefix: config.envPrefix,
+                provider: config.provider,
+              }),
+            );
+            // k8s-ha: a reseed before the promotion ran in place on the
+            // promoted db. A failover that printed its no-reseed line skips
+            // this; any other output runs it, and a missing swap fails.
+            if (config.mode === 'k8s-ha') {
+              if (failoverReseedWasSkipped) {
+                console.log(
+                  `${tag} [${stepName}] reseed_in_place not run: the failover promoted without a reseed`,
+                );
+              } else {
+                replResults.push(
+                  checkReseedInPlace({
+                    ip: primaryIp,
+                    step: 'failover',
+                    before: preFailoverStandbyAttach,
+                    after: postFailoverStandbyAttach,
+                  }),
+                );
+              }
             }
             // The retired side (role standby now) must archive nothing and
             // refuse its backups until a deploy rebuilds it.
@@ -2484,8 +2563,21 @@ export async function runLifecycle(
                       sshKeyPath,
                     }),
                   }),
+                  // A cold deploy read the standby too: a null read fails.
+                  checkStandbyDbCreatedOnce({ ip: standbyIp, state: standbyAttachAtDeploy }),
                 );
               }
+            }
+            // k8s-ha: `vibecarbon restore` reseeds the standby, in place.
+            if (config.mode === 'k8s-ha' && stepName === 'verify-restore') {
+              replResults.push(
+                checkReseedInPlace({
+                  ip: standbyIp,
+                  step: 'restore',
+                  before: preRestoreStandbyAttach,
+                  after: postRestoreStandbyAttach,
+                }),
+              );
             }
             if (stepName === 'verify-deploy') {
               replResults.push(
@@ -3412,6 +3504,14 @@ EOF`;
                 ip: resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp,
                 sshKeyPath,
               });
+              // The standby was seeded in place: verify-deploy proves db-0
+              // was created once and its volume attached once.
+              standbyAttachAtDeploy = await readDbAttachState({
+                mode: config.mode,
+                projectName: config.projectName,
+                ip: resolveHaDbIps(config.projectDir, config.envPrefix).standbyIp,
+                sshKeyPath,
+              });
             }
 
             // Per-mode cold-deploy budgets (deploy-budget.ts): the deploy's
@@ -4260,6 +4360,19 @@ EOF`;
 
           console.log(`${tag} Re-deployed. Server IPs: [${serverIps.join(', ')}]`);
 
+          // k8s-ha: the standby db right before the restore reseeds it.
+          preRestoreStandbyAttach = null;
+          postRestoreStandbyAttach = null;
+          const restoreStandby = {
+            mode: config.mode,
+            projectName: config.projectName,
+            ip: resolveHaDbIps(config.projectDir, config.envPrefix).standbyIp,
+            sshKeyPath,
+          };
+          if (config.mode === 'k8s-ha') {
+            preRestoreStandbyAttach = await readDbAttachState(restoreStandby);
+          }
+
           // Now restore the database backup
           const restoreResult = await runRestore(config.envPrefix, pushedBackupName ?? 'latest', {
             cwd: config.projectDir,
@@ -4276,6 +4389,9 @@ EOF`;
             throw new Error(
               `Restore failed (exit ${restoreResult.exitCode}): ${readable.slice(-500) || '(no output)'}`,
             );
+          }
+          if (config.mode === 'k8s-ha') {
+            postRestoreStandbyAttach = await readDbAttachState(restoreStandby);
           }
 
           // Refresh server info after restore
@@ -4380,15 +4496,34 @@ EOF`;
               );
             }
 
-            preFailoverStandbyDb =
-              config.mode === 'compose-ha'
-                ? await readDbIncarnation({
-                    mode: config.mode,
-                    projectName: config.projectName,
-                    ip: preFailover.standbyIp,
-                    sshKeyPath: sshKeyPath ?? getSshKeyPath(config.projectDir, config.envPrefix),
-                  })
-                : null;
+            // The promotion moves the wal-g role with one file write: the
+            // target's db must come out of it the same container (k8s: the
+            // same pod, at the same StatefulSet generation).
+            const promotionTarget = {
+              mode: config.mode,
+              projectName: config.projectName,
+              ip: preFailover.standbyIp,
+              sshKeyPath: sshKeyPath ?? getSshKeyPath(config.projectDir, config.envPrefix),
+            };
+            preFailoverStandbyDb = await readDbIncarnation(promotionTarget);
+            preFailoverStandbyGeneration = null;
+            if (config.mode === 'k8s-ha') {
+              const generation = await readDbGeneration(promotionTarget);
+              if ('error' in generation) {
+                console.warn(
+                  `${tag} [${name}] could not read the promotion target's db generation ` +
+                    `(${generation.error}); promoted_db_not_recreated will fail`,
+                );
+              } else preFailoverStandbyGeneration = generation.generation;
+            }
+            // k8s-ha: a reseed before the promotion runs in place on this
+            // same db (reseed_in_place, when one ran).
+            preFailoverStandbyAttach = null;
+            postFailoverStandbyAttach = null;
+            failoverReseedWasSkipped = null;
+            if (config.mode === 'k8s-ha') {
+              preFailoverStandbyAttach = await readDbAttachState(promotionTarget);
+            }
 
             // k8s-ha: the promotion restores the primary's certificate onto
             // the promoted cluster (src/failover.js) instead of ordering a
@@ -4412,6 +4547,12 @@ EOF`;
                 `${name === 'failback' ? 'Failback' : 'Failover'} exited with code ${result.exitCode}.\n` +
                   `STDERR: ${(result.stderr || '').slice(-1000) || '(empty)'}\n` +
                   `STDOUT tail: ${(result.stdout || '').slice(-2000) || '(empty)'}`,
+              );
+            }
+            if (config.mode === 'k8s-ha') {
+              postFailoverStandbyAttach = await readDbAttachState(promotionTarget);
+              failoverReseedWasSkipped = failoverReseedSkipped(
+                `${result.stdout || ''}\n${result.stderr || ''}`,
               );
             }
 

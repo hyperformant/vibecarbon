@@ -648,19 +648,29 @@ The command:
 
 **One archive folder per database lineage.** The environment's backup prefix (`WALG_S3_PREFIX_BASE`, `backups/<project>/<env>/walg`) holds one folder per database, named by its system identifier. Every wal-g caller in the db container sources `walg-env.sh` (`carbon/volumes/db/walg-env.sh`, copied into the `vibecarbon-wal-archive` ConfigMap on k8s), which exports `WALG_S3_PREFIX=<base>/<system identifier>`, or `<base>/$RESTORE_LINEAGE` during a restore's fetch. A destroyed and redeployed environment is a new database, so it archives beside the old one and never takes over its newest base; `WALG_PREVENT_WAL_OVERWRITE=true` refuses a segment name already archived with other bytes. Each deploy records the database's system identifier as `backup.lineage` in `.vibecarbon.json` (a changed one moves the old value to `backup.priorLineages`), and the record survives a destroy. `vibecarbon restore` reads one lineage: `-lineage <id>`, or the recorded one when it covers the restore point and no other lineage holds a newer base. Otherwise it refuses and lists each lineage with its newest base.
 
-**The wal-g write-guard moves with the role (both HA modes).** `WALG_ROLE` is
-the backup write-guard: `standby` makes WAL archiving and base backups no-op so
-only one node ever writes the environment's archive. It is rendered
-at deploy time, so failover re-renders it directly (`primary` onto the promoted
-node and, best-effort, `standby` onto the demoted one) and then recreates the
-database container, because container environment is fixed at container-create
-time (writing `.env` or patching a StatefulSet alone changes nothing in the
-running process). The failover then re-runs the deploy-time backup audit against
-the promoted node in `requirePrimary` mode, where a lingering
-`WALG_ROLE=standby` is a failure rather than the legitimate skip it is at deploy
-time. If that cannot be proven, the failover still completes (promotion, DNS and
-the persisted role swap all stand: an aborted post-promotion failover would be
-worse) but the command exits non-zero with the remediation, so dead backups are
+**The wal-g write-guard moves with the role (both HA modes).** The wal-g role
+is the backup write-guard: `standby` makes WAL archiving and base backups no-op
+so only one node ever writes the environment's archive. It is a one-word file
+outside PGDATA, `/var/lib/vibecarbon/role/walg-role` in the db container, read
+on every run by every wal-g caller through one parser (`WALG_ROLE_PARSE_SH` in
+`src/lib/deploy/walg-role.js`, carried verbatim by `walg-env.sh`). A missing or
+unreadable file never archives and never drops a segment: archiving exits 1 and
+postgres keeps the segment. On compose the file lives in the host directory
+`/opt/<project>/.vibecarbon-role`, bound read-only into the db container. On k8s
+it lives on the db volume (a `vibecarbon-role` subPath beside `postgres-data`),
+and the CLI also keeps a durable intent in the `vibecarbon-db-role` ConfigMap,
+which `db-guard.sh` applies on every container start, so a db the CLI could not
+reach comes back with the right role. Nothing about the role is in `.env` or the
+StatefulSet env any more. Failover therefore moves it with one write and no
+restart: `primary` onto the promoted node before `pg_promote` (while it is still
+in recovery, where the write is inert; if the write fails the failover stops
+before promotion) and, best-effort, `standby` onto the demoted one. The failover
+then re-runs the deploy-time backup audit against the promoted node in
+`requirePrimary` mode, where a role still reading `standby` is a failure rather
+than the legitimate skip it is at deploy time. If that cannot be proven, the
+failover still completes (promotion, DNS and the persisted role swap all stand:
+an aborted post-promotion failover would be worse) but the command exits
+non-zero with the remediation, so dead backups are
 never reported as a clean success.
 
 **Fail-back semantics:**
@@ -673,6 +683,122 @@ never reported as a clean success.
 - **Provisioning failure at failover:** The provisioning step attempts to converge workers to 0 on abort; if that also fails, the exact resource state is reported. The primary is untouched. Re-run `vibecarbon failover` (optionally with a different `-server-type`) to retry.
 - **Promotion failure:** The existing abort-before-anything-moves check stands. If promotion is not confirmed, the failover stops before any other resource moves.
 - Every failure path reports what state the world is in and what the operator's next command should be.
+
+#### Deploy after `failover -abort`
+
+`vibecarbon failover <env> -abort` keeps the OLD primary. The failover it
+calls off may already have promoted the standby, so the standby can be running
+a newer timeline of the same database. A cold deploy refuses such a standby as
+"promoted outside vibecarbon", because reseeding it would overwrite writes the
+primary never saw. The abort resolves that for its own standby:
+
+- Before it stops the standby, the abort reads the standby's lineage (recovery
+  state, system identifier, timeline). If the standby is out of recovery, the
+  abort records that exact copy as discardable in `.vibecarbon.json`
+  (`ha.discardableStandby`: address, system identifier, timeline). The
+  operator chose the old primary, so that copy's writes are given up,
+  including any writes it takes after the abort.
+- The next `vibecarbon deploy <env>` reseeds over that copy, and only that
+  copy: the same address, system identifier and timeline. A promotion the
+  abort did not record (another timeline, another identifier, another
+  standby) still refuses. Both tiers apply the same check (k8s-ha in
+  `setupReplication`, compose-ha before `configureStandbyReplication`).
+- The record is cleared once the reseed replaced the standby's data
+  directory, once a deploy verifies the standby streaming from the primary
+  (with or without a reseed), and by any failover's role swap: it never
+  outlives a role change. A reseed that failed keeps it for the rerun.
+- A standby still in recovery at abort time never promoted and gets no record.
+  If the abort could not read the standby at all, it records nothing and
+  warns: if that standby had promoted, the next deploy refuses it. Then decide
+  by hand which copy to keep. To give up the standby's copy, back it up if in
+  doubt, then rebuild the standby's db as in the next sections (k8s-ha or
+  compose-ha), and deploy.
+
+#### Rebuilding a k8s-ha standby whose db cannot start
+
+The cold reseed works inside the RUNNING standby db pod: it stages a copy of
+the primary next to the standby's data, then restarts postgres in the same
+pod. A standby whose postgres cannot start at all (a crash loop, a damaged
+data directory) has no running pod to stage into, so the deploy refuses (the
+db rollout wait, the self-heal wait or the reseed guard) and names this
+procedure. A CLI command for it is a tracked follow-up.
+
+Run it on the **standby** cluster only (`vibecarbon status <env>` names which
+cluster is the standby). Its volume holds only a replica of the primary;
+never do this on the primary.
+
+```bash
+ssh root@<standby master ip>
+kubectl scale statefulset/db --replicas=0 -n vibecarbon
+kubectl wait --for=delete pod/db-0 --timeout=600s -n vibecarbon
+kubectl delete pvc data-db-0 -n vibecarbon
+kubectl scale statefulset/db --replicas=1 -n vibecarbon
+exit
+vibecarbon deploy <env>
+```
+
+Why each step, checked against the code:
+
+- The StatefulSet (`carbon/k8s/base/db/statefulset.yaml`, `replicas: 1`) is
+  applied by the CLI only, never by Flux, so nothing scales it back behind
+  you. Scaling to 0 first releases the claim; deleting `data-db-0` under a
+  running pod would leave it Terminating.
+- Scaling back to 1 makes the StatefulSet create a fresh `data-db-0` from its
+  volumeClaimTemplate. The pod's `db-guard.sh` applies the `standby` role
+  intent to the new volume's empty role directory, and the image entrypoint
+  runs `initdb`: a new database with its own system identifier. This is the
+  state of a brand-new standby cluster.
+- Scale back up yourself rather than leaving it to the deploy: a deploy whose
+  manifests did not change skips the apply and goes straight to waiting for
+  postgres in `db-0`, which would not exist at 0 replicas.
+- `vibecarbon deploy <env>` then takes the cold path a new standby takes: the
+  standby is not streaming, the reseed guard finds the wrapper and the
+  `standby` intent, the lineage check reads another system identifier (a
+  fresh initdb, never refused), and the in-place reseed seeds it from the
+  primary and verifies streaming. The volume is attached once, at creation.
+
+#### Rebuilding a compose-ha standby whose db cannot start
+
+The compose-ha cold reseed stages inside the running standby db container,
+and before that it reads the standby's lineage (after one 60 s wait for the
+db to accept connections). A standby whose postgres cannot start fails that
+read, so the deploy refuses and names this procedure.
+
+Run it on the **standby** server only (`vibecarbon status <env>` names it).
+Its volume holds only a replica of the primary; never do this on the primary.
+
+```bash
+ssh root@<standby ip>
+docker rm -f <project>-db
+docker volume rm <project>_db_data
+exit
+vibecarbon deploy <env>
+```
+
+Why each step, checked against the code and the compose files:
+
+- `<project>-db` is the db service's `container_name`
+  (`carbon/docker-compose.yml`). `docker rm -f` stops and removes it whatever
+  state its crash loop left it in, which releases the volume.
+- The volume is the `db_data` named volume of the compose project. The
+  project is the `/opt/<project>` directory, so docker names it
+  `<project>_db_data` (`docker volume ls --filter label=com.docker.compose.volume=db_data`
+  shows it). The wal-g role file is not on it: it lives in the host
+  directory `/opt/<project>/.vibecarbon-role`, which the deploy rewrites.
+- The deploy's database-ledger preflight then reads "no db container and no
+  db volume", which is a first deploy on that server: nothing to refuse.
+- The deploy starts db on the standby (its replication overlay step runs
+  `docker compose ... up -d --no-build db` on every deploy), which creates a
+  fresh `<project>_db_data`, and the image entrypoint runs `initdb`: a new
+  database with its own system identifier, the state of a brand-new standby
+  server.
+- The cold reseed then finds the standby not streaming, and the lineage
+  check reads another system identifier (a fresh initdb, never refused).
+  `configureStandbyReplication` stages a copy of the primary into the
+  running container and swaps it in, and the deploy verifies streaming.
+- Run the deploy right after: anything that runs `docker compose up` on the
+  server before it would also create a fresh empty volume, which the deploy
+  treats the same way.
 
 ---
 
