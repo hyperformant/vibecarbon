@@ -23,18 +23,12 @@ export function scenarioDomain(envPrefix: string, runTag: string, baseDomain: st
   return `${envPrefix}-${runTag}.${baseDomain}`;
 }
 
-const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 /**
- * True when a DNS record name belongs to this env: `<envPrefix>` or
- * `<envPrefix>-<6 hex>` directly under the base domain, optionally as the
- * wildcard `*.` form. Lookalikes (`d40`, `d4-xyz`, 7-hex tags, deeper
- * subdomains, other zones) do not match, so a crashed run's names are found
- * without touching a neighbour's.
+ * The DNS tag for one attempt of a scenario. Attempt 1 uses the run tag; a
+ * flake retry gets `<runTag>r<N>` so it never reuses the name the failed
+ * attempt just destroyed.
  */
-export function dnsNameBelongsToEnv(name: string, envPrefix: string, baseDomain: string): boolean {
-  const re = new RegExp(
-    `^(?:\\*\\.)?${escapeRe(envPrefix)}(?:-[0-9a-f]{6})?\\.${escapeRe(baseDomain)}\\.?$`,
-  );
-  return re.test(name);
+export function attemptTagFor(runId: string, attemptNumber: number): string {
+  const tag = runTagFor(runId);
+  return attemptNumber > 1 ? `${tag}r${attemptNumber}` : tag;
 }

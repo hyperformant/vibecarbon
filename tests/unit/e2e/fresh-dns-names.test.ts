@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dnsNameBelongsToEnv, runTagFor, scenarioDomain } from '../../e2e/utils/fresh-dns-names.js';
+import { attemptTagFor, runTagFor, scenarioDomain } from '../../e2e/utils/fresh-dns-names.js';
 
 describe('fresh DNS names per run', () => {
   const runId = '0123abcd-4567-89ab-cdef-0123456789ab';
@@ -15,21 +15,16 @@ describe('fresh DNS names per run', () => {
     );
   });
 
-  it('sweep matcher accepts <envPrefix> and <envPrefix>-<6 hex> under the base domain', () => {
-    expect(dnsNameBelongsToEnv('d4.do.appcarbon.dev', 'd4', 'do.appcarbon.dev')).toBe(true);
-    expect(dnsNameBelongsToEnv('d4-0123ab.do.appcarbon.dev', 'd4', 'do.appcarbon.dev')).toBe(true);
-    expect(dnsNameBelongsToEnv('*.d4-0123ab.do.appcarbon.dev', 'd4', 'do.appcarbon.dev')).toBe(
-      true,
-    );
-  });
-
-  it('sweep matcher rejects lookalikes', () => {
-    const base = 'do.appcarbon.dev';
-    expect(dnsNameBelongsToEnv('d40.do.appcarbon.dev', 'd4', base)).toBe(false);
-    expect(dnsNameBelongsToEnv('d4-xyz.do.appcarbon.dev', 'd4', base)).toBe(false);
-    expect(dnsNameBelongsToEnv('d4-0123abc.do.appcarbon.dev', 'd4', base)).toBe(false);
-    expect(dnsNameBelongsToEnv('d4-0123AB.do.appcarbon.dev', 'd4', base)).toBe(false);
-    expect(dnsNameBelongsToEnv('d4-0123ab.other.dev', 'd4', base)).toBe(false);
-    expect(dnsNameBelongsToEnv('x.d4-0123ab.do.appcarbon.dev', 'd4', base)).toBe(false);
+  it('every attempt of one run gets its own valid DNS label', () => {
+    const a1 = scenarioDomain('d4', attemptTagFor(runId, 1), 'do.appcarbon.dev');
+    const a2 = scenarioDomain('d4', attemptTagFor(runId, 2), 'do.appcarbon.dev');
+    const a3 = scenarioDomain('d4', attemptTagFor(runId, 3), 'do.appcarbon.dev');
+    expect(a1).toBe('d4-0123ab.do.appcarbon.dev');
+    expect(new Set([a1, a2, a3]).size).toBe(3);
+    for (const d of [a1, a2, a3]) {
+      const label = d.split('.')[0];
+      expect(label).toMatch(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/);
+      expect(label.length).toBeLessThanOrEqual(16);
+    }
   });
 });

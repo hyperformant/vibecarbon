@@ -102,7 +102,7 @@ import { scenarioContext } from './utils/cli-runner.js';
 import { E2EDbImageError, selectE2EDbImage } from './utils/db-image-select.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
 import { resolveE2EAcmeCa, setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
-import { runTagFor, scenarioDomain } from './utils/fresh-dns-names.js';
+import { attemptTagFor, scenarioDomain } from './utils/fresh-dns-names.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
 import { logPreflight, runPreflight } from './utils/preflight.js';
 import type { CapacityPreferences } from './utils/region-resolver.js';
@@ -850,8 +850,6 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
 
   // Initialize DB and metrics
   const runId = randomUUID();
-  // Fresh DNS names for this run only (see utils/fresh-dns-names.ts); envPrefix is untouched.
-  const runTag = runTagFor(runId);
   const db = new E2EDb();
   const collector = new MetricsCollector(db);
   const git = getGitInfo();
@@ -925,7 +923,8 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     const provider = scenario.provider;
     const domain = scenarioDomain(
       envPrefix,
-      runTag,
+      // Fresh DNS name per attempt (utils/fresh-dns-names.ts); envPrefix is untouched.
+      attemptTagFor(runId, attemptNumber),
       resolveBaseDomain(config.domains, dnsProvider, process.env.E2E_DOMAIN),
     );
     // Unique per scenario — Date.now() collisions are rare, but the random
