@@ -1745,6 +1745,8 @@ export const DB_GUARD_MARKER_GREP = Object.freeze([
     // running db passes at once.
     `vc_ready=0; vc_i=0; while [ "$vc_i" -lt ${DB_GUARD_READY_WAIT_S} ]; do if pg_isready -q -h 127.0.0.1 -U postgres; then vc_ready=1; break; fi; vc_i=$((vc_i + 1)); sleep 1; done; printf 'ready=%s\\n' "$vc_ready"; ` +
     `printf 'in_recovery=%s\\n' ${IN_RECOVERY_SH}; ` +
+    // What the data directory says, for when psql cannot (crash recovery).
+    `if [ -f "\${PGDATA:-/var/lib/postgresql/data}/standby.signal" ]; then echo standby_signal=1; else echo standby_signal=0; fi; ` +
     `printf 'slots=%s\\n' "$(psql -U postgres -tAc '${REPLICATION_SLOT_COUNT_SQL}' 2>/dev/null)"; ` +
     `printf 'ident=%s\\n' "$(psql -U postgres -tAc '${DB_IDENTITY_SQL}' 2>/dev/null)"`,
 ]);
@@ -1763,7 +1765,13 @@ export const DB_IN_PLACE_STOP = Object.freeze([
   'sh',
   '-c',
   `grep -q '^${DB_GUARD_PROTOCOL_MARKER}$' /usr/local/bin/db-guard.sh || { echo '${STOP_REFUSED} the mounted db-guard.sh does not speak the reseed protocol'; exit ${STOP_REFUSED_STATUS}; }; ` +
-    `r=${IN_RECOVERY_SH}; [ -n "$r" ] || { echo '${STOP_REFUSED} could not confirm the db is in recovery (psql did not answer)'; exit ${STOP_REFUSED_STATUS}; }; ` +
+    // psql silent (a standby in crash recovery refuses every connection, which
+    // is what a primary restored onto a new timeline does to it): the data
+    // directory decides. standby.signal is what makes postgres start as a
+    // standby; pg_promote removes it, so a primary never has one. A live
+    // answer always wins over the file.
+    `r=${IN_RECOVERY_SH}; ` +
+    `if [ -z "$r" ]; then [ -f "\${PGDATA:-/var/lib/postgresql/data}/standby.signal" ] && r=t || { echo '${STOP_REFUSED} could not confirm the db is in recovery (psql did not answer and PGDATA has no standby.signal)'; exit ${STOP_REFUSED_STATUS}; }; fi; ` +
     `[ "$r" = t ] || { echo "${STOP_REFUSED} postgres is not in recovery (pg_is_in_recovery: $r)"; exit ${STOP_REFUSED_STATUS}; }; ` +
     'kill -INT 1',
 ]);
@@ -1933,7 +1941,14 @@ export function evaluateDbGuardSupport(
   };
   if (!requireRecovery) return { ...verdict, ...readings };
   if (!recovery) {
-    // psql did not answer (postgres down or still starting): no verdict.
+    // psql did not answer. A standby in crash recovery refuses every
+    // connection (a primary restored onto a new timeline does this to it), and
+    // that standby is exactly the one a reseed is for: its data directory still
+    // says what it is. standby.signal makes postgres start as a standby and
+    // pg_promote removes it, so a primary never has one. DB_IN_PLACE_STOP
+    // re-checks the same way in the stopping container.
+    if (/^standby_signal=1$/m.test(out)) return { ...verdict, ...readings, standbySignal: true };
+    // No answer and no file (postgres down or still starting): no verdict.
     return {
       ok: false,
       reason: `could not confirm the db is in recovery: psql in ${DB_POD} did not answer pg_is_in_recovery()`,

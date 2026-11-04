@@ -13,7 +13,7 @@
  *   - every remote argv survives the remote shell through shJoin.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -226,6 +226,29 @@ describe('evaluateDbGuardSupport', () => {
     expect(DB_GUARD_MARKER_GREP[2]).toContain('SELECT count(*) FROM pg_replication_slots');
     expect(DB_GUARD_MARKER_GREP[2]).toContain('pg_walfile_name(pg_current_wal_lsn())');
     expect(DB_GUARD_MARKER_GREP[2]).toContain('FROM pg_control_system()');
+  });
+
+  it('a silent psql over a data directory with standby.signal passes: a standby in crash recovery is still a standby', () => {
+    const v = evaluateDbGuardSupport(
+      pod(),
+      '1\nready=0\nin_recovery=\nstandby_signal=1',
+      'standby',
+    );
+    expect(v).toMatchObject({ ok: true, standbySignal: true });
+    // No file and no answer: still no verdict.
+    expect(
+      evaluateDbGuardSupport(pod(), '1\nready=0\nin_recovery=\nstandby_signal=0', 'standby'),
+    ).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/could not confirm the db is in recovery/),
+    });
+    // A live f wins over the file.
+    expect(
+      evaluateDbGuardSupport(pod(), '1\nready=1\nin_recovery=f\nstandby_signal=1', 'standby'),
+    ).toMatchObject({ ok: false, reason: expect.stringMatching(/is not in recovery/) });
+    // The guard exec reports the file.
+    expect(DB_GUARD_MARKER_GREP[2]).toContain('standby_signal=');
+    expect(DB_GUARD_MARKER_GREP[2]).toContain('/standby.signal');
   });
 
   it('an unanswered recovery read says it could not confirm recovery, never "not in recovery"', () => {
@@ -643,8 +666,14 @@ describe('the guard and stop scripts, executed under sh', () => {
   // The real script text, with only the wrapper's absolute path pointed at a
   // temp file; psql is a PATH stub printing the recovery answer, and kill a
   // shell function (functions shadow the regular builtin) that records it.
-  const run = (script: string, o: { marker: boolean | null; recovery: string }) => {
+  const run = (
+    script: string,
+    o: { marker: boolean | null; recovery: string; standbySignal?: boolean },
+  ) => {
     const dir = mkdtempSync(join(tmpdir(), 'vc-stop-'));
+    const pgdata = join(dir, 'pgdata');
+    mkdirSync(pgdata);
+    if (o.standbySignal) writeFileSync(join(pgdata, 'standby.signal'), '');
     const guard = join(dir, 'db-guard.sh');
     if (o.marker !== null) {
       writeFileSync(
@@ -660,7 +689,7 @@ describe('the guard and stop scripts, executed under sh', () => {
     expect(body).not.toBe(script);
     return spawnSync('sh', ['-c', `kill() { echo "KILLED $*"; }; ${body}`], {
       encoding: 'utf-8',
-      env: { PATH: `${dir}:${process.env.PATH}` },
+      env: { PATH: `${dir}:${process.env.PATH}`, PGDATA: pgdata },
     });
   };
 
@@ -700,12 +729,30 @@ describe('the guard and stop scripts, executed under sh', () => {
     const silent = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: '' });
     expect(silent.status).toBe(3);
     expect(silent.stdout).toBe(
-      'RESEED_STOP_REFUSED could not confirm the db is in recovery (psql did not answer)\n',
+      'RESEED_STOP_REFUSED could not confirm the db is in recovery (psql did not answer and PGDATA has no standby.signal)\n',
     );
     const primary = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: 'f' });
     expect(primary.stdout).toBe(
       'RESEED_STOP_REFUSED postgres is not in recovery (pg_is_in_recovery: f)\n',
     );
+  });
+
+  it('a standby psql cannot reach (crash recovery after a restored primary) still stops on its standby.signal', () => {
+    // A standby whose primary was restored onto a new timeline can sit in
+    // crash recovery, refusing every connection ("the database system is in
+    // recovery mode"): exactly the standby the reseed exists for. Its data
+    // directory still says what it is: standby.signal, which a primary never has.
+    const down = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: '', standbySignal: true });
+    expect(down.status).toBe(0);
+    expect(down.stdout).toBe('KILLED -INT 1\n');
+    // A live answer always wins: a db that says f is a primary, whatever the file says.
+    const primary = run(DB_IN_PLACE_STOP[2], { marker: true, recovery: 'f', standbySignal: true });
+    expect(primary.status).toBe(3);
+    expect(primary.stdout).toMatch(/^RESEED_STOP_REFUSED postgres is not in recovery/);
+    // The protocol marker still comes first.
+    const noMarker = run(DB_IN_PLACE_STOP[2], { marker: false, recovery: '', standbySignal: true });
+    expect(noMarker.status).toBe(3);
+    expect(noMarker.stdout).not.toContain('KILLED');
   });
 
   /**
@@ -749,7 +796,9 @@ describe('the guard and stop scripts, executed under sh', () => {
   it('the guard exec waits (bounded) for a db that is still starting, then reads slots and lineage', () => {
     const { stdout, sleeps } = runGuardExec(4);
     expect(sleeps).toBe(3);
-    expect(stdout).toBe('1\nready=1\nin_recovery=f\nslots=3\nident=7412345678901234567|00000002\n');
+    expect(stdout).toBe(
+      '1\nready=1\nin_recovery=f\nstandby_signal=0\nslots=3\nident=7412345678901234567|00000002\n',
+    );
     expect(evaluateDbGuardSupport(pod(), stdout, 'standby', { requireRecovery: false })).toEqual({
       ...GUARD,
       dbReady: true,
@@ -763,7 +812,7 @@ describe('the guard and stop scripts, executed under sh', () => {
   it('the guard exec gives a db that never accepts connections exactly DB_GUARD_READY_WAIT_S, then reports it', () => {
     const { stdout, sleeps } = runGuardExec(0);
     expect(sleeps).toBe(DB_GUARD_READY_WAIT_S);
-    expect(stdout).toBe('1\nready=0\nin_recovery=\nslots=\nident=\n');
+    expect(stdout).toBe('1\nready=0\nin_recovery=\nstandby_signal=0\nslots=\nident=\n');
     expect(evaluateDbGuardSupport(pod(), stdout, 'standby', { requireRecovery: false })).toEqual({
       ...READ(''),
       dbReady: false,
