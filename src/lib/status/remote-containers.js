@@ -25,7 +25,7 @@ import {
 } from '../services/addon-start.js';
 import { enabledAddonNames } from '../services/standby-policy.js';
 import {
-  getSSHKeyPath as defaultGetKey,
+  sshKeyPathFor as defaultGetKey,
   sshKubectl as defaultKubectl,
   sshRun as defaultSsh,
 } from '../ssh.js';
@@ -305,7 +305,7 @@ async function collectK8s(target, deps) {
  * @param {string} envName
  * @param {object} envConfig
  * @param {string|undefined} projectName
- * @param {{sshRun?: typeof defaultSsh, sshKubectl?: typeof defaultKubectl, getSSHKeyPath?: typeof defaultGetKey, existsSync?: typeof fsExistsSync, timeoutMs?: number, snapshots?: ReturnType<typeof createClusterSnapshots>}} [deps]
+ * @param {{sshRun?: typeof defaultSsh, sshKubectl?: typeof defaultKubectl, sshKeyPathFor?: typeof defaultGetKey, existsSync?: typeof fsExistsSync, timeoutMs?: number, snapshots?: ReturnType<typeof createClusterSnapshots>}} [deps]
  *   `snapshots`: the run's cluster snapshots, shared with the other rows; one of its own otherwise
  * @returns {Promise<Record<string, {kind: 'compose'|'k8s', ip: string, rows: object[], platform?: object, nodes?: object, error?: string}>|null>}
  */
@@ -313,7 +313,7 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
   const d = {
     sshRun: deps.sshRun || defaultSsh,
     sshKubectl: deps.sshKubectl || defaultKubectl,
-    getSSHKeyPath: deps.getSSHKeyPath || defaultGetKey,
+    sshKeyPathFor: deps.sshKeyPathFor || defaultGetKey,
     existsSync: deps.existsSync || fsExistsSync,
     timeoutMs: deps.timeoutMs ?? 10_000,
   };
@@ -322,7 +322,7 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
   const targets = planContainerTargets(envConfig, { env: envName });
   if (targets.length === 0) return null;
 
-  const keyPath = d.getSSHKeyPath(envName);
+  const keyPath = d.sshKeyPathFor(envName);
   const haveKey = !!keyPath && d.existsSync(keyPath);
   // The add-ons this env starts in the background, whose states the job records.
   const expectedAddons = backgroundAddons(enabledAddonNames(envConfig)).map((a) => ({

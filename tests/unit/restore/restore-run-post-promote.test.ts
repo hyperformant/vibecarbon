@@ -40,7 +40,7 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => ({
 }));
 vi.mock('../../../src/lib/ssh.js', async (orig) => ({
   ...(await orig<typeof import('../../../src/lib/ssh.js')>()),
-  getSSHKeyPath: () => keyPath,
+  sshKeyPathFor: () => keyPath,
 }));
 const readBases = vi.fn();
 vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => ({

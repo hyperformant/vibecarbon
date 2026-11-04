@@ -35,7 +35,6 @@
  *     replicationStatus, replStreaming, replLastState, replError, lastStateHint
  *     allowDegraded
  */
-import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { spinner } from '../../cli/progress.js';
 import { c, link } from '../../colors.js';
@@ -45,6 +44,7 @@ import { summarizePulumiError } from '../../iac/index.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor } from '../../providers/index.js';
 import { haClassMessage } from '../../sizing.js';
+import { sshKeyPathFor } from '../../ssh.js';
 import { createPrefixedTracker } from '../../tracker.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { copyAppImageToStandby } from '../k8s/ha/image-copy.js';
@@ -79,7 +79,7 @@ async function haK8sGenerateSshKey(ctx) {
 
   // Generate shared SSH key for both clusters (avoids Hetzner duplicate fingerprint errors)
   s.start('Generating shared SSH key for HA clusters');
-  const sharedSshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${options.environment}`);
+  const sharedSshKeyPath = sshKeyPathFor(options.environment);
   const sharedSshPublicKey = generateSSHKeyPair(sharedSshKeyPath);
   s.stop('Shared SSH key generated');
   ctx.sharedSshKeyPath = sharedSshKeyPath;

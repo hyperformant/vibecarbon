@@ -29,8 +29,8 @@ import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import {
   getPostgresPod,
-  getSSHKeyPath,
   scpDownload,
+  sshKeyPathFor,
   sshKubectl,
   sshRun,
   sshRunScript,
@@ -494,7 +494,7 @@ export async function run(args) {
 
   // SSH key is required for create and download. Bail early with a clear
   // message if it's missing.
-  const sshKeyPath = getSSHKeyPath(envName);
+  const sshKeyPath = sshKeyPathFor(envName);
   if (!existsSync(sshKeyPath)) {
     p.log.error(`SSH key not found: ${sshKeyPath}`);
     p.log.info(

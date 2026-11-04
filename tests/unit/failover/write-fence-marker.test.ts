@@ -358,7 +358,7 @@ describe('status shows a write-fenced primary', () => {
         snapshots: dbPodSnapshots(() => 'db-0'),
         // Never reached on k8s, but held to ssh.js's argv contract all the same.
         sshRun: withSshContract(vi.fn()),
-        getSSHKeyPath: () => __filename,
+        sshKeyPathFor: () => __filename,
         timeoutMs: 5000,
       },
     );

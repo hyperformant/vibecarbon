@@ -104,7 +104,7 @@ function cluster({ failSnapshotOn }: { failSnapshotOn?: string } = {}) {
   const deps = {
     sshKubectl,
     sshRun: withSshContract(vi.fn()),
-    getSSHKeyPath: () => KEY,
+    sshKeyPathFor: () => KEY,
     existsSync: () => true,
     readBases: async () => ({
       s3Config: { bucket: 'b' },

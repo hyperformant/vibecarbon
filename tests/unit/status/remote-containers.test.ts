@@ -502,7 +502,7 @@ describe('checkRemoteContainers', () => {
     ],
   };
   const base = () => ({
-    getSSHKeyPath: vi.fn(() => '/tmp/key'),
+    sshKeyPathFor: vi.fn(() => '/tmp/key'),
     existsSync: vi.fn(() => true),
     sshKubectl: vi.fn(async () => '{}'),
   });

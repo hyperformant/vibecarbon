@@ -85,7 +85,7 @@ describe('checkReplication reads the slot on the primary', () => {
         snapshots: dbPodSnapshots(() => 'db-0'),
         sshKubectl,
         sshRun: withSshContract(vi.fn()),
-        getSSHKeyPath: vi.fn(() => fileURLToPath(import.meta.url)),
+        sshKeyPathFor: vi.fn(() => fileURLToPath(import.meta.url)),
         timeoutMs: 5000,
       },
     );
@@ -125,7 +125,7 @@ describe('the slot query names the standby slot and travels quoting-safe', () =>
         snapshots: { get: vi.fn() },
         sshKubectl: vi.fn(),
         sshRun: withSshContract(sshRun),
-        getSSHKeyPath: vi.fn(() => fileURLToPath(import.meta.url)),
+        sshKeyPathFor: vi.fn(() => fileURLToPath(import.meta.url)),
         timeoutMs: 5000,
       },
     );

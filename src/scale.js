@@ -14,7 +14,6 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { getGHCRCredentials } from './lib/build.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
@@ -114,7 +113,7 @@ import {
   mintAttemptId,
 } from './lib/services/addon-start.js';
 import { enabledAddonNames } from './lib/services/standby-policy.js';
-import { sshRun, sshRunScript } from './lib/ssh.js';
+import { sshKeyPathFor, sshRun, sshRunScript } from './lib/ssh.js';
 import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
 import { buildRecoveryConfig, renderRecoveryConf } from './lib/walg/recovery-config.js';
 import {
@@ -298,7 +297,7 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
       projectName,
       provider: new Provider(apiToken),
       Provider,
-      sshKeyPath: join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`),
+      sshKeyPath: sshKeyPathFor(environment),
       domain: envConfig.domain || null,
       dnsChallenge: useDnsChallenge(dnsProviderId),
       apiToken,
@@ -462,7 +461,7 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
 
   // Prepare shared resources
   const provider = new Provider(apiToken);
-  const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
+  const sshKeyPath = sshKeyPathFor(environment);
   const sshPubKeyPath = `${sshKeyPath}.pub`;
   const domain = envConfig.domain || null;
   // Managed-DNS (cloudflare/hetzner) deploys issue certs via ACME DNS-01, so
@@ -2922,7 +2921,7 @@ async function scaleReestablishHaTunnel(ctx) {
     );
     return;
   }
-  const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
+  const sshKeyPath = sshKeyPathFor(environment);
   const s = spinner();
   s.start('Re-establishing WireGuard replication tunnel after database-node resize');
   try {

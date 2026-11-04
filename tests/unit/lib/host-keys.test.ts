@@ -94,14 +94,8 @@ describe('knownHostsPathForKey', () => {
     );
   });
 
-  it('derives known_hosts_<env> beside an ssh-<env> path', () => {
-    expect(knownHostsPathForKey('/proj/.vibecarbon/ssh-staging')).toBe(
-      '/proj/.vibecarbon/known_hosts_staging',
-    );
-  });
-
   it('keeps HA suffixes so primary/standby share one per-env file via the base key', () => {
-    // getSSHKeyPath strips -primary/-standby and returns deploy_key_<baseEnv>,
+    // sshKeyPathFor strips -primary/-standby and returns deploy_key_<baseEnv>,
     // so both arms derive the same known_hosts_<baseEnv>.
     expect(knownHostsPathForKey('/proj/.vibecarbon/deploy_key_prod')).toBe(
       '/proj/.vibecarbon/known_hosts_prod',
