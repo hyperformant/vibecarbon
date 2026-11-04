@@ -511,30 +511,55 @@ export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {})
  * @param {number|'up'} replicas
  * @param {string} label
  */
+/** Is this kubectl failure a missing object? */
+function isNotFound(err) {
+  return /not found|no objects passed/i.test(err instanceof Error ? err.message : String(err));
+}
+
 /**
- * Single-ACME-issuer policy, promote half — see
- * src/lib/deploy/k8s/acme-issuer-policy.js for the full account.
+ * Read a deploy-owned Certificate's promote state on the promoted cluster:
+ * the ACME issuer the deploy stamped in PROMOTE_ISSUER_ANNOTATION (`target`),
+ * the live issuerRef (`current`) and its names. Throws what kubectl throws.
+ */
+async function readPromoteState({ kubectl, promotedIp, sshKeyPath, namespace, name }) {
+  const raw = await kubectl(promotedIp, sshKeyPath, [
+    'get',
+    'certificate',
+    name,
+    '-n',
+    namespace,
+    '-o',
+    'json',
+  ]);
+  const cert = JSON.parse(String(raw));
+  return {
+    target: cert?.metadata?.annotations?.[PROMOTE_ISSUER_ANNOTATION],
+    current: cert?.spec?.issuerRef?.name,
+    dnsNames: cert?.spec?.dnsNames,
+  };
+}
+
+/**
+ * TLS certificate reuse on the promoted cluster, BEFORE the DNS flip: the
+ * env's saved certificate goes into the vibecarbon-tls Secret and the
+ * Certificate is re-created on its ACME issuer (promoteTlsFromSnapshot), so
+ * the promoted site serves a trusted certificate the moment DNS moves, and
+ * cert-manager, finding a Secret that matches, places no order. With no
+ * restorable snapshot nothing is touched: the issuer is promoted after the
+ * flip (promoteAcmeIssuer), and cert-manager issues then.
  *
- * For each deploy-owned Certificate on the promoted cluster: read the
- * `vibecarbon.dev/promote-issuer` annotation (stamped by the deploy) and,
- * when the live issuerRef differs, patch it to the annotated ACME issuer —
- * making the promoted cluster the environment's sole ACME solver.
- *
- * TLS certificate reuse (`snapshot`): vibecarbon-tls serves the primary's
- * certificate instead of a new one (promoteTlsFromSnapshot).
- *
- * Best-effort BY CONTRACT: this runs after the point of no return (standby
- * promoted, DNS about to flip), and a promoted site serving on the
- * self-signed cert is strictly better than an aborted failover. Not-found
- * certificates (a pilot-standby never installs observability) are skipped
- * quietly; every other failure warns loudly and continues — the reconverge
- * redeploy repairs issuer ownership.
+ * A Certificate already on its ACME issuer (a resumed run that restored it)
+ * or with no promote annotation (a pre-policy cluster) is left alone. A
+ * missing one, on a resumed failover whose first run crashed between the
+ * restore's delete and its re-create, is re-created from the live Secret
+ * (recreateMissingTlsCertificate). One that cannot be read is left to the
+ * promote, which reads it again and warns. Never throws.
  *
  * @param {object} args
  * @param {string} args.promotedIp - promoted cluster master IP (kubectl target)
  * @param {string} args.sshKeyPath
  * @param {{ s3Config: object|null, projectName: string, envName: string,
- *   ca: 'prod'|'staging'|null, domain?: string|null }} [args.snapshot] - where
+ *   ca: 'prod'|'staging'|null, domain?: string|null }} args.snapshot - where
  *   the env's TLS snapshot lives; `ca` is the one the last deploy recorded
  *   (envConfig.tls.ca), `domain` the env's apex
  * @param {{kubectl?: Function, quietKubectl?: Function, readSnapshot?: Function,
@@ -542,72 +567,108 @@ export async function waitForAppTierGone(ip, sshKeyPath, deployments, opts = {})
  *   message?: (msg: string) => void, awaitLeader?: () => Promise<void>}} [args.deps] -
  *   `message` prints a command on its own line; `awaitLeader` is the settled
  *   cert-manager wait run before any Secret restore or Certificate apply
- * @returns {Promise<{patched: string[], tls?: {restored: boolean, reason: string}}>}
- *   `ns/name` keys actually re-pointed, and the TLS restore outcome when a
- *   snapshot was asked for
+ * @returns {Promise<{restored: string[], tls?: {restored: boolean, reason: string}}>}
+ *   `ns/name` keys re-created on their ACME issuer, and the TLS restore
+ *   outcome when a snapshot was judged
  */
-export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, snapshot, deps = {} }) {
+export async function restorePromotedTls({ promotedIp, sshKeyPath, snapshot, deps = {} }) {
   const {
     kubectl = sshKubectl,
     warn = (m) => p.log.warn(m),
     message = (m) => p.log.message(m),
   } = deps;
+  const key = `${TLS_NAMESPACE}/${TLS_CERTIFICATE}`;
+  let state;
+  try {
+    state = await readPromoteState({
+      kubectl,
+      promotedIp,
+      sshKeyPath,
+      namespace: TLS_NAMESPACE,
+      name: TLS_CERTIFICATE,
+    });
+  } catch (err) {
+    if (!isNotFound(err)) return { restored: [] };
+    const recreated = await recreateMissingTlsCertificate({
+      promotedIp,
+      sshKeyPath,
+      snapshot,
+      deps,
+    });
+    return { restored: recreated ? [key] : [] };
+  }
+  const { target, current, dnsNames } = state;
+  if (!target || target === current) return { restored: [] };
+  const outcome = await promoteTlsFromSnapshot({
+    promotedIp,
+    sshKeyPath,
+    snapshot,
+    target,
+    dnsNames,
+    deps,
+  });
+  if (outcome.promoted) return { restored: [key], tls: outcome.tls };
+  if (outcome.deleted) {
+    // The Certificate is gone and was not re-created: the promote after the
+    // flip finds nothing to re-point.
+    warn(
+      `promote-issuer: ${key} could not be re-created after the certificate restore ` +
+        `(${outcome.error}): no Certificate on the promoted cluster until the next deploy ` +
+        're-creates it. The site serves the restored certificate meanwhile. Run:',
+    );
+    message(`vibecarbon deploy ${snapshot.envName}`);
+  } else if (outcome.error) {
+    warn(
+      `promote-issuer: the certificate restore for ${key} stopped (${outcome.error}), so ` +
+        'cert-manager requests a new certificate once the issuer is promoted after the DNS ' +
+        'flip. If the site has no certificate after the failover, the next deploy re-creates it.',
+    );
+  }
+  return { restored: [], tls: outcome.tls };
+}
+
+/**
+ * Single-ACME-issuer policy, promote half — see
+ * src/lib/deploy/k8s/acme-issuer-policy.js for the full account.
+ *
+ * For each deploy-owned Certificate on the promoted cluster: read the
+ * `vibecarbon.dev/promote-issuer` annotation (stamped by the deploy) and,
+ * when the live issuerRef differs, patch it to the annotated ACME issuer —
+ * making the promoted cluster the environment's sole ACME solver. The
+ * failover runs it only AFTER the DNS flip: Let's Encrypt fetches an HTTP-01
+ * challenge from the address the domain resolves to, so an order placed
+ * before the flip reaches the old primary and fails, and cert-manager backs
+ * off for an hour. A Certificate the restore already re-created on its ACME
+ * issuer (restorePromotedTls) is left alone.
+ *
+ * Best-effort BY CONTRACT: this runs after the point of no return (standby
+ * promoted, DNS flipped), and a promoted site serving on the self-signed
+ * cert is strictly better than an aborted failover. Not-found certificates
+ * (a pilot-standby never installs observability) are skipped quietly; every
+ * other failure warns loudly and continues — the reconverge redeploy
+ * repairs issuer ownership.
+ *
+ * @param {object} args
+ * @param {string} args.promotedIp - promoted cluster master IP (kubectl target)
+ * @param {string} args.sshKeyPath
+ * @param {{kubectl?: Function, warn?: (msg: string) => void}} [args.deps]
+ * @returns {Promise<{patched: string[]}>} `ns/name` keys actually re-pointed
+ */
+export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, deps = {} }) {
+  const { kubectl = sshKubectl, warn = (m) => p.log.warn(m) } = deps;
   const patched = [];
-  let tls;
   for (const { namespace, name } of PROMOTABLE_CERTIFICATES) {
-    const isTls = namespace === TLS_NAMESPACE && name === TLS_CERTIFICATE;
-    let fetched = false;
     try {
-      const raw = await kubectl(promotedIp, sshKeyPath, [
-        'get',
-        'certificate',
-        name,
-        '-n',
+      const { target, current } = await readPromoteState({
+        kubectl,
+        promotedIp,
+        sshKeyPath,
         namespace,
-        '-o',
-        'json',
-      ]);
-      fetched = true;
-      const cert = JSON.parse(String(raw));
-      const target = cert?.metadata?.annotations?.[PROMOTE_ISSUER_ANNOTATION];
-      const current = cert?.spec?.issuerRef?.name;
+        name,
+      });
       // No annotation = a pre-policy cluster (or a hand-managed cert): its
       // issuerRef was never redirected, so there is nothing to promote.
       if (!target || target === current) continue;
-      if (snapshot && isTls) {
-        const outcome = await promoteTlsFromSnapshot({
-          promotedIp,
-          sshKeyPath,
-          snapshot,
-          target,
-          dnsNames: cert?.spec?.dnsNames,
-          deps,
-        });
-        tls = outcome.tls;
-        if (outcome.promoted) {
-          patched.push(`${namespace}/${name}`);
-          continue;
-        }
-        if (outcome.deleted) {
-          // The Certificate is gone and was not re-created: a patch has
-          // nothing to re-point.
-          warn(
-            `promote-issuer: ${namespace}/${name} could not be re-created after the certificate ` +
-              `restore (${outcome.error}): no Certificate on the promoted cluster until the next ` +
-              'deploy re-creates it. The site serves the restored certificate meanwhile. Run:',
-          );
-          message(`vibecarbon deploy ${snapshot.envName}`);
-          continue;
-        }
-        if (outcome.error) {
-          warn(
-            `promote-issuer: the certificate restore for ${namespace}/${name} stopped ` +
-              `(${outcome.error}); re-pointing it at its ACME issuer instead, so cert-manager ` +
-              `requests a new certificate. If the site has no certificate after the failover, ` +
-              `the next deploy re-creates it.`,
-          );
-        }
-      }
       await kubectl(promotedIp, sshKeyPath, [
         'patch',
         'certificate',
@@ -620,25 +681,15 @@ export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, snapshot, deps
       ]);
       patched.push(`${namespace}/${name}`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const notFound = /not found|no objects passed/i.test(msg);
-      if (notFound && !fetched && snapshot && isTls) {
-        // A resumed failover whose first run crashed between the
-        // certificate restore's delete and its re-create.
-        if (await recreateMissingTlsCertificate({ promotedIp, sshKeyPath, snapshot, deps })) {
-          patched.push(`${namespace}/${name}`);
-        }
-        continue;
-      }
-      if (notFound) continue;
+      if (isNotFound(err)) continue;
       warn(
         `promote-issuer: could not re-point ${namespace}/${name} at its ACME issuer ` +
-          `(${msg.split('\n')[0]}). The site serves on the standby self-signed cert until ` +
+          `(${firstErrorLine(err)}). The site serves on the standby self-signed cert until ` +
           `the next deploy reconverges issuer ownership.`,
       );
     }
   }
-  return tls ? { patched, tls } : { patched };
+  return { patched };
 }
 
 /**
@@ -2113,9 +2164,12 @@ export function walgVerdictsDetail(health) {
  *   4. catch-up, re-seed, journal, promote standby     (skipped on resume;
  *                                                       unconfirmed = kept fenced)
  *   5. scale up promoted app tier
+ *  5b. restore the saved TLS certificate               (best-effort)
  *   6. readiness gate (rollout-status each + public API probe)
  *  6b. scale down old primary                          (unplanned only, best-effort)
- *   7. DNS flip, then TERMINAL persist of the role swap
+ *   7. DNS flip
+ *  7b. promote the ACME issuer                         (only once DNS points here)
+ *   8. TERMINAL persist of the role swap
  *
  * All step seams default to the real implementations and are overridable via
  * `deps` for unit tests (the closure-injection pattern) so no ssh / iac / config
@@ -2174,6 +2228,7 @@ export async function failoverHA(
     restoreWalgRole = restorePromotedWalgRole,
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
+    restoreTls = restorePromotedTls,
     promoteIssuer = promoteAcmeIssuer,
     tlsSnapshotInputs = k8sTlsSnapshotInputs,
     // Dynamic: the GitOps module pulls in the k8s deploy (R6a).
@@ -2769,24 +2824,15 @@ export async function failoverHA(
   );
   s.stop('Promoted app tier scaled up');
 
-  // STEP 5b — Single-ACME-issuer policy, promote half (d4 2026-08-28): the
-  // pilot-standby deploy pointed this cluster's Certificate at the local
-  // self-signed issuer so two clusters never solve DNS-01 for the same names
-  // (cert-manager's DO solver keys challenge records by NAME — concurrent
-  // issuers live-lock). Patch issuerRef back to the ACME issuer stamped in
-  // the promote annotation NOW, so real-cert issuance overlaps the rollout
-  // gate below and this cluster becomes the SOLE ACME solver. Runs before
-  // the gate on purpose; best-effort inside (a promoted site serving on the
-  // self-signed cert is strictly better than an aborted failover, and the
-  // reconverge redeploy repairs issuer ownership).
-  //
-  // The TLS certificate reuse rides this step: the promoted cluster's
-  // vibecarbon-tls Secret is restored from the env's snapshot first, so the
-  // promoted site serves a trusted certificate when the DNS flip brings
-  // traffic (promoteTlsFromSnapshot). Bounded per piece; a miss re-points
-  // the Certificate as before, and cert-manager issues.
-  s.start('Promoting ACME issuer on the promoted cluster');
-  const promoted = await promoteIssuer({
+  // STEP 5b — TLS certificate reuse, before the DNS flip: the env's saved
+  // certificate goes into the promoted cluster's vibecarbon-tls Secret and
+  // its Certificate is re-created on the ACME issuer, finding a Secret that
+  // matches it, so the promoted site serves a trusted certificate the moment
+  // DNS moves (restorePromotedTls). Bounded per piece and best-effort. With
+  // no restorable snapshot nothing changes here: the Certificate stays on the
+  // standby self-signed issuer until the promote after the flip (STEP 7b).
+  s.start('Restoring the saved TLS certificate on the promoted cluster');
+  const restored = await restoreTls({
     promotedIp: servers.standby.ip,
     sshKeyPath,
     snapshot: await tlsSnapshotInputs({
@@ -2796,11 +2842,11 @@ export async function failoverHA(
     }),
   });
   s.stop(
-    promoted.patched.length > 0
-      ? `ACME issuer promoted (${promoted.patched.join(', ')})`
-      : 'ACME issuer already in place',
+    restored.restored.length > 0
+      ? `Saved TLS certificate restored (${restored.restored.join(', ')})`
+      : 'No saved TLS certificate restored',
   );
-  if (promoted.tls) p.log.info(k8sTlsRestoreLine(promoted.tls));
+  if (restored.tls) p.log.info(k8sTlsRestoreLine(restored.tls));
 
   // STEP 6 — Readiness gate: rollout-status each scaled deployment on the
   // promoted cluster, then gate on the public API actually serving. Best-effort;
@@ -2881,6 +2927,39 @@ export async function failoverHA(
       s.stop('DNS update not confirmed');
       p.log.error(dnsFlip.reason);
     }
+  }
+
+  // STEP 7b — Single-ACME-issuer policy, promote half (d4 2026-08-28): the
+  // pilot-standby deploy pointed this cluster's Certificate at the local
+  // self-signed issuer, since a cluster DNS does not point at can never pass
+  // HTTP-01. Patch issuerRef back to the ACME issuer stamped in the promote
+  // annotation only now that DNS points here: Let's Encrypt fetches the
+  // challenge from the address the domain resolves to, so an order placed
+  // before the flip reaches the old primary, fails, and cert-manager backs off
+  // for an hour. Manual DNS promotes here too, as a deploy does: cert-manager
+  // retries on its backoff once the records point here. A flip that was not
+  // confirmed does not promote; the deploy the DNS error names does. Before
+  // the swap save, so a run that dies here keeps its journal and the rerun
+  // promotes. Best-effort inside (a promoted site serving on the self-signed
+  // cert is strictly better than an aborted failover, and the reconverge
+  // redeploy repairs issuer ownership).
+  if (dnsFlip.ok) {
+    s.start('Promoting ACME issuer on the promoted cluster');
+    const promoted = await promoteIssuer({ promotedIp: servers.standby.ip, sshKeyPath });
+    s.stop(
+      promoted.patched.length > 0
+        ? `ACME issuer promoted (${promoted.patched.join(', ')})`
+        : 'ACME issuer already in place',
+    );
+  } else if (restored.restored.length === 0) {
+    // A restored certificate already sits on its ACME issuer: nothing is left
+    // to promote.
+    p.log.warn(
+      'The promoted cluster keeps its stand-in certificate until DNS points at it: ' +
+        "Let's Encrypt validates at the address the domain resolves to, and the flip was not " +
+        'confirmed. This points the records at this cluster and switches it to its ACME ' +
+        `issuer: vibecarbon deploy ${envName}`,
+    );
   }
 
   // TERMINAL WRITE: persist the role swap LAST, after the DNS flip. A rerun

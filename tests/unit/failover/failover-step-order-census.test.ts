@@ -311,6 +311,7 @@ async function runK8s(
       };
     },
     gate: async () => {},
+    restoreTls: async () => ({ restored: [] }),
     promoteIssuer: async () => ({ patched: [] }),
     swapRoles: () => {
       order.push('swap');

@@ -2,20 +2,20 @@
  * Compose-HA single-active-ACME-issuer policy (the compose mirror of
  * src/lib/deploy/k8s/acme-issuer-policy.js).
  *
- * THE PROBLEM (runs 33273372657 / 33276113128, DO compose-ha): both nodes
- * run a full Traefik with an active `letsencrypt` resolver for the SAME
- * domain, so up to four concurrent DNS-01 authorizations fight over ONE
- * `_acme-challenge.${domain}` TXT name — competing values ("Incorrect TXT
- * record ... (and 1 more) found"), then mutual cleanup ("No TXT record
- * found"). The apex/wildcard serial-ordering design in
- * renderTraefikDefaultCert is per-INSTANCE and two instances break it.
+ * THE PROBLEM: both nodes run a full Traefik with a `letsencrypt` resolver
+ * for the SAME names. Every certificate validates with HTTP-01, and Let's
+ * Encrypt fetches the challenge from the address the domain resolves to, so
+ * only the node DNS points at can pass one. An armed issuer on the other
+ * node fails every order, and each failure counts against the 5 failed
+ * validations per hostname per hour that the serving node shares.
  *
- * THE POLICY: only the primary-role node runs an armed ACME issuer. The
- * standby's Traefik points its `caserver` at a reserved-`.invalid` URL
- * (instant NXDOMAIN — zero ACME traffic, zero TXT writes, and the hostname
- * self-documents in any log tail) and serves the default cert until
- * failover re-arms it. Compose interpolation carries the whole policy:
- * `${ACME_DISARMED_CA_SERVER:-${ACME_CA_SERVER:-<prod>}}` — set on the
+ * THE POLICY: only the node DNS points at (the primary role) runs an armed
+ * ACME issuer. The standby's Traefik points its `caserver` at a
+ * reserved-`.invalid` URL (instant NXDOMAIN, zero ACME traffic, and the
+ * hostname self-documents in any log tail) and serves what its acme.json
+ * holds, or the default cert, until a failover arms it after the DNS flip.
+ * Compose interpolation carries the whole policy:
+ * `${ACME_DISARMED_CA_SERVER:-${ACME_CA_SERVER:-<prod>}}`, set on the
  * standby only, empty (= fall through) everywhere else. Verified against
  * live `docker compose config`: set → disarmed URL; empty/unset → the
  * ACME_CA_SERVER value or the prod default.
@@ -47,11 +47,10 @@ describe('policy constants', () => {
 });
 
 describe('every Traefik caserver line honors the disarm var (census over carbon compose files)', () => {
-  // Both command restatements (base prod.yml and the DNS-01 override, which
-  // must restate the full command — Compose replaces sequences) carry the
-  // caserver flag; each must consult the disarm var FIRST, then the real
-  // ACME_CA_SERVER, then the prod default. A future file that adds a
-  // caserver line is drafted automatically.
+  // The caserver flag must consult the disarm var FIRST, then the real
+  // ACME_CA_SERVER, then the prod default. Any compose file that restates the
+  // Traefik command (Compose replaces sequences) must keep that order; a
+  // future file that adds a caserver line is drafted automatically.
   const carbonDir = join(process.cwd(), 'carbon');
   const composeFiles = readdirSync(carbonDir).filter((f) => /^docker-compose.*\.ya?ml$/.test(f));
 
@@ -86,11 +85,10 @@ describe('composeTraefikRecreateShell', () => {
     expect(shell).toContain('docker compose $FLAGS up -d --no-deps traefik');
   });
 
-  it('falls back to the base files alone, with no DNS-01 override — never a bare up', () => {
+  it('falls back to the base files alone, never a bare up', () => {
     // A bare `up` resolves docker-compose.yml alone; the fallback is the
     // base + prod pair. Same class as the db recreate's wrong-`-f` hazard.
     expect(shell).toContain('-f docker-compose.yml -f docker-compose.prod.yml');
-    expect(shell).not.toContain('dns01');
   });
 
   it('refuses to recreate blind when no traefik container is running', () => {
@@ -156,81 +154,7 @@ describe('armComposeAcme / disarmComposeAcme', () => {
   });
 });
 
-describe('armComposeAcme restores the saved certificate before the recreate (failover)', () => {
-  const baseArgs = { sshKeyPath: '/k', projectName: 'demo', promotedIp: '10.0.0.2' };
-
-  it('runs the restore after the .env merge and before the recreate script', async () => {
-    const order: string[] = [];
-    const mergeEnv = vi.fn(async () => {
-      order.push('merge');
-    });
-    const restore = vi.fn(async () => {
-      order.push('restore');
-      return { restored: true, reason: 'restored from the last snapshot' };
-    });
-    const run = vi.fn(async () => {
-      order.push('recreate');
-      return 'ok';
-    });
-    const ok = await armComposeAcme({
-      ...baseArgs,
-      deps: { mergeEnv, run, restore, log: vi.fn() },
-    });
-    expect(ok).toBe(true);
-    expect(order).toEqual(['merge', 'restore', 'recreate']);
-  });
-
-  it('says the restored certificate is served when the restore landed', async () => {
-    const log = vi.fn();
-    await armComposeAcme({
-      ...baseArgs,
-      deps: {
-        mergeEnv: vi.fn().mockResolvedValue(undefined),
-        run: vi.fn().mockResolvedValue('ok'),
-        restore: async () => ({ restored: true, reason: 'restored from the last snapshot' }),
-        log,
-      },
-    });
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(log.mock.calls[0][0]).toContain('serving the restored certificate');
-    expect(log.mock.calls[0][0]).not.toContain('issuance');
-  });
-
-  it('says issuance started when nothing was restored', async () => {
-    const log = vi.fn();
-    await armComposeAcme({
-      ...baseArgs,
-      deps: {
-        mergeEnv: vi.fn().mockResolvedValue(undefined),
-        run: vi.fn().mockResolvedValue('ok'),
-        restore: async () => ({ restored: false, reason: 'no recorded CA' }),
-        log,
-      },
-    });
-    expect(log.mock.calls[0][0]).toContain('certificate issuance started');
-  });
-
-  it('a restore that throws still recreates traefik and returns true (a DR path never throws over certificates)', async () => {
-    const run = vi.fn().mockResolvedValue('ok');
-    const warn = vi.fn();
-    const ok = await armComposeAcme({
-      ...baseArgs,
-      deps: {
-        mergeEnv: vi.fn().mockResolvedValue(undefined),
-        run,
-        restore: vi.fn().mockRejectedValue(new Error('s3 exploded')),
-        log: vi.fn(),
-        warn,
-      },
-    });
-    expect(ok).toBe(true);
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(run.mock.calls[0][2]).toContain('up -d --no-deps traefik');
-    expect(warn).not.toHaveBeenCalled();
-  });
-});
-
-describe('restoreFailoverTls (the restore armComposeAcme runs on the promoted node)', () => {
+describe('restoreFailoverTls (the restore the failover runs on the promoted node, before the DNS flip)', () => {
   afterEach(() => vi.useRealTimers());
   const envConfig = (over: Record<string, unknown> = {}) => ({
     domain: 'app.example.com',
@@ -257,7 +181,7 @@ describe('restoreFailoverTls (the restore armComposeAcme runs on the promoted no
     expect(restore).not.toHaveBeenCalled();
   });
 
-  it('with a recorded CA: no prompt, the recorded CA and domain, each piece bounded, no restart', async () => {
+  it('with a recorded CA: no prompt, the recorded CA and domain, each piece bounded, traefik restarted onto it', async () => {
     const resolveS3 = vi.fn().mockResolvedValue(S3);
     const restore = vi
       .fn()
@@ -283,7 +207,10 @@ describe('restoreFailoverTls (the restore armComposeAcme runs on the promoted no
       envName: 'prod',
       ca: 'prod',
       s3Config: S3,
-      restart: false,
+      // The promoted node's Traefik loads acme.json only when it starts: the
+      // restart makes it serve the certificate before DNS moves. Its issuer
+      // stays disarmed until after the flip.
+      restart: true,
       s3ClientOptions: {
         maxAttempts: 1,
         requestHandler: { connectionTimeout: 10_000, requestTimeout: 10_000 },

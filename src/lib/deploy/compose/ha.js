@@ -2047,10 +2047,12 @@ export function composeFailoverAbortBackend({
  * fence its database read-only so no write can land after the promote,
  * capture its WAL position and wait for the standby to replay it (or reseed a
  * standby that is not streaming, proven free of the fence); arm the promoted
- * side's wal-g role (D2), journal, promote, then prove the write-guard, arm
- * the issuer, restart the app, flip DNS and persist the swap. The order is
- * fence < terminate < capture LSN < catch-up < arm < promote < DNS, as on k8s
- * (failover-step-order-census.test.ts).
+ * side's wal-g role (D2), journal, promote, then prove the write-guard,
+ * restore the saved TLS certificate, restart the app, disarm the old
+ * primary's ACME issuer, flip DNS, arm the promoted node's issuer and persist
+ * the swap. The order is fence < terminate < capture LSN < catch-up < arm <
+ * promote < DNS, as on k8s (failover-step-order-census.test.ts), and ACME
+ * disarm < DNS < ACME arm (HTTP-01 validates where DNS points).
  *
  * Refuses a role-swapped environment before any ssh call (R4), and decides
  * promote, resume or refuse from the guard before any write (R1). Once the
@@ -2583,42 +2585,26 @@ export async function failoverComposeHA(
     sshKeyPath,
     projectName,
   });
-  // Step 1a3: Arm the promoted node's ACME issuer (single-active-issuer
-  // policy — it was deployed as the standby with a disarmed caserver, so
-  // until this lands the domain would serve the Traefik default cert after
-  // the DNS flip). Runs THIS early on purpose: issuance (DNS-01 propagation
-  // included) overlaps the app-tier restart, API gate, and DNS flip below.
-  // Best-effort like the write-guard — a failed re-arm degrades TLS, it
-  // must never abort a DR flip (armComposeAcme warns with the manual fix).
-  // The saved certificate is restored first (restoreFailoverTls), so the
-  // recreated Traefik serves it at once; with none, it issues a new one.
-  s.start("Arming the promoted node's ACME issuer");
-  let tlsRestore = null;
-  const acmeArmed = await armComposeAcme({
-    promotedIp: standbyServer.ip,
-    sshKeyPath,
+  // Step 1a3: Put the saved certificate on the promoted node
+  // (restoreFailoverTls) and restart its Traefik onto it, so the node serves
+  // it the moment DNS moves. Its ACME issuer stays disarmed (it was deployed
+  // as the standby) until DNS points at it, step 3a. With no usable snapshot
+  // nothing changes here, and Traefik issues once it is armed. Never throws:
+  // a restore that fails degrades to issuance.
+  s.start('Restoring the saved TLS certificate on the promoted node');
+  const tlsRestore = await restoreFailoverTls({
+    envName,
+    envConfig,
     projectName,
-    deps: {
-      restore: async () => {
-        tlsRestore = await restoreFailoverTls({
-          envName,
-          envConfig,
-          projectName,
-          ip: standbyServer.ip,
-          sshKeyPath,
-        });
-        return tlsRestore;
-      },
-    },
+    ip: standbyServer.ip,
+    sshKeyPath,
   });
   s.stop(
-    acmeArmed
-      ? tlsRestore?.restored
-        ? 'Promoted node ACME issuer armed (saved certificate restored)'
-        : 'Promoted node ACME issuer armed (certificate issuance underway)'
-      : 'Promoted node ACME issuer NOT armed — domain serves an untrusted cert (see warning)',
+    tlsRestore.restored
+      ? 'Saved TLS certificate restored on the promoted node'
+      : 'No saved TLS certificate restored on the promoted node',
   );
-  if (tlsRestore) p.log.info(tlsRestore.line);
+  p.log.info(tlsRestore.line);
   s.stop(
     backupHealth.ok
       ? 'wal-g write-guard moved, new primary is archiving'
@@ -2786,9 +2772,10 @@ export async function failoverComposeHA(
     projectName,
     deps: { roleRun },
   });
-  // Step 2c: Disarm the retired node's ACME issuer — the swapped pair must
-  // never run two armed solvers against one challenge name (the
-  // dual-solver clobbering class, acme-role.js). Best-effort for the same
+  // Step 2c: Disarm the retired node's ACME issuer, before the DNS flip. Once
+  // DNS moves, every HTTP-01 challenge it starts would reach the promoted node
+  // and fail, spending the hostname's failed validations; until the arm in
+  // step 3a neither node can issue (acme-role.js). Best-effort for the same
   // reason the demote is.
   await disarmComposeAcme({
     oldPrimaryIp: primaryServer.ip,
@@ -2827,10 +2814,44 @@ export async function failoverComposeHA(
     p.log.message(`  ${c.dim('New IP'.padEnd(14))} ${c.bold(standbyServer.ip)} (promoted standby)`);
   }
 
+  // Step 3a: Arm the promoted node's ACME issuer, only now that DNS points at
+  // it. Let's Encrypt fetches an HTTP-01 challenge from the address the domain
+  // resolves to: armed before the flip, the first attempt reaches the old
+  // primary and fails, Traefik does not retry it until a restart, and each
+  // failure counts against the hostname's 5 failed validations per hour.
+  // Manual DNS arms here too, as a first deploy does: the tls-retry cron
+  // restarts Traefik once the records point at this node. A flip that was not
+  // confirmed does not arm; the deploy the DNS error names arms it. Before the
+  // swap save, so a run that dies here keeps its journal and the rerun arms.
+  // Best-effort: a failed arm degrades TLS and never aborts a DR flip
+  // (armComposeAcme warns with the manual fix). A restored certificate is
+  // served as is; with none, issuance starts here.
+  if (dnsFlip.ok) {
+    s.start("Arming the promoted node's ACME issuer");
+    const acmeArmed = await armComposeAcme({
+      promotedIp: standbyServer.ip,
+      sshKeyPath,
+      projectName,
+    });
+    s.stop(
+      acmeArmed
+        ? tlsRestore.restored
+          ? 'Promoted node ACME issuer armed (serving the restored certificate)'
+          : 'Promoted node ACME issuer armed (certificate issuance underway)'
+        : 'Promoted node ACME issuer NOT armed, the domain serves an untrusted certificate (see warning)',
+    );
+  } else {
+    p.log.warn(
+      `The promoted node's ACME issuer stays off until DNS points at it: Let's Encrypt ` +
+        'validates at the address the domain resolves to, and the flip was not confirmed. ' +
+        `This points the records at this node and arms it: vibecarbon deploy ${envName}`,
+    );
+  }
+
   // Persist the swap; the same save clears the failover journal (R2). Right
-  // after the DNS verdict, before the TLS wait: the journal must not stay set
-  // through minutes of certificate issuance (a crash there would leave a
-  // finished failover looking mid-flight).
+  // after the DNS verdict and the arm, before the TLS wait: the journal must
+  // not stay set through minutes of certificate issuance (a crash there would
+  // leave a finished failover looking mid-flight).
   // On resume the override was recorded by the run that skipped the proof.
   swapRoles(envName, {
     override: unproven
@@ -2857,10 +2878,10 @@ export async function failoverComposeHA(
 
   // Step 3b: TLS gate — the deploy rule, applied to failover: it is not done
   // until the domain serves a trusted certificate. The promoted node was
-  // deployed with a DISARMED issuer (single-active-issuer policy), so its
-  // ACME issuance only began at the arm in step 1a3; on slow DNS-01
-  // (DigitalOcean anycast) that can outlive downstream checks that assume
-  // the cert exists — run 33279912405's verify-failover expired mid-issuance.
+  // deployed with a DISARMED issuer (single-active-issuer policy), so with no
+  // restored certificate its ACME issuance only began at the arm in step 3a,
+  // and that can outlive downstream checks that assume the cert exists (run
+  // 33279912405's verify-failover expired mid-issuance).
   // Warn-don't-abort: the DR flip is complete and the site serves; a pending
   // cert is degraded TLS, not a failed failover. The same first-look budget
   // as deploy: past it, the promoted node's tls-retry cron (installed on both

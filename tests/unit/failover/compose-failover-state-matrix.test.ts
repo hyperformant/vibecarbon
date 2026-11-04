@@ -20,6 +20,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The first base backup on the new timeline has its own tests
@@ -101,9 +102,19 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   };
 });
 
+// The ACME arm and disarm (acme-role.js) write ACME_DISARMED_CA_SERVER into a
+// node's .env: recorded here by node and value (empty arms, the URL disarms).
+let onMergeEnv: ((ip: string, values: Record<string, string>) => void) | undefined;
 vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, mergeRemoteDotenv: vi.fn(async () => {}) };
+  return {
+    ...actual,
+    mergeRemoteDotenv: vi.fn(
+      async (ip: string, _ssh: string, _dir: string, values: Record<string, string>) => {
+        onMergeEnv?.(ip, values);
+      },
+    ),
+  };
 });
 
 vi.mock('node:fs', async (orig) => {
@@ -138,6 +149,7 @@ vi.mock('../../../src/lib/deploy/compose/tls-restore.js', async (orig) => ({
   }),
 }));
 
+const { ACME_DISARM_ENV } = await import('../../../src/lib/deploy/acme-role.js');
 const composeSsh = await import('../../../src/lib/deploy/compose/index.js');
 const { restoreFailoverTls } = await import('../../../src/lib/deploy/compose/tls-restore.js');
 const {
@@ -253,6 +265,11 @@ async function run(opts: RunOpts = {}) {
   } = opts;
   const order: string[] = [];
   onTlsRestore = () => order.push('tlsRestore');
+  onMergeEnv = (ip, values) => {
+    if (!(ACME_DISARM_ENV in values)) return;
+    const step = values[ACME_DISARM_ENV] ? 'disarmAcme' : 'armAcme';
+    order.push(`${step}@${ip === STANDBY_IP ? 'standby' : ip === PRIMARY_IP ? 'primary' : ip}`);
+  };
   const captured: Record<string, unknown> = {};
   let reseeded = false;
   const deps = {
@@ -1404,5 +1421,89 @@ describe('failoverComposeHA DNS flip is verified (R5)', () => {
     expect(rerun.thrown).toBeInstanceOf(FailoverRefusedError);
     expect(rerun.thrown?.message).toMatch(/vibecarbon deploy/);
     expectNoMutation(rerun.order);
+  });
+});
+
+describe('failoverComposeHA arms ACME only where DNS points (HTTP-01)', () => {
+  // Let's Encrypt fetches an HTTP-01 challenge from the address the domain
+  // resolves to, so only the node DNS points at can pass one. Armed before the
+  // flip, the promoted node's first attempt reaches the old primary and fails;
+  // Traefik does not retry until it restarts, and each failure counts against
+  // the 5 failed validations per hostname per hour. The saved certificate goes
+  // on before the flip, so the promoted node serves it the moment DNS moves.
+  const managedDns = () =>
+    baseEnvConfig({
+      domain: 'app.example.com',
+      dns: { provider: 'cloudflare', zoneId: 'z1' },
+      tls: { ca: 'prod' },
+    });
+  const arms = (order: string[]) => order.filter((s) => s.startsWith('armAcme'));
+
+  for (const primaryReachable of [true, false]) {
+    it(`${primaryReachable ? 'planned' : 'unplanned'}: disarm and certificate restore before the flip, the arm after it`, async () => {
+      const { order, thrown } = await run({ envConfig: managedDns(), primaryReachable });
+      expect(thrown).toBeUndefined();
+      expect(order).toContain('dns');
+      expect(order).toContain('disarmAcme@primary');
+      expect(order.indexOf('disarmAcme@primary')).toBeLessThan(order.indexOf('dns'));
+      expect(order).toContain('tlsRestore');
+      expect(order.indexOf('tlsRestore')).toBeLessThan(order.indexOf('dns'));
+      expect(arms(order)).toEqual(['armAcme@standby']);
+      expect(order.indexOf('armAcme@standby')).toBeGreaterThan(order.indexOf('dns'));
+      // Before the swap save: a run that dies in the arm keeps its journal,
+      // and the rerun resumes and arms.
+      expect(order.indexOf('armAcme@standby')).toBeLessThan(order.indexOf('swap'));
+      expect(order).not.toContain('disarmAcme@standby');
+    });
+  }
+
+  it('a DNS flip that was not confirmed never arms the promoted node, and names the deploy that does', async () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    try {
+      const { order, thrown } = await run({
+        envConfig: managedDns(),
+        dnsFlip: { ok: false, reason: 'app.example.com reads back as 10.0.0.1, not 10.0.0.2' },
+      });
+      expect(thrown?.name).toBe('FailoverDnsError');
+      expect(order.indexOf('disarmAcme@primary')).toBeLessThan(order.indexOf('dns'));
+      expect(order.indexOf('tlsRestore')).toBeLessThan(order.indexOf('dns'));
+      expect(arms(order)).toEqual([]);
+      const said = warn.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(said).toMatch(/ACME issuer/);
+      expect(said).toContain('vibecarbon deploy prod');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('an unconfirmed promote stops before the flip: nothing is armed or restored on the standby', async () => {
+    const { order, thrown } = await run({ envConfig: managedDns(), promoteVerdict: 'unknown' });
+    expect(thrown).toBeDefined();
+    expect(order).not.toContain('dns');
+    expect(arms(order)).toEqual([]);
+    expect(order).not.toContain('tlsRestore');
+  });
+
+  it('an abort before the promote never arms the standby', async () => {
+    const { order, thrown } = await run({
+      envConfig: managedDns(),
+      primaryReachable: true,
+      catchUpThrows: true,
+    });
+    expect(thrown?.message).toMatch(/Failover aborted/);
+    expect(order).not.toContain('promote');
+    expect(arms(order)).toEqual([]);
+  });
+
+  it('manual DNS: the promoted node is armed after the old primary is disarmed, never before', async () => {
+    const { order, thrown } = await run({
+      envConfig: baseEnvConfig({ domain: 'app.example.com', tls: { ca: 'prod' } }),
+    });
+    expect(thrown).toBeUndefined();
+    expect(order).not.toContain('dns');
+    expect(arms(order)).toEqual(['armAcme@standby']);
+    expect(order.indexOf('disarmAcme@primary')).toBeLessThan(order.indexOf('armAcme@standby'));
+    expect(order.indexOf('tlsRestore')).toBeLessThan(order.indexOf('armAcme@standby'));
+    expect(order.indexOf('armAcme@standby')).toBeLessThan(order.indexOf('swap'));
   });
 });

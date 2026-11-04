@@ -256,6 +256,7 @@ async function runFailover({
     kubectl: k8sRoleKubectl(),
     restoreWalgRole: async () => ({ promoted: { ok: true }, demoted: { ok: true } }),
     gate: async () => {},
+    restoreTls: async () => ({ restored: [] }),
     promoteIssuer: async () => ({ patched: [] }),
     addonRollouts: async () => ({ notReady: [] }),
     writeFence: async () => ({ ok: true }),

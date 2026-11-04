@@ -19,10 +19,11 @@
  *     in seconds, zero ACME traffic — and stamps the REAL issuer name into
  *     PROMOTE_ISSUER_ANNOTATION (on the primary too, where it is simply a
  *     record of the current ref).
- *   - Promote half (failover.js promoteAcmeIssuer): right after the promoted
- *     app tier scales up, read the annotation and patch issuerRef back — the
- *     promoted cluster becomes the sole ACME solver and issues cleanly while
- *     the readiness gate runs.
+ *   - Promote half (failover.js promoteAcmeIssuer): only after the DNS flip,
+ *     when the challenges reach the promoted cluster, read the annotation and
+ *     patch issuerRef back; the promoted cluster becomes the sole ACME
+ *     solver. A saved certificate is restored before the flip
+ *     (restorePromotedTls), so the site serves it the moment DNS moves.
  *   - Convergence: the reconverge redeploy re-runs the deploy half per the
  *     swapped roles, so issuer ownership always follows the primary role.
  *
