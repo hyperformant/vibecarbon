@@ -152,7 +152,7 @@ const SPEC = {
       name: 'lineage',
       value: '<system-identifier>',
       description:
-        "The database lineage to restore from. Each database archives in its own folder, so a destroyed and redeployed environment leaves its old backups beside the new database's. Needed only when more than one lineage holds backups; the refusal names them.",
+        "The database lineage to restore from. Each database archives in its own folder, so a destroyed and redeployed environment leaves its old backups beside the new database's. Needed only when more than one lineage holds backups and -source does not name a base backup that only one of them has; the refusal names them.",
     },
     {
       name: 'confirm',
@@ -429,6 +429,7 @@ export async function run(args, deps = {}) {
       skipPrompts: !!values.y || !process.stdin.isTTY,
       lineage: values.lineage ?? null,
       target: lineageTarget,
+      base: sourceForLineage?.base ?? null,
       resolveS3: deps.resolveS3Config ?? resolveS3Config,
       makeClient: deps.createS3Client ?? createS3Client,
     });
