@@ -106,7 +106,7 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   // negative-cache poisoning (2026-08-30 RCA, run 33287840597 + acme-iso
   // probes): a name queried before its record lands stays invisible for
   // minutes, so the check sees NXDOMAIN or a sibling order's stale token.
-  // Mitigated by the vultr legoTuningEnv row (delay floor + 300s window);
+  // Historical DNS-01 failure signature (no longer produced by deploys);
   // residual stragglers on churned names are retryable weather. Pinned to
   // vultr's NS names so the same lego wording against another provider's
   // NS does not borrow this attribution.

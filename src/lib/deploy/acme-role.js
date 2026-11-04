@@ -5,7 +5,7 @@
  * THE PROBLEM (runs 33273372657 / 33276113128, DigitalOcean compose-ha):
  * a compose-ha environment runs a full Traefik on BOTH nodes, each with an
  * armed `letsencrypt` resolver for the SAME domain. The apex and wildcard
- * certs both validate at ONE TXT name (`_acme-challenge.${domain}`);
+ * certs both validate at ONE challenge name for the domain;
  * renderTraefikDefaultCert's apex/wildcard split makes their orders serial
  * PER INSTANCE, but two instances yield up to four concurrent
  * authorizations on that one name. lego instances add competing values

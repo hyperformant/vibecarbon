@@ -31,7 +31,7 @@ import {
   buildInfraSecretData,
   INFRA_SECRET_KEYS,
 } from '../../../src/lib/deploy/k8s/k3s.js';
-import { DNS_PROVIDERS, DNS01_PROVIDERS } from '../../../src/lib/dns-provider.js';
+import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 
@@ -59,7 +59,6 @@ const SET_EXPLICITLY = (key: string) =>
 /** Every cloud and DNS credential env var name the CLI knows about. */
 function credentialEnvNames(): string[] {
   const names = new Set<string>();
-  for (const row of Object.values(DNS01_PROVIDERS)) names.add(row.tokenEnvVar);
   for (const row of Object.values(DNS_PROVIDERS)) names.add(row.tokenEnv);
   for (const Provider of Object.values(PROVIDERS)) {
     if (Provider.TOKEN_ENV) names.add(Provider.TOKEN_ENV);
@@ -128,12 +127,17 @@ describe('census (a): every key the app reads is delivered', () => {
 describe('census (b): no cloud, DNS or infra credential is an app runtime key', () => {
   it('sees the credential names it guards', () => {
     const names = credentialEnvNames();
-    for (const n of ['HETZNER_API_TOKEN', 'CF_DNS_API_TOKEN', 'DO_AUTH_TOKEN', 'SCW_SECRET_KEY']) {
+    for (const n of [
+      'HETZNER_API_TOKEN',
+      'CLOUDFLARE_API_TOKEN',
+      'DIGITALOCEAN_API_TOKEN',
+      'SCW_SECRET_KEY',
+    ]) {
       expect(names).toContain(n);
     }
   });
 
-  it('holds no DNS01 token, provider TOKEN_ENV or CLI_TOKEN_ENV', () => {
+  it('holds no DNS token, provider TOKEN_ENV or CLI_TOKEN_ENV', () => {
     const leaked = credentialEnvNames().filter((k) => APP_RUNTIME_KEYS.includes(k));
     expect(leaked).toEqual([]);
   });

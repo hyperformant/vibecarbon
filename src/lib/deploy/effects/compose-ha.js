@@ -708,8 +708,8 @@ async function haMergeWalgRole(ctx) {
   const haRemoteDir = `/opt/${projectName}`;
   // ACME_DISARM_ENV rides the same per-node merge (single-active-issuer
   // policy, acme-role.js): the standby's Traefik caserver dials the
-  // reserved-.invalid sentinel — zero ACME traffic, zero `_acme-challenge`
-  // TXT writes — so only the primary ever solves the domain's challenges.
+  // reserved-.invalid sentinel — zero ACME traffic, zero
+  // challenge writes — so only the primary ever solves the domain's challenges.
   // Explicitly EMPTY on the primary (falls through to the real CA) so a
   // re-deploy over a node that once held the standby role converges it.
   // This runs before start-compose-stack, so the first `up` already

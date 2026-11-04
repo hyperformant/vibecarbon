@@ -16,8 +16,7 @@ function textFiles(dir: string): string[] {
 // Each banned token and the files allowed to carry it. Both exceptions are
 // deliberate, not leftovers: scale.js lists the DNS-01 env keys it strips from
 // an old server's .env, and the compose upload removes a stale override file
-// an older deploy left behind. dns-provider.js carries the DNS01_PROVIDERS
-// table until Task 5 deletes it.
+// an older deploy left behind.
 const BANNED: Array<[string, RegExp, string[]]> = [
   [
     'docker-compose.dns01.prod.yml',
@@ -26,8 +25,8 @@ const BANNED: Array<[string, RegExp, string[]]> = [
   ],
   ['useDnsChallenge', /useDnsChallenge/, []],
   ['dnsChallenge', /\bdnsChallenge\b/, []],
-  ['ACME_DNS_PROVIDER', /ACME_DNS_PROVIDER/, ['src/scale.js', 'src/lib/dns-provider.js']],
-  ['dnschallenge', /dnschallenge/i, ['src/lib/dns-provider.js']],
+  ['ACME_DNS_PROVIDER', /ACME_DNS_PROVIDER/, ['src/scale.js']],
+  ['dnschallenge', /dnschallenge/i, []],
 ];
 
 describe('compose solves HTTP-01 only', () => {

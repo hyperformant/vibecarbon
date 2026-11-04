@@ -6,7 +6,7 @@ import {
   APP_RUNTIME_KEYS,
 } from '../../../src/lib/deploy/app-runtime-env.js';
 import { INFRA_SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
-import { DNS_PROVIDERS, DNS01_PROVIDERS } from '../../../src/lib/dns-provider.js';
+import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 
 // Guards that the deploy workflow's apply-secrets step stays self-syncing —
@@ -52,7 +52,6 @@ describe('deploy.yml splits the app Secret from the infra Secret', () => {
 
   it('drops every cloud and DNS token the CLI knows about', () => {
     const names = new Set<string>();
-    for (const row of Object.values(DNS01_PROVIDERS)) names.add(row.tokenEnvVar);
     for (const row of Object.values(DNS_PROVIDERS)) names.add(row.tokenEnv);
     for (const P of Object.values(PROVIDERS)) {
       if (P.TOKEN_ENV) names.add(P.TOKEN_ENV);
@@ -61,6 +60,11 @@ describe('deploy.yml splits the app Secret from the infra Secret', () => {
     expect(names.size).toBeGreaterThan(10);
     const kept = [...names].filter((n) => !new RegExp(`\\.${n}\\b`).test(delList));
     expect(kept, 'tokens the app Secret would carry').toEqual([]);
+  });
+
+  it('no longer lists the names only DNS-01 used (lego token vars)', () => {
+    expect(delList).not.toContain('CF_DNS_API_TOKEN');
+    expect(delList).not.toContain('DO_AUTH_TOKEN');
   });
 
   it('selects exactly APP_RUNTIME_KEYS and the extras for the app Secret', () => {

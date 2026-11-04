@@ -65,6 +65,34 @@ describe('cloudflare upsertApexAndWildcard', () => {
   });
 });
 
+describe('cloudflare setupSimple / setupHA', () => {
+  // HTTP-01 needs the record DNS-only: an orange-cloud apex would answer the
+  // challenge from Cloudflare's edge instead of the origin.
+  it.each(['setupSimple', 'setupHA'] as const)(
+    "%s creates a fresh domain's A records with proxied:false",
+    async (fn) => {
+      fetchMock.mockImplementation(async (_url: string, init?: { method?: string }) =>
+        init?.method === 'POST' || !init?.method
+          ? ok({ result: init?.method === 'POST' ? { id: 'r' } : [] })
+          : ok({ result: { id: 'r' } }),
+      );
+      const mod = await import('../../../src/lib/cloudflare-dns.js');
+      if (fn === 'setupSimple') {
+        await mod.setupSimple('tok', 'zone', 'e1.example.com', '1.2.3.4', { onProgress: () => {} });
+      } else {
+        await mod.setupHA('tok', 'zone', 'e1.example.com', [{ name: 's1', ip: '1.2.3.4' }], {
+          onProgress: () => {},
+        });
+      }
+      const aCreates = fetchMock.mock.calls
+        .filter(([url, init]) => init?.method === 'POST' && String(url).endsWith('/dns_records'))
+        .map(([, init]) => JSON.parse(init.body));
+      expect(aCreates.map((b) => b.name)).toEqual(['e1.example.com', '*.e1.example.com']);
+      for (const body of aCreates) expect(body.proxied).toBe(false);
+    },
+  );
+});
+
 describe('hetzner-dns upsertApexAndWildcard', () => {
   it('fetches the zone name once, then creates apex + wildcard rrsets at ttl:60', async () => {
     // Zone name matches the domain (the common case — the DNS zone is

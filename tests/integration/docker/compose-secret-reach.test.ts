@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildAppRuntimeEnv } from '../../../src/lib/deploy/app-runtime-env.js';
-import { DNS_PROVIDERS, DNS01_PROVIDERS } from '../../../src/lib/dns-provider.js';
+import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 
@@ -58,11 +58,18 @@ const ADDON_FILES = ADDONS.flatMap((name) =>
     })),
 );
 
-const dnsTokenNames = [...new Set(Object.values(DNS01_PROVIDERS).map((r) => r.tokenEnvVar))];
+// The DNS token names a server must never hold: every operator DNS credential,
+// plus the two names the retired DNS-01 deploys wrote that no provider row has.
+const dnsTokenNames = [
+  ...new Set([
+    ...Object.values(DNS_PROVIDERS).map((r) => r.tokenEnv),
+    'CF_DNS_API_TOKEN',
+    'DO_AUTH_TOKEN',
+  ]),
+];
 const providerTokenNames = [
   ...new Set([
     ...dnsTokenNames,
-    ...Object.values(DNS_PROVIDERS).map((r) => r.tokenEnv),
     ...Object.values(PROVIDERS).flatMap((P) => [P.TOKEN_ENV, P.CLI_TOKEN_ENV].filter(Boolean)),
   ]),
 ];

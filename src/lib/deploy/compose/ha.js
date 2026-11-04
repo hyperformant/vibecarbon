@@ -13,7 +13,6 @@ import { existsSync, rmSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { reapChallengeRecords } from '../../acme-challenge.js';
 import { exitCancelled, exitDeclined } from '../../cli/exit-guard.js';
 import { resolvePrimary } from '../../cli/resolve-primary.js';
 import { c } from '../../colors.js';
@@ -1094,25 +1093,6 @@ export async function destroyComposeHA(options) {
         // The 0.0.0.0 warm-up sentinel is always ours to reap — a deploy
         // that died pre-provision leaves records no server ever "owned".
         await dns.deleteApexAndWildcard(token, zoneId, envConfig.domain, [...ownedIps, '0.0.0.0']);
-        // The ACME client's DNS-01 residue. Written by lego/cert-manager, so
-        // the ownership-filtered delete above structurally cannot reach it —
-        // which is why `_acme-challenge.<env>` TXTs accumulated across every
-        // destroy until the 2026-08-10 audit found twelve tokens in one
-        // (see lib/acme-challenge.js). Reported, never silently skipped: a
-        // stale challenge record shadows the next DNS-01 wildcard validation.
-        const challenge = await reapChallengeRecords({
-          dns,
-          token,
-          zoneId,
-          domain: envConfig.domain,
-        });
-        if (challenge.error) {
-          noteLeak(
-            'dns-record',
-            `_acme-challenge.${envConfig.domain} (${row.name} zone ${zoneId})`,
-            `challenge-record delete failed: ${challenge.error.message}`,
-          );
-        }
         if (typeof dns.deleteHealthCheck === 'function') {
           await Promise.allSettled(
             (envConfig.servers || []).map((server) =>
@@ -2546,7 +2526,7 @@ export async function failoverComposeHA(
     projectName,
   });
   // Step 2c: Disarm the retired node's ACME issuer — the swapped pair must
-  // never run two armed solvers against one `_acme-challenge` TXT name (the
+  // never run two armed solvers against one challenge name (the
   // dual-solver clobbering class, acme-role.js). Best-effort for the same
   // reason the demote is.
   await disarmComposeAcme({

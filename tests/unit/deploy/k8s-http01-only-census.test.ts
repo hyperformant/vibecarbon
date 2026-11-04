@@ -58,9 +58,11 @@ describe('k8s manifests are HTTP-01 only', () => {
       ['dns01-recursive-nameservers', /dns01-recursive-nameservers/],
       ['cert-manager-webhook-hetzner', /cert-manager-webhook-hetzner/],
       ['findStalledAcmeChallenges', /findStalledAcmeChallenges/],
+      // A Secret identity: a `secretName:` / `secretKeyRef` reference, or the
+      // `name:` of a `kind: Secret` document. Never a bare `name: hetzner`.
       [
-        'DNS provider Secret',
-        /name:\s*['"]?(digitalocean-dns|cloudflare-api-token|hetzner)['"]?\s*$/m,
+        'DNS provider Secret reference',
+        /secretName:\s*['"]?(digitalocean-dns|cloudflare-api-token|hetzner|linode-dns|vultr-dns|scaleway-dns)['"]?\s*$/m,
       ],
     ];
     const hits: string[] = [];
@@ -69,6 +71,21 @@ describe('k8s manifests are HTTP-01 only', () => {
       for (const [label, re] of banned) if (re.test(text)) hits.push(`${file}: ${label}`);
     }
     expect(hits).toEqual([]);
+  });
+
+  it('no Secret document carries a DNS provider token name', () => {
+    const names = [
+      'digitalocean-dns',
+      'cloudflare-api-token',
+      'hetzner',
+      'linode-dns',
+      'vultr-dns',
+      'scaleway-dns',
+    ];
+    const secrets = docs()
+      .filter((d) => d.doc.kind === 'Secret')
+      .map((d) => d.doc.metadata?.name);
+    for (const n of names) expect(secrets).not.toContain(n);
   });
 
   it('no ClusterIssuer has a dns01 solver', () => {

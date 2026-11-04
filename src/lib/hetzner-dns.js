@@ -14,7 +14,6 @@
  * API Documentation: https://docs.hetzner.cloud/
  */
 
-import { challengeRecordNames } from './acme-challenge.js';
 import { spinner } from './cli/progress.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { HetznerProvider } from './providers/hetzner.js';
@@ -419,55 +418,6 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
     deletedAny: root.deleted > 0 || wildcard.deleted > 0,
     preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
   };
-}
-
-/**
- * Delete this environment's leftover DNS-01 challenge TXT records.
- *
- * Ownership is by NAME, not by value — see acme-challenge.js for why the
- * `ownedIps` filter that guards the A-record path cannot apply to an opaque
- * ACME token, and why the exact name is used instead of a subtree sweep.
- *
- * Hetzner's rrset model works in our favour here: the twelve accumulated
- * tokens the 2026-08-10 audit found under `_acme-challenge.e1` are ONE rrset,
- * so one DELETE removes the pile.
- *
- * The name segment is interpolated RAW. Percent-encoding it 404s: live
- * confirmation 2026-08-10 on this very endpoint — `%2A.ci3` → 404, literal
- * `*.ci3` → 201. An encoded name would make this delete a silent no-op.
- *
- * @param {string} apiToken - Hetzner Cloud API token
- * @param {string} zoneId - Zone ID
- * @param {string} domain - the environment's domain
- * @returns {Promise<{deleted: number, names: string[]}>} count of TXT values
- *   removed, and the record names they were removed from.
- */
-export async function deleteChallengeRecords(apiToken, zoneId, domain) {
-  const wanted = challengeRecordNames(domain);
-  if (wanted.length === 0) return { deleted: 0, names: [] };
-
-  const zoneName = await zoneNameForId(apiToken, zoneId);
-  const rrsets = await getRrsets(apiToken, zoneId);
-  let deleted = 0;
-  const names = [];
-
-  for (const fqdn of wanted) {
-    const relativeName = fqdnToRelative(fqdn, zoneName);
-    const match = rrsets.find((r) => r.type === 'TXT' && r.name === relativeName);
-    if (!match) continue;
-    const response = await fetchWithRetry(
-      `${API_BASE}/zones/${zoneId}/rrsets/${relativeName}/TXT`,
-      {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${apiToken}` },
-      },
-    );
-    if (!response.ok) continue;
-    deleted += (match.records || []).length || 1;
-    names.push(fqdn);
-  }
-
-  return { deleted, names };
 }
 
 /**

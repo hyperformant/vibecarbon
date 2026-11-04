@@ -155,8 +155,8 @@ jobs:
                 .KUBECONFIG_B64,
                 .GITHUB_TOKEN, .github_token,
                 .HETZNER_API_TOKEN, .HCLOUD_TOKEN,
-                .CLOUDFLARE_API_TOKEN, .CF_DNS_API_TOKEN,
-                .DIGITALOCEAN_API_TOKEN, .DIGITALOCEAN_TOKEN, .DO_AUTH_TOKEN,
+                .CLOUDFLARE_API_TOKEN,
+                .DIGITALOCEAN_API_TOKEN, .DIGITALOCEAN_TOKEN,
                 .LINODE_API_TOKEN, .LINODE_TOKEN,
                 .VULTR_API_TOKEN, .VULTR_API_KEY,
                 .SCALEWAY_SECRET_KEY, .SCW_SECRET_KEY

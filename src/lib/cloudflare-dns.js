@@ -4,7 +4,6 @@
  */
 
 import * as p from '@clack/prompts';
-import { challengeRecordNames } from './acme-challenge.js';
 import { spinner } from './cli/progress.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
@@ -294,54 +293,6 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
     deletedAny: root.deleted > 0 || wildcard.deleted > 0,
     preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
   };
-}
-
-/**
- * Delete this environment's leftover DNS-01 challenge TXT records.
- *
- * Ownership is by NAME, not by value — see acme-challenge.js for why the
- * `ownedIps` filter that guards the A-record path cannot apply to an opaque
- * ACME token, and why the exact name is used instead of a subtree sweep.
- *
- * Cloudflare stores one row per value, so the 11 stray `_acme-challenge.*`
- * TXTs the 2026-08-10 audit found on appcarbon.dev are 11 deletes, not one.
- *
- * @param {string} apiToken - Cloudflare API token
- * @param {string} zoneId - Zone ID
- * @param {string} domain - the environment's domain
- * @returns {Promise<{deleted: number, names: string[]}>}
- */
-export async function deleteChallengeRecords(apiToken, zoneId, domain) {
-  const headers = {
-    Authorization: `Bearer ${apiToken}`,
-    'Content-Type': 'application/json',
-  };
-  let deleted = 0;
-  const names = [];
-
-  for (const fqdn of challengeRecordNames(domain)) {
-    const listResponse = await fetchWithRetry(
-      `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=TXT&name=${fqdn}`,
-      { headers },
-    );
-    const listData = await listResponse.json();
-    const records = (listData.result || []).filter((r) => r.name === fqdn && r.type === 'TXT');
-
-    let removedHere = 0;
-    for (const record of records) {
-      const response = await fetchWithRetry(
-        `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${record.id}`,
-        { method: 'DELETE', headers },
-      );
-      if (response.ok) removedHere += 1;
-    }
-    if (removedHere > 0) {
-      deleted += removedHere;
-      names.push(fqdn);
-    }
-  }
-
-  return { deleted, names };
 }
 
 /**

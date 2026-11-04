@@ -25,7 +25,6 @@ process.on('SIGTERM', () => {
   process.exit(143);
 });
 
-import { reapChallengeRecords } from './lib/acme-challenge.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
@@ -2039,31 +2038,8 @@ export async function cleanupDnsRecords({ envConfig, ownedIps, providerToken, s,
       resourceClass: 'dns-record',
       resource: `${envConfig.domain} (${row.name} zone ${zoneId})`,
       reason: `delete failed: ${error.message}`,
-      hint: 'Remove the apex and wildcard records by hand; they now point at a released IP, and a stale record shadows the next deploy (and its DNS-01 wildcard challenge).',
+      hint: 'Remove the apex and wildcard records by hand; they now point at a released IP, and a stale record shadows the next deploy.',
     });
-  }
-
-  // Reap the DNS-01 challenge residue. These are the ACME client's records,
-  // not ours, which is exactly why the A-record delete above never touched
-  // them and why they accumulated across every destroy (2026-08-10 audit: 12
-  // tokens under one `_acme-challenge.e1`). See lib/acme-challenge.js.
-  s.start(`Deleting ACME challenge records for ${envConfig.domain}`);
-  const challenge = await reapChallengeRecords({ dns, token, zoneId, domain: envConfig.domain });
-  if (challenge.error) {
-    s.stop(`ACME challenge cleanup failed: ${challenge.error.message}`);
-    results.leaks.leak({
-      resourceClass: 'dns-record',
-      resource: `_acme-challenge.${envConfig.domain} (${row.name} zone ${zoneId})`,
-      reason: `challenge-record delete failed: ${challenge.error.message}`,
-      hint: 'Delete the `_acme-challenge` TXT record by hand — a stale one shadows the next DNS-01 wildcard challenge for this name.',
-    });
-  } else {
-    results.dns.push(...challenge.names);
-    s.stop(
-      challenge.deleted > 0
-        ? `ACME challenge records deleted (${challenge.deleted} token(s))`
-        : 'No ACME challenge records found',
-    );
   }
 
   // Provider-specific extra: deploy-created health checks (Cloudflare's

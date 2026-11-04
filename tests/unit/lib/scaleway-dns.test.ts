@@ -372,28 +372,6 @@ describe('scaleway-dns deleteApexAndWildcard', () => {
   });
 });
 
-describe('scaleway-dns deleteChallengeRecords', () => {
-  it('removes every accumulated token under the exact challenge name, in one PATCH', async () => {
-    fetchMock.mockResolvedValueOnce(
-      records([
-        { id: 't1', name: '_acme-challenge.e1', type: 'TXT', data: '"one"' },
-        { id: 't2', name: '_acme-challenge.e1', type: 'TXT', data: '"two"' },
-        // A neighbour's challenge record in the same zone — never ours.
-        { id: 't3', name: '_acme-challenge.e2', type: 'TXT', data: '"other"' },
-      ]),
-    );
-    fetchMock.mockResolvedValueOnce(patched([]));
-
-    const { deleteChallengeRecords } = await import(MOD);
-    const result = await deleteChallengeRecords('secret', ZONE, 'e1.example.com');
-
-    expect(result).toEqual({ deleted: 2, names: ['_acme-challenge.e1.example.com'] });
-    expect(bodyOf(1)).toEqual({
-      changes: [{ delete: { id: 't1' } }, { delete: { id: 't2' } }],
-    });
-  });
-});
-
 describe('scaleway-dns upsertApexAndWildcard', () => {
   it('repoints both records at the new IP at ttl 60', async () => {
     fetchMock
