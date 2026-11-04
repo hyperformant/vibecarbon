@@ -27,13 +27,13 @@
  * output. Nothing here logs: callers print the one info line (tlsRestoreLine).
  */
 import { sshRun } from '../../ssh.js';
-import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import {
   DR_S3_CLIENT_OPTIONS,
   inspectComposeAcme,
   readTlsSnapshot,
   tlsSnapshotKey,
 } from '../tls-snapshot.js';
+import { VC_COMPOSE, VC_COMPOSE_SCRIPT } from './command.js';
 
 /** The reason a restore leaves a live apex certificate alone. */
 export const LIVE_CERTIFICATE_PRESENT = 'live certificate present';
@@ -60,8 +60,8 @@ const CHECK_TIMEOUT_MS = 300_000; // a fresh server pulls the traefik image here
 const WRITE_TIMEOUT_MS = 120_000;
 const SNAPSHOT_TIMEOUT_MS = 180_000; // tls-snapshot.sh bounds its own upload at 120s
 
-/** Exit status of a server with no project dir or no `-f` set in reconcile.sh. */
-const NO_COMPOSE_FLAGS_EXIT = 20;
+/** Exit status of a server with no project dir or no vc-compose in it. */
+const NO_COMPOSE_COMMAND_EXIT = 20;
 
 /**
  * The ERE matching an acme.json certificate entry for the apex domain. Every
@@ -73,16 +73,16 @@ function apexPattern(domain) {
 }
 
 /**
- * Shell prelude: the project dir and reconcile.sh's own `-f` set, so `run`
- * renders the stack the way reconcile does. letsencrypt_data is declared in
- * docker-compose.prod.yml; with a guessed set the volume would differ. An
- * empty set refuses (NO_COMPOSE_FLAGS_EXIT) instead of guessing.
+ * Shell prelude: the project dir, where vc-compose (compose/command.js) runs
+ * `run` against the stack reconcile renders. letsencrypt_data is declared in
+ * docker-compose.prod.yml; with a guessed set the volume would differ. A
+ * server without vc-compose refuses (NO_COMPOSE_COMMAND_EXIT) instead of
+ * guessing.
  */
 function composePrelude(projectName) {
   return (
-    `cd /opt/${projectName} || exit ${NO_COMPOSE_FLAGS_EXIT}\n` +
-    `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1)\n` +
-    `[ -n "$FLAGS" ] || exit ${NO_COMPOSE_FLAGS_EXIT}\n`
+    `cd /opt/${projectName} || exit ${NO_COMPOSE_COMMAND_EXIT}\n` +
+    `[ -f ${VC_COMPOSE_SCRIPT} ] || exit ${NO_COMPOSE_COMMAND_EXIT}\n`
   );
 }
 
@@ -91,7 +91,7 @@ function liveCheckScript(projectName, domain) {
   return (
     'set -uo pipefail\n' +
     composePrelude(projectName) +
-    'docker compose $FLAGS run --rm --no-deps -T --entrypoint sh traefik -c ' +
+    `${VC_COMPOSE} run --rm --no-deps -T --entrypoint sh traefik -c ` +
     `'if grep -Eq "$1" /letsencrypt/acme.json 2>/dev/null; then echo present; else echo absent; fi' ` +
     `sh '${apexPattern(domain)}' </dev/null\n`
   );
@@ -115,13 +115,13 @@ function writeScript(projectName, domain, bytes, restart) {
     'set -euo pipefail\n' +
     'umask 077\n' +
     composePrelude(projectName) +
-    `docker compose $FLAGS run --rm --no-deps -T --entrypoint sh traefik -c '${inner}' ` +
+    `${VC_COMPOSE} run --rm --no-deps -T --entrypoint sh traefik -c '${inner}' ` +
     `sh '${apexPattern(domain)}' ${bytes}\n` +
     // A running Traefik read acme.json at start; restart it to load the file.
     // A stopped one loads it when start-compose-stack brings it up.
     (restart
-      ? 'if [ -n "$(docker compose $FLAGS ps -q traefik 2>/dev/null)" ]; then\n' +
-        '  docker compose $FLAGS restart traefik >/dev/null 2>&1 || exit 5\n' +
+      ? `if [ -n "$(${VC_COMPOSE} ps -q traefik 2>/dev/null)" ]; then\n` +
+        `  ${VC_COMPOSE} restart traefik >/dev/null 2>&1 || exit 5\n` +
         'fi\n'
       : '')
   );
@@ -161,8 +161,8 @@ export async function readLiveApexCertificate({
   } catch (err) {
     if (err?.timedOut) return { state: 'unknown', reason: 'live check timed out', timedOut: true };
     return unknown(
-      err?.status === NO_COMPOSE_FLAGS_EXIT
-        ? 'reconcile.sh on the server has no compose files'
+      err?.status === NO_COMPOSE_COMMAND_EXIT
+        ? `the server has no ${VC_COMPOSE_SCRIPT} yet, a deploy writes it`
         : 'could not check the live certificate',
     );
   }

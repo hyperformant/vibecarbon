@@ -37,7 +37,7 @@ const VIBECARBON_THEN_PUNCT = new RegExp(
 // hosts and key=value pairs, so only the closing . , ; is looked for.
 const TOOL_ARGS = String.raw`(?: [A-Za-z0-9_@:=/.-]*[A-Za-z0-9_/-]| -[a-z-]+| <[a-z-]+>| \$\{[^}]+\})*`;
 const TOOL_THEN_PUNCT = new RegExp(
-  String.raw`\b(?:kubectl (?:get|exec|delete|apply|logs|scale|rollout|describe|patch|-n)|docker compose (?:up|down|start|stop|restart|logs|exec|ps|rm|pull)|ssh (?:-[a-z] \S+ )*[\w.-]+@[\w.\$\{\}-]+)${TOOL_ARGS}[.,;](?=[\s'"\x60)]|$)`,
+  String.raw`\b(?:kubectl (?:get|exec|delete|apply|logs|scale|rollout|describe|patch|-n)|(?:docker compose|sh vc-compose) (?:up|down|start|stop|restart|logs|exec|ps|rm|pull)|ssh (?:-[a-z] \S+ )*[\w.-]+@[\w.\$\{\}-]+)${TOOL_ARGS}[.,;](?=[\s'"\x60)]|$)`,
 );
 const QUOTED_THEN_PUNCT = /'[.,;:]["`]/;
 
@@ -95,6 +95,7 @@ describe('copyable commands are never followed by punctuation', () => {
       `\`run vibecarbon deploy ${env} first, which points it\``,
       "'check kubectl get pods -n vibecarbon, then retry',",
       "'run docker compose logs db.',",
+      "'run sh vc-compose logs db.',",
       "'ssh root@10.0.0.1; then look',",
     ]) {
       expect(offenders(bad, 'x.js'), bad).toHaveLength(1);

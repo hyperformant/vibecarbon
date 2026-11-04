@@ -20,7 +20,9 @@
  * live `docker compose config`: set → disarmed URL; empty/unset → the
  * ACME_CA_SERVER value or the prod default.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -31,10 +33,12 @@ import {
   composeTraefikRecreateShell,
   disarmComposeAcme,
 } from '../../../src/lib/deploy/acme-role.js';
+import { composeFileFlags } from '../../../src/lib/deploy/bundle.js';
 import {
   restoreComposeTls,
   restoreFailoverTls,
 } from '../../../src/lib/deploy/compose/tls-restore.js';
+import { writeVcCompose } from '../../_shared/vc-compose-stub.js';
 import { acmeJson } from './_tls-fixtures.ts';
 
 describe('policy constants', () => {
@@ -80,15 +84,37 @@ describe('every Traefik caserver line honors the disarm var (census over carbon 
 describe('composeTraefikRecreateShell', () => {
   const shell = composeTraefikRecreateShell('/opt/demo');
 
-  it('recreates traefik with the -f set the running container was created with', () => {
-    expect(shell).toContain('com.docker.compose.project.config_files');
-    expect(shell).toContain('docker compose $FLAGS up -d --no-deps traefik');
+  it('recreates traefik through vc-compose, never a bare up', () => {
+    expect(shell).toContain('sh vc-compose up -d --no-deps traefik');
+    expect(shell).not.toMatch(/\bdocker compose\b/);
   });
 
-  it('falls back to the base files alone, never a bare up', () => {
-    // A bare `up` resolves docker-compose.yml alone; the fallback is the
-    // base + prod pair. Same class as the db recreate's wrong-`-f` hazard.
-    expect(shell).toContain('-f docker-compose.yml -f docker-compose.prod.yml');
+  it('the recreate keeps the add-on overlays the node runs (vc-compose carries the deploy set)', () => {
+    // A bare `up` resolves docker-compose.yml alone and would recreate
+    // Traefik WITHOUT the prod file and the add-on overlays the node runs.
+    // vc-compose carries the deploy's own set.
+    const dir = mkdtempSync(join(tmpdir(), 'vc-acme-role-'));
+    try {
+      writeVcCompose(dir, composeFileFlags({ observability: true }));
+      writeFileSync(
+        join(dir, 'docker'),
+        `#!/bin/sh\necho "$*" >> "${dir}/calls"\ncase "$*" in *" ps -q traefik") echo cid ;; esac\nexit 0\n`,
+      );
+      chmodSync(join(dir, 'docker'), 0o755);
+      const r = spawnSync('bash', ['-c', composeTraefikRecreateShell(dir)], {
+        encoding: 'utf-8',
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const up = readFileSync(join(dir, 'calls'), 'utf-8')
+        .split('\n')
+        .find((l) => l.endsWith(' up -d --no-deps traefik'));
+      expect(up).toBe(
+        'compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.yml -f docker-compose.observability.prod.yml up -d --no-deps traefik',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('refuses to recreate blind when no traefik container is running', () => {
@@ -142,7 +168,7 @@ describe('armComposeAcme / disarmComposeAcme', () => {
     });
     const said = String(warn.mock.calls[0][0]);
     expect(said).toContain('ran on the live node and may have left Traefik stopped');
-    expect(said).toContain("ssh root@10.0.0.2 'cd /opt/demo && docker compose ps traefik'");
+    expect(said).toContain("ssh root@10.0.0.2 'cd /opt/demo && sh vc-compose ps traefik'");
     expect(said).toContain('`vibecarbon deploy <env>`');
   });
 

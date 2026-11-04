@@ -218,6 +218,9 @@ describe('renderBundle DNS-01 challenge', () => {
     try {
       const reconcile = readFileSync(join(stage, 'reconcile.sh'), 'utf-8');
       expect(reconcile).not.toContain('dns01');
+      // vc-compose carries the deploy's -f set: no DNS-01 override in it.
+      const composeCommand = readFileSync(join(stage, 'vc-compose'), 'utf-8');
+      expect(composeCommand).not.toContain('dns01');
       expect(existsSync(join(stage, 'docker-compose.dns01.prod.yml'))).toBe(false);
 
       const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));

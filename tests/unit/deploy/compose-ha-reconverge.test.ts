@@ -363,7 +363,7 @@ const envOnDisk = () =>
 
 /** A command that stops, restarts, recreates or starts the db service. */
 const DB_LIFECYCLE =
-  /docker compose\b[^;&|]*\b(stop|restart|up|rm|kill|create|start)\b[^;&|]*\sdb(\s|$)|--force-recreate/;
+  /(?:docker compose|sh vc-compose)\b[^;&|]*\b(stop|restart|up|rm|kill|create|start)\b[^;&|]*\sdb(\s|$)|--force-recreate/;
 
 beforeEach(() => {
   h.calls.length = 0;

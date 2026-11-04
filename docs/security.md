@@ -145,10 +145,10 @@ It signs the app's session cookies and auth tokens (email verification, password
 1. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64').replace(/[+/=]/g, 'x'))"`
 2. Set it on the role with psql's `\password`, which sends a SCRAM verifier and never the password itself, so it cannot reach `pg_stat_activity`, the server log or pg_stat_statements. From the project directory on the server (Kubernetes: `kubectl exec -it -n vibecarbon <db-pod> -- psql -U postgres`):
    ```bash
-   docker compose exec db psql -U postgres -c '\password postgres'
+   sh vc-compose exec db psql -U postgres -c '\password postgres'
    ```
    It prompts for the new value twice. Avoid `ALTER ROLE ... PASSWORD '...'`: the literal travels in plain text, a superuser sees it in `pg_stat_activity` while it runs, and if the statement fails (a typo, or a quote in the password breaking the literal), the server log records the whole statement, literal included (`log_min_error_statement = error`), and with the observability add-on that log reaches Loki. If you must script it, run `SET log_min_error_statement = panic;` and `SET log_min_duration_statement = -1;` first in the same session (a slow statement is logged with its literal too), and read the value with psql's `\getenv pw MY_ENV_VAR` and `:'pw'` rather than `psql -v pw=...`, which puts it in the process list. The add-on init scripts do all three.
-3. Update `DB_PASSWORD` / `POSTGRES_PASSWORD` in `.env.local` and `.env`, then `docker compose up -d` so the migrate step runs with the new value (Kubernetes: `vibecarbon deploy <env>` re-renders `vibecarbon-infra-secrets` and rolls the app pods, whose migrate step reads it; the db pod reads it at start, so it takes the new value on its next restart).
+3. Update `DB_PASSWORD` / `POSTGRES_PASSWORD` in `.env.local` and `.env`, then `sh vc-compose up -d` on the server so the migrate step runs with the new value (Kubernetes: `vibecarbon deploy <env>` re-renders `vibecarbon-infra-secrets` and rolls the app pods, whose migrate step reads it; the db pod reads it at start, so it takes the new value on its next restart).
 4. Verify the app reconnects (`/api/health/ready`).
 
 #### `METABASE_DB_PASSWORD` / `N8N_DB_PASSWORD`
@@ -156,8 +156,8 @@ It signs the app's session cookies and auth tokens (email verification, password
 Each add-on's role has its own password, so a leaked add-on credential is that role's reach only (below), never the superuser's.
 
 1. Generate one as above.
-2. Set it on the role: `docker compose exec db psql -U postgres -c '\password metabase'` (or `n8n`). Locally, `vibecarbon up` does this for you from `.env.local`: it reruns the add-on's init script on every start.
-3. Update the key in `.env.local` and `.env`, then `docker compose up -d` so the add-on is recreated with it (Kubernetes: `vibecarbon deploy <env>` re-renders `vibecarbon-infra-secrets`; then restart the add-on's Deployment).
+2. Set it on the role: `sh vc-compose exec db psql -U postgres -c '\password metabase'` (or `n8n`). Locally, `vibecarbon up` does this for you from `.env.local`: it reruns the add-on's init script on every start.
+3. Update the key in `.env.local` and `.env`, then `sh vc-compose up -d` on the server so the add-on is recreated with it (Kubernetes: `vibecarbon deploy <env>` re-renders `vibecarbon-infra-secrets`; then restart the add-on's Deployment).
 
 #### `HETZNER_API_TOKEN`
 
@@ -172,7 +172,7 @@ Each add-on's role has its own password, so a leaked add-on credential is that r
 1. Generate (same command as `DB_PASSWORD`).
 2. `CONFIG SET requirepass '…' && CONFIG REWRITE` inside the Redis container.
 3. Update `REDIS_PASSWORD` / `REDIS_URL` in `.env.local`.
-4. `docker compose restart app` (or `kubectl rollout restart deployment/app -n vibecarbon`).
+4. `sh vc-compose restart app` on the server (or `kubectl rollout restart deployment/app -n vibecarbon`).
 
 ### Access control
 
@@ -285,7 +285,7 @@ Postgres `pg_hba.conf`: the local socket and `127.0.0.1`/`::1` are `trust`,
 every other address needs `scram-sha-256`. Anything already running inside
 the db container (on k8s, the db pod, which runs nothing else) is superuser
 without a password; nothing outside it is. pg_cron, the WAL archive script
-and the CLI's `docker compose exec db` / `kubectl exec statefulset/db` paths
+and the CLI's `sh vc-compose exec db` / `kubectl exec statefulset/db` paths
 (backups, audits, HA probes, restore) depend on it. Treat a shell in the db
 container as database superuser, and never add a sidecar to the db pod.
 Details and what tightening it would take: `docker/postgres-walg/README.md`.

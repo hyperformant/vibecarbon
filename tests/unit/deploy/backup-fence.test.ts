@@ -35,6 +35,7 @@ import {
   writeComposeBackupFence,
   writeK8sBackupFence,
 } from '../../../src/lib/deploy/backup-fence.js';
+import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const ARCHIVE = join(ROOT, 'carbon/volumes/db/wal-archive.sh');
@@ -170,7 +171,7 @@ describe('the fence record', () => {
     ).resolves.toMatchObject({ ok: false, reason: /did not confirm/ });
   });
 
-  it('compose writes through docker compose exec on the node; k8s through the db pod', async () => {
+  it('compose writes through vc-compose exec on the node; k8s through the db pod', async () => {
     const cmds: string[] = [];
     await writeComposeBackupFence({
       ip: '10.0.0.2',
@@ -184,13 +185,13 @@ describe('the fence record', () => {
       },
     });
     expect(cmds[0]).toBe(
-      `cd /opt/myapp && docker compose exec -T db psql -U postgres -d postgres -tAc '${BACKUP_FENCE_STATE_SQL}'`,
+      `cd /opt/myapp && sh vc-compose exec -T db psql -U postgres -d postgres -tAc '${BACKUP_FENCE_STATE_SQL}'`,
     );
     expect(cmds[1]).toBe(
-      `cd /opt/myapp && docker compose exec -T db psql -U postgres -d postgres -tAc '${BACKUP_FENCE_SWITCH_SQL}'`,
+      `cd /opt/myapp && sh vc-compose exec -T db psql -U postgres -d postgres -tAc '${BACKUP_FENCE_SWITCH_SQL}'`,
     );
     expect(cmds[2]).toMatch(
-      /^cd \/opt\/myapp && docker compose exec -T db sh -c '.*FENCE_WRITTEN'$/,
+      /^cd \/opt\/myapp && sh vc-compose exec -T db sh -c '.*FENCE_WRITTEN'$/,
     );
 
     const argvs: string[][] = [];
@@ -287,13 +288,13 @@ case "$*" in
 esac
 `,
   );
-  // docker compose exec -T db <cmd...> / kubectl exec ... -- <cmd...>: run <cmd...> here.
+  // (vc-compose's) docker compose -f ... exec -T db <cmd...> / kubectl exec ... -- <cmd...>: run <cmd...> here.
   // walg-env.sh reads the system identifier from pg_controldata.
   writeFileSync(
     join(bin, 'pg_controldata'),
     `#!/bin/sh\necho "Database system identifier:           ${sysid}"\n`,
   );
-  writeFileSync(join(bin, 'docker'), '#!/bin/bash\nshift 4\nexec "$@"\n');
+  writeFileSync(join(bin, 'docker'), `#!/bin/bash\n${DROP_COMPOSE_FILES_SH}shift 4\nexec "$@"\n`);
   writeFileSync(
     join(bin, 'kubectl'),
     '#!/bin/bash\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n',
@@ -426,6 +427,7 @@ const backupRuns = {
     const dir = join(work, `proj-${bin.split('/').pop()}`);
     mkdirSync(join(dir, 'backup'), { recursive: true });
     writeFileSync(join(dir, 'backup/compose-backup.sh'), readFileSync(COMPOSE_BACKUP));
+    writeVcCompose(dir);
     return spawnSync('bash', ['backup/compose-backup.sh'], {
       cwd: dir,
       encoding: 'utf-8',

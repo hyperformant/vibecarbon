@@ -128,7 +128,7 @@ export async function assertDbMadeByThisStack(ips, sshKeyPath, projectName, opti
     if (verdict === 'unreadable') {
       const noContainer = /no db container is running/.test(detail);
       const how = noContainer
-        ? `Start the db container with \`docker compose up -d db\` in the project directory on the server (\`ssh -i ${sshKeyPath} root@${ip}\`; the old compose files are still there, nothing new has been uploaded), then deploy again so the check can read its migration ledger.`
+        ? `Start the db container with \`[ -f vc-compose ] && sh vc-compose up -d db || docker compose up -d db\` in the project directory on the server (\`ssh -i ${sshKeyPath} root@${ip}\`). Servers this CLI deployed have vc-compose, which starts db with the same files as the deploy; an older stack only has its own compose files, so the command falls back to those. Nothing new has been uploaded. Then deploy again so the check can read its migration ledger.`
         : `Check \`docker logs ${projectName}-db\` on the server (\`ssh -i ${sshKeyPath} root@${ip}\`). ` +
           `If the db container is crash-looping, \`docker stop ${projectName}-db\` lets the check fall back to the container's image instead. Then deploy again.`;
       throw new Error(

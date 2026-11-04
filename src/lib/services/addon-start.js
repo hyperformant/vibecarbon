@@ -15,7 +15,7 @@
  *     `app` service, as redis does with REDIS_URL) is core: the app needs it
  *     to serve, so it starts with the stack.
  *   - Core is everything else in the rendered stack: reconcile.sh asks
- *     `docker compose config --services` and removes the deferred names.
+ *     vc-compose's `config --services` and removes the deferred names.
  * tests/unit/services/addon-start.test.ts classifies every service in the
  * base compose files and every add-on overlay against this.
  */
@@ -24,6 +24,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { VC_COMPOSE } from '../deploy/compose/command.js';
 import { COMPOSE_WALG_ROLE_HOST_DIR, walgRoleReadFragment } from '../deploy/walg-role.js';
 import { loadAddonStandby } from './standby-policy.js';
 
@@ -82,7 +83,7 @@ export const ADDON_WAIT_TIMEOUT_S = 900;
 export const ADDON_STATES = ['starting', 'running', 'failed', 'stopped'];
 
 /**
- * Reads `docker compose config --format json` on stdin and prints, one per
+ * Reads compose's `config --format json` on stdin and prints, one per
  * line, every service whose image is not the app service's own. The app image
  * is a local-only tag built on the server, so no registry serves it, and every
  * service that runs it (app, app-migrate) must stay out of a `compose pull`.
@@ -107,7 +108,7 @@ export const NON_APP_IMAGE_SERVICES_FILTER = `python3 -I -c '${NON_APP_IMAGE_SER
  * Shell that prints the services a pull may ask a registry for: every service
  * not on the app image (see NON_APP_IMAGE_SERVICES_PY). Its exit status is the
  * parser's, so an unreadable config fails it.
- * @param {string} compose the compose invocation with its `-f` set, e.g. `docker compose -f a.yml`
+ * @param {string} compose the compose invocation, VC_COMPOSE on a server (`sh vc-compose`)
  */
 export function nonAppImageServicesShell(compose) {
   return `${compose} config --format json | ${NON_APP_IMAGE_SERVICES_FILTER}`;
@@ -268,10 +269,9 @@ ${list}exit 0
  * failure.
  *
  * @param {string} projectName
- * @param {string} composeFlags the deploy's baked `-f` set (reconcile.sh's)
  * @param {Array<{name: string, services: string[], setup: string[]}>} addons
  */
-export function renderAddonJobScript(projectName, composeFlags, addons) {
+export function renderAddonJobScript(projectName, addons) {
   const runs = addons
     .map((a) => `run_addon ${a.name} '${a.services.join(' ')}' '${a.setup.join(' ')}'`)
     .join('\n');
@@ -320,11 +320,10 @@ skip_setup=""
 stop_job
 echo "$$" > "$dir/job.pid"
 
-# The -f set, resolved at EVERY call: compose-ha writes the replication
-# overlay after the core up, while this job runs, and a stale set would
-# render db without it.
-# shellcheck disable=SC2046,SC2086 # the -f set is a word list
-dc() { docker compose ${composeFlags} $([ -f docker-compose.replication.yml ] && echo '-f docker-compose.replication.yml') "$@"; }
+# vc-compose, the server's one Compose command. It resolves the replication
+# overlay at EVERY call: compose-ha writes it after the core up, while this
+# job runs, and a stale set would render db without it.
+dc() { ${VC_COMPOSE} "$@"; }
 
 # <name> <state> <reason>: replace the add-on's line, atomically.
 set_status() {

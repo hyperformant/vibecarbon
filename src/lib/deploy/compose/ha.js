@@ -39,7 +39,6 @@ import { shEscape } from '../../shell.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import { backupFenceWarning, recordBackupFence, writeComposeBackupFence } from '../backup-fence.js';
-import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import {
   assertFailoverClassified,
   assertFailoverPreconditions,
@@ -109,6 +108,7 @@ import {
   liftStrandedWriteFence,
   writeWriteFenceMarker,
 } from '../write-fence.js';
+import { VC_COMPOSE } from './command.js';
 import {
   assertNoComposeHaRoleSwap,
   composeHaFailoverRecoveryInstructions,
@@ -282,8 +282,7 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
 export const SOCAT_IMAGE = socatImageRef();
 
 export function buildReplicationOverlay(selfWgIp) {
-  return `version: "3.8"
-services:
+  return `services:
   db:
     ports:
       - "${REPL_PORT}:5432"
@@ -296,12 +295,6 @@ services:
       - "TCP:127.0.0.1:${REPL_PORT}"
 `;
 }
-
-// The compose flags that include the replication overlay so `up`/`restart`
-// against the repl-gateway service resolves it. Exported so the compose-ha
-// deploy effects (write-replication-overlay) build the identical file set.
-export const REPL_COMPOSE_FLAGS =
-  '-f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.replication.yml';
 
 /**
  * Configure the primary PostgreSQL server for streaming replication.
@@ -354,7 +347,7 @@ export async function ensurePrimaryReplicationAccess(primaryIp, sshKeyPath, proj
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose ${REPL_COMPOSE_FLAGS} up -d repl-gateway 2>&1`,
+    `cd ${remoteDir} && ${VC_COMPOSE} up -d repl-gateway 2>&1`,
     { timeout: 60_000, what: "primary's repl-gateway start" },
   );
   // replPassword is generated at create time from crypto.randomBytes and is
@@ -400,7 +393,7 @@ ${ensureReplicationSlotSql()}
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres`,
+    `cd ${remoteDir} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres`,
     { timeout: 30_000, input: createRoleSql, what: 'replicator role + replication slot creation' },
   );
 
@@ -432,7 +425,7 @@ ${ensureReplicationSlotSql()}
   const netOut = await sshRun(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && for NET in $(docker inspect -f '{{ range $k,$v := .NetworkSettings.Networks }}{{ $v.NetworkID }} {{ end }}' $(docker compose ps -q db)); do ` +
+    `cd ${remoteDir} && for NET in $(docker inspect -f '{{ range $k,$v := .NetworkSettings.Networks }}{{ $v.NetworkID }} {{ end }}' $(${VC_COMPOSE} ps -q db)); do ` +
       `docker network inspect -f '{{ range .IPAM.Config }}{{ .Subnet }} {{ end }}' "$NET"; done`,
     { timeout: 30_000 },
   );
@@ -453,8 +446,8 @@ ${ensureReplicationSlotSql()}
   const hbaOut = await sshRun(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && HBA_FILE=$(docker compose exec -T db psql -U postgres -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]') && ` +
-      `docker compose exec -T db sh -c "${hbaAppendCmds}; ` +
+    `cd ${remoteDir} && HBA_FILE=$(${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]') && ` +
+      `${VC_COMPOSE} exec -T db sh -c "${hbaAppendCmds}; ` +
       `psql -U postgres -d postgres -tAc 'SELECT pg_reload_conf();'"`,
     { timeout: 15_000 },
   );
@@ -520,7 +513,7 @@ export async function readComposeDbLineage(ip, sshKeyPath, projectName, { run = 
   const out = await run(
     ip,
     sshKeyPath,
-    `cd /opt/${projectName} && docker compose exec -T db sh -c ${shEscape(inner)}`,
+    `cd /opt/${projectName} && ${VC_COMPOSE} exec -T db sh -c ${shEscape(inner)}`,
     { timeout: (COMPOSE_LINEAGE_READY_WAIT_S + 60) * 1000 },
   );
   const text = typeof out === 'string' ? out : '';
@@ -568,7 +561,7 @@ export function assertComposeStandbyNotPromotedOutside({
       `reseed refused: the standby ${standbyIp} is not proven in recovery and ${why}, so it ` +
         'cannot be told apart from a primary promoted outside vibecarbon. Nothing was staged or ' +
         `stopped. Check that its db answers (ssh root@${standbyIp} 'cd /opt/${projectName} && ` +
-        `docker compose exec -T db psql -U postgres -c "SELECT 1"'), then rerun \`vibecarbon deploy ${env}\`. ` +
+        `${VC_COMPOSE} exec -T db psql -U postgres -c "SELECT 1"'), then rerun \`vibecarbon deploy ${env}\`. ` +
         composeStandbyDbRebuildHint(projectName, envName),
     );
   }
@@ -647,7 +640,7 @@ export async function configureStandbyReplication(
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && echo ${ensureSlotB64} | base64 -d | docker compose exec -T db psql -U postgres -d postgres`,
+    `cd ${remoteDir} && echo ${ensureSlotB64} | base64 -d | ${VC_COMPOSE} exec -T db psql -U postgres -d postgres`,
     { timeout: 30_000, what: 'replication-slot re-create on the primary' },
   );
 
@@ -661,7 +654,7 @@ export async function configureStandbyReplication(
   await sshRunChecked(
     standbyIp,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose ${REPL_COMPOSE_FLAGS} up -d repl-gateway 2>&1`,
+    `cd ${remoteDir} && ${VC_COMPOSE} up -d repl-gateway 2>&1`,
     { timeout: 60_000, what: "standby's repl-gateway start" },
   );
 
@@ -732,7 +725,7 @@ echo COMPOSE_RESEED_STAGED
   const stageOut = await sshRun(
     standbyIp,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose ${REPL_COMPOSE_FLAGS} exec -T db bash 2>&1 || true`,
+    `cd ${remoteDir} && ${VC_COMPOSE} exec -T db bash 2>&1 || true`,
     // 300s basebackup budget + the probe's retry budget (12 × 10s ≈ 2 min) —
     // the probe must never eat into the basebackup's transfer window.
     { timeout: 420_000, input: basebackupScript },
@@ -767,7 +760,7 @@ echo COMPOSE_RESEED_STAGED
     sshKeyPath,
     `cd ${remoteDir} && docker inspect -f ` +
       `'{{ range .Mounts }}{{ if eq .Destination "/var/lib/postgresql/data" }}{{ .Source }}{{ end }}{{ end }}' ` +
-      `"$(docker compose ${REPL_COMPOSE_FLAGS} ps -q db)"`,
+      `"$(${VC_COMPOSE} ps -q db)"`,
     { timeout: 30_000 },
   );
   const pgdataHostPath = typeof volOut === 'string' ? volOut.trim() : '';
@@ -783,20 +776,19 @@ echo COMPOSE_RESEED_STAGED
     // Host-side stop of the db container: compose owns
     // the container lifecycle (never an in-container pg_ctl stop — postgres is
     // the container's PID 1, so that kills the container out from under us).
-    // Include the replication overlay flags so the compose file set matches
-    // every other db invocation in the HA flow (walg gotcha: an overlay-less
-    // recreate drops the 5433 mapping; stop/start don't recreate, but keep the
-    // file set consistent anyway).
+    // vc-compose, like every other Compose call on the node: the same file set,
+    // replication overlay included (walg gotcha: an overlay-less recreate drops
+    // the 5433 mapping; stop/start do not recreate, but the set stays one).
     const stopRes = await sshRun(
       standbyIp,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose ${REPL_COMPOSE_FLAGS} stop db`,
+      `cd ${remoteDir} && ${VC_COMPOSE} stop db`,
       { timeout: 120_000 },
     );
     if (stopRes === false) {
       throw new Error(
-        `configureStandbyReplication: 'docker compose stop db' failed on ${standbyIp} — ` +
-          `refusing the host-side PGDATA swap while the db may still be running.`,
+        `configureStandbyReplication: '${VC_COMPOSE} stop db' failed on ${standbyIp}, so it ` +
+          `refused the host-side PGDATA swap while the db may still be running.`,
       );
     }
 
@@ -822,12 +814,9 @@ echo COMPOSE_RESEED_STAGED
     // Always start the db back up — on any failure above the previous PGDATA is
     // intact and boots the standby's prior state (sshRun never throws, so this
     // best-effort start cannot mask the in-flight error).
-    await sshRun(
-      standbyIp,
-      sshKeyPath,
-      `cd ${remoteDir} && docker compose ${REPL_COMPOSE_FLAGS} start db`,
-      { timeout: 120_000 },
-    );
+    await sshRun(standbyIp, sshKeyPath, `cd ${remoteDir} && ${VC_COMPOSE} start db`, {
+      timeout: 120_000,
+    });
   }
 
   // Verify the standby is in recovery mode.
@@ -860,7 +849,7 @@ echo COMPOSE_RESEED_STAGED
       const result = await sshRun(
         standbyIp,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
+        `cd ${remoteDir} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
         { timeout: 10_000 },
       );
       lastProbeResult = typeof result === 'string' ? result.trim() : '';
@@ -872,7 +861,7 @@ echo COMPOSE_RESEED_STAGED
       const primaryResult = await sshRun(
         primaryIp,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT state FROM pg_stat_replication WHERE client_addr = '${standbyIp}'::inet"`,
+        `cd ${remoteDir} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc "SELECT state FROM pg_stat_replication WHERE client_addr = '${standbyIp}'::inet"`,
         { timeout: 10_000 },
       );
       lastPrimarySignal = typeof primaryResult === 'string' ? primaryResult.trim() : '';
@@ -893,8 +882,8 @@ echo COMPOSE_RESEED_STAGED
     `configureStandbyReplication: standby ${standbyIp} did not enter recovery mode ` +
       `within ${PROBE_BUDGET_S}s after pg_basebackup. Last standby pg_is_in_recovery() = ` +
       `${JSON.stringify(lastProbeResult)}, last primary pg_stat_replication.state for this ` +
-      `standby = ${JSON.stringify(lastPrimarySignal)}. SSH in and check: docker compose exec ` +
-      `db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()' and ` +
+      `standby = ${JSON.stringify(lastPrimarySignal)}. SSH in and check: cd ${remoteDir} && ` +
+      `${VC_COMPOSE} exec db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()' and ` +
       `ls /var/lib/postgresql/data/standby.signal`,
   );
 }
@@ -1013,7 +1002,7 @@ async function isPrimaryReachable(primaryIp, sshKeyPath, remoteDir) {
     const result = await sshRun(
       primaryIp,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres -t 3`,
+      `cd ${remoteDir} && ${VC_COMPOSE} exec -T db pg_isready -h 127.0.0.1 -U postgres -t 3`,
       { timeout: 10_000 },
     );
     return result?.includes('accepting connections') ?? false;
@@ -1069,7 +1058,7 @@ export async function destroyComposeHA(options) {
           sshRunAsync(
             server.ip,
             sshKeyPath,
-            `cd /opt/${projectName} && docker compose down -v --remove-orphans 2>/dev/null; rm -rf /opt/${projectName}`,
+            `cd /opt/${projectName} && ${VC_COMPOSE} down -v --remove-orphans 2>/dev/null; rm -rf /opt/${projectName}`,
             { timeout: 120_000, ignoreError: true },
           ),
         ),
@@ -1587,7 +1576,7 @@ export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectN
  */
 function composeDbPsqlShell(sql) {
   if (/["'$`\\]/.test(sql)) throw new Error('composeDbPsqlShell: SQL must carry no quotes');
-  return `docker compose exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -tAc "${sql}"`;
+  return `${VC_COMPOSE} exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -tAc "${sql}"`;
 }
 
 /**
@@ -1608,7 +1597,7 @@ export function composePsqlRunner(ip, sshKeyPath, remoteDir) {
     const out = await sshRun(
       ip,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T ${env}db psql -U postgres -d postgres -tAc ${quoted}`,
+      `cd ${remoteDir} && ${VC_COMPOSE} exec -T ${env}db psql -U postgres -d postgres -tAc ${quoted}`,
       { silent: true, timeout: 10_000 },
     );
     return typeof out === 'string' ? out : '';
@@ -1640,7 +1629,7 @@ export async function promoteComposeStandby(standbyIp, sshKeyPath, remoteDir, op
       sshRun(
         standbyIp,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT pg_promote(wait => false)"`,
+        `cd ${remoteDir} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc "SELECT pg_promote(wait => false)"`,
         { silent: true, timeout: 30_000 },
       ),
   });
@@ -1685,10 +1674,11 @@ export function failoverFenceServices(envConfig) {
 
 /**
  * The command that starts the primary-only add-ons on a freshly promoted node,
- * or null when there are none. It rebuilds reconcile.sh's own `-f` set (so the
- * rendered config matches what the next reconcile hashes) and adds the
- * replication overlay. `--no-deps` never touches db, and there is no fallback
- * `-f` set: a guessed one would recreate db.
+ * or null when there are none. It runs vc-compose, the node's own `-f` set with
+ * its replication overlay, so the rendered config matches what the next
+ * reconcile hashes. `--no-deps` never touches db, and a node without
+ * vc-compose fails the command rather than guessing a set (a guessed one would
+ * recreate db).
  *
  * @param {string} projectName
  * @param {string[]} services compose services to start (never the `*-setup` jobs)
@@ -1696,11 +1686,7 @@ export function failoverFenceServices(envConfig) {
  */
 export function composeStartPrimaryOnlyCmd(projectName, services) {
   if (services.length === 0) return null;
-  return (
-    `cd /opt/${projectName} && ` +
-    `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1) && [ -n "$FLAGS" ] && ` +
-    `docker compose $FLAGS -f docker-compose.replication.yml up -d --no-deps ${services.join(' ')}`
-  );
+  return `cd /opt/${projectName} && ${VC_COMPOSE} up -d --no-deps ${services.join(' ')}`;
 }
 
 /**
@@ -1935,7 +1921,7 @@ export function composeFailoverAbortBackend({
         return null;
       }
     },
-    unfenceHint: `ssh root@${primaryServer.ip} 'cd ${remoteDir} && docker compose exec -T db ${UNFENCE_SQL_HINT}'`,
+    unfenceHint: `ssh root@${primaryServer.ip} 'cd ${remoteDir} && ${VC_COMPOSE} exec -T db ${UNFENCE_SQL_HINT}'`,
     stopStandbyDb: async () => {
       const out = await run(
         standbyServer.ip,
@@ -2160,7 +2146,7 @@ export async function failoverComposeHA(
   p.log.info(c.bold('This will:'));
   p.log.message('  1. Fence writes on the old primary if it answers (planned: brief write outage)');
   p.log.message("  2. Wait for the standby to replay the old primary's final writes");
-  p.log.message('  3. Promote the standby database to primary (docker compose exec)');
+  p.log.message('  3. Promote the standby database to primary (pg_promote in its db container)');
   p.log.message('  4. Update DNS, or print the record to change by hand');
 
   if (parsed.dryRun) {
@@ -2292,7 +2278,7 @@ export async function failoverComposeHA(
         else
           p.log.warn(
             `Could not lift the database write fence on the old primary (${primaryServer.ip}). ` +
-              `Lift it by hand: ssh root@${primaryServer.ip} 'cd ${remoteDir} && docker compose ` +
+              `Lift it by hand: ssh root@${primaryServer.ip} 'cd ${remoteDir} && ${VC_COMPOSE} ` +
               `exec -T db ${UNFENCE_SQL_HINT}'`,
           );
       }
@@ -2918,7 +2904,7 @@ export async function failoverComposeHA(
           ? `The failover is complete and the site is serving, but ${envConfig.domain} still ` +
               `presents an untrusted certificate (${tls.reason}). The tls-retry cron on the ` +
               `promoted node restarts Traefik to retry issuance every 30 minutes. If this ` +
-              `persists, check the ACME error in \`docker compose logs traefik\` on that node.`
+              `persists, check the ACME error in \`${VC_COMPOSE} logs traefik\` on that node.`
           : `The failover is complete, but the promoted node's ACME issuer is not armed and ` +
               `${envConfig.domain} does not present a trusted certificate (${tls.reason}). ` +
               `Traefik may be stopped on that node, so the site may not be serving. Check it ` +

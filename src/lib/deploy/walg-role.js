@@ -424,23 +424,6 @@ export async function composeDbMountsWalgRoleDir({ ip, sshKeyPath, projectName, 
 }
 
 /**
- * The compose label that records the `-f` set a container was CREATED with.
- * Set by Compose v2+ on every container it creates, as comma-separated absolute
- * paths. Verified against Docker Compose v5.3.1. acme-role.js's traefik
- * recreate derives its `-f` set from it.
- *
- * WHY THE `-f` SET IS THE WHOLE PROBLEM: a bare `docker compose up -d
- * --no-deps <svc>` resolves ONLY `docker-compose.yml`. It recreates the
- * service with the DEV config (no `docker-compose.prod.yml`, no overlays), and
- * on a compose-ha node a db recreated that way DROPPED the replication
- * overlay's `5433:5432` publish (measured: `Container … Started`, and
- * `.NetworkSettings.Ports` was `{}`). So a recreate reads this label off the
- * RUNNING container first, falls back to a constrained file list, and then
- * checks the published ports (PUBLISHED_PORTS_TEMPLATE) survived.
- */
-export const COMPOSE_CONFIG_FILES_LABEL = 'com.docker.compose.project.config_files';
-
-/**
  * Go template emitting one `<container-port>-><host-port>` token per PUBLISHED
  * port. Exposed-but-unpublished ports have a null mapping and `range` over nil
  * yields nothing, so only real publishes are compared, which is the property

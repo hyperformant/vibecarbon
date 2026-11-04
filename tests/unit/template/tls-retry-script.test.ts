@@ -36,6 +36,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { ACME_DISARMED_CA_SERVER } from '../../../src/lib/deploy/acme-role.js';
+import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const SCRIPT = fileURLToPath(new URL('../../../carbon/backup/tls-retry.sh', import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), 'tls-retry-'));
@@ -80,6 +81,7 @@ function project(f: Fixture = {}) {
   mkdirSync(bin);
   mkdirSync(fx);
   mkdirSync(join(dir, 'backups'));
+  writeVcCompose(dir);
   const log = join(dir, 'calls.log');
   writeFileSync(log, '');
   const started = new Date(Date.now() - traefikStartedSecondsAgo * 1000)
@@ -119,7 +121,7 @@ function project(f: Fixture = {}) {
   };
   shim(
     'docker',
-    `printf '%s\\n' "docker $*" >> "${log}"
+    `${DROP_COMPOSE_FILES_SH}printf '%s\\n' "docker $*" >> "${log}"
 case "$*" in
   "compose ps -q traefik") echo traefikcid ;;
   *"{{.State.StartedAt}} traefikcid") cat "${fx}/started" ;;

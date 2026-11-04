@@ -209,7 +209,7 @@ describe('compose-HA deploy: the lineage check before the reseed (final review I
     const reads = h.commands.filter((c) => c.includes('pg_control_system'));
     expect(reads).toHaveLength(2);
     for (const cmd of reads) {
-      expect(cmd).toMatch(/^cd \/opt\/myapp && docker compose exec -T db sh -c '/);
+      expect(cmd).toMatch(/^cd \/opt\/myapp && sh vc-compose exec -T db sh -c '/);
       expect(cmd).toContain('while [ "$vc_i" -lt 60 ]');
       expect(cmd).toContain('pg_isready -q -h 127.0.0.1 -U postgres');
     }

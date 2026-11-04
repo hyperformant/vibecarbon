@@ -213,7 +213,7 @@ describe('demoteComposeWalgRole drops inactive slots', () => {
     const drop = n.commands.findIndex((c) => c.includes(DROP_INACTIVE_SLOTS_SQL));
     expect(write).toBeGreaterThan(-1);
     expect(drop).toBeGreaterThan(write);
-    expect(n.commands[drop]).toContain('docker compose exec -T db psql');
+    expect(n.commands[drop]).toContain('sh vc-compose exec -T db psql');
     expect(n.commands.some((c) => c.includes('up -d'))).toBe(false);
   });
 

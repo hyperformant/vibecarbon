@@ -33,7 +33,7 @@ function remoteCommands(): string[] {
   return vi
     .mocked(runCommandAsync)
     .mock.calls.map((c) => String((c[0] as string[]).at(-1)))
-    .filter((s) => s.includes('docker compose'));
+    .filter((s) => s.includes('sh vc-compose'));
 }
 
 describe('restoreCompose runs ANALYZE after the restored cluster promotes', () => {
@@ -52,7 +52,7 @@ describe('restoreCompose runs ANALYZE after the restored cluster promotes', () =
     const cmds = remoteCommands();
     const analyzeIdx = cmds.findIndex((c) => /psql\b.*\bANALYZE\b/.test(c));
     const promotedIdx = cmds.findIndex((c) => c.includes('pg_is_in_recovery'));
-    const appStartIdx = cmds.findIndex((c) => c.includes('docker compose start app'));
+    const appStartIdx = cmds.findIndex((c) => c.includes('sh vc-compose start app'));
     expect(analyzeIdx, `no ANALYZE in:\n${cmds.join('\n')}`).toBeGreaterThan(-1);
     expect(analyzeIdx).toBeGreaterThan(promotedIdx);
     expect(analyzeIdx).toBeLessThan(appStartIdx);

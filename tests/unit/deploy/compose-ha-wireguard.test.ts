@@ -108,6 +108,10 @@ describe('buildReplicationOverlay', () => {
     expect(y).toContain('TCP:127.0.0.1:5433');
   });
 
+  it('has no top-level version key (Compose v2 warns that it is obsolete on every command)', () => {
+    expect(buildReplicationOverlay(WG_PRIMARY_IP)).not.toMatch(/^version:/m);
+  });
+
   it('bakes the per-node self tunnel IP (never hardcoded to primary)', () => {
     expect(buildReplicationOverlay('10.99.0.2')).toContain('bind=10.99.0.2');
   });
@@ -253,7 +257,8 @@ describe('configureStandbyReplication — WireGuard transport', () => {
     expect(script).toContain('primary_conninfo');
 
     // Ordering: stage (exec) → inspect volume path → stop db → host swap →
-    // start db. Stop/start carry the replication overlay flags.
+    // start db. Stop/start run vc-compose (the node's own -f set, replication
+    // overlay included).
     const stageIdx = standbyCmds.findIndex((c) => c.includes('exec -T db bash'));
     const inspectIdx = standbyCmds.findIndex((c) => c.includes('docker inspect'));
     const stopIdx = standbyCmds.findIndex((c) => c.includes('stop db'));
@@ -273,13 +278,9 @@ describe('configureStandbyReplication — WireGuard transport', () => {
     const swapCall = sshCalls[swapIdx];
     expect(swapCall.input).toContain("PGDATA='/var/lib/docker/volumes/myapp_db_data/_data'");
 
-    // Replication overlay flags on the compose stop/start invocations.
-    expect(standbyCmds[stopIdx]).toContain(
-      '-f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.replication.yml',
-    );
-    expect(standbyCmds[startIdx]).toContain(
-      '-f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.replication.yml',
-    );
+    // The node's own -f set (replication overlay included) on the stop/start.
+    expect(standbyCmds[stopIdx]).toBe('cd /opt/myapp && sh vc-compose stop db');
+    expect(standbyCmds[startIdx]).toBe('cd /opt/myapp && sh vc-compose start db');
   });
 
   it('throws loudly (db never stopped) when staging fails, and still classifies a probe-skip', async () => {
@@ -339,7 +340,7 @@ describe('composePsqlRunner (the compose transport for readReplicaState)', () =>
       const q = sshCalls.find((c) => c.command.includes('pg_stat_wal_receiver'));
       expect(q?.ip).toBe(STANDBY);
       expect(q?.command).toMatch(
-        /^cd \/opt\/myapp && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery\(\)/,
+        /^cd \/opt\/myapp && sh vc-compose exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery\(\)/,
       );
     } finally {
       sshRunMock.mockImplementation(orig as never);

@@ -20,6 +20,7 @@ import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { queueBootTiming } from '../boot-timing.js';
+import { VC_COMPOSE } from '../compose/command.js';
 import { requireDnsSetup } from '../dns-result.js';
 import { buildRemote } from '../remote-build.js';
 import { fingerprintSecret } from '../secret-fingerprint.js';
@@ -369,12 +370,7 @@ async function setupServerFiles(ctx) {
     );
     state.completeStep('compose-setup-files', { serverIp });
   }
-  ctx.stackPullPromise = pullComposeImages(
-    serverIp,
-    sshKeyPath,
-    projectConfig.projectName,
-    services,
-  );
+  ctx.stackPullPromise = pullComposeImages(serverIp, sshKeyPath, projectConfig.projectName);
   // Same contract as transferImagePromise: the real throw happens at the
   // barrier in startComposeStack; this only keeps an early failure from being
   // an unhandledRejection before that await attaches.
@@ -653,7 +649,7 @@ async function verifyTlsReady(ctx) {
       (await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd /opt/${projectConfig.projectName} && docker compose logs --tail=60 traefik 2>&1 | tail -40`,
+        `cd /opt/${projectConfig.projectName} && ${VC_COMPOSE} logs --tail=60 traefik 2>&1 | tail -40`,
         { timeout: 15_000, ignoreError: true },
       )) || '';
   }

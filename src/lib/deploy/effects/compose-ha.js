@@ -42,7 +42,7 @@ import { haClassMessage, haStandbyType } from '../../sizing.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
 import { queueBootTiming } from '../boot-timing.js';
-import { RECONCILE_FLAGS_SED } from '../bundle.js';
+import { VC_COMPOSE } from '../compose/command.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
   assertComposeStandbyNotPromotedOutside,
@@ -742,15 +742,14 @@ async function haWriteNodeRoles(ctx) {
 async function haPullImages(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { primary, standby, sshKeyPath } = ctx;
-  const serviceOpts = haServiceOpts(ctx);
   ctx.onProgress('Pulling images on both servers...');
   await perfAsync('deploy.ha.compose.pullFan', () =>
     Promise.all([
       perfAsync('deploy.ha.compose.pullImages.primary', () =>
-        pullComposeImages(primary.ip, sshKeyPath, projectName, serviceOpts),
+        pullComposeImages(primary.ip, sshKeyPath, projectName),
       ),
       perfAsync('deploy.ha.compose.pullImages.standby', () =>
-        pullComposeImages(standby.ip, sshKeyPath, projectName, serviceOpts),
+        pullComposeImages(standby.ip, sshKeyPath, projectName),
       ),
     ]),
   );
@@ -983,7 +982,7 @@ async function haWaitPrimaryPostgres(ctx) {
         const health = await sshRun(
           primary.ip,
           sshKeyPath,
-          `cd /opt/${projectName} && docker compose exec -T db pg_isready -h localhost -p 5432 -U postgres 2>/dev/null`,
+          `cd /opt/${projectName} && ${VC_COMPOSE} exec -T db pg_isready -h localhost -p 5432 -U postgres 2>/dev/null`,
           { timeout: 10_000 },
         );
         if (health?.includes('accepting connections')) return true;
@@ -1009,17 +1008,15 @@ async function haWaitPrimaryPostgres(ctx) {
  * mapping is live. The relay is NOT started here — it binds the tunnel IP,
  * which only exists after wg0 comes up in configure-replication.
  *
- * THE `up -d db` MUST RUN WITH RECONCILE'S OWN FLAG SET (extracted from
- * reconcile.sh on the node), not REPL_COMPOSE_FLAGS. The 3-file subset
- * recreated db with a config-hash no full-set reconcile ever computes, so
- * EVERY subsequent warm deploy recreated db again — and the then-separate
- * auth service 502'd through the admin-user step's whole retry budget while
- * db cycled (e2 warm-deploy,
- * 3× on 2026-08-06/07; the .vc-render-first/last diff on the kept rig named
- * the replication overlay as the drifting content). Extracting the baked
- * flags keeps this invocation byte-identical to future reconciles by
- * construction — a JS-side rebuild of the option set would drift the moment
- * an overlay is added to one list and not the other (this bug, exactly).
+ * THE `up -d db` MUST RUN WITH RECONCILE'S OWN FLAG SET. A 3-file subset
+ * (base + prod + replication) once recreated db with a config-hash no
+ * full-set reconcile ever computes, so EVERY subsequent warm deploy recreated
+ * db again, and the then-separate auth service 502'd through the admin-user
+ * step's whole retry budget while db cycled (e2 warm-deploy, 3x on
+ * 2026-08-06/07; the .vc-render-first/last diff on the kept rig named the
+ * replication overlay as the drifting content). So both calls run
+ * vc-compose (compose/command.js), the node's own set, which picks up the
+ * overlay this step just wrote: the same config the next reconcile hashes.
  */
 async function haWriteReplicationOverlay(ctx) {
   const projectName = ctx.projectConfig.projectName;
@@ -1053,34 +1050,20 @@ async function haWriteReplicationOverlay(ctx) {
       await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd /opt/${projectName} || exit 1; ` +
-          `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1); ` +
-          `[ -n "$FLAGS" ] || FLAGS='${REPL_COMPOSE_FLAGS_BASE}'; ` +
-          `docker compose $FLAGS -f docker-compose.replication.yml pull db 2>&1`,
+        `cd /opt/${projectName} || exit 1; ${VC_COMPOSE} pull db 2>&1`,
         { timeout: 600_000 },
       );
-      // Pull reconcile.sh's own ${composeFlags} (the text before the runtime
-      // replication-overlay conditional on its `up` line) and append the
-      // overlay explicitly — the file was just written, so this renders the
-      // same config the next reconcile will hash.
+      // The overlay was just written, so vc-compose renders the same config
+      // the next reconcile will hash.
       await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd /opt/${projectName} || exit 1; ` +
-          `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1); ` +
-          `[ -n "$FLAGS" ] || FLAGS='${REPL_COMPOSE_FLAGS_BASE}'; ` +
-          `docker compose $FLAGS -f docker-compose.replication.yml up -d --no-build db 2>&1`,
+        `cd /opt/${projectName} || exit 1; ${VC_COMPOSE} up -d --no-build db 2>&1`,
         { timeout: 60_000 },
       );
     }),
   );
 }
-
-// Fallback flag set for the db recreate above if reconcile.sh's up line ever
-// changes shape and the sed extraction comes back empty: the pre-fix behavior
-// (base + prod), which at worst reintroduces one bounded warm-recreate churn
-// rather than failing the deploy.
-const REPL_COMPOSE_FLAGS_BASE = '-f docker-compose.yml -f docker-compose.prod.yml';
 
 /**
  * Configure PostgreSQL streaming replication: bring up the WireGuard tunnel +
@@ -1104,7 +1087,7 @@ async function haConfigureReplication(ctx) {
         sshRun(
           primary.ip,
           sshKeyPath,
-          `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${sql}"`,
+          `cd /opt/${projectName} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc "${sql}"`,
           { timeout: 10_000 },
         ),
     });
@@ -1294,7 +1277,7 @@ async function haVerifyStreaming(ctx) {
       const state = await sshRun(
         primary.ip,
         sshKeyPath,
-        `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+        `cd /opt/${projectName} && ${VC_COMPOSE} exec -T db psql -U postgres -d postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
         { timeout: 10_000 },
       );
       return typeof state === 'string' ? state.trim() : '';

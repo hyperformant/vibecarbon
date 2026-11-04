@@ -251,7 +251,7 @@ describe('failoverComposeHA — standby already streaming', () => {
   // Container names (container_name: ${PROJECT_NAME}-<svc>, stamped on every
   // service) bypass compose file resolution entirely — the
   // hand-rolled-compose-invocation-drifts family (see
-  // compose-invocation-service-names census).
+  // server-compose-command-census: a bare `docker compose` is banned).
   it('restarts the new-primary app tier by CONTAINER name, never bare compose service names', async () => {
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
@@ -263,7 +263,9 @@ describe('failoverComposeHA — standby already streaming', () => {
     // non-zero for the whole list.
     expect(restart?.command).toBe('docker restart myapp-app');
     // The 3/3-failing shape must never come back.
-    expect(sshCalls.some((c) => /docker compose restart(?! db)/.test(c.command))).toBe(false);
+    expect(
+      sshCalls.some((c) => /(?:docker compose|sh vc-compose) restart(?! db)/.test(c.command)),
+    ).toBe(false);
   });
 
   // The bug this guards: failover swapped the roles in config but never moved
@@ -351,7 +353,9 @@ describe('failoverComposeHA — standby already streaming', () => {
     // plain `docker stop` exit non-zero, which reads as the split-brain warning.
     expect(sshCalls[stopIdx].command).toContain('docker container inspect');
     expect(sshCalls[stopIdx].command).toContain('docker stop "$c"');
-    expect(sshCalls.some((c) => /docker compose stop app/.test(c.command))).toBe(false);
+    expect(sshCalls.some((c) => /(?:docker compose|sh vc-compose) stop app/.test(c.command))).toBe(
+      false,
+    );
   });
 
   it('arms the promoted node by a host role-file write BEFORE pg_promote, with no db recreate', async () => {
@@ -366,6 +370,7 @@ describe('failoverComposeHA — standby already streaming', () => {
     expect(arm).toBeLessThan(promote);
     // On the host, through the one writer: /opt/<project>/.vibecarbon-role.
     expect(sshCalls[arm].command).toContain('/opt/myapp/.vibecarbon-role');
+    // No db recreate, whatever spelling: the old one ran through compose's `up`.
     expect(sshCalls.some((c) => c.command.includes('up -d --no-deps db'))).toBe(false);
   });
 

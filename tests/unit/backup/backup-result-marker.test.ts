@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { afterAll, describe, expect, it } from 'vitest';
 import { parseBackupResult, pushedBackupNames } from '../../../src/lib/walg/backup-result.js';
+import { DROP_COMPOSE_FILES_SH, writeVcCompose } from '../../_shared/vc-compose-stub.js';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const COMPOSE_BACKUP = join(ROOT, 'carbon/backup/compose-backup.sh');
@@ -186,7 +187,8 @@ esac
   // gosu <user> <cmd...>: the scripts drop to the postgres user for PGDATA
   // writes; here the test user stands in for it.
   writeFileSync(join(bin, 'gosu'), '#!/bin/bash\nshift\nexec "$@"\n');
-  writeFileSync(join(bin, 'docker'), '#!/bin/bash\nshift 4\nexec "$@"\n');
+  // `compose exec -T db <cmd...>` once vc-compose's -f pairs are dropped.
+  writeFileSync(join(bin, 'docker'), `#!/bin/bash\n${DROP_COMPOSE_FILES_SH}shift 4\nexec "$@"\n`);
   writeFileSync(
     join(bin, 'kubectl'),
     '#!/bin/bash\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n',
@@ -242,6 +244,7 @@ function runCompose(
   const dir = join(work, `proj-${name}`);
   mkdirSync(join(dir, 'backup'), { recursive: true });
   writeFileSync(join(dir, 'backup/compose-backup.sh'), readFileSync(COMPOSE_BACKUP));
+  writeVcCompose(dir);
   if (retired) writeFileSync(join(dir, '.vibecarbon-retired'), '');
   const r = spawnSync('bash', ['backup/compose-backup.sh'], {
     cwd: dir,
@@ -826,6 +829,7 @@ function runComposeBackup({
   const calls = join(root, 'calls.log');
   writeFileSync(calls, '');
   writeFileSync(join(dir, 'backup/compose-backup.sh'), readFileSync(COMPOSE_BACKUP));
+  writeVcCompose(dir);
   writeFileSync(
     join(dir, 'backup/tls-snapshot.sh'),
     `printf '%s\\n' "bash backup/tls-snapshot.sh" >> "${calls}"\necho "BACKUP_RESULT=pushed:not-a-backup"\nexit ${tlsFails ? 1 : 0}\n`,
@@ -833,7 +837,7 @@ function runComposeBackup({
   const marker = dbExecRc === 0 || dbExecRc === 3 ? `echo "BACKUP_RESULT=pushed:${NAME}"` : ':';
   writeFileSync(
     join(bin, 'docker'),
-    `#!/bin/bash\nprintf '%s\\n' "docker $1 $2 $3 $4" >> "${calls}"\n${marker}\nexit ${dbExecRc}\n`,
+    `#!/bin/bash\n${DROP_COMPOSE_FILES_SH}printf '%s\\n' "docker $1 $2 $3 $4" >> "${calls}"\n${marker}\nexit ${dbExecRc}\n`,
   );
   writeFileSync(join(bin, 'flock'), '#!/bin/bash\nexit 0\n');
   chmodSync(join(bin, 'docker'), 0o755);
