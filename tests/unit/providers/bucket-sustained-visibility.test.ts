@@ -48,6 +48,7 @@ function makeProvider({
       err.name = 'NoSuchBucket';
       throw err;
     }
+    if (name === 'GetObjectCommand') return { Body: { transformToString: async () => 'probe' } };
     return {};
   });
   return { p, sends };
