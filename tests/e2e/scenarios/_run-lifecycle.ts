@@ -110,12 +110,14 @@ import {
 } from '../utils/cli-runner.js';
 import {
   buildClusterScopedDiagnostics,
+  buildTlsReissueDiagnostics,
   isClusterScopedStep,
 } from '../utils/cluster-diagnostics.js';
 import { hcloudChildEnv } from '../utils/compute-token.js';
 import { type ResolutionPin, withResolutionPin } from '../utils/dns-pin.js';
 import { getE2ELicenseStub, resolveE2EAcmeCa } from '../utils/e2e-env.js';
 import { extractDeployFailureDetail } from '../utils/extract-failure-detail.js';
+import { collectHostDiagnostics, findClusterHosts } from '../utils/host-diagnostics.js';
 import { sharedStateBucketName } from '../utils/namespace.js';
 import { deployedScaleTarget } from '../utils/region-resolver.js';
 import { fetchServerTypes } from '../utils/server-types.js';
@@ -516,7 +518,12 @@ async function captureFailureDiagnostics(
   // kubectl returns or it can't reach the API). 30s was the old default;
   // padding ~5 commands × 30s added 2.5min to every failure-diagnostic
   // capture. Curl gets its own 10s --max-time arg already; safe to lower.
-  const safeRun = (cmd: string, argv: readonly string[], timeoutMs = 10_000): string => {
+  const safeRun = (
+    cmd: string,
+    argv: readonly string[],
+    timeoutMs = 10_000,
+    maxChars = 4000,
+  ): string => {
     try {
       return execFileSync(cmd, argv, {
         encoding: 'utf8',
@@ -526,12 +533,12 @@ async function captureFailureDiagnostics(
       })
         .toString()
         .trim()
-        .slice(0, 4000);
+        .slice(0, maxChars);
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stdout?: Buffer; stderr?: Buffer };
       const stdout = e?.stdout?.toString?.()?.trim() ?? '';
       const stderr = e?.stderr?.toString?.()?.trim() ?? '';
-      const tail = [stdout, stderr].filter(Boolean).join('\n').slice(0, 4000);
+      const tail = [stdout, stderr].filter(Boolean).join('\n').slice(0, maxChars);
       const reason = e?.message?.split('\n')[0] || 'unknown';
       // Best-effort but LOUD: a capture that silently degrades to "(cmd
       // failed)" inside a file nobody opens is how a bundle ends up looking
@@ -687,6 +694,31 @@ async function captureFailureDiagnostics(
           sections.push([c.label, safeRun(c.cmd, c.argv, c.timeoutMs)]);
         }
       }
+      // Why cert-manager issued: on any step, since a re-issue of a restored
+      // certificate surfaces in verify steps, minutes after the deploy that
+      // restored it. Selected by object name, so a noisy namespace cannot push
+      // the reason out of the window (the 100-event tail above lost it on two
+      // DO k8s-ha runs). See tests/e2e/utils/cluster-diagnostics.ts.
+      for (const c of buildTlsReissueDiagnostics(kc, label)) {
+        sections.push([c.label, safeRun(c.cmd, c.argv, c.timeoutMs, c.maxChars)]);
+      }
+    }
+  }
+
+  // 3b. k8s host state over ssh: k3s unit status + journal, kernel OOM
+  //     lines, memory/disk/uptime and the top processes, for each cluster's
+  //     master and db node. Bought by a DO k8s-ha deploy whose standby k3s API
+  //     refused :6443 for 5+ minutes during the pgdata swap: every kubectl
+  //     section above said only "connection refused". Nothing here goes
+  //     through the API, so it answers exactly when the API cannot. Bounded
+  //     and redacted in tests/e2e/utils/host-diagnostics.ts.
+  if (config.mode === 'k8s' || config.mode === 'k8s-ha') {
+    const { getSshKeyPath } = await import('../utils/ssh.js');
+    for (const [label, text] of await collectHostDiagnostics({
+      hosts: findClusterHosts(config.projectDir, config.envPrefix),
+      sshKeyPath: getSshKeyPath(config.projectDir, config.envPrefix),
+    })) {
+      sections.push([label, text]);
     }
   }
 
