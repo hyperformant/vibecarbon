@@ -35,6 +35,7 @@ Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean
   - `DIGITALOCEAN_API_TOKEN` / `DIGITALOCEAN_ACCESS_KEY` / `DIGITALOCEAN_SECRET_KEY` — required for DigitalOcean scenarios (`--provider digitalocean`).
 - `CLOUDFLARE_API_TOKEN` — required only for scenarios on Cloudflare DNS (HA modes, and every DigitalOcean scenario). Checked separately — Cloudflare is a DNS provider, not a cloud provider in the registry.
 - `E2E_PREFLIGHT=skip` — bypass the 30-second infra preflight ping. Use when re-running after a known-good fix.
+- `E2E_ACME_CA=production` — opt in to Let's Encrypt production instead of the default staging (`staging`). One switch drives compose `ACME_CA_SERVER`, the k8s ClusterIssuer choice, the trust store (production needs no extra roots) and the preflight's ACME directory check. Use when staging is down (preflight aborts naming the CA URL; see https://letsencrypt.status.io). Production is rate limited: 50 certificates per registered domain per week, 5 duplicates. The ACME directory check is part of the infra preflight, so `E2E_PREFLIGHT=skip` bypasses it too.
 - `E2E_RETRY_FLAKES=1` — opt-in single retry on `failureCategory=infra` failures. Doubles wall-clock worst case; only enable when chasing a flake hypothesis.
 - `VC_KEEP_ON_FAILURE=1` (or `--keep-on-fail`) — preserves repo + cluster on failure so you can iterate.
 - `VC_KEEP_ALWAYS=1` (or `--keep`) — never tear down. Pairs with `iter-step.js` for the kept-rig pattern.

@@ -850,6 +850,9 @@ export class DigitalOceanProvider extends BaseProvider {
       image,
       ssh_keys: resolvedSshKeys,
       tags: encodeLabels(labels),
+      // Skip DO's Droplet Console agent: its vendor cloud-init script costs
+      // 44-68s of first boot. SSH and the Recovery Console still work.
+      with_droplet_agent: false,
     };
     if (Array.isArray(networks) && networks.length > 0) {
       body.vpc_uuid = String(networks[0]);

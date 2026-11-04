@@ -67,6 +67,10 @@ export const SERVER_RESOURCE_TYPES = Object.freeze({
     noun: 'droplet',
     locationInput: 'region',
     userDataInput: 'userData',
+    // Create-only inputs: set on a fresh droplet, ignored on a live one so a
+    // later `pulumi up` never replaces it. `dropletAgent: false` skips DO's
+    // Droplet Console agent, which cost 44-68s of first boot per node.
+    createOnlyInputs: ['dropletAgent'],
   },
   'vultr:index/instance:Instance': {
     noun: 'instance',
@@ -103,7 +107,11 @@ export function serverResourceOptions(type, extra = {}) {
   return {
     ...extra,
     customTimeouts: SERVER_CUSTOM_TIMEOUTS,
-    ignoreChanges: [...(extra.ignoreChanges ?? []), serverClass.userDataInput],
+    ignoreChanges: [
+      ...(extra.ignoreChanges ?? []),
+      serverClass.userDataInput,
+      ...(serverClass.createOnlyInputs ?? []),
+    ],
   };
 }
 
@@ -135,10 +143,11 @@ export function workerResourceOptions(type, { joinTarget, ...extra } = {}) {
   const serverClass = SERVER_RESOURCE_TYPES[type];
   if (!serverClass) throw new Error(`workerResourceOptions: unknown server type ${type}`);
   if (!joinTarget) throw new Error('workerResourceOptions: joinTarget is required');
+  const createOnly = serverClass.createOnlyInputs ?? [];
   return {
     ...extra,
     customTimeouts: SERVER_CUSTOM_TIMEOUTS,
-    ignoreChanges: [...(extra.ignoreChanges ?? []), serverClass.userDataInput],
+    ignoreChanges: [...(extra.ignoreChanges ?? []), serverClass.userDataInput, ...createOnly],
     replacementTrigger: pulumi
       .all([joinTarget.masterId, joinTarget.masterPrivateIp, joinTarget.k3sVersion])
       .apply(([id, ip, version]) => `master=${id}@${ip} k3s=${version}`),

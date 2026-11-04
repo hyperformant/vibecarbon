@@ -83,6 +83,12 @@ export async function runPreflight(args: {
    * existing callers see no new behavior.
    */
   dnsChecks?: ReadonlyArray<{ dnsProvider: string; token?: string; baseDomain: string }>;
+  /**
+   * The ACME directory URL this run will issue against (resolveE2EAcmeCa).
+   * One bounded GET; a CA that is down fails the run BEFORE anything is
+   * provisioned. Omitted runs no ACME check.
+   */
+  acmeDirectory?: { url: string; label: string };
 }): Promise<PreflightResult> {
   const needsHetzner = args.needsHetzner !== false;
   const skippedHetzner = (service: string): Promise<PreflightCheck> =>
@@ -134,6 +140,7 @@ export async function runPreflight(args: {
         ]
       : []),
     ...(args.dnsChecks ?? []).map((d) => checkDnsZone(d)),
+    ...(args.acmeDirectory ? [checkAcmeDirectory(args.acmeDirectory)] : []),
   ]);
   const allHealthy = checks.every((c) => c.status === 'ok');
   const hasFailure = checks.some((c) => c.status === 'failed');
@@ -158,6 +165,40 @@ export function logPreflight(result: PreflightResult): boolean {
     console.log('  WARN: some checks were slow. Proceeding — matrix may be flakier than usual.');
   }
   return true;
+}
+
+/**
+ * ACME directory reachability. A gate, not a retry: one bounded request.
+ * LE staging maintenance (2026-11-03) reset every directory connection after
+ * about 20 s, which a run only discovered 15 minutes into provisioning, at
+ * ssl_valid. The detail names the CA URL, the error and both ways forward.
+ */
+export async function checkAcmeDirectory(
+  acme: { url: string; label: string },
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = TIMEOUT_MS,
+): Promise<PreflightCheck> {
+  const t0 = Date.now();
+  let error: string | undefined;
+  try {
+    const res = await fetchImpl(acme.url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) error = `HTTP ${res.status}`;
+    else await res.json();
+  } catch (err) {
+    const e = err as Error & { cause?: { code?: string; message?: string } };
+    error = [e.message, e.cause?.code ?? e.cause?.message].filter(Boolean).join(': ');
+  }
+  const latencyMs = Date.now() - t0;
+  if (!error) return { service: 'acme-ca', status: 'ok', latencyMs };
+  return {
+    service: 'acme-ca',
+    status: 'failed',
+    latencyMs,
+    detail:
+      `${acme.label} directory ${acme.url} is not answering (${error}). ` +
+      `Check https://letsencrypt.status.io, or run against production with E2E_ACME_CA=production ` +
+      `(subject to Let's Encrypt rate limits).`,
+  };
 }
 
 /** Hetzner Cloud API — list servers (authoritative health for the API). */

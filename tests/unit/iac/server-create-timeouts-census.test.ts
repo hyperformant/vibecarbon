@@ -163,6 +163,28 @@ describe('server-class create timeouts (census)', () => {
     },
   );
 
+  // Speed: DO's vendor cloud-init installs the Droplet Console agent, costing
+  // 44-68s of first boot on every node. `dropletAgent: false` skips it. The
+  // provider treats the field as create-only, so it is ignored on existing
+  // droplets: a live droplet is never replaced to apply it.
+  it.each(Object.keys(PROGRAMS).filter((f) => f.startsWith('digitalocean-')))(
+    '%s: every droplet skips the DO agent and never replaces a live one for it',
+    async (file) => {
+      const resources = await runProgram(file);
+      const droplets = resources.filter((r) => r.token === 'digitalocean:index/droplet:Droplet');
+      expect(droplets.length).toBeGreaterThan(0);
+      for (const d of droplets) {
+        expect((d.args as { dropletAgent?: boolean }).dropletAgent, `${file}: ${d.name}`).toBe(
+          false,
+        );
+        const opts = (d.opts ?? {}) as { ignoreChanges?: string[] };
+        expect(opts.ignoreChanges ?? [], `${file}: ${d.name} would be replaced`).toContain(
+          'dropletAgent',
+        );
+      }
+    },
+  );
+
   it.each(Object.keys(PROGRAMS))(
     '%s: k8s workers are rebuilt by their join target, not their user data',
     async (file) => {

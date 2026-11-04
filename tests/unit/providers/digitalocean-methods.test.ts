@@ -207,8 +207,27 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
         ssh_keys: [111],
         tags: ['managed-by:vibecarbon', 'environment:e2'],
         user_data: cloudInit,
+        with_droplet_agent: false,
       });
       expect(result).toEqual({ id: 99, server: { id: 99, name: 'proj-e2' } });
+    });
+
+    it('skips the DO Droplet Console agent on every create (scale and autoscaler included)', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ droplets: [], links: {} }))
+        .mockResolvedValueOnce(resp({ droplet: { id: 1, name: 'x' } }, 202));
+
+      await provider.createServer({
+        name: 'x',
+        region: 'nyc3',
+        serverType: 's-2vcpu-4gb',
+        image: 'ubuntu-24-04-x64',
+        sshKeys: [1],
+        labels: {},
+      });
+
+      const body = JSON.parse((fetchWithRetryMock.mock.calls[1][1] as RequestInit).body as string);
+      expect(body.with_droplet_agent).toBe(false);
     });
 
     it('omits user_data when userData is not provided', async () => {
@@ -294,6 +313,7 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
         image: 'ubuntu-24-04-x64',
         ssh_keys: [1],
         tags: [],
+        with_droplet_agent: false,
       });
     });
 
