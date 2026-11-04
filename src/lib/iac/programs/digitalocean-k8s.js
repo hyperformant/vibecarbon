@@ -83,6 +83,7 @@ import * as digitalocean from '@pulumi/digitalocean';
 import * as pulumi from '@pulumi/pulumi';
 import { DigitalOceanProvider, encodeLabels } from '../../providers/digitalocean.js';
 import { serverResourceOptions, workerResourceOptions } from '../create-timeout.js';
+import { waitForDropletIdle } from '../droplet-idle.js';
 import { transliterateToAscii } from './digitalocean-compose.js';
 
 /**
@@ -379,7 +380,13 @@ export function buildDigitalOceanK8sProgram(config) {
     });
     new digitalocean.ReservedIpAssignment('ingress-assignment', {
       ipAddress: reservedIp.ipAddress,
-      dropletId: master.id.apply((id) => Number.parseInt(id, 10)),
+      // Resolves only once the master's `create` action has finished: the
+      // provider returns at status `active`, DO refuses a second action
+      // ("Droplet already has a pending event") until `create` completes.
+      dropletId: master.id.apply(async (id) => {
+        await waitForDropletIdle({ token: config.apiToken, dropletId: id });
+        return Number.parseInt(id, 10);
+      }),
     });
 
     // Database droplet — joins master via k3s agent, pinned to the
