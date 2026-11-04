@@ -41,7 +41,7 @@ export const PUBLIC_DNS_BUDGET_MS = 1_500;
  * lookup's in-flight query (status probes readiness and TLS together) and
  * push it onto the system resolver too. A Resolver is cheap to create.
  */
-function publicResolver(servers) {
+export function publicResolver(servers) {
   const r = new dnsCallback.Resolver({ timeout: 1_000, tries: 1 });
   r.setServers(servers);
   return r;
