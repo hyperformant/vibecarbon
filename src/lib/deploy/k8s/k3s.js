@@ -70,6 +70,11 @@ import {
   csiSidecarSetImagePlan,
   resolveDbImage,
 } from '../../images.js';
+import {
+  localKubeconfigPath,
+  storeOperatorKubeconfig,
+  upgradeKubeconfig,
+} from '../../kubeconfig.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
@@ -1313,9 +1318,12 @@ export async function waitForK3sReady(masterIp, sshKeyPath, khPath, maxWaitSec =
 }
 
 /**
- * scp the master's kubeconfig and patch its server URL to point at the
- * public master IP (cloud-init writes `127.0.0.1:6443`, useless from
- * the operator's laptop).
+ * scp the master's kubeconfig and store it as the operator's
+ * (storeOperatorKubeconfig, kubeconfig.js): its server URL points at the
+ * public master IP (cloud-init writes `127.0.0.1:6443`, useless from the
+ * operator's laptop) and every cluster entry carries
+ * `disable-compression: true`. The only place the cluster's credentials leave
+ * the master (kubectl-no-compression-census.test.ts).
  *
  * @param {string} masterIp
  * @param {string} sshKeyPath
@@ -1325,7 +1333,7 @@ export async function waitForK3sReady(masterIp, sshKeyPath, khPath, maxWaitSec =
  * @returns {Promise<string>} absolute path to the local kubeconfig
  */
 export async function fetchKubeconfig(masterIp, sshKeyPath, khPath, projectDir, environment) {
-  const localPath = join(projectDir, '.vibecarbon', `kubeconfig-${environment}`);
+  const localPath = localKubeconfigPath(projectDir, environment);
   await scpWithRetry([
     '-i',
     sshKeyPath,
@@ -1333,17 +1341,7 @@ export async function fetchKubeconfig(masterIp, sshKeyPath, khPath, projectDir, 
     `root@${masterIp}:/etc/rancher/k3s/k3s.yaml`,
     localPath,
   ]);
-  const kc = readFileSync(localPath, 'utf-8');
-  const patched = kc.replace(
-    /server: https:\/\/127\.0\.0\.1:6443/g,
-    `server: https://${masterIp}:6443`,
-  );
-  writeFileSync(localPath, patched);
-  // Tighten perms — kubeconfig embeds a cluster-admin client cert + key.
-  // scp inherits the operator's umask, so without this the file lands at
-  // 0644 and helm/kubectl warn "Kubernetes configuration file is
-  // world-readable" on every invocation.
-  chmodSync(localPath, 0o600);
+  storeOperatorKubeconfig(localPath, masterIp);
   return localPath;
 }
 
@@ -5265,7 +5263,9 @@ async function deployK3sSteps(options, inFlight) {
     state.completeStep('k3s-kubeconfig', { kubeconfig });
     s.stop('Kubeconfig saved');
   } else {
-    kubeconfig = state.getStepResult('k3s-kubeconfig').kubeconfig;
+    // A resumed deploy reuses the kubeconfig its last run fetched, which an
+    // older CLI may have written without disable-compression.
+    kubeconfig = upgradeKubeconfig(state.getStepResult('k3s-kubeconfig').kubeconfig);
   }
 
   // 5b. The cluster's restore marker decides what this deploy may do (a

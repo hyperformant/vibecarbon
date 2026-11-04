@@ -27,6 +27,7 @@ import { join } from 'node:path';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig } from './lib/config.js';
+import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccessWarn } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
@@ -98,7 +99,7 @@ export async function run(args) {
 
   const envName = /** @type {string|undefined} */ (positional.env) ?? 'prod';
   const cwd = process.cwd();
-  const kubeconfig = join(cwd, '.vibecarbon', `kubeconfig-${envName}`);
+  const kubeconfig = localKubeconfigPath(cwd, envName);
   const sshKey = join(cwd, '.vibecarbon', `ssh-${envName}`);
 
   // Warn but don't bail if either is missing — the operator may be

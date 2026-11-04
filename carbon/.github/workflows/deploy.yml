@@ -68,6 +68,13 @@ jobs:
         run: |
           printf '%s' "$KUBECONFIG_B64" | base64 -d > "$KUBECONFIG"
           chmod 600 "$KUBECONFIG"
+          # Response compression off for every cluster entry: gzip on the API's
+          # large responses (the OpenAPI documents kubectl downloads before an
+          # apply) cost seconds per call from a distant runner. A kubeconfig the
+          # CLI uploads already carries the field; an older upload gets it here.
+          for cluster in $(kubectl config get-clusters | tail -n +2); do
+            kubectl config set "clusters.${cluster}.disable-compression" true >/dev/null
+          done
           kubectl version --client=true
 
       - name: Ensure vibecarbon namespace exists
@@ -276,6 +283,13 @@ jobs:
         run: |
           printf '%s' "$KUBECONFIG_B64" | base64 -d > "$KUBECONFIG"
           chmod 600 "$KUBECONFIG"
+          # Response compression off for every cluster entry: gzip on the API's
+          # large responses (the OpenAPI documents kubectl downloads before an
+          # apply) cost seconds per call from a distant runner. A kubeconfig the
+          # CLI uploads already carries the field; an older upload gets it here.
+          for cluster in $(kubectl config get-clusters | tail -n +2); do
+            kubectl config set "clusters.${cluster}.disable-compression" true >/dev/null
+          done
 
       - name: Install Flux if not present
         # FLUX_INSTALL_URL matches src/lib/deploy/k8s/index.js so the
@@ -401,6 +415,13 @@ jobs:
         run: |
           printf '%s' "$KUBECONFIG_B64" | base64 -d > "$KUBECONFIG"
           chmod 600 "$KUBECONFIG"
+          # Response compression off for every cluster entry: gzip on the API's
+          # large responses (the OpenAPI documents kubectl downloads before an
+          # apply) cost seconds per call from a distant runner. A kubeconfig the
+          # CLI uploads already carries the field; an older upload gets it here.
+          for cluster in $(kubectl config get-clusters | tail -n +2); do
+            kubectl config set "clusters.${cluster}.disable-compression" true >/dev/null
+          done
 
       - name: Annotate GitRepository + root Kustomizations
         run: |
