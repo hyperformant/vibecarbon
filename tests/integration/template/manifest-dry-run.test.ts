@@ -5,13 +5,6 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(__dirname, '../../..');
 
-/**
- * DNS-01 providers that can reach the k8s deploy mode, and therefore need a
- * `cluster-issuers-<id>.yaml`. linode and vultr are in DNS01_PROVIDERS but
- * are compose-only tiers — cert-manager never sees them.
- */
-const K8S_TIER_DNS_PROVIDERS = ['cloudflare', 'digitalocean', 'hetzner'];
-
 function kustomizeBuild(path: string): { ok: boolean; stdout: string; stderr: string } {
   // `kubectl kustomize` is pure client-side — it doesn't need a kubeconfig
   // or cluster connection. `kubectl apply --dry-run=client -k` would also
@@ -45,76 +38,24 @@ describe('cert-manager-resources kustomization', () => {
     expect(result.stdout).toBeTruthy();
   });
 
-  it('emits every per-DNS-provider issuer set', () => {
+  it('emits the one HTTP-01 issuer pair, plus the standby self-signed issuer', () => {
     const { stdout } = kustomizeBuild('carbon/k8s/infra/cert-manager-resources');
-    for (const suffix of ['manual', ...K8S_TIER_DNS_PROVIDERS]) {
-      expect(stdout).toContain(`letsencrypt-prod-${suffix}`);
-      expect(stdout).toContain(`letsencrypt-staging-${suffix}`);
-    }
+    expect(stdout).toContain('name: letsencrypt-prod\n');
+    expect(stdout).toContain('name: letsencrypt-staging\n');
+    expect(stdout).toContain('name: vibecarbon-standby-selfsigned');
+    expect(stdout).not.toContain('dns01:');
   });
 
-  it("uses cert-manager core's native solver shape for the DigitalOcean ClusterIssuer", () => {
-    // cert-manager ships the DigitalOcean solver in core (no webhook), and
-    // its documented Secret is `digitalocean-dns` / key `access-token` —
-    // which is what buildDnsProviderSecret creates. A drift on either side
-    // leaves Orders Pending with no apply-time error.
-    const { stdout } = kustomizeBuild('carbon/k8s/infra/cert-manager-resources');
-    expect(stdout).toContain('digitalocean:');
-    expect(stdout).toContain('tokenSecretRef:');
-    expect(stdout).toMatch(/name: digitalocean-dns\b/);
-    expect(stdout).toContain('key: access-token');
-    // Core solver — no webhook indirection for this provider.
-    const doIssuers = stdout
-      .split('---')
-      .filter((doc) => /name: letsencrypt-(prod|staging)-digitalocean/.test(doc));
-    expect(doIssuers).toHaveLength(2);
-    for (const doc of doIssuers) {
-      expect(doc).not.toContain('webhook:');
-      expect(doc).not.toContain('groupName:');
-    }
-  });
-
-  it('lists every cluster-issuers file in the kustomization (an unlisted file silently never applies)', () => {
+  it('lists every cluster-issuer file in the kustomization (an unlisted file silently never applies)', () => {
     const dir = resolve(REPO_ROOT, 'carbon/k8s/infra/cert-manager-resources');
     const onDisk = readdirSync(dir)
-      .filter((f) => f.startsWith('cluster-issuers-') && f.endsWith('.yaml'))
+      .filter((f) => f.startsWith('cluster-issuer') && f.endsWith('.yaml'))
       .sort();
     const kustomization = readFileSync(resolve(dir, 'kustomization.yaml'), 'utf-8');
-    const listed = [...kustomization.matchAll(/^\s*-\s+(cluster-issuers-[\w-]+\.yaml)\s*$/gm)]
+    const listed = [...kustomization.matchAll(/^\s*-\s+(cluster-issuer[\w-]*\.yaml)\s*$/gm)]
       .map((m) => m[1])
       .sort();
     expect(listed).toEqual(onDisk);
-  });
-
-  it('ships an issuer file for exactly the DNS providers that have a k8s tier', () => {
-    // pickIssuerName derives the issuer suffix from DNS01_PROVIDERS keys, so
-    // any provider reachable on the k8s path needs a matching file here or
-    // the Certificate references a ClusterIssuer that does not exist.
-    // linode/vultr are deliberately absent: compose-only tiers.
-    const dir = resolve(REPO_ROOT, 'carbon/k8s/infra/cert-manager-resources');
-    const suffixes = readdirSync(dir)
-      .filter((f) => f.startsWith('cluster-issuers-') && f.endsWith('.yaml'))
-      .map((f) => f.slice('cluster-issuers-'.length, -'.yaml'.length))
-      .filter((s) => s !== 'manual')
-      .sort();
-    expect(suffixes).toEqual([...K8S_TIER_DNS_PROVIDERS].sort());
-  });
-
-  it('uses the correct webhook groupName + solverName for the Hetzner ClusterIssuer', () => {
-    // These values are the contract between the ClusterIssuer and the
-    // cert-manager-webhook-hetzner chart. If any of them drift the
-    // webhook silently no-ops on Order reconciliation. groupName must
-    // match the chart's default (Values.groupName → APIService spec.group
-    // + GROUP_NAME env on the webhook deployment); the chart ships
-    // acme.hetzner.com as default, so that's what the issuer uses.
-    // tokenSecretKeyRef.{name,key} must match the Secret produced by
-    // buildDnsProviderSecret (Secret/hetzner with key `token`).
-    const { stdout } = kustomizeBuild('carbon/k8s/infra/cert-manager-resources');
-    expect(stdout).toContain('groupName: acme.hetzner.com');
-    expect(stdout).toContain('solverName: hetzner');
-    expect(stdout).toContain('tokenSecretKeyRef:');
-    expect(stdout).toMatch(/name: hetzner\b/);
-    expect(stdout).toContain('key: token');
   });
 });
 

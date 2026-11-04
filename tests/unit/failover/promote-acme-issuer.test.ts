@@ -40,7 +40,7 @@ describe('promoteAcmeIssuer', () => {
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
       calls.push(argv);
       if (argv.includes('get'))
-        return CERT_JSON('vibecarbon-standby-selfsigned', 'letsencrypt-staging-digitalocean');
+        return CERT_JSON('vibecarbon-standby-selfsigned', 'letsencrypt-staging');
       return '';
     });
     const result = await promoteAcmeIssuer({
@@ -53,13 +53,12 @@ describe('promoteAcmeIssuer', () => {
     expect(patch).toBeDefined();
     expect(patch?.join(' ')).toContain('certificate');
     expect(patch?.join(' ')).toContain('vibecarbon-tls');
-    expect(JSON.stringify(patch)).toContain('letsencrypt-staging-digitalocean');
+    expect(JSON.stringify(patch)).toContain('letsencrypt-staging');
   });
 
   it('no-ops when issuerRef already equals the annotated issuer (idempotent on re-promote)', async () => {
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      if (argv.includes('get'))
-        return CERT_JSON('letsencrypt-staging-digitalocean', 'letsencrypt-staging-digitalocean');
+      if (argv.includes('get')) return CERT_JSON('letsencrypt-staging', 'letsencrypt-staging');
       return '';
     });
     const result = await promoteAcmeIssuer({
@@ -73,7 +72,7 @@ describe('promoteAcmeIssuer', () => {
 
   it('skips a certificate with no promote annotation (pre-policy cluster) without patching', async () => {
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      if (argv.includes('get')) return CERT_JSON('letsencrypt-staging-digitalocean');
+      if (argv.includes('get')) return CERT_JSON('letsencrypt-staging');
       return '';
     });
     const result = await promoteAcmeIssuer({
@@ -119,8 +118,8 @@ describe('promoteAcmeIssuer', () => {
 // matches it. vibecarbon-tls is the only Certificate a deploy owns.
 // ============================================================================
 
-const TARGET = 'letsencrypt-staging-digitalocean';
-const DNS = ['app.example.com', '*.app.example.com'];
+const TARGET = 'letsencrypt-staging';
+const DNS = ['app.example.com'];
 const S3 = { bucket: 'proj-backups', accessKey: 'AK', secretKey: 'SK', endpoint: 'https://s3' };
 const SNAPSHOT_INPUTS = {
   s3Config: S3,
@@ -316,10 +315,9 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     const { json, ca } = k8sSecretJsonWithCa({
       dnsNames: DNS,
       days: 60,
-      issuerName: 'letsencrypt-prod-digitalocean',
+      issuerName: 'letsencrypt-prod',
     });
-    const prodCert = (name: string) =>
-      LIVE_CERT(name).replaceAll(TARGET, 'letsencrypt-prod-digitalocean');
+    const prodCert = (name: string) => LIVE_CERT(name).replaceAll(TARGET, 'letsencrypt-prod');
     for (const [roots, restored] of [
       [[ca as string], true],
       [[], false],
@@ -356,7 +354,7 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     [
       'a snapshot from another issuer',
       {
-        text: k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: 'letsencrypt-staging-hetzner' }),
+        text: k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: 'letsencrypt-prod' }),
       },
     ],
     [

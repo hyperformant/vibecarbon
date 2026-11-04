@@ -247,7 +247,7 @@ export async function deployK8sGitOps(args) {
   // Before anything is committed or seeded: a malformed backup config fails here.
   const backupSettings = resolveBackupSettings(backupConfig);
   // The Certificate deploy.yml renders, validated before anything is seeded.
-  const tlsCertVars = gitopsTlsCertificateVars({ projectDir, dnsProvider, domain, role });
+  const tlsCertVars = gitopsTlsCertificateVars({ projectDir, domain, role });
 
   const s = spinner();
   const skipCiStr = skipCi ? ' [skip ci]' : '';
@@ -360,15 +360,15 @@ export function gitopsTargets(envName, envConfig) {
  * issuer, with the real ACME issuer in the promote annotation. Throws when
  * there is no domain.
  *
- * @param {{ projectDir: string, dnsProvider?: string|null, domain?: string|null,
+ * @param {{ projectDir: string, domain?: string|null,
  *   role?: 'primary'|'standby' }} args
  * @returns {{ TLS_CERT_ISSUER: string, TLS_CERT_EFFECTIVE_ISSUER: string, TLS_CERT_DNS_NAMES: string }}
  */
-export function gitopsTlsCertificateVars({ projectDir, dnsProvider, domain, role = 'primary' }) {
+export function gitopsTlsCertificateVars({ projectDir, domain, role = 'primary' }) {
   // No fallback name: a Certificate for another name than the env's is one
   // the cluster would issue and serve, and never trusted.
   if (!domain) throw new Error('the TLS Certificate needs a domain, and this environment has none');
-  const { issuerName, dnsNames } = k8sTlsIdentity({ projectDir, dnsProvider, domain });
+  const { issuerName, dnsNames } = k8sTlsIdentity({ projectDir, domain });
   return tlsCertificateVars({
     dnsNames,
     issuerName,
@@ -432,7 +432,6 @@ export async function refreshGitopsTlsVars({ envName, projectDir, deps = {} }) {
       const subEnvConfig = projectConfig.environments?.[target.envName] ?? envConfig;
       const vars = gitopsTlsCertificateVars({
         projectDir,
-        dnsProvider: subEnvConfig.dnsProvider || envConfig.dnsProvider,
         domain: subEnvConfig.domain || envConfig.domain,
         role: target.role,
       });

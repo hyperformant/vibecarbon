@@ -138,8 +138,8 @@ describe('state-resumed k8s deploy keeps the provider StorageClass', () => {
       undefined,
       {
         dnsNames: ['app.example.test'],
-        issuerName: 'letsencrypt-prod-manual',
-        effectiveIssuer: 'letsencrypt-prod-manual',
+        issuerName: 'letsencrypt-prod',
+        effectiveIssuer: 'letsencrypt-prod',
       },
     );
     try {

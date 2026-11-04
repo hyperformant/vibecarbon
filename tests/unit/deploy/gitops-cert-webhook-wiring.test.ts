@@ -17,7 +17,7 @@
  *  2. Both install paths must pin the SAME chart version — bump together.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -25,11 +25,6 @@ const ROOT = join(__dirname, '../../..');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
 
 describe('gitops workflow creates the Secret the ClusterIssuers reference', () => {
-  it('cluster-issuers-hetzner.yaml pins the tokenSecretKeyRef contract (hetzner/token)', () => {
-    const issuers = read('carbon/k8s/infra/cert-manager-resources/cluster-issuers-hetzner.yaml');
-    expect(issuers).toMatch(/tokenSecretKeyRef:\s*\n\s*name: hetzner\s*\n\s*key: token/);
-  });
-
   it('deploy.yml creates Secret/hetzner with key `token` in cert-manager', () => {
     const wf = read('carbon/.github/workflows/deploy.yml');
     expect(wf).toMatch(
@@ -48,52 +43,11 @@ describe('gitops workflow creates the Secret the ClusterIssuers reference', () =
 
 /**
  * The gitops (configure cicd) path creates the cert-manager Secrets from
- * GitHub Environment secrets instead of from buildDnsProviderSecret. Until
- * 2026-08 it had a hetzner arm and nothing else, so a cloudflare gitops
- * deploy shipped ClusterIssuers whose apiTokenSecretRef pointed at a Secret
- * no job ever created — Orders Pending, no error at apply time. This census
- * makes every issuer file's Secret reference prove it has a creating arm.
+ * GitHub Environment secrets. The ClusterIssuers are all HTTP-01 now, so the
+ * per-issuer Secret census is gone; these two checks stay until the DNS
+ * secret arms are removed.
  */
-describe('deploy.yml creates a Secret for every ClusterIssuer that references one', () => {
-  const ISSUER_DIR = 'carbon/k8s/infra/cert-manager-resources';
-
-  /** ClusterIssuer files that reference a Secret, with the name+key they expect. */
-  function issuerSecretRefs() {
-    return readdirSync(join(ROOT, ISSUER_DIR))
-      .filter((f) => f.startsWith('cluster-issuers-') && f.endsWith('.yaml'))
-      .map((file) => {
-        const yaml = read(join(ISSUER_DIR, file));
-        // Covers all three solver shapes: cloudflare apiTokenSecretRef,
-        // digitalocean tokenSecretRef, hetzner webhook tokenSecretKeyRef.
-        const m = yaml.match(
-          /(?:apiTokenSecretRef|tokenSecretRef|tokenSecretKeyRef):\s*\n\s*name: ([\w-]+)\s*\n\s*key: ([\w-]+)/,
-        );
-        const provider = file.slice('cluster-issuers-'.length, -'.yaml'.length);
-        return m ? { provider, name: m[1], key: m[2] } : { provider, name: null, key: null };
-      });
-  }
-
-  it('found the issuer files (guards against a silently-empty census)', () => {
-    const refs = issuerSecretRefs();
-    expect(refs.length).toBeGreaterThanOrEqual(4);
-    // manual is HTTP-01: no Secret, hence no CI arm.
-    expect(refs.find((r) => r.provider === 'manual')?.name).toBeNull();
-    expect(refs.filter((r) => r.name).length).toBeGreaterThanOrEqual(3);
-  });
-
-  it('has a DNS_PROVIDER-gated arm creating each referenced Secret in cert-manager', () => {
-    const wf = read('carbon/.github/workflows/deploy.yml');
-    for (const { provider, name, key } of issuerSecretRefs()) {
-      if (!name) continue;
-      expect(wf).toContain(`vars.DNS_PROVIDER == '${provider}'`);
-      expect(wf).toMatch(
-        new RegExp(
-          `kubectl create secret generic ${name} \\\\\\s*\\n\\s*--namespace=cert-manager \\\\\\s*\\n\\s*--from-literal=${key}=`,
-        ),
-      );
-    }
-  });
-
+describe('deploy.yml keeps DNS tokens out of the app and out of run: lines', () => {
   it('excludes every DNS-01 provider token from the app-facing vibecarbon-app-secrets bag', () => {
     // vibecarbon-app-secrets is envFrom'd wholesale into the app pod, and it is
     // built from toJSON(secrets) minus an exclude list. An infra credential

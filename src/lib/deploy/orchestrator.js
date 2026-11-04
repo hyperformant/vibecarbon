@@ -628,7 +628,7 @@ function probeFailureReason(probeResult) {
  * cert-manager's reason. Never throws.
  *
  * @param {{ domain: string, environment: string, projectName: string,
- *   dnsProvider?: string|null, kubeconfig: string, s3Config?: object,
+ *   kubeconfig: string, s3Config?: object,
  *   backupS3Config?: { bucket?: string }, tlsRestoredAt?: string|null,
  *   deps?: object }} args
  * @returns {Promise<{ state: 'trusted'|'pending', checkedAt: string, reason?: string, ca: string }>}
@@ -637,7 +637,6 @@ export async function verifyK8sTls({
   domain,
   environment,
   projectName,
-  dnsProvider,
   kubeconfig,
   s3Config,
   backupS3Config,
@@ -667,7 +666,7 @@ export async function verifyK8sTls({
   const servedSerial =
     deps.servedSerial ?? (async (d) => (await probeTlsTrustOnce(d)).serialNumber ?? null);
   const secretSerial = deps.secretSerial ?? liveK8sTlsSecretSerial;
-  const { dnsNames, ca } = identity({ projectDir: process.cwd(), dnsProvider, domain });
+  const { dnsNames, ca } = identity({ projectDir: process.cwd(), domain });
   const haveKubeconfig = kubeconfigExists(kubeconfig);
   const s = (deps.spinner ?? spinner)({ indicator: 'timer' });
   s.start(`Waiting for ${domain} to serve a trusted TLS certificate`);
@@ -2348,7 +2347,6 @@ export async function executeDeployment(args, gatheredConfig) {
           domain,
           environment,
           projectName: projectConfig.projectName,
-          dnsProvider,
           kubeconfig: probeKubeconfig,
           s3Config,
           backupS3Config,

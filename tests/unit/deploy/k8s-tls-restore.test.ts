@@ -33,8 +33,8 @@ const {
   snapshotK8sTlsSecret,
 } = await import('../../../src/lib/deploy/k8s/tls-restore.js');
 
-const DNS = ['app.example.com', '*.app.example.com'];
-const ISSUER = 'letsencrypt-prod-hetzner';
+const DNS = ['app.example.com'];
+const ISSUER = 'letsencrypt-prod';
 const S3 = { bucket: 'proj-backups', accessKey: 'AK', secretKey: 'SK', endpoint: 'https://s3' };
 
 // The snapshot is signed by a throwaway CA; the prod chain check trusts it
@@ -194,15 +194,35 @@ describe('restoreK8sTlsSecret', () => {
     H.read.mockReset();
     H.read.mockResolvedValue({ text: SNAP });
     const k = fakeKubectl({
-      live: k8sSecretJson({ dnsNames: DNS, issuerName: 'letsencrypt-staging-hetzner' }),
+      live: k8sSecretJson({ dnsNames: DNS, issuerName: 'letsencrypt-staging' }),
     });
     const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
     expect(r.restored).toBe(true);
   });
 
+  it('refuses a wildcard-era snapshot for the apex-only names, so cert-manager issues', async () => {
+    H.read.mockReset();
+    H.read.mockResolvedValue({
+      text: k8sSecretJson({
+        dnsNames: ['d.example.com', '*.d.example.com'],
+        issuerName: 'letsencrypt-prod',
+      }),
+    });
+    const k = fakeKubectl({ live: '' });
+    const r = await restoreK8sTlsSecret({
+      ...BASE,
+      issuerName: 'letsencrypt-prod',
+      dnsNames: ['d.example.com'],
+      runKubectl: k.run,
+    });
+    expect(r.restored).toBe(false);
+    expect(r.reason).toMatch(/^snapshot refused: certificate names differ/);
+    expect(writes(k.calls)).toHaveLength(0);
+  });
+
   it('skips a snapshot issued for other names', async () => {
     H.read.mockReset();
-    H.read.mockResolvedValue({ text: k8sSecretJson({ dnsNames: ['app.example.com'] }) });
+    H.read.mockResolvedValue({ text: k8sSecretJson({ dnsNames: ['other.example.com'] }) });
     const k = fakeKubectl({ live: '' });
     const r = await restoreK8sTlsSecret({ ...BASE, dnsNames: DNS, runKubectl: k.run });
     expect(r.restored).toBe(false);
@@ -211,8 +231,8 @@ describe('restoreK8sTlsSecret', () => {
   });
 
   it.each([
-    ['a staging issuer', 'letsencrypt-staging-hetzner'],
-    ['another provider', 'letsencrypt-prod-cloudflare'],
+    ['a staging issuer', 'letsencrypt-staging'],
+    ['another issuer', 'some-other-issuer'],
   ])('skips a snapshot from %s', async (_label, snapIssuer) => {
     H.read.mockReset();
     const { json, ca } = k8sSecretJsonWithCa({ dnsNames: DNS, issuerName: snapIssuer });
@@ -260,7 +280,7 @@ describe('restoreK8sTlsSecret', () => {
 
   it('staging: the chain is not checked against the platform roots', async () => {
     H.read.mockReset();
-    const staging = 'letsencrypt-staging-hetzner';
+    const staging = 'letsencrypt-staging';
     H.read.mockResolvedValue({ text: k8sSecretJson({ dnsNames: DNS, issuerName: staging }) });
     const k = fakeKubectl({ live: '' });
     const r = await restoreK8sTlsSecret({
@@ -401,8 +421,8 @@ describe('snapshotK8sTlsSecret', () => {
         selfSigned: true,
         issuerName: 'vibecarbon-standby-selfsigned',
       }),
-      k8sSecretJson({ dnsNames: ['app.example.com'] }),
-      k8sSecretJson({ dnsNames: DNS, issuerName: 'letsencrypt-staging-hetzner' }),
+      k8sSecretJson({ dnsNames: ['other.example.com'] }),
+      k8sSecretJson({ dnsNames: DNS, issuerName: 'letsencrypt-staging' }),
     ];
     for (const live of refused) {
       H.write.mockReset();
@@ -650,7 +670,7 @@ describe('readRestorableK8sTlsSnapshot', () => {
   it.each([
     ['no recorded CA', { ca: null }, /no recorded CA/],
     ['no backup bucket', { s3Config: null }, /no backup bucket/],
-    ['another issuer', { issuerName: 'letsencrypt-prod-digitalocean' }, /another issuer/],
+    ['another issuer', { issuerName: 'some-other-issuer' }, /another issuer/],
     ['other names', { dnsNames: ['other.example.com'] }, /names differ/],
   ])('refuses on %s, with a fixed reason', async (_l, over, reason) => {
     const read = vi.fn(async () => ({ text: SNAP }));
@@ -678,7 +698,7 @@ describe('readRestorableK8sTlsSnapshot', () => {
   });
 
   it('a CA-only mismatch (the snapshot issuer equals issuerName, but is the staging CA) is another issuer', async () => {
-    const staging = 'letsencrypt-staging-hetzner';
+    const staging = 'letsencrypt-staging';
     const text = k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: staging });
     const r = await readRestorableK8sTlsSnapshot({
       ...ARGS,

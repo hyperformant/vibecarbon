@@ -194,7 +194,7 @@ export function k8sSecretJsonWithCa(opts: K8sSecretOpts): { json: string; ca?: s
       ownerReferences: [{ kind: 'Certificate', name: 'vibecarbon-tls' }],
       annotations: opts.omitIssuer
         ? {}
-        : { 'cert-manager.io/issuer-name': opts.issuerName ?? 'letsencrypt-prod-hetzner' },
+        : { 'cert-manager.io/issuer-name': opts.issuerName ?? 'letsencrypt-prod' },
     },
     data: {
       'tls.crt': b64(cert),

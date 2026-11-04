@@ -24,8 +24,8 @@ const BASE = join(ROOT, 'carbon/k8s/base');
 
 const TEST_TLS = {
   dnsNames: ['app.example.test'],
-  issuerName: 'letsencrypt-prod-manual',
-  effectiveIssuer: 'letsencrypt-prod-manual',
+  issuerName: 'letsencrypt-prod',
+  effectiveIssuer: 'letsencrypt-prod',
 };
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML

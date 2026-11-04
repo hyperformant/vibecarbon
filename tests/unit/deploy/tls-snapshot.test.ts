@@ -45,7 +45,7 @@ describe('caSlug', () => {
     expect(caSlug('https://acme-staging-v02.api.letsencrypt.org/directory')).toBe('staging');
   });
   it('maps a prod issuer name to prod', () => {
-    expect(caSlug('letsencrypt-prod-hetzner')).toBe('prod');
+    expect(caSlug('letsencrypt-prod')).toBe('prod');
   });
   it('maps empty to prod', () => {
     expect(caSlug('')).toBe('prod');
@@ -284,7 +284,7 @@ describe('inspectK8sTlsSecret', () => {
   it('passes when SANs equal the required names', () => {
     const v = inspectK8sTlsSecret(k8sSecretJson({}), { dnsNames: names });
     expect(v.ok).toBe(true);
-    if (v.ok) expect(v.issuerName).toBe('letsencrypt-prod-hetzner');
+    if (v.ok) expect(v.issuerName).toBe('letsencrypt-prod');
   });
   it('fails when a required name is not covered', () => {
     expect(
@@ -347,7 +347,7 @@ describe('inspectK8sTlsSecret', () => {
 describe('buildRestoredTlsSecret', () => {
   const out = buildRestoredTlsSecret(k8sSecretJson({}), {
     namespace: 'vibecarbon',
-    issuerName: 'letsencrypt-prod-hetzner',
+    issuerName: 'letsencrypt-prod',
   }) as { type: string; metadata: Record<string, unknown> };
   it('is a named kubernetes.io/tls secret', () => {
     expect(out.type).toBe('kubernetes.io/tls');
@@ -367,7 +367,7 @@ describe('buildRestoredTlsSecret', () => {
   });
   it('carries every annotation cert-manager writes for this certificate, and no other', () => {
     expect(out.metadata.annotations).toEqual({
-      'cert-manager.io/issuer-name': 'letsencrypt-prod-hetzner',
+      'cert-manager.io/issuer-name': 'letsencrypt-prod',
       'cert-manager.io/issuer-kind': 'ClusterIssuer',
       'cert-manager.io/issuer-group': 'cert-manager.io',
       'cert-manager.io/certificate-name': 'vibecarbon-tls',
@@ -379,7 +379,7 @@ describe('buildRestoredTlsSecret', () => {
   });
   it('is still judged a valid issued Secret, as one cert-manager wrote is', () => {
     const verdict = inspectK8sTlsSecret(JSON.stringify(out), { dnsNames: names });
-    expect(verdict).toMatchObject({ ok: true, issuerName: 'letsencrypt-prod-hetzner' });
+    expect(verdict).toMatchObject({ ok: true, issuerName: 'letsencrypt-prod' });
   });
   it('drops server-owned metadata', () => {
     for (const f of [

@@ -151,7 +151,7 @@ describe('backup CronJob TLS snapshot step', () => {
   function runCron({
     rc,
     prefix = PREFIX,
-    issuer = 'letsencrypt-prod-cloudflare',
+    issuer = 'letsencrypt-prod',
     secretExists = true,
   }: {
     rc: number;
@@ -234,22 +234,22 @@ esac
   // caSlug's rule, "staging" in the issuer name. A project or env merely
   // named staging is no staging folder.
   it.each([
-    ['a staging issuer, the prod folder', 'letsencrypt-staging-cloudflare', PREFIX, false],
+    ['a staging issuer, the prod folder', 'letsencrypt-staging', PREFIX, false],
     [
       'a prod issuer, the staging folder',
-      'letsencrypt-prod-cloudflare',
+      'letsencrypt-prod',
       's3://proj-backups/backups/proj/prod/tls/staging',
       false,
     ],
     [
       'a staging issuer, the staging folder',
-      'letsencrypt-staging-cloudflare',
+      'letsencrypt-staging',
       's3://proj-backups/backups/proj/prod/tls/staging',
       true,
     ],
     [
       'a prod issuer, the prod folder of an env named staging',
-      'letsencrypt-prod-cloudflare',
+      'letsencrypt-prod',
       's3://proj-backups/backups/proj/staging/tls/prod',
       true,
     ],

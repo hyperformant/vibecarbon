@@ -28,7 +28,7 @@ const SRC = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.j
 
 const DOMAIN = 'app.example.com';
 const IDENTITY = {
-  issuerName: 'letsencrypt-staging-hetzner',
+  issuerName: 'letsencrypt-staging',
   dnsNames: [DOMAIN, `*.${DOMAIN}`],
   ca: 'staging',
 };

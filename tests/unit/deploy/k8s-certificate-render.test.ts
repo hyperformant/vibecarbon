@@ -29,9 +29,9 @@ const BASE = join(ROOT, 'carbon/k8s/base');
 type Doc = any;
 
 const TLS = {
-  dnsNames: ['app.example.test', '*.app.example.test'],
-  issuerName: 'letsencrypt-prod-hetzner',
-  effectiveIssuer: 'letsencrypt-prod-hetzner',
+  dnsNames: ['app.example.test'],
+  issuerName: 'letsencrypt-prod',
+  effectiveIssuer: 'letsencrypt-prod',
 };
 
 function walkFiles(dir: string): string[] {
@@ -70,7 +70,7 @@ describe('renderTlsCertificateManifest', () => {
       renderTlsCertificateManifest({ ...TLS, effectiveIssuer: 'vibecarbon-standby-selfsigned' }),
     ) as Doc;
     expect(doc.spec.issuerRef.name).toBe('vibecarbon-standby-selfsigned');
-    expect(doc.metadata.annotations[PROMOTE_ISSUER_ANNOTATION]).toBe('letsencrypt-prod-hetzner');
+    expect(doc.metadata.annotations[PROMOTE_ISSUER_ANNOTATION]).toBe('letsencrypt-prod');
   });
 
   it('refuses a missing name list or issuer', () => {

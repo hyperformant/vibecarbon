@@ -722,7 +722,7 @@ async function recreateMissingTlsCertificate({ promotedIp, sshKeyPath, snapshot,
     } else {
       // Dynamic: k3s.js is the k8s deploy, which failover loads lazily (R6a).
       const { certificateDnsNames } = await import('./lib/deploy/k8s/k3s.js');
-      const dnsNames = certificateDnsNames(snapshot.domain, live.issuerName);
+      const dnsNames = certificateDnsNames(snapshot.domain);
       if (!sameNames(dnsNames, live.dnsNames)) {
         reason = 'live Secret names differ from the deploy names';
       } else {

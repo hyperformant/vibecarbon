@@ -47,9 +47,9 @@ const RENDERER = 'carbon/scripts/render-tls-certificate.mjs';
 const NO_DOMAIN = 'the TLS Certificate needs a domain, and this environment has none';
 const WF = readFileSync('carbon/.github/workflows/deploy.yml', 'utf8');
 const TLS = {
-  dnsNames: ['app.example.test', '*.app.example.test'],
-  issuerName: 'letsencrypt-prod-hetzner',
-  effectiveIssuer: 'letsencrypt-prod-hetzner',
+  dnsNames: ['app.example.test'],
+  issuerName: 'letsencrypt-prod',
+  effectiveIssuer: 'letsencrypt-prod',
 };
 
 const work = mkdtempSync(join(tmpdir(), 'vc-gitops-tls-'));
@@ -67,17 +67,17 @@ describe('the shared Certificate renderer', () => {
   it('vars round-trip to the same settings', () => {
     const vars = tlsCertificateVars(TLS);
     expect(vars).toEqual({
-      TLS_CERT_ISSUER: 'letsencrypt-prod-hetzner',
-      TLS_CERT_EFFECTIVE_ISSUER: 'letsencrypt-prod-hetzner',
-      TLS_CERT_DNS_NAMES: 'app.example.test,*.app.example.test',
+      TLS_CERT_ISSUER: 'letsencrypt-prod',
+      TLS_CERT_EFFECTIVE_ISSUER: 'letsencrypt-prod',
+      TLS_CERT_DNS_NAMES: 'app.example.test',
     });
     expect(tlsCertificateFromVars(vars)).toEqual(TLS);
   });
 
   it.each([
-    [{ issuerName: 'letsencrypt-prod-hetzner"\nx: y' }, /issuer/],
+    [{ issuerName: 'letsencrypt-prod"\nx: y' }, /issuer/],
     [{ issuerName: 'some-issuer' }, /issuer/],
-    [{ effectiveIssuer: 'letsencrypt-prod-hetzner; rm' }, /issuer/],
+    [{ effectiveIssuer: 'letsencrypt-prod; rm' }, /issuer/],
     [{ dnsNames: ['app.example.test\n- evil'] }, /DNS name/],
     [{ dnsNames: ['app example.test'] }, /DNS name/],
     [{ dnsNames: [] }, /dnsNames/],
@@ -182,12 +182,12 @@ describe('deployK8sGitOps seeds the Certificate vars', () => {
     return vars as Record<string, string>;
   }
 
-  it('the primary role seeds the issuer it issues from, and the DNS-01 names', async () => {
+  it('the primary role seeds the issuer it issues from, and the apex name', async () => {
     const vars = await seedFor('prod', {});
     expect(vars).toMatchObject({
-      TLS_CERT_ISSUER: 'letsencrypt-staging-hetzner',
-      TLS_CERT_EFFECTIVE_ISSUER: 'letsencrypt-staging-hetzner',
-      TLS_CERT_DNS_NAMES: 'app.example.test,*.app.example.test',
+      TLS_CERT_ISSUER: 'letsencrypt-staging',
+      TLS_CERT_EFFECTIVE_ISSUER: 'letsencrypt-staging',
+      TLS_CERT_DNS_NAMES: 'app.example.test',
     });
   });
 
@@ -199,7 +199,7 @@ describe('deployK8sGitOps seeds the Certificate vars', () => {
   it('the standby role issues from the self-signed issuer; the real one rides the annotation', async () => {
     const vars = await seedFor('prod-standby', { role: 'standby' });
     expect(vars).toMatchObject({
-      TLS_CERT_ISSUER: 'letsencrypt-staging-hetzner',
+      TLS_CERT_ISSUER: 'letsencrypt-staging',
       TLS_CERT_EFFECTIVE_ISSUER: STANDBY_SELFSIGNED_ISSUER,
     });
   });
@@ -261,12 +261,12 @@ describe('refreshGitopsTlsVars (after a k8s-ha failover)', () => {
     const byEnv = Object.fromEntries(seed.mock.calls.map((c) => [c[0], c]));
     expect(byEnv['prod-primary'][1]).toEqual({});
     expect(byEnv['prod-primary'][2]).toEqual({
-      TLS_CERT_ISSUER: 'letsencrypt-staging-hetzner',
+      TLS_CERT_ISSUER: 'letsencrypt-staging',
       TLS_CERT_EFFECTIVE_ISSUER: STANDBY_SELFSIGNED_ISSUER,
-      TLS_CERT_DNS_NAMES: 'app.example.test,*.app.example.test',
+      TLS_CERT_DNS_NAMES: 'app.example.test',
     });
     expect(byEnv['prod-standby'][2]).toMatchObject({
-      TLS_CERT_EFFECTIVE_ISSUER: 'letsencrypt-staging-hetzner',
+      TLS_CERT_EFFECTIVE_ISSUER: 'letsencrypt-staging',
     });
     // Every gh call is bounded.
     expect(byEnv['prod-standby'][3]).toEqual({ timeout: expect.any(Number) });

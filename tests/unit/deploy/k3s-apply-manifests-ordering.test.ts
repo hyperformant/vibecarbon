@@ -1337,10 +1337,7 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(deleteCert).toBeGreaterThan(apply);
     expect(deleteSecret).toBeGreaterThan(deleteCert);
     expect(cmdCalls.some((a) => a.includes('patch') && a.includes('grafana-tls'))).toBe(false);
-    expect(certificateAtBaseApply?.spec?.dnsNames).toEqual([
-      'app.example.test',
-      '*.app.example.test',
-    ]);
+    expect(certificateAtBaseApply?.spec?.dnsNames).toEqual(['app.example.test']);
   });
 
   it('one certificate per name: a primary whose project removed observability still clears grafana-tls and its old route', async () => {
@@ -1405,9 +1402,7 @@ describe('applyK3sManifests pilot-standby role', () => {
       name: 'vibecarbon-standby-selfsigned',
       kind: 'ClusterIssuer',
     });
-    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe(
-      'letsencrypt-prod-hetzner',
-    );
+    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe('letsencrypt-prod');
   });
 
   it('single-ACME-issuer policy: a primary cert keeps the ACME issuerRef AND carries the annotation', async () => {
@@ -1424,12 +1419,10 @@ describe('applyK3sManifests pilot-standby role', () => {
     const body = certificateAtBaseApply;
     if (!body) throw new Error('no rendered certificate/vibecarbon-tls at the base apply');
     expect(body.spec.issuerRef).toEqual({
-      name: 'letsencrypt-prod-hetzner',
+      name: 'letsencrypt-prod',
       kind: 'ClusterIssuer',
     });
-    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe(
-      'letsencrypt-prod-hetzner',
-    );
+    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe('letsencrypt-prod');
   });
 
   it('renders or patches exactly the Certificates the ACME watchdog is allowed to repair', async () => {

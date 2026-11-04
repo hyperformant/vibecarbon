@@ -1011,64 +1011,29 @@ export async function renderCarbonAutoscalerConfig({
 }
 
 /**
- * Matches a ClusterIssuer name ending in a DNS01_PROVIDERS key (e.g.
- * `letsencrypt-prod-hetzner`) — generated once from the table's own keys so
- * `certificateDnsNames` can't drift from `pickIssuerName`'s provider suffixes.
+ * Map acmeServer → the ClusterIssuer name that `applyK3sManifests` renders
+ * into `Certificate/vibecarbon-tls`. Both issuers solve HTTP-01 through the
+ * Traefik ingress class (carbon/k8s/infra/cert-manager-resources/
+ * cluster-issuers.yaml), for every DNS provider.
+ *
+ * @param {{acmeServer?: string|null}} args
+ * @returns {'letsencrypt-prod'|'letsencrypt-staging'}
  */
-const DNS01_ISSUER_SUFFIX_PATTERN = new RegExp(`-(${Object.keys(DNS01_PROVIDERS).join('|')})$`);
-
-/**
- * Map (dnsProvider, acmeServer) → ClusterIssuer name that
- * `applyK3sManifests` renders into `Certificate/vibecarbon-tls`.
- *
- * - cloudflare/hetzner: DNS-01 solver — works behind reverse proxies and
- *   has no port-80 dependency. Requires per-provider Secret + (for
- *   hetzner) the cert-manager-webhook-hetzner deployment.
- * - manual (default): HTTP-01 solver — needs port 80 reachable from
- *   Let's Encrypt. Used when no programmable DNS provider is wired up.
- *
- * Unknown providers fall back to `manual` so a future enum addition
- * never deploys a Certificate that references a non-existent issuer.
- *
- * @param {{dnsProvider?: string|null, acmeServer?: string|null}} args
- * @returns {string}
- */
-export function pickIssuerName({ dnsProvider, acmeServer }) {
-  const stage = (acmeServer || '').includes('staging') ? 'staging' : 'prod';
-  const providerSuffix = DNS01_PROVIDERS[dnsProvider] ? dnsProvider : 'manual';
-  return `letsencrypt-${stage}-${providerSuffix}`;
+export function pickIssuerName({ acmeServer }) {
+  return (acmeServer || '').includes('staging') ? 'letsencrypt-staging' : 'letsencrypt-prod';
 }
 
 /**
  * Build the `dnsNames` list of the rendered `Certificate/vibecarbon-tls`.
  *
- * DNS-01 issuers (cloudflare, hetzner) support wildcard SANs — cert-manager
- * can obtain `*.${domain}` in a single ACME order, covering every subdomain
- * (api, dashboard, grafana, n8n …) without separate per-subdomain
- * certificates. One wildcard cert = no per-router cert-resolver needed =
- * no per-domain ACME rate-limit risk.
- *
- * Manual issuers use HTTP-01 which cannot issue wildcards, so fall back to
- * the apex domain only (the IngressRoutes already work; only non-apex
- * subdomains are uncovered, but those are admin-only tools the operator
- * configures manually for manual-DNS deploys).
+ * The apex alone: k8s routes every app and add-on by path on the apex, and
+ * HTTP-01 cannot issue a wildcard.
  *
  * @param {string} domain - The apex deploy domain, e.g. `e1.carbonstack.dev`
- * @param {string} issuerName - The ClusterIssuer name, e.g.
- *   `letsencrypt-prod-hetzner`, produced by `pickIssuerName`
  * @returns {string[]}
  */
-export function certificateDnsNames(domain, issuerName) {
-  // Only the known DNS-01 providers (DNS01_PROVIDERS keys — cloudflare,
-  // hetzner) support wildcard SANs. `manual` and any future/unknown issuer
-  // name falls back to apex-only so an unrecognised issuer never attempts a
-  // wildcard via HTTP-01 (which LE rejects). Generated from the same table
-  // pickIssuerName/buildDnsProviderSecret read, so a row is one place that
-  // grants wildcard capability instead of a separately-maintained regex.
-  const isDns01 = DNS01_ISSUER_SUFFIX_PATTERN.test(issuerName);
-  if (!isDns01) return [domain];
-  // DNS-01 issuers (cloudflare, hetzner — prod or staging): issue one wildcard.
-  return [domain, `*.${domain}`];
+export function certificateDnsNames(domain) {
+  return [domain];
 }
 
 /**
@@ -1078,12 +1043,12 @@ export function certificateDnsNames(domain, issuerName) {
  * operator's environment, so the e2e harness can inject the staging URL
  * without writing it into the project. Anything else gets the prod issuer.
  *
- * @param {{ envLocal?: Record<string, string>|null, dnsProvider?: string|null }} args
+ * @param {{ envLocal?: Record<string, string>|null }} args
  * @returns {string}
  */
-export function k8sIssuerName({ envLocal, dnsProvider }) {
+export function k8sIssuerName({ envLocal }) {
   const acmeServer = envLocal?.ACME_CA_SERVER || readOperatorVar('ACME_CA_SERVER').value || '';
-  return pickIssuerName({ dnsProvider, acmeServer });
+  return pickIssuerName({ acmeServer });
 }
 
 /**
@@ -1092,16 +1057,16 @@ export function k8sIssuerName({ envLocal, dnsProvider }) {
  * .env.local the same way applyK3sManifests does, for the code that runs
  * after the apply (the deploy's TLS phase).
  *
- * @param {{ projectDir: string, dnsProvider?: string|null, domain: string }} args
+ * @param {{ projectDir: string, domain: string }} args
  * @returns {{ issuerName: string, dnsNames: string[], ca: 'prod'|'staging' }}
  */
-export function k8sTlsIdentity({ projectDir, dnsProvider, domain }) {
+export function k8sTlsIdentity({ projectDir, domain }) {
   const envPath = join(projectDir, '.env.local');
   const envLocal = existsSync(envPath) ? loadEnvLocal(envPath) : null;
-  const issuerName = k8sIssuerName({ envLocal, dnsProvider });
+  const issuerName = k8sIssuerName({ envLocal });
   return {
     issuerName,
-    dnsNames: certificateDnsNames(domain, issuerName),
+    dnsNames: certificateDnsNames(domain),
     ca: caSlug(issuerName),
   };
 }
@@ -4020,22 +3985,18 @@ export async function applyK3sManifests({
   await assertNoRetiredChartDb({ env });
   await assertDbStorageClass({ storageClass, env });
   // Issuer choice (k8sIssuerName): ACME_CA_SERVER from .env.local or the
-  // operator's environment picks staging or prod; the provider suffix
-  // (cloudflare/hetzner/manual) determines which solver, DNS-01 or HTTP-01,
-  // cert-manager actually uses (see pickIssuerName). Computed before the base
+  // operator's environment picks staging or prod, both HTTP-01 (see
+  // pickIssuerName). Computed before the base
   // is rendered: the backup settings below (the TLS snapshot folder is per
   // CA), the rendered Certificate and the Secret restore all need it.
-  const issuerName = k8sIssuerName({ envLocal, dnsProvider });
-  // DNS-01 issuers (cloudflare, hetzner) support wildcard SANs: one cert
-  // covers *.${domain} so every IngressRoute subdomain is included without
-  // separate per-router ACME orders. Manual (HTTP-01) falls back to apex-only.
-  const dnsNames = certificateDnsNames(domain, issuerName);
+  const issuerName = k8sIssuerName({ envLocal });
+  // The apex alone: k8s routes by path on the apex, and HTTP-01 has no wildcard.
+  const dnsNames = certificateDnsNames(domain);
   // Single-ACME-issuer policy (d4 2026-08-28, acme-issuer-policy.js): a
   // pilot-standby's Certificate references the local self-signed issuer so
-  // two clusters never solve DNS-01 for the same names concurrently
-  // (cert-manager's DO solver keys challenge records by name; concurrent
-  // issuers live-lock). The REAL issuer name rides along in the promote
-  // annotation on BOTH roles: the failover promote step (and every
+  // only the cluster DNS points at solves ACME (HTTP-01 can pass on no other)
+  // and two issuers never order the same names at once. The REAL issuer name
+  // rides along in the promote annotation on BOTH roles: the failover promote step (and every
   // reconverge redeploy, via this same branch under the swapped role)
   // re-points issuerRef from it.
   const effectiveIssuer = pilotStandby ? STANDBY_SELFSIGNED_ISSUER : issuerName;
