@@ -974,6 +974,15 @@ export class BaseProvider {
   static CPU_CLASSES = [];
 
   /**
+   * What ranks CPU_CLASSES: 'speed' when the order is a measured or decided
+   * speed ranking (a standby on a lower class may run a failover slower, and
+   * the CLI says so), 'price' when it is only the price order (the CLI then
+   * says only that the classes differ).
+   * @type {'speed'|'price'}
+   */
+  static CPU_CLASS_ORDER = 'price';
+
+  /**
    * How the CLI names each class in its messages, by CPU_CLASSES id. A class
    * with no label prints as its id.
    * @type {Record<string, string>}

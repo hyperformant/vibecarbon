@@ -260,6 +260,8 @@ export class DigitalOceanProvider extends BaseProvider {
   // primary on `-amd`. The class is the slug's suffix.
   static CPU_CLASSES = ['amd', 'intel', 'regular'];
 
+  static CPU_CLASS_ORDER = 'speed';
+
   static CPU_CLASS_LABELS = { amd: 'premium AMD', intel: 'premium Intel', regular: 'regular' };
 
   /**

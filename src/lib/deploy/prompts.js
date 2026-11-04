@@ -42,7 +42,7 @@ import {
   cheapestDefaultRegion,
   cheapestRoleSet,
   formatMonthly,
-  haClassLabel,
+  haDefaultPair,
   haRoleSets,
   haStandbyType,
   ROLE_MIN_RAM_GB,
@@ -709,27 +709,35 @@ export function unorderableDefaultRefusal(
  * (`<id> - <name> · from $7.09/mo`: the cheapest role set for `roles` plus
  * billed IPv4, `cheapestRoleSet`), or `· not orderable right now` where some
  * role has nothing in stock (still selectable: the P7 refusal then names
- * where to go). The pre-selection is `cheapestDefaultRegion`, ranked from the
- * same sets, so it never disagrees with a label. With no catalog (offline,
- * or a failed fetch) the labels are the plain `<id> - <name>` and the
- * pre-selection is the provider's default region.
+ * where to go). For an HA deploy (`options.ha`) the price is the pair the
+ * deploy creates by default, both sides on one CPU class, and the label
+ * names its standby location (`haDefaultPair`). The pre-selection is
+ * `cheapestDefaultRegion`, ranked from the same sets, so it never disagrees
+ * with a label. With no catalog (offline, or a failed fetch) the labels are
+ * the plain `<id> - <name>` and the pre-selection is the provider's default
+ * region.
  *
  * @param {object} Provider - the provider class
  * @param {Record<string, string>} regions - id to display name
  * @param {string[]} roles - the roles this deploy places
+ * @param {{ha?: boolean}} [options]
  * @returns {{options: Array<{value: string, label: string}>, initialValue: string}}
  */
-export function regionPromptChoices(Provider, regions, roles) {
+export function regionPromptChoices(Provider, regions, roles, { ha = false } = {}) {
   const live = Boolean(Provider._locationTypes);
   const options = Object.entries(regions).map(([id, name]) => {
     const plain = `${id} - ${name}`;
     if (!live) return { value: id, label: plain };
-    const set = cheapestRoleSet(Provider, id, roles);
+    const set = ha ? haDefaultPair(Provider, id, roles) : cheapestRoleSet(Provider, id, roles);
     if (!set) return { value: id, label: `${plain} · not orderable right now` };
     if (set.monthly === null) return { value: id, label: plain };
-    return { value: id, label: `${plain} · from ${formatMonthly(Provider, set.monthly)}/mo` };
+    const standby = ha ? ` with a standby in ${set.standbyRegion}` : '';
+    return {
+      value: id,
+      label: `${plain} · from ${formatMonthly(Provider, set.monthly)}/mo${standby}`,
+    };
   });
-  return { options, initialValue: cheapestDefaultRegion(Provider, roles) };
+  return { options, initialValue: cheapestDefaultRegion(Provider, roles, { ha }) };
 }
 
 export async function gatherDeploymentConfig(args) {
@@ -892,6 +900,7 @@ export async function gatherDeploymentConfig(args) {
       Provider,
       providerConfig.regions,
       regionRoles,
+      { ha },
     );
     region = initialValue;
     if (!args.yes) {
@@ -1012,11 +1021,20 @@ export async function gatherDeploymentConfig(args) {
   if (ha) {
     // The k8s-ha pilot-light standby places a master and a db, no worker.
     const standbyRoles = isComposeDeploy ? ['compose'] : ['master', 'db'];
-    const primaryTypes = isComposeDeploy
-      ? { compose: serverType }
-      : { master: masterServerType, db: dbServerType };
-    // The default must fit the primary's types without shrinking them.
-    const standbyDefault = Provider.getDefaultStandbyRegion(region, standbyRoles, primaryTypes);
+    const primaryTypesNow = () =>
+      isComposeDeploy ? { compose: serverType } : { master: masterServerType, db: dbServerType };
+    // The default must fit the primary's fixed types (a flag or a record)
+    // without shrinking them. A role still on its region default is left
+    // open: it is re-picked for the pair below, so each location is ranked
+    // by the pair it would make, one CPU class on both sides first.
+    const fixedPrimaryTypes = Object.fromEntries(
+      Object.entries(primaryTypesNow()).filter(([role]) => !defaultedRoles.includes(role)),
+    );
+    const standbyDefault = Provider.getDefaultStandbyRegion(
+      region,
+      standbyRoles,
+      fixedPrimaryTypes,
+    );
     secondaryRegion = args.secondaryRegion || envConfig.secondaryRegion || standbyDefault;
     if (!args.secondaryRegion && !envConfig.secondaryRegion && !args.yes) {
       const standbyOptions = Object.entries(providerConfig.regions)
@@ -1034,43 +1052,33 @@ export async function gatherDeploymentConfig(args) {
 
     // One CPU class for both sides (owner decision 2026-11-03): each role
     // whose type is the region default is re-picked as the best class both
-    // locations sell, at the same RAM tier (src/lib/sizing.js haRoleSets), so
-    // the standby below resolves to the very same type. A DigitalOcean sfo3
-    // primary with a tor1 standby runs -intel on both sides rather than an
-    // -amd primary beside a regular standby, which measured about twice as
-    // slow to install on the deploy's critical path. Flags and recorded types
-    // stay as they are.
+    // locations sell, never below the default's size (src/lib/sizing.js
+    // haRoleSets), so the standby below resolves to the same class. A
+    // DigitalOcean sfo3 primary with a tor1 standby runs -intel on both sides
+    // rather than an -amd primary beside a regular standby, which measured
+    // about twice as slow to install on the deploy's critical path. Flags and
+    // recorded types stay as they are. The deploy prints which class the two
+    // sides run, once, when it sizes the standby (haClassMessage).
     if (defaultedRoles.length > 0) {
       const sets = haRoleSets(Provider, region, secondaryRegion, defaultedRoles);
-      const before = {
-        compose: serverType,
-        master: masterServerType,
-        db: dbServerType,
-        worker: workerServerType,
-      };
       const picked = Object.fromEntries(
         defaultedRoles
           .filter((role) => sets.primary[role])
           .map((role) => [role, sets.primary[role]]),
       );
       if (isComposeDeploy) {
-        if (picked.compose)
+        if (picked.compose) {
           serverType = masterServerType = workerServerType = dbServerType = picked.compose;
+        }
       } else {
         masterServerType = picked.master ?? masterServerType;
         dbServerType = picked.db ?? dbServerType;
         workerServerType = picked.worker ?? workerServerType;
         serverType = workerServerType;
       }
-      const moved = Object.entries(picked).filter(([role, type]) => before[role] !== type);
-      if (moved.length > 0 && sets.shared && sets.cpuClass) {
-        p.log.info(
-          `${region} and ${secondaryRegion} both sell ${haClassLabel(Provider, sets.cpuClass)} ` +
-            'servers, the best CPU class the two have in common, so both sides use it: ' +
-            `${moved.map(([role, type]) => `${role}=${type}`).join(', ')}`,
-        );
-      }
     }
+    // The primary's types as the deploy will place them (re-picked above).
+    const primaryTypes = primaryTypesNow();
 
     // The standby's own sizes, resolved as the HA effects resolve them: a
     // type on record for the standby is kept (a redeploy never resizes or

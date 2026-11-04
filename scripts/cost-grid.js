@@ -17,8 +17,9 @@
  *
  * Every location comes from the functions the deploy wizard uses
  * (cheapestDefaultRegion for the primary, getDefaultStandbyRegion for an HA
- * standby), and an HA pair's sizes from its common-class picker (haRoleSets),
- * so the grid always shows what a new customer is offered.
+ * standby), and an HA pair's sizes from its common-class picker
+ * (haDefaultPair over haRoleSets), so the grid always shows what a new
+ * customer is offered.
  * Refresh it with --write before a release that changes default sizes.
  */
 
@@ -30,7 +31,7 @@ import {
   cheapestDefaultRegion,
   cheapestRoleSet,
   formatMonthly,
-  haRoleSets,
+  haDefaultPair,
   ipv4MonthlyAt,
 } from '../src/lib/sizing.js';
 
@@ -232,12 +233,15 @@ export function computeEnvMonthly(Provider, mode, extras = extrasFor(Provider)) 
     throw new Error(`cost-grid: ${Provider.NAME} does not support ${mode}`);
   }
   const k8s = mode.startsWith('k8s');
+  const ha = mode.endsWith('-ha');
   const roles = k8s ? ['master', 'db', 'worker'] : ['compose'];
-  const primary = cheapestDefaultRegion(Provider, roles);
-  const set = cheapestRoleSet(Provider, primary, roles);
-  if (!set) throw new Error(`cost-grid: ${Provider.NAME} ${mode} is not orderable in ${primary}`);
+  // The location the wizard pre-selects for this mode: for HA, ranked by
+  // the pair it creates (cheapestDefaultRegion with `ha`).
+  const primary = cheapestDefaultRegion(Provider, roles, { ha });
   const cluster = (location) => (k8s ? extras.perCluster(location) : 0);
-  if (!mode.endsWith('-ha')) {
+  if (!ha) {
+    const set = cheapestRoleSet(Provider, primary, roles);
+    if (!set) throw new Error(`cost-grid: ${Provider.NAME} ${mode} is not orderable in ${primary}`);
     const monthly =
       setMonthly(Provider, primary, set.types, mode) +
       cluster(primary) +
@@ -245,28 +249,19 @@ export function computeEnvMonthly(Provider, mode, extras = extrasFor(Provider)) 
     return { monthly: Math.round(monthly * 100) / 100, locations: [primary] };
   }
 
-  // HA: the standby location as the wizard defaults it, then both sides'
-  // types as the wizard re-picks them for that pair: one CPU class for both,
-  // the best both locations sell (haRoleSets). The k8s-ha pilot-light
-  // standby places a master and a db, no worker.
-  const standbyRoles = k8s ? ['master', 'db'] : ['compose'];
-  const primaryTypes = Object.fromEntries(standbyRoles.map((r) => [r, set.types[r]]));
-  const standby = Provider.getDefaultStandbyRegion(primary, standbyRoles, primaryTypes);
-  const pair = haRoleSets(Provider, primary, standby, roles);
-  if (roles.some((r) => !pair.primary[r])) {
-    throw new Error(`cost-grid: ${Provider.NAME} ${mode} is not orderable in ${primary}`);
-  }
-  const placed = Object.fromEntries(standbyRoles.map((r) => [r, pair.standby[r]]));
-  if (standbyRoles.some((r) => !placed[r])) {
-    throw new Error(`cost-grid: ${Provider.NAME} ${mode} standby is not orderable in ${standby}`);
-  }
+  // HA: the pair the wizard creates by default (haDefaultPair): its standby
+  // location, and both sides on one CPU class, the best both locations sell
+  // (haRoleSets). The k8s-ha pilot-light standby places a master and a db.
+  const pair = haDefaultPair(Provider, primary, roles);
+  if (!pair) throw new Error(`cost-grid: ${Provider.NAME} ${mode} is not orderable in ${primary}`);
+  const standby = pair.standbyRegion;
   const monthly =
     setMonthly(Provider, primary, pair.primary, mode) +
     cluster(primary) +
     roles.length * extras.perServer +
-    setMonthly(Provider, standby, placed, mode) +
+    setMonthly(Provider, standby, pair.standby, mode) +
     cluster(standby) +
-    standbyRoles.length * extras.perServer;
+    Object.keys(pair.standby).length * extras.perServer;
   const locations = [primary, standby];
   return { monthly: Math.round(monthly * 100) / 100, locations };
 }

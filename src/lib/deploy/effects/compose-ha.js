@@ -225,6 +225,7 @@ async function haProvisionServers(ctx) {
       standbyRegion,
       primary: { compose: primaryStackServerType },
       standby: { compose: standbyServerType },
+      environment,
     });
     if (message) p.log[message.level](message.line);
   }

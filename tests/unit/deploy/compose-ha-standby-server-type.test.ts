@@ -110,11 +110,11 @@ describe('compose-ha standby server type', () => {
       const ctx = await runDecision({ serverType: 'cx23', region: 'hel1', secondary: 'fsn1' });
       expect(ctx.standbyServerType).toBe('cpx22');
       expect(warn).toHaveBeenCalledWith(
-        'Standby server types adjusted for fsn1: compose=cpx22; the standby in fsn1 runs ' +
-          'regular AMD (cpx) servers (compose=cpx22) and the primary in hel1 runs ' +
-          'cost-optimized (cx), so a failover may run slower than the primary. Both ' +
-          'locations sell regular AMD (cpx) servers: deploy -server-type cpx22 puts both ' +
-          'sides on that class',
+        'Standby server types adjusted for fsn1: compose=cpx22; your standby runs a different ' +
+          'CPU class from your primary (compose: regular AMD (cpx) in fsn1, cost-optimized (cx) ' +
+          'in hel1). Both locations sell regular AMD (cpx) servers this size or larger: once ' +
+          'this deploy finishes, run vibecarbon scale production and pick a regular AMD (cpx) ' +
+          'size to put both sides on one class',
       );
     });
 
@@ -124,8 +124,9 @@ describe('compose-ha standby server type', () => {
       const ctx = await runDecision({ serverType: 'cpx22', region: 'nbg1', secondary: 'fsn1' });
       expect(ctx.standbyServerType).toBe('cpx22');
       expect(info).toHaveBeenCalledWith(
-        'Primary (nbg1) and standby (fsn1) both run regular AMD (cpx) servers, the best CPU ' +
-          "class nbg1 and fsn1 both sell, so a failover lands on servers as fast as the primary's",
+        'Your primary (nbg1) and standby (fsn1) both run regular AMD (cpx) servers, the ' +
+          'lowest-priced CPU class nbg1 and fsn1 both sell, so a failover lands on servers as ' +
+          "fast as your primary's",
       );
     });
 

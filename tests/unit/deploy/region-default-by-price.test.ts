@@ -278,7 +278,40 @@ describe('new-project region default by price', () => {
     expect(order.indexOf('Region:')).toBeLessThan(
       order.indexOf('Standby region (HA failover target):'),
     );
-    expect(out.region).toBe('hel1');
-    expect(out.secondaryRegion).not.toBe('hel1');
+    expect(out.secondaryRegion).not.toBe(out.region);
+  });
+
+  it('HA: each label prices the pair the deploy creates, both sides on one class', async () => {
+    // cx23 is stocked in hel1 only, so an HA pair from hel1 runs cpx22 on both
+    // sides (a cx23 primary would be alone in its class). hel1 is no cheaper
+    // than nbg1 as a pair, so nbg1, the default region, stays pre-selected.
+    seed(HetznerProvider, 'flux-hetzner-cx23-hel1');
+    const { out, selectCalls } = await runPrompts({ ha: true });
+    const regionSelect = regionSelectOf(selectCalls);
+    // cpx22 22.99 + IPv4 0.60 on each side.
+    expect(labelOf(regionSelect, 'hel1')).toBe(
+      'hel1 - Helsinki, Finland · from $47.18/mo with a standby in fsn1',
+    );
+    expect(labelOf(regionSelect, 'nbg1')).toBe(
+      'nbg1 - Nuremberg, Germany · from $47.18/mo with a standby in fsn1',
+    );
+    expect(regionSelect.initialValue).toBe('nbg1');
+    expect(out.region).toBe('nbg1');
+    expect(out.serverType).toBe('cpx22');
+  });
+
+  it('HA: DigitalOcean k8s-ha labels price five servers on one class', async () => {
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const { selectCalls } = await runPrompts({ provider: 'digitalocean', mode: 'k8s', ha: true });
+    const regionSelect = regionSelectOf(selectCalls);
+    // nyc3 + tor1 share only regular: 24 + 12 + 24 and 24 + 12.
+    expect(labelOf(regionSelect, 'nyc3')).toBe(
+      'nyc3 - New York 3 · from $96.00/mo with a standby in tor1',
+    );
+    // sfo3 pairs with nyc3 on -amd: 28 + 14 + 28 and 28 + 14.
+    expect(labelOf(regionSelect, 'sfo3')).toBe(
+      'sfo3 - San Francisco 3 · from $112.00/mo with a standby in nyc3',
+    );
+    expect(regionSelect.initialValue).toBe('nyc3');
   });
 });

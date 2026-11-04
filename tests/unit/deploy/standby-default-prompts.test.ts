@@ -205,7 +205,7 @@ describe('deploy wizard HA standby', () => {
     expect(out.standbyServerTypes).toEqual({ serverType: 's-2vcpu-4gb-amd' });
   });
 
-  it('k8s-ha sfo3 + tor1: every role on -intel on both sides, and the wizard says why', async () => {
+  it('k8s-ha sfo3 + tor1: every role on -intel on both sides, the class line left to the deploy', async () => {
     seed(DigitalOceanProvider, '2026-10-22/digitalocean');
     const out = await runPrompts({
       mode: 'k8s',
@@ -221,11 +221,39 @@ describe('deploy wizard HA standby', () => {
       dbServerType: 's-1vcpu-2gb-intel',
       workerServerType: 's-2vcpu-4gb-intel',
     });
-    const said = clackMock.log.info.mock.calls.map(([m]) => String(m));
-    expect(said).toContain(
-      'sfo3 and tor1 both sell premium Intel servers, the best CPU class the two have in ' +
-        'common, so both sides use it: master=s-2vcpu-4gb-intel, db=s-1vcpu-2gb-intel, ' +
-        'worker=s-2vcpu-4gb-intel',
+    // The deploy prints which class both sides run, once, when it sizes the
+    // standby (haClassMessage); the wizard does not repeat it.
+    const said = [...clackMock.log.info.mock.calls, ...clackMock.log.warn.mock.calls].map(([m]) =>
+      String(m),
+    );
+    expect(said.filter((m) => /CPU class|premium Intel/.test(m))).toEqual([]);
+  });
+
+  it('k8s-ha sfo3 with nyc3 out of -amd defaults its standby to tor1, the matching pair', async () => {
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean');
+    const nyc3 = DigitalOceanProvider._locationTypes.nyc3 as Set<string>;
+    for (const t of [...nyc3]) if (t.endsWith('-amd')) nyc3.delete(t);
+    const out = await runPrompts({ mode: 'k8s', args: { yes: true, region: 'sfo3' } });
+    // nyc3 is the static pair and its regular standby the cheapest, but it
+    // would put a regular standby beside the sfo3 primary.
+    expect(out.secondaryRegion).toBe('tor1');
+    expect(out.masterServerType).toBe('s-2vcpu-4gb-intel');
+    expect(out.standbyServerTypes?.masterServerType).toBe('s-2vcpu-4gb-intel');
+  });
+
+  it('a standby refusal prices nearby locations from the re-picked primary types', async () => {
+    // tor1 sells nothing at 4 GB; the sfo3 primary is re-picked for the pair
+    // (none matches, so it keeps its -amd default) and nearby locations are
+    // priced from that type.
+    seed(DigitalOceanProvider, '2026-10-22/digitalocean', {
+      drop: { tor1: ['s-2vcpu-4gb', 's-2vcpu-4gb-intel'] },
+    });
+    await expect(
+      runPrompts({ args: { yes: true, region: 'sfo3', secondaryRegion: 'tor1' } }),
+    ).rejects.toThrow(/exit 1/);
+    expect(String(clackMock.log.error.mock.calls[0][0])).toBe(
+      'no standby compose server with 4 GB+ RAM is orderable in tor1 right now; ' +
+        'orderable nearby: nyc3 (s-2vcpu-4gb-amd $28.00/mo)',
     );
   });
 

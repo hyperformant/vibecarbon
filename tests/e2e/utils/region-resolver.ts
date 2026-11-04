@@ -251,7 +251,7 @@ export async function resolveCapacity(
 /**
  * HA: the primary is the first preferred region the picker can place (as
  * `resolveCapacity`); the standby is where a customer's deploy puts it,
- * `Provider.getDefaultStandbyRegion(primary, roles, primaryTypes)` on the
+ * `Provider.getDefaultStandbyRegion(primary, roles, {})` on the
  * same catalog, whatever the e2e region list says. Both sides' types are
  * what the deploy wizard picks for that pair, `haRoleSets` (one CPU class for
  * both, the best both locations sell, at the default RAM tiers). `scale -type` resizes both sides, so the standby must sell the scale
@@ -272,7 +272,9 @@ export async function resolveCapacityPair(
 
   const roles = standbyRoles(mode);
   const primaryTypes = Object.fromEntries(roles.map((role) => [role, primary.types[role]]));
-  const region: string = Provider.getDefaultStandbyRegion(primary.region, roles, primaryTypes);
+  // As the wizard ranks it for a deploy with no sizes given: every role open
+  // to the class rule, a location where both sides match first.
+  const region: string = Provider.getDefaultStandbyRegion(primary.region, roles, {});
   if (!region || region === primary.region) {
     throw new Error(
       `region-resolver: ${name} has no default standby location for a ${mode} primary in ${primary.region}.`,
@@ -280,8 +282,9 @@ export async function resolveCapacityPair(
   }
 
   // Both sides' types as the deploy wizard re-picks them for this pair: one
-  // CPU class for both, the best both locations sell (haRoleSets), at the
-  // default RAM tiers. The primary's own pick above chose the location only.
+  // CPU class for both, the best both locations sell (haRoleSets), never
+  // below the default sizes. The primary's own pick above chose the location
+  // only.
   const pair = haRoleSets(Provider, primary.region, region, primaryRoles(mode));
   const types: Record<string, string> = {};
   for (const role of roles) {

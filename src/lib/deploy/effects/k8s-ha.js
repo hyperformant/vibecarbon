@@ -190,18 +190,22 @@ async function haK8sProvisionClusters(ctx) {
     );
   }
 
-  // `Standby server types adjusted for <region>: ...` when the standby's
-  // sizes differ from the primary's, and in any case which CPU class the two
-  // sides run and why: one class for both whenever the two locations share
-  // one (src/lib/sizing.js haClassMessage), else a warning that a failover
-  // may run slower.
-  const classMessage = haClassMessage(Provider, {
-    primaryRegion,
-    standbyRegion,
-    primary: { master: primaryMasterType, db: primaryDbType, worker: primaryWorkerType },
-    standby: { master: standbyMasterType, db: standbyDbType, worker: standbyWorkerType },
-  });
-  if (classMessage) p.log[classMessage.level](classMessage.line);
+  // Only when this deploy sizes the standby (not a redeploy that keeps the
+  // one on record), as compose-ha: `Standby server types adjusted for
+  // <region>: ...` when the standby's sizes differ from the primary's, and
+  // which CPU class the two sides run and why, one class for both whenever
+  // the two locations share one (src/lib/sizing.js haClassMessage), else a
+  // warning naming the difference and what can fix it.
+  if (standby.newlySized) {
+    const classMessage = haClassMessage(Provider, {
+      primaryRegion,
+      standbyRegion,
+      primary: { master: primaryMasterType, db: primaryDbType, worker: primaryWorkerType },
+      standby: { master: standbyMasterType, db: standbyDbType, worker: standbyWorkerType },
+      environment: options.environment,
+    });
+    if (classMessage) p.log[classMessage.level](classMessage.line);
+  }
 
   // Diagnostic: confirm image tag and services config reach BOTH clusters.
   // Helps attribute per-cluster failures to input config vs runtime issues.

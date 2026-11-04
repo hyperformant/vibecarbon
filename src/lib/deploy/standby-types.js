@@ -53,6 +53,9 @@ export function haStacksFrom(envConfig) {
  * records it, for failover to bring up) is reported as `workerUnstocked` and
  * left out, for the caller to fall back and say so. A role with no primary
  * type at all stays undefined (the caller's last-resort default covers it).
+ * `newlySized` is true when the master or the db was resolved here rather
+ * than taken from the record: the deploy says which CPU class the two sides
+ * run only then, never on a redeploy that keeps the standby it has.
  *
  * @param {object} args
  * @param {object} args.Provider - a provider class
@@ -61,7 +64,7 @@ export function haStacksFrom(envConfig) {
  * @param {{masterServerType?: string, dbServerType?: string, workerServerType?: string}} [args.recorded]
  * @param {boolean} [args.requested] - `deploy -server-type` given: ignore the record
  * @returns {{masterServerType: string|null|undefined, dbServerType: string|null|undefined,
- *   workerServerType: string|undefined, workerUnstocked: boolean}}
+ *   workerServerType: string|undefined, workerUnstocked: boolean, newlySized: boolean}}
  */
 export function k8sStandbyTypes({ Provider, standbyRegion, primary, recorded = {}, requested }) {
   const record = requested ? {} : (recorded ?? {});
@@ -73,5 +76,6 @@ export function k8sStandbyTypes({ Provider, standbyRegion, primary, recorded = {
     dbServerType: pick('db', primary.db, record.dbServerType),
     workerServerType: worker ?? undefined,
     workerUnstocked: worker === null,
+    newlySized: !(record.masterServerType && record.dbServerType),
   };
 }

@@ -65,6 +65,14 @@ const { haStacksFrom } = await import('../../../src/lib/deploy/standby-types.js'
 const { swapHaRoles } = await import('../../../src/failover.js');
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
 const { envIdentityOf } = await import('../../../src/lib/env-identity.js');
+const clack = await import('@clack/prompts');
+
+/** What the fan-out said about CPU classes (info and warn). */
+function classLines() {
+  return [...vi.mocked(clack.log.info).mock.calls, ...vi.mocked(clack.log.warn).mock.calls]
+    .map(([m]) => String(m))
+    .filter((m) => m.includes('CPU class'));
+}
 
 const AMD = { master: 's-2vcpu-4gb-amd', db: 's-1vcpu-2gb-amd', worker: 's-2vcpu-4gb-amd' };
 const PLAIN = { master: 's-2vcpu-4gb', db: 's-1vcpu-2gb', worker: 's-2vcpu-4gb' };
@@ -166,6 +174,31 @@ describe('k8s-ha failover with mixed standby types (DigitalOcean sfo3 + tor1)', 
   afterEach(() => {
     restore();
     vi.restoreAllMocks();
+  });
+
+  it('first deploy: the class line once, a warning naming what works, never -server-type', async () => {
+    vi.mocked(clack.log.info).mockClear();
+    vi.mocked(clack.log.warn).mockClear();
+    await fanOut(store.current?.state.disk.environments.prod);
+    expect(classLines()).toEqual([
+      'Standby server types adjusted for tor1: master=s-2vcpu-4gb-intel, ' +
+        'db=s-1vcpu-2gb-intel, worker=s-2vcpu-4gb-intel; your standby runs a different CPU ' +
+        'class from your primary (master: premium Intel in tor1, premium AMD in sfo3; db: ' +
+        'premium Intel in tor1, premium AMD in sfo3; worker: premium Intel in tor1, premium ' +
+        'AMD in sfo3), so a failover may run slower than your primary. Both locations sell ' +
+        'premium Intel servers this size or larger: once this deploy finishes, run vibecarbon ' +
+        'scale prod and pick premium Intel sizes for each role to put both sides on one class',
+    ]);
+    expect(vi.mocked(clack.log.warn)).toHaveBeenCalledTimes(1);
+  });
+
+  it('a redeploy that keeps the standby on record says nothing about classes', async () => {
+    const first = await fanOut(store.current?.state.disk.environments.prod);
+    saveSuccess(first.ctx);
+    vi.mocked(clack.log.info).mockClear();
+    vi.mocked(clack.log.warn).mockClear();
+    await fanOut(store.current?.state.disk.environments.prod);
+    expect(classLines()).toEqual([]);
   });
 
   it('first deploy: each side on types its own location sells', async () => {
