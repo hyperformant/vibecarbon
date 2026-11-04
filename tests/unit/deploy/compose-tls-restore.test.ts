@@ -147,6 +147,7 @@ describe('restoreComposeTls: the live certificate wins', () => {
     expect(calls[0].argv.slice(0, 2)).toEqual(['bash', '-c']);
     expect(script).toContain('cd /opt/myapp');
     expect(script).toContain('[ -f vc-compose ] || exit 20');
+    expect(script).toContain('sh vc-compose exec -T traefik sh -c');
     expect(script).toContain('sh vc-compose run --rm --no-deps -T --entrypoint sh traefik -c');
     expect(script).toContain('grep -Eq "$1" /letsencrypt/acme.json');
     expect(script).toContain(APEX_RE_ARG);
@@ -197,6 +198,7 @@ describe('restoreComposeTls: a valid snapshot fills an empty acme.json', () => {
     const script = write.argv[2];
     expect(script).toContain('umask 077');
     expect(script).toContain('[ -f vc-compose ] || exit 20');
+    expect(script).toContain('sh vc-compose exec -T traefik sh -c');
     expect(script).toContain('sh vc-compose run --rm --no-deps -T --entrypoint sh traefik -c');
     expect(script).toContain('cat > "$t"');
     expect(script).toContain('chmod 600 "$t"; mv -f "$t" "$f"');
@@ -223,7 +225,7 @@ describe('restoreComposeTls: a valid snapshot fills an empty acme.json', () => {
     const { ssh, calls } = fakeSsh();
     await restoreComposeTls({ ...args(), deps: { ssh, read: async () => ({ text: VALID }) } });
     const script = calls[1].argv[2];
-    const inner = script.split("traefik -c '")[1].split("' sh '")[0];
+    const inner = script.split("vc_traefik_sh '")[1].split("' '")[0];
     expect(inner).not.toContain("'");
   });
 });

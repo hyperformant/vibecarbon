@@ -74,7 +74,7 @@ function apexPattern(domain) {
 
 /**
  * Shell prelude: the project dir, where vc-compose (compose/command.js) runs
- * `run` against the stack reconcile renders. letsencrypt_data is declared in
+ * Compose against the stack reconcile renders. letsencrypt_data is declared in
  * docker-compose.prod.yml; with a guessed set the volume would differ. A
  * server without vc-compose refuses (NO_COMPOSE_COMMAND_EXIT) instead of
  * guessing.
@@ -86,14 +86,35 @@ function composePrelude(projectName) {
   );
 }
 
+/**
+ * The shell function both scripts use to reach the letsencrypt volume:
+ * `vc_traefik_sh '<inner>' <args...>` runs `sh -c '<inner>' sh <args...>`
+ * inside Traefik. While Traefik runs it goes through `exec`: with the
+ * observability add-on Traefik holds a static ipv4_address, so a one-off
+ * `run` container is refused ("Address already in use"). Only a stopped
+ * Traefik (a first deploy, a scale, a redeploy after destroy) gets the
+ * one-off `run`, which has no address to collide with. `exec -T` and `run -T`
+ * both pass stdin through to the inner script.
+ */
+export const TRAEFIK_VOLUME_SH =
+  'vc_traefik_sh() {\n' +
+  '  vc_inner=$1; shift\n' +
+  `  if [ -n "$(${VC_COMPOSE} ps -q traefik 2>/dev/null)" ]; then\n` +
+  `    ${VC_COMPOSE} exec -T traefik sh -c "$vc_inner" sh "$@"\n` +
+  '  else\n' +
+  `    ${VC_COMPOSE} run --rm --no-deps -T --entrypoint sh traefik -c "$vc_inner" sh "$@"\n` +
+  '  fi\n' +
+  '}\n';
+
 /** Prints `present` or `absent`: does the volume's acme.json hold the apex? */
 function liveCheckScript(projectName, domain) {
   return (
     'set -uo pipefail\n' +
     composePrelude(projectName) +
-    `${VC_COMPOSE} run --rm --no-deps -T --entrypoint sh traefik -c ` +
+    TRAEFIK_VOLUME_SH +
+    `vc_traefik_sh ` +
     `'if grep -Eq "$1" /letsencrypt/acme.json 2>/dev/null; then echo present; else echo absent; fi' ` +
-    `sh '${apexPattern(domain)}' </dev/null\n`
+    `'${apexPattern(domain)}' </dev/null\n`
   );
 }
 
@@ -115,8 +136,8 @@ function writeScript(projectName, domain, bytes, restart) {
     'set -euo pipefail\n' +
     'umask 077\n' +
     composePrelude(projectName) +
-    `${VC_COMPOSE} run --rm --no-deps -T --entrypoint sh traefik -c '${inner}' ` +
-    `sh '${apexPattern(domain)}' ${bytes}\n` +
+    TRAEFIK_VOLUME_SH +
+    `vc_traefik_sh '${inner}' '${apexPattern(domain)}' ${bytes}\n` +
     // A running Traefik read acme.json at start; restart it to load the file.
     // A stopped one loads it when start-compose-stack brings it up.
     (restart
