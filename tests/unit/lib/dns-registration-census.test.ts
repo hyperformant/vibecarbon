@@ -16,7 +16,8 @@
  *     for years with nothing enforcing them — that's how the hetzner side
  *     shipped without deleteApexAndWildcard (wildcard-orphan class).
  */
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DNS_PROVIDERS, getDnsProvider } from '../../../src/lib/dns-provider.js';
@@ -35,12 +36,6 @@ const CONTRACT = [
   'createDNSRecord',
   'deleteDNSRecord',
   'deleteApexAndWildcard',
-  // destroy's ACME residue reap. Added after the 2026-08-10 orphan audit found
-  // `_acme-challenge.<env>` TXTs surviving GREEN destroys on BOTH backends it
-  // checked — the same "one backend shipped without it" shape that produced
-  // the wildcard-orphan class, so it joins the contract rather than living at
-  // one call site. Behaviour is censused in dns-challenge-cleanup.test.ts.
-  'deleteChallengeRecords',
 ] as const;
 
 describe('DNS backend registration census', () => {
@@ -58,6 +53,35 @@ describe('DNS backend registration census', () => {
     for (const [id, row] of Object.entries(DNS_PROVIDERS)) {
       expect(row.modulePath, id).toBe(`./${id}-dns.js`);
     }
+  });
+});
+
+describe('providers manage A records only', () => {
+  it.each(Object.keys(DNS_PROVIDERS))('%s exports no challenge-record reaping', async (id) => {
+    const mod = (await getDnsProvider(id)) as Record<string, unknown>;
+    expect(mod.deleteChallengeRecords, id).toBeUndefined();
+    expect(mod.challengeRecordNames, id).toBeUndefined();
+  });
+
+  it('nothing under src/ or carbon/ names an _acme-challenge record or the DNS01_PROVIDERS table', () => {
+    const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+    const walk = (dir: string, exts: string[]): string[] =>
+      readdirSync(dir).flatMap((name) => {
+        if (name === 'node_modules') return [];
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) return walk(path, exts);
+        return exts.some((e) => path.endsWith(e)) ? [path] : [];
+      });
+    const src = walk(join(ROOT, 'src'), ['.js']);
+    expect(src.length).toBeGreaterThan(100);
+    // The template's compose files and scripts: a DNS-01 rationale in a
+    // comment there is as stale as one in the CLI.
+    const carbon = walk(join(ROOT, 'carbon'), ['.yml', '.yaml', '.js', '.mjs']);
+    expect(carbon.length).toBeGreaterThan(5);
+    const hits = [...src, ...carbon].filter((f) =>
+      /_acme-challenge|DNS01_PROVIDERS/.test(readFileSync(f, 'utf8')),
+    );
+    expect(hits.map((f) => f.slice(ROOT.length))).toEqual([]);
   });
 });
 

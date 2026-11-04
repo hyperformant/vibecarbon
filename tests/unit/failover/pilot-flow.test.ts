@@ -492,8 +492,8 @@ interface RunOpts {
   standbyOutputs?: Record<string, unknown>;
   /** The CA the last deploy recorded (envConfig.tls.ca). */
   tlsCa?: 'prod' | 'staging';
-  /** What the promotion reports for the certificate restore. */
-  promoteTls?: { restored: boolean; reason: string };
+  /** What the certificate restore reports. */
+  restoreTls?: { restored: boolean; reason: string };
   /** projectConfig.cicdEnabled (GitOps layered on). */
   cicdEnabled?: boolean;
   /** What the GitOps TLS refresh returns, or throws when an Error. */
@@ -520,7 +520,7 @@ async function runFailoverHA(opts: RunOpts) {
     addonRolloutsThrows = false,
     oldPrimaryScaleDown,
     tlsCa,
-    promoteTls,
+    restoreTls,
     cicdEnabled = false,
     gitopsRefresh = { ok: true, refreshed: ['e4-primary', 'e4-standby'] },
   } = opts;
@@ -650,14 +650,20 @@ async function runFailoverHA(opts: RunOpts) {
       order.push('rollout');
       order.push('apiProbe');
     },
+    restoreTls: async (a: { promotedIp: string; snapshot?: unknown }) => {
+      captured.restoreTlsIp = a.promotedIp;
+      captured.restoreSnapshot = a.snapshot;
+      order.push('restoreTls');
+      return {
+        restored: restoreTls?.restored ? ['vibecarbon/vibecarbon-tls'] : [],
+        ...(restoreTls ? { tls: restoreTls } : {}),
+      };
+    },
     promoteIssuer: async (a: { promotedIp: string; snapshot?: unknown }) => {
       captured.promoteIssuerIp = a.promotedIp;
-      captured.promoteSnapshot = a.snapshot;
+      captured.promoteIssuerArgs = a;
       order.push('promoteIssuer');
-      return {
-        patched: ['vibecarbon/vibecarbon-tls'],
-        ...(promoteTls ? { tls: promoteTls } : {}),
-      };
+      return { patched: ['vibecarbon/vibecarbon-tls'] };
     },
     tlsSnapshotInputs: async (a: Record<string, unknown>) => {
       captured.tlsSnapshotInputsArgs = a;
@@ -743,7 +749,7 @@ async function runFailoverHA(opts: RunOpts) {
 }
 
 describe('failoverHA step order', () => {
-  it('planned mode: provision → quiesce → catch-up → reseed+promote → walg-role → scale-up → gate → dns → persist swap', async () => {
+  it('planned mode: provision → quiesce → catch-up → reseed+promote → walg-role → scale-up → tls restore → gate → dns → issuer promote → persist swap', async () => {
     const { order } = await runFailoverHA({ primaryReachable: true });
     expect(order).toEqual([
       'preflight',
@@ -754,10 +760,11 @@ describe('failoverHA step order', () => {
       'promote',
       'walgRole',
       'scaleUp',
-      'promoteIssuer',
+      'restoreTls',
       'rollout',
       'apiProbe',
       'dns',
+      'promoteIssuer',
       'saveConfig',
       'fenceRetired',
     ]);
@@ -776,15 +783,16 @@ describe('failoverHA step order', () => {
     expect(order).not.toContain('scaleDownOldPrimary');
   });
 
-  it('the promotion gets the env TLS snapshot inputs and prints the restore line, before the DNS flip', async () => {
+  it('the certificate restore gets the env TLS snapshot inputs and prints the restore line, before the DNS flip', async () => {
     const info = vi.spyOn(p.log, 'info').mockImplementation(() => {});
     const { order, captured } = await runFailoverHA({
       primaryReachable: true,
       tlsCa: 'staging',
-      promoteTls: { restored: true, reason: 'restored from the last snapshot' },
+      restoreTls: { restored: true, reason: 'restored from the last snapshot' },
     });
     expect(captured.tlsSnapshotInputsArgs).toMatchObject({ envName: 'e4', projectName: 'proj' });
-    expect(captured.promoteSnapshot).toEqual({
+    expect(captured.restoreTlsIp).toBe('10.0.0.9');
+    expect(captured.restoreSnapshot).toEqual({
       s3Config: { bucket: 'b', accessKey: 'A', secretKey: 'S' },
       projectName: 'proj',
       envName: 'e4',
@@ -793,10 +801,23 @@ describe('failoverHA step order', () => {
     expect(info.mock.calls.map((c) => String(c[0]))).toContain(
       'TLS certificate restored from its last snapshot.',
     );
-    expect(order.indexOf('promoteIssuer')).toBeLessThan(order.indexOf('dns'));
+    expect(order.indexOf('restoreTls')).toBeLessThan(order.indexOf('dns'));
+    // The issuer promote reads no snapshot: the restore already ran.
+    expect(order.indexOf('promoteIssuer')).toBeGreaterThan(order.indexOf('dns'));
+    expect(captured.promoteIssuerIp).toBe('10.0.0.9');
+    expect(captured.promoteIssuerArgs).not.toHaveProperty('snapshot');
     // No GitOps on this project: nothing is refreshed.
     expect(order).not.toContain('gitopsRefresh');
     info.mockRestore();
+  });
+
+  it('manual DNS: the issuer is promoted after the gate, where the DNS flip would run, before the swap', async () => {
+    const { order, thrown } = await runFailoverHA({ primaryReachable: true, manualDns: true });
+    expect(thrown).toBeUndefined();
+    expect(order).not.toContain('dns');
+    expect(order.indexOf('restoreTls')).toBeLessThan(order.indexOf('apiProbe'));
+    expect(order.indexOf('apiProbe')).toBeLessThan(order.indexOf('promoteIssuer'));
+    expect(order.indexOf('promoteIssuer')).toBeLessThan(order.indexOf('saveConfig'));
   });
 
   it('GitOps: the TLS vars are refreshed after the role swap, and a miss prints the repair command on its own line', async () => {

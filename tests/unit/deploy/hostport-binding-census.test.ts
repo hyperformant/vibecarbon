@@ -28,8 +28,8 @@ import { describe, expect, it } from 'vitest';
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
 const TEST_TLS = {
   dnsNames: ['app.example.test'],
-  issuerName: 'letsencrypt-prod-manual',
-  effectiveIssuer: 'letsencrypt-prod-manual',
+  issuerName: 'letsencrypt-prod',
+  effectiveIssuer: 'letsencrypt-prod',
 };
 
 const ROOT = join(__dirname, '../../..');

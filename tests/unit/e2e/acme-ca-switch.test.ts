@@ -77,8 +77,8 @@ describe('E2E_ACME_CA switch', () => {
 
   it('flips ACME_CA_SERVER, the k8s issuer and the trust wiring together', () => {
     for (const [value, issuer, staging] of [
-      [undefined, 'letsencrypt-staging-manual', true],
-      ['production', 'letsencrypt-prod-manual', false],
+      [undefined, 'letsencrypt-staging', true],
+      ['production', 'letsencrypt-prod', false],
     ] as const) {
       const env = flipped(value);
       const r = (() => {
@@ -92,9 +92,7 @@ describe('E2E_ACME_CA switch', () => {
       })();
       const acme = resolveE2EAcmeCa(env);
       env.ACME_CA_SERVER = acme.directory;
-      expect(
-        k8sIssuerName({ envLocal: { ACME_CA_SERVER: acme.directory }, dnsProvider: null }),
-      ).toBe(issuer);
+      expect(k8sIssuerName({ envLocal: { ACME_CA_SERVER: acme.directory } })).toBe(issuer);
       if (r) {
         expect(env.ACME_CA_SERVER).toBe(acme.directory);
         expect(r.tls === null).toBe(!staging);

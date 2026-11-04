@@ -267,23 +267,12 @@ classes:
       Upstream cert-manager#8960 / PR#8968 matched by pinned-source read of
       v1.20.2; watchdog + terminal classification landed 33c68884. Our
       duplicate-order trigger (grafana-tls dnsNames) root-fixed in the same
-      change. Extended 2026-08-28 (d4 run 3, live zone dumps + per-cluster
-      dig transcripts): a pending Challenge with `presented: true` whose TXT
-      record is no longer in the zone is the SAME no-recovery class in a
-      live state — cert-manager only polls propagation and never re-presents
-      (pkg/controller/acmechallenges has no re-Present path for a presented
-      challenge). Trigger observed: two clusters issuing for the same names
-      around a failover, cert-manager's core DO solver keying records by
-      NAME. The watchdog's bounded challenge bounce (delete → controller
-      recreates → fresh Present) is the recovery; the self-check half
-      (anycast POP staleness) is root-addressed by the
-      --dns01-recursive-nameservers-only config in the same change.
+      change.
     sites:
       - site: "src/lib/deploy/k8s/acme-order-recovery.js :: createAcmeIssuanceWatchdog"
         detectable: false
         notes: >-
-          bounded in-place repair of terminal Orders + bounded bounce of
-          stalled-pending presented Challenges; fails open
+          bounded in-place repair of terminal Orders; fails open
 
   - class: do-csi-stale-volumeattachment
     attribution: external-proven
@@ -380,54 +369,6 @@ classes:
 # i.e. everything eligible for the runner's E2E_RETRY_FLAKES auto-retry —
 # maps to a class above. The census fails if a reason maps to an 'ours'
 # class: our own defects must never auto-retry.
-  - class: dns-anycast-propagation-divergence
-    attribution: external-proven
-    evidence: >-
-      DigitalOcean authoritative DNS is anycast and its POPs converge minutes
-      apart, in BOTH directions of the DNS-01 dance. Run 33266321881: lego's
-      own propagation check against ns1-3.digitalocean.com failed past its
-      60s window ("did not return the expected TXT record") while the API
-      write had succeeded. Run 33283466928: with a SINGLE armed solver
-      (acme-role.js single-active-issuer policy — our own dual-solver
-      contribution root-fixed first), lego's 300s authoritative check
-      PASSED and Let's Encrypt validation still answered "No TXT record
-      found" — divergence between lego's vantage POP and the CA's.
-      Mitigations: DO_PROPAGATION_TIMEOUT=300 plus a 90s
-      propagation.delayBeforeChecks settle floor (dns-provider.js
-      legoTuningEnv → docker-compose.dns01.prod.yml), giving each record
-      wall-time in the zone before any validation is triggered. Residual
-      misses are retried by E2E_RETRY_FLAKES via this mapping.
-      2026-09-01: hetzner joined this class — its anycast NS showed the
-      same divergence in degraded windows (twin records 20s vs 90s+,
-      run 33341893276 probes) and post-timeout-only-fix dispatches
-      (33435737752) failed on the vantage-divergence spellings, including
-      LE's "During secondary validation:" prefix (remote perspectives
-      only). Same mitigation pair applied to the hetzner legoTuningEnv row;
-      harness-proven (split-shape trial, apex+wildcard at +123s with the
-      90s floor).
-    sites: []
-
-  - class: vultr-dns-negative-cache-poisoning
-    attribution: external-proven
-    evidence: >-
-      Direct probes on the threvidence.com zone, 2026-08-30 ~15:0x-15:3xZ:
-      a TXT record created WITHOUT any prior query serves from
-      ns1.vultr.com in <=5s (records d9a48ee6, c94211a5, 085779f2 —
-      1-label, 2-label, and _acme-challenge.* names alike); the identical
-      create preceded by ONE dig of the not-yet-existing name (record
-      ef1dbe24, _acme-challenge.primed1788103268) stays invisible for 60s+
-      — the authoritative frontend negatively caches the miss. lego at
-      delayBeforeChecks=0 queries the instant it presents, poisoning its
-      own challenge name; its 60s default window then starves against the
-      cached miss ("NS ns1.vultr.com:53 returned NXDOMAIN", harness trials
-      isov1050/isov4b51/isov5b51) or, with apex+wildcard orders sharing a
-      name, the sibling's stale token (run 33287840597 vultr compose-ha).
-      Mitigation: vultr legoTuningEnv (dns-provider.js) — 60s
-      delayBeforeChecks floor so the first query lands after publication,
-      VULTR_PROPAGATION_TIMEOUT=300 for cache-expiry stragglers on churned
-      names. Residual misses retried by E2E_RETRY_FLAKES via this mapping.
-    sites: []
-
 flakeRetry:
   - { reason: "k3s install timeout", class: provider-provisioning-slowness }
   - { reason: "Hetzner capacity", class: hetzner-capacity }
@@ -442,6 +383,4 @@ flakeRetry:
   - { reason: "Docker Hub transient", class: provider-rate-limits }
   - { reason: "SSH connection blip", class: ssh-transport-blips }
   - { reason: "LE cert pending", class: acme-issuance-pending }
-  - { reason: "ACME DNS-01 propagation (anycast lag)", class: dns-anycast-propagation-divergence }
   - { reason: "k8s node NotReady (host died)", class: provider-host-failure }
-  - { reason: "ACME DNS-01 propagation (NS negative cache)", class: vultr-dns-negative-cache-poisoning }

@@ -196,10 +196,9 @@ function commitAndPushManifests(cwd, message) {
  * @param {string} args.projectName
  * @param {string} args.kubeconfigPath - path to kubeconfig fetched from the cluster
  * @param {string} args.networkId - Hetzner private network ID (Pulumi output)
- * @param {string} args.dnsProvider - "cloudflare" | "hetzner" | "manual"
  * @param {object} args.providerCreds - operator-secret values read from
  *   process.env by the caller (see config-registry.js's operator-secret
- *   class): { hetznerApiToken, dnsTokens }
+ *   class): { hetznerApiToken }
  * @param {{ accessKey: string, secretKey: string }} args.appStorage - the env
  *   app's own storage pair (storedAppStoragePair), seeded per environment
  * @param {{schedule?: string, retentionDays?: number}} [args.backupConfig] - envConfig.backup:
@@ -226,7 +225,6 @@ export async function deployK8sGitOps(args) {
     projectName,
     kubeconfigPath,
     networkId,
-    dnsProvider,
     providerCreds,
     appStorage,
     imageTag,
@@ -247,7 +245,7 @@ export async function deployK8sGitOps(args) {
   // Before anything is committed or seeded: a malformed backup config fails here.
   const backupSettings = resolveBackupSettings(backupConfig);
   // The Certificate deploy.yml renders, validated before anything is seeded.
-  const tlsCertVars = gitopsTlsCertificateVars({ projectDir, dnsProvider, domain, role });
+  const tlsCertVars = gitopsTlsCertificateVars({ projectDir, domain, role });
 
   const s = spinner();
   const skipCiStr = skipCi ? ' [skip ci]' : '';
@@ -299,7 +297,6 @@ export async function deployK8sGitOps(args) {
   const perEnvSecrets = buildPerEnvSecrets(envLocal, { appStorage });
   const perEnvVars = {
     SITE_URL: domain ? `https://${domain}` : '',
-    DNS_PROVIDER: dnsProvider || '',
     HCLOUD_NETWORK_ID: networkId || '',
     // Per environment, never in the committed k8s/base every environment
     // shares: deploy.yml renders the backup CronJob and its settings from
@@ -360,15 +357,15 @@ export function gitopsTargets(envName, envConfig) {
  * issuer, with the real ACME issuer in the promote annotation. Throws when
  * there is no domain.
  *
- * @param {{ projectDir: string, dnsProvider?: string|null, domain?: string|null,
+ * @param {{ projectDir: string, domain?: string|null,
  *   role?: 'primary'|'standby' }} args
  * @returns {{ TLS_CERT_ISSUER: string, TLS_CERT_EFFECTIVE_ISSUER: string, TLS_CERT_DNS_NAMES: string }}
  */
-export function gitopsTlsCertificateVars({ projectDir, dnsProvider, domain, role = 'primary' }) {
+export function gitopsTlsCertificateVars({ projectDir, domain, role = 'primary' }) {
   // No fallback name: a Certificate for another name than the env's is one
   // the cluster would issue and serve, and never trusted.
   if (!domain) throw new Error('the TLS Certificate needs a domain, and this environment has none');
-  const { issuerName, dnsNames } = k8sTlsIdentity({ projectDir, dnsProvider, domain });
+  const { issuerName, dnsNames } = k8sTlsIdentity({ projectDir, domain });
   return tlsCertificateVars({
     dnsNames,
     issuerName,
@@ -432,7 +429,6 @@ export async function refreshGitopsTlsVars({ envName, projectDir, deps = {} }) {
       const subEnvConfig = projectConfig.environments?.[target.envName] ?? envConfig;
       const vars = gitopsTlsCertificateVars({
         projectDir,
-        dnsProvider: subEnvConfig.dnsProvider || envConfig.dnsProvider,
         domain: subEnvConfig.domain || envConfig.domain,
         role: target.role,
       });

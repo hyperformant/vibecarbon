@@ -183,14 +183,13 @@ updates:
       - dependencies
 
   # Compose files: the template's (shipped into every project), the add-on
-  # services', and the ACME isolation harness. Same `images` PR as the
+  # services'. Same `images` PR as the
   # Dockerfiles and k8s manifests. A Traefik tag bump must also move the CRD
   # URL in carbon/k8s/base/traefik (tests/unit/template/traefik-crd-version.test.ts).
   - package-ecosystem: docker-compose
     directories:
       - /carbon
       - /services/*/compose
-      - /scripts/acme-iso
     multi-ecosystem-group: images
     patterns: ["*"]
     ignore:

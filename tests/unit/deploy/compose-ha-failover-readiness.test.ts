@@ -206,7 +206,15 @@ describe('primary-only add-ons on the promoted node', () => {
     const audit = body.indexOf('await restoreWalgRole(');
     expect(audit).toBeGreaterThan(-1);
     expect(audit).toBeLessThan(start);
-    expect(body.indexOf('armComposeAcme(')).toBeLessThan(start);
+    const tlsRestore = body.indexOf('restoreFailoverTls(');
+    expect(tlsRestore).toBeGreaterThan(-1);
+    expect(tlsRestore).toBeLessThan(start);
+    // HTTP-01 validates where DNS points: the old primary is disarmed before
+    // the flip, the promoted node armed after it.
+    const flip = body.indexOf('await flipDns(');
+    expect(flip).toBeGreaterThan(-1);
+    expect(body.indexOf('await disarmComposeAcme(')).toBeLessThan(flip);
+    expect(body.indexOf('await armComposeAcme(')).toBeGreaterThan(flip);
     expect(body.indexOf('waitForNewPrimaryApi(')).toBeLessThan(start);
     const step2Stop = body.indexOf("s.start('Stopping old primary services')");
     expect(step2Stop).toBeGreaterThan(-1);

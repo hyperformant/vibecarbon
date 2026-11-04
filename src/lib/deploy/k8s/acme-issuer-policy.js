@@ -1,15 +1,17 @@
 /**
- * Single-ACME-issuer policy constants (d4 runs 3/5 RCA, 2026-08-28).
+ * Single-ACME-issuer policy constants (d4 runs 3/5 RCA, 2026-08-28; HTTP-01
+ * rationale 2026-11-04).
  *
  * THE PROBLEM: a k8s-ha environment is two clusters applying the SAME
- * Certificate manifests for the SAME dns names on one shared zone.
- * cert-manager's core DigitalOcean solver keys `_acme-challenge` TXT records
- * by NAME, so two clusters solving concurrently clobber each other's records
- * — observed live as the standby-role cluster's issuance parking on
- * "pending, presented" forever, and a promoted cluster serving the Traefik
- * default cert. (Hetzner's webhook solver coexists — e4's reconverge is
- * green — but the policy is applied uniformly: one active ACME issuer per
- * environment is the right shape on every provider.)
+ * Certificate manifests for the SAME dns name. Every certificate validates
+ * with HTTP-01, and Let's Encrypt fetches the challenge from whichever
+ * cluster DNS points at, so an ACME-issuing standby can never pass. cert-manager
+ * self-checks the challenge first, so its orders wait instead of failing, but
+ * a standby that keeps trying is still a second solver contending for the same
+ * hostname, and a validation that does reach Let's Encrypt counts against its
+ * limit of 5 failed validations per hostname per hour, which the promoted
+ * cluster then shares. One active ACME issuer per environment is the right
+ * shape on every provider.
  *
  * THE POLICY: only the cluster currently in the PRIMARY role holds an
  * ACME-issued Certificate.
@@ -19,10 +21,11 @@
  *     in seconds, zero ACME traffic — and stamps the REAL issuer name into
  *     PROMOTE_ISSUER_ANNOTATION (on the primary too, where it is simply a
  *     record of the current ref).
- *   - Promote half (failover.js promoteAcmeIssuer): right after the promoted
- *     app tier scales up, read the annotation and patch issuerRef back — the
- *     promoted cluster becomes the sole ACME solver and issues cleanly while
- *     the readiness gate runs.
+ *   - Promote half (failover.js promoteAcmeIssuer): only after the DNS flip,
+ *     when the challenges reach the promoted cluster, read the annotation and
+ *     patch issuerRef back; the promoted cluster becomes the sole ACME
+ *     solver. A saved certificate is restored before the flip
+ *     (restorePromotedTls), so the site serves it the moment DNS moves.
  *   - Convergence: the reconverge redeploy re-runs the deploy half per the
  *     swapped roles, so issuer ownership always follows the primary role.
  *

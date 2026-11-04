@@ -1,10 +1,10 @@
 /**
  * Which compose service can see which secret, read off `docker compose config`
  * (security plan 2026-10-20, Task 1). The deployed `-f` set (base + prod,
- * + the DNS-01 override, + every add-on overlay) is rendered against a
+ * + every add-on overlay) is rendered against a
  * sentinel `.env` (the substitution source the bundle ships) and an `app.env`
- * built by buildAppRuntimeEnv, the way renderBundle builds it. Only Traefik
- * may hold a DNS token; the app and the add-ons hold no provider token; the
+ * built by buildAppRuntimeEnv, the way renderBundle builds it. No service
+ * holds a DNS token (every certificate validates over HTTP-01); the
  * redis overlay's REDIS_URL still reaches the app after `env_file: !override`.
  *
  * Task 3 adds who reaches the Docker API: only traefik reaches its socket
@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildAppRuntimeEnv } from '../../../src/lib/deploy/app-runtime-env.js';
-import { DNS_PROVIDERS, DNS01_PROVIDERS } from '../../../src/lib/dns-provider.js';
+import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 
@@ -58,11 +58,18 @@ const ADDON_FILES = ADDONS.flatMap((name) =>
     })),
 );
 
-const dnsTokenNames = [...new Set(Object.values(DNS01_PROVIDERS).map((r) => r.tokenEnvVar))];
+// The DNS token names a server must never hold: every operator DNS credential,
+// plus the two names the retired DNS-01 deploys wrote that no provider row has.
+const dnsTokenNames = [
+  ...new Set([
+    ...Object.values(DNS_PROVIDERS).map((r) => r.tokenEnv),
+    'CF_DNS_API_TOKEN',
+    'DO_AUTH_TOKEN',
+  ]),
+];
 const providerTokenNames = [
   ...new Set([
     ...dnsTokenNames,
-    ...Object.values(DNS_PROVIDERS).map((r) => r.tokenEnv),
     ...Object.values(PROVIDERS).flatMap((P) => [P.TOKEN_ENV, P.CLI_TOKEN_ENV].filter(Boolean)),
   ]),
 ];
@@ -91,7 +98,6 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       );
     stage('carbon/docker-compose.yml', 'docker-compose.yml');
     stage('carbon/docker-compose.prod.yml', 'docker-compose.prod.yml');
-    stage('carbon/docker-compose.dns01.prod.yml', 'docker-compose.dns01.prod.yml');
     for (const file of ADDON_FILES) stage(file.from, file.to);
     const serverEnv: Record<string, string> = {
       PROJECT_NAME: 'reach',
@@ -100,7 +106,6 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       DB_IMAGE: 'postgres',
       DB_IMAGE_TAG: '17',
       APP_IMAGE: 'ghcr.io/example/reach:test',
-      ACME_DNS_PROVIDER: 'hetzner',
       BETTER_AUTH_SECRET: sentinel('BETTER_AUTH_SECRET'),
       ADMIN_EMAIL: 'admin@example.com',
       ADMIN_PASSWORD: sentinel('ADMIN_PASSWORD'),
@@ -155,7 +160,6 @@ describeDocker('compose: secrets reach only the services that use them', () => {
   const FULL_FILES = () => [
     'docker-compose.yml',
     'docker-compose.prod.yml',
-    'docker-compose.dns01.prod.yml',
     ...ADDON_FILES.map((f) => f.to),
   ];
   const full = () => render(FULL_FILES());
@@ -174,10 +178,10 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     expect(holders(services, sentinel('STRIPE_SECRET_KEY'))).toContain('app');
   });
 
-  it('full deploy set: every DNS token sentinel appears only in traefik', () => {
+  it('full deploy set: no DNS token sentinel reaches any service, traefik included', () => {
     const services = full();
     for (const k of dnsTokenNames) {
-      expect(holders(services, sentinel(k)), k).toEqual(['traefik']);
+      expect(holders(services, sentinel(k)), k).toEqual([]);
     }
   });
 

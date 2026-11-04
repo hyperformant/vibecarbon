@@ -39,7 +39,6 @@ import {
   resolveDeployRestorePoint,
   walgPrefixFor,
 } from '../walg/restore-base.js';
-import { useDnsChallenge } from './acme.js';
 import {
   finishAppKeyRotation,
   localAppStorageSecrets,
@@ -74,6 +73,7 @@ import {
   liveK8sTlsSecretSerial,
   quietKubectl,
   snapshotK8sTlsSecret,
+  staleClusterIssuersProblem,
   staleObservabilityTlsProblem,
 } from './k8s/index.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
@@ -629,7 +629,7 @@ function probeFailureReason(probeResult) {
  * cert-manager's reason. Never throws.
  *
  * @param {{ domain: string, environment: string, projectName: string,
- *   dnsProvider?: string|null, kubeconfig: string, s3Config?: object,
+ *   kubeconfig: string, s3Config?: object,
  *   backupS3Config?: { bucket?: string }, tlsRestoredAt?: string|null,
  *   deps?: object }} args
  * @returns {Promise<{ state: 'trusted'|'pending', checkedAt: string, reason?: string, ca: string }>}
@@ -638,7 +638,6 @@ export async function verifyK8sTls({
   domain,
   environment,
   projectName,
-  dnsProvider,
   kubeconfig,
   s3Config,
   backupS3Config,
@@ -668,7 +667,7 @@ export async function verifyK8sTls({
   const servedSerial =
     deps.servedSerial ?? (async (d) => (await probeTlsTrustOnce(d)).serialNumber ?? null);
   const secretSerial = deps.secretSerial ?? liveK8sTlsSecretSerial;
-  const { dnsNames, ca } = identity({ projectDir: process.cwd(), dnsProvider, domain });
+  const { dnsNames, ca } = identity({ projectDir: process.cwd(), domain });
   const haveKubeconfig = kubeconfigExists(kubeconfig);
   const s = (deps.spinner ?? spinner)({ indicator: 'timer' });
   s.start(`Waiting for ${domain} to serve a trusted TLS certificate`);
@@ -1103,6 +1102,10 @@ export async function executeDeployment(args, gatheredConfig) {
   if (isK8sTier(tier)) {
     const staleObservabilityTls = staleObservabilityTlsProblem(process.cwd());
     if (staleObservabilityTls) throw new Error(staleObservabilityTls);
+    // The same refusal for the ClusterIssuers: a project copied before
+    // HTTP-01 certificates has no `letsencrypt-prod` for the Certificate.
+    const staleClusterIssuers = staleClusterIssuersProblem(process.cwd());
+    if (staleClusterIssuers) throw new Error(staleClusterIssuers);
   }
 
   // Operator-IP access: detect + persist + (when env already deployed) patch
@@ -1843,13 +1846,6 @@ export async function executeDeployment(args, gatheredConfig) {
   // gutter and print flush-left, breaking the visual flow. Bundle content
   // is reproducible from the project tree; debug it by re-running with
   // VIBECARBON_PERF=1 + VIBECARBON_BUNDLE_VERBOSE=1 if needed.
-  // Managed-DNS compose deploys (cloudflare/hetzner) solve ACME via DNS-01 —
-  // Traefik writes a TXT record through the provider API, so there is no
-  // HTTP-01 race against A-record propagation and no need for the
-  // DNS-propagation poll or the Traefik cert self-heal below. `manual` keeps
-  // HTTP-01. Scoped to compose: k8s issues certs via cert-manager and ignores
-  // this Traefik override entirely.
-  const dnsChallenge = isComposeTier(tier) && useDnsChallenge(dnsProvider);
   const bundlePath = renderBundle(projectConfig.projectName, {
     domain,
     environment,
@@ -1871,9 +1867,6 @@ export async function executeDeployment(args, gatheredConfig) {
           ca: caSlug(readOperatorVar('ACME_CA_SERVER').value ?? ''),
         })
       : '',
-    dnsChallenge,
-    dnsProvider,
-    dnsToken,
     verbose: process.env.VIBECARBON_BUNDLE_VERBOSE === '1',
   });
   bundleRenderTimer.end();
@@ -2015,7 +2008,6 @@ export async function executeDeployment(args, gatheredConfig) {
     ciReady,
     s3Config,
     state,
-    dnsChallenge,
     dnsWarmupPromise,
     isDirectDeploy,
     isComposeLocal,
@@ -2349,7 +2341,6 @@ export async function executeDeployment(args, gatheredConfig) {
           domain,
           environment,
           projectName: projectConfig.projectName,
-          dnsProvider,
           kubeconfig: probeKubeconfig,
           s3Config,
           backupS3Config,

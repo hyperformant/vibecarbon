@@ -12,8 +12,8 @@ import {
 // renderK8sBase renders the vibecarbon-tls Certificate from these.
 const TEST_TLS = {
   dnsNames: ['app.example.test'],
-  issuerName: 'letsencrypt-prod-manual',
-  effectiveIssuer: 'letsencrypt-prod-manual',
+  issuerName: 'letsencrypt-prod',
+  effectiveIssuer: 'letsencrypt-prod',
 };
 
 // Two coupled defects, both silent.

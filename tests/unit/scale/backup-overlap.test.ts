@@ -166,7 +166,6 @@ function makeCtx() {
       sshKeyPath: '/key',
       domain: null, // skip the DNS update path
       services: {},
-      dnsChallenge: true, // skip the HTTP-01 ACME reset path
       dnsProvider: null,
       apiToken: 'tok',
       projectConfig: { projectName: 'myapp', environments: {} },

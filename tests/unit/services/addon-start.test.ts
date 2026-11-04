@@ -51,11 +51,7 @@ const servicesOf = (path: string): Record<string, any> =>
     ) as any
   )?.services ?? {}) as Record<string, any>;
 
-const BASE_FILES = [
-  'docker-compose.yml',
-  'docker-compose.prod.yml',
-  'docker-compose.dns01.prod.yml',
-]
+const BASE_FILES = ['docker-compose.yml', 'docker-compose.prod.yml']
   .map((f) => join(REPO, 'carbon', f))
   .filter((p) => existsSync(p));
 const BASE_SERVICES = new Set(BASE_FILES.flatMap((p) => Object.keys(servicesOf(p))));

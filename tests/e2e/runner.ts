@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+
 /**
  * E2E Test Runner — interactive by default, batch with --batch.
  *
@@ -48,9 +49,8 @@
  *   `e2e.providers[provider].requiredEnv`) — a missing var aborts loudly,
  *   naming exactly the var and pointing at tests/.env.e2e. As of the two
  *   registered providers:
- *   HETZNER_API_TOKEN           Required for Hetzner scenarios (also used for
- *                                Hetzner DNS-01 since the DNS Console was
- *                                retired in May 2026)
+ *   HETZNER_API_TOKEN           Required for Hetzner scenarios (compute and
+ *                                Hetzner DNS records)
  *   CLOUDFLARE_API_TOKEN        Required for Cloudflare-DNS scenarios
  *   DIGITALOCEAN_API_TOKEN      Required for DigitalOcean scenarios
  *                                (--provider digitalocean, opt-in only)
@@ -66,7 +66,6 @@ import { cpus, hostname, tmpdir, totalmem } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-
 import { testConfig } from '../config.js';
 import { haScenarioFeatures } from './checks/standby-addons.js';
 import { MetricsCollector } from './metrics/collector.js';
@@ -102,6 +101,7 @@ import { scenarioContext } from './utils/cli-runner.js';
 import { E2EDbImageError, selectE2EDbImage } from './utils/db-image-select.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
 import { resolveE2EAcmeCa, setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
+import { attemptTagFor, scenarioDomain } from './utils/fresh-dns-names.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
 import { logPreflight, runPreflight } from './utils/preflight.js';
 import type { CapacityPreferences } from './utils/region-resolver.js';
@@ -920,7 +920,12 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     const { mode, dnsProvider, envPrefix, serverType, region, scaleTo, scaleTarget } = scenario;
     const secondaryRegion = scenario.secondaryRegion;
     const provider = scenario.provider;
-    const domain = `${envPrefix}.${resolveBaseDomain(config.domains, dnsProvider, process.env.E2E_DOMAIN)}`;
+    const domain = scenarioDomain(
+      envPrefix,
+      // Fresh DNS name per attempt (utils/fresh-dns-names.ts); envPrefix is untouched.
+      attemptTagFor(runId, attemptNumber),
+      resolveBaseDomain(config.domains, dnsProvider, process.env.E2E_DOMAIN),
+    );
     // Unique per scenario — Date.now() collisions are rare, but the random
     // suffix is cheap insurance. Retries get a fresh timestamp + suffix so
     // the project dir / Hetzner names don't collide with the first attempt's

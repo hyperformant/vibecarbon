@@ -114,29 +114,6 @@ spec:
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: vibecarbon-cert-manager-webhook-hetzner
-  namespace: flux-system
-spec:
-  interval: 10m
-  targetNamespace: flux-system
-  sourceRef:
-    kind: GitRepository
-    name: vibecarbon
-  path: ./k8s/gitops/cert-manager-webhook-hetzner
-  prune: true
-  wait: true
-  timeout: 10m
-  dependsOn:
-    - name: vibecarbon-base
-  healthChecks:
-    - apiVersion: helm.toolkit.fluxcd.io/v2
-      kind: HelmRelease
-      name: cert-manager-webhook-hetzner
-      namespace: flux-system
----
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
   name: vibecarbon-production-hel1
   namespace: flux-system
 spec:

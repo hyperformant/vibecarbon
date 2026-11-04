@@ -263,7 +263,6 @@ function makeCtx(target: 'both' | 'primary' | 'standby') {
       sshKeyPath: '/key',
       domain: null,
       services: {},
-      dnsChallenge: true,
       dnsProvider: null,
       apiToken: 'tok',
       servers: [primary, standby],

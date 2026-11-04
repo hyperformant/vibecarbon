@@ -12,12 +12,12 @@
 import { existsSync, rmSync } from 'node:fs';
 import { isIP } from 'node:net';
 import * as p from '@clack/prompts';
-import { reapChallengeRecords } from '../../acme-challenge.js';
 import { exitCancelled, exitDeclined } from '../../cli/exit-guard.js';
 import { resolvePrimary } from '../../cli/resolve-primary.js';
 import { c } from '../../colors.js';
 import { loadProjectConfig, updateProjectConfig } from '../../config.js';
 import { environmentServerNames } from '../../destroy/server-naming.js';
+import { waitForDNSPropagation } from '../../dns-propagation.js';
 import {
   DNS_PROVIDERS,
   findZoneForDomain,
@@ -1154,7 +1154,7 @@ export async function destroyComposeHA(options) {
     }
   });
 
-  // Delete SSH key + DNS resources in parallel
+  // Delete the SSH key, then DNS (in that order; see below)
   onProgress('Cleaning up resources...');
   await Promise.allSettled([
     // SSH key deletion. The compose-ha deploy creates a SHARED ssh key named
@@ -1181,80 +1181,68 @@ export async function destroyComposeHA(options) {
         // created OUTSIDE Pulumi, so nothing else will ever reap it.
         noteLeak('ssh-key', sshKeyName, `delete failed: ${error.message}`);
       }
-    })(),
-    // DNS resource deletion (ownership-filtered — only records pointing at
-    // this env's server IPs are removed; shared zones keep their other
-    // tenants' records intact). Registry-driven: every DNS_PROVIDERS backend
-    // exposes deleteApexAndWildcard (root + wildcard — M3 Task 9i: deploy
-    // creates both records, so destroy must delete both, or the wildcard
-    // orphans at a released IP). Token resolution is env-first under the
-    // same-token rule; a missing token is a LEAK entry, never a silent skip.
-    (async () => {
-      const ownedIps = (envConfig.servers || []).map((srv) => srv.ip).filter(Boolean);
-      // Nested persisted block first, else the pre-deploy flat binding — a
-      // compose-ha deploy that died before its mid-deploy persist leaves
-      // only the flat key (same class destroy.js's cleanupDnsRecords covers;
-      // observed live 2026-08-08 on the compose-single path).
-      const dnsProvider = envConfig.dns?.provider ?? envConfig.dnsProvider;
-      if (!hasAutomatedDns(dnsProvider) || !envConfig.domain) return;
-      const row = DNS_PROVIDERS[dnsProvider];
-      const token = resolveDnsToken(dnsProvider, {
-        computeProviderId: providerIdFor(envConfig),
-        computeToken: providerToken,
-      });
-      if (!token) {
-        noteLeak(
-          'dns-record',
-          `${envConfig.domain} (${row.name})`,
-          `no ${row.tokenEnv} available for DNS cleanup`,
-        );
-        return;
-      }
-      let zoneId = envConfig.dns?.zoneId ?? null;
-      try {
-        const dns = await getDnsProvider(dnsProvider);
-        if (!zoneId) {
-          const zone = findZoneForDomain(await dns.getZones(token), envConfig.domain);
-          zoneId = zone ? String(zone.id) : null;
-          if (!zoneId) return;
-        }
-        // The 0.0.0.0 warm-up sentinel is always ours to reap — a deploy
-        // that died pre-provision leaves records no server ever "owned".
-        await dns.deleteApexAndWildcard(token, zoneId, envConfig.domain, [...ownedIps, '0.0.0.0']);
-        // The ACME client's DNS-01 residue. Written by lego/cert-manager, so
-        // the ownership-filtered delete above structurally cannot reach it —
-        // which is why `_acme-challenge.<env>` TXTs accumulated across every
-        // destroy until the 2026-08-10 audit found twelve tokens in one
-        // (see lib/acme-challenge.js). Reported, never silently skipped: a
-        // stale challenge record shadows the next DNS-01 wildcard validation.
-        const challenge = await reapChallengeRecords({
-          dns,
-          token,
-          zoneId,
-          domain: envConfig.domain,
+    })().then(() =>
+      // DNS goes only after the shared key (the last compute resource) is gone:
+      // never delete a record while anything that could still validate or serve
+      // it is alive.
+      // DNS resource deletion (ownership-filtered — only records pointing at
+      // this env's server IPs are removed; shared zones keep their other
+      // tenants' records intact). Registry-driven: every DNS_PROVIDERS backend
+      // exposes deleteApexAndWildcard (root + wildcard — M3 Task 9i: deploy
+      // creates both records, so destroy must delete both, or the wildcard
+      // orphans at a released IP). Token resolution is env-first under the
+      // same-token rule; a missing token is a LEAK entry, never a silent skip.
+      (async () => {
+        const ownedIps = (envConfig.servers || []).map((srv) => srv.ip).filter(Boolean);
+        // Nested persisted block first, else the pre-deploy flat binding — a
+        // compose-ha deploy that died before its mid-deploy persist leaves
+        // only the flat key (same class destroy.js's cleanupDnsRecords covers;
+        // observed live 2026-08-08 on the compose-single path).
+        const dnsProvider = envConfig.dns?.provider ?? envConfig.dnsProvider;
+        if (!hasAutomatedDns(dnsProvider) || !envConfig.domain) return;
+        const row = DNS_PROVIDERS[dnsProvider];
+        const token = resolveDnsToken(dnsProvider, {
+          computeProviderId: providerIdFor(envConfig),
+          computeToken: providerToken,
         });
-        if (challenge.error) {
+        if (!token) {
           noteLeak(
             'dns-record',
-            `_acme-challenge.${envConfig.domain} (${row.name} zone ${zoneId})`,
-            `challenge-record delete failed: ${challenge.error.message}`,
+            `${envConfig.domain} (${row.name})`,
+            `no ${row.tokenEnv} available for DNS cleanup`,
+          );
+          return;
+        }
+        let zoneId = envConfig.dns?.zoneId ?? null;
+        try {
+          const dns = await getDnsProvider(dnsProvider);
+          if (!zoneId) {
+            const zone = findZoneForDomain(await dns.getZones(token), envConfig.domain);
+            zoneId = zone ? String(zone.id) : null;
+            if (!zoneId) return;
+          }
+          // The 0.0.0.0 warm-up sentinel is always ours to reap — a deploy
+          // that died pre-provision leaves records no server ever "owned".
+          await dns.deleteApexAndWildcard(token, zoneId, envConfig.domain, [
+            ...ownedIps,
+            '0.0.0.0',
+          ]);
+          if (typeof dns.deleteHealthCheck === 'function') {
+            await Promise.allSettled(
+              (envConfig.servers || []).map((server) =>
+                dns.deleteHealthCheck(token, zoneId, `${server.name}-health`),
+              ),
+            );
+          }
+        } catch (error) {
+          noteLeak(
+            'dns-record',
+            `${envConfig.domain} (${row.name} zone ${zoneId})`,
+            `delete failed: ${error.message}`,
           );
         }
-        if (typeof dns.deleteHealthCheck === 'function') {
-          await Promise.allSettled(
-            (envConfig.servers || []).map((server) =>
-              dns.deleteHealthCheck(token, zoneId, `${server.name}-health`),
-            ),
-          );
-        }
-      } catch (error) {
-        noteLeak(
-          'dns-record',
-          `${envConfig.domain} (${row.name} zone ${zoneId})`,
-          `delete failed: ${error.message}`,
-        );
-      }
-    })(),
+      })(),
+    ),
   ]);
 
   // Clean up local SSH key files
@@ -2046,10 +2034,12 @@ export function composeFailoverAbortBackend({
  * fence its database read-only so no write can land after the promote,
  * capture its WAL position and wait for the standby to replay it (or reseed a
  * standby that is not streaming, proven free of the fence); arm the promoted
- * side's wal-g role (D2), journal, promote, then prove the write-guard, arm
- * the issuer, restart the app, flip DNS and persist the swap. The order is
- * fence < terminate < capture LSN < catch-up < arm < promote < DNS, as on k8s
- * (failover-step-order-census.test.ts).
+ * side's wal-g role (D2), journal, promote, then prove the write-guard,
+ * restore the saved TLS certificate, restart the app, disarm the old
+ * primary's ACME issuer, flip DNS, arm the promoted node's issuer and persist
+ * the swap. The order is fence < terminate < capture LSN < catch-up < arm <
+ * promote < DNS, as on k8s (failover-step-order-census.test.ts), and ACME
+ * disarm < DNS < ACME arm (HTTP-01 validates where DNS points).
  *
  * Refuses a role-swapped environment before any ssh call (R4), and decides
  * promote, resume or refuse from the guard before any write (R1). Once the
@@ -2114,6 +2104,7 @@ export async function failoverComposeHA(
     probeRoleBind = composeDbMountsWalgRoleDir,
     restoreWalgRole = auditComposeWalgRole,
     pushBaseBackup = pushBaseBackupAfterPromote,
+    waitForDns = waitForDNSPropagation,
     reconcileRetired = () =>
       reconcileRetiredFence({
         environment: envName,
@@ -2582,42 +2573,26 @@ export async function failoverComposeHA(
     sshKeyPath,
     projectName,
   });
-  // Step 1a3: Arm the promoted node's ACME issuer (single-active-issuer
-  // policy — it was deployed as the standby with a disarmed caserver, so
-  // until this lands the domain would serve the Traefik default cert after
-  // the DNS flip). Runs THIS early on purpose: issuance (DNS-01 propagation
-  // included) overlaps the app-tier restart, API gate, and DNS flip below.
-  // Best-effort like the write-guard — a failed re-arm degrades TLS, it
-  // must never abort a DR flip (armComposeAcme warns with the manual fix).
-  // The saved certificate is restored first (restoreFailoverTls), so the
-  // recreated Traefik serves it at once; with none, it issues a new one.
-  s.start("Arming the promoted node's ACME issuer");
-  let tlsRestore = null;
-  const acmeArmed = await armComposeAcme({
-    promotedIp: standbyServer.ip,
-    sshKeyPath,
+  // Step 1a3: Put the saved certificate on the promoted node
+  // (restoreFailoverTls) and restart its Traefik onto it, so the node serves
+  // it the moment DNS moves. Its ACME issuer stays disarmed (it was deployed
+  // as the standby) until DNS points at it, step 3a. With no usable snapshot
+  // nothing changes here, and Traefik issues once it is armed. Never throws:
+  // a restore that fails degrades to issuance.
+  s.start('Restoring the saved TLS certificate on the promoted node');
+  const tlsRestore = await restoreFailoverTls({
+    envName,
+    envConfig,
     projectName,
-    deps: {
-      restore: async () => {
-        tlsRestore = await restoreFailoverTls({
-          envName,
-          envConfig,
-          projectName,
-          ip: standbyServer.ip,
-          sshKeyPath,
-        });
-        return tlsRestore;
-      },
-    },
+    ip: standbyServer.ip,
+    sshKeyPath,
   });
   s.stop(
-    acmeArmed
-      ? tlsRestore?.restored
-        ? 'Promoted node ACME issuer armed (saved certificate restored)'
-        : 'Promoted node ACME issuer armed (certificate issuance underway)'
-      : 'Promoted node ACME issuer NOT armed — domain serves an untrusted cert (see warning)',
+    tlsRestore.restored
+      ? 'Saved TLS certificate restored on the promoted node'
+      : 'No saved TLS certificate restored on the promoted node',
   );
-  if (tlsRestore) p.log.info(tlsRestore.line);
+  p.log.info(tlsRestore.line);
   s.stop(
     backupHealth.ok
       ? 'wal-g write-guard moved, new primary is archiving'
@@ -2785,9 +2760,10 @@ export async function failoverComposeHA(
     projectName,
     deps: { roleRun },
   });
-  // Step 2c: Disarm the retired node's ACME issuer — the swapped pair must
-  // never run two armed solvers against one `_acme-challenge` TXT name (the
-  // dual-solver clobbering class, acme-role.js). Best-effort for the same
+  // Step 2c: Disarm the retired node's ACME issuer, before the DNS flip. Once
+  // DNS moves, every HTTP-01 challenge it starts would reach the promoted node
+  // and fail, spending the hostname's failed validations; until the arm in
+  // step 3a neither node can issue (acme-role.js). Best-effort for the same
   // reason the demote is.
   await disarmComposeAcme({
     oldPrimaryIp: primaryServer.ip,
@@ -2826,10 +2802,57 @@ export async function failoverComposeHA(
     p.log.message(`  ${c.dim('New IP'.padEnd(14))} ${c.bold(standbyServer.ip)} (promoted standby)`);
   }
 
+  // Step 3a: Arm the promoted node's ACME issuer, only now that the failover
+  // has reached its DNS step. Let's Encrypt fetches an HTTP-01 challenge from
+  // the address the domain resolves to: armed before the flip, the first
+  // attempt reaches the old primary and fails, Traefik does not retry it until
+  // a restart, and each failure counts against the hostname's 5 failed
+  // validations per hour. A confirmed managed flip is read back through the
+  // provider's API only, so public resolvers may still answer the old address:
+  // wait for them first, as the deploy does before compose-up (a timeout is a
+  // note, not a stop). Manual DNS and a flip that was not confirmed arm
+  // without the wait: an early attempt costs at most one failed validation
+  // per hostname, and the tls-retry cron restarts Traefik once the apex
+  // resolves to this node. Never arming would be worse: a disarmed primary
+  // never renews, even a restored certificate. Before the swap save, so a run
+  // that dies here keeps its journal and the rerun arms. Best-effort: a failed
+  // arm degrades TLS and never aborts a DR flip (armComposeAcme warns with the
+  // manual fix). A restored certificate is served as is; with none, issuance
+  // starts here. The arm is a Traefik recreate (its caserver is a static flag),
+  // and it now runs on the node DNS points at, so the few seconds of refused
+  // connections it causes land right after the flip. That is inherent to
+  // arming after the flip, which is what keeps the first HTTP-01 challenge
+  // from reaching the old primary.
+  if (dnsAutomated && dnsFlip.ok && envConfig.domain) {
+    s.start(`Waiting for ${envConfig.domain} to resolve to ${standbyServer.ip}`);
+    const propagated = await waitForDns(envConfig.domain, standbyServer.ip, 120_000);
+    s.stop(
+      propagated
+        ? `DNS resolves: ${envConfig.domain} → ${standbyServer.ip}`
+        : 'Public resolvers do not show the promoted node yet; arming anyway (tls-retry retries issuance)',
+    );
+  }
+  s.start("Arming the promoted node's ACME issuer");
+  const acmeArmed = await armComposeAcme({
+    promotedIp: standbyServer.ip,
+    sshKeyPath,
+    projectName,
+  });
+  s.stop(
+    acmeArmed
+      ? tlsRestore.restored
+        ? 'Promoted node ACME issuer armed (serving the restored certificate)'
+        : 'Promoted node ACME issuer armed (certificate issuance underway)'
+      : tlsRestore.restored
+        ? 'Promoted node ACME issuer NOT armed, the domain serves the restored certificate until renewal is armed (see warning)'
+        : 'Promoted node ACME issuer NOT armed, the domain serves an untrusted certificate (see warning)',
+  );
+
   // Persist the swap; the same save clears the failover journal (R2). Right
-  // after the DNS verdict, before the TLS wait: the journal must not stay set
-  // through minutes of certificate issuance (a crash there would leave a
-  // finished failover looking mid-flight).
+  // after the DNS verdict and the arm (its DNS wait is bounded at 2 minutes),
+  // before the TLS wait: the journal must not stay set through minutes of
+  // certificate issuance (a crash there would leave a finished failover
+  // looking mid-flight).
   // On resume the override was recorded by the run that skipped the proof.
   swapRoles(envName, {
     override: unproven
@@ -2856,10 +2879,10 @@ export async function failoverComposeHA(
 
   // Step 3b: TLS gate — the deploy rule, applied to failover: it is not done
   // until the domain serves a trusted certificate. The promoted node was
-  // deployed with a DISARMED issuer (single-active-issuer policy), so its
-  // ACME issuance only began at the arm in step 1a3; on slow DNS-01
-  // (DigitalOcean anycast) that can outlive downstream checks that assume
-  // the cert exists — run 33279912405's verify-failover expired mid-issuance.
+  // deployed with a DISARMED issuer (single-active-issuer policy), so with no
+  // restored certificate its ACME issuance only began at the arm in step 3a,
+  // and that can outlive downstream checks that assume the cert exists (run
+  // 33279912405's verify-failover expired mid-issuance).
   // Warn-don't-abort: the DR flip is complete and the site serves; a pending
   // cert is degraded TLS, not a failed failover. The same first-look budget
   // as deploy: past it, the promoted node's tls-retry cron (installed on both
@@ -2877,10 +2900,15 @@ export async function failoverComposeHA(
     } else {
       s.stop('Domain not yet serving a trusted TLS certificate', 1);
       p.log.warn(
-        `The failover is complete and the site is serving, but ${envConfig.domain} still ` +
-          `presents an untrusted certificate (${tls.reason}). The tls-retry cron on the ` +
-          `promoted node restarts Traefik to retry issuance every 30 minutes. If this ` +
-          `persists, check the ACME error in \`${VC_COMPOSE} logs traefik\` on that node.`,
+        acmeArmed
+          ? `The failover is complete and the site is serving, but ${envConfig.domain} still ` +
+              `presents an untrusted certificate (${tls.reason}). The tls-retry cron on the ` +
+              `promoted node restarts Traefik to retry issuance every 30 minutes. If this ` +
+              `persists, check the ACME error in \`${VC_COMPOSE} logs traefik\` on that node.`
+          : `The failover is complete, but the promoted node's ACME issuer is not armed and ` +
+              `${envConfig.domain} does not present a trusted certificate (${tls.reason}). ` +
+              `Traefik may be stopped on that node, so the site may not be serving. Check it ` +
+              `with the command in the warning above, then run \`vibecarbon deploy ${envName}\`.`,
       );
     }
   }

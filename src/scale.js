@@ -25,7 +25,6 @@ import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c, link } from './lib/colors.js';
 import { checkDependency, runCommand } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
-import { useDnsChallenge } from './lib/deploy/acme.js';
 import { queueBootTiming } from './lib/deploy/boot-timing.js';
 import { STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
 import { buildComposeAppImage, deliverComposeAppImage } from './lib/deploy/compose/app-image.js';
@@ -288,7 +287,6 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   // A scale that stopped mid-cutover is resumed before anything new: its
   // journal names both servers, and the config may still name the old one.
   if (envConfig.ha?.writeFence?.cutover) {
-    const dnsProviderId = envConfig.dnsProvider || envConfig.dns?.provider || null;
     const resumeCtx = {
       tier,
       environment,
@@ -299,7 +297,6 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
       Provider,
       sshKeyPath: sshKeyPathFor(environment),
       domain: envConfig.domain || null,
-      dnsChallenge: useDnsChallenge(dnsProviderId),
       apiToken,
       region: envConfig.region,
       services: projectConfig.services || {},
@@ -464,11 +461,7 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   const sshKeyPath = sshKeyPathFor(environment);
   const sshPubKeyPath = `${sshKeyPath}.pub`;
   const domain = envConfig.domain || null;
-  // Managed-DNS (cloudflare/hetzner) deploys issue certs via ACME DNS-01, so
-  // the new/recreated server needs the DNS-01 Traefik override and has no
-  // HTTP-01 race to wait on or reset. `manual` keeps HTTP-01.
   const dnsProvider = envConfig.dnsProvider || envConfig.dns?.provider || null;
-  const dnsChallenge = useDnsChallenge(dnsProvider);
 
   // Read the SSH public key here (sync, no side effect); the actual Hetzner
   // registration (network I/O) is the plan's `register-ssh-key` step.
@@ -506,7 +499,6 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
     sshKeyName,
     domain,
     dnsProvider,
-    dnsChallenge,
     apiToken,
     services,
     serverStateOptions,
@@ -599,6 +591,35 @@ export function dropUnportableEnv(env, { log = p.log } = {}) {
   return kept;
 }
 
+/**
+ * Env keys the retired DNS-01 deploys wrote to a server's .env: the provider
+ * token lego read, the provider selector, and the lego tuning vars. Every
+ * certificate now validates over HTTP-01, so no server keeps a DNS API token.
+ */
+const DNS01_ENV_KEYS = new Set([
+  'DO_AUTH_TOKEN',
+  'CF_DNS_API_TOKEN',
+  'HETZNER_API_TOKEN',
+  'LINODE_TOKEN',
+  'VULTR_API_KEY',
+  'SCW_SECRET_KEY',
+  'ACME_DNS_PROVIDER',
+  'ACME_DNS_DELAY_BEFORE_CHECKS',
+]);
+
+/**
+ * The old server's .env without any DNS-01 variable, for the scale replay.
+ * @param {Record<string, string>} env
+ * @returns {Record<string, string>}
+ */
+export function dropDnsTokenEnv(env) {
+  return Object.fromEntries(
+    Object.entries(env).filter(
+      ([key]) => !DNS01_ENV_KEYS.has(key) && !key.endsWith('_PROPAGATION_TIMEOUT'),
+    ),
+  );
+}
+
 /** What the old server prints instead of app.env when it has none. */
 export const NO_APP_ENV_MARKER = '__VC_NO_APP_ENV__';
 
@@ -680,7 +701,7 @@ function remainingCutoverSteps(done) {
  * holds the restore (post-promote-backup census).
  */
 async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase, onServing }) {
-  const { provider, projectName, environment, sshKeyPath, dnsChallenge, envConfig } = ctx;
+  const { provider, projectName, environment, sshKeyPath, envConfig } = ctx;
   const s = spinner();
   const remoteDir = `/opt/${projectName}`;
   const step = async (name, run) => {
@@ -710,11 +731,9 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
   });
 
   await step('recreate', async () => {
-    // 13a. HTTP-01 only: reset ACME state so Traefik retries challenges with
-    // the corrected DNS — the new server's stack started before the A record
-    // moved, so failed challenges are cached as errors in letsencrypt_data.
-    // DNS-01 has no such cached HTTP-01 failure to clear (and wiping acme.json
-    // would force a needless re-issue), so skip it.
+    // 13a. Reset ACME state so Traefik retries challenges with the corrected
+    // DNS — the new server's stack started before the A record moved, so
+    // failed challenges are cached as errors in letsencrypt_data.
     // An apex certificate already in acme.json (the restored one) is kept: the
     // server is asked, never this process's memory, so a cutover resumed from
     // its journal decides the same way. A check that cannot answer keeps the
@@ -722,19 +741,17 @@ async function finishComposeCutover(ctx, { server, newIp, label, done, pushBase,
     // Uses an SCP'd script so quoting/redirection stay intact without local shell.
     const apex = ctx.domain ?? envConfig.domain ?? null;
     let live = null;
-    if (!dnsChallenge) {
-      // No domain: no certificate to keep, so the reset runs as it always has.
-      live = apex
-        ? await readLiveApexCertificate({
-            ip: newIp,
-            sshKeyPath,
-            projectName,
-            domain: apex,
-            // The stack is up, so the traefik image is local.
-            timeoutMs: 30_000,
-          })
-        : { state: 'absent' };
-    }
+    // No domain: no certificate to keep, so the reset runs as it always has.
+    live = apex
+      ? await readLiveApexCertificate({
+          ip: newIp,
+          sshKeyPath,
+          projectName,
+          domain: apex,
+          // The stack is up, so the traefik image is local.
+          timeoutMs: 30_000,
+        })
+      : { state: 'absent' };
     if (live?.state === 'absent') {
       await sshRunScript(
         newIp,
@@ -1131,20 +1148,7 @@ export function replacementImagePlan(appImage, { localDocker, recorded, forceDir
  * @returns {Promise<string>} the new server's public IP
  */
 async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 = null } = {}) {
-  const {
-    tier,
-    provider,
-    Provider,
-    envConfig,
-    projectName,
-    environment,
-    sshKeyPath,
-    domain,
-    services,
-    dnsChallenge,
-    dnsProvider,
-    apiToken,
-  } = ctx;
+  const { tier, provider, Provider, projectName, environment, sshKeyPath, domain, services } = ctx;
   // 3. Wait for the server to come online, THEN resolve its IP off the
   // object waitForServer resolves with — not off createServer's return.
   // Hetzner assigns the IP synchronously at create time, but
@@ -1273,26 +1277,12 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
       n8n: services.n8n,
       metabase: services.metabase,
       redis: services.redis,
-      // DNS-01: ship the Traefik override + re-affirm ACME_DNS_PROVIDER.
-      // The provider token flows through `envOverrides: oldEnv` (the
-      // original deploy baked it into the server .env); the token is
-      // passed too so a fresh bundle still works if the old server was
-      // unreachable. Same-token rule: native DNS reuses the compute
-      // token in hand.
-      dnsChallenge,
-      dnsProvider,
-      dnsToken: hasAutomatedDns(dnsProvider)
-        ? resolveDnsToken(dnsProvider, {
-            computeProviderId: providerIdFor(envConfig),
-            computeToken: apiToken,
-          })
-        : null,
       // Replay every env var the old server had. renderBundle's existing
       // envOverrides path overlays these onto the project-local `.env`
       // baseline, then re-applies the deploy-time overrides (DOMAIN,
       // SITE_URL, APP_IMAGE, etc.) on top — so the new bundle is a
       // superset of both sources.
-      envOverrides: oldEnv,
+      envOverrides: dropDnsTokenEnv(oldEnv),
       appEnvReplay: oldAppEnv,
     }),
   );
@@ -1518,7 +1508,6 @@ async function scaleServers(ctx) {
     sshKeyPath,
     domain,
     services,
-    dnsChallenge,
     apiToken,
     targetServers,
   } = ctx;
@@ -1709,12 +1698,11 @@ async function scaleServers(ctx) {
         },
       );
       journaled = true;
-      // On HTTP-01 the flip must happen BEFORE recreating services (Traefik
-      // challenges the A record on startup; a stale record fails all
-      // challenges with a 30+ min retry). On DNS-01 the ordering is irrelevant
-      // — lego validates a TXT record, not the A record. Gated to ONE writer:
-      // the standby's replacement never touches apex (see shouldUpdateApexDns
-      // — the two-writer upsert race, run 31970876667).
+      // The flip must happen BEFORE recreating services: Traefik asks for its
+      // certificates on startup, and HTTP-01 validates over the A record, so a
+      // stale record fails every challenge with a 30+ min retry. Gated to ONE
+      // writer: the standby's replacement never touches apex (see
+      // shouldUpdateApexDns — the two-writer upsert race, run 31970876667).
       if (domain && shouldUpdateApexDns(server)) {
         s.start('Updating DNS to new server...');
         try {
@@ -1761,16 +1749,13 @@ async function scaleServers(ctx) {
         markScaleCutoverStep({ environment }, 'dns');
         progress.push('dns');
 
-        // HTTP-01 only: poll until public resolvers return the new IP (max
-        // 120s) so Traefik's first challenge sees it. DNS-01 doesn't gate on
-        // A-record propagation, so skip the wait.
-        if (!dnsChallenge) {
-          s.start('Waiting for DNS propagation...');
-          const dnsOk = await perfAsync('scale.waitForDNS', () =>
-            waitForDNSPropagation(domain, newIp, 120_000),
-          );
-          s.stop(dnsOk ? 'DNS propagated' : 'DNS propagation timed out (proceeding anyway)');
-        }
+        // Poll until public resolvers return the new IP (max 120s) so
+        // Traefik's first HTTP-01 challenge sees it.
+        s.start('Waiting for DNS propagation...');
+        const dnsOk = await perfAsync('scale.waitForDNS', () =>
+          waitForDNSPropagation(domain, newIp, 120_000),
+        );
+        s.stop(dnsOk ? 'DNS propagated' : 'DNS propagation timed out (proceeding anyway)');
       } else {
         progress.push('dns');
       }

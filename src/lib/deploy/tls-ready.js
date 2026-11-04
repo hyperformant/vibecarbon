@@ -2,12 +2,10 @@
  * TLS verdict for the compose tiers.
  *
  * THE RULE: a deploy reports its TLS state; it does not wait out a CA.
- * Compose fires Traefik/lego ACME issuance asynchronously, and on slow DNS-01
- * propagation (DigitalOcean's anycast POPs, run 33252884427) the domain sat
- * on the Traefik self-signed default (compose) or an apex-less wildcard
- * (compose-ha) for minutes after "success". The first answer was a hard
- * gate (480s, then abort), which failed deploys whose app was healthy only
- * because a CA was slow. Now the deploy looks for a trusted chain for one
+ * Compose fires Traefik ACME issuance asynchronously, so the domain can sit
+ * on the Traefik self-signed default for a while after "success". The first
+ * answer was a hard gate (480s, then abort), which failed deploys whose app
+ * was healthy only because a CA was slow. Now the deploy looks for a trusted chain for one
  * first-look window (TLS_FIRST_LOOK_BUDGET_MS), then finishes either trusted
  * or pending. A pending deploy names the cause in one warning, records
  * envConfig.tls for `vibecarbon status`, and the server's tls-retry cron
@@ -27,13 +25,12 @@ import { connectPublicTls, probeTrustStore } from './public-domain-probe.js';
 
 /**
  * First-look budget for the apex to serve a trusted chain on managed DNS.
- * The DNS-01 settle floor (legoTuningEnv, ACME_DNS_DELAY_BEFORE_CHECKS) puts
- * healthy issuance at about 120s (2026-10-20 trials: wildcard 119s, apex
- * 124s), and Traefik has been issuing since start-compose-stack, so a
- * healthy CA lands inside it. A slower one leaves the deploy finished with
- * TLS pending instead of holding it open.
+ * HTTP-01 issues in seconds once the A record is visible, and Traefik has been
+ * issuing since start-compose-stack, so a healthy CA lands well inside 120s.
+ * A slower one leaves the deploy finished with TLS pending instead of holding
+ * it open.
  */
-export const TLS_FIRST_LOOK_BUDGET_MS = 180_000;
+export const TLS_FIRST_LOOK_BUDGET_MS = 120_000;
 
 /** Poll cadence — matches the e2e ssl_valid retry cadence order of magnitude. */
 export const TLS_READY_POLL_MS = 5_000;
@@ -53,9 +50,9 @@ export const TLS_PROBE_TIMEOUT_MS = 10_000;
  * One real TLS probe of `domain`:443 with full verification (SNI +
  * hostname + chain against the platform store, plus the LE staging roots
  * when ACME_CA_SERVER points at staging), resolved through public DNS: the
- * shared policy of public-domain-probe.js. On an untrusted chain, retries once WITHOUT
- * verification purely to NAME the served cert for the error message — that
- * insecure attempt can never produce trusted:true.
+ * shared policy of public-domain-probe.js. On an untrusted chain, retries
+ * once WITHOUT verification purely to NAME the served cert for the error
+ * message — that insecure attempt can never produce trusted:true.
  *
  * A trusted handshake also names the certificate it verified: its expiry
  * (`validTo`, ISO 8601) and `serialNumber` (hex), for `vibecarbon status`.

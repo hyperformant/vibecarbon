@@ -662,7 +662,7 @@ export async function setupServerFiles(ip, sshKeyPath, projectName, options = {}
       // command (mkdir/tar/cp/daemon-reload) is idempotent anyway.
       const uploadScript =
         // shell-safety-ignore: opts from composeSshOptsString (shEscaped); data flows via positionals
-        `cat "$1" | ssh ${composeSshOptsString(sshKeyPath)} -i "$2" "root@$3" "mkdir -p $4/backups && tar --no-xattrs --no-same-owner -xzf - -C $4 && cp $4/$5.service /etc/systemd/system/ && systemctl daemon-reload"`;
+        `cat "$1" | ssh ${composeSshOptsString(sshKeyPath)} -i "$2" "root@$3" "mkdir -p $4/backups && tar --no-xattrs --no-same-owner -xzf - -C $4 && rm -f $4/docker-compose.dns01.prod.yml && cp $4/$5.service /etc/systemd/system/ && systemctl daemon-reload"`;
       await perfAsync('deploy.bundle.extract', () =>
         runWithTransportRetry(() =>
           runCommandAsync(

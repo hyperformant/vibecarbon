@@ -791,8 +791,8 @@ export const CONFIG_KEYS = [
   // deploy templates default to the production LE directory.
   //
   // NOT a credential, and NOT operator-secret: the deployed SERVER reads it —
-  // carbon/docker-compose.prod.yml and docker-compose.dns01.prod.yml
-  // interpolate `${ACME_CA_SERVER:-<prod LE>}` from the `.env` the bundle
+  // carbon/docker-compose.prod.yml
+  // interpolates `${ACME_CA_SERVER:-<prod LE>}` from the `.env` the bundle
   // ships, and the k8s issuer patch reads it from the project env too. The
   // operator-secret class strips its lines from that `.env` baseline
   // (stripOperatorSecretLines), which would silently move every staging
@@ -926,8 +926,7 @@ export function isSecretKey(key) {
  *
  * Deliberately does NOT touch programmatic `envOverrides` — renderBundle's
  * own explicit propagation of individual operator-secret-classified keys
- * (S3 storage/backup credentials via `options.s3`, the DNS-01 provider
- * token via `options.dnsToken`, an old server's
+ * (S3 storage/backup credentials via `options.s3`, an old server's
  * full env replayed via `options.envOverrides` during `scale`) is a
  * separate, deliberate, tested mechanism — those values arrive as explicit
  * function arguments, never by echoing this file, and callers rely on them

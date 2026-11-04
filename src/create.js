@@ -767,7 +767,6 @@ async function bootstrap(cliArgs) {
     'k8s/overlays/production',
     'k8s/flux/clusters/primary',
     'k8s/flux/clusters/standby',
-    'k8s/gitops/cert-manager-webhook-hetzner',
   ];
   for (const dir of dirs) {
     mkdirSync(join(projectDir, dir), { recursive: true });
@@ -831,12 +830,6 @@ async function bootstrap(cliArgs) {
   copyTemplate('.dockerignore', join(projectDir, '.dockerignore'), variables);
   copyTemplate('docker-compose.yml', join(projectDir, 'docker-compose.yml'), variables);
   copyTemplate('docker-compose.prod.yml', join(projectDir, 'docker-compose.prod.yml'), variables);
-  // DNS-01 ACME override — applied at deploy only for managed-DNS (cloudflare/hetzner).
-  copyTemplate(
-    'docker-compose.dns01.prod.yml',
-    join(projectDir, 'docker-compose.dns01.prod.yml'),
-    variables,
-  );
   copyTemplate(
     'docker-compose.override.yml',
     join(projectDir, 'docker-compose.override.yml'),

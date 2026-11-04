@@ -39,7 +39,6 @@ import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { haClassMessage, haStandbyType } from '../../sizing.js';
-import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
 import { queueBootTiming } from '../boot-timing.js';
@@ -725,8 +724,8 @@ async function haWriteNodeRoles(ctx) {
   const haRemoteDir = `/opt/${projectName}`;
   // ACME_DISARM_ENV rides the same per-node merge (single-active-issuer
   // policy, acme-role.js): the standby's Traefik caserver dials the
-  // reserved-.invalid sentinel — zero ACME traffic, zero `_acme-challenge`
-  // TXT writes — so only the primary ever solves the domain's challenges.
+  // reserved-.invalid sentinel — zero ACME traffic, zero
+  // challenge writes — so only the primary ever solves the domain's challenges.
   // Explicitly EMPTY on the primary (falls through to the real CA) so a
   // re-deploy over a node that once held the standby role converges it.
   // This runs before start-compose-stack, so the first `up` already
@@ -841,10 +840,10 @@ async function haUpdateDns(ctx) {
     p.log.message(`  Standby server: ${c.bold(standby.ip)} (for manual failover)`);
   }
 
-  // HTTP-01 only: block compose-up until public resolvers see the apex domain.
-  // Managed-DNS HA issues certs via DNS-01, which doesn't gate on A-record
-  // propagation. `manual` isn't reached here (excluded by the guard above).
-  if (domain && dnsProvider && dnsProvider !== 'manual' && !useDnsChallenge(dnsProvider)) {
+  // Block compose-up until public resolvers see the apex domain, so Traefik's
+  // first HTTP-01 challenge sees real DNS. `manual` isn't reached here
+  // (excluded by the guard above).
+  if (domain && dnsProvider && dnsProvider !== 'manual') {
     ctx.onProgress(`Waiting for ${domain} to propagate to ${primary.ip}...`);
     const { waitForDNSPropagation } = await import('../../dns-propagation.js');
     await perfAsync('deploy.ha.compose.dns.waitForPropagation', () =>

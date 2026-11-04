@@ -2,10 +2,9 @@
 # (d4 2026-08-28 — see src/lib/deploy/k8s/acme-issuer-policy.js).
 #
 # A k8s-ha environment is two clusters holding Certificates for the SAME
-# dns names on one shared zone; two clusters solving ACME DNS-01
-# concurrently clobber each other's challenge records on solvers that key
-# records by name (cert-manager's core DigitalOcean solver). So only the
-# PRIMARY-role cluster references an ACME issuer: `applyK3sManifests`
+# dns name. HTTP-01 can pass only on the cluster DNS points at, so a standby
+# solving ACME fails every challenge and burns Let's Encrypt's failed
+# validation limit. So only the PRIMARY-role cluster references an ACME issuer: `applyK3sManifests`
 # patches a pilot-standby's Certificates onto THIS issuer instead (instant
 # local issuance, zero ACME traffic), stashing the real issuer name in the
 # `vibecarbon.dev/promote-issuer` annotation, and `vibecarbon failover`'s

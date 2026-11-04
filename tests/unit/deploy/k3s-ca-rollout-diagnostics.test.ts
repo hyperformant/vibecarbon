@@ -302,10 +302,6 @@ describe('k3s.js diagnostics wiring (structural pin)', () => {
     expect(await src()).toContain('await captureClusterAutoscalerDiagnostics({ env });');
   });
 
-  it('routes the cert-manager webhook log dump through runDeployDiagnostic too', async () => {
-    expect(await src()).toMatch(/runDeployDiagnostic\(\s*\[\s*'kubectl',\s*'-n',\s*'cert-manager'/);
-  });
-
   it('leaves no best-effort capture on inherited stdio (bypasses the deploy log)', async () => {
     // `silent: false` + `ignoreError: true` is precisely the shape that wrote
     // to the terminal and left the 2026-07-31 deploy log with a bare header:

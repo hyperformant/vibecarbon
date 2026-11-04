@@ -87,33 +87,6 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
       /rateLimited|429\s+(too many|rate.?limit)|too many (certificates|requests)|rate[ _-]?limit(?:ed|ing)?[\s_](exceed|reach|hit|exceeds|throttl)/i,
     reason: 'rate limit',
   },
-  // LE validation seeing a missing/mismatched challenge TXT despite lego's
-  // own authoritative pre-check passing — anycast POP divergence between
-  // lego's vantage and LE's (DO: run 33283466928; hetzner: run 33435737752,
-  // both observed under a SINGLE armed solver, so it is provider-side
-  // propagation, not our dual-issuer race — that class is closed by
-  // acme-role.js). The urn context is required so a sentence merely
-  // mentioning TXT records cannot match. The bounded `.{0,60}?` infix
-  // admits LE's "During secondary validation: " prefix (emitted when only
-  // REMOTE perspectives fail — the purest vantage-divergence spelling; it
-  // escaped the original pattern and hard-failed run 33435737752 as
-  // [unknown]) without letting the urn anchor drift a sentence away.
-  {
-    pattern: /urn:ietf:params:acme:error:unauthorized :: .{0,60}?(No|Incorrect) TXT record/i,
-    reason: 'ACME DNS-01 propagation (anycast lag)',
-  },
-  // lego's OWN authoritative pre-check starving against Vultr's
-  // negative-cache poisoning (2026-08-30 RCA, run 33287840597 + acme-iso
-  // probes): a name queried before its record lands stays invisible for
-  // minutes, so the check sees NXDOMAIN or a sibling order's stale token.
-  // Mitigated by the vultr legoTuningEnv row (delay floor + 300s window);
-  // residual stragglers on churned names are retryable weather. Pinned to
-  // vultr's NS names so the same lego wording against another provider's
-  // NS does not borrow this attribution.
-  {
-    pattern: /NS ns\d\.vultr\.com\S* (?:did not return the expected TXT record|returned NXDOMAIN)/i,
-    reason: 'ACME DNS-01 propagation (NS negative cache)',
-  },
   // The db rollout wait expiring on a pod whose NODE is NotReady: the host
   // died or lost its kubelet mid-deploy (RCA 2026-09-01, k8s-ha standby, PG17
   // cert: worker dark — kubelet 502, SSH timeout — while Hetzner's API

@@ -5,7 +5,7 @@
  * Hetzner scenarios alternate hetzner/cloudflare DNS, and each non-Hetzner
  * cloud that has a delegated e2e zone runs on its OWN native DNS backend
  * (DigitalOcean scenarios on DigitalOcean DNS, Linode on Linode DNS) —
- * exercising every DNS-01 path we ship rather than funnelling them all
+ * exercising every DNS provider path we ship rather than funnelling them all
  * through Cloudflare. Perf-focused runs (the CI US-region workflow) don't
  * want that split: DNS provider variance adds noise, and a Cloudflare
  * dependency means an extra credential. These knobs let a run pin
@@ -48,9 +48,9 @@ export function overrideDnsProvider<T extends { dnsProvider: DnsProvider }>(
  * Base domain for a scenario: E2E_DOMAIN override, else the provider map.
  *
  * A DNS provider with no domains-map entry throws. It used to return
- * `undefined`, which the single caller (runner.ts) interpolated into
- * `${envPrefix}.${undefined}` — the scenario then provisioned against the
- * literal domain `d1.undefined`, failing tens of minutes later at cert
+ * `undefined`, which the single caller (runner.ts) interpolated into the
+ * scenario's domain — the scenario then provisioned against the literal
+ * domain `<name>.undefined`, failing tens of minutes later at cert
  * issuance with an error naming neither the scenario nor the missing key.
  * Every DNS backend in `PROVIDERS` above needs a delegated zone before a
  * scenario can name it; this is where that debt comes due.

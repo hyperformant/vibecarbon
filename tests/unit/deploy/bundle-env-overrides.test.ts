@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -191,92 +191,41 @@ describe('renderBundle DNS-01 challenge', () => {
     }
   });
 
-  it('adds the DNS-01 override to vc-compose + cloudflare token to .env', () => {
+  const DNS01_TOKEN_VARS = [
+    'DO_AUTH_TOKEN',
+    'CF_DNS_API_TOKEN',
+    'HETZNER_API_TOKEN',
+    'LINODE_TOKEN',
+    'VULTR_API_KEY',
+    'SCW_SECRET_KEY',
+    'ACME_DNS_PROVIDER',
+    'ACME_DNS_DELAY_BEFORE_CHECKS',
+    'DO_PROPAGATION_TIMEOUT',
+    'HETZNER_PROPAGATION_TIMEOUT',
+    'VULTR_PROPAGATION_TIMEOUT',
+  ];
+
+  it('a digitalocean deploy ships no DNS token variable and no DNS-01 compose file', () => {
     projectDir = makeProjectDir('FOO=local');
     process.chdir(projectDir);
 
     const stage = renderBundle('myproj', {
-      dnsChallenge: true,
-      dnsProvider: 'cloudflare',
-      dnsToken: 'cf-tok',
+      domain: 'e1.carbonstack.dev',
+      dnsProvider: 'digitalocean',
+      dnsToken: 'do-tok',
     });
 
     try {
+      const reconcile = readFileSync(join(stage, 'reconcile.sh'), 'utf-8');
+      expect(reconcile).not.toContain('dns01');
+      // vc-compose carries the deploy's -f set: no DNS-01 override in it.
       const composeCommand = readFileSync(join(stage, 'vc-compose'), 'utf-8');
-      expect(composeCommand).toContain('-f docker-compose.dns01.prod.yml');
-      // Override must come after prod.yml so it replaces the Traefik command.
-      expect(composeCommand.indexOf('docker-compose.dns01.prod.yml')).toBeGreaterThan(
-        composeCommand.indexOf('docker-compose.prod.yml'),
-      );
+      expect(composeCommand).not.toContain('dns01');
+      expect(existsSync(join(stage, 'docker-compose.dns01.prod.yml'))).toBe(false);
 
       const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
-      expect(env.ACME_DNS_PROVIDER).toBe('cloudflare');
-      expect(env.CF_DNS_API_TOKEN).toBe('cf-tok');
-      // No other provider's token var is written at all — the deploy carries
-      // exactly one DNS credential and it lands under exactly one name.
-      expect(env.HETZNER_API_TOKEN).toBeUndefined();
-      expect(env.DO_AUTH_TOKEN).toBeUndefined();
-    } finally {
-      rmSync(stage, { recursive: true, force: true });
-    }
-  });
-
-  it('injects the consolidated Hetzner Cloud token for the hetzner provider', () => {
-    projectDir = makeProjectDir('');
-    process.chdir(projectDir);
-
-    const stage = renderBundle('myproj', {
-      dnsChallenge: true,
-      dnsProvider: 'hetzner',
-      dnsToken: 'hz-tok',
-    });
-
-    try {
-      const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
-      expect(env.ACME_DNS_PROVIDER).toBe('hetzner');
-      expect(env.HETZNER_API_TOKEN).toBe('hz-tok');
-      expect(env.CF_DNS_API_TOKEN).toBeUndefined();
-    } finally {
-      rmSync(stage, { recursive: true, force: true });
-    }
-  });
-
-  it('injects the lego-named token var for each newly wired provider', () => {
-    // lego reads a different env var name per provider; the bundler writes
-    // the one selected provider's, under lego's name (not the CLI's).
-    const cases: Array<[string, string]> = [
-      ['digitalocean', 'DO_AUTH_TOKEN'],
-      ['linode', 'LINODE_TOKEN'],
-      ['vultr', 'VULTR_API_KEY'],
-    ];
-    for (const [dnsProvider, tokenVar] of cases) {
-      projectDir = makeProjectDir('');
-      process.chdir(projectDir);
-
-      const stage = renderBundle('myproj', { dnsChallenge: true, dnsProvider, dnsToken: 'tok' });
-
-      try {
-        const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
-        expect(env.ACME_DNS_PROVIDER).toBe(dnsProvider);
-        expect(env[tokenVar]).toBe('tok');
-      } finally {
-        rmSync(stage, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it('leaves HTTP-01 untouched when dnsChallenge is not set (manual DNS)', () => {
-    projectDir = makeProjectDir('');
-    process.chdir(projectDir);
-
-    const stage = renderBundle('myproj', {});
-
-    try {
-      const composeCommand = readFileSync(join(stage, 'vc-compose'), 'utf-8');
-      expect(composeCommand).not.toContain('docker-compose.dns01.prod.yml');
-
-      const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
-      expect(env.ACME_DNS_PROVIDER).toBeUndefined();
+      for (const name of DNS01_TOKEN_VARS) expect(env[name]).toBeUndefined();
+      expect(JSON.stringify(env)).not.toContain('do-tok');
     } finally {
       rmSync(stage, { recursive: true, force: true });
     }
@@ -302,47 +251,26 @@ describe('renderBundle tls-default.yml', () => {
     }
   });
 
-  it('writes tls-default.yml with wildcard SAN for DNS-01 (cloudflare) deploy', () => {
+  it('writes tls-default.yml with explicit names for a managed-DNS (cloudflare) deploy', () => {
     projectDir = makeProjectDir('');
     process.chdir(projectDir);
 
     const stage = renderBundle('myproj', {
       domain: 'e1.carbonstack.dev',
-      dnsChallenge: true,
       dnsProvider: 'cloudflare',
-      dnsToken: 'cf-tok',
-    });
-
-    try {
-      const tls = readFileSync(join(stage, 'volumes', 'traefik', 'tls-default.yml'), 'utf-8');
-      // default cert is the wildcard (subdomains); the apex app owns its own cert
-      expect(tls).toContain('main: "*.e1.carbonstack.dev"');
-      expect(tls).not.toContain('main: "e1.carbonstack.dev"');
-      expect(tls).not.toContain('api.e1.carbonstack.dev');
-    } finally {
-      rmSync(stage, { recursive: true, force: true });
-    }
-  });
-
-  it('writes tls-default.yml with explicit subdomain SANs for HTTP-01 deploy', () => {
-    projectDir = makeProjectDir('');
-    process.chdir(projectDir);
-
-    const stage = renderBundle('myproj', {
-      domain: 'e1.carbonstack.dev',
-      dnsChallenge: false,
       observability: true,
+      n8n: true,
     });
 
     try {
       const tls = readFileSync(join(stage, 'volumes', 'traefik', 'tls-default.yml'), 'utf-8');
-      // HTTP-01: dashboard.<domain> is main; apex app owns its own cert; no
-      // wildcard; no api. host exists under single-origin routing
-      expect(tls).toContain('main: "dashboard.e1.carbonstack.dev"');
+      // traefik.<domain> is main; the apex app owns its own cert; no wildcard
+      expect(tls).toContain('main: "traefik.e1.carbonstack.dev"');
       expect(tls).not.toContain('main: "e1.carbonstack.dev"');
-      expect(tls).not.toContain('api.e1.carbonstack.dev');
       expect(tls).toContain('grafana.e1.carbonstack.dev');
-      expect(tls).not.toContain('*.');
+      expect(tls).toContain('n8n.e1.carbonstack.dev');
+      expect(tls).not.toContain('prometheus');
+      expect(tls).not.toContain('*');
     } finally {
       rmSync(stage, { recursive: true, force: true });
     }

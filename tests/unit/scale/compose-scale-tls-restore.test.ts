@@ -31,6 +31,8 @@ const h = vi.hoisted(() => {
     live: {} as Record<string, 'present' | 'absent'>,
     snapshot: null as string | null,
     checkTimeouts: [] as number[],
+    // What the replay handed setupServerFiles (the options of its one call).
+    setupOptions: null as Record<string, unknown> | null,
   };
   return { events, state };
 });
@@ -122,7 +124,14 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     backupCompose: async () => ({ result: 'pushed', name: PUSHED }),
     waitForSSH: async () => true,
     setupServer: async () => {},
-    setupServerFiles: async () => {},
+    setupServerFiles: async (
+      _ip: string,
+      _k: string,
+      _p: string,
+      options: Record<string, unknown>,
+    ) => {
+      h.state.setupOptions = options;
+    },
     pullComposeImages: async (ip: string) => {
       h.events.push(`pull:${ip}`);
     },
@@ -209,6 +218,10 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
       // The real argv contract (tests/_shared/ssh-contract.ts).
       const { assertSshRunArgv } = await import('../../_shared/ssh-contract.js');
       assertSshRunArgv(argv);
+      if (argv[0] === 'cat' && String(argv[1]).endsWith('/.env')) {
+        // An old server deployed before HTTP-01 everywhere: it holds DNS-01 tokens.
+        return OLD_SERVER_ENV;
+      }
       // The replacement's wal-g role write reads back the role it wrote.
       const { roleWriteOf } = await import('../helpers/scale-cutover-stub.js');
       const role = roleWriteOf(argv);
@@ -235,7 +248,7 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
 
 const { SCALE_EFFECTS, resumeComposeCutover } = await import('../../../src/scale.js');
 
-function makeCtx({ tier = 'compose', dnsChallenge = false, ca = 'staging' as string | null } = {}) {
+function makeCtx({ tier = 'compose', ca = 'staging' as string | null } = {}) {
   const provider = {
     createServer: vi.fn(async () => ({ id: 'new-id' })),
     waitForServer: vi.fn(async () => ({ public_net: { ipv4: { ip: '9.9.9.9' } } })),
@@ -266,7 +279,6 @@ function makeCtx({ tier = 'compose', dnsChallenge = false, ca = 'staging' as str
     sshKeyPath: '/key',
     domain: 'app.example.com',
     services: {},
-    dnsChallenge,
     dnsProvider: 'hetzner',
     apiToken: 'tok',
     servers,
@@ -279,34 +291,70 @@ function reset({ snapshot = acmeJson({}) as string | null } = {}) {
   h.state.live = {};
   h.state.snapshot = snapshot;
   h.state.checkTimeouts = [];
+  h.state.setupOptions = null;
 }
+
+const OLD_SERVER_ENV = [
+  'APP_IMAGE=myapp-app:local',
+  'FOO=keep',
+  'ACME_DNS_PROVIDER=digitalocean',
+  'ACME_DNS_DELAY_BEFORE_CHECKS=90s',
+  'DO_AUTH_TOKEN=do-secret',
+  'DO_PROPAGATION_TIMEOUT=300',
+  'CF_DNS_API_TOKEN=cf-secret',
+  'HETZNER_API_TOKEN=hz-secret',
+  'HETZNER_PROPAGATION_TIMEOUT=600',
+  'LINODE_TOKEN=li-secret',
+  'VULTR_API_KEY=vu-secret',
+  'VULTR_PROPAGATION_TIMEOUT=300',
+  'SCW_SECRET_KEY=sw-secret',
+  '',
+].join('\n');
 
 const tlsAndStack = (events: string[]) =>
   events.filter((e) => /^(pull|up|tls):/.test(e) && !e.startsWith('tls:read'));
 
+describe('the scale replay drops every DNS-01 variable from the old server .env', () => {
+  it('replays the other variables and none of the DNS tokens', async () => {
+    reset();
+    await SCALE_EFFECTS.scaleServers(makeCtx());
+    const replayed = h.state.setupOptions?.envOverrides as Record<string, string>;
+    expect(replayed.FOO).toBe('keep');
+    expect(replayed.APP_IMAGE).toBe('myapp-app:local');
+    expect(Object.keys(replayed).sort()).toEqual(['APP_IMAGE', 'FOO']);
+    expect(JSON.stringify(h.state.setupOptions)).not.toMatch(/-secret/);
+    expect(h.state.setupOptions).not.toHaveProperty('dnsToken');
+    expect(h.state.setupOptions).not.toHaveProperty('dnsChallenge');
+  });
+});
+
 describe('scale restores the certificate on the replacement primary', () => {
   it('restores after the image pull and before the stack starts, from the recorded CA', async () => {
     reset();
-    await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }));
+    await SCALE_EFFECTS.scaleServers(makeCtx());
     expect(tlsAndStack(h.events)).toEqual([
       'pull:9.9.9.9',
       'tls:check:9.9.9.9',
       'tls:write:9.9.9.9',
       'up:9.9.9.9',
+      // The recreate asks the server again, and finds the restored apex.
+      'tls:check:9.9.9.9',
     ]);
     expect(h.events).toContain('tls:read:backups/myapp/prod/tls/staging/compose-acme.json');
   });
 
   it('no recorded CA: nothing is read or written, the scale goes on', async () => {
     reset();
-    await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true, ca: null }));
-    expect(h.events.some((e) => e.startsWith('tls:'))).toBe(false);
+    await SCALE_EFFECTS.scaleServers(makeCtx({ ca: null }));
+    // Nothing is read from the backup or written to the server; only the
+    // recreate's own live check runs.
+    expect(h.events.some((e) => e.startsWith('tls:read') || e.startsWith('tls:write'))).toBe(false);
     expect(h.events).toContain('up:9.9.9.9');
   });
 
   it('a standby-only scale never restores', async () => {
     reset();
-    const ctx = makeCtx({ tier: 'compose-ha', dnsChallenge: true });
+    const ctx = makeCtx({ tier: 'compose-ha' });
     ctx.targetServers = [(ctx.servers as Array<Record<string, unknown>>)[1]];
     // The streaming proof is not faked here, so the arm fails after its
     // stack is up; what matters is what ran before that.
@@ -321,7 +369,7 @@ describe('scale restores the certificate on the replacement primary', () => {
     reset();
     const snapshot = h.state.snapshot as string;
     const { captured } = await expectNoKeyLeak(snapshot, () =>
-      SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true })),
+      SCALE_EFFECTS.scaleServers(makeCtx()),
     );
     expect(h.events).toContain('tls:write:9.9.9.9');
     expect(captured).toContain(
@@ -330,10 +378,10 @@ describe('scale restores the certificate on the replacement primary', () => {
   });
 });
 
-describe('the HTTP-01 recreate wipes acme.json only when the new server has no apex certificate', () => {
+describe('the recreate wipes acme.json only when the new server has no apex certificate', () => {
   it('the live check finds the restored apex: no wipe is sent', async () => {
     reset();
-    await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: false }));
+    await SCALE_EFFECTS.scaleServers(makeCtx());
     // One check before the stack starts (the restore), one in the recreate.
     expect(h.events.filter((e) => e === 'tls:check:9.9.9.9')).toHaveLength(2);
     expect(h.events).not.toContain('tls:wipe:9.9.9.9');
@@ -343,7 +391,7 @@ describe('the HTTP-01 recreate wipes acme.json only when the new server has no a
 
   it('the live check finds nothing (no snapshot to restore): the wipe is sent as before', async () => {
     reset({ snapshot: null });
-    await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: false }));
+    await SCALE_EFFECTS.scaleServers(makeCtx());
     expect(h.events).not.toContain('tls:write:9.9.9.9');
     const wipe = h.events.indexOf('tls:wipe:9.9.9.9');
     expect(wipe).toBeGreaterThan(-1);
@@ -351,19 +399,11 @@ describe('the HTTP-01 recreate wipes acme.json only when the new server has no a
     expect(h.events.lastIndexOf('tls:check:9.9.9.9')).toBeLessThan(wipe);
     expect(wipe).toBeLessThan(h.events.indexOf('journal:done:recreate'));
   });
-
-  it('DNS-01: no check and no wipe in the recreate, as before', async () => {
-    reset({ snapshot: null });
-    await SCALE_EFFECTS.scaleServers(makeCtx({ dnsChallenge: true }));
-    // No snapshot: the restore never reaches the server, and DNS-01 skips the recreate check.
-    expect(h.events.filter((e) => e === 'tls:check:9.9.9.9')).toHaveLength(0);
-    expect(h.events).not.toContain('tls:wipe:9.9.9.9');
-  });
 });
 
 describe('a resumed cutover (resumeComposeCutover) makes the same live-check decision', () => {
   const resumeCtx = () => {
-    const ctx = makeCtx({ dnsChallenge: false });
+    const ctx = makeCtx();
     const envConfig = {
       ...(ctx.envConfig as Record<string, unknown>),
       ha: {

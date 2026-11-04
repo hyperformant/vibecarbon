@@ -96,10 +96,6 @@ let secretVersionOut: Record<string, string> = {};
 let deliverGate: { promise: Promise<void>; release: () => void } | null = null;
 // What the image delivery rejects with, or null for success.
 let deliverError: Error | null = null;
-// Exit codes for the cert-manager DNS-01 webhook install pair (helm install /
-// kubectl wait) — drives the fail-loud tests below.
-let webhookHelmExit = 0;
-let webhookWaitExit = 0;
 // Exit code of `kubectl rollout status deployment/local-registry`, and the
 // cluster events read when it fails (the mirror-pull diagnosis).
 let registryRolloutExit = 0;
@@ -375,20 +371,6 @@ function installSpawnMock() {
     if (cmd === 'kubectl' && argv.includes('get') && argv.includes('events')) {
       return fakeChild({ stdout: eventsOut, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
-    if (cmd === 'helm' && argv[0] === 'upgrade' && argv.includes('cert-manager-webhook-hetzner')) {
-      return fakeChild({ exitCode: webhookHelmExit, argv: full }) as unknown as ReturnType<
-        typeof spawn
-      >;
-    }
-    if (
-      cmd === 'kubectl' &&
-      argv.includes('wait') &&
-      argv.includes('deploy/cert-manager-webhook-hetzner')
-    ) {
-      return fakeChild({ exitCode: webhookWaitExit, argv: full }) as unknown as ReturnType<
-        typeof spawn
-      >;
-    }
     // The migration watch resolves the rollout's newest pod first
     // (readiness.js newestAppPod): one current ReplicaSet, one pod.
     if (
@@ -544,7 +526,6 @@ function baseArgs(projectDir: string) {
     domain: 'app.example.test',
     // s3Config omitted → no wal-g backup credentials (fewer calls).
     restore: null,
-    // dnsProvider omitted → no DNS secret / hetzner webhook path.
     apiToken: 'hetzner-token',
     providerId: 'hetzner',
     ProviderClass: FakeHetznerProvider,
@@ -636,8 +617,6 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     installSpawnMock();
   });
   afterEach(() => {
@@ -705,8 +684,6 @@ describe("applyK3sManifests binds the registry hostPort to the deploy's master p
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     registryAtBaseApply = null;
     installSpawnMock();
   });
@@ -738,8 +715,6 @@ describe('applyK3sManifests creates an HA db with its replication hostPort (neve
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     dbAtBaseApply = null;
     installSpawnMock();
   });
@@ -779,8 +754,6 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     registryRolloutExit = 0;
     eventsOut = '';
     installSpawnMock();
@@ -1132,8 +1105,6 @@ describe('applyK3sManifests pilot-standby role', () => {
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     installSpawnMock();
   });
 
@@ -1371,8 +1342,6 @@ describe('applyK3sManifests pilot-standby role', () => {
 
     await applyK3sManifests({
       ...baseArgs(projectDir),
-      dnsProvider: 'hetzner',
-      dnsToken: 'hetzner-dns-token',
       role: 'primary',
     });
 
@@ -1383,10 +1352,7 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(deleteCert).toBeGreaterThan(apply);
     expect(deleteSecret).toBeGreaterThan(deleteCert);
     expect(cmdCalls.some((a) => a.includes('patch') && a.includes('grafana-tls'))).toBe(false);
-    expect(certificateAtBaseApply?.spec?.dnsNames).toEqual([
-      'app.example.test',
-      '*.app.example.test',
-    ]);
+    expect(certificateAtBaseApply?.spec?.dnsNames).toEqual(['app.example.test']);
   });
 
   it('one certificate per name: a primary whose project removed observability still clears grafana-tls and its old route', async () => {
@@ -1431,17 +1397,15 @@ describe('applyK3sManifests pilot-standby role', () => {
   });
 
   it('single-ACME-issuer policy: a pilot-standby cert references the self-signed issuer, the promote annotation carries the real one', async () => {
-    // d4 runs 3/5 RCA (2026-08-28): two clusters solving DNS-01 for the same
-    // names live-lock on cert-manager's name-keyed DO solver. The standby
-    // must not be an active ACME issuer; the annotation is what the failover
+    // d4 runs 3/5 RCA (2026-08-28): two clusters ordering certificates for
+    // the same names contend, and only the cluster DNS points at can pass
+    // HTTP-01. The standby must not be an active ACME issuer; the annotation is what the failover
     // promote (and every reconverge under the swapped role) re-points from.
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
 
     await applyK3sManifests({
       ...baseArgs(projectDir),
-      dnsProvider: 'hetzner',
-      dnsToken: 'hetzner-dns-token',
       role: 'standby',
     });
 
@@ -1451,9 +1415,7 @@ describe('applyK3sManifests pilot-standby role', () => {
       name: 'vibecarbon-standby-selfsigned',
       kind: 'ClusterIssuer',
     });
-    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe(
-      'letsencrypt-prod-hetzner',
-    );
+    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe('letsencrypt-prod');
   });
 
   it('single-ACME-issuer policy: a primary cert keeps the ACME issuerRef AND carries the annotation', async () => {
@@ -1462,20 +1424,16 @@ describe('applyK3sManifests pilot-standby role', () => {
 
     await applyK3sManifests({
       ...baseArgs(projectDir),
-      dnsProvider: 'hetzner',
-      dnsToken: 'hetzner-dns-token',
       role: 'primary',
     });
 
     const body = certificateAtBaseApply;
     if (!body) throw new Error('no rendered certificate/vibecarbon-tls at the base apply');
     expect(body.spec.issuerRef).toEqual({
-      name: 'letsencrypt-prod-hetzner',
+      name: 'letsencrypt-prod',
       kind: 'ClusterIssuer',
     });
-    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe(
-      'letsencrypt-prod-hetzner',
-    );
+    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe('letsencrypt-prod');
   });
 
   it('renders or patches exactly the Certificates the ACME watchdog is allowed to repair', async () => {
@@ -1491,8 +1449,6 @@ describe('applyK3sManifests pilot-standby role', () => {
 
     await applyK3sManifests({
       ...baseArgs(projectDir),
-      dnsProvider: 'hetzner',
-      dnsToken: 'hetzner-dns-token',
       role: 'primary',
     });
 
@@ -1555,8 +1511,6 @@ describe('applyK3sManifests restores the TLS Secret before applying the base', (
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     installSpawnMock();
   });
 
@@ -1642,8 +1596,6 @@ describe('applyK3sManifests image delivery by role', () => {
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     installSpawnMock();
   });
 
@@ -1684,131 +1636,6 @@ describe('applyK3sManifests image delivery by role', () => {
   });
 });
 
-describe('cert-manager DNS-01 webhook install fails loud', () => {
-  // 2026-07-16 runCommandAsync audit: both webhook install steps discarded
-  // their result — runCommandAsync resolves `false` (does NOT reject) for
-  // non-silent callers, so a failed webhook chart install or readiness wait
-  // let the deploy march on and ACME DNS-01 issuance died minutes later with
-  // no pointer back. Same class as the db rollout wait's check.
-  beforeEach(() => {
-    vi.mocked(spawn).mockReset();
-    cmdCalls = [];
-    stdinCalls = [];
-    deliverGate = null;
-    deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
-    installSpawnMock();
-  });
-
-  async function runWithHetznerDns() {
-    const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir();
-    return applyK3sManifests({
-      ...baseArgs(projectDir),
-      dnsProvider: 'hetzner',
-      dnsToken: 'hetzner-dns-token',
-    });
-  }
-
-  it('throws when the webhook helm install exits non-zero', async () => {
-    webhookHelmExit = 1;
-    await expect(runWithHetznerDns()).rejects.toThrow(/cert-manager webhook.*helm/i);
-  });
-
-  it('throws when the webhook deploy never becomes Available', async () => {
-    webhookWaitExit = 1;
-    await expect(runWithHetznerDns()).rejects.toThrow(/never became Available/);
-  });
-
-  it('proceeds past the webhook block when both steps succeed', async () => {
-    await expect(runWithHetznerDns()).resolves.not.toThrow();
-    // Sanity: the webhook install actually ran in this configuration.
-    expect(
-      cmdCalls.some(
-        ([cmd, ...a]) =>
-          cmd === 'helm' && a[0] === 'upgrade' && a.includes('cert-manager-webhook-hetzner'),
-      ),
-    ).toBe(true);
-  });
-});
-
-/**
- * DigitalOcean DNS-01: cert-manager core carries the solver
- * (dns01.digitalocean.tokenSecretRef), so unlike Hetzner there is no webhook
- * chart — the only prerequisite is that Secret/digitalocean-dns exists in the
- * cert-manager namespace BEFORE the kustomization creates the ClusterIssuers
- * that reference it. An issuer whose tokenSecretRef dangles leaves every
- * Order Pending with no error at apply time, which is exactly the failure
- * mode this ordering exists to prevent.
- */
-describe('DNS-01 Secret precedes the ClusterIssuers that reference it (digitalocean)', () => {
-  beforeEach(() => {
-    vi.mocked(spawn).mockReset();
-    cmdCalls = [];
-    stdinCalls = [];
-    deliverGate = null;
-    deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
-    installSpawnMock();
-  });
-
-  const issuerApplyIndex = () =>
-    cmdCalls.findIndex(
-      (a) =>
-        a[0] === 'kubectl' &&
-        a.includes('apply') &&
-        a.includes('-k') &&
-        a.some((s) => String(s).includes('cert-manager-resources')),
-    );
-
-  it('pipes Secret/digitalocean-dns (key access-token) before applying cert-manager-resources', async () => {
-    const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir();
-    await applyK3sManifests({
-      ...baseArgs(projectDir),
-      dnsProvider: 'digitalocean',
-      dnsToken: 'dop_v1_test',
-    });
-
-    const secretWrite = stdinCalls.find((c) => c.data.includes('name: digitalocean-dns'));
-    expect(secretWrite).toBeTruthy();
-    expect(secretWrite?.data).toContain('namespace: cert-manager');
-    expect(secretWrite?.data).toContain('access-token: "dop_v1_test"');
-    // Token travels over stdin, never argv.
-    expect(secretWrite?.argv.join(' ')).not.toContain('dop_v1_test');
-
-    const issuerIdx = issuerApplyIndex();
-    expect(issuerIdx).toBeGreaterThan(-1);
-    expect(secretWrite?.seq).toBeLessThan(issuerIdx);
-  });
-
-  it('installs no webhook chart for digitalocean (solver ships in cert-manager core)', async () => {
-    const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir();
-    await applyK3sManifests({
-      ...baseArgs(projectDir),
-      dnsProvider: 'digitalocean',
-      dnsToken: 'dop_v1_test',
-    });
-
-    expect(
-      cmdCalls.some(([cmd, ...a]) => cmd === 'helm' && a.some((s) => /webhook/.test(String(s)))),
-    ).toBe(false);
-  });
-
-  it('a missing DNS token aborts before any kubectl apply reaches the cluster', async () => {
-    const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir();
-
-    await expect(
-      applyK3sManifests({ ...baseArgs(projectDir), dnsProvider: 'digitalocean' }),
-    ).rejects.toThrow(/DIGITALOCEAN_TOKEN/);
-    expect(cmdCalls.some((a) => a[0] === 'kubectl' && a.includes('apply'))).toBe(false);
-  });
-});
-
 describe('readiness probes are wired in (mitigation-audit clusters 1+4 root fix)', () => {
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
@@ -1816,8 +1643,6 @@ describe('readiness probes are wired in (mitigation-audit clusters 1+4 root fix)
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     installSpawnMock();
   });
 
@@ -1879,8 +1704,6 @@ describe('postgres accepting-gate precedes the first psql (cluster 5 root fix)',
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     installSpawnMock();
   });
 
@@ -1925,8 +1748,6 @@ describe('applyK3sManifests — waits for the app to report its super admin', ()
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     installSpawnMock();
   });
 
@@ -2035,8 +1856,6 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     installSpawnMock();
   });
 
@@ -2139,8 +1958,6 @@ describe('a changed app Secret rolls deployment/app', () => {
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     secretVersionOut = {
       'vibecarbon-app-secrets': '4101',
       'vibecarbon-infra-secrets': '4102',
@@ -2270,8 +2087,6 @@ describe('perf markers attribute every step of the apply', () => {
     stdinCalls = [];
     deliverGate = null;
     deliverError = null;
-    webhookHelmExit = 0;
-    webhookWaitExit = 0;
     perfNames.length = 0;
     installSpawnMock();
   });
@@ -2306,18 +2121,5 @@ describe('perf markers attribute every step of the apply', () => {
     expect(at('db.preflight')).toBeLessThan(at('applyBase'));
     // The probe deployK3s already ran is gone from here.
     expect(at('controlPlane.serving')).toBe(-1);
-  });
-
-  it('a DNS-01 provider adds its Secret and webhook spans before the ClusterIssuers', async () => {
-    const { applyK3sManifests } = await k3sPromise;
-    await applyK3sManifests({
-      ...baseArgs(makeProjectDir()),
-      dnsProvider: 'hetzner',
-      dnsToken: 'hetzner-dns-token',
-    });
-
-    expect(at('dnsSecret')).toBeGreaterThan(at('certManager.admission'));
-    expect(at('certManager.webhook')).toBeGreaterThan(at('dnsSecret'));
-    expect(at('certManager.resources')).toBeGreaterThan(at('certManager.webhook'));
   });
 });

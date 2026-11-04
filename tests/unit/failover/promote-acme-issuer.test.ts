@@ -1,20 +1,24 @@
 /**
- * Single-ACME-issuer policy — promote half (d4 runs 3/5 RCA, 2026-08-28).
+ * Single-ACME-issuer policy — promote half (d4 runs 3/5 RCA, 2026-08-28;
+ * HTTP-01 order 2026-11-04).
  *
- * Both clusters used to run active ACME issuers for the SAME dns names;
- * cert-manager's name-keyed DigitalOcean solver made the standby-role
- * cluster's issuance live-lock against the primary's, and after a failover
- * the promoted cluster served the Traefik default cert indefinitely. The
- * deploy half points a pilot-standby's Certificate at the local self-signed
- * ClusterIssuer and stamps the REAL issuer name into the
- * `vibecarbon.dev/promote-issuer` annotation; this half — run right after
- * the promoted app tier scales up — reads that annotation and patches
- * issuerRef back, making the promoted cluster the SOLE ACME solver.
+ * Every certificate validates with HTTP-01, and Let's Encrypt fetches the
+ * challenge from the address the domain resolves to, so a standby cluster
+ * can never pass one. The deploy half points a pilot-standby's Certificate
+ * at the local self-signed ClusterIssuer and stamps the REAL issuer name
+ * into the `vibecarbon.dev/promote-issuer` annotation. On failover:
  *
- * Best-effort by contract: DNS has already flipped by the time a failure
- * here could abort, and a promoted site serving on a self-signed cert is
- * strictly better than an aborted failover — so failures WARN loudly and
- * the reconverge redeploy repairs issuer ownership.
+ *   - restorePromotedTls, BEFORE the DNS flip, puts the env's saved
+ *     certificate into the Secret and re-creates the Certificate on the ACME
+ *     issuer, so the site serves it the moment DNS moves and cert-manager
+ *     places no order;
+ *   - promoteAcmeIssuer, AFTER the DNS flip, reads the annotation and
+ *     patches issuerRef back, making the promoted cluster the SOLE ACME
+ *     solver once the challenges reach it.
+ *
+ * Best-effort by contract: a promoted site serving on a self-signed cert is
+ * strictly better than an aborted failover, so failures WARN loudly and the
+ * reconverge redeploy repairs issuer ownership.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { renderTlsCertificateManifest } from '../../../carbon/scripts/render-tls-certificate.mjs';
@@ -22,6 +26,7 @@ import {
   k8sTlsSnapshotInputs,
   promoteAcmeIssuer,
   promoteTlsKubectl,
+  restorePromotedTls,
 } from '../../../src/failover.js';
 import { k8sSecretSerial, tlsSnapshotKey } from '../../../src/lib/deploy/tls-snapshot.js';
 import { expectNoKeyLeak } from '../deploy/_no-key-leak.ts';
@@ -40,7 +45,7 @@ describe('promoteAcmeIssuer', () => {
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
       calls.push(argv);
       if (argv.includes('get'))
-        return CERT_JSON('vibecarbon-standby-selfsigned', 'letsencrypt-staging-digitalocean');
+        return CERT_JSON('vibecarbon-standby-selfsigned', 'letsencrypt-staging');
       return '';
     });
     const result = await promoteAcmeIssuer({
@@ -53,13 +58,12 @@ describe('promoteAcmeIssuer', () => {
     expect(patch).toBeDefined();
     expect(patch?.join(' ')).toContain('certificate');
     expect(patch?.join(' ')).toContain('vibecarbon-tls');
-    expect(JSON.stringify(patch)).toContain('letsencrypt-staging-digitalocean');
+    expect(JSON.stringify(patch)).toContain('letsencrypt-staging');
   });
 
   it('no-ops when issuerRef already equals the annotated issuer (idempotent on re-promote)', async () => {
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      if (argv.includes('get'))
-        return CERT_JSON('letsencrypt-staging-digitalocean', 'letsencrypt-staging-digitalocean');
+      if (argv.includes('get')) return CERT_JSON('letsencrypt-staging', 'letsencrypt-staging');
       return '';
     });
     const result = await promoteAcmeIssuer({
@@ -73,7 +77,7 @@ describe('promoteAcmeIssuer', () => {
 
   it('skips a certificate with no promote annotation (pre-policy cluster) without patching', async () => {
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      if (argv.includes('get')) return CERT_JSON('letsencrypt-staging-digitalocean');
+      if (argv.includes('get')) return CERT_JSON('letsencrypt-staging');
       return '';
     });
     const result = await promoteAcmeIssuer({
@@ -111,16 +115,18 @@ describe('promoteAcmeIssuer', () => {
 });
 
 // ============================================================================
-// TLS certificate reuse: the promoted cluster serves the primary's certificate.
-// With a valid snapshot from this env's own issuer, vibecarbon-tls is not
-// re-pointed by a patch (cert-manager would then see a self-signed Secret and
-// issue): its Certificate is deleted, the snapshot goes into the Secret, and
-// the Certificate comes back on the ACME issuer, finding a Secret that
-// matches it. vibecarbon-tls is the only Certificate a deploy owns.
+// TLS certificate reuse, before the DNS flip: the promoted cluster serves the
+// primary's certificate. With a valid snapshot from this env's own issuer,
+// vibecarbon-tls is not re-pointed by a patch (cert-manager would then see a
+// self-signed Secret and issue): its Certificate is deleted, the snapshot
+// goes into the Secret, and the Certificate comes back on the ACME issuer,
+// finding a Secret that matches it. Without one, nothing is touched until
+// the promote after the flip. vibecarbon-tls is the only Certificate a
+// deploy owns.
 // ============================================================================
 
-const TARGET = 'letsencrypt-staging-digitalocean';
-const DNS = ['app.example.com', '*.app.example.com'];
+const TARGET = 'letsencrypt-staging';
+const DNS = ['app.example.com'];
 const S3 = { bucket: 'proj-backups', accessKey: 'AK', secretKey: 'SK', endpoint: 'https://s3' };
 const SNAPSHOT_INPUTS = {
   s3Config: S3,
@@ -203,26 +209,27 @@ const leaseRead = (calls: Call[]) =>
   calls.findIndex((c) => c.argv.includes('lease') && c.argv.includes('cert-manager-controller'));
 const argvs = (calls: Call[]) => calls.map((c) => c.argv);
 
+/** The failover's certificate restore, before the DNS flip. */
 function run(
   c: ReturnType<typeof cluster>,
   {
-    snapshot = SNAPSHOT_INPUTS as typeof SNAPSHOT_INPUTS | null,
+    snapshot = SNAPSHOT_INPUTS,
     read = vi.fn(async () => ({ text: SNAP })),
     warn,
     message,
     awaitLeader,
   }: {
-    snapshot?: typeof SNAPSHOT_INPUTS | null;
+    snapshot?: typeof SNAPSHOT_INPUTS;
     read?: ReturnType<typeof vi.fn>;
     warn?: (m: string) => void;
     message?: (m: string) => void;
     awaitLeader?: () => Promise<void>;
   } = {},
 ) {
-  return promoteAcmeIssuer({
+  return restorePromotedTls({
     promotedIp: '203.0.113.9',
     sshKeyPath: '/k',
-    ...(snapshot ? { snapshot } : {}),
+    snapshot,
     deps: {
       kubectl: c.kubectl,
       quietKubectl: c.quietKubectl,
@@ -234,20 +241,36 @@ function run(
   });
 }
 
-/** Today's patch-path argv, from a run with no snapshot inputs at all. */
+/** The failover's issuer promote, after the DNS flip: it reads no snapshot. */
+function promote(c: ReturnType<typeof cluster>, { warn }: { warn?: (m: string) => void } = {}) {
+  return promoteAcmeIssuer({
+    promotedIp: '203.0.113.9',
+    sshKeyPath: '/k',
+    deps: { kubectl: c.kubectl, ...(warn ? { warn } : {}) },
+  });
+}
+
+/** The patch path's argv: the promote alone, on a fresh cluster. */
 async function patchPathArgv(opts: Cluster = {}) {
   const c = cluster(opts);
-  await run(c, { snapshot: null });
+  await promote(c);
   return argvs(c.calls);
 }
 
-describe('promoteAcmeIssuer with a TLS snapshot', () => {
+/** Run the promote after a restore on the same cluster; its argv only. */
+async function promoteAfter(c: ReturnType<typeof cluster>) {
+  const before = c.calls.length;
+  const result = await promote(c);
+  return { result, argv: argvs(c.calls.slice(before)) };
+}
+
+describe('restorePromotedTls (before the DNS flip)', () => {
   it('restores the snapshot: delete Certificate, write Secret, re-create the Certificate on the ACME issuer', async () => {
     const c = cluster();
     const read = vi.fn(async () => ({ text: SNAP }));
     const { result } = await expectNoKeyLeak(SNAP, () => run(c, { read }));
 
-    expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    expect(result.restored).toEqual(['vibecarbon/vibecarbon-tls']);
     // The serial it restored (public) rides the result into the failover's line.
     expect(result.tls).toEqual({
       restored: true,
@@ -305,6 +328,27 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     }
   });
 
+  it('a read error that is not NotFound warns with its first line and says cert-manager issues after the flip', async () => {
+    const c = cluster();
+    const kubectl = vi.fn(async () => {
+      throw new Error('ssh: connect to host 203.0.113.9 port 22: Connection refused\nsecond line');
+    });
+    const warn = vi.fn();
+    const result = await restorePromotedTls({
+      promotedIp: '203.0.113.9',
+      sshKeyPath: '/k',
+      snapshot: SNAPSHOT_INPUTS,
+      deps: { kubectl, quietKubectl: c.quietKubectl, readSnapshot: vi.fn(), warn },
+    });
+    expect(result).toEqual({ restored: [] });
+    expect(warn).toHaveBeenCalledTimes(1);
+    const said = String(warn.mock.calls[0][0]);
+    expect(said).toContain('Connection refused');
+    expect(said).not.toContain('second line');
+    expect(said).toContain('cert-manager issues a certificate after the flip');
+    expect(c.calls).toEqual([]);
+  });
+
   it('an absent live Secret is filled with create, never replace', async () => {
     const c = cluster({ liveSecret: '' });
     const result = await run(c);
@@ -316,10 +360,9 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     const { json, ca } = k8sSecretJsonWithCa({
       dnsNames: DNS,
       days: 60,
-      issuerName: 'letsencrypt-prod-digitalocean',
+      issuerName: 'letsencrypt-prod',
     });
-    const prodCert = (name: string) =>
-      LIVE_CERT(name).replaceAll(TARGET, 'letsencrypt-prod-digitalocean');
+    const prodCert = (name: string) => LIVE_CERT(name).replaceAll(TARGET, 'letsencrypt-prod');
     for (const [roots, restored] of [
       [[ca as string], true],
       [[], false],
@@ -330,7 +373,7 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
           ? prodCert('vibecarbon-tls')
           : c.kubectl(ip, key, argv, o as Record<string, unknown>),
       );
-      const result = await promoteAcmeIssuer({
+      const result = await restorePromotedTls({
         promotedIp: '203.0.113.9',
         sshKeyPath: '/k',
         snapshot: { ...SNAPSHOT_INPUTS, ca: 'prod' },
@@ -356,40 +399,51 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     [
       'a snapshot from another issuer',
       {
-        text: k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: 'letsencrypt-staging-hetzner' }),
+        text: k8sSecretJson({ dnsNames: DNS, days: 60, issuerName: 'letsencrypt-prod' }),
       },
     ],
     [
       'a snapshot for other names',
       { text: k8sSecretJson({ dnsNames: ['other.example.com'], days: 60, issuerName: TARGET }) },
     ],
-  ])('%s: today’s patch path, byte-identical argv, no delete', async (_label, answer) => {
-    const c = cluster();
-    const result = await run(c, { read: vi.fn(async () => answer) });
-    expect(argvs(c.calls)).toEqual(await patchPathArgv());
-    expect(c.quietKubectl).not.toHaveBeenCalled();
-    expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
-    expect(result.tls?.restored).toBe(false);
-  });
+  ])(
+    '%s: nothing touched before the flip; the promote after it patches',
+    async (_label, answer) => {
+      const c = cluster();
+      const result = await run(c, { read: vi.fn(async () => answer) });
+      expect(mutations(c.calls)).toEqual([]);
+      expect(c.quietKubectl).not.toHaveBeenCalled();
+      expect(result.restored).toEqual([]);
+      expect(result.tls?.restored).toBe(false);
+      const after = await promoteAfter(c);
+      expect(after.argv).toEqual(await patchPathArgv());
+      expect(after.result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    },
+  );
 
   it.each([
     ['no s3Config', { ...SNAPSHOT_INPUTS, s3Config: null }],
     ['no recorded CA', { ...SNAPSHOT_INPUTS, ca: null }],
-  ])('%s: today’s patch path without reading S3', async (_label, snapshot) => {
-    const c = cluster();
-    const read = vi.fn(async () => ({ text: SNAP }));
-    // biome-ignore lint/suspicious/noExplicitAny: the null fields are the point.
-    await run(c, { snapshot: snapshot as any, read });
-    expect(read).not.toHaveBeenCalled();
-    expect(argvs(c.calls)).toEqual(await patchPathArgv());
-  });
+  ])(
+    '%s: no S3 read, nothing touched; the promote after the flip patches',
+    async (_label, snapshot) => {
+      const c = cluster();
+      const read = vi.fn(async () => ({ text: SNAP }));
+      // biome-ignore lint/suspicious/noExplicitAny: the null fields are the point.
+      await run(c, { snapshot: snapshot as any, read });
+      expect(read).not.toHaveBeenCalled();
+      expect(mutations(c.calls)).toEqual([]);
+      expect((await promoteAfter(c)).argv).toEqual(await patchPathArgv());
+    },
+  );
 
   it('touches only vibecarbon-tls, even with a retired grafana-tls on the cluster', async () => {
     // One certificate per name: grafana-tls is no longer deploy-owned. A
     // leftover one is removed by the reconverge redeploy, never re-pointed.
     const c = cluster({ grafana: true });
     const result = await run(c);
-    expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+    expect(result.restored).toEqual(['vibecarbon/vibecarbon-tls']);
+    await promote(c);
     expect(c.calls.some((x) => x.argv.includes('grafana-tls'))).toBe(false);
   });
 
@@ -401,7 +455,7 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
       false,
     ],
   ])(
-    '%s: falls back to the patch path, warns once, never throws',
+    '%s: warns once, never throws, no patch before the flip; the promote after it patches',
     async (_label, opts, readThrows) => {
       const c = cluster(opts as Cluster);
       const warns: string[] = [];
@@ -413,11 +467,14 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
       const result = await run(c, { read, warn: (m) => warns.push(m) });
       expect(warns).toHaveLength(1);
       expect(warns[0]).toMatch(/vibecarbon-tls/);
+      expect(warns[0]).toMatch(/after the DNS flip/);
       expect(warns[0]).not.toMatch(/BEGIN|PRIVATE KEY/);
-      // The patch path ran after the snapshot path gave up.
-      const tlsCalls = c.calls.filter((x) => x.argv.includes('vibecarbon-tls'));
-      expect(tlsCalls.at(-1)?.argv[0]).toBe('patch');
-      expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+      expect(c.calls.some((x) => x.argv[0] === 'patch')).toBe(false);
+      expect(result.restored).toEqual([]);
+      // The patch path runs once DNS points at the promoted cluster.
+      const after = await promoteAfter(c);
+      expect(after.argv.at(-1)?.[0]).toBe('patch');
+      expect(after.result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
     },
   );
 
@@ -437,7 +494,7 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
     expect(c.calls.some((x) => x.argv[0] === 'patch' && x.argv.includes('vibecarbon-tls'))).toBe(
       false,
     );
-    expect(result.patched).toEqual([]);
+    expect(result.restored).toEqual([]);
     // The Secret itself was restored before the re-create failed.
     expect(result.tls?.restored).toBe(true);
   });
@@ -465,7 +522,7 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
       expect(
         c.calls.filter((x) => x.argv[0] === 'get' && x.argv[1] === 'secret').map((x) => x.via),
       ).toEqual(['quiet']);
-      expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+      expect(result.restored).toEqual(['vibecarbon/vibecarbon-tls']);
     });
 
     it('names come in the deploy order, not the Secret order, so the GitOps apply does not conflict', async () => {
@@ -484,7 +541,7 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
           effectiveIssuer: TARGET,
         }),
       );
-      expect(result.patched).toEqual(['vibecarbon/vibecarbon-tls']);
+      expect(result.restored).toEqual(['vibecarbon/vibecarbon-tls']);
     });
 
     it.each([
@@ -507,7 +564,7 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
       expect(warns[0]).toMatch(re);
       expect(messages).toEqual(['vibecarbon deploy prod']);
       expect(mutations(c.calls)).toEqual([]);
-      expect(result.patched).toEqual([]);
+      expect(result.restored).toEqual([]);
     });
 
     it.each([
@@ -528,15 +585,16 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
         expect(warns[0]).toMatch(/vibecarbon\/vibecarbon-tls is missing/);
         expect(messages).toEqual(['vibecarbon deploy prod']);
         expect(mutations(c.calls)).toEqual([]);
-        expect(result.patched).toEqual([]);
+        expect(result.restored).toEqual([]);
       },
     );
 
-    it('without snapshot inputs a missing Certificate is still skipped quietly', async () => {
+    it('the promote after the flip skips a missing Certificate quietly (it reads no snapshot)', async () => {
       const c = cluster({ certMissing: true });
       const warns: string[] = [];
-      await run(c, { snapshot: null, warn: (m) => warns.push(m) });
+      const result = await promote(c, { warn: (m) => warns.push(m) });
       expect(warns).toEqual([]);
+      expect(result.patched).toEqual([]);
       expect(c.quietKubectl).not.toHaveBeenCalled();
     });
   });
@@ -564,13 +622,13 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
       if (argv.includes('get')) return CERT_JSON(TARGET, TARGET);
       return '';
     });
-    const result = await promoteAcmeIssuer({
+    const result = await restorePromotedTls({
       promotedIp: '203.0.113.9',
       sshKeyPath: '/k',
       snapshot: SNAPSHOT_INPUTS,
       deps: { kubectl, quietKubectl: vi.fn(), readSnapshot: read },
     });
-    expect(result.patched).toEqual([]);
+    expect(result.restored).toEqual([]);
     expect(read).not.toHaveBeenCalled();
   });
 });
@@ -581,7 +639,7 @@ describe('promoteAcmeIssuer with a TLS snapshot', () => {
  * lease on a current-ReplicaSet pod): the same wait the deploy runs
  * (readiness.js awaitCertManagerLeader), over the promotion's ssh kubectl.
  */
-describe('promoteAcmeIssuer waits for a settled cert-manager leader', () => {
+describe('restorePromotedTls waits for a settled cert-manager leader', () => {
   it('restore path: the lease is read before the delete, the Secret write and the Certificate apply', async () => {
     const c = cluster();
     await run(c);
@@ -638,7 +696,7 @@ describe('promoteAcmeIssuer waits for a settled cert-manager leader', () => {
     expect(c.calls.some((x) => x.argv[0] === 'apply')).toBe(false);
     expect(warns.join('\n')).toMatch(/did not settle as leader/);
     expect(msgs).toEqual(['vibecarbon deploy prod']);
-    expect(result.patched).toEqual([]);
+    expect(result.restored).toEqual([]);
   });
 });
 

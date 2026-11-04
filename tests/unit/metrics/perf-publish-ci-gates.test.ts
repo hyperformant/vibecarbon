@@ -59,7 +59,7 @@ describe('local e2e runs never publish performance surfaces', () => {
     expect(pkg).not.toContain('publish-perf-pr');
     const offenders: string[] = [];
     const { readdirSync } = require('node:fs') as typeof import('node:fs');
-    // Recursive: scripts/ gained subdirectories (scripts/acme-iso) — a
+    // Recursive: scripts/ may have subdirectories — a
     // helper nested one level down is exactly as locally-runnable as a
     // top-level one, so the census walks files at every depth.
     const walk = (rel: string): void => {

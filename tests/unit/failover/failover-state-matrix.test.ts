@@ -21,6 +21,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { k8sRoleKubectl } from '../helpers/k8s-role-kubectl.js';
 
@@ -134,7 +135,7 @@ interface RunOpts {
  * Drive failoverHA with every step seam injected, recording each call as a
  * canonical step name. Mutating steps are the ones a refusal must never reach:
  * provision, quiesce, unquiesce, reseed, journal, promote, walgRole, scaleUp,
- * promoteIssuer, scaleDownOldPrimary, dns, saveConfig.
+ * restoreTls, scaleDownOldPrimary, dns, promoteIssuer, saveConfig.
  */
 async function run(opts: RunOpts = {}) {
   const {
@@ -287,6 +288,10 @@ async function run(opts: RunOpts = {}) {
     gate: async () => {
       order.push('gate');
     },
+    restoreTls: async () => {
+      order.push('restoreTls');
+      return { restored: [] };
+    },
     promoteIssuer: async () => {
       order.push('promoteIssuer');
       return { patched: [] };
@@ -341,6 +346,7 @@ const MUTATIONS = [
   'promote',
   'walgRole',
   'scaleUp',
+  'restoreTls',
   'promoteIssuer',
   'scaleDownOldPrimary',
   'dns',
@@ -1073,5 +1079,54 @@ describe('failoverHA DNS flip is verified (R5)', () => {
     expect(rerun.thrown).toBeInstanceOf(FailoverRefusedError);
     expect(rerun.thrown?.message).toMatch(/vibecarbon deploy/);
     expectNoMutation(rerun.order);
+  });
+});
+
+describe('failoverHA promotes the ACME issuer only where DNS points (HTTP-01)', () => {
+  // Let's Encrypt fetches an HTTP-01 challenge from the address the domain
+  // resolves to, so only the cluster DNS points at can pass one. Promoted
+  // before the flip, cert-manager's self-check holds the order until DNS
+  // points at the cluster, so nothing is wasted, but the issuer is still
+  // promoted only after the flip. The saved certificate goes on before the
+  // flip, so the promoted cluster serves it the moment DNS moves.
+  afterEach(() => vi.restoreAllMocks());
+
+  for (const primaryReachable of [true, false]) {
+    it(`${primaryReachable ? 'planned' : 'unplanned'}: the certificate restore before the flip, the issuer promote after it`, async () => {
+      const { order, thrown } = await run({ primaryReachable });
+      expect(thrown).toBeUndefined();
+      expect(order).toContain('restoreTls');
+      expect(order.indexOf('restoreTls')).toBeLessThan(order.indexOf('dns'));
+      expect(order.filter((s) => s === 'promoteIssuer')).toHaveLength(1);
+      expect(order.indexOf('promoteIssuer')).toBeGreaterThan(order.indexOf('dns'));
+      // Before the terminal swap save: a run that dies in the promote keeps
+      // its journal, and the rerun resumes and promotes.
+      expect(order.indexOf('promoteIssuer')).toBeLessThan(order.indexOf('saveConfig'));
+    });
+  }
+
+  it.each([
+    ['a rejected DNS update', { dnsUpdateThrows: true }],
+    ['a read-back at the old primary', { dnsReadsBack: ['10.0.0.1'] }],
+  ])('%s still promotes the issuer, after the flip step', async (_l, over) => {
+    // cert-manager self-checks the challenge before it asks Let's Encrypt to
+    // validate, so while DNS points elsewhere the order waits and spends no
+    // failed validation; never promoting leaves the site untrusted until a deploy.
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const { order, thrown } = await run(over);
+    expect(thrown?.name).toBe('FailoverDnsError');
+    expect(order.indexOf('restoreTls')).toBeLessThan(order.indexOf('dns'));
+    expect(order.filter((s) => s === 'promoteIssuer')).toHaveLength(1);
+    expect(order.indexOf('promoteIssuer')).toBeGreaterThan(order.indexOf('dns'));
+    expect(order.indexOf('promoteIssuer')).toBeLessThan(order.indexOf('saveConfig'));
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).not.toMatch(/stand-in/);
+  });
+
+  it("promote 'unknown' stops before the flip: nothing restored, nothing promoted", async () => {
+    const { order, thrown } = await run({ promoteVerdict: 'unknown' });
+    expect(thrown).toBeDefined();
+    expect(order).not.toContain('dns');
+    expect(order).not.toContain('restoreTls');
+    expect(order).not.toContain('promoteIssuer');
   });
 });

@@ -25,7 +25,6 @@ process.on('SIGTERM', () => {
   process.exit(143);
 });
 
-import { reapChallengeRecords } from './lib/acme-challenge.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
@@ -2054,31 +2053,8 @@ export async function cleanupDnsRecords({ envConfig, ownedIps, providerToken, s,
       resourceClass: 'dns-record',
       resource: `${envConfig.domain} (${row.name} zone ${zoneId})`,
       reason: `delete failed: ${error.message}`,
-      hint: 'Remove the apex and wildcard records by hand; they now point at a released IP, and a stale record shadows the next deploy (and its DNS-01 wildcard challenge).',
+      hint: 'Remove the apex and wildcard records by hand; they now point at a released IP, and a stale record shadows the next deploy.',
     });
-  }
-
-  // Reap the DNS-01 challenge residue. These are the ACME client's records,
-  // not ours, which is exactly why the A-record delete above never touched
-  // them and why they accumulated across every destroy (2026-08-10 audit: 12
-  // tokens under one `_acme-challenge.e1`). See lib/acme-challenge.js.
-  s.start(`Deleting ACME challenge records for ${envConfig.domain}`);
-  const challenge = await reapChallengeRecords({ dns, token, zoneId, domain: envConfig.domain });
-  if (challenge.error) {
-    s.stop(`ACME challenge cleanup failed: ${challenge.error.message}`);
-    results.leaks.leak({
-      resourceClass: 'dns-record',
-      resource: `_acme-challenge.${envConfig.domain} (${row.name} zone ${zoneId})`,
-      reason: `challenge-record delete failed: ${challenge.error.message}`,
-      hint: 'Delete the `_acme-challenge` TXT record by hand — a stale one shadows the next DNS-01 wildcard challenge for this name.',
-    });
-  } else {
-    results.dns.push(...challenge.names);
-    s.stop(
-      challenge.deleted > 0
-        ? `ACME challenge records deleted (${challenge.deleted} token(s))`
-        : 'No ACME challenge records found',
-    );
   }
 
   // Provider-specific extra: deploy-created health checks (Cloudflare's
@@ -2681,10 +2657,10 @@ export function planDoK8sBackstopTargets({ plan, envConfig, projectConfig }) {
 }
 
 /**
- * k8s / k8s-ha: Cloudflare + Hetzner DNS, then Pulumi-managed infra teardown
- * (volume pre-scan, CCM LB cleanup, CSI release, CA-worker sweep, `pulumi
- * destroy` per stack, orphan sweep, HA shared-key delete), then orphaned CSI
- * volume cleanup. plan.stackEnvs already differs for k8s vs k8s-ha, so a single
+ * k8s / k8s-ha: Pulumi-managed infra teardown (volume pre-scan, CCM LB
+ * cleanup, CSI release, CA-worker sweep, `pulumi destroy` per stack, orphan
+ * sweep, HA shared-key delete), then DNS records (last, once nothing can still
+ * validate them), then orphaned CSI volume cleanup. plan.stackEnvs already differs for k8s vs k8s-ha, so a single
  * function serves both.
  */
 async function destroyK8sTier({
@@ -2732,11 +2708,10 @@ async function destroyK8sTier({
   const clusterServerIds = [];
   const prescanVolumeIds = [];
 
-  // 1. Delete DNS resources first (while servers still exist for reference) —
-  // registry-driven, ownership-filtered, incl. provider health checks.
-  await cleanupDnsRecords({ envConfig, ownedIps, providerToken, s, results });
-
-  // 2. Delete Pulumi-managed cloud resources
+  // 1. Delete Pulumi-managed cloud resources. DNS is deleted LAST (step 2):
+  // while any cluster is alive its cert-manager may still be validating, and a
+  // lookup in the gap after the records vanish caches the name as NXDOMAIN for
+  // the next deploy on it (2026-11-04).
   if (hasPulumiStack) {
     // Pulumi owns the servers, firewalls, SSH keys, and networks — `pulumi
     // destroy` tears them all down in one pass.
@@ -3335,6 +3310,11 @@ async function destroyK8sTier({
     }
   }
 
+  // 2. Delete DNS resources now that nothing that could validate or serve them
+  // is alive. Registry-driven, ownership-filtered, incl. provider health
+  // checks. A failure here reports through the leak list (no retry).
+  await cleanupDnsRecords({ envConfig, ownedIps, providerToken, s, results });
+
   // Clean up Kubernetes-managed resources (created by CCM/CSI at runtime,
   // not by the Pulumi program). These aren't in any stack's resource graph.
   //
@@ -3660,7 +3640,7 @@ function finishThenReport(stepLabel, effect) {
         resourceClass: 'destroy-step',
         resource: stepLabel,
         reason: `step threw: ${error.message}, anything it had not yet deleted is unaccounted for`,
-        hint: `Re-run \`vibecarbon destroy ${ctx.environment}\` once the cause is addressed; the remaining teardown steps still ran.`,
+        hint: `Re-run \`vibecarbon destroy ${ctx.environment}\` once the cause is addressed; the remaining teardown steps still ran. A step that stopped early can leave the environment's compute and its DNS records in place, and the re-run removes both.`,
       });
     }
   };

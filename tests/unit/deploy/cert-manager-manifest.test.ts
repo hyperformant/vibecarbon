@@ -48,11 +48,7 @@ const UPSTREAM_ARGS = [
   `--acme-http01-solver-image=quay.io/jetstack/cert-manager-acmesolver:${CERT_MANAGER_VERSION}`,
   '--max-concurrent-challenges=60',
 ];
-const ALL = [
-  '--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53',
-  '--dns01-recursive-nameservers-only',
-  '--certificate-request-minimum-backoff-duration=5m',
-];
+const ALL = ['--certificate-request-minimum-backoff-duration=5m'];
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -84,7 +80,7 @@ const deployment = (docs: Doc[], name: string) =>
 const upstream = () => (loadAll(readFileSync(FIXTURE, 'utf-8')) as Doc[]).filter(Boolean);
 
 describe('cert-manager controller flags', () => {
-  it('is the recursive self-check pair plus the 5 minute minimum backoff', () => {
+  it('is the 5 minute minimum backoff only', () => {
     expect([...CERT_MANAGER_CONTROLLER_FLAGS]).toEqual(ALL);
     expect(CERT_MANAGER_MIN_BACKOFF).toBe('5m');
   });
@@ -231,7 +227,7 @@ describe('the kubectl floor', () => {
 
   it('the k8s deploy preflight checks it right after the tool lookup', () => {
     const k3s = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
-    const tools = k3s.indexOf("for (const tool of ['docker', 'ssh', 'kubectl', 'helm'])");
+    const tools = k3s.indexOf("for (const tool of ['docker', 'ssh', 'kubectl'])");
     const floor = k3s.indexOf('kubectlFloorProblem(');
     const ok = k3s.indexOf("s.stop('Preflight OK')");
     expect(tools).toBeGreaterThan(-1);

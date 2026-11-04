@@ -27,6 +27,8 @@ export const RETIRED_OBSERVABILITY_CERTIFICATE = Object.freeze({
 });
 
 const OBSERVABILITY_DIR = 'k8s/base/observability';
+const ISSUERS_DIR = 'k8s/infra/cert-manager-resources';
+const ISSUERS_FILE = 'cluster-issuers.yaml';
 
 /** The text without its YAML comments, so a mention in a comment is no evidence. */
 function withoutComments(text) {
@@ -64,6 +66,32 @@ export function staleObservabilityTlsProblem(projectDir) {
   const namesSecret = /^\s*secretName:\s*["']?grafana-tls["']?\s*$/m.test(ingressRoute);
   if (!listsCertificate && !namesSecret) return null;
   return 'Your observability add-on files are out of date. Run `vibecarbon upgrade`, then deploy again.';
+}
+
+/**
+ * Why this project's cluster issuers cannot serve this CLI's Certificate, or
+ * null when they can. The CLI renders `issuerRef.name: letsencrypt-prod` from
+ * its own code, while the ClusterIssuers come from the project's copy of
+ * k8s/infra/cert-manager-resources. A copy made before HTTP-01 certificates
+ * lists only the provider-suffixed issuers files, so the Certificate would
+ * name an issuer that does not exist and nothing would ever renew it.
+ * `vibecarbon upgrade` refreshes the copy. A project with no such kustomization
+ * is not k8s scaffold this check can judge, so it passes.
+ *
+ * @param {string} projectDir
+ * @returns {string|null}
+ */
+export function staleClusterIssuersProblem(projectDir) {
+  const dir = join(projectDir, ISSUERS_DIR);
+  if (!existsSync(join(dir, 'kustomization.yaml'))) return null;
+  const kustomization = withoutComments(readOrEmpty(join(dir, 'kustomization.yaml')));
+  const listsIssuers = new RegExp(`^\\s*-\\s*${ISSUERS_FILE.replace('.', '\\.')}\\s*$`, 'm').test(
+    kustomization,
+  );
+  const issuers = withoutComments(readOrEmpty(join(dir, ISSUERS_FILE)));
+  const definesProd = /^\s*name:\s*["']?letsencrypt-prod["']?\s*$/m.test(issuers);
+  if (listsIssuers && definesProd) return null;
+  return "This project's cluster issuers predate HTTP-01 certificates. Run `vibecarbon upgrade`, then deploy again. Nothing was provisioned.";
 }
 
 /**

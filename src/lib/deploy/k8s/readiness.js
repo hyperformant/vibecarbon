@@ -153,9 +153,8 @@ export async function awaitControlPlaneServing({
 /**
  * Prove cert-manager's admission pipeline round-trips. Placed once, after the
  * Available wait and before ANYTHING that creates cert-manager resources —
- * the ClusterIssuer kustomization AND the third-party DNS-01 webhook chart
- * (whose own Issuer/Certificate pass through this same pipeline) are both
- * downstream of this single probe.
+ * the ClusterIssuer kustomization and the Certificate are downstream of
+ * this single probe.
  */
 export async function awaitCertManagerAdmission({
   env,

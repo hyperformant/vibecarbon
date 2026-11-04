@@ -261,8 +261,8 @@ describe('config-registry', () => {
       }
     });
     it('ACME_CA_SERVER is runtime-config in .env (a server-read value, not a credential)', () => {
-      // carbon/docker-compose.prod.yml + docker-compose.dns01.prod.yml
-      // interpolate `${ACME_CA_SERVER:-<prod LE>}` from the `.env` the bundle
+      // carbon/docker-compose.prod.yml
+      // interpolates `${ACME_CA_SERVER:-<prod LE>}` from the `.env` the bundle
       // ships; the k8s issuer patch reads it from the project env too. Any
       // class stripOperatorSecretLines acts on would drop it from every
       // compose bundle and silently move a staging deploy to LE production.

@@ -241,6 +241,11 @@ vi.mock('../../../src/lib/walg/post-promote-backup.js', async (orig) => {
   };
 });
 
+vi.mock('../../../src/lib/dns-propagation.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, waitForDNSPropagation: async () => true };
+});
+
 vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -336,7 +341,6 @@ function makeCtx() {
       sshKeyPath: '/key',
       domain: 'example.com',
       services: {},
-      dnsChallenge: true,
       dnsProvider: 'hetzner',
       apiToken: 'tok',
       servers: [server],

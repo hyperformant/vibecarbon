@@ -223,6 +223,7 @@ describe('failoverHA (k8s): a failed arm still disarms, and the exit names both 
           deps: { kubectl, audit: auditThat(!!fail.audit), ...quiet },
         }),
       gate: async () => {},
+      restoreTls: async () => ({ restored: [] }),
       promoteIssuer: async () => ({ patched: [] }),
       swapRoles: () => {},
       reconcileRetired: async () => ({ fenced: [], unreachable: [] }),

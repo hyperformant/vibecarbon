@@ -207,16 +207,7 @@ const FEATURES: Record<string, Record<string, unknown>> = {
   observability: { observability: true },
   'n8n + metabase': { n8n: true, metabase: true },
   redis: { redis: true },
-  'dns-01': { dnsChallenge: true, dnsProvider: 'cloudflare', dnsToken: 'token' },
-  'every add-on + dns-01': {
-    observability: true,
-    n8n: true,
-    metabase: true,
-    redis: true,
-    dnsChallenge: true,
-    dnsProvider: 'cloudflare',
-    dnsToken: 'token',
-  },
+  'every add-on': { observability: true, n8n: true, metabase: true, redis: true },
 };
 
 describe('renderBundle stages vc-compose with the deploy -f set', () => {

@@ -169,6 +169,8 @@ describe('finish-then-report wrapper (DESTROY_EFFECTS)', () => {
     expect(entry.resourceClass).toBe('destroy-step');
     expect(entry.resource).toBe('cleanup-local-files');
     expect(entry.reason).toMatch(/step threw/);
+    // The compute and its A records are kept together, so the hint says both.
+    expect(entry.hint).toContain('and its DNS records');
     // Non-zero, so the caller still learns the teardown was not clean.
     expect(ctx.results.leaks.exitCode()).toBe(2);
   });

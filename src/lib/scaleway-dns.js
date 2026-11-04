@@ -79,7 +79,6 @@
  * ownership filter below exists to prevent.
  */
 
-import { challengeRecordNames } from './acme-challenge.js';
 import { spinner } from './cli/progress.js';
 import { fetchWithRetry } from './fetch-retry.js';
 
@@ -445,46 +444,6 @@ export async function deleteApexAndWildcard(apiToken, zoneId, domain, ownedIps) 
     deletedAny: root.deleted > 0 || wildcard.deleted > 0,
     preservedTargets: [...root.skippedTargets, ...wildcard.skippedTargets],
   };
-}
-
-/**
- * Delete this environment's leftover DNS-01 challenge TXT records.
- *
- * Ownership is by NAME, not by value — see acme-challenge.js for why the
- * `ownedIps` filter that guards the A-record path cannot apply to an opaque
- * ACME token, and why the exact name is used instead of a subtree sweep.
- * Every DNS backend carries this helper so no destroy path can pick a
- * provider that lacks it (dns-challenge-cleanup.test.ts is the census).
- *
- * @param {string} apiToken - Scaleway secret key
- * @param {string} zoneId - Zone identity — the zone NAME on Scaleway
- * @param {string} domain - the environment's domain
- * @returns {Promise<{deleted: number, names: string[]}>}
- */
-export async function deleteChallengeRecords(apiToken, zoneId, domain) {
-  const wanted = challengeRecordNames(domain);
-  if (wanted.length === 0) return { deleted: 0, names: [] };
-
-  const all = await getRecords(apiToken, zoneId);
-  let deleted = 0;
-  const names = [];
-
-  for (const fqdn of wanted) {
-    const records = matching(all, fqdnToRelative(fqdn, zoneId), fqdn, 'TXT');
-    if (records.length === 0) continue;
-    // All the accumulated tokens under one name go in a single PATCH.
-    const response = await patchChanges(
-      apiToken,
-      zoneId,
-      records.map((record) => ({ delete: { id: record.id } })),
-    );
-    if (response.ok) {
-      deleted += records.length;
-      names.push(fqdn);
-    }
-  }
-
-  return { deleted, names };
 }
 
 /**

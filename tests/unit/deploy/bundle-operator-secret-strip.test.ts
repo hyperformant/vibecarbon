@@ -92,8 +92,7 @@ describe('renderBundle strips operator-secret keys from the raw .env baseline', 
   it('keeps ACME_CA_SERVER in the baseline — a staging CA override must reach the compose server', () => {
     // Regression (whole-branch review 2026-09-19, Critical): ACME_CA_SERVER was
     // briefly classified operator-secret, so this strip dropped it from every
-    // compose bundle. carbon/docker-compose.prod.yml:133 and
-    // docker-compose.dns01.prod.yml:54 interpolate
+    // compose bundle. carbon/docker-compose.prod.yml interpolates
     // `${ACME_CA_SERVER:-<prod LE>}` from the shipped .env, so a stripped
     // override silently moved every staging deploy (the e2e matrix appends it
     // to .env — tests/e2e/scenarios/_run-lifecycle.ts) to LE production. It is

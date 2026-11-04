@@ -14,21 +14,13 @@ const SAFE_PATTERNS = [
   'docker-compose.prod.yml',
   // Every other compose file: the add-ons' (docker-compose.<name>[.prod|
   // .override].yml, refreshed from services/<name>/ through the add-on's
-  // manifest, src/lib/addon-upgrade-files.js), docker-compose.dev-init.yml
-  // and docker-compose.dns01.prod.yml (live on every managed-DNS compose
-  // deploy: acme.js exports it as DNS01_OVERRIDE_FILE). docker-compose.yml
-  // and docker-compose.override.yml are user-blended: MERGE_PATTERNS is
-  // checked first and keeps them there.
+  // manifest, src/lib/addon-upgrade-files.js) and docker-compose.dev-init.yml.
+  // docker-compose.yml and docker-compose.override.yml are user-blended:
+  // MERGE_PATTERNS is checked first and keeps them there.
   'docker-compose.*.yml',
   'k8s/base/**',
   'k8s/infra/**',
   'k8s/flux/**',
-  // k8s/gitops/** was in NO bucket, and getFilePolicy defaults an unmatched
-  // path to 'never' — so it was silently stranded on every existing project.
-  // It is among the WORST files to strand: the cert-manager webhook
-  // HelmRelease carries a chart-version pin that must move in lockstep with
-  // the CLI (DNS01_PROVIDERS.hetzner.webhook.version).
-  'k8s/gitops/**',
   'cloud-init/**',
   '.github/workflows/**',
   // Node line for the project. Safe to replace: it's a version pin we own,

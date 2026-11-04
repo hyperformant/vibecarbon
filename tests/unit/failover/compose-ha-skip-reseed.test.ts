@@ -169,6 +169,13 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
   };
 });
 
+// The public-DNS wait before the ACME arm (compose-failover-state-matrix pins
+// its place): public resolvers already show the promoted node, no network.
+vi.mock('../../../src/lib/dns-propagation.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  waitForDNSPropagation: vi.fn(async () => true),
+}));
+
 vi.mock('../../../src/lib/deploy/tls-ready.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -267,19 +274,19 @@ describe('failoverComposeHA — standby already streaming', () => {
   // archived nothing until some later deploy happened to rewrite the roles.
   it('moves the wal-g role FILE and the active ACME issuer onto the promoted node, demoting both on the old primary', async () => {
     // The ACME merges are the compose-ha single-active-issuer policy
-    // (acme-role.js): the promoted node's disarm key is EMPTIED (falls
-    // through to the real CA) and the retired node's is set to the
-    // reserved-.invalid sentinel, so the swapped pair never runs two armed
-    // solvers against one `_acme-challenge` TXT name (runs
-    // 33273372657/33276113128). The wal-g role is no longer in .env at all.
+    // (acme-role.js): the retired node's disarm key is set to the
+    // reserved-.invalid sentinel BEFORE the DNS flip, and the promoted node's
+    // is EMPTIED (falls through to the real CA) after it, so only the node
+    // DNS points at ever places an HTTP-01 order. The wal-g role is no longer
+    // in .env at all.
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
     expect(envMerges).toEqual([
-      { ip: '2.2.2.2', updates: { ACME_DISARMED_CA_SERVER: '' } },
       {
         ip: '1.1.1.1',
         updates: { ACME_DISARMED_CA_SERVER: 'https://acme-disarmed.invalid/directory' },
       },
+      { ip: '2.2.2.2', updates: { ACME_DISARMED_CA_SERVER: '' } },
     ]);
     expect(roleFiles.get('2.2.2.2')).toBe('primary');
     expect(roleFiles.get('1.1.1.1')).toBe('standby');
@@ -301,8 +308,7 @@ describe('failoverComposeHA — standby already streaming', () => {
   it('gates failover completion on the domain serving trusted TLS (post-DNS-flip)', async () => {
     // Run 33279912405 attempt 2: the arm/disarm both landed (traefik
     // recreated on both nodes) but verify-failover's 180s ssl_valid budget
-    // expired while the promoted node's fresh DNS-01 issuance was still in
-    // flight. Same rule as deploy: a failover is not done until the domain
+    // expired while the promoted node's fresh issuance was still in flight. Same rule as deploy: a failover is not done until the domain
     // serves trusted TLS — the failover CLI waits (warn-don't-abort: DR
     // completion beats cert perfection) so downstream checks start AFTER
     // issuance in the normal case.

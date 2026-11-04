@@ -297,7 +297,7 @@ describe('the detectors bite', () => {
       "const FLAGS = '-f docker-compose.yml -f docker-compose.prod.yml';",
       tpl('`#{VC_COMPOSE} -f docker-compose.replication.yml up -d db`'),
       tpl('`cd #{remoteDir} && #{VC_COMPOSE} -f #{COMPOSE_REPLICATION_OVERLAY} up -d db`'),
-      tpl('`cd #{remoteDir} && #{VC_COMPOSE} -f #{DNS01_OVERRIDE_FILE} up -d db`'),
+      tpl('`cd #{remoteDir} && #{VC_COMPOSE} --file #{COMPOSE_REPLICATION_OVERLAY} up -d db`'),
       'sh vc-compose --file extra.yml up -d db',
       tpl('const base = COMPOSE_BASE_FILES.map((f) => `-f #{f}`);'),
       'const flags = composeFileFlags(options);',

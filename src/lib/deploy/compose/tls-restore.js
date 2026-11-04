@@ -43,9 +43,9 @@ export const RESTORE_TIMED_OUT = 'restore timed out';
 
 /**
  * The failover bounds, per piece (never a race around the whole call: an
- * abandoned write could land after the caller recreated Traefik). The
- * promoted standby already runs Traefik, so its image is local and the check
- * is quick; the S3 read makes one attempt.
+ * abandoned write could land after the caller moved on). The promoted standby
+ * already runs Traefik, so its image is local and the check is quick; the
+ * write bound covers the Traefik restart; the S3 read makes one attempt.
  */
 export const FAILOVER_TLS_BOUNDS = {
   checkTimeoutMs: 30_000,
@@ -343,14 +343,17 @@ export function tlsRestoreLine(result, domain) {
 }
 
 /**
- * The restore a compose-ha failover runs on the promoted node, inside
- * armComposeAcme (before its traefik recreate, so the write never restarts
- * Traefik itself). The CA is the one the last deploy recorded
- * (envConfig.tls.ca), never a guess: with none, nothing is read and Traefik
- * issues a new certificate. The backup credentials come from the record and
- * the environment only; a failover never prompts. Each piece is bounded
- * (FAILOVER_TLS_BOUNDS). Never throws and never logs: the result carries
- * the one info line for the caller to print once its spinner stops.
+ * The restore a compose-ha failover runs on the promoted node before the DNS
+ * flip. It restarts Traefik onto the certificate, since Traefik reads
+ * acme.json only when it starts, so the node serves it the moment DNS moves.
+ * The restart keeps the container's command, so the issuer stays disarmed
+ * until the failover arms it after the flip. The CA is the one the last
+ * deploy recorded (envConfig.tls.ca), never a guess: with none, nothing is
+ * read and Traefik issues a new certificate once armed. The backup
+ * credentials come from the record and the environment only; a failover
+ * never prompts. Each piece is bounded (FAILOVER_TLS_BOUNDS). Never throws
+ * and never logs: the result carries the one info line for the caller to
+ * print once its spinner stops.
  *
  * @param {{ envName: string, envConfig: object, projectName: string,
  *   ip: string, sshKeyPath: string,
@@ -390,7 +393,7 @@ export async function restoreFailoverTls({
         envName,
         ca,
         s3Config,
-        restart: false,
+        restart: true,
         ...FAILOVER_TLS_BOUNDS,
       });
     }

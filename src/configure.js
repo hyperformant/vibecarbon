@@ -37,7 +37,6 @@ import {
   registryEntry,
 } from './lib/config-registry.js';
 import { promptProviders } from './lib/configure-providers.js';
-import { DNS_PROVIDERS } from './lib/dns-provider.js';
 import { dotenvValueProblem } from './lib/dotenv.js';
 import { envSummaryLines } from './lib/env-summary.js';
 import {
@@ -1624,14 +1623,6 @@ export async function runConfigureCicd(envName) {
   const { getImageTag } = await import('./lib/ci-setup.js');
   const providerCreds = {
     hetznerApiToken: readOperatorVar('HETZNER_API_TOKEN').value || '',
-    // DNS token candidates keyed by env var, registry-derived — seedOrgSecrets
-    // seeds the non-empty ones (native DNS rows share the compute token env).
-    dnsTokens: Object.fromEntries(
-      Object.values(DNS_PROVIDERS).map((row) => [
-        row.tokenEnv,
-        readOperatorVar(row.tokenEnv).value || '',
-      ]),
-    ),
   };
   const imageTag = getImageTag(cwd);
   // The app pod's object-storage pair, per environment: the env's own key
@@ -1702,7 +1693,6 @@ export async function runConfigureCicd(envName) {
       projectName: projectConfig.projectName,
       kubeconfigPath: targetKubeconfig,
       networkId: subEnvConfig.networkId || envConfig.networkId,
-      dnsProvider: subEnvConfig.dnsProvider || envConfig.dnsProvider,
       providerCreds,
       appStorage,
       imageTag,

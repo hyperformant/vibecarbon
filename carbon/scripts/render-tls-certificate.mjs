@@ -37,11 +37,11 @@ const STANDBY_SELFSIGNED_ISSUER = 'vibecarbon-standby-selfsigned';
 const NAME = 'vibecarbon-tls';
 const NAMESPACE = 'vibecarbon';
 
-/** letsencrypt-{prod,staging}-{provider}, as pickIssuerName names them. */
-const ACME_ISSUER = /^letsencrypt-(prod|staging)-[a-z0-9]+$/;
+/** letsencrypt-{prod,staging}, as pickIssuerName names them. */
+const ACME_ISSUER = /^letsencrypt-(prod|staging)$/;
 
-/** A DNS name, optionally one leading wildcard label. */
-const DNS_NAME = /^(\*\.)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+/** A DNS name. HTTP-01 cannot issue wildcards, so `*` is refused. */
+const DNS_NAME = /^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
 
 /**
  * Validate the Certificate settings; returns a clean copy or throws.
@@ -80,7 +80,7 @@ export function validateTlsCertificate({ dnsNames, issuerName, effectiveIssuer }
   if (!ACME_ISSUER.test(String(issuerName ?? ''))) {
     throw invalid(
       'TLS_CERT_ISSUER',
-      `the TLS Certificate issuer ${JSON.stringify(issuerName ?? null)} is not a letsencrypt-<stage>-<provider> ClusterIssuer`,
+      `the TLS Certificate issuer ${JSON.stringify(issuerName ?? null)} is not letsencrypt-prod or letsencrypt-staging`,
     );
   }
   if (effectiveIssuer !== issuerName && effectiveIssuer !== STANDBY_SELFSIGNED_ISSUER) {
