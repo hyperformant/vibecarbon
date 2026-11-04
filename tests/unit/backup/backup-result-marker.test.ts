@@ -442,15 +442,26 @@ describe('the backup CronJob prints the same markers', () => {
     expect(r.walg).toBe('');
   });
 
+  // The test waits out a deliberate 3 s hold, so its own timeout covers that
+  // plus the cron runs. It used to sleep 0.5 s and assume the background flock
+  // held the lock by then, and it ran under the 5 s default: under load it
+  // timed out (pre-push, 2026-11-04). The holder now touches `held` once it
+  // has the lock, and the test waits for that file.
   it('LOCK_WAIT waits out a held lock and then pushes; without it a held lock is a skip', () => {
     const lockfile = join(work, 'cron-real.lock');
-    // Hold the lock for 3s with the real flock.
+    const held = join(work, 'cron-real.held');
+    rmSync(held, { force: true });
+    // Hold the lock for 3s with the real flock; `held` appears once it is held.
     const holder = spawnSync(
       'bash',
-      ['-c', `(flock -n "${lockfile}" sleep 3 >/dev/null 2>&1 &) ; sleep 0.5`],
+      [
+        '-c',
+        `(flock -n "${lockfile}" sh -c 'touch "$1"; sleep 3' sh "${held}" >/dev/null 2>&1 &) ; ` +
+          `for _ in $(seq 1 200); do [ -f "${held}" ] && exit 0; sleep 0.05; done; exit 1`,
+      ],
       { encoding: 'utf-8' },
     );
-    expect(holder.status).toBe(0);
+    expect(holder.status, 'the background flock never took the lock').toBe(0);
     const env = { VC_BACKUP_LOCKFILE: lockfile };
     const skip = runCron('real-skip', { realFlock: true }, env);
     expect(skip.status, skip.stderr).toBe(0);
@@ -458,7 +469,7 @@ describe('the backup CronJob prints the same markers', () => {
     const waited = runCron('real-wait', { realFlock: true }, { ...env, LOCK_WAIT: '8' });
     expect(waited.status, waited.stderr).toBe(0);
     expect(markers(waited.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
-  });
+  }, 30_000);
 
   it('a symlink at the lock path is refused and its target is never written', () => {
     const target = join(work, 'cron-symlink-target');
