@@ -96,6 +96,7 @@ import {
 } from './lib/dns-provider.js';
 import { dotenvValueProblem, parseDotenv } from './lib/dotenv.js';
 import { convergeClusterInfra } from './lib/iac/converge-cluster.js';
+import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { repairLegacyEnvQuoting } from './lib/project.js';
@@ -2708,7 +2709,7 @@ async function scaleApplyK8sChanges(ctx) {
     // follow-up — for now we surface a 1-line warning.
     const needsCaRepatch = changes.includes('workerType') || changes.includes('workerBounds');
     if (needsCaRepatch) {
-      const kubeconfigPath = join(process.cwd(), '.vibecarbon', `kubeconfig-${clusterEnv}`);
+      const kubeconfigPath = localKubeconfigPath(process.cwd(), clusterEnv);
       if (!existsSync(kubeconfigPath)) {
         p.log.warn(`kubeconfig missing at ${kubeconfigPath} (${label}); skipping CA re-patch`);
       } else {
@@ -3010,7 +3011,7 @@ async function scaleVerifyK8sReady(ctx) {
   // its old 300s budget, so the bump costs nothing on the happy path.
   const WAIT_TIMEOUT_SEC = 600;
   for (const { env: clusterEnv, label, isStandby } of clustersToVerify) {
-    const kubeconfigPath = join(process.cwd(), '.vibecarbon', `kubeconfig-${clusterEnv}`);
+    const kubeconfigPath = localKubeconfigPath(process.cwd(), clusterEnv);
     if (!existsSync(kubeconfigPath)) {
       p.log.warn(
         `kubeconfig missing at ${kubeconfigPath} (${label}); skipping post-resize Ready wait`,

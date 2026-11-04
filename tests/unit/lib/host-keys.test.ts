@@ -153,6 +153,42 @@ describe('seedKnownHosts', () => {
     expect(existsSync(khPath)).toBe(false);
   });
 
+  it('seeds of several hosts into one file run concurrently and keep every host', async () => {
+    // The deploy scans every node of a cluster at once (Promise.all at the
+    // call sites, host-key-seed-parallel-census below). That is safe only
+    // because each seed's read-merge-write of the file runs with no await in
+    // it, after its own scan: scans that finish in any order still leave
+    // every host's keys in the file.
+    mkdirSync(join(tmp, '.vibecarbon'), { recursive: true, mode: 0o700 });
+    writeFileSync(khPath, '9.9.9.9 ssh-ed25519 KEEP\n');
+    const ips = ['10.0.0.1', '10.0.0.2', '10.0.0.3'];
+    const release: Record<string, () => void> = {};
+    let inFlight = 0;
+    let peak = 0;
+    const keyscan = (ip: string) =>
+      new Promise<string>((resolve) => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        release[ip] = () => {
+          inFlight--;
+          resolve(`${ip} ssh-ed25519 KEY-${ip}\n`);
+        };
+      });
+    const all = Promise.all(ips.map((ip) => seedKnownHosts(khPath, ip, { keyscan })));
+    await vi.waitFor(() => expect(Object.keys(release)).toHaveLength(3));
+    expect(peak).toBe(3);
+    // Finish out of order.
+    for (const ip of ['10.0.0.3', '10.0.0.1', '10.0.0.2']) release[ip]();
+    expect(await all).toEqual([true, true, true]);
+    const lines = readFileSync(khPath, 'utf-8').trim().split('\n').sort();
+    expect(lines).toEqual([
+      '10.0.0.1 ssh-ed25519 KEY-10.0.0.1',
+      '10.0.0.2 ssh-ed25519 KEY-10.0.0.2',
+      '10.0.0.3 ssh-ed25519 KEY-10.0.0.3',
+      '9.9.9.9 ssh-ed25519 KEEP',
+    ]);
+  });
+
   it('retries until a scan lands', async () => {
     const sleep = vi.fn().mockResolvedValue(undefined);
     const keyscan = vi

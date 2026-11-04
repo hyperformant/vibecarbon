@@ -48,6 +48,7 @@ import {
   removeLocale,
   SUPPORTED_LOCALES,
 } from './lib/globalization.js';
+import { localKubeconfigPath } from './lib/kubeconfig.js';
 import {
   normalizeOperatorValue,
   readOperatorVar,
@@ -1607,7 +1608,7 @@ export async function runConfigureCicd(envName) {
     return;
   }
 
-  const kubeconfigPath = join(cwd, '.vibecarbon', `kubeconfig-${envName}`);
+  const kubeconfigPath = localKubeconfigPath(cwd, envName);
   if (!existsSync(kubeconfigPath)) {
     p.log.error(
       `Kubeconfig not found at ${kubeconfigPath}. Deploy the cluster first: vibecarbon deploy ${envName} -mode k8s`,
@@ -1685,7 +1686,7 @@ export async function runConfigureCicd(envName) {
   const targets = gitopsTargets(envName, envConfig);
 
   for (const target of targets) {
-    const targetKubeconfig = join(cwd, '.vibecarbon', `kubeconfig-${target.envName}`);
+    const targetKubeconfig = localKubeconfigPath(cwd, target.envName);
     if (!existsSync(targetKubeconfig)) {
       p.log.warn(
         `Kubeconfig for ${target.envName} not found at ${targetKubeconfig}, skipping. Deploy that cluster first with \`vibecarbon deploy\`.`,

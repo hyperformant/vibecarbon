@@ -378,8 +378,7 @@ export async function prepareReplicationTransport({
   // Timed by the caller's `deploy.ha.replication.transportEarly` marker,
   // which also covers the peer firewall opened before this.
   const khPath = knownHostsPathForKey(sshKeyPath);
-  await seedKnownHosts(khPath, primaryIp);
-  await seedKnownHosts(khPath, standbyIp);
+  await Promise.all([primaryIp, standbyIp].map((ip) => seedKnownHosts(khPath, ip)));
   const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
   await applyGatewaysAndBringUpTunnel({
     primaryIp,
@@ -441,8 +440,7 @@ export async function reestablishReplicationTransport(options) {
   }
 
   const khPath = knownHostsPathForKey(sshKeyPath);
-  await seedKnownHosts(khPath, primaryIp);
-  await seedKnownHosts(khPath, standbyIp);
+  await Promise.all([primaryIp, standbyIp].map((ip) => seedKnownHosts(khPath, ip)));
   const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
 
   // 1. Recreate wg0 on both database nodes (+ retrofit the systemd unit).
@@ -841,8 +839,7 @@ export async function setupReplication(options) {
   // accept-new TOFUs a fresh/recycled Hetzner IP but REJECTS a changed key for
   // an already-pinned host.
   const khPath = knownHostsPathForKey(sshKeyPath);
-  await seedKnownHosts(khPath, primaryIp);
-  await seedKnownHosts(khPath, standbyIp);
+  await Promise.all([primaryIp, standbyIp].map((ip) => seedKnownHosts(khPath, ip)));
   const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
 
   // 1a. Stand up the WireGuard replication transport.
