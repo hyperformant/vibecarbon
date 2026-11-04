@@ -24,6 +24,9 @@ vi.mock('@aws-sdk/client-s3', () => {
   };
 });
 
+// Default send result: carries a GetObject Body so the visibility probe read-back sees "probe".
+const PROBE_OK = { Body: { transformToString: async () => 'probe' } };
+
 describe('HetznerS3Provider', () => {
   describe('static properties', () => {
     it('has correct endpoints for all regions', () => {
@@ -238,7 +241,7 @@ describe('HetznerS3Provider', () => {
           // condition (3 consecutive HEAD+LIST rounds + put/get/delete
           // write probe) completes on the happy path.
           mockSend.mockRejectedValueOnce({ name: 'NotFound' });
-          mockSend.mockResolvedValue({});
+          mockSend.mockResolvedValue(PROBE_OK);
 
           const pending = provider.createBucket('new-bucket');
           await vi.advanceTimersByTimeAsync(20_000);
@@ -266,7 +269,7 @@ describe('HetznerS3Provider', () => {
             name: 'AccessDenied',
             $metadata: { httpStatusCode: 403 },
           }); // LIST denied — resets the streak
-          mockSend.mockResolvedValue({}); // then clean: 3 rounds + write probe
+          mockSend.mockResolvedValue(PROBE_OK); // then clean: 3 rounds + write probe
 
           const pending = provider.createBucket('list-lagging-bucket');
           await vi.advanceTimersByTimeAsync(30_000);
@@ -289,7 +292,7 @@ describe('HetznerS3Provider', () => {
           // Propagation window: HEAD returns 403 (auth data not yet visible),
           // then the bucket appears. Must NOT throw "owned by another account".
           mockSend.mockRejectedValueOnce({ name: 'Forbidden', $metadata: { httpStatusCode: 403 } });
-          mockSend.mockResolvedValue({});
+          mockSend.mockResolvedValue(PROBE_OK);
 
           const pending = provider.createBucket('propagating-bucket');
           await vi.advanceTimersByTimeAsync(30_000);
@@ -310,7 +313,7 @@ describe('HetznerS3Provider', () => {
           // the read frontend — two 404s, then it appears and lists.
           mockSend.mockRejectedValueOnce({ name: 'NotFound' });
           mockSend.mockRejectedValueOnce({ name: 'NotFound' });
-          mockSend.mockResolvedValue({}); // visible from here: 3 rounds + probe
+          mockSend.mockResolvedValue(PROBE_OK); // visible from here: 3 rounds + probe
 
           const pending = provider.createBucket('slow-bucket');
           await vi.advanceTimersByTimeAsync(30_000);
@@ -488,7 +491,7 @@ describe('HetznerS3Provider', () => {
         mockSend.mockRejectedValueOnce(makeErr({ name: 'UnknownError' }));
         mockSend.mockResolvedValueOnce({});
         // Post-create sustained-visibility rounds + write probe: all clean.
-        mockSend.mockResolvedValue({});
+        mockSend.mockResolvedValue(PROBE_OK);
 
         const promise = provider.createBucket('flaky-bucket');
         await vi.runAllTimersAsync();

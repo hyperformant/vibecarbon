@@ -647,9 +647,17 @@ export class S3CompatibleProvider {
               new PutObjectCommand({ Bucket: bucketName, Key: probeKey, Body: 'probe' }),
               { maxAttempts: 1 },
             );
-            await this._send(new GetObjectCommand({ Bucket: bucketName, Key: probeKey }), {
-              maxAttempts: 1,
-            });
+            const got = await this._send(
+              new GetObjectCommand({ Bucket: bucketName, Key: probeKey }),
+              { maxAttempts: 1 },
+            );
+            // Read the body: an unread response stream keeps its socket checked
+            // out and referenced, so on providers that never close idle
+            // connections (Linode) the CLI hangs after finishing. Reading it
+            // also proves the read path returns what the write path stored.
+            if ((await got?.Body?.transformToString()) !== 'probe') {
+              throw new Error('probe read-back mismatch');
+            }
             await this._send(new DeleteObjectCommand({ Bucket: bucketName, Key: probeKey }), {
               maxAttempts: 1,
             });
