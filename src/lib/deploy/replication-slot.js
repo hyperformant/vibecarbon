@@ -19,6 +19,8 @@
  * verified on postgres:17.11-walg3.0.9-r2.
  */
 
+import { escapeSql } from '../shell.js';
+
 // The physical replication slot name is a project-wide constant: the primary
 // creates it and the standby streams through it (primary_slot_name).
 export const REPLICATION_SLOT = 'vibecarbon_standby_slot';
@@ -54,8 +56,8 @@ export const REPLICATION_SLOT_HEALTH_SQL =
 /**
  * Idempotent slot ensure: drop the slot if it is lost, then create it if it is
  * missing. The one builder every slot creation goes through (the census in
- * tests/unit/deploy/slot-lost-reseed.test.ts); carbon/ha/primary-init.sql
- * carries its output verbatim.
+ * tests/unit/deploy/slot-lost-reseed.test.ts); primaryReplicationSql embeds
+ * its output verbatim.
  *
  * @param {string} [slotName]
  * @returns {string}
@@ -75,6 +77,56 @@ BEGIN
     PERFORM pg_create_physical_replication_slot('${slotName}');
   END IF;
 END $$;`;
+}
+
+/**
+ * The replication role, created if missing and given the per-deploy password.
+ *
+ * Postgres logs a failing statement's text (log_min_error_statement = error)
+ * and any statement over 1 s (log_min_duration_statement = 1000), and the db
+ * log reaches Loki. So the password literal never rides in a statement that
+ * can be logged:
+ *
+ *   - the SETs come first, so this session logs neither, and keeps the
+ *     statement out of pg_stat_statements (which the monitoring view reads);
+ *   - the DO block carries NO password: an error inside PL/pgSQL quotes the
+ *     inner statement in a CONTEXT line, which no SET suppresses;
+ *   - the password is set by one TOP-LEVEL ALTER ROLE, after the SETs.
+ *
+ * Deliver it on psql's stdin (never argv, never a file on the node). The
+ * census in tests/unit/security/role-password-session.test.ts pins the shape.
+ *
+ * @param {string} password
+ * @returns {string}
+ */
+export function replicationRoleSql(password) {
+  return `SET log_min_error_statement = panic;
+SET log_min_duration_statement = -1;
+SET pg_stat_statements.track_utility = off;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'replicator') THEN
+    CREATE ROLE replicator WITH REPLICATION LOGIN;
+  END IF;
+END $$;
+ALTER ROLE replicator WITH PASSWORD ${escapeSql(password)};`;
+}
+
+/**
+ * The primary's whole replication setup, one psql session on stdin: the role
+ * (replicationRoleSql), then the physical slot (ensureReplicationSlotSql). The
+ * one builder both HA tiers run.
+ *
+ * @param {string} password
+ * @returns {string}
+ */
+export function primaryReplicationSql(password) {
+  return `${replicationRoleSql(password)}
+
+-- The physical replication slot: dropped when lost (WAL past the
+-- max_slot_wal_keep_size cap, it can never stream again), created if missing.
+${ensureReplicationSlotSql()}
+`;
 }
 
 /**

@@ -12,9 +12,7 @@
  *   streaming pair
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-// Keep the import narrow — we only need join() to resolve .env.local relative to cwd.
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
@@ -26,7 +24,7 @@ import {
 } from '../../../host-keys.js';
 import { perfAsync } from '../../../perf.js';
 import { shJoin } from '../../../shell.js';
-import { scpWithRetry, sshRun } from '../../../ssh.js';
+import { sshRun } from '../../../ssh.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET, standbyDbRebuildHint } from '../../db-workload.js';
 import {
   buildInPlaceReseedStageScript,
@@ -41,6 +39,7 @@ import {
   SYSTEM_IDENTIFIER_SQL,
   verifyStreaming,
 } from '../../replication.js';
+import { primaryReplicationSql } from '../../replication-slot.js';
 import { discardableReseedLine, standbyLineageVerdict } from '../../standby-lineage.js';
 import { readReplPassword } from '../../utils.js';
 import {
@@ -54,9 +53,6 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-// Path to HA scripts in the template
-const HA_SCRIPTS_PATH = join(__dirname, '../../../../../carbon/ha');
 
 // The k3s cluster pod CIDR (default `--cluster-cidr`). Our k3s install
 // (k8s/k3s.js) does NOT pass --cluster-cidr, so every cluster runs the k3s
@@ -494,23 +490,18 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   await seedKnownHosts(khPath, primaryIp);
   const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
 
-  // 1. Apply primary-init.sql on primary.
-  // Render the SQL template locally (substituting REPL_PASSWORD), SCP the rendered
-  // copy, then delete the temp file. Approach A from spec.
-  const primaryInitSql = join(HA_SCRIPTS_PATH, 'primary-init.sql');
-  if (!existsSync(primaryInitSql)) {
-    throw new Error(`Missing HA script: ${primaryInitSql}`);
-  }
-
+  // 1. Create the replication role and slot on the primary.
+  //
+  // primaryReplicationSql (the one builder both HA tiers run) travels on the
+  // kubectl exec's STDIN: no rendered plaintext file on the node, no scp, no
+  // argv. Its session sets the statement-log guards first and keeps the
+  // password out of any DO block, so a failure cannot put it in the db log
+  // (which reaches Loki). The trailing reload keeps the slot settings live.
+  //
   // All SSH commands use runCommandAsync in argv form — ssh/scp receive
   // separate tokens and the final remote-command string is the only place
   // a shell parses anything. No local template-literal interpolation.
-
-  // Render primary-init.sql with the real REPL_PASSWORD, SCP to remote, then
-  // clean up. The SQL template ships the `{{REPL_PASSWORD}}` placeholder (a
-  // token, not a credential); substitute the per-deploy random password. These
-  // two MUST stay in sync — if the template's placeholder is renamed, k8s-HA
-  // would SCP an unrendered SQL file and replication auth would break.
+  //
   // Perf slices: this function was the largest un-instrumented block of the
   // k8s-ha deploy (~185s opaque tail in run 29354358889 — silent:true
   // throughout, so the log showed nothing between the app rollout and the
@@ -518,36 +509,15 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   // marker so perf_substep can attribute the tail. Wrappers only — the
   // operations, their order, and their throw semantics are unchanged.
   await perfAsync('deploy.ha.replication.primaryInit', async () => {
-    const sqlTemplate = readFileSync(primaryInitSql, 'utf-8');
-    const renderedSql = sqlTemplate.replaceAll('{{REPL_PASSWORD}}', replPassword);
-    const tmpDir = mkdtempSync(join(tmpdir(), 'vibecarbon-repl-'));
-    const renderedSqlPath = join(tmpDir, 'primary-init.sql');
-    try {
-      writeFileSync(renderedSqlPath, renderedSql, { mode: 0o600 });
-      await scpWithRetry([...sshOpts, renderedSqlPath, `root@${primaryIp}:/tmp/primary-init.sql`]);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-    try {
-      await runCommandAsync(
-        [
-          'ssh',
-          ...sshOpts,
-          `root@${primaryIp}`,
-          `cat /tmp/primary-init.sql | kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres`,
-        ],
-        { silent: true },
-      );
-    } finally {
-      // Always remove the rendered SQL — it contains the replication password.
-      await runCommandAsync(
-        ['ssh', ...sshOpts, `root@${primaryIp}`, 'rm -f /tmp/primary-init.sql'],
-        {
-          silent: true,
-          ignoreError: true,
-        },
-      );
-    }
+    await runCommandAsync(
+      [
+        'ssh',
+        ...sshOpts,
+        `root@${primaryIp}`,
+        `kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres`,
+      ],
+      { silent: true, input: `${primaryReplicationSql(replPassword)}\nSELECT pg_reload_conf();\n` },
+    );
   });
 
   // 1b. The primary's postgres hostPort (127.0.0.1:REPL_PORT -> 5432), the
@@ -792,7 +762,7 @@ function parsePodIdentity(podJson) {
  * @param {number} [options.attachWatchPollMs] - test seam: watchDbAttach's poll interval when the reseed's restart recreated the pod
  * @param {object|null} [options.discardableStandby] the env's ha.discardableStandby: the
  *   standby copy a `failover -abort` gave up, which the lineage check lets the reseed overwrite
- * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort check, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
+ * @param {boolean} [options.primaryConfigured] - Primary-side replication config (role + slot, hostPort check, pg_hba + reload) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
  * @returns {Promise<{streaming: boolean, lastState: string, systemIdentifier: string|null, reseeded?: true}>} Replication status;
  *   systemIdentifier is the standby's, set only when streaming was verified;
  *   reseeded once the in-place swap replaced the standby's data directory

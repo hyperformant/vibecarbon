@@ -1037,8 +1037,8 @@ export async function getReplPasswordFromSecret(ip, sshKeyPath) {
  * standby connects and immediately errors `replication slot "…" does not exist`,
  * so it never streams. (The basebackup itself no longer needs the slot — it uses
  * a temporary slot now — but streaming does.) Recreate it idempotently BEFORE the
- * re-seed with ensureReplicationSlotSql, the one builder primary-init.sql and the
- * compose-HA sites use too: it also drops a `lost` slot (WAL past the
+ * re-seed with ensureReplicationSlotSql, the one builder the HA role + slot setup
+ * (primaryReplicationSql) and the compose-HA sites use too: it also drops a `lost` slot (WAL past the
  * max_slot_wal_keep_size cap), which could never stream again.
  *
  * Failover does NOT need this: its re-seed sources from a live, untouched
