@@ -19,7 +19,7 @@
  *
  * checkReplication (src/status.js) threads both rows through its existing
  * deps-injection pattern (sshKubectl, the cluster snapshots that name the db
- * pods, getSSHKeyPath, sshRun), so this stubs those instead of mocking the ssh.js module wholesale.
+ * pods, sshKeyPathFor, sshRun), so this stubs those instead of mocking the ssh.js module wholesale.
  */
 
 import { fileURLToPath } from 'node:url';
@@ -128,7 +128,7 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
       snapshots,
       sshKubectl,
       sshRun: withSshContract(vi.fn()),
-      getSSHKeyPath: vi.fn(() => FAKE_KEY_PATH),
+      sshKeyPathFor: vi.fn(() => FAKE_KEY_PATH),
       timeoutMs: 5000,
     };
   }
@@ -228,7 +228,7 @@ describe('checkReplication — standby-side threading (k8s-HA)', () => {
       sshRun: withSshContract(sshRun),
       sshKubectl,
       snapshots: { get: vi.fn() },
-      getSSHKeyPath: vi.fn(() => FAKE_KEY_PATH),
+      sshKeyPathFor: vi.fn(() => FAKE_KEY_PATH),
       timeoutMs: 5000,
     };
     const result = await checkReplication('prod', envConfig, 'myproj', deps);

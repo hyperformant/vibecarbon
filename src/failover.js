@@ -116,7 +116,7 @@ import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { pollUntil } from './lib/retry.js';
 import { declaredAddonNames, k8sPrimaryOnlyWorkloads } from './lib/services/standby-policy.js';
-import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
+import { getPostgresPod, sshKeyPathFor, sshKubectl, sshRun } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
 import {
@@ -1330,7 +1330,7 @@ async function prePullStandbyImages({ servers, envName, workerIps }) {
   const nodeIps = [servers.standby.ip, servers.standby.dbIp, ...(workerIps ?? [])].filter(Boolean);
   return prePullImages({
     nodeIps,
-    sshKeyPath: getSSHKeyPath(envName),
+    sshKeyPath: sshKeyPathFor(envName),
     khPath: knownHostsPath(envName),
   });
 }
@@ -1586,7 +1586,7 @@ async function _provisionStandbyCapacityImpl({
 
     // Gate on the freshly-provisioned workers registering Ready before the
     // caller scales the app tier onto them.
-    await waitForWorkersReady(servers.standby.ip, getSSHKeyPath(envName), count, { deps });
+    await waitForWorkersReady(servers.standby.ip, sshKeyPathFor(envName), count, { deps });
 
     // Best-effort image pre-pull on the standby nodes, overlapping Task 10's
     // app scale-up. Never awaited into the failover critical path; every
@@ -1877,7 +1877,7 @@ export const ABORT_DB_GONE_TIMEOUT_S = 180;
  * @returns {import('./lib/deploy/failover-abort.js').AbortBackend}
  */
 export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {} }) {
-  const sshKeyPath = deps.sshKeyPath ?? getSSHKeyPath(envName);
+  const sshKeyPath = deps.sshKeyPath ?? sshKeyPathFor(envName);
   const {
     kubectl = (ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts),
     psql = (ip) => k8sPsqlRunner(ip, sshKeyPath),
@@ -2194,7 +2194,7 @@ export async function failoverHA(
 ) {
   const {
     identify = identifyServers,
-    getKeyPath = getSSHKeyPath,
+    getKeyPath = sshKeyPathFor,
     keyExists = existsSync,
     preflight = preflightPilotFailover,
     // Dynamic: failover.js imports no k8s deploy module statically (R6a).
@@ -3216,7 +3216,7 @@ export async function runFailoverAbort({ envName, envConfig, projectConfig, pars
         envName,
         envConfig,
         projectName: projectConfig.projectName,
-        sshKeyPath: getSSHKeyPath(envName),
+        sshKeyPath: sshKeyPathFor(envName),
       });
     } else {
       const scenario = detectScenario(envConfig);

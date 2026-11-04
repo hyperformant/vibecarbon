@@ -19,7 +19,7 @@
  * or recycled IP. The operator's ~/.ssh/known_hosts is never touched.
  */
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { progressLog } from './cli/progress.js';
@@ -33,48 +33,21 @@ import { shJoin } from './shell.js';
 const K3S_KUBECONFIG = '/etc/rancher/k3s/k3s.yaml';
 
 /**
- * Resolve the SSH key path for an environment.
- * HA deployments store a shared SSH key under the base env name
- * (e.g., deploy_key_prod). Internal cluster names use -primary / -standby
- * suffixes for filesystem resources.
+ * The one definition of where an environment's SSH private key lives:
+ * `<cwd>/.vibecarbon/deploy_key_<env>` (public half beside it as `.pub`).
+ * Every deploy mode writes it there and every reader asks here; nothing else
+ * in src/ or tests/e2e builds this path by hand (census-enforced).
  *
- * K8s single-cluster deploys use a different filename convention
- * (`ssh-<env>` — see deployK3s in src/lib/deploy/k8s/k3s.js). We probe
- * that path too so backup/restore/scale/failover work for k8s
- * single-cluster without changing the deploy-side filename. (Compose,
- * compose-HA, and k8s-HA all use `deploy_key_<env>`.)
- */
-export function getSSHKeyPath(environment) {
-  const candidates = sshKeyCandidates(environment, join(process.cwd(), '.vibecarbon'));
-  for (const path of candidates) {
-    if (existsSync(path)) return path;
-  }
-  // Nothing exists — fall back to the literal env-name path so caller
-  // error messages name what they asked for. Matches pre-fallback
-  // semantics for HA-suffixed environments.
-  return join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
-}
-
-/**
- * Every path a deploy may have written the environment's SSH private key to,
- * in probe order. The single source for "where is the key": the CLI resolves
- * through getSSHKeyPath above and the e2e harness (tests/e2e/utils/ssh.ts
- * getSshKeyPath) probes this same list against its project dir. The harness
- * once kept its own list without `ssh-<env>`, so every k8s single-cluster
- * scenario ran its database checks with no key (2026-10-19).
+ * HA deployments share one key under the base env name, and internal cluster
+ * names carry a -primary / -standby suffix, so the suffix is stripped.
  *
  * @param {string} environment
- * @param {string} vibecarbonDir  the project's `.vibecarbon` directory
- * @returns {string[]}
+ * @param {string} [cwd]
+ * @returns {string}
  */
-export function sshKeyCandidates(environment, vibecarbonDir) {
+export function sshKeyPathFor(environment, cwd = process.cwd()) {
   const baseEnv = environment.replace(/-(primary|standby)$/, '');
-  return [
-    join(vibecarbonDir, `deploy_key_${baseEnv}`),
-    join(vibecarbonDir, `deploy_key_${environment}`),
-    join(vibecarbonDir, `ssh-${baseEnv}`),
-    join(vibecarbonDir, `ssh-${environment}`),
-  ];
+  return join(cwd, '.vibecarbon', `deploy_key_${baseEnv}`);
 }
 
 /**

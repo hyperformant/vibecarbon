@@ -14,7 +14,7 @@
  * kubeconfig + ssh key paths follow the same convention as the deploy
  * code path:
  *   <cwd>/.vibecarbon/kubeconfig-<env>
- *   <cwd>/.vibecarbon/ssh-<env>
+ *   <cwd>/.vibecarbon/deploy_key_<env>
  *
  * Env vars are sourced from the provider's TOKEN_ENV (env or the project's
  * .env.local — see bootstrapOperatorEnv) for CLI_TOKEN_ENV, and from
@@ -31,6 +31,7 @@ import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccessWarn } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
+import { sshKeyPathFor } from './lib/ssh.js';
 
 /**
  * Trailing "Try:" hint in the welcome banner (R9). `hcloud server list`
@@ -66,7 +67,7 @@ export const SPEC = {
     '',
     'Exports:',
     '  KUBECONFIG       <cwd>/.vibecarbon/kubeconfig-<env>',
-    '  VC_SSH_KEY       <cwd>/.vibecarbon/ssh-<env>',
+    '  VC_SSH_KEY       <cwd>/.vibecarbon/deploy_key_<env>',
     `  ${shellSpecProvider.CLI_TOKEN_ENV}     From ${shellSpecProvider.TOKEN_ENV} (env or .env.local)`,
     `  ${shellSpecProvider.K8S_ASSETS.networkEnvVar}   From .vibecarbon.json (if present)`,
     '  VC_ENV           Environment name (so PS1 can reference it)',
@@ -100,7 +101,7 @@ export async function run(args) {
   const envName = /** @type {string|undefined} */ (positional.env) ?? 'prod';
   const cwd = process.cwd();
   const kubeconfig = localKubeconfigPath(cwd, envName);
-  const sshKey = join(cwd, '.vibecarbon', `ssh-${envName}`);
+  const sshKey = sshKeyPathFor(envName, cwd);
 
   // Warn but don't bail if either is missing — the operator may be
   // debugging exactly that case (e.g. cluster is half-up, only one of

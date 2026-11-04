@@ -29,7 +29,7 @@ import {
 } from '../providers/index.js';
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
 import { mintAttemptId } from '../services/addon-start.js';
-import { getSSHKeyPath } from '../ssh.js';
+import { sshKeyPathFor } from '../ssh.js';
 import { createTracker } from '../tracker.js';
 import {
   assertDeployRestoreAllowed,
@@ -511,14 +511,14 @@ function deployedPrimaryIp(tier, deployResult) {
 async function deployedPrimaryPsql(tier, environment, projectName, ip) {
   if (isComposeTier(tier)) {
     const { composePsqlRunner } = await import('./compose/ha.js');
-    return composePsqlRunner(ip, getSSHKeyPath(environment), `/opt/${projectName}`);
+    return composePsqlRunner(ip, sshKeyPathFor(environment), `/opt/${projectName}`);
   }
-  return k8sPsqlRunner(ip, getSSHKeyPath(environment));
+  return k8sPsqlRunner(ip, sshKeyPathFor(environment));
 }
 
 /** psql on the role primary over the tier's transport (the write-fence checks). */
 async function rolePrimaryPsql(tier, environment, projectName, ip) {
-  const key = getSSHKeyPath(environment);
+  const key = sshKeyPathFor(environment);
   if (isComposeTier(tier)) {
     const { composePsqlRunner } = await import('./compose/ha.js');
     return composePsqlRunner(ip, key, `/opt/${projectName}`);
@@ -1157,7 +1157,7 @@ export async function executeDeployment(args, gatheredConfig) {
   // before every SSH write and Pulumi call.
   if (composeHaReconverge) {
     const { composePsqlRunner, flipComposeDnsWith } = await import('./compose/ha.js');
-    const haKey = getSSHKeyPath(environment);
+    const haKey = sshKeyPathFor(environment);
     const managedDns = !!(domain && hasAutomatedDns(dnsProvider) && dnsToken && dnsZoneId);
     const ready = await assertComposeHaReconvergeReady({
       plan: composeHaReconverge,
@@ -2082,7 +2082,7 @@ export async function executeDeployment(args, gatheredConfig) {
     // ran; ctx threads the mutable server identity the effects fill in
     // (serverIp / providerServerId / providerServerName) and the orchestrator
     // reads back into the single-server deployResult shape below.
-    const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
+    const sshKeyPath = sshKeyPathFor(environment);
     // Single-node compose: its one server, whichever record resolvePrimary names.
     const composeServer = resolvePrimary(envConfig, { env: environment })?.entry;
     const composeCtx = {
@@ -2117,7 +2117,7 @@ export async function executeDeployment(args, gatheredConfig) {
     // deployComposeHA ran over the primary+standby pair; ctx threads the
     // mutable two-node identity the effects fill in (primary/standby/degraded)
     // and the orchestrator reads back into the HA deployResult shape below.
-    const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
+    const sshKeyPath = sshKeyPathFor(environment);
     const s = tracker.spinner();
     s.start('Starting HA deployment...');
     const composeHaCtx = {
@@ -2219,7 +2219,7 @@ export async function executeDeployment(args, gatheredConfig) {
     if (fencePrimaryIp) {
       const fence = await writeK8sBackupFence({
         ip: fencePrimaryIp,
-        sshKeyPath: getSSHKeyPath(environment),
+        sshKeyPath: sshKeyPathFor(environment),
       });
       if (!fence.ok) p.log.warn(backupFenceWarning(fencePrimaryIp, fence.reason));
       recordBackupFence({ environment }, fence);

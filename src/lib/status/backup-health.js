@@ -26,7 +26,7 @@ import { DEFAULT_BACKUP_SCHEDULE } from '../../../carbon/scripts/render-backup-s
 import { resolvePrimary } from '../cli/resolve-primary.js';
 import { VC_COMPOSE } from '../deploy/compose/command.js';
 import { redactCredentials } from '../redact-credentials.js';
-import { getSSHKeyPath, sshKubectl, sshRun } from '../ssh.js';
+import { sshKeyPathFor, sshKubectl, sshRun } from '../ssh.js';
 import { hasBackupResult, pushedBackupNames } from '../walg/backup-result.js';
 import { backupCredentialVars, readEnvBaseBackups } from '../walg/restore-base.js';
 import { PGDATA_PATH, WAL_GAP_RECORDS } from '../walg/restore-layout.js';
@@ -428,7 +428,7 @@ function newestBackupJob(jobs) {
  * @param {string} envName
  * @param {object} envConfig
  * @param {string} projectName
- * @param {{ sshRun?: typeof sshRun, sshKubectl?: typeof sshKubectl, getSSHKeyPath?: typeof getSSHKeyPath, existsSync?: typeof existsSync, snapshots?: ReturnType<typeof createClusterSnapshots> }} [deps]
+ * @param {{ sshRun?: typeof sshRun, sshKubectl?: typeof sshKubectl, sshKeyPathFor?: typeof sshKeyPathFor, existsSync?: typeof existsSync, snapshots?: ReturnType<typeof createClusterSnapshots> }} [deps]
  *   `snapshots`: the run's cluster snapshots, shared with the other rows; one of its own otherwise
  */
 function primaryProbes(envName, envConfig, projectName, deps = {}) {
@@ -437,12 +437,12 @@ function primaryProbes(envName, envConfig, projectName, deps = {}) {
   const t = {
     sshRun: deps.sshRun ?? sshRun,
     sshKubectl: deps.sshKubectl ?? sshKubectl,
-    getSSHKeyPath: deps.getSSHKeyPath ?? getSSHKeyPath,
+    sshKeyPathFor: deps.sshKeyPathFor ?? sshKeyPathFor,
     existsSync: deps.existsSync ?? existsSync,
   };
   const snapshots = deps.snapshots ?? createClusterSnapshots(envName, t);
   const key = () => {
-    const path = t.getSSHKeyPath(envName);
+    const path = t.sshKeyPathFor(envName);
     if (!t.existsSync(path)) throw new Error('no ssh key for this environment');
     return path;
   };

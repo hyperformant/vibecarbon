@@ -54,7 +54,7 @@ function writeKnownHosts(khPath, hostKeyLines) {
  * Derive the per-environment known_hosts path from an SSH key path.
  *
  * Every SSH/SCP caller in the codebase already threads the deploy key path
- * (`.vibecarbon/deploy_key_<env>` or `.vibecarbon/ssh-<env>`). Placing
+ * (`.vibecarbon/deploy_key_<env>`). Placing
  * `known_hosts_<env>` beside it lets every caller pin host keys per-env
  * WITHOUT having to thread a separate `env` argument through helpers that
  * only receive `(ip, sshKeyPath)`. Self-consistent: the same key path always
@@ -65,9 +65,7 @@ function writeKnownHosts(khPath, hostKeyLines) {
  */
 export function knownHostsPathForKey(sshKeyPath) {
   const dir = dirname(sshKeyPath);
-  const env = basename(sshKeyPath)
-    .replace(/^deploy_key_/, '')
-    .replace(/^ssh-/, '');
+  const env = basename(sshKeyPath).replace(/^deploy_key_/, '');
   return join(dir, `known_hosts_${env}`);
 }
 

@@ -37,12 +37,12 @@
  * unchanged. scale.js's call site replays each line then `process.exit(1)`.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { spinner } from '../cli/progress.js';
 import { perfAsync } from '../perf.js';
 import { providerIdFor } from '../providers/index.js';
 import { assertPersistedRoleTypes, buildProgramConfig } from '../scale-plan.js';
+import { sshKeyPathFor } from '../ssh.js';
 
 /**
  * Build an abort Error whose `logLines` are the exact `p.log.error(...)` lines
@@ -162,7 +162,7 @@ export async function convergeClusterInfra({
 
   // SSH key location depends on deploy topology:
   // - Single-cluster k8s: deployK3s' ensureSshKey writes
-  //   `.vibecarbon/ssh-<env>` and lets Pulumi manage the SshKey resource.
+  //   `.vibecarbon/deploy_key_<env>` and lets Pulumi manage the SshKey resource.
   // - HA k8s: deployK8sHA generates a SHARED key at
   //   `.vibecarbon/deploy_key_<environment>` (one file, used by both
   //   primary and standby), uploads it ONCE via provider.createSSHKey,
@@ -183,7 +183,7 @@ export async function convergeClusterInfra({
   let sshPublicKey = '';
   let existingSshKeyId;
   if (isHA) {
-    const sharedKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}.pub`);
+    const sharedKeyPath = `${sshKeyPathFor(environment)}.pub`;
     if (existsSync(sharedKeyPath)) {
       sshPublicKey = readFileSync(sharedKeyPath, 'utf-8').trim();
     } else {
@@ -209,7 +209,7 @@ export async function convergeClusterInfra({
       ]);
     }
   } else {
-    const sshKeyPath = join(process.cwd(), '.vibecarbon', `ssh-${clusterEnv}`);
+    const sshKeyPath = sshKeyPathFor(clusterEnv);
     sshPublicKey = existsSync(`${sshKeyPath}.pub`)
       ? readFileSync(`${sshKeyPath}.pub`, 'utf-8').trim()
       : '';

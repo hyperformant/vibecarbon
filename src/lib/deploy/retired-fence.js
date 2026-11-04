@@ -55,7 +55,7 @@ import {
   enabledAddonNames,
   k8sStandbyZeroedWorkloads,
 } from '../services/standby-policy.js';
-import { getSSHKeyPath, sshKubectl } from '../ssh.js';
+import { sshKeyPathFor, sshKubectl } from '../ssh.js';
 import { sshRun as composeSshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD } from './db-workload.js';
 import { swappedSinceLastDeploy } from './failover-guard.js';
@@ -796,7 +796,7 @@ export async function reconcileRetiredFence({
   const result = { fenced: [], unreachable: [], nodes: [] };
   if (sides.length === 0) return result;
   const { log = (line) => p.log.info(line), warn = (line) => p.log.warn(line) } = deps;
-  const sshKeyPath = deps.sshKeyPath ?? getSSHKeyPath(environment);
+  const sshKeyPath = deps.sshKeyPath ?? sshKeyPathFor(environment);
   const domain = envConfig?.domain || envConfig?.dns?.domain;
   for (const { ip } of sides) {
     const verdict = await fenceRetiredNode({
@@ -861,7 +861,7 @@ export async function reconcileRetiredFence({
  * @returns {Promise<{ cleared: boolean }>}
  */
 export async function clearRetiredFence({ tier, ip, projectName, environment, deps = {} }) {
-  const sshKeyPath = deps.sshKeyPath ?? getSSHKeyPath(environment);
+  const sshKeyPath = deps.sshKeyPath ?? sshKeyPathFor(environment);
   const { warn = (line) => p.log.warn(line) } = deps;
   let psqlFor = deps.psql;
   if (!psqlFor && tier === 'k8s-ha') psqlFor = (h) => k8sPsqlRunner(h, sshKeyPath);

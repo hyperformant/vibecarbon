@@ -1962,7 +1962,7 @@ export async function runLifecycle(
         // -11) running every SSH/exec check against the decommissioned node.
         // Lazily backfill the SSH handles if the step that would have set them
         // has not run yet. Both accessors are pure reads of the project dir
-        // (.vibecarbon.json / .vibecarbon/deploy_key_<env> or ssh-<env>) and return
+        // (.vibecarbon.json / .vibecarbon/deploy_key_<env>) and return
         // empty/null rather than throwing, so this costs nothing when they are
         // already populated.
         //

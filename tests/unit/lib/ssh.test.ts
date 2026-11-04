@@ -28,11 +28,11 @@ vi.mock('../../../src/lib/cli/progress.js', () => ({
 import { runCommandAsync } from '../../../src/lib/command.js';
 import {
   getPostgresPod,
-  getSSHKeyPath,
   isNeverStartedSshTransportFailure,
   SSH_TRANSPORT_NEVER_STARTED_RE,
   scpDownload,
   scpUpload,
+  sshKeyPathFor,
   sshKubectl,
   sshRun,
   sshRunScript,
@@ -69,42 +69,17 @@ function transportError(stderr: string, status: number) {
 const mockExistsSync = existsSync as unknown as ReturnType<typeof vi.fn>;
 const mockRun = runCommandAsync as unknown as ReturnType<typeof vi.fn>;
 
-describe('getSSHKeyPath', () => {
-  const cwd = process.cwd();
-
-  beforeEach(() => {
-    mockExistsSync.mockReset();
-  });
-
-  it('strips -primary suffix and returns base key when it exists', () => {
-    mockExistsSync.mockImplementation(
-      (p: string) => p === join(cwd, '.vibecarbon', 'deploy_key_prod'),
+describe('sshKeyPathFor', () => {
+  it('names deploy_key_<env> under <cwd>/.vibecarbon, touching no filesystem', () => {
+    expect(sshKeyPathFor('staging')).toBe(join(process.cwd(), '.vibecarbon', 'deploy_key_staging'));
+    expect(sshKeyPathFor('staging', '/proj')).toBe(
+      join('/proj', '.vibecarbon', 'deploy_key_staging'),
     );
-    expect(getSSHKeyPath('prod-primary')).toBe(join(cwd, '.vibecarbon', 'deploy_key_prod'));
   });
 
-  it('strips -standby suffix and returns base key when it exists', () => {
-    mockExistsSync.mockImplementation(
-      (p: string) => p === join(cwd, '.vibecarbon', 'deploy_key_prod'),
-    );
-    expect(getSSHKeyPath('prod-standby')).toBe(join(cwd, '.vibecarbon', 'deploy_key_prod'));
-  });
-
-  it('falls back to exact name when base key does not exist', () => {
-    mockExistsSync.mockReturnValue(false);
-    expect(getSSHKeyPath('prod-primary')).toBe(join(cwd, '.vibecarbon', 'deploy_key_prod-primary'));
-  });
-
-  it('returns exact name for non-HA environments', () => {
-    mockExistsSync.mockReturnValue(false);
-    expect(getSSHKeyPath('staging')).toBe(join(cwd, '.vibecarbon', 'deploy_key_staging'));
-  });
-
-  it('returns base key path for non-HA environment when it exists', () => {
-    mockExistsSync.mockImplementation(
-      (p: string) => p === join(cwd, '.vibecarbon', 'deploy_key_staging'),
-    );
-    expect(getSSHKeyPath('staging')).toBe(join(cwd, '.vibecarbon', 'deploy_key_staging'));
+  it('strips -primary and -standby so HA clusters share the base key', () => {
+    expect(sshKeyPathFor('prod-primary', '/proj')).toBe('/proj/.vibecarbon/deploy_key_prod');
+    expect(sshKeyPathFor('prod-standby', '/proj')).toBe('/proj/.vibecarbon/deploy_key_prod');
   });
 });
 

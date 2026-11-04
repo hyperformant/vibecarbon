@@ -32,7 +32,7 @@ vi.mock('../../../src/lib/ssh.js', async () => {
     getPostgresPod: vi.fn(),
     sshKubectl: vi.fn(),
     sshRun: vi.fn(contractSshRun(() => undefined)),
-    getSSHKeyPath: vi.fn(),
+    sshKeyPathFor: vi.fn(),
   };
 });
 

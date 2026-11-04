@@ -428,7 +428,7 @@ describe('checkBackupHealth on k8s reads the cluster snapshot', () => {
         snapshots,
         sshKubectl,
         sshRun: withSshContract(vi.fn()),
-        getSSHKeyPath: () => '/k',
+        sshKeyPathFor: () => '/k',
         existsSync: () => true,
       },
     };

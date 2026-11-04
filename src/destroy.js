@@ -74,6 +74,7 @@ import {
 } from './lib/providers/index.js';
 import { deriveEnvAppBucketName } from './lib/providers/s3-base.js';
 import { generateBucketSalt } from './lib/secrets.js';
+import { sshKeyPathFor } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
 import { recordLeakedVolumes } from './lib/volume-ledger.js';
@@ -329,6 +330,22 @@ export async function ensureDestroyOperatorAccess(
 }
 
 /**
+ * What destroy hands preDestroyBackup. The key path comes from sshKeyPathFor,
+ * the same helper every deploy mode writes through.
+ */
+export function preDestroyBackupOptions({ envConfig, envName, projectName, cwd, args }) {
+  return {
+    envConfig,
+    envName,
+    projectName,
+    sshKeyPath: sshKeyPathFor(envName, cwd),
+    yes: args.yes,
+    purge: args.purgeBackups,
+    force: args.force,
+  };
+}
+
+/**
  * The backup destroy takes before it deletes anything, and what it does with
  * the answer.
  *
@@ -536,10 +553,8 @@ export async function cleanupClusterPVCs(kubeconfigPath) {
 
 function cleanupLocalEnvFiles(cwd, envName) {
   const cleanupPaths = [
-    join(cwd, '.vibecarbon', `deploy_key_${envName}`),
-    join(cwd, '.vibecarbon', `deploy_key_${envName}.pub`),
-    join(cwd, '.vibecarbon', `ssh-${envName}`),
-    join(cwd, '.vibecarbon', `ssh-${envName}.pub`),
+    sshKeyPathFor(envName, cwd),
+    `${sshKeyPathFor(envName, cwd)}.pub`,
     join(cwd, '.vibecarbon', `known_hosts_${envName}`),
     join(cwd, '.vibecarbon', `known_hosts_${envName}-primary`),
     join(cwd, '.vibecarbon', `known_hosts_${envName}-standby`),
@@ -2175,7 +2190,7 @@ async function destroyComposeTier({
   // Compose single-node: its one server, found through the resolver.
   const composeServer = resolvePrimary(envConfig, { env: environment })?.entry;
   const serverIp = composeServer?.ip;
-  const sshKeyPath = join(cwd, '.vibecarbon', `deploy_key_${environment}`);
+  const sshKeyPath = sshKeyPathFor(environment, cwd);
 
   if (serverIp && existsSync(sshKeyPath)) {
     // Stop and remove Docker Compose services
@@ -3965,15 +3980,15 @@ async function main(argv = []) {
 
   // Back up before deleting anything; a failed or skipped backup stops here
   // unless -force (see preDestroyBackup).
-  await preDestroyBackup({
-    envConfig,
-    envName,
-    projectName: projectConfig.projectName,
-    sshKeyPath: join(cwd, '.vibecarbon', `deploy_key_${envName}`),
-    yes: args.yes,
-    purge: args.purgeBackups,
-    force: args.force,
-  });
+  await preDestroyBackup(
+    preDestroyBackupOptions({
+      envConfig,
+      envName,
+      projectName: projectConfig.projectName,
+      cwd,
+      args,
+    }),
+  );
 
   // DNS cleanup credential: resolve up-front so the teardown never stalls on
   // a mid-flow prompt. Under the same-token rule, native DNS on the deploy's
