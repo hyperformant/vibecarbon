@@ -33,7 +33,8 @@ For exact, up-to-date figures, see
    (read + write). The deploy prompt asks for it on first run and can save it
    to the project's `.env.local`; scripted runs can pass it via the
    `HETZNER_API_TOKEN` environment variable instead. The same token drives
-   servers, firewalls, DNS, and TLS (DNS-01). No separate DNS token exists.
+   servers, firewalls, and DNS. No separate DNS token exists, and it stays
+   on your machine: the servers never hold it.
 3. **S3 credentials for Hetzner Object Storage**: used for deploy state and
    `wal-g` database backups. The guided setup walks you through creating them.
 4. **A domain** you control, for the app URL and TLS certificates.
@@ -144,7 +145,8 @@ A deploy:
    lives in your Hetzner Object Storage bucket, no Pulumi account needed)
 2. Creates DNS records for your domain (Hetzner DNS by default; Cloudflare
    opt-in; or manual if you manage DNS elsewhere)
-3. Issues TLS certificates via ACME DNS-01 (wildcard-capable), or puts back
+3. Issues a TLS certificate for each name over HTTP-01 (port 80 must reach
+   your server, and there is no wildcard certificate), or puts back
    the environment's saved certificate ([Certificates](#certificates))
 4. Builds your app image locally and sends only your app's own layers over
    SSH; servers pull the shared runtime base themselves (compose-ha sends the
@@ -184,6 +186,8 @@ Scheduled backups are installed automatically at deploy time (wal-g archiving
 to your Object Storage bucket).
 
 ### Certificates
+
+Let's Encrypt checks each name over HTTP-01, so port 80 must reach your server, and there is no wildcard certificate. Your DNS token stays on your machine; the servers never hold it. On compose, the apex has its own certificate and `traefik.<domain>` shares one with grafana, n8n and metabase when you enable them. To add your own subdomain, give its Traefik router the label `traefik.http.routers.<name>.tls.certresolver=letsencrypt` and Traefik issues it a certificate of its own. On Kubernetes, routes are paths on your domain, so a new path needs nothing.
 
 Your certificate is issued once and then reused. Right after a deploy finds it trusted, and on every scheduled backup after that, it is saved (with its key) to the environment's backup bucket. A restore, a scale onto new servers, or a failover puts that copy back instead of asking Let's Encrypt for a new one, so the new side serves your certificate as soon as it takes over and you stay clear of Let's Encrypt's rate limits. A plain `vibecarbon destroy` keeps the saved copy; `destroy -purge` removes it with the rest of the backups.
 

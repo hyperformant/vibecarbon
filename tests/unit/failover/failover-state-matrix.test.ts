@@ -1085,10 +1085,10 @@ describe('failoverHA DNS flip is verified (R5)', () => {
 describe('failoverHA promotes the ACME issuer only where DNS points (HTTP-01)', () => {
   // Let's Encrypt fetches an HTTP-01 challenge from the address the domain
   // resolves to, so only the cluster DNS points at can pass one. Promoted
-  // before the flip with no saved certificate, cert-manager's first order
-  // reaches the old primary and fails, and backs off for an hour. The saved
-  // certificate goes on before the flip, so the promoted cluster serves it
-  // the moment DNS moves.
+  // before the flip, cert-manager's self-check holds the order until DNS
+  // points at the cluster, so nothing is wasted, but the issuer is still
+  // promoted only after the flip. The saved certificate goes on before the
+  // flip, so the promoted cluster serves it the moment DNS moves.
   afterEach(() => vi.restoreAllMocks());
 
   for (const primaryReachable of [true, false]) {

@@ -5,11 +5,13 @@
  * THE PROBLEM: a k8s-ha environment is two clusters applying the SAME
  * Certificate manifests for the SAME dns name. Every certificate validates
  * with HTTP-01, and Let's Encrypt fetches the challenge from whichever
- * cluster DNS points at, so an ACME-issuing standby can never pass: its
- * orders fail, and each failure counts against Let's Encrypt's limit of 5
- * failed validations per hostname per hour, which the promoted cluster then
- * shares. One active ACME issuer per environment is the right shape on every
- * provider.
+ * cluster DNS points at, so an ACME-issuing standby can never pass. cert-manager
+ * self-checks the challenge first, so its orders wait instead of failing, but
+ * a standby that keeps trying is still a second solver contending for the same
+ * hostname, and a validation that does reach Let's Encrypt counts against its
+ * limit of 5 failed validations per hostname per hour, which the promoted
+ * cluster then shares. One active ACME issuer per environment is the right
+ * shape on every provider.
  *
  * THE POLICY: only the cluster currently in the PRIMARY role holds an
  * ACME-issued Certificate.

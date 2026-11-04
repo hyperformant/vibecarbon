@@ -3740,8 +3740,7 @@ export async function applyK3sManifests({
   // 1. Install cert-manager: ONE apply of the upstream manifest with our
   //    settings rendered in as kustomize patches
   //    (carbon/scripts/render-cert-manager.mjs, shared with the GitOps
-  //    workflow): the controller flags (DNS-01 self-check through public
-  //    recursive resolvers, a 5 minute minimum backoff) and the control-plane
+  //    workflow): the controller flag (a 5 minute minimum backoff) and the control-plane
   //    pin of all three Deployments.
   //
   //    Nothing patches a cert-manager Deployment after this apply

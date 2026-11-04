@@ -44,7 +44,7 @@ Vibecarbon does not install DigitalOcean's Droplet Console agent, which keeps fi
 | `k8s` | k3s cluster (master Droplet + worker Droplets + dedicated database Droplet) with DO CSI volumes |
 | `k8s-ha` | Two k3s clusters in two regions (primary + pilot-light standby with a zeroed app tier), WireGuard replication transport, Postgres streaming replication, one-command failover |
 
-> `k8s-ha` (pilot-light standby cluster) is fully supported: the standby is the same k8s stack provisioned in a second region (`-standby-region`), with failover as a DNS flip between the two clusters' own reserved IPs. The dormant standby serves a self-signed certificate by design (single-issuer policy: DigitalOcean's DNS-01 solver keys challenge records by name, so only the primary-role cluster holds an active Let's Encrypt certificate); promotion re-points it automatically.
+> `k8s-ha` (pilot-light standby cluster) is fully supported: the standby is the same k8s stack provisioned in a second region (`-standby-region`), with failover as a DNS flip between the two clusters' own reserved IPs. The dormant standby serves a self-signed certificate by design (single-issuer policy: only the primary-role cluster holds an active Let's Encrypt certificate); promotion re-points it automatically.
 
 Server sizes can be selected interactively during deploy or pre-configured in `.vibecarbon.json`:
 - Standard Droplets: `s-2vcpu-4gb` (minimum for compose/k3s nodes: the 4 GB floor is enforced by the size picker)

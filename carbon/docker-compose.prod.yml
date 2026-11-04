@@ -57,11 +57,13 @@ services:
       - "traefik.http.routers.app-http.middlewares=redirect-to-https"
       - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
       # HTTPS router for the app at the bare apex (${DOMAIN}). The apex gets its
-      # OWN single-domain cert via certresolver — it is intentionally NOT in the
-      # default wildcard store cert, because apex + `*.${DOMAIN}` share the
-      # `_acme-challenge.${DOMAIN}` TXT name and some DNS providers (Hetzner)
-      # can't hold both challenge values at once. The subdomain routers below use
-      # `tls=true` (no resolver) and serve the `*.${DOMAIN}` default cert via SNI.
+      # OWN single-domain cert via certresolver, validated over HTTP-01. It is
+      # intentionally NOT in the default store cert (tls-default.yml), which
+      # names traefik.${DOMAIN} plus the enabled grafana, n8n and metabase hosts.
+      # The subdomain routers below use `tls=true` (no resolver) and serve that
+      # default cert via SNI. To add your own subdomain, give its router the
+      # label `traefik.http.routers.<name>.tls.certresolver=letsencrypt` and
+      # Traefik issues it a certificate of its own.
       - "traefik.http.routers.app.rule=Host(`${DOMAIN:-localhost}`)"
       - "traefik.http.routers.app.priority=1"
       - "traefik.http.routers.app.entrypoints=websecure"

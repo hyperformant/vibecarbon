@@ -1709,10 +1709,9 @@ async function scaleServers(ctx) {
         },
       );
       journaled = true;
-      // On HTTP-01 the flip must happen BEFORE recreating services (Traefik
-      // challenges the A record on startup; a stale record fails all
-      // challenges with a 30+ min retry). On DNS-01 the ordering is irrelevant
-      // — lego validates a TXT record, not the A record. Gated to ONE writer:
+      // The flip must happen BEFORE recreating services: Traefik asks for its
+      // certificates on startup, and HTTP-01 validates over the A record, so a
+      // stale record fails every challenge with a 30+ min retry. Gated to ONE writer:
       // the standby's replacement never touches apex (see shouldUpdateApexDns
       // — the two-writer upsert race, run 31970876667).
       if (domain && shouldUpdateApexDns(server)) {

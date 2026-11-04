@@ -63,20 +63,25 @@ describe('providers manage A records only', () => {
     expect(mod.challengeRecordNames, id).toBeUndefined();
   });
 
-  it('nothing under src/ names an _acme-challenge record or the DNS01_PROVIDERS table', () => {
-    const SRC = fileURLToPath(new URL('../../../src', import.meta.url));
-    const walk = (dir: string): string[] =>
+  it('nothing under src/ or carbon/ names an _acme-challenge record or the DNS01_PROVIDERS table', () => {
+    const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+    const walk = (dir: string, exts: string[]): string[] =>
       readdirSync(dir).flatMap((name) => {
+        if (name === 'node_modules') return [];
         const path = join(dir, name);
-        if (statSync(path).isDirectory()) return walk(path);
-        return path.endsWith('.js') ? [path] : [];
+        if (statSync(path).isDirectory()) return walk(path, exts);
+        return exts.some((e) => path.endsWith(e)) ? [path] : [];
       });
-    const files = walk(SRC);
-    expect(files.length).toBeGreaterThan(100);
-    const hits = files.filter((f) =>
+    const src = walk(join(ROOT, 'src'), ['.js']);
+    expect(src.length).toBeGreaterThan(100);
+    // The template's compose files and scripts: a DNS-01 rationale in a
+    // comment there is as stale as one in the CLI.
+    const carbon = walk(join(ROOT, 'carbon'), ['.yml', '.yaml', '.js', '.mjs']);
+    expect(carbon.length).toBeGreaterThan(5);
+    const hits = [...src, ...carbon].filter((f) =>
       /_acme-challenge|DNS01_PROVIDERS/.test(readFileSync(f, 'utf8')),
     );
-    expect(hits.map((f) => f.slice(SRC.length + 1))).toEqual([]);
+    expect(hits.map((f) => f.slice(ROOT.length))).toEqual([]);
   });
 });
 

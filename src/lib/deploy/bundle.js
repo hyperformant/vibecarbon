@@ -367,7 +367,7 @@ export function renderBundle(projectName, options = {}) {
   // Defense-in-depth: this baseline is echoed into the bundle line-for-line
   // below for any key without an explicit override, so an operator-secret
   // key must never survive the read — see stripOperatorSecretLines' doc for
-  // why this doesn't touch envOverrides (S3/DNS-01/scale-replay stay live).
+  // why this doesn't touch envOverrides (S3 and scale-replay stay live).
   envContent = stripOperatorSecretLines(envContent);
   // Servers derive the compose project from /opt/<project>. A local
   // COMPOSE_PROJECT_NAME pin (written by `vibecarbon up` after a folder
