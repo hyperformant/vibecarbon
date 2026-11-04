@@ -6,11 +6,10 @@
  * The 2026-10-19 Hetzner k8s run failed db_schema, db_write_roundtrip,
  * db_migrations_applied, db_cron_jobs and db_server_config with
  * "Cannot reach the database: no sshKeyPath (serverIp present)" while compose
- * passed all five. A k8s single-cluster deploy writes its key to
- * `.vibecarbon/ssh-<env>` (deployK3s → ensureSshKey); the harness's
- * getSshKeyPath probed only `deploy_key_<env>` (what compose, compose-HA and
- * k8s-HA write) and a `ssh_key` file nothing writes, so on k8s it returned
- * null at every step.
+ * passed all five. A k8s single-cluster deploy wrote its key to
+ * `.vibecarbon/ssh-<env>` while the harness probed only `deploy_key_<env>`, so
+ * on k8s it returned null at every step. Every mode now writes
+ * `deploy_key_<env>` through sshKeyPathFor.
  *
  * Each fixture is built the way the deploy builds it: the k8s key file comes
  * from the real ensureSshKey (ssh-keygen stubbed), and the `deploy_key_<env>`
@@ -201,24 +200,22 @@ function writeConfig(dir: string, env: EnvConfig): void {
 describe('the deploy writes each mode key where the harness looks', () => {
   it('compose and compose-ha deploys write .vibecarbon/deploy_key_<env>', () => {
     const orchestrator = srcFile('lib/deploy/orchestrator.js');
-    const writes = orchestrator.match(
-      /const sshKeyPath = join\(process\.cwd\(\), '\.vibecarbon', `deploy_key_\$\{environment\}`\);/g,
-    );
+    const writes = orchestrator.match(/const sshKeyPath = sshKeyPathFor\(environment\);/g);
     // One for the compose branch, one for the compose-ha branch.
     expect(writes?.length).toBe(2);
   });
 
   it('the k8s-ha deploy writes the shared .vibecarbon/deploy_key_<env>', () => {
     expect(srcFile('lib/deploy/effects/k8s-ha.js')).toMatch(
-      /sharedSshKeyPath = join\(process\.cwd\(\), '\.vibecarbon', `deploy_key_\$\{options\.environment\}`\);/,
+      /sharedSshKeyPath = sshKeyPathFor\(options\.environment\);/,
     );
   });
 
-  it('the k8s single-cluster deploy writes .vibecarbon/ssh-<env>', async () => {
+  it('the k8s single-cluster deploy writes .vibecarbon/deploy_key_<env>', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'db-handle-k8s-key-'));
     try {
       const { privateKeyPath } = await ensureSshKey(dir, ENV);
-      expect(privateKeyPath).toBe(join(dir, '.vibecarbon', `ssh-${ENV}`));
+      expect(privateKeyPath).toBe(join(dir, '.vibecarbon', `deploy_key_${ENV}`));
       expect(getSshKeyPath(dir, ENV)).toBe(privateKeyPath);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -294,14 +291,12 @@ describe('getSshKeyPath', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('prefers deploy_key_<env> when both conventions are present', () => {
+  it('finds deploy_key_<env>', () => {
     writeFileSync(join(dir, '.vibecarbon', `deploy_key_${ENV}`), 'k\n');
-    writeFileSync(join(dir, '.vibecarbon', `ssh-${ENV}`), 'k\n');
     expect(getSshKeyPath(dir, ENV)).toBe(join(dir, '.vibecarbon', `deploy_key_${ENV}`));
   });
 
   it('never matches another environment key', () => {
-    writeFileSync(join(dir, '.vibecarbon', 'ssh-other'), 'k\n');
     writeFileSync(join(dir, '.vibecarbon', 'deploy_key_other'), 'k\n');
     expect(getSshKeyPath(dir, ENV)).toBeNull();
   });

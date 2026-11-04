@@ -9,7 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { sshKeyCandidates } from '../../../src/lib/ssh.js';
+import { sshKeyPathFor } from '../../../src/lib/ssh.js';
 import type { ResourceMetrics } from '../scenarios/types.js';
 import { sshUnreachableSince } from './ssh-reachability.js';
 
@@ -348,23 +348,10 @@ export function getServerIps(projectDir: string, env: string): string[] {
 
 /**
  * Get the SSH key path for a deployed environment, or null when no key file
- * exists.
- *
- * Probes the CLI's own candidate list (src/lib/ssh.js sshKeyCandidates), never
- * a harness copy of it. Compose, compose-HA and k8s-HA deploys write
- * `.vibecarbon/deploy_key_<env>`; a k8s single-cluster deploy writes
- * `.vibecarbon/ssh-<env>` (deployK3s → ensureSshKey). The harness used to
- * probe only `deploy_key_<env>` plus a `ssh_key` file nothing writes, so on
- * k8s it returned null and every database check failed with
- * "no sshKeyPath (serverIp present)" (Hetzner k8s, 2026-10-19).
+ * exists. The path itself comes from the CLI's own helper (src/lib/ssh.js
+ * sshKeyPathFor): every deploy mode writes `.vibecarbon/deploy_key_<env>`.
  */
 export function getSshKeyPath(projectDir: string, env: string): string | null {
-  try {
-    for (const path of sshKeyCandidates(env, join(projectDir, '.vibecarbon'))) {
-      if (existsSync(path)) return path;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+  const path = sshKeyPathFor(env, projectDir);
+  return existsSync(path) ? path : null;
 }

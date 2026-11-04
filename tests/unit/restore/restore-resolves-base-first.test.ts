@@ -46,7 +46,7 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
   const actual = await orig<typeof import('../../../src/lib/ssh.js')>();
   return {
     ...actual,
-    getSSHKeyPath: () => keyPath,
+    sshKeyPathFor: () => keyPath,
     getPostgresPod: vi.fn(async () => 'db-0'),
     sshKubectl: vi.fn(async () => ''),
     // The real argv contract (tests/_shared/ssh-contract.ts).

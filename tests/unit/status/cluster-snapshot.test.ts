@@ -51,7 +51,7 @@ describe('parseClusterSnapshot', () => {
 describe('createClusterSnapshots', () => {
   const seams = (sshKubectl: (...a: never[]) => unknown) => ({
     sshKubectl,
-    getSSHKeyPath: vi.fn(() => '/k'),
+    sshKeyPathFor: vi.fn(() => '/k'),
     existsSync: vi.fn(() => true),
   });
 

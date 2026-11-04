@@ -46,7 +46,7 @@ import { formatOrphanNotice } from './lib/orphan-stack-notice.js';
 import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
-import { getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
+import { sshKeyPathFor, sshKubectl, sshRun } from './lib/ssh.js';
 import { checkBackupHealth } from './lib/status/backup-health.js';
 import { createClusterSnapshots, dbPod, describeSshError } from './lib/status/cluster-snapshot.js';
 import {
@@ -561,7 +561,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
   const {
     sshRun: _sshRun = sshRun,
     sshKubectl: _sshKubectl = sshKubectl,
-    getSSHKeyPath: _getKey = getSSHKeyPath,
+    sshKeyPathFor: _getKey = sshKeyPathFor,
     existsSync: _exists = existsSync,
     timeoutMs = 10_000,
   } = deps;
@@ -602,7 +602,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
     deps.snapshots ??
     createClusterSnapshots(envName, {
       sshKubectl: _sshKubectl,
-      getSSHKeyPath: _getKey,
+      sshKeyPathFor: _getKey,
       existsSync: _exists,
     });
   const standbyIp = envConfig.ha?.standby?.masterIp;
@@ -798,7 +798,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
  * @param {string} envName
  * @param {object} envConfig
  * @param {string} projectName
- * @param {object} [deps] the ssh seams (sshRun, sshKubectl, getSSHKeyPath, existsSync) and checkBackupHealth's
+ * @param {object} [deps] the ssh seams (sshRun, sshKubectl, sshKeyPathFor, existsSync) and checkBackupHealth's
  * @returns {Promise<{ replication: PromiseSettledResult<any>, containers: PromiseSettledResult<any>, backups: PromiseSettledResult<any> }>}
  */
 export async function checkEnvironmentRemote(envName, envConfig, projectName, deps = {}) {

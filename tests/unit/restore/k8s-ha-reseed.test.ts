@@ -40,7 +40,7 @@ vi.mock('../../../src/lib/ssh.js', async () => {
     getPostgresPod: vi.fn().mockResolvedValue('db-0'),
     sshKubectl: vi.fn(promotedKubectl),
     sshRun: vi.fn(contractSshRun()),
-    getSSHKeyPath: vi.fn(),
+    sshKeyPathFor: vi.fn(),
   };
 });
 

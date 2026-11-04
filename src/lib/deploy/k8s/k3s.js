@@ -9,7 +9,7 @@
  *   2. Start the app image build locally, in the background, before anything
  *      is provisioned (startAppImageBuild: `vibecarbon-local/<project>:<sha>
  *      [-dirty]-<ts>`, its k3s-build gate inputs read first).
- *   3. Generate (or reuse) the SSH keypair under projectDir/.vibecarbon/ssh-<env>.
+ *   3. Generate (or reuse) the SSH keypair under projectDir/.vibecarbon/deploy_key_<env>.
  *   4. Pulumi up — cloud-init installs k3s + the provider's CCM/CSI on each node.
  *   5. Wait for SSH on master + `/tmp/k3s-ready` marker (onInfraReady fires:
  *      single k8s starts its DNS A record write here).
@@ -86,7 +86,7 @@ import {
   k8sStandbyZeroedWorkloads,
 } from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
-import { scpWithRetry, sshRun } from '../../ssh.js';
+import { scpWithRetry, sshKeyPathFor, sshRun } from '../../ssh.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import {
   BACKUP_NAME_RE,
@@ -1210,7 +1210,7 @@ export function buildDnsProviderSecret({ dnsProvider, dnsToken }) {
 
 /**
  * Generate or reuse an SSH keypair for this environment.
- * Stored under projectDir/.vibecarbon/ssh-<env>{,.pub}.
+ * Stored under projectDir/.vibecarbon/deploy_key_<env>{,.pub}.
  *
  * @param {string} projectDir
  * @param {string} environment
@@ -1219,7 +1219,7 @@ export function buildDnsProviderSecret({ dnsProvider, dnsToken }) {
 export async function ensureSshKey(projectDir, environment) {
   const dir = join(projectDir, '.vibecarbon');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const privateKeyPath = join(dir, `ssh-${environment}`);
+  const privateKeyPath = sshKeyPathFor(environment, projectDir);
   const publicKeyPath = `${privateKeyPath}.pub`;
   if (existsSync(privateKeyPath) && existsSync(publicKeyPath)) {
     return { privateKeyPath, publicKey: readFileSync(publicKeyPath, 'utf-8').trim() };

@@ -23,7 +23,7 @@
  */
 import { existsSync as fsExistsSync } from 'node:fs';
 import { DB_CONTAINER, DB_POD_SELECTOR } from '../deploy/db-workload.js';
-import { getSSHKeyPath as defaultGetKey, sshKubectl as defaultKubectl } from '../ssh.js';
+import { sshKeyPathFor as defaultGetKey, sshKubectl as defaultKubectl } from '../ssh.js';
 
 const NAMESPACE = 'vibecarbon';
 
@@ -99,12 +99,12 @@ export function parseClusterSnapshot(text) {
  * every asker with the same `cluster snapshot failed: <why>`.
  *
  * @param {string} envName
- * @param {{ sshKubectl?: typeof defaultKubectl, getSSHKeyPath?: typeof defaultGetKey, existsSync?: typeof fsExistsSync, snapshotTimeoutMs?: number }} [deps]
+ * @param {{ sshKubectl?: typeof defaultKubectl, sshKeyPathFor?: typeof defaultGetKey, existsSync?: typeof fsExistsSync, snapshotTimeoutMs?: number }} [deps]
  * @returns {{ get: (ip: string) => Promise<{ nodes: object[], pods: object[], jobs: object[] }> }}
  */
 export function createClusterSnapshots(envName, deps = {}) {
   const sshKubectl = deps.sshKubectl ?? defaultKubectl;
-  const getKey = deps.getSSHKeyPath ?? defaultGetKey;
+  const getKey = deps.sshKeyPathFor ?? defaultGetKey;
   const exists = deps.existsSync ?? fsExistsSync;
   const timeoutMs = deps.snapshotTimeoutMs ?? SNAPSHOT_TIMEOUT_MS;
   const byIp = new Map();

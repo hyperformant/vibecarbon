@@ -75,7 +75,7 @@ import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
-import { getPostgresPod, getSSHKeyPath, sshKubectl } from './lib/ssh.js';
+import { getPostgresPod, sshKeyPathFor, sshKubectl } from './lib/ssh.js';
 import { readPrimaryWalGap } from './lib/status/backup-health.js';
 import { createTracker } from './lib/tracker.js';
 import {
@@ -499,7 +499,7 @@ export async function run(args, deps = {}) {
   }
 
   // SSH key is required for everything restore touches.
-  const sshKeyPath = getSSHKeyPath(envName);
+  const sshKeyPath = sshKeyPathFor(envName);
   if (!existsSync(sshKeyPath)) {
     p.log.error(`SSH key not found: ${sshKeyPath}`);
     p.log.info(

@@ -46,7 +46,7 @@ import { localKubeconfigPath } from './lib/kubeconfig.js';
 import { ensureOperatorIpAccessWarn } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
-import { getSSHKeyPath, sshRun } from './lib/ssh.js';
+import { sshKeyPathFor, sshRun } from './lib/ssh.js';
 
 /**
  * One-line note printed (and saved to the report) when `hcloud` is
@@ -688,7 +688,7 @@ export async function diagnoseCompose(ctx) {
   const { report, envName, envConfig, projectName } = ctx;
   report.section('COMPOSE STATE');
 
-  const sshKeyPath = ctx.sshKeyPath ?? getSSHKeyPath(envName);
+  const sshKeyPath = ctx.sshKeyPath ?? sshKeyPathFor(envName);
   if (!existsSync(sshKeyPath)) {
     report.warn(
       `Skipping compose sections: SSH key not found at ${sshKeyPath}. Run a deploy first.`,
@@ -912,7 +912,7 @@ export async function run(args) {
 
   const cwd = process.cwd();
   const kubeconfig = localKubeconfigPath(cwd, envName);
-  const sshKey = join(cwd, '.vibecarbon', `ssh-${envName}`);
+  const sshKey = sshKeyPathFor(envName, cwd);
   const controlplaneIp = readControlplaneIp(envName);
 
   const envConfig = loadProjectConfig()?.environments?.[envName];
@@ -941,7 +941,6 @@ export async function run(args) {
   const isCompose = isComposeTier(tier);
   const providerId = providerIdFor(envConfig);
   const projectName = projectConfig?.projectName || 'project';
-  const composeKey = getSSHKeyPath(envName);
   const serverIps = (Array.isArray(envConfig?.servers) ? envConfig.servers : [])
     .map((s) => s?.ip)
     .filter(Boolean);
@@ -960,7 +959,7 @@ export async function run(args) {
     ...(isCompose
       ? [
           `# servers:    ${serverIps.length ? serverIps.join(', ') : '(none)'}`,
-          `# sshKey:     ${composeKey} ${existsSync(composeKey) ? '(found)' : '(MISSING)'}`,
+          `# sshKey:     ${sshKey} ${existsSync(sshKey) ? '(found)' : '(MISSING)'}`,
           `# project:    ${projectName}`,
         ]
       : [
@@ -980,7 +979,7 @@ export async function run(args) {
     envName,
     envConfig,
     projectName,
-    sshKeyPath: composeKey,
+    sshKeyPath: sshKey,
     // k8s collector fields
     cmdEnv: env,
     kubeconfig,

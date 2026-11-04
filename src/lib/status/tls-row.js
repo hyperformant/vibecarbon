@@ -24,7 +24,7 @@ import { existsSync } from 'node:fs';
 import { resolvePrimary } from '../cli/resolve-primary.js';
 import { c } from '../colors.js';
 import { probeTlsTrustOnce } from '../deploy/tls-ready.js';
-import { getSSHKeyPath, sshRun } from '../ssh.js';
+import { sshKeyPathFor, sshRun } from '../ssh.js';
 
 /** The cron's retry ceiling (MAX_RESTARTS in carbon/backup/tls-retry.sh). */
 export const TLS_RETRY_MAX = 48;
@@ -81,7 +81,7 @@ function readRetryOnPrimary(envName, envConfig, projectName) {
   return async () => {
     const primary = resolvePrimary(envConfig, { env: envName });
     if (!primary?.ip) throw new Error('no primary server recorded');
-    const key = getSSHKeyPath(envName);
+    const key = sshKeyPathFor(envName);
     if (!existsSync(key)) throw new Error('no ssh key for this environment');
     return sshRun(primary.ip, key, ['bash', '-lc', tlsRetryReadSh(`/opt/${projectName}`)], {
       timeout: PROBE_TIMEOUT_MS,

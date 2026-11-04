@@ -11,7 +11,6 @@
 
 import { existsSync, rmSync } from 'node:fs';
 import { isIP } from 'node:net';
-import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { reapChallengeRecords } from '../../acme-challenge.js';
 import { exitCancelled, exitDeclined } from '../../cli/exit-guard.js';
@@ -36,6 +35,7 @@ import {
   enabledAddonNames,
 } from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
+import { sshKeyPathFor } from '../../ssh.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import { backupFenceWarning, recordBackupFence, writeComposeBackupFence } from '../backup-fence.js';
@@ -1040,7 +1040,7 @@ async function isPrimaryReachable(primaryIp, sshKeyPath, remoteDir) {
 export async function destroyComposeHA(options) {
   const { projectName, environment, envConfig, providerToken, onProgress = () => {} } = options;
 
-  const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
+  const sshKeyPath = sshKeyPathFor(environment);
   const provider = new (providerFor(envConfig))(providerToken);
 
   /** @type {Array<{ resourceClass: string, resource: string, reason: string }>} */
@@ -2140,7 +2140,7 @@ export async function failoverComposeHA(
     process.exit(1);
   }
 
-  const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${envName}`);
+  const sshKeyPath = sshKeyPathFor(envName);
   if (!keyExists(sshKeyPath)) {
     p.log.error(`SSH key not found: ${sshKeyPath}`);
     process.exit(1);
