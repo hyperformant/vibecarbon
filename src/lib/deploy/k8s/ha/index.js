@@ -1050,8 +1050,9 @@ export async function setupReplication(options) {
           return source;
         },
         stageProbeS: inPlaceProbeBudgetS(PROBE_ATTEMPTS, PROBE_DELAY_S),
-        stageScript: (attempt, { basebackupDeadlineS }) =>
+        stageScript: (attempt, { basebackupDeadlineS, intent }) =>
           buildInPlaceReseedStageScript({
+            intent,
             replPassword,
             relayHost: _standbyDbPrivateIp,
             attempt,

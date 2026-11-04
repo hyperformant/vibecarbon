@@ -434,6 +434,7 @@ describe('buildStagedBasebackupScript in-place mode', () => {
     stagingDir: IN_PLACE_RESEED_DIR,
     primaryConninfo: 'host=10.0.0.5',
     inPlaceAttempt: 'att-1',
+    intent: 'standby',
   };
   const s = buildStagedBasebackupScript(base);
   it('clears a stale ready marker before staging anything', () => {
@@ -460,12 +461,16 @@ describe('buildStagedBasebackupScript in-place mode', () => {
       /> \/var\/lib\/postgresql\/data\/\.vc-reseed-ready\.tmp\nsync\nmv -f \/var\/lib\/postgresql\/data\/\.vc-reseed-ready\.tmp \/var\/lib\/postgresql\/data\/\.vc-reseed-ready\nsync\n/,
     );
   });
-  it('stages only on a standby, through the intent gate db-guard.sh swaps under', () => {
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: shell expansion text
-    const gate = s.indexOf('if [ "${VC_WALG_ROLE_INTENT:-}" != standby ]; then');
-    expect(gate).toBeGreaterThan(-1);
-    expect(gate).toBeLessThan(s.indexOf('rm -f /var/lib/postgresql/data/.vc-reseed-ready'));
-    // The same comparison the swap makes (no second role parser).
+  it('stages only for a standby intent the CLI read, never the running container env', () => {
+    // The running container's VC_WALG_ROLE_INTENT is the value from ITS start:
+    // after a failover swaps the roles it still names the old role until the
+    // container restarts (the 2026-11-04 reconverge refusal). The intent that
+    // matters is the one the NEXT start reads, the vibecarbon-db-role
+    // ConfigMap's, which the CLI's guard read; db-guard.sh swaps under it.
+    expect(s).not.toContain('VC_WALG_ROLE_INTENT');
+    for (const intent of ['', 'primary', 'standby2', undefined]) {
+      expect(() => buildStagedBasebackupScript({ ...base, intent })).toThrow(/intent/);
+    }
     expect(readFileSync('carbon/volumes/db/db-guard.sh', 'utf-8')).toContain(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: shell expansion text
       '[ "${VC_WALG_ROLE_INTENT:-}" = standby ]',
@@ -674,6 +679,7 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
       stagingDir: IN_PLACE_RESEED_DIR,
       primaryConninfo: 'host=10.0.0.5 port=15433',
       inPlaceAttempt: 'att-1',
+      intent: 'standby',
       // The production shape: reseedStandbyInPlace always bounds the transfer.
       basebackupDeadlineS: 600,
       ...extra,
@@ -739,18 +745,23 @@ describe.skipIf(!hasFlock)('the in-place stage, executed, then the real db-guard
     }
   });
 
-  it.each([
-    ['unset', ''],
-    ['primary', 'primary'],
-    ['garbage', 'standby2'],
-  ])('intent %s: refuses before touching anything', (_label, intent) => {
-    writeFileSync(join(pgdata, '.vc-reseed-ready'), 'old');
-    const r = stage({ VC_WALG_ROLE_INTENT: intent });
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toMatch(/not standby/);
-    expect(read('.vc-reseed-ready')).toBe('old');
-    expect(existsSync(join(pgdata, '.vc-reseed'))).toBe(false);
-    expect(existsSync(calls)).toBe(false);
+  it('reconverge: the old primary container still says primary in its env, the stage runs and the swap takes it', () => {
+    // A failover swapped the roles: the ConfigMap now says standby, the
+    // running container (started as the primary) still has primary in env.
+    const r = stage({ VC_WALG_ROLE_INTENT: 'primary' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim().split('\n').at(-1)).toBe('RESEED_STAGED att-1');
+    // The restarted container resolves the ConfigMap again: standby.
+    const g = guard('standby');
+    expect(g.status, g.stderr).toBe(0);
+    expect(g.stderr).toContain('RESEED_SWAPPED att-1');
+  });
+
+  it('a restarted container whose intent is still not standby never swaps the staged tree', () => {
+    expect(stage().status).toBe(0);
+    const g = guard('primary');
+    expect(g.stderr).not.toContain('RESEED_SWAPPED');
+    expect(read('base/marker')).toBe('live\n');
   });
 
   it('a swap under way (.vc-reseed-in-progress): refuses, nothing touched', () => {

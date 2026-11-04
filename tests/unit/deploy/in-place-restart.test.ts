@@ -297,9 +297,12 @@ describe('assertLiveDbGuardSupportsReseed', () => {
 
   it('reads the running pod, the intent ConfigMap, then greps the mounted wrapper; returns the guard', async () => {
     const { kubectl, argvs } = stub();
-    await expect(assertLiveDbGuardSupportsReseed(kubectl, { envName: 'prod' })).resolves.toEqual(
-      READ('t'),
-    );
+    // The guard carries the ConfigMap intent it read: the in-place stage
+    // builds only for it (the running container's env can be stale).
+    await expect(assertLiveDbGuardSupportsReseed(kubectl, { envName: 'prod' })).resolves.toEqual({
+      ...READ('t'),
+      intent: 'standby',
+    });
     expect(argvs).toEqual([
       ['-n', 'vibecarbon', 'get', 'pod', 'db-0', '-o', 'json'],
       [

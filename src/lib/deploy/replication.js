@@ -293,8 +293,18 @@ export function buildStagedBasebackupScript({
   label = 'reseed',
   inPlaceAttempt = null,
   basebackupDeadlineS = null,
+  intent = null,
 }) {
   const inPlace = inPlaceAttempt !== null && inPlaceAttempt !== undefined;
+  if (inPlace && intent !== 'standby') {
+    // The intent that decides is the one the NEXT container start reads (the
+    // vibecarbon-db-role ConfigMap, which the CLI's guard read), never the
+    // running container's env, which still names the old role after a
+    // failover swapped them.
+    throw new Error(
+      `buildStagedBasebackupScript: an in-place stage needs the standby role intent the CLI read (got ${intent ? `'${intent}'` : 'none'})`,
+    );
+  }
   if (basebackupDeadlineS !== null && basebackupDeadlineS !== undefined) {
     if (!inPlace) {
       throw new Error('buildStagedBasebackupScript: basebackupDeadlineS is for an in-place stage');
@@ -482,9 +492,12 @@ if [ ! -f ${stagingDir}/PG_VERSION ]; then
   exit 1
 fi`;
 
-  // In-place mode: the gate, the lock and the clean slate come before
-  // anything else. The intent gate is the very comparison db-guard.sh swaps
-  // under, so a stage never builds a tree the swap would refuse. The lock is
+  // In-place mode: the lock and the clean slate come before anything else.
+  // No intent gate here: the running container's VC_WALG_ROLE_INTENT is the
+  // value from its own start, stale after a failover swapped the roles (a
+  // reconverge refused on exactly that, 2026-11-04). The caller passes the
+  // ConfigMap intent its guard read (checked above), and db-guard.sh swaps
+  // only under the intent the restarted container resolves. The lock is
   // the one restore and db-guard.sh take: a kubectl exec whose client dropped
   // keeps running, and a second stage over it would mix two base backups into
   // a tree that passes every proof. The loser prints RESEED_REFUSED busy and
@@ -494,10 +507,6 @@ fi`;
   const lockFile = `${pgdataDir}/.vc-restore.lock`;
   const inPlaceHead = inPlace
     ? `
-if [ "\${VC_WALG_ROLE_INTENT:-}" != standby ]; then
-  echo "[${label}] RESEED_REFUSED: the db intent (VC_WALG_ROLE_INTENT) is not standby; nothing staged" >&2
-  exit 1
-fi
 if [ -L ${lockFile} ]; then
   echo "[${label}] RESEED_REFUSED: ${lockFile} is a symlink; nothing staged" >&2
   exit 1
@@ -1163,8 +1172,9 @@ export async function reseedStandbyFromPrimary(
   // postgres runs. The script is piped over stdin (PGPASSWORD embedded), never
   // argv. It dials the LOCAL relay and pins the explicit streaming conninfo,
   // byte-identical to the deploy-time seed's buildPrimaryConninfo output.
-  const stageScript = (attempt, { basebackupDeadlineS }) =>
+  const stageScript = (attempt, { basebackupDeadlineS, intent }) =>
     buildInPlaceReseedStageScript({
+      intent,
       replPassword,
       relayHost: standbyDbPrivateIp,
       // One probe, like the single-shot pre-check this replaces: failover
@@ -1221,6 +1231,8 @@ export async function reseedStandbyFromPrimary(
  * @param {number} o.probeAttempts
  * @param {number} [o.probeDelayS=10]
  * @param {string} o.label
+ * @param {string} o.intent the role intent the guard read from the
+ *   vibecarbon-db-role ConfigMap (reseedStandbyInPlace passes it); must be 'standby'
  * @returns {string}
  */
 export function buildInPlaceReseedStageScript({
@@ -1231,6 +1243,7 @@ export function buildInPlaceReseedStageScript({
   probeAttempts,
   probeDelayS = 10,
   label,
+  intent,
 }) {
   return buildStagedBasebackupScript({
     replPassword,
@@ -1249,6 +1262,7 @@ export function buildInPlaceReseedStageScript({
     label,
     inPlaceAttempt: attempt,
     basebackupDeadlineS,
+    intent,
   });
 }
 
@@ -1490,7 +1504,7 @@ export async function reseedStandbyInPlace({
   const clientS = bounds.clientS + Math.max(0, Math.ceil(Number(stageProbeS) || 0));
 
   const attempt = newReseedAttempt();
-  const script = stageScript(attempt, { basebackupDeadlineS: remoteS });
+  const script = stageScript(attempt, { basebackupDeadlineS: remoteS, intent: guard.intent });
   // runInPlaceStage reads the stage's stdout (an exec error carries it):
   // busy is terminal, never retried here or by a caller. The client bound
   // sits above the stage's own deadline, so it never abandons a live stage.
@@ -2008,7 +2022,9 @@ export async function assertLiveDbGuardSupportsReseed(
   });
   const verdict = evaluateDbGuardSupport(podJson, marker, intent, { requireRecovery });
   if (!verdict.ok) throw refuse(verdict);
-  return verdict;
+  // The intent read here is the one the next container start resolves; the
+  // in-place stage builds only for it (buildStagedBasebackupScript).
+  return { ...verdict, intent };
 }
 
 /** An earlier in-place stage still holds the PGDATA lock: report, never retry. */
