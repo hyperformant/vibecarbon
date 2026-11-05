@@ -287,6 +287,50 @@ describe('grafana_route_protected', () => {
     expect(r.grafana_route_protected.status).toBe('fail');
     expect(r.grafana_route_protected.errorMessage).toMatch(/not behind ForwardAuth/);
   });
+
+  // Grafana comes up after the deploy returns, and until it is Ready the path
+  // falls through to the app's own page: 200 text/html on DigitalOcean k8s,
+  // 2026-11-05, which this check reported as an exposed route. It was not.
+  it('waits for a route still coming up, then grades the real answer', async () => {
+    let answers = 0;
+    const r = await run(
+      environment(K8S_BASE, { unauthed: () => (++answers < 3 ? html(200) : unauthorized()) }),
+    );
+    expect(r.grafana_route_protected.status).toBe('pass');
+    expect(answers).toBe(3);
+  });
+
+  it('a wait never turns exposure into a pass: the route comes up open', async () => {
+    let answers = 0;
+    const r = await run(
+      environment(K8S_BASE, {
+        unauthed: () => (++answers < 3 ? html(200) : json(GRAFANA_HEALTH)),
+      }),
+    );
+    expect(r.grafana_route_protected.status).toBe('fail');
+    expect(r.grafana_route_protected.errorMessage).toMatch(/not behind ForwardAuth/);
+  });
+
+  it('does not wait on real exposure: the first answer fails it', async () => {
+    let answers = 0;
+    const r = await run(
+      environment(K8S_BASE, {
+        unauthed: () => {
+          answers += 1;
+          return json(GRAFANA_HEALTH);
+        },
+      }),
+    );
+    expect(r.grafana_route_protected.status).toBe('fail');
+    expect(answers).toBe(1);
+  });
+
+  it('reports a route that never arrives as that, not as an open route', async () => {
+    const r = await run(environment(K8S_BASE, { unauthed: () => html(200) }));
+    expect(r.grafana_route_protected.status).toBe('fail');
+    expect(r.grafana_route_protected.errorMessage).toMatch(/nothing routes it to Grafana/);
+    expect(r.grafana_route_protected.errorMessage).not.toMatch(/ForwardAuth/);
+  });
 });
 
 describe('the ForwardAuth cookie', () => {
