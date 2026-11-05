@@ -65,6 +65,24 @@ describe('k3s SSH host-key pinning (PR 1B-T6)', () => {
     expect(argv.join(' ')).not.toContain(`${process.env.HOME}/.ssh/known_hosts`);
   });
 
+  it('waitForK3sReady gives the held ssh session a timeout bounded by the remaining budget', async () => {
+    const { waitForK3sReady } = await k3sModulePromise;
+    const spawnMock = vi.mocked(spawn);
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => fakeChild(255) as unknown as ReturnType<typeof spawn>);
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const tmp = mkdtempSync(join(tmpdir(), 'vc-k3s-test-'));
+
+    await expect(waitForK3sReady('1.2.3.4', '/tmp/key', join(tmp, 'kh'), 1)).rejects.toThrow(
+      /k3s did not become ready/,
+    );
+
+    // min(30, ~1s) * 1000 + 5000: one real session timeout, not unbounded.
+    const delays = timers.mock.calls.map((c) => Number(c[1]));
+    expect(delays.some((d) => d >= 5500 && d <= 6000)).toBe(true);
+    timers.mockRestore();
+  });
+
   it('fetchKubeconfig passes UserKnownHostsFile=<env known_hosts> to scp', async () => {
     // fetchKubeconfig's scp now goes through runCommandAsync (Task A3).
     const { fetchKubeconfig } = await k3sModulePromise;

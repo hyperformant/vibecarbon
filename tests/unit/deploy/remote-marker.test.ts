@@ -55,6 +55,8 @@ describe('markerWaitScript', () => {
     expect(lines).toContain('during');
     expect(lines).toContain('READY');
     expect(r.ms).toBeLessThan(1500);
+    const ps = await runScript(`pgrep -f '[t]ail -n .*${dir}' || true`);
+    expect(ps.out.trim()).toBe('');
   });
 
   it('works without a log path', async () => {
@@ -77,6 +79,18 @@ describe('markerWaitScript', () => {
 });
 
 describe('waitForRemoteMarker', () => {
+  // A regression that stops the loop from ending must fail, not hang the suite.
+  const wait = (args: Parameters<typeof waitForRemoteMarker>[0]) => {
+    let calls = 0;
+    return waitForRemoteMarker({
+      ...args,
+      run: (...a) => {
+        if (++calls > 50) throw new Error('run called more than 50 times: loop never ended');
+        return args.run(...a);
+      },
+    });
+  };
+
   function clock() {
     let t = 0;
     return {
@@ -95,7 +109,7 @@ describe('waitForRemoteMarker', () => {
     const outs = [null, 'CONNECTED\n', 'CONNECTED\nREADY\n'];
     let n = 0;
     let connectedCalls = 0;
-    const res = await waitForRemoteMarker({
+    const res = await wait({
       run: async () => outs[n++],
       markerPath: '/m',
       deadlineMs: 600_000,
@@ -110,7 +124,7 @@ describe('waitForRemoteMarker', () => {
 
   it('keeps connected when the held session printed CONNECTED then died (null result)', async () => {
     const c = clock();
-    const res = await waitForRemoteMarker({
+    const res = await wait({
       run: async (_s, { onLine }) => {
         onLine('CONNECTED');
         c.advance(30_000);
@@ -125,7 +139,7 @@ describe('waitForRemoteMarker', () => {
   });
 
   it('is ready from a streamed READY even when the result is null', async () => {
-    const res = await waitForRemoteMarker({
+    const res = await wait({
       run: async (_s, { onLine }) => {
         onLine('CONNECTED');
         onLine('READY');
@@ -141,7 +155,7 @@ describe('waitForRemoteMarker', () => {
 
   it('returns not ready, connected at the deadline when only CONNECTED ever arrives', async () => {
     const c = clock();
-    const res = await waitForRemoteMarker({
+    const res = await wait({
       run: async () => {
         c.advance(30_000);
         return 'CONNECTED\n';
@@ -156,7 +170,7 @@ describe('waitForRemoteMarker', () => {
 
   it('returns not connected when nothing ever answers', async () => {
     const c = clock();
-    const res = await waitForRemoteMarker({
+    const res = await wait({
       run: async () => null,
       markerPath: '/m',
       deadlineMs: 10_000,
@@ -170,7 +184,7 @@ describe('waitForRemoteMarker', () => {
     const c = clock();
     const seen: string[] = [];
     const timeouts: number[] = [];
-    await waitForRemoteMarker({
+    await wait({
       run: async (_s, { onLine, timeoutMs }) => {
         timeouts.push(timeoutMs);
         onLine('CONNECTED');
@@ -188,6 +202,63 @@ describe('waitForRemoteMarker', () => {
     expect(new Set(seen)).toEqual(new Set(['1700000000 line']));
     expect(timeouts[0]).toBe(35_000);
     expect(timeouts[1]).toBeLessThanOrEqual(15_000 + 5000);
+  });
+});
+
+describe('waitForRemoteMarker sentinel matching', () => {
+  it('counts only a whole READY line, and keeps look-alikes as log lines', async () => {
+    let t = 0;
+    const seen: string[] = [];
+    const res = await waitForRemoteMarker({
+      run: async (_s, { onLine }) => {
+        onLine('CONNECTED');
+        onLine('NOT_READY');
+        onLine('u 1.2 READY');
+        t += 60_000;
+        return null;
+      },
+      markerPath: '/m',
+      deadlineMs: 30_000,
+      now: () => t,
+      sleep: async () => {},
+      onLine: (l) => seen.push(l),
+    });
+    expect(res).toEqual({ ready: false, connected: true });
+    expect(seen).toEqual(['NOT_READY', 'u 1.2 READY']);
+  });
+
+  it('does not treat look-alikes in the resolved stdout as READY either', async () => {
+    let t = 0;
+    const res = await waitForRemoteMarker({
+      run: async () => {
+        t += 60_000;
+        return 'CONNECTED\nNOT_READY\nu 1.2 READY\n';
+      },
+      markerPath: '/m',
+      deadlineMs: 30_000,
+      now: () => t,
+      sleep: async () => {},
+    });
+    expect(res.ready).toBe(false);
+  });
+
+  it('keeps a real READY line out of onLine', async () => {
+    const seen: string[] = [];
+    const res = await waitForRemoteMarker({
+      run: async (_s, { onLine }) => {
+        onLine('CONNECTED');
+        onLine('d 1.5');
+        onLine('READY');
+        return null;
+      },
+      markerPath: '/m',
+      deadlineMs: 30_000,
+      now: () => 0,
+      sleep: async () => {},
+      onLine: (l) => seen.push(l),
+    });
+    expect(res).toEqual({ ready: true, connected: true });
+    expect(seen).toEqual(['d 1.5']);
   });
 });
 

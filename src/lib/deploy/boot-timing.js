@@ -23,7 +23,7 @@
  *   - `cloud-init analyze show`: total cloud-init time and each stage
  *     (init-local, init-network, modules-config, modules-final).
  *   - `cloud-init analyze blame`: the slowest modules.
- *   - BOOT_MARK_LOG: one `<id> <epoch seconds>` line per major phase, written
+ *   - BOOT_MARK_LOG: one `<id> <epoch seconds.nanoseconds>` line per major phase, written
  *     by the cloud-init scripts in carbon/cloud-init/ with one-letter ids
  *     (PHASE_IDS; Hetzner caps user data at 32 KiB). A plain mark starts a
  *     sequential phase that runs until the next plain mark (the last one, `e`,
@@ -81,7 +81,7 @@ export const BOOT_STAGE_LABELS = Object.freeze({
   r: 'waiting for Kubernetes',
   x: 'installing cluster add-ons',
   d: 'starting Docker',
-  u: 'installing the firewall',
+  u: 'setting up the firewall',
   b: 'pulling the database image',
 });
 

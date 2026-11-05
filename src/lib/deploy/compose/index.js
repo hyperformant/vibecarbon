@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-settings.mjs';
-import { progressLog, spinner } from '../../cli/progress.js';
+import { progressLog, shouldAnimateSpinner, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { writeLogDetail } from '../../deploy-logger.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
@@ -453,6 +453,7 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
   const deadline = start + timeoutMs;
   let everConnected = false;
   let stageLabel = '';
+  let newestMark = 0;
   // One held SSH session returns the moment the marker exists and streams the
   // boot log; a 1s timer keeps the spinner's elapsed time and stage current.
   const render = () => {
@@ -462,7 +463,10 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
       : `Waiting for SSH to reach ${ip} (${elapsed}s)`;
     s.message(stageLabel ? `${base}: ${stageLabel}` : `${base}...`);
   };
-  const ticker = setInterval(render, 1000);
+  // The quiet (non-TTY) spinner prints a line per change, and the elapsed time
+  // changes every tick, so only an animating spinner gets the timer. Quiet
+  // output still renders on connect and on a stage change.
+  const ticker = shouldAnimateSpinner() ? setInterval(render, 1000) : null;
   let ready = false;
   try {
     ({ ready, connected: everConnected } = await waitForRemoteMarker({
@@ -481,17 +485,21 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
         render();
       },
       onLine: (line) => {
-        // Boot-log lines are `<phase id> <epoch seconds>`.
-        const mark = /^([a-z]) \d+$/.exec(line.trim());
+        // Boot-log lines are `<phase id> <epoch seconds.nanoseconds>`. Every
+        // reconnect replays the whole log, so only a mark newer than the last
+        // one seen may change the label.
+        const mark = /^([a-z]) (\d+(?:\.\d+)?)$/.exec(line.trim());
         const label = mark && BOOT_STAGE_LABELS[mark[1]];
-        if (label && label !== stageLabel) {
+        if (!label || Number(mark[2]) <= newestMark) return;
+        newestMark = Number(mark[2]);
+        if (label !== stageLabel) {
           stageLabel = label;
           render();
         }
       },
     }));
   } finally {
-    clearInterval(ticker);
+    if (ticker) clearInterval(ticker);
   }
   if (ready) {
     s.stop(`Server ${ip} ready (cloud-init complete)`);

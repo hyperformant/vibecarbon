@@ -72,7 +72,7 @@ export async function waitForRemoteMarker({
   const handleLine = (raw) => {
     const line = String(raw).trim();
     if (line === 'CONNECTED') return markConnected();
-    if (line === 'READY') {
+    if (hasSentinelLine(line, 'READY')) {
       markConnected();
       ready = true;
       return;
@@ -100,7 +100,6 @@ export async function waitForRemoteMarker({
     if (out != null) {
       markConnected();
       if (!streamed) for (const line of String(out).split('\n')) handleLine(line);
-      if (hasSentinelLine(out, 'READY')) ready = true;
     }
     if (ready) return { ready: true, connected };
     await sleep(reconnectDelayMs);
