@@ -38,6 +38,7 @@ interface K8sContainer {
   volumeMounts?: Array<{ name: string; mountPath: string; readOnly?: boolean }>;
   livenessProbe?: unknown;
   readinessProbe?: unknown;
+  startupProbe?: unknown;
 }
 
 interface K8sDeployment {
@@ -231,10 +232,20 @@ describe('cluster-autoscaler deployment.yaml — carbon-autoscaler sidecar', () 
     const sidecar = containerNamed('carbon-autoscaler');
     expect(sidecar.livenessProbe).toEqual({
       exec: { command: ['node', 'src/autoscaler/healthcheck.js', '--liveness'] },
-      initialDelaySeconds: 15,
+      initialDelaySeconds: 0,
       periodSeconds: 30,
       timeoutSeconds: 15,
       failureThreshold: 3,
+    });
+  });
+
+  it('startupProbe runs the readiness check every 2s so the cold start is gated there', () => {
+    const sidecar = containerNamed('carbon-autoscaler');
+    expect(sidecar.startupProbe).toEqual({
+      exec: { command: ['node', 'src/autoscaler/healthcheck.js', '--readiness'] },
+      periodSeconds: 2,
+      timeoutSeconds: 15,
+      failureThreshold: 60,
     });
   });
 
@@ -242,7 +253,7 @@ describe('cluster-autoscaler deployment.yaml — carbon-autoscaler sidecar', () 
     const sidecar = containerNamed('carbon-autoscaler');
     expect(sidecar.readinessProbe).toEqual({
       exec: { command: ['node', 'src/autoscaler/healthcheck.js', '--readiness'] },
-      initialDelaySeconds: 10,
+      initialDelaySeconds: 0,
       periodSeconds: 20,
       timeoutSeconds: 15,
       failureThreshold: 3,

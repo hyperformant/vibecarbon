@@ -515,6 +515,15 @@ spec:
           # standby in recovery also answers, so the k8s-ha standby goes Ready
           # too. No liveness probe: a long WAL replay after a restore must not
           # be killed half way.
+          # Startup uses the same check every second, so Ready lands within a
+          # second of the server accepting. A startup probe must never be what
+          # kills a recovering database, so its budget is one hour.
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+            periodSeconds: 1
+            timeoutSeconds: 5
+            failureThreshold: 3600
           readinessProbe:
             exec:
               command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]

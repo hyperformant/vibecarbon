@@ -56,11 +56,18 @@ spec:
           limits:
             cpu: 500m
             memory: 256Mi
+        startupProbe:
+          httpGet:
+            path: /ping
+            port: traefik
+          periodSeconds: 1
+          timeoutSeconds: 3
+          failureThreshold: 60
         livenessProbe:
           httpGet:
             path: /ping
             port: traefik
-          initialDelaySeconds: 10
+          initialDelaySeconds: 0
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
@@ -68,7 +75,7 @@ spec:
           httpGet:
             path: /ping
             port: traefik
-          initialDelaySeconds: 5
+          initialDelaySeconds: 0
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 3

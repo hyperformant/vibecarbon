@@ -137,26 +137,41 @@ spec:
           # margin the failing runs needed (healthcheck.js's own internal
           # gRPC deadline is 3s, so 15s covers a slow node cold-start on
           # top of that with room to spare) without image changes.
-          # initialDelaySeconds bumped in step so the very first attempt —
-          # fired while the rest of the control-plane pods are also
-          # starting — gets the same slack.
+          # The cold start is now gated by the startupProbe below (same
+          # command as readiness, same 15s timeout), so the probes here carry
+          # no initialDelaySeconds: liveness is off until startup passes, and
+          # readiness runs the moment it does.
           #
           # Worst-case detection window (true backend death to kubelet
           # restart), assuming death lands right after a successful check:
           # failureThreshold(3) x periodSeconds(30) + timeoutSeconds(15) =
           # ~105s. That's only ~10s worse than the pre-incident bound
-          # (~95s), because periodSeconds (unchanged, still > timeoutSeconds
-          # so probes can't overlap) dominates the bound, not
+          # (~95s), because periodSeconds (unchanged, still > timeoutSeconds)
+          # dominates the bound, not
           # timeoutSeconds — i.e. this buys headroom against slow-but-alive
           # without materially widening the window in which a genuinely
           # dead sidecar goes undetected.
+          # Startup: the readiness check, polled every 2s, for up to 120s of
+          # attempts. Ends the wait for the next 20s readiness tick once the
+          # sidecar is actually serving. A kubelet probe worker runs one
+          # attempt at a time, so a 2s period with a 15s timeout cannot
+          # overlap: the next attempt starts after the previous one returns.
+          startupProbe:
+            exec:
+              command:
+                - node
+                - src/autoscaler/healthcheck.js
+                - --readiness
+            periodSeconds: 2
+            timeoutSeconds: 15
+            failureThreshold: 60
           livenessProbe:
             exec:
               command:
                 - node
                 - src/autoscaler/healthcheck.js
                 - --liveness
-            initialDelaySeconds: 15
+            initialDelaySeconds: 0
             periodSeconds: 30
             timeoutSeconds: 15
             failureThreshold: 3
@@ -167,9 +182,8 @@ spec:
           # directly over loopback), so a longer detection window than
           # liveness is acceptable in exchange for the same cold-start
           # margin — see the Task 9j incident note on livenessProbe above.
-          # periodSeconds raised 10 -> 20 alongside timeoutSeconds (must
-          # stay > timeoutSeconds or successive exec attempts would
-          # overlap/queue instead of running on a clean cadence).
+          # periodSeconds raised 10 -> 20 alongside timeoutSeconds, to keep
+          # the cadence clean (probes never overlap, see startupProbe).
           # Worst-case detection window: failureThreshold(3) x
           # periodSeconds(20) + timeoutSeconds(15) = ~75s (was ~35s) —
           # still well bounded, and non-destructive when hit.
@@ -179,7 +193,7 @@ spec:
                 - node
                 - src/autoscaler/healthcheck.js
                 - --readiness
-            initialDelaySeconds: 10
+            initialDelaySeconds: 0
             periodSeconds: 20
             timeoutSeconds: 15
             failureThreshold: 3
