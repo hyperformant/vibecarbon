@@ -38,6 +38,7 @@ interface K8sContainer {
   volumeMounts?: Array<{ name: string; mountPath: string; readOnly?: boolean }>;
   livenessProbe?: unknown;
   readinessProbe?: unknown;
+  startupProbe?: unknown;
 }
 
 interface K8sDeployment {
@@ -231,10 +232,23 @@ describe('cluster-autoscaler deployment.yaml — carbon-autoscaler sidecar', () 
     const sidecar = containerNamed('carbon-autoscaler');
     expect(sidecar.livenessProbe).toEqual({
       exec: { command: ['node', 'src/autoscaler/healthcheck.js', '--liveness'] },
-      initialDelaySeconds: 15,
+      initialDelaySeconds: 0,
       periodSeconds: 30,
       timeoutSeconds: 15,
       failureThreshold: 3,
+    });
+  });
+
+  it('startupProbe runs the liveness check, never the SERVING-gated readiness check', () => {
+    // SERVING needs a first Refresh driven by the cluster-autoscaler container.
+    // A startup failure kills this container, so gating it on SERVING would
+    // restart a healthy sidecar whenever that other container crash-loops.
+    const sidecar = containerNamed('carbon-autoscaler');
+    expect(sidecar.startupProbe).toEqual({
+      exec: { command: ['node', 'src/autoscaler/healthcheck.js', '--liveness'] },
+      periodSeconds: 2,
+      timeoutSeconds: 15,
+      failureThreshold: 60,
     });
   });
 
@@ -242,7 +256,7 @@ describe('cluster-autoscaler deployment.yaml — carbon-autoscaler sidecar', () 
     const sidecar = containerNamed('carbon-autoscaler');
     expect(sidecar.readinessProbe).toEqual({
       exec: { command: ['node', 'src/autoscaler/healthcheck.js', '--readiness'] },
-      initialDelaySeconds: 10,
+      initialDelaySeconds: 0,
       periodSeconds: 20,
       timeoutSeconds: 15,
       failureThreshold: 3,

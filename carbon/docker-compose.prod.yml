@@ -248,6 +248,13 @@ services:
   # postgresql.conf and the base file's `-c` flags). Keep any `cpus` you add
   # elsewhere at 1.0 or below (tests/unit/template/compose-cpu-limits.test.ts).
   db:
+    # Docker checks every second during the start period only, then returns
+    # to the base file's `interval`. Dependents (app, app-migrate) start
+    # within a second of the db being ready. Needs Docker Engine 25 or newer,
+    # which servers have; the base file omits it because Compose 2.18 rejects
+    # the key and Compose 2.24-2.29 on Engine 24 refuse to start with it.
+    healthcheck:
+      start_interval: 1s
     environment:
       # Required (`:?`) so deploy's preflight refuses a .env without the
       # database password before anything is created (findMissingRequiredEnv

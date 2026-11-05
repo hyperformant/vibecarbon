@@ -78,7 +78,7 @@ import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
-import { pollUntil, runWithRetry } from '../../retry.js';
+import { runWithRetry } from '../../retry.js';
 import {
   declaredAddonNames,
   enabledK8sAddonNames,
@@ -102,7 +102,7 @@ import {
 } from '../../walg/restore-layout.js';
 import { assertRestoredPrimaryWritable } from '../../walg/restore-marker.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
-import { queueBootTiming } from '../boot-timing.js';
+import { BOOT_MARK_LOG, queueBootTiming, readBootStage } from '../boot-timing.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import {
   DB_CONTAINER,
@@ -114,6 +114,7 @@ import {
 } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
+import { waitForRemoteMarker } from '../remote-marker.js';
 import {
   READ_WRITE_PGOPTIONS,
   REPL_PORT,
@@ -1234,59 +1235,69 @@ function sshHostKeyOpts(khPath) {
  * Block until the cloud-init `/tmp/k3s-ready` marker appears via SSH.
  * Cloud-init writes this after `kubectl get nodes` shows the master Ready.
  *
- * Exponential backoff (2s → 4s → 8s, capped at 15s) so early-ready nodes
- * (~80s on the spike) aren't held back. Long tails still back off so we
- * don't hammer SSH during slow boots.
+ * Holds one SSH session that returns the moment the marker exists (see
+ * remote-marker.js), reconnecting if it drops, so a ready node is noticed
+ * within a fraction of a second.
  *
  * @param {string} masterIp
  * @param {string} sshKeyPath
  * @param {string} khPath - per-env known_hosts file path
  * @param {number} [maxWaitSec]
+ * @param {{ onStage?: (label: string) => void }} [opts] - called with a plain
+ *   description of what the server is doing, when it changes
  * @returns {Promise<void>}
  */
-export async function waitForK3sReady(masterIp, sshKeyPath, khPath, maxWaitSec = 600) {
-  try {
-    await pollUntil(
-      async () => {
-        await runCommandAsync(
-          [
-            'ssh',
-            '-i',
-            sshKeyPath,
-            ...sshHostKeyOpts(khPath),
-            '-o',
-            'ConnectTimeout=5',
-            '-o',
-            'BatchMode=yes',
-            `root@${masterIp}`,
-            'test -f /tmp/k3s-ready',
-          ],
-          { silent: true },
-        );
-        return true;
-      },
-      {
-        budgetMs: maxWaitSec * 1000,
-        // Tight tail (default is 15s): a cold node flips /tmp/k3s-ready in one
-        // step, so a 15s backoff would add up to ~15s of dead time past the
-        // actual-ready moment. 5s caps that at ~5s; the extra SSH probes are
-        // ~1s ConnectTimeout=5 round-trips, cheap against the saved tail.
-        initialDelayMs: 1000,
-        maxDelayMs: 5000,
-        description: 'k3s ready flag',
-      },
-    );
-  } catch (err) {
+export async function waitForK3sReady(
+  masterIp,
+  sshKeyPath,
+  khPath,
+  maxWaitSec = 600,
+  { onStage } = {},
+) {
+  // One held SSH session returns the moment /tmp/k3s-ready exists. The run
+  // wrapper never throws (the helper's contract) and keeps the last SSH error
+  // for the timeout message below.
+  let lastErr;
+  const run = async (script, { timeoutMs, onLine }) => {
+    try {
+      return await runCommandAsync(
+        [
+          'ssh',
+          '-i',
+          sshKeyPath,
+          ...sshHostKeyOpts(khPath),
+          '-o',
+          'ConnectTimeout=5',
+          '-o',
+          'BatchMode=yes',
+          `root@${masterIp}`,
+          script,
+        ],
+        { silent: true, timeout: timeoutMs, onStdoutLine: onLine },
+      );
+    } catch (err) {
+      lastErr = err;
+      return null;
+    }
+  };
+  const { ready } = await waitForRemoteMarker({
+    run,
+    markerPath: '/tmp/k3s-ready',
+    logPath: BOOT_MARK_LOG,
+    deadlineMs: Date.now() + maxWaitSec * 1000,
+    ...(onStage && { onLine: readBootStage(onStage) }),
+  });
+  if (!ready) {
+    const err = lastErr;
     // Capture cloud-init + syslog before throwing so the failure log says
     // WHY install timed out (apt slow? k3s download 5xx? script crashed?)
     // instead of just "300s passed and the marker isn't there." Best-effort —
     // if the box is unreachable, captureK3sInstallDiag returns an empty string
     // and we surface only the SSH probe error.
-    const lastErr = err.cause ?? err;
     const diag = await captureK3sInstallDiag(masterIp, sshKeyPath, khPath);
     throw new Error(
       `k3s did not become ready on ${masterIp} within ${maxWaitSec}s. ` +
-        `Last SSH error: ${lastErr instanceof Error ? lastErr.message : 'unknown'}` +
+        `Last SSH error: ${err instanceof Error ? err.message : 'unknown'}` +
         (diag ? `\n\n--- install diagnostics from ${masterIp} ---\n${diag}` : ''),
     );
   }
@@ -5089,7 +5100,9 @@ async function deployK3sSteps(options, inFlight) {
     // costs us nothing — we still get the same actionable signal on real
     // failures, just don't false-positive on slow apt mornings.
     await perfAsync(`deploy.${perfPrefix}.waitForReady`, () =>
-      waitForK3sReady(masterIp, privateKeyPath, khPath, 1200),
+      waitForK3sReady(masterIp, privateKeyPath, khPath, 1200, {
+        onStage: (label) => s.message(`Waiting for k3s on master: ${label}`),
+      }),
     );
     bootTimingDue = true;
     state.completeStep('k3s-ready');

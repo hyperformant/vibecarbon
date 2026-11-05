@@ -99,11 +99,18 @@ spec:
               # 1Gi headroom: large image layers (the backup image is
               # ~300MB) stream through memory during pushes.
               memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            periodSeconds: 1
+            timeoutSeconds: 10
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /v2/
               port: 5000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 0
             periodSeconds: 10
             # Default timeoutSeconds=1 is hostile to a registry busy
             # writing a large layer to disk — give it 10s before we
@@ -114,7 +121,7 @@ spec:
             httpGet:
               path: /v2/
               port: 5000
-            initialDelaySeconds: 10
+            initialDelaySeconds: 0
             periodSeconds: 30
             # Same reasoning as readinessProbe — but with a larger
             # failureThreshold because killing the pod mid-push aborts

@@ -60,6 +60,7 @@ import {
   readDbAttachState,
   readDbGeneration,
   readDbIncarnation,
+  readServingIp,
   readSwappedSinceLastDeploy,
   verifyDnsFlip,
 } from '../checks/ha-integrity.js';
@@ -1998,10 +1999,10 @@ export async function runLifecycle(
         // spuriously. Wait (bounded) until the domain resolves to the promoted
         // IP; both modes rewrite .vibecarbon.json on failover (compose-ha in
         // failoverComposeHA, k8s-ha via swapHaRoles' terminal write), so a
-        // fresh resolveHaDbIps().primaryIp is the promoted master on both —
-        // that's what sshCheckMasterIp already resolves to above.
+        // fresh readServingIp is what the record now carries: the promoted
+        // node on compose-ha, the promoted cluster's floating IP on k8s-ha.
         if (isPostFailoverVerify(stepName)) {
-          const promotedIp = sshCheckMasterIp;
+          const promotedIp = readServingIp(config.projectDir, config.envPrefix);
           if (promotedIp) {
             console.log(
               `${tag} Waiting for ${config.domain} to resolve to promoted IP ${promotedIp}...`,
@@ -2054,7 +2055,7 @@ export async function runLifecycle(
               skipReason:
                 config.mode === 'compose-ha'
                   ? null
-                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (floating/reserved) — the harness doesn't track that IP, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
+                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (floating/reserved), which readServingIp reads back in the DNS-provider check below; this node-IP comparison does not apply, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
             }),
           );
           // The same flip read back through the DNS provider's own API (the

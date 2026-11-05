@@ -101,7 +101,7 @@ runcmd:
   # restart is cheap here - no containers exist yet at boot. Nothing below
   # restarts Docker again, so the boot pull started next never races a restart.
   #
-  # Boot timing: one `<id> <epoch seconds>` line per major phase (and a
+  # Boot timing: one `<id> <epoch seconds.nanoseconds>` line per major phase (and a
   # begin/end pair around the background boot pull), read back by the deploy
   # after its ready wait (src/lib/deploy/boot-timing.js). Timing only: nothing
   # here depends on these lines. Anything spliced above this mark (a provider's

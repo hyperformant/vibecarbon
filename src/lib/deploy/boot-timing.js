@@ -23,7 +23,7 @@
  *   - `cloud-init analyze show`: total cloud-init time and each stage
  *     (init-local, init-network, modules-config, modules-final).
  *   - `cloud-init analyze blame`: the slowest modules.
- *   - BOOT_MARK_LOG: one `<id> <epoch seconds>` line per major phase, written
+ *   - BOOT_MARK_LOG: one `<id> <epoch seconds.nanoseconds>` line per major phase, written
  *     by the cloud-init scripts in carbon/cloud-init/ with one-letter ids
  *     (PHASE_IDS; Hetzner caps user data at 32 KiB). A plain mark starts a
  *     sequential phase that runs until the next plain mark (the last one, `e`,
@@ -71,6 +71,48 @@ export const PHASE_IDS = Object.freeze({
   b: 'bootPull',
   e: 'done',
 });
+
+/**
+ * Plain words for what the server is doing at each phase id, shown beside the
+ * ready wait's spinner. `e` (done) needs no label: the wait ends there. `b`
+ * has none either: the boot pull is written as `b.begin` / `b.end`, never as a
+ * plain `b` mark.
+ */
+export const BOOT_STAGE_LABELS = Object.freeze({
+  p: 'starting up',
+  a: 'installing system packages',
+  n: 'setting up the network',
+  w: 'waiting for the primary server',
+  k: 'installing Kubernetes',
+  r: 'waiting for Kubernetes',
+  x: 'installing cluster add-ons',
+  d: 'starting Docker',
+  u: 'setting up the firewall',
+});
+
+/**
+ * A reader for the boot log's lines as they stream in, for a ready wait's
+ * spinner. Calls `onStage(label)` when a `<id> <epoch.fraction>` mark moves
+ * the label. Every reconnect replays the whole log, so only a mark newer than
+ * the newest one seen may change the label, and an unchanged label is not
+ * reported again (a quiet, non-TTY spinner prints a line per report).
+ *
+ * @param {(label: string) => void} onStage
+ * @returns {(line: string) => void}
+ */
+export function readBootStage(onStage) {
+  let newest = 0;
+  let current = '';
+  return (line) => {
+    const mark = /^([a-z]) (\d+(?:\.\d+)?)$/.exec(String(line).trim());
+    const label = mark && Object.hasOwn(BOOT_STAGE_LABELS, mark[1]) && BOOT_STAGE_LABELS[mark[1]];
+    if (!label || Number(mark[2]) <= newest) return;
+    newest = Number(mark[2]);
+    if (label === current) return;
+    current = label;
+    onStage(label);
+  };
+}
 
 /** The whole collection's bound, all nodes in parallel. */
 export const BOOT_TIMING_BUDGET_MS = 45_000;
