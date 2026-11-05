@@ -67,7 +67,7 @@ export const PAID_SURFACE = {
  * to fetch these from the license-authenticated registry alongside the
  * engine source above.
  */
-export const PAID_TEMPLATE_ASSETS = ['carbon/k8s/', 'carbon/ha/', 'carbon/cloud-init/k3s/'];
+export const PAID_TEMPLATE_ASSETS = ['carbon/k8s/', 'carbon/cloud-init/k3s/'];
 
 /**
  * The only paid-surface files free code may import from. Anything else

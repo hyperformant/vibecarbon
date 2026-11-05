@@ -10,7 +10,7 @@
  * streaming, so the deploy already takes the reseed path; every slot ensure on
  * that path now drops a lost slot first, so the reseed gets a fresh one.
  *
- * Census: every slot creation in src/ and carbon/ha/ comes from the one
+ * Census: every slot creation in src/ comes from the one
  * builder (ensureReplicationSlotSql), so no site can create a slot without
  * the lost-slot drop.
  */
@@ -43,7 +43,7 @@ vi.mock('../../../src/lib/deploy/wireguard.js', async (orig) => ({
   exchangeAndBringUpTunnel: vi.fn().mockResolvedValue({}),
 }));
 
-const { ensureReplicationSlotSql, REPLICATION_SLOT } = await import(
+const { ensureReplicationSlotSql, primaryReplicationSql, REPLICATION_SLOT } = await import(
   '../../../src/lib/deploy/replication-slot.js'
 );
 const { configurePrimaryReplication, configureStandbyReplication } = await import(
@@ -101,9 +101,8 @@ describe('the reseed path recreates a lost slot', () => {
     expect(basebackup).toBeGreaterThan(ensure);
   });
 
-  it('k8s: primary-init.sql (run on every HA deploy) carries the same ensure', () => {
-    const sql = readFileSync(join(ROOT, 'carbon/ha/primary-init.sql'), 'utf-8');
-    expect(sql).toContain(ensureReplicationSlotSql());
+  it('k8s: the primary init SQL (run on every HA deploy) carries the same ensure', () => {
+    expect(primaryReplicationSql('pw')).toContain(ensureReplicationSlotSql());
   });
 });
 
@@ -126,7 +125,7 @@ describe('census: every slot creation goes through ensureReplicationSlotSql', ()
       .map(({ path }) => path);
   }
 
-  const sources = [...walk(join(ROOT, 'src')), ...walk(join(ROOT, 'carbon/ha'))]
+  const sources = walk(join(ROOT, 'src'))
     .filter((p) => /\.(js|sql)$/.test(p))
     .map((p) => ({ path: relative(ROOT, p), text: readFileSync(p, 'utf-8') }));
 

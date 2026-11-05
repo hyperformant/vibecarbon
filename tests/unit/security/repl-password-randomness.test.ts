@@ -38,22 +38,18 @@ describe('C-1: legacy hardcoded password removed from deploy code', () => {
   });
 });
 
-describe('C-1: primary-init.sql handles idempotent re-runs', () => {
-  it('primary-init.sql has both CREATE and ALTER branches', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const content = readFileSync(join(process.cwd(), 'carbon', 'ha', 'primary-init.sql'), 'utf-8');
-    expect(content).toMatch(/CREATE ROLE replicator/);
-    expect(content).toMatch(/ALTER ROLE replicator/);
+describe('C-1: the replication role SQL handles idempotent re-runs', () => {
+  it('creates the role when missing and always sets the password', async () => {
+    const { replicationRoleSql } = await import('../../../src/lib/deploy/replication-slot.js');
+    const sql = replicationRoleSql('testreplpass');
+    expect(sql).toMatch(/CREATE ROLE replicator/);
+    expect(sql).toMatch(/^ALTER ROLE replicator WITH PASSWORD 'testreplpass';$/m);
   });
 
-  it('primary-init.sql ships the {{REPL_PASSWORD}} placeholder (not a literal credential)', async () => {
-    const { readFileSync } = await import('node:fs');
+  it('carbon/ha no longer ships primary-init.sql (the SQL is built, never rendered)', async () => {
+    const { existsSync } = await import('node:fs');
     const { join } = await import('node:path');
-    const content = readFileSync(join(process.cwd(), 'carbon', 'ha', 'primary-init.sql'), 'utf-8');
-    // Rendered by k8s/ha/index.js via replaceAll('{{REPL_PASSWORD}}', …).
-    expect(content).toContain('{{REPL_PASSWORD}}');
-    expect(content).not.toMatch(/repl_password/);
+    expect(existsSync(join(process.cwd(), 'carbon', 'ha', 'primary-init.sql'))).toBe(false);
   });
 });
 

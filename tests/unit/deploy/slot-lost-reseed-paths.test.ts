@@ -10,15 +10,14 @@
  * probe's false into the basebackup:
  *
  *   - compose-ha: haConfigureReplication;
- *   - k8s-ha: setupReplication (primary-init carries the ensure, then the
+ *   - k8s-ha: setupReplication (the primary init carries the ensure, then the
  *     probe, then the staged basebackup on the standby).
  */
-import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const calls: Array<{ cmd: string; input?: string; file?: string }> = [];
+const calls: Array<{ cmd: string; input?: string }> = [];
 
-// k8s transport: every ssh is runCommandAsync argv; scp carries primary-init.sql.
+// k8s transport: every ssh is runCommandAsync argv; the primary init SQL rides its stdin.
 vi.mock('../../../src/lib/command.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   runCommandAsync: vi.fn(async (argv: string[], opts: { input?: string } = {}) => {
@@ -84,12 +83,6 @@ vi.mock('../../../src/lib/command.js', async (orig) => ({
     return '';
   }),
 }));
-vi.mock('../../../src/lib/ssh.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  scpWithRetry: vi.fn(async (args: string[]) => {
-    calls.push({ cmd: 'scp', file: readFileSync(args[args.length - 2], 'utf-8') });
-  }),
-}));
 vi.mock('../../../src/lib/host-keys.js', async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
   seedKnownHosts: vi.fn(async () => {}),
@@ -143,7 +136,7 @@ beforeEach(() => {
 });
 
 describe('k8s-ha: a lost slot reseeds through the probe', () => {
-  it('primary-init (dropping the lost slot) runs, the probe reads no stream, and the basebackup is staged', async () => {
+  it('the primary init (dropping the lost slot) runs, the probe reads no stream, and the basebackup is staged', async () => {
     await expect(
       setupReplication({
         primaryIp: '10.1.0.1',
@@ -155,7 +148,7 @@ describe('k8s-ha: a lost slot reseeds through the probe', () => {
       }),
     ).rejects.toThrow(/stop after stage/);
     const init = calls.findIndex(
-      (c) => c.cmd === 'scp' && c.file?.includes(ensureReplicationSlotSql()),
+      (c) => c.cmd.includes('psql -U postgres') && c.input?.includes(ensureReplicationSlotSql()),
     );
     const probe = calls.findIndex((c) => c.cmd.includes('pg_stat_replication'));
     const stage = calls.findIndex((c) => c.input?.includes('pg_basebackup'));
