@@ -205,8 +205,11 @@ export const testConfig = {
         // legacy cpx*1 line costs more than its successor since the
         // repricing. cpx21 and cpx11 are the ash/hil (US) defaults, reached
         // only by an explicit E2E_REGIONS=ash,hil run.
+        // cx33 and cx43 sold out in all three EU locations on 2026-11-04 while
+        // cx23 stayed in stock, and one missing target stops the whole batch
+        // at preflight, so cx23 can also move to cpx32.
         scaleTo: {
-          cx23: 'cx33',
+          cx23: ['cx33', 'cpx32'],
           cpx22: 'cpx32',
           cpx12: 'cpx22',
           cpx21: 'cpx31',
