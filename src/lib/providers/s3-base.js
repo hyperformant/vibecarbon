@@ -619,13 +619,21 @@ export class S3CompatibleProvider {
    * bucket that did pass is still covered by the caller-side NoSuchBucket
    * retry (see lib/iac withStateBackendRetry) and the registry push's
    * round-trip probe.
+   *
+   * The pause between clean rounds is for that convergence, so only a
+   * provider with a settle window takes it: on 2026-11-05 the other four
+   * answered 780 of 780 HEAD and LIST samples from the first one after
+   * CreateBucket, on fresh connections. They run the same checks back to back.
+   * A round that fails always pauses, so a provider that lags cannot spin.
    */
   async waitForBucketVisible(bucketName, { budgetMs = 120_000, intervalMs = 2000 } = {}) {
     const REQUIRED_STREAK = 3;
     const deadline = Date.now() + budgetMs;
     const probeKey = `.vibecarbon-visibility-probe-${Date.now()}`;
+    const pauseCleanRounds = this.constructor.bucketSettleWindowMs > 0;
     let streak = 0;
     for (;;) {
+      let clean = false;
       // bucketExists translates HeadBucket 403 into a fatal "owned by another
       // account" — correct for cold lookups, WRONG here: during post-create
       // propagation the provider can 403 the bucket we created seconds ago
@@ -641,6 +649,7 @@ export class S3CompatibleProvider {
             maxAttempts: 1,
           });
           streak += 1;
+          clean = true;
           if (streak >= REQUIRED_STREAK) {
             // Streak held — prove the write path with a tiny round-trip.
             await this._send(
@@ -668,7 +677,9 @@ export class S3CompatibleProvider {
         }
       } catch {
         streak = 0;
+        clean = false;
       }
+      if (clean && !pauseCleanRounds) continue;
       if (Date.now() + intervalMs > deadline) {
         console.warn(
           `[s3] bucket ${bucketName} created but not sustainably HEAD+LIST+write-ready after ${budgetMs}ms`,
