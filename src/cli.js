@@ -12,7 +12,6 @@
  *   vibecarbon -h                     # Show help
  */
 
-import dns from 'node:dns';
 import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
@@ -24,16 +23,14 @@ import { enterJsonMode, wantsJson } from './lib/cli/json-mode.js';
 import { c, link } from './lib/colors.js';
 import { dbImageOverrideProblem, setDbImageWarningSink } from './lib/images.js';
 import { shouldGate } from './lib/licensing/gate.js';
+import { applyNetworkDefaults } from './lib/net-defaults.js';
 import { perfEnabled, perfTimer } from './lib/perf.js';
 import { bootstrapOperatorEnv } from './lib/project.js';
 import { recordCommandStart, reportCrash, settlePendingTelemetry } from './lib/telemetry/index.js';
 import { printUpdateNotice, refreshUpdateCache } from './lib/telemetry/update-check.js';
 import { VERSION } from './lib/version.js';
 
-// Prefer IPv4 to avoid timeouts on systems with broken IPv6 connectivity.
-// Node.js/undici tries IPv6 first by default, which causes fetch() to hang
-// when the host resolves to an AAAA record but IPv6 routing is broken.
-dns.setDefaultResultOrder('ipv4first');
+applyNetworkDefaults();
 
 // Hard-disable any ssh-askpass / interactive password fallback for every
 // child ssh/scp this process spawns. Belt to BatchMode=yes's suspenders:
