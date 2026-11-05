@@ -199,10 +199,6 @@ services:
       # with "dependency failed to start". start_period suppresses the
       # unhealthy verdict during initial boot.
       start_period: 180s
-      # Docker checks every second during the start period only, then
-      # returns to `interval`. Dependents (app, app-migrate) start within a
-      # second of the db being ready. Needs Docker Engine 25 or newer.
-      start_interval: 1s
     command:
       - postgres
       - -c
