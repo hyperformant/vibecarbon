@@ -4,8 +4,14 @@
  * The old boot waits opened a fresh SSH connection every poll. This holds the
  * session instead: the remote script returns the moment the marker exists and
  * streams the boot log while it waits, so the spinner can say what the server
- * is doing. The script ends itself after `holdS`, so a half-open connection
- * cannot use up the deadline, and the caller reconnects.
+ * is doing. The script ends itself after `holdS` and the caller reconnects.
+ *
+ * A half-open connection (a paused or unreachable sshd) is not bounded by
+ * `holdS` or by the caller's wrapper timeout. The mux client exits in
+ * milliseconds, but the master process holds dups of its pipes and
+ * runCommandAsync resolves on `close`, so ServerAlive (about 60-75 s) is the
+ * real bound: a paused sshd took 74.9 s against a 35 s wrapper. The deadline
+ * can overrun by about 75 s.
  */
 
 import { hasSentinelLine } from '../remote-sentinel.js';
@@ -14,7 +20,9 @@ import { shEscape } from '../shell.js';
 /**
  * The remote script. Prints CONNECTED, then READY the moment `markerPath`
  * exists. With `logPath` it streams that log from its first line while it
- * waits. Ends by itself after `holdS` seconds (non-zero, no READY).
+ * waits. Ends by itself after `holdS` seconds with exit 0 and no READY: only
+ * the READY line means ready, and a non-zero exit would make CI/DEBUG print
+ * `Command failed:` on every reconnect and replace the real SSH error.
  *
  * @param {string} markerPath
  * @param {{holdS: number, logPath?: string}} options
@@ -29,6 +37,7 @@ export function markerWaitScript(markerPath, { holdS, logPath }) {
     '  [ -z "$2" ] || tail -n +1 -s 0.2 -F --pid="$w" "$2" 2>/dev/null',
     '  wait "$w"',
     `' _ ${shEscape(markerPath)} ${shEscape(logPath ?? '')} && echo READY`,
+    'exit 0',
   ].join('\n');
 }
 
@@ -83,6 +92,8 @@ export async function waitForRemoteMarker({
 
   while (now() < deadlineMs) {
     const remainingS = (deadlineMs - now()) / 1000;
+    // The wrapper timeout is a ceiling the runner may honour late on a
+    // half-open connection (see the header): the deadline can overrun by ~75 s.
     const timeoutMs = Math.min(holdS, remainingS) * 1000 + 5000;
     const script = markerWaitScript(markerPath, {
       holdS: Math.min(holdS, Math.ceil(remainingS)),

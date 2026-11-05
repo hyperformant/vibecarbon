@@ -68,12 +68,12 @@ describe('markerWaitScript', () => {
     expect(r.out.split('\n')).toContain('READY');
   });
 
-  it('ends itself after holdS with no READY and a non-zero exit', async () => {
+  it('ends itself after holdS with no READY and exit 0 (only READY means ready)', async () => {
     const r = await runScript(
       markerWaitScript(join(dir, 'never'), { holdS: 1, logPath: join(dir, 'l.log') }),
     );
     expect(r.out).not.toContain('READY');
-    expect(r.code).not.toBe(0);
+    expect(r.code).toBe(0);
     expect(r.ms).toBeLessThan(2500);
   });
 });
