@@ -138,6 +138,17 @@ export function serverResourceOptions(type, extra = {}) {
  * and the token in state is a secret. Pulumi compares a trigger only between
  * two defined values, so adding it to an existing worker replaces nothing.
  *
+ * Building that trigger needs the master's id, and the SDK resolves a trigger
+ * before it registers the worker, so the worker cannot start until the master
+ * has finished. `omitJoinTrigger` leaves it out when the deploy has no k3s
+ * token to replay, which normally means no cluster exists and no worker needs
+ * protecting. The next deploy adds it, replacing nothing, and it counts from
+ * then on. That reading is not proof of a new stack (a failed state read looks
+ * the same), and it does not have to be: a trigger absent on either side of a
+ * comparison replaces nothing, so being wrong costs one deploy without the
+ * protection. A program whose workers wait on the master anyway keeps the
+ * trigger, since leaving it out would gain nothing.
+ *
  * So a worker-init.sh change reaches NEW workers only (a fresh deploy, a
  * scale-up, an autoscaler-spawned node), exactly like master-init.sh,
  * db-init.sh and the compose cloud-config on their servers. To put it on an
@@ -150,8 +161,9 @@ export function serverResourceOptions(type, extra = {}) {
  * @param {object} extra
  * @param {{ masterId: unknown, masterPrivateIp: unknown, k3sVersion: unknown }} extra.joinTarget
  *   plain values or Pulumi outputs
+ * @param {boolean} [extra.omitJoinTrigger] the deploy has no k3s token to replay
  */
-export function workerResourceOptions(type, { joinTarget, ...extra } = {}) {
+export function workerResourceOptions(type, { joinTarget, omitJoinTrigger, ...extra } = {}) {
   const serverClass = SERVER_RESOURCE_TYPES[type];
   if (!serverClass) throw new Error(`workerResourceOptions: unknown server type ${type}`);
   if (!joinTarget) throw new Error('workerResourceOptions: joinTarget is required');
@@ -165,9 +177,11 @@ export function workerResourceOptions(type, { joinTarget, ...extra } = {}) {
       serverClass.imageInput,
       ...createOnly,
     ],
-    replacementTrigger: pulumi
-      .all([joinTarget.masterId, joinTarget.masterPrivateIp, joinTarget.k3sVersion])
-      .apply(([id, ip, version]) => `master=${id}@${ip} k3s=${version}`),
+    ...(!omitJoinTrigger && {
+      replacementTrigger: pulumi
+        .all([joinTarget.masterId, joinTarget.masterPrivateIp, joinTarget.k3sVersion])
+        .apply(([id, ip, version]) => `master=${id}@${ip} k3s=${version}`),
+    }),
   };
 }
 
