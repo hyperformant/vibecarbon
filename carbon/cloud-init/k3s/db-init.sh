@@ -87,19 +87,21 @@ echo "Waiting for private network interface..."
 while [ -z "$PRIVATE_IFACE" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
   PRIVATE_IFACE=$(ip -4 addr show | grep 'inet 10\.0\.' | awk '{print $NF}' || true)
   if [ -z "$PRIVATE_IFACE" ]; then
+    PASS_SLEEP=5
     if [ $RETRY_COUNT -ge 1 ] && command -v dhcpcd >/dev/null 2>&1; then
       CANDIDATE=$(ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: en[a-z]+[0-9]+s[0-9]+/ {print $2}' | grep -v '^eth' | head -1 || true)
       if [ -n "$CANDIDATE" ]; then
         echo "Private NIC $CANDIDATE has no lease yet - asking dhcpcd (attempt $RETRY_COUNT)"
         ip link set "$CANDIDATE" up 2>&1 || true
-        dhcpcd -1 -t 4 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
+        dhcpcd -1 -A -t 4 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
+        PASS_SLEEP=1
       fi
     fi
     if [ $((RETRY_COUNT % 12)) -eq 0 ]; then
       echo "Private interface not ready yet... ($RETRY_COUNT/$MAX_RETRIES)"
     fi
     RETRY_COUNT=$((RETRY_COUNT + 1))
-    sleep 5
+    sleep "$PASS_SLEEP"
   fi
 done
 if [ -z "$PRIVATE_IFACE" ]; then

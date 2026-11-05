@@ -42,6 +42,8 @@
  * update/install, the apt comments and the `_m a` mark, and asks for its
  * private-NIC lease at the first retry instead of the sixth. The diff is
  * confined to those lines.
+ * RE-CAPTURED 2026-11-04 (dhcpcd -A): the lease wait runs `dhcpcd -1 -A -t 4`
+ * and a pass that asked sleeps 1 s. The diff is confined to those lines.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -111,7 +111,8 @@ describe('Hetzner private-NIC wait loop (executed)', () => {
 esac
 exit 0`,
     );
-    shim('sleep', 'exit 0');
+    const sleeps = join(tmp, 'sleeps');
+    shim('sleep', `echo "$*" >> ${sleeps}\nexit 0`);
     shim(
       'dhcpcd',
       `echo "$*" >> ${calls}
@@ -128,7 +129,15 @@ exit 1`,
     const callLines = existsSync(calls)
       ? readFileSync(calls, 'utf8').split('\n').filter(Boolean)
       : [];
-    return { status: r.status, out: `${r.stdout}${r.stderr}`, calls: callLines };
+    const sleepLines = existsSync(sleeps)
+      ? readFileSync(sleeps, 'utf8').split('\n').filter(Boolean)
+      : [];
+    return {
+      status: r.status,
+      out: `${r.stdout}${r.stderr}`,
+      calls: callLines,
+      sleeps: sleepLines,
+    };
   }
 
   it.each(hetzner)('%s: keeps asking after failed attempts and ends with the interface', (f) => {
@@ -158,5 +167,20 @@ exit 1`,
     const r = run(f, { failFirst: 3, leased: false, maxRetries: 120 });
     expect(r.calls.length).toBeGreaterThan(0);
     for (const c of r.calls) expect(c).toMatch(/(^|\s)-t \d+(\s|$)/);
+  });
+
+  // dhcpcd's ARP duplicate-address probe takes 6-7 s, so `-1 -t 4` killed every
+  // attempt mid-probe (5 of 5 failed on real dhcpcd 10.0.6). -A skips the probe
+  // (and IPv4LL); Hetzner assigns these addresses.
+  it.each(hetzner)('%s: every dhcpcd call is `-1 -A -t 4`', (f) => {
+    const r = run(f, { failFirst: 3, leased: false, maxRetries: 120 });
+    expect(r.calls.length).toBeGreaterThan(0);
+    for (const c of r.calls) expect(c).toMatch(/^-1 -A -t 4 \S+$/);
+  });
+
+  it.each(hetzner)('%s: a pass that asked dhcpcd sleeps 1 s, the first pass 5 s', (f) => {
+    const r = run(f, { failFirst: 1_000_000, leased: false, maxRetries: 7 });
+    expect(r.sleeps[0]).toBe('5');
+    expect(r.sleeps.slice(1)).toEqual(Array(6).fill('1'));
   });
 });

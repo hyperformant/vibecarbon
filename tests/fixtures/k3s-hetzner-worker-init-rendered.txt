@@ -101,6 +101,7 @@ echo "Waiting for private network interface..."
 while [ -z "$PRIVATE_IFACE" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
   PRIVATE_IFACE=$(ip -4 addr show | grep 'inet 10\.0\.' | awk '{print $NF}' || true)
   if [ -z "$PRIVATE_IFACE" ]; then
+    PASS_SLEEP=5
     # From the first miss (no 10.0.x.x address yet), actively ask dhcpcd for a
     # lease on any unmanaged enp* NIC. Hetzner ships dhcpcd-base + auto-starts
     # dhcpcd at boot, but it races with the post-boot Hetzner private-network
@@ -108,22 +109,27 @@ while [ -z "$PRIVATE_IFACE" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     # IP is ever requested - `dhcpcd -1 <iface>` obtains the lease idempotently.
     # Ask on EVERY pass, not once: this starts ~5 s in, when the NIC can exist
     # while the attachment or DHCP is still settling, and one failed attempt
-    # would leave nothing requesting a lease. -t 4 bounds each attempt so the
-    # pass stays near the 5 s cadence; MAX_RETRIES bounds the whole wait.
+    # would leave nothing requesting a lease. -t 4 bounds each attempt and a pass
+    # that asked sleeps 1 s, so the pass stays near the 5 s cadence (the worst
+    # case near 600 s); MAX_RETRIES bounds the whole wait. -A skips dhcpcd's
+    # ARP duplicate-address probe, which takes 6-7 s and outlasts -t 4 (every
+    # attempt died mid-probe on real dhcpcd 10.0.6). Hetzner assigns these
+    # addresses, so the probe adds nothing; -A also disables IPv4LL.
     # Skipped when dhcpcd is missing.
     if [ $RETRY_COUNT -ge 1 ] && command -v dhcpcd >/dev/null 2>&1; then
       CANDIDATE=$(ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: en[a-z]+[0-9]+s[0-9]+/ {print $2}' | grep -v '^eth' | head -1 || true)
       if [ -n "$CANDIDATE" ]; then
         echo "Private NIC $CANDIDATE has no lease yet - asking dhcpcd (attempt $RETRY_COUNT)"
         ip link set "$CANDIDATE" up 2>&1 || true
-        dhcpcd -1 -t 4 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
+        dhcpcd -1 -A -t 4 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
+        PASS_SLEEP=1
       fi
     fi
     if [ $((RETRY_COUNT % 12)) -eq 0 ]; then
       echo "Private interface not ready yet... ($RETRY_COUNT/$MAX_RETRIES)"
     fi
     RETRY_COUNT=$((RETRY_COUNT + 1))
-    sleep 5
+    sleep "$PASS_SLEEP"
   fi
 done
 if [ -z "$PRIVATE_IFACE" ]; then
