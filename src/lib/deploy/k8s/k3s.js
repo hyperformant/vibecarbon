@@ -5034,9 +5034,6 @@ async function deployK3sSteps(options, inFlight) {
         providerToken: options.apiToken,
         s3Config: options.s3Config,
         projectName: options.projectName,
-        // k8s-ha fans two of these out against one state bucket: past its
-        // settle window they provision in parallel (lib/iac/state-lock.js).
-        stateBucketYoung: options.stateBucketYoung,
         // Recover stale-EMPTY outputs reads in place (read-only poll inside
         // upStack) — the hard gate below stays the loud last resort. Same
         // family member as the compose provision sites (bc94b18): this gate

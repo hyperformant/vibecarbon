@@ -1,7 +1,7 @@
 /**
  * compose-HA persists the env mid-flight (status 'deploying') so a destroy can
  * clean up a deploy that dies later. That save rebuilt `s3` from scratch and
- * dropped `bucketCreatedAt` (status' settling row). This drives
+ * dropped `bucketCreatedAt` (the app key fence's proof). This drives
  * haPersistPendingConfig directly and checks it survives, and that the save
  * carries no `keyPrefix` or `corsOrigins` (both removed by design: each env
  * has its own app bucket and owns its CORS rule outright).

@@ -79,9 +79,6 @@ async function listAccountEndpoints(apiToken, refused) {
 }
 
 export class LinodeObjectStorageProvider extends S3CompatibleProvider {
-  /** No settle window has been observed on a new bucket here. */
-  static bucketSettleWindowMs = 0;
-
   /** A new bucket answers from its first request here, so nothing waits. */
   static bucketQuietMs = 0;
 

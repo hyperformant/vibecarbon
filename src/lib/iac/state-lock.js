@@ -1,94 +1,50 @@
 /**
- * Serialize state-backend operations per bucket, within this process.
+ * Serialize one state read-modify-write per bucket, within this process.
  *
- * WHY. Both HA runners fan primary and standby out under `Promise.all`
- * (`deploy/effects/compose-ha.js`, `deploy/effects/k8s-ha.js`) against ONE
- * state bucket, so two Pulumi engines do their stack-selects, checkpoint writes
- * and lock acquisitions against the same S3 prefix at the same time. That is
- * self-inflicted load, and the evidence says load is the problem: of the 40
- * state-backend recovery events in run 31898658781's hetzner leg, 38 were
- * throttle and only 2 were staleness-shaped. They cluster exactly where the
- * concurrency is —
+ * `syncServerState` (server-state.js) is the only holder: it exports a stack's
+ * state, edits it and imports it back, and that must not interleave with
+ * another one on the same bucket.
  *
- *     11  up
- *      8  stack-select ci4-standby   <- the k8s-ha pair, one bucket,
- *      8  stack-select ci4-primary   <- both in flight together
- *      8  stack-select ci3
+ * WHY NOTHING ELSE HOLDS IT. Both HA runners fan primary and standby out under
+ * `Promise.all` against one state bucket (`deploy/effects/compose-ha.js`,
+ * `deploy/effects/k8s-ha.js`). From 2026-08-15 this lock kept the two Pulumi
+ * engines apart, first for each whole `upStack`, later for its select and
+ * refresh and, on a new Hetzner bucket, still its whole `up`. The evidence was
+ * run 31898658781's hetzner leg: 38 of 40 state-backend recovery events were
+ * throttle, all 11 `up` throttles landed 39-150 s after their state bucket was
+ * created and every `stack-select` throttle 2-14 s after it. Those buckets had
+ * been probed in their first second, the thing `bucketQuietMs` (hetzner-s3.js)
+ * now prevents, and with that pause the throttles do not come back:
  *
- * Note where the mass is: stack-select outnumbers up two to one. Serializing
- * only the mutating operations would miss most of it, so this covers reads too.
+ *   - `up` outside the lock on new Hetzner buckets (cpx22, hel1 and fsn1):
+ *     compose-ha 212 s became 184 and 201 s, k8s-ha 330 s became 260 and 247 s,
+ *     no backpressure in any run.
+ *   - two unlocked preparations at once (select, stack list, create, cancel,
+ *     export, refresh, the Vultr repair) with the real Pulumi CLI, 2026-11-05:
+ *     80 pairs and 7,520 requests across Hetzner hel1, DigitalOcean nyc3, Vultr
+ *     ewr1, Scaleway nl-ams and Linode us-iad-10, no 503, 429 or SlowDown, no
+ *     retry, no state error. Pulumi's S3 client retries a 503 twice without
+ *     saying so, so every request's status was read at a proxy in front of it.
+ *     A Hetzner pair's median was 14 s side by side, 26 s one after the other.
  *
- * Hetzner documents 750 requests/s per bucket, 750/s per source IP and 256
- * active parallel TCP sessions per source IP, and says that as a shared-resource
- * product, contention "could lead to slow response times or timeout errors". We
- * have never modelled any of that. One engine at a time per bucket is the
- * structural version of staying inside it.
+ * 49 of those were the first pair on a brand-new bucket, 25 of them on Hetzner.
+ * That is the case to watch: two selects there both initialize
+ * `.pulumi/meta.yaml`, the shape a 2026-04-28 k8s-ha deploy died in (`could not
+ * list bucket: blob (code=NotFound): NoSuchKey`), on a bucket with no quiet
+ * pause.
  *
- * WHY NOT a bucket per stack, which would raise the per-bucket ceiling: the
- * per-source-IP ceilings are NOT per bucket, and every deploy runs from one
- * operator host, so more buckets does not raise the limit that actually binds
- * us — and it manufactures more freshly-created buckets, which the code
- * documents as the worst window for this whole class.
- *
- * WHY NOT stagger or a wider retry ladder: every retry is one more request
- * against the store that is already failing to keep up. The ladder increases
- * volume under exactly the conditions that trigger it.
+ * WHY NOT stagger or a wider retry ladder if this turns out wrong: every retry
+ * is one more request against a store that is already failing to keep up. A
+ * throttle is absorbed by withStateBackendRetry and counted as `backpressure`
+ * in the `[state]` line, which the e2e budgets fail on, and they alarm on a
+ * lock wait too, which should now be near zero.
  *
  * SCOPE is per-process and per-bucket. Two separate `vibecarbon` processes, or
- * e2e matrix siblings, still share the source IP; that is what the retry
- * classifier remains for.
- *
- * WHAT IT COVERS depends on the state bucket's age (Ruling A′, 2026-10-21).
- * `upStack` takes `options.stateBucketYoung`, read once per deploy against
- * the provider's declared settle window (`static bucketSettleWindowMs`:
- * Hetzner 20 min, every other provider 0, so they never read the age):
- *
- *   - past the window: the lock covers the state-backend preparation only,
- *     stack select, stale-lock cancel, pre-up refresh and the Vultr repair
- *     (labels `stack-select <s>` and `refresh <s>`), and is released before
- *     `stack.up()`. An HA pair's two engines provision in parallel.
- *   - inside the window, or with an unknown age: the whole `upStack` holds it
- *     (label `up <s>`), provisioning and any retry backoff included, so the
- *     two `up`s serialize end to end as they did from 2026-08-15 on.
- *
- * The evidence for the split (run 31898658781, job 95045761606 log, re-read
- * 2026-10-21): all 11 `up` throttles landed 39-150 s after their state bucket
- * was created, every `stack-select` throttle 2-14 s after it, and four of the
- * `up` throttles came from a single-cluster deploy with no second engine at
- * all. Young buckets throttle; settled ones did not. The one compose-ha pair
- * that overlapped its `up`s did it on a ~95 s old bucket, and failed, which is
- * why a young bucket keeps the whole-operation lock: a customer's first HA
- * deploy runs on a minutes-old bucket. Holding it past the window cost every
- * HA deploy the primary's whole provisioning time (compose-ha's standby `up`
- * finished ~95 s after the primary's, `state lock acquired after 93s`).
- *
- * If that is wrong, two `up`s overlap on a settled bucket and any throttle is
- * still absorbed by withStateBackendRetry and counted as `backpressure` in the
- * `[state]` line, which the e2e budgets fail on. The second engine always
- * waits a few seconds for the first one's select and refresh.
- *
- * `syncServerState` (server-state.js) keeps a whole-operation lock in every
- * case: it is a state read-modify-write, not provisioning.
- *
- * RE-ENTRANCY is the part that has to be right. The public operations nest:
- * `upStack` calls `getOrCreateStack`, which calls `listStacks`; `destroyStack`
- * and `getStackOutputs` call `getOrCreateStack` too. A plain mutex would
- * deadlock on the first deploy — the outer holder would wait for itself. So a
- * holder is tracked in async context and a nested acquisition of a key this
- * context already holds runs straight through.
+ * e2e matrix siblings, are not serialized.
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
 import { progressLog } from '../cli/progress.js';
 import { recordLockWait, recordStateOp } from './state-telemetry.js';
-
-/**
- * Keys held by the current async context. Propagates across await points and
- * promise chains, which is what makes nested acquisition detectable without
- * threading a token through every signature.
- * @type {AsyncLocalStorage<Set<string>>}
- */
-const heldKeys = new AsyncLocalStorage();
 
 /**
  * Tail of the wait chain per key. Each holder's slot is settled by its release
@@ -105,10 +61,8 @@ const depths = new Map();
 let waitObserver = null;
 
 /**
- * Run `fn` with exclusive access to `key` within this process.
- *
- * Nested calls for a key the current async context already holds run inline —
- * see the re-entrancy note above.
+ * Run `fn` with exclusive access to `key` within this process. Not re-entrant:
+ * a holder that takes its own key again waits for itself.
  *
  * @template T
  * @param {string} key - Serialization key. The state backend URL, so distinct
@@ -118,12 +72,7 @@ let waitObserver = null;
  * @returns {Promise<T>}
  */
 export async function withStateLock(key, label, fn) {
-  // Counted for BOTH the nested and queued paths: a nested acquisition still
-  // runs its own pulumi invocation, and the telemetry's job is to state what
-  // this process did to the store, not how the lock happened to route it.
   recordStateOp(label.split(' ')[0]);
-  const held = heldKeys.getStore();
-  if (held?.has(key)) return fn();
 
   const prior = tails.get(key) ?? Promise.resolve();
   let releaseSlot;
@@ -154,10 +103,8 @@ export async function withStateLock(key, label, fn) {
     waitObserver?.({ key, label, waitedMs });
   }
 
-  const nested = new Set(held ?? []);
-  nested.add(key);
   try {
-    return await heldKeys.run(nested, fn);
+    return await fn();
   } finally {
     depths.set(key, Math.max(0, (depths.get(key) ?? 1) - 1));
     releaseSlot();

@@ -22,9 +22,6 @@ const API_BASE = 'https://api.digitalocean.com/v2';
 const DO_SCOPE = 'the spaces_key create and delete scopes';
 
 export class DigitalOceanSpacesProvider extends S3CompatibleProvider {
-  /** No settle window has been observed on a new bucket here. */
-  static bucketSettleWindowMs = 0;
-
   /** A new bucket answers from its first request here, so nothing waits. */
   static bucketQuietMs = 0;
 

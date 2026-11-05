@@ -38,9 +38,11 @@ classes:
       31857911325; commits 2b236261 and a0b64ff7 carry upstream stack frames
       (pulumi v3.231.0 diy backend). Our amplification (concurrent HA writers,
       fresh-bucket churn, state-op volume) was the root cause of FREQUENCY and
-      is FIXED: per-bucket lock, bucket retention (no delete/recreate), warm
-      e2e bucket, project-scoped keys, checkpoint-backup off — validated run
-      31913846541, 38 backpressure events -> 0. The staleness RECOVERY
+      is FIXED: bucket retention (no delete/recreate), warm e2e bucket,
+      project-scoped keys, checkpoint-backup off, and from 2026-11-05 a quiet
+      first seconds on a new bucket, which retired the per-bucket lock that
+      run 31913846541 validated (38 backpressure events -> 0): a concurrent HA
+      pair draws no throttle (src/lib/iac/state-lock.js). The staleness RECOVERY
       machinery is DELETED with that trigger (2026-08-16): guarded re-run,
       read-only rereads, poll-throughs, requiredOutputs poll, up-path
       widenings all gone; classifyStateError fails every staleness spelling

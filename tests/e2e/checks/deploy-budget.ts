@@ -20,12 +20,10 @@
  * silently.
  *
  * HA cold deploys also hold the state-lock invariants (ruling R6b): no
- * `backpressure` in any `[state] up` line, and a lock wait of at most 15 s
- * (select and refresh still serialize, so the second engine always waits a
- * little). compose-ha's infra fan must stay within 1.25x its slower arm.
- * Inside a young state bucket (the deploy prints `[state] scope young`,
- * Ruling A′) the whole upStack is locked, so those two are not judged and the
- * details say why; backpressure still is.
+ * `backpressure` in any `[state] up` line, and a lock wait of at most 15 s. An
+ * HA pair takes no state lock (src/lib/iac/state-lock.js), so a wait should be
+ * near zero and the 15 s is the alarm that something brought one back.
+ * compose-ha's infra fan must stay within 1.25x its slower arm.
  * k8s-ha's standby must not wait on its database for a minute, and the early
  * replication transport must not fail.
  *
@@ -46,7 +44,7 @@ export const DEPLOY_BUDGETS: Record<DeployMode, { ownedS: number; endToEndS: num
 
 /** A cold image delta carries the app's own layers on a pulled base: 4-5 MB. */
 export const COLD_DELTA_MAX_BYTES = 10_000_000;
-/** One select plus one refresh of the other engine (R6b). */
+/** The alarm for a lock wait that should be near zero (R6b). */
 export const HA_LOCK_WAIT_MAX_S = 15;
 export const FAN_RATIO_MAX = 1.25;
 export const STANDBY_AWAIT_DB_MAX_MS = 60_000;
@@ -85,13 +83,6 @@ const NOT_SERIAL =
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
 const ANSI = /\x1b\[[0-9;]*m/g;
-/**
- * The deploy's Ruling A′ line (src/lib/iac/state-telemetry.js
- * formatStateScopeYoung): the state bucket is inside its provider's settle
- * window, so each upStack holds the lock end to end and the HA pair's ups
- * serialize by design.
- */
-export const STATE_SCOPE_YOUNG = /\[state\] scope young (\S+)/;
 const STATE_UP =
   /\[state\] up (\S+): .*?\| backpressure (.+?) \| lock-waits (\d+)(?: \((\d+)s\))?/g;
 
@@ -167,16 +158,8 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     }
   }
 
-  // HA state-lock invariants. Inside a young state bucket the whole upStack
-  // is locked (Ruling A′), so the second engine waits out the first one's up
-  // and the fan runs near the sum of its arms: the lock-wait and fan checks
-  // only hold past the window. Backpressure is judged either way.
-  const youngStateBucket = STATE_SCOPE_YOUNG.exec(clean)?.[1] ?? null;
+  // HA state-lock invariants.
   const ha = mode === 'compose-ha' || mode === 'k8s-ha';
-  const skipped =
-    ha && youngStateBucket
-      ? `lock wait and fan ratio not judged: state bucket ${youngStateBucket} was inside its settle window, so each up held the state lock end to end`
-      : null;
   let lockWaitS: number | null = null;
   if (ha) {
     const states = [...clean.matchAll(STATE_UP)];
@@ -191,13 +174,13 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     // The counters are cumulative per process: the largest is the total.
     if (states.length > 0) {
       lockWaitS = Math.max(...states.map((m) => Number(m[4] ?? 0)));
-      if (!youngStateBucket && lockWaitS > HA_LOCK_WAIT_MAX_S) {
+      if (lockWaitS > HA_LOCK_WAIT_MAX_S) {
         failures.push(`lock wait ${lockWaitS}s > ${HA_LOCK_WAIT_MAX_S}s`);
       }
     }
   }
 
-  if (mode === 'compose-ha' && !youngStateBucket) {
+  if (mode === 'compose-ha') {
     const one = (name: string) => all(name)[0]?.ms;
     const fan = one('deploy.ha.compose.iac.upStack.fan');
     const primary = one('deploy.ha.compose.iac.upStack.primary');
@@ -246,8 +229,6 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     endToEndBudgetS: budget.endToEndS,
     deltaBytes,
     lockWaitS,
-    youngStateBucket,
-    skipped,
     slowest,
   };
 

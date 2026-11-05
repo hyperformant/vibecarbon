@@ -152,7 +152,7 @@ const bareListBuckets = (next, context) => (args) => {
  * 'none'): how the env's app gets an object-storage key of its own (security
  * plan R2). The base declares none on purpose, so a provider that forgets it
  * fails tests/unit/providers/app-key-scoping-census.test.ts instead of
- * inheriting a silent default, the same pattern as `bucketSettleWindowMs`.
+ * inheriting a silent default, the same pattern as `bucketQuietMs`.
  */
 export class S3CompatibleProvider {
   /**

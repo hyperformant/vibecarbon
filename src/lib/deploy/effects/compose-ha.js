@@ -366,9 +366,6 @@ async function haProvisionServers(ctx) {
               providerToken: apiToken,
               s3Config,
               projectName,
-              // Past the state bucket's settle window the two ups provision in
-              // parallel; inside it they serialize (lib/iac/state-lock.js).
-              stateBucketYoung: ctx.stateBucketYoung,
               // Recover stale-EMPTY outputs reads in place (read-only poll inside
               // upStack); the hard gate below stays the loud last resort. This
               // path is the MOST exposed member of the class: two parallel ups
@@ -383,7 +380,6 @@ async function haProvisionServers(ctx) {
               providerToken: apiToken,
               s3Config,
               projectName,
-              stateBucketYoung: ctx.stateBucketYoung,
               requiredOutputs: ['serverIp'],
             }),
           ),

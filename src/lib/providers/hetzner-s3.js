@@ -21,14 +21,6 @@ import {
 
 export class HetznerS3Provider extends S3CompatibleProvider {
   /**
-   * How long a new Hetzner bucket counts as young, for the state lock's scope
-   * (Ruling A′, src/lib/iac/state-lock.js). The 16 minutes this came from,
-   * rounded up to 20, turned out to be our own probe touching the bucket in its
-   * first second: see `bucketQuietMs`.
-   */
-  static bucketSettleWindowMs = 20 * 60_000;
-
-  /**
    * How long a new bucket is left alone. A HEAD or LIST in its first second can
    * leave it answering NoSuchBucket at random for up to 15 minutes. On
    * 2026-11-05, 54 new buckets across hel1, fsn1 and nbg1: touched at once, 6

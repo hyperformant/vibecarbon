@@ -5,11 +5,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import {
-  checkDeployBudget,
-  DEPLOY_BUDGETS,
-  STATE_SCOPE_YOUNG,
-} from '../../e2e/checks/deploy-budget.js';
+import { checkDeployBudget, DEPLOY_BUDGETS } from '../../e2e/checks/deploy-budget.js';
 
 const perf = (name: string, ms: number, note?: string) =>
   `[perf] ${name} ${ms}ms${note ? ` ${note}` : ''}`;
@@ -29,14 +25,11 @@ interface LogOpts {
   transportNote?: string;
   transport?: boolean;
   state?: boolean;
-  /** The deploy's `[state] scope young <bucket>` line (Ruling A′). */
-  young?: boolean;
 }
 
 /** A passing cold deploy log for each mode; opts bend one number. */
 function fixture(mode: keyof typeof DEPLOY_BUDGETS, o: LogOpts = {}): string {
   const lines: string[] = ['◇  Provisioning infrastructure', 'some spinner text'];
-  if (o.young) lines.push('[state] scope young proj-storage-pulumi-state-a1b2c3');
   const delta = (bytes: number | null | undefined) =>
     bytes === null
       ? []
@@ -272,34 +265,8 @@ describe('checkDeployBudget: cold image bytes', () => {
   );
 });
 
-describe('checkDeployBudget: a young state bucket (Ruling A′)', () => {
-  it('skips the lock-wait and fan checks on compose-ha, and says why', () => {
-    const r = checkDeployBudget(
-      fixture('compose-ha', { young: true, standbyLock: '1 (93s)', fan: 200_000 }),
-      'compose-ha',
-    );
-    expect(r.ok).toBe(true);
-    expect(r.details?.youngStateBucket).toBe('proj-storage-pulumi-state-a1b2c3');
-    expect(String(r.details?.skipped)).toMatch(/lock wait and fan ratio not judged/);
-    expect(String(r.details?.skipped)).toMatch(/settle window/);
-  });
-
-  it('skips the lock-wait check on k8s-ha', () => {
-    const r = checkDeployBudget(
-      fixture('k8s-ha', { young: true, standbyLock: '1 (120s)' }),
-      'k8s-ha',
-    );
-    expect(r.ok).toBe(true);
-    expect(r.details?.lockWaitS).toBe(120);
-  });
-
-  it.each(['compose-ha', 'k8s-ha'] as const)('still fails %s on state backpressure', (mode) => {
-    const r = checkDeployBudget(fixture(mode, { young: true, standbyBackpressure: 'up=2' }), mode);
-    expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/state backpressure up=2/);
-  });
-
-  it('judges both checks when the line is absent (past the window)', () => {
+describe('checkDeployBudget: HA invariants', () => {
+  it('judges the lock wait and the fan ratio on every cold deploy', () => {
     const r = checkDeployBudget(
       fixture('compose-ha', { standbyLock: '1 (93s)', fan: 200_000 }),
       'compose-ha',
@@ -307,18 +274,15 @@ describe('checkDeployBudget: a young state bucket (Ruling A′)', () => {
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/lock wait 93s > 15s/);
     expect(r.message).toMatch(/iac\.upStack\.fan 200s/);
-    expect(r.details?.youngStateBucket).toBeNull();
   });
-});
 
-describe('checkDeployBudget: HA invariants', () => {
   it('fails a compose-ha cold deploy whose standby waited on the lock', () => {
     const r = checkDeployBudget(fixture('compose-ha', { standbyLock: '1 (93s)' }), 'compose-ha');
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/lock wait 93s > 15s/);
   });
 
-  it('passes a lock wait of exactly 15s (a select plus refresh)', () => {
+  it('passes a lock wait of exactly 15s, the alarm line', () => {
     const r = checkDeployBudget(fixture('k8s-ha', { standbyLock: '2 (15s)' }), 'k8s-ha');
     expect(r.ok).toBe(true);
   });
@@ -403,17 +367,6 @@ describe('the markers the budget reads exist in the deploy', () => {
     expect(timer).toBeGreaterThan(start);
     expect(end).toBeGreaterThan(timer);
     expect(end).toBeLessThan(outro);
-  });
-
-  it('a young state bucket prints its [state] scope line, in the shape the check reads', async () => {
-    const young = orch.indexOf('if (stateBucketYoung) {');
-    const emit = orch.indexOf('emitStateScopeYoung(s3Config.stateBucket)');
-    expect(young).toBeGreaterThan(-1);
-    expect(emit).toBeGreaterThan(young);
-    expect(emit - young).toBeLessThan(400);
-    const { formatStateScopeYoung } = await import('../../../src/lib/iac/state-telemetry.js');
-    const line = formatStateScopeYoung('proj-storage-pulumi-state-a1b2c3');
-    expect(STATE_SCOPE_YOUNG.exec(`●  ${line}`)?.[1]).toBe('proj-storage-pulumi-state-a1b2c3');
   });
 
   it('deploy.storage.finish wraps the app-bucket finalize', () => {

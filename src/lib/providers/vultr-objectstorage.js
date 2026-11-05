@@ -26,9 +26,6 @@
 import { deriveStateBucketName, S3CompatibleProvider, sanitizeBucketName } from './s3-base.js';
 
 export class VultrObjectStorageProvider extends S3CompatibleProvider {
-  /** No settle window has been observed on a new bucket here. */
-  static bucketSettleWindowMs = 0;
-
   /** A new bucket answers from its first request here, so nothing waits. */
   static bucketQuietMs = 0;
 
