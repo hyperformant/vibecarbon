@@ -161,9 +161,9 @@ describe('renderDoUserData (cloud-init parity splice)', () => {
     // missing an entry for typography actually in use — this should
     // never fire, but if it does, the map (not the '?' fallback) is the fix.
     expect(sharedCloudInit).not.toContain('?');
-    // The one legitimate '?' is the shell's `$?` (apt's exit status) in the
-    // spliced quiet-update line; it is ASCII in the source, not a fallback.
-    expect(rendered.replaceAll('$?', '')).not.toContain('?');
+    // The one legitimate '?' source is a shell `rc=$?`; stripping exactly that
+    // keeps a fallback '?' that follows any other '$' visible.
+    expect(rendered.replaceAll('rc=$?', '')).not.toContain('?');
   });
 
   it('throws (fail loud) if the runcmd anchor is missing from the input', () => {

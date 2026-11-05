@@ -5,8 +5,8 @@
 # provider. Each provider's renderer splices the one pinned Docker install
 # (src/lib/iac/docker-install.js) at the top of runcmd, so every server runs
 # the same Docker. Boot refreshes only Docker's own apt source (no
-# package_update: Ubuntu's shipped lists already hold ufw and
-# unattended-upgrades), with Ubuntu's post-update hooks silenced.
+# package_update: ufw and unattended-upgrades are already installed on the
+# images we boot), with Ubuntu's post-update hooks silenced.
 # By finishing UFW + unattended-upgrades before SSH is even reachable, the
 # CLI's post-SSH setupServer becomes a ~2-second marker-file probe instead
 # of a ~90-second serial apt-get chain.

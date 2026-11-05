@@ -71,7 +71,7 @@ describe('(a) no compose program or provider spells its own Docker install', () 
     expect(spellsInstall(readFileSync(join(ROOT, INSTALL_MODULE), 'utf-8'))).toBe(true);
   });
 
-  it('the k8s scripts install Ubuntu docker.io, not docker-ce', () => {
+  it('the k8s scripts never install docker-ce (they run no docker install at all)', () => {
     const k3s = files.filter((f) => f.startsWith('carbon/cloud-init/k3s/') && f.endsWith('.sh'));
     expect(k3s.length, K8S_SCRIPTS_ALLOWED_TO_DIFFER).toBeGreaterThan(0);
     for (const rel of k3s) {

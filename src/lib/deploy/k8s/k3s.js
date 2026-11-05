@@ -5031,7 +5031,7 @@ async function deployK3sSteps(options, inFlight) {
   if (!state.shouldSkip('k3s-ready', { masterIp })) {
     state.startStep('k3s-ready', { masterIp });
     s.start('Waiting for k3s on master (cloud-init + Ready)');
-    // 1200s (20 min) covers cold-init + apt-install + k3s-download + k3s-up.
+    // 1200s (20 min) covers cold-init + k3s-download + k3s-up.
     // Earlier 600s budget tripped on 2026-04-27 morning matrix when apt was
     // mid-install at the timeout (cloud-init-output.log diagnostics
     // confirmed). The diagnostic capture inside waitForK3sReady means a

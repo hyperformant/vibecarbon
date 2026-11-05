@@ -20,10 +20,11 @@
  * Versions checked 2026-11-04 against the noble amd64 Packages index.
  *
  * Boot refreshes only what it installs: the apt update is limited to Docker's
- * own source (the Ubuntu lists the image ships with already hold everything
- * else we install) and runs with Ubuntu's post-update hooks silenced; cloud-init
- * no longer does a `package_update`. If the install cannot find a package in the
- * shipped lists, a plain full update is the fallback (see aptInstallOrRefresh).
+ * own source and runs with Ubuntu's post-update hooks silenced; cloud-init no
+ * longer does a `package_update`. The other packages we use (ufw,
+ * unattended-upgrades) are already installed on the images we boot; Hetzner and
+ * Linode ship no apt lists at all. If the Docker install cannot find a package,
+ * a plain full update is the fallback (see aptInstallOrRefresh).
  *
  * ASCII-only: DigitalOcean and Scaleway user data must be pure ASCII.
  */

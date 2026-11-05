@@ -8,7 +8,7 @@
  * re-acquired, severing the 10.0.1.x path to the master, after which
  * kubelet's apiserver tunnel died with TLS-handshake timeouts.
  *
- * The pre-existing dhcpcd self-heal (the `DHCP_TRIGGERED` block in each
+ * The pre-existing dhcpcd self-heal (the `dhcpcd -1` call in each
  * role script's private-NIC wait loop) only runs during cloud-init. It
  * guards BOOT. Nothing guarded day 4 — so every long-lived cluster is
  * exposed, and the exposure grows with uptime.
