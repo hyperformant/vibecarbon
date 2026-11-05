@@ -80,13 +80,21 @@ export const APT_LOCK_TIMEOUT_SECONDS = 300;
 export const APT_LOCK_OPT = `-o DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}`;
 
 /**
+ * Stops apt asking DNS for `_https._tcp` SRV records before it connects.
+ * DigitalOcean's resolver takes 31 s to answer that query (the other four
+ * providers answer in under 0.1 s), which made a narrow `apt-get update` take
+ * 10 s and a package download 15 s there. Nothing we install uses SRV records.
+ */
+export const APT_NO_SRV_OPT = '-o Acquire::EnableSrvRecords=false';
+
+/**
  * Build a lock-safe apt-get command line.
  *
  * @param {string} args - everything after `apt-get`, e.g. `install -y -qq curl`
  * @returns {string} the full command, with the lock timeout applied
  */
 export function aptGet(args) {
-  return `apt-get ${APT_LOCK_OPT} ${args}`;
+  return `apt-get ${APT_LOCK_OPT} ${APT_NO_SRV_OPT} ${args}`;
 }
 
 /**
@@ -130,7 +138,7 @@ const APT_HOOKS_CLEARED = [
  */
 export function aptQuietUpdate(opts = '', confPath = APT_QUIET_CONF) {
   const clears = APT_HOOKS_CLEARED.map((k) => `"#clear ${k};"`).join(' ');
-  return `printf "%s\\n" ${clears} > ${confPath}; apt-get -c ${confPath} ${APT_LOCK_OPT} update -qq${opts ? ` ${opts}` : ''}`;
+  return `printf "%s\\n" ${clears} > ${confPath}; apt-get -c ${confPath} ${APT_LOCK_OPT} ${APT_NO_SRV_OPT} update -qq${opts ? ` ${opts}` : ''}`;
 }
 
 /**

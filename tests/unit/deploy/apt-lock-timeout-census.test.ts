@@ -23,7 +23,13 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { APT_LOCK_OPT, APT_LOCK_TIMEOUT_SECONDS, aptGet } from '../../../src/lib/deploy/apt.js';
+import {
+  APT_LOCK_OPT,
+  APT_LOCK_TIMEOUT_SECONDS,
+  APT_NO_SRV_OPT,
+  aptGet,
+  aptQuietUpdate,
+} from '../../../src/lib/deploy/apt.js';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 
@@ -53,6 +59,11 @@ const APT_GET = /\bapt-get\s|\baptGet\(|\baptQuietUpdate\(|\baptInstallOrRefresh
 // interpolating the shared constant (the .js sites import APT_LOCK_OPT).
 const HAS_TIMEOUT =
   /DPkg::Lock::Timeout|APT_LOCK_OPT|aptGet\(|aptQuietUpdate\(|aptInstallOrRefresh\(/;
+
+// The SRV option must ride on every apt-get too: DigitalOcean's resolver takes
+// 31 s to answer the SRV query apt makes by default. Same two ways to satisfy it.
+const HAS_NO_SRV =
+  /Acquire::EnableSrvRecords=false|APT_NO_SRV_OPT|aptGet\(|aptQuietUpdate\(|aptInstallOrRefresh\(/;
 
 function isComment(line: string, file: string): boolean {
   const t = line.trim();
@@ -104,6 +115,19 @@ describe('apt lock-timeout census', () => {
     ).toEqual([]);
   });
 
+  it('every apt-get site in src/ and carbon/ skips SRV lookups', () => {
+    const offenders = aptSites()
+      .filter((s) => !(s.rel in EXEMPT))
+      .filter((s) => !HAS_NO_SRV.test(s.text));
+
+    expect(
+      offenders,
+      'apt-get without -o Acquire::EnableSrvRecords=false: apt makes an SRV query ' +
+        "first, and DigitalOcean's resolver takes 31 s to answer it:\n" +
+        offenders.map((o) => `  ${o.rel}:${o.line}  ${o.text}`).join('\n'),
+    ).toEqual([]);
+  });
+
   it('finds the whole known class, so the census cannot pass vacuously', () => {
     const sites = aptSites();
     // wireguard.js (2) + apt.js helper (1) + the one shared Docker install (2).
@@ -151,8 +175,14 @@ describe('the shared apt constant', () => {
     // and the key is case-sensitive.
     expect(APT_LOCK_OPT).toBe(`-o DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}`);
     expect(aptGet('install -y curl')).toBe(
-      `apt-get -o DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS} install -y curl`,
+      `apt-get -o DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS} -o Acquire::EnableSrvRecords=false install -y curl`,
     );
+  });
+
+  it('aptGet and aptQuietUpdate both carry the no-SRV option', () => {
+    expect(APT_NO_SRV_OPT).toBe('-o Acquire::EnableSrvRecords=false');
+    expect(aptGet('update')).toContain(APT_NO_SRV_OPT);
+    expect(aptQuietUpdate()).toContain(APT_NO_SRV_OPT);
   });
 
   it('the timeout is finite and long enough to outlast a first-boot upgrade run', () => {
