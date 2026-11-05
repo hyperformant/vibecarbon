@@ -116,7 +116,8 @@ describe.each(Object.entries(RENDERERS))('(b) %s rendered compose user data', (_
     expect(updates[0]).toContain('-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/docker.list');
     expect(updates[0]).toContain('-o Dir::Etc::sourceparts=-');
     expect(updates[0]).toContain('#clear APT::Update::Post-Invoke-Success;');
-    expect(updates[0]).toContain('rm -f /etc/apt/apt.conf.d/99zz-vibecarbon-boot');
+    expect(updates[0]).toContain('apt-get -c /run/vibecarbon-boot.conf ');
+    expect(updates[0]).not.toContain('apt.conf.d');
     expect(Buffer.byteLength(text)).toBeLessThan(32 * 1024);
     expect([...text].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
   });

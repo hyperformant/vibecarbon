@@ -176,6 +176,13 @@ describe('exchangeAndBringUpTunnel', () => {
     // private key generated on-node, never returned/logged
     expect(JSON.stringify(res)).not.toContain('private');
     expect(calls.some((c) => c.includes('wg genkey'))).toBe(true);
+    // The apt refresh waits for the daily apt units first, then refreshes with
+    // no DEBIAN_FRONTEND prefix landing on the printf.
+    const install = calls.find((c) => c.includes('wireguard-tools')) ?? '';
+    const wait = install.indexOf('systemd-run --quiet --wait');
+    expect(wait).toBeGreaterThan(-1);
+    expect(wait).toBeLessThan(install.indexOf('apt-get -c '));
+    expect(install).not.toContain('DEBIAN_FRONTEND=noninteractive printf');
     expect(calls.some((c) => c.includes('ip link add wg0'))).toBe(true);
     // the peer's PUBLIC endpoint is configured on each node
     expect(calls.some((c) => c.includes(`157.180.115.19:${WG_PORT}`))).toBe(true);

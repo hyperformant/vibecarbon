@@ -13,7 +13,13 @@
  */
 
 import { sshRun } from '../ssh.js';
-import { APT_LOCK_TIMEOUT_SECONDS, APT_TRIMMED_INDEXES, aptGet, aptQuietUpdate } from './apt.js';
+import {
+  APT_LOCK_TIMEOUT_SECONDS,
+  APT_TRIMMED_INDEXES,
+  aptGet,
+  aptQuietUpdate,
+  aptWaitForDailyUnits,
+} from './apt.js';
 
 export const WG_PORT = 51821; // NOT 51820 — flannel-wg owns that in k3s
 export const WG_SUBNET_CIDR = '10.99.0.0/30';
@@ -259,7 +265,8 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
         '-c',
         'set -e; ' +
           'if ! command -v wg >/dev/null 2>&1; then ' +
-          `DEBIAN_FRONTEND=noninteractive ${aptQuietUpdate(APT_TRIMMED_INDEXES)}; ` +
+          `${aptWaitForDailyUnits()}; ` +
+          `${aptQuietUpdate(APT_TRIMMED_INDEXES)}; ` +
           `DEBIAN_FRONTEND=noninteractive ${aptGet('install -y -qq wireguard-tools')}; ` +
           'command -v wg >/dev/null 2>&1 || { ' +
           'echo "wireguard-tools installed but wg is still not on PATH" >&2; exit 1; }; ' +
