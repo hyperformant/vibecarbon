@@ -400,6 +400,15 @@ export class BaseProvider {
   static STATE_BACKEND_CHECKSUM_CALCULATION = '';
 
   /**
+   * Pulumi stack config for this provider's plugin, as plain `pkg:key` strings.
+   * Only for settings the plugin has no environment variable for: credentials
+   * go through buildIacEnv. Written on every stack open, because each open is a
+   * fresh temporary workspace and a value set once would be gone on the next.
+   * @type {Record<string, string>}
+   */
+  static IAC_STACK_CONFIG = {};
+
+  /**
    * The `[accessKeyEnv, secretKeyEnv]` pair this provider's object-storage
    * credentials are read from — the env vars `promptObjectStorageCredentials`
    * (and the guided-setup `getS3Credentials` behind it) consult before falling

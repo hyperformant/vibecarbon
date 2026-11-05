@@ -149,8 +149,8 @@ export function resolveBackendUrl(s3Config, provider) {
  * Build the env var bag Pulumi needs. The compute provider's CLI reads its
  * own token env var (Hetzner: HCLOUD_TOKEN, via
  * `getProviderClass(provider).CLI_TOKEN_ENV`); S3 backend reads
- * AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY; our programs read any additional
- * config we pass through `stack.setConfig(...)`.
+ * AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY. A plugin setting with no env var
+ * travels as the provider's IAC_STACK_CONFIG instead.
  *
  * There is NO default provider here (deliberately — see the DO k8s 401 RCA:
  * a caller that forgot `provider` used to silently get 'hetzner', so a
@@ -296,9 +296,13 @@ async function getOrCreateStackImpl(stackName, program, options = {}) {
   const backendUrl = resolveBackendUrl(options.s3Config, options.provider);
   const envVars = buildEnv(options);
   const stackArgs = { stackName, projectName: pulumiProject, program };
+  const stackConfig = options.provider ? getProviderClass(options.provider).IAC_STACK_CONFIG : {};
   const wsOpts = {
     projectSettings: { name: pulumiProject, runtime: 'nodejs', backend: { url: backendUrl } },
     envVars,
+    ...(Object.keys(stackConfig).length > 0 && {
+      stackSettings: { [stackName]: { config: stackConfig } },
+    }),
   };
   const requireExisting = options.requireExisting === true;
 

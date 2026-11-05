@@ -48,6 +48,11 @@ export class HetznerProvider extends BaseProvider {
   // Externally pinned as a customer-visible CI secret name — never derive/rename.
   static TOKEN_ENV = 'HETZNER_API_TOKEN';
   static CLI_TOKEN_ENV = 'HCLOUD_TOKEN';
+  // The plugin's default polling doubles up to a minute between checks, so a
+  // finished server action could sit unnoticed for that long: 56 s on a k8s
+  // master, 2026-11-05. Neither setting has an environment variable. Changing
+  // them on an existing stack updates the provider only and replaces nothing.
+  static IAC_STACK_CONFIG = { 'hcloud:pollFunction': 'constant', 'hcloud:pollInterval': '1s' };
   // The pair getS3Credentials (hetzner-guided-setup.js) reads before prompting.
   static OBJECT_STORAGE_ENV = ['HETZNER_ACCESS_KEY', 'HETZNER_SECRET_KEY'];
   // Stamped on nodes by hcloud-cloud-controller-manager (see K8S_ASSETS).
