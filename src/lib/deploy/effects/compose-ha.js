@@ -87,6 +87,7 @@ import {
   discardableReseedLine,
   readDiscardableStandby,
 } from '../standby-lineage.js';
+import { COMPOSE_HA_INFRA_STEP } from '../state.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
 import { writeComposeWalgRole } from '../walg-role.js';
 import { exchangeAndBringUpTunnel, wgIpOf } from '../wireguard.js';
@@ -119,6 +120,38 @@ const readNodeState = (ctx, ip) =>
   readReplicaState({
     exec: composePsqlRunner(ip, ctx.sshKeyPath, `/opt/${ctx.projectConfig.projectName}`),
   });
+
+/** Every output later steps read, on both arms. */
+const INFRA_OUTPUTS = ['serverIp', 'serverId', 'firewallId'];
+const recordedInfraIsComplete = (recorded) =>
+  ['primary', 'standby'].every((arm) => INFRA_OUTPUTS.every((key) => !!recorded[arm]?.[key]));
+
+/** Each arm's recorded server is the one .vibecarbon.json records for its stack. */
+function recordedInfraMatchesConfig(recorded, { envConfig, projectName, environment }) {
+  return ['primary', 'standby'].every((stack) => {
+    const entry = (envConfig?.servers ?? []).find(
+      (sv) => composeHaStackOf(sv, projectName, environment) === stack,
+    );
+    return (
+      !!entry &&
+      String(entry.id) === String(recorded[stack].serverId) &&
+      entry.ip === recorded[stack].serverIp
+    );
+  });
+}
+
+/** The provider still has both recorded servers. A failed probe is a miss. */
+async function recordedServersExist(recorded, provider) {
+  const probe = async (arm) => {
+    try {
+      return (await provider.getServerSummary(recorded[arm].serverId)) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const summaries = await Promise.all([probe('primary'), probe('standby')]);
+  return summaries.every(Boolean);
+}
 
 /**
  * Provision BOTH VPS via two parallel Pulumi stacks (one per cluster). Uploads
@@ -305,16 +338,22 @@ async function haProvisionServers(ctx) {
   };
   const state = ctx.state;
   const recorded =
-    !ctx.reconverge && state?.shouldSkip('compose-ha-infra', infraInputs)
-      ? state.getStepResult('compose-ha-infra')
+    !ctx.reconverge && state?.shouldSkip(COMPOSE_HA_INFRA_STEP, infraInputs)
+      ? state.getStepResult(COMPOSE_HA_INFRA_STEP)
       : null;
-  // A ledger entry missing an output provisions rather than continuing with
-  // undefined, as the gate below does for a Pulumi result.
-  const reusable = !!recorded?.primary?.serverIp && !!recorded?.standby?.serverIp;
+  // The ledger is not trusted over reality. It is reused only when every
+  // output later steps read is present, it names the servers .vibecarbon.json
+  // records, and the provider still has both. Anything else runs Pulumi as
+  // before, which also repairs a server deleted out of band.
+  const reusable =
+    !!recorded &&
+    recordedInfraIsComplete(recorded) &&
+    recordedInfraMatchesConfig(recorded, { envConfig, projectName, environment }) &&
+    (await recordedServersExist(recorded, provider));
   if (reusable) {
     ctx.onProgress('Infrastructure unchanged, skipping Pulumi');
   } else {
-    state?.startStep('compose-ha-infra', infraInputs);
+    state?.startStep(COMPOSE_HA_INFRA_STEP, infraInputs);
   }
   const [primaryResult, standbyResult] = reusable
     ? [{ outputs: recorded.primary }, { outputs: recorded.standby }]
@@ -369,7 +408,7 @@ async function haProvisionServers(ctx) {
   }
   // Both arms passed the gate: only now is the run recorded as complete.
   if (!reusable) {
-    state?.completeStep('compose-ha-infra', {
+    state?.completeStep(COMPOSE_HA_INFRA_STEP, {
       primary: primaryResult.outputs,
       standby: standbyResult.outputs,
     });

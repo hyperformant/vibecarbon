@@ -19,6 +19,9 @@ import { join } from 'node:path';
 // state bucket) is exactly what we want.
 export const STATE_VERSION = 2;
 
+/** The ledger step that records a compose-ha deploy's two stacks' outputs. */
+export const COMPOSE_HA_INFRA_STEP = 'compose-ha-infra';
+
 export class StateTracker {
   constructor(projectName, environment) {
     this.projectName = projectName;

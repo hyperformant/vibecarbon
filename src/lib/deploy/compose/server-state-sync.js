@@ -19,7 +19,7 @@ import * as p from '@clack/prompts';
 import { updateProjectConfig } from '../../config.js';
 import { composeServerStateSpec, syncServerState } from '../../iac/server-state.js';
 import { providerIdFor } from '../../providers/index.js';
-import { StateTracker } from '../state.js';
+import { COMPOSE_HA_INFRA_STEP, StateTracker } from '../state.js';
 import { composeHaStackOf } from './ha-role-swap.js';
 
 /**
@@ -92,7 +92,7 @@ export function recordPendingServerState(environment, entry) {
   // The scale replaces a server and its id and IP without changing any input
   // of the compose-ha infra step, so the outputs that step recorded now name
   // a server that is about to be deleted. The next deploy runs Pulumi once.
-  new StateTracker(undefined, environment).invalidateStep('compose-ha-infra');
+  new StateTracker(undefined, environment).invalidateStep(COMPOSE_HA_INFRA_STEP);
   updateProjectConfig((config) => {
     const envConfig = config.environments?.[environment];
     if (!envConfig) {
