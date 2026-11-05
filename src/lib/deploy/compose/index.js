@@ -59,7 +59,7 @@ import {
   isAdminProbeExit,
   isTerminalAdminProbeExit,
 } from '../admin-ready.js';
-import { BOOT_MARK_LOG, BOOT_STAGE_LABELS } from '../boot-timing.js';
+import { BOOT_MARK_LOG, readBootStage } from '../boot-timing.js';
 // DNS_NOT_SETTLED_RETRY_DELAYS_MS: shared with remote-build.js's own
 // DNS-not-settled ladder so the two can't drift apart — see that file's
 // docstring on the constant for the sizing rationale.
@@ -453,7 +453,6 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
   const deadline = start + timeoutMs;
   let everConnected = false;
   let stageLabel = '';
-  let newestMark = 0;
   // One held SSH session returns the moment the marker exists and streams the
   // boot log; a 1s timer keeps the spinner's elapsed time and stage current.
   const render = () => {
@@ -484,19 +483,10 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
         everConnected = true;
         render();
       },
-      onLine: (line) => {
-        // Boot-log lines are `<phase id> <epoch seconds.nanoseconds>`. Every
-        // reconnect replays the whole log, so only a mark newer than the last
-        // one seen may change the label.
-        const mark = /^([a-z]) (\d+(?:\.\d+)?)$/.exec(line.trim());
-        const label = mark && BOOT_STAGE_LABELS[mark[1]];
-        if (!label || Number(mark[2]) <= newestMark) return;
-        newestMark = Number(mark[2]);
-        if (label !== stageLabel) {
-          stageLabel = label;
-          render();
-        }
-      },
+      onLine: readBootStage((label) => {
+        stageLabel = label;
+        render();
+      }),
     }));
   } finally {
     if (ticker) clearInterval(ticker);

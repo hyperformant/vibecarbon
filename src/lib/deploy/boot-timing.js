@@ -70,7 +70,9 @@ export const PHASE_IDS = Object.freeze({
 
 /**
  * Plain words for what the server is doing at each phase id, shown beside the
- * ready wait's spinner. `e` (done) needs no label: the wait ends there.
+ * ready wait's spinner. `e` (done) needs no label: the wait ends there. `b`
+ * has none either: the boot pull is written as `b.begin` / `b.end`, never as a
+ * plain `b` mark.
  */
 export const BOOT_STAGE_LABELS = Object.freeze({
   p: 'starting up',
@@ -82,8 +84,31 @@ export const BOOT_STAGE_LABELS = Object.freeze({
   x: 'installing cluster add-ons',
   d: 'starting Docker',
   u: 'setting up the firewall',
-  b: 'pulling the database image',
 });
+
+/**
+ * A reader for the boot log's lines as they stream in, for a ready wait's
+ * spinner. Calls `onStage(label)` when a `<id> <epoch.fraction>` mark moves
+ * the label. Every reconnect replays the whole log, so only a mark newer than
+ * the newest one seen may change the label, and an unchanged label is not
+ * reported again (a quiet, non-TTY spinner prints a line per report).
+ *
+ * @param {(label: string) => void} onStage
+ * @returns {(line: string) => void}
+ */
+export function readBootStage(onStage) {
+  let newest = 0;
+  let current = '';
+  return (line) => {
+    const mark = /^([a-z]) (\d+(?:\.\d+)?)$/.exec(String(line).trim());
+    const label = mark && Object.hasOwn(BOOT_STAGE_LABELS, mark[1]) && BOOT_STAGE_LABELS[mark[1]];
+    if (!label || Number(mark[2]) <= newest) return;
+    newest = Number(mark[2]);
+    if (label === current) return;
+    current = label;
+    onStage(label);
+  };
+}
 
 /** The whole collection's bound, all nodes in parallel. */
 export const BOOT_TIMING_BUDGET_MS = 45_000;

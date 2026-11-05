@@ -102,7 +102,7 @@ import {
 } from '../../walg/restore-layout.js';
 import { assertRestoredPrimaryWritable } from '../../walg/restore-marker.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
-import { BOOT_MARK_LOG, queueBootTiming } from '../boot-timing.js';
+import { BOOT_MARK_LOG, queueBootTiming, readBootStage } from '../boot-timing.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import {
   DB_CONTAINER,
@@ -1201,9 +1201,17 @@ function sshHostKeyOpts(khPath) {
  * @param {string} sshKeyPath
  * @param {string} khPath - per-env known_hosts file path
  * @param {number} [maxWaitSec]
+ * @param {{ onStage?: (label: string) => void }} [opts] - called with a plain
+ *   description of what the server is doing, when it changes
  * @returns {Promise<void>}
  */
-export async function waitForK3sReady(masterIp, sshKeyPath, khPath, maxWaitSec = 600) {
+export async function waitForK3sReady(
+  masterIp,
+  sshKeyPath,
+  khPath,
+  maxWaitSec = 600,
+  { onStage } = {},
+) {
   // One held SSH session returns the moment /tmp/k3s-ready exists. The run
   // wrapper never throws (the helper's contract) and keeps the last SSH error
   // for the timeout message below.
@@ -1235,6 +1243,7 @@ export async function waitForK3sReady(masterIp, sshKeyPath, khPath, maxWaitSec =
     markerPath: '/tmp/k3s-ready',
     logPath: BOOT_MARK_LOG,
     deadlineMs: Date.now() + maxWaitSec * 1000,
+    ...(onStage && { onLine: readBootStage(onStage) }),
   });
   if (!ready) {
     const err = lastErr;
@@ -5041,7 +5050,9 @@ async function deployK3sSteps(options, inFlight) {
     // costs us nothing — we still get the same actionable signal on real
     // failures, just don't false-positive on slow apt mornings.
     await perfAsync(`deploy.${perfPrefix}.waitForReady`, () =>
-      waitForK3sReady(masterIp, privateKeyPath, khPath, 1200),
+      waitForK3sReady(masterIp, privateKeyPath, khPath, 1200, {
+        onStage: (label) => s.message(`Waiting for k3s on master: ${label}`),
+      }),
     );
     bootTimingDue = true;
     state.completeStep('k3s-ready');

@@ -47,4 +47,35 @@ describe('waitForK3sReady holds one session', () => {
       /k3s did not become ready on 1\.2\.3\.4 within 1s\. Last SSH error: ssh: connect to host refused/,
     );
   });
+
+  it('hands the marker wait a stage reader that reports labels from real boot marks', async () => {
+    const { waitForRemoteMarker } = await import('../../../src/lib/deploy/remote-marker.js');
+    const { waitForK3sReady } = await import('../../../src/lib/deploy/k8s/k3s.js');
+    vi.mocked(waitForRemoteMarker).mockReset();
+    const stages: string[] = [];
+    vi.mocked(waitForRemoteMarker).mockImplementation(async ({ onLine }) => {
+      onLine?.('k 1762300000.5');
+      onLine?.('a 1762299990.5'); // a reconnect's replay of an older mark
+      onLine?.('r 1762300010.25');
+      onLine?.('r 1762300010.25');
+      return { ready: true, connected: true };
+    });
+
+    await waitForK3sReady('1.2.3.4', '/tmp/key', '/tmp/kh', 600, {
+      onStage: (label: string) => stages.push(label),
+    });
+
+    expect(stages).toEqual(['installing Kubernetes', 'waiting for Kubernetes']);
+  });
+
+  it('works without an onStage callback', async () => {
+    const { waitForRemoteMarker } = await import('../../../src/lib/deploy/remote-marker.js');
+    const { waitForK3sReady } = await import('../../../src/lib/deploy/k8s/k3s.js');
+    vi.mocked(waitForRemoteMarker).mockReset();
+    vi.mocked(waitForRemoteMarker).mockImplementation(async ({ onLine }) => {
+      onLine?.('k 1762300000.5');
+      return { ready: true, connected: true };
+    });
+    await expect(waitForK3sReady('1.2.3.4', '/tmp/key', '/tmp/kh', 600)).resolves.toBeUndefined();
+  });
 });
