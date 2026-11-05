@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { resolveEnvStorage } from '../../../src/lib/deploy/prompts.js';
 import {
+  buildArchiverEvidenceCommand,
   buildWalSwitchProbe,
   buildWalSwitchRemoteCommand,
   FORBIDDEN_ROLE_PREFIXES,
@@ -112,6 +113,24 @@ describe('buildWalSwitchProbe', () => {
 
   it('always exits 0 so the verdict is decided in TypeScript, not in shell', () => {
     expect(probe.trimEnd().endsWith('exit 0')).toBe(true);
+  });
+});
+
+describe('buildArchiverEvidenceCommand', () => {
+  it('compose reads the archiver and the db logs through the compose project', () => {
+    const cmd = buildArchiverEvidenceCommand('myapp', true);
+    expect(cmd).toContain('cd /opt/myapp && docker compose exec -T db');
+    expect(cmd).toContain('pg_stat_archiver');
+    expect(cmd).toContain('docker compose logs --tail 400 db');
+    expect(cmd).toMatch(/WAL_ARCHIVE/);
+  });
+
+  it('k8s reads the same two things from the db pod', () => {
+    const cmd = buildArchiverEvidenceCommand('myapp', false);
+    expect(cmd).toContain(`kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} --`);
+    expect(cmd).toContain('pg_stat_archiver');
+    expect(cmd).toContain(`kubectl -n vibecarbon logs ${DB_POD} -c ${DB_CONTAINER} --tail=400`);
+    expect(cmd).toMatch(/WAL_ARCHIVE/);
   });
 });
 
@@ -328,16 +347,71 @@ describe('runBackupEvidenceChecks', () => {
     expect(seen).toContain(`backups/myapp/e3/walg/${LINEAGE}/wal_005/000000010000000000000009`);
   });
 
-  // The load-bearing mutation test: WAL is silently dropped (wal-archive.sh
-  // exits 0 by design) and nothing lands. The guard MUST go red.
-  it('FAILS when the segment never lands — the silent-archive-failure case', async () => {
+  // The load-bearing mutation test: nothing lands. The guard MUST go red.
+  it('FAILS when the segment never lands', async () => {
     const results = await runBackupEvidenceChecks(
       opts({ execRemote: () => probeOutput, probePrefix: async () => false }),
     );
     const wal = byName(results, 'backup_walg_wal_archived');
     expect(wal.status).toBe('fail');
     expect(wal.errorMessage).toContain(SEGMENT);
-    expect(wal.errorMessage).toMatch(/dropping WAL/i);
+    // wal-archive.sh holds a segment it could not push, so the message must not
+    // claim the segment was dropped.
+    expect(wal.errorMessage).not.toMatch(/dropping WAL|exits 0/i);
+  });
+
+  // The server is torn down straight after a failed verify, so what Postgres
+  // knew has to be read before the verdict is written. It is what separates a
+  // push that failed from a segment that landed and the listing cannot see.
+  it('a segment that never lands records what the archiver saw', async () => {
+    const evidence =
+      'archived=0 failed=3 last_failed=000000010000000000000009\nWAL_ARCHIVE_FAILED: x';
+    const commands: string[] = [];
+    const results = await runBackupEvidenceChecks(
+      opts({
+        execRemote: (_ip: string, _key: string, cmd: string) => {
+          commands.push(cmd);
+          return commands.length === 1 ? probeOutput : evidence;
+        },
+        probePrefix: async () => false,
+      }),
+    );
+    const wal = byName(results, 'backup_walg_wal_archived');
+    expect(commands[1]).toBe(buildArchiverEvidenceCommand(PROJECT, false));
+    expect(wal.errorMessage).toContain('failed=3');
+    expect(wal.details).toMatchObject({ archiver: evidence });
+  });
+
+  it('a verdict still lands when the archiver cannot be read', async () => {
+    let calls = 0;
+    const results = await runBackupEvidenceChecks(
+      opts({
+        execRemote: () => {
+          calls += 1;
+          if (calls > 1) throw new Error('ssh: connection refused');
+          return probeOutput;
+        },
+        probePrefix: async () => false,
+      }),
+    );
+    const wal = byName(results, 'backup_walg_wal_archived');
+    expect(wal.status).toBe('fail');
+    expect(wal.errorMessage).toContain('could not read the archiver: ssh: connection refused');
+  });
+
+  it('a segment that lands costs no extra read', async () => {
+    const commands: string[] = [];
+    await runBackupEvidenceChecks(
+      opts({
+        execRemote: (_ip: string, _key: string, cmd: string) => {
+          commands.push(cmd);
+          return probeOutput;
+        },
+        probePrefix: async (prefix: string) =>
+          prefix === walSegmentKeyPrefix(PROJECT, 'e3', LINEAGE, SEGMENT),
+      }),
+    );
+    expect(commands).toHaveLength(1);
   });
 
   it('keeps polling through transient S3 errors before giving a verdict', async () => {

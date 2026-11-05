@@ -2188,10 +2188,8 @@ export async function runLifecycle(
         // Backup evidence — assert a WAL object actually LANDS in S3 (verify-deploy
         // only; verify-scale runs the same check itself, and restore/failover
         // verification has its own backup semantics). Everything else in the stack
-        // proves wal-g *can* reach the bucket; nothing proved an object arrives,
-        // because wal-archive.sh exits 0 on push failure by design and
-        // pg_stat_archiver is therefore structurally blind. See the check's
-        // docblock and docs/tests.md's class-3 countermeasure.
+        // proves wal-g *can* reach the bucket; nothing proved an object arrives.
+        // See the check's docblock and docs/tests.md's class-3 countermeasure.
         //
         // sshCheckMasterIp is already resolved to the HA PRIMARY above — the
         // probe refuses to provoke a standby and reports that as a failure.

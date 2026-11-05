@@ -281,8 +281,8 @@ documented exception there.
 wrong-arch wal-g builds fine and Postgres comes up green with backups dead; `destroy`
 printed "(all via Pulumi)" while Pulumi destroyed nothing; a registry push failure
 fell back to sideload so quietly that warm redeploys just "got slow"; and
-`pg_stat_archiver` is *structurally* blind here because `wal-archive.sh` deliberately
-exits 0. Health checks assert liveness; nobody asserted *effect*.
+`pg_stat_archiver` counts what `archive_command` reported, not what reached the
+bucket. Health checks assert liveness; nobody asserted *effect*.
 *Countermeasure (rule):* **success must cite evidence.** A step that can degrade must
 (a) mark the run summary degraded (never `warn`-and-continue on a deploy-critical
 path) and (b) carry a unit test asserting the loud path (pattern:
