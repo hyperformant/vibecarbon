@@ -103,9 +103,9 @@ export const TRANSPORT_DROP_RETRY_DELAYS_MS = [3000, 6000];
  *
  * Sized against the one hard data point in the project record for a fresh-
  * Hetzner-boot network race self-healing: the private-NIC (enp7s0) dhcpcd
- * race, whose init-script recovery retriggers the DHCP lease after 30s of
- * no IP. Tonight's failure was PUBLIC DNS resolution (apk fetching
- * dl-cdn.alpinelinux.org) — a different interface/subsystem than that
+ * race, whose init-script recovery retriggers the DHCP lease at the first
+ * retry (it was after 30s of no IP when this ladder was sized). Tonight's
+ * failure was PUBLIC DNS resolution (apk fetching dl-cdn.alpinelinux.org) — a different interface/subsystem than that
  * record covers, not confirmed to be the identical mechanism — but the same
  * fresh-server-network-still-settling family, so the same ~30s order of
  * magnitude applies, with margin, until a dedicated RCA pins the exact

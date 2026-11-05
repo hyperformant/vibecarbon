@@ -38,6 +38,10 @@
  * (src/lib/deploy/boot-timing.js reads them back), and the apt comment's
  * fuser-loop history paragraph became a pointer to src/lib/deploy/apt.js,
  * which holds it, to keep master-init under 27 KiB. No command changed.
+ * RE-CAPTURED 2026-11-04 (boot speed): each init script dropped its apt
+ * update/install, the apt comments and the `_m a` mark, and asks for its
+ * private-NIC lease at the first retry instead of the sixth. The diff is
+ * confined to those lines.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -106,19 +106,17 @@ describe('apt lock-timeout census', () => {
 
   it('finds the whole known class, so the census cannot pass vacuously', () => {
     const sites = aptSites();
-    // wireguard.js (2) + apt.js helper (1) + the one shared Docker install (2)
-    // + 6 k3s init scripts (12). The db Dockerfile that used to add 2 is gone.
-    expect(sites.length).toBeGreaterThanOrEqual(17);
+    // wireguard.js (2) + apt.js helper (1) + the one shared Docker install (2).
+    // The six k3s init scripts used to add 12; they boot without apt now
+    // (k3s-no-apt.test.ts holds that line).
+    expect(sites.length).toBeGreaterThanOrEqual(5);
 
-    // The three groups must each still be represented — a refactor that moves
-    // one group out from under the walk would otherwise silently shrink the
-    // census while still passing.
+    // Each remaining group must still be represented. A refactor that moves
+    // one out from under the walk would otherwise silently shrink the census
+    // while still passing.
     const files = new Set(sites.map((s) => s.rel));
     expect(files).toContain('src/lib/deploy/wireguard.js');
     expect(files).toContain('src/lib/iac/docker-install.js');
-    for (const s of ['db', 'master', 'worker', 'do-db', 'do-master', 'do-worker']) {
-      expect(files).toContain(`carbon/cloud-init/k3s/${s}-init.sh`);
-    }
   });
 
   it('every exemption names a file that still exists and still has an apt-get', () => {

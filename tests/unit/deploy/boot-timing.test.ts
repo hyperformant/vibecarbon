@@ -283,18 +283,12 @@ describe('cloud-init phase marks', () => {
   const marksIn = (text: string) => [...text.matchAll(/^_m (\S+)$/gm)].map((m) => name(m[1]));
 
   it.each([
-    [
-      'master-init.sh',
-      ['preamble', 'apt', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done'],
-    ],
-    [
-      'do-master-init.sh',
-      ['preamble', 'apt', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done'],
-    ],
-    ['db-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
-    ['do-db-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
-    ['worker-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
-    ['do-worker-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['master-init.sh', ['preamble', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done']],
+    ['do-master-init.sh', ['preamble', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done']],
+    ['db-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['do-db-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['worker-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['do-worker-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
   ])('%s marks its phases in order, into the log the collector reads', (file, phases) => {
     const text = readFileSync(join(k3sDir, file), 'utf-8');
     expect(marksIn(text)).toEqual(phases);

@@ -8,16 +8,6 @@ _m p
 # Note: This script runs AS PART of cloud-init (user_data), so we cannot wait for
 # cloud-init to complete (that would cause a deadlock). The script starts immediately.
 
-# apt's default behaviour on lock contention is to try once and exit 100,
-# and unattended-upgrades holds dpkg's lock right through first boot --
-# which is exactly when cloud-init runs this. `-o DPkg::Lock::Timeout`
-# makes apt block on the lock instead. See src/lib/deploy/apt.js for the
-# RCA, the live verification and the fuser poll loop this replaced.
-
-# Update apt lists + install the packages we need. `apt-get upgrade` was
-# removed from the critical path - unattended-upgrades handles security
-# patches async. Saves 30-60s per deploy.
-
 # sshd concurrency headroom - same rationale as docker-ce-setup.yaml's
 # 99-vibecarbon-concurrency.conf: the deploy fans concurrent ssh (builds,
 # tunnels, probes) past Ubuntu's MaxStartups 10:30:100 default, which drops
@@ -26,9 +16,6 @@ mkdir -p /etc/ssh/sshd_config.d
 printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
 systemctl reload ssh || systemctl reload sshd || true
 
-_m a
-apt-get -o DPkg::Lock::Timeout=300 update -qq
-apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq docker.io docker-buildx
 _m n
 
 # Validate k3s version is set
@@ -138,11 +125,11 @@ while [ -z "$PRIVATE_IFACE" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
   PRIVATE_IFACE=$(ip -4 addr show | grep 'inet 10\.0\.' | awk '{print $NF}' || true)
   if [ -z "$PRIVATE_IFACE" ]; then
     # See worker-init.sh for the dhcpcd-race RCA. Same recovery applies here.
-    if [ "$DHCP_TRIGGERED" = "false" ] && [ $RETRY_COUNT -ge 6 ] && command -v dhcpcd >/dev/null 2>&1; then
+    if [ "$DHCP_TRIGGERED" = "false" ] && [ $RETRY_COUNT -ge 1 ] && command -v dhcpcd >/dev/null 2>&1; then
       CANDIDATE=$(ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: en[a-z]+[0-9]+s[0-9]+/ {print $2}' | grep -v '^eth' | head -1 || true)
       if [ -n "$CANDIDATE" ]; then
         DHCP_TRIGGERED=true
-        echo "Private NIC $CANDIDATE has no lease after 30s - triggering dhcpcd"
+        echo "Private NIC $CANDIDATE has no lease yet - triggering dhcpcd"
         ip link set "$CANDIDATE" up 2>&1 || true
         dhcpcd -1 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
       fi

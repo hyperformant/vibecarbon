@@ -40,6 +40,10 @@
  * alias mirror from _k3s-system-image-mirror.yaml and its k3s agent install
  * gained --disable-default-registry-endpoint; the embedded `cloudInit` diff is
  * confined to those lines.
+ * RE-CAPTURED 2026-11-04 (boot speed): worker-init.sh dropped its apt
+ * update/install and the `_m a` mark, and asks for its private-NIC lease at the
+ * first retry instead of the sixth; the embedded `cloudInit` diff is confined
+ * to those lines.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

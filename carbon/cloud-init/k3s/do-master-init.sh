@@ -8,16 +8,6 @@ _m p
 # Note: This script runs AS PART of cloud-init (user_data), so we cannot wait for
 # cloud-init to complete (that would cause a deadlock). The script starts immediately.
 
-# apt's default behaviour on lock contention is to try once and exit 100,
-# and unattended-upgrades holds dpkg's lock right through first boot --
-# which is exactly when cloud-init runs this. `-o DPkg::Lock::Timeout`
-# makes apt block on the lock instead. See src/lib/deploy/apt.js for the
-# RCA, the live verification and the fuser poll loop this replaced.
-
-# Update apt lists + install the packages we need. `apt-get upgrade` was
-# removed from the critical path -- unattended-upgrades handles security
-# patches async. Saves 30-60s per deploy.
-
 # sshd concurrency headroom - same rationale as docker-ce-setup.yaml's
 # 99-vibecarbon-concurrency.conf: the deploy fans concurrent ssh (builds,
 # tunnels, probes) past Ubuntu's MaxStartups 10:30:100 default, which drops
@@ -26,9 +16,6 @@ mkdir -p /etc/ssh/sshd_config.d
 printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
 systemctl reload ssh || systemctl reload sshd || true
 
-_m a
-apt-get -o DPkg::Lock::Timeout=300 update -qq
-apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq docker.io docker-buildx
 _m n
 
 # Validate k3s version is set
