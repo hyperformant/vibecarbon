@@ -59,7 +59,7 @@ describe('noteBootPull: a db image the boot pull did not fetch', () => {
     const run = vi.fn(async () => 'ok\n');
     await noteBootPull('1.2.3.4', '/k', {
       run,
-      deployDbImage: 'ghcr.io/hyperformant/postgres-dev:17.11-walg3.0.9-r3-abcdef123456',
+      deployDbImage: 'ghcr.io/hyperformant/postgres-dev:17.11-walg3.0.9-r4-abcdef123456',
     });
     const lines = writeLogDetail.mock.calls.map((c) => c[0]);
     expect(lines).toContain('[boot-pull] 1.2.3.4: core images already pulled at boot');

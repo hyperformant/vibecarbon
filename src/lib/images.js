@@ -24,16 +24,16 @@
 // unchanged tag never reaches a server that already has it. Reset to -r1
 // when the PostgreSQL or wal-g version moves.
 export const DB_IMAGE = 'ghcr.io/hyperformant/postgres';
-export const DB_IMAGE_TAG = '17.11-walg3.0.9-r3';
+export const DB_IMAGE_TAG = '17.11-walg3.0.9-r4';
 
 // sha256 fingerprint of docker/postgres-walg's inputs (every file there but
 // README.md; see tests/unit/deploy/db-image-fingerprint.test.ts for the exact
 // hashing). Changing any input fails that test until you bump the -r revision
 // in DB_IMAGE_TAG above AND paste the new hash here: a deliberate two-line edit.
 export const DB_IMAGE_INPUTS_SHA256 =
-  '9e4807d6a1f02552de0e3987933411e6cbe496f930e1092ba12d4b32ac1bc09b';
+  '4688f0e083296f65033484bcc09c0bb088e10910ff61df76d618f834d9df5daa';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r3" */
+/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r4" */
 export function dbImageRef() {
   return `${DB_IMAGE}:${DB_IMAGE_TAG}`;
 }

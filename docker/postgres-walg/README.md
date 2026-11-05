@@ -19,6 +19,15 @@ pinned by digest:
   pg_stat_statements (the contrib module the official image ships; the
   Dockerfile checks it is there), and logs statements slower than 1 s and
   lock waits.
+- **No LLVM, flattened.** The official image carries libLLVM (about 100 MB)
+  only for PostgreSQL's JIT compiler, and `postgresql.conf` sets `jit = off`,
+  so the Dockerfile deletes the library, `llvmjit`, the JIT bitcode and
+  `/usr/local/include`, then copies the result into a `FROM scratch` stage so
+  the deleted files are not in any layer. The pull drops from about 126 MB to
+  about 50 MB compressed (amd64). ICU data stays, for non-English collations.
+  `FROM scratch` loses the base image's config, so the Dockerfile restates
+  `ENV`, `VOLUME`, `STOPSIGNAL SIGINT`, `EXPOSE`, `ENTRYPOINT` and `CMD`;
+  re-read them from the base (`docker image inspect`) when its pin moves.
 - **`db-entrypoint.sh`**, a wrapper around the official entrypoint that keeps
   WAL archiving off the init-time temporary server, so a first boot with an
   unreachable backup bucket cannot crash (the script explains why).

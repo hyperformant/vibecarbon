@@ -106,16 +106,62 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
   const dockerfile = readFileSync(join(ROOT, DB_IMAGE_DOCKERFILE), 'utf-8');
   const instructions = logicalInstructions(dockerfile);
   const froms = instructions.filter((i) => /^FROM\b/.test(i));
-  const pgFroms = froms.filter((i) => !i.includes('hyperformant/wal-g'));
-  // Final stage = everything after the last FROM.
+  const pgFroms = froms.filter((i) => !i.includes('hyperformant/wal-g') && i !== 'FROM scratch');
+  // The image is flattened: the last FROM is `scratch` and copies the whole
+  // filesystem of the stage named `db`. So the rules below about "the final
+  // stage" follow `db`, the last stage built FROM the postgres base, and
+  // `finalStage` is that stage's instructions. `scratchStage` is the real last
+  // stage and gets its own checks.
+  const dbFrom = instructions.findLastIndex(
+    (i) => /^FROM\b/.test(i) && i.includes('postgres:') && !i.includes('hyperformant/wal-g'),
+  );
+  const nextFrom = instructions.findIndex((i, n) => n > dbFrom && /^FROM\b/.test(i));
+  const finalStage = instructions.slice(dbFrom, nextFrom === -1 ? undefined : nextFrom);
   const lastFrom = instructions.findLastIndex((i) => /^FROM\b/.test(i));
-  const finalStage = instructions.slice(lastFrom);
+  const scratchStage = instructions.slice(lastFrom);
 
   it(`both postgres stages are FROM ${PG_BASE} pinned by the same digest`, () => {
     expect(pgFroms).toHaveLength(2);
     for (const from of pgFroms) {
       expect(from.split(/\s+/)[1]).toBe(`${PG_BASE}@${PG_BASE_DIGEST}`);
     }
+  });
+
+  it('the db stage is named `db` and the last stage is FROM scratch, copying db whole', () => {
+    expect(froms[froms.length - 2]).toMatch(/ AS db$/);
+    expect(scratchStage[0]).toBe('FROM scratch');
+    expect(scratchStage).toContain('COPY --from=db / /');
+  });
+
+  it('removes LLVM (library, JIT provider, bitcode) in the db stage after the verification RUN', () => {
+    const rm = finalStage.findIndex((i) => /^RUN\b/.test(i) && /\brm\b/.test(i));
+    const verify = finalStage.findIndex((i) => /^RUN\b/.test(i) && /wal-g --version/.test(i));
+    expect(rm, 'no RUN that removes files').toBeGreaterThan(verify);
+    const rmText = finalStage[rm];
+    expect(rmText).toContain('libLLVM');
+    expect(rmText).toContain('llvmjit');
+    expect(rmText).toContain('bitcode');
+    expect(rmText).toContain('/usr/local/include');
+  });
+
+  it('restates what FROM scratch loses: ENV, VOLUME, STOPSIGNAL, EXPOSE, ENTRYPOINT, CMD', () => {
+    const text = scratchStage.join('\n');
+    expect(text).toMatch(/^ENV .*\bPATH=/m);
+    expect(text).toMatch(/\bPGDATA=\/var\/lib\/postgresql\/data\b/);
+    expect(text).toMatch(/\bLANG=en_US\.utf8\b/);
+    expect(text).toMatch(/\bPG_MAJOR=17\b/);
+    expect(text).toMatch(/\bPG_VERSION=17\.11\b/);
+    expect(scratchStage).toContain('VOLUME /var/lib/postgresql/data');
+    expect(scratchStage).toContain('STOPSIGNAL SIGINT');
+    expect(scratchStage).toContain('EXPOSE 5432');
+    expect(scratchStage).toContain('ENTRYPOINT ["db-entrypoint.sh"]');
+    expect(scratchStage).toContain('CMD ["postgres"]');
+    expect(scratchStage.some((i) => /^LABEL\b/.test(i))).toBe(true);
+  });
+
+  it('postgresql.conf turns jit off, since the image carries no LLVM', () => {
+    const conf = readFileSync(join(ROOT, 'docker', 'postgres-walg', 'postgresql.conf'), 'utf-8');
+    expect(conf).toMatch(/^jit = off\s*$/m);
   });
 
   it('pins pg_cron to a release tag and verifies the tarball checksum', () => {
@@ -128,7 +174,8 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
   });
 
   it('the final stage installs no toolchain and copies only pg_cron files from the builder', () => {
-    const finalText = finalStage.join('\n');
+    // The one RUN allowed to NAME llvm is the one that deletes it.
+    const finalText = finalStage.filter((i) => !/^RUN\b.*\brm -f\b/.test(i)).join('\n');
     expect(finalText).not.toMatch(/apk add|build-base|\bgcc\b|\bmake\b|clang|llvm/);
     const builderCopies = finalStage.filter((i) => /^COPY --from=pg_cron\b/.test(i));
     expect(builderCopies.map((i) => i.split(/\s+/)[2])).toEqual([
