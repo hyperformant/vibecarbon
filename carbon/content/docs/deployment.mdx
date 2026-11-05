@@ -46,9 +46,6 @@ Database backups are written to the S3-compatible object storage of the same pro
 - **kubectl** 1.27 or newer applies manifests + waits for the app rollout. Deploy refuses an older one: its built-in kustomize must be v5 to install cert-manager.
 - **docker** + **ssh**: the image is built locally and sideloaded to each k3s node via `docker save | ssh node 'k3s ctr images import -'`. No registry round-trip on the deploy path.
 
-**Optional:**
-- `helm` is only required if you layer Flux GitOps on top via [`vibecarbon configure cicd <env>`](/docs/cli#configure-cicd-subcommand) (Flux-managed Helm releases). The default deploy path doesn't use it.
-
 ## Build
 
 Build the client and server for production:
