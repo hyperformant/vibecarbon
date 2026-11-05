@@ -905,22 +905,31 @@ async function waitForServicesHealthy(ip, sshKeyPath, projectName, maxWaitMs = 1
 }
 
 /**
- * App-health probe backoff ramp (F4).
- *
- * verifyAppHealth runs LAST (after wait-admin-ready + audit-database), so the app is
- * usually already serving and the very first probe passes. When it isn't, the
- * app typically binds :3000 within ~10-30s — probe fast (2s) for the first
- * few gaps so a fast-converging app is detected within ~2s instead of waiting
- * a full flat 10s, then back off to 10s for the long tail.
- *
- * `attempt` is the loop index; the gap is applied BEFORE probe `attempt` (only
- * when attempt > 0).
- *
- * @param {number} attempt
- * @returns {number} ms to wait before this probe
+ * How long verifyAppHealth waits for the app to answer: 3 minutes covers the
+ * worst-case cold start (the app binds :3000 in 10-30s empirically).
  */
-export function healthProbeDelayMs(attempt) {
-  return attempt <= 5 ? 2000 : 10000;
+export const APP_HEALTH_PROBE_BUDGET_MS = 180_000;
+
+/**
+ * The held probe: a node program that asks `localhost:3000<path>` every 200 ms
+ * and exits 0 on the first 2xx, so the app is seen the moment it answers. It
+ * exits 1 once `budgetMs` has passed. A request that never answers is
+ * abandoned after 2 s, and a hard timer at the budget ends the program even
+ * if one is still in flight.
+ *
+ * @param {string} path
+ * @param {number} budgetMs
+ * @returns {string}
+ */
+export function appHealthProbeScript(path, budgetMs) {
+  return (
+    `const h=require('http');const end=Date.now()+${Math.max(0, Math.floor(budgetMs))};` +
+    `setTimeout(()=>process.exit(1),Math.max(0,end-Date.now()));` +
+    `const go=()=>{const r=h.request({host:'localhost',port:3000,path:${JSON.stringify(path)},method:'GET',timeout:2000},res=>{res.resume();` +
+    `if(res.statusCode>=200&&res.statusCode<300)process.exit(0);next()});` +
+    `r.on('error',next);r.on('timeout',()=>r.destroy());r.end()};` +
+    `let t=0;const next=()=>{if(t++)return;t=0;if(Date.now()>=end)process.exit(1);setTimeout(go,200)};go();`
+  );
 }
 
 /**
@@ -928,8 +937,10 @@ export function healthProbeDelayMs(attempt) {
  *
  * Probes `http://localhost/api/health` on the server itself with a Host header
  * (if a domain is configured), bypassing public DNS and TLS to isolate app
- * health from DNS propagation / cert issuance races. Polls up to `attempts`
- * times with 3s between attempts.
+ * health from DNS propagation / cert issuance races. One held probe inside the
+ * container asks every 200 ms until the app answers or `budgetMs` is spent;
+ * the outer loop re-runs it (after 1s) only when `exec` itself fails, as it
+ * does while the container restarts.
  *
  * On failure, captures `docker compose ps` + the last 40 lines of the `app`
  * container log so operators see WHY the probe failed, not just THAT it did.
@@ -950,25 +961,27 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
   // First-boot route registration takes longer than the initial `docker
   // compose up -d` return: the app has to start + bind port 3000.
   // Empirically 10-30s. 3 min tolerates worst-case cold starts.
-  const { path = '/api/health', attempts = 18, delayMs } = options;
-  // Ramp by default (fast-early, F4); honor an explicit flat delayMs override.
-  const delayFor = (i) => delayMs ?? healthProbeDelayMs(i);
+  const { path = '/api/health', budgetMs = APP_HEALTH_PROBE_BUDGET_MS } = options;
   const remoteDir = `/opt/${projectName}`;
   // Use `node` for the probe — the app's runtime image is guaranteed to have
   // it (it runs the server), whereas curl/wget may not be present in slim
-  // node base images. One-liner: HEAD the local port 3000 path; exit 0 on
-  // 2xx, 1 otherwise. The outer shell echoes "2xx" or "fail" so the caller
+  // node base images. The outer shell echoes "2xx" or "fail" so the caller
   // sees a deterministic token on stdout regardless of node's exit code.
-  const nodeScript = `const r=require('http').request({host:'localhost',port:3000,path:${JSON.stringify(path)},method:'GET',timeout:4000},res=>{process.exit(res.statusCode<300?0:1)});r.on('error',()=>process.exit(2));r.on('timeout',()=>process.exit(3));r.end();`;
-  const nodeScriptB64 = Buffer.from(nodeScript).toString('base64');
-  const probeCmd = `cd ${remoteDir} && (echo ${nodeScriptB64} | base64 -d | ${VC_COMPOSE} exec -T app node - && echo 2xx || echo fail) 2>&1`;
-
+  const deadline = Date.now() + budgetMs;
   let lastStatus = 'none';
-  for (let i = 0; i < attempts; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, delayFor(i)));
+  let attempts = 0;
+  while (attempts === 0 || Date.now() < deadline) {
+    if (attempts > 0) {
+      await new Promise((r) => setTimeout(r, Math.min(1000, Math.max(0, deadline - Date.now()))));
+      if (Date.now() >= deadline) break;
+    }
+    attempts++;
+    const remainingMs = Math.max(0, deadline - Date.now());
+    const nodeScriptB64 = Buffer.from(appHealthProbeScript(path, remainingMs)).toString('base64');
+    const probeCmd = `cd ${remoteDir} && (echo ${nodeScriptB64} | base64 -d | ${VC_COMPOSE} exec -T app node - && echo 2xx || echo fail) 2>&1`;
     try {
       const result = await sshRunAsync(ip, sshKeyPath, probeCmd, {
-        timeout: 15_000,
+        timeout: remainingMs + 10_000,
         ignoreError: true,
       });
       const out = (result || '').trim();
