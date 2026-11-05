@@ -53,7 +53,7 @@ import { pipeline } from 'node:stream/promises';
 import { createGzip, constants as zlibConstants } from 'node:zlib';
 import { knownHostsPathForKey, SSH_CONNECTION_OPTS } from '../host-keys.js';
 import { NODE_RUNTIME_IMAGE } from '../images.js';
-import { perfTimer } from '../perf.js';
+import { perfRecord, perfTimer } from '../perf.js';
 import { shEscape } from '../shell.js';
 import { TARGET_PLATFORM } from './platform.js';
 import { acquireUplinkLock } from './uplink-lock.js';
@@ -263,14 +263,18 @@ function sshRunner(sshArgs) {
 
 function sshSender(sshArgs) {
   return async (cmd, stdin) => {
-    const child = spawn('ssh', [...sshArgs, cmd], { stdio: ['pipe', 'ignore', 'pipe'] });
+    const child = spawn('ssh', [...sshArgs, cmd], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    child.stdout.on('data', (c) => {
+      stdout += c;
+    });
     const done = settle(child, 'ssh');
     // An ssh that dies mid-stream closes its stdin; its exit code and stderr
     // carry the cause, so the EPIPE here is not the error to report.
     const fed = pipeline(stdin, child.stdin).catch(() => {});
     const result = await done;
     await fed;
-    return result;
+    return { ...result, stdout };
   };
 }
 
@@ -566,17 +570,26 @@ export async function deliverImage({
   mkdirSync(archiveDir);
   mkdirSync(stageDir);
   try {
-    const saved = saveImage(tag, archiveDir).catch((err) => {
-      throw new DeliveryError(firstLine(err?.message) || 'docker save failed');
-    });
-    const pulled = Promise.resolve(basePull).catch((err) => {
-      throw new DeliveryError(basePullCause(err));
-    });
+    // The total below is mostly not the transfer: a 5 MB delta took 20-136 s
+    // (e2e 2026-11-05). These say which stage to look at.
+    const saveTimer = perfTimer('deploy.image.delta.save');
+    const pullTimer = perfTimer('deploy.image.delta.basePullWait');
+    const saved = saveImage(tag, archiveDir)
+      .catch((err) => {
+        throw new DeliveryError(firstLine(err?.message) || 'docker save failed');
+      })
+      .finally(() => saveTimer.end());
+    const pulled = Promise.resolve(basePull)
+      .catch((err) => {
+        throw new DeliveryError(basePullCause(err));
+      })
+      .finally(() => pullTimer.end());
     // allSettled: a failed pull must not remove the work dir under a save
     // still writing into it.
     const failed = (await Promise.allSettled([pulled, saved])).find((r) => r.status === 'rejected');
     if (failed) throw failed.reason;
 
+    const stageTimer = perfTimer('deploy.image.delta.stage');
     const layerSources = await listTargetLayers({
       run,
       runtime,
@@ -599,8 +612,12 @@ export async function deliverImage({
       .map(shEscape)
       .join(' ')}`;
 
+    stageTimer.end();
+
     let bytes = 0;
+    const lockTimer = perfTimer('deploy.image.delta.uplinkLock');
     const releaseLock = await acquireLock({ label: `delta tag=${tag}` });
+    lockTimer.end();
     let released = false;
     const release = () => {
       if (released) return;
@@ -628,7 +645,14 @@ export async function deliverImage({
       // The uplink is free once the last byte is handed to ssh: the target's
       // own save, load and push must not hold up another process's transfer.
       counted.on('end', release);
+      const sendTimer = perfTimer('deploy.image.delta.send');
+      let targetTimer;
+      counted.on('end', () => {
+        sendTimer.end();
+        targetTimer = perfTimer('deploy.image.delta.target');
+      });
       result = await send(cmd, counted);
+      targetTimer?.end();
       // A target that failed mid-stream stopped reading: close the pipe so a
       // tar still writing exits instead of blocking forever.
       tar.stdout.destroy();
@@ -645,6 +669,9 @@ export async function deliverImage({
     if (tarExit.code !== 0) {
       throw new DeliveryError(firstLine(tarExit.stderr) || `tar exited ${tarExit.code}`);
     }
+    for (const [, stage, seconds] of (result.stdout ?? '').matchAll(/^mark (\w+) (\d+)$/gm)) {
+      perfRecord(`deploy.image.delta.target.${stage}`, Number(seconds) * 1000);
+    }
     const layersReused = keep.length;
     const layersSent = totalLayers - layersReused;
     timer.end(`bytes=${bytes} sent=${layersSent} reused=${layersReused}`);
@@ -658,8 +685,12 @@ export async function deliverImage({
   // After the work dir is gone: a pushAfter that never settles (the deploy
   // failed before the registry served) holds nothing on this machine.
   if (pushAfter) {
+    const waitTimer = perfTimer('deploy.image.registryWait');
     await pushAfter;
+    waitTimer.end();
+    const pushTimer = perfTimer('deploy.image.registryPush');
     await pushToRegistry({ run, ref: delivered.ref, registryRef });
+    pushTimer.end();
   }
   const { ref: _ref, ...result } = delivered;
   return result;

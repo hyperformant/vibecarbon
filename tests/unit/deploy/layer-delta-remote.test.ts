@@ -228,6 +228,8 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       const r = runScript(shell, ['docker', TAG, TAG, ''], deltaTar({ fill: dockerFill }));
       expect(r.stderr).toBe('');
       expect(r.status).toBe(0);
+      // Its stages, for the deploy's perf lines, and nothing else on stdout.
+      expect(r.stdout).toMatch(/^mark receive \d+\nmark fill \d+\nmark load \d+\n$/);
       const l = loaded();
       expect(l.members).toEqual(['config.json', 'l0', 'l1', 'l2', 'l3', 'l4', 'manifest.json']);
       srcLayers.forEach((p, i) => {
@@ -360,6 +362,9 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       });
       expect(r.stderr).toBe('');
       expect(r.status).toBe(0);
+      expect(r.stdout).toMatch(
+        /^mark receive \d+\nmark fill \d+\nmark load \d+\nmark verify \d+\nmark push \d+\n$/,
+      );
       const l = loaded();
       expect(l.members).toEqual(['config.json', 'l0', 'l1', 'l2', 'l3', 'l4', 'manifest.json']);
       expect(l.read('l1')).toEqual(gzipSync(BODIES[1]));

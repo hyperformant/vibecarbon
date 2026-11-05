@@ -3527,8 +3527,8 @@ export async function applyK3sManifests({
   if (deliver) {
     // `deploy.<prefix>.image.deliver` now spans the transfer AND the wait for
     // the registry before the push, so it is not comparable with the pre-
-    // pushAfter figure (12 s on DO, 2026-10-31); `deploy.image.delta` alone
-    // times the transfer.
+    // pushAfter figure (12 s on DO, 2026-10-31). `deploy.image.delta` covers
+    // everything up to the target's import, with a mark for each stage.
     deliveryPromise = perfAsync(`deploy.${perfPrefix}.image.deliver`, () =>
       deliverImage({
         tag: imageTag,
