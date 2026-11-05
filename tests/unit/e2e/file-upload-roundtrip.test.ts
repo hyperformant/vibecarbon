@@ -306,135 +306,24 @@ describe('checkFileUploadRoundtrip', () => {
     expect(r.errorMessage).toMatch(/^request: DNS resolution failed/);
   });
 
-  describe('the bucket settle gate before the first upload', () => {
-    const MIN = 60_000;
-    const T0 = Date.parse('2026-10-20T12:00:00Z');
-    const storage = (providerId: string, ageMs: number | null) => ({
-      providerId,
-      bucket: 'bucket',
-      region: providerId === 'hetzner' ? 'fsn1' : 'fra1',
-      endpoint: STORAGE_ORIGIN,
-      bucketCreatedAt: ageMs === null ? null : new Date(T0 - ageMs).toISOString(),
+  // A known provider quirk on new buckets must not hold the run up: the first
+  // upload goes straight away, as a customer's does, so a bucket that is not
+  // ready fails this check instead of pausing every Hetzner verify.
+  it('uploads to a brand-new Hetzner bucket straight away, with no wait', async () => {
+    const started = Date.now();
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+      appFetch: appFetchWith(),
+      transfer: transferWith(),
+      storage: {
+        providerId: 'hetzner',
+        bucket: 'bucket',
+        region: 'fsn1',
+        endpoint: STORAGE_ORIGIN,
+      },
     });
-    const settleDeps = (
-      probeRound: () => Promise<{ ok: number; total: number; failures: string[] }>,
-    ) => {
-      let t = T0;
-      return {
-        now: () => t,
-        sleep: vi.fn(async (ms: number) => {
-          t += ms;
-        }),
-        probeRound: vi.fn(probeRound),
-      };
-    };
-
-    it('a 0-window provider with a 1-minute-old bucket makes zero probes and never sleeps', async () => {
-      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
-      const transfer = transferWith();
-      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
-        appFetch: appFetchWith(),
-        transfer,
-        storage: storage('digitalocean', MIN),
-        settle,
-      });
-      expect(r.status).toBe('pass');
-      expect(settle.probeRound).not.toHaveBeenCalled();
-      expect(settle.sleep).not.toHaveBeenCalled();
-      expect(transfer.put).toHaveBeenCalledOnce();
-      expect(r.details).not.toHaveProperty('settle');
-    });
-
-    it('an old Hetzner bucket runs no gate', async () => {
-      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
-      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
-        appFetch: appFetchWith(),
-        transfer: transferWith(),
-        storage: storage('hetzner', 30 * MIN),
-        settle,
-      });
-      expect(r.status).toBe('pass');
-      expect(settle.probeRound).not.toHaveBeenCalled();
-    });
-
-    it('a young Hetzner bucket waits for the gate, then uploads, with rounds and seconds in the detail', async () => {
-      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
-      const transfer = transferWith();
-      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
-        appFetch: appFetchWith(),
-        transfer,
-        storage: storage('hetzner', MIN),
-        settle,
-      });
-      expect(r.status).toBe('pass');
-      expect(settle.probeRound).toHaveBeenCalledTimes(3);
-      expect(r.details).toMatchObject({ settle: { rounds: 3, elapsedSeconds: 60 } });
-      const firstPut = (transfer.put as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
-      expect(settle.probeRound.mock.invocationCallOrder[2]).toBeLessThan(firstPut);
-    });
-
-    it('an unknown Hetzner bucket age is treated as young', async () => {
-      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
-      await checkFileUploadRoundtrip(DOMAIN, jar, {
-        appFetch: appFetchWith(),
-        transfer: transferWith(),
-        storage: storage('hetzner', null),
-        settle,
-      });
-      expect(settle.probeRound).toHaveBeenCalled();
-    });
-
-    it('a Hetzner env with no recorded creation time (deployed before it was recorded) runs no gate', async () => {
-      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
-      const { bucketCreatedAt: _, ...unrecorded } = storage('hetzner', MIN);
-      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
-        appFetch: appFetchWith(),
-        transfer: transferWith(),
-        storage: unrecorded,
-        settle,
-      });
-      expect(r.status).toBe('pass');
-      expect(settle.probeRound).not.toHaveBeenCalled();
-    });
-
-    it('fails fast, before any probe, when the region has no object-storage endpoint', async () => {
-      // The probes must hit the provider's ENDPOINTS[region] (what HeadBucket
-      // uses), never the recorded endpoint, which can be ''. An unresolvable
-      // region fails at once instead of burning the 25-minute budget.
-      const sleep = vi.fn(async () => {});
-      const transfer = transferWith();
-      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
-        appFetch: appFetchWith(),
-        transfer,
-        storage: { ...storage('hetzner', MIN), region: 'nowhere' },
-        settle: { now: () => T0, sleep },
-      });
-      expect(r.status).toBe('fail');
-      expect(r.errorMessage).toMatch(
-        /^settle: .*no object-storage endpoint for hetzner region "nowhere"/,
-      );
-      expect(sleep).not.toHaveBeenCalled();
-      expect(transfer.put).not.toHaveBeenCalled();
-    });
-
-    it('an exhausted gate fails with the bucket, its age and the last failures, and uploads nothing', async () => {
-      const settle = settleDeps(async () => ({
-        ok: 19,
-        total: 20,
-        failures: ['options:403'],
-      }));
-      const transfer = transferWith();
-      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
-        appFetch: appFetchWith(),
-        transfer,
-        storage: storage('hetzner', MIN),
-        settle,
-      });
-      expect(r.status).toBe('fail');
-      expect(r.errorMessage).toMatch(/^settle: bucket "bucket" .*1 min old.*options:403/);
-      expect(r.details).toMatchObject({ step: 'settle', lastFailures: ['options:403'] });
-      expect(transfer.put).not.toHaveBeenCalled();
-    });
+    expect(r.status).toBe('pass');
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(r.details).not.toHaveProperty('settle');
   });
 
   it('ships a real PNG (signature + IHDR), not arbitrary bytes', () => {
@@ -486,11 +375,9 @@ describe('resolveAppStorage', () => {
                 keyPrefix: 'e1/',
                 region: 'fsn1',
                 endpoint: 'https://fsn1.your-objectstorage.com',
-                bucketCreatedAt: '2026-10-20T12:00:00.000Z',
               },
             },
             e2: { s3: { bucket: 'other', region: 'fsn1', endpoint: 'https://x' } },
-            e4: { provider: 'Hetzner', s3: { bucket: 'b', bucketCreatedAt: null } },
           },
         }),
       );
@@ -501,18 +388,10 @@ describe('resolveAppStorage', () => {
         envName: 'e1',
         region: 'fsn1',
         endpoint: 'https://fsn1.your-objectstorage.com',
-        bucketCreatedAt: '2026-10-20T12:00:00.000Z',
       });
-      // No recorded creation time stays absent (no gate); an explicit null
-      // (unreadable at deploy) stays null (treated as young).
       const e2 = resolveAppStorage(dir, 'e2');
       expect(e2).toMatchObject({ providerId: 'hetzner' });
       expect(e2).not.toHaveProperty('keyPrefix');
-      expect(e2).not.toHaveProperty('bucketCreatedAt');
-      expect(resolveAppStorage(dir, 'e4')).toMatchObject({
-        providerId: 'hetzner',
-        bucketCreatedAt: null,
-      });
       expect(resolveAppStorage(dir, 'e3')).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
