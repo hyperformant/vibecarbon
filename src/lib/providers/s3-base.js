@@ -179,7 +179,7 @@ export class S3CompatibleProvider {
       // request will hang the call indefinitely. Observed in iter-initbackend
       // 2026-05-01 (Hetzner Ceph): compose destroy hung for 600s (test runner
       // SIGKILL) on emptyAndDeleteBucket → ListObjectsV2; the per-iteration
-      // `client.send` never returned. With requestTimeout set, a stuck call
+      // `client.send` never returned. With socketTimeout set, a stuck call
       // surfaces as a TimeoutError after 60s and `_send` retries. maxAttempts
       // here is the SDK's own internal retry; `_send` adds an outer layer with
       // backoff tuned for the provider's recovery cadence.

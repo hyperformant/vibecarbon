@@ -165,6 +165,24 @@ describe('waitForBucketSettled', () => {
 });
 
 describe('makeAppBucketProbeRound', () => {
+  it('a preflight that never answers counts against the round instead of stalling it', async () => {
+    const silent = ((_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+      })) as typeof fetch;
+    const round = makeAppBucketProbeRound({
+      endpoint: 'https://fsn1.your-objectstorage.com',
+      bucket: 'b',
+      origin: 'https://app.test',
+      signedHead: async () => {},
+      fetchImpl: silent,
+      requestTimeoutMs: 20,
+    });
+    const r = await round();
+    expect(r.ok).toBe(10);
+    expect(new Set(r.failures)).toEqual(new Set(['options:TimeoutError']));
+  });
+
   const opts = {
     endpoint: 'https://fsn1.your-objectstorage.com',
     bucket: 'p-abc123-prod-storage',

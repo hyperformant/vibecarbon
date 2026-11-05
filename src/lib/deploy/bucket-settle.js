@@ -23,6 +23,8 @@ export const BUCKET_SETTLE_ROUND_SIZE = 20;
 export const BUCKET_SETTLE_STREAK = 3;
 export const BUCKET_SETTLE_ROUND_INTERVAL_MS = 30_000;
 export const BUCKET_SETTLE_BUDGET_MS = 25 * 60_000;
+/** How long one probe may sit silent. A stuck request fails its round, not the budget. */
+export const BUCKET_SETTLE_REQUEST_TIMEOUT_MS = 30_000;
 
 const MINUTE_MS = 60_000;
 
@@ -184,6 +186,7 @@ export async function waitForBucketSettled({
  * @param {string} opts.origin - the app origin the CORS rule must allow
  * @param {() => Promise<unknown>} opts.signedHead - one signed HeadBucket
  * @param {typeof fetch} [opts.fetchImpl]
+ * @param {number} [opts.requestTimeoutMs]
  * @returns {() => Promise<{ ok: number, total: number, failures: string[] }>}
  */
 export function makeAppBucketProbeRound({
@@ -192,6 +195,7 @@ export function makeAppBucketProbeRound({
   origin,
   signedHead,
   fetchImpl = globalThis.fetch,
+  requestTimeoutMs = BUCKET_SETTLE_REQUEST_TIMEOUT_MS,
 }) {
   const url = `${endpoint}/${bucket}/.settle-probe`;
   const preflight = async () => {
@@ -200,6 +204,7 @@ export function makeAppBucketProbeRound({
       res = await fetchImpl(url, {
         method: 'OPTIONS',
         headers: { Origin: origin, 'Access-Control-Request-Method': 'PUT' },
+        signal: AbortSignal.timeout(requestTimeoutMs),
       });
     } catch (err) {
       return `options:${err?.name || 'Error'}`;
@@ -273,7 +278,10 @@ export function makeSignedHead({ providerId, accessKey, secretKey, region, bucke
       forcePathStyle: true,
       credentials: { accessKeyId: accessKey, secretAccessKey: secretKey },
       maxAttempts: 1,
-      requestHandler: { connectionTimeout: 10_000, requestTimeout: 30_000 },
+      requestHandler: {
+        connectionTimeout: 10_000,
+        socketTimeout: BUCKET_SETTLE_REQUEST_TIMEOUT_MS,
+      },
     });
     try {
       await client.send(new HeadBucketCommand({ Bucket: bucket }));

@@ -41,11 +41,11 @@ export const CERT_MANAGER_CONTROLLER_LABEL = 'controller.cert-manager.io/fao';
 
 /**
  * The S3 client options of a snapshot read on a failover path, where waiting
- * is outage: one attempt, 10s to connect and 10s for the request.
+ * is outage: one attempt, 10 s to connect and 10 s of silence.
  */
 export const DR_S3_CLIENT_OPTIONS = Object.freeze({
   maxAttempts: 1,
-  requestHandler: { connectionTimeout: 10_000, requestTimeout: 10_000 },
+  requestHandler: { connectionTimeout: 10_000, socketTimeout: 10_000 },
 });
 
 /** 'staging' iff the ACME directory URL or issuer name mentions staging. */

@@ -1221,7 +1221,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
       // Bound the purge so a slow/contended S3 endpoint can't consume the whole
       // destroy budget. The Hetzner resources are already freed (Pulumi destroy
       // ran before this), but a single S3 op can hang up to ~9 min under the
-      // SDK (maxAttempts 3 × 60s requestTimeout) × _send (maxAttempts 3) retry
+      // SDK (maxAttempts 3 × 60s socketTimeout) × _send (maxAttempts 3) retry
       // layers — observed on k8s teardown, where the storage bucket doubles as
       // the Pulumi state backend (slow/contended), blowing the 600s
       // final-destroy timeout and getting the whole step SIGKILLed. On timeout

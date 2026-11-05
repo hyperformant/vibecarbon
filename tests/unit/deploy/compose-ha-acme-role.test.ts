@@ -252,7 +252,7 @@ describe('restoreFailoverTls (the restore the failover runs on the promoted node
       restart: true,
       s3ClientOptions: {
         maxAttempts: 1,
-        requestHandler: { connectionTimeout: 10_000, requestTimeout: 10_000 },
+        requestHandler: { connectionTimeout: 10_000, socketTimeout: 10_000 },
       },
     });
     expect(a.checkTimeoutMs).toBeLessThanOrEqual(30_000);
