@@ -1409,7 +1409,7 @@ export async function runK8sRestore({
       // slot post-swap (primary_slot_name) — without it, it connects and errors
       // `replication slot "…" does not exist`, so it never streams. (The basebackup
       // itself uses a temp slot now and no longer needs this — streaming does.)
-      // Recreate it idempotently first — same IF-NOT-EXISTS block primary-init.sql uses.
+      // Recreate it idempotently first — same ensureReplicationSlotSql both HA tiers run.
       s.start('Recreating replication slot on restored primary');
       try {
         await ensureReplicationSlot(serverIp, sshKeyPath);

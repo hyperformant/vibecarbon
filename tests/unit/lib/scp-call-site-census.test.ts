@@ -123,11 +123,7 @@ describe('scp call-site census', () => {
     expect(
       [...consumers].sort(),
       'Consumers of scpWithRetry dropped below the converted set — did a site get re-inlined?',
-    ).toEqual([
-      'src/lib/deploy/k8s/ha/index.js',
-      'src/lib/deploy/k8s/k3s.js',
-      'src/lib/deploy/utils.js',
-    ]);
+    ).toEqual(['src/lib/deploy/k8s/k3s.js', 'src/lib/deploy/utils.js']);
   });
 
   it('every consumer imports the helper from the wrapper module', () => {

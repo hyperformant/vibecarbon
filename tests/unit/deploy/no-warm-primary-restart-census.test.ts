@@ -16,7 +16,7 @@
  *       deploy, reconverge and failover code of both HA tiers) restarts the db
  *       container or deletes the db pod, with an allowlist of zero. The scale
  *       path (src/scale.js) only force-recreates a brand-new server.
- *   (b) carbon/ha/primary-init.sql carries no ALTER SYSTEM for any setting the
+ *   (b) primaryReplicationSql (the k8s-ha primary init) carries no ALTER SYSTEM for any setting the
  *       db argv already sets, and both argv lists carry the replication
  *       startup flags.
  */
@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 import { loadAll } from 'js-yaml';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
+
+import { primaryReplicationSql } from '../../../src/lib/deploy/replication-slot.js';
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const DIRS = ['src/lib/deploy/compose', 'src/lib/deploy/k8s/ha'];
@@ -138,7 +140,7 @@ function shadowedByArgv(sql: string, argv: string[]): string[] {
 const REPLICATION_STARTUP_FLAGS = ['wal_level', 'hot_standby', 'max_wal_senders', 'wal_keep_size'];
 
 describe('census (b): replication settings live in the db argv, not in ALTER SYSTEM', () => {
-  const sql = readFileSync(join(REPO, 'carbon/ha/primary-init.sql'), 'utf-8');
+  const sql = primaryReplicationSql('pw');
 
   it('both db argv lists carry the replication startup flags', () => {
     for (const argv of [composeArgv(), k8sArgv()]) {
@@ -147,11 +149,11 @@ describe('census (b): replication settings live in the db argv, not in ALTER SYS
     }
   });
 
-  it('primary-init.sql sets nothing the k8s db args already set', () => {
+  it('the primary init SQL sets nothing the k8s db args already set', () => {
     expect(shadowedByArgv(sql, k8sArgv())).toEqual([]);
   });
 
-  it('primary-init.sql sets nothing the compose db command already sets', () => {
+  it('the primary init SQL sets nothing the compose db command already sets', () => {
     expect(shadowedByArgv(sql, composeArgv())).toEqual([]);
   });
 

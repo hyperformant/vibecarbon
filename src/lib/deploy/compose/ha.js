@@ -74,6 +74,7 @@ import {
 import {
   dropInactiveReplicationSlots,
   ensureReplicationSlotSql,
+  primaryReplicationSql,
   slotDropSkippedNote,
   slotDropWarning,
 } from '../replication-slot.js';
@@ -375,21 +376,11 @@ export async function ensurePrimaryReplicationAccess(primaryIp, sshKeyPath, proj
   // The SQL (which embeds the replication password) is piped to psql via STDIN
   // (`input:`), so it never appears in argv / the ssh command string / the
   // remote shell's /proc/cmdline. `docker compose exec -T` forwards our stdin
-  // straight into psql.
-  const createRoleSql = `
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'replicator') THEN
-    CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '${replPassword}';
-  ELSE
-    ALTER ROLE replicator WITH PASSWORD '${replPassword}';
-  END IF;
-END $$;
-
--- The physical replication slot: dropped when lost (WAL past the
--- max_slot_wal_keep_size cap, it can never stream again), created if missing.
-${ensureReplicationSlotSql()}
-`;
+  // straight into psql. primaryReplicationSql silences the statement log for
+  // the session and keeps the password out of any DO block, so a failure
+  // (a write-fenced primary, say) cannot put it in the db log, which reaches
+  // Loki.
+  const createRoleSql = primaryReplicationSql(replPassword);
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
