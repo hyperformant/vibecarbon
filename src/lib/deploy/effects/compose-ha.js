@@ -39,6 +39,7 @@ import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { haClassMessage, haStandbyType } from '../../sizing.js';
+import { VERSION } from '../../version.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
 import { queueBootTiming } from '../boot-timing.js';
@@ -282,36 +283,71 @@ async function haProvisionServers(ctx) {
     labels: { 'managed-by': 'vibecarbon', role: 'standby' },
     allowedSshIps,
   });
-  const [primaryResult, standbyResult] = await perfAsync('deploy.ha.compose.iac.upStack.fan', () =>
-    Promise.all([
-      perfAsync('deploy.ha.compose.iac.upStack.primary', () =>
-        upStack(`${environment}-primary`, primaryProgram, {
-          provider: providerIdFor(envConfig),
-          providerToken: apiToken,
-          s3Config,
-          projectName,
-          // Past the state bucket's settle window the two ups provision in
-          // parallel; inside it they serialize (lib/iac/state-lock.js).
-          stateBucketYoung: ctx.stateBucketYoung,
-          // Recover stale-EMPTY outputs reads in place (read-only poll inside
-          // upStack); the hard gate below stays the loud last resort. This
-          // path is the MOST exposed member of the class: two parallel ups
-          // against a possibly-fresh state bucket.
-          requiredOutputs: ['serverIp'],
-        }),
-      ),
-      perfAsync('deploy.ha.compose.iac.upStack.standby', () =>
-        upStack(`${environment}-standby`, standbyProgram, {
-          provider: providerIdFor(envConfig),
-          providerToken: apiToken,
-          s3Config,
-          projectName,
-          stateBucketYoung: ctx.stateBucketYoung,
-          requiredOutputs: ['serverIp'],
-        }),
-      ),
-    ]),
-  );
+  // Everything the two programs receive. A warm deploy with the same inputs
+  // returns the outputs the last complete run recorded, without two no-op
+  // Pulumi runs (13-19 s of a 56-95 s warm deploy), as k8s's `k3s-infra` does.
+  // Any other input, including an operator CIDR, runs Pulumi. The CLI version
+  // is an input because a new release can change the programs. A reconverge
+  // always runs Pulumi: it rebuilds the retired server, which may be gone.
+  const infraInputs = {
+    projectName,
+    environment,
+    provider: providerIdFor(envConfig),
+    primaryRegion: primaryStackRegion,
+    standbyRegion,
+    primaryServerType: primaryStackServerType,
+    standbyServerType,
+    sshPublicKey: publicKey,
+    sharedSshKeyId,
+    allowedSshIps,
+    stateBucket: s3Config?.stateBucket ?? null,
+    cliVersion: VERSION,
+  };
+  const state = ctx.state;
+  const recorded =
+    !ctx.reconverge && state?.shouldSkip('compose-ha-infra', infraInputs)
+      ? state.getStepResult('compose-ha-infra')
+      : null;
+  // A ledger entry missing an output provisions rather than continuing with
+  // undefined, as the gate below does for a Pulumi result.
+  const reusable = !!recorded?.primary?.serverIp && !!recorded?.standby?.serverIp;
+  if (reusable) {
+    ctx.onProgress('Infrastructure unchanged, skipping Pulumi');
+  } else {
+    state?.startStep('compose-ha-infra', infraInputs);
+  }
+  const [primaryResult, standbyResult] = reusable
+    ? [{ outputs: recorded.primary }, { outputs: recorded.standby }]
+    : await perfAsync('deploy.ha.compose.iac.upStack.fan', () =>
+        Promise.all([
+          perfAsync('deploy.ha.compose.iac.upStack.primary', () =>
+            upStack(`${environment}-primary`, primaryProgram, {
+              provider: providerIdFor(envConfig),
+              providerToken: apiToken,
+              s3Config,
+              projectName,
+              // Past the state bucket's settle window the two ups provision in
+              // parallel; inside it they serialize (lib/iac/state-lock.js).
+              stateBucketYoung: ctx.stateBucketYoung,
+              // Recover stale-EMPTY outputs reads in place (read-only poll inside
+              // upStack); the hard gate below stays the loud last resort. This
+              // path is the MOST exposed member of the class: two parallel ups
+              // against a possibly-fresh state bucket.
+              requiredOutputs: ['serverIp'],
+            }),
+          ),
+          perfAsync('deploy.ha.compose.iac.upStack.standby', () =>
+            upStack(`${environment}-standby`, standbyProgram, {
+              provider: providerIdFor(envConfig),
+              providerToken: apiToken,
+              s3Config,
+              projectName,
+              stateBucketYoung: ctx.stateBucketYoung,
+              requiredOutputs: ['serverIp'],
+            }),
+          ),
+        ]),
+      );
   // Hard gate, twin of the single-compose one in effects/index.js: a stale S3
   // state read right after stack creation can return a "successful" up with
   // EMPTY outputs. This path is MORE exposed than the single-node one — two
@@ -330,6 +366,13 @@ async function haProvisionServers(ctx) {
           `stack '${environment}-${role}'.`,
       );
     }
+  }
+  // Both arms passed the gate: only now is the run recorded as complete.
+  if (!reusable) {
+    state?.completeStep('compose-ha-infra', {
+      primary: primaryResult.outputs,
+      standby: standbyResult.outputs,
+    });
   }
   // firewallId is persisted per server so `scale`'s blue-green replacement can
   // re-attach it — each HA node has its OWN firewall (one per stack), so this

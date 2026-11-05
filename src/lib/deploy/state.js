@@ -164,6 +164,17 @@ export class StateTracker {
   }
 
   /**
+   * Forget one step, so the next deploy runs it. For a path that changes what
+   * the step produced without changing the step's inputs.
+   * @param {string} stepId
+   */
+  invalidateStep(stepId) {
+    if (!this.state.steps[stepId]) return;
+    delete this.state.steps[stepId];
+    this.save();
+  }
+
+  /**
    * Clear state for a new deployment
    */
   clear() {
