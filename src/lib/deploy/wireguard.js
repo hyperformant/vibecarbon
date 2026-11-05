@@ -120,6 +120,47 @@ export function buildWireguardInterfaceConfig({
 }
 
 /**
+ * Shell test: does wg0 already run exactly this config? Tests the live
+ * interface, not a file on disk, so a tunnel changed by hand or left half-built
+ * fails it and gets rebuilt. Only the peer lines of `wg show dump` are read: its
+ * first line carries the private key.
+ *
+ * @param {Parameters<typeof buildWireguardInterfaceConfig>[0]} params
+ * @returns {string}
+ */
+function wireguardAlreadyMatches({
+  selfIp,
+  selfPrivKeyPath,
+  listenPort,
+  peerPubKey,
+  peerEndpoint,
+  peerAllowedIp,
+  keepalive = 25,
+}) {
+  return [
+    `ip -4 -o addr show dev wg0 up 2>/dev/null | grep -qF ' inet ${selfIp}/30 '`,
+    `[ "$(wg show wg0 public-key 2>/dev/null)" = "$(wg pubkey < ${selfPrivKeyPath})" ]`,
+    `[ "$(wg show wg0 listen-port 2>/dev/null)" = "${listenPort}" ]`,
+    '[ "$(wg show wg0 dump 2>/dev/null | tail -n +2 | cut -f1,3,4,8)" = ' +
+      `"$(printf '${peerPubKey}\t${peerEndpoint}\t${peerAllowedIp}\t${keepalive}')" ]`,
+  ].join(' && ');
+}
+
+/**
+ * The live bring-up: rebuild wg0 only when it differs from these params.
+ * Rebuilding a healthy tunnel drops replication, and a deploy runs this every
+ * time, with nothing to gain from it: a tunnel with the right config needs no
+ * help to reconnect. Anything that does not match takes the full rebuild.
+ *
+ * @param {Parameters<typeof buildWireguardInterfaceConfig>[0]} params
+ * @returns {string}
+ */
+export function buildWireguardBringUp(params) {
+  const rebuild = buildWireguardInterfaceConfig(params); // validates params; throws on injection
+  return `${wireguardAlreadyMatches(params)} || { ${rebuild.join(' && ')}; }`;
+}
+
+/**
  * The on-node bring-up script persisted at WG_BOOTSCRIPT_PATH and run by the
  * systemd oneshot on every boot. It is generated FROM buildWireguardInterfaceConfig
  * with the SAME validated params the live bring-up uses, so boot-time bring-up
@@ -305,10 +346,8 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
     peerEndpoint: `${primaryIp}:${WG_PORT}`,
     peerAllowedIp: `${WG_PRIMARY_IP}/32`,
   };
-  const primaryUp = buildWireguardInterfaceConfig(primaryParams);
-  const standbyUp = buildWireguardInterfaceConfig(standbyParams);
-  await sshRun(primaryIp, sshKeyPath, ['bash', '-c', primaryUp.join(' && ')]);
-  await sshRun(standbyIp, sshKeyPath, ['bash', '-c', standbyUp.join(' && ')]);
+  await sshRun(primaryIp, sshKeyPath, ['bash', '-c', buildWireguardBringUp(primaryParams)]);
+  await sshRun(standbyIp, sshKeyPath, ['bash', '-c', buildWireguardBringUp(standbyParams)]);
 
   // 4. Persist reboot-durable bring-up: write the boot script + systemd oneshot
   //    on each node and enable it (item I-1). Idempotent — overwrites + re-enables
