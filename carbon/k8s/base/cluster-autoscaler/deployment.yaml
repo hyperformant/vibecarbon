@@ -137,8 +137,8 @@ spec:
           # margin the failing runs needed (healthcheck.js's own internal
           # gRPC deadline is 3s, so 15s covers a slow node cold-start on
           # top of that with room to spare) without image changes.
-          # The cold start is now gated by the startupProbe below (same
-          # command as readiness, same 15s timeout), so the probes here carry
+          # The cold start is now gated by the startupProbe below (the liveness
+          # command, same 15s timeout), so the probes here carry
           # no initialDelaySeconds: liveness is off until startup passes, and
           # readiness runs the moment it does.
           #
@@ -151,17 +151,22 @@ spec:
           # timeoutSeconds — i.e. this buys headroom against slow-but-alive
           # without materially widening the window in which a genuinely
           # dead sidecar goes undetected.
-          # Startup: the readiness check, polled every 2s, for up to 120s of
-          # attempts. Ends the wait for the next 20s readiness tick once the
-          # sidecar is actually serving. A kubelet probe worker runs one
-          # attempt at a time, so a 2s period with a 15s timeout cannot
-          # overlap: the next attempt starts after the previous one returns.
+          # Startup: the liveness check, polled every 2s, for up to 120s of
+          # failed attempts (60 x 2s, plus up to 15s per attempt). It must not
+          # depend on SERVING: SERVING needs a first Refresh driven by the
+          # OTHER container (cluster-autoscaler), and a startup probe failure
+          # kills this container. A crash-looping cluster-autoscaler would
+          # then restart a healthy sidecar, which the liveness note above
+          # rules out. Ready stays with the readinessProbe, which the kubelet
+          # runs once right after startup succeeds and then every 20s. A
+          # kubelet probe worker runs one attempt at a time, so a 2s period
+          # with a 15s timeout cannot overlap.
           startupProbe:
             exec:
               command:
                 - node
                 - src/autoscaler/healthcheck.js
-                - --readiness
+                - --liveness
             periodSeconds: 2
             timeoutSeconds: 15
             failureThreshold: 60

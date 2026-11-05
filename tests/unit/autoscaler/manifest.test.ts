@@ -239,10 +239,13 @@ describe('cluster-autoscaler deployment.yaml — carbon-autoscaler sidecar', () 
     });
   });
 
-  it('startupProbe runs the readiness check every 2s so the cold start is gated there', () => {
+  it('startupProbe runs the liveness check, never the SERVING-gated readiness check', () => {
+    // SERVING needs a first Refresh driven by the cluster-autoscaler container.
+    // A startup failure kills this container, so gating it on SERVING would
+    // restart a healthy sidecar whenever that other container crash-loops.
     const sidecar = containerNamed('carbon-autoscaler');
     expect(sidecar.startupProbe).toEqual({
-      exec: { command: ['node', 'src/autoscaler/healthcheck.js', '--readiness'] },
+      exec: { command: ['node', 'src/autoscaler/healthcheck.js', '--liveness'] },
       periodSeconds: 2,
       timeoutSeconds: 15,
       failureThreshold: 60,

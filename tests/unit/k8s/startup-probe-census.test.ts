@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 const BASE = join(process.cwd(), 'carbon', 'k8s', 'base');
 
 interface Probe {
+  exec?: { command?: string[] };
   initialDelaySeconds?: number;
   periodSeconds?: number;
   failureThreshold?: number;
@@ -104,10 +105,23 @@ describe('k8s base startup-probe census', () => {
         });
       }
 
+      if (container.name === 'carbon-autoscaler') {
+        // The startup probe kills the container on failure. Readiness here
+        // needs SERVING, which depends on the other container's first Refresh,
+        // so a startup probe gated on it would restart a healthy sidecar.
+        it('startupProbe is not gated on SERVING', () => {
+          const cmd = container.startupProbe?.exec?.command ?? [];
+          expect(cmd, `${where}: startup must not run --readiness`).not.toContain('--readiness');
+          expect(cmd).toContain('--liveness');
+        });
+      }
+
       if (isDb) {
-        it('db startup budget is an hour and there is no liveness probe', () => {
+        it('db startup budget is 30 days and there is no liveness probe', () => {
           const s = container.startupProbe;
-          expect((s?.failureThreshold ?? 0) * (s?.periodSeconds ?? 0)).toBeGreaterThanOrEqual(3600);
+          expect((s?.failureThreshold ?? 0) * (s?.periodSeconds ?? 0)).toBeGreaterThanOrEqual(
+            2592000,
+          );
           expect(container.livenessProbe).toBeUndefined();
         });
       }
