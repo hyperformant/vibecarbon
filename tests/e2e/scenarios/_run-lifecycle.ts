@@ -2055,7 +2055,7 @@ export async function runLifecycle(
               skipReason:
                 config.mode === 'compose-ha'
                   ? null
-                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (floating/reserved) — the harness doesn't track that IP, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
+                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (floating/reserved), which readServingIp reads back in the DNS-provider check below; this node-IP comparison does not apply, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
             }),
           );
           // The same flip read back through the DNS provider's own API (the
