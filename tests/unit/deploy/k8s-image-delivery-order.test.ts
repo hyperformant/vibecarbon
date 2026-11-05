@@ -63,9 +63,9 @@ describe('applyK3sManifests: the one delivery', () => {
     expect(registryReady).toBeLessThan(served);
     expect(awaited).toBeLessThan(patch);
     // Nothing between the await and the patch but the patch itself, the
-    // Secret versions it stamps, and the CA barrier.
+    // Secret versions it stamps, and the check for a failed autoscaler.
     expect(body.slice(awaited, patch)).not.toMatch(
-      /\bawait (?!deliveryPromise|clusterAutoscalerReady|readAppSecretVersions|runKubectlWithRetry)/,
+      /\bawait (?!deliveryPromise|Promise\.race\(\[clusterAutoscalerFailed|readAppSecretVersions|runKubectlWithRetry)/,
     );
   });
 

@@ -3572,8 +3572,8 @@ export async function applyK3sManifests({
   const rollOutClusterAutoscaler = async () => {
     // One span for the Secret, the apply, the image pin and (pilot standby)
     // the zero; the rollout wait has its own. The whole chain runs alongside
-    // the cert-manager chain, so this span is off the critical path unless
-    // it outlasts that chain.
+    // the rest of the apply, so it is off the critical path unless it outlasts
+    // the app rollout.
     await perfAsync(`deploy.${perfPrefix}.clusterAutoscaler.apply`, async () => {
       // 4b. Create the kube-system/carbon-autoscaler-config Secret the
       //     carbon-autoscaler sidecar reads on startup (and on every
@@ -3770,9 +3770,15 @@ export async function applyK3sManifests({
     }
   };
   const clusterAutoscalerReady = rollOutClusterAutoscaler();
-  // Awaited before step 6; this only keeps a rollout that fails while the
-  // cert-manager chain is still running from being an unhandledRejection.
+  // The app does not wait for this. The autoscaler serves pending pods whenever
+  // it comes up, and holding the app for it cost about 20 s after the image had
+  // landed (DO e2e 2026-11-05: 94 s rollout). The deploy still awaits it, last.
+  // Only a failure settles clusterAutoscalerFailed, so the app's path can stop
+  // on one at once without waiting for a healthy rollout.
+  const clusterAutoscalerFailed = clusterAutoscalerReady.then(() => new Promise(() => {}));
+  // These only keep a failed rollout from being an unhandledRejection.
   clusterAutoscalerReady.catch(() => {});
+  clusterAutoscalerFailed.catch(() => {});
   inFlight.stopClusterAutoscaler = async () => {
     caStop.abort();
     await clusterAutoscalerReady.catch(() => {});
@@ -4342,7 +4348,9 @@ export async function applyK3sManifests({
   //    change, one roll. Both containers: the app and its migrate init
   //    container run one image.
   if (deliveryPromise) await deliveryPromise;
-  await clusterAutoscalerReady;
+  // An autoscaler that has already failed stops the deploy before the app is
+  // touched. One still coming up does not hold it.
+  await Promise.race([clusterAutoscalerFailed, Promise.resolve()]);
   const appTemplatePatch = {
     spec: {
       template: {
@@ -4476,7 +4484,7 @@ export async function applyK3sManifests({
     });
     const migrationWatch = watchAppMigrationFailure({ env, signal: rolloutAbort.signal });
     try {
-      await Promise.race([rollout, migrationWatch]);
+      await Promise.race([rollout, migrationWatch, clusterAutoscalerFailed]);
     } finally {
       rolloutAbort.abort();
       // The loser settles after the abort; its outcome no longer matters.
@@ -4569,6 +4577,7 @@ export async function applyK3sManifests({
   } catch (err) {
     progressLog(`[k3s] traefik post-apply restart warning: ${err.message?.split('\n')[0] || err}`);
   }
+  await clusterAutoscalerReady;
   return { tlsRestoredAt };
 }
 

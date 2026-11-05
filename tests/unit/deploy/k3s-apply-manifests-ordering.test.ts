@@ -414,9 +414,11 @@ function installSpawnMock() {
       argv.includes('status') &&
       argv.includes('deployment/app')
     ) {
-      return fakeChild({ gate: new Promise<void>(() => {}), argv: full }) as unknown as ReturnType<
-        typeof spawn
-      >;
+      return fakeChild({
+        gate: new Promise<void>(() => {}),
+        signal: opts?.signal ?? null,
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
     }
     // The deploy's live wal-g role write (writeDeployWalgRole): the db pod
     // mounts the role dir, and the write reads back the role it wrote.
@@ -817,7 +819,9 @@ describe('applyK3sManifests deploy-time optimizations', () => {
   // kustomization) needs nothing cert-manager or k8s/base provides, so its
   // apply and rollout run alongside the cert-manager readiness chain instead
   // of after the base (DO e2e 2026-10-31: clusterAutoscaler.rollout 15.6 s on
-  // the critical path). The app still rolls only after it.
+  // the critical path). The app does not wait for it either: the autoscaler
+  // serves pending pods whenever it comes up, and on DO e2e 2026-11-05 its
+  // pod took 94 s and held the app for about 20 s after the image had landed.
   const isCertManagerWait = (a: string[]) =>
     a[0] === 'kubectl' && a.includes('wait') && a.includes('deploy/cert-manager');
   const isCaRollout = (a: string[]) =>
@@ -825,6 +829,11 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     a.includes('rollout') &&
     a.includes('status') &&
     a.includes('deploy/cluster-autoscaler');
+  const isAppRollout = (a: string[]) =>
+    a[0] === 'kubectl' &&
+    a.includes('rollout') &&
+    a.includes('status') &&
+    a.includes('deployment/app');
 
   it('the CA apply and rollout run while cert-manager is still becoming Available', async () => {
     const { applyK3sManifests } = await k3sPromise;
@@ -895,24 +904,53 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     }
   });
 
-  it('the app is not patched until the CA rollout completes', async () => {
+  it('the app rolls out while the CA pod is still coming up, and the deploy waits for both', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const gate = makeGate();
     caRolloutGate = gate.promise;
     try {
-      const done = applyK3sManifests(baseArgs(makeProjectDir()));
+      let finished = false;
+      const done = applyK3sManifests(baseArgs(makeProjectDir())).finally(() => {
+        finished = true;
+      });
       done.catch(() => {});
       expect(await waitFor(() => cmdCalls.some(isCaRollout), 2000)).toBe(true);
-      // Everything up to the barrier may run; the app patch may not.
-      expect(await waitFor(() => cmdCalls.some(isDelivery), 2000)).toBe(true);
+      expect(await waitFor(() => cmdCalls.some(isAppPatch), 2000)).toBe(true);
+      expect(await waitFor(() => cmdCalls.some(isAppRollout), 2000)).toBe(true);
+      // Everything else may finish; the deploy still reports the autoscaler.
       await new Promise((r) => setTimeout(r, 50));
-      const patchedEarly = cmdCalls.some(isAppPatch);
+      expect(finished).toBe(false);
       gate.release();
       await done;
-      expect(patchedEarly).toBe(false);
-      expect(cmdCalls.findIndex(isCaRollout)).toBeLessThan(cmdCalls.findIndex(isAppPatch));
+      expect(finished).toBe(true);
     } finally {
       caRolloutGate = null;
+    }
+  });
+
+  it('a CA rollout that fails during the app rollout ends the deploy at once', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const gate = makeGate();
+    caRolloutGate = gate.promise;
+    caRolloutExit = 1;
+    rolloutHangs = true; // the app wait would otherwise run its 600 s
+    killed = [];
+    try {
+      const done = applyK3sManifests(baseArgs(makeProjectDir())).catch((e) => e);
+      expect(await waitFor(() => cmdCalls.some(isAppRollout), 2000)).toBe(true);
+      gate.release();
+      const err = await done;
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/progress deadline/);
+      expect(killed.some(isAppRollout)).toBe(true);
+      // Its diagnostics still ran: this is the failure the deploy reports.
+      expect(cmdCalls.some((a) => a.includes('get') && a.includes('app=cluster-autoscaler'))).toBe(
+        true,
+      );
+    } finally {
+      caRolloutGate = null;
+      caRolloutExit = 0;
+      rolloutHangs = false;
     }
   });
 
