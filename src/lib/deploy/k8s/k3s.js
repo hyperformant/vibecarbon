@@ -158,12 +158,7 @@ import {
   watchAppMigrationFailure,
 } from './readiness.js';
 import { tlsApplyTimingLines, tlsRestoreTimingLine } from './tls-reissue-watch.js';
-import {
-  CERT_MANAGER_MIN_BACKOFF,
-  k8sTlsRestoreLine,
-  quietKubectl,
-  restoreK8sTlsSecret,
-} from './tls-restore.js';
+import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-restore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

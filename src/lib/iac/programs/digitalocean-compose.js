@@ -1,5 +1,3 @@
-import { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import * as digitalocean from '@pulumi/digitalocean';
 import { encodeLabels } from '../../providers/digitalocean.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';

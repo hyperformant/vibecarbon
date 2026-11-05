@@ -1,5 +1,3 @@
-import { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import * as linode from '@pulumi/linode';
 import {
   encodeLabels,

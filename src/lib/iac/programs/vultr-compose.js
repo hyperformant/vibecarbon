@@ -1,5 +1,3 @@
-import { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import * as vultr from '@ediri/vultr';
 import { cidrToVultrRuleFields, encodeLabels } from '../../providers/vultr.js';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';

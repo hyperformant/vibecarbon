@@ -1,5 +1,3 @@
-import { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import * as scaleway from '@pulumiverse/scaleway';
 import {
   assertAsciiCloudInit,
