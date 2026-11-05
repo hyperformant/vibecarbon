@@ -102,6 +102,21 @@ describe('verifyAppHealth', () => {
     expect(cmds.some((c) => c.includes('logs --tail=40 app-migrate app'))).toBe(true);
   });
 
+  it('does not retry inside one probe call: the outer loop retries with the remaining time', async () => {
+    H.run.mockImplementation(async (argv: string[]) => {
+      if (String(argv.at(-1)).includes('exec -T app node'))
+        throw new Error('Connection reset by peer');
+      return 'diag\n';
+    });
+    const t0 = Date.now();
+    const r = await verifyAppHealth('10.0.0.1', '/k', 'myapp', { budgetMs: 1500 });
+    expect(r.healthy).toBe(false);
+    // retries 3 would sleep 5s between attempts inside one call, overshooting the 1.5s budget
+    expect(Date.now() - t0).toBeLessThan(4000);
+    const probes = H.run.mock.calls.filter((c) => sshArgv(c).includes('exec -T app node'));
+    expect(probes.length).toBeLessThanOrEqual(2);
+  });
+
   it('re-runs the held probe when exec fails once (container restarting)', async () => {
     let probes = 0;
     H.run.mockImplementation(async (argv: string[]) => {

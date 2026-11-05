@@ -953,7 +953,7 @@ export function appHealthProbeScript(path, budgetMs) {
     `const go=()=>{const r=h.request({host:'localhost',port:3000,path:${JSON.stringify(path)},method:'GET',timeout:2000},res=>{res.resume();` +
     `if(res.statusCode>=200&&res.statusCode<300)process.exit(0);next()});` +
     `r.on('error',next);r.on('timeout',()=>r.destroy());r.end()};` +
-    `let t=0;const next=()=>{if(t++)return;t=0;if(Date.now()>=end)process.exit(1);setTimeout(go,200)};go();`
+    `const next=()=>{if(Date.now()>=end)process.exit(1);setTimeout(go,200)};go();`
   );
 }
 
@@ -1007,6 +1007,8 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
     try {
       const result = await sshRunAsync(ip, sshKeyPath, probeCmd, {
         timeout: remainingMs + 10_000,
+        // The outer loop retries with the correct remaining time.
+        retries: 1,
         ignoreError: true,
       });
       const out = (result || '').trim();
