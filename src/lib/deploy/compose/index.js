@@ -16,8 +16,8 @@ import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { writeLogDetail } from '../../deploy-logger.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
-import { bootPullImages, loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
-import { K8S_MIRROR_ORG, mirroredPackageNames, resolveDbImage } from '../../images.js';
+import { loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
+import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
@@ -399,7 +399,7 @@ export function bootPullLogLine(ip, status) {
  * on by the deploy (setupServer does not await it) and never retried: the
  * deploy's own pull does whatever the boot pull did not.
  */
-export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync, deployDbImage } = {}) {
+export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync } = {}) {
   try {
     const status = await run(
       ip,
@@ -408,23 +408,6 @@ export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync, deployDb
       { timeout: 15_000, ignoreError: true, retries: 1 },
     );
     writeLogDetail(bootPullLogLine(ip, status ?? 'absent'));
-    // The boot pull fetches the pinned db image; a deploy running another
-    // (VIBECARBON_DB_IMAGE) pulls its own, which the log should explain.
-    const [bootDb] = bootPullImages();
-    // Resolved here, inside the try: a malformed VIBECARBON_DB_IMAGE throws,
-    // and this note runs unawaited (setupServer), so it must never reject.
-    let deployDb = deployDbImage;
-    try {
-      deployDb ??= resolveDbImage({ warn: () => {} }).ref;
-    } catch {
-      deployDb = null;
-    }
-    if (deployDb && deployDb !== bootDb) {
-      writeLogDetail(
-        `[boot-pull] ${ip}: this deploy runs db image ${deployDb}, not the pinned ` +
-          `${bootDb} the boot pull fetched; the deploy pull fetches it`,
-      );
-    }
   } catch {
     // The note is informational: a failed read changes nothing.
   }

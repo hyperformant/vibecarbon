@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dbImageRef, dockerSocketProxyImageRef, traefikImageRef } from '../images.js';
+import { dockerSocketProxyImageRef, resolveDbImage, traefikImageRef } from '../images.js';
 
 const CLOUD_INIT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -30,7 +30,10 @@ export const BOOT_PULL_PLACEHOLDER = '__VIBECARBON_BOOT_PULL_IMAGES__';
  * @returns {string[]}
  */
 export function bootPullImages() {
-  return [dbImageRef(), traefikImageRef(), dockerSocketProxyImageRef()];
+  // resolveDbImage, not the pinned ref: the deploy runs the VIBECARBON_DB_IMAGE
+  // override when set, and the boot pull must fetch that image (quietly: the
+  // deploy bundle already warned).
+  return [resolveDbImage({ warn: () => {} }).ref, traefikImageRef(), dockerSocketProxyImageRef()];
 }
 
 /** Fill the boot pull's image list in the shared cloud-init text. */

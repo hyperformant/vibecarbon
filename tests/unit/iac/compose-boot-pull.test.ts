@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -9,7 +9,7 @@ import { loadHetznerComposeUserData } from '../../../src/lib/iac/programs/hetzne
 import { loadLinodeComposeUserData } from '../../../src/lib/iac/programs/linode-compose.js';
 import { loadScalewayComposeUserData } from '../../../src/lib/iac/programs/scaleway-compose.js';
 import { loadVultrComposeUserData } from '../../../src/lib/iac/programs/vultr-compose.js';
-import { dbImageRef } from '../../../src/lib/images.js';
+import { dbImageRef, resolveDbImage } from '../../../src/lib/images.js';
 
 /**
  * The boot image pull: every compose server (all five providers) starts
@@ -37,6 +37,43 @@ describe('boot pull refs', () => {
     expect(prod).toContain(`image: ${proxy}`);
     expect(traefik).toMatch(/^ghcr\.io\/hyperformant\/traefik:.*@sha256:/);
     expect(proxy).toMatch(/^ghcr\.io\/hyperformant\/docker-socket-proxy:.*@sha256:/);
+  });
+});
+
+describe('boot pull db ref follows the deploy', () => {
+  it('is what resolveDbImage runs, release pin by default', () => {
+    expect(bootPullImages()[0]).toBe(resolveDbImage({ warn: () => {} }).ref);
+    expect(bootPullImages()[0]).toBe(dbImageRef());
+  });
+
+  it('is the VIBECARBON_DB_IMAGE override when set, silently', () => {
+    const prev = process.env.VIBECARBON_DB_IMAGE;
+    const dev = 'ghcr.io/hyperformant/postgres-dev:17.11-walg3.0.9-r4-abcdef123456';
+    process.env.VIBECARBON_DB_IMAGE = dev;
+    try {
+      expect(bootPullImages()[0]).toBe(dev);
+    } finally {
+      if (prev === undefined) delete process.env.VIBECARBON_DB_IMAGE;
+      else process.env.VIBECARBON_DB_IMAGE = prev;
+    }
+  });
+
+  it('census: no source file outside images.js prefetches through dbImageRef()', () => {
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (
+          /\.(js|ts|sh|ya?ml)$/.test(e.name) &&
+          /\bdbImageRef\(/.test(readFileSync(full, 'utf8'))
+        )
+          offenders.push(full.slice(REPO.length + 1));
+      }
+    };
+    walk(join(REPO, 'src'));
+    walk(join(REPO, 'carbon', 'cloud-init'));
+    expect(offenders.filter((f) => f !== 'src/lib/images.js')).toEqual([]);
   });
 });
 
