@@ -551,7 +551,8 @@ export async function repairVultrFirewallRuleInputs(stack) {
 async function upStackImpl(stackName, program, options = {}) {
   // `options.perfStem` is the caller's own perf timer name (e.g.
   // `deploy.k3s.iac.upStack`); the markers below hang off it so every arm of
-  // a deploy stays distinguishable.
+  // a deploy stays distinguishable. The `.prepare` marker includes the wait
+  // for the state lock, so an HA arm's number can be lock contention.
   const prepare = options.perfStem ? perfTimer(`${options.perfStem}.prepare`) : null;
   const stack = await withStateLock(
     resolveBackendUrl(options.s3Config, options.provider),

@@ -23,9 +23,13 @@ describe('deploy pre-plan phase keeps a spinner over its network waits', () => {
   it('starts a spinner before awaiting ensureOperatorIpAccess', () => {
     const start = src.indexOf('accessSpinner.start(');
     const call = src.indexOf('ensureOperatorIpAccess({');
+    // The call is timed, and the timed wrapper must itself come after the start.
+    const timed = src.indexOf("perfAsync('deploy.preamble.operatorIpAccess'");
     expect(start).toBeGreaterThan(-1);
     expect(call).toBeGreaterThan(-1);
-    expect(start).toBeLessThan(call);
+    expect(timed).toBeGreaterThan(-1);
+    expect(start).toBeLessThan(timed);
+    expect(timed).toBeLessThan(call);
   });
 
   it('routes operator-ip onMessage through progressLog, not p.log.info (raw writes shred an active spinner)', () => {
