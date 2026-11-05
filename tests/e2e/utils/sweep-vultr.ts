@@ -16,10 +16,8 @@
  *      back as `&cursor=`) with no page/pages counter, so a walk written to
  *      Linode's `{data, page, pages}` idiom would stop after one page and
  *      silently miss every later page's residue.
- *   2. BUCKET ENUMERATION. Plain S3 `ListBuckets` WORKS on Vultr's RGW
- *      (live-probed 2026-08-08 — unlike Linode, where account ListBuckets
- *      fails with SignatureDoesNotMatch and the sweep has to detour through
- *      the management API). Vultr object-storage keys are minted PER
+ *   2. BUCKET ENUMERATION. Plain S3 `ListBuckets` works on Vultr's RGW
+ *      (live-probed 2026-08-08). Vultr object-storage keys are minted PER
  *      SUBSCRIPTION and one subscription is one cluster, so that listing is
  *      already scoped to exactly the cluster's buckets. The flip side: the
  *      cluster must be known (`VULTR_STORAGE_REGION`); the keys

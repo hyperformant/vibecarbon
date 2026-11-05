@@ -135,6 +135,19 @@ export function formatS3SetupFailure(error, { endpoint, source } = {}) {
 }
 
 /**
+ * Sends ListBuckets as the bare `GET /` AWS documents. The SDK adds
+ * `?x-id=ListBuckets`, which every Linode E0 and E1 cluster refuses with
+ * SignatureDoesNotMatch while E3 ignores it (11 clusters probed with a separate
+ * signer, 2026-11-05). A good key then read as a wrong one and stopped the
+ * deploy. This runs at the build step, ahead of signing, so the signature
+ * covers what is sent. Other calls keep their query: E1 takes it on object paths.
+ */
+const bareListBuckets = (next, context) => (args) => {
+  if (context.commandName === 'ListBucketsCommand') delete args.request.query['x-id'];
+  return next(args);
+};
+
+/**
  * Subclasses also declare `static appKeyScoping` ('mint' | 'paste-fence' |
  * 'none'): how the env's app gets an object-storage key of its own (security
  * plan R2). The base declares none on purpose, so a provider that forgets it
@@ -198,6 +211,10 @@ export class S3CompatibleProvider {
         },
         maxAttempts: 3,
         requestHandler: { ...S3_HTTP_TIMEOUTS },
+      });
+      this._client.middlewareStack.add(bareListBuckets, {
+        step: 'build',
+        name: 'bareListBuckets',
       });
     }
     return this._client;

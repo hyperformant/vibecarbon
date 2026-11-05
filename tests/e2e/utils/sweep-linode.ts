@@ -54,11 +54,9 @@ interface LinodeSweepObjectStorage {
   /**
    * Every bucket on the account with its assigned cluster slug; null =
    * unreadable. Backed by the Linode MANAGEMENT API (GET
-   * /object-storage/buckets), NOT S3 ListBuckets: account-level ListBuckets
-   * fails with SignatureDoesNotMatch on Linode's RGW (live-probed
-   * 2026-08-08 across every signing-region/path-style combination) while
-   * bucket-level S3 ops work fine — and the management listing additionally
-   * reports each bucket's cluster, which per-cluster S3 listings couldn't.
+   * /object-storage/buckets), NOT S3 ListBuckets: only the management
+   * listing reports each bucket's cluster, which per-cluster S3 listings
+   * can't give in one call.
    */
   listAllBuckets(): Promise<Array<{ name: string; cluster: string }> | null>;
   emptyAndDeleteBucket(cluster: string, name: string): Promise<{ objectsRemoved: number }>;
@@ -96,8 +94,8 @@ async function defaultObjectStorage(
   )) as any;
   return {
     async listAllBuckets() {
-      // Management-API listing (see the interface doc for why S3
-      // ListBuckets cannot be used on Linode). Hostname shape:
+      // Management-API listing (see the interface doc for why not S3
+      // ListBuckets). Hostname shape:
       // `<bucket>.<cluster>.linodeobjects.com` — the cluster slug is
       // recovered by stripping the bucket's own name and the domain.
       const buckets: Array<{ name: string; cluster: string }> = [];

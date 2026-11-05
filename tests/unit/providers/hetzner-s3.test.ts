@@ -5,6 +5,7 @@ import { HetznerS3Provider, sanitizeBucketName } from '../../../src/lib/provider
 vi.mock('@aws-sdk/client-s3', () => {
   const MockS3Client = class {
     send = vi.fn();
+    middlewareStack = { add: vi.fn() };
   };
   return {
     S3Client: MockS3Client,
