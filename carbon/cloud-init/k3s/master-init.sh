@@ -119,19 +119,17 @@ echo "Public IP: $PUBLIC_IP"
 PRIVATE_IFACE=""
 RETRY_COUNT=0
 MAX_RETRIES=120
-DHCP_TRIGGERED=false
 echo "Waiting for private network interface..."
 while [ -z "$PRIVATE_IFACE" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
   PRIVATE_IFACE=$(ip -4 addr show | grep 'inet 10\.0\.' | awk '{print $NF}' || true)
   if [ -z "$PRIVATE_IFACE" ]; then
-    # See worker-init.sh for the dhcpcd-race RCA. Same recovery applies here.
-    if [ "$DHCP_TRIGGERED" = "false" ] && [ $RETRY_COUNT -ge 1 ] && command -v dhcpcd >/dev/null 2>&1; then
+    # See worker-init.sh for the dhcpcd-race RCA and why it asks on every pass.
+    if [ $RETRY_COUNT -ge 1 ] && command -v dhcpcd >/dev/null 2>&1; then
       CANDIDATE=$(ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: en[a-z]+[0-9]+s[0-9]+/ {print $2}' | grep -v '^eth' | head -1 || true)
       if [ -n "$CANDIDATE" ]; then
-        DHCP_TRIGGERED=true
-        echo "Private NIC $CANDIDATE has no lease yet - triggering dhcpcd"
+        echo "Private NIC $CANDIDATE has no lease yet - asking dhcpcd (attempt $RETRY_COUNT)"
         ip link set "$CANDIDATE" up 2>&1 || true
-        dhcpcd -1 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
+        dhcpcd -1 -t 4 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
       fi
     fi
     if [ $((RETRY_COUNT % 12)) -eq 0 ]; then

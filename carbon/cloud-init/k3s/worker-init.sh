@@ -85,24 +85,26 @@ echo "Public IP: $PUBLIC_IP"
 PRIVATE_IFACE=""
 RETRY_COUNT=0
 MAX_RETRIES=120
-DHCP_TRIGGERED=false
 echo "Waiting for private network interface..."
 while [ -z "$PRIVATE_IFACE" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
   PRIVATE_IFACE=$(ip -4 addr show | grep 'inet 10\.0\.' | awk '{print $NF}' || true)
   if [ -z "$PRIVATE_IFACE" ]; then
-    # On the first miss (no 10.0.x.x address yet), actively trigger dhcpcd on any
-    # unmanaged enp* NIC. Hetzner ships dhcpcd-base + auto-starts dhcpcd at
-    # boot, but it races with the post-boot Hetzner private-network
+    # From the first miss (no 10.0.x.x address yet), actively ask dhcpcd for a
+    # lease on any unmanaged enp* NIC. Hetzner ships dhcpcd-base + auto-starts
+    # dhcpcd at boot, but it races with the post-boot Hetzner private-network
     # attachment. When dhcpcd loses the race the interface stays DOWN and no
-    # IP is ever requested - running `dhcpcd -1 <iface>` once obtains the
-    # lease idempotently. Skip if already triggered or dhcpcd missing.
-    if [ "$DHCP_TRIGGERED" = "false" ] && [ $RETRY_COUNT -ge 1 ] && command -v dhcpcd >/dev/null 2>&1; then
+    # IP is ever requested - `dhcpcd -1 <iface>` obtains the lease idempotently.
+    # Ask on EVERY pass, not once: this starts ~5 s in, when the NIC can exist
+    # while the attachment or DHCP is still settling, and one failed attempt
+    # would leave nothing requesting a lease. -t 4 bounds each attempt so the
+    # pass stays near the 5 s cadence; MAX_RETRIES bounds the whole wait.
+    # Skipped when dhcpcd is missing.
+    if [ $RETRY_COUNT -ge 1 ] && command -v dhcpcd >/dev/null 2>&1; then
       CANDIDATE=$(ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: en[a-z]+[0-9]+s[0-9]+/ {print $2}' | grep -v '^eth' | head -1 || true)
       if [ -n "$CANDIDATE" ]; then
-        DHCP_TRIGGERED=true
-        echo "Private NIC $CANDIDATE has no lease yet - triggering dhcpcd"
+        echo "Private NIC $CANDIDATE has no lease yet - asking dhcpcd (attempt $RETRY_COUNT)"
         ip link set "$CANDIDATE" up 2>&1 || true
-        dhcpcd -1 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
+        dhcpcd -1 -t 4 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
       fi
     fi
     if [ $((RETRY_COUNT % 12)) -eq 0 ]; then
