@@ -4,7 +4,10 @@
 # This user-data runs at VPS boot time on plain Ubuntu 24.04 on every
 # provider. Each provider's renderer splices the one pinned Docker install
 # (src/lib/iac/docker-install.js) at the top of runcmd, so every server runs
-# the same Docker. By finishing UFW + unattended-upgrades before SSH is even reachable, the
+# the same Docker. Boot refreshes only Docker's own apt source (no
+# package_update: Ubuntu's shipped lists already hold ufw and
+# unattended-upgrades), with Ubuntu's post-update hooks silenced.
+# By finishing UFW + unattended-upgrades before SSH is even reachable, the
 # CLI's post-SSH setupServer becomes a ~2-second marker-file probe instead
 # of a ~90-second serial apt-get chain.
 #
@@ -15,7 +18,6 @@
 # ufw and unattended-upgrades install in runcmd, AFTER Docker is up and the
 # boot image pull has started, so Docker (and the pull) start as early as the
 # boot allows instead of waiting for these packages.
-package_update: true
 
 write_files:
   # The boot image pull: the pinned core images (the db image, the traefik and
@@ -119,7 +121,10 @@ runcmd:
   # Lock timeout, not bare apt-get: unattended-upgrades may hold dpkg's lock
   # on first boot (src/lib/deploy/apt.js).
   - [sh, -c, 'echo "a $(date +%s.%N)">>/var/log/vcboot||true']
-  - [sh, -c, 'apt-get -o DPkg::Lock::Timeout=300 install -y ufw unattended-upgrades']
+  # Spelled out because shell templates cannot import src/lib/deploy/apt.js;
+  # same shape as aptInstallOrRefresh: install, and only if that fails refresh
+  # the lists and retry.
+  - [sh, -c, 'apt-get -o DPkg::Lock::Timeout=300 install -y ufw unattended-upgrades || { apt-get -o DPkg::Lock::Timeout=300 update && apt-get -o DPkg::Lock::Timeout=300 install -y ufw unattended-upgrades; }']
   - [sh, -c, 'echo "u $(date +%s.%N)">>/var/log/vcboot||true']
   # UFW defaults + the three ports Traefik needs. Ordering matters: we enable
   # last so the allow rules are in place before the first policy flip.

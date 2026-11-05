@@ -19,9 +19,15 @@
  *
  * Versions checked 2026-11-04 against the noble amd64 Packages index.
  *
+ * Boot refreshes only what it installs: the apt update is limited to Docker's
+ * own source (the Ubuntu lists the image ships with already hold everything
+ * else we install) and runs with Ubuntu's post-update hooks silenced; cloud-init
+ * no longer does a `package_update`. If the install cannot find a package in the
+ * shipped lists, a plain full update is the fallback (see aptInstallOrRefresh).
+ *
  * ASCII-only: DigitalOcean and Scaleway user data must be pure ASCII.
  */
-import { APT_LOCK_OPT } from '../deploy/apt.js';
+import { aptInstallOrRefresh, aptQuietUpdate } from '../deploy/apt.js';
 
 export const DOCKER_VERSIONS = Object.freeze({
   'docker-ce': '5:29.9.3-1~ubuntu.24.04~noble',
@@ -35,6 +41,9 @@ const PINNED_PACKAGES = Object.entries(DOCKER_VERSIONS)
   .map(([name, version]) => `${name}=${version}`)
   .join(' ');
 
+const DOCKER_SOURCE_ONLY =
+  '-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/docker.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0';
+
 // Idempotent / safe to re-run: `install -m` re-applies the same mode, the curl
 // step overwrites the keyring with identical bytes, and installing an already
 // installed pinned version is a no-op.
@@ -46,8 +55,8 @@ export const DOCKER_INSTALL_RUNCMD = [
   // Lock timeout, not bare apt-get: runcmd runs while unattended-upgrades is
   // still holding dpkg's lock-frontend on first boot, and apt's default is to
   // fail on contention rather than wait. See src/lib/deploy/apt.js.
-  `  - [sh, -c, 'apt-get ${APT_LOCK_OPT} update']`,
-  `  - [sh, -c, 'apt-get ${APT_LOCK_OPT} install -y ${PINNED_PACKAGES}']`,
+  `  - [sh, -c, '${aptQuietUpdate(DOCKER_SOURCE_ONLY)}']`,
+  `  - [sh, -c, '${aptInstallOrRefresh(PINNED_PACKAGES)}']`,
 ].join('\n');
 
 /**

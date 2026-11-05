@@ -89,7 +89,7 @@ describe('renderDoUserData (cloud-init parity splice)', () => {
     expect(rendered).toMatch(/ufw, allow, '443\/tcp'/);
     expect(rendered).toContain('/var/lib/vibecarbon/ready');
     expect(rendered).toContain('final_message:');
-    expect(rendered).toContain('package_update: true');
+    expect(rendered).not.toContain('package_update: true');
   });
 
   // d1 e2e RCA pin: a live DigitalOcean droplet received user-data with the
@@ -161,7 +161,9 @@ describe('renderDoUserData (cloud-init parity splice)', () => {
     // missing an entry for typography actually in use — this should
     // never fire, but if it does, the map (not the '?' fallback) is the fix.
     expect(sharedCloudInit).not.toContain('?');
-    expect(rendered).not.toContain('?');
+    // The one legitimate '?' is the shell's `$?` (apt's exit status) in the
+    // spliced quiet-update line; it is ASCII in the source, not a fallback.
+    expect(rendered.replaceAll('$?', '')).not.toContain('?');
   });
 
   it('throws (fail loud) if the runcmd anchor is missing from the input', () => {

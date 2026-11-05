@@ -109,6 +109,18 @@ describe.each(Object.entries(RENDERERS))('(b) %s rendered compose user data', (_
     }
   });
 
+  it("refreshes only Docker's source, with no package_update and ASCII under the 32 KiB cap", () => {
+    expect(text).not.toMatch(/^package_update:\s*true/m);
+    const updates = steps.map((s) => String(s.at(-1))).filter((c) => /\bupdate -qq\b/.test(c));
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toContain('-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/docker.list');
+    expect(updates[0]).toContain('-o Dir::Etc::sourceparts=-');
+    expect(updates[0]).toContain('#clear APT::Update::Post-Invoke-Success;');
+    expect(updates[0]).toContain('rm -f /etc/apt/apt.conf.d/99zz-vibecarbon-boot');
+    expect(Buffer.byteLength(text)).toBeLessThan(32 * 1024);
+    expect([...text].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
+  });
+
   it('pins Docker 28 or newer, so `docker save --platform` exists', () => {
     const major = Number(DOCKER_VERSIONS['docker-ce'].split(':')[1].split('.')[0]);
     expect(major).toBeGreaterThanOrEqual(28);
@@ -118,6 +130,14 @@ describe.each(Object.entries(RENDERERS))('(b) %s rendered compose user data', (_
     const install = steps.indexOf(installs[0]);
     const enable = steps.findIndex((s) => s.join(',') === 'systemctl,enable,--now,docker');
     expect(enable).toBeGreaterThan(install);
+  });
+});
+
+describe('wireguard-tools install refreshes with the quiet trimmed update', () => {
+  it('uses aptQuietUpdate(APT_TRIMMED_INDEXES), not a plain update', () => {
+    const src = readFileSync(join(ROOT, 'src/lib/deploy/wireguard.js'), 'utf-8');
+    expect(src).toContain('aptQuietUpdate(APT_TRIMMED_INDEXES)');
+    expect(src).not.toContain("aptGet('update -qq')");
   });
 });
 

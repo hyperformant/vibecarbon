@@ -44,13 +44,15 @@ const EXEMPT: Record<string, string> = {
   // so the census is exemption-free. Argue any new entry in a comment like this one.
 };
 
-// A site is a literal `apt-get …` OR a call to the shared helper — the .js
+// A site is a literal `apt-get …` OR a call to a shared helper (aptGet, or the
+// quiet-update / install-or-refresh builders, which route through aptGet) — the .js
 // sites that route through aptGet() emit no literal, and a census that only
 // looked for the literal would stop seeing them the moment they were fixed.
-const APT_GET = /\bapt-get\s|\baptGet\(/;
+const APT_GET = /\bapt-get\s|\baptGet\(|\baptQuietUpdate\(|\baptInstallOrRefresh\(/;
 // A line satisfies the census by carrying the literal option, or by
 // interpolating the shared constant (the .js sites import APT_LOCK_OPT).
-const HAS_TIMEOUT = /DPkg::Lock::Timeout|APT_LOCK_OPT|aptGet\(/;
+const HAS_TIMEOUT =
+  /DPkg::Lock::Timeout|APT_LOCK_OPT|aptGet\(|aptQuietUpdate\(|aptInstallOrRefresh\(/;
 
 function isComment(line: string, file: string): boolean {
   const t = line.trim();

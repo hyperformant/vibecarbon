@@ -82,3 +82,59 @@ export const APT_LOCK_OPT = `-o DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}`
 export function aptGet(args) {
   return `apt-get ${APT_LOCK_OPT} ${args}`;
 }
+
+/**
+ * Where the boot refresh writes its hook-silencing apt config. Sorted after
+ * Ubuntu's own `99update-notifier` and friends so the `#clear` lines win.
+ */
+export const APT_QUIET_CONF = '/etc/apt/apt.conf.d/99zz-vibecarbon-boot';
+
+/**
+ * Index targets a server never reads: translations, command-not-found data and
+ * the desktop AppStream metadata. Measured on five providers, fetching these
+ * dominates a full `apt-get update`.
+ */
+export const APT_TRIMMED_INDEXES = [
+  '-o Acquire::Languages=none',
+  '-o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false',
+  '-o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false',
+  '-o Acquire::IndexTargets::deb::DEP-11-icons-small::DefaultEnabled=false',
+  '-o Acquire::IndexTargets::deb::DEP-11-icons-hidpi::DefaultEnabled=false',
+].join(' ');
+
+const APT_HOOKS_CLEARED = [
+  'APT::Update::Post-Invoke-Success',
+  'APT::Update::Post-Invoke',
+  'APT::Update::Post-Invoke-Stats',
+  'APT::Update::Pre-Invoke',
+];
+
+/**
+ * An `apt-get update` with Ubuntu's post-update hooks silenced for this one
+ * refresh (they cost more than the refresh on a fresh image). One line of POSIX
+ * sh, double quotes only so it embeds in a single-quoted YAML scalar. The conf
+ * file is removed whether or not apt succeeds, and the exit status is apt's,
+ * also under `set -e`.
+ *
+ * @param {string} [opts] - extra apt options placed after `update -qq`
+ * @param {string} [confPath] - where the temporary config is written
+ * @returns {string}
+ */
+export function aptQuietUpdate(opts = '', confPath = APT_QUIET_CONF) {
+  const clears = APT_HOOKS_CLEARED.map((k) => `"#clear ${k};"`).join(' ');
+  const update = aptGet(`update -qq${opts ? ` ${opts}` : ''}`);
+  return `printf "%s\\n" ${clears} > ${confPath}; ${update} && rc=0 || rc=$?; rm -f ${confPath}; [ "$rc" -eq 0 ]`;
+}
+
+/**
+ * Install packages, refreshing the lists only if the install fails (a package
+ * missing from the lists the image shipped with). The fallback update is plain,
+ * hooks left in place: it is rare, and silencing is for the trimmed refresh.
+ *
+ * @param {string} pkgs - space-separated package specs
+ * @returns {string}
+ */
+export function aptInstallOrRefresh(pkgs) {
+  const install = aptGet(`install -y ${pkgs}`);
+  return `${install} || { ${aptGet('update')} && ${install}; }`;
+}
