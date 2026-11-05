@@ -402,20 +402,20 @@ export class HetznerProvider extends BaseProvider {
   /**
    * Matches hetzner-compose.js's buildHetznerComposeProgram `image:
    * 'ubuntu-24.04'` literal exactly. Plain Ubuntu, like every provider: the
-   * pinned Docker comes from the cloud-init install (iac/docker-install.js),
+   * latest Docker comes from the cloud-init install (iac/docker-install.js),
    * never from a prebuilt Docker image.
    * @type {string}
    */
   static COMPOSE_IMAGE = 'ubuntu-24.04';
 
-  // Cloud-init installs the pinned Docker from Docker's apt repo at first
+  // Cloud-init installs the latest Docker from Docker's apt repo at first
   // boot, so Hetzner gets the same 600s ready budget as DigitalOcean, Linode,
   // Vultr and Scaleway (BaseProvider's 180s assumed a preinstalled Docker).
   static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
 
   /**
    * Returns the same user data hetzner-compose.js's Pulumi program hands its
-   * server: the shared compose cloud-init with the pinned Docker install
+   * server: the shared compose cloud-init with the Docker install
    * spliced in. Delegates to that module's `loadHetznerComposeUserData`
    * (dynamic import, like the other providers).
    * @returns {Promise<string>}

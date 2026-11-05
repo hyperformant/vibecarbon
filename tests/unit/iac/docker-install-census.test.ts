@@ -1,21 +1,21 @@
 /**
  * One Docker, everywhere. Every compose server (all five providers) boots plain
- * Ubuntu 24.04 and installs the SAME pinned Docker through
- * src/lib/iac/docker-install.js. Why: image delivery runs
- * `docker save --platform` on the server, which needs Docker 28+, and
- * Hetzner's prebuilt `docker-ce` app image shipped 27.5.1 while the other four
- * clouds floated on whatever Docker released last (2026-11-04 Hetzner e2e:
- * `unknown flag: --platform`).
+ * Ubuntu 24.04 and installs the latest Docker through
+ * src/lib/iac/docker-install.js, with no version pinned. Why one install: image
+ * delivery runs `docker save --platform` on the server, which needs Docker 28+,
+ * and Hetzner's prebuilt `docker-ce` app image shipped 27.5.1 (2026-11-04
+ * Hetzner e2e: `unknown flag: --platform`). Why no pin: a Docker security fix
+ * has to reach a new server without a CLI release.
  *
  * (a) no file spells its own Docker install; (b) each provider's rendered
- * compose user data installs exactly the pinned docker-ce, through the real
+ * compose user data installs every Docker package, unpinned, through the real
  * renderer; (c) no provider's COMPOSE_IMAGE is a prebuilt Docker image.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { DOCKER_VERSIONS } from '../../../src/lib/iac/docker-install.js';
+import { DOCKER_PACKAGES } from '../../../src/lib/iac/docker-install.js';
 import { loadDoComposeUserData } from '../../../src/lib/iac/programs/digitalocean-compose.js';
 import { loadHetznerComposeUserData } from '../../../src/lib/iac/programs/hetzner-compose.js';
 import { loadLinodeComposeUserData } from '../../../src/lib/iac/programs/linode-compose.js';
@@ -96,17 +96,13 @@ describe.each(Object.entries(RENDERERS))('(b) %s rendered compose user data', (_
     /apt-get\b.*\binstall\b.*\bdocker-ce/.test(String(s.at(-1))),
   );
 
-  it('installs exactly the pinned docker-ce, once', () => {
+  it('installs every Docker package once, with no version pinned', () => {
     expect(installs).toHaveLength(1);
-    const cmd = String(installs[0].at(-1));
-    expect(cmd).toContain(`docker-ce=${DOCKER_VERSIONS['docker-ce']} `);
-    for (const [name, version] of Object.entries(DOCKER_VERSIONS)) {
-      expect(cmd, name).toContain(` ${name}=${version}`);
-    }
-    // No package of the install is left floating.
-    for (const word of cmd.split(/\s+/).filter((w) => /^(docker|containerd)/.test(w))) {
-      expect(word).toContain('=');
-    }
+    const words = String(installs[0].at(-1)).split(/\s+/);
+    for (const name of DOCKER_PACKAGES) expect(words, name).toContain(name);
+    // A version here is a pin: a security fix would wait on a CLI release.
+    expect(words.filter((w) => /^(docker|containerd)\S*=/.test(w))).toEqual([]);
+    expect(text).not.toMatch(/apt-mark\s+hold|Pin-Priority/);
   });
 
   it("refreshes only Docker's source, with no package_update and ASCII under the 32 KiB cap", () => {
@@ -120,11 +116,6 @@ describe.each(Object.entries(RENDERERS))('(b) %s rendered compose user data', (_
     expect(updates[0]).not.toContain('apt.conf.d');
     expect(Buffer.byteLength(text)).toBeLessThan(32 * 1024);
     expect([...text].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
-  });
-
-  it('pins Docker 28 or newer, so `docker save --platform` exists', () => {
-    const major = Number(DOCKER_VERSIONS['docker-ce'].split(':')[1].split('.')[0]);
-    expect(major).toBeGreaterThanOrEqual(28);
   });
 
   it('runs the install before the shared file enables docker', () => {

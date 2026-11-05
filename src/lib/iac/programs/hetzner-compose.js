@@ -117,7 +117,7 @@ export function buildHetznerComposeProgram(config) {
       {
         name,
         serverType: config.serverType,
-        // Plain Ubuntu 24.04, like every other provider: the pinned Docker
+        // Plain Ubuntu 24.04, like every other provider: the latest Docker
         // is installed by the cloud-init user data (../docker-install.js), not
         // by Hetzner's prebuilt `docker-ce` app image, which ships an older
         // Docker (27.5.1) than the deploy's `docker save --platform` needs.

@@ -177,7 +177,7 @@ async function persistProvisionedServer(ctx) {
  * BaseProvider.CLOUD_INIT_READY_TIMEOUT_MS) — resolved the same way
  * provisionServer resolves its Provider class, via ctx.envConfig — since how
  * long cloud-init takes depends on what the provider's base image already
- * has installed. Every provider installs the pinned Docker INSIDE cloud-init
+ * has installed. Every provider installs the latest Docker INSIDE cloud-init
  * (src/lib/iac/docker-install.js), so they all get the same long budget.
  */
 async function setupServer(ctx) {

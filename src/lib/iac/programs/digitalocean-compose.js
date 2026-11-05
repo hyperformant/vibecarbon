@@ -5,8 +5,8 @@ import { serverResourceOptions } from '../create-timeout.js';
 import { spliceDockerInstall } from '../docker-install.js';
 
 // The Docker install spliced into the user data is the one shared by every
-// compose provider: see ../docker-install.js (pinned versions, why no prebuilt
-// Docker image).
+// compose provider: see ../docker-install.js (why the latest Docker, why no
+// prebuilt Docker image).
 
 // DO's user-data delivery pipeline double-encodes non-ASCII (RCA
 // 2026-07-25, droplet evidence: a rendered em-dash — UTF-8 `E2 80 94` —

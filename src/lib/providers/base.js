@@ -128,7 +128,7 @@ export class BaseProvider {
    * The budget covers image-boot-to-ready-marker, and that varies by
    * provider because of what each provider's base image already has
    * installed. No compose provider's image has Docker preinstalled: all
-   * five install the same pinned docker-ce from Docker's apt repo INSIDE
+   * five install the latest docker-ce from Docker's apt repo INSIDE
    * cloud-init (iac/docker-install.js), which takes 3-5 minutes, so every
    * compose provider overrides this static with 600s. The 180s here is only
    * the ceiling for a provider whose image would ship Docker already.

@@ -92,7 +92,7 @@ describe('HetznerProvider', () => {
       expect(HetznerProvider.S3_REGION_ENV).toBe('HETZNER_STORAGE_REGION');
     });
 
-    it('overrides CLOUD_INIT_READY_TIMEOUT_MS to 600s — like every compose provider, cloud-init installs the pinned docker-ce itself', () => {
+    it('overrides CLOUD_INIT_READY_TIMEOUT_MS to 600s — like every compose provider, cloud-init installs the latest docker-ce itself', () => {
       expect(HetznerProvider.CLOUD_INIT_READY_TIMEOUT_MS).toBe(600_000);
     });
 
@@ -110,13 +110,13 @@ describe('HetznerProvider', () => {
   });
 
   describe('getComposeUserData', () => {
-    it('returns the user data hetzner-compose.js hands its server: the shared cloud-init plus the pinned Docker install', async () => {
+    it('returns the user data hetzner-compose.js hands its server: the shared cloud-init plus the Docker install', async () => {
       const { loadHetznerComposeUserData } = await import(
         '../../../src/lib/iac/programs/hetzner-compose.js'
       );
       const userData = await HetznerProvider.getComposeUserData();
       expect(userData).toBe(loadHetznerComposeUserData());
-      expect(userData).toContain('install -y docker-ce=');
+      expect(userData).toContain('install -y docker-ce ');
       expect(userData).toContain('runcmd:');
     });
   });
