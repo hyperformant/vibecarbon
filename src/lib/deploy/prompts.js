@@ -741,6 +741,29 @@ export function regionPromptChoices(Provider, regions, roles, { ha = false } = {
   return { options, initialValue: cheapestDefaultRegion(Provider, roles, { ha }) };
 }
 
+/**
+ * Where this deployment's storage goes, and the line to print when that is
+ * not the compute region. Anything pinned wins and says nothing: the operator
+ * chose it, or the bucket already lives there, and the note would name the
+ * wrong city.
+ *
+ * @param {object} opts
+ * @param {{ s3Region?: string }} opts.args
+ * @param {{ provider?: string, s3?: { region?: string } }} opts.envConfig
+ * @param {object} opts.Provider
+ * @param {string} opts.region - compute region
+ * @param {string} [opts.apiToken]
+ * @returns {Promise<{ s3Region: string, note: string|null }>}
+ */
+export async function resolveStoragePlacement({ args, envConfig, Provider, region, apiToken }) {
+  const pinned =
+    args.s3Region || readOperatorVar(Provider.S3_REGION_ENV).value || envConfig.s3?.region;
+  if (pinned) return { s3Region: pinned, note: null };
+  const s3Region = await resolveS3RegionFor(providerIdFor(envConfig), region, { apiToken });
+  const S3Class = await Provider.getObjectStorageProviderClass();
+  return { s3Region, note: S3Class.storageRegionNote?.(region) ?? null };
+}
+
 export async function gatherDeploymentConfig(args) {
   console.clear();
   printBanner();
@@ -1207,12 +1230,11 @@ export async function gatherDeploymentConfig(args) {
   // beforehand froze the compute-region default and produced an opaque
   // auth failure against the wrong cluster. Account-wide-key providers
   // (Hetzner/DO/Linode) are indifferent to this order.
-  const resolveStorageRegion = async () =>
-    args.s3Region ||
-    readOperatorVar(Provider.S3_REGION_ENV).value ||
-    envConfig.s3?.region ||
-    (await resolveS3RegionFor(providerId, region));
-  let s3Region = await resolveStorageRegion();
+  const resolveStorageRegion = () =>
+    resolveStoragePlacement({ args, envConfig, Provider, region, apiToken });
+  const placement = await resolveStorageRegion();
+  let s3Region = placement.s3Region;
+  if (placement.note) p.log.info(placement.note);
   let s3Provider = await getObjectStorageProvider(providerId, s3AccessKey, s3SecretKey, s3Region);
 
   // Verify the keys NOW, the way the API token was just verified. Wrong keys
@@ -1243,7 +1265,7 @@ export async function gatherDeploymentConfig(args) {
     s3SecretKey = again.secretKey;
     s3CredentialSource = again.source ?? 'what you pasted';
     saveS3Credentials = again.save ?? null;
-    s3Region = await resolveStorageRegion();
+    s3Region = (await resolveStorageRegion()).s3Region;
     s3Provider = await getObjectStorageProvider(providerId, s3AccessKey, s3SecretKey, s3Region);
   }
 

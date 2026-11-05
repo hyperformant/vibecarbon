@@ -15,16 +15,18 @@
  * ACCOUNT-ASSIGNED CLUSTERS (live-verified 2026-08-08 against a real
  * account's `GET /v4/object-storage/endpoints`): Linode assigns each
  * account ONE cluster per region, and it is not always the `-1` cluster —
- * the verification account got `us-iad-10`, `us-ord-10`, and `us-lax-4`
- * where the docs' generic table says `-1`. The maps below therefore carry
- * every OBSERVED cluster slug alongside the docs defaults; `resolveS3Region`
- * still maps compute regions to the docs-default cluster, and an operator
- * whose account is assigned a variant pins it via the
- * `LINODE_STORAGE_REGION` env override (S3_REGION_ENV — honored by
- * the deploy-time resolution in deploy/prompts.js). Durable follow-up
- * (recorded in the expansion plan): resolve the assigned cluster
- * dynamically from the endpoints listing at deploy time instead of asking
- * the operator to know it.
+ * the verification account got `us-iad-10` where the docs' generic table
+ * says `-1`. A deploy therefore asks the account
+ * (`resolveAccountS3Region`), and `LINODE_STORAGE_REGION` (S3_REGION_ENV)
+ * stays as an operator override.
+ *
+ * E0 AND E1 ONLY: E2 and E3 answer PutBucketCors with 501, so a browser cannot
+ * upload to them, and presigned uploads are how the app stores files. E0 and
+ * E1 took the rule in all nine regions that have them, with 30 of 30 preflights
+ * and a presigned PUT and GET each (2026-11-05). A compute region without one
+ * stores in the nearest region that has one (COMPUTE_TO_S3), and the deploy
+ * says so (`storageRegionNote`).
+ *
  * Keys must be S3-client region strings AND embed themselves in their
  * endpoint hostname (s3-provider-contract pins both).
  *
@@ -41,6 +43,40 @@ import { appKeyLabel, appKeyMintError, readJson } from './app-key-api.js';
 import { deriveStateBucketName, S3CompatibleProvider, sanitizeBucketName } from './s3-base.js';
 
 const API_BASE = 'https://api.linode.com/v4';
+
+/** The endpoint types that accept the CORS rule browser uploads need. */
+const CORS_ENDPOINT_TYPES = new Set(['E0', 'E1']);
+
+/**
+ * A listing's endpoint as a URL. The API gives a bare host, and none at all for
+ * an endpoint not yet provisioned.
+ * @param {{ s3_endpoint: string|null }} entry
+ * @returns {URL|null}
+ */
+function endpointUrl(entry) {
+  return entry.s3_endpoint ? new URL(`https://${entry.s3_endpoint}`) : null;
+}
+
+/**
+ * Every Object Storage endpoint the account lists, across pages.
+ * @param {string} apiToken
+ * @param {(status: number) => Error} refused - the error for a failed listing
+ * @returns {Promise<Array<{ region: string, endpoint_type: string, s3_endpoint: string|null }>>}
+ */
+async function listAccountEndpoints(apiToken, refused) {
+  const entries = [];
+  for (let page = 1, pages = 1; page <= pages; page++) {
+    const listed = await fetchWithRetry(
+      `${API_BASE}/object-storage/endpoints?page_size=500&page=${page}`,
+      { headers: { Authorization: `Bearer ${apiToken}` } },
+    );
+    if (!listed.ok) throw refused(listed.status);
+    const body = await readJson(listed);
+    pages = body.pages ?? 1;
+    entries.push(...(body.data ?? []));
+  }
+  return entries;
+}
 
 export class LinodeObjectStorageProvider extends S3CompatibleProvider {
   /** No settle window has been observed on a new bucket here. */
@@ -69,19 +105,10 @@ export class LinodeObjectStorageProvider extends S3CompatibleProvider {
   static async mintAppKey(bucket, { endpoint, apiToken }) {
     const headers = { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' };
     const host = new URL(endpoint).host;
-    let entry;
-    for (let page = 1, pages = 1; page <= pages && !entry; page++) {
-      const listed = await fetchWithRetry(
-        `${API_BASE}/object-storage/endpoints?page_size=500&page=${page}`,
-        { headers },
-      );
-      if (!listed.ok) throw appKeyMintError('Linode', listed.status, LINODE_SCOPE);
-      const body = await readJson(listed);
-      pages = body.pages ?? 1;
-      entry = (body.data ?? []).find(
-        (e) => e.s3_endpoint && new URL(`https://${e.s3_endpoint}`).host === host,
-      );
-    }
+    const endpoints = await listAccountEndpoints(apiToken, (status) =>
+      appKeyMintError('Linode', status, LINODE_SCOPE),
+    );
+    const entry = endpoints.find((e) => endpointUrl(e)?.host === host);
     if (!entry?.region) {
       throw new Error(
         `Linode lists no object storage region for ${host}, so no app storage key can be minted for ${bucket}`,
@@ -195,24 +222,24 @@ export class LinodeObjectStorageProvider extends S3CompatibleProvider {
     'br-gru-1': 'Sao Paulo, Brazil',
   };
 
-  // Compute region slug → Object Storage endpoint slug. Every
-  // LinodeProvider.REGIONS key appears here (the compute region list is
-  // pinned to Object-Storage-carrying regions, same doctrine as DO's B2).
+  // Compute region slug → the documented cluster of its Object Storage region:
+  // its own where that region has E0 or E1, else the nearest that does. Every
+  // LinodeProvider.REGIONS key appears here.
   static COMPUTE_TO_S3 = {
     'us-iad': 'us-iad-1',
-    'us-iad-2': 'us-iad-18',
-    'us-ord': 'us-ord-1',
+    'us-iad-2': 'us-iad-1',
+    'us-ord': 'us-iad-1',
     'us-sea': 'us-sea-1',
-    'us-lax': 'us-lax-1',
+    'us-lax': 'us-sea-1',
     'us-mia': 'us-mia-1',
     'us-east': 'us-east-1',
     'us-southeast': 'us-southeast-1',
     'fr-par': 'fr-par-1',
-    'gb-lon': 'gb-lon-1',
-    'de-fra-2': 'de-fra-1',
+    'gb-lon': 'fr-par-1',
+    'de-fra-2': 'fr-par-1',
     'in-maa': 'in-maa-1',
-    'sg-sin-2': 'sg-sin-1',
-    'jp-tyo-3': 'jp-tyo-1',
+    'sg-sin-2': 'id-cgk-1',
+    'jp-tyo-3': 'id-cgk-1',
     'id-cgk': 'id-cgk-1',
     'br-gru': 'br-gru-1',
   };
@@ -231,6 +258,55 @@ export class LinodeObjectStorageProvider extends S3CompatibleProvider {
     if (LinodeObjectStorageProvider.ENDPOINTS[deployRegion]) return deployRegion;
     return 'us-iad-1';
   }
+
+  /**
+   * The cluster this account holds for a deployment region's storage, from
+   * the account's own endpoint list. An E2 or E3 listing never counts: a
+   * bucket there could not take the rule browser uploads need.
+   * @param {string} deployRegion
+   * @param {{ apiToken: string }} opts
+   * @returns {Promise<string>} the cluster slug, e.g. `us-iad-10`
+   */
+  static async resolveAccountS3Region(deployRegion, { apiToken }) {
+    const storage = regionOfCluster(LinodeObjectStorageProvider.resolveS3Region(deployRegion));
+    const endpoints = await listAccountEndpoints(
+      apiToken,
+      (status) =>
+        new Error(
+          `Linode refused to list Object Storage endpoints (HTTP ${status}). The API token needs ${LINODE_SCOPE}.`,
+        ),
+    );
+    const entry = endpoints.find(
+      (e) => e.region === storage && e.s3_endpoint && CORS_ENDPOINT_TYPES.has(e.endpoint_type),
+    );
+    if (!entry) {
+      throw new Error(
+        `This Linode account has no E0 or E1 Object Storage in ${storage}, and browser uploads need one. Set LINODE_STORAGE_REGION to a cluster that has it.`,
+      );
+    }
+    const url = endpointUrl(entry);
+    const cluster = url.hostname.split('.')[0];
+    // Clusters are assigned per account, so this may be one no map here holds.
+    LinodeObjectStorageProvider.ENDPOINTS[cluster] ??= url.origin;
+    return cluster;
+  }
+
+  /**
+   * One line for a deploy whose storage is not in its compute region.
+   * @param {string} deployRegion
+   * @returns {string|null} null when storage is in the compute region
+   */
+  static storageRegionNote(deployRegion) {
+    const cluster = LinodeObjectStorageProvider.resolveS3Region(deployRegion);
+    if (regionOfCluster(cluster) === deployRegion) return null;
+    const where = LinodeObjectStorageProvider.REGIONS[cluster];
+    return `files and backups live in ${where}, the nearest Linode storage that takes browser uploads`;
+  }
+}
+
+/** A cluster slug's Linode region: `us-iad-10` is in `us-iad`. */
+function regionOfCluster(cluster) {
+  return cluster.replace(/-\d+$/, '');
 }
 
 /** The scope a Linode token needs to mint and revoke app keys. */

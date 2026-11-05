@@ -239,11 +239,12 @@ export class LinodeProvider extends BaseProvider {
   // are not yet built or declared.
   static SUPPORTED_TIERS = ['compose', 'compose-ha'];
 
-  // Instance regions WITH in-region Object Storage only (same doctrine as
-  // DigitalOceanProvider.REGIONS: a region that can host an instance but not
-  // a bucket would force cross-region backup traffic as a silent default).
-  // All 16 verified 2026-08-07 via GET /v4/regions capabilities — every one
-  // also carries the Metadata capability cloud-init user-data requires.
+  // Instance regions with Object Storage (same doctrine as
+  // DigitalOceanProvider.REGIONS). All 16 verified 2026-08-07 via GET
+  // /v4/regions capabilities — every one also carries the Metadata capability
+  // cloud-init user-data requires. Seven hold only E3 storage, which cannot
+  // take browser uploads: their files go to the nearest region with E0 or E1,
+  // and the deploy says so (linode-objectstorage.js COMPUTE_TO_S3).
   // Labels are the API's own `label` field values.
   static REGIONS = {
     'us-iad': 'Washington, DC',

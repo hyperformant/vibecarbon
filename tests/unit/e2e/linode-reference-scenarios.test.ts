@@ -38,11 +38,8 @@ describe('providers.linode (Linode opt-in scenarios)', () => {
       'LINODE_API_TOKEN',
       'LINODE_ACCESS_KEY',
       'LINODE_SECRET_KEY',
-      // Required since 2026-08-13, not an override: Linode assigns each
-      // ACCOUNT one storage cluster per region and it is not always the
-      // documented `-1` one. Unset, buckets are created against the wrong
-      // cluster and the failure reads `owned by another account`.
-      'LINODE_STORAGE_REGION',
+      // LINODE_STORAGE_REGION stays out: a deploy reads the account's cluster
+      // from Linode's endpoint list, and the e2e must run that path.
     ]);
   });
 

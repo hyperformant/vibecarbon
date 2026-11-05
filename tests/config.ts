@@ -352,20 +352,10 @@ export const testConfig = {
       // namespace.test.ts).
       linode: {
         displayName: 'Linode',
-        // STORAGE_REGION is required, not an override — the same reasoning as
-        // Vultr's below, reached by a different route. Linode assigns each
-        // ACCOUNT one object-storage cluster per region and it is not always
-        // the documented `-1` one (this account's us-iad cluster is
-        // `us-iad-10`). Unset, bucket creation goes to the wrong cluster and
-        // fails as `exists but is owned by another account` — which reads as a
-        // name collision and is really a wrong endpoint. Listing it here is
-        // what makes preflight demand it instead of the deploy discovering it.
-        requiredEnv: [
-          'LINODE_API_TOKEN',
-          'LINODE_ACCESS_KEY',
-          'LINODE_SECRET_KEY',
-          'LINODE_STORAGE_REGION',
-        ],
+        // LINODE_STORAGE_REGION is an override, not a requirement: a deploy
+        // reads the account's own cluster from Linode's endpoint list, which
+        // is what a customer gets. Pinning it here would hide that path.
+        requiredEnv: ['LINODE_API_TOKEN', 'LINODE_ACCESS_KEY', 'LINODE_SECRET_KEY'],
         // Native Linode DNS (linode.appcarbon.dev), same reasoning as the DO
         // block above: LINODE_API_TOKEN already covers it, so l1 needs no
         // Cloudflare credential and the Linode DNS path gets real coverage.

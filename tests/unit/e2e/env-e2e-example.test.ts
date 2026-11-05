@@ -59,8 +59,8 @@ describe('tests/.env.e2e.example is value-free', () => {
         'LINODE_API_TOKEN',
         'LINODE_ACCESS_KEY',
         'LINODE_SECRET_KEY',
-        // Cluster overrides: Linode's is optional (accounts on a non-default
-        // cluster pin it); Vultr's is effectively REQUIRED (keys are minted
+        // Cluster overrides: Linode's is optional (a deploy reads the
+        // account's own cluster); Vultr's is effectively REQUIRED (keys are minted
         // per subscription and only work against its cluster).
         'LINODE_STORAGE_REGION',
         'VULTR_API_TOKEN',

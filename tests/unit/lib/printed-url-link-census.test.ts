@@ -67,7 +67,7 @@ const ALLOW: { why: string; sites: string[] }[] = [
       'src/lib/telemetry/update-check.js base https://vibecarbon.com',
       'src/lib/ci-setup.js res https://ghcr.io/token?scope=repository:{*}/{*}:pull',
       'src/lib/ci-setup.js url https://ghcr.io/v2/{*}/{*}/manifests/{*}',
-      'src/lib/providers/linode-objectstorage.js mintAppKey https://{*}',
+      'src/lib/providers/linode-objectstorage.js endpointUrl https://{*}',
       'src/add.js GITHUB_RAW_BASE https://raw.githubusercontent.com/{*}/{*}',
       'src/lib/kubeconfig.js operatorKubeconfigText https://{*}:6443',
       'src/lib/deploy/compose/index.js registryHost https://index.docker.io/v1/',

@@ -276,6 +276,8 @@ export function envCorsOrigins(domain) {
  * converge on re-run. One GET, and a PUT only when the rule differs, so a
  * warm redeploy writes nothing. A failed GET just means the rule is unknown,
  * so it PUTs. A failure only costs browser uploads, so it warns and returns.
+ * Storage that does not implement CORS (Linode E2 and E3 answer 501) cannot be
+ * fixed by a re-run or a console setting, so that warning says what can.
  *
  * @param {object} opts
  * @param {() => Promise<object>} opts.createProvider - builds a provider at the
@@ -298,6 +300,12 @@ export async function applyAppBucketCors({ createProvider, bucket, domain, log }
     if (existing && sameOrigins(existing, origins)) return;
     await provider.setBucketCors(bucket, origins);
   } catch (corsErr) {
+    if (corsErr?.name === 'NotImplemented' || corsErr?.$metadata?.httpStatusCode === 501) {
+      log.warn(
+        `Browser uploads will not work here: this storage does not support CORS, so ${bucket} cannot allow your origin. Use a storage region that does, then deploy again.`,
+      );
+      return;
+    }
     log.warn(
       `Browser uploads will fail until the bucket allows your origin (${corsErr.message}). Re-run \`vibecarbon deploy\` to apply it again, or set CORS on ${bucket} in your provider console.`,
     );
