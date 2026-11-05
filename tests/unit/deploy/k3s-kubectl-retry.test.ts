@@ -309,6 +309,18 @@ describe('applyKustomization', () => {
     expect(applied.writtenStdin.join('')).toBe(rendered);
   });
 
+  it('applies what `render` makes of the manifests', async () => {
+    const applied = ok('deployment.apps/cluster-autoscaler created');
+    spawnMock.mockReturnValueOnce(ok('image: {{X}}\n')).mockReturnValueOnce(applied);
+    await applyKustomization('/tmp/rendered-base', {
+      env,
+      master,
+      description: 'base',
+      render: (manifests: string) => manifests.replace('{{X}}', 'real'),
+    });
+    expect(applied.writtenStdin.join('')).toBe('image: real\n');
+  });
+
   it('retries a blip on the master the same way as one seen from here', async () => {
     spawnMock
       .mockReturnValueOnce(ok(rendered))

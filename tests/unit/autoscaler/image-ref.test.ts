@@ -195,7 +195,7 @@ describe('every cluster-autoscaler reference site is pinned to the constant', ()
     expect(deployment).toContain(`image: ${clusterAutoscalerImageRef()}`);
   });
 
-  it('applyK3sManifests re-pins BOTH container images in one `set image` call', () => {
+  it('applyK3sManifests renders the sidecar image and re-pins the autoscaler image', () => {
     // Belt-and-braces for projects generated before the mirror landed: their
     // checked-in copy of the manifest still carries the registry.k8s.io ref,
     // and `vibecarbon deploy` applies from the PROJECT dir, not from carbon/.
@@ -204,8 +204,10 @@ describe('every cluster-autoscaler reference site is pinned to the constant', ()
     const k3s = read('src/lib/deploy/k8s/k3s.js');
     const setImage = k3s.match(/'set',\s*\n\s*'image',[\s\S]{0,400}?\]/)?.[0];
     expect(setImage, 'kubectl set image call not found in k3s.js').toBeDefined();
-    expect(setImage).toMatch(/`carbon-autoscaler=\$\{carbonAutoscalerImageRef\(\)\}`/);
     expect(setImage).toMatch(/`cluster-autoscaler=\$\{clusterAutoscalerImageRef\(\)\}`/);
+    expect(k3s).toContain(
+      "manifests.replaceAll('{{CARBON_AUTOSCALER_IMAGE}}', carbonAutoscalerImageRef())",
+    );
     expect(k3s).toMatch(
       /import \{[^}]*clusterAutoscalerImageRef[^}]*\} from '\.\.\/\.\.\/images\.js'/,
     );

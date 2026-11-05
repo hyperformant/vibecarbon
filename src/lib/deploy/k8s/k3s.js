@@ -666,10 +666,10 @@ export async function runKubectlWithRetry(
  * what they save.
  *
  * @param {string} dir  kustomization directory on this machine
- * @param {{env: NodeJS.ProcessEnv, master: {ip: string, sshKeyPath: string}, description: string, signal?: AbortSignal}} options
+ * @param {{env: NodeJS.ProcessEnv, master: {ip: string, sshKeyPath: string}, description: string, render?: (manifests: string) => string, signal?: AbortSignal}} options
  * @returns {Promise<string>} kubectl's stdout
  */
-export async function applyKustomization(dir, { env, master, description, signal }) {
+export async function applyKustomization(dir, { env, master, description, render, signal }) {
   const manifests = await runKubectlWithRetry(['kustomize', dir], {
     env,
     captureStdout: true,
@@ -678,7 +678,7 @@ export async function applyKustomization(dir, { env, master, description, signal
   });
   return runKubectlWithRetry(['apply', '-f', '-'], {
     on: master,
-    input: manifests,
+    input: render ? render(manifests) : manifests,
     description,
     ...(signal && { signal }),
   });
@@ -3642,25 +3642,22 @@ export async function applyK3sManifests({
         master,
         signal: caStop.signal,
         description: 'applyK3sManifests: apply cluster-autoscaler',
+        // The sidecar's image goes in here, not after: a client-side apply pushes
+        // every field the manifest names, so an image patched in afterwards is
+        // reset by the next deploy, and on `strategy: Recreate` that killed a
+        // healthy autoscaler to roll out a pod that could not start.
+        render: (manifests) =>
+          manifests.replaceAll('{{CARBON_AUTOSCALER_IMAGE}}', carbonAutoscalerImageRef()),
       });
-      // 5a''. Patch BOTH container images in one call.
-      //
-      //       `carbon-autoscaler`: deployment.yaml ships the
-      //       `{{CARBON_AUTOSCALER_IMAGE}}` placeholder (kustomize has no
-      //       built-in var-substitution for a container image string), so
-      //       resolve it here the same way the domain/SITE_URL placeholders
-      //       below are patched at deploy time.
-      //
-      //       `cluster-autoscaler`: the manifest already carries the mirrored
-      //       ghcr ref as a literal, so this is belt-and-braces — but load-bearing
-      //       belt-and-braces. the apply above reads the PROJECT's checked-in
-      //       copy of this manifest, and a project generated before the mirror
-      //       landed still pins registry.k8s.io there, i.e. still walks into the
-      //       403 that cost a deploy on 2026-07-31 (src/lib/images.js). Re-pinning
-      //       here makes images.js authoritative at deploy time no matter how old
-      //       the project's k8s/ tree is.
-      //
-      //       Both refs come from src/lib/images.js, the single source of truth.
+      // 5a''. The manifest already carries the mirrored ghcr ref as a literal, so
+      //       this is belt-and-braces, but load-bearing belt-and-braces: the apply
+      //       above reads the PROJECT's checked-in copy of this manifest, and a
+      //       project generated before the mirror landed still pins
+      //       registry.k8s.io there, i.e. still walks into the 403 that cost a
+      //       deploy on 2026-07-31 (src/lib/images.js). Re-pinning here makes
+      //       images.js authoritative at deploy time no matter how old the
+      //       project's k8s/ tree is. On a current project it changes nothing, so
+      //       nothing rolls.
       await runKubectlWithRetry(
         [
           '-n',
@@ -3668,14 +3665,12 @@ export async function applyK3sManifests({
           'set',
           'image',
           'deployment/cluster-autoscaler',
-          `carbon-autoscaler=${carbonAutoscalerImageRef()}`,
           `cluster-autoscaler=${clusterAutoscalerImageRef()}`,
         ],
         {
           env,
           signal: caStop.signal,
-          description:
-            'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
+          description: 'applyK3sManifests: kubectl set image deployment/cluster-autoscaler',
         },
       );
       if (pilotStandby) {

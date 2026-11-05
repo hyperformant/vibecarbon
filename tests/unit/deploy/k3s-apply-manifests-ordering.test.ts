@@ -21,7 +21,7 @@ import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.
  *   #2 — the carbon-autoscaler config Secret is applied via stdin as PLAIN
  *        JSON (Task 8: retired the old base64-encoded legacy CA config
  *        Secret + the `--nodes`/HCLOUD_* argv-and-env patch entirely), the
- *        sidecar image placeholder is patched via `set image` AFTER
+ *        autoscaler image is re-pinned via `set image` AFTER
  *        `apply of cluster-autoscaler`, and exactly one rollout status wait
  *        gates the roll (no `--nodes=` patch, no HCLOUD_* env upsert).
  *
@@ -258,6 +258,13 @@ function installSpawnMock() {
     const full = [cmd, ...argv];
     if (cmd === 'kubectl' && argv[0] === 'kustomize') {
       const target = String(argv[1]);
+      if (target.endsWith('/cluster-autoscaler')) {
+        return fakeChild({
+          stdout:
+            "image: ghcr.io/hyperformant/cluster-autoscaler:v1\nimage: '{{CARBON_AUTOSCALER_IMAGE}}'\n",
+          argv: full,
+        }) as unknown as ReturnType<typeof spawn>;
+      }
       if (target.includes('observability')) observabilityApplied = true;
       const registry = join(target, 'registry', 'local-registry.yaml');
       if (/k8s-base/.test(target) && existsSync(registry)) {
@@ -1061,7 +1068,20 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     expect(stdinCalls.some((c) => c.data.includes('cluster-config.json'))).toBe(false);
   });
 
-  it('#2 patches the sidecar image via `set image` AFTER `apply of cluster-autoscaler`, with no --nodes/HCLOUD_* patch anywhere', async () => {
+  it('applies the autoscaler with its real image, so the first pod is the pod', async () => {
+    // The placeholder used to reach the cluster and `set image` fixed it after.
+    // A pod created from it can never start, and because a client-side apply
+    // pushes every field the manifest names, each deploy that ran the apply put
+    // the placeholder back: on `strategy: Recreate` that killed a healthy
+    // autoscaler to roll out a pod that could not run.
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const applied = stdinCalls.find((c) => c.data.includes('hyperformant/cluster-autoscaler:v1'));
+    expect(applied?.data).toContain("image: 'ghcr.io/hyperformant/carbon-autoscaler:");
+    expect(applied?.data).not.toContain('{{');
+  });
+
+  it('#2 re-pins the autoscaler image via `set image` AFTER `apply of cluster-autoscaler`, with no --nodes/HCLOUD_* patch anywhere', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
 
@@ -1082,17 +1102,10 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     );
     expect(applyKIdx).toBeGreaterThanOrEqual(0);
     expect(setImageIdx).toBeGreaterThan(applyKIdx);
-    expect(
-      cmdCalls[setImageIdx].some((s) =>
-        s.startsWith('carbon-autoscaler=ghcr.io/hyperformant/carbon-autoscaler:'),
-      ),
-    ).toBe(true);
-    // BOTH containers are re-pinned in this ONE call. The upstream CA image
-    // moved to a ghcr mirror after registry.k8s.io 403'd the pull on Hetzner
-    // (2026-07-31, src/lib/images.js); patching it here — not only in the
-    // manifest — is what makes images.js authoritative for projects whose
-    // checked-in k8s/ tree predates the mirror. Two containers, one roll:
-    // `strategy: Recreate` means each extra patch would cost a full cycle.
+    // The upstream CA image moved to a ghcr mirror after registry.k8s.io 403'd
+    // the pull on Hetzner (2026-07-31, src/lib/images.js); patching it here, not
+    // only in the manifest, is what makes images.js authoritative for projects
+    // whose checked-in k8s/ tree predates the mirror.
     expect(
       cmdCalls[setImageIdx].some((s) =>
         s.startsWith('cluster-autoscaler=ghcr.io/hyperformant/cluster-autoscaler:'),
