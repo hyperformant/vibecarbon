@@ -310,13 +310,22 @@ export function buildReplicationOverlay(selfWgIp) {
  * replication settings are on the db command line (carbon/docker-compose.yml),
  * so the primary that is serving traffic keeps serving through a deploy.
  */
-export async function configurePrimaryReplication(primaryIp, standbyIp, sshKeyPath, projectName) {
+export async function configurePrimaryReplication(
+  primaryIp,
+  standbyIp,
+  sshKeyPath,
+  projectName,
+  { tunnel } = {},
+) {
   // Establish the WireGuard replication transport. Keys are generated on-node
   // (private key never leaves the node); only the derived public keys transit
   // the orchestrator. Endpoints/SSH targets are the two VPS PUBLIC IPs. This
   // must run BEFORE starting the socat relay, since the relay binds the tunnel
   // IP (10.99.0.x) which only exists once `wg0` is up.
-  await exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPath });
+  // A deploy that started the tunnel early passes its promise: await it, so a
+  // failure surfaces here with its own message. Without one (restore, scale,
+  // every other caller) the tunnel runs here, as it always did.
+  await (tunnel ?? exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPath }));
 
   await ensurePrimaryReplicationAccess(primaryIp, sshKeyPath, projectName);
 

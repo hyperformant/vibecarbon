@@ -784,6 +784,24 @@ async function haSetupServerFiles(ctx) {
     );
   }
   await perfAsync('deploy.ha.compose.setupFan', () => Promise.all(setupTasks));
+
+  // The WireGuard ports are open on both nodes, so the tunnel can come up now,
+  // in the background, while the pulls and the stack start run. It is apt work
+  // on both nodes (48 s measured), serial at the end of the deploy otherwise.
+  // A reconverge keeps its own explicit call (reconvergeReplication). The no-op
+  // catch only stops an unhandled rejection while nothing awaits the promise;
+  // haConfigureReplication awaits the original, so the failure surfaces there
+  // with its own message.
+  if (!ctx.reconverge) {
+    ctx.earlyTunnel = perfAsync('deploy.ha.replication.transportEarly', () =>
+      exchangeAndBringUpTunnel({
+        primaryIp: primary.ip,
+        standbyIp: standby.ip,
+        sshKeyPath,
+      }),
+    );
+    ctx.earlyTunnel.catch(() => {});
+  }
 }
 
 /**
@@ -1162,7 +1180,10 @@ async function haConfigureReplication(ctx) {
   const { primary, standby, sshKeyPath } = ctx;
   await perfAsync('deploy.ha.replication.setup', async () => {
     ctx.onProgress('Configuring PostgreSQL replication on primary...');
-    await configurePrimaryReplication(primary.ip, standby.ip, sshKeyPath, projectName);
+    // Taken once: a re-run of this step starts its own tunnel, not a spent promise.
+    const tunnel = ctx.earlyTunnel;
+    ctx.earlyTunnel = undefined;
+    await configurePrimaryReplication(primary.ip, standby.ip, sshKeyPath, projectName, { tunnel });
 
     // A standby already streaming from this primary is left alone: the reseed
     // wipes its PGDATA and downtime-reseeds it. Same probe as the k8s tier.

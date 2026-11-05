@@ -235,11 +235,15 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
     throw new Error('exchangeAndBringUpTunnel requires primaryIp, standbyIp, and sshKeyPath');
   }
 
-  // 1. Ensure wireguard-tools is installed and a private key exists on each
-  //    node. Idempotent: the install is skipped when `wg` is already present,
-  //    and the key is generated only if absent (so a re-deploy keeps the same
-  //    keypair and does not churn the tunnel).
-  for (const ip of [primaryIp, standbyIp]) {
+  // 1+2. On each node: ensure wireguard-tools is installed and a private key
+  //    exists, then read back ONLY the public key (the private key stays
+  //    on-node). Idempotent: the install is skipped when `wg` is already
+  //    present, and the key is generated only if absent (so a re-deploy keeps
+  //    the same keypair and does not churn the tunnel). The nodes share
+  //    nothing, so both run at once: the apt work is the slow part. Settled,
+  //    not raced, so both finish before a failure is thrown, and the primary's
+  //    error wins when both fail (the order the nodes used to run in).
+  const prepareNode = async (ip) => {
     // `set -e` is load-bearing. This ran as a bare `||` chain, so a failed
     // install did NOT stop the script -- it fell through to `wg genkey` and
     // the step died reporting `wg: command not found`, burying the real
@@ -275,15 +279,12 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
       ],
       { timeout: (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000 },
     );
-  }
-
-  // 2. Read back ONLY the public key from each node (private key stays on-node).
-  const primaryPubKey = (
-    await sshRun(primaryIp, sshKeyPath, ['bash', '-c', `wg pubkey < ${WG_KEY_PATH}`])
-  ).trim();
-  const standbyPubKey = (
-    await sshRun(standbyIp, sshKeyPath, ['bash', '-c', `wg pubkey < ${WG_KEY_PATH}`])
-  ).trim();
+    return (await sshRun(ip, sshKeyPath, ['bash', '-c', `wg pubkey < ${WG_KEY_PATH}`])).trim();
+  };
+  const prepared = await Promise.allSettled([prepareNode(primaryIp), prepareNode(standbyIp)]);
+  const failed = prepared.find((r) => r.status === 'rejected');
+  if (failed) throw failed.reason;
+  const [primaryPubKey, standbyPubKey] = prepared.map((r) => r.value);
 
   // 3. Cross-configure + bring up each node with the PEER's pubkey + endpoint.
   // Keep the per-node params so the SAME values feed both the live bring-up and

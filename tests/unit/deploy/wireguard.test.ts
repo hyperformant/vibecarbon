@@ -190,6 +190,51 @@ describe('exchangeAndBringUpTunnel', () => {
     vi.restoreAllMocks();
   });
 
+  it('installs and reads keys on both nodes at once', async () => {
+    const started: string[] = [];
+    const finished: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    vi.spyOn(ssh, 'sshRun').mockImplementation(async (ip, _k, cmd) => {
+      const c = String(cmd);
+      if (c.includes('wireguard-tools')) {
+        started.push(String(ip));
+        await gate;
+        finished.push(String(ip));
+        return '';
+      }
+      return c.includes('wg pubkey') ? 'FWxNbddwB9ap1+Nfhv++GcS2CtEh/5CNPiCKF9UIkS4=' : '';
+    });
+    const run = exchangeAndBringUpTunnel({
+      primaryIp: '167.233.150.173',
+      standbyIp: '157.180.115.19',
+      sshKeyPath: '/k',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    // Both installs are in flight before either has finished.
+    expect(started.sort()).toEqual(['157.180.115.19', '167.233.150.173']);
+    expect(finished).toEqual([]);
+    release();
+    await run;
+    vi.restoreAllMocks();
+  });
+
+  it('a failing node surfaces its own error; the primary wins when both fail', async () => {
+    vi.spyOn(ssh, 'sshRun').mockImplementation(async (ip, _k, cmd) => {
+      if (String(cmd).includes('wireguard-tools')) {
+        await new Promise((r) => setTimeout(r, ip === '1.1.1.1' ? 20 : 1));
+        throw new Error(`apt failed on ${ip}`);
+      }
+      return '';
+    });
+    await expect(
+      exchangeAndBringUpTunnel({ primaryIp: '1.1.1.1', standbyIp: '2.2.2.2', sshKeyPath: '/k' }),
+    ).rejects.toThrow('apt failed on 1.1.1.1');
+    vi.restoreAllMocks();
+  });
+
   it('installs the reboot-persistence systemd unit on BOTH nodes (item I-1)', async () => {
     const perNode: Record<string, string[]> = {};
     vi.spyOn(ssh, 'sshRun').mockImplementation(async (ip, _k, cmd) => {
