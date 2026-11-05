@@ -94,7 +94,7 @@ const SHARED_CAUSE = {
  * declaration is a bug the census catches; here it fails loudly.
  * @param {string} provider
  */
-async function scopingOf(provider) {
+export async function scopingOf(provider) {
   const S3Class = await getProviderClass(provider).getObjectStorageProviderClass();
   const scoping = Object.hasOwn(S3Class, 'appKeyScoping') ? S3Class.appKeyScoping : undefined;
   if (!['mint', 'paste-fence', 'none'].includes(scoping)) {

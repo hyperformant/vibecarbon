@@ -44,12 +44,13 @@ import {
   localAppStorageSecrets,
   markUnfencedBuckets,
   resolveAppStorageCredential,
+  scopingOf,
   syncHetznerFences,
   waitForAppKeyReady,
 } from './app-storage-credential.js';
 import { backupFenceWarning, recordBackupFence, writeK8sBackupFence } from './backup-fence.js';
 import { recordDeployedLineage } from './backup-lineage.js';
-import { readStateBucketYoung, settleWindowFor } from './bucket-settle.js';
+import { readStateBucketYoung } from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
@@ -317,17 +318,18 @@ function sameOrigins(a, b) {
 /**
  * Start the app-bucket storage work that does not gate provisioning, so it
  * runs beside the IaC step instead of ahead of it (R7): the CORS rule and,
- * only on a provider whose S3 class declares a non-zero
- * `bucketSettleWindowMs`, one read of the bucket's creation time. Its output
- * is held back while IaC prints, and `finish(log)`, awaited just before the
- * success outro, waits for it and reports any warnings. A 0 window costs
- * nothing: no read, and no `bucketCreatedAt` on the result.
+ * only on a provider that fences a pasted app key (`appKeyScoping:
+ * 'paste-fence'`), one read of the bucket's creation time, which the fence
+ * takes as proof a deploy finished. Its output is held back while IaC prints,
+ * and `finish(log)`, awaited just before the success outro, waits for it and
+ * reports any warnings. Every other provider costs nothing: no read, and no
+ * `bucketCreatedAt` on the result.
  *
  * The CORS step warns instead of throwing, and an unreadable creation time
- * is recorded as unknown (null). A provider class without a declared window
- * is a bug the census catches; `finish` warns about it and treats the window
- * as absent, because it runs after IaC succeeded and a throw would skip the
- * final config save.
+ * is recorded as unknown (null). A provider class without a declared scoping
+ * is a bug the census catches; `finish` warns about it and records nothing,
+ * because it runs after IaC succeeded and a throw would skip the final config
+ * save.
  *
  * Two security checks run here too (security plan R2, R9), and they DO make
  * `finish` reject, because an app whose own key cannot reach its bucket, or
@@ -336,7 +338,7 @@ function sameOrigins(a, b) {
  * budget, and `fence` writes and verifies the Hetzner deny-fence.
  *
  * @param {object} opts
- * @param {string} opts.providerId - the env's provider id, for its settle window
+ * @param {string} opts.providerId - the env's provider id, for its app key scoping
  * @param {() => Promise<object>} opts.createProvider
  * @param {string} opts.bucket
  * @param {string} [opts.domain]
@@ -348,8 +350,8 @@ function sameOrigins(a, b) {
  *   done: Promise<void>,
  *   finish: (log: { warn: Function, info: Function }) => Promise<{ bucketCreatedAt?: string|null }>,
  * }}
- *   `bucketCreatedAt` (ISO string, or null when unknown) is present only for
- *   a non-zero settle window.
+ *   `bucketCreatedAt` (ISO string, or null when unknown) is present only on a
+ *   provider that fences a pasted app key.
  */
 export function startAppBucketFinalize({
   providerId,
@@ -374,7 +376,11 @@ export function startAppBucketFinalize({
     domain,
     log: heldLog,
   });
-  const settle = readBucketSettleState({ providerId, createProvider: sharedProvider, bucket });
+  const fenceRecord = readFenceBucketRecord({
+    providerId,
+    createProvider: sharedProvider,
+    bucket,
+  });
   // The env's own app key (isolated or fenced tier) must reach its bucket
   // before the deploy calls itself done: a new key can take 5 to 10 s to
   // answer (R9). Polled here, beside IaC, never as a serial step before it.
@@ -385,7 +391,7 @@ export function startAppBucketFinalize({
   const fenced = fence ? Promise.resolve().then(fence) : Promise.resolve(null);
   // Handled at `finish`; this only keeps an early rejection from counting as
   // unhandled while IaC runs.
-  settle.catch(() => {});
+  fenceRecord.catch(() => {});
   appKeyReady.catch(() => {});
   fenced.catch(() => {});
   return {
@@ -408,40 +414,43 @@ export function startAppBucketFinalize({
       // Present only when the fence ran, so the caller can persist (or clear)
       // the unfenced marker status shows.
       const fenceOut = fence ? { fenceSkipped: fence.skipped ?? [] } : {};
-      const { windowMs, createdAt, warning } = await settle;
+      const { recorded, createdAt, warning } = await fenceRecord;
       if (warning) log.warn(warning);
-      if (windowMs === 0) return fenceOut;
+      if (!recorded) return fenceOut;
       return { ...fenceOut, bucketCreatedAt: createdAt ? createdAt.toISOString() : null };
     },
   };
 }
 
 /**
- * The provider's settle window and, only when it is non-zero, the bucket's
- * creation time (null when it cannot be read). An undeclared window comes
- * back as 0 with a `warning`, never a throw.
+ * What the app key fence needs from this deploy: on a provider that fences a
+ * pasted key, the bucket's creation time (null when it cannot be read), whose
+ * presence in the env's record is the fence's proof that a deploy finished
+ * (`fenceTargets`, hetzner-app-key-fence.js). It follows the provider's
+ * declared scoping and nothing else, so no other setting can leave a bucket
+ * unfenced. An undeclared scoping comes back with a `warning`, never a throw.
  *
  * @param {{ providerId: string, createProvider: () => Promise<object>, bucket: string }} opts
- * @returns {Promise<{ windowMs: number, createdAt?: Date|null, warning?: string }>}
+ * @returns {Promise<{ recorded: boolean, createdAt?: Date|null, warning?: string }>}
  */
-async function readBucketSettleState({ providerId, createProvider, bucket }) {
-  let windowMs;
+async function readFenceBucketRecord({ providerId, createProvider, bucket }) {
+  let scoping;
   try {
-    windowMs = await settleWindowFor(providerId);
+    ({ scoping } = await scopingOf(providerId));
   } catch (err) {
     return {
-      windowMs: 0,
-      warning: `Storage settle window unknown (${err.message}), so its creation time is not recorded.`,
+      recorded: false,
+      warning: `App key scoping unknown (${err.message}), so the bucket's creation time is not recorded.`,
     };
   }
-  if (windowMs === 0) return { windowMs };
+  if (scoping !== 'paste-fence') return { recorded: false };
   let createdAt = null;
   try {
     createdAt = await (await createProvider()).bucketCreatedAt(bucket);
   } catch {
-    // An unknown age is treated as a young bucket (R5).
+    // Recorded as null: the fence reads that the key is there, not its value.
   }
-  return { windowMs, createdAt };
+  return { recorded: true, createdAt };
 }
 
 /**
@@ -2883,10 +2892,10 @@ export async function executeDeployment(args, gatheredConfig) {
         : new Date().toISOString(),
       deployedCommit,
       ...(deployedDirty !== null && { deployedDirty }),
-      // bucketCreatedAt only on a provider with a settle window (the app key
-      // fence reads it as proof a deploy finished); the fence marks the
-      // sync above wrote to disk; the app key's record (R9, no secret) so
-      // destroy can revoke it.
+      // bucketCreatedAt only on a provider that fences a pasted key (the fence
+      // reads it as proof a deploy finished); the fence marks the sync above
+      // wrote to disk; the app key's record (R9, no secret) so destroy can
+      // revoke it.
       s3: envS3Record(s3Config, {
         unfencedBuckets: persistedEnvConfig.s3?.unfencedBuckets,
         ...(Object.hasOwn(appBucketFinal, 'bucketCreatedAt') && {

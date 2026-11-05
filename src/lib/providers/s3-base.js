@@ -323,8 +323,8 @@ export class S3CompatibleProvider {
 
   /**
    * When a bucket was created, from ListBuckets' CreationDate. Null on any
-   * error, an unlisted bucket or a missing date: callers treat an unknown
-   * age as a young bucket, so this never needs to throw.
+   * error, an unlisted bucket or a missing date: the app key fence reads that
+   * a deploy recorded this, not the value, so this never needs to throw.
    *
    * @param {string} bucketName
    * @returns {Promise<Date|null>}
