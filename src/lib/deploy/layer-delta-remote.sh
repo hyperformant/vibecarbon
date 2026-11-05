@@ -111,11 +111,18 @@ else
   # Save each source image once, then pair ITS manifest Layers[j] with ITS
   # config diff_ids[j]: a containerd-store save names gzip layers by their
   # compressed digest, so the file name says nothing about the diffID.
+  # --platform came in Docker 28.0. An older server holds one variant of each
+  # image, so its plain save gives the same layers.
+  save_cmd='docker save'
+  if [ -s "$img/fill.txt" ] && docker save --help 2>&1 | grep -q -e --platform; then
+    save_cmd="$save_cmd --platform $platform"
+  fi
   n=0
   for src in $(cut -d' ' -f3 "$img/fill.txt" | sort -u); do
     n=$((n + 1))
     s=$d/src$n
-    save_into "$s" docker save --platform "$platform" "$src"
+    # shellcheck disable=SC2086 # $save_cmd is a command and its flags
+    save_into "$s" $save_cmd "$src"
     flat "$s/manifest.json" > "$s.manifest"
     cfg=$(json_str Config < "$s.manifest")
     [ -n "$cfg" ] && [ -f "$s/$cfg" ] || die "the save of $src has no config"
