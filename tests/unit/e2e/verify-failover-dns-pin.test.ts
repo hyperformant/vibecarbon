@@ -626,3 +626,19 @@ describe('_run-lifecycle.ts: verify-failover pin wiring', () => {
     expect(body).toContain('waitForDnsToPoint(config.domain, promotedIp');
   });
 });
+
+describe('post-failover DNS wait target', () => {
+  // Every k8s-ha verify-failover burned this wait's full 360 s: the record
+  // carries the promoted cluster's floating IP, and the wait compared it to
+  // the master node's own address, which can never match.
+  it('waits for the IP the A records carry, not for a node address', () => {
+    const lifecycle = readFileSync(
+      fileURLToPath(new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url)),
+      'utf8',
+    );
+    expect(lifecycle).toContain(
+      'const promotedIp = readServingIp(config.projectDir, config.envPrefix)',
+    );
+    expect(lifecycle).not.toContain('const promotedIp = sshCheckMasterIp');
+  });
+});
