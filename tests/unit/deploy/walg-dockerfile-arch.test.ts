@@ -142,7 +142,7 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
     expect(rm, 'no RUN that deletes libLLVM').toBeGreaterThan(verify);
     const rmText = finalStage[rm];
     expect(rmText).toContain('libLLVM');
-    expect(rmText).toContain('/usr/lib/llvm21');
+    expect(rmText).toContain('/usr/lib/llvm[0-9]*');
     expect(rmText).toContain('llvmjit');
     expect(rmText).toContain('bitcode');
     expect(rmText).toContain('/usr/local/include');
