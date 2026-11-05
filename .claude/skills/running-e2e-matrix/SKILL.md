@@ -1,11 +1,11 @@
 ---
 name: running-e2e-matrix
-description: Use when running vibecarbon's real-infra e2e tests (compose, compose-ha, k8s, k8s-ha; Hetzner or DigitalOcean), iterating on a failing scenario, or diagnosing a deploy/verify/scale/restore/failover failure. Keywords — pnpm test:e2e:batch, test:e2e, REAL_INFRA, --scenario, --provider, --keep, iter-step, E2E_RETRY_FLAKES, vibecarbon deploy failure, "transient" Hetzner error.
+description: Use when running vibecarbon's real-infra e2e tests (compose, compose-ha, k8s, k8s-ha; Hetzner, DigitalOcean, Linode, Vultr or Scaleway), iterating on a failing scenario, or diagnosing a deploy/verify/scale/restore/failover failure. Keywords — pnpm test:e2e:batch, test:e2e, REAL_INFRA, --scenario, --provider, --keep, iter-step, E2E_RETRY_FLAKES, vibecarbon deploy failure, "transient" Hetzner error.
 ---
 
 # Running the Vibecarbon E2E Matrix
 
-The e2e matrix is the only test suite that provisions real Hetzner infrastructure end-to-end. It runs the full deploy → verify → scale → backup → destroy → restore → (failover) → final-destroy lifecycle for each scenario. A full matrix is ~3 hr; a single scenario is ~30–60 min.
+The e2e matrix is the only test suite that provisions real cloud infrastructure end-to-end, on every provider the CLI supports (Hetzner, DigitalOcean, Linode, Vultr, Scaleway). It runs the full deploy → verify → scale → backup → destroy → restore → (failover) → final-destroy lifecycle for each scenario. A full matrix is ~3 hr; a single scenario is ~30–60 min.
 
 ## Pick the right command
 
@@ -16,14 +16,14 @@ The e2e matrix is the only test suite that provisions real Hetzner infrastructur
 | Confidence check before merging | `pnpm test:e2e:batch -- --provider hetzner` (the Hetzner four, serial) | ~3 hr wall-clock |
 | Drop already-green scenarios | `pnpm test:e2e:batch -- --except hetzner/compose,hetzner/k8s` | matrix minus the named ones |
 | Skip slow steps you don't need | `pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --minimal` (skips scale/backup/destroy/restore) | ~25 min |
-| Run DigitalOcean's default scenarios | `pnpm test:e2e:batch -- --provider digitalocean` — requires `DIGITALOCEAN_API_TOKEN`, `DIGITALOCEAN_ACCESS_KEY`, `DIGITALOCEAN_SECRET_KEY` | 30–60 min |
-| Run every provider's default scenarios | `pnpm test:e2e:batch -- --provider all` | ~3 hr + DO scenarios |
+| Run another provider's default scenarios | `pnpm test:e2e:batch -- --provider <digitalocean\|linode\|vultr\|scaleway>` — credentials listed under Required environment | 30–60 min per scenario |
+| Run every provider's default scenarios | `pnpm test:e2e:batch -- --provider all` | many hours (every provider's scenarios, serial) |
 
-Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean/compose`), with an optional `-dnsProvider` refinement for disambiguation (`hetzner/k8s-ha-cloudflare`). Bare mode tokens (`k8s-ha`) and the old opt-in `d1`/`d2`/`d3` tokens are not accepted — an invalid token throws with the valid forms named. **A bare invocation (no `--scenario`/`--provider`) refuses to run**: there is deliberately no default provider. `--provider hetzner` runs the Hetzner four (`compose`, `compose-ha`, `k8s`, `k8s-ha`); `--provider digitalocean` runs DO's four (d1–d4; `digitalocean/k8s-ha` is d4, the DO pilot-light standby + failover scenario since 2026-08-27). See `tests/e2e/selection.ts` for the full grammar.
+Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean/compose`), with an optional `-dnsProvider` refinement for disambiguation (`hetzner/k8s-ha-cloudflare`). Bare mode tokens (`k8s-ha`) and the old opt-in `d1`/`d2`/`d3` tokens are not accepted — an invalid token throws with the valid forms named. **A bare invocation (no `--scenario`/`--provider`) refuses to run**: there is deliberately no default provider. `--provider hetzner` runs the Hetzner four (`compose`, `compose-ha`, `k8s`, `k8s-ha`); `--provider digitalocean` runs DO's four (d1–d4; `digitalocean/k8s-ha` is d4, the DO pilot-light standby + failover scenario). Linode, Vultr and Scaleway run `compose` and `compose-ha` only (their `SUPPORTED_TIERS`). See `tests/e2e/selection.ts` for the full grammar.
 
 ## Serial execution
 
-- **The matrix runs SERIALLY** — one full deploy→…→destroy lifecycle at a time. Each scenario gets a unique env prefix (e1=compose, e2=compose-ha, e3=k8s, e4=k8s-ha) and a tee'd `[mode]`-prefixed log.
+- **The matrix runs SERIALLY** — one full deploy→…→destroy lifecycle at a time. Each scenario gets a unique env prefix (Hetzner e1-e4 = compose, compose-ha, k8s, k8s-ha; DigitalOcean d1-d4; Linode l1-l2; Vultr v1-v2; Scaleway s1-s2) and a tee'd `[mode]`-prefixed log.
 - **Parallel execution is not supported.** It was prototyped (a deploy-gate + fixed schedule that serialized cold deploys/restore re-deploys) and validated on real infra, but pulled 2026-06-01: driving all four scenarios from one operator host manufactured failures no customer sees — Pulumi-on-S3 `503` throttles, local-host saturation that starved the `frontend_render` browser check, and fresh-cluster cert-manager lag under concurrent provisions. It only sped up the (infrequent, unattended) full matrix while making it flakier, so the cost/benefit didn't hold. The robustness hardening it produced was KEPT because it helps serial too: `withStateBackendRetry` (S3 503 retry) in `src/lib/iac/index.js`, `frontend_render` hydration polling in `tests/e2e/checks/frontend-smoke.ts`, and the cert-manager budgeted readiness poll in `src/lib/deploy/k8s/k3s.js`.
 - **Interactive mode** (no `--batch`) pauses after each step.
 
@@ -32,8 +32,11 @@ Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean
 - `REAL_INFRA=true` — already set by every `test:e2e*` script. Required if invoking the runner directly.
 - Credentials are registry-driven (`tests/config.ts` `e2e.providers[provider].requiredEnv`) — the runner unions the requirements of every selected scenario's provider and aborts loudly naming exactly what's missing, pointing at `tests/.env.e2e`. Read from `process.env` (a shell export, CI's GitHub Environment secrets, or `tests/.env.e2e` — copy `tests/.env.e2e.example`).
   - `HETZNER_API_TOKEN` — required for every Hetzner scenario (the default matrix).
-  - `DIGITALOCEAN_API_TOKEN` / `DIGITALOCEAN_ACCESS_KEY` / `DIGITALOCEAN_SECRET_KEY` — required for DigitalOcean scenarios (`--provider digitalocean`).
-- `CLOUDFLARE_API_TOKEN` — required only for scenarios on Cloudflare DNS (HA modes, and every DigitalOcean scenario). Checked separately — Cloudflare is a DNS provider, not a cloud provider in the registry.
+  - `DIGITALOCEAN_API_TOKEN` / `DIGITALOCEAN_ACCESS_KEY` / `DIGITALOCEAN_SECRET_KEY` — DigitalOcean scenarios.
+  - `LINODE_API_TOKEN` / `LINODE_ACCESS_KEY` / `LINODE_SECRET_KEY` — Linode scenarios.
+  - `VULTR_API_TOKEN` / `VULTR_ACCESS_KEY` / `VULTR_SECRET_KEY` / `VULTR_STORAGE_REGION` — Vultr scenarios.
+  - `SCALEWAY_ACCESS_KEY` / `SCALEWAY_SECRET_KEY` / `SCALEWAY_DEFAULT_PROJECT_ID` — Scaleway scenarios (use a dedicated Scaleway Project).
+- `CLOUDFLARE_API_TOKEN` — required only for a scenario refined onto Cloudflare DNS (for example `hetzner/k8s-ha-cloudflare`). Every default scenario uses its own provider's native DNS with the same credentials as its compute. Checked separately — Cloudflare is a DNS provider, not a cloud provider in the registry.
 - `E2E_PREFLIGHT=skip` — bypass the 30-second infra preflight ping. Use when re-running after a known-good fix.
 - `E2E_ACME_CA=production` — opt in to Let's Encrypt production instead of the default staging (`staging`). One switch drives compose `ACME_CA_SERVER`, the k8s ClusterIssuer choice, the trust store (production needs no extra roots) and the preflight's ACME directory check. Use when staging is down (preflight aborts naming the CA URL; see https://letsencrypt.status.io). Production is rate limited: 50 certificates per registered domain per week, 5 duplicates. The ACME directory check is part of the infra preflight, so `E2E_PREFLIGHT=skip` bypasses it too.
 - `E2E_RETRY_FLAKES=1` — opt-in single retry on `failureCategory=infra` failures. Doubles wall-clock worst case; only enable when chasing a flake hypothesis.
@@ -127,7 +130,7 @@ pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --minimal
 pnpm test:e2e:batch -- --scenario hetzner/k8s --features=redis,n8n
 pnpm test:e2e:batch -- --scenario hetzner/k8s --features=               # zero features
 
-# DigitalOcean's default scenarios (opt-in), or every provider's
+# Another provider's default scenarios (opt-in), or every provider's
 pnpm test:e2e:batch -- --provider digitalocean
 pnpm test:e2e:batch -- --provider all
 

@@ -102,11 +102,11 @@ describe('vibecarbon add observability', () => {
 
 **`tests/e2e/scenarios/`**: full deploy/destroy/scale/restore matrix over the scenarios in the provider registry (`testConfig.e2e.providers` in `tests/config.ts`), which providers and scenarios come from; which deploy tiers each provider supports comes from that provider's `SUPPORTED_TIERS` in `src/lib/providers/<id>.js`. Run via `pnpm test:e2e` (the runner with metrics). Requires `REAL_INFRA=true` and burns real cloud credit on whichever provider you select.
 
-**Scenario identity is `provider/mode`.** Selection is the grammar in `tests/e2e/selection.ts`: `--provider <name|all>` picks whole providers, `--scenario <provider>/<mode>` picks individual scenarios (optionally refined by DNS provider, e.g. `hetzner/k8s-ha-cloudflare`), and `--except` takes the same tokens. A bare mode is not a token. It throws a `SelectionError` naming the valid forms. Env prefixes (`e1`–`e4`, `d1`–`d3`) are internal namespacing for resource names and DNS subdomains, never selection vocabulary.
+**Scenario identity is `provider/mode`.** Selection is the grammar in `tests/e2e/selection.ts`: `--provider <name|all>` picks whole providers, `--scenario <provider>/<mode>` picks individual scenarios (optionally refined by DNS provider, e.g. `hetzner/k8s-ha-cloudflare`), and `--except` takes the same tokens. A bare mode is not a token. It throws a `SelectionError` naming the valid forms. Env prefixes (`e1`–`e4`, `d1`–`d4`, `l1`–`l2`, `v1`–`v2`, `s1`–`s2`) are internal namespacing for resource names and DNS subdomains, never selection vocabulary.
 
 **Every provider is opt-in, equally.** There is no default provider: `pnpm test:e2e:batch` with no `--provider` throws, naming the known providers. Reach any of them with `--provider <id>` (its whole default selection), `--provider all`, or `--scenario <provider>/<mode>`. Each provider's required credentials are declared in its registry entry (`requiredEnv`) and listed in `tests/.env.e2e.example`.
 
-Providers differ only in which deploy tiers they implement: Hetzner all four, DigitalOcean compose/compose-ha/k8s, Linode/Vultr/Scaleway compose/compose-ha. That is a capability difference, not a standing one: no provider is a default, and none gates a release.
+Providers differ only in which deploy tiers they implement: Hetzner all four, DigitalOcean all four, Linode/Vultr/Scaleway compose/compose-ha. That is a capability difference, not a standing one: no provider is a default, and none gates a release.
 
 ### README performance table
 
@@ -163,7 +163,7 @@ merging leg-by-leg is safe without merging the dbs first), then re-renders
 the unified README table, the inline headline markers, and the carbon
 component's data copy once from the merged result.
 
-- `provider` input: `hetzner` (default), `digitalocean`, or `all`, selecting which
+- `provider` input: `hetzner` (default), `digitalocean`, `linode`, `vultr`, `scaleway`, or `all`, selecting which
   provider(s)' legs run.
 - `scenarios` input: qualified `provider/mode` tokens (e.g.
   `hetzner/k8s-ha,digitalocean/compose`, the same `--scenario` grammar the CLI
@@ -171,11 +171,12 @@ component's data copy once from the merged result.
   provider(s)' registry default lists.
 - `regions` input → `E2E_REGIONS` (comma-separated Hetzner locations). Only
   meaningful on the Hetzner leg; harmlessly ignored on the DigitalOcean leg.
-- Environment variables on `e2e-infra`: `E2E_DNS_PROVIDER=hetzner` pins
-  scenarios to Hetzner DNS (no provider variance in the numbers, no
-  Cloudflare credential needed: preflight skips the Cloudflare check when
-  nothing uses it); `E2E_DOMAIN` optionally overrides the base domain so
-  every scenario shares one zone (e.g. `carbonstack.dev`).
+- Environment variables on `e2e-infra`: leave `E2E_DNS_PROVIDER` and
+  `E2E_DOMAIN` unset. Each scenario takes its DNS provider and domain from
+  the `tests/config.ts` registry, so every leg uses the native DNS of the
+  provider that owns its compute and needs no Cloudflare credential.
+  Setting either variable forces every scenario onto one DNS provider; they
+  survive only as escape hatches for a deliberate perf run.
 - Runs under `E2E_NAMESPACE=ci`, scoped to the `matrix` job only (the
   collector never provisions anything): `citest-*` resource names, DNS
   prefixes, and prefix-scoped preflight/sweep, so CI and local matrices can
@@ -201,8 +202,8 @@ component's data copy once from the merged result.
   leg results.
 
 Requires the `e2e-infra` GitHub Environment (Hetzner API + S3 + Docker Hub
-secrets always; DigitalOcean API + Spaces secrets only for a
-`provider: digitalocean` or `provider: all` dispatch: the DigitalOcean leg
+secrets always; another provider's API + object-storage secrets only for a
+dispatch that selects that provider (or `provider: all`): its leg
 hard-aborts with a clear message if they're absent; Cloudflare only for
 cloudflare-DNS dispatches). Hetzner runs target the dedicated
 `vibecarbon-e2e` Hetzner project, which owns the `carbonstack.dev` zone.
@@ -213,9 +214,8 @@ CI-image build path, which no perf scenario uses; skipping it means no
 repo-create/delete PAT lives in CI (the runner waives its gh-auth requirement
 when setup-repo is skipped, and teardown-repo self-skips when no repo exists).
 
-Note: with `E2E_DNS_PROVIDER=hetzner` the Hetzner HA scenarios exercise the
-HA-failover-over-Hetzner-DNS path, which the local matrix (Cloudflare for HA)
-does not: a failover failure there is a real product signal, not CI noise.
+Note: every HA scenario fails over on its own provider's native DNS, so a
+failover failure in CI is a real product signal, not CI noise.
 
 ## When to add a test where
 
