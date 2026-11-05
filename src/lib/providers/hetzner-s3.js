@@ -21,11 +21,10 @@ import {
 
 export class HetznerS3Provider extends S3CompatibleProvider {
   /**
-   * A new Hetzner bucket answers inconsistently for about 16 minutes. The
-   * 2026-10-20 probes against a minutes-old bucket saw about 40% of CORS
-   * preflights refused with a 403 and some NoSuchBucket answers, then 58/60
-   * and 60/60 three times, settled about 16 minutes after create. Rounded up
-   * to 20 for margin; see src/lib/deploy/bucket-settle.js.
+   * How long a new Hetzner bucket counts as young, for the state lock's scope
+   * (Ruling A′, src/lib/iac/state-lock.js). The 16 minutes this came from,
+   * rounded up to 20, turned out to be our own probe touching the bucket in its
+   * first second: see `bucketQuietMs`.
    */
   static bucketSettleWindowMs = 20 * 60_000;
 

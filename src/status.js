@@ -24,7 +24,6 @@ import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
 import { storageAccessLine, unfencedBucketsLine } from './lib/deploy/app-storage-credential.js';
 import { backupFenceRow } from './lib/deploy/backup-fence.js';
-import { settleWindowFor, storageSettleStatus } from './lib/deploy/bucket-settle.js';
 import { VC_COMPOSE } from './lib/deploy/compose/command.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { DEGRADED_CAUSE } from './lib/deploy/env-safety-fields.js';
@@ -1178,43 +1177,6 @@ function resolveEnvProvider(envConfig) {
 }
 
 /**
- * The `storage settling` row (R5): age-based, from the persisted
- * `s3.bucketCreatedAt` and the window the env provider's S3 class declares,
- * with no network call. Null (no row) once the window has passed, and always
- * for a 0-window provider. An unknown creation time shows `storage settling`
- * with no estimate until a redeploy records one.
- *
- * @param {{ provider?: string, s3?: { bucket?: string, bucketCreatedAt?: string|null } }} envConfig
- * @param {number} [now]
- * @returns {Promise<string|null>}
- */
-async function storageSettleLine(envConfig, now = Date.now()) {
-  if (!envConfig?.s3?.bucket) return null;
-  // Same fallback as resolveEnvProvider: a missing or unregistered provider
-  // reads as Hetzner.
-  const providerId =
-    envConfig.provider && hasProvider(envConfig.provider)
-      ? envConfig.provider.toLowerCase()
-      : 'hetzner';
-  // An env deployed before creation times were recorded has no key at all:
-  // nothing to say. An explicit null means the deploy could not read it.
-  if (!Object.hasOwn(envConfig.s3, 'bucketCreatedAt')) return null;
-  let windowMs;
-  try {
-    windowMs = await settleWindowFor(providerId);
-  } catch (err) {
-    // An advisory row must never fail the environment's checks. stderr, so
-    // `-json` output stays parseable.
-    console.warn(`storage settle window unknown: ${err.message}`);
-    return null;
-  }
-  const status = storageSettleStatus(envConfig.s3.bucketCreatedAt, now, windowMs);
-  if (!status.settling) return null;
-  if (status.remainingMs === null) return 'storage settling';
-  return `storage settling (about ${Math.ceil(status.remainingMs / 60_000)} min left)`;
-}
-
-/**
  * The `storage access` row (security plan R2/R4): which tier the env's app
  * key is on and why, from the recorded `s3.appKey` and the provider's
  * declared scoping. No network. Never fails the env's checks.
@@ -1494,7 +1456,6 @@ function renderEnvironment(envName, envConfig, checks) {
   if (envConfig.s3?.bucket) {
     const s3Region = envConfig.s3.region ? ` ${c.dim(`(${envConfig.s3.region})`)}` : '';
     lines.push(`${c.dim('S3 Bucket')}      ${envConfig.s3.bucket}${s3Region}`);
-    if (checks.storageSettle) lines.push(`               ${c.warning(checks.storageSettle)}`);
     if (checks.storageAccess) {
       const color = checks.storageAccess.startsWith('storage access: shared') ? c.warning : c.dim;
       lines.push(`               ${color(checks.storageAccess)}`);
@@ -1858,8 +1819,6 @@ async function main(argv = []) {
       // Git sync
       checks.gitSync = checkGitSync(envName, envConfig);
 
-      const storageSettle = await storageSettleLine(envConfig);
-      if (storageSettle) checks.storageSettle = storageSettle;
       const storageAccess = await storageAccessRow(envConfig);
       if (storageAccess) checks.storageAccess = storageAccess;
       const unfenced = unfencedBucketsLine(envConfig);
@@ -2015,6 +1974,5 @@ export {
   resolveEnvProvider,
   SPEC,
   storageAccessRow,
-  storageSettleLine,
   VERSION,
 };

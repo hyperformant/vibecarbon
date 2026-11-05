@@ -104,11 +104,11 @@ describe('waitForBucketVisible sustained-visibility condition', () => {
 });
 
 /**
- * The pause between clean rounds exists for Hetzner's settle window. On
- * 2026-11-05 the other four answered 780 of 780 HEAD and LIST samples from the
- * first one after CreateBucket, on fresh connections, so they keep every check
- * and skip the wait: 4 s a bucket. A round that fails still pauses, so a
- * provider that ever does lag cannot spin.
+ * Clean rounds run back to back on every provider, Hetzner included: 4 s a
+ * bucket. On 2026-11-05 the other four answered 780 of 780 HEAD and LIST samples
+ * from the first one after CreateBucket, and Hetzner answered 6,512 of 6,512 once
+ * a bucket was left quiet first. A round that fails still pauses, so a provider
+ * that ever does lag cannot spin.
  */
 describe('waitForBucketVisible pacing', () => {
   const noWindow = () => new DigitalOceanSpacesProvider('ak', 'sk', 'nyc3');
@@ -133,7 +133,7 @@ describe('waitForBucketVisible pacing', () => {
     return { result: done, spent };
   }
 
-  it('skips the wait between clean rounds when the provider has no settle window', async () => {
+  it('runs clean rounds back to back', async () => {
     const { p, sends } = makeProvider({ headResults: [true], provider: noWindow() });
     const { result, spent } = await clockNeeded(p);
     expect(result).toBe(true);
@@ -150,10 +150,10 @@ describe('waitForBucketVisible pacing', () => {
     expect(spent).toBe(2_000);
   });
 
-  it('keeps the wait on a provider with a settle window', async () => {
+  it('does the same on Hetzner, whose new buckets are left quiet first', async () => {
     const { p } = makeProvider({ headResults: [true] });
     const { result, spent } = await clockNeeded(p);
     expect(result).toBe(true);
-    expect(spent).toBe(4_000);
+    expect(spent).toBe(0);
   });
 });

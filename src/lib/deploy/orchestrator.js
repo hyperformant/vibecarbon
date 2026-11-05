@@ -49,12 +49,7 @@ import {
 } from './app-storage-credential.js';
 import { backupFenceWarning, recordBackupFence, writeK8sBackupFence } from './backup-fence.js';
 import { recordDeployedLineage } from './backup-lineage.js';
-import {
-  bucketSettleNote,
-  readStateBucketYoung,
-  settleWindowFor,
-  storageSettleStatus,
-} from './bucket-settle.js';
+import { readStateBucketYoung, settleWindowFor } from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
@@ -325,10 +320,8 @@ function sameOrigins(a, b) {
  * only on a provider whose S3 class declares a non-zero
  * `bucketSettleWindowMs`, one read of the bucket's creation time. Its output
  * is held back while IaC prints, and `finish(log)`, awaited just before the
- * success outro, waits for it, reports any warnings, and prints one note
- * when the bucket is still inside its settle window. It never waits for the
- * bucket to settle (R5). A 0 window costs nothing: no read, no note, and no
- * `bucketCreatedAt` on the result.
+ * success outro, waits for it and reports any warnings. A 0 window costs
+ * nothing: no read, and no `bucketCreatedAt` on the result.
  *
  * The CORS step warns instead of throwing, and an unreadable creation time
  * is recorded as unknown (null). A provider class without a declared window
@@ -418,8 +411,6 @@ export function startAppBucketFinalize({
       const { windowMs, createdAt, warning } = await settle;
       if (warning) log.warn(warning);
       if (windowMs === 0) return fenceOut;
-      const status = storageSettleStatus(createdAt, Date.now(), windowMs);
-      if (status.settling) log.info(bucketSettleNote(status, windowMs));
       return { ...fenceOut, bucketCreatedAt: createdAt ? createdAt.toISOString() : null };
     },
   };
@@ -440,7 +431,7 @@ async function readBucketSettleState({ providerId, createProvider, bucket }) {
   } catch (err) {
     return {
       windowMs: 0,
-      warning: `Storage settle window unknown (${err.message}), so no settle note or status row for this bucket.`,
+      warning: `Storage settle window unknown (${err.message}), so its creation time is not recorded.`,
     };
   }
   if (windowMs === 0) return { windowMs };
@@ -2697,8 +2688,6 @@ export async function executeDeployment(args, gatheredConfig) {
 
   // The app-bucket finalize started after s3-setup ran beside IaC; wait for
   // it here, before the final save and the outro, and report its warnings.
-  // On a provider with a settle window it also prints the young-bucket note;
-  // it never waits for the bucket to settle (R5).
   let appBucketFinal;
   try {
     appBucketFinal = await perfAsync('deploy.storage.finish', () =>
@@ -2894,8 +2883,8 @@ export async function executeDeployment(args, gatheredConfig) {
         : new Date().toISOString(),
       deployedCommit,
       ...(deployedDirty !== null && { deployedDirty }),
-      // bucketCreatedAt only on a provider with a settle window (status'
-      // "storage settling" row, the e2e upload gate); the fence marks the
+      // bucketCreatedAt only on a provider with a settle window (the app key
+      // fence reads it as proof a deploy finished); the fence marks the
       // sync above wrote to disk; the app key's record (R9, no secret) so
       // destroy can revoke it.
       s3: envS3Record(s3Config, {

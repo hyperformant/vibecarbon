@@ -8,9 +8,9 @@
 
 /**
  * Rebuilt from s3Config. The fields that only exist in the PRIOR record are
- * carried from it: `bucketCreatedAt` (status' "storage settling" row, the e2e
- * upload gate's clock, null included) and `unfencedBuckets` (status' fence
- * row). The `appKey` record follows appKeyBlock.
+ * carried from it: `bucketCreatedAt` (the app key fence reads it as proof a
+ * deploy finished, null included) and `unfencedBuckets` (status' fence row).
+ * The `appKey` record follows appKeyBlock.
  *
  * @param {{ bucket: string, bucketPin?: string, region: string, endpoint: string, stateBucket?: string, stateBucketRegion?: string, stateEndpoint?: string, appKey?: object|null }} s3Config
  * @param {{ bucketCreatedAt?: string|null, appKey?: object, unfencedBuckets?: string[] } | undefined} priorS3

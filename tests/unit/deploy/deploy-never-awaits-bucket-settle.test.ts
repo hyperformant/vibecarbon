@@ -1,11 +1,10 @@
 /**
- * R5/R7: the deploy never waits for a new bucket to settle. On a provider
- * with a settle window it reads the bucket's creation time beside IaC,
- * records it on the env and prints one note; on a 0-window provider it does
- * nothing at all. Only the e2e verification runs the gate.
+ * R5/R7: the deploy never waits for a new bucket. On a provider with a settle
+ * window it reads the bucket's creation time beside IaC and records it on the
+ * env, with nothing printed; on a 0-window provider it does nothing at all.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { S3Client } from '@aws-sdk/client-s3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startAppBucketFinalize } from '../../../src/lib/deploy/orchestrator.js';
@@ -34,7 +33,7 @@ afterEach(() => {
 });
 
 describe('a Hetzner-shaped deploy (20 minute window) against a new bucket', () => {
-  it('records the creation time and prints one note, with zero probes', async () => {
+  it('records the creation time with no note and zero probes', async () => {
     const { fetchSpy, sendSpy } = spyProbes();
     const createdAt = new Date(Date.now() - MIN);
     const provider = fakeProvider(createdAt);
@@ -50,13 +49,11 @@ describe('a Hetzner-shaped deploy (20 minute window) against a new bucket', () =
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(sendSpy).not.toHaveBeenCalled();
     expect(provider.bucketCreatedAt).toHaveBeenCalledOnce();
-    const notes = log.info.mock.calls.filter(([m]) => /new storage bucket/.test(m));
-    expect(notes).toHaveLength(1);
-    expect(notes[0][0]).toMatch(/about 19 more minutes/);
+    expect(log.info).not.toHaveBeenCalled();
     expect(result.bucketCreatedAt).toBe(createdAt.toISOString());
   });
 
-  it('an unreadable creation time is recorded as null and still gets the note', async () => {
+  it('an unreadable creation time is recorded as null, quietly', async () => {
     spyProbes();
     const finalize = startAppBucketFinalize({
       providerId: 'hetzner',
@@ -67,10 +64,10 @@ describe('a Hetzner-shaped deploy (20 minute window) against a new bucket', () =
     const log = { warn: vi.fn(), info: vi.fn() };
     const result = await finalize.finish(log);
     expect(result).toHaveProperty('bucketCreatedAt', null);
-    expect(log.info).toHaveBeenCalledOnce();
+    expect(log.info).not.toHaveBeenCalled();
   });
 
-  it('an old bucket is recorded with no note', async () => {
+  it('an old bucket is recorded the same way', async () => {
     spyProbes();
     const createdAt = new Date(Date.now() - 30 * MIN);
     const finalize = startAppBucketFinalize({
@@ -89,7 +86,7 @@ describe('a Hetzner-shaped deploy (20 minute window) against a new bucket', () =
 describe.each(['digitalocean', 'linode', 'scaleway', 'vultr'])(
   'a 0-window provider (%s)',
   (providerId) => {
-    it('reads no creation time, prints no note and records no bucketCreatedAt', async () => {
+    it('reads no creation time and records no bucketCreatedAt', async () => {
       const { fetchSpy, sendSpy } = spyProbes();
       const provider = fakeProvider(new Date(Date.now() - MIN));
       const finalize = startAppBucketFinalize({
@@ -125,27 +122,5 @@ describe('orchestrator wiring', () => {
 
   it('hands the env provider id to the finalize', () => {
     expect(src).toContain('providerId: providerIdFor(envConfig),');
-  });
-});
-
-describe('census: only the gate module references the gate', () => {
-  const srcRoot = join(import.meta.dirname, '../../../src');
-
-  function walk(dir: string): string[] {
-    return readdirSync(dir).flatMap((name) => {
-      const path = join(dir, name);
-      return statSync(path).isDirectory() ? walk(path) : [path];
-    });
-  }
-
-  it('no src file other than bucket-settle.js names waitForBucketSettled or makeAppBucketProbeRound', () => {
-    const offenders = walk(srcRoot)
-      .filter((f) => /\.(js|mjs|ts)$/.test(f))
-      .filter((f) => relative(srcRoot, f) !== join('lib', 'deploy', 'bucket-settle.js'))
-      .filter((f) =>
-        /\b(waitForBucketSettled|makeAppBucketProbeRound)\b/.test(readFileSync(f, 'utf-8')),
-      )
-      .map((f) => relative(srcRoot, f));
-    expect(offenders).toEqual([]);
   });
 });

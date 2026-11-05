@@ -608,16 +608,13 @@ export class S3CompatibleProvider {
    * 403 and the deploy died first-strike). Poll until the bucket answers
    * BOTH a HEAD and a LIST so callers can rely on create → use with either
    * operation.
-   * SUSTAINED visibility, not one lucky sample (registry-500 RCA, runs
-   * 31970876667/31984725162/31997668866): Hetzner's frontends propagate
-   * bucket metadata independently and each new connection may land on a
-   * different one — a single HEAD+LIST pass proved ONE frontend while the
-   * in-cluster registry's S3 driver was still getting `s3aws: NoSuchBucket`
-   * resolving upload sessions minutes later. The condition is therefore
-   * K CONSECUTIVE clean HEAD+LIST rounds (a flap resets the streak — the
-   * frontends must converge, not get lucky) followed by one
-   * write → read → delete round-trip, proving the WRITE path every consumer
-   * (registry uploads, wal-g, Pulumi state) actually depends on.
+   * SUSTAINED visibility, not one lucky sample: K CONSECUTIVE clean HEAD+LIST
+   * rounds (a flap resets the streak) followed by one write → read → delete
+   * round-trip, proving the WRITE path every consumer (registry uploads, wal-g,
+   * Pulumi state) actually depends on. The `s3aws: NoSuchBucket` that made
+   * this a streak (registry-500 RCA, runs 31970876667/31984725162/31997668866)
+   * was this probe reaching a new Hetzner bucket in its first second, which
+   * `bucketQuietMs` now prevents; no provider needs time between clean rounds.
    *
    * On budget exhaustion this returns false and the CALLER decides:
    * createBucket surfaces it as `ready: false`, and the deploy orchestrator
@@ -626,17 +623,13 @@ export class S3CompatibleProvider {
    * retry (see lib/iac withStateBackendRetry) and the registry push's
    * round-trip probe.
    *
-   * The pause between clean rounds is for that convergence, so only a
-   * provider with a settle window takes it: on 2026-11-05 the other four
-   * answered 780 of 780 HEAD and LIST samples from the first one after
-   * CreateBucket, on fresh connections. They run the same checks back to back.
-   * A round that fails always pauses, so a provider that lags cannot spin.
+   * Clean rounds run back to back. A round that fails always pauses, so a
+   * provider that lags cannot spin.
    */
   async waitForBucketVisible(bucketName, { budgetMs = 120_000, intervalMs = 2000 } = {}) {
     const REQUIRED_STREAK = 3;
     const deadline = Date.now() + budgetMs;
     const probeKey = `.vibecarbon-visibility-probe-${Date.now()}`;
-    const pauseCleanRounds = this.constructor.bucketSettleWindowMs > 0;
     let streak = 0;
     for (;;) {
       let clean = false;
@@ -685,7 +678,7 @@ export class S3CompatibleProvider {
         streak = 0;
         clean = false;
       }
-      if (clean && !pauseCleanRounds) continue;
+      if (clean) continue;
       if (Date.now() + intervalMs > deadline) {
         console.warn(
           `[s3] bucket ${bucketName} created but not sustainably HEAD+LIST+write-ready after ${budgetMs}ms`,
