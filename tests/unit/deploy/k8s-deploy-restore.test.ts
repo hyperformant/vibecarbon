@@ -296,7 +296,7 @@ let fence = 'off';
 // Secret carries (plain; the mock answers base64 as kubectl does), and what
 // the db pod's PGDATA shows (null: the pod cannot be exec'd).
 let liveDbSts = false;
-/** The backup files inside the rendered dir `kubectl apply -k` was handed. */
+/** The backup files inside the rendered dir `kubectl kustomize` was handed. */
 let appliedBackup: { cronjob: string; configmap: string } | null = null;
 let marker: Record<string, string> = {};
 let pgdataState: string | null = '';
@@ -353,8 +353,8 @@ function installSpawn() {
   vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
     calls.push([cmd, ...args]);
     const has = (s: string) => args.includes(s);
-    if (cmd === 'kubectl' && has('apply') && has('-k') && args.some((a) => /k8s-base/.test(a))) {
-      const dir = args[args.indexOf('-k') + 1];
+    if (cmd === 'kubectl' && args[0] === 'kustomize' && args.some((a) => /k8s-base/.test(a))) {
+      const dir = args[1];
       appliedBackup = {
         cronjob: readFileSync(join(dir, 'backup/cronjob.yaml'), 'utf-8'),
         configmap: readFileSync(join(dir, 'config/configmap.yaml'), 'utf-8'),
@@ -475,10 +475,7 @@ function args(restore: typeof RESTORE | null) {
 const idx = (pred: (a: string[]) => boolean) => calls.findIndex(pred);
 const infraSecretApply = () => stdin.find((s) => s.data.includes('name: vibecarbon-infra-secrets'));
 const isBaseApply = (a: string[]) =>
-  a[0] === 'kubectl' &&
-  a.includes('apply') &&
-  a.includes('-k') &&
-  a.some((x) => /k8s-base/.test(x));
+  a[0] === 'kubectl' && a[1] === 'kustomize' && a.some((x) => /k8s-base/.test(x));
 const isDbWait = (a: string[]) =>
   a[0] === 'kubectl' && a.includes('rollout') && a.includes('statefulset/db');
 const isPromotedCheck = (a: string[]) =>
@@ -763,7 +760,7 @@ describe('applyK3sManifests with a restore point', () => {
       appliedBackup = null;
       stdin.length = 0;
       await applyK3sManifests({ ...args(null), backupConfig: cfg });
-      // The CronJob in the rendered copy kubectl apply -k is handed ...
+      // The CronJob in the rendered copy kubectl kustomize is handed ...
       expect(appliedBackup?.cronjob).toContain(`schedule: "${cron}"`);
       expect(appliedBackup?.cronjob).not.toContain('{{BACKUP_SCHEDULE}}');
       // ... and the per-cluster settings ConfigMap, applied after it.

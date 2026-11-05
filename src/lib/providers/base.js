@@ -206,7 +206,7 @@ export class BaseProvider {
    * `renderK8sStorageClassPlaceholder`, deploy/k8s/k3s.js), which already
    * has the deploy's authoritative resolved `ProviderClass` in scope. It
    * renders a TEMP COPY of the manifest directory (never rewrites the
-   * project's own checked-in files) and points `kubectl apply -k` at that
+   * project's own checked-in files) and points the apply at that
    * copy — so the concrete literal exists before the object is ever
    * created, and no placeholder ever reaches a live cluster.
    * @type {string}

@@ -4,8 +4,8 @@
  * ways a cluster gets it:
  *
  * - the vibecarbon CLI imports this module when it applies a cluster
- *   (applyK3sManifests writes the kustomization into a temp dir and runs
- *   `kubectl apply -k` on it);
+ *   (applyK3sManifests writes the kustomization into a temp dir and renders
+ *   it here, then applies the result on the master);
  * - the GitOps deploy workflow (.github/workflows/deploy.yml) runs it as a
  *   script and applies the same directory.
  *

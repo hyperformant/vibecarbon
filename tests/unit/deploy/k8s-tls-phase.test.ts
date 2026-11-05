@@ -391,7 +391,7 @@ describe('deploy timing records (k3s.js)', () => {
   it('the restore records its write, and the apply records the Certificate and the controller', () => {
     const restore = K3S.indexOf('restoreK8sTlsSecret({');
     const wrote = K3S.indexOf('tlsRestoreTimingLine(timingKubectl, tlsRestoredAt)');
-    const apply = K3S.indexOf("runKubectlWithRetry(['apply', '-k', baseDir]");
+    const apply = K3S.indexOf('applyKustomization(baseDir,');
     const after = K3S.indexOf('tlsApplyTimingLines(timingKubectl)');
     expect(restore).toBeGreaterThan(-1);
     expect(wrote).toBeGreaterThan(restore);

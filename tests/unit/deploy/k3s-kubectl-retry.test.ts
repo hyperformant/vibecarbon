@@ -29,7 +29,7 @@ vi.mock('node:child_process', async () => {
   };
 });
 
-const { runKubectlWithRetry, KUBECTL_TRANSIENT_PATTERN } = await import(
+const { applyKustomization, runKubectlWithRetry, KUBECTL_TRANSIENT_PATTERN } = await import(
   '../../../src/lib/deploy/k8s/k3s.js'
 );
 
@@ -272,6 +272,80 @@ describe('runKubectlWithRetry', () => {
 // admission probe and the pg-accepting gate close those windows at the
 // source, and their incident shapes are preserved verbatim in
 // tests/unit/deploy/k8s-readiness.test.ts.
+
+describe('applyKustomization', () => {
+  // `kubectl apply` costs round trips per object, so from a laptop 130 ms from
+  // the cluster the same manifests took 27.1 s against 4.5 s on the master
+  // (real k3s on Hetzner, 2026-11-05). Applying there leaves a deploy's time
+  // depending on the servers, not on where the operator happens to sit.
+  const master = { ip: '203.0.113.7', sshKeyPath: '/keys/id' };
+  const env = { KUBECONFIG: '/tmp/local-kubeconfig' } as NodeJS.ProcessEnv;
+  const rendered = 'kind: Namespace\n---\nkind: Secret\n';
+
+  const callOf = (index: number) => {
+    const [cmd, args, opts] = spawnMock.mock.calls[index];
+    return { cmd, args: args as string[], opts };
+  };
+
+  it('renders on this machine, because the directory only exists here', async () => {
+    spawnMock.mockReturnValueOnce(ok(rendered)).mockReturnValueOnce(ok('applied'));
+    await applyKustomization('/tmp/rendered-base', { env, master, description: 'base' });
+    const render = callOf(0);
+    expect(render.cmd).toBe('kubectl');
+    expect(render.args).toEqual(['kustomize', '/tmp/rendered-base']);
+    expect(render.opts.env.KUBECONFIG).toBe('/tmp/local-kubeconfig');
+  });
+
+  it('applies on the master, sending the rendered manifests over stdin', async () => {
+    const applied = ok('namespace/vibecarbon created');
+    spawnMock.mockReturnValueOnce(ok(rendered)).mockReturnValueOnce(applied);
+    await applyKustomization('/tmp/rendered-base', { env, master, description: 'base' });
+    const apply = callOf(1);
+    expect(apply.cmd).toBe('ssh');
+    expect(apply.args).toContain('root@203.0.113.7');
+    expect(apply.args.at(-1)).toBe(
+      "'env' 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml' 'kubectl' 'apply' '-f' '-'",
+    );
+    expect(applied.writtenStdin.join('')).toBe(rendered);
+  });
+
+  it('retries a blip on the master the same way as one seen from here', async () => {
+    spawnMock
+      .mockReturnValueOnce(ok(rendered))
+      .mockReturnValueOnce(fail('http2: client connection lost'))
+      .mockReturnValueOnce(ok('applied'));
+    const r = await settled(
+      applyKustomization('/tmp/rendered-base', { env, master, description: 'base' }),
+    );
+    expect(r.ok).toBe(true);
+    expect(spawnMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('fails with the description and what kubectl said on the master', async () => {
+    spawnMock
+      .mockReturnValueOnce(ok(rendered))
+      .mockReturnValueOnce(fail('error: the namespace is immutable'));
+    const r = await settled(
+      applyKustomization('/tmp/rendered-base', { env, master, description: 'apply base' }),
+    );
+    expect(r.ok).toBe(false);
+    expect((r as { e: Error }).e.message).toMatch(/apply base failed.*namespace is immutable/);
+  });
+
+  it('never applies a render that failed', async () => {
+    spawnMock.mockReturnValueOnce(fail('error: accumulating resources'));
+    const r = await settled(
+      applyKustomization('/tmp/rendered-base', { env, master, description: 'base' }),
+    );
+    expect(r.ok).toBe(false);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('census: no kustomization is applied from the operator machine', () => {
+    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf8');
+    expect(src).not.toMatch(/\['apply', '-k'/);
+  });
+});
 
 describe('census: every psql-over-kubectl call site opts into the lifecycle ladder', () => {
   // A pattern only helps where it is passed. The 2026-08-14 failure was not a
