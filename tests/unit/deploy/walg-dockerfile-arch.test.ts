@@ -102,6 +102,9 @@ describe('docker/wal-g/Dockerfile builds wal-g static (musl-safe)', () => {
   });
 });
 
+/** The one RUN allowed to name llvm: it must delete libLLVM. */
+const isLlvmDelete = (i: string) => /^RUN\b/.test(i) && /\brm\b/.test(i) && i.includes('libLLVM');
+
 describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
   const dockerfile = readFileSync(join(ROOT, DB_IMAGE_DOCKERFILE), 'utf-8');
   const instructions = logicalInstructions(dockerfile);
@@ -134,11 +137,12 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
   });
 
   it('removes LLVM (library, JIT provider, bitcode) in the db stage after the verification RUN', () => {
-    const rm = finalStage.findIndex((i) => /^RUN\b/.test(i) && /\brm\b/.test(i));
+    const rm = finalStage.findIndex(isLlvmDelete);
     const verify = finalStage.findIndex((i) => /^RUN\b/.test(i) && /wal-g --version/.test(i));
-    expect(rm, 'no RUN that removes files').toBeGreaterThan(verify);
+    expect(rm, 'no RUN that deletes libLLVM').toBeGreaterThan(verify);
     const rmText = finalStage[rm];
     expect(rmText).toContain('libLLVM');
+    expect(rmText).toContain('/usr/lib/llvm21');
     expect(rmText).toContain('llvmjit');
     expect(rmText).toContain('bitcode');
     expect(rmText).toContain('/usr/local/include');
@@ -175,7 +179,7 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
 
   it('the final stage installs no toolchain and copies only pg_cron files from the builder', () => {
     // The one RUN allowed to NAME llvm is the one that deletes it.
-    const finalText = finalStage.filter((i) => !/^RUN\b.*\brm -f\b/.test(i)).join('\n');
+    const finalText = finalStage.filter((i) => !isLlvmDelete(i)).join('\n');
     expect(finalText).not.toMatch(/apk add|build-base|\bgcc\b|\bmake\b|clang|llvm/);
     const builderCopies = finalStage.filter((i) => /^COPY --from=pg_cron\b/.test(i));
     expect(builderCopies.map((i) => i.split(/\s+/)[2])).toEqual([

@@ -87,12 +87,13 @@ RUN wal-g --version \
 # LLVM and the server headers go after the checks above. Deleting them here and
 # then copying the whole filesystem into `scratch` below is what makes the
 # deletion real: files removed in a later layer would still be pulled, because
-# an image ships every layer. libLLVM is the JIT compiler's library, llvmjit.so
+# an image ships every layer. libLLVM (and the llvm21 directory that links to it) is the JIT compiler's
+# library, llvmjit.so
 # is the module that loads it, bitcode is what it inlines from, and
 # /usr/local/include is server headers that only a compiler reads. ICU data
 # stays, because non-English collations need it.
 RUN rm -f /usr/lib/libLLVM* /usr/local/lib/postgresql/llvmjit* \
- && rm -rf /usr/local/lib/postgresql/bitcode /usr/local/include
+ && rm -rf /usr/lib/llvm21 /usr/local/lib/postgresql/bitcode /usr/local/include
 
 # --- final image: one flat layer ---------------------------------------------
 # `FROM scratch` loses the base image's config, so everything the official image
