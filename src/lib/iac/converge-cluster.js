@@ -422,6 +422,7 @@ export async function convergeClusterInfra({
   try {
     upResult = await perfAsync(`scale.k8s.${clusterEnv}.upStack`, () =>
       upStack(clusterEnv, program, {
+        perfStem: `scale.k8s.${clusterEnv}.upStack`,
         provider: providerIdFor(envConfig),
         providerToken: apiToken,
         s3Config,

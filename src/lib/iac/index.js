@@ -25,8 +25,10 @@ import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
 import { summarizeCommandError } from '../cli/error-line.js';
 import { progressLog } from '../cli/progress.js';
 import { readOperatorVar } from '../operator-env.js';
+import { perfEnabled, perfRecord, perfTimer } from '../perf.js';
 import { getProviderClass } from '../providers/index.js';
 import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
+import { createResourceTimer } from './resource-timing.js';
 import {
   classifyStateError,
   failingPulumiCommandVerb,
@@ -547,11 +549,16 @@ export async function repairVultrFirewallRuleInputs(stack) {
  * decides whether `up` itself does too (state-lock.js, SCOPE).
  */
 async function upStackImpl(stackName, program, options = {}) {
+  // `options.perfStem` is the caller's own perf timer name (e.g.
+  // `deploy.k3s.iac.upStack`); the markers below hang off it so every arm of
+  // a deploy stays distinguishable.
+  const prepare = options.perfStem ? perfTimer(`${options.perfStem}.prepare`) : null;
   const stack = await withStateLock(
     resolveBackendUrl(options.s3Config, options.provider),
     `refresh ${stackName}`,
     () => prepareStackForUp(stackName, program, options),
   );
+  prepare?.end();
   return runUp(stack, options);
 }
 
@@ -639,6 +646,12 @@ async function runUp(stack, options) {
   // analysis. Destroy-path ops must still treat these as real.
   let rawOutputs;
   let summary;
+  // Per-resource timing from the engine event stream; only when perf tracing
+  // is on and the caller named its timer. The handler cannot throw.
+  const resourceTimer =
+    options.perfStem && perfEnabled()
+      ? createResourceTimer({ stem: options.perfStem, record: perfRecord })
+      : null;
   try {
     const result = await withStateBackendRetry(async () => {
       // A `up` that failed on an S3 `SlowDown` (common on a freshly-created
@@ -652,7 +665,12 @@ async function runUp(stack, options) {
       } catch {
         /* no lock — ignore */
       }
-      return stack.up({ onOutput: options.onOutput, color: 'never' });
+      resourceTimer?.begin();
+      return stack.up({
+        onOutput: options.onOutput,
+        color: 'never',
+        ...(resourceTimer ? { onEvent: resourceTimer.onEvent } : {}),
+      });
     }, 'up');
     rawOutputs = result.outputs || {};
     summary = result.summary;

@@ -72,6 +72,7 @@ async function provisionServer(ctx) {
   try {
     const result = await perfAsync('deploy.iac.upStack', () =>
       upStack(environment, program, {
+        perfStem: 'deploy.iac.upStack',
         provider: providerIdFor(envConfig),
         providerToken: apiToken,
         s3Config,

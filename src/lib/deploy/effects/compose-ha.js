@@ -361,6 +361,7 @@ async function haProvisionServers(ctx) {
         Promise.all([
           perfAsync('deploy.ha.compose.iac.upStack.primary', () =>
             upStack(`${environment}-primary`, primaryProgram, {
+              perfStem: 'deploy.ha.compose.iac.upStack.primary',
               provider: providerIdFor(envConfig),
               providerToken: apiToken,
               s3Config,
@@ -377,6 +378,7 @@ async function haProvisionServers(ctx) {
           ),
           perfAsync('deploy.ha.compose.iac.upStack.standby', () =>
             upStack(`${environment}-standby`, standbyProgram, {
+              perfStem: 'deploy.ha.compose.iac.upStack.standby',
               provider: providerIdFor(envConfig),
               providerToken: apiToken,
               s3Config,

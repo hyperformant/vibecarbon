@@ -4964,6 +4964,7 @@ async function deployK3sSteps(options, inFlight) {
     s.start('Provisioning k3s cluster (Pulumi up)');
     const { outputs } = await perfAsync(`deploy.${perfPrefix}.iac.upStack`, () =>
       upStack(options.environment, program, {
+        perfStem: `deploy.${perfPrefix}.iac.upStack`,
         provider: providerIdFor(options),
         providerToken: options.apiToken,
         s3Config: options.s3Config,
