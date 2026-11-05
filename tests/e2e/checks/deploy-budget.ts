@@ -7,7 +7,8 @@
  *
  * - DEPLOY-OWNED: `deploy.total` minus the TLS first look (`deploy.tls.ready`
  *   plus `deploy.tls.snapshot`), the work the deploy controls. A first-ever
- *   deploy waits up to 180 s for Let's Encrypt; that wait is the CA's, not ours.
+ *   deploy waits up to 180 s for Let's Encrypt's HTTP-01 validation (the CA
+ *   fetching the challenge from the new server); that wait is the CA's, not ours.
  * - END-TO-END: `deploy.total` itself, a first-ever deploy with TLS issued.
  *
  * `deploy.total` starts when executeDeployment does (after config gathering
@@ -59,8 +60,10 @@ const DELTA_MARKERS: Partial<Record<DeployMode, number>> = { 'compose-ha': 2 };
 /**
  * Markers that are not serial work of their own, kept out of the "slowest"
  * list a failure names:
- * - umbrellas that wrap other markers: the total, `.full`, the k8s-ha arms,
- *   every fan (`.fan`, `setupFan`, `pullFan`), and the image delta, which runs
+ * - umbrellas that wrap other markers: the totals (`deploy.total`, and
+ *   `cli.deploy.total`, the whole CLI process), `.full`, the k8s-ha arms,
+ *   `.fan` and `setupFan` (`pullFan` is NOT here: it is serial work on the
+ *   critical path and must be nameable), and the image delta, which runs
  *   inside `image.transfer` (compose, once per compose-ha server) or
  *   `image.deliver` (k8s);
  * - work that runs in the background, whose residue on the critical path has
@@ -68,11 +71,17 @@ const DELTA_MARKERS: Partial<Record<DeployMode, number>> = { 'compose-ha': 2 };
  *   compose stack pull (stackPull.await), the compose image transfer
  *   (transfer.await, and compose-ha's imageTransfer.await) and k8s-ha's early
  *   replication transport;
+ * - the Pulumi breakdown inside an iac.upStack marker (`.prepare`, `.resource.*`:
+ *   the select/refresh before `up`, and each resource's own time, which sum
+ *   to more than the wall clock when resources run in parallel);
+ * - markers nested inside another or outside `deploy.total`: the state seed
+ *   inside `deploy.preamble.s3Setup`, and `deploy.preamble.subscription`,
+ *   which runs while config is gathered, before `deploy.total` starts;
  * - the first-boot breakdown (`deploy.<prefix>.boot.*`, read back from each
  *   node after its ready wait): it splits time the ready wait already holds.
  */
 const NOT_SERIAL =
-  /^deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|Fan$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$|\.boot\./;
+  /^(cli\.)?deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|setupFan$|\.iac\.upStack(\.(primary|standby))?\.(prepare|resource\..+)$|^deploy\.preamble\.(s3Setup\.stateSeed|subscription)$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$|\.boot\./;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
 const ANSI = /\x1b\[[0-9;]*m/g;

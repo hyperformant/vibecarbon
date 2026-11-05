@@ -1122,14 +1122,16 @@ export async function executeDeployment(args, gatheredConfig) {
   accessSpinner.start('Checking operator IP access');
   let accessResult;
   try {
-    accessResult = await ensureOperatorIpAccess({
-      projectConfig,
-      environment,
-      isHA: isHATier(tier),
-      apiToken,
-      yes: !!args.yes,
-      onMessage: (msg) => progressLog(msg),
-    });
+    accessResult = await perfAsync('deploy.preamble.operatorIpAccess', () =>
+      ensureOperatorIpAccess({
+        projectConfig,
+        environment,
+        isHA: isHATier(tier),
+        apiToken,
+        yes: !!args.yes,
+        onMessage: (msg) => progressLog(msg),
+      }),
+    );
   } catch (err) {
     accessSpinner.stop('Operator IP access check failed', 1);
     throw err;
@@ -1363,6 +1365,7 @@ export async function executeDeployment(args, gatheredConfig) {
   }
   saveSkeletonEnv();
 
+  const s3SetupTimer = perfTimer('deploy.preamble.s3Setup');
   s3Spinner.start('Verifying S3 buckets');
   const skipS3Setup = await state.shouldSkipWithVerify('s3-setup', s3Inputs, verifyBucketsExist);
   s3Spinner.stop(skipS3Setup ? 'S3 buckets ready' : 'S3 setup needed');
@@ -1441,6 +1444,8 @@ export async function executeDeployment(args, gatheredConfig) {
       // has no legacy state), so a check failure must NOT hard-abort. Only a
       // CONFIRMED legacy-state copy failure aborts (below). Retry the checks a
       // few times so a transient blip doesn't misfire either way.
+      // Nested inside deploy.preamble.s3Setup (not a serial marker of its own).
+      const stateSeedTimer = perfTimer('deploy.preamble.s3Setup.stateSeed');
       let legacyState = false;
       let checkOk = false;
       for (let attempt = 1; attempt <= 3; attempt++) {
@@ -1500,6 +1505,7 @@ export async function executeDeployment(args, gatheredConfig) {
           process.exit(1);
         }
       }
+      stateSeedTimer.end();
 
       const result = {
         // Deliberately the PRE-state-bucket capture, not the provider's current
@@ -1540,6 +1546,7 @@ export async function executeDeployment(args, gatheredConfig) {
       process.exit(1);
     }
   }
+  s3SetupTimer.end();
 
   // Apply resolved S3 values from state
   const s3Result = state.getStepResult('s3-setup');
@@ -1585,17 +1592,19 @@ export async function executeDeployment(args, gatheredConfig) {
   // deploy only checks the object it is handed).
   let restorePoint = null;
   try {
-    restorePoint = await resolveDeployRestorePoint({
-      restore: args.restore,
-      k8s: isK8sTier(tier),
-      // The lineage the base comes from: -lineage, or the record the destroyed
-      // environment left (envConfig.backup survives a destroy).
-      envConfig,
-      lineage: args.lineage,
-      s3Config,
-      backupBucketName: backupS3Config?.bucket || null,
-      credentialVars: backupCredentialVars(envConfig),
-    });
+    restorePoint = await perfAsync('deploy.preamble.restorePoint', () =>
+      resolveDeployRestorePoint({
+        restore: args.restore,
+        k8s: isK8sTier(tier),
+        // The lineage the base comes from: -lineage, or the record the destroyed
+        // environment left (envConfig.backup survives a destroy).
+        envConfig,
+        lineage: args.lineage,
+        s3Config,
+        backupBucketName: backupS3Config?.bucket || null,
+        credentialVars: backupCredentialVars(envConfig),
+      }),
+    );
   } catch (err) {
     p.log.error(`deploy -restore: ${err.message}`);
     writeLogDetail(`# deploy -restore error detail: ${err?.stack || err}`);
@@ -1616,20 +1625,22 @@ export async function executeDeployment(args, gatheredConfig) {
   const storageProviderId = providerIdFor(envConfig);
   let appStorage;
   try {
-    appStorage = await resolveAppStorageCredential({
-      provider: storageProviderId,
-      environment,
-      envConfig,
-      projectConfig,
-      bucket: s3Config.bucket,
-      infraCredential: {
-        accessKey: s3Config.accessKey,
-        secretKey: s3Config.secretKey,
-        endpoint: s3Config.endpoint,
-      },
-      secrets: localAppStorageSecrets(),
-      apiToken,
-    });
+    appStorage = await perfAsync('deploy.preamble.appStorageCredential', () =>
+      resolveAppStorageCredential({
+        provider: storageProviderId,
+        environment,
+        envConfig,
+        projectConfig,
+        bucket: s3Config.bucket,
+        infraCredential: {
+          accessKey: s3Config.accessKey,
+          secretKey: s3Config.secretKey,
+          endpoint: s3Config.endpoint,
+        },
+        secrets: localAppStorageSecrets(),
+        apiToken,
+      }),
+    );
   } catch (err) {
     p.log.error(`App storage key: ${err.message}`);
     writeLogDetail(`# app storage key error detail: ${err?.stack || err}`);
@@ -2921,10 +2932,12 @@ export async function executeDeployment(args, gatheredConfig) {
   // providers whose project model needs post-hoc assignment (DigitalOcean);
   // a no-op elsewhere. Best-effort by contract — never fails the deploy.
   const AssignProvider = providerFor(envConfig);
-  await runProjectAssignment(new AssignProvider(apiToken), {
-    projectName: projectConfig.projectName,
-    environment,
-  });
+  await perfAsync('deploy.finish.fileResources', () =>
+    runProjectAssignment(new AssignProvider(apiToken), {
+      projectName: projectConfig.projectName,
+      environment,
+    }),
+  );
 
   const { formatted: timeStr } = tracker.finish();
   deployTotalTimer.end();

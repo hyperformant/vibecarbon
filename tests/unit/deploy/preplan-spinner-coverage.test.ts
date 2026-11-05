@@ -22,7 +22,7 @@ describe('deploy pre-plan phase keeps a spinner over its network waits', () => {
 
   it('starts a spinner before awaiting ensureOperatorIpAccess', () => {
     const start = src.indexOf('accessSpinner.start(');
-    const call = src.indexOf('await ensureOperatorIpAccess(');
+    const call = src.indexOf('ensureOperatorIpAccess({');
     expect(start).toBeGreaterThan(-1);
     expect(call).toBeGreaterThan(-1);
     expect(start).toBeLessThan(call);

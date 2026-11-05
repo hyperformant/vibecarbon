@@ -26,6 +26,7 @@ import {
 import { resolveEnvSeed } from '../env-identity.js';
 import { requireDeployEntitlement } from '../licensing/index.js';
 import { readOperatorVar } from '../operator-env.js';
+import { perfAsync } from '../perf.js';
 import {
   getObjectStorageProvider,
   listProviders,
@@ -811,7 +812,9 @@ export async function gatherDeploymentConfig(args) {
   // or credential prompt. Every deploy into a paid mode checks the project's
   // subscription (live, or the cached verdict); Compose returns at once.
   const deployTier = resolveTier({ deployMode, ha });
-  await requireDeployEntitlement({ deployTier, projectConfig });
+  await perfAsync('deploy.preamble.subscription', () =>
+    requireDeployEntitlement({ deployTier, projectConfig }),
+  );
 
   // Template lockstep (wal-g role file), on the tier just resolved and before
   // any region, DNS, server-type or credential prompt: this CLI moves the

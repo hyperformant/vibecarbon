@@ -203,6 +203,33 @@ describe('checkDeployBudget: time budgets', () => {
     expect(r.message).toMatch(/slowest: deploy\.tls\.ready 90s, deploy\.iac\.upStack 70s/);
   });
 
+  it('leaves the CLI total, Pulumi breakdown and nested preamble markers out of the slowest list', () => {
+    const extra = [
+      '[perf] cli.deploy.total 999000ms',
+      '[perf] deploy.iac.upStack.prepare 800000ms',
+      '[perf] deploy.iac.upStack.resource.Server.web 700000ms',
+      '[perf] deploy.k3s.primary.iac.upStack.resource.Firewall.fw 600000ms',
+      '[perf] deploy.preamble.s3Setup.stateSeed 500000ms',
+      '[perf] deploy.preamble.subscription 400000ms',
+    ].join('\n');
+    const r = checkDeployBudget(`${fixture('compose', { total: 400_000 })}\n${extra}\n`, 'compose');
+    expect(r.message).not.toMatch(
+      /cli\.deploy\.total|\.prepare|\.resource\.|stateSeed|subscription/,
+    );
+    expect(r.message).toMatch(/slowest: deploy\.tls\.ready 90s, deploy\.iac\.upStack 70s/);
+  });
+
+  it('names serial preamble and pullFan markers among the slowest', () => {
+    const extra = [
+      '[perf] deploy.ha.compose.pullFan 900000ms',
+      '[perf] deploy.preamble.s3Setup 800000ms',
+    ].join('\n');
+    const r = checkDeployBudget(`${fixture('compose', { total: 400_000 })}\n${extra}\n`, 'compose');
+    expect(r.message).toMatch(
+      /slowest: deploy\.ha\.compose\.pullFan 900s, deploy\.preamble\.s3Setup 800s/,
+    );
+  });
+
   it('fails a log with no deploy.total marker (the check cannot run)', () => {
     const log = fixture('compose').replace(/^\[perf\] deploy\.total .*$/m, '');
     const r = checkDeployBudget(log, 'compose');
