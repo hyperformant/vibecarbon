@@ -19,9 +19,13 @@ vi.mock('node:child_process', async () => {
 const k3sModulePromise = import('../../../src/lib/deploy/k8s/k3s.js');
 
 /** Minimal ChildProcess stand-in for runCommandAsync's silent:true path. */
-function fakeChild(code = 0) {
+function fakeChild(code = 0, stdout = '') {
   const child = {
-    stdout: { on: vi.fn() },
+    stdout: {
+      on(event: string, cb: (d: string) => void) {
+        if (event === 'data' && stdout) Promise.resolve().then(() => cb(stdout));
+      },
+    },
     stderr: { on: vi.fn() },
     on(event: string, cb: (...args: unknown[]) => void) {
       if (event === 'close') Promise.resolve().then(() => cb(code));
@@ -36,9 +40,11 @@ describe('k3s SSH host-key pinning (PR 1B-T6)', () => {
     const { waitForK3sReady } = await k3sModulePromise;
     const spawnMock = vi.mocked(spawn);
     spawnMock.mockReset();
-    // First (and only) ssh probe resolves exit 0 → marker present → pollUntil
-    // returns without a second attempt.
-    spawnMock.mockImplementationOnce(() => fakeChild(0) as unknown as ReturnType<typeof spawn>);
+    // First (and only) held ssh session prints READY → marker present → the
+    // wait returns without reconnecting.
+    spawnMock.mockImplementationOnce(
+      () => fakeChild(0, 'CONNECTED\nREADY\n') as unknown as ReturnType<typeof spawn>,
+    );
 
     const tmp = mkdtempSync(join(tmpdir(), 'vc-k3s-test-'));
     const khPath = join(tmp, '.vibecarbon', 'known_hosts_e2e');

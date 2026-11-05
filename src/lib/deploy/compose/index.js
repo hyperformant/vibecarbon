@@ -59,10 +59,12 @@ import {
   isAdminProbeExit,
   isTerminalAdminProbeExit,
 } from '../admin-ready.js';
+import { BOOT_MARK_LOG, BOOT_STAGE_LABELS } from '../boot-timing.js';
 // DNS_NOT_SETTLED_RETRY_DELAYS_MS: shared with remote-build.js's own
 // DNS-not-settled ladder so the two can't drift apart — see that file's
 // docstring on the constant for the sizing rationale.
 import { DNS_NOT_SETTLED_RETRY_DELAYS_MS } from '../remote-build.js';
+import { waitForRemoteMarker } from '../remote-marker.js';
 import { composeRlsAuditShell } from '../rls-audit.js';
 import {
   assertWalgBackupsWorking,
@@ -443,44 +445,59 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
   // a slow boot (or a flaky uplink) reads as "still working", not "hung".
   const s = spinner();
   s.start(`Waiting for ${ip} to finish booting (cloud-init)...`);
-  // Deliberately NOT lib/retry.js#pollUntil: this loop's two-phase cadence
-  // (750ms × 15 fast probes, then flat 5s) isn't expressible in pollUntil's
-  // exponential backoff, and the fast phase saves ~10s on every deploy.
   const start = Date.now();
   // Provider-owned (see BaseProvider.CLOUD_INIT_READY_TIMEOUT_MS): 180s is a
   // generous ceiling vs Hetzner's typical ~20-40s (Docker preinstalled), but
   // a provider that installs Docker inside cloud-init (e.g. DigitalOcean)
   // passes a materially larger timeoutMs.
   const deadline = start + timeoutMs;
-  let attempt = 0;
   let everConnected = false;
-  while (Date.now() < deadline) {
-    // retries:1 — the poll loop IS the retry, so each tick is a SINGLE ssh
-    // attempt. That keeps the wait quiet: no inner `[retry] ssh …` lines
-    // printing raw over the spinner (the corruption a flaky connection used to
-    // trigger). The spinner message carries progress instead.
-    const result = await sshRunAsync(
-      ip,
-      sshKeyPath,
-      'test -f /var/lib/vibecarbon/ready && echo READY || echo NOT_READY',
-      { timeout: 10_000, ignoreError: true, retries: 1 },
-    );
-    if (result != null) everConnected = true; // any output means SSH connected
-    if (hasSentinelLine(result, 'READY')) {
-      s.stop(`Server ${ip} ready (cloud-init complete)`);
-      // Not awaited: the deploy never waits on the boot pull.
-      noteBootPull(ip, sshKeyPath);
-      return;
-    }
+  let stageLabel = '';
+  // One held SSH session returns the moment the marker exists and streams the
+  // boot log; a 1s timer keeps the spinner's elapsed time and stage current.
+  const render = () => {
     const elapsed = Math.round((Date.now() - start) / 1000);
-    s.message(
-      everConnected
-        ? `Waiting for cloud-init to finish on ${ip} (${elapsed}s)...`
-        : `Waiting for SSH to reach ${ip} (${elapsed}s)...`,
-    );
-    const interval = attempt < 15 ? 750 : 5000;
-    attempt++;
-    await new Promise((r) => setTimeout(r, interval));
+    const base = everConnected
+      ? `Waiting for cloud-init to finish on ${ip} (${elapsed}s)`
+      : `Waiting for SSH to reach ${ip} (${elapsed}s)`;
+    s.message(stageLabel ? `${base}: ${stageLabel}` : `${base}...`);
+  };
+  const ticker = setInterval(render, 1000);
+  let ready = false;
+  try {
+    ({ ready, connected: everConnected } = await waitForRemoteMarker({
+      run: (script, { timeoutMs: holdMs, onLine }) =>
+        sshRunAsync(ip, sshKeyPath, script, {
+          timeout: holdMs,
+          ignoreError: true,
+          retries: 1,
+          onStdoutLine: onLine,
+        }),
+      markerPath: '/var/lib/vibecarbon/ready',
+      logPath: BOOT_MARK_LOG,
+      deadlineMs: deadline,
+      onConnected: () => {
+        everConnected = true;
+        render();
+      },
+      onLine: (line) => {
+        // Boot-log lines are `<phase id> <epoch seconds>`.
+        const mark = /^([a-z]) \d+$/.exec(line.trim());
+        const label = mark && BOOT_STAGE_LABELS[mark[1]];
+        if (label && label !== stageLabel) {
+          stageLabel = label;
+          render();
+        }
+      },
+    }));
+  } finally {
+    clearInterval(ticker);
+  }
+  if (ready) {
+    s.stop(`Server ${ip} ready (cloud-init complete)`);
+    // Not awaited: the deploy never waits on the boot pull.
+    noteBootPull(ip, sshKeyPath);
+    return;
   }
 
   s.stop(

@@ -68,6 +68,23 @@ export const PHASE_IDS = Object.freeze({
   e: 'done',
 });
 
+/**
+ * Plain words for what the server is doing at each phase id, shown beside the
+ * ready wait's spinner. `e` (done) needs no label: the wait ends there.
+ */
+export const BOOT_STAGE_LABELS = Object.freeze({
+  p: 'starting up',
+  a: 'installing system packages',
+  n: 'setting up the network',
+  w: 'waiting for the primary server',
+  k: 'installing Kubernetes',
+  r: 'waiting for Kubernetes',
+  x: 'installing cluster add-ons',
+  d: 'starting Docker',
+  u: 'installing the firewall',
+  b: 'pulling the database image',
+});
+
 /** The whole collection's bound, all nodes in parallel. */
 export const BOOT_TIMING_BUDGET_MS = 45_000;
 
