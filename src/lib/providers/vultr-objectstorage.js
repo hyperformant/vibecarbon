@@ -29,6 +29,9 @@ export class VultrObjectStorageProvider extends S3CompatibleProvider {
   /** No settle window has been observed on a new bucket here. */
   static bucketSettleWindowMs = 0;
 
+  /** A new bucket answers from its first request here, so nothing waits. */
+  static bucketQuietMs = 0;
+
   // R2: one key pair per subscription and policies apply to everyone, so the app shares it.
   static appKeyScoping = 'none';
 

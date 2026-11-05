@@ -53,6 +53,9 @@ export class ScalewayObjectStorageProvider extends S3CompatibleProvider {
   /** No settle window has been observed on a new bucket here. */
   static bucketSettleWindowMs = 0;
 
+  /** A new bucket answers from its first request here, so nothing waits. */
+  static bucketQuietMs = 0;
+
   // R2: a one-bucket key needs org-wide IAM write on the deploy key, a privilege escalation, so the app shares it.
   static appKeyScoping = 'none';
 

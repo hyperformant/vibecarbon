@@ -30,6 +30,16 @@ export class HetznerS3Provider extends S3CompatibleProvider {
   static bucketSettleWindowMs = 20 * 60_000;
 
   /**
+   * How long a new bucket is left alone. A HEAD or LIST in its first second can
+   * leave it answering NoSuchBucket at random for up to 15 minutes. On
+   * 2026-11-05, 54 new buckets across hel1, fsn1 and nbg1: touched at once, 6
+   * of 18 did this; silent for 1 s or 2 s, none of 36 did. No bucket left alone
+   * for a second or more did so in any test that day (111 buckets). 2 s rather
+   * than 1 because a miss costs 15 minutes and the pause costs 2 s per bucket.
+   */
+  static bucketQuietMs = 2000;
+
+  /**
    * Keys are made only in the console (every API credential route is a 404),
    * but each key is its own principal, `arn:aws:iam:::user/<ownerId>:<accessKeyId>`,
    * so a pasted app key can be fenced out of the other buckets with a Deny

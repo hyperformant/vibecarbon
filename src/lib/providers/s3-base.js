@@ -543,6 +543,12 @@ export class S3CompatibleProvider {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         await this._send(command, { maxAttempts: 1 });
+        // Before anything else touches the bucket, not as part of the wait
+        // below: on a provider with a quiet period, that first probe arriving
+        // too soon is what makes the bucket unreliable (static bucketQuietMs).
+        if (this.constructor.bucketQuietMs > 0) {
+          await new Promise((r) => setTimeout(r, this.constructor.bucketQuietMs));
+        }
         const ready = await this.waitForBucketVisible(bucketName);
         return { name: bucketName, created: true, ready };
       } catch (error) {

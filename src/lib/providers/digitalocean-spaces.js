@@ -25,6 +25,9 @@ export class DigitalOceanSpacesProvider extends S3CompatibleProvider {
   /** No settle window has been observed on a new bucket here. */
   static bucketSettleWindowMs = 0;
 
+  /** A new bucket answers from its first request here, so nothing waits. */
+  static bucketQuietMs = 0;
+
   /**
    * The API mints a key with a `readwrite` grant on one bucket, which gets
    * 403 on every other bucket and on ListBuckets (security plan R2, measured
