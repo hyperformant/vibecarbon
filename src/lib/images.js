@@ -245,7 +245,7 @@ export function carbonAutoscalerImageRef() {
 // byte-identical to upstream's so a version string means exactly one thing
 // everywhere. Bumping CA therefore means: bump CLUSTER_AUTOSCALER_TAG, let
 // the mirror workflow run, THEN deploy. Its minor must equal the cluster's
-// (K3S_VERSION in src/lib/deploy/k8s/k3s.js): upstream only tests that pairing.
+// (K3S_VERSION below): upstream only tests that pairing.
 //
 // Like every other package in the org, ghcr.io/hyperformant/cluster-autoscaler
 // must be set PUBLIC — k3s nodes pull it anonymously, with no imagePullSecret.
@@ -260,9 +260,16 @@ export const CLUSTER_AUTOSCALER_TAG = 'v1.37.0';
 export const CLUSTER_AUTOSCALER_DIGEST =
   'sha256:c239e40cc745d9e0f1ba7c2272eaab44ca4586cd053f13ba8c8a4a6b27b18294';
 
+/** @type {MirroredImage} */
+export const CLUSTER_AUTOSCALER_MIRROR = {
+  repo: 'autoscaling/cluster-autoscaler',
+  tag: CLUSTER_AUTOSCALER_TAG,
+  digest: CLUSTER_AUTOSCALER_DIGEST,
+};
+
 /** @returns {string} the ref k8s deploys — e.g. "ghcr.io/hyperformant/cluster-autoscaler:v1.37.0@sha256:…" */
 export function clusterAutoscalerImageRef() {
-  return `${CLUSTER_AUTOSCALER_IMAGE}:${CLUSTER_AUTOSCALER_TAG}@${CLUSTER_AUTOSCALER_DIGEST}`;
+  return currentImageSet().kubernetes.clusterAutoscaler;
 }
 
 /** @returns {string} the ref the mirror workflow COPIES FROM — never deployed directly */
@@ -503,11 +510,11 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 //
 // BUMPING ONE: Dependabot cannot see these (the refs point at our mirror, and
 // the mirror tag's digest is the index the job mints, not this child digest).
-// Edit {tag, digest, index} here AND the literal copies (compose files and k8s base
-// manifests, which cannot import JS; the census
-// tests/unit/deploy/core-images-from-mirror-census.test.ts fails until every
-// copy names an entry exactly), merge, and publish-images mirrors the new tag.
-// The weekly `mirror-upstream-drift` job lists newer upstream tags.
+// The images in the version set (CHANNEL_IMAGES below) need no bump to reach a
+// deploy: version-channel.yml moves them, and an edit here only moves the floor a
+// CLI release ships with. For the rest, edit {tag, digest, index} here, merge,
+// and publish-images mirrors the new tag. The weekly `mirror-upstream-drift` job
+// lists newer upstream tags.
 //
 // Not here, deliberately: the add-ons (n8n, Metabase, Redis, observability)
 // and their alpine helpers, the diagnose-only probes, and BINFMT_IMAGE (runs
@@ -566,7 +573,7 @@ export const SOCAT_MIRROR = {
 /**
  * @type {MirroredImage} the backup CronJob's kubectl (carbon/k8s/base/backup/
  * cronjob.yaml). Its tag tracks a Kubernetes minor and must stay within one
- * minor of K3S_VERSION (src/lib/deploy/k8s/k3s.js).
+ * minor of K3S_VERSION.
  */
 export const ALPINE_K8S_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
@@ -575,6 +582,12 @@ export const ALPINE_K8S_MIRROR = {
   digest: 'sha256:bd844bea70da4fbca6e10062d0e282809874045a86aaf60e58ca5a296f04d99d',
   index: 'sha256:dcb7185e112a453aa72f426754849a97357727ef8f40168fb208c8cf59952042',
 };
+
+/**
+ * The k3s release a new cluster installs when the channel cannot be read. A
+ * cluster keeps the version it was built with (src/lib/version-channel.js).
+ */
+export const K3S_VERSION = 'v1.37.2+k3s1';
 
 /**
  * The alias k3s's `--system-default-registry` names its system images under.
@@ -603,8 +616,9 @@ export const K3S_SYSTEM_REGISTRY = 'vibecarbon-system.invalid';
  * it (a dollar sign followed by a quote stays literal).
  *
  * Tags are k3s-images.txt of K3S_VERSION (v1.37.2+k3s1). Unmirrored on
- * purpose: klipper-helm and mirrored-library-traefik (`--disable traefik`)
- * and klipper-lb (`--disable servicelb`). mirrored-library-busybox (the
+ * purpose: klipper-helm (`--disable traefik`, `--disable gateway-api-crd`: its
+ * only users are those two charts), mirrored-library-traefik (`--disable
+ * traefik`) and klipper-lb (`--disable servicelb`). mirrored-library-busybox (the
  * local-path helper) IS mirrored although the deploy refuses local-path
  * PVCs: through the alias registry below there is no Docker Hub fallback.
  * A K3S_VERSION bump re-derives these from the new release's k3s-images.txt
@@ -668,22 +682,24 @@ export const DOCKERHUB_MIRRORS = [
  * by digest through the same `kubectl set image` seam. DO's v4.19.0
  * driver.yaml runs its `automount-udev-deleter` init container as bare
  * `alpine:3`, a floating major on Docker Hub; it now runs our alpine mirror
- * (ALPINE_MIRROR above), so a rate-limited Docker Hub cannot hold up the
+ * (the set's `images.alpine`), so a rate-limited Docker Hub cannot hold up the
  * node plugin. `kubectl set image` addresses init containers by name too.
  * Values are full refs. csiSidecarSetImagePlan merges these into the same
  * per-workload call as the mirrors, so no extra rollout happens.
- * @type {Record<string, Array<{workload: string, containers: Record<string, string>}>>}
+ * @returns {Record<string, Array<{workload: string, containers: Record<string, string>}>>}
  */
-export const CSI_UPSTREAM_IMAGE_PINS = {
-  digitalocean: [
-    {
-      workload: 'daemonset/csi-do-node',
-      containers: {
-        'automount-udev-deleter': k8sMirrorRef(ALPINE_MIRROR),
+export function csiUpstreamImagePins() {
+  return {
+    digitalocean: [
+      {
+        workload: 'daemonset/csi-do-node',
+        containers: {
+          'automount-udev-deleter': alpineImageRef(),
+        },
       },
-    },
-  ],
-};
+    ],
+  };
+}
 
 /**
  * Every image we mirror (registry.k8s.io and Docker Hub), in publish order.
@@ -701,11 +717,7 @@ export const MIRRORED_IMAGES = assertDistinctPackageNames(
     // Keeps its own named constants because deploy code references the CA image
     // directly, but it is mirrored by the same matrix as everything else — one
     // mechanism, not two.
-    {
-      repo: 'autoscaling/cluster-autoscaler',
-      tag: CLUSTER_AUTOSCALER_TAG,
-      digest: CLUSTER_AUTOSCALER_DIGEST,
-    },
+    CLUSTER_AUTOSCALER_MIRROR,
     ...Object.values(CSI_SIDECAR_MIRRORS).flatMap((specs) =>
       specs.flatMap((spec) => Object.values(spec.containers)),
     ),
@@ -813,7 +825,7 @@ export function mirroredPackageNames() {
  */
 export function csiSidecarSetImagePlan(providerId) {
   const specs = (providerId && CSI_SIDECAR_MIRRORS[providerId]) || [];
-  const inPlace = (providerId && CSI_UPSTREAM_IMAGE_PINS[providerId]) || [];
+  const inPlace = (providerId && csiUpstreamImagePins()[providerId]) || [];
   const plan = specs.map(({ workload, containers }) => ({
     workload,
     setImageArgs: Object.entries(containers).map(
@@ -841,33 +853,142 @@ export const DIAG_BUSYBOX_IMAGE =
 export const DIAG_NETSHOOT_IMAGE =
   'nicolaka/netshoot:v0.16@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70';
 
-// Per-image mirror refs, digest-pinned: `ghcr.io/hyperformant/<name>:<tag>@<digest>`.
-// Compose and k8s manifests carry the same strings as literals; the census
-// keeps them equal.
+// ---------------------------------------------------------------------------
+// The version set: what a deploy runs
+// ---------------------------------------------------------------------------
+//
+// The channel (.github/workflows/version-channel.yml) moves these with no CLI
+// release, so a patched image reaches deploys on its own. The constants above
+// are the BUNDLED copy: what a deploy runs when the channel cannot be read, and
+// the floor a channel entry may not go below. src/lib/version-channel.js picks
+// the set for a command and activates it once; everything below reads that one
+// set, so both sides of an HA pair run the same refs by construction.
+//
+// `images` move on every deploy. `kubernetes` moves as one set and stays at the
+// recorded version on an existing cluster: k3s cannot skip minors and we do not
+// upgrade clusters in place. cluster-autoscaler's minor equals the cluster's and
+// alpine/k8s stays within one minor of it, so both belong to that set.
+//
+// Not in the set: the db image, node-runtime and carbon-autoscaler (ours: a new
+// one is a source change in this repo, which the job does not make), the CSI
+// sidecars (they move with the driver version cloud-init applies, which stays
+// here), the k3s system images (k3s names them itself; the job mirrors them
+// first), pause (tests only) and the add-ons (not mirrored).
+
+/** @typedef {{images: Record<string, string>, kubernetes: Record<string, string>}} ImageSet */
+
+/** The channel's `images` keys, and the bundled entry each one starts from. */
+export const CHANNEL_IMAGES = Object.freeze({
+  traefik: TRAEFIK_MIRROR,
+  dockerSocketProxy: DOCKER_SOCKET_PROXY_MIRROR,
+  alpine: ALPINE_MIRROR,
+  registry: REGISTRY_MIRROR,
+  socat: SOCAT_MIRROR,
+});
+
+/** The channel's `kubernetes` image keys, beside its `k3s` version. */
+export const CHANNEL_KUBERNETES_IMAGES = Object.freeze({
+  clusterAutoscaler: CLUSTER_AUTOSCALER_MIRROR,
+  kubectl: ALPINE_K8S_MIRROR,
+});
+
+/**
+ * The set this CLI ships: the fallback for an unreadable channel.
+ * @returns {ImageSet}
+ */
+export function bundledImageSet() {
+  const refs = (table) =>
+    Object.fromEntries(Object.entries(table).map(([key, image]) => [key, k8sMirrorRef(image)]));
+  return {
+    images: refs(CHANNEL_IMAGES),
+    kubernetes: { k3s: K3S_VERSION, ...refs(CHANNEL_KUBERNETES_IMAGES) },
+  };
+}
+
+/** @type {ImageSet | null} */
+let activeImageSet = null;
+
+/**
+ * Make `set` the one this process runs. Only src/lib/version-channel.js calls
+ * this, with a set it validated (census: version-channel-census.test.ts).
+ * @param {ImageSet | null} set
+ */
+export function activateImageSet(set) {
+  activeImageSet = set;
+}
+
+/** @returns {ImageSet} the active set, else the bundled copy */
+export function currentImageSet() {
+  return activeImageSet ?? bundledImageSet();
+}
 
 /** @returns {string} the mirrored traefik ref */
 export function traefikImageRef() {
-  return k8sMirrorRef(TRAEFIK_MIRROR);
+  return currentImageSet().images.traefik;
 }
 /** @returns {string} the mirrored docker-socket-proxy ref */
 export function dockerSocketProxyImageRef() {
-  return k8sMirrorRef(DOCKER_SOCKET_PROXY_MIRROR);
+  return currentImageSet().images.dockerSocketProxy;
 }
 /** @returns {string} the mirrored alpine ref */
 export function alpineImageRef() {
-  return k8sMirrorRef(ALPINE_MIRROR);
+  return currentImageSet().images.alpine;
 }
 /** @returns {string} the mirrored registry ref (k8s in-cluster registry) */
 export function registryImageRef() {
-  return k8sMirrorRef(REGISTRY_MIRROR);
+  return currentImageSet().images.registry;
 }
 /** @returns {string} the mirrored socat ref (both HA tiers' replication gateway) */
 export function socatImageRef() {
-  return k8sMirrorRef(SOCAT_MIRROR);
+  return currentImageSet().images.socat;
 }
 /** @returns {string} the mirrored alpine/k8s ref (the backup CronJob) */
 export function alpineK8sImageRef() {
-  return k8sMirrorRef(ALPINE_K8S_MIRROR);
+  return currentImageSet().kubernetes.kubectl;
+}
+/** @returns {string} the k3s version a node of this environment installs */
+export function k3sVersion() {
+  return currentImageSet().kubernetes.k3s;
+}
+
+/**
+ * The tag a Traefik ref carries. The CRDs come from the same Traefik tag
+ * (k8s/infra/traefik-crds): a field newer than the CRD schema is pruned
+ * silently, so the two move together.
+ * @returns {string} e.g. "v3.7.17"
+ */
+export function traefikVersion() {
+  const ref = traefikImageRef();
+  return ref.slice(ref.indexOf(':') + 1, ref.indexOf('@'));
+}
+
+/**
+ * The `{{TOKEN}}`s the k8s templates carry for the set, with this deploy's
+ * values. The compose files take the same refs through .env
+ * (TRAEFIK_IMAGE, DOCKER_SOCKET_PROXY_IMAGE; deploy/bundle.js).
+ * @returns {Record<string, string>}
+ */
+export function manifestImageValues() {
+  return {
+    TRAEFIK_IMAGE: traefikImageRef(),
+    TRAEFIK_VERSION: traefikVersion(),
+    REGISTRY_IMAGE: registryImageRef(),
+    SOCAT_IMAGE: socatImageRef(),
+    KUBECTL_IMAGE: alpineK8sImageRef(),
+    CLUSTER_AUTOSCALER_IMAGE: clusterAutoscalerImageRef(),
+  };
+}
+
+/**
+ * Fill every set token in a manifest's text.
+ * @param {string} text
+ * @returns {string}
+ */
+export function renderManifestImages(text) {
+  return Object.entries(manifestImageValues()).reduce(
+    (out, [key, value]) => out.replaceAll(`{{${key}}}`, value),
+    text,
+  );
 }
 
 /** @returns {string} the mirrored pause ref — e.g. "ghcr.io/hyperformant/pause:3.9@sha256:…" */

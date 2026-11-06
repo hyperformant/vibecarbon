@@ -38,6 +38,7 @@ import {
   uploadKubeconfig,
   waitForLatestWorkflowRun,
 } from '../../github-environments.js';
+import { alpineK8sImageRef, traefikVersion } from '../../images.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import { k8sTlsIdentity } from './k3s.js';
 
@@ -309,6 +310,10 @@ export async function deployK8sGitOps(args) {
     // The deploy-owned vibecarbon-tls Certificate (Flux drops it from its
     // build); deploy.yml renders and applies it from these.
     ...tlsCertVars,
+    // The two values deploy.yml renders itself, from this environment's
+    // version set: the backup CronJob's kubectl and the Traefik CRDs' tag.
+    KUBECTL_IMAGE: alpineK8sImageRef(),
+    TRAEFIK_VERSION: traefikVersion(),
   };
   await seedEnvironmentSecrets(environment, perEnvSecrets, perEnvVars);
   await uploadKubeconfig(environment, kubeconfigPath);

@@ -8,6 +8,8 @@ import { digestDir } from '../../../src/lib/deploy/digest.js';
 import { BUNDLED_K8S_DIR, buildK3sApplyInputs } from '../../../src/lib/deploy/k8s/k3s.js';
 // @ts-expect-error — JS module without types
 import { StateTracker } from '../../../src/lib/deploy/state.js';
+// @ts-expect-error — JS module without types
+import { activateImageSet, bundledImageSet } from '../../../src/lib/images.js';
 
 /**
  * Regression coverage for the `k3s-apply` gate hole found in the M3 follow-up
@@ -63,6 +65,25 @@ describe('buildK3sApplyInputs — bundled manifest tree is part of the gate', ()
 
   it('is stable across calls (content-only digest — no mtimes/absolute paths)', () => {
     expect(buildK3sApplyInputs(baseArgs())).toEqual(buildK3sApplyInputs(baseArgs()));
+  });
+
+  it('an unchanged version set leaves the gate shut, and a moved one opens it', () => {
+    const before = buildK3sApplyInputs(baseArgs());
+    const set = bundledImageSet();
+    try {
+      activateImageSet(structuredClone(set));
+      expect(buildK3sApplyInputs(baseArgs())).toEqual(before);
+      activateImageSet({
+        ...set,
+        images: {
+          ...set.images,
+          traefik: `${set.images.traefik.split('@')[0]}@sha256:${'c'.repeat(64)}`,
+        },
+      });
+      expect(buildK3sApplyInputs(baseArgs()).imageSetDigest).not.toBe(before.imageSetDigest);
+    } finally {
+      activateImageSet(null);
+    }
   });
 
   it('re-runs the gate when only the bundled manifest content changed', () => {

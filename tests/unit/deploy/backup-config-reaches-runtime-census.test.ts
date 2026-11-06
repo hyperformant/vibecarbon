@@ -40,6 +40,7 @@ import {
 } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { setupComposeBackupCron } from '../../../src/lib/deploy/compose/index.js';
 import { resolveBackupConfig } from '../../../src/lib/deploy/prompts.js';
+import { alpineK8sImageRef } from '../../../src/lib/images.js';
 import {
   formatReachSites,
   loadSourceTree,
@@ -237,19 +238,32 @@ describe('Flux cannot revert a deploy-owned backup, and the workflow applies it 
       env,
     });
     expect(none.status).toBe(1);
-    expect(none.stderr).toMatch(/BACKUP_SCHEDULE and BACKUP_RETENTION_DAYS are not set/);
+    expect(none.stderr).toMatch(
+      /BACKUP_SCHEDULE, BACKUP_RETENTION_DAYS and KUBECTL_IMAGE are not set/,
+    );
     expect(none.stderr).toContain('vibecarbon configure cicd');
     const ok = spawnSync('node', [join(dir, 'render.mjs'), join(dir, 'k8s/base')], {
       encoding: 'utf8',
-      env: { ...env, BACKUP_SCHEDULE: '15 3 * * *', BACKUP_RETENTION_DAYS: '21' },
+      env: {
+        ...env,
+        BACKUP_SCHEDULE: '15 3 * * *',
+        BACKUP_RETENTION_DAYS: '21',
+        KUBECTL_IMAGE: alpineK8sImageRef(),
+      },
     });
     expect(ok.status, ok.stderr).toBe(0);
+    expect(ok.stdout).toContain(`image: "${alpineK8sImageRef()}"`);
     expect(ok.stdout).toContain('schedule: "15 3 * * *"');
     expect(ok.stdout).toContain('BACKUP_RETENTION_DAYS: "21"');
     writeFileSync(join(dir, 'out.yaml'), ok.stdout);
     const bad = spawnSync('node', [join(dir, 'render.mjs'), join(dir, 'k8s/base')], {
       encoding: 'utf8',
-      env: { ...env, BACKUP_SCHEDULE: '15 3 * * *', BACKUP_RETENTION_DAYS: '0' },
+      env: {
+        ...env,
+        BACKUP_SCHEDULE: '15 3 * * *',
+        BACKUP_RETENTION_DAYS: '0',
+        KUBECTL_IMAGE: alpineK8sImageRef(),
+      },
     });
     expect(bad.status).toBe(1);
     expect(bad.stderr).toMatch(/positive whole number of days/);
@@ -310,6 +324,7 @@ describe('the TLS snapshot prefix rides in vibecarbon-backup-settings', () => {
       PATH: process.env.PATH ?? '',
       BACKUP_SCHEDULE: '15 3 * * *',
       BACKUP_RETENTION_DAYS: '21',
+      KUBECTL_IMAGE: alpineK8sImageRef(),
     };
     const run = (extra: Record<string, string>) =>
       spawnSync('node', [join(dir, 'render.mjs'), join(dir, 'k8s/base')], {

@@ -22,6 +22,7 @@ import {
   knownHostsPathForKey,
   seedKnownHosts,
 } from '../../../host-keys.js';
+import { renderManifestImages } from '../../../images.js';
 import { perfAsync } from '../../../perf.js';
 import { shJoin } from '../../../shell.js';
 import { sshRun } from '../../../ssh.js';
@@ -126,7 +127,7 @@ export function buildReplGatewaySocatArgs(role, nodePrivateIp) {
  */
 export function renderReplGatewayManifest({ template, role, nodePrivateIp }) {
   const { relayListen, relayTarget } = buildReplGatewaySocatArgs(role, nodePrivateIp);
-  return template
+  return renderManifestImages(template)
     .replaceAll('__RELAY_LISTEN__', relayListen)
     .replaceAll('__RELAY_TARGET__', relayTarget)
     .replaceAll('__DB_PRIVATE_IP__', nodePrivateIp);
@@ -153,7 +154,7 @@ export function renderRegistryRelayManifest({ template, primaryMasterPrivateIp }
   if (!primaryMasterPrivateIp) {
     throw new Error('renderRegistryRelayManifest: primaryMasterPrivateIp is required');
   }
-  return template
+  return renderManifestImages(template)
     .replaceAll(
       '__RELAY_LISTEN__',
       `TCP-LISTEN:${REGISTRY_RELAY_PORT},bind=${WG_PRIMARY_IP},fork,reuseaddr,range=${WG_STANDBY_IP}/32`,

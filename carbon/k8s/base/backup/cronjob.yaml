@@ -81,7 +81,7 @@ spec:
               # until Bitnami sunset their public Docker Hub catalog (2025) and
               # the tag vanished (`not found` → ImagePullBackOff); alpine/k8s
               # is the maintained drop-in (alpine base, bash + kubectl).
-              image: ghcr.io/hyperformant/k8s:1.37.2@sha256:bd844bea70da4fbca6e10062d0e282809874045a86aaf60e58ca5a296f04d99d
+              image: "{{KUBECTL_IMAGE}}"
               imagePullPolicy: IfNotPresent
               env:
                 - name: BACKUP_RETENTION_DAYS

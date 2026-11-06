@@ -272,23 +272,17 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
  * on ITS first pull, so two nodes in one HA pair could run different builds.
  *
  * Pulled from our ghcr mirror (socatImageRef, src/lib/images.js), pinned by
- * tag AND upstream's amd64 digest, so neither a retagged 1.8.1.3 nor a Docker
- * Hub rate limit can reach a node.
- *
- * LOCKSTEP: must match the ref in
- * carbon/k8s/base/repl-gateway/repl-gateway.yaml and registry-relay.yaml (the
- * k8s tier). tests/unit/deploy/socat-pin.test.ts and
- * core-images-from-mirror-census.test.ts fail the build if they drift.
+ * tag AND upstream's amd64 digest, so neither a retagged tag nor a Docker Hub
+ * rate limit can reach a node, and both nodes run the one ref the deploy
+ * resolved.
  */
-export const SOCAT_IMAGE = socatImageRef();
-
 export function buildReplicationOverlay(selfWgIp) {
   return `services:
   db:
     ports:
       - "${REPL_PORT}:5432"
   repl-gateway:
-    image: ${SOCAT_IMAGE}
+    image: ${socatImageRef()}
     network_mode: host
     restart: unless-stopped
     command:

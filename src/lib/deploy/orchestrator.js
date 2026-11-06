@@ -31,6 +31,7 @@ import { readSshVersion } from '../runtime-floors.js';
 import { mintAttemptId } from '../services/addon-start.js';
 import { sshKeyPathFor } from '../ssh.js';
 import { createTracker } from '../tracker.js';
+import { resolveDeployImageSet } from '../version-channel.js';
 import {
   assertDeployRestoreAllowed,
   backupCredentialVars,
@@ -1284,6 +1285,16 @@ export async function executeDeployment(args, gatheredConfig) {
   // skeleton, never cleared, and handed to reconcile.sh's environment so the
   // add-on job's status file names it.
   const attemptId = mintAttemptId();
+  // The one version set this deploy runs: read from the channel here, once,
+  // before anything renders a ref, so both sides of an HA pair get it. Saved
+  // with the skeleton: restore, failover and scale run what this recorded, and
+  // an existing cluster keeps its Kubernetes set on the next deploy. Never
+  // blocks or fails the deploy (src/lib/version-channel.js).
+  const imageSet = await resolveDeployImageSet({
+    envConfig,
+    k8s: isK8sTier(tier),
+    note: (line) => p.log.info(line),
+  });
   const saveSkeletonEnv = () => {
     const written = updateProjectConfig((onDisk) => {
       const existingEnv = onDisk.environments?.[environment] ?? {};
@@ -1335,6 +1346,7 @@ export async function executeDeployment(args, gatheredConfig) {
               },
             }
           : {}),
+        imageSet,
         lastAttempt: new Date().toISOString(),
         lastAttemptId: attemptId,
       };

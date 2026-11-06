@@ -154,6 +154,7 @@ for attempt in 1 2 3 4 5; do
       --flannel-iface "eth1" \
       --disable traefik \
       --disable=servicelb \
+      --disable gateway-api-crd \
       --disable-cloud-controller \
       --system-default-registry "vibecarbon-system.invalid" \
       --kubelet-arg="cloud-provider=external" \

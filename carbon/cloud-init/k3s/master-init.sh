@@ -180,6 +180,8 @@ PRIVATE_IP=$(ip -4 addr show "$PRIVATE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d
 # so a transient CDN hiccup doesn't kill a fresh provision.
 # --system-default-registry: k3s system images come only from our ghcr mirror
 # (registries.yaml above; K3S_SYSTEM_IMAGE_MIRRORS). Agents inherit it.
+# --disable gateway-api-crd: nothing here uses the Gateway API, and its chart
+# needs klipper-helm, which the mirror does not carry.
 _m k
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
@@ -196,6 +198,7 @@ for attempt in 1 2 3 4 5; do
       --flannel-iface "$PRIVATE_IFACE" \
       --disable traefik \
       --disable servicelb \
+      --disable gateway-api-crd \
       --disable-cloud-controller \
       --system-default-registry "vibecarbon-system.invalid" \
       --flannel-backend=wireguard-native \

@@ -101,12 +101,13 @@ describe('cluster-autoscaler deployment.yaml — CA container swap', () => {
 
   it('CA container VERSION pin unchanged — only the registry host moved', () => {
     const ca = containerNamed('cluster-autoscaler');
-    // The ghcr ref is a digest-preserving mirror of
-    // the upstream image, made because registry.k8s.io 403s Hetzner IP ranges
-    // (incident 2026-07-31 — see the block in src/lib/images.js). The exact
-    // literal value of the ref is pinned in tests/unit/autoscaler/image-ref.test.ts.
-    expect(ca.image).toBe(clusterAutoscalerImageRef());
-    expect(ca.image).toContain(':v1.37.0');
+    // The ref comes from the deploy's version set; the bundled one is a
+    // digest-preserving mirror of the upstream image, made because
+    // registry.k8s.io 403s Hetzner IP ranges (incident 2026-07-31, see the block
+    // in src/lib/images.js). Its value is pinned in
+    // tests/unit/autoscaler/image-ref.test.ts.
+    expect(ca.image).toBe('{{CLUSTER_AUTOSCALER_IMAGE}}');
+    expect(clusterAutoscalerImageRef()).toContain(':v1.37.0');
     expect(ca.imagePullPolicy).toBe('IfNotPresent');
     expect(ca.command).toEqual(['./cluster-autoscaler']);
   });

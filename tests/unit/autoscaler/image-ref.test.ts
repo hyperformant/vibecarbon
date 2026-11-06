@@ -32,11 +32,13 @@ import {
   carbonAutoscalerImageRef,
   clusterAutoscalerImageRef,
   clusterAutoscalerUpstreamRef,
+  manifestImageValues,
 } from '../../../src/lib/images.js';
 
 const ROOT = process.cwd();
 const DOCKERFILE_PATH = join(ROOT, 'docker', 'carbon-autoscaler', 'Dockerfile');
 const WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'publish-images.yml');
+const MIRROR_WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'mirror-images.yml');
 const PACKAGE_JSON_PATH = join(ROOT, 'package.json');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 
@@ -189,10 +191,11 @@ describe('cluster-autoscaler image ref (ghcr mirror of the upstream image)', () 
 describe('every cluster-autoscaler reference site is pinned to the constant', () => {
   it('the shipped Deployment runs the mirrored image', () => {
     const deployment = read('carbon/k8s/base/cluster-autoscaler/deployment.yaml');
-    // Literal, not a placeholder: this manifest also ships into the customer's
-    // repo, where `kubectl apply -k k8s/base/cluster-autoscaler/` (the usage
-    // its own kustomization.yaml documents) has no deploy-time patch step.
-    expect(deployment).toContain(`image: ${clusterAutoscalerImageRef()}`);
+    // A token the deploy fills from its version set, so a patch reaches a
+    // deploy with no CLI release. The manifest is applied by the deploy, never
+    // directly, and a leftover token fails loud before the apply.
+    expect(deployment).toContain('image: "{{CLUSTER_AUTOSCALER_IMAGE}}"');
+    expect(manifestImageValues().CLUSTER_AUTOSCALER_IMAGE).toBe(clusterAutoscalerImageRef());
   });
 
   it('applyK3sManifests renders the sidecar image and re-pins the autoscaler image', () => {
@@ -205,8 +208,8 @@ describe('every cluster-autoscaler reference site is pinned to the constant', ()
     const setImage = k3s.match(/'set',\s*\n\s*'image',[\s\S]{0,400}?\]/)?.[0];
     expect(setImage, 'kubectl set image call not found in k3s.js').toBeDefined();
     expect(setImage).toMatch(/`cluster-autoscaler=\$\{clusterAutoscalerImageRef\(\)\}`/);
-    expect(k3s).toContain(
-      "manifests.replaceAll('{{CARBON_AUTOSCALER_IMAGE}}', carbonAutoscalerImageRef())",
+    expect(k3s).toMatch(
+      /renderManifestImages\(manifests\)\.replaceAll\(\s*'\{\{CARBON_AUTOSCALER_IMAGE\}\}',\s*carbonAutoscalerImageRef\(\),\s*\)/,
     );
     expect(k3s).toMatch(
       /import \{[^}]*clusterAutoscalerImageRef[^}]*\} from '\.\.\/\.\.\/images\.js'/,
@@ -234,7 +237,8 @@ describe('every cluster-autoscaler reference site is pinned to the constant', ()
 });
 
 describe('mirror job copies the manifest — never rebuilds, never multi-arch', () => {
-  const workflow = readFileSync(WORKFLOW_PATH, 'utf8');
+  // publish-images.yml's own job and the mirror job it calls.
+  const workflow = `${readFileSync(WORKFLOW_PATH, 'utf8')}\n${readFileSync(MIRROR_WORKFLOW_PATH, 'utf8')}`;
   // Executable YAML only; comments are where the reasoning lives.
   const code = workflow
     .split('\n')

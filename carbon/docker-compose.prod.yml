@@ -97,7 +97,7 @@ services:
   # container inspect, env included, so it sits on the internal socket-proxy
   # network that only traefik joins. Nothing else can resolve or reach it.
   docker-socket-proxy:
-    image: ghcr.io/hyperformant/docker-socket-proxy:v0.5.0@sha256:753044cb0851ce53ab44c2504872ff02ae37be9c294fa8abea3754074e61eab4
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:?DOCKER_SOCKET_PROXY_IMAGE missing, run vibecarbon upgrade to write it to .env}
     container_name: ${PROJECT_NAME}-socket-proxy
     restart: unless-stopped
     security_opt:
@@ -145,7 +145,7 @@ services:
   # other section and every non-GET. Only the app shares its network.
   # Guarded by tests/integration/docker/compose-secret-reach.test.ts.
   app-docker-proxy:
-    image: ghcr.io/hyperformant/docker-socket-proxy:v0.5.0@sha256:753044cb0851ce53ab44c2504872ff02ae37be9c294fa8abea3754074e61eab4
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:?DOCKER_SOCKET_PROXY_IMAGE missing, run vibecarbon upgrade to write it to .env}
     container_name: ${PROJECT_NAME}-app-docker-proxy
     restart: unless-stopped
     security_opt:
@@ -172,7 +172,7 @@ services:
   traefik:
     # Our ghcr mirror of the base file's tag (amd64, servers only): no Docker
     # Hub pull on a deploy. Same tag as carbon/docker-compose.yml, by census.
-    image: ghcr.io/hyperformant/traefik:v3.7.17@sha256:e15b8921020b4fd81de5746b170dfceec221d2450711449f6427e4692881511a
+    image: ${TRAEFIK_IMAGE:?TRAEFIK_IMAGE missing, run vibecarbon upgrade to write it to .env}
     command:
       - "--api.dashboard=true"
       - "--providers.docker=true"
