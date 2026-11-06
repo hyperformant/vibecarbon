@@ -926,6 +926,10 @@ export class LinodeProvider extends BaseProvider {
     return response.json();
   }
 
+  // Statuses an instance stays in when it failed to boot (Linode API
+  // `status`): it is not coming up by itself.
+  static FAILED_BOOT_STATUSES = ['offline', 'stopped', 'billing_suspension'];
+
   /**
    * Wait for an instance to be ready: status 'running' AND a public IPv4
    * (assigned at create on Linode, but guarded the same as DO's contract).
@@ -936,6 +940,7 @@ export class LinodeProvider extends BaseProvider {
   async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
     const startTime = Date.now();
     const pollInterval = 5000;
+    let settledDown = 0;
 
     while (Date.now() - startTime < timeout) {
       try {
@@ -945,7 +950,23 @@ export class LinodeProvider extends BaseProvider {
         if (instance.status === 'running' && LinodeProvider.getPublicIP(instance)) {
           return instance;
         }
+        // A create that boots goes provisioning -> booting -> running. An
+        // instance that settles in offline or stopped did not boot, and
+        // waiting longer changes nothing. Two reads in a row, so the gap
+        // between create and boot is not mistaken for it.
+        if (LinodeProvider.FAILED_BOOT_STATUSES.includes(instance.status)) {
+          settledDown += 1;
+          if (settledDown >= 2) {
+            throw new LinodeBootFailure(
+              `Linode instance ${serverId} did not boot: it is ${instance.status}. ` +
+                `Check its Lish console in the Linode Cloud Manager, then run the command again.`,
+            );
+          }
+        } else {
+          settledDown = 0;
+        }
       } catch (error) {
+        if (error instanceof LinodeBootFailure) throw error;
         if (Date.now() - startTime >= timeout - pollInterval) {
           throw new Error(`Failed to check server status: ${error.message}`);
         }
@@ -1549,3 +1570,5 @@ export class LinodeProvider extends BaseProvider {
     return buildLinodeComposeProgram(config);
   }
 }
+
+class LinodeBootFailure extends Error {}
