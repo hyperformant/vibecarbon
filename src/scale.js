@@ -2937,14 +2937,15 @@ async function scaleReestablishHaTunnel(ctx) {
 
 /**
  * k8s/k8s-ha `verify-ready` effect: wait for every resized cluster to settle
- * before returning — API server healthz, then the hcloud-csi-node DaemonSet
- * rollout, then (primary/single only — the standby's replica-mode app tier
+ * before returning — API server healthz, then on a type change every kubelet
+ * back and reporting, then the hcloud-csi-node DaemonSet rollout, then
+ * (primary/single only — the standby's replica-mode app tier
  * is not expected to Ready until failover) all vibecarbon pods Ready. A
  * faithful relocation of the (now removed) inlined `clustersToVerify` loop
  * from `scaleK8s` — same order, budgets, and diag-dump-on-timeout behavior.
  */
 async function scaleVerifyK8sReady(ctx) {
-  const { environment, envConfig, region, secondaryRegion, isHA, Provider } = ctx;
+  const { environment, envConfig, region, secondaryRegion, isHA, Provider, infraChanges } = ctx;
 
   // Hetzner in-place server_type changes are ~2 min reboots per node.
   // Pulumi's upStack returns when the VM is back up + k3s reports
@@ -3048,6 +3049,45 @@ async function scaleVerifyK8sReady(ctx) {
         `Kube API server for ${label} never returned /healthz=ok within 5 min after Pulumi resize. ` +
           `Last error: ${lastApiErr}`,
       );
+    }
+    // A resize powers each server off and back on, and the provider's answer
+    // comes back when the power does. Every wait below reads Ready conditions,
+    // and until a dead kubelet is noticed those still say Ready: on Hetzner
+    // k8s at 776400cb the CSI and pod waits took 3 s in all, scale reported
+    // done, and worker-1's kubelet started 9 s later with Traefik still
+    // routing to its dead pod. Only a type change reboots anything, so only a
+    // type change pays for this. Both HA clusters run it, as the CSI wait does.
+    if (infraChanges?.length) {
+      const { waitForKubeletsRenewing } = await import('./lib/deploy/k8s/index.js');
+      const kubeletSpinner = spinner();
+      kubeletSpinner.start(`Waiting for every node to report in (${label})`);
+      const { settled, pending } = await perfAsync('scale.waitForKubelets', async () =>
+        waitForKubeletsRenewing({
+          readLeases: () =>
+            runCommand(
+              [
+                'kubectl',
+                '--kubeconfig',
+                kubeconfigPath,
+                '-n',
+                'kube-node-lease',
+                'get',
+                'leases',
+                '-o',
+                'json',
+              ],
+              { silent: true, timeout: 10_000 },
+            ),
+        }),
+      );
+      kubeletSpinner.stop(
+        settled ? `Every node has reported in (${label})` : `Still waiting on nodes (${label})`,
+      );
+      if (!settled) {
+        p.log.warn(
+          `No word from ${pending.join(', ') || 'any node'} after 5 min (${label}). Checking the pods next, which will show what is wrong.`,
+        );
+      }
     }
     // Wait for the Hetzner CSI driver DaemonSet to register on every
     // node BEFORE checking pod-Ready. RCA from k8s-ha standby failure
