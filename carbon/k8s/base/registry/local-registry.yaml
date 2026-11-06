@@ -37,7 +37,7 @@ spec:
       # keeps runAsNonRoot).
       initContainers:
         - name: chown-storage
-          image: ghcr.io/hyperformant/registry:3.1.2@sha256:52b489ad8e6f40d1a676702e3ce398ec796ce38f08fbb786e1f324baa12d84b8
+          image: "{{REGISTRY_IMAGE}}"
           command: ["/bin/sh", "-c", "chown -R 1000:1000 /var/lib/registry && chmod 700 /var/lib/registry"]
           securityContext:
             runAsUser: 0
@@ -47,7 +47,7 @@ spec:
               mountPath: /var/lib/registry
       containers:
         - name: registry
-          image: ghcr.io/hyperformant/registry:3.1.2@sha256:52b489ad8e6f40d1a676702e3ce398ec796ce38f08fbb786e1f324baa12d84b8
+          image: "{{REGISTRY_IMAGE}}"
           # ROOT FIX (2026-08-30, run 33332292268): image layers live on the
           # MASTER NODE DISK, never object storage. The registry is a
           # transport cache — every deploy builds and pushes the image to the

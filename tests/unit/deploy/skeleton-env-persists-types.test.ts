@@ -78,6 +78,12 @@ vi.mock('../../../src/lib/deploy/state.js', () => ({
 }));
 
 const { executeDeployment } = await import('../../../src/lib/deploy/orchestrator.js');
+const { buildReplicationOverlay } = await import('../../../src/lib/deploy/compose/ha.js');
+const { bootPullImages } = await import('../../../src/lib/iac/compose-cloud-init.js');
+const { activateImageSet, bundledImageSet, k3sVersion, traefikImageRef } = await import(
+  '../../../src/lib/images.js'
+);
+const { CHANNEL_SCHEMA } = await import('../../../src/lib/version-channel.js');
 const { gatherDeploymentConfig } = await import('../../../src/lib/deploy/prompts.js');
 const { loadProjectConfig } = await import('../../../src/lib/config.js');
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
@@ -328,5 +334,95 @@ describe('the skeleton save records the sizes the deploy picked', () => {
     expect(rerun.serverType).toBe('cpx32');
     const env = await deployUntilFailure(rerun as never);
     expect(env.serverType).toBe('cpx32');
+  });
+});
+
+describe('a deploy resolves one version set at its start and records it', () => {
+  const sizes = { serverType: 'cpx22', masterServerType: 'cpx22', dbServerType: 'cpx22' };
+  const ref = (name: string, version: string) =>
+    `ghcr.io/hyperformant/${name}:${version}@sha256:${'b'.repeat(64)}`;
+  /** A channel list one patch ahead of the bundled copy on Traefik and k3s. */
+  function channelFile() {
+    const set = bundledImageSet();
+    return {
+      schema: CHANNEL_SCHEMA,
+      images: { ...set.images, traefik: ref('traefik', 'v3.99.0') },
+      kubernetes: { ...set.kubernetes, k3s: 'v1.37.99+k3s1' },
+    };
+  }
+  const stubChannel = (body: unknown) => {
+    const read = vi.fn(async () => new Response(JSON.stringify(body)));
+    vi.stubGlobal('fetch', read);
+    return read;
+  };
+
+  beforeEach(() => {
+    store.current = projectConfigStore({
+      projectName: 'sizeapp',
+      bucketSalt: 'abc123',
+      environments: {},
+    });
+  });
+  afterEach(() => {
+    activateImageSet(null);
+    vi.unstubAllGlobals();
+  });
+
+  it('records the channel list and runs it', async () => {
+    const read = stubChannel(channelFile());
+    const env = await deployUntilFailure(gathered('compose', false, sizes));
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(env.imageSet.images.traefik).toBe(ref('traefik', 'v3.99.0'));
+    expect(traefikImageRef()).toBe(ref('traefik', 'v3.99.0'));
+  });
+
+  it('a bad channel falls back to the bundled copy with one quiet note, and the deploy goes on', async () => {
+    const file = channelFile();
+    file.images.traefik = `ghcr.io/evil/traefik:v3.99.0@sha256:${'b'.repeat(64)}`;
+    stubChannel(file);
+    clackMock.log.info.mockClear();
+    const env = await deployUntilFailure(gathered('compose', false, sizes));
+    expect(env.imageSet).toEqual(bundledImageSet());
+    const notes = clackMock.log.info.mock.calls.map(([line]) => String(line));
+    expect(notes.filter((line) => line.includes('version channel not used'))).toHaveLength(1);
+    expect(notes.join('\n')).not.toContain('evil');
+  });
+
+  it.each([
+    ['compose-ha', 'compose'],
+    ['k8s-ha', 'kubernetes'],
+  ])('%s: both sides of the pair run the one set, read once', async (_name, deployMode) => {
+    const read = stubChannel(channelFile());
+    const env = await deployUntilFailure(gathered(deployMode, true, sizes));
+    // The list moves while the pair is being built. Neither side looks again.
+    stubChannel({ ...channelFile(), images: { ...channelFile().images, traefik: 'moved' } });
+    const primary = { socat: buildReplicationOverlay('10.10.0.1'), pull: bootPullImages() };
+    const standby = { socat: buildReplicationOverlay('10.10.0.2'), pull: bootPullImages() };
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(primary.pull).toEqual(standby.pull);
+    expect(primary.pull).toContain(env.imageSet.images.traefik);
+    const socatLine = (yaml: string) => yaml.match(/image: (.+)/)?.[1];
+    expect(socatLine(standby.socat)).toBe(socatLine(primary.socat));
+    expect(socatLine(primary.socat)).toBe(env.imageSet.images.socat);
+    expect(k3sVersion()).toBe(env.imageSet.kubernetes.k3s);
+  });
+
+  it('an existing cluster keeps its Kubernetes set while its images move', async () => {
+    stubChannel(channelFile());
+    const old = bundledImageSet();
+    const g = gathered('kubernetes', false, sizes);
+    const env = await deployUntilFailure({
+      ...g,
+      envConfig: { deployMode: 'kubernetes', deployedAt: '2026-11-01', imageSet: old },
+    });
+    expect(env.imageSet.kubernetes).toEqual(old.kubernetes);
+    expect(env.imageSet.images.traefik).toBe(ref('traefik', 'v3.99.0'));
+    expect(k3sVersion()).toBe(old.kubernetes.k3s);
+  });
+
+  it('a new cluster takes the channel Kubernetes set', async () => {
+    stubChannel(channelFile());
+    const env = await deployUntilFailure(gathered('kubernetes', false, sizes));
+    expect(env.imageSet.kubernetes.k3s).toBe('v1.37.99+k3s1');
   });
 });

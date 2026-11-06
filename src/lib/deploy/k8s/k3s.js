@@ -64,6 +64,10 @@ import {
   carbonAutoscalerImageRef,
   clusterAutoscalerImageRef,
   csiSidecarSetImagePlan,
+  currentImageSet,
+  k3sVersion,
+  manifestImageValues,
+  renderManifestImages,
   resolveDbImage,
 } from '../../images.js';
 import {
@@ -171,8 +175,6 @@ import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-rest
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-export const K3S_VERSION = 'v1.37.2+k3s1';
 
 // The vibecarbon CLI's OWN bundled k8s manifest tree (the `carbon/k8s/`
 // shipped inside the installed package), as opposed to `projectDir/k8s` —
@@ -408,8 +410,13 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * `restore` is the resolved `deploy -restore` point: its backup and target
  * are an input, so a rerun that restores another base re-applies.
  *
+ * `imageSetDigest` is the version set this deploy resolved. Its refs reach the
+ * cluster through the render, and no manifest digest sees them: without it a
+ * patched image on the channel would be skipped on a warm deploy. An unchanged
+ * set hashes the same, so it costs nothing.
+ *
  * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string, backupConfig?: {schedule?: string, retentionDays?: number} }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, imageSetDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -436,6 +443,7 @@ export function buildK3sApplyInputs({
     // cluster's is not (renderK8sBase): a different db, so a different gate.
     replicationHostPort: rendersReplicationHostPort(role),
     appStorageKeyDigest: appStorageAccessKey ? fingerprintSecret(appStorageAccessKey) : '',
+    imageSetDigest: createHash('sha256').update(JSON.stringify(currentImageSet())).digest('hex'),
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
     envLocalDigest: digestEnvLocalSecrets(projectDir),
@@ -2737,8 +2745,20 @@ function renderK8sPlaceholders(dir, values, label) {
   return tmpDir;
 }
 
+/**
+ * Copy `k8s/infra/traefik-crds` with its Traefik tag filled in.
+ *
+ * @param {string} dir
+ * @returns {string} the rendered temp copy to pass to applyKustomization
+ */
+export function renderTraefikCrds(dir) {
+  return renderK8sPlaceholders(dir, manifestImageValues(), 'crds');
+}
+
 /** The in-cluster registry manifest, relative to `k8s/base`. */
 const REGISTRY_MANIFEST = 'registry/local-registry.yaml';
+/** The Traefik Deployment, relative to `k8s/base`. */
+const TRAEFIK_MANIFEST = 'traefik/deployment.yaml';
 
 /** The vibecarbon-tls Certificate, relative to `k8s/base`. */
 const CERTIFICATE_MANIFEST = 'traefik/certificate.yaml';
@@ -2919,7 +2939,9 @@ export function renderK8sBase(
       `renderK8sBase: MASTER_PRIVATE_IP is not an IPv4 address (got ${JSON.stringify(values.MASTER_PRIVATE_IP ?? null)}), so the registry hostPort has no address to bind`,
     );
   }
-  const rendered = renderK8sPlaceholders(dir, values, 'base');
+  // The image tokens are the deploy's version set (images.js), never the
+  // caller's: there is one set per deploy.
+  const rendered = renderK8sPlaceholders(dir, { ...values, ...manifestImageValues() }, 'base');
   // The backup CronJob's schedule is per environment (deploy-owned, Flux does
   // not build it): filled in by the renderer deploy.yml also runs.
   const cronjob = join(rendered, 'backup', 'cronjob.yaml');
@@ -2945,10 +2967,15 @@ export function renderK8sBase(
   writeFileSync(join(rendered, CERTIFICATE_MANIFEST), renderTlsCertificateManifest(tls));
   const checks = [
     ...(existsSync(cronjob)
-      ? [['backup/cronjob.yaml', 'a backup CronJob with an unresolved schedule']]
+      ? [['backup/cronjob.yaml', 'a backup CronJob with an unresolved schedule or image']]
       : []),
     ['db/statefulset.yaml', 'a database with an unresolved image, prefix or StorageClass'],
-    ...(hasRegistry ? [[REGISTRY_MANIFEST, 'a registry with an unresolved bind address']] : []),
+    ...(hasRegistry
+      ? [[REGISTRY_MANIFEST, 'a registry with an unresolved image or bind address']]
+      : []),
+    ...(existsSync(join(rendered, TRAEFIK_MANIFEST))
+      ? [[TRAEFIK_MANIFEST, 'a Traefik with an unresolved image']]
+      : []),
     [CERTIFICATE_MANIFEST, 'a placeholder TLS Certificate', /app\.example\.com/g],
   ];
   for (const [file, what, pattern = /\{\{[A-Z0-9_]+\}\}/g] of checks) {
@@ -3641,7 +3668,7 @@ export async function applyK3sManifests({
       //     pattern at step 2b).
       const clusterName = `${projectName}-${environment}`;
       const carbonAutoscalerConfigJson = await renderCarbonAutoscalerConfig({
-        k3sVersion: K3S_VERSION,
+        k3sVersion: k3sVersion(),
         k3sToken,
         // M3 Task 2: output-driven master private IP (Hetzner's own default
         // stays '10.0.1.1' when this is undefined — see renderCarbonAutoscalerConfig).
@@ -3695,17 +3722,20 @@ export async function applyK3sManifests({
         // reset by the next deploy, and on `strategy: Recreate` that killed a
         // healthy autoscaler to roll out a pod that could not start.
         render: (manifests) =>
-          manifests.replaceAll('{{CARBON_AUTOSCALER_IMAGE}}', carbonAutoscalerImageRef()),
+          renderManifestImages(manifests).replaceAll(
+            '{{CARBON_AUTOSCALER_IMAGE}}',
+            carbonAutoscalerImageRef(),
+          ),
       });
-      // 5a''. The manifest already carries the mirrored ghcr ref as a literal, so
-      //       this is belt-and-braces, but load-bearing belt-and-braces: the apply
-      //       above reads the PROJECT's checked-in copy of this manifest, and a
-      //       project generated before the mirror landed still pins
-      //       registry.k8s.io there, i.e. still walks into the 403 that cost a
-      //       deploy on 2026-07-31 (src/lib/images.js). Re-pinning here makes
-      //       images.js authoritative at deploy time no matter how old the
-      //       project's k8s/ tree is. On a current project it changes nothing, so
-      //       nothing rolls.
+      // 5a''. The manifest's token already carries this ref, so this is
+      //       belt-and-braces, but load-bearing belt-and-braces: the apply above
+      //       reads the PROJECT's checked-in copy of this manifest, and a project
+      //       generated before the mirror landed still pins registry.k8s.io
+      //       there, i.e. still walks into the 403 that cost a deploy on
+      //       2026-07-31 (src/lib/images.js). Re-pinning here keeps the version
+      //       set authoritative at deploy time no matter how old the project's
+      //       k8s/ tree is. On a current project it changes nothing, so nothing
+      //       rolls.
       await runKubectlWithRetry(
         [
           '-n',
@@ -3953,13 +3983,21 @@ export async function applyK3sManifests({
       description: 'applyK3sManifests: apply cert-manager-resources',
     }),
   );
-  await perfAsync(`deploy.${perfPrefix}.traefikCrds`, () =>
-    applyKustomization(join(projectDir, 'k8s/infra/traefik-crds'), {
-      env,
-      master,
-      description: 'applyK3sManifests: apply traefik-crds',
-    }),
-  );
+  // The CRD URL carries the Traefik tag this deploy resolved, so it is filled
+  // in BEFORE `kubectl kustomize` fetches it, on a temp copy: a redeploy must
+  // not leave the operator's git tree dirty.
+  const traefikCrdsDir = renderTraefikCrds(join(projectDir, 'k8s/infra/traefik-crds'));
+  try {
+    await perfAsync(`deploy.${perfPrefix}.traefikCrds`, () =>
+      applyKustomization(traefikCrdsDir, {
+        env,
+        master,
+        description: 'applyK3sManifests: apply traefik-crds',
+      }),
+    );
+  } finally {
+    rmSync(traefikCrdsDir, { recursive: true, force: true });
+  }
   // 4. Create the app and infra Secrets BEFORE base/ — base/'s Deployment
   //    and StatefulSet reference them; without them kubelet fails container
   //    creation with `secret "vibecarbon-app-secrets" not found`.
@@ -5012,7 +5050,7 @@ async function deployK3sSteps(options, inFlight) {
     workerType: options.workerServerType,
     minWorkers,
     maxWorkers,
-    k3sVersion: K3S_VERSION,
+    k3sVersion: k3sVersion(),
   };
   if (!state.shouldSkip('k3s-infra', infraInputs)) {
     state.startStep('k3s-infra', infraInputs);
@@ -5035,7 +5073,7 @@ async function deployK3sSteps(options, inFlight) {
         options.workerServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
       minWorkers,
       maxWorkers,
-      k3sVersion: K3S_VERSION,
+      k3sVersion: k3sVersion(),
       apiToken: options.apiToken,
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
       allowedSshIps: allowedCidrs,

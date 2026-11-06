@@ -38,25 +38,27 @@ import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
-import { SOCAT_IMAGE } from '../../../src/lib/deploy/compose/ha.js';
 import { BINFMT_IMAGE } from '../../../src/lib/deploy/platform.js';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import {
   CARBON_AUTOSCALER_IMAGE,
-  CSI_UPSTREAM_IMAGE_PINS,
   csiSidecarSetImagePlan,
+  csiUpstreamImagePins,
   DB_IMAGE,
   DEV_DB_IMAGE,
   DIAG_BUSYBOX_IMAGE,
   DIAG_NETSHOOT_IMAGE,
   DOCKERHUB_MIRRORS,
   DOCKERHUB_UPSTREAM_REGISTRY,
+  dockerSocketProxyImageRef,
   K3S_SYSTEM_IMAGE_MIRRORS,
   K3S_SYSTEM_REGISTRY,
   k8sMirrorRef,
   MIRRORED_IMAGES,
   mirroredImageName,
   NODE_RUNTIME_IMAGE,
+  renderManifestImages,
+  socatImageRef,
   TRAEFIK_MIRROR,
   traefikImageRef,
   upstreamRef,
@@ -196,13 +198,24 @@ function unknownMirrorRefs(sites: Site[]): string[] {
  * only literals, and a helper-built ref is exactly as core-path as one.
  */
 const JS_EVALUATED: Site[] = [
-  { where: 'js SOCAT_IMAGE', ref: SOCAT_IMAGE },
-  ...Object.keys(CSI_UPSTREAM_IMAGE_PINS)
+  { where: 'js SOCAT_IMAGE', ref: socatImageRef() },
+  ...Object.keys(csiUpstreamImagePins())
     .flatMap((p) => csiSidecarSetImagePlan(p))
     .flatMap(({ workload, setImageArgs }) =>
       setImageArgs.map((a) => ({ where: `js csi ${workload}`, ref: a.slice(a.indexOf('=') + 1) })),
     ),
 ];
+
+/**
+ * Templates name the version set through tokens (k8s) and required env vars
+ * (compose). Filled with the bundled set here, so the rules below judge the
+ * refs a deploy runs, and the mirror census holds whatever the set can name.
+ */
+const fillImages = (text: string) =>
+  renderManifestImages(text).replace(
+    /\$\{(TRAEFIK|DOCKER_SOCKET_PROXY)_IMAGE:\?[^}]*\}/g,
+    (_, name) => (name === 'TRAEFIK' ? traefikImageRef() : dockerSocketProxyImageRef()),
+  );
 
 /**
  * Servers run carbon/docker-compose.yml UNDER docker-compose.prod.yml
@@ -215,7 +228,8 @@ const JS_EVALUATED: Site[] = [
 type ComposeDoc = { services?: Record<string, { image?: string }> };
 // Compose's `!reset` / `!override` merge tags mean nothing to js-yaml; drop them.
 const composeServices = (rel: string) =>
-  (loadYaml(read(rel).replace(/!(?:reset|override)\b/g, '')) as ComposeDoc).services ?? {};
+  (loadYaml(fillImages(read(rel)).replace(/!(?:reset|override)\b/g, '')) as ComposeDoc).services ??
+  {};
 const PROD_IMAGES = Object.fromEntries(
   Object.entries(composeServices('carbon/docker-compose.prod.yml'))
     .filter(([, svc]) => svc?.image)
@@ -227,14 +241,14 @@ const SERVER_OVERRIDDEN_BASE_REFS = new Set(
     .map(([, svc]) => svc.image as string),
 );
 const composeSites = (f: string) =>
-  textSites(f).filter(
+  textSites(f, fillImages(read(f))).filter(
     (s) => !(f === 'carbon/docker-compose.yml' && SERVER_OVERRIDDEN_BASE_REFS.has(s.ref)),
   );
 
 const ALL_SITES = [
   ...JS_EVALUATED,
   ...COMPOSE_FILES.flatMap(composeSites),
-  ...K8S_FILES.flatMap((f) => textSites(f)),
+  ...K8S_FILES.flatMap((f) => textSites(f, fillImages(read(f)))),
   ...CLOUD_INIT_FILES.flatMap((f) => textSites(f)),
   ...SRC_FILES.flatMap((f) => jsSites(f)),
 ];
@@ -347,7 +361,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
   const SERVER_SCRIPTS = ['master-init.sh', 'do-master-init.sh'];
 
   it('the mirrored set is exactly the pinned k3s release’s system images we pull', () => {
-    const k3sVersion = read('src/lib/deploy/k8s/k3s.js').match(/K3S_VERSION = '([^']+)'/)?.[1];
+    const k3sVersion = read('src/lib/images.js').match(/K3S_VERSION = '([^']+)'/)?.[1];
     expect(k3sVersion, 'bump K3S_IMAGES_TXT from the new release’s k3s-images.txt').toBe(
       K3S_IMAGES_TXT.version,
     );

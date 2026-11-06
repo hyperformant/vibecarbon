@@ -472,6 +472,15 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
     readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
   );
+  // The Traefik CRDs apply from a rendered copy of this directory.
+  mkdirSync(join(dir, 'k8s', 'infra', 'traefik-crds'), { recursive: true });
+  writeFileSync(
+    join(dir, 'k8s', 'infra', 'traefik-crds', 'kustomization.yaml'),
+    readFileSync(
+      join(__dirname, '../../../carbon/k8s/infra/traefik-crds/kustomization.yaml'),
+      'utf-8',
+    ),
+  );
   // A k8s-ha role renders its replication hostPort into db/ as a kustomize patch.
   writeFileSync(
     join(dir, 'k8s', 'base', 'db', 'kustomization.yaml'),

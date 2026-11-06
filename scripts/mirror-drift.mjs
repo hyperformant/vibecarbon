@@ -88,11 +88,11 @@ export function newerTags(current, tags) {
 const majorMinor = (v) => v.replace(/^v/, '').split('.').slice(0, 2).map(Number);
 
 /**
- * K3S_VERSION read from k3s.js's source, not imported: k3s.js pulls the whole
+ * K3S_VERSION read from images.js's source, not imported: images.js pulls the whole
  * deploy graph, and the drift job runs with no install step.
  */
 export function readK3sVersion(
-  file = fileURLToPath(new URL('../src/lib/deploy/k8s/k3s.js', import.meta.url)),
+  file = fileURLToPath(new URL('../src/lib/images.js', import.meta.url)),
 ) {
   const v = readFileSync(file, 'utf8').match(/K3S_VERSION = '(v[^']+)'/)?.[1];
   if (!v) throw new Error(`no K3S_VERSION in ${file}`);

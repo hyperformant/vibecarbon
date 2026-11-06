@@ -807,7 +807,7 @@ describe('the backup Job fails, not retries, on a retention failure', () => {
   });
 
   it('the pinned k3s is on a line where podFailurePolicy is GA (>= 1.31)', async () => {
-    const { K3S_VERSION } = await import('../../../src/lib/deploy/k8s/k3s.js');
+    const { K3S_VERSION } = await import('../../../src/lib/images.js');
     const [maj, min] = K3S_VERSION.replace(/^v/, '').split('.').map(Number);
     expect(maj * 100 + min).toBeGreaterThanOrEqual(131);
   });

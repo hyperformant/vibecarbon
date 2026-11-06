@@ -152,7 +152,7 @@ describeDocker('layer delta delivery (deliverImage) on every target store', () =
 
   beforeAll(() => {
     // The k3s pin must track the one deploys install.
-    expect(readFileSync(join(REPO_ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8')).toContain(
+    expect(readFileSync(join(REPO_ROOT, 'src/lib/images.js'), 'utf-8')).toContain(
       `K3S_VERSION = '${K3S_IMAGE.split(':')[1].replace(/-k3s/, '+k3s')}'`,
     );
     work = mkdtempSync(join(tmpdir(), 'vcdelta-'));

@@ -9,7 +9,12 @@ import { loadHetznerComposeUserData } from '../../../src/lib/iac/programs/hetzne
 import { loadLinodeComposeUserData } from '../../../src/lib/iac/programs/linode-compose.js';
 import { loadScalewayComposeUserData } from '../../../src/lib/iac/programs/scaleway-compose.js';
 import { loadVultrComposeUserData } from '../../../src/lib/iac/programs/vultr-compose.js';
-import { dbImageRef, resolveDbImage } from '../../../src/lib/images.js';
+import {
+  dbImageRef,
+  dockerSocketProxyImageRef,
+  resolveDbImage,
+  traefikImageRef,
+} from '../../../src/lib/images.js';
 
 /**
  * The boot image pull: every compose server (all five providers) starts
@@ -33,8 +38,10 @@ describe('boot pull refs', () => {
     const prod = readFileSync(join(REPO, 'carbon', 'docker-compose.prod.yml'), 'utf8');
     const [db, traefik, proxy] = bootPullImages();
     expect(db).toBe(dbImageRef());
-    expect(prod).toContain(`image: ${traefik}`);
-    expect(prod).toContain(`image: ${proxy}`);
+    expect(prod).toContain('image: ${TRAEFIK_IMAGE:?');
+    expect(prod).toContain('image: ${DOCKER_SOCKET_PROXY_IMAGE:?');
+    expect(traefik).toBe(traefikImageRef());
+    expect(proxy).toBe(dockerSocketProxyImageRef());
     expect(traefik).toMatch(/^ghcr\.io\/hyperformant\/traefik:.*@sha256:/);
     expect(proxy).toMatch(/^ghcr\.io\/hyperformant\/docker-socket-proxy:.*@sha256:/);
   });

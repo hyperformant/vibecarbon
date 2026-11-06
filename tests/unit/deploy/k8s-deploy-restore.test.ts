@@ -424,6 +424,14 @@ function projectDir() {
   );
   mkdirSync(join(dir, 'k8s', 'base', 'backup'), { recursive: true });
   mkdirSync(join(dir, 'k8s', 'base', 'config'), { recursive: true });
+  mkdirSync(join(dir, 'k8s', 'infra', 'traefik-crds'), { recursive: true });
+  writeFileSync(
+    join(dir, 'k8s', 'infra', 'traefik-crds', 'kustomization.yaml'),
+    readFileSync(
+      join(__dirname, '../../../carbon/k8s/infra/traefik-crds/kustomization.yaml'),
+      'utf-8',
+    ),
+  );
   for (const f of ['backup/cronjob.yaml', 'config/configmap.yaml']) {
     writeFileSync(
       join(dir, 'k8s', 'base', f),

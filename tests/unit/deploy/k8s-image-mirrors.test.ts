@@ -50,10 +50,10 @@ import {
   alpineK8sImageRef,
   assertDistinctPackageNames,
   CSI_SIDECAR_MIRRORS,
-  CSI_UPSTREAM_IMAGE_PINS,
   clusterAutoscalerImageRef,
   clusterAutoscalerUpstreamRef,
   csiSidecarSetImagePlan,
+  csiUpstreamImagePins,
   DO_CSI_VERSION,
   DOCKER_SOCKET_PROXY_MIRROR,
   DOCKERHUB_MIRRORS,
@@ -314,10 +314,10 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
       '1.36': null,
       '1.37': null,
     };
-    const k3sMinor = read('src/lib/deploy/k8s/k3s.js').match(
+    const k3sMinor = read('src/lib/images.js').match(
       /K3S_VERSION = 'v(\d+\.\d+)\.\d+\+k3s\d+'/,
     )?.[1];
-    expect(k3sMinor, 'no K3S_VERSION pin found in k3s.js').toBeDefined();
+    expect(k3sMinor, 'no K3S_VERSION pin found in images.js').toBeDefined();
     expect(
       Object.keys(UPSTREAM_K8S_CEILING),
       `k3s is pinned at v${k3sMinor} — add that row from upstream's version policy ` +
@@ -438,9 +438,9 @@ describe('csiSidecarSetImagePlan()', () => {
       const plan = csiSidecarSetImagePlan(providerId);
       expect(plan.length).toBeGreaterThan(0);
       const inPlace = new Set(
-        (CSI_UPSTREAM_IMAGE_PINS[providerId as keyof typeof CSI_UPSTREAM_IMAGE_PINS] ?? []).flatMap(
-          ({ containers }) => Object.entries(containers).map(([c, ref]) => `${c}=${ref}`),
-        ),
+        (
+          csiUpstreamImagePins()[providerId as keyof ReturnType<typeof csiUpstreamImagePins>] ?? []
+        ).flatMap(({ containers }) => Object.entries(containers).map(([c, ref]) => `${c}=${ref}`)),
       );
       for (const { workload, setImageArgs } of plan) {
         expect(workload).toMatch(/^(daemonset|deployment|statefulset)\//);
@@ -473,7 +473,7 @@ describe('csiSidecarSetImagePlan()', () => {
       /^automount-udev-deleter=ghcr\.io\/hyperformant\/alpine:3\.\d+\.\d+@sha256:[a-f0-9]{64}$/,
     );
     // Every in-place pin addresses a container upstream actually ships.
-    for (const [provider, specs] of Object.entries(CSI_UPSTREAM_IMAGE_PINS)) {
+    for (const [provider, specs] of Object.entries(csiUpstreamImagePins())) {
       const workloads = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS]
         .workloads as Record<string, Record<string, string>>;
       for (const { workload, containers } of specs) {

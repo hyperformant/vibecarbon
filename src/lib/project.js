@@ -224,6 +224,13 @@ export const COMPOSE_REQUIRED_ENV_FALLBACK = Object.freeze([
 ]);
 
 /**
+ * Required by the compose file, but written into the server's .env by the
+ * deploy bundle whatever the project's .env says (deploy/bundle.js), so a
+ * project .env without them is no reason to stop a deploy.
+ */
+const COMPOSE_ENV_SET_BY_DEPLOY = new Set(['DOCKER_SOCKET_PROXY_IMAGE', 'TRAEFIK_IMAGE']);
+
+/**
  * Keys that `docker compose up` will REFUSE to start without, and that are
  * empty or absent in `.env` — the file a deploy ships as the server's runtime
  * baseline.
@@ -252,7 +259,9 @@ export function findMissingRequiredEnv(cwd = process.cwd()) {
   if (existsSync(composePath)) {
     const compose = readFileSync(composePath, 'utf-8');
     required = new Set();
-    for (const m of compose.matchAll(/\$\{([A-Z][A-Z0-9_]*):\?/g)) required.add(m[1]);
+    for (const m of compose.matchAll(/\$\{([A-Z][A-Z0-9_]*):\?/g)) {
+      if (!COMPOSE_ENV_SET_BY_DEPLOY.has(m[1])) required.add(m[1]);
+    }
   } else {
     required = new Set(COMPOSE_REQUIRED_ENV_FALLBACK);
   }

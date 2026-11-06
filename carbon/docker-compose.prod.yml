@@ -99,7 +99,7 @@ services:
   # Held on 0.4.x until Tecnativa/docker-socket-proxy#180 closes; the reason
   # is on DOCKER_SOCKET_PROXY_MIRROR in the CLI's src/lib/images.js.
   docker-socket-proxy:
-    image: ghcr.io/hyperformant/docker-socket-proxy:v0.4.2@sha256:bd2241b3bec83abcff25927a0a7ae518e0c5bef624b3cc247dcb31e68b53f417
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:?DOCKER_SOCKET_PROXY_IMAGE missing, run vibecarbon upgrade to write it to .env}
     container_name: ${PROJECT_NAME}-socket-proxy
     restart: unless-stopped
     security_opt:
@@ -147,7 +147,7 @@ services:
   # other section and every non-GET. Only the app shares its network.
   # Guarded by tests/integration/docker/compose-secret-reach.test.ts.
   app-docker-proxy:
-    image: ghcr.io/hyperformant/docker-socket-proxy:v0.4.2@sha256:bd2241b3bec83abcff25927a0a7ae518e0c5bef624b3cc247dcb31e68b53f417
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:?DOCKER_SOCKET_PROXY_IMAGE missing, run vibecarbon upgrade to write it to .env}
     container_name: ${PROJECT_NAME}-app-docker-proxy
     restart: unless-stopped
     security_opt:
@@ -174,7 +174,7 @@ services:
   traefik:
     # Our ghcr mirror of the base file's tag (amd64, servers only): no Docker
     # Hub pull on a deploy. Same tag as carbon/docker-compose.yml, by census.
-    image: ghcr.io/hyperformant/traefik:v3.7.17@sha256:e15b8921020b4fd81de5746b170dfceec221d2450711449f6427e4692881511a
+    image: ${TRAEFIK_IMAGE:?TRAEFIK_IMAGE missing, run vibecarbon upgrade to write it to .env}
     command:
       - "--api.dashboard=true"
       - "--providers.docker=true"

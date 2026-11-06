@@ -39,6 +39,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { spinner } from '../cli/progress.js';
+import { k3sVersion } from '../images.js';
 import { perfAsync } from '../perf.js';
 import { providerIdFor } from '../providers/index.js';
 import { assertPersistedRoleTypes, buildProgramConfig } from '../scale-plan.js';
@@ -158,7 +159,6 @@ export async function convergeClusterInfra({
     classifyK3sTokenProbe,
     summarizePulumiError,
   } = await import('./index.js');
-  const { K3S_VERSION } = await import('../deploy/k8s/index.js');
 
   // SSH key location depends on deploy topology:
   // - Single-cluster k8s: deployK3s' ensureSshKey writes
@@ -275,7 +275,7 @@ export async function convergeClusterInfra({
     currentWorkerType,
     persistedMinWorkers: envConfig.minWorkers,
     persistedMaxWorkers: envConfig.maxWorkers,
-    k3sVersion: K3S_VERSION,
+    k3sVersion: k3sVersion(),
     labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
     apiToken,
   });

@@ -114,6 +114,7 @@ import {
 } from './lib/services/addon-start.js';
 import { enabledAddonNames } from './lib/services/standby-policy.js';
 import { sshKeyPathFor, sshRun, sshRunScript } from './lib/ssh.js';
+import { useRecordedImageSet } from './lib/version-channel.js';
 import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
 import { buildRecoveryConfig, renderRecoveryConf } from './lib/walg/recovery-config.js';
 import {
@@ -2216,6 +2217,9 @@ export async function run(args) {
     p.log.error(`Environment "${environment}" not found in .vibecarbon.json`);
     process.exit(1);
   }
+  // This environment's recorded versions, never the channel: only a deploy
+  // takes new ones (src/lib/version-channel.js).
+  useRecordedImageSet(envConfig, { note: (line) => p.log.info(line) });
 
   // `-type` is raw operator input — it bypasses every option list, so the
   // catalog filtering that keeps ARM out of the prompts does nothing for it.

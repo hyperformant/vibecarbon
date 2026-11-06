@@ -124,6 +124,7 @@ import { pollUntil } from './lib/retry.js';
 import { declaredAddonNames, k8sPrimaryOnlyWorkloads } from './lib/services/standby-policy.js';
 import { getPostgresPod, sshKeyPathFor, sshKubectl, sshRun } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
+import { useRecordedImageSet } from './lib/version-channel.js';
 import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
 import {
   backupCredentialVars,
@@ -3266,6 +3267,9 @@ export async function run(args) {
     positional,
     projectConfig,
   });
+  // This environment's recorded versions, never the channel: only a deploy
+  // takes new ones (src/lib/version-channel.js).
+  useRecordedImageSet(envConfig, { note: (line) => p.log.info(line) });
 
   // Compatibility shim — the existing failover orchestration helpers
   // read `parsed.dryRun` and `parsed.yes` from the legacy struct shape.

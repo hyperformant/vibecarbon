@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderBundle } from '../../../src/lib/deploy/bundle.js';
 import { formatDotenvLine, parseDotenv } from '../../../src/lib/dotenv.js';
+import { activateImageSet, bundledImageSet } from '../../../src/lib/images.js';
 
 // renderBundle runs against `process.cwd()`, so each test gets its own
 // throwaway directory containing a project-shaped `.env`.
@@ -53,6 +54,26 @@ describe('renderBundle envOverrides', () => {
       // PROJECT_NAME is set by renderBundle when projectName is given
       expect(env.PROJECT_NAME).toBe('myproj');
     } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
+
+  it('the version set wins over the project .env and a replayed older one', () => {
+    const stale = `ghcr.io/hyperformant/traefik:v3.0.0@sha256:${'0'.repeat(64)}`;
+    projectDir = makeProjectDir(formatDotenvLine('TRAEFIK_IMAGE', stale));
+    process.chdir(projectDir);
+    const set = bundledImageSet();
+    const moved = `ghcr.io/hyperformant/traefik:v3.99.0@sha256:${'b'.repeat(64)}`;
+    activateImageSet({ ...set, images: { ...set.images, traefik: moved } });
+
+    const stage = renderBundle('myproj', { envOverrides: { TRAEFIK_IMAGE: stale } });
+
+    try {
+      const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
+      expect(env.TRAEFIK_IMAGE).toBe(moved);
+      expect(env.DOCKER_SOCKET_PROXY_IMAGE).toBe(set.images.dockerSocketProxy);
+    } finally {
+      activateImageSet(null);
       rmSync(stage, { recursive: true, force: true });
     }
   });

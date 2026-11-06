@@ -106,6 +106,18 @@ spec:
       target:
         kind: Deployment
         name: local-registry
+    # Traefik's image comes from the version set this environment resolved
+    # ({{TRAEFIK_IMAGE}}), rendered by the CLI's deploy, so the CLI owns this
+    # Deployment like the registry. Its Service and RBAC stay with Flux.
+    - patch: |
+        $patch: delete
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: traefik
+      target:
+        kind: Deployment
+        name: traefik
   healthChecks:
     - apiVersion: apps/v1
       kind: StatefulSet

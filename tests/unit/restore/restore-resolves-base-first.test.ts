@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const keyDir = mkdtempSync(join(tmpdir(), 'vc-restore-base-'));
 const keyPath = join(keyDir, 'id_ed25519');
@@ -56,6 +56,9 @@ vi.mock('../../../src/lib/ssh.js', async (orig) => {
 });
 
 const { run, runComposeRestore, runK8sRestore } = await import('../../../src/restore.js');
+const { activateImageSet, bundledImageSet, traefikImageRef } = await import(
+  '../../../src/lib/images.js'
+);
 const { runCommandAsync } = await import('../../../src/lib/command.js');
 const ssh = await import('../../../src/lib/ssh.js');
 
@@ -141,6 +144,39 @@ describe('restore run(): no restorable base refuses before any stop', () => {
     expect(errors.join('\n')).toContain('HETZNER_SECRET_KEY');
     noServerTouched();
   });
+});
+
+describe('restore run(): the recorded versions, never the channel', () => {
+  const VERSION = 'v9.9.9';
+  const recordedTraefik = `ghcr.io/hyperformant/traefik:${VERSION}@sha256:${'a'.repeat(64)}`;
+
+  afterEach(() => {
+    activateImageSet(null);
+    vi.unstubAllGlobals();
+  });
+
+  for (const deployMode of ['compose', 'kubernetes']) {
+    it(`${deployMode}: runs what the environment recorded and reads nothing`, async () => {
+      const bundled = bundledImageSet();
+      envConfig = {
+        deployMode,
+        provider: 'hetzner',
+        servers: [{ ip: '10.0.0.1' }],
+        imageSet: { ...bundled, images: { ...bundled.images, traefik: recordedTraefik } },
+      };
+      const fetchSpy = vi.fn();
+      vi.stubGlobal('fetch', fetchSpy);
+      exitSpy();
+      await expect(
+        run(['prod', '-y', '-source', 'latest', '-confirm', 'prod'], {
+          resolveS3Config: async () => S3,
+          createS3Client: () => emptyS3(),
+        }),
+      ).rejects.toThrow('process.exit(1)');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(traefikImageRef()).toBe(recordedTraefik);
+    });
+  }
 });
 
 describe('restore run(): the real credential lookup with -y', () => {

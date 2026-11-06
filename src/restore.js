@@ -84,6 +84,7 @@ import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { getPostgresPod, sshKeyPathFor, sshKubectl } from './lib/ssh.js';
 import { readPrimaryWalGap } from './lib/status/backup-health.js';
 import { createTracker } from './lib/tracker.js';
+import { useRecordedImageSet } from './lib/version-channel.js';
 import {
   PostPromoteBackupError,
   pushBaseBackupAfterPromote,
@@ -367,6 +368,9 @@ export async function run(args, deps = {}) {
     projectConfig,
     serverIp: 'primary',
   });
+  // This environment's recorded versions, never the channel: only a deploy
+  // takes new ones (src/lib/version-channel.js).
+  useRecordedImageSet(envConfig, { note: (line) => p.log.info(line) });
 
   // A failover in flight (its journal set) may be promoting the standby while
   // the old primary is fenced: a restore would rewind and restart the fenced
