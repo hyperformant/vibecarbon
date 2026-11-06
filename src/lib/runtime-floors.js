@@ -26,6 +26,7 @@
  * Engine behaviour was tested by pointing real Compose binaries at a stub
  * Docker API reporting the old version.
  */
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 /** What a person calls each tool, in messages. */
@@ -388,6 +389,22 @@ export function kubectlFloorProblem(versionJson) {
     floor,
     fix: `Install kubectl ${floor.min} or newer, then run the deploy again.`,
   });
+}
+
+/**
+ * What `ssh -V` prints, or null. The version goes to stderr. Never throws: an
+ * unreadable version must not be a deploy blocker.
+ *
+ * @param {{ spawn?: typeof spawnSync }} [deps]
+ * @returns {string | null}
+ */
+export function readSshVersion({ spawn = spawnSync } = {}) {
+  try {
+    const res = spawn('ssh', ['-o', 'BatchMode=yes', '-V'], { encoding: 'utf-8', timeout: 5000 });
+    return `${res.stderr ?? ''}${res.stdout ?? ''}`.trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 /** `major.minor` of a version, or null. */

@@ -23,6 +23,7 @@ import { reclaimOrphanPorts } from './lib/orphan.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+import { judgeVersion, tooOldMessage, unreadableMessage } from './lib/runtime-floors.js';
 import { parseComposePs, publishedPorts } from './lib/status/compose-ps.js';
 import {
   deriveComposeProjectName,
@@ -292,6 +293,42 @@ export function assertDockerRunning({ probe = dockerInfoOk } = {}) {
   }
 }
 
+/** What `docker compose version --short` prints, or null when it cannot run. */
+function readComposeVersion() {
+  try {
+    return execFileSync('docker', ['compose', 'version', '--short'], {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: 5000,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stop early, with what to do, on a local Compose under the floor. Otherwise
+ * the first sign is Compose's own parse error part way through dev:start. A
+ * version it cannot read is a warning: only one it knows is too old refuses.
+ *
+ * @param {{ read?: () => string | null }} [deps]
+ */
+export function assertComposeFloor({ read = readComposeVersion } = {}) {
+  const raw = read();
+  const { verdict, found, floor } = judgeVersion('compose', 'laptop', raw);
+  if (verdict === 'unreadable') p.log.warn(unreadableMessage({ tool: 'compose', raw }));
+  if (verdict !== 'too-old' || !found || !floor) return;
+  p.log.error(
+    tooOldMessage({
+      tool: 'compose',
+      found,
+      floor,
+      fix: 'Update Docker Desktop, or the docker-compose-plugin package on Linux, then run `vibecarbon up` again.',
+    }),
+  );
+  process.exit(1);
+}
+
 export async function run(args = []) {
   const { handled } = parseFlagsOrExit(args, SPEC);
   if (handled) return;
@@ -326,6 +363,7 @@ export async function run(args = []) {
   // Docker must be running before any of the port/subnet probes (which call
   // docker) or dev:start — otherwise the user gets a raw daemon-socket error.
   assertDockerRunning();
+  assertComposeFloor();
 
   // Pin the compose project name so renaming this folder keeps its database,
   // adopt a stack whose folder moved, and refuse to hijack a copy's stack.

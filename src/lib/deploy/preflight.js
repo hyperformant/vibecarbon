@@ -3,7 +3,13 @@ import { join } from 'node:path';
 import { checkDependency, runCommand } from '../command.js';
 import { checkOperatorConfig } from '../operator-env.js';
 import { readProjectEnvFiles } from '../project.js';
-import { compareVersions, rowFor } from '../runtime-floors.js';
+import {
+  compareVersions,
+  judgeVersion,
+  rowFor,
+  tooOldMessage,
+  unreadableMessage,
+} from '../runtime-floors.js';
 import { DB_GUARD_COMMAND, DB_GUARD_PROTOCOL_MARKER } from './db-workload.js';
 import { isComposeTier, isK8sTier } from './tier-registry.js';
 import { COMPOSE_WALG_ROLE_HOST_DIR, WALG_ROLE_PARSE_SH } from './walg-role.js';
@@ -43,6 +49,29 @@ export function readPulumiVersion({ run = runCommand } = {}) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Refuse a deploy from a laptop whose OpenSSH is under the floor; warn and
+ * continue on one it cannot read. Only a version it read and knows is too old
+ * stops anyone.
+ *
+ * @param {string | null} raw - what `ssh -V` printed
+ * @param {(message: string) => void} warn
+ * @throws when the client is under the floor
+ */
+function assertOpenSshFloor(raw, warn) {
+  const { verdict, found, floor } = judgeVersion('openssh', 'laptop', raw);
+  if (verdict === 'unreadable') warn(unreadableMessage({ tool: 'openssh', raw }));
+  if (verdict !== 'too-old' || !found || !floor) return;
+  throw new Error(
+    tooOldMessage({
+      tool: 'openssh',
+      found,
+      floor,
+      fix: 'Update OpenSSH (`sudo apt install openssh-client` on Debian and Ubuntu, `brew install openssh` on macOS), then deploy again.',
+    }),
+  );
 }
 
 /**
@@ -292,6 +321,11 @@ export function assertOperatorConfig(
  * @param {(bin: string) => boolean} [deps.has]
  * @param {object} [deps.ProviderClass] - the provider this deploy targets
  * @param {() => string|null} [deps.pulumiVersion]
+ * @param {(() => string|null) | null} [deps.sshVersion] - reads `ssh -V`.
+ *   Default null skips the check, the same deliberate opt-out as
+ *   `operatorScopes`: the deploy path passes readSshVersion, and no unit test
+ *   shells out.
+ * @param {(message: string) => void} [deps.warn] - unreadable versions
  * @param {string[]} [deps.operatorScopes] - config-registry.js scopes to
  *   validate for this deploy (default: `[]`, i.e. skip the check — see the
  *   opt-out note above).
@@ -311,6 +345,8 @@ export function checkDeployPrerequisites(
     has = checkDependency,
     ProviderClass = null,
     pulumiVersion = readPulumiVersion,
+    sshVersion = null,
+    warn = console.warn,
     operatorScopes = [],
     operatorKeys = [],
     env = process.env,
@@ -328,6 +364,7 @@ export function checkDeployPrerequisites(
       `Missing host-side tools required to deploy:\n  - ${missing.map((b) => hints[b] ?? b).join('\n  - ')}`,
     );
   }
+  if (sshVersion) assertOpenSshFloor(sshVersion(), warn);
   // LAZY on purpose: reading the version shells out to `pulumi version`, and
   // only a provider that PINS a checksum mode can fail this check. Calling it
   // unconditionally made a pure-unit preflight test do real subprocess I/O and
@@ -339,6 +376,7 @@ export function checkDeployPrerequisites(
   const k8sTier = tier === 'k8s' || tier === 'k8s-ha';
   if (k8sTier || ProviderClass?.STATE_BACKEND_CHECKSUM_CALCULATION) {
     const installed = pulumiVersion();
+    if (!installed) warn(unreadableMessage({ tool: 'pulumi' }));
     assertPulumiSupportsWorkerJoinTrigger(tier, installed);
     assertPulumiSupportsBackendOptions(ProviderClass, installed);
   }

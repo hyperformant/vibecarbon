@@ -27,6 +27,7 @@ import {
   providerIdFor,
 } from '../providers/index.js';
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
+import { readSshVersion } from '../runtime-floors.js';
 import { mintAttemptId } from '../services/addon-start.js';
 import { sshKeyPathFor } from '../ssh.js';
 import { createTracker } from '../tracker.js';
@@ -1096,6 +1097,7 @@ export async function executeDeployment(args, gatheredConfig) {
   }
   checkDeployPrerequisites(tier, {
     ProviderClass: providerFor(config),
+    sshVersion: readSshVersion,
     operatorScopes,
     operatorKeys: dnsOperatorConfig.keys,
     env: operatorCheckEnvs(process.cwd()),
