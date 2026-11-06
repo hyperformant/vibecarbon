@@ -1,5 +1,5 @@
 /**
- * Per-mode cold-deploy budgets, judged from the deploy's own CLI log.
+ * Per-provider, per-mode, per-class cold-deploy budgets, judged from the deploy's own CLI log.
  *
  * A cold deploy (the e2e db's classifyColdWarm: no passing deploy for the
  * project and env in 24 h, which is every scenario's first deploy) must fit
@@ -13,6 +13,10 @@
  *
  * `deploy.total` starts when executeDeployment does (after config gathering
  * and the local preflight) and ends at the success outro.
+ *
+ * Budgets are keyed on provider + mode + CPU class (deploy-budgets.json). A
+ * combination with no calibrated row fails with `no budget yet`: it is never a
+ * pass for want of a number.
  *
  * Hard limits, no uplink exemption: the cold image delta's bytes are asserted
  * too (10 MB), so a slow uplink moves a deploy by seconds, not minutes. If
@@ -31,16 +35,62 @@
  * (tests/unit/e2e/hollow-pass-census.test.ts registers this check). A failure
  * names the three slowest markers, so the message says where the time went.
  */
+import { readFileSync } from 'node:fs';
+import { getProviderClass } from '../../../src/lib/providers/index.js';
 import { parsePerfLines } from '../metrics/reporter.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
 
-/** Seconds, per mode (D1). */
-export const DEPLOY_BUDGETS: Record<DeployMode, { ownedS: number; endToEndS: number }> = {
-  compose: { ownedS: 180, endToEndS: 300 },
-  'compose-ha': { ownedS: 300, endToEndS: 360 },
-  k8s: { ownedS: 300, endToEndS: 390 },
-  'k8s-ha': { ownedS: 420, endToEndS: 480 },
-};
+/** What a budget is keyed on: where the scenario deployed, and on which CPU class. */
+export interface BudgetKey {
+  provider: string;
+  /** `deployCpuClass()`: the class the deploy actually ran on. */
+  cpuClass: string;
+}
+
+export interface BudgetRow {
+  ownedS: number;
+  endToEndS: number;
+  /** Samples the row was calibrated from. */
+  samples: number;
+}
+
+/** provider -> mode -> CPU class -> seconds. Only combinations with data have a row. */
+export type BudgetTable = Record<string, Partial<Record<DeployMode, Record<string, BudgetRow>>>>;
+
+/**
+ * The calibrated table, written by scripts/calibrate-deploy-budgets.js from the
+ * e2e results db (rule: ceil5(p90 + 15) at n >= 4, else ceil5(max + 30)).
+ * Never edited by hand.
+ */
+export const DEPLOY_BUDGET_TABLE: BudgetTable = (
+  JSON.parse(readFileSync(new URL('./deploy-budgets.json', import.meta.url), 'utf8')) as {
+    budgets: BudgetTable;
+  }
+).budgets;
+
+/** The class every provider that declares no CPU classes deploys on. */
+export const STANDARD_CLASS = 'standard';
+
+/**
+ * The CPU class a deploy ran on, from the server type it recorded in
+ * `.vibecarbon.json` (compose: `serverType`; k8s: `masterServerType`). A
+ * provider with no declared classes is always `standard`. A classed provider
+ * whose type is missing or has no class is `unknown`, which has no budget, so
+ * the check says so instead of judging against another class's number.
+ */
+export function deployCpuClass(provider: string, serverType: string | undefined): string {
+  const Provider = getProviderClass(provider);
+  if ((Provider.CPU_CLASSES?.length ?? 0) === 0) return STANDARD_CLASS;
+  return (serverType && Provider.cpuClassOf(serverType)) || 'unknown';
+}
+
+export function budgetFor(
+  table: BudgetTable,
+  mode: DeployMode,
+  { provider, cpuClass }: BudgetKey,
+): BudgetRow | undefined {
+  return table[provider]?.[mode]?.[cpuClass];
+}
 
 /** A cold image delta carries the app's own layers on a pulled base: 4-5 MB. */
 export const COLD_DELTA_MAX_BYTES = 10_000_000;
@@ -98,18 +148,18 @@ const s = (ms: number) => Math.round(ms / 1000);
  * `deploy_budget` for one cold deploy. `output` is the deploy's combined
  * stdout and stderr (VIBECARBON_PERF=1).
  */
-export function checkDeployBudget(output: string, mode: DeployMode): DeployBudgetResult {
+export function checkDeployBudget(
+  output: string,
+  mode: DeployMode,
+  key: BudgetKey,
+  table: BudgetTable = DEPLOY_BUDGET_TABLE,
+): DeployBudgetResult {
   const checkName = 'deploy_budget';
-  const budget = DEPLOY_BUDGETS[mode];
+  const budget = budgetFor(table, mode, key);
   const clean = output.replace(ANSI, '');
   const perf = parsePerfLines(clean);
   const all = (name: string) => perf.filter((p) => p.name === name);
   const failures: string[] = [];
-
-  if (!budget) {
-    const message = `no cold-deploy budget for mode ${mode}`;
-    return { checkName, status: 'fail', ok: false, message, errorMessage: message };
-  }
 
   const totals = all('deploy.total');
   const totalMs = totals.length ? Math.max(...totals.map((p) => p.ms)) : null;
@@ -118,11 +168,17 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     0,
   );
   const ownedMs = totalMs === null ? null : totalMs - tlsMs;
+  if (!budget) {
+    failures.push(
+      `no budget yet for ${key.provider}/${mode}/${key.cpuClass}: no passing cold deploy calibrated it ` +
+        '(scripts/calibrate-deploy-budgets.js writes the row after one)',
+    );
+  }
   if (totalMs === null || ownedMs === null) {
     failures.push(
       'no [perf] deploy.total marker (VIBECARBON_PERF off, or the deploy never reached its outro)',
     );
-  } else {
+  } else if (budget) {
     if (s(ownedMs) > budget.ownedS) {
       failures.push(
         `deploy-owned ${s(ownedMs)}s > ${budget.ownedS}s (deploy.total ${s(totalMs)}s − TLS first look ${s(tlsMs)}s)`,
@@ -222,11 +278,13 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     .map((p) => `${p.name} ${s(p.ms)}s`);
   const details = {
     mode,
+    provider: key.provider,
+    cpuClass: key.cpuClass,
     totalS: totalMs === null ? null : s(totalMs),
     tlsFirstLookS: s(tlsMs),
     ownedS: ownedMs === null ? null : s(ownedMs),
-    ownedBudgetS: budget.ownedS,
-    endToEndBudgetS: budget.endToEndS,
+    ownedBudgetS: budget?.ownedS ?? null,
+    endToEndBudgetS: budget?.endToEndS ?? null,
     deltaBytes,
     lockWaitS,
     slowest,
@@ -238,7 +296,7 @@ export function checkDeployBudget(output: string, mode: DeployMode): DeployBudge
     return { checkName, status: 'fail', ok: false, message, errorMessage: message, details };
   }
   const message =
-    `deploy-owned ${details.ownedS}s ≤ ${budget.ownedS}s, ` +
-    `end-to-end ${details.totalS}s ≤ ${budget.endToEndS}s`;
+    `deploy-owned ${details.ownedS}s ≤ ${budget?.ownedS}s, ` +
+    `end-to-end ${details.totalS}s ≤ ${budget?.endToEndS}s`;
   return { checkName, status: 'pass', ok: true, message, details };
 }

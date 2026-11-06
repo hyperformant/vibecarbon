@@ -10,6 +10,8 @@ export interface SelectedScenario {
   mode: string;
   dnsProvider: string;
   envPrefix: string;
+  /** Lifecycle steps this scenario never runs (tests/config.ts, with the reason). */
+  skipSteps?: readonly string[];
 }
 
 interface Token {
@@ -23,7 +25,12 @@ const registry = () =>
     string,
     {
       requiredEnv: string[];
-      scenarios: { mode: string; dnsProvider: string; envPrefix: string }[];
+      scenarios: {
+        mode: string;
+        dnsProvider: string;
+        envPrefix: string;
+        skipSteps?: readonly string[];
+      }[];
       defaultSelection: string[];
     }
   >;
@@ -195,6 +202,7 @@ export function resolveSelection(opts: {
         // The token's refinement wins; the registry row supplies the default.
         dnsProvider: matchedInclude?.dnsProvider ?? s.dnsProvider,
         envPrefix: s.envPrefix,
+        ...(s.skipSteps && { skipSteps: s.skipSteps }),
       });
     }
   }

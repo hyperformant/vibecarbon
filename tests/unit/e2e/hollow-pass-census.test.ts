@@ -824,13 +824,28 @@ describe('TLS REUSE: every check fails without its baseline', () => {
 // Deploy budget: a log without the markers fails, never passes
 // ---------------------------------------------------------------------------
 
+const BUDGET_KEY = { provider: 'hetzner', cpuClass: 'cx' };
+// A row for every mode, so a failure below is the missing markers' and not a
+// missing budget's.
+const row = { ownedS: 900, endToEndS: 1000, samples: 9 };
+const BUDGET_TABLE = {
+  hetzner: {
+    compose: { cx: row },
+    'compose-ha': { cx: row },
+    k8s: { cx: row },
+    'k8s-ha': { cx: row },
+  },
+};
+
 const DEPLOY_BUDGET_MARKERLESS: Record<string, Array<() => VerificationResult>> = {
   checkDeployBudget: (['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const).flatMap((mode) => [
-    () => deployBudget.checkDeployBudget('', mode),
+    () => deployBudget.checkDeployBudget('', mode, BUDGET_KEY, BUDGET_TABLE),
     () =>
       deployBudget.checkDeployBudget(
         '◆  Deployment to e1 complete! (1m 2s)\n[perf] deploy.iac.upStack 1000ms',
         mode,
+        BUDGET_KEY,
+        BUDGET_TABLE,
       ),
   ]),
 };
@@ -843,6 +858,18 @@ describe('DEPLOY BUDGET: every check fails on a log without its markers', () => 
   it.each(cases)('%s fails', (_label, run) => {
     const r = run();
     expect(r.status, r.errorMessage).toBe('fail');
+    expect(r.errorMessage).not.toMatch(/no budget yet/);
+  });
+
+  it('a combination with no budget row fails, even on a log that would pass', () => {
+    const r = deployBudget.checkDeployBudget(
+      '',
+      'compose',
+      { provider: 'vultr', cpuClass: 'vc2' },
+      {},
+    );
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(/no budget yet for vultr\/compose\/vc2/);
   });
 
   it('every exported check in deploy-budget.ts is registered', () => {

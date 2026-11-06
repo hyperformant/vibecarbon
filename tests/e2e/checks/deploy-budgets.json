@@ -1,0 +1,24 @@
+{
+  "rule": "owned = ceil5(p90 + 15) at n >= 4 else ceil5(max + 30); endToEnd = owned + tlsAllowanceS (15, or ceil5 of the TLS first-look statistic when above 15). Regenerate with scripts/calibrate-deploy-budgets.js.",
+  "since": "2026-11-05T13:00:00.000Z",
+  "budgets": {
+    "linode": {
+      "compose-ha": {
+        "standard": {
+          "ownedS": 230,
+          "endToEndS": 245,
+          "tlsAllowanceS": 15,
+          "samples": 1
+        }
+      },
+      "compose": {
+        "standard": {
+          "ownedS": 210,
+          "endToEndS": 235,
+          "tlsAllowanceS": 25,
+          "samples": 1
+        }
+      }
+    }
+  }
+}

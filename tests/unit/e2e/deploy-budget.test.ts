@@ -5,7 +5,28 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { checkDeployBudget, DEPLOY_BUDGETS } from '../../e2e/checks/deploy-budget.js';
+import {
+  type BudgetKey,
+  type BudgetTable,
+  budgetFor,
+  DEPLOY_BUDGET_TABLE,
+  deployCpuClass,
+  checkDeployBudget as judge,
+} from '../../e2e/checks/deploy-budget.js';
+import type { DeployMode } from '../../e2e/scenarios/types.js';
+
+/** The numbers these fixtures are bent around (one provider, one class). */
+const TABLE: BudgetTable = {
+  hetzner: {
+    compose: { cx: { ownedS: 180, endToEndS: 300, samples: 9 } },
+    'compose-ha': { cx: { ownedS: 300, endToEndS: 360, samples: 9 } },
+    k8s: { cx: { ownedS: 300, endToEndS: 390, samples: 9 } },
+    'k8s-ha': { cx: { ownedS: 420, endToEndS: 480, samples: 9 } },
+  },
+};
+const KEY: BudgetKey = { provider: 'hetzner', cpuClass: 'cx' };
+const checkDeployBudget = (output: string, mode: DeployMode, key = KEY, table = TABLE) =>
+  judge(output, mode, key, table);
 
 const perf = (name: string, ms: number, note?: string) =>
   `[perf] ${name} ${ms}ms${note ? ` ${note}` : ''}`;
@@ -28,7 +49,7 @@ interface LogOpts {
 }
 
 /** A passing cold deploy log for each mode; opts bend one number. */
-function fixture(mode: keyof typeof DEPLOY_BUDGETS, o: LogOpts = {}): string {
+function fixture(mode: DeployMode, o: LogOpts = {}): string {
   const lines: string[] = ['◇  Provisioning infrastructure', 'some spinner text'];
   const delta = (bytes: number | null | undefined) =>
     bytes === null
@@ -108,14 +129,87 @@ function fixture(mode: keyof typeof DEPLOY_BUDGETS, o: LogOpts = {}): string {
   return lines.join('\n');
 }
 
-describe('DEPLOY_BUDGETS', () => {
-  it('holds the D1 numbers: deploy-owned and end-to-end seconds per mode', () => {
-    expect(DEPLOY_BUDGETS).toEqual({
-      compose: { ownedS: 180, endToEndS: 300 },
-      'compose-ha': { ownedS: 300, endToEndS: 360 },
-      k8s: { ownedS: 300, endToEndS: 390 },
-      'k8s-ha': { ownedS: 420, endToEndS: 480 },
+describe('budgets are keyed on provider + mode + class', () => {
+  it('judges each key against its own row', () => {
+    const table: BudgetTable = {
+      hetzner: { compose: { cx: { ownedS: 180, endToEndS: 300, samples: 9 } } },
+      digitalocean: {
+        compose: {
+          amd: { ownedS: 120, endToEndS: 135, samples: 9 },
+          intel: { ownedS: 400, endToEndS: 415, samples: 9 },
+        },
+      },
+    };
+    const log = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    // 245 s owned: over DO amd's 120, inside DO intel's 400, over Hetzner cx's 180.
+    const run = (provider: string, cpuClass: string) =>
+      judge(log, 'compose', { provider, cpuClass }, table);
+    expect(run('digitalocean', 'amd').message).toMatch(/deploy-owned 245s > 120s/);
+    expect(run('digitalocean', 'intel').ok).toBe(true);
+    expect(run('hetzner', 'cx').message).toMatch(/deploy-owned 245s > 180s/);
+  });
+
+  it('a combination with no row fails with `no budget yet`, never a pass', () => {
+    for (const key of [
+      { provider: 'hetzner', cpuClass: 'ccx' }, // class with no data
+      { provider: 'vultr', cpuClass: 'cx' }, // provider with no data
+    ]) {
+      const r = checkDeployBudget(fixture('compose'), 'compose', key);
+      expect(r.ok).toBe(false);
+      expect(r.status).toBe('fail');
+      expect(r.message).toMatch(
+        new RegExp(`no budget yet for ${key.provider}/compose/${key.cpuClass}`),
+      );
+    }
+    expect(checkDeployBudget(fixture('k8s'), 'k8s', KEY, {}).message).toMatch(/no budget yet/);
+  });
+
+  it('still judges the byte and lock invariants when the time budget is missing', () => {
+    const r = checkDeployBudget(fixture('compose-ha', { standbyLock: '1 (93s)' }), 'compose-ha', {
+      provider: 'vultr',
+      cpuClass: 'vc2',
     });
+    expect(r.message).toMatch(/no budget yet/);
+    expect(r.message).toMatch(/lock wait 93s > 15s/);
+  });
+
+  it('records the key it judged', () => {
+    const r = checkDeployBudget(fixture('compose'), 'compose');
+    expect(r.details).toMatchObject({ provider: 'hetzner', cpuClass: 'cx' });
+  });
+
+  it('the calibrated table has no hand-edit shape errors', () => {
+    for (const [provider, modes] of Object.entries(DEPLOY_BUDGET_TABLE)) {
+      for (const [mode, classes] of Object.entries(modes)) {
+        for (const [cpuClass, row] of Object.entries(classes)) {
+          const where = `${provider}/${mode}/${cpuClass}`;
+          expect(row.ownedS % 5, where).toBe(0);
+          expect(row.endToEndS, where).toBeGreaterThanOrEqual(row.ownedS + 15);
+          expect(row.samples, where).toBeGreaterThan(0);
+          expect(budgetFor(DEPLOY_BUDGET_TABLE, mode as DeployMode, { provider, cpuClass })).toBe(
+            row,
+          );
+        }
+      }
+    }
+  });
+});
+
+describe('deployCpuClass', () => {
+  it('names the class of the recorded server type', () => {
+    expect(deployCpuClass('hetzner', 'cx32')).toBe('cx');
+    expect(deployCpuClass('hetzner', 'cpx31')).toBe('cpx');
+    expect(deployCpuClass('digitalocean', 's-2vcpu-4gb-intel')).toBe('intel');
+  });
+
+  it('is `standard` for a provider that declares no classes', () => {
+    expect(deployCpuClass('linode', 'g6-standard-2')).toBe('standard');
+    expect(deployCpuClass('linode', undefined)).toBe('standard');
+  });
+
+  it('is `unknown` for a classed provider whose type is missing or classless', () => {
+    expect(deployCpuClass('hetzner', undefined)).toBe('unknown');
+    expect(deployCpuClass('hetzner', 'not-a-type')).toBe('unknown');
   });
 });
 
