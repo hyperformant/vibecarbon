@@ -30,6 +30,9 @@ export { reestablishReplicationTransport } from './ha/index.js';
 // can name the deploy's issuer and save the trusted certificate without
 // reaching into ./k3s.js or ./tls-restore.js directly — see paid-boundary guard.
 export { k8sTlsIdentity } from './k3s.js';
+// Re-exported so scale (outside src/lib/deploy/k8s/) can wait out a resize's
+// reboots without reaching into ./kubelet-liveness.js directly.
+export { waitForKubeletsRenewing } from './kubelet-liveness.js';
 // Re-exported so the orchestrator's preflight (outside src/lib/deploy/k8s/)
 // refuses a project whose observability files still issue grafana-tls.
 export { staleClusterIssuersProblem, staleObservabilityTlsProblem } from './one-certificate.js';
