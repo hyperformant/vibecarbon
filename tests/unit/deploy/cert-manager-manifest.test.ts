@@ -28,8 +28,6 @@ import {
   CERT_MANAGER_MIN_BACKOFF,
   CERT_MANAGER_URL,
   CERT_MANAGER_VERSION,
-  KUBECTL_MIN_VERSION,
-  kubectlFloorProblem,
   renderCertManagerKustomization,
   writeCertManagerKustomization,
 } from '../../../carbon/scripts/render-cert-manager.mjs';
@@ -197,34 +195,7 @@ describe('the script form (GitOps workflow)', () => {
   });
 });
 
-describe('the kubectl floor', () => {
-  const version = (minor: string, major = '1') =>
-    JSON.stringify({ clientVersion: { major, minor, gitVersion: `v${major}.${minor}.0` } });
-
-  it('is 1.27: the first kubectl whose built-in kustomize is v5', () => {
-    expect(KUBECTL_MIN_VERSION).toEqual({ major: 1, minor: 27 });
-  });
-
-  it('refuses an older kubectl with what to do', () => {
-    const problem = kubectlFloorProblem(version('26'));
-    expect(problem).toMatch(/kubectl 1\.26 is older than 1\.27/);
-    expect(problem).toMatch(/Install kubectl 1\.27 or newer, then run the deploy again/);
-    expect(problem).not.toMatch(/\u2014/);
-  });
-
-  it('accepts the floor and newer, including a vendor "+" minor', () => {
-    expect(kubectlFloorProblem(version('27'))).toBeNull();
-    expect(kubectlFloorProblem(version('35'))).toBeNull();
-    expect(kubectlFloorProblem(version('28+'))).toBeNull();
-    expect(kubectlFloorProblem(version('0', '2'))).toBeNull();
-  });
-
-  it('an unreadable version is not refused (nothing proven old)', () => {
-    expect(kubectlFloorProblem('')).toBeNull();
-    expect(kubectlFloorProblem('not json')).toBeNull();
-    expect(kubectlFloorProblem('{}')).toBeNull();
-  });
-
+describe('the kubectl floor (lib/runtime-floors.js)', () => {
   it('the k8s deploy preflight checks it right after the tool lookup', () => {
     const k3s = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf-8');
     const tools = k3s.indexOf("for (const tool of ['docker', 'ssh', 'kubectl'])");

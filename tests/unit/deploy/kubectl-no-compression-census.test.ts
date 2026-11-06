@@ -54,6 +54,9 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/** Names kubectl as data in the floors table. It judges version text and spawns nothing. */
+const NOT_A_SPAWNER = new Set(['src/lib/runtime-floors.js']);
+
 const SRC = walk(join(ROOT, 'src')).map((f) => ({
   file: relative(ROOT, f),
   text: readFileSync(f, 'utf-8'),
@@ -243,7 +246,9 @@ describe('kubectl/helm read a kubeconfig with compression off', () => {
   });
 
   it('(c) every file that spawns kubectl or helm is in the inventory, and nothing stale is', () => {
-    const spawners = SRC.filter(({ text }) => spawnsKubeClient(text)).map((s) => s.file);
+    const spawners = SRC.filter(({ text }) => spawnsKubeClient(text))
+      .map((s) => s.file)
+      .filter((f) => !NOT_A_SPAWNER.has(f));
     const unlisted = spawners.filter((f) => !(f in SPAWNERS));
     expect(
       unlisted,

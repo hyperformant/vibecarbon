@@ -54,10 +54,7 @@ import {
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../../carbon/scripts/render-backup-settings.mjs';
-import {
-  kubectlFloorProblem,
-  writeCertManagerKustomization,
-} from '../../../../carbon/scripts/render-cert-manager.mjs';
+import { writeCertManagerKustomization } from '../../../../carbon/scripts/render-cert-manager.mjs';
 import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
@@ -80,6 +77,7 @@ import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
 import { runWithRetry } from '../../retry.js';
+import { kubectlFloorProblem } from '../../runtime-floors.js';
 import {
   declaredAddonNames,
   enabledK8sAddonNames,
@@ -4935,8 +4933,8 @@ async function deployK3sSteps(options, inFlight) {
       throw new Error(`Required tool '${tool}' not found on PATH`);
     }
   }
-  // The cert-manager install is a kustomization over the release manifest's
-  // URL (render-cert-manager.mjs), which needs kubectl's built-in kustomize v5.
+  // The floor and why it is what it is: kubectl-patch-subresource in
+  // lib/runtime-floors.js.
   const kubectlVersion = await runCommandAsync(['kubectl', 'version', '--client', '-o', 'json'], {
     silent: true,
   }).catch(() => '');

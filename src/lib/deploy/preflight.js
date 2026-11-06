@@ -3,19 +3,15 @@ import { join } from 'node:path';
 import { checkDependency, runCommand } from '../command.js';
 import { checkOperatorConfig } from '../operator-env.js';
 import { readProjectEnvFiles } from '../project.js';
+import { compareVersions, rowFor } from '../runtime-floors.js';
 import { DB_GUARD_COMMAND, DB_GUARD_PROTOCOL_MARKER } from './db-workload.js';
 import { isComposeTier, isK8sTier } from './tier-registry.js';
 import { COMPOSE_WALG_ROLE_HOST_DIR, WALG_ROLE_PARSE_SH } from './walg-role.js';
 
 /**
  * The Pulumi release that taught the DIY S3 backend to accept
- * `request_checksum_calculation` in the backend URL.
- *
- * Sourced, not guessed: pulumi/pulumi PR #24109 ("improve gcloud backcompat",
- * commit e4936998) merged 2026-07-29, and the first release cut after it was
- * v3.256.0 on 2026-08-04. That matches the version
- * BaseProvider.STATE_BACKEND_CHECKSUM_CALCULATION's RCA already names as the
- * one whose `translateLegacyS3Params` injects the parameter.
+ * `request_checksum_calculation` in the backend URL. The number and its source
+ * live in the floors table.
  *
  * Below this, a provider that PINS a checksum mode hands Pulumi a URL it does
  * not understand and every state operation dies at the very first one:
@@ -26,11 +22,9 @@ import { COMPOSE_WALG_ROLE_HOST_DIR, WALG_ROLE_PARSE_SH } from './walg-role.js';
  * That message names neither Pulumi nor a version, and it surfaces from
  * `pulumi stack select` before a single line of provider code runs — so the
  * operator sees a bucket error and goes looking at their object storage
- * credentials. Live 2026-08-20: a Scaleway compose-HA deploy failed exactly
- * this way against Pulumi v3.231.0, and finding the cause took reading the
- * RCA comment in providers/base.js.
+ * credentials.
  */
-export const PULUMI_MIN_VERSION_FOR_BACKEND_CHECKSUM = '3.256.0';
+export const PULUMI_MIN_VERSION_FOR_BACKEND_CHECKSUM = rowFor('pulumi-backend-checksum').min;
 
 /**
  * Read the installed Pulumi CLI version as `major.minor.patch`, or null when
@@ -49,16 +43,6 @@ export function readPulumiVersion({ run = runCommand } = {}) {
   } catch {
     return null;
   }
-}
-
-/** @returns {number} negative / 0 / positive, like a comparator */
-function compareVersions(a, b) {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
-  }
-  return 0;
 }
 
 /**
@@ -86,7 +70,7 @@ export function assertPulumiSupportsBackendOptions(ProviderClass, installed) {
       `  This provider pins \`request_checksum_calculation=${mode}\` on the Pulumi state\n` +
       `  backend URL, which Pulumi only understands from v${PULUMI_MIN_VERSION_FOR_BACKEND_CHECKSUM}.\n` +
       `  On ${installed} every state operation fails at the first one with\n` +
-      `  \`unknown query parameter "request_checksum_calculation"\` — a bucket error\n` +
+      `  \`unknown query parameter "request_checksum_calculation"\`, a bucket error\n` +
       '  that looks like an object-storage credential problem but is not.\n\n' +
       '  Upgrade:  curl -fsSL https://get.pulumi.com | sh\n' +
       '  Then reopen your shell and re-run.',
@@ -96,12 +80,12 @@ export function assertPulumiSupportsBackendOptions(ProviderClass, installed) {
 /**
  * The oldest Pulumi CLI a k8s deploy may run on: static k8s workers ignore
  * their user data and are rebuilt by a `replacementTrigger` holding their
- * join target (src/lib/iac/create-timeout.js workerResourceOptions). The
- * resource option arrived in Pulumi v3.208.0, and v3.226.0 fixed it firing on
- * dependency changes. An older CLI drops the option without a word, so a
- * replaced master would leave the static workers joining one that is gone.
+ * join target (src/lib/iac/create-timeout.js workerResourceOptions). An older
+ * CLI drops the option without a word, so a replaced master would leave the
+ * static workers joining one that is gone. The number and its source live in
+ * the floors table.
  */
-export const PULUMI_MIN_VERSION_FOR_WORKER_JOIN_TRIGGER = '3.226.0';
+export const PULUMI_MIN_VERSION_FOR_WORKER_JOIN_TRIGGER = rowFor('pulumi-worker-trigger').min;
 
 /**
  * Refuse a k8s or k8s-ha deploy on a Pulumi CLI too old to honor the workers'
