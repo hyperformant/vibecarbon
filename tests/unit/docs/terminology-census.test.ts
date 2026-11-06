@@ -38,13 +38,6 @@ const ROOT = join(import.meta.dirname, '..', '..', '..');
 //   third-party tools by their real licensing. The one ban that does reach
 //   it — named-framework compliance — is pinned by its own targeted check
 //   below, so the whole-file exemption doesn't leave that family unguarded.
-// - carbon/src/client/locales/en.json's "pricing" object (tier cards,
-//   taglines, CTAs, units): the generated app's own demo SaaS pricing page
-//   for the user's product, not a statement of Vibecarbon's license model.
-//   It reuses tier-shaped placeholder copy (including the retired Agency
-//   name) as example content and is deliberately left alone; only its "faq"
-//   object states Vibecarbon's own licensing and is checked directly by the
-//   pricing/tier assertions below.
 const SURFACES = [
   'README.md',
   'FEATURES.md',
@@ -334,6 +327,20 @@ describe('terminology census', () => {
     }
   });
 
+  it('the template locale carries no retired tier names, FSL / Fair Source, or per-project price language', () => {
+    // The whole `landing` object, not only its FAQ: the homepage cards,
+    // pillars and footer all speak for Vibecarbon. (The app's own billing
+    // strings elsewhere in the file describe the user's customers.)
+    const pattern =
+      /graphite|graphene|fullerene|\bFSL\b|fair[ -]source|per-project subscription|per project per (month|year)|\$\d/gi;
+    for (const f of LOCALE_FILES) {
+      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
+      const landing = JSON.stringify(json.landing ?? {});
+      const hits = contextHits(landing, pattern);
+      expect(hits, `locales/${f} landing: ${hits.join(' | ')}`).toEqual([]);
+    }
+  });
+
   it('per-project subscription prices ($19 Graphene, $39 Fullerene) are stated in README and TERMS', () => {
     for (const rel of ['README.md', 'TERMS.md']) {
       const text = read(rel);
@@ -439,20 +446,14 @@ describe('terminology census', () => {
     }
   });
 
-  it('locale files carry no banned terms (Diamond, reference provider, open-source branding, pivot literals)', () => {
+  it('locale files carry no banned terms (Diamond, reference provider, pivot literals)', () => {
     const localeDir = join(ROOT, 'carbon', 'src', 'client', 'locales');
     for (const f of readdirSync(localeDir).filter((f) => f.endsWith('.json'))) {
       const text = readFileSync(join(localeDir, f), 'utf-8');
       expect(text, `${f}: Diamond`).not.toMatch(/\bDiamond\b/);
       expect(text, `${f}: reference provider`).not.toMatch(/reference[- ]provider/i);
-      // "Open Source Templates" is the single allowed use (2026-08-14 pillar
-      // copy): the carbon template genuinely ships MIT. The CLI stays Fair
-      // Source — any other "open source" is still banned. Claims-registry
-      // rule 5 records the exception.
-      const openSourceUses = (text.match(/open[- ]source(?:[- ]templates?)?/gi) ?? []).filter(
-        (m) => !/templates?$/i.test(m),
-      );
-      expect(openSourceUses, `${f}: open source outside "Open Source Templates"`).toEqual([]);
+      // "Open source" is no longer banned in the locale: the CLI and the
+      // template are both MIT, so the Grounded pillar says so.
       expect(text, `${f}: servers you own`).not.toMatch(/servers? you own/i);
       expect(text, `${f}: two cloud providers`).not.toMatch(/two cloud providers/i);
       expect(text, `${f}: two clouds`).not.toMatch(/\btwo clouds\b/i);

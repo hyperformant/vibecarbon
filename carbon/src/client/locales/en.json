@@ -403,13 +403,12 @@
   },
   "landing": {
     "hero": {
-      "badge": "Fully Automated · Self-Hosted",
-      "headline1": "Professional-Grade",
-      "subheading": "Full-stack apps in minutes. Auth, billing, security, AI-guardrails, and powerful automations built-in.",
+      "headline1": "Build the next",
+      "headline2": "big thing.",
+      "subheading": "Launch full-stack apps in minutes on the VPS provider of your choice. Auth, billing, and AI-guardrails built-in, with automated backup, restore, scale, replication, and failover.",
       "getUpdates": "Get Updates"
     },
     "pillars": {
-      "eyebrow": "We build on",
       "headline": "Four commitments,",
       "headlineHighlight": "enforced by design.",
       "sovereign": {
@@ -420,12 +419,12 @@
       "agnostic": {
         "name": "Agnostic",
         "definition": "Modular and portable",
-        "belief": "Swap components, move hosting providers. All the batteries included, but easily changed."
+        "belief": "Swap components, move providers. All the batteries included, but easily changed."
       },
       "grounded": {
         "name": "Grounded",
         "definition": "Rooted in transparency",
-        "belief": "Fair Source CLI, Open Source Templates. Everything transparent all the way down."
+        "belief": "Open source under MIT, CLI and template alike. Everything transparent all the way down."
       },
       "agentic": {
         "name": "Agentic",
@@ -446,9 +445,6 @@
         "infra": "Infrastructure"
       }
     },
-    "logoStrip": {
-      "label": "Optimized for the tools you use"
-    },
     "workflow": {
       "headline": "Launch in minutes.",
       "subheading": "Deploy, scale, backup, restore, and failover with simple CLI commands.",
@@ -458,68 +454,32 @@
       },
       "develop": {
         "label": "Develop",
-        "description": "Spin up a dev environment for building your app using AI, complete with security guardrails and a hot-reloading frontend."
+        "description": "Spin up a dev environment for building your app with AI, complete with security guardrails. Your changes appear in the browser the moment you make them."
       },
       "deploy": {
         "label": "Deploy",
         "description": "Deploy with Docker Compose or Kubernetes on the hosting provider you choose. Backups, scaling, and high-availability are automated commands."
       }
     },
-    "pricing": {
-      "headline1": "From",
-      "headlineSketch": "sketch",
-      "headline2": "to",
-      "headlineScale": "scale.",
-      "subheading": "Same carbon, different form. Pay once, or talk to us about Agency.",
-      "redirecting": "Redirecting…",
-      "checkoutError": "Something went wrong. Please try again.",
-      "popular": "All 4 Modes",
-      "contactUs": "Contact us",
-      "units": {
-        "forever": "forever",
-        "oneTime": "one-time payment",
-        "contact": "signed agreement"
+    "growth": {
+      "headline": "Same carbon,",
+      "headlineHighlight": "different form.",
+      "subheading": "The same app runs in every mode. Choose one for each environment when you create it.",
+      "launch": {
+        "name": "Launch.",
+        "mode": "Docker Compose",
+        "tagline": "Most apps live here: one server, automated SSL, nightly backups, one-command restore. Auth, billing, and teams are built-in and ready to ship.",
+        "cta": "Start building"
       },
-      "graphite": {
-        "tagline": "Sketch, build, and deploy!",
-        "cta": "Start Sketching",
-        "features": {
-          "unlimitedProjects": "Unlimited projects",
-          "localDev": "Full local dev environment",
-          "production": "Compose only production deploys",
-          "backups": "Backups, restore & scaling",
-          "cicd": "Push-to-deploy CI/CD",
-          "addOns": "Every add-on included",
-          "stack": "Complete Vibecarbon stack",
-          "fairSource": "Fair Source — audit, fork, use commercially",
-          "community": "Community support"
-        }
+      "supercharge": {
+        "name": "Supercharge.",
+        "mode": "Kubernetes",
+        "tagline": "Everything in Launch, on an autoscaling cluster designed for apps that go viral. Roll out updates with zero downtime."
       },
-      "fullerene": {
-        "tagline": "Advanced scaling and redundancy.",
-        "cta": "Get Fullerene",
-        "features": {
-          "graphite": "Everything in Graphite",
-          "deployModes": "Compose HA, K8s & K8s HA deploys",
-          "replication": "High availability with replication",
-          "healthChecks": "One-command failover",
-          "cicd": "Flux GitOps on the Kubernetes modes",
-          "monitoring": "Advanced monitoring & alerting",
-          "unlimited": "Unlimited servers & projects",
-          "support": "Email support"
-        }
-      },
-      "agency": {
-        "tagline": "Deploy for clients and enterprise.",
-        "cta": "Contact Us",
-        "features": {
-          "fullerene": "Everything in Fullerene",
-          "exception": "Embed or resell Vibecarbon-powered services",
-          "clients": "Deploy for clients and employers",
-          "whiteLabel": "White-label Vibecarbon-powered services",
-          "customTerms": "Custom terms, signed agreement",
-          "priority": "Priority support"
-        }
+      "fortify": {
+        "name": "Fortify.",
+        "mode": "Kubernetes HA",
+        "tagline": "Everything in Supercharge, plus a live copy of your app and data with real-time replication, on standby, for failover to a second region."
       }
     },
     "faq": {
@@ -527,7 +487,7 @@
       "subheading": "Common questions, direct answers.",
       "q1": {
         "question": "What do I get out of the box?",
-        "answer": "A full-stack app with React 19 and a Hono API on your own Postgres, with Better Auth and Drizzle, on one server. Billing, file uploads, blog, docs, i18n, Kubernetes manifests, and Docker Compose for local dev come with it."
+        "answer": "A full-stack app with React 19, Hono API, your own Postgres database, auth, billing, file uploads, blog, docs, i18n, Kubernetes manifests, and Docker Compose for local dev."
       },
       "q2": {
         "question": "Can I modify or customize everything?",
@@ -535,35 +495,39 @@
       },
       "q3": {
         "question": "What cloud providers are supported?",
-        "answer": "Hetzner Cloud, DigitalOcean, Linode, Vultr, and Scaleway: the same CLI, the same lifecycle, the same test coverage. Mode support varies by provider: Hetzner and DigitalOcean run Compose, Kubernetes, and Kubernetes HA; Linode, Vultr, and Scaleway run Compose. Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with -mode compose-ha. The provider is a per-environment setting: pick one, and pick again whenever you want."
+        "answer": "Hetzner Cloud, DigitalOcean, Linode, Vultr, and Scaleway: the same CLI, the same lifecycle, the same test coverage. Mode support varies by provider. Hetzner and DigitalOcean run Compose, Kubernetes, and Kubernetes HA (a standby copy in a second region, kept ready to take over). Linode, Vultr, and Scaleway run Compose today. The provider is a per-environment setting: pick one, and pick again whenever you want."
       },
       "q4": {
         "question": "How does deployment work?",
-        "answer": "Run \"vibecarbon deploy\" to provision a VPS, install your stack (Docker Compose or Kubernetes, depending on deploy mode), configure Traefik, deploy your app with auto-HTTPS, and set up automated backups, all in one command."
+        "answer": "Run \"vibecarbon deploy\" and one command does the whole job: rents and configures a server in your own cloud account, installs your stack, turns on HTTPS (the browser padlock) automatically, and sets up scheduled backups. When you outgrow one server, the same command family handles scaling, restore, and failover."
       },
       "q5": {
-        "question": "How does pricing work?",
-        "answer": "Graphite is free forever: create projects, develop locally, and deploy in production on a single server, with every add-on included. Graphene is $19 per project per month ($190 per year) and unlocks Kubernetes. Fullerene is $39 per project per month ($390 per year) and unlocks Kubernetes HA, which also covers Compose HA. A subscription is per project: it is checked on every deploy to a Kubernetes or HA environment, and backup, restore, failover, and scale never require a key. Either way, it deploys to your own cloud account."
+        "question": "Which setup do I need?",
+        "answer": "Pick by circumstance, not by size. Launch runs most production apps: one server in your own cloud account, automated SSL, nightly backups, one-command restore. Supercharge is for absorbing traffic spikes: a cluster that adds workers under load and deploys with zero downtime. Fortify is for guaranteeing uptime: a live standby in a second region with one-command failover."
       },
       "q6": {
-        "question": "How many projects can I create with one license?",
-        "answer": "A subscription covers one project. Create as many Graphite (free) projects as you like; each one you want to run on Graphene or Fullerene needs its own subscription. A key may be used by anyone working on that project, client work included."
+        "question": "How many projects can I create?",
+        "answer": "As many as you like. There are no keys and no per-project limits."
       },
       "q7": {
-        "question": "Do I need a paid license to charge users or run a SaaS?",
-        "answer": "No. Single-server Docker Compose production deploys are free on Graphite, including your own commercial SaaS. You need Graphene or Fullerene only for Kubernetes or Kubernetes HA. A key may be used by anyone working on that project, client work included; there is no separate tier for deploying on someone else's behalf."
+        "question": "Can I charge users or run a SaaS?",
+        "answer": "Yes. Vibecarbon and the code it generates are MIT licensed, so commercial use and client work are fine."
       },
       "q8": {
         "question": "What happens if Vibecarbon shuts down?",
-        "answer": "Nothing changes for your app. The generated code is MIT-licensed with zero runtime dependency on Vibecarbon; it's just a codebase you own outright. The CLI is Fair Source (FSL), so you can run it from source indefinitely for any non-competing use, and every release converts to the MIT license two years after publication. Your infrastructure runs in your own cloud account."
+        "answer": "Nothing changes for your app. The generated code is MIT-licensed with zero runtime dependency on Vibecarbon; it's just a codebase you own outright. The CLI is MIT too. Your infrastructure runs in your own cloud account."
       },
       "q9": {
         "question": "Do I need DevOps experience to deploy?",
         "answer": "No. The CLI handles provisioning, SSL, scaling, backups, and monitoring. You need an account with a supported provider, a domain, and SMTP credentials for email. That's it. All the Kubernetes manifests and Docker Compose files live in your project if you want to understand or customize what's being set up."
       },
       "q10": {
-        "question": "What if I cancel or a payment fails?",
-        "answer": "You get 30 days after the paid period ends. Every deploy in that window tells you how long is left and where to fix it. After that, deploys to your paid-mode environments pause until you renew. Backup, restore, failover, and scale never pause, and your running app is untouched."
+        "question": "I'm building with AI. What stops my agent from making a security mistake?",
+        "answer": "Guardrails your agent is required to follow, not asked to. Generated projects ship with security rules AI agents must obey: row-level security on every table (the database itself refusing to show one customer another customer's data), sign-in checks, and input validation. There's also a scanner that blocks secret keys from ever being committed, and confirmation gates on anything destructive. The architecture helps too: browser code, server code, and the database are three separate pieces, so an agent can't accidentally put a secret where the public can see it."
+      },
+      "q11": {
+        "question": "What does it cost to run?",
+        "answer": "The software is MIT licensed, so there is nothing to pay Vibecarbon. You pay your own cloud bill, which depends on your provider and deploy mode."
       }
     },
     "newsletter": {
@@ -574,17 +538,24 @@
       "errorInvalid": "Please enter a valid email address"
     },
     "cta": {
-      "headline": "Ship your next big thing!",
+      "headline": "Ship the next big thing.",
       "subheading": "Production-grade infrastructure in minutes with automated everything."
     },
     "footer": {
+      "pricing": "Pricing",
       "userDocs": "User Docs",
       "apiDocs": "API Docs",
       "blog": "Blog",
       "changelog": "Changelog",
       "contact": "Contact",
       "privacy": "Privacy",
-      "terms": "Terms"
+      "terms": "Terms",
+      "security": "Security",
+      "groups": {
+        "product": "Product",
+        "developers": "Developers",
+        "company": "Company"
+      }
     }
   }
 }

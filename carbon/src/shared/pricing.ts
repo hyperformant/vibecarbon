@@ -156,19 +156,6 @@ export const catalogTiers: CatalogTier[] = [...billingCatalog.tiers].sort(
   (a, b) => a.amount - b.amount
 );
 
-/**
- * Map an activated catalog product to its bespoke design slot by name (the
- * allotrope tiers are stable). Returns '' for an unrecognized product, which
- * falls back to default styling.
- */
-export function designSlugFromName(name: string): string {
-  const n = name.toLowerCase();
-  if (n.includes('graphite')) return 'graphite';
-  if (n.includes('fullerene')) return 'fullerene';
-  if (n.includes('agency')) return 'agency';
-  return '';
-}
-
 function priceSuffix(interval: CatalogTier['interval'], type: CatalogTier['type']): string {
   if (type === 'one_time' || interval === 'one_time') return '';
   if (interval === 'year') return '/yr';

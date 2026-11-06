@@ -10,7 +10,6 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { twMerge } from 'tailwind-merge';
 import { Nav } from './Nav';
-import { ShimmerBadge } from './ShimmerBadge';
 import { CommandBox } from './WorkflowSection';
 
 function cn(...inputs: ClassValue[]) {
@@ -488,15 +487,6 @@ export default function Hero() {
 
       <main className="relative z-10 flex flex-col items-center justify-center min-h-screen bg-canvas px-4 pt-32 pb-32">
         <div className="text-center max-w-4xl mx-auto mb-6 relative">
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.8, delay: 0.3 }}
-            className="flex items-center justify-center gap-3 select-none cursor-default mb-6"
-          >
-            <ShimmerBadge>{t('landing.hero.badge')}</ShimmerBadge>
-          </motion.div>
-
           <motion.h1
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -504,7 +494,7 @@ export default function Hero() {
             className="text-4xl md:text-6xl lg:text-7xl font-black tracking-tight mb-6"
           >
             <span className="block text-foreground">{t('landing.hero.headline1')}</span>
-            <span className="block text-primary pb-2">Architecture</span>
+            <span className="block text-primary pb-2">{t('landing.hero.headline2')}</span>
           </motion.h1>
 
           <motion.p

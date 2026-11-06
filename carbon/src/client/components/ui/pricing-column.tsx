@@ -89,7 +89,7 @@ export function PricingColumn({
                   <span className="text-muted-foreground text-sm">billed monthly</span>
                 </>
               ) : (
-                <span className="text-sm">free forever</span>
+                <span className="text-sm">free</span>
               )}
             </div>
           </div>

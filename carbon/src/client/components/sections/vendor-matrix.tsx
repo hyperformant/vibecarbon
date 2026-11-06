@@ -43,6 +43,11 @@ const TIERS = [
 
 type TierKey = (typeof TIERS)[number]['key'];
 
+// Compose HA is measured and supported on every provider, but the grid shows
+// the three modes the homepage presents. Its values stay in each provider's
+// `tiers` (the census mirrors SUPPORTED_TIERS) and in HA_TIERS below.
+const DISPLAYED_TIERS = TIERS.filter((t) => t.key !== 'compose-ha');
+
 interface ProviderRow {
   /** Provider registry key — must match src/lib/providers/*.js and perf-data. */
   id: string;
@@ -296,7 +301,7 @@ export default function VendorMatrix() {
                   {/* Row-key column. Fixed width so the timing columns sit in
                       the same place whether or not a tab renders the key. */}
                   <th className="w-[104px] min-w-[104px] border-b border-border" />
-                  {TIERS.map((t) => (
+                  {DISPLAYED_TIERS.map((t) => (
                     <th
                       key={t.key}
                       className="text-muted-foreground border-b border-border px-4 py-5 text-center text-xs font-semibold tracking-wide whitespace-nowrap uppercase"
@@ -347,7 +352,7 @@ export default function VendorMatrix() {
                           need it. */}
                       {i === 0 && PAIR_LABELS[step] && <RowKey labels={PAIR_LABELS[step]} />}
                     </td>
-                    {TIERS.map((t) => (
+                    {DISPLAYED_TIERS.map((t) => (
                       <td key={t.key} className="border-b border-border/60 px-4 py-4 text-center">
                         <Cell
                           support={p.tiers[t.key]}

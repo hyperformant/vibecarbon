@@ -258,7 +258,7 @@ describe('formatPlanPrice', () => {
 describe('formatTierPrice', () => {
   const tier = (over: Partial<CatalogTier>): CatalogTier => ({
     priceId: 'price_1',
-    name: 'Fullerene',
+    name: 'Pro',
     description: null,
     features: [],
     amount: 14900,
@@ -317,7 +317,7 @@ describe('catalog tier sorting', () => {
       },
       {
         priceId: 'p1',
-        name: 'Graphite',
+        name: 'Starter',
         description: null,
         features: [],
         amount: 0,
@@ -327,7 +327,7 @@ describe('catalog tier sorting', () => {
       },
       {
         priceId: 'p2',
-        name: 'Fullerene',
+        name: 'Pro',
         description: null,
         features: [],
         amount: 14900,
@@ -337,7 +337,7 @@ describe('catalog tier sorting', () => {
       },
     ];
     const sorted = [...unsorted].sort((a, b) => a.amount - b.amount);
-    expect(sorted.map((t) => t.name)).toEqual(['Graphite', 'Fullerene', 'Enterprise']);
+    expect(sorted.map((t) => t.name)).toEqual(['Starter', 'Pro', 'Enterprise']);
   });
 });
 

@@ -49,4 +49,15 @@ describe('<FAQSection />', () => {
     const faqKeys = Object.keys(en.landing.faq).filter((k) => k.startsWith('q'));
     expect(screen.getAllByRole('button')).toHaveLength(faqKeys.length);
   });
+
+  it('answers what it costs to run and states the license plainly', () => {
+    render(<FAQSection />);
+
+    expect(screen.getByText('What does it cost to run?')).toBeInTheDocument();
+    expect(screen.getByText('Which setup do I need?')).toBeInTheDocument();
+    expect(screen.getByText('Can I charge users or run a SaaS?')).toBeInTheDocument();
+    expect(JSON.stringify(en.landing.faq)).not.toMatch(
+      /graphite|graphene|fullerene|fair source|subscription|cancel/i
+    );
+  });
 });

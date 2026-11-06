@@ -9,6 +9,7 @@ export function FAQSection() {
 
   const faqs = [
     { question: t('landing.faq.q1.question'), answer: t('landing.faq.q1.answer') },
+    { question: t('landing.faq.q10.question'), answer: t('landing.faq.q10.answer') },
     { question: t('landing.faq.q2.question'), answer: t('landing.faq.q2.answer') },
     { question: t('landing.faq.q3.question'), answer: t('landing.faq.q3.answer') },
     { question: t('landing.faq.q4.question'), answer: t('landing.faq.q4.answer') },
@@ -17,7 +18,7 @@ export function FAQSection() {
     { question: t('landing.faq.q7.question'), answer: t('landing.faq.q7.answer') },
     { question: t('landing.faq.q8.question'), answer: t('landing.faq.q8.answer') },
     { question: t('landing.faq.q9.question'), answer: t('landing.faq.q9.answer') },
-    { question: t('landing.faq.q10.question'), answer: t('landing.faq.q10.answer') },
+    { question: t('landing.faq.q11.question'), answer: t('landing.faq.q11.answer') },
   ];
 
   return (

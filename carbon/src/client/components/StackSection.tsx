@@ -1,16 +1,11 @@
 import type { TablerIcon as IconComponent } from '@tabler/icons-react';
 import {
   IconBucket,
-  IconCertificate,
-  IconComponents,
+  IconDatabase,
   IconDeviceSdCard,
   IconKey,
-  IconLock,
   IconMail,
-  IconMarkdown,
   IconShieldLock,
-  IconTable,
-  IconUserShield,
 } from '@tabler/icons-react';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
@@ -28,6 +23,8 @@ import grafanaLogo from '../assets/logos/tech-grafana.svg';
 import honoLogo from '../assets/logos/tech-hono.svg';
 import i18nextLogo from '../assets/logos/tech-i18next.svg';
 import kubernetesLogo from '../assets/logos/tech-kubernetes.svg';
+import letsencryptLogo from '../assets/logos/tech-letsencrypt.svg';
+import mdxLogo from '../assets/logos/tech-mdx.svg';
 import postgresqlLogo from '../assets/logos/tech-postgresql.svg';
 import prometheusLogo from '../assets/logos/tech-prometheus.svg';
 import pulumiLogo from '../assets/logos/tech-pulumi.svg';
@@ -36,12 +33,14 @@ import reactHookFormLogo from '../assets/logos/tech-reacthookform.svg';
 import reactQueryLogo from '../assets/logos/tech-reactquery.svg';
 import reactRouterLogo from '../assets/logos/tech-reactrouter.svg';
 import redisLogo from '../assets/logos/tech-redis.svg';
+import shadcnLogo from '../assets/logos/tech-shadcnui.svg';
 import stripeLogo from '../assets/logos/tech-stripe.svg';
 import swaggerLogo from '../assets/logos/tech-swagger.svg';
 import tailwindLogo from '../assets/logos/tech-tailwindcss.svg';
 import traefikLogo from '../assets/logos/tech-traefikproxy.svg';
 import typescriptLogo from '../assets/logos/tech-typescript.svg';
 import viteLogo from '../assets/logos/tech-vite.svg';
+import wireguardLogo from '../assets/logos/tech-wireguard.svg';
 import zodLogo from '../assets/logos/tech-zod.svg';
 
 /**
@@ -81,11 +80,11 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
       { name: 'TypeScript', imgs: [typescriptLogo] },
       { name: 'React Router 8', imgs: [reactRouterLogo] },
       { name: 'Tailwind CSS', imgs: [tailwindLogo] },
-      { name: 'Shadcn UI', icon: IconComponents },
+      { name: 'Shadcn UI', imgs: [shadcnLogo] },
       { name: 'TanStack Query', imgs: [reactQueryLogo] },
       { name: 'Zod + React Hook Form', imgs: [zodLogo, reactHookFormLogo] },
       { name: 'Framer Motion', imgs: [framerLogo] },
-      { name: 'MDX', icon: IconMarkdown },
+      { name: 'MDX', imgs: [mdxLogo] },
       { name: 'i18next', imgs: [i18nextLogo] },
       { name: 'Vite 8', imgs: [viteLogo] },
     ],
@@ -94,12 +93,12 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
     key: 'api',
     tech: [
       { name: 'Hono', imgs: [honoLogo] },
+      { name: 'Better Auth', icon: IconShieldLock },
       { name: 'PostgreSQL', imgs: [postgresqlLogo] },
-      { name: 'Better Auth', icon: IconUserShield },
-      { name: 'Drizzle ORM', icon: IconTable },
-      { name: 'Row-level security', icon: IconLock },
+      { name: 'Drizzle ORM', icon: IconDatabase },
+      { name: 'Row-level security', icon: IconKey },
       { name: 'OpenAPI + Swagger docs', imgs: [swaggerLogo] },
-      { name: 'Redis', imgs: [redisLogo] },
+      { name: 'Redis', imgs: [redisLogo], badge: 'add-on' },
     ],
   },
   {
@@ -115,9 +114,9 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
     key: 'edge',
     tech: [
       { name: 'Traefik', imgs: [traefikLogo] },
-      { name: "Let's Encrypt TLS", icon: IconCertificate },
+      { name: "Let's Encrypt TLS", imgs: [letsencryptLogo] },
       { name: 'Cloudflare DNS', imgs: [cloudflareLogo] },
-      { name: 'WireGuard', icon: IconShieldLock },
+      { name: 'WireGuard', imgs: [wireguardLogo] },
     ],
   },
   {
@@ -128,7 +127,7 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
       { name: 'Pulumi', imgs: [pulumiLogo] },
       { name: 'Flux GitOps', imgs: [fluxLogo] },
       { name: 'WAL-G backups', icon: IconDeviceSdCard },
-      { name: 'Grafana & Prometheus', imgs: [grafanaLogo, prometheusLogo] },
+      { name: 'Grafana & Prometheus', imgs: [grafanaLogo, prometheusLogo], badge: 'add-on' },
     ],
   },
   {
