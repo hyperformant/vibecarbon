@@ -513,9 +513,9 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 export const TRAEFIK_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
   repo: 'library/traefik',
-  tag: 'v3.6.11',
-  digest: 'sha256:2b6506fde98570702dd026bc70ed307a0f22c2cf693329e91b46f94d371097a1',
-  index: 'sha256:acfc80650104f0194a15f73dc1648f517561bc1645391a15705332a064cfc33c',
+  tag: 'v3.7.17',
+  digest: 'sha256:e15b8921020b4fd81de5746b170dfceec221d2450711449f6427e4692881511a',
+  index: 'sha256:92627e6a99f71b8e46634acea28130b9f14bec5d9887ad15161007e1b652afe1',
 };
 /** @type {MirroredImage} compose prod's two socket proxies (traefik's and the app's) */
 export const DOCKER_SOCKET_PROXY_MIRROR = {

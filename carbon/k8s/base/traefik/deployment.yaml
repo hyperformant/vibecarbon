@@ -25,7 +25,7 @@ spec:
         effect: NoSchedule
       containers:
       - name: traefik
-        image: ghcr.io/hyperformant/traefik:v3.6.11@sha256:2b6506fde98570702dd026bc70ed307a0f22c2cf693329e91b46f94d371097a1
+        image: ghcr.io/hyperformant/traefik:v3.7.17@sha256:e15b8921020b4fd81de5746b170dfceec221d2450711449f6427e4692881511a
         imagePullPolicy: IfNotPresent
         args:
         - --api.dashboard=true

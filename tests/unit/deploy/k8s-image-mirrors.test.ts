@@ -184,7 +184,7 @@ describe('mirror set shape', () => {
     expect(socatImageRef()).toBe(byRepo('alpine/socat'));
     expect(alpineK8sImageRef()).toBe(byRepo('alpine/k8s'));
     expect(traefikImageRef()).toMatch(
-      /^ghcr\.io\/hyperformant\/traefik:v3\.6\.11@sha256:[a-f0-9]{64}$/,
+      /^ghcr\.io\/hyperformant\/traefik:v3\.7\.17@sha256:[a-f0-9]{64}$/,
     );
   });
 
@@ -603,8 +603,8 @@ describe('publish workflow mirrors exactly the set', () => {
     );
     // Docker Hub mirrors ride the same matrix: the copy reads docker.io.
     expect(matrix).toContainEqual({
-      src: 'docker.io/library/traefik:v3.6.11',
-      dst: 'ghcr.io/hyperformant/traefik:v3.6.11',
+      src: 'docker.io/library/traefik:v3.7.17',
+      dst: 'ghcr.io/hyperformant/traefik:v3.7.17',
       digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       index: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
     });

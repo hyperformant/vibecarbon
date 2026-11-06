@@ -251,7 +251,7 @@ jobs:
           PINNED: ${{ matrix.digest }}
           INDEX: ${{ matrix.index }}
         # SRC is `<registry>/<repo>:<tag>` for both registries, e.g.
-        # docker.io/library/traefik:v3.6.11 or registry.k8s.io/pause:3.9.
+        # docker.io/library/traefik:v3.7.17 or registry.k8s.io/pause:3.9.
         # Upstream publishes a multi-platform index. vibecarbon runs x86-64
         # only (see tests/unit/deploy/workflow-platforms.test.ts), so resolve
         # the linux/amd64 child manifest and copy just that — hauling the other
