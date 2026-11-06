@@ -43,7 +43,7 @@ import {
   type DeployBudgetResult,
   deployCpuClass,
 } from '../checks/deploy-budget.js';
-import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
+import { resolveAuthoritativeA, runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
 import { runFrontendSmokeChecks } from '../checks/frontend-smoke.js';
@@ -1755,9 +1755,9 @@ export async function runLifecycle(
     // the zone's authoritative nameservers. The verifier's job is those two
     // things, not measuring how long the operator's ISP cache holds a record.
     //
-    // Scope is deliberately narrow: verify-deploy and friends stay on the
-    // public-resolver path because that IS the customer cold path, and k8s-ha
-    // failover moves a floating IP without ever rewriting the A record.
+    // Scope is deliberately narrow: verify-deploy stays on the public-resolver
+    // path because that IS the customer cold path, and k8s-ha failover moves a
+    // floating IP without ever rewriting the A record.
     let verifyPin: ResolutionPin | null = null;
     if (isPostFailoverVerify(stepName) && config.mode === 'compose-ha') {
       const { primaryIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
@@ -1775,6 +1775,32 @@ export async function runLifecycle(
         console.warn(
           `${tag} [${stepName}] no promoted primary IP in .vibecarbon.json — HTTP checks fall ` +
             'back to the public resolvers and may hit the retired node mid-TTL',
+        );
+      }
+    }
+
+    // A restore rebuilds on new servers and destroys the old ones, so a public
+    // resolver can still hand out a dead address for the record's TTL. l2 on
+    // 2026-11-06: the health checks got the new address, then the upload and the
+    // browser got the old one. Dial what the zone's authoritative servers publish
+    // now. That proves the record too: one that never moved dials a dead server.
+    if (stepName === 'verify-restore') {
+      const { ips, source } = await resolveAuthoritativeA(config.domain);
+      const published = source === 'authoritative' ? ips.find((ip) => ip !== '0.0.0.0') : undefined;
+      if (published) {
+        verifyPin = {
+          domain: config.domain,
+          ip: published,
+          reason: `verify-restore: published address for ${config.envPrefix}`,
+        };
+        console.log(
+          `${tag} [verify-restore] pinning HTTP checks for ${config.domain} (and *.${config.domain}) ` +
+            `to the published address ${published} — Host/SNI stay ${config.domain}`,
+        );
+      } else {
+        console.warn(
+          `${tag} [verify-restore] no authoritative answer for ${config.domain} — HTTP checks ` +
+            'fall back to the public resolvers and may hit a destroyed server mid-TTL',
         );
       }
     }

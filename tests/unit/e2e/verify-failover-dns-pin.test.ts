@@ -591,7 +591,7 @@ describe('_run-lifecycle.ts: verify-failover pin wiring', () => {
     expect(body).toMatch(/withResolutionPin\(verifyPin,\s*\(\)\s*=>\s*executeStep\(/);
   });
 
-  it('pins ONLY compose-ha verify-failover and verify-failback in the shared battery', () => {
+  it('pins only the steps that moved the record: compose-ha failover and failback, restore', () => {
     // verify-deploy stays on the public resolver deliberately: that is the
     // customer cold path, and pinning it would hide an unpublished record.
     // verify-scale is its own step with its own pin, for the same reason: see
@@ -604,8 +604,13 @@ describe('_run-lifecycle.ts: verify-failover pin wiring', () => {
       /function isPostFailoverVerify\(step: StepName\): boolean \{\s*return step === 'verify-failover' \|\| step === 'verify-failback';/,
     );
     expect(body).toContain('resolveHaDbIps(config.projectDir, config.envPrefix)');
+    // A restore pins to the published record whatever the mode, because a
+    // record that never moved must still fail by dialing the destroyed server.
+    expect(body).toMatch(
+      /stepName === 'verify-restore'\) \{\s+const \{ ips, source \} = await resolveAuthoritativeA\(config\.domain\);[\s\S]{0,300}source === 'authoritative'[\s\S]{0,300}verifyPin = \{/,
+    );
     // And nothing else computes a pin here.
-    expect(body.match(/verifyPin = \{/g)).toHaveLength(1);
+    expect(body.match(/verifyPin = \{/g)).toHaveLength(2);
   });
 
   it('runs dns_failover_flip at verify-failover, gated to the mode that flips DNS', () => {
