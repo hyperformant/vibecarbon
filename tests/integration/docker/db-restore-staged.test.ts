@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { writeBackupFence } from '../../../src/lib/deploy/backup-fence.js';
 import { composeRestoreScript } from '../../../src/lib/deploy/compose/index.js';
+import { resolveDbImage } from '../../../src/lib/images.js';
 import { parseWalGapRecord } from '../../../src/lib/status/backup-health.js';
 import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/recovery-config.js';
 import {
@@ -66,7 +67,7 @@ const VOL = `${NAME}-data`;
 /** The streaming standby a promote test builds next to DB_CT. */
 const SB_CT = `${NAME}-sb`;
 const SB_VOL = `${NAME}-sb-data`;
-const DB_IMAGE = 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r4';
+const DB_IMAGE = resolveDbImage({ warn: () => {} }).ref;
 const GARAGE_IMAGE =
   'dxflrs/garage:v2.5.0@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5';
 // Garage's fixed dev key (carbon/docker-compose.override.yml), never a real credential.

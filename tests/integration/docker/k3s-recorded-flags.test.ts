@@ -3,8 +3,8 @@
  *
  * The version channel's k3s smoke test: `.github/workflows/version-channel.yml`
  * runs this on a version before the list names it (VC_K3S_VERSION), on a runner,
- * with no cloud spend. It also runs under `pnpm test:docker`, on the bundled
- * version.
+ * with no cloud spend. It checks the published mirror itself, so it needs a
+ * version to check: a plain `pnpm test:docker` skips it and needs nothing published.
  *
  * What it proves that nothing cheaper can. The flags are read out of
  * master-init.sh, so `--system-default-registry` is really on, and registries.yaml
@@ -29,7 +29,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { K3S_SYSTEM_REGISTRY, k3sVersion, traefikImageRef } from '../../../src/lib/images.js';
 import { k3sServerFlags } from '../../_shared/k3s-server-flags.js';
 
-const describeDocker = process.env.DOCKER_INTEGRATION === 'true' ? describe : describe.skip;
+const describeDocker =
+  process.env.DOCKER_INTEGRATION === 'true' && process.env.VC_K3S_VERSION
+    ? describe
+    : describe.skip;
 
 const ROOT = process.cwd();
 const VERSION = process.env.VC_K3S_VERSION || k3sVersion();

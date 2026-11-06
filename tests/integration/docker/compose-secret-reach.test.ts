@@ -30,8 +30,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildAppRuntimeEnv } from '../../../src/lib/deploy/app-runtime-env.js';
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
-import { dockerSocketProxyImageRef, traefikImageRef } from '../../../src/lib/images.js';
+import { DOCKER_SOCKET_PROXY_MIRROR, TRAEFIK_MIRROR } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { upstreamRef } from '../../_shared/local-images.js';
 
 // Skipped by default like the other docker tests; run explicitly via
 // `DOCKER_INTEGRATION=true pnpm test:docker` (the script sets the variable).
@@ -106,8 +107,8 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       SITE_URL: 'https://example.com',
       DB_IMAGE: 'postgres',
       DB_IMAGE_TAG: '17',
-      TRAEFIK_IMAGE: traefikImageRef(),
-      DOCKER_SOCKET_PROXY_IMAGE: dockerSocketProxyImageRef(),
+      TRAEFIK_IMAGE: upstreamRef(TRAEFIK_MIRROR),
+      DOCKER_SOCKET_PROXY_IMAGE: upstreamRef(DOCKER_SOCKET_PROXY_MIRROR),
       APP_IMAGE: 'ghcr.io/example/reach:test',
       BETTER_AUTH_SECRET: sentinel('BETTER_AUTH_SECRET'),
       ADMIN_EMAIL: 'admin@example.com',
@@ -414,8 +415,10 @@ describeDocker('compose: secrets reach only the services that use them', () => {
         '-c',
         // Retry the connect while haproxy binds (a fresh container); one
         // request per call, the response printed raw.
+        // The input stays open until the answer is back: busybox nc half-closes
+        // at EOF, and HAProxy 3.4 answers a half-closed client with 400.
         'for i in 1 2 3 4 5 6 7 8 9 10; do ' +
-          `printf '%s %s HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n' "$0" "$1" | nc app-docker-proxy 2375 && exit 0; sleep 1; done; exit 1`,
+          `{ printf '%s %s HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n' "$0" "$1"; sleep 1; } | nc app-docker-proxy 2375 && exit 0; sleep 1; done; exit 1`,
         method,
         path,
       ]);

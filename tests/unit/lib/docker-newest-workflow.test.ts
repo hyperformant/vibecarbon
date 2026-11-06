@@ -67,9 +67,9 @@ describe('docker-newest workflow', () => {
     expect(test?.env?.VC_TRAEFIK_IMAGE).toContain('inputs.traefik_image');
     expect(test?.env?.VC_DOCKER_SOCKET_PROXY_IMAGE).toContain('inputs.docker_socket_proxy_image');
     const smoke = readFileSync('tests/integration/docker/traefik-socket-proxy.test.ts', 'utf-8');
-    expect(smoke).toMatch(/process\.env\.VC_TRAEFIK_IMAGE \|\| traefikImageRef\(\)/);
+    expect(smoke).toMatch(/process\.env\.VC_TRAEFIK_IMAGE \|\| upstreamRef\(TRAEFIK_MIRROR\)/);
     expect(smoke).toMatch(
-      /process\.env\.VC_DOCKER_SOCKET_PROXY_IMAGE \|\| dockerSocketProxyImageRef\(\)/,
+      /process\.env\.VC_DOCKER_SOCKET_PROXY_IMAGE \|\| upstreamRef\(DOCKER_SOCKET_PROXY_MIRROR\)/,
     );
   });
 

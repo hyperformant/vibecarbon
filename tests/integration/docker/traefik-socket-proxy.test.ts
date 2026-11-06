@@ -22,7 +22,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
-import { dockerSocketProxyImageRef, traefikImageRef } from '../../../src/lib/images.js';
+import { DOCKER_SOCKET_PROXY_MIRROR, TRAEFIK_MIRROR } from '../../../src/lib/images.js';
+import { upstreamRef } from '../../_shared/local-images.js';
 
 const describeDocker = process.env.DOCKER_INTEGRATION === 'true' ? describe : describe.skip;
 
@@ -62,9 +63,9 @@ describeDocker('Traefik through the docker-socket-proxy, on the Docker under tes
       SITE_URL: 'https://example.com',
       DB_IMAGE: 'postgres',
       DB_IMAGE_TAG: '17',
-      TRAEFIK_IMAGE: process.env.VC_TRAEFIK_IMAGE || traefikImageRef(),
+      TRAEFIK_IMAGE: process.env.VC_TRAEFIK_IMAGE || upstreamRef(TRAEFIK_MIRROR),
       DOCKER_SOCKET_PROXY_IMAGE:
-        process.env.VC_DOCKER_SOCKET_PROXY_IMAGE || dockerSocketProxyImageRef(),
+        process.env.VC_DOCKER_SOCKET_PROXY_IMAGE || upstreamRef(DOCKER_SOCKET_PROXY_MIRROR),
       APP_IMAGE: 'ghcr.io/example/app:test',
       BETTER_AUTH_SECRET: 'x',
       ADMIN_EMAIL: 'admin@example.com',

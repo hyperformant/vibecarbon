@@ -118,6 +118,7 @@ export default defineConfig({
           // stack, and two at once clash on the compose network subnet.
           // `pnpm test:integration` selects both projects (`integration*`).
           name: 'integration-docker',
+          globalSetup: ['tests/setup/docker-tier-setup.ts'],
           include: ['tests/integration/docker/**/*.test.ts'],
           // The root `include` (tests/**) merges into every project's, so
           // everything outside the docker dir is excluded explicitly.
