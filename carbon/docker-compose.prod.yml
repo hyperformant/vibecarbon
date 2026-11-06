@@ -229,10 +229,15 @@ services:
       - "traefik.http.routers.dashboard.entrypoints=websecure"
       - "traefik.http.routers.dashboard.tls=true"
       - "traefik.http.routers.dashboard.middlewares=super-admin-auth@file"
+    # No CPU limit, on purpose. Every request and every TLS handshake passes
+    # through Traefik, so a limit turns one noisy client into an outage for the
+    # whole site: at 0.5 CPU, about 220 new TLS connections a second were
+    # throttled in 4,808 of 4,811 periods, the accept queue filled and all HTTPS
+    # hung. Without one, Traefik shares the CPU with the app and the db.
+    # Guarded by tests/unit/template/compose-cpu-limits.test.ts.
     deploy:
       resources:
         limits:
-          cpus: '0.5'
           memory: 256M
 
   # ===========================================
