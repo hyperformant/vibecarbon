@@ -18,6 +18,8 @@ describe('providers.scaleway (Scaleway opt-in scenarios)', () => {
       mode: 'compose',
       dnsProvider: 'scaleway',
       envPrefix: 's1',
+      // The plan refuses to scale a compose server up (tests/config.ts).
+      skipSteps: ['scale', 'verify-scale'],
     });
     expect(scaleway.scenarios[1]).toEqual({
       mode: 'compose-ha',

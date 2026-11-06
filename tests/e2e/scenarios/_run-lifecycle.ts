@@ -38,7 +38,11 @@ import {
   OAUTH_CANARY_CLIENT_ID,
   runConfigCanaryChecks,
 } from '../checks/config-canary.js';
-import { checkDeployBudget, type DeployBudgetResult } from '../checks/deploy-budget.js';
+import {
+  checkDeployBudget,
+  type DeployBudgetResult,
+  deployCpuClass,
+} from '../checks/deploy-budget.js';
 import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
@@ -3518,7 +3522,18 @@ EOF`;
             // image bytes and the HA lock invariants. The numbers land in
             // e2e.db with the verdict, pass or fail.
             if (cold) {
-              const budget = checkDeployBudget(`${result.stdout}\n${result.stderr}`, config.mode);
+              // The class is what the deploy recorded and ran on, read back from
+              // `.vibecarbon.json`; it keys the budget and lands in the db with
+              // the verdict, where scripts/calibrate-deploy-budgets.js reads it.
+              const env = readEnvConfig(config.projectDir, config.envPrefix);
+              const cpuClass = deployCpuClass(
+                config.provider,
+                config.mode.startsWith('k8s') ? env.masterServerType : env.serverType,
+              );
+              const budget = checkDeployBudget(`${result.stdout}\n${result.stderr}`, config.mode, {
+                provider: config.provider,
+                cpuClass,
+              });
               console.log(`${tag} [deploy] deploy_budget: ${budget.status} (${budget.message})`);
               collector.recordVerifications(stepId, [budget]);
               if (budget.status !== 'pass') {
@@ -5045,17 +5060,19 @@ EOF`;
   // The runner passes a Set of step names to remove from the lifecycle
   // entirely (NOT skipped-due-to-prior-failure; just not run). Cuts HA
   // scenarios from ~60min → ~25min when iterating on failover-class bugs.
-  if (options.skipSteps && options.skipSteps.size > 0) {
+  // The scenario's own skips (tests/config.ts) apply on top of the flag's.
+  const requestedSkips = new Set([...(options.skipSteps ?? []), ...(config.skipSteps ?? [])]);
+  if (requestedSkips.size > 0) {
     const before = filteredStepDefs.length;
     // A skipped step takes its dependents with it (failover -> second-failover
     // and reconverge-deploy -> failback -> verify-failback): they assert the
     // state it leaves and would only fail on their own precondition.
-    const dropped = expandSkippedSteps(options.skipSteps);
+    const dropped = expandSkippedSteps(requestedSkips);
     filteredStepDefs = filteredStepDefs.filter((s) => !dropped.has(s.name));
     const removed = before - filteredStepDefs.length;
     if (removed > 0) {
       console.log(
-        `${tag} --skip-steps: dropped ${removed} step(s) from lifecycle: ${[...dropped].join(', ')}`,
+        `${tag} skipped steps (--skip-steps and scenario config): dropped ${removed} step(s) from lifecycle: ${[...dropped].join(', ')}`,
       );
     }
   }
