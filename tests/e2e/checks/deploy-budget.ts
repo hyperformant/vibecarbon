@@ -137,7 +137,7 @@ const DELTA_MARKERS: Partial<Record<DeployMode, number>> = { 'compose-ha': 2 };
  *   node after its ready wait): it splits time the ready wait already holds.
  */
 const NOT_SERIAL =
-  /^(cli\.)?deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|setupFan$|\.iac\.upStack(\.(primary|standby))?\.(prepare|resource\..+)$|^deploy\.preamble\.(s3Setup\.stateSeed)$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$|\.boot\./;
+  /^(cli\.)?deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|setupFan$|\.iac\.upStack(\.(primary|standby))?\.(prepare|resource\..+)$|^deploy\.preamble\.s3Setup\.stateSeed$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$|\.boot\./;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
 const ANSI = /\x1b\[[0-9;]*m/g;

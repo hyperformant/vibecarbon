@@ -468,7 +468,7 @@
       "launch": {
         "name": "Launch.",
         "mode": "Docker Compose",
-        "tagline": "Most apps live here: one server, automated SSL, nightly backups, one-command restore. Auth, billing, and teams are built-in and ready to ship.",
+        "tagline": "Most apps live here: one server, automated SSL, automated backups, one-command restore. Auth, billing, and teams are built-in and ready to ship.",
         "cta": "Start building"
       },
       "supercharge": {
@@ -491,19 +491,19 @@
       },
       "q2": {
         "question": "Can I modify or customize everything?",
-        "answer": "Yes. Every line is yours, generated once and kept forever. No vendor lock-in, no runtime dependency on Vibecarbon."
+        "answer": "Yes. Every line is yours, generated once and yours to keep. No vendor lock-in, no runtime dependency on Vibecarbon."
       },
       "q3": {
         "question": "What cloud providers are supported?",
-        "answer": "Hetzner Cloud, DigitalOcean, Linode, Vultr, and Scaleway: the same CLI, the same lifecycle, the same test coverage. Mode support varies by provider. Hetzner and DigitalOcean run Compose, Kubernetes, and Kubernetes HA (a standby copy in a second region, kept ready to take over). Linode, Vultr, and Scaleway run Compose today. The provider is a per-environment setting: pick one, and pick again whenever you want."
+        "answer": "Hetzner Cloud, DigitalOcean, Linode, Vultr, and Scaleway: the same CLI, the same lifecycle, the same test coverage. Mode support varies by provider. Hetzner and DigitalOcean run Compose, Kubernetes, and Kubernetes HA (a standby copy in a second region, kept ready to take over). Linode, Vultr, and Scaleway run Compose today. The provider is chosen per environment when you first deploy it, so another environment of the same app can use a different one."
       },
       "q4": {
         "question": "How does deployment work?",
-        "answer": "Run \"vibecarbon deploy\" and one command does the whole job: rents and configures a server in your own cloud account, installs your stack, turns on HTTPS (the browser padlock) automatically, and sets up scheduled backups. When you outgrow one server, the same command family handles scaling, restore, and failover."
+        "answer": "Run \"vibecarbon deploy\" and one command does the whole job: rents and configures a server in your own cloud account, installs your stack, turns on HTTPS (the browser padlock) automatically, and sets up scheduled backups. Once it is live, the same CLI handles scaling and restore, plus failover in the HA modes."
       },
       "q5": {
         "question": "Which setup do I need?",
-        "answer": "Pick by circumstance, not by size. Launch runs most production apps: one server in your own cloud account, automated SSL, nightly backups, one-command restore. Supercharge is for absorbing traffic spikes: a cluster that adds workers under load and deploys with zero downtime. Fortify is for guaranteeing uptime: a live standby in a second region with one-command failover."
+        "answer": "Pick by circumstance, not by size. Launch runs most production apps: one server in your own cloud account, automated SSL, automated backups, one-command restore. Supercharge is for absorbing traffic spikes: a cluster that adds workers under load and deploys with zero downtime. Fortify is for surviving a region outage: a live standby in a second region with one-command failover."
       },
       "q6": {
         "question": "How many projects can I create?",

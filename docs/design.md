@@ -15,7 +15,7 @@ Business vision and brand design guidelines.
     - Self-contained, Cloud agnostic, Portable
     - Fully automated: CICD, Scaling, Failover, Backups
     - Opinionated, but modular core stack
-- **License:** MIT. The CLI, images, services and generated project code are all MIT: users own their apps.
+- **License:** MIT. The CLI, template, services and generated project code are all MIT: users own their apps. The Postgres and Node runtime images package upstream software under those projects' own licenses.
 
 ---
 

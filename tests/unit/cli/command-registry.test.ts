@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildSpec } from '../../../src/add.js';
+import { KNOWN_COMMANDS } from '../../../src/cli.js';
 import { COMMANDS, loadAllSpecs } from '../../../src/lib/cli/command-registry.js';
 
 const dispatched = [
@@ -35,6 +36,13 @@ describe('command registry', () => {
   it('covers exactly the commands cli.js dispatches (aliases aside)', () => {
     expect(dispatched.length).toBeGreaterThan(15);
     expect(COMMANDS.map((e) => e.name).sort()).toEqual(dispatched);
+  });
+
+  it('keeps the hand-written KNOWN_COMMANDS equal to the registry names plus their aliases', () => {
+    const registered = COMMANDS.flatMap((e) => [e.name, ...(e.aliases ?? [])]).sort();
+    // The one legitimate difference: `?` is an alias of `next` that cli.js
+    // routes before it consults KNOWN_COMMANDS, so the list does not carry it.
+    expect([...KNOWN_COMMANDS].sort()).toEqual(registered.filter((n) => n !== '?'));
   });
 
   it('gives `next` the ? alias and no other command an alias', () => {

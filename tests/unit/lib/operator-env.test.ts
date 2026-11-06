@@ -152,7 +152,7 @@ describe('validateOperatorValue', () => {
       class: 'operator-secret',
       feature: 'e2e',
       kind: 'port',
-      where: 'tests/.env.e2e',
+      where: '.env',
       scope: 'e2e',
     } as const;
     expect(validateOperatorValue('8080', portEntry)).toBeNull();
@@ -167,7 +167,7 @@ describe('validateOperatorValue', () => {
       class: 'operator-secret',
       feature: 'e2e',
       kind: 'email',
-      where: 'tests/.env.e2e',
+      where: '.env',
       scope: 'e2e',
     } as const;
     expect(validateOperatorValue('a@b.co', emailEntry)).toBeNull();
@@ -180,7 +180,7 @@ describe('validateOperatorValue', () => {
       class: 'operator-secret',
       feature: 'e2e',
       kind: 'cidr-list',
-      where: 'tests/.env.e2e',
+      where: '.env',
       scope: 'e2e',
     } as const;
     // A5 (review 2026-09-19): nobody documents a format for this list and the

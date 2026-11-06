@@ -89,7 +89,7 @@ export const SPEC = {
     '',
     'CICD SUBCOMMAND',
     '  cicd         Install the GitHub Actions build + deploy workflows.',
-    '               Works in every deploy mode, and is free.',
+    '               Works in every deploy mode.',
     '  cicd <env>   The same, then layer Flux GitOps onto <env> when it is a',
     '               k8s/k8s-ha cluster. Compose deploys by push from Actions',
     '               and needs no Flux, so naming a Compose env just does the',

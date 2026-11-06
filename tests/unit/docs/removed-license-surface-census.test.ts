@@ -1,10 +1,12 @@
 /**
  * Vibecarbon is MIT with no keys, no activation and no license service. The
  * strings below belonged to the retired license machinery; if one shows up in
- * the CLI or the template again, someone has revived a removed surface. The
- * bare word "activate" is NOT banned: it has unrelated uses.
+ * the CLI, the template, the scripts, the workflows or the live docs again,
+ * someone has revived a removed surface. The historical record (docs/superpowers,
+ * carbon/content/changelog, CHANGELOG.md) and tests/ are not scanned. The bare
+ * word "activate" is NOT banned: it has unrelated uses.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -16,15 +18,39 @@ const BANNED_STRINGS = [
   '/api/v1/license',
   '.vibecarbon.license',
   'license-checkout',
+  'src/lib/licensing',
+  'COMMAND_GATES',
+  'LICENSE_PRIVATE_KEY',
 ];
+
+// Directories and single files. The historical record is never listed.
+const SCANNED = [
+  'src',
+  'carbon/src',
+  'scripts',
+  'docs',
+  '.github',
+  'carbon/content',
+  'AGENTS.md',
+  'README.md',
+  'FEATURES.md',
+  'CONTRIBUTING.md',
+  'SECURITY.md',
+  'carbon/README.md',
+  'carbon/AGENTS.md',
+];
+
+const HISTORICAL = ['docs/superpowers', 'carbon/content/changelog'];
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build']);
 
 function walk(dir: string): string[] {
+  if (!statSync(dir).isDirectory()) return [dir];
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
     if (SKIP_DIRS.has(entry)) continue;
     const full = join(dir, entry);
+    if (HISTORICAL.includes(full.slice(ROOT.length + 1))) continue;
     const stat = statSync(full);
     if (stat.isDirectory()) out.push(...walk(full));
     else if (stat.size < 2_000_000) out.push(full);
@@ -35,6 +61,7 @@ function walk(dir: string): string[] {
 function findBanned(roots: string[], banned: string[]): string[] {
   const offenders: string[] = [];
   for (const root of roots) {
+    if (!existsSync(join(ROOT, root))) continue;
     for (const file of walk(join(ROOT, root))) {
       const text = readFileSync(file, 'utf-8');
       for (const needle of banned) {
@@ -46,11 +73,11 @@ function findBanned(roots: string[], banned: string[]): string[] {
 }
 
 describe('removed license surface census', () => {
-  it('src/ and carbon/src/ never reference the retired license commands, API, file or checkout', () => {
+  it('the source, scripts, workflows and live docs never reference the retired license machinery', () => {
     // Sanity: the walk reaches both trees.
     expect(walk(join(ROOT, 'src')).length).toBeGreaterThan(50);
     expect(walk(join(ROOT, 'carbon', 'src')).length).toBeGreaterThan(100);
-    expect(findBanned(['src', 'carbon/src'], BANNED_STRINGS)).toEqual([]);
+    expect(findBanned(SCANNED, BANNED_STRINGS)).toEqual([]);
   });
 
   it('the scan catches a banned string (a scan that cannot fail guards nothing)', () => {

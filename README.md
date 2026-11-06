@@ -342,7 +342,7 @@ Plus object storage for backups and uploads, billed once per provider account an
 
 ## License
 
-The CLI, images and template are MIT licensed, see [LICENSE](./LICENSE). The Vibecarbon name and logo are covered by [TRADEMARK.md](./TRADEMARK.md).
+The CLI, template and carbon-autoscaler image are MIT licensed, see [LICENSE](./LICENSE). The Postgres and Node runtime images package upstream software under those projects' own licenses. The Vibecarbon name and logo are covered by [TRADEMARK.md](./TRADEMARK.md).
 
 ---
 
