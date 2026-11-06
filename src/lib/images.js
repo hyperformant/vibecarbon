@@ -169,7 +169,8 @@ export function localComposeEnv(base = process.env) {
 // .nvmrc moves. `pnpm node-runtime:build-local` builds an unpublished tag into
 // the local Docker image store for testing.
 // biome-ignore format: publish-node-runtime-image.yml and scripts/sync-node-version.js read this declaration as one line
-export const NODE_RUNTIME_IMAGE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r3';
+export const NODE_RUNTIME_IMAGE =
+  'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r3@sha256:a4ea2f6d26f35c86337e787a76a56b12aa2bfef84aa3df58b1ec60bd52fc1cc0';
 
 // sha256 fingerprint of docker/node-runtime's inputs (every file there but
 // README.md; tests/unit/deploy/node-runtime-image-fingerprint.test.ts has the
