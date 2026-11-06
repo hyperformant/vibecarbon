@@ -131,7 +131,11 @@ import { getE2ELicenseStub, resolveE2EAcmeCa } from '../utils/e2e-env.js';
 import { extractDeployFailureDetail } from '../utils/extract-failure-detail.js';
 import { collectHostDiagnostics, findClusterHosts } from '../utils/host-diagnostics.js';
 import { sharedStateBucketName } from '../utils/namespace.js';
-import { deployedScaleTarget } from '../utils/region-resolver.js';
+import {
+  type CapacityProvider,
+  type DeployedEnv,
+  deployedScaleTarget,
+} from '../utils/region-resolver.js';
 import { fetchServerTypes } from '../utils/server-types.js';
 import {
   e2eSshOpts,
@@ -357,10 +361,12 @@ function readAdminCredentials(projectDir: string): AdminCredentials | null {
  * `environments[env]` from `.vibecarbon.json`; `{}` when the file or the env
  * is missing (the caller then names the absent field).
  */
-function readEnvConfig(projectDir: string, env: string): Record<string, string | undefined> {
+type EnvRecord = DeployedEnv & Record<string, unknown>;
+
+function readEnvConfig(projectDir: string, env: string): EnvRecord {
   try {
     const config = JSON.parse(readFileSync(join(projectDir, '.vibecarbon.json'), 'utf-8')) as {
-      environments?: Record<string, Record<string, string | undefined>>;
+      environments?: Record<string, EnvRecord>;
     };
     return config.environments?.[env] ?? {};
   } catch {
@@ -3905,13 +3911,14 @@ EOF`;
       run: () =>
         executeStep('scale', `vibecarbon scale ${config.envPrefix}`, async () => {
           // The deploy picked the default sizes and recorded them; scale moves
-          // the recorded type one rung up the ladder. A type with no ladder
-          // entry fails here, naming the type.
-          scaleToType = deployedScaleTarget(
+          // the recorded type one rung up the ladder, to a type sold right now.
+          // A type with no ladder entry fails here, naming the type.
+          scaleToType = await deployedScaleTarget(
             readEnvConfig(config.projectDir, config.envPrefix),
             config.mode,
             config.scaleTo,
-            config.scaleTarget,
+            typeSnapshotProvider as CapacityProvider,
+            typeSnapshotToken ?? '',
           );
           // Snapshot server types BEFORE scale so verify-scale can assert
           // they actually changed. Without this, a silent no-op scale (CLI

@@ -11,10 +11,10 @@
           "samples": 1
         },
         "intel": {
-          "ownedS": 225,
-          "endToEndS": 240,
+          "ownedS": 245,
+          "endToEndS": 260,
           "tlsAllowanceS": 15,
-          "samples": 3
+          "samples": 5
         },
         "regular": {
           "ownedS": 250,
