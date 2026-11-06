@@ -32,7 +32,7 @@ function fakeProvider(
       Object.fromEntries((v.tags ?? []).map((t) => t.split(':') as [string, string])),
     deleteVolume: vi.fn().mockResolvedValue(undefined),
     deleteFirewallByName: vi.fn().mockResolvedValue({ deleted: true, everExisted: true }),
-    deleteSSHKeyByName: vi.fn().mockResolvedValue(true),
+    deleteSSHKeyById: vi.fn().mockResolvedValue('deleted'),
     listLoadBalancers: vi.fn().mockResolvedValue([]),
     deleteLoadBalancer: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -118,7 +118,7 @@ describe('sweepOrphanedDigitalOceanResources', () => {
     expect(counts.volumes).toBe(2);
   });
 
-  it('deletes prefix-matching firewalls/ssh-keys via the provider name API and vpcs/load-balancers by id', async () => {
+  it('deletes prefix-matching firewalls via the provider name API and ssh-keys/vpcs/load-balancers by id', async () => {
     const provider = fakeProvider({
       listLoadBalancers: vi.fn().mockResolvedValue([
         { id: 'lb1', name: 'testapp-d3-lb' },
@@ -147,12 +147,35 @@ describe('sweepOrphanedDigitalOceanResources', () => {
     });
     expect(provider.deleteFirewallByName).toHaveBeenCalledWith('testapp-d3-fw');
     expect(provider.deleteFirewallByName).not.toHaveBeenCalledWith('other-fw');
-    expect(provider.deleteSSHKeyByName).toHaveBeenCalledWith('testapp-d3-nyc3-key');
+    expect(provider.deleteSSHKeyById).toHaveBeenCalledWith(9);
     expect(provider.deleteLoadBalancer).toHaveBeenCalledWith('lb1');
     expect(provider.deleteLoadBalancer).not.toHaveBeenCalledWith('lb2');
     expect(counts.firewalls).toBe(1);
     expect(counts.sshKeys).toBe(1);
     expect(counts.networks).toBe(1);
+  });
+
+  it('does not call a deleted key an orphan just because the list was stale', async () => {
+    const provider = fakeProvider({ deleteSSHKeyById: vi.fn().mockResolvedValue('absent') });
+    const { counts, enumFailed } = await sweepOrphanedDigitalOceanResources(TAG, 'testapp-d3', {
+      provider,
+      spaces: fakeSpaces(),
+      fetchImpl: fakeFetch({ '/account/keys': { ssh_keys: [{ id: 9, name: 'testapp-d3-key' }] } }),
+    });
+    expect(provider.deleteSSHKeyById).toHaveBeenCalledWith(9);
+    expect(counts.sshKeys).toBe(0);
+    expect(enumFailed).toBe(false);
+  });
+
+  it('reports a key that will not go as an incomplete sweep', async () => {
+    const provider = fakeProvider({ deleteSSHKeyById: vi.fn().mockResolvedValue('stuck') });
+    const { counts, enumFailed } = await sweepOrphanedDigitalOceanResources(TAG, 'testapp-d3', {
+      provider,
+      spaces: fakeSpaces(),
+      fetchImpl: fakeFetch({ '/account/keys': { ssh_keys: [{ id: 9, name: 'testapp-d3-key' }] } }),
+    });
+    expect(counts.sshKeys).toBe(0);
+    expect(enumFailed).toBe(true);
   });
 
   it('sweeps prefix-matching Spaces buckets once across regions', async () => {

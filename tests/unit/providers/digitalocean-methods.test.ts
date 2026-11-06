@@ -1344,6 +1344,78 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       expect(calls()).toEqual([['GET', `${BASE}/account/keys?per_page=100&page=1`]]);
       expect(out).toBe(false);
     });
+
+    it('takes a 404 only when the read agrees: the key was already gone', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ ssh_keys: [{ id: 88, name: 'k' }], links: {} }))
+        .mockResolvedValueOnce(resp({}, 404))
+        .mockResolvedValueOnce(resp({}, 404));
+
+      expect(await provider.deleteSSHKeyByName('k')).toBe(true);
+      expect(calls()).toEqual([
+        ['GET', `${BASE}/account/keys?per_page=100&page=1`],
+        ['DELETE', `${BASE}/account/keys/88`],
+        ['GET', `${BASE}/account/keys/88`],
+      ]);
+    });
+
+    it('deletes again when DigitalOcean answers 404 for a key that is still there', async () => {
+      vi.useFakeTimers();
+      try {
+        fetchWithRetryMock
+          .mockResolvedValueOnce(resp({ ssh_keys: [{ id: 88, name: 'k' }], links: {} }))
+          .mockResolvedValueOnce(resp({}, 404))
+          .mockResolvedValueOnce(resp({ ssh_key: { id: 88 } }))
+          .mockResolvedValueOnce(resp({}, 204));
+
+        const out = provider.deleteSSHKeyByName('k');
+        await vi.advanceTimersByTimeAsync(3_000);
+
+        expect(await out).toBe(true);
+        expect(calls().filter(([method]) => method === 'DELETE')).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('throws when the key will not go, so destroy records a leak instead of a delete', async () => {
+      vi.useFakeTimers();
+      try {
+        fetchWithRetryMock.mockImplementation(async (_url: string, init?: { method?: string }) =>
+          init?.method === 'DELETE' ? resp({}, 404) : resp({ ssh_key: { id: 88 } }),
+        );
+        fetchWithRetryMock.mockResolvedValueOnce(
+          resp({ ssh_keys: [{ id: 88, name: 'k' }], links: {} }),
+        );
+
+        const out = provider.deleteSSHKeyByName('k').catch((err: Error) => err.message);
+        await vi.advanceTimersByTimeAsync(40_000);
+
+        expect(await out).toBe('DigitalOcean would not delete SSH key k (id 88)');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not call a server error deleted', async () => {
+      fetchWithRetryMock
+        .mockResolvedValueOnce(resp({ ssh_keys: [{ id: 88, name: 'k' }], links: {} }))
+        .mockResolvedValueOnce(resp({}, 500));
+
+      await expect(provider.deleteSSHKeyByName('k')).rejects.toThrow(/would not delete/);
+    });
+  });
+
+  describe('deleteSSHKeyById', () => {
+    it('says deleted only for a delete that landed', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 204));
+      expect(await provider.deleteSSHKeyById(88)).toBe('deleted');
+    });
+
+    it('says absent for a key both calls agree is gone, so a stale list is not an orphan', async () => {
+      fetchWithRetryMock.mockResolvedValueOnce(resp({}, 404)).mockResolvedValueOnce(resp({}, 404));
+      expect(await provider.deleteSSHKeyById(88)).toBe('absent');
+    });
   });
 
   // M3 Task 9f — the k8s destroy sweep's DO-only backstop for
