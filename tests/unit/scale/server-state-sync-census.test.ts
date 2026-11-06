@@ -13,7 +13,6 @@
  *     before the delete and runs it after; every other scale delete removes a
  *     replacement that never took over, which the stack never knew;
  *   - deploy repairs pending syncs before it runs any plan (and so any `up`);
- *   - scale refuses a provider whose stack cannot follow, before any prompt.
  */
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -121,15 +120,13 @@ describe('servers created or deleted outside Pulumi are followed by the state sy
     expect(code(read('src/lib/deploy/effects/compose-ha.js'))).toMatch(/ctx\.serverTypeRequested/);
   });
 
-  it('scale refuses a provider the stack cannot follow before the token prompt, and resolves the backend before any server', () => {
+  it('scale resolves the backend after the token prompt and before anything moves', () => {
     const body = scaleFn('scaleCompose');
-    const refuse = body.indexOf('assertComposeScaleKeepsState(');
     const token = body.indexOf('Provider.promptApiToken(');
     const options = body.indexOf('resolveServerStateOptions(');
     const resume = body.indexOf('resumeComposeCutover(');
     const plan = body.indexOf('runPlan(planScale(');
-    expect(refuse).toBeGreaterThan(-1);
-    expect(refuse).toBeLessThan(token);
+    expect(token).toBeGreaterThan(-1);
     expect(token).toBeLessThan(options);
     expect(options).toBeLessThan(resume);
     expect(resume).toBeLessThan(plan);

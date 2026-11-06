@@ -53,7 +53,6 @@ import {
 } from './lib/deploy/compose/scale-cutover.js';
 import { assertServerFloors } from './lib/deploy/compose/server-floors.js';
 import {
-  assertComposeScaleKeepsState,
   describeOldServer,
   markPendingServerOldDeleted,
   recordPendingServerState,
@@ -239,10 +238,6 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
     p.outro('');
     return;
   }
-
-  // Before any prompt or server: the replacement must be one Pulumi state can
-  // follow, or the next deploy builds a second server.
-  refuseOrContinue(() => assertComposeScaleKeepsState({ environment, envConfig }));
 
   // Get API token
   const apiToken = await Provider.promptApiToken(projectName);

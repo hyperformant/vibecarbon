@@ -60,21 +60,6 @@ beforeEach(() => {
   h.logs.length = 0;
 });
 
-describe('assertComposeScaleKeepsState', () => {
-  for (const provider of ['hetzner', 'digitalocean', 'vultr', 'linode']) {
-    it(`${provider}: allowed`, () => {
-      expect(() =>
-        m.assertComposeScaleKeepsState({ environment: 'prod', envConfig: { provider } }),
-      ).not.toThrow();
-    });
-  }
-  it('scaleway: refused, naming the console as the way to resize', () => {
-    expect(() =>
-      m.assertComposeScaleKeepsState({ environment: 'prod', envConfig: { provider: 'scaleway' } }),
-    ).toThrow(/compose scale is not available on scaleway.*Resize prod in the scaleway console/);
-  });
-});
-
 describe('composeServerStack', () => {
   it('single compose: the env itself', () => {
     expect(

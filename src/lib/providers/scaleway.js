@@ -955,10 +955,12 @@ export class ScalewayProvider extends BaseProvider {
    * No ssh-key field exists — keys are Project-level and auto-propagate at
    * boot (class header; the dedicated-Project doctrine makes that the
    * correct mechanism, so `sshKeys`/`sshKeyId` are accepted for interface
-   * parity and deliberately unused). `dynamic_ip_required: true` (the API
-   * default, pinned explicitly) attaches a dynamic public IPv4 that is
-   * auto-released with the server — the replacement path never mints a
-   * flexible IP it could leak. Root volume: explicit SBS template sized at
+   * parity and deliberately unused). The server gets a flexible IPv4, reserved
+   * onto it before first boot, because the compose stack holds its IP as a
+   * flexible IP resource and a scale points that resource at this one
+   * (lib/iac/server-state.js). `dynamic_ip_required: false` stops a second,
+   * dynamic address. deleteServer releases the flexible IP, so no path leaks
+   * it. Root volume: explicit SBS template sized at
    * COMPOSE_ROOT_VOLUME_GB — BASIC3 admits no local SSD, and leaving the
    * size to the image default under-provisions the compose stack.
    *
@@ -1010,7 +1012,7 @@ export class ScalewayProvider extends BaseProvider {
       image,
       project: projectId,
       tags: encodeLabels(labels),
-      dynamic_ip_required: true,
+      dynamic_ip_required: false,
       volumes: {
         0: {
           volume_type: 'sbs_volume',
@@ -1052,6 +1054,23 @@ export class ScalewayProvider extends BaseProvider {
         const detail = await udRes.text().catch(() => '');
         throw new Error(`Scaleway user-data write failed (${udRes.status}): ${detail}`);
       }
+    }
+
+    // Before first boot, so the server has its address when cloud-init runs.
+    // Without it the server could never be reached, so it does not stay.
+    const ipRes = await this.apiRequest(`/instance/v1/zones/${region}/ips`, {
+      method: 'POST',
+      body: JSON.stringify({
+        project: projectId,
+        type: 'routed_ipv4',
+        tags: encodeLabels(labels),
+        server: server.id,
+      }),
+    });
+    if (!ipRes.ok) {
+      const error = await ipRes.json().catch(() => ({}));
+      await this.deleteServer(server.id).catch(() => {});
+      throw new Error(`Scaleway flexible IP failed: ${error.message || 'Unknown error'}`);
     }
 
     // Create leaves the server stopped — boot it.

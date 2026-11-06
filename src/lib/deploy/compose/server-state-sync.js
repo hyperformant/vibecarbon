@@ -17,26 +17,10 @@
 
 import * as p from '@clack/prompts';
 import { updateProjectConfig } from '../../config.js';
-import { composeServerStateSpec, syncServerState } from '../../iac/server-state.js';
+import { syncServerState } from '../../iac/server-state.js';
 import { providerIdFor } from '../../providers/index.js';
 import { COMPOSE_HA_INFRA_STEP, StateTracker } from '../state.js';
 import { composeHaStackOf } from './ha-role-swap.js';
-
-/**
- * Refuse a compose scale, before any server is built, on a provider whose
- * stack cannot be pointed at a replacement (Scaleway, see iac/server-state.js).
- *
- * @param {{ environment: string, envConfig: object }} args
- */
-export function assertComposeScaleKeepsState({ environment, envConfig }) {
-  const provider = providerIdFor(envConfig);
-  if (composeServerStateSpec(provider)) return;
-  throw new Error(
-    `compose scale is not available on ${provider} yet: it replaces the server outside Pulumi, ` +
-      `and ${provider}'s server holds an IP and a volume Pulumi state could not follow, so the next ` +
-      `deploy would build a second server. Resize ${environment} in the ${provider} console instead.`,
-  );
-}
 
 /**
  * The Pulumi stack a compose server was born in: the env itself on single

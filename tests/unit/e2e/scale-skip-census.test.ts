@@ -3,11 +3,10 @@ import { composeServerStateSpec } from '../../../src/lib/iac/server-state.js';
 import { testConfig } from '../../config.js';
 
 /**
- * A compose scenario skips `scale` exactly where the CLI refuses it
- * (assertComposeScaleKeepsState reads composeServerStateSpec). Scaleway's
- * compose-ha row lacked the skip and failed the final run at a step that could
- * only ever refuse; the census also stops a skip outliving the refusal and
- * quietly dropping scale coverage from a provider that gains support.
+ * Every provider runs compose scale, so every compose scenario runs it: a skip
+ * here hides a product gap rather than saving test time. Scale replaces a
+ * server outside Pulumi, so a provider also needs a state spec, or the next
+ * deploy would build a second server. A new provider without one fails here.
  */
 const composeScenarios = Object.entries(testConfig.e2e.providers).flatMap(([provider, entry]) =>
   entry.scenarios
@@ -15,7 +14,7 @@ const composeScenarios = Object.entries(testConfig.e2e.providers).flatMap(([prov
     .map((s) => ({ provider, ...s })),
 );
 
-describe('compose scale skips follow the CLI refusal', () => {
+describe('compose scale runs on every provider', () => {
   it('walks every provider with a compose scenario', () => {
     expect(new Set(composeScenarios.map((s) => s.provider)).size).toBeGreaterThanOrEqual(5);
   });
@@ -24,12 +23,9 @@ describe('compose scale skips follow the CLI refusal', () => {
     '%s',
     (_name, scenario) => {
       const skips = ('skipSteps' in scenario ? scenario.skipSteps : []) as readonly string[];
-      if (composeServerStateSpec(scenario.provider)) {
-        expect(skips).not.toContain('scale');
-        expect(skips).not.toContain('verify-scale');
-      } else {
-        expect(skips).toEqual(expect.arrayContaining(['scale', 'verify-scale']));
-      }
+      expect(composeServerStateSpec(scenario.provider)).not.toBeNull();
+      expect(skips).not.toContain('scale');
+      expect(skips).not.toContain('verify-scale');
     },
   );
 });

@@ -438,6 +438,78 @@ describe('applyOperatorCidrs — read-filter-rebuild into one atomic PUT', () =>
   });
 });
 
+describe('createServer — the replacement holds a flexible IP, as the stack does', () => {
+  const config = {
+    name: 'myapp-prod-new',
+    region: 'fr-par-1',
+    serverType: 'DEV1-M',
+    image: 'ubuntu_resolute',
+    labels: { project: 'myapp' },
+    userData: '#cloud-config\n',
+  };
+
+  function wireMocks({ ipStatus = 201 } = {}) {
+    const calls: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const handler = async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      const raw = typeof init?.body === 'string' ? init.body : null;
+      const body = raw?.startsWith('{') ? JSON.parse(raw) : null;
+      calls.push({ url, method, body });
+      if (url.includes('/servers?') && method === 'GET') return jsonResp({ servers: [] });
+      if (url.endsWith('/zones/fr-par-1/servers') && method === 'POST') {
+        return jsonResp({ server: { id: 'srv-new', zone: 'fr-par-1' } }, 201);
+      }
+      if (url.endsWith('/user_data/cloud-init')) return jsonResp({}, 204);
+      if (url.endsWith('/zones/fr-par-1/ips') && method === 'POST') {
+        return jsonResp({ ip: { id: 'ip-new', address: '203.0.113.7' } }, ipStatus);
+      }
+      if (url.endsWith('/servers/srv-new/action')) return jsonResp({ task: { id: 't' } });
+      if (/\/servers\/srv-new$/.test(url)) {
+        return method === 'GET'
+          ? jsonResp({ server: { id: 'srv-new', zone: 'fr-par-1', volumes: {}, public_ips: [] } })
+          : jsonResp({}, 204);
+      }
+      return jsonResp({}, 404);
+    };
+    fetchWithRetryMock.mockImplementation(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => handler(String(url), init)),
+    );
+    return calls;
+  }
+
+  beforeEach(() => vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', 'proj-1'));
+
+  it('reserves a routed flexible IP on the server before it boots, and asks for no dynamic one', async () => {
+    const calls = wireMocks();
+    await new ScalewayProvider('tok').createServer(config);
+
+    const create = calls.find((c) => c.url.endsWith('/servers') && c.method === 'POST');
+    expect(create?.body?.dynamic_ip_required).toBe(false);
+
+    const ipAt = calls.findIndex((c) => c.url.endsWith('/ips') && c.method === 'POST');
+    const bootAt = calls.findIndex((c) => c.url.endsWith('/action'));
+    expect(ipAt).toBeGreaterThan(-1);
+    expect(ipAt).toBeLessThan(bootAt);
+    expect(calls[ipAt].body).toEqual({
+      project: 'proj-1',
+      type: 'routed_ipv4',
+      tags: encodeLabels(config.labels),
+      server: 'srv-new',
+    });
+  });
+
+  it('removes the server when the IP cannot be reserved: it could never be reached', async () => {
+    const calls = wireMocks({ ipStatus: 500 });
+    const provider = new ScalewayProvider('tok');
+    const deleted = vi.spyOn(provider, 'deleteServer').mockResolvedValue(true as never);
+    await expect(provider.createServer(config)).rejects.toThrow(/Scaleway flexible IP/);
+    expect(deleted).toHaveBeenCalledWith('srv-new');
+    expect(calls.some((c) => c.url.endsWith('/action'))).toBe(false);
+  });
+});
+
 describe('deleteServer — billing-leak census (terminate only DETACHES sbs_volume)', () => {
   // Wire fixture: one server in fr-par-1 with an SBS root volume and a
   // flexible IP that survives deletion. The chain must: terminate → wait

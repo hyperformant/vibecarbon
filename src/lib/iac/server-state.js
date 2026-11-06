@@ -18,9 +18,10 @@
  * replacement was built from the same image, user data and key), and the
  * deploy's refresh reads every readable field from the new server.
  *
- * Scaleway has no spec: its server holds a flexible IP resource and an SBS
- * root volume, and the old server's delete releases both, which a re-point of
- * the server alone cannot account for. Compose scale refuses there up front.
+ * Scaleway holds its public IP as a resource of its own, and the old server's
+ * delete releases it, so the replacement gets a flexible IP and that resource
+ * follows too. Its ids also carry the zone (`fr-par-1/<uuid>`). The SBS root
+ * volume is an output only: the deploy's refresh reads the new one.
  */
 
 /** The program's logical name for the compose server, in every compose program. */
@@ -28,7 +29,8 @@ export const COMPOSE_SERVER_LOGICAL_NAME = 'server';
 
 /**
  * Per provider: the server resource's type token, its size input and its
- * public-IP output (programs/<provider>-compose.js).
+ * public-IP output (programs/<provider>-compose.js). A provider whose IP is a
+ * resource of its own names that resource instead, and zones its ids.
  */
 export const COMPOSE_SERVER_STATE = Object.freeze({
   hetzner: { type: 'hcloud:index/server:Server', sizeKey: 'serverType', ipKey: 'ipv4Address' },
@@ -39,11 +41,16 @@ export const COMPOSE_SERVER_STATE = Object.freeze({
   },
   vultr: { type: 'vultr:index/instance:Instance', sizeKey: 'plan', ipKey: 'mainIp' },
   linode: { type: 'linode:index/instance:Instance', sizeKey: 'type', ipKey: 'ipAddress' },
+  scaleway: {
+    type: 'scaleway:instance/server:Server',
+    sizeKey: 'type',
+    ipResource: { type: 'scaleway:instance/ip:Ip', name: 'ip' },
+  },
 });
 
 /**
  * @param {string} providerId
- * @returns {{ type: string, sizeKey: string, ipKey: string } | null}
+ * @returns {{ type: string, sizeKey: string, ipKey?: string, ipResource?: { type: string, name: string } } | null}
  */
 export function composeServerStateSpec(providerId) {
   return Object.hasOwn(COMPOSE_SERVER_STATE, providerId) ? COMPOSE_SERVER_STATE[providerId] : null;
@@ -71,25 +78,73 @@ export function retargetServerResource(state, spec, target, stackName = '?') {
         : `stack ${stackName} holds ${matches.length} ${spec.type} resources named "${COMPOSE_SERVER_LOGICAL_NAME}"; refusing to guess which is server ${target.serverId}`,
     );
   }
-  const id = String(target.serverId);
   const [server] = matches;
   const before = JSON.stringify(next);
+  // A zoned provider's ids read `<zone>/<uuid>`, and the stack's output is bare.
+  const zone = spec.ipResource ? `${String(server.id).split('/')[0]}/` : '';
+  const id = `${zone}${target.serverId}`;
   server.id = id;
   server.inputs = { ...(server.inputs ?? {}), [spec.sizeKey]: target.serverType };
   server.outputs = {
     ...(server.outputs ?? {}),
     id,
     [spec.sizeKey]: target.serverType,
-    [spec.ipKey]: target.ip,
+    ...(spec.ipKey ? { [spec.ipKey]: target.ip } : {}),
   };
+  if (spec.ipResource) {
+    const ipId = retargetIpResource(resources, spec.ipResource, target, zone, stackName);
+    server.inputs.ipIds = [ipId];
+    server.outputs.ipIds = [ipId];
+  }
   // The stack outputs `status`, `failover` and the deploy read (serverIp,
   // serverId) name the replacement too. Every compose program exports both.
   const stackRes = resources.find((r) => r?.type === 'pulumi:pulumi:Stack');
   if (stackRes?.outputs) {
-    if ('serverId' in stackRes.outputs) stackRes.outputs.serverId = id;
+    if ('serverId' in stackRes.outputs) stackRes.outputs.serverId = String(target.serverId);
     if ('serverIp' in stackRes.outputs) stackRes.outputs.serverIp = target.ip;
   }
   return { deployment: next, changed: JSON.stringify(next) !== before };
+}
+
+/**
+ * Point the stack's IP resource at the replacement's flexible IP.
+ *
+ * @returns {string} the IP's zoned id, which the server's ipIds name
+ */
+function retargetIpResource(resources, ipResource, target, zone, stackName) {
+  if (!target.ipId) {
+    throw new Error(
+      `stack ${stackName}: no flexible IP id for ${target.ip}, so state would keep naming a ` +
+        'released IP',
+    );
+  }
+  const ips = resources.filter(
+    (r) => r?.type === ipResource.type && String(r?.urn ?? '').endsWith(`::${ipResource.name}`),
+  );
+  if (ips.length !== 1) {
+    throw new Error(
+      `stack ${stackName} holds ${ips.length === 0 ? 'no' : ips.length} ${ipResource.type} ` +
+        `named "${ipResource.name}"`,
+    );
+  }
+  const id = `${zone}${target.ipId}`;
+  ips[0].id = id;
+  ips[0].outputs = { ...(ips[0].outputs ?? {}), id, address: target.ip };
+  return id;
+}
+
+/**
+ * The flexible IP holding `address`. A scale records the replacement's address
+ * rather than this id, which keeps every path that resumes a scale or repairs
+ * its state the same, and only the provider can say which IP that is.
+ */
+async function flexibleIpIdFor(address, options) {
+  const { getProviderClass } = await import('../providers/index.js');
+  const provider = new (getProviderClass(options.provider))(options.providerToken);
+  const { items } = await provider.listFlexibleIPsDetailed();
+  const match = items.find((ip) => ip.address === address);
+  if (!match) throw new Error(`no flexible IP holds ${address}`);
+  return match.id;
 }
 
 /**
@@ -118,7 +173,10 @@ export async function syncServerState(stackName, target, options) {
         requireExisting: true,
       });
       const state = await withStateBackendRetry(() => stack.exportStack(), 'server-state export');
-      const { deployment, changed } = retargetServerResource(state, spec, target, stackName);
+      const resolved = spec.ipResource
+        ? { ...target, ipId: await flexibleIpIdFor(target.ip, options) }
+        : target;
+      const { deployment, changed } = retargetServerResource(state, spec, resolved, stackName);
       if (changed) {
         await withStateBackendRetry(() => stack.importStack(deployment), 'server-state import');
       }
