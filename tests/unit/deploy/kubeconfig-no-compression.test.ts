@@ -7,7 +7,7 @@
  * against 0.75 s with `--disable-compression` (12-17 s against 1.9 s in an
  * evening window), and kubectl downloads about 4.7 MB of OpenAPI documents per
  * cluster on a cold deploy. kubectl and helm honor the field since client-go
- * 1.26 (the deploy preflight already refuses kubectl older than 1.27).
+ * 1.26, and an older client ignores it (tested on 1.23 to 1.25).
  *
  * Covered here: the pure text transform (k3s.yaml shape, idempotence, an
  * explicit `false`, a kubeconfig with more than one cluster); readers leave

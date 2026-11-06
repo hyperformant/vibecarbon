@@ -49,7 +49,9 @@ describe('compose: check-db-ledger runs before the server is touched', () => {
   it('reads the one server, and a refusal propagates', async () => {
     const ctx = { serverIp: '1.1.1.1', sshKeyPath: '/k', projectConfig: { projectName: 'acme' } };
     await EFFECTS.checkDbLedger(ctx as never);
-    expect(H.calls).toEqual([[['1.1.1.1'], '/k', 'acme']]);
+    expect(H.calls).toEqual([
+      [['1.1.1.1'], '/k', 'acme', { perfName: 'deploy.compose.serverFloors' }],
+    ]);
     H.refuse = true;
     await expect(EFFECTS.checkDbLedger(ctx as never)).rejects.toThrow(/older vibecarbon/);
   });
@@ -79,7 +81,9 @@ describe('compose-ha: both servers are read before either is touched', () => {
       onProgress: () => {},
     };
     await COMPOSE_HA_EFFECTS.haCheckDbLedger(ctx as never);
-    expect(H.calls).toEqual([[['1.1.1.1', '2.2.2.2'], '/k', 'acme']]);
+    expect(H.calls).toEqual([
+      [['1.1.1.1', '2.2.2.2'], '/k', 'acme', { perfName: 'deploy.ha.compose.serverFloors' }],
+    ]);
     H.refuse = true;
     await expect(COMPOSE_HA_EFFECTS.haCheckDbLedger(ctx as never)).rejects.toThrow(
       /older vibecarbon/,

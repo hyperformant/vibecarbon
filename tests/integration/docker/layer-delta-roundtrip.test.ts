@@ -36,7 +36,8 @@ const describeDocker = shouldRunDocker ? describe : describe.skip;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '../../..');
-const DIND_IMAGE = 'docker:29-dind';
+// .github/workflows/docker-newest.yml sets this to the newest Docker.
+const DIND_IMAGE = process.env.VC_DIND_IMAGE || 'docker:29-dind';
 const K3S_IMAGE = 'rancher/k3s:v1.31.5-k3s1';
 const REGISTRY_IMAGE = 'registry:2.8.3';
 const NET = 'vcdelta-net';

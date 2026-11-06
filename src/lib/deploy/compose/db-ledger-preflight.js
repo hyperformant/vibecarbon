@@ -34,6 +34,7 @@
  *    bundle is not uploaded yet) so the running path can read the ledger.
  */
 import { sshRunAsync } from './index.js';
+import { judgeServerVersions, withServerVersions } from './server-floors.js';
 
 /** The query: true when tables exist in `public` but drizzle's ledger does not. */
 export const PRE_LEDGER_SQL =
@@ -42,6 +43,8 @@ export const PRE_LEDGER_SQL =
 /**
  * The remote script. Prints `STATE=`, then `VOLUME=` (container absent) or `IMAGE=`
  * and (when running) `PRE_LEDGER=` lines; psql's own stderr is folded in so a failed read can be quoted.
+ * This is the first thing a deploy asks of a server's Docker, so the Docker
+ * version read rides along (server-floors.js).
  *
  * @param {string} projectName
  * @returns {string}
@@ -49,7 +52,7 @@ export const PRE_LEDGER_SQL =
 export function dbLedgerProbeCommand(projectName) {
   const container = `${projectName}-db`;
   const sqlB64 = Buffer.from(PRE_LEDGER_SQL).toString('base64');
-  return [
+  const probe = [
     `c=${container}`,
     // `|| running=absent`, not `$(... || echo absent)`: a failed inspect still
     // prints an empty line, and the substitution would capture both.
@@ -60,6 +63,7 @@ export function dbLedgerProbeCommand(projectName) {
     `[ "$running" = true ] || exit 0`,
     `out=$(docker exec "$c" psql -U postgres -d postgres -tAc "$(echo ${sqlB64} | base64 -d)" 2>&1); echo "PRE_LEDGER=$(echo "$out" | tr -d '[:space:]')"`,
   ].join('; ');
+  return withServerVersions(probe);
 }
 
 /**
@@ -108,10 +112,13 @@ export function parseDbLedgerProbe(output, projectName) {
  * @param {string[]} ips - primary first on compose-ha
  * @param {string} sshKeyPath
  * @param {string} projectName
- * @param {{sshRun?: typeof sshRunAsync}} [options] - `sshRun` is a test seam.
+ * @param {object} [options]
+ * @param {typeof sshRunAsync} [options.sshRun] - test seam
+ * @param {(message: string) => void} [options.warn] - test seam
+ * @param {string} [options.perfName] - `[perf]` marker for the Docker version read
  */
 export async function assertDbMadeByThisStack(ips, sshKeyPath, projectName, options = {}) {
-  const { sshRun = sshRunAsync } = options;
+  const { sshRun = sshRunAsync, warn, perfName } = options;
   for (const ip of ips) {
     let out;
     try {
@@ -123,6 +130,7 @@ export async function assertDbMadeByThisStack(ips, sshKeyPath, projectName, opti
           'knowing whether it holds data from an older vibecarbon stack.',
       );
     }
+    judgeServerVersions(ip, out, { sshKeyPath, warn, perfName });
     const { verdict, detail } = parseDbLedgerProbe(out, projectName);
     if (verdict === 'absent' || verdict === 'ok') continue;
     if (verdict === 'unreadable') {

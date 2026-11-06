@@ -13,7 +13,6 @@
  */
 
 import { existsSync, realpathSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { COMMANDS, loadAllSpecs } from './lib/cli/command-registry.js';
@@ -26,6 +25,7 @@ import { shouldGate } from './lib/licensing/gate.js';
 import { applyNetworkDefaults } from './lib/net-defaults.js';
 import { perfEnabled, perfTimer } from './lib/perf.js';
 import { bootstrapOperatorEnv } from './lib/project.js';
+import { compareVersions, floorFor, parseVersion } from './lib/runtime-floors.js';
 import { recordCommandStart, reportCrash, settlePendingTelemetry } from './lib/telemetry/index.js';
 import { printUpdateNotice, refreshUpdateCache } from './lib/telemetry/update-check.js';
 import { VERSION } from './lib/version.js';
@@ -102,44 +102,22 @@ export function asksHelpOrVersion(args) {
 }
 
 /**
- * The Node floor, read from package.json `engines.node` (computed by
- * scripts/sync-node-version.js from the lockfile). Reading it here means there
- * is no second copy to drift.
- *
- * @returns {string|null} the `X.Y.Z` minimum, or null if it can't be parsed
- */
-function nodeEnginesFloor() {
-  try {
-    const require = createRequire(import.meta.url);
-    const { engines } = require('../package.json');
-    const m = String(engines?.node ?? '').match(/(\d+)\.(\d+)\.(\d+)/);
-    return m ? `${m[1]}.${m[2]}.${m[3]}` : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Guard against Node versions below the engines floor. `engines.node` only
  * produces an npm *warning* on install, so without this a user on Node 20/22
  * gets a working `create` and then a cryptic crash (undici throws on import)
  * at the first deploy/provider command. Fail fast with a clear message instead.
  *
  * @param {string} current - defaults to process.versions.node; injectable for testing
- * @param {string|null} floor - defaults to the package's engines.node minimum
+ * @param {string|null} floor - defaults to the node row of the floors table
  */
-export function checkNodeVersion(current = process.versions.node, floor = nodeEnginesFloor()) {
+export function checkNodeVersion(
+  current = process.versions.node,
+  floor = floorFor('node', 'laptop')?.min ?? null,
+) {
   if (!floor) return;
-  const cur = String(current)
-    .replace(/^v/, '')
-    .match(/^\d+\.\d+\.\d+/)?.[0];
+  const cur = parseVersion(current);
   if (!cur) return;
-  const [a, b] = [cur, floor].map((v) => v.split('.').map(Number));
-  const below =
-    a[0] < b[0] ||
-    (a[0] === b[0] && a[1] < b[1]) ||
-    (a[0] === b[0] && a[1] === b[1] && a[2] < b[2]);
-  if (below) {
+  if (compareVersions(cur, floor) < 0) {
     console.error(`vibecarbon requires Node.js ${floor} or newer; you are running ${current}.`);
     console.error(
       `Upgrade Node (e.g. \`nvm install 24 && nvm use 24\`) or see ${link('https://nodejs.org', undefined, { stream: process.stderr })}.`,

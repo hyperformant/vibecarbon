@@ -959,7 +959,9 @@ async function haCheckDbLedger(ctx) {
   const { primary, standby, sshKeyPath } = ctx;
   ctx.onProgress('Checking both databases were made by this stack...');
   await perfAsync('deploy.ha.compose.checkDbLedger', () =>
-    assertDbMadeByThisStack([primary.ip, standby.ip], sshKeyPath, ctx.projectConfig.projectName),
+    assertDbMadeByThisStack([primary.ip, standby.ip], sshKeyPath, ctx.projectConfig.projectName, {
+      perfName: 'deploy.ha.compose.serverFloors',
+    }),
   );
 }
 

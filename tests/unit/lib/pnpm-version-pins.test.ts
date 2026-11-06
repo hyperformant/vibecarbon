@@ -67,6 +67,7 @@ function pinnedMajor(): number {
  */
 const PNPM_WORKFLOWS: Record<string, string[]> = {
   // matrix (one per provider leg, but they share one job template) + publish-perf.
+  [join('.github', 'workflows', 'docker-newest.yml')]: [ROOT_PKG],
   [join('.github', 'workflows', 'e2e-us-perf.yml')]: [ROOT_PKG, ROOT_PKG],
   [join('.github', 'workflows', 'release.yml')]: [ROOT_PKG],
   // lint, unit, integration, engines-min. Four, and NOT the carbon Template

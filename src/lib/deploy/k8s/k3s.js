@@ -54,10 +54,7 @@ import {
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../../carbon/scripts/render-backup-settings.mjs';
-import {
-  kubectlFloorProblem,
-  writeCertManagerKustomization,
-} from '../../../../carbon/scripts/render-cert-manager.mjs';
+import { writeCertManagerKustomization } from '../../../../carbon/scripts/render-cert-manager.mjs';
 import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
@@ -80,6 +77,11 @@ import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
 import { runWithRetry } from '../../retry.js';
+import {
+  kubectlClientVersion,
+  kubectlFloorProblem,
+  unreadableMessage,
+} from '../../runtime-floors.js';
 import {
   declaredAddonNames,
   enabledK8sAddonNames,
@@ -161,6 +163,7 @@ import {
   awaitDbPodReady,
   awaitPostgresAccepting,
   awaitPostgresPromoted,
+  kubectlSkewNotice,
   watchAppMigrationFailure,
 } from './readiness.js';
 import { tlsApplyTimingLines, tlsRestoreTimingLine } from './tls-reissue-watch.js';
@@ -4951,14 +4954,18 @@ async function deployK3sSteps(options, inFlight) {
       throw new Error(`Required tool '${tool}' not found on PATH`);
     }
   }
-  // The cert-manager install is a kustomization over the release manifest's
-  // URL (render-cert-manager.mjs), which needs kubectl's built-in kustomize v5.
+  // The floor and why it is what it is: kubectl-patch-subresource in
+  // lib/runtime-floors.js.
   const kubectlVersion = await runCommandAsync(['kubectl', 'version', '--client', '-o', 'json'], {
     silent: true,
   }).catch(() => '');
-  const kubectlTooOld = kubectlFloorProblem(String(kubectlVersion ?? ''));
+  const kubectlVersionText = String(kubectlVersion ?? '');
+  const kubectlTooOld = kubectlFloorProblem(kubectlVersionText);
   if (kubectlTooOld) throw new Error(kubectlTooOld);
   s.stop('Preflight OK');
+  if (!kubectlClientVersion(kubectlVersionText)) {
+    progressLog(unreadableMessage({ tool: 'kubectl', raw: kubectlVersionText }));
+  }
 
   // 1b. The app image build, started now so it runs while Pulumi provisions
   //     the cluster (startAppImageBuild); deliverAppImage takes it below. The
@@ -5272,9 +5279,14 @@ async function deployK3sSteps(options, inFlight) {
   //     peer; the apply gate's registry probe is ssh).
   {
     const kubeEnv = { ...process.env, KUBECONFIG: kubeconfig };
+    // Beside the gate, which makes the same kind of call to the same apiserver,
+    // so a warning costs the deploy no extra wait.
+    const skewNotice = kubectlSkewNotice({ env: kubeEnv });
     await perfAsync(`deploy.${perfPrefix}.controlPlane.gate`, () =>
       awaitControlPlaneServing({ env: kubeEnv }),
     );
+    const skew = await skewNotice;
+    if (skew) progressLog(skew);
     await perfAsync(`deploy.${perfPrefix}.restoreMarker`, () =>
       assertRestoreMarkerState({
         env: kubeEnv,

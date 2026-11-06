@@ -59,6 +59,12 @@ vi.mock('@clack/prompts', async (orig) => {
   };
 });
 
+// server-floors.test.ts covers the check; here it would open a real SSH session.
+vi.mock('../../../src/lib/deploy/compose/server-floors.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  assertServerFloors: async () => {},
+}));
+
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {

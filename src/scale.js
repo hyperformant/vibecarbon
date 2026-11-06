@@ -51,6 +51,7 @@ import {
   rollbackComposeCutover,
   writeComposeReplicationOverlay,
 } from './lib/deploy/compose/scale-cutover.js';
+import { assertServerFloors } from './lib/deploy/compose/server-floors.js';
 import {
   assertComposeScaleKeepsState,
   describeOldServer,
@@ -1181,6 +1182,7 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   await perfAsync('scale.cloudInitReady', () =>
     setupServer(newIp, sshKeyPath, Provider.CLOUD_INIT_READY_TIMEOUT_MS),
   );
+  await assertServerFloors(newIp, sshKeyPath, { perfName: 'scale.serverFloors' });
   // First-boot timing (`[perf] scale.server.boot.*`, VIBECARBON_PERF only):
   // queued now, read once the command is over (lib/deploy/boot-timing.js).
   queueBootTiming([{ ip: newIp, prefix: 'scale.server' }], sshKeyPath);
