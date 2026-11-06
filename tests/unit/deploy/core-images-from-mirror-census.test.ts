@@ -57,6 +57,7 @@ import {
   MIRRORED_IMAGES,
   mirroredImageName,
   NODE_RUNTIME_IMAGE,
+  PRE_CHANNEL_KUBERNETES,
   renderManifestImages,
   socatImageRef,
   TRAEFIK_MIRROR,
@@ -184,13 +185,18 @@ const MIRROR_KEYS = new Set(MIRRORED_IMAGES.map((image) => k8sMirrorRef(image)))
 
 /** Rule (c). */
 function unknownMirrorRefs(sites: Site[]): string[] {
-  return sites
-    .filter(({ ref }) => ref.startsWith(MIRROR_PREFIX) && ref.includes('@sha256:'))
-    .filter(({ ref }) => !OWN_PACKAGES.has(ref.slice(MIRROR_PREFIX.length).split(/[:@]/)[0]))
-    .filter(({ ref }) => !MIRROR_KEYS.has(ref))
-    .map(
-      ({ where, ref }) => `${where}: ${ref} is not a MIRRORED_IMAGES entry (name, tag and digest)`,
-    );
+  return (
+    sites
+      .filter(({ ref }) => ref.startsWith(MIRROR_PREFIX) && ref.includes('@sha256:'))
+      // Retired, already published, and kept only for clusters built on them.
+      .filter(({ ref }) => !(Object.values(PRE_CHANNEL_KUBERNETES) as string[]).includes(ref))
+      .filter(({ ref }) => !OWN_PACKAGES.has(ref.slice(MIRROR_PREFIX.length).split(/[:@]/)[0]))
+      .filter(({ ref }) => !MIRROR_KEYS.has(ref))
+      .map(
+        ({ where, ref }) =>
+          `${where}: ${ref} is not a MIRRORED_IMAGES entry (name, tag and digest)`,
+      )
+  );
 }
 
 /**

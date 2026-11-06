@@ -893,6 +893,21 @@ export const CHANNEL_KUBERNETES_IMAGES = Object.freeze({
 });
 
 /**
+ * The Kubernetes set of a cluster built before the channel existed. Such a
+ * cluster has no record, and every one of them runs exactly this. We do not
+ * upgrade a cluster in place, so a record of it stays here for good: never bump
+ * these with the versions above.
+ * @type {Readonly<ImageSet['kubernetes']>}
+ */
+export const PRE_CHANNEL_KUBERNETES = Object.freeze({
+  k3s: 'v1.31.5+k3s1',
+  clusterAutoscaler:
+    'ghcr.io/hyperformant/cluster-autoscaler:v1.32.7@sha256:b3a67e07244033d36adc1cbe236fdbf9729b968f9c1c47477e26547a78131c81',
+  kubectl:
+    'ghcr.io/hyperformant/k8s:1.31.12@sha256:d57b0d2e1837411db2616cd680e474a3564b3a129d942d3464deb2b19790c2e4',
+});
+
+/**
  * The set this CLI ships: the fallback for an unreadable channel.
  * @returns {ImageSet}
  */

@@ -11,6 +11,8 @@ import {
   activateImageSet,
   bundledImageSet,
   K3S_VERSION,
+  k3sVersion,
+  PRE_CHANNEL_KUBERNETES,
   traefikImageRef,
 } from '../../../src/lib/images.js';
 import {
@@ -198,6 +200,15 @@ describe('readChannel', () => {
     );
   });
 
+  it('stops reading an answer that never ends, at the cap and not at the timeout', async () => {
+    const pull = (c: ReadableStreamDefaultController) =>
+      c.enqueue(new Uint8Array(32 * 1024).fill(32));
+    const fetchFn = vi.fn(async () => new Response(new ReadableStream({ pull })));
+    const { set, problem } = await readChannel({ fetchFn });
+    expect(set).toBeUndefined();
+    expect(problem).toBe('the file is too large');
+  });
+
   it.each([
     ['a network failure', vi.fn(async () => Promise.reject(new TypeError('fetch failed')))],
     ['a 404', answer('nope', 404)],
@@ -338,14 +349,40 @@ describe('resolveDeployImageSet', () => {
     expect(set.images.traefik).toContain(':v3.99.0@');
   });
 
-  it('a live cluster from before the channel stays on the bundled Kubernetes set', async () => {
+  it('a live cluster from before the channel keeps the Kubernetes set it was built with', async () => {
     const set = await resolveDeployImageSet({
       envConfig: { deployMode: 'kubernetes', deployedAt: '2026-11-01' },
       k8s: true,
       read: channelRead(moved()),
     });
-    expect(set.kubernetes.k3s).toBe(K3S_VERSION);
+    expect(set.kubernetes).toEqual(PRE_CHANNEL_KUBERNETES);
+    expect(set.kubernetes.k3s).not.toBe(K3S_VERSION);
     expect(set.images.traefik).toContain(':v3.99.0@');
+  });
+
+  it('the pre-channel set survives being recorded and read back', async () => {
+    const first = await resolveDeployImageSet({
+      envConfig: { deployMode: 'kubernetes', deployedAt: '2026-11-01' },
+      k8s: true,
+      read: channelRead(moved()),
+    });
+    const next = await resolveDeployImageSet({
+      envConfig: { deployMode: 'kubernetes', deployedAt: '2026-11-01', imageSet: first },
+      k8s: true,
+      read: channelRead(moved()),
+    });
+    expect(next.kubernetes).toEqual(PRE_CHANNEL_KUBERNETES);
+  });
+
+  it('a compose environment or a first deploy with no record takes no pre-channel set', async () => {
+    for (const envConfig of [{ deployMode: 'compose', deployedAt: '2026-11-01' }, {}]) {
+      const set = await resolveDeployImageSet({
+        envConfig,
+        k8s: true,
+        read: channelRead(moved()),
+      });
+      expect(set.kubernetes).not.toEqual(PRE_CHANNEL_KUBERNETES);
+    }
   });
 
   it('a compose environment that becomes k8s starts on the channel, not its old record', async () => {
@@ -390,6 +427,16 @@ describe('resolveDeployImageSet', () => {
 });
 
 describe('useRecordedImageSet', () => {
+  it('a cluster from before the channel scales and fails over on its own Kubernetes', () => {
+    useRecordedImageSet({ deployMode: 'kubernetes', deployedAt: '2026-11-01' });
+    expect(k3sVersion()).toBe(PRE_CHANNEL_KUBERNETES.k3s);
+  });
+
+  it('an environment that was never deployed stays on the bundled set', () => {
+    useRecordedImageSet({ deployMode: 'kubernetes' });
+    expect(k3sVersion()).toBe(K3S_VERSION);
+  });
+
   it('activates the recorded set and never reads the channel', () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);

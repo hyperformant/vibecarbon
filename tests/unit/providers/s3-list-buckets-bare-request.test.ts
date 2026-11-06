@@ -21,7 +21,7 @@ const hmac = (key: string | Buffer, text: string) =>
 
 function signatureHolds(req: IncomingMessage) {
   const auth = req.headers.authorization ?? '';
-  const [, day, region] = /Credential=[^/]+\/(\d{8})\/([^/]+)\//.exec(auth) ?? [];
+  const [, day, region] = (auth.split('Credential=')[1]?.split(',')[0] ?? '').split('/');
   const signedHeaders = /SignedHeaders=([^,]+)/.exec(auth)?.[1] ?? '';
   const sent = /Signature=([0-9a-f]+)/.exec(auth)?.[1];
   const [path, query = ''] = (req.url ?? '').split('?');

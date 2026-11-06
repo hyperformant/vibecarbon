@@ -43,6 +43,7 @@ import {
   CHANNEL_KUBERNETES_IMAGES,
   K8S_MIRROR_ORG,
   mirroredImageName,
+  PRE_CHANNEL_KUBERNETES,
 } from './images.js';
 
 /** Fixed at the top of the file so a CLI never fetches a location it was handed. */
@@ -192,8 +193,8 @@ export async function readChannel({
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return { problem: `it answered ${res.status}` };
-    const text = await res.text();
-    if (text.length > CHANNEL_MAX_CHARS) return { problem: 'the file is too large' };
+    const text = await readCapped(res);
+    if (text === null) return { problem: 'the file is too large' };
     return { set: parseChannelFile(JSON.parse(text), bundledImageSet()) };
   } catch (err) {
     if (err instanceof ImageSetRejected) return { problem: err.message };
@@ -238,6 +239,38 @@ function recordedImageSet(envConfig, note) {
 }
 
 /**
+ * The body as text, or null past the cap. The cap holds while reading, so a huge
+ * answer never reaches memory.
+ *
+ * @param {Response} res
+ * @returns {Promise<string | null>}
+ */
+async function readCapped(res) {
+  const decoder = new TextDecoder();
+  let text = '';
+  for await (const chunk of res.body ?? []) {
+    text += decoder.decode(chunk, { stream: true });
+    if (text.length > CHANNEL_MAX_CHARS) return null;
+  }
+  return text;
+}
+
+/**
+ * A live cluster with no record was built before the channel existed. The
+ * bundled Kubernetes set is not what it runs: taking it would join new workers
+ * to an older master. A record that exists but fails validation is not this
+ * case, since only a CLI with the channel writes one.
+ *
+ * @param {any} envConfig
+ * @returns {import('./images.js').ImageSet | null}
+ */
+function preChannelImageSet(envConfig) {
+  const live = envConfig?.deployMode === 'kubernetes' && envConfig.deployedAt;
+  if (!live || envConfig.imageSet) return null;
+  return { ...bundledImageSet(), kubernetes: { ...PRE_CHANNEL_KUBERNETES } };
+}
+
+/**
  * The set a deploy runs, resolved once at its start and activated. The caller
  * records it. Never throws: no problem here stops a deploy.
  *
@@ -259,9 +292,8 @@ export async function resolveDeployImageSet({
   if (!channel) {
     note(`version channel not used (${problem}), deploying the versions bundled with this CLI`);
   }
-  const recorded = recordedImageSet(envConfig, note);
-  // A cluster already built with a version stays on it. One deployed before
-  // the channel existed has no record, and was built from the bundled copy.
+  const recorded = recordedImageSet(envConfig, note) ?? preChannelImageSet(envConfig);
+  // A cluster already built with a version stays on it.
   const existingCluster =
     k8s && envConfig?.deployMode === 'kubernetes' && (recorded || envConfig.deployedAt);
   const set = chooseImageSet({
@@ -275,12 +307,12 @@ export async function resolveDeployImageSet({
 
 /**
  * For every command that is not a deploy: run what the environment recorded,
- * and do not read the channel. An environment with no record was deployed
- * before the channel existed, from the bundled copy.
+ * and do not read the channel. A cluster with no record keeps the Kubernetes set
+ * it was built with.
  *
  * @param {{ imageSet?: unknown } | undefined} envConfig
  * @param {{ note?: (line: string) => void }} [opts]
  */
 export function useRecordedImageSet(envConfig, { note = () => {} } = {}) {
-  activateImageSet(recordedImageSet(envConfig, note));
+  activateImageSet(recordedImageSet(envConfig, note) ?? preChannelImageSet(envConfig));
 }

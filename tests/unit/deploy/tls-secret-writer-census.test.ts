@@ -85,7 +85,7 @@ function secretNameConstants(text: string): string[] {
 /** True when `value` names the Secret: the literal, or one of `consts` as a whole token. */
 function namesSecret(value: string, consts: string[]): boolean {
   return [SECRET, ...consts].some((n) =>
-    new RegExp(`(^|[^\\w$-])${n.replace(/[$]/g, '\\$')}([^\\w$-]|$)`).test(value),
+    new RegExp(`(^|[^\\w$-])${n.replace(/[\\$]/g, '\\$&')}([^\\w$-]|$)`).test(value),
   );
 }
 
