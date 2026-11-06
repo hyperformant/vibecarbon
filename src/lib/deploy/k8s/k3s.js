@@ -2262,18 +2262,12 @@ async function describeDbPods(env) {
 export const DB_ROLLOUT_TIMEOUT_S = 900;
 
 /**
- * The workloads the retired Postgres Helm chart left in a cluster: its db
- * StatefulSet (`<release>-<chart>-db`; the release and the chart shared one
- * name) and Helm's release record (a `sh.helm.release.v1.<release>.v<n>`
- * Secret labelled owner=helm,name=<release>), plus the GitOps Kustomization
- * `vibecarbon-<release>` that installed it. Named here, and only here, so
- * the deploy can recognize a chart-era cluster and refuse to build a second
- * database beside it. The release name is the one line the terminology
- * census exempts (tests/unit/lib/terminology-census.test.ts).
+ * A StatefulSet the retired Postgres Helm chart left behind: `<release>-<chart>-db`.
+ * Ours is plainly `db`, so any other `*-db` is not one this CLI made.
  */
-export const RETIRED_CHART_RELEASE = 'supabase'; // terminology-census: retired chart name
-export const RETIRED_CHART_DB_STATEFULSET = `${RETIRED_CHART_RELEASE}-${RETIRED_CHART_RELEASE}-db`;
-export const RETIRED_CHART_KUSTOMIZATION = `vibecarbon-${RETIRED_CHART_RELEASE}`;
+const RETIRED_CHART_DB = /^statefulset(\.apps)?\/.+-db$/;
+/** Helm's release record: a Secret `sh.helm.release.v1.<release>.v<n>`. */
+const HELM_RELEASE_RECORD = /sh\.helm\.release\.v1\.(.+)\.v\d+$/;
 
 /**
  * Refuse to deploy onto a cluster that still runs the retired chart's
@@ -2287,6 +2281,12 @@ export const RETIRED_CHART_KUSTOMIZATION = `vibecarbon-${RETIRED_CHART_RELEASE}`
  * would burn its whole budget. Nothing moves the data across automatically,
  * so the operator has to choose how, and this says how.
  *
+ * Recognized by shape, not by name: this CLI installs no Helm release, so a
+ * release record in the app namespace, or a database StatefulSet other than
+ * `db`, is not ours. A customer's own chart in this namespace is refused too,
+ * and that is the safe way round: a wrong refusal explains itself, a wrong
+ * pass empties the site.
+ *
  * A single read of the live cluster, not a retry: it runs after
  * awaitControlPlaneServing proved the apiserver answers, so a failing read
  * is a real failure and is reported as one rather than guessed at.
@@ -2298,35 +2298,15 @@ export async function assertNoRetiredChartDb({
   namespace = 'vibecarbon',
   exec = runCommandAsync,
 }) {
-  let sts;
-  let release;
+  let statefulsets;
+  let releases;
   try {
-    sts = await exec(
-      [
-        'kubectl',
-        '-n',
-        namespace,
-        'get',
-        'statefulset',
-        RETIRED_CHART_DB_STATEFULSET,
-        '--ignore-not-found',
-        '-o',
-        'name',
-      ],
-      { env, silent: true },
-    );
-    release = await exec(
-      [
-        'kubectl',
-        '-n',
-        namespace,
-        'get',
-        'secret',
-        '-l',
-        `owner=helm,name=${RETIRED_CHART_RELEASE}`,
-        '-o',
-        'name',
-      ],
+    statefulsets = await exec(['kubectl', '-n', namespace, 'get', 'statefulset', '-o', 'name'], {
+      env,
+      silent: true,
+    });
+    releases = await exec(
+      ['kubectl', '-n', namespace, 'get', 'secret', '-l', 'owner=helm', '-o', 'name'],
       { env, silent: true },
     );
   } catch (err) {
@@ -2336,8 +2316,19 @@ export async function assertNoRetiredChartDb({
         'StatefulSet without knowing whether an older database is still running here.',
     );
   }
-  const found = [String(sts ?? '').trim(), String(release ?? '').trim()].filter(Boolean);
+  const lines = (out) =>
+    String(out ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+  const records = lines(releases);
+  const found = [...lines(statefulsets).filter((l) => RETIRED_CHART_DB.test(l)), ...records];
   if (found.length === 0) return;
+  const release = records[0]?.match(HELM_RELEASE_RECORD)?.[1];
+  const uninstall = release
+    ? `\`helm uninstall ${release} -n ${namespace}\``
+    : `\`helm uninstall\` the release \`helm list -n ${namespace}\` names`;
+  const kustomization = release ? `\`vibecarbon-${release}\`` : "the chart's";
   throw new Error(
     `This cluster still runs the database from the retired Helm chart (${found.join(', ')} in ` +
       `namespace ${namespace}). This version runs Postgres as its own StatefulSet on a NEW ` +
@@ -2345,12 +2336,12 @@ export async function assertNoRetiredChartDb({
       'the app at an empty database.\n' +
       'Pick one:\n' +
       '  - Start clean: `vibecarbon destroy <env>`, then `vibecarbon deploy <env>`.\n' +
-      `  - Keep the data: \`helm uninstall ${RETIRED_CHART_RELEASE} -n ${namespace}\`, then ` +
+      `  - Keep the data: ${uninstall}, then ` +
       '`vibecarbon deploy <env> -restore latest`. The restore reads the same wal-g prefix ' +
       'the chart database archived to (unchanged), so it replays every segment archived ' +
       'before the uninstall. On k8s-ha do this on both clusters.\n' +
-      'GitOps clusters (`vibecarbon configure cicd`): first set `prune: false` on the ' +
-      `\`${RETIRED_CHART_KUSTOMIZATION}\` Flux Kustomization in flux-system and then delete it; deleting it ` +
+      'GitOps clusters (`vibecarbon configure cicd`): first set `prune: false` on ' +
+      `${kustomization} Flux Kustomization in flux-system and then delete it; deleting it ` +
       'with prune on garbage-collects the HelmRelease, which uninstalls the chart and deletes ' +
       'its database volume before you chose to.',
   );

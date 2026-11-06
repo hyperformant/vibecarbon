@@ -33,7 +33,7 @@ All nine findings hold. None were dropped. Two were corrected or extended:
 | M6 | Prometheus has no egress to the Kubernetes API | Confirmed: the `prometheus-policy` egress (`services/observability/k8s/network-policy.yaml:160-181`) allows only the vibecarbon namespace and :10250. The scrape config uses `kubernetes_sd_configs` (role node and pod). |
 | L7 | Old WireGuard peer rules are never removed outside Hetzner, or in UFW | Confirmed: DO `digitalocean.js:1402-1415` appends and keeps every existing rule. `openWireguardPortUfw` (`compose/ha.js:739-743`) only ever runs `ufw allow`. |
 | L8 | The MFA check fails open | Confirmed: `carbon/src/server/lib/mfa-settings.ts:38-43` returns `cache?.value ?? false` on error. Its callers are `middleware/requireAal2.ts:51`, `routes/_internal/verify-role.ts:142` and `auth/assurance.ts:381`. |
-| I9 | Comments still refer to the Supabase-era service-role key | Confirmed in the observability k8s manifests. |
+| I9 | Comments still refer to the previous stack's admin key | Confirmed in the observability k8s manifests. |
 
 Added by the coordinator (H10): **the template app connects to Postgres as the `postgres` superuser.**
 - Verified:

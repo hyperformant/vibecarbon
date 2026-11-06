@@ -41,9 +41,6 @@ const {
   assertDbStorageClass,
   assertNoRetiredChartDb,
   awaitDbRollout,
-  RETIRED_CHART_DB_STATEFULSET,
-  RETIRED_CHART_KUSTOMIZATION,
-  RETIRED_CHART_RELEASE,
   buildDbManifestValues,
   dbPodListArgs,
   renderK8sBase,
@@ -614,25 +611,21 @@ describe('summarizeDbPods / summarizeNotReadyNodes', () => {
 describe('the chart is gone for good', () => {
   it('k3s.js installs no chart for the database and patches no db config at runtime', () => {
     const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
-    // The retired chart is named in exactly one place: the probe that refuses
-    // to deploy beside it (assertNoRetiredChartDb).
-    const start = k3s.indexOf('/**\n * The workloads the retired Postgres Helm chart');
-    const end = k3s.indexOf('\n}\n', k3s.indexOf('export async function assertNoRetiredChartDb('));
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    const outside = k3s.slice(0, start) + k3s.slice(end);
-    expect(outside.toLowerCase()).not.toContain(RETIRED_CHART_RELEASE);
     expect(k3s).not.toContain('ALTER SYSTEM');
   });
 
-  it('the scaffold carries no values/ or chart GitOps bundle', () => {
-    for (const gone of ['carbon/k8s/values', `carbon/k8s/gitops/${RETIRED_CHART_RELEASE}`]) {
-      expect(existsSync(join(ROOT, gone)), gone).toBe(false);
-    }
+  it('the scaffold carries no values/ directory', () => {
+    expect(existsSync(join(ROOT, 'carbon/k8s/values'))).toBe(false);
   });
 });
 
 describe('assertNoRetiredChartDb — a chart-era cluster is refused, not silently forked', () => {
+  // The chart's real name stays out of the source: a release called `oldchart`
+  // has the same shape, and the guard must find it by that shape alone.
+  const RELEASE = 'oldchart';
+  const CHART_DB = `statefulset.apps/${RELEASE}-${RELEASE}-db`;
+  const CHART_RECORD = `secret/sh.helm.release.v1.${RELEASE}.v3`;
+
   // A read of the live cluster: [statefulset get, helm release secret get].
   const execWith = (stsOut: string, releaseOut: string) => {
     const calls: string[][] = [];
@@ -644,46 +637,49 @@ describe('assertNoRetiredChartDb — a chart-era cluster is refused, not silentl
   };
 
   it('proceeds on a cluster with no trace of the chart (two reads, no retry)', async () => {
-    const { exec, calls } = execWith('', '');
+    const { exec, calls } = execWith('statefulset.apps/db\n', '');
     await expect(assertNoRetiredChartDb({ env, exec })).resolves.toBeUndefined();
-    expect(calls).toHaveLength(2);
-    expect(calls[0]).toEqual([
-      'kubectl',
-      '-n',
-      'vibecarbon',
-      'get',
-      'statefulset',
-      RETIRED_CHART_DB_STATEFULSET,
-      '--ignore-not-found',
-      '-o',
-      'name',
+    expect(calls).toEqual([
+      ['kubectl', '-n', 'vibecarbon', 'get', 'statefulset', '-o', 'name'],
+      ['kubectl', '-n', 'vibecarbon', 'get', 'secret', '-l', 'owner=helm', '-o', 'name'],
     ]);
-    expect(calls[1]).toContain(`owner=helm,name=${RETIRED_CHART_RELEASE}`);
   });
 
   it('refuses when the chart StatefulSet still runs, and says what to do', async () => {
-    const { exec } = execWith(
-      `statefulset.apps/${RETIRED_CHART_DB_STATEFULSET}\n`,
-      `secret/sh.helm.release.v1.${RETIRED_CHART_RELEASE}.v3\n`,
-    );
+    const { exec } = execWith(`statefulset.apps/db\n${CHART_DB}\n`, `${CHART_RECORD}\n`);
     const msg = String(
       ((await assertNoRetiredChartDb({ env, exec }).catch((e) => e)) as Error).message,
     );
-    expect(msg).toContain(`statefulset.apps/${RETIRED_CHART_DB_STATEFULSET}`);
+    expect(msg).toContain(CHART_DB);
+    expect(msg).not.toContain('statefulset.apps/db,');
     expect(msg).toContain('existing data does not carry over automatically');
     expect(msg).toContain('`vibecarbon destroy <env>`');
-    expect(msg).toContain(`\`helm uninstall ${RETIRED_CHART_RELEASE} -n vibecarbon\``);
+    expect(msg).toContain(`\`helm uninstall ${RELEASE} -n vibecarbon\``);
     expect(msg).toContain('`vibecarbon deploy <env> -restore latest`');
     expect(msg).toMatch(/same wal-g prefix/);
     // GitOps: deleting the old Flux Kustomization with prune on would delete
     // the volume before the operator chose to.
     expect(msg).toContain('`prune: false`');
-    expect(msg).toContain(`\`${RETIRED_CHART_KUSTOMIZATION}\``);
+    expect(msg).toContain(`\`vibecarbon-${RELEASE}\``);
   });
 
   it('refuses on the Helm release record alone (the StatefulSet already gone)', async () => {
-    const { exec } = execWith('', `secret/sh.helm.release.v1.${RETIRED_CHART_RELEASE}.v1\n`);
+    const { exec } = execWith('', `secret/sh.helm.release.v1.${RELEASE}.v1\n`);
     await expect(assertNoRetiredChartDb({ env, exec })).rejects.toThrow(/retired Helm chart/);
+  });
+
+  it('refuses on the chart database alone, and points at helm list for the name', async () => {
+    const { exec } = execWith(`${CHART_DB}\n`, '');
+    const msg = String(
+      ((await assertNoRetiredChartDb({ env, exec }).catch((e) => e)) as Error).message,
+    );
+    expect(msg).toContain(CHART_DB);
+    expect(msg).toContain('`helm list -n vibecarbon`');
+  });
+
+  it('ignores a StatefulSet that is not a database', async () => {
+    const { exec } = execWith('statefulset.apps/db\nstatefulset.apps/redis\n', '');
+    await expect(assertNoRetiredChartDb({ env, exec })).resolves.toBeUndefined();
   });
 
   it('refuses rather than guesses when the cluster cannot be read', async () => {

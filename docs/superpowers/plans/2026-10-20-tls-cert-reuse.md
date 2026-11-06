@@ -96,7 +96,7 @@ These findings shaped the design. Implementers must not re-derive them.
   - `TLS_READY_BUDGET_MS` (480 s) is removed, not kept as an alias.
 - **Compose TLS retry cadence is every 30 minutes, and never against a Traefik younger than 15 minutes.** Ruling: Let's Encrypt's failed-validation limit is 5 per account, per hostname, per hour. Every restart issues the apex order and the wildcard order, so 2 restarts per hour stay at 4. This is issuance scheduling for an external outage, not a retry ladder around our own bug: Traefik has no retry of its own (finding 1). The age guard keeps a restart from abandoning an in-flight DNS-01 order (Refresh item 17). It gives up after 48 restarts (24 h), which `status` shows as pending.
 - **`.vibecarbon.json` only via `updateProjectConfig`**, in the orchestrator's final save, through `preserveSafetyFields` as it already does. Dotenv only via `formatDotenvLine`.
-- **No second CA.** No Supabase vocabulary. Conventional commits, pathspec commits, never `--no-verify`, no `!:` footers. Ship with a Compatibility note. No legacy compat code.
+- **No second CA.** No retired-stack vocabulary. Conventional commits, pathspec commits, never `--no-verify`, no `!:` footers. Ship with a Compatibility note. No legacy compat code.
 - **Shell embedded in YAML or `bash -c '…'` wrappers carries no apostrophes**, comments included (tests/unit/template/embedded-shell-syntax.test.ts, which already walks `carbon/backup/*.sh` and `backup/cronjob.yaml`).
 - **Operator-facing copy:** commands in backticks or ending the sentence (copyable-command census), no em dashes, lowercase informational hints.
 

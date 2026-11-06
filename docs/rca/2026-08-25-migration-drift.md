@@ -13,7 +13,7 @@ ERROR:  schema "cron" does not exist
 `00008_crawler_hits.sql` (AI Visibility feature) depends on pg_cron and
 `public.log_cron_job()` from template migration `00003_pg_cron.sql` — which,
 along with `00002_theme_settings` and `00004`–`00007`, had never reached the
-project: its `supabase/migrations/` held only `00001_init.sql` and a local
+project: its the migrations folder held only `00001_init.sql` and a local
 `00002_purchases.sql`. The failure also left `00008` **partially applied**
 (its tables and policies were created; the `cron.schedule` calls were not),
 because the runner applied statements without a transaction.
@@ -32,12 +32,12 @@ because the runner applied statements without a transaction.
 ## Root-cause chain
 
 1. **Schema delivery has no path to existing projects (structural).**
-   `supabase/**` is in `NEVER_PATTERNS` (`src/lib/upgrade-policy.js`), so
+   the migrations folder is in `NEVER_PATTERNS` (`src/lib/upgrade-policy.js`), so
    `vibecarbon upgrade` never delivers new template migrations. Correct for
    *existing* files (user schema is user code); wrong for template migrations
    the project has never seen — those are pure additions.
 2. **Hand-mirroring is partial by nature.** vibecarbon-web's `src/` tracks the
-   template via mirror commits, but nobody mirrors `supabase/migrations/` —
+   template via mirror commits, but nobody mirrors the migrations folder —
    code and schema advanced independently for six template migrations, and
    nothing detects the divergence.
 3. **No dependency preflight.** The runner applies whatever files exist in
@@ -75,7 +75,7 @@ because the runner applied statements without a transaction.
 **Queued (the hardening this class deserves, in priority order):**
 
 1. **`vibecarbon upgrade` delivers missing template migrations** — refine
-   `supabase/migrations/**` from `never` to add-only: offer template
+   the migrations folder from `never` to add-only: offer template
    migration files the project lacks (never modify or overwrite ones it has,
    never touch non-template files). Kills the whole class for every
    generated project.

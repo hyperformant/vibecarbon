@@ -95,8 +95,8 @@ Re-checked every cited file, line and claim against `d1fe1b2` (the top of the st
 - **B8 (new), the lineage on the record.** After every deploy the CLI records `envConfig.backup.lineage`. A changed value pushes the old one onto `backup.priorLineages` (newest first, with its newest finish time). The `backup` block already rides `destroyedEnvironments` (`env-identity.js:35`). Restore without `-lineage` refuses when the choice is ambiguous (Decision 2).
 
 ## Global Constraints
-- No customers, pre-1.0: no migration code for old prefixes or config keys, and no legacy compatibility code (including for Supabase-era environments). Ship a Compatibility note and no `!:` footer or `BREAKING CHANGE`.
-- No Supabase vocabulary in code, comments, docs or messages.
+- No customers, pre-1.0: no migration code for old prefixes or config keys, and no legacy compatibility code (including for environments on the previous stack). Ship a Compatibility note and no `!:` footer or `BREAKING CHANGE`.
+- No retired-stack vocabulary in code, comments, docs or messages.
 - No retry ladders. A failed backup, a failed preflight or a failed fence fails the command with one line naming the cause. The existing quarantined staleness sites in `docs/mitigations.yml` keep their names and get no new members.
 - Storage layout: an app bucket per env; state and backups per project, with env folders. No path in this plan creates a bucket. Restore, redeploy and the sentinel reader only read, list or put objects inside the env's folder.
 - Never print secrets. A sentinel read uses the backup credentials and logs only bucket, prefix and backup names.

@@ -15,7 +15,7 @@ Nobody has purchased a licence on any version, so there is nothing to stay compa
 
 | Question | Decision |
 |---|---|
-| Does a licence belong to an account? | Yes. Stripe Checkout still collects only an email. The purchase email carries a Supabase magic link; the account is created on first click. No signup wall before payment. |
+| Does a licence belong to an account? | Yes. Stripe Checkout still collects only an email. The purchase email carries a magic link; the account is created on first click. No signup wall before payment. |
 | Moving a subscription to another project | Release + rebind, self-serve. `deactivate` from the CLI triggers a release link to the buyer's email (the key alone never releases; see §2a); the dashboard (later workstream) releases directly. Every bind and release is announced to the buyer by email. One project at a time. |
 | Key shape | One project-less key. Binding is server state only ("option B"). The CLI never infers the project from the key. |
 | Backwards compatibility | None. Clean sweep of v1 and v2 code, fixtures, env vars, and docs. |
@@ -145,7 +145,7 @@ The harness currently gets past `requireLicense()` with a real legacy lifetime k
 
 ### Purchase email (`src/server/emails/templates.ts`)
 
-Contains, in order: the key; the exact command `vibecarbon activate vc-…` with "run this inside your project"; a Supabase magic link (`supabaseAdmin.auth.admin.generateLink({ type: 'magiclink', email })`, the same helper `impersonation.ts:146` already uses) whose redirect is `/dashboard`; the `/license` self-serve link. The magic-link callback (`AuthCallback.tsx` → existing auth route) additionally runs `UPDATE license_subscriptions SET user_id = auth.uid() WHERE email = <verified email> AND user_id IS NULL`. That single statement is the entirety of account plumbing in this workstream; the dashboard itself is a separate spec.
+Contains, in order: the key; the exact command `vibecarbon activate vc-…` with "run this inside your project"; a magic link (the web app's admin auth client, the same helper `impersonation.ts:146` already uses) whose redirect is `/dashboard`; the `/license` self-serve link. The magic-link callback (`AuthCallback.tsx` → existing auth route) additionally runs `UPDATE license_subscriptions SET user_id = auth.uid() WHERE email = <verified email> AND user_id IS NULL`. That single statement is the entirety of account plumbing in this workstream; the dashboard itself is a separate spec.
 
 ### Release and notification emails (`src/server/emails/templates.ts`)
 
