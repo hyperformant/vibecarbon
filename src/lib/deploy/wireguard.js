@@ -58,8 +58,13 @@ export const REGISTRY_RELAY_PORT = 15000;
 
 // The on-node WireGuard private key. Generated on each database node with
 // umask 077 and NEVER read back into this process — only the derived public
-// key ever crosses the wire.
-const WG_KEY_PATH = '/etc/vibecarbon-wg.key';
+// key ever crosses the wire. It lives in /etc/wireguard because that is the
+// only place Ubuntu 26.04's AppArmor profile lets `wg` read it: anywhere else
+// `wg set` fails with `fopen: Permission denied` and wg0 stays down.
+const WG_KEY_PATH = '/etc/wireguard/vibecarbon-wg0.key';
+// Where a node set up before that move has its key. It moves over rather than
+// being regenerated, so the tunnel keeps its peer through the deploy.
+const WG_OLD_KEY_PATH = '/etc/vibecarbon-wg.key';
 
 // Reboot-persistence (item I-1, live-confirmed 2026-07-07): wg0 is an
 // imperative, in-memory-only interface — a node reboot (scale resize, crash,
@@ -101,7 +106,9 @@ export function buildWireguardInterfaceConfig({
     throw new Error(`wireguard: invalid peer allowed-ip '${peerAllowedIp}'`);
   }
   return [
-    'ip link del wg0 2>/dev/null; true',
+    // `|| true`, not `; true`: the boot script runs this under `set -e`, and a
+    // node that just booted has no wg0 to delete.
+    'ip link del wg0 2>/dev/null || true',
     'ip link add wg0 type wireguard',
     `ip addr add ${selfIp}/30 dev wg0`,
     `wg set wg0 private-key ${selfPrivKeyPath} listen-port ${listenPort} ` +
@@ -316,7 +323,8 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
           'command -v wg >/dev/null 2>&1 || { ' +
           'echo "wireguard-tools installed but wg is still not on PATH" >&2; exit 1; }; ' +
           'fi; ' +
-          `umask 077; [ -f ${WG_KEY_PATH} ] || wg genkey > ${WG_KEY_PATH}`,
+          `umask 077; [ -f ${WG_KEY_PATH} ] || mv ${WG_OLD_KEY_PATH} ${WG_KEY_PATH} 2>/dev/null || ` +
+          `wg genkey > ${WG_KEY_PATH}`,
       ],
       { timeout: (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000 },
     );

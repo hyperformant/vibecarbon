@@ -337,7 +337,7 @@ export class LinodeProvider extends BaseProvider {
   // reads it while SUPPORTED_TIERS is compose-only.
   static DEFAULT_K8S_NODE_TYPE = 'g6-standard-2';
 
-  // `linode/ubuntu24.04` ships no Docker (Linode's Marketplace Docker is a
+  // `linode/ubuntu26.04` ships no Docker (Linode's Marketplace Docker is a
   // StackScript, not an image — audit doc), so cloud-init installs docker-ce
   // inside the boot script, same as DigitalOcean: 3-5 min realistic budget.
   static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
@@ -419,11 +419,11 @@ export class LinodeProvider extends BaseProvider {
 
   /**
    * Matches linode-compose.js's buildLinodeComposeProgram
-   * `image: 'linode/ubuntu24.04'` literal exactly (the scale/replacement
+   * `image: 'linode/ubuntu26.04'` literal exactly (the scale/replacement
    * path bypasses Pulumi and must create byte-identical servers).
    * @type {string}
    */
-  static COMPOSE_IMAGE = 'linode/ubuntu24.04';
+  static COMPOSE_IMAGE = 'linode/ubuntu26.04';
 
   /**
    * Returns the SAME rendered user-data linode-compose.js's Pulumi program

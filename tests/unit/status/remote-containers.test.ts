@@ -547,7 +547,7 @@ describe('checkRemoteContainers', () => {
       '',
       'letsgo-app\trunning\tUp 1h (healthy)\nletsgo-grafana\trunning\tUp 2m (healthy)\n' +
         'letsgo-loki\trunning\tUp 2m\nletsgo-prometheus\trunning\tUp 2m\n' +
-        'letsgo-promtail\trunning\tUp 2m\nletsgo-postgres-exporter\trunning\tUp 2m\n',
+        'letsgo-alloy\trunning\tUp 2m\nletsgo-postgres-exporter\trunning\tUp 2m\n',
     );
     const out = await checkWithContract('prod', withAddons(), 'letsgo', { ...base(), sshRun });
     expect(out?.p.addons).toEqual([

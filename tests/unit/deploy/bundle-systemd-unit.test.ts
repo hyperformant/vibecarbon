@@ -7,7 +7,7 @@
  * transport until the next deploy. The unit runs vc-compose, like
  * reconcile.sh, which adds the overlay when the node has it; the standby-scale
  * fragment is escaped for systemd ($$ → literal $, verified on systemd 255,
- * the Ubuntu 24.04 node version).
+ * the Ubuntu 24.04 node version; nodes now run 259).
  */
 
 import { spawnSync } from 'node:child_process';

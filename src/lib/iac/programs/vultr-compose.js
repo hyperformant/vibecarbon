@@ -129,9 +129,9 @@ export function buildVultrComposeProgram(config) {
         label: name,
         region: config.location,
         plan: config.serverType,
-        // MUST byte-match VultrProvider.COMPOSE_IMAGE ('2284' — Ubuntu 24.04
+        // MUST byte-match VultrProvider.COMPOSE_IMAGE ('2760' — Ubuntu 26.04
         // LTS x64; Vultr images are numeric os_ids).
-        osId: 2284,
+        osId: 2760,
         sshKeyIds: [sshKeyIdForInstance],
         // RAW — see the module doc's encoding VERIFY note.
         userData,

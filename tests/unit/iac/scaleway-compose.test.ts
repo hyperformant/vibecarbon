@@ -12,7 +12,7 @@ const PROGRAM_PATH = join(process.cwd(), 'src', 'lib', 'iac', 'programs', 'scale
 const sharedCloudInit = readFileSync(CLOUD_INIT_PATH, 'utf-8');
 const programSource = readFileSync(PROGRAM_PATH, 'utf-8');
 
-// Same parity check as the DO/Linode/Vultr splices: `ubuntu_noble` ships no
+// Same parity check as the DO/Linode/Vultr splices: `ubuntu_resolute` ships no
 // Docker (the Docker InstantApp's base OS is unpinnable — audit), so the
 // Docker-CE install must land in `runcmd:` BEFORE the shared file's
 // `systemctl enable --now docker` step.
@@ -93,7 +93,7 @@ describe('scaleway-compose.js source pins', () => {
     // Same independent-opinion rule as volumeType above: assert the SHAPE the
     // provider requires, not the literal the source happens to hold. Scaleway
     // marketplace labels are lowercase snake_case `distro_codename`
-    // (`ubuntu_jammy`, `ubuntu_noble`) — a camelCased or hyphenated spelling is
+    // (`ubuntu_jammy`, `ubuntu_resolute`) — a camelCased or hyphenated spelling is
     // rejected at provision time, and a bare UUID is wrong for a different
     // reason (UUIDs are per-zone AND per-volume-type, so a pinned one breaks
     // the moment either changes).
@@ -110,7 +110,7 @@ describe('scaleway-compose.js source pins', () => {
     // Ubuntu LTS is the only base the cloud-init in this program is written
     // for (apt/`VERSION_CODENAME`/docker-ce repo layout).
     expect(value).toMatch(/^ubuntu_/);
-    expect(value).toBe('ubuntu_noble');
+    expect(value).toBe('ubuntu_resolute');
   });
 
   it('delivers cloud-init under the `cloud-init` user-data key (the key-value store contract)', () => {

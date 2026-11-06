@@ -311,14 +311,14 @@ export class VultrProvider extends BaseProvider {
   // ── Compose-tier replacement-server identity ────────────────────────────
 
   /**
-   * Vultr images are numeric os_ids, not slugs — `2284` = "Ubuntu 24.04
-   * LTS x64" (live GET /v2/os, 2026-08-08). Stored as a STRING for
+   * Vultr images are numeric os_ids, not slugs — `2760` = "Ubuntu 26.04
+   * LTS x64" (live GET /v2/os, 2026-11-05). Stored as a STRING for
    * interface parity; both wire boundaries (createServer's REST body and
    * vultr-compose.js's `osId`) convert with Number(). MUST byte-match the
    * program's literal.
    * @type {string}
    */
-  static COMPOSE_IMAGE = '2284';
+  static COMPOSE_IMAGE = '2760';
 
   /**
    * Same rendered user-data vultr-compose.js's Pulumi program uses —
@@ -608,7 +608,7 @@ export class VultrProvider extends BaseProvider {
    * @param {string} config.name - instance `label`
    * @param {string} config.region
    * @param {string} config.serverType - plan id (e.g. vc2-2c-4gb)
-   * @param {string} config.image - numeric os_id as a string ('2284')
+   * @param {string} config.image - numeric os_id as a string ('2760')
    * @param {(string|number)[]} [config.sshKeys] - key UUIDs or names
    * @param {string|number} [config.sshKeyId] - single-entry fallback
    * @param {object} [config.labels]

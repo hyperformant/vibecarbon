@@ -292,7 +292,7 @@ export class DigitalOceanProvider extends BaseProvider {
   // separate k8s-sized tier, so this matches DEFAULT_COMPOSE_TYPE).
   static DEFAULT_K8S_NODE_TYPE = 's-2vcpu-4gb';
 
-  // Overrides BaseProvider's 180s default: `ubuntu-24-04-x64` has no
+  // Overrides BaseProvider's 180s default: `ubuntu-26-04-x64` has no
   // preinstalled Docker, so cloud-init installs the latest docker-ce from
   // Docker's apt repo INSIDE the boot script (iac/docker-install.js, the same
   // install every compose provider runs) — realistically 3-5 minutes on
@@ -312,8 +312,8 @@ export class DigitalOceanProvider extends BaseProvider {
   /**
    * Kubernetes cluster-addon asset identity for DO's CCM/CSI (M3 Task 1) —
    * see base.js's K8S_ASSETS doc for the field-by-consumer breakdown.
-   * `ccmSelector`/`csiControllerSelector` use bare `app=` — DO's v0.1.68 CCM
-   * and v4.17.0 CSI manifests label with a plain `app` key, NOT Hetzner's
+   * `ccmSelector`/`csiControllerSelector` use bare `app=` — DO's CCM
+   * and CSI manifests label with a plain `app` key, NOT Hetzner's
    * `app.kubernetes.io/name=` convention (dossier-verified). `csi-do-controller`
    * is a StatefulSet in DO (a Deployment on Hetzner) — irrelevant to
    * csiControllerSelector's use as a log-selector, but any future
@@ -338,7 +338,7 @@ export class DigitalOceanProvider extends BaseProvider {
   };
 
   /**
-   * StorageClass name DO's csi-digitalocean driver (v4.17.0) creates by
+   * StorageClass name DO's csi-digitalocean driver creates by
    * default (M3 dossier §2). See HetznerProvider.K8S_STORAGE_CLASS for the
    * Hetzner counterpart (`hcloud-volumes`).
    * @type {string}
@@ -384,12 +384,12 @@ export class DigitalOceanProvider extends BaseProvider {
   /**
    * Base droplet image slug DO's k8s Pulumi program (`digitalocean-k8s.js`,
    * M3 Task 5) provisions master/database/worker nodes with — matches
-   * `COMPOSE_IMAGE` below (same `ubuntu-24-04-x64` base image, no separate
+   * `COMPOSE_IMAGE` below (same `ubuntu-26-04-x64` base image, no separate
    * k8s-tier image on DO). `renderCarbonAutoscalerConfig` reads this for
    * the CA-spawned worker node group's `image` field.
    * @type {string}
    */
-  static K8S_IMAGE = 'ubuntu-24-04-x64';
+  static K8S_IMAGE = 'ubuntu-26-04-x64';
 
   /**
    * Render this provider's k3s master-node boot user-data — wraps the new
@@ -469,11 +469,11 @@ export class DigitalOceanProvider extends BaseProvider {
 
   /**
    * Matches digitalocean-compose.js's buildDigitalOceanComposeProgram
-   * `image: 'ubuntu-24-04-x64'` literal
+   * `image: 'ubuntu-26-04-x64'` literal
    * (lib/iac/programs/digitalocean-compose.js:204) exactly.
    * @type {string}
    */
-  static COMPOSE_IMAGE = 'ubuntu-24-04-x64';
+  static COMPOSE_IMAGE = 'ubuntu-26-04-x64';
 
   /**
    * Returns the SAME rendered user-data digitalocean-compose.js's Pulumi
@@ -604,7 +604,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * builders filter on (lib/server-types.js `filterAmd64Types`). It is a
    * constant here because DigitalOcean sells NO ARM instances at all: 31 size
    * slugs across the s/c/g/gd/m/gpu families, none of them ARM, and DO's own
-   * CCM (v0.1.68) and CSI (v4.17.0) publish amd64-only images regardless.
+   * CCM and CSI publish amd64-only images regardless.
    * @param {string} region - Region slug
    * @returns {Array<{name: string, vcpu: number, ram: number, disk: number, architecture: string}>}
    */
@@ -1876,7 +1876,7 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
-   * Task 7 brief's verify-at-impl note: csi-digitalocean v4.17.0's
+   * Task 7 brief's verify-at-impl note: csi-digitalocean's
    * driver.yaml (the exact manifest do-master-init.sh applies) runs its
    * csi-provisioner sidecar WITHOUT `--extra-create-metadata` and its
    * csi-do-plugin container WITHOUT a `--do-tag` flag (confirmed against

@@ -172,7 +172,7 @@ import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-rest
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-export const K3S_VERSION = 'v1.31.5+k3s1';
+export const K3S_VERSION = 'v1.37.2+k3s1';
 
 // The vibecarbon CLI's OWN bundled k8s manifest tree (the `carbon/k8s/`
 // shipped inside the installed package), as opposed to `projectDir/k8s` —
@@ -3516,7 +3516,7 @@ export async function applyK3sManifests({
   //     the identical images without trouble: registry.k8s.io routes by client
   //     IP, so the 403 is per-node roulette (full write-up: src/lib/images.js).
   //     (Those two tags are the INCIDENT's — csi-driver v2.9.0's. The Hetzner
-  //     driver has since been bumped to v2.18.1; the plan below always carries
+  //     driver has moved on since; the plan below always carries
   //     whatever tags CSI_SIDECAR_MIRRORS was last re-derived from.)
   //
   //     WHY HERE AND NOT IN THE MANIFEST — we do not own these manifests.

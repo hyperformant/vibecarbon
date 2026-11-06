@@ -274,7 +274,7 @@ export function buildHetznerK8sProgram(config) {
       {
         name: `${clusterName}-master`,
         serverType: config.masterServerType,
-        image: 'ubuntu-24.04',
+        image: 'ubuntu-26.04',
         location: config.location,
         sshKeys: [sshKeyId],
         firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],
@@ -314,7 +314,7 @@ export function buildHetznerK8sProgram(config) {
       {
         name: `${clusterName}-db`,
         serverType: config.dbServerType,
-        image: 'ubuntu-24.04',
+        image: 'ubuntu-26.04',
         location: config.location,
         sshKeys: [sshKeyId],
         firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],
@@ -349,7 +349,7 @@ export function buildHetznerK8sProgram(config) {
           {
             name: `${clusterName}-worker-${i + 1}`,
             serverType: config.workerServerType,
-            image: 'ubuntu-24.04',
+            image: 'ubuntu-26.04',
             location: config.location,
             sshKeys: [sshKeyId],
             firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],

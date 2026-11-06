@@ -68,7 +68,7 @@ const SB_CT = `${NAME}-sb`;
 const SB_VOL = `${NAME}-sb-data`;
 const DB_IMAGE = 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r4';
 const GARAGE_IMAGE =
-  'dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020';
+  'dxflrs/garage:v2.5.0@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5';
 // Garage's fixed dev key (carbon/docker-compose.override.yml), never a real credential.
 const ACCESS_KEY = 'GK6c6f63616c2d6465762d7333';
 const SECRET_KEY = '6c6f63616c2d6465762d73332d7365637265742d6e6f742d666f722d70726f64';

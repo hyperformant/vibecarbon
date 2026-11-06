@@ -96,8 +96,8 @@ describe('HetznerProvider', () => {
       expect(HetznerProvider.CLOUD_INIT_READY_TIMEOUT_MS).toBe(600_000);
     });
 
-    it("pins COMPOSE_IMAGE to hetzner-compose.js's buildHetznerComposeProgram `image: 'ubuntu-24.04'` literal exactly", () => {
-      expect(HetznerProvider.COMPOSE_IMAGE).toBe('ubuntu-24.04');
+    it("pins COMPOSE_IMAGE to hetzner-compose.js's buildHetznerComposeProgram `image: 'ubuntu-26.04'` literal exactly", () => {
+      expect(HetznerProvider.COMPOSE_IMAGE).toBe('ubuntu-26.04');
     });
   });
 

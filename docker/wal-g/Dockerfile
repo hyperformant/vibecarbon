@@ -16,7 +16,7 @@
 # natively, never under QEMU. The build stage still runs on $BUILDPLATFORM
 # with GOARCH from TARGETARCH, so a local cross-platform build keeps the
 # `go build` itself emulation-free.
-FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine3.24@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 RUN apk add --no-cache git
 ARG WALG_VERSION=v3.0.9
 RUN git clone --depth 1 --branch "${WALG_VERSION}" https://github.com/wal-g/wal-g.git /src
@@ -34,7 +34,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOEXPERIMENT=jsonv2 \
 # above runs on BUILDPLATFORM and may have cross-compiled, so the exec has
 # to happen in a TARGETPLATFORM stage. A wrong-arch or dynamically-linked
 # binary fails HERE, in the build — not silently in archive_command later.
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS smoke
+FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4 AS smoke
 COPY --from=build /out/wal-g /usr/local/bin/wal-g
 RUN wal-g --version
 

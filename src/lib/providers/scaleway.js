@@ -528,7 +528,7 @@ export class ScalewayProvider extends BaseProvider {
 
   /**
    * Marketplace LABEL, deliberately not a UUID: Scaleway image UUIDs are
-   * per-zone AND per-volume-type (`ubuntu_noble` in fr-par-1 alone
+   * per-zone AND per-volume-type (`ubuntu_resolute` in fr-par-1 alone
    * resolves to six local-image UUIDs), and the Instance API + Pulumi
    * provider both accept the label and resolve the right variant for the
    * zone/volume-type (BASIC3 → the `instance_sbs` x86 variant). A UUID pin
@@ -536,7 +536,7 @@ export class ScalewayProvider extends BaseProvider {
    * literal (scaleway-compose.js).
    * @type {string}
    */
-  static COMPOSE_IMAGE = 'ubuntu_noble';
+  static COMPOSE_IMAGE = 'ubuntu_resolute';
 
   /**
    * Same rendered user-data scaleway-compose.js's Pulumi program uses —
@@ -966,7 +966,7 @@ export class ScalewayProvider extends BaseProvider {
    * @param {string} config.name
    * @param {string} config.region - ZONE (fr-par-1 …)
    * @param {string} config.serverType - commercial type (BASIC3-X2C-4G)
-   * @param {string} config.image - marketplace label ('ubuntu_noble')
+   * @param {string} config.image - marketplace label ('ubuntu_resolute')
    * @param {(string|number)[]} [config.sshKeys] - interface parity; unused
    *   (Project-level keys — see above)
    * @param {string|number} [config.sshKeyId] - interface parity; unused

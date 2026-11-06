@@ -117,11 +117,11 @@ export function buildHetznerComposeProgram(config) {
       {
         name,
         serverType: config.serverType,
-        // Plain Ubuntu 24.04, like every other provider: the latest Docker
+        // Plain Ubuntu 26.04, like every other provider: the latest Docker
         // is installed by the cloud-init user data (../docker-install.js), not
         // by Hetzner's prebuilt `docker-ce` app image, which ships an older
         // Docker (27.5.1) than the deploy's `docker save --platform` needs.
-        image: 'ubuntu-24.04',
+        image: 'ubuntu-26.04',
         location: config.location,
         sshKeys: [sshKeyId],
         firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],

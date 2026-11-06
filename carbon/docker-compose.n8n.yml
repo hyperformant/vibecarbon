@@ -18,7 +18,7 @@ services:
       - ./volumes/db/n8n-init.sh:/docker-entrypoint-initdb.d/zz-n8n-init.sh:Z
 
   n8n:
-    image: n8nio/n8n:2.43.6@sha256:dd580fe1ab6e99e85bc66f2acf8bc8c5e9409fbe61b2e2803c5024403ef52833
+    image: n8nio/n8n:2.46.6@sha256:8602f5dfacbe2c931eeafd010de0e68182310e9f309921e780ab69182e92b3ae
     container_name: ${PROJECT_NAME:-vibecarbon}-n8n
     restart: unless-stopped
     environment:
@@ -78,7 +78,7 @@ services:
       start_period: 30s
 
   n8n-setup:
-    image: alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+    image: alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4
     container_name: ${PROJECT_NAME:-vibecarbon}-n8n-setup
     volumes:
       - ./volumes/n8n/scripts:/scripts:ro

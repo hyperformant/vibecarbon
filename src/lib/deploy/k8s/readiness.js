@@ -210,7 +210,7 @@ export async function awaitCertManagerAdmission({
 }
 
 /**
- * The controller's leader lease: cert-manager v1.20's default
+ * The controller's leader lease: cert-manager's default
  * `--leader-election-namespace=kube-system` and lock name.
  */
 export const CERT_MANAGER_LEADER_LEASE = Object.freeze({

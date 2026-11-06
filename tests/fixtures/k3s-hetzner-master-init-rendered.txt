@@ -19,7 +19,7 @@ systemctl reload ssh || systemctl reload sshd || true
 _m n
 
 # Validate k3s version is set
-K3S_TARGET_VERSION="v1.31.5+k3s1"
+K3S_TARGET_VERSION="v1.37.2+k3s1"
 if [ -z "$K3S_TARGET_VERSION" ]; then
   echo "ERROR: k3s_version not set"
   exit 1
@@ -471,7 +471,7 @@ echo "Private-NIC address guard installed (iface $PRIVATE_IFACE, ip $PRIVATE_IP)
 _m k
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
-  if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="v1.31.5+k3s1" sh -s - server \
+  if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="v1.37.2+k3s1" sh -s - server \
       --disable-default-registry-endpoint \
       --cluster-init \
       --token "deadbeefcafe1234567890abcdef" \
@@ -540,23 +540,21 @@ kubectl -n kube-system create secret generic hcloud-csi \
 # Use ccm.yaml (not ccm-networks.yaml) since k3s manages pod networking via flannel
 # Retry up to 3 times - kubectl apply can fail if API server is briefly unavailable
 for i in 1 2 3; do
-  kubectl apply -f https://github.com/hetznercloud/hcloud-cloud-controller-manager/releases/download/v1.20.0/ccm.yaml && break
+  kubectl apply -f https://github.com/hetznercloud/hcloud-cloud-controller-manager/releases/download/v1.39.2/ccm.yaml && break
   echo "CCM install attempt $i failed, retrying in 10s..."
   sleep 10
 done
 
 # Install Hetzner CSI Driver
 #
-# VERSION WINDOW - v2.18.1 is the NEWEST release upstream supports on
-# Kubernetes v1.31 (what INSTALL_K3S_VERSION pins): the driver supports the
-# latest three k8s minors, and v2.18.2's changelog entry is "drop Kubernetes
-# v1.31 support". The FLOOR is v2.15.0, below which the volume-label line
-# below does nothing. Both ends are asserted by
+# The driver supports the latest three k8s minors, so it moves with
+# INSTALL_K3S_VERSION. The FLOOR is v2.15.0, below which the volume-label line
+# below does nothing. Both are asserted by
 # tests/unit/deploy/k8s-image-mirrors.test.ts, which also re-derives the
 # sig-storage sidecar tags src/lib/images.js re-pins onto our ghcr mirrors -
 # bump this URL and that fixture fails until the tags are re-derived too.
 for i in 1 2 3; do
-  kubectl apply -f https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.18.1/deploy/kubernetes/hcloud-csi.yml && break
+  kubectl apply -f https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.24.1/deploy/kubernetes/hcloud-csi.yml && break
   echo "CSI install attempt $i failed, retrying in 10s..."
   sleep 10
 done
@@ -572,14 +570,11 @@ done
 # servers already carry the same label from the Pulumi program, which is also
 # why the value is already known-valid to Hetzner's label validator).
 #
-# This line was a NO-OP from 2026-07-18 until the v2.18.1 bump: volume
-# labelling only landed upstream in v2.14.0, and the v2.9.0 controller read
-# exactly one env var (HCLOUD_VOLUME_DEFAULT_LOCATION), so every volume leaked
-# in the three occurrences #236 catalogues was unlabelled. On v2.18.1 the
-# controller parses this into extra labels and stamps them on every
-# CreateVolume (cmd/main.go:128 -> internal/driver/controller.go:87-91,118),
-# alongside the driver's own managed-by / pvc-name / pvc-namespace / pv-name
-# defaults. Deleting this line re-opens the attribution gap.
+# Volume labelling landed upstream in v2.14.0. The controller parses this into
+# extra labels and stamps them on every CreateVolume (cmd/main.go ->
+# internal/driver/controller.go), alongside the driver's own managed-by /
+# pvc-name / pvc-namespace / pv-name defaults. Deleting this line re-opens the
+# attribution gap.
 kubectl -n kube-system set env deployment/hcloud-csi-controller \
   HCLOUD_VOLUME_EXTRA_LABELS="project=acme" || \
   echo "WARN: could not set CSI volume labels - volumes will be unattributed"

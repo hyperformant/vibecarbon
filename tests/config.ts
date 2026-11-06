@@ -24,7 +24,7 @@ export const testConfig = {
       secondaryRegion: 'nbg1', // Nuremberg, Germany
 
       // Base image for servers (plain Ubuntu; cloud-init installs the pinned Docker)
-      image: 'ubuntu-24.04',
+      image: 'ubuntu-26.04',
 
       // Labels applied to all test resources
       labels: {

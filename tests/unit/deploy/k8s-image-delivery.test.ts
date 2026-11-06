@@ -117,13 +117,13 @@ describe('MANIFEST_DIGEST_SH runs', () => {
  * Ruling R8 (cold-deploy-speed Task 5): the primary's registry is now filled by
  * `ctr images push` (layer-delta-remote.sh, after deliverImage's import and
  * diffID check), not by `docker push`. Task 1 recorded what that writes
- * against registry:2.8.3 (task-1-report.md; tests/integration/docker/
+ * against registry:3.1.2 (task-1-report.md; tests/integration/docker/
  * layer-delta-roundtrip.test.ts runs it for real): ONE docker v2 manifest
  * (no index), a docker v1 config, a gzip base layer and gzip or uncompressed
  * app layers, blobs pushed as stored. The two readers of that registry are the
  * apply gate's probe (primaryRegistryHasImage) and the k8s-ha standby copy
  * (copyAppImageToStandby). Both are run here against a stub registry that
- * answers a manifest HEAD the way registry:2 does: only when the request's
+ * answers a manifest HEAD the way the registry does: only when the request's
  * Accept list names the stored manifest's media type.
  */
 describe('a ctr-pushed tag is what the apply-gate probe and the standby copy read (R8)', () => {

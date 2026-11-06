@@ -56,7 +56,7 @@ Development:
 
 - **Export format**: `{ n8n: { ready: [fn] } }` — two-level nested, NOT `{ 'n8n.ready': [fn] }`
 - **Router access**: Express 5 uses `app.router.stack` (not `app._router.stack`)
-- **Layer creation**: Must use `require('router/lib/layer')` to create proper Layer instances (plain objects cause `layer.match is not a function`)
+- **Layer creation**: Take the class from an existing layer (`layers[i].constructor`) to create proper Layer instances (plain objects cause `layer.match is not a function`, and `require('router/lib/layer')` fails because n8n's pnpm layout does not hoist `router`)
 - **User repository**: Available via `this.dbCollections.User` (provided by hook context)
 - **Session cookies**: Use `Container.get(AuthService).issueCookie()` from `@n8n/di` (not `@n8n/api` which doesn't exist)
 - **User role column**: n8n v2.x uses `roleSlug` (FK to `role` table), not `role`
@@ -88,7 +88,7 @@ Check the export format. n8n's `loadHooks()` expects `{ resource: { operation: [
 
 ### n8n crash loop: "layer.match is not a function"
 
-The hooks.js spliced a plain object into Express 5's router stack. Use `require('router/lib/layer')` to create proper Layer instances.
+The hooks.js spliced a plain object into Express 5's router stack. Build it from an existing layer's class (`layers[i].constructor`) so it is a proper Layer instance.
 
 ### Setup wizard still appears
 

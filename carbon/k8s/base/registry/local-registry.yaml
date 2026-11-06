@@ -37,7 +37,7 @@ spec:
       # keeps runAsNonRoot).
       initContainers:
         - name: chown-storage
-          image: ghcr.io/hyperformant/registry:2.8.3@sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
+          image: ghcr.io/hyperformant/registry:3.1.2@sha256:52b489ad8e6f40d1a676702e3ce398ec796ce38f08fbb786e1f324baa12d84b8
           command: ["/bin/sh", "-c", "chown -R 1000:1000 /var/lib/registry && chmod 700 /var/lib/registry"]
           securityContext:
             runAsUser: 0
@@ -47,7 +47,7 @@ spec:
               mountPath: /var/lib/registry
       containers:
         - name: registry
-          image: ghcr.io/hyperformant/registry:2.8.3@sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
+          image: ghcr.io/hyperformant/registry:3.1.2@sha256:52b489ad8e6f40d1a676702e3ce398ec796ce38f08fbb786e1f324baa12d84b8
           # ROOT FIX (2026-08-30, run 33332292268): image layers live on the
           # MASTER NODE DISK, never object storage. The registry is a
           # transport cache — every deploy builds and pushes the image to the
@@ -59,7 +59,7 @@ spec:
           # k8s deploy to the one backend with documented read-after-write
           # weather ("s3aws: NoSuchBucket" completing an upload mid-push →
           # docker push 500s → deploy dead; the class the walg/pulumi
-          # surfaces already document). Filesystem is registry:2's default
+          # surfaces already document). Filesystem is the registry's default
           # driver when no REGISTRY_STORAGE env is set. Enforced by
           # tests/unit/template/registry-no-object-storage.test.ts.
           securityContext:
@@ -67,6 +67,11 @@ spec:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
           env:
+            # Registry 3's packaged config logs at debug, which is a line for
+            # every probe. Its env overrides work as they did on 2.x, and the
+            # config moved to /etc/distribution, which nothing here reads.
+            - name: REGISTRY_LOG_LEVEL
+              value: info
             - name: REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR
               value: inmemory
             - name: REGISTRY_STORAGE_DELETE_ENABLED

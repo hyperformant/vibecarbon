@@ -518,7 +518,7 @@ export function renderBundle(projectName, options = {}) {
   if (options.observability) {
     copyDirIfExist('prometheus', 'prometheus');
     copyDirIfExist('grafana', 'grafana');
-    for (const subdir of ['prometheus', 'grafana', 'loki', 'promtail']) {
+    for (const subdir of ['prometheus', 'grafana', 'loki', 'alloy']) {
       copyDirIfExist(`volumes/${subdir}`, `volumes/${subdir}`);
     }
   }

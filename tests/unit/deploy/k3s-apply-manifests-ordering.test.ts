@@ -512,7 +512,7 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
 // loadCloudInit/renderScript).
 const FakeHetznerProvider = {
   PROVIDER_ID_PREFIX: 'hcloud://',
-  K8S_IMAGE: 'ubuntu-24.04',
+  K8S_IMAGE: 'ubuntu-26.04',
   K8S_STORAGE_CLASS: 'hcloud-volumes',
   async getK8sWorkerUserData(vars: Record<string, unknown>) {
     const { loadCloudInit, renderScript } = await import('../../../src/lib/iac/cloud-init.js');

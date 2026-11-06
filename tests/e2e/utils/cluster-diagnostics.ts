@@ -143,7 +143,7 @@ export function buildClusterScopedDiagnostics(
   ];
 
   cmds.push({
-    // `local-registry` is registry:2 on an S3 backend. When S3 errors it
+    // `local-registry` is the registry image on an S3 backend. When S3 errors it
     // answers `docker push` with HTTP 500 while its /v2/ readiness probe keeps
     // passing — so it stays 1/1 Running and the not-Ready collector below
     // never dumps it. Two matrices lost their push-failure evidence exactly
@@ -222,7 +222,7 @@ const CONTROLLER_SELECTOR =
 /**
  * Why did cert-manager issue a certificate the deploy had just restored?
  *
- * On DO k8s-ha e2e runs (LE staging, HTTP-01, cert-manager v1.20.2) the deploy
+ * On DO k8s-ha e2e runs (LE staging, HTTP-01, cert-manager v1.21.3) the deploy
  * restored Secret/vibecarbon-tls from its snapshot before `apply -k` created
  * the Certificate, the restored serial was served trusted, and minutes later
  * CertificateRequest vibecarbon-tls-1 had issued a new one (2 of 2 runs). The

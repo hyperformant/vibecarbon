@@ -11,7 +11,7 @@ The observability stack provides:
 | **Prometheus** | Metrics collection and storage | 9090 (internal) |
 | **Grafana** | Dashboards and visualization | grafana.localhost (dev, via Traefik) / grafana.domain.com (prod) |
 | **Loki** | Log aggregation | 3100 (internal) |
-| **Promtail** | Docker log shipper | 9080 (internal) |
+| **Alloy** | Docker log shipper | 12345 (inside the container only) |
 | **postgres-exporter** | PostgreSQL metrics | 9187 (internal) |
 
 ## Quick Start
@@ -181,7 +181,7 @@ Then uncomment the `app` job in `volumes/prometheus/prometheus.yml`:
 When both n8n (project-level) and observability (environment-level) are enabled:
 
 - **Prometheus** automatically scrapes n8n metrics at `n8n:5678/metrics`
-- **Promtail** collects n8n container logs via Docker discovery
+- **Alloy** collects n8n container logs via Docker discovery
 - All n8n data appears in existing dashboards
 
 To enable n8n metrics, set in n8n environment:
@@ -195,7 +195,7 @@ N8N_METRICS=true
 |------|---------|
 | `volumes/prometheus/prometheus.yml` | Scrape targets and intervals |
 | `volumes/loki/loki-config.yml` | Storage and retention settings |
-| `volumes/promtail/promtail-config.yml` | Docker log discovery |
+| `volumes/alloy/config.alloy` | Docker log discovery |
 | `volumes/grafana/provisioning/datasources/` | Prometheus + Loki datasources |
 | `volumes/grafana/provisioning/dashboards/` | Dashboard provider config |
 | `volumes/grafana/dashboards/` | Pre-built dashboard JSON files |
@@ -225,14 +225,14 @@ View Prometheus targets:
 
 ### No Logs in Loki
 
-1. Check Promtail is running:
+1. Check Alloy is running:
    ```bash
-   docker logs ${PROJECT_NAME}-promtail
+   docker logs ${PROJECT_NAME}-alloy
    ```
 
 2. Verify Docker socket access:
    ```bash
-   docker exec ${PROJECT_NAME}-promtail ls -la /var/run/docker.sock
+   docker exec ${PROJECT_NAME}-alloy ls -la /var/run/docker.sock
    ```
 
 3. Check Loki is receiving data:

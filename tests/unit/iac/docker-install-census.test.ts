@@ -1,6 +1,6 @@
 /**
  * One Docker, everywhere. Every compose server (all five providers) boots plain
- * Ubuntu 24.04 and installs the latest Docker through
+ * Ubuntu 26.04 and installs the latest Docker through
  * src/lib/iac/docker-install.js, with no version pinned. Why one install: image
  * delivery runs `docker save --platform` on the server, which needs Docker 28+,
  * and Hetzner's prebuilt `docker-ce` app image shipped 27.5.1 (2026-11-04

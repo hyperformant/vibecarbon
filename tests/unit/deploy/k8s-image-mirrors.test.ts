@@ -55,6 +55,7 @@ import {
   clusterAutoscalerUpstreamRef,
   csiSidecarSetImagePlan,
   DO_CSI_VERSION,
+  DOCKER_SOCKET_PROXY_MIRROR,
   DOCKERHUB_MIRRORS,
   DOCKERHUB_UPSTREAM_REGISTRY,
   dockerSocketProxyImageRef,
@@ -86,9 +87,9 @@ const MATRIX_SCRIPT = 'scripts/mirror-matrix.mjs';
 /**
  * The registry.k8s.io images each pinned CSI release actually ships, captured
  * from the upstream manifests cloud-init applies:
- *   https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.18.1/deploy/kubernetes/hcloud-csi.yml
- *   https://raw.githubusercontent.com/digitalocean/csi-digitalocean/master/deploy/kubernetes/releases/csi-digitalocean-v4.17.0/driver.yaml
- * (both fetched 2026-08-05). Keyed workload -> container -> image, exactly as
+ *   https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.24.1/deploy/kubernetes/hcloud-csi.yml
+ *   https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.17.0/driver.yaml
+ * (both fetched 2026-11-05). Keyed workload -> container -> image, exactly as
  * upstream spells them, because `kubectl set image` addresses containers BY
  * NAME: a rename upstream turns our re-pin into a silent no-op, and the 403
  * comes straight back. If you bump a CSI version, re-derive this fixture from
@@ -96,38 +97,38 @@ const MATRIX_SCRIPT = 'scripts/mirror-matrix.mjs';
  */
 const UPSTREAM_CSI_MANIFESTS = {
   hetzner: {
-    version: 'v2.18.1',
+    version: 'v2.24.1',
     workloads: {
       'daemonset/hcloud-csi-node': {
         'csi-node-driver-registrar':
-          'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.15.0',
-        'liveness-probe': 'registry.k8s.io/sig-storage/livenessprobe:v2.17.0',
-        'hcloud-csi-driver': 'docker.io/hetznercloud/hcloud-csi-driver:v2.18.1',
+          'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0',
+        'liveness-probe': 'registry.k8s.io/sig-storage/livenessprobe:v2.20.0',
+        'hcloud-csi-driver': 'docker.io/hetznercloud/hcloud-csi-driver:v2.24.1',
       },
       'deployment/hcloud-csi-controller': {
-        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.10.0',
-        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v2.0.0',
-        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v6.0.0',
-        'liveness-probe': 'registry.k8s.io/sig-storage/livenessprobe:v2.17.0',
-        'hcloud-csi-driver': 'docker.io/hetznercloud/hcloud-csi-driver:v2.18.1',
+        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.13.0',
+        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v2.2.1',
+        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v6.3.0',
+        'liveness-probe': 'registry.k8s.io/sig-storage/livenessprobe:v2.20.0',
+        'hcloud-csi-driver': 'docker.io/hetznercloud/hcloud-csi-driver:v2.24.1',
       },
     },
   },
   digitalocean: {
-    version: 'v4.17.0',
+    version: 'v4.19.0',
     workloads: {
       'statefulset/csi-do-controller': {
-        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v6.2.0',
-        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.11.0',
-        'csi-snapshotter': 'registry.k8s.io/sig-storage/csi-snapshotter:v8.5.0',
-        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v2.1.0',
-        'csi-do-plugin': 'digitalocean/do-csi-plugin:v4.17.0',
+        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v6.3.0',
+        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.13.0',
+        'csi-snapshotter': 'registry.k8s.io/sig-storage/csi-snapshotter:v8.6.0',
+        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v2.2.1',
+        'csi-do-plugin': 'digitalocean/do-csi-plugin:v4.19.0',
       },
       'daemonset/csi-do-node': {
         'automount-udev-deleter': 'alpine:3',
         'csi-node-driver-registrar':
-          'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.16.0',
-        'csi-do-plugin': 'digitalocean/do-csi-plugin:v4.17.0',
+          'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0',
+        'csi-do-plugin': 'digitalocean/do-csi-plugin:v4.19.0',
       },
     },
   },
@@ -135,7 +136,7 @@ const UPSTREAM_CSI_MANIFESTS = {
 
 describe('mirror set shape', () => {
   it('every entry mirrors registry.k8s.io or docker.io into our ghcr org', () => {
-    expect(MIRRORED_IMAGES.length).toBeGreaterThanOrEqual(22);
+    expect(MIRRORED_IMAGES.length).toBeGreaterThanOrEqual(19);
     for (const image of MIRRORED_IMAGES) {
       const upstream = image.upstream ?? K8S_UPSTREAM_REGISTRY;
       expect([K8S_UPSTREAM_REGISTRY, DOCKERHUB_UPSTREAM_REGISTRY]).toContain(upstream);
@@ -184,7 +185,7 @@ describe('mirror set shape', () => {
     expect(socatImageRef()).toBe(byRepo('alpine/socat'));
     expect(alpineK8sImageRef()).toBe(byRepo('alpine/k8s'));
     expect(traefikImageRef()).toMatch(
-      /^ghcr\.io\/hyperformant\/traefik:v3\.6\.11@sha256:[a-f0-9]{64}$/,
+      /^ghcr\.io\/hyperformant\/traefik:v3\.7\.17@sha256:[a-f0-9]{64}$/,
     );
   });
 
@@ -224,24 +225,6 @@ describe('mirror set shape', () => {
   it('has no duplicate (repo, tag) entries', () => {
     const refs = MIRRORED_IMAGES.map(upstreamRef);
     expect(refs).toEqual([...new Set(refs)]);
-  });
-
-  it('two packages legitimately carry MORE than one tag (Hetzner + DO disagree)', () => {
-    // csi-provisioner is v6.0.0 on Hetzner and v6.2.0 on DO, etc. A dedupe
-    // that collapsed by package NAME would drop one provider's tag and
-    // reintroduce the 403 on that provider only — the nastiest possible shape.
-    const byName = new Map<string, Set<string>>();
-    for (const image of MIRRORED_IMAGES) {
-      const name = image.repo.slice(image.repo.lastIndexOf('/') + 1);
-      byName.set(name, (byName.get(name) ?? new Set()).add(image.tag));
-    }
-    const multiTag = [...byName.entries()].filter(([, tags]) => tags.size > 1).map(([n]) => n);
-    expect(multiTag.sort()).toEqual([
-      'csi-attacher',
-      'csi-node-driver-registrar',
-      'csi-provisioner',
-      'csi-resizer',
-    ]);
   });
 
   it('mirroredPackageNames() is the operator’s public-flip checklist', () => {
@@ -312,16 +295,12 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
   );
 
   it('hetzner: the CSI pin is inside upstream’s support ceiling for the pinned k3s minor', () => {
-    // THE TRAP THIS EXISTS FOR — "bump the CSI driver" reads like "take the
-    // newest release", and the newest release does not run on our Kubernetes.
-    // hetznercloud/csi-driver supports the latest THREE k8s minors and drops
-    // the rest; k3s is pinned at v1.31.x (k3s.js K3S_VERSION), and v2.18.2's
-    // changelog entry is literally "drop Kubernetes v1.31 support". So v2.18.1
-    // is the ceiling until K3S_VERSION moves — bumping past it would install a
-    // driver upstream no longer tests against our API server.
+    // hetznercloud/csi-driver supports the latest THREE k8s minors and drops the
+    // rest, so a driver bump and a k3s bump have to stay inside each other's
+    // window.
     //
     // Table transcribed from upstream docs/kubernetes/reference/version-policy.md
-    // @ v2.22.1 (fetched 2026-08-05); `null` = still on the supported line, no
+    // @ v2.24.1 (fetched 2026-11-05); `null` = still on the supported line, no
     // ceiling. A k3s bump to a minor that is not listed fails HERE, on purpose:
     // the new row has to be read off upstream's matrix, not guessed.
     const UPSTREAM_K8S_CEILING: Record<string, string | null> = {
@@ -329,10 +308,11 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
       '1.30': 'v2.17.0',
       '1.31': 'v2.18.1',
       '1.32': 'v2.20.2',
-      '1.33': null,
+      '1.33': 'v2.23.0',
       '1.34': null,
       '1.35': null,
       '1.36': null,
+      '1.37': null,
     };
     const k3sMinor = read('src/lib/deploy/k8s/k3s.js').match(
       /K3S_VERSION = 'v(\d+\.\d+)\.\d+\+k3s\d+'/,
@@ -624,8 +604,8 @@ describe('publish workflow mirrors exactly the set', () => {
     );
     // Docker Hub mirrors ride the same matrix: the copy reads docker.io.
     expect(matrix).toContainEqual({
-      src: 'docker.io/library/traefik:v3.6.11',
-      dst: 'ghcr.io/hyperformant/traefik:v3.6.11',
+      src: 'docker.io/library/traefik:v3.7.17',
+      dst: 'ghcr.io/hyperformant/traefik:v3.7.17',
       digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       index: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
     });
@@ -703,8 +683,7 @@ describe('publish workflow mirrors exactly the set', () => {
     expect(kubectl?.allows(`1.${minor + 1}.0`)).toBe(true);
     expect(kubectl?.allows(`1.${minor + 2}.0`)).toBe(false);
     const registry = holdFor(REGISTRY_MIRROR, k3s);
-    expect(registry?.allows('2.8.4')).toBe(true);
-    expect(registry?.allows('3.0.0')).toBe(false);
+    expect(registry).toBeNull();
     for (const image of K3S_SYSTEM_IMAGE_MIRRORS)
       expect(holdFor(image, k3s)?.allows('9.9.9')).toBe(false);
     for (const spec of CSI_SIDECAR_MIRRORS.hetzner) {
@@ -712,6 +691,11 @@ describe('publish workflow mirrors exactly the set', () => {
         expect(holdFor(image, k3s)?.allows('v99.0.0')).toBe(false);
     }
     expect(holdFor(TRAEFIK_MIRROR, k3s)).toBeNull();
+    // v0.5.0 breaks the /version call Traefik's Docker provider makes.
+    const proxy = holdFor(DOCKER_SOCKET_PROXY_MIRROR, k3s);
+    expect(proxy?.reason).toContain('docker-socket-proxy#180');
+    expect(proxy?.allows('v0.4.3')).toBe(true);
+    expect(proxy?.allows('v0.5.0')).toBe(false);
     const none = renderReport([
       { upstream: 'docker.io/library/traefik', pinned: 'v3.6.11', newer: [], hold: null },
     ]);
@@ -719,15 +703,17 @@ describe('publish workflow mirrors exactly the set', () => {
     const some = renderReport([
       { upstream: 'docker.io/library/traefik', pinned: 'v3.6.11', newer: ['v3.6.12'], hold: null },
       {
-        upstream: 'docker.io/library/registry',
-        pinned: '2.8.3',
+        upstream: 'docker.io/alpine/k8s',
+        pinned: '1.37.2',
         newer: [],
-        hold: 'registry stays on 2.x',
+        hold: 'kubectl stays within one minor of k3s',
       },
     ]);
     expect(some).not.toContain(NO_DRIFT_MARKER);
     expect(some).toContain('| docker.io/library/traefik | v3.6.11 | v3.6.12 |');
-    expect(some).toContain('- docker.io/library/registry (2.8.3): registry stays on 2.x');
+    expect(some).toContain(
+      '- docker.io/alpine/k8s (1.37.2): kubectl stays within one minor of k3s',
+    );
     // A lookup failure is a row, never a silent "no drift".
     const failed = renderReport([
       { upstream: 'x/y', pinned: '1.0', newer: [], hold: null, error: '503' },

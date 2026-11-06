@@ -63,7 +63,7 @@ async function withServer(testFn: (ctx: { bind: string; client: any }) => Promis
           maxSize: 4,
           serverType: 'cx23',
           region: 'nbg1',
-          image: 'ubuntu-24.04',
+          image: 'ubuntu-26.04',
           cloudInit: '#cloud-config\nruncmd: []\n',
           serverLabels: {
             'cluster-autoscaler/node': 'worker-pool',

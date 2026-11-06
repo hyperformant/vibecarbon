@@ -147,7 +147,7 @@ export function buildLinodeComposeProgram(config) {
         type: config.serverType,
         // Plain Ubuntu LTS — see the module doc comment (no Docker image on
         // Linode; cloud-init installs it).
-        image: 'linode/ubuntu24.04',
+        image: 'linode/ubuntu26.04',
         // Raw OpenSSH key material — Linode's create contract (ids/names are
         // a REST-path resolution concern, see LinodeProvider._resolveSshKeyMaterial).
         authorizedKeys: [config.sshPublicKey.trim()],

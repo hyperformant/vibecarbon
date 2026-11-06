@@ -32,7 +32,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: cluster-autoscaler
-          # Upstream cluster-autoscaler v1.32.7, MIRRORED into our ghcr org.
+          # Upstream cluster-autoscaler, MIRRORED into our ghcr org.
           # Same bits (the mirror is a digest-preserving manifest copy, not a
           # rebuild) — only the registry host differs. registry.k8s.io routes
           # by client IP to a cloud backend whose GCP leg intermittently 403s
@@ -40,7 +40,7 @@ spec:
           # 2026-07-31 until the rollout timed out. ghcr.io is already this
           # pod's other registry (see the sidecar below). Full incident +
           # bump procedure: src/lib/images.js.
-          image: ghcr.io/hyperformant/cluster-autoscaler:v1.32.7@sha256:b3a67e07244033d36adc1cbe236fdbf9729b968f9c1c47477e26547a78131c81
+          image: ghcr.io/hyperformant/cluster-autoscaler:v1.37.0@sha256:c239e40cc745d9e0f1ba7c2272eaab44ca4586cd053f13ba8c8a4a6b27b18294
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true

@@ -139,3 +139,5 @@ spec:
       # requests that pass through Traefik. Direct-to-grafana:3000 spoofing is blocked
       # separately by GF_AUTH_PROXY_WHITELIST + the grafana NetworkPolicy.
       - X-Authenticated-User
+    # The auth request gets X-Forwarded-* from the real request, never the client's.
+    trustForwardHeader: false

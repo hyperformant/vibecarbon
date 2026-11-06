@@ -435,7 +435,7 @@
 - Prometheus for metrics collection
 - Grafana for dashboards (pre-provisioned: logs overview, system overview, PostgreSQL)
 - Loki for log aggregation
-- Promtail for log shipping
+- Grafana Alloy for log shipping
 - postgres-exporter for database metrics
 - Accessible at prometheus.localhost, grafana.localhost, loki.localhost
 - Kubernetes manifests included
@@ -479,7 +479,7 @@
   - Auto-generated password
   - `ioredis` pre-installed in template
   - Used by rate limiter for distributed deployments
-- **Observability**: Prometheus + Grafana + Loki + Promtail + postgres-exporter
+- **Observability**: Prometheus + Grafana + Loki + Alloy + postgres-exporter
 - **CI/CD**: GitHub Actions workflow generation with ghcr.io image registry
 - Add-ons fetched from GitHub at runtime or bundled locally (offline/air-gapped mode)
 - Fuzzy matching with Levenshtein distance for typo correction on unknown feature names

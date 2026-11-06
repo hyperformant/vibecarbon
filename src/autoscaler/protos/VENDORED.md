@@ -1,15 +1,17 @@
-# Vendored protos — cluster-autoscaler `externalgrpc` (CA 1.32.7)
+# Vendored protos — cluster-autoscaler `externalgrpc` (CA 1.37.0)
 
 These `.proto` files are vendored, not generated. They define the wire contract for the
 `clusterautoscaler.cloudprovider.v1.externalgrpc.CloudProvider` gRPC service that
 cluster-autoscaler talks to when run with `--cloud-provider=externalgrpc`.
 
-**Pinned upstream tag: `cluster-autoscaler-1.32.7`** of `github.com/kubernetes/autoscaler`.
+**Pinned upstream tag: `cluster-autoscaler-1.37.0`** of `github.com/kubernetes/autoscaler`.
 
-At this tag, `NodeGroupTemplateNodeInfoResponse` embeds the k8s Node as a proto message
-(`k8s.io.api.core.v1.Node nodeInfo = 1;`) rather than the `bytes nodeBytes` field used from
-CA 1.35+. That embedding is why this vendor tree needs the full k8s `generated.proto` import
-closure, not just `externalgrpc.proto`.
+At this tag, `NodeGroupTemplateNodeInfoResponse` carries the k8s Node as bytes
+(`bytes nodeBytes = 2;`, the contract since CA 1.35): CA passes them straight to Go's
+`v1.Node.Unmarshal`, so they are a bare Node message with no `runtime.Unknown` wrapper and no k8s
+magic prefix. `externalgrpc.proto` itself no longer imports any k8s proto. The k8s
+`generated.proto` closure stays vendored only so `loadNodeType` in `src/autoscaler/proto.js` can
+encode that message.
 
 ## DO NOT EDIT field numbers or message/field definitions
 
@@ -29,42 +31,37 @@ prefix that matches the Go import path used in `externalgrpc.proto`.
 
 | File | Source | Tag/ref | Verified sha256 |
 |---|---|---|---|
-| `externalgrpc.proto` | `kubernetes/autoscaler`, `cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto` | `cluster-autoscaler-1.32.7` | `ddd1809b504c233e564282646aa060f2491360c31de9f4fc8d95a4a1339d3be1` |
-| `k8s.io/api/core/v1/generated.proto` | `kubernetes/api`, `core/v1/generated.proto` | `kubernetes-1.32.12` | `dd6cf89d7df51a09d62b9c57f645c90956195df301c3c62d204b569821599502` |
-| `k8s.io/apimachinery/pkg/apis/meta/v1/generated.proto` | `kubernetes/apimachinery`, `pkg/apis/meta/v1/generated.proto` | `kubernetes-1.32.12` | `ffc98d709e9d139e60460ee7a4fd526baf3baf1176a51859a7ba092eb26875cc` |
-| `k8s.io/apimachinery/pkg/api/resource/generated.proto` | `kubernetes/apimachinery`, `pkg/api/resource/generated.proto` | `kubernetes-1.32.12` | `b952ca7037ea1fef76285a8b20597da7b18f2f789662dcf87717304da58a53b3` |
-| `k8s.io/apimachinery/pkg/runtime/generated.proto` | `kubernetes/apimachinery`, `pkg/runtime/generated.proto` | `kubernetes-1.32.12` | `19a098984ebde051f717387ef35ae0069104eab9c0534a4bb37470ea1d47fcc9` |
-| `k8s.io/apimachinery/pkg/runtime/schema/generated.proto` | `kubernetes/apimachinery`, `pkg/runtime/schema/generated.proto` | `kubernetes-1.32.12` | `f6c8cc582d36e639e022c9edc2faf213ab16fe07045fabf54f5edc2241eda3e5` |
-| `k8s.io/apimachinery/pkg/util/intstr/generated.proto` | `kubernetes/apimachinery`, `pkg/util/intstr/generated.proto` | `kubernetes-1.32.12` | `7988d488df2aa72bc5fb7de6094e372f5aef03d7d70819ba777a8e8760dd9091` |
+| `externalgrpc.proto` | `kubernetes/autoscaler`, `cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto` | `cluster-autoscaler-1.37.0` | `0071a1864ef3a6f2f47c354a60b71f685281169f13ddff22e885667a13015cb2` |
+| `k8s.io/api/core/v1/generated.proto` | `kubernetes/api`, `core/v1/generated.proto` | `kubernetes-1.37.1` | `fa79488e86ac6e10eee7d15a5d7a98d4e7a28eaf213bb9791f69bddb6d7fb35d` |
+| `k8s.io/apimachinery/pkg/apis/meta/v1/generated.proto` | `kubernetes/apimachinery`, `pkg/apis/meta/v1/generated.proto` | `kubernetes-1.37.1` | `852ca832d77f5c9281034f9f1ae3ae581dc77a069ee0c0f5db2832002655ee83` |
+| `k8s.io/apimachinery/pkg/api/resource/generated.proto` | `kubernetes/apimachinery`, `pkg/api/resource/generated.proto` | `kubernetes-1.37.1` | `78274163443c9942fd5cfd41d2c0cb6d5bb06ff109f37c33be23147dcf63771a` |
+| `k8s.io/apimachinery/pkg/runtime/generated.proto` | `kubernetes/apimachinery`, `pkg/runtime/generated.proto` | `kubernetes-1.37.1` | `65aaf6e591ce90732d184ff893c807cf54e2e6ef8640260837614ee5ccf2b329` |
+| `k8s.io/apimachinery/pkg/runtime/schema/generated.proto` | `kubernetes/apimachinery`, `pkg/runtime/schema/generated.proto` | `kubernetes-1.37.1` | `f6c8cc582d36e639e022c9edc2faf213ab16fe07045fabf54f5edc2241eda3e5` |
+| `k8s.io/apimachinery/pkg/util/intstr/generated.proto` | `kubernetes/apimachinery`, `pkg/util/intstr/generated.proto` | `kubernetes-1.37.1` | `3595eaaeb57a233568c50c9e16d81efa50238f63e9f7d8d00f18b188fa8fdcb2` |
 
 Fetched via `raw.githubusercontent.com/<repo>/<tag>/<path>`, e.g.:
 
 ```
-https://raw.githubusercontent.com/kubernetes/autoscaler/cluster-autoscaler-1.32.7/cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto
-https://raw.githubusercontent.com/kubernetes/api/kubernetes-1.32.12/core/v1/generated.proto
-https://raw.githubusercontent.com/kubernetes/apimachinery/kubernetes-1.32.12/pkg/apis/meta/v1/generated.proto
+https://raw.githubusercontent.com/kubernetes/autoscaler/cluster-autoscaler-1.37.0/cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto
+https://raw.githubusercontent.com/kubernetes/api/kubernetes-1.37.1/core/v1/generated.proto
+https://raw.githubusercontent.com/kubernetes/apimachinery/kubernetes-1.37.1/pkg/apis/meta/v1/generated.proto
 ```
 
-### Why `kubernetes-1.32.12` for the k8s files, not `kubernetes-1.32.0`
+### Why `kubernetes-1.37.1` for the k8s files, not `kubernetes-1.37.0`
 
-`cluster-autoscaler-1.32.7`'s `cluster-autoscaler/go.mod` pins:
+`cluster-autoscaler-1.37.0`'s `cluster-autoscaler/go.mod` pins:
 
 ```
-k8s.io/api           v0.32.12
-k8s.io/apimachinery  v0.32.12
+k8s.io/api           v0.37.1
+k8s.io/apimachinery  v0.37.1
 ```
 
 `k8s.io/api` and `k8s.io/apimachinery` are published from the `kubernetes/api` and
 `kubernetes/apimachinery` staging repos with tags of the form `kubernetes-1.<minor>.<patch>`
-that correspond 1:1 to their Go module version `v0.<minor>.<patch>`. So `v0.32.12` ==
-tag `kubernetes-1.32.12`. Using the exact patch tag (not just the `.0` tag) matches exactly
-what CA 1.32.7 was built and tested against, in case any patch release touched these
+that correspond 1:1 to their Go module version `v0.<minor>.<patch>`. So `v0.37.1` ==
+tag `kubernetes-1.37.1`. Using the exact patch tag (not just the `.0` tag) matches exactly
+what CA 1.37.0 was built and tested against, in case any patch release touched these
 generated protos.
-
-The `cluster-autoscaler` repo's own `cluster-autoscaler/vendor/k8s.io/...` copies of these
-files were tried first (per the task brief's fallback instruction) and returned 404 at this
-tag — `vendor/` is not checked into that repo at `cluster-autoscaler-1.32.7`. Hence the
-fallback to `k8s.io/api` + `k8s.io/apimachinery` directly, as instructed.
 
 ### Import closure
 
@@ -75,8 +72,8 @@ pulled in transitively):
 externalgrpc.proto
   -> google/protobuf/descriptor.proto      (bundled by protobufjs/proto-loader — not vendored)
   -> google/protobuf/any.proto             (bundled by protobufjs/proto-loader — not vendored)
-  -> k8s.io/apimachinery/pkg/apis/meta/v1/generated.proto
-  -> k8s.io/api/core/v1/generated.proto
+  -> google/protobuf/timestamp.proto       (bundled by protobufjs/proto-loader — not vendored)
+  -> google/protobuf/duration.proto        (bundled by protobufjs/proto-loader — not vendored)
 
 k8s.io/apimachinery/pkg/apis/meta/v1/generated.proto
   -> k8s.io/apimachinery/pkg/runtime/generated.proto
@@ -95,11 +92,10 @@ k8s.io/apimachinery/pkg/api/resource/generated.proto   -> (no imports)
 k8s.io/apimachinery/pkg/util/intstr/generated.proto    -> (no imports)
 ```
 
-`google/protobuf/any.proto` and `google/protobuf/descriptor.proto` are **not** vendored here:
-`@grpc/proto-loader` (via `protobufjs`) bundles the standard `google/protobuf/*` well-known
-types internally and resolves them without touching `includeDirs`. This was verified
-empirically — `tests/unit/autoscaler/proto.test.ts` loads and exercises the full service
-definition with only the 7 files in this directory present.
+The `google/protobuf/*` files are **not** vendored here: `@grpc/proto-loader` (via `protobufjs`)
+bundles those well-known types and resolves them without touching `includeDirs`.
+`tests/unit/autoscaler/proto.test.ts` loads and exercises the full service definition with only
+the files in this directory present.
 
 `// +protobuf.options.(gogoproto...)` lines seen in the k8s files are comment annotations
 consumed by Kubernetes' Go code generator, not real `.proto` imports — no `gogo.proto` file
@@ -131,18 +127,16 @@ To re-vendor at a new CA tag `cluster-autoscaler-X.Y.Z`:
 
 1. Fetch `externalgrpc.proto` from
    `cluster-autoscaler/cloudprovider/externalgrpc/protos/externalgrpc.proto` at that tag.
-2. Read its `import "k8s.io/..."` lines (if any — CA >= 1.35 drops them, see the M2 dossier
-   §3 for the version-shape table) and that tag's `cluster-autoscaler/go.mod` for the exact
-   `k8s.io/api` / `k8s.io/apimachinery` versions.
+2. Read that tag's `cluster-autoscaler/go.mod` for the exact `k8s.io/api` /
+   `k8s.io/apimachinery` versions.
 3. Fetch each required `generated.proto` from `kubernetes/api` / `kubernetes/apimachinery` at
-   the matching `kubernetes-<version>` tag (try `cluster-autoscaler/vendor/k8s.io/...` inside
-   the autoscaler repo first — use it if present, since it's guaranteed consistent).
+   the matching `kubernetes-<version>` tag.
 4. Recursively follow each new file's own `import` lines until closed (none of the current
    6 k8s files import anything outside this closure or `google/protobuf/*`).
 5. Diff every file against the previous vendor. Confirm no message/field/field-number was
    altered from what CA's Go client actually sends/expects at the new tag — a real shape
-   change (e.g. `nodeInfo` -> `nodeBytes` at 1.35) is expected and must be reflected end-to-end
-   in `src/autoscaler/proto.js` callers, not silently absorbed here.
+   change must be reflected end-to-end in `src/autoscaler/` callers, not silently absorbed here.
 6. Re-run `pnpm vitest run tests/unit/autoscaler/proto.test.ts` and update its assertions to
    match the new contract shape if it changed.
-7. Update this file's table (sources, tag, sha256) and this section's CA tag pin.
+7. Update this file's table (sources, tag, sha256) and this section's CA tag pin, and move
+   `CARBON_AUTOSCALER_TAG`, since the image contents changed.

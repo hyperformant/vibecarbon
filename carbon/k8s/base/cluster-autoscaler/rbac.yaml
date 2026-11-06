@@ -29,6 +29,16 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["watch", "list", "get", "update"]
+  # podtemplates, the resource.k8s.io rule and apps/deployments below follow
+  # upstream's chart at cluster-autoscaler-1.37.0. The FAQ at that tag lists
+  # --enable-dynamic-resource-allocation as locked to true, so CA watches the DRA
+  # objects on every cluster and its informers need the grant to start.
+  - apiGroups: [""]
+    resources: ["podtemplates"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceslices", "deviceclasses", "resourceclaims"]
+    verbs: ["watch", "list", "get"]
   - apiGroups: [""]
     resources: ["namespaces", "pods", "services", "replicationcontrollers", "persistentvolumeclaims", "persistentvolumes"]
     verbs: ["watch", "list", "get"]
@@ -45,18 +55,17 @@ rules:
     resources: ["poddisruptionbudgets"]
     verbs: ["watch", "list"]
   - apiGroups: ["apps"]
-    resources: ["daemonsets", "replicasets", "statefulsets"]
+    resources: ["daemonsets", "deployments", "replicasets", "statefulsets"]
     verbs: ["watch", "list", "get"]
-  # volumeattachments: cluster-autoscaler 1.32 links the kube 1.32 scheduler
-  # framework, whose CSI-limits plugin starts a VolumeAttachment informer at
-  # startup — without this grant every CA pod runs a reflector error loop
+  # volumeattachments: cluster-autoscaler links the kube scheduler framework,
+  # whose CSI-limits plugin starts a VolumeAttachment informer at startup — without this grant every CA pod runs a reflector error loop
   # (`volumeattachments.storage.k8s.io is forbidden`, observed live on the M3
   # rig). Verbs mirror upstream's own chart
   # (kubernetes/autoscaler charts/cluster-autoscaler/templates/clusterrole.yaml
   # @ cluster-autoscaler-chart-9.50.1), which lists volumeattachments in this
   # exact storage.k8s.io rule with watch/list/get. Upstream's per-cloudprovider
-  # EXAMPLE manifests (cloudprovider/hetzner/examples/*.yaml @ 1.32.7 and
-  # 1.34.0) still omit it — this file was derived from those, which is how the
+  # EXAMPLE manifests (cloudprovider/hetzner/examples/*.yaml @ 1.32.7 through
+  # 1.37.0) still omit it — this file was derived from those, which is how the
   # gap got here.
   - apiGroups: ["storage.k8s.io"]
     resources:
@@ -64,7 +73,7 @@ rules:
     verbs: ["watch", "list", "get"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["list", "watch"]
+    verbs: ["list", "watch", "get"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["create"]

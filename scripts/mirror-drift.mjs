@@ -12,11 +12,12 @@
  *
  * CEILINGS (`holdFor`): some newer tags must not be taken, and listing them
  * would keep the issue open forever. alpine/k8s stays within one minor of
- * K3S_VERSION (kubectl's skew policy); registry stays on 2.x (3 changed the
- * config format); cluster-autoscaler stays on its minor (it tracks the
- * Kubernetes minor); k3s system images move only with K3S_VERSION, and CSI
- * sidecars only with the CSI driver release, so neither is listed. Held
- * entries are named under the table, not counted. When nothing is
+ * K3S_VERSION (kubectl's skew policy); cluster-autoscaler stays on its minor
+ * (it tracks the Kubernetes minor); docker-socket-proxy stays on 0.4.x until
+ * its upstream issue closes (see the mirror's comment in images.js); k3s system
+ * images move only with K3S_VERSION, and CSI sidecars only with the CSI driver
+ * release, so neither is listed. Held entries are named under the table, not
+ * counted. When nothing is
  * actionable the report carries the marker `<!-- mirror-drift: none -->`,
  * which the workflow reads to leave the issue alone.
  *
@@ -36,9 +37,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   ALPINE_K8S_MIRROR,
   CSI_SIDECAR_MIRRORS,
+  DOCKER_SOCKET_PROXY_MIRROR,
   K3S_SYSTEM_IMAGE_MIRRORS,
   MIRRORED_IMAGES,
-  REGISTRY_MIRROR,
   upstreamRef,
 } from '../src/lib/images.js';
 
@@ -125,12 +126,15 @@ export function holdFor(image, k3sVersion) {
       },
     };
   }
-  if (sameRepo(REGISTRY_MIRROR)) {
-    return { reason: 'registry stays on 2.x (3 changed the config format)', allows: (tag) => majorMinor(tag)[0] === 2 };
-  }
   if (image.repo === 'autoscaling/cluster-autoscaler') {
     return {
       reason: 'cluster-autoscaler stays on its Kubernetes minor',
+      allows: (tag) => majorMinor(tag).join('.') === majorMinor(image.tag).join('.'),
+    };
+  }
+  if (sameRepo(DOCKER_SOCKET_PROXY_MIRROR)) {
+    return {
+      reason: 'stays on 0.4.x until Tecnativa/docker-socket-proxy#180 is closed',
       allows: (tag) => majorMinor(tag).join('.') === majorMinor(image.tag).join('.'),
     };
   }

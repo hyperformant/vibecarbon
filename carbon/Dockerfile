@@ -6,7 +6,7 @@
 # line from the repo's .nvmrc. Dockerfiles can't read .nvmrc, so
 # tests/unit/lib/node-version-pins.test.ts asserts this tag's major matches it,
 # and that its alpine minor matches the runtime base below.
-ARG NODE_IMAGE=node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf
+ARG NODE_IMAGE=node:24-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
 
 # The runtime base the app runs on: vibecarbon's published node runtime
 # (Alpine + the node binary + libstdc++ + the `hono` user, built from
@@ -14,7 +14,7 @@ ARG NODE_IMAGE=node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b
 # so a server pulls it from the registry once and a deploy ships only the
 # layers below that are this app's own. Written by vibecarbon, and the one
 # place the CLI looks for the base a deploy can pre-pull on a server.
-ARG RUNTIME_IMAGE=ghcr.io/hyperformant/node-runtime:24-alpine3.24-r2@sha256:83cfe107168c1a63deb63dbedb5947ba473cb00142d242a1bce0218dbdc14646
+ARG RUNTIME_IMAGE=ghcr.io/hyperformant/node-runtime:24-alpine3.24-r3
 
 # Base image can be overridden for Turbo Layer Caching
 # Default is the standard node image

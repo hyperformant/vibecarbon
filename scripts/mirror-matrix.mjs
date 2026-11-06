@@ -2,7 +2,7 @@
 /**
  * Emit the ghcr mirror matrix as JSON: one {src, dst, digest} entry per image
  * in `MIRRORED_IMAGES` (src/lib/images.js), registry.k8s.io and docker.io
- * alike. `src` is the upstream ref (`docker.io/library/traefik:v3.6.11`,
+ * alike. `src` is the upstream ref (`docker.io/library/traefik:v3.7.17`,
  * `registry.k8s.io/pause:3.9`); `dst` is the tag the job
  * pushes; `digest` is the pinned upstream linux/amd64 manifest the job copies
  * (and the digest every deployed ref carries); `index` is the upstream index

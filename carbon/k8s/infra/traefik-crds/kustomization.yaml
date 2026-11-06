@@ -18,4 +18,4 @@ kind: Kustomization
 # field added in 3.4-3.6 was being dropped without an error.
 resources:
   # Traefik v3 CRDs from official repository
-  - https://raw.githubusercontent.com/traefik/traefik/v3.6.11/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml
+  - https://raw.githubusercontent.com/traefik/traefik/v3.7.17/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml
