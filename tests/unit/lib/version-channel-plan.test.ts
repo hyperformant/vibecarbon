@@ -344,6 +344,15 @@ describe('planChannel', () => {
     await expect(plan({}, drivers(), tampered)).rejects.toThrow(/images\.traefik/);
   });
 
+  it.each([
+    ['a short digest', { digest: 'sha256:abc', index: digest('b') }],
+    ['text in the digest', { digest: `sha256:${'a'.repeat(63)}\nx`, index: digest('b') }],
+  ])('%s from upstream fails the validator before it can reach a list', async (_what, answer) => {
+    await expect(
+      plan({ tags: tagsFor('library/traefik', 'v3.7.99'), manifest: async () => answer }),
+    ).rejects.toThrow(/images\.traefik/);
+  });
+
   it('an upstream that answers with no amd64 stops the job, naming the image', async () => {
     await expect(
       plan({
