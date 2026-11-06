@@ -2343,11 +2343,6 @@ export async function runLifecycle(
               );
               if (logs) console.log(`${tag} [diag] traefik errors:\n${logs}`);
             }
-
-            const grafana = ssh(
-              `curl -sk -o /dev/null -w '%{http_code}' https://grafana.${config.domain}/api/health 2>/dev/null || echo "fail"`,
-            );
-            console.log(`${tag} [diag] from server: grafana=${grafana}`);
           } catch (diagErr) {
             console.log(
               `${tag} [diag] failed: ${diagErr instanceof Error ? diagErr.message : String(diagErr)}`,
