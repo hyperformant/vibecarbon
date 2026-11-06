@@ -81,6 +81,29 @@ describe('removeStackState — state-only stack removal after out-of-band teardo
     createStackMock.mockClear();
   });
 
+  // Linode compose-ha, run 42261394446: the primary's `up` failed, the CLI
+  // exited with the standby's `up` still running, and the lock it left made
+  // destroy report the stack as a leak.
+  it('clears the lock a killed deploy left, then removes the stack', async () => {
+    let locked = true;
+    const stack = {
+      cancel: vi.fn(async () => {
+        locked = false;
+      }),
+      workspace: {
+        removeStack: vi.fn(async () => {
+          if (locked) throw new Error('the stack is currently locked by 1 lock(s)');
+        }),
+      },
+    };
+    selectStackMock.mockResolvedValue(stack);
+    const { removeStackState } = await import('../../../src/lib/iac/index.js');
+    await expect(removeStackState('civ1', { projectName: 'testproj' })).resolves.toEqual({
+      removed: true,
+    });
+    expect(stack.cancel).toHaveBeenCalledTimes(1);
+  });
+
   it('removes an existing stack with force (its state still lists the reaped resources) and reports removed', async () => {
     const stack = makeStack();
     selectStackMock.mockResolvedValue(stack);
