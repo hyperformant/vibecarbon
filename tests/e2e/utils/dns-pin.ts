@@ -45,11 +45,13 @@
  *
  * SCOPE
  * -----
- * The pin is entered ONLY for `verify-failover` on `compose-ha`. `verify-deploy`
- * and friends deliberately stay on the public-resolver path: that IS the
- * customer cold path, and pinning it would hide a broken/unpublished record.
- * `k8s-ha` failover moves a floating IP and never rewrites the A record, so it
- * has nothing to pin.
+ * The pin is entered where a step has just moved the record and destroyed the
+ * old address: `verify-failover` and `verify-failback` on `compose-ha`,
+ * `verify-scale` on compose modes, and `verify-restore`, which pins to what the
+ * zone's authoritative servers publish. `verify-deploy` deliberately stays on the
+ * public-resolver path: that IS the customer cold path, and pinning it would
+ * hide a broken/unpublished record. `k8s-ha` failover moves a floating IP and
+ * never rewrites the A record, so it has nothing to pin.
  *
  * The scope is carried in an AsyncLocalStorage (same convention as
  * `scenarioContext` in tests/e2e/utils/cli-runner.ts) rather than a module-level

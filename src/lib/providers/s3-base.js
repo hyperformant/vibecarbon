@@ -83,6 +83,13 @@ const S3_KEY_PROBLEMS = {
     "these keys aren't allowed to do this, so check that they have full Object Storage access",
 };
 
+/** True when a GetBucketCors error says the bucket has no CORS rule. */
+function isNoCorsRule(error) {
+  const name = error?.name ?? error?.Code ?? '';
+  if (name === 'NoSuchCORSConfiguration') return true;
+  return error?.$metadata?.httpStatusCode === 404 && name !== 'NoSuchBucket';
+}
+
 /** True when an S3 error says the credentials themselves are the problem. */
 export function isS3KeyProblem(error) {
   return Boolean(error && Object.hasOwn(S3_KEY_PROBLEMS, error.name));
@@ -547,9 +554,17 @@ export class S3CompatibleProvider {
    * build a VPS and fail five minutes later at wal-g's audit with
    * NoSuchBucket, and the bucket never appeared at all.
    * @param {string} bucketName - Bucket name (must be globally unique)
+   * @param {object} [opts]
+   * @param {() => Promise<void>} [opts.beforeFirstRead] - writes bucket settings
+   *   on a bucket this call really created, after the quiet period and before
+   *   any probe reads it. Must not throw. Hetzner again, 2026-11-06: a CORS rule
+   *   written after the probes got its preflights denied at random for about
+   *   9 minutes, 20 to 30% of them, while a read-back of the rule looked right;
+   *   written first, none of about 700 were. So a setting a new bucket needs
+   *   goes on here, never after.
    * @returns {Promise<{name: string, created: boolean, ready: boolean, message?: string}>}
    */
-  async createBucket(bucketName) {
+  async createBucket(bucketName, { beforeFirstRead } = {}) {
     if (await this.bucketExists(bucketName)) {
       return { name: bucketName, created: false, ready: true, message: 'Bucket already exists' };
     }
@@ -566,6 +581,7 @@ export class S3CompatibleProvider {
         if (this.constructor.bucketQuietMs > 0) {
           await new Promise((r) => setTimeout(r, this.constructor.bucketQuietMs));
         }
+        await beforeFirstRead?.();
         const ready = await this.waitForBucketVisible(bucketName);
         return { name: bucketName, created: true, ready };
       } catch (error) {
@@ -1060,12 +1076,15 @@ export class S3CompatibleProvider {
    */
   async getBucketCorsOrigins(bucketName) {
     try {
-      const result = await this._send(new GetBucketCorsCommand({ Bucket: bucketName }));
+      // No rule is an answer. Some stores send it with no message, which the
+      // SDK words `UnknownError`, a word the retry reads as a network failure:
+      // it spent 15 s on a real new bucket before returning this empty list.
+      const result = await this._send(new GetBucketCorsCommand({ Bucket: bucketName }), {
+        terminal: isNoCorsRule,
+      });
       return (result?.CORSRules ?? []).flatMap((rule) => rule.AllowedOrigins ?? []);
     } catch (err) {
-      const name = err?.name ?? err?.Code ?? '';
-      if (name === 'NoSuchCORSConfiguration') return [];
-      if (err?.$metadata?.httpStatusCode === 404 && name !== 'NoSuchBucket') return [];
+      if (isNoCorsRule(err)) return [];
       throw err;
     }
   }

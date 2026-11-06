@@ -165,9 +165,13 @@ export async function dnsSafeFetch(
     // Use undici/fetch with custom lookup to bypass system DNS cache.
     // Node.js fetch doesn't support `servername`, so we use https.request.
     return new Promise<Response>((resolve, reject) => {
+      // What the request is still waiting for, so a timeout places the stall:
+      // a timed-out connect, handshake and response all read the same without
+      // it, and a burst's hung requests leave nothing else behind.
+      let waitingFor = 'tcp connect';
       const timer = setTimeout(() => {
         req.destroy();
-        reject(new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`));
+        reject(new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms (${waitingFor})`));
       }, REQUEST_TIMEOUT_MS);
 
       const req = httpsRequest(
@@ -233,6 +237,19 @@ export async function dnsSafeFetch(
           });
         },
       );
+
+      req.on('socket', (socket) => {
+        if (!socket.connecting) {
+          waitingFor = 'response';
+          return;
+        }
+        socket.once('connect', () => {
+          waitingFor = 'tls handshake';
+        });
+        socket.once('secureConnect', () => {
+          waitingFor = 'response';
+        });
+      });
 
       req.on('error', (err) => {
         clearTimeout(timer);

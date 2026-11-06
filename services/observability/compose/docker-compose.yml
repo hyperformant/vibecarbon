@@ -83,7 +83,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      # First boot runs the database migrations before the health endpoint
+      # answers, past a minute on a 2 vCPU server. A pass ends this period early.
+      start_period: 300s
     labels:
       # Traefik routing with ForwardAuth (super_admin only). The chain strips any
       # client-supplied X-Authenticated-User, then ForwardAuth injects the verified

@@ -141,7 +141,7 @@ describe('preDestroyBackup', () => {
       backupCompose: vi.fn(async () => ({
         result: 'pushed',
         name: 'base_c',
-        retentionError: 'retention failed after pushing base_c: AccessDenied',
+        retentionError: 'retention failed before pushing base_c: AccessDenied',
       })),
     });
     await preDestroyBackup(opts(compose()), deps);

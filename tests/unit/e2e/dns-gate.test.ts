@@ -6,9 +6,14 @@ import {
   storageHostFor,
 } from '../../e2e/utils/dns-gate.js';
 
-const deps = (local: Record<string, string[]>, pub: Record<string, string[]>): DnsGateDeps => ({
+const deps = (
+  local: Record<string, string[]>,
+  pub: Record<string, string[]>,
+  reachable: string[] = [],
+): DnsGateDeps => ({
   local: async (h) => local[h] ?? [],
   publicResolver: async (h) => pub[h] ?? [],
+  reaches: async (ip) => reachable.includes(ip),
 });
 
 const SCW = 's3.fr-par.scw.cloud';
@@ -37,9 +42,31 @@ describe('checkStorageDns', () => {
     await expect(assertStorageDns(target, d)).rejects.toThrow(new RegExp(`${SCW}.*no A answer`));
   });
 
-  it('refuses disjoint answers', async () => {
+  it('passes disjoint answers from a rotating pool when the local one serves', async () => {
+    const d = deps(
+      { [SCW]: ['62.210.223.115', '51.159.217.163'] },
+      { [SCW]: ['51.159.50.179', '51.159.217.4'] },
+      ['62.210.223.115'],
+    );
+    expect(await checkStorageDns(target, d)).toEqual([]);
+  });
+
+  it('refuses a disjoint local answer that goes nowhere, such as a stale pin', async () => {
     const d = deps({ [SCW]: ['10.0.0.1'] }, { [SCW]: ['51.159.0.1'] });
     await expect(assertStorageDns(target, d)).rejects.toThrow(/10\.0\.0\.1.*51\.159\.0\.1/);
+  });
+
+  it('never connects when the resolvers already agree', async () => {
+    const calls: string[] = [];
+    const d: DnsGateDeps = {
+      ...deps({ [SCW]: ['2.2.2.2'] }, { [SCW]: ['2.2.2.2'] }),
+      reaches: async (ip) => {
+        calls.push(ip);
+        return false;
+      },
+    };
+    expect(await checkStorageDns(target, d)).toEqual([]);
+    expect(calls).toEqual([]);
   });
 
   it('refuses when the public resolver cannot answer, since nothing is checked', async () => {
@@ -63,6 +90,7 @@ describe('checkStorageDns', () => {
         return [];
       },
       publicResolver: async () => ['9.9.9.9'],
+      reaches: async () => false,
     };
     const targets = [
       { provider: 'scaleway', region: 'fr-par-1' },

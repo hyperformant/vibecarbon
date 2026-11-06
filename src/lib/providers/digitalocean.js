@@ -139,6 +139,9 @@ export class DigitalOceanProvider extends BaseProvider {
 
   static NAME = 'DigitalOcean';
   static API_BASE = 'https://api.digitalocean.com/v2';
+  /** deleteSSHKeyById: how long a 404 and a readable key may keep disagreeing. */
+  static SSH_KEY_SETTLE_MS = 30_000;
+  static SSH_KEY_SETTLE_INTERVAL_MS = 3_000;
   // Ours (env-first token env var) — see resolveProviderToken (index.js).
   static TOKEN_ENV = 'DIGITALOCEAN_API_TOKEN';
   // Read by @pulumi/digitalocean and doctl — never derive/rename.
@@ -1566,8 +1569,9 @@ export class DigitalOceanProvider extends BaseProvider {
 
   /**
    * Delete an SSH key by its exact name. DO has no name-filter query param,
-   * so this walks /account/keys (guarded ≤20 pages). Never throws; returns
-   * false when no key matches.
+   * so this walks /account/keys (guarded ≤20 pages). Returns false when no
+   * key matches, and throws when a matching key will not go, which callers
+   * record as a leak instead of reporting it deleted.
    * @param {string} name
    * @returns {Promise<boolean>}
    */
@@ -1589,11 +1593,36 @@ export class DigitalOceanProvider extends BaseProvider {
 
     if (!match) return false;
 
-    const response = await fetchWithRetry(
-      `${DigitalOceanProvider.API_BASE}/account/keys/${match.id}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
-    return response.ok || response.status === 404;
+    if ((await this.deleteSSHKeyById(match.id)) === 'stuck') {
+      throw new Error(`DigitalOcean would not delete SSH key ${name} (id ${match.id})`);
+    }
+    return true;
+  }
+
+  /**
+   * Delete one SSH key and say what really happened. DO's key API disagrees
+   * with itself around a write: measured 2026-11-06, a DELETE answered 404 for
+   * a key that stayed for over a minute until a later DELETE took it (3 of
+   * 48), and a key whose DELETE answered 204 stayed listed for up to
+   * 22 s. So a 404 alone proves nothing: the key is gone only when the read by
+   * id agrees.
+   * @param {number|string} id
+   * @returns {Promise<'deleted'|'absent'|'stuck'>} `absent` means this call
+   *   deleted nothing: a caller holding a list had a stale one.
+   */
+  async deleteSSHKeyById(id) {
+    const url = `${DigitalOceanProvider.API_BASE}/account/keys/${id}`;
+    const headers = { Authorization: `Bearer ${this.apiToken}` };
+    const deadline = Date.now() + DigitalOceanProvider.SSH_KEY_SETTLE_MS;
+    for (;;) {
+      const res = await fetchWithRetry(url, { method: 'DELETE', headers });
+      if (res.ok) return 'deleted';
+      if (res.status !== 404) return 'stuck';
+      const read = await fetchWithRetry(url, { headers });
+      if (read.status === 404) return 'absent';
+      if (Date.now() >= deadline) return 'stuck';
+      await new Promise((r) => setTimeout(r, DigitalOceanProvider.SSH_KEY_SETTLE_INTERVAL_MS));
+    }
   }
 
   /**

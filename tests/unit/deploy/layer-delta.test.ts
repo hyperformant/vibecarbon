@@ -673,6 +673,26 @@ describe('deliverImage', () => {
     }
   });
 
+  it('a failed pull quotes docker, not the ssh command that ran it', async () => {
+    const basePull = Promise.reject(
+      Object.assign(new Error('Command failed: ssh -o BatchMode=yes root@10.0.0.1 docker pull x'), {
+        stderr:
+          "Warning: Permanently added '10.0.0.1' (ED25519) to the list of known hosts.\n" +
+          'failed to copy: read tcp [2600::1]:1->[2606::2]:443: read: connection reset by peer\n',
+      }),
+    );
+    basePull.catch(() => {});
+    const err = await deliverImage({
+      ...args,
+      basePull,
+      deps: { run: listBase, send: stubSsh().send, saveImage: saveFixture, acquireLock: noLock },
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toBe(
+      'image delivery failed: base image pull failed: ' +
+        'failed to copy: read tcp [2600::1]:1->[2606::2]:443: read: connection reset by peer',
+    );
+  });
+
   it('a failed pull waits for the host save to settle before the work dir goes', async () => {
     const order: string[] = [];
     const basePull = Promise.reject(new Error('connection reset'));

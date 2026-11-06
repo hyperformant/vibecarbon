@@ -36,6 +36,10 @@ vi.mock('node:fs', async (orig) => {
   };
 });
 
+vi.mock('../../../src/lib/deploy/k8s/kubelet-liveness.js', () => ({
+  waitForKubeletsRenewing: vi.fn(),
+}));
+
 vi.mock('../../../src/lib/iac/converge-cluster.js', () => ({
   convergeClusterInfra: vi.fn(async () => ({ outputs: {} })),
 }));
@@ -92,6 +96,7 @@ vi.mock('../../../src/lib/config.js', () => ({
 }));
 
 const { SCALE_EFFECTS } = await import('../../../src/scale.js');
+const { waitForKubeletsRenewing } = await import('../../../src/lib/deploy/k8s/kubelet-liveness.js');
 const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
 const { runCommand } = await import('../../../src/lib/command.js');
 
@@ -686,5 +691,57 @@ describe('scaleVerifyK8sReady — role-derived standby gate (not a stack-name su
     const kubeconfigsWaited = waitCalls.map(([args]) => (args as string[])[2]);
     expect(kubeconfigsWaited.some((k) => k.includes('kubeconfig-prod-primary'))).toBe(true);
     expect(kubeconfigsWaited.some((k) => k.includes('kubeconfig-prod-standby'))).toBe(false);
+  });
+});
+
+describe('scaleVerifyK8sReady — a resize waits for rebooted kubelets', () => {
+  const verify = (extra: Record<string, unknown>) =>
+    SCALE_EFFECTS.scaleVerifyK8sReady({
+      environment: 'prod',
+      envConfig: {},
+      region: 'nbg1',
+      secondaryRegion: 'ash',
+      Provider,
+      ...extra,
+    });
+  const runCommandLog = () => vi.mocked(runCommand).mock.calls.map(([args]) => args as string[]);
+  const position = (needle: string, kubeconfig: string) =>
+    runCommandLog().findIndex((args) => args.includes(needle) && args[2].includes(kubeconfig));
+
+  beforeEach(() => {
+    vi.mocked(runCommand).mockClear();
+    vi.mocked(waitForKubeletsRenewing).mockReset();
+    // Reads once, so the gate's own kubectl call lands in the log.
+    vi.mocked(waitForKubeletsRenewing).mockImplementation(async ({ readLeases }) => {
+      await readLeases();
+      return { settled: true, pending: [] };
+    });
+  });
+
+  it('gates both HA clusters before the CSI wait, the standby included', async () => {
+    await verify({ isHA: true, infraChanges: ['workerType'] });
+    for (const cluster of ['kubeconfig-prod-primary', 'kubeconfig-prod-standby']) {
+      const lease = position('kube-node-lease', cluster);
+      expect(lease).toBeGreaterThanOrEqual(0);
+      expect(lease).toBeLessThan(position('rollout', cluster));
+    }
+  });
+
+  it('runs before the pod wait, which is the read that went stale', async () => {
+    await verify({ isHA: false, infraChanges: ['dbType'] });
+    expect(position('kube-node-lease', 'kubeconfig-prod')).toBeLessThan(
+      position('wait', 'kubeconfig-prod'),
+    );
+  });
+
+  it('costs nothing when no type changed, because nothing rebooted', async () => {
+    await verify({ isHA: false, infraChanges: [] });
+    expect(waitForKubeletsRenewing).not.toHaveBeenCalled();
+  });
+
+  it('carries on to the pod wait when a node stays silent', async () => {
+    vi.mocked(waitForKubeletsRenewing).mockResolvedValue({ settled: false, pending: ['worker-1'] });
+    await verify({ isHA: false, infraChanges: ['workerType'] });
+    expect(position('wait', 'kubeconfig-prod')).toBeGreaterThanOrEqual(0);
   });
 });

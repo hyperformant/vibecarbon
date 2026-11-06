@@ -13,7 +13,7 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { load as loadYaml } from 'js-yaml';
+import { loadAll, load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = process.cwd();
@@ -39,6 +39,17 @@ const FILES = [
 type Service = {
   cpus?: number | string;
   deploy?: { resources?: Record<string, { cpus?: number | string } | undefined> };
+};
+
+type K8sDoc = {
+  kind?: string;
+  spec?: {
+    template?: {
+      spec?: {
+        containers?: { resources?: { limits?: { cpu?: string }; requests?: { cpu?: string } } }[];
+      };
+    };
+  };
 };
 
 /** Every CPU figure a service sets: `cpus:` and deploy.resources.{limits,reservations}.cpus. */
@@ -83,5 +94,33 @@ describe('compose CPU limits fit a 1-vCPU server', () => {
       services: Record<string, Service>;
     };
     expect(doc.services.db.deploy).toBeUndefined();
+  });
+
+  // All traffic passes through Traefik, so a CPU limit there is an outage
+  // waiting for one noisy client: 0.5 CPU hung all HTTPS on a real server at
+  // about 220 new TLS connections a second.
+  it('no compose file sets a CPU figure on Traefik', () => {
+    const onTraefik = FILES.flatMap((file) =>
+      cpuFigures(file)
+        .filter(({ where }) => where.startsWith('traefik.'))
+        .map(({ where }) => `${file} ${where}`),
+    );
+    expect(onTraefik).toEqual([]);
+  });
+
+  it('the k8s Traefik has no CPU limit and keeps its request', () => {
+    const docs = loadAll(
+      readFileSync(join(ROOT, 'carbon/k8s/base/traefik/deployment.yaml'), 'utf8').replace(
+        /\{\{(\w+)\}\}/g,
+        '$1',
+      ),
+    ) as K8sDoc[];
+    const deployment = docs.find((d) => d?.kind === 'Deployment');
+    const containers = deployment?.spec?.template?.spec?.containers ?? [];
+    expect(containers.length).toBeGreaterThan(0);
+    for (const { resources } of containers) {
+      expect(resources?.limits?.cpu).toBeUndefined();
+      expect(resources?.requests?.cpu).toBeDefined();
+    }
   });
 });

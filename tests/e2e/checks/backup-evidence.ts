@@ -71,7 +71,7 @@ import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { getObjectStorageProvider, getProviderClass } from '../../../src/lib/providers/index.js';
 import { WALG_ENV_SOURCE } from '../../../src/lib/walg/restore-layout.js';
 import type { VerificationResult } from '../scenarios/types.js';
-import { e2eSshOpts } from '../utils/ssh.js';
+import { e2eSshOpts, sshFailureReason } from '../utils/ssh.js';
 
 /**
  * The slice of `S3CompatibleProvider` this check uses. The JS module's inferred
@@ -482,7 +482,7 @@ export async function runBackupEvidenceChecks(
     return [
       fail(
         'backup_walg_wal_archived',
-        `Could not run the WAL-switch probe on ${masterIp}: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`,
+        `Could not run the WAL-switch probe on ${masterIp}: ${sshFailureReason(err)}`,
         { bucket: target.bucket },
       ),
       skip('backup_walg_canonical_prefix', { skipped: 'probe unreachable' }),
@@ -591,8 +591,7 @@ export async function runBackupEvidenceChecks(
         buildArchiverEvidenceCommand(projectName, isCompose),
       );
     } catch (err) {
-      const why = err instanceof Error ? err.message.split('\n')[0] : String(err);
-      archiver = `could not read the archiver: ${why}`;
+      archiver = `could not read the archiver: ${sshFailureReason(err)}`;
     }
     results.push(
       fail(

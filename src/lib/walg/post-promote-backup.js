@@ -19,7 +19,7 @@
  * timeline (or a newer one after a restore), and only an older one is refused.
  *
  * It requires `pushed`. A skip is a failure here: the new timeline still has
- * no base. A retention failure after the push is not (the base is in the
+ * no base. A retention failure with the base pushed is not (the base is in the
  * bucket); it warns. `failover -abort` never calls it: the old primary stays
  * on its own timeline.
  */
