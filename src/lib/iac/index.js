@@ -566,22 +566,7 @@ async function upStackImpl(stackName, program, options = {}) {
 async function prepareStackForUp(stackName, program, options) {
   const stack = await getOrCreateStack(stackName, program, options);
   recordStateOp('refresh');
-  // Clear any stale update lock before `up` — when a prior run aborted
-  // mid-flight (Ctrl-C, scenario timeout, background-task stop), Pulumi's
-  // file backend leaves a `.lock.*` in the bucket and subsequent `up`
-  // calls fail with:
-  //
-  //   error: the stack is currently locked by 1 lock(s). Either wait for
-  //   the other process(es) to end or delete the lock file with
-  //   `pulumi cancel`.
-  //
-  // Since e2e runs one scenario per stack at a time, it's always
-  // safe to clear. `stack.cancel()` is idempotent (no-op if no lock).
-  try {
-    await stack.cancel();
-  } catch {
-    /* no lock — ignore */
-  }
+  await clearStaleLock(stack);
 
   // Refresh state before `up` to purge pending operations from a crashed
   // prior run. Without this, Pulumi's `up` with "N pending operations
@@ -652,11 +637,7 @@ async function runUp(stack, options) {
       // currently locked". Clear the lock before EACH attempt — cancel() is
       // idempotent and per-stack, so it's safe under the parallel HA deploys
       // (primary/standby are separate stacks).
-      try {
-        await stack.cancel();
-      } catch {
-        /* no lock — ignore */
-      }
+      await clearStaleLock(stack);
       resourceTimer?.begin();
       return stack.up({
         onOutput: options.onOutput,
@@ -796,6 +777,27 @@ function flattenOutputs(rawOutputs) {
 }
 
 /**
+ * Clear an update lock a killed run left behind. A run that dies mid-update
+ * (Ctrl-C, a timeout, the CLI exiting on the other half of an HA pair) leaves
+ * its lock in the state bucket, and every later `up`, `destroy` and stack
+ * removal then fails with:
+ *
+ *   error: the stack is currently locked by 1 lock(s). Either wait for the
+ *   other process(es) to end or delete the lock file with `pulumi cancel`.
+ *
+ * Every command that acts on a stack is the operator's own and runs one at a
+ * time per stack, so a lock it meets is stale. `cancel()` is a no-op with no
+ * lock, and it is per stack, so it is safe under parallel HA deploys.
+ */
+async function clearStaleLock(stack) {
+  try {
+    await stack.cancel();
+  } catch {
+    /* no lock */
+  }
+}
+
+/**
  * Run `pulumi destroy` and remove the stack. Idempotent — if the stack
  * doesn't exist the function resolves without error.
  *
@@ -861,6 +863,7 @@ export async function destroyStack(stackName, program, options = {}) {
     }
     throw err;
   }
+  await clearStaleLock(stack);
   // Refresh first so destroy tolerates resources that were already reaped
   // out-of-band (e.g. Hetzner server deleted by a prior partial destroy or
   // by direct API cleanup). Without this, hcloud returns 404 and pulumi
@@ -1101,6 +1104,11 @@ export async function removeStackState(stackName, options = {}) {
     }
     throw err;
   }
+  // A deploy that died mid-update leaves its lock, and a locked stack refuses
+  // removal. Linode compose-ha, run 42261394446: the primary failed, the CLI
+  // exited with the standby's `up` still running, and destroy reported its
+  // state as a leak.
+  await clearStaleLock(stack);
   await stack.workspace.removeStack(stackName, { force: true });
   return { removed: true };
 }

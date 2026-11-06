@@ -65,6 +65,28 @@ describe('destroyStack — loud partial detection (M3 Task 9f)', () => {
     createOrSelectStackMock.mockReset();
   });
 
+  it('clears the lock a killed deploy left before it refreshes or destroys', async () => {
+    let locked = true;
+    const stack = {
+      ...makeStack({ destroyResult: { summary: { result: 'succeeded', resourceChanges: {} } } }),
+      cancel: vi.fn(async () => {
+        locked = false;
+      }),
+    };
+    const refuseIfLocked = async () => {
+      if (locked) throw new Error('the stack is currently locked by 1 lock(s)');
+      return { summary: { result: 'succeeded', resourceChanges: {} } };
+    };
+    stack.refresh = vi.fn(refuseIfLocked);
+    stack.destroy = vi.fn(refuseIfLocked);
+    createOrSelectStackMock.mockResolvedValue(stack);
+    const { destroyStack } = await import('../../../src/lib/iac/index.js');
+    await expect(
+      destroyStack('civ1', async () => ({}), { projectName: 'testproj' }),
+    ).resolves.toBeDefined();
+    expect(stack.cancel).toHaveBeenCalledTimes(1);
+  });
+
   it('resolves and removes the stack when the stack had resources and destroy records matching deletes', async () => {
     const stack = makeStack({
       exportStackResources: [
