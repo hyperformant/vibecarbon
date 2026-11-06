@@ -27,11 +27,12 @@
  *     saying so, so every request's status was read at a proxy in front of it.
  *     A Hetzner pair's median was 14 s side by side, 26 s one after the other.
  *
- * 49 of those were the first pair on a brand-new bucket, 25 of them on Hetzner.
- * That is the case to watch: two selects there both initialize
- * `.pulumi/meta.yaml`, the shape a 2026-04-28 k8s-ha deploy died in (`could not
- * list bucket: blob (code=NotFound): NoSuchKey`), on a bucket with no quiet
- * pause.
+ * ONE THING THE LOCK USED TO DO has its own step now. Two selects on a new
+ * bucket both initialize `.pulumi/meta.yaml`, and that race failed a k8s-ha
+ * deploy (2026-04-28, `could not list bucket: blob (code=NotFound): NoSuchKey`).
+ * 49 of the pairs above were that case and none failed, which only bounds it,
+ * so an HA deploy that created its state bucket opens the backend once before
+ * the pair starts (`openStateBackend`, the plans' `open-state-backend` step).
  *
  * WHY NOT stagger or a wider retry ladder if this turns out wrong: every retry
  * is one more request against a store that is already failing to keep up. A

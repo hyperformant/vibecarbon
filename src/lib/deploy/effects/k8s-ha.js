@@ -110,8 +110,8 @@ async function haK8sUploadSshKey(ctx) {
  * its app image from the primary: the primary's built ref reaches it as a
  * promise, and the copy into its registry starts once the WireGuard transport
  * is up (here, when the early prep brought it up; else in copy-standby-image).
- * Pre-inits the Pulumi S3 backend before the parallel fan-out. Surfaces
- * per-cluster success/failure distinctly; hard-fails if either cluster failed.
+ * Surfaces per-cluster success/failure distinctly; hard-fails if either cluster
+ * failed.
  */
 async function haK8sProvisionClusters(ctx) {
   const options = ctx.options;
@@ -227,15 +227,6 @@ async function haK8sProvisionClusters(ctx) {
   // k8s-ha matrix runs).
   const primaryState = new StateTracker(options.projectName, primaryEnv);
   const standbyState = new StateTracker(options.projectName, standbyEnv);
-
-  // The Pulumi backend pre-init that used to sit here is gone. RCA from k8s-ha
-  // 2026-04-28: both deployK3s threads raced a freshly-created S3 bucket and
-  // `pulumi stack select` failed with `could not list bucket: blob
-  // (code=NotFound): NoSuchKey`, killing the deploy in under 20s. The fix was a
-  // sequential no-op stack that forced `.pulumi/meta.yaml` to be written first.
-  // Two selects on a new bucket no longer fail that way now that nothing
-  // touches it in its first seconds (lib/iac/state-lock.js has the numbers), so
-  // the pair starts together and the `__init` stack create plus delete stay gone.
 
   // Pilot-light sizing: primary gets full sizing (role: 'primary',
   // minWorkers/maxWorkers as configured); standby is a dormant DR target, not

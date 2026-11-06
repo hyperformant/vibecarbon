@@ -1374,6 +1374,9 @@ export async function executeDeployment(args, gatheredConfig) {
   const s3SetupTimer = perfTimer('deploy.preamble.s3Setup');
   s3Spinner.start('Verifying S3 buckets');
   const skipS3Setup = await state.shouldSkipWithVerify('s3-setup', s3Inputs, verifyBucketsExist);
+  // Read from this run's CreateBucket, never from the step ledger: a warm
+  // deploy restores that ledger and must not count as a new bucket.
+  let stateBucketCreated = false;
   s3Spinner.stop(skipS3Setup ? 'S3 buckets ready' : 'S3 setup needed');
   if (!skipS3Setup) {
     state.startStep('s3-setup', s3Inputs);
@@ -1418,6 +1421,7 @@ export async function executeDeployment(args, gatheredConfig) {
       s3Spinner.start(`Creating Pulumi state bucket: ${stateBucket}`);
       const stateBucketResult = await s3Provider.createBucket(stateBucket);
       assertBucketReady(stateBucketResult, 'Pulumi state');
+      stateBucketCreated = stateBucketResult.created;
       s3Spinner.stop(
         stateBucketResult.created
           ? `Pulumi state bucket created: ${stateBucket}`
@@ -1573,6 +1577,15 @@ export async function executeDeployment(args, gatheredConfig) {
   // Every downstream iac call reads it via s3Config, and it's persisted into
   // .vibecarbon.json so scale / failover / destroy resolve the same backend.
   s3Config.stateBucket = s3Result?.stateBucket || stateBucket;
+  // The HA plans open a backend this run brought into being, once, before the
+  // pair starts (open-state-backend). Any other deploy has nothing to open.
+  const newStateBackend = stateBucketCreated
+    ? {
+        provider: providerIdFor(envConfig),
+        s3Config,
+        projectName: projectConfig.projectName,
+      }
+    : null;
 
   // DR (`deploy -restore latest|<base>|<ISO-8601>`, k8s tiers): resolve the
   // exact base backup now, from the stop sentinels in the bucket and prefix
@@ -2005,6 +2018,7 @@ export async function executeDeployment(args, gatheredConfig) {
     isComposeLocal,
     localImageTag,
     composeLocalBuildPromise,
+    newStateBackend,
     attemptId,
   };
 
@@ -2188,7 +2202,7 @@ export async function executeDeployment(args, gatheredConfig) {
     // deploy.ha.k8s.* sub-stages) wraps the whole pipeline, as before.
     // dnsWarmupPromise: the early HA DNS write (haK8sProvisionClusters) must
     // not race the 0.0.0.0 warm-up write of the same apex record.
-    const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise };
+    const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise, newStateBackend };
     await perfAsync('deploy.ha.k8s.full', () =>
       runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
     );

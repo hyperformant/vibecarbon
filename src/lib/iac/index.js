@@ -1236,6 +1236,36 @@ export async function listStacks(options = {}) {
 }
 
 /**
+ * Open the state backend, which writes `.pulumi/meta.yaml` on a new bucket. An
+ * HA deploy does this once before its two engines start, so they never both
+ * initialize one backend: that race failed a k8s-ha deploy with `could not list
+ * bucket: blob (code=NotFound): NoSuchKey` (2026-04-28), a failure nothing
+ * retries.
+ *
+ * `pulumi whoami` is the cheapest operation that does it. On a new bucket, on
+ * all five providers (2026-11-06): GET meta.yaml, LIST, PUT meta.yaml, LIST, in
+ * 0.5 to 1.8 s, one request fewer than `pulumi stack ls`.
+ *
+ * Throws, unlike `listStacks`: nothing is provisioned yet, and a backend that
+ * will not open now would only fail the pair later.
+ *
+ * @param {{ provider: string, s3Config: object, projectName: string }} options
+ * @returns {Promise<void>}
+ */
+export async function openStateBackend(options) {
+  recordStateOp('backend-open');
+  const workspace = await LocalWorkspace.create({
+    projectSettings: {
+      name: requirePulumiProject(options),
+      runtime: 'nodejs',
+      backend: { url: resolveBackendUrl(options.s3Config, options.provider) },
+    },
+    envVars: buildEnv(options),
+  });
+  await workspace.whoAmI();
+}
+
+/**
  * Two stacks' `upStack`s on one state bucket run side by side from the first
  * request, select and refresh included (state-lock.js header says why).
  */

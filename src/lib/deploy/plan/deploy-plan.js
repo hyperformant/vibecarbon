@@ -45,6 +45,7 @@ import {
   haWriteNodeRolesStep,
   haWriteReplicationOverlayStep,
   k8sDeployClusterStep,
+  openStateBackendStep,
   persistProvisionedServerStep,
   provisionServerStep,
   restoreTlsStep,
@@ -101,6 +102,7 @@ export function planDeploy(tier, _config) {
     // DNS; the replication warn/hard-gate) live in the steps' when-gates and
     // inside the effects, exactly as the single-compose plan defers them.
     return [
+      openStateBackendStep(),
       haProvisionServersStep(),
       haPersistPendingConfigStep(),
       // The HA record write overlaps boot; update-dns below is its barrier.
@@ -153,6 +155,7 @@ export function planDeploy(tier, _config) {
     // exactly as the compose-ha plan defers them. Replication step names
     // (configure-replication, verify-streaming) mirror compose-ha's.
     return [
+      openStateBackendStep(),
       haK8sGenerateSshKeyStep(),
       haK8sUploadSshKeyStep(),
       haK8sProvisionClustersStep(),

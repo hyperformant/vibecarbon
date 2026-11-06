@@ -757,8 +757,19 @@ async function setupBackupCron(ctx) {
   }
 }
 
+/**
+ * Open a state backend this deploy's own bucket just brought into being, before
+ * an HA pair's two engines reach it. See `openStateBackend`.
+ */
+async function openNewStateBackend(ctx) {
+  const { openStateBackend } = await import('../../iac/index.js');
+  await perfAsync('deploy.ha.stateBackend.open', () => openStateBackend(ctx.newStateBackend));
+}
+
 export const EFFECTS = {
   noop: async () => {},
+  // both HA deploy tiers, before their fan-out
+  openStateBackend: openNewStateBackend,
   // compose deploy tier
   provisionServer,
   setupServer,

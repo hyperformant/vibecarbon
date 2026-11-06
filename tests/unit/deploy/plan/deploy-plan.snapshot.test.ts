@@ -36,6 +36,7 @@ describe('compose deploy plan snapshot', () => {
   it('locks the compose-ha step-name sequence', () => {
     expect(planStepNames(planDeploy('compose-ha', {}))).toMatchInlineSnapshot(`
       [
+        "open-state-backend",
         "provision-servers",
         "persist-pending-config",
         "start-dns-update",
@@ -76,6 +77,7 @@ describe('compose deploy plan snapshot', () => {
   it('locks the k8s-ha step-name sequence', () => {
     expect(planStepNames(planDeploy('k8s-ha', {}))).toMatchInlineSnapshot(`
       [
+        "open-state-backend",
         "generate-ssh-key",
         "upload-ssh-key",
         "provision-clusters",
