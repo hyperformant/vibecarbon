@@ -211,13 +211,6 @@ jobs:
           # Via env, never interpolated into the script body — a secret on a
           # shell command line is a secret in the process table.
           VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
-          # Pulumi downloads third-party provider plugins (vultr, linode) from
-          # github:// servers. Unauthenticated, that shares the runner IP's
-          # 60/hr GitHub API budget with every other tenant — run 32614839037's
-          # vultr leg died at provision on "failed all 5 attempts" downloading
-          # pulumi-resource-vultr v2.27.1 while the release itself was fine.
-          # Pulumi honors GITHUB_TOKEN for exactly this.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # No licence file is written: a key entitles nothing on its own now,
           # and the project binding lives on vibecarbon.com. The harness runs a
@@ -245,6 +238,13 @@ jobs:
           # the variable itself must be exported here or
           # assertLicenseSigningKey fails the leg at preflight.
           VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
+          # Pulumi downloads third-party provider plugins (vultr, linode) from
+          # github:// servers. Unauthenticated, that shares the runner IP's
+          # 60/hr GitHub API budget with every other tenant — run 32614839037's
+          # vultr leg died at provision on "failed all 5 attempts" downloading
+          # pulumi-resource-vultr v2.27.1 while the release itself was fine.
+          # Pulumi honors GITHUB_TOKEN for exactly this.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # The v2 credential-profiles store is retired (A5) — every
