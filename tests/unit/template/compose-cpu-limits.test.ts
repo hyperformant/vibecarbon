@@ -46,7 +46,10 @@ type K8sDoc = {
   spec?: {
     template?: {
       spec?: {
-        containers?: { resources?: { limits?: { cpu?: string }; requests?: { cpu?: string } } }[];
+        containers?: {
+          env?: { name: string; value?: string }[];
+          resources?: { limits?: { cpu?: string; memory?: string }; requests?: { cpu?: string } };
+        }[];
       };
     };
   };
@@ -122,5 +125,59 @@ describe('compose CPU limits fit a 1-vCPU server', () => {
       expect(resources?.limits?.cpu).toBeUndefined();
       expect(resources?.requests?.cpu).toBeDefined();
     }
+  });
+});
+
+// Traefik's memory limit is room for a connection flood, not for traffic: its
+// normal peak is about 56 MB. Go only collects harder near that limit if
+// GOMEMLIMIT tells it the limit exists, so the two move together or the kernel
+// kills Traefik with garbage still on the heap. Measured held connections
+// before the kill: 4,600 at 256 MB, 5,800 with GOMEMLIMIT, 8,900 at 512 MB,
+// 11,900 with GOMEMLIMIT.
+describe('Traefik keeps Go under its memory limit', () => {
+  const mebibytes = (value: unknown) => {
+    const match = /^(\d+)(M|Mi|MiB)$/.exec(String(value));
+    expect(match, `unreadable memory figure: ${value}`).not.toBeNull();
+    return Number(match?.[1]);
+  };
+
+  const compose = load(readFileSync(join(ROOT, 'carbon/docker-compose.prod.yml'), 'utf8')) as {
+    services: Record<
+      string,
+      {
+        environment?: Record<string, string>;
+        deploy?: { resources?: { limits?: { memory?: string } } };
+      }
+    >;
+  };
+  const k8s = (
+    loadAll(
+      readFileSync(join(ROOT, 'carbon/k8s/base/traefik/deployment.yaml'), 'utf8').replace(
+        /\{\{(\w+)\}\}/g,
+        '$1',
+      ),
+    ) as K8sDoc[]
+  ).find((d) => d?.kind === 'Deployment')?.spec?.template?.spec?.containers?.[0];
+
+  const modes = {
+    compose: {
+      limit: compose.services.traefik?.deploy?.resources?.limits?.memory,
+      soft: compose.services.traefik?.environment?.GOMEMLIMIT,
+    },
+    k8s: {
+      limit: k8s?.resources?.limits?.memory,
+      soft: k8s?.env?.find(({ name }) => name === 'GOMEMLIMIT')?.value,
+    },
+  };
+
+  it.each(Object.entries(modes))('%s sets the soft limit about 10%% under the limit', (_, m) => {
+    const ratio = mebibytes(m.soft) / mebibytes(m.limit);
+    expect(ratio).toBeGreaterThanOrEqual(0.85);
+    expect(ratio).toBeLessThan(0.95);
+  });
+
+  it('every mode survives the same flood', () => {
+    expect(mebibytes(modes.compose.limit)).toBe(mebibytes(modes.k8s.limit));
+    expect(mebibytes(modes.compose.soft)).toBe(mebibytes(modes.k8s.soft));
   });
 });

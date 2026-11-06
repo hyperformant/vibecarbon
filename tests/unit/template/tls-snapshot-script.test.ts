@@ -329,7 +329,7 @@ describe('the snapshot prefix and apex reach the servers as data', () => {
       prod.indexOf('\n    ports:', prod.indexOf('\n  traefik:\n')),
     );
     expect(traefik).toMatch(
-      /\n {4}environment:\n {6}TLS_SNAPSHOT_S3_PREFIX: \$\{TLS_SNAPSHOT_S3_PREFIX:-\}\n {6}TLS_SNAPSHOT_DOMAIN: \$\{DOMAIN:-\}$/,
+      /\n {4}environment:\n {6}TLS_SNAPSHOT_S3_PREFIX: \$\{TLS_SNAPSHOT_S3_PREFIX:-\}\n {6}TLS_SNAPSHOT_DOMAIN: \$\{DOMAIN:-\}\n/,
     );
   });
 
