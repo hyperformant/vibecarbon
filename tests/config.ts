@@ -434,14 +434,6 @@ export const testConfig = {
             mode: 'compose' as const,
             dnsProvider: 'scaleway' as const,
             envPrefix: 's1',
-            // The CLI refuses a compose scale here: Pulumi state cannot follow
-            // a replaced Scaleway server (assertComposeScaleKeepsState), so
-            // the step could only fail. Skipped in the scenario so no
-            // command-line flag can be forgotten, and verify-scale rides
-            // along because it asserts the state scale leaves. The census in
-            // tests/unit/e2e/scale-skip-census.test.ts ties this to that rule
-            // for every provider, so it comes off when the rule does.
-            skipSteps: ['scale', 'verify-scale'] as const,
           },
           // s2 uses Scaleway DNS so the compose-ha failover flip exercises
           // the SAME provider that owns the compute — the self-contained
@@ -450,8 +442,6 @@ export const testConfig = {
             mode: 'compose-ha' as const,
             dnsProvider: 'scaleway' as const,
             envPrefix: 's2',
-            // Same refusal as s1: compose-ha scales through the same path.
-            skipSteps: ['scale', 'verify-scale'] as const,
           },
         ],
         defaultSelection: ['compose', 'compose-ha'],

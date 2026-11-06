@@ -18,8 +18,6 @@ describe('providers.scaleway (Scaleway opt-in scenarios)', () => {
       mode: 'compose',
       dnsProvider: 'scaleway',
       envPrefix: 's1',
-      // The CLI refuses a compose scale on Scaleway (tests/config.ts).
-      skipSteps: ['scale', 'verify-scale'],
     });
     expect(scaleway.scenarios[1]).toEqual({
       mode: 'compose-ha',
@@ -28,8 +26,6 @@ describe('providers.scaleway (Scaleway opt-in scenarios)', () => {
       // default, same reasoning as Hetzner's e2.
       dnsProvider: 'scaleway',
       envPrefix: 's2',
-      // The same refusal: compose-ha scales through the same path.
-      skipSteps: ['scale', 'verify-scale'],
     });
     expect(scaleway.defaultSelection).toEqual(['compose', 'compose-ha']);
   });

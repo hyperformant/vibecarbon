@@ -45,7 +45,6 @@ vi.mock('../../../src/lib/deploy/compose/server-state-sync.js', async (orig) => 
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    assertComposeScaleKeepsState: () => {},
     resolveServerStateOptions: async () => ({}),
   };
 });

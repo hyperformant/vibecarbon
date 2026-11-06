@@ -15,7 +15,7 @@
  * (Read with the last known inputs) fills every readable field from the new
  * server.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const selectStackMock = vi.fn();
 vi.mock('@pulumi/pulumi/automation/index.js', () => ({
@@ -30,6 +30,7 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
 
 const { COMPOSE_SERVER_STATE, composeServerStateSpec, retargetServerResource, syncServerState } =
   await import('../../../src/lib/iac/server-state.js');
+const { ScalewayProvider } = await import('../../../src/lib/providers/scaleway.js');
 
 const STACK_URN = 'urn:pulumi:prod-primary::myapp::pulumi:pulumi:Stack::myapp-prod-primary';
 
@@ -83,6 +84,11 @@ describe('COMPOSE_SERVER_STATE: every provider compose scale supports', () => {
       },
       vultr: { type: 'vultr:index/instance:Instance', sizeKey: 'plan', ipKey: 'mainIp' },
       linode: { type: 'linode:index/instance:Instance', sizeKey: 'type', ipKey: 'ipAddress' },
+      scaleway: {
+        type: 'scaleway:instance/server:Server',
+        sizeKey: 'type',
+        ipResource: { type: 'scaleway:instance/ip:Ip', name: 'ip' },
+      },
     });
   });
 
@@ -92,20 +98,30 @@ describe('COMPOSE_SERVER_STATE: every provider compose scale supports', () => {
       digitalocean: (await import('@pulumi/digitalocean')).Droplet,
       vultr: (await import('@ediri/vultr')).Instance,
       linode: (await import('@pulumi/linode')).Instance,
+      scaleway: (await import('@pulumiverse/scaleway')).instance.Server,
     } as Record<string, { __pulumiType: string }>;
     for (const [provider, spec] of Object.entries(COMPOSE_SERVER_STATE)) {
       expect(classes[provider].__pulumiType).toBe(spec.type);
     }
   });
 
-  it('scaleway has no spec: its server holds a flexible IP and volumes the replacement does not', () => {
-    expect(composeServerStateSpec('scaleway')).toBeNull();
+  it('names the class of the IP resource the Scaleway program declares as `ip`', async () => {
+    const { instance } = await import('@pulumiverse/scaleway');
+    expect(instance.Ip.__pulumiType).toBe(COMPOSE_SERVER_STATE.scaleway.ipResource.type);
+  });
+
+  it('every provider has a spec, and an unknown one has none', () => {
+    expect(composeServerStateSpec('scaleway')).toBe(COMPOSE_SERVER_STATE.scaleway);
     expect(composeServerStateSpec('hetzner')).toBe(COMPOSE_SERVER_STATE.hetzner);
+    expect(composeServerStateSpec('nosuch')).toBeNull();
   });
 });
 
 describe('retargetServerResource', () => {
-  for (const provider of Object.keys(COMPOSE_SERVER_STATE)) {
+  const plainProviders = Object.keys(COMPOSE_SERVER_STATE).filter(
+    (p) => !COMPOSE_SERVER_STATE[p].ipResource,
+  );
+  for (const provider of plainProviders) {
     it(`${provider}: re-points the server resource at the replacement, same URN, inputs kept`, () => {
       const spec = COMPOSE_SERVER_STATE[provider];
       const before = deploymentFor(provider);
@@ -209,11 +225,128 @@ describe('syncServerState', () => {
   it('refuses a provider with no spec before touching state', async () => {
     await expect(
       syncServerState('prod', TARGET, {
-        provider: 'scaleway',
+        provider: 'nosuch',
         providerToken: 't',
         projectName: 'myapp',
       }),
-    ).rejects.toThrow(/scaleway/);
+    ).rejects.toThrow(/nosuch/);
     expect(selectStackMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('Scaleway: the IP is its own resource, and ids carry the zone', () => {
+  const spec = COMPOSE_SERVER_STATE.scaleway;
+  const ZONED_SERVER = 'fr-par-1/old-id';
+  const ZONED_IP = 'fr-par-1/old-ip';
+  const target = { serverId: 'new-id', serverType: 'big', ip: '9.9.9.9', ipId: 'new-ip' };
+
+  const deployment = () => ({
+    version: 3,
+    deployment: {
+      manifest: {},
+      resources: [
+        {
+          urn: STACK_URN,
+          type: 'pulumi:pulumi:Stack',
+          outputs: { serverIp: '1.1.1.1', serverId: 'old-id', firewallId: 'fw' },
+        },
+        {
+          urn: 'urn:pulumi:prod-primary::myapp::scaleway:instance/ip:Ip::ip',
+          type: spec.ipResource.type,
+          id: ZONED_IP,
+          inputs: { type: 'routed_ipv4', zone: 'fr-par-1' },
+          outputs: { id: ZONED_IP, address: '1.1.1.1', type: 'routed_ipv4' },
+          parent: STACK_URN,
+        },
+        {
+          urn: `urn:pulumi:prod-primary::myapp::${spec.type}::server`,
+          type: spec.type,
+          id: ZONED_SERVER,
+          inputs: { type: 'small', ipIds: [ZONED_IP], userData: { 'cloud-init': 'kept' } },
+          outputs: { id: ZONED_SERVER, type: 'small', ipIds: [ZONED_IP] },
+          parent: STACK_URN,
+        },
+      ],
+    },
+  });
+
+  it('points the server and its IP at the replacement, keeping the zone on both ids', () => {
+    const { deployment: next, changed } = retargetServerResource(deployment(), spec, target);
+    expect(changed).toBe(true);
+    const [stackRes, ip, server] = next.deployment.resources;
+    expect(server.id).toBe('fr-par-1/new-id');
+    expect(server.outputs.id).toBe('fr-par-1/new-id');
+    expect(server.inputs.type).toBe('big');
+    expect(server.inputs.ipIds).toEqual(['fr-par-1/new-ip']);
+    expect(server.outputs.ipIds).toEqual(['fr-par-1/new-ip']);
+    expect(server.inputs.userData).toEqual({ 'cloud-init': 'kept' });
+    expect(ip.id).toBe('fr-par-1/new-ip');
+    expect(ip.outputs).toMatchObject({ id: 'fr-par-1/new-ip', address: '9.9.9.9' });
+    // The program strips the zone from this output, and the REST paths read it.
+    expect(stackRes.outputs).toMatchObject({ serverId: 'new-id', serverIp: '9.9.9.9' });
+  });
+
+  it('applied twice, the second pass changes nothing', () => {
+    const once = retargetServerResource(deployment(), spec, target).deployment;
+    expect(retargetServerResource(once, spec, target).changed).toBe(false);
+  });
+
+  it('refuses a target with no IP id, rather than leaving the old IP in state', () => {
+    const { ipId: _ipId, ...noIp } = target;
+    expect(() => retargetServerResource(deployment(), spec, noIp, 'prod')).toThrow(/flexible IP/);
+  });
+
+  it('refuses a stack with no IP resource', () => {
+    const state = deployment();
+    state.deployment.resources.splice(1, 1);
+    expect(() => retargetServerResource(state, spec, target, 'prod')).toThrow(/holds no/);
+  });
+
+  describe('syncServerState', () => {
+    const { ipId: _ipId, ...recorded } = target;
+    const options = { provider: 'scaleway', providerToken: 't', projectName: 'myapp' };
+    let imported: unknown;
+
+    beforeEach(() => {
+      imported = undefined;
+      vi.stubEnv('SCALEWAY_ACCESS_KEY', 'a');
+      vi.stubEnv('SCALEWAY_DEFAULT_PROJECT_ID', 'p');
+      selectStackMock.mockResolvedValue({
+        exportStack: async () => deployment(),
+        importStack: async (state: unknown) => {
+          imported = state;
+        },
+        setConfig: async () => {},
+        workspace: { installPlugin: async () => {} },
+      });
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+
+    it('finds the IP id by address, since a scale records only the address', async () => {
+      vi.spyOn(ScalewayProvider.prototype, 'listFlexibleIPsDetailed').mockResolvedValue({
+        items: [
+          { id: 'other', address: '8.8.8.8' },
+          { id: 'new-ip', address: '9.9.9.9' },
+        ],
+        complete: true,
+      } as never);
+      await syncServerState('prod-primary', recorded, options);
+      const resources = (imported as ReturnType<typeof deployment>).deployment.resources;
+      expect(resources[1].id).toBe('fr-par-1/new-ip');
+    });
+
+    it('fails rather than guesses when no flexible IP holds the address', async () => {
+      vi.spyOn(ScalewayProvider.prototype, 'listFlexibleIPsDetailed').mockResolvedValue({
+        items: [{ id: 'other', address: '8.8.8.8' }],
+        complete: true,
+      } as never);
+      await expect(syncServerState('prod-primary', recorded, options)).rejects.toThrow(
+        /no flexible IP holds 9\.9\.9\.9/,
+      );
+      expect(imported).toBeUndefined();
+    });
   });
 });
