@@ -9,7 +9,7 @@
  *
  * Deletion goes through the provider instance API wherever it exists
  * (listServersDetailed / deleteServer(waitUntilGone) / listVolumesDetailed /
- * deleteVolume / deleteFirewallByName / deleteSSHKeyByName /
+ * deleteVolume / deleteFirewallByName / deleteSSHKeyById /
  * listLoadBalancers / deleteLoadBalancer); enumeration of firewalls, ssh
  * keys, and VPCs — which the provider only exposes as exact-name lookups —
  * walks the DO API directly with the same links.pages.next idiom as
@@ -48,7 +48,7 @@ interface DoSweepProvider {
   volumeLabels(volume: object): Record<string, string>;
   deleteVolume(id: number | string): Promise<unknown>;
   deleteFirewallByName(name: string): Promise<{ deleted: boolean }>;
-  deleteSSHKeyByName(name: string): Promise<boolean>;
+  deleteSSHKeyById(id: number): Promise<'deleted' | 'absent' | 'stuck'>;
   listLoadBalancers(): Promise<Array<{ id: string; name: string }>>;
   deleteLoadBalancer(id: string): Promise<unknown>;
 }
@@ -277,8 +277,13 @@ export async function sweepOrphanedDigitalOceanResources(
     for (const sshKey of items) {
       if (!sshKey.name.startsWith(projectName)) continue;
       console.log(`${tag} [sweep] Deleting orphaned ssh key ${sshKey.name}`);
-      if (await provider.deleteSSHKeyByName(sshKey.name)) counts.sshKeys++;
-      else {
+      const outcome = await provider.deleteSSHKeyById(sshKey.id);
+      if (outcome === 'deleted') counts.sshKeys++;
+      else if (outcome === 'absent') {
+        // DigitalOcean lists a deleted key for up to 22 s: destroy's delete
+        // landed and this list was stale, so nothing was left behind.
+        console.log(`${tag} [sweep] ssh key ${sshKey.name} was already gone (stale list)`);
+      } else {
         enumFailed = true;
         console.warn(`${tag} [sweep] SSH key ${sshKey.name} delete failed`);
       }
