@@ -651,6 +651,20 @@ async function captureFailureDiagnostics(
           60_000,
         ),
       ]);
+      // The request path's own logs. A pod that is healthy and never restarted
+      // is in neither section above, so a stall in Traefik or the app left
+      // nothing to read (DO k8s-ha verify-load, 2026-11-06).
+      sections.push([
+        `${label}: traefik and app logs (last 60 lines each)`,
+        safeRun(
+          'bash',
+          [
+            '-c',
+            `for p in $(kubectl --kubeconfig ${kc} -n vibecarbon get pods --no-headers -o custom-columns=:metadata.name 2>&1 | grep -E '^(traefik|app)-'); do echo "=== $p ==="; timeout 12 kubectl --kubeconfig ${kc} -n vibecarbon logs "$p" --all-containers --timestamps --tail=60 2>&1 | tail -60 || true; done`,
+          ],
+          60_000,
+        ),
+      ]);
       // Database ROLE: pg_is_in_recovery distinguishes a seeded/streaming
       // replica (t) from an independent writable primary (f) — decisive for
       // any standby-seeding or replication RCA, and cheap.

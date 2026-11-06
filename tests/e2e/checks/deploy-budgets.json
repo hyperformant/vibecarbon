@@ -9,6 +9,12 @@
           "endToEndS": 265,
           "tlsAllowanceS": 15,
           "samples": 1
+        },
+        "intel": {
+          "ownedS": 215,
+          "endToEndS": 230,
+          "tlsAllowanceS": 15,
+          "samples": 2
         }
       },
       "compose": {
@@ -17,12 +23,24 @@
           "endToEndS": 215,
           "tlsAllowanceS": 15,
           "samples": 1
+        },
+        "regular": {
+          "ownedS": 195,
+          "endToEndS": 220,
+          "tlsAllowanceS": 25,
+          "samples": 4
         }
       },
       "k8s-ha": {
         "any": {
           "ownedS": 320,
           "endToEndS": 335,
+          "tlsAllowanceS": 15,
+          "samples": 2
+        },
+        "intel": {
+          "ownedS": 300,
+          "endToEndS": 315,
           "tlsAllowanceS": 15,
           "samples": 2
         }
@@ -33,6 +51,12 @@
           "endToEndS": 285,
           "tlsAllowanceS": 15,
           "samples": 1
+        },
+        "regular": {
+          "ownedS": 265,
+          "endToEndS": 350,
+          "tlsAllowanceS": 85,
+          "samples": 2
         }
       }
     },
@@ -43,6 +67,18 @@
           "endToEndS": 350,
           "tlsAllowanceS": 15,
           "samples": 9
+        },
+        "cpx": {
+          "ownedS": 195,
+          "endToEndS": 210,
+          "tlsAllowanceS": 15,
+          "samples": 2
+        },
+        "cx": {
+          "ownedS": 260,
+          "endToEndS": 275,
+          "tlsAllowanceS": 15,
+          "samples": 1
         }
       },
       "compose": {
@@ -51,6 +87,18 @@
           "endToEndS": 300,
           "tlsAllowanceS": 25,
           "samples": 3
+        },
+        "cpx": {
+          "ownedS": 190,
+          "endToEndS": 210,
+          "tlsAllowanceS": 20,
+          "samples": 2
+        },
+        "cx": {
+          "ownedS": 175,
+          "endToEndS": 190,
+          "tlsAllowanceS": 15,
+          "samples": 1
         }
       },
       "k8s-ha": {
@@ -59,6 +107,12 @@
           "endToEndS": 420,
           "tlsAllowanceS": 15,
           "samples": 6
+        },
+        "cpx": {
+          "ownedS": 280,
+          "endToEndS": 295,
+          "tlsAllowanceS": 15,
+          "samples": 2
         }
       },
       "k8s": {
@@ -67,24 +121,30 @@
           "endToEndS": 415,
           "tlsAllowanceS": 15,
           "samples": 3
+        },
+        "cpx": {
+          "ownedS": 260,
+          "endToEndS": 275,
+          "tlsAllowanceS": 15,
+          "samples": 3
         }
       }
     },
     "linode": {
       "compose-ha": {
         "standard": {
-          "ownedS": 230,
-          "endToEndS": 245,
+          "ownedS": 265,
+          "endToEndS": 280,
           "tlsAllowanceS": 15,
-          "samples": 1
+          "samples": 6
         }
       },
       "compose": {
         "standard": {
-          "ownedS": 210,
-          "endToEndS": 235,
-          "tlsAllowanceS": 25,
-          "samples": 2
+          "ownedS": 225,
+          "endToEndS": 265,
+          "tlsAllowanceS": 40,
+          "samples": 6
         }
       }
     },
@@ -95,6 +155,12 @@
           "endToEndS": 380,
           "tlsAllowanceS": 15,
           "samples": 1
+        },
+        "DEV1": {
+          "ownedS": 330,
+          "endToEndS": 345,
+          "tlsAllowanceS": 15,
+          "samples": 2
         }
       },
       "compose": {
@@ -103,6 +169,12 @@
           "endToEndS": 240,
           "tlsAllowanceS": 20,
           "samples": 1
+        },
+        "BASIC3": {
+          "ownedS": 170,
+          "endToEndS": 200,
+          "tlsAllowanceS": 30,
+          "samples": 2
         }
       }
     },
@@ -113,6 +185,12 @@
           "endToEndS": 285,
           "tlsAllowanceS": 15,
           "samples": 1
+        },
+        "vc2": {
+          "ownedS": 250,
+          "endToEndS": 265,
+          "tlsAllowanceS": 15,
+          "samples": 2
         }
       },
       "compose": {
@@ -121,6 +199,12 @@
           "endToEndS": 245,
           "tlsAllowanceS": 15,
           "samples": 1
+        },
+        "vc2": {
+          "ownedS": 195,
+          "endToEndS": 215,
+          "tlsAllowanceS": 20,
+          "samples": 2
         }
       }
     }
