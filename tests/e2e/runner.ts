@@ -801,7 +801,6 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     region: string;
     secondaryRegion?: string;
     scaleTo: CapacityPreferences['scaleTo'];
-    scaleTarget: string;
   };
   const typesLabel = (types: Record<string, string>) =>
     Object.entries(types)
@@ -830,7 +829,6 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
         region: pair.primary.region,
         secondaryRegion: pair.standby.region,
         scaleTo: capacityPrefs.scaleTo,
-        scaleTarget: pair.primary.scaleTarget,
       });
     } else {
       const r = await resolveCapacity(capacityPrefs, token, {
@@ -843,7 +841,6 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
         serverType: r.serverType,
         region: r.region,
         scaleTo: capacityPrefs.scaleTo,
-        scaleTarget: r.scaleTarget,
       });
     }
   }
@@ -928,7 +925,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     scenario: (typeof scenarios)[number],
     attemptNumber: number,
   ): Promise<ScenarioResult> => {
-    const { mode, dnsProvider, envPrefix, serverType, region, scaleTo, scaleTarget } = scenario;
+    const { mode, dnsProvider, envPrefix, serverType, region, scaleTo } = scenario;
     const secondaryRegion = scenario.secondaryRegion;
     const provider = scenario.provider;
     const domain = scenarioDomain(
@@ -991,7 +988,6 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       adminEmail: config.adminEmail,
       adminPassword: config.adminPassword,
       scaleTo,
-      scaleTarget,
       projectName,
       projectDir,
       provider,

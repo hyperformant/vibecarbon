@@ -242,41 +242,127 @@ describe('scale target candidates', () => {
 
 describe('deployedScaleTarget', () => {
   const ladder = { cpx22: 'cpx32', cpx12: 'cpx22' };
-  const multi = { 's-2vcpu-4gb-amd': ['s-4vcpu-8gb-amd', 's-4vcpu-8gb-intel'] };
+  const doLadder = {
+    's-2vcpu-4gb': ['s-4vcpu-8gb', 's-4vcpu-8gb-intel'],
+    's-2vcpu-4gb-intel': 's-4vcpu-8gb-intel',
+  };
+  const doFixture = '2026-10-22/digitalocean';
+  const doHa = {
+    masterServerType: 's-2vcpu-4gb',
+    region: 'nyc3',
+    secondaryRegion: 'tor1',
+    ha: { primary: { region: 'nyc3' }, standby: { region: 'tor1' } },
+  };
 
-  it('uses the resolved target when it is one of the entry candidates', () => {
-    const env = { serverType: 's-2vcpu-4gb-amd' };
-    expect(deployedScaleTarget(env, 'compose-ha', multi, 's-4vcpu-8gb-intel')).toBe(
-      's-4vcpu-8gb-intel',
+  // The catalog the step reads, as the provider's API would answer now. The
+  // class must be empty when the read starts: `fetchServerTypes` answers from
+  // preflight's copy otherwise, and a seeded class would hide that.
+  function readsNow(fixture: string, drop: Record<string, string[]> = {}) {
+    // biome-ignore lint/suspicious/noExplicitAny: a provider class
+    return vi.fn(async (Provider: any) => {
+      expect(Provider._locationTypes).toBeNull();
+      seedCatalog(Provider, fixture, { drop });
+      return true;
+    });
+  }
+  function doTarget(
+    env: object,
+    drop: Record<string, string[]>,
+    mode: 'k8s' | 'k8s-ha' = 'k8s-ha',
+  ) {
+    restore = seedCatalog(DigitalOceanProvider, doFixture);
+    const loadCatalog = readsNow(doFixture, drop);
+    return deployedScaleTarget(env, mode, doLadder, 'digitalocean', 't', { loadCatalog });
+  }
+  function hetznerTarget(env: object, mode: 'compose' | 'k8s-ha' | 'k8s', scaleTo = ladder) {
+    seedHetzner();
+    const loadCatalog = readsNow('2026-10-22/hetzner');
+    return deployedScaleTarget(env, mode, scaleTo, 'hetzner', 't', { loadCatalog });
+  }
+
+  // Run 42292028864: DigitalOcean stopped selling Intel in nyc3 during the leg,
+  // so the deploy rightly chose regular and preflight's Intel target was refused.
+  it('reads the catalog when the step runs, not the copy preflight left in the class', async () => {
+    restore = seedCatalog(DigitalOceanProvider, doFixture, { drop: { nyc3: ['s-4vcpu-8gb'] } });
+    const loadCatalog = readsNow(doFixture, { nyc3: ['s-4vcpu-8gb-intel'] });
+    const target = await deployedScaleTarget(doHa, 'k8s-ha', doLadder, 'digitalocean', 't', {
+      loadCatalog,
+    });
+    expect(target).toBe('s-4vcpu-8gb');
+    expect(loadCatalog).toHaveBeenCalledOnce();
+  });
+
+  // In the fixture tor1 sells regular and Intel, sfo3 Intel only, nyc3 regular only.
+  const tor1Sfo3 = { region: 'tor1', secondaryRegion: 'sfo3' };
+
+  it('takes the next candidate when a side does not sell the first', async () => {
+    const env = { ...tor1Sfo3, masterServerType: 's-2vcpu-4gb' };
+    await expect(doTarget(env, {})).resolves.toBe('s-4vcpu-8gb-intel');
+  });
+
+  it('follows the type the deploy chose when the catalog moved the other way', async () => {
+    const env = { ...tor1Sfo3, masterServerType: 's-2vcpu-4gb-intel' };
+    await expect(doTarget(env, {})).resolves.toBe('s-4vcpu-8gb-intel');
+  });
+
+  it('checks the primary the env records now, as scale does', async () => {
+    // Top-level nyc3 sells no Intel, so reading it instead would fail the step.
+    const env = {
+      masterServerType: 's-2vcpu-4gb',
+      region: 'nyc3',
+      ha: { primary: { region: 'tor1' }, standby: { region: 'sfo3' } },
+    };
+    await expect(doTarget(env, {})).resolves.toBe('s-4vcpu-8gb-intel');
+  });
+
+  it('checks only the one location of a single-cluster deploy', async () => {
+    const env = { masterServerType: 's-2vcpu-4gb', region: 'nyc3', secondaryRegion: 'sfo3' };
+    await expect(doTarget(env, {}, 'k8s')).resolves.toBe('s-4vcpu-8gb');
+  });
+
+  it('fails the step naming every candidate when none is sold', async () => {
+    await expect(doTarget(doHa, { tor1: ['s-4vcpu-8gb'] })).rejects.toThrow(
+      /s-4vcpu-8gb: standby location tor1 does not sell.*s-4vcpu-8gb-intel: primary location nyc3/,
     );
-    expect(deployedScaleTarget(env, 'compose-ha', multi)).toBe('s-4vcpu-8gb-amd');
   });
 
-  // Preflight runs once when a leg starts and a leg can run for 100 minutes.
-  // DigitalOcean began selling Intel in sfo3 during one, so the deploy rightly
-  // chose Intel while preflight's target was still the regular type.
-  it('follows the deployed type when the catalog moved after preflight', () => {
-    const env = { serverType: 's-2vcpu-4gb-amd' };
-    expect(deployedScaleTarget(env, 'compose-ha', multi, 's-4vcpu-8gb')).toBe('s-4vcpu-8gb-amd');
+  it('fails the step when the catalog cannot be read', async () => {
+    seedHetzner();
+    const env = { serverType: 'cpx22', region: 'nbg1' };
+    const loadCatalog = async () => false;
+    await expect(
+      deployedScaleTarget(env, 'compose', ladder, 'hetzner', 't', { loadCatalog }),
+    ).rejects.toThrow(/could not read/);
   });
 
-  it('scales compose from the serverType the deploy recorded', () => {
-    expect(deployedScaleTarget({ serverType: 'cpx22' }, 'compose-ha', ladder)).toBe('cpx32');
+  it('scales compose from the serverType the deploy recorded', async () => {
+    const env = { serverType: 'cpx22', region: 'nbg1' };
+    await expect(hetznerTarget(env, 'compose')).resolves.toBe('cpx32');
   });
 
-  it('scales k8s from the recorded master type (scale -type resizes every role)', () => {
-    const env = { masterServerType: 'cpx22', dbServerType: 'cpx12', workerServerType: 'cpx22' };
-    expect(deployedScaleTarget(env, 'k8s-ha', ladder)).toBe('cpx32');
+  it('scales k8s from the recorded master type (scale -type resizes every role)', async () => {
+    const env = {
+      masterServerType: 'cpx22',
+      dbServerType: 'cpx12',
+      workerServerType: 'cpx22',
+      region: 'nbg1',
+    };
+    await expect(hetznerTarget(env, 'k8s')).resolves.toBe('cpx32');
   });
 
-  it('fails the step when the recorded type has no ladder entry', () => {
-    expect(() => deployedScaleTarget({ serverType: 'cx43' }, 'compose', ladder)).toThrow(
+  it('fails the step when the recorded type has no ladder entry', async () => {
+    const env = { serverType: 'cx43', region: 'nbg1' };
+    await expect(hetznerTarget(env, 'compose')).rejects.toThrow(
       'no scale target for cx43 in tests/config.ts scaleTo',
     );
   });
 
-  it('fails the step when the deploy recorded no type', () => {
-    expect(() => deployedScaleTarget({}, 'k8s', ladder)).toThrow(/masterServerType/);
+  it('fails the step when the deploy recorded no type', async () => {
+    await expect(hetznerTarget({ region: 'nbg1' }, 'k8s')).rejects.toThrow(/masterServerType/);
+  });
+
+  it('fails the step when the deploy recorded no region', async () => {
+    await expect(hetznerTarget({ serverType: 'cpx22' }, 'compose')).rejects.toThrow(/no region/);
   });
 });
 

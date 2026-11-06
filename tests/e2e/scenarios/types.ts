@@ -42,11 +42,6 @@ export interface ScenarioConfig {
    * the scale step looks up the type the deploy recorded.
    */
   scaleTo: Readonly<Record<string, string | readonly string[]>>;
-  /**
-   * The scale target the preflight resolver chose (first ladder candidate sold
-   * on every side and bigger than each side's type); the scale step uses it.
-   */
-  scaleTarget?: string;
   projectName: string;
   projectDir: string;
   testRepoSlug?: string;

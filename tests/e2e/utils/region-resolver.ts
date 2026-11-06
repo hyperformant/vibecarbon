@@ -58,9 +58,9 @@ export interface ResolvedCapacity {
   /** Where the capacity was found, for diagnostics (the region itself). */
   datacenter: string;
   /**
-   * The scale step's target: the first ladder candidate sold on every side
-   * of the deploy and bigger than each side's own type. The scale step uses
-   * this, never `scaleTo[type]` directly.
+   * The first ladder candidate sold on every side of the deploy and bigger
+   * than each side's own type at preflight. It proves a target exists when the
+   * leg starts; the scale step chooses its own (`deployedScaleTarget`).
    */
   scaleTarget: string;
 }
@@ -332,25 +332,36 @@ export async function resolveCapacityPair(
   };
 }
 
+/** What the scale step reads back from `.vibecarbon.json`. */
+export interface DeployedEnv {
+  serverType?: string;
+  masterServerType?: string;
+  region?: string;
+  secondaryRegion?: string;
+  ha?: { primary?: { region?: string }; standby?: { region?: string } };
+}
+
 /**
- * The scale step's target. The deploy records its type in `.vibecarbon.json`
- * (compose: `serverType`; k8s: `masterServerType`, since `scale -type` resizes
- * every role); that type must have a ladder entry. `resolvedTarget` is the
- * preflight resolver's pick (`ResolvedCapacity.scaleTarget`) and wins when it
- * is one of that entry's candidates. Preflight and the deploy share `haRoleSets`,
- * so a pick that is not a candidate means the catalog moved between them:
- * preflight runs once when a leg starts and a leg can run for 100 minutes. The
- * deployed type is the truth then, so the entry's first candidate is used, as
- * it is with no `resolvedTarget`, and a target the provider no longer sells
- * fails the scale itself. Throws when the deploy recorded no type or the ladder
- * has no entry.
+ * The scale step's target, chosen from the catalog as it is when the step runs.
+ * A leg can run for 100 minutes and DigitalOcean's stock moved during several,
+ * in both directions, so nothing preflight chose is kept: preflight only proves
+ * a target exists at the start. The deploy records its type (compose:
+ * `serverType`; k8s: `masterServerType`, since `scale -type` resizes every
+ * role) and that type's ladder entry gives the candidates. The first one every
+ * resized side sells now is the target, the same read `vibecarbon scale` then
+ * makes. `fetchServerTypes` returns early once a class has a catalog and this
+ * process has held one since preflight, so the class is cleared first. Throws
+ * when the deploy recorded no type or region, the ladder has no entry, or no
+ * candidate is sold.
  */
-export function deployedScaleTarget(
-  envConfig: { serverType?: string; masterServerType?: string },
+export async function deployedScaleTarget(
+  envConfig: DeployedEnv,
   mode: CapacityMode,
   scaleTo: Readonly<Record<string, string | readonly string[]>>,
-  resolvedTarget?: string,
-): string {
+  provider: CapacityProvider,
+  token: string,
+  options: Pick<ResolveOptions, 'loadCatalog'> = {},
+): Promise<string> {
   const field = mode.startsWith('k8s') ? 'masterServerType' : 'serverType';
   const type = envConfig[field];
   if (!type) {
@@ -360,13 +371,32 @@ export function deployedScaleTarget(
   }
   const candidates = scaleCandidates(scaleTo[type]);
   if (candidates.length === 0) throw noScaleTarget(type);
-  if (resolvedTarget === undefined) return candidates[0];
-  if (candidates.includes(resolvedTarget)) return resolvedTarget;
-  console.log(
-    `[scale] preflight's target ${resolvedTarget} does not fit the deployed ${type}, ` +
-      `because the catalog moved: scaling to ${candidates[0]}`,
-  );
-  return candidates[0];
+
+  const isHa = mode.endsWith('-ha');
+  const primaryRegion = (isHa && envConfig.ha?.primary?.region) || envConfig.region;
+  if (!primaryRegion) {
+    throw new Error('the deploy recorded no region in .vibecarbon.json');
+  }
+  const standbyRegion = isHa ? (envConfig.ha?.standby?.region ?? envConfig.secondaryRegion) : null;
+
+  const role = scaleKeyRole(mode);
+  const sides: ScaleSide[] = [
+    { label: 'primary', location: primaryRegion, types: [{ role, type }] },
+    ...(standbyRegion
+      ? [{ label: 'standby', location: standbyRegion, types: [{ role, type }] }]
+      : []),
+  ];
+
+  const cached: ProviderClass = getProviderClass(provider);
+  cached._locationTypes = null;
+  const Provider = await loadProvider(provider, token, options.loadCatalog);
+  const picked = pickScaleTarget(Provider, candidates, sides);
+  if ('failures' in picked) {
+    throw new Error(
+      `no scale target candidate for the deployed ${type} is sold now: ${picked.failures.join('; ')}`,
+    );
+  }
+  return picked.target;
 }
 
 /**
