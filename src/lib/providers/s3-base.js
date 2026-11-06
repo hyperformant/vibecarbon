@@ -547,9 +547,17 @@ export class S3CompatibleProvider {
    * build a VPS and fail five minutes later at wal-g's audit with
    * NoSuchBucket, and the bucket never appeared at all.
    * @param {string} bucketName - Bucket name (must be globally unique)
+   * @param {object} [opts]
+   * @param {() => Promise<void>} [opts.beforeFirstRead] - writes bucket settings
+   *   on a bucket this call really created, after the quiet period and before
+   *   any probe reads it. Must not throw. Hetzner again, 2026-11-06: a CORS rule
+   *   written after the probes got its preflights denied at random for about
+   *   9 minutes, 20 to 30% of them, while a read-back of the rule looked right;
+   *   written first, none of about 700 were. So a setting a new bucket needs
+   *   goes on here, never after.
    * @returns {Promise<{name: string, created: boolean, ready: boolean, message?: string}>}
    */
-  async createBucket(bucketName) {
+  async createBucket(bucketName, { beforeFirstRead } = {}) {
     if (await this.bucketExists(bucketName)) {
       return { name: bucketName, created: false, ready: true, message: 'Bucket already exists' };
     }
@@ -566,6 +574,7 @@ export class S3CompatibleProvider {
         if (this.constructor.bucketQuietMs > 0) {
           await new Promise((r) => setTimeout(r, this.constructor.bucketQuietMs));
         }
+        await beforeFirstRead?.();
         const ready = await this.waitForBucketVisible(bucketName);
         return { name: bucketName, created: true, ready };
       } catch (error) {

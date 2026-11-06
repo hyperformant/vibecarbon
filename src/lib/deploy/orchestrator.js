@@ -1396,7 +1396,17 @@ export async function executeDeployment(args, gatheredConfig) {
     state.startStep('s3-setup', s3Inputs);
     try {
       s3Spinner.start(`Creating S3 bucket: ${s3Config.bucket}`);
-      const bucket = await s3Provider.createBucket(s3Config.bucket);
+      // The rule goes on before anything reads the new bucket (createBucket says
+      // why). A failure here stays quiet: the finalize step below reads the
+      // rule, writes it if it is missing, and reports what still fails.
+      const beforeFirstRead = () =>
+        applyAppBucketCors({
+          createProvider: async () => s3Provider,
+          bucket: s3Config.bucket,
+          domain,
+          log: { warn: () => {} },
+        });
+      const bucket = await s3Provider.createBucket(s3Config.bucket, { beforeFirstRead });
       assertBucketReady(bucket, 'App storage');
       s3Spinner.stop(
         bucket.created

@@ -235,6 +235,21 @@ describe('orchestrator call site', () => {
     expect(src).not.toMatch(/await applyAppBucketCors\(/);
   });
 
+  it('a new app bucket gets its rule before the first read, and only the app bucket does', () => {
+    const creates = [...src.matchAll(/s3Provider\.createBucket\(([^\n]*)/g)].map((m) => m[1]);
+    expect(creates).toEqual([
+      's3Config.bucket, { beforeFirstRead });',
+      'backupS3Config.bucket);',
+      'stateBucket);',
+    ]);
+    const hook = src.match(
+      /const beforeFirstRead = \(\) =>\s+applyAppBucketCors\(\{[\s\S]*?\}\);/,
+    )?.[0];
+    expect(hook, 'the hook the app bucket create passes').toBeTruthy();
+    expect(hook).toContain('createProvider: async () => s3Provider');
+    expect(hook).toContain('bucket: s3Config.bucket');
+  });
+
   it('awaits the finalize after the tier deploy and before the success outro', () => {
     const finish = src.indexOf('appBucketFinalize.finish(p.log)');
     expect(finish).toBeGreaterThan(-1);
