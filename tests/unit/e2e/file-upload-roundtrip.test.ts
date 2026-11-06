@@ -303,7 +303,39 @@ describe('checkFileUploadRoundtrip', () => {
     });
     const r = await checkFileUploadRoundtrip(DOMAIN, jar, { appFetch, transfer: transferWith() });
     expect(r.status).toBe('fail');
-    expect(r.errorMessage).toMatch(/^request: DNS resolution failed/);
+    expect(r.errorMessage).toMatch(/^presign: DNS resolution failed/);
+  });
+
+  // Each call has its own stage, or a stall on one is indistinguishable from a
+  // stall on another (a Scaleway run failed with only "request: ...aborted").
+  it.each([
+    ['cors', 'preflight'],
+    ['upload', 'put'],
+    ['download', 'get'],
+  ] as const)('names %s when the transfer call throws', async (stage, method) => {
+    const aborted = vi.fn(async () => {
+      throw new Error('The operation was aborted due to timeout');
+    });
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+      appFetch: appFetchWith(),
+      transfer: transferWith({ [method]: aborted }),
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toBe(`${stage}: The operation was aborted due to timeout`);
+    expect(r.details).toMatchObject({ step: stage });
+  });
+
+  it.each([
+    ['csp', 'home'],
+    ['read', 'read'],
+  ] as const)('names %s when the app call throws', async (stage, hook) => {
+    const appFetch = appFetchWith({
+      [hook]: () => {
+        throw new Error('The operation was aborted due to timeout');
+      },
+    });
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, { appFetch, transfer: transferWith() });
+    expect(r.errorMessage).toBe(`${stage}: The operation was aborted due to timeout`);
   });
 
   // A known provider quirk on new buckets must not hold the run up: the first

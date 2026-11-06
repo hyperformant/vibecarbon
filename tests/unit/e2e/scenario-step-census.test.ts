@@ -53,16 +53,16 @@ describe('warm-deploy runs in every scenario', () => {
   });
 });
 
-describe('scale is skipped by scenario config, for Scaleway compose only', () => {
-  it('Scaleway compose skips scale and its verify', () => {
-    const [s] = resolveSelection({ include: ['scaleway/compose'] });
+describe('scale is skipped by scenario config, for Scaleway only', () => {
+  it.each(['scaleway/compose', 'scaleway/compose-ha'])('%s skips scale and its verify', (token) => {
+    const [s] = resolveSelection({ include: [token] });
     expect(s.skipSteps).toEqual(['scale', 'verify-scale']);
   });
 
   it('no other scenario skips anything', () => {
     for (const [provider, entry] of Object.entries(registry)) {
       for (const s of entry.scenarios) {
-        const expected = provider === 'scaleway' && s.mode === 'compose';
+        const expected = provider === 'scaleway';
         expect(Boolean(s.skipSteps?.length), `${provider}/${s.mode}`).toBe(expected);
       }
     }
@@ -72,7 +72,7 @@ describe('scale is skipped by scenario config, for Scaleway compose only', () =>
     const cfg = read('../../config.ts');
     const at = cfg.indexOf("skipSteps: ['scale', 'verify-scale']");
     expect(at).toBeGreaterThan(-1);
-    expect(cfg.slice(at - 600, at)).toMatch(/refuses to scale/);
+    expect(cfg.slice(at - 600, at)).toMatch(/CLI refuses a compose scale/);
   });
 
   it('the lifecycle applies the scenario skips on top of the flag', () => {
