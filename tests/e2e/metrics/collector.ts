@@ -15,18 +15,7 @@ import type { CostSnapshot, VerificationResult } from '../scenarios/types.js';
 import { collectResourceMetrics } from '../utils/ssh.js';
 import { sshUnreachableDiagnosis, sshUnreachableSince } from '../utils/ssh-reachability.js';
 import type { E2EDb } from './db.js';
-
-// ---------------------------------------------------------------------------
-// Hetzner server type pricing (approximate EUR/hr)
-// Source: https://www.hetzner.com/cloud — pricing as of 2026-03
-// ---------------------------------------------------------------------------
-
-const HETZNER_PRICING: Record<string, { hourly: number; monthly: number }> = {
-  cpx11: { hourly: 0.0065, monthly: 4.69 },
-  cpx21: { hourly: 0.0079, monthly: 5.69 },
-  cpx31: { hourly: 0.0158, monthly: 11.39 },
-  cpx41: { hourly: 0.0317, monthly: 22.79 },
-};
+import { fetchHetznerTypePrices } from './hetzner-prices.js';
 
 // ---------------------------------------------------------------------------
 // MetricsCollector
@@ -175,9 +164,9 @@ export class MetricsCollector {
   /**
    * Fetch and record current cost from Hetzner pricing for the environment's servers.
    *
-   * Uses a hardcoded pricing lookup by server type rather than calling the Hetzner API,
-   * which avoids an API dependency and keeps tests hermetic. The server type is resolved
-   * by querying the Hetzner API for each server IP.
+   * The server type is resolved by querying the Hetzner API for each server IP, and
+   * priced from Hetzner's live `/server_types` catalog (hetzner-prices.ts), so a newly
+   * default type needs no edit here.
    *
    * Returns the cost snapshot for display purposes, or null if no servers are provided
    * or the cost cannot be determined.
@@ -189,7 +178,7 @@ export class MetricsCollector {
     provider = 'hetzner',
   ): Promise<CostSnapshot | null> {
     if (serverIps.length === 0) return null;
-    // The pricing table below is Hetzner's, and the IP -> type lookup would
+    // The pricing source below is Hetzner's, and the IP -> type lookup would
     // send computeToken to the provider's own API. Pricing another provider's
     // servers from a Hetzner table is wrong, so skip with a visible line
     // rather than query (or mis-price) a cloud we have no price list for.
@@ -207,10 +196,8 @@ export class MetricsCollector {
       // so on a busy shared account a server past page 1 was unmatchable
       // and its cost silently dropped from the metrics (truncated-listing
       // failure class, 2026-07-30). One helper, two consumers — the IP→type
-      // FETCH can no longer drift from verify-scale's (the pricing table
-      // below is still this file's own and can: HETZNER_PRICING covers only
-      // the cpx line today, so cx-typed servers resolve a type but no
-      // price — pre-existing gap, see PR #214 review ledger).
+      // FETCH can no longer drift from verify-scale's (prices come
+      // from the live catalog below, not a list kept here).
       //
       // Deliberate behavior deltas vs the old inline fetch, accepted for
       // convergence: the helper retries thrown network errors 6× with
@@ -225,6 +212,8 @@ export class MetricsCollector {
         ),
       );
 
+      const prices = await fetchHetznerTypePrices(computeToken);
+
       // Sum up pricing for all servers in this environment
       let totalHourly = 0;
       let totalMonthly = 0;
@@ -237,7 +226,7 @@ export class MetricsCollector {
           continue;
         }
 
-        const pricing = HETZNER_PRICING[serverType];
+        const pricing = prices.get(serverType);
         if (!pricing) {
           console.warn(
             `[metrics-collector] No pricing data for server type "${serverType}" (IP: ${ip})`,
