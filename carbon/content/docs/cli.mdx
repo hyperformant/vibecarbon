@@ -42,9 +42,9 @@ Multi-letter flags are spelled out (`-env`, `-mode`, `-source`). Only `-h`,
 
 ## Deploy modes
 
-Every command works in every deploy mode. The mode sets how many servers an
-environment runs, and you choose it per environment at first deploy. The same
-app deploys in any of them.
+The mode sets how many servers an environment runs and where they live. You
+choose it per environment at first deploy, and the same app deploys in any of
+them.
 
 | Goal | Mode |
 |------|------|
@@ -452,8 +452,7 @@ in the environment, or when `VIBECARBON_TELEMETRY_DISABLED=1` is set.
 
 # Deploy
 
-Cloud infrastructure primitives. `destroy`, `backup`, `restore`, `failover`,
-`scale`, `configure`, `up`, and `deploy` work the same way in every deploy mode.
+Cloud infrastructure primitives.
 
 ## deploy
 

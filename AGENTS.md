@@ -8,7 +8,7 @@ Guidance for AI coding agents working on this repository.
 
 Vibecarbon is a CLI tool, MIT licensed, that generates production-ready software applications with Hono + Vite + React 19 on its own Postgres 17 (Better Auth for sign-in, Drizzle for data, Traefik at the edge; extras such as observability and Redis arrive through `vibecarbon add`). The repository contains:
 
-1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`next.js`, `create.js`, `add.js`, `remove.js`, `up.js`, `down.js`, `reset.js`, `push.js`, `deploy.js`, `destroy.js`, `status.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `configure.js`, `upgrade.js`, `activate.js`)
+1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`next.js`, `create.js`, `add.js`, `remove.js`, `up.js`, `down.js`, `reset.js`, `push.js`, `deploy.js`, `destroy.js`, `status.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `configure.js`, `upgrade.js`)
 2. **Template directory** (`carbon/`): The complete template that gets copied and configured when users run `vibecarbon create`
 3. **Test suite** (`tests/`): Comprehensive Vitest test suite
 
