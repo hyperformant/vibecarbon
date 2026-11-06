@@ -84,9 +84,9 @@ Vibecarbon handles Docker Compose and Kubernetes, high availability with one-com
 
 **Prerequisites**
 
-- **Node.js 24.15+** and **Docker** for `create` and local development (`up`).
+- **Node.js 24.15+** and **Docker** with Compose 2.24.4+ for `create` and local development (`up`).
 - **[Pulumi CLI](https://www.pulumi.com/docs/install/)** is required for any cloud deploy (`curl -fsSL https://get.pulumi.com | sh`). It is not bundled.
-- **`kubectl` 1.27+** additionally for the `k8s` / `k8s-ha` modes.
+- **`kubectl` 1.24+** additionally for the `k8s` / `k8s-ha` modes.
 - **Linux, macOS, or Windows via [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)**. Native Windows is not supported.
 
 **Zero → production in five commands:**
