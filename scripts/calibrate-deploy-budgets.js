@@ -16,7 +16,8 @@
  * shape never sets a budget). The class is what the check recorded in the
  * step's `deploy_budget` verification details; a provider that declares no CPU
  * classes is always `standard`. A sample of a classed provider with no
- * recorded class is excluded and counted, never guessed.
+ * recorded class goes in the provider + mode row `any`, never a guessed class.
+ * Only modes in a provider's SUPPORTED_TIERS are enumerated.
  *
  * Rule (seconds):
  *   owned     = ceil5(p90 + 15) of deploy.total minus the TLS first look, at
@@ -43,6 +44,7 @@ export const MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 export const MIN_P90_SAMPLES = 4;
 export const TLS_ALLOWANCE_FLOOR_S = 15;
 export const STANDARD_CLASS = 'standard';
+export const ANY_CLASS = 'any';
 
 export const ceil5 = (s) => Math.ceil(s / 5) * 5;
 
@@ -73,6 +75,12 @@ export function budgetFromSamples(samples) {
     samples.length >= MIN_P90_SAMPLES ? percentile(tlsValues, 0.9) : Math.max(...tlsValues);
   const tlsAllowanceS = tlsRaw > TLS_ALLOWANCE_FLOOR_S ? ceil5(tlsRaw) : TLS_ALLOWANCE_FLOOR_S;
   return { ownedS, endToEndS: ownedS + tlsAllowanceS, tlsAllowanceS, samples: samples.length };
+}
+
+/** The modes a provider can really run (its SUPPORTED_TIERS). */
+export function supportedModes(provider) {
+  const tiers = getProviderClass(provider).SUPPORTED_TIERS ?? [];
+  return MODES.filter((m) => tiers.includes(m));
 }
 
 /** The classes a provider can deploy on: its declared ones, else `standard`. */
@@ -111,18 +119,16 @@ export function readSamples(dbPath, since) {
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
     const groups = new Map();
-    const unclassed = new Map();
     for (const row of db.prepare(SAMPLE_SQL).all(since)) {
       if (!MODES.includes(row.mode) || !Object.hasOwn(PROVIDERS, row.provider)) continue;
+      if (!supportedModes(row.provider).includes(row.mode)) continue;
       if (row.total_ms == null) continue;
+      // No recorded class goes in the provider + mode `any` row: a class is
+      // never guessed (the default type moves with capacity).
       const cls =
         recordedClass(row.details) ??
-        (declaredClasses(row.provider).includes(STANDARD_CLASS) ? STANDARD_CLASS : null);
+        (declaredClasses(row.provider).includes(STANDARD_CLASS) ? STANDARD_CLASS : ANY_CLASS);
       const key = `${row.provider}/${row.mode}`;
-      if (cls === null) {
-        unclassed.set(key, (unclassed.get(key) ?? 0) + 1);
-        continue;
-      }
       const gk = `${key}/${cls}`;
       if (!groups.has(gk))
         groups.set(gk, { provider: row.provider, mode: row.mode, cls, rows: [] });
@@ -131,14 +137,14 @@ export function readSamples(dbPath, since) {
         tlsS: row.tls_ms / 1000,
       });
     }
-    return { groups: [...groups.values()], unclassed };
+    return { groups: [...groups.values()] };
   } finally {
     db.close();
   }
 }
 
 /** The table and the report from the samples. */
-export function buildTable({ groups, unclassed }, since) {
+export function buildTable({ groups }, since) {
   const budgets = {};
   const rows = [];
   for (const g of groups.sort((a, b) =>
@@ -152,13 +158,8 @@ export function buildTable({ groups, unclassed }, since) {
   }
   const noData = [];
   for (const provider of Object.keys(PROVIDERS).sort()) {
-    for (const mode of MODES) {
-      for (const cls of declaredClasses(provider)) {
-        if (!budgets[provider]?.[mode]?.[cls]) {
-          const skipped = unclassed.get(`${provider}/${mode}`) ?? 0;
-          noData.push({ provider, mode, cls, skipped });
-        }
-      }
+    for (const mode of supportedModes(provider)) {
+      if (!budgets[provider]?.[mode]) noData.push({ provider, mode });
     }
   }
   const table = {
@@ -187,10 +188,7 @@ export function renderReport({ rows, noData }, since) {
     '',
     '## No data (no number; the check fails with `no budget yet`)',
     '',
-    ...noData.map(
-      (n) =>
-        `- ${n.provider}/${n.mode}/${n.cls}${n.skipped ? ` (${n.skipped} passing cold deploy(s) excluded: class not recorded)` : ''}`,
-    ),
+    ...noData.map((n) => `- ${n.provider}/${n.mode}`),
     '',
   ];
   return out.join('\n');

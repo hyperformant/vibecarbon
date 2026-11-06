@@ -105,13 +105,22 @@ describe('reading the results db', () => {
   deploy({ ...base, totalS: 999, status: 'fail', cpuClass: 'cx' }); // failed
   deploy({ ...base, totalS: 999, coldWarm: 'warm', cpuClass: 'cx' }); // warm
   deploy({ ...base, run: 'r1', started: '2026-11-05T01:00:00Z', totalS: 999, cpuClass: 'cx' }); // before --since
-  deploy({ ...base, totalS: 150 }); // classed provider, class not recorded
-  deploy({ ...base, provider: 'linode', totalS: 190 }); // classless provider: standard
+  deploy({ ...base, totalS: 150 }); // classed provider, class not recorded: the `any` row
+  deploy({ ...base, provider: 'linode', totalS: 190 });
+  deploy({
+    ...base,
+    run: 'r0',
+    started: '2026-11-05T02:00:00Z',
+    provider: 'vultr',
+    mode: 'k8s',
+    totalS: 99,
+  }); // classless provider: standard
   db.close();
 
   it('counts only passing, cold deploys since --since, by provider, mode and class', () => {
     const { table, rows } = buildTable(readSamples(dbPath, '2026-11-05T13:00:00Z'), 'x');
     expect(rows.map((r) => `${r.provider}/${r.mode}/${r.cls}:${r.samples}`).sort()).toEqual([
+      'hetzner/compose/any:1',
       'hetzner/compose/cx:1',
       'linode/compose/standard:1',
     ]);
@@ -119,13 +128,25 @@ describe('reading the results db', () => {
     expect(table.budgets.hetzner.compose.cx.tlsAllowanceS).toBe(20);
   });
 
-  it('reports a sample without a recorded class as excluded, and gives no number', () => {
+  it('puts a sample without a recorded class in the `any` row, never a guessed class', () => {
+    const { table } = buildTable(readSamples(dbPath, '2026-11-05T13:00:00Z'), 'x');
+    expect(table.budgets.hetzner.compose.any.ownedS).toBe(180); // 150 + 30
+    expect(table.budgets.hetzner.compose.ccx).toBeUndefined();
+  });
+
+  it('lists only combinations the provider supports, with or without data', () => {
     const built = buildTable(readSamples(dbPath, '2026-11-05T13:00:00Z'), 'x');
-    const ccx = built.noData.find(
-      (d) => d.provider === 'hetzner' && d.mode === 'compose' && d.cls === 'ccx',
-    );
-    expect(ccx?.skipped).toBe(1);
-    expect(built.table.budgets.hetzner.compose.ccx).toBeUndefined();
+    const listed = built.noData.map((d) => `${d.provider}/${d.mode}`);
+    for (const unsupported of ['linode/k8s', 'linode/k8s-ha', 'vultr/k8s', 'scaleway/k8s-ha']) {
+      expect(listed).not.toContain(unsupported);
+    }
+    expect(listed).toContain('vultr/compose');
+    expect(listed).not.toContain('hetzner/compose');
+  });
+
+  it('ignores a sample of an unsupported mode', () => {
+    const { rows } = buildTable(readSamples(dbPath, '2026-11-05T00:00:00Z'), 'x');
+    expect(rows.some((r) => r.provider === 'vultr' && r.mode === 'k8s')).toBe(false);
   });
 
   it('never writes the db', () => {

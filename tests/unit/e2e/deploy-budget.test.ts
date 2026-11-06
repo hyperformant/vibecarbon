@@ -164,6 +164,25 @@ describe('budgets are keyed on provider + mode + class', () => {
     expect(checkDeployBudget(fixture('k8s'), 'k8s', KEY, {}).message).toMatch(/no budget yet/);
   });
 
+  it('a run with no exact class row is judged by the provider + mode `any` row, and says so', () => {
+    const table: BudgetTable = {
+      hetzner: {
+        compose: {
+          any: { ownedS: 180, endToEndS: 300, samples: 9 },
+          cpx: { ownedS: 100, endToEndS: 115, samples: 9 },
+        },
+      },
+    };
+    const log = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const viaAny = judge(log, 'compose', { provider: 'hetzner', cpuClass: 'cx' }, table);
+    expect(viaAny.message).toMatch(/deploy-owned 245s > 180s/);
+    expect(viaAny.details).toMatchObject({ budgetRow: 'hetzner/compose/any' });
+    // An exact row wins over `any`.
+    const exact = judge(log, 'compose', { provider: 'hetzner', cpuClass: 'cpx' }, table);
+    expect(exact.message).toMatch(/deploy-owned 245s > 100s/);
+    expect(exact.details).toMatchObject({ budgetRow: 'hetzner/compose/cpx' });
+  });
+
   it('still judges the byte and lock invariants when the time budget is missing', () => {
     const r = checkDeployBudget(fixture('compose-ha', { standbyLock: '1 (93s)' }), 'compose-ha', {
       provider: 'vultr',
@@ -186,9 +205,10 @@ describe('budgets are keyed on provider + mode + class', () => {
           expect(row.ownedS % 5, where).toBe(0);
           expect(row.endToEndS, where).toBeGreaterThanOrEqual(row.ownedS + 15);
           expect(row.samples, where).toBeGreaterThan(0);
-          expect(budgetFor(DEPLOY_BUDGET_TABLE, mode as DeployMode, { provider, cpuClass })).toBe(
-            row,
-          );
+          expect(
+            budgetFor(DEPLOY_BUDGET_TABLE, mode as DeployMode, { provider, cpuClass })?.row,
+            where,
+          ).toBe(where);
         }
       }
     }

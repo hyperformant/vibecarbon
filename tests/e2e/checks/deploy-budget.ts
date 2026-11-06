@@ -70,6 +70,8 @@ export const DEPLOY_BUDGET_TABLE: BudgetTable = (
 
 /** The class every provider that declares no CPU classes deploys on. */
 export const STANDARD_CLASS = 'standard';
+/** The row for samples calibrated before a class was recorded. */
+export const ANY_CLASS = 'any';
 
 /**
  * The CPU class a deploy ran on, from the server type it recorded in
@@ -88,8 +90,15 @@ export function budgetFor(
   table: BudgetTable,
   mode: DeployMode,
   { provider, cpuClass }: BudgetKey,
-): BudgetRow | undefined {
-  return table[provider]?.[mode]?.[cpuClass];
+): (BudgetRow & { row: string }) | undefined {
+  const classes = table[provider]?.[mode];
+  // The exact class first; else the provider + mode row for runs that
+  // recorded no class (`any`).
+  for (const c of [cpuClass, ANY_CLASS]) {
+    const row = classes?.[c];
+    if (row) return { ...row, row: `${provider}/${mode}/${c}` };
+  }
+  return undefined;
 }
 
 /** A cold image delta carries the app's own layers on a pulled base: 4-5 MB. */
@@ -170,7 +179,7 @@ export function checkDeployBudget(
   const ownedMs = totalMs === null ? null : totalMs - tlsMs;
   if (!budget) {
     failures.push(
-      `no budget yet for ${key.provider}/${mode}/${key.cpuClass}: no passing cold deploy calibrated it ` +
+      `no budget yet for ${key.provider}/${mode}/${key.cpuClass} (nor ${key.provider}/${mode}/${ANY_CLASS}): no passing cold deploy calibrated it ` +
         '(scripts/calibrate-deploy-budgets.js writes the row after one)',
     );
   }
@@ -283,6 +292,7 @@ export function checkDeployBudget(
     totalS: totalMs === null ? null : s(totalMs),
     tlsFirstLookS: s(tlsMs),
     ownedS: ownedMs === null ? null : s(ownedMs),
+    budgetRow: budget?.row ?? null,
     ownedBudgetS: budget?.ownedS ?? null,
     endToEndBudgetS: budget?.endToEndS ?? null,
     deltaBytes,
