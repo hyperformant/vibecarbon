@@ -8,7 +8,7 @@
 - **A failover journal replaces state inference.** Every promote decision reads a persisted journal and a positive replica proof, not "`pg_is_in_recovery()` is false".
 - **One preconditions gate.** Both failover tiers share one preconditions gate (`assertFailoverPreconditions`) and one step order: fence, then catch-up, then promote, then DNS. The DNS step is verified by reading the record back.
 - **Retirement enforces itself.** A retired side carries a marker that its own backup job and app readiness check, and every CLI entry point re-applies the fence.
-- **Lean-stack cleanups:** a WAL cap on the replication slot, no Supabase-era `ALTER SYSTEM` + restart, and the DB boot budget applied everywhere.
+- **Lean-stack cleanups:** a WAL cap on the replication slot, no `ALTER SYSTEM` + restart, and the DB boot budget applied everywhere.
 
 **Tech Stack:** Node ESM CLI (`src/`), Postgres 17 streaming replication, WAL-G, k3s/kubectl over SSH, docker compose, vitest.
 

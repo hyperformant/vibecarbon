@@ -19,7 +19,7 @@
 
 **Spec:** No spec file. The decision is the item 1 recommendation agreed in conversation on 2026-10-20 ("stop creating buckets in the deploy path"; Brandon: "Go ahead"). The evidence lives in two places:
 - the session scratchpad: `restore-bucket-report.md`, `cors-probe.txt` (about 40% preflight 403 on a minutes-old bucket) and `cors-settle.txt` (clean about 16 minutes after create);
-- memory `drop-supabase-lean-graphite.md` (the Hetzner new-bucket window).
+- the lean-stack memory note (the Hetzner new-bucket window).
 
 Rulings made without a spec file are provisional and are recorded below.
 
@@ -288,7 +288,7 @@ Rulings made without a spec file are provisional and are recorded below.
   - `bucket-settle-window-census.test.ts` (a walk, not a hand list):
     - (a) every file under `src/lib/providers/` with a class that `extends S3CompatibleProvider`, and every compute provider's `getObjectStorageProviderClass()` result from the provider registry, has `Object.hasOwn(Class, 'bucketSettleWindowMs')` and a non-negative integer value;
     - (b) `Object.hasOwn(S3CompatibleProvider, 'bucketSettleWindowMs')` is false, so there is no implicit default;
-    - (c) every non-zero value appears in the test's `SETTLE_WINDOW_EVIDENCE` map (`{ hetzner: '2026-10-20 probes, memory drop-supabase-lean-graphite.md' }`); a non-zero value without an evidence entry fails with "a settle window needs probe evidence";
+    - (c) every non-zero value appears in the test's `SETTLE_WINDOW_EVIDENCE` map (`{ hetzner: '2026-10-20 probes, lean-stack memory note' }`); a non-zero value without an evidence entry fails with "a settle window needs probe evidence";
     - prove each arm bites: temporarily delete Hetzner's declaration (arm a fails) and set DigitalOcean's to 60000 (arm c fails), then restore. Record that in the report.
 - [ ] **Step 2: Run** `pnpm vitest run tests/unit/deploy/bucket-settle.test.ts tests/unit/deploy/deploy-never-awaits-bucket-settle.test.ts tests/unit/providers/bucket-settle-window-census.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**

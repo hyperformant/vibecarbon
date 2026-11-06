@@ -99,7 +99,6 @@ const RECORD_FILES = new Set([
   'tests/unit/licensing/no-legacy-traces.test.ts',
   'docs/superpowers/specs/2026-09-15-license-bind-at-activate-design.md',
   'docs/superpowers/plans/2026-09-15-license-bind-at-activate-cli.md',
-  'docs/superpowers/plans/2026-09-18-status-docker-native-health.md',
 ]);
 
 /** `<file>::<pattern>` for every line the pattern matched outside the record. */

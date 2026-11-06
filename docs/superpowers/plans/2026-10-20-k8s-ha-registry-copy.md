@@ -80,7 +80,7 @@ The plan was written on 2026-10-20, before #234 (security), #235 (HA), #236 (add
 - Perf marker: `deploy.ha.image.copyToStandby`. The `deploy.k3s.standby.sideload.app` and `deploy.k3s.standby.registryPush.app` markers disappear.
 - Never print secrets: no token, key or `.env` value in any log line, error, perf marker or test snapshot.
 - Dotenv is written only via `formatDotenvLine`, and `.vibecarbon.json` only via `updateProjectConfig`. This plan writes neither, and no task may add a write.
-- No Supabase vocabulary in code, comments, docs or messages. No legacy compat for Supabase-era envs.
+- No retired-stack vocabulary in code, comments, docs or messages. No legacy compat for envs on the previous stack.
 - Pre-1.0: no `!:` footers and no `BREAKING CHANGE`. The PR body carries a Compatibility note: "k8s-ha standby now receives its app image from the primary; the first redeploy after upgrading copies it."
 - Repo conventions: conventional commits, pathspec commits (`git commit -- <files>`), never `--no-verify`. Attribution lines only as the executing session's instructions specify.
 

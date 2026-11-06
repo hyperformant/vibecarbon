@@ -71,7 +71,7 @@ Every number was read on 2026-10-22 from the provider's API (read-only GETs with
 | Scaleway | 40 GB SBS root | €3.45 per month at €0.000118 per GB-hour | n/a | public product catalog. **Unverified:** which SBS SKU an `sbs_volume` root bills as (Low Latency 5K is €0.00013, which would make it €3.80) |
 | Scaleway | Object Storage | usage-based | n/a | **unverified 2026-10-22**, carried from 2026-10-20 |
 
-Peak RAM (tests/results/e2e.db, `metric_type = 'resource'`, lean stack only: recorded after 2026-10-17, all on 2026-10-20, Hetzner, observability on), re-queried 2026-10-22: compose 1,101 MB; compose-ha 1,245 / 1,239 MB; k8s master 1,488, db 636, worker 1,050; k8s-ha primary master 1,559, db 659, standby master 1,363, db 653. There is no lean-stack data for any other provider (the DigitalOcean rows are from August, the Supabase era).
+Peak RAM (tests/results/e2e.db, `metric_type = 'resource'`, lean stack only: recorded after 2026-10-17, all on 2026-10-20, Hetzner, observability on), re-queried 2026-10-22: compose 1,101 MB; compose-ha 1,245 / 1,239 MB; k8s master 1,488, db 636, worker 1,050; k8s-ha primary master 1,559, db 659, standby master 1,363, db 653. There is no lean-stack data for any other provider (the DigitalOcean rows are from August, the previous stack).
 
 ## Rulings (made while planning)
 

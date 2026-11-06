@@ -159,7 +159,7 @@ Sources: the archived private repo `brandonpowers/vibecarbon` (cloned, filter=bl
 - **e2e reproduces the customer cold-start path.** No test-only caches, pre-baked images, pre-pulled layers or warm registries. The runtime base is pulled from public GHCR by the server exactly as a customer's server pulls it.
 - **Never print secrets.** Registry tokens, keys and passwords never reach argv, logs, errors or perf markers; the delta's stderr line is the first line of the remote error, which carries no secret by construction (the remote script never echoes env).
 - **dotenv writes only through `formatDotenvLine`; `.vibecarbon.json` writes only through `updateProjectConfig`.** No new parser or writer.
-- **No Supabase vocabulary** in code, comments, docs or commit messages (the Context's Aug baseline is described as "the previous stack").
+- **No retired-stack vocabulary** in code, comments, docs or commit messages (the Context's Aug baseline is described as "the previous stack").
 - Template uses npm; root uses pnpm. Conventional commits, pathspec commits (`git commit -- <files>`), never `--no-verify`.
 - **Sibling plans: all landed in the stack.** `2026-10-20-tls-cert-reuse.md` (#239), `2026-10-20-project-app-bucket.md` (#233, main), `2026-10-20-k8s-ha-registry-copy.md` (#238). Task 8 is unblocked.
 - **Release order:** Task 5 must not ship without Task 6 Cause B (the dead seed wait). After #238 the k8s-ha primary arm (~770 s) still masks the standby's 346 s `awaitDb`; Task 5 shortens the primary arm to ~260 s and unmasks it. Both are in this branch; never cut a release between them.

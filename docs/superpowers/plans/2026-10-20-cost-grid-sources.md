@@ -117,7 +117,7 @@ Two capture details the table does not show: Vultr plans carry a `location_cost`
 - k8s master 1,451-1,488 / db 635-636 / worker 1,021-1,050 MB;
 - k8s-ha primary master 1,431-1,559, primary db 631-659, standby master 1,320-1,363, standby db 610-653 MB.
 - The k8s-ha primary worker is not collected by the harness (`tests/e2e/utils/ssh.ts` `getServerIps` reads only the ha.primary/standby master + db); the k8s worker figure stands in.
-- No lean-stack data for any other provider (the DigitalOcean rows are from August, the Supabase era). Same stack, so the same floors apply.
+- No lean-stack data for any other provider (the DigitalOcean rows are from August, the previous stack). Same stack, so the same floors apply.
 
 ### Smallest-fit rule
 

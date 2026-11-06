@@ -79,7 +79,6 @@ vi.mock('../../../src/lib/perf.js', async (orig) => {
 });
 
 const k3sPromise = import('../../../src/lib/deploy/k8s/k3s.js');
-const { RETIRED_CHART_DB_STATEFULSET, RETIRED_CHART_RELEASE } = await k3sPromise;
 
 // Ordered log of every spawn argv ([executable, ...args]).
 let cmdCalls: string[][] = [];
@@ -298,8 +297,9 @@ function installSpawnMock() {
     }
     if (
       cmd === 'kubectl' &&
+      argv.includes('get') &&
       argv.includes('statefulset') &&
-      argv.includes(RETIRED_CHART_DB_STATEFULSET)
+      argv.at(-1) === 'name'
     ) {
       return fakeChild({
         exitCode: 0,
@@ -307,11 +307,7 @@ function installSpawnMock() {
         argv: full,
       }) as unknown as ReturnType<typeof spawn>;
     }
-    if (
-      cmd === 'kubectl' &&
-      argv.includes('secret') &&
-      argv.includes(`owner=helm,name=${RETIRED_CHART_RELEASE}`)
-    ) {
+    if (cmd === 'kubectl' && argv.includes('secret') && argv.includes('owner=helm')) {
       return fakeChild({
         exitCode: 0,
         stdout: retiredChartReleaseOut,
@@ -643,7 +639,7 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
 
   it('refuses before applying k8s/base when the old chart database still runs', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    retiredChartStsOut = `statefulset.apps/${RETIRED_CHART_DB_STATEFULSET}\n`;
+    retiredChartStsOut = 'statefulset.apps/oldchart-oldchart-db\n';
     await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
       /existing data does not carry over automatically/,
     );
@@ -660,9 +656,9 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
   // release alone still means the chart owns this namespace: refuse.
   it('refuses before applying k8s/base when only the Helm release record remains', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    retiredChartReleaseOut = `secret/sh.helm.release.v1.${RETIRED_CHART_RELEASE}.v3\n`;
+    retiredChartReleaseOut = 'secret/sh.helm.release.v1.oldchart.v3\n';
     await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
-      new RegExp(`sh\\.helm\\.release\\.v1\\.${RETIRED_CHART_RELEASE}\\.v3`),
+      /sh\.helm\.release\.v1\.oldchart\.v3/,
     );
     expect(
       cmdCalls.some(
@@ -675,7 +671,7 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
   it('proceeds to apply k8s/base when there is no trace of it', async () => {
     const { applyK3sManifests } = await k3sPromise;
     await applyK3sManifests(baseArgs(makeProjectDir()));
-    expect(cmdCalls.some((a) => a.includes(RETIRED_CHART_DB_STATEFULSET))).toBe(true);
+    expect(cmdCalls.some((a) => a.includes('owner=helm'))).toBe(true);
     expect(
       cmdCalls.some(
         (a) =>
