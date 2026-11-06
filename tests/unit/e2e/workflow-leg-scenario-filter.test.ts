@@ -31,6 +31,7 @@ const LEG_STEP_NAME = 'Run e2e (provider leg)';
 interface WorkflowDoc {
   jobs?: {
     matrix?: { steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }> };
+    'publish-perf'?: { steps?: Array<{ uses?: string; with?: Record<string, string> }> };
   };
 }
 
@@ -135,5 +136,19 @@ describe('e2e leg step env', () => {
     const doc = loadYaml(readFileSync(WORKFLOW_PATH, 'utf8')) as WorkflowDoc;
     const step = doc.jobs?.matrix?.steps?.find((s) => s.name === LEG_STEP_NAME);
     expect(step?.env?.GITHUB_TOKEN).toBe('$' + '{{ secrets.GITHUB_TOKEN }}');
+  });
+});
+
+describe('perf table publish', () => {
+  // The job's push is a GITHUB_TOKEN push, which GitHub refuses when the branch
+  // would change a workflow file. A run that started before a workflow change
+  // landed on main carries the older file, so its publish failed after the leg
+  // had passed. Vultr lost a publish this way when #345 merged mid-run.
+  it('builds on current main, not the commit the run started from', () => {
+    const doc = loadYaml(readFileSync(WORKFLOW_PATH, 'utf8')) as WorkflowDoc;
+    const checkout = doc.jobs?.['publish-perf']?.steps?.find((s) =>
+      s.uses?.startsWith('actions/checkout@'),
+    );
+    expect(checkout?.with?.ref).toBe('main');
   });
 });

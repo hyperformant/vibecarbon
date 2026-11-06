@@ -519,7 +519,12 @@ jobs:
       group: e2e-us-perf-publish
       cancel-in-progress: false
     steps:
+      # Current main, not the commit this run started from: GitHub refuses a
+      # GITHUB_TOKEN push that would change a workflow file, so a publish built
+      # on an older commit fails if a workflow change landed during the run.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
 
       - name: Setup pnpm
         uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
