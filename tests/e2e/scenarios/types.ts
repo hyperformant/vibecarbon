@@ -62,6 +62,12 @@ export interface ScenarioConfig {
    * artifact, never an implicit 'hetzner'.
    */
   provider: Provider;
+  /**
+   * Steps this scenario never runs, set in the provider registry
+   * (tests/config.ts) next to the reason. Unlike `--skip-steps`, a person
+   * cannot forget it.
+   */
+  skipSteps?: readonly string[];
 }
 
 export type StepName =

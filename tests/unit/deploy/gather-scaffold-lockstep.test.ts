@@ -7,11 +7,12 @@
  * shipped scaffold (current) and one whose walg-env.sh predates the role file.
  * Harness as in compose-default-size.test.ts.
  */
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seedCatalog } from '../helpers/catalog-fixtures.js';
+import { copyTemplate } from '../helpers/copy-template.js';
 
 const clackMock = vi.hoisted(() => ({
   select: vi.fn(),
@@ -62,7 +63,6 @@ import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 
 const REFUSAL =
   "This project's scaffold predates the wal-g role file. Run `vibecarbon upgrade`, then deploy again.";
-const ROOT = process.cwd();
 const dirs: string[] = [];
 afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
@@ -70,7 +70,7 @@ afterAll(() => {
 function project(stale: boolean) {
   const dir = mkdtempSync(join(tmpdir(), 'vc-gather-scaffold-'));
   dirs.push(dir);
-  cpSync(join(ROOT, 'carbon'), dir, { recursive: true });
+  copyTemplate(dir);
   if (stale) {
     const env = join(dir, 'volumes/db/walg-env.sh');
     writeFileSync(env, readFileSync(env, 'utf-8').replace(WALG_ROLE_PARSE_SH, ''));

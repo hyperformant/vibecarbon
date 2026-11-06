@@ -6,10 +6,11 @@
  * file, and checks each one refuses with the one line naming
  * `vibecarbon upgrade`, before its first remote or cloud call.
  */
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { copyTemplate } from '../helpers/copy-template.js';
 
 const errors: string[] = [];
 const infos: string[] = [];
@@ -84,7 +85,7 @@ async function staleProject() {
   const { WALG_ROLE_PARSE_SH } = await import('../../../src/lib/deploy/walg-role.js');
   const dir = mkdtempSync(join(tmpdir(), 'vc-stale-scaffold-'));
   dirs.push(dir);
-  cpSync(join(process.cwd(), 'carbon'), dir, { recursive: true });
+  copyTemplate(dir);
   const env = join(dir, 'volumes/db/walg-env.sh');
   writeFileSync(env, readFileSync(env, 'utf-8').replace(WALG_ROLE_PARSE_SH, ''));
   return dir;
