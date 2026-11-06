@@ -160,6 +160,27 @@ async function recordedServersExist(recorded, provider) {
  * parallel up() so a freshly-created bucket doesn't NoSuchBucket-race. Sets
  * ctx.primary / ctx.standby / ctx.standbyRegion / ctx.sharedSshKeyId.
  */
+/**
+ * Wait for both regions' `pulumi up`, even when one fails first. Returning on
+ * the first failure ends the CLI with the other update still running, which
+ * leaves that stack half built and locked until the next deploy or destroy
+ * clears it. k8s-ha waits for both clusters the same way.
+ *
+ * @param {[Promise<object>, Promise<object>]} ups - primary, then standby
+ * @returns {Promise<[object, object]>}
+ */
+async function settleBothRegions(ups) {
+  const [primary, standby] = await Promise.allSettled(ups);
+  const failed = [primary, standby].filter((r) => r.status === 'rejected');
+  if (failed.length === 0) return [primary.value, standby.value];
+  if (failed.length === 1) throw failed[0].reason;
+  const { summarizePulumiError } = await import('../../iac/index.js');
+  throw new Error(
+    `HA deploy failed: primary: ${summarizePulumiError(primary.reason)} | ` +
+      `standby: ${summarizePulumiError(standby.reason)}`,
+  );
+}
+
 async function haProvisionServers(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { environment, sshKeyPath, region, apiToken, s3Config, imageRef, envConfig } = ctx;
@@ -358,7 +379,7 @@ async function haProvisionServers(ctx) {
   const [primaryResult, standbyResult] = reusable
     ? [{ outputs: recorded.primary }, { outputs: recorded.standby }]
     : await perfAsync('deploy.ha.compose.iac.upStack.fan', () =>
-        Promise.all([
+        settleBothRegions([
           perfAsync('deploy.ha.compose.iac.upStack.primary', () =>
             upStack(`${environment}-primary`, primaryProgram, {
               perfStem: 'deploy.ha.compose.iac.upStack.primary',
