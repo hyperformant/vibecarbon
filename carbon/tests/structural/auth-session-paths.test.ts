@@ -21,7 +21,7 @@ import { describe, expect, it } from 'vitest';
  * src/server/auth/, then a bump of PINNED_VERSION.
  */
 
-const PINNED_VERSION = '1.7.14';
+const PINNED_VERSION = '1.7.18';
 
 const ROOT = join(__dirname, '..', '..');
 const DIST = join(ROOT, 'node_modules', 'better-auth', 'dist');
@@ -46,9 +46,9 @@ const CLASSIFIED: Record<string, Site> = {
     why: 'change-password re-issues the session after checking the current password',
   },
   'api/routes/email-verification.mjs': {
-    count: 3,
+    count: 1,
     credentialPaths: [],
-    why: '/verify-email: proves the email by a mailed token, not the password',
+    why: '/verify-email auto sign-in: proves the email by a mailed token (now bound to the user id), not the password. The two change-email calls were removed in 1.7.16',
   },
   'oauth2/link-account.mjs': {
     count: 1,
