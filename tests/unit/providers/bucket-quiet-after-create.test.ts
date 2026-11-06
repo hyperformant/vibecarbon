@@ -20,7 +20,10 @@ type Fake = {
   bucketExists: (b: string) => Promise<boolean>;
   _send: (cmd: unknown, opts?: unknown) => Promise<unknown>;
   waitForBucketVisible: (b: string) => Promise<boolean>;
-  createBucket: (b: string) => Promise<{ created: boolean; ready: boolean }>;
+  createBucket: (
+    b: string,
+    opts?: { beforeFirstRead?: () => Promise<void> },
+  ) => Promise<{ created: boolean; ready: boolean }>;
 };
 
 function fake(provider: unknown, { exists = false } = {}) {
@@ -57,6 +60,28 @@ describe('createBucket quiet period', () => {
     await vi.advanceTimersByTimeAsync(1);
     await expect(pending).resolves.toMatchObject({ created: true, ready: true });
     expect(calls).toEqual(['head', 'CreateBucketCommand', 'visible']);
+  });
+
+  it('settings go on after the quiet period and before the first read', async () => {
+    const { p, calls } = fake(new HetznerS3Provider('ak', 'sk', 'fsn1'));
+    const pending = p.createBucket('b', {
+      beforeFirstRead: async () => {
+        calls.push('settings');
+      },
+    });
+    await vi.advanceTimersByTimeAsync(HetznerS3Provider.bucketQuietMs - 1);
+    expect(calls).toEqual(['head', 'CreateBucketCommand']);
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(calls).toEqual(['head', 'CreateBucketCommand', 'settings', 'visible']);
+  });
+
+  it('a bucket that already exists gets no settings write from createBucket', async () => {
+    const { p, calls } = fake(new HetznerS3Provider('ak', 'sk', 'fsn1'), { exists: true });
+    const beforeFirstRead = vi.fn(async () => {});
+    await p.createBucket('b', { beforeFirstRead });
+    expect(beforeFirstRead).not.toHaveBeenCalled();
+    expect(calls).toEqual(['head']);
   });
 
   it('a bucket that already exists takes no pause', async () => {

@@ -43,7 +43,7 @@ import {
   type DeployBudgetResult,
   deployCpuClass,
 } from '../checks/deploy-budget.js';
-import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
+import { resolveAuthoritativeA, runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
 import { runFrontendSmokeChecks } from '../checks/frontend-smoke.js';
@@ -1706,6 +1706,30 @@ export async function runLifecycle(
     if (result.status !== 'pass') throw new Error(`${result.checkName}: ${result.errorMessage}`);
   }
 
+  /**
+   * The pin for the checks that follow a scale (run 32013980356, compose-ha, and
+   * l1 on 2026-11-06, compose): a blue-green compose scale rewrites the apex and
+   * wildcard A records to the replacement server and destroys the old one, so a
+   * public resolver can hand out the dead address for the rest of the 60 s TTL.
+   * The checks dial the replacement directly, Host and SNI stay the domain.
+   * `dns_scale_flip` proves the record itself moved. Compose modes only: a k8s
+   * scale is a resize in place and never rewrites the record.
+   */
+  function postScaleResolutionPin(): ResolutionPin | null {
+    if (!config.mode.startsWith('compose')) return null;
+    const ip =
+      resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp ??
+      readSingleServerIp(config.projectDir, config.envPrefix) ??
+      null;
+    return ip
+      ? {
+          domain: config.domain,
+          ip,
+          reason: `verify-scale: post-scale server for ${config.envPrefix}`,
+        }
+      : null;
+  }
+
   async function runVerificationChecks(stepName: StepName): Promise<StepResult> {
     const command = `verify:${config.domain}`;
 
@@ -1731,9 +1755,9 @@ export async function runLifecycle(
     // the zone's authoritative nameservers. The verifier's job is those two
     // things, not measuring how long the operator's ISP cache holds a record.
     //
-    // Scope is deliberately narrow: verify-deploy and friends stay on the
-    // public-resolver path because that IS the customer cold path, and k8s-ha
-    // failover moves a floating IP without ever rewriting the A record.
+    // Scope is deliberately narrow: verify-deploy stays on the public-resolver
+    // path because that IS the customer cold path, and k8s-ha failover moves a
+    // floating IP without ever rewriting the A record.
     let verifyPin: ResolutionPin | null = null;
     if (isPostFailoverVerify(stepName) && config.mode === 'compose-ha') {
       const { primaryIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
@@ -1755,32 +1779,28 @@ export async function runLifecycle(
       }
     }
 
-    // verify-scale gets the SAME pin for the same reason (run 32013980356,
-    // compose-ha): a blue-green compose scale rewrites the apex + wildcard A
-    // records to the replacement primary and DESTROYS the old servers, then
-    // verify-scale rendered the frontend seconds into the 60s TTL — the
-    // operator resolver chain handed it the retired address and the page
-    // "rendered 0 chars" against a dead server. Compose modes only: k8s scale
-    // is a Pulumi in-place resize and never rewrites the record. Whether the
-    // flip PUBLISHED is asserted separately by `dns_scale_flip` below.
-    if (stepName === 'verify-scale' && config.mode.startsWith('compose')) {
-      const { primaryIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
-      const postScaleIp =
-        primaryIp ?? readSingleServerIp(config.projectDir, config.envPrefix) ?? null;
-      if (postScaleIp) {
+    // A restore rebuilds on new servers and destroys the old ones, so a public
+    // resolver can still hand out a dead address for the record's TTL. l2 on
+    // 2026-11-06: the health checks got the new address, then the upload and the
+    // browser got the old one. Dial what the zone's authoritative servers publish
+    // now. That proves the record too: one that never moved dials a dead server.
+    if (stepName === 'verify-restore') {
+      const { ips, source } = await resolveAuthoritativeA(config.domain);
+      const published = source === 'authoritative' ? ips.find((ip) => ip !== '0.0.0.0') : undefined;
+      if (published) {
         verifyPin = {
           domain: config.domain,
-          ip: postScaleIp,
-          reason: `verify-scale: post-scale serving IP for ${config.envPrefix}`,
+          ip: published,
+          reason: `verify-restore: published address for ${config.envPrefix}`,
         };
         console.log(
-          `${tag} [verify-scale] pinning HTTP checks for ${config.domain} (and *.${config.domain}) ` +
-            `to the post-scale server ${postScaleIp} — Host/SNI stay ${config.domain}`,
+          `${tag} [verify-restore] pinning HTTP checks for ${config.domain} (and *.${config.domain}) ` +
+            `to the published address ${published} — Host/SNI stay ${config.domain}`,
         );
       } else {
         console.warn(
-          `${tag} [verify-scale] no post-scale server IP in .vibecarbon.json — HTTP checks fall ` +
-            'back to the public resolvers and may hit a destroyed pre-scale server mid-TTL',
+          `${tag} [verify-restore] no authoritative answer for ${config.domain} — HTTP checks ` +
+            'fall back to the public resolvers and may hit a destroyed server mid-TTL',
         );
       }
     }
@@ -2067,21 +2087,6 @@ export async function runLifecycle(
           // record carries the promoted cluster's floating IP, which
           // .vibecarbon.json does track.
           allResults.push(await runDnsFlipVerified());
-        }
-
-        // Publish-half of the verify-scale assertion (mirrors the failover
-        // shape above): the pinned checks below prove the post-scale server
-        // SERVES; this proves the scale's A-record rewrite actually reached
-        // the zone's authoritative nameservers. Gated on the pin because the
-        // pin is only computed for the record-flipping (compose) scales.
-        if (stepName === 'verify-scale' && verifyPin) {
-          allResults.push(
-            await runDnsFailoverFlipCheck({
-              domain: config.domain,
-              expectedIp: verifyPin.ip,
-              checkName: 'dns_scale_flip',
-            }),
-          );
         }
 
         // Wait for the in-process auth API before the functional checks: the
@@ -2516,11 +2521,7 @@ export async function runLifecycle(
                 sshKeyPath,
               }),
             );
-          } else if (
-            stepName === 'verify-deploy' ||
-            stepName === 'verify-scale' ||
-            stepName === 'verify-restore'
-          ) {
+          } else if (stepName === 'verify-deploy' || stepName === 'verify-restore') {
             replResults.push(
               ...(await runReplicationChecks({
                 mode: config.mode,
@@ -4086,13 +4087,16 @@ EOF`;
           //    the full window (CI run 29180322032). Bounded wait for a
           //    200 + non-empty body; on timeout proceed anyway and let the
           //    render check fail with fresh context.
-          const gate = await waitForAppServing(config.domain);
-          console.log(
-            gate.ok
-              ? `${tag} [verify-scale] serving gate: 200 + body after ${Math.round(gate.elapsedMs / 1000)}s (${gate.attempts} attempt${gate.attempts === 1 ? '' : 's'})`
-              : `${tag} [verify-scale] serving gate: still not serving after ${Math.round(gate.elapsedMs / 1000)}s (last status=${gate.lastStatus ?? 'none'}, last error=${gate.lastError ?? 'none'}) — running render check anyway`,
-          );
-          const frontendResults = await runFrontendSmokeChecks(config.domain);
+          const scalePin = postScaleResolutionPin();
+          const frontendResults = await withResolutionPin(scalePin, async () => {
+            const gate = await waitForAppServing(config.domain);
+            console.log(
+              gate.ok
+                ? `${tag} [verify-scale] serving gate: 200 + body after ${Math.round(gate.elapsedMs / 1000)}s (${gate.attempts} attempt${gate.attempts === 1 ? '' : 's'})`
+                : `${tag} [verify-scale] serving gate: still not serving after ${Math.round(gate.elapsedMs / 1000)}s (last status=${gate.lastStatus ?? 'none'}, last error=${gate.lastError ?? 'none'}) — running render check anyway`,
+            );
+            return runFrontendSmokeChecks(config.domain);
+          });
           collector.recordVerifications(stepId, frontendResults);
           const frontendFails = frontendResults.filter((r) => r.status === 'fail');
           if (frontendFails.length > 0) {
@@ -4103,6 +4107,20 @@ EOF`;
             );
           }
           console.log(`${tag} [verify-scale] frontend render OK after scale`);
+
+          // The pinned checks prove the replacement serves; this proves the
+          // scale's A-record rewrite reached the zone's authoritative servers.
+          if (scalePin) {
+            const flip = await runDnsFailoverFlipCheck({
+              domain: config.domain,
+              expectedIp: scalePin.ip,
+              checkName: 'dns_scale_flip',
+            });
+            collector.recordVerifications(stepId, [flip]);
+            if (flip.status === 'fail') {
+              throw new Error(`verify-scale: ${flip.checkName}: ${flip.errorMessage}`);
+            }
+          }
 
           // 5. Backup evidence AFTER scale. Scale is the step most likely to
           //    break archiving without breaking anything visible: compose
@@ -4135,24 +4153,8 @@ EOF`;
 
           // 6. The certificate survived the scale (compose replaces the
           //    server and restores the snapshot; k8s resizes in place): the
-          //    domain still serves verify-deploy's serial. Compose dials the
-          //    replacement server directly, Host/SNI stay the domain, because
-          //    the A records were rewritten seconds ago (60s TTL).
-          const postScaleIp = config.mode.startsWith('compose')
-            ? (resolveHaDbIps(config.projectDir, config.envPrefix).primaryIp ??
-              readSingleServerIp(config.projectDir, config.envPrefix) ??
-              null)
-            : null;
-          const reused = await withResolutionPin(
-            postScaleIp
-              ? {
-                  domain: config.domain,
-                  ip: postScaleIp,
-                  reason: `verify-scale: post-scale server for ${config.envPrefix}`,
-                }
-              : null,
-            () => recordTlsReused('verify-scale'),
-          );
+          //    domain still serves verify-deploy's serial, on the same pin.
+          const reused = await withResolutionPin(scalePin, () => recordTlsReused('verify-scale'));
           collector.recordVerifications(stepId, [reused]);
           if (reused.status !== 'pass') {
             throw new Error(`verify-scale: ${reused.checkName}: ${reused.errorMessage}`);

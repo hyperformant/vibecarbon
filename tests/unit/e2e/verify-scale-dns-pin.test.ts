@@ -34,30 +34,54 @@ function stripComments(src: string): string {
 
 const LIFECYCLE = stripComments(read('tests/e2e/scenarios/_run-lifecycle.ts'));
 
+/**
+ * The step that really runs. The first version of this guard searched the whole
+ * file and passed for three months on a pin inside a `verify-scale` branch of
+ * runVerificationChecks, which that step never calls: l1 on 2026-11-06 rendered
+ * a dead address with this suite green.
+ */
+function liveStep(): string {
+  const start = LIFECYCLE.indexOf("name: 'verify-scale',");
+  expect(start, 'the verify-scale step').toBeGreaterThan(-1);
+  const end = LIFECYCLE.indexOf("name: 'backup',", start);
+  expect(end, 'the step after verify-scale').toBeGreaterThan(start);
+  return LIFECYCLE.slice(start, end);
+}
+
 describe('verify-scale resolution pin wiring', () => {
-  it('computes a pin for verify-scale on compose modes (the record-flipping scales)', () => {
-    // The pin block must exist and be gated to the modes whose scale rewrites
-    // the A record. k8s/k8s-ha scale is a Pulumi resize — no flip, no pin.
-    expect(LIFECYCLE).toMatch(
-      /stepName === 'verify-scale'[\s\S]{0,200}config\.mode\.startsWith\('compose'\)/,
-    );
+  it('runs no shared branch: nothing calls runVerificationChecks for verify-scale', () => {
+    expect(LIFECYCLE).not.toContain("runVerificationChecks('verify-scale')");
+    expect(LIFECYCLE).not.toContain("stepName === 'verify-scale'");
   });
 
-  it('the verify-scale pin resolves the post-scale serving IP from .vibecarbon.json', () => {
-    // compose-ha → the CURRENT primary via resolveHaDbIps (role-aware);
-    // compose → the single server entry. Both live in the same gated block.
-    const block = LIFECYCLE.match(
-      /stepName === 'verify-scale'[\s\S]{0,1200}withResolutionPin/,
+  it('pins compose modes only, to the post-scale server from .vibecarbon.json', () => {
+    const helper = LIFECYCLE.match(/function postScaleResolutionPin\(\)[\s\S]*?\n {2}}\n/)?.[0];
+    expect(helper, 'postScaleResolutionPin').toBeTruthy();
+    expect(helper).toContain("config.mode.startsWith('compose')");
+    expect(helper).toContain('resolveHaDbIps');
+    expect(helper).toContain('readSingleServerIp');
+  });
+
+  it('the serving gate, the render and the certificate check all run on the pin', () => {
+    const step = liveStep();
+    const pinned = step.match(
+      /withResolutionPin\(scalePin, async \(\) => \{[\s\S]*?\n {10}\}\);/,
     )?.[0];
-    expect(block, 'verify-scale pin block feeding withResolutionPin').toBeTruthy();
-    expect(block).toContain('resolveHaDbIps');
+    expect(pinned, 'the pinned gate and render').toBeTruthy();
+    expect(pinned).toContain('waitForAppServing(config.domain)');
+    expect(pinned).toContain('runFrontendSmokeChecks(config.domain)');
+    expect(step).toContain("withResolutionPin(scalePin, () => recordTlsReused('verify-scale'))");
+    // Once each, so nothing runs a second time outside the pin.
+    expect(step.match(/waitForAppServing\(/g)).toHaveLength(1);
+    expect(step.match(/runFrontendSmokeChecks\(/g)).toHaveLength(1);
   });
 
-  it('pairs the pin with an authoritative dns_scale_flip assertion', () => {
-    // Pin without the publish-half would let a never-published record pass.
-    expect(LIFECYCLE).toMatch(/dns_scale_flip/);
-    // And it must run for verify-scale, not just failover.
-    expect(LIFECYCLE).toMatch(/stepName === 'verify-scale'[\s\S]{0,4500}dns_scale_flip/);
+  it('pairs the pin with an authoritative dns_scale_flip that can fail the step', () => {
+    // A pin without the publish half would let a never-published record pass.
+    const step = liveStep();
+    expect(step).toContain("checkName: 'dns_scale_flip'");
+    expect(step).toContain('expectedIp: scalePin.ip');
+    expect(step).toMatch(/flip\.status === 'fail'[\s\S]{0,120}throw new Error/);
   });
 });
 
