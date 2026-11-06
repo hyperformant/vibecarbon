@@ -94,7 +94,9 @@ describe('state lock — wiring', () => {
       syncServerState('one', TARGET, options()),
       syncServerState('two', TARGET, options()),
     ]);
-    await vi.waitFor(() => expect(log).toContain('one:export'));
+    // The first sync lazily imports the Pulumi automation layer, which takes
+    // longer than waitFor's default 1 s on a loaded machine.
+    await vi.waitFor(() => expect(log).toContain('one:export'), { timeout: 15_000 });
     await new Promise((r) => setTimeout(r, 20));
     expect(log).toEqual(['one:export']);
 
