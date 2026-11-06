@@ -96,6 +96,8 @@ services:
   # mutation, but its GET sections (CONTAINERS/SERVICES/TASKS/NETWORKS) serve
   # container inspect, env included, so it sits on the internal socket-proxy
   # network that only traefik joins. Nothing else can resolve or reach it.
+  # Held on 0.4.x until Tecnativa/docker-socket-proxy#180 closes; the reason
+  # is on DOCKER_SOCKET_PROXY_MIRROR in the CLI's src/lib/images.js.
   docker-socket-proxy:
     image: ghcr.io/hyperformant/docker-socket-proxy:v0.4.2@sha256:bd2241b3bec83abcff25927a0a7ae518e0c5bef624b3cc247dcb31e68b53f417
     container_name: ${PROJECT_NAME}-socket-proxy

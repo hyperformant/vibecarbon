@@ -23,6 +23,10 @@
 // with policy `missing` and k8s with IfNotPresent, so a republish under an
 // unchanged tag never reaches a server that already has it. Reset to -r1
 // when the PostgreSQL or wal-g version moves.
+//
+// The major stays on 17 on purpose. PostgreSQL's data directory format and
+// wal-g's physical backups do not cross majors, so moving to 18 is a data
+// migration for every live database, not a tag edit. Minors move freely.
 export const DB_IMAGE = 'ghcr.io/hyperformant/postgres';
 export const DB_IMAGE_TAG = '17.11-walg3.0.9-r4';
 
@@ -517,7 +521,16 @@ export const TRAEFIK_MIRROR = {
   digest: 'sha256:e15b8921020b4fd81de5746b170dfceec221d2450711449f6427e4692881511a',
   index: 'sha256:92627e6a99f71b8e46634acea28130b9f14bec5d9887ad15161007e1b652afe1',
 };
-/** @type {MirroredImage} compose prod's two socket proxies (traefik's and the app's) */
+/**
+ * compose prod's two socket proxies (traefik's and the app's).
+ *
+ * Held on 0.4.x, and mirror-drift's holdFor knows it. v0.5.0 moves to HAProxy
+ * 3.4, and Tecnativa/docker-socket-proxy#180 reports /version hanging behind
+ * it, the call a Docker client makes first. That issue is still open. Traefik
+ * routed fine through 0.5.0 on Docker 29 here, so this is caution about a bug
+ * nobody has explained, and closing the issue lifts the hold.
+ * @type {MirroredImage}
+ */
 export const DOCKER_SOCKET_PROXY_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
   repo: 'tecnativa/docker-socket-proxy',
