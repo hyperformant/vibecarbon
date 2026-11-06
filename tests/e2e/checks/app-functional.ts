@@ -941,6 +941,9 @@ export async function checkFileUploadRoundtrip(
       details: { step, ...details },
     });
 
+  // The call in flight, so a timeout names it: every stage below can throw, and
+  // one 22 s Scaleway failure reading only "request" could not be placed.
+  let call = 'presign';
   try {
     const presignRes = await appFetch(`https://${appDomain}/api/v1/files/presign`, {
       method: 'POST',
@@ -989,6 +992,7 @@ export async function checkFileUploadRoundtrip(
     // storage origin, and the bucket's CORS must answer the preflight for the
     // app's origin.
     const storageOrigin = new URL(presign.url).origin;
+    call = 'csp';
     const homeRes = await appFetch(`https://${appDomain}/`, { method: 'GET' });
     const csp = homeRes.headers.get('content-security-policy');
     const connectSrc = cspDirective(csp, 'connect-src');
@@ -1001,6 +1005,7 @@ export async function checkFileUploadRoundtrip(
     }
 
     const appOrigin = `https://${appDomain}`;
+    call = 'cors';
     const preflight = await transfer.preflight(presign.url, appOrigin);
     if (preflight.status < 200 || preflight.status >= 300 || preflight.allowOrigin !== appOrigin) {
       return fail(
@@ -1012,6 +1017,7 @@ export async function checkFileUploadRoundtrip(
       );
     }
 
+    call = 'upload';
     const put = await transfer.put(
       presign.url,
       presign.headers as Record<string, string>,
@@ -1023,6 +1029,7 @@ export async function checkFileUploadRoundtrip(
       });
     }
 
+    call = 'read';
     const readRes = await appFetch(`https://${appDomain}${presign.fileUrl}`, { method: 'GET' });
     const location = readRes.headers.get('location');
     if (readRes.status !== 302 || !location) {
@@ -1034,6 +1041,7 @@ export async function checkFileUploadRoundtrip(
       );
     }
 
+    call = 'download';
     const got = await transfer.get(location);
     if (got.status !== 200) {
       return fail('download', `following the read redirect returned ${got.status}`, { key });
@@ -1048,7 +1056,7 @@ export async function checkFileUploadRoundtrip(
 
     return result('file_upload_roundtrip', 'pass', start, { details: { key } });
   } catch (err) {
-    return fail('request', err instanceof Error ? err.message : String(err));
+    return fail(call, err instanceof Error ? err.message : String(err));
   }
 }
 
