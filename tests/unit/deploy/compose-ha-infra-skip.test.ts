@@ -284,6 +284,55 @@ describe('compose-ha infra skip', () => {
     expect(ups() - before).toBe(2);
   });
 
+  describe('one region fails while the other is still updating', () => {
+    it('waits for the other region, so no update is left running when the CLI exits', async () => {
+      let finishStandby: (value: unknown) => void = () => {};
+      fake.upStack.mockImplementation((stack: string) =>
+        stack.endsWith('primary')
+          ? Promise.reject(new Error('primary failed'))
+          : new Promise((resolve) => {
+              finishStandby = resolve;
+            }),
+      );
+
+      const outcome = provision(makeCtx()).then(
+        () => 'resolved',
+        (err: Error) => err.message,
+      );
+      await vi.waitFor(() => expect(ups()).toBe(2));
+      const pending = new Promise((resolve) => setTimeout(() => resolve('pending'), 25));
+      expect(await Promise.race([outcome, pending])).toBe('pending');
+
+      finishStandby({ outputs: outputsFor('prod-standby', 1) });
+      expect(await outcome).toBe('primary failed');
+    });
+
+    it('rethrows the one failure as it was', async () => {
+      const failure = new Error('standby failed');
+      fake.upStack.mockImplementation(async (stack: string) => {
+        if (stack.endsWith('standby')) throw failure;
+        return { outputs: outputsFor(stack, 1) };
+      });
+
+      await expect(provision(makeCtx())).rejects.toBe(failure);
+    });
+
+    it('names both regions when both fail', async () => {
+      fake.upStack.mockImplementation(async (stack: string) => {
+        throw new Error(`${stack} failed`);
+      });
+
+      const message = await provision(makeCtx()).then(
+        () => 'resolved',
+        (err: Error) => err.message,
+      );
+      expect(message).toContain('primary: ');
+      expect(message).toContain('prod-primary failed');
+      expect(message).toContain('standby: ');
+      expect(message).toContain('prod-standby failed');
+    });
+  });
+
   it('an arm that returns no serverIp fails the gate and completes nothing', async () => {
     fake.upStack.mockImplementation(async (stack: string) => ({
       outputs: stack === 'prod-primary' ? {} : outputsFor(stack, 2),
