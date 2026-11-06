@@ -34,7 +34,7 @@
           "ownedS": 195,
           "endToEndS": 235,
           "tlsAllowanceS": 40,
-          "samples": 7
+          "samples": 8
         }
       },
       "k8s-ha": {
@@ -45,10 +45,10 @@
           "samples": 2
         },
         "intel": {
-          "ownedS": 285,
-          "endToEndS": 300,
+          "ownedS": 340,
+          "endToEndS": 355,
           "tlsAllowanceS": 15,
-          "samples": 4
+          "samples": 5
         },
         "regular": {
           "ownedS": 325,
@@ -68,7 +68,7 @@
           "ownedS": 295,
           "endToEndS": 380,
           "tlsAllowanceS": 85,
-          "samples": 5
+          "samples": 6
         }
       }
     },
@@ -189,9 +189,9 @@
           "samples": 1
         },
         "BASIC3": {
-          "ownedS": 170,
-          "endToEndS": 200,
-          "tlsAllowanceS": 30,
+          "ownedS": 215,
+          "endToEndS": 250,
+          "tlsAllowanceS": 35,
           "samples": 2
         }
       }
