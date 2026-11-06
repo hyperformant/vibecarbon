@@ -58,6 +58,7 @@ import {
 import { assertInProjectDir } from './lib/project-guard.js';
 import { sidecarBlocked, symlinkedComponent, writeSidecar } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
+import { parseComposePs } from './lib/status/compose-ps.js';
 import { templatePathFor } from './lib/template-paths.js';
 import { getAddonFilePolicy, getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
 import { VERSION } from './lib/version.js';
@@ -521,7 +522,9 @@ async function main(cliArgs) {
       encoding: 'utf-8',
       timeout: 10000,
     }).trim();
-    if (ps) {
+    // Compose before 2.21 prints `[]` for an empty stack, which is not nothing.
+    const rows = parseComposePs(ps);
+    if (rows === null || rows.length > 0) {
       p.log.warn(
         `Docker containers are running. Consider running ${c.info('vibecarbon down')} first.`,
       );

@@ -23,6 +23,7 @@ import { reclaimOrphanPorts } from './lib/orphan.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+import { parseComposePs, publishedPorts } from './lib/status/compose-ps.js';
 import {
   deriveComposeProjectName,
   findSubnetConflict,
@@ -123,22 +124,7 @@ function getOwnDockerPorts(cwd) {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    const ports = new Set();
-    for (const line of output.trim().split('\n')) {
-      if (!line) continue;
-      try {
-        const container = JSON.parse(line);
-        // Publishers is an array of { URL, TargetPort, PublishedPort, Protocol }
-        if (Array.isArray(container.Publishers)) {
-          for (const pub of container.Publishers) {
-            if (pub.PublishedPort) ports.add(pub.PublishedPort);
-          }
-        }
-      } catch {
-        // skip non-JSON lines
-      }
-    }
-    return ports;
+    return publishedPorts(parseComposePs(output));
   } catch {
     return new Set();
   }
