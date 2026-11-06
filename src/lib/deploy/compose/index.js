@@ -18,6 +18,7 @@ import { writeLogDetail } from '../../deploy-logger.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
 import { loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
 import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
+import { assertOperatorIpUnchanged } from '../../operator-ip-guard.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
@@ -253,6 +254,7 @@ export async function sshRunAsync(ip, sshKeyPath, command, options = {}) {
         return await runCommandAsync(sshArgs, runOpts);
       } catch (err) {
         if (!isTransientSshCommandError(err)) throw err;
+        await assertOperatorIpUnchanged();
         if (!ladderLocked) {
           ladderLocked = true;
           if (retries > 1 && isDnsNotSettledSshCommandError(err)) {

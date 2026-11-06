@@ -75,6 +75,7 @@ import {
   upgradeKubeconfig,
 } from '../../kubeconfig.js';
 import { readOperatorVar } from '../../operator-env.js';
+import { assertOperatorIpUnchanged } from '../../operator-ip-guard.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
@@ -623,6 +624,9 @@ export async function runKubectlWithRetry(
         } catch (err) {
           if (!captureStdout && err.stdout) process.stdout.write(err.stdout);
           if (err.stderr) process.stderr.write(err.stderr);
+          if (KUBECTL_TRANSIENT_PATTERN.test(kubectlErrorHaystack(err))) {
+            await assertOperatorIpUnchanged();
+          }
           throw err;
         }
       },

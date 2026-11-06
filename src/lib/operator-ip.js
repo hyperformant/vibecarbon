@@ -26,6 +26,7 @@
 import { updateProjectConfig } from './config.js';
 import { fetchWithRetry } from './fetch-retry.js';
 import { readOperatorVar } from './operator-env.js';
+import { armOperatorIpGuard } from './operator-ip-guard.js';
 import { providerFor } from './providers/index.js';
 
 // ============================================================================
@@ -376,6 +377,10 @@ export async function ensureOperatorIpAccess({
       `${err.message}. Pass ALLOWED_SSH_IPS=... or run \`vibecarbon access add <cidr>\` manually.`,
     );
   }
+
+  // Remember the IP this command was let in under: if it changes mid-command
+  // the transport layers fail fast instead of waiting out locked firewalls.
+  armOperatorIpGuard({ ip });
 
   const match = findMatchingCidr(list, ip, version);
   if (match) {
