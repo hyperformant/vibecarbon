@@ -476,7 +476,9 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads, warn }) {
         what: 'the PGDATA marker',
         apply: (ip) =>
           attempt(async () => {
-            const out = await kubectl(ip, k8sDbMarkerExec(`touch ${DB_MARKER_PATH} && echo OK`));
+            const out = await kubectl(ip, k8sDbMarkerExec(`touch ${DB_MARKER_PATH} && echo OK`), {
+              timeout: PROBE_TIMEOUT_MS,
+            });
             if (String(out ?? '').trim() !== 'OK') throw new Error('touch did not confirm');
           }),
       },
@@ -903,7 +905,9 @@ export async function clearRetiredFence({ tier, ip, projectName, environment, de
         '-p',
         JSON.stringify({ data: { [RETIRED_ROLE_KEY]: null } }),
       ]);
-      const out = await kubectl(ip, k8sDbMarkerExec(`rm -f ${DB_MARKER_PATH} && echo OK`));
+      const out = await kubectl(ip, k8sDbMarkerExec(`rm -f ${DB_MARKER_PATH} && echo OK`), {
+        timeout: PROBE_TIMEOUT_MS,
+      });
       if (String(out ?? '').trim() !== 'OK') throw new Error('rm did not confirm');
       await clearDbReadOnly(exec);
       for (const k of (await listFluxKustomizations(ip, kubectl)) ?? []) {

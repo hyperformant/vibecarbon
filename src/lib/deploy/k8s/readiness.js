@@ -47,6 +47,7 @@ import {
   isAdminProbeExit,
   isTerminalAdminProbeExit,
 } from '../admin-ready.js';
+import { DB_POD, POD_EXEC_PROBE_MS, POD_EXEC_QUERY_MS } from '../db-workload.js';
 
 /**
  * Inert probe resource: namespaced (no cluster-wide footprint), self-signed
@@ -386,8 +387,58 @@ export async function awaitPostgresAccepting({
           '-U',
           'postgres',
         ],
-        { env, silent: true },
+        // Killed at the bound, a hung exec is one failed attempt of this poll.
+        { env, silent: true, timeout: POD_EXEC_PROBE_MS },
       ),
+  });
+}
+
+/**
+ * Wait for the db pod's Ready condition, read from the API. For a deploy that
+ * changed nothing: its only question is whether the db is up, the kubelet's
+ * readiness probe (the same pg_isready over TCP) already answers it, and an
+ * API read never takes the apiserver-to-kubelet exec path.
+ *
+ * It is not awaitPostgresAccepting's equal. Ready is the probe's last verdict,
+ * and it does not prove the exec path (src/backup.js triggerBackupJob): a step
+ * that rolled the db, or that execs next with no budget of its own, keeps that.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
+ * @param {string} [params.dbPod]
+ * @param {string} [params.namespace]
+ * @param {number} [params.budgetMs]
+ * @param {Function} [params.exec] - test seam, defaults to runCommandAsync
+ * @param {Function} [params.sleep] - test seam
+ * @param {Function} [params.nowFn] - test seam
+ */
+export async function awaitDbPodReady({
+  env,
+  dbPod = DB_POD,
+  namespace = 'vibecarbon',
+  budgetMs = 180_000,
+  exec = defaultExec,
+  sleep = defaultSleep,
+  nowFn,
+}) {
+  await pollCondition({
+    name: `db pod Ready (${dbPod})`,
+    budgetMs,
+    sleep,
+    nowFn,
+    attempt: async () => {
+      const out = await exec(['kubectl', '-n', namespace, 'get', 'pod', dbPod, '-o', 'json'], {
+        env,
+        silent: true,
+        timeout: POD_EXEC_QUERY_MS,
+      });
+      const ready = JSON.parse(String(out ?? '')).status?.conditions?.find(
+        (c) => c?.type === 'Ready',
+      );
+      if (ready?.status !== 'True') {
+        throw new Error(`${dbPod} is not Ready (${ready?.reason ?? ready?.status ?? 'no status'})`);
+      }
+    },
   });
 }
 
@@ -440,7 +491,7 @@ export async function awaitPostgresPromoted({
           '-tAc',
           'SELECT pg_is_in_recovery()',
         ],
-        { env, silent: true },
+        { env, silent: true, timeout: POD_EXEC_QUERY_MS },
       );
       const v = String(out ?? '').trim();
       if (v !== 'f') throw new Error(`pg_is_in_recovery() = ${v || '(no answer)'}`);
@@ -496,7 +547,7 @@ export async function awaitAppAdminReady({
               '-e',
               adminReadyProbeScript(),
             ],
-            { env, silent: true },
+            { env, silent: true, timeout: POD_EXEC_QUERY_MS },
           );
         } catch (err) {
           // The probe's own exit codes say which half is missing; anything
@@ -667,7 +718,7 @@ export async function watchAppMigrationFailure({
               ...(terminatedNow ? [] : ['--previous']),
               '--tail=40',
             ],
-            { env, silent: true },
+            { env, silent: true, timeout: POD_EXEC_QUERY_MS },
           )) ?? '',
         );
       } catch {
@@ -697,7 +748,7 @@ export async function watchAppMigrationFailure({
             '-e',
             adminReadyProbeScript(),
           ],
-          { env, silent: true },
+          { env, silent: true, timeout: POD_EXEC_QUERY_MS },
         );
         code = 0;
       } catch (err) {
@@ -714,6 +765,7 @@ export async function watchAppMigrationFailure({
             {
               env,
               silent: true,
+              timeout: POD_EXEC_QUERY_MS,
             },
           )) ?? '',
         );

@@ -753,7 +753,10 @@ describe('k8s audit is NOT behind the persisted k3s-apply skip gate', () => {
 
   it('still runs only when S3 is configured — a backup-less deploy is untouched', () => {
     const call = SRC.indexOf('verifyWalgBackups({ kubeconfig })');
-    const gate = SRC.lastIndexOf('if (options.s3Config?.accessKey) {', call);
+    const gate = SRC.lastIndexOf(
+      "if (options.s3Config?.accessKey && options.role !== 'standby') {",
+      call,
+    );
     expect(gate).toBeGreaterThan(-1);
     // The gate must be the immediately-enclosing conditional, not some far
     // earlier one that happens to appear before the call.

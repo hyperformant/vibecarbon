@@ -25,7 +25,14 @@ import {
 import { perfAsync } from '../../../perf.js';
 import { shJoin } from '../../../shell.js';
 import { sshRun } from '../../../ssh.js';
-import { DB_CONTAINER, DB_POD, DB_STATEFULSET, standbyDbRebuildHint } from '../../db-workload.js';
+import {
+  DB_CONTAINER,
+  DB_POD,
+  DB_STATEFULSET,
+  POD_EXEC_QUERY_MS,
+  POD_EXEC_WRITE_MS,
+  standbyDbRebuildHint,
+} from '../../db-workload.js';
 import {
   buildInPlaceReseedStageScript,
   buildReplicationHbaLines,
@@ -169,7 +176,7 @@ function firstErrorLine(err) {
 async function relayDiagnostics(exec, primaryIp) {
   const ask = async (script) => {
     try {
-      return String((await exec(primaryIp, script)) ?? '').trim();
+      return String((await exec(primaryIp, script, undefined, POD_EXEC_QUERY_MS)) ?? '').trim();
     } catch {
       return '';
     }
@@ -198,7 +205,7 @@ const RELAY_DELETE = 'kubectl delete pod registry-relay -n vibecarbon --ignore-n
  * @param {string} o.standbyIp - standby master public IP (ssh)
  * @param {string} o.primaryMasterPrivateIp
  * @param {string} o.sshKeyPath
- * @param {(ip: string, script: string, input?: string) => Promise<unknown>} [o.run]
+ * @param {(ip: string, script: string, input?: string, timeout?: number) => Promise<unknown>} [o.run]
  * @param {() => Promise<T>} fn
  * @returns {Promise<T>}
  * @template T
@@ -209,8 +216,8 @@ export async function withRegistryRelay(
 ) {
   const exec =
     run ??
-    ((ip, script, input) =>
-      sshRun(ip, sshKeyPath, ['sh', '-c', script], { input, timeout: 120_000 }));
+    ((ip, script, input, timeout = 120_000) =>
+      sshRun(ip, sshKeyPath, ['sh', '-c', script], { input, timeout }));
   const manifest = renderRegistryRelayManifest({
     template: readFileSync(REGISTRY_RELAY_MANIFEST, 'utf-8'),
     primaryMasterPrivateIp,
@@ -516,7 +523,11 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         `root@${primaryIp}`,
         `kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres`,
       ],
-      { silent: true, input: `${primaryReplicationSql(replPassword)}\nSELECT pg_reload_conf();\n` },
+      {
+        silent: true,
+        input: `${primaryReplicationSql(replPassword)}\nSELECT pg_reload_conf();\n`,
+        timeout: POD_EXEC_WRITE_MS,
+      },
     );
   });
 
@@ -604,7 +615,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         `root@${primaryIp}`,
         `kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- bash`,
       ],
-      { silent: true, input: hbaSetupScript },
+      { silent: true, input: hbaSetupScript, timeout: POD_EXEC_WRITE_MS },
     ),
   );
 }
@@ -873,7 +884,7 @@ export async function setupReplication(options) {
             `root@${primaryIp}`,
             `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "${sql}"`,
           ],
-          { silent: true, ignoreError: true },
+          { silent: true, ignoreError: true, timeout: POD_EXEC_QUERY_MS },
         ),
     }),
   );
@@ -889,7 +900,7 @@ export async function setupReplication(options) {
         `root@${standbyIp}`,
         `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "${SYSTEM_IDENTIFIER_SQL}"`,
       ],
-      { silent: true },
+      { silent: true, timeout: POD_EXEC_QUERY_MS },
     );
     const sysid = (typeof out === 'string' ? out : '').trim();
     if (!/^\d+$/.test(sysid)) {
@@ -1092,7 +1103,7 @@ export async function setupReplication(options) {
             `root@${primaryIp}`,
             `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
           ],
-          { silent: true },
+          { silent: true, timeout: POD_EXEC_QUERY_MS },
         );
         const out = (typeof result === 'string' ? result : '').trim();
         if (!VALID_STATES.has(out)) {

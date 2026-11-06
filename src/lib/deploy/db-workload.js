@@ -13,6 +13,30 @@
  * engine internals.
  */
 
+/**
+ * What one kubectl call into a pod may take. `exec` and `logs` go apiserver to
+ * kubelet to the container, a path that has hung on a healthy db until the
+ * call's own bound killed it (30 s on a role write, 120 s on a backup audit)
+ * with the cause unknown, so a hang has to cost seconds and never the deploy's
+ * whole wait. A long operation (a reseed stage, `rm -rf` of an old cluster, ANALYZE)
+ * names its own bound beside its call. Every pod call names one
+ * (tests/unit/deploy/pod-exec-bound-census.test.ts): sshRun's default is 120 s
+ * and runCommandAsync has none.
+ *
+ * Slowest real runs (perf_substep, k8s modes on DigitalOcean and Hetzner,
+ * 2026-08 to 2026-11): auditRls 1.5 s, the whole app health wait 1.8 s, the
+ * replication setup 4.9 s, the pg_hba write 1.2 s. pg_isready has no timing of
+ * its own here; its connect timeout caps it at 3 s.
+ */
+/** pg_isready (its own connect timeout is 3 s), a stat, a read of a small file, df. */
+export const POD_EXEC_PROBE_MS = 10_000;
+
+/** One psql statement, or the app's health probe (4 s http plus node starting). */
+export const POD_EXEC_QUERY_MS = 15_000;
+
+/** A short write with no loop around it: replication setup, pg_hba, a slot, a promote. */
+export const POD_EXEC_WRITE_MS = 30_000;
+
 /** The StatefulSet (`statefulset/db`). */
 export const DB_STATEFULSET = 'db';
 

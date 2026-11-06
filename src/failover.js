@@ -27,7 +27,13 @@ import {
   recordBackupFence,
   writeK8sBackupFence,
 } from './lib/deploy/backup-fence.js';
-import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_STATEFULSET } from './lib/deploy/db-workload.js';
+import {
+  DB_CONTAINER,
+  DB_POD,
+  DB_POD_SELECTOR,
+  DB_STATEFULSET,
+  POD_EXEC_PROBE_MS,
+} from './lib/deploy/db-workload.js';
 import { abortFailover } from './lib/deploy/failover-abort.js';
 import {
   assertFailoverClassified,
@@ -300,18 +306,12 @@ export function identifyServers(envName, envConfig, _projectConfig) {
 async function isPrimaryPostgresReady(primaryIp, sshKeyPath) {
   try {
     const pod = await getPostgresPod(primaryIp, sshKeyPath);
-    const result = await sshKubectl(primaryIp, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'pg_isready',
-      '-U',
-      'postgres',
-      '-t',
-      '3',
-    ]);
+    const result = await sshKubectl(
+      primaryIp,
+      sshKeyPath,
+      ['exec', '-n', 'vibecarbon', pod, '--', 'pg_isready', '-U', 'postgres', '-t', '3'],
+      { timeout: POD_EXEC_PROBE_MS },
+    );
     return result?.includes('accepting connections') ?? false;
   } catch {
     return false;
@@ -2002,17 +2002,21 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
         // an empty answer (no ConfigMap) or an unreadable one: write it
       }
       try {
-        const out = await kubectl(primary.ip, [
-          ...ns,
-          'exec',
-          DB_POD,
-          '-c',
-          DB_CONTAINER,
-          '--',
-          'sh',
-          '-c',
-          walgRoleReadShell(WALG_ROLE_DIR),
-        ]);
+        const out = await kubectl(
+          primary.ip,
+          [
+            ...ns,
+            'exec',
+            DB_POD,
+            '-c',
+            DB_CONTAINER,
+            '--',
+            'sh',
+            '-c',
+            walgRoleReadShell(WALG_ROLE_DIR),
+          ],
+          { timeout: POD_EXEC_PROBE_MS },
+        );
         live = parseWalgRoleReadBack(out);
       } catch {
         // the db does not answer: the write below says so

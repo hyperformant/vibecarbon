@@ -20,7 +20,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { selectAction } from './lib/cli/select-action.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
+import { DB_STATEFULSET, POD_EXEC_WRITE_MS } from './lib/deploy/db-workload.js';
 import { awaitPostgresAccepting } from './lib/deploy/k8s/index.js';
 import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
@@ -113,12 +113,13 @@ const ACTION_CHOICES = [
 async function downloadPodBackup(ip, sshKeyPath, filename) {
   const pod = await getPostgresPod(ip, sshKeyPath);
 
-  // Copy from pod to host
-  await sshKubectl(ip, sshKeyPath, [
-    'cp',
-    `vibecarbon/${pod}:/backups/${filename}`,
-    `/tmp/${filename}`,
-  ]);
+  // Copy from pod to host. A whole dump: the bound of the scp that follows.
+  await sshKubectl(
+    ip,
+    sshKeyPath,
+    ['cp', `vibecarbon/${pod}:/backups/${filename}`, `/tmp/${filename}`],
+    { timeout: 300_000 },
+  );
 
   // SCP from host to local
   const localPath = join(process.cwd(), filename);
@@ -279,8 +280,10 @@ export async function triggerBackupJob(ip, sshKeyPath, opts = {}) {
     sleep,
     nowFn,
     // Route the probe over the same ssh→kubectl hop the trigger uses; argv[0]
-    // is the 'kubectl' token sshKubectl prepends itself.
-    exec: (argv) => kubectlImpl(ip, sshKeyPath, argv.slice(1), { silent: true }),
+    // is the 'kubectl' token sshKubectl prepends itself. The probe's own bound
+    // has to come through: sshRun's default is 120 s.
+    exec: (argv, { timeout }) =>
+      kubectlImpl(ip, sshKeyPath, argv.slice(1), { silent: true, timeout }),
   });
 
   const timestamp = new Date()
@@ -410,7 +413,7 @@ fi`,
     ip,
     sshKeyPath,
     ['logs', '-n', 'vibecarbon', '-l', `job-name=${jobName}`, '--tail=-1'],
-    { silent: true },
+    { silent: true, timeout: POD_EXEC_WRITE_MS },
   );
   return { ...parseBackupResult(logs), job: jobName };
 }

@@ -110,6 +110,8 @@ import {
   DB_POD_SELECTOR,
   DB_PVC,
   DB_STATEFULSET,
+  POD_EXEC_PROBE_MS,
+  POD_EXEC_QUERY_MS,
   standbyDbRebuildHint,
 } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
@@ -155,6 +157,7 @@ import {
   awaitCertManagerAdmission,
   awaitCertManagerLeader,
   awaitControlPlaneServing,
+  awaitDbPodReady,
   awaitPostgresAccepting,
   awaitPostgresPromoted,
   watchAppMigrationFailure,
@@ -593,7 +596,17 @@ const KUBECTL_ON_MASTER_TIMEOUT_MS = 300_000;
  */
 export async function runKubectlWithRetry(
   args,
-  { env, input, captureStdout = false, description, transientExtra, delaysMs, signal, on } = {},
+  {
+    env,
+    input,
+    captureStdout = false,
+    description,
+    transientExtra,
+    delaysMs,
+    signal,
+    on,
+    timeout,
+  } = {},
 ) {
   const RETRY_DELAYS_MS = delaysMs ?? [2000, 4000];
   const ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -605,13 +618,14 @@ export async function runKubectlWithRetry(
           const out = await (on
             ? sshKubectl(on.ip, on.sshKeyPath, args, {
                 input,
-                timeout: KUBECTL_ON_MASTER_TIMEOUT_MS,
+                timeout: timeout ?? KUBECTL_ON_MASTER_TIMEOUT_MS,
                 ...(signal && { signal }),
               })
             : runCommandAsync(['kubectl', ...args], {
                 env,
                 input,
                 silent: true,
+                ...(timeout && { timeout }),
                 ...(signal && { signal }),
               }));
           // Stream captured stdout through to the operator's terminal so the
@@ -2523,7 +2537,7 @@ export async function auditRls({ kubeconfig }) {
       '-tAc',
       RLS_AUDIT_SQL,
     ],
-    { env, silent: true },
+    { env, silent: true, timeout: POD_EXEC_QUERY_MS },
   );
   // runCommandAsync(silent) resolves the stdout string directly.
   const unprotected = String(auditOut ?? '').trim();
@@ -2535,8 +2549,8 @@ export async function auditRls({ kubeconfig }) {
 /**
  * The deploy's live wal-g role write: the intent (vibecarbon-db-role) and the
  * role file in the running db container, through setK8sWalgRole. deployK3s
- * runs it on every deploy, outside the k3s-apply skip gate and once postgres
- * accepts, so a redeploy that did not restart the db
+ * runs it on every deploy, outside the k3s-apply skip gate and once the db is
+ * up, so a redeploy that did not restart the db
  * (or skipped the apply altogether) still converges the file. A deploy whose
  * role vibecarbon-db-role already proves does not exec at all (recordLive; the
  * header of walg-role.js says why that is sound). Throws when the
@@ -3128,7 +3142,7 @@ async function readRestoreSwapState(env, marker) {
   try {
     out = await runCommandAsync(
       ['kubectl', '-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', probe],
-      { env, silent: true },
+      { env, silent: true, timeout: POD_EXEC_PROBE_MS },
     );
   } catch {
     return { state: 'unknown', previous: false };
@@ -3268,7 +3282,7 @@ function dbPsql(env) {
           '-tAc',
           sql,
         ],
-        { env, silent: true },
+        { env, silent: true, timeout: POD_EXEC_QUERY_MS },
       )) ?? '',
     );
 }
@@ -3309,12 +3323,14 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
       ].join('\n'),
     );
   }
-  const execInDb = (script, description) =>
+  // The bounds `vibecarbon restore` gives the same two scripts: a rename, and
+  // an `rm -rf` of a whole cluster.
+  const execInDb = (script, description, timeout) =>
     runKubectlWithRetry(
       ['-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', script],
-      { env, description },
+      { env, description, timeout },
     );
-  await execInDb(RETIRE_PREVIOUS_SH, 'finishDeployRestore: retire the previous cluster');
+  await execInDb(RETIRE_PREVIOUS_SH, 'finishDeployRestore: retire the previous cluster', 60_000);
   try {
     await runKubectlWithRetry(
       [
@@ -3345,7 +3361,7 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
       ].join('\n'),
     );
   }
-  await execInDb(REMOVE_DISCARD_SH, 'finishDeployRestore: remove the discarded cluster');
+  await execInDb(REMOVE_DISCARD_SH, 'finishDeployRestore: remove the discarded cluster', 300_000);
   progressLog(`[db] restored ${restore.backup}: promoted, writable, restore marker cleared`);
 }
 
@@ -5393,13 +5409,11 @@ async function deployK3sSteps(options, inFlight) {
   //     intent and the file are set to this deploy's role and read back
   //     before the audit, so the audit reads the role this deploy set; a role
   //     vibecarbon-db-role already proves needs no exec. A skipped apply
-  //     waited for no db, so postgres has to accept first: the write never
-  //     races a starting pod.
+  //     waited for no db and rolled none, so it waits on the pod's Ready from
+  //     the API: the write never races a starting pod, and a deploy with
+  //     nothing to do does not exec only to ask if the db is up.
   if (skipApply) {
-    await awaitPostgresAccepting({
-      env: { ...process.env, KUBECONFIG: kubeconfig },
-      dbPod: DB_POD,
-    });
+    await awaitDbPodReady({ env: { ...process.env, KUBECONFIG: kubeconfig } });
   }
   await perfAsync(`deploy.${perfPrefix}.walgRole`, () =>
     writeDeployWalgRole({
@@ -5421,11 +5435,13 @@ async function deployK3sSteps(options, inFlight) {
   //     until something unrelated forced an image change — green gate, dead
   //     backups. Compose runs its audit on every deploy; this keeps k8s honest
   //     with it. Cost is one S3 LIST.
-  //     Gated only on S3 being configured at all (mirrors the archiving-enable
+  //     Gated on S3 being configured at all (mirrors the archiving-enable
   //     block); the probe independently re-checks that from inside the
-  //     container and self-skips a node whose role file says standby.
+  //     container. Not on a standby: the probe only reads the role file and
+  //     skips, and the step above just proved that file reads standby, so the
+  //     exec could learn nothing.
   //     THROWS on failure — see src/lib/deploy/walg-audit.js.
-  if (options.s3Config?.accessKey) {
+  if (options.s3Config?.accessKey && options.role !== 'standby') {
     await perfAsync(`deploy.${perfPrefix}.verifyWalgBackups`, () =>
       verifyWalgBackups({ kubeconfig }),
     );
