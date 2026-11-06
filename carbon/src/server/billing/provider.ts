@@ -42,19 +42,9 @@ export interface BillingProvider {
   isConfigured(): boolean;
 
   /**
-   * OPTIONAL: retrieve a price's charge amount for integrity checks.
-   * License checkout refuses to sell when the live catalog price disagrees
-   * with the advertised amount (the static surfaces all say $149 — a stale
-   * price ID in FULLERENE_PRICE_ID must fail loud, never charge silently).
-   * Providers without price-retrieval support omit this; the guard then
-   * logs and skips.
-   */
-  getPriceAmount?(priceId: string): Promise<{ unitAmountCents: number; currency: string } | null>;
-
-  /**
    * Create a checkout session and return the redirect URL.
-   * `customerId` is optional: guest checkouts (license sales) omit it and let
-   * the provider's checkout page collect the buyer's email itself.
+   * `customerId` is optional: guest checkouts omit it and let the provider's
+   * checkout page collect the buyer's email itself.
    */
   createCheckout(params: {
     customerId?: string;

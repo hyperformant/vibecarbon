@@ -28,7 +28,6 @@ const Blog = lazy(() => import('./pages/Blog'));
 const Changelog = lazy(() => import('./pages/Changelog'));
 const Docs = lazy(() => import('./pages/Docs'));
 const Legal = lazy(() => import('./pages/Legal'));
-const Checkout = lazy(() => import('./pages/Checkout'));
 const Pricing = lazy(() => import('./pages/Pricing'));
 
 // Settings
@@ -171,7 +170,6 @@ export default function App() {
         <Route path="/blog/:slug" element={<Blog />} />
         <Route path="/changelog" element={<Changelog />} />
         <Route path="/changelog/:slug" element={<Changelog />} />
-        <Route path="/checkout" element={<Checkout />} />
         <Route path="/pricing" element={<Pricing />} />
         <Route
           path="/docs"

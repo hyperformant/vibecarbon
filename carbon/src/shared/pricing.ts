@@ -2,7 +2,6 @@
  * Pricing configuration - single source of truth for plan tiers.
  *
  * NOTE: This is the subscription pricing for apps BUILT WITH Vibecarbon (Stripe subscriptions).
- * For Vibecarbon CLI licensing tiers (Graphite/Fullerene/Agency), see src/lib/licensing/tiers.js.
  *
  * Stripe price IDs are loaded from environment variables so they differ
  * between development (test mode) and production (live mode).

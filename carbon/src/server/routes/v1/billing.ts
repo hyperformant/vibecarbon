@@ -22,8 +22,7 @@ const billingRoutes = new Hono<{ Variables: HonoVariables }>();
 // Polar checkout/setup/portal object, so the app-wide 100/min/IP still allows
 // 100 provider objects/min. Registered BEFORE the route handlers (Hono applies
 // middleware in registration order). Authed + org-role gated already, so a
-// modest 20/15min is ample for legitimate use. (The public license-checkout
-// gets its own tighter 5/15min limiter further down.)
+// modest 20/15min is ample for legitimate use.
 for (const p of ['/checkout', '/setup', '/portal']) {
   billingRoutes.use(p, createRateLimiter({ windowMs: 15 * 60 * 1000, max: 20 }));
 }
@@ -636,139 +635,6 @@ billingRoutes.post('/portal', requireAal2, requireOrgRole(ORG_BILLING_ROLES), as
     });
   } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to create portal session') }, 500);
-  }
-});
-
-// ============================================================================
-// LICENSE CHECKOUT (public, no auth — one-time license purchases)
-// ============================================================================
-
-const licenseCheckoutSchema = z.object({
-  tier: z.enum(['fullerene']),
-});
-
-// Fullerene is the only self-serve license tier; Agency is a contact-us
-// channel with no checkout (see src/lib/licensing/tiers.js in the CLI repo).
-const TIER_PRICE_IDS: Record<string, string | undefined> = {
-  fullerene: env.FULLERENE_PRICE_ID,
-};
-
-// The amounts every static surface advertises (README, docs, PricingSection).
-// Checkout REFUSES to sell when the live catalog price disagrees — a stale
-// FULLERENE_PRICE_ID pointing at the old $299 price must fail loud, never
-// charge a customer more than the page said. USD cents.
-const TIER_ADVERTISED_CENTS: Record<string, number> = {
-  fullerene: 149_00,
-};
-
-// One successful verification per price id per process — checkout must not
-// pay a provider round-trip on every request. A FAILED verification is never
-// cached: config can be fixed live and the next request re-checks.
-const verifiedPriceIds = new Set<string>();
-
-/**
- * Returns null when the checkout may proceed, or an operator-facing reason
- * string when the live price disagrees with the advertised amount.
- * Providers without price retrieval, and transient retrieval errors, log and
- * proceed — availability is not held hostage to a provider API blip; only a
- * POSITIVE amount mismatch blocks the sale.
- */
-async function priceIntegrityFailure(
-  provider: import('../../billing/provider').BillingProvider,
-  tier: string,
-  priceId: string
-): Promise<string | null> {
-  const expected = TIER_ADVERTISED_CENTS[tier];
-  if (!expected || verifiedPriceIds.has(priceId)) return null;
-  if (!provider.getPriceAmount) {
-    console.warn(
-      `[billing] ${provider.type} lacks price retrieval, skipping ${tier} price integrity check`
-    );
-    return null;
-  }
-  let live: { unitAmountCents: number; currency: string } | null;
-  try {
-    live = await provider.getPriceAmount(priceId);
-  } catch (err) {
-    console.warn(
-      `[billing] price integrity check for ${tier} (${priceId}) errored, proceeding: ${err instanceof Error ? err.message : err}`
-    );
-    return null;
-  }
-  if (live === null) return null;
-  if (live.unitAmountCents !== expected || live.currency !== 'usd') {
-    return (
-      `live ${provider.type} price ${priceId} is ${live.unitAmountCents} ${live.currency}, ` +
-      `but ${tier} is advertised at ${expected} usd, refusing to sell at an undisclosed amount`
-    );
-  }
-  verifiedPriceIds.add(priceId);
-  return null;
-}
-
-// SECURITY: this route is public (no auth) and creates a provider checkout
-// session on every request, so it's an abuse/cost vector. Apply a strict
-// per-IP limiter on top of the app-wide 100/min, matching the contact/
-// newsletter public routes.
-billingRoutes.use('/license-checkout', createRateLimiter({ windowMs: 15 * 60 * 1000, max: 5 }));
-
-/**
- * Create a one-time payment checkout session for a license tier.
- * No authentication and no pre-collected email — the provider's checkout page
- * collects the buyer's email itself (Stripe guest payment sessions create a
- * Customer via customer_creation: 'always', so license fulfillment reads the
- * email from the dashboard / customer_details).
- */
-billingRoutes.post('/license-checkout', async (c) => {
-  if (!isBillingConfigured()) {
-    return c.json({ error: 'Billing is not configured' }, 503);
-  }
-
-  let body: z.infer<typeof licenseCheckoutSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = licenseCheckoutSchema.safeParse(rawBody);
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
-
-  const priceId = TIER_PRICE_IDS[body.tier];
-  if (!priceId) {
-    return c.json({ error: `Price not configured for ${body.tier} tier` }, 503);
-  }
-
-  try {
-    const provider = getBillingProvider();
-
-    // Catalog-drift guard: never charge an amount the page didn't advertise.
-    const integrityFailure = await priceIntegrityFailure(provider, body.tier, priceId);
-    if (integrityFailure) {
-      console.error(`[billing] LICENSE CHECKOUT BLOCKED: ${integrityFailure}`);
-      return c.json({ error: 'License pricing is temporarily unavailable' }, 503);
-    }
-
-    const baseUrl = env.NODE_ENV === 'production' ? process.env.SITE_URL : 'http://localhost:5173';
-    const successUrl = `${baseUrl}/checkout?success=true&tier=${body.tier}`;
-    // Purchases start straight from the pricing card, so a cancelled checkout
-    // returns there — /checkout only renders the success state.
-    const cancelUrl = `${baseUrl}/#pricing`;
-
-    const result = await provider.createCheckout({
-      priceId,
-      successUrl,
-      cancelUrl,
-      metadata: { tier: body.tier, type: 'license' },
-      mode: 'payment',
-    });
-
-    return c.json({ url: result.url });
-  } catch (error) {
-    return c.json({ error: sanitizeError(error, 'Failed to create checkout session') }, 500);
   }
 });
 

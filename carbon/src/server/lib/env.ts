@@ -106,9 +106,6 @@ const envSchema = z.object({
   POLAR_PRICE_STARTER: z.string().optional(),
   POLAR_PRICE_PRO: z.string().optional(),
 
-  // License tier price ID (for one-time license purchases)
-  FULLERENE_PRICE_ID: z.string().optional(),
-
   // Redis (optional - for distributed rate limiting)
   // Format: redis://[:password@]host:port or redis://[:password@]host:port/db
   REDIS_URL: z.string().url().optional(),

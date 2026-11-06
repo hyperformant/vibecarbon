@@ -18,16 +18,6 @@ export class StripeProvider implements BillingProvider {
     return isStripeConfigured();
   }
 
-  async getPriceAmount(
-    priceId: string
-  ): Promise<{ unitAmountCents: number; currency: string } | null> {
-    const client = getStripe();
-    if (!client) return null;
-    const price = await client.prices.retrieve(priceId);
-    if (typeof price.unit_amount !== 'number') return null;
-    return { unitAmountCents: price.unit_amount, currency: price.currency };
-  }
-
   async createCheckout(params: {
     customerId?: string;
     priceId: string;
@@ -42,7 +32,7 @@ export class StripeProvider implements BillingProvider {
     const session = await stripe.checkout.sessions.create({
       customer: params.customerId,
       // Guest payment checkouts (no pre-created customer) still create a
-      // Customer record, so one-time license sales stay attributable in the
+      // Customer record, so one-time sales stay attributable in the
       // dashboard. Stripe only allows this param in payment mode.
       ...(!params.customerId && mode === 'payment' ? { customer_creation: 'always' as const } : {}),
       mode,

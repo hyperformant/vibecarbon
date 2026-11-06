@@ -344,10 +344,6 @@ describe('Rate limiting: abuse-prone routes are protected', () => {
     expect(auth).not.toMatch(/authRoutes\.post\(\s*['"]\/login['"]/);
   });
 
-  it.runIf(billing)('public license checkout is strictly limited', () => {
-    expect(billing).toMatch(/\/license-checkout['"]\s*,\s*createRateLimiter/);
-  });
-
   it.runIf(billing)('authed provider-cost routes (checkout/setup/portal) are limited', () => {
     // Registered together in a loop; assert the limiter + the path set are present.
     expect(billing).toContain('createRateLimiter');
