@@ -59,6 +59,7 @@ const WORKFLOWS = [
   join('.github', 'workflows', 'dependabot-auto-merge.yml'),
   join('.github', 'workflows', 'docker-newest.yml'),
   join('.github', 'workflows', 'e2e-us-perf.yml'),
+  join('.github', 'workflows', 'mirror-images.yml'),
   join('.github', 'workflows', 'native-multiarch-image.yml'),
   join('.github', 'workflows', 'publish-db-image-dev.yml'),
   join('.github', 'workflows', 'publish-db-image.yml'),
@@ -68,6 +69,7 @@ const WORKFLOWS = [
   // Scorecard runs prebuilt analysis actions only — no setup-node, no Node pin.
   join('.github', 'workflows', 'scorecard.yml'),
   join('.github', 'workflows', 'test.yml'),
+  join('.github', 'workflows', 'version-channel.yml'),
   join('carbon', '.github', 'workflows', 'deploy.yml'),
   join('carbon', '.github', 'workflows', 'vibecarbon-build.yml'),
 ];

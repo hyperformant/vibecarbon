@@ -5,10 +5,10 @@
  *
  * Run weekly by the `mirror-upstream-drift` job in
  * .github/workflows/publish-images.yml, which writes the table to the job
- * summary and to one GitHub issue. It REPORTS ONLY, never re-pins: a mirror
- * bump is a reviewed edit of {tag, digest, index} in images.js (and the
- * literal compose / k8s copies), because Dependabot cannot see refs that
- * point at our mirror.
+ * summary and to one GitHub issue. It REPORTS ONLY, never re-pins: a bundled
+ * mirror bump is a reviewed edit of {tag, digest, index} in images.js, because
+ * Dependabot cannot see refs that point at our mirror. The images the version
+ * channel covers move on their own (scripts/version-channel.mjs).
  *
  * CEILINGS (`holdFor`): some newer tags must not be taken, and listing them
  * would keep the issue open forever. alpine/k8s stays within one minor of
@@ -142,8 +142,10 @@ export function holdFor(image, k3sVersion) {
 }
 
 /** GET with one anonymous-token retry when the registry answers 401. */
-async function registryGet(url, token) {
-  const res = await fetch(url, token ? { headers: { Authorization: `Bearer ${token}` } } : {});
+async function registryGet(url, token, headers = {}) {
+  const res = await fetch(url, {
+    headers: { ...headers, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
   if (res.status !== 401 || token) return { res, token };
   const challenge = res.headers.get('www-authenticate') ?? '';
   const field = (k) => challenge.match(new RegExp(`${k}="([^"]+)"`))?.[1];
@@ -156,11 +158,33 @@ async function registryGet(url, token) {
   if (!tokenRes.ok) throw new Error(`token ${tokenRes.status} from ${realm}`);
   const body = await tokenRes.json();
   const fresh = body.token ?? body.access_token;
-  return registryGet(url, fresh);
+  return registryGet(url, fresh, headers);
+}
+
+/** What a multi-platform tag answers with, in either media type. */
+const INDEX_TYPES = [
+  'application/vnd.oci.image.index.v1+json',
+  'application/vnd.docker.distribution.manifest.list.v2+json',
+].join(', ');
+
+/**
+ * The bytes of the index a tag names. The caller digests them itself, so the
+ * registry's own digest header is never what gets pinned.
+ * @param {string} registry
+ * @param {string} repo
+ * @param {string} tag
+ * @returns {Promise<Uint8Array>}
+ */
+export async function fetchIndex(registry, repo, tag) {
+  const host = API_HOST[registry] ?? registry;
+  const url = `https://${host}/v2/${repo}/manifests/${tag}`;
+  const { res } = await registryGet(url, undefined, { Accept: INDEX_TYPES });
+  if (!res.ok) throw new Error(`${res.status} reading ${host}/${repo}:${tag}`);
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 /** Every tag of `repo` on `registry`, across `Link` pages. */
-async function listTags(registry, repo) {
+export async function listTags(registry, repo) {
   const host = API_HOST[registry] ?? registry;
   let url = `https://${host}/v2/${repo}/tags/list?n=1000`;
   let token;
@@ -189,8 +213,8 @@ export function renderReport(entries) {
   return [
     '## Mirror drift: newer upstream tags',
     '',
-    'Report only. To bump one, edit its {tag, digest, index} in src/lib/images.js and',
-    'the literal compose / k8s copies; publish-images mirrors it on merge.',
+    'Report only. To bump one, edit its {tag, digest, index} in src/lib/images.js;',
+    'publish-images mirrors it on merge.',
     '',
     ...(rows.length
       ? ['| upstream | pinned | newer |', '| --- | --- | --- |', ...rows]

@@ -334,9 +334,10 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
   /**
    * The system images k3s itself pulls, from the k3s-images.txt asset of the
    * pinned release (https://github.com/k3s-io/k3s/releases, v1.37.2+k3s1,
-   * fetched 2026-11-05). traefik/klipper-helm (helm-controller's traefik
-   * chart, `--disable traefik`) and klipper-lb (`--disable servicelb`) are
-   * never pulled on our clusters and are not mirrored. The local-path helper
+   * fetched 2026-11-05). traefik/klipper-helm (helm-controller's traefik and
+   * gateway-api-crd charts, `--disable traefik`, `--disable gateway-api-crd`)
+   * and klipper-lb (`--disable servicelb`) are never pulled on our clusters and
+   * are not mirrored. The local-path helper
    * busybox is mirrored: through the alias there is no Docker Hub fallback.
    */
   const K3S_IMAGES_TXT = {

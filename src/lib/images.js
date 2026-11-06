@@ -510,11 +510,11 @@ export const DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io';
 //
 // BUMPING ONE: Dependabot cannot see these (the refs point at our mirror, and
 // the mirror tag's digest is the index the job mints, not this child digest).
-// Edit {tag, digest, index} here AND the literal copies (compose files and k8s base
-// manifests, which cannot import JS; the census
-// tests/unit/deploy/core-images-from-mirror-census.test.ts fails until every
-// copy names an entry exactly), merge, and publish-images mirrors the new tag.
-// The weekly `mirror-upstream-drift` job lists newer upstream tags.
+// The images in the version set (CHANNEL_IMAGES below) need no bump to reach a
+// deploy: version-channel.yml moves them, and an edit here only moves the floor a
+// CLI release ships with. For the rest, edit {tag, digest, index} here, merge,
+// and publish-images mirrors the new tag. The weekly `mirror-upstream-drift` job
+// lists newer upstream tags.
 //
 // Not here, deliberately: the add-ons (n8n, Metabase, Redis, observability)
 // and their alpine helpers, the diagnose-only probes, and BINFMT_IMAGE (runs
@@ -625,8 +625,9 @@ export const K3S_SYSTEM_REGISTRY = 'vibecarbon-system.invalid';
  * it (a dollar sign followed by a quote stays literal).
  *
  * Tags are k3s-images.txt of K3S_VERSION (v1.37.2+k3s1). Unmirrored on
- * purpose: klipper-helm and mirrored-library-traefik (`--disable traefik`)
- * and klipper-lb (`--disable servicelb`). mirrored-library-busybox (the
+ * purpose: klipper-helm (`--disable traefik`, `--disable gateway-api-crd`: its
+ * only users are those two charts), mirrored-library-traefik (`--disable
+ * traefik`) and klipper-lb (`--disable servicelb`). mirrored-library-busybox (the
  * local-path helper) IS mirrored although the deploy refuses local-path
  * PVCs: through the alias registry below there is no Docker Hub fallback.
  * A K3S_VERSION bump re-derives these from the new release's k3s-images.txt

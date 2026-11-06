@@ -30,6 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildAppRuntimeEnv } from '../../../src/lib/deploy/app-runtime-env.js';
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
+import { dockerSocketProxyImageRef, traefikImageRef } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 
 // Skipped by default like the other docker tests; run explicitly via
@@ -105,6 +106,8 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       SITE_URL: 'https://example.com',
       DB_IMAGE: 'postgres',
       DB_IMAGE_TAG: '17',
+      TRAEFIK_IMAGE: traefikImageRef(),
+      DOCKER_SOCKET_PROXY_IMAGE: dockerSocketProxyImageRef(),
       APP_IMAGE: 'ghcr.io/example/reach:test',
       BETTER_AUTH_SECRET: sentinel('BETTER_AUTH_SECRET'),
       ADMIN_EMAIL: 'admin@example.com',

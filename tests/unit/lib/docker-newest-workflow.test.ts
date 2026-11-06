@@ -58,6 +58,21 @@ describe('docker-newest workflow', () => {
     );
   });
 
+  it('tests the refs the version channel hands it, and the bundled ones otherwise', () => {
+    const inputs = (workflow.on.workflow_call as { inputs: Record<string, { default: string }> })
+      .inputs;
+    expect(inputs.traefik_image.default).toBe('');
+    expect(inputs.docker_socket_proxy_image.default).toBe('');
+    const test = steps.find((s) => s.run?.includes('traefik-socket-proxy'));
+    expect(test?.env?.VC_TRAEFIK_IMAGE).toContain('inputs.traefik_image');
+    expect(test?.env?.VC_DOCKER_SOCKET_PROXY_IMAGE).toContain('inputs.docker_socket_proxy_image');
+    const smoke = readFileSync('tests/integration/docker/traefik-socket-proxy.test.ts', 'utf-8');
+    expect(smoke).toMatch(/process\.env\.VC_TRAEFIK_IMAGE \|\| traefikImageRef\(\)/);
+    expect(smoke).toMatch(
+      /process\.env\.VC_DOCKER_SOCKET_PROXY_IMAGE \|\| dockerSocketProxyImageRef\(\)/,
+    );
+  });
+
   it('turns a scheduled failure into one issue, and holds that permission nowhere else', () => {
     const escalate = workflow.jobs.escalate;
     expect(escalate.needs).toBe('newest-docker');

@@ -70,6 +70,7 @@ const PNPM_WORKFLOWS: Record<string, string[]> = {
   [join('.github', 'workflows', 'docker-newest.yml')]: [ROOT_PKG],
   [join('.github', 'workflows', 'e2e-us-perf.yml')]: [ROOT_PKG, ROOT_PKG],
   [join('.github', 'workflows', 'release.yml')]: [ROOT_PKG],
+  [join('.github', 'workflows', 'version-channel.yml')]: [ROOT_PKG],
   // lint, unit, integration, engines-min. Four, and NOT the carbon Template
   // Tests job: that one runs carbon/ under npm, so it sets no pnpm up at all
   // (npm ships with the Node the action installs). `engines-min` pins Node —
@@ -83,6 +84,7 @@ const PNPM_WORKFLOWS: Record<string, string[]> = {
 const NON_PNPM_WORKFLOWS = [
   join('.github', 'workflows', 'dependabot-auto-merge.yml'),
   join('.github', 'workflows', 'cleanup-db-image-dev.yml'),
+  join('.github', 'workflows', 'mirror-images.yml'),
   join('.github', 'workflows', 'native-multiarch-image.yml'),
   join('.github', 'workflows', 'publish-db-image-dev.yml'),
   join('.github', 'workflows', 'publish-db-image.yml'),

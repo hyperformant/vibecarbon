@@ -82,6 +82,7 @@ import { namesHost } from '../../_shared/hosts.js';
 const ROOT = process.cwd();
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 const WORKFLOW = '.github/workflows/publish-images.yml';
+const MIRROR_WORKFLOW = '.github/workflows/mirror-images.yml';
 const MATRIX_SCRIPT = 'scripts/mirror-matrix.mjs';
 
 /**
@@ -579,10 +580,14 @@ describe('every consuming reference resolves through the mirror', () => {
 describe('publish workflow mirrors exactly the set', () => {
   const workflow = read(WORKFLOW);
   // Executable YAML only; comments are where the reasoning lives.
-  const code = workflow
-    .split('\n')
-    .filter((line) => !/^\s*#/.test(line))
-    .join('\n');
+  const executable = (text: string) =>
+    text
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+  const code = executable(workflow);
+  const mirrorWorkflow = read(MIRROR_WORKFLOW);
+  const mirrorCode = executable(mirrorWorkflow);
 
   it('generates its matrix by running the checked-in generator script', () => {
     // The generator is a real file rather than an inline `node -e`, precisely
@@ -616,22 +621,34 @@ describe('publish workflow mirrors exactly the set', () => {
   });
 
   it('copies manifests — never rebuilds, never multi-arch', () => {
-    expect(code).toMatch(/docker buildx imagetools create/);
-    expect(code).toMatch(/architecture\s*==\s*"amd64"/);
-    expect(code).not.toMatch(/arm64|aarch64/);
-    expect(code).not.toMatch(/mirror-cluster-autoscaler/); // folded into the matrix
+    expect(mirrorCode).toMatch(/docker buildx imagetools create/);
+    expect(mirrorCode).toMatch(/architecture\s*==\s*"amd64"/);
+    expect(mirrorCode).not.toMatch(/arm64|aarch64/);
+    expect(mirrorCode).not.toMatch(/mirror-cluster-autoscaler/); // folded into the matrix
   });
 
   it('every job is bound to the environment holding the ghcr PAT', () => {
-    const jobEnvironments = [...workflow.matchAll(/^\s{4}environment:\s*(\S+)/gm)].map((m) => m[1]);
+    const jobEnvironments = [
+      ...`${workflow}\n${mirrorWorkflow}`.matchAll(/^\s{4}environment:\s*(\S+)/gm),
+    ].map((m) => m[1]);
     expect(jobEnvironments.length).toBeGreaterThanOrEqual(2);
     for (const env of jobEnvironments) expect(env).toBe('e2e-infra');
   });
 
+  it('calls the one mirror job, and hands down the environment secret it needs', () => {
+    const wf = loadYaml(workflow) as { jobs: Record<string, Record<string, unknown>> };
+    const job = wf.jobs['mirror-upstream-images'];
+    expect(job.uses).toBe(`./${MIRROR_WORKFLOW}`);
+    expect(job.secrets).toBe('inherit');
+    expect(job.permissions).toEqual({ contents: 'read', packages: 'write' });
+    expect(JSON.stringify(job.with)).toContain('needs.mirror-matrix.outputs.include');
+    // A reusable workflow sees the caller's event: gating on it here would
+    // silently change what a scheduled caller does.
+    expect(mirrorCode).not.toContain('github.event_name');
+  });
+
   it('the mirror job logs in to Docker Hub with the CI credential before copying', () => {
-    const steps = (workflow.split('  mirror-upstream-images:')[1] ?? '').split(
-      '\n  mirror-upstream-drift:',
-    )[0];
+    const steps = mirrorWorkflow.split('  mirror-upstream-images:')[1] ?? '';
     const hub = steps.indexOf('vars.DOCKER_HUB_USERNAME');
     expect(hub).toBeGreaterThan(-1);
     expect(steps).toContain('secrets.DOCKER_HUB_TOKEN');
@@ -722,10 +739,7 @@ describe('publish workflow mirrors exactly the set', () => {
   });
 
   it('the mirror leg reads the child from the pinned index, skips when already mirrored, and checks the tag', () => {
-    const leg = code.slice(
-      code.indexOf('mirror-upstream-images:'),
-      code.indexOf('mirror-upstream-drift:'),
-    );
+    const leg = mirrorCode;
     expect(leg).toMatch(/INDEX: \$\{\{ matrix\.index \}\}/);
     expect(leg).toMatch(/READ="\$\{SRC%:\*\}@\$INDEX"/);
     expect(leg).toMatch(/DIGEST=\$\(amd64_child "\$READ"\)/);

@@ -21,7 +21,7 @@
  *       invalidate a build layer;
  *   (e) the upstream-image MIRROR job stays annotation-free. That one is a
  *       two-way guard — see the block above `mirror-upstream-images` in
- *       .github/workflows/publish-images.yml. `imagetools
+ *       .github/workflows/mirror-images.yml. `imagetools
  *       create --annotation` is silently DISCARDED for a Docker-media-type
  *       source, so an annotation flag there would look like documentation and
  *       do nothing.
@@ -215,11 +215,11 @@ describe('docker/ holds no undocumented publishable image', () => {
 });
 
 describe('the upstream-image mirror stays annotation-free', () => {
-  const WORKFLOW = join('.github', 'workflows', 'publish-images.yml');
+  const WORKFLOW = join('.github', 'workflows', 'mirror-images.yml');
   const workflow = read(WORKFLOW);
-  // The MIRROR job's body only. The publish job above it builds our own image
-  // and is free to use whatever metadata mechanism it likes; this guard is
-  // about the one job that must not touch the bits it copies.
+  // The MIRROR job's body only. The publish job in publish-images.yml builds
+  // our own image and is free to use whatever metadata mechanism it likes; this
+  // guard is about the one job that must not touch the bits it copies.
   const jobStart = workflow.indexOf('\n  mirror-upstream-images:');
   const mirrorJob = workflow.slice(jobStart);
   // Executable YAML only — the reasoning lives in the comments, which are

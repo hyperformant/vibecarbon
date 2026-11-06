@@ -72,6 +72,11 @@ function compareParts(a, b) {
   return 0;
 }
 
+/** Sort order of two versions, for the job that writes the list. */
+export function compareVersions(a, b) {
+  return compareParts(versionParts(a), versionParts(b));
+}
+
 /** Why a file or a record was refused. Its message names a key, never a value. */
 class ImageSetRejected extends Error {}
 
@@ -92,7 +97,7 @@ function assertExactKeys(value, keys, where) {
 }
 
 /** The version a validated ref or k3s string carries. */
-function versionOf(value) {
+export function versionOf(value) {
   return value.includes('@') ? value.slice(value.indexOf(':') + 1, value.indexOf('@')) : value;
 }
 

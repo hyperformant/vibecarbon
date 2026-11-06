@@ -38,6 +38,7 @@ import {
 const ROOT = process.cwd();
 const DOCKERFILE_PATH = join(ROOT, 'docker', 'carbon-autoscaler', 'Dockerfile');
 const WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'publish-images.yml');
+const MIRROR_WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'mirror-images.yml');
 const PACKAGE_JSON_PATH = join(ROOT, 'package.json');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 
@@ -236,7 +237,8 @@ describe('every cluster-autoscaler reference site is pinned to the constant', ()
 });
 
 describe('mirror job copies the manifest — never rebuilds, never multi-arch', () => {
-  const workflow = readFileSync(WORKFLOW_PATH, 'utf8');
+  // publish-images.yml's own job and the mirror job it calls.
+  const workflow = `${readFileSync(WORKFLOW_PATH, 'utf8')}\n${readFileSync(MIRROR_WORKFLOW_PATH, 'utf8')}`;
   // Executable YAML only; comments are where the reasoning lives.
   const code = workflow
     .split('\n')
