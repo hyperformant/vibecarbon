@@ -92,6 +92,26 @@ describe('assessStatusJson', () => {
       problems: ['no containers data for prod'],
     });
   });
+  it('a failed probe is a verdict, unless the record just moved', () => {
+    const j = structuredClone(green);
+    j.environments.prod.checks.remoteHealth.ok = false;
+    (j.environments.prod.checks.remoteHealth as Record<string, unknown>).status = 404;
+    expect(assessStatusJson(j, 'prod')).toMatchObject({ ok: false, retryable: false });
+    expect(assessStatusJson(j, 'prod', { recordJustMoved: true })).toMatchObject({
+      ok: false,
+      retryable: true,
+      problems: ['readiness probe failed: HTTP 404'],
+    });
+  });
+  it('a moved record excuses only the probe: an unhealthy row is still a verdict', () => {
+    const j = structuredClone(green);
+    j.environments.prod.checks.remoteHealth.ok = false;
+    j.environments.prod.checks.containers.p.rows = [row('app', 'unhealthy', 'unhealthy')];
+    expect(assessStatusJson(j, 'prod', { recordJustMoved: true })).toMatchObject({
+      ok: false,
+      retryable: false,
+    });
+  });
   // A server status could not read is no verdict: not passed, but retried
   // within the window like a starting row, never failed on first sight.
   it('an unreadable server is not a pass, and is retryable', () => {
@@ -265,6 +285,55 @@ describe('checkStatusHealth', () => {
     expect(runCli).toHaveBeenCalledTimes(2);
     expect(runCli.mock.calls[0][0]).toBe('status -json');
   });
+  it('keeps observing a failed probe after a moved record, and fails at the deadline', async () => {
+    const stale = structuredClone(green);
+    stale.environments.prod.checks.remoteHealth.ok = false;
+    const stdouts = [stale, green].map((j) => JSON.stringify(j));
+    const recovers = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: stdouts.shift() as string,
+      stderr: '',
+    }));
+    await expect(
+      checkStatusHealth({
+        projectDir: '/x',
+        envName: 'prod',
+        timeoutMs: 1000,
+        pollMs: 1,
+        recordJustMoved: true,
+        runCli: recovers as never,
+      }),
+    ).resolves.toMatchObject({ status: 'pass' });
+    expect(recovers).toHaveBeenCalledTimes(2);
+
+    const never = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify(stale),
+      stderr: '',
+    }));
+    await expect(
+      checkStatusHealth({
+        projectDir: '/x',
+        envName: 'prod',
+        timeoutMs: 5,
+        pollMs: 1,
+        recordJustMoved: true,
+        runCli: never as never,
+      }),
+    ).resolves.toMatchObject({ status: 'fail' });
+  });
+
+  it('the window after a compose-ha failover is past the longest TTL a provider allows', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(
+      new URL('../../e2e/scenarios/_run-lifecycle.ts', import.meta.url),
+      'utf8',
+    );
+    expect(src).toContain('timeoutMs: recordJustMoved ? 360_000 : 180_000');
+    const linode = readFileSync(new URL('../../../src/lib/linode-dns.js', import.meta.url), 'utf8');
+    expect(linode).toMatch(/ALLOWED_TTL_SEC = \[\s*300,/);
+  });
+
   it('fails immediately on a non-retryable problem', async () => {
     const j = structuredClone(green);
     j.environments.prod.checks.containers.p.rows.push(
