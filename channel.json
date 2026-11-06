@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "images": {
+    "traefik": "ghcr.io/hyperformant/traefik:v3.7.17@sha256:e15b8921020b4fd81de5746b170dfceec221d2450711449f6427e4692881511a",
+    "dockerSocketProxy": "ghcr.io/hyperformant/docker-socket-proxy:v0.5.0@sha256:753044cb0851ce53ab44c2504872ff02ae37be9c294fa8abea3754074e61eab4",
+    "alpine": "ghcr.io/hyperformant/alpine:3.24.4@sha256:0f49f331d9212aff11b932863be4eb01cdf962969aa86dab7d1ee21ac6f5f52b",
+    "registry": "ghcr.io/hyperformant/registry:3.1.2@sha256:52b489ad8e6f40d1a676702e3ce398ec796ce38f08fbb786e1f324baa12d84b8",
+    "socat": "ghcr.io/hyperformant/socat:1.8.1.3@sha256:99316fc7e1e8b5f40308105c54c9bed5a45891acee6480e8f0f9d2f4e69dee02"
+  },
+  "kubernetes": {
+    "k3s": "v1.37.2+k3s1",
+    "clusterAutoscaler": "ghcr.io/hyperformant/cluster-autoscaler:v1.37.0@sha256:c239e40cc745d9e0f1ba7c2272eaab44ca4586cd053f13ba8c8a4a6b27b18294",
+    "kubectl": "ghcr.io/hyperformant/k8s:1.37.2@sha256:bd844bea70da4fbca6e10062d0e282809874045a86aaf60e58ca5a296f04d99d"
+  }
+}
