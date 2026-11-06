@@ -250,9 +250,14 @@ describe('deployedScaleTarget', () => {
       's-4vcpu-8gb-intel',
     );
     expect(deployedScaleTarget(env, 'compose-ha', multi)).toBe('s-4vcpu-8gb-amd');
-    expect(() => deployedScaleTarget(env, 'compose-ha', multi, 's-4vcpu-8gb')).toThrow(
-      /not a ladder candidate/,
-    );
+  });
+
+  // Preflight runs once when a leg starts and a leg can run for 100 minutes.
+  // DigitalOcean began selling Intel in sfo3 during one, so the deploy rightly
+  // chose Intel while preflight's target was still the regular type.
+  it('follows the deployed type when the catalog moved after preflight', () => {
+    const env = { serverType: 's-2vcpu-4gb-amd' };
+    expect(deployedScaleTarget(env, 'compose-ha', multi, 's-4vcpu-8gb')).toBe('s-4vcpu-8gb-amd');
   });
 
   it('scales compose from the serverType the deploy recorded', () => {

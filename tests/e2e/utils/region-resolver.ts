@@ -337,10 +337,13 @@ export async function resolveCapacityPair(
  * (compose: `serverType`; k8s: `masterServerType`, since `scale -type` resizes
  * every role); that type must have a ladder entry. `resolvedTarget` is the
  * preflight resolver's pick (`ResolvedCapacity.scaleTarget`) and wins when it
- * is one of that entry's candidates; one that is not means the deploy recorded
- * a different type than preflight placed, so it throws rather than scale to a
- * type nobody checked. Without `resolvedTarget` the entry's first candidate is
- * used. Throws when the deploy recorded no type or the ladder has no entry.
+ * is one of that entry's candidates. Preflight and the deploy share `haRoleSets`,
+ * so a pick that is not a candidate means the catalog moved between them:
+ * preflight runs once when a leg starts and a leg can run for 100 minutes. The
+ * deployed type is the truth then, so the entry's first candidate is used, as
+ * it is with no `resolvedTarget`, and a target the provider no longer sells
+ * fails the scale itself. Throws when the deploy recorded no type or the ladder
+ * has no entry.
  */
 export function deployedScaleTarget(
   envConfig: { serverType?: string; masterServerType?: string },
@@ -358,13 +361,12 @@ export function deployedScaleTarget(
   const candidates = scaleCandidates(scaleTo[type]);
   if (candidates.length === 0) throw noScaleTarget(type);
   if (resolvedTarget === undefined) return candidates[0];
-  if (!candidates.includes(resolvedTarget)) {
-    throw new Error(
-      `the resolved scale target ${resolvedTarget} is not a ladder candidate for the deployed ` +
-        `${type} [${candidates.join(', ')}]: the deploy recorded a different type than preflight placed`,
-    );
-  }
-  return resolvedTarget;
+  if (candidates.includes(resolvedTarget)) return resolvedTarget;
+  console.log(
+    `[scale] preflight's target ${resolvedTarget} does not fit the deployed ${type}, ` +
+      `because the catalog moved: scaling to ${candidates[0]}`,
+  );
+  return candidates[0];
 }
 
 /**
