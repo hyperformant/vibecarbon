@@ -100,6 +100,7 @@ import { resolveSelection, type SelectedScenario, SelectionError } from './selec
 import { scenarioContext } from './utils/cli-runner.js';
 import { E2EDbImageError, selectE2EDbImage } from './utils/db-image-select.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
+import { assertStorageDns } from './utils/dns-gate.js';
 import { resolveE2EAcmeCa, setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
 import { attemptTagFor, scenarioDomain } from './utils/fresh-dns-names.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
@@ -847,6 +848,16 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     }
   }
 
+  // DNS gate (tests/e2e/utils/dns-gate.ts): every selected provider's storage
+  // host must resolve through this machine's resolver as it does through a
+  // public one. Read-only; refuses the run before any resource exists.
+  await assertStorageDns(
+    scenarios.flatMap((sc) => [
+      { provider: sc.provider, region: sc.region },
+      ...(sc.secondaryRegion ? [{ provider: sc.provider, region: sc.secondaryRegion }] : []),
+    ]),
+  );
+
   // Initialize DB and metrics
   const runId = randomUUID();
   const db = new E2EDb();
@@ -984,6 +995,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       projectName,
       projectDir,
       provider,
+      ...(scenario.skipSteps && { skipSteps: scenario.skipSteps }),
     };
 
     db.createScenario({
