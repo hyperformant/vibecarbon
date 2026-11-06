@@ -98,7 +98,7 @@ describe('backup create', () => {
     const call = vi.fn(async () => ({
       result: 'pushed',
       name: 'base_x',
-      retentionError: 'retention failed after pushing base_x: AccessDenied',
+      retentionError: 'retention failed before pushing base_x: AccessDenied',
     }));
     await expect(runCreate(base(true, { backupCompose: call }))).rejects.toThrow(Exit);
     expect(process.exit).toHaveBeenCalledWith(1);

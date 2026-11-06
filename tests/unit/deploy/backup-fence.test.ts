@@ -468,7 +468,7 @@ describe.each(Object.entries(backupRuns))('%s base backup against the fence', (t
     const r = run('b1', { fence: null });
     expect(r.status).toBe(0);
     expect(r.pushes).toMatch(
-      /backup-push[\s\S]*delete before FIND_FULL base_000000010000000000000001 --confirm/,
+      /delete before FIND_FULL base_000000010000000000000001 --confirm[\s\S]*backup-push/,
     );
   });
 

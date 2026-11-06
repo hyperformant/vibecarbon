@@ -92,7 +92,7 @@ describe('triggerBackupJob exec+pg condition gate', () => {
     const waitErr = Object.assign(new Error('Command failed: ssh ... bash /tmp/vb-script.sh'), {
       stdout:
         'JOB_RESULT=failed\n=== current container logs ===\nBACKUP_RESULT=pushed:base_000000010000000000000009\n' +
-        'retention failed after pushing base_000000010000000000000009: ERROR: AccessDenied\n',
+        'retention failed before pushing base_000000010000000000000009: ERROR: AccessDenied\n',
     });
     const runScriptImpl = vi
       .fn()
@@ -105,7 +105,7 @@ describe('triggerBackupJob exec+pg condition gate', () => {
     });
     expect(backup).toMatchObject({ result: 'pushed', name: 'base_000000010000000000000009' });
     expect(backup.retentionError).toContain(
-      'retention failed after pushing base_000000010000000000000009: ERROR: AccessDenied',
+      'retention failed before pushing base_000000010000000000000009: ERROR: AccessDenied',
     );
   });
 
