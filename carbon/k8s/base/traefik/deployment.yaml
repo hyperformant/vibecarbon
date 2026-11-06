@@ -58,8 +58,11 @@ spec:
           requests:
             cpu: 100m
             memory: 128Mi
+          # No CPU limit, on purpose: everything the site serves passes through
+          # here, so a limit turns one noisy client into a full outage. See
+          # docker-compose.prod.yml. Guarded by
+          # tests/unit/template/compose-cpu-limits.test.ts.
           limits:
-            cpu: 500m
             memory: 256Mi
         startupProbe:
           httpGet:
