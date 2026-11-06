@@ -242,12 +242,12 @@ describe('orchestrator call site', () => {
       'backupS3Config.bucket);',
       'stateBucket);',
     ]);
-    const hook = src.match(
-      /const beforeFirstRead = \(\) =>\s+applyAppBucketCors\(\{[\s\S]*?\}\);/,
-    )?.[0];
+    const hook = src.match(/const beforeFirstRead = \(\) =>\s+[^;]*;/)?.[0];
     expect(hook, 'the hook the app bucket create passes').toBeTruthy();
-    expect(hook).toContain('createProvider: async () => s3Provider');
-    expect(hook).toContain('bucket: s3Config.bucket');
+    expect(hook).toContain('s3Provider.setBucketCors(s3Config.bucket, envCorsOrigins(domain))');
+    // The whole point: a read here is what the hook exists to get ahead of,
+    // and on a new bucket it cost 15 s on every provider.
+    expect(hook).not.toMatch(/applyAppBucketCors|getBucketCorsOrigins/);
   });
 
   it('awaits the finalize after the tier deploy and before the success outro', () => {

@@ -77,6 +77,26 @@ describe('getBucketCorsOrigins', () => {
     await expect(p.getBucketCorsOrigins('b')).resolves.toEqual([]);
   });
 
+  it('takes a no-rule answer the first time, even worded UnknownError', async () => {
+    // DigitalOcean Spaces on a new bucket, 2026-11-06: 404 NoSuchCORSConfiguration
+    // with no message, so the SDK's message is `UnknownError`, which the retry
+    // reads as a network failure. Every cold deploy spent 15 s here.
+    const p = new HetznerS3Provider('ak', 'sk', 'fsn1') as unknown as {
+      getClient: () => { send: () => Promise<unknown> };
+      getBucketCorsOrigins: (b: string) => Promise<string[]>;
+    };
+    const send = vi.fn(async () => {
+      throw Object.assign(new Error('UnknownError'), {
+        name: 'NoSuchCORSConfiguration',
+        $metadata: { httpStatusCode: 404 },
+      });
+    });
+    p.getClient = () => ({ send });
+
+    await expect(p.getBucketCorsOrigins('app-bucket')).resolves.toEqual([]);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
   it('returns [] on a bare 404', async () => {
     const { p, send } = provider();
     send.mockRejectedValueOnce(

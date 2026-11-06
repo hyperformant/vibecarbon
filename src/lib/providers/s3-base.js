@@ -83,6 +83,13 @@ const S3_KEY_PROBLEMS = {
     "these keys aren't allowed to do this, so check that they have full Object Storage access",
 };
 
+/** True when a GetBucketCors error says the bucket has no CORS rule. */
+function isNoCorsRule(error) {
+  const name = error?.name ?? error?.Code ?? '';
+  if (name === 'NoSuchCORSConfiguration') return true;
+  return error?.$metadata?.httpStatusCode === 404 && name !== 'NoSuchBucket';
+}
+
 /** True when an S3 error says the credentials themselves are the problem. */
 export function isS3KeyProblem(error) {
   return Boolean(error && Object.hasOwn(S3_KEY_PROBLEMS, error.name));
@@ -1069,12 +1076,15 @@ export class S3CompatibleProvider {
    */
   async getBucketCorsOrigins(bucketName) {
     try {
-      const result = await this._send(new GetBucketCorsCommand({ Bucket: bucketName }));
+      // No rule is an answer. Some stores send it with no message, which the
+      // SDK words `UnknownError`, a word the retry reads as a network failure:
+      // it spent 15 s on a real new bucket before returning this empty list.
+      const result = await this._send(new GetBucketCorsCommand({ Bucket: bucketName }), {
+        terminal: isNoCorsRule,
+      });
       return (result?.CORSRules ?? []).flatMap((rule) => rule.AllowedOrigins ?? []);
     } catch (err) {
-      const name = err?.name ?? err?.Code ?? '';
-      if (name === 'NoSuchCORSConfiguration') return [];
-      if (err?.$metadata?.httpStatusCode === 404 && name !== 'NoSuchBucket') return [];
+      if (isNoCorsRule(err)) return [];
       throw err;
     }
   }
