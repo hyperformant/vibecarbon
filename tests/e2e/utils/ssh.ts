@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sshKeyPathFor } from '../../../src/lib/ssh.js';
 import type { ResourceMetrics } from '../scenarios/types.js';
+import { redactHostDiagnostics } from './host-diagnostics.js';
 import { sshUnreachableSince } from './ssh-reachability.js';
 
 /**
@@ -30,6 +31,28 @@ import { sshUnreachableSince } from './ssh-reachability.js';
  * pass the flag here so an SSH-only invocation outside that env (a unit
  * test, an interactive `tsx` debug session) is also safe.
  */
+/**
+ * Why an ssh call failed, for a failure message. execFileSync's message starts
+ * `Command failed: ssh ...` and carries the remote command, so with a multi-line
+ * command its first line never gives the reason: that is in stderr. Redacted
+ * because remote stderr lands in CI logs.
+ */
+export function sshFailureReason(err: unknown): string {
+  if (!(err instanceof Error)) return redactHostDiagnostics(String(err));
+  const { stderr, status, code } = err as Error & {
+    stderr?: unknown;
+    status?: number | null;
+    code?: string;
+  };
+  const lastLine = String(stderr ?? '')
+    .trim()
+    .split('\n')
+    .pop();
+  if (lastLine) return redactHostDiagnostics(`exit ${status ?? '?'}: ${lastLine}`);
+  if (code === 'ETIMEDOUT') return 'the ssh call was killed at its time limit';
+  return redactHostDiagnostics(err.message.split('\n')[0]);
+}
+
 export function e2eSshOpts(connectTimeoutSec = 5): string[] {
   return [
     '-o',

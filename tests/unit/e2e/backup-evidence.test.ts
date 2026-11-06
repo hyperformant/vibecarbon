@@ -399,6 +399,53 @@ describe('runBackupEvidenceChecks', () => {
     expect(wal.errorMessage).toContain('could not read the archiver: ssh: connection refused');
   });
 
+  // execFileSync's message is `Command failed: ssh ... bash -c 'set -u` and then
+  // the rest of the probe, so its first line never says why ssh failed.
+  const sshFailure = (over: Record<string, unknown>) =>
+    Object.assign(new Error("Command failed: ssh root@1.2.3.4 bash -c 'set -u\nexit 0'\n"), over);
+
+  it("a probe that cannot run reports ssh's own reason", async () => {
+    const results = await runBackupEvidenceChecks(
+      opts({
+        execRemote: () => {
+          throw sshFailure({
+            status: 255,
+            stderr: 'ssh: connect to host 1.2.3.4 port 22: Connection timed out\n',
+          });
+        },
+      }),
+    );
+    const wal = byName(results, 'backup_walg_wal_archived');
+    expect(wal.status).toBe('fail');
+    expect(wal.errorMessage).toContain('port 22: Connection timed out');
+    expect(wal.errorMessage).toContain('exit 255');
+    expect(wal.errorMessage).not.toContain('set -u');
+  });
+
+  it('a probe killed at its time limit says so', async () => {
+    const results = await runBackupEvidenceChecks(
+      opts({
+        execRemote: () => {
+          throw sshFailure({ code: 'ETIMEDOUT', status: null, stderr: '' });
+        },
+      }),
+    );
+    expect(byName(results, 'backup_walg_wal_archived').errorMessage).toContain(
+      'killed at its time limit',
+    );
+  });
+
+  it('remote stderr is redacted before it reaches a failure message', async () => {
+    const results = await runBackupEvidenceChecks(
+      opts({
+        execRemote: () => {
+          throw sshFailure({ status: 1, stderr: 'psql: postgres://u:hunter2@db:5432/x refused\n' });
+        },
+      }),
+    );
+    expect(byName(results, 'backup_walg_wal_archived').errorMessage).not.toContain('hunter2');
+  });
+
   it('a segment that lands costs no extra read', async () => {
     const commands: string[] = [];
     await runBackupEvidenceChecks(
