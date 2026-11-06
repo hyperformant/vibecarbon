@@ -29,7 +29,9 @@ const WORKFLOW_PATH = '.github/workflows/e2e-us-perf.yml';
 const LEG_STEP_NAME = 'Run e2e (provider leg)';
 
 interface WorkflowDoc {
-  jobs?: { matrix?: { steps?: Array<{ name?: string; run?: string }> } };
+  jobs?: {
+    matrix?: { steps?: Array<{ name?: string; run?: string; env?: Record<string, string> }> };
+  };
 }
 
 function legStepScript(): string {
@@ -122,5 +124,16 @@ describe('e2e-us-perf.yml leg step filters `scenarios` to its own provider', () 
     // subset that names no DigitalOcean scenario.
     expect(flags).toEqual([]);
     expect(stdout).toContain('no scenarios for this provider');
+  });
+});
+
+describe('e2e leg step env', () => {
+  // A step's `env:` does not reach the next step. The token sat on the licence
+  // check step above this one, so Pulumi's plugin download ran unauthenticated
+  // and a vultr leg died on GitHub's shared 60/hr rate limit.
+  it('gives the step that runs Pulumi the token for plugin downloads', () => {
+    const doc = loadYaml(readFileSync(WORKFLOW_PATH, 'utf8')) as WorkflowDoc;
+    const step = doc.jobs?.matrix?.steps?.find((s) => s.name === LEG_STEP_NAME);
+    expect(step?.env?.GITHUB_TOKEN).toBe('$' + '{{ secrets.GITHUB_TOKEN }}');
   });
 });

@@ -187,10 +187,10 @@
           "samples": 1
         },
         "vc2": {
-          "ownedS": 250,
-          "endToEndS": 265,
+          "ownedS": 290,
+          "endToEndS": 305,
           "tlsAllowanceS": 15,
-          "samples": 2
+          "samples": 5
         }
       },
       "compose": {
@@ -201,10 +201,10 @@
           "samples": 1
         },
         "vc2": {
-          "ownedS": 195,
-          "endToEndS": 215,
+          "ownedS": 205,
+          "endToEndS": 225,
           "tlsAllowanceS": 20,
-          "samples": 2
+          "samples": 4
         }
       }
     }
