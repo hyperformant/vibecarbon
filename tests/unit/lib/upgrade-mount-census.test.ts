@@ -13,26 +13,33 @@
  * volumes/db/walg-env.sh (never): every upgraded compose backup exited 1.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { projectPathFor } from '../../../src/lib/template-paths.js';
 import { getFilePolicy } from '../../../src/lib/upgrade-policy.js';
 
 const CARBON = join(__dirname, '../../../carbon');
 
-function walk(dir: string, out: string[] = []): string[] {
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    if (e.name === 'node_modules' || e.name === '.git') continue;
-    const p = join(dir, e.name);
-    if (e.isDirectory()) walk(p, out);
-    else out.push(projectPathFor(relative(CARBON, p)));
-  }
-  return out;
+/**
+ * The template's files, as git sees them. A walk of the disk also finds a
+ * developer's gitignored output (a local docker-compose.dev-init.yml mounting
+ * volumes/db/super-admin.generated.sql), which is no part of the template and
+ * failed this census on any checkout that had one.
+ */
+function templateFiles(): string[] {
+  return execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
+    cwd: CARBON,
+    encoding: 'utf-8',
+  })
+    .split('\n')
+    .filter((f) => f && existsSync(join(CARBON, f)))
+    .map((f) => projectPathFor(f));
 }
 
 const shipped = (f: string) => getFilePolicy(f) !== 'never';
-const all = walk(CARBON);
+const all = templateFiles();
 const composeFiles = all.filter((f) => /^docker-compose[^/]*\.yml$/.test(f) && shipped(f));
 
 /** Every template file a mount source covers (a file, or each file under a directory). */
