@@ -14,8 +14,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
  * probe and leased in 0.1-1.8 s. The unit tests shim dhcpcd, which cannot see
  * this; only the real client can.
  *
- * One throwaway ubuntu:24.04 container (the Hetzner image family that ships
- * dhcpcd 10.0.6) holds a veth pair: `enp7s0` in the root namespace is the
+ * One throwaway ubuntu:26.04 container (the Hetzner image family, dhcpcd 10.3.0;
+ * the bug above was found on 10.0.6) holds a veth pair: `enp7s0` in the root namespace is the
  * private NIC, and its peer sits in a `srv` namespace where dnsmasq answers
  * DHCP the way Hetzner does (/32 address, classless static routes, mtu 1450).
  * No ports are published. The loop is cut out of the real init scripts, so
@@ -25,7 +25,7 @@ const shouldRunDocker = process.env.DOCKER_INTEGRATION === 'true';
 const describeDocker = shouldRunDocker ? describe : describe.skip;
 
 const ROOT = process.cwd();
-const IMAGE = 'ubuntu:24.04';
+const IMAGE = 'ubuntu:26.04';
 const NAME = `vctest-dhcpwait-${process.pid}`;
 const START = 'echo "Waiting for private network interface..."';
 const END = 'echo "Private interface: $PRIVATE_IFACE"';

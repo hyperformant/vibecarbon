@@ -401,12 +401,12 @@ export class HetznerProvider extends BaseProvider {
 
   /**
    * Matches hetzner-compose.js's buildHetznerComposeProgram `image:
-   * 'ubuntu-24.04'` literal exactly. Plain Ubuntu, like every provider: the
+   * 'ubuntu-26.04'` literal exactly. Plain Ubuntu, like every provider: the
    * latest Docker comes from the cloud-init install (iac/docker-install.js),
    * never from a prebuilt Docker image.
    * @type {string}
    */
-  static COMPOSE_IMAGE = 'ubuntu-24.04';
+  static COMPOSE_IMAGE = 'ubuntu-26.04';
 
   // Cloud-init installs the latest Docker from Docker's apt repo at first
   // boot, so Hetzner gets the same 600s ready budget as DigitalOcean, Linode,
@@ -457,14 +457,14 @@ export class HetznerProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'hcloud-volumes';
 
   /**
-   * Matches hetzner-k8s.js's `image: 'ubuntu-24.04'` literal (the master,
+   * Matches hetzner-k8s.js's `image: 'ubuntu-26.04'` literal (the master,
    * db, and worker `hcloud.Server` resources all use the same slug —
    * lib/iac/programs/hetzner-k8s.js:243,283,318) exactly.
    * `renderCarbonAutoscalerConfig` reads this for the CA-spawned worker
    * node group's `image` field instead of hardcoding it.
    * @type {string}
    */
-  static K8S_IMAGE = 'ubuntu-24.04';
+  static K8S_IMAGE = 'ubuntu-26.04';
 
   /**
    * Render this provider's k3s master-node boot user-data — wraps
@@ -960,7 +960,7 @@ export class HetznerProvider extends BaseProvider {
       name,
       server_type: serverType,
       location: region,
-      image: image || 'ubuntu-24.04',
+      image: image || 'ubuntu-26.04',
       ssh_keys: sshKeys || (sshKeyId ? [sshKeyId] : []),
       public_net: {
         enable_ipv4: true,

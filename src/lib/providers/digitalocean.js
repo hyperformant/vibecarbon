@@ -292,7 +292,7 @@ export class DigitalOceanProvider extends BaseProvider {
   // separate k8s-sized tier, so this matches DEFAULT_COMPOSE_TYPE).
   static DEFAULT_K8S_NODE_TYPE = 's-2vcpu-4gb';
 
-  // Overrides BaseProvider's 180s default: `ubuntu-24-04-x64` has no
+  // Overrides BaseProvider's 180s default: `ubuntu-26-04-x64` has no
   // preinstalled Docker, so cloud-init installs the latest docker-ce from
   // Docker's apt repo INSIDE the boot script (iac/docker-install.js, the same
   // install every compose provider runs) — realistically 3-5 minutes on
@@ -384,12 +384,12 @@ export class DigitalOceanProvider extends BaseProvider {
   /**
    * Base droplet image slug DO's k8s Pulumi program (`digitalocean-k8s.js`,
    * M3 Task 5) provisions master/database/worker nodes with — matches
-   * `COMPOSE_IMAGE` below (same `ubuntu-24-04-x64` base image, no separate
+   * `COMPOSE_IMAGE` below (same `ubuntu-26-04-x64` base image, no separate
    * k8s-tier image on DO). `renderCarbonAutoscalerConfig` reads this for
    * the CA-spawned worker node group's `image` field.
    * @type {string}
    */
-  static K8S_IMAGE = 'ubuntu-24-04-x64';
+  static K8S_IMAGE = 'ubuntu-26-04-x64';
 
   /**
    * Render this provider's k3s master-node boot user-data — wraps the new
@@ -469,11 +469,11 @@ export class DigitalOceanProvider extends BaseProvider {
 
   /**
    * Matches digitalocean-compose.js's buildDigitalOceanComposeProgram
-   * `image: 'ubuntu-24-04-x64'` literal
+   * `image: 'ubuntu-26-04-x64'` literal
    * (lib/iac/programs/digitalocean-compose.js:204) exactly.
    * @type {string}
    */
-  static COMPOSE_IMAGE = 'ubuntu-24-04-x64';
+  static COMPOSE_IMAGE = 'ubuntu-26-04-x64';
 
   /**
    * Returns the SAME rendered user-data digitalocean-compose.js's Pulumi

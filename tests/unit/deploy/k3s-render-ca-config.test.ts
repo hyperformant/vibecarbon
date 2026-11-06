@@ -12,14 +12,14 @@ describe('renderCarbonAutoscalerConfig', () => {
   // Stand-in for a provider class — renderCarbonAutoscalerConfig reads
   // PROVIDER_ID_PREFIX/K8S_IMAGE off it AND (M3 Task 5b) dispatches
   // getK8sWorkerUserData(vars) on it to render the worker cloud-init.
-  // K8S_IMAGE (M3 Task 2) mirrors HetznerProvider's real 'ubuntu-24.04'
+  // K8S_IMAGE (M3 Task 2) mirrors HetznerProvider's real 'ubuntu-26.04'
   // value; getK8sWorkerUserData mirrors HetznerProvider's own static
   // exactly (wraps worker-init.sh via loadCloudInit/renderScript) so the
   // shape-only assertions below stay decoupled from a specific real
   // provider class while still exercising real template substitution.
   const FakeProvider = {
     PROVIDER_ID_PREFIX: 'hcloud://',
-    K8S_IMAGE: 'ubuntu-24.04',
+    K8S_IMAGE: 'ubuntu-26.04',
     async getK8sWorkerUserData(vars: Record<string, unknown>) {
       const { loadCloudInit, renderScript } = await import('../../../src/lib/iac/cloud-init.js');
       return renderScript(loadCloudInit('worker-init.sh'), vars);
@@ -69,7 +69,7 @@ describe('renderCarbonAutoscalerConfig', () => {
   it('threads providerIdPrefix from whatever ProviderClass is passed', async () => {
     const OtherProvider = {
       PROVIDER_ID_PREFIX: 'digitalocean://',
-      K8S_IMAGE: 'ubuntu-24-04-x64',
+      K8S_IMAGE: 'ubuntu-26-04-x64',
       getK8sWorkerUserData: FakeProvider.getK8sWorkerUserData,
     };
     const cfg = JSON.parse(
@@ -141,7 +141,7 @@ describe('renderCarbonAutoscalerConfig', () => {
     const wp = cfg.nodeGroups['worker-pool'];
     expect(wp.serverType).toBe('cx23');
     expect(wp.region).toBe('hel1');
-    expect(wp.image).toBe('ubuntu-24.04');
+    expect(wp.image).toBe('ubuntu-26.04');
   });
 
   it('sets serverLabels including the sweep signal, managed-by, environment, and cluster', async () => {

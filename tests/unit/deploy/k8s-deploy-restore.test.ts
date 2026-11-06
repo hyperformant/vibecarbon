@@ -452,7 +452,7 @@ function args(restore: typeof RESTORE | null) {
     providerId: 'hetzner',
     ProviderClass: {
       PROVIDER_ID_PREFIX: 'hcloud://',
-      K8S_IMAGE: 'ubuntu-24.04',
+      K8S_IMAGE: 'ubuntu-26.04',
       K8S_STORAGE_CLASS: 'hcloud-volumes',
       async getK8sWorkerUserData() {
         return '#cloud-config\n';

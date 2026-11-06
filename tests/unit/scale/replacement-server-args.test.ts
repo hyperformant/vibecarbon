@@ -71,14 +71,14 @@ const baseArgs = {
 describe('buildReplacementServerArgs — image + user-data are provider-owned', () => {
   it('resolves HetznerProvider.COMPOSE_IMAGE and getComposeUserData() for a Hetzner replacement server', async () => {
     const args = await buildReplacementServerArgs(HetznerProvider, baseArgs);
-    expect(args.image).toBe('ubuntu-24.04');
+    expect(args.image).toBe('ubuntu-26.04');
     expect(args.image).toBe(HetznerProvider.COMPOSE_IMAGE);
     expect(args.userData).toBe(await HetznerProvider.getComposeUserData());
   });
 
   it('resolves DigitalOceanProvider.COMPOSE_IMAGE and getComposeUserData() for a DO replacement server — never the Hetzner image/user-data', async () => {
     const args = await buildReplacementServerArgs(DigitalOceanProvider, baseArgs);
-    expect(args.image).toBe('ubuntu-24-04-x64');
+    expect(args.image).toBe('ubuntu-26-04-x64');
     expect(args.image).toBe(DigitalOceanProvider.COMPOSE_IMAGE);
     expect(args.userData).toBe(loadDoComposeUserData());
     expect(args.userData).not.toBe(loadCloudInitScript());
@@ -156,7 +156,7 @@ describe('createServer wire-level ssh-key contract — canonical arg name pinned
       name: 'n',
       region: 'nyc3',
       serverType: 's-2vcpu-4gb',
-      image: 'ubuntu-24-04-x64',
+      image: 'ubuntu-26-04-x64',
       sshKeys: [42],
       labels: {},
     });
@@ -175,7 +175,7 @@ describe('createServer wire-level ssh-key contract — canonical arg name pinned
       name: 'n',
       region: 'nyc3',
       serverType: 's-2vcpu-4gb',
-      image: 'ubuntu-24-04-x64',
+      image: 'ubuntu-26-04-x64',
       sshKeyId: 42,
       labels: {},
     });
@@ -235,7 +235,7 @@ describe('createServer firewall-attach contract — a replacement server is neve
       name: 'n',
       region: 'nyc3',
       serverType: 's-2vcpu-4gb',
-      image: 'ubuntu-24-04-x64',
+      image: 'ubuntu-26-04-x64',
       sshKeys: [42],
       labels: {},
       firewalls: ['fw-1'],
@@ -260,7 +260,7 @@ describe('createServer firewall-attach contract — a replacement server is neve
         name: 'n',
         region: 'nyc3',
         serverType: 's-2vcpu-4gb',
-        image: 'ubuntu-24-04-x64',
+        image: 'ubuntu-26-04-x64',
         sshKeys: [42],
         labels: {},
         firewalls: ['fw-1'],
@@ -284,7 +284,7 @@ describe('createServer firewall-attach contract — a replacement server is neve
       name: 'n',
       region: 'nyc3',
       serverType: 's-2vcpu-4gb',
-      image: 'ubuntu-24-04-x64',
+      image: 'ubuntu-26-04-x64',
       sshKeys: [42],
       labels: {},
     });

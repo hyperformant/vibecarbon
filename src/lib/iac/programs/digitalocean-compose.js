@@ -151,7 +151,7 @@ export function buildDigitalOceanComposeProgram(config) {
         size: config.serverType,
         // Plain Ubuntu LTS — see the module doc comment for why this isn't
         // a docker-preinstalled marketplace image yet (Step 1 parity note).
-        image: 'ubuntu-24-04-x64',
+        image: 'ubuntu-26-04-x64',
         // Despite DO's REST API using numeric key IDs, @pulumi/digitalocean's
         // DropletArgs.sshKeys type is Input<string>[] — the TF-bridged
         // provider does its own string/id marshaling internally, so this

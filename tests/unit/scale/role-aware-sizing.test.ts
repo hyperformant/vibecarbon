@@ -56,7 +56,7 @@ const BASE_CA_CONFIG = {
       maxSize: 1,
       serverType: 'cx22',
       region: 'nbg1',
-      image: 'ubuntu-24.04',
+      image: 'ubuntu-26.04',
       cloudInit: '#cloud-config\n',
       serverLabels: { 'cluster-autoscaler/node': 'worker-pool' },
       nodeLabels: {},

@@ -137,8 +137,8 @@ export function buildScalewayComposeProgram(config) {
         zone,
         type: config.serverType,
         // Marketplace LABEL — MUST byte-match ScalewayProvider.COMPOSE_IMAGE
-        // ('ubuntu_noble'; UUIDs are per-zone AND per-volume-type, audit).
-        image: 'ubuntu_noble',
+        // ('ubuntu_resolute'; UUIDs are per-zone AND per-volume-type, audit).
+        image: 'ubuntu_resolute',
         securityGroupId: securityGroup.id,
         ipIds: [ip.id],
         // SBS root with EXPLICIT deleteOnTermination — never default-trusted

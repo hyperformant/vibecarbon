@@ -59,7 +59,7 @@ const { loadConfig } = await import('../../../src/autoscaler/config.js');
 // mutate, not which provider's cloud-init shape ends up embedded.
 const FakeProvider = {
   PROVIDER_ID_PREFIX: 'hcloud://',
-  K8S_IMAGE: 'ubuntu-24.04',
+  K8S_IMAGE: 'ubuntu-26.04',
   async getK8sWorkerUserData(vars: Record<string, unknown>) {
     const { loadCloudInit, renderScript } = await import('../../../src/lib/iac/cloud-init.js');
     return renderScript(loadCloudInit('worker-init.sh'), vars);

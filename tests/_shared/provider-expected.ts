@@ -70,8 +70,8 @@ export const EXPECTED: Record<
       networkEnvVar: 'HCLOUD_NETWORK',
     },
     k8sStorageClass: 'hcloud-volumes',
-    // M3 Task 2 — matches hetzner-k8s.js's `image: 'ubuntu-24.04'` literal.
-    k8sImage: 'ubuntu-24.04',
+    // M3 Task 2 — matches hetzner-k8s.js's `image: 'ubuntu-26.04'` literal.
+    k8sImage: 'ubuntu-26.04',
   },
   linode: {
     name: 'Linode',
@@ -187,6 +187,6 @@ export const EXPECTED: Record<
     },
     k8sStorageClass: 'do-block-storage',
     // M3 Task 2 — matches COMPOSE_IMAGE (no separate k8s-tier image on DO).
-    k8sImage: 'ubuntu-24-04-x64',
+    k8sImage: 'ubuntu-26-04-x64',
   },
 };

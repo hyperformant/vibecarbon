@@ -21,7 +21,7 @@ const baseGroup = {
   maxSize: 5,
   serverType: 'cx23',
   region: 'nbg1',
-  image: 'ubuntu-24.04',
+  image: 'ubuntu-26.04',
   cloudInit: 'cloud-init-body',
   serverLabels: { 'cluster-autoscaler/node': 'worker-pool' },
   nodeLabels: { 'vibecarbon.io/pool': 'worker-pool' },

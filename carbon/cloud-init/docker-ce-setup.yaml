@@ -1,7 +1,7 @@
 #cloud-config
 # Vibecarbon compose-deploy bootstrap.
 #
-# This user-data runs at VPS boot time on plain Ubuntu 24.04 on every
+# This user-data runs at VPS boot time on plain Ubuntu 26.04 on every
 # provider. Each provider's renderer splices the one Docker install
 # (src/lib/iac/docker-install.js) at the top of runcmd, so every server installs
 # the latest stable Docker the same way. Boot refreshes only Docker's own apt

@@ -2,7 +2,7 @@
  * M3 Task 2 — Hetzner byte-identical pin.
  *
  * The k8s pipeline's static-IP + image literals (`10.0.1.1`/`10.0.1.2`
- * registry refs, `ubuntu-24.04` node image) became data driven by
+ * registry refs, `ubuntu-26.04` node image) became data driven by
  * `infraOutputs.masterPrivateIp`/`dbPrivateIp` and the new
  * `ProviderClass.K8S_IMAGE` static — required because DigitalOcean's VPC
  * can't pin private IPs the way Hetzner's Pulumi program does. THE
@@ -118,9 +118,9 @@ describe('M3 Task 2 — Hetzner byte-identical pin', () => {
     );
 
     // The image field specifically — the literal this task's refactor
-    // touched most directly (was hardcoded 'ubuntu-24.04', now
+    // touched most directly (was hardcoded 'ubuntu-26.04', now
     // ProviderClass.K8S_IMAGE).
-    expect(JSON.parse(expected).nodeGroups['worker-pool'].image).toBe('ubuntu-24.04');
+    expect(JSON.parse(expected).nodeGroups['worker-pool'].image).toBe('ubuntu-26.04');
   });
 
   it('buildAppImage names no registry; the Hetzner registry ref is still 10.0.1.1:5000', async () => {

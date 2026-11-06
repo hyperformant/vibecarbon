@@ -1,7 +1,7 @@
 /**
  * The one Docker install every compose server runs, on every provider.
  *
- * Every compose server boots plain Ubuntu 24.04 and installs the latest Docker
+ * Every compose server boots plain Ubuntu 26.04 and installs the latest Docker
  * from Docker's own stable apt repo, spliced into the shared cloud-init's
  * `runcmd:` list. Why one install and not each provider's prebuilt image: the
  * deploy's image delivery (src/lib/deploy/layer-delta-remote.sh) runs

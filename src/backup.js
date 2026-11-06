@@ -113,19 +113,20 @@ const ACTION_CHOICES = [
 async function downloadPodBackup(ip, sshKeyPath, filename) {
   const pod = await getPostgresPod(ip, sshKeyPath);
 
-  // Copy from pod to host
+  // Copy from pod to host. /var/tmp, not /tmp: Ubuntu 26.04's /tmp is a tmpfs
+  // of half the RAM, and a dump does not belong in the database server's memory.
   await sshKubectl(ip, sshKeyPath, [
     'cp',
     `vibecarbon/${pod}:/backups/${filename}`,
-    `/tmp/${filename}`,
+    `/var/tmp/${filename}`,
   ]);
 
   // SCP from host to local
   const localPath = join(process.cwd(), filename);
-  await scpDownload(ip, sshKeyPath, `/tmp/${filename}`, localPath);
+  await scpDownload(ip, sshKeyPath, `/var/tmp/${filename}`, localPath);
 
   // Clean up remote temp file
-  await sshRun(ip, sshKeyPath, ['rm', '-f', `/tmp/${filename}`]);
+  await sshRun(ip, sshKeyPath, ['rm', '-f', `/var/tmp/${filename}`]);
 
   return localPath;
 }
