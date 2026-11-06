@@ -82,7 +82,10 @@ const PULL_DENIED = /unauthorized|denied|not found/i;
  * anonymously) or not published yet, so say how to fix that.
  */
 function basePullCause(err) {
-  const cause = `base image pull failed: ${firstLine(err?.message ?? err)}`;
+  // Docker's reason is in the output. The message of a failed ssh is only
+  // `Command failed: ssh ...`, the command, which tells nobody why.
+  const said = lastLine(err?.stderr) || lastLine(err?.stdout);
+  const cause = `base image pull failed: ${said || firstLine(err?.message ?? err)}`;
   if (!PULL_DENIED.test(cause)) return cause;
   return (
     `${cause}. The node-runtime package must be public on GHCR, since servers ` +
@@ -100,6 +103,15 @@ function firstLine(text) {
       .map((l) => l.trim())
       .find((l) => l && !l.startsWith('Warning: Permanently added')) ?? ''
   );
+}
+
+/** The last line of a command's output, which is where docker puts its reason. */
+function lastLine(text) {
+  return String(text ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('Warning: Permanently added'))
+    .at(-1);
 }
 
 /**
