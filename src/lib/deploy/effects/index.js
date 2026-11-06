@@ -474,7 +474,9 @@ async function checkDbLedger(ctx) {
   const { serverIp, sshKeyPath, projectConfig } = ctx;
   const { assertDbMadeByThisStack } = await import('../compose/db-ledger-preflight.js');
   await perfAsync('deploy.compose.checkDbLedger', () =>
-    assertDbMadeByThisStack([serverIp], sshKeyPath, projectConfig.projectName),
+    assertDbMadeByThisStack([serverIp], sshKeyPath, projectConfig.projectName, {
+      perfName: 'deploy.compose.serverFloors',
+    }),
   );
 }
 
