@@ -394,7 +394,7 @@ fi`,
     const diag = `${inlineDiag}\n${podDiag}`;
     const pushed = [...new Set(pushedBackupNames(diag))];
     if (pushed.length > 0) {
-      const cause = /retention failed after pushing .*$/m.exec(diag)?.[0];
+      const cause = /retention failed \w+ pushing .*$/m.exec(diag)?.[0];
       return {
         result: 'pushed',
         name: pushed[pushed.length - 1],
@@ -697,7 +697,7 @@ export async function runDownload({
 
 /**
  * `-action create`: push a base backup and report it. Exits 1 on a skip and on
- * a retention failure after the push (naming the base that was pushed).
+ * a retention failure on a pushed base (naming that base).
  * `deps` is a test seam for the two backup runners.
  */
 export async function runCreate({

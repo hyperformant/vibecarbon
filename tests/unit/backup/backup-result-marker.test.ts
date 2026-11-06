@@ -90,6 +90,8 @@ type Stub = {
   pushOutput?: string;
   pushFails?: boolean;
   retainFails?: boolean;
+  /** Once a push has run, a read of its sentinel 404s, as Hetzner did on 2026-11-06. */
+  freshSentinelStale?: boolean;
   /** The fence object disappears when `delete before` runs. */
   fenceVanishes?: boolean;
   lockHeld?: boolean;
@@ -136,6 +138,7 @@ function stubs(name: string, opts: Stub) {
     ].join('\n'),
     pushFails = false,
     retainFails = false,
+    freshSentinelStale = false,
     fenceVanishes = false,
     lockHeld = false,
     realFlock = false,
@@ -157,8 +160,10 @@ if [ "$1" = st ] && [ "$2" = cat ]; then
   exit 0
 fi
 echo "$*" >> ${log}
+${freshSentinelStale ? `if [ "$1" != backup-push ] && [ -e ${join(bin, 'pushed')} ]; then echo "ERROR: object '${NAME}_backup_stop_sentinel.json' not found in storage" >&2; exit 1; fi` : ''}
 if [ "$1" = backup-list ]; then cat ${join(bin, 'list.json')}; fi
 if [ "$1" = backup-push ]; then
+  ${freshSentinelStale ? `touch ${join(bin, 'pushed')}` : ''}
   ${pushFails ? 'echo "ERROR: pg_backup_start: permission denied" >&2; exit 1' : `printf '%s\\n' "${pushOutput}" >&2`}
 fi
 if [ "$1" = delete ] && [ "$2" = before ]; then
@@ -234,6 +239,9 @@ const baseEnv = (bin: string): Record<string, string> => ({
 
 const markers = (out: string) => out.split('\n').filter((l) => l.startsWith('BACKUP_RESULT='));
 
+/** The last wal-g call a run made. Nothing is deleted after a push that failed. */
+const lastWalgCall = (walg: string) => walg.trim().split('\n').at(-1) ?? '';
+
 function runCompose(
   name: string,
   opts: Stub = {},
@@ -292,23 +300,23 @@ describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
     expect(r.walg).toBe('');
   });
 
-  it('success: pushed with the name from wal-g backup-push, then retention runs', () => {
+  it('success: retention runs, then the push, and the name comes from wal-g backup-push', () => {
     const r = runCompose('ok');
     expect(r.status, r.stderr).toBe(0);
     expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
     expect(parseBackupResult(r.stdout)).toEqual({ result: 'pushed', name: NAME });
     expect(r.walg).toMatch(
-      /backup-push[\s\S]*delete garbage BACKUPS[\s\S]*delete before FIND_FULL \S+ --confirm/,
+      /delete garbage BACKUPS[\s\S]*delete before FIND_FULL \S+ --confirm[\s\S]*backup-push/,
     );
   });
 
-  it('a retention failure after the push: exit 3, the pushed marker stands, the cause names the base', () => {
+  it('a retention failure does not stop the push: exit 3, the pushed marker stands, the cause names the base', () => {
     const r = runCompose('retain-fail', { retainFails: true });
     // 3, not 1: the one exit code that means "the base landed, retention did
     // not" (the CronJob fails the Job on it instead of re-pushing).
     expect(r.status).toBe(3);
     expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
-    expect(r.stderr).toContain(`retention failed after pushing ${NAME}: `);
+    expect(r.stderr).toContain(`retention failed before pushing ${NAME}: `);
     expect(r.stderr).toContain('AccessDenied');
   });
 
@@ -317,7 +325,7 @@ describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
     expect(r.status).toBe(1);
     expect(markers(r.stdout)).toEqual([]);
     expect(r.stderr).toContain('permission denied');
-    expect(r.walg).not.toContain('delete');
+    expect(lastWalgCall(r.walg)).toMatch(/^backup-push/);
   });
 
   it('a push that names no backup: exit 1, no marker (nothing proves what landed)', () => {
@@ -325,7 +333,7 @@ describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
     expect(r.status).toBe(1);
     expect(markers(r.stdout)).toEqual([]);
     expect(r.stderr).toMatch(/printed no backup name/);
-    expect(r.walg).not.toContain('delete');
+    expect(lastWalgCall(r.walg)).toMatch(/^backup-push/);
   });
 
   it('a Started line alone is not a pushed base: exit 1, no marker', () => {
@@ -334,7 +342,7 @@ describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
     });
     expect(r.status).toBe(1);
     expect(markers(r.stdout)).toEqual([]);
-    expect(r.walg).not.toContain('delete');
+    expect(lastWalgCall(r.walg)).toMatch(/^backup-push/);
   });
 
   it('the retired-node refusal: exit 1, no marker, wal-g never runs', () => {
@@ -428,7 +436,7 @@ describe('the backup CronJob prints the same markers', () => {
     const bad = runCron('retain-fail', { retainFails: true });
     expect(bad.status).toBe(3);
     expect(markers(bad.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
-    expect(bad.stderr).toContain(`retention failed after pushing ${NAME}: `);
+    expect(bad.stderr).toContain(`retention failed before pushing ${NAME}: `);
   });
 
   // Every Job (the schedule, and each `kubectl create job --from` beside it:
@@ -605,6 +613,31 @@ describe('a pushed base clears the WAL gap record entries older than itself', ()
  * the newest base always survives (proved against the real wal-g in
  * tests/integration/docker/db-restore-staged.test.ts).
  */
+describe('retention never reads what the push just wrote', () => {
+  // A k8s backup on 2026-11-06 pushed its base, then failed reading that base's
+  // own sentinel: Hetzner Object Storage can answer 404 for an object written
+  // seconds ago. Retention never needs the new base, so it runs first.
+  it.each([
+    ['compose', () => runCompose('stale-compose', { freshSentinelStale: true })],
+    ['k8s CronJob', () => runCron('stale-cron', { freshSentinelStale: true })],
+  ])('%s: a sentinel still stale after the push costs nothing', (_t, run) => {
+    const r = run();
+    expect(r.status, r.stderr).toBe(0);
+    expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
+    expect(r.stderr).not.toContain('retention failed');
+    expect(lastWalgCall(r.walg)).toMatch(/^backup-push/);
+  });
+
+  it.each([
+    ['compose', () => runCompose('order-compose', { retainFails: true })],
+    ['k8s CronJob', () => runCron('order-cron', { retainFails: true })],
+  ])('%s: the push still runs after a failed retention', (_t, run) => {
+    const r = run();
+    expect(r.status).toBe(3);
+    expect(lastWalgCall(r.walg)).toMatch(/^backup-push/);
+  });
+});
+
 describe('retention deletes by time, inside the current lineage', () => {
   const deletes = (walg: string) =>
     walg
@@ -717,7 +750,7 @@ describe('retention deletes by time, inside the current lineage', () => {
       // The base landed; only retention failed: exit 3 with the marker kept.
       expect(r.status).toBe(3);
       expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
-      expect(r.stderr).toContain('retention failed after pushing');
+      expect(r.stderr).toContain('retention failed before pushing');
       expect(r.stderr).toContain('fence (vibecarbon-fence.json) changed or vanished');
     }
   });

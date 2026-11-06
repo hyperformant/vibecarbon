@@ -398,7 +398,7 @@ describe('backupCompose — wal-g backup-push staleness retry', () => {
     mockBackup(() => {
       throw Object.assign(
         execError(
-          'ERROR: object not found in storage NoSuchKey\nretention failed after pushing base_000000010000000000000003: ERROR: NoSuchKey',
+          'ERROR: object not found in storage NoSuchKey\nretention failed before pushing base_000000010000000000000003: ERROR: NoSuchKey',
         ),
         { stdout: PUSHED },
       );
@@ -410,7 +410,7 @@ describe('backupCompose — wal-g backup-push staleness retry', () => {
       result: 'pushed',
       name: 'base_000000010000000000000003',
       retentionError:
-        'retention failed after pushing base_000000010000000000000003: ERROR: NoSuchKey',
+        'retention failed before pushing base_000000010000000000000003: ERROR: NoSuchKey',
     });
     // A retry would push a second base.
     expect(backupPushCount()).toBe(1);
@@ -427,7 +427,7 @@ describe('backupCompose — wal-g backup-push staleness retry', () => {
     mockBackup(() => {
       throw Object.assign(
         execError(
-          'retention failed after pushing base_000000010000000000000003: dial tcp: i/o timeout',
+          'retention failed before pushing base_000000010000000000000003: dial tcp: i/o timeout',
         ),
         { stdout: PUSHED, status: 3 },
       );

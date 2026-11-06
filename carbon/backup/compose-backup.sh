@@ -175,6 +175,39 @@ sh vc-compose exec -T db bash -c '
       exit 1
     fi
   fi
+  # RETENTION, BEFORE the push. It reads every sentinel in the lineage, and on
+  # Hetzner Object Storage a sentinel written seconds ago can answer 404: a
+  # k8s backup on 2026-11-06 pushed its base, then failed reading the sentinel
+  # of that same base. Retention is by time and never needs it, so running
+  # first takes that read away rather than retrying it, and it can never touch
+  # the base about to land. A failure does not stop the push: it is reported
+  # after it, as exit 3 (base pushed, retention failed), never 1. An empty
+  # lineage is fine: on wal-g 3.0.9 both commands exit 0 with nothing to do.
+  # `delete garbage BACKUPS` sweeps
+  # sentinel-less orphans (an interrupted backup-push writes its stop-sentinel
+  # LAST, so a mid-upload failure leaves data files with no sentinel) BEFORE
+  # the delete, which hard-crashes on such an orphan ("object
+  # …_backup_stop_sentinel.json not found in storage") on every run until
+  # someone deletes it by hand (2026-08-30 RCA: a stale-storage-frontend
+  # window orphaned one push and wedged all five retry attempts). Safe under
+  # the flock above: no concurrent push on this host can look like an orphan
+  # mid-flight.
+  # Retention is by TIME and keeps the full RETAIN days. The cutoff is RETAIN
+  # days ago; the target is the NEWEST base that finished at or before it, and
+  # `delete before FIND_FULL <that base>` removes what precedes it, so that
+  # base and its WAL stay: a restore to any moment in the last RETAIN days has
+  # its base. No base that old (a young environment): nothing is deleted, and
+  # the newest base always survives. (wal-g given a bare timestamp would keep
+  # only the first base AFTER it and shorten the window.) The list is parsed
+  # without jq (the db image is Alpine busybox, no coreutils or jq): the cutoff
+  # is epoch arithmetic, the JSON is split with tr and sed. It acts on this
+  # lineage folder only (WALG_S3_PREFIX from walg-env.sh). The fence object
+  # lives at the lineage root, outside what the delete touches; it is read
+  # back after, and a fence that changed or vanished fails retention loudly.
+  RETAIN_DAYS='"${RETAIN}"'
+  retain_rc=0
+  retain_out="$( { cutoff="$(date -u -d "@$(( $(date +%s) - RETAIN_DAYS * 86400 ))" +%Y-%m-%dT%H:%M:%SZ)" && [ -n "$cutoff" ] && wal-g delete garbage BACKUPS --confirm && list="$(wal-g backup-list --detail --json)" && target="$(printf "%s" "$list" | tr "}" "\n" | sed -n "s/.*\"backup_name\":\"\([^\"]*\)\".*\"finish_time\":\"\([^\"]*\)\".*/\2 \1/p" | awk -v c="$cutoff" "substr(\$1,1,19) <= substr(c,1,19)" | sort | tail -n 1 | cut -d " " -f 2)" && { if [ -n "$target" ]; then wal-g delete before FIND_FULL "$target" --confirm; else echo "no base backup is older than ${RETAIN_DAYS} days, nothing to delete"; fi; } && { [ -z "$fence" ] || [ "$(wal-g st cat vibecarbon-fence.json 2>&1)" = "$fence" ] || { echo "the backup-prefix fence (vibecarbon-fence.json) changed or vanished during retention"; false; }; }; } 2>&1)" || retain_rc=$?
+  printf "%s\n" "$retain_out" >&2
   # The push. wal-g logs to stderr only, and names the base twice: "Started
   # backup with name base_..." when it begins and "Wrote backup with name
   # base_... to storage default" once the sentinel is written (verified on
@@ -215,36 +248,10 @@ sh vc-compose exec -T db bash -c '
         rm -f \"\$g.clearing\"
     " sh "$gap" "$push_started" || echo "could not clear the WAL gap record $gap after pushing $name" >&2
   fi
-  # RETENTION, a separate step after the marker: the base above is in the
-  # bucket whatever happens here, and a failure exits 3 (base pushed,
-  # retention failed), never 1. `delete garbage BACKUPS` sweeps
-  # sentinel-less orphans (an interrupted backup-push writes its stop-sentinel
-  # LAST, so a mid-upload failure leaves data files with no sentinel) BEFORE
-  # the delete, which hard-crashes on such an orphan ("object
-  # …_backup_stop_sentinel.json not found in storage") on every run until
-  # someone deletes it by hand (2026-08-30 RCA: a stale-storage-frontend
-  # window orphaned one push and wedged all five retry attempts). Safe under
-  # the flock above: no concurrent push on this host can look like an orphan
-  # mid-flight.
-  # Retention is by TIME and keeps the full RETAIN days. The cutoff is RETAIN
-  # days ago; the target is the NEWEST base that finished at or before it, and
-  # `delete before FIND_FULL <that base>` removes what precedes it, so that
-  # base and its WAL stay: a restore to any moment in the last RETAIN days has
-  # its base. No base that old (a young environment): nothing is deleted, and
-  # the newest base always survives. (wal-g given a bare timestamp would keep
-  # only the first base AFTER it and shorten the window.) The list is parsed
-  # without jq (the db image is Alpine busybox, no coreutils or jq): the cutoff
-  # is epoch arithmetic, the JSON is split with tr and sed. It acts on this
-  # lineage folder only (WALG_S3_PREFIX from walg-env.sh). The fence object
-  # lives at the lineage root, outside what the delete touches; it is read
-  # back after, and a fence that changed or vanished fails retention loudly.
-  RETAIN_DAYS='"${RETAIN}"'
-  retain_out="$( { cutoff="$(date -u -d "@$(( $(date +%s) - RETAIN_DAYS * 86400 ))" +%Y-%m-%dT%H:%M:%SZ)" && [ -n "$cutoff" ] && wal-g delete garbage BACKUPS --confirm && list="$(wal-g backup-list --detail --json)" && target="$(printf "%s" "$list" | tr "}" "\n" | sed -n "s/.*\"backup_name\":\"\([^\"]*\)\".*\"finish_time\":\"\([^\"]*\)\".*/\2 \1/p" | awk -v c="$cutoff" "substr(\$1,1,19) <= substr(c,1,19)" | sort | tail -n 1 | cut -d " " -f 2)" && { if [ -n "$target" ]; then wal-g delete before FIND_FULL "$target" --confirm; else echo "no base backup is older than ${RETAIN_DAYS} days, nothing to delete"; fi; } && { [ -z "$fence" ] || [ "$(wal-g st cat vibecarbon-fence.json 2>&1)" = "$fence" ] || { echo "the backup-prefix fence (vibecarbon-fence.json) changed or vanished during retention"; false; }; }; } 2>&1)" || {
-    printf "%s\n" "$retain_out" >&2
-    echo "retention failed after pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
+  if [ "$retain_rc" -ne 0 ]; then
+    echo "retention failed before pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
     exit 3
-  }
-  printf "%s\n" "$retain_out" >&2
+  fi
 ' || rc=$?
 
 # The TLS snapshot runs after a run that reached the push (0, including its

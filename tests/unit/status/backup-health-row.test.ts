@@ -549,7 +549,7 @@ describe('compose scheduled backup log', () => {
   });
   it('pushed then retention failed (no completed line) is a failure', () => {
     const r = parseComposeBackupLog(
-      'Started at x\nBACKUP_RESULT=pushed:b\nretention failed after pushing b: nope\n__RUNNING__=0',
+      'Started at x\nBACKUP_RESULT=pushed:b\nretention failed before pushing b: nope\n__RUNNING__=0',
     );
     expect(r).toMatchObject({ failed: true, retentionFailed: true });
   });
