@@ -152,7 +152,7 @@ describe('walg role primitives', () => {
     expect(r.stdout.trim()).toBe('WALG_ROLE_FILE=standby');
     expect(readFileSync(join(dir, 'walg-role'), 'utf-8')).toBe('standby\n');
   });
-  it('the manifest is the CLI-owned ConfigMap with the one key', () => {
+  it('the manifest is the CLI-owned ConfigMap with the intent and an empty live record', () => {
     const doc = load(dbRoleConfigMapManifest('standby')) as {
       kind: string;
       metadata: { name: string; namespace: string };
@@ -161,7 +161,7 @@ describe('walg role primitives', () => {
     expect(doc).toMatchObject({
       kind: 'ConfigMap',
       metadata: { name: DB_ROLE_CONFIGMAP, namespace: 'vibecarbon' },
-      data: { [DB_ROLE_INTENT_KEY]: 'standby' },
+      data: { [DB_ROLE_INTENT_KEY]: 'standby', VC_WALG_ROLE_LIVE: '' },
     });
   });
   it('setK8sWalgRole: apply (never patch) the intent, then the live write on a mounted pod', async () => {

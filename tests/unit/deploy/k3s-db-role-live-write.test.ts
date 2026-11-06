@@ -6,7 +6,9 @@
  * leave the file as it was. So deployK3s runs writeDeployWalgRole on every
  * deploy, outside the k3s-apply skip gate (a skipped apply first waits for
  * postgres to accept), through a local-kubectl adapter and before the wal-g
- * audit (verifyWalgBackups), so the audit reads the role this deploy set.
+ * audit (verifyWalgBackups), so the audit reads the role this deploy set. When
+ * the ConfigMap already proves the role it does not exec at all
+ * (k8s-walg-role-record.test.ts).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,10 +44,12 @@ describe('writeDeployWalgRole', () => {
       return '';
     });
     await writeDeployWalgRole({ kubectl, role: 'primary' });
-    expect(calls[0]).toContain('apply -f -');
-    expect(calls.some((c) => c.includes('exec') && c.includes('/var/lib/vibecarbon/role'))).toBe(
-      true,
+    const apply = calls.findIndex((c) => c.includes('apply -f -'));
+    const exec = calls.findIndex(
+      (c) => c.includes('exec') && c.includes('/var/lib/vibecarbon/role'),
     );
+    expect(apply).toBeGreaterThan(-1);
+    expect(exec).toBeGreaterThan(apply);
   });
 
   it('a live write that does not read back fails the deploy', async () => {

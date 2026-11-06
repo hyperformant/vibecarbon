@@ -133,6 +133,7 @@ import {
 import {
   dbRoleConfigMapManifest,
   k8sWalgRoleIntentApplyArgv,
+  readDbRoleRecord,
   setK8sWalgRole,
   WALG_ROLE_DIR,
 } from '../walg-role.js';
@@ -1876,14 +1877,19 @@ export async function applyVibecarbonSecrets({
     });
   }
   // The intent must exist before the base apply creates the db pod, which
-  // reads it at container start. deployK3s applies it again on every deploy
+  // reads it at container start. deployK3s sets it on every deploy
   // (writeDeployWalgRole, through setK8sWalgRole), including one whose apply
-  // is skipped; this first apply is what a brand-new pod starts with.
-  await runKubectlWithRetry(k8sWalgRoleIntentApplyArgv(), {
-    env,
-    input: dbRoleConfigMapManifest(walgRole),
-    description: 'applyVibecarbonSecrets: kubectl apply ConfigMap/vibecarbon-db-role',
-  });
+  // is skipped; this first apply is what a brand-new pod starts with. An
+  // unchanged intent stays as it is: applying it clears the live record, which
+  // would cost this warm deploy the exec the record exists to avoid.
+  const { intent } = await readDbRoleRecord({ kubectl: localWalgRoleKubectl(kubeconfig) });
+  if (intent !== walgRole) {
+    await runKubectlWithRetry(k8sWalgRoleIntentApplyArgv(), {
+      env,
+      input: dbRoleConfigMapManifest(walgRole),
+      description: 'applyVibecarbonSecrets: kubectl apply ConfigMap/vibecarbon-db-role',
+    });
+  }
 }
 
 /**
@@ -2531,7 +2537,9 @@ export async function auditRls({ kubeconfig }) {
  * role file in the running db container, through setK8sWalgRole. deployK3s
  * runs it on every deploy, outside the k3s-apply skip gate and once postgres
  * accepts, so a redeploy that did not restart the db
- * (or skipped the apply altogether) still converges the file. Throws when the
+ * (or skipped the apply altogether) still converges the file. A deploy whose
+ * role vibecarbon-db-role already proves does not exec at all (recordLive; the
+ * header of walg-role.js says why that is sound). Throws when the
  * file does not read back the role, which fails the deploy: a db whose role
  * file is wrong would hold or drop WAL behind a green deploy. The errors are
  * the deploy's own: a missing role mount after the rollout is a template that
@@ -2545,7 +2553,13 @@ export async function auditRls({ kubeconfig }) {
  * @returns {Promise<{intent: true, live: boolean}>}
  */
 export async function writeDeployWalgRole({ kubectl, role, envName }) {
-  const result = await setK8sWalgRole({ ip: undefined, kubectl, role, envName });
+  const result = await setK8sWalgRole({
+    ip: undefined,
+    kubectl,
+    role,
+    envName,
+    recordLive: true,
+  });
   if (result.live) return result;
   // setK8sWalgRole's own no-role-mount hint says to run a deploy; this IS the
   // deploy, after a rollout of the template that carries the mount, so the
@@ -5377,9 +5391,10 @@ async function deployK3sSteps(options, inFlight) {
   //     only at container start, so a db this deploy did not restart (or a
   //     deploy whose apply was skipped) keeps whatever role file it had. The
   //     intent and the file are set to this deploy's role and read back
-  //     before the audit, so the audit reads the role this deploy set. A
-  //     skipped apply waited for no db, so postgres has to accept first: the
-  //     write never races a starting pod.
+  //     before the audit, so the audit reads the role this deploy set; a role
+  //     vibecarbon-db-role already proves needs no exec. A skipped apply
+  //     waited for no db, so postgres has to accept first: the write never
+  //     races a starting pod.
   if (skipApply) {
     await awaitPostgresAccepting({
       env: { ...process.env, KUBECONFIG: kubeconfig },
