@@ -13,7 +13,7 @@
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/npm/v/vibecarbon?color=0a7ea4&label=npm" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/badge/npm-provenance%20attested-0a7ea4" alt="npm provenance attested (SLSA build provenance via Trusted Publishing)" /></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/hyperformant/vibecarbon"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.scorecard.dev%2Fprojects%2Fgithub.com%2Fhyperformant%2Fvibecarbon&query=%24.score&label=openssf%20scorecard&color=informational" alt="OpenSSF Scorecard" /></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--MIT-blue" alt="License: FSL-1.1-MIT" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT" /></a>
   <a href="https://discord.gg/up8Z9sX6M6"><img src="https://img.shields.io/badge/discord-join%20the%20community-5865F2" alt="Join the vibecarbon Discord" /></a>
 </p>
 
@@ -22,7 +22,7 @@
   <a href="#commands">Commands</a> ·
   <a href="#key-benefits">Benefits</a> ·
   <a href="#performance">Performance</a> ·
-  <a href="#license--terms">License</a>
+  <a href="#license">License</a>
 </p>
 
 ---
@@ -65,7 +65,7 @@ Vibecarbon handles Docker Compose and Kubernetes, high availability with one-com
         <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/grounded-light.svg" alt="Grounded" width="88" height="88" />
       </picture>
     </td>
-    <td><strong>Grounded</strong> · <em>Rooted in transparency</em><br />Fair Source CLI, Open Source Templates. Everything transparent all the way down.</td>
+    <td><strong>Grounded</strong> · <em>Rooted in transparency</em><br />Open source under MIT, CLI and template alike. Everything transparent all the way down.</td>
   </tr>
   <tr>
     <td width="112" align="center">
@@ -268,7 +268,7 @@ One CLI, four deploy modes, picked per environment. Every mode includes automate
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean is fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining tiers aren't built for them yet, though Compose HA is available on every provider regardless (see Architecture above).
+DigitalOcean is fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining modes aren't built for them yet, though Compose HA is available on every provider regardless (see Architecture above).
 
 ### Integration Guides
 
@@ -340,19 +340,9 @@ Plus object storage for backups and uploads, billed once per provider account an
 
 ---
 
-## License & Terms
+## License
 
-The CLI is Fair Source under the [Functional Source License 1.1 with MIT future license](./LICENSE). **Building from source is free for any non-competing use, and every release converts to the MIT license two years after publication.**
-
-Using the distributed `vibecarbon` package is a per-project subscription:
-
-| Tier | Tagline | What it is for | Price | Deploy mode |
-|------|---------|-----------------|-------|--------------|
-| **Graphite** | Go live. | Local dev, all add-ons, GitHub Actions CI/CD, single-server production, and `upgrade` (free on every tier) | Free, no key | Compose |
-| **Graphene** | Scale on demand. | Production that needs to scale | $19 per project per month ($190 per year) | Kubernetes |
-| **Fullerene** | Enterprise resiliency. | Production that must survive a region failure | $39 per project per month ($390 per year) | Kubernetes HA |
-
-The subscription is checked on every deploy to a Kubernetes or HA environment. A lapsed subscription keeps deploying for 30 days with a warning, then pauses those deploys until renewed. Backup, restore, failover, and scale never require a subscription. Run `vibecarbon activate <key>` inside the project; it binds the key to that project on vibecarbon.com and writes `.vibecarbon.license`, which should be committed and shared with your team. A key is bound to one project at a time: `vibecarbon deactivate` emails the buyer a release link, after which the key can be activated elsewhere. Every bind and release is announced to the buyer by email. See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT](./carbon/LICENSE), so you own your app outright.
+The CLI, images and template are MIT licensed, see [LICENSE](./LICENSE). The Vibecarbon name and logo are covered by [TRADEMARK.md](./TRADEMARK.md).
 
 ---
 

@@ -4,11 +4,9 @@ description: "Deploy your application to production with Docker or Kubernetes."
 order: 6
 ---
 
-> **Single-server Docker Compose deploys need no license.** `create`, local development (`up`, `down`), and single-server production deploys never require a license key. Deploying to a Kubernetes environment requires Graphene; Kubernetes HA and Compose HA require Fullerene; the subscription is checked on every deploy with 30 days of grace. See [Getting Started](/docs/getting-started) for licensing details.
-
 ## Overview
 
-Your application can be deployed using Docker Compose (single server, no license required) or Kubernetes, which requires a subscription (Graphene, or Fullerene for Kubernetes HA). Compose HA is also available, for providers without Kubernetes; select it explicitly with `-mode compose-ha`.
+Your application can be deployed using Docker Compose (single server) or Kubernetes (with Kubernetes HA for a standby region). Each environment picks its mode at first deploy, and the same app deploys in any of them. Compose HA is also available, for providers without Kubernetes; select it explicitly with `-mode compose-ha`.
 
 ## Choosing a provider
 
@@ -83,7 +81,7 @@ curl -s https://your-domain.com/api/health | jq
 
 ## Kubernetes
 
-For production deployments with auto-scaling and monitoring (requires a Graphene subscription):
+For production deployments with auto-scaling and monitoring:
 
 ```bash
 # Bare command opens a guided prompt for env, mode, region, etc.

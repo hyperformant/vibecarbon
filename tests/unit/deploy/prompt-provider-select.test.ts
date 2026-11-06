@@ -58,8 +58,8 @@ describe('resolveProvider', () => {
     // Pre-multi-provider environments have deployMode/status/servers but no
     // `provider` field. Must fall back to hetzner silently — not re-prompt
     // an operator whose environment is already deployed. Regression: this
-    // exact shape (deployMode set, provider absent) is what the license-gate
-    // integration fixtures use, and an earlier version of this guard keyed
+    // exact shape (deployMode set, provider absent) is what older integration
+    // fixtures use, and an earlier version of this guard keyed
     // only on `provider`, wrongly prompting here.
     const result = await resolveProvider(noFlags, {
       deployMode: 'compose-ha',

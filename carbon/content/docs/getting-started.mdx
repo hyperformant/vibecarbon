@@ -74,24 +74,21 @@ Before deploying, configure `DOMAIN` in `.env.local` to match your production do
 
 ## 4. Deploy to Production
 
-Deploying on a single Docker Compose server requires no license. Kubernetes and Kubernetes HA require a per-project subscription. Vibecarbon has three tiers:
+Vibecarbon deploys in the mode that fits what you are building. You pay your cloud provider directly for the servers.
 
-| Tier | Tagline | What it is for | Price | Deploy mode |
-|------|---------|-----------------|-------|--------------|
-| **Graphite** | Go live. | Everyone: create projects, develop locally, deploy production on a single server, set up CI/CD, use every add-on | Free, no key | Compose |
-| **Graphene** | Scale on demand. | Production that needs to scale | $19 per project per month ($190 per year) | Kubernetes |
-| **Fullerene** | Enterprise resiliency. | Production that must survive a region failure | $39 per project per month ($390 per year) | Kubernetes HA |
+| Goal | Tagline | What it is for | Deploy mode |
+|------|---------|-----------------|--------------|
+| **Launch** | Go live. | Create projects, develop locally, deploy production on a single server, set up CI/CD, use every add-on | Compose |
+| **Supercharge** | Scale on demand. | Production that needs to scale | Kubernetes |
+| **Fortify** | Enterprise resiliency. | Production that must survive a region failure | Kubernetes HA |
 
-Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`.
+Compose HA gives a primary and a standby for providers without Kubernetes; select it explicitly with `-mode compose-ha`. Each environment picks its mode at first deploy, and the same app deploys in any of them.
 
-If you're deploying single-server Docker Compose, skip straight to `deploy`; no license needed. Kubernetes and Kubernetes HA need a subscription key; run `activate` from inside this project's directory first:
+Run `deploy` from inside this project's directory:
 
 ```bash
-vibecarbon activate <your-key>
 vibecarbon deploy
 ```
-
-Activating writes `.vibecarbon.license` into the project; commit it and share it with your team. The key never rotates. The subscription is checked on every deploy to a Kubernetes or HA environment. A lapsed subscription keeps deploying for 30 days with a warning, then pauses those deploys until renewed. Backup, restore, failover, and scale never require a subscription.
 
 The bare `deploy` command opens a guided prompt that walks you through environment selection, mode (`compose`, `k8s`, or `k8s-ha`; `compose-ha` is also available, pass it explicitly with `-mode compose-ha`), region, and other settings. Behind the scenes it builds your app, pushes container images, and applies your infrastructure configuration. Traefik handles SSL certificates automatically via Let's Encrypt.
 

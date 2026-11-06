@@ -37,7 +37,7 @@ The seams mostly exist. What is missing is the path between them.
 **The catalog is the single source of truth for every billing surface.**
 Marketing pricing, in-app pricing, and checkout all render from it. A
 hand-maintained second tier list is exactly the drift that produced this
-(vibecarbon.com's `PricingSection` disagreeing with an empty catalog).
+(a marketing pricing section disagreeing with an empty catalog).
 
 **Onboarding does not sell.** The Plan step is removed outright rather than
 made catalog-aware. Onboarding becomes Profile → Organization; monetization
@@ -47,8 +47,8 @@ surface, and makes one-time and subscription projects onboard identically.
 
 **The template owns the mechanism; the project owns the payload.** The template
 verifies, deduplicates, records, and emails. What the customer actually
-*receives* — a license key, a download, a seat grant — is one project-owned
-function. The template never learns what a license is.
+*receives* (a download, a seat grant, an access code) is one project-owned
+function. The template never learns what the product is.
 
 **One-time handling is provider-agnostic.** It moves out of the Stripe route so
 Paddle and Polar inherit it instead of each growing their own branch.
@@ -94,82 +94,20 @@ Delete the Plan step and its `PlanId` coupling. `plans` in `@shared/pricing`
 survives only as the empty-catalog fallback for `/pricing`, so it folds into
 the catalog fallback rather than remaining a second pricing vocabulary.
 
-## vibecarbon.com: the first consumer
-
-vibecarbon.com implements `fulfillPurchase` by minting a license server-side.
-It is the reference implementation, not a special case — which is the only
-honest test of whether this seam is any good.
-
-Key format is fixed by the shipped CLI, whose validator embeds the public half:
-
-```
-message = "<license_id 16 hex>"
-key     = "vc-<license_id 16 hex>-<ed25519 sig hex>"
-```
-
-The key carries **nothing but its own identity** — no tier, no email, no
-project, no expiry. Everything that could change over the life of a
-subscription lives in the `licenses` row on vibecarbon.com, so the key never
-has to be reissued. One subscription, one key, one row.
-
-The whole lifecycle is four moves (see
-[the design spec](../superpowers/specs/2026-09-15-license-bind-at-activate-design.md)):
-
-1. **Mint** — `fulfillPurchase` signs a fresh `license_id` and stores the row
-   (tier, status, period end, `project_id = null`). Idempotent on the
-   subscription id, so a fulfilment retry returns the same key.
-2. **Activate / bind** — `vibecarbon activate <key>` inside a project posts
-   `POST /api/v1/license/bind` with the key and the project id from
-   `.vibecarbon.json`. The server sets `project_id`, emails the buyer that the
-   key is now bound, and the CLI writes `.vibecarbon.license`.
-3. **Check** — every gated deploy posts `POST /api/v1/license/check` with the
-   key and the project id and gets back a **signed verdict token**
-   (`status`, `tier`, `periodEnd`), cached per machine. Entitlement comes only
-   from a verified verdict: an unbound key or the wrong project is a refusal,
-   not a local guess.
-4. **Deactivate / release** — `vibecarbon deactivate` asks the server to email
-   the buyer a release link; following it clears `project_id` and the key can
-   be activated on another project. `-rm` only deletes the local file.
-
-```ts
-return {
-  items: [
-    { label: 'Your license key', value: key, copyable: true },
-    { label: 'Activate it', value: `vibecarbon activate ${key}`, copyable: true, mono: true },
-  ],
-};
-```
-
-The copy says "run this **inside your project**": a key that is never bound
-entitles nothing, so the instruction is part of the product, not a nicety.
-
-**Blast radius to accept deliberately:** server-side minting puts
-`VIBECARBON_LICENSE_PRIVATE_KEY` on the vibecarbon.com host. That key is what
-makes every license trustworthy; until now it lived only on a laptop.
-
-## Sequencing
-
-vibecarbon.com ships first and independently — launch does not wait on the
-template generalisation. A **native license model in the template** is a
-post-launch fast follow; it replaces the *body* of `fulfillPurchase`, not the
-interface, so vibecarbon.com's implementation does not get unwound.
-
 ## Out of scope
 
 Catalog sync for Paddle and Polar. The provider-agnostic write seam
 (`write-catalog.js`) already exists; only Stripe has a reader today, and adding
 others is independent of this work.
 
-## Implementation notes from the reference implementation
+## Implementation notes
 
-vibecarbon.com shipped this design on 2026-08-23 (live, verified end-to-end
-against a real paid session). Findings the template generalisation must carry:
+Findings from the first implementation that any generalisation must carry:
 
 - **Thread the event id, not the session id, into the purchase record.** The
   event is what providers redeliver; `checkout.session.completed` retried with
   the same `event.id` hits the UNIQUE constraint (Postgres 23505) and is a
-  no-op. Webhook tests must pin this — breaking it turned one test red in the
-  reference suite.
+  no-op. Webhook tests must pin this.
 - **Record before delivering, and never fail the webhook on delivery.** Once
   ACKed, the provider never redelivers. A delivery failure stores
   `fulfillment_error`, leaves `fulfilled_at` null, and still returns 200 —
@@ -180,11 +118,6 @@ against a real paid session). Findings the template generalisation must carry:
   migrations directory and `CREATE POLICY` has no `IF NOT EXISTS`; omitting the
   `DROP POLICY IF EXISTS` convention aborted a production deploy. Prove
   idempotency by applying the migration twice in one transaction.
-- **A deterministic fulfilment payload makes the success page instant.** The
-  redirect lands ~a minute before the webhook. Because the key derives from
-  (tier, email), a `session-fulfillment` endpoint can serve it from the paid
-  session directly — gate on `payment_status === 'paid'`, map Stripe's
-  `resource_missing` to 404, and treat the email as the durable copy.
 - **Verify the deployed surface, not the deploy exit code.** The first "live"
   claim was disproven by one curl: a known API route returned JSON while the
   new route returned the SPA shell — the running build predated the change.

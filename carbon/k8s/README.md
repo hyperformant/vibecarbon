@@ -1,6 +1,6 @@
 # Vibecarbon Kubernetes Deployment
 
-> **Note**: Kubernetes requires a Graphene subscription; Kubernetes HA requires Fullerene, which also covers Compose HA. Single-server Compose deploys run without a license. For the full deployment flow and provider options, see the [deployment guide](../content/docs/deployment.mdx) (rendered at `/docs/deployment`).
+> **Note**: For the full deployment flow and provider options, see the [deployment guide](../content/docs/deployment.mdx) (rendered at `/docs/deployment`).
 
 This directory contains Kubernetes manifests for deploying Vibecarbon with enterprise-grade autoscaling and high availability.
 

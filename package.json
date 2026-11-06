@@ -65,7 +65,7 @@
     "saas-starter",
     "starter-kit",
     "self-hosted",
-    "fair-source",
+    "open-source",
     "devops",
     "kubernetes",
     "docker-compose",
@@ -75,7 +75,7 @@
     "ai-guardrails"
   ],
   "author": "Brandon Powers",
-  "license": "FSL-1.1-MIT",
+  "license": "MIT",
   "homepage": "https://vibecarbon.com?utm_source=npm&utm_medium=listing&utm_campaign=launch2026",
   "repository": {
     "type": "git",

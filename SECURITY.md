@@ -34,8 +34,6 @@ Please include:
 
 - Infrastructure a user has modified after deployment, or third-party services
   (Hetzner, DigitalOcean, Stripe, Cloudflare) themselves.
-- The license gate. Enforcement is contractual, not technical (see `TERMS.md`);
-  bypassing it on your own machine is not a vulnerability.
 - Findings that require an already-compromised operator workstation or a
   deliberately weakened, non-default configuration.
 

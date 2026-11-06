@@ -21,7 +21,7 @@ import {
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 
-// User-facing surfaces — the "living docs" inventory, minus the two
+// User-facing surfaces — the "living docs" inventory, minus the
 // deliberate exemptions below.
 // LICENSE files exempt (legal text).
 //
@@ -30,18 +30,12 @@ const ROOT = join(import.meta.dirname, '..', '..', '..');
 //   this repo. A dated tracker's shipped-item entries are write-once
 //   historical record; sweeping one would either force rewriting history to
 //   sound current (wrong) or drown the census in false positives.
-// - carbon/content/docs/analytics.mdx (part of the carbon/content/** Tier-1
-//   entry): its one "open source" hit describes third-party Plausible
-//   Analytics, not Vibecarbon — true, unrelated to the Fair Source/FSL ban.
-//   carbon/content/** isn't swept as a blanket glob for the same reason:
-//   it's the generated project's own docs, which routinely describe
-//   third-party tools by their real licensing. The one ban that does reach
-//   it — named-framework compliance — is pinned by its own targeted check
-//   below, so the whole-file exemption doesn't leave that family unguarded.
+// - carbon/content/**: swept by the targeted checks below, not as a blanket
+//   glob. It is the generated project's own docs, which routinely describe
+//   third-party tools by their real licensing.
 const SURFACES = [
   'README.md',
   'FEATURES.md',
-  'TERMS.md',
   'AGENTS.md',
   'carbon/AGENTS.md',
   'docs/technical.md',
@@ -115,7 +109,7 @@ function surfacesAndLocales(): Array<[string, string]> {
 }
 
 // matchAll -> ±60-char context snippets, the file's established failure-
-// reporting convention (see the "open source" ban above) — reused by every
+// reporting convention — reused by every
 // Task 8 assertion below so a failure shows the offending sentence, not just
 // a filename.
 function contextHits(text: string, pattern: RegExp): string[] {
@@ -185,27 +179,6 @@ function _extractLaunchAssetsGrid(text: string): Record<string, Set<string>> {
 }
 
 describe('terminology census', () => {
-  it('never brands the project "open source" (Fair Source / FSL only)', () => {
-    // The old "becomes MIT open source two years after publication" sentence
-    // was rewritten (Task 6) to "converts to the MIT license two years after
-    // publication" so this ban needs no license-sentence carve-out. LICENSE
-    // files stay exempt by not being in SURFACES. Single exception, same as
-    // the locale guard below (2026-08-14 pillar copy): exactly "Open Source
-    // Templates" — the carbon template genuinely ships MIT, and the Grounded
-    // pillar quotes it verbatim wherever the strip appears. Claims-registry
-    // rule 5 records the exception.
-    for (const rel of SURFACES) {
-      // These docs hard-wrap prose, so the phrase can straddle a line break
-      // ("open\nsource") and slip past a line-local match — normalize
-      // whitespace first, the same way the launch-assets check below does.
-      const text = read(rel).replace(/\s+/g, ' ');
-      const hits = [...text.matchAll(/open[- ]source(?:[- ]templates?)?/gi)]
-        .filter((m) => !/templates?$/i.test(m[0]))
-        .map((m) => text.slice(Math.max(0, (m.index ?? 0) - 60), (m.index ?? 0) + 60));
-      expect(hits, `${rel}: ${hits.join(' | ')}`).toEqual([]);
-    }
-  });
-
   it('never mentions the retired Diamond tier', () => {
     for (const rel of SURFACES) {
       expect(read(rel)).not.toMatch(/\bDiamond\b/);
@@ -308,98 +281,59 @@ describe('terminology census', () => {
     }
   });
 
-  it('tier naming is Graphite / Graphene / Fullerene, never Agency, where tiers appear', () => {
-    const readme = read('README.md');
-    expect(readme).toMatch(/Graphite/);
-    expect(readme).toMatch(/Graphene/);
-    expect(readme).toMatch(/Fullerene/);
+  it('never mentions the retired Diamond or Agency tiers', () => {
     for (const rel of SURFACES) {
       expect(read(rel), `${rel}: Agency`).not.toMatch(/\bAgency\b/);
     }
-    // The locale FAQ (not the template's own SaaS pricing cards, which
-    // legitimately reuse tier-shaped placeholder copy for the demo product.
-    // see the pricing-object carve-out in the file-level comment above)
-    // states Vibecarbon's own license model and must not resurrect Agency.
     for (const f of LOCALE_FILES) {
-      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
-      const faqText = JSON.stringify(json.landing?.faq ?? json.faq ?? {});
-      expect(faqText, `locales/${f} faq: Agency`).not.toMatch(/\bAgency\b/);
+      const text = readFileSync(join(LOCALE_DIR, f), 'utf-8');
+      expect(text, `locales/${f}: Agency`).not.toMatch(/\bAgency\b/);
     }
   });
 
-  it('the template locale carries no retired tier names, FSL / Fair Source, or per-project price language', () => {
-    // The whole `landing` object, not only its FAQ: the homepage cards,
-    // pillars and footer all speak for Vibecarbon. (The app's own billing
-    // strings elsewhere in the file describe the user's customers.)
-    const pattern =
-      /graphite|graphene|fullerene|\bFSL\b|fair[ -]source|per-project subscription|per project per (month|year)|\$\d/gi;
-    for (const f of LOCALE_FILES) {
-      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
-      const landing = JSON.stringify(json.landing ?? {});
-      const hits = contextHits(landing, pattern);
-      expect(hits, `locales/${f} landing: ${hits.join(' | ')}`).toEqual([]);
-    }
-  });
-
-  it('per-project subscription prices ($19 Graphene, $39 Fullerene) are stated in README and TERMS', () => {
-    for (const rel of ['README.md', 'TERMS.md']) {
-      const text = read(rel);
-      expect(text, `${rel}: $19 per project`).toMatch(/\$19 per project per month/);
-      expect(text, `${rel}: $39 per project`).toMatch(/\$39 per project per month/);
-    }
-  });
-
-  it('the three tier taglines appear verbatim in README and TERMS', () => {
-    for (const rel of ['README.md', 'TERMS.md']) {
-      const text = read(rel);
-      expect(text, `${rel}: Go live.`).toContain('Go live.');
-      expect(text, `${rel}: Scale on demand.`).toContain('Scale on demand.');
-      expect(text, `${rel}: Enterprise resiliency.`).toContain('Enterprise resiliency.');
-    }
-  });
-
-  it('never says "paid-through" or "release published", terms the deploy-time check replaced', () => {
+  it('carries no retired tier names, FSL / Fair Source, or per-project price language', () => {
+    // Vibecarbon is MIT with no tiers and no subscription. Every doc surface,
+    // the generated project's own docs and the whole template locale stay
+    // clear of the retired model. (The app's own billing strings in the
+    // locale describe the user's customers, so the price pattern is scoped
+    // to the `landing` object.)
     const mdxDir = join(ROOT, 'carbon', 'content', 'docs');
     const mdxFiles = readdirSync(mdxDir)
       .filter((f) => f.endsWith('.mdx'))
       .map((f) => join('carbon', 'content', 'docs', f));
-    const pattern = /paid-through|release published/gi;
+    const retired = /graphite|graphene|fullerene|\bFSL\b|fair[ -]source/gi;
+    for (const rel of [...SURFACES, ...mdxFiles]) {
+      const hits = contextHits(read(rel), retired);
+      expect(hits, `${rel}: ${hits.join(' | ')}`).toEqual([]);
+    }
+    const price = /per-project subscription|per project per (month|year)|\$\d/gi;
+    for (const f of LOCALE_FILES) {
+      const raw = readFileSync(join(LOCALE_DIR, f), 'utf-8');
+      const hitsRetired = contextHits(raw, retired);
+      expect(hitsRetired, `locales/${f}: ${hitsRetired.join(' | ')}`).toEqual([]);
+      const landing = JSON.stringify(JSON.parse(raw).landing ?? {});
+      const hitsPrice = contextHits(landing, price);
+      expect(hitsPrice, `locales/${f} landing: ${hitsPrice.join(' | ')}`).toEqual([]);
+    }
+  });
+
+  it('never promises the license lasts: no "free forever", "forever free" or "always free"', () => {
+    const mdxDir = join(ROOT, 'carbon', 'content', 'docs');
+    const mdxFiles = readdirSync(mdxDir)
+      .filter((f) => f.endsWith('.mdx'))
+      .map((f) => join('carbon', 'content', 'docs', f));
+    const pattern = /free\s+forever|forever\s+free|always\s+free/gi;
     for (const rel of [...SURFACES, ...mdxFiles]) {
       const hits = contextHits(read(rel), pattern);
       expect(hits, `${rel}: ${hits.join(' | ')}`).toEqual([]);
     }
     for (const f of LOCALE_FILES) {
-      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
-      const faqText = JSON.stringify(json.landing?.faq ?? json.faq ?? {});
-      const hits = contextHits(faqText, pattern);
-      expect(hits, `locales/${f} faq: ${hits.join(' | ')}`).toEqual([]);
+      const hits = contextHits(readFileSync(join(LOCALE_DIR, f), 'utf-8'), pattern);
+      expect(hits, `locales/${f}: ${hits.join(' | ')}`).toEqual([]);
     }
   });
 
-  it('never claims only provisioning a new environment is gated, or that every existing environment is free', () => {
-    // The deploy-time check runs on every deploy to a paid mode, redeploy
-    // included (see entitlement.js/index.js). These phrasings all describe
-    // the retired "only provisioning is gated" model and must not survive
-    // in prose anywhere the docs describe what's checked.
-    const mdxDir = join(ROOT, 'carbon', 'content', 'docs');
-    const mdxFiles = readdirSync(mdxDir)
-      .filter((f) => f.endsWith('.mdx'))
-      .map((f) => join('carbon', 'content', 'docs', f));
-    const pattern =
-      /only provisioning|provisioning a new [^.]{0,60}(requires|needs)|only when provisioning|free on every existing environment/gi;
-    for (const rel of [...SURFACES, ...mdxFiles]) {
-      const hits = contextHits(read(rel), pattern);
-      expect(hits, `${rel}: ${hits.join(' | ')}`).toEqual([]);
-    }
-    for (const f of LOCALE_FILES) {
-      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
-      const faqText = JSON.stringify(json.landing?.faq ?? json.faq ?? {});
-      const hits = contextHits(faqText, pattern);
-      expect(hits, `locales/${f} faq: ${hits.join(' | ')}`).toEqual([]);
-    }
-  });
-
-  it('retired one-time/legacy pricing language ("one-time", "$149", "retail $299") never appears in SURFACES or the locale FAQ', () => {
+  it('retired one-time/legacy pricing language ("one-time", "$149", "retail $299") never appears in SURFACES', () => {
     const patterns: Array<[string, RegExp]> = [
       ['one-time', /one-time/i],
       ['$149', /\$149\b/],
@@ -408,17 +342,6 @@ describe('terminology census', () => {
     for (const rel of SURFACES) {
       for (const [label, pattern] of patterns) {
         expect(read(rel), `${rel}: ${label}`).not.toMatch(pattern);
-      }
-    }
-    // Scoped to the FAQ, not the whole locale file: the template's own SaaS
-    // pricing cards (carbon/src/client/locales/en.json's "pricing" object)
-    // are a separate, deliberately untouched surface. The generated app's
-    // own demo product copy, not a statement of Vibecarbon's license model.
-    for (const f of LOCALE_FILES) {
-      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
-      const faqText = JSON.stringify(json.landing?.faq ?? json.faq ?? {});
-      for (const [label, pattern] of patterns) {
-        expect(faqText, `locales/${f} faq: ${label}`).not.toMatch(pattern);
       }
     }
   });
@@ -665,13 +588,12 @@ describe('terminology census', () => {
     expect(read('FEATURES.md')).toContain(message);
   });
 
-  it('carbon/src file text never carries the open-source/Diamond/reference-provider/pivot/metal-ownership/composed-claim/named-framework banned terms', () => {
+  it('carbon/src file text never carries the Diamond/reference-provider/pivot/metal-ownership/composed-claim/named-framework banned terms', () => {
     const carbonSrcRoot = join(ROOT, 'carbon', 'src');
     const files = walkTsFiles(carbonSrcRoot);
     expect(files.length).toBeGreaterThan(100); // sanity: the walk actually found the tree
 
     const patterns: Array<[string, RegExp]> = [
-      ['open source', /open[- ]source/gi],
       ['Diamond', /\bDiamond\b/g],
       ['reference provider', /reference[- ]provider/gi],
       ['servers you own', /servers? you own/gi],

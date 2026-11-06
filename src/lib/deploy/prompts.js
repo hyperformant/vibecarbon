@@ -84,9 +84,9 @@ const MODE_OPTION_TIER = {
 };
 
 // Compose HA is a fully supported deploy mode (existing environments keep
-// working, `-mode compose-ha` still resolves, the e2e matrix still runs it) but it is no longer RECOMMENDED:
-// Kubernetes HA is the HA answer we lead with, so the picker hides Compose
-// HA wherever Kubernetes HA is on offer.
+// working, `-mode compose-ha` still resolves, the e2e matrix still runs it)
+// but it is no longer RECOMMENDED: Kubernetes HA is the HA answer we lead
+// with, so the picker hides Compose HA wherever Kubernetes HA is on offer.
 //
 // "Wherever" is per provider, not global. Vultr and Scaleway declare
 // SUPPORTED_TIERS = ['compose', 'compose-ha'] (no Kubernetes tiers built

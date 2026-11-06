@@ -1,7 +1,7 @@
 /**
  * Unit tests for lib/deploy/prompts.js resolveDeployMode — the decision that
- * routes a deploy into compose / compose-ha / kubernetes / kubernetes-ha and
- * therefore which license gate fires. The non-interactive branches are pure;
+ * routes a deploy into compose / compose-ha / kubernetes / kubernetes-ha. The
+ * non-interactive branches are pure;
  * the interactive branch is exercised through a mocked clack select.
  */
 
