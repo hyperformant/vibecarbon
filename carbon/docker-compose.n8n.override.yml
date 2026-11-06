@@ -17,3 +17,12 @@ services:
       - "traefik.http.routers.n8n.entrypoints=web"
       - "traefik.http.routers.n8n.middlewares="
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+
+  # Dev only (this file is never deployed): the documented dev login is the
+  # admin email with the password "changeme". Compose reads "$$" as a literal
+  # "$", so the bcrypt hash below is written with every "$" doubled. Without
+  # this variable setup.sh stores a random password nobody knows, which is what
+  # every production deploy gets.
+  n8n-setup:
+    environment:
+      - N8N_ADMIN_PASSWORD_HASH=$$2a$$10$$HuKPNCaZ0UnhGFhLC1wMZ.e.1dpHzQ4eY84AWxGVTINMGnzDx8awy
