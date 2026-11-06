@@ -521,22 +521,13 @@ export const TRAEFIK_MIRROR = {
   digest: 'sha256:e15b8921020b4fd81de5746b170dfceec221d2450711449f6427e4692881511a',
   index: 'sha256:92627e6a99f71b8e46634acea28130b9f14bec5d9887ad15161007e1b652afe1',
 };
-/**
- * compose prod's two socket proxies (traefik's and the app's).
- *
- * Held on 0.4.x, and mirror-drift's holdFor knows it. v0.5.0 moves to HAProxy
- * 3.4, and Tecnativa/docker-socket-proxy#180 reports /version hanging behind
- * it, the call a Docker client makes first. That issue is still open. Traefik
- * routed fine through 0.5.0 on Docker 29 here, so this is caution about a bug
- * nobody has explained, and closing the issue lifts the hold.
- * @type {MirroredImage}
- */
+/** @type {MirroredImage} compose prod's two socket proxies (traefik's and the app's) */
 export const DOCKER_SOCKET_PROXY_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
   repo: 'tecnativa/docker-socket-proxy',
-  tag: 'v0.4.2',
-  digest: 'sha256:bd2241b3bec83abcff25927a0a7ae518e0c5bef624b3cc247dcb31e68b53f417',
-  index: 'sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476',
+  tag: 'v0.5.0',
+  digest: 'sha256:753044cb0851ce53ab44c2504872ff02ae37be9c294fa8abea3754074e61eab4',
+  index: 'sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459',
 };
 /** @type {MirroredImage} DO CSI's automount-udev-deleter init container */
 export const ALPINE_MIRROR = {

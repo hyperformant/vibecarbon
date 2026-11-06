@@ -691,11 +691,8 @@ describe('publish workflow mirrors exactly the set', () => {
         expect(holdFor(image, k3s)?.allows('v99.0.0')).toBe(false);
     }
     expect(holdFor(TRAEFIK_MIRROR, k3s)).toBeNull();
-    // v0.5.0 breaks the /version call Traefik's Docker provider makes.
-    const proxy = holdFor(DOCKER_SOCKET_PROXY_MIRROR, k3s);
-    expect(proxy?.reason).toContain('docker-socket-proxy#180');
-    expect(proxy?.allows('v0.4.3')).toBe(true);
-    expect(proxy?.allows('v0.5.0')).toBe(false);
+    // No named break holds the socket proxy back, so it floats like Traefik.
+    expect(holdFor(DOCKER_SOCKET_PROXY_MIRROR, k3s)).toBeNull();
     const none = renderReport([
       { upstream: 'docker.io/library/traefik', pinned: 'v3.6.11', newer: [], hold: null },
     ]);
