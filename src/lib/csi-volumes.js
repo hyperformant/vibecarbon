@@ -30,10 +30,10 @@
  * id, attached or not. Capturing that list while the API server is still up
  * turns a heuristic into an identity.
  *
- * WHAT THE DRIVERS ACTUALLY GIVE US (verified 2026-08-05, versions as pinned
- * by carbon/cloud-init/k3s/{master,do-master}-init.sh):
+ * WHAT THE DRIVERS ACTUALLY GIVE US (verified 2026-08-05, re-read at the versions
+ * pinned by carbon/cloud-init/k3s/{master,do-master}-init.sh on 2026-11-05):
  *
- *   hcloud csi-driver v2.18.1 (`csi.hetzner.cloud`)
+ *   hcloud csi-driver v2.24.1 (`csi.hetzner.cloud`)
  *     - `spec.csi.volumeHandle` = the Hetzner volume id as a STRING
  *       (`VolumeId: strconv.FormatInt(volume.ID, 10)`), so it must be compared
  *       to `volume.id` (a NUMBER over the wire) by string key — see idKey() in
@@ -46,8 +46,7 @@
  *       `HCLOUD_VOLUME_EXTRA_LABELS` parsed to (master-init.sh sets
  *       `project=<name>`), and adds `pvc-name` / `pvc-namespace` / `pv-name`
  *       from the CreateVolume parameters csi-provisioner supplies under
- *       `--extra-create-metadata` (cmd/main.go:128 ->
- *       internal/driver/controller.go:87-118).
+ *       `--extra-create-metadata` (internal/driver/controller.go).
  *       HISTORY, because the fix reads oddly without it: that env-var line was
  *       added by the 2026-07-18 RCA and was a NO-OP for the next three weeks.
  *       Upstream only added volume labelling in v2.14.0 ("allow to set labels
@@ -57,7 +56,7 @@
  *       in all three occurrences above was unlabelled — the label matches in
  *       destroy.js were wired against a driver that could not stamp them.
  *
- *   csi-digitalocean v4.17.0 (`dobs.csi.digitalocean.com`)
+ *   csi-digitalocean v4.19.0 (`dobs.csi.digitalocean.com`)
  *     - `spec.csi.volumeHandle` = the DO volume UUID (string).
  *     - topology segment key `region` (CreateVolume returns
  *       `Segments: {"region": d.region}`).

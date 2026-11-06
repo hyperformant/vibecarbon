@@ -11,8 +11,8 @@ import {
  * from the cluster's own PersistentVolumes while the API server is still up.
  *
  * Fixtures below are the real wire shapes of the two drivers this repo pins
- * (hcloud csi-driver v2.18.1 via carbon/cloud-init/k3s/master-init.sh,
- * csi-digitalocean v4.17.0 via do-master-init.sh) — including the details that
+ * (hcloud csi-driver v2.24.1 via carbon/cloud-init/k3s/master-init.sh,
+ * csi-digitalocean v4.19.0 via do-master-init.sh) — including the details that
  * actually bite: Hetzner's volumeHandle is the numeric volume id rendered as a
  * STRING, and its topology key is `csi.hetzner.cloud/location` while DO's is a
  * bare `region`. Both survived the v2.9.0 -> v2.18.1 bump verbatim
@@ -91,7 +91,7 @@ const doPv = (name: string, handle: string, region = 'nyc3') => ({
 const PVC_A = 'pvc-1c3f8b2a-4d5e-4f60-9a1b-2c3d4e5f6071';
 const PVC_B = 'pvc-2d4e9c3b-5e6f-4071-8b2c-3d4e5f607182';
 
-describe('parseCsiPersistentVolumes — hcloud csi-driver v2.18.1 fixtures', () => {
+describe('parseCsiPersistentVolumes — hcloud csi-driver v2.24.1 fixtures', () => {
   it('extracts the numeric Hetzner volume id from spec.csi.volumeHandle as a string', () => {
     const { volumes } = parseCsiPersistentVolumes({
       items: [hetznerPv(PVC_A, '100604631')],
@@ -129,7 +129,7 @@ describe('parseCsiPersistentVolumes — hcloud csi-driver v2.18.1 fixtures', () 
   });
 });
 
-describe('parseCsiPersistentVolumes — csi-digitalocean v4.17.0 fixtures', () => {
+describe('parseCsiPersistentVolumes — csi-digitalocean v4.19.0 fixtures', () => {
   it('extracts the DO volume UUID and the bare `region` topology key', () => {
     const { volumes } = parseCsiPersistentVolumes({
       items: [doPv(PVC_A, 'e2ba5a3c-c714-11e8-bc0c-0a58ac14421e', 'sfo3')],

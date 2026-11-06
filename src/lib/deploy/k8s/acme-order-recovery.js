@@ -26,7 +26,7 @@
  * the re-fetched order is "valid" (pkg/controller/acmeorders/sync.go) — a
  * "processing" order falls through to the generic 4xx branch and the Order
  * is marked Errored, which is TERMINAL. Upstream tracks this as
- * cert-manager#8960 / PR#8968; neither is merged as of v1.20.2, the version
+ * cert-manager#8960 / PR#8968; neither is merged as of v1.21.3, the version
  * we pin.
  *
  * WHY WAITING DOESN'T HELP: cert-manager does eventually retry, but the

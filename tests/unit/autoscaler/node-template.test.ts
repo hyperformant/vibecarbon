@@ -1,10 +1,8 @@
-import { join } from 'node:path';
-import protobuf from 'protobufjs';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error — JS module without types
 import { buildTemplateNode } from '../../../src/autoscaler/node-template.js';
 // @ts-expect-error — JS module without types
-import { PROTO_DIR } from '../../../src/autoscaler/proto.js';
+import { loadNodeType } from '../../../src/autoscaler/proto.js';
 
 type Quantity = { string: string };
 
@@ -178,21 +176,6 @@ describe('buildTemplateNode', () => {
   // Type#verify() reports a shape problem here, the BUILDER is wrong —
   // never relax this test to work around a verify() failure.
   describe('round-trips through the vendored k8s.io.api.core.v1.Node proto', () => {
-    function loadNodeType() {
-      const root = new protobuf.Root();
-      // generated.proto's import statements are all full `k8s.io/...`
-      // paths (verified against every file in the vendored tree) —
-      // resolve them against PROTO_DIR rather than protobufjs's default
-      // origin-relative resolution, which would look for a nested
-      // `k8s.io/api/core/v1/k8s.io/...` directory that doesn't exist.
-      root.resolvePath = (origin: string, target: string) =>
-        target.startsWith('k8s.io/')
-          ? join(PROTO_DIR, target)
-          : protobuf.util.path.resolve(origin, target);
-      root.loadSync(join(PROTO_DIR, 'k8s.io/api/core/v1/generated.proto'), { keepCase: true });
-      return root.lookupType('k8s.io.api.core.v1.Node');
-    }
-
     it('verify() accepts the built node with no shape errors', () => {
       const NodeType = loadNodeType();
       const node = buildTemplateNode({

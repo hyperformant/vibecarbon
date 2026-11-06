@@ -27,11 +27,12 @@ describe('externalgrpc proto vendoring', () => {
     expect(methods).toHaveLength(15);
   });
 
-  it('is the <=1.34 contract: TemplateNodeInfo response embeds nodeInfo (no nodeBytes)', () => {
+  it('is the >=1.35 contract: TemplateNodeInfo response carries nodeBytes (no nodeInfo)', () => {
     const { CloudProvider } = loadExternalGrpcDefinition();
     const respType = CloudProvider.service.NodeGroupTemplateNodeInfo.responseType.type;
     const fieldNames = respType.field.map((f: { name: string }) => f.name);
-    expect(fieldNames).toContain('nodeInfo');
-    expect(fieldNames).not.toContain('nodeBytes');
+    expect(fieldNames).toContain('nodeBytes');
+    expect(fieldNames).toContain('resourceSliceBytes');
+    expect(fieldNames).not.toContain('nodeInfo');
   });
 });

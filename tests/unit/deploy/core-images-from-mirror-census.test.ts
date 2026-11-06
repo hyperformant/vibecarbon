@@ -319,20 +319,20 @@ describe('core-path images come from our ghcr mirror', () => {
 describe('k3s system images come from the mirror (ruling D3)', () => {
   /**
    * The system images k3s itself pulls, from the k3s-images.txt asset of the
-   * pinned release (https://github.com/k3s-io/k3s/releases, v1.31.5+k3s1,
-   * fetched 2026-10-22). traefik/klipper-helm (helm-controller's traefik
+   * pinned release (https://github.com/k3s-io/k3s/releases, v1.37.2+k3s1,
+   * fetched 2026-11-05). traefik/klipper-helm (helm-controller's traefik
    * chart, `--disable traefik`) and klipper-lb (`--disable servicelb`) are
    * never pulled on our clusters and are not mirrored. The local-path helper
    * busybox is mirrored: through the alias there is no Docker Hub fallback.
    */
   const K3S_IMAGES_TXT = {
-    version: 'v1.31.5+k3s1',
+    version: 'v1.37.2+k3s1',
     mirrored: [
-      'docker.io/rancher/local-path-provisioner:v0.0.30',
-      'docker.io/rancher/mirrored-coredns-coredns:1.12.0',
-      'docker.io/rancher/mirrored-library-busybox:1.36.1',
-      'docker.io/rancher/mirrored-metrics-server:v0.7.2',
-      'docker.io/rancher/mirrored-pause:3.6',
+      'docker.io/rancher/local-path-provisioner:v0.0.37',
+      'docker.io/rancher/mirrored-coredns-coredns:1.14.7',
+      'docker.io/rancher/mirrored-library-busybox:1.37.0',
+      'docker.io/rancher/mirrored-metrics-server:v0.9.0',
+      'docker.io/rancher/mirrored-pause:3.10.2',
     ],
   };
   const SNIPPET = 'carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml';
@@ -441,7 +441,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
       expect(forbiddenMirrors(doc.mirrors)).toEqual([]);
       // No fallback to a mirrored registry's own host, not even the alias's
       // DNS lookup: the flag sits on the one k3s install line (server or agent;
-      // both accept it in v1.31, pkg/cli/cmds/agent.go and server.go).
+      // both accept it in v1.37, `k3s server --help` and `k3s agent --help`).
       const install = script.match(/sh -s - (?:server|agent) \\\n([\s\S]*?); then/)?.[1] ?? '';
       expect(install).toContain('--disable-default-registry-endpoint \\');
       // Only one registries.yaml write per script, and no other mirror config.

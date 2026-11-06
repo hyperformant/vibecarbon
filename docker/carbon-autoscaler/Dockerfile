@@ -8,7 +8,7 @@ WORKDIR /app
 # lazy-import @pulumi inside method bodies, never at import time; undici is
 # fetch-retry's HTTP client). Versions pinned to root package.json — the
 # image-ref drift test asserts parity.
-RUN npm install --no-save --omit=dev @grpc/grpc-js@^1.14.4 @grpc/proto-loader@^0.8.1 undici@^8.12.4 @clack/prompts@^1.6.0 \
+RUN npm install --no-save --omit=dev @grpc/grpc-js@^1.14.4 @grpc/proto-loader@^0.8.1 protobufjs@^8.8.0 undici@^8.12.4 @clack/prompts@^1.6.0 \
     && addgroup -S carbon && adduser -S carbon -G carbon
 COPY src/autoscaler/ ./src/autoscaler/
 COPY src/lib/ ./src/lib/

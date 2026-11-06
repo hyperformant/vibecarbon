@@ -251,7 +251,7 @@ describe('cert-manager controller leader', () => {
       return { exec, calls };
     }
 
-    it('reads the v1.20 default lease, the controller Deployment and its ReplicaSets', async () => {
+    it('reads the default lease, the controller Deployment and its ReplicaSets', async () => {
       const { exec, calls } = cluster({
         deployment: dep(),
         replicaSets: [OLD_RS, NEW_RS],

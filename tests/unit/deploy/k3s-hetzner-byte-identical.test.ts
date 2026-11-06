@@ -44,6 +44,9 @@
  * update/install and the `_m a` mark, and asks for its private-NIC lease at the
  * first retry instead of the sixth; the embedded `cloudInit` diff is confined
  * to those lines.
+ *
+ * RE-CAPTURED 2026-11-05 (Kubernetes 1.37): the k3s version in the embedded
+ * worker script, nothing else.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -92,7 +95,7 @@ describe('M3 Task 2 — Hetzner byte-identical pin', () => {
     const expected = JSON.stringify(fixture, null, 2);
 
     const args = {
-      k3sVersion: 'v1.31.5+k3s1',
+      k3sVersion: 'v1.37.2+k3s1',
       k3sToken: 'deadbeefcafe1234567890abcdef',
       clusterName: 'acme-prod',
       environment: 'prod',

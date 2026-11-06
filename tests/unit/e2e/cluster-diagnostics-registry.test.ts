@@ -1,7 +1,7 @@
 /**
  * The failure bundle must capture the in-cluster registry's own logs.
  *
- * `local-registry` is `registry:2` with an S3 storage backend. When that
+ * `local-registry` is the registry image with an S3 storage backend. When that
  * backend errors, the registry answers `docker push` with HTTP 500 — but its
  * readiness probe hits `/v2/`, which keeps succeeding. The pod therefore stays
  * `1/1 Running` throughout, and the bundle's log collector only dumps logs for

@@ -96,6 +96,7 @@
     "@pulumi/pulumi": "^3.260.0",
     "@pulumiverse/scaleway": "^1.61.1",
     "opentype.js": "^2.0.0",
+    "protobufjs": "^8.8.0",
     "undici": "^8.12.4",
     "which": "^7.0.0"
   },
@@ -127,7 +128,6 @@
     "dotenv-expand": "^1000.0.0",
     "js-yaml": "^5.4.1",
     "playwright-core": "^1.61.1",
-    "protobufjs": "^8.8.0",
     "semantic-release": "^25.0.8",
     "tsx": "^4.22.4",
     "typescript": "^7.0.2",

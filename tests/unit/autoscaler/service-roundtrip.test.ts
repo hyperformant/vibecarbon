@@ -22,9 +22,18 @@ import grpc from '@grpc/grpc-js';
 import protoLoader from '@grpc/proto-loader';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — JS module without types
-import { loadExternalGrpcDefinition, PROTO_DIR } from '../../../src/autoscaler/proto.js';
+import {
+  loadExternalGrpcDefinition,
+  loadNodeType,
+  PROTO_DIR,
+} from '../../../src/autoscaler/proto.js';
 // @ts-expect-error — JS module without types
 import { startServer } from '../../../src/autoscaler/server.js';
+
+const decodeNode = (bytes: Buffer) => {
+  const Node = loadNodeType();
+  return Node.toObject(Node.decode(bytes), { defaults: false });
+};
 
 // ── fixtures ────────────────────────────────────────────────────────────
 
@@ -261,7 +270,13 @@ describe('carbon-autoscaler externalgrpc service round-trip', () => {
   it('NodeGroupTemplateNodeInfo response decodes through real grpc serialization — allocatable.pods.string === "110"', async () => {
     await withServer({}, async ({ client }) => {
       const response = await call(client, 'NodeGroupTemplateNodeInfo', { id: 'worker-pool' });
-      expect(response.nodeInfo.status.allocatable.pods.string).toBe('110');
+      // CA hands these bytes straight to Go's v1.Node.Unmarshal, so they are a
+      // bare k8s Node message: no runtime.Unknown wrapper, no k8s magic prefix.
+      expect(Buffer.isBuffer(response.nodeBytes)).toBe(true);
+      const node = decodeNode(response.nodeBytes);
+      expect(node.status.allocatable.pods.string).toBe('110');
+      expect(node.metadata.labels['kubernetes.io/os']).toBe('linux');
+      expect(response.resourceSliceBytes).toEqual([]);
     });
   });
 
@@ -270,11 +285,11 @@ describe('carbon-autoscaler externalgrpc service round-trip', () => {
       'PricingNodePrice',
       {
         node: { providerID: 'testprov://1', name: 'n', labels: {}, annotations: {} },
-        startTime: {},
-        endTime: {},
+        startTimestamp: {},
+        endTimestamp: {},
       },
     ],
-    ['PricingPodPrice', { pod: {}, startTime: {}, endTime: {} }],
+    ['PricingPodPrice', { pod_bytes: Buffer.alloc(0), startTimestamp: {}, endTimestamp: {} }],
     ['NodeGroupGetOptions', { id: 'worker-pool', defaults: {} }],
   ])('%s returns UNIMPLEMENTED', async (method, request) => {
     await withServer({}, async ({ client }) => {

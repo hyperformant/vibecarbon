@@ -101,12 +101,12 @@ describe('cluster-autoscaler deployment.yaml — CA container swap', () => {
 
   it('CA container VERSION pin unchanged — only the registry host moved', () => {
     const ca = containerNamed('cluster-autoscaler');
-    // v1.32.7 is still v1.32.7: the ghcr ref is a digest-preserving mirror of
+    // The ghcr ref is a digest-preserving mirror of
     // the upstream image, made because registry.k8s.io 403s Hetzner IP ranges
     // (incident 2026-07-31 — see the block in src/lib/images.js). The exact
     // literal value of the ref is pinned in tests/unit/autoscaler/image-ref.test.ts.
     expect(ca.image).toBe(clusterAutoscalerImageRef());
-    expect(ca.image).toContain(':v1.32.7');
+    expect(ca.image).toContain(':v1.37.0');
     expect(ca.imagePullPolicy).toBe('IfNotPresent');
     expect(ca.command).toEqual(['./cluster-autoscaler']);
   });
@@ -310,7 +310,10 @@ describe('cluster-autoscaler kustomization.yaml', () => {
   });
 });
 
-describe('cluster-autoscaler rbac.yaml — untouched', () => {
+describe('cluster-autoscaler rbac.yaml', () => {
+  // biome-ignore lint/suspicious/noExplicitAny: parsed YAML, shapes asserted per test
+  const rbacDocs = loadYamlAll(readFileSync(RBAC_PATH, 'utf8')) as any[];
+
   it('still parses into the same SA/ClusterRole/ClusterRoleBinding/Role/RoleBinding docs', () => {
     const raw = readFileSync(RBAC_PATH, 'utf8');
     interface K8sRbacDoc {
@@ -333,10 +336,35 @@ describe('cluster-autoscaler rbac.yaml — untouched', () => {
     expect(docs[0].metadata.namespace).toBe('kube-system');
   });
 
-  // CA 1.32 links the kube 1.32 scheduler framework, whose CSI-limits plugin
-  // starts a VolumeAttachment informer — without the grant every CA pod loops
-  // on `volumeattachments.storage.k8s.io is forbidden` (observed live on the
-  // M3 rig). Verb set mirrors upstream's own chart
+  // CA 1.37's FAQ lists --enable-dynamic-resource-allocation as locked to true,
+  // so it watches the DRA objects on every cluster. Without these grants its
+  // informers loop on `forbidden` and it never finishes starting. Rules taken
+  // from the chart at cluster-autoscaler-1.37.0
+  // (cluster-autoscaler/charts/cluster-autoscaler/templates/clusterrole.yaml).
+  it.each([
+    ['resource.k8s.io', 'resourceslices', ['watch', 'list', 'get']],
+    ['resource.k8s.io', 'deviceclasses', ['watch', 'list', 'get']],
+    ['resource.k8s.io', 'resourceclaims', ['watch', 'list', 'get']],
+    ['', 'podtemplates', ['get', 'list', 'watch']],
+    ['apps', 'deployments', ['watch', 'list', 'get']],
+    ['', 'configmaps', ['list', 'watch', 'get']],
+  ])('grants what CA 1.37 reads: %s %s', (group, resource, verbs) => {
+    const clusterRole = rbacDocs.find((doc) => doc.kind === 'ClusterRole');
+    const granted = clusterRole.rules
+      .filter(
+        (rule: { apiGroups: string[]; resources: string[]; resourceNames?: string[] }) =>
+          rule.apiGroups.includes(group) &&
+          rule.resources.includes(resource) &&
+          !rule.resourceNames,
+      )
+      .flatMap((rule: { verbs: string[] }) => rule.verbs);
+    expect(granted).toEqual(expect.arrayContaining(verbs));
+  });
+
+  // The kube scheduler framework CA links has a CSI-limits plugin that starts a
+  // VolumeAttachment informer — without the grant every CA pod loops on
+  // `volumeattachments.storage.k8s.io is forbidden` (observed live on the M3
+  // rig). Verb set mirrors upstream's own chart
   // (charts/cluster-autoscaler/templates/clusterrole.yaml @
   // cluster-autoscaler-chart-9.50.1).
   it('grants watch/list/get on volumeattachments in the storage.k8s.io rule', () => {

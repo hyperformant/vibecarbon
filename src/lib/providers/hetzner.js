@@ -438,12 +438,12 @@ export class HetznerProvider extends BaseProvider {
     csiControllerSelector:
       'app.kubernetes.io/component=controller,app.kubernetes.io/name=hcloud-csi',
     ccmDeployment: 'hcloud-cloud-controller-manager',
-    ccmSelector: 'app.kubernetes.io/name=hcloud-cloud-controller-manager',
+    ccmSelector: 'app=hcloud-cloud-controller-manager',
     networkEnvVar: 'HCLOUD_NETWORK',
   };
 
   /**
-   * StorageClass name Hetzner's hcloud-csi driver (v2.18.1, installed by
+   * StorageClass name Hetzner's hcloud-csi driver (installed by
    * master-init.sh) creates by default. Value verified live — this is what
    * `services/observability/k8s/{loki,grafana,prometheus}-pvc.yaml` and
    * `services/n8n/k8s/pvc.yaml`'s `storageClassName: {{K8S_STORAGE_CLASS}}`

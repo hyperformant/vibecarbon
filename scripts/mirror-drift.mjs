@@ -12,9 +12,8 @@
  *
  * CEILINGS (`holdFor`): some newer tags must not be taken, and listing them
  * would keep the issue open forever. alpine/k8s stays within one minor of
- * K3S_VERSION (kubectl's skew policy); registry stays on 2.x (3 changed the
- * config format); cluster-autoscaler stays on its minor (it tracks the
- * Kubernetes minor); k3s system images move only with K3S_VERSION, and CSI
+ * K3S_VERSION (kubectl's skew policy); cluster-autoscaler stays on its minor
+ * (it tracks the Kubernetes minor); k3s system images move only with K3S_VERSION, and CSI
  * sidecars only with the CSI driver release, so neither is listed. Held
  * entries are named under the table, not counted. When nothing is
  * actionable the report carries the marker `<!-- mirror-drift: none -->`,
@@ -38,7 +37,6 @@ import {
   CSI_SIDECAR_MIRRORS,
   K3S_SYSTEM_IMAGE_MIRRORS,
   MIRRORED_IMAGES,
-  REGISTRY_MIRROR,
   upstreamRef,
 } from '../src/lib/images.js';
 
@@ -124,9 +122,6 @@ export function holdFor(image, k3sVersion) {
         return major === k3sMajor && minor <= k3sMinor + 1;
       },
     };
-  }
-  if (sameRepo(REGISTRY_MIRROR)) {
-    return { reason: 'registry stays on 2.x (3 changed the config format)', allows: (tag) => majorMinor(tag)[0] === 2 };
   }
   if (image.repo === 'autoscaling/cluster-autoscaler') {
     return {

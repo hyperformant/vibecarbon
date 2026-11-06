@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url';
  * tests/fixtures/cert-manager-<version>-deployments.upstream.txt from the new
  * manifest when bumping, so the render test proves the patches still land.
  */
-export const CERT_MANAGER_VERSION = 'v1.20.2';
+export const CERT_MANAGER_VERSION = 'v1.21.3';
 
 export const CERT_MANAGER_URL = `https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml`;
 

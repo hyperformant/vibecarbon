@@ -196,9 +196,10 @@ export const CARBON_AUTOSCALER_IMAGE = 'ghcr.io/hyperformant/carbon-autoscaler';
 //           manifest digest — moves. `crictl images` would show two different
 //           digests under one tag if this stayed at 0.1.2, which is exactly the
 //           ambiguity the rule above exists to prevent.
-export const CARBON_AUTOSCALER_TAG = '0.1.3';
+//   0.1.4 — speaks cluster-autoscaler 1.37's externalgrpc contract (nodeBytes).
+export const CARBON_AUTOSCALER_TAG = '0.1.4';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.3" */
+/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.4" */
 export function carbonAutoscalerImageRef() {
   return `${CARBON_AUTOSCALER_IMAGE}:${CARBON_AUTOSCALER_TAG}`;
 }
@@ -237,9 +238,10 @@ export function carbonAutoscalerImageRef() {
 // The mirror is a digest-preserving MANIFEST COPY (`docker buildx imagetools
 // create` in .github/workflows/publish-images.yml), never a
 // rebuild — same bits, same tag, different host. The tag must stay
-// byte-identical to upstream's so `v1.32.7` means exactly one thing
+// byte-identical to upstream's so a version string means exactly one thing
 // everywhere. Bumping CA therefore means: bump CLUSTER_AUTOSCALER_TAG, let
-// the mirror workflow run, THEN deploy.
+// the mirror workflow run, THEN deploy. Its minor must equal the cluster's
+// (K3S_VERSION in src/lib/deploy/k8s/k3s.js): upstream only tests that pairing.
 //
 // Like every other package in the org, ghcr.io/hyperformant/cluster-autoscaler
 // must be set PUBLIC — k3s nodes pull it anonymously, with no imagePullSecret.
@@ -247,14 +249,14 @@ export const CLUSTER_AUTOSCALER_UPSTREAM_IMAGE = 'registry.k8s.io/autoscaling/cl
 export const CLUSTER_AUTOSCALER_IMAGE = 'ghcr.io/hyperformant/cluster-autoscaler';
 // Version pin shared by BOTH refs above — deliberately one constant, so the
 // mirror can never end up copying one version under another version's tag.
-export const CLUSTER_AUTOSCALER_TAG = 'v1.32.7';
+export const CLUSTER_AUTOSCALER_TAG = 'v1.37.0';
 // Upstream's linux/amd64 manifest digest for that tag. The mirror copies
 // exactly this manifest, so the digest is identical on both hosts and the
 // deployed ref pins it (see MirroredImage.digest below).
 export const CLUSTER_AUTOSCALER_DIGEST =
-  'sha256:b3a67e07244033d36adc1cbe236fdbf9729b968f9c1c47477e26547a78131c81';
+  'sha256:c239e40cc745d9e0f1ba7c2272eaab44ca4586cd053f13ba8c8a4a6b27b18294';
 
-/** @returns {string} the ref k8s deploys — e.g. "ghcr.io/hyperformant/cluster-autoscaler:v1.32.7@sha256:…" */
+/** @returns {string} the ref k8s deploys — e.g. "ghcr.io/hyperformant/cluster-autoscaler:v1.37.0@sha256:…" */
 export function clusterAutoscalerImageRef() {
   return `${CLUSTER_AUTOSCALER_IMAGE}:${CLUSTER_AUTOSCALER_TAG}@${CLUSTER_AUTOSCALER_DIGEST}`;
 }
@@ -342,27 +344,12 @@ export const K8S_UPSTREAM_REGISTRY = 'registry.k8s.io';
  * (tests/unit/deploy/k8s-image-mirrors.test.ts) reads the versions back out of
  * the cloud-init scripts and fails on any mismatch.
  *
- * Sources (fetched 2026-08-05):
- *   hetznercloud/csi-driver v2.18.1  deploy/kubernetes/hcloud-csi.yml
- *   digitalocean/csi-digitalocean v4.17.0  .../releases/csi-digitalocean-v4.17.0/driver.yaml
- *
- * WHY v2.18.1 AND NOT THE NEWEST RELEASE (v2.22.1 at time of writing) —
- * upstream supports the latest THREE Kubernetes minors and drops the rest
- * (docs/kubernetes/reference/version-policy.md). k3s is pinned at v1.31.x
- * (K3S_VERSION in deploy/k8s/k3s.js) and v2.18.2's changelog entry is
- * literally "drop Kubernetes v1.31 support", so v2.18.1 is the ceiling until
- * K3S_VERSION moves. A unit guard asserts both ends of that window — the
- * v2.15.0 FLOOR (below it master-init.sh's HCLOUD_VOLUME_EXTRA_LABELS line is
- * a no-op, see below) and the per-k8s-minor ceiling.
- *
- * KNOWN GAP AT v2.18.1 — its ClusterRole omits `volumeattributesclasses`
- * get/list/watch, which csi-resizer v2.0.0 watches, so that container logs a
- * forbidden-list line every few seconds (upstream #1191). Provision, attach,
- * detach and resize all work; upstream fixed the RBAC in v2.18.3, which is
- * past our k8s ceiling. Noise only — do not chase it in a deploy log.
+ * Sources (fetched 2026-11-05):
+ *   hetznercloud/csi-driver v2.24.1  deploy/kubernetes/hcloud-csi.yml
+ *   digitalocean/csi-digitalocean v4.19.0  .../releases/csi-digitalocean-v4.19.0/driver.yaml
  */
-export const HETZNER_CSI_VERSION = 'v2.18.1';
-export const DO_CSI_VERSION = 'v4.17.0';
+export const HETZNER_CSI_VERSION = 'v2.24.1';
+export const DO_CSI_VERSION = 'v4.19.0';
 
 /**
  * Per-provider map of the CSI workloads cloud-init applies from upstream YAML,
@@ -386,11 +373,10 @@ export const DO_CSI_VERSION = 'v4.17.0';
  * @type {Record<string, Array<{workload: string, containers: Record<string, MirroredImage>}>>}
  */
 export const CSI_SIDECAR_MIRRORS = {
-  // hetznercloud/csi-driver v2.18.1 — everything lands in kube-system. Workload
-  // names, kinds and container names are byte-identical to v2.9.0's, so the
-  // `kubectl set image` seam below survived the bump unchanged; only the
-  // sidecar TAGS moved (v2.9.0 shipped registrar v2.11.1 / livenessprobe
-  // v2.13.1 / attacher v4.6.1 / resizer v1.11.2 / provisioner v5.0.2).
+  // hetznercloud/csi-driver v2.24.1 — everything lands in kube-system. Workload
+  // names, kinds and container names have stayed the same since v2.9.0, so the
+  // `kubectl set image` seam below survives a bump unchanged; only the sidecar
+  // TAGS move.
   hetzner: [
     {
       // The workload from the 2026-08-05 incident: no node plugin, no CSINode
@@ -399,13 +385,13 @@ export const CSI_SIDECAR_MIRRORS = {
       containers: {
         'csi-node-driver-registrar': {
           repo: 'sig-storage/csi-node-driver-registrar',
-          tag: 'v2.15.0',
-          digest: 'sha256:1ca23bdbb1504e41233d527e826d02dac98571c45a6cd74c5fb28be485d680fa',
+          tag: 'v2.18.0',
+          digest: 'sha256:692a30d9f27d32a25ea2784d01251b73e189e9d1156dd43c58f87ad2b70ec1e6',
         },
         'liveness-probe': {
           repo: 'sig-storage/livenessprobe',
-          tag: 'v2.17.0',
-          digest: 'sha256:e8983e659df16bda5bd8d2900651e1236b1c1bd0c96c8600aec736e7eabdb1e4',
+          tag: 'v2.20.0',
+          digest: 'sha256:c3dc967a4d8b18655e14bab5553017f850fda96221b8b0d2abfd9f6213c30f35',
         },
       },
     },
@@ -414,53 +400,54 @@ export const CSI_SIDECAR_MIRRORS = {
       containers: {
         'csi-attacher': {
           repo: 'sig-storage/csi-attacher',
-          tag: 'v4.10.0',
-          digest: 'sha256:8a46d7ecbb798f19d7ccd7e510a2efec00ae7ba50fd82cc2f5ac45cedbab0bc1',
+          tag: 'v4.13.0',
+          digest: 'sha256:3998c70f02511068e879b2222d7d4943db86fe044dd311f7bbb90812f778ad82',
         },
         'csi-resizer': {
           repo: 'sig-storage/csi-resizer',
-          tag: 'v2.0.0',
-          digest: 'sha256:25b17c4f84b0ab061da6397caf407c7251a571df5c4071e4917942684c61689a',
+          tag: 'v2.2.1',
+          digest: 'sha256:da560f720351d2c5ed1d3f85ad5a03d3935967a0586810eb2c1ea4d3109493fa',
         },
         'csi-provisioner': {
           repo: 'sig-storage/csi-provisioner',
-          tag: 'v6.0.0',
-          digest: 'sha256:4c7e7c948bed9d8bb117cd4cdff59699568732147ae151842836cfcb385cbf22',
+          tag: 'v6.3.0',
+          digest: 'sha256:54de28a6565647405647b34d092eefb4a51c7be14f29bdafc721773a5ec0600c',
         },
         'liveness-probe': {
           repo: 'sig-storage/livenessprobe',
-          tag: 'v2.17.0',
-          digest: 'sha256:e8983e659df16bda5bd8d2900651e1236b1c1bd0c96c8600aec736e7eabdb1e4',
+          tag: 'v2.20.0',
+          digest: 'sha256:c3dc967a4d8b18655e14bab5553017f850fda96221b8b0d2abfd9f6213c30f35',
         },
       },
     },
   ],
-  // digitalocean/csi-digitalocean v4.17.0 — same sig-storage sidecars, but a
-  // DIFFERENT tag for every single one, and a snapshotter Hetzner does not
-  // ship. This is why the mirror set is keyed by (repo, tag) and not by name.
+  // digitalocean/csi-digitalocean v4.19.0 — the same sig-storage sidecars, plus
+  // a snapshotter Hetzner does not ship. The two drivers release separately and
+  // their tags often differ, which is why the mirror set is keyed by
+  // (repo, tag) and not by name.
   digitalocean: [
     {
       workload: 'statefulset/csi-do-controller',
       containers: {
         'csi-provisioner': {
           repo: 'sig-storage/csi-provisioner',
-          tag: 'v6.2.0',
-          digest: 'sha256:da2f5c41881009b963c121d3605c68ad9127490f2c209a849b4eb26074b0038b',
+          tag: 'v6.3.0',
+          digest: 'sha256:54de28a6565647405647b34d092eefb4a51c7be14f29bdafc721773a5ec0600c',
         },
         'csi-attacher': {
           repo: 'sig-storage/csi-attacher',
-          tag: 'v4.11.0',
-          digest: 'sha256:4f6b1289ffe62dbe3d2317dd938cd9dd3fb0a7c0088d505cde4effa1e0771dc2',
+          tag: 'v4.13.0',
+          digest: 'sha256:3998c70f02511068e879b2222d7d4943db86fe044dd311f7bbb90812f778ad82',
         },
         'csi-snapshotter': {
           repo: 'sig-storage/csi-snapshotter',
-          tag: 'v8.5.0',
-          digest: 'sha256:f4d58334dc3c0873e544f110a188be47e224ff7e99c6400d2fd7b35de9b962eb',
+          tag: 'v8.6.0',
+          digest: 'sha256:87a9712e10c3a70b9070ada79611aff48174ce2f4b60f447503481d1d467be70',
         },
         'csi-resizer': {
           repo: 'sig-storage/csi-resizer',
-          tag: 'v2.1.0',
-          digest: 'sha256:69e7bf7d929e5d98a5a74e753b45220e6e7b04f35163e48e8a5958bf1d819b4c',
+          tag: 'v2.2.1',
+          digest: 'sha256:da560f720351d2c5ed1d3f85ad5a03d3935967a0586810eb2c1ea4d3109493fa',
         },
       },
     },
@@ -469,8 +456,8 @@ export const CSI_SIDECAR_MIRRORS = {
       containers: {
         'csi-node-driver-registrar': {
           repo: 'sig-storage/csi-node-driver-registrar',
-          tag: 'v2.16.0',
-          digest: 'sha256:aeecba5b171b50558bab359fdb8e28b9da185f666cef35cd87ac9784e51956c5',
+          tag: 'v2.18.0',
+          digest: 'sha256:692a30d9f27d32a25ea2784d01251b73e189e9d1156dd43c58f87ad2b70ec1e6',
         },
       },
     },
@@ -548,15 +535,14 @@ export const ALPINE_MIRROR = {
 };
 /**
  * @type {MirroredImage} the k8s in-cluster registry
- * (carbon/k8s/base/registry/local-registry.yaml). Stays on the 2.x line:
- * registry 3 changed the config format.
+ * (carbon/k8s/base/registry/local-registry.yaml).
  */
 export const REGISTRY_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
   repo: 'library/registry',
-  tag: '2.8.3',
-  digest: 'sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278',
-  index: 'sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373',
+  tag: '3.1.2',
+  digest: 'sha256:52b489ad8e6f40d1a676702e3ce398ec796ce38f08fbb786e1f324baa12d84b8',
+  index: 'sha256:79c026787b4607fb4633d415966cf7c059c1f46f92f597c346eb23f818fe4a3d',
 };
 /**
  * @type {MirroredImage} the replication gateway (compose-ha SOCAT_IMAGE,
@@ -581,9 +567,9 @@ export const SOCAT_MIRROR = {
 export const ALPINE_K8S_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
   repo: 'alpine/k8s',
-  tag: '1.31.12',
-  digest: 'sha256:d57b0d2e1837411db2616cd680e474a3564b3a129d942d3464deb2b19790c2e4',
-  index: 'sha256:5aab84f0ca8ee3ae12dbe2c9fef9502a0c1e2bb0fac913bb3e71e422b642986e',
+  tag: '1.37.2',
+  digest: 'sha256:bd844bea70da4fbca6e10062d0e282809874045a86aaf60e58ca5a296f04d99d',
+  index: 'sha256:dcb7185e112a453aa72f426754849a97357727ef8f40168fb208c8cf59952042',
 };
 
 /**
@@ -612,7 +598,7 @@ export const K3S_SYSTEM_REGISTRY = 'vibecarbon-system.invalid';
  * DigitalOcean scripts: no capture groups, backticks or dollar-variables in
  * it (a dollar sign followed by a quote stays literal).
  *
- * Tags are k3s-images.txt of K3S_VERSION (v1.31.5+k3s1). Unmirrored on
+ * Tags are k3s-images.txt of K3S_VERSION (v1.37.2+k3s1). Unmirrored on
  * purpose: klipper-helm and mirrored-library-traefik (`--disable traefik`)
  * and klipper-lb (`--disable servicelb`). mirrored-library-busybox (the
  * local-path helper) IS mirrored although the deploy refuses local-path
@@ -625,37 +611,37 @@ export const K3S_SYSTEM_IMAGE_MIRRORS = [
   {
     upstream: DOCKERHUB_UPSTREAM_REGISTRY,
     repo: 'rancher/mirrored-coredns-coredns',
-    tag: '1.12.0',
-    digest: 'sha256:2324f485c8db937628a18c293d946327f3a7229b9f77213e8f2256f0b616a4ee',
-    index: 'sha256:82979ddf442c593027a57239ad90616deb874e90c365d1a96ad508c2104bdea5',
+    tag: '1.14.7',
+    digest: 'sha256:2329f5f0e7e79fbe56dcdf11ecc4337ee2476bb251095bc275fe9461cb88a55b',
+    index: 'sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286',
   },
   {
     upstream: DOCKERHUB_UPSTREAM_REGISTRY,
     repo: 'rancher/local-path-provisioner',
-    tag: 'v0.0.30',
-    digest: 'sha256:fe541e6e7ee182cd6469c831f74026a4e36a5fa059d582459eca40b17c5275b3',
-    index: 'sha256:9b914881170048f80ae9302f36e5b99b4a6b18af73a38adc1c66d12f65d360be',
+    tag: 'v0.0.37',
+    digest: 'sha256:c3f2c60ee2490eb83ac00101d7e239fd8c20a5b8b4038e2dfc36a7e66fe99c08',
+    index: 'sha256:e757967a5ec338f6a9b371c5a9688bedaa8c3578ea3dd4db329ea0084be0a86f',
   },
   {
     upstream: DOCKERHUB_UPSTREAM_REGISTRY,
     repo: 'rancher/mirrored-metrics-server',
-    tag: 'v0.7.2',
-    digest: 'sha256:78e46b57096ec75e302fbc853e36359555df5c827bb009ecfe66f97474cc2a5a',
-    index: 'sha256:dccf8474fb910fef261d31d9483d7e4c1df7b86cf4d638fb6a7d7c88bd51600a',
+    tag: 'v0.9.0',
+    digest: 'sha256:25d291fde59974547bac6f07fa9d6cf6f5bedd1f19d60c893311c5e741e0a42f',
+    index: 'sha256:d9862115e7c7881280d3d75ca26bda8ffc0fc213315979575bf23ce9826205c0',
   },
   {
     upstream: DOCKERHUB_UPSTREAM_REGISTRY,
     repo: 'rancher/mirrored-library-busybox',
-    tag: '1.36.1',
-    digest: 'sha256:ec15a5bd53cf9507beb851574654669e778a9735f8e605e0ee3d71fd07debbe1',
-    index: 'sha256:8a45424ddf949bbe9bb3231b05f9032a45da5cd036eb4867b511b00734756d6f',
+    tag: '1.37.0',
+    digest: 'sha256:ad9fa4d07136a83e69a54ef00102f579d04eba431932de3b0f098cc5d5948f9f',
+    index: 'sha256:101b4afd76732482eff9b95cae5f94bcf295e521fbec4e01b69c5421f3f3f3e5',
   },
   {
     upstream: DOCKERHUB_UPSTREAM_REGISTRY,
     repo: 'rancher/mirrored-pause',
-    tag: '3.6',
-    digest: 'sha256:c2280d2f5f56cf9c9a01bb64b2db4651e35efd6d62a54dcfc12049fe6449c5e4',
-    index: 'sha256:74c4244427b7312c5b901fe0f67cbc53683d06f4f24c6faee65d4182bf0fa893',
+    tag: '3.10.2',
+    digest: 'sha256:412c4a7219cb8a299a37337f3d87810c5340095322e15594a1637785adad0f17',
+    index: 'sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4',
   },
 ];
 
@@ -675,7 +661,7 @@ export const DOCKERHUB_MIRRORS = [
 
 /**
  * Upstream CSI containers that ship FLOATING in upstream's manifest, re-pinned
- * by digest through the same `kubectl set image` seam. DO's v4.17.0
+ * by digest through the same `kubectl set image` seam. DO's v4.19.0
  * driver.yaml runs its `automount-udev-deleter` init container as bare
  * `alpine:3`, a floating major on Docker Hub; it now runs our alpine mirror
  * (ALPINE_MIRROR above), so a rate-limited Docker Hub cannot hold up the
@@ -703,7 +689,7 @@ export const CSI_UPSTREAM_IMAGE_PINS = {
  * mirrors something nothing deploys" and — far worse — "something deploys a ref
  * the workflow never mirrored" are both unrepresentable rather than merely
  * tested for. Duplicates collapse by (repo, tag): Hetzner's node DaemonSet and
- * controller both run livenessprobe v2.13.1, and that is one package to mirror.
+ * controller both run the same livenessprobe, and that is one package to mirror.
  * @type {MirroredImage[]}
  */
 export const MIRRORED_IMAGES = assertDistinctPackageNames(
@@ -867,7 +853,7 @@ export function dockerSocketProxyImageRef() {
 export function alpineImageRef() {
   return k8sMirrorRef(ALPINE_MIRROR);
 }
-/** @returns {string} the mirrored registry:2 ref (k8s in-cluster registry) */
+/** @returns {string} the mirrored registry ref (k8s in-cluster registry) */
 export function registryImageRef() {
   return k8sMirrorRef(REGISTRY_MIRROR);
 }

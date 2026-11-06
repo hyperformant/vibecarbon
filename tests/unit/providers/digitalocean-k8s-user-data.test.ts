@@ -17,19 +17,19 @@ import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 
 const masterVars = {
-  k3s_version: 'v1.31.5+k3s1',
+  k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   do_token: 'dop_v1_test_token_1234',
 };
 
 const workerVars = {
-  k3s_version: 'v1.31.5+k3s1',
+  k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   master_ip: '10.10.0.2',
 };
 
 const dbVars = {
-  k3s_version: 'v1.31.5+k3s1',
+  k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   master_ip: '10.10.0.2',
 };
@@ -74,7 +74,7 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
 
     it('substitutes k3s_version/k3s_token verbatim', async () => {
       const rendered = await DigitalOceanProvider.getK8sMasterUserData(masterVars);
-      expect(rendered).toContain('INSTALL_K3S_VERSION="v1.31.5+k3s1"');
+      expect(rendered).toContain('INSTALL_K3S_VERSION="v1.37.2+k3s1"');
       expect(rendered).toContain('--token "deadbeefcafe1234567890abcdef"');
     });
 

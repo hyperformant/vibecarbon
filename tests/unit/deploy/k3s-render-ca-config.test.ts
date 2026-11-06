@@ -27,7 +27,7 @@ describe('renderCarbonAutoscalerConfig', () => {
   };
 
   const baseArgs = {
-    k3sVersion: 'v1.31.5+k3s1',
+    k3sVersion: 'v1.37.2+k3s1',
     k3sToken: 'deadbeefcafe1234567890abcdef',
     clusterName: 'acme-prod',
     environment: 'prod',
@@ -199,7 +199,7 @@ describe('K8S_IMAGE fail-fast guard (T2 review)', () => {
     const NoImageProvider = { name: 'NoImageProvider', PROVIDER_ID_PREFIX: 'x://', K8S_IMAGE: '' };
     await expect(
       renderCarbonAutoscalerConfig({
-        k3sVersion: 'v1.31.5+k3s1',
+        k3sVersion: 'v1.37.2+k3s1',
         k3sToken: 'tok',
         clusterName: 'c-e9',
         environment: 'e9',
@@ -217,7 +217,7 @@ describe('K8S_IMAGE fail-fast guard (T2 review)', () => {
 
 describe('renderCarbonAutoscalerConfig dispatches through ProviderClass.getK8sWorkerUserData (M3 Task 5b Critical)', () => {
   const baseArgs = {
-    k3sVersion: 'v1.31.5+k3s1',
+    k3sVersion: 'v1.37.2+k3s1',
     k3sToken: 'deadbeefcafe1234567890abcdef',
     clusterName: 'acme-prod',
     environment: 'prod',

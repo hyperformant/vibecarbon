@@ -19,7 +19,7 @@ systemctl reload ssh || systemctl reload sshd || true
 _m n
 
 # Validate k3s version is set
-K3S_TARGET_VERSION="v1.31.5+k3s1"
+K3S_TARGET_VERSION="v1.37.2+k3s1"
 if [ -z "$K3S_TARGET_VERSION" ]; then
   echo "ERROR: k3s_version not set"
   exit 1
@@ -435,7 +435,7 @@ fi
 _m k
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
-  if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="v1.31.5+k3s1" K3S_URL="https://10.0.1.1:6443" K3S_TOKEN="deadbeefcafe1234567890abcdef" sh -s - agent \
+  if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="v1.37.2+k3s1" K3S_URL="https://10.0.1.1:6443" K3S_TOKEN="deadbeefcafe1234567890abcdef" sh -s - agent \
       --disable-default-registry-endpoint \
       --node-ip "$PUBLIC_IP" \
       --node-external-ip "$PUBLIC_IP" \

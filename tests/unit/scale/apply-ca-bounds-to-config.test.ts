@@ -66,7 +66,7 @@ const FakeProvider = {
   },
 };
 const baseArgs = {
-  k3sVersion: 'v1.31.5+k3s1',
+  k3sVersion: 'v1.37.2+k3s1',
   k3sToken: 'deadbeefcafe1234567890abcdef',
   clusterName: 'acme-prod',
   environment: 'prod',
