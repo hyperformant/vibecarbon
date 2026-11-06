@@ -45,6 +45,10 @@ spec:
         - --accesslog=true
         - --accesslog.format=json
         - --accesslog.fields.names.RequestPath=drop
+        env:
+        # Go's own soft limit, kept about 10% under the memory limit below.
+        - name: GOMEMLIMIT
+          value: 460MiB
         ports:
         - containerPort: 80
           name: web
@@ -60,10 +64,10 @@ spec:
             memory: 128Mi
           # No CPU limit, on purpose: everything the site serves passes through
           # here, so a limit turns one noisy client into a full outage. See
-          # docker-compose.prod.yml. Guarded by
-          # tests/unit/template/compose-cpu-limits.test.ts.
+          # docker-compose.prod.yml, which also explains the memory figure.
+          # Guarded by tests/unit/template/compose-cpu-limits.test.ts.
           limits:
-            memory: 256Mi
+            memory: 512Mi
         startupProbe:
           httpGet:
             path: /ping

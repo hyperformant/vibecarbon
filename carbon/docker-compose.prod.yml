@@ -206,6 +206,8 @@ services:
     environment:
       TLS_SNAPSHOT_S3_PREFIX: ${TLS_SNAPSHOT_S3_PREFIX:-}
       TLS_SNAPSHOT_DOMAIN: ${DOMAIN:-}
+      # Go's own soft limit, kept about 10% under the memory limit below.
+      GOMEMLIMIT: 460MiB
     ports:
       - "80:80"
       - "443:443"
@@ -234,11 +236,17 @@ services:
     # whole site: at 0.5 CPU, about 220 new TLS connections a second were
     # throttled in 4,808 of 4,811 periods, the accept queue filled and all HTTPS
     # hung. Without one, Traefik shares the CPU with the app and the db.
+    #
+    # The memory limit is room for a connection flood, not for traffic: Traefik
+    # peaks around 56 MB serving 2,000 new TLS connections a second, and a limit
+    # reserves nothing. Each held connection costs about 40 KB, so 512 MB holds
+    # about 11,900 before the kernel kills Traefik, where 256 MB held 4,600.
+    # GOMEMLIMIT is what makes Go collect harder as it nears the limit.
     # Guarded by tests/unit/template/compose-cpu-limits.test.ts.
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 512M
 
   # ===========================================
   # PRODUCTION OPTIMIZATIONS

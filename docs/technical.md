@@ -461,13 +461,13 @@ vibecarbon deploy prod -y
 
 | Component | CPU (max) | RAM (max) |
 |-----------|-----------|-----------|
-| PostgreSQL | 2.0 | 4 GB |
+| PostgreSQL | not capped | not capped |
 | App (Hono + Better Auth) | not capped | not capped |
-| Traefik | 0.5 | 256 MB |
+| Traefik | not capped | 512 MB |
 | Docker socket proxy | 0.25 | 128 MB |
 | Observability Stack (optional) | ~1.0 | ~1.5 GB |
 
-The caps are the `deploy.resources.limits` in `docker-compose.prod.yml`. The app has none, so it can use what the database leaves free.
+The caps are the `deploy.resources.limits` in `docker-compose.prod.yml`. The database and the app have none, so they share the server. Traefik has no CPU cap because one noisy client would otherwise hang all HTTPS. Its 512 MB is room for a connection flood: it peaks around 56 MB in normal use, and a limit reserves nothing.
 
 ### VPS Recommendations
 
