@@ -4632,11 +4632,15 @@ EOF`;
       name: 'verify-status',
       run: () =>
         executeStep('verify-status', 'vibecarbon status -json', async () => {
+          // compose-ha flips the A record, so the probe gets past the longest
+          // TTL a provider's DNS allows. k8s-ha moves a floating IP.
+          const recordJustMoved = config.mode === 'compose-ha';
           const r = await checkStatusHealth({
             projectDir: config.projectDir,
             envName: config.envPrefix,
-            timeoutMs: 180_000,
+            timeoutMs: recordJustMoved ? 360_000 : 180_000,
             retired: retiredAfterFailover('verify-status'),
+            recordJustMoved,
           });
           if (r.status !== 'pass') throw new Error(`verify-status: ${r.errorMessage}`);
         }),
@@ -4685,6 +4689,7 @@ EOF`;
                 envName: config.envPrefix,
                 timeoutMs: 180_000,
                 retired: retiredAfterFailover('second-failover'),
+                recordJustMoved: config.mode === 'compose-ha',
               }),
             ];
             requireAllPass(stepId, 'second-failover', results);

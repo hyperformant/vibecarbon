@@ -42,7 +42,18 @@ type ServerContainers = {
  */
 export type RetiredServer = { serverName?: string; ip?: string; allowedExited: readonly string[] };
 
-export type AssessOptions = { retired?: RetiredServer };
+export type AssessOptions = {
+  retired?: RetiredServer;
+  /**
+   * The A record moved moments ago, so the public probe can land on the retired
+   * node until caches expire. A failed probe is then observed again until
+   * timeoutMs instead of being a verdict. Set after a compose-ha failover, with a
+   * window past the longest TTL a provider's DNS allows: Linode's floor is 300 s
+   * (src/lib/linode-dns.js), which failed l2 on 2026-11-06 with a 404 from the
+   * retired node. A probe that never recovers still fails at the deadline.
+   */
+  recordJustMoved?: boolean;
+};
 
 type Verdict = { ok: true } | { ok: false; retryable: boolean; problems: string[] };
 // TS discriminated-union narrowing on `ok` needs strictNullChecks, which
@@ -87,7 +98,7 @@ export function assessStatusJson(
     | undefined;
   if (!probe?.ok) {
     problems.push(`readiness probe failed: ${probe?.error || `HTTP ${probe?.status}`}`);
-    retryable = false;
+    if (!opts.recordJustMoved) retryable = false;
   }
   // The TLS row must say trusted: the live handshake status ran, not the
   // deploy's record. A missing row (no domain, a stale CLI) fails instead of
@@ -146,6 +157,7 @@ export async function checkStatusHealth(opts: {
   pollMs?: number;
   runCli?: typeof defaultRunCli;
   retired?: RetiredServer;
+  recordJustMoved?: boolean;
 }): Promise<VerificationResult> {
   const runCli = opts.runCli ?? defaultRunCli;
   const pollMs = opts.pollMs ?? 10_000;
@@ -161,7 +173,10 @@ export async function checkStatusHealth(opts: {
     } catch {
       return fail(`status -json was not JSON: ${r.stdout.slice(0, 200)}`);
     }
-    const verdict = assessStatusJson(json, opts.envName, { retired: opts.retired });
+    const verdict = assessStatusJson(json, opts.envName, {
+      retired: opts.retired,
+      recordJustMoved: opts.recordJustMoved,
+    });
     if (verdict.ok) return { checkName: 'status-health', status: 'pass' };
     const failed = verdict as FailVerdict;
     last = failed.problems;
