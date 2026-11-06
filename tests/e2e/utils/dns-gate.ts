@@ -9,14 +9,18 @@
  * comparison at the start refuses the run in seconds and names the host.
  *
  * The check only reads: one A lookup through the system resolver (what the CLI
- * and Pulumi use) and one through 1.1.1.1. It changes no resolver setting and
- * no /etc/hosts entry.
+ * and Pulumi use), one through 1.1.1.1 and, when those share no address, one
+ * TCP connect to the local answer. It changes no resolver setting and no
+ * /etc/hosts entry.
  *
- * Mismatch = no address in common. Two resolvers may rotate through different
- * members of one pool, so a partial overlap is fine; a disjoint pair or an
- * empty local answer is not.
+ * An empty local answer is refused. Answers with nothing in common prove nothing
+ * alone: s3.fr-par.scw.cloud hands out 2 of a large pool per query, so two
+ * resolvers usually disagree (a run refused on that 2026-11-06, with all four
+ * addresses serving). What can hurt is a local answer that goes nowhere, such as
+ * a stale pin, so a disjoint answer is refused only if nothing accepts on 443.
  */
 import { promises as dns, Resolver } from 'node:dns';
+import { connect } from 'node:net';
 import { getProviderClass } from '../../../src/lib/providers/index.js';
 
 export const PUBLIC_RESOLVER = '1.1.1.1';
@@ -26,6 +30,8 @@ export interface DnsGateDeps {
   local: (host: string) => Promise<string[]>;
   /** A records through a public resolver; [] when it has no answer. */
   publicResolver: (host: string) => Promise<string[]>;
+  /** Whether anything accepts a TLS port connection at this address. */
+  reaches: (ip: string) => Promise<boolean>;
 }
 
 export interface DnsGateTarget {
@@ -72,6 +78,17 @@ const systemDeps: DnsGateDeps = {
       return [];
     }
   },
+  reaches: (ip) =>
+    new Promise((resolve) => {
+      const socket = connect({ host: ip, port: 443, timeout: 4000 });
+      const done = (ok: boolean) => {
+        socket.destroy();
+        resolve(ok);
+      };
+      socket.once('connect', () => done(true));
+      socket.once('timeout', () => done(false));
+      socket.once('error', () => done(false));
+    }),
 };
 
 /** Findings for every target whose storage host does not resolve like the public one. */
@@ -107,11 +124,11 @@ export async function checkStorageDns(
         host,
         reason: `${PUBLIC_RESOLVER} has no A answer, so the local answer ${local.join(', ')} cannot be checked`,
       });
-    } else if (!local.some((a) => pub.includes(a))) {
+    } else if (!local.some((a) => pub.includes(a)) && !(await deps.reaches(local[0]))) {
       findings.push({
         provider,
         host,
-        reason: `the local resolver says ${local.join(', ')} but ${PUBLIC_RESOLVER} says ${pub.join(', ')}`,
+        reason: `the local resolver says ${local.join(', ')}, nothing accepts on port 443 there, and ${PUBLIC_RESOLVER} says ${pub.join(', ')}`,
       });
     }
   }
