@@ -39,6 +39,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { progressLog } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
+import { kubectlSkewWarning } from '../../runtime-floors.js';
 import {
   ADMIN_PROBE_EXIT,
   adminNotReadyHint,
@@ -112,6 +113,36 @@ async function pollCondition({ name, attempt, budgetMs, sleep, nowFn, isFinal, d
   throw new Error(
     `${name} did not become serving within ${seconds}s. Last error: ${lastErr?.message ?? '(none recorded)'}`,
   );
+}
+
+/**
+ * The warning to show when this machine's kubectl is outside one minor of the
+ * cluster, or null. The laptop still does most of a deploy's kubectl work
+ * (rollouts, patches, waits and reads; only kustomizations apply on the master),
+ * so the skew is worth a line, and it is never a failure. Reads the cluster
+ * itself rather than the version this CLI would install: a warm deploy may be
+ * on an older cluster. Never throws: an unreachable cluster or output it cannot
+ * read says nothing, and the control-plane gate beside it reports the outage.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
+ * @param {Function} [params.exec] - test seam, defaults to runCommandAsync
+ * @returns {Promise<string | null>}
+ */
+export async function kubectlSkewNotice({ env, exec = defaultExec }) {
+  try {
+    const out = await exec(['kubectl', 'version', '-o', 'json', '--request-timeout=5s'], {
+      env,
+      silent: true,
+    });
+    const { clientVersion, serverVersion } = JSON.parse(String(out ?? ''));
+    return kubectlSkewWarning({
+      client: clientVersion?.gitVersion,
+      server: serverVersion?.gitVersion,
+    });
+  } catch {
+    return null;
+  }
 }
 
 /**

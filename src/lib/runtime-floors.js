@@ -357,16 +357,14 @@ export function unreadableMessage({ tool, raw, subject }) {
 }
 
 /**
- * Judge `kubectl version --client -o json`: a message when the client is
- * proven older than its floor, otherwise null. Output that cannot be read
- * proves nothing and is not refused. Reads `major` and `minor` rather than
- * `gitVersion`: a vendor build can carry any suffix there, and a minor like
- * `28+` still counts.
+ * `major.minor` from `kubectl version --client -o json`, or null. Reads the
+ * `major` and `minor` fields rather than `gitVersion`: a vendor build can carry
+ * any suffix there, and a minor like `28+` still counts.
  *
  * @param {string} versionJson
  * @returns {string | null}
  */
-export function kubectlFloorProblem(versionJson) {
+export function kubectlClientVersion(versionJson) {
   let client;
   try {
     client = JSON.parse(versionJson)?.clientVersion;
@@ -375,17 +373,29 @@ export function kubectlFloorProblem(versionJson) {
   }
   const major = Number.parseInt(client?.major ?? '', 10);
   const minor = Number.parseInt(client?.minor ?? '', 10);
-  if (!Number.isFinite(major) || !Number.isFinite(minor)) return null;
-  const { verdict, floor, found } = judgeVersion(
+  return Number.isFinite(major) && Number.isFinite(minor) ? `${major}.${minor}` : null;
+}
+
+/**
+ * Judge `kubectl version --client -o json`: a message when the client is
+ * proven older than its floor, otherwise null. Output that cannot be read
+ * proves nothing and is not refused.
+ *
+ * @param {string} versionJson
+ * @returns {string | null}
+ */
+export function kubectlFloorProblem(versionJson) {
+  const version = kubectlClientVersion(versionJson);
+  const { verdict, floor } = judgeVersion(
     'kubectl',
     'laptop',
-    `${major}.${minor}`,
+    version,
     rowFor('kubectl-patch-subresource'),
   );
-  if (verdict !== 'too-old' || !floor || !found) return null;
+  if (verdict !== 'too-old' || !version || !floor) return null;
   return tooOldMessage({
     tool: 'kubectl',
-    found: `${major}.${minor}`,
+    found: version,
     floor,
     fix: `Install kubectl ${floor.min} or newer, then run the deploy again.`,
   });

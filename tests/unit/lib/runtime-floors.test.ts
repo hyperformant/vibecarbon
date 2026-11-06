@@ -10,6 +10,7 @@ import {
   compareVersions,
   floorFor,
   judgeVersion,
+  kubectlClientVersion,
   kubectlFloorProblem,
   kubectlSkewWarning,
   parseVersion,
@@ -193,6 +194,15 @@ describe('kubectlFloorProblem: judges `kubectl version --client -o json`', () =>
     expect(kubectlFloorProblem('')).toBeNull();
     expect(kubectlFloorProblem('not json')).toBeNull();
     expect(kubectlFloorProblem('{}')).toBeNull();
+  });
+});
+
+describe('kubectlClientVersion', () => {
+  it('reads major.minor, and null when it cannot', () => {
+    const json = JSON.stringify({ clientVersion: { major: '1', minor: '28+' } });
+    expect(kubectlClientVersion(json)).toBe('1.28');
+    expect(kubectlClientVersion('')).toBeNull();
+    expect(kubectlClientVersion('{}')).toBeNull();
   });
 });
 
