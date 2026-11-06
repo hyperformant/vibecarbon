@@ -6,9 +6,9 @@
  * modes run k3s on plain Ubuntu VMs (Hetzner cx23 by default). Callers
  * should import it directly.
  *
- * This is also the paid-boundary entry point for the k8s engine (see
- * src/lib/licensing/paid-surface.js) — free code outside src/lib/deploy/k8s/
- * imports k3s.js internals through here rather than reaching in directly.
+ * This is also the entry point for the k8s engine: code outside
+ * src/lib/deploy/k8s/ imports k3s.js internals through here rather than
+ * reaching in directly.
  */
 
 import * as p from '@clack/prompts';
@@ -16,19 +16,18 @@ import { spinner } from '../../cli/progress.js';
 
 // Re-exported so the orchestrator's public health probe (outside
 // src/lib/deploy/k8s/) can watch cert-manager for terminally-failed ACME
-// issuance without reaching into ./acme-order-recovery.js directly — see
-// paid-boundary guard.
+// issuance without reaching into ./acme-order-recovery.js directly.
 export { createAcmeIssuanceWatchdog } from './acme-order-recovery.js';
 // Re-exported so the orchestrator's k8s DNS step (outside src/lib/deploy/k8s/)
 // can start the A record at infra-ready without reaching into
-// ./dns-record.js directly — see paid-boundary guard.
+// ./dns-record.js directly.
 export { createK8sDnsWriter } from './dns-record.js';
 export { reestablishReplicationTransport } from './ha/index.js';
 // Re-exported so callers outside src/lib/deploy/k8s/ (e.g. src/scale.js)
-// don't reach into ./k3s.js directly — see paid-boundary guard.
+// don't reach into ./k3s.js directly.
 // Re-exported so the orchestrator's TLS phase (outside src/lib/deploy/k8s/)
 // can name the deploy's issuer and save the trusted certificate without
-// reaching into ./k3s.js or ./tls-restore.js directly — see paid-boundary guard.
+// reaching into ./k3s.js or ./tls-restore.js directly.
 export { k8sTlsIdentity } from './k3s.js';
 // Re-exported so scale (outside src/lib/deploy/k8s/) can wait out a resize's
 // reboots without reaching into ./kubelet-liveness.js directly.
@@ -38,11 +37,11 @@ export { waitForKubeletsRenewing } from './kubelet-liveness.js';
 export { staleClusterIssuersProblem, staleObservabilityTlsProblem } from './one-certificate.js';
 // Re-exported so src/backup.js can gate the manual backup Job on the
 // exec+pg condition (RCA 2026-08-16, run 31927810430) without reaching into
-// ./readiness.js directly — see paid-boundary guard.
+// ./readiness.js directly.
 export { awaitPostgresAccepting } from './readiness.js';
 // Re-exported so the orchestrator's finalize (outside src/lib/deploy/k8s/)
 // can derive the pilot-light scale-up list without reaching into
-// ./standby-config.js directly — see paid-boundary guard.
+// ./standby-config.js directly.
 export { deriveScaleUpList, failoverAddonManifests } from './standby-config.js';
 export { checkReissueAfterRestore } from './tls-reissue-watch.js';
 export { liveK8sTlsSecretSerial, quietKubectl, snapshotK8sTlsSecret } from './tls-restore.js';

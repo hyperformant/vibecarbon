@@ -151,7 +151,7 @@ function regenerate(path, text, specs) {
         next = replaceRegion(next, `flags ${entry.name}`, renderFlagTable(spec), 'mdx');
       }
     } else if (path.endsWith('README.md')) {
-      for (const cat of ['dev', 'deploy', 'debug', 'license']) {
+      for (const cat of ['dev', 'deploy', 'debug']) {
         next = replaceRegion(next, `commands ${cat}`, renderCommandTable(specs, cat), 'md');
       }
     } else if (path.endsWith('AGENTS.md')) {

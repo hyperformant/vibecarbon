@@ -129,8 +129,8 @@ describe('e2e-us-perf.yml leg step filters `scenarios` to its own provider', () 
 });
 
 describe('e2e leg step env', () => {
-  // A step's `env:` does not reach the next step. The token sat on the licence
-  // check step above this one, so Pulumi's plugin download ran unauthenticated
+  // A step's `env:` does not reach the next step. The token once sat on an earlier
+  // setup step, so Pulumi's plugin download ran unauthenticated
   // and a vultr leg died on GitHub's shared 60/hr rate limit.
   it('gives the step that runs Pulumi the token for plugin downloads', () => {
     const doc = loadYaml(readFileSync(WORKFLOW_PATH, 'utf8')) as WorkflowDoc;

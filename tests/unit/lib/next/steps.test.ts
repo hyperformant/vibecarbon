@@ -149,7 +149,7 @@ describe('nextStep', () => {
     expect(step).toEqual({
       id: 'deploy',
       title: 'Deploy to the cloud',
-      why: 'Provisions a server or cluster on your cloud account and ships the app. Compose deploys need no license; Kubernetes and HA modes do.',
+      why: 'Provisions a server or cluster on your cloud account and ships the app.',
       command: ['deploy'],
       display: 'vibecarbon deploy',
       canLaunch: true,
@@ -166,7 +166,7 @@ describe('nextStep', () => {
     const step = nextStep(state);
     expect(step.id).toBe('deploy');
     expect(step.why).toBe(
-      'Provisions a server or cluster on your cloud account and ships the app. Compose deploys need no license; Kubernetes and HA modes do.',
+      'Provisions a server or cluster on your cloud account and ships the app.',
     );
   });
 
@@ -179,7 +179,7 @@ describe('nextStep', () => {
     const step = nextStep(state);
     expect(step.id).toBe('deploy');
     expect(step.why).toBe(
-      'Provisions a server or cluster on your cloud account and ships the app. Compose deploys need no license; Kubernetes and HA modes do. ' +
+      'Provisions a server or cluster on your cloud account and ships the app. ' +
         "A previous deploy of stg didn't finish; running deploy again will resume it.",
     );
   });

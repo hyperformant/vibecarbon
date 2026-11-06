@@ -29,13 +29,12 @@ describe('e2eCliEnv', () => {
     expect(env.VIBECARBON_PERF).toBe('1');
     // Disposable rigs: -y deploys need an operator CIDR list.
     expect(env.ALLOWED_SSH_IPS).toBe('0.0.0.0/0,::/0');
-    // No license bypass is handed to the child: the harness activates a
-    // genuine signed key and lets the CLI ask the licence API for a signed
-    // verdict, the same path a customer walks. The old
-    // VIBECARBON_DEV_LICENSE=true skipped Ed25519 verification outright, and
-    // it shipped in the npm tarball — see tests/unit/licensing/
-    // no-dev-bypass.test.ts.
-    expect(env.VIBECARBON_DEV_LICENSE).toBeUndefined();
+    // Telemetry goes to a closed port, whatever the shell exported.
+    expect(env.VIBECARBON_API_BASE).toBe('http://127.0.0.1:9');
+    expect(
+      e2eCliEnv({}, { VIBECARBON_API_BASE: 'https://example.com' } as NodeJS.ProcessEnv)
+        .VIBECARBON_API_BASE,
+    ).toBe('http://127.0.0.1:9');
   });
 
   it('lets the real environment override a default, and a per-call value override both', () => {
@@ -106,7 +105,6 @@ describe('runner ↔ iter-step parity (drift guards)', () => {
   it('iter-step no longer hand-copies the child env vars', () => {
     // The literals below are the copy that drifted. They belong in
     // tests/e2e/utils/e2e-env.js and nowhere else.
-    expect(iterStep).not.toMatch(/VIBECARBON_DEV_LICENSE:\s*'true'/);
     expect(iterStep).not.toMatch(/ALLOWED_SSH_IPS:\s*'0\.0\.0\.0\/0/);
     expect(iterStep).not.toMatch(/VIBECARBON_PERF:\s*'1'/);
   });
@@ -118,39 +116,5 @@ describe('runner ↔ iter-step parity (drift guards)', () => {
     expect(read('tests', 'e2e', 'utils', 'e2e-env.js')).toContain(
       'https://acme-staging-v02.api.letsencrypt.org/directory',
     );
-  });
-});
-
-describe('test harnesses use a real signed license, not a bypass', () => {
-  const runCli = read('tests', 'integration', '_harness', 'run-cli.ts');
-  const e2eEnv = read('tests', 'e2e', 'utils', 'e2e-env.js');
-
-  it('the integration harness never READS a licence key or the signing key', () => {
-    // A key alone entitles nothing now: the binding lives on vibecarbon.com,
-    // and tests that need a verdict point the CLI at the local stub instead.
-    //
-    // The guard is on a READ, not on a mention, because the harness must now
-    // NAME the signing key in order to blank it. `env.VIBECARBON_…` is how
-    // sourcing it would look; VIBECARBON_TEST_LICENSE_KEY is the retired
-    // pre-minted key, which had no use other than being sourced.
-    expect(runCli).not.toMatch(/env\.VIBECARBON_LICENSE_PRIVATE_KEY|VIBECARBON_TEST_LICENSE_KEY/);
-    // And the scrub itself is present: without it `...process.env` would hand
-    // an exported signing key to every CLI child.
-    expect(runCli).toContain("VIBECARBON_LICENSE_PRIVATE_KEY: ''");
-  });
-
-  it('no harness embeds a licence key literal', () => {
-    // A hardcoded key is either unsignable (the old fixture, which only ever
-    // worked because DEV_MODE skipped verification) or a real one leaking into
-    // the repo. Neither belongs here: keys are minted per run by the stub.
-    // Matched as a quoted string literal in the CURRENT `vc-<16 hex>-` shape,
-    // not as bare text, so prose about keys does not trip the guard.
-    for (const source of [runCli, e2eEnv]) {
-      expect(source).not.toMatch(/['"`]vc-[0-9a-f]{16}-/);
-    }
-  });
-
-  it('the e2e child env sets no license bypass variable', () => {
-    expect(e2eEnv).not.toMatch(/VIBECARBON_DEV_LICENSE:\s*'true'/);
   });
 });

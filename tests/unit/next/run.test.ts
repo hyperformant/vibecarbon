@@ -32,9 +32,6 @@ vi.mock('../../../src/lib/next/launch.js', () => ({ launchCli }));
 
 vi.mock('../../../src/lib/cli/intro.js', () => ({ introCommand: vi.fn() }));
 
-const getLicense = vi.hoisted(() => vi.fn(() => ({ active: false })));
-vi.mock('../../../src/lib/licensing/index.js', () => ({ getLicense }));
-
 const selectAction = vi.hoisted(() => vi.fn());
 vi.mock('../../../src/lib/cli/select-action.js', () => ({ selectAction }));
 
@@ -54,7 +51,6 @@ function setTTY(value: boolean) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getLicense.mockReturnValue({ active: false });
   setTTY(true);
   process.exit = vi.fn((code?: number) => {
     throw new Error(`process.exit:${code}`);
@@ -300,23 +296,14 @@ describe('configure step', () => {
 });
 
 describe('deploy step', () => {
-  it('mentions activation when the project has no license', async () => {
+  it('prompts to deploy without mentioning keys or activation', async () => {
     detectProjectState.mockResolvedValue(deployState);
     clack.confirm.mockResolvedValue(false);
 
     await expect(run([])).resolves.toBeUndefined();
     const logged = clack.log.info.mock.calls.map((call) => String(call[0])).join('\n');
-    expect(logged).toContain('vibecarbon activate <key>');
-  });
-
-  it('stays quiet about activation when a license is active', async () => {
-    getLicense.mockReturnValue({ active: true });
-    detectProjectState.mockResolvedValue(deployState);
-    clack.confirm.mockResolvedValue(false);
-
-    await expect(run([])).resolves.toBeUndefined();
-    const logged = clack.log.info.mock.calls.map((call) => String(call[0])).join('\n');
-    expect(logged).not.toContain('vibecarbon activate');
+    expect(logged).not.toMatch(/activate|license/i);
+    expect(clack.confirm).toHaveBeenCalledWith({ message: 'Deploy now?' });
   });
 
   it('launches deploy when confirmed', async () => {

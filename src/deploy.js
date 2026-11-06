@@ -233,19 +233,9 @@ async function main(values, positional) {
   // project-scoped command (see lib/project-guard.js): an accidental
   // `vibecarbon deploy` from a parent directory (e.g. ~/repos) must print
   // the canonical "not in a project" message and exit non-zero — it must not
-  // fall through to the license upsell or a secret-scan that walks sibling
-  // repos. This matches scale/backup/restore/failover, which all assert
-  // first; deploy previously gated the license first and so exited 0 (the
-  // upsell path) outside a project, tripping the not-in-project contract.
+  // fall through to a secret-scan that walks sibling repos. This matches
+  // scale/backup/restore/failover, which all assert first.
   assertInProjectDir();
-
-  // 0b. The license gate for deploy is mode-based, not command-based: a
-  // single-server Compose deploy is free, and every deploy into a paid mode
-  // checks this project's subscription. It can't be gated here pre-dispatch
-  // (before the mode is even known, since `deploy` can resolve the
-  // architecture interactively). gatherDeploymentConfig() below calls
-  // requireDeployEntitlement() immediately after resolveDeployMode(), before
-  // any region/DNS/credential prompts.
 
   // 0c. Refuse to deploy if the working tree contains likely secrets.
   // We push the project's tracked files to GitHub during deploy (CI,
@@ -344,19 +334,13 @@ async function main(values, positional) {
   //
   // `presence: false` — a MISSING credential is never refused here, only a
   // MALFORMED one, matching Gate 2a/2b. This is deliberate, not merely
-  // consistent: `requireDeployEntitlement` (the license gate for a paid
-  // tier) runs inside gatherDeploymentConfig, AFTER mode resolution but
-  // BEFORE any credential is read — deliberately, so an unpaid k8s/HA
-  // attempt is refused with "License required" rather than a credential
-  // complaint, even when both are true at once (see
-  // tests/integration/cli/_global/license-gate.test.ts, which pins this
-  // exact ordering with every provider credential scrubbed). Gate 1 runs
-  // before mode is even known, so it cannot tell a free deploy with no
-  // token yet (fine — a prompt or, for -y, a clean "Cannot prompt" refusal
-  // is coming) from a paid one that should hear about money first; `presence:
-  // false` defers that judgment to the code that already makes it correctly.
-  // A malformed value has no such ambiguity — it's wrong regardless of tier
-  // or payment status, so it still refuses here, before anything else runs.
+  // consistent: Gate 1 runs before the deploy mode is even known, so it
+  // cannot tell which credentials this deploy will need. A deploy with no
+  // token yet is fine here, because a prompt or, for -y, a clean "Cannot
+  // prompt" refusal is coming from the code that already knows the mode;
+  // `presence: false` defers that judgment to it. A malformed value has no
+  // such ambiguity, since it is wrong in every mode, so it still refuses
+  // here, before anything else runs.
   //
   // FILE-AWARE (review residual, PR #112): `where: '.env'` keys
   // (ACME_CA_SERVER, ALLOWED_SSH_IPS) ship in the FILE and bootstrapOperatorEnv
@@ -403,7 +387,7 @@ async function main(values, positional) {
   // lockfile, so the common path is a single existsSync.
   //
   // Deliberately AFTER gatherDeploymentConfig, not among the 0x preflights:
-  // gathering is what validates the region and enforces the license gate, and
+  // gathering is what validates the region, and
   // generating a lockfile for a deploy that is about to be refused would spend
   // a minute of the operator's time to reach the same refusal.
   {

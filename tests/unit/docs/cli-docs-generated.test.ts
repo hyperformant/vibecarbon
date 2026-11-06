@@ -23,7 +23,7 @@ describe('generated CLI docs', () => {
 
   it('README has a region for every category', () => {
     const readme = onDisk.get('README.md') as string;
-    for (const cat of ['dev', 'deploy', 'debug', 'license']) {
+    for (const cat of ['dev', 'deploy', 'debug']) {
       expect(readme).toContain(`<!-- BEGIN GENERATED: commands ${cat} -->`);
     }
   });

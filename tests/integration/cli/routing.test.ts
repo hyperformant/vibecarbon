@@ -69,8 +69,6 @@ describe('KNOWN_COMMANDS registry', () => {
     'scale',
     'upgrade',
     'configure',
-    'activate',
-    'deactivate',
     'shell',
     'diagnose',
     'console',
@@ -109,13 +107,6 @@ describe('Command module exports', () => {
     ['configure', '../../../src/configure.js'],
     ['telemetry', '../../../src/telemetry.js'],
   ];
-
-  // Activate module has runActivate and runDeactivate instead of run
-  it('activate module exports runActivate and runDeactivate functions', async () => {
-    const mod = await import('../../../src/activate.js');
-    expect(typeof mod.runActivate).toBe('function');
-    expect(typeof mod.runDeactivate).toBe('function');
-  });
 
   for (const [command, modulePath] of modulesWithRun) {
     it(`${command} module exports a run() function`, async () => {

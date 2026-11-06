@@ -154,15 +154,6 @@ vibecarbon <command> [options]
 | **`scale [env]`** | Scale worker nodes and instance sizes |
 <!-- END GENERATED: commands deploy -->
 
-### License: unlock HA + Kubernetes
-
-<!-- BEGIN GENERATED: commands license -->
-| Command | What it does |
-| :------ | :----------- |
-| **`activate [key]`** | Bind a Graphene or Fullerene key to this project, unlocking Kubernetes and HA deploys. Run it inside the project |
-| **`deactivate [key]`** | Release the key from this project, confirmed by a link emailed to the buyer (-rm removes only the local file) |
-<!-- END GENERATED: commands license -->
-
 ### Debug: look under the hood
 
 <!-- BEGIN GENERATED: commands debug -->

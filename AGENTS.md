@@ -40,8 +40,6 @@ vibecarbon shell [env]            # Open an interactive bash with KUBECONFIG and
 vibecarbon diagnose [env]         # Dump cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*
 vibecarbon console <node>         # Open Hetzner's web VNC console for a node
 vibecarbon access [subcommand]    # Manage the SSH and k8s-API operator-CIDR allowlist
-vibecarbon activate [key]         # Bind a Graphene or Fullerene key to this project, unlocking Kubernetes and HA deploys. Run it inside the project
-vibecarbon deactivate [key]       # Release the key from this project, confirmed by a link emailed to the buyer (-rm removes only the local file)
 ```
 <!-- END GENERATED: commands -->
 

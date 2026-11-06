@@ -7,7 +7,7 @@
  *
  * `runCli` is the synchronous default. `runCliAsync` is the same call without
  * blocking the event loop, which is mandatory for any test that points the
- * CLI at the in-process licence stub — see its doc comment.
+ * CLI at an in-process server — see its doc comment.
  *
  * NO_COLOR=1 + FORCE_COLOR=0 forces clack/pico-colors to emit plain
  * text; otherwise some prompt screens still color even when stdout
@@ -24,10 +24,7 @@ const CLI_PATH = join(REPO_ROOT, 'src', 'cli.js');
 
 /**
  * Per-process fake HOME, so CLI children never read or write the developer's
- * real ~/.vibecarbon. No licence is seeded: a key alone entitles nothing now
- * — the binding lives on vibecarbon.com, and tests that need a verdict point
- * the CLI at the local licence stub (see tests/e2e/utils/license-stub.js)
- * through `apiBase`.
+ * real ~/.vibecarbon.
  */
 let FAKE_HOME: string | null = null;
 function getFakeHome(): string {
@@ -53,9 +50,9 @@ export interface RunOptions {
    */
   execStubs?: { binPath: string };
   /**
-   * Base URL for vibecarbon.com's licence API. Defaults to a closed port so
-   * no test ever reaches the real network by accident; point it at a
-   * startLicenseStub() baseUrl to serve real signed verdicts.
+   * Base URL the CLI sends its telemetry and update check to. Defaults to a
+   * closed port so no test ever reaches production by accident; point it at
+   * a local server to observe which requests the CLI makes.
    */
   apiBase?: string;
 }
@@ -86,17 +83,12 @@ function childEnv(opts: RunOptions): NodeJS.ProcessEnv {
     ...process.env,
     NO_COLOR: '1',
     FORCE_COLOR: '0',
-    // The licence stub holds the signing key and signs in-process; a CLI
-    // child verifies against its EMBEDDED public key and never needs the
-    // private one. `...process.env` spreads whatever the shell or CI job
-    // exported, so blank it here. Blanked, not deleted: an empty value is
-    // unambiguous in the child.
-    VIBECARBON_LICENSE_PRIVATE_KEY: '',
     // Point HOME at a per-process tmp so CLI children never touch the
     // developer's real ~/.vibecarbon.
     HOME: getFakeHome(),
-    // A closed port by default: an unstubbed licence call fails fast as
-    // 'unreachable' instead of hitting production vibecarbon.com.
+    // A closed port by default: the CLI's telemetry and update-check calls
+    // fail fast and are swallowed, instead of reporting test runs to
+    // production vibecarbon.com.
     VIBECARBON_API_BASE: opts.apiBase ?? 'http://127.0.0.1:9',
     // Prepend exec stub binPath so calls to ssh/docker/kubectl/etc.
     // hit the stub log, not real binaries.
@@ -125,12 +117,11 @@ export function runCli(verb: string, flags: string[], opts: RunOptions = {}): Ru
  * runCli, asynchronously. Same argv, env, HOME and ANSI handling; the only
  * difference is that this one does not block the event loop.
  *
- * That difference is load-bearing for anything pointed at the licence stub.
- * `startLicenseStub()` listens IN THIS PROCESS, and spawnSync parks the event
- * loop for the whole child run — so the stub can never accept the child's
- * connection, the CLI's fetch times out, and the stub records no call at all.
- * Every case that passes `apiBase: stub.baseUrl` must therefore await this
- * instead of calling runCli.
+ * That difference is load-bearing for anything pointed at a server in the
+ * test process. spawnSync parks the event loop for the whole child run, so
+ * such a server can never accept the child's connection and records no call
+ * at all. Every case that passes an `apiBase` of its own must therefore await
+ * this instead of calling runCli.
  */
 export function runCliAsync(
   verb: string,

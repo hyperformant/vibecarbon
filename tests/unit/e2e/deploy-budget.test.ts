@@ -317,12 +317,9 @@ describe('checkDeployBudget: time budgets', () => {
       '[perf] deploy.iac.upStack.resource.Server.web 700000ms',
       '[perf] deploy.k3s.primary.iac.upStack.resource.Firewall.fw 600000ms',
       '[perf] deploy.preamble.s3Setup.stateSeed 500000ms',
-      '[perf] deploy.preamble.subscription 400000ms',
     ].join('\n');
     const r = checkDeployBudget(`${fixture('compose', { total: 400_000 })}\n${extra}\n`, 'compose');
-    expect(r.message).not.toMatch(
-      /cli\.deploy\.total|\.prepare|\.resource\.|stateSeed|subscription/,
-    );
+    expect(r.message).not.toMatch(/cli\.deploy\.total|\.prepare|\.resource\.|stateSeed/);
     expect(r.message).toMatch(/slowest: deploy\.tls\.ready 90s, deploy\.iac\.upStack 70s/);
   });
 

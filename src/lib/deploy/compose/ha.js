@@ -5,8 +5,6 @@
  * - Docker Compose on both servers
  * - PostgreSQL streaming replication (primary → standby)
  * - Cloudflare health checks + failover (or manual DNS instructions)
- *
- * Available on the Fullerene tier.
  */
 
 import { existsSync, rmSync } from 'node:fs';

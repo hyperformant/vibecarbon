@@ -42,9 +42,6 @@ const project = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
 vi.mock('../../../src/lib/config.js', () => ({
   loadProjectConfig: () => project.current,
 }));
-vi.mock('../../../src/lib/licensing/index.js', () => ({
-  requireDeployEntitlement: vi.fn(async () => undefined),
-}));
 vi.mock('../../../src/lib/telemetry/update-check.js', () => ({ printUpdateNotice: vi.fn() }));
 vi.mock('../../../src/lib/deploy/delta.js', () => ({
   collectDeployDelta: () => ({}),

@@ -25,7 +25,7 @@
     "node-runtime:remove-local": "node scripts/node-runtime-remove-local.mjs",
     "template:db-baseline": "node scripts/template-db-baseline.mjs",
     "dev:stop": "node scripts/dev-stop.js",
-    "lint": "node scripts/check-shell-safety.js && node scripts/check-stale-deploy-references.js && node scripts/check-paid-boundary.js && biome check src/ tests/ scripts/cost-grid.js && tsc -p tsconfig.e2e.json",
+    "lint": "node scripts/check-shell-safety.js && node scripts/check-stale-deploy-references.js && biome check src/ tests/ scripts/cost-grid.js && tsc -p tsconfig.e2e.json",
     "docs:cli": "node scripts/gen-cli-docs.js",
     "lint:shell": "node scripts/check-shell-safety.js",
     "lint:stale-deploy": "node scripts/check-stale-deploy-references.js",

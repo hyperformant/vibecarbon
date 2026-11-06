@@ -45,9 +45,6 @@ vi.mock('../../../src/lib/config.js', () => ({
     environments: { prod: disk.envConfig },
   }),
 }));
-vi.mock('../../../src/lib/licensing/index.js', () => ({
-  requireDeployEntitlement: vi.fn(async () => undefined),
-}));
 vi.mock('../../../src/lib/telemetry/update-check.js', () => ({ printUpdateNotice: vi.fn() }));
 vi.mock('../../../src/lib/deploy/delta.js', () => ({
   collectDeployDelta: () => ({}),

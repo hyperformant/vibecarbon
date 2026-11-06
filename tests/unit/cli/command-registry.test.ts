@@ -59,7 +59,6 @@ describe('command registry', () => {
     ]);
     expect(by('deploy')).toEqual(['deploy', 'destroy', 'backup', 'restore', 'failover', 'scale']);
     expect(by('debug')).toEqual(['shell', 'diagnose', 'console', 'access']);
-    expect(by('license')).toEqual(['activate', 'deactivate']);
   });
 
   describe.each(specs.map(({ entry, spec }) => [entry.name, entry, spec] as const))(

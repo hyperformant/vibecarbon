@@ -101,8 +101,7 @@ export function nextStep(state, { skipConfigure = false } = {}) {
     });
   }
 
-  let why =
-    'Provisions a server or cluster on your cloud account and ships the app. Compose deploys need no license; Kubernetes and HA modes do.';
+  let why = 'Provisions a server or cluster on your cloud account and ships the app.';
   const resuming = (state.environments ?? []).find((env) => env.status === 'deploying');
   if (resuming) {
     why += ` A previous deploy of ${resuming.name} didn't finish; running deploy again will resume it.`;

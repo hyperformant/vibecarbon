@@ -25,8 +25,8 @@ const CLI = join(REPO_ROOT, 'src', 'cli.js');
 //
 // `status` is intentionally excluded — it has a documented dual mode
 // that lists registered projects when run outside a project. `console`
-// and `activate` / `deactivate` are also excluded — they don't need a
-// project (they operate on global Hetzner / license state).
+// is also excluded — it doesn't need a project (it operates on global
+// Hetzner state).
 const IN_PROJECT_COMMANDS: Array<{ name: string; argv: string[] }> = [
   { name: 'add', argv: ['add', 'observability'] },
   { name: 'remove', argv: ['remove', 'observability'] },

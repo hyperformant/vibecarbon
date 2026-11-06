@@ -218,7 +218,6 @@ const CATEGORY_HEADINGS = [
   ['dev', 'DEV COMMANDS'],
   ['deploy', 'DEPLOY COMMANDS'],
   ['debug', 'DEBUG COMMANDS'],
-  ['license', 'LICENSE COMMANDS'],
 ];
 
 /** Greedy word wrap to `max` columns (a word longer than `max` gets its own line). */

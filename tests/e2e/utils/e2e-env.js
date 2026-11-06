@@ -32,7 +32,6 @@ import { applyNetworkDefaults } from '../../../src/lib/net-defaults.js';
 import { fileURLToPath } from 'node:url';
 import { pmScrubbedEnv } from '../../_shared/pm-env.js';
 import { loadE2EEnvFile } from './e2e-env-file.js';
-import { signingKeyOrNull, startLicenseStub } from './license-stub.js';
 
 /** Repo root, resolved from this file (tests/e2e/utils/ → 3 up). */
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -329,65 +328,6 @@ export function disableSshAskpass(env = process.env) {
 }
 
 /**
- * Fail fast unless the licence signing key is present: the harness runs a
- * local stub of vibecarbon.com's licence API and every paid-tier deploy in
- * the matrix is checked against it. No key, no signed verdicts, and a
- * matrix leg would die 40 minutes in with "License not bound".
- *
- * @param {NodeJS.ProcessEnv} [env]
- * @returns {string} The signing key, as raw PEM.
- */
-export function assertLicenseSigningKey(env = process.env) {
-  const key = signingKeyOrNull(env);
-  if (key) return key;
-  throw new Error(
-    '[e2e-env] VIBECARBON_LICENSE_PRIVATE_KEY is not set (shell or tests/.env.e2e).\n' +
-      "It is the same value as vibecarbon-web's LICENSE_SIGNING_PRIVATE_KEY, PEM or base64-encoded PEM.",
-  );
-}
-
-/**
- * The licence API the harness runs against, once started. Module-level
- * because `setupE2EEnv()` is synchronous (it is called at module load by
- * `tests/e2e/runner.ts` and `scripts/iter-step.js`) while starting a server
- * is not — so the stub gets its own async entry point and the child-env
- * builder below reads it from here.
- *
- * @type {Awaited<ReturnType<typeof startLicenseStub>> | null}
- */
-let licenseStub = null;
-
-/**
- * Start the local licence API the whole run is checked against, and point
- * every CLI child at it.
- *
- * The CLI walks its PRODUCTION path against this stub: `activate` binds a
- * real Ed25519-signed key through `POST /api/v1/license/bind`, and each
- * gated deploy asks `/check` and verifies the signed verdict it gets back.
- * Only the host changes (`VIBECARBON_API_BASE`) — there is no test-only
- * bypass in the licensing code to change anything else.
- *
- * Idempotent: a second call returns the stub already running.
- *
- * @param {NodeJS.ProcessEnv} [env]
- * @returns {Promise<Awaited<ReturnType<typeof startLicenseStub>>>}
- */
-export async function startE2ELicenseStub(env = process.env) {
-  if (licenseStub) return licenseStub;
-  licenseStub = await startLicenseStub({ privateKeyPem: assertLicenseSigningKey(env) });
-  // Read back by `e2eCliEnv()` — both through this env (which is
-  // `process.env`, the builder's default base) and from `licenseStub`
-  // directly, so a caller passing its own base still reaches the stub.
-  env.VIBECARBON_API_BASE = licenseStub.baseUrl;
-  return licenseStub;
-}
-
-/** The running licence stub, or null before `startE2ELicenseStub()`. */
-export function getE2ELicenseStub() {
-  return licenseStub;
-}
-
-/**
  * Everything the e2e harness establishes at process level, in one call.
  * Idempotent — safe to call more than once.
  *
@@ -405,12 +345,6 @@ export function setupE2EEnv(opts = {}) {
   // wins: a key already exported in the shell or set by CI (GitHub
   // Environments) is left untouched. Missing file is a no-op.
   const envFileKeys = [...loadE2EEnvFile(join(REPO_ROOT, 'tests', '.env.e2e'), env)];
-
-  // After loadE2EEnvFile (the key may live in tests/.env.e2e), before any
-  // network work — a licence failure should cost seconds, not a provisioned rig.
-  // Only asserts the key is THERE; `startE2ELicenseStub()` (async, called by
-  // the runner right after this) is what puts it to work.
-  assertLicenseSigningKey(env);
 
   pinPublicDns();
   disableSshAskpass(env);
@@ -445,9 +379,9 @@ export function setupE2EEnv(opts = {}) {
  * Precedence: defaults < process.env < pins < `extra`. The real environment
  * overriding a default is deliberate (an operator can widen ALLOWED_SSH_IPS
  * or turn perf logging off from the shell); per-call `extra` wins over both.
- * The two licence variables are PINS, set after the inherited spread, because
- * a shell-exported value must not be able to send a child at production or
- * hand it the signing key — see their comments below.
+ * VIBECARBON_API_BASE is a PIN, set after the inherited spread, because a
+ * shell-exported value must not be able to send a child's telemetry at
+ * production — see its comment below.
  *
  * @param {Record<string, string | undefined>} [extra] Per-call overrides.
  * @param {NodeJS.ProcessEnv} [base] Env to inherit (default `process.env`).
@@ -478,28 +412,14 @@ export function e2eCliEnv(extra = {}, base = process.env, provider = undefined) 
     // project's Dockerfile). Scrub it so the harness tests the default.
     // A scenario wanting pnpm/bun must pass `-pm` explicitly, which wins.
     ...pmScrubbedEnv(base),
-    // AFTER the spread, both of them, because both must beat the inherited
-    // environment rather than lose to it.
+    // AFTER the spread, because it must beat the inherited environment
+    // rather than lose to it.
     //
-    // VIBECARBON_API_BASE is the only licence-related variable a child gets,
-    // and it is a HOST, not a credential: it points the child's bind/check
-    // requests at the local stub of vibecarbon.com's licence API
-    // (startE2ELicenseStub() above). Licensing is deploy-mode-based, so
-    // compose-ha/k8s/k8s-ha scenarios hit requireDeployEntitlement() every
-    // time `deploy` runs, and the harness satisfies that the way a customer
-    // does: a genuine Ed25519-signed key, bound to the project by `vibecarbon
-    // activate`, re-checked against the API for a signed verdict on every
-    // gated command. It FAILS CLOSED — with no stub running the child gets a
-    // closed port and the call fails as 'unreachable', where an inherited or
-    // shell-exported value could have sent a real request to production.
-    VIBECARBON_API_BASE: licenseStub?.baseUrl ?? 'http://127.0.0.1:9',
-    // The signing key mints keys and verdicts; only the STUB, in this
-    // process, ever needs it. `...pmScrubbedEnv(base)` spreads the whole
-    // parent environment, so without this blank a shell or CI job that
-    // exported it would hand the private key to every CLI child — and the
-    // CLI verifies against its embedded public key, so no child has any use
-    // for it. Blanked rather than deleted: an empty value is unambiguous.
-    VIBECARBON_LICENSE_PRIVATE_KEY: '',
+    // VIBECARBON_API_BASE is the host the CLI sends its anonymous telemetry
+    // and update check to. Pinned to a closed port, so a test child never
+    // reports to production and a shell-exported value cannot send it there;
+    // the calls fail fast and are swallowed.
+    VIBECARBON_API_BASE: 'http://127.0.0.1:9',
     ...extra,
   };
 

@@ -1,6 +1,5 @@
 /**
- * k8s-ha replication helpers (Fullerene).
- * Licensed under FSL-1.1-MIT.
+ * k8s-ha replication helpers.
  *
  * The k8s-ha deploy/destroy/failover flows now live in the step-plan
  * (plan/deploy-plan.js, plan/destroy-plan.js) + effects registry

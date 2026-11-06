@@ -24,9 +24,7 @@ import {
   resolveDnsToken,
 } from '../dns-provider.js';
 import { resolveEnvSeed } from '../env-identity.js';
-import { requireDeployEntitlement } from '../licensing/index.js';
 import { readOperatorVar } from '../operator-env.js';
-import { perfAsync } from '../perf.js';
 import {
   getObjectStorageProvider,
   listProviders,
@@ -86,8 +84,7 @@ const MODE_OPTION_TIER = {
 };
 
 // Compose HA is a fully supported deploy mode (existing environments keep
-// working, `-mode compose-ha` still resolves, resolveTier still prices it at
-// Fullerene, the e2e matrix still runs it) but it is no longer RECOMMENDED:
+// working, `-mode compose-ha` still resolves, the e2e matrix still runs it) but it is no longer RECOMMENDED:
 // Kubernetes HA is the HA answer we lead with, so the picker hides Compose
 // HA wherever Kubernetes HA is on offer.
 //
@@ -100,7 +97,7 @@ const MODE_OPTION_TIER = {
 const COMPOSE_HA_OPTION = {
   value: 'compose-ha',
   label: 'Docker Compose HA (Auto Failover)',
-  hint: '2 VPS - Simple failover without K8s complexity - Enterprise resiliency, Fullerene',
+  hint: '2 VPS - Simple failover without K8s complexity - Enterprise resiliency',
 };
 
 /**
@@ -245,7 +242,7 @@ export async function resolveDeployMode(args, envConfig) {
     return { deployMode: envConfig.deployMode, ha: envConfig.ha?.enabled || false };
   }
 
-  // Fullerene tier features: resolve from CLI flags. Not filtered by
+  // HA modes: resolve from CLI flags. Not filtered by
   // SUPPORTED_TIERS here — an unsupported flag-selected tier passes
   // through and is caught loudly by assertTierSupported() at orchestrator
   // entry instead of silently here.
@@ -269,17 +266,17 @@ export async function resolveDeployMode(args, envConfig) {
     {
       value: 'compose',
       label: 'Docker Compose (Fast)',
-      hint: '1 VPS - Best for startups and internal tools - Go live, Graphite',
+      hint: '1 VPS - Best for startups and internal tools - Go live',
     },
     {
       value: 'kubernetes',
       label: 'Kubernetes (Auto Scaling)',
-      hint: 'k3s + Autoscaling - Best for high-traffic apps - Scale on demand, Graphene',
+      hint: 'k3s + Autoscaling - Best for high-traffic apps - Scale on demand',
     },
     {
       value: 'kubernetes-ha',
       label: 'Kubernetes HA (Auto Scaling + Failover)',
-      hint: 'Multi-region cluster - Maximum availability - Enterprise resiliency, Fullerene',
+      hint: 'Multi-region cluster - Maximum availability - Enterprise resiliency',
     },
   ];
   // Compose HA is offered only when this provider has no Kubernetes tier at
@@ -831,13 +828,7 @@ export async function gatherDeploymentConfig(args) {
 
   const { deployMode, ha } = await resolveDeployMode(args, envConfig);
 
-  // Gate immediately after the deploy mode is known, before any region, DNS
-  // or credential prompt. Every deploy into a paid mode checks the project's
-  // subscription (live, or the cached verdict); Compose returns at once.
   const deployTier = resolveTier({ deployMode, ha });
-  await perfAsync('deploy.preamble.subscription', () =>
-    requireDeployEntitlement({ deployTier, projectConfig }),
-  );
 
   // Template lockstep (wal-g role file), on the tier just resolved and before
   // any region, DNS, server-type or credential prompt: this CLI moves the

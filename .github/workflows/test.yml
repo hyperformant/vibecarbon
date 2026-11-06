@@ -99,25 +99,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      # No licence FILE is materialized any more: there is no global slot, and a
-      # key alone entitles nothing — the project binding lives on
-      # vibecarbon.com. The harnesses run a local stub of that API
-      # (tests/e2e/utils/license-stub.js) which signs real verdicts with this
-      # secret, so the SIGNING KEY is what CI must supply.
-      #
-      # TRIPWIRE ONLY — the unit suite below does NOT need the key (it injects
-      # an ephemeral keypair). This fails fast, in the cheapest job, so the
-      # integration step here and the e2e jobs never discover the missing
-      # secret three minutes in.
-      - name: Check licence signing key
-        env:
-          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
-        run: |
-          if [ -z "$VIBECARBON_LICENSE_PRIVATE_KEY" ]; then
-            echo "::error::VIBECARBON_LICENSE_PRIVATE_KEY secret is not set — signed-verdict tests cannot run."
-            exit 1
-          fi
-
       - name: Run unit tests
         run: pnpm test:unit
 
@@ -159,15 +140,6 @@ jobs:
       - name: Run integration tests
         run: pnpm test:integration
         timeout-minutes: 10
-        env:
-          # The Ed25519 SIGNING key — integration tests spawn paid commands
-          # and there is no dev bypass any more (c7efe141). The harness starts
-          # a local stub of vibecarbon.com's licence API
-          # (tests/e2e/utils/license-stub.js), mints a key with this secret and
-          # activates it against the stub, so the CLI walks its production
-          # bind/check path. No licence file is materialized: the binding lives
-          # on the server. Signed cases skip without the variable.
-          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
 
   # The engines.node MINIMUM leg — the one job here that does NOT float.
   #
@@ -220,26 +192,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      # Same contract as the unit job's signing-key check above — tripwire
-      # only; the unit suite does not need the key, the integration step does.
-      - name: Check licence signing key
-        env:
-          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
-        run: |
-          if [ -z "$VIBECARBON_LICENSE_PRIVATE_KEY" ]; then
-            echo "::error::VIBECARBON_LICENSE_PRIVATE_KEY secret is not set — signed-verdict tests cannot run."
-            exit 1
-          fi
-
       - name: Run unit tests
         run: pnpm test:unit
 
       - name: Run integration tests
         run: pnpm test:integration
         timeout-minutes: 10
-        env:
-          # Same contract as the integration job above.
-          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
 
   # carbon/ is a SEPARATE project with its own lockfile (it ships inside the
   # published CLI and is scaffolded into user projects), so the root jobs

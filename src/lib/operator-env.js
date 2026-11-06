@@ -75,10 +75,6 @@ const KIND_FALLBACKS = {
     describe: 'comma-separated IPv4/IPv6 addresses or CIDRs like 203.0.113.0/24',
     test: (v) => v.split(',').every((part) => isAddressOrCidr(part.trim())),
   },
-  pem: {
-    describe: 'a PEM block (or its base64 encoding)',
-    test: (v) => v.includes('-----BEGIN') && v.includes('-----END'),
-  },
 };
 
 /** True when `str` starts and ends with the same quote character. */
@@ -91,14 +87,8 @@ function isQuoteWrapped(str) {
 
 /**
  * Normalize a raw env-var string against its registry entry: trims
- * whitespace, strips one pair of matching surrounding quotes, strips a
- * `Bearer ` prefix (token kind only), and — for `kind: 'pem'` — expands
- * literal `\n` escapes or decodes a base64-wrapped PEM. Reimplements the PEM
- * normalization in `scripts/generate-license.js` (`normalizePem`, which
- * carries the matching cross-reference back here); kept duplicated rather
- * than imported so this lib stays dependency-free of the scripts directory.
- * The two are intentionally NOT unified yet (review 2026-09-19, M13) — a
- * change to either's accepted encodings must be mirrored in the other.
+ * whitespace, strips one pair of matching surrounding quotes, and strips a
+ * `Bearer ` prefix (token kind only).
  * @param {string | null | undefined} raw
  * @param {import('./config-registry.js').ConfigKey} entry
  * @returns {{ value: string, fixed: string[] }}
@@ -121,26 +111,6 @@ export function normalizeOperatorValue(raw, entry) {
   if (entry.kind === 'token' && value.startsWith('Bearer ')) {
     value = value.slice('Bearer '.length);
     fixed.push('removed "Bearer " prefix');
-  }
-
-  if (entry.kind === 'pem') {
-    if (!value.includes('\n') && value.includes('\\n')) {
-      value = value.replace(/\\n/g, '\n');
-      fixed.push('expanded \\n escapes');
-    }
-    if (!value.startsWith('-----BEGIN')) {
-      const decoded = Buffer.from(value, 'base64').toString('utf8').trim();
-      // Only trust the decode if it actually looks like a PEM block — base64
-      // decoding a non-base64, non-PEM string still "succeeds" (Node ignores
-      // invalid characters) and would otherwise silently replace the value
-      // with garbage. Leave the original untouched when it doesn't pan out;
-      // validateOperatorValue's pem fallback below is what reports the
-      // problem.
-      if (decoded.startsWith('-----BEGIN')) {
-        value = decoded;
-        fixed.push('decoded base64');
-      }
-    }
   }
 
   return { value, fixed };

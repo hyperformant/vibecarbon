@@ -72,7 +72,7 @@ async function haK8sGenerateSshKey(ctx) {
   const s = options.tracker ? options.tracker.spinner() : spinner();
   ctx.s = s;
 
-  p.log.info(`${c.bold('Fullerene HA Multi-Region Deployment')}`);
+  p.log.info(`${c.bold('HA Multi-Region Deployment')}`);
   p.log.info(`Primary:   ${c.bold(options.region)}`);
   p.log.info(`Secondary: ${c.bold(options.secondaryRegion)}`);
   p.log.info('');
@@ -892,12 +892,12 @@ async function haK8sUpdateDns(ctx) {
   p.log.info('DNS configured — use `vibecarbon failover` to switch regions');
 }
 
-/** Print the Fullerene HA deploy summary + failover-command notes. */
+/** Print the HA deploy summary + failover-command notes. */
 async function haK8sFinalize(ctx) {
   const options = ctx.options;
   const { primaryResult, standbyResult, replicationStatus } = ctx;
   // Success message
-  p.log.success(`${c.success('Fullerene HA deployment complete!')}`);
+  p.log.success(`${c.success('HA deployment complete!')}`);
 
   if (options.domain) {
     p.log.info(`\n  ${c.bold(c.success(`🌐 ${link(`https://${options.domain}`)}`))}\n`);
