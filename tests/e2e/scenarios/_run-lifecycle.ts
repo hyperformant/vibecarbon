@@ -38,7 +38,11 @@ import {
   OAUTH_CANARY_CLIENT_ID,
   runConfigCanaryChecks,
 } from '../checks/config-canary.js';
-import { checkDeployBudget, type DeployBudgetResult } from '../checks/deploy-budget.js';
+import {
+  checkDeployBudget,
+  type DeployBudgetResult,
+  deployCpuClass,
+} from '../checks/deploy-budget.js';
 import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
@@ -60,6 +64,7 @@ import {
   readDbAttachState,
   readDbGeneration,
   readDbIncarnation,
+  readServingIp,
   readSwappedSinceLastDeploy,
   verifyDnsFlip,
 } from '../checks/ha-integrity.js';
@@ -1998,10 +2003,10 @@ export async function runLifecycle(
         // spuriously. Wait (bounded) until the domain resolves to the promoted
         // IP; both modes rewrite .vibecarbon.json on failover (compose-ha in
         // failoverComposeHA, k8s-ha via swapHaRoles' terminal write), so a
-        // fresh resolveHaDbIps().primaryIp is the promoted master on both —
-        // that's what sshCheckMasterIp already resolves to above.
+        // fresh readServingIp is what the record now carries: the promoted
+        // node on compose-ha, the promoted cluster's floating IP on k8s-ha.
         if (isPostFailoverVerify(stepName)) {
-          const promotedIp = sshCheckMasterIp;
+          const promotedIp = readServingIp(config.projectDir, config.envPrefix);
           if (promotedIp) {
             console.log(
               `${tag} Waiting for ${config.domain} to resolve to promoted IP ${promotedIp}...`,
@@ -2054,7 +2059,7 @@ export async function runLifecycle(
               skipReason:
                 config.mode === 'compose-ha'
                   ? null
-                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (floating/reserved) — the harness doesn't track that IP, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
+                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (floating/reserved), which readServingIp reads back in the DNS-provider check below; this node-IP comparison does not apply, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
             }),
           );
           // The same flip read back through the DNS provider's own API (the
@@ -2188,10 +2193,8 @@ export async function runLifecycle(
         // Backup evidence — assert a WAL object actually LANDS in S3 (verify-deploy
         // only; verify-scale runs the same check itself, and restore/failover
         // verification has its own backup semantics). Everything else in the stack
-        // proves wal-g *can* reach the bucket; nothing proved an object arrives,
-        // because wal-archive.sh exits 0 on push failure by design and
-        // pg_stat_archiver is therefore structurally blind. See the check's
-        // docblock and docs/tests.md's class-3 countermeasure.
+        // proves wal-g *can* reach the bucket; nothing proved an object arrives.
+        // See the check's docblock and docs/tests.md's class-3 countermeasure.
         //
         // sshCheckMasterIp is already resolved to the HA PRIMARY above — the
         // probe refuses to provoke a standby and reports that as a failure.
@@ -2344,11 +2347,6 @@ export async function runLifecycle(
               );
               if (logs) console.log(`${tag} [diag] traefik errors:\n${logs}`);
             }
-
-            const grafana = ssh(
-              `curl -sk -o /dev/null -w '%{http_code}' https://grafana.${config.domain}/api/health 2>/dev/null || echo "fail"`,
-            );
-            console.log(`${tag} [diag] from server: grafana=${grafana}`);
           } catch (diagErr) {
             console.log(
               `${tag} [diag] failed: ${diagErr instanceof Error ? diagErr.message : String(diagErr)}`,
@@ -3519,7 +3517,18 @@ EOF`;
             // image bytes and the HA lock invariants. The numbers land in
             // e2e.db with the verdict, pass or fail.
             if (cold) {
-              const budget = checkDeployBudget(`${result.stdout}\n${result.stderr}`, config.mode);
+              // The class is what the deploy recorded and ran on, read back from
+              // `.vibecarbon.json`; it keys the budget and lands in the db with
+              // the verdict, where scripts/calibrate-deploy-budgets.js reads it.
+              const env = readEnvConfig(config.projectDir, config.envPrefix);
+              const cpuClass = deployCpuClass(
+                config.provider,
+                config.mode.startsWith('k8s') ? env.masterServerType : env.serverType,
+              );
+              const budget = checkDeployBudget(`${result.stdout}\n${result.stderr}`, config.mode, {
+                provider: config.provider,
+                cpuClass,
+              });
               console.log(`${tag} [deploy] deploy_budget: ${budget.status} (${budget.message})`);
               collector.recordVerifications(stepId, [budget]);
               if (budget.status !== 'pass') {
@@ -5046,17 +5055,19 @@ EOF`;
   // The runner passes a Set of step names to remove from the lifecycle
   // entirely (NOT skipped-due-to-prior-failure; just not run). Cuts HA
   // scenarios from ~60min → ~25min when iterating on failover-class bugs.
-  if (options.skipSteps && options.skipSteps.size > 0) {
+  // The scenario's own skips (tests/config.ts) apply on top of the flag's.
+  const requestedSkips = new Set([...(options.skipSteps ?? []), ...(config.skipSteps ?? [])]);
+  if (requestedSkips.size > 0) {
     const before = filteredStepDefs.length;
     // A skipped step takes its dependents with it (failover -> second-failover
     // and reconverge-deploy -> failback -> verify-failback): they assert the
     // state it leaves and would only fail on their own precondition.
-    const dropped = expandSkippedSteps(options.skipSteps);
+    const dropped = expandSkippedSteps(requestedSkips);
     filteredStepDefs = filteredStepDefs.filter((s) => !dropped.has(s.name));
     const removed = before - filteredStepDefs.length;
     if (removed > 0) {
       console.log(
-        `${tag} --skip-steps: dropped ${removed} step(s) from lifecycle: ${[...dropped].join(', ')}`,
+        `${tag} skipped steps (--skip-steps and scenario config): dropped ${removed} step(s) from lifecycle: ${[...dropped].join(', ')}`,
       );
     }
   }

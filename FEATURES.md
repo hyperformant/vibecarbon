@@ -426,7 +426,7 @@
   - Package manager auto-detection for correct CI setup
   - GitHub secrets management via `gh secret set`
   - Deployment monitoring via `gh run list` polling
-- Pulumi programs for Hetzner and DigitalOcean infrastructure, and Cloudflare DNS
+- Pulumi programs for all five providers' infrastructure, and Cloudflare DNS
 - Flux GitOps support on the Kubernetes modes, opt-in via `vibecarbon configure cicd <env>` after a cluster is up; deploys themselves stay local-first. The GitHub Actions build/deploy workflows the same command installs are free in every mode
 - Pod autoscaling via Kubernetes HPA (2-10 replicas); worker nodes and server sizes scale via `vibecarbon scale`
 
@@ -435,7 +435,7 @@
 - Prometheus for metrics collection
 - Grafana for dashboards (pre-provisioned: logs overview, system overview, PostgreSQL)
 - Loki for log aggregation
-- Promtail for log shipping
+- Grafana Alloy for log shipping
 - postgres-exporter for database metrics
 - Accessible at prometheus.localhost, grafana.localhost, loki.localhost
 - Kubernetes manifests included
@@ -479,7 +479,7 @@
   - Auto-generated password
   - `ioredis` pre-installed in template
   - Used by rate limiter for distributed deployments
-- **Observability**: Prometheus + Grafana + Loki + Promtail + postgres-exporter
+- **Observability**: Prometheus + Grafana + Loki + Alloy + postgres-exporter
 - **CI/CD**: GitHub Actions workflow generation with ghcr.io image registry
 - Add-ons fetched from GitHub at runtime or bundled locally (offline/air-gapped mode)
 - Fuzzy matching with Levenshtein distance for typo correction on unknown feature names

@@ -4,8 +4,8 @@
  * ways a cluster gets it:
  *
  * - the vibecarbon CLI imports this module when it applies a cluster
- *   (applyK3sManifests writes the kustomization into a temp dir and runs
- *   `kubectl apply -k` on it);
+ *   (applyK3sManifests writes the kustomization into a temp dir and renders
+ *   it here, then applies the result on the master);
  * - the GitOps deploy workflow (.github/workflows/deploy.yml) runs it as a
  *   script and applies the same directory.
  *
@@ -31,46 +31,9 @@ import { fileURLToPath } from 'node:url';
  * tests/fixtures/cert-manager-<version>-deployments.upstream.txt from the new
  * manifest when bumping, so the render test proves the patches still land.
  */
-export const CERT_MANAGER_VERSION = 'v1.20.2';
+export const CERT_MANAGER_VERSION = 'v1.21.3';
 
 export const CERT_MANAGER_URL = `https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml`;
-
-/**
- * The oldest kubectl that can apply this render: 1.27, the first release
- * whose built-in kustomize is v5, which loads the release manifest's https
- * URL as a plain file resource. The CLI's k8s deploy preflight refuses an
- * older one (kubectlFloorProblem); the GitOps workflow pins a newer kubectl
- * itself (azure/setup-kubectl).
- */
-export const KUBECTL_MIN_VERSION = Object.freeze({ major: 1, minor: 27 });
-
-/**
- * Judge `kubectl version --client -o json`: a message when the client is
- * proven older than KUBECTL_MIN_VERSION, otherwise null. Output that cannot
- * be read proves nothing and is not refused.
- *
- * @param {string} versionJson
- * @returns {string|null}
- */
-export function kubectlFloorProblem(versionJson) {
-  let client;
-  try {
-    client = JSON.parse(versionJson)?.clientVersion;
-  } catch {
-    return null;
-  }
-  const major = Number.parseInt(client?.major ?? '', 10);
-  const minor = Number.parseInt(client?.minor ?? '', 10);
-  if (!Number.isFinite(major) || !Number.isFinite(minor)) return null;
-  const { major: wantMajor, minor: wantMinor } = KUBECTL_MIN_VERSION;
-  if (major > wantMajor || (major === wantMajor && minor >= wantMinor)) return null;
-  const want = `${wantMajor}.${wantMinor}`;
-  return (
-    `kubectl ${major}.${minor} is older than ${want}, the oldest that can install cert-manager: ` +
-    'its built-in kustomize must be v5 to load the release manifest from its URL. ' +
-    `Install kubectl ${want} or newer, then run the deploy again.`
-  );
-}
 
 /**
  * cert-manager's minimum backoff after a failed CertificateRequest (the

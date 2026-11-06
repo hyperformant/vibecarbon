@@ -1,14 +1,22 @@
 # syntax=docker/dockerfile:1
 # vibecarbon's database image: the official postgres Alpine image plus three
-# additions, pg_cron, wal-g and a baked postgresql.conf. Built ONCE per version
+# additions, pg_cron, wal-g and a baked postgresql.conf, minus LLVM and the
+# headers (see the last stage). Built ONCE per version
 # by .github/workflows/publish-db-image.yml and PULLED by every deploy mode
 # (compose, compose-ha, k8s, k8s-ha) and by local `vibecarbon up`. Nothing
 # builds a database image on a server or a developer machine any more.
 #
+# WHY LLVM GOES: the official image ships libLLVM (about 100 MB) only for
+# PostgreSQL's JIT compiler, and postgresql.conf sets jit = off, so nothing in
+# vibecarbon ever loads it. The library is most of the image, and every deploy
+# pulls and unpacks the image, so removing it is the biggest boot-time saving
+# available. The last stage then flattens what is left into one layer.
+#
 # BASE: postgres:<major>.<minor>-alpine<alpine>, pinned by the multi-arch INDEX
 # digest (amd64 + arm64 children, so an Apple Silicon `vibecarbon up` resolves
 # its own platform). The builder stage and the final stage MUST name the
-# identical ref: pg_cron's shared library is compiled against that exact
+# identical ref (the stage named `db` is the one that carries it into the final
+# image): pg_cron's shared library is compiled against that exact
 # server's headers, and a minor-version skew between the two stages would ship
 # a library built for a different server. Guarded by
 # tests/unit/deploy/walg-dockerfile-arch.test.ts, which also pins the tag in
@@ -24,7 +32,7 @@
 # since the docker ecosystem watches this directory) plus a DB_IMAGE_TAG
 # revision bump. The dev channel (publish-db-image-dev.yml) overrides this
 # exact ref with a build context when a branch rebuilt wal-g.
-FROM ghcr.io/hyperformant/wal-g:3.0.9@sha256:c278e2f144a6118409174b2f614329e2846aa5842d65c47aa98e0190cd374ce2 AS walg
+FROM ghcr.io/hyperformant/wal-g:3.0.9@sha256:f7d7ceff084156ea83417b7017c0622d40737f5e5ad981701c25b3cd6a32dc29 AS walg
 
 # --- pg_cron builder -------------------------------------------------------
 # Compiled from a pinned upstream release tag. ADD --checksum verifies the
@@ -54,8 +62,8 @@ RUN apk add --no-cache build-base \
  && make -C /tmp/pg_cron with_llvm=no \
  && make -C /tmp/pg_cron with_llvm=no install DESTDIR=/out
 
-# --- final image -----------------------------------------------------------
-FROM postgres:17.11-alpine3.24@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+# --- db: the official image plus our additions, LLVM still present ----------
+FROM postgres:17.11-alpine3.24@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b AS db
 
 # pg_cron: the shared library and the extension's control + SQL scripts. Only
 # those two directories come across; no compiler, headers or build output.
@@ -75,6 +83,36 @@ RUN wal-g --version \
  && test -f "$(pg_config --sharedir)/extension/pg_cron.control" \
  && test -f "$(pg_config --pkglibdir)/pg_stat_statements.so" \
  && test -f "$(pg_config --sharedir)/extension/pg_stat_statements.control"
+
+# LLVM and the server headers go after the checks above. Deleting them here and
+# then copying the whole filesystem into `scratch` below is what makes the
+# deletion real: files removed in a later layer would still be pulled, because
+# an image ships every layer. libLLVM (and the /usr/lib/llvm<N> directory that
+# links to it, matched by glob so a base bump to another major still deletes it)
+# is the JIT compiler's library, llvmjit.so is the module that loads it, bitcode
+# is what it inlines from, and /usr/local/include is server headers that only a
+# compiler reads. ICU data stays, because non-English collations need it.
+RUN rm -f /usr/lib/libLLVM* /usr/local/lib/postgresql/llvmjit* \
+ && rm -rf /usr/lib/llvm[0-9]* /usr/local/lib/postgresql/bitcode /usr/local/include
+
+# --- final image: one flat layer ---------------------------------------------
+# `FROM scratch` loses the base image's config, so everything the official image
+# set is restated here. The values are read from the pinned base (docker image
+# inspect), minus two build-time variables nothing reads at runtime
+# (PG_SHA256, DOCKER_PG_LLVM_DEPS). A new base pin means re-reading them.
+FROM scratch
+COPY --from=db / /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=en_US.utf8 \
+    PG_MAJOR=17 \
+    PG_VERSION=17.11 \
+    PGDATA=/var/lib/postgresql/data \
+    GOSU_VERSION=1.19
+VOLUME /var/lib/postgresql/data
+# SIGINT is postgres's "fast shutdown"; the default SIGTERM would be a smart
+# shutdown that waits for clients, until docker stop SIGKILLs it.
+STOPSIGNAL SIGINT
+EXPOSE 5432
 
 # db-entrypoint.sh wraps the official docker-entrypoint.sh (it sources it and
 # keeps WAL archiving off the init-time temporary server; the script says why).

@@ -30,7 +30,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildAppRuntimeEnv } from '../../../src/lib/deploy/app-runtime-env.js';
 import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { formatDotenvLine } from '../../../src/lib/dotenv.js';
+import { DOCKER_SOCKET_PROXY_MIRROR, TRAEFIK_MIRROR } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { upstreamRef } from '../../_shared/local-images.js';
 
 // Skipped by default like the other docker tests; run explicitly via
 // `DOCKER_INTEGRATION=true pnpm test:docker` (the script sets the variable).
@@ -105,6 +107,8 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       SITE_URL: 'https://example.com',
       DB_IMAGE: 'postgres',
       DB_IMAGE_TAG: '17',
+      TRAEFIK_IMAGE: upstreamRef(TRAEFIK_MIRROR),
+      DOCKER_SOCKET_PROXY_IMAGE: upstreamRef(DOCKER_SOCKET_PROXY_MIRROR),
       APP_IMAGE: 'ghcr.io/example/reach:test',
       BETTER_AUTH_SECRET: sentinel('BETTER_AUTH_SECRET'),
       ADMIN_EMAIL: 'admin@example.com',
@@ -263,7 +267,7 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     'app-docker-proxy': 'GET /containers/json, GET /containers/{id}/logs, GET /_ping',
     // The observability add-on's log shipper reads container logs from the
     // socket itself; it serves no Docker API to anyone.
-    promtail: 'reads container logs (observability add-on)',
+    alloy: 'reads container logs (observability add-on)',
   };
   const PROXIES = ['docker-socket-proxy', 'app-docker-proxy'];
 
@@ -350,7 +354,7 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     const SECRET = sentinel('NEIGHBOUR_ENV');
     // Pinned by digest like every image the project runs.
     const BUSYBOX =
-      'busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662';
+      'busybox:1.38@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4';
     let liveDir: string;
     let victimId: string;
     const compose = (args: string[]) =>
@@ -411,8 +415,10 @@ describeDocker('compose: secrets reach only the services that use them', () => {
         '-c',
         // Retry the connect while haproxy binds (a fresh container); one
         // request per call, the response printed raw.
+        // The input stays open until the answer is back: busybox nc half-closes
+        // at EOF, and HAProxy 3.4 answers a half-closed client with 400.
         'for i in 1 2 3 4 5 6 7 8 9 10; do ' +
-          `printf '%s %s HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n' "$0" "$1" | nc app-docker-proxy 2375 && exit 0; sleep 1; done; exit 1`,
+          `{ printf '%s %s HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n' "$0" "$1"; sleep 1; } | nc app-docker-proxy 2375 && exit 0; sleep 1; done; exit 1`,
         method,
         path,
       ]);

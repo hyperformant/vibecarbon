@@ -26,6 +26,7 @@ import { progressLog } from './cli/progress.js';
 import { runCommandAsync } from './command.js';
 import { DB_POD_SELECTOR } from './deploy/db-workload.js';
 import { buildHostKeyOpts, knownHostsPath, SSH_CONNECTION_OPTS } from './host-keys.js';
+import { assertOperatorIpUnchanged } from './operator-ip-guard.js';
 import { runWithRetry } from './retry.js';
 import { shJoin } from './shell.js';
 
@@ -240,6 +241,28 @@ function logTransportRetry(err, attempt) {
 }
 
 /**
+ * Wrap a connection-making call so a transport failure first asks whether the
+ * operator's public IP changed since the command began (operator-ip-guard.js).
+ * If it did, the plain "your IP changed" error replaces the connection error
+ * and the retries and waits behind it never start.
+ *
+ * @template T
+ * @param {() => Promise<T>} fn
+ * @param {(err: Error) => boolean} isTransportFailure
+ * @returns {() => Promise<T>}
+ */
+export function withOperatorIpCheck(fn, isTransportFailure) {
+  return async (...args) => {
+    try {
+      return await fn(...args);
+    } catch (err) {
+      if (isTransportFailure(err)) await assertOperatorIpUnchanged();
+      throw err;
+    }
+  };
+}
+
+/**
  * Run `fn` with the standard never-started-transport retry policy: retry only
  * failures OpenSSH provably reported before the remote command could start
  * (isNeverStartedSshTransportFailure), on the shared 5s/15s ladder, with the
@@ -255,7 +278,7 @@ function logTransportRetry(err, attempt) {
  * @returns {Promise<T>}
  */
 export function runWithTransportRetry(fn) {
-  return runWithRetry(fn, {
+  return runWithRetry(withOperatorIpCheck(fn, isNeverStartedSshTransportFailure), {
     delaysMs: TRANSPORT_RETRY_DELAYS_MS,
     isTransient: isNeverStartedSshTransportFailure,
     onRetry: logTransportRetry,
@@ -467,8 +490,11 @@ export async function scpWithRetry(args, options = {}) {
       // (it would resolve(null) on the first blip and the ladder would never
       // engage); it is applied by hand below once the ladder is spent.
       //
-      // shell-safety-ignore: -o options come from CALLERS; BatchMode is enforced per call site by Pattern 5b in check-shell-safety.js
-      () => runCommandAsync(['scp', ...args], { ...rest, silent: true }),
+      withOperatorIpCheck(
+        // shell-safety-ignore: -o options come from CALLERS; BatchMode is enforced per call site by Pattern 5b in check-shell-safety.js
+        () => runCommandAsync(['scp', ...args], { ...rest, silent: true }),
+        isTransientSshCommandError,
+      ),
       {
         delaysMs,
         isTransient: isTransientSshCommandError,

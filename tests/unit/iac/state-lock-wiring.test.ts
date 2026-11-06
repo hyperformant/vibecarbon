@@ -4,14 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * Proves the LOCK IS WIRED IN, not merely that the lock works.
  *
  * state-lock.test.ts exercises the mechanism in isolation; that would still
- * pass if nothing called it. This drives the real `upStack` entry point the way
- * the HA runners do — two stacks, one state bucket, both started in the same
- * tick under Promise.all.
- *
- * Its scope follows Ruling A′ (state-lock.js header): while the state bucket
- * is inside its provider's settle window the two Pulumi updates never overlap;
- * past it only select and refresh are serialized and the two updates run in
- * parallel. state-lock-scope.test.ts counts the peaks.
+ * pass if nothing called it. This drives the real `syncServerState`, the one
+ * operation that holds the lock: an export, an edit and an import of one
+ * state, which must not interleave with another on the same bucket.
  */
 
 const selectStackMock = vi.fn();
@@ -20,7 +15,7 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   LocalWorkspace: {
     selectStack: (...args: unknown[]) => selectStackMock(...args),
     createStack: () => {
-      throw new Error('createStack must not be called: it would clobber real state');
+      throw new Error('createStack must not be called: the sync never conjures a stack');
     },
     create: async () => ({ listStacks: async () => [] }),
   },
@@ -28,142 +23,108 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
 
 vi.mock('../../../src/lib/cli/progress.js', () => ({ progressLog: vi.fn() }));
 
-/** Same bucket for both stacks — the HA arrangement. */
 const s3Config = {
   bucket: 'proj-storage',
   stateBucket: 'proj-storage-pulumi-state-a1b2c3',
   endpoint: 'https://nbg1.your-objectstorage.com',
   region: 'nbg1',
+  accessKey: 'k',
+  secretKey: 's',
 };
 
-/** A stack whose `up` takes a turn we can observe. */
-const makeStack = (name: string, log: string[], gate: Promise<void>) => ({
-  name,
-  cancel: async () => {},
-  refresh: async () => ({}),
-  exportStack: async () => ({ deployment: { resources: [] } }),
-  outputs: async () => ({ serverIp: { value: '1.2.3.4' } }),
-  workspace: { removeStack: async () => {} },
-  up: async () => {
-    log.push(`${name}:start`);
-    await gate;
-    log.push(`${name}:end`);
-    return { outputs: { serverIp: { value: '1.2.3.4' } }, summary: { result: 'succeeded' } };
+const TARGET = { serverId: 'new-id', serverType: 'big', ip: '1.2.3.4' };
+
+/** A vultr compose stack whose import takes a turn the test can hold open. */
+const stateFor = () => ({
+  deployment: {
+    resources: [
+      { type: 'pulumi:pulumi:Stack', outputs: {} },
+      {
+        type: 'vultr:index/instance:Instance',
+        urn: 'urn:pulumi:prod::p::vultr:index/instance:Instance::server',
+        id: 'old-id',
+        inputs: { plan: 'small' },
+        outputs: { plan: 'small', mainIp: '9.9.9.9' },
+      },
+    ],
   },
 });
+
+function stackThat(name: string, log: string[], gate: Promise<void>) {
+  return {
+    name,
+    exportStack: async () => {
+      log.push(`${name}:export`);
+      return stateFor();
+    },
+    importStack: async () => {
+      await gate;
+      log.push(`${name}:import`);
+    },
+  };
+}
 
 beforeEach(() => {
   vi.resetModules();
   selectStackMock.mockReset();
 });
 
+const options = (stateBucket = s3Config.stateBucket) => ({
+  provider: 'vultr',
+  providerToken: 'tok',
+  projectName: 'testproj',
+  s3Config: { ...s3Config, stateBucket },
+});
+
 describe('state lock — wiring', () => {
-  it('on a young state bucket, never runs two ups against it at the same time', async () => {
-    const { upStack } = await import('../../../src/lib/iac/index.js');
-    const { resetStateLocksForTest } = await import('../../../src/lib/iac/state-lock.js');
-    resetStateLocksForTest();
-
-    const log: string[] = [];
-    let openPrimary!: () => void;
-    const primaryGate = new Promise<void>((r) => {
-      openPrimary = r;
-    });
-
-    selectStackMock.mockImplementation((args: { stackName: string }) =>
-      Promise.resolve(
-        args.stackName === 'e2-primary'
-          ? makeStack('e2-primary', log, primaryGate)
-          : makeStack('e2-standby', log, Promise.resolve()),
-      ),
-    );
-
-    const young = { s3Config, projectName: 'testproj', stateBucketYoung: true };
-    const fan = Promise.all([
-      upStack('e2-primary', () => ({}), young),
-      upStack('e2-standby', () => ({}), young),
-    ]);
-
-    // Let every microtask that can run, run. Without the whole-operation lock
-    // the standby's up would have started by now, which is the overlap a
-    // young bucket must not see.
-    for (let i = 0; i < 50; i++) await Promise.resolve();
-    expect(log).toEqual(['e2-primary:start']);
-
-    openPrimary();
-    await fan;
-
-    // Strict interleaving check: primary fully finishes before standby begins.
-    expect(log).toEqual([
-      'e2-primary:start',
-      'e2-primary:end',
-      'e2-standby:start',
-      'e2-standby:end',
-    ]);
-  });
-
-  it('past the settle window, the second up starts while the first is still running', async () => {
-    const { upStack } = await import('../../../src/lib/iac/index.js');
-    const { resetStateLocksForTest } = await import('../../../src/lib/iac/state-lock.js');
-    resetStateLocksForTest();
-
-    const log: string[] = [];
-    let openPrimary!: () => void;
-    const primaryGate = new Promise<void>((r) => {
-      openPrimary = r;
-    });
-    selectStackMock.mockImplementation((args: { stackName: string }) =>
-      Promise.resolve(
-        args.stackName === 'e2-primary'
-          ? makeStack('e2-primary', log, primaryGate)
-          : makeStack('e2-standby', log, Promise.resolve()),
-      ),
-    );
-
-    const settled = { s3Config, projectName: 'testproj', stateBucketYoung: false };
-    const fan = Promise.all([
-      upStack('e2-primary', () => ({}), settled),
-      upStack('e2-standby', () => ({}), settled),
-    ]);
-    for (let i = 0; i < 200; i++) await Promise.resolve();
-    // The standby provisioned to completion while the primary's up was held.
-    expect(log).toEqual(['e2-primary:start', 'e2-standby:start', 'e2-standby:end']);
-
-    openPrimary();
-    await fan;
-    expect(log.at(-1)).toBe('e2-primary:end');
-  });
-
-  it('does not serialize stacks in different state buckets', async () => {
-    // Two unrelated environments must not queue behind each other; the lock is
-    // keyed on the backend URL for exactly this reason.
-    const { upStack } = await import('../../../src/lib/iac/index.js');
-    const { resetStateLocksForTest } = await import('../../../src/lib/iac/state-lock.js');
-    resetStateLocksForTest();
-
+  it('two server-state syncs on one bucket never interleave', async () => {
+    const { syncServerState } = await import('../../../src/lib/iac/server-state.js');
     const log: string[] = [];
     let openFirst!: () => void;
     const firstGate = new Promise<void>((r) => {
       openFirst = r;
     });
-
-    selectStackMock.mockImplementation((args: { stackName: string }) =>
-      Promise.resolve(
-        args.stackName === 'alpha'
-          ? makeStack('alpha', log, firstGate)
-          : makeStack('beta', log, Promise.resolve()),
-      ),
+    selectStackMock.mockImplementation(async (args: { stackName: string }) =>
+      args.stackName === 'one'
+        ? stackThat('one', log, firstGate)
+        : stackThat('two', log, Promise.resolve()),
     );
 
-    const alpha = upStack('alpha', () => ({}), { s3Config, projectName: 'testproj' });
-    const beta = upStack('beta', () => ({}), {
-      s3Config: { ...s3Config, stateBucket: 'other-project-pulumi-state-9z8y7x' },
-      projectName: 'otherproj',
-    });
-
-    await beta;
-    expect(log).toContain('beta:end');
+    const fan = Promise.all([
+      syncServerState('one', TARGET, options()),
+      syncServerState('two', TARGET, options()),
+    ]);
+    // The first sync lazily imports the Pulumi automation layer, which takes
+    // longer than waitFor's default 1 s on a loaded machine.
+    await vi.waitFor(() => expect(log).toContain('one:export'), { timeout: 15_000 });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(log).toEqual(['one:export']);
 
     openFirst();
-    await alpha;
+    await fan;
+    expect(log).toEqual(['one:export', 'one:import', 'two:export', 'two:import']);
+  });
+
+  it('does not serialize stacks in different state buckets', async () => {
+    // Two unrelated environments must not queue behind each other; the lock is
+    // keyed on the backend URL for exactly this reason.
+    const { syncServerState } = await import('../../../src/lib/iac/server-state.js');
+    const log: string[] = [];
+    let openFirst!: () => void;
+    const firstGate = new Promise<void>((r) => {
+      openFirst = r;
+    });
+    selectStackMock.mockImplementation(async (args: { stackName: string }) =>
+      args.stackName === 'one'
+        ? stackThat('one', log, firstGate)
+        : stackThat('two', log, Promise.resolve()),
+    );
+
+    const first = syncServerState('one', TARGET, options());
+    await syncServerState('two', TARGET, options('other-project-pulumi-state-9z8y7x'));
+    expect(log).toContain('two:import');
+
+    openFirst();
+    await first;
   });
 });

@@ -48,6 +48,11 @@ const BARE_ALLOWED: { file: string; fragment: string; why: string }[] = [
       'a hint for a server that may still hold a RETIRED stack (the preflight refuses before the ' +
       'bundle upload); that stack predates vc-compose, so its own compose files are all there is',
   },
+  {
+    file: 'src/lib/deploy/compose/server-floors.js',
+    fragment: 'docker compose version --short',
+    why: 'reads the version of the Compose plugin itself, which involves no project and no files',
+  },
 ];
 
 /** Files that run Compose LOCALLY through an argv array, and why it is local. */

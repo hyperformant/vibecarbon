@@ -114,7 +114,7 @@ describe('deployK3s wires the replayed token into the real program', () => {
       /resolveStackK3sToken\(Provider, programConfig, \{\s*provider: providerIdFor\(options\),/,
     );
     expect(src).toMatch(
-      /upStack\(options\.environment, program, \{\s*provider: providerIdFor\(options\),/,
+      /upStack\(options\.environment, program, \{\s*perfStem: [^\n]*\n\s*provider: providerIdFor\(options\),/,
     );
   });
 });

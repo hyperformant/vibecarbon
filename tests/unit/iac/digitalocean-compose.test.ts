@@ -12,11 +12,10 @@ import { namesHost } from '../../_shared/hosts.js';
 const CLOUD_INIT_PATH = join(process.cwd(), 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
 const sharedCloudInit = readFileSync(CLOUD_INIT_PATH, 'utf-8');
 
-// Step 1 (blocking) parity check: Hetzner's `docker-ce` image ships Docker
-// preinstalled, so the shared cloud-init's `systemctl enable --now docker`
-// runcmd step assumes docker.service already exists. DigitalOcean's
-// `ubuntu-24-04-x64` image does not ship Docker, so renderDoUserData()
-// must splice an official-Docker-apt-repo install block into `runcmd:`
+// Step 1 (blocking) parity check: the shared cloud-init's `systemctl enable
+// --now docker` runcmd step assumes docker.service already exists, but
+// DigitalOcean's `ubuntu-26-04-x64` image does not ship Docker, so
+// renderDoUserData() must splice an official-Docker-apt-repo install block into `runcmd:`
 // BEFORE that step, or the droplet would boot with no `docker` command and
 // the first `docker compose up` would fail.
 describe('renderDoUserData (cloud-init parity splice)', () => {
@@ -90,7 +89,7 @@ describe('renderDoUserData (cloud-init parity splice)', () => {
     expect(rendered).toMatch(/ufw, allow, '443\/tcp'/);
     expect(rendered).toContain('/var/lib/vibecarbon/ready');
     expect(rendered).toContain('final_message:');
-    expect(rendered).toContain('package_update: true');
+    expect(rendered).not.toContain('package_update: true');
   });
 
   // d1 e2e RCA pin: a live DigitalOcean droplet received user-data with the
@@ -162,7 +161,9 @@ describe('renderDoUserData (cloud-init parity splice)', () => {
     // missing an entry for typography actually in use — this should
     // never fire, but if it does, the map (not the '?' fallback) is the fix.
     expect(sharedCloudInit).not.toContain('?');
-    expect(rendered).not.toContain('?');
+    // The one legitimate '?' source is a shell `rc=$?`; stripping exactly that
+    // keeps a fallback '?' that follows any other '$' visible.
+    expect(rendered.replaceAll('rc=$?', '')).not.toContain('?');
   });
 
   it('throws (fail loud) if the runcmd anchor is missing from the input', () => {

@@ -19,10 +19,10 @@ describe('M3 Task 3 — do-master-init.sh shape', () => {
   it('installs the digitalocean secret before the CCM, the CCM before the CSI crds, the crds before the driver, and the ready marker last', () => {
     const secretIdx = master.indexOf('create secret generic digitalocean');
     const ccmIdx = master.indexOf(
-      'digitalocean-cloud-controller-manager/master/releases/digitalocean-cloud-controller-manager/v0.1.68.yml',
+      'digitalocean-cloud-controller-manager/v0.1.72/releases/digitalocean-cloud-controller-manager/v0.1.72.yml',
     );
-    const crdsIdx = master.indexOf('csi-digitalocean-v4.17.0/crds.yaml');
-    const driverIdx = master.indexOf('csi-digitalocean-v4.17.0/driver.yaml');
+    const crdsIdx = master.indexOf('csi-digitalocean-v4.19.0/crds.yaml');
+    const driverIdx = master.indexOf('csi-digitalocean-v4.19.0/driver.yaml');
     const markerIdx = master.indexOf('touch /tmp/k3s-ready');
 
     for (const idx of [secretIdx, ccmIdx, crdsIdx, driverIdx, markerIdx]) {
@@ -34,15 +34,15 @@ describe('M3 Task 3 — do-master-init.sh shape', () => {
     expect(driverIdx).toBeLessThan(markerIdx);
   });
 
-  it('pins the CCM to v0.1.68 and the CSI driver to v4.17.0 (never `master`/`latest`)', () => {
+  it('pins the CCM to v0.1.72 and the CSI driver to v4.19.0 by tag (never `master`/`latest`)', () => {
     expect(master).toContain(
-      'https://raw.githubusercontent.com/digitalocean/digitalocean-cloud-controller-manager/master/releases/digitalocean-cloud-controller-manager/v0.1.68.yml',
+      'https://raw.githubusercontent.com/digitalocean/digitalocean-cloud-controller-manager/v0.1.72/releases/digitalocean-cloud-controller-manager/v0.1.72.yml',
     );
     expect(master).toContain(
-      'https://raw.githubusercontent.com/digitalocean/csi-digitalocean/master/deploy/kubernetes/releases/csi-digitalocean-v4.17.0/crds.yaml',
+      'https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.19.0/crds.yaml',
     );
     expect(master).toContain(
-      'https://raw.githubusercontent.com/digitalocean/csi-digitalocean/master/deploy/kubernetes/releases/csi-digitalocean-v4.17.0/driver.yaml',
+      'https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.19.0/driver.yaml',
     );
   });
 
@@ -80,7 +80,7 @@ describe('M3 Task 3 — do-master-init.sh shape', () => {
     // affinity conflict (RCA: DO d3 rig, battery kept-rig deploy
     // iteration 2). This pin exists so a future CSI version bump can't
     // silently drop the patch and reintroduce the wedge.
-    const driverIdx = master.indexOf('csi-digitalocean-v4.17.0/driver.yaml');
+    const driverIdx = master.indexOf('csi-digitalocean-v4.19.0/driver.yaml');
     const patchIdx = master.indexOf('kubectl patch daemonset csi-do-node');
     const markerIdx = master.indexOf('touch /tmp/k3s-ready');
     expect(driverIdx).toBeGreaterThan(-1);

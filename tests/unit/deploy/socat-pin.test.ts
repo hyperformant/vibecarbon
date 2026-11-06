@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildReplicationOverlay, SOCAT_IMAGE } from '../../../src/lib/deploy/compose/ha.js';
+import { buildReplicationOverlay } from '../../../src/lib/deploy/compose/ha.js';
+import { renderManifestImages, socatImageRef } from '../../../src/lib/images.js';
 
 /**
  * socat pin guard for the replication gateway.
@@ -13,7 +14,8 @@ import { buildReplicationOverlay, SOCAT_IMAGE } from '../../../src/lib/deploy/co
  * so each node froze on whatever :latest meant at its first pull and two nodes
  * in the same pair could run different socat builds. Both now pin the same
  * tag AND digest, on our ghcr mirror (upstream's amd64 child; Docker Hub's
- * anonymous rate limit never reaches a deploy).
+ * anonymous rate limit never reaches a deploy). The ref comes from the deploy's
+ * version set on both tiers, so two nodes of a pair cannot disagree.
  */
 
 const K8S_MANIFEST = fileURLToPath(
@@ -21,8 +23,8 @@ const K8S_MANIFEST = fileURLToPath(
 );
 
 function k8sSocatRef(): string {
-  const m = readFileSync(K8S_MANIFEST, 'utf8').match(
-    /image:\s*(ghcr\.io\/hyperformant\/socat:[^\s]+)/,
+  const m = renderManifestImages(readFileSync(K8S_MANIFEST, 'utf8')).match(
+    /image:\s*"?(ghcr\.io\/hyperformant\/socat:[^\s"]+)/,
   );
   if (!m) throw new Error('no pinned socat mirror image found in repl-gateway.yaml');
   return m[1];
@@ -33,8 +35,8 @@ const PINNED_SOCAT = /^ghcr\.io\/hyperformant\/socat:\d+\.\d+\.\d+\.\d+@sha256:[
 describe('replication gateway socat pin', () => {
   it('compose overlay pins an explicit socat tag and digest', () => {
     const yaml = buildReplicationOverlay('10.10.0.1');
-    expect(SOCAT_IMAGE).toMatch(PINNED_SOCAT);
-    expect(yaml).toContain(`image: ${SOCAT_IMAGE}`);
+    expect(socatImageRef()).toMatch(PINNED_SOCAT);
+    expect(yaml).toContain(`image: ${socatImageRef()}`);
     // Never the bare/implicit-latest form that caused the drift.
     expect(yaml).not.toMatch(/image:\s*(alpine\/)?socat\s*$/m);
   });
@@ -44,6 +46,6 @@ describe('replication gateway socat pin', () => {
   });
 
   it('compose and k8s tiers agree on one socat ref', () => {
-    expect(k8sSocatRef()).toBe(SOCAT_IMAGE);
+    expect(k8sSocatRef()).toBe(socatImageRef());
   });
 });

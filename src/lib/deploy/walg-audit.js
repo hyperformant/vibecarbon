@@ -226,12 +226,17 @@ export const WALG_AUDIT_RETRY_DELAYS_MS = [5000, 15000];
 
 /**
  * Per-attempt exec ceiling, shared by both deploy paths so neither can drift
- * into being unbounded. The probe is one S3 LIST plus a catalog read — seconds
- * — so this is a hang backstop (a wedged `docker compose exec` / `kubectl
- * exec`, an apiserver that stopped answering), not a working budget. Bounding
- * it is what turns a hang into a retryable failure the audit can report.
+ * into being unbounded. The probe is one S3 LIST plus a catalog read. On
+ * 2026-11-05 the slowest k8s audit that did not hang took 9.3 s (DigitalOcean
+ * and Hetzner), and compose's audit step, which also runs the RLS audit, 16 s
+ * (all five providers). So this is a hang backstop (a wedged `docker compose
+ * exec` / `kubectl exec`, an apiserver that stopped answering), not a working
+ * budget. Bounding it is what turns a hang into a retryable failure the audit
+ * can report, and a hang costs this much per attempt: one attempt on
+ * DigitalOcean k8s hung until the former 120 s bound killed it, and the retry
+ * answered in under a second.
  */
-export const WALG_AUDIT_PROBE_TIMEOUT_MS = 120_000;
+export const WALG_AUDIT_PROBE_TIMEOUT_MS = 30_000;
 
 /**
  * Human-readable "check this by hand" command per deploy path. Keyed by the

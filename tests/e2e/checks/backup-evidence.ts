@@ -10,14 +10,16 @@
  *   - `src/lib/deploy/walg-audit.js` proves wal-g can REACH the bucket — but
  *     its own docblock is explicit that an EMPTY `backup-list` is a PASS, so
  *     a prefix that never receives a single object still audits green.
- *   - `pg_stat_archiver` is *structurally blind* here: `wal-archive.sh`
- *     deliberately exits 0 on push failure (a non-zero archive_command pins
- *     pg_wal and fills the disk — RCA prod-1 2026-05-26), so Postgres counts
- *     every dropped segment as archived and `failed_count` stays 0.
+ *   - `pg_stat_archiver` counts what `archive_command` reported, not what is
+ *     in the bucket. `wal-archive.sh` exits 1 on a failed push, so Postgres
+ *     keeps the segment and retries it, but it exits 0 for a segment it gives
+ *     up under disk pressure or skips on purpose, and those count as archived.
  *
  * The gap that leaves is the one that matters to a customer: a database that
- * is healthy, serving traffic, green on every check, and accumulating ZERO
- * recoverable backups. Nothing in the repo asserted an object exists.
+ * is healthy, serving traffic, green on every check, and accumulating no
+ * recoverable backups. Nothing else in the repo asserts an object exists. When
+ * nothing lands, the check reads the archiver before the server is torn down:
+ * it separates a failing push from a segment the listing cannot see.
  *
  * HOW IT ASSERTS EFFECT
  * ---------------------
@@ -34,7 +36,7 @@
  * freshness heuristic: no clock-skew comparison, no "some object looks
  * recent", no dependence on `LastModified` semantics that differ between
  * Hetzner Object Storage and DO Spaces. Either the segment Postgres just
- * closed is in the bucket, or the archive path is dropping data on the floor.
+ * closed is in the bucket, or the archive path is not delivering it.
  *
  * WHY WE FORCE THE SWITCH RATHER THAN WAITING
  * -------------------------------------------
@@ -322,6 +324,33 @@ export function buildWalSwitchRemoteCommand(projectName: string, isCompose: bool
   );
 }
 
+/**
+ * Read-only remote command for a segment that never landed. The server is torn
+ * down straight after a failed verify, so this is the last chance to learn
+ * whether the push failed (failed_count, WAL_ARCHIVE_FAILED) or succeeded and
+ * the listing cannot see it. psql runs directly, not through bash -c: the SQL
+ * carries single quotes, and it needs no probe logic.
+ */
+export function buildArchiverEvidenceCommand(projectName: string, isCompose: boolean): string {
+  const sql =
+    "select 'archived=' || archived_count || ' failed=' || failed_count || " +
+    "' last_archived=' || coalesce(last_archived_wal, 'none') || " +
+    "' last_failed=' || coalesce(last_failed_wal, 'none') from pg_stat_archiver";
+  const psql = `psql -U postgres -d postgres -tAXc "${sql}"`;
+  const logLines = "2>&1 | grep -E 'WAL_ARCHIVE|wal-archive|archive command|ERROR' | tail -n 8";
+  if (isCompose) {
+    return (
+      `cd /opt/${projectName} && docker compose exec -T db ${psql}; ` +
+      `docker compose logs --tail 400 db ${logLines}`
+    );
+  }
+  return (
+    'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; ' +
+    `kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- ${psql}; ` +
+    `kubectl -n vibecarbon logs ${DB_POD} -c ${DB_CONTAINER} --tail=400 ${logLines}`
+  );
+}
+
 function ssh(ip: string, sshKeyPath: string, cmd: string): string {
   // SECURITY: all arguments come from trusted test config, never user input.
   // e2eSshOpts carries BatchMode=yes (a password fallback would hang the step
@@ -554,16 +583,27 @@ export async function runBackupEvidenceChecks(
   if (landed) {
     results.push(pass('backup_walg_wal_archived', evidenceDetails));
   } else {
+    let archiver: string;
+    try {
+      archiver = execRemote(
+        masterIp,
+        sshKeyPath,
+        buildArchiverEvidenceCommand(projectName, isCompose),
+      );
+    } catch (err) {
+      const why = err instanceof Error ? err.message.split('\n')[0] : String(err);
+      archiver = `could not read the archiver: ${why}`;
+    }
     results.push(
       fail(
         'backup_walg_wal_archived',
         `Postgres closed WAL segment ${probe.segment} but no object appeared under ` +
           `s3://${target.bucket}/${segmentPrefix} within ${Math.round(budgetMs / 1000)}s. ` +
-          'The archive path is dropping WAL: wal-archive.sh exits 0 on push failure by design, ' +
-          'so postgres and pg_stat_archiver both report success while nothing is recoverable. ' +
-          `Check wal-g credentials/endpoint for ${target.bucket}.` +
+          'wal-archive.sh holds a segment it cannot push and Postgres retries it, so the ' +
+          'archiver below tells a failing push from a listing that cannot see the object. ' +
+          `Archiver: ${archiver}` +
           (lastError ? ` Last S3 error: ${lastError}` : ''),
-        evidenceDetails,
+        { ...evidenceDetails, archiver },
       ),
     );
   }

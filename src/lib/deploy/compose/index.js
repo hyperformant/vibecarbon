@@ -12,12 +12,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-settings.mjs';
-import { progressLog, spinner } from '../../cli/progress.js';
+import { progressLog, shouldAnimateSpinner, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { writeLogDetail } from '../../deploy-logger.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
-import { bootPullImages, loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
-import { K8S_MIRROR_ORG, mirroredPackageNames, resolveDbImage } from '../../images.js';
+import { loadComposeCloudInit } from '../../iac/compose-cloud-init.js';
+import { K8S_MIRROR_ORG, mirroredPackageNames } from '../../images.js';
+import { assertOperatorIpUnchanged } from '../../operator-ip-guard.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { redactCredentials } from '../../redact-credentials.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
@@ -59,10 +60,12 @@ import {
   isAdminProbeExit,
   isTerminalAdminProbeExit,
 } from '../admin-ready.js';
+import { BOOT_MARK_LOG, readBootStage } from '../boot-timing.js';
 // DNS_NOT_SETTLED_RETRY_DELAYS_MS: shared with remote-build.js's own
 // DNS-not-settled ladder so the two can't drift apart — see that file's
 // docstring on the constant for the sizing rationale.
 import { DNS_NOT_SETTLED_RETRY_DELAYS_MS } from '../remote-build.js';
+import { waitForRemoteMarker } from '../remote-marker.js';
 import { composeRlsAuditShell } from '../rls-audit.js';
 import {
   assertWalgBackupsWorking,
@@ -251,6 +254,7 @@ export async function sshRunAsync(ip, sshKeyPath, command, options = {}) {
         return await runCommandAsync(sshArgs, runOpts);
       } catch (err) {
         if (!isTransientSshCommandError(err)) throw err;
+        await assertOperatorIpUnchanged();
         if (!ladderLocked) {
           ladderLocked = true;
           if (retries > 1 && isDnsNotSettledSshCommandError(err)) {
@@ -399,7 +403,7 @@ export function bootPullLogLine(ip, status) {
  * on by the deploy (setupServer does not await it) and never retried: the
  * deploy's own pull does whatever the boot pull did not.
  */
-export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync, deployDbImage } = {}) {
+export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync } = {}) {
   try {
     const status = await run(
       ip,
@@ -408,23 +412,6 @@ export async function noteBootPull(ip, sshKeyPath, { run = sshRunAsync, deployDb
       { timeout: 15_000, ignoreError: true, retries: 1 },
     );
     writeLogDetail(bootPullLogLine(ip, status ?? 'absent'));
-    // The boot pull fetches the pinned db image; a deploy running another
-    // (VIBECARBON_DB_IMAGE) pulls its own, which the log should explain.
-    const [bootDb] = bootPullImages();
-    // Resolved here, inside the try: a malformed VIBECARBON_DB_IMAGE throws,
-    // and this note runs unawaited (setupServer), so it must never reject.
-    let deployDb = deployDbImage;
-    try {
-      deployDb ??= resolveDbImage({ warn: () => {} }).ref;
-    } catch {
-      deployDb = null;
-    }
-    if (deployDb && deployDb !== bootDb) {
-      writeLogDetail(
-        `[boot-pull] ${ip}: this deploy runs db image ${deployDb}, not the pinned ` +
-          `${bootDb} the boot pull fetched; the deploy pull fetches it`,
-      );
-    }
   } catch {
     // The note is informational: a failed read changes nothing.
   }
@@ -443,44 +430,57 @@ export async function setupServer(ip, sshKeyPath, timeoutMs = 180_000) {
   // a slow boot (or a flaky uplink) reads as "still working", not "hung".
   const s = spinner();
   s.start(`Waiting for ${ip} to finish booting (cloud-init)...`);
-  // Deliberately NOT lib/retry.js#pollUntil: this loop's two-phase cadence
-  // (750ms × 15 fast probes, then flat 5s) isn't expressible in pollUntil's
-  // exponential backoff, and the fast phase saves ~10s on every deploy.
   const start = Date.now();
   // Provider-owned (see BaseProvider.CLOUD_INIT_READY_TIMEOUT_MS): 180s is a
   // generous ceiling vs Hetzner's typical ~20-40s (Docker preinstalled), but
   // a provider that installs Docker inside cloud-init (e.g. DigitalOcean)
   // passes a materially larger timeoutMs.
   const deadline = start + timeoutMs;
-  let attempt = 0;
   let everConnected = false;
-  while (Date.now() < deadline) {
-    // retries:1 — the poll loop IS the retry, so each tick is a SINGLE ssh
-    // attempt. That keeps the wait quiet: no inner `[retry] ssh …` lines
-    // printing raw over the spinner (the corruption a flaky connection used to
-    // trigger). The spinner message carries progress instead.
-    const result = await sshRunAsync(
-      ip,
-      sshKeyPath,
-      'test -f /var/lib/vibecarbon/ready && echo READY || echo NOT_READY',
-      { timeout: 10_000, ignoreError: true, retries: 1 },
-    );
-    if (result != null) everConnected = true; // any output means SSH connected
-    if (hasSentinelLine(result, 'READY')) {
-      s.stop(`Server ${ip} ready (cloud-init complete)`);
-      // Not awaited: the deploy never waits on the boot pull.
-      noteBootPull(ip, sshKeyPath);
-      return;
-    }
+  let stageLabel = '';
+  // One held SSH session returns the moment the marker exists and streams the
+  // boot log; a 1s timer keeps the spinner's elapsed time and stage current.
+  const render = () => {
     const elapsed = Math.round((Date.now() - start) / 1000);
-    s.message(
-      everConnected
-        ? `Waiting for cloud-init to finish on ${ip} (${elapsed}s)...`
-        : `Waiting for SSH to reach ${ip} (${elapsed}s)...`,
-    );
-    const interval = attempt < 15 ? 750 : 5000;
-    attempt++;
-    await new Promise((r) => setTimeout(r, interval));
+    const base = everConnected
+      ? `Waiting for cloud-init to finish on ${ip} (${elapsed}s)`
+      : `Waiting for SSH to reach ${ip} (${elapsed}s)`;
+    s.message(stageLabel ? `${base}: ${stageLabel}` : `${base}...`);
+  };
+  // The quiet (non-TTY) spinner prints a line per change, and the elapsed time
+  // changes every tick, so only an animating spinner gets the timer. Quiet
+  // output still renders on connect and on a stage change.
+  const ticker = shouldAnimateSpinner() ? setInterval(render, 1000) : null;
+  let ready = false;
+  try {
+    ({ ready, connected: everConnected } = await waitForRemoteMarker({
+      run: (script, { timeoutMs: holdMs, onLine }) =>
+        sshRunAsync(ip, sshKeyPath, script, {
+          timeout: holdMs,
+          ignoreError: true,
+          retries: 1,
+          onStdoutLine: onLine,
+        }),
+      markerPath: '/var/lib/vibecarbon/ready',
+      logPath: BOOT_MARK_LOG,
+      deadlineMs: deadline,
+      onConnected: () => {
+        everConnected = true;
+        render();
+      },
+      onLine: readBootStage((label) => {
+        stageLabel = label;
+        render();
+      }),
+    }));
+  } finally {
+    if (ticker) clearInterval(ticker);
+  }
+  if (ready) {
+    s.stop(`Server ${ip} ready (cloud-init complete)`);
+    // Not awaited: the deploy never waits on the boot pull.
+    noteBootPull(ip, sshKeyPath);
+    return;
   }
 
   s.stop(
@@ -538,14 +538,12 @@ export async function dockerLoginOnServer(ip, sshKeyPath, creds) {
   const authB64 = Buffer.from(`${username}:${token}`).toString('base64');
 
   // Merge into any existing config.json via jq (preserves other registries'
-  // auth when we log in to multiple). jq is guaranteed on Hetzner docker-ce
-  // images; if not present we fall back to writing a minimal file.
-  // Bash here-doc writes a minimal config.json directly. No jq dependency:
-  // bare Hetzner images don't ship with it, and installing via apt-get races
+  // auth when we log in to multiple). Bash here-doc writes a minimal config.json directly. No jq dependency:
+  // plain Ubuntu images don't ship with it, and installing via apt-get races
   // cloud-init's unattended-upgrades apt lock (observed 04:08 UTC —
   // "Could not get lock /var/lib/apt/lists/lock").
   //
-  // Python3 is preinstalled on Ubuntu's docker-ce cloud image, so we use
+  // Python3 is preinstalled on Ubuntu's cloud images, so we use
   // it to merge cleanly into any existing config.json (preserves other
   // registries' auth when logging into Docker Hub + GHCR sequentially).
   // Falls back to overwriting config.json if python3 is absent.
@@ -716,8 +714,7 @@ export function isLocalOnlyImageTag(imageRef) {
 /**
  * Wait for Docker daemon to be ready on a remote server.
  *
- * On Hetzner docker-ce VPSes Docker is already running once cloud-init
- * releases the dpkg lock, so the first check usually succeeds immediately.
+ * Docker is already running once cloud-init releases the dpkg lock, so the first check usually succeeds immediately.
  * Short initial interval keeps the latency tight on the rare miss.
  */
 export async function waitForDockerReady(ip, sshKeyPath, maxAttempts = 12) {
@@ -905,22 +902,31 @@ async function waitForServicesHealthy(ip, sshKeyPath, projectName, maxWaitMs = 1
 }
 
 /**
- * App-health probe backoff ramp (F4).
- *
- * verifyAppHealth runs LAST (after wait-admin-ready + audit-database), so the app is
- * usually already serving and the very first probe passes. When it isn't, the
- * app typically binds :3000 within ~10-30s — probe fast (2s) for the first
- * few gaps so a fast-converging app is detected within ~2s instead of waiting
- * a full flat 10s, then back off to 10s for the long tail.
- *
- * `attempt` is the loop index; the gap is applied BEFORE probe `attempt` (only
- * when attempt > 0).
- *
- * @param {number} attempt
- * @returns {number} ms to wait before this probe
+ * How long verifyAppHealth waits for the app to answer: 3 minutes covers the
+ * worst-case cold start (the app binds :3000 in 10-30s empirically).
  */
-export function healthProbeDelayMs(attempt) {
-  return attempt <= 5 ? 2000 : 10000;
+export const APP_HEALTH_PROBE_BUDGET_MS = 180_000;
+
+/**
+ * The held probe: a node program that asks `localhost:3000<path>` every 200 ms
+ * and exits 0 on the first 2xx, so the app is seen the moment it answers. It
+ * exits 1 once `budgetMs` has passed. A request that never answers is
+ * abandoned after 2 s, and a hard timer at the budget ends the program even
+ * if one is still in flight.
+ *
+ * @param {string} path
+ * @param {number} budgetMs
+ * @returns {string}
+ */
+export function appHealthProbeScript(path, budgetMs) {
+  return (
+    `const h=require('http');const end=Date.now()+${Math.max(0, Math.floor(budgetMs))};` +
+    `setTimeout(()=>process.exit(1),Math.max(0,end-Date.now()));` +
+    `const go=()=>{const r=h.request({host:'localhost',port:3000,path:${JSON.stringify(path)},method:'GET',timeout:2000},res=>{res.resume();` +
+    `if(res.statusCode>=200&&res.statusCode<300)process.exit(0);next()});` +
+    `r.on('error',next);r.on('timeout',()=>r.destroy());r.end()};` +
+    `const next=()=>{if(Date.now()>=end)process.exit(1);setTimeout(go,200)};go();`
+  );
 }
 
 /**
@@ -928,8 +934,10 @@ export function healthProbeDelayMs(attempt) {
  *
  * Probes `http://localhost/api/health` on the server itself with a Host header
  * (if a domain is configured), bypassing public DNS and TLS to isolate app
- * health from DNS propagation / cert issuance races. Polls up to `attempts`
- * times with 3s between attempts.
+ * health from DNS propagation / cert issuance races. One held probe inside the
+ * container asks every 200 ms until the app answers or `budgetMs` is spent;
+ * the outer loop re-runs it (after 1s) only when `exec` itself fails, as it
+ * does while the container restarts.
  *
  * On failure, captures `docker compose ps` + the last 40 lines of the `app`
  * container log so operators see WHY the probe failed, not just THAT it did.
@@ -950,25 +958,29 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
   // First-boot route registration takes longer than the initial `docker
   // compose up -d` return: the app has to start + bind port 3000.
   // Empirically 10-30s. 3 min tolerates worst-case cold starts.
-  const { path = '/api/health', attempts = 18, delayMs } = options;
-  // Ramp by default (fast-early, F4); honor an explicit flat delayMs override.
-  const delayFor = (i) => delayMs ?? healthProbeDelayMs(i);
+  const { path = '/api/health', budgetMs = APP_HEALTH_PROBE_BUDGET_MS } = options;
   const remoteDir = `/opt/${projectName}`;
   // Use `node` for the probe — the app's runtime image is guaranteed to have
   // it (it runs the server), whereas curl/wget may not be present in slim
-  // node base images. One-liner: HEAD the local port 3000 path; exit 0 on
-  // 2xx, 1 otherwise. The outer shell echoes "2xx" or "fail" so the caller
+  // node base images. The outer shell echoes "2xx" or "fail" so the caller
   // sees a deterministic token on stdout regardless of node's exit code.
-  const nodeScript = `const r=require('http').request({host:'localhost',port:3000,path:${JSON.stringify(path)},method:'GET',timeout:4000},res=>{process.exit(res.statusCode<300?0:1)});r.on('error',()=>process.exit(2));r.on('timeout',()=>process.exit(3));r.end();`;
-  const nodeScriptB64 = Buffer.from(nodeScript).toString('base64');
-  const probeCmd = `cd ${remoteDir} && (echo ${nodeScriptB64} | base64 -d | ${VC_COMPOSE} exec -T app node - && echo 2xx || echo fail) 2>&1`;
-
+  const deadline = Date.now() + budgetMs;
   let lastStatus = 'none';
-  for (let i = 0; i < attempts; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, delayFor(i)));
+  let attempts = 0;
+  while (attempts === 0 || Date.now() < deadline) {
+    if (attempts > 0) {
+      await new Promise((r) => setTimeout(r, Math.min(1000, Math.max(0, deadline - Date.now()))));
+      if (Date.now() >= deadline) break;
+    }
+    attempts++;
+    const remainingMs = Math.max(0, deadline - Date.now());
+    const nodeScriptB64 = Buffer.from(appHealthProbeScript(path, remainingMs)).toString('base64');
+    const probeCmd = `cd ${remoteDir} && (echo ${nodeScriptB64} | base64 -d | ${VC_COMPOSE} exec -T app node - && echo 2xx || echo fail) 2>&1`;
     try {
       const result = await sshRunAsync(ip, sshKeyPath, probeCmd, {
-        timeout: 15_000,
+        timeout: remainingMs + 10_000,
+        // The outer loop retries with the correct remaining time.
+        retries: 1,
         ignoreError: true,
       });
       const out = (result || '').trim();

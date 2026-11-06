@@ -17,6 +17,7 @@ vi.mock('@aws-sdk/client-s3', () => {
   return {
     S3Client: class {
       send = vi.fn();
+      middlewareStack = { add: vi.fn() };
     },
     CopyObjectCommand: cmd('CopyObject'),
     CreateBucketCommand: cmd('CreateBucket'),

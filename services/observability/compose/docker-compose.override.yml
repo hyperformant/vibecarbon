@@ -12,7 +12,7 @@ services:
   loki:
     restart: on-failure:5
 
-  promtail:
+  alloy:
     restart: on-failure:5
 
   postgres-exporter:

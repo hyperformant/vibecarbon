@@ -21,8 +21,8 @@ import { certManagerLeaderStdout } from '../helpers/cert-manager-leader-fixture.
  *   #2 — the carbon-autoscaler config Secret is applied via stdin as PLAIN
  *        JSON (Task 8: retired the old base64-encoded legacy CA config
  *        Secret + the `--nodes`/HCLOUD_* argv-and-env patch entirely), the
- *        sidecar image placeholder is patched via `set image` AFTER
- *        `apply -k cluster-autoscaler`, and exactly one rollout status wait
+ *        autoscaler image is re-pinned via `set image` AFTER
+ *        `apply of cluster-autoscaler`, and exactly one rollout status wait
  *        gates the roll (no `--nodes=` patch, no HCLOUD_* env upsert).
  *
  * Every shell-out in applyK3sManifests ultimately reaches node's `spawn` —
@@ -55,7 +55,7 @@ vi.mock('../../../src/lib/deploy/layer-delta.js', async (orig) => ({
   deliverImage,
 }));
 
-// The TLS restore before `apply -k base` reads the env's snapshot from S3;
+// The TLS restore before `apply of base` reads the env's snapshot from S3;
 // here there is never one, so no test opens a socket.
 vi.mock('../../../src/lib/deploy/tls-snapshot.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -115,12 +115,12 @@ let caRolloutExit = 0;
 let killed: string[][] = [];
 // Exit code of `kubectl wait deploy/cert-manager` (drives a main-chain failure).
 let certManagerWaitExit = 0;
-// The rendered registry manifest as `kubectl apply -k <rendered base>` saw it
+// The rendered registry manifest as `kubectl kustomize <rendered base>` saw it
 // (the rendered copy is removed right after the apply).
 let registryAtBaseApply: string | null = null;
-// The rendered db/ (kustomization + any patch file) as `apply -k base` saw it.
+// The rendered db/ (kustomization + any patch file) as `apply of base` saw it.
 let dbAtBaseApply: { kustomization: string; hostPortPatch: string | null } | null = null;
-// The rendered vibecarbon-tls Certificate as `kubectl apply -k <rendered
+// The rendered vibecarbon-tls Certificate as `kubectl kustomize <rendered
 // base>` saw it, parsed.
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
 let certificateAtBaseApply: any = null;
@@ -211,7 +211,7 @@ let retiredChartReleaseOut = '';
 // from a life as primary — the demoted-standby reconverge case.
 // Default: absent, as on every freshly deployed cluster.
 let leftoverObservability = false;
-// Set by the observability `apply -k`: the namespace exists from then on.
+// Set by the observability `apply of`: the namespace exists from then on.
 let observabilityApplied = false;
 // What `get ingressroute -o json` answers in the observability namespace.
 let observabilityRoutesOut = '{"items":[]}';
@@ -243,7 +243,7 @@ const DB_POD_WITH_ROLE_MOUNT = JSON.stringify({
   },
 });
 
-// The cert-manager kustomization as `kubectl apply -k <dir>` saw it (the
+// The cert-manager kustomization as `kubectl kustomize <dir>` saw it (the
 // rendered dir is removed right after the apply).
 let certManagerKustomizationAtApply: string | null = null;
 
@@ -256,8 +256,15 @@ function installSpawnMock() {
     cmdCalls.push([cmd, ...(args ?? [])]);
     const argv = args ?? [];
     const full = [cmd, ...argv];
-    if (cmd === 'kubectl' && argv.includes('apply') && argv.includes('-k')) {
-      const target = String(argv[argv.indexOf('-k') + 1]);
+    if (cmd === 'kubectl' && argv[0] === 'kustomize') {
+      const target = String(argv[1]);
+      if (target.endsWith('/cluster-autoscaler')) {
+        return fakeChild({
+          stdout:
+            "image: ghcr.io/hyperformant/cluster-autoscaler:v1\nimage: '{{CARBON_AUTOSCALER_IMAGE}}'\n",
+          argv: full,
+        }) as unknown as ReturnType<typeof spawn>;
+      }
       if (target.includes('observability')) observabilityApplied = true;
       const registry = join(target, 'registry', 'local-registry.yaml');
       if (/k8s-base/.test(target) && existsSync(registry)) {
@@ -414,9 +421,11 @@ function installSpawnMock() {
       argv.includes('status') &&
       argv.includes('deployment/app')
     ) {
-      return fakeChild({ gate: new Promise<void>(() => {}), argv: full }) as unknown as ReturnType<
-        typeof spawn
-      >;
+      return fakeChild({
+        gate: new Promise<void>(() => {}),
+        signal: opts?.signal ?? null,
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
     }
     // The deploy's live wal-g role write (writeDeployWalgRole): the db pod
     // mounts the role dir, and the write reads back the role it wrote.
@@ -463,6 +472,15 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
     readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
   );
+  // The Traefik CRDs apply from a rendered copy of this directory.
+  mkdirSync(join(dir, 'k8s', 'infra', 'traefik-crds'), { recursive: true });
+  writeFileSync(
+    join(dir, 'k8s', 'infra', 'traefik-crds', 'kustomization.yaml'),
+    readFileSync(
+      join(__dirname, '../../../carbon/k8s/infra/traefik-crds/kustomization.yaml'),
+      'utf-8',
+    ),
+  );
   // A k8s-ha role renders its replication hostPort into db/ as a kustomize patch.
   writeFileSync(
     join(dir, 'k8s', 'base', 'db', 'kustomization.yaml'),
@@ -479,7 +497,7 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
     );
   }
   if (withObservability) {
-    // The isolated observability stack applies via `kubectl apply -k
+    // The isolated observability stack applies via `kubectl kustomize
     // k8s/base/observability` only when this dir exists (present after
     // `vibecarbon add observability`). Creating it lets the standby test assert
     // the apply is SKIPPED by the role gate (not merely absent for lack of a
@@ -503,7 +521,7 @@ function makeProjectDir({ withObservability = false, withRegistry = false } = {}
 // loadCloudInit/renderScript).
 const FakeHetznerProvider = {
   PROVIDER_ID_PREFIX: 'hcloud://',
-  K8S_IMAGE: 'ubuntu-24.04',
+  K8S_IMAGE: 'ubuntu-26.04',
   K8S_STORAGE_CLASS: 'hcloud-volumes',
   async getK8sWorkerUserData(vars: Record<string, unknown>) {
     const { loadCloudInit, renderScript } = await import('../../../src/lib/iac/cloud-init.js');
@@ -555,8 +573,7 @@ const isDbRolloutWait = (a: string[]) =>
   a[0] === 'kubectl' && a.includes('rollout') && a.includes('statefulset/db');
 const isObservabilityApply = (a: string[]) =>
   a[0] === 'kubectl' &&
-  a.includes('apply') &&
-  a.includes('-k') &&
+  a[1] === 'kustomize' &&
   a.some((s) => typeof s === 'string' && s.includes('observability'));
 const retiredGrafanaDelete = (kind: 'certificate' | 'secret') => [
   'kubectl',
@@ -633,10 +650,7 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
     expect(
       cmdCalls.some(
         (a) =>
-          a[0] === 'kubectl' &&
-          a.includes('apply') &&
-          a.includes('-k') &&
-          a.some((x) => /k8s-base/.test(String(x))),
+          a[0] === 'kubectl' && a[1] === 'kustomize' && a.some((x) => /k8s-base/.test(String(x))),
       ),
     ).toBe(false);
   });
@@ -653,10 +667,7 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
     expect(
       cmdCalls.some(
         (a) =>
-          a[0] === 'kubectl' &&
-          a.includes('apply') &&
-          a.includes('-k') &&
-          a.some((x) => /k8s-base/.test(String(x))),
+          a[0] === 'kubectl' && a[1] === 'kustomize' && a.some((x) => /k8s-base/.test(String(x))),
       ),
     ).toBe(false);
   });
@@ -668,10 +679,7 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
     expect(
       cmdCalls.some(
         (a) =>
-          a[0] === 'kubectl' &&
-          a.includes('apply') &&
-          a.includes('-k') &&
-          a.some((x) => /k8s-base/.test(String(x))),
+          a[0] === 'kubectl' && a[1] === 'kustomize' && a.some((x) => /k8s-base/.test(String(x))),
       ),
     ).toBe(true);
   });
@@ -769,8 +777,7 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     a.includes('deployment/local-registry');
   const isCaApply = (a: string[]) =>
     a[0] === 'kubectl' &&
-    a.includes('apply') &&
-    a.includes('-k') &&
+    a[1] === 'kustomize' &&
     a.some((x) => typeof x === 'string' && x.includes('cluster-autoscaler'));
   const isAppPatch = (a: string[]) =>
     a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app');
@@ -778,12 +785,27 @@ describe('applyK3sManifests deploy-time optimizations', () => {
 
   const isRegistryPush = (a: string[]) => a[0] === 'registryPush';
   const isCertManagerInstall = (a: string[]) =>
-    a[0] === 'kubectl' && a.includes('apply') && a.some((x) => /vibecarbon-cert-manager-/.test(x));
+    a[0] === 'kubectl' && a[1] === 'kustomize' && a.some((x) => /vibecarbon-cert-manager-/.test(x));
 
   // The layer delta into the master's containerd needs only ssh and the base
   // pull, so it starts with the apply, before cert-manager; only its push
   // waits for the registry pod, which k8s/base creates (DO e2e 2026-10-31:
   // image.deliver 12 s, which the CA rollout had hidden until it moved out).
+  it('every kustomization renders here and applies on the master', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const renders = cmdCalls.filter((a) => a[0] === 'kubectl' && a[1] === 'kustomize');
+    const appliesOnMaster = cmdCalls.filter(
+      (a) =>
+        a[0] === 'ssh' &&
+        a.includes('root@1.2.3.4') &&
+        String(a.at(-1)).includes("'kubectl' 'apply' '-f' '-'"),
+    );
+    expect(renders.length).toBeGreaterThanOrEqual(5);
+    expect(appliesOnMaster).toHaveLength(renders.length);
+    expect(cmdCalls.some((a) => a[0] === 'kubectl' && a.includes('-k'))).toBe(false);
+  });
+
   it('#1 the transfer starts before cert-manager; the push waits for the registry; the app patch waits for both', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
@@ -813,7 +835,9 @@ describe('applyK3sManifests deploy-time optimizations', () => {
   // kustomization) needs nothing cert-manager or k8s/base provides, so its
   // apply and rollout run alongside the cert-manager readiness chain instead
   // of after the base (DO e2e 2026-10-31: clusterAutoscaler.rollout 15.6 s on
-  // the critical path). The app still rolls only after it.
+  // the critical path). The app does not wait for it either: the autoscaler
+  // serves pending pods whenever it comes up, and on DO e2e 2026-11-05 its
+  // pod took 94 s and held the app for about 20 s after the image had landed.
   const isCertManagerWait = (a: string[]) =>
     a[0] === 'kubectl' && a.includes('wait') && a.includes('deploy/cert-manager');
   const isCaRollout = (a: string[]) =>
@@ -821,6 +845,11 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     a.includes('rollout') &&
     a.includes('status') &&
     a.includes('deploy/cluster-autoscaler');
+  const isAppRollout = (a: string[]) =>
+    a[0] === 'kubectl' &&
+    a.includes('rollout') &&
+    a.includes('status') &&
+    a.includes('deployment/app');
 
   it('the CA apply and rollout run while cert-manager is still becoming Available', async () => {
     const { applyK3sManifests } = await k3sPromise;
@@ -832,7 +861,8 @@ describe('applyK3sManifests deploy-time optimizations', () => {
       const waiting = await waitFor(() => cmdCalls.some(isCertManagerWait), 2000);
       const rolledWhileWaiting = await waitFor(() => cmdCalls.some(isCaRollout), 2000);
       const baseAppliedWhileWaiting = cmdCalls.some(
-        (a) => a[0] === 'kubectl' && a.includes('-k') && a.some((x) => /k8s-base/.test(String(x))),
+        (a) =>
+          a[0] === 'kubectl' && a[1] === 'kustomize' && a.some((x) => /k8s-base/.test(String(x))),
       );
       gate.release();
       await done;
@@ -890,24 +920,53 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     }
   });
 
-  it('the app is not patched until the CA rollout completes', async () => {
+  it('the app rolls out while the CA pod is still coming up, and the deploy waits for both', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const gate = makeGate();
     caRolloutGate = gate.promise;
     try {
-      const done = applyK3sManifests(baseArgs(makeProjectDir()));
+      let finished = false;
+      const done = applyK3sManifests(baseArgs(makeProjectDir())).finally(() => {
+        finished = true;
+      });
       done.catch(() => {});
       expect(await waitFor(() => cmdCalls.some(isCaRollout), 2000)).toBe(true);
-      // Everything up to the barrier may run; the app patch may not.
-      expect(await waitFor(() => cmdCalls.some(isDelivery), 2000)).toBe(true);
+      expect(await waitFor(() => cmdCalls.some(isAppPatch), 2000)).toBe(true);
+      expect(await waitFor(() => cmdCalls.some(isAppRollout), 2000)).toBe(true);
+      // Everything else may finish; the deploy still reports the autoscaler.
       await new Promise((r) => setTimeout(r, 50));
-      const patchedEarly = cmdCalls.some(isAppPatch);
+      expect(finished).toBe(false);
       gate.release();
       await done;
-      expect(patchedEarly).toBe(false);
-      expect(cmdCalls.findIndex(isCaRollout)).toBeLessThan(cmdCalls.findIndex(isAppPatch));
+      expect(finished).toBe(true);
     } finally {
       caRolloutGate = null;
+    }
+  });
+
+  it('a CA rollout that fails during the app rollout ends the deploy at once', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const gate = makeGate();
+    caRolloutGate = gate.promise;
+    caRolloutExit = 1;
+    rolloutHangs = true; // the app wait would otherwise run its 600 s
+    killed = [];
+    try {
+      const done = applyK3sManifests(baseArgs(makeProjectDir())).catch((e) => e);
+      expect(await waitFor(() => cmdCalls.some(isAppRollout), 2000)).toBe(true);
+      gate.release();
+      const err = await done;
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/progress deadline/);
+      expect(killed.some(isAppRollout)).toBe(true);
+      // Its diagnostics still ran: this is the failure the deploy reports.
+      expect(cmdCalls.some((a) => a.includes('get') && a.includes('app=cluster-autoscaler'))).toBe(
+        true,
+      );
+    } finally {
+      caRolloutGate = null;
+      caRolloutExit = 0;
+      rolloutHangs = false;
     }
   });
 
@@ -1018,7 +1077,20 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     expect(stdinCalls.some((c) => c.data.includes('cluster-config.json'))).toBe(false);
   });
 
-  it('#2 patches the sidecar image via `set image` AFTER `apply -k cluster-autoscaler`, with no --nodes/HCLOUD_* patch anywhere', async () => {
+  it('applies the autoscaler with its real image, so the first pod is the pod', async () => {
+    // The placeholder used to reach the cluster and `set image` fixed it after.
+    // A pod created from it can never start, and because a client-side apply
+    // pushes every field the manifest names, each deploy that ran the apply put
+    // the placeholder back: on `strategy: Recreate` that killed a healthy
+    // autoscaler to roll out a pod that could not run.
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const applied = stdinCalls.find((c) => c.data.includes('hyperformant/cluster-autoscaler:v1'));
+    expect(applied?.data).toContain("image: 'ghcr.io/hyperformant/carbon-autoscaler:");
+    expect(applied?.data).not.toContain('{{');
+  });
+
+  it('#2 re-pins the autoscaler image via `set image` AFTER `apply of cluster-autoscaler`, with no --nodes/HCLOUD_* patch anywhere', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
 
@@ -1027,8 +1099,7 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     const applyKIdx = cmdCalls.findIndex(
       (a) =>
         a[0] === 'kubectl' &&
-        a.includes('apply') &&
-        a.includes('-k') &&
+        a[1] === 'kustomize' &&
         a.some((s) => s.endsWith('/cluster-autoscaler')),
     );
     const setImageIdx = cmdCalls.findIndex(
@@ -1040,17 +1111,10 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     );
     expect(applyKIdx).toBeGreaterThanOrEqual(0);
     expect(setImageIdx).toBeGreaterThan(applyKIdx);
-    expect(
-      cmdCalls[setImageIdx].some((s) =>
-        s.startsWith('carbon-autoscaler=ghcr.io/hyperformant/carbon-autoscaler:'),
-      ),
-    ).toBe(true);
-    // BOTH containers are re-pinned in this ONE call. The upstream CA image
-    // moved to a ghcr mirror after registry.k8s.io 403'd the pull on Hetzner
-    // (2026-07-31, src/lib/images.js); patching it here — not only in the
-    // manifest — is what makes images.js authoritative for projects whose
-    // checked-in k8s/ tree predates the mirror. Two containers, one roll:
-    // `strategy: Recreate` means each extra patch would cost a full cycle.
+    // The upstream CA image moved to a ghcr mirror after registry.k8s.io 403'd
+    // the pull on Hetzner (2026-07-31, src/lib/images.js); patching it here, not
+    // only in the manifest, is what makes images.js authoritative for projects
+    // whose checked-in k8s/ tree predates the mirror.
     expect(
       cmdCalls[setImageIdx].some((s) =>
         s.startsWith('cluster-autoscaler=ghcr.io/hyperformant/cluster-autoscaler:'),
@@ -1164,7 +1228,7 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(cmdCalls).toContainEqual(zeroPatchArgv('kube-system', 'cluster-autoscaler'));
 
     // The CA zero-patch is still the LAST CA-related op: the
-    // carbon-autoscaler-config Secret render + apply -k + set image all
+    // carbon-autoscaler-config Secret render + apply of + set image all
     // land BEFORE it, so the config/image are fully in place before the
     // Deployment gets scaled to 0 (a future failover only has to flip
     // replicas 0→1, never re-render anything).
@@ -1222,7 +1286,7 @@ describe('applyK3sManifests pilot-standby role', () => {
       cmdCalls.some(
         (a) =>
           a[0] === 'kubectl' &&
-          a.includes('apply') &&
+          a[1] === 'kustomize' &&
           a.some((x) => /vibecarbon-cert-manager-/.test(String(x))),
       ),
     ).toBe(true);
@@ -1483,8 +1547,7 @@ describe('applyK3sManifests pilot-standby role', () => {
     const applyIdx = cmdCalls.findIndex(
       (a) =>
         a[0] === 'kubectl' &&
-        a.includes('apply') &&
-        a.includes('-k') &&
+        a[1] === 'kustomize' &&
         a.some((s) => /vibecarbon-cert-manager-/.test(String(s))),
     );
     const waitIdx = cmdCalls.findIndex(
@@ -1530,13 +1593,10 @@ describe('applyK3sManifests restores the TLS Secret before applying the base', (
   const isLiveTlsRead = (a: string[]) =>
     a[0] === 'kubectl' && a.includes('get') && a.includes('secret') && a.includes('vibecarbon-tls');
   const isBaseApply = (a: string[]) =>
-    a[0] === 'kubectl' &&
-    a.includes('apply') &&
-    a.includes('-k') &&
-    a.some((x) => /k8s-base/.test(String(x)));
+    a[0] === 'kubectl' && a[1] === 'kustomize' && a.some((x) => /k8s-base/.test(String(x)));
 
   for (const role of [undefined, 'primary'] as const) {
-    it(`${role ?? 'single cluster'}: reads the live Secret after the namespace and before apply -k base`, async () => {
+    it(`${role ?? 'single cluster'}: reads the live Secret after the namespace and before apply of base`, async () => {
       const { applyK3sManifests } = await k3sPromise;
       await applyK3sManifests({ ...withBackups(makeProjectDir()), ...(role && { role }) });
       const read = cmdCalls.findIndex(isLiveTlsRead);
@@ -1552,14 +1612,14 @@ describe('applyK3sManifests restores the TLS Secret before applying the base', (
   }
 
   for (const role of [undefined, 'primary', 'standby'] as const) {
-    it(`${role ?? 'single cluster'}: waits for a settled cert-manager leader before the restore and apply -k base`, async () => {
+    it(`${role ?? 'single cluster'}: waits for a settled cert-manager leader before the restore and apply of base`, async () => {
       const { applyK3sManifests } = await k3sPromise;
       await applyK3sManifests({ ...withBackups(makeProjectDir()), ...(role && { role }) });
       const lease = cmdCalls.findIndex(
         (a) => a[0] === 'kubectl' && a.includes('lease') && a.includes('cert-manager-controller'),
       );
       const install = cmdCalls.findIndex(
-        (a) => a.includes('apply') && a.some((s) => /vibecarbon-cert-manager-/.test(String(s))),
+        (a) => a[1] === 'kustomize' && a.some((s) => /vibecarbon-cert-manager-/.test(String(s))),
       );
       const read = cmdCalls.findIndex(isLiveTlsRead);
       const base = cmdCalls.findIndex(isBaseApply);
@@ -1688,8 +1748,7 @@ describe('readiness probes are wired in (mitigation-audit clusters 1+4 root fix)
     const issuersIdx = cmdCalls.findIndex(
       (a) =>
         a[0] === 'kubectl' &&
-        a.includes('apply') &&
-        a.includes('-k') &&
+        a[1] === 'kustomize' &&
         a.some((x) => String(x).includes('cert-manager-resources')),
     );
     expect(admissionProbe?.seq).toBeGreaterThan(lastAvailableWaitIdx);
@@ -2061,11 +2120,11 @@ describe('applyK3sManifests records the wal-g role intent before the db exists',
     }));
   }
 
-  it('applies the db role ConfigMap, with the deploy role, BEFORE apply -k base', async () => {
+  it('applies the db role ConfigMap, with the deploy role, BEFORE apply of base', async () => {
     const calls = await runApply({ role: 'standby' });
     const cm = calls.findIndex((c) => c.input?.includes('name: vibecarbon-db-role'));
     const base = calls.findIndex(
-      (c) => c.argv.includes('-k') && c.argv.some((a: string) => /k8s-base|\/base$/.test(a)),
+      (c) => c.argv[1] === 'kustomize' && c.argv.some((a: string) => /k8s-base|\/base$/.test(a)),
     );
     expect(cm).toBeGreaterThanOrEqual(0);
     expect(cm).toBeLessThan(base);

@@ -23,8 +23,8 @@ export const testConfig = {
       // Secondary region for HA standby server
       secondaryRegion: 'nbg1', // Nuremberg, Germany
 
-      // Docker image to use for servers
-      image: 'docker-ce',
+      // Base image for servers (plain Ubuntu; cloud-init installs the pinned Docker)
+      image: 'ubuntu-26.04',
 
       // Labels applied to all test resources
       labels: {
@@ -205,8 +205,11 @@ export const testConfig = {
         // legacy cpx*1 line costs more than its successor since the
         // repricing. cpx21 and cpx11 are the ash/hil (US) defaults, reached
         // only by an explicit E2E_REGIONS=ash,hil run.
+        // cx33 and cx43 sold out in all three EU locations on 2026-11-04 while
+        // cx23 stayed in stock, and one missing target stops the whole batch
+        // at preflight, so cx23 can also move to cpx32.
         scaleTo: {
-          cx23: 'cx33',
+          cx23: ['cx33', 'cpx32'],
           cpx22: 'cpx32',
           cpx12: 'cpx22',
           cpx21: 'cpx31',
@@ -352,20 +355,10 @@ export const testConfig = {
       // namespace.test.ts).
       linode: {
         displayName: 'Linode',
-        // STORAGE_REGION is required, not an override — the same reasoning as
-        // Vultr's below, reached by a different route. Linode assigns each
-        // ACCOUNT one object-storage cluster per region and it is not always
-        // the documented `-1` one (this account's us-iad cluster is
-        // `us-iad-10`). Unset, bucket creation goes to the wrong cluster and
-        // fails as `exists but is owned by another account` — which reads as a
-        // name collision and is really a wrong endpoint. Listing it here is
-        // what makes preflight demand it instead of the deploy discovering it.
-        requiredEnv: [
-          'LINODE_API_TOKEN',
-          'LINODE_ACCESS_KEY',
-          'LINODE_SECRET_KEY',
-          'LINODE_STORAGE_REGION',
-        ],
+        // LINODE_STORAGE_REGION is an override, not a requirement: a deploy
+        // reads the account's own cluster from Linode's endpoint list, which
+        // is what a customer gets. Pinning it here would hide that path.
+        requiredEnv: ['LINODE_API_TOKEN', 'LINODE_ACCESS_KEY', 'LINODE_SECRET_KEY'],
         // Native Linode DNS (linode.appcarbon.dev), same reasoning as the DO
         // block above: LINODE_API_TOKEN already covers it, so l1 needs no
         // Cloudflare credential and the Linode DNS path gets real coverage.
@@ -437,7 +430,18 @@ export const testConfig = {
         displayName: 'Scaleway',
         requiredEnv: ['SCALEWAY_SECRET_KEY', 'SCALEWAY_ACCESS_KEY', 'SCALEWAY_DEFAULT_PROJECT_ID'],
         scenarios: [
-          { mode: 'compose' as const, dnsProvider: 'scaleway' as const, envPrefix: 's1' },
+          {
+            mode: 'compose' as const,
+            dnsProvider: 'scaleway' as const,
+            envPrefix: 's1',
+            // Scaleway's plan refuses to scale a compose server up today (the
+            // provider rejects the larger type), so the scale step can only
+            // fail on the provider, never on our code. Skipped here, in the
+            // scenario, so no command-line flag can be forgotten. Drop this
+            // line when the plan allows it. verify-scale rides along: it
+            // asserts the state scale leaves.
+            skipSteps: ['scale', 'verify-scale'] as const,
+          },
           // s2 uses Scaleway DNS so the compose-ha failover flip exercises
           // the SAME provider that owns the compute — the self-contained
           // default, same reasoning as Hetzner's e2.

@@ -19,9 +19,13 @@ vi.mock('node:child_process', async () => {
 const k3sModulePromise = import('../../../src/lib/deploy/k8s/k3s.js');
 
 /** Minimal ChildProcess stand-in for runCommandAsync's silent:true path. */
-function fakeChild(code = 0) {
+function fakeChild(code = 0, stdout = '') {
   const child = {
-    stdout: { on: vi.fn() },
+    stdout: {
+      on(event: string, cb: (d: string) => void) {
+        if (event === 'data' && stdout) Promise.resolve().then(() => cb(stdout));
+      },
+    },
     stderr: { on: vi.fn() },
     on(event: string, cb: (...args: unknown[]) => void) {
       if (event === 'close') Promise.resolve().then(() => cb(code));
@@ -36,9 +40,11 @@ describe('k3s SSH host-key pinning (PR 1B-T6)', () => {
     const { waitForK3sReady } = await k3sModulePromise;
     const spawnMock = vi.mocked(spawn);
     spawnMock.mockReset();
-    // First (and only) ssh probe resolves exit 0 → marker present → pollUntil
-    // returns without a second attempt.
-    spawnMock.mockImplementationOnce(() => fakeChild(0) as unknown as ReturnType<typeof spawn>);
+    // First (and only) held ssh session prints READY → marker present → the
+    // wait returns without reconnecting.
+    spawnMock.mockImplementationOnce(
+      () => fakeChild(0, 'CONNECTED\nREADY\n') as unknown as ReturnType<typeof spawn>,
+    );
 
     const tmp = mkdtempSync(join(tmpdir(), 'vc-k3s-test-'));
     const khPath = join(tmp, '.vibecarbon', 'known_hosts_e2e');
@@ -57,6 +63,24 @@ describe('k3s SSH host-key pinning (PR 1B-T6)', () => {
     expect(argv).toContain('BatchMode=yes');
     // Sanity: the user's ~/.ssh/known_hosts is not referenced.
     expect(argv.join(' ')).not.toContain(`${process.env.HOME}/.ssh/known_hosts`);
+  });
+
+  it('waitForK3sReady gives the held ssh session a timeout bounded by the remaining budget', async () => {
+    const { waitForK3sReady } = await k3sModulePromise;
+    const spawnMock = vi.mocked(spawn);
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => fakeChild(255) as unknown as ReturnType<typeof spawn>);
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const tmp = mkdtempSync(join(tmpdir(), 'vc-k3s-test-'));
+
+    await expect(waitForK3sReady('1.2.3.4', '/tmp/key', join(tmp, 'kh'), 1)).rejects.toThrow(
+      /k3s did not become ready/,
+    );
+
+    // min(30, ~1s) * 1000 + 5000: one real session timeout, not unbounded.
+    const delays = timers.mock.calls.map((c) => Number(c[1]));
+    expect(delays.some((d) => d >= 5500 && d <= 6000)).toBe(true);
+    timers.mockRestore();
   });
 
   it('fetchKubeconfig passes UserKnownHostsFile=<env known_hosts> to scp', async () => {

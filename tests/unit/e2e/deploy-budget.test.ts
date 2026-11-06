@@ -6,10 +6,27 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  checkDeployBudget,
-  DEPLOY_BUDGETS,
-  STATE_SCOPE_YOUNG,
+  type BudgetKey,
+  type BudgetTable,
+  budgetFor,
+  DEPLOY_BUDGET_TABLE,
+  deployCpuClass,
+  checkDeployBudget as judge,
 } from '../../e2e/checks/deploy-budget.js';
+import type { DeployMode } from '../../e2e/scenarios/types.js';
+
+/** The numbers these fixtures are bent around (one provider, one class). */
+const TABLE: BudgetTable = {
+  hetzner: {
+    compose: { cx: { ownedS: 180, endToEndS: 300, samples: 9 } },
+    'compose-ha': { cx: { ownedS: 300, endToEndS: 360, samples: 9 } },
+    k8s: { cx: { ownedS: 300, endToEndS: 390, samples: 9 } },
+    'k8s-ha': { cx: { ownedS: 420, endToEndS: 480, samples: 9 } },
+  },
+};
+const KEY: BudgetKey = { provider: 'hetzner', cpuClass: 'cx' };
+const checkDeployBudget = (output: string, mode: DeployMode, key = KEY, table = TABLE) =>
+  judge(output, mode, key, table);
 
 const perf = (name: string, ms: number, note?: string) =>
   `[perf] ${name} ${ms}ms${note ? ` ${note}` : ''}`;
@@ -29,14 +46,11 @@ interface LogOpts {
   transportNote?: string;
   transport?: boolean;
   state?: boolean;
-  /** The deploy's `[state] scope young <bucket>` line (Ruling A′). */
-  young?: boolean;
 }
 
 /** A passing cold deploy log for each mode; opts bend one number. */
-function fixture(mode: keyof typeof DEPLOY_BUDGETS, o: LogOpts = {}): string {
+function fixture(mode: DeployMode, o: LogOpts = {}): string {
   const lines: string[] = ['◇  Provisioning infrastructure', 'some spinner text'];
-  if (o.young) lines.push('[state] scope young proj-storage-pulumi-state-a1b2c3');
   const delta = (bytes: number | null | undefined) =>
     bytes === null
       ? []
@@ -115,14 +129,107 @@ function fixture(mode: keyof typeof DEPLOY_BUDGETS, o: LogOpts = {}): string {
   return lines.join('\n');
 }
 
-describe('DEPLOY_BUDGETS', () => {
-  it('holds the D1 numbers: deploy-owned and end-to-end seconds per mode', () => {
-    expect(DEPLOY_BUDGETS).toEqual({
-      compose: { ownedS: 180, endToEndS: 300 },
-      'compose-ha': { ownedS: 300, endToEndS: 360 },
-      k8s: { ownedS: 300, endToEndS: 390 },
-      'k8s-ha': { ownedS: 420, endToEndS: 480 },
+describe('budgets are keyed on provider + mode + class', () => {
+  it('judges each key against its own row', () => {
+    const table: BudgetTable = {
+      hetzner: { compose: { cx: { ownedS: 180, endToEndS: 300, samples: 9 } } },
+      digitalocean: {
+        compose: {
+          amd: { ownedS: 120, endToEndS: 135, samples: 9 },
+          intel: { ownedS: 400, endToEndS: 415, samples: 9 },
+        },
+      },
+    };
+    const log = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    // 245 s owned: over DO amd's 120, inside DO intel's 400, over Hetzner cx's 180.
+    const run = (provider: string, cpuClass: string) =>
+      judge(log, 'compose', { provider, cpuClass }, table);
+    expect(run('digitalocean', 'amd').message).toMatch(/deploy-owned 245s > 120s/);
+    expect(run('digitalocean', 'intel').ok).toBe(true);
+    expect(run('hetzner', 'cx').message).toMatch(/deploy-owned 245s > 180s/);
+  });
+
+  it('a combination with no row fails with `no budget yet`, never a pass', () => {
+    for (const key of [
+      { provider: 'hetzner', cpuClass: 'ccx' }, // class with no data
+      { provider: 'vultr', cpuClass: 'cx' }, // provider with no data
+    ]) {
+      const r = checkDeployBudget(fixture('compose'), 'compose', key);
+      expect(r.ok).toBe(false);
+      expect(r.status).toBe('fail');
+      expect(r.message).toMatch(
+        new RegExp(`no budget yet for ${key.provider}/compose/${key.cpuClass}`),
+      );
+    }
+    expect(checkDeployBudget(fixture('k8s'), 'k8s', KEY, {}).message).toMatch(/no budget yet/);
+  });
+
+  it('a run with no exact class row is judged by the provider + mode `any` row, and says so', () => {
+    const table: BudgetTable = {
+      hetzner: {
+        compose: {
+          any: { ownedS: 180, endToEndS: 300, samples: 9 },
+          cpx: { ownedS: 100, endToEndS: 115, samples: 9 },
+        },
+      },
+    };
+    const log = fixture('compose', { total: 250_000, tlsReady: 5_000, tlsSnapshot: 0 });
+    const viaAny = judge(log, 'compose', { provider: 'hetzner', cpuClass: 'cx' }, table);
+    expect(viaAny.message).toMatch(/deploy-owned 245s > 180s/);
+    expect(viaAny.details).toMatchObject({ budgetRow: 'hetzner/compose/any' });
+    // An exact row wins over `any`.
+    const exact = judge(log, 'compose', { provider: 'hetzner', cpuClass: 'cpx' }, table);
+    expect(exact.message).toMatch(/deploy-owned 245s > 100s/);
+    expect(exact.details).toMatchObject({ budgetRow: 'hetzner/compose/cpx' });
+  });
+
+  it('still judges the byte and lock invariants when the time budget is missing', () => {
+    const r = checkDeployBudget(fixture('compose-ha', { standbyLock: '1 (93s)' }), 'compose-ha', {
+      provider: 'vultr',
+      cpuClass: 'vc2',
     });
+    expect(r.message).toMatch(/no budget yet/);
+    expect(r.message).toMatch(/lock wait 93s > 15s/);
+  });
+
+  it('records the key it judged', () => {
+    const r = checkDeployBudget(fixture('compose'), 'compose');
+    expect(r.details).toMatchObject({ provider: 'hetzner', cpuClass: 'cx' });
+  });
+
+  it('the calibrated table has no hand-edit shape errors', () => {
+    for (const [provider, modes] of Object.entries(DEPLOY_BUDGET_TABLE)) {
+      for (const [mode, classes] of Object.entries(modes)) {
+        for (const [cpuClass, row] of Object.entries(classes)) {
+          const where = `${provider}/${mode}/${cpuClass}`;
+          expect(row.ownedS % 5, where).toBe(0);
+          expect(row.endToEndS, where).toBeGreaterThanOrEqual(row.ownedS + 15);
+          expect(row.samples, where).toBeGreaterThan(0);
+          expect(
+            budgetFor(DEPLOY_BUDGET_TABLE, mode as DeployMode, { provider, cpuClass })?.row,
+            where,
+          ).toBe(where);
+        }
+      }
+    }
+  });
+});
+
+describe('deployCpuClass', () => {
+  it('names the class of the recorded server type', () => {
+    expect(deployCpuClass('hetzner', 'cx32')).toBe('cx');
+    expect(deployCpuClass('hetzner', 'cpx31')).toBe('cpx');
+    expect(deployCpuClass('digitalocean', 's-2vcpu-4gb-intel')).toBe('intel');
+  });
+
+  it('is `standard` for a provider that declares no classes', () => {
+    expect(deployCpuClass('linode', 'g6-standard-2')).toBe('standard');
+    expect(deployCpuClass('linode', undefined)).toBe('standard');
+  });
+
+  it('is `unknown` for a classed provider whose type is missing or classless', () => {
+    expect(deployCpuClass('hetzner', undefined)).toBe('unknown');
+    expect(deployCpuClass('hetzner', 'not-a-type')).toBe('unknown');
   });
 });
 
@@ -203,6 +310,33 @@ describe('checkDeployBudget: time budgets', () => {
     expect(r.message).toMatch(/slowest: deploy\.tls\.ready 90s, deploy\.iac\.upStack 70s/);
   });
 
+  it('leaves the CLI total, Pulumi breakdown and nested preamble markers out of the slowest list', () => {
+    const extra = [
+      '[perf] cli.deploy.total 999000ms',
+      '[perf] deploy.iac.upStack.prepare 800000ms',
+      '[perf] deploy.iac.upStack.resource.Server.web 700000ms',
+      '[perf] deploy.k3s.primary.iac.upStack.resource.Firewall.fw 600000ms',
+      '[perf] deploy.preamble.s3Setup.stateSeed 500000ms',
+      '[perf] deploy.preamble.subscription 400000ms',
+    ].join('\n');
+    const r = checkDeployBudget(`${fixture('compose', { total: 400_000 })}\n${extra}\n`, 'compose');
+    expect(r.message).not.toMatch(
+      /cli\.deploy\.total|\.prepare|\.resource\.|stateSeed|subscription/,
+    );
+    expect(r.message).toMatch(/slowest: deploy\.tls\.ready 90s, deploy\.iac\.upStack 70s/);
+  });
+
+  it('names serial preamble and pullFan markers among the slowest', () => {
+    const extra = [
+      '[perf] deploy.ha.compose.pullFan 900000ms',
+      '[perf] deploy.preamble.s3Setup 800000ms',
+    ].join('\n');
+    const r = checkDeployBudget(`${fixture('compose', { total: 400_000 })}\n${extra}\n`, 'compose');
+    expect(r.message).toMatch(
+      /slowest: deploy\.ha\.compose\.pullFan 900s, deploy\.preamble\.s3Setup 800s/,
+    );
+  });
+
   it('fails a log with no deploy.total marker (the check cannot run)', () => {
     const log = fixture('compose').replace(/^\[perf\] deploy\.total .*$/m, '');
     const r = checkDeployBudget(log, 'compose');
@@ -245,34 +379,8 @@ describe('checkDeployBudget: cold image bytes', () => {
   );
 });
 
-describe('checkDeployBudget: a young state bucket (Ruling A′)', () => {
-  it('skips the lock-wait and fan checks on compose-ha, and says why', () => {
-    const r = checkDeployBudget(
-      fixture('compose-ha', { young: true, standbyLock: '1 (93s)', fan: 200_000 }),
-      'compose-ha',
-    );
-    expect(r.ok).toBe(true);
-    expect(r.details?.youngStateBucket).toBe('proj-storage-pulumi-state-a1b2c3');
-    expect(String(r.details?.skipped)).toMatch(/lock wait and fan ratio not judged/);
-    expect(String(r.details?.skipped)).toMatch(/settle window/);
-  });
-
-  it('skips the lock-wait check on k8s-ha', () => {
-    const r = checkDeployBudget(
-      fixture('k8s-ha', { young: true, standbyLock: '1 (120s)' }),
-      'k8s-ha',
-    );
-    expect(r.ok).toBe(true);
-    expect(r.details?.lockWaitS).toBe(120);
-  });
-
-  it.each(['compose-ha', 'k8s-ha'] as const)('still fails %s on state backpressure', (mode) => {
-    const r = checkDeployBudget(fixture(mode, { young: true, standbyBackpressure: 'up=2' }), mode);
-    expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/state backpressure up=2/);
-  });
-
-  it('judges both checks when the line is absent (past the window)', () => {
+describe('checkDeployBudget: HA invariants', () => {
+  it('judges the lock wait and the fan ratio on every cold deploy', () => {
     const r = checkDeployBudget(
       fixture('compose-ha', { standbyLock: '1 (93s)', fan: 200_000 }),
       'compose-ha',
@@ -280,18 +388,15 @@ describe('checkDeployBudget: a young state bucket (Ruling A′)', () => {
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/lock wait 93s > 15s/);
     expect(r.message).toMatch(/iac\.upStack\.fan 200s/);
-    expect(r.details?.youngStateBucket).toBeNull();
   });
-});
 
-describe('checkDeployBudget: HA invariants', () => {
   it('fails a compose-ha cold deploy whose standby waited on the lock', () => {
     const r = checkDeployBudget(fixture('compose-ha', { standbyLock: '1 (93s)' }), 'compose-ha');
     expect(r.ok).toBe(false);
     expect(r.message).toMatch(/lock wait 93s > 15s/);
   });
 
-  it('passes a lock wait of exactly 15s (a select plus refresh)', () => {
+  it('passes a lock wait of exactly 15s, the alarm line', () => {
     const r = checkDeployBudget(fixture('k8s-ha', { standbyLock: '2 (15s)' }), 'k8s-ha');
     expect(r.ok).toBe(true);
   });
@@ -376,17 +481,6 @@ describe('the markers the budget reads exist in the deploy', () => {
     expect(timer).toBeGreaterThan(start);
     expect(end).toBeGreaterThan(timer);
     expect(end).toBeLessThan(outro);
-  });
-
-  it('a young state bucket prints its [state] scope line, in the shape the check reads', async () => {
-    const young = orch.indexOf('if (stateBucketYoung) {');
-    const emit = orch.indexOf('emitStateScopeYoung(s3Config.stateBucket)');
-    expect(young).toBeGreaterThan(-1);
-    expect(emit).toBeGreaterThan(young);
-    expect(emit - young).toBeLessThan(400);
-    const { formatStateScopeYoung } = await import('../../../src/lib/iac/state-telemetry.js');
-    const line = formatStateScopeYoung('proj-storage-pulumi-state-a1b2c3');
-    expect(STATE_SCOPE_YOUNG.exec(`●  ${line}`)?.[1]).toBe('proj-storage-pulumi-state-a1b2c3');
   });
 
   it('deploy.storage.finish wraps the app-bucket finalize', () => {

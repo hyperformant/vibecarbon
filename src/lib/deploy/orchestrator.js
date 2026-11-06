@@ -15,7 +15,6 @@ import { loadProjectConfig, registerProject, updateProjectConfig } from '../conf
 import { writeLogDetail } from '../deploy-logger.js';
 import { getDnsProvider, hasAutomatedDns, operatorConfigForDns } from '../dns-provider.js';
 import { clearDestroyedRecord } from '../env-identity.js';
-import { emitStateScopeYoung } from '../iac/state-telemetry.js';
 import { localKubeconfigPath } from '../kubeconfig.js';
 import { readOperatorVar } from '../operator-env.js';
 import { ensureOperatorIpAccess } from '../operator-ip.js';
@@ -28,9 +27,11 @@ import {
   providerIdFor,
 } from '../providers/index.js';
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
+import { readSshVersion } from '../runtime-floors.js';
 import { mintAttemptId } from '../services/addon-start.js';
 import { sshKeyPathFor } from '../ssh.js';
 import { createTracker } from '../tracker.js';
+import { resolveDeployImageSet } from '../version-channel.js';
 import {
   assertDeployRestoreAllowed,
   backupCredentialVars,
@@ -44,17 +45,12 @@ import {
   localAppStorageSecrets,
   markUnfencedBuckets,
   resolveAppStorageCredential,
+  scopingOf,
   syncHetznerFences,
   waitForAppKeyReady,
 } from './app-storage-credential.js';
 import { backupFenceWarning, recordBackupFence, writeK8sBackupFence } from './backup-fence.js';
 import { recordDeployedLineage } from './backup-lineage.js';
-import {
-  bucketSettleNote,
-  readStateBucketYoung,
-  settleWindowFor,
-  storageSettleStatus,
-} from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
@@ -276,6 +272,8 @@ export function envCorsOrigins(domain) {
  * converge on re-run. One GET, and a PUT only when the rule differs, so a
  * warm redeploy writes nothing. A failed GET just means the rule is unknown,
  * so it PUTs. A failure only costs browser uploads, so it warns and returns.
+ * Storage that does not implement CORS (Linode E2 and E3 answer 501) cannot be
+ * fixed by a re-run or a console setting, so that warning says what can.
  *
  * @param {object} opts
  * @param {() => Promise<object>} opts.createProvider - builds a provider at the
@@ -298,6 +296,12 @@ export async function applyAppBucketCors({ createProvider, bucket, domain, log }
     if (existing && sameOrigins(existing, origins)) return;
     await provider.setBucketCors(bucket, origins);
   } catch (corsErr) {
+    if (corsErr?.name === 'NotImplemented' || corsErr?.$metadata?.httpStatusCode === 501) {
+      log.warn(
+        `Browser uploads will not work here: this storage does not support CORS, so ${bucket} cannot allow your origin. Use a storage region that does, then deploy again.`,
+      );
+      return;
+    }
     log.warn(
       `Browser uploads will fail until the bucket allows your origin (${corsErr.message}). Re-run \`vibecarbon deploy\` to apply it again, or set CORS on ${bucket} in your provider console.`,
     );
@@ -314,19 +318,18 @@ function sameOrigins(a, b) {
 /**
  * Start the app-bucket storage work that does not gate provisioning, so it
  * runs beside the IaC step instead of ahead of it (R7): the CORS rule and,
- * only on a provider whose S3 class declares a non-zero
- * `bucketSettleWindowMs`, one read of the bucket's creation time. Its output
- * is held back while IaC prints, and `finish(log)`, awaited just before the
- * success outro, waits for it, reports any warnings, and prints one note
- * when the bucket is still inside its settle window. It never waits for the
- * bucket to settle (R5). A 0 window costs nothing: no read, no note, and no
+ * only on a provider that fences a pasted app key (`appKeyScoping:
+ * 'paste-fence'`), one read of the bucket's creation time, which the fence
+ * takes as proof a deploy finished. Its output is held back while IaC prints,
+ * and `finish(log)`, awaited just before the success outro, waits for it and
+ * reports any warnings. Every other provider costs nothing: no read, and no
  * `bucketCreatedAt` on the result.
  *
  * The CORS step warns instead of throwing, and an unreadable creation time
- * is recorded as unknown (null). A provider class without a declared window
- * is a bug the census catches; `finish` warns about it and treats the window
- * as absent, because it runs after IaC succeeded and a throw would skip the
- * final config save.
+ * is recorded as unknown (null). A provider class without a declared scoping
+ * is a bug the census catches; `finish` warns about it and records nothing,
+ * because it runs after IaC succeeded and a throw would skip the final config
+ * save.
  *
  * Two security checks run here too (security plan R2, R9), and they DO make
  * `finish` reject, because an app whose own key cannot reach its bucket, or
@@ -335,7 +338,7 @@ function sameOrigins(a, b) {
  * budget, and `fence` writes and verifies the Hetzner deny-fence.
  *
  * @param {object} opts
- * @param {string} opts.providerId - the env's provider id, for its settle window
+ * @param {string} opts.providerId - the env's provider id, for its app key scoping
  * @param {() => Promise<object>} opts.createProvider
  * @param {string} opts.bucket
  * @param {string} [opts.domain]
@@ -347,8 +350,8 @@ function sameOrigins(a, b) {
  *   done: Promise<void>,
  *   finish: (log: { warn: Function, info: Function }) => Promise<{ bucketCreatedAt?: string|null }>,
  * }}
- *   `bucketCreatedAt` (ISO string, or null when unknown) is present only for
- *   a non-zero settle window.
+ *   `bucketCreatedAt` (ISO string, or null when unknown) is present only on a
+ *   provider that fences a pasted app key.
  */
 export function startAppBucketFinalize({
   providerId,
@@ -373,7 +376,11 @@ export function startAppBucketFinalize({
     domain,
     log: heldLog,
   });
-  const settle = readBucketSettleState({ providerId, createProvider: sharedProvider, bucket });
+  const fenceRecord = readFenceBucketRecord({
+    providerId,
+    createProvider: sharedProvider,
+    bucket,
+  });
   // The env's own app key (isolated or fenced tier) must reach its bucket
   // before the deploy calls itself done: a new key can take 5 to 10 s to
   // answer (R9). Polled here, beside IaC, never as a serial step before it.
@@ -384,7 +391,7 @@ export function startAppBucketFinalize({
   const fenced = fence ? Promise.resolve().then(fence) : Promise.resolve(null);
   // Handled at `finish`; this only keeps an early rejection from counting as
   // unhandled while IaC runs.
-  settle.catch(() => {});
+  fenceRecord.catch(() => {});
   appKeyReady.catch(() => {});
   fenced.catch(() => {});
   return {
@@ -407,42 +414,43 @@ export function startAppBucketFinalize({
       // Present only when the fence ran, so the caller can persist (or clear)
       // the unfenced marker status shows.
       const fenceOut = fence ? { fenceSkipped: fence.skipped ?? [] } : {};
-      const { windowMs, createdAt, warning } = await settle;
+      const { recorded, createdAt, warning } = await fenceRecord;
       if (warning) log.warn(warning);
-      if (windowMs === 0) return fenceOut;
-      const status = storageSettleStatus(createdAt, Date.now(), windowMs);
-      if (status.settling) log.info(bucketSettleNote(status, windowMs));
+      if (!recorded) return fenceOut;
       return { ...fenceOut, bucketCreatedAt: createdAt ? createdAt.toISOString() : null };
     },
   };
 }
 
 /**
- * The provider's settle window and, only when it is non-zero, the bucket's
- * creation time (null when it cannot be read). An undeclared window comes
- * back as 0 with a `warning`, never a throw.
+ * What the app key fence needs from this deploy: on a provider that fences a
+ * pasted key, the bucket's creation time (null when it cannot be read), whose
+ * presence in the env's record is the fence's proof that a deploy finished
+ * (`fenceTargets`, hetzner-app-key-fence.js). It follows the provider's
+ * declared scoping and nothing else, so no other setting can leave a bucket
+ * unfenced. An undeclared scoping comes back with a `warning`, never a throw.
  *
  * @param {{ providerId: string, createProvider: () => Promise<object>, bucket: string }} opts
- * @returns {Promise<{ windowMs: number, createdAt?: Date|null, warning?: string }>}
+ * @returns {Promise<{ recorded: boolean, createdAt?: Date|null, warning?: string }>}
  */
-async function readBucketSettleState({ providerId, createProvider, bucket }) {
-  let windowMs;
+async function readFenceBucketRecord({ providerId, createProvider, bucket }) {
+  let scoping;
   try {
-    windowMs = await settleWindowFor(providerId);
+    ({ scoping } = await scopingOf(providerId));
   } catch (err) {
     return {
-      windowMs: 0,
-      warning: `Storage settle window unknown (${err.message}), so no settle note or status row for this bucket.`,
+      recorded: false,
+      warning: `App key scoping unknown (${err.message}), so the bucket's creation time is not recorded.`,
     };
   }
-  if (windowMs === 0) return { windowMs };
+  if (scoping !== 'paste-fence') return { recorded: false };
   let createdAt = null;
   try {
     createdAt = await (await createProvider()).bucketCreatedAt(bucket);
   } catch {
-    // An unknown age is treated as a young bucket (R5).
+    // Recorded as null: the fence reads that the key is there, not its value.
   }
-  return { windowMs, createdAt };
+  return { recorded: true, createdAt };
 }
 
 /**
@@ -1090,6 +1098,7 @@ export async function executeDeployment(args, gatheredConfig) {
   }
   checkDeployPrerequisites(tier, {
     ProviderClass: providerFor(config),
+    sshVersion: readSshVersion,
     operatorScopes,
     operatorKeys: dnsOperatorConfig.keys,
     env: operatorCheckEnvs(process.cwd()),
@@ -1122,14 +1131,16 @@ export async function executeDeployment(args, gatheredConfig) {
   accessSpinner.start('Checking operator IP access');
   let accessResult;
   try {
-    accessResult = await ensureOperatorIpAccess({
-      projectConfig,
-      environment,
-      isHA: isHATier(tier),
-      apiToken,
-      yes: !!args.yes,
-      onMessage: (msg) => progressLog(msg),
-    });
+    accessResult = await perfAsync('deploy.preamble.operatorIpAccess', () =>
+      ensureOperatorIpAccess({
+        projectConfig,
+        environment,
+        isHA: isHATier(tier),
+        apiToken,
+        yes: !!args.yes,
+        onMessage: (msg) => progressLog(msg),
+      }),
+    );
   } catch (err) {
     accessSpinner.stop('Operator IP access check failed', 1);
     throw err;
@@ -1274,6 +1285,16 @@ export async function executeDeployment(args, gatheredConfig) {
   // skeleton, never cleared, and handed to reconcile.sh's environment so the
   // add-on job's status file names it.
   const attemptId = mintAttemptId();
+  // The one version set this deploy runs: read from the channel here, once,
+  // before anything renders a ref, so both sides of an HA pair get it. Saved
+  // with the skeleton: restore, failover and scale run what this recorded, and
+  // an existing cluster keeps its Kubernetes set on the next deploy. Never
+  // blocks or fails the deploy (src/lib/version-channel.js).
+  const imageSet = await resolveDeployImageSet({
+    envConfig,
+    k8s: isK8sTier(tier),
+    note: (line) => p.log.info(line),
+  });
   const saveSkeletonEnv = () => {
     const written = updateProjectConfig((onDisk) => {
       const existingEnv = onDisk.environments?.[environment] ?? {};
@@ -1325,6 +1346,7 @@ export async function executeDeployment(args, gatheredConfig) {
               },
             }
           : {}),
+        imageSet,
         lastAttempt: new Date().toISOString(),
         lastAttemptId: attemptId,
       };
@@ -1363,8 +1385,12 @@ export async function executeDeployment(args, gatheredConfig) {
   }
   saveSkeletonEnv();
 
+  const s3SetupTimer = perfTimer('deploy.preamble.s3Setup');
   s3Spinner.start('Verifying S3 buckets');
   const skipS3Setup = await state.shouldSkipWithVerify('s3-setup', s3Inputs, verifyBucketsExist);
+  // Read from this run's CreateBucket, never from the step ledger: a warm
+  // deploy restores that ledger and must not count as a new bucket.
+  let stateBucketCreated = false;
   s3Spinner.stop(skipS3Setup ? 'S3 buckets ready' : 'S3 setup needed');
   if (!skipS3Setup) {
     state.startStep('s3-setup', s3Inputs);
@@ -1409,6 +1435,7 @@ export async function executeDeployment(args, gatheredConfig) {
       s3Spinner.start(`Creating Pulumi state bucket: ${stateBucket}`);
       const stateBucketResult = await s3Provider.createBucket(stateBucket);
       assertBucketReady(stateBucketResult, 'Pulumi state');
+      stateBucketCreated = stateBucketResult.created;
       s3Spinner.stop(
         stateBucketResult.created
           ? `Pulumi state bucket created: ${stateBucket}`
@@ -1441,6 +1468,8 @@ export async function executeDeployment(args, gatheredConfig) {
       // has no legacy state), so a check failure must NOT hard-abort. Only a
       // CONFIRMED legacy-state copy failure aborts (below). Retry the checks a
       // few times so a transient blip doesn't misfire either way.
+      // Nested inside deploy.preamble.s3Setup (not a serial marker of its own).
+      const stateSeedTimer = perfTimer('deploy.preamble.s3Setup.stateSeed');
       let legacyState = false;
       let checkOk = false;
       for (let attempt = 1; attempt <= 3; attempt++) {
@@ -1500,6 +1529,7 @@ export async function executeDeployment(args, gatheredConfig) {
           process.exit(1);
         }
       }
+      stateSeedTimer.end();
 
       const result = {
         // Deliberately the PRE-state-bucket capture, not the provider's current
@@ -1540,6 +1570,7 @@ export async function executeDeployment(args, gatheredConfig) {
       process.exit(1);
     }
   }
+  s3SetupTimer.end();
 
   // Apply resolved S3 values from state
   const s3Result = state.getStepResult('s3-setup');
@@ -1560,23 +1591,15 @@ export async function executeDeployment(args, gatheredConfig) {
   // Every downstream iac call reads it via s3Config, and it's persisted into
   // .vibecarbon.json so scale / failover / destroy resolve the same backend.
   s3Config.stateBucket = s3Result?.stateBucket || stateBucket;
-
-  // The state lock's scope for an HA pair's `up`s (Ruling A′, lib/iac/
-  // state-lock.js): one read of the state bucket's creation time, and only on
-  // a provider with a non-zero settle window. Started here so it runs beside
-  // the image and restore-point work, and awaited where the tier ctx is built.
-  // Never rejects: an unreadable age answers young.
-  const stateBucketYoungRead = readStateBucketYoung({
-    providerId: providerIdFor(envConfig),
-    createProvider: () =>
-      getObjectStorageProvider(
-        providerIdFor(envConfig),
-        s3Config.accessKey,
-        s3Config.secretKey,
-        s3Config.stateBucketRegion ?? s3Config.region,
-      ),
-    bucket: s3Config.stateBucket,
-  });
+  // The HA plans open a backend this run brought into being, once, before the
+  // pair starts (open-state-backend). Any other deploy has nothing to open.
+  const newStateBackend = stateBucketCreated
+    ? {
+        provider: providerIdFor(envConfig),
+        s3Config,
+        projectName: projectConfig.projectName,
+      }
+    : null;
 
   // DR (`deploy -restore latest|<base>|<ISO-8601>`, k8s tiers): resolve the
   // exact base backup now, from the stop sentinels in the bucket and prefix
@@ -1585,17 +1608,19 @@ export async function executeDeployment(args, gatheredConfig) {
   // deploy only checks the object it is handed).
   let restorePoint = null;
   try {
-    restorePoint = await resolveDeployRestorePoint({
-      restore: args.restore,
-      k8s: isK8sTier(tier),
-      // The lineage the base comes from: -lineage, or the record the destroyed
-      // environment left (envConfig.backup survives a destroy).
-      envConfig,
-      lineage: args.lineage,
-      s3Config,
-      backupBucketName: backupS3Config?.bucket || null,
-      credentialVars: backupCredentialVars(envConfig),
-    });
+    restorePoint = await perfAsync('deploy.preamble.restorePoint', () =>
+      resolveDeployRestorePoint({
+        restore: args.restore,
+        k8s: isK8sTier(tier),
+        // The lineage the base comes from: -lineage, or the record the destroyed
+        // environment left (envConfig.backup survives a destroy).
+        envConfig,
+        lineage: args.lineage,
+        s3Config,
+        backupBucketName: backupS3Config?.bucket || null,
+        credentialVars: backupCredentialVars(envConfig),
+      }),
+    );
   } catch (err) {
     p.log.error(`deploy -restore: ${err.message}`);
     writeLogDetail(`# deploy -restore error detail: ${err?.stack || err}`);
@@ -1616,20 +1641,22 @@ export async function executeDeployment(args, gatheredConfig) {
   const storageProviderId = providerIdFor(envConfig);
   let appStorage;
   try {
-    appStorage = await resolveAppStorageCredential({
-      provider: storageProviderId,
-      environment,
-      envConfig,
-      projectConfig,
-      bucket: s3Config.bucket,
-      infraCredential: {
-        accessKey: s3Config.accessKey,
-        secretKey: s3Config.secretKey,
-        endpoint: s3Config.endpoint,
-      },
-      secrets: localAppStorageSecrets(),
-      apiToken,
-    });
+    appStorage = await perfAsync('deploy.preamble.appStorageCredential', () =>
+      resolveAppStorageCredential({
+        provider: storageProviderId,
+        environment,
+        envConfig,
+        projectConfig,
+        bucket: s3Config.bucket,
+        infraCredential: {
+          accessKey: s3Config.accessKey,
+          secretKey: s3Config.secretKey,
+          endpoint: s3Config.endpoint,
+        },
+        secrets: localAppStorageSecrets(),
+        apiToken,
+      }),
+    );
   } catch (err) {
     p.log.error(`App storage key: ${err.message}`);
     writeLogDetail(`# app storage key error detail: ${err?.stack || err}`);
@@ -1932,13 +1959,6 @@ export async function executeDeployment(args, gatheredConfig) {
   // keeps them, so a redeploy never resizes or refuses an existing env
   // (src/lib/deploy/standby-types.js haStacksFrom).
   const haStacks = haStacksFrom(envConfig);
-  const stateBucketYoung = await stateBucketYoungRead;
-  if (stateBucketYoung) {
-    emitStateScopeYoung(s3Config.stateBucket);
-    writeLogDetail(
-      `# state bucket ${s3Config.stateBucket} is inside its settle window: each Pulumi up holds the state lock end to end`,
-    );
-  }
   const deploymentConfig = {
     projectName: projectConfig.projectName,
     environment: config.environment,
@@ -1984,7 +2004,6 @@ export async function executeDeployment(args, gatheredConfig) {
     imageReadyPromise,
     tracker,
     state,
-    stateBucketYoung,
   };
 
   const deployCtx = {
@@ -2013,7 +2032,7 @@ export async function executeDeployment(args, gatheredConfig) {
     isComposeLocal,
     localImageTag,
     composeLocalBuildPromise,
-    stateBucketYoung,
+    newStateBackend,
     attemptId,
   };
 
@@ -2197,7 +2216,7 @@ export async function executeDeployment(args, gatheredConfig) {
     // deploy.ha.k8s.* sub-stages) wraps the whole pipeline, as before.
     // dnsWarmupPromise: the early HA DNS write (haK8sProvisionClusters) must
     // not race the 0.0.0.0 warm-up write of the same apex record.
-    const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise };
+    const k8sHaCtx = { options: deploymentConfig, dnsWarmupPromise, newStateBackend };
     await perfAsync('deploy.ha.k8s.full', () =>
       runPlan(planDeploy('k8s-ha', config), k8sHaCtx, EFFECTS),
     );
@@ -2678,8 +2697,6 @@ export async function executeDeployment(args, gatheredConfig) {
 
   // The app-bucket finalize started after s3-setup ran beside IaC; wait for
   // it here, before the final save and the outro, and report its warnings.
-  // On a provider with a settle window it also prints the young-bucket note;
-  // it never waits for the bucket to settle (R5).
   let appBucketFinal;
   try {
     appBucketFinal = await perfAsync('deploy.storage.finish', () =>
@@ -2875,10 +2892,10 @@ export async function executeDeployment(args, gatheredConfig) {
         : new Date().toISOString(),
       deployedCommit,
       ...(deployedDirty !== null && { deployedDirty }),
-      // bucketCreatedAt only on a provider with a settle window (status'
-      // "storage settling" row, the e2e upload gate); the fence marks the
-      // sync above wrote to disk; the app key's record (R9, no secret) so
-      // destroy can revoke it.
+      // bucketCreatedAt only on a provider that fences a pasted key (the fence
+      // reads it as proof a deploy finished); the fence marks the sync above
+      // wrote to disk; the app key's record (R9, no secret) so destroy can
+      // revoke it.
       s3: envS3Record(s3Config, {
         unfencedBuckets: persistedEnvConfig.s3?.unfencedBuckets,
         ...(Object.hasOwn(appBucketFinal, 'bucketCreatedAt') && {
@@ -2921,10 +2938,12 @@ export async function executeDeployment(args, gatheredConfig) {
   // providers whose project model needs post-hoc assignment (DigitalOcean);
   // a no-op elsewhere. Best-effort by contract — never fails the deploy.
   const AssignProvider = providerFor(envConfig);
-  await runProjectAssignment(new AssignProvider(apiToken), {
-    projectName: projectConfig.projectName,
-    environment,
-  });
+  await perfAsync('deploy.finish.fileResources', () =>
+    runProjectAssignment(new AssignProvider(apiToken), {
+      projectName: projectConfig.projectName,
+      environment,
+    }),
+  );
 
   const { formatted: timeStr } = tracker.finish();
   deployTotalTimer.end();

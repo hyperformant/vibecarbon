@@ -35,7 +35,7 @@ import { registerProject, updateProjectConfig } from './lib/config.js';
 import { devS3Endpoint } from './lib/dev-s3.js';
 import { titleizeSlug } from './lib/display-name.js';
 import { dotenvValueProblem, formatDotenvLine } from './lib/dotenv.js';
-import { resolveDbImage } from './lib/images.js';
+import { dockerSocketProxyImageRef, resolveDbImage, traefikImageRef } from './lib/images.js';
 import { writeLogoSvgs } from './lib/logo-generator.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import {
@@ -1521,6 +1521,8 @@ ${formatDotenvLine('REPL_PASSWORD', variables.REPL_PASSWORD)}
 # \`vibecarbon upgrade\` and every deploy rewrite it to the CLI's own version.
 ${formatDotenvLine('DB_IMAGE', dbImage.image)}
 ${formatDotenvLine('DB_IMAGE_TAG', dbImage.tag)}
+${formatDotenvLine('TRAEFIK_IMAGE', traefikImageRef())}
+${formatDotenvLine('DOCKER_SOCKET_PROXY_IMAGE', dockerSocketProxyImageRef())}
 
 # =============================================================================
 # ADMIN CREDENTIALS

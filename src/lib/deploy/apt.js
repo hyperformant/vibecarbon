@@ -29,7 +29,13 @@
  *
  *   install, no option           -> exit=100 in  0s  "Could not get lock"
  *   install, Lock::Timeout=60    -> exit=0   in 22s  (waited out a 15s hold)
- *   update,  Lock::Timeout=60    -> exit=0   in  3s
+ *   update,  Lock::Timeout=60    -> exit=0   in  3s  (no lock was held)
+ *
+ * `update` takes dpkg's lock-frontend too, but the list lock (lists/lock) is
+ * apt's own: with it held, `apt-get -o DPkg::Lock::Timeout=30 update` exits
+ * 100 in 0 s, because the option does not apply to it. The cloud-init
+ * programs are covered anyway (apt-daily is ordered Before= cloud-init's
+ * final stage); post-boot ssh refreshes call aptWaitForDailyUnits() first.
  *
  * WHY THIS REPLACED THREE SEPARATE DODGES
  * ---------------------------------------
@@ -74,11 +80,92 @@ export const APT_LOCK_TIMEOUT_SECONDS = 300;
 export const APT_LOCK_OPT = `-o DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_SECONDS}`;
 
 /**
+ * Stops apt asking DNS for `_https._tcp` SRV records before it connects.
+ * DigitalOcean's resolver takes 31 s to answer that query (the other four
+ * providers answer in under 0.1 s), which made a narrow `apt-get update` take
+ * 10 s and a package download 15 s there. Nothing we install uses SRV records.
+ */
+export const APT_NO_SRV_OPT = '-o Acquire::EnableSrvRecords=false';
+
+/**
  * Build a lock-safe apt-get command line.
  *
  * @param {string} args - everything after `apt-get`, e.g. `install -y -qq curl`
  * @returns {string} the full command, with the lock timeout applied
  */
 export function aptGet(args) {
-  return `apt-get ${APT_LOCK_OPT} ${args}`;
+  return `apt-get ${APT_LOCK_OPT} ${APT_NO_SRV_OPT} ${args}`;
+}
+
+/**
+ * Where the boot refresh writes its hook-silencing apt config. /run is tmpfs:
+ * a refresh killed mid-way leaves nothing in apt's config, and a reboot clears
+ * the file. `apt-get -c` loads it after apt.conf.d, so its `#clear` lines win
+ * over Ubuntu's own `99update-notifier` and friends.
+ */
+export const APT_QUIET_CONF = '/run/vibecarbon-boot.conf';
+
+/**
+ * Index targets a server never reads: translations, command-not-found data and
+ * the desktop AppStream metadata. Measured on five providers, fetching these
+ * dominates a full `apt-get update`.
+ */
+export const APT_TRIMMED_INDEXES = [
+  '-o Acquire::Languages=none',
+  '-o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false',
+  '-o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false',
+  '-o Acquire::IndexTargets::deb::DEP-11-icons-small::DefaultEnabled=false',
+  '-o Acquire::IndexTargets::deb::DEP-11-icons-hidpi::DefaultEnabled=false',
+].join(' ');
+
+const APT_HOOKS_CLEARED = [
+  'APT::Update::Post-Invoke-Success',
+  'APT::Update::Post-Invoke',
+  'APT::Update::Post-Invoke-Stats',
+  'APT::Update::Pre-Invoke',
+];
+
+/**
+ * An `apt-get update` with Ubuntu's post-update hooks silenced for this one
+ * refresh (they cost more than the refresh on a fresh image). One line of POSIX
+ * sh, double quotes only so it embeds in a single-quoted YAML scalar. The
+ * config goes to `confPath` and is loaded with `apt-get -c`, never written into
+ * apt.conf.d; the command's exit status is apt's own, also under `set -e`.
+ *
+ * @param {string} [opts] - extra apt options placed after `update -qq`
+ * @param {string} [confPath] - where the config is written
+ * @returns {string}
+ */
+export function aptQuietUpdate(opts = '', confPath = APT_QUIET_CONF) {
+  const clears = APT_HOOKS_CLEARED.map((k) => `"#clear ${k};"`).join(' ');
+  return `printf "%s\\n" ${clears} > ${confPath}; apt-get -c ${confPath} ${APT_LOCK_OPT} ${APT_NO_SRV_OPT} update -qq${opts ? ` ${opts}` : ''}`;
+}
+
+/**
+ * Block until apt-daily.service and apt-daily-upgrade.service are not running,
+ * for an apt refresh that runs after boot over ssh. `apt-get update` takes
+ * lists/lock without waiting (DPkg::Lock::Timeout does not apply to it), so a
+ * refresh that overlaps apt-daily exits 100. One blocking call, not a loop:
+ * `systemd-run --wait` starts a no-op unit ordered After= both services, and
+ * systemd runs it once they are done. Bounded by `timeout 300`, skipped where
+ * systemd-run is missing, and it fails open: if the wait itself fails the
+ * refresh runs as it would have without it.
+ *
+ * @returns {string} one line of POSIX sh, safe under `set -e`
+ */
+export function aptWaitForDailyUnits() {
+  return '{ command -v systemd-run >/dev/null 2>&1 && timeout 300 systemd-run --quiet --wait --property=After=apt-daily.service --property=After=apt-daily-upgrade.service true || true; }';
+}
+
+/**
+ * Install packages, refreshing the lists only if the install fails (a package
+ * missing from the lists the image shipped with). The fallback update is plain,
+ * hooks left in place: it is rare, and silencing is for the trimmed refresh.
+ *
+ * @param {string} pkgs - space-separated package specs
+ * @returns {string}
+ */
+export function aptInstallOrRefresh(pkgs) {
+  const install = aptGet(`install -y ${pkgs}`);
+  return `${install} || { ${aptGet('update')} && ${install}; }`;
 }

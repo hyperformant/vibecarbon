@@ -106,6 +106,32 @@ describe('applyAppBucketCors', () => {
   });
 });
 
+describe('applyAppBucketCors on storage without CORS', () => {
+  it('a 501 says to use another storage region, not to re-run or open the console', async () => {
+    const warn = vi.fn();
+    await applyAppBucketCors({
+      createProvider: async () => ({
+        getBucketCorsOrigins: async () => null,
+        setBucketCors: async () => {
+          throw Object.assign(new Error('Not Implemented'), {
+            name: 'NotImplemented',
+            $metadata: { httpStatusCode: 501 },
+          });
+        },
+      }),
+      bucket: 'app-b',
+      domain: 'staging.dev',
+      log: { warn },
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    const message = warn.mock.calls[0][0];
+    expect(message).toContain('does not support CORS');
+    expect(message).toContain('storage region');
+    expect(message).not.toContain('console');
+    expect(message).not.toContain('Re-run');
+  });
+});
+
 describe('startAppBucketFinalize (R7: beside IaC, awaited before the outro)', () => {
   it('returns before the CORS read settles, and finish waits for it', async () => {
     const events: string[] = [];

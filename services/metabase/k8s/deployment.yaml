@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: metabase
-        image: metabase/metabase:v0.64.2.7@sha256:f69044cd03f1a9968cdd427f23e3f50b893666f0092e6cac1ef7e2e30e100a96
+        image: metabase/metabase:v0.65.3.4@sha256:e8f38a6d846accfdd44cf8f31d9fb50648162ddf22daf469dac3a1e4727a7657
         ports:
         - containerPort: 3000
         env:

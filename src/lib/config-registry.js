@@ -626,8 +626,8 @@ export const CONFIG_KEYS = [
     where: '.env.local',
     scope: 'provider:linode',
   },
-  // Linode assigns one storage cluster per account/region, not always the
-  // default one — optional pin when it differs (see .env.e2e.example).
+  // A deploy finds the account's storage cluster itself. Optional pin for an
+  // operator who wants a different one (see .env.e2e.example).
   {
     key: 'LINODE_STORAGE_REGION',
     class: 'operator-secret',

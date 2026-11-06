@@ -81,7 +81,7 @@ describe('addons_ready', () => {
   it('no status file: passes on the add-on containers being healthy', async () => {
     const ps =
       'demo-grafana\trunning\tUp 1m (healthy)\ndemo-loki\trunning\tUp 1m\n' +
-      'demo-prometheus\trunning\tUp 1m\ndemo-promtail\trunning\tUp 1m\n' +
+      'demo-prometheus\trunning\tUp 1m\ndemo-alloy\trunning\tUp 1m\n' +
       'demo-postgres-exporter\trunning\tUp 1m\ndemo-n8n\trunning\tUp 1m (healthy)\n';
     const r = await checkAddonsReady({ ...base, run: remote([''], '', { ps }) });
     expect(r.status).toBe('pass');

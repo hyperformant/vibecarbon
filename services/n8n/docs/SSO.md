@@ -19,9 +19,11 @@ In dev, `localhost` and `n8n.localhost` are treated as **separate domains** by b
 
 Instead, n8n uses its **own built-in auth** in dev:
 
-1. `setup.sh` sidecar creates an owner user with a random password hash (stored in the n8n database)
+1. `setup.sh` sidecar gives n8n's owner your admin email and a password hash from `N8N_ADMIN_PASSWORD_HASH`, which only the dev compose override sets (a bcrypt hash of `changeme`)
 2. User visits `http://n8n.localhost` → sees n8n's login page
-3. Logs in with their admin email and the password configured at project creation
+3. Logs in with their admin email and the password `changeme`
+
+In production nothing sets `N8N_ADMIN_PASSWORD_HASH`, so `setup.sh` stores a random value nobody knows. Nobody signs in with a password there: ForwardAuth and `hooks.js` sign super admins in.
 
 The SSO hook (`hooks.js`) is still loaded but has no effect since ForwardAuth headers are absent — it calls `next()` and falls through to n8n's normal auth.
 
@@ -43,7 +45,7 @@ Development:
 | Component | File | Purpose |
 |-----------|------|---------|
 | SSO hook | `volumes/n8n/hooks.js` | Express middleware: reads `X-User-Email`, auto-creates user, issues session cookie |
-| DB setup sidecar | `volumes/n8n/scripts/setup.sh` | Creates owner user in PostgreSQL so setup wizard is skipped |
+| DB setup sidecar | `volumes/n8n/scripts/setup.sh` | Sets the skeleton owner's email and password hash in PostgreSQL so the setup wizard is skipped |
 | ForwardAuth config (prod) | `volumes/traefik/middlewares.yml` | Chains header stripping → role verification |
 | ForwardAuth config (dev) | `volumes/traefik/middlewares.dev.yml` | Same, routes to `host.docker.internal:3000` |
 | Verify-role endpoint | `src/server/routes/_internal/verify-role.ts` | Checks the ForwardAuth token and role, sets `X-User-*` headers |
@@ -56,7 +58,7 @@ Development:
 
 - **Export format**: `{ n8n: { ready: [fn] } }` — two-level nested, NOT `{ 'n8n.ready': [fn] }`
 - **Router access**: Express 5 uses `app.router.stack` (not `app._router.stack`)
-- **Layer creation**: Must use `require('router/lib/layer')` to create proper Layer instances (plain objects cause `layer.match is not a function`)
+- **Layer creation**: Take the class from an existing layer (`layers[i].constructor`) to create proper Layer instances (plain objects cause `layer.match is not a function`, and `require('router/lib/layer')` fails because n8n's pnpm layout does not hoist `router`)
 - **User repository**: Available via `this.dbCollections.User` (provided by hook context)
 - **Session cookies**: Use `Container.get(AuthService).issueCookie()` from `@n8n/di` (not `@n8n/api` which doesn't exist)
 - **User role column**: n8n v2.x uses `roleSlug` (FK to `role` table), not `role`
@@ -67,9 +69,11 @@ Development:
 n8n v2.x auto-creates a skeleton owner row (no email) during migration. The setup script:
 
 1. Waits for n8n's `user` table to exist
-2. UPDATEs the skeleton owner to set email, name, bcrypt password, and `lastActiveAt`
-3. Falls back to INSERT if no skeleton owner exists
+2. UPDATEs the skeleton owner to set email, name, password hash, and `lastActiveAt`. The hash is `N8N_ADMIN_PASSWORD_HASH`, or a random value when it is unset (every production deploy)
+3. Falls back to INSERT (with `roleSlug`) if no skeleton owner exists
 4. Sets `userManagement.isInstanceOwnerSetUp = true` in the `settings` table
+
+psql runs with `ON_ERROR_STOP` in one transaction, so any SQL error exits the script non-zero and success is never logged after one. The same script ships from `services/n8n/scripts/` and `carbon/volumes/n8n/scripts/`, and a unit test keeps the two identical.
 
 All three are required to skip the setup wizard:
 - `hasInstanceOwner()` checks: `password IS NOT NULL` OR `lastActiveAt IS NOT NULL`
@@ -88,7 +92,7 @@ Check the export format. n8n's `loadHooks()` expects `{ resource: { operation: [
 
 ### n8n crash loop: "layer.match is not a function"
 
-The hooks.js spliced a plain object into Express 5's router stack. Use `require('router/lib/layer')` to create proper Layer instances.
+The hooks.js spliced a plain object into Express 5's router stack. Build it from an existing layer's class (`layers[i].constructor`) so it is a proper Layer instance.
 
 ### Setup wizard still appears
 

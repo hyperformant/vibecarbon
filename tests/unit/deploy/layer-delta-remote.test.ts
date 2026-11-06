@@ -96,8 +96,16 @@ function writeSourceSave() {
 const DOCKER_STUB = `#!/bin/sh
 echo "docker $*" >> "$STUB/calls"
 case "$1 $2" in
+  "save --help")
+    echo "Usage:  docker save [OPTIONS] IMAGE [IMAGE...]"
+    [ -n "\${STUB_OLD_DOCKER:-}" ] || echo "      --platform string   Save only the given platform variant"
+    exit 0 ;;
   "save --platform")
+    [ -z "\${STUB_OLD_DOCKER:-}" ] || { echo "unknown flag: --platform" >&2; exit 125; }
     [ "$4" = "$STUB_SRC_ID" ] || { echo "Error: No such image: $4" >&2; exit 1; }
+    cd "$STUB/srcsave" && exec tar -cf - . ;;
+  "save "*)
+    [ "$2" = "$STUB_SRC_ID" ] || { echo "Error: No such image: $2" >&2; exit 1; }
     cd "$STUB/srcsave" && exec tar -cf - . ;;
   "load "*|"load")
     cat > "$STUB/loaded.tar"
@@ -228,6 +236,8 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       const r = runScript(shell, ['docker', TAG, TAG, ''], deltaTar({ fill: dockerFill }));
       expect(r.stderr).toBe('');
       expect(r.status).toBe(0);
+      // Its stages, for the deploy's perf lines, and nothing else on stdout.
+      expect(r.stdout).toMatch(/^mark receive \d+\nmark fill \d+\nmark load \d+\n$/);
       const l = loaded();
       expect(l.members).toEqual(['config.json', 'l0', 'l1', 'l2', 'l3', 'l4', 'manifest.json']);
       srcLayers.forEach((p, i) => {
@@ -235,7 +245,7 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       });
       expect(l.read('config.json').toString()).toBe(CONFIG);
       // One save per source image, pinned to the platform deploys run.
-      expect(calls().match(/docker save/g)).toHaveLength(1);
+      expect(calls().match(/docker save --platform/g)).toHaveLength(1);
       expect(calls()).toContain(`docker save --platform linux/amd64 ${SRC_ID}`);
       expect(tags()).toEqual([TAG]);
       expect(readdirSync(deltaRoot)).toEqual([]);
@@ -253,6 +263,21 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       );
       expect(r.status).toBe(0);
       expect(calls()).toContain(`docker save --platform linux/arm64 ${SRC_ID}`);
+    });
+
+    // `docker save --platform` came in Docker 28.0, and compose servers from
+    // before the Docker unification run 27.5.1 until they are rebuilt.
+    it('saves without --platform on a Docker too old to have the flag', () => {
+      writeSourceSave();
+      storeLoaded();
+      const r = runScript(shell, ['docker', TAG, TAG, ''], deltaTar({ fill: dockerFill }), {
+        STUB_OLD_DOCKER: '1',
+      });
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      expect(calls()).toContain(`docker save ${SRC_ID}`);
+      expect(calls()).not.toContain('docker save --platform');
+      expect(tags()).toEqual([TAG]);
     });
 
     it('sweeps work dirs an hour old that a killed host left behind, and only those', () => {
@@ -360,6 +385,9 @@ describe.each(SHELLS)('layer-delta-remote.sh under %s', (shell) => {
       });
       expect(r.stderr).toBe('');
       expect(r.status).toBe(0);
+      expect(r.stdout).toMatch(
+        /^mark receive \d+\nmark fill \d+\nmark load \d+\nmark verify \d+\nmark push \d+\n$/,
+      );
       const l = loaded();
       expect(l.members).toEqual(['config.json', 'l0', 'l1', 'l2', 'l3', 'l4', 'manifest.json']);
       expect(l.read('l1')).toEqual(gzipSync(BODIES[1]));

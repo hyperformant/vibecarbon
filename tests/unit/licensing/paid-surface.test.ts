@@ -88,7 +88,7 @@ describe('check-paid-boundary.js', () => {
       mkdirSync(k8sDir, { recursive: true });
 
       // A paid-surface internal (not in PAID_ENTRY_POINTS).
-      writeFileSync(join(k8sDir, 'k3s.js'), "export const K3S_VERSION = 'v1.31.5+k3s1';\n");
+      writeFileSync(join(k8sDir, 'k3s.js'), "export const K3S_VERSION = 'v1.37.2+k3s1';\n");
 
       // Free code reaching directly into the internal instead of through
       // src/lib/deploy/k8s/index.js.
@@ -113,7 +113,7 @@ describe('check-paid-boundary.js', () => {
       const k8sDir = join(srcDir, 'lib', 'deploy', 'k8s');
       mkdirSync(k8sDir, { recursive: true });
 
-      writeFileSync(join(k8sDir, 'k3s.js'), "export const K3S_VERSION = 'v1.31.5+k3s1';\n");
+      writeFileSync(join(k8sDir, 'k3s.js'), "export const K3S_VERSION = 'v1.37.2+k3s1';\n");
       writeFileSync(
         join(srcDir, 'scale.js'),
         '// paid-boundary-ignore: test fixture\n' +

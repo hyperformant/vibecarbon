@@ -131,21 +131,20 @@ updates:
   #      (`ARG RUNTIME_IMAGE=`) and NODE_RUNTIME_INPUTS_SHA256 move
   #      (tests/unit/deploy/node-runtime-image-fingerprint.test.ts).
   #
-  # OUR GHCR MIRRORS ARE NOT DEPENDABOT'S (cold-deploy-speed plan, Task 7).
-  # Every image a deploy pulls that upstream hosts on registry.k8s.io or Docker
-  # Hub is mirrored into ghcr.io/hyperformant/<name> by publish-images.yml:
-  # cluster-autoscaler, the CSI sidecars, pause, and since Task 7 traefik (on
-  # servers), docker-socket-proxy, alpine, registry, socat, alpine/k8s and
-  # k3s's own system images. Their refs pin upstream's linux/amd64 CHILD
-  # digest, which no ecosystem can propose (the mirror tag's own digest is the
-  # index the job mints), so the entries below ignore every mirror name and a
-  # bump follows the registry.k8s.io mirrors' flow: edit {tag, digest, index} in
-  # src/lib/images.js and the literal compose / k8s copies (the mirror census
-  # fails until every copy names an entry exactly), merge, and publish-images
-  # mirrors the new tag. Its weekly `mirror-upstream-drift` job lists newer
-  # upstream tags, so a release upstream is not missed. The base compose
-  # traefik (local `up`, Docker Hub's multi-arch index) stays Dependabot's;
-  # its bump goes red until TRAEFIK_MIRROR moves to the same tag.
+  # OUR GHCR MIRRORS ARE NOT DEPENDABOT'S. Every image a deploy pulls that
+  # upstream hosts on registry.k8s.io or Docker Hub is mirrored into
+  # ghcr.io/hyperformant/<name> by publish-images.yml: cluster-autoscaler, the
+  # CSI sidecars, pause, traefik (on servers), docker-socket-proxy, alpine,
+  # registry, socat, alpine/k8s and k3s's own system images. Their refs pin
+  # upstream's linux/amd64 CHILD digest, which no ecosystem can propose (the
+  # mirror tag's own digest is the index the job mints). Most of them move with
+  # no CLI release: version-channel.yml mirrors the new tag, smoke-tests it and
+  # publishes channel.json, and the templates name them by tokens the deploy
+  # fills, so no file here carries one. The rest follow the registry.k8s.io
+  # flow: edit {tag, digest, index} in src/lib/images.js, merge, and
+  # publish-images mirrors the new tag. The base compose traefik (local `up`,
+  # Docker Hub's multi-arch index) stays Dependabot's; its bump goes red until
+  # TRAEFIK_MIRROR moves to the same tag.
   #
   # Not reachable by any ecosystem: the mirror digests above (verified by
   # publish-images.yml on every run), and the project's own
@@ -164,15 +163,6 @@ updates:
     multi-ecosystem-group: images
     patterns: ["*"]
     ignore:
-      # Our ghcr mirrors (see OUR GHCR MIRRORS above): each manifest pins
-      # upstream's amd64 child digest, not the mirror tag's index digest, so
-      # a Dependabot "update" would only break the mirror census. images.js
-      # owns these refs.
-      - dependency-name: ghcr.io/hyperformant/cluster-autoscaler
-      - dependency-name: ghcr.io/hyperformant/traefik
-      - dependency-name: ghcr.io/hyperformant/registry
-      - dependency-name: ghcr.io/hyperformant/socat
-      - dependency-name: ghcr.io/hyperformant/k8s
       # Our node runtime base, carbon/Dockerfile's `ARG RUNTIME_IMAGE=`. It
       # must equal NODE_RUNTIME_IMAGE byte for byte (census), so a Dependabot
       # tag or digest move here would only break parity. images.js owns this
@@ -183,19 +173,13 @@ updates:
       - dependencies
 
   # Compose files: the template's (shipped into every project), the add-on
-  # services'. Same `images` PR as the
-  # Dockerfiles and k8s manifests. A Traefik tag bump must also move the CRD
-  # URL in carbon/k8s/base/traefik (tests/unit/template/traefik-crd-version.test.ts).
+  # services'. Same `images` PR as the Dockerfiles and k8s manifests.
   - package-ecosystem: docker-compose
     directories:
       - /carbon
       - /services/*/compose
     multi-ecosystem-group: images
     patterns: ["*"]
-    ignore:
-      # Our ghcr mirrors in docker-compose.prod.yml (see OUR GHCR MIRRORS).
-      - dependency-name: ghcr.io/hyperformant/traefik
-      - dependency-name: ghcr.io/hyperformant/docker-socket-proxy
     labels:
       - dependencies
 

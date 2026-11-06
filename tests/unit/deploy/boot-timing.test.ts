@@ -25,6 +25,7 @@ import {
   parseAnalyzeShow,
   parseBootMarkers,
   parseBootReport,
+  parseK3sInstallNotes,
   parseSystemdAnalyze,
   pendingBootTiming,
   queueBootTiming,
@@ -35,7 +36,13 @@ const fx = (name: string) =>
   readFileSync(join(__dirname, '../../fixtures/cloud-init-analyze', name), 'utf-8');
 
 /** The report the remote script prints: one `==> <section> <==` per source. */
-function report(parts: { markers?: string; show?: string; blame?: string; systemd?: string }) {
+function report(parts: {
+  markers?: string;
+  show?: string;
+  blame?: string;
+  systemd?: string;
+  k3s?: string;
+}) {
   return [
     '==> markers <==',
     parts.markers ?? '',
@@ -45,6 +52,8 @@ function report(parts: { markers?: string; show?: string; blame?: string; system
     parts.blame ?? '',
     '==> systemd <==',
     parts.systemd ?? '',
+    '==> k3s <==',
+    parts.k3s ?? '',
   ].join('\n');
 }
 
@@ -187,6 +196,7 @@ describe('parseBootReport', () => {
       show: '',
       blame: '',
       systemd: 'x',
+      k3s: '',
     });
   });
 
@@ -254,6 +264,49 @@ describe('summarizeBootTiming', () => {
   });
 });
 
+describe('the k3s install split', () => {
+  // 2026-11-05 09:13 UTC: `k3s.install` took 91.5 and 105.1 s on two masters in
+  // two Hetzner locations at once, against 7-17 s on every other run. One
+  // number could not say whether the download or k3s itself had stalled.
+  const stall = 'k 1000.500\nr 1091.000\nx 1096.000\ne 1100.000\n';
+
+  const split = (markers: string, k3s: string) =>
+    summarizeBootTiming(parseBootReport(report({ markers, k3s })))
+      .filter((s) => /k3s\.(download|start)$/.test(s.stage))
+      .map((s) => [s.stage, s.ms]);
+
+  it('separates the download from the time k3s takes to come up', () => {
+    expect(split(stall, 'binary 1085.000')).toEqual([
+      ['script.k3s.download', 84500],
+      ['script.k3s.start', 6000],
+    ]);
+  });
+
+  it('reports no split on a node that has no k3s binary', () => {
+    expect(split(stall, '')).toEqual([]);
+    expect(split('p 1.000\nd 2.000\ne 3.000\n', 'binary 2.500')).toEqual([]);
+  });
+
+  it('reports no split when the binary was not written during the install', () => {
+    expect(split(stall, 'binary 900.000')).toEqual([]);
+    expect(split(stall, 'binary 1095.000')).toEqual([]);
+  });
+
+  it('reads why an install attempt failed, and nothing else', () => {
+    const k3s = [
+      'binary 1085.000',
+      'note k3s install attempt 1 failed (likely transient GitHub/CDN issue), retrying in 20s...',
+      'note [ERROR]  Download failed',
+      'noise',
+    ].join('\n');
+    expect(parseK3sInstallNotes(k3s)).toEqual([
+      'k3s install attempt 1 failed (likely transient GitHub/CDN issue), retrying in 20s...',
+      '[ERROR]  Download failed',
+    ]);
+    expect(parseK3sInstallNotes('binary 1085.000')).toEqual([]);
+  });
+});
+
 describe('bootTimingPerfName', () => {
   it('is the deploy.<prefix>.boot.<stage> name the perf parser ingests', () => {
     expect(bootTimingPerfName('deploy.k3s.standby.master', 'script.apt')).toBe(
@@ -271,6 +324,15 @@ describe('BOOT_TIMING_SCRIPT', () => {
     expect(BOOT_TIMING_SCRIPT).toContain('cloud-init analyze blame');
     expect(BOOT_TIMING_SCRIPT).toContain('systemd-analyze');
   });
+
+  it('reads when the k3s binary landed and why any install attempt failed', () => {
+    expect(BOOT_TIMING_SCRIPT).toContain("stat -c 'binary %.3Y' /usr/local/bin/k3s");
+    expect(BOOT_TIMING_SCRIPT).toContain('/var/log/cloud-init-output.log');
+    expect(BOOT_TIMING_SCRIPT).toContain('k3s install attempt');
+    // grep -E reads this as a literal parenthesis; a template literal that
+    // dropped the backslash would make it an unterminated group.
+    expect(BOOT_TIMING_SCRIPT).toContain('curl: \\(');
+  });
 });
 
 describe('cloud-init phase marks', () => {
@@ -283,18 +345,12 @@ describe('cloud-init phase marks', () => {
   const marksIn = (text: string) => [...text.matchAll(/^_m (\S+)$/gm)].map((m) => name(m[1]));
 
   it.each([
-    [
-      'master-init.sh',
-      ['preamble', 'apt', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done'],
-    ],
-    [
-      'do-master-init.sh',
-      ['preamble', 'apt', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done'],
-    ],
-    ['db-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
-    ['do-db-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
-    ['worker-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
-    ['do-worker-init.sh', ['preamble', 'apt', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['master-init.sh', ['preamble', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done']],
+    ['do-master-init.sh', ['preamble', 'network', 'k3s.install', 'k3s.ready', 'addons', 'done']],
+    ['db-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['do-db-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['worker-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
+    ['do-worker-init.sh', ['preamble', 'network', 'master.wait', 'k3s.install', 'done']],
   ])('%s marks its phases in order, into the log the collector reads', (file, phases) => {
     const text = readFileSync(join(k3sDir, file), 'utf-8');
     expect(marksIn(text)).toEqual(phases);
@@ -447,6 +503,40 @@ describe('collectBootTiming', () => {
       }),
     ).resolves.toBeDefined();
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('says why a k3s install attempt failed', async () => {
+    const warn = vi.fn();
+    await collectBootTiming({
+      ip: 'x',
+      sshKeyPath: '/k',
+      prefix: 'deploy.k3s.master',
+      enabled: true,
+      run: async () =>
+        report({
+          markers: 'k 10.000\nr 20.000\ne 21.000\n',
+          k3s: 'note [ERROR]  Download failed',
+        }),
+      emit: vi.fn(),
+      warn,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      '[boot-timing] deploy.k3s.master: k3s install: [ERROR]  Download failed',
+    );
+  });
+
+  it('a clean install adds no warning', async () => {
+    const warn = vi.fn();
+    await collectBootTiming({
+      ip: 'x',
+      sshKeyPath: '/k',
+      prefix: 'deploy.k3s.master',
+      enabled: true,
+      run: async () => report({ markers: 'k 10.000\nr 20.000\ne 21.000\n', k3s: 'binary 18.000' }),
+      emit: vi.fn(),
+      warn,
+    });
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('warns once when the report has no timing in it', async () => {

@@ -38,25 +38,28 @@ import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { parseAst } from 'vite';
 import { describe, expect, it } from 'vitest';
-import { SOCAT_IMAGE } from '../../../src/lib/deploy/compose/ha.js';
 import { BINFMT_IMAGE } from '../../../src/lib/deploy/platform.js';
 import { loadCloudInit } from '../../../src/lib/iac/cloud-init.js';
 import {
   CARBON_AUTOSCALER_IMAGE,
-  CSI_UPSTREAM_IMAGE_PINS,
   csiSidecarSetImagePlan,
+  csiUpstreamImagePins,
   DB_IMAGE,
   DEV_DB_IMAGE,
   DIAG_BUSYBOX_IMAGE,
   DIAG_NETSHOOT_IMAGE,
   DOCKERHUB_MIRRORS,
   DOCKERHUB_UPSTREAM_REGISTRY,
+  dockerSocketProxyImageRef,
   K3S_SYSTEM_IMAGE_MIRRORS,
   K3S_SYSTEM_REGISTRY,
   k8sMirrorRef,
   MIRRORED_IMAGES,
   mirroredImageName,
   NODE_RUNTIME_IMAGE,
+  PRE_CHANNEL_KUBERNETES,
+  renderManifestImages,
+  socatImageRef,
   TRAEFIK_MIRROR,
   traefikImageRef,
   upstreamRef,
@@ -182,13 +185,18 @@ const MIRROR_KEYS = new Set(MIRRORED_IMAGES.map((image) => k8sMirrorRef(image)))
 
 /** Rule (c). */
 function unknownMirrorRefs(sites: Site[]): string[] {
-  return sites
-    .filter(({ ref }) => ref.startsWith(MIRROR_PREFIX) && ref.includes('@sha256:'))
-    .filter(({ ref }) => !OWN_PACKAGES.has(ref.slice(MIRROR_PREFIX.length).split(/[:@]/)[0]))
-    .filter(({ ref }) => !MIRROR_KEYS.has(ref))
-    .map(
-      ({ where, ref }) => `${where}: ${ref} is not a MIRRORED_IMAGES entry (name, tag and digest)`,
-    );
+  return (
+    sites
+      .filter(({ ref }) => ref.startsWith(MIRROR_PREFIX) && ref.includes('@sha256:'))
+      // Retired, already published, and kept only for clusters built on them.
+      .filter(({ ref }) => !(Object.values(PRE_CHANNEL_KUBERNETES) as string[]).includes(ref))
+      .filter(({ ref }) => !OWN_PACKAGES.has(ref.slice(MIRROR_PREFIX.length).split(/[:@]/)[0]))
+      .filter(({ ref }) => !MIRROR_KEYS.has(ref))
+      .map(
+        ({ where, ref }) =>
+          `${where}: ${ref} is not a MIRRORED_IMAGES entry (name, tag and digest)`,
+      )
+  );
 }
 
 /**
@@ -196,13 +204,24 @@ function unknownMirrorRefs(sites: Site[]): string[] {
  * only literals, and a helper-built ref is exactly as core-path as one.
  */
 const JS_EVALUATED: Site[] = [
-  { where: 'js SOCAT_IMAGE', ref: SOCAT_IMAGE },
-  ...Object.keys(CSI_UPSTREAM_IMAGE_PINS)
+  { where: 'js SOCAT_IMAGE', ref: socatImageRef() },
+  ...Object.keys(csiUpstreamImagePins())
     .flatMap((p) => csiSidecarSetImagePlan(p))
     .flatMap(({ workload, setImageArgs }) =>
       setImageArgs.map((a) => ({ where: `js csi ${workload}`, ref: a.slice(a.indexOf('=') + 1) })),
     ),
 ];
+
+/**
+ * Templates name the version set through tokens (k8s) and required env vars
+ * (compose). Filled with the bundled set here, so the rules below judge the
+ * refs a deploy runs, and the mirror census holds whatever the set can name.
+ */
+const fillImages = (text: string) =>
+  renderManifestImages(text).replace(
+    /\$\{(TRAEFIK|DOCKER_SOCKET_PROXY)_IMAGE:\?[^}]*\}/g,
+    (_, name) => (name === 'TRAEFIK' ? traefikImageRef() : dockerSocketProxyImageRef()),
+  );
 
 /**
  * Servers run carbon/docker-compose.yml UNDER docker-compose.prod.yml
@@ -215,7 +234,8 @@ const JS_EVALUATED: Site[] = [
 type ComposeDoc = { services?: Record<string, { image?: string }> };
 // Compose's `!reset` / `!override` merge tags mean nothing to js-yaml; drop them.
 const composeServices = (rel: string) =>
-  (loadYaml(read(rel).replace(/!(?:reset|override)\b/g, '')) as ComposeDoc).services ?? {};
+  (loadYaml(fillImages(read(rel)).replace(/!(?:reset|override)\b/g, '')) as ComposeDoc).services ??
+  {};
 const PROD_IMAGES = Object.fromEntries(
   Object.entries(composeServices('carbon/docker-compose.prod.yml'))
     .filter(([, svc]) => svc?.image)
@@ -227,14 +247,14 @@ const SERVER_OVERRIDDEN_BASE_REFS = new Set(
     .map(([, svc]) => svc.image as string),
 );
 const composeSites = (f: string) =>
-  textSites(f).filter(
+  textSites(f, fillImages(read(f))).filter(
     (s) => !(f === 'carbon/docker-compose.yml' && SERVER_OVERRIDDEN_BASE_REFS.has(s.ref)),
   );
 
 const ALL_SITES = [
   ...JS_EVALUATED,
   ...COMPOSE_FILES.flatMap(composeSites),
-  ...K8S_FILES.flatMap((f) => textSites(f)),
+  ...K8S_FILES.flatMap((f) => textSites(f, fillImages(read(f)))),
   ...CLOUD_INIT_FILES.flatMap((f) => textSites(f)),
   ...SRC_FILES.flatMap((f) => jsSites(f)),
 ];
@@ -319,20 +339,21 @@ describe('core-path images come from our ghcr mirror', () => {
 describe('k3s system images come from the mirror (ruling D3)', () => {
   /**
    * The system images k3s itself pulls, from the k3s-images.txt asset of the
-   * pinned release (https://github.com/k3s-io/k3s/releases, v1.31.5+k3s1,
-   * fetched 2026-10-22). traefik/klipper-helm (helm-controller's traefik
-   * chart, `--disable traefik`) and klipper-lb (`--disable servicelb`) are
-   * never pulled on our clusters and are not mirrored. The local-path helper
+   * pinned release (https://github.com/k3s-io/k3s/releases, v1.37.2+k3s1,
+   * fetched 2026-11-05). traefik/klipper-helm (helm-controller's traefik and
+   * gateway-api-crd charts, `--disable traefik`, `--disable gateway-api-crd`)
+   * and klipper-lb (`--disable servicelb`) are never pulled on our clusters and
+   * are not mirrored. The local-path helper
    * busybox is mirrored: through the alias there is no Docker Hub fallback.
    */
   const K3S_IMAGES_TXT = {
-    version: 'v1.31.5+k3s1',
+    version: 'v1.37.2+k3s1',
     mirrored: [
-      'docker.io/rancher/local-path-provisioner:v0.0.30',
-      'docker.io/rancher/mirrored-coredns-coredns:1.12.0',
-      'docker.io/rancher/mirrored-library-busybox:1.36.1',
-      'docker.io/rancher/mirrored-metrics-server:v0.7.2',
-      'docker.io/rancher/mirrored-pause:3.6',
+      'docker.io/rancher/local-path-provisioner:v0.0.37',
+      'docker.io/rancher/mirrored-coredns-coredns:1.14.7',
+      'docker.io/rancher/mirrored-library-busybox:1.37.0',
+      'docker.io/rancher/mirrored-metrics-server:v0.9.0',
+      'docker.io/rancher/mirrored-pause:3.10.2',
     ],
   };
   const SNIPPET = 'carbon/cloud-init/k3s/_k3s-system-image-mirror.yaml';
@@ -347,7 +368,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
   const SERVER_SCRIPTS = ['master-init.sh', 'do-master-init.sh'];
 
   it('the mirrored set is exactly the pinned k3s release’s system images we pull', () => {
-    const k3sVersion = read('src/lib/deploy/k8s/k3s.js').match(/K3S_VERSION = '([^']+)'/)?.[1];
+    const k3sVersion = read('src/lib/images.js').match(/K3S_VERSION = '([^']+)'/)?.[1];
     expect(k3sVersion, 'bump K3S_IMAGES_TXT from the new release’s k3s-images.txt').toBe(
       K3S_IMAGES_TXT.version,
     );
@@ -441,7 +462,7 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
       expect(forbiddenMirrors(doc.mirrors)).toEqual([]);
       // No fallback to a mirrored registry's own host, not even the alias's
       // DNS lookup: the flag sits on the one k3s install line (server or agent;
-      // both accept it in v1.31, pkg/cli/cmds/agent.go and server.go).
+      // both accept it in v1.37, `k3s server --help` and `k3s agent --help`).
       const install = script.match(/sh -s - (?:server|agent) \\\n([\s\S]*?); then/)?.[1] ?? '';
       expect(install).toContain('--disable-default-registry-endpoint \\');
       // Only one registries.yaml write per script, and no other mirror config.

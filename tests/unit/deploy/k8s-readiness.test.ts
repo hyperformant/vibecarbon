@@ -6,6 +6,7 @@ import {
   awaitPostgresAccepting,
   CERT_MANAGER_ADMISSION_PROBE_MANIFEST,
   judgeCertManagerLeader,
+  kubectlSkewNotice,
   // @ts-expect-error — JS module without types
 } from '../../../src/lib/deploy/k8s/readiness.js';
 
@@ -251,7 +252,7 @@ describe('cert-manager controller leader', () => {
       return { exec, calls };
     }
 
-    it('reads the v1.20 default lease, the controller Deployment and its ReplicaSets', async () => {
+    it('reads the default lease, the controller Deployment and its ReplicaSets', async () => {
       const { exec, calls } = cluster({
         deployment: dep(),
         replicaSets: [OLD_RS, NEW_RS],
@@ -469,5 +470,48 @@ describe('pg_isready TCP census (k8s path)', () => {
     for (const rel of ['src/restore.js', 'src/failover.js']) {
       expect(readSrc(joinPath(root, rel), 'utf8')).toContain('pg_isready');
     }
+  });
+});
+
+describe('kubectlSkewNotice: outside one minor warns, and never fails a deploy', () => {
+  const answer = (client: string, server: string) =>
+    vi.fn(async () =>
+      JSON.stringify({
+        clientVersion: { gitVersion: client },
+        serverVersion: { gitVersion: server },
+      }),
+    );
+
+  it('reads both versions from one bounded kubectl call against this cluster', async () => {
+    const exec = answer('v1.31.0', 'v1.31.5+k3s1');
+    const env = { KUBECONFIG: '/tmp/k' };
+    await expect(kubectlSkewNotice({ env, exec })).resolves.toBeNull();
+    expect(exec).toHaveBeenCalledTimes(1);
+    const [argv, opts] = exec.mock.calls[0] as unknown as [string[], Record<string, unknown>];
+    expect(argv).toEqual(['kubectl', 'version', '-o', 'json', '--request-timeout=5s']);
+    expect(opts.env).toBe(env);
+  });
+
+  it('warns when the client is two minors off, in either direction', async () => {
+    const newer = await kubectlSkewNotice({ env: {}, exec: answer('v1.35.0', 'v1.31.5+k3s1') });
+    expect(newer).toContain('kubectl 1.35');
+    const older = await kubectlSkewNotice({ env: {}, exec: answer('v1.29.0', 'v1.31.5+k3s1') });
+    expect(older).toContain('kubectl 1.29');
+  });
+
+  it('says nothing, and does not throw, when it cannot tell', async () => {
+    const down = vi.fn(async () => {
+      throw new Error('connection refused');
+    });
+    await expect(kubectlSkewNotice({ env: {}, exec: down })).resolves.toBeNull();
+    await expect(
+      kubectlSkewNotice({ env: {}, exec: vi.fn(async () => 'not json') }),
+    ).resolves.toBeNull();
+    await expect(
+      kubectlSkewNotice({
+        env: {},
+        exec: vi.fn(async () => JSON.stringify({ clientVersion: { gitVersion: 'v1.31.0' } })),
+      }),
+    ).resolves.toBeNull();
   });
 });

@@ -292,7 +292,9 @@ export function findCalls(text: string, names: readonly string[]): CallSite[] {
   // Fail closed: a source the lexer misreads could hide a call.
   if (errors.length > 0) throw new Error(`js-call-scan: cannot scan soundly: ${errors[0]}`);
   const ranges = functionRanges(text, mask);
-  const re = new RegExp(`(?<![\\w$.])(${names.join('|')})\\s*\\(`, 'g');
+  // A dot before the name is a member access, unless it ends a spread: the
+  // `...fn(` in `['kubectl', ...fn(x)]` is a call like any other.
+  const re = new RegExp(`(?<![\\w$])(?<![^.]\\.)(${names.join('|')})\\s*\\(`, 'g');
   const out: CallSite[] = [];
   for (const m of text.matchAll(re)) {
     const at = m.index ?? 0;

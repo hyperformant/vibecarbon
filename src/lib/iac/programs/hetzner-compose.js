@@ -1,8 +1,27 @@
-import { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import * as hcloud from '@pulumi/hcloud';
 import { loadComposeCloudInit } from '../compose-cloud-init.js';
 import { serverResourceOptions } from '../create-timeout.js';
+import { spliceDockerInstall } from '../docker-install.js';
+
+/**
+ * Splice the shared Docker install into the shared compose cloud-init, the
+ * same way the other four providers' renderers do (see ../docker-install.js).
+ * @param {string} sharedYaml
+ * @returns {string}
+ */
+export function renderHetznerUserData(sharedYaml) {
+  return spliceDockerInstall(sharedYaml, 'renderHetznerUserData');
+}
+
+/**
+ * This provider's compose-tier boot user-data. Single source of truth for this
+ * module's Pulumi program and HetznerProvider.getComposeUserData (the scale
+ * and HA replacement path).
+ * @returns {string}
+ */
+export function loadHetznerComposeUserData() {
+  return renderHetznerUserData(loadComposeCloudInit());
+}
 
 /**
  * @typedef {Object} ComposeStackConfig
@@ -36,7 +55,7 @@ export function buildHetznerComposeProgram(config) {
     );
   }
   const allowedSshIps = config.allowedSshIps;
-  const userData = loadComposeCloudInit();
+  const userData = loadHetznerComposeUserData();
 
   return async () => {
     let sshKeyId;
@@ -98,13 +117,11 @@ export function buildHetznerComposeProgram(config) {
       {
         name,
         serverType: config.serverType,
-        // Hetzner-maintained app image: Ubuntu LTS with docker + the
-        // docker-compose plugin pre-installed. Matches the contract in
-        // carbon/cloud-init/docker-ce-setup.yaml ("VPS boot time in parallel
-        // with Hetzner's default docker-ce app"). Plain `ubuntu-24.04` leaves
-        // the VM without docker and the deploy hits `docker: command not
-        // found` on the first `docker compose up` call.
-        image: 'docker-ce',
+        // Plain Ubuntu 26.04, like every other provider: the latest Docker
+        // is installed by the cloud-init user data (../docker-install.js), not
+        // by Hetzner's prebuilt `docker-ce` app image, which ships an older
+        // Docker (27.5.1) than the deploy's `docker save --platform` needs.
+        image: 'ubuntu-26.04',
         location: config.location,
         sshKeys: [sshKeyId],
         firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],

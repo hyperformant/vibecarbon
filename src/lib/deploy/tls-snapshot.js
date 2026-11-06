@@ -24,7 +24,7 @@ const K8S_SECRET_NAME = 'vibecarbon-tls';
 
 /**
  * The label cert-manager puts on every Secret it manages
- * (`cmapi.PartOfCertManagerControllerLabelKey`, cert-manager v1.20.2
+ * (`cmapi.PartOfCertManagerControllerLabelKey`, cert-manager v1.21.3
  * pkg/apis/certmanager/v1/types.go; set in
  * pkg/controller/certificates/issuing/internal/secret.go, setValues).
  *
@@ -41,11 +41,11 @@ export const CERT_MANAGER_CONTROLLER_LABEL = 'controller.cert-manager.io/fao';
 
 /**
  * The S3 client options of a snapshot read on a failover path, where waiting
- * is outage: one attempt, 10s to connect and 10s for the request.
+ * is outage: one attempt, 10 s to connect and 10 s of silence.
  */
 export const DR_S3_CLIENT_OPTIONS = Object.freeze({
   maxAttempts: 1,
-  requestHandler: { connectionTimeout: 10_000, requestTimeout: 10_000 },
+  requestHandler: { connectionTimeout: 10_000, socketTimeout: 10_000 },
 });
 
 /** 'staging' iff the ACME directory URL or issuer name mentions staging. */
@@ -156,7 +156,7 @@ function subjectList(subject, key) {
 
 /**
  * The annotations cert-manager derives from a certificate and writes on its
- * Secret, with the same keys, values and formatting: cert-manager v1.20.2
+ * Secret, with the same keys, values and formatting: cert-manager v1.21.3
  * internal/controller/certificates/secrets.go, AnnotationsForCertificate
  * (keys from pkg/apis/certmanager/v1/types.go). common-name, alt-names,
  * ip-sans and uri-sans are kept when empty, every other one only when it has
@@ -426,7 +426,7 @@ export function inspectK8sTlsSecret(secretJsonText, { dnsNames, now = new Date()
 /**
  * A clean vibecarbon-tls manifest from a snapshot, for `kubectl create` or
  * `replace -f -`. Its labels and annotations are exactly those cert-manager's
- * SecretsManager.setValues writes for this Certificate (cert-manager v1.20.2
+ * SecretsManager.setValues writes for this Certificate (cert-manager v1.21.3
  * pkg/controller/certificates/issuing/internal/secret.go): the certificate
  * details (certificateDetailsAnnotations), the certificate name, the issuer
  * reference and CERT_MANAGER_CONTROLLER_LABEL.

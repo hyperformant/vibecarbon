@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripOperatorSecretLines } from '../config-registry.js';
 import { formatDotenvLine, parseDotenv } from '../dotenv.js';
-import { resolveDbImage } from '../images.js';
+import { dockerSocketProxyImageRef, resolveDbImage, traefikImageRef } from '../images.js';
 import {
   ADDON_JOB_SCRIPT,
   ADDON_SERVICES_SCRIPT,
@@ -363,6 +363,10 @@ export function renderBundle(projectName, options = {}) {
   const dbImage = resolveDbImage();
   envOverrides.DB_IMAGE = dbImage.image;
   envOverrides.DB_IMAGE_TAG = dbImage.tag;
+  // The same rule for the images the version set moves: the prod overlay reads
+  // both from .env, so the value here is what the server runs.
+  envOverrides.TRAEFIK_IMAGE = traefikImageRef();
+  envOverrides.DOCKER_SOCKET_PROXY_IMAGE = dockerSocketProxyImageRef();
   if (options.domain) {
     envOverrides.DOMAIN = options.domain;
     envOverrides.ACME_EMAIL = `admin@${options.domain}`;
@@ -518,7 +522,7 @@ export function renderBundle(projectName, options = {}) {
   if (options.observability) {
     copyDirIfExist('prometheus', 'prometheus');
     copyDirIfExist('grafana', 'grafana');
-    for (const subdir of ['prometheus', 'grafana', 'loki', 'promtail']) {
+    for (const subdir of ['prometheus', 'grafana', 'loki', 'alloy']) {
       copyDirIfExist(`volumes/${subdir}`, `volumes/${subdir}`);
     }
   }

@@ -60,7 +60,7 @@ jobs:
         uses: azure/setup-kubectl@v4
         with:
           # Pin to a specific minor; bump deliberately.
-          version: 'v1.32.0'
+          version: 'v1.37.2'
 
       - name: Write kubeconfig from env secret
         env:
@@ -94,6 +94,8 @@ jobs:
         env:
           BACKUP_SCHEDULE: ${{ vars.BACKUP_SCHEDULE }}
           BACKUP_RETENTION_DAYS: ${{ vars.BACKUP_RETENTION_DAYS }}
+          # The CronJob's kubectl, from the environment's version set.
+          KUBECTL_IMAGE: ${{ vars.KUBECTL_IMAGE }}
           # Optional: where the CronJob saves the TLS certificate (seeded by
           # `vibecarbon configure cicd` when the env has a backup bucket).
           TLS_SNAPSHOT_S3_PREFIX: ${{ vars.TLS_SNAPSHOT_S3_PREFIX }}
@@ -219,7 +221,7 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
-          version: 'v1.32.0'
+          version: 'v1.37.2'
 
       - name: Write kubeconfig from env secret
         env:
@@ -241,7 +243,7 @@ jobs:
         # Bumping here requires a matching bump there + a re-test.
         run: |
           if ! kubectl -n flux-system get deployment source-controller > /dev/null 2>&1; then
-            kubectl apply -f https://github.com/fluxcd/flux2/releases/download/v2.8.5/install.yaml
+            kubectl apply -f https://github.com/fluxcd/flux2/releases/download/v2.10.0/install.yaml
             kubectl -n flux-system wait --for=condition=available \
               deployment/source-controller deployment/kustomize-controller \
               deployment/helm-controller deployment/notification-controller \
@@ -267,11 +269,24 @@ jobs:
       # flags and the control-plane pin). Applying the bare upstream manifest
       # here would strip the flags and the pin the CLI rendered in, and roll
       # the controller on every run; the rendered one re-applies as a no-op.
+      #
+      # The CRD URL carries the Traefik tag of the environment's version set
+      # (TRAEFIK_VERSION, seeded by `vibecarbon configure cicd`): a CRD behind
+      # the running Traefik prunes newer fields without an error.
       - name: Install cert-manager + Traefik CRDs
+        env:
+          TRAEFIK_VERSION: ${{ vars.TRAEFIK_VERSION }}
         run: |
+          [[ "$TRAEFIK_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::TRAEFIK_VERSION is not set for this environment. Run vibecarbon configure cicd <env>."
+            exit 1
+          }
           node scripts/render-cert-manager.mjs "$RUNNER_TEMP/cert-manager"
           kubectl apply -k "$RUNNER_TEMP/cert-manager"
-          kubectl apply -k k8s/infra/traefik-crds/
+          mkdir -p "$RUNNER_TEMP/traefik-crds"
+          sed "s/{{TRAEFIK_VERSION}}/$TRAEFIK_VERSION/g" k8s/infra/traefik-crds/kustomization.yaml \
+            > "$RUNNER_TEMP/traefik-crds/kustomization.yaml"
+          kubectl apply -k "$RUNNER_TEMP/traefik-crds"
           kubectl -n cert-manager wait --for=condition=available \
             deployment/cert-manager \
             deployment/cert-manager-webhook \
@@ -351,7 +366,7 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
-          version: 'v1.32.0'
+          version: 'v1.37.2'
 
       - name: Write kubeconfig from env secret
         env:
@@ -443,9 +458,9 @@ jobs:
             # kube-system has relaxed PodSecurity (allows system pods).
             # A plain pod can curl/nslookup without host namespaces —
             # this is what Flux's source-controller is actually doing.
-            kubectl -n kube-system run dns-probe-$RANDOM --image=busybox:1.36 \
+            kubectl -n kube-system run dns-probe-$RANDOM --image=busybox:1.38 \
               --restart=Never --rm -i --timeout=60s \
-              --overrides='{"spec":{"containers":[{"name":"probe","image":"busybox:1.36","command":["sh","-c","echo \"--- /etc/resolv.conf ---\"; cat /etc/resolv.conf; echo; echo \"--- nslookup github.com (via coredns) ---\"; nslookup github.com; echo; echo \"--- nslookup github.com @1.1.1.1 ---\"; nslookup github.com 1.1.1.1; echo; echo \"--- wget github.com ---\"; wget -qO- --timeout=5 https://github.com 2>&1 | head -5 || echo wget-failed"]}]}}' \
+              --overrides='{"spec":{"containers":[{"name":"probe","image":"busybox:1.38","command":["sh","-c","echo \"--- /etc/resolv.conf ---\"; cat /etc/resolv.conf; echo; echo \"--- nslookup github.com (via coredns) ---\"; nslookup github.com; echo; echo \"--- nslookup github.com @1.1.1.1 ---\"; nslookup github.com 1.1.1.1; echo; echo \"--- wget github.com ---\"; wget -qO- --timeout=5 https://github.com 2>&1 | head -5 || echo wget-failed"]}]}}' \
               2>&1 | head -50 || echo "(pod dns-probe failed)"
             echo
             echo "=== kube-proxy / node routing (kube-proxy pod logs) ==="

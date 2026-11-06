@@ -2,7 +2,7 @@
  * M3 Task 2 — Hetzner byte-identical pin.
  *
  * The k8s pipeline's static-IP + image literals (`10.0.1.1`/`10.0.1.2`
- * registry refs, `ubuntu-24.04` node image) became data driven by
+ * registry refs, `ubuntu-26.04` node image) became data driven by
  * `infraOutputs.masterPrivateIp`/`dbPrivateIp` and the new
  * `ProviderClass.K8S_IMAGE` static — required because DigitalOcean's VPC
  * can't pin private IPs the way Hetzner's Pulumi program does. THE
@@ -40,6 +40,13 @@
  * alias mirror from _k3s-system-image-mirror.yaml and its k3s agent install
  * gained --disable-default-registry-endpoint; the embedded `cloudInit` diff is
  * confined to those lines.
+ * RE-CAPTURED 2026-11-04 (boot speed): worker-init.sh dropped its apt
+ * update/install and the `_m a` mark, and asks for its private-NIC lease at the
+ * first retry instead of the sixth; the embedded `cloudInit` diff is confined
+ * to those lines.
+ *
+ * RE-CAPTURED 2026-11-05 (Kubernetes 1.37): the k3s version in the embedded
+ * worker script, nothing else.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -88,7 +95,7 @@ describe('M3 Task 2 — Hetzner byte-identical pin', () => {
     const expected = JSON.stringify(fixture, null, 2);
 
     const args = {
-      k3sVersion: 'v1.31.5+k3s1',
+      k3sVersion: 'v1.37.2+k3s1',
       k3sToken: 'deadbeefcafe1234567890abcdef',
       clusterName: 'acme-prod',
       environment: 'prod',
@@ -114,9 +121,9 @@ describe('M3 Task 2 — Hetzner byte-identical pin', () => {
     );
 
     // The image field specifically — the literal this task's refactor
-    // touched most directly (was hardcoded 'ubuntu-24.04', now
+    // touched most directly (was hardcoded 'ubuntu-26.04', now
     // ProviderClass.K8S_IMAGE).
-    expect(JSON.parse(expected).nodeGroups['worker-pool'].image).toBe('ubuntu-24.04');
+    expect(JSON.parse(expected).nodeGroups['worker-pool'].image).toBe('ubuntu-26.04');
   });
 
   it('buildAppImage names no registry; the Hetzner registry ref is still 10.0.1.1:5000', async () => {

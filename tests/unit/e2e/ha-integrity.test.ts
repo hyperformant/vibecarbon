@@ -1317,7 +1317,7 @@ describe('_run-lifecycle.ts wires the HA integrity steps', async () => {
   });
 
   it('--skip-steps drops dependents through expandSkippedSteps', () => {
-    expect(src).toContain('const dropped = expandSkippedSteps(options.skipSteps);');
+    expect(src).toContain('const dropped = expandSkippedSteps(requestedSkips);');
   });
 
   it('a reconverge that cannot write its survival marker fails instead of skipping the proof', () => {

@@ -12,7 +12,7 @@ services:
       - ./volumes/db/metabase-init.sh:/docker-entrypoint-initdb.d/zz-metabase-init.sh:Z
 
   metabase:
-    image: metabase/metabase:v0.64.2.7@sha256:f69044cd03f1a9968cdd427f23e3f50b893666f0092e6cac1ef7e2e30e100a96
+    image: metabase/metabase:v0.65.3.4@sha256:e8f38a6d846accfdd44cf8f31d9fb50648162ddf22daf469dac3a1e4727a7657
     container_name: {{PROJECT_NAME}}-metabase
     restart: unless-stopped
     ports:
@@ -49,7 +49,7 @@ services:
       - "traefik.http.services.metabase.loadbalancer.server.port=3000"
 
   metabase-setup:
-    image: alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+    image: alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4
     container_name: {{PROJECT_NAME}}-metabase-setup
     volumes:
       - ./volumes/metabase/scripts:/scripts:ro

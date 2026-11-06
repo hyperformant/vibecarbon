@@ -85,7 +85,7 @@ const baseConfig = {
   workerServerType: 's-2vcpu-4gb',
   minWorkers: 2,
   maxWorkers: 3,
-  k3sVersion: 'v1.31.5+k3s1',
+  k3sVersion: 'v1.37.2+k3s1',
   apiToken: 'dop_v1_test_token_1234',
   allowedSshIps: ['203.0.113.5/32'],
   allowedK8sApiIps: ['203.0.113.5/32'],

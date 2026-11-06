@@ -160,7 +160,7 @@ describe('the upstream cert-manager manifest is named only by the renderer', () 
   it('bites: the retired workflow line and the retired JS constant', () => {
     expect(
       upstreamManifestLines(
-        '          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml',
+        '          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.21.3/cert-manager.yaml',
       ),
     ).toHaveLength(1);
     expect(
@@ -171,7 +171,7 @@ describe('the upstream cert-manager manifest is named only by the renderer', () 
     ).toHaveLength(1);
     expect(
       upstreamManifestLines(
-        '# cert-manager URL: https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml',
+        '# cert-manager URL: https://github.com/cert-manager/cert-manager/releases/download/v1.21.3/cert-manager.yaml',
       ),
     ).toHaveLength(1);
     expect(upstreamManifestLines('kubectl apply -k "$RUNNER_TEMP/cert-manager"')).toEqual([]);

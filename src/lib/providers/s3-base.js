@@ -135,11 +135,24 @@ export function formatS3SetupFailure(error, { endpoint, source } = {}) {
 }
 
 /**
+ * Sends ListBuckets as the bare `GET /` AWS documents. The SDK adds
+ * `?x-id=ListBuckets`, which every Linode E0 and E1 cluster refuses with
+ * SignatureDoesNotMatch while E3 ignores it (11 clusters probed with a separate
+ * signer, 2026-11-05). A good key then read as a wrong one and stopped the
+ * deploy. This runs at the build step, ahead of signing, so the signature
+ * covers what is sent. Other calls keep their query: E1 takes it on object paths.
+ */
+const bareListBuckets = (next, context) => (args) => {
+  if (context.commandName === 'ListBucketsCommand') delete args.request.query['x-id'];
+  return next(args);
+};
+
+/**
  * Subclasses also declare `static appKeyScoping` ('mint' | 'paste-fence' |
  * 'none'): how the env's app gets an object-storage key of its own (security
  * plan R2). The base declares none on purpose, so a provider that forgets it
  * fails tests/unit/providers/app-key-scoping-census.test.ts instead of
- * inheriting a silent default, the same pattern as `bucketSettleWindowMs`.
+ * inheriting a silent default, the same pattern as `bucketQuietMs`.
  */
 export class S3CompatibleProvider {
   /**
@@ -179,7 +192,7 @@ export class S3CompatibleProvider {
       // request will hang the call indefinitely. Observed in iter-initbackend
       // 2026-05-01 (Hetzner Ceph): compose destroy hung for 600s (test runner
       // SIGKILL) on emptyAndDeleteBucket → ListObjectsV2; the per-iteration
-      // `client.send` never returned. With requestTimeout set, a stuck call
+      // `client.send` never returned. With socketTimeout set, a stuck call
       // surfaces as a TimeoutError after 60s and `_send` retries. maxAttempts
       // here is the SDK's own internal retry; `_send` adds an outer layer with
       // backoff tuned for the provider's recovery cadence.
@@ -198,6 +211,10 @@ export class S3CompatibleProvider {
         },
         maxAttempts: 3,
         requestHandler: { ...S3_HTTP_TIMEOUTS },
+      });
+      this._client.middlewareStack.add(bareListBuckets, {
+        step: 'build',
+        name: 'bareListBuckets',
       });
     }
     return this._client;
@@ -306,8 +323,8 @@ export class S3CompatibleProvider {
 
   /**
    * When a bucket was created, from ListBuckets' CreationDate. Null on any
-   * error, an unlisted bucket or a missing date: callers treat an unknown
-   * age as a young bucket, so this never needs to throw.
+   * error, an unlisted bucket or a missing date: the app key fence reads that
+   * a deploy recorded this, not the value, so this never needs to throw.
    *
    * @param {string} bucketName
    * @returns {Promise<Date|null>}
@@ -543,6 +560,12 @@ export class S3CompatibleProvider {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         await this._send(command, { maxAttempts: 1 });
+        // Before anything else touches the bucket, not as part of the wait
+        // below: on a provider with a quiet period, that first probe arriving
+        // too soon is what makes the bucket unreliable (static bucketQuietMs).
+        if (this.constructor.bucketQuietMs > 0) {
+          await new Promise((r) => setTimeout(r, this.constructor.bucketQuietMs));
+        }
         const ready = await this.waitForBucketVisible(bucketName);
         return { name: bucketName, created: true, ready };
       } catch (error) {
@@ -602,16 +625,13 @@ export class S3CompatibleProvider {
    * 403 and the deploy died first-strike). Poll until the bucket answers
    * BOTH a HEAD and a LIST so callers can rely on create → use with either
    * operation.
-   * SUSTAINED visibility, not one lucky sample (registry-500 RCA, runs
-   * 31970876667/31984725162/31997668866): Hetzner's frontends propagate
-   * bucket metadata independently and each new connection may land on a
-   * different one — a single HEAD+LIST pass proved ONE frontend while the
-   * in-cluster registry's S3 driver was still getting `s3aws: NoSuchBucket`
-   * resolving upload sessions minutes later. The condition is therefore
-   * K CONSECUTIVE clean HEAD+LIST rounds (a flap resets the streak — the
-   * frontends must converge, not get lucky) followed by one
-   * write → read → delete round-trip, proving the WRITE path every consumer
-   * (registry uploads, wal-g, Pulumi state) actually depends on.
+   * SUSTAINED visibility, not one lucky sample: K CONSECUTIVE clean HEAD+LIST
+   * rounds (a flap resets the streak) followed by one write → read → delete
+   * round-trip, proving the WRITE path every consumer (registry uploads, wal-g,
+   * Pulumi state) actually depends on. The `s3aws: NoSuchBucket` that made
+   * this a streak (registry-500 RCA, runs 31970876667/31984725162/31997668866)
+   * was this probe reaching a new Hetzner bucket in its first second, which
+   * `bucketQuietMs` now prevents; no provider needs time between clean rounds.
    *
    * On budget exhaustion this returns false and the CALLER decides:
    * createBucket surfaces it as `ready: false`, and the deploy orchestrator
@@ -619,6 +639,9 @@ export class S3CompatibleProvider {
    * bucket that did pass is still covered by the caller-side NoSuchBucket
    * retry (see lib/iac withStateBackendRetry) and the registry push's
    * round-trip probe.
+   *
+   * Clean rounds run back to back. A round that fails always pauses, so a
+   * provider that lags cannot spin.
    */
   async waitForBucketVisible(bucketName, { budgetMs = 120_000, intervalMs = 2000 } = {}) {
     const REQUIRED_STREAK = 3;
@@ -626,6 +649,7 @@ export class S3CompatibleProvider {
     const probeKey = `.vibecarbon-visibility-probe-${Date.now()}`;
     let streak = 0;
     for (;;) {
+      let clean = false;
       // bucketExists translates HeadBucket 403 into a fatal "owned by another
       // account" — correct for cold lookups, WRONG here: during post-create
       // propagation the provider can 403 the bucket we created seconds ago
@@ -641,6 +665,7 @@ export class S3CompatibleProvider {
             maxAttempts: 1,
           });
           streak += 1;
+          clean = true;
           if (streak >= REQUIRED_STREAK) {
             // Streak held — prove the write path with a tiny round-trip.
             await this._send(
@@ -668,7 +693,9 @@ export class S3CompatibleProvider {
         }
       } catch {
         streak = 0;
+        clean = false;
       }
+      if (clean) continue;
       if (Date.now() + intervalMs > deadline) {
         console.warn(
           `[s3] bucket ${bucketName} created but not sustainably HEAD+LIST+write-ready after ${budgetMs}ms`,

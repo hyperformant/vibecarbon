@@ -5,6 +5,11 @@ metadata:
   labels:
     app: vibecarbon-traefik
     component: ingress
+  # The CLI's deploy owns this Deployment: {{TRAEFIK_IMAGE}} is rendered from
+  # the version set, and Flux drops it from its build (flux/clusters/*).
+  # prune: disabled keeps Flux's garbage collection off it too.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   replicas: 1
   selector:
@@ -25,7 +30,7 @@ spec:
         effect: NoSchedule
       containers:
       - name: traefik
-        image: ghcr.io/hyperformant/traefik:v3.6.11@sha256:2b6506fde98570702dd026bc70ed307a0f22c2cf693329e91b46f94d371097a1
+        image: "{{TRAEFIK_IMAGE}}"
         imagePullPolicy: IfNotPresent
         args:
         - --api.dashboard=true
@@ -56,11 +61,18 @@ spec:
           limits:
             cpu: 500m
             memory: 256Mi
+        startupProbe:
+          httpGet:
+            path: /ping
+            port: traefik
+          periodSeconds: 1
+          timeoutSeconds: 3
+          failureThreshold: 60
         livenessProbe:
           httpGet:
             path: /ping
             port: traefik
-          initialDelaySeconds: 10
+          initialDelaySeconds: 0
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
@@ -68,7 +80,7 @@ spec:
           httpGet:
             path: /ping
             port: traefik
-          initialDelaySeconds: 5
+          initialDelaySeconds: 0
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 3

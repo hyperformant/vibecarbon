@@ -1,9 +1,8 @@
 /**
  * The cloud-init readiness budget (setupServer's polling deadline) is
  * provider-owned (see BaseProvider.CLOUD_INIT_READY_TIMEOUT_MS / hetzner.js /
- * digitalocean.js). Hetzner's `docker-ce` image has Docker preinstalled, so
- * 180s is generous; DigitalOcean's `ubuntu-24-04-x64` image installs
- * docker-ce from Docker's apt repo INSIDE cloud-init (see
+ * digitalocean.js). Every compose provider, Hetzner included, installs the
+ * pinned docker-ce from Docker's apt repo INSIDE cloud-init (see
  * digitalocean-compose.js renderDoUserData) — realistically 3-5 minutes on
  * small droplets — so it needs 600s.
  *
@@ -45,7 +44,7 @@ beforeEach(() => {
 });
 
 describe('setupServer effect — provider-owned cloud-init readiness budget', () => {
-  it('passes HetznerProvider.CLOUD_INIT_READY_TIMEOUT_MS (180s) for a Hetzner envConfig', async () => {
+  it('passes HetznerProvider.CLOUD_INIT_READY_TIMEOUT_MS (600s) for a Hetzner envConfig', async () => {
     const ctx: Record<string, unknown> = {
       state: fakeState(),
       serverIp: '5.78.41.67',
@@ -58,7 +57,7 @@ describe('setupServer effect — provider-owned cloud-init readiness budget', ()
     await EFFECTS.setupServer(ctx);
 
     expect(H.calls).toHaveLength(1);
-    expect(H.calls[0].timeoutMs).toBe(180_000);
+    expect(H.calls[0].timeoutMs).toBe(600_000);
   });
 
   it('passes DigitalOceanProvider.CLOUD_INIT_READY_TIMEOUT_MS (600s) for a DigitalOcean envConfig', async () => {
@@ -77,7 +76,7 @@ describe('setupServer effect — provider-owned cloud-init readiness budget', ()
     expect(H.calls[0].timeoutMs).toBe(600_000);
   });
 
-  it("defaults to hetzner (180s) when envConfig.provider is absent, matching providerFor's ?? 'hetzner' fallback", async () => {
+  it("defaults to hetzner (600s) when envConfig.provider is absent, matching providerFor's ?? 'hetzner' fallback", async () => {
     const ctx: Record<string, unknown> = {
       state: fakeState(),
       serverIp: '5.78.41.67',
@@ -89,6 +88,6 @@ describe('setupServer effect — provider-owned cloud-init readiness budget', ()
 
     await EFFECTS.setupServer(ctx);
 
-    expect(H.calls[0].timeoutMs).toBe(180_000);
+    expect(H.calls[0].timeoutMs).toBe(600_000);
   });
 });

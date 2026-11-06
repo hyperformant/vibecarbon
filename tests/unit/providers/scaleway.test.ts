@@ -81,11 +81,11 @@ describe('ScalewayProvider statics', () => {
   });
 
   it('pins the compose image as the marketplace LABEL, never a UUID (per-zone/per-volume-type UUIDs)', () => {
-    expect(ScalewayProvider.COMPOSE_IMAGE).toBe('ubuntu_noble');
+    expect(ScalewayProvider.COMPOSE_IMAGE).toBe('ubuntu_resolute');
     expect(ScalewayProvider.COMPOSE_IMAGE).not.toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it('pins the 10-minute cloud-init budget (Docker is NOT preinstalled on ubuntu_noble)', () => {
+  it('pins the 10-minute cloud-init budget (Docker is NOT preinstalled on ubuntu_resolute)', () => {
     expect(ScalewayProvider.CLOUD_INIT_READY_TIMEOUT_MS).toBe(600_000);
   });
 

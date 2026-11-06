@@ -1,0 +1,204 @@
+name: Version channel
+
+# A patched image reaches customer deploys with no CLI release. Once a day this
+# reads upstream, copies what is new into ghcr.io/hyperformant, smoke-tests it,
+# and publishes one list, channel.json on the `channel` branch. Deploys read that
+# list and fall back to the copy bundled with the CLI (src/lib/version-channel.js).
+#
+# The order is the safety. Nothing a deploy can see changes until the copies
+# exist and the smoke test passed: a failure at any step leaves the list as it
+# was, and that step fails visibly. k3s names its system images by tag through
+# registries.yaml, so those are mirrored here too, before the list names the k3s
+# that asks for them.
+#
+# The smoke test is the cheapest real check with no cloud spend:
+#   pull-check     every ref pulls for amd64 with no login, as a node pulls it
+#   compose-smoke  the compose stack on the newest Docker, Traefik through the
+#                  socket proxy (docker-newest.yml)
+#   k3s-smoke      one k3s node with the flags in master-init.sh, its system
+#                  images coming only from our mirror
+#
+# What moves is decided in scripts/version-channel.mjs. A new major never moves
+# on its own: it stays out of the list, and escalate opens one issue for it.
+#
+# Every write here is scoped to the one job that needs it. This is the only
+# thing that writes the `channel` branch.
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Two runs would read the same list and publish over each other.
+concurrency:
+  group: version-channel
+
+jobs:
+  plan:
+    name: Read upstream and plan the next list
+    # A dispatch from any other branch would run that branch's script, and then
+    # mirror and publish what it says with the tokens below. Everything else
+    # here needs this job, so this one line gates them all.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.plan.outputs.changed }}
+      channel: ${{ steps.plan.outputs.channel }}
+      include: ${{ steps.plan.outputs.include }}
+      refs: ${{ steps.plan.outputs.refs }}
+      k3s: ${{ steps.plan.outputs.k3s }}
+      traefik_image: ${{ steps.plan.outputs.traefik_image }}
+      docker_socket_proxy_image: ${{ steps.plan.outputs.docker_socket_proxy_image }}
+      majors: ${{ steps.plan.outputs.majors }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: channel
+          path: published
+      # scripts/version-channel.mjs has no dependencies, so no install step.
+      - id: plan
+        name: Plan
+        run: node scripts/version-channel.mjs plan published/channel.json
+
+  mirror:
+    name: Copy what is new into ghcr
+    needs: plan
+    if: needs.plan.outputs.changed == 'true'
+    uses: ./.github/workflows/mirror-images.yml
+    permissions:
+      contents: read
+      packages: write   # push mirrored manifests to ghcr
+    with:
+      include: ${{ needs.plan.outputs.include }}
+    # e2e-infra's Docker Hub credential: see publish-images.yml.
+    secrets: inherit
+
+  pull-check:
+    name: Every ref pulls for amd64 with no login
+    needs: [plan, mirror]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # No login, on purpose. A node pulls with no credential, so this is also
+      # the proof every package is public.
+      - name: Pull
+        env:
+          REFS: ${{ needs.plan.outputs.refs }}
+        run: |
+          set -euo pipefail
+          for ref in $REFS; do
+            docker pull --platform linux/amd64 "$ref"
+          done
+
+  compose-smoke:
+    name: Compose on the newest Docker
+    needs: [plan, mirror]
+    uses: ./.github/workflows/docker-newest.yml
+    permissions:
+      contents: read
+      issues: write   # its escalate job
+    with:
+      traefik_image: ${{ needs.plan.outputs.traefik_image }}
+      docker_socket_proxy_image: ${{ needs.plan.outputs.docker_socket_proxy_image }}
+
+  k3s-smoke:
+    name: One k3s node with the recorded flags
+    needs: [plan, mirror]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # The flags ask for wireguard-native, which needs the module on the host.
+      - name: Load wireguard
+        run: sudo modprobe wireguard
+
+      - name: k3s from master-init.sh's flags, pulling only from our mirror
+        env:
+          DOCKER_INTEGRATION: 'true'
+          VC_K3S_VERSION: ${{ needs.plan.outputs.k3s }}
+          VC_TRAEFIK_IMAGE: ${{ needs.plan.outputs.traefik_image }}
+        run: pnpm exec vitest run --project integration-docker tests/integration/docker/k3s-recorded-flags.test.ts
+
+  publish:
+    name: Publish the list
+    needs: [plan, pull-check, compose-smoke, k3s-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write   # the one write to the list
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: channel
+          path: published
+
+      # The CLI's own validator, once more, on what is about to go out.
+      - name: Write the list
+        env:
+          CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: node scripts/version-channel.mjs write published/channel.json
+
+      # No force: if the branch moved, this fails rather than writing over it.
+      - name: Push it
+        working-directory: published
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add channel.json
+          git commit -m 'chore: publish the version list'
+          git push origin HEAD:channel
+
+  escalate:
+    name: Open or update the issues
+    needs: [plan, mirror, pull-check, compose-smoke, k3s-smoke, publish]
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: One issue for a new major, one for a failed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MAJORS: ${{ needs.plan.outputs.majors }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          set -euo pipefail
+          open_or_update() {
+            number=$(TITLE="$1" gh issue list --state open --search "in:title \"$1\"" --json number,title \
+              --jq 'map(select(.title == env.TITLE))[0].number // empty')
+            if [ -n "$number" ]; then
+              gh issue edit "$number" --body "$2"
+            else
+              gh issue create --title "$1" --body "$2"
+            fi
+          }
+          if [ -n "$MAJORS" ]; then
+            open_or_update 'A new major version is waiting for a decision' \
+              "The version channel leaves a new major where it is. Waiting: $MAJORS. Moving one is a change to src/lib/images.js and a CLI release, because the templates may need to change with it."
+          fi
+          if [ "$FAILED" = 'true' ]; then
+            open_or_update 'The version channel did not publish' \
+              "Deploys keep the list they have. Failed run: $RUN_URL"
+          fi

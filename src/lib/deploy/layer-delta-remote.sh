@@ -86,11 +86,21 @@ save_into() {
   [ ! -f "$dir.rc" ] || die "$* failed (exit $(cat "$dir.rc"))"
 }
 
+# One stage's whole seconds on stdout, for the deploy's perf lines (deliverImage).
+# Nothing else writes to stdout, and a failure's stderr stays the error line.
+stage_start=$(date +%s)
+mark() {
+  stage_now=$(date +%s)
+  echo "mark $1 $((stage_now - stage_start))"
+  stage_start=$stage_now
+}
+
 img=$d/img
 mkdir "$img"
 tar -x -C "$img"
 [ -f "$img/manifest.json" ] && [ -f "$img/config.json" ] && [ -f "$img/fill.txt" ] ||
   die "the image delta arrived incomplete"
+mark receive
 
 if [ "$runtime" = k3s ]; then
   # The content store holds each layer blob by its own digest; ctr verifies it.
@@ -101,11 +111,18 @@ else
   # Save each source image once, then pair ITS manifest Layers[j] with ITS
   # config diff_ids[j]: a containerd-store save names gzip layers by their
   # compressed digest, so the file name says nothing about the diffID.
+  # --platform came in Docker 28.0. An older server holds one variant of each
+  # image, so its plain save gives the same layers.
+  save_cmd='docker save'
+  if [ -s "$img/fill.txt" ] && docker save --help 2>&1 | grep -q -e --platform; then
+    save_cmd="$save_cmd --platform $platform"
+  fi
   n=0
   for src in $(cut -d' ' -f3 "$img/fill.txt" | sort -u); do
     n=$((n + 1))
     s=$d/src$n
-    save_into "$s" docker save --platform "$platform" "$src"
+    # shellcheck disable=SC2086 # $save_cmd is a command and its flags
+    save_into "$s" $save_cmd "$src"
     flat "$s/manifest.json" > "$s.manifest"
     cfg=$(json_str Config < "$s.manifest")
     [ -n "$cfg" ] && [ -f "$s/$cfg" ] || die "the save of $src has no config"
@@ -122,6 +139,7 @@ else
     done < "$img/fill.txt"
   done
 fi
+mark fill
 
 want=$(flat "$img/config.json" | json_list diff_ids | tr '\n' ' ')
 layers=$(flat "$img/manifest.json" | json_list Layers | tr '\n' ' ')
@@ -135,6 +153,7 @@ load() {
 
 if [ "$runtime" = k3s ]; then
   load $ctr -n k8s.io images import -
+  mark load
   digest=$($ctr -n k8s.io images ls | awk -v r="$ref" '$1 == r { print $3; exit }')
   [ -n "$digest" ] || die "the import did not create $ref"
   cfg=$($ctr -n k8s.io content get "$digest" | tr -d ' \t\r\n' |
@@ -145,11 +164,14 @@ if [ "$runtime" = k3s ]; then
     $ctr -n k8s.io images rm "$ref" > /dev/null 2>&1 || true
     die "the imported layers of $ref do not match the delta manifest"
   fi
+  mark verify
   if [ -n "$registry_ref" ]; then
     push_to_registry "$ref" "$registry_ref"
+    mark push
   fi
 else
   load docker load
+  mark load
   got=$(docker image inspect --format '{{range .RootFS.Layers}}{{.}} {{end}}' "$tag")
   if [ "$got" != "$want" ]; then
     docker image rm "$tag" > /dev/null 2>&1 || true

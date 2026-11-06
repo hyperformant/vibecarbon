@@ -2,7 +2,7 @@
  * Census: every code path that creates or replaces Secret/vibecarbon-tls goes
  * through buildRestoredTlsSecret (src/lib/deploy/tls-snapshot.js).
  *
- * Why. cert-manager v1.20.2 keeps Secrets labelled
+ * Why. cert-manager v1.21.3 keeps Secrets labelled
  * `controller.cert-manager.io/fao: "true"` in a typed informer cache and every
  * other Secret in a metadata-only cache (internal/informers/
  * core_filteredsecrets.go). A Secret that gains or loses the label moves from
@@ -85,7 +85,7 @@ function secretNameConstants(text: string): string[] {
 /** True when `value` names the Secret: the literal, or one of `consts` as a whole token. */
 function namesSecret(value: string, consts: string[]): boolean {
   return [SECRET, ...consts].some((n) =>
-    new RegExp(`(^|[^\\w$-])${n.replace(/[$]/g, '\\$')}([^\\w$-]|$)`).test(value),
+    new RegExp(`(^|[^\\w$-])${n.replace(/[\\$]/g, '\\$&')}([^\\w$-]|$)`).test(value),
   );
 }
 

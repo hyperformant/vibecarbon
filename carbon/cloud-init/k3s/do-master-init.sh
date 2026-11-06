@@ -8,16 +8,6 @@ _m p
 # Note: This script runs AS PART of cloud-init (user_data), so we cannot wait for
 # cloud-init to complete (that would cause a deadlock). The script starts immediately.
 
-# apt's default behaviour on lock contention is to try once and exit 100,
-# and unattended-upgrades holds dpkg's lock right through first boot --
-# which is exactly when cloud-init runs this. `-o DPkg::Lock::Timeout`
-# makes apt block on the lock instead. See src/lib/deploy/apt.js for the
-# RCA, the live verification and the fuser poll loop this replaced.
-
-# Update apt lists + install the packages we need. `apt-get upgrade` was
-# removed from the critical path -- unattended-upgrades handles security
-# patches async. Saves 30-60s per deploy.
-
 # sshd concurrency headroom - same rationale as docker-ce-setup.yaml's
 # 99-vibecarbon-concurrency.conf: the deploy fans concurrent ssh (builds,
 # tunnels, probes) past Ubuntu's MaxStartups 10:30:100 default, which drops
@@ -26,9 +16,6 @@ mkdir -p /etc/ssh/sshd_config.d
 printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
 systemctl reload ssh || systemctl reload sshd || true
 
-_m a
-apt-get -o DPkg::Lock::Timeout=300 update -qq
-apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq docker.io docker-buildx
 _m n
 
 # Validate k3s version is set
@@ -167,6 +154,7 @@ for attempt in 1 2 3 4 5; do
       --flannel-iface "eth1" \
       --disable traefik \
       --disable=servicelb \
+      --disable gateway-api-crd \
       --disable-cloud-controller \
       --system-default-registry "vibecarbon-system.invalid" \
       --kubelet-arg="cloud-provider=external" \
@@ -221,46 +209,35 @@ kubectl -n kube-system create secret generic digitalocean \
   --from-literal=access-token="${do_token}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# Install the DigitalOcean Cloud Controller Manager, pinned to v0.1.68.
-#
-# Note what is and is not immutable here: the VERSION is pinned, because it is
-# in the filename (.../releases/.../v0.1.68.yml) and upstream does not rewrite
-# published release manifests. The PATH is not -- it is served from the mutable
-# `master` branch. An earlier comment claimed this was "never `master`" and
-# "mirrors how this template pins every other install below", and both halves
-# were wrong: the URL literally contains /master/, and the sibling installs in
-# the equivalent provider's init script use two different mechanisms (a GitHub
-# release asset for its CCM, a git tag for its CSI) while this one is a release
-# file served off a branch. Three installs, three immutability guarantees,
-# described as if they were one. If DigitalOcean reorganises that directory or
-# renames its default branch, this 404s at cloud-init time.
+# Install the DigitalOcean Cloud Controller Manager, pinned to v0.1.72. The URL
+# is the git tag, so neither the version nor the path can move underneath us.
 #
 # Retry up to 3 times -- kubectl apply can fail if the API server is briefly
 # unavailable.
 for i in 1 2 3; do
-  kubectl apply -f https://raw.githubusercontent.com/digitalocean/digitalocean-cloud-controller-manager/master/releases/digitalocean-cloud-controller-manager/v0.1.68.yml && break
+  kubectl apply -f https://raw.githubusercontent.com/digitalocean/digitalocean-cloud-controller-manager/v0.1.72/releases/digitalocean-cloud-controller-manager/v0.1.72.yml && break
   echo "CCM install attempt $i failed, retrying in 10s..."
   sleep 10
 done
 
-# Install the DigitalOcean CSI driver (pinned v4.17.0): CRDs first, then
+# Install the DigitalOcean CSI driver (pinned v4.19.0): CRDs first, then
 # the driver -- crds.yaml must land before driver.yaml since the driver's
 # resources depend on those CRDs existing. Deliberately no
 # snapshot-controller.yaml: we don't wire VolumeSnapshots here, matching
 # how the equivalent provider's path leaves snapshots unwired too.
 for i in 1 2 3; do
-  kubectl apply -f https://raw.githubusercontent.com/digitalocean/csi-digitalocean/master/deploy/kubernetes/releases/csi-digitalocean-v4.17.0/crds.yaml && break
+  kubectl apply -f https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.19.0/crds.yaml && break
   echo "CSI crds install attempt $i failed, retrying in 10s..."
   sleep 10
 done
 for i in 1 2 3; do
-  kubectl apply -f https://raw.githubusercontent.com/digitalocean/csi-digitalocean/master/deploy/kubernetes/releases/csi-digitalocean-v4.17.0/driver.yaml && break
+  kubectl apply -f https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.19.0/driver.yaml && break
   echo "CSI driver install attempt $i failed, retrying in 10s..."
   sleep 10
 done
 
 # csi-do-node (the CSI NODE plugin, a DaemonSet) ships from upstream with
-# NO tolerations at all (confirmed against the v4.17.0 driver.yaml itself
+# NO tolerations at all (confirmed against the v4.19.0 driver.yaml itself
 # -- its spec.template.spec has no tolerations key), so it never schedules
 # onto the tainted dedicated=db node (do-db-init.sh taints it
 # dedicated=db:NoSchedule). That node's CSINode object then never

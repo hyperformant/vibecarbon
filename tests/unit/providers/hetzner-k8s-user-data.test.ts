@@ -38,6 +38,15 @@
  * (src/lib/deploy/boot-timing.js reads them back), and the apt comment's
  * fuser-loop history paragraph became a pointer to src/lib/deploy/apt.js,
  * which holds it, to keep master-init under 27 KiB. No command changed.
+ * RE-CAPTURED 2026-11-04 (boot speed): each init script dropped its apt
+ * update/install, the apt comments and the `_m a` mark, and asks for its
+ * private-NIC lease at the first retry instead of the sixth. The diff is
+ * confined to those lines.
+ * RE-CAPTURED 2026-11-04 (dhcpcd -A): the lease wait runs `dhcpcd -1 -A -t 4`
+ * and a pass that asked sleeps 1 s. The diff is confined to those lines.
+ * RE-CAPTURED 2026-11-05 (Kubernetes 1.37): the k3s, CCM and CSI versions and
+ * the comments naming the old driver ceiling. The diff is confined to those
+ * lines.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -46,7 +55,7 @@ import { loadCloudInit, renderScript } from '../../../src/lib/iac/cloud-init.js'
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 
 const masterVars = {
-  k3s_version: 'v1.31.5+k3s1',
+  k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   cluster_name: 'acme-prod',
   disable_traefik: 'true',
@@ -57,14 +66,14 @@ const masterVars = {
 };
 
 const workerVars = {
-  k3s_version: 'v1.31.5+k3s1',
+  k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   master_ip: '10.0.1.1',
   cluster_name: 'acme-prod',
 };
 
 const dbVars = {
-  k3s_version: 'v1.31.5+k3s1',
+  k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   master_ip: '10.0.1.1',
 };

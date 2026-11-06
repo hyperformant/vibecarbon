@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wait until the cert-manager controller is SETTLED before the TLS Certificate
 # is applied: its Deployment rollout is complete, and its leader lease
-# (kube-system/cert-manager-controller, the v1.20 default) is held by a pod of
+# (kube-system/cert-manager-controller, cert-manager's default) is held by a pod of
 # the Deployment's current ReplicaSet. A controller handoff while the
 # Certificate lands can miss the Secret it should reuse in the new leader's
 # cache and issue a brand-new certificate.

@@ -3,14 +3,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { resetStateLocksForTest, withStateLock } from '../../../src/lib/iac/state-lock.js';
 
 /**
- * The lock exists to stop two Pulumi engines hitting one state bucket at once
- * — the shape that produced 16 of the 38 throttle events in run 31898658781
- * (the k8s-ha primary/standby pair, both stack-selecting the same bucket).
- *
- * The property that has to hold above all others is re-entrancy: the public
- * iac operations nest (upStack -> getOrCreateStack -> listStacks), so a lock
- * that is not re-entrant deadlocks on the first deploy rather than failing a
- * test. That case is first below and is the reason for the AsyncLocalStorage.
+ * The lock keeps one state read-modify-write from interleaving with another on
+ * the same bucket (`syncServerState`). These are the properties a waiter
+ * depends on: order, a key per bucket, and a failed holder never strands the
+ * queue behind it.
  */
 
 const defer = () => {
@@ -24,23 +20,6 @@ const defer = () => {
 afterEach(() => resetStateLocksForTest());
 
 describe('withStateLock', () => {
-  it('does not deadlock when a holder acquires the same key again', async () => {
-    // upStack -> getOrCreateStack -> listStacks, all on one backend URL.
-    const order: string[] = [];
-    const result = await withStateLock('s3://bucket', 'up', async () => {
-      order.push('outer');
-      return withStateLock('s3://bucket', 'stack-select', async () => {
-        order.push('middle');
-        return withStateLock('s3://bucket', 'list', async () => {
-          order.push('inner');
-          return 'done';
-        });
-      });
-    });
-    expect(result).toBe('done');
-    expect(order).toEqual(['outer', 'middle', 'inner']);
-  });
-
   it('serializes two operations on the same key', async () => {
     const first = defer();
     const events: string[] = [];
@@ -113,32 +92,5 @@ describe('withStateLock', () => {
     await expect(a).rejects.toThrow('boom');
     await b;
     expect(results).toEqual(['b ran']);
-  });
-
-  it('scopes the holder to its own async context, not globally', async () => {
-    // The re-entrancy escape must not leak: an unrelated concurrent operation
-    // has to queue even while another context holds the key. Otherwise the
-    // re-entrancy fix would silently disable the serialization it sits inside.
-    const holding = defer();
-    const released = defer();
-    const events: string[] = [];
-
-    const holder = withStateLock('s3://bucket', 'holder', async () => {
-      events.push('holder:in');
-      holding.resolve();
-      await released.promise;
-    });
-
-    await holding.promise;
-    const other = withStateLock('s3://bucket', 'other', async () => {
-      events.push('other:in');
-    });
-
-    await Promise.resolve();
-    expect(events).toEqual(['holder:in']);
-
-    released.resolve();
-    await Promise.all([holder, other]);
-    expect(events).toEqual(['holder:in', 'other:in']);
   });
 });

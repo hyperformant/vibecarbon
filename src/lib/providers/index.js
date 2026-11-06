@@ -194,14 +194,21 @@ export async function getObjectStorageProvider(providerId, accessKeyId, secretAc
  * import; the compute provider class deliberately mirrors no S3
  * region-map data of its own (see base.js's object-storage dispatch block).
  *
+ * A provider that assigns storage per account (`resolveAccountS3Region`) is
+ * asked live when a token is at hand.
+ *
  * @param {string} providerId - Provider id (e.g. 'hetzner')
  * @param {string} region - Candidate deploy region
+ * @param {{ apiToken?: string }} [opts]
  * @returns {Promise<string>} Resolved object-storage region
  * @throws {Error} If providerId is not a known provider
  */
-export async function resolveS3RegionFor(providerId, region) {
+export async function resolveS3RegionFor(providerId, region, { apiToken } = {}) {
   const Provider = getProviderClass(providerId);
   const S3Class = await Provider.getObjectStorageProviderClass();
+  if (apiToken && S3Class.resolveAccountS3Region) {
+    return S3Class.resolveAccountS3Region(region, { apiToken });
+  }
   return S3Class.resolveS3Region(region);
 }
 

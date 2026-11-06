@@ -239,11 +239,12 @@ export class LinodeProvider extends BaseProvider {
   // are not yet built or declared.
   static SUPPORTED_TIERS = ['compose', 'compose-ha'];
 
-  // Instance regions WITH in-region Object Storage only (same doctrine as
-  // DigitalOceanProvider.REGIONS: a region that can host an instance but not
-  // a bucket would force cross-region backup traffic as a silent default).
-  // All 16 verified 2026-08-07 via GET /v4/regions capabilities — every one
-  // also carries the Metadata capability cloud-init user-data requires.
+  // Instance regions with Object Storage (same doctrine as
+  // DigitalOceanProvider.REGIONS). All 16 verified 2026-08-07 via GET
+  // /v4/regions capabilities — every one also carries the Metadata capability
+  // cloud-init user-data requires. Seven hold only E3 storage, which cannot
+  // take browser uploads: their files go to the nearest region with E0 or E1,
+  // and the deploy says so (linode-objectstorage.js COMPUTE_TO_S3).
   // Labels are the API's own `label` field values.
   static REGIONS = {
     'us-iad': 'Washington, DC',
@@ -336,7 +337,7 @@ export class LinodeProvider extends BaseProvider {
   // reads it while SUPPORTED_TIERS is compose-only.
   static DEFAULT_K8S_NODE_TYPE = 'g6-standard-2';
 
-  // `linode/ubuntu24.04` ships no Docker (Linode's Marketplace Docker is a
+  // `linode/ubuntu26.04` ships no Docker (Linode's Marketplace Docker is a
   // StackScript, not an image — audit doc), so cloud-init installs docker-ce
   // inside the boot script, same as DigitalOcean: 3-5 min realistic budget.
   static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
@@ -418,11 +419,11 @@ export class LinodeProvider extends BaseProvider {
 
   /**
    * Matches linode-compose.js's buildLinodeComposeProgram
-   * `image: 'linode/ubuntu24.04'` literal exactly (the scale/replacement
+   * `image: 'linode/ubuntu26.04'` literal exactly (the scale/replacement
    * path bypasses Pulumi and must create byte-identical servers).
    * @type {string}
    */
-  static COMPOSE_IMAGE = 'linode/ubuntu24.04';
+  static COMPOSE_IMAGE = 'linode/ubuntu26.04';
 
   /**
    * Returns the SAME rendered user-data linode-compose.js's Pulumi program
@@ -925,6 +926,10 @@ export class LinodeProvider extends BaseProvider {
     return response.json();
   }
 
+  // Statuses an instance stays in when it failed to boot (Linode API
+  // `status`): it is not coming up by itself.
+  static FAILED_BOOT_STATUSES = ['offline', 'stopped', 'billing_suspension'];
+
   /**
    * Wait for an instance to be ready: status 'running' AND a public IPv4
    * (assigned at create on Linode, but guarded the same as DO's contract).
@@ -935,6 +940,7 @@ export class LinodeProvider extends BaseProvider {
   async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
     const startTime = Date.now();
     const pollInterval = 5000;
+    let settledDown = 0;
 
     while (Date.now() - startTime < timeout) {
       try {
@@ -944,7 +950,23 @@ export class LinodeProvider extends BaseProvider {
         if (instance.status === 'running' && LinodeProvider.getPublicIP(instance)) {
           return instance;
         }
+        // A create that boots goes provisioning -> booting -> running. An
+        // instance that settles in offline or stopped did not boot, and
+        // waiting longer changes nothing. Two reads in a row, so the gap
+        // between create and boot is not mistaken for it.
+        if (LinodeProvider.FAILED_BOOT_STATUSES.includes(instance.status)) {
+          settledDown += 1;
+          if (settledDown >= 2) {
+            throw new LinodeBootFailure(
+              `Linode instance ${serverId} did not boot: it is ${instance.status}. ` +
+                `Check its Lish console in the Linode Cloud Manager, then run the command again.`,
+            );
+          }
+        } else {
+          settledDown = 0;
+        }
       } catch (error) {
+        if (error instanceof LinodeBootFailure) throw error;
         if (Date.now() - startTime >= timeout - pollInterval) {
           throw new Error(`Failed to check server status: ${error.message}`);
         }
@@ -1548,3 +1570,5 @@ export class LinodeProvider extends BaseProvider {
     return buildLinodeComposeProgram(config);
   }
 }
+
+class LinodeBootFailure extends Error {}

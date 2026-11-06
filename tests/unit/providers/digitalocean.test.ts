@@ -73,12 +73,12 @@ describe('DigitalOceanProvider — identity/credentials statics (exact values)',
     expect(DigitalOceanProvider.DEFAULT_COMPOSE_TYPE).toBe('s-2vcpu-4gb');
   });
 
-  it("overrides CLOUD_INIT_READY_TIMEOUT_MS to 600s — ubuntu-24-04-x64 installs docker-ce from Docker's apt repo INSIDE cloud-init (see digitalocean-compose.js renderDoUserData), realistically 3-5 minutes on small droplets, unlike Hetzner's docker-ce image", () => {
+  it("overrides CLOUD_INIT_READY_TIMEOUT_MS to 600s — ubuntu-26-04-x64 installs docker-ce from Docker's apt repo INSIDE cloud-init (see digitalocean-compose.js renderDoUserData), realistically 3-5 minutes on small droplets, unlike Hetzner's docker-ce image", () => {
     expect(DigitalOceanProvider.CLOUD_INIT_READY_TIMEOUT_MS).toBe(600_000);
   });
 
-  it("pins COMPOSE_IMAGE to digitalocean-compose.js's buildDigitalOceanComposeProgram `image: 'ubuntu-24-04-x64'` literal exactly", () => {
-    expect(DigitalOceanProvider.COMPOSE_IMAGE).toBe('ubuntu-24-04-x64');
+  it("pins COMPOSE_IMAGE to digitalocean-compose.js's buildDigitalOceanComposeProgram `image: 'ubuntu-26-04-x64'` literal exactly", () => {
+    expect(DigitalOceanProvider.COMPOSE_IMAGE).toBe('ubuntu-26-04-x64');
   });
 
   it('pins the real k8s-facing statics (M3 Task 1, live since Task 6 lifted the SUPPORTED_TIERS gate)', () => {

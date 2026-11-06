@@ -354,7 +354,7 @@ describe('buildRestoredTlsSecret', () => {
     expect(out.metadata.name).toBe('vibecarbon-tls');
     expect(out.metadata.namespace).toBe('vibecarbon');
   });
-  // cert-manager v1.20.2 keeps Secrets labelled controller.cert-manager.io/fao
+  // cert-manager v1.21.3 keeps Secrets labelled controller.cert-manager.io/fao
   // in a typed cache and the rest in a metadata cache. A restored Secret
   // without the label is moved between the two when cert-manager adds it, and
   // in that moment its lister says NotFound: the trigger controller then
@@ -394,7 +394,7 @@ describe('buildRestoredTlsSecret', () => {
   });
 });
 
-// cert-manager v1.20.2 internal/controller/certificates/secrets.go,
+// cert-manager v1.21.3 internal/controller/certificates/secrets.go,
 // AnnotationsForCertificate: the values it derives from the leaf.
 describe('certificateDetailsAnnotations', () => {
   const pem = (o: Parameters<typeof makeCert>[1]) =>
@@ -525,7 +525,7 @@ describe('readTlsSnapshot', () => {
     expect(await readTlsSnapshot(s3Config, 'k', { makeClient })).toEqual({ text: 'hello' });
   });
   it('hands the client options to the client factory (the failover bound)', async () => {
-    const clientOptions = { maxAttempts: 1, requestHandler: { requestTimeout: 10_000 } };
+    const clientOptions = { maxAttempts: 1, requestHandler: { socketTimeout: 10_000 } };
     const makeClient = vi.fn(async () => ({
       send: async () => ({ Body: { transformToString: async () => 'hello' } }),
     }));

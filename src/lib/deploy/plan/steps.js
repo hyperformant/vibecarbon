@@ -161,6 +161,18 @@ export const snapshotTlsStep = () =>
 export const setupBackupCronStep = () =>
   defineStep({ name: 'setup-backup-cron', effect: 'setupBackupCron' });
 
+/**
+ * Both HA plans, first: open a new state backend once, so the pair never
+ * initializes it together. Only when this deploy created the state bucket: the
+ * orchestrator sets ctx.newStateBackend, and every other deploy skips this.
+ */
+export const openStateBackendStep = () =>
+  defineStep({
+    name: 'open-state-backend',
+    effect: 'openStateBackend',
+    when: (ctx) => !!ctx.newStateBackend,
+  });
+
 // ============================================================================
 // compose-ha step factories
 //

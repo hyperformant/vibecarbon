@@ -702,7 +702,7 @@ describe('assertNoRetiredChartDb — a chart-era cluster is refused, not silentl
     const probe = body.indexOf('await assertNoRetiredChartDb({ env })');
     expect(probe).toBeGreaterThan(-1);
     expect(probe).toBeLessThan(body.indexOf('renderK8sBase('));
-    expect(probe).toBeLessThan(body.indexOf("runKubectlWithRetry(['apply', '-k', baseDir]"));
+    expect(probe).toBeLessThan(body.indexOf('applyKustomization(baseDir,'));
   });
 });
 

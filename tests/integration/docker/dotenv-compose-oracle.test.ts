@@ -36,7 +36,7 @@ import { ORACLE_VALUES } from '../../fixtures/dotenv-oracle-values.js';
 const shouldRunDocker = process.env.DOCKER_INTEGRATION === 'true';
 const describeDocker = shouldRunDocker ? describe : describe.skip;
 
-const IMAGE = 'busybox:1.36';
+const IMAGE = 'busybox:1.38';
 const KEYS = Object.keys(ORACLE_VALUES);
 
 describeDocker('dotenv oracle: docker compose reads the writer identically', () => {

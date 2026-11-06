@@ -4,9 +4,11 @@
  * db-guard.sh applies the intent ConfigMap (vibecarbon-db-role) on every db
  * container start, but a warm redeploy that does not restart the db would
  * leave the file as it was. So deployK3s runs writeDeployWalgRole on every
- * deploy, outside the k3s-apply skip gate (a skipped apply first waits for
- * postgres to accept), through a local-kubectl adapter and before the wal-g
- * audit (verifyWalgBackups), so the audit reads the role this deploy set.
+ * deploy, outside the k3s-apply skip gate (a skipped apply first reads the db
+ * pod's Ready condition), through a local-kubectl adapter and before the wal-g
+ * audit (verifyWalgBackups), so the audit reads the role this deploy set. When
+ * the ConfigMap already proves the role it does not exec at all
+ * (k8s-walg-role-record.test.ts).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,10 +44,12 @@ describe('writeDeployWalgRole', () => {
       return '';
     });
     await writeDeployWalgRole({ kubectl, role: 'primary' });
-    expect(calls[0]).toContain('apply -f -');
-    expect(calls.some((c) => c.includes('exec') && c.includes('/var/lib/vibecarbon/role'))).toBe(
-      true,
+    const apply = calls.findIndex((c) => c.includes('apply -f -'));
+    const exec = calls.findIndex(
+      (c) => c.includes('exec') && c.includes('/var/lib/vibecarbon/role'),
     );
+    expect(apply).toBeGreaterThan(-1);
+    expect(exec).toBeGreaterThan(apply);
   });
 
   it('a live write that does not read back fails the deploy', async () => {
@@ -107,9 +111,9 @@ describe('writeDeployWalgRole', () => {
     expect(gateEnd).toBeGreaterThan(gate);
     expect(call).toBeGreaterThan(gateEnd);
     expect(call).toBeLessThan(audit);
-    // A skipped apply waited for no db: postgres must accept before the write.
+    // A skipped apply waited for no db: the pod must be Ready before the write.
     const between = deploy.slice(gateEnd, call);
-    expect(between).toMatch(/if \(skipApply\)[\s\S]*awaitPostgresAccepting\(/);
+    expect(between).toMatch(/if \(skipApply\)[\s\S]*awaitDbPodReady\(/);
     // And applyK3sManifests' awaitDb no longer writes it (one write per deploy).
     const awaitDb = src.slice(src.indexOf('const awaitDb = async () => {'));
     expect(awaitDb.slice(0, awaitDb.indexOf('\n  };'))).not.toContain('writeDeployWalgRole(');

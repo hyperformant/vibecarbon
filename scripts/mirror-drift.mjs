@@ -5,16 +5,15 @@
  *
  * Run weekly by the `mirror-upstream-drift` job in
  * .github/workflows/publish-images.yml, which writes the table to the job
- * summary and to one GitHub issue. It REPORTS ONLY, never re-pins: a mirror
- * bump is a reviewed edit of {tag, digest, index} in images.js (and the
- * literal compose / k8s copies), because Dependabot cannot see refs that
- * point at our mirror.
+ * summary and to one GitHub issue. It REPORTS ONLY, never re-pins: a bundled
+ * mirror bump is a reviewed edit of {tag, digest, index} in images.js, because
+ * Dependabot cannot see refs that point at our mirror. The images the version
+ * channel covers move on their own (scripts/version-channel.mjs).
  *
  * CEILINGS (`holdFor`): some newer tags must not be taken, and listing them
  * would keep the issue open forever. alpine/k8s stays within one minor of
- * K3S_VERSION (kubectl's skew policy); registry stays on 2.x (3 changed the
- * config format); cluster-autoscaler stays on its minor (it tracks the
- * Kubernetes minor); k3s system images move only with K3S_VERSION, and CSI
+ * K3S_VERSION (kubectl's skew policy); cluster-autoscaler stays on its minor
+ * (it tracks the Kubernetes minor); k3s system images move only with K3S_VERSION, and CSI
  * sidecars only with the CSI driver release, so neither is listed. Held
  * entries are named under the table, not counted. When nothing is
  * actionable the report carries the marker `<!-- mirror-drift: none -->`,
@@ -38,7 +37,6 @@ import {
   CSI_SIDECAR_MIRRORS,
   K3S_SYSTEM_IMAGE_MIRRORS,
   MIRRORED_IMAGES,
-  REGISTRY_MIRROR,
   upstreamRef,
 } from '../src/lib/images.js';
 
@@ -87,11 +85,11 @@ export function newerTags(current, tags) {
 const majorMinor = (v) => v.replace(/^v/, '').split('.').slice(0, 2).map(Number);
 
 /**
- * K3S_VERSION read from k3s.js's source, not imported: k3s.js pulls the whole
+ * K3S_VERSION read from images.js's source, not imported: images.js pulls the whole
  * deploy graph, and the drift job runs with no install step.
  */
 export function readK3sVersion(
-  file = fileURLToPath(new URL('../src/lib/deploy/k8s/k3s.js', import.meta.url)),
+  file = fileURLToPath(new URL('../src/lib/images.js', import.meta.url)),
 ) {
   const v = readFileSync(file, 'utf8').match(/K3S_VERSION = '(v[^']+)'/)?.[1];
   if (!v) throw new Error(`no K3S_VERSION in ${file}`);
@@ -125,9 +123,6 @@ export function holdFor(image, k3sVersion) {
       },
     };
   }
-  if (sameRepo(REGISTRY_MIRROR)) {
-    return { reason: 'registry stays on 2.x (3 changed the config format)', allows: (tag) => majorMinor(tag)[0] === 2 };
-  }
   if (image.repo === 'autoscaling/cluster-autoscaler') {
     return {
       reason: 'cluster-autoscaler stays on its Kubernetes minor',
@@ -138,8 +133,10 @@ export function holdFor(image, k3sVersion) {
 }
 
 /** GET with one anonymous-token retry when the registry answers 401. */
-async function registryGet(url, token) {
-  const res = await fetch(url, token ? { headers: { Authorization: `Bearer ${token}` } } : {});
+async function registryGet(url, token, headers = {}) {
+  const res = await fetch(url, {
+    headers: { ...headers, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
   if (res.status !== 401 || token) return { res, token };
   const challenge = res.headers.get('www-authenticate') ?? '';
   const field = (k) => challenge.match(new RegExp(`${k}="([^"]+)"`))?.[1];
@@ -152,11 +149,33 @@ async function registryGet(url, token) {
   if (!tokenRes.ok) throw new Error(`token ${tokenRes.status} from ${realm}`);
   const body = await tokenRes.json();
   const fresh = body.token ?? body.access_token;
-  return registryGet(url, fresh);
+  return registryGet(url, fresh, headers);
+}
+
+/** What a multi-platform tag answers with, in either media type. */
+const INDEX_TYPES = [
+  'application/vnd.oci.image.index.v1+json',
+  'application/vnd.docker.distribution.manifest.list.v2+json',
+].join(', ');
+
+/**
+ * The bytes of the index a tag names. The caller digests them itself, so the
+ * registry's own digest header is never what gets pinned.
+ * @param {string} registry
+ * @param {string} repo
+ * @param {string} tag
+ * @returns {Promise<Uint8Array>}
+ */
+export async function fetchIndex(registry, repo, tag) {
+  const host = API_HOST[registry] ?? registry;
+  const url = `https://${host}/v2/${repo}/manifests/${tag}`;
+  const { res } = await registryGet(url, undefined, { Accept: INDEX_TYPES });
+  if (!res.ok) throw new Error(`${res.status} reading ${host}/${repo}:${tag}`);
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 /** Every tag of `repo` on `registry`, across `Link` pages. */
-async function listTags(registry, repo) {
+export async function listTags(registry, repo) {
   const host = API_HOST[registry] ?? registry;
   let url = `https://${host}/v2/${repo}/tags/list?n=1000`;
   let token;
@@ -185,8 +204,8 @@ export function renderReport(entries) {
   return [
     '## Mirror drift: newer upstream tags',
     '',
-    'Report only. To bump one, edit its {tag, digest, index} in src/lib/images.js and',
-    'the literal compose / k8s copies; publish-images mirrors it on merge.',
+    'Report only. To bump one, edit its {tag, digest, index} in src/lib/images.js;',
+    'publish-images mirrors it on merge.',
     '',
     ...(rows.length
       ? ['| upstream | pinned | newer |', '| --- | --- | --- |', ...rows]

@@ -60,6 +60,7 @@ import {
   setEnvVar,
 } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
+import { useRecordedImageSet } from './lib/version-channel.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 export const SPEC = {
@@ -1557,6 +1558,9 @@ export async function runConfigureCicd(envName) {
     );
     process.exit(1);
   }
+  // deploy.yml renders the set's kubectl and Traefik CRD tag from what this
+  // seeds, so it must be what the environment runs.
+  useRecordedImageSet(envConfig, { note: (line) => p.log.info(line) });
 
   // Template lockstep, k8s only: the GitOps workflow and Flux apply the
   // project's k8s manifests to the cluster as they are, and this CLI moves the

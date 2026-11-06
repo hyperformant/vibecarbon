@@ -1,0 +1,112 @@
+name: Newest Docker
+
+# Servers float on Docker: a new compose server installs the newest docker-ce
+# and Compose from Docker's apt repo (src/lib/iac/docker-install.js), so a
+# Docker release can break a deploy with no change on our side. This is the
+# warning. It puts that same newest Docker on a runner and runs the two parts a
+# new Docker is likeliest to break: the layer delta, and Traefik finding
+# containers through the docker-socket-proxy.
+#
+# A failure is visible and blocks nothing. Nothing requires this workflow, and a
+# scheduled failure opens or updates one issue, because a red run alone is a row
+# in a tab nobody revisits.
+#
+# workflow_call lets the version channel job run this as its compose smoke test
+# rather than keep a second copy. A caller's `uses` job must grant
+# `issues: write`, which the escalate job asks for.
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+  workflow_call:
+    # The refs to test instead of the bundled ones, when the version channel has
+    # a list it has not published yet. Empty means the bundled ones.
+    inputs:
+      traefik_image:
+        required: false
+        type: string
+        default: ''
+      docker_socket_proxy_image:
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  newest-docker:
+    name: Layer delta and socket proxy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # The steps a server's cloud-init runs, with its package list read from
+      # the same constant.
+      - name: Install the newest Docker, the way a server does
+        run: |
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          sudo chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+            | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          packages=$(node --input-type=module -e "import { DOCKER_PACKAGES } from './src/lib/iac/docker-install.js'; console.log(DOCKER_PACKAGES.join(' '))")
+          sudo apt-get install -y $packages
+
+      - name: Say which Docker this run tested
+        run: |
+          docker version
+          docker compose version
+          { echo "Engine $(docker version --format '{{.Server.Version}}')"; echo "Compose $(docker compose version --short)"; } >> "$GITHUB_STEP_SUMMARY"
+
+      # VC_DIND_IMAGE: the layer delta's server side runs in dind, so it floats
+      # as well, or a new major would never reach it here.
+      - name: Layer delta, and Traefik through the socket proxy
+        env:
+          DOCKER_INTEGRATION: 'true'
+          VC_DIND_IMAGE: docker:dind
+          VC_TRAEFIK_IMAGE: ${{ inputs.traefik_image }}
+          VC_DOCKER_SOCKET_PROXY_IMAGE: ${{ inputs.docker_socket_proxy_image }}
+        run: >-
+          pnpm exec vitest run --project integration-docker
+          tests/integration/docker/layer-delta-roundtrip.test.ts
+          tests/integration/docker/traefik-socket-proxy.test.ts
+
+  escalate:
+    name: Open or update the issue
+    needs: newest-docker
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the one issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: The newest Docker failed the compose checks
+        run: |
+          body="Servers float on Docker, so the next new server gets this version. Failed run: $RUN_URL"
+          number=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number,title \
+            --jq "map(select(.title == \"$TITLE\"))[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi

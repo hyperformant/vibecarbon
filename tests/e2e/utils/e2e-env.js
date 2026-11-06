@@ -28,6 +28,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import tls from 'node:tls';
+import { applyNetworkDefaults } from '../../../src/lib/net-defaults.js';
 import { fileURLToPath } from 'node:url';
 import { pmScrubbedEnv } from '../../_shared/pm-env.js';
 import { loadE2EEnvFile } from './e2e-env-file.js';
@@ -294,15 +295,14 @@ export function resetStagingTrustCacheForTests() {
  * resolver caches NXDOMAIN for domains that no longer exist, which fails ALL
  * subsequent health checks and verification requests for the cache TTL.
  *
- * IPv4 first, like src/cli.js. On a machine with no IPv6 route, a dual-stack
- * host (Hetzner object storage) fails a share of parallel connections with
- * ETIMEDOUT under Node's default order: 15 of 60 preflights on 2026-11-04,
- * against 0 of 60 with ipv4first. The bucket settle gate needs fully clean
- * rounds, so that alone failed a healthy Hetzner bucket after 25 minutes.
+ * The harness makes its own connections, so it applies the CLI's network
+ * defaults too. The bucket settle gate needs fully clean rounds, so a single
+ * connect dropped by Node's default budget resets it: that alone failed a
+ * healthy Hetzner bucket after 25 minutes.
  */
 export function pinPublicDns() {
   try {
-    dns.setDefaultResultOrder('ipv4first');
+    applyNetworkDefaults();
     dns.setServers(['1.1.1.1', '8.8.8.8']);
   } catch {
     // setServers throws on an empty/invalid list — both are caller errors,

@@ -3,8 +3,8 @@
  * diagnosis aid, not a fix.
  *
  * On DigitalOcean k8s-ha e2e runs (Let's Encrypt staging,
- * cert-manager v1.20.2) the deploy restored Secret/vibecarbon-tls from its
- * snapshot before `apply -k` created the Certificate (tls-restore.js), the
+ * cert-manager v1.21.3) the deploy restored Secret/vibecarbon-tls from its
+ * snapshot before the base apply created the Certificate (tls-restore.js), the
  * restored serial was served trusted, and cert-manager still issued a new
  * certificate: CertificateRequest vibecarbon-tls-1, created with the
  * Certificate, in 2 of 2 runs. A local k3d replay reissued only through a

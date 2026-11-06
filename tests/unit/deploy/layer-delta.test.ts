@@ -16,6 +16,25 @@ import {
 } from '../../../src/lib/deploy/layer-delta.js';
 import { SSH_CONNECTION_OPTS } from '../../../src/lib/host-keys.js';
 
+// Every perf line a delivery emits, in order, as `name` or `name=ms`.
+const perfLines = vi.hoisted(() => [] as string[]);
+vi.mock('../../../src/lib/perf.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../src/lib/perf.js')>();
+  return {
+    ...real,
+    perfRecord: (name: string, ms: number) => perfLines.push(`${name}=${ms}`),
+    perfTimer: (name: string) => {
+      const timer = real.perfTimer(name);
+      return {
+        end(note?: string) {
+          perfLines.push(name);
+          return timer.end(note);
+        },
+      };
+    },
+  };
+});
+
 // A fake `docker save` directory: OCI layout plus the legacy manifest.json,
 // layer files uncompressed and named by diffID, exactly as the classic store
 // writes them (task-1 archive fact 1).
@@ -284,6 +303,48 @@ describe('deliverImage', () => {
     expect(ssh.sent[0].cmd).toContain(
       ` layer-delta 'k3s' 'linux/amd64' '${ref}' '${ref}' '${ref}'`,
     );
+  });
+
+  // A 5 MB delta took 20-136 s (e2e 2026-11-05), so the total says little. Each
+  // stage has its own line, and the target reports the ones only it can see.
+  it('times every stage of a delivery, and reports the target stages it prints', async () => {
+    perfLines.length = 0;
+    const ssh = stubSsh();
+    const ref = '10.0.1.1:5000/app:abc123-20261021000000';
+    await deliverImage({
+      ...args,
+      tag: ref,
+      runtime: 'k3s',
+      registryRef: ref,
+      basePull: Promise.resolve('pulled'),
+      pushAfter: Promise.resolve(),
+      deps: {
+        run: async () => '',
+        send: async (cmd: string, stdin: Readable) => ({
+          ...(await ssh.send(cmd, stdin)),
+          stdout: 'mark receive 1\nmark fill 12\nsomething else\nmark load 9\n',
+        }),
+        saveImage: saveFixture,
+        acquireLock: noLock,
+      },
+    });
+    expect(perfLines.slice(2)).toEqual([
+      'deploy.image.delta.stage',
+      'deploy.image.delta.uplinkLock',
+      'deploy.image.delta.send',
+      'deploy.image.delta.target',
+      'deploy.image.delta.target.receive=1000',
+      'deploy.image.delta.target.fill=12000',
+      'deploy.image.delta.target.load=9000',
+      'deploy.image.delta',
+      'deploy.image.registryWait',
+      'deploy.image.registryPush',
+    ]);
+    // The save and the base pull run together, so either may end first.
+    expect(perfLines.slice(0, 2).sort()).toEqual([
+      'deploy.image.delta.basePullWait',
+      'deploy.image.delta.save',
+    ]);
   });
 
   // The delta into the master's containerd needs only ssh and the base pull;

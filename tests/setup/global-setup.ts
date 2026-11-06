@@ -21,6 +21,15 @@ process.env.VIBECARBON_FINGERPRINT_KEY_DIR = mkdtempSync(join(tmpdir(), 'vc-test
 import { afterAll, afterEach, beforeAll } from 'vitest';
 import { cleanupAllTempDirs } from '../_shared/temp-dir.js';
 
+// An in-process deploy reads the version channel at its start. No test reaches
+// the real file: it would make a test's versions depend on the published list.
+// A test that wants a channel stubs fetch itself.
+const realFetch = globalThis.fetch;
+globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+  String(input).includes('/hyperformant/vibecarbon/channel/')
+    ? Promise.reject(new Error('no version channel in tests'))
+    : realFetch(input, init)) as typeof fetch;
+
 // A test that reaches the real updateProjectConfig without its own cwd writes
 // the repo's own .vibecarbon.json (and its lock or temp file). Record what is
 // there now; a file that appears during this test file's run (or a parallel

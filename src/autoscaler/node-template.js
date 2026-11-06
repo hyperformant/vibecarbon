@@ -2,13 +2,9 @@
  * carbon-autoscaler TemplateNodeInfo builder — synthesizes the
  * `v1.Node` object CA's `NodeGroupTemplateNodeInfo` RPC returns for a
  * node group at 0 nodes (scale-from-zero) and "upcoming node" scheduling
- * simulation. The proto-loader vendored contract at CA v1.32.7 (see
- * proto.js) embeds this as the response's `nodeInfo` field and serializes
- * it as k8s-protobuf on the wire — we hand back a plain JS object shaped
- * to the vendored `k8s.io.api.core.v1.Node` message and let proto-loader
- * do the encoding; we never hand-encode bytes ourselves (that's only
- * required at CA >=1.35's `nodeBytes` contract, which this repo doesn't
- * target — see m2-dossier-externalgrpc.md §3).
+ * simulation. This builds a plain JS object shaped to the vendored
+ * `k8s.io.api.core.v1.Node` message; the handler encodes it into the
+ * response's `nodeBytes` (see loadNodeType in proto.js).
  *
  * Getting this wrong is the highest-risk failure mode in the whole
  * effort: a missing `pods` resource, wrong labels, or capacity that

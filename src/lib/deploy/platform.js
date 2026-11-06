@@ -13,13 +13,13 @@
  *
  * Why amd64 and not multi-arch:
  *   - **DigitalOcean has ZERO ARM instances** (31 size slugs across the
- *     s/c/g/gd/m/gpu families — none ARM), and DO's own CCM (v0.1.68) and CSI
- *     (v4.17.0) ship amd64-only images regardless.
+ *     s/c/g/gd/m/gpu families — none ARM), and DO's own CCM and CSI
+ *     ship amd64-only images regardless.
  *   - **Hetzner ARM exists in only 3 of 6 locations** (fsn1/hel1/nbg1 — absent
  *     in ash/hil/sin), in only 4 SKUs (cax11/21/31/41), all inside the
  *     "Cost-Optimized / Limited availability" tier.
  *   - Everything the stack depends on — Postgres, Traefik, cert-manager,
- *     the Hetzner CCM/CSI drivers, cluster-autoscaler, registry:2, and the
+ *     the Hetzner CCM/CSI drivers, cluster-autoscaler, registry, and the
  *     add-ons — publishes amd64 without question.
  *
  * So a single pinned architecture buys correctness (no silent arch mismatch)

@@ -36,7 +36,7 @@ const SAFE_PATTERNS = [
   'volumes/grafana/**',
   'volumes/prometheus/**',
   'volumes/loki/**',
-  'volumes/promtail/**',
+  'volumes/alloy/**',
   'volumes/traefik/**',
   // The dev-only Garage config docker-compose.override.yml mounts. Missing,
   // Docker would mount an empty directory there and the local S3 would not

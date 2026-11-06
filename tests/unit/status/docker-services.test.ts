@@ -163,16 +163,16 @@ describe('checkDockerContainers', () => {
       'letsgo-redis\trunning\tUp 1 hour (healthy)',
       'letsgo-grafana\trunning\tUp 1 hour (health: starting)',
       'letsgo-metabase-setup\texited\tExited (0) 1 hour ago',
-      'letsgo-promtail\trunning\tUp 1 hour',
+      'letsgo-alloy\trunning\tUp 1 hour',
     ].join('\n');
     const rows = await checkDockerContainers('letsgo', {
       runCommand: fakeDocker({ ps }),
     });
     expect(rows.map((r) => [r.container, r.name, r.health, r.label])).toEqual([
       ['db', 'PostgreSQL', 'healthy', 'healthy'],
+      ['alloy', 'alloy', 'healthy', 'running'],
       ['grafana', 'grafana', 'starting', 'starting'],
       ['metabase-setup', 'metabase-setup', 'done', 'done'],
-      ['promtail', 'promtail', 'healthy', 'running'],
       ['redis', 'redis', 'healthy', 'healthy'],
     ]);
   });

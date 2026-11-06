@@ -92,12 +92,12 @@ describe('HetznerProvider', () => {
       expect(HetznerProvider.S3_REGION_ENV).toBe('HETZNER_STORAGE_REGION');
     });
 
-    it('inherits the BaseProvider CLOUD_INIT_READY_TIMEOUT_MS default (180s) — the docker-ce image has Docker preinstalled, so cloud-init is fast', () => {
-      expect(HetznerProvider.CLOUD_INIT_READY_TIMEOUT_MS).toBe(180_000);
+    it('overrides CLOUD_INIT_READY_TIMEOUT_MS to 600s — like every compose provider, cloud-init installs the latest docker-ce itself', () => {
+      expect(HetznerProvider.CLOUD_INIT_READY_TIMEOUT_MS).toBe(600_000);
     });
 
-    it("pins COMPOSE_IMAGE to hetzner-compose.js's buildHetznerComposeProgram `image: 'docker-ce'` literal exactly", () => {
-      expect(HetznerProvider.COMPOSE_IMAGE).toBe('docker-ce');
+    it("pins COMPOSE_IMAGE to hetzner-compose.js's buildHetznerComposeProgram `image: 'ubuntu-26.04'` literal exactly", () => {
+      expect(HetznerProvider.COMPOSE_IMAGE).toBe('ubuntu-26.04');
     });
   });
 
@@ -110,10 +110,13 @@ describe('HetznerProvider', () => {
   });
 
   describe('getComposeUserData', () => {
-    it('returns the same raw shared cloud-init file loadCloudInitScript() reads (single source of truth with hetzner-compose.js)', async () => {
-      const { loadCloudInitScript } = await import('../../../src/lib/deploy/compose/index.js');
+    it('returns the user data hetzner-compose.js hands its server: the shared cloud-init plus the Docker install', async () => {
+      const { loadHetznerComposeUserData } = await import(
+        '../../../src/lib/iac/programs/hetzner-compose.js'
+      );
       const userData = await HetznerProvider.getComposeUserData();
-      expect(userData).toBe(loadCloudInitScript());
+      expect(userData).toBe(loadHetznerComposeUserData());
+      expect(userData).toContain('install -y docker-ce ');
       expect(userData).toContain('runcmd:');
     });
   });

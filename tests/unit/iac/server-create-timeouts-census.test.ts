@@ -72,6 +72,8 @@ const k8s = {
   workerServerType: 'cx23',
   minWorkers: 2,
   apiToken: 'test-token',
+  // An existing cluster's token, replayed. A first deploy mints its own.
+  k3sToken: 'replayed-token',
 };
 
 const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown> }> = {
@@ -96,11 +98,11 @@ const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown
   },
 };
 
-async function runProgram(file: string) {
+async function runProgram(file: string, configOverride?: Record<string, unknown>) {
   const { builder, config } = PROGRAMS[file];
   const mod = await import(`../../../src/lib/iac/programs/${file}`);
   created.length = 0;
-  await mod[builder](config)();
+  await mod[builder](configOverride ?? config)();
   return created.map((r) => ({ ...r, token: typeToken(r.type) }));
 }
 
@@ -163,6 +165,32 @@ describe('server-class create timeouts (census)', () => {
     },
   );
 
+  // Same guard for the base image. Hetzner compose moved from the `docker-ce`
+  // app image to plain Ubuntu (2026-11-04); an image change replaces a server,
+  // and a compose server's database lives on its disk.
+  it.each(Object.keys(PROGRAMS))(
+    '%s: every server-class resource ignores changes to its base image',
+    async (file) => {
+      const resources = await runProgram(file);
+      const servers = resources.filter((r) => r.token in SERVER_RESOURCE_TYPES);
+      expect(servers.length).toBeGreaterThan(0);
+      for (const server of servers) {
+        const input =
+          SERVER_RESOURCE_TYPES[server.token as keyof typeof SERVER_RESOURCE_TYPES].imageInput;
+        // Non-vacuous: the input really is where this server's image goes.
+        expect(
+          Object.keys((server.args ?? {}) as object),
+          `${file}: ${server.type} "${server.name}" carries no ${input}`,
+        ).toContain(input);
+        const opts = (server.opts ?? {}) as { ignoreChanges?: string[] };
+        expect(
+          opts.ignoreChanges ?? [],
+          `${file}: ${server.type} "${server.name}" would be replaced by an image change`,
+        ).toContain(input);
+      }
+    },
+  );
+
   // Speed: DO's vendor cloud-init installs the Droplet Console agent, costing
   // 44-68s of first boot on every node. `dropletAgent: false` skips it. The
   // provider treats the field as create-only, so it is ignored on existing
@@ -209,6 +237,43 @@ describe('server-class create timeouts (census)', () => {
       }
     },
   );
+
+  // Speed: Hetzner workers have a static master address, so nothing they are
+  // built from needs the master to exist. A trigger built from master.id does:
+  // the SDK resolves it before it registers the worker, and that alone took
+  // Hetzner k8s infra from 72-124 s to 358-788 s (ff9a3a00, 2026-11-04). A
+  // first deploy has no worker to protect, and a trigger that arrives on the
+  // second deploy replaces nothing but counts from then on (proved on real
+  // Pulumi, 2026-11-05: 7 of 7 transitions), so it waits for a token to replay.
+  it('hetzner-k8s.js: a first deploy starts its workers with the master, not after it', async () => {
+    const { k3sToken: _existing, ...fresh } = k8s;
+    const resources = await runProgram('hetzner-k8s.js', fresh);
+    const workers = resources.filter(
+      (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
+    );
+    expect(workers).toHaveLength(2);
+    for (const w of workers) {
+      const opts = (w.opts ?? {}) as { replacementTrigger?: unknown; dependsOn?: unknown };
+      expect(opts, `worker "${w.name}"`).not.toHaveProperty('replacementTrigger');
+      expect(String(JSON.stringify(opts.dependsOn)), `worker "${w.name}"`).not.toContain('master');
+      // The recorder prints a resource output as `<name>.<property>`. User data
+      // is a rendered script, whose own text may say "master." in a comment.
+      const { userData: _script, ...inputs } = w.args as Record<string, unknown>;
+      expect(JSON.stringify(inputs), `worker "${w.name}" inputs`).not.toContain('master.');
+    }
+  });
+
+  it('digitalocean-k8s.js: a first deploy keeps the trigger, its workers wait on the master anyway', async () => {
+    const { k3sToken: _existing, ...fresh } = PROGRAMS['digitalocean-k8s.js'].config;
+    const resources = await runProgram('digitalocean-k8s.js', fresh);
+    const workers = resources.filter(
+      (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
+    );
+    expect(workers.length).toBeGreaterThan(0);
+    for (const w of workers) {
+      expect(w.opts, `worker "${w.name}"`).toHaveProperty('replacementTrigger');
+    }
+  });
 
   it.each(Object.keys(PROGRAMS))(
     '%s: every VM-shaped class is a known server class',

@@ -48,6 +48,11 @@ export class HetznerProvider extends BaseProvider {
   // Externally pinned as a customer-visible CI secret name — never derive/rename.
   static TOKEN_ENV = 'HETZNER_API_TOKEN';
   static CLI_TOKEN_ENV = 'HCLOUD_TOKEN';
+  // The plugin's default polling doubles up to a minute between checks, so a
+  // finished server action could sit unnoticed for that long: 56 s on a k8s
+  // master, 2026-11-05. Neither setting has an environment variable. Changing
+  // them on an existing stack updates the provider only and replaces nothing.
+  static IAC_STACK_CONFIG = { 'hcloud:pollFunction': 'constant', 'hcloud:pollInterval': '1s' };
   // The pair getS3Credentials (hetzner-guided-setup.js) reads before prompting.
   static OBJECT_STORAGE_ENV = ['HETZNER_ACCESS_KEY', 'HETZNER_SECRET_KEY'];
   // Stamped on nodes by hcloud-cloud-controller-manager (see K8S_ASSETS).
@@ -396,23 +401,28 @@ export class HetznerProvider extends BaseProvider {
 
   /**
    * Matches hetzner-compose.js's buildHetznerComposeProgram `image:
-   * 'docker-ce'` literal (lib/iac/programs/hetzner-compose.js:115) exactly.
+   * 'ubuntu-26.04'` literal exactly. Plain Ubuntu, like every provider: the
+   * latest Docker comes from the cloud-init install (iac/docker-install.js),
+   * never from a prebuilt Docker image.
    * @type {string}
    */
-  static COMPOSE_IMAGE = 'docker-ce';
+  static COMPOSE_IMAGE = 'ubuntu-26.04';
+
+  // Cloud-init installs the latest Docker from Docker's apt repo at first
+  // boot, so Hetzner gets the same 600s ready budget as DigitalOcean, Linode,
+  // Vultr and Scaleway (BaseProvider's 180s assumed a preinstalled Docker).
+  static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
 
   /**
-   * Returns the same raw shared cloud-init file hetzner-compose.js's Pulumi
-   * program reads (both point at the identical
-   * carbon/cloud-init/docker-ce-setup.yaml via their own CLOUD_INIT_PATH).
-   * Delegates to deploy/compose/index.js's `loadCloudInitScript` (dynamic
-   * import — keeps the deploy layer out of this class's static-load graph
-   * until actually called) rather than re-declaring the path a third time.
+   * Returns the same user data hetzner-compose.js's Pulumi program hands its
+   * server: the shared compose cloud-init with the Docker install
+   * spliced in. Delegates to that module's `loadHetznerComposeUserData`
+   * (dynamic import, like the other providers).
    * @returns {Promise<string>}
    */
   static async getComposeUserData() {
-    const { loadCloudInitScript } = await import('../deploy/compose/index.js');
-    return loadCloudInitScript();
+    const { loadHetznerComposeUserData } = await import('../iac/programs/hetzner-compose.js');
+    return loadHetznerComposeUserData();
   }
 
   // ── K8s asset identity — pure string data (C7c) ──────────────────────
@@ -428,12 +438,12 @@ export class HetznerProvider extends BaseProvider {
     csiControllerSelector:
       'app.kubernetes.io/component=controller,app.kubernetes.io/name=hcloud-csi',
     ccmDeployment: 'hcloud-cloud-controller-manager',
-    ccmSelector: 'app.kubernetes.io/name=hcloud-cloud-controller-manager',
+    ccmSelector: 'app=hcloud-cloud-controller-manager',
     networkEnvVar: 'HCLOUD_NETWORK',
   };
 
   /**
-   * StorageClass name Hetzner's hcloud-csi driver (v2.18.1, installed by
+   * StorageClass name Hetzner's hcloud-csi driver (installed by
    * master-init.sh) creates by default. Value verified live — this is what
    * `services/observability/k8s/{loki,grafana,prometheus}-pvc.yaml` and
    * `services/n8n/k8s/pvc.yaml`'s `storageClassName: {{K8S_STORAGE_CLASS}}`
@@ -447,14 +457,14 @@ export class HetznerProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'hcloud-volumes';
 
   /**
-   * Matches hetzner-k8s.js's `image: 'ubuntu-24.04'` literal (the master,
+   * Matches hetzner-k8s.js's `image: 'ubuntu-26.04'` literal (the master,
    * db, and worker `hcloud.Server` resources all use the same slug —
    * lib/iac/programs/hetzner-k8s.js:243,283,318) exactly.
    * `renderCarbonAutoscalerConfig` reads this for the CA-spawned worker
    * node group's `image` field instead of hardcoding it.
    * @type {string}
    */
-  static K8S_IMAGE = 'ubuntu-24.04';
+  static K8S_IMAGE = 'ubuntu-26.04';
 
   /**
    * Render this provider's k3s master-node boot user-data — wraps
@@ -950,7 +960,7 @@ export class HetznerProvider extends BaseProvider {
       name,
       server_type: serverType,
       location: region,
-      image: image || 'docker-ce',
+      image: image || 'ubuntu-26.04',
       ssh_keys: sshKeys || (sshKeyId ? [sshKeyId] : []),
       public_net: {
         enable_ipv4: true,

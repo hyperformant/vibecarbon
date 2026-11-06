@@ -41,7 +41,13 @@ import {
   detectComposeHaRoleSwap,
 } from './lib/deploy/compose/ha-role-swap.js';
 import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index.js';
-import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './lib/deploy/db-workload.js';
+import {
+  DB_CONTAINER,
+  DB_POD,
+  DB_STATEFULSET,
+  POD_EXEC_PROBE_MS,
+  POD_EXEC_QUERY_MS,
+} from './lib/deploy/db-workload.js';
 import {
   assertNoFailoverInFlight,
   readReplicaState,
@@ -78,6 +84,7 @@ import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { getPostgresPod, sshKeyPathFor, sshKubectl } from './lib/ssh.js';
 import { readPrimaryWalGap } from './lib/status/backup-health.js';
 import { createTracker } from './lib/tracker.js';
+import { useRecordedImageSet } from './lib/version-channel.js';
 import {
   PostPromoteBackupError,
   pushBaseBackupAfterPromote,
@@ -232,7 +239,7 @@ async function scaleUpApp(ip, sshKeyPath) {
  * @param {object} [opts]
  * @param {number} [opts.timeoutMs=300000]
  * @param {number} [opts.intervalMs=2000]
- * @param {(ip: string, key: string, args: string[]) => unknown} [opts.exec=sshKubectl]
+ * @param {(ip: string, key: string, args: string[], o: {timeout: number}) => unknown} [opts.exec=sshKubectl]
  * @param {(ip: string, key: string) => string} [opts.getPod=getPostgresPod]
  * @param {(ms: number) => Promise<void>} [opts.sleep]
  */
@@ -253,16 +260,12 @@ export async function verifyPostgres(ip, sshKeyPath, opts = {}) {
   let lastErr = '';
   for (;;) {
     try {
-      await exec(ip, sshKeyPath, [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        'pg_isready',
-        '-U',
-        'postgres',
-      ]);
+      await exec(
+        ip,
+        sshKeyPath,
+        ['exec', '-n', 'vibecarbon', pod, '--', 'pg_isready', '-U', 'postgres'],
+        { timeout: POD_EXEC_PROBE_MS },
+      );
       return; // exit 0 = accepting connections
     } catch (err) {
       lastErr = err instanceof Error ? err.message : String(err);
@@ -365,6 +368,9 @@ export async function run(args, deps = {}) {
     projectConfig,
     serverIp: 'primary',
   });
+  // This environment's recorded versions, never the channel: only a deploy
+  // takes new ones (src/lib/version-channel.js).
+  useRecordedImageSet(envConfig, { note: (line) => p.log.info(line) });
 
   // A failover in flight (its journal set) may be promoting the standby while
   // the old primary is fenced: a restore would rewind and restart the fenced
@@ -1090,18 +1096,23 @@ async function pushFirstBase(s, push) {
 /** Free bytes on the db pod's PGDATA volume, or null when unreadable. */
 async function k8sPgdataFreeBytes(ip, sshKeyPath) {
   try {
-    const out = await sshKubectl(ip, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      DB_POD,
-      '-c',
-      DB_CONTAINER,
-      '--',
-      'df',
-      '-Pk',
-      '/var/lib/postgresql/data',
-    ]);
+    const out = await sshKubectl(
+      ip,
+      sshKeyPath,
+      [
+        'exec',
+        '-n',
+        'vibecarbon',
+        DB_POD,
+        '-c',
+        DB_CONTAINER,
+        '--',
+        'df',
+        '-Pk',
+        '/var/lib/postgresql/data',
+      ],
+      { timeout: POD_EXEC_PROBE_MS },
+    );
     const row =
       String(out ?? '')
         .trim()
@@ -1123,21 +1134,26 @@ async function waitForK8sPromotion(
   let last = '';
   for (;;) {
     try {
-      const out = await sshKubectl(ip, sshKeyPath, [
-        'exec',
-        '-n',
-        'vibecarbon',
-        DB_POD,
-        '-c',
-        DB_CONTAINER,
-        '--',
-        'psql',
-        '-U',
-        'postgres',
-        '-At',
-        '-c',
-        'SELECT pg_is_in_recovery()',
-      ]);
+      const out = await sshKubectl(
+        ip,
+        sshKeyPath,
+        [
+          'exec',
+          '-n',
+          'vibecarbon',
+          DB_POD,
+          '-c',
+          DB_CONTAINER,
+          '--',
+          'psql',
+          '-U',
+          'postgres',
+          '-At',
+          '-c',
+          'SELECT pg_is_in_recovery()',
+        ],
+        { timeout: POD_EXEC_QUERY_MS },
+      );
       if (String(out ?? '').trim() === 'f') return;
       last = 'pg_is_in_recovery() still true';
     } catch (err) {

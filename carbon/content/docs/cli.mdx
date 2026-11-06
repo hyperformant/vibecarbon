@@ -512,8 +512,8 @@ confirmations.
 | `-allow-degraded` | HA only: proceed even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy FAILS unless replication is confirmed streaming. |
 {/* END GENERATED: flags deploy */}
 
-Provider support varies by mode: `compose` runs on all five providers, and
-`compose-ha`, `k8s`, and `k8s-ha` run on Hetzner and DigitalOcean. See
+Provider support varies by mode: `compose` and `compose-ha` run on all five
+providers, and `k8s` and `k8s-ha` run on Hetzner and DigitalOcean. See
 [Deployment](/docs/deployment#choosing-a-provider) for the full matrix and
 the API token each provider reads.
 

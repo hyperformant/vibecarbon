@@ -21,13 +21,14 @@ import {
 
 export class HetznerS3Provider extends S3CompatibleProvider {
   /**
-   * A new Hetzner bucket answers inconsistently for about 16 minutes. The
-   * 2026-10-20 probes against a minutes-old bucket saw about 40% of CORS
-   * preflights refused with a 403 and some NoSuchBucket answers, then 58/60
-   * and 60/60 three times, settled about 16 minutes after create. Rounded up
-   * to 20 for margin; see src/lib/deploy/bucket-settle.js.
+   * How long a new bucket is left alone. A HEAD or LIST in its first second can
+   * leave it answering NoSuchBucket at random for up to 15 minutes. On
+   * 2026-11-05, 54 new buckets across hel1, fsn1 and nbg1: touched at once, 6
+   * of 18 did this; silent for 1 s or 2 s, none of 36 did. No bucket left alone
+   * for a second or more did so in any test that day (111 buckets). 2 s rather
+   * than 1 because a miss costs 15 minutes and the pause costs 2 s per bucket.
    */
-  static bucketSettleWindowMs = 20 * 60_000;
+  static bucketQuietMs = 2000;
 
   /**
    * Keys are made only in the console (every API credential route is a 404),

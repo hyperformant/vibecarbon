@@ -19,6 +19,9 @@ import { join } from 'node:path';
 // state bucket) is exactly what we want.
 export const STATE_VERSION = 2;
 
+/** The ledger step that records a compose-ha deploy's two stacks' outputs. */
+export const COMPOSE_HA_INFRA_STEP = 'compose-ha-infra';
+
 export class StateTracker {
   constructor(projectName, environment) {
     this.projectName = projectName;
@@ -161,6 +164,17 @@ export class StateTracker {
   getStepResult(stepId) {
     const stepState = this.state.steps[stepId];
     return stepState && stepState.status === 'completed' ? stepState.result : null;
+  }
+
+  /**
+   * Forget one step, so the next deploy runs it. For a path that changes what
+   * the step produced without changing the step's inputs.
+   * @param {string} stepId
+   */
+  invalidateStep(stepId) {
+    if (!this.state.steps[stepId]) return;
+    delete this.state.steps[stepId];
+    this.save();
   }
 
   /**

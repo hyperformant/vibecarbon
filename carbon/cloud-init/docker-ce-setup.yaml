@@ -1,8 +1,12 @@
 #cloud-config
 # Vibecarbon compose-deploy bootstrap.
 #
-# This user-data runs at VPS boot time in parallel with Hetzner's default
-# docker-ce app (Ubuntu 24.04 with Docker + compose-plugin pre-installed).
+# This user-data runs at VPS boot time on plain Ubuntu 26.04 on every
+# provider. Each provider's renderer splices the one Docker install
+# (src/lib/iac/docker-install.js) at the top of runcmd, so every server installs
+# the latest stable Docker the same way. Boot refreshes only Docker's own apt
+# source (no package_update: ufw and unattended-upgrades are already installed
+# on the images we boot), with Ubuntu's post-update hooks silenced.
 # By finishing UFW + unattended-upgrades before SSH is even reachable, the
 # CLI's post-SSH setupServer becomes a ~2-second marker-file probe instead
 # of a ~90-second serial apt-get chain.
@@ -14,7 +18,6 @@
 # ufw and unattended-upgrades install in runcmd, AFTER Docker is up and the
 # boot image pull has started, so Docker (and the pull) start as early as the
 # boot allows instead of waiting for these packages.
-package_update: true
 
 write_files:
   # The boot image pull: the pinned core images (the db image, the traefik and
@@ -60,7 +63,7 @@ write_files:
   # Without this, a chatty container grows /var/lib/docker/containers/*/*.log
   # without limit until the single-VPS root disk fills and the whole stack
   # wedges (slow disk-fill outage). 10m x 3 files = 30MB/container ceiling.
-  # A fresh Ubuntu + docker-ce app ships no daemon.json, so this is a create,
+  # A fresh Ubuntu + Docker install ships no daemon.json, so this is a create,
   # not a merge; if that ever changes, fold these keys into the existing file.
   - path: /etc/docker/daemon.json
     permissions: '0644'
@@ -93,12 +96,12 @@ runcmd:
   # Docker first (a provider that installs it splices that install above this
   # line). Ensure it is running and restart it so it picks up
   # /etc/docker/daemon.json written above: write_files runs before runcmd, but
-  # the docker-ce app has usually already started the daemon with the OLD
-  # config, so `enable --now` alone would leave the log cap unapplied. The
+  # the install above has already started the daemon with the OLD
+  # config (the package starts it on install), so `enable --now` alone would leave the log cap unapplied. The
   # restart is cheap here - no containers exist yet at boot. Nothing below
   # restarts Docker again, so the boot pull started next never races a restart.
   #
-  # Boot timing: one `<id> <epoch seconds>` line per major phase (and a
+  # Boot timing: one `<id> <epoch seconds.nanoseconds>` line per major phase (and a
   # begin/end pair around the background boot pull), read back by the deploy
   # after its ready wait (src/lib/deploy/boot-timing.js). Timing only: nothing
   # here depends on these lines. Anything spliced above this mark (a provider's
@@ -118,7 +121,11 @@ runcmd:
   # Lock timeout, not bare apt-get: unattended-upgrades may hold dpkg's lock
   # on first boot (src/lib/deploy/apt.js).
   - [sh, -c, 'echo "a $(date +%s.%N)">>/var/log/vcboot||true']
-  - [sh, -c, 'apt-get -o DPkg::Lock::Timeout=300 install -y ufw unattended-upgrades']
+  # Spelled out because shell templates cannot import src/lib/deploy/apt.js;
+  # same shape as aptInstallOrRefresh: install, and only if that fails refresh
+  # the lists and retry. EnableSrvRecords=false because DigitalOcean's resolver
+  # takes 31 s to answer the SRV query apt makes first; nothing here uses SRV.
+  - [sh, -c, 'apt-get -o DPkg::Lock::Timeout=300 -o Acquire::EnableSrvRecords=false install -y ufw unattended-upgrades || { apt-get -o DPkg::Lock::Timeout=300 -o Acquire::EnableSrvRecords=false update && apt-get -o DPkg::Lock::Timeout=300 -o Acquire::EnableSrvRecords=false install -y ufw unattended-upgrades; }']
   - [sh, -c, 'echo "u $(date +%s.%N)">>/var/log/vcboot||true']
   # UFW defaults + the three ports Traefik needs. Ordering matters: we enable
   # last so the allow rules are in place before the first policy flip.

@@ -1,7 +1,7 @@
 /**
  * carbon-autoscaler RPC handlers — implements the 15 `CloudProvider` RPCs
  * of the vendored `externalgrpc` contract (src/autoscaler/protos/
- * externalgrpc.proto, CA v1.32.7) on top of the group state machine
+ * externalgrpc.proto, CA v1.37.0) on top of the group state machine
  * (groups.js) and the config watcher (config.js). See
  * .superpowers/sdd/m2-dossier-externalgrpc.md for the wire contract this
  * implements and the m2-carbon-autoscaler plan
@@ -16,6 +16,7 @@
 
 import grpc from '@grpc/grpc-js';
 import { buildTemplateNode } from './node-template.js';
+import { loadNodeType } from './proto.js';
 
 /**
  * Maps a GroupManager validation Error to a grpc status. GroupManager's
@@ -56,6 +57,7 @@ function internalError(err) {
  * knowledge — provider, providerIdPrefix, log — stays in server.js).
  */
 export function buildHandlers({ getGroupManager, configWatcher, provider, log }) {
+  const NodeType = loadNodeType();
   let manager = getGroupManager(configWatcher.currentSync());
   // Per-serverType TemplateNodeInfo specs cache. Dropped whenever Refresh
   // recreates the manager from a changed config — a config edit could
@@ -152,13 +154,14 @@ export function buildHandlers({ getGroupManager, configWatcher, provider, log })
           specsCache.set(groupConfig.serverType, specs);
         }
 
-        const nodeInfo = buildTemplateNode({
+        const node = buildTemplateNode({
           groupId: id,
           group: groupConfig,
           specs,
           clusterName: manager.config.clusterName,
         });
-        callback(null, { nodeInfo });
+        const nodeBytes = NodeType.encode(NodeType.fromObject(node)).finish();
+        callback(null, { nodeBytes: Buffer.from(nodeBytes) });
       } catch (err) {
         callback(internalError(err));
       }

@@ -68,6 +68,9 @@ export function grafanaBaseUrl(appDomain: string, isCompose: boolean): string {
   return isCompose ? `https://grafana.${appDomain}` : `https://${appDomain}/admin/grafana`;
 }
 
+/** How long the route may take to arrive after the deploy: 11 waits of 5 s. */
+const ROUTE_ARRIVAL_ATTEMPTS = 12;
+
 /**
  * Run observability feature checks (Grafana, Prometheus).
  */
@@ -77,8 +80,18 @@ export async function runObservabilityChecks(
   const fetcher = opts.fetcher ?? defaultFetcher;
   const base = grafanaBaseUrl(opts.appDomain, opts.isCompose);
   const results: VerificationResult[] = [];
+  const retry = {
+    attempts: opts.attempts ?? 4,
+    delayMs: opts.retryDelayMs ?? 5_000,
+    sleep: opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))),
+  };
 
-  results.push(await checkGrafanaRouteProtected(base, opts.appDomain, fetcher));
+  results.push(
+    await checkGrafanaRouteProtected(base, opts.appDomain, fetcher, {
+      ...retry,
+      attempts: ROUTE_ARRIVAL_ATTEMPTS,
+    }),
+  );
 
   if (!opts.adminJar) {
     const reason =
@@ -97,11 +110,6 @@ export async function runObservabilityChecks(
     return results;
   }
 
-  const retry = {
-    attempts: opts.attempts ?? 4,
-    delayMs: opts.retryDelayMs ?? 5_000,
-    sleep: opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))),
-  };
   results.push(await checkGrafanaHealth(base, minted.cookie, fetcher, retry));
   results.push(await checkPrometheusTargets(base, minted.cookie, fetcher, retry));
   return results;
@@ -155,37 +163,60 @@ export async function mintForwardAuthCookie(
 
 /**
  * Without the cookie the route must exist and refuse: ForwardAuth answers 401
- * (or 403), or redirects a browser to the app's /login. The app's 404 means
- * nothing routes the path to Grafana; a 200 means Grafana (or something
- * else) serves it unauthenticated.
+ * (or 403), or redirects a browser to the app's /login.
+ *
+ * Grafana comes up after the deploy returns, and until the route is served the
+ * path falls through to the app: its page as 200 text/html, or a 404. That says
+ * nothing about protection either way, so it waits, bounded, for the route to
+ * arrive. Anything else is graded on the first answer: Grafana's own JSON
+ * without a cookie is an open route, and waiting could only hide it. A
+ * fall-through still fails when the wait runs out, so the app's page can never
+ * pass as Grafana.
  */
 export async function checkGrafanaRouteProtected(
   base: string,
   appDomain: string,
   fetcher: Fetcher,
+  retry: RetryPolicy,
 ): Promise<VerificationResult> {
   const checkName = 'grafana_route_protected';
   const start = performance.now();
   try {
-    const res = await fetcher(`${base}/api/health`, { signal: timeoutSignal() });
-    const location = res.headers.get('location') ?? '';
-    if (res.status === 401 || res.status === 403) {
-      return pass(checkName, start, { statusCode: res.status });
-    }
-    if (res.status >= 300 && res.status < 400 && isAppLoginRedirect(location, appDomain)) {
-      return pass(checkName, start, { statusCode: res.status, location });
-    }
-    const body = await res.text().catch(() => '');
-    return fail(
-      checkName,
-      start,
-      res.status === 404
-        ? `${base}/api/health returned 404 without a cookie: nothing routes it to Grafana`
-        : res.status === 200
+    for (let attempt = 1; ; attempt++) {
+      const res = await fetcher(`${base}/api/health`, { signal: timeoutSignal() });
+      const location = res.headers.get('location') ?? '';
+      if (res.status === 401 || res.status === 403) {
+        return pass(checkName, start, { statusCode: res.status, attempts: attempt });
+      }
+      if (res.status >= 300 && res.status < 400 && isAppLoginRedirect(location, appDomain)) {
+        return pass(checkName, start, { statusCode: res.status, location, attempts: attempt });
+      }
+      const body = await res.text().catch(() => '');
+      const details = { statusCode: res.status, location, body: body.slice(0, 200) };
+      const appPage =
+        res.status === 200 && (res.headers.get('content-type') ?? '').includes('text/html');
+      if (res.status === 404 || appPage) {
+        if (attempt < retry.attempts) {
+          await retry.sleep(retry.delayMs);
+          continue;
+        }
+        const answer = appPage ? "the app's page" : '404';
+        return fail(
+          checkName,
+          start,
+          `${base}/api/health answered ${answer} without a cookie after ${attempt} attempts: nothing routes it to Grafana`,
+          details,
+        );
+      }
+      return fail(
+        checkName,
+        start,
+        res.status === 200
           ? `${base}/api/health served 200 without a cookie: the route is not behind ForwardAuth`
           : `${base}/api/health returned ${res.status} without a cookie (expected 401/403 or a redirect to /login)`,
-      { statusCode: res.status, location, body: body.slice(0, 200) },
-    );
+        details,
+      );
+    }
   } catch (err) {
     return fail(checkName, start, err instanceof Error ? err.message : String(err));
   }

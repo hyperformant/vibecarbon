@@ -5,11 +5,11 @@ kind: Kustomization
 # Apply this BEFORE base manifests that use Traefik CRs
 # Usage: kubectl apply -k k8s/infra/traefik-crds/
 
-# LOCKSTEP PIN — the tag below MUST equal the Traefik image tag we run:
-#   carbon/k8s/base/traefik/deployment.yaml   (image: ghcr.io/hyperformant/traefik:vX.Y.Z@...)
-#   carbon/docker-compose.yml                 (image: traefik:vX.Y.Z)
-#   carbon/docker-compose.prod.yml            (image: ghcr.io/hyperformant/traefik:vX.Y.Z@...)
-# tests/unit/template/traefik-crd-version.test.ts fails the build if they drift.
+# LOCKSTEP: the tag below is the Traefik tag this deploy runs. Traefik floats
+# with the version channel, so the CLI deploy and deploy.yml fill it in from the
+# same resolved set as the Traefik image (traefikVersion, src/lib/images.js), and
+# this file cannot be applied as it stands.
+# tests/unit/template/traefik-crd-version.test.ts holds the lockstep.
 #
 # Why it matters: the CRDs define the schema the API server validates against,
 # so anything newer than the CRD tag is silently PRUNED from an IngressRoute or
@@ -18,4 +18,4 @@ kind: Kustomization
 # field added in 3.4-3.6 was being dropped without an error.
 resources:
   # Traefik v3 CRDs from official repository
-  - https://raw.githubusercontent.com/traefik/traefik/v3.6.11/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml
+  - https://raw.githubusercontent.com/traefik/traefik/{{TRAEFIK_VERSION}}/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml

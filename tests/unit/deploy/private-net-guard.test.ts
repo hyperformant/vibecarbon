@@ -8,7 +8,7 @@
  * re-acquired, severing the 10.0.1.x path to the master, after which
  * kubelet's apiserver tunnel died with TLS-handshake timeouts.
  *
- * The pre-existing dhcpcd self-heal (the `DHCP_TRIGGERED` block in each
+ * The pre-existing dhcpcd self-heal (the `dhcpcd -1` call in each
  * role script's private-NIC wait loop) only runs during cloud-init. It
  * guards BOOT. Nothing guarded day 4 — so every long-lived cluster is
  * exposed, and the exposure grows with uptime.
@@ -36,7 +36,7 @@ function repairBody(): string {
 }
 
 const masterVars = {
-  k3s_version: 'v1.31.5+k3s1',
+  k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   cluster_name: 'acme-prod',
   disable_traefik: 'true',
@@ -46,13 +46,13 @@ const masterVars = {
   project_name: 'acme',
 };
 const workerVars = {
-  k3s_version: 'v1.31.5+k3s1',
+  k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   master_ip: '10.0.1.1',
   cluster_name: 'acme-prod',
 };
 const dbVars = {
-  k3s_version: 'v1.31.5+k3s1',
+  k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   master_ip: '10.0.1.1',
 };
@@ -103,7 +103,7 @@ describe('private-NIC guard is wired into every Hetzner k3s role', () => {
     // in place exactly where it bites hardest.
     const cfg = JSON.parse(
       await renderCarbonAutoscalerConfig({
-        k3sVersion: 'v1.31.5+k3s1',
+        k3sVersion: 'v1.37.2+k3s1',
         k3sToken: 'deadbeefcafe1234567890abcdef',
         clusterName: 'acme-prod',
         environment: 'prod',
@@ -260,7 +260,7 @@ describe('provider + tier scoping (deliberate — do not widen without evidence)
     // Shipping a dead watchdog there would be untested code on a provider
     // that cannot exhibit the bug.
     const doVars = {
-      k3s_version: 'v1.31.5+k3s1',
+      k3s_version: 'v1.37.2+k3s1',
       k3s_token: 'deadbeefcafe1234567890abcdef',
       master_ip: '10.116.0.2',
       cluster_name: 'acme-prod',

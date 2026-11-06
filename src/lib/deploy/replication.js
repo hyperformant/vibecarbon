@@ -27,6 +27,8 @@ import {
   DB_GUARD_PROTOCOL_MARKER,
   DB_POD,
   DB_STATEFULSET,
+  POD_EXEC_QUERY_MS,
+  POD_EXEC_WRITE_MS,
 } from './db-workload.js';
 import { ensureReplicationSlotSql, REPLICATION_SLOT } from './replication-slot.js';
 import {
@@ -1070,7 +1072,7 @@ export async function ensureReplicationSlot(primaryIp, sshKeyPath, slotName = RE
       '-v',
       'ON_ERROR_STOP=1',
     ],
-    { input: sql },
+    { input: sql, timeout: POD_EXEC_WRITE_MS },
   );
 }
 
@@ -2269,19 +2271,24 @@ export const PROMOTE_DEADLINE_MS = 120_000;
 export function k8sPsqlRunner(ip, sshKeyPath) {
   return async (sql, { readWrite = false } = {}) => {
     const pod = await getPostgresPod(ip, sshKeyPath);
-    const out = await sshKubectl(ip, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
-      'psql',
-      '-U',
-      'postgres',
-      '-tAc',
-      sql,
-    ]);
+    const out = await sshKubectl(
+      ip,
+      sshKeyPath,
+      [
+        'exec',
+        '-n',
+        'vibecarbon',
+        pod,
+        '--',
+        ...(readWrite ? ['env', `PGOPTIONS=${READ_WRITE_PGOPTIONS}`] : []),
+        'psql',
+        '-U',
+        'postgres',
+        '-tAc',
+        sql,
+      ],
+      { timeout: POD_EXEC_QUERY_MS },
+    );
     return typeof out === 'string' ? out : '';
   };
 }
@@ -2630,17 +2637,24 @@ export async function promoteStandby(standbyIp, sshKeyPath, opts = {}) {
     ...opts,
     issuePromote: async () => {
       const pod = await getPostgresPod(standbyIp, sshKeyPath);
-      await sshKubectl(standbyIp, sshKeyPath, [
-        'exec',
-        '-n',
-        'vibecarbon',
-        pod,
-        '--',
-        'su',
-        'postgres',
-        '-c',
-        'pg_ctl promote -D /var/lib/postgresql/data',
-      ]);
+      // Below pg_ctl's own 60 s wait on purpose: the promote lands in its
+      // first moments, and promoteWithProof's reads decide either way.
+      await sshKubectl(
+        standbyIp,
+        sshKeyPath,
+        [
+          'exec',
+          '-n',
+          'vibecarbon',
+          pod,
+          '--',
+          'su',
+          'postgres',
+          '-c',
+          'pg_ctl promote -D /var/lib/postgresql/data',
+        ],
+        { timeout: POD_EXEC_WRITE_MS },
+      );
     },
   });
 }
@@ -2663,18 +2677,23 @@ export async function promoteStandby(standbyIp, sshKeyPath, opts = {}) {
 export async function isStandbyStreaming(standbyIp, sshKeyPath) {
   try {
     const pod = await getPostgresPod(standbyIp, sshKeyPath);
-    const out = await sshKubectl(standbyIp, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'psql',
-      '-U',
-      'postgres',
-      '-tAc',
-      'SELECT status FROM pg_stat_wal_receiver',
-    ]);
+    const out = await sshKubectl(
+      standbyIp,
+      sshKeyPath,
+      [
+        'exec',
+        '-n',
+        'vibecarbon',
+        pod,
+        '--',
+        'psql',
+        '-U',
+        'postgres',
+        '-tAc',
+        'SELECT status FROM pg_stat_wal_receiver',
+      ],
+      { timeout: POD_EXEC_QUERY_MS },
+    );
     return (typeof out === 'string' ? out : '').trim() === 'streaming';
   } catch {
     return false;
@@ -2692,18 +2711,23 @@ export async function isStandbyStreaming(standbyIp, sshKeyPath) {
  */
 export async function readK8sReplicationState(primaryIp, sshKeyPath) {
   const pod = await getPostgresPod(primaryIp, sshKeyPath);
-  const result = await sshKubectl(primaryIp, sshKeyPath, [
-    'exec',
-    '-n',
-    'vibecarbon',
-    pod,
-    '--',
-    'psql',
-    '-U',
-    'postgres',
-    '-tAc',
-    "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1",
-  ]);
+  const result = await sshKubectl(
+    primaryIp,
+    sshKeyPath,
+    [
+      'exec',
+      '-n',
+      'vibecarbon',
+      pod,
+      '--',
+      'psql',
+      '-U',
+      'postgres',
+      '-tAc',
+      "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1",
+    ],
+    { timeout: POD_EXEC_QUERY_MS },
+  );
   const out = (typeof result === 'string' ? result : '').trim();
   // `psql -tAc` yields exactly one token: a pg_stat_replication.state value, or
   // '' when no replica is connected. Anything else means the read itself failed —

@@ -673,6 +673,20 @@ an aborted post-promotion failover would be worse) but the command exits
 non-zero with the remediation, so dead backups are
 never reported as a clean success.
 
+A k8s deploy writes the role file with a `kubectl exec`, and skips that exec when
+the ConfigMap already proves the role: `VC_WALG_ROLE_LIVE` records a deploy's
+write that read back, every intent apply clears it, and a restart cannot falsify
+it because `db-guard.sh` writes the intent to the file before postgres starts.
+Failover always writes. A mounted ConfigMap would need no exec at all, but the
+kubelet can take a minute or two to project a change, too slow for a failover.
+
+An exec can hang on a healthy db, so a k8s deploy avoids the ones it does not
+need and bounds the rest. A standby skips the backup audit, which would only
+read that same role file. A warm deploy that skipped the manifest apply reads
+the db pod's `Ready` condition from the API. Every other `kubectl` call that
+reaches a pod names its own per-attempt bound, enforced by
+`tests/unit/deploy/pod-exec-bound-census.test.ts`.
+
 **Fail-back semantics:**
 - **After a completed failover**, running `vibecarbon failover <env>` again performs a **planned switchover in the reverse direction** (the new primary becomes the standby, and the ex-standby becomes primary)
 - **After an unplanned failover**, the normal recovery path is running `vibecarbon deploy <env>`, which converges the recovered ex-primary back to a pilot-light standby (cold app tier, workers removed) and re-establishes streaming replication

@@ -20,8 +20,8 @@
  *
  * kubectl and helm both honor the field (client-go 1.26+, verified with
  * kubectl 1.35 and helm 3.16: neither sends `Accept-Encoding: gzip` with it).
- * The deploy preflight already refuses kubectl older than 1.27
- * (KUBECTL_MIN_VERSION), and an older client ignores the unknown field.
+ * An older client ignores the unknown field (run on kubectl 1.23 to 1.25) and
+ * just downloads more.
  */
 import { randomBytes } from 'node:crypto';
 import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';

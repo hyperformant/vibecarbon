@@ -1,6 +1,11 @@
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildWireguardBootScript,
+  buildWireguardBringUp,
   buildWireguardInterfaceConfig,
   buildWireguardPersistInstall,
   buildWireguardSystemdUnit,
@@ -16,6 +21,9 @@ import {
 } from '../../../src/lib/deploy/wireguard.js';
 import * as ssh from '../../../src/lib/ssh.js';
 import { assertSshRunArgv } from '../../_shared/ssh-contract.js';
+
+const KEY = '/etc/wireguard/vibecarbon-wg0.key';
+const OLD_KEY = '/etc/vibecarbon-wg.key';
 
 describe('wireguard constants', () => {
   it('uses a port distinct from flannel-wg (51820)', () => {
@@ -75,7 +83,7 @@ describe('buildWireguardInterfaceConfig', () => {
 describe('reboot persistence (item I-1)', () => {
   const params = {
     selfIp: WG_PRIMARY_IP,
-    selfPrivKeyPath: '/etc/vibecarbon-wg.key',
+    selfPrivKeyPath: KEY,
     listenPort: WG_PORT,
     peerPubKey: 'FWxNbddwB9ap1+Nfhv++GcS2CtEh/5CNPiCKF9UIkS4=',
     peerEndpoint: '157.180.115.19:51821',
@@ -97,7 +105,7 @@ describe('reboot persistence (item I-1)', () => {
       expect(script).toContain('ip link set wg0 up');
       expect(script).toContain('ufw allow in on wg0');
       // Reads the persisted private key from disk — never embeds the secret.
-      expect(script).toContain('private-key /etc/vibecarbon-wg.key');
+      expect(script).toContain(`private-key ${KEY}`);
       expect(script).not.toContain('PRIVATE KEY');
     });
     it('cannot drift from the live bring-up (built from the same builder)', () => {
@@ -176,10 +184,144 @@ describe('exchangeAndBringUpTunnel', () => {
     // private key generated on-node, never returned/logged
     expect(JSON.stringify(res)).not.toContain('private');
     expect(calls.some((c) => c.includes('wg genkey'))).toBe(true);
+    // The apt refresh waits for the daily apt units first, then refreshes with
+    // no DEBIAN_FRONTEND prefix landing on the printf.
+    const install = calls.find((c) => c.includes('wireguard-tools')) ?? '';
+    const wait = install.indexOf('systemd-run --quiet --wait');
+    expect(wait).toBeGreaterThan(-1);
+    expect(wait).toBeLessThan(install.indexOf('apt-get -c '));
+    expect(install).not.toContain('DEBIAN_FRONTEND=noninteractive printf');
     expect(calls.some((c) => c.includes('ip link add wg0'))).toBe(true);
+    // Both live bring-ups check first, so a redeploy leaves a good tunnel alone.
+    expect(calls.filter((c) => c.includes('wg show wg0 dump'))).toHaveLength(2);
     // the peer's PUBLIC endpoint is configured on each node
     expect(calls.some((c) => c.includes(`157.180.115.19:${WG_PORT}`))).toBe(true);
     expect(calls.some((c) => c.includes(`167.233.150.173:${WG_PORT}`))).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  // Ubuntu 26.04's AppArmor profile for `wg` only lets it read /etc/wireguard,
+  // so a key anywhere else fails with `fopen: Permission denied` and wg0 stays
+  // down (real servers on all five providers, 2026-11-05).
+  describe('the private key lives where wg can read it', () => {
+    async function bringUp() {
+      const calls: string[] = [];
+      vi.spyOn(ssh, 'sshRun').mockImplementation(async (_ip, _k, cmd) => {
+        calls.push(String(cmd));
+        return String(cmd).includes('wg pubkey') ? `${'B'.repeat(43)}=` : '';
+      });
+      await exchangeAndBringUpTunnel({
+        primaryIp: '167.233.150.173',
+        standbyIp: '157.180.115.19',
+        sshKeyPath: '/k',
+      });
+      vi.restoreAllMocks();
+      return calls;
+    }
+
+    it('every command that names the key names it under /etc/wireguard', async () => {
+      const calls = await bringUp();
+      const keyPaths = calls.join('\n').match(/\/\S+\.key\b/g) ?? [];
+      const inUse = keyPaths.filter((path) => path !== OLD_KEY);
+      expect(inUse.length).toBeGreaterThan(0);
+      for (const path of inUse) expect(path).toBe(KEY);
+    });
+
+    /** Runs the key step against scratch files standing in for the two paths. */
+    function runKeyStep(script: string, files: { old?: string; current?: string }) {
+      const dir = mkdtempSync(join(tmpdir(), 'wg-key-'));
+      const oldPath = join(dir, 'old');
+      const current = join(dir, 'current');
+      if (files.old) writeFileSync(oldPath, files.old, { mode: 0o600 });
+      if (files.current) writeFileSync(current, files.current, { mode: 0o600 });
+      writeFileSync(join(dir, 'wg'), '#!/bin/bash\necho generated\n', { mode: 0o755 });
+      const step = script.slice(script.indexOf('umask 077'));
+      const result = spawnSync(
+        'bash',
+        ['-c', step.replaceAll(OLD_KEY, oldPath).replaceAll(KEY, current)],
+        { env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, encoding: 'utf-8' },
+      );
+      const out = {
+        status: result.status,
+        current: existsSync(current) ? readFileSync(current, 'utf-8').trim() : null,
+        oldStillThere: existsSync(oldPath),
+      };
+      rmSync(dir, { recursive: true, force: true });
+      return out;
+    }
+
+    async function keyStep() {
+      const calls = await bringUp();
+      return calls.find((c) => c.includes('wg genkey')) ?? '';
+    }
+
+    it('generates a key on a new node', async () => {
+      expect(runKeyStep(await keyStep(), {})).toEqual({
+        status: 0,
+        current: 'generated',
+        oldStillThere: false,
+      });
+    });
+
+    it('keeps the key a live node has at the old path, so its tunnel keeps its peer', async () => {
+      expect(runKeyStep(await keyStep(), { old: 'live-key' })).toEqual({
+        status: 0,
+        current: 'live-key',
+        oldStillThere: false,
+      });
+    });
+
+    it('never replaces a key that is already in place', async () => {
+      expect(runKeyStep(await keyStep(), { current: 'in-place' })).toEqual({
+        status: 0,
+        current: 'in-place',
+        oldStillThere: false,
+      });
+    });
+  });
+
+  it('installs and reads keys on both nodes at once', async () => {
+    const started: string[] = [];
+    const finished: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    vi.spyOn(ssh, 'sshRun').mockImplementation(async (ip, _k, cmd) => {
+      const c = String(cmd);
+      if (c.includes('wireguard-tools')) {
+        started.push(String(ip));
+        await gate;
+        finished.push(String(ip));
+        return '';
+      }
+      return c.includes('wg pubkey') ? 'FWxNbddwB9ap1+Nfhv++GcS2CtEh/5CNPiCKF9UIkS4=' : '';
+    });
+    const run = exchangeAndBringUpTunnel({
+      primaryIp: '167.233.150.173',
+      standbyIp: '157.180.115.19',
+      sshKeyPath: '/k',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    // Both installs are in flight before either has finished.
+    expect(started.sort()).toEqual(['157.180.115.19', '167.233.150.173']);
+    expect(finished).toEqual([]);
+    release();
+    await run;
+    vi.restoreAllMocks();
+  });
+
+  it('a failing node surfaces its own error; the primary wins when both fail', async () => {
+    vi.spyOn(ssh, 'sshRun').mockImplementation(async (ip, _k, cmd) => {
+      if (String(cmd).includes('wireguard-tools')) {
+        await new Promise((r) => setTimeout(r, ip === '1.1.1.1' ? 20 : 1));
+        throw new Error(`apt failed on ${ip}`);
+      }
+      return '';
+    });
+    await expect(
+      exchangeAndBringUpTunnel({ primaryIp: '1.1.1.1', standbyIp: '2.2.2.2', sshKeyPath: '/k' }),
+    ).rejects.toThrow('apt failed on 1.1.1.1');
     vi.restoreAllMocks();
   });
 
@@ -213,5 +355,143 @@ describe('exchangeAndBringUpTunnel', () => {
     await expect(
       exchangeAndBringUpTunnel({ primaryIp: '1.2.3.4', standbyIp: '', sshKeyPath: '/k' }),
     ).rejects.toThrow();
+  });
+});
+
+describe('a tunnel that already matches is left alone', () => {
+  // A deploy rebuilt wg0 every time, which drops replication for no reason.
+  // These run the generated command in a real bash, with `ip` and `wg` stubs
+  // replaying what a live node printed (DO k8s-ha rig, 2026-11-05).
+  const params = {
+    selfIp: '10.99.0.1',
+    selfPrivKeyPath: KEY,
+    listenPort: 51821,
+    peerPubKey: 'B'.repeat(43) + '=',
+    peerEndpoint: '157.245.209.44:51821',
+    peerAllowedIp: '10.99.0.2/32',
+  };
+  const live = {
+    address: '35: wg0    inet 10.99.0.1/30 scope global wg0\\       valid_lft forever',
+    publicKey: 'SELF',
+    keyFilePublicKey: 'SELF',
+    port: '51821',
+    peer: [
+      params.peerPubKey,
+      '(none)',
+      params.peerEndpoint,
+      params.peerAllowedIp,
+      '1793',
+      '10',
+      '20',
+      '25',
+    ],
+  };
+
+  function run(overrides: Partial<typeof live> | 'no-interface' = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'wg-bringup-'));
+    const state = overrides === 'no-interface' ? null : { ...live, ...overrides };
+    const log = join(dir, 'calls.log');
+    writeFileSync(
+      join(dir, 'ip'),
+      `#!/bin/bash
+echo "ip $*" >> ${log}
+case "$*" in
+  "-4 -o addr show dev wg0 up") ${state ? `printf '%s\\n' '${state.address}'` : 'exit 1'} ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    const dump = state ? `PRIVATE\tSELF\t51821\toff\n${state.peer.join('\t')}\n` : '';
+    writeFileSync(
+      join(dir, 'wg'),
+      `#!/bin/bash
+echo "wg $*" >> ${log}
+case "$*" in
+  "show wg0 public-key") ${state ? `echo '${state.publicKey}'` : 'exit 1'} ;;
+  "show wg0 listen-port") ${state ? `echo '${state.port}'` : 'exit 1'} ;;
+  "show wg0 dump") ${state ? `printf '${dump.replaceAll('\t', '\\t').replaceAll('\n', '\\n')}'` : 'exit 1'} ;;
+  pubkey) echo '${state?.keyFilePublicKey ?? 'SELF'}' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    const keyFile = join(dir, 'key');
+    writeFileSync(keyFile, 'unused');
+    const result = spawnSync(
+      'bash',
+      ['-c', buildWireguardBringUp({ ...params, selfPrivKeyPath: keyFile })],
+      { env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, encoding: 'utf-8' },
+    );
+    const calls = existsSync(log) ? readFileSync(log, 'utf-8') : '';
+    rmSync(dir, { recursive: true, force: true });
+    return { status: result.status, calls, stdout: result.stdout };
+  }
+
+  it('does nothing to a matching interface', () => {
+    const { status, calls, stdout } = run();
+    expect(status).toBe(0);
+    expect(calls).not.toContain('link del');
+    expect(calls).not.toContain('wg set');
+    expect(stdout).toBe('');
+  });
+
+  it.each([
+    ['no interface yet', 'no-interface' as const],
+    ['another tunnel address', { address: '35: wg0    inet 10.99.0.2/30 scope global wg0' }],
+    ['a key that is not this one', { keyFilePublicKey: 'ROTATED' }],
+    ['another listen port', { port: '51820' }],
+    ['another peer key', { peer: ['C'.repeat(43) + '=', ...live.peer.slice(1)] }],
+    [
+      'another peer endpoint',
+      { peer: [live.peer[0], '(none)', '1.2.3.4:51821', ...live.peer.slice(3)] },
+    ],
+    [
+      'another allowed ip',
+      { peer: [...live.peer.slice(0, 3), '10.99.0.9/32', ...live.peer.slice(4)] },
+    ],
+    ['another keepalive', { peer: [...live.peer.slice(0, 7), 'off'] }],
+  ])('rebuilds on %s', (_name, overrides) => {
+    const { status, calls } = run(overrides);
+    expect(status).toBe(0);
+    expect(calls).toContain('ip link del wg0');
+    expect(calls).toContain('wg set wg0 private-key');
+  });
+
+  it('the boot script stays unconditional, because a booted node has no wg0', () => {
+    expect(buildWireguardBootScript(params)).not.toContain('wg show');
+  });
+
+  it('the boot script brings wg0 up on a node that has none, as every boot does', () => {
+    // `set -e` stopped the script at `ip link del wg0`, so the unit failed and
+    // the tunnel stayed down after every reboot (real servers, 2026-11-05).
+    const dir = mkdtempSync(join(tmpdir(), 'wg-boot-'));
+    const log = join(dir, 'calls.log');
+    writeFileSync(
+      join(dir, 'ip'),
+      `#!/bin/bash
+echo "ip $*" >> ${log}
+[ "$*" = "link del wg0" ] && { echo 'Cannot find device "wg0"' >&2; exit 1; }
+exit 0
+`,
+      { mode: 0o755 },
+    );
+    writeFileSync(join(dir, 'wg'), `#!/bin/bash\necho "wg $*" >> ${log}\n`, { mode: 0o755 });
+    const script = join(dir, 'boot.sh');
+    writeFileSync(script, buildWireguardBootScript(params));
+    const result = spawnSync('bash', [script], {
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+      encoding: 'utf-8',
+    });
+    const calls = readFileSync(log, 'utf-8');
+    rmSync(dir, { recursive: true, force: true });
+    expect(result.status).toBe(0);
+    expect(calls).toContain('ip link add wg0 type wireguard');
+    expect(calls).toContain('wg set wg0 private-key');
+    expect(calls).toContain('ip link set wg0 up');
+  });
+
+  it('never lets a key near the output of the comparison', () => {
+    // `wg show wg0 dump` prints the private key on its first line.
+    expect(buildWireguardBringUp(params)).toContain('wg show wg0 dump 2>/dev/null | tail -n +2');
   });
 });

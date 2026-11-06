@@ -1,0 +1,128 @@
+{
+  "rule": "owned = ceil5(p90 + 15) at n >= 4 else ceil5(max + 30); endToEnd = owned + tlsAllowanceS (15, or ceil5 of the TLS first-look statistic when above 15). Regenerate with scripts/calibrate-deploy-budgets.js.",
+  "since": "2026-11-05T12:00:00.000Z",
+  "budgets": {
+    "digitalocean": {
+      "compose-ha": {
+        "any": {
+          "ownedS": 250,
+          "endToEndS": 265,
+          "tlsAllowanceS": 15,
+          "samples": 1
+        }
+      },
+      "compose": {
+        "any": {
+          "ownedS": 200,
+          "endToEndS": 215,
+          "tlsAllowanceS": 15,
+          "samples": 1
+        }
+      },
+      "k8s-ha": {
+        "any": {
+          "ownedS": 320,
+          "endToEndS": 335,
+          "tlsAllowanceS": 15,
+          "samples": 2
+        }
+      },
+      "k8s": {
+        "any": {
+          "ownedS": 270,
+          "endToEndS": 285,
+          "tlsAllowanceS": 15,
+          "samples": 1
+        }
+      }
+    },
+    "hetzner": {
+      "compose-ha": {
+        "any": {
+          "ownedS": 335,
+          "endToEndS": 350,
+          "tlsAllowanceS": 15,
+          "samples": 9
+        }
+      },
+      "compose": {
+        "any": {
+          "ownedS": 275,
+          "endToEndS": 300,
+          "tlsAllowanceS": 25,
+          "samples": 3
+        }
+      },
+      "k8s-ha": {
+        "any": {
+          "ownedS": 405,
+          "endToEndS": 420,
+          "tlsAllowanceS": 15,
+          "samples": 6
+        }
+      },
+      "k8s": {
+        "any": {
+          "ownedS": 400,
+          "endToEndS": 415,
+          "tlsAllowanceS": 15,
+          "samples": 3
+        }
+      }
+    },
+    "linode": {
+      "compose-ha": {
+        "standard": {
+          "ownedS": 230,
+          "endToEndS": 245,
+          "tlsAllowanceS": 15,
+          "samples": 1
+        }
+      },
+      "compose": {
+        "standard": {
+          "ownedS": 210,
+          "endToEndS": 235,
+          "tlsAllowanceS": 25,
+          "samples": 2
+        }
+      }
+    },
+    "scaleway": {
+      "compose-ha": {
+        "any": {
+          "ownedS": 365,
+          "endToEndS": 380,
+          "tlsAllowanceS": 15,
+          "samples": 1
+        }
+      },
+      "compose": {
+        "any": {
+          "ownedS": 220,
+          "endToEndS": 240,
+          "tlsAllowanceS": 20,
+          "samples": 1
+        }
+      }
+    },
+    "vultr": {
+      "compose-ha": {
+        "any": {
+          "ownedS": 270,
+          "endToEndS": 285,
+          "tlsAllowanceS": 15,
+          "samples": 1
+        }
+      },
+      "compose": {
+        "any": {
+          "ownedS": 230,
+          "endToEndS": 245,
+          "tlsAllowanceS": 15,
+          "samples": 1
+        }
+      }
+    }
+  }
+}

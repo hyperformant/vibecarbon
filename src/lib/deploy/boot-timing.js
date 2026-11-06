@@ -23,13 +23,17 @@
  *   - `cloud-init analyze show`: total cloud-init time and each stage
  *     (init-local, init-network, modules-config, modules-final).
  *   - `cloud-init analyze blame`: the slowest modules.
- *   - BOOT_MARK_LOG: one `<id> <epoch seconds>` line per major phase, written
+ *   - BOOT_MARK_LOG: one `<id> <epoch seconds.nanoseconds>` line per major phase, written
  *     by the cloud-init scripts in carbon/cloud-init/ with one-letter ids
  *     (PHASE_IDS; Hetzner caps user data at 32 KiB). A plain mark starts a
  *     sequential phase that runs until the next plain mark (the last one, `e`,
  *     only closes the chain). `<id>.begin` / `<id>.end` bracket a background
  *     span (the compose boot image pull) that overlaps the chain.
  *   - `systemd-analyze`: kernel and userspace boot time.
+ *   - The k3s binary's mtime, which splits `k3s.install` into the download and
+ *     the time k3s took to come up, and any line in cloud-init's output saying
+ *     why an install attempt failed. Both cost nothing at boot: the node
+ *     already holds them, so nothing is added to user data.
  *
  * Once per node, cold provisions only: the script reports nothing on a node
  * without the marker log (provisioned before the marks existed, so its boot
@@ -68,6 +72,48 @@ export const PHASE_IDS = Object.freeze({
   e: 'done',
 });
 
+/**
+ * Plain words for what the server is doing at each phase id, shown beside the
+ * ready wait's spinner. `e` (done) needs no label: the wait ends there. `b`
+ * has none either: the boot pull is written as `b.begin` / `b.end`, never as a
+ * plain `b` mark.
+ */
+export const BOOT_STAGE_LABELS = Object.freeze({
+  p: 'starting up',
+  a: 'installing system packages',
+  n: 'setting up the network',
+  w: 'waiting for the primary server',
+  k: 'installing Kubernetes',
+  r: 'waiting for Kubernetes',
+  x: 'installing cluster add-ons',
+  d: 'starting Docker',
+  u: 'setting up the firewall',
+});
+
+/**
+ * A reader for the boot log's lines as they stream in, for a ready wait's
+ * spinner. Calls `onStage(label)` when a `<id> <epoch.fraction>` mark moves
+ * the label. Every reconnect replays the whole log, so only a mark newer than
+ * the newest one seen may change the label, and an unchanged label is not
+ * reported again (a quiet, non-TTY spinner prints a line per report).
+ *
+ * @param {(label: string) => void} onStage
+ * @returns {(line: string) => void}
+ */
+export function readBootStage(onStage) {
+  let newest = 0;
+  let current = '';
+  return (line) => {
+    const mark = /^([a-z]) (\d+(?:\.\d+)?)$/.exec(String(line).trim());
+    const label = mark && Object.hasOwn(BOOT_STAGE_LABELS, mark[1]) && BOOT_STAGE_LABELS[mark[1]];
+    if (!label || Number(mark[2]) <= newest) return;
+    newest = Number(mark[2]);
+    if (label === current) return;
+    current = label;
+    onStage(label);
+  };
+}
+
 /** The whole collection's bound, all nodes in parallel. */
 export const BOOT_TIMING_BUDGET_MS = 45_000;
 
@@ -93,6 +139,9 @@ echo '==> blame <=='
 cloud-init analyze blame 2>/dev/null || true
 echo '==> systemd <=='
 systemd-analyze 2>/dev/null || true
+echo '==> k3s <=='
+stat -c 'binary %.3Y' /usr/local/bin/k3s 2>/dev/null || true
+grep -E 'k3s install attempt|Download failed|curl: \\(' /var/log/cloud-init-output.log 2>/dev/null | tail -n 5 | sed 's/^/note /' || true
 : > "$sentinel" || true
 `;
 
@@ -100,6 +149,9 @@ systemd-analyze 2>/dev/null || true
 /** @typedef {{ stage: string, ms: number }} StageTiming */
 
 const MARK_LINE = /^(\S+)[ \t]+(\d+(?:\.\d+)?)[ \t]*$/;
+
+/** The mark that opens the k3s install phase. */
+const K3S_INSTALL_MARK = 'k';
 
 /**
  * Parse the marker log.
@@ -138,6 +190,44 @@ export function parseBootMarkers(text) {
   }
   const span = chain.length >= 2 ? chain[chain.length - 1].t - chain[0].t : -1;
   return { phases, spans, totalMs: span >= 0 ? toMs(span) : null };
+}
+
+/**
+ * Split `k3s.install` at the moment the binary landed. Empty on a node with no
+ * k3s, and on a binary not written during the install phase, whose mtime then
+ * says nothing about this boot.
+ *
+ * @param {string} markers  the marker log
+ * @param {string} k3s      the report's k3s section
+ * @returns {Timing[]}
+ */
+function k3sInstallSplit(markers, k3s) {
+  const binary = /^binary (\d+(?:\.\d+)?)$/m.exec(String(k3s ?? ''));
+  if (!binary) return [];
+  const plain = [];
+  for (const line of String(markers ?? '').split('\n')) {
+    const m = MARK_LINE.exec(line.trim());
+    if (m && !/\.(begin|end)$/.test(m[1])) plain.push({ id: m[1], t: Number(m[2]) });
+  }
+  const at = plain.findIndex((mark) => mark.id === K3S_INSTALL_MARK);
+  if (at === -1 || at + 1 >= plain.length) return [];
+  const landed = Number(binary[1]);
+  const [start, end] = [plain[at].t, plain[at + 1].t];
+  if (landed < start || landed > end) return [];
+  return [
+    { name: 'k3s.download', ms: toMs(landed - start) },
+    { name: 'k3s.start', ms: toMs(end - landed) },
+  ];
+}
+
+/**
+ * Why any k3s install attempt failed, as cloud-init logged it.
+ *
+ * @param {string} k3s  the report's k3s section
+ * @returns {string[]}
+ */
+export function parseK3sInstallNotes(k3s) {
+  return [...String(k3s ?? '').matchAll(/^note (.+)$/gm)].map((m) => m[1].trim());
 }
 
 /** The text of the first `-- Boot Record NN --` block (the provisioning boot). */
@@ -221,7 +311,7 @@ export function parseSystemdAnalyze(text) {
  * Split the remote script's output into its sections.
  *
  * @param {string} raw
- * @returns {{ skipped: string|null, markers: string, show: string, blame: string, systemd: string }}
+ * @returns {{ skipped: string|null, markers: string, show: string, blame: string, systemd: string, k3s: string }}
  */
 export function parseBootReport(raw) {
   /** @type {Record<string, string[]>} */
@@ -243,6 +333,7 @@ export function parseBootReport(raw) {
     show: text('show'),
     blame: text('blame'),
     systemd: text('systemd'),
+    k3s: text('k3s'),
   };
 }
 
@@ -282,6 +373,9 @@ export function summarizeBootTiming(report) {
   if (markers.totalMs !== null) out.push({ stage: 'script.total', ms: markers.totalMs });
   for (const p of markers.phases) out.push({ stage: `script.${p.name}`, ms: p.ms });
   for (const s of markers.spans) out.push({ stage: `script.${s.name}`, ms: s.ms });
+  for (const s of k3sInstallSplit(report.markers, report.k3s)) {
+    out.push({ stage: `script.${s.name}`, ms: s.ms });
+  }
   // The part of the user script the marks do not cover: on compose, a
   // provider's docker install spliced in ahead of the first runcmd mark.
   const scriptsUser = modules.find((m) => m.name.endsWith('/config-scripts_user'));
@@ -336,13 +430,14 @@ export async function collectBootTiming({
   warn = (message) => process.stderr.write(`${message}\n`),
 }) {
   if (!enabled) return { stages: [] };
-  const sayOnce = (reason) => {
+  const say = (text) => {
     try {
-      warn(`[boot-timing] ${prefix}: boot timing not collected (${reason})`);
+      warn(`[boot-timing] ${prefix}: ${text}`);
     } catch {
       // a warning must never fail the command either
     }
   };
+  const sayOnce = (reason) => say(`boot timing not collected (${reason})`);
   try {
     if (signal?.aborted) throw new Error('out of time');
     const call = Promise.resolve().then(() =>
@@ -373,6 +468,7 @@ export async function collectBootTiming({
       return { stages };
     }
     for (const { stage, ms } of stages) emit(bootTimingPerfName(prefix, stage), ms);
+    for (const note of parseK3sInstallNotes(report.k3s)) say(`k3s install: ${note}`);
     return { stages };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

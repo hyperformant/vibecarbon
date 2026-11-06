@@ -49,40 +49,6 @@ describe('noteBootPull', () => {
   });
 });
 
-/**
- * M-B2a: a deploy running a db image other than the pinned one the boot pull
- * fetched (VIBECARBON_DB_IMAGE) says so, so a slow db pull is explained.
- */
-describe('noteBootPull: a db image the boot pull did not fetch', () => {
-  it('notes the mismatch next to the outcome', async () => {
-    writeLogDetail.mockClear();
-    const run = vi.fn(async () => 'ok\n');
-    await noteBootPull('1.2.3.4', '/k', {
-      run,
-      deployDbImage: 'ghcr.io/hyperformant/postgres-dev:17.11-walg3.0.9-r3-abcdef123456',
-    });
-    const lines = writeLogDetail.mock.calls.map((c) => c[0]);
-    expect(lines).toContain('[boot-pull] 1.2.3.4: core images already pulled at boot');
-    expect(
-      lines.some((l: string) =>
-        /\[boot-pull\] 1\.2\.3\.4: this deploy runs db image ghcr\.io\/hyperformant\/postgres-dev:.* not the pinned .* the boot pull fetched; the deploy pull fetches it/.test(
-          l,
-        ),
-      ),
-    ).toBe(true);
-  });
-
-  it('the pinned db image: no extra line', async () => {
-    writeLogDetail.mockClear();
-    const { dbImageRef } = await import('../../../src/lib/images.js');
-    await noteBootPull('1.2.3.4', '/k', {
-      run: vi.fn(async () => 'ok'),
-      deployDbImage: dbImageRef(),
-    });
-    expect(writeLogDetail).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe('noteBootPull: a malformed VIBECARBON_DB_IMAGE', () => {
   it('is noted as unreadable, never an unhandled rejection or a throw', async () => {
     const prev = process.env.VIBECARBON_DB_IMAGE;

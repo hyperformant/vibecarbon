@@ -39,6 +39,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { progressLog } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
+import { kubectlSkewWarning } from '../../runtime-floors.js';
 import {
   ADMIN_PROBE_EXIT,
   adminNotReadyHint,
@@ -47,6 +48,7 @@ import {
   isAdminProbeExit,
   isTerminalAdminProbeExit,
 } from '../admin-ready.js';
+import { DB_POD, POD_EXEC_PROBE_MS, POD_EXEC_QUERY_MS } from '../db-workload.js';
 
 /**
  * Inert probe resource: namespaced (no cluster-wide footprint), self-signed
@@ -115,6 +117,36 @@ async function pollCondition({ name, attempt, budgetMs, sleep, nowFn, isFinal, d
 }
 
 /**
+ * The warning to show when this machine's kubectl is outside one minor of the
+ * cluster, or null. The laptop still does most of a deploy's kubectl work
+ * (rollouts, patches, waits and reads; only kustomizations apply on the master),
+ * so the skew is worth a line, and it is never a failure. Reads the cluster
+ * itself rather than the version this CLI would install: a warm deploy may be
+ * on an older cluster. Never throws: an unreachable cluster or output it cannot
+ * read says nothing, and the control-plane gate beside it reports the outage.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
+ * @param {Function} [params.exec] - test seam, defaults to runCommandAsync
+ * @returns {Promise<string | null>}
+ */
+export async function kubectlSkewNotice({ env, exec = defaultExec }) {
+  try {
+    const out = await exec(['kubectl', 'version', '-o', 'json', '--request-timeout=5s'], {
+      env,
+      silent: true,
+    });
+    const { clientVersion, serverVersion } = JSON.parse(String(out ?? ''));
+    return kubectlSkewWarning({
+      client: clientVersion?.gitVersion,
+      server: serverVersion?.gitVersion,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Prove the control plane SERVES — discovery and admission, not liveness.
  * Both checks must pass in the same iteration: a control plane can answer
  * health checks while its admission chain still 500s, and that half-state is
@@ -178,7 +210,7 @@ export async function awaitCertManagerAdmission({
 }
 
 /**
- * The controller's leader lease: cert-manager v1.20's default
+ * The controller's leader lease: cert-manager's default
  * `--leader-election-namespace=kube-system` and lock name.
  */
 export const CERT_MANAGER_LEADER_LEASE = Object.freeze({
@@ -386,8 +418,58 @@ export async function awaitPostgresAccepting({
           '-U',
           'postgres',
         ],
-        { env, silent: true },
+        // Killed at the bound, a hung exec is one failed attempt of this poll.
+        { env, silent: true, timeout: POD_EXEC_PROBE_MS },
       ),
+  });
+}
+
+/**
+ * Wait for the db pod's Ready condition, read from the API. For a deploy that
+ * changed nothing: its only question is whether the db is up, the kubelet's
+ * readiness probe (the same pg_isready over TCP) already answers it, and an
+ * API read never takes the apiserver-to-kubelet exec path.
+ *
+ * It is not awaitPostgresAccepting's equal. Ready is the probe's last verdict,
+ * and it does not prove the exec path (src/backup.js triggerBackupJob): a step
+ * that rolled the db, or that execs next with no budget of its own, keeps that.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
+ * @param {string} [params.dbPod]
+ * @param {string} [params.namespace]
+ * @param {number} [params.budgetMs]
+ * @param {Function} [params.exec] - test seam, defaults to runCommandAsync
+ * @param {Function} [params.sleep] - test seam
+ * @param {Function} [params.nowFn] - test seam
+ */
+export async function awaitDbPodReady({
+  env,
+  dbPod = DB_POD,
+  namespace = 'vibecarbon',
+  budgetMs = 180_000,
+  exec = defaultExec,
+  sleep = defaultSleep,
+  nowFn,
+}) {
+  await pollCondition({
+    name: `db pod Ready (${dbPod})`,
+    budgetMs,
+    sleep,
+    nowFn,
+    attempt: async () => {
+      const out = await exec(['kubectl', '-n', namespace, 'get', 'pod', dbPod, '-o', 'json'], {
+        env,
+        silent: true,
+        timeout: POD_EXEC_QUERY_MS,
+      });
+      const ready = JSON.parse(String(out ?? '')).status?.conditions?.find(
+        (c) => c?.type === 'Ready',
+      );
+      if (ready?.status !== 'True') {
+        throw new Error(`${dbPod} is not Ready (${ready?.reason ?? ready?.status ?? 'no status'})`);
+      }
+    },
   });
 }
 
@@ -440,7 +522,7 @@ export async function awaitPostgresPromoted({
           '-tAc',
           'SELECT pg_is_in_recovery()',
         ],
-        { env, silent: true },
+        { env, silent: true, timeout: POD_EXEC_QUERY_MS },
       );
       const v = String(out ?? '').trim();
       if (v !== 'f') throw new Error(`pg_is_in_recovery() = ${v || '(no answer)'}`);
@@ -496,7 +578,7 @@ export async function awaitAppAdminReady({
               '-e',
               adminReadyProbeScript(),
             ],
-            { env, silent: true },
+            { env, silent: true, timeout: POD_EXEC_QUERY_MS },
           );
         } catch (err) {
           // The probe's own exit codes say which half is missing; anything
@@ -667,7 +749,7 @@ export async function watchAppMigrationFailure({
               ...(terminatedNow ? [] : ['--previous']),
               '--tail=40',
             ],
-            { env, silent: true },
+            { env, silent: true, timeout: POD_EXEC_QUERY_MS },
           )) ?? '',
         );
       } catch {
@@ -697,7 +779,7 @@ export async function watchAppMigrationFailure({
             '-e',
             adminReadyProbeScript(),
           ],
-          { env, silent: true },
+          { env, silent: true, timeout: POD_EXEC_QUERY_MS },
         );
         code = 0;
       } catch (err) {
@@ -714,6 +796,7 @@ export async function watchAppMigrationFailure({
             {
               env,
               silent: true,
+              timeout: POD_EXEC_QUERY_MS,
             },
           )) ?? '',
         );

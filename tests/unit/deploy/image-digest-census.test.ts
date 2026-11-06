@@ -31,23 +31,24 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { SOCAT_IMAGE } from '../../../src/lib/deploy/compose/ha.js';
 import { BINFMT_IMAGE } from '../../../src/lib/deploy/platform.js';
 import { bootPullImages } from '../../../src/lib/iac/compose-cloud-init.js';
 import {
   CSI_SIDECAR_MIRRORS,
-  CSI_UPSTREAM_IMAGE_PINS,
   carbonAutoscalerImageRef,
   clusterAutoscalerImageRef,
   csiSidecarSetImagePlan,
+  csiUpstreamImagePins,
   DIAG_BUSYBOX_IMAGE,
   DIAG_NETSHOOT_IMAGE,
   dbImageRef,
   k8sMirrorRef,
   MIRRORED_IMAGES,
+  manifestImageValues,
   NODE_RUNTIME_IMAGE,
   pauseImageRef,
   registryImageRef,
+  socatImageRef,
 } from '../../../src/lib/images.js';
 import { escapeRegExp } from '../../_shared/regexp.js';
 
@@ -88,6 +89,19 @@ const ALLOWLIST: Record<string, string> = {
   // the tag in src/lib/images.js, which must move with any content change.
   '{{CARBON_AUTOSCALER_IMAGE}}': 'carbon-autoscaler, published by this repo after merge',
   [carbonAutoscalerImageRef()]: 'carbon-autoscaler, published by this repo after merge',
+  // Filled from the deploy's version set, whose every ref is pinned (bundled:
+  // the constants below; channel: src/lib/version-channel.js refuses anything
+  // else). tests/unit/deploy/version-channel-census.test.ts holds the tokens to
+  // the set.
+  ...Object.fromEntries(
+    Object.keys(manifestImageValues())
+      .filter((token) => token.endsWith('_IMAGE'))
+      .map((token) => [`{{${token}}}`, 'version set, filled at deploy']),
+  ),
+  '${TRAEFIK_IMAGE:?TRAEFIK_IMAGE missing, run vibecarbon upgrade to write it to .env}':
+    'version set, written to .env at deploy',
+  '${DOCKER_SOCKET_PROXY_IMAGE:?DOCKER_SOCKET_PROXY_IMAGE missing, run vibecarbon upgrade to write it to .env}':
+    'version set, written to .env at deploy',
   // The node runtime base the app image builds FROM: built from
   // docker/node-runtime by publish-node-runtime-image.yml AFTER the commit
   // that names the tag merges. Revisioned like the db image (-r<N>, enforced
@@ -234,7 +248,7 @@ function workflowSites(rel: string): Site[] {
  * sweep below fails on an interpolation it cannot resolve to this map.
  */
 const JS_REFS: Record<string, string[]> = {
-  SOCAT_IMAGE: [SOCAT_IMAGE],
+  'socatImageRef()': [socatImageRef()],
   'registryImageRef()': [registryImageRef()],
   DIAG_BUSYBOX_IMAGE: [DIAG_BUSYBOX_IMAGE],
   DIAG_NETSHOOT_IMAGE: [DIAG_NETSHOOT_IMAGE],
@@ -243,7 +257,7 @@ const JS_REFS: Record<string, string[]> = {
   'carbonAutoscalerImageRef()': [carbonAutoscalerImageRef()],
   'pauseImageRef()': [pauseImageRef()],
   'k8sMirrorRef(MIRRORED_IMAGES)': MIRRORED_IMAGES.map(k8sMirrorRef),
-  'csiSidecarSetImagePlan()': Object.keys({ ...CSI_SIDECAR_MIRRORS, ...CSI_UPSTREAM_IMAGE_PINS })
+  'csiSidecarSetImagePlan()': Object.keys({ ...CSI_SIDECAR_MIRRORS, ...csiUpstreamImagePins() })
     .flatMap((p) => csiSidecarSetImagePlan(p))
     .flatMap(({ setImageArgs }) => setImageArgs.map((a) => a.slice(a.indexOf('=') + 1))),
   'dbImageRef()': [dbImageRef()],
@@ -576,7 +590,7 @@ describe('Dependabot can bump every pinned location', () => {
         K8S_FILES.filter((f) => yamlImageSites(f).some(({ ref }) => PINNED.test(ref))).map(dirname),
       ),
     ];
-    expect(withPins.length).toBeGreaterThan(5);
+    expect(withPins.length).toBeGreaterThan(2);
     expect(withPins.filter((d) => !covered(dirs, d))).toEqual([]);
   });
 
@@ -645,10 +659,10 @@ describe('Dependabot can bump every pinned location', () => {
       'docker',
       'docker-compose',
     ]);
-    // Our ghcr mirrors pin upstream's amd64 CHILD digest, not the mirror
-    // tag's index digest, so a Dependabot "update" of one would only break
-    // the mirror census. Each entry ignores exactly the mirror names its
-    // files carry (images.js owns them), plus our node runtime base.
+    // Our ghcr mirrors are named by tokens now, filled from the version set,
+    // so no entry has one to ignore unless a literal comes back. An entry
+    // ignores exactly the mirror names its files carry, plus our node runtime
+    // base.
     const ignoredBy = (eco: string) =>
       new Set(
         (inImages.find((u) => u['package-ecosystem'] === eco)?.ignore ?? [])
@@ -666,11 +680,9 @@ describe('Dependabot can bump every pinned location', () => {
         'ghcr.io/hyperformant/node-runtime',
       ]),
     );
-    expect(ignoredBy('docker')).toContain('ghcr.io/hyperformant/cluster-autoscaler');
     expect(ignoredBy('docker-compose')).toEqual(
       new Set(mirrorNamesIn(COMPOSE_FILES.flatMap(yamlImageSites))),
     );
-    expect(ignoredBy('docker-compose')).toContain('ghcr.io/hyperformant/traefik');
   });
 
   it('github-actions is watched (workflow actions are SHA-pinned)', () => {
@@ -690,9 +702,9 @@ describe('Dependabot can bump every pinned location', () => {
     const jsThirdParty = [DIAG_BUSYBOX_IMAGE, DIAG_NETSHOOT_IMAGE, BINFMT_IMAGE];
     expect(fromPins).toEqual([...new Set(jsThirdParty)].sort());
     const mirrored = [
-      SOCAT_IMAGE,
+      socatImageRef(),
       registryImageRef(),
-      ...Object.values(CSI_UPSTREAM_IMAGE_PINS).flatMap((specs) =>
+      ...Object.values(csiUpstreamImagePins()).flatMap((specs) =>
         specs.flatMap((s) => Object.values(s.containers)),
       ),
     ];
@@ -701,11 +713,13 @@ describe('Dependabot can bump every pinned location', () => {
 
   it('the k8s repl-gateway runs the same socat ref as the compose-ha overlay', () => {
     const k8s = yamlImageSites('carbon/k8s/base/repl-gateway/repl-gateway.yaml').map((s) => s.ref);
-    expect(k8s).toEqual([SOCAT_IMAGE]);
+    expect(k8s).toEqual(['{{SOCAT_IMAGE}}']);
+    expect(manifestImageValues().SOCAT_IMAGE).toBe(socatImageRef());
   });
 
   it('the k8s local registry runs registryImageRef()', () => {
     const k8s = yamlImageSites('carbon/k8s/base/registry/local-registry.yaml').map((s) => s.ref);
-    expect(new Set(k8s)).toEqual(new Set([registryImageRef()]));
+    expect(new Set(k8s)).toEqual(new Set(['{{REGISTRY_IMAGE}}']));
+    expect(manifestImageValues().REGISTRY_IMAGE).toBe(registryImageRef());
   });
 });

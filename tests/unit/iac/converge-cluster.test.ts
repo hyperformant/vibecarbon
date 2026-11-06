@@ -15,7 +15,7 @@
  *   (d) the interactive S3 prompt is skipped when `s3Creds` are supplied.
  *
  * `../iac/index.js` (upStack/getStackOutputs/getOrCreateStack/
- * classifyK3sTokenProbe) and `../deploy/k8s/index.js` (K3S_VERSION) are mocked
+ * classifyK3sTokenProbe) and `../images.js` (k3sVersion) are mocked
  * so no @pulumi / real cloud call is made. The Provider is a fake that records
  * every `getK8sProgram(config)` call, which is how we inspect the assembled
  * program config without exporting internals.
@@ -36,10 +36,6 @@ vi.mock('../../../src/lib/iac/index.js', () => ({
   // Pulumi aborts so they stop reading "code: -2" (2026-08-06 RCA).
   summarizePulumiError: (err: unknown) =>
     (err instanceof Error ? err.message : String(err)).split('\n')[0],
-}));
-
-vi.mock('../../../src/lib/deploy/k8s/index.js', () => ({
-  K3S_VERSION: '1.30.4+k3s1',
 }));
 
 const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');

@@ -274,7 +274,7 @@ export function buildHetznerK8sProgram(config) {
       {
         name: `${clusterName}-master`,
         serverType: config.masterServerType,
-        image: 'ubuntu-24.04',
+        image: 'ubuntu-26.04',
         location: config.location,
         sshKeys: [sshKeyId],
         firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],
@@ -314,7 +314,7 @@ export function buildHetznerK8sProgram(config) {
       {
         name: `${clusterName}-db`,
         serverType: config.dbServerType,
-        image: 'ubuntu-24.04',
+        image: 'ubuntu-26.04',
         location: config.location,
         sshKeys: [sshKeyId],
         firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],
@@ -349,7 +349,7 @@ export function buildHetznerK8sProgram(config) {
           {
             name: `${clusterName}-worker-${i + 1}`,
             serverType: config.workerServerType,
-            image: 'ubuntu-24.04',
+            image: 'ubuntu-26.04',
             location: config.location,
             sshKeys: [sshKeyId],
             firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],
@@ -370,6 +370,10 @@ export function buildHetznerK8sProgram(config) {
           },
           workerResourceOptions('hcloud:index/server:Server', {
             dependsOn: [subnet],
+            // The master's address is static, so only the join trigger would
+            // hold a worker back until the master finished. With no token to
+            // replay it has nothing to protect yet: see workerResourceOptions.
+            omitJoinTrigger: !config.k3sToken,
             joinTarget: {
               masterId: master.id,
               masterPrivateIp: '10.0.1.1',

@@ -53,6 +53,17 @@ patches:
     target:
       kind: Deployment
       name: local-registry
+  # Same for Traefik's Deployment: {{TRAEFIK_IMAGE}} comes from the version set
+  # the CLI's deploy resolved.
+  - patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: traefik
+    target:
+      kind: Deployment
+      name: traefik
   # And the backup CronJob: deploy-owned, per environment (its schedule is
   # filled in by the CLI deploy and deploy.yml, not by anything Flux builds).
   - patch: |

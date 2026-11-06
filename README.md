@@ -84,9 +84,9 @@ Vibecarbon handles Docker Compose and Kubernetes, high availability with one-com
 
 **Prerequisites**
 
-- **Node.js 24.15+** and **Docker** for `create` and local development (`up`).
+- **Node.js 24.15+** and **Docker** with Compose 2.24.4+ for `create` and local development (`up`).
 - **[Pulumi CLI](https://www.pulumi.com/docs/install/)** is required for any cloud deploy (`curl -fsSL https://get.pulumi.com | sh`). It is not bundled.
-- **`kubectl` 1.27+ and `helm`** additionally for the `k8s` / `k8s-ha` modes.
+- **`kubectl` 1.24+** additionally for the `k8s` / `k8s-ha` modes.
 - **Linux, macOS, or Windows via [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)**. Native Windows is not supported.
 
 **Zero → production in five commands:**
@@ -222,7 +222,7 @@ Same family, different starting point. If your app already exists, those tools a
 - Guided onboarding flow
 - Contact form with admin panel and email notifications
 - Newsletter with double opt-in, admin compose/send, and CSV export
-- File uploads via S3-compatible object storage (Hetzner Object Storage, DigitalOcean Spaces)
+- File uploads via S3-compatible object storage (your provider's object storage: Hetzner, DigitalOcean, Linode, Vultr or Scaleway)
 - Transactional email (SMTP)
 - Client-side docs search with Cmd+K shortcut
 - Product analytics (Plausible, cookie-free and privacy-focused)
@@ -253,7 +253,7 @@ Same family, different starting point. If your app already exists, those tools a
 
 ## Architecture
 
-One CLI, three deploy modes, picked per environment. Every mode includes automated SSL and backups; monitoring dashboards are an optional add-on. Compose HA gives the same high-availability architecture as Kubernetes HA without needing a Kubernetes cluster, so it runs on every provider, including ones with no Kubernetes support at all; select it explicitly with `-mode compose-ha`.
+One CLI, four deploy modes, picked per environment. Every mode includes automated SSL and backups; monitoring dashboards are an optional add-on. Compose HA gives the same high-availability architecture as Kubernetes HA without needing a Kubernetes cluster, so it runs on every provider, including ones with no Kubernetes support at all; select it explicitly with `-mode compose-ha`.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/architecture.svg" alt="vibecarbon deploy fans out to three scenarios: compose (one server), k8s (k3s cluster, autoscaling workers), and k8s-ha (multi-region, one-command failover), all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway" width="880" />

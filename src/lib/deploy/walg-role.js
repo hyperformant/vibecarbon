@@ -27,6 +27,35 @@
  *     read-only into the db container. writeComposeWalgRole writes it over
  *     SSH and reads it back. Nothing about the role is in `.env` any more.
  *
+ * A DEPLOY DOES NOT EXEC WHEN THE ROLE DID NOT CHANGE
+ * ---------------------------------------------------
+ * The k8s write is a `kubectl exec` into the db, the one role step that has
+ * hung (30 s, 2 of 11 first warm deploys, cause unknown), failing a deploy
+ * whose site stayed healthy. So the ConfigMap also records that a write
+ * landed, and a deploy skips the exec when the intent and the record both name
+ * its role. The intent alone proves nothing: it goes first, and the exec after
+ * it can fail. The record (DB_ROLE_LIVE_KEY) holds because:
+ *
+ *   - only a deploy sets it, after the read-back (setK8sWalgRole recordLive);
+ *   - every intent apply spells it empty in the same object, so a role moved
+ *     away and back through a failed write cannot find an old word still
+ *     matching;
+ *   - a restart changes nothing: the kubelet resolves VC_WALG_ROLE_INTENT from
+ *     the ConfigMap for each new container, also one restarting in the same
+ *     pod (seen on real k3s 1.34: same pod uid, new container, changed value),
+ *     and db-guard.sh writes it to the file before postgres starts, so the
+ *     file reads the intent, which the record equals. This is why it is safe
+ *     across the reseed's restart, and why a record tied to one container
+ *     would not do: a cold deploy's reseed restarts the standby, and that
+ *     first warm deploy is exactly where the exec hung. The one gap is a
+ *     container created inside the kubelet's ConfigMap watch delay after a
+ *     role move, which then has to outlive the deploy's read-back and record.
+ *
+ * Mounting the ConfigMap as the role instead would drop the exec altogether,
+ * but the kubelet projects a change on its periodic sync, a minute or two
+ * later, and failover must arm the promoted node before pg_promote and demote
+ * the old one at once. Failover and every other caller keep the exec.
+ *
  * Failover arms the promoted side BEFORE pg_promote (D2), while it is still
  * in recovery (archive_command never runs there, so the write is inert until
  * the promote makes it true), and then PROVES it took by running the
@@ -95,8 +124,14 @@ export const COMPOSE_WALG_ROLE_HOST_DIR = '.vibecarbon-role';
 /** k8s: the CLI-owned ConfigMap holding the durable role intent. */
 export const DB_ROLE_CONFIGMAP = 'vibecarbon-db-role';
 
-/** Its one key, injected into the db container as an env var of the same name. */
+/** The intent, injected into the db container as an env var of the same name. */
 export const DB_ROLE_INTENT_KEY = 'VC_WALG_ROLE_INTENT';
+
+/**
+ * The role a deploy proved in the live file, read back; empty otherwise. The
+ * CLI's alone: nothing in the container reads it, so setting it restarts nothing.
+ */
+export const DB_ROLE_LIVE_KEY = 'VC_WALG_ROLE_LIVE';
 
 /**
  * The one role check every writer goes through: only the two literal words.
@@ -177,10 +212,16 @@ export function walgRoleWriteShell(dir, role) {
  * cluster that predates it gets it created rather than a failed patch. Not in
  * k8s/base: Flux never sees it.
  *
+ * The record is always spelled, empty unless `live`, so an intent apply clears
+ * it in the same write and never leans on a three-way merge to drop a key.
+ * `live` is setK8sWalgRole's alone, after a read-back (census:
+ * tests/unit/deploy/k8s-walg-role-record.test.ts).
+ *
  * @param {'primary'|'standby'} role
+ * @param {{live?: boolean}} [o] record that the file was just read back as `role`
  * @returns {string} YAML
  */
-export function dbRoleConfigMapManifest(role) {
+export function dbRoleConfigMapManifest(role, { live = false } = {}) {
   assertWalgRole(role);
   return [
     'apiVersion: v1',
@@ -190,8 +231,41 @@ export function dbRoleConfigMapManifest(role) {
     '  namespace: vibecarbon',
     'data:',
     `  ${DB_ROLE_INTENT_KEY}: ${role}`,
+    `  ${DB_ROLE_LIVE_KEY}: ${live ? role : '""'}`,
     '',
   ].join('\n');
+}
+
+/**
+ * What vibecarbon-db-role says now. Never throws: a missing or unreadable
+ * ConfigMap proves nothing, so it reads as nothing and the caller writes.
+ *
+ * @param {object} o
+ * @param {string} [o.ip]
+ * @param {(ip: string, argv: string[], opts?: {timeout?: number}) => Promise<string>} o.kubectl
+ * @returns {Promise<{intent?: string, live?: string}>}
+ */
+export async function readDbRoleRecord({ ip, kubectl }) {
+  try {
+    const cm = JSON.parse(
+      await kubectl(
+        ip,
+        [
+          '-n',
+          'vibecarbon',
+          'get',
+          `configmap/${DB_ROLE_CONFIGMAP}`,
+          '-o',
+          'json',
+          '--ignore-not-found',
+        ],
+        { timeout: 30_000 },
+      ),
+    );
+    return { intent: cm?.data?.[DB_ROLE_INTENT_KEY], live: cm?.data?.[DB_ROLE_LIVE_KEY] };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -248,6 +322,31 @@ export function podMountsWalgRoleDir(podJson) {
   return Array.isArray(mounts) && mounts.some((m) => m?.mountPath === WALG_ROLE_DIR);
 }
 
+/** kubectl argv that reads the db pod, for podMountsWalgRoleDir. */
+const DB_POD_GET_ARGV = Object.freeze(['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json']);
+
+/**
+ * Does the ConfigMap prove the live file reads `role` (see the file header)?
+ * Only with the intent and the record both naming it, on a pod that mounts
+ * WALG_ROLE_DIR: without the mount db-guard.sh writes nothing at a restart, so
+ * the proof has nothing to stand on, and the write path reports that pod.
+ *
+ * @param {object} o
+ * @param {string} [o.ip]
+ * @param {(ip: string, argv: string[], opts?: {timeout?: number}) => Promise<string>} o.kubectl
+ * @param {'primary'|'standby'} o.role
+ * @returns {Promise<boolean>}
+ */
+async function walgRoleProvenLive({ ip, kubectl, role }) {
+  const { intent, live } = await readDbRoleRecord({ ip, kubectl });
+  if (intent !== role || live !== role) return false;
+  try {
+    return podMountsWalgRoleDir(await kubectl(ip, [...DB_POD_GET_ARGV], { timeout: 30_000 }));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Set the k8s wal-g role: the durable intent first (created if missing), then
  * the live file, but only on a pod whose spec mounts WALG_ROLE_DIR.
@@ -261,16 +360,32 @@ export function podMountsWalgRoleDir(podJson) {
  * `write-failed` (the write ran and failed: a read-only mount, a full disk),
  * `read-back-mismatch` (it ran but the parser does not read `role` back).
  *
+ * The intent apply clears the live record. `recordLive` is the deploy's: it
+ * returns at once, with no exec and no apply, when the record already proves
+ * `role`, and it records a write that read back. Failover never passes it: it
+ * always writes, and the next deploy proves the role again.
+ *
  * @param {object} o
  * @param {string} o.ip
  * @param {(ip: string, argv: string[], opts?: {input?: string, timeout?: number}) => Promise<string>} o.kubectl
  * @param {'primary'|'standby'} o.role
  * @param {boolean} [o.requireLive] throw unless the live file now reads `role`
  * @param {string} [o.envName] named in the no-role-mount hint; `<env>` when absent
+ * @param {boolean} [o.recordLive] skip a proven role, record a write that read back
  * @returns {Promise<{intent: true, live: boolean, reason?: 'no-role-mount'|'pod-unreachable'|'write-failed'|'read-back-mismatch', error?: Error}>}
  */
-export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false, envName }) {
+export async function setK8sWalgRole({
+  ip,
+  kubectl,
+  role,
+  requireLive = false,
+  envName,
+  recordLive = false,
+}) {
   assertWalgRole(role);
+  if (recordLive && (await walgRoleProvenLive({ ip, kubectl, role }))) {
+    return { intent: true, live: true };
+  }
   await kubectl(ip, k8sWalgRoleIntentApplyArgv(), {
     input: dbRoleConfigMapManifest(role),
     timeout: 60_000,
@@ -293,9 +408,7 @@ export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false, e
 
   let pod;
   try {
-    pod = await kubectl(ip, ['-n', 'vibecarbon', 'get', 'pod', DB_POD, '-o', 'json'], {
-      timeout: 30_000,
-    });
+    pod = await kubectl(ip, [...DB_POD_GET_ARGV], { timeout: 30_000 });
   } catch (error) {
     return settle({ intent: true, live: false, reason: 'pod-unreachable', error });
   }
@@ -318,6 +431,16 @@ export async function setK8sWalgRole({ ip, kubectl, role, requireLive = false, e
   const readBack = parseWalgRoleReadBack(out);
   if (readBack !== role) {
     return settle({ intent: true, live: false, reason: 'read-back-mismatch' });
+  }
+  if (recordLive) {
+    try {
+      await kubectl(ip, k8sWalgRoleIntentApplyArgv(), {
+        input: dbRoleConfigMapManifest(role, { live: true }),
+        timeout: 30_000,
+      });
+    } catch {
+      // The role is set. All this costs is one exec on the next deploy.
+    }
   }
   return { intent: true, live: true };
 }

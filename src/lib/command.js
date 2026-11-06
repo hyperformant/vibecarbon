@@ -263,9 +263,18 @@ export function runCommandAsync(cmd, options = {}) {
 
     let stdout = '';
     let stderr = '';
+    // options.onStdoutLine: each complete stdout line as it arrives (silent
+    // only). A last line with no newline is delivered when the child closes.
+    let pendingLine = '';
     if (options.silent) {
       child.stdout?.on('data', (data) => {
         stdout += data;
+        if (options.onStdoutLine) {
+          pendingLine += data;
+          const lines = pendingLine.split('\n');
+          pendingLine = lines.pop();
+          for (const line of lines) options.onStdoutLine(line);
+        }
       });
       child.stderr?.on('data', (data) => {
         stderr += data;
@@ -284,6 +293,7 @@ export function runCommandAsync(cmd, options = {}) {
     child.on('close', (code, signal) => {
       activeChildren.delete(child);
       if (timer) clearTimeout(timer);
+      if (options.onStdoutLine && pendingLine) options.onStdoutLine(pendingLine);
 
       if (signal === 'SIGINT' || code === 130) {
         process.exit(130);

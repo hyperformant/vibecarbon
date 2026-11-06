@@ -13,7 +13,7 @@ import { acquireUplinkLock } from '../../../src/lib/deploy/uplink-lock.js';
 // The layer delta (src/lib/deploy/layer-delta.js + layer-delta-remote.sh) end
 // to end on every store a deploy target can have: docker:29-dind with the
 // classic store, docker:29-dind with the containerd snapshotter, and k3s
-// (`ctr images import`, then a push into a registry:2.8.3 sidecar and a
+// (`ctr images import`, then a push into a registry:3.1.2 sidecar and a
 // `ctr images pull --plain-http` back, the call
 // src/lib/deploy/k8s/ha/image-copy.js makes).
 //
@@ -36,9 +36,10 @@ const describeDocker = shouldRunDocker ? describe : describe.skip;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '../../..');
-const DIND_IMAGE = 'docker:29-dind';
-const K3S_IMAGE = 'rancher/k3s:v1.31.5-k3s1';
-const REGISTRY_IMAGE = 'registry:2.8.3';
+// .github/workflows/docker-newest.yml sets this to the newest Docker.
+const DIND_IMAGE = process.env.VC_DIND_IMAGE || 'docker:29-dind';
+const K3S_IMAGE = 'rancher/k3s:v1.37.2-k3s1';
+const REGISTRY_IMAGE = 'registry:3.1.2';
 const NET = 'vcdelta-net';
 const REG = 'vcdelta-reg';
 const DIND_CLASSIC = 'vcdelta-dind-classic';
@@ -151,7 +152,7 @@ describeDocker('layer delta delivery (deliverImage) on every target store', () =
 
   beforeAll(() => {
     // The k3s pin must track the one deploys install.
-    expect(readFileSync(join(REPO_ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8')).toContain(
+    expect(readFileSync(join(REPO_ROOT, 'src/lib/images.js'), 'utf-8')).toContain(
       `K3S_VERSION = '${K3S_IMAGE.split(':')[1].replace(/-k3s/, '+k3s')}'`,
     );
     work = mkdtempSync(join(tmpdir(), 'vcdelta-'));

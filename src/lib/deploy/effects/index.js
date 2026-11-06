@@ -72,11 +72,11 @@ async function provisionServer(ctx) {
   try {
     const result = await perfAsync('deploy.iac.upStack', () =>
       upStack(environment, program, {
+        perfStem: 'deploy.iac.upStack',
         provider: providerIdFor(envConfig),
         providerToken: apiToken,
         s3Config,
         projectName: projectConfig.projectName,
-        stateBucketYoung: ctx.stateBucketYoung,
         // Recover stale-EMPTY outputs reads in place (read-only poll inside
         // upStack) — the hard gate below stays as the loud last resort.
         requiredOutputs: ['serverIp'],
@@ -176,8 +176,8 @@ async function persistProvisionedServer(ctx) {
  * BaseProvider.CLOUD_INIT_READY_TIMEOUT_MS) — resolved the same way
  * provisionServer resolves its Provider class, via ctx.envConfig — since how
  * long cloud-init takes depends on what the provider's base image already
- * has installed (e.g. DigitalOcean installs docker-ce INSIDE cloud-init,
- * unlike Hetzner's docker-ce image).
+ * has installed. Every provider installs the latest Docker INSIDE cloud-init
+ * (src/lib/iac/docker-install.js), so they all get the same long budget.
  */
 async function setupServer(ctx) {
   const { state, serverIp, sshKeyPath, isDirectDeploy, isComposeLocal, envConfig } = ctx;
@@ -474,7 +474,9 @@ async function checkDbLedger(ctx) {
   const { serverIp, sshKeyPath, projectConfig } = ctx;
   const { assertDbMadeByThisStack } = await import('../compose/db-ledger-preflight.js');
   await perfAsync('deploy.compose.checkDbLedger', () =>
-    assertDbMadeByThisStack([serverIp], sshKeyPath, projectConfig.projectName),
+    assertDbMadeByThisStack([serverIp], sshKeyPath, projectConfig.projectName, {
+      perfName: 'deploy.compose.serverFloors',
+    }),
   );
 }
 
@@ -757,8 +759,19 @@ async function setupBackupCron(ctx) {
   }
 }
 
+/**
+ * Open a state backend this deploy's own bucket just brought into being, before
+ * an HA pair's two engines reach it. See `openStateBackend`.
+ */
+async function openNewStateBackend(ctx) {
+  const { openStateBackend } = await import('../../iac/index.js');
+  await perfAsync('deploy.ha.stateBackend.open', () => openStateBackend(ctx.newStateBackend));
+}
+
 export const EFFECTS = {
   noop: async () => {},
+  // both HA deploy tiers, before their fan-out
+  openStateBackend: openNewStateBackend,
   // compose deploy tier
   provisionServer,
   setupServer,

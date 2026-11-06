@@ -46,14 +46,17 @@ importers:
         specifier: ^3.260.0
         version: 3.273.0(typescript@7.0.2)
       '@pulumiverse/scaleway':
-        specifier: ^1.54.0
-        version: 1.60.0(typescript@7.0.2)
+        specifier: ^1.61.1
+        version: 1.61.1(typescript@7.0.2)
       opentype.js:
         specifier: ^2.0.0
         version: 2.0.0
+      protobufjs:
+        specifier: ^8.8.0
+        version: 8.8.1
       undici:
-        specifier: ^8.5.0
-        version: 8.12.3
+        specifier: ^8.12.4
+        version: 8.12.4
       which:
         specifier: ^7.0.0
         version: 7.0.0
@@ -94,9 +97,6 @@ importers:
       playwright-core:
         specifier: ^1.61.1
         version: 1.64.1
-      protobufjs:
-        specifier: ^8.8.0
-        version: 8.8.1
       semantic-release:
         specifier: ^25.0.8
         version: 25.0.9(typescript@7.0.2)
@@ -811,8 +811,8 @@ packages:
       typescript:
         optional: true
 
-  '@pulumiverse/scaleway@1.60.0':
-    resolution: {integrity: sha512-ii3NoS0ts0VO3l43szVtVlsmp1+15ebRE30hZPl/1miwvJTvlKqUlP6f2TgSovj7f7104H6f15e0udfMuUiU9Q==}
+  '@pulumiverse/scaleway@1.61.1':
+    resolution: {integrity: sha512-7IQzv0BSI3ZFIavjrznBNiBjsGUyHxLSGHGfoSPDhOpSK1JkVkvrNNEyTNqVtYchSnUW6Cmj38LWuKKXK+dAqA==}
 
   '@rolldown/binding-android-arm-eabi@1.2.15':
     resolution: {integrity: sha512-aLcgK9gIJ3YRvrrtfSBbRa27F5WrpiTaPulnFpsHPxpUHgFlSgnU4854MHwoRGEBhfRJDWCS2WQ7lIjskE9Olw==}
@@ -2875,12 +2875,12 @@ packages:
     resolution: {integrity: sha512-EvRlUt/QqAEvXdQeRMYUfwOQsfzpDztykrG2owGEE/rBOBoYv9uF39ZzsNDh4lTFHhTr2XOZjKkYgueD12ZmGA==}
     engines: {node: '>=18.17'}
 
-  undici@7.30.1:
-    resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
+  undici@7.30.2:
+    resolution: {integrity: sha512-mLyPQnHwUxaM/rideoK/+KL8DaAJLRl4aBCfmX444aCSLnIaomqPLtNRe2jdCYcsk5wZzXrDIQC8ZeYNRAYyIA==}
     engines: {node: '>=20.18.1'}
 
-  undici@8.12.3:
-    resolution: {integrity: sha512-+fdndUTwBP86cVjihTp21hZHo7d6oj1c/47XPA3lL8mM0XHs+C4EkcjmgRsFnFk2f/UONGDy9ItBItmXsLOQHw==}
+  undici@8.12.4:
+    resolution: {integrity: sha512-8Mx+uNKKER2bA4AdtedkqRbwUCIJFr2nJckXRe5yrDqzePqwLP7VNcctN8/XdmDSbF7mS+jJKIszlL+vbam1VA==}
     engines: {node: '>=22.19.0'}
 
   unicode-emoji-modifier-base@1.0.0:
@@ -3905,7 +3905,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@pulumiverse/scaleway@1.60.0(typescript@7.0.2)':
+  '@pulumiverse/scaleway@1.61.1(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.273.0(typescript@7.0.2)
     transitivePeerDependencies:
@@ -3996,7 +3996,7 @@ snapshots:
       p-filter: 4.1.0
       semantic-release: 25.0.9(typescript@7.0.2)
       tinyglobby: 0.2.17
-      undici: 7.30.1
+      undici: 7.30.2
       url-join: 5.0.0
     transitivePeerDependencies:
       - kerberos
@@ -5882,9 +5882,9 @@ snapshots:
 
   undici@6.29.1: {}
 
-  undici@7.30.1: {}
+  undici@7.30.2: {}
 
-  undici@8.12.3: {}
+  undici@8.12.4: {}
 
   unicode-emoji-modifier-base@1.0.0: {}
 

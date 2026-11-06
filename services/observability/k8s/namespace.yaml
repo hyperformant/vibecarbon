@@ -1,7 +1,7 @@
 # =============================================================================
 # OBSERVABILITY NAMESPACE (H-9 hardening)
 # =============================================================================
-# Grafana + Prometheus + Loki + Promtail live in their OWN namespace so the
+# Grafana + Prometheus + Loki live in their OWN namespace so the
 # permissive `allow-intra-namespace` baseline policy in the `vibecarbon`
 # namespace (podSelector:{}, all ports) no longer selects Grafana. Combined with
 # the default-deny ingress in this namespace (network-policy.yaml), only Traefik

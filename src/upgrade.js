@@ -39,7 +39,12 @@ import { gitSafeEnv, runCommandAsync } from './lib/command.js';
 import { updateProjectConfig } from './lib/config.js';
 import { resolveDisplayName } from './lib/display-name.js';
 import { parseDotenv } from './lib/dotenv.js';
-import { localComposeEnv, resolveDbImage } from './lib/images.js';
+import {
+  dockerSocketProxyImageRef,
+  localComposeEnv,
+  resolveDbImage,
+  traefikImageRef,
+} from './lib/images.js';
 import { mergePackageJson } from './lib/merge-package-json.js';
 import {
   adaptDockerfileForPackageManager,
@@ -58,6 +63,7 @@ import {
 import { assertInProjectDir } from './lib/project-guard.js';
 import { sidecarBlocked, symlinkedComponent, writeSidecar } from './lib/project-write-guard.js';
 import { generatePassword } from './lib/secrets.js';
+import { parseComposePs } from './lib/status/compose-ps.js';
 import { templatePathFor } from './lib/template-paths.js';
 import { getAddonFilePolicy, getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
 import { VERSION } from './lib/version.js';
@@ -277,7 +283,27 @@ export function addonSecretUpgradeNotes(
  */
 export function ensureDbImageEnv(cwd, { dryRun = false } = {}) {
   const { image, tag } = resolveDbImage();
-  const want = { DB_IMAGE: image, DB_IMAGE_TAG: tag };
+  return ensureEnvValues({ DB_IMAGE: image, DB_IMAGE_TAG: tag }, cwd, dryRun);
+}
+
+/**
+ * The ingress refs the production overlay reads, for a local run of it. A
+ * deploy never reads these: its bundle writes the versions it resolved.
+ *
+ * @param {string} cwd
+ * @param {{dryRun?: boolean}} [opts]
+ * @returns {boolean} whether either file was (or, under -dry, would be) changed
+ */
+export function ensureIngressImageEnv(cwd, { dryRun = false } = {}) {
+  return ensureEnvValues(
+    { TRAEFIK_IMAGE: traefikImageRef(), DOCKER_SOCKET_PROXY_IMAGE: dockerSocketProxyImageRef() },
+    cwd,
+    dryRun,
+  );
+}
+
+/** @param {Record<string, string>} want @param {string} cwd @param {boolean} dryRun */
+function ensureEnvValues(want, cwd, dryRun) {
   let changed = false;
   for (const file of ['.env.local', '.env']) {
     const path = join(cwd, file);
@@ -362,6 +388,13 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
       dryRun
         ? `Would set the database image to ${ref} in .env and .env.local`
         : `Set the database image to ${ref} in .env and .env.local`,
+    );
+  }
+  if (ensureIngressImageEnv(cwd, { dryRun })) {
+    p.log.info(
+      dryRun
+        ? 'Would set the Traefik and socket proxy images in .env and .env.local'
+        : 'Set the Traefik and socket proxy images in .env and .env.local',
     );
   }
   const env = loadEnvVariables(cwd);
@@ -521,7 +554,9 @@ async function main(cliArgs) {
       encoding: 'utf-8',
       timeout: 10000,
     }).trim();
-    if (ps) {
+    // Compose before 2.21 prints `[]` for an empty stack, which is not nothing.
+    const rows = parseComposePs(ps);
+    if (rows === null || rows.length > 0) {
       p.log.warn(
         `Docker containers are running. Consider running ${c.info('vibecarbon down')} first.`,
       );

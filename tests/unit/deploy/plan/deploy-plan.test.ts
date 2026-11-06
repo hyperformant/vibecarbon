@@ -167,6 +167,7 @@ describe('planDeploy(k8s)', () => {
 // EFFECTS are k8s-ha-specific (kubectl-over-ssh fan-out, `deploy.ha.k8s.*` perf
 // labels) so they are distinct registry entries.
 const EXPECTED_K8S_HA_SEQUENCE = [
+  'open-state-backend',
   'generate-ssh-key',
   'upload-ssh-key',
   'provision-clusters',
@@ -221,13 +222,13 @@ describe('planDeploy(k8s-ha)', () => {
     }
   });
 
-  it('leaves all k8s-ha steps unconditional (conditionals live inside the effects)', () => {
+  it('leaves the k8s-ha phases unconditional (conditionals live inside the effects)', () => {
     // deployK8sHA gated its firewall (apiToken), DNS (domain/provider) and
     // degraded handling INSIDE the function body, not at the phase boundary —
-    // so no step carries a when-predicate, mirroring compose-ha's provisioning.
-    for (const step of planDeploy('k8s-ha', {})) {
-      expect(step.when).toBeUndefined();
-    }
+    // so no phase carries a when-predicate, mirroring compose-ha's provisioning.
+    // open-state-backend is the one gated step: it runs only on a new bucket.
+    const gated = planDeploy('k8s-ha', {}).filter((step) => step.when);
+    expect(planStepNames(gated)).toEqual(['open-state-backend']);
   });
 
   it('marks the DR gate + replication + finalize steps `required` (unskippable)', () => {
@@ -251,9 +252,9 @@ describe('planDeploy(k8s-ha)', () => {
 
   it('runs EVERY step (incl. the replication hard-gate + finalize) under a realistic cold-deploy ctx', async () => {
     // Pin the tonight-failing invariant directly: given a cold-deploy ctx (the
-    // shape the orchestrator builds — `{ options: deploymentConfig }` with no
-    // primaryResult/replicationStatus yet), runPlan must execute all 9 effects
-    // in order. No step may be when-skipped out; the replication setup,
+    // shape the orchestrator builds — `{ options: deploymentConfig }` and a new
+    // state backend, with no primaryResult/replicationStatus yet), runPlan must
+    // execute all 10 effects in order. No step may be when-skipped out; the replication setup,
     // verify-streaming gate and finalize MUST all fire. Effects are stubbed so
     // this stays a pure ordering assertion (no SSH/kubectl).
     const ran: string[] = [];
@@ -261,6 +262,7 @@ describe('planDeploy(k8s-ha)', () => {
       ran.push(name);
     };
     const stubEffects = {
+      openStateBackend: record('open-state-backend'),
       haK8sGenerateSshKey: record('generate-ssh-key'),
       haK8sUploadSshKey: record('upload-ssh-key'),
       haK8sProvisionClusters: record('provision-clusters'),
@@ -272,6 +274,7 @@ describe('planDeploy(k8s-ha)', () => {
       haK8sFinalize: record('finalize'),
     };
     const coldCtx = {
+      newStateBackend: { provider: 'hetzner', projectName: 'testapp' },
       options: {
         projectName: 'testapp',
         environment: 'e4',
@@ -319,6 +322,7 @@ describe('planDeploy(k8s-ha)', () => {
 // entries — reusing the single-server effects verbatim would change the perf
 // instrumentation and the ctx shape, breaking behavior-identity.
 const EXPECTED_COMPOSE_HA_SEQUENCE = [
+  'open-state-backend',
   'provision-servers',
   'persist-pending-config',
   'start-dns-update',

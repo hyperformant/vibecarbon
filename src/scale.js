@@ -51,6 +51,7 @@ import {
   rollbackComposeCutover,
   writeComposeReplicationOverlay,
 } from './lib/deploy/compose/scale-cutover.js';
+import { assertServerFloors } from './lib/deploy/compose/server-floors.js';
 import {
   assertComposeScaleKeepsState,
   describeOldServer,
@@ -113,6 +114,7 @@ import {
 } from './lib/services/addon-start.js';
 import { enabledAddonNames } from './lib/services/standby-policy.js';
 import { sshKeyPathFor, sshRun, sshRunScript } from './lib/ssh.js';
+import { useRecordedImageSet } from './lib/version-channel.js';
 import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
 import { buildRecoveryConfig, renderRecoveryConf } from './lib/walg/recovery-config.js';
 import {
@@ -533,7 +535,7 @@ async function scaleRegisterSshKey(ctx) {
  * `getComposeUserData()` (see base.js's "Compose-tier replacement-server
  * identity" doc block) rather than an implicit, Hetzner-shaped default —
  * omitting `image` here previously relied on HetznerProvider.createServer's
- * own `image || 'docker-ce'` fallback, which sent DigitalOcean's droplet
+ * own `image` fallback, which sent DigitalOcean's droplet
  * create with NO image field at all (d1 regression: "invalid image for
  * Droplet creation").
  * @param {typeof import('./lib/providers/base.js').BaseProvider} Provider
@@ -1181,6 +1183,7 @@ async function prepareReplacementServer(ctx, server, newServerId, s, { backupS3 
   await perfAsync('scale.cloudInitReady', () =>
     setupServer(newIp, sshKeyPath, Provider.CLOUD_INIT_READY_TIMEOUT_MS),
   );
+  await assertServerFloors(newIp, sshKeyPath, { perfName: 'scale.serverFloors' });
   // First-boot timing (`[perf] scale.server.boot.*`, VIBECARBON_PERF only):
   // queued now, read once the command is over (lib/deploy/boot-timing.js).
   queueBootTiming([{ ip: newIp, prefix: 'scale.server' }], sshKeyPath);
@@ -2214,6 +2217,9 @@ export async function run(args) {
     p.log.error(`Environment "${environment}" not found in .vibecarbon.json`);
     process.exit(1);
   }
+  // This environment's recorded versions, never the channel: only a deploy
+  // takes new ones (src/lib/version-channel.js).
+  useRecordedImageSet(envConfig, { note: (line) => p.log.info(line) });
 
   // `-type` is raw operator input — it bypasses every option list, so the
   // catalog filtering that keeps ARM out of the prompts does nothing for it.

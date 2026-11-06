@@ -14,19 +14,22 @@
  * plus one write → read → delete round-trip so the WRITE path every consumer
  * (registry uploads, wal-g, Pulumi state) depends on is proven too.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DigitalOceanSpacesProvider } from '../../../src/lib/providers/digitalocean-spaces.js';
 import { HetznerS3Provider } from '../../../src/lib/providers/hetzner-s3.js';
 
 function makeProvider({
   headResults,
   failWrites = 0,
+  provider = new HetznerS3Provider('ak', 'sk', 'fsn1'),
 }: {
   /** Per-round bucketExists outcomes (true/false); last value repeats. */
   headResults: boolean[];
   /** How many leading write-probe PutObjects fail before succeeding. */
   failWrites?: number;
+  provider?: unknown;
 }) {
-  const p = new HetznerS3Provider('ak', 'sk', 'fsn1') as unknown as {
+  const p = provider as {
     bucketExists: (b: string) => Promise<boolean>;
     _send: (cmd: unknown, opts?: unknown) => Promise<unknown>;
     waitForBucketVisible: (b: string, opts?: Record<string, unknown>) => Promise<boolean>;
@@ -97,5 +100,60 @@ describe('waitForBucketVisible sustained-visibility condition', () => {
     await expect(p.waitForBucketVisible('b', { intervalMs: 0, budgetMs: 50 })).resolves.toBe(false);
 
     warn.mockRestore();
+  });
+});
+
+/**
+ * Clean rounds run back to back on every provider, Hetzner included: 4 s a
+ * bucket. On 2026-11-05 the other four answered 780 of 780 HEAD and LIST samples
+ * from the first one after CreateBucket, and Hetzner answered 6,512 of 6,512 once
+ * a bucket was left quiet first. A round that fails still pauses, so a provider
+ * that ever does lag cannot spin.
+ */
+describe('waitForBucketVisible pacing', () => {
+  const noWindow = () => new DigitalOceanSpacesProvider('ak', 'sk', 'nyc3');
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Runs the wait under fake timers; reports how much clock it needed. */
+  async function clockNeeded(p: { waitForBucketVisible: (b: string) => Promise<boolean> }) {
+    vi.useFakeTimers();
+    let done: boolean | undefined;
+    const run = p.waitForBucketVisible('b').then((r) => {
+      done = r;
+    });
+    let spent = 0;
+    while (done === undefined && spent < 20_000) {
+      await vi.advanceTimersByTimeAsync(spent === 0 ? 0 : 500);
+      if (done === undefined) spent += 500;
+    }
+    await run;
+    return { result: done, spent };
+  }
+
+  it('runs clean rounds back to back', async () => {
+    const { p, sends } = makeProvider({ headResults: [true], provider: noWindow() });
+    const { result, spent } = await clockNeeded(p);
+    expect(result).toBe(true);
+    expect(spent).toBe(0);
+    // Every check stays: three LIST rounds, then the write round-trip.
+    expect(sends.filter((n) => n === 'ListObjectsV2Command')).toHaveLength(3);
+    expect(sends).toContain('PutObjectCommand');
+  });
+
+  it('still pauses after a failed round, so a lagging provider cannot spin', async () => {
+    const { p } = makeProvider({ headResults: [false, true], provider: noWindow() });
+    const { result, spent } = await clockNeeded(p);
+    expect(result).toBe(true);
+    expect(spent).toBe(2_000);
+  });
+
+  it('does the same on Hetzner, whose new buckets are left quiet first', async () => {
+    const { p } = makeProvider({ headResults: [true] });
+    const { result, spent } = await clockNeeded(p);
+    expect(result).toBe(true);
+    expect(spent).toBe(0);
   });
 });

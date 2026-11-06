@@ -18,7 +18,7 @@
  *      (deliverAppImage).
  *   8. applyK3sManifests: the image's layer delta into the master's
  *      containerd and the cluster autoscaler rollout start alongside the
- *      cert-manager chain; then `kubectl apply -k` a rendered copy of
+ *      cert-manager chain; then applyKustomization a rendered copy of
  *      `k8s/base/` (db StatefulSet, traefik, app, the master's local
  *      registry); the image is pushed into that registry once it serves
  *      (deliverImage pushAfter), and every node pulls it from there.
@@ -54,10 +54,7 @@ import {
   renderBackupSettingsConfigMap,
   resolveBackupSettings,
 } from '../../../../carbon/scripts/render-backup-settings.mjs';
-import {
-  kubectlFloorProblem,
-  writeCertManagerKustomization,
-} from '../../../../carbon/scripts/render-cert-manager.mjs';
+import { writeCertManagerKustomization } from '../../../../carbon/scripts/render-cert-manager.mjs';
 import { renderTlsCertificateManifest } from '../../../../carbon/scripts/render-tls-certificate.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
@@ -67,6 +64,10 @@ import {
   carbonAutoscalerImageRef,
   clusterAutoscalerImageRef,
   csiSidecarSetImagePlan,
+  currentImageSet,
+  k3sVersion,
+  manifestImageValues,
+  renderManifestImages,
   resolveDbImage,
 } from '../../images.js';
 import {
@@ -75,17 +76,23 @@ import {
   upgradeKubeconfig,
 } from '../../kubeconfig.js';
 import { readOperatorVar } from '../../operator-env.js';
+import { assertOperatorIpUnchanged } from '../../operator-ip-guard.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { hasSentinelLine } from '../../remote-sentinel.js';
-import { pollUntil, runWithRetry } from '../../retry.js';
+import { runWithRetry } from '../../retry.js';
+import {
+  kubectlClientVersion,
+  kubectlFloorProblem,
+  unreadableMessage,
+} from '../../runtime-floors.js';
 import {
   declaredAddonNames,
   enabledK8sAddonNames,
   k8sStandbyZeroedWorkloads,
 } from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
-import { scpWithRetry, sshKeyPathFor, sshRun } from '../../ssh.js';
+import { scpWithRetry, sshKeyPathFor, sshKubectl, sshRun } from '../../ssh.js';
 import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import {
   BACKUP_NAME_RE,
@@ -102,7 +109,7 @@ import {
 } from '../../walg/restore-layout.js';
 import { assertRestoredPrimaryWritable } from '../../walg/restore-marker.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
-import { queueBootTiming } from '../boot-timing.js';
+import { BOOT_MARK_LOG, queueBootTiming, readBootStage } from '../boot-timing.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import {
   DB_CONTAINER,
@@ -110,10 +117,13 @@ import {
   DB_POD_SELECTOR,
   DB_PVC,
   DB_STATEFULSET,
+  POD_EXEC_PROBE_MS,
+  POD_EXEC_QUERY_MS,
   standbyDbRebuildHint,
 } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { deliverImage } from '../layer-delta.js';
+import { waitForRemoteMarker } from '../remote-marker.js';
 import {
   READ_WRITE_PGOPTIONS,
   REPL_PORT,
@@ -132,6 +142,7 @@ import {
 import {
   dbRoleConfigMapManifest,
   k8sWalgRoleIntentApplyArgv,
+  readDbRoleRecord,
   setK8sWalgRole,
   WALG_ROLE_DIR,
 } from '../walg-role.js';
@@ -153,27 +164,22 @@ import {
   awaitCertManagerAdmission,
   awaitCertManagerLeader,
   awaitControlPlaneServing,
+  awaitDbPodReady,
   awaitPostgresAccepting,
   awaitPostgresPromoted,
+  kubectlSkewNotice,
   watchAppMigrationFailure,
 } from './readiness.js';
 import { tlsApplyTimingLines, tlsRestoreTimingLine } from './tls-reissue-watch.js';
-import {
-  CERT_MANAGER_MIN_BACKOFF,
-  k8sTlsRestoreLine,
-  quietKubectl,
-  restoreK8sTlsSecret,
-} from './tls-restore.js';
+import { k8sTlsRestoreLine, quietKubectl, restoreK8sTlsSecret } from './tls-restore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-export const K3S_VERSION = 'v1.31.5+k3s1';
-
 // The vibecarbon CLI's OWN bundled k8s manifest tree (the `carbon/k8s/`
 // shipped inside the installed package), as opposed to `projectDir/k8s` —
 // the per-project copy `create` lays down. Both feed the `k3s-apply` step:
-// the project copy via `kubectl apply -k`, this one via the conditional
+// the project copy via applyKustomization, this one via the conditional
 // standalone manifests below (s3-egress-vpc, repl-gateway). Exported so the
 // step-gate regression test can pin the path from outside.
 export const BUNDLED_K8S_DIR = join(__dirname, '../../../../carbon/k8s');
@@ -357,7 +363,7 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * digests:
  *
  *   - `manifestDigest` — `projectDir/k8s`, the per-project copy applied with
- *     `kubectl apply -k` (added 2026-07-11 for the prod content-blind-gate bug).
+ *     applyKustomization (added 2026-07-11 for the prod content-blind-gate bug).
  *   - `bundledManifestDigest` — `carbon/k8s` inside the installed CLI, applied
  *     directly by this module (s3-egress-vpc, repl-gateway) and the source the
  *     project copy is generated from. Without it, a CLI upgrade whose ONLY
@@ -404,8 +410,13 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * `restore` is the resolved `deploy -restore` point: its backup and target
  * are an input, so a rerun that restores another base re-applies.
  *
+ * `imageSetDigest` is the version set this deploy resolved. Its refs reach the
+ * cluster through the render, and no manifest digest sees them: without it a
+ * patched image on the channel would be skipped on a warm deploy. An unchanged
+ * set hashes the same, so it costs nothing.
+ *
  * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string, backupConfig?: {schedule?: string, retentionDays?: number} }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', replicationHostPort: boolean, appStorageKeyDigest: string, imageSetDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -432,6 +443,7 @@ export function buildK3sApplyInputs({
     // cluster's is not (renderK8sBase): a different db, so a different gate.
     replicationHostPort: rendersReplicationHostPort(role),
     appStorageKeyDigest: appStorageAccessKey ? fingerprintSecret(appStorageAccessKey) : '',
+    imageSetDigest: createHash('sha256').update(JSON.stringify(currentImageSet())).digest('hex'),
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
     envLocalDigest: digestEnvLocalSecrets(projectDir),
@@ -555,6 +567,9 @@ export function kubectlErrorHaystack(err) {
 // ladder absorbed per call site (0fbb296f RCA). A lifecycle FATAL after a
 // proven-accepting gate is a real regression and must fail the deploy.
 
+/** A kubectl command run on the master: longer than any apply, short of a hang. */
+const KUBECTL_ON_MASTER_TIMEOUT_MS = 300_000;
+
 /**
  * Run a short-lived kubectl command with retry-on-transient-error.
  *
@@ -583,13 +598,27 @@ export function kubectlErrorHaystack(err) {
  * (bytes land at completion instead of live) — the deploy log still gets
  * everything. Only `kubectl logs --follow` stays out (unbounded stream).
  *
+ * `on` runs the command on a k3s server over ssh instead of on this machine
+ * (see applyKustomization). Retries, classification and failure text are the
+ * same either way: ssh hands back kubectl's exit code and stderr.
+ *
  * @param {string[]} args kubectl argv
- * @param {{env: NodeJS.ProcessEnv, input?: string, captureStdout?: boolean, description?: string}} options
+ * @param {{env?: NodeJS.ProcessEnv, input?: string, captureStdout?: boolean, description?: string, on?: {ip: string, sshKeyPath: string}}} options
  * @returns {Promise<string>} stdout (always returned; empty when nothing was emitted)
  */
 export async function runKubectlWithRetry(
   args,
-  { env, input, captureStdout = false, description, transientExtra, delaysMs, signal } = {},
+  {
+    env,
+    input,
+    captureStdout = false,
+    description,
+    transientExtra,
+    delaysMs,
+    signal,
+    on,
+    timeout,
+  } = {},
 ) {
   const RETRY_DELAYS_MS = delaysMs ?? [2000, 4000];
   const ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -598,12 +627,19 @@ export async function runKubectlWithRetry(
     return await runWithRetry(
       async () => {
         try {
-          const out = await runCommandAsync(['kubectl', ...args], {
-            env,
-            input,
-            silent: true,
-            ...(signal && { signal }),
-          });
+          const out = await (on
+            ? sshKubectl(on.ip, on.sshKeyPath, args, {
+                input,
+                timeout: timeout ?? KUBECTL_ON_MASTER_TIMEOUT_MS,
+                ...(signal && { signal }),
+              })
+            : runCommandAsync(['kubectl', ...args], {
+                env,
+                input,
+                silent: true,
+                ...(timeout && { timeout }),
+                ...(signal && { signal }),
+              }));
           // Stream captured stdout through to the operator's terminal so the
           // success path looks identical to the legacy `stdio: 'inherit'` shape.
           // captureStdout suppresses stdout streaming because the caller wants
@@ -613,6 +649,9 @@ export async function runKubectlWithRetry(
         } catch (err) {
           if (!captureStdout && err.stdout) process.stdout.write(err.stdout);
           if (err.stderr) process.stderr.write(err.stderr);
+          if (KUBECTL_TRANSIENT_PATTERN.test(kubectlErrorHaystack(err))) {
+            await assertOperatorIpUnchanged();
+          }
           throw err;
         }
       },
@@ -640,6 +679,40 @@ export async function runKubectlWithRetry(
       { status: err.status, stderr: err.stderr },
     );
   }
+}
+
+/**
+ * Apply a kustomization from the master, not from this machine.
+ *
+ * `kubectl apply` costs round trips per object on top of discovery, so a
+ * chatty apply is mostly distance. On real k3s from a laptop 130 ms away
+ * (Hetzner nbg1, 2026-11-05, median of 3), the laptop against the master:
+ * base 27.1 s and 4.5 s, cert-manager 24.2 s and 12.9 s, Traefik CRDs 6.6 s and
+ * 4.7 s. Run on the master, these steps take the same time wherever the
+ * operator sits, so a provider's numbers describe its servers.
+ *
+ * The render stays here: the directory is usually a temp copy on this machine,
+ * and it is why this needs only `kubectl kustomize` locally. Applying one or
+ * two objects stays local (runKubectlWithRetry): an ssh handshake costs about
+ * what they save.
+ *
+ * @param {string} dir  kustomization directory on this machine
+ * @param {{env: NodeJS.ProcessEnv, master: {ip: string, sshKeyPath: string}, description: string, render?: (manifests: string) => string, signal?: AbortSignal}} options
+ * @returns {Promise<string>} kubectl's stdout
+ */
+export async function applyKustomization(dir, { env, master, description, render, signal }) {
+  const manifests = await runKubectlWithRetry(['kustomize', dir], {
+    env,
+    captureStdout: true,
+    description: `${description} (render)`,
+    ...(signal && { signal }),
+  });
+  return runKubectlWithRetry(['apply', '-f', '-'], {
+    on: master,
+    input: render ? render(manifests) : manifests,
+    description,
+    ...(signal && { signal }),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,59 +1265,69 @@ function sshHostKeyOpts(khPath) {
  * Block until the cloud-init `/tmp/k3s-ready` marker appears via SSH.
  * Cloud-init writes this after `kubectl get nodes` shows the master Ready.
  *
- * Exponential backoff (2s → 4s → 8s, capped at 15s) so early-ready nodes
- * (~80s on the spike) aren't held back. Long tails still back off so we
- * don't hammer SSH during slow boots.
+ * Holds one SSH session that returns the moment the marker exists (see
+ * remote-marker.js), reconnecting if it drops, so a ready node is noticed
+ * within a fraction of a second.
  *
  * @param {string} masterIp
  * @param {string} sshKeyPath
  * @param {string} khPath - per-env known_hosts file path
  * @param {number} [maxWaitSec]
+ * @param {{ onStage?: (label: string) => void }} [opts] - called with a plain
+ *   description of what the server is doing, when it changes
  * @returns {Promise<void>}
  */
-export async function waitForK3sReady(masterIp, sshKeyPath, khPath, maxWaitSec = 600) {
-  try {
-    await pollUntil(
-      async () => {
-        await runCommandAsync(
-          [
-            'ssh',
-            '-i',
-            sshKeyPath,
-            ...sshHostKeyOpts(khPath),
-            '-o',
-            'ConnectTimeout=5',
-            '-o',
-            'BatchMode=yes',
-            `root@${masterIp}`,
-            'test -f /tmp/k3s-ready',
-          ],
-          { silent: true },
-        );
-        return true;
-      },
-      {
-        budgetMs: maxWaitSec * 1000,
-        // Tight tail (default is 15s): a cold node flips /tmp/k3s-ready in one
-        // step, so a 15s backoff would add up to ~15s of dead time past the
-        // actual-ready moment. 5s caps that at ~5s; the extra SSH probes are
-        // ~1s ConnectTimeout=5 round-trips, cheap against the saved tail.
-        initialDelayMs: 1000,
-        maxDelayMs: 5000,
-        description: 'k3s ready flag',
-      },
-    );
-  } catch (err) {
+export async function waitForK3sReady(
+  masterIp,
+  sshKeyPath,
+  khPath,
+  maxWaitSec = 600,
+  { onStage } = {},
+) {
+  // One held SSH session returns the moment /tmp/k3s-ready exists. The run
+  // wrapper never throws (the helper's contract) and keeps the last SSH error
+  // for the timeout message below.
+  let lastErr;
+  const run = async (script, { timeoutMs, onLine }) => {
+    try {
+      return await runCommandAsync(
+        [
+          'ssh',
+          '-i',
+          sshKeyPath,
+          ...sshHostKeyOpts(khPath),
+          '-o',
+          'ConnectTimeout=5',
+          '-o',
+          'BatchMode=yes',
+          `root@${masterIp}`,
+          script,
+        ],
+        { silent: true, timeout: timeoutMs, onStdoutLine: onLine },
+      );
+    } catch (err) {
+      lastErr = err;
+      return null;
+    }
+  };
+  const { ready } = await waitForRemoteMarker({
+    run,
+    markerPath: '/tmp/k3s-ready',
+    logPath: BOOT_MARK_LOG,
+    deadlineMs: Date.now() + maxWaitSec * 1000,
+    ...(onStage && { onLine: readBootStage(onStage) }),
+  });
+  if (!ready) {
+    const err = lastErr;
     // Capture cloud-init + syslog before throwing so the failure log says
     // WHY install timed out (apt slow? k3s download 5xx? script crashed?)
     // instead of just "300s passed and the marker isn't there." Best-effort —
     // if the box is unreachable, captureK3sInstallDiag returns an empty string
     // and we surface only the SSH probe error.
-    const lastErr = err.cause ?? err;
     const diag = await captureK3sInstallDiag(masterIp, sshKeyPath, khPath);
     throw new Error(
       `k3s did not become ready on ${masterIp} within ${maxWaitSec}s. ` +
-        `Last SSH error: ${lastErr instanceof Error ? lastErr.message : 'unknown'}` +
+        `Last SSH error: ${err instanceof Error ? err.message : 'unknown'}` +
         (diag ? `\n\n--- install diagnostics from ${masterIp} ---\n${diag}` : ''),
     );
   }
@@ -1822,15 +1905,20 @@ export async function applyVibecarbonSecrets({
       description: `applyVibecarbonSecrets: kubectl apply Secret/${name}`,
     });
   }
-  // The intent must exist before `apply -k base` creates the db pod, which
-  // reads it at container start. deployK3s applies it again on every deploy
+  // The intent must exist before the base apply creates the db pod, which
+  // reads it at container start. deployK3s sets it on every deploy
   // (writeDeployWalgRole, through setK8sWalgRole), including one whose apply
-  // is skipped; this first apply is what a brand-new pod starts with.
-  await runKubectlWithRetry(k8sWalgRoleIntentApplyArgv(), {
-    env,
-    input: dbRoleConfigMapManifest(walgRole),
-    description: 'applyVibecarbonSecrets: kubectl apply ConfigMap/vibecarbon-db-role',
-  });
+  // is skipped; this first apply is what a brand-new pod starts with. An
+  // unchanged intent stays as it is: applying it clears the live record, which
+  // would cost this warm deploy the exec the record exists to avoid.
+  const { intent } = await readDbRoleRecord({ kubectl: localWalgRoleKubectl(kubeconfig) });
+  if (intent !== walgRole) {
+    await runKubectlWithRetry(k8sWalgRoleIntentApplyArgv(), {
+      env,
+      input: dbRoleConfigMapManifest(walgRole),
+      description: 'applyVibecarbonSecrets: kubectl apply ConfigMap/vibecarbon-db-role',
+    });
+  }
 }
 
 /**
@@ -1846,7 +1934,7 @@ export async function applyVibecarbonSecrets({
  * read app credentials. Values are piped via stdin (never argv), same as
  * applyVibecarbonSecrets.
  *
- * Must run BEFORE `kubectl apply -k k8s/base/observability` so the Grafana
+ * Must run BEFORE the observability apply so the Grafana
  * Deployment finds its secret/config on first schedule.
  *
  * @param {{kubeconfig: string, envLocal: Record<string,string>, domain: string}} args
@@ -2464,7 +2552,7 @@ export async function auditRls({ kubeconfig }) {
       '-tAc',
       RLS_AUDIT_SQL,
     ],
-    { env, silent: true },
+    { env, silent: true, timeout: POD_EXEC_QUERY_MS },
   );
   // runCommandAsync(silent) resolves the stdout string directly.
   const unprotected = String(auditOut ?? '').trim();
@@ -2476,9 +2564,11 @@ export async function auditRls({ kubeconfig }) {
 /**
  * The deploy's live wal-g role write: the intent (vibecarbon-db-role) and the
  * role file in the running db container, through setK8sWalgRole. deployK3s
- * runs it on every deploy, outside the k3s-apply skip gate and once postgres
- * accepts, so a redeploy that did not restart the db
- * (or skipped the apply altogether) still converges the file. Throws when the
+ * runs it on every deploy, outside the k3s-apply skip gate and once the db is
+ * up, so a redeploy that did not restart the db
+ * (or skipped the apply altogether) still converges the file. A deploy whose
+ * role vibecarbon-db-role already proves does not exec at all (recordLive; the
+ * header of walg-role.js says why that is sound). Throws when the
  * file does not read back the role, which fails the deploy: a db whose role
  * file is wrong would hold or drop WAL behind a green deploy. The errors are
  * the deploy's own: a missing role mount after the rollout is a template that
@@ -2492,7 +2582,13 @@ export async function auditRls({ kubeconfig }) {
  * @returns {Promise<{intent: true, live: boolean}>}
  */
 export async function writeDeployWalgRole({ kubectl, role, envName }) {
-  const result = await setK8sWalgRole({ ip: undefined, kubectl, role, envName });
+  const result = await setK8sWalgRole({
+    ip: undefined,
+    kubectl,
+    role,
+    envName,
+    recordLive: true,
+  });
   if (result.live) return result;
   // setK8sWalgRole's own no-role-mount hint says to run a deploy; this IS the
   // deploy, after a rollout of the template that carries the mount, so the
@@ -2585,7 +2681,7 @@ export async function verifyWalgBackups({ kubeconfig, dbPod = DB_POD }) {
  * addon that needs one would need this extended" — which had already happened
  * without anyone noticing: `add redis` / `add n8n` copy their PVCs into
  * `k8s/base/<addon>/`, a SUBDIRECTORY of the tree applied by
- * `kubectl apply -k k8s/base`, and that apply never went through this
+ * the k8s/base apply, and that apply never went through this
  * renderer at all. The literal `{{K8S_STORAGE_CLASS}}` therefore reached the
  * API server, which accepts it (storageClassName is a free-form reference,
  * never DNS-1123-validated) and leaves the PVC Pending forever.
@@ -2594,7 +2690,7 @@ export async function verifyWalgBackups({ kubeconfig, dbPod = DB_POD }) {
  *   `${projectDir}/k8s/base/observability`)
  * @param {string} storageClass - `ProviderClass.K8S_STORAGE_CLASS`
  * @returns {string} Path to the rendered temp copy — pass this to
- *   `kubectl apply -k` instead of `dir`.
+ *   applyKustomization instead of `dir`.
  */
 export function renderK8sStorageClassPlaceholder(dir, storageClass) {
   // Fail loudly up front: k8s gives NO natural error for a bad value here.
@@ -2649,8 +2745,20 @@ function renderK8sPlaceholders(dir, values, label) {
   return tmpDir;
 }
 
+/**
+ * Copy `k8s/infra/traefik-crds` with its Traefik tag filled in.
+ *
+ * @param {string} dir
+ * @returns {string} the rendered temp copy to pass to applyKustomization
+ */
+export function renderTraefikCrds(dir) {
+  return renderK8sPlaceholders(dir, manifestImageValues(), 'crds');
+}
+
 /** The in-cluster registry manifest, relative to `k8s/base`. */
 const REGISTRY_MANIFEST = 'registry/local-registry.yaml';
+/** The Traefik Deployment, relative to `k8s/base`. */
+const TRAEFIK_MANIFEST = 'traefik/deployment.yaml';
 
 /** The vibecarbon-tls Certificate, relative to `k8s/base`. */
 const CERTIFICATE_MANIFEST = 'traefik/certificate.yaml';
@@ -2727,7 +2835,7 @@ const DB_HOSTPORT_PATCH_FILE = 'replication-hostport.patch.json';
 
 /**
  * Add buildDbHostPortPatch to a RENDERED k8s/base copy as a kustomize patch
- * of `db/`, so `kubectl apply -k` creates the StatefulSet with it. Refuses a
+ * of `db/`, so applyKustomization creates the StatefulSet with it. Refuses a
  * db/kustomization.yaml that already declares patches rather than guess how
  * to merge into an operator's own list.
  *
@@ -2798,7 +2906,7 @@ function addDbReplicationHostPort(rendered) {
  * @param {{schedule?: string, retentionDays?: number}} [backupConfig]
  * @param {{ dnsNames: string[], issuerName: string, effectiveIssuer: string }} tls
  * @param {{ replicationHostPort?: boolean }} [opts]
- * @returns {string} the rendered temp copy to pass to `kubectl apply -k`
+ * @returns {string} the rendered temp copy to pass to applyKustomization
  */
 export function renderK8sBase(
   dir,
@@ -2831,7 +2939,9 @@ export function renderK8sBase(
       `renderK8sBase: MASTER_PRIVATE_IP is not an IPv4 address (got ${JSON.stringify(values.MASTER_PRIVATE_IP ?? null)}), so the registry hostPort has no address to bind`,
     );
   }
-  const rendered = renderK8sPlaceholders(dir, values, 'base');
+  // The image tokens are the deploy's version set (images.js), never the
+  // caller's: there is one set per deploy.
+  const rendered = renderK8sPlaceholders(dir, { ...values, ...manifestImageValues() }, 'base');
   // The backup CronJob's schedule is per environment (deploy-owned, Flux does
   // not build it): filled in by the renderer deploy.yml also runs.
   const cronjob = join(rendered, 'backup', 'cronjob.yaml');
@@ -2857,10 +2967,15 @@ export function renderK8sBase(
   writeFileSync(join(rendered, CERTIFICATE_MANIFEST), renderTlsCertificateManifest(tls));
   const checks = [
     ...(existsSync(cronjob)
-      ? [['backup/cronjob.yaml', 'a backup CronJob with an unresolved schedule']]
+      ? [['backup/cronjob.yaml', 'a backup CronJob with an unresolved schedule or image']]
       : []),
     ['db/statefulset.yaml', 'a database with an unresolved image, prefix or StorageClass'],
-    ...(hasRegistry ? [[REGISTRY_MANIFEST, 'a registry with an unresolved bind address']] : []),
+    ...(hasRegistry
+      ? [[REGISTRY_MANIFEST, 'a registry with an unresolved image or bind address']]
+      : []),
+    ...(existsSync(join(rendered, TRAEFIK_MANIFEST))
+      ? [[TRAEFIK_MANIFEST, 'a Traefik with an unresolved image']]
+      : []),
     [CERTIFICATE_MANIFEST, 'a placeholder TLS Certificate', /app\.example\.com/g],
   ];
   for (const [file, what, pattern = /\{\{[A-Z0-9_]+\}\}/g] of checks) {
@@ -3061,7 +3176,7 @@ async function readRestoreSwapState(env, marker) {
   try {
     out = await runCommandAsync(
       ['kubectl', '-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', probe],
-      { env, silent: true },
+      { env, silent: true, timeout: POD_EXEC_PROBE_MS },
     );
   } catch {
     return { state: 'unknown', previous: false };
@@ -3201,7 +3316,7 @@ function dbPsql(env) {
           '-tAc',
           sql,
         ],
-        { env, silent: true },
+        { env, silent: true, timeout: POD_EXEC_QUERY_MS },
       )) ?? '',
     );
 }
@@ -3242,12 +3357,14 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
       ].join('\n'),
     );
   }
-  const execInDb = (script, description) =>
+  // The bounds `vibecarbon restore` gives the same two scripts: a rename, and
+  // an `rm -rf` of a whole cluster.
+  const execInDb = (script, description, timeout) =>
     runKubectlWithRetry(
       ['-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', script],
-      { env, description },
+      { env, description, timeout },
     );
-  await execInDb(RETIRE_PREVIOUS_SH, 'finishDeployRestore: retire the previous cluster');
+  await execInDb(RETIRE_PREVIOUS_SH, 'finishDeployRestore: retire the previous cluster', 60_000);
   try {
     await runKubectlWithRetry(
       [
@@ -3278,7 +3395,7 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
       ].join('\n'),
     );
   }
-  await execInDb(REMOVE_DISCARD_SH, 'finishDeployRestore: remove the discarded cluster');
+  await execInDb(REMOVE_DISCARD_SH, 'finishDeployRestore: remove the discarded cluster', 300_000);
   progressLog(`[db] restored ${restore.backup}: promoted, writable, restore marker cleared`);
 }
 
@@ -3381,7 +3498,10 @@ export async function applyK3sManifests({
   // rollout), so deployK3s can stop and settle it when the deploy fails.
   inFlight = {},
 }) {
+  if (!masterIp) throw new Error('applyK3sManifests: masterIp required');
+  if (!sshKeyPath) throw new Error('applyK3sManifests: sshKeyPath required');
   const env = { ...process.env, KUBECONFIG: kubeconfig };
+  const master = { ip: masterIp, sshKeyPath };
   // The schedule and retention this environment runs backups with, validated
   // before anything is created; rendered into the CronJob (renderK8sBase) and
   // the vibecarbon-backup-settings ConfigMap applied below.
@@ -3423,7 +3543,7 @@ export async function applyK3sManifests({
   //     the identical images without trouble: registry.k8s.io routes by client
   //     IP, so the 403 is per-node roulette (full write-up: src/lib/images.js).
   //     (Those two tags are the INCIDENT's — csi-driver v2.9.0's. The Hetzner
-  //     driver has since been bumped to v2.18.1; the plan below always carries
+  //     driver has moved on since; the plan below always carries
   //     whatever tags CSI_SIDECAR_MIRRORS was last re-derived from.)
   //
   //     WHY HERE AND NOT IN THE MANIFEST — we do not own these manifests.
@@ -3480,16 +3600,10 @@ export async function applyK3sManifests({
   const { deliver } = planImageDelivery({ role });
   let deliveryPromise = null;
   if (deliver) {
-    if (!masterIp) {
-      throw new Error('applyK3sManifests: masterIp required for the image delivery');
-    }
-    if (!sshKeyPath) {
-      throw new Error('applyK3sManifests: sshKeyPath required for the image delivery');
-    }
     // `deploy.<prefix>.image.deliver` now spans the transfer AND the wait for
     // the registry before the push, so it is not comparable with the pre-
-    // pushAfter figure (12 s on DO, 2026-10-31); `deploy.image.delta` alone
-    // times the transfer.
+    // pushAfter figure (12 s on DO, 2026-10-31). `deploy.image.delta` covers
+    // everything up to the target's import, with a mark for each stage.
     deliveryPromise = perfAsync(`deploy.${perfPrefix}.image.deliver`, () =>
       deliverImage({
         tag: imageTag,
@@ -3533,8 +3647,8 @@ export async function applyK3sManifests({
   const rollOutClusterAutoscaler = async () => {
     // One span for the Secret, the apply, the image pin and (pilot standby)
     // the zero; the rollout wait has its own. The whole chain runs alongside
-    // the cert-manager chain, so this span is off the critical path unless
-    // it outlasts that chain.
+    // the rest of the apply, so it is off the critical path unless it outlasts
+    // the app rollout.
     await perfAsync(`deploy.${perfPrefix}.clusterAutoscaler.apply`, async () => {
       // 4b. Create the kube-system/carbon-autoscaler-config Secret the
       //     carbon-autoscaler sidecar reads on startup (and on every
@@ -3554,7 +3668,7 @@ export async function applyK3sManifests({
       //     pattern at step 2b).
       const clusterName = `${projectName}-${environment}`;
       const carbonAutoscalerConfigJson = await renderCarbonAutoscalerConfig({
-        k3sVersion: K3S_VERSION,
+        k3sVersion: k3sVersion(),
         k3sToken,
         // M3 Task 2: output-driven master private IP (Hetzner's own default
         // stays '10.0.1.1' when this is undefined — see renderCarbonAutoscalerConfig).
@@ -3598,29 +3712,30 @@ export async function applyK3sManifests({
       //      child kustomization at carbon/k8s/base/cluster-autoscaler/
       //      sets `namespace: kube-system` explicitly, which only takes
       //      effect when applied standalone like this.
-      await runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/base/cluster-autoscaler')], {
+      await applyKustomization(join(projectDir, 'k8s/base/cluster-autoscaler'), {
         env,
+        master,
         signal: caStop.signal,
-        description: 'applyK3sManifests: kubectl apply -k cluster-autoscaler',
+        description: 'applyK3sManifests: apply cluster-autoscaler',
+        // The sidecar's image goes in here, not after: a client-side apply pushes
+        // every field the manifest names, so an image patched in afterwards is
+        // reset by the next deploy, and on `strategy: Recreate` that killed a
+        // healthy autoscaler to roll out a pod that could not start.
+        render: (manifests) =>
+          renderManifestImages(manifests).replaceAll(
+            '{{CARBON_AUTOSCALER_IMAGE}}',
+            carbonAutoscalerImageRef(),
+          ),
       });
-      // 5a''. Patch BOTH container images in one call.
-      //
-      //       `carbon-autoscaler`: deployment.yaml ships the
-      //       `{{CARBON_AUTOSCALER_IMAGE}}` placeholder (kustomize has no
-      //       built-in var-substitution for a container image string), so
-      //       resolve it here the same way the domain/SITE_URL placeholders
-      //       below are patched at deploy time.
-      //
-      //       `cluster-autoscaler`: the manifest already carries the mirrored
-      //       ghcr ref as a literal, so this is belt-and-braces — but load-bearing
-      //       belt-and-braces. `apply -k` above reads the PROJECT's checked-in
-      //       copy of this manifest, and a project generated before the mirror
-      //       landed still pins registry.k8s.io there, i.e. still walks into the
-      //       403 that cost a deploy on 2026-07-31 (src/lib/images.js). Re-pinning
-      //       here makes images.js authoritative at deploy time no matter how old
-      //       the project's k8s/ tree is.
-      //
-      //       Both refs come from src/lib/images.js, the single source of truth.
+      // 5a''. The manifest's token already carries this ref, so this is
+      //       belt-and-braces, but load-bearing belt-and-braces: the apply above
+      //       reads the PROJECT's checked-in copy of this manifest, and a project
+      //       generated before the mirror landed still pins registry.k8s.io
+      //       there, i.e. still walks into the 403 that cost a deploy on
+      //       2026-07-31 (src/lib/images.js). Re-pinning here keeps the version
+      //       set authoritative at deploy time no matter how old the project's
+      //       k8s/ tree is. On a current project it changes nothing, so nothing
+      //       rolls.
       await runKubectlWithRetry(
         [
           '-n',
@@ -3628,14 +3743,12 @@ export async function applyK3sManifests({
           'set',
           'image',
           'deployment/cluster-autoscaler',
-          `carbon-autoscaler=${carbonAutoscalerImageRef()}`,
           `cluster-autoscaler=${clusterAutoscalerImageRef()}`,
         ],
         {
           env,
           signal: caStop.signal,
-          description:
-            'applyK3sManifests: kubectl set image deployment/cluster-autoscaler (carbon-autoscaler sidecar)',
+          description: 'applyK3sManifests: kubectl set image deployment/cluster-autoscaler',
         },
       );
       if (pilotStandby) {
@@ -3665,7 +3778,7 @@ export async function applyK3sManifests({
         );
       }
     });
-    // 5e. Wait for the rollout the `apply -k cluster-autoscaler` + `set image`
+    // 5e. Wait for the rollout the the cluster-autoscaler apply + `set image`
     //     steps above triggered (on `strategy: Recreate`, either one changing
     //     the pod template rolls the pod). The status-wait is the clean
     //     failure mode: a misconfigured sidecar (e.g. an unreachable image tag)
@@ -3730,9 +3843,15 @@ export async function applyK3sManifests({
     }
   };
   const clusterAutoscalerReady = rollOutClusterAutoscaler();
-  // Awaited before step 6; this only keeps a rollout that fails while the
-  // cert-manager chain is still running from being an unhandledRejection.
+  // The app does not wait for this. The autoscaler serves pending pods whenever
+  // it comes up, and holding the app for it cost about 20 s after the image had
+  // landed (DO e2e 2026-11-05: 94 s rollout). The deploy still awaits it, last.
+  // Only a failure settles clusterAutoscalerFailed, so the app's path can stop
+  // on one at once without waiting for a healthy rollout.
+  const clusterAutoscalerFailed = clusterAutoscalerReady.then(() => new Promise(() => {}));
+  // These only keep a failed rollout from being an unhandledRejection.
   clusterAutoscalerReady.catch(() => {});
+  clusterAutoscalerFailed.catch(() => {});
   inFlight.stopClusterAutoscaler = async () => {
     caStop.abort();
     await clusterAutoscalerReady.catch(() => {});
@@ -3760,9 +3879,10 @@ export async function applyK3sManifests({
   try {
     writeCertManagerKustomization(certManagerDir);
     await perfAsync(`deploy.${perfPrefix}.certManager.install`, () =>
-      runKubectlWithRetry(['apply', '-k', certManagerDir], {
+      applyKustomization(certManagerDir, {
         env,
-        description: 'applyK3sManifests: kubectl apply -k cert-manager',
+        master,
+        description: 'applyK3sManifests: apply cert-manager',
       }),
     );
   } finally {
@@ -3857,17 +3977,27 @@ export async function applyK3sManifests({
   // admission pipeline round-trips, so a webhook failure here is a real
   // regression and must fail the deploy loudly, not be absorbed.
   await perfAsync(`deploy.${perfPrefix}.certManager.resources`, () =>
-    runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/infra/cert-manager-resources')], {
+    applyKustomization(join(projectDir, 'k8s/infra/cert-manager-resources'), {
       env,
-      description: 'applyK3sManifests: kubectl apply -k cert-manager-resources',
+      master,
+      description: 'applyK3sManifests: apply cert-manager-resources',
     }),
   );
-  await perfAsync(`deploy.${perfPrefix}.traefikCrds`, () =>
-    runKubectlWithRetry(['apply', '-k', join(projectDir, 'k8s/infra/traefik-crds')], {
-      env,
-      description: 'applyK3sManifests: kubectl apply -k traefik-crds',
-    }),
-  );
+  // The CRD URL carries the Traefik tag this deploy resolved, so it is filled
+  // in BEFORE `kubectl kustomize` fetches it, on a temp copy: a redeploy must
+  // not leave the operator's git tree dirty.
+  const traefikCrdsDir = renderTraefikCrds(join(projectDir, 'k8s/infra/traefik-crds'));
+  try {
+    await perfAsync(`deploy.${perfPrefix}.traefikCrds`, () =>
+      applyKustomization(traefikCrdsDir, {
+        env,
+        master,
+        description: 'applyK3sManifests: apply traefik-crds',
+      }),
+    );
+  } finally {
+    rmSync(traefikCrdsDir, { recursive: true, force: true });
+  }
   // 4. Create the app and infra Secrets BEFORE base/ — base/'s Deployment
   //    and StatefulSet reference them; without them kubelet fails container
   //    creation with `secret "vibecarbon-app-secrets" not found`.
@@ -3995,9 +4125,10 @@ export async function applyK3sManifests({
       }
     }
     await perfAsync(`deploy.${perfPrefix}.applyBase`, () =>
-      runKubectlWithRetry(['apply', '-k', baseDir], {
+      applyKustomization(baseDir, {
         env,
-        description: 'applyK3sManifests: kubectl apply -k k8s/base',
+        master,
+        description: 'applyK3sManifests: apply k8s/base',
       }),
     );
     if (!pilotStandby) {
@@ -4039,7 +4170,7 @@ export async function applyK3sManifests({
     );
     // Every declared add-on follows (primary-only ones write to the primary's
     // database; with-app-tier ones follow the zeroed app tier), in the same
-    // window after `apply -k` as the app. Failover scales the app-namespace
+    // window after the apply as the app. Failover scales the app-namespace
     // ones back up from ha.scaleUpList.
     await zeroWorkloadsOnStandby({ env, workloads: standbyAddonWorkloads });
 
@@ -4207,9 +4338,10 @@ export async function applyK3sManifests({
     );
     try {
       await perfAsync(`deploy.${perfPrefix}.applyObservability`, () =>
-        runKubectlWithRetry(['apply', '-k', renderedObservabilityDir], {
+        applyKustomization(renderedObservabilityDir, {
           env,
-          description: 'applyK3sManifests: kubectl apply -k k8s/base/observability',
+          master,
+          description: 'applyK3sManifests: apply k8s/base/observability',
         }),
       );
     } finally {
@@ -4297,7 +4429,9 @@ export async function applyK3sManifests({
   //    change, one roll. Both containers: the app and its migrate init
   //    container run one image.
   if (deliveryPromise) await deliveryPromise;
-  await clusterAutoscalerReady;
+  // An autoscaler that has already failed stops the deploy before the app is
+  // touched. One still coming up does not hold it.
+  await Promise.race([clusterAutoscalerFailed, Promise.resolve()]);
   const appTemplatePatch = {
     spec: {
       template: {
@@ -4431,7 +4565,7 @@ export async function applyK3sManifests({
     });
     const migrationWatch = watchAppMigrationFailure({ env, signal: rolloutAbort.signal });
     try {
-      await Promise.race([rollout, migrationWatch]);
+      await Promise.race([rollout, migrationWatch, clusterAutoscalerFailed]);
     } finally {
       rolloutAbort.abort();
       // The loser settles after the abort; its outcome no longer matters.
@@ -4524,6 +4658,7 @@ export async function applyK3sManifests({
   } catch (err) {
     progressLog(`[k3s] traefik post-apply restart warning: ${err.message?.split('\n')[0] || err}`);
   }
+  await clusterAutoscalerReady;
   return { tlsRestoredAt };
 }
 
@@ -4857,14 +4992,18 @@ async function deployK3sSteps(options, inFlight) {
       throw new Error(`Required tool '${tool}' not found on PATH`);
     }
   }
-  // The cert-manager install is a kustomization over the release manifest's
-  // URL (render-cert-manager.mjs), which needs kubectl's built-in kustomize v5.
+  // The floor and why it is what it is: kubectl-patch-subresource in
+  // lib/runtime-floors.js.
   const kubectlVersion = await runCommandAsync(['kubectl', 'version', '--client', '-o', 'json'], {
     silent: true,
   }).catch(() => '');
-  const kubectlTooOld = kubectlFloorProblem(String(kubectlVersion ?? ''));
+  const kubectlVersionText = String(kubectlVersion ?? '');
+  const kubectlTooOld = kubectlFloorProblem(kubectlVersionText);
   if (kubectlTooOld) throw new Error(kubectlTooOld);
   s.stop('Preflight OK');
+  if (!kubectlClientVersion(kubectlVersionText)) {
+    progressLog(unreadableMessage({ tool: 'kubectl', raw: kubectlVersionText }));
+  }
 
   // 1b. The app image build, started now so it runs while Pulumi provisions
   //     the cluster (startAppImageBuild); deliverAppImage takes it below. The
@@ -4911,7 +5050,7 @@ async function deployK3sSteps(options, inFlight) {
     workerType: options.workerServerType,
     minWorkers,
     maxWorkers,
-    k3sVersion: K3S_VERSION,
+    k3sVersion: k3sVersion(),
   };
   if (!state.shouldSkip('k3s-infra', infraInputs)) {
     state.startStep('k3s-infra', infraInputs);
@@ -4934,7 +5073,7 @@ async function deployK3sSteps(options, inFlight) {
         options.workerServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
       minWorkers,
       maxWorkers,
-      k3sVersion: K3S_VERSION,
+      k3sVersion: k3sVersion(),
       apiToken: options.apiToken,
       labels: { 'managed-by': 'vibecarbon', 'os-flavor': 'k3s' },
       allowedSshIps: allowedCidrs,
@@ -4969,13 +5108,11 @@ async function deployK3sSteps(options, inFlight) {
     s.start('Provisioning k3s cluster (Pulumi up)');
     const { outputs } = await perfAsync(`deploy.${perfPrefix}.iac.upStack`, () =>
       upStack(options.environment, program, {
+        perfStem: `deploy.${perfPrefix}.iac.upStack`,
         provider: providerIdFor(options),
         providerToken: options.apiToken,
         s3Config: options.s3Config,
         projectName: options.projectName,
-        // k8s-ha fans two of these out against one state bucket: past its
-        // settle window they provision in parallel (lib/iac/state-lock.js).
-        stateBucketYoung: options.stateBucketYoung,
         // Recover stale-EMPTY outputs reads in place (read-only poll inside
         // upStack) — the hard gate below stays the loud last resort. Same
         // family member as the compose provision sites (bc94b18): this gate
@@ -5031,7 +5168,7 @@ async function deployK3sSteps(options, inFlight) {
   if (!state.shouldSkip('k3s-ready', { masterIp })) {
     state.startStep('k3s-ready', { masterIp });
     s.start('Waiting for k3s on master (cloud-init + Ready)');
-    // 1200s (20 min) covers cold-init + apt-install + k3s-download + k3s-up.
+    // 1200s (20 min) covers cold-init + k3s-download + k3s-up.
     // Earlier 600s budget tripped on 2026-04-27 morning matrix when apt was
     // mid-install at the timeout (cloud-init-output.log diagnostics
     // confirmed). The diagnostic capture inside waitForK3sReady means a
@@ -5039,7 +5176,9 @@ async function deployK3sSteps(options, inFlight) {
     // costs us nothing — we still get the same actionable signal on real
     // failures, just don't false-positive on slow apt mornings.
     await perfAsync(`deploy.${perfPrefix}.waitForReady`, () =>
-      waitForK3sReady(masterIp, privateKeyPath, khPath, 1200),
+      waitForK3sReady(masterIp, privateKeyPath, khPath, 1200, {
+        onStage: (label) => s.message(`Waiting for k3s on master: ${label}`),
+      }),
     );
     bootTimingDue = true;
     state.completeStep('k3s-ready');
@@ -5178,9 +5317,14 @@ async function deployK3sSteps(options, inFlight) {
   //     peer; the apply gate's registry probe is ssh).
   {
     const kubeEnv = { ...process.env, KUBECONFIG: kubeconfig };
+    // Beside the gate, which makes the same kind of call to the same apiserver,
+    // so a warning costs the deploy no extra wait.
+    const skewNotice = kubectlSkewNotice({ env: kubeEnv });
     await perfAsync(`deploy.${perfPrefix}.controlPlane.gate`, () =>
       awaitControlPlaneServing({ env: kubeEnv }),
     );
+    const skew = await skewNotice;
+    if (skew) progressLog(skew);
     await perfAsync(`deploy.${perfPrefix}.restoreMarker`, () =>
       assertRestoreMarkerState({
         env: kubeEnv,
@@ -5317,14 +5461,13 @@ async function deployK3sSteps(options, inFlight) {
   //     only at container start, so a db this deploy did not restart (or a
   //     deploy whose apply was skipped) keeps whatever role file it had. The
   //     intent and the file are set to this deploy's role and read back
-  //     before the audit, so the audit reads the role this deploy set. A
-  //     skipped apply waited for no db, so postgres has to accept first: the
-  //     write never races a starting pod.
+  //     before the audit, so the audit reads the role this deploy set; a role
+  //     vibecarbon-db-role already proves needs no exec. A skipped apply
+  //     waited for no db and rolled none, so it waits on the pod's Ready from
+  //     the API: the write never races a starting pod, and a deploy with
+  //     nothing to do does not exec only to ask if the db is up.
   if (skipApply) {
-    await awaitPostgresAccepting({
-      env: { ...process.env, KUBECONFIG: kubeconfig },
-      dbPod: DB_POD,
-    });
+    await awaitDbPodReady({ env: { ...process.env, KUBECONFIG: kubeconfig } });
   }
   await perfAsync(`deploy.${perfPrefix}.walgRole`, () =>
     writeDeployWalgRole({
@@ -5346,11 +5489,13 @@ async function deployK3sSteps(options, inFlight) {
   //     until something unrelated forced an image change — green gate, dead
   //     backups. Compose runs its audit on every deploy; this keeps k8s honest
   //     with it. Cost is one S3 LIST.
-  //     Gated only on S3 being configured at all (mirrors the archiving-enable
+  //     Gated on S3 being configured at all (mirrors the archiving-enable
   //     block); the probe independently re-checks that from inside the
-  //     container and self-skips a node whose role file says standby.
+  //     container. Not on a standby: the probe only reads the role file and
+  //     skips, and the step above just proved that file reads standby, so the
+  //     exec could learn nothing.
   //     THROWS on failure — see src/lib/deploy/walg-audit.js.
-  if (options.s3Config?.accessKey) {
+  if (options.s3Config?.accessKey && options.role !== 'standby') {
     await perfAsync(`deploy.${perfPrefix}.verifyWalgBackups`, () =>
       verifyWalgBackups({ kubeconfig }),
     );

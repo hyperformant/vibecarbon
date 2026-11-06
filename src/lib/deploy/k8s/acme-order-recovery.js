@@ -26,7 +26,7 @@
  * the re-fetched order is "valid" (pkg/controller/acmeorders/sync.go) — a
  * "processing" order falls through to the generic 4xx branch and the Order
  * is marked Errored, which is TERMINAL. Upstream tracks this as
- * cert-manager#8960 / PR#8968; neither is merged as of v1.20.2, the version
+ * cert-manager#8960 / PR#8968; neither is merged as of v1.21.3, the version
  * we pin.
  *
  * WHY WAITING DOESN'T HELP: cert-manager does eventually retry, but the
@@ -44,6 +44,8 @@
  * (cert-manager#4441). Recovery therefore has to clear the failure stamp on
  * the Certificate status as well.
  */
+
+import { rowFor } from '../../runtime-floors.js';
 
 /**
  * `Order.status.state` values that cert-manager never transitions out of on
@@ -211,7 +213,7 @@ export async function recoverTerminalAcmeFailure({ finding, runKubectl }) {
       JSON.stringify({ status: { lastFailureTime: null, failedIssuanceAttempts: null } }),
     ]);
   } catch (err) {
-    // `kubectl patch --subresource` landed in 1.24. On an older client the
+    // `kubectl patch --subresource` is the kubectl floor. On an older client the
     // request delete above still happened, so issuance WILL retry — just not
     // until cert-manager's one-hour backoff elapses, long after any budget we
     // hold. That is a materially different outcome from "the patch failed",
@@ -219,7 +221,7 @@ export async function recoverTerminalAcmeFailure({ finding, runKubectl }) {
     if (/unknown flag:\s*--subresource/i.test(errorText(err))) {
       throw new Error(
         `clearing the issuance-failure backoff on ${finding.namespace}/${finding.certificate} ` +
-          `requires kubectl >= 1.24 (this client has no \`patch --subresource\`). The failed ` +
+          `requires kubectl >= ${rowFor('kubectl-patch-subresource').min} (this client has no \`patch --subresource\`). The failed ` +
           `CertificateRequest was deleted, so cert-manager will reissue; but only after its ` +
           `~1h backoff, not within this deploy. Upgrade kubectl to recover in-deploy.`,
         { cause: err },

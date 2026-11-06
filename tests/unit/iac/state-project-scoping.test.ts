@@ -63,8 +63,6 @@ beforeEach(() => {
 describe('Pulumi project scoping', () => {
   it('two projects sharing one pinned bucket get DISTINCT state keys', async () => {
     const { upStack } = await import('../../../src/lib/iac/index.js');
-    const { resetStateLocksForTest } = await import('../../../src/lib/iac/state-lock.js');
-    resetStateLocksForTest();
     selectStackMock.mockImplementation((args: { stackName: string }) =>
       Promise.resolve(healthyStack(args.stackName)),
     );
@@ -102,8 +100,6 @@ describe('Pulumi project scoping', () => {
 
   it('a missing projectName throws loudly on every entry point', async () => {
     const iac = await import('../../../src/lib/iac/index.js');
-    const { resetStateLocksForTest } = await import('../../../src/lib/iac/state-lock.js');
-    resetStateLocksForTest();
     for (const call of [
       () => iac.upStack('e1', () => ({}), { s3Config }),
       () => iac.getOrCreateStack('e1', () => ({}), { s3Config }),

@@ -39,6 +39,7 @@ import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { haClassMessage, haStandbyType } from '../../sizing.js';
+import { VERSION } from '../../version.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
 import { queueBootTiming } from '../boot-timing.js';
@@ -86,6 +87,7 @@ import {
   discardableReseedLine,
   readDiscardableStandby,
 } from '../standby-lineage.js';
+import { COMPOSE_HA_INFRA_STEP } from '../state.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
 import { writeComposeWalgRole } from '../walg-role.js';
 import { exchangeAndBringUpTunnel, wgIpOf } from '../wireguard.js';
@@ -118,6 +120,38 @@ const readNodeState = (ctx, ip) =>
   readReplicaState({
     exec: composePsqlRunner(ip, ctx.sshKeyPath, `/opt/${ctx.projectConfig.projectName}`),
   });
+
+/** Every output later steps read, on both arms. */
+const INFRA_OUTPUTS = ['serverIp', 'serverId', 'firewallId'];
+const recordedInfraIsComplete = (recorded) =>
+  ['primary', 'standby'].every((arm) => INFRA_OUTPUTS.every((key) => !!recorded[arm]?.[key]));
+
+/** Each arm's recorded server is the one .vibecarbon.json records for its stack. */
+function recordedInfraMatchesConfig(recorded, { envConfig, projectName, environment }) {
+  return ['primary', 'standby'].every((stack) => {
+    const entry = (envConfig?.servers ?? []).find(
+      (sv) => composeHaStackOf(sv, projectName, environment) === stack,
+    );
+    return (
+      !!entry &&
+      String(entry.id) === String(recorded[stack].serverId) &&
+      entry.ip === recorded[stack].serverIp
+    );
+  });
+}
+
+/** The provider still has both recorded servers. A failed probe is a miss. */
+async function recordedServersExist(recorded, provider) {
+  const probe = async (arm) => {
+    try {
+      return (await provider.getServerSummary(recorded[arm].serverId)) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const summaries = await Promise.all([probe('primary'), probe('standby')]);
+  return summaries.every(Boolean);
+}
 
 /**
  * Provision BOTH VPS via two parallel Pulumi stacks (one per cluster). Uploads
@@ -282,36 +316,75 @@ async function haProvisionServers(ctx) {
     labels: { 'managed-by': 'vibecarbon', role: 'standby' },
     allowedSshIps,
   });
-  const [primaryResult, standbyResult] = await perfAsync('deploy.ha.compose.iac.upStack.fan', () =>
-    Promise.all([
-      perfAsync('deploy.ha.compose.iac.upStack.primary', () =>
-        upStack(`${environment}-primary`, primaryProgram, {
-          provider: providerIdFor(envConfig),
-          providerToken: apiToken,
-          s3Config,
-          projectName,
-          // Past the state bucket's settle window the two ups provision in
-          // parallel; inside it they serialize (lib/iac/state-lock.js).
-          stateBucketYoung: ctx.stateBucketYoung,
-          // Recover stale-EMPTY outputs reads in place (read-only poll inside
-          // upStack); the hard gate below stays the loud last resort. This
-          // path is the MOST exposed member of the class: two parallel ups
-          // against a possibly-fresh state bucket.
-          requiredOutputs: ['serverIp'],
-        }),
-      ),
-      perfAsync('deploy.ha.compose.iac.upStack.standby', () =>
-        upStack(`${environment}-standby`, standbyProgram, {
-          provider: providerIdFor(envConfig),
-          providerToken: apiToken,
-          s3Config,
-          projectName,
-          stateBucketYoung: ctx.stateBucketYoung,
-          requiredOutputs: ['serverIp'],
-        }),
-      ),
-    ]),
-  );
+  // Everything the two programs receive. A warm deploy with the same inputs
+  // returns the outputs the last complete run recorded, without two no-op
+  // Pulumi runs (13-19 s of a 56-95 s warm deploy), as k8s's `k3s-infra` does.
+  // Any other input, including an operator CIDR, runs Pulumi. The CLI version
+  // is an input because a new release can change the programs. A reconverge
+  // always runs Pulumi: it rebuilds the retired server, which may be gone.
+  const infraInputs = {
+    projectName,
+    environment,
+    provider: providerIdFor(envConfig),
+    primaryRegion: primaryStackRegion,
+    standbyRegion,
+    primaryServerType: primaryStackServerType,
+    standbyServerType,
+    sshPublicKey: publicKey,
+    sharedSshKeyId,
+    allowedSshIps,
+    stateBucket: s3Config?.stateBucket ?? null,
+    cliVersion: VERSION,
+  };
+  const state = ctx.state;
+  const recorded =
+    !ctx.reconverge && state?.shouldSkip(COMPOSE_HA_INFRA_STEP, infraInputs)
+      ? state.getStepResult(COMPOSE_HA_INFRA_STEP)
+      : null;
+  // The ledger is not trusted over reality. It is reused only when every
+  // output later steps read is present, it names the servers .vibecarbon.json
+  // records, and the provider still has both. Anything else runs Pulumi as
+  // before, which also repairs a server deleted out of band.
+  const reusable =
+    !!recorded &&
+    recordedInfraIsComplete(recorded) &&
+    recordedInfraMatchesConfig(recorded, { envConfig, projectName, environment }) &&
+    (await recordedServersExist(recorded, provider));
+  if (reusable) {
+    ctx.onProgress('Infrastructure unchanged, skipping Pulumi');
+  } else {
+    state?.startStep(COMPOSE_HA_INFRA_STEP, infraInputs);
+  }
+  const [primaryResult, standbyResult] = reusable
+    ? [{ outputs: recorded.primary }, { outputs: recorded.standby }]
+    : await perfAsync('deploy.ha.compose.iac.upStack.fan', () =>
+        Promise.all([
+          perfAsync('deploy.ha.compose.iac.upStack.primary', () =>
+            upStack(`${environment}-primary`, primaryProgram, {
+              perfStem: 'deploy.ha.compose.iac.upStack.primary',
+              provider: providerIdFor(envConfig),
+              providerToken: apiToken,
+              s3Config,
+              projectName,
+              // Recover stale-EMPTY outputs reads in place (read-only poll inside
+              // upStack); the hard gate below stays the loud last resort. This
+              // path is the MOST exposed member of the class: two parallel ups
+              // against a possibly-fresh state bucket.
+              requiredOutputs: ['serverIp'],
+            }),
+          ),
+          perfAsync('deploy.ha.compose.iac.upStack.standby', () =>
+            upStack(`${environment}-standby`, standbyProgram, {
+              perfStem: 'deploy.ha.compose.iac.upStack.standby',
+              provider: providerIdFor(envConfig),
+              providerToken: apiToken,
+              s3Config,
+              projectName,
+              requiredOutputs: ['serverIp'],
+            }),
+          ),
+        ]),
+      );
   // Hard gate, twin of the single-compose one in effects/index.js: a stale S3
   // state read right after stack creation can return a "successful" up with
   // EMPTY outputs. This path is MORE exposed than the single-node one — two
@@ -330,6 +403,13 @@ async function haProvisionServers(ctx) {
           `stack '${environment}-${role}'.`,
       );
     }
+  }
+  // Both arms passed the gate: only now is the run recorded as complete.
+  if (!reusable) {
+    state?.completeStep(COMPOSE_HA_INFRA_STEP, {
+      primary: primaryResult.outputs,
+      standby: standbyResult.outputs,
+    });
   }
   // firewallId is persisted per server so `scale`'s blue-green replacement can
   // re-attach it — each HA node has its OWN firewall (one per stack), so this
@@ -700,6 +780,24 @@ async function haSetupServerFiles(ctx) {
     );
   }
   await perfAsync('deploy.ha.compose.setupFan', () => Promise.all(setupTasks));
+
+  // The WireGuard ports are open on both nodes, so the tunnel can come up now,
+  // in the background, while the pulls and the stack start run. It is apt work
+  // on both nodes (48 s measured), serial at the end of the deploy otherwise.
+  // A reconverge keeps its own explicit call (reconvergeReplication). The no-op
+  // catch only stops an unhandled rejection while nothing awaits the promise;
+  // haConfigureReplication awaits the original, so the failure surfaces there
+  // with its own message.
+  if (!ctx.reconverge) {
+    ctx.earlyTunnel = perfAsync('deploy.ha.replication.transportEarly', () =>
+      exchangeAndBringUpTunnel({
+        primaryIp: primary.ip,
+        standbyIp: standby.ip,
+        sshKeyPath,
+      }),
+    );
+    ctx.earlyTunnel.catch(() => {});
+  }
 }
 
 /**
@@ -861,7 +959,9 @@ async function haCheckDbLedger(ctx) {
   const { primary, standby, sshKeyPath } = ctx;
   ctx.onProgress('Checking both databases were made by this stack...');
   await perfAsync('deploy.ha.compose.checkDbLedger', () =>
-    assertDbMadeByThisStack([primary.ip, standby.ip], sshKeyPath, ctx.projectConfig.projectName),
+    assertDbMadeByThisStack([primary.ip, standby.ip], sshKeyPath, ctx.projectConfig.projectName, {
+      perfName: 'deploy.ha.compose.serverFloors',
+    }),
   );
 }
 
@@ -1078,7 +1178,10 @@ async function haConfigureReplication(ctx) {
   const { primary, standby, sshKeyPath } = ctx;
   await perfAsync('deploy.ha.replication.setup', async () => {
     ctx.onProgress('Configuring PostgreSQL replication on primary...');
-    await configurePrimaryReplication(primary.ip, standby.ip, sshKeyPath, projectName);
+    // Taken once: a re-run of this step starts its own tunnel, not a spent promise.
+    const tunnel = ctx.earlyTunnel;
+    ctx.earlyTunnel = undefined;
+    await configurePrimaryReplication(primary.ip, standby.ip, sshKeyPath, projectName, { tunnel });
 
     // A standby already streaming from this primary is left alone: the reseed
     // wipes its PGDATA and downtime-reseeds it. Same probe as the k8s tier.

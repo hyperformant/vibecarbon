@@ -25,15 +25,16 @@ import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
 import { summarizeCommandError } from '../cli/error-line.js';
 import { progressLog } from '../cli/progress.js';
 import { readOperatorVar } from '../operator-env.js';
+import { perfEnabled, perfRecord, perfTimer } from '../perf.js';
 import { getProviderClass } from '../providers/index.js';
 import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
+import { createResourceTimer } from './resource-timing.js';
 import {
   classifyStateError,
   failingPulumiCommandVerb,
   HISTORY_WRITE_PATTERN,
   isHistoryWriteOnlyFailure,
 } from './state-error.js';
-import { withStateLock } from './state-lock.js';
 import { emitStateTelemetry, recordStateOp, recordStateRetry } from './state-telemetry.js';
 
 // Re-exported so this module stays the iac layer's public surface while the
@@ -147,8 +148,8 @@ export function resolveBackendUrl(s3Config, provider) {
  * Build the env var bag Pulumi needs. The compute provider's CLI reads its
  * own token env var (Hetzner: HCLOUD_TOKEN, via
  * `getProviderClass(provider).CLI_TOKEN_ENV`); S3 backend reads
- * AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY; our programs read any additional
- * config we pass through `stack.setConfig(...)`.
+ * AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY. A plugin setting with no env var
+ * travels as the provider's IAC_STACK_CONFIG instead.
  *
  * There is NO default provider here (deliberately — see the DO k8s 401 RCA:
  * a caller that forgot `provider` used to silently get 'hetzner', so a
@@ -289,14 +290,19 @@ export function summarizePulumiError(err) {
  *   caller that operates on EXISTING infrastructure must set this — creating a
  *   stack for them silently destroys state. See `isStackNotFoundError`.
  */
-async function getOrCreateStackImpl(stackName, program, options = {}) {
+export async function getOrCreateStack(stackName, program, options = {}) {
+  recordStateOp('stack-select');
   const pulumiProject = requirePulumiProject(options);
   const backendUrl = resolveBackendUrl(options.s3Config, options.provider);
   const envVars = buildEnv(options);
   const stackArgs = { stackName, projectName: pulumiProject, program };
+  const stackConfig = options.provider ? getProviderClass(options.provider).IAC_STACK_CONFIG : {};
   const wsOpts = {
     projectSettings: { name: pulumiProject, runtime: 'nodejs', backend: { url: backendUrl } },
     envVars,
+    ...(Object.keys(stackConfig).length > 0 && {
+      stackSettings: { [stackName]: { config: stackConfig } },
+    }),
   };
   const requireExisting = options.requireExisting === true;
 
@@ -308,11 +314,11 @@ async function getOrCreateStackImpl(stackName, program, options = {}) {
   // it can only mean staleness.
   // Band-aid removal 2026-08-16: the staleness poll-throughs that lived on
   // this select are DELETED with their manufactured trigger. Buckets are no
-  // longer deleted/recreated (retention), e2e reuses a warm bucket, the
+  // longer deleted/recreated (retention), e2e reuses a warm bucket, and the
   // orchestrator's waitForBucketVisible gates HEAD+LIST before any select on a
-  // genuinely-fresh first deploy, and the per-bucket lock removed the
-  // concurrent load. A 404 here now means what it says and fails loudly with a
-  // named cause; only backpressure retries (via classifyStateError).
+  // genuinely-fresh first deploy. A 404 here now means what it says and fails
+  // loudly with a named cause; only backpressure retries (via
+  // classifyStateError).
   try {
     return await withStateBackendRetry(
       () => LocalWorkspace.selectStack(stackArgs, wsOpts),
@@ -541,28 +547,25 @@ export async function repairVultrFirewallRuleInputs(stack) {
 /**
  * Run `pulumi up` and return the raw outputs. Streams Pulumi logs to an
  * optional `onOutput` sink so callers can forward progress to a spinner.
- *
- * The state-backend preparation (select, stale-lock cancel, pre-up refresh,
- * Vultr repair) always runs under the per-bucket state lock; `upStack`
- * decides whether `up` itself does too (state-lock.js, SCOPE).
  */
 async function upStackImpl(stackName, program, options = {}) {
-  const stack = await withStateLock(
-    resolveBackendUrl(options.s3Config, options.provider),
-    `refresh ${stackName}`,
-    () => prepareStackForUp(stackName, program, options),
-  );
+  // `options.perfStem` is the caller's own perf timer name (e.g.
+  // `deploy.k3s.iac.upStack`); the markers below hang off it so every arm of
+  // a deploy stays distinguishable.
+  const prepare = options.perfStem ? perfTimer(`${options.perfStem}.prepare`) : null;
+  const stack = await prepareStackForUp(stackName, program, options);
+  prepare?.end();
   return runUp(stack, options);
 }
 
 /**
  * Select (or create) the stack and bring its state up to date for `up`:
  * clear a stale update lock, refresh a populated stack, repair what the
- * refresh poisons. Every step here reads or writes the state bucket, which is
- * why it all sits inside one lock acquisition.
+ * refresh poisons.
  */
 async function prepareStackForUp(stackName, program, options) {
   const stack = await getOrCreateStack(stackName, program, options);
+  recordStateOp('refresh');
   // Clear any stale update lock before `up` — when a prior run aborted
   // mid-flight (Ctrl-C, scenario timeout, background-task stop), Pulumi's
   // file backend leaves a `.lock.*` in the bucket and subsequent `up`
@@ -627,10 +630,7 @@ async function prepareStackForUp(stackName, program, options) {
   return stack;
 }
 
-/**
- * The `up` itself and its post-mutation recovery. Runs inside the state lock
- * only when `upStack` holds the whole operation (a young state bucket).
- */
+/** The `up` itself and its post-mutation recovery. */
 async function runUp(stack, options) {
   // The up path widens what counts as transient to the two fresh-bucket
   // read-after-write spellings — a 404 of the state bucket itself, and a 404 of
@@ -639,20 +639,30 @@ async function runUp(stack, options) {
   // analysis. Destroy-path ops must still treat these as real.
   let rawOutputs;
   let summary;
+  // Per-resource timing from the engine event stream; only when perf tracing
+  // is on and the caller named its timer. The handler cannot throw.
+  const resourceTimer =
+    options.perfStem && perfEnabled()
+      ? createResourceTimer({ stem: options.perfStem, record: perfRecord })
+      : null;
   try {
     const result = await withStateBackendRetry(async () => {
-      // A `up` that failed on an S3 `SlowDown` (common on a freshly-created
-      // dedicated state bucket, especially under the parallel HA primary+standby
-      // deploys) may have already acquired the stack lock before erroring. The
-      // retry would then fail with "stack is currently locked". Clear the lock
-      // before EACH attempt — cancel() is idempotent and per-stack, so it's safe
-      // under the parallel HA deploys (primary/standby are separate stacks).
+      // A `up` that failed on an S3 `SlowDown` may have already acquired the
+      // stack lock before erroring. The retry would then fail with "stack is
+      // currently locked". Clear the lock before EACH attempt — cancel() is
+      // idempotent and per-stack, so it's safe under the parallel HA deploys
+      // (primary/standby are separate stacks).
       try {
         await stack.cancel();
       } catch {
         /* no lock — ignore */
       }
-      return stack.up({ onOutput: options.onOutput, color: 'never' });
+      resourceTimer?.begin();
+      return stack.up({
+        onOutput: options.onOutput,
+        color: 'never',
+        ...(resourceTimer ? { onEvent: resourceTimer.onEvent } : {}),
+      });
     }, 'up');
     rawOutputs = result.outputs || {};
     summary = result.summary;
@@ -721,7 +731,7 @@ async function runUp(stack, options) {
       // Band-aid removal 2026-08-16: the startup-staleness guarded re-run and
       // the post-up read-only reread that lived here are DELETED with their
       // manufactured trigger (fresh/recreated buckets under our own parallel
-      // load — all root-fixed: retention, warm e2e bucket, per-bucket lock,
+      // load — all root-fixed: retention, warm e2e bucket, a quiet new bucket,
       // project-scoped keys, fewer writes). Every staleness spelling now
       // fails loudly with its cause named by classifyStateError; only the
       // history-write adjudication above survives, because that failure is
@@ -1226,51 +1236,43 @@ export async function listStacks(options = {}) {
 }
 
 /**
- * Public entry points for the two operations the throttle evidence points at,
- * each serialized per state bucket: the select always, `up` only on a young
- * state bucket (its preparation always; see `upStack` and state-lock.js).
+ * Open the state backend, which writes `.pulumi/meta.yaml` on a new bucket. An
+ * HA deploy does this once before its two engines start, so they never both
+ * initialize one backend: that race failed a k8s-ha deploy with `could not list
+ * bucket: blob (code=NotFound): NoSuchKey` (2026-04-28), a failure nothing
+ * retries.
  *
- * Of the 40 state-backend recovery events in run 31898658781's hetzner leg, 38
- * were throttle, and 35 of those came from these two: `up` 11, and
- * `stack-select` 24 across ci3, ci4-primary and ci4-standby — the last two
- * being the k8s-ha pair fanned out under Promise.all against ONE bucket.
+ * `pulumi whoami` is the cheapest operation that does it. On a new bucket, on
+ * all five providers (2026-11-06): GET meta.yaml, LIST, PUT meta.yaml, LIST, in
+ * 0.5 to 1.8 s, one request fewer than `pulumi stack ls`.
  *
- * `destroyStack` and `getStackOutputs` are not wrapped here and do not need to
- * be: each calls `getOrCreateStack`, so their select phase is already covered,
- * and the lock is re-entrant so the nesting is free. Their own pulumi
- * invocations remain unserialized, which is deliberate for now — no observed
- * event came from them, and locking work we have no evidence for would cost
- * wall-clock to no measured end.
+ * Throws, unlike `listStacks`: nothing is provisioned yet, and a backend that
+ * will not open now would only fail the pair later.
  *
- * The key is the backend URL, so distinct buckets never block each other.
+ * @param {{ provider: string, s3Config: object, projectName: string }} options
+ * @returns {Promise<void>}
  */
-export async function getOrCreateStack(stackName, program, options = {}) {
-  return withStateLock(
-    resolveBackendUrl(options.s3Config, options.provider),
-    `stack-select ${stackName}`,
-    () => getOrCreateStackImpl(stackName, program, options),
-  );
+export async function openStateBackend(options) {
+  recordStateOp('backend-open');
+  const workspace = await LocalWorkspace.create({
+    projectSettings: {
+      name: requirePulumiProject(options),
+      runtime: 'nodejs',
+      backend: { url: resolveBackendUrl(options.s3Config, options.provider) },
+    },
+    envVars: buildEnv(options),
+  });
+  await workspace.whoAmI();
 }
 
 /**
- * `options.stateBucketYoung` sets the lock's scope (Ruling A′, state-lock.js
- * header). `false`, the state bucket is past its provider's settle window:
- * only the preparation in `upStackImpl` is serialized and two stacks' `up`s
- * provision in parallel. `true`, or unstated (the safe side): the whole
- * operation holds the lock, provisioning included.
+ * Two stacks' `upStack`s on one state bucket run side by side from the first
+ * request, select and refresh included (state-lock.js header says why).
  */
 export async function upStack(stackName, program, options = {}) {
   try {
-    if (options.stateBucketYoung === false) {
-      // Counted here because no `up` lock label is taken to count it.
-      recordStateOp('up');
-      return await upStackImpl(stackName, program, options);
-    }
-    return await withStateLock(
-      resolveBackendUrl(options.s3Config, options.provider),
-      `up ${stackName}`,
-      () => upStackImpl(stackName, program, options),
-    );
+    recordStateOp('up');
+    return await upStackImpl(stackName, program, options);
   } finally {
     // Success AND failure: the failure log is where the budget-vs-consistency
     // question actually gets asked, so the cumulative counts must be there.

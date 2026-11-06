@@ -25,7 +25,7 @@ describe('compose cloud-init user_data', () => {
     // (tests/unit/iac/compose-boot-pull.test.ts pins the order).
     const contents = readFileSync(cloudInitPath, 'utf-8');
     expect(contents).toMatch(
-      /apt-get -o DPkg::Lock::Timeout=\d+ install -y ufw unattended-upgrades/,
+      /apt-get -o DPkg::Lock::Timeout=\d+ -o Acquire::EnableSrvRecords=false install -y ufw unattended-upgrades/,
     );
   });
 

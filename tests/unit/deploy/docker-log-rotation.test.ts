@@ -38,7 +38,7 @@ describe('compose cloud-init bounds Docker log growth', () => {
 
   it('restarts (or --now starts) docker after the config write so the cap applies', () => {
     // daemon.json only takes effect on a daemon (re)start. write_files runs
-    // before runcmd, and the docker-ce app has usually already started docker,
+    // before runcmd, and the Docker install has already started docker,
     // so a plain `enable` would leave the daemon running with the OLD config.
     // Require an explicit restart, or `enable --now` on a not-yet-started
     // daemon, somewhere in runcmd.

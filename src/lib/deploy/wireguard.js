@@ -13,7 +13,13 @@
  */
 
 import { sshRun } from '../ssh.js';
-import { APT_LOCK_TIMEOUT_SECONDS, aptGet } from './apt.js';
+import {
+  APT_LOCK_TIMEOUT_SECONDS,
+  APT_TRIMMED_INDEXES,
+  aptGet,
+  aptQuietUpdate,
+  aptWaitForDailyUnits,
+} from './apt.js';
 
 export const WG_PORT = 51821; // NOT 51820 — flannel-wg owns that in k3s
 export const WG_SUBNET_CIDR = '10.99.0.0/30';
@@ -52,8 +58,13 @@ export const REGISTRY_RELAY_PORT = 15000;
 
 // The on-node WireGuard private key. Generated on each database node with
 // umask 077 and NEVER read back into this process — only the derived public
-// key ever crosses the wire.
-const WG_KEY_PATH = '/etc/vibecarbon-wg.key';
+// key ever crosses the wire. It lives in /etc/wireguard because that is the
+// only place Ubuntu 26.04's AppArmor profile lets `wg` read it: anywhere else
+// `wg set` fails with `fopen: Permission denied` and wg0 stays down.
+const WG_KEY_PATH = '/etc/wireguard/vibecarbon-wg0.key';
+// Where a node set up before that move has its key. It moves over rather than
+// being regenerated, so the tunnel keeps its peer through the deploy.
+const WG_OLD_KEY_PATH = '/etc/vibecarbon-wg.key';
 
 // Reboot-persistence (item I-1, live-confirmed 2026-07-07): wg0 is an
 // imperative, in-memory-only interface — a node reboot (scale resize, crash,
@@ -95,7 +106,9 @@ export function buildWireguardInterfaceConfig({
     throw new Error(`wireguard: invalid peer allowed-ip '${peerAllowedIp}'`);
   }
   return [
-    'ip link del wg0 2>/dev/null; true',
+    // `|| true`, not `; true`: the boot script runs this under `set -e`, and a
+    // node that just booted has no wg0 to delete.
+    'ip link del wg0 2>/dev/null || true',
     'ip link add wg0 type wireguard',
     `ip addr add ${selfIp}/30 dev wg0`,
     `wg set wg0 private-key ${selfPrivKeyPath} listen-port ${listenPort} ` +
@@ -111,6 +124,47 @@ export function buildWireguardInterfaceConfig({
     '(command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active" ' +
       '&& ufw allow in on wg0) || true',
   ];
+}
+
+/**
+ * Shell test: does wg0 already run exactly this config? Tests the live
+ * interface, not a file on disk, so a tunnel changed by hand or left half-built
+ * fails it and gets rebuilt. Only the peer lines of `wg show dump` are read: its
+ * first line carries the private key.
+ *
+ * @param {Parameters<typeof buildWireguardInterfaceConfig>[0]} params
+ * @returns {string}
+ */
+function wireguardAlreadyMatches({
+  selfIp,
+  selfPrivKeyPath,
+  listenPort,
+  peerPubKey,
+  peerEndpoint,
+  peerAllowedIp,
+  keepalive = 25,
+}) {
+  return [
+    `ip -4 -o addr show dev wg0 up 2>/dev/null | grep -qF ' inet ${selfIp}/30 '`,
+    `[ "$(wg show wg0 public-key 2>/dev/null)" = "$(wg pubkey < ${selfPrivKeyPath})" ]`,
+    `[ "$(wg show wg0 listen-port 2>/dev/null)" = "${listenPort}" ]`,
+    '[ "$(wg show wg0 dump 2>/dev/null | tail -n +2 | cut -f1,3,4,8)" = ' +
+      `"$(printf '${peerPubKey}\t${peerEndpoint}\t${peerAllowedIp}\t${keepalive}')" ]`,
+  ].join(' && ');
+}
+
+/**
+ * The live bring-up: rebuild wg0 only when it differs from these params.
+ * Rebuilding a healthy tunnel drops replication, and a deploy runs this every
+ * time, with nothing to gain from it: a tunnel with the right config needs no
+ * help to reconnect. Anything that does not match takes the full rebuild.
+ *
+ * @param {Parameters<typeof buildWireguardInterfaceConfig>[0]} params
+ * @returns {string}
+ */
+export function buildWireguardBringUp(params) {
+  const rebuild = buildWireguardInterfaceConfig(params); // validates params; throws on injection
+  return `${wireguardAlreadyMatches(params)} || { ${rebuild.join(' && ')}; }`;
 }
 
 /**
@@ -229,11 +283,15 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
     throw new Error('exchangeAndBringUpTunnel requires primaryIp, standbyIp, and sshKeyPath');
   }
 
-  // 1. Ensure wireguard-tools is installed and a private key exists on each
-  //    node. Idempotent: the install is skipped when `wg` is already present,
-  //    and the key is generated only if absent (so a re-deploy keeps the same
-  //    keypair and does not churn the tunnel).
-  for (const ip of [primaryIp, standbyIp]) {
+  // 1+2. On each node: ensure wireguard-tools is installed and a private key
+  //    exists, then read back ONLY the public key (the private key stays
+  //    on-node). Idempotent: the install is skipped when `wg` is already
+  //    present, and the key is generated only if absent (so a re-deploy keeps
+  //    the same keypair and does not churn the tunnel). The nodes share
+  //    nothing, so both run at once: the apt work is the slow part. Settled,
+  //    not raced, so both finish before a failure is thrown, and the primary's
+  //    error wins when both fail (the order the nodes used to run in).
+  const prepareNode = async (ip) => {
     // `set -e` is load-bearing. This ran as a bare `||` chain, so a failed
     // install did NOT stop the script -- it fell through to `wg genkey` and
     // the step died reporting `wg: command not found`, burying the real
@@ -259,24 +317,23 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
         '-c',
         'set -e; ' +
           'if ! command -v wg >/dev/null 2>&1; then ' +
-          `DEBIAN_FRONTEND=noninteractive ${aptGet('update -qq')}; ` +
+          `${aptWaitForDailyUnits()}; ` +
+          `${aptQuietUpdate(APT_TRIMMED_INDEXES)}; ` +
           `DEBIAN_FRONTEND=noninteractive ${aptGet('install -y -qq wireguard-tools')}; ` +
           'command -v wg >/dev/null 2>&1 || { ' +
           'echo "wireguard-tools installed but wg is still not on PATH" >&2; exit 1; }; ' +
           'fi; ' +
-          `umask 077; [ -f ${WG_KEY_PATH} ] || wg genkey > ${WG_KEY_PATH}`,
+          `umask 077; [ -f ${WG_KEY_PATH} ] || mv ${WG_OLD_KEY_PATH} ${WG_KEY_PATH} 2>/dev/null || ` +
+          `wg genkey > ${WG_KEY_PATH}`,
       ],
       { timeout: (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000 },
     );
-  }
-
-  // 2. Read back ONLY the public key from each node (private key stays on-node).
-  const primaryPubKey = (
-    await sshRun(primaryIp, sshKeyPath, ['bash', '-c', `wg pubkey < ${WG_KEY_PATH}`])
-  ).trim();
-  const standbyPubKey = (
-    await sshRun(standbyIp, sshKeyPath, ['bash', '-c', `wg pubkey < ${WG_KEY_PATH}`])
-  ).trim();
+    return (await sshRun(ip, sshKeyPath, ['bash', '-c', `wg pubkey < ${WG_KEY_PATH}`])).trim();
+  };
+  const prepared = await Promise.allSettled([prepareNode(primaryIp), prepareNode(standbyIp)]);
+  const failed = prepared.find((r) => r.status === 'rejected');
+  if (failed) throw failed.reason;
+  const [primaryPubKey, standbyPubKey] = prepared.map((r) => r.value);
 
   // 3. Cross-configure + bring up each node with the PEER's pubkey + endpoint.
   // Keep the per-node params so the SAME values feed both the live bring-up and
@@ -297,10 +354,8 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
     peerEndpoint: `${primaryIp}:${WG_PORT}`,
     peerAllowedIp: `${WG_PRIMARY_IP}/32`,
   };
-  const primaryUp = buildWireguardInterfaceConfig(primaryParams);
-  const standbyUp = buildWireguardInterfaceConfig(standbyParams);
-  await sshRun(primaryIp, sshKeyPath, ['bash', '-c', primaryUp.join(' && ')]);
-  await sshRun(standbyIp, sshKeyPath, ['bash', '-c', standbyUp.join(' && ')]);
+  await sshRun(primaryIp, sshKeyPath, ['bash', '-c', buildWireguardBringUp(primaryParams)]);
+  await sshRun(standbyIp, sshKeyPath, ['bash', '-c', buildWireguardBringUp(standbyParams)]);
 
   // 4. Persist reboot-durable bring-up: write the boot script + systemd oneshot
   //    on each node and enable it (item I-1). Idempotent — overwrites + re-enables

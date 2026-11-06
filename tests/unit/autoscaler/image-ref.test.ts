@@ -32,18 +32,20 @@ import {
   carbonAutoscalerImageRef,
   clusterAutoscalerImageRef,
   clusterAutoscalerUpstreamRef,
+  manifestImageValues,
 } from '../../../src/lib/images.js';
 
 const ROOT = process.cwd();
 const DOCKERFILE_PATH = join(ROOT, 'docker', 'carbon-autoscaler', 'Dockerfile');
 const WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'publish-images.yml');
+const MIRROR_WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'mirror-images.yml');
 const PACKAGE_JSON_PATH = join(ROOT, 'package.json');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 
 describe('carbon-autoscaler image ref', () => {
   it('is the pre-published amd64 tag (no project/sha/timestamp)', () => {
     expect(CARBON_AUTOSCALER_IMAGE).toBe('ghcr.io/hyperformant/carbon-autoscaler');
-    expect(CARBON_AUTOSCALER_TAG).toBe('0.1.3');
+    expect(CARBON_AUTOSCALER_TAG).toBe('0.1.4');
     expect(carbonAutoscalerImageRef()).toBe(`${CARBON_AUTOSCALER_IMAGE}:${CARBON_AUTOSCALER_TAG}`);
   });
 
@@ -145,7 +147,7 @@ describe('publish workflow tag-resolution grep matches images.js', () => {
   it('the CA tag still feeds source and mirror from ONE constant', () => {
     // The property #222's "grep the tag once" test protected, restated against
     // the constants themselves rather than against the (now retired) grep: a
-    // mirror that copied v1.32.7 under a different tag would silently unpin
+    // mirror that copied one version under a different tag would silently unpin
     // every cluster. Both refs derive from CLUSTER_AUTOSCALER_TAG, so they
     // cannot diverge.
     expect(clusterAutoscalerUpstreamRef().split(':').pop()).toBe(CLUSTER_AUTOSCALER_TAG);
@@ -159,7 +161,7 @@ describe('cluster-autoscaler image ref (ghcr mirror of the upstream image)', () 
     expect(CLUSTER_AUTOSCALER_UPSTREAM_IMAGE).toBe(
       'registry.k8s.io/autoscaling/cluster-autoscaler',
     );
-    expect(CLUSTER_AUTOSCALER_TAG).toBe('v1.32.7');
+    expect(CLUSTER_AUTOSCALER_TAG).toBe('v1.37.0');
     expect(clusterAutoscalerImageRef()).toBe(
       `${CLUSTER_AUTOSCALER_IMAGE}:${CLUSTER_AUTOSCALER_TAG}@${CLUSTER_AUTOSCALER_DIGEST}`,
     );
@@ -180,7 +182,7 @@ describe('cluster-autoscaler image ref (ghcr mirror of the upstream image)', () 
     // The mirror copies upstream's linux/amd64 manifest verbatim, so the
     // digest is the same on both hosts; the fixture below is that manifest.
     expect(CLUSTER_AUTOSCALER_DIGEST).toMatch(/^sha256:[a-f0-9]{64}$/);
-    expect(clusterAutoscalerImageRef()).toMatch(/:v1\.32\.7@sha256:[a-f0-9]{64}$/);
+    expect(clusterAutoscalerImageRef()).toMatch(/:v1\.37\.0@sha256:[a-f0-9]{64}$/);
     expect(clusterAutoscalerImageRef()).toBe(clusterAutoscalerImageRef());
     expect(clusterAutoscalerImageRef()).not.toMatch(/dirty|\d{14}/);
   });
@@ -189,13 +191,14 @@ describe('cluster-autoscaler image ref (ghcr mirror of the upstream image)', () 
 describe('every cluster-autoscaler reference site is pinned to the constant', () => {
   it('the shipped Deployment runs the mirrored image', () => {
     const deployment = read('carbon/k8s/base/cluster-autoscaler/deployment.yaml');
-    // Literal, not a placeholder: this manifest also ships into the customer's
-    // repo, where `kubectl apply -k k8s/base/cluster-autoscaler/` (the usage
-    // its own kustomization.yaml documents) has no deploy-time patch step.
-    expect(deployment).toContain(`image: ${clusterAutoscalerImageRef()}`);
+    // A token the deploy fills from its version set, so a patch reaches a
+    // deploy with no CLI release. The manifest is applied by the deploy, never
+    // directly, and a leftover token fails loud before the apply.
+    expect(deployment).toContain('image: "{{CLUSTER_AUTOSCALER_IMAGE}}"');
+    expect(manifestImageValues().CLUSTER_AUTOSCALER_IMAGE).toBe(clusterAutoscalerImageRef());
   });
 
-  it('applyK3sManifests re-pins BOTH container images in one `set image` call', () => {
+  it('applyK3sManifests renders the sidecar image and re-pins the autoscaler image', () => {
     // Belt-and-braces for projects generated before the mirror landed: their
     // checked-in copy of the manifest still carries the registry.k8s.io ref,
     // and `vibecarbon deploy` applies from the PROJECT dir, not from carbon/.
@@ -204,8 +207,10 @@ describe('every cluster-autoscaler reference site is pinned to the constant', ()
     const k3s = read('src/lib/deploy/k8s/k3s.js');
     const setImage = k3s.match(/'set',\s*\n\s*'image',[\s\S]{0,400}?\]/)?.[0];
     expect(setImage, 'kubectl set image call not found in k3s.js').toBeDefined();
-    expect(setImage).toMatch(/`carbon-autoscaler=\$\{carbonAutoscalerImageRef\(\)\}`/);
     expect(setImage).toMatch(/`cluster-autoscaler=\$\{clusterAutoscalerImageRef\(\)\}`/);
+    expect(k3s).toMatch(
+      /renderManifestImages\(manifests\)\.replaceAll\(\s*'\{\{CARBON_AUTOSCALER_IMAGE\}\}',\s*carbonAutoscalerImageRef\(\),\s*\)/,
+    );
     expect(k3s).toMatch(
       /import \{[^}]*clusterAutoscalerImageRef[^}]*\} from '\.\.\/\.\.\/images\.js'/,
     );
@@ -232,7 +237,8 @@ describe('every cluster-autoscaler reference site is pinned to the constant', ()
 });
 
 describe('mirror job copies the manifest — never rebuilds, never multi-arch', () => {
-  const workflow = readFileSync(WORKFLOW_PATH, 'utf8');
+  // publish-images.yml's own job and the mirror job it calls.
+  const workflow = `${readFileSync(WORKFLOW_PATH, 'utf8')}\n${readFileSync(MIRROR_WORKFLOW_PATH, 'utf8')}`;
   // Executable YAML only; comments are where the reasoning lives.
   const code = workflow
     .split('\n')
@@ -276,30 +282,29 @@ describe('mirror job copies the manifest — never rebuilds, never multi-arch', 
   });
 
   /**
-   * Upstream's REAL index for v1.32.7, captured 2026-07-31 from
-   * https://registry.k8s.io/v2/autoscaling/cluster-autoscaler/manifests/v1.32.7,
-   * plus the attestation-shaped entry that OCI-era indexes add. Note the
-   * mediaType: it is the DOCKER manifest type, not the OCI `image.manifest`
-   * one — a jq filter written against the OCI type selects nothing here, which
-   * is exactly the bug this fixture exists to catch.
+   * Upstream's REAL index for v1.37.0, captured 2026-11-05 with `docker buildx
+   * imagetools inspect --raw`, plus the attestation-shaped entry that OCI-era
+   * indexes add. Upstream moved from the Docker manifest types to the OCI ones
+   * between 1.32 and 1.37, which is why the job selects by platform: a jq filter
+   * written against one media type would select nothing on the other.
    */
   const UPSTREAM_INDEX = {
     schemaVersion: 2,
-    mediaType: 'application/vnd.docker.distribution.manifest.list.v2+json',
+    mediaType: 'application/vnd.oci.image.index.v1+json',
     manifests: [
       {
-        mediaType: 'application/vnd.docker.distribution.manifest.v2+json',
-        digest: 'sha256:b3a67e07244033d36adc1cbe236fdbf9729b968f9c1c47477e26547a78131c81',
+        mediaType: 'application/vnd.oci.image.manifest.v1+json',
+        digest: 'sha256:c239e40cc745d9e0f1ba7c2272eaab44ca4586cd053f13ba8c8a4a6b27b18294',
         platform: { architecture: 'amd64', os: 'linux' },
       },
       {
-        mediaType: 'application/vnd.docker.distribution.manifest.v2+json',
-        digest: 'sha256:d2f8a85ff48287ea3e8fa0e3d39e93bb72927fc535febdfa786cf358cef6d221',
+        mediaType: 'application/vnd.oci.image.manifest.v1+json',
+        digest: 'sha256:ff9c0bd82fb45e747ed3cbafe6b3ebbd5361fb672be4eb1dac9ec6fe9951dfd1',
         platform: { architecture: 'arm64', os: 'linux' },
       },
       {
-        mediaType: 'application/vnd.docker.distribution.manifest.v2+json',
-        digest: 'sha256:286d76ffabc9c2f9eef068de345bf3bb86f29989463a4aaa6550c7ad9f1f7629',
+        mediaType: 'application/vnd.oci.image.manifest.v1+json',
+        digest: 'sha256:2c1313074e4a2b4cb2326edb249b679d17fc8fa39b413ad8df5e09ee1c771e1a',
         platform: { architecture: 's390x', os: 'linux' },
       },
       {

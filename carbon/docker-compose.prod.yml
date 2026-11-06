@@ -97,7 +97,7 @@ services:
   # container inspect, env included, so it sits on the internal socket-proxy
   # network that only traefik joins. Nothing else can resolve or reach it.
   docker-socket-proxy:
-    image: ghcr.io/hyperformant/docker-socket-proxy:v0.4.2@sha256:bd2241b3bec83abcff25927a0a7ae518e0c5bef624b3cc247dcb31e68b53f417
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:?DOCKER_SOCKET_PROXY_IMAGE missing, run vibecarbon upgrade to write it to .env}
     container_name: ${PROJECT_NAME}-socket-proxy
     restart: unless-stopped
     security_opt:
@@ -145,7 +145,7 @@ services:
   # other section and every non-GET. Only the app shares its network.
   # Guarded by tests/integration/docker/compose-secret-reach.test.ts.
   app-docker-proxy:
-    image: ghcr.io/hyperformant/docker-socket-proxy:v0.4.2@sha256:bd2241b3bec83abcff25927a0a7ae518e0c5bef624b3cc247dcb31e68b53f417
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:?DOCKER_SOCKET_PROXY_IMAGE missing, run vibecarbon upgrade to write it to .env}
     container_name: ${PROJECT_NAME}-app-docker-proxy
     restart: unless-stopped
     security_opt:
@@ -172,7 +172,7 @@ services:
   traefik:
     # Our ghcr mirror of the base file's tag (amd64, servers only): no Docker
     # Hub pull on a deploy. Same tag as carbon/docker-compose.yml, by census.
-    image: ghcr.io/hyperformant/traefik:v3.6.11@sha256:2b6506fde98570702dd026bc70ed307a0f22c2cf693329e91b46f94d371097a1
+    image: ${TRAEFIK_IMAGE:?TRAEFIK_IMAGE missing, run vibecarbon upgrade to write it to .env}
     command:
       - "--api.dashboard=true"
       - "--providers.docker=true"
@@ -248,6 +248,13 @@ services:
   # postgresql.conf and the base file's `-c` flags). Keep any `cpus` you add
   # elsewhere at 1.0 or below (tests/unit/template/compose-cpu-limits.test.ts).
   db:
+    # Docker checks every second during the start period only, then returns
+    # to the base file's `interval`. Dependents (app, app-migrate) start
+    # within a second of the db being ready. Needs Docker Engine 25 or newer,
+    # which servers have; the base file omits it because Compose 2.18 rejects
+    # the key and Compose 2.24-2.29 on Engine 24 refuse to start with it.
+    healthcheck:
+      start_interval: 1s
     environment:
       # Required (`:?`) so deploy's preflight refuses a .env without the
       # database password before anything is created (findMissingRequiredEnv
