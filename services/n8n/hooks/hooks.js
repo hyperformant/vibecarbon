@@ -83,7 +83,9 @@ module.exports = {
                 firstName: email.split('@')[0],
                 lastName: '',
                 password: hashSync(randomPassword, 10),
-                roleSlug: 'global:owner',
+                // `role` is the mapped relation; roleSlug is only its join
+                // column, so setting that is ignored and the user is a member.
+                role: { slug: 'global:owner' },
               });
               user = await userRepo.save(user);
               // Reload with role relation
@@ -112,10 +114,12 @@ module.exports = {
         };
 
         // Inject middleware after cookie-parser so req.cookies is available.
-        // Must create a proper Layer instance (Express 5 router calls layer.match()).
+        // It must be a real Layer (Express 5 router calls layer.match()). The
+        // class comes from the stack itself: n8n's pnpm layout does not hoist
+        // `router`, so it cannot be required by name.
         if (cookieParserIdx >= 0) {
           try {
-            const Layer = require('router/lib/layer');
+            const Layer = layers[cookieParserIdx].constructor;
             const layer = new Layer('/', { end: false }, middleware);
             layers.splice(cookieParserIdx + 1, 0, layer);
             console.log('[hooks.js] ForwardAuth SSO middleware installed');

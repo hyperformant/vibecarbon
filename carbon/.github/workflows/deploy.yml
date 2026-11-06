@@ -443,9 +443,9 @@ jobs:
             # kube-system has relaxed PodSecurity (allows system pods).
             # A plain pod can curl/nslookup without host namespaces —
             # this is what Flux's source-controller is actually doing.
-            kubectl -n kube-system run dns-probe-$RANDOM --image=busybox:1.36 \
+            kubectl -n kube-system run dns-probe-$RANDOM --image=busybox:1.38 \
               --restart=Never --rm -i --timeout=60s \
-              --overrides='{"spec":{"containers":[{"name":"probe","image":"busybox:1.36","command":["sh","-c","echo \"--- /etc/resolv.conf ---\"; cat /etc/resolv.conf; echo; echo \"--- nslookup github.com (via coredns) ---\"; nslookup github.com; echo; echo \"--- nslookup github.com @1.1.1.1 ---\"; nslookup github.com 1.1.1.1; echo; echo \"--- wget github.com ---\"; wget -qO- --timeout=5 https://github.com 2>&1 | head -5 || echo wget-failed"]}]}}' \
+              --overrides='{"spec":{"containers":[{"name":"probe","image":"busybox:1.38","command":["sh","-c","echo \"--- /etc/resolv.conf ---\"; cat /etc/resolv.conf; echo; echo \"--- nslookup github.com (via coredns) ---\"; nslookup github.com; echo; echo \"--- nslookup github.com @1.1.1.1 ---\"; nslookup github.com 1.1.1.1; echo; echo \"--- wget github.com ---\"; wget -qO- --timeout=5 https://github.com 2>&1 | head -5 || echo wget-failed"]}]}}' \
               2>&1 | head -50 || echo "(pod dns-probe failed)"
             echo
             echo "=== kube-proxy / node routing (kube-proxy pod logs) ==="

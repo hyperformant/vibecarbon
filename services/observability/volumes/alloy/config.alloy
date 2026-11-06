@@ -1,0 +1,91 @@
+// Grafana Alloy configuration for Vibecarbon
+// Collects logs from all Docker containers and ships them to Loki.
+//
+// Generated from our former Promtail config by upstream's converter:
+//   alloy convert --source-format=promtail
+// The labels (container, service, project, container_id, environment, level)
+// are the ones the Grafana log dashboards query, so keep them when editing.
+
+discovery.docker "docker" {
+	host             = "unix:///var/run/docker.sock"
+	refresh_interval = "5s"
+}
+
+loki.process "docker" {
+	forward_to = [loki.write.default.receiver]
+
+	stage.json {
+		expressions = {
+			level     = "level",
+			message   = "message",
+			msg       = "msg",
+			time      = "time",
+			timestamp = "timestamp",
+		}
+	}
+
+	stage.labels {
+		values = {
+			level = null,
+		}
+	}
+
+	stage.match {
+		selector = "{service=~\".+\"}"
+
+		stage.regex {
+			expression = "(?P<level>INFO|WARN|ERROR|DEBUG|FATAL)"
+		}
+
+		stage.labels {
+			values = {
+				level = null,
+			}
+		}
+	}
+}
+
+discovery.relabel "docker" {
+	targets = []
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		target_label  = "project"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_id"]
+		regex         = "(.{12}).*"
+		target_label  = "container_id"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_environment"]
+		target_label  = "environment"
+	}
+}
+
+loki.source.docker "docker" {
+	host          = "unix:///var/run/docker.sock"
+	targets       = discovery.docker.docker.targets
+	forward_to    = [loki.process.docker.receiver]
+	relabel_rules = discovery.relabel.docker.rules
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+	external_labels = {}
+}

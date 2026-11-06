@@ -26,7 +26,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: loki
-        image: grafana/loki:3.3.0@sha256:58b60b901255c209d3455d8a1979a3f73d1d09686a0a858c2c93025a969eb550
+        image: grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
         imagePullPolicy: IfNotPresent
         args:
         - -config.file=/etc/loki/loki-config.yaml

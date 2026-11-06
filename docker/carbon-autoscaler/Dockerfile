@@ -1,7 +1,7 @@
 # The ONE Node pin in this file — written from the repo's .nvmrc by
 # `pnpm node:sync` and asserted against it by
 # tests/unit/lib/node-version-pins.test.ts.
-ARG NODE_IMAGE=node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf
+ARG NODE_IMAGE=node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
 FROM ${NODE_IMAGE}
 WORKDIR /app
 # Runtime deps of the server.js static import graph (provider modules

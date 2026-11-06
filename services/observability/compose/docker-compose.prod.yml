@@ -30,7 +30,7 @@ services:
       - "traefik.http.routers.grafana-http.entrypoints=web"
       - "traefik.http.routers.grafana-http.middlewares=redirect-to-https"
 
-  # Prometheus and Loki have no Traefik route; Grafana/Promtail reach them over
+  # Prometheus and Loki have no Traefik route; Grafana/Alloy reach them over
   # the compose network. Drop the dev host-port publishing so prod never binds
   # them on the host (defense-in-depth behind the 22/80/443-only firewall).
   prometheus:

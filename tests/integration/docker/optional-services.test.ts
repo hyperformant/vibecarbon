@@ -80,7 +80,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
     ]);
 
     // Start db and observability services
-    execSync('docker compose up -d db prometheus grafana loki promtail postgres-exporter', {
+    execSync('docker compose up -d db prometheus grafana loki alloy postgres-exporter', {
       cwd: projectDir(),
       encoding: 'utf-8',
       timeout: testConfig.smoke.timeouts.dockerUp,
@@ -310,9 +310,10 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
       const responds = await waitWithBackoff(
         () => {
           try {
-            // Check /metrics endpoint which is less strict than /ready
+            // Check /metrics endpoint which is less strict than /ready. The
+            // Loki image has no shell and no wget, so Grafana's container asks.
             const result = execSync(
-              'docker compose exec -T loki wget -qO- http://localhost:3100/metrics 2>&1 | head -5 || echo "error"',
+              'docker compose exec -T grafana wget -qO- http://loki:3100/metrics 2>&1 | head -5 || echo "error"',
               {
                 cwd: projectDir(),
                 encoding: 'utf-8',
@@ -332,7 +333,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
     }, 30000);
   });
 
-  describe('Promtail', () => {
+  describe('Alloy', () => {
     it('container is running', ({ skip }) => {
       if (!observabilityAvailable) skip();
       const result = execSync('docker compose ps --format json', {
@@ -348,24 +349,28 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
         .filter((c: { State: string }) => c.State === 'running')
         .map((c: { Service: string }) => c.Service);
 
-      expect(runningServices).toContain('promtail');
+      expect(runningServices).toContain('alloy');
     });
 
     it('is shipping logs to Loki', async ({ skip }) => {
-      if (!observabilityAvailable) skip();
-      // Check Promtail targets via docker exec
-      const result = execSync(
-        'docker compose exec -T promtail wget -qO- http://localhost:9080/ready || echo "ready"',
-        {
-          cwd: projectDir(),
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: getExecEnv(),
+      if (!lokiAvailable) skip();
+      // The label the log dashboards group by. Its values only exist once a
+      // container's log lines have reached Loki through Alloy.
+      const shipped = await waitWithBackoff(
+        () => {
+          try {
+            return execSync(
+              'docker compose exec -T grafana wget -qO- http://loki:3100/loki/api/v1/label/service/values',
+              { cwd: projectDir(), encoding: 'utf-8', timeout: 10000, env: getExecEnv() },
+            ).includes('grafana');
+          } catch {
+            return false;
+          }
         },
+        { timeout: 60000, label: 'logs in Loki' },
       );
-      // Promtail should respond (even if just with ready check)
-      expect(result).toBeDefined();
-    });
+      expect(shipped).toBe(true);
+    }, 70000);
   });
 
   describe('Postgres Exporter', () => {

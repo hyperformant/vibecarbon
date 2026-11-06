@@ -16,13 +16,13 @@
 # alpine or the binary hits a musl/libstdc++ mismatch at runtime. The tag in
 # NODE_RUNTIME_IMAGE names both (<node major>-alpine<alpine minor>-r<N>), and
 # the pins test holds all three to one minor.
-ARG NODE_IMAGE=node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf
+ARG NODE_IMAGE=node:24-alpine3.24@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8
 
 # BuildKit REJECTS `COPY --from=${NODE_IMAGE}` ("variable expansion is not
 # supported for --from"); a stage built FROM the global ARG is the workaround.
 FROM ${NODE_IMAGE} AS node
 
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
 
 RUN apk add --no-cache libstdc++ && \
     addgroup -g 1001 -S hono && \

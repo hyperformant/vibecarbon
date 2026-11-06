@@ -263,7 +263,7 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     'app-docker-proxy': 'GET /containers/json, GET /containers/{id}/logs, GET /_ping',
     // The observability add-on's log shipper reads container logs from the
     // socket itself; it serves no Docker API to anyone.
-    promtail: 'reads container logs (observability add-on)',
+    alloy: 'reads container logs (observability add-on)',
   };
   const PROXIES = ['docker-socket-proxy', 'app-docker-proxy'];
 
@@ -350,7 +350,7 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     const SECRET = sentinel('NEIGHBOUR_ENV');
     // Pinned by digest like every image the project runs.
     const BUSYBOX =
-      'busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662';
+      'busybox:1.38@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4';
     let liveDir: string;
     let victimId: string;
     const compose = (args: string[]) =>

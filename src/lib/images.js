@@ -165,7 +165,7 @@ export function localComposeEnv(base = process.env) {
 // .nvmrc moves. `pnpm node-runtime:build-local` builds an unpublished tag into
 // the local Docker image store for testing.
 // biome-ignore format: publish-node-runtime-image.yml and scripts/sync-node-version.js read this declaration as one line
-export const NODE_RUNTIME_IMAGE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r2@sha256:83cfe107168c1a63deb63dbedb5947ba473cb00142d242a1bce0218dbdc14646';
+export const NODE_RUNTIME_IMAGE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.24-r3';
 
 // sha256 fingerprint of docker/node-runtime's inputs (every file there but
 // README.md; tests/unit/deploy/node-runtime-image-fingerprint.test.ts has the
@@ -173,7 +173,7 @@ export const NODE_RUNTIME_IMAGE = 'ghcr.io/hyperformant/node-runtime:24-alpine3.
 // fails that test until the hash AND the -r revision move together (and the
 // carbon/Dockerfile copy with them).
 export const NODE_RUNTIME_INPUTS_SHA256 =
-  '6ed48efc09951538f09ee3bf9ab7638f2c9dceb6cf4a6ca455fafe1a252a824e';
+  '4841ebd27ef353a57ed151c8418b815867f006867cd18c63bf1f65a2770291e1';
 
 // Single source of truth for the pre-published carbon-autoscaler image
 // (src/autoscaler/). Built once per version by
@@ -529,9 +529,9 @@ export const DOCKER_SOCKET_PROXY_MIRROR = {
 export const ALPINE_MIRROR = {
   upstream: DOCKERHUB_UPSTREAM_REGISTRY,
   repo: 'library/alpine',
-  tag: '3.24.3',
-  digest: 'sha256:c26612752c78b18faacd63c7d50f4592c2e7b0f25e0e20e82bd74e465c57ab0d',
-  index: 'sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a',
+  tag: '3.24.4',
+  digest: 'sha256:0f49f331d9212aff11b932863be4eb01cdf962969aa86dab7d1ee21ac6f5f52b',
+  index: 'sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4',
 };
 /**
  * @type {MirroredImage} the k8s in-cluster registry
@@ -833,7 +833,7 @@ export function csiSidecarSetImagePlan(providerId) {
  * Dependabot sees them through .github/image-pins/Dockerfile.
  */
 export const DIAG_BUSYBOX_IMAGE =
-  'busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662';
+  'busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4';
 export const DIAG_NETSHOOT_IMAGE =
   'nicolaka/netshoot:v0.16@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70';
 

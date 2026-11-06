@@ -21,7 +21,7 @@
   "standby": {
     "policy": "with-app-tier",
     "compose": {
-      "services": ["prometheus", "grafana", "loki", "promtail", "postgres-exporter"],
+      "services": ["prometheus", "grafana", "loki", "alloy", "postgres-exporter"],
       "setup": []
     },
     "k8s": [

@@ -5,12 +5,12 @@
 # - Prometheus: Metrics collection and storage
 # - Grafana: Dashboards and visualization
 # - Loki: Log aggregation
-# - Promtail: Docker log shipper
+# - Alloy: Docker log shipper
 # - postgres-exporter: PostgreSQL metrics
 
 services:
   prometheus:
-    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
     container_name: ${PROJECT_NAME:-vibecarbon}-prometheus
     restart: unless-stopped
     command:
@@ -37,7 +37,7 @@ services:
         condition: service_healthy
 
   grafana:
-    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
     container_name: ${PROJECT_NAME:-vibecarbon}-grafana
     restart: unless-stopped
     environment:
@@ -98,7 +98,7 @@ services:
       - loki
 
   loki:
-    image: grafana/loki:3.3.0@sha256:58b60b901255c209d3455d8a1979a3f73d1d09686a0a858c2c93025a969eb550
+    image: grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
     container_name: ${PROJECT_NAME:-vibecarbon}-loki
     restart: unless-stopped
     command: -config.file=/etc/loki/loki-config.yml
@@ -110,28 +110,29 @@ services:
     networks:
       - vibecarbon-network
     healthcheck:
-      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:3100/ready']
+      # The image has no shell and no wget since Loki 3.5.8.
+      test: ['CMD', '/usr/bin/loki', '-health']
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
 
-  promtail:
-    image: grafana/promtail:3.3.0@sha256:5aa128328d6b0b47a41e1fedd3e5e599c02203c0368d2a2ffc736785ba5a22a3
-    container_name: ${PROJECT_NAME:-vibecarbon}-promtail
+  alloy:
+    image: grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4
+    container_name: ${PROJECT_NAME:-vibecarbon}-alloy
     restart: unless-stopped
-    command: -config.file=/etc/promtail/promtail-config.yml
+    # Reads logs through the Docker API, so the socket is the only host path it
+    # needs. The image's default command runs /etc/alloy/config.alloy.
     volumes:
-      - ./volumes/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - ./volumes/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
     networks:
       - vibecarbon-network
     depends_on:
       - loki
 
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:v0.19.1@sha256:e96064f876226d94bb6ce48a4c4b3dd76edba91168ec1ab024e5c4b959310b0f
+    image: prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
     container_name: ${PROJECT_NAME:-vibecarbon}-postgres-exporter
     restart: unless-stopped
     environment:

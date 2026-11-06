@@ -7,8 +7,8 @@ both the Docker Compose and Kubernetes deploy modes.
 
 | File / dir | Purpose |
 |------------|---------|
-| `docker-compose.observability.yml` (+ `.prod.yml`, `.override.yml`) | Compose overlay for Prometheus, Grafana, Loki, Promtail, postgres-exporter |
-| `volumes/prometheus/`, `volumes/loki/`, `volumes/promtail/`, `volumes/grafana/` | Scrape config, log pipeline, datasources, and dashboards (prod + dev variants) |
+| `docker-compose.observability.yml` (+ `.prod.yml`, `.override.yml`) | Compose overlay for Prometheus, Grafana, Loki, Alloy, postgres-exporter |
+| `volumes/prometheus/`, `volumes/loki/`, `volumes/alloy/`, `volumes/grafana/` | Scrape config, log pipeline, datasources, and dashboards (prod + dev variants) |
 | `volumes/db/observability-init.sh` | Creates the least-privilege `observability_ro` Postgres role (see [Security](#security)) |
 | `k8s/base/observability/` | Kubernetes manifests + a kustomization, applied as a SEPARATE unit into the `vibecarbon-observability` namespace (NOT wired into `k8s/base/kustomization.yaml` — see [Security](#security)) |
 
