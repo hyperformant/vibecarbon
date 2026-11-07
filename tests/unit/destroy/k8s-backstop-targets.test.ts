@@ -1,5 +1,5 @@
 /**
- * planDoK8sBackstopTargets — the DO k8s destroy backstop's target list.
+ * planK8sBackstopTargets — the DO k8s destroy backstop's target list.
  *
  * The backstop (destroyK8sTier's DO block) is THE mechanism for reserved-IP
  * release (upstream Pulumi provider defects leak it every run — see the
@@ -13,13 +13,13 @@
  * byte-identical.
  */
 import { describe, expect, it } from 'vitest';
-import { planDoK8sBackstopTargets } from '../../../src/destroy.js';
+import { planK8sBackstopTargets } from '../../../src/destroy.js';
 
 const projectConfig = { projectName: 'proj' };
 
-describe('planDoK8sBackstopTargets', () => {
+describe('planK8sBackstopTargets', () => {
   it('single k8s: one target, names byte-identical to the pre-d4 backstop', () => {
-    const targets = planDoK8sBackstopTargets({
+    const targets = planK8sBackstopTargets({
       plan: { tier: 'k8s', stackEnvs: ['e3'] },
       envConfig: { region: 'nyc3', floatingIp: '203.0.113.7' },
       projectConfig,
@@ -36,7 +36,7 @@ describe('planDoK8sBackstopTargets', () => {
   });
 
   it('single k8s without a persisted region: sshKeyName is null (matches old guard)', () => {
-    const [t] = planDoK8sBackstopTargets({
+    const [t] = planK8sBackstopTargets({
       plan: { tier: 'k8s', stackEnvs: ['e3'] },
       envConfig: { floatingIp: '203.0.113.7' },
       projectConfig,
@@ -46,7 +46,7 @@ describe('planDoK8sBackstopTargets', () => {
   });
 
   it('k8s-ha: two per-stack targets; shared HA key handled elsewhere (sshKeyName null)', () => {
-    const targets = planDoK8sBackstopTargets({
+    const targets = planK8sBackstopTargets({
       plan: { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] },
       envConfig: {
         region: 'nyc3',
@@ -79,7 +79,7 @@ describe('planDoK8sBackstopTargets', () => {
     // failover persists the swap under ha.{primary,standby}.stack — the
     // stack identity ('e4-standby') keeps its own reserved IP regardless of
     // which role currently points at it.
-    const targets = planDoK8sBackstopTargets({
+    const targets = planK8sBackstopTargets({
       plan: { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] },
       envConfig: {
         ha: {
@@ -94,7 +94,7 @@ describe('planDoK8sBackstopTargets', () => {
   });
 
   it('k8s-ha with a pre-swap config lacking .stack: falls back to role-suffix mapping', () => {
-    const targets = planDoK8sBackstopTargets({
+    const targets = planK8sBackstopTargets({
       plan: { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] },
       envConfig: {
         ha: {
@@ -109,11 +109,45 @@ describe('planDoK8sBackstopTargets', () => {
   });
 
   it('missing floatingIp yields null (backstop skips the release, never throws)', () => {
-    const [t] = planDoK8sBackstopTargets({
+    const [t] = planK8sBackstopTargets({
       plan: { tier: 'k8s', stackEnvs: ['e3'] },
       envConfig: { region: 'nyc3' },
       projectConfig,
     });
     expect(t.floatingIp).toBeNull();
+  });
+});
+
+describe('planK8sBackstopTargets on Linode', () => {
+  it('gives Linode the same target names as DigitalOcean, single and HA', () => {
+    const single = {
+      plan: { tier: 'k8s', stackEnvs: ['e3'] },
+      envConfig: { region: 'us-iad', floatingIp: '203.0.113.7' },
+      projectConfig,
+    };
+    expect(planK8sBackstopTargets(single)).toEqual([
+      {
+        stackEnv: 'e3',
+        firewallName: 'proj-e3-firewall',
+        sshKeyName: 'proj-e3-us-iad-key',
+        floatingIp: '203.0.113.7',
+        networkName: 'proj-e3-network',
+      },
+    ]);
+    const ha = planK8sBackstopTargets({
+      plan: { tier: 'k8s-ha', stackEnvs: ['e4-primary', 'e4-standby'] },
+      envConfig: {
+        region: 'us-iad',
+        ha: {
+          primary: { stack: 'e4-primary', floatingIp: '203.0.113.10' },
+          standby: { stack: 'e4-standby', floatingIp: '203.0.113.20' },
+        },
+      },
+      projectConfig,
+    });
+    expect(ha.map((t) => [t.firewallName, t.sshKeyName, t.floatingIp, t.networkName])).toEqual([
+      ['proj-e4-primary-firewall', null, '203.0.113.10', 'proj-e4-primary-network'],
+      ['proj-e4-standby-firewall', null, '203.0.113.20', 'proj-e4-standby-network'],
+    ]);
   });
 });

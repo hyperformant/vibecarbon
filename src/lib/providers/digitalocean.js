@@ -175,6 +175,9 @@ export class DigitalOceanProvider extends BaseProvider {
   // as a pure DNS flip between the two clusters' own reserved IPs.
   static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
+  /** Pulumi destroy has left the k8s reserved IP, VPC, firewall and key behind; destroy sweeps them by name. */
+  static K8S_DESTROY_BACKSTOP = true;
+
   // Droplet regions WITH Spaces availability only — keeps backup/S3 traffic
   // in-region (a region that can host a droplet but not a Spaces bucket
   // would force cross-region backup traffic, which we don't want as a

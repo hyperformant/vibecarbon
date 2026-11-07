@@ -261,6 +261,9 @@ export class LinodeProvider extends BaseProvider {
   // are not yet built or declared.
   static SUPPORTED_TIERS = ['compose', 'compose-ha'];
 
+  /** Pulumi destroy leaves the k8s reserved IP, VPC, firewall and key; destroy sweeps them by name. */
+  static K8S_DESTROY_BACKSTOP = true;
+
   // Instance regions with Object Storage (same doctrine as
   // DigitalOceanProvider.REGIONS). All 16 verified 2026-08-07 via GET
   // /v4/regions capabilities — every one also carries the Metadata capability
