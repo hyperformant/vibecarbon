@@ -1,7 +1,7 @@
 /**
  * Unit tests for lib/deploy/prompts.js resolveDeployMode — the decision that
- * routes a deploy into compose / compose-ha / kubernetes / kubernetes-ha and
- * therefore which license gate fires. The non-interactive branches are pure;
+ * routes a deploy into compose / compose-ha / kubernetes / kubernetes-ha. The
+ * non-interactive branches are pure;
  * the interactive branch is exercised through a mocked clack select.
  */
 
@@ -110,7 +110,7 @@ describe('resolveDeployMode', () => {
       }[];
       expect(options.map((o) => o.value)).toEqual(['compose', 'compose-ha']);
       expect(options.find((o) => o.value === 'compose-ha')?.hint).toContain(
-        'Enterprise resiliency, Fullerene',
+        'Enterprise resiliency',
       );
       clackMock.select.mockClear();
     },
@@ -129,7 +129,7 @@ describe('resolveDeployMode', () => {
     expect(clackMock.select).not.toHaveBeenCalled();
   });
 
-  it('labels each picker choice with the benefit and the tier that unlocks it', async () => {
+  it('labels each picker choice with the benefit it delivers', async () => {
     clackMock.select.mockResolvedValueOnce('compose');
     await resolveDeployMode(noFlags, {});
 
@@ -138,11 +138,11 @@ describe('resolveDeployMode', () => {
       hint: string;
     }[];
     const hintFor = (value: string) => options.find((o) => o.value === value)?.hint ?? '';
-    expect(hintFor('compose')).toContain('Go live, Graphite');
-    expect(hintFor('kubernetes')).toContain('Scale on demand, Graphene');
-    expect(hintFor('kubernetes-ha')).toContain('Enterprise resiliency, Fullerene');
-    // The old copy paywalled Kubernetes at the wrong tier.
-    for (const o of options) expect(o.hint).not.toContain('requires Fullerene');
+    expect(hintFor('compose')).toContain('Go live');
+    expect(hintFor('kubernetes')).toContain('Scale on demand');
+    expect(hintFor('kubernetes-ha')).toContain('Enterprise resiliency');
+    // Tier names are retired from the picker.
+    for (const o of options) expect(o.hint).not.toMatch(/Graphite|Graphene|Fullerene/);
     clackMock.select.mockClear();
   });
 

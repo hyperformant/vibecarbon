@@ -40,33 +40,25 @@ Multi-letter flags are spelled out (`-env`, `-mode`, `-source`). Only `-h`,
 
 ---
 
-## License Requirements
+## Deploy modes
 
-Licensing follows the **deploy scenario**, never the command. No command is
-paid for being that command.
+The mode sets how many servers an environment runs and where they live. You
+choose it per environment at first deploy, and the same app deploys in any of
+them.
 
-| Deploy scenario | License |
-|-----------------|---------|
-| Single-server Docker Compose | None, always free |
-| Kubernetes | Graphene |
-| Kubernetes HA | Fullerene (also covers Compose HA) |
+| Goal | Mode |
+|------|------|
+| Launch | Single-server Docker Compose |
+| Supercharge | Kubernetes |
+| Fortify | Kubernetes HA (Compose HA is the same idea for providers without Kubernetes) |
 
-The subscription is checked on every deploy to a Kubernetes or HA
-environment. A lapsed subscription keeps deploying for 30 days with a
-warning, then pauses those deploys until renewed. Backup, restore,
-failover, and scale never require a subscription. Every other command,
-including all of `configure`, is free in every mode.
-
-Activation writes `.vibecarbon.license` into the project; commit it and
-share it with your team. The key never rotates.
-
-Run `vibecarbon activate <key>` to activate a license.
+You pay your cloud provider directly for the servers in each mode.
 
 ---
 
 # Dev
 
-Local-development primitives. All free, all interactive-by-default.
+Local-development primitives. All interactive-by-default.
 
 ## next
 
@@ -372,7 +364,7 @@ vibecarbon configure cicd prod     # stage 1, plus stage 2 if prod is k8s
 **Stage 1** installs `.github/workflows/vibecarbon-build.yml` and
 `.github/workflows/deploy.yml` if missing, rewrites image references to your
 GitHub owner, and marks `cicdEnabled: true` in `vibecarbon.json`. It runs in
-every deploy mode and is free.
+every deploy mode.
 
 **Stage 2** connects to the cluster, installs Flux, seeds the GitHub
 Environment secrets/vars, uploads `KUBECONFIG_B64`, and triggers the first
@@ -387,7 +379,7 @@ cluster, so there is nothing for it to do on Compose.
 
 Pre-conditions: the `gh` CLI must be authenticated. For stage 2 the cluster
 must already be deployed (`vibecarbon deploy <env>` with `-mode k8s` or
-`-mode k8s-ha`), which itself requires Graphene (k8s) or Fullerene (k8s-ha).
+`-mode k8s-ha`).
 
 After stage 2, future commits to `main` reconcile through Flux automatically.
 The deploy path itself stays local-first: `vibecarbon deploy` continues to
@@ -460,12 +452,7 @@ in the environment, or when `VIBECARBON_TELEMETRY_DISABLED=1` is set.
 
 # Deploy
 
-Cloud infrastructure primitives. `destroy` is always free, in every deploy
-mode. `backup`, `restore`, `failover`, `scale`, `configure`, and `up` never
-require a license either. `deploy` needs no key on single-server Docker
-Compose; deploying to a Kubernetes or HA environment checks the project's
-subscription on every run, first deploy and redeploy alike (Graphene for
-Kubernetes, Fullerene for Kubernetes HA, which also covers Compose HA).
+Cloud infrastructure primitives.
 
 ## deploy
 
@@ -763,8 +750,7 @@ vibecarbon scale prod
 
 # Debug & Access
 
-Operator tools for cluster introspection and access management. Always free,
-no license required.
+Operator tools for cluster introspection and access management.
 
 ## shell
 
@@ -884,71 +870,6 @@ ephemeral IPs that would pollute the list. Either commit a populated
 If you somehow lock yourself out (no Hetzner API token, API unreachable), use
 [`vibecarbon console <node>`](#console): Hetzner's web VNC bypasses the
 firewall entirely.
-
----
-
-# License
-
-## activate
-
-Activate a license key (Graphene or Fullerene). A key looks like
-`vc-<id>-<signature>` and is not tied to a project when you buy it:
-`activate` binds it to the project in the current directory through
-vibecarbon.com, so run it from inside that project's directory. It writes
-`.vibecarbon.license`, which should be committed and shared with your team
-so anyone working on the project can deploy without activating separately.
-
-{/* BEGIN GENERATED: flags activate */}
-_No flags beyond -h and -v._
-{/* END GENERATED: flags activate */}
-
-```bash
-# Prompts for key
-vibecarbon activate
-
-# Key seeded
-vibecarbon activate vc-xxxxxxxxxxxxxxxx-signature...
-```
-
-A key holds one project at a time; to move it to another project, release
-it first with [`deactivate`](#deactivate). The key never rotates; the
-subscription is checked on every deploy to a Kubernetes or HA environment.
-A lapsed subscription keeps deploying for 30 days with a warning, then
-pauses those deploys until renewed. Subscribe at
-[vibecarbon.com/pricing](https://vibecarbon.com/pricing).
-
----
-
-## deactivate
-
-Release the key from this project so it can be activated somewhere else.
-Vibecarbon emails a release link to the address that bought the key.
-Nothing changes until you click it; the link works once and expires after
-an hour.
-
-```bash
-# Interactive: prompts for confirmation, then emails the link
-vibecarbon deactivate
-
-# Skip confirmation
-vibecarbon deactivate -y
-
-# From any directory, when there is no .vibecarbon.license to read
-vibecarbon deactivate vc-xxxxxxxxxxxxxxxx-signature...
-
-# Remove only the local file; nothing is sent, the key stays bound
-vibecarbon deactivate -rm
-```
-
-{/* BEGIN GENERATED: flags deactivate */}
-| Flag | Description |
-|------|-------------|
-| `-y` | Skip confirmation prompt |
-| `-rm` | Remove the local .vibecarbon.license only; no request is sent |
-{/* END GENERATED: flags deactivate */}
-
-Clicking the link unbinds the key. The local `.vibecarbon.license` stays
-where it is until you remove it with `deactivate -rm`.
 
 ---
 

@@ -1,5 +1,5 @@
 /**
- * Issuer names shared by the free TLS snapshot code and the k8s-ha engine.
+ * Issuer names shared by the TLS snapshot code and the k8s-ha engine.
  * An import-free leaf so neither side reaches into the other's internals.
  */
 

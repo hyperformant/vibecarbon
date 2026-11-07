@@ -132,13 +132,12 @@ const DELTA_MARKERS: Partial<Record<DeployMode, number>> = { 'compose-ha': 2 };
  *   the select/refresh before `up`, and each resource's own time, which sum
  *   to more than the wall clock when resources run in parallel);
  * - markers nested inside another or outside `deploy.total`: the state seed
- *   inside `deploy.preamble.s3Setup`, and `deploy.preamble.subscription`,
- *   which runs while config is gathered, before `deploy.total` starts;
+ *   inside `deploy.preamble.s3Setup`;
  * - the first-boot breakdown (`deploy.<prefix>.boot.*`, read back from each
  *   node after its ready wait): it splits time the ready wait already holds.
  */
 const NOT_SERIAL =
-  /^(cli\.)?deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|setupFan$|\.iac\.upStack(\.(primary|standby))?\.(prepare|resource\..+)$|^deploy\.preamble\.(s3Setup\.stateSeed|subscription)$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$|\.boot\./;
+  /^(cli\.)?deploy\.total$|\.full$|^deploy\.ha\.k8s\.(primary|standby)$|\.fan$|setupFan$|\.iac\.upStack(\.(primary|standby))?\.(prepare|resource\..+)$|^deploy\.preamble\.s3Setup\.stateSeed$|^deploy\.image\.delta$|\.basePull$|^deploy\.compose\.imagesPull$|^deploy\.image\.transfer$|^deploy\.ha\.replication\.transportEarly$|\.boot\./;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
 const ANSI = /\x1b\[[0-9;]*m/g;

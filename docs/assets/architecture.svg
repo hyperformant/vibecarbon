@@ -64,7 +64,7 @@
   <rect x="48" y="170" width="228" height="3" rx="1.5" fill="#5EEAD4"/>
   <text x="162" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">compose</text>
   <text x="162" y="248" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">one server</text>
-  <text x="162" y="271" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" font-weight="700" letter-spacing="0.5" fill="#5EEAD4">Graphite · free license</text>
+  <text x="162" y="271" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" font-weight="700" letter-spacing="0.5" fill="#5EEAD4">Launch</text>
 
   <!-- k8s -->
   <rect x="314" y="170" width="252" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
@@ -72,7 +72,7 @@
   <text x="440" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">k8s</text>
   <text x="440" y="238" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">k3s cluster</text>
   <text x="440" y="256" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">autoscaling workers</text>
-  <text x="440" y="277" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" font-weight="700" letter-spacing="0.5" fill="#2DD4BF">Graphene</text>
+  <text x="440" y="277" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" font-weight="700" letter-spacing="0.5" fill="#2DD4BF">Supercharge</text>
 
   <!-- k8s-ha -->
   <rect x="592" y="170" width="252" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
@@ -80,7 +80,7 @@
   <text x="718" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">k8s-ha</text>
   <text x="718" y="238" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">multi-region</text>
   <text x="718" y="256" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">one-command failover</text>
-  <text x="718" y="277" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" font-weight="700" letter-spacing="0.5" fill="#0D9488">Fullerene</text>
+  <text x="718" y="277" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" font-weight="700" letter-spacing="0.5" fill="#0D9488">Fortify</text>
   <rect x="802" y="182" width="30" height="18" rx="9" fill="none" stroke="#0D9488" stroke-opacity="0.7"/>
   <text x="817" y="195" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9" font-weight="700" letter-spacing="1" fill="#0D9488">HA</text>
 </g>

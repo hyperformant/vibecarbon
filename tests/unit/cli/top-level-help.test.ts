@@ -14,7 +14,6 @@ const HEADINGS: Record<string, string> = {
   dev: 'DEV COMMANDS',
   deploy: 'DEPLOY COMMANDS',
   debug: 'DEBUG COMMANDS',
-  license: 'LICENSE COMMANDS',
 };
 
 /** Lines belonging to a heading's section (until the next blank line). */

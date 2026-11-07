@@ -7,9 +7,8 @@
  * manifest, and a unit test (k8s-db-statefulset.test.ts) pins the two
  * together.
  *
- * A free leaf module on purpose: the backup, restore, replication and status
- * code outside src/lib/deploy/k8s/ needs the same names, and the paid-boundary
- * guard (src/lib/licensing/paid-surface.js) keeps that code from importing
+ * A leaf module on purpose: the backup, restore, replication and status
+ * code outside src/lib/deploy/k8s/ needs the same names without importing
  * engine internals.
  */
 

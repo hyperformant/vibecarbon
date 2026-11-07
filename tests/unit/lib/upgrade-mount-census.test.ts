@@ -29,9 +29,14 @@ const CARBON = join(__dirname, '../../../carbon');
  * failed this census on any checkout that had one.
  */
 function templateFiles(): string[] {
+  // Inside a git hook, GIT_DIR points at the repository without a work tree,
+  // which makes git treat CARBON as the tree root and list its node_modules
+  // (no root .gitignore applies there). Run it as a plain invocation.
+  const { GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...env } = process.env;
   return execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
     cwd: CARBON,
     encoding: 'utf-8',
+    env,
   })
     .split('\n')
     .filter((f) => f && existsSync(join(CARBON, f)))

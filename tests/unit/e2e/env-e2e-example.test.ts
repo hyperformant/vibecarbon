@@ -78,9 +78,6 @@ describe('tests/.env.e2e.example is value-free', () => {
         'SCALEWAY_STORAGE_REGION',
         'DOCKER_HUB_USERNAME',
         'DOCKER_HUB_TOKEN',
-        // Not a provider credential: the Ed25519 signing key the local
-        // licence-API stub signs real verdict tokens with.
-        'VIBECARBON_LICENSE_PRIVATE_KEY',
       ].sort(),
     );
   });

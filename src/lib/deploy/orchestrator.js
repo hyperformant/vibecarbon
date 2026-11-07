@@ -2074,7 +2074,7 @@ export async function executeDeployment(args, gatheredConfig) {
 
   // The k8s tiers' A record (k8s/dns-record.js): single k8s starts it from
   // deployK3s's onInfraReady; the post-deploy block below finishes it. Loaded
-  // for the k8s tiers only: compose never touches the paid k8s engine.
+  // for the k8s tiers only: compose never touches the k8s engine.
   const k8sDns = isK8sTier(tier)
     ? (await import('./k8s/index.js')).createK8sDnsWriter({
         domain,

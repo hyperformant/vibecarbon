@@ -44,4 +44,4 @@ ENTRYPOINT ["node", "src/autoscaler/server.js"]
 LABEL org.opencontainers.image.title="carbon-autoscaler" \
       org.opencontainers.image.description="Vibecarbon's cloud-agnostic autoscaler backend: it implements the Kubernetes cluster-autoscaler externalgrpc CloudProvider contract on top of vibecarbon's provider registry, so one unmodified cluster-autoscaler can add and remove nodes on any cloud vibecarbon supports. Runs as a sidecar to the mirrored upstream cluster-autoscaler, pinned to the k3s control-plane node. Not a general-purpose autoscaler — it speaks only to the cluster it was deployed alongside." \
       org.opencontainers.image.source="https://github.com/hyperformant/vibecarbon" \
-      org.opencontainers.image.licenses="FSL-1.1-MIT"
+      org.opencontainers.image.licenses="MIT"

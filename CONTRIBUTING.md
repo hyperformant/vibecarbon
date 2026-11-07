@@ -25,7 +25,7 @@ pnpm test:prepush   # lint + unit + integration
 - **Tests are required.** New behavior needs a test; a bug fix needs a
   regression test. Where a fix closes a class of problem, add a census/guard
   test that asserts the property across every member, not just the one you hit.
-- **Lint must pass:** `pnpm lint` (shell-safety, stale-deploy, paid-boundary,
+- **Lint must pass:** `pnpm lint` (shell-safety, stale-deploy,
   Biome, and type-checks).
 - Follow the existing style: single-dash CLI flags, interactive-by-default
   commands, no secrets in the tree.
@@ -40,9 +40,7 @@ pnpm test:prepush   # lint + unit + integration
 
 ## Licensing of contributions
 
-Vibecarbon is distributed under the **Functional Source License, Version 1.1,
-MIT Future License (`FSL-1.1-MIT`)**. By submitting a contribution you agree
-that it is licensed under the same terms, including the MIT future-license
-grant. That is, your contribution may be relicensed under MIT on the schedule
-the FSL defines, alongside the rest of the project. Do not submit code you are
-not authorized to license this way.
+Vibecarbon is distributed under the MIT license (see [LICENSE](./LICENSE)).
+By submitting a contribution you agree that it is licensed under the same
+terms, MIT in, MIT out. Do not submit code you are not authorized to license
+this way.

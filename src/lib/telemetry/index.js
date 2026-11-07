@@ -30,7 +30,7 @@ function projectContext(cwd) {
       return { project_id: null, provider: null, deploy_target: null };
     }
     const manifest = loadManifest(cwd);
-    // Lazy backfill, shared with the licensing gate — see ensureProjectId().
+    // Lazy backfill — see ensureProjectId().
     const projectId = ensureProjectId(manifest, cwd);
     const envs = manifest.environments || {};
     const envCfg = envs.prod || envs[Object.keys(envs)[0]] || {};

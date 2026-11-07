@@ -21,7 +21,6 @@ import { formatExamples, renderCommandList } from './lib/cli/help.js';
 import { enterJsonMode, wantsJson } from './lib/cli/json-mode.js';
 import { c, link } from './lib/colors.js';
 import { dbImageOverrideProblem, setDbImageWarningSink } from './lib/images.js';
-import { shouldGate } from './lib/licensing/gate.js';
 import { applyNetworkDefaults } from './lib/net-defaults.js';
 import { perfEnabled, perfTimer } from './lib/perf.js';
 import { bootstrapOperatorEnv } from './lib/project.js';
@@ -148,8 +147,6 @@ export const KNOWN_COMMANDS = [
   'scale',
   'upgrade',
   'configure',
-  'activate',
-  'deactivate',
   'shell',
   'diagnose',
   'console',
@@ -249,25 +246,6 @@ async function main() {
   // `[perf] cli.<command>.total <ms>ms` when VIBECARBON_PERF=1 is set — the
   // e2e runner forces it on so we always have total + sub-step
   // breakdowns per CLI invocation.
-
-  // Central license gate chokepoint: any command classified 'paid' in
-  // COMMAND_GATES is gated HERE, pre-dispatch, so it can never ship
-  // unguarded (COMMAND_GATES must classify every KNOWN_COMMAND — enforced
-  // by tests/unit/licensing/command-gates.test.ts). No command is
-  // currently 'paid', because licensing follows the deploy tier: `deploy`
-  // gates itself in-flow via requireDeployEntitlement() once its deploy mode
-  // is known, and backup/restore/failover/scale never gate at all (see
-  // src/lib/licensing/gate.js). The chokepoint stays wired up for a future
-  // command-wide paid feature.
-  // Ordering contract: the canonical "not in a project" refusal must win
-  // over the license upsell (all paid commands are project-scoped), and
-  // -h/-v invocations are never gated — shouldGate() handles the bypass.
-  if (shouldGate(command, subcommandArgs)) {
-    const { assertInProjectDir } = await import('./lib/project-guard.js');
-    assertInProjectDir();
-    const { requireLicense } = await import('./lib/licensing/index.js');
-    requireLicense(command);
-  }
 
   // JSON mode, decided once here for every command: from now on stdout is
   // reserved for the JSON document (written via writeJson), and clack output,
@@ -386,18 +364,6 @@ async function main() {
       case 'configure': {
         const configureModule = await import('./configure.js');
         await configureModule.run(subcommandArgs);
-        break;
-      }
-
-      case 'activate': {
-        const activateModule = await import('./activate.js');
-        await activateModule.runActivate(subcommandArgs);
-        break;
-      }
-
-      case 'deactivate': {
-        const activateModule = await import('./activate.js');
-        await activateModule.runDeactivate(subcommandArgs);
         break;
       }
 

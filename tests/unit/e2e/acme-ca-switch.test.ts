@@ -68,9 +68,7 @@ describe('E2E_ACME_CA switch', () => {
   });
 
   const flipped = (value?: string) => {
-    const env: NodeJS.ProcessEnv = {
-      VIBECARBON_LICENSE_PRIVATE_KEY: process.env.VIBECARBON_LICENSE_PRIVATE_KEY,
-    };
+    const env: NodeJS.ProcessEnv = {};
     if (value) env.E2E_ACME_CA = value;
     return env;
   };

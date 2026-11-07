@@ -104,10 +104,6 @@ const ALIAS_ALLOWLIST: Record<string, string> = {
     'supportsHyperlinks reads terminal facts only: FORCE_HYPERLINK/NO_COLOR/FORCE_COLOR/VIBECARBON_PLAIN/CI/TERM/TERM_PROGRAM/VTE_VERSION/WT_SESSION/KONSOLE_VERSION',
   [join('lib', 'cli', 'progress.js')]:
     'shouldAnimateSpinner reads TTY facts: VIBECARBON_PLAIN/NO_COLOR/TERM/CI',
-  [join('lib', 'licensing', 'check.js')]:
-    'env.VIBECARBON_API_BASE (host override) is the only read, documented in its header',
-  [join('lib', 'licensing', 'bind.js')]:
-    'env.VIBECARBON_API_BASE (host override) is the only read, documented in its header',
   [join('lib', 'telemetry', 'index.js')]:
     'env.VIBECARBON_API_BASE (host override) is the only read',
   [join('lib', 'telemetry', 'state.js')]:

@@ -27,7 +27,6 @@ const ROOT = process.cwd();
 const SURFACES = [
   'README.md',
   'FEATURES.md',
-  'TERMS.md',
   'AGENTS.md',
   'carbon/AGENTS.md',
   'docs/technical.md',

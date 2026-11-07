@@ -79,8 +79,7 @@ export function loadManifest(cwd = process.cwd()) {
  * The project's stable id, backfilling one into `.vibecarbon.json` when the
  * project doesn't have one yet.
  *
- * The id identifies a project to per-project licensing (a v2 key is issued
- * for exactly one id) and to telemetry. It is created lazily, on first need,
+ * The id identifies a project to telemetry. It is created lazily, on first need,
  * rather than at `create` time, so projects scaffolded before ids existed
  * pick one up silently.
  *

@@ -347,9 +347,6 @@ Destructive and financial API endpoints in the generated app require an `aal2`
   member to `OWNER` (ownership transfer)
 - `POST /api/v1/billing/checkout`, `/portal`, `/setup`
 
-The public, unauthenticated `POST /api/v1/billing/license-checkout` is **not**
-gated by design (it has no session to elevate).
-
 **Inert by default.** The gate activates only when `app_settings.mfa_enabled` is
 `{ "enabled": true }` (seeded to `false`). While MFA is globally disabled the
 gate is a no-op, so existing deployments are unaffected until an operator turns

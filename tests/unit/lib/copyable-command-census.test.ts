@@ -90,7 +90,7 @@ describe('copyable commands are never followed by punctuation', () => {
       "'then rerun vibecarbon restore.',",
       `\`run vibecarbon deploy ${env}.\``,
       `\`then rerun vibecarbon deploy: ${env}\``,
-      "'No license here. Pass the key: vibecarbon deactivate <key>.',",
+      "'No project here. Pass the name: vibecarbon destroy <env>.',",
       `"&& docker compose start app'.",`,
       `\`run vibecarbon deploy ${env} first, which points it\``,
       "'check kubectl get pods -n vibecarbon, then retry',",

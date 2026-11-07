@@ -8,17 +8,17 @@ import { useTranslation } from 'react-i18next';
 import { CTAFooter } from '../components/CTAFooter';
 import { FilmGrainOverlay } from '../components/effects/FilmGrainOverlay';
 import { FAQSection } from '../components/FAQSection';
+import { GrowthSection } from '../components/GrowthSection';
 import Hero from '../components/Hero';
 import { LogoStrip } from '../components/LogoStrip';
 import { NewsletterSignup } from '../components/NewsletterSignup';
 import { PillarsSection } from '../components/PillarsSection';
-import { PricingSection } from '../components/PricingSection';
 import { SEO } from '../components/SEO';
 import { StackSection } from '../components/StackSection';
 import { ScrollSection } from '../components/scroll/ScrollSection';
 import { ScrollytellingProvider } from '../components/scroll/ScrollytellingProvider';
-import FooterSection from '../components/sections/footer';
 import VendorMatrix from '../components/sections/vendor-matrix';
+import { VibecarbonFooter } from '../components/VibecarbonFooter';
 import { WorkflowSection } from '../components/WorkflowSection';
 
 function VibecarbonCTAFooter() {
@@ -34,7 +34,7 @@ function VibecarbonCTAFooter() {
 
         <NewsletterSignup className="justify-center max-w-md mx-auto" />
       </CTAFooter>
-      <FooterSection />
+      <VibecarbonFooter />
     </>
   );
 }
@@ -43,7 +43,7 @@ export default function VibecarbonHome() {
   return (
     <ScrollytellingProvider>
       <div className="relative min-h-screen">
-        <SEO description="Vibecarbon — full-stack apps in minutes: auth, billing, security, AI-guardrails, and powerful automations built-in." />
+        <SEO description="Full-stack apps in minutes on the VPS provider of your choice. Auth, billing, and AI-guardrails built-in, with automated backup, restore, scale, replication, and failover." />
         <FilmGrainOverlay opacity={0.025} />
 
         <ScrollSection id="hero" disableEffects>
@@ -69,8 +69,8 @@ export default function VibecarbonHome() {
 
           <LogoStrip />
 
-          <ScrollSection id="pricing">
-            <PricingSection />
+          <ScrollSection id="grow">
+            <GrowthSection />
           </ScrollSection>
 
           <ScrollSection id="faq">

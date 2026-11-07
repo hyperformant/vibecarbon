@@ -16,14 +16,6 @@ function entry(key: string) {
 
 const hetzner = entry('HETZNER_API_TOKEN');
 const stripe = entry('STRIPE_SECRET_KEY');
-const pem = {
-  key: 'X_PEM',
-  class: 'operator-secret',
-  feature: 'e2e',
-  kind: 'pem',
-  where: 'tests/.env.e2e',
-  scope: 'e2e',
-} as const;
 const good64 = 'a'.repeat(64);
 
 describe('normalizeOperatorValue', () => {
@@ -45,18 +37,8 @@ describe('normalizeOperatorValue', () => {
     });
     expect(normalizeOperatorValue('Bearer x', entry('SMTP_HOST')).value).toBe('Bearer x');
   });
-  it('expands \\n escapes and decodes base64 for pem', () => {
-    const p = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----';
-    expect(normalizeOperatorValue(p.replace(/\n/g, '\\n'), pem).value).toBe(p);
-    expect(normalizeOperatorValue(Buffer.from(p).toString('base64'), pem).value).toBe(p);
-    expect(normalizeOperatorValue(p, pem).fixed).toEqual([]);
-  });
   it('returns empty for null/undefined', () => {
     expect(normalizeOperatorValue(undefined, hetzner)).toEqual({ value: '', fixed: [] });
-  });
-  it('leaves a non-PEM value untouched rather than trusting a garbage base64 decode', () => {
-    const garbage = 'plainly-not-a-pem-or-base64!!';
-    expect(normalizeOperatorValue(garbage, pem)).toEqual({ value: garbage, fixed: [] });
   });
 });
 
@@ -164,13 +146,13 @@ describe('validateOperatorValue', () => {
       `VITE_GITHUB_REPO_URL looks wrong: expected a URL, got ${bareUrl.length} characters`,
     );
   });
-  it('pins the shape-less port/email/cidr-list/pem fallbacks (entries constructed inline, no shape)', () => {
+  it('pins the shape-less port/email/cidr-list fallbacks (entries constructed inline, no shape)', () => {
     const portEntry = {
       key: 'T_PORT',
       class: 'operator-secret',
       feature: 'e2e',
       kind: 'port',
-      where: 'tests/.env.e2e',
+      where: '.env',
       scope: 'e2e',
     } as const;
     expect(validateOperatorValue('8080', portEntry)).toBeNull();
@@ -185,7 +167,7 @@ describe('validateOperatorValue', () => {
       class: 'operator-secret',
       feature: 'e2e',
       kind: 'email',
-      where: 'tests/.env.e2e',
+      where: '.env',
       scope: 'e2e',
     } as const;
     expect(validateOperatorValue('a@b.co', emailEntry)).toBeNull();
@@ -198,7 +180,7 @@ describe('validateOperatorValue', () => {
       class: 'operator-secret',
       feature: 'e2e',
       kind: 'cidr-list',
-      where: 'tests/.env.e2e',
+      where: '.env',
       scope: 'e2e',
     } as const;
     // A5 (review 2026-09-19): nobody documents a format for this list and the
@@ -233,13 +215,6 @@ describe('validateOperatorValue', () => {
       validateOperatorValue('2001:db8::1/128, 203.0.113.5', entry('ALLOWED_SSH_IPS')),
     ).toBeNull();
     expect(validateOperatorValue('garbage', entry('ALLOWED_SSH_IPS'))).toContain(cidrDescribe);
-
-    const p = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----';
-    expect(validateOperatorValue(p, pem)).toBeNull();
-    const garbage = 'plainly-not-a-pem-or-base64!!';
-    expect(validateOperatorValue(garbage, pem)).toBe(
-      `X_PEM looks wrong: expected a PEM block (or its base64 encoding), got ${garbage.length} characters`,
-    );
   });
 });
 

@@ -10,16 +10,16 @@ import { Button } from '@/components/ui/button';
 // Button follows suit.
 describe('Button disabled state', () => {
   it('sets the native disabled attribute and dims the button', () => {
-    render(<Button disabled>Get Fullerene</Button>);
-    const button = screen.getByRole('button', { name: 'Get Fullerene' });
+    render(<Button disabled>Get started</Button>);
+    const button = screen.getByRole('button', { name: 'Get started' });
     expect(button).toBeDisabled();
     expect(button.className).toContain('disabled:opacity-50');
     expect(button.className).toContain('disabled:pointer-events-none');
   });
 
   it('leaves an enabled button interactive', () => {
-    render(<Button>Get Fullerene</Button>);
-    const button = screen.getByRole('button', { name: 'Get Fullerene' });
+    render(<Button>Get started</Button>);
+    const button = screen.getByRole('button', { name: 'Get started' });
     expect(button).toBeEnabled();
     expect(button.className).toContain('cursor-pointer');
   });

@@ -26,7 +26,6 @@ const FETCH_TRIPWIRE = join(HERE, '_fixtures', 'fetch-tripwire.mjs');
  * absence is what proves a Gate-1 refusal happened before any of that ran,
  * not just before provisioning. */
 const PAST_GATE_1 = [
-  "Checking this project's subscription", // licence check (paid tiers only)
   'Generating package-lock.json', // step 1b, real npm install
   'Checking operator IP access', // orchestrator, well past both
 ];

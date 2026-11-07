@@ -81,10 +81,8 @@ tests/results/.current-batch.pid
 # Pattern-2 keep-alive rig sentinels — tracked rig coordinates per mode
 tests/results/.rig-*.json
 
-# License keys (NEVER commit private keys)
+# Private keys (NEVER commit)
 *.key
-vibecarbon-license.*
-scripts/generate-license-keypair.js
 
 # Font cache for scripts/banner-generator.py — fetched on demand, never vendored
 .banner-fonts/

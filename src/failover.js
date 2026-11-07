@@ -3257,9 +3257,8 @@ export async function run(args) {
 
   introCommand('failover');
 
-  // License-gates before any paid work (including the operator-IP firewall
-  // check below). Single-server Compose stays free — it only ever reaches
-  // failoverSingleServer(), a printed recovery guide.
+  // Single-server Compose only ever reaches failoverSingleServer(), a
+  // printed recovery guide.
   const { envName, envConfig } = await resolveEnvContext({
     actionVerb: 'fail over',
     envRequirement: 'name an environment to fail over',

@@ -49,7 +49,7 @@ const DEFAULT_COLUMNS: FooterColumnProps[] = [
     title: 'Product',
     links: [
       { text: 'Features', href: '#features' },
-      { text: 'Pricing', href: '#pricing' },
+      { text: 'Pricing', href: '/pricing' },
       { text: 'Changelog', href: '/changelog' },
     ],
   },

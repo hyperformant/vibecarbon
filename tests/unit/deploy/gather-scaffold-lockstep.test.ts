@@ -42,19 +42,20 @@ vi.mock('../../../src/lib/config.js', async (orig) => ({
     environments: { prod: {} },
   }),
 }));
-const entitlement = vi.hoisted(() => vi.fn(async () => undefined));
-vi.mock('../../../src/lib/licensing/index.js', () => ({ requireDeployEntitlement: entitlement }));
 vi.mock('../../../src/lib/telemetry/update-check.js', () => ({ printUpdateNotice: vi.fn() }));
 vi.mock('../../../src/lib/deploy/delta.js', () => ({
   collectDeployDelta: () => ({}),
   formatDeployDeltaLines: () => [],
 }));
-// The real assertScaffoldSupportsRoleFile; only the operator-credential gate
-// (its own tests) is inert.
-vi.mock('../../../src/lib/deploy/preflight.js', async (orig) => ({
-  ...((await orig()) as Record<string, unknown>),
-  assertOperatorConfig: vi.fn(),
-}));
+// The real assertScaffoldSupportsRoleFile, wrapped in a spy so the test can
+// read the tier it was called with; only the operator-credential gate (its
+// own tests) is inert.
+const roleFile = vi.hoisted(() => vi.fn());
+vi.mock('../../../src/lib/deploy/preflight.js', async (orig) => {
+  const real = (await orig()) as Record<string, (...a: unknown[]) => unknown>;
+  roleFile.mockImplementation(real.assertScaffoldSupportsRoleFile);
+  return { ...real, assertOperatorConfig: vi.fn(), assertScaffoldSupportsRoleFile: roleFile };
+});
 vi.mock('../../../src/lib/ci-setup.js', () => ({ ciAvailable: () => false }));
 
 import { gatherDeploymentConfig } from '../../../src/lib/deploy/prompts.js';
@@ -108,8 +109,7 @@ afterEach(() => {
   restoreCatalog();
   vi.restoreAllMocks();
   for (const fn of Object.values(later)) fn.mockClear();
-  for (const fn of [clackMock.select, clackMock.text, clackMock.password, entitlement])
-    fn.mockClear();
+  for (const fn of [clackMock.select, clackMock.text, clackMock.password, roleFile]) fn.mockClear();
   clackMock.log.error.mockClear();
 });
 
@@ -119,7 +119,7 @@ describe('deploy: gatherDeploymentConfig refuses a scaffold that predates the wa
   it.each([
     ['compose', { compose: true }],
     ['k8s-ha', { k8s: true, ha: true }],
-  ])('%s: refuses right after the tier is known, before any later prompt', async (_t, mode) => {
+  ])('%s: refuses right after the tier is known, before any later prompt', async (tier, mode) => {
     project(true);
     const err = await gatherDeploymentConfig({
       env: 'prod',
@@ -130,8 +130,9 @@ describe('deploy: gatherDeploymentConfig refuses a scaffold that predates the wa
     }).catch((e) => e);
     expect(String(err)).toMatch(/exit 1/);
     expect(errorLines()).toEqual([REFUSAL]);
-    // The tier was resolved (the entitlement gate ran on it) ...
-    expect(entitlement).toHaveBeenCalledTimes(1);
+    // The tier was resolved and the check ran on it ...
+    expect(roleFile).toHaveBeenCalledTimes(1);
+    expect(roleFile.mock.calls[0][1]).toBe(tier);
     // ... and nothing after it: no token, catalog, S3 key, select or text prompt.
     for (const [name, fn] of Object.entries(later)) {
       expect(fn, `${name} ran before the refusal`).not.toHaveBeenCalled();

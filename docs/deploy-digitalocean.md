@@ -29,7 +29,6 @@ This guide covers setup prerequisites, cloud resource handling, and operational 
 3. **Spaces Access Key & Secret Key**: Control Panel → API → Spaces Access Keys. Used for the dedicated Pulumi state bucket and `wal-g` S3 database backups.
 4. **A domain** you control, for the application URL and Let's Encrypt TLS certificates.
 5. **Docker running locally**: images are built on your machine and pushed over SSH (`local` build mode).
-6. **A license for Kubernetes and Kubernetes HA**: single-server Docker Compose deploys need no license (Graphite); `k8s` needs a Graphene subscription, `k8s-ha` needs Fullerene, which also covers `compose-ha`.
 
 Vibecarbon does not install DigitalOcean's Droplet Console agent, which keeps first boot about a minute faster per node. The in-browser Droplet Console is unavailable on new Droplets; SSH and DigitalOcean's Recovery Console still work.
 

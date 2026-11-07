@@ -427,7 +427,7 @@
   - GitHub secrets management via `gh secret set`
   - Deployment monitoring via `gh run list` polling
 - Pulumi programs for all five providers' infrastructure, and Cloudflare DNS
-- Flux GitOps support on the Kubernetes modes, opt-in via `vibecarbon configure cicd <env>` after a cluster is up; deploys themselves stay local-first. The GitHub Actions build/deploy workflows the same command installs are free in every mode
+- Flux GitOps support on the Kubernetes modes, opt-in via `vibecarbon configure cicd <env>` after a cluster is up; deploys themselves stay local-first. The GitHub Actions build/deploy workflows the same command installs work in every mode
 - Pod autoscaling via Kubernetes HPA (2-10 replicas); worker nodes and server sizes scale via `vibecarbon scale`
 
 ## Observability (add-on)

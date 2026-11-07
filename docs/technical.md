@@ -495,13 +495,13 @@ The deploy mode sets how many servers an environment runs: one, a primary and a
 standby, a cluster, or a cluster plus its standby region. Check your provider's
 current pricing for the server types you select at deploy time.
 
-| Option | Tier | Description |
+| Option | Goal | Description |
 |--------|------|-------------|
-| Single VPS | Graphite (free) | Docker Compose on a single VPS |
-| Single K8s | Graphene | Single-region k3s cluster |
-| Multi-Region K8s HA | Fullerene | k3s primary + standby clusters with PG streaming replication + one-command failover |
+| Single VPS | Launch | Docker Compose on a single VPS |
+| Single K8s | Supercharge | Single-region k3s cluster |
+| Multi-Region K8s HA | Fortify | k3s primary + standby clusters with PG streaming replication + one-command failover |
 
-Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`.
+Compose HA gives a primary and a standby for providers without Kubernetes; select it explicitly with `-mode compose-ha`.
 
 Mode support by provider (same facts as the README architecture diagram):
 

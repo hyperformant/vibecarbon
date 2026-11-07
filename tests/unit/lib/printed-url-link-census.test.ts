@@ -61,8 +61,6 @@ const ALLOW: { why: string; sites: string[] }[] = [
       'src/lib/deploy/orchestrator.js url https://{*}/api/health',
       'src/lib/deploy/orchestrator.js curlVerbose https://{*}/api/health',
       'src/lib/deploy/orchestrator.js curlPodIp https://{*}/api/health',
-      'src/lib/licensing/check.js base https://vibecarbon.com',
-      'src/lib/licensing/bind.js base https://vibecarbon.com',
       'src/lib/telemetry/index.js apiBase https://vibecarbon.com',
       'src/lib/telemetry/update-check.js base https://vibecarbon.com',
       'src/lib/ci-setup.js res https://ghcr.io/token?scope=repository:{*}/{*}:pull',

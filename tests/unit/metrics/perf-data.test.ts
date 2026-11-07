@@ -440,7 +440,7 @@ ${UNIFIED_PERF_TABLE_MARKERS.end}
 
 ## License
 
-FSL-1.1-MIT.
+MIT.
 `;
 
 describe('patchReadmeUnifiedPerfTable', () => {

@@ -123,14 +123,11 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
   const examplePath = join(process.cwd(), 'tests', '.env.e2e.example');
   const exampleKeys = Object.keys(parseDotenv(readFileSync(examplePath, 'utf-8')));
 
-  // DOCKER_HUB_* and VIBECARBON_LICENSE_PRIVATE_KEY were both excluded here
-  // before the operator config hygiene pass registered them (DOCKER_HUB_* as
-  // operator-shell-level, where: 'operator shell'; VIBECARBON_LICENSE_PRIVATE_KEY
-  // as where: 'tests/.env.e2e' — the docs census (env-docs-census.test.ts)
-  // needed a registry row to generate its '# format:' line). Both are now
-  // registry-backed and flow through the parity check below like any other
-  // operator-secret key, so this set is currently empty — kept as the place
-  // a genuinely non-registry example key would go.
+  // DOCKER_HUB_* were excluded here before the operator config hygiene pass
+  // registered them (operator-shell-level, where: 'operator shell'). They are
+  // now registry-backed and flow through the parity check below like any
+  // other operator-secret key, so this set is currently empty — kept as the
+  // place a genuinely non-registry example key would go.
   const NON_REGISTRY_EXAMPLE_KEYS = new Set();
 
   // Operator-secret keys that are NOT per-provider e2e credential tokens this

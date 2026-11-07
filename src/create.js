@@ -973,6 +973,10 @@ async function bootstrap(cliArgs) {
   const readme = generateReadme(projectName, packageManager);
   writeFileSync(join(projectDir, 'README.md'), readme);
 
+  // The project is a copy of the MIT-licensed template, and MIT requires the
+  // notice to travel with copies.
+  copyTemplate('LICENSE', join(projectDir, 'LICENSE'), variables);
+
   // AI development experience files
   copyTemplate('AGENTS.md', join(projectDir, 'AGENTS.md'), variables);
   copyTemplate('CLAUDE.md', join(projectDir, 'CLAUDE.md'), variables);

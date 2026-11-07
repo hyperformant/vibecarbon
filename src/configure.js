@@ -89,7 +89,7 @@ export const SPEC = {
     '',
     'CICD SUBCOMMAND',
     '  cicd         Install the GitHub Actions build + deploy workflows.',
-    '               Works in every deploy mode, and is free.',
+    '               Works in every deploy mode.',
     '  cicd <env>   The same, then layer Flux GitOps onto <env> when it is a',
     '               k8s/k8s-ha cluster. Compose deploys by push from Actions',
     '               and needs no Flux, so naming a Compose env just does the',
@@ -1512,12 +1512,8 @@ async function main(cliArgs) {
  *   vibecarbon configure cicd          Stage 1 only. Every mode.
  *   vibecarbon configure cicd <env>    Stage 1, then Stage 2 if <env> is k8s.
  *
- * NOT license-gated. Stage 1 is free in every mode, and Stage 2 is reachable
- * only on k8s / k8s-ha environments, which already required Fullerene at
- * `deploy` time. A check here would gate a command rather than a scenario,
- * and would fire before the mode is known — which is exactly how this used to
- * show Compose users a paywall for a free feature they were already entitled
- * to.
+ * Stage 1 runs in every mode, and Stage 2 is reachable only on k8s / k8s-ha
+ * environments.
  *
  * Pre-conditions:
  *   - Project is initialized (`.vibecarbon.json` exists).

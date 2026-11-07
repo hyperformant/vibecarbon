@@ -63,10 +63,7 @@ export function PillarsSection() {
     <section id="pillars" className="relative py-24 md:py-36">
       <div className="mx-auto max-w-7xl px-6">
         <div className="mx-auto max-w-3xl text-center">
-          <div className="font-mono text-xs uppercase tracking-[0.2em] text-primary">
-            {t('landing.pillars.eyebrow')}
-          </div>
-          <h2 className="mt-5 text-3xl font-black tracking-tight md:text-5xl">
+          <h2 className="text-3xl font-black tracking-tight md:text-5xl">
             {t('landing.pillars.headline')}{' '}
             <span className="text-primary">{t('landing.pillars.headlineHighlight')}</span>
           </h2>

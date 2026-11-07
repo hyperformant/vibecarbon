@@ -25,8 +25,6 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { selectAction } from './lib/cli/select-action.js';
 import { selectEnvironment } from './lib/cli/select-environment.js';
-import { c } from './lib/colors.js';
-import { getLicense } from './lib/licensing/index.js';
 import { launchCli } from './lib/next/launch.js';
 import { displayCommand, menuLines, stateLines, stepBlock } from './lib/next/render.js';
 import { detectProjectState } from './lib/next/state.js';
@@ -263,9 +261,6 @@ export async function run(args) {
     }
 
     if (step.id === 'deploy') {
-      if (!getLicense({ projectDir: cwd }).active) {
-        p.log.info(c.dim('Kubernetes and HA modes need a license: vibecarbon activate <key>'));
-      }
       const ok = await p.confirm({ message: 'Deploy now?' });
       if (p.isCancel(ok)) exitCancelled();
       if (!ok) {

@@ -27,7 +27,6 @@ export const PRIVATE_ROUTES: readonly string[] = [
   '/auth/callback',
   // Signed-in app
   '/onboarding',
-  '/checkout',
   '/dashboard',
   '/ui-components',
   '/charts',

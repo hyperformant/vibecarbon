@@ -14,7 +14,7 @@
  * @typedef {object} CommandEntry
  * @property {string} name
  * @property {string[]} [aliases]
- * @property {'dev' | 'deploy' | 'debug' | 'license'} category
+ * @property {'dev' | 'deploy' | 'debug'} category
  * @property {string} usage - argument hint shown after the name ('' when none)
  * @property {() => Promise<CommandSpec & { summary?: string }>} loadSpec
  */
@@ -150,19 +150,6 @@ export const COMMANDS = [
     category: 'debug',
     usage: '[subcommand]',
     loadSpec: async () => (await import('../../access.js')).SPEC,
-  },
-  // License
-  {
-    name: 'activate',
-    category: 'license',
-    usage: '[key]',
-    loadSpec: async () => (await import('../../activate.js')).ACTIVATE_SPEC,
-  },
-  {
-    name: 'deactivate',
-    category: 'license',
-    usage: '[key]',
-    loadSpec: async () => (await import('../../activate.js')).DEACTIVATE_SPEC,
   },
 ];
 

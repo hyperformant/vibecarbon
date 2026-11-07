@@ -2232,12 +2232,6 @@ export async function run(args) {
   // Dispatch to the tier's scale strategy. The 4th arg carries the parsed
   // flags plus the resolved `tier` so each strategy dispatches on tier /
   // isHATier(tier) instead of re-deriving deployMode+ha.
-  //
-  // No license gate here: operating an existing environment (scale, backup,
-  // restore, failover) never consults the license, in every deploy mode.
-  // Only `deploy` into a Kubernetes or HA environment does, and it does so
-  // on every run, provisioning and redeploy alike (see
-  // src/lib/licensing/gate.js).
   const tier = resolveTier(envConfig);
   // Template lockstep: this CLI moves the wal-g role through a file the
   // project's scripts parse. A scaffold from before that reads a role env this

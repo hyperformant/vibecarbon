@@ -391,6 +391,6 @@ export const haK8sCopyStandbyImageStep = () =>
 export const haK8sUpdateDnsStep = () =>
   defineStep({ name: 'update-dns', effect: 'haK8sUpdateDns' });
 
-/** Print the Fullerene HA deploy summary + failover-command notes. */
+/** Print the HA deploy summary + failover-command notes. */
 export const haK8sFinalizeStep = () =>
   defineStep({ name: 'finalize', effect: 'haK8sFinalize', required: true });

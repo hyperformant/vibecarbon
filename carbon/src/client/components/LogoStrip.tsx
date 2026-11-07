@@ -1,5 +1,4 @@
 import { motion } from 'framer-motion';
-import { useTranslation } from 'react-i18next';
 import aiderLogo from '../assets/logos/aider.svg';
 import antigravityLogo from '../assets/logos/antigravity.svg';
 import boltLogo from '../assets/logos/bolt.svg';
@@ -27,7 +26,6 @@ const LOGO_ITEMS = [
 ];
 
 export function LogoStrip() {
-  const { t } = useTranslation();
   return (
     <motion.section
       className="relative py-10 overflow-hidden"
@@ -35,26 +33,7 @@ export function LogoStrip() {
       whileInView={{ opacity: 1 }}
       viewport={{ once: true }}
     >
-      {/* Soft centered glow behind the strip — same radial language as the
-          workflow visuals — instead of the old flat band, whose border-y
-          edges read as seams against the page background. */}
-      <div
-        aria-hidden
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          // Vertical radius = half the section height and fully transparent
-          // by 85% of it, so the glow dies out before the overflow-hidden
-          // edges — an oversized ellipse gets clipped into a hard seam there.
-          // Accent (magenta) hue, same value as the secondary-accent glows in
-          // the workflow visuals.
-          background:
-            'radial-gradient(ellipse 60% 50% at 50% 50%, oklch(0.68 0.26 350 / 0.3) 0%, oklch(0.68 0.26 350 / 0.1) 50%, transparent 85%)',
-        }}
-      />
       <div className="max-w-7xl mx-auto">
-        <p className="text-center text-sm uppercase tracking-widest text-muted-foreground mb-6">
-          {t('landing.logoStrip.label')}
-        </p>
         <div
           className="relative overflow-hidden"
           style={{

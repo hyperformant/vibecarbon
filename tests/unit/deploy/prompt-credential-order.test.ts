@@ -41,9 +41,6 @@ vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/config.js', () => ({
   loadProjectConfig: () => ({ projectName: 'orderapp', bucketSalt: 'abc123', environments: {} }),
 }));
-vi.mock('../../../src/lib/licensing/index.js', () => ({
-  requireDeployEntitlement: vi.fn(async () => undefined),
-}));
 vi.mock('../../../src/lib/telemetry/update-check.js', () => ({ printUpdateNotice: vi.fn() }));
 vi.mock('../../../src/lib/deploy/delta.js', () => ({
   collectDeployDelta: () => ({}),

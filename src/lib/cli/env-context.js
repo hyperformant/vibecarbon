@@ -4,12 +4,6 @@
  * (optionally) target server IP. Collapses the near-verbatim ~40-line block
  * each of those commands used to copy.
  *
- * No license gate lives here any more. Operating an existing environment
- * (scale, backup, restore, failover) never consults the license, in every
- * deploy mode. Only `deploy` into a Kubernetes or HA environment does, and
- * it does so on every run, provisioning and redeploy alike (see
- * src/lib/licensing/gate.js).
- *
  * Callers run `assertInProjectDir()` first and pass its return value as
  * `projectConfig` — this helper never reloads the config (the old copies
  * each re-called loadProjectConfig and discarded the guard's return).
