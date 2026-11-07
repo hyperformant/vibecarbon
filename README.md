@@ -332,7 +332,7 @@ You pay your cloud provider directly, and vibecarbon starts every new project on
 | Hetzner (USD account) | $23.59 (nbg1) | $47.18 (nbg1 + fsn1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |
 | DigitalOcean | $24 (nyc3) | $48 (nyc3 + tor1) | $61 (nyc3) | $98 (nyc3 + tor1) |
 | Vultr | $20 (ewr) | $40 (ewr + ord) | not yet | not yet |
-| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | $60 (us-iad) | $96 (us-iad + us-ord) |
+| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |
 | Scaleway | €21.84 (fr-par-1) | €43.68 (fr-par-1 + nl-ams-1) | not yet | not yet |
 
 Plus object storage for backups and uploads, billed once per provider account and shared by every project on it: Hetzner $7.99 (this USD account; €6.49 on EUR accounts), DigitalOcean $5, Vultr $18, Linode $5, Scaleway usage-based (cents at this size).

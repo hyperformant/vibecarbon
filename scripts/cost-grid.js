@@ -98,6 +98,23 @@ export const BILLING_EXTRAS = {
     },
   },
   linode: {
+    // The db PVC, 10Gi on Linode Block Storage, which bills it as 10 GB; one per cluster.
+    volume: {
+      perGbMonthly: 0.1,
+      gb: 10,
+      source: 'https://www.akamai.com/cloud/pricing/block-storage',
+      checked: '2026-11-07',
+    },
+    // The ingress reserved IP, one per cluster. It bills by the hour with no
+    // monthly cap, assigned or not (changelog of 1 July 2026). The rate is
+    // the documented response of GET /networking/reserved/ips/types; the
+    // pricing pages do not list it.
+    reservedIp: {
+      perHour: 0.0068,
+      hoursPerMonth: 730,
+      source: 'https://techdocs.akamai.com/linode-api/reference/get-reserved-ip-types',
+      checked: '2026-11-07',
+    },
     objectStorage: {
       text: '$5',
       source: 'https://api.linode.com/v4/object-storage/types',
@@ -187,9 +204,11 @@ export function extrasFor(Provider, live = {}) {
       perServer: 0,
     };
   }
-  if (id === 'digitalocean') {
+  if (id === 'digitalocean' || id === 'linode') {
+    const ip = table.reservedIp;
+    const ipMonthly = ip.monthly ?? ip.perHour * ip.hoursPerMonth;
     return {
-      perCluster: () => table.reservedIp.monthly + table.volume.perGbMonthly * table.volume.gb,
+      perCluster: () => ipMonthly + table.volume.perGbMonthly * table.volume.gb,
       perServer: 0,
     };
   }
