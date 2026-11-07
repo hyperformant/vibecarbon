@@ -147,7 +147,6 @@ import {
   WALG_ROLE_DIR,
 } from '../walg-role.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
-import { autoscalerSshKeyName } from './ha-ssh-key.js';
 import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
@@ -1198,6 +1197,7 @@ export function k8sTlsIdentity({ projectDir, domain }) {
  * @property {string} [sharedSshKeyPath]
  * @property {string} [sharedSshPublicKey]
  * @property {string|number} [sharedSshKeyId]
+ * @property {string} [sharedSshKeyName]
  * @property {Object} [s3Config]
  */
 
@@ -5417,7 +5417,7 @@ async function deployK3sSteps(options, inFlight) {
         // and `providerIdPrefix` without re-deriving either.
         providerId: providerIdFor(options),
         ProviderClass: Provider,
-        sshKeyName: autoscalerSshKeyName(options),
+        sshKeyName: options.sharedSshKeyName,
         region: options.region,
         environment: options.environment,
         // Pilot-light: 'primary' | 'standby' | undefined — drives walgRole
