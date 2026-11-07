@@ -298,6 +298,11 @@ export function buildLinodeK8sProgram(config) {
           },
           workerResourceOptions('linode:index/instance:Instance', {
             deleteBeforeReplace: true,
+            // The master's VPC address is fixed, so only the join trigger
+            // would hold a worker back until the master finished. With no
+            // token to replay it has nothing to protect yet: see
+            // workerResourceOptions.
+            omitJoinTrigger: !config.k3sToken,
             joinTarget: {
               masterId: master.id,
               masterPrivateIp: MASTER_IP,
