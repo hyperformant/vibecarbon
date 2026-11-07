@@ -2,44 +2,44 @@
   "providers": {
     "hetzner": {
       "run": {
-        "id": "d938a71",
-        "date": "2026-11-06",
+        "id": "1904abc",
+        "date": "2026-11-07",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 116616,
-          "warm-deploy": 25930,
-          "scale": 132464,
-          "backup": 4429,
-          "destroy": 19490,
-          "restore": 121131
+          "deploy": 111592,
+          "warm-deploy": 25824,
+          "scale": 156470,
+          "backup": 4243,
+          "destroy": 22739,
+          "restore": 156273
         },
         "compose-ha": {
-          "deploy": 137299,
-          "warm-deploy": 38780,
-          "scale": 156029,
-          "backup": 5062,
-          "destroy": 19782,
-          "restore": 175847,
-          "failover": 44870
+          "deploy": 169400,
+          "warm-deploy": 50120,
+          "scale": 187583,
+          "backup": 5747,
+          "destroy": 27282,
+          "restore": 171394,
+          "failover": 43758
         },
         "k8s": {
-          "deploy": 184360,
-          "warm-deploy": 13542,
-          "scale": 161857,
-          "backup": 25646,
-          "destroy": 109473,
-          "restore": 100119
+          "deploy": 164538,
+          "warm-deploy": 11084,
+          "scale": 181571,
+          "backup": 24806,
+          "destroy": 105561,
+          "restore": 119765
         },
         "k8s-ha": {
-          "deploy": 216844,
-          "warm-deploy": 28032,
-          "scale": 264706,
-          "backup": 24479,
-          "destroy": 129157,
-          "restore": 145749,
-          "failover": 204878
+          "deploy": 253921,
+          "warm-deploy": 26802,
+          "scale": 300403,
+          "backup": 23745,
+          "destroy": 120014,
+          "restore": 150243,
+          "failover": 219283
         }
       }
     },
@@ -88,79 +88,79 @@
     },
     "linode": {
       "run": {
-        "id": "3b1b2a3",
-        "date": "2026-11-06",
+        "id": "1720818",
+        "date": "2026-11-07",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 208973,
-          "warm-deploy": 27714,
-          "scale": 213632,
-          "backup": 4454,
-          "destroy": 20964,
-          "restore": 195608
+          "deploy": 160801,
+          "warm-deploy": 26425,
+          "scale": 239704,
+          "backup": 7177,
+          "destroy": 15297,
+          "restore": 233096
         },
         "compose-ha": {
-          "deploy": 215080,
-          "warm-deploy": 34906,
-          "scale": 187397,
-          "backup": 4158,
-          "destroy": 14782,
-          "restore": 245072,
-          "failover": 64367
+          "deploy": 212135,
+          "warm-deploy": 35951,
+          "scale": 196692,
+          "backup": 4996,
+          "destroy": 24792,
+          "restore": 248426,
+          "failover": 77786
         }
       }
     },
     "vultr": {
       "run": {
-        "id": "971ad14",
-        "date": "2026-11-06",
+        "id": "3b6b2c8",
+        "date": "2026-11-07",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 146058,
-          "warm-deploy": 35244,
-          "scale": 133234,
-          "backup": 4046,
-          "destroy": 23279,
-          "restore": 234475
+          "deploy": 159258,
+          "warm-deploy": 45807,
+          "scale": 153633,
+          "backup": 4724,
+          "destroy": 23017,
+          "restore": 174687
         },
         "compose-ha": {
-          "deploy": 245282,
-          "warm-deploy": 57668,
-          "scale": 185075,
-          "backup": 3966,
-          "destroy": 20242,
-          "restore": 313671,
-          "failover": 49305
+          "deploy": 224918,
+          "warm-deploy": 54042,
+          "scale": 186272,
+          "backup": 5439,
+          "destroy": 20824,
+          "restore": 289614,
+          "failover": 58387
         }
       }
     },
     "scaleway": {
       "run": {
-        "id": "e58ef2d",
-        "date": "2026-11-06",
+        "id": "fb3cf0e",
+        "date": "2026-11-07",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 144837,
-          "warm-deploy": 31293,
-          "scale": 155944,
-          "backup": 3395,
-          "destroy": 30354,
-          "restore": 174889
+          "deploy": 145980,
+          "warm-deploy": 31726,
+          "scale": 152073,
+          "backup": 6602,
+          "destroy": 23375,
+          "restore": 174755
         },
         "compose-ha": {
-          "deploy": 232896,
-          "warm-deploy": 56928,
-          "scale": 201332,
-          "backup": 3807,
-          "destroy": 43329,
-          "restore": 298673,
-          "failover": 62606
+          "deploy": 327969,
+          "warm-deploy": 85421,
+          "scale": 236249,
+          "backup": 8769,
+          "destroy": 41886,
+          "restore": 274919,
+          "failover": 54324
         }
       }
     }
