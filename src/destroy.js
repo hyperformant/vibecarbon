@@ -2661,6 +2661,33 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
 }
 
 /**
+ * Whether the reserved IP at an address saved at deploy time is still this
+ * cluster's. Linode reissues a released address within minutes, so by
+ * destroy time the saved address can be another project's. A provider whose
+ * reserved IPs carry tags (Linode: `reservedIpLabelMatch`) is asked, and only
+ * an IP carrying this project's and this stack's tags (the labels the k8s
+ * program stamps) counts as ours. DigitalOcean reserved IPs carry no tags, so
+ * the saved address is their only attribution and they count as ours.
+ *
+ * @param {object} provider
+ * @param {string} address
+ * @param {string|undefined} projectName
+ * @param {string} stackEnv
+ * @returns {Promise<{verdict: 'ours'} | {verdict: 'released'} | {verdict: 'foreign', tags: string[]}>}
+ * @throws when the tags cannot be read, or there is no project name to check them against
+ */
+async function savedReservedIpOwner(provider, address, projectName, stackEnv) {
+  if (typeof provider.reservedIpLabelMatch !== 'function') return { verdict: 'ours' };
+  if (!projectName) throw new Error('no project name to check its tags against');
+  const match = await provider.reservedIpLabelMatch(address, {
+    project: projectName,
+    environment: stackEnv,
+  });
+  if (!match.found) return { verdict: 'released' };
+  return match.matches ? { verdict: 'ours' } : { verdict: 'foreign', tags: match.tags };
+}
+
+/**
  * Idempotent name/address deletes for the leftovers `pulumi destroy` has
  * been seen to skip on a provider with `K8S_DESTROY_BACKSTOP`: firewall, SSH
  * key, reserved IP, then the VPC last. Every delete goes by name or address,
@@ -2738,18 +2765,41 @@ export async function sweepK8sBackstopTargets({ provider, targets, results, s, p
     // `digitalocean.ReservedIp` construction site in
     // src/lib/iac/programs/digitalocean-k8s.js. By the time this runs the
     // droplets are gone, so the IP is unassigned and a plain DELETE works.
+    //
+    // A provider whose reserved IPs carry tags (Linode) is asked first
+    // whether the saved address is still this cluster's (savedReservedIpOwner).
     if (target.floatingIp) {
       s.start(`Verifying ${Provider.NAME} reserved IP is gone: ${target.floatingIp}`);
       try {
-        const deleted = await provider.deleteReservedIpByAddress(target.floatingIp);
-        s.stop(deleted ? 'Reserved IP released (backstop)' : 'Reserved IP backstop failed');
-        if (!deleted) {
-          results.leaks.leak({
+        const owner = await savedReservedIpOwner(
+          provider,
+          target.floatingIp,
+          projectName,
+          target.stackEnv,
+        );
+        if (owner.verdict === 'released') {
+          s.stop('Reserved IP already released');
+        } else if (owner.verdict === 'foreign') {
+          s.stop(`Reserved IP ${target.floatingIp} left alone: it is no longer this cluster's`);
+          results.leaks.foreign({
             resourceClass: 'reserved-ip',
             resource: target.floatingIp,
-            reason: 'backstop delete did not release it',
-            hint: `Delete it via the ${Provider.NAME} console (look for reserved or floating IPs under networking); it continues to incur a small charge until released.`,
+            reason:
+              `not released: it carries ${owner.tags.length ? owner.tags.join(', ') : 'no tags'}, ` +
+              `not project ${projectName} and stack ${target.stackEnv}, so the address was likely reissued`,
+            hint: `If it is this cluster's after all, release it in the ${Provider.NAME} console under reserved IPs.`,
           });
+        } else {
+          const deleted = await provider.deleteReservedIpByAddress(target.floatingIp);
+          s.stop(deleted ? 'Reserved IP released (backstop)' : 'Reserved IP backstop failed');
+          if (!deleted) {
+            results.leaks.leak({
+              resourceClass: 'reserved-ip',
+              resource: target.floatingIp,
+              reason: 'backstop delete did not release it',
+              hint: `Delete it via the ${Provider.NAME} console (look for reserved or floating IPs under networking); it continues to incur a small charge until released.`,
+            });
+          }
         }
       } catch (error) {
         s.stop(`Reserved IP backstop check failed: ${error.message}`);

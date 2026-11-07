@@ -1566,6 +1566,55 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
+   * Every reserved IPv4 on the account (guarded paginated walk of
+   * GET /networking/reserved/ips).
+   * @returns {Promise<Array<{ address: string, tags?: string[] }>>}
+   * @throws when a page cannot be read
+   */
+  async _listReservedIps() {
+    const ips = [];
+    let page = 1;
+    for (let guard = 0; guard < 20; guard++) {
+      const response = await fetchWithRetry(
+        `${LinodeProvider.API_BASE}/networking/reserved/ips?page=${page}&page_size=100`,
+        { headers: { Authorization: `Bearer ${this.apiToken}` } },
+      );
+      if (!response.ok) {
+        throw new Error(`GET /networking/reserved/ips failed: HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      ips.push(...(data.data ?? []));
+      if (!data.pages || page >= data.pages) break;
+      page++;
+    }
+    return ips;
+  }
+
+  /**
+   * Whether the reserved IPv4 at `address` still carries ALL of `labels` as
+   * tags (the encodeLabel encoding the k8s program tags with). Destroy asks
+   * before it releases an address saved at deploy time: Linode reissues a
+   * released address within minutes, so by destroy time the saved address
+   * can be another project's. Empty labels match nothing.
+   * @param {string} address
+   * @param {Object<string,string>} labels
+   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[] }>}
+   *   found is false when the account holds no reserved IP at that address
+   * @throws when the listing cannot be read
+   */
+  async reservedIpLabelMatch(address, labels) {
+    const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
+    const ip = (await this._listReservedIps()).find((i) => i.address === address);
+    if (!ip) return { found: false };
+    const tags = ip.tags ?? [];
+    return {
+      found: true,
+      matches: wanted.length > 0 && wanted.every((t) => tags.includes(t)),
+      tags,
+    };
+  }
+
+  /**
    * Release every reserved IPv4 whose tags carry ALL of the given labels
    * (same encodeLabel encoding the k8s Pulumi program tags with). Lists
    * GET /networking/reserved/ips and filters client-side, the way
@@ -1578,23 +1627,9 @@ export class LinodeProvider extends BaseProvider {
   async deleteReservedIpsByLabels(labels) {
     const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
     if (wanted.length === 0) return { deleted: [], failed: [] };
-    const matches = [];
-    let page = 1;
-    for (let guard = 0; guard < 20; guard++) {
-      const response = await fetchWithRetry(
-        `${LinodeProvider.API_BASE}/networking/reserved/ips?page=${page}&page_size=100`,
-        { headers: { Authorization: `Bearer ${this.apiToken}` } },
-      );
-      if (!response.ok) {
-        throw new Error(`GET /networking/reserved/ips failed: HTTP ${response.status}`);
-      }
-      const data = await response.json();
-      for (const ip of data.data ?? []) {
-        if (wanted.every((tag) => (ip.tags ?? []).includes(tag))) matches.push(ip.address);
-      }
-      if (!data.pages || page >= data.pages) break;
-      page++;
-    }
+    const matches = (await this._listReservedIps())
+      .filter((ip) => wanted.every((tag) => (ip.tags ?? []).includes(tag)))
+      .map((ip) => ip.address);
     const deleted = [];
     const failed = [];
     for (const address of matches) {
