@@ -4,6 +4,8 @@
  */
 import * as pulumi from '@pulumi/pulumi';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { planK8sBackstopTargets } from '../../../src/destroy.js';
+import { renderCarbonAutoscalerConfig } from '../../../src/lib/deploy/k8s/k3s.js';
 import { buildLinodeK8sProgram } from '../../../src/lib/iac/programs/linode-k8s.js';
 import {
   LinodeProvider,
@@ -93,6 +95,63 @@ describe('buildLinodeK8sProgram config guard', () => {
       /allowedK8sApiIps required/,
     );
   });
+
+  // Linode caps VPC, VPC subnet and SSH key labels at 64 (API spec). They go
+  // out unsqueezed so every lookup can use the plain name, so a name past
+  // the cap must stop the deploy here, before anything exists.
+  it('refuses a cluster whose network label passes 64 characters, naming the fix', () => {
+    const projectName = `p${'x'.repeat(44)}`; // 45 + '-' + 'prod-primary' = 58; '-network' = 66
+    const build = () =>
+      buildLinodeK8sProgram({
+        ...baseConfig,
+        projectName,
+        environment: 'prod-primary',
+        existingSshKeyId: '424242',
+      });
+    expect(build).toThrow(`${projectName}-prod-primary-network`);
+    expect(build).toThrow(/66 characters/);
+    expect(build).toThrow(/Linode allows 64/);
+    expect(build).toThrow(/shorter project or environment name/);
+  });
+
+  it('refuses a cluster whose own SSH key label passes 64 characters', () => {
+    // A 50-character cluster (45 + '-prod'): key `<cluster>-jp-tyo-3-key` is 63, fits.
+    expect(() =>
+      buildLinodeK8sProgram({
+        ...baseConfig,
+        projectName: `p${'x'.repeat(44)}`,
+        location: 'jp-tyo-3',
+      }),
+    ).not.toThrow();
+    // Two more characters: the key is 65, while the network label (60) still fits.
+    const build = () =>
+      buildLinodeK8sProgram({
+        ...baseConfig,
+        projectName: `p${'x'.repeat(46)}`,
+        location: 'jp-tyo-3',
+      });
+    expect(build).toThrow(/-jp-tyo-3-key/);
+    expect(build).toThrow(/65 characters/);
+  });
+
+  it('builds the longest e2e names with room to spare', () => {
+    expect(() =>
+      buildLinodeK8sProgram({
+        ...baseConfig,
+        projectName: 'citest-k8s-ha-1787258789210-0typg2',
+        environment: 'cil4-standby',
+        existingSshKeyId: '424242',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildLinodeK8sProgram({
+        ...baseConfig,
+        projectName: 'citest-k8s-1787258789210-0typg2',
+        environment: 'cil3',
+        location: 'jp-tyo-3',
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe('buildLinodeK8sProgram resource graph', () => {
@@ -137,8 +196,9 @@ describe('buildLinodeK8sProgram resource graph', () => {
   });
 
   it('names network, firewall and ssh key as the autoscaler looks them up', () => {
-    expect(byType(captured, 'linode:index/vpc:Vpc')[0].inputs.label).toBe(
-      squeezeLinodeLabel(`${CLUSTER}-network`),
+    expect(byType(captured, 'linode:index/vpc:Vpc')[0].inputs.label).toBe(`${CLUSTER}-network`);
+    expect(byType(captured, 'linode:index/vpcSubnet:VpcSubnet')[0].inputs.label).toBe(
+      `${CLUSTER}-subnet`,
     );
     expect(byType(captured, 'linode:index/firewall:Firewall')[0].inputs.label).toBe(
       squeezeLinodeLabel(`${CLUSTER}-firewall`),
@@ -256,6 +316,94 @@ describe('buildLinodeK8sProgram with existingSshKeyId', () => {
       (i) => i.name === 'master',
     ) as Captured;
     expect(master.inputs.authorizedKeys).toEqual(['ssh-ed25519 AAAAtest test@example.com']);
+  });
+});
+
+// The longest cluster name the e2e matrix makes: runner.ts names the project
+// `citest-<mode>-<ms>-<6 chars>`, the env is `cil4`, and k8s-ha adds
+// `-primary`/`-standby`. 47 characters, past the 32-character firewall cap,
+// so a label squeezed on one side and not the other cannot hide here.
+const E2E_PROJECT = 'citest-k8s-ha-1787258789210-0typg2';
+const E2E_STACK_ENV = 'cil4-standby';
+const E2E_CLUSTER = `${E2E_PROJECT}-${E2E_STACK_ENV}`;
+const VPC = 'linode:index/vpc:Vpc';
+const FIREWALL = 'linode:index/firewall:Firewall';
+
+describe('a long e2e-shaped k8s-ha standby: program, autoscaler, destroy and sweep agree', () => {
+  type Names = { networkName: string; firewallName: string };
+  let slice: Captured[];
+  let caConfig: Names;
+  let standbyTarget: Names;
+
+  beforeAll(async () => {
+    const start = captured.length;
+    // The standby stack's shape: shared key, no static workers.
+    const raw = await buildLinodeK8sProgram({
+      ...baseConfig,
+      projectName: E2E_PROJECT,
+      environment: E2E_STACK_ENV,
+      location: 'us-ord',
+      minWorkers: 0,
+      existingSshKeyId: '424242',
+    })();
+    // vpc, subnet, firewall, reservedIp, master, db
+    await waitFor(start + 6);
+    await pulumi.output(raw).promise();
+    slice = captured.slice(start);
+    caConfig = JSON.parse(
+      await renderCarbonAutoscalerConfig({
+        k3sVersion: baseConfig.k3sVersion,
+        k3sToken: 'deadbeefcafe1234567890abcdef',
+        masterPrivateIp: '10.0.1.2',
+        clusterName: E2E_CLUSTER,
+        environment: E2E_STACK_ENV,
+        providerId: 'linode',
+        ProviderClass: LinodeProvider,
+        region: 'us-ord',
+        workerServerType: 'g6-standard-2',
+        minWorkers: 0,
+        maxWorkers: 3,
+        caBoundsMin: 1,
+        sshKeyName: `${E2E_PROJECT}-cil4-ha-key`,
+      }),
+    );
+    const targets = planK8sBackstopTargets({
+      plan: { tier: 'k8s-ha', stackEnvs: ['cil4-primary', 'cil4-standby'] },
+      envConfig: {
+        region: 'us-iad',
+        ha: {
+          primary: { stack: 'cil4-primary', region: 'us-iad' },
+          standby: { stack: 'cil4-standby', region: 'us-ord' },
+        },
+      },
+      projectConfig: { projectName: E2E_PROJECT },
+    });
+    standbyTarget = targets.find((t) => t.stackEnv === E2E_STACK_ENV) as Names;
+  });
+
+  it('creates no static worker at minWorkers 0', () => {
+    expect(
+      byType(slice, INSTANCE)
+        .map((i) => i.name)
+        .sort(),
+    ).toEqual(['db', 'master']);
+  });
+
+  it('labels the VPC with the exact name the autoscaler and destroy look up', () => {
+    const vpcLabel = byType(slice, VPC)[0].inputs.label;
+    expect(vpcLabel).toBe(caConfig.networkName);
+    expect(vpcLabel).toBe(standbyTarget.networkName);
+  });
+
+  it('labels the VPC so the e2e sweep finds it by project prefix', () => {
+    expect(byType(slice, VPC)[0].inputs.label.startsWith(E2E_PROJECT)).toBe(true);
+  });
+
+  it('labels the firewall as findFirewallByName squeezes the autoscaler and destroy names', () => {
+    const fwLabel = byType(slice, FIREWALL)[0].inputs.label;
+    expect(fwLabel.length).toBeLessThanOrEqual(32);
+    expect(fwLabel).toBe(squeezeLinodeLabel(caConfig.firewallName));
+    expect(fwLabel).toBe(squeezeLinodeLabel(standbyTarget.firewallName));
   });
 });
 

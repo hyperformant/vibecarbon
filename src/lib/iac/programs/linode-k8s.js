@@ -18,9 +18,12 @@
  *     SshKey resource exists so the `sshKeyId` output is real and destroy
  *     has something to reap.
  *
- * Every label is squeezed into Linode's length caps with the same helpers
- * the REST lookups use, so destroy and the autoscaler find resources by
- * the names this program creates.
+ * Firewall and instance labels are squeezed into Linode's caps (32 and 50)
+ * with the same helpers the REST lookups use. The VPC, subnet and SSH key
+ * labels go out as plain names, as on DigitalOcean: Linode allows 64
+ * characters there, and the autoscaler config, destroy and the e2e sweep
+ * look them up by the plain name. A cluster whose plain name would pass 64
+ * is refused when the program is built, before anything is created.
  *
  * Outputs: masterIp, masterPrivateIp, dbIp, dbPrivateIp, workerIps,
  * floatingIp, networkId, sshKeyId, k3sToken, clusterName, vpcCidr.
@@ -41,6 +44,34 @@ const VPC_CIDR = LinodeProvider.DEFAULT_VPC_CIDR;
 const MASTER_IP = '10.0.1.2';
 const DB_IP = '10.0.1.3';
 const WORKER_IP_BASE = 10;
+
+/**
+ * Linode's cap on VPC, VPC subnet and SSH key labels. Source: Linode API
+ * OpenAPI spec, `POST /vpcs` and `POST /vpcs/{vpcId}/subnets` `label`
+ * (maxLength 64, letters, digits and single hyphens) and
+ * `POST /profile/sshkeys` `label` (maxLength 64). The Pulumi provider
+ * (terraform-provider-linode v4.9.0, bundled by @pulumi/linode 6.9.0) adds
+ * no tighter limit for VPCs and checks 64 for SSH keys.
+ */
+const LINODE_LABEL_MAX = 64;
+
+/**
+ * Refuse, before any resource exists, a label Linode would reject. These
+ * labels are not squeezed: the autoscaler config, destroy and the e2e sweep
+ * find them by the plain name, so a squeezed copy would orphan them.
+ * @param {Array<[string, string]>} labels  [what, label] pairs
+ */
+function assertLabelsFit(labels) {
+  for (const [what, label] of labels) {
+    if (label.length > LINODE_LABEL_MAX) {
+      throw new Error(
+        `Kubernetes on Linode cannot name this cluster's ${what} "${label}": ` +
+          `it is ${label.length} characters and Linode allows ${LINODE_LABEL_MAX}. ` +
+          'Use a shorter project or environment name.',
+      );
+    }
+  }
+}
 
 /**
  * @typedef {Object} K8sStackConfig
@@ -92,6 +123,14 @@ export function buildLinodeK8sProgram(config) {
       'allowedK8sApiIps required (no default; pass operatorCidrs from .vibecarbon.json or set ALLOWED_SSH_IPS=...)',
     );
   }
+  const networkLabel = `${clusterName}-network`;
+  const subnetLabel = `${clusterName}-subnet`;
+  const sshKeyLabel = `${clusterName}-${config.location}-key`;
+  assertLabelsFit([
+    ['private network', networkLabel],
+    ['subnet', subnetLabel],
+    ...(config.existingSshKeyId ? [] : [['SSH key', sshKeyLabel]]),
+  ]);
   const k3sToken = config.k3sToken ?? randomBytes(32).toString('hex');
   const image = LinodeProvider.K8S_IMAGE;
   const minWorkers = config.minWorkers ?? 1;
@@ -104,19 +143,19 @@ export function buildLinodeK8sProgram(config) {
       sshKeyId = config.existingSshKeyId;
     } else {
       const sshKey = new linode.SshKey('ssh-key', {
-        label: `${clusterName}-${config.location}-key`,
+        label: sshKeyLabel,
         sshKey: config.sshPublicKey.trim(),
       });
       sshKeyId = sshKey.id;
     }
 
     const network = new linode.Vpc('network', {
-      label: squeezeLinodeLabel(`${clusterName}-network`),
+      label: networkLabel,
       region: config.location,
     });
     const subnet = new linode.VpcSubnet('subnet', {
       vpcId: network.id.apply((id) => Number.parseInt(id, 10)),
-      label: squeezeLinodeLabel(`${clusterName}-subnet`),
+      label: subnetLabel,
       ipv4: VPC_CIDR,
     });
 
