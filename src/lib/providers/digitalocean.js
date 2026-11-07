@@ -139,8 +139,13 @@ export class DigitalOceanProvider extends BaseProvider {
 
   static NAME = 'DigitalOcean';
   static API_BASE = 'https://api.digitalocean.com/v2';
-  /** deleteSSHKeyById: how long a 404 and a readable key may keep disagreeing. */
-  static SSH_KEY_SETTLE_MS = 30_000;
+  /**
+   * deleteSSHKeyById: how long a 404 and a readable key may keep disagreeing.
+   * Seen for 47 s after a delete that landed, and for over a minute on a key a
+   * later DELETE took, so this covers both with room. Only a disagreement ever
+   * waits: a normal delete answers on the first call.
+   */
+  static SSH_KEY_SETTLE_MS = 120_000;
   static SSH_KEY_SETTLE_INTERVAL_MS = 3_000;
   // Ours (env-first token env var) — see resolveProviderToken (index.js).
   static TOKEN_ENV = 'DIGITALOCEAN_API_TOKEN';
@@ -1603,9 +1608,9 @@ export class DigitalOceanProvider extends BaseProvider {
    * Delete one SSH key and say what really happened. DO's key API disagrees
    * with itself around a write: measured 2026-11-06, a DELETE answered 404 for
    * a key that stayed for over a minute until a later DELETE took it (3 of
-   * 48), and a key whose DELETE answered 204 stayed listed for up to
-   * 22 s. So a 404 alone proves nothing: the key is gone only when the read by
-   * id agrees.
+   * 48), and a key whose DELETE answered 204 stayed listed for up to 22 s, then
+   * 47 s in a real run. So a 404 alone proves nothing: the key is gone only
+   * when the read by id agrees.
    * @param {number|string} id
    * @returns {Promise<'deleted'|'absent'|'stuck'>} `absent` means this call
    *   deleted nothing: a caller holding a list had a stale one.
