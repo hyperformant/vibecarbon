@@ -17,7 +17,7 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
 });
 
 import { BaseProvider } from '../../../src/lib/providers/base.js';
-import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { encodeLabels, LinodeProvider } from '../../../src/lib/providers/linode.js';
 import { VultrProvider } from '../../../src/lib/providers/vultr.js';
 
 const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
@@ -109,41 +109,83 @@ describe('LinodeProvider VPC reads', () => {
     expect(nets[0]).toMatchObject({ id: 1, name: 'proj-prod-network' });
   });
 
-  it('serverNetworkIds reads VPC ids from config interfaces, [] when none', () => {
+  it('serverNetworkIds reads the attached vpc_ids, [] when none', () => {
     const p = new LinodeProvider('tok');
     expect(
       p.serverNetworkIds({
-        config_interfaces: [
-          { purpose: 'public', vpc_id: null },
-          { purpose: 'vpc', vpc_id: 77 },
-        ],
+        vpc_ids: [77],
       }),
     ).toEqual([77]);
     expect(p.serverNetworkIds({ id: 1 })).toEqual([]);
   });
 
-  it('listServersDetailed attaches config interfaces when the account has a VPC', async () => {
+  it('an unfiltered listing reads VPC membership once from /vpcs/ips, across pages', async () => {
+    const urls: string[] = [];
     fetchWithRetryMock.mockImplementation(async (url: string) => {
-      if (url.includes('/linode/instances?')) return ok({ data: [{ id: 5 }], page: 1, pages: 1 });
-      if (url.includes('/vpcs?')) return ok({ data: [{ id: 77 }] });
-      if (url.includes('/linode/instances/5/configs'))
-        return ok({ data: [{ interfaces: [{ purpose: 'vpc', vpc_id: 77 }] }] });
+      urls.push(url);
+      if (url.includes('/linode/instances?'))
+        return ok({ data: [{ id: 5 }, { id: 6 }], page: 1, pages: 1 });
+      if (url.includes('/vpcs/ips?page=1'))
+        return ok({ data: [{ linode_id: 5, vpc_id: 77 }], page: 1, pages: 2 });
+      if (url.includes('/vpcs/ips?page=2'))
+        return ok({
+          data: [
+            { linode_id: 5, vpc_id: 77 },
+            { linode_id: 9, vpc_id: 1 },
+          ],
+          page: 2,
+          pages: 2,
+        });
       throw new Error(`unexpected ${url}`);
     });
     const p = new LinodeProvider('tok');
-    const [server] = await p.listServers();
-    expect(p.serverNetworkIds(server)).toEqual([77]);
+    const [a, b] = await p.listServers();
+    expect(p.serverNetworkIds(a)).toEqual([77]);
+    expect(p.serverNetworkIds(b)).toEqual([]);
+    expect(urls.filter((u) => u.includes('/vpcs')).length).toBe(2);
+    expect(urls.some((u) => u.includes('/configs'))).toBe(false);
   });
 
-  it('listServersDetailed makes no config calls when the account has no VPC', async () => {
+  it('listServers(selector), as the autoscaler calls it, makes no VPC or config request', async () => {
+    const urls: string[] = [];
     fetchWithRetryMock.mockImplementation(async (url: string) => {
-      if (url.includes('/linode/instances?')) return ok({ data: [{ id: 5 }], page: 1, pages: 1 });
-      if (url.includes('/vpcs?')) return ok({ data: [] });
+      urls.push(url);
+      if (url.includes('/linode/instances?'))
+        return ok({
+          data: [
+            { id: 5, tags: encodeLabels({ 'cluster-autoscaler/node': 'pool', cluster: 'c' }) },
+          ],
+          page: 1,
+          pages: 1,
+        });
       throw new Error(`unexpected ${url}`);
     });
-    const p = new LinodeProvider('tok');
-    const [server] = await p.listServers();
-    expect(p.serverNetworkIds(server)).toEqual([]);
+    const servers = await new LinodeProvider('tok').listServers({
+      'cluster-autoscaler/node': 'pool',
+      cluster: 'c',
+    });
+    expect(servers).toHaveLength(1);
+    expect(urls.every((u) => u.includes('/linode/instances?'))).toBe(true);
+  });
+
+  it('a failed membership read reports complete:false and listServers rejects', async () => {
+    for (const failure of [
+      async () => status(500),
+      async () => {
+        throw new Error('socket hang up');
+      },
+    ]) {
+      fetchWithRetryMock.mockReset();
+      fetchWithRetryMock.mockImplementation(async (url: string) => {
+        if (url.includes('/linode/instances?')) return ok({ data: [{ id: 5 }], page: 1, pages: 1 });
+        return failure();
+      });
+      const p = new LinodeProvider('tok');
+      const detailed = await p.listServersDetailed();
+      expect(detailed.complete).toBe(false);
+      expect(detailed.items).toHaveLength(1);
+      await expect(p.listServers()).rejects.toThrow(/VPC membership read failed/);
+    }
   });
 });
 

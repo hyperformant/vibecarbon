@@ -41,15 +41,8 @@ const EXCEPTIONS: Array<{ file: string; pathPrefix: string; reason: string }> = 
     file: 'src/lib/providers/linode.js',
     pathPrefix: '/vpcs/${vpcId}/subnets',
     reason:
-      "Reads only the VPC's first subnet (our VPCs hold exactly one, 10.0.1.0/24); the first " +
-      'page always contains it, so truncation cannot hide it.',
-  },
-  {
-    file: 'src/lib/providers/linode.js',
-    pathPrefix: '/linode/instances/${instance.id}/configs',
-    reason:
-      'An instance has one config profile, far under the 100-row page size; the interfaces are ' +
-      'read for VPC membership only.',
+      'Reads the first subnet of a VPC we create with exactly one (10.0.1.0/24); the first page ' +
+      'always contains it, so truncation cannot hide it.',
   },
   {
     file: 'src/lib/hetzner-guided-setup.js',

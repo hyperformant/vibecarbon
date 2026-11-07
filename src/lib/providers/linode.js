@@ -1186,7 +1186,13 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
+    const { items, membershipError } = await this.listServersDetailed(labels);
+    // An unfiltered listing is destroy's: a node whose VPC membership could
+    // not be read would be silently skipped by the cluster sweeps, so reject
+    // (destroy's callers report a rejection loudly) instead of returning it
+    // looking VPC-less.
+    if (membershipError) throw membershipError;
+    return items;
   }
 
   /**
@@ -1225,51 +1231,52 @@ export class LinodeProvider extends BaseProvider {
         ? instances
         : instances.filter((i) => wantedTags.every((tag) => (i.tags || []).includes(tag)));
 
-    if (status === undefined) await this._attachConfigInterfaces(items);
+    // VPC membership is read only for an UNFILTERED listing, which is the
+    // destroy sweep's. The autoscaler always lists with a selector and never
+    // reads membership, so it pays no extra request.
+    let membershipError;
+    if (status === undefined && wantedTags.length === 0) {
+      membershipError = await this._attachVpcMembership(items);
+    }
+    if (membershipError) return { items, complete: false, membershipError };
     return status === undefined ? { items, complete } : { items, complete, status };
   }
 
   /**
-   * Attach `config_interfaces` (the flat list of config-profile interfaces)
-   * to each instance, so the synchronous serverNetworkIds accessor can read
-   * VPC membership; the instance object carries none. Only runs when the
-   * account has a VPC at all, so compose-only accounts pay no extra calls.
-   * Best effort: an instance whose configs cannot be read keeps no
-   * `config_interfaces` (reads as in no VPC), never failing the listing.
+   * Attach `vpc_ids` (numeric VPC ids) to each instance, so the synchronous
+   * serverNetworkIds accessor can read VPC membership; the instance object
+   * carries none. One account-wide GET /vpcs/ips walk (rows carry `linode_id`
+   * and `vpc_id`), not a request per instance.
    * @param {object[]} instances
-   * @returns {Promise<void>}
+   * @returns {Promise<Error|undefined>} the failure, or undefined when read
    */
-  async _attachConfigInterfaces(instances) {
-    if (instances.length === 0) return;
+  async _attachVpcMembership(instances) {
+    const byLinode = new Map();
     try {
-      const first = await fetchWithRetry(`${LinodeProvider.API_BASE}/vpcs?page=1&page_size=1`, {
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      });
-      if (!first.ok) return;
-      const probe = await first.json();
-      if (!Array.isArray(probe.data) || probe.data.length === 0) return;
-    } catch {
-      return;
-    }
-    const CONCURRENCY = 8;
-    let next = 0;
-    const worker = async () => {
-      while (next < instances.length) {
-        const instance = instances[next++];
-        try {
-          const res = await fetchWithRetry(
-            `${LinodeProvider.API_BASE}/linode/instances/${instance.id}/configs?page_size=100`,
-            { headers: { Authorization: `Bearer ${this.apiToken}` } },
-          );
-          if (!res.ok) continue;
-          const data = await res.json();
-          instance.config_interfaces = (data.data || []).flatMap((c) => c.interfaces || []);
-        } catch {
-          // leave unset
+      let page = 1;
+      for (let guard = 0; guard < 50; guard++) {
+        const res = await fetchWithRetry(
+          `${LinodeProvider.API_BASE}/vpcs/ips?page=${page}&page_size=100`,
+          { headers: { Authorization: `Bearer ${this.apiToken}` } },
+        );
+        if (!res.ok) {
+          return new Error(`Linode VPC membership read failed (HTTP ${res.status})`);
         }
+        const data = await res.json();
+        for (const row of data.data || []) {
+          if (row.linode_id == null || row.vpc_id == null) continue;
+          const ids = byLinode.get(row.linode_id) || [];
+          if (!ids.includes(row.vpc_id)) ids.push(row.vpc_id);
+          byLinode.set(row.linode_id, ids);
+        }
+        if (!data.pages || page >= data.pages) break;
+        page++;
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, instances.length) }, worker));
+    } catch (err) {
+      return new Error(`Linode VPC membership read failed: ${err.message}`);
+    }
+    for (const instance of instances) instance.vpc_ids = byLinode.get(instance.id) || [];
+    return undefined;
   }
 
   /**
@@ -1621,19 +1628,15 @@ export class LinodeProvider extends BaseProvider {
   // See BaseProvider's doc for the cross-provider contract.
 
   /**
-   * VPC ids the instance has an interface in. The instance object itself
-   * carries no interfaces; listServersDetailed attaches the config
-   * interfaces as `config_interfaces` (see _attachConfigInterfaces). []
-   * for an instance with none (every compose instance).
+   * VPC ids the instance has an interface in. The instance object carries
+   * none; an unfiltered listServersDetailed attaches `vpc_ids` (see
+   * _attachVpcMembership). [] for an instance in no VPC (every compose
+   * instance).
    * @param {object} server
    * @returns {number[]}
    */
   serverNetworkIds(server) {
-    const ids = [];
-    for (const iface of server?.config_interfaces || []) {
-      if (iface?.vpc_id != null && !ids.includes(iface.vpc_id)) ids.push(iface.vpc_id);
-    }
-    return ids;
+    return Array.isArray(server?.vpc_ids) ? [...server.vpc_ids] : [];
   }
 
   /**
