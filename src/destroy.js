@@ -969,6 +969,9 @@ async function cleanupOrphanedVolumes(
   /** PROJECT/REGION-SCOPED pattern match — never env-scoped. See the doc above. */
   const heuristicMatch = (volume) => {
     const volumeLabels = provider.volumeLabels(volume);
+    // A volume that names a different project is never ours, whatever its
+    // region or name looks like. No project label keeps the old behaviour.
+    if (projectName && volumeLabels.project && volumeLabels.project !== projectName) return null;
     // Namespace label, from a CSI driver run with --extra-create-metadata.
     // Both the AWS/GCE-style key and hcloud >= v2.15's own `pvc-namespace`.
     if (
@@ -2234,7 +2237,7 @@ async function destroyComposeTier({
         resourceClass: 'server',
         resource: describeResource({ name: providerServerName, id: serverId }),
         reason: `delete failed: ${error.message}`,
-        hint: `Delete it via the ${Provider.NAME} console — it keeps billing, and its name blocks the next deploy with "name is already used (uniqueness_error)".`,
+        hint: `Delete it via the ${Provider.NAME} console, because it keeps billing and its name blocks the next deploy.`,
       });
     }
   } else if (!serverId && providerToken && providerServerName) {
@@ -2317,7 +2320,7 @@ async function destroyComposeTier({
           resourceClass: 'firewall',
           resource: fwName,
           reason: `delete did not complete: ${result.apiError.message}`,
-          hint: `Delete it via the ${Provider.NAME} console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".`,
+          hint: `Delete it via the ${Provider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`,
         });
       } else {
         s.stop('Firewall not found');
@@ -2328,7 +2331,7 @@ async function destroyComposeTier({
         resourceClass: 'firewall',
         resource: fwName,
         reason: `delete threw: ${error.message}`,
-        hint: `Delete it via the ${Provider.NAME} console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".`,
+        hint: `Delete it via the ${Provider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`,
       });
     }
   }
@@ -2614,7 +2617,7 @@ export async function resolveDestroyS3Config(Provider, projectName, s3Fields, op
  *
  * One entry per Pulumi stack (single k8s: the environment itself; k8s-ha:
  * `<env>-primary` + `<env>-standby`), carrying the literal resource names the
- * DO k8s program creates for that stack (digitalocean-k8s.js:
+ * DO and Linode k8s programs create for that stack (digitalocean-k8s.js:
  * `${clusterName}-firewall` / `${clusterName}-network` /
  * `${clusterName}-${region}-key`) plus the reserved-IP address persisted for
  * that stack. Deriving these from the USER-FACING environment instead (the
@@ -2666,26 +2669,26 @@ export function planK8sBackstopTargets({ plan, envConfig, projectConfig }) {
  *
  * Exported for unit testing (destroyK8sTier itself is not).
  *
- * @param {{provider: object, targets: ReturnType<typeof planK8sBackstopTargets>, results: object, s: {start: Function, stop: Function}}} args
+ * @param {{provider: object, targets: ReturnType<typeof planK8sBackstopTargets>, results: object, s: {start: Function, stop: Function}, projectName?: string}} args
  */
-export async function sweepK8sBackstopTargets({ provider, targets, results, s }) {
+export async function sweepK8sBackstopTargets({ provider, targets, results, s, projectName }) {
   const Provider = provider.constructor;
   for (const target of targets) {
     // Firewall — literal name from digitalocean-k8s.js: `${clusterName}-firewall`.
-    const doFwName = target.firewallName;
-    s.start(`Verifying ${Provider.NAME} firewall is gone: ${doFwName}`);
+    const firewallName = target.firewallName;
+    s.start(`Verifying ${Provider.NAME} firewall is gone: ${firewallName}`);
     try {
-      const result = await provider.deleteFirewallByName(doFwName);
+      const result = await provider.deleteFirewallByName(firewallName);
       if (result.deleted) {
-        results.firewalls.push(doFwName);
+        results.firewalls.push(firewallName);
         s.stop('Firewall deleted (backstop)');
       } else if (result.apiError) {
         s.stop(`Firewall backstop failed: ${result.apiError.message}`);
         results.leaks.leak({
           resourceClass: 'firewall',
-          resource: doFwName,
+          resource: firewallName,
           reason: `backstop delete did not complete: ${result.apiError.message}`,
-          hint: `Delete it via the ${Provider.NAME} console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".`,
+          hint: `Delete it via the ${Provider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`,
         });
       } else {
         s.stop('Firewall already gone (Pulumi)');
@@ -2694,9 +2697,9 @@ export async function sweepK8sBackstopTargets({ provider, targets, results, s })
       s.stop(`Firewall backstop check failed: ${error.message}`);
       results.leaks.unverified({
         resourceClass: 'firewall',
-        resource: doFwName,
+        resource: firewallName,
         reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
-        hint: `Delete it via the ${Provider.NAME} console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".`,
+        hint: `Delete it via the ${Provider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`,
       });
     }
 
@@ -2704,18 +2707,18 @@ export async function sweepK8sBackstopTargets({ provider, targets, results, s })
     // `${clusterName}-${config.location}-key` (config.location ===
     // envConfig.region). Null on HA: both clusters share one key created
     // OUTSIDE Pulumi, swept by the dedicated block below.
-    const doSshKeyName = target.sshKeyName;
-    if (doSshKeyName) {
-      s.start(`Verifying ${Provider.NAME} SSH key is gone: ${doSshKeyName}`);
+    const sshKeyName = target.sshKeyName;
+    if (sshKeyName) {
+      s.start(`Verifying ${Provider.NAME} SSH key is gone: ${sshKeyName}`);
       try {
-        const deleted = await provider.deleteSSHKeyByName(doSshKeyName);
-        if (deleted) results.sshKeys.push(doSshKeyName);
+        const deleted = await provider.deleteSSHKeyByName(sshKeyName);
+        if (deleted) results.sshKeys.push(sshKeyName);
         s.stop(deleted ? 'SSH key deleted (backstop)' : 'SSH key already gone (Pulumi)');
       } catch (error) {
         s.stop(`SSH key backstop check failed: ${error.message}`);
         results.leaks.unverified({
           resourceClass: 'ssh-key',
-          resource: doSshKeyName,
+          resource: sshKeyName,
           reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
           hint: `Delete it via the ${Provider.NAME} console — a leaked key blocks the next deploy's key registration by name.`,
         });
@@ -2745,7 +2748,7 @@ export async function sweepK8sBackstopTargets({ provider, targets, results, s })
             resourceClass: 'reserved-ip',
             resource: target.floatingIp,
             reason: 'backstop delete did not release it',
-            hint: `Delete it via the ${Provider.NAME} console (Networking → Reserved IPs); it continues to incur a small charge until released.`,
+            hint: `Delete it via the ${Provider.NAME} console (look for reserved or floating IPs under networking); it continues to incur a small charge until released.`,
           });
         }
       } catch (error) {
@@ -2754,29 +2757,71 @@ export async function sweepK8sBackstopTargets({ provider, targets, results, s })
           resourceClass: 'reserved-ip',
           resource: target.floatingIp,
           reason: `backstop check threw: ${error.message}, could not confirm it is released`,
-          hint: `Delete it via the ${Provider.NAME} console (Networking → Reserved IPs); it continues to incur a small charge until released.`,
+          hint: `Delete it via the ${Provider.NAME} console (look for reserved or floating IPs under networking); it continues to incur a small charge until released.`,
+        });
+      }
+    }
+
+    // No persisted address: the deploy died after `pulumi up` created the
+    // reserved IP but before its address reached envConfig. A provider whose
+    // reserved IPs carry tags (Linode) finds them by the labels its Pulumi
+    // program stamps: project plus the per-stack environment, which is one
+    // cluster (k8s-ha has one stack per cluster). Never project alone.
+    // DigitalOcean reserved IPs carry no tags, so it lacks the method and
+    // keeps the address-only behaviour above.
+    if (
+      !target.floatingIp &&
+      projectName &&
+      typeof provider.deleteReservedIpsByLabels === 'function'
+    ) {
+      s.start(`Looking for ${Provider.NAME} reserved IPs tagged for ${target.stackEnv}`);
+      try {
+        const swept = await provider.deleteReservedIpsByLabels({
+          project: projectName,
+          environment: target.stackEnv,
+        });
+        s.stop(
+          swept.deleted.length > 0
+            ? `Reserved IP released by tag (backstop): ${swept.deleted.join(', ')}`
+            : 'No tagged reserved IP left',
+        );
+        for (const failure of swept.failed) {
+          results.leaks.leak({
+            resourceClass: 'reserved-ip',
+            resource: failure.address,
+            reason: 'backstop delete by tag did not release it',
+            hint: `Delete it via the ${Provider.NAME} console (look for reserved or floating IPs under networking); it continues to incur a small charge until released.`,
+          });
+        }
+      } catch (error) {
+        s.stop(`Reserved IP tag check failed: ${error.message}`);
+        results.leaks.unverified({
+          resourceClass: 'reserved-ip',
+          resource: `reserved IPs tagged ${projectName}/${target.stackEnv}`,
+          reason: `backstop listing threw: ${error.message}, could not confirm none remain`,
+          hint: `Check the ${Provider.NAME} console for a reserved IP left behind by this cluster.`,
         });
       }
     }
 
     // VPC LAST — DO refuses to delete a non-empty VPC (still-attached
-    // droplets/load balancers/etc respond non-2xx). By this point Pulumi
+    // servers/load balancers/etc respond non-2xx). By this point Pulumi
     // + every sweep above should have cleared every member; a refusal
     // here is therefore a genuine ordering bug elsewhere, not a
     // not-found — surface it loudly rather than swallow it.
-    const doNetworkName = target.networkName;
-    s.start(`Verifying ${Provider.NAME} VPC is gone: ${doNetworkName}`);
+    const networkName = target.networkName;
+    s.start(`Verifying ${Provider.NAME} VPC is gone: ${networkName}`);
     try {
-      const result = await provider.deleteNetworkByName(doNetworkName);
+      const result = await provider.deleteNetworkByName(networkName);
       if (result.deleted) {
         s.stop('VPC deleted (backstop)');
       } else if (result.apiError) {
         s.stop(`VPC backstop failed: ${result.apiError.message}`);
         results.leaks.leak({
           resourceClass: 'network',
-          resource: doNetworkName,
+          resource: networkName,
           reason: `delete refused (likely still has members): ${result.apiError.message}`,
-          hint: `Check the ${Provider.NAME} console for leftover droplets/load balancers/database clusters in this VPC, delete them, then delete the VPC manually.`,
+          hint: `Check the ${Provider.NAME} console for leftover servers, load balancers or managed databases in this VPC, delete them, then delete the VPC manually.`,
         });
       } else {
         s.stop('VPC already gone (Pulumi)');
@@ -2785,9 +2830,9 @@ export async function sweepK8sBackstopTargets({ provider, targets, results, s })
       s.stop(`VPC backstop check failed: ${error.message}`);
       results.leaks.unverified({
         resourceClass: 'network',
-        resource: doNetworkName,
+        resource: networkName,
         reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
-        hint: `Check the ${Provider.NAME} console for a surviving VPC and any droplets/load balancers still inside it.`,
+        hint: `Check the ${Provider.NAME} console for a surviving VPC and any servers or load balancers still inside it.`,
       });
     }
   }
@@ -3276,7 +3321,8 @@ async function destroyK8sTier({
       });
     }
 
-    // DO-only name/address backstop (M3 Task 9f). Two live DO k8s destroys
+    // Name/address backstop for providers with K8S_DESTROY_BACKSTOP (M3 Task 9f;
+    // DigitalOcean first, Linode too). Two live DO k8s destroys
     // left the firewall/VPC/SSH-key/reserved-IP behind even though Pulumi
     // reported success. The loud-partial-detection this task also added
     // (destroyStack's internal checks in lib/iac/index.js, PLUS the
@@ -3289,7 +3335,7 @@ async function destroyK8sTier({
     // name/address deletes that don't depend on trusting Pulumi's own report
     // at all, so leftover resources get cleaned up regardless of whether the
     // Pulumi step above was verified or not. Hetzner's k8s Pulumi destroy has
-    // never been observed to leak these, so it gets none of this — only the
+    // never been observed to leak these, so it opts out of this and only gets the
     // ownedIps fix above (its k8s DNS record was the actual gap there).
     // One pass per Pulumi STACK: k8s-ha is two stacks (`<env>-primary` /
     // `<env>-standby`), each with its own firewall/VPC/reserved IP — deriving
@@ -3303,6 +3349,7 @@ async function destroyK8sTier({
         targets: planK8sBackstopTargets({ plan, envConfig, projectConfig }),
         results,
         s,
+        projectName: projectConfig.projectName,
       });
     }
 

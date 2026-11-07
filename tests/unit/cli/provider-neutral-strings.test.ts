@@ -141,14 +141,14 @@ describe('destroy.js console-hint + orphan-token strings — Provider.NAME/.TOKE
   it('the firewall-leak hint interpolates Provider.NAME', () => {
     expect(DESTROY_SRC).toContain(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the literal source-code ${Provider.NAME} placeholder, not a JS template
-      'hint: `Delete it via the ${Provider.NAME} console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".`,',
+      'hint: `Delete it via the ${Provider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`,',
     );
   });
 
-  it('renders "Delete it via the Hetzner Cloud console — ..." for Hetzner — not the old "...Hetzner console..."', () => {
-    const rendered = `Delete it via the ${HetznerProvider.NAME} console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".`;
+  it('renders "Delete it via the Hetzner Cloud console, ..." for Hetzner — not the old "...Hetzner console..."', () => {
+    const rendered = `Delete it via the ${HetznerProvider.NAME} console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.`;
     expect(rendered).toBe(
-      'Delete it via the Hetzner Cloud console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".',
+      'Delete it via the Hetzner Cloud console, because a leaked firewall makes the next deploy fail with a name-already-in-use error.',
     );
   });
 

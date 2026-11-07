@@ -7,11 +7,21 @@
  * reserved IP, VPC, firewall and SSH key by name or address, never through
  * the cluster.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const fetchWithRetryMock = vi.fn();
+vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, fetchWithRetry: (...args: unknown[]) => fetchWithRetryMock(...args) };
+});
+
 import { planK8sBackstopTargets, sweepK8sBackstopTargets } from '../../../src/destroy.js';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
+import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
-import { LinodeProvider } from '../../../src/lib/providers/linode.js';
+import { encodeLabel, LinodeProvider } from '../../../src/lib/providers/linode.js';
+
+beforeEach(() => fetchWithRetryMock.mockReset());
 
 const spinner = () => ({ start: vi.fn(), stop: vi.fn() });
 const makeResults = () => ({ firewalls: [], sshKeys: [], leaks: createLeakLedger() });
@@ -71,6 +81,60 @@ describe('sweepK8sBackstopTargets on Linode', () => {
     expect(results.leaks.entries.map((e: { resourceClass: string }) => e.resourceClass)).toEqual([
       'reserved-ip',
     ]);
+  });
+});
+
+describe('reserved IP found by tag when no address was persisted', () => {
+  const target = {
+    stackEnv: 'prod',
+    firewallName: 'proj-prod-firewall',
+    sshKeyName: null,
+    floatingIp: null,
+    networkName: 'proj-prod-network',
+  };
+  const tags = (project: string, environment: string) => [
+    encodeLabel('project', project),
+    encodeLabel('environment', environment),
+  ];
+
+  it("deletes this cluster's tagged IP and no other environment or project", async () => {
+    const provider = new LinodeProvider('token');
+    vi.spyOn(provider, 'deleteFirewallByName').mockResolvedValue({ deleted: false });
+    vi.spyOn(provider, 'deleteNetworkByName').mockResolvedValue({ deleted: false });
+    fetchWithRetryMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (init?.method === 'DELETE') return { ok: true, status: 204 };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          page: 1,
+          pages: 1,
+          data: [
+            { address: '203.0.113.1', tags: tags('proj', 'prod') },
+            { address: '203.0.113.2', tags: tags('proj', 'staging') },
+            { address: '203.0.113.3', tags: tags('other', 'prod') },
+            { address: '203.0.113.4', tags: [] },
+          ],
+        }),
+      };
+    });
+    const results = makeResults();
+    await sweepK8sBackstopTargets({
+      provider,
+      targets: [target],
+      results,
+      s: spinner(),
+      projectName: 'proj',
+    });
+    const deletes = fetchWithRetryMock.mock.calls
+      .filter(([, init]) => init?.method === 'DELETE')
+      .map(([url]) => url as string);
+    expect(deletes).toEqual(['https://api.linode.com/v4/networking/reserved/ips/203.0.113.1']);
+    expect(results.leaks.entries).toHaveLength(0);
+  });
+
+  it('DigitalOcean has no by-label method, so a missing address is skipped as before', () => {
+    expect(typeof new DigitalOceanProvider('token').deleteReservedIpsByLabels).toBe('undefined');
   });
 });
 

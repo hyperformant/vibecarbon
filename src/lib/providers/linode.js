@@ -1547,6 +1547,45 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
+   * Release every reserved IPv4 whose tags carry ALL of the given labels
+   * (same encodeLabel encoding the k8s Pulumi program tags with). Lists
+   * GET /networking/reserved/ips and filters client-side, the way
+   * listServersDetailed does, so no server-side filter syntax is relied on.
+   * Empty labels match nothing: it never sweeps the whole account.
+   * @param {Object<string,string>} labels
+   * @returns {Promise<{ deleted: string[], failed: Array<{ address: string }> }>}
+   * @throws when the listing cannot be read
+   */
+  async deleteReservedIpsByLabels(labels) {
+    const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
+    if (wanted.length === 0) return { deleted: [], failed: [] };
+    const matches = [];
+    let page = 1;
+    for (let guard = 0; guard < 20; guard++) {
+      const response = await fetchWithRetry(
+        `${LinodeProvider.API_BASE}/networking/reserved/ips?page=${page}&page_size=100`,
+        { headers: { Authorization: `Bearer ${this.apiToken}` } },
+      );
+      if (!response.ok) {
+        throw new Error(`GET /networking/reserved/ips failed: HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      for (const ip of data.data ?? []) {
+        if (wanted.every((tag) => (ip.tags ?? []).includes(tag))) matches.push(ip.address);
+      }
+      if (!data.pages || page >= data.pages) break;
+      page++;
+    }
+    const deleted = [];
+    const failed = [];
+    for (const address of matches) {
+      if (await this.deleteReservedIpByAddress(address)) deleted.push(address);
+      else failed.push({ address });
+    }
+    return { deleted, failed };
+  }
+
+  /**
    * List ALL volumes (paginated walk, soft-fail contract matching
    * listServers).
    * @returns {Promise<object[]>}

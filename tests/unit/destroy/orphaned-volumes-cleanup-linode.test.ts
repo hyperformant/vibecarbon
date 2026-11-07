@@ -24,8 +24,9 @@ function setup(volumes: Array<ReturnType<typeof volume>>) {
   const deleteVolume = vi.spyOn(provider, 'deleteVolume').mockResolvedValue(true);
   return { provider, deleteVolume };
 }
+// A real destroy passes the cluster's regions, which arms the region heuristic.
 const run = (provider: LinodeProvider) =>
-  cleanupOrphanedVolumes(provider, 'proj', 'prod', [], [], [], { report: () => {} });
+  cleanupOrphanedVolumes(provider, 'proj', 'prod', [], [], ['us-iad'], { report: () => {} });
 
 describe('cleanupOrphanedVolumes on Linode', () => {
   it('deletes a detached pvc volume carrying the project tag', async () => {
@@ -40,6 +41,16 @@ describe('cleanupOrphanedVolumes on Linode', () => {
     const { deleted } = await run(provider);
     expect(deleteVolume).not.toHaveBeenCalled();
     expect(deleted).toEqual([]);
+  });
+
+  it("in the cluster region, deletes only this project's volume of two detached pvc volumes", async () => {
+    const { provider, deleteVolume } = setup([
+      volume('pvc-0123456789abcdef', 'other', { id: 1 }),
+      volume('pvc-fedcba9876543210', 'proj', { id: 2 }),
+    ]);
+    const { deleted } = await run(provider);
+    expect(deleteVolume).toHaveBeenCalledExactlyOnceWith(2);
+    expect(deleted).toEqual(['pvc-fedcba9876543210']);
   });
 
   it('leaves a hand-named volume with the project tag alone', async () => {

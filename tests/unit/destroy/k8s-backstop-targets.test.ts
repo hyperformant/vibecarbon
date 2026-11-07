@@ -1,7 +1,7 @@
 /**
- * planK8sBackstopTargets — the DO k8s destroy backstop's target list.
+ * planK8sBackstopTargets — the k8s destroy backstop's target list.
  *
- * The backstop (destroyK8sTier's DO block) is THE mechanism for reserved-IP
+ * The backstop (sweepK8sBackstopTargets) is THE mechanism for reserved-IP
  * release (upstream Pulumi provider defects leak it every run — see the
  * ReservedIp construction site in digitalocean-k8s.js) and the hard guarantee
  * for firewall/VPC/SSH-key cleanup. Before d4 it derived ONE cluster name from
