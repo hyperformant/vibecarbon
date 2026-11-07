@@ -3,8 +3,8 @@
  *
  * Provides a unified interface for accessing cloud providers.
  * Providers differ only by which deploy tiers they implement, never by
- * standing: Hetzner and DigitalOcean cover all four, and
- * Linode/Vultr/Scaleway are compose-only (see assertTierSupported below).
+ * standing: Hetzner, DigitalOcean and Linode cover all four, and
+ * Vultr/Scaleway are compose-only (see assertTierSupported below).
  * No provider is a default or gates a release.
  *
  * To add a new provider:
@@ -133,6 +133,45 @@ export function assertTierSupported(ProviderClass, tier) {
   throw new Error(
     `${ProviderClass.NAME} does not support the '${tier}' deploy tier. Supported: ${supported}.${tierAvailabilityNote}`,
   );
+}
+
+const isK8sTierId = (tier) => tier === 'k8s' || tier === 'k8s-ha';
+
+/**
+ * The region id to name map a tier may deploy to: `regions` itself, less any
+ * region the provider cannot run a Kubernetes tier in
+ * (`ProviderClass.k8sRegionProblem`). Compose tiers get every region. The
+ * interactive region and standby lists read this.
+ *
+ * @param {typeof BaseProvider} ProviderClass
+ * @param {string} tier - `compose` | `compose-ha` | `k8s` | `k8s-ha`
+ * @param {Record<string, string>} regions - region id to display name
+ * @returns {Record<string, string>}
+ */
+export function regionsForTier(ProviderClass, tier, regions) {
+  if (!isK8sTierId(tier)) return regions;
+  return Object.fromEntries(
+    Object.entries(regions).filter(([id]) => !ProviderClass.k8sRegionProblem?.(id)),
+  );
+}
+
+/**
+ * Refuse a region the provider cannot run `tier` in, before any provider API
+ * or Pulumi work. The single check behind every entry point that holds a
+ * region: the deploy wizard (flags, saved config, the picked standby) and the
+ * orchestrator's entry. Unset regions are skipped.
+ *
+ * @param {typeof BaseProvider} ProviderClass
+ * @param {string} tier - `compose` | `compose-ha` | `k8s` | `k8s-ha`
+ * @param {...(string|null|undefined)} regions - primary, then standby
+ * @throws {Error} The provider's own message naming the region
+ */
+export function assertRegionSupportedForTier(ProviderClass, tier, ...regions) {
+  if (!isK8sTierId(tier)) return;
+  for (const region of regions) {
+    const problem = region ? ProviderClass.k8sRegionProblem?.(region) : null;
+    if (problem) throw new Error(problem);
+  }
 }
 
 /**

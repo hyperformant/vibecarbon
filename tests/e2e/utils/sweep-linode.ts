@@ -311,7 +311,7 @@ export async function sweepOrphanedLinodeResources(
     console.warn(`${tag} [sweep] SSH-key cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
-  // Reserved IPs. linode-k8s.js mints one via `linode.NetworkingIp`
+  // Reserved IPs. linode-k8s.js mints one via `linode.ReservedIp`
   // (reserved: true) and its own header carries the warning: reserved IPs
   // BILL WHILE UNASSIGNED. Deleting the instance does not release it, so a
   // failed destroy strands a billing IP.

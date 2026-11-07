@@ -1103,6 +1103,18 @@ export class BaseProvider {
   }
 
   /**
+   * Why `region` cannot host a Kubernetes tier (k8s, k8s-ha), or null when it
+   * can. Compose tiers never ask. The one rule every deploy entry point reads
+   * (providers/index.js assertRegionSupportedForTier, the region lists, the
+   * standby default), so a provider with k8s-less regions declares them once.
+   * @param {string} _region - Region ID
+   * @returns {string|null} The refusal message, or null
+   */
+  static k8sRegionProblem(_region) {
+    return null;
+  }
+
+  /**
    * Default HA standby region for a given primary region: the cheapest
    * same-continent partner where every role in `roles` is orderable (see
    * src/lib/sizing.js cheapestStandbyRegion), else the static pair.

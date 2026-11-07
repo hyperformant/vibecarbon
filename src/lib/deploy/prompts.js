@@ -26,10 +26,12 @@ import {
 import { resolveEnvSeed } from '../env-identity.js';
 import { readOperatorVar } from '../operator-env.js';
 import {
+  assertRegionSupportedForTier,
   getObjectStorageProvider,
   listProviders,
   providerFor,
   providerIdFor,
+  regionsForTier,
   resolveS3RegionFor,
 } from '../providers/index.js';
 import {
@@ -830,6 +832,16 @@ export async function gatherDeploymentConfig(args) {
 
   const deployTier = resolveTier({ deployMode, ha });
 
+  // A region the tier cannot run in (Linode us-east for k8s: no VPC) stops
+  // here, ahead of the token prompt and every provider call. The standby is
+  // checked again once it is picked, below.
+  assertRegionSupportedForTier(
+    Provider,
+    deployTier,
+    args.region || envConfig.region,
+    ha ? args.secondaryRegion || envConfig.secondaryRegion : null,
+  );
+
   // Template lockstep (wal-g role file), on the tier just resolved and before
   // any region, DNS, server-type or credential prompt: this CLI moves the
   // wal-g role through a file the project's scripts parse, and a scaffold from
@@ -926,7 +938,7 @@ export async function gatherDeploymentConfig(args) {
     const regionRoles = isComposeDeploy ? ['compose'] : ['master', 'db', 'worker'];
     const { options, initialValue } = regionPromptChoices(
       Provider,
-      providerConfig.regions,
+      regionsForTier(Provider, deployTier, providerConfig.regions),
       regionRoles,
       { ha },
     );
@@ -1067,7 +1079,9 @@ export async function gatherDeploymentConfig(args) {
     const standbyDefault = Provider.getDefaultStandbyRegion(region, rankRoles, fixedPrimaryTypes);
     secondaryRegion = args.secondaryRegion || envConfig.secondaryRegion || standbyDefault;
     if (!args.secondaryRegion && !envConfig.secondaryRegion && !args.yes) {
-      const standbyOptions = Object.entries(providerConfig.regions)
+      const standbyOptions = Object.entries(
+        regionsForTier(Provider, deployTier, providerConfig.regions),
+      )
         .filter(([id]) => id !== region)
         .map(([id, name]) => ({ value: id, label: `${id} - ${name}` }));
       secondaryRegion = await p.select({
@@ -1079,6 +1093,8 @@ export async function gatherDeploymentConfig(args) {
         exitCancelled();
       }
     }
+
+    assertRegionSupportedForTier(Provider, deployTier, region, secondaryRegion);
 
     // One CPU class for both sides (owner decision 2026-11-03): each role
     // whose type is the region default is re-picked as the best class both

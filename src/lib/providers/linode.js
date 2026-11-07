@@ -254,12 +254,27 @@ export class LinodeProvider extends BaseProvider {
   // linode-objectstorage.js's REGIONS doc.
   static S3_REGION_ENV = 'LINODE_STORAGE_REGION';
 
-  // Compose tiers only (compose-ha added in the 2026-08 tier-parity wave 1 —
-  // the HA surface below was contract-complete since PR 1; effects/compose-ha
-  // is provider-generic). The slate was chosen for 4-mode headroom — CCM/CSI/
-  // DNS-flip feasibility is recorded in linode-step0-audit.md — the k8s tiers
-  // are not yet built or declared.
-  static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+  // All four tiers. The slate was chosen for 4-mode headroom — CCM/CSI/
+  // DNS-flip feasibility is recorded in linode-step0-audit.md. The k8s tiers
+  // need a VPC, which two regions lack (K8S_UNSUPPORTED_REGIONS).
+  static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
+
+  /**
+   * Regions with no VPC, which the k8s tiers need for node-to-node traffic.
+   * k8s and k8s-ha refuse them (k8sRegionProblem) and the region lists omit
+   * them; compose tiers use them freely.
+   * @type {string[]}
+   */
+  static K8S_UNSUPPORTED_REGIONS = ['us-east', 'us-southeast'];
+
+  /**
+   * @param {string} region
+   * @returns {string|null}
+   */
+  static k8sRegionProblem(region) {
+    if (!LinodeProvider.K8S_UNSUPPORTED_REGIONS.includes(region)) return null;
+    return `Linode ${region} has no VPC, which k8s needs. Use us-iad, us-ord or another region with VPCs.`;
+  }
 
   /** Pulumi destroy leaves the k8s reserved IP, VPC, firewall and key; destroy sweeps them by name. */
   static K8S_DESTROY_BACKSTOP = true;
@@ -345,6 +360,9 @@ export class LinodeProvider extends BaseProvider {
   // Compose candidates (see BaseProvider.ROLE_CANDIDATES).
   static ROLE_CANDIDATES = {
     compose: ['g6-standard-2'],
+    master: ['g6-standard-2', 'g6-standard-4'],
+    db: ['g6-standard-1', 'g6-standard-2'],
+    worker: ['g6-standard-2', 'g6-standard-4'],
   };
 
   // Every Linode's public IPv4 is included in its plan price
@@ -358,8 +376,7 @@ export class LinodeProvider extends BaseProvider {
 
   // ── Engine-literal statics ──────────────────────────────────────────────
   static DEFAULT_COMPOSE_TYPE = 'g6-standard-2';
-  // Pinned to the compose default for EXPECTED-table completeness; nothing
-  // reads it while SUPPORTED_TIERS is compose-only.
+  // Pinned to the compose default for EXPECTED-table completeness.
   static DEFAULT_K8S_NODE_TYPE = 'g6-standard-2';
 
   // `linode/ubuntu26.04` ships no Docker (Linode's Marketplace Docker is a
@@ -389,27 +406,26 @@ export class LinodeProvider extends BaseProvider {
   };
 
   /**
-   * The Delete-reclaim StorageClass linode-blockstorage-csi-driver installs
-   * (audit 2026-08-07: the driver ships `linode-block-storage-retain` — its
-   * default — and `linode-block-storage`; the Delete-policy class matches
-   * hcloud-volumes/do-block-storage semantics). Nothing consumes this while
-   * SUPPORTED_TIERS is compose-only, but the literal-guard census requires
-   * every registered provider's value to be distinct and to live in this
-   * file — re-verify against the driver's manifests when the k8s tier is
-   * actually built.
+   * The Delete-reclaim StorageClass the k3s master boot script creates for
+   * linode-blockstorage-csi-driver (the driver itself ships
+   * `linode-block-storage-retain`, its default, and `linode-block-storage`;
+   * the Delete-policy class matches hcloud-volumes/do-block-storage
+   * semantics). The literal-guard census requires every registered
+   * provider's value to be distinct and to live in this file.
    * @type {string}
    */
   static K8S_STORAGE_CLASS = 'linode-block-storage-vibecarbon';
 
   /**
-   * Compose-only: no k8s Pulumi program exists to pin a VPC CIDR against.
+   * The VPC subnet the k8s Pulumi program (iac/programs/linode-k8s.js)
+   * creates for the cluster's nodes.
    * @type {string}
    */
   static DEFAULT_VPC_CIDR = '10.0.1.0/24';
 
   /**
-   * Compose-only: no k8s program/image. K8S_IMAGE's only contract is
-   * byte-matching the k8s program's image literal — there is none.
+   * The image every k8s node boots (byte-matched by the k8s program's image
+   * literal). Ubuntu 26.04: Linode ships it, and k3s needs no Docker.
    * @type {string}
    */
   static K8S_IMAGE = 'linode/ubuntu26.04';

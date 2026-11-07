@@ -85,10 +85,10 @@ export const EXPECTED: Record<
     s3RegionEnv: 'LINODE_STORAGE_REGION',
     defaultComposeType: 'g6-standard-2',
     defaultK8sNodeType: 'g6-standard-2',
-    // Compose-only provider (2026-08 expansion phase 1): no CCM/CSI is
-    // deployed, so the asset identity is deliberately empty — except the
-    // storage-class literal, which the literal-guard census requires to be
-    // real and distinct even before the k8s tier exists.
+    // k8s runs the Linode block storage CSI driver (a StatefulSet controller
+    // and a DaemonSet node plugin). No CCM is deployed, so its fields are
+    // deliberately empty; the storage-class literal is the Delete-reclaim
+    // class the master boot script creates.
     k8sAssets: {
       csiNodeDaemonSet: 'daemonset/csi-linode-node',
       csiControllerSelector: 'app=csi-linode-controller',

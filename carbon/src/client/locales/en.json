@@ -495,7 +495,7 @@
       },
       "q3": {
         "question": "What cloud providers are supported?",
-        "answer": "Hetzner Cloud, DigitalOcean, Linode, Vultr, and Scaleway: the same CLI, the same lifecycle, the same test coverage. Mode support varies by provider. Hetzner and DigitalOcean run Compose, Kubernetes, and Kubernetes HA (a standby copy in a second region, kept ready to take over). Linode, Vultr, and Scaleway run Compose today. The provider is chosen per environment when you first deploy it, so another environment of the same app can use a different one."
+        "answer": "Hetzner Cloud, DigitalOcean, Linode, Vultr, and Scaleway: the same CLI, the same lifecycle, the same test coverage. Mode support varies by provider. Hetzner, DigitalOcean, and Linode run Compose, Kubernetes, and Kubernetes HA (a standby copy in a second region, kept ready to take over). Vultr and Scaleway run Compose today. The provider is chosen per environment when you first deploy it, so another environment of the same app can use a different one."
       },
       "q4": {
         "question": "How does deployment work?",

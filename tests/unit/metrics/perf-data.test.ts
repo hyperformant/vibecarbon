@@ -357,6 +357,8 @@ describe('renderUnifiedPerfTableMd', () => {
       ['', '`k8s-ha`'],
       ['Linode', '`compose`'],
       ['', '`compose-ha`'],
+      ['', '`k8s`'],
+      ['', '`k8s-ha`'],
       ['Vultr', '`compose`'],
       ['', '`compose-ha`'],
       ['Scaleway', '`compose`'],

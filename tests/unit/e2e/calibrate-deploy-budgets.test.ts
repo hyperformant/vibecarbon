@@ -137,10 +137,13 @@ describe('reading the results db', () => {
   it('lists only combinations the provider supports, with or without data', () => {
     const built = buildTable(readSamples(dbPath, '2026-11-05T13:00:00Z'), 'x');
     const listed = built.noData.map((d) => `${d.provider}/${d.mode}`);
-    for (const unsupported of ['linode/k8s', 'linode/k8s-ha', 'vultr/k8s', 'scaleway/k8s-ha']) {
+    for (const unsupported of ['vultr/k8s', 'scaleway/k8s-ha']) {
       expect(listed).not.toContain(unsupported);
     }
     expect(listed).toContain('vultr/compose');
+    // Linode runs all four modes, so its k8s rows are listed until they have data.
+    expect(listed).toContain('linode/k8s');
+    expect(listed).toContain('linode/k8s-ha');
     expect(listed).not.toContain('hetzner/compose');
   });
 

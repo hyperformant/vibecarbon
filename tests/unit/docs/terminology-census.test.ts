@@ -13,11 +13,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import {
-  assertTierSupported,
-  LinodeProvider,
-  PROVIDERS,
-} from '../../../src/lib/providers/index.js';
+import { assertTierSupported, PROVIDERS, VultrProvider } from '../../../src/lib/providers/index.js';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 
@@ -571,16 +567,16 @@ describe('terminology census', () => {
     }
   });
 
-  it('FEATURES.md quotes the real Linode k8s capability-gate error byte-identically', () => {
+  it('FEATURES.md quotes the real Vultr k8s capability-gate error byte-identically', () => {
     // Mirror-with-drift-guard: import the real provider + guard function
     // (src/lib/providers/index.js) and trigger the actual thrown error,
     // rather than duplicating its format string — so a future wording
     // change to assertTierSupported() fails this test instead of silently
-    // leaving FEATURES.md stale. (Linode/k8s carries the example since the
-    // d4 lift removed DO's k8s-ha gate.)
+    // leaving FEATURES.md stale. (Vultr/k8s carries the example since the
+    // Linode lift removed Linode's k8s gate.)
     let message = '';
     try {
-      assertTierSupported(LinodeProvider, 'k8s');
+      assertTierSupported(VultrProvider, 'k8s');
     } catch (err) {
       message = (err as Error).message;
     }

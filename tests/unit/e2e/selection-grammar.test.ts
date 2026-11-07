@@ -39,20 +39,22 @@ describe('resolveSelection — defaults', () => {
     ]);
   });
 
-  it('--provider all = every provider defaults, hetzner first (14 total)', () => {
-    // 4 hetzner + 4 digitalocean (d4 lift 2026-08-27) + 2 linode + 2 vultr
-    // + 2 scaleway (2026-08 expansion PRs 1-3 + tier-parity wave 1).
+  it('--provider all = every provider defaults, hetzner first (16 total)', () => {
+    // 4 hetzner + 4 digitalocean (d4 lift 2026-08-27) + 4 linode (k8s lift)
+    // + 2 vultr + 2 scaleway (2026-08 expansion PRs 1-3 + tier-parity wave 1).
     const sel = resolveSelection({ providers: ['all'] });
-    expect(sel).toHaveLength(14);
+    expect(sel).toHaveLength(16);
     expect(sel[0]).toMatchObject({ provider: 'hetzner', mode: 'compose' });
     expect(sel[6]).toMatchObject({ provider: 'digitalocean', mode: 'k8s' });
     expect(sel[7]).toMatchObject({ provider: 'digitalocean', mode: 'k8s-ha' });
     expect(sel[8]).toMatchObject({ provider: 'linode', mode: 'compose' });
     expect(sel[9]).toMatchObject({ provider: 'linode', mode: 'compose-ha' });
-    expect(sel[10]).toMatchObject({ provider: 'vultr', mode: 'compose' });
-    expect(sel[11]).toMatchObject({ provider: 'vultr', mode: 'compose-ha' });
-    expect(sel[12]).toMatchObject({ provider: 'scaleway', mode: 'compose' });
-    expect(sel[13]).toMatchObject({ provider: 'scaleway', mode: 'compose-ha' });
+    expect(sel[10]).toMatchObject({ provider: 'linode', mode: 'k8s' });
+    expect(sel[11]).toMatchObject({ provider: 'linode', mode: 'k8s-ha' });
+    expect(sel[12]).toMatchObject({ provider: 'vultr', mode: 'compose' });
+    expect(sel[13]).toMatchObject({ provider: 'vultr', mode: 'compose-ha' });
+    expect(sel[14]).toMatchObject({ provider: 'scaleway', mode: 'compose' });
+    expect(sel[15]).toMatchObject({ provider: 'scaleway', mode: 'compose-ha' });
   });
 });
 
@@ -148,7 +150,7 @@ describe('resolveSelection — explicit tokens', () => {
 
   it('provider all + exclude', () => {
     const sel = resolveSelection({ providers: ['all'], exclude: ['digitalocean/compose-ha'] });
-    expect(sel).toHaveLength(13);
+    expect(sel).toHaveLength(15);
   });
 });
 
@@ -167,8 +169,8 @@ describe('resolveSelection — loud failures (no legacy forms)', () => {
   });
 
   it('mode unsupported by provider throws naming supported modes', () => {
-    // linode carries the negative case now that DO supports all four tiers.
-    expect(() => resolveSelection({ include: ['linode/k8s'] })).toThrow(
+    // vultr carries the negative case now that DO and Linode support all four tiers.
+    expect(() => resolveSelection({ include: ['vultr/k8s'] })).toThrow(
       /does not support k8s.*compose, compose-ha/,
     );
   });

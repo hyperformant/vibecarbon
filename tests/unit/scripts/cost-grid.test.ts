@@ -145,7 +145,7 @@ describe('on the 2026-10-22 catalogs', () => {
     [
       LinodeProvider,
       'linode',
-      '| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | not yet | not yet |',
+      '| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | $60 (us-iad) | $96 (us-iad + us-ord) |',
     ],
     [
       ScalewayProvider,

@@ -21,6 +21,7 @@ import { ensureOperatorIpAccess } from '../operator-ip.js';
 import { perfAsync, perfTimer } from '../perf.js';
 import { runProjectAssignment } from '../project-assignment.js';
 import {
+  assertRegionSupportedForTier,
   assertTierSupported,
   getObjectStorageProvider,
   providerFor,
@@ -1104,6 +1105,12 @@ export async function executeDeployment(args, gatheredConfig) {
     env: operatorCheckEnvs(process.cwd()),
   });
   assertTierSupported(providerFor(config), tier);
+  assertRegionSupportedForTier(
+    providerFor(config),
+    tier,
+    config.region,
+    isHaTier(tier) ? config.secondaryRegion : null,
+  );
   // One certificate per name: an observability add-on copied into the
   // project before the change still issues grafana-tls for the app domain
   // until `vibecarbon upgrade` refreshes it. Refused here, the last stop
