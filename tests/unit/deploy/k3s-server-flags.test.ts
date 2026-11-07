@@ -67,6 +67,7 @@ describe('k3sServerFlags', () => {
     it('only the master advertises the private address and carries the mirror flags', () => {
       const flags = k3sServerFlags(linode('master'), LINODE_VARS);
       expect(flagArg(flags, '--advertise-address')).toBe('10.0.1.2');
+      expect(flags).toContain('--write-kubeconfig-mode=600');
       expect(flagArg(flags, '--system-default-registry')).toBe('vibecarbon-system.invalid');
       for (const role of ['worker', 'db']) {
         const agent = k3sServerFlags(linode(role), LINODE_VARS, 'agent');

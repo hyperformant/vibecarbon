@@ -142,7 +142,7 @@ for attempt in 1 2 3 4 5; do
       --disable gateway-api-crd \
       --system-default-registry "vibecarbon-system.invalid" \
       --kubelet-arg="provider-id=linode://$NODE_ID" \
-      --write-kubeconfig-mode=644; then
+      --write-kubeconfig-mode=600; then
     K3S_INSTALL_OK=true
     break
   fi
