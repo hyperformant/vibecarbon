@@ -482,23 +482,44 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       expect((await roleOf(email)).role).toBe('user');
     });
 
-    it('refuses a leftover super admin with no password at once, with the fix', async () => {
-      // A bootstrap interrupted between the user row and its password. Under
-      // the advisory lock no other replica can be mid-create, so this is a
-      // real leftover: refused immediately, not waited on.
+    it('finishes a super admin left without a password: ADMIN_PASSWORD becomes its password', async () => {
+      // A bootstrap interrupted between the user row and its password (a pod
+      // killed mid-start, seen on a k8s-ha deploy 2026-11-07). Under the
+      // advisory lock no other replica can be mid-create, so this is a real
+      // leftover. Refusing it left an admin nobody could sign in as.
       const email = newEmail();
       await db.query('insert into public."user" (name, email, role) values ($1, $2, $3)', [
         'Half Made',
         email,
         'super_admin',
       ]);
-      const errors = vi.spyOn(logger, 'error');
-      try {
-        expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('refused');
-        expect(JSON.stringify(errors.mock.calls)).toContain('has no password');
-      } finally {
-        errors.mockRestore();
-      }
+      expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('created');
+      expect((await signIn(email, PASSWORD, '203.0.113.94')).status).toBe(200);
+      // Settled now: a later ADMIN_PASSWORD change resets nothing.
+      expect(await bootstrapAdmin({ email, password: 'test-different-password' })).toBe(
+        'unchanged',
+      );
+      expect((await signIn(email, 'test-different-password', '203.0.113.95')).status).toBe(401);
+    });
+
+    it('fills in a credential account that has no password rather than adding a second', async () => {
+      const email = newEmail();
+      const { rows } = await db.query(
+        'insert into public."user" (name, email, role) values ($1, $2, $3) returning id',
+        ['Half Linked', email, 'super_admin'],
+      );
+      const userId = rows[0].id;
+      await db.query(
+        `insert into public.account (account_id, provider_id, user_id) values ($1::text, 'credential', $1::uuid)`,
+        [userId],
+      );
+      expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('created');
+      const credentials = await db.query(
+        `select count(*)::int as n from public.account where user_id = $1 and provider_id = 'credential'`,
+        [userId],
+      );
+      expect(credentials.rows[0].n).toBe(1);
+      expect((await signIn(email, PASSWORD, '203.0.113.96')).status).toBe(200);
     });
 
     it('the bootstrap lock is exclusive and released afterwards', async () => {
