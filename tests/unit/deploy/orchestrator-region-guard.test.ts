@@ -13,7 +13,7 @@ import { LinodeProvider } from '../../../src/lib/providers/linode.js';
 describe('assertDeployRegion', () => {
   it('refuses a Linode k8s deploy to a VPC-less region', () => {
     expect(() => assertDeployRegion(LinodeProvider, 'k8s', { region: 'us-east' })).toThrow(
-      'Linode us-east has no VPC, which k8s needs. Use us-iad, us-ord or another region with VPCs.',
+      "Kubernetes on Linode does not run in Newark (us-east): Linode has no VPC there for the cluster's private network. Use us-iad, us-ord or another region.",
     );
   });
 
@@ -23,7 +23,7 @@ describe('assertDeployRegion', () => {
         region: 'us-iad',
         secondaryRegion: 'us-southeast',
       }),
-    ).toThrow(/us-southeast has no VPC/);
+    ).toThrow(/does not run in Atlanta \(us-southeast\)/);
   });
 
   it('lets compose and VPC regions through, and other providers', () => {

@@ -86,8 +86,9 @@ fi
 echo "Linode ID: $NODE_ID"
 
 # Configure containerd to mirror pulls for the local registry running on
-# the master, at the master's private IP. That IP is known at render time
-# (the master is created first), so it is a template var (${master_ip}).
+# the master, at the master's private IP. The program fixes that VPC address
+# (10.0.1.2), so it is known at render time and this node is created in
+# parallel with the master, not after it. It is a template var (${master_ip}).
 #
 # Plain http://${master_ip}:5000 -- the registry runs HTTP on the private
 # network. Do NOT add `insecure_skip_verify: true` (see linode-master-init.sh).

@@ -2357,7 +2357,7 @@ async function destroyComposeTier({
         resourceClass: 'ssh-key',
         resource: hetznerSshKeyName,
         reason: `delete failed: ${error.message}`,
-        hint: `Delete it via the ${Provider.NAME} console — a leaked key blocks the next deploy's key registration by name.`,
+        hint: `Delete it via the ${Provider.NAME} console, because a leaked key blocks the next deploy's key registration by name.`,
       });
     }
   }
@@ -2720,7 +2720,7 @@ export async function sweepK8sBackstopTargets({ provider, targets, results, s, p
           resourceClass: 'ssh-key',
           resource: sshKeyName,
           reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
-          hint: `Delete it via the ${Provider.NAME} console — a leaked key blocks the next deploy's key registration by name.`,
+          hint: `Delete it via the ${Provider.NAME} console, because a leaked key blocks the next deploy's key registration by name.`,
         });
       }
     }

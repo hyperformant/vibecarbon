@@ -113,7 +113,7 @@ describe('deploy: Linode k8s tiers refuse regions without a VPC', () => {
       ...mode,
     }).catch((e) => e);
     expect(String(err)).toContain(
-      `Linode ${region} has no VPC, which k8s needs. Use us-iad, us-ord or another region with VPCs.`,
+      `Kubernetes on Linode does not run in ${region === 'us-east' ? 'Newark' : 'Atlanta'} (${region}): Linode has no VPC there for the cluster's private network. Use us-iad, us-ord or another region.`,
     );
     for (const [name, fn] of Object.entries(later)) {
       expect(fn, `${name} ran before the refusal`).not.toHaveBeenCalled();
@@ -131,7 +131,7 @@ describe('deploy: Linode k8s tiers refuse regions without a VPC', () => {
       k8s: true,
       ha: true,
     }).catch((e) => e);
-    expect(String(err)).toContain('Linode us-southeast has no VPC');
+    expect(String(err)).toContain('does not run in Atlanta (us-southeast)');
     expect(later.apiToken).not.toHaveBeenCalled();
   });
 

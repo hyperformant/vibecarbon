@@ -29,10 +29,10 @@ const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
 // public port).
 const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
-// The single replication port for the WireGuard tunnel (see wireguard.js —
-// WG_PORT=51821). Only reachable via compose-ha, which Linode does not
-// support yet — implemented anyway because buildReplicationFirewallRules is
-// contract-required and the rule shape is pinned by unit tests.
+// The single replication port for the WireGuard tunnel (wireguard.js,
+// WG_PORT=51821). buildReplicationFirewallRules opens it to the peer site's
+// server for compose-ha (compose/ha.js) and to the peer cluster's db for
+// k8s-ha (deploy/effects/k8s-ha.js); the rule shape is pinned by unit tests.
 const WG_PORT = '51821';
 
 /**
@@ -243,8 +243,9 @@ export class LinodeProvider extends BaseProvider {
   // prompting. Linode Object Storage keys are separate credentials minted
   // via POST /object-storage/keys (secret shown once).
   static OBJECT_STORAGE_ENV = ['LINODE_ACCESS_KEY', 'LINODE_SECRET_KEY'];
-  // The providerID scheme Linode's CCM stamps on nodes (`linode://<id>`) —
-  // relevant only at the (unbuilt) k8s tier, pinned now for uniqueness.
+  // The providerID on Linode k8s nodes (`linode://<id>`). There is no Linode
+  // CCM: the k3s boot scripts pre-seed it with the kubelet's `provider-id`
+  // flag, and the autoscaler strips the prefix to find the instance.
   static PROVIDER_ID_PREFIX = 'linode://';
   static DEFAULT_REGION = 'us-iad';
   static PRICING_URL = 'https://www.linode.com/pricing/';
@@ -273,7 +274,11 @@ export class LinodeProvider extends BaseProvider {
    */
   static k8sRegionProblem(region) {
     if (!LinodeProvider.K8S_UNSUPPORTED_REGIONS.includes(region)) return null;
-    return `Linode ${region} has no VPC, which k8s needs. Use us-iad, us-ord or another region with VPCs.`;
+    const city = LinodeProvider.REGIONS[region]?.split(',')[0] ?? region;
+    return (
+      `Kubernetes on Linode does not run in ${city} (${region}): Linode has no VPC there ` +
+      "for the cluster's private network. Use us-iad, us-ord or another region."
+    );
   }
 
   /** Pulumi destroy leaves the k8s reserved IP, VPC, firewall and key; destroy sweeps them by name. */

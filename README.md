@@ -268,7 +268,7 @@ One CLI, four deploy modes, picked per environment. Every mode includes automate
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean and Linode are fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode's Kubernetes modes run in every Linode region except us-east and us-southeast, which have no VPCs. Vultr and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining modes aren't built for them yet, though Compose HA is available on every provider regardless (see Architecture above).
+DigitalOcean and Linode are fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Kubernetes on Linode runs in every region except Newark (us-east) and Atlanta (us-southeast). Vultr and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining modes aren't built for them yet, though Compose HA is available on every provider regardless (see Architecture above).
 
 ### Integration Guides
 

@@ -9,9 +9,12 @@ afterEach(() => {
 
 describe('Linode k8s region rule', () => {
   it.each(['k8s', 'k8s-ha'])('%s refuses a region without a VPC, naming it', (tier) => {
-    for (const region of ['us-east', 'us-southeast']) {
+    for (const [city, region] of [
+      ['Newark', 'us-east'],
+      ['Atlanta', 'us-southeast'],
+    ]) {
       expect(() => assertRegionSupportedForTier(LinodeProvider, tier, region)).toThrow(
-        `Linode ${region} has no VPC, which k8s needs. Use us-iad, us-ord or another region with VPCs.`,
+        `Kubernetes on Linode does not run in ${city} (${region}): Linode has no VPC there for the cluster's private network. Use us-iad, us-ord or another region.`,
       );
     }
   });
@@ -19,7 +22,7 @@ describe('Linode k8s region rule', () => {
   it('k8s-ha refuses a VPC-less standby as well as a VPC-less primary', () => {
     expect(() =>
       assertRegionSupportedForTier(LinodeProvider, 'k8s-ha', 'us-iad', 'us-east'),
-    ).toThrow(/us-east has no VPC/);
+    ).toThrow(/does not run in Newark \(us-east\)/);
   });
 
   it.each(['compose', 'compose-ha'])('%s may use any region', (tier) => {

@@ -152,6 +152,14 @@ describe('destroy.js console-hint + orphan-token strings — Provider.NAME/.TOKE
     );
   });
 
+  it('both SSH-key leak hints interpolate Provider.NAME, with no em dash', () => {
+    const sshKeyHint =
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the literal source-code ${Provider.NAME} placeholder, not a JS template
+      "hint: `Delete it via the ${Provider.NAME} console, because a leaked key blocks the next deploy's key registration by name.`,";
+    expect(DESTROY_SRC.split(sshKeyHint).length - 1).toBe(2);
+    expect(DESTROY_SRC).not.toContain('console — a leaked key');
+  });
+
   it('the k8s manual-cleanup hint interpolates Provider.NAME', () => {
     expect(DESTROY_SRC).toContain(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the literal source-code ${dirLabel}/${Provider.NAME} placeholders, not a JS template

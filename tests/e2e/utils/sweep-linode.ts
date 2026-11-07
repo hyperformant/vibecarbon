@@ -311,10 +311,10 @@ export async function sweepOrphanedLinodeResources(
     console.warn(`${tag} [sweep] SSH-key cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
-  // Reserved IPs. linode-k8s.js mints one via `linode.ReservedIp`
-  // (reserved: true) and its own header carries the warning: reserved IPs
-  // BILL WHILE UNASSIGNED. Deleting the instance does not release it, so a
-  // failed destroy strands a billing IP.
+  // Reserved IPs. linode-k8s.js mints one per cluster via `linode.ReservedIp`.
+  // Linode bills a reserved IP by the hour whether it is assigned or not
+  // (Linode API changelog, 1 July 2026), and deleting the instance does not
+  // release it, so a failed destroy strands a billing IP.
   //
   // This counter used to be a hardcoded `floatingIps: 0` with the comment
   // a claim that this tier mints none. True of the
@@ -354,7 +354,7 @@ export async function sweepOrphanedLinodeResources(
       for (const i of stranded) {
         console.warn(
           `${tag} [sweep] UNASSIGNED reserved IP ${i.address} is billing and cannot be ` +
-            'attributed from the API (this sweep does not read the k8s tags). Not deleted — ' +
+            'attributed from the API (this sweep does not read the k8s tags). Not deleted: ' +
             'check it belongs to this e2e account and release it manually.',
         );
       }
