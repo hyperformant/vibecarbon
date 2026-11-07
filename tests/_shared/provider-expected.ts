@@ -90,8 +90,8 @@ export const EXPECTED: Record<
     // storage-class literal, which the literal-guard census requires to be
     // real and distinct even before the k8s tier exists.
     k8sAssets: {
-      csiNodeDaemonSet: '',
-      csiControllerSelector: '',
+      csiNodeDaemonSet: 'daemonset/csi-linode-node',
+      csiControllerSelector: 'app=csi-linode-controller',
       ccmDeployment: '',
       ccmSelector: '',
       networkEnvVar: '',

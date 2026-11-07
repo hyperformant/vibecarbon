@@ -368,12 +368,10 @@ export class LinodeProvider extends BaseProvider {
   static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
 
   /**
-   * Empty at the compose-only tier: no CCM/CSI is deployed, so there is no
-   * asset identity to probe (and an empty `csiNodeDaemonSet` keeps
-   * k8s-image-mirrors' census from demanding a mirror spec). The real
-   * values, when the k8s tier is built, come from
-   * linode-cloud-controller-manager / linode-blockstorage-csi-driver
-   * manifests — see linode-step0-audit.md's headroom record.
+   * Kubernetes cluster-addon asset identity. The CSI names come from
+   * linode-blockstorage-csi-driver v1.1.5: a StatefulSet controller and a
+   * DaemonSet node plugin, both labelled with a bare `app=` key. CCM entries
+   * stay empty until Linode's CCM is wired.
    * @type {{
    *   csiNodeDaemonSet: string,
    *   csiControllerSelector: string,
@@ -383,8 +381,8 @@ export class LinodeProvider extends BaseProvider {
    * }}
    */
   static K8S_ASSETS = {
-    csiNodeDaemonSet: '',
-    csiControllerSelector: '',
+    csiNodeDaemonSet: 'daemonset/csi-linode-node',
+    csiControllerSelector: 'app=csi-linode-controller',
     ccmDeployment: '',
     ccmSelector: '',
     networkEnvVar: '',

@@ -119,7 +119,7 @@ describe('the driver support oracle', () => {
   });
 
   it('finds every driver the cloud-init scripts install, with the tag they install', () => {
-    const scripts = ['master-init.sh', 'do-master-init.sh'].map((f) =>
+    const scripts = ['master-init.sh', 'do-master-init.sh', 'linode-master-init.sh'].map((f) =>
       readFileSync(join('carbon/cloud-init/k3s', f), 'utf8'),
     );
     expect(
@@ -131,6 +131,7 @@ describe('the driver support oracle', () => {
       'digitalocean/digitalocean-cloud-controller-manager',
       'hetznercloud/csi-driver',
       'hetznercloud/hcloud-cloud-controller-manager',
+      'linode/linode-blockstorage-csi-driver',
     ]);
     expect(driverPinsIn(scripts).every((d: { tag: string }) => /^v\d/.test(d.tag))).toBe(true);
   });
