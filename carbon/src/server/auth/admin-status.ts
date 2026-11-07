@@ -11,8 +11,8 @@
  * - `ready`:   the admin exists with a password and can sign in.
  * - `skipped`: ADMIN_EMAIL / ADMIN_PASSWORD are not set. Terminal.
  * - `refused`: an account with that email exists that the operator's
- *   password does not prove ownership of (or a super admin without a
- *   password). Terminal; the app log says how to fix it.
+ *   password does not prove ownership of. Terminal; the app log says how
+ *   to fix it.
  * - `failed`:  the last attempt hit an error waiting does not fix (see the
  *   log). Final for a deploy, which stops on it, but not for the app: the
  *   loop keeps retrying and moves to `ready` (or back to `pending` while it

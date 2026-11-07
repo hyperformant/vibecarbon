@@ -17,9 +17,12 @@ export type { BootstrapResult } from './admin-status';
  *   super admin past onboarding;
  * - the account is already super_admin: nothing to do (its password is
  *   never touched, so changing ADMIN_PASSWORD later resets nothing),
- *   unless it has no password, which is refused with a fix (under the
- *   bootstrap lock this is a real leftover, never another replica's
- *   create in progress);
+ *   unless it has no password: then ADMIN_PASSWORD becomes its password.
+ *   Under the bootstrap lock that is a real leftover, never another
+ *   replica's create in progress: most often a pod killed between
+ *   createUser's user row and its password. The account is already the
+ *   operator's super admin, so this grants nothing new, and refusing it
+ *   left the operator with an admin nobody could sign in as;
  * - the account exists but is not super_admin: promote it ONLY if its own
  *   password verifies against ADMIN_PASSWORD. Sign-up is open and, without
  *   SMTP, unverified, so anyone could register the admin address before
@@ -30,8 +33,9 @@ export type { BootstrapResult } from './admin-status';
  * (withAdminBootstrapLock). Better Auth's createUser writes the user row,
  * hashes, then links the password outside one transaction, so two replicas
  * starting together could otherwise see each other's half-made admin. Under
- * the lock the second one finds the finished admin and returns `unchanged`.
- * The unique-email fallback below stays as a backstop.
+ * the lock the second one finds the finished admin and returns `unchanged`;
+ * if the first was killed mid-create, the next one finishes it. The
+ * unique-email fallback below stays as a backstop.
  */
 export async function bootstrapAdmin(
   opts: { email?: string; password?: string } = {
@@ -95,15 +99,15 @@ async function bootstrapUnderLock(email: string, password: string): Promise<Boot
     if (isSuperAdmin(existing)) {
       if (await hasPassword(existing.id)) return 'unchanged';
       // Under the bootstrap lock no other replica can be mid-create, so this
-      // is a real leftover: refuse now, with the fix.
-      logger.error(
+      // is a leftover: finish it rather than lock the operator out.
+      await setPassword(existing.id, password);
+      logger.warn(
         { email },
-        `The super admin ${email} has no password, so it cannot sign in with ADMIN_PASSWORD ` +
-          '(a bootstrap interrupted before the password was saved, or an account that only ' +
-          'uses social sign-in). Request a password reset for it, or delete the account and ' +
-          'restart to recreate it from ADMIN_EMAIL and ADMIN_PASSWORD.'
+        `The super admin ${email} had no password (a bootstrap interrupted before the ` +
+          'password was saved, or an account that only used social sign-in), so its ' +
+          'password is now ADMIN_PASSWORD.'
       );
-      return 'refused';
+      return 'created';
     }
     if (!(await passwordMatches(existing.id, password))) {
       logger.error(
@@ -153,6 +157,26 @@ async function credentialHash(userId: string): Promise<string | null> {
 
 async function hasPassword(userId: string): Promise<boolean> {
   return (await credentialHash(userId)) !== null;
+}
+
+/**
+ * Give a user a password the way Better Auth's own set-password route does:
+ * fill in an existing credential account that has none, or link a new one.
+ */
+async function setPassword(userId: string, password: string): Promise<void> {
+  const ctx = await auth.$context;
+  const hash = await ctx.password.hash(password);
+  const credential = await ctx.internalAdapter.findCredentialAccount(userId);
+  if (credential) {
+    await ctx.internalAdapter.updateAccount(credential.id, { password: hash });
+    return;
+  }
+  await ctx.internalAdapter.linkAccount({
+    userId,
+    providerId: 'credential',
+    accountId: userId,
+    password: hash,
+  });
 }
 
 /**
