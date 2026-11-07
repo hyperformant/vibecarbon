@@ -805,8 +805,18 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<{id: number, server: object, reused?: boolean}>}
    */
   async createServer(config) {
-    const { name, region, serverType, image, sshKeys, sshKeyId, labels, userData, firewalls } =
-      config;
+    const {
+      name,
+      region,
+      serverType,
+      image,
+      sshKeys,
+      sshKeyId,
+      labels,
+      userData,
+      firewalls,
+      networks,
+    } = config;
 
     const [existing] = await this.findServersByName(name);
     if (existing) {
@@ -830,6 +840,16 @@ export class LinodeProvider extends BaseProvider {
     };
     if (userData) {
       body.metadata = { user_data: Buffer.from(userData, 'utf-8').toString('base64') };
+    }
+    const vpcId = Array.isArray(networks) ? networks[0] : undefined;
+    if (vpcId !== undefined && vpcId !== null) {
+      // Same shape linode-k8s.js gives its Pulumi-made instances: legacy
+      // config interfaces, public first, then the VPC's first subnet. The
+      // generation is pinned because new accounts default to Linode
+      // Interfaces, which take a different body.
+      const subnetId = await this._firstSubnetId(vpcId);
+      body.interface_generation = 'legacy_config';
+      body.interfaces = [{ purpose: 'public' }, { purpose: 'vpc', subnet_id: subnetId }];
     }
     const [firstFirewall, ...extraFirewalls] = Array.isArray(firewalls) ? firewalls : [];
     if (firstFirewall !== undefined) {
@@ -862,6 +882,23 @@ export class LinodeProvider extends BaseProvider {
       }
     }
     return { id: instance.id, server: instance };
+  }
+
+  /**
+   * The id of a VPC's first subnet (GET /vpcs/{id}/subnets). Throws when the
+   * VPC has none, so a node is never created into a network it cannot join.
+   * @param {number|string} vpcId
+   * @returns {Promise<number>}
+   */
+  async _firstSubnetId(vpcId) {
+    const response = await this.apiRequest(`/vpcs/${vpcId}/subnets`);
+    if (!response.ok) {
+      throw new Error(`Linode VPC ${vpcId} subnet lookup failed (HTTP ${response.status})`);
+    }
+    const data = await response.json();
+    const subnet = (data.data || [])[0];
+    if (!subnet?.id) throw new Error(`Linode VPC ${vpcId} has no subnet`);
+    return subnet.id;
   }
 
   /**
@@ -1188,7 +1225,51 @@ export class LinodeProvider extends BaseProvider {
         ? instances
         : instances.filter((i) => wantedTags.every((tag) => (i.tags || []).includes(tag)));
 
+    if (status === undefined) await this._attachConfigInterfaces(items);
     return status === undefined ? { items, complete } : { items, complete, status };
+  }
+
+  /**
+   * Attach `config_interfaces` (the flat list of config-profile interfaces)
+   * to each instance, so the synchronous serverNetworkIds accessor can read
+   * VPC membership; the instance object carries none. Only runs when the
+   * account has a VPC at all, so compose-only accounts pay no extra calls.
+   * Best effort: an instance whose configs cannot be read keeps no
+   * `config_interfaces` (reads as in no VPC), never failing the listing.
+   * @param {object[]} instances
+   * @returns {Promise<void>}
+   */
+  async _attachConfigInterfaces(instances) {
+    if (instances.length === 0) return;
+    try {
+      const first = await fetchWithRetry(`${LinodeProvider.API_BASE}/vpcs?page=1&page_size=1`, {
+        headers: { Authorization: `Bearer ${this.apiToken}` },
+      });
+      if (!first.ok) return;
+      const probe = await first.json();
+      if (!Array.isArray(probe.data) || probe.data.length === 0) return;
+    } catch {
+      return;
+    }
+    const CONCURRENCY = 8;
+    let next = 0;
+    const worker = async () => {
+      while (next < instances.length) {
+        const instance = instances[next++];
+        try {
+          const res = await fetchWithRetry(
+            `${LinodeProvider.API_BASE}/linode/instances/${instance.id}/configs?page_size=100`,
+            { headers: { Authorization: `Bearer ${this.apiToken}` } },
+          );
+          if (!res.ok) continue;
+          const data = await res.json();
+          instance.config_interfaces = (data.data || []).flatMap((c) => c.interfaces || []);
+        } catch {
+          // leave unset
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, instances.length) }, worker));
   }
 
   /**
@@ -1406,7 +1487,53 @@ export class LinodeProvider extends BaseProvider {
       if (!data.pages || page >= data.pages) break;
       page++;
     }
-    return vpcs;
+    // `name` is the provider-neutral identity callers match on
+    // (autoscaler groups.js, destroy.js); Linode calls it `label`.
+    return vpcs.map((v) => ({ ...v, name: v.label }));
+  }
+
+  /**
+   * Delete a VPC by its exact label. Linode refuses while an instance still
+   * has an interface in it; that comes back as `apiError` (an ordering bug in
+   * the caller), never as a not-found.
+   * @param {string} name
+   * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+   */
+  async deleteNetworkByName(name) {
+    let everExisted = false;
+    try {
+      const vpcs = await this.listNetworks();
+      const vpc = vpcs.find((v) => v.name === name);
+      if (!vpc) return { deleted: false, everExisted: false, apiError: null };
+      everExisted = true;
+      const res = await fetchWithRetry(`${LinodeProvider.API_BASE}/vpcs/${vpc.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${this.apiToken}` },
+      });
+      if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
+      const body = await res.text().catch(() => '');
+      return {
+        deleted: false,
+        everExisted,
+        apiError: new Error(`DELETE /vpcs/${vpc.id} failed: HTTP ${res.status} ${body}`.trim()),
+      };
+    } catch (err) {
+      return { deleted: false, everExisted, apiError: err };
+    }
+  }
+
+  /**
+   * Release a reserved IPv4 by address (DELETE /networking/reserved/ips/{address}).
+   * Idempotent: 404 counts as already gone.
+   * @param {string} address
+   * @returns {Promise<boolean>} true on success or if already gone (404)
+   */
+  async deleteReservedIpByAddress(address) {
+    const response = await fetchWithRetry(
+      `${LinodeProvider.API_BASE}/networking/reserved/ips/${address}`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
+    );
+    return response.ok || response.status === 404;
   }
 
   /**
@@ -1494,14 +1621,19 @@ export class LinodeProvider extends BaseProvider {
   // See BaseProvider's doc for the cross-provider contract.
 
   /**
-   * Compose-tier Linode instances join no VPC, and the basic instance
-   * object carries no VPC membership field either way — VPC attribution on
-   * Linode lives on the VPC's interface list, not the instance. Always [].
-   * @param {object} _server
-   * @returns {string[]}
+   * VPC ids the instance has an interface in. The instance object itself
+   * carries no interfaces; listServersDetailed attaches the config
+   * interfaces as `config_interfaces` (see _attachConfigInterfaces). []
+   * for an instance with none (every compose instance).
+   * @param {object} server
+   * @returns {number[]}
    */
-  serverNetworkIds(_server) {
-    return [];
+  serverNetworkIds(server) {
+    const ids = [];
+    for (const iface of server?.config_interfaces || []) {
+      if (iface?.vpc_id != null && !ids.includes(iface.vpc_id)) ids.push(iface.vpc_id);
+    }
+    return ids;
   }
 
   /**
@@ -1541,6 +1673,15 @@ export class LinodeProvider extends BaseProvider {
    */
   volumeAttachedServerIds(volume) {
     return volume.linode_id != null ? [volume.linode_id] : [];
+  }
+
+  /**
+   * Linode names a volume with `label`.
+   * @param {object} volume
+   * @returns {string|null}
+   */
+  volumeName(volume) {
+    return volume.label ?? null;
   }
 
   /**

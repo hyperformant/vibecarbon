@@ -933,6 +933,16 @@ export class BaseProvider {
     throw new Error('volumeCreatedAt() must be implemented by subclass');
   }
 
+  /**
+   * A volume's display name. Most clouds call it `name`; Linode overrides
+   * this because it calls it `label`.
+   * @param {object} volume - A volume object as returned by listVolumes.
+   * @returns {string|null}
+   */
+  volumeName(volume) {
+    return volume.name ?? null;
+  }
+
   // ============================================================================
   // ABSTRACT STATIC METHODS - CATALOG
   // Must be implemented by subclasses. Polymorphic call sites resolve these

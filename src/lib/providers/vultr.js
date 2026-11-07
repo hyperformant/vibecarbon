@@ -1133,7 +1133,7 @@ export class VultrProvider extends BaseProvider {
    */
   async listNetworks() {
     const { items, status } = await this._walkCursor('/vpcs', 'vpcs');
-    return status === undefined ? items : [];
+    return status === undefined ? items.map((n) => ({ ...n, name: n.description })) : [];
   }
 
   /**

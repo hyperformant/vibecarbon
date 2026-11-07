@@ -202,9 +202,11 @@ export const CARBON_AUTOSCALER_IMAGE = 'ghcr.io/hyperformant/carbon-autoscaler';
 //           digests under one tag if this stayed at 0.1.2, which is exactly the
 //           ambiguity the rule above exists to prevent.
 //   0.1.4 — speaks cluster-autoscaler 1.37's externalgrpc contract (nodeBytes).
-export const CARBON_AUTOSCALER_TAG = '0.1.4';
+//   0.1.5 — Linode createServer joins a VPC with a legacy config interface and
+//           the cluster firewall; listNetworks items carry `name`.
+export const CARBON_AUTOSCALER_TAG = '0.1.5';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.4" */
+/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.5" */
 export function carbonAutoscalerImageRef() {
   return `${CARBON_AUTOSCALER_IMAGE}:${CARBON_AUTOSCALER_TAG}`;
 }

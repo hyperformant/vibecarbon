@@ -135,9 +135,17 @@ describe('DigitalOceanProvider destroy-sweep field accessors', () => {
 });
 
 describe('LinodeProvider destroy-sweep field accessors', () => {
-  it('serverNetworkIds is always [] — compose instances join no VPC, and the instance object carries no VPC field', () => {
+  it('serverNetworkIds reads VPC ids from the config interfaces listServersDetailed attaches, [] when none', () => {
     expect(linode.serverNetworkIds({ id: 1, region: 'us-iad' })).toEqual([]);
     expect(linode.serverNetworkIds({})).toEqual([]);
+    expect(
+      linode.serverNetworkIds({
+        config_interfaces: [
+          { purpose: 'public', vpc_id: null },
+          { purpose: 'vpc', vpc_id: 5 },
+        ],
+      }),
+    ).toEqual([5]);
   });
 
   it('serverLabels decodes tags[] via the canonical encoding — round-trips encodeLabels', () => {

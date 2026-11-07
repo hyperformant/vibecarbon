@@ -45,7 +45,7 @@ const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 describe('carbon-autoscaler image ref', () => {
   it('is the pre-published amd64 tag (no project/sha/timestamp)', () => {
     expect(CARBON_AUTOSCALER_IMAGE).toBe('ghcr.io/hyperformant/carbon-autoscaler');
-    expect(CARBON_AUTOSCALER_TAG).toBe('0.1.4');
+    expect(CARBON_AUTOSCALER_TAG).toBe('0.1.5');
     expect(carbonAutoscalerImageRef()).toBe(`${CARBON_AUTOSCALER_IMAGE}:${CARBON_AUTOSCALER_TAG}`);
   });
 
