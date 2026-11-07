@@ -321,10 +321,11 @@ export async function sweepOrphanedLinodeResources(
   // compose tier; false the moment the k8s tier landed. The ledger then read
   // zero meaning "never looked", not "found none".
   //
-  // We do NOT auto-delete. Linode reserved IPs carry no label or tag (unlike
-  // Vultr's, which the program names), so an UNASSIGNED one cannot be
-  // attributed to this namespace from the API alone, and deleting an
-  // unattributable address could destroy someone's production IP. Report it
+  // We do NOT auto-delete. The k8s program tags its reserved IP
+  // (linode-k8s.js `tags: encodeLabels(labels)`), but this sweep does not
+  // read those tags yet, and the compose tier mints none, so an UNASSIGNED
+  // one is not attributed to this namespace here, and deleting an
+  // unattributed address could destroy someone's production IP. Report it
   // and mark the sweep INCOMPLETE so the CI step fails and a human decides —
   // an unverifiable sweep must not pose as a clean one.
   try {
@@ -353,7 +354,7 @@ export async function sweepOrphanedLinodeResources(
       for (const i of stranded) {
         console.warn(
           `${tag} [sweep] UNASSIGNED reserved IP ${i.address} is billing and cannot be ` +
-            'attributed from the API (Linode reserved IPs carry no label/tag). Not deleted — ' +
+            'attributed from the API (this sweep does not read the k8s tags). Not deleted — ' +
             'check it belongs to this e2e account and release it manually.',
         );
       }

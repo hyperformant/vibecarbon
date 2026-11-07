@@ -501,6 +501,23 @@ export function assertBucketReady(result, role) {
  */
 const isHaTier = (tier) => tier === 'compose-ha' || tier === 'k8s-ha';
 
+/**
+ * The orchestrator's entry region guard, right after the tier gate: for the
+ * k8s tiers the region and standby region must be ones the provider runs
+ * Kubernetes in. Throws before any provider API or Pulumi work.
+ * @param {typeof import('../providers/base.js').BaseProvider} ProviderClass
+ * @param {string} tier
+ * @param {{region?: string, secondaryRegion?: string|null}} config
+ */
+export function assertDeployRegion(ProviderClass, tier, config) {
+  assertRegionSupportedForTier(
+    ProviderClass,
+    tier,
+    config.region,
+    isHaTier(tier) ? config.secondaryRegion : null,
+  );
+}
+
 /** The node the persisted roles call primary, as the write-fence marker names it. */
 function rolePrimaryOf(_tier, envConfig, environment) {
   return resolvePrimary(envConfig, { env: environment });
@@ -1105,12 +1122,7 @@ export async function executeDeployment(args, gatheredConfig) {
     env: operatorCheckEnvs(process.cwd()),
   });
   assertTierSupported(providerFor(config), tier);
-  assertRegionSupportedForTier(
-    providerFor(config),
-    tier,
-    config.region,
-    isHaTier(tier) ? config.secondaryRegion : null,
-  );
+  assertDeployRegion(providerFor(config), tier, config);
   // One certificate per name: an observability add-on copied into the
   // project before the change still issues grafana-tls for the app domain
   // until `vibecarbon upgrade` refreshes it. Refused here, the last stop

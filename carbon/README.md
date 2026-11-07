@@ -170,7 +170,7 @@ The bare command opens a guided prompt for environment, provider, region, and de
 |----------|:---------:|:------------:|:-----:|:--------:|
 | Hetzner Cloud | ✅ | ✅ | ✅ | ✅ |
 | DigitalOcean | ✅ | ✅ | ✅ | ✅ |
-| Linode | ✅ | ✅ | — | — |
+| Linode | ✅ | ✅ | ✅ | ✅ |
 | Vultr | ✅ | ✅ | — | — |
 | Scaleway | ✅ | ✅ | — | — |
 
