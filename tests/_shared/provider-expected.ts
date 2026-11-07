@@ -96,8 +96,8 @@ export const EXPECTED: Record<
       ccmSelector: '',
       networkEnvVar: '',
     },
-    k8sStorageClass: 'linode-block-storage',
-    k8sImage: '',
+    k8sStorageClass: 'linode-block-storage-vibecarbon',
+    k8sImage: 'linode/ubuntu26.04',
   },
   vultr: {
     name: 'Vultr',

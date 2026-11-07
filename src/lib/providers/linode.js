@@ -192,6 +192,28 @@ export function splitCidrsByFamily(cidrs) {
   return out;
 }
 
+/**
+ * The pure rule rewrite behind LinodeProvider.applyOperatorCidrs: drop any
+ * inbound TCP/5432 or TCP/6543 rule (RETIRED_DB_PORTS), point the
+ * operator-locked ports (SSH 22, k8s API 6443) at `cidrs`, and leave every
+ * other rule as it is. Takes and returns the API rule shape
+ * (`addresses: {ipv4, ipv6}`).
+ * @param {object[]} rules - a firewall's inbound rules, API shape
+ * @param {string[]} cidrs
+ * @returns {object[]}
+ */
+export function rewriteOperatorRules(rules, cidrs) {
+  const addresses = splitCidrsByFamily(cidrs);
+  return rules
+    .filter((rule) => !(rule.protocol === 'TCP' && RETIRED_DB_PORTS.has(String(rule.ports))))
+    .map((rule) => {
+      if (rule.protocol === 'TCP' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
+        return { ...rule, addresses };
+      }
+      return rule;
+    });
+}
+
 export class LinodeProvider extends BaseProvider {
   /**
    * Documented object-storage operational limits (techdocs.akamai.com,
@@ -376,20 +398,20 @@ export class LinodeProvider extends BaseProvider {
    * actually built.
    * @type {string}
    */
-  static K8S_STORAGE_CLASS = 'linode-block-storage';
+  static K8S_STORAGE_CLASS = 'linode-block-storage-vibecarbon';
 
   /**
    * Compose-only: no k8s Pulumi program exists to pin a VPC CIDR against.
    * @type {string}
    */
-  static DEFAULT_VPC_CIDR = '';
+  static DEFAULT_VPC_CIDR = '10.0.1.0/24';
 
   /**
    * Compose-only: no k8s program/image. K8S_IMAGE's only contract is
    * byte-matching the k8s program's image literal — there is none.
    * @type {string}
    */
-  static K8S_IMAGE = '';
+  static K8S_IMAGE = 'linode/ubuntu26.04';
 
   // ── k8s boot user-data (carbon/cloud-init/k3s/linode-*-init.sh) ─────────
 
@@ -439,9 +461,13 @@ export class LinodeProvider extends BaseProvider {
     return renderScript(loadCloudInit('linode-db-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sProgram() {
-    throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * @param {object} config - see linode-k8s.js's K8sStackConfig
+   * @returns {Promise<() => Promise<Record<string, unknown>>>}
+   */
+  static async getK8sProgram(config) {
+    const { buildLinodeK8sProgram } = await import('../iac/programs/linode-k8s.js');
+    return buildLinodeK8sProgram(config);
   }
 
   // ── Compose-tier replacement-server identity ────────────────────────────
@@ -1303,15 +1329,7 @@ export class LinodeProvider extends BaseProvider {
   async applyOperatorCidrs({ firewallName, cidrs }) {
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
-    const addresses = splitCidrsByFamily(cidrs);
-    const newRules = (fw.rules?.inbound || [])
-      .filter((rule) => !(rule.protocol === 'TCP' && RETIRED_DB_PORTS.has(String(rule.ports))))
-      .map((rule) => {
-        if (rule.protocol === 'TCP' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
-          return { ...rule, addresses };
-        }
-        return rule;
-      });
+    const newRules = rewriteOperatorRules(fw.rules?.inbound || [], cidrs);
     await this.setFirewallRules(fw.id, newRules);
     return true;
   }

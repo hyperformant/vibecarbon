@@ -92,6 +92,10 @@ const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown
     builder: 'buildLinodeComposeProgram',
     config: { ...base, location: 'us-east' },
   },
+  'linode-k8s.js': {
+    builder: 'buildLinodeK8sProgram',
+    config: { ...k8s, location: 'us-east' },
+  },
   'scaleway-compose.js': {
     builder: 'buildScalewayComposeProgram',
     config: { ...base, location: 'fr-par-1' },
