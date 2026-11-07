@@ -22,6 +22,8 @@
  * destroy-stack-partial-detection pattern) so the real getOrCreateStack /
  * removeStackState code paths run against the automation API's shapes.
  */
+import { spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const selectStackMock = vi.fn();
@@ -86,13 +88,19 @@ describe('removeStackState — state-only stack removal after out-of-band teardo
   // destroy report the stack as a leak.
   it('clears the lock a killed deploy left, then removes the stack', async () => {
     let locked = true;
+    const holder = `u@${hostname()} (pid ${spawnSync('true').pid})`;
     const stack = {
       cancel: vi.fn(async () => {
         locked = false;
       }),
       workspace: {
         removeStack: vi.fn(async () => {
-          if (locked) throw new Error('the stack is currently locked by 1 lock(s)');
+          if (locked) {
+            throw new Error(
+              'the stack is currently locked by 1 lock(s).\n' +
+                `  s3://b/l.json: created by ${holder} at ${new Date().toISOString()}`,
+            );
+          }
         }),
       },
     };
