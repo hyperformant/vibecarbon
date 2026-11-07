@@ -197,7 +197,7 @@ on a NEW workflow or Dockerfile that isn't registered in its inventory.
 
 ### CLI conventions
 
-- **Flags are single-dash only** (`-mode k8s`, `-y`); `--long` forms are rejected by the parser. Only `-h`/`-v`/`-y`/`-l` are single-letter; everything else is spelled out. Every command declares a `SPEC` consumed by `parseFlagsOrExit` (`src/lib/cli/parse-flags.js`), which also renders help and handles `-h`/`-v` uniformly.
+- **Flags are single-dash only** (`-mode k8s`, `-y`); `--long` forms are rejected by the parser. The one exception is a top-level `vibecarbon --version`, which `src/cli.js` answers before any parsing. Only `-h`/`-v`/`-y`/`-l` are single-letter; everything else is spelled out. Every command declares a `SPEC` consumed by `parseFlagsOrExit` (`src/lib/cli/parse-flags.js`), which also renders help and handles `-h`/`-v` uniformly.
 - **Interactive-by-default**: a bare command opens prompts; positionals/flags are optional prompt seeds. Off-TTY invocations must pass the flags named by `requireTTYOrFlags`.
 - **Exit codes**: `0` success, `1` any failure (usage errors included: there is no exit-2 convention), `130`/`143` on SIGINT/SIGTERM. Fatal errors either `process.exit(1)` after printing context or throw to cli.js's central handler (which prints `Error: <msg>` and exits 1).
 - **Error output idioms** (pick by layer): argument/usage errors print `✗ <msg>` to stderr via `parseFlagsOrExit`; mid-flow interactive failures use `p.log.error(...)` (clack gutter); user-initiated cancels use `p.cancel(...)` + exit 0; only cli.js's top-level catch prints the bare `Error:` prefix. Don't hand-roll new variants.

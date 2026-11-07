@@ -184,7 +184,7 @@ ${c.bold('GLOBAL FLAGS')}
   ${c.dim('-h')}    Show help for a command
   ${c.dim('-v')}    Show version number
 
-  ${c.dim('Vibecarbon uses single-dash flags only; no double-dash forms.')}
+  ${c.dim('Vibecarbon uses single-dash flags only; --version is the one exception.')}
   ${c.dim('Run any command with -h to see its specific flags.')}
 
 ${c.bold('EXAMPLES')}
@@ -225,14 +225,15 @@ async function main() {
   // never be a `case '?'`.
   const command = args[0] === '?' ? 'next' : args[0];
 
-  // Top-level help / version. Single-dash only — `--help` falls through
-  // to the unknown-command branch, matching the per-command flag policy.
+  // Top-level help / version. Flags are single-dash, so `--help` falls through
+  // to the unknown-command branch. `--version` is the one exception: it is the
+  // spelling people and tools try first to ask any CLI what it is.
   if (command === '-h') {
     await showHelp();
     process.exit(0);
   }
 
-  if (command === '-v') {
+  if (command === '-v' || command === '--version') {
     showVersion();
     process.exit(0);
   }
