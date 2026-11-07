@@ -4,8 +4,8 @@
  * Covers:
  * - KNOWN_COMMANDS registry (all commands are listed, including newly added ones)
  * - Help text mentions every registered command
- * - --help / -h exits 0 and prints usage
- * - --version / -v exits 0 and prints version
+ * - -h exits 0 and prints usage, and --help is rejected
+ * - -v and --version exit 0 and print version
  * - No args exits 0 (shows help)
  * - Unknown command exits 1
  * - CLI module itself imports cleanly (catches duplicate-export bugs)
@@ -163,8 +163,14 @@ describe('CLI -v', () => {
     expect(result.status).toBe(0);
   });
 
-  it('rejects --version (single-dash only)', () => {
+  it('answers --version the same as -v, the one double-dash exception', () => {
     const result = runCliScript(['--version']);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(runCliScript(['-v']).stdout);
+  });
+
+  it('keeps a command rejecting --version as its own flag', () => {
+    const result = runCliScript(['status', '--version']);
     expect(result.status).toBe(1);
   });
 
