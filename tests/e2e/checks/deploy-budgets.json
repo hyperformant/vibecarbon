@@ -141,10 +141,10 @@
           "samples": 6
         },
         "cx": {
-          "ownedS": 215,
-          "endToEndS": 230,
+          "ownedS": 255,
+          "endToEndS": 270,
           "tlsAllowanceS": 15,
-          "samples": 1
+          "samples": 2
         }
       }
     },

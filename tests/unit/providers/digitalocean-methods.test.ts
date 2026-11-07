@@ -1389,7 +1389,7 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
         );
 
         const out = provider.deleteSSHKeyByName('k').catch((err: Error) => err.message);
-        await vi.advanceTimersByTimeAsync(40_000);
+        await vi.advanceTimersByTimeAsync(DigitalOceanProvider.SSH_KEY_SETTLE_MS + 10_000);
 
         expect(await out).toBe('DigitalOcean would not delete SSH key k (id 88)');
       } finally {
@@ -1415,6 +1415,45 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
     it('says absent for a key both calls agree is gone, so a stale list is not an orphan', async () => {
       fetchWithRetryMock.mockResolvedValueOnce(resp({}, 404)).mockResolvedValueOnce(resp({}, 404));
       expect(await provider.deleteSSHKeyById(88)).toBe('absent');
+    });
+
+    // A real run, 2026-11-06: destroy deleted a key, and 47 s later DELETE
+    // still said 404 while the read by id still returned the key. It cleared
+    // with no further delete. A 30 s window called that `stuck`, which turned
+    // an all-green DigitalOcean compose run red.
+    it('waits out a deleted key DigitalOcean keeps showing past 47 s', async () => {
+      vi.useFakeTimers();
+      try {
+        const started = Date.now();
+        fetchWithRetryMock.mockImplementation(async (_url: string, init?: RequestInit) =>
+          init?.method === 'DELETE'
+            ? resp({}, 404)
+            : resp({}, Date.now() - started < 60_000 ? 200 : 404),
+        );
+
+        const outcome = provider.deleteSSHKeyById(88);
+        await vi.advanceTimersByTimeAsync(63_000);
+
+        await expect(outcome).resolves.toBe('absent');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('still says stuck for a key that never clears, so a real leak is not hidden', async () => {
+      vi.useFakeTimers();
+      try {
+        fetchWithRetryMock.mockImplementation(async (_url: string, init?: RequestInit) =>
+          resp({}, init?.method === 'DELETE' ? 404 : 200),
+        );
+
+        const outcome = provider.deleteSSHKeyById(88);
+        await vi.advanceTimersByTimeAsync(DigitalOceanProvider.SSH_KEY_SETTLE_MS + 10_000);
+
+        await expect(outcome).resolves.toBe('stuck');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
