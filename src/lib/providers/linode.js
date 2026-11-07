@@ -391,23 +391,52 @@ export class LinodeProvider extends BaseProvider {
    */
   static K8S_IMAGE = '';
 
-  // ── k8s user-data statics — compose-only, provider-specific throws ─────
-  // (Worded to avoid the contract test's /must be implemented/ abstract
-  // marker: these are deliberate refusals, not inherited stubs.)
+  // ── k8s boot user-data (carbon/cloud-init/k3s/linode-*-init.sh) ─────────
 
-  /** @returns {Promise<never>} */
-  static async getK8sMasterUserData() {
-    throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s master boot script. The Linode API token is the CSI
+   * driver's credential; project_name becomes the project tag on every
+   * volume the CSI driver creates.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   linode_token: string,
+   *   project_name: string,
+   * }} vars - The template's complete var set.
+   * @returns {Promise<string>}
+   */
+  static async getK8sMasterUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('linode-master-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sWorkerUserData() {
-    throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s worker boot script.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - master_ip is the master's private (VPC) IP.
+   * @returns {Promise<string>}
+   */
+  static async getK8sWorkerUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('linode-worker-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sDbUserData() {
-    throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s database-node boot script: the worker script plus the
+   * dedicated=db label and taint, applied at join time.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - Same set as getK8sWorkerUserData.
+   * @returns {Promise<string>}
+   */
+  static async getK8sDbUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('linode-db-init.sh'), vars);
   }
 
   /** @returns {Promise<never>} */

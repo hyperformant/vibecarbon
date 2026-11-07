@@ -31,12 +31,15 @@ const inits = scripts.filter((s) => s.name.endsWith('-init.sh'));
 const code = (lines: string[]) => lines.filter((l) => !l.trim().startsWith('#'));
 
 describe('k3s cloud-init scripts', () => {
-  it('walk finds all six init scripts, so the assertions below are not vacuous', () => {
+  it('walk finds all nine init scripts, so the assertions below are not vacuous', () => {
     expect(inits.map((s) => s.name).sort()).toEqual([
       'db-init.sh',
       'do-db-init.sh',
       'do-master-init.sh',
       'do-worker-init.sh',
+      'linode-db-init.sh',
+      'linode-master-init.sh',
+      'linode-worker-init.sh',
       'master-init.sh',
       'worker-init.sh',
     ]);
@@ -60,7 +63,9 @@ describe('k3s cloud-init scripts', () => {
   });
 
   it('no comment still describes a 30 s wait before dhcpcd', () => {
-    for (const s of inits.filter((x) => !x.name.startsWith('do-'))) {
+    for (const s of inits.filter(
+      (x) => !x.name.startsWith('do-') && !x.name.startsWith('linode-'),
+    )) {
       const stale = s.lines.filter((l) => /no lease after 30s|After 30s with no 10\.0/.test(l));
       expect(stale, s.name).toEqual([]);
     }

@@ -364,8 +364,11 @@ describe('k3s system images come from the mirror (ruling D3)', () => {
     'do-master-init.sh',
     'do-worker-init.sh',
     'do-db-init.sh',
+    'linode-master-init.sh',
+    'linode-worker-init.sh',
+    'linode-db-init.sh',
   ];
-  const SERVER_SCRIPTS = ['master-init.sh', 'do-master-init.sh'];
+  const SERVER_SCRIPTS = ['master-init.sh', 'do-master-init.sh', 'linode-master-init.sh'];
 
   it('the mirrored set is exactly the pinned k3s release’s system images we pull', () => {
     const k3sVersion = read('src/lib/images.js').match(/K3S_VERSION = '([^']+)'/)?.[1];
