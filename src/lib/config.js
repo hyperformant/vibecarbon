@@ -169,7 +169,7 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function pidAlive(pid) {
+export function pidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;

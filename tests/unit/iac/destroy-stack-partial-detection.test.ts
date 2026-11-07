@@ -15,6 +15,8 @@
  * `DestroyResult.summary`) drive the assertions, rather than mocking
  * `destroyStack` itself.
  */
+import { spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 type FakeStack = {
@@ -67,6 +69,7 @@ describe('destroyStack — loud partial detection (M3 Task 9f)', () => {
 
   it('clears the lock a killed deploy left before it refreshes or destroys', async () => {
     let locked = true;
+    const holder = `u@${hostname()} (pid ${spawnSync('true').pid})`;
     const stack = {
       ...makeStack({ destroyResult: { summary: { result: 'succeeded', resourceChanges: {} } } }),
       cancel: vi.fn(async () => {
@@ -74,7 +77,12 @@ describe('destroyStack — loud partial detection (M3 Task 9f)', () => {
       }),
     };
     const refuseIfLocked = async () => {
-      if (locked) throw new Error('the stack is currently locked by 1 lock(s)');
+      if (locked) {
+        throw new Error(
+          'the stack is currently locked by 1 lock(s).\n' +
+            `  s3://b/l.json: created by ${holder} at ${new Date().toISOString()}`,
+        );
+      }
       return { summary: { result: 'succeeded', resourceChanges: {} } };
     };
     stack.refresh = vi.fn(refuseIfLocked);

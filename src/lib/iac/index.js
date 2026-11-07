@@ -29,6 +29,7 @@ import { perfEnabled, perfRecord, perfTimer } from '../perf.js';
 import { getProviderClass } from '../providers/index.js';
 import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
 import { createResourceTimer } from './resource-timing.js';
+import { runPastStaleLock, StackHeldError } from './stack-lock.js';
 import {
   classifyStateError,
   failingPulumiCommandVerb,
@@ -222,8 +223,9 @@ export function buildEnv(options) {
   env.PULUMI_DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS = 'true';
   // Inline programs don't need a passphrase — but Pulumi insists on one for
   // the secrets provider. A deterministic empty value keeps the automation
-  // API happy without us caring about secrets encryption at the state level
-  // (we never store secrets in Pulumi state; they flow in at program time).
+  // API happy, so nothing in state is encrypted. Secrets flow in at program
+  // time, with one exception: the k8s programs export `k3sToken` as a plain
+  // output, so anyone who can read the state bucket can read the join token.
   env.PULUMI_CONFIG_PASSPHRASE = options.configPassphrase || '';
   return env;
 }
@@ -560,13 +562,11 @@ async function upStackImpl(stackName, program, options = {}) {
 
 /**
  * Select (or create) the stack and bring its state up to date for `up`:
- * clear a stale update lock, refresh a populated stack, repair what the
- * refresh poisons.
+ * refresh a populated stack, repair what the refresh poisons.
  */
 async function prepareStackForUp(stackName, program, options) {
   const stack = await getOrCreateStack(stackName, program, options);
   recordStateOp('refresh');
-  await clearStaleLock(stack);
 
   // Refresh state before `up` to purge pending operations from a crashed
   // prior run. Without this, Pulumi's `up` with "N pending operations
@@ -598,10 +598,14 @@ async function prepareStackForUp(stackName, program, options) {
   if (needsRefresh) {
     try {
       await withStateBackendRetry(
-        () => stack.refresh({ onOutput: options.onOutput, color: 'never' }),
+        () =>
+          runPastStaleLock(stack, () =>
+            stack.refresh({ onOutput: options.onOutput, color: 'never' }),
+          ),
         'pre-up refresh',
       );
     } catch (err) {
+      if (err instanceof StackHeldError) throw err;
       // refresh can fail if the state file is completely corrupt or a
       // resource is unreachable. Log and proceed — `up` may still succeed
       // or surface a cleaner error.
@@ -631,20 +635,21 @@ async function runUp(stack, options) {
       ? createResourceTimer({ stem: options.perfStem, record: perfRecord })
       : null;
   try {
-    const result = await withStateBackendRetry(async () => {
-      // A `up` that failed on an S3 `SlowDown` may have already acquired the
-      // stack lock before erroring. The retry would then fail with "stack is
-      // currently locked". Clear the lock before EACH attempt — cancel() is
-      // idempotent and per-stack, so it's safe under the parallel HA deploys
-      // (primary/standby are separate stacks).
-      await clearStaleLock(stack);
-      resourceTimer?.begin();
-      return stack.up({
-        onOutput: options.onOutput,
-        color: 'never',
-        ...(resourceTimer ? { onEvent: resourceTimer.onEvent } : {}),
-      });
-    }, 'up');
+    // A `up` that failed on an S3 `SlowDown` may have already acquired the stack
+    // lock before erroring. Its process has exited by the retry, so the retry
+    // gets past that lock the same way it gets past any other dead run's.
+    const result = await withStateBackendRetry(
+      () =>
+        runPastStaleLock(stack, () => {
+          resourceTimer?.begin();
+          return stack.up({
+            onOutput: options.onOutput,
+            color: 'never',
+            ...(resourceTimer ? { onEvent: resourceTimer.onEvent } : {}),
+          });
+        }),
+      'up',
+    );
     rawOutputs = result.outputs || {};
     summary = result.summary;
   } catch (err) {
@@ -777,27 +782,6 @@ function flattenOutputs(rawOutputs) {
 }
 
 /**
- * Clear an update lock a killed run left behind. A run that dies mid-update
- * (Ctrl-C, a timeout, the CLI exiting on the other half of an HA pair) leaves
- * its lock in the state bucket, and every later `up`, `destroy` and stack
- * removal then fails with:
- *
- *   error: the stack is currently locked by 1 lock(s). Either wait for the
- *   other process(es) to end or delete the lock file with `pulumi cancel`.
- *
- * Every command that acts on a stack is the operator's own and runs one at a
- * time per stack, so a lock it meets is stale. `cancel()` is a no-op with no
- * lock, and it is per stack, so it is safe under parallel HA deploys.
- */
-async function clearStaleLock(stack) {
-  try {
-    await stack.cancel();
-  } catch {
-    /* no lock */
-  }
-}
-
-/**
  * Run `pulumi destroy` and remove the stack. Idempotent — if the stack
  * doesn't exist the function resolves without error.
  *
@@ -863,7 +847,6 @@ export async function destroyStack(stackName, program, options = {}) {
     }
     throw err;
   }
-  await clearStaleLock(stack);
   // Refresh first so destroy tolerates resources that were already reaped
   // out-of-band (e.g. Hetzner server deleted by a prior partial destroy or
   // by direct API cleanup). Without this, hcloud returns 404 and pulumi
@@ -871,10 +854,14 @@ export async function destroyStack(stackName, program, options = {}) {
   // "server not found (not_found, ...)".
   try {
     await withStateBackendRetry(
-      () => stack.refresh({ onOutput: options.onOutput, color: 'never' }),
+      () =>
+        runPastStaleLock(stack, () =>
+          stack.refresh({ onOutput: options.onOutput, color: 'never' }),
+        ),
       'pre-destroy refresh',
     );
   } catch (err) {
+    if (err instanceof StackHeldError) throw err;
     progressLog(`[pulumi] pre-destroy refresh warning: ${summarizePulumiError(err)}`);
   }
   // DigitalOcean Droplets can list CSI volumes the cluster teardown is still
@@ -902,10 +889,14 @@ export async function destroyStack(stackName, program, options = {}) {
   let result;
   try {
     result = await withStateBackendRetry(
-      () => stack.destroy({ onOutput: options.onOutput, color: 'never', continueOnError: true }),
+      () =>
+        runPastStaleLock(stack, () =>
+          stack.destroy({ onOutput: options.onOutput, color: 'never', continueOnError: true }),
+        ),
       'destroy',
     );
   } catch (err) {
+    if (err instanceof StackHeldError) throw err;
     throw await describeDestroyFailure(stack, stackName, err);
   }
 
@@ -1108,8 +1099,7 @@ export async function removeStackState(stackName, options = {}) {
   // removal. Linode compose-ha, run 42261394446: the primary failed, the CLI
   // exited with the standby's `up` still running, and destroy reported its
   // state as a leak.
-  await clearStaleLock(stack);
-  await stack.workspace.removeStack(stackName, { force: true });
+  await runPastStaleLock(stack, () => stack.workspace.removeStack(stackName, { force: true }));
   return { removed: true };
 }
 
