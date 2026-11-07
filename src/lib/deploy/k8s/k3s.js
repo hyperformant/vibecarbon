@@ -147,6 +147,7 @@ import {
   WALG_ROLE_DIR,
 } from '../walg-role.js';
 import { STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
+import { autoscalerSshKeyName } from './ha-ssh-key.js';
 import {
   MANIFEST_DIGEST_SH,
   parseLocalRegistryRef,
@@ -1043,6 +1044,7 @@ export async function captureClusterAutoscalerDiagnostics({ env } = {}) {
  *   minWorkers: number,
  *   maxWorkers: number,
  *   caBoundsMin?: number,
+ *   sshKeyName?: string,
  * }} args
  * @returns {Promise<string>} JSON-stringified carbon-autoscaler config
  */
@@ -1059,6 +1061,7 @@ export async function renderCarbonAutoscalerConfig({
   minWorkers,
   maxWorkers,
   caBoundsMin,
+  sshKeyName,
 }) {
   // Fail at render time, not as a post-deploy runtime CA failure: this config
   // is kubectl-applied straight into the Secret without passing the sidecar's
@@ -1099,7 +1102,10 @@ export async function renderCarbonAutoscalerConfig({
         podsPerNode: 110,
       },
     },
-    sshKeyName: `${clusterName}-${region}-key`,
+    // A k8s-ha cluster boots from the pair's shared key, so its caller names
+    // that key; a single cluster owns `${clusterName}-${region}-key` (what its
+    // program creates) and passes nothing.
+    sshKeyName: sshKeyName ?? `${clusterName}-${region}-key`,
     firewallName: `${clusterName}-firewall`,
     networkName: `${clusterName}-network`,
   };
@@ -3399,7 +3405,7 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
  * Local-first by default — no Flux on the deploy path; Flux is opt-in
  * via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, basePull?: Promise<unknown>, onNamespaceReady?: () => void, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, sshKeyName?: string, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, basePull?: Promise<unknown>, onNamespaceReady?: () => void, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
  *   `restore` is the resolved `deploy -restore` point (resolveDeployRestorePoint,
  *   src/lib/walg/restore-base.js). With it the restore marker goes into the
  *   infra Secret before the db StatefulSet applies, so the db pod's
@@ -3445,6 +3451,9 @@ export async function applyK3sManifests({
   // config. Defaults to `minWorkers` so single-cluster deploys (and
   // primary) are unaffected.
   caBoundsMin,
+  // The SSH key name carbon-autoscaler gives the provider for new nodes; set
+  // on k8s-ha (shared key), undefined on single-cluster k8s.
+  sshKeyName: caSshKeyName,
   workerServerType,
   k3sToken,
   // The app image delivery's ssh coordinates: operator → master only. The
@@ -3673,6 +3682,7 @@ export async function applyK3sManifests({
         minWorkers,
         maxWorkers,
         caBoundsMin,
+        sshKeyName: caSshKeyName,
       });
       {
         const caSecretYaml = [
@@ -5407,6 +5417,7 @@ async function deployK3sSteps(options, inFlight) {
         // and `providerIdPrefix` without re-deriving either.
         providerId: providerIdFor(options),
         ProviderClass: Provider,
+        sshKeyName: autoscalerSshKeyName(options),
         region: options.region,
         environment: options.environment,
         // Pilot-light: 'primary' | 'standby' | undefined — drives walgRole

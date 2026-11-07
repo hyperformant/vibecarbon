@@ -53,6 +53,7 @@ import {
   prepareReplicationTransport,
   setupReplication,
 } from '../k8s/ha/index.js';
+import { haSshKeyName } from '../k8s/ha-ssh-key.js';
 import { deployK3s } from '../k8s/k3s.js';
 import { assertReplicationStreamingOrDegraded } from '../replication.js';
 import { clearDiscardableStandby, readDiscardableStandby } from '../standby-lineage.js';
@@ -94,7 +95,7 @@ async function haK8sUploadSshKey(ctx) {
   // exact name and by key content across the FULL paginated key list: a
   // partial listing or a substring-name fallback could hand each cluster a
   // different account key.
-  const sshKeyName = `${options.projectName}-${options.environment}-ha-key`;
+  const sshKeyName = haSshKeyName(options.projectName, options.environment);
   const Provider = providerFor(options);
   s.start(`Uploading SSH key to ${Provider.NAME}`);
   const provider = new Provider(options.apiToken);
