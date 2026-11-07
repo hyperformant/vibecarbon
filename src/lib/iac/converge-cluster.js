@@ -39,6 +39,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { spinner } from '../cli/progress.js';
+import { haSshKeyName as haSshKeyNameFor } from '../deploy/k8s/ha-ssh-key.js';
 import { k3sVersion } from '../images.js';
 import { perfAsync } from '../perf.js';
 import { providerIdFor } from '../providers/index.js';
@@ -199,7 +200,7 @@ export async function convergeClusterInfra({
     // exists. Same call the deploy's haK8sUploadSshKey effect makes —
     // must match so Pulumi sees the same `existingSshKeyId` input.
     const provider = new Provider(apiToken);
-    const haSshKeyName = `${projectConfig.projectName}-${environment}-ha-key`;
+    const haSshKeyName = haSshKeyNameFor(projectConfig.projectName, environment);
     try {
       const id = await provider.createSSHKey(haSshKeyName, sshPublicKey);
       existingSshKeyId = String(id);

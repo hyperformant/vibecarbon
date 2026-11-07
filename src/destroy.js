@@ -38,6 +38,7 @@ import {
   revokeAppStorageCredential,
   syncHetznerFences,
 } from './lib/deploy/app-storage-credential.js';
+import { haSshKeyName as haSshKeyNameFor } from './lib/deploy/k8s/ha-ssh-key.js';
 import { planDestroy } from './lib/deploy/plan/destroy-plan.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import {
@@ -3292,7 +3293,7 @@ async function destroyK8sTier({
     // (RCA from k8s-ha 2026-04-30: post-destroy sweep flagged the same
     // key as REGRESSION every run).
     if (isHAK8s && providerToken) {
-      const haSshKeyName = `${projectConfig.projectName}-${environment}-ha-key`;
+      const haSshKeyName = haSshKeyNameFor(projectConfig.projectName, environment);
       s.start(`Deleting shared HA SSH key: ${haSshKeyName}`);
       try {
         const deleted = await provider.deleteSSHKeyByName(haSshKeyName);

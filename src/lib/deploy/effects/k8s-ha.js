@@ -25,7 +25,7 @@
  *               services). Each HA effect reads `ctx.options.*` verbatim.
  *   Filled in by the effects:
  *     s                                        // shared @clack spinner
- *     sharedSshKeyPath, sharedSshPublicKey, sharedSshKeyId
+ *     sharedSshKeyPath, sharedSshPublicKey, sharedSshKeyId, sharedSshKeyName
  *     primaryResult, standbyResult             // per-cluster deployK3s returns
  *     transportPrepared                        // early fan-out prep succeeded
  *     standbyImageCopy                         // the image copy, started early once the transport is up
@@ -53,6 +53,7 @@ import {
   prepareReplicationTransport,
   setupReplication,
 } from '../k8s/ha/index.js';
+import { haSshKeyName } from '../k8s/ha-ssh-key.js';
 import { deployK3s } from '../k8s/k3s.js';
 import { assertReplicationStreamingOrDegraded } from '../replication.js';
 import { clearDiscardableStandby, readDiscardableStandby } from '../standby-lineage.js';
@@ -94,13 +95,17 @@ async function haK8sUploadSshKey(ctx) {
   // exact name and by key content across the FULL paginated key list: a
   // partial listing or a substring-name fallback could hand each cluster a
   // different account key.
-  const sshKeyName = `${options.projectName}-${options.environment}-ha-key`;
+  const sshKeyName = haSshKeyName(options.projectName, options.environment);
   const Provider = providerFor(options);
   s.start(`Uploading SSH key to ${Provider.NAME}`);
   const provider = new Provider(options.apiToken);
   const sharedSshKeyId = await provider.createSSHKey(sshKeyName, ctx.sharedSshPublicKey);
   s.stop('SSH key uploaded');
   ctx.sharedSshKeyId = sharedSshKeyId;
+  // The name travels with the id: the cluster stacks run under other
+  // environment names (<env>-primary / <env>-standby), so nothing downstream
+  // may re-derive it.
+  ctx.sharedSshKeyName = sshKeyName;
 }
 
 /**
@@ -115,7 +120,7 @@ async function haK8sUploadSshKey(ctx) {
  */
 async function haK8sProvisionClusters(ctx) {
   const options = ctx.options;
-  const { sharedSshKeyPath, sharedSshPublicKey, sharedSshKeyId } = ctx;
+  const { sharedSshKeyPath, sharedSshPublicKey, sharedSshKeyId, sharedSshKeyName } = ctx;
 
   // Role↔stack mapping: stacks are cluster IDENTITIES ("e4-primary" named at
   // birth); roles flip at failover. failover persists the swap under
@@ -282,6 +287,7 @@ async function haK8sProvisionClusters(ctx) {
       sharedSshKeyPath,
       sharedSshPublicKey,
       sharedSshKeyId,
+      sharedSshKeyName,
       tracker: primaryTracker,
       quietSuccess: true,
       role: 'primary',
@@ -312,6 +318,7 @@ async function haK8sProvisionClusters(ctx) {
       sharedSshKeyPath,
       sharedSshPublicKey,
       sharedSshKeyId,
+      sharedSshKeyName,
       tracker: standbyTracker,
       quietSuccess: true,
       role: 'standby',
