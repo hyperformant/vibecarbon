@@ -18,7 +18,7 @@ describe('k3sServerFlags', () => {
       '--cluster-init',
       '--token',
     ]);
-    expect(flags.at(-1)).toBe('--write-kubeconfig-mode=644');
+    expect(flags.at(-1)).toBe('--write-kubeconfig-mode=600');
     expect(flags).toEqual(expect.arrayContaining(['--flannel-backend=wireguard-native']));
     expect(flags).not.toContain('then');
     expect(flags).not.toContain('\\');
