@@ -328,6 +328,7 @@ describe('destroy after a stalled create', () => {
       deleteServer,
       serverLabels: (s: { labels?: Record<string, string> }) => s.labels ?? {},
       serverRegion: () => 'hel1',
+      labelValue: (_key: string, value: string) => value,
     };
     const leaks = createLeakLedger();
 
@@ -355,6 +356,7 @@ describe('destroy after a stalled create', () => {
         .mockRejectedValue(new Error('Failed to delete server: server is locked')),
       serverLabels: () => ({}),
       serverRegion: () => 'hel1',
+      labelValue: (_key: string, value: string) => value,
     };
     const leaks = createLeakLedger();
     await sweepEnvironmentServers({

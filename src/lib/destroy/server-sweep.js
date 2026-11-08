@@ -33,7 +33,7 @@ import { isEnvironmentOwnedServer } from './server-naming.js';
  *
  * @param {object} args
  * @param {object} args.provider - provider instance (listServersDetailed,
- *   deleteServer, serverLabels, serverRegion)
+ *   deleteServer, serverLabels, serverRegion, labelValue)
  * @param {ReturnType<import('./leak-ledger.js').createLeakLedger>} args.leaks
  * @param {string} args.projectName
  * @param {string} args.environment
@@ -84,7 +84,13 @@ export async function sweepEnvironmentServers({
       !handled.has(String(server.id)) &&
       isEnvironmentOwnedServer(
         { name: server.name, labels: provider.serverLabels(server) },
-        { projectName, environment, deployMode, roles },
+        {
+          projectName,
+          environment,
+          deployMode,
+          roles,
+          labelValue: (key, value) => provider.labelValue(key, value),
+        },
       ),
   );
 

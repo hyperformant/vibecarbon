@@ -42,6 +42,8 @@ interface LinodeSweepProvider {
   }>;
   volumeAttachedServerIds(volume: object): Array<unknown>;
   volumeLabels(volume: object): Record<string, string>;
+  /** The decoded value a raw name is stored as: squeezed past 50 characters. */
+  labelValue(key: string, value: string): string;
   deleteVolume(id: number | string): Promise<unknown>;
   deleteFirewallByName(name: string): Promise<{ deleted: boolean }>;
   deleteSSHKeyByName(name: string): Promise<boolean>;
@@ -207,6 +209,9 @@ export async function sweepOrphanedLinodeResources(
 
   // 2. Volumes. Project-labeled volumes delete on prefix; pvc-* CSI volumes
   // delete ONLY with a matching project tag (see header — cross-run safety).
+  // Linode squeezes a tag past 50 characters, so the decoded tag is compared
+  // to labelValue, not the raw project name.
+  const ownProject = provider.labelValue('project', projectName);
   try {
     const { items, complete } = await provider.listVolumesDetailed();
     if (!complete) markIncomplete('volume list');
@@ -214,7 +219,7 @@ export async function sweepOrphanedLinodeResources(
       if (provider.volumeAttachedServerIds(volume).length > 0) continue;
       const ownedByName = volume.label.startsWith(projectName);
       const isPvc = volume.label.startsWith('pvc');
-      const ownedByTag = isPvc && provider.volumeLabels(volume).project === projectName;
+      const ownedByTag = isPvc && provider.volumeLabels(volume).project === ownProject;
       if (!ownedByName && !ownedByTag) {
         if (isPvc) {
           console.warn(
@@ -279,7 +284,7 @@ export async function sweepOrphanedLinodeResources(
       // prefix — ownership falls back to the `project:` tag the compose
       // program stamps on every firewall it creates.
       const ownedByLabel = fw.label.startsWith(projectName);
-      const ownedByTag = decodeLabels(fw.tags).project === projectName;
+      const ownedByTag = decodeLabels(fw.tags).project === ownProject;
       if (!ownedByLabel && !ownedByTag) continue;
       console.log(`${tag} [sweep] Deleting orphaned firewall ${fw.label}`);
       const { deleted } = await provider.deleteFirewallByName(fw.label);

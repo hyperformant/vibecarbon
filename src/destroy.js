@@ -782,13 +782,35 @@ async function cleanupAutoscalerWorkers(provider, clusterName) {
 }
 
 /**
+ * Whether a server's decoded labels name this project and one of this
+ * environment's clusters. The raw names go through provider.labelValue,
+ * because a provider that squeezes long tags (Linode, past 50 characters)
+ * stores the squeezed value, not the raw name.
+ * @param {{ labelValue: (key: string, value: string) => string }} provider
+ * @param {Record<string, string>} labels - provider.serverLabels(server).
+ * @param {string} projectName
+ * @param {string[]} clusterNames - This environment's cluster names (`<project>-<env>`).
+ * @returns {boolean}
+ */
+export function labelsNameEnvironment(provider, labels, projectName, clusterNames) {
+  return (
+    labels.project === provider.labelValue('project', projectName) &&
+    clusterNames.some(
+      (cn) =>
+        labels.environment ===
+        provider.labelValue('environment', cn.replace(`${projectName}-`, '')),
+    )
+  );
+}
+
+/**
  * Regions that host servers this environment does not own (the layer-2
  * heuristic defers `pvc-*` matches there). A foreign server whose region
  * cannot be read could sit in any of our regions, so it is reported as
  * `unreadable` and the caller blocks every region: unknown occupancy is never
  * "nobody is there". (Hetzner dropped `server.datacenter` on 2026-07-01; a
  * provider field going missing must fail closed, not silently empty this.)
- * @param {{ serverLabels: (s: object) => Record<string, string>, serverRegion: (s: object) => string|null }} provider
+ * @param {{ serverLabels: (s: object) => Record<string, string>, serverRegion: (s: object) => string|null, labelValue: (key: string, value: string) => string }} provider
  * @param {object[]} servers - Every server still in the project.
  * @param {string} projectName
  * @param {string[]} clusterNames - This environment's cluster names (`<project>-<env>`).
@@ -798,11 +820,9 @@ export function foreignServerRegions(provider, servers, projectName, clusterName
   const regions = new Set();
   let unreadable = null;
   for (const sv of servers) {
-    const labels = provider.serverLabels(sv);
-    const isOurs =
-      labels.project === projectName &&
-      clusterNames.some((cn) => labels.environment === cn.replace(`${projectName}-`, ''));
-    if (isOurs) continue;
+    if (labelsNameEnvironment(provider, provider.serverLabels(sv), projectName, clusterNames)) {
+      continue;
+    }
     const region = provider.serverRegion(sv);
     if (region) regions.add(region);
     else unreadable ??= String(sv.name ?? sv.id);
@@ -971,7 +991,10 @@ async function cleanupOrphanedVolumes(
     const volumeLabels = provider.volumeLabels(volume);
     // A volume that names a different project is never ours, whatever its
     // region or name looks like. No project label keeps the old behaviour.
-    if (projectName && volumeLabels.project && volumeLabels.project !== projectName) return null;
+    // The decoded label is compared to labelValue, which is what a provider
+    // that squeezes long tags (Linode) stores for this project.
+    const ownProject = projectName ? provider.labelValue('project', projectName) : projectName;
+    if (projectName && volumeLabels.project && volumeLabels.project !== ownProject) return null;
     // Namespace label, from a CSI driver run with --extra-create-metadata.
     // Both the AWS/GCE-style key and hcloud >= v2.15's own `pvc-namespace`.
     if (
@@ -983,7 +1006,7 @@ async function cleanupOrphanedVolumes(
     // `pvc-<uuid>` form (not a bare `pvc-` prefix) so an operator's hand-named
     // `pvc-backups` volume can never be swept up by a heuristic.
     if (!isCsiVolumeName(provider.volumeName(volume))) return null;
-    if (projectName && volumeLabels.project === projectName) return 'project-label';
+    if (projectName && volumeLabels.project === ownProject) return 'project-label';
     const region = provider.volumeRegion(volume);
     if (region && (clusterLocations ?? []).includes(region)) return 'pvc-in-cluster-region';
     return null;
@@ -3321,10 +3344,7 @@ async function destroyK8sTier({
         const labels = provider.serverLabels(sv);
         return (
           labels['managed-by'] === 'vibecarbon' &&
-          labels.project === projectConfig.projectName &&
-          clusterNames.some(
-            (cn) => labels.environment === cn.replace(`${projectConfig.projectName}-`, ''),
-          )
+          labelsNameEnvironment(provider, labels, projectConfig.projectName, clusterNames)
         );
       });
       if (orphanedServers.length > 0) {

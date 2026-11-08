@@ -1758,6 +1758,18 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
+   * The decoded value of this provider's own encoding: the raw value when
+   * the tag fits in 50 characters, the squeezed one when encodeLabel had to
+   * shorten it.
+   * @param {string} key
+   * @param {string} value
+   * @returns {string}
+   */
+  labelValue(key, value) {
+    return decodeLabels([encodeLabel(key, value)])[key];
+  }
+
+  /**
    * Linode's instance object carries NO attached-volume ids (the
    * volume → `linode_id` direction is the authoritative attachment record
    * on this API — see volumeAttachedServerIds). Always [] — the sweep and

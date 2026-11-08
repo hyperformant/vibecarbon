@@ -173,21 +173,32 @@ export function environmentLabelValues({ environment, deployMode } = {}) {
  * Both are required to agree on the PROJECT, so a second project's `e2` in the
  * same account is never in scope.
  *
+ * The decoded labels are compared to `labelValue(key, raw)`, the provider's
+ * hook: Linode squeezes a tag past 50 characters, so a long project name is
+ * stored as its squeezed value. The default is identity.
+ *
  * @param {{name?: string|null, labels?: Record<string,string>}} server
  * @param {object} args
  * @param {string} args.projectName
  * @param {string} args.environment
  * @param {string} [args.deployMode]
  * @param {string[]} [args.roles]
+ * @param {(key: string, value: string) => string} [args.labelValue] -
+ *   provider.labelValue.
  * @returns {boolean}
  */
-export function isEnvironmentOwnedServer(server, { projectName, environment, deployMode, roles }) {
+export function isEnvironmentOwnedServer(
+  server,
+  { projectName, environment, deployMode, roles, labelValue = (_key, value) => value },
+) {
   if (!server || !projectName || !environment) return false;
   const labels = server.labels ?? {};
   const labelOwned =
     labels['managed-by'] === 'vibecarbon' &&
-    labels.project === projectName &&
-    environmentLabelValues({ environment, deployMode }).includes(labels.environment);
+    labels.project === labelValue('project', projectName) &&
+    environmentLabelValues({ environment, deployMode })
+      .map((value) => labelValue('environment', value))
+      .includes(labels.environment);
   if (labelOwned) return true;
   return isEnvironmentServerName(server.name, { projectName, environment, roles });
 }

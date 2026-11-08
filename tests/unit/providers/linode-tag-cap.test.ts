@@ -22,6 +22,8 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
   };
 });
 
+import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
+import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 import {
   decodeLabels,
   encodeLabel,
@@ -101,5 +103,24 @@ describe('LinodeProvider.listServers finds a server by its squeezed cluster tag'
     });
     const found = await new LinodeProvider('t').listServers({ cluster: HA_CLUSTER });
     expect(found.map((s: { id: number }) => s.id)).toEqual([1]);
+  });
+});
+
+describe('provider.labelValue: the decoded value a raw name is stored as', () => {
+  it('is the squeezed value on Linode when the tag would pass 50', () => {
+    const linode = new LinodeProvider('t');
+    const value = linode.labelValue('cluster', HA_CLUSTER);
+    expect(value).not.toBe(HA_CLUSTER);
+    expect(value).toBe(decodeLabels([encodeLabel('cluster', HA_CLUSTER)]).cluster);
+  });
+
+  it('is the raw value on Linode when the tag fits', () => {
+    expect(new LinodeProvider('t').labelValue('project', HA_PROJECT)).toBe(HA_PROJECT);
+  });
+
+  it('is the raw value on Hetzner and DigitalOcean, however long', () => {
+    const long = 'z'.repeat(80);
+    expect(new HetznerProvider('t').labelValue('project', long)).toBe(long);
+    expect(new DigitalOceanProvider('t').labelValue('project', long)).toBe(long);
   });
 });
