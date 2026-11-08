@@ -3,11 +3,22 @@
  * harness as digitalocean-k8s.test.ts.
  */
 import * as pulumi from '@pulumi/pulumi';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+const fetchWithRetryMock = vi.fn();
+vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    fetchWithRetry: (...args: unknown[]) => fetchWithRetryMock(...args),
+  };
+});
+
 import { planK8sBackstopTargets } from '../../../src/destroy.js';
 import { renderCarbonAutoscalerConfig } from '../../../src/lib/deploy/k8s/k3s.js';
 import { buildLinodeK8sProgram } from '../../../src/lib/iac/programs/linode-k8s.js';
 import {
+  encodeLabel,
   LinodeProvider,
   rewriteOperatorRules,
   squeezeLinodeLabel,
@@ -404,6 +415,102 @@ describe('a long e2e-shaped k8s-ha standby: program, autoscaler, destroy and swe
     expect(fwLabel.length).toBeLessThanOrEqual(32);
     expect(fwLabel).toBe(squeezeLinodeLabel(caConfig.firewallName));
     expect(fwLabel).toBe(squeezeLinodeLabel(standbyTarget.firewallName));
+  });
+});
+
+// A local k8s-ha primary: runner.ts names the project
+// `testapp-k8s-ha-<13 digits>-<6 chars>`, the stack env is `l4-primary`.
+// `cluster:<project>-l4-primary` is 54 characters, past Linode's 50-character
+// tag cap, so the program's tags and the autoscaler's selector must squeeze
+// the same way.
+const HA_PROJECT = 'testapp-k8s-ha-1787258789210-0typg2';
+const HA_STACK_ENV = 'l4-primary';
+const HA_CLUSTER = `${HA_PROJECT}-${HA_STACK_ENV}`;
+
+describe('a long e2e-shaped k8s-ha primary: every tag fits and the autoscaler finds its own', () => {
+  let slice: Captured[];
+  let caConfig: {
+    clusterName: string;
+    nodeGroups: Record<string, { serverLabels: Record<string, string> }>;
+  };
+
+  beforeAll(async () => {
+    const start = captured.length;
+    const raw = await buildLinodeK8sProgram({
+      ...baseConfig,
+      projectName: HA_PROJECT,
+      environment: HA_STACK_ENV,
+      location: 'us-iad',
+      minWorkers: 1,
+      existingSshKeyId: '424242',
+    })();
+    // vpc, subnet, firewall, reservedIp, master, db, worker-1
+    await waitFor(start + 7);
+    await pulumi.output(raw).promise();
+    slice = captured.slice(start);
+    caConfig = JSON.parse(
+      await renderCarbonAutoscalerConfig({
+        k3sVersion: baseConfig.k3sVersion,
+        k3sToken: 'deadbeefcafe1234567890abcdef',
+        masterPrivateIp: '10.0.1.2',
+        clusterName: HA_CLUSTER,
+        environment: HA_STACK_ENV,
+        providerId: 'linode',
+        ProviderClass: LinodeProvider,
+        region: 'us-iad',
+        workerServerType: 'g6-standard-2',
+        minWorkers: 1,
+        maxWorkers: 3,
+        caBoundsMin: 1,
+        sshKeyName: `${HA_PROJECT}-l4-ha-key`,
+      }),
+    );
+  });
+
+  it('writes only tags of 3 to 50 characters', () => {
+    const tags = slice.flatMap((r) => (r.inputs.tags ?? []) as string[]);
+    expect(tags.length).toBeGreaterThan(0);
+    for (const tag of tags) {
+      expect(tag.length, tag).toBeGreaterThanOrEqual(3);
+      expect(tag.length, tag).toBeLessThanOrEqual(50);
+    }
+  });
+
+  it("tags the master's cluster exactly as the autoscaler's selector encodes it", () => {
+    const master = byType(slice, INSTANCE).find((i) => i.name === 'master') as Captured;
+    const clusterTag = (master.inputs.tags as string[]).find((t) => t.startsWith('cluster:'));
+    expect(clusterTag).toBe(encodeLabel('cluster', caConfig.clusterName));
+  });
+
+  it('lists the static worker under the selector the autoscaler and destroy send', async () => {
+    const instances = byType(slice, INSTANCE).map((i, n) => ({
+      id: n + 1,
+      label: i.inputs.label,
+      tags: i.inputs.tags,
+    }));
+    fetchWithRetryMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: instances, page: 1, pages: 1 }),
+    });
+    const provider = new LinodeProvider('t');
+    const workers = await provider.listServers({
+      'cluster-autoscaler/node': 'static',
+      cluster: caConfig.clusterName,
+    });
+    expect(workers.map((w: { label: string }) => w.label)).toEqual([
+      byType(slice, INSTANCE).find((i) => i.name === 'worker-1')?.inputs.label,
+    ]);
+    const all = await provider.listServers({ cluster: caConfig.clusterName });
+    expect(all).toHaveLength(3);
+  });
+
+  it("renders the CSI StorageClass volumeTags as the project's encoded tag", () => {
+    const master = byType(slice, INSTANCE).find((i) => i.name === 'master') as Captured;
+    const userData = Buffer.from(master.inputs.metadatas[0].userData, 'base64').toString();
+    expect(userData).toContain(
+      `linodebs.csi.linode.com/volumeTags: "${encodeLabel('project', HA_PROJECT)}"`,
+    );
   });
 });
 

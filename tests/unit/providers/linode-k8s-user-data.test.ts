@@ -13,7 +13,7 @@ const masterVars = {
   k3s_version: 'v1.37.2+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   linode_token: 'linode_test_token_1234',
-  project_name: 'quorum',
+  project_tag: 'project:quorum',
 };
 const agentVars = {
   k3s_version: 'v1.37.2+k3s1',
@@ -76,8 +76,7 @@ describe('LinodeProvider k8s user-data statics', () => {
     expect(rendered).toContain('reclaimPolicy: Delete');
     expect(rendered).toContain('allowVolumeExpansion: true');
     expect(rendered).toContain('volumeBindingMode: WaitForFirstConsumer');
-    expect(rendered).toContain('linodebs.csi.linode.com/volumeTags: "$PROJECT_TAG"');
-    expect(rendered).toContain('printf \'project:%s\' "quorum"');
+    expect(rendered).toContain('linodebs.csi.linode.com/volumeTags: "project:quorum"');
     expect(rendered).toContain('--advertise-address "$PRIVATE_IP"');
     // the marker comes after the StorageClass
     expect(rendered.indexOf('touch /tmp/k3s-ready')).toBeGreaterThan(

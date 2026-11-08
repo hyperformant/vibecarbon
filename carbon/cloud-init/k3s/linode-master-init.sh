@@ -204,10 +204,10 @@ if [ "$CSI_INSTALL_OK" != "true" ]; then
 fi
 
 # Our own StorageClass: the shipped ones are untagged and default to Retain.
-# volumeTags carries the project tag (encoded as the destroy sweep matches
-# it: `project:<name>` with characters outside [A-Za-z0-9:_-] as `-`), so
-# every volume the driver creates can be found and removed with its project.
-PROJECT_TAG=$(printf 'project:%s' "${project_name}" | tr -c 'A-Za-z0-9:_-' '-')
+# volumeTags carries the project tag, rendered by the provider's encodeLabel
+# (the encoding the destroy sweep matches, within Linode's 50-character tag
+# cap), so every volume the driver creates can be found and removed with its
+# project.
 SC_APPLIED=false
 for i in 1 2 3; do
   if kubectl apply -f - << SCEOF
@@ -220,7 +220,7 @@ reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer
 parameters:
-  linodebs.csi.linode.com/volumeTags: "$PROJECT_TAG"
+  linodebs.csi.linode.com/volumeTags: "${project_tag}"
 SCEOF
   then
     SC_APPLIED=true

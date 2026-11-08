@@ -36,23 +36,37 @@ const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 const WG_PORT = '51821';
 
 /**
+ * Linode caps every tag at 3-50 characters (live 2026-11-07: POST /v4/tags
+ * with a 55-character label returned 400 "Length must be 3-50 characters").
+ * @type {number}
+ */
+const TAG_MAX = 50;
+
+/**
  * Encode a label key/value pair into a Linode tag string. Same `key:value`
- * wire encoding as DigitalOcean's encodeLabel (Linode tags are free-form
- * strings, 3-50 chars) — kept byte-compatible so the destroy-sweep /
- * listing matchers behave identically across the two tag-based providers.
- * Characters outside [A-Za-z0-9:_-] are replaced with `-` (conservative;
- * Linode allows more, but staying inside DO's charset keeps the encoding
- * provably round-trippable on both). NOTE Linode's 50-char tag ceiling:
- * project/environment names long enough to exceed it fail the create
- * loudly at the API rather than being silently truncated here.
- * Named export so the Pulumi IaC program (linode-compose.js) tags its
- * resources with the identical encoding.
+ * wire encoding as DigitalOcean's encodeLabel, kept byte-compatible so the
+ * destroy-sweep and listing matchers behave alike on the two tag-based
+ * providers. Characters outside [A-Za-z0-9:_-] become `-` (Linode allows
+ * more, but DO's charset keeps the encoding round-trippable on both).
+ *
+ * A tag of 50 or fewer characters is returned as is. A longer one becomes
+ * exactly 50: the `key:` head, a prefix of the value, `-`, and an 8-hex
+ * FNV-1a hash of the full value, the shape squeezeLinodeLabel uses. It is
+ * deterministic, so every writer (the IaC programs, createServer, the CSI
+ * StorageClass volumeTags) and every selector (listServers, the reserved IP
+ * matchers) derive the same tag from the same name. A squeezed tag decodes to
+ * the squeezed value, never the raw name, so an ownership check compares the
+ * decoded label against provider.labelValue(key, raw).
  * @param {string} key
  * @param {string} value
  * @returns {string}
  */
 export function encodeLabel(key, value) {
-  return `${key}:${value}`.replace(/[^A-Za-z0-9:_-]/g, '-');
+  const tag = `${key}:${value}`.replace(/[^A-Za-z0-9:_-]/g, '-');
+  if (tag.length <= TAG_MAX) return tag;
+  const head = tag.slice(0, tag.indexOf(':') + 1);
+  const room = TAG_MAX - head.length - 9;
+  return `${head}${tag.slice(head.length, head.length + room)}-${fnv1a32hex(String(value))}`;
 }
 
 /**
@@ -439,13 +453,13 @@ export class LinodeProvider extends BaseProvider {
 
   /**
    * Render the k3s master boot script. The Linode API token is the CSI
-   * driver's credential; project_name becomes the project tag on every
-   * volume the CSI driver creates.
+   * driver's credential; project_tag is the project tag on every volume the
+   * CSI driver creates, `encodeLabel('project', projectName)`.
    * @param {{
    *   k3s_version: string,
    *   k3s_token: string,
    *   linode_token: string,
-   *   project_name: string,
+   *   project_tag: string,
    * }} vars - The template's complete var set.
    * @returns {Promise<string>}
    */

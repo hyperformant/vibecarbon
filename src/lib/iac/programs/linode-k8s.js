@@ -32,6 +32,7 @@
 import { randomBytes } from 'node:crypto';
 import * as linode from '@pulumi/linode';
 import {
+  encodeLabel,
   encodeLabels,
   LinodeProvider,
   splitCidrsByFamily,
@@ -219,7 +220,7 @@ export function buildLinodeK8sProgram(config) {
       k3s_version: config.k3sVersion,
       k3s_token: k3sToken,
       linode_token: config.apiToken ?? '',
-      project_name: config.projectName,
+      project_tag: encodeLabel('project', config.projectName),
     });
     const master = new linode.Instance(
       'master',
