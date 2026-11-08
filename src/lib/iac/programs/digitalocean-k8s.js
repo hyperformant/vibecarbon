@@ -95,6 +95,10 @@ import { transliterateToAscii } from './digitalocean-compose.js';
  *                                        (HA case: shared key across clusters)
  * @property {string} [k3sToken]          Pre-shared k3s node-join token
  *                                        (auto-generated if omitted)
+ * @property {{id: string, privateIp: string}} [priorMaster] The master as the
+ *   prior state records it. Set only by converge-cluster.js (scale and
+ *   failover), whose preview refuses any plan that replaces the master; the
+ *   db and workers are built from it so they resize alongside the master.
  * @property {string} location         DigitalOcean region slug (e.g. nyc3).
  *                                      Unlike Hetzner, DO VPCs are single-
  *                                      region — there is no separate
@@ -389,17 +393,25 @@ export function buildDigitalOceanK8sProgram(config) {
       }),
     });
 
+    // The master's private address, and what its db and workers wait on. A
+    // deploy reads both off the live master. A scale or failover names the
+    // master from prior state (config.priorMaster, see converge-cluster.js
+    // priorMasterFrom), where it cannot be replaced, so the db and workers
+    // resize alongside it rather than after it.
+    const masterPrivateIp = config.priorMaster?.privateIp ?? master.ipv4AddressPrivate;
+    const masterDeps = config.priorMaster ? [firewall] : [master, firewall];
+
     // Database droplet — joins master via k3s agent, pinned to the
     // dedicated database node-pool (label + NoSchedule taint baked into
     // do-db-init.sh's k3s agent argv). master_ip MUST be the
     // master's REAL private IP, only known once Pulumi has created it —
     // unlike Hetzner's hardcoded '10.0.1.1', DO has no static-IP
     // assignment to pin this to ahead of time (M3 dossier §4-repo).
-    const dbUserData = pulumi.all([master.ipv4AddressPrivate]).apply(([masterPrivateIp]) =>
+    const dbUserData = pulumi.all([masterPrivateIp]).apply(([ip]) =>
       DigitalOceanProvider.getK8sDbUserData({
         k3s_version: config.k3sVersion,
         k3s_token: k3sToken,
-        master_ip: masterPrivateIp,
+        master_ip: ip,
       }).then(transliterateToAscii),
     );
     const dbServer = new digitalocean.Droplet(
@@ -423,7 +435,7 @@ export function buildDigitalOceanK8sProgram(config) {
       // dependsOn firewall explicitly (M3 Task 5b), not just transitively
       // through master — see master's own dependsOn comment.
       serverResourceOptions('digitalocean:index/droplet:Droplet', {
-        dependsOn: [master, firewall],
+        dependsOn: masterDeps,
       }),
     );
 
@@ -433,11 +445,11 @@ export function buildDigitalOceanK8sProgram(config) {
     // rendered user-data (all join the same master over the same private
     // IP), so it's computed once outside the loop, mirroring
     // hetzner-k8s.js's workerUserData reuse.
-    const workerUserData = pulumi.all([master.ipv4AddressPrivate]).apply(([masterPrivateIp]) =>
+    const workerUserData = pulumi.all([masterPrivateIp]).apply(([ip]) =>
       DigitalOceanProvider.getK8sWorkerUserData({
         k3s_version: config.k3sVersion,
         k3s_token: k3sToken,
-        master_ip: masterPrivateIp,
+        master_ip: ip,
       }).then(transliterateToAscii),
     );
     const workers = [];
@@ -470,10 +482,10 @@ export function buildDigitalOceanK8sProgram(config) {
           // transitively through master — see master's own dependsOn
           // comment.
           workerResourceOptions('digitalocean:index/droplet:Droplet', {
-            dependsOn: [master, firewall],
+            dependsOn: masterDeps,
             joinTarget: {
-              masterId: master.id,
-              masterPrivateIp: master.ipv4AddressPrivate,
+              masterId: config.priorMaster?.id ?? master.id,
+              masterPrivateIp,
               k3sVersion: config.k3sVersion,
             },
           }),
@@ -483,6 +495,8 @@ export function buildDigitalOceanK8sProgram(config) {
 
     return {
       masterIp: master.ipv4Address,
+      // Read back by a scale or failover (converge-cluster.js priorMasterFrom).
+      masterId: master.id,
       // REAL output (not hardcoded) — see module doc + Task 2's Hetzner
       // byte-identical contrast.
       masterPrivateIp: master.ipv4AddressPrivate,

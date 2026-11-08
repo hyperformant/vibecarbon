@@ -195,6 +195,8 @@ describe('buildLinodeK8sProgram resource graph', () => {
     expect(Object.keys(outputs).sort()).toEqual(
       [
         'masterIp',
+        // Read back by a scale or failover (converge-cluster.js priorMasterFrom).
+        'masterId',
         'masterPrivateIp',
         'dbIp',
         'dbPrivateIp',

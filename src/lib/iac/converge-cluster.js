@@ -62,6 +62,28 @@ function abort(lines) {
 }
 
 /**
+ * The master as the prior state records it, for the program's db and workers
+ * to be built from in place of the live master. Only a converge may do this:
+ * its preview refuses any plan that replaces the master, so during the up the
+ * master's id and private address cannot change. Built from the live master,
+ * every worker (and DigitalOcean's db) waits for the master's own update to
+ * finish before its own starts: a Linode k8s scale held its worker 7 minutes
+ * behind the master's resize (2026-11-08). A stack that predates the masterId
+ * output, or a failed state read, gives undefined, and the program uses the
+ * live master as a deploy does.
+ *
+ * @param {Record<string, unknown> | null} outputs prior stack outputs
+ * @returns {{ id: string, privateIp: string } | undefined}
+ */
+function priorMasterFrom(outputs) {
+  const id = outputs?.masterId;
+  const privateIp = outputs?.masterPrivateIp;
+  if (id == null || id === '' || typeof privateIp !== 'string' || privateIp === '')
+    return undefined;
+  return { id: String(id), privateIp };
+}
+
+/**
  * Converge a single k8s cluster stack via the hardened Pulumi path.
  *
  * @param {object} args
@@ -335,12 +357,14 @@ export async function convergeClusterInfra({
       p.log.error(`${label}: unexpected probe status '${probe.status}': ${probe.reason}`);
   }
 
+  const priorMaster = priorMasterFrom(probeOutputs);
   const program = await Provider.getK8sProgram({
     ...programConfig,
     // Replay the prior token (when available) so userData hashes match
     // and Pulumi plans an in-place server-type change rather than a
     // destructive replace of every node.
     k3sToken: priorK3sToken,
+    ...(priorMaster && { priorMaster }),
   });
 
   // Defense in depth: run a Pulumi preview and refuse to proceed if any

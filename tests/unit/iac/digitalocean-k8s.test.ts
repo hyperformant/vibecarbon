@@ -193,6 +193,8 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     expect(Object.keys(outputs).sort()).toEqual(
       [
         'masterIp',
+        // Read back by a scale or failover (converge-cluster.js priorMasterFrom).
+        'masterId',
         'masterPrivateIp',
         'dbIp',
         'dbPrivateIp',
@@ -430,6 +432,35 @@ describe('buildDigitalOceanK8sProgram — existingSshKeyId reuse (HA shared key)
     const droplets = thisRun.filter((r) => r.type === 'digitalocean:index/droplet:Droplet');
     for (const d of droplets) {
       expect(d.inputs.sshKeys).toEqual(['424242']);
+    }
+  });
+});
+
+// A scale or failover hands the program the master as prior state records it
+// (converge-cluster.js priorMasterFrom) so the db and workers resize alongside
+// the master. Their join address must then come from that record, rendered
+// into the script as a plain address.
+describe('buildDigitalOceanK8sProgram — a scale or failover (priorMaster)', () => {
+  const PRIOR = { id: '9000001', privateIp: '10.10.0.99' };
+  let mine: CapturedResource[];
+
+  beforeAll(async () => {
+    const start = capturedResources.length;
+    await buildDigitalOceanK8sProgram({
+      ...baseConfig,
+      k3sToken: 'replayed',
+      priorMaster: PRIOR,
+    })();
+    await waitForResourceCount(start + 10);
+    mine = capturedResources.slice(start);
+  });
+
+  it('renders database/worker user-data with the master address prior state records', () => {
+    for (const name of ['db', 'worker-1', 'worker-2'].map((n) => `${CLUSTER_NAME}-${n}`)) {
+      const droplet = mine.find(
+        (r) => r.type === 'digitalocean:index/droplet:Droplet' && r.inputs.name === name,
+      );
+      expect(droplet?.inputs.userData, name).toContain(`K3S_URL="https://${PRIOR.privateIp}:6443"`);
     }
   });
 });

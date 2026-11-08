@@ -64,6 +64,10 @@ export function networkZoneFor(location) {
  *                                        (HA case: shared key across clusters)
  * @property {string} [k3sToken]          Pre-shared k3s node-join token
  *                                        (auto-generated if omitted)
+ * @property {{id: string, privateIp: string}} [priorMaster] The master as the
+ *   prior state records it. Set only by converge-cluster.js (scale and
+ *   failover), whose preview refuses any plan that replaces the master; the
+ *   db and workers are built from it so they resize alongside the master.
  * @property {string} location         Hetzner datacenter (nbg1/hel1/fsn1/hil/ash/sin).
  *                                      networkZone is derived from this (see
  *                                      `networkZoneFor` above) — not a config field.
@@ -375,7 +379,9 @@ export function buildHetznerK8sProgram(config) {
             // replay it has nothing to protect yet: see workerResourceOptions.
             omitJoinTrigger: !config.k3sToken,
             joinTarget: {
-              masterId: master.id,
+              // A scale or failover names the master from prior state, so the
+              // worker resizes alongside it: see priorMasterFrom.
+              masterId: config.priorMaster?.id ?? master.id,
               masterPrivateIp: '10.0.1.1',
               k3sVersion: config.k3sVersion,
             },
@@ -386,6 +392,8 @@ export function buildHetznerK8sProgram(config) {
 
     return {
       masterIp: master.ipv4Address,
+      // Read back by a scale or failover (converge-cluster.js priorMasterFrom).
+      masterId: master.id,
       masterPrivateIp: '10.0.1.1',
       dbIp: dbServer.ipv4Address,
       dbPrivateIp: '10.0.1.2',

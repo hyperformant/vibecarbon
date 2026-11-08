@@ -301,4 +301,45 @@ describe('convergeClusterInfra', () => {
     await convergeClusterInfra({ ...args, Provider });
     expect(programCalls[0].workerServerType).toBe('cpx32');
   });
+
+  // The preview below refuses any plan that replaces the master, so in a
+  // converge the master's id and private address cannot change during the up.
+  // Handed to the program as prior state records them, the db and workers
+  // resize alongside the master instead of after it (Linode k8s scale,
+  // 2026-11-08: the worker waited 7 minutes for the master's resize).
+  it('(h) hands the real program the master as prior state records it', async () => {
+    getStackOutputsMock.mockResolvedValue({
+      k3sToken: 'REPLAY_TOKEN',
+      masterId: 5000001,
+      masterPrivateIp: '10.0.1.2',
+    });
+    const { Provider, programCalls } = makeProvider();
+
+    await convergeClusterInfra({ ...baseArgs(), Provider });
+
+    expect(programCalls[0].priorMaster).toBeUndefined();
+    expect(programCalls[1].priorMaster).toEqual({ id: '5000001', privateIp: '10.0.1.2' });
+  });
+
+  it('(h2) leaves the program on the live master when state lacks either value', async () => {
+    for (const outputs of [
+      { k3sToken: 'T', masterPrivateIp: '10.0.1.2' },
+      { k3sToken: 'T', masterId: '5000001' },
+      { k3sToken: 'T', masterId: '', masterPrivateIp: '10.0.1.2' },
+      {},
+    ]) {
+      getStackOutputsMock.mockResolvedValue(outputs);
+      const { Provider, programCalls } = makeProvider();
+      await convergeClusterInfra({ ...baseArgs(), Provider });
+      expect(programCalls[1], JSON.stringify(outputs)).not.toHaveProperty('priorMaster');
+    }
+  });
+
+  it('(h3) leaves the program on the live master when the state read fails', async () => {
+    getStackOutputsMock.mockRejectedValue(new Error('backend down'));
+    classifyK3sTokenProbeMock.mockReturnValue({ status: 'errored', reason: 'backend down' });
+    const { Provider, programCalls } = makeProvider();
+    await convergeClusterInfra({ ...baseArgs(), Provider });
+    expect(programCalls[1]).not.toHaveProperty('priorMaster');
+  });
 });
