@@ -44,10 +44,10 @@ const TAG_MAX = 50;
 
 /**
  * Encode a label key/value pair into a Linode tag string. Same `key:value`
- * wire encoding as DigitalOcean's encodeLabel, kept byte-compatible so the
- * destroy-sweep and listing matchers behave alike on the two tag-based
- * providers. Characters outside [A-Za-z0-9:_-] become `-` (Linode allows
- * more, but DO's charset keeps the encoding round-trippable on both).
+ * wire encoding as DigitalOcean's encodeLabel for tags of 50 characters or
+ * fewer, so the destroy-sweep and listing matchers behave alike on the two
+ * tag-based providers. Characters outside [A-Za-z0-9:_-] become `-` (Linode
+ * allows more, but DO's charset keeps the encoding round-trippable on both).
  *
  * A tag of 50 or fewer characters is returned as is. A longer one becomes
  * exactly 50: the `key:` head, a prefix of the value, `-`, and an 8-hex
@@ -1511,9 +1511,9 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * List ALL VPCs (paginated walk, soft-fail [] on non-ok). Compose-tier
-   * Linode deploys create no VPCs, but the destroy sweep still enumerates
-   * them so a future tier's leak can never hide behind a stub.
+   * List ALL VPCs (paginated walk, soft-fail [] on non-ok). The k8s tiers
+   * create one VPC per stack, labelled `${clusterName}-network`; destroy
+   * finds it here by that exact label.
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
