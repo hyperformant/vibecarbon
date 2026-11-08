@@ -250,7 +250,7 @@ export const testConfig = {
       // with no per-region capacity flux.
       linode: {
         regions: ['us-iad', 'us-ord', 'fr-par', 'us-sea'] as const,
-        scaleTo: { 'g6-standard-2': 'g6-standard-4' },
+        scaleTo: { 'g6-standard-1': 'g6-standard-2', 'g6-standard-2': 'g6-standard-4' },
       },
       // Vultr runs compose + compose-ha (2026-08 expansion phase 1, PR 2 +
       // tier-parity wave 1 — see VultrProvider.SUPPORTED_TIERS). Regions are
@@ -346,10 +346,9 @@ export const testConfig = {
         ],
         defaultSelection: ['compose', 'compose-ha', 'k8s', 'k8s-ha'],
       },
-      // Compose + compose-ha (2026-08 expansion PR 1 + tier-parity wave 1 —
-      // LinodeProvider.SUPPORTED_TIERS stops at `compose-ha`; 4-mode headroom
-      // recorded in
-      // the linode-provider-step0-audit plan).
+      // All four modes (LinodeProvider.SUPPORTED_TIERS; 4-mode headroom
+      // recorded in the linode-provider-step0-audit plan). The k8s scenarios
+      // run in regions with VPCs: us-east and us-southeast have none.
       // NOTE for CI namespacing: remapEnvPrefix strips only a LEADING `e`,
       // so `l1` under E2E_NAMESPACE=ci becomes `cil1` (pinned in
       // namespace.test.ts).
@@ -368,8 +367,13 @@ export const testConfig = {
           // SAME provider that owns the compute — the self-contained default,
           // same reasoning as Hetzner's e2.
           { mode: 'compose-ha' as const, dnsProvider: 'linode' as const, envPrefix: 'l2' },
+          { mode: 'k8s' as const, dnsProvider: 'linode' as const, envPrefix: 'l3' },
+          // l4: the k8s-ha reference scenario. Its standby goes where a
+          // customer's deploy puts it (getDefaultStandbyRegion); the flip
+          // exercises the SAME provider that owns the compute, like d4.
+          { mode: 'k8s-ha' as const, dnsProvider: 'linode' as const, envPrefix: 'l4' },
         ],
-        defaultSelection: ['compose', 'compose-ha'],
+        defaultSelection: ['compose', 'compose-ha', 'k8s', 'k8s-ha'],
       },
       // Compose + compose-ha (2026-08 expansion PR 2 + tier-parity wave 1 —
       // VultrProvider.SUPPORTED_TIERS stops at `compose-ha`; 4-mode headroom

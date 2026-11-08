@@ -5,8 +5,8 @@
  * check and the post-select re-check in gatherDeploymentConfig — see its
  * "Resolved once per flow" comment). Also pins the gate interaction with
  * resolveDeployMode (A2's SUPPORTED_TIERS mode filter), which must use the
- * POST-SELECT provider so selecting a compose-only provider (Linode) hides
- * the k8s modes while Hetzner and DigitalOcean keep all four (d4 lift).
+ * POST-SELECT provider so selecting a compose-only provider (Vultr) hides
+ * the k8s modes while Hetzner, DigitalOcean and Linode keep all four.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -254,6 +254,35 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
     const modeValues = modeCall.options.map((o: { value: string }) => o.value);
     // compose-ha is supported but not recommended, so the picker omits it.
     expect(modeValues).toEqual(['compose', 'kubernetes', 'kubernetes-ha']);
+  });
+
+  it('offers every recommended deploy mode for linode (k8s lift)', async () => {
+    clackMock.select.mockResolvedValueOnce('linode'); // provider select
+    const { envConfig } = await resolveProvider(noFlags, {});
+    expect(envConfig.provider).toBe('linode');
+
+    clackMock.select.mockResolvedValueOnce('compose'); // deploy-mode select
+    await resolveDeployMode(noFlags, envConfig);
+
+    const modeCall = clackMock.select.mock.calls[1][0];
+    expect(modeCall.options.map((o: { value: string }) => o.value)).toEqual([
+      'compose',
+      'kubernetes',
+      'kubernetes-ha',
+    ]);
+  });
+
+  it('hides the k8s modes for vultr, which stays compose-only', async () => {
+    clackMock.select.mockResolvedValueOnce('vultr'); // provider select
+    const { envConfig } = await resolveProvider(noFlags, {});
+
+    clackMock.select.mockResolvedValueOnce('compose'); // deploy-mode select
+    await resolveDeployMode(noFlags, envConfig);
+
+    const modeCall = clackMock.select.mock.calls[1][0];
+    const values = modeCall.options.map((o: { value: string }) => o.value);
+    expect(values).not.toContain('kubernetes');
+    expect(values).not.toContain('kubernetes-ha');
   });
 
   it('offers every recommended deploy mode for hetzner', async () => {

@@ -10,14 +10,19 @@ function words(line: string): string[] {
 }
 
 /**
- * @param script - master-init.sh's text
+ * @param script - a k3s init script's text
  * @param vars - the script's shell variables and template values, by name
+ * @param role - which install line to read: the master's `server` or a node's `agent`
  * @returns one argv entry per word, with every variable filled in
  */
-export function k3sServerFlags(script: string, vars: Record<string, string>): string[] {
+export function k3sServerFlags(
+  script: string,
+  vars: Record<string, string>,
+  role: 'server' | 'agent' = 'server',
+): string[] {
   const lines = script.split('\n');
-  const start = lines.findIndex((line) => /\bsh -s - server \\$/.test(line));
-  if (start === -1) throw new Error('no k3s server install line in the script');
+  const start = lines.findIndex((line) => new RegExp(`\\bsh -s - ${role} \\\\$`).test(line));
+  if (start === -1) throw new Error(`no k3s ${role} install line in the script`);
   const flags: string[] = [];
   for (const line of lines.slice(start + 1)) {
     flags.push(...words(line.replace(/\\$/, '').replace(/; then$/, '')));

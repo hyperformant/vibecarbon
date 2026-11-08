@@ -1,0 +1,155 @@
+#!/bin/bash
+set -euo pipefail
+
+# Boot timing marks, read by src/lib/deploy/boot-timing.js
+_m(){ echo "$1 $(date +%s.%N)">>/var/log/vcboot||true;}
+_m p
+
+# Note: This script runs AS PART of cloud-init (user_data), so we cannot wait for
+# cloud-init to complete (that would cause a deadlock). The script starts immediately.
+
+# sshd concurrency headroom - same rationale as docker-ce-setup.yaml's
+# 99-vibecarbon-concurrency.conf: the deploy fans concurrent ssh (builds,
+# tunnels, probes) past Ubuntu's MaxStartups 10:30:100 default, which drops
+# connections at the door (kex_exchange_identification reset; 2026-08-23).
+mkdir -p /etc/ssh/sshd_config.d
+printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
+systemctl reload ssh || systemctl reload sshd || true
+
+_m n
+
+# Validate k3s version is set
+K3S_TARGET_VERSION="${k3s_version}"
+if [ -z "$K3S_TARGET_VERSION" ]; then
+  echo "ERROR: k3s_version not set"
+  exit 1
+fi
+echo "Installing k3s version: $K3S_TARGET_VERSION"
+
+# Node identity via Linode's Metadata Service (169.254.169.254). Two calls
+# to get a token (PUT, 1 h expiry) and then plain-text reads of /v1/instance
+# and /v1/network (`key: value` lines, no jq needed). The VPC address is on
+# eth1 from the initrd and in the metadata from bootcmd, so it is there by
+# the time this script runs; the retry only covers a slow metadata answer.
+# The token is fetched once and reused: the service rate-limits requests.
+# Still bound the retry and FATAL on empty metadata: never install k3s with
+# an empty --node-ip.
+METADATA_TOKEN=""
+for i in $(seq 1 15); do
+  METADATA_TOKEN=$(curl -sf --max-time 5 -X PUT -H "Metadata-Token-Expiry-Seconds: 3600" http://169.254.169.254/v1/token || true)
+  if [ -n "$METADATA_TOKEN" ]; then
+    break
+  fi
+  sleep 2
+done
+
+fetch_metadata() {
+  local path="$1"
+  local val=""
+  for i in $(seq 1 15); do
+    val=$(curl -sf --max-time 5 -H "Metadata-Token: $METADATA_TOKEN" "http://169.254.169.254/v1/$path" || true)
+    if [ -n "$val" ]; then
+      break
+    fi
+    sleep 2
+  done
+  echo "$val"
+}
+
+# Value of one `key: value` line, with any /32 suffix dropped.
+metadata_value() {
+  echo "$1" | sed -n "s/^$2: *//p" | head -n 1 | sed 's|/.*$||'
+}
+
+INSTANCE_META=$(fetch_metadata "instance")
+NETWORK_META=$(fetch_metadata "network")
+
+PUBLIC_IP=$(metadata_value "$NETWORK_META" "ipv4.public")
+if ! echo "$PUBLIC_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "FATAL: could not determine public IPv4 from Linode metadata; refusing to install k3s with an empty node-external-ip"
+  exit 1
+fi
+echo "Public IP: $PUBLIC_IP"
+
+PRIVATE_IP=$(metadata_value "$NETWORK_META" "ipv4.vpc")
+if ! echo "$PRIVATE_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "FATAL: could not determine private VPC IPv4 from Linode metadata; refusing to install k3s with an empty node-ip"
+  exit 1
+fi
+echo "Private IP: $PRIVATE_IP"
+
+NODE_ID=$(metadata_value "$INSTANCE_META" "id")
+if ! echo "$NODE_ID" | grep -qE '^[0-9]+$'; then
+  echo "FATAL: could not determine Linode id from Linode metadata; refusing to install k3s without a provider-id"
+  exit 1
+fi
+echo "Linode ID: $NODE_ID"
+
+# Configure containerd to mirror pulls for the local registry running on
+# the master, at the master's private IP. The program fixes that VPC address
+# (10.0.1.2), so it is known at render time and this node is created in
+# parallel with the master, not after it. It is a template var (${master_ip}).
+#
+# Plain http://${master_ip}:5000 -- the registry runs HTTP on the private
+# network. Do NOT add `insecure_skip_verify: true` (see linode-master-init.sh).
+mkdir -p /etc/rancher/k3s
+cat > /etc/rancher/k3s/registries.yaml << REGEOF
+mirrors:
+  "${master_ip}:5000":
+    endpoint:
+      - "http://${master_ip}:5000"
+# @include _k3s-system-image-mirror.yaml
+REGEOF
+
+_m w
+# Wait for the master k3s API (private IP, over the VPC) before joining.
+MAX_RETRIES=120
+RETRY_COUNT=0
+
+echo "Waiting for master k3s API to be ready..."
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+  if curl -sk --max-time 5 "https://${master_ip}:6443/readyz" >/dev/null 2>&1; then
+    echo "Master k3s API is ready!"
+    break
+  fi
+
+  if [ $((RETRY_COUNT % 12)) -eq 0 ]; then
+    echo "Master not ready yet... ($RETRY_COUNT/$MAX_RETRIES)"
+  fi
+  RETRY_COUNT=$((RETRY_COUNT + 1))
+  sleep 5
+done
+
+if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+  echo "Warning: Master may not be fully ready, attempting to join anyway..."
+fi
+
+# --node-ip is this node's PRIVATE (VPC) IP and --node-external-ip its
+# PUBLIC IP. --kubelet-arg=provider-id=linode://<id> is what the Linode CSI
+# driver and k3s's embedded cloud controller read to identify the node. There
+# is no Linode CCM here and no external cloud-provider mode: k3s's own embedded
+# cloud controller keeps the preset providerID and clears the uninitialized
+# taint. --flannel-iface=eth1 pins pod-to-pod (VXLAN) traffic to the VPC
+# interface; no --flannel-backend flag (vxlan default).
+_m k
+K3S_INSTALL_OK=false
+for attempt in 1 2 3 4 5; do
+  if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" K3S_URL="https://${master_ip}:6443" K3S_TOKEN="${k3s_token}" sh -s - agent \
+      --disable-default-registry-endpoint \
+      --node-ip "$PRIVATE_IP" \
+      --node-external-ip "$PUBLIC_IP" \
+      --flannel-iface "eth1" \
+      --kubelet-arg="provider-id=linode://$NODE_ID"; then
+    K3S_INSTALL_OK=true
+    break
+  fi
+  echo "k3s worker install attempt $attempt failed (likely transient GitHub/CDN issue), retrying in 20s..."
+  sleep 20
+done
+if [ "$K3S_INSTALL_OK" != "true" ]; then
+  echo "k3s worker install failed after 5 attempts -- check GitHub CDN status" >&2
+  exit 1
+fi
+
+echo "k3s worker installation complete!"
+_m e

@@ -86,6 +86,9 @@ describe('loadCloudInit include directive', () => {
       'do-master-init.sh',
       'do-db-init.sh',
       'do-worker-init.sh',
+      'linode-master-init.sh',
+      'linode-db-init.sh',
+      'linode-worker-init.sh',
     ]) {
       expect(loadCloudInit(name), name).not.toMatch(/^#\s*@include\b/m);
     }

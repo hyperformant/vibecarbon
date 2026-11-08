@@ -94,7 +94,6 @@ describe('getDefaultStandbyRegion by price', () => {
   it('compose-only providers keep a same-continent partner for k8s roles they have no candidates for', () => {
     for (const [P, name, primary] of [
       [VultrProvider, 'vultr', 'ewr'],
-      [LinodeProvider, 'linode', 'us-iad'],
       [ScalewayProvider, 'scaleway', 'fr-par-1'],
     ] as const) {
       const offline = P.getDefaultStandbyRegion(primary);
@@ -104,6 +103,27 @@ describe('getDefaultStandbyRegion by price', () => {
       expect(P.REGION_CONTINENT[live]).toBe(P.REGION_CONTINENT[primary]);
       expect(P.getDefaultStandbyRegion(primary, ['master', 'db'])).toBe(offline);
     }
+  });
+});
+
+describe('Linode k8s-ha standby region', () => {
+  const NO_VPC = LinodeProvider.K8S_UNSUPPORTED_REGIONS;
+  const k8sRoles = ['master', 'db', 'worker'];
+
+  it('never picks a region without a VPC, offline or live, for any primary', () => {
+    const primaries = Object.keys(LinodeProvider.REGIONS).filter((r) => !NO_VPC.includes(r));
+    for (const live of [false, true]) {
+      if (live) seed(LinodeProvider, '2026-10-22/linode');
+      for (const primary of primaries) {
+        const standby = LinodeProvider.getDefaultStandbyRegion(primary, k8sRoles);
+        expect(NO_VPC, `${primary} (live=${live}) -> ${standby}`).not.toContain(standby);
+        expect(standby).not.toBe(primary);
+      }
+    }
+  });
+
+  it('compose-ha may still pair the VPC-less regions', () => {
+    expect(LinodeProvider.getDefaultStandbyRegion('us-east', ['compose'])).toBe('us-southeast');
   });
 });
 

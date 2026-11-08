@@ -12,8 +12,8 @@ import { testConfig } from '../../config.js';
 describe('providers.linode (Linode opt-in scenarios)', () => {
   const linode = testConfig.e2e.providers.linode;
 
-  it('has exactly two scenarios — compose + compose-ha (tier-parity wave 1; LinodeProvider.SUPPORTED_TIERS stops at compose-ha)', () => {
-    expect(linode.scenarios).toHaveLength(2);
+  it('has exactly four scenarios — compose, compose-ha, k8s, k8s-ha (LinodeProvider.SUPPORTED_TIERS)', () => {
+    expect(linode.scenarios).toHaveLength(4);
     expect(linode.scenarios[0]).toEqual({
       mode: 'compose',
       // Native Linode DNS (linode.appcarbon.dev) — authenticates with the
@@ -30,7 +30,19 @@ describe('providers.linode (Linode opt-in scenarios)', () => {
       dnsProvider: 'linode',
       envPrefix: 'l2',
     });
-    expect(linode.defaultSelection).toEqual(['compose', 'compose-ha']);
+    expect(linode.scenarios[2]).toEqual({
+      mode: 'k8s',
+      dnsProvider: 'linode',
+      envPrefix: 'l3',
+    });
+    expect(linode.scenarios[3]).toEqual({
+      mode: 'k8s-ha',
+      // Same-provider DNS so the l4 failover flip exercises the Linode DNS
+      // backend, like d4 on DigitalOcean.
+      dnsProvider: 'linode',
+      envPrefix: 'l4',
+    });
+    expect(linode.defaultSelection).toEqual(['compose', 'compose-ha', 'k8s', 'k8s-ha']);
   });
 
   it('names its required credentials', () => {
@@ -49,8 +61,9 @@ describe('providers.linode (Linode opt-in scenarios)', () => {
 });
 
 describe('capacityPreferences.linode', () => {
-  it('scales the default Standard plan one size up', () => {
+  it('scales every default Standard plan one size up (db g6-standard-1, the rest g6-standard-2)', () => {
     expect(testConfig.e2e.capacityPreferences.linode.scaleTo).toEqual({
+      'g6-standard-1': 'g6-standard-2',
       'g6-standard-2': 'g6-standard-4',
     });
   });

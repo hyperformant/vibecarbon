@@ -11,10 +11,13 @@
  * parity and is pinned empty.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { encodeLabel, LinodeProvider } from '../../../src/lib/providers/linode.js';
 import {
   PROTECTED_OBJECT_STORAGE_BUCKETS,
   sweepOrphanedLinodeResources,
 } from '../../e2e/utils/sweep-linode.js';
+
+const linode = new LinodeProvider('t');
 
 type ProviderLike = Parameters<typeof sweepOrphanedLinodeResources>[2]['provider'];
 type StorageLike = Parameters<typeof sweepOrphanedLinodeResources>[2]['objectStorage'];
@@ -30,6 +33,7 @@ function fakeProvider(
       v.linode_id != null ? [v.linode_id] : [],
     volumeLabels: (v: { tags?: string[] }) =>
       Object.fromEntries((v.tags ?? []).map((t) => t.split(':') as [string, string])),
+    labelValue: (key: string, value: string) => linode.labelValue(key, value),
     deleteVolume: vi.fn().mockResolvedValue(true),
     deleteFirewallByName: vi.fn().mockResolvedValue({ deleted: true, everExisted: true }),
     deleteSSHKeyByName: vi.fn().mockResolvedValue(true),
@@ -212,6 +216,63 @@ describe('sweepOrphanedLinodeResources', () => {
 
     expect(provider.deleteFirewallByName).toHaveBeenCalledTimes(1);
     expect(provider.deleteFirewallByName).toHaveBeenCalledWith('testapp-compose-1786199-ab12cd34');
+    expect(counts.firewalls).toBe(1);
+  });
+
+  it('deletes a firewall and a pvc volume whose project tag was squeezed past 50 characters', async () => {
+    // 47 characters each, identical for the first 45: both project tags
+    // squeeze to the same value prefix and differ only in the hash.
+    const long = 'acme-analytics-platform-production-workloads-eu';
+    const other = 'acme-analytics-platform-production-workloads-us';
+    const deleteVolume = vi.fn().mockResolvedValue(true);
+    const provider = fakeProvider({
+      listVolumesDetailed: vi.fn().mockResolvedValue({
+        items: [
+          {
+            id: 30,
+            label: 'pvc-0123456789abcdef',
+            linode_id: null,
+            tags: [encodeLabel('project', long)],
+          },
+          {
+            id: 31,
+            label: 'pvc-fedcba9876543210',
+            linode_id: null,
+            tags: [encodeLabel('project', other)],
+          },
+        ],
+        complete: true,
+      }),
+      deleteVolume,
+    });
+    const { counts } = await sweepOrphanedLinodeResources(TAG, long, {
+      provider,
+      objectStorage: fakeStorage(),
+      fetchImpl: fakeFetch({
+        '/networking/firewalls': {
+          data: [
+            {
+              id: 11,
+              label: 'acme-analytics-platfo-0a1b2c3d',
+              tags: [encodeLabel('project', long)],
+            },
+            {
+              id: 12,
+              label: 'acme-analytics-platfo-4e5f6a7b',
+              tags: [encodeLabel('project', other)],
+            },
+          ],
+          page: 1,
+          pages: 1,
+        },
+      }),
+    });
+
+    expect(deleteVolume).toHaveBeenCalledExactlyOnceWith(30);
+    expect(provider.deleteFirewallByName).toHaveBeenCalledExactlyOnceWith(
+      'acme-analytics-platfo-0a1b2c3d',
+    );
+    expect(counts.volumes).toBe(1);
     expect(counts.firewalls).toBe(1);
   });
 

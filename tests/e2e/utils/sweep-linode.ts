@@ -42,6 +42,8 @@ interface LinodeSweepProvider {
   }>;
   volumeAttachedServerIds(volume: object): Array<unknown>;
   volumeLabels(volume: object): Record<string, string>;
+  /** The decoded value a raw name is stored as: squeezed past 50 characters. */
+  labelValue(key: string, value: string): string;
   deleteVolume(id: number | string): Promise<unknown>;
   deleteFirewallByName(name: string): Promise<{ deleted: boolean }>;
   deleteSSHKeyByName(name: string): Promise<boolean>;
@@ -207,6 +209,9 @@ export async function sweepOrphanedLinodeResources(
 
   // 2. Volumes. Project-labeled volumes delete on prefix; pvc-* CSI volumes
   // delete ONLY with a matching project tag (see header — cross-run safety).
+  // Linode squeezes a tag past 50 characters, so the decoded tag is compared
+  // to labelValue, not the raw project name.
+  const ownProject = provider.labelValue('project', projectName);
   try {
     const { items, complete } = await provider.listVolumesDetailed();
     if (!complete) markIncomplete('volume list');
@@ -214,7 +219,7 @@ export async function sweepOrphanedLinodeResources(
       if (provider.volumeAttachedServerIds(volume).length > 0) continue;
       const ownedByName = volume.label.startsWith(projectName);
       const isPvc = volume.label.startsWith('pvc');
-      const ownedByTag = isPvc && provider.volumeLabels(volume).project === projectName;
+      const ownedByTag = isPvc && provider.volumeLabels(volume).project === ownProject;
       if (!ownedByName && !ownedByTag) {
         if (isPvc) {
           console.warn(
@@ -279,7 +284,7 @@ export async function sweepOrphanedLinodeResources(
       // prefix — ownership falls back to the `project:` tag the compose
       // program stamps on every firewall it creates.
       const ownedByLabel = fw.label.startsWith(projectName);
-      const ownedByTag = decodeLabels(fw.tags).project === projectName;
+      const ownedByTag = decodeLabels(fw.tags).project === ownProject;
       if (!ownedByLabel && !ownedByTag) continue;
       console.log(`${tag} [sweep] Deleting orphaned firewall ${fw.label}`);
       const { deleted } = await provider.deleteFirewallByName(fw.label);
@@ -311,20 +316,21 @@ export async function sweepOrphanedLinodeResources(
     console.warn(`${tag} [sweep] SSH-key cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
-  // Reserved IPs. linode-k8s.js mints one via `linode.NetworkingIp`
-  // (reserved: true) and its own header carries the warning: reserved IPs
-  // BILL WHILE UNASSIGNED. Deleting the instance does not release it, so a
-  // failed destroy strands a billing IP.
+  // Reserved IPs. linode-k8s.js mints one per cluster via `linode.ReservedIp`.
+  // Linode bills a reserved IP by the hour whether it is assigned or not
+  // (Linode API changelog, 1 July 2026), and deleting the instance does not
+  // release it, so a failed destroy strands a billing IP.
   //
   // This counter used to be a hardcoded `floatingIps: 0` with the comment
   // a claim that this tier mints none. True of the
   // compose tier; false the moment the k8s tier landed. The ledger then read
   // zero meaning "never looked", not "found none".
   //
-  // We do NOT auto-delete. Linode reserved IPs carry no label or tag (unlike
-  // Vultr's, which the program names), so an UNASSIGNED one cannot be
-  // attributed to this namespace from the API alone, and deleting an
-  // unattributable address could destroy someone's production IP. Report it
+  // We do NOT auto-delete. The k8s program tags its reserved IP
+  // (linode-k8s.js `tags: encodeLabels(labels)`), but this sweep does not
+  // read those tags yet, and the compose tier mints none, so an UNASSIGNED
+  // one is not attributed to this namespace here, and deleting an
+  // unattributed address could destroy someone's production IP. Report it
   // and mark the sweep INCOMPLETE so the CI step fails and a human decides —
   // an unverifiable sweep must not pose as a clean one.
   try {
@@ -353,7 +359,7 @@ export async function sweepOrphanedLinodeResources(
       for (const i of stranded) {
         console.warn(
           `${tag} [sweep] UNASSIGNED reserved IP ${i.address} is billing and cannot be ` +
-            'attributed from the API (Linode reserved IPs carry no label/tag). Not deleted — ' +
+            'attributed from the API (this sweep does not read the k8s tags). Not deleted: ' +
             'check it belongs to this e2e account and release it manually.',
         );
       }

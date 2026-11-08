@@ -75,6 +75,8 @@ function stubProvider(items: object[], { complete = true, deleteServer = vi.fn()
     deleteServer,
     serverLabels: (s: { labels?: Record<string, string> }) => s.labels ?? {},
     serverRegion: (s: { region?: string }) => s.region ?? null,
+    // Hetzner stores labels verbatim, so a raw name is its own label value.
+    labelValue: (_key: string, value: string) => value,
   };
 }
 

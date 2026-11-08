@@ -38,6 +38,13 @@ const EXTENSIONS = ['.js', '.ts', '.mjs'];
  */
 const EXCEPTIONS: Array<{ file: string; pathPrefix: string; reason: string }> = [
   {
+    file: 'src/lib/providers/linode.js',
+    pathPrefix: '/vpcs/${vpcId}/subnets',
+    reason:
+      'Reads the first subnet of a VPC we create with exactly one (10.0.1.0/24); the first page ' +
+      'always contains it, so truncation cannot hide it.',
+  },
+  {
     file: 'src/lib/hetzner-guided-setup.js',
     pathPrefix: '/locations?per_page=1',
     reason:

@@ -359,13 +359,16 @@ function diagnoseNetwork(report, env, kubeconfig, Provider) {
   const ccmLabel = Provider.NAME === 'Hetzner Cloud' ? 'hcloud-CCM' : `${Provider.NAME} CCM`;
   const csiControllerLabel =
     Provider.NAME === 'Hetzner Cloud' ? 'hcloud-CSI controller' : `${Provider.NAME} CSI controller`;
+  // An empty selector names no workload (Linode runs no CCM), and
+  // `kubectl get pods -l ''` would list every kube-system pod under its
+  // heading, so that section is left out.
   for (const labelSel of [
     { name: 'CoreDNS', sel: 'k8s-app=kube-dns' },
     { name: 'Flannel', sel: 'app=flannel' },
     { name: 'kube-proxy', sel: 'k8s-app=kube-proxy' },
     { name: ccmLabel, sel: Provider.K8S_ASSETS.ccmSelector },
     { name: csiControllerLabel, sel: Provider.K8S_ASSETS.csiControllerSelector },
-  ]) {
+  ].filter((entry) => entry.sel)) {
     report.subsection(`${labelSel.name} logs`);
     const list = safeRun(
       'kubectl',
@@ -449,30 +452,33 @@ function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provide
   // that var so its presence is easy to eyeball in the dump. A provider with
   // no such var (networkEnvVar === '' — e.g. DO, which discovers VPC
   // membership from droplet metadata instead) gets a generic label; the probe
-  // itself is unconditional either way — dumping ALL of the CCM container's
-  // env vars is useful regardless of provider.
-  report.subsection(
-    Provider.K8S_ASSETS.networkEnvVar
-      ? `CCM env vars (${Provider.K8S_ASSETS.networkEnvVar} present?)`
-      : 'CCM env vars',
-  );
-  probe(
-    report,
-    'CCM deploy env',
-    'kubectl',
-    [
-      '--kubeconfig',
-      kubeconfig,
-      '-n',
-      'kube-system',
-      'get',
-      'deploy',
-      Provider.K8S_ASSETS.ccmDeployment,
-      '-o',
-      'jsonpath={range .spec.template.spec.containers[*].env[*]}{.name}\t{.value}\t{.valueFrom.secretKeyRef.name}/{.valueFrom.secretKeyRef.key}{"\\n"}{end}',
-    ],
-    env,
-  );
+  // runs either way, since dumping ALL of the CCM container's env vars is
+  // useful regardless of provider. A provider with no CCM (Linode:
+  // ccmDeployment === '') has nothing to dump, so the section is left out.
+  if (Provider.K8S_ASSETS.ccmDeployment) {
+    report.subsection(
+      Provider.K8S_ASSETS.networkEnvVar
+        ? `CCM env vars (${Provider.K8S_ASSETS.networkEnvVar} present?)`
+        : 'CCM env vars',
+    );
+    probe(
+      report,
+      'CCM deploy env',
+      'kubectl',
+      [
+        '--kubeconfig',
+        kubeconfig,
+        '-n',
+        'kube-system',
+        'get',
+        'deploy',
+        Provider.K8S_ASSETS.ccmDeployment,
+        '-o',
+        'jsonpath={range .spec.template.spec.containers[*].env[*]}{.name}\t{.value}\t{.valueFrom.secretKeyRef.name}/{.valueFrom.secretKeyRef.key}{"\\n"}{end}',
+      ],
+      env,
+    );
+  }
 
   // CoreDNS Corefile — forwarders are the upstream resolver pod-DNS depends on.
   report.subsection('CoreDNS Corefile');

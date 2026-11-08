@@ -79,11 +79,11 @@ describe('vibecarbon add observability', () => {
 
 **`tests/e2e/scenarios/`**: full deploy/destroy/scale/restore matrix over the scenarios in the provider registry (`testConfig.e2e.providers` in `tests/config.ts`), which providers and scenarios come from; which deploy tiers each provider supports comes from that provider's `SUPPORTED_TIERS` in `src/lib/providers/<id>.js`. Run via `pnpm test:e2e` (the runner with metrics). Requires `REAL_INFRA=true` and burns real cloud credit on whichever provider you select.
 
-**Scenario identity is `provider/mode`.** Selection is the grammar in `tests/e2e/selection.ts`: `--provider <name|all>` picks whole providers, `--scenario <provider>/<mode>` picks individual scenarios (optionally refined by DNS provider, e.g. `hetzner/k8s-ha-cloudflare`), and `--except` takes the same tokens. A bare mode is not a token. It throws a `SelectionError` naming the valid forms. Env prefixes (`e1`–`e4`, `d1`–`d4`, `l1`–`l2`, `v1`–`v2`, `s1`–`s2`) are internal namespacing for resource names and DNS subdomains, never selection vocabulary.
+**Scenario identity is `provider/mode`.** Selection is the grammar in `tests/e2e/selection.ts`: `--provider <name|all>` picks whole providers, `--scenario <provider>/<mode>` picks individual scenarios (optionally refined by DNS provider, e.g. `hetzner/k8s-ha-cloudflare`), and `--except` takes the same tokens. A bare mode is not a token. It throws a `SelectionError` naming the valid forms. Env prefixes (`e1`–`e4`, `d1`–`d4`, `l1`–`l4`, `v1`–`v2`, `s1`–`s2`) are internal namespacing for resource names and DNS subdomains, never selection vocabulary.
 
 **Every provider is opt-in, equally.** There is no default provider: `pnpm test:e2e:batch` with no `--provider` throws, naming the known providers. Reach any of them with `--provider <id>` (its whole default selection), `--provider all`, or `--scenario <provider>/<mode>`. Each provider's required credentials are declared in its registry entry (`requiredEnv`) and listed in `tests/.env.e2e.example`.
 
-Providers differ only in which deploy tiers they implement: Hetzner all four, DigitalOcean all four, Linode/Vultr/Scaleway compose/compose-ha. That is a capability difference, not a standing one: no provider is a default, and none gates a release.
+Providers differ only in which deploy tiers they implement: Hetzner, DigitalOcean and Linode all four, Vultr/Scaleway compose/compose-ha. That is a capability difference, not a standing one: no provider is a default, and none gates a release.
 
 ### README performance table
 

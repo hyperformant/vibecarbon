@@ -933,6 +933,30 @@ export class BaseProvider {
     throw new Error('volumeCreatedAt() must be implemented by subclass');
   }
 
+  /**
+   * A volume's display name. Most clouds call it `name`; Linode overrides
+   * this because it calls it `label`.
+   * @param {object} volume - A volume object as returned by listVolumes.
+   * @returns {string|null}
+   */
+  volumeName(volume) {
+    return volume.name ?? null;
+  }
+
+  /**
+   * The decoded label value a raw `value` is stored as under `key`: what
+   * serverLabels or volumeLabels returns for a resource labelled with it.
+   * Identity on providers that store labels verbatim. Linode overrides this
+   * because it squeezes a tag past 50 characters. Every ownership check that
+   * compares a decoded label to a raw name compares it to this instead.
+   * @param {string} _key
+   * @param {string} value
+   * @returns {string}
+   */
+  labelValue(_key, value) {
+    return value;
+  }
+
   // ============================================================================
   // ABSTRACT STATIC METHODS - CATALOG
   // Must be implemented by subclasses. Polymorphic call sites resolve these
@@ -1090,6 +1114,18 @@ export class BaseProvider {
    */
   static getRegionDefaults(_region) {
     throw new Error('getRegionDefaults() must be implemented by subclass');
+  }
+
+  /**
+   * Why `region` cannot host a Kubernetes tier (k8s, k8s-ha), or null when it
+   * can. Compose tiers never ask. The one rule every deploy entry point reads
+   * (providers/index.js assertRegionSupportedForTier, the region lists, the
+   * standby default), so a provider with k8s-less regions declares them once.
+   * @param {string} _region - Region ID
+   * @returns {string|null} The refusal message, or null
+   */
+  static k8sRegionProblem(_region) {
+    return null;
   }
 
   /**

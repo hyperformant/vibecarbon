@@ -268,7 +268,7 @@ One CLI, four deploy modes, picked per environment. Every mode includes automate
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean is fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining modes aren't built for them yet, though Compose HA is available on every provider regardless (see Architecture above).
+DigitalOcean and Linode are fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Kubernetes on Linode runs in every region except Newark (us-east) and Atlanta (us-southeast). Vultr and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining modes aren't built for them yet, though Compose HA is available on every provider regardless (see Architecture above).
 
 ### Integration Guides
 
@@ -297,6 +297,8 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 | | `k8s-ha` | 9m 22s | 1m 4s | 27.7s | 12m 29s | 10m 49s | 2m 5s | 7m 41s |
 | Linode | `compose` | 2m 41s | 26.4s | 7.2s | 3m 53s | 4m 0s | 15.3s | — |
 | | `compose-ha` | 3m 32s | 36.0s | 5.0s | 4m 8s | 3m 17s | 24.8s | 1m 18s |
+| | `k8s` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 | Vultr | `compose` | 2m 39s | 45.8s | 4.7s | 2m 55s | 2m 34s | 23.0s | — |
 | | `compose-ha` | 3m 45s | 54.0s | 5.4s | 4m 50s | 3m 6s | 20.8s | 58.4s |
 | Scaleway | `compose` | 2m 26s | 31.7s | 6.6s | 2m 55s | 2m 32s | 23.4s | — |
@@ -305,7 +307,7 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 _Latest green CI runs: Hetzner Cloud `1904abc` (2026-11-07) · DigitalOcean `48e8713` (2026-09-02) · Linode `1720818` (2026-11-07) · Vultr `3b6b2c8` (2026-11-07) · Scaleway `fb3cf0e` (2026-11-07) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
-`k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner and DigitalOcean today.
+`k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
 
 ---
 
@@ -330,7 +332,7 @@ You pay your cloud provider directly, and vibecarbon starts every new project on
 | Hetzner (USD account) | $23.59 (nbg1) | $47.18 (nbg1 + fsn1) | $65.61 (nbg1) | $107.64 (nbg1 + fsn1) |
 | DigitalOcean | $24 (nyc3) | $48 (nyc3 + tor1) | $61 (nyc3) | $98 (nyc3 + tor1) |
 | Vultr | $20 (ewr) | $40 (ewr + ord) | not yet | not yet |
-| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | not yet | not yet |
+| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |
 | Scaleway | €21.84 (fr-par-1) | €43.68 (fr-par-1 + nl-ams-1) | not yet | not yet |
 
 Plus object storage for backups and uploads, billed once per provider account and shared by every project on it: Hetzner $7.99 (this USD account; €6.49 on EUR accounts), DigitalOcean $5, Vultr $18, Linode $5, Scaleway usage-based (cents at this size).

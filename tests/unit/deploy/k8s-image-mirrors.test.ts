@@ -65,6 +65,7 @@ import {
   K8S_UPSTREAM_REGISTRY,
   k8sMirrorRef,
   k8sMirrorTagRef,
+  LINODE_CSI_VERSION,
   MIRRORED_IMAGES,
   mirroredImageName,
   mirroredPackageNames,
@@ -90,7 +91,8 @@ const MATRIX_SCRIPT = 'scripts/mirror-matrix.mjs';
  * from the upstream manifests cloud-init applies:
  *   https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.24.1/deploy/kubernetes/hcloud-csi.yml
  *   https://raw.githubusercontent.com/digitalocean/csi-digitalocean/v4.19.0/deploy/kubernetes/releases/csi-digitalocean-v4.17.0/driver.yaml
- * (both fetched 2026-11-05). Keyed workload -> container -> image, exactly as
+ *   https://github.com/linode/linode-blockstorage-csi-driver/releases/download/v1.1.5/linode-blockstorage-csi-driver-v1.1.5.yaml
+ * (hetzner and digitalocean fetched 2026-11-05, linode 2026-11-07). Keyed workload -> container -> image, exactly as
  * upstream spells them, because `kubectl set image` addresses containers BY
  * NAME: a rename upstream turns our re-pin into a silent no-op, and the 403
  * comes straight back. If you bump a CSI version, re-derive this fixture from
@@ -130,6 +132,22 @@ const UPSTREAM_CSI_MANIFESTS = {
         'csi-node-driver-registrar':
           'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0',
         'csi-do-plugin': 'digitalocean/do-csi-plugin:v4.19.0',
+      },
+    },
+  },
+  linode: {
+    version: 'v1.1.5',
+    workloads: {
+      'statefulset/csi-linode-controller': {
+        'csi-provisioner': 'registry.k8s.io/sig-storage/csi-provisioner:v6.2.0',
+        'csi-attacher': 'registry.k8s.io/sig-storage/csi-attacher:v4.11.0',
+        'csi-resizer': 'registry.k8s.io/sig-storage/csi-resizer:v2.1.0',
+        'csi-linode-plugin': 'linode/linode-blockstorage-csi-driver:v1.1.5',
+      },
+      'daemonset/csi-linode-node': {
+        'csi-node-driver-registrar':
+          'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.16.0',
+        'csi-linode-plugin': 'linode/linode-blockstorage-csi-driver:v1.1.5',
       },
     },
   },
@@ -279,6 +297,11 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
   it.each([
     ['hetzner', 'carbon/cloud-init/k3s/master-init.sh', /csi-driver\/(v[\d.]+)\//],
     ['digitalocean', 'carbon/cloud-init/k3s/do-master-init.sh', /csi-digitalocean-(v[\d.]+)\//],
+    [
+      'linode',
+      'carbon/cloud-init/k3s/linode-master-init.sh',
+      /linode-blockstorage-csi-driver\/releases\/download\/(v[\d.]+)\//,
+    ],
   ] as const)(
     '%s: the version in cloud-init matches the version the tags were derived from',
     (provider, initScript, pattern) => {
@@ -288,7 +311,11 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
       // versions over the new manifest — or, if a container was renamed, do
       // nothing at all and hand the deploy straight back to registry.k8s.io.
       const pinned = read(initScript).match(pattern)?.[1];
-      const expected = provider === 'hetzner' ? HETZNER_CSI_VERSION : DO_CSI_VERSION;
+      const expected = {
+        hetzner: HETZNER_CSI_VERSION,
+        digitalocean: DO_CSI_VERSION,
+        linode: LINODE_CSI_VERSION,
+      }[provider];
       expect(pinned, `no CSI version found in ${initScript}`).toBeDefined();
       expect(pinned).toBe(expected);
       expect(expected).toBe(UPSTREAM_CSI_MANIFESTS[provider].version);
@@ -355,7 +382,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
     expect(initScript).toContain('deployment/hcloud-csi-controller');
   });
 
-  it.each(['hetzner', 'digitalocean'] as const)(
+  it.each(['hetzner', 'digitalocean', 'linode'] as const)(
     '%s: re-pins EVERY registry.k8s.io container upstream ships, and no other',
     (provider) => {
       const upstream = UPSTREAM_CSI_MANIFESTS[provider].workloads as Record<
@@ -375,7 +402,7 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
     },
   );
 
-  it.each(['hetzner', 'digitalocean'] as const)(
+  it.each(['hetzner', 'digitalocean', 'linode'] as const)(
     '%s: each re-pin carries upstream’s exact tag (same bits, different host)',
     (provider) => {
       const upstream = UPSTREAM_CSI_MANIFESTS[provider].workloads as Record<

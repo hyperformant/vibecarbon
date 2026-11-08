@@ -202,9 +202,11 @@ export const CARBON_AUTOSCALER_IMAGE = 'ghcr.io/hyperformant/carbon-autoscaler';
 //           digests under one tag if this stayed at 0.1.2, which is exactly the
 //           ambiguity the rule above exists to prevent.
 //   0.1.4 — speaks cluster-autoscaler 1.37's externalgrpc contract (nodeBytes).
-export const CARBON_AUTOSCALER_TAG = '0.1.4';
+//   0.1.5 — Linode createServer joins a VPC with a legacy config interface and
+//           the cluster firewall; listNetworks items carry `name`.
+export const CARBON_AUTOSCALER_TAG = '0.1.5';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.4" */
+/** @returns {string} e.g. "ghcr.io/hyperformant/carbon-autoscaler:0.1.5" */
 export function carbonAutoscalerImageRef() {
   return `${CARBON_AUTOSCALER_IMAGE}:${CARBON_AUTOSCALER_TAG}`;
 }
@@ -359,9 +361,13 @@ export const K8S_UPSTREAM_REGISTRY = 'registry.k8s.io';
  * Sources (fetched 2026-11-05):
  *   hetznercloud/csi-driver v2.24.1  deploy/kubernetes/hcloud-csi.yml
  *   digitalocean/csi-digitalocean v4.19.0  .../releases/csi-digitalocean-v4.19.0/driver.yaml
+ * Fetched 2026-11-07:
+ *   linode/linode-blockstorage-csi-driver v1.1.5  linode-blockstorage-csi-driver-v1.1.5.yaml
+ *   (a release asset, applied by linode-master-init.sh)
  */
 export const HETZNER_CSI_VERSION = 'v2.24.1';
 export const DO_CSI_VERSION = 'v4.19.0';
+export const LINODE_CSI_VERSION = 'v1.1.5';
 
 /**
  * Per-provider map of the CSI workloads cloud-init applies from upstream YAML,
@@ -470,6 +476,44 @@ export const CSI_SIDECAR_MIRRORS = {
           repo: 'sig-storage/csi-node-driver-registrar',
           tag: 'v2.18.0',
           digest: 'sha256:692a30d9f27d32a25ea2784d01251b73e189e9d1156dd43c58f87ad2b70ec1e6',
+        },
+      },
+    },
+  ],
+  // linode/linode-blockstorage-csi-driver v1.1.5 — three sidecars on the
+  // controller StatefulSet (no snapshotter, no livenessprobe) and the registrar
+  // on the node DaemonSet. Its tags run behind Hetzner's and DO's, so these are
+  // their own (repo, tag) packages, not shared ones. The driver container
+  // (docker.io/linode/linode-blockstorage-csi-driver) is not mirrored, as with
+  // the other two.
+  linode: [
+    {
+      workload: 'statefulset/csi-linode-controller',
+      containers: {
+        'csi-provisioner': {
+          repo: 'sig-storage/csi-provisioner',
+          tag: 'v6.2.0',
+          digest: 'sha256:da2f5c41881009b963c121d3605c68ad9127490f2c209a849b4eb26074b0038b',
+        },
+        'csi-attacher': {
+          repo: 'sig-storage/csi-attacher',
+          tag: 'v4.11.0',
+          digest: 'sha256:4f6b1289ffe62dbe3d2317dd938cd9dd3fb0a7c0088d505cde4effa1e0771dc2',
+        },
+        'csi-resizer': {
+          repo: 'sig-storage/csi-resizer',
+          tag: 'v2.1.0',
+          digest: 'sha256:69e7bf7d929e5d98a5a74e753b45220e6e7b04f35163e48e8a5958bf1d819b4c',
+        },
+      },
+    },
+    {
+      workload: 'daemonset/csi-linode-node',
+      containers: {
+        'csi-node-driver-registrar': {
+          repo: 'sig-storage/csi-node-driver-registrar',
+          tag: 'v2.16.0',
+          digest: 'sha256:aeecba5b171b50558bab359fdb8e28b9da185f666cef35cd87ac9784e51956c5',
         },
       },
     },
@@ -821,7 +865,7 @@ export function mirroredPackageNames() {
  * this unconditionally, and a provider that installs no CSI driver must
  * degrade to "do nothing", never to a failed deploy.
  *
- * @param {string|undefined} providerId - 'hetzner' | 'digitalocean'
+ * @param {string|undefined} providerId - 'hetzner' | 'digitalocean' | 'linode'
  * @returns {Array<{workload: string, setImageArgs: string[]}>}
  */
 export function csiSidecarSetImagePlan(providerId) {

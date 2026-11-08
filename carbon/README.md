@@ -170,11 +170,11 @@ The bare command opens a guided prompt for environment, provider, region, and de
 |----------|:---------:|:------------:|:-----:|:--------:|
 | Hetzner Cloud | ✅ | ✅ | ✅ | ✅ |
 | DigitalOcean | ✅ | ✅ | ✅ | ✅ |
-| Linode | ✅ | ✅ | — | — |
+| Linode | ✅ | ✅ | ✅ | ✅ |
 | Vultr | ✅ | ✅ | — | — |
 | Scaleway | ✅ | ✅ | — | — |
 
-`k8s-ha` (multi-region Kubernetes with one-command failover) runs on Hetzner and DigitalOcean today.
+`k8s-ha` (multi-region Kubernetes with one-command failover) runs on Hetzner, DigitalOcean, and Linode today.
 
 An environment is bound to the provider it was first deployed with, and `-provider` picks that cloud for a new one. The in-app guide at `/docs/deployment` (source: `content/docs/deployment.mdx`) covers regions, API tokens, backups, and the HA flags in full. [PRODUCTION.md](./PRODUCTION.md) covers what changes between local development and a production deployment, and [k8s/README.md](./k8s/README.md) covers the Kubernetes manifests, autoscaling, and HA clusters.
 

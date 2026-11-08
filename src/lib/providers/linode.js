@@ -29,30 +29,44 @@ const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
 // public port).
 const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
-// The single replication port for the WireGuard tunnel (see wireguard.js —
-// WG_PORT=51821). Only reachable via compose-ha, which Linode does not
-// support yet — implemented anyway because buildReplicationFirewallRules is
-// contract-required and the rule shape is pinned by unit tests.
+// The single replication port for the WireGuard tunnel (wireguard.js,
+// WG_PORT=51821). buildReplicationFirewallRules opens it to the peer site's
+// server for compose-ha (compose/ha.js) and to the peer cluster's db for
+// k8s-ha (deploy/effects/k8s-ha.js); the rule shape is pinned by unit tests.
 const WG_PORT = '51821';
 
 /**
+ * Linode caps every tag at 3-50 characters (live 2026-11-07: POST /v4/tags
+ * with a 55-character label returned 400 "Length must be 3-50 characters").
+ * @type {number}
+ */
+const TAG_MAX = 50;
+
+/**
  * Encode a label key/value pair into a Linode tag string. Same `key:value`
- * wire encoding as DigitalOcean's encodeLabel (Linode tags are free-form
- * strings, 3-50 chars) — kept byte-compatible so the destroy-sweep /
- * listing matchers behave identically across the two tag-based providers.
- * Characters outside [A-Za-z0-9:_-] are replaced with `-` (conservative;
- * Linode allows more, but staying inside DO's charset keeps the encoding
- * provably round-trippable on both). NOTE Linode's 50-char tag ceiling:
- * project/environment names long enough to exceed it fail the create
- * loudly at the API rather than being silently truncated here.
- * Named export so the Pulumi IaC program (linode-compose.js) tags its
- * resources with the identical encoding.
+ * wire encoding as DigitalOcean's encodeLabel for tags of 50 characters or
+ * fewer, so the destroy-sweep and listing matchers behave alike on the two
+ * tag-based providers. Characters outside [A-Za-z0-9:_-] become `-` (Linode
+ * allows more, but DO's charset keeps the encoding round-trippable on both).
+ *
+ * A tag of 50 or fewer characters is returned as is. A longer one becomes
+ * exactly 50: the `key:` head, a prefix of the value, `-`, and an 8-hex
+ * FNV-1a hash of the full value, the shape squeezeLinodeLabel uses. It is
+ * deterministic, so every writer (the IaC programs, createServer, the CSI
+ * StorageClass volumeTags) and every selector (listServers, the reserved IP
+ * matchers) derive the same tag from the same name. A squeezed tag decodes to
+ * the squeezed value, never the raw name, so an ownership check compares the
+ * decoded label against provider.labelValue(key, raw).
  * @param {string} key
  * @param {string} value
  * @returns {string}
  */
 export function encodeLabel(key, value) {
-  return `${key}:${value}`.replace(/[^A-Za-z0-9:_-]/g, '-');
+  const tag = `${key}:${value}`.replace(/[^A-Za-z0-9:_-]/g, '-');
+  if (tag.length <= TAG_MAX) return tag;
+  const head = tag.slice(0, tag.indexOf(':') + 1);
+  const room = TAG_MAX - head.length - 9;
+  return `${head}${tag.slice(head.length, head.length + room)}-${fnv1a32hex(String(value))}`;
 }
 
 /**
@@ -192,6 +206,28 @@ export function splitCidrsByFamily(cidrs) {
   return out;
 }
 
+/**
+ * The pure rule rewrite behind LinodeProvider.applyOperatorCidrs: drop any
+ * inbound TCP/5432 or TCP/6543 rule (RETIRED_DB_PORTS), point the
+ * operator-locked ports (SSH 22, k8s API 6443) at `cidrs`, and leave every
+ * other rule as it is. Takes and returns the API rule shape
+ * (`addresses: {ipv4, ipv6}`).
+ * @param {object[]} rules - a firewall's inbound rules, API shape
+ * @param {string[]} cidrs
+ * @returns {object[]}
+ */
+export function rewriteOperatorRules(rules, cidrs) {
+  const addresses = splitCidrsByFamily(cidrs);
+  return rules
+    .filter((rule) => !(rule.protocol === 'TCP' && RETIRED_DB_PORTS.has(String(rule.ports))))
+    .map((rule) => {
+      if (rule.protocol === 'TCP' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
+        return { ...rule, addresses };
+      }
+      return rule;
+    });
+}
+
 export class LinodeProvider extends BaseProvider {
   /**
    * Documented object-storage operational limits (techdocs.akamai.com,
@@ -221,8 +257,9 @@ export class LinodeProvider extends BaseProvider {
   // prompting. Linode Object Storage keys are separate credentials minted
   // via POST /object-storage/keys (secret shown once).
   static OBJECT_STORAGE_ENV = ['LINODE_ACCESS_KEY', 'LINODE_SECRET_KEY'];
-  // The providerID scheme Linode's CCM stamps on nodes (`linode://<id>`) —
-  // relevant only at the (unbuilt) k8s tier, pinned now for uniqueness.
+  // The providerID on Linode k8s nodes (`linode://<id>`). There is no Linode
+  // CCM: the k3s boot scripts pre-seed it with the kubelet's `provider-id`
+  // flag, and the autoscaler strips the prefix to find the instance.
   static PROVIDER_ID_PREFIX = 'linode://';
   static DEFAULT_REGION = 'us-iad';
   static PRICING_URL = 'https://www.linode.com/pricing/';
@@ -232,12 +269,34 @@ export class LinodeProvider extends BaseProvider {
   // linode-objectstorage.js's REGIONS doc.
   static S3_REGION_ENV = 'LINODE_STORAGE_REGION';
 
-  // Compose tiers only (compose-ha added in the 2026-08 tier-parity wave 1 —
-  // the HA surface below was contract-complete since PR 1; effects/compose-ha
-  // is provider-generic). The slate was chosen for 4-mode headroom — CCM/CSI/
-  // DNS-flip feasibility is recorded in linode-step0-audit.md — the k8s tiers
-  // are not yet built or declared.
-  static SUPPORTED_TIERS = ['compose', 'compose-ha'];
+  // All four tiers. The slate was chosen for 4-mode headroom — CCM/CSI/
+  // DNS-flip feasibility is recorded in linode-step0-audit.md. The k8s tiers
+  // need a VPC, which two regions lack (K8S_UNSUPPORTED_REGIONS).
+  static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
+
+  /**
+   * Regions with no VPC, which the k8s tiers need for node-to-node traffic.
+   * k8s and k8s-ha refuse them (k8sRegionProblem) and the region lists omit
+   * them; compose tiers use them freely.
+   * @type {string[]}
+   */
+  static K8S_UNSUPPORTED_REGIONS = ['us-east', 'us-southeast'];
+
+  /**
+   * @param {string} region
+   * @returns {string|null}
+   */
+  static k8sRegionProblem(region) {
+    if (!LinodeProvider.K8S_UNSUPPORTED_REGIONS.includes(region)) return null;
+    const city = LinodeProvider.REGIONS[region]?.split(',')[0] ?? region;
+    return (
+      `Kubernetes on Linode does not run in ${city} (${region}): Linode has no VPC there ` +
+      "for the cluster's private network. Use us-iad, us-ord or another region."
+    );
+  }
+
+  /** Pulumi destroy leaves the k8s reserved IP, VPC, firewall and key; destroy sweeps them by name. */
+  static K8S_DESTROY_BACKSTOP = true;
 
   // Instance regions with Object Storage (same doctrine as
   // DigitalOceanProvider.REGIONS). All 16 verified 2026-08-07 via GET
@@ -320,6 +379,9 @@ export class LinodeProvider extends BaseProvider {
   // Compose candidates (see BaseProvider.ROLE_CANDIDATES).
   static ROLE_CANDIDATES = {
     compose: ['g6-standard-2'],
+    master: ['g6-standard-2', 'g6-standard-4'],
+    db: ['g6-standard-1', 'g6-standard-2'],
+    worker: ['g6-standard-2', 'g6-standard-4'],
   };
 
   // Every Linode's public IPv4 is included in its plan price
@@ -333,8 +395,7 @@ export class LinodeProvider extends BaseProvider {
 
   // ── Engine-literal statics ──────────────────────────────────────────────
   static DEFAULT_COMPOSE_TYPE = 'g6-standard-2';
-  // Pinned to the compose default for EXPECTED-table completeness; nothing
-  // reads it while SUPPORTED_TIERS is compose-only.
+  // Pinned to the compose default for EXPECTED-table completeness.
   static DEFAULT_K8S_NODE_TYPE = 'g6-standard-2';
 
   // `linode/ubuntu26.04` ships no Docker (Linode's Marketplace Docker is a
@@ -343,12 +404,10 @@ export class LinodeProvider extends BaseProvider {
   static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
 
   /**
-   * Empty at the compose-only tier: no CCM/CSI is deployed, so there is no
-   * asset identity to probe (and an empty `csiNodeDaemonSet` keeps
-   * k8s-image-mirrors' census from demanding a mirror spec). The real
-   * values, when the k8s tier is built, come from
-   * linode-cloud-controller-manager / linode-blockstorage-csi-driver
-   * manifests — see linode-step0-audit.md's headroom record.
+   * Kubernetes cluster-addon asset identity. The CSI names come from
+   * linode-blockstorage-csi-driver v1.1.5: a StatefulSet controller and a
+   * DaemonSet node plugin, both labelled with a bare `app=` key. CCM entries
+   * stay empty until Linode's CCM is wired.
    * @type {{
    *   csiNodeDaemonSet: string,
    *   csiControllerSelector: string,
@@ -358,61 +417,93 @@ export class LinodeProvider extends BaseProvider {
    * }}
    */
   static K8S_ASSETS = {
-    csiNodeDaemonSet: '',
-    csiControllerSelector: '',
+    csiNodeDaemonSet: 'daemonset/csi-linode-node',
+    csiControllerSelector: 'app=csi-linode-controller',
     ccmDeployment: '',
     ccmSelector: '',
     networkEnvVar: '',
   };
 
   /**
-   * The Delete-reclaim StorageClass linode-blockstorage-csi-driver installs
-   * (audit 2026-08-07: the driver ships `linode-block-storage-retain` — its
-   * default — and `linode-block-storage`; the Delete-policy class matches
-   * hcloud-volumes/do-block-storage semantics). Nothing consumes this while
-   * SUPPORTED_TIERS is compose-only, but the literal-guard census requires
-   * every registered provider's value to be distinct and to live in this
-   * file — re-verify against the driver's manifests when the k8s tier is
-   * actually built.
+   * The Delete-reclaim StorageClass the k3s master boot script creates for
+   * linode-blockstorage-csi-driver (the driver itself ships
+   * `linode-block-storage-retain`, its default, and `linode-block-storage`;
+   * the Delete-policy class matches hcloud-volumes/do-block-storage
+   * semantics). The literal-guard census requires every registered
+   * provider's value to be distinct and to live in this file.
    * @type {string}
    */
-  static K8S_STORAGE_CLASS = 'linode-block-storage';
+  static K8S_STORAGE_CLASS = 'linode-block-storage-vibecarbon';
 
   /**
-   * Compose-only: no k8s Pulumi program exists to pin a VPC CIDR against.
+   * The VPC subnet the k8s Pulumi program (iac/programs/linode-k8s.js)
+   * creates for the cluster's nodes.
    * @type {string}
    */
-  static DEFAULT_VPC_CIDR = '';
+  static DEFAULT_VPC_CIDR = '10.0.1.0/24';
 
   /**
-   * Compose-only: no k8s program/image. K8S_IMAGE's only contract is
-   * byte-matching the k8s program's image literal — there is none.
+   * The image every k8s node boots (byte-matched by the k8s program's image
+   * literal). Ubuntu 26.04: Linode ships it, and k3s needs no Docker.
    * @type {string}
    */
-  static K8S_IMAGE = '';
+  static K8S_IMAGE = 'linode/ubuntu26.04';
 
-  // ── k8s user-data statics — compose-only, provider-specific throws ─────
-  // (Worded to avoid the contract test's /must be implemented/ abstract
-  // marker: these are deliberate refusals, not inherited stubs.)
+  // ── k8s boot user-data (carbon/cloud-init/k3s/linode-*-init.sh) ─────────
 
-  /** @returns {Promise<never>} */
-  static async getK8sMasterUserData() {
-    throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s master boot script. The Linode API token is the CSI
+   * driver's credential; project_tag is the project tag on every volume the
+   * CSI driver creates, `encodeLabel('project', projectName)`.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   linode_token: string,
+   *   project_tag: string,
+   * }} vars - The template's complete var set.
+   * @returns {Promise<string>}
+   */
+  static async getK8sMasterUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('linode-master-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sWorkerUserData() {
-    throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s worker boot script.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - master_ip is the master's private (VPC) IP.
+   * @returns {Promise<string>}
+   */
+  static async getK8sWorkerUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('linode-worker-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sDbUserData() {
-    throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * Render the k3s database-node boot script: the worker script plus the
+   * dedicated=db label and taint, applied at join time.
+   * @param {{
+   *   k3s_version: string,
+   *   k3s_token: string,
+   *   master_ip: string,
+   * }} vars - Same set as getK8sWorkerUserData.
+   * @returns {Promise<string>}
+   */
+  static async getK8sDbUserData(vars) {
+    const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
+    return renderScript(loadCloudInit('linode-db-init.sh'), vars);
   }
 
-  /** @returns {Promise<never>} */
-  static async getK8sProgram() {
-    throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
+  /**
+   * @param {object} config - see linode-k8s.js's K8sStackConfig
+   * @returns {Promise<() => Promise<Record<string, unknown>>>}
+   */
+  static async getK8sProgram(config) {
+    const { buildLinodeK8sProgram } = await import('../iac/programs/linode-k8s.js');
+    return buildLinodeK8sProgram(config);
   }
 
   // ── Compose-tier replacement-server identity ────────────────────────────
@@ -750,8 +841,18 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<{id: number, server: object, reused?: boolean}>}
    */
   async createServer(config) {
-    const { name, region, serverType, image, sshKeys, sshKeyId, labels, userData, firewalls } =
-      config;
+    const {
+      name,
+      region,
+      serverType,
+      image,
+      sshKeys,
+      sshKeyId,
+      labels,
+      userData,
+      firewalls,
+      networks,
+    } = config;
 
     const [existing] = await this.findServersByName(name);
     if (existing) {
@@ -775,6 +876,16 @@ export class LinodeProvider extends BaseProvider {
     };
     if (userData) {
       body.metadata = { user_data: Buffer.from(userData, 'utf-8').toString('base64') };
+    }
+    const vpcId = Array.isArray(networks) ? networks[0] : undefined;
+    if (vpcId !== undefined && vpcId !== null) {
+      // Same shape linode-k8s.js gives its Pulumi-made instances: legacy
+      // config interfaces, public first, then the VPC's first subnet. The
+      // generation is pinned because new accounts default to Linode
+      // Interfaces, which take a different body.
+      const subnetId = await this._firstSubnetId(vpcId);
+      body.interface_generation = 'legacy_config';
+      body.interfaces = [{ purpose: 'public' }, { purpose: 'vpc', subnet_id: subnetId }];
     }
     const [firstFirewall, ...extraFirewalls] = Array.isArray(firewalls) ? firewalls : [];
     if (firstFirewall !== undefined) {
@@ -807,6 +918,23 @@ export class LinodeProvider extends BaseProvider {
       }
     }
     return { id: instance.id, server: instance };
+  }
+
+  /**
+   * The id of a VPC's first subnet (GET /vpcs/{id}/subnets). Throws when the
+   * VPC has none, so a node is never created into a network it cannot join.
+   * @param {number|string} vpcId
+   * @returns {Promise<number>}
+   */
+  async _firstSubnetId(vpcId) {
+    const response = await this.apiRequest(`/vpcs/${vpcId}/subnets`);
+    if (!response.ok) {
+      throw new Error(`Linode VPC ${vpcId} subnet lookup failed (HTTP ${response.status})`);
+    }
+    const data = await response.json();
+    const subnet = (data.data || [])[0];
+    if (!subnet?.id) throw new Error(`Linode VPC ${vpcId} has no subnet`);
+    return subnet.id;
   }
 
   /**
@@ -1094,7 +1222,13 @@ export class LinodeProvider extends BaseProvider {
    * @returns {Promise<object[]>}
    */
   async listServers(labels = {}) {
-    return (await this.listServersDetailed(labels)).items;
+    const { items, membershipError } = await this.listServersDetailed(labels);
+    // An unfiltered listing is destroy's: a node whose VPC membership could
+    // not be read would be silently skipped by the cluster sweeps, so reject
+    // (destroy's callers report a rejection loudly) instead of returning it
+    // looking VPC-less.
+    if (membershipError) throw membershipError;
+    return items;
   }
 
   /**
@@ -1133,7 +1267,52 @@ export class LinodeProvider extends BaseProvider {
         ? instances
         : instances.filter((i) => wantedTags.every((tag) => (i.tags || []).includes(tag)));
 
+    // VPC membership is read only for an UNFILTERED listing, which is the
+    // destroy sweep's. The autoscaler always lists with a selector and never
+    // reads membership, so it pays no extra request.
+    let membershipError;
+    if (status === undefined && wantedTags.length === 0) {
+      membershipError = await this._attachVpcMembership(items);
+    }
+    if (membershipError) return { items, complete: false, membershipError };
     return status === undefined ? { items, complete } : { items, complete, status };
+  }
+
+  /**
+   * Attach `vpc_ids` (numeric VPC ids) to each instance, so the synchronous
+   * serverNetworkIds accessor can read VPC membership; the instance object
+   * carries none. One account-wide GET /vpcs/ips walk (rows carry `linode_id`
+   * and `vpc_id`), not a request per instance.
+   * @param {object[]} instances
+   * @returns {Promise<Error|undefined>} the failure, or undefined when read
+   */
+  async _attachVpcMembership(instances) {
+    const byLinode = new Map();
+    try {
+      let page = 1;
+      for (let guard = 0; guard < 50; guard++) {
+        const res = await fetchWithRetry(
+          `${LinodeProvider.API_BASE}/vpcs/ips?page=${page}&page_size=100`,
+          { headers: { Authorization: `Bearer ${this.apiToken}` } },
+        );
+        if (!res.ok) {
+          return new Error(`Linode VPC membership read failed (HTTP ${res.status})`);
+        }
+        const data = await res.json();
+        for (const row of data.data || []) {
+          if (row.linode_id == null || row.vpc_id == null) continue;
+          const ids = byLinode.get(row.linode_id) || [];
+          if (!ids.includes(row.vpc_id)) ids.push(row.vpc_id);
+          byLinode.set(row.linode_id, ids);
+        }
+        if (!data.pages || page >= data.pages) break;
+        page++;
+      }
+    } catch (err) {
+      return new Error(`Linode VPC membership read failed: ${err.message}`);
+    }
+    for (const instance of instances) instance.vpc_ids = byLinode.get(instance.id) || [];
+    return undefined;
   }
 
   /**
@@ -1274,15 +1453,7 @@ export class LinodeProvider extends BaseProvider {
   async applyOperatorCidrs({ firewallName, cidrs }) {
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
-    const addresses = splitCidrsByFamily(cidrs);
-    const newRules = (fw.rules?.inbound || [])
-      .filter((rule) => !(rule.protocol === 'TCP' && RETIRED_DB_PORTS.has(String(rule.ports))))
-      .map((rule) => {
-        if (rule.protocol === 'TCP' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
-          return { ...rule, addresses };
-        }
-        return rule;
-      });
+    const newRules = rewriteOperatorRules(fw.rules?.inbound || [], cidrs);
     await this.setFirewallRules(fw.id, newRules);
     return true;
   }
@@ -1340,9 +1511,9 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * List ALL VPCs (paginated walk, soft-fail [] on non-ok). Compose-tier
-   * Linode deploys create no VPCs, but the destroy sweep still enumerates
-   * them so a future tier's leak can never hide behind a stub.
+   * List ALL VPCs (paginated walk, soft-fail [] on non-ok). The k8s tiers
+   * create one VPC per stack, labelled `${clusterName}-network`; destroy
+   * finds it here by that exact label.
    * @returns {Promise<object[]>}
    */
   async listNetworks() {
@@ -1359,7 +1530,127 @@ export class LinodeProvider extends BaseProvider {
       if (!data.pages || page >= data.pages) break;
       page++;
     }
-    return vpcs;
+    // `name` is the provider-neutral identity callers match on
+    // (autoscaler groups.js, destroy.js); Linode calls it `label`.
+    return vpcs.map((v) => ({ ...v, name: v.label }));
+  }
+
+  /**
+   * Delete a VPC by its exact label. Linode refuses while an instance still
+   * has an interface in it; that comes back as `apiError` (an ordering bug in
+   * the caller), never as a not-found.
+   * @param {string} name
+   * @returns {Promise<{deleted: boolean, everExisted: boolean, apiError: (Error|null)}>}
+   */
+  async deleteNetworkByName(name) {
+    let everExisted = false;
+    try {
+      const vpcs = await this.listNetworks();
+      const vpc = vpcs.find((v) => v.name === name);
+      if (!vpc) return { deleted: false, everExisted: false, apiError: null };
+      everExisted = true;
+      const res = await fetchWithRetry(`${LinodeProvider.API_BASE}/vpcs/${vpc.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${this.apiToken}` },
+      });
+      if (res.ok || res.status === 404) return { deleted: true, everExisted, apiError: null };
+      const body = await res.text().catch(() => '');
+      return {
+        deleted: false,
+        everExisted,
+        apiError: new Error(`DELETE /vpcs/${vpc.id} failed: HTTP ${res.status} ${body}`.trim()),
+      };
+    } catch (err) {
+      return { deleted: false, everExisted, apiError: err };
+    }
+  }
+
+  /**
+   * Release a reserved IPv4 by address (DELETE /networking/reserved/ips/{address}).
+   * Idempotent: 404 counts as already gone.
+   * @param {string} address
+   * @returns {Promise<boolean>} true on success or if already gone (404)
+   */
+  async deleteReservedIpByAddress(address) {
+    const response = await fetchWithRetry(
+      `${LinodeProvider.API_BASE}/networking/reserved/ips/${address}`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${this.apiToken}` } },
+    );
+    return response.ok || response.status === 404;
+  }
+
+  /**
+   * Every reserved IPv4 on the account (guarded paginated walk of
+   * GET /networking/reserved/ips).
+   * @returns {Promise<Array<{ address: string, tags?: string[] }>>}
+   * @throws when a page cannot be read
+   */
+  async _listReservedIps() {
+    const ips = [];
+    let page = 1;
+    for (let guard = 0; guard < 20; guard++) {
+      const response = await fetchWithRetry(
+        `${LinodeProvider.API_BASE}/networking/reserved/ips?page=${page}&page_size=100`,
+        { headers: { Authorization: `Bearer ${this.apiToken}` } },
+      );
+      if (!response.ok) {
+        throw new Error(`GET /networking/reserved/ips failed: HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      ips.push(...(data.data ?? []));
+      if (!data.pages || page >= data.pages) break;
+      page++;
+    }
+    return ips;
+  }
+
+  /**
+   * Whether the reserved IPv4 at `address` still carries ALL of `labels` as
+   * tags (the encodeLabel encoding the k8s program tags with). Destroy asks
+   * before it releases an address saved at deploy time: Linode reissues a
+   * released address within minutes, so by destroy time the saved address
+   * can be another project's. Empty labels match nothing.
+   * @param {string} address
+   * @param {Object<string,string>} labels
+   * @returns {Promise<{ found: false } | { found: true, matches: boolean, tags: string[] }>}
+   *   found is false when the account holds no reserved IP at that address
+   * @throws when the listing cannot be read
+   */
+  async reservedIpLabelMatch(address, labels) {
+    const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
+    const ip = (await this._listReservedIps()).find((i) => i.address === address);
+    if (!ip) return { found: false };
+    const tags = ip.tags ?? [];
+    return {
+      found: true,
+      matches: wanted.length > 0 && wanted.every((t) => tags.includes(t)),
+      tags,
+    };
+  }
+
+  /**
+   * Release every reserved IPv4 whose tags carry ALL of the given labels
+   * (same encodeLabel encoding the k8s Pulumi program tags with). Lists
+   * GET /networking/reserved/ips and filters client-side, the way
+   * listServersDetailed does, so no server-side filter syntax is relied on.
+   * Empty labels match nothing: it never sweeps the whole account.
+   * @param {Object<string,string>} labels
+   * @returns {Promise<{ deleted: string[], failed: Array<{ address: string }> }>}
+   * @throws when the listing cannot be read
+   */
+  async deleteReservedIpsByLabels(labels) {
+    const wanted = Object.entries(labels ?? {}).map(([k, v]) => encodeLabel(k, v));
+    if (wanted.length === 0) return { deleted: [], failed: [] };
+    const matches = (await this._listReservedIps())
+      .filter((ip) => wanted.every((tag) => (ip.tags ?? []).includes(tag)))
+      .map((ip) => ip.address);
+    const deleted = [];
+    const failed = [];
+    for (const address of matches) {
+      if (await this.deleteReservedIpByAddress(address)) deleted.push(address);
+      else failed.push({ address });
+    }
+    return { deleted, failed };
   }
 
   /**
@@ -1447,14 +1738,15 @@ export class LinodeProvider extends BaseProvider {
   // See BaseProvider's doc for the cross-provider contract.
 
   /**
-   * Compose-tier Linode instances join no VPC, and the basic instance
-   * object carries no VPC membership field either way — VPC attribution on
-   * Linode lives on the VPC's interface list, not the instance. Always [].
-   * @param {object} _server
-   * @returns {string[]}
+   * VPC ids the instance has an interface in. The instance object carries
+   * none; an unfiltered listServersDetailed attaches `vpc_ids` (see
+   * _attachVpcMembership). [] for an instance in no VPC (every compose
+   * instance).
+   * @param {object} server
+   * @returns {number[]}
    */
-  serverNetworkIds(_server) {
-    return [];
+  serverNetworkIds(server) {
+    return Array.isArray(server?.vpc_ids) ? [...server.vpc_ids] : [];
   }
 
   /**
@@ -1463,6 +1755,18 @@ export class LinodeProvider extends BaseProvider {
    */
   serverLabels(server) {
     return decodeLabels(server.tags);
+  }
+
+  /**
+   * The decoded value of this provider's own encoding: the raw value when
+   * the tag fits in 50 characters, the squeezed one when encodeLabel had to
+   * shorten it.
+   * @param {string} key
+   * @param {string} value
+   * @returns {string}
+   */
+  labelValue(key, value) {
+    return decodeLabels([encodeLabel(key, value)])[key];
   }
 
   /**
@@ -1494,6 +1798,15 @@ export class LinodeProvider extends BaseProvider {
    */
   volumeAttachedServerIds(volume) {
     return volume.linode_id != null ? [volume.linode_id] : [];
+  }
+
+  /**
+   * Linode names a volume with `label`.
+   * @param {object} volume
+   * @returns {string|null}
+   */
+  volumeName(volume) {
+    return volume.label ?? null;
   }
 
   /**

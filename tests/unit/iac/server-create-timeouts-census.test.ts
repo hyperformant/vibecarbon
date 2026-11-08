@@ -92,6 +92,10 @@ const PROGRAMS: Record<string, { builder: string; config: Record<string, unknown
     builder: 'buildLinodeComposeProgram',
     config: { ...base, location: 'us-east' },
   },
+  'linode-k8s.js': {
+    builder: 'buildLinodeK8sProgram',
+    config: { ...k8s, location: 'us-east' },
+  },
   'scaleway-compose.js': {
     builder: 'buildScalewayComposeProgram',
     config: { ...base, location: 'fr-par-1' },
@@ -245,23 +249,33 @@ describe('server-class create timeouts (census)', () => {
   // first deploy has no worker to protect, and a trigger that arrives on the
   // second deploy replaces nothing but counts from then on (proved on real
   // Pulumi, 2026-11-05: 7 of 7 transitions), so it waits for a token to replay.
-  it('hetzner-k8s.js: a first deploy starts its workers with the master, not after it', async () => {
-    const { k3sToken: _existing, ...fresh } = k8s;
-    const resources = await runProgram('hetzner-k8s.js', fresh);
-    const workers = resources.filter(
-      (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
-    );
-    expect(workers).toHaveLength(2);
-    for (const w of workers) {
-      const opts = (w.opts ?? {}) as { replacementTrigger?: unknown; dependsOn?: unknown };
-      expect(opts, `worker "${w.name}"`).not.toHaveProperty('replacementTrigger');
-      expect(String(JSON.stringify(opts.dependsOn)), `worker "${w.name}"`).not.toContain('master');
-      // The recorder prints a resource output as `<name>.<property>`. User data
-      // is a rendered script, whose own text may say "master." in a comment.
-      const { userData: _script, ...inputs } = w.args as Record<string, unknown>;
-      expect(JSON.stringify(inputs), `worker "${w.name}" inputs`).not.toContain('master.');
-    }
-  });
+  // Linode's workers take a fixed VPC address too (10.0.1.2 for the master),
+  // so the same holds there.
+  it.each([
+    ['hetzner-k8s.js', 'userData'],
+    ['linode-k8s.js', 'metadatas'],
+  ])(
+    '%s: a first deploy starts its workers with the master, not after it',
+    async (file, scriptInput) => {
+      const { k3sToken: _existing, ...fresh } = PROGRAMS[file].config;
+      const resources = await runProgram(file, fresh);
+      const workers = resources.filter(
+        (r) => r.token in SERVER_RESOURCE_TYPES && /^worker-/.test(r.name),
+      );
+      expect(workers).toHaveLength(2);
+      for (const w of workers) {
+        const opts = (w.opts ?? {}) as { replacementTrigger?: unknown; dependsOn?: unknown };
+        expect(opts, `worker "${w.name}"`).not.toHaveProperty('replacementTrigger');
+        expect(String(JSON.stringify(opts.dependsOn)), `worker "${w.name}"`).not.toContain(
+          'master',
+        );
+        // The recorder prints a resource output as `<name>.<property>`. User data
+        // is a rendered script, whose own text may say "master." in a comment.
+        const { [scriptInput]: _script, ...inputs } = w.args as Record<string, unknown>;
+        expect(JSON.stringify(inputs), `worker "${w.name}" inputs`).not.toContain('master.');
+      }
+    },
+  );
 
   it('digitalocean-k8s.js: a first deploy keeps the trigger, its workers wait on the master anyway', async () => {
     const { k3sToken: _existing, ...fresh } = PROGRAMS['digitalocean-k8s.js'].config;

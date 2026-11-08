@@ -145,7 +145,7 @@ describe('on the 2026-10-22 catalogs', () => {
     [
       LinodeProvider,
       'linode',
-      '| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | not yet | not yet |',
+      '| Linode | $24 (us-iad) | $48 (us-iad + us-ord) | $65.96 (us-iad) | $107.93 (us-iad + us-ord) |',
     ],
     [
       ScalewayProvider,
@@ -222,6 +222,17 @@ describe('on the 2026-10-22 catalogs', () => {
     });
     expect(computeEnvMonthly(LinodeProvider, 'compose-ha')).toEqual({
       monthly: 48,
+      locations: ['us-iad', 'us-ord'],
+    });
+    // Servers 24 + 12 + 24, plus per cluster the reserved IP (0.0068 an hour,
+    // 730 hours) and the 10 GB db volume at 0.10: 60 + 4.964 + 1 = 65.964.
+    expect(computeEnvMonthly(LinodeProvider, 'k8s')).toEqual({
+      monthly: 65.96,
+      locations: ['us-iad'],
+    });
+    // Standby 24 + 12 plus its own reserved IP and volume: 96 + 2 * 5.964.
+    expect(computeEnvMonthly(LinodeProvider, 'k8s-ha')).toEqual({
+      monthly: 107.93,
       locations: ['us-iad', 'us-ord'],
     });
     expect(computeEnvMonthly(ScalewayProvider, 'compose')).toEqual({
@@ -311,6 +322,15 @@ describe('the command line', () => {
 });
 
 describe('billing extras', () => {
+  it('the Linode reserved IP bills by the hour whether assigned or not, with its source', () => {
+    const ip = BILLING_EXTRAS.linode.reservedIp as Record<string, unknown>;
+    expect(ip.perHour).toBe(0.0068);
+    expect(ip.hoursPerMonth).toBe(730);
+    expect(String(ip.source)).toMatch(/techdocs\.akamai\.com/);
+    const volume = BILLING_EXTRAS.linode.volume as Record<string, unknown>;
+    expect(volume).toMatchObject({ perGbMonthly: 0.1, gb: 10 });
+  });
+
   it('the Scaleway root volume price is marked unverified, with both SKUs it may bill as', () => {
     const root = BILLING_EXTRAS.scaleway.rootVolume as Record<string, unknown>;
     expect(root.verified).toBe(false);

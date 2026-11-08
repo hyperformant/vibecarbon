@@ -95,6 +95,10 @@ export const CSI_DRIVERS = {
     providerId: 'digitalocean',
     regionKeys: ['region', 'topology.kubernetes.io/region'],
   },
+  'linodebs.csi.linode.com': {
+    providerId: 'linode',
+    regionKeys: ['topology.linode.com/region', 'topology.kubernetes.io/region'],
+  },
 };
 
 /**
@@ -117,11 +121,19 @@ const GENERIC_REGION_KEYS = [
 const CSI_VOLUME_NAME_RE = /^pvc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
+ * Linode's CSI driver labels volumes `pvc-` plus 16 hex characters (the
+ * PV name truncated to fit Linode's 32 character label limit).
+ */
+const LINODE_CSI_LABEL_RE = /^pvc-[0-9a-f]{16}$/;
+
+/**
  * @param {unknown} name
  * @returns {boolean} true when `name` is a CSI-provisioned volume name.
  */
 export function isCsiVolumeName(name) {
-  return typeof name === 'string' && CSI_VOLUME_NAME_RE.test(name);
+  return (
+    typeof name === 'string' && (CSI_VOLUME_NAME_RE.test(name) || LINODE_CSI_LABEL_RE.test(name))
+  );
 }
 
 /**

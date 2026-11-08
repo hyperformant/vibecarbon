@@ -583,12 +583,30 @@ export function cheapestStandbyRegion(
   const continentOf = Provider.REGION_CONTINENT ?? {};
   const continent = continentOf[primaryRegion];
   const partners = [...new Set([conventional, ...Object.keys(continentOf)])].filter(
-    (r) => r !== primaryRegion && continent && continentOf[r] === continent,
+    (r) =>
+      r !== primaryRegion &&
+      continent &&
+      continentOf[r] === continent &&
+      regionFits(Provider, r, roles),
   );
+  // A conventional pair the tier cannot use (a k8s-less region) gives way to
+  // the first partner that can.
+  const fallback = regionFits(Provider, conventional, roles)
+    ? conventional
+    : (partners[0] ?? conventional);
   return (
     rankStandbyLocations(Provider, partners, roles, primaryTypes, primaryRegion)[0]?.location ??
-    conventional
+    fallback
   );
+}
+
+/**
+ * Whether `region` can host a deploy placing `roles`: a k8s deploy (roles
+ * other than `compose`) needs a region the provider runs Kubernetes in
+ * (`Provider.k8sRegionProblem`); compose placements fit anywhere.
+ */
+function regionFits(Provider, region, roles) {
+  return roles.includes('compose') || !Provider.k8sRegionProblem?.(region);
 }
 
 /**
@@ -790,7 +808,7 @@ export function cheapestDefaultRegion(Provider, roles, { ha = false } = {}) {
   const sameContinent = [
     fallback,
     ...Object.keys(Provider.REGIONS).filter((r) => r !== fallback && continentOf[r] === continent),
-  ];
+  ].filter((r) => regionFits(Provider, r, roles));
   const ranked = ha
     ? rankSets(sameContinent, (location) => {
         const pair = haDefaultPair(Provider, location, roles);

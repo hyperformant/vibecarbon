@@ -60,6 +60,7 @@ export function recorderModule(prefix: string, created: Created) {
     'FloatingIpAssignment',
     'PlacementGroup',
     'Vpc',
+    'VpcSubnet',
     'Tag',
     'ReservedIp',
     'ReservedIpAssignment',

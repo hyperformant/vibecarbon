@@ -392,8 +392,8 @@
 - DigitalOcean fully supported for all four modes (compose, compose-ha, k8s, and k8s-ha) with the same CLI, lifecycle, and e2e gate as Hetzner
   - Interactive region selection, guided API token + Spaces key setup
   - DigitalOcean Spaces object storage for backups
-  - Requesting a tier a provider hasn't built fails loudly with the capability-gate error, e.g. on Linode: `Linode does not support the 'k8s' deploy tier. Supported: compose, compose-ha. (k8s: Hetzner Cloud, DigitalOcean only)`
-- Linode supported for compose and compose-ha, with the same CLI, lifecycle, and e2e gate as Hetzner; k8s is not supported on Linode
+  - Requesting a tier a provider hasn't built fails loudly with the capability-gate error, e.g. on Vultr: `Vultr does not support the 'k8s' deploy tier. Supported: compose, compose-ha. (k8s: Hetzner Cloud, DigitalOcean, Linode only)`
+- Linode fully supported for all four modes (compose, compose-ha, k8s, and k8s-ha) with the same CLI, lifecycle, and e2e gate as Hetzner; the k8s modes run in every Linode region except us-east and us-southeast, which have no VPCs
   - Interactive region selection, guided API token + Object Storage key setup
   - Linode Object Storage for backups
 - Vultr supported for compose and compose-ha, with the same CLI, lifecycle, and e2e gate as Hetzner; k8s is not supported on Vultr
