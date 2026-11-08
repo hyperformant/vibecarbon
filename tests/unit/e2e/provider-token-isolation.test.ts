@@ -85,13 +85,12 @@ describe('census: no Hetzner-named token on provider-neutral paths', () => {
     expect(collector).not.toMatch(/hetznerToken/);
   });
 
-  it('hetznerToken in the lifecycle appears only inside the Hetzner-only sweep', () => {
-    const start = lifecycle.indexOf('export async function sweepOrphanedHetznerResources');
-    const end = lifecycle.indexOf('export async function runLifecycle');
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    const outside = lifecycle.slice(0, start) + lifecycle.slice(end);
-    expect(outside).not.toMatch(/hetznerToken/);
+  it('hetznerToken lives only in the Hetzner-only sweep, never in the lifecycle', () => {
+    // The sweep moved out to tests/e2e/utils/sweep-hetzner.ts, so the
+    // lifecycle has no Hetzner-named token left at all.
+    expect(lifecycle).not.toMatch(/hetznerToken/);
+    const hetznerSweep = readFileSync(join(root, 'utils/sweep-hetzner.ts'), 'utf-8');
+    expect(hetznerSweep).toMatch(/export async function sweepOrphanedHetznerResources/);
   });
 
   it('the runner never passes hetznerToken into runLifecycle', () => {

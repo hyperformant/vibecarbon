@@ -309,6 +309,10 @@ export const testConfig = {
     providers: {
       hetzner: {
         displayName: 'Hetzner Cloud',
+        // The provider's compute API token: the one credential its teardown
+        // sweep (tests/e2e/utils/sweep-provider.ts) is handed. Also in
+        // requiredEnv (tests/unit/e2e/sweep-provider.test.ts pins that).
+        computeTokenEnv: 'HETZNER_API_TOKEN',
         requiredEnv: ['HETZNER_API_TOKEN'],
         scenarios: [
           { mode: 'compose' as const, dnsProvider: 'hetzner' as const, envPrefix: 'e1' },
@@ -322,6 +326,7 @@ export const testConfig = {
       },
       digitalocean: {
         displayName: 'DigitalOcean',
+        computeTokenEnv: 'DIGITALOCEAN_API_TOKEN',
         requiredEnv: [
           'DIGITALOCEAN_API_TOKEN',
           'DIGITALOCEAN_ACCESS_KEY',
@@ -354,6 +359,7 @@ export const testConfig = {
       // namespace.test.ts).
       linode: {
         displayName: 'Linode',
+        computeTokenEnv: 'LINODE_API_TOKEN',
         // LINODE_STORAGE_REGION is an override, not a requirement: a deploy
         // reads the account's own cluster from Linode's endpoint list, which
         // is what a customer gets. Pinning it here would hide that path.
@@ -389,6 +395,7 @@ export const testConfig = {
       // namespace.test.ts).
       vultr: {
         displayName: 'Vultr',
+        computeTokenEnv: 'VULTR_API_TOKEN',
         requiredEnv: [
           'VULTR_API_TOKEN',
           'VULTR_ACCESS_KEY',
@@ -432,6 +439,7 @@ export const testConfig = {
       // namespace.test.ts).
       scaleway: {
         displayName: 'Scaleway',
+        computeTokenEnv: 'SCALEWAY_SECRET_KEY',
         requiredEnv: ['SCALEWAY_SECRET_KEY', 'SCALEWAY_ACCESS_KEY', 'SCALEWAY_DEFAULT_PROJECT_ID'],
         scenarios: [
           {

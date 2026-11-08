@@ -15,12 +15,13 @@
  *      non-zero on failure so xargs / shell loops can react.
  *   3. When done debugging, tear the rig down:
  *        node scripts/iter-step.js hetzner/k8s-ha destroy -purge
- *      (or run `vibecarbon destroy -purge` directly + `gh repo delete ...`).
+ *      After the destroy it runs the cleanup the lifecycle runs after its
+ *      own final destroy, which --keep skipped in step 1: the provider's
+ *      orphan sweep, deleting the throwaway GitHub repo, reaping local build
+ *      images, then removing the rig file (tests/e2e/utils/rig-teardown.ts).
  *      -purge is required — plain destroy preserves the backup bucket by
- *      design (production recovery), and nothing else cleans it up for a
- *      kept rig: the orphan sweep that normally would is exactly what
- *      --keep skipped in step 1. Forgetting it leaks a backup bucket per
- *      abandoned rig, silently and indefinitely.
+ *      design (production recovery), so it gets none of that cleanup: the
+ *      sweep would delete the very bucket it kept.
  *
  * The first argument is a QUALIFIED scenario token, the same `provider/mode`
  * identity the selection grammar uses (`--scenario hetzner/k8s-ha`). It is
@@ -46,7 +47,7 @@ import {
   setupE2EEnv,
 } from '../tests/e2e/utils/e2e-env.js';
 import { E2EDbImageError, selectE2EDbImage } from '../tests/e2e/utils/db-image-select.js';
-import { ITER_STEPS, iterStepCliArgs } from '../tests/e2e/utils/iter-step-args.js';
+import { ITER_STEPS, isPurgeDestroy, iterStepCliArgs } from '../tests/e2e/utils/iter-step-args.js';
 
 const VALID_STEPS = new Set(ITER_STEPS);
 
@@ -229,15 +230,40 @@ child.stderr.on('data', (chunk) => {
   logStream.write(chunk);
 });
 
-child.on('close', (code) => {
-  const elapsedMs = Date.now() - startedAt;
-  const elapsedS = (elapsedMs / 1000).toFixed(1);
+child.on('close', async (destroyOrStepCode) => {
+  let code = destroyOrStepCode ?? 1;
   // `destroy` exit 2 is its own verdict: the teardown RAN but left resources
   // behind (see src/lib/destroy/leak-ledger.js). Reporting that as a bare FAIL
   // sends the operator hunting for a crash that never happened — the leak
   // report is already above this line in the log, and the fix is to go delete
   // what it names, not to re-run the step.
-  const verdict = code === 0 ? 'PASS' : step === 'destroy' && code === 2 ? 'LEAKED' : 'FAIL';
+  let verdict = code === 0 ? 'PASS' : step === 'destroy' && code === 2 ? 'LEAKED' : 'FAIL';
+  const log = (line) => {
+    process.stdout.write(`${line}\n`);
+    logStream.write(`${line}\n`);
+  };
+  if (await isPurgeDestroy(step, extraArgs)) {
+    try {
+      // tsx loads the TypeScript sweeps from this plain-node script.
+      const { tsImport } = await import('tsx/esm/api');
+      const { finishRigTeardown } = await tsImport(
+        '../tests/e2e/utils/rig-teardown.ts',
+        import.meta.url,
+      );
+      ({ verdict, exitCode: code } = await finishRigTeardown({
+        rig,
+        rigPath,
+        destroyExit: code,
+        env: process.env,
+        log,
+      }));
+    } catch (err) {
+      log(`[iter] UNVERIFIED: the post-destroy cleanup failed: ${err?.message ?? err}`);
+      verdict = 'UNVERIFIED';
+      code = 2;
+    }
+  }
+  const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
   const summary = `[iter] ${verdict} scenario=${provider}/${mode} step=${step} elapsed=${elapsedS}s exit=${code}\n`;
   process.stdout.write(summary);
   logStream.write(summary);
@@ -246,6 +272,7 @@ child.on('close', (code) => {
     process.stdout.write(note);
     logStream.write(note);
   }
-  // Exit code still propagates unchanged, so shell loops keep reacting.
-  logStream.end(() => process.exit(code ?? 1));
+  // The step's own exit code, or the teardown's after a purge destroy, so
+  // shell loops keep reacting.
+  logStream.end(() => process.exit(code));
 });

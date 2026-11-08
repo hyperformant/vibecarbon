@@ -12,7 +12,11 @@ import { describe, expect, it } from 'vitest';
 import { COMMANDS } from '../../../src/lib/cli/command-registry.js';
 import { parseFlags } from '../../../src/lib/cli/parse-flags.js';
 import { REPO_ROOT } from '../../../tests/e2e/utils/e2e-env.js';
-import { ITER_STEPS, iterStepCliArgs } from '../../../tests/e2e/utils/iter-step-args.js';
+import {
+  ITER_STEPS,
+  isPurgeDestroy,
+  iterStepCliArgs,
+} from '../../../tests/e2e/utils/iter-step-args.js';
 
 const ENV = 'prod-e2e1234';
 
@@ -76,5 +80,23 @@ describe('iter-step runs each step with arguments its command accepts', () => {
     // No hand-built argv left beside it.
     expect(script).not.toMatch(/'-y'/);
     expect(script).not.toMatch(/'-action'/);
+  });
+
+  it("only destroy -purge is a full teardown, read with the CLI's own parser", async () => {
+    expect(await isPurgeDestroy('destroy', ['-purge'])).toBe(true);
+    expect(await isPurgeDestroy('destroy', [])).toBe(false);
+    expect(await isPurgeDestroy('destroy', ['-y'])).toBe(false);
+    expect(await isPurgeDestroy('backup', ['-purge'])).toBe(false);
+  });
+
+  it("the script runs the lifecycle's post-destroy cleanup only after destroy -purge", () => {
+    const script = readFileSync(join(REPO_ROOT, 'scripts', 'iter-step.js'), 'utf-8');
+    const gate = script.indexOf('if (await isPurgeDestroy(step, extraArgs)) {');
+    const cleanup = script.indexOf('await finishRigTeardown(');
+    expect(gate).toBeGreaterThan(-1);
+    expect(cleanup).toBeGreaterThan(gate);
+    // One call, inside that branch.
+    expect(script.split('await finishRigTeardown(').length).toBe(2);
+    expect(script.slice(gate, cleanup)).not.toMatch(/\n {2}\}\n/);
   });
 });
