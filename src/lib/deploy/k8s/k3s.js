@@ -4935,6 +4935,17 @@ export async function resolveStackK3sToken(Provider, programConfig, opts = {}) {
 }
 
 /**
+ * Stop what a failed deploy started in the background, before its error is
+ * rethrown. `early` is whatever startAppImageBuild returned: null, a skipped
+ * build with no abort, or a running build.
+ * @param {{early?: {abort?: () => void}|null, stopClusterAutoscaler?: () => Promise<void>}} inFlight
+ */
+export async function reapInFlight(inFlight) {
+  inFlight.early?.abort?.();
+  await inFlight.stopClusterAutoscaler?.();
+}
+
+/**
  * Deploy one k3s cluster on any provider: infra (Pulumi), k3s install and
  * kubeconfig, the app image built locally and delivered once into the
  * master's registry by layer delta (every node pulls it from there), then the
@@ -4955,8 +4966,7 @@ export async function deployK3s(options) {
   try {
     return await deployK3sSteps(options, inFlight);
   } catch (err) {
-    inFlight.early?.abort();
-    await inFlight.stopClusterAutoscaler?.();
+    await reapInFlight(inFlight);
     throw err;
   }
 }
