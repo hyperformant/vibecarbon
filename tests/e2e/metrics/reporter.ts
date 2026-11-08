@@ -11,6 +11,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { STEP_NAMES } from '../scenarios/types.js';
 import { summarizeVerifications } from '../scenarios/verification-summary.js';
 import type { RunRow, StepTrendRow } from './db.js';
 import { E2EDb } from './db.js';
@@ -323,37 +324,6 @@ export function logStepMatrix(
 ): void {
   if (scenarios.length === 0) return;
 
-  // Canonical lifecycle order — keep in sync with StepName in
-  // tests/e2e/scenarios/types.ts. Hardcoding here (rather than
-  // importing) keeps the reporter free of cross-module type imports
-  // during the live progress path.
-  const STEP_ORDER = [
-    'create',
-    'setup-repo',
-    'add-features',
-    'deploy',
-    'verify-deploy',
-    'verify-status',
-    'warm-deploy',
-    'verify-load',
-    'verify-autoscale',
-    'scale',
-    'verify-scale',
-    'backup',
-    'destroy',
-    'restore-deploy',
-    'restore',
-    'verify-restore',
-    'failover',
-    'verify-failover',
-    'second-failover',
-    'reconverge-deploy',
-    'failback',
-    'verify-failback',
-    'final-destroy',
-    'teardown-repo',
-  ];
-
   // Column key is ALWAYS provider/mode (unlike the header label below, which
   // drops the provider on a single-provider run) — two scenarios must never
   // collide in this index.
@@ -369,8 +339,14 @@ export function logStepMatrix(
 
   // Drop steps that no scenario actually ran (e.g. verify-autoscale outside
   // --expanded). Status === 'skip' DOES count as ran-and-skipped — those
-  // rows are useful signal ("scenario got far enough to skip").
-  const activeSteps = STEP_ORDER.filter((name) => stepIndex[name]);
+  // rows are useful signal ("scenario got far enough to skip"). A step the
+  // lifecycle list does not name still gets its row, after the known ones:
+  // dropping it is how warm-redeploy-change went missing from every matrix.
+  const known: readonly string[] = STEP_NAMES;
+  const activeSteps = [
+    ...known.filter((name) => stepIndex[name]),
+    ...Object.keys(stepIndex).filter((name) => !known.includes(name)),
+  ];
   if (activeSteps.length === 0) return;
 
   console.log('');
@@ -392,8 +368,9 @@ export function logStepMatrix(
   ];
 
   // Per-scenario reachability flag — once a scenario hits its first non-pass
-  // step, downstream cells are either explicit `skip` or absent. Either way
-  // they rendered the same in v1, which made it hard to spot the failure
+  // step, most downstream cells are explicit `skip` or absent (a failure the
+  // lifecycle runs past leaves real results, drawn as they are). Skip and
+  // absent rendered the same in v1, which made it hard to spot the failure
   // site at a glance. With this flag we render the cell where the scenario
   // *first* went red as the headline `✗ FAIL <dur>` and any subsequent cell
   // for that same scenario as a dim `↷ blocked`. The reader's eye lands on
@@ -420,7 +397,11 @@ export function logStepMatrix(
         failedAt[key(sc)] !== stepName &&
         // only mark as blocked AFTER the failure point; same-name and earlier
         // steps render normally (the failure cell is itself the headline ✗).
-        activeSteps.indexOf(stepName) > activeSteps.indexOf(failedAt[key(sc)] ?? '');
+        activeSteps.indexOf(stepName) > activeSteps.indexOf(failedAt[key(sc)] ?? '') &&
+        // A failure that lets the lifecycle go on (a missed deploy budget)
+        // leaves later steps that really ran: show what they did. Only a
+        // step that was skipped, or never reached, reads as blocked.
+        (!entry || entry.status === 'skip');
       return formatMatrixCell(entry, blocked);
     }),
   ]);
