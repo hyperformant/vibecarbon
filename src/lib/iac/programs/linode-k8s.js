@@ -209,10 +209,11 @@ export function buildLinodeK8sProgram(config) {
 
     const firewallId = firewall.id.apply((id) => Number.parseInt(id, 10));
     const subnetId = subnet.id.apply((id) => Number.parseInt(id, 10));
-    const vpcId = network.id.apply((id) => Number.parseInt(id, 10));
+    // No vpcId: the provider derives it from the subnet and refuses a set
+    // value at create (preview cannot see it, the id is unknown there).
     const interfaces = (vpcAddress) => [
       { purpose: 'public', primary: true },
-      { purpose: 'vpc', vpcId, subnetId, ipv4: { vpc: vpcAddress } },
+      { purpose: 'vpc', subnetId, ipv4: { vpc: vpcAddress } },
     ];
     const authorizedKeys = [config.sshPublicKey.trim()];
 

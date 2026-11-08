@@ -239,7 +239,10 @@ describe('buildLinodeK8sProgram resource graph', () => {
       expect(i.inputs.interfaceGeneration).toBe('legacy_config');
       expect(i.inputs.interfaces[0].purpose).toBe('public');
       expect(i.inputs.interfaces[1].purpose).toBe('vpc');
-      expect(i.inputs.interfaces[1].vpcId).toBe(1234);
+      // The provider computes vpc_id from the subnet and refuses a set value
+      // at create ("Can't configure a value for interface.1.vpc_id"), live
+      // 2026-11-08. Preview does not catch it: the id is unknown there.
+      expect(Object.keys(i.inputs.interfaces[1]).sort()).toEqual(['ipv4', 'purpose', 'subnetId']);
       expect(i.inputs.interfaces[1].subnetId).toBe(5678);
       return i.inputs.interfaces[1].ipv4.vpc;
     };
