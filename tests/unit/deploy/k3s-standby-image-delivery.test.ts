@@ -2,7 +2,11 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { deliverAppImage, startAppImageBuild } from '../../../src/lib/deploy/k8s/k3s.js';
+import {
+  deliverAppImage,
+  reapInFlight,
+  startAppImageBuild,
+} from '../../../src/lib/deploy/k8s/k3s.js';
 import { StateTracker } from '../../../src/lib/deploy/state.js';
 
 /**
@@ -175,6 +179,28 @@ describe('startAppImageBuild: the build overlaps provisioning', () => {
     await deliverAppImage({ ...h.args, early });
     expect(h.buildK3sBuildInputs).toHaveBeenCalledTimes(1);
     expect(h.buildAppImage).not.toHaveBeenCalled();
+  });
+
+  // A failed deploy reaps whatever this returned. The skip shape has no
+  // abort: live 2026-11-08 a failed warm Linode redeploy died on
+  // "inFlight.early?.abort is not a function", which hid the real error.
+  it('a failed deploy can reap every shape this returns, and stops the CA rollout', async () => {
+    const standby = harness('standby');
+    const none = startAppImageBuild(startArgs(standby));
+    const warm = harness('primary');
+    await deliverAppImage(warm.args);
+    const skipped = startAppImageBuild(startArgs(warm, { priorMasterPrivateIp: '10.0.1.1' }));
+    expect(skipped?.build).toBeNull();
+    const cold = harness('primary');
+    const building = startAppImageBuild(startArgs(cold));
+    for (const early of [none, skipped, building]) {
+      const stopClusterAutoscaler = vi.fn(async () => {});
+      await expect(reapInFlight({ early, stopClusterAutoscaler })).resolves.toBeUndefined();
+      expect(stopClusterAutoscaler).toHaveBeenCalledTimes(1);
+    }
+    const signal = (cold.buildAppImage.mock.calls[0] as unknown[])[4] as { signal: AbortSignal };
+    expect(signal.signal.aborted).toBe(true);
+    await expect(reapInFlight({})).resolves.toBeUndefined();
   });
 
   it('warm rerun whose inputs changed: starts the build early too', async () => {

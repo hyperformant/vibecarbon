@@ -37,11 +37,11 @@ describe('deployK3s starts the app image build before provisioning', () => {
 });
 
 describe('a failed deploy reaps what it started in the background', () => {
-  it('deployK3s aborts the early build and settles the CA rollout before rethrowing', () => {
+  // What reapInFlight does with each shape is tested behaviourally in
+  // k3s-standby-image-delivery.test.ts; this pins that deployK3s calls it.
+  it('deployK3s reaps what it started before rethrowing', () => {
     const wrapper = functionBody('deployK3s');
-    expect(wrapper).toMatch(
-      /catch \(err\) \{\s*inFlight\.early\?\.abort\(\);\s*await inFlight\.stopClusterAutoscaler\?\.\(\);\s*throw err;/,
-    );
+    expect(wrapper).toMatch(/catch \(err\) \{\s*await reapInFlight\(inFlight\);\s*throw err;/);
     expect(wrapper).toMatch(/applyK3sManifests\(\{\s*inFlight,/);
     expect(wrapper).toMatch(/inFlight\.early = early;/);
   });
