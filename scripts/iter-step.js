@@ -32,7 +32,7 @@
  *   node scripts/iter-step.js <provider>/<mode> <step> [extra-args...]
  * Examples:
  *   node scripts/iter-step.js hetzner/k8s-ha failover
- *   node scripts/iter-step.js digitalocean/compose-ha failover --dry-run
+ *   node scripts/iter-step.js digitalocean/compose-ha failover -dry
  *   node scripts/iter-step.js hetzner/k8s scale
  */
 
@@ -46,17 +46,9 @@ import {
   setupE2EEnv,
 } from '../tests/e2e/utils/e2e-env.js';
 import { E2EDbImageError, selectE2EDbImage } from '../tests/e2e/utils/db-image-select.js';
+import { ITER_STEPS, iterStepCliArgs } from '../tests/e2e/utils/iter-step-args.js';
 
-const VALID_STEPS = new Set([
-  'deploy',
-  'failover',
-  'scale',
-  'backup',
-  'restore',
-  'destroy',
-  'status',
-  'diagnose',
-]);
+const VALID_STEPS = new Set(ITER_STEPS);
 
 const [, , scenarioToken, step, ...extraArgs] = process.argv;
 
@@ -179,23 +171,9 @@ if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
 // providers can be iterating the same mode+step at once.
 const logPath = join(logDir, `iter-${provider}-${mode}-${step}-${ts}.log`);
 
-// `backup` has its own TTY guard for the action prompt (create/list/
-// download) that fires independently of `-y` — off-TTY it needs an explicit
-// `-action` seed or it exits asking for one. `create` is the only sensible
-// default for this iteration helper (list/download need a `-source` the
-// caller would have to supply anyway). Only inject it when the caller hasn't
-// already passed `-action` (or `-l`, its list shorthand) via extraArgs.
-const stepArgs =
-  step === 'backup' && !extraArgs.includes('-action') && !extraArgs.includes('-l')
-    ? [...extraArgs, '-action', 'create']
-    : extraArgs;
-
-// `vibecarbon status` takes neither the env positional nor `-y` — unlike
-// every other step here, it's a read-only query the CLI never prompts for,
-// and it infers the environment from the project dir's .vibecarbon.json
-// (we already run with cwd=projectDir). Passing `<env> -y` the way every
-// other step does makes status choke on an unexpected positional arg.
-const cliArgs = step === 'status' ? ['status', ...stepArgs] : [step, envPrefix, '-y', ...stepArgs];
+// The env positional and `-y` only where the step's command declares them,
+// plus backup's `-action create` default (tests/e2e/utils/iter-step-args.js).
+const cliArgs = await iterStepCliArgs(step, envPrefix, extraArgs);
 
 // Establish the SAME process environment tests/e2e/runner.ts does — public
 // DNS pinning, ssh-askpass guards, the Let's Encrypt STAGING ACME directory,
